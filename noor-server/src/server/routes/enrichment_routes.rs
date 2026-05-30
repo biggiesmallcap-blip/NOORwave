@@ -491,6 +491,7 @@ pub(super) async fn purge_orphan_tidal_stream_tracks(
 #[derive(Deserialize)]
 pub(super) struct LastFmConfigRequest {
     api_key: String,
+    api_secret: Option<String>,
 }
 
 pub(super) async fn lastfm_save_config(
@@ -498,11 +499,25 @@ pub(super) async fn lastfm_save_config(
     Json(payload): Json<LastFmConfigRequest>,
 ) -> Result<Json<Value>, StatusCode> {
     use crate::services::lastfm;
-    let api_key = payload.api_key.trim().to_string();
+    let mut api_key = payload.api_key.trim().to_string();
+    if api_key.is_empty() {
+        api_key = state
+            .read()
+            .await
+            .db
+            .with_conn(|conn| {
+                Ok::<_, anyhow::Error>(
+                    lastfm::auth::load_credentials(conn)?
+                        .map(|creds| creds.api_key)
+                        .unwrap_or_default(),
+                )
+            })
+            .unwrap_or_default();
+    }
     if api_key.is_empty() {
         return Ok(Json(json!({
             "status": "error",
-            "message": "API key is required."
+            "message": "API key is required before saving a Last.fm secret."
         })));
     }
 
@@ -527,12 +542,15 @@ pub(super) async fn lastfm_save_config(
                         body_text.chars().take(200).collect::<String>())
                 })));
             }
-            let creds = lastfm::auth::LastFmCredentials {
-                api_key,
-                ..Default::default()
-            };
+            let api_secret = payload.api_secret.as_deref().map(str::trim).unwrap_or("");
+            let master_key = state.read().await.master_key.clone();
             let _ = state.read().await.db.with_conn(|conn| {
+                let mut creds = lastfm::auth::load_credentials(conn)?.unwrap_or_default();
+                creds.api_key = api_key.clone();
                 lastfm::auth::save_credentials(conn, &creds)?;
+                if !api_secret.is_empty() {
+                    lastfm::auth::save_api_secret(conn, &master_key, api_secret)?;
+                }
                 Ok(())
             });
             Ok(Json(json!({"status": "ok"})))
@@ -552,13 +570,21 @@ pub(super) async fn lastfm_status(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
     use crate::services::lastfm;
-    let (creds, has_secret) = {
+    let (creds, has_secret, pending, failed) = {
         let s = state.read().await;
-        let creds =
-            s.db.with_conn(|conn| Ok(lastfm::auth::load_credentials(conn).ok().flatten()))
-                .ok()
-                .flatten();
-        (creds, s.lastfm_api_secret.is_some())
+        let result = s.db.with_conn(|conn| {
+            let creds = lastfm::auth::load_credentials(conn).ok().flatten();
+            let has_db_secret = lastfm::auth::has_api_secret(conn).unwrap_or(false);
+            let (pending, failed) =
+                crate::services::scrobbling::outbox_status(conn).unwrap_or((0, 0));
+            Ok::<_, anyhow::Error>((
+                creds,
+                has_db_secret || s.lastfm_api_secret.is_some(),
+                pending,
+                failed,
+            ))
+        });
+        result.unwrap_or((None, s.lastfm_api_secret.is_some(), 0, 0))
     };
     let enrichment = creds
         .as_ref()
@@ -571,10 +597,108 @@ pub(super) async fn lastfm_status(
         // /api/lastfm/status: equivalent to `enrichment`.
         "configured": enrichment,
         "enrichment": enrichment,
+        "api_key_configured": enrichment,
+        "api_secret_configured": has_secret,
         "scrobbling": scrobbling,
         "scrobble_available": has_secret,
+        "recommendations": scrobbling,
+        "pending_submissions": pending,
+        "failed_submissions": failed,
         "user": user,
     })))
+}
+
+#[derive(Deserialize)]
+pub(super) struct ListenBrainzConfigRequest {
+    token: String,
+}
+
+pub(super) async fn listenbrainz_save_config(
+    State(state): State<SharedState>,
+    Json(payload): Json<ListenBrainzConfigRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    let token = payload.token.trim().to_string();
+    if token.is_empty() {
+        return Ok(Json(json!({
+            "status": "error",
+            "message": "ListenBrainz token is required."
+        })));
+    }
+    let (http, master_key) = {
+        let s = state.read().await;
+        (s.http_client.clone(), s.master_key.clone())
+    };
+    let validation = match crate::services::listenbrainz::validate_token(&http, &token).await {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(Json(json!({
+                "status": "error",
+                "message": format!("Could not validate ListenBrainz token: {e}")
+            })));
+        }
+    };
+    if !validation.valid {
+        return Ok(Json(json!({
+            "status": "error",
+            "message": "ListenBrainz rejected that token."
+        })));
+    }
+    let Some(user_name) = validation.user_name else {
+        return Ok(Json(json!({
+            "status": "error",
+            "message": "ListenBrainz did not return a username for that token."
+        })));
+    };
+    let result = state.read().await.db.with_conn(|conn| {
+        crate::services::listenbrainz::save_credentials(conn, &master_key, &token, &user_name)?;
+        Ok::<_, anyhow::Error>(())
+    });
+    if let Err(e) = result {
+        tracing::warn!("Failed to save ListenBrainz credentials: {e:#}");
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    Ok(Json(json!({
+        "status": "ok",
+        "user": user_name,
+    })))
+}
+
+pub(super) async fn listenbrainz_status(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let (creds, has_token, pending, failed) = {
+        let s = state.read().await;
+        s.db.with_conn(|conn| {
+            let creds = crate::services::listenbrainz::load_credentials(conn)
+                .ok()
+                .flatten();
+            let has_token = crate::services::listenbrainz::has_token(conn).unwrap_or(false);
+            let (pending, failed) =
+                crate::services::scrobbling::outbox_status(conn).unwrap_or((0, 0));
+            Ok::<_, anyhow::Error>((creds, has_token, pending, failed))
+        })
+        .unwrap_or((None, false, 0, 0))
+    };
+    let user = creds.as_ref().and_then(|c| c.user_name.clone());
+    let configured = has_token && user.is_some();
+    Ok(Json(json!({
+        "configured": configured,
+        "scrobbling": configured && creds.as_ref().is_some_and(|c| c.scrobbling_enabled),
+        "recommendations": configured && creds.as_ref().is_some_and(|c| c.recommendations_enabled),
+        "pending_submissions": pending,
+        "failed_submissions": failed,
+        "user": user,
+    })))
+}
+
+pub(super) async fn listenbrainz_clear_config(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = state.read().await.db.with_conn(|conn| {
+        crate::services::listenbrainz::clear_credentials(conn)?;
+        Ok::<_, anyhow::Error>(())
+    });
+    Ok(Json(json!({"status": "cleared"})))
 }
 
 pub(super) async fn lastfm_clear_config(
@@ -827,12 +951,16 @@ pub(super) async fn lastfm_auth_start(
 
     let (http, api_secret, api_key) = {
         let s = state.read().await;
-        let api_key =
-            s.db.with_conn(|conn| Ok(lastfm::auth::load_credentials(conn).ok().flatten()))
+        let result = s.db.with_conn(|conn| {
+            let creds = lastfm::auth::load_credentials(conn).ok().flatten();
+            let api_secret = lastfm::auth::load_api_secret(conn, &s.master_key)
                 .ok()
                 .flatten()
-                .map(|c| c.api_key);
-        (s.http_client.clone(), s.lastfm_api_secret.clone(), api_key)
+                .or_else(|| s.lastfm_api_secret.clone());
+            Ok::<_, anyhow::Error>((api_secret, creds.map(|c| c.api_key)))
+        });
+        let (api_secret, api_key) = result.unwrap_or((s.lastfm_api_secret.clone(), None));
+        (s.http_client.clone(), api_secret, api_key)
     };
     let Some(api_secret) = api_secret else {
         return Err(StatusCode::NOT_IMPLEMENTED);
@@ -887,9 +1015,14 @@ pub(super) async fn lastfm_auth_complete(
             s.db.with_conn(|conn| Ok(lastfm::auth::load_credentials(conn).ok().flatten()))
                 .ok()
                 .flatten();
+        let api_secret =
+            s.db.with_conn(|conn| lastfm::auth::load_api_secret(conn, &s.master_key))
+                .ok()
+                .flatten()
+                .or_else(|| s.lastfm_api_secret.clone());
         (
             s.http_client.clone(),
-            s.lastfm_api_secret.clone(),
+            api_secret,
             creds.as_ref().map(|c| c.api_key.clone()),
             creds.and_then(|c| c.pending_token),
             s.master_key.clone(),

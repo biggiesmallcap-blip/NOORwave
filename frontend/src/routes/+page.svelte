@@ -7,6 +7,7 @@
 	} from '$lib/api/client';
 	import YourMixesShelf from '$lib/components/home/YourMixesShelf.svelte';
 	import PersonalRadioShelf from '$lib/components/home/PersonalRadioShelf.svelte';
+	import HomeRecommendationsShelf from '$lib/components/home/HomeRecommendationsShelf.svelte';
 	import HomeMoodsRail from '$lib/components/home/HomeMoodsRail.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import TrendingCard from '$lib/components/TrendingCard.svelte';
@@ -132,6 +133,9 @@
 
 		<!-- Personal Radio Stations (TIDAL) -->
 		<PersonalRadioShelf />
+
+		<!-- Provider recommendations load independently from profile integrations. -->
+		<HomeRecommendationsShelf />
 
 		<!-- Moods preview rail. Pulls the first chunk of categories from
 		     /api/tidal/moods and links each tile to /moods/[slug]. Full

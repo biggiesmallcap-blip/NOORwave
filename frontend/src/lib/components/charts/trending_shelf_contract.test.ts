@@ -80,4 +80,22 @@ describe('trending shelf contract', () => {
 		expect(muralSource).toContain('color: var(--chart-mural-accent)');
 		expect(muralSource).not.toContain('.chart-mural-title {\n\t\tcolor: var(--chart-mural-accent)');
 	});
+
+	test('keeps mural navigation controls out of the title area', () => {
+		expect(muralSource).toContain('bottom: var(--space-4)');
+		expect(muralSource).toContain('right: calc(var(--space-3) + clamp(32px, 3vw, 40px) + var(--space-2))');
+		expect(muralSource).not.toContain('top: 50%');
+		expect(muralSource).not.toContain('left: var(--space-3)');
+	});
+
+	test('fits short mural item sets instead of forcing every panel into twenty slots', () => {
+		expect(muralSource).toContain('muralLayoutClass(items.length)');
+		expect(muralSource).toContain("if (count <= 12) return 'layout-count-12'");
+		expect(muralSource).toContain('.chart-mural-bg.layout-count-6');
+		expect(muralSource).toContain('grid-template-columns: repeat(3, minmax(0, 1fr))');
+		expect(muralSource).toContain('.chart-mural-bg.layout-count-12');
+		expect(muralSource).toContain('grid-template-columns: repeat(6, minmax(0, 1fr))');
+		expect(muralSource).toContain('.chart-mural-bg.layout-count-16');
+		expect(muralSource).toContain('grid-template-columns: repeat(8, minmax(0, 1fr))');
+	});
 });

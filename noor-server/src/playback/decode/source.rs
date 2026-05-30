@@ -9,6 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub(crate) const DASH_INITIAL_MEDIA_SEGMENTS: usize = 2;
+/// Four-wide lookahead kept 192 kHz shared output fed in live testing while
+/// bounding extra CDN pressure and whole-segment memory.
+pub(crate) const DASH_BACKGROUND_FETCH_WINDOW: usize = 4;
 pub(crate) const DASH_SEGMENT_TIMEOUT_SECS: u64 = 12;
 const STREAM_PIPE_RECV_POLL_MS: u64 = 100;
 
@@ -213,7 +216,7 @@ pub(crate) fn dash_initial_media_count(total_segments: usize) -> usize {
 }
 
 pub(crate) fn dash_background_fetch_window() -> usize {
-    1
+    DASH_BACKGROUND_FETCH_WINDOW
 }
 
 pub(crate) fn build_tidal_cdn_client() -> reqwest::Client {
@@ -353,11 +356,12 @@ mod tests {
             dash_initial_media_count(DASH_INITIAL_MEDIA_SEGMENTS + 10),
             DASH_INITIAL_MEDIA_SEGMENTS
         );
+        assert_eq!(dash_initial_media_count(40), 2);
     }
 
     #[test]
-    fn dash_background_fetch_window_is_sequential() {
-        assert_eq!(dash_background_fetch_window(), 1);
+    fn dash_background_fetch_window_looks_ahead_without_unbounded_fetching() {
+        assert_eq!(dash_background_fetch_window(), 4);
     }
 
     #[test]

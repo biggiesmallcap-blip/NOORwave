@@ -52,6 +52,7 @@
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
+	import IntegrationsPanel from '$lib/components/settings/IntegrationsPanel.svelte';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
 	import { WALLPAPERS, type WallpaperOption } from '$lib/components/wallpaper/shaders';
 	import {
@@ -1343,6 +1344,15 @@
 	let activeCategory = $state<SettingsCategory>('appearance');
 	let handledTidalLoginRequest = $state('');
 	$effect(() => {
+		const requestedCategory = page.url.searchParams.get('category');
+		if (
+			requestedCategory === 'appearance' ||
+			requestedCategory === 'sources' ||
+			requestedCategory === 'audio' ||
+			requestedCategory === 'account'
+		) {
+			activeCategory = requestedCategory;
+		}
 		const requested = page.url.searchParams.get('tidalLogin');
 		if (requested !== '1') return;
 		const key = page.url.href;
@@ -1893,6 +1903,8 @@
 					Regenerating disconnects all other devices — they'll need to re-enter the new PIN.
 				</p>
 			</section>
+
+			<IntegrationsPanel />
 
 			<section class="glass-panel section-panel">
 				<SectionHeader eyebrow="Desktop" title="App updates" subtitle="Version, install mode, and update checks." />

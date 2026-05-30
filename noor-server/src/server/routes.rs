@@ -1,6 +1,8 @@
 use crate::db::queries;
 use crate::metadata::discogs::DiscogsClient;
-use crate::metadata::lastfm::LastFmClient;
+use crate::metadata::lastfm::{
+    LastFmChartAlbum, LastFmChartArtist, LastFmChartTrack, LastFmClient,
+};
 use crate::playback::{automix, pending, player, queue, runtime as playback_runtime};
 use crate::services::discovery::{
     DiscoveryCandidateSeed, DiscoveryProvider, TidalDiscoveryProvider,
@@ -922,13 +924,21 @@ pub fn api_routes(state: SharedState) -> Router {
         // Last.fm
         .route(
             "/api/lastfm/config",
-            post(enrichment_routes::lastfm_save_config),
-        )
-        .route(
-            "/api/lastfm/config",
-            axum::routing::delete(enrichment_routes::lastfm_clear_config),
+            post(enrichment_routes::lastfm_save_config)
+                .get(enrichment_routes::lastfm_status)
+                .delete(enrichment_routes::lastfm_clear_config),
         )
         .route("/api/lastfm/status", get(enrichment_routes::lastfm_status))
+        .route(
+            "/api/listenbrainz/config",
+            post(enrichment_routes::listenbrainz_save_config)
+                .get(enrichment_routes::listenbrainz_status)
+                .delete(enrichment_routes::listenbrainz_clear_config),
+        )
+        .route(
+            "/api/listenbrainz/status",
+            get(enrichment_routes::listenbrainz_status),
+        )
         // Last.fm scrobble auth (server-side flow - `LASTFM_API_SECRET` env required)
         .route(
             "/api/lastfm/auth/start",
@@ -958,6 +968,7 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/library/enrich/lastfm/reset",
             post(enrichment_routes::reset_lastfm_enrichment),
         )
+        .route("/api/scrobbling/backfill", post(scrobbling_backfill))
         // Audio analysis
         .route(
             "/api/library/analyze/audio-features",
@@ -1010,6 +1021,7 @@ pub fn api_routes(state: SharedState) -> Router {
         // Home page discovery endpoints
         .route("/api/home/releases", get(get_home_releases))
         .route("/api/home/picks", get(get_home_picks))
+        .route("/api/home/recommendations", get(get_home_recommendations))
         .route("/api/home/articles", get(get_home_articles))
         .route("/api/home/news", get(get_home_news))
         // TIDAL "Your Mixes" - drives the home Your Mixes shelf above Trending.
@@ -7218,6 +7230,10 @@ async fn set_track_favorite(
             })?;
 
         let _ = state.event_tx.send(AppEvent::LibrarySynced);
+    }
+
+    if payload.favorite && state_changed {
+        crate::services::scrobbling::enqueue_favorite_love(state.clone(), &track).await;
     }
 
     // Fire Tidal sync in the background so the response returns immediately.
@@ -13484,7 +13500,7 @@ async fn sync_session_after_snapshot(
             }
         };
 
-        let mut now_playing: Option<(String, String, Option<String>, Option<i64>, String)> = None;
+        let mut now_playing: Option<crate::services::scrobbling::ScrobblePayload> = None;
         if snapshot.state.is_playing {
             if let Some(track) = snapshot.state.current_track.as_ref() {
                 let source = state
@@ -13506,13 +13522,15 @@ async fn sync_session_after_snapshot(
                     player::ActiveListenSession::start(track.id, now, source, prior)
                         .with_dj_transition_event_id(dj_transition_event_id),
                 );
-                now_playing = Some((
-                    track.artist_name.clone().unwrap_or_default(),
-                    track.title.clone(),
-                    track.album_title.clone(),
-                    track.duration_ms,
-                    track.source.clone(),
-                ));
+                now_playing = Some(crate::services::scrobbling::ScrobblePayload {
+                    track_id: Some(track.id),
+                    artist: track.artist_name.clone().unwrap_or_default(),
+                    title: track.title.clone(),
+                    album: track.album_title.clone(),
+                    duration_ms: track.duration_ms,
+                    listened_ms: None,
+                    started_at_unix: Some(now.timestamp()),
+                });
             }
         } else if snapshot.state.current_track.is_none() {
             state.active_listen_session = None;
@@ -13532,45 +13550,17 @@ async fn sync_session_after_snapshot(
             .send(AppEvent::ListenHistoryUpdated { track_id });
     }
 
-    // Fire-and-forget Last.fm scrobbles. Helpers no-op when source != tidal,
-    // when LASTFM_API_SECRET is unset, or when no session_key is stored.
-    if let Some((artist, title, album, duration_ms, listened_ms, started_at_unix, source)) =
-        scrobble_completed_payload
-        && !artist.is_empty()
-        && !title.is_empty()
-    {
-        crate::services::lastfm::scrobble::spawn_scrobble_completed(
-            state.clone(),
-            artist,
-            title,
-            album,
-            duration_ms,
-            listened_ms,
-            started_at_unix,
-            &source,
-        );
+    if let Some(payload) = scrobble_completed_payload {
+        crate::services::scrobbling::enqueue_completed(state.clone(), payload).await;
     }
-    if let Some((artist, title, album, duration_ms, source)) = now_playing_payload
-        && !artist.is_empty()
-        && !title.is_empty()
-    {
-        crate::services::lastfm::scrobble::spawn_now_playing(
-            state.clone(),
-            artist,
-            title,
-            album,
-            duration_ms,
-            &source,
-        );
+    if let Some(payload) = now_playing_payload {
+        crate::services::scrobbling::enqueue_now_playing(state.clone(), payload).await;
     }
 }
 
 pub(crate) struct FlushOutcome {
     flushed_track_id: Option<i64>,
-    /// (artist, title, album, duration_ms, listened_ms, started_at_unix, source).
-    /// `None` when there's nothing eligible to consider for a scrobble call.
-    /// The actual eligibility + source filter happens in the scrobble helper.
-    scrobble_completed: Option<(String, String, Option<String>, i64, i64, i64, String)>,
+    scrobble_completed: Option<crate::services::scrobbling::ScrobblePayload>,
 }
 
 pub(crate) fn flush_active_listen_session_locked(
@@ -13633,18 +13623,15 @@ pub(crate) fn flush_active_listen_session_locked(
             listened_ms,
             completed,
         )?;
-        // Capture the fields needed for a Last.fm scrobble. The scrobble
-        // helper itself does the source filter + eligibility check + silent
-        // no-op when scrobbling isn't configured.
-        let payload = (
-            track.artist_name.clone().unwrap_or_default(),
-            track.title.clone(),
-            track.album_title.clone(),
-            track.duration_ms.unwrap_or(0),
-            listened_ms,
-            started_at_unix,
-            track.source.clone(),
-        );
+        let payload = crate::services::scrobbling::ScrobblePayload {
+            track_id: Some(track_id),
+            artist: track.artist_name.clone().unwrap_or_default(),
+            title: track.title.clone(),
+            album: track.album_title.clone(),
+            duration_ms: track.duration_ms,
+            listened_ms: Some(listened_ms),
+            started_at_unix: Some(started_at_unix),
+        };
         Ok((completed, payload))
     });
     // On DB error: restore the session so the next flush attempt retries
@@ -13985,6 +13972,783 @@ async fn get_home_picks(State(state): State<SharedState>) -> Result<Json<Value>,
     })))
 }
 
+async fn scrobbling_backfill(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+    let listens = {
+        let s = state.read().await;
+        s.db.with_conn(|conn| crate::services::scrobbling::recent_eligible_listens(conn, 30))
+            .map_err(|error| {
+                warn!("Failed to load backfill listens: {error:#}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+    };
+    let eligible = listens.len();
+    let provider_count = crate::services::scrobbling::enabled_provider_count(&state).await;
+    let mut queued = 0usize;
+    if provider_count > 0 {
+        for payload in listens {
+            queued += crate::services::scrobbling::enqueue_backfill(state.clone(), payload).await;
+        }
+    }
+    let status = if queued > 0 {
+        "queued"
+    } else if provider_count > 0 {
+        "up_to_date"
+    } else if eligible > 0 {
+        "not_ready"
+    } else {
+        "empty"
+    };
+    Ok(Json(json!({
+        "status": status,
+        "days": 30,
+        "eligible": eligible,
+        "providers": provider_count,
+        "queued": queued
+    })))
+}
+
+async fn get_home_recommendations(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let lastfm = load_or_fetch_recommendation_shelf(state.clone(), "lastfm").await;
+    let listenbrainz = load_or_fetch_recommendation_shelf(state.clone(), "listenbrainz").await;
+    Ok(Json(json!({
+        "shelves": [
+            recommendation_shelf_json("lastfm", "Last.fm recommended tracks", Some("track"), &lastfm),
+            recommendation_shelf_json("lastfm", "Last.fm recommended artists", Some("artist"), &lastfm),
+            recommendation_shelf_json("lastfm", "Last.fm recommended albums", Some("album"), &lastfm),
+            recommendation_shelf_json("listenbrainz", "ListenBrainz recommends", Some("track"), &listenbrainz),
+        ]
+    })))
+}
+
+const RECOMMENDATION_HOME_CACHE_KEY: &str = "home:v6";
+const LASTFM_HOME_RECOMMENDATION_LIMIT: usize = 20;
+const LASTFM_HOME_SEED_LIMIT: usize = 12;
+const LASTFM_HOME_PROFILE_SOURCE_LIMIT: usize = 30;
+const LASTFM_HOME_RECENT_SEED_TARGET: usize = 8;
+const LASTFM_HOME_LOVED_SEED_TARGET: usize = 8;
+const LASTFM_HOME_TOP_SEED_TARGET: usize = 6;
+const LASTFM_HOME_SIMILAR_LIMIT: usize = 20;
+const LASTFM_HOME_ARTIST_LIMIT: usize = 20;
+const LASTFM_HOME_ALBUM_LIMIT: usize = 20;
+const LASTFM_HOME_ALBUM_SIMILAR_ARTIST_LIMIT: usize = 8;
+const LASTFM_HOME_ALBUMS_PER_ARTIST_LIMIT: usize = 5;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LastFmTrackSeed {
+    artist: String,
+    title: String,
+    reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LastFmArtistSeed {
+    name: String,
+    reason: String,
+}
+
+fn recommendation_shelf_json(
+    provider: &str,
+    title: &str,
+    entity_type: Option<&str>,
+    result: &anyhow::Result<Vec<Value>>,
+) -> Value {
+    match result {
+        Ok(items) => {
+            let filtered = filter_recommendation_items(items, entity_type);
+            json!({
+                "provider": provider,
+                "title": title,
+                "entity_type": entity_type.unwrap_or("track"),
+                "status": if filtered.is_empty() { "empty" } else { "ok" },
+                "items": filtered,
+            })
+        }
+        Err(error) => json!({
+            "provider": provider,
+            "title": title,
+            "entity_type": entity_type.unwrap_or("track"),
+            "status": "error",
+            "message": error.to_string(),
+            "items": [],
+        }),
+    }
+}
+
+fn filter_recommendation_items(items: &[Value], entity_type: Option<&str>) -> Vec<Value> {
+    let wanted = entity_type.unwrap_or("track");
+    items
+        .iter()
+        .filter(|item| {
+            item.get("entity_type")
+                .and_then(Value::as_str)
+                .unwrap_or("track")
+                == wanted
+        })
+        .cloned()
+        .collect()
+}
+
+async fn load_or_fetch_recommendation_shelf(
+    state: SharedState,
+    provider: &str,
+) -> anyhow::Result<Vec<Value>> {
+    if let Some(cached) = read_recommendation_cache(&state, provider).await {
+        return Ok(cached);
+    }
+    let items = match provider {
+        "lastfm" => fetch_lastfm_home_recommendations(&state).await?,
+        "listenbrainz" => fetch_listenbrainz_home_recommendations(&state).await?,
+        _ => Vec::new(),
+    };
+    write_recommendation_cache(&state, provider, &items).await;
+    Ok(items)
+}
+
+async fn read_recommendation_cache(state: &SharedState, provider: &str) -> Option<Vec<Value>> {
+    let now = unix_now_secs();
+    let s = state.read().await;
+    s.db.with_conn(|conn| {
+        conn.query_row(
+            "SELECT payload_json FROM provider_recommendation_cache
+                  WHERE provider = ?1 AND cache_key = ?2 AND expires_at > ?3",
+            params![provider, RECOMMENDATION_HOME_CACHE_KEY, now],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    })
+    .ok()
+    .flatten()
+    .and_then(|raw| serde_json::from_str(&raw).ok())
+}
+
+async fn write_recommendation_cache(state: &SharedState, provider: &str, items: &[Value]) {
+    let now = unix_now_secs();
+    let expires = now + 6 * 60 * 60;
+    let Ok(payload) = serde_json::to_string(items) else {
+        return;
+    };
+    let s = state.read().await;
+    let _ = s.db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO provider_recommendation_cache (provider, cache_key, payload_json, fetched_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(provider, cache_key) DO UPDATE SET
+                 payload_json = excluded.payload_json,
+                 fetched_at = excluded.fetched_at,
+                 expires_at = excluded.expires_at",
+            params![provider, RECOMMENDATION_HOME_CACHE_KEY, payload, now, expires],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    });
+}
+
+fn recommendation_seed_window() -> usize {
+    (unix_now_secs() / (6 * 60 * 60)) as usize
+}
+
+fn rotate_take<T: Clone>(items: &[T], limit: usize, salt: usize) -> Vec<T> {
+    if items.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let offset = salt % items.len();
+    items
+        .iter()
+        .cycle()
+        .skip(offset)
+        .take(limit.min(items.len()))
+        .cloned()
+        .collect()
+}
+
+fn merge_lastfm_track_seeds(
+    recent: Vec<LastFmChartTrack>,
+    loved: Vec<LastFmChartTrack>,
+    top: Vec<LastFmChartTrack>,
+    salt: usize,
+    limit: usize,
+) -> Vec<LastFmTrackSeed> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push_track = |track: LastFmChartTrack, reason: String| {
+        if out.len() >= limit {
+            return;
+        }
+        let key = crate::services::radio::normalize_for_dedup(&track.artist, &track.title);
+        if key.is_empty() || !seen.insert(key) {
+            return;
+        }
+        out.push(LastFmTrackSeed {
+            artist: track.artist,
+            title: track.title,
+            reason,
+        });
+    };
+
+    for track in rotate_take(&recent, LASTFM_HOME_RECENT_SEED_TARGET, salt) {
+        let reason = format!("Because you played {} recently", track.title);
+        push_track(track, reason);
+    }
+    for track in rotate_take(&loved, LASTFM_HOME_LOVED_SEED_TARGET, salt + 3) {
+        let reason = format!("Because you loved {}", track.title);
+        push_track(track, reason);
+    }
+    for track in rotate_take(&top, LASTFM_HOME_TOP_SEED_TARGET, salt + 7) {
+        let reason = format!("Near your top track {}", track.title);
+        push_track(track, reason);
+    }
+
+    out
+}
+
+fn merge_lastfm_artist_seeds(
+    track_seeds: &[LastFmTrackSeed],
+    top_artists: Vec<LastFmChartArtist>,
+    top_albums: Vec<LastFmChartAlbum>,
+    salt: usize,
+    limit: usize,
+) -> Vec<LastFmArtistSeed> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push_artist = |name: String, reason: String| {
+        if out.len() >= limit {
+            return;
+        }
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let key = trimmed.to_ascii_lowercase();
+        if !seen.insert(key) {
+            return;
+        }
+        out.push(LastFmArtistSeed {
+            name: trimmed.to_string(),
+            reason,
+        });
+    };
+
+    for seed in rotate_take(track_seeds, LASTFM_HOME_RECENT_SEED_TARGET, salt) {
+        push_artist(seed.artist.clone(), seed.reason.clone());
+    }
+    for artist in rotate_take(&top_artists, LASTFM_HOME_TOP_SEED_TARGET, salt + 5) {
+        let reason = format!("Near your top artist {}", artist.name);
+        push_artist(artist.name, reason);
+    }
+    for album in rotate_take(&top_albums, LASTFM_HOME_TOP_SEED_TARGET, salt + 11) {
+        let reason = format!("Because you play albums by {}", album.artist);
+        push_artist(album.artist, reason);
+    }
+
+    out
+}
+
+async fn load_lastfm_track_seeds(client: &LastFmClient, user: &str) -> Vec<LastFmTrackSeed> {
+    let recent = client
+        .user_recent_tracks(user, LASTFM_HOME_PROFILE_SOURCE_LIMIT)
+        .await
+        .unwrap_or_default();
+    let loved = client
+        .user_loved_tracks(user, LASTFM_HOME_PROFILE_SOURCE_LIMIT)
+        .await
+        .unwrap_or_default();
+    let top = client
+        .user_top_tracks(user, LASTFM_HOME_PROFILE_SOURCE_LIMIT)
+        .await
+        .unwrap_or_default();
+    merge_lastfm_track_seeds(
+        recent,
+        loved,
+        top,
+        recommendation_seed_window(),
+        LASTFM_HOME_SEED_LIMIT,
+    )
+}
+
+async fn load_lastfm_artist_seeds(
+    client: &LastFmClient,
+    user: &str,
+    track_seeds: &[LastFmTrackSeed],
+) -> Vec<LastFmArtistSeed> {
+    let top_artists = client
+        .user_top_artists(user, LASTFM_HOME_PROFILE_SOURCE_LIMIT)
+        .await
+        .unwrap_or_default();
+    let top_albums = client
+        .user_top_albums(user, LASTFM_HOME_PROFILE_SOURCE_LIMIT)
+        .await
+        .unwrap_or_default();
+    merge_lastfm_artist_seeds(
+        track_seeds,
+        top_artists,
+        top_albums,
+        recommendation_seed_window(),
+        LASTFM_HOME_SEED_LIMIT,
+    )
+}
+
+async fn fetch_lastfm_home_recommendations(state: &SharedState) -> anyhow::Result<Vec<Value>> {
+    let (http, db, user) = {
+        let s = state.read().await;
+        let user = s.db.with_conn(|conn| {
+            Ok::<_, anyhow::Error>(
+                crate::services::lastfm::auth::load_credentials(conn)?.and_then(|c| c.session_user),
+            )
+        })?;
+        (s.http_client.clone(), s.db.clone(), user)
+    };
+    let Some(user) = user else {
+        return Ok(Vec::new());
+    };
+    let Some(client) = LastFmClient::load(http, &db) else {
+        return Ok(Vec::new());
+    };
+    let track_seeds = load_lastfm_track_seeds(&client, &user).await;
+    let artist_seeds = load_lastfm_artist_seeds(&client, &user, &track_seeds).await;
+    let mut out = Vec::new();
+    out.extend(fetch_lastfm_track_recommendations(state, &client, &track_seeds).await?);
+    out.extend(fetch_lastfm_artist_recommendations(state, &client, &artist_seeds).await?);
+    out.extend(fetch_lastfm_album_recommendations(state, &client, &artist_seeds).await?);
+    Ok(out)
+}
+
+async fn fetch_lastfm_track_recommendations(
+    state: &SharedState,
+    client: &LastFmClient,
+    seeds: &[LastFmTrackSeed],
+) -> anyhow::Result<Vec<Value>> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for seed in seeds {
+        for similar in client
+            .track_get_similar_with_artist_fallback(
+                &seed.artist,
+                &seed.title,
+                LASTFM_HOME_SIMILAR_LIMIT,
+            )
+            .await
+            .unwrap_or_default()
+        {
+            let key = crate::services::radio::normalize_for_dedup(&similar.artist, &similar.title);
+            if key.is_empty() || !seen.insert(key) {
+                continue;
+            }
+            if let Some(item) = resolve_recommendation_item(
+                state,
+                "lastfm",
+                &similar.artist,
+                &similar.title,
+                None,
+                Some(similar.match_score),
+                &seed.reason,
+            )
+            .await
+            {
+                out.push(item);
+            } else {
+                out.push(recommendation_placeholder_item(
+                    "lastfm",
+                    &similar.artist,
+                    &similar.title,
+                    similar.mbid.as_deref(),
+                    Some(similar.match_score),
+                    &seed.reason,
+                ));
+            }
+            if out.len() >= LASTFM_HOME_RECOMMENDATION_LIMIT {
+                return Ok(out);
+            }
+        }
+    }
+    Ok(out)
+}
+
+async fn fetch_lastfm_artist_recommendations(
+    state: &SharedState,
+    client: &LastFmClient,
+    seeds: &[LastFmArtistSeed],
+) -> anyhow::Result<Vec<Value>> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for seed in seeds {
+        for artist in client
+            .artist_get_similar(&seed.name, LASTFM_HOME_SIMILAR_LIMIT)
+            .await
+            .unwrap_or_default()
+        {
+            let key = artist.name.trim().to_ascii_lowercase();
+            if key.is_empty() || !seen.insert(key) {
+                continue;
+            }
+            out.push(
+                resolve_recommendation_artist_item(
+                    state,
+                    "lastfm",
+                    &artist.name,
+                    artist.mbid.as_deref(),
+                    artist.match_score,
+                    &seed.reason,
+                    artist.image_url.as_deref(),
+                )
+                .await,
+            );
+            if out.len() >= LASTFM_HOME_ARTIST_LIMIT {
+                return Ok(out);
+            }
+        }
+    }
+    Ok(out)
+}
+
+async fn fetch_lastfm_album_recommendations(
+    state: &SharedState,
+    client: &LastFmClient,
+    seeds: &[LastFmArtistSeed],
+) -> anyhow::Result<Vec<Value>> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for seed in seeds {
+        let similar_artists = client
+            .artist_get_similar(&seed.name, LASTFM_HOME_ALBUM_SIMILAR_ARTIST_LIMIT)
+            .await
+            .unwrap_or_default();
+        for artist in similar_artists {
+            for album in client
+                .artist_top_albums(&artist.name, LASTFM_HOME_ALBUMS_PER_ARTIST_LIMIT)
+                .await
+                .unwrap_or_default()
+            {
+                let key = crate::services::radio::normalize_for_dedup(&album.artist, &album.title);
+                if key.is_empty() || !seen.insert(key) {
+                    continue;
+                }
+                out.push(
+                    resolve_recommendation_album_item(
+                        state,
+                        "lastfm",
+                        &album.artist,
+                        &album.title,
+                        album.mbid.as_deref(),
+                        artist
+                            .match_score
+                            .or_else(|| album.playcount.map(|count| count as f64)),
+                        &seed.reason,
+                        album.image_url.as_deref(),
+                    )
+                    .await,
+                );
+                if out.len() >= LASTFM_HOME_ALBUM_LIMIT {
+                    return Ok(out);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+async fn fetch_listenbrainz_home_recommendations(
+    state: &SharedState,
+) -> anyhow::Result<Vec<Value>> {
+    let (http, token, user) = {
+        let s = state.read().await;
+        let (token, user) = s.db.with_conn(|conn| {
+            let token = crate::services::listenbrainz::load_token(conn, &s.master_key)?;
+            let user =
+                crate::services::listenbrainz::load_credentials(conn)?.and_then(|c| c.user_name);
+            Ok::<_, anyhow::Error>((token, user))
+        })?;
+        (s.http_client.clone(), token, user)
+    };
+    let Some(user) = user else {
+        return Ok(Vec::new());
+    };
+    let recs =
+        crate::services::listenbrainz::user_recommendations(&http, &user, token.as_deref()).await?;
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for rec in recs {
+        let key = crate::services::radio::normalize_for_dedup(&rec.artist, &rec.title);
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+        if let Some(item) = resolve_recommendation_item(
+            state,
+            "listenbrainz",
+            &rec.artist,
+            &rec.title,
+            rec.mbid.as_deref(),
+            rec.score,
+            "Collaborative filtering",
+        )
+        .await
+        {
+            out.push(item);
+        } else {
+            out.push(recommendation_placeholder_item(
+                "listenbrainz",
+                &rec.artist,
+                &rec.title,
+                rec.mbid.as_deref(),
+                rec.score,
+                "Collaborative filtering",
+            ));
+        }
+        if out.len() >= 12 {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+async fn resolve_recommendation_item(
+    state: &SharedState,
+    provider: &str,
+    artist: &str,
+    title: &str,
+    mbid: Option<&str>,
+    score: Option<f64>,
+    reason: &str,
+) -> Option<Value> {
+    let s = state.read().await;
+    s.db
+        .with_conn(|conn| {
+            if let Some(mbid_value) = mbid.filter(|v| !v.trim().is_empty()) {
+                let by_mbid = conn
+                    .query_row(
+                        "SELECT t.id, t.tidal_id, t.title, a.name, al.title, t.artwork_url
+                           FROM external_track_candidates c
+                           JOIN tracks t
+                             ON t.id = c.resolved_track_id
+                             OR (c.tidal_id IS NOT NULL AND t.tidal_id = c.tidal_id)
+                           LEFT JOIN artists a ON a.id = t.artist_id
+                           LEFT JOIN albums al ON al.id = t.album_id
+                          WHERE c.mbid = ?1
+                          ORDER BY (c.resolved_track_id IS NULL), t.is_favorite DESC, t.play_count DESC
+                          LIMIT 1",
+                        params![mbid_value],
+                        |row| {
+                            Ok(json!({
+                                "provider": provider,
+                                "entity_type": "track",
+                                "local_track_id": row.get::<_, i64>(0)?,
+                                "tidal_id": row.get::<_, Option<i64>>(1)?,
+                                "title": row.get::<_, String>(2)?,
+                                "artist_name": row.get::<_, Option<String>>(3)?,
+                                "album_title": row.get::<_, Option<String>>(4)?,
+                                "artwork_url": row.get::<_, Option<String>>(5)?,
+                                "mbid": mbid,
+                                "score": score,
+                                "reason": reason,
+                                "playable": true,
+                            }))
+                        },
+                    )
+                    .optional()?;
+                if by_mbid.is_some() {
+                    return Ok::<_, anyhow::Error>(by_mbid);
+                }
+            }
+
+            conn.query_row(
+                "SELECT t.id, t.tidal_id, t.title, a.name, al.title, t.artwork_url
+                   FROM tracks t
+                   LEFT JOIN artists a ON a.id = t.artist_id
+                   LEFT JOIN albums al ON al.id = t.album_id
+                  WHERE LOWER(t.title) = LOWER(?1)
+                    AND LOWER(COALESCE(a.name, '')) = LOWER(?2)
+                  ORDER BY t.is_favorite DESC, t.play_count DESC
+                  LIMIT 1",
+                params![title, artist],
+                |row| {
+                    Ok(json!({
+                        "provider": provider,
+                        "entity_type": "track",
+                        "local_track_id": row.get::<_, i64>(0)?,
+                        "tidal_id": row.get::<_, Option<i64>>(1)?,
+                        "title": row.get::<_, String>(2)?,
+                        "artist_name": row.get::<_, Option<String>>(3)?,
+                        "album_title": row.get::<_, Option<String>>(4)?,
+                        "artwork_url": row.get::<_, Option<String>>(5)?,
+                        "mbid": mbid,
+                        "score": score,
+                        "reason": reason,
+                        "playable": true,
+                    }))
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+        .ok()
+        .flatten()
+}
+
+async fn resolve_recommendation_artist_item(
+    state: &SharedState,
+    provider: &str,
+    artist: &str,
+    mbid: Option<&str>,
+    score: Option<f64>,
+    reason: &str,
+    image_url: Option<&str>,
+) -> Value {
+    let s = state.read().await;
+    s.db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT id, tidal_id, name, photo_url
+                   FROM artists
+                  WHERE LOWER(name) = LOWER(?1)
+                  ORDER BY tidal_id IS NULL, id ASC
+                  LIMIT 1",
+                params![artist],
+                |row| {
+                    Ok(json!({
+                        "provider": provider,
+                        "entity_type": "artist",
+                        "local_artist_id": row.get::<_, i64>(0)?,
+                        "tidal_artist_id": row.get::<_, Option<i64>>(1)?,
+                        "local_track_id": null,
+                        "tidal_id": null,
+                        "title": row.get::<_, String>(2)?,
+                        "artist_name": row.get::<_, String>(2)?,
+                        "album_title": null,
+                        "artwork_url": row.get::<_, Option<String>>(3)?.or_else(|| image_url.map(str::to_string)),
+                        "mbid": mbid,
+                        "score": score,
+                        "reason": reason,
+                        "playable": true,
+                    }))
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| {
+            json!({
+                "provider": provider,
+                "entity_type": "artist",
+                "local_artist_id": null,
+                "tidal_artist_id": null,
+                "local_track_id": null,
+                "tidal_id": null,
+                "title": artist,
+                "artist_name": artist,
+                "album_title": null,
+                "artwork_url": image_url,
+                "mbid": mbid,
+                "score": score,
+                "reason": reason,
+                "playable": false,
+            })
+        })
+}
+
+async fn resolve_recommendation_album_item(
+    state: &SharedState,
+    provider: &str,
+    artist: &str,
+    title: &str,
+    mbid: Option<&str>,
+    score: Option<f64>,
+    reason: &str,
+    image_url: Option<&str>,
+) -> Value {
+    let s = state.read().await;
+    s.db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT al.id, al.tidal_id, al.title, a.id, a.tidal_id, a.name, al.artwork_url
+                   FROM albums al
+                   LEFT JOIN artists a ON a.id = al.artist_id
+                  WHERE LOWER(al.title) = LOWER(?1)
+                    AND LOWER(COALESCE(a.name, '')) = LOWER(?2)
+                  ORDER BY al.tidal_id IS NULL, al.id ASC
+                  LIMIT 1",
+                params![title, artist],
+                |row| {
+                    Ok(json!({
+                        "provider": provider,
+                        "entity_type": "album",
+                        "local_album_id": row.get::<_, i64>(0)?,
+                        "tidal_album_id": row.get::<_, Option<i64>>(1)?,
+                        "local_artist_id": row.get::<_, Option<i64>>(3)?,
+                        "tidal_artist_id": row.get::<_, Option<i64>>(4)?,
+                        "local_track_id": null,
+                        "tidal_id": null,
+                        "title": row.get::<_, String>(2)?,
+                        "artist_name": row.get::<_, Option<String>>(5)?,
+                        "album_title": row.get::<_, String>(2)?,
+                        "artwork_url": row.get::<_, Option<String>>(6)?.or_else(|| image_url.map(str::to_string)),
+                        "mbid": mbid,
+                        "score": score,
+                        "reason": reason,
+                        "playable": true,
+                    }))
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| {
+            json!({
+                "provider": provider,
+                "entity_type": "album",
+                "local_album_id": null,
+                "tidal_album_id": null,
+                "local_artist_id": null,
+                "tidal_artist_id": null,
+                "local_track_id": null,
+                "tidal_id": null,
+                "title": title,
+                "artist_name": artist,
+                "album_title": title,
+                "artwork_url": image_url,
+                "mbid": mbid,
+                "score": score,
+                "reason": reason,
+                "playable": false,
+            })
+        })
+}
+
+fn recommendation_placeholder_item(
+    provider: &str,
+    artist: &str,
+    title: &str,
+    mbid: Option<&str>,
+    score: Option<f64>,
+    reason: &str,
+) -> Value {
+    json!({
+        "provider": provider,
+        "entity_type": "track",
+        "local_track_id": null,
+        "tidal_id": 0,
+        "title": title,
+        "artist_name": artist,
+        "album_title": null,
+        "artwork_url": null,
+        "mbid": mbid,
+        "score": score,
+        "reason": reason,
+        "playable": false,
+    })
+}
+
+fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Get weekly articles from AllMusic RSS
 async fn get_home_articles(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     let aggregator = state.read().await.rss_aggregator.clone();
@@ -14060,6 +14824,99 @@ mod tests {
             reason: None,
             is_pending: source == "automix-new",
         }
+    }
+
+    fn lastfm_test_track(artist: &str, title: &str) -> LastFmChartTrack {
+        LastFmChartTrack {
+            artist: artist.to_string(),
+            title: title.to_string(),
+            mbid: None,
+            image_url: None,
+            listeners: None,
+            playcount: None,
+        }
+    }
+
+    fn lastfm_test_artist(name: &str) -> LastFmChartArtist {
+        LastFmChartArtist {
+            name: name.to_string(),
+            mbid: None,
+            image_url: None,
+            listeners: None,
+            playcount: None,
+            match_score: None,
+        }
+    }
+
+    fn lastfm_test_album(artist: &str, title: &str) -> LastFmChartAlbum {
+        LastFmChartAlbum {
+            artist: artist.to_string(),
+            title: title.to_string(),
+            mbid: None,
+            image_url: None,
+            playcount: None,
+        }
+    }
+
+    #[test]
+    fn lastfm_track_seed_merge_prioritizes_recent_and_loved_context() {
+        let seeds = merge_lastfm_track_seeds(
+            vec![
+                lastfm_test_track("Recent Artist", "Recent One"),
+                lastfm_test_track("Recent Artist", "Recent Two"),
+            ],
+            vec![lastfm_test_track("Loved Artist", "Loved One")],
+            vec![lastfm_test_track("Top Artist", "Top One")],
+            0,
+            4,
+        );
+
+        assert_eq!(seeds.len(), 4);
+        assert_eq!(seeds[0].reason, "Because you played Recent One recently");
+        assert_eq!(seeds[1].reason, "Because you played Recent Two recently");
+        assert_eq!(seeds[2].reason, "Because you loved Loved One");
+        assert_eq!(seeds[3].reason, "Near your top track Top One");
+    }
+
+    #[test]
+    fn lastfm_artist_seed_merge_uses_track_context_before_top_artists() {
+        let track_seeds = vec![
+            LastFmTrackSeed {
+                artist: "Recent Artist".to_string(),
+                title: "Recent One".to_string(),
+                reason: "Because you played Recent One recently".to_string(),
+            },
+            LastFmTrackSeed {
+                artist: "Recent Artist".to_string(),
+                title: "Duplicate Artist".to_string(),
+                reason: "Because you loved Duplicate Artist".to_string(),
+            },
+        ];
+        let seeds = merge_lastfm_artist_seeds(
+            &track_seeds,
+            vec![lastfm_test_artist("Top Artist")],
+            vec![lastfm_test_album("Album Artist", "Album One")],
+            0,
+            3,
+        );
+
+        assert_eq!(
+            seeds,
+            vec![
+                LastFmArtistSeed {
+                    name: "Recent Artist".to_string(),
+                    reason: "Because you played Recent One recently".to_string(),
+                },
+                LastFmArtistSeed {
+                    name: "Top Artist".to_string(),
+                    reason: "Near your top artist Top Artist".to_string(),
+                },
+                LastFmArtistSeed {
+                    name: "Album Artist".to_string(),
+                    reason: "Because you play albums by Album Artist".to_string(),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -17496,7 +18353,13 @@ mod tests {
             ("POST", "/api/library/enrich/spotify/reset"),
             ("POST", "/api/library/tidal-stream/purge"),
             ("POST", "/api/lastfm/config"),
+            ("GET", "/api/lastfm/config"),
+            ("DELETE", "/api/lastfm/config"),
             ("GET", "/api/lastfm/status"),
+            ("POST", "/api/listenbrainz/config"),
+            ("GET", "/api/listenbrainz/config"),
+            ("DELETE", "/api/listenbrainz/config"),
+            ("GET", "/api/listenbrainz/status"),
             ("POST", "/api/lastfm/auth/start"),
             ("POST", "/api/lastfm/auth/complete"),
             ("POST", "/api/lastfm/auth/disconnect"),
@@ -17504,6 +18367,7 @@ mod tests {
             ("POST", "/api/library/enrich/lastfm/stop"),
             ("GET", "/api/library/enrich/lastfm/status"),
             ("POST", "/api/library/enrich/lastfm/reset"),
+            ("POST", "/api/scrobbling/backfill"),
             ("POST", "/api/library/analyze/audio-features"),
             ("POST", "/api/library/analyze/stop"),
             ("GET", "/api/library/analyze/status"),
@@ -17522,6 +18386,7 @@ mod tests {
             ("GET", "/api/home/picks"),
             ("GET", "/api/home/articles"),
             ("GET", "/api/home/news"),
+            ("GET", "/api/home/recommendations"),
             ("GET", "/api/tidal/mixes"),
             ("GET", "/api/tidal/mixes/1/tracks"),
             ("POST", "/api/tidal/play-mix"),
