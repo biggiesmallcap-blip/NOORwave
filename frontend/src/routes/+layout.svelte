@@ -235,6 +235,40 @@
 	function hideQueueReason() {
 		hoveredReason = null;
 	}
+
+	let activeQueueActionsRowId = $state<number | null>(null);
+	let queueActionsAlwaysVisible = $state(false);
+
+	function setQueueActionsRowActive(itemId: number) {
+		if (queueActionsAlwaysVisible) return;
+		activeQueueActionsRowId = itemId;
+	}
+
+	function clearQueueActionsRow(itemId: number) {
+		if (activeQueueActionsRowId === itemId) {
+			activeQueueActionsRowId = null;
+		}
+	}
+
+	function handleQueueRowFocusOut(event: FocusEvent, itemId: number) {
+		const current = event.currentTarget;
+		const next = event.relatedTarget;
+		if (current instanceof HTMLElement && next instanceof Node && current.contains(next)) {
+			return;
+		}
+		clearQueueActionsRow(itemId);
+	}
+
+	function queueActionsAccessible(itemId: number): boolean {
+		return queueActionsAlwaysVisible || activeQueueActionsRowId === itemId;
+	}
+
+	function updateQueueActionsVisibility(query: MediaQueryList | MediaQueryListEvent) {
+		queueActionsAlwaysVisible = query.matches;
+		if (queueActionsAlwaysVisible) {
+			activeQueueActionsRowId = null;
+		}
+	}
 	let mobileFavoritePending = $state(false);
 	let desktopFavoritePending = $state(false);
 
@@ -340,9 +374,13 @@
 
 		window.addEventListener('keydown', handleGlobalKeydown);
 		window.addEventListener('wheel', handleGlobalWheel, { passive: false });
+		const queueActionsMedia = window.matchMedia('(max-width: 760px)');
+		updateQueueActionsVisibility(queueActionsMedia);
+		queueActionsMedia.addEventListener('change', updateQueueActionsVisibility);
 		return () => {
 			window.removeEventListener('keydown', handleGlobalKeydown);
 			window.removeEventListener('wheel', handleGlobalWheel);
+			queueActionsMedia.removeEventListener('change', updateQueueActionsVisibility);
 			for (const unlisten of tauriUpdateUnlisteners) unlisten();
 			unsubPalette();
 		};
@@ -1570,6 +1608,7 @@
 					{#each upcomingQueue.slice(0, queueVisibleCount) as item, i (`${item.id}-${i}`)}
 						{@const aid = item.track.artist_id}
 						{@const isPending = item.is_pending === true}
+						{@const actionsAccessible = queueActionsAccessible(item.id)}
 						<div
 							role="listitem"
 							class:active={$currentQueueItemId != null
@@ -1588,6 +1627,10 @@
 							ondragleave={() => handleQueueDragLeave(item)}
 							ondrop={(event) => void handleQueueDrop(event, item)}
 							ondragend={handleQueueDragEnd}
+							onmouseenter={() => setQueueActionsRowActive(item.id)}
+							onmouseleave={() => clearQueueActionsRow(item.id)}
+							onfocusin={() => setQueueActionsRowActive(item.id)}
+							onfocusout={(event) => handleQueueRowFocusOut(event, item.id)}
 						>
 							<span class="queue-grip" aria-hidden="true" title="Drag to reorder">⋮⋮</span>
 							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
@@ -1636,7 +1679,11 @@
 
 							<div class="queue-side">
 								<span class="queue-time">{formatTrackDuration(item.track.duration_ms)}</span>
-								<div class="queue-actions">
+								<div
+									class="queue-actions"
+									inert={!actionsAccessible}
+									aria-hidden={actionsAccessible ? undefined : 'true'}
+								>
 									{#if item.reason}
 										{@const reasonDesc = formatReasonForScreenReader(item.reason)}
 										{@const reasonId = `queue-reason-${item.id}`}
@@ -1921,6 +1968,7 @@
 					{#each upcomingQueue.slice(0, queueVisibleCount) as item, i (`${item.id}-${i}`)}
 						{@const aid = item.track.artist_id}
 						{@const isPending = item.is_pending === true}
+						{@const actionsAccessible = queueActionsAccessible(item.id)}
 						<div
 							role="listitem"
 							class="queue-row"
@@ -1930,6 +1978,10 @@
 							class:pending={isPending}
 							title={isPending ? 'Resolving on TIDAL...' : undefined}
 							oncontextmenu={(event) => openQueueRowMenu(item, event)}
+							onmouseenter={() => setQueueActionsRowActive(item.id)}
+							onmouseleave={() => clearQueueActionsRow(item.id)}
+							onfocusin={() => setQueueActionsRowActive(item.id)}
+							onfocusout={(event) => handleQueueRowFocusOut(event, item.id)}
 						>
 							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
 								{#if isPending}
@@ -1975,7 +2027,11 @@
 							</div>
 							<div class="queue-side">
 								<span class="queue-time">{formatTrackDuration(item.track.duration_ms)}</span>
-								<div class="queue-actions">
+								<div
+									class="queue-actions"
+									inert={!actionsAccessible}
+									aria-hidden={actionsAccessible ? undefined : 'true'}
+								>
 									<button
 										class="queue-action icon"
 										aria-label="More actions"
