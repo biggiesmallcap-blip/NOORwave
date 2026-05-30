@@ -219,11 +219,13 @@ fn write_output_buffer<T>(
 
     if guard.started && !guard.started_notified {
         guard.started_notified = true;
-        let _ = event_tx.send(PlaybackRuntimeEvent::Started {
-            track_id: shared.track_id,
-            generation: shared.generation,
-            source: shared.source_kind,
-        });
+        if shared.started_event_enabled.load(Ordering::Relaxed) {
+            let _ = event_tx.send(PlaybackRuntimeEvent::Started {
+                track_id: shared.track_id,
+                generation: shared.generation,
+                source: shared.source_kind,
+            });
+        }
     }
 
     if guard.started && written == 0 && guard.finished && !guard.finished_notified {
@@ -345,6 +347,7 @@ pub(crate) struct PlaybackSharedState {
     pub(crate) suppress_crossfade_after_seek: AtomicBool,
     pub(crate) drop_preview_trigger_samples: AtomicU64,
     pub(crate) drop_preview_start_signaled: AtomicBool,
+    pub(crate) started_event_enabled: AtomicBool,
     pub(crate) fadein_start_samples: AtomicU64,
     pub(crate) device_sample_rate: u32,
     pub(crate) device_channels: u16,
@@ -399,11 +402,23 @@ impl PlaybackSharedState {
             suppress_crossfade_after_seek: AtomicBool::new(false),
             drop_preview_trigger_samples: AtomicU64::new(u64::MAX),
             drop_preview_start_signaled: AtomicBool::new(false),
+            started_event_enabled: AtomicBool::new(true),
             fadein_start_samples: AtomicU64::new(u64::MAX),
             device_sample_rate,
             device_channels,
             target_sample_rate: AtomicU32::new(device_sample_rate),
         }
+    }
+
+    pub(crate) fn suppress_started_event(&self) {
+        self.started_event_enabled.store(false, Ordering::Relaxed);
+    }
+
+    pub(crate) fn clear_drop_preview_trigger(&self) {
+        self.drop_preview_trigger_samples
+            .store(u64::MAX, Ordering::Relaxed);
+        self.drop_preview_start_signaled
+            .store(true, Ordering::Relaxed);
     }
 
     pub(crate) fn reset_buffer(&self) {
@@ -661,6 +676,56 @@ mod tests {
         // Idempotent overwrite is fine - the callback re-publishes on every drain.
         shared.publish_buffered_samples(0);
         assert_eq!(shared.buffered_samples.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn started_event_emits_for_normal_playback() {
+        let shared = test_shared_state();
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer");
+            buffer.samples = vec![0.1, 0.2];
+        }
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(4);
+        let mut output = [0.0f32; 2];
+
+        write_output_f32(&mut output, &shared, &command_tx, &event_tx);
+
+        match event_rx.try_recv().expect("started event") {
+            PlaybackRuntimeEvent::Started {
+                track_id,
+                generation,
+                source,
+            } => {
+                assert_eq!(track_id, 1);
+                assert_eq!(generation, 1);
+                assert_eq!(source, PlaybackSourceKind::TidalStream);
+            }
+            other => panic!("expected Started, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn suppress_started_event_keeps_preview_from_publishing_track_start() {
+        let shared = test_shared_state();
+        shared.suppress_started_event();
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer");
+            buffer.samples = vec![0.1, 0.2];
+        }
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(4);
+        let mut output = [0.0f32; 2];
+
+        write_output_f32(&mut output, &shared, &command_tx, &event_tx);
+
+        assert!(
+            event_rx.try_recv().is_err(),
+            "drop preview playback must not publish Started"
+        );
+        let buffer = shared.buffer.lock().expect("buffer");
+        assert!(buffer.started);
+        assert!(buffer.started_notified);
     }
 
     #[test]
