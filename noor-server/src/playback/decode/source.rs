@@ -215,6 +215,11 @@ pub(crate) fn dash_initial_media_count(total_segments: usize) -> usize {
     total_segments.min(DASH_INITIAL_MEDIA_SEGMENTS)
 }
 
+// Concurrency window for the background DASH segment downloader. Segments are
+// consumed by Symphonia in order, but fetched in parallel up to this many
+// in-flight requests so per-segment CDN latency doesn't starve the decoder.
+// The downstream chunk channel (capacity 32) still bounds peak memory, and
+// `futures::StreamExt::buffered` preserves output order.
 pub(crate) fn dash_background_fetch_window() -> usize {
     DASH_BACKGROUND_FETCH_WINDOW
 }
@@ -362,6 +367,9 @@ mod tests {
     #[test]
     fn dash_background_fetch_window_looks_ahead_without_unbounded_fetching() {
         assert_eq!(dash_background_fetch_window(), 4);
+        // Must be >=2 so per-segment HTTPS round-trips overlap and the decoder
+        // doesn't starve when one segment's fetch exceeds its audio duration.
+        assert!(dash_background_fetch_window() >= 2);
     }
 
     #[test]

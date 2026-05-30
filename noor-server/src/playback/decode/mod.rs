@@ -51,6 +51,7 @@ struct DashPrebuffer {
 struct DashBackgroundFetchSummary {
     sent_segments: usize,
     sent_bytes: usize,
+    slowest_fetch_ms: u64,
     stopped: bool,
     receiver_closed: bool,
 }
@@ -202,10 +203,11 @@ where
     let fetches = futures::stream::iter(media_urls.into_iter().enumerate().map(|(idx, url)| {
         let fetch = fetch.clone();
         async move {
+            let started = Instant::now();
             let segment_index = first_segment_index + idx;
             fetch(url, segment_index)
                 .await
-                .map(|bytes| (segment_index, bytes))
+                .map(|bytes| (segment_index, started.elapsed(), bytes))
         }
     }))
     .buffered(fetch_window);
@@ -218,7 +220,10 @@ where
             break;
         }
 
-        let (_segment_index, bytes) = result?;
+        let (_segment_index, elapsed, bytes) = result?;
+        summary.slowest_fetch_ms = summary
+            .slowest_fetch_ms
+            .max(elapsed.as_millis().min(u128::from(u64::MAX)) as u64);
         summary.sent_bytes += bytes.len();
         if !send(bytes) {
             summary.receiver_closed = true;
@@ -438,17 +443,31 @@ pub(crate) fn decode_and_buffer_job(
                                 let _ = len_tx.send(None);
                                 let total_segments = segment_urls.len();
                                 let first_segment_index = prebuffered_media_segments + 1;
+                                let fetch_window = dash_background_fetch_window();
                                 let fetch_http = http.clone();
                                 let summary = fetch_dash_segments_ordered(
                                     segment_urls,
                                     first_segment_index,
-                                    dash_background_fetch_window(),
+                                    fetch_window,
                                     &download_stop,
                                     move |seg_url, segment_index| {
                                         let http = fetch_http.clone();
                                         async move {
-                                            append_stream_bytes(&http, &seg_url, segment_index)
-                                                .await
+                                            let started = Instant::now();
+                                            let bytes =
+                                                append_stream_bytes(&http, &seg_url, segment_index)
+                                                    .await?;
+                                            tracing::info!(
+                                                target: "noor.dash",
+                                                event = "dash_segment_fetched",
+                                                track_id = download_track_id,
+                                                segment_index,
+                                                fetch_ms = started.elapsed().as_millis() as u64,
+                                                bytes = bytes.len(),
+                                                fetch_window,
+                                                "DASH segment fetched"
+                                            );
+                                            Ok(bytes)
                                         }
                                     },
                                     |bytes| chunk_tx.send(Some(bytes)).is_ok(),
@@ -479,12 +498,13 @@ pub(crate) fn decode_and_buffer_job(
                                     }
                                 }
                                 debug!(
-                                    "TIDAL DASH download EOF: track_id={}, sent_segments={}, total_remaining_segments={}, bytes={}, fetch_window={}",
+                                    "TIDAL DASH download EOF: track_id={}, sent_segments={}, total_remaining_segments={}, bytes={}, slowest_fetch_ms={}, fetch_window={}",
                                     download_track_id,
                                     summary.sent_segments,
                                     total_segments,
                                     summary.sent_bytes,
-                                    dash_background_fetch_window()
+                                    summary.slowest_fetch_ms,
+                                    fetch_window
                                 );
                             }
                             Ok(())
@@ -595,7 +615,7 @@ pub(crate) fn decode_and_buffer_job(
 
             loop {
                 if shared.stopped.load(Ordering::SeqCst) {
-                    return Ok(()); // track was stopped/skipped — exit cleanly
+                    return Ok(()); // track was stopped/skipped. Exit cleanly.
                 }
 
                 let packet = match format.next_packet() {
@@ -695,7 +715,7 @@ pub(crate) fn decode_and_buffer_job(
                 );
 
                 let resampled = if decoded_sample_rate == live_target_rate {
-                    // Bit-perfect passthrough — rates already match.
+                    // Bit-perfect passthrough. Rates already match.
                     resampler = None;
                     channelized
                 } else {
@@ -799,7 +819,7 @@ pub(crate) fn decode_and_buffer_job(
                     .lock()
                     .map_err(|_| anyhow!("playback buffer poisoned"))?;
 
-                // Fade ramps are applied dynamically in the CPAL callback — no baking needed.
+                // Fade ramps are applied dynamically in the CPAL callback. No baking needed.
 
                 guard.mark_finished();
                 guard.samples.len() as u64
@@ -1130,15 +1150,10 @@ mod tests {
             .expect("background fetch");
 
         assert_eq!(sent, vec![3, 4, 5]);
-        assert_eq!(
-            summary,
-            DashBackgroundFetchSummary {
-                sent_segments: 3,
-                sent_bytes: 3,
-                stopped: false,
-                receiver_closed: false,
-            }
-        );
+        assert_eq!(summary.sent_segments, 3);
+        assert_eq!(summary.sent_bytes, 3);
+        assert!(!summary.stopped);
+        assert!(!summary.receiver_closed);
     }
 
     #[test]
@@ -1165,6 +1180,7 @@ mod tests {
             DashBackgroundFetchSummary {
                 sent_segments: 0,
                 sent_bytes: 0,
+                slowest_fetch_ms: 0,
                 stopped: true,
                 receiver_closed: false,
             }
@@ -1195,15 +1211,10 @@ mod tests {
             .expect("closed receiver");
 
         assert_eq!(sent, vec![7]);
-        assert_eq!(
-            summary,
-            DashBackgroundFetchSummary {
-                sent_segments: 0,
-                sent_bytes: 1,
-                stopped: false,
-                receiver_closed: true,
-            }
-        );
+        assert_eq!(summary.sent_segments, 0);
+        assert_eq!(summary.sent_bytes, 1);
+        assert!(!summary.stopped);
+        assert!(summary.receiver_closed);
     }
 
     #[test]
