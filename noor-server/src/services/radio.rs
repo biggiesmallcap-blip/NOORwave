@@ -15,6 +15,26 @@ use crate::smart::taste_vector::TasteVector;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+pub type LastFmSimilarCache = Arc<Mutex<HashMap<LastFmSimilarCacheKey, LastFmSimilarCacheEntry>>>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LastFmSimilarCacheKey {
+    artist: String,
+    title: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LastFmSimilarCacheEntry {
+    fetched_at: Instant,
+    requested_limit: usize,
+    tracks: Vec<crate::metadata::lastfm::LastFmSimilarTrack>,
+}
+
+const LASTFM_SIMILAR_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
@@ -95,12 +115,69 @@ pub struct RadioQueue {
     pub tracks: Vec<RadioCandidate>,
 }
 
+pub fn new_lastfm_similar_cache() -> LastFmSimilarCache {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+fn lastfm_similar_cache_key(artist: &str, title: &str) -> LastFmSimilarCacheKey {
+    LastFmSimilarCacheKey {
+        artist: artist.trim().to_lowercase(),
+        title: title.trim().to_lowercase(),
+    }
+}
+
+async fn lastfm_similar_with_cache<F, Fut>(
+    cache: Option<&LastFmSimilarCache>,
+    artist: &str,
+    title: &str,
+    limit: usize,
+    fetch: F,
+) -> Result<Vec<crate::metadata::lastfm::LastFmSimilarTrack>>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<Vec<crate::metadata::lastfm::LastFmSimilarTrack>>>,
+{
+    let Some(cache) = cache else {
+        return fetch().await;
+    };
+    let key = lastfm_similar_cache_key(artist, title);
+    let now = Instant::now();
+
+    if let Ok(mut guard) = cache.lock() {
+        if let Some(entry) = guard.get(&key) {
+            if now.duration_since(entry.fetched_at) <= LASTFM_SIMILAR_CACHE_TTL
+                && entry.requested_limit >= limit
+            {
+                tracing::debug!(artist, title, limit, "lastfm similar cache hit");
+                return Ok(entry.tracks.iter().take(limit).cloned().collect());
+            }
+            if now.duration_since(entry.fetched_at) > LASTFM_SIMILAR_CACHE_TTL {
+                guard.remove(&key);
+            }
+        }
+    }
+
+    let tracks: Vec<_> = fetch().await?.into_iter().take(limit).collect();
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(
+            key,
+            LastFmSimilarCacheEntry {
+                fetched_at: now,
+                requested_limit: limit,
+                tracks: tracks.clone(),
+            },
+        );
+    }
+    Ok(tracks)
+}
+
 // ─── Public orchestrators ────────────────────────────────────────────────────
 
 /// Build a Song Radio queue seeded from a single library track.
 pub async fn orchestrate_song(
     db: &Database,
     lastfm: Option<&LastFmClient>,
+    lastfm_similar_cache: Option<&LastFmSimilarCache>,
     seed_track_id: i64,
     blend: RadioBlend,
     limit: usize,
@@ -213,9 +290,15 @@ pub async fn orchestrate_song(
     let lastfm_results: Vec<RadioCandidate> = if let (Some(client), Some(artist)) =
         (lastfm, seed_meta.artist_name.as_deref())
     {
-        let lfm = client
-            .track_get_similar_with_artist_fallback(artist, &seed_meta.title, lfm_target.max(20))
-            .await;
+        let fetch_limit = lfm_target.max(20);
+        let lfm = lastfm_similar_with_cache(
+            lastfm_similar_cache,
+            artist,
+            &seed_meta.title,
+            fetch_limit,
+            || client.track_get_similar_with_artist_fallback(artist, &seed_meta.title, fetch_limit),
+        )
+        .await;
         if let Err(ref e) = lfm {
             tracing::warn!(seed_track_id, artist, title = %seed_meta.title, error = %e, "orchestrate_song: Last.fm track_get_similar failed");
         }
@@ -489,6 +572,7 @@ pub async fn orchestrate_song(
 pub async fn orchestrate_album(
     db: &Database,
     lastfm: Option<&LastFmClient>,
+    lastfm_similar_cache: Option<&LastFmSimilarCache>,
     seed_album_id: i64,
     blend: RadioBlend,
     limit: usize,
@@ -521,8 +605,16 @@ pub async fn orchestrate_album(
     let per_seed_limit = (limit / seed_track_ids.len()).max(8);
     let mut all_candidates: Vec<RadioCandidate> = Vec::new();
     for tid in &seed_track_ids {
-        if let Ok(q) =
-            orchestrate_song(db, lastfm, *tid, blend, per_seed_limit, exclude_track_ids).await
+        if let Ok(q) = orchestrate_song(
+            db,
+            lastfm,
+            lastfm_similar_cache,
+            *tid,
+            blend,
+            per_seed_limit,
+            exclude_track_ids,
+        )
+        .await
         {
             all_candidates.extend(q.tracks);
         }
@@ -549,6 +641,7 @@ pub async fn orchestrate_album(
 pub async fn orchestrate_artist(
     db: &Database,
     lastfm: Option<&LastFmClient>,
+    lastfm_similar_cache: Option<&LastFmSimilarCache>,
     seed_artist_id: i64,
     blend: RadioBlend,
     limit: usize,
@@ -575,8 +668,16 @@ pub async fn orchestrate_artist(
     let per_seed_limit = (limit / seed_track_ids.len()).max(8);
     let mut all_candidates: Vec<RadioCandidate> = Vec::new();
     for tid in &seed_track_ids {
-        if let Ok(q) =
-            orchestrate_song(db, lastfm, *tid, blend, per_seed_limit, exclude_track_ids).await
+        if let Ok(q) = orchestrate_song(
+            db,
+            lastfm,
+            lastfm_similar_cache,
+            *tid,
+            blend,
+            per_seed_limit,
+            exclude_track_ids,
+        )
+        .await
         {
             all_candidates.extend(q.tracks);
         }
@@ -1682,6 +1783,7 @@ fn diversity_rerank(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn weights_sum_to_one() {
@@ -1696,6 +1798,77 @@ mod tests {
                 "weights for {blend:?}: {a}+{b}+{c}"
             );
         }
+    }
+
+    fn similar_track(idx: usize) -> crate::metadata::lastfm::LastFmSimilarTrack {
+        crate::metadata::lastfm::LastFmSimilarTrack {
+            artist: format!("Artist {idx}"),
+            title: format!("Track {idx}"),
+            mbid: None,
+            match_score: 1.0 - (idx as f64 * 0.01),
+        }
+    }
+
+    #[tokio::test]
+    async fn lastfm_similar_cache_reuses_same_artist_title_within_ttl() {
+        let cache = new_lastfm_similar_cache();
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let first = lastfm_similar_with_cache(Some(&cache), " The Artist ", " The Song ", 2, {
+            let calls = calls.clone();
+            || async move {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(vec![similar_track(1), similar_track(2), similar_track(3)])
+            }
+        })
+        .await
+        .expect("first fetch");
+        assert_eq!(first.len(), 2);
+
+        let second = lastfm_similar_with_cache(Some(&cache), "the artist", "the song", 2, {
+            let calls = calls.clone();
+            || async move {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(vec![similar_track(4)])
+            }
+        })
+        .await
+        .expect("cached fetch");
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(second.len(), first.len());
+        assert_eq!(second[0].title, first[0].title);
+        assert_eq!(second[1].artist, first[1].artist);
+    }
+
+    #[tokio::test]
+    async fn lastfm_similar_cache_refetches_when_larger_limit_is_needed() {
+        let cache = new_lastfm_similar_cache();
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let first = lastfm_similar_with_cache(Some(&cache), "Artist", "Song", 1, {
+            let calls = calls.clone();
+            || async move {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(vec![similar_track(1)])
+            }
+        })
+        .await
+        .expect("first fetch");
+        assert_eq!(first.len(), 1);
+
+        let second = lastfm_similar_with_cache(Some(&cache), "Artist", "Song", 3, {
+            let calls = calls.clone();
+            || async move {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(vec![similar_track(1), similar_track(2), similar_track(3)])
+            }
+        })
+        .await
+        .expect("larger fetch");
+
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(second.len(), 3);
     }
 
     #[test]
