@@ -6,11 +6,15 @@
 		type ChartMatrixResponse,
 		type ChartSnapshotEntry,
 		type ChartSnapshotResponse,
+		type TidalPlayable,
 		type TidalSearchTrack,
 	} from '$lib/api/client';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
-	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { playTidalTrackNow, playerError } from '$lib/stores/player';
+	import { openContextMenu } from '$lib/stores/context_menu';
+	import { buildTidalTrackMenu } from '$lib/player/track_menu';
+	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
+	import ChartMural, { type ChartMuralItem } from '$lib/components/charts/ChartMural.svelte';
 
 	const REGIONS = [
 		{ code: 'global', label: 'Global' },
@@ -45,6 +49,17 @@
 
 	let chartEntries = $derived(data?.entries ?? []);
 	let currentEntry = $derived(chartEntries[currentEntryIndex] ?? chartEntries[0] ?? null);
+	let muralItems = $derived<ChartMuralItem[]>(
+		chartEntries.map((entry) => ({
+			id: String(entry.id),
+			title: entry.title,
+			subtitle: entrySubtitle(entry),
+			artwork: entryArtwork(entry),
+			fallbackText: entryFallbackText(entry),
+			tileLabel: `Select ${entry.title}`,
+			tileTitle: `${entry.rank}. ${entry.title} - ${entry.artist}`,
+		})),
+	);
 
 	onMount(() => {
 		void loadMatrix();
@@ -255,6 +270,41 @@
 		});
 	}
 
+	function playableFromHit(hit: TidalSearchTrack, fallbackArtwork: string | null): TidalPlayable {
+		return {
+			tidal_id: hit.tidal_id,
+			title: hit.title,
+			artist_name: hit.artist_name,
+			album_title: hit.album_title,
+			artwork_url: hit.artwork_url ?? fallbackArtwork,
+			duration_ms: hit.duration_ms,
+			artist_tidal_id: hit.artist_id,
+			album_tidal_id: hit.album_tidal_id,
+			local_id: hit.local_id,
+			is_in_library: hit.in_library,
+		};
+	}
+
+	async function openEntryContext(e: MouseEvent, entry: ChartSnapshotEntry) {
+		e.preventDefault();
+		e.stopPropagation();
+		const hit = resolvedTracks[entry.id] ?? (await resolveEntry(entry));
+		if (!hit) return;
+		const playable = playableFromHit(hit, entry.artwork_url);
+		openContextMenu(e, buildTidalTrackMenu(playable), playable.title);
+	}
+
+	async function openMatrixCellContext(e: MouseEvent, cell: ChartMatrixCell) {
+		e.preventDefault();
+		e.stopPropagation();
+		const hit =
+			resolvedTracks[cell.entry_id] ??
+			(await resolveChartItem(cell.entry_id, cell.artist, cell.title, cell.entity_type, cell.tidal_id));
+		if (!hit) return;
+		const playable = playableFromHit(hit, cell.artwork_url);
+		openContextMenu(e, buildTidalTrackMenu(playable), playable.title);
+	}
+
 	function entryArtwork(entry: ChartSnapshotEntry): string | null {
 		return resolvedTracks[entry.id]?.artwork_url ?? entry.artwork_url;
 	}
@@ -284,11 +334,8 @@
 </script>
 
 <section class="daily-chart-shelf">
-	<div class="section-header">
-		<div class="section-title-group">
-			<p class="eyebrow">Charts - Provider matrix</p>
-			<h2>Market pulse</h2>
-		</div>
+	<SectionHeader eyebrow="Charts - Provider matrix" title="Market pulse" variant="charts" level={2}>
+		{#snippet actions()}
 		<div class="region-tabs" role="tablist" aria-label="Daily chart region">
 			{#each REGIONS as region (region.code)}
 				<button
@@ -303,7 +350,8 @@
 				</button>
 			{/each}
 		</div>
-	</div>
+		{/snippet}
+	</SectionHeader>
 
 	{#if matrix?.providers.length}
 		<div class="source-tabs" role="tablist" aria-label="Daily chart provider">
@@ -323,59 +371,41 @@
 	{/if}
 
 	{#if chartEntries.length > 0 && currentEntry}
-		<div
-			class="chart-mural-card"
-			onmouseenter={() => carouselPaused = true}
-			onmouseleave={() => carouselPaused = false}
-			role="region"
-			aria-label={`${selectedProviderLabel()} ${selectedRegionLabel()} top ${chartEntries.length}`}
-		>
-			<div class="chart-mural-bg" aria-hidden="true">
-				{#each chartEntries as entry (entry.id)}
-					<button
-						class="chart-mural-tile"
-						class:chart-mural-tile--featured={currentEntry.id === entry.id}
-						type="button"
-						onclick={() => selectEntry(entry.id)}
-						aria-label={`Select ${entry.title}`}
-						title={`${entry.rank}. ${entry.title} - ${entry.artist}`}
-					>
-						<ArtworkImage
-							src={entryArtwork(entry)}
-							size={320}
-							className="chart-mural-art"
-							fallbackText={entryFallbackText(entry)}
-							decorative
-						/>
-					</button>
-				{/each}
-			</div>
-			<div class="chart-mural-shade"></div>
-			<div class="chart-mural-content">
-				<div class="chart-mural-meta">
-					<span class="chart-mural-kind">
-						{selectedProviderLabel()} top {chartEntries.length} - {selectedRegionLabel()}
-					</span>
-					<h3 class="chart-mural-title">{currentEntry.title}</h3>
-					<p class="chart-mural-sub">{entrySubtitle(currentEntry)}</p>
-					<div class="chart-mural-actions">
-						<button class="btn btn-primary chart-mural-play" type="button" onclick={() => void playEntry(currentEntry)}>
-							<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
-								<path d="M3 2.5l10 5.5-10 5.5V2.5z"/>
-							</svg>
-							Play
-						</button>
-						<span>{entryMetric(currentEntry)}</span>
-					</div>
-				</div>
-			</div>
-			{#if chartEntries.length > 1}
-				<button class="chart-nav chart-nav--prev" type="button" onclick={() => jumpEntry(-1)} aria-label="Previous chart entry">&lsaquo;</button>
-				<button class="chart-nav chart-nav--next" type="button" onclick={() => jumpEntry(1)} aria-label="Next chart entry">&rsaquo;</button>
-			{/if}
-		</div>
+		<ChartMural
+			items={muralItems}
+			currentIndex={currentEntryIndex}
+			ariaLabel={`${selectedProviderLabel()} ${selectedRegionLabel()} top ${chartEntries.length}`}
+			kindLabel={`${selectedProviderLabel()} top ${chartEntries.length} - ${selectedRegionLabel()}`}
+			title={currentEntry.title}
+			subtitle={entrySubtitle(currentEntry)}
+			metric={entryMetric(currentEntry)}
+			actionLabel="Play"
+			loading={loading && chartEntries.length === 0}
+			loadingLabel="Loading chart mural"
+			onSelect={(index) => {
+				const entry = chartEntries[index];
+				if (entry) selectEntry(entry.id);
+			}}
+			onJump={jumpEntry}
+			onPlay={() => playEntry(currentEntry)}
+			onCardContext={(event) => currentEntry && openEntryContext(event, currentEntry)}
+			onItemContext={(event, index) => {
+				const entry = chartEntries[index];
+				if (entry) void openEntryContext(event, entry);
+			}}
+			onPauseChange={(paused) => carouselPaused = paused}
+		/>
 	{:else if loading}
-		<div class="chart-mural-loading">Loading chart mural</div>
+		<ChartMural
+			items={[]}
+			currentIndex={0}
+			ariaLabel="Loading market pulse"
+			kindLabel=""
+			title=""
+			subtitle=""
+			loading
+			loadingLabel="Loading chart mural"
+		/>
 	{:else if error}
 		<EmptyState
 			title="Daily chart unavailable"
@@ -422,6 +452,9 @@
 								if (cell) pickProvider(row.region, provider.source_key);
 								else pickRegion(row.region);
 							}}
+							oncontextmenu={(e) => {
+								if (cell) void openMatrixCellContext(e, cell);
+							}}
 							aria-label={`${provider.label} ${row.region}`}
 						>
 							{#if cell}
@@ -466,36 +499,6 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-3);
-	}
-
-	.section-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--gap-sm);
-		flex-wrap: wrap;
-	}
-
-	.section-title-group {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-1);
-	}
-
-	.eyebrow {
-		margin: 0;
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-		text-transform: uppercase;
-		letter-spacing: 0;
-		color: var(--service-spotify);
-	}
-
-	h2 {
-		margin: 0;
-		font-size: var(--font-size-lg);
-		font-weight: var(--font-weight-bold);
-		line-height: var(--line-height-tight);
 	}
 
 	.region-tabs {
@@ -562,230 +565,6 @@
 		border-color: var(--accent-line);
 		color: var(--text-primary);
 		outline: none;
-	}
-
-	.chart-mural-card {
-		position: relative;
-		min-height: clamp(220px, 24vw, 360px);
-		border: 1px solid var(--panel-border);
-		border-radius: var(--radius-md);
-		overflow: hidden;
-		background: var(--panel-bg);
-	}
-
-	.chart-mural-bg {
-		position: absolute;
-		inset: -7%;
-		z-index: 0;
-		display: grid;
-		grid-template-columns: repeat(10, minmax(0, 1fr));
-		grid-template-rows: repeat(2, minmax(0, 1fr));
-		background: linear-gradient(120deg, var(--panel-bg), color-mix(in srgb, var(--accent-soft) 24%, transparent));
-	}
-
-	.chart-mural-bg::after {
-		content: '';
-		position: absolute;
-		inset: 0;
-		background:
-			radial-gradient(circle at 78% 42%, rgba(255,255,255,0.2), transparent 30%),
-			linear-gradient(90deg, rgba(0,0,0,0.06), transparent 42%, rgba(0,0,0,0.02));
-		pointer-events: none;
-	}
-
-	.chart-mural-tile {
-		appearance: none;
-		position: relative;
-		min-width: 0;
-		min-height: 0;
-		padding: 0;
-		border: 0;
-		background: var(--bg-raised);
-		color: var(--text-primary);
-		cursor: pointer;
-		overflow: hidden;
-		opacity: 0.96;
-		filter: saturate(1.18) brightness(1.16);
-		transform: skewX(-7deg) scaleX(1.08);
-		transform-origin: center;
-		transition:
-			filter var(--motion-fast),
-			opacity var(--motion-fast),
-			transform var(--motion-base),
-			box-shadow var(--motion-base);
-	}
-
-	.chart-mural-tile::after {
-		content: '';
-		position: absolute;
-		inset: 0;
-		background: linear-gradient(90deg, rgba(0,0,0,0.18), transparent 48%, rgba(0,0,0,0.2));
-		opacity: 0.18;
-		pointer-events: none;
-	}
-
-	.chart-mural-tile:hover,
-	.chart-mural-tile:focus-visible,
-	.chart-mural-tile--featured {
-		z-index: var(--z-raised);
-		opacity: 1;
-		filter: saturate(1.8) brightness(1.42);
-		transform: skewX(-7deg) scaleX(1.08) scale(1.045);
-		box-shadow:
-			0 0 0 1px rgba(255,255,255,0.32),
-			0 14px 30px rgba(0,0,0,0.32),
-			0 0 24px color-mix(in srgb, var(--accent) 38%, transparent);
-		outline: none;
-	}
-
-	:global(.chart-mural-art),
-	:global(.chart-mural-art.fallback) {
-		display: block;
-		width: 100%;
-		height: 100%;
-	}
-
-	:global(.chart-mural-art) {
-		object-fit: cover;
-		transform: skewX(7deg) scale(1.24);
-		transition: transform var(--motion-base);
-	}
-
-	.chart-mural-tile:hover :global(.chart-mural-art),
-	.chart-mural-tile:focus-visible :global(.chart-mural-art),
-	.chart-mural-tile--featured :global(.chart-mural-art) {
-		transform: skewX(7deg) scale(1.34);
-	}
-
-	:global(.chart-mural-art.fallback) {
-		display: grid;
-		place-items: center;
-		background: linear-gradient(135deg, var(--bg-raised), color-mix(in srgb, var(--accent-soft) 28%, var(--bg-surface)));
-		color: rgba(255,255,255,0.78);
-		font-size: var(--font-size-xl);
-		font-weight: var(--font-weight-bold);
-	}
-
-	.chart-mural-shade {
-		position: absolute;
-		inset: 0;
-		z-index: var(--z-base);
-		background: linear-gradient(90deg, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0.34) 42%, rgba(0,0,0,0.06) 78%, transparent 100%);
-		pointer-events: none;
-	}
-
-	.chart-mural-content {
-		position: relative;
-		z-index: calc(var(--z-base) + 1);
-		display: grid;
-		align-items: center;
-		min-height: inherit;
-		padding: var(--space-5);
-		pointer-events: none;
-	}
-
-	.chart-mural-meta {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-1);
-		max-width: min(42rem, 58vw);
-		text-shadow: 0 2px 18px rgba(0,0,0,0.62);
-	}
-
-	.chart-mural-kind {
-		color: var(--accent);
-		font-size: var(--font-size-2xs);
-		font-weight: var(--font-weight-semibold);
-		letter-spacing: 0;
-		text-transform: uppercase;
-	}
-
-	.chart-mural-title {
-		margin: 0;
-		color: var(--text-primary);
-		font-size: var(--font-size-4xl);
-		font-weight: var(--font-weight-bold);
-		line-height: var(--line-height-tight);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.chart-mural-sub {
-		margin: 0 0 var(--space-2);
-		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
-	}
-
-	.chart-mural-actions {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
-		pointer-events: auto;
-	}
-
-	.chart-mural-actions span {
-		color: var(--text-secondary);
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-	}
-
-	.chart-mural-play {
-		display: flex;
-		align-items: center;
-		gap: var(--space-1);
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-semibold);
-	}
-
-	.chart-nav {
-		position: absolute;
-		top: 50%;
-		z-index: var(--z-raised);
-		display: grid;
-		place-items: center;
-		width: clamp(32px, 3vw, 40px);
-		aspect-ratio: 1 / 1;
-		border: 1px solid var(--panel-border);
-		border-radius: 50%;
-		background: rgba(0,0,0,0.5);
-		color: var(--text-primary);
-		cursor: pointer;
-		font-size: var(--font-size-xl);
-		line-height: 1;
-		opacity: 0;
-		transform: translateY(-50%);
-		transition: opacity var(--motion-fast), background var(--motion-fast);
-	}
-
-	.chart-mural-card:hover .chart-nav,
-	.chart-nav:focus-visible {
-		opacity: 1;
-		outline: none;
-	}
-
-	.chart-nav:hover {
-		background: rgba(0,0,0,0.75);
-	}
-
-	.chart-nav--prev {
-		left: var(--space-3);
-	}
-
-	.chart-nav--next {
-		right: var(--space-3);
-	}
-
-	.chart-mural-loading {
-		display: grid;
-		place-items: center;
-		min-height: clamp(180px, 20vw, 280px);
-		border: 1px solid var(--panel-border);
-		border-radius: var(--radius-md);
-		background: var(--panel-bg);
-		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-semibold);
 	}
 
 	.matrix-shell {
@@ -925,9 +704,9 @@
 	}
 
 	.chip {
-		border: 0;
+		border: 1px solid var(--panel-border);
 		border-radius: 999px;
-		background: transparent;
+		background: var(--panel-bg);
 		color: var(--text-muted);
 		font-size: var(--font-size-xs);
 		font-weight: var(--font-weight-semibold);
@@ -935,36 +714,21 @@
 		padding: var(--space-2) var(--space-3);
 		cursor: pointer;
 		white-space: nowrap;
-		transition: background var(--motion-base), color var(--motion-base);
+		transition: background var(--motion-base), border-color var(--motion-base), color var(--motion-base);
 	}
 
 	.chip:hover,
 	.chip:focus-visible {
+		background: var(--bg-hover);
+		border-color: var(--accent-line);
 		color: var(--text-primary);
 		outline: none;
 	}
 
 	.chip.active {
 		background: var(--bg-hover);
+		border-color: var(--accent-line);
 		color: var(--text-primary);
 	}
 
-	@media (max-width: 760px) {
-		.chart-mural-bg {
-			grid-template-columns: repeat(5, minmax(0, 1fr));
-			grid-template-rows: repeat(4, minmax(0, 1fr));
-		}
-
-		.chart-mural-content {
-			padding: var(--space-4);
-		}
-
-		.chart-mural-meta {
-			max-width: 100%;
-		}
-
-		.chart-mural-title {
-			font-size: var(--font-size-3xl);
-		}
-	}
 </style>
