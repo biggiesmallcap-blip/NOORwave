@@ -159,9 +159,20 @@
 			<h1 id="dj-cockpit-heading">Transition control</h1>
 		</div>
 		<div class="engine-toggle">
-			<span>{enabled ? 'DJ transitions on' : 'Use legacy playback'}</span>
-			<button type="button" aria-pressed={enabled} disabled={saving} onclick={() => void setEnabled(!enabled)}>
-				{enabled ? 'Use legacy playback' : 'DJ transitions on'}
+			<span class="engine-label">DJ transitions</span>
+			<button
+				class="engine-switch"
+				type="button"
+				role="switch"
+				aria-checked={enabled}
+				aria-label={enabled ? 'Disable DJ transitions' : 'Enable DJ transitions'}
+				disabled={saving}
+				onclick={() => void setEnabled(!enabled)}
+			>
+				<span class="switch-track" aria-hidden="true">
+					<span class="switch-thumb"></span>
+				</span>
+				<span class="switch-state">{enabled ? 'On' : 'Off'}</span>
 			</button>
 		</div>
 	</header>
@@ -253,32 +264,84 @@
 	.engine-toggle {
 		display: flex;
 		align-items: center;
-		gap: var(--space-2);
+		gap: var(--space-3);
 		color: var(--text-secondary);
 		font-size: var(--font-size-sm);
 	}
 
-	button {
+	.engine-label {
+		font-weight: var(--font-weight-semibold);
+		line-height: var(--line-height-tight);
+	}
+
+	.engine-switch {
 		min-height: 2.75rem;
-		padding: 0 var(--space-3);
-		border: 1px solid var(--accent-line);
-		border-radius: var(--radius-sm);
-		background: var(--accent-soft);
-		color: var(--accent-strong);
+		padding: 0 var(--space-2);
+		border: 1px solid var(--border-muted);
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--bg-raised) 86%, transparent);
+		color: var(--text-secondary);
 		font-size: var(--font-size-sm);
 		font-weight: var(--font-weight-semibold);
 		line-height: 1;
 		cursor: pointer;
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-2);
+		transition:
+			background var(--motion-fast),
+			border-color var(--motion-fast),
+			color var(--motion-fast);
 	}
 
-	button:focus-visible {
+	.engine-switch[aria-checked='true'] {
+		border-color: color-mix(in srgb, var(--state-success) 54%, var(--accent-line));
+		background: color-mix(in srgb, var(--state-success) 14%, var(--accent-soft));
+		color: var(--text-primary);
+	}
+
+	.engine-switch:focus-visible {
 		outline: 2px solid var(--accent);
 		outline-offset: 2px;
 	}
 
-	button:disabled {
+	.engine-switch:disabled {
 		cursor: not-allowed;
 		opacity: 0.55;
+	}
+
+	.switch-track {
+		width: 2.3rem;
+		height: 1.25rem;
+		padding: 0.15rem;
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--text-tertiary) 32%, transparent);
+		display: flex;
+		align-items: center;
+		transition: background var(--motion-fast);
+	}
+
+	.engine-switch[aria-checked='true'] .switch-track {
+		background: color-mix(in srgb, var(--state-success) 68%, var(--accent-strong));
+	}
+
+	.switch-thumb {
+		width: 0.95rem;
+		height: 0.95rem;
+		border-radius: 50%;
+		background: var(--text-primary);
+		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+		transform: translateX(0);
+		transition: transform var(--motion-fast);
+	}
+
+	.engine-switch[aria-checked='true'] .switch-thumb {
+		transform: translateX(1.05rem);
+	}
+
+	.switch-state {
+		min-width: 2ch;
+		text-align: left;
 	}
 
 	.disabled-note,

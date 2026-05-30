@@ -27,6 +27,7 @@ const guardrails = readFileSync(
 	join(root, 'lib/components/dj-cockpit/SafetyGuardrailPanel.svelte'),
 	'utf8',
 );
+const layout = readFileSync(join(root, 'routes/+layout.svelte'), 'utf8');
 const navigation = readFileSync(join(root, 'lib/routes/navigation-data.json'), 'utf8');
 const registry = readFileSync(join(root, 'lib/routes/registry-data.json'), 'utf8');
 const playerBar = readFileSync(join(root, 'lib/shell/PlayerBar.svelte'), 'utf8');
@@ -39,8 +40,11 @@ describe('dj cockpit page contract', () => {
 		expect(page).toContain('DjCockpit');
 	});
 
-	test('player_or_queue_exposes_open_dj_cockpit_action', () => {
-		expect(playerBar).toContain('Open DJ Cockpit');
+	test('player_bar_does_not_expose_open_dj_cockpit_action', () => {
+		expect(playerBar).not.toContain('Open DJ Cockpit');
+		expect(playerBar).not.toContain('np-dj-btn');
+		expect(playerBar).not.toContain('onOpenDjCockpit');
+		expect(layout).not.toContain('onOpenDjCockpit');
 	});
 
 	test('remote_ui_does_not_expose_dj_controls', () => {
@@ -60,8 +64,14 @@ describe('dj cockpit page contract', () => {
 	});
 
 	test('dj_disabled_state_explains_legacy_path', () => {
-		expect(cockpit).toContain('DJ transitions on');
-		expect(cockpit).toContain('Use legacy playback');
+		expect(cockpit).toContain('role="switch"');
+		expect(cockpit).toContain('aria-checked={enabled}');
+		expect(cockpit).toContain('DJ transitions');
+		expect(cockpit).toContain("{enabled ? 'On' : 'Off'}");
+		expect(cockpit).toContain('Enable DJ transitions');
+		expect(cockpit).toContain('Disable DJ transitions');
+		expect(cockpit).not.toContain("'DJ transitions on'");
+		expect(cockpit).not.toContain('Use legacy playback');
 		expect(cockpit).toContain('Playback is using the legacy path');
 		expect(cockpit).toContain('DJ lookahead and transition planning are stopped');
 		expect(cockpit).toContain('next eligible current-plus-next pair');

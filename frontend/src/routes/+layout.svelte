@@ -1435,7 +1435,6 @@
 			onNext={() => void playNextTrack()}
 			onCycleRepeat={() => void cyclePlayerRepeatMode()}
 			onOpenMore={(anchor) => openNowPlayingMenuAt(anchor)}
-			onOpenDjCockpit={() => void goto('/dj')}
 			onToggleMute={() => void toggleMute()}
 			onVolumePreview={(percent) => { displayVolume = percent; }}
 			onVolumeChange={(nextVolume) => void setPlayerVolume(nextVolume)}
