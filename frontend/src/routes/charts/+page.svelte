@@ -5,6 +5,9 @@
   import { goto } from '$app/navigation';
   import TrendingShelf from '$lib/components/charts/TrendingShelf.svelte';
   import DailyChartShelf from '$lib/components/charts/DailyChartShelf.svelte';
+  import PageHeader from '$lib/components/ui/PageHeader.svelte';
+  import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
+  import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
   import {
     getCachedSpotifyChartMetaMap,
     putCachedSpotifyChartMeta,
@@ -82,24 +85,28 @@
 <svelte:head><title>Charts . NOOR</title></svelte:head>
 
 <div class="page">
-  <header class="page-header">
-    <p class="eyebrow">Charts</p>
-    <h1>What's hot</h1>
-    <p class="sub">Worldwide trending tracks from Last.fm and editorial Spotify chart playlists.</p>
-  </header>
+  <PageHeader
+    eyebrow="Charts"
+    title="What's hot"
+    subtitle="Worldwide trending tracks from Last.fm and editorial Spotify chart playlists."
+    variant="editorial"
+  />
 
   <section class="trending-block">
-    <TrendingShelf limit={12} />
+    <TrendingShelf limit={20} />
   </section>
 
   <section class="daily-block">
     <DailyChartShelf />
   </section>
 
-  <section>
-    <h2 class="block-title">Spotify chart playlists</h2>
-    <p class="block-sub">Click any to play on TIDAL.</p>
-  </section>
+  <SectionHeader
+    eyebrow="Spotify playlists"
+    title="Chart playlists"
+    subtitle="Click any to play on TIDAL."
+    variant="charts"
+    level={2}
+  />
 
   <div class="grid">
     {#each CHARTS as c (c.id)}
@@ -110,11 +117,13 @@
         oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, chartMenu(c.id, c.title), c.title); }}
       >
         <div class="art-wrap">
-          {#if m?.thumbnail}
-            <div class="art" style="background-image:url('{m.thumbnail}')"></div>
-          {:else}
-            <div class="art fallback">M</div>
-          {/if}
+          <ArtworkImage
+            src={m?.thumbnail ?? null}
+            alt={m?.title ?? c.title}
+            size={320}
+            className="chart-playlist-art"
+            fallbackText="M"
+          />
         </div>
         <div class="meta">
           <p class="title">{m?.title ?? c.title}</p>
@@ -126,13 +135,7 @@
 </div>
 
 <style>
-  .page { max-width: var(--content-width); margin: 0 auto; padding: 32px 28px 96px; display: flex; flex-direction: column; gap: 24px; }
-  .page-header { display: flex; flex-direction: column; gap: 4px; }
-  .eyebrow { font-size: var(--font-size-xs); letter-spacing: 0.08em; text-transform: uppercase; color: var(--service-spotify); margin: 0; font-weight: var(--font-weight-bold); }
-  .page-header h1 { margin: 0; font-size: var(--font-size-3xl); font-weight: 800; }
-  .page-header .sub { margin: 0; font-size: var(--font-size-sm); color: var(--text-secondary); }
-  .block-title { margin: 0 0 4px; font-size: var(--font-size-lg); font-weight: var(--font-weight-bold); color: var(--text-primary); }
-  .block-sub { margin: 0 0 var(--space-3); font-size: var(--font-size-sm); color: var(--text-secondary); }
+  .page { max-width: var(--content-width); margin: 0 auto; padding: var(--space-5) var(--space-4) var(--space-7); display: flex; flex-direction: column; gap: var(--space-5); }
   .trending-block { display: flex; flex-direction: column; gap: var(--gap); }
 
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(180px, 100%), 1fr)); gap: var(--gap); }
@@ -153,9 +156,9 @@
   .card:hover, .card:focus-visible { background: var(--bg-hover); border-color: var(--panel-border); outline: none; }
   .card:focus-visible { border-color: var(--accent-line); }
   .art-wrap { position: relative; aspect-ratio: 1 / 1; width: 100%; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-hover); }
-  .art { width: 100%; height: 100%; background-size: cover; background-position: center; transition: transform var(--motion-base); }
-  .card:hover .art { transform: scale(1.05); }
-  .art.fallback { display: flex; align-items: center; justify-content: center; font-size: var(--font-size-4xl); color: var(--text-muted); }
+  :global(.chart-playlist-art) { width: 100%; height: 100%; object-fit: cover; transition: transform var(--motion-base); }
+  .card:hover :global(.chart-playlist-art) { transform: scale(1.05); }
+  :global(.chart-playlist-art.fallback) { display: flex; align-items: center; justify-content: center; background: var(--bg-hover); color: var(--text-muted); font-size: var(--font-size-4xl); font-weight: var(--font-weight-bold); }
   .meta { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
   .meta .title { margin: 0; font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: var(--line-height-snug); }
   .meta .sub { font-size: var(--font-size-xs); color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
