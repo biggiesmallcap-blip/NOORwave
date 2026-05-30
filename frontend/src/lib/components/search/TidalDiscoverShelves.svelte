@@ -96,7 +96,7 @@
 				[
 					{
 						label: 'Play playlist',
-						icon: 'Play',
+						icon: '▶',
 						onSelect: () => { void playTidalPlaylist(item.id); }
 					}
 				],

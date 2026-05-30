@@ -133,20 +133,20 @@
     const disabled = track === null;
     const hint = disabled ? statusLabel(t.tidal) : undefined;
     return [
-      { label: 'Play now', icon: 'Play', disabled, hint, onSelect: () => { if (track) void playTidalTrackNow(track); } },
-      { label: 'Play next', icon: 'Next', disabled, hint, onSelect: () => { if (track) void playTidalTrackNext(track); } },
+      { label: 'Play now', icon: '▶', disabled, hint, onSelect: () => { if (track) void playTidalTrackNow(track); } },
+      { label: 'Play next', icon: '⤴', disabled, hint, onSelect: () => { if (track) void playTidalTrackNext(track); } },
       { label: 'Add to queue', icon: '+', disabled, hint, onSelect: () => { if (track) void addTidalTrackToQueue(track); } },
       { separator: true, label: '' },
-      { label: 'Song radio', icon: 'Radio', disabled, hint, onSelect: () => { if (track) void startTidalSongRadio(track); } },
+      { label: 'Song radio', icon: '◉', disabled, hint, onSelect: () => { if (track) void startTidalSongRadio(track); } },
     ];
   }
 
   function buildAlbumCardMenu(a: SpotifyAlbumSearchItem): MenuItem[] {
-    return [{ label: 'Open album', icon: 'Open', onSelect: () => void goto(`/spotify-album/${a.spotifyId}`) }];
+    return [{ label: 'Open album', icon: '→', onSelect: () => void goto(`/spotify-album/${a.spotifyId}`) }];
   }
 
   function buildArtistCardMenu(a: SpotifyArtistSearchItem): MenuItem[] {
-    return [{ label: 'Open artist', icon: 'Open', onSelect: () => void goto(`/spotify-artist/${a.spotifyId}`) }];
+    return [{ label: 'Open artist', icon: '→', onSelect: () => void goto(`/spotify-artist/${a.spotifyId}`) }];
   }
 
   function formatNumber(n: number | null): string {

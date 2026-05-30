@@ -3,6 +3,7 @@
 		contextMenu,
 		closeContextMenu,
 		cancelContextMenuClose,
+		menuIconForDisplay,
 		type MenuItem
 	} from '$lib/stores/context_menu';
 
@@ -114,8 +115,8 @@
 							disabled={item.disabled}
 							onclick={() => void activate(item, index)}
 						>
-							{#if item.icon}
-								<span class="context-menu-icon" aria-hidden="true">{item.icon}</span>
+							{#if menuIconForDisplay(item.icon)}
+								<span class="context-menu-icon" aria-hidden="true">{menuIconForDisplay(item.icon)}</span>
 							{/if}
 							<span class="context-menu-label">{item.label}</span>
 							{#if item.submenu && item.submenu.length > 0}
@@ -141,8 +142,8 @@
 												disabled={child.disabled}
 												onclick={() => void activate(child, -1)}
 											>
-												{#if child.icon}
-													<span class="context-menu-icon" aria-hidden="true">{child.icon}</span>
+												{#if menuIconForDisplay(child.icon)}
+													<span class="context-menu-icon" aria-hidden="true">{menuIconForDisplay(child.icon)}</span>
 												{/if}
 												<span class="context-menu-label">{child.label}</span>
 												{#if child.hint}

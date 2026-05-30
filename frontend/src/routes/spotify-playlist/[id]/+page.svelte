@@ -298,7 +298,7 @@
     return [
       {
         label: 'Play now',
-        icon: 'Play',
+        icon: '▶',
         disabled,
         hint,
         onSelect: () => {
@@ -307,7 +307,7 @@
       },
       {
         label: 'Play next',
-        icon: 'Next',
+        icon: '⤴',
         disabled,
         hint,
         onSelect: () => {
@@ -326,7 +326,7 @@
       { separator: true, label: '' },
       {
         label: 'Song radio',
-        icon: 'Radio',
+        icon: '◉',
         disabled,
         hint,
         onSelect: () => {

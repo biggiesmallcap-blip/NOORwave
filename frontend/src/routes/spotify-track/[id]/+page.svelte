@@ -198,11 +198,11 @@
     const disabled = track === null;
     const hint = disabled ? statusLabel(d.tidal) : undefined;
     return [
-      { label: 'Play now', icon: 'Play', disabled, hint, onSelect: () => { if (track) void playTidalTrackNow(track); } },
-      { label: 'Play next', icon: 'Next', disabled, hint, onSelect: () => { if (track) void playTidalTrackNext(track); } },
+      { label: 'Play now', icon: '▶', disabled, hint, onSelect: () => { if (track) void playTidalTrackNow(track); } },
+      { label: 'Play next', icon: '⤴', disabled, hint, onSelect: () => { if (track) void playTidalTrackNext(track); } },
       { label: 'Add to queue', icon: '+', disabled, hint, onSelect: () => { if (track) void addTidalTrackToQueue(track); } },
       { separator: true, label: '' },
-      { label: 'Song radio', icon: 'Radio', disabled, hint, onSelect: () => { if (track) void startTidalSongRadio(track); } },
+      { label: 'Song radio', icon: '◉', disabled, hint, onSelect: () => { if (track) void startTidalSongRadio(track); } },
     ];
   }
 
@@ -215,11 +215,11 @@
     const disabled = track === null;
     const hint = disabled ? statusLabel(t.tidal) : undefined;
     return [
-      { label: 'Play now', icon: 'Play', disabled, hint, onSelect: () => { if (track) void playTidalTrackNow(track); } },
-      { label: 'Play next', icon: 'Next', disabled, hint, onSelect: () => { if (track) void playTidalTrackNext(track); } },
+      { label: 'Play now', icon: '▶', disabled, hint, onSelect: () => { if (track) void playTidalTrackNow(track); } },
+      { label: 'Play next', icon: '⤴', disabled, hint, onSelect: () => { if (track) void playTidalTrackNext(track); } },
       { label: 'Add to queue', icon: '+', disabled, hint, onSelect: () => { if (track) void addTidalTrackToQueue(track); } },
       { separator: true, label: '' },
-      { label: 'Song radio', icon: 'Radio', disabled, hint, onSelect: () => { if (track) void startTidalSongRadio(track); } },
+      { label: 'Song radio', icon: '◉', disabled, hint, onSelect: () => { if (track) void startTidalSongRadio(track); } },
     ];
   }
 </script>

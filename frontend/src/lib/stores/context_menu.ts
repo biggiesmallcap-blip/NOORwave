@@ -21,6 +21,7 @@ export interface ContextMenuState {
 }
 
 export const CONTEXT_MENU_EXIT_MS = 160;
+const TEXT_ICON_PATTERN = /^[A-Za-z][A-Za-z ]+$/;
 
 const initial: ContextMenuState = { open: false, closing: false, x: 0, y: 0, items: [], title: undefined };
 let closeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -32,6 +33,11 @@ function clearCloseTimer() {
 }
 
 export const contextMenu = writable<ContextMenuState>(initial);
+
+export function menuIconForDisplay(icon: string | undefined): string | undefined {
+	if (!icon) return undefined;
+	return TEXT_ICON_PATTERN.test(icon) ? undefined : icon;
+}
 
 export function openContextMenu(
 	event: MouseEvent | { clientX: number; clientY: number; preventDefault?: () => void; stopPropagation?: () => void },
