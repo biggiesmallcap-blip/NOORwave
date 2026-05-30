@@ -35,6 +35,7 @@ use crate::SharedState;
 /// - eligibility threshold not met
 ///
 /// HTTP failures are logged at warn and never propagated.
+#[allow(dead_code)]
 pub fn spawn_scrobble_completed(
     state: SharedState,
     artist: String,
@@ -63,6 +64,7 @@ pub fn spawn_scrobble_completed(
 
 /// Spawn a fire-and-forget `track.updateNowPlaying` for a TIDAL play.
 /// Same silent-no-op gating as [`spawn_scrobble_completed`].
+#[allow(dead_code)]
 pub fn spawn_now_playing(
     state: SharedState,
     artist: String,
@@ -84,11 +86,13 @@ pub fn spawn_now_playing(
     );
 }
 
+#[allow(dead_code)]
 enum ScrobbleKind {
     NowPlaying,
     Completed { started_at_unix: i64 },
 }
 
+#[allow(dead_code)]
 fn spawn_lastfm_call(
     state: SharedState,
     kind: ScrobbleKind,
@@ -363,6 +367,26 @@ pub async fn scrobble_track(
         api_secret,
         "track.scrobble",
         extra,
+        Some(session_key),
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn love_track(
+    http: &reqwest::Client,
+    api_key: &str,
+    api_secret: &str,
+    session_key: &str,
+    artist: &str,
+    track: &str,
+) -> Result<()> {
+    api_call(
+        http,
+        api_key,
+        api_secret,
+        "track.love",
+        vec![("artist", artist.to_string()), ("track", track.to_string())],
         Some(session_key),
     )
     .await?;

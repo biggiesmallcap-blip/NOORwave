@@ -55,7 +55,7 @@
 				scrobbleState = 'idle';
 			}
 		} catch {
-			// Status endpoint failure shouldn't block the form — fall back to
+			// Status endpoint failure shouldn't block the form, fall back to
 			// the legacy flow (start with `connected = false`).
 		}
 	}
@@ -78,7 +78,7 @@
 				connected = true;
 				apiKey = '';
 				onconnected?.();
-				// Refresh scrobble availability after the API key lands —
+				// Refresh scrobble availability after the API key lands,
 				// it gates the scrobble auth flow.
 				void loadStatus();
 			} else {
@@ -128,7 +128,7 @@
 			} else if (data.status === 'not_yet_authorized') {
 				// Stay in awaiting state so the user can retry after authorizing.
 				scrobbleState = 'awaiting_user';
-				scrobbleError = 'Not yet authorized — click "Yes, allow access" on Last.fm first.';
+				scrobbleError = 'Not yet authorized. Click "Yes, allow access" on Last.fm first.';
 			} else {
 				scrobbleState = 'error';
 				scrobbleError = data.message ?? 'Failed to complete Last.fm auth.';
@@ -144,7 +144,7 @@
 		try {
 			await api.lastfmAuthDisconnect();
 		} catch {
-			// Best-effort — proceed regardless.
+			// Best-effort, proceed regardless.
 		}
 		pendingAuthUrl = null;
 		scrobbleState = scrobbleAvailable ? 'idle' : 'unavailable';
@@ -204,7 +204,7 @@
 		{/if}
 
 		<!-- Enable scrobbling sub-section. Only meaningful in the settings
-		     variant — onboarding doesn't need to surface scrobble auth at
+		     variant, onboarding doesn't need to surface scrobble auth at
 		     first-run. -->
 		{#if variant === 'settings'}
 			<div class="scrobble-section">
@@ -223,8 +223,9 @@
 					</div>
 				{:else if scrobbleState === 'unavailable'}
 					<p class="muted">
-						Server is not configured for Last.fm scrobbling. Ask the admin to set
-						<code>LASTFM_API_SECRET</code>.
+						Last.fm API key is saved. Scrobbling also needs the API secret from the same
+						Last.fm app. Set <code>LASTFM_API_SECRET</code> on the server and restart
+						NOOR.
 					</p>
 				{:else if scrobbleState === 'awaiting_user'}
 					<p class="muted">

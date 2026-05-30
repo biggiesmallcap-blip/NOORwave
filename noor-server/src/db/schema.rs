@@ -50,6 +50,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_046,
     MIGRATION_047,
     MIGRATION_048,
+    MIGRATION_049,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1383,6 +1384,63 @@ CREATE TABLE IF NOT EXISTS chart_entry_resolutions (
 
 CREATE INDEX IF NOT EXISTS idx_chart_entry_resolutions_status
     ON chart_entry_resolutions(status, resolved_at);
+"#;
+
+const MIGRATION_049: &str = r#"
+CREATE TABLE IF NOT EXISTS scrobble_outbox (
+    id INTEGER PRIMARY KEY,
+    provider TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    track_id INTEGER,
+    artist TEXT NOT NULL,
+    title TEXT NOT NULL,
+    album TEXT,
+    duration_ms INTEGER,
+    listened_ms INTEGER,
+    started_at_unix INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    UNIQUE(provider, kind, track_id, started_at_unix)
+);
+
+CREATE INDEX IF NOT EXISTS idx_scrobble_outbox_due
+    ON scrobble_outbox(status, next_attempt_at, id);
+
+CREATE TABLE IF NOT EXISTS provider_feedback_outbox (
+    id INTEGER PRIMARY KEY,
+    provider TEXT NOT NULL,
+    action TEXT NOT NULL,
+    track_id INTEGER NOT NULL,
+    artist TEXT NOT NULL,
+    title TEXT NOT NULL,
+    mbid TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    UNIQUE(provider, action, track_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_provider_feedback_outbox_due
+    ON provider_feedback_outbox(status, next_attempt_at, id);
+
+CREATE TABLE IF NOT EXISTS provider_recommendation_cache (
+    provider TEXT NOT NULL,
+    cache_key TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    fetched_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    PRIMARY KEY(provider, cache_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_provider_recommendation_cache_expiry
+    ON provider_recommendation_cache(provider, expires_at);
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

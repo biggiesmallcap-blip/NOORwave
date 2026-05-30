@@ -693,9 +693,14 @@ export interface ChartEntry {
 	image_url: string | null;
 	source: 'lastfm' | 'tidal';
 	genre: string | null;
+	entity_type?: 'track' | 'artist' | 'tag' | string;
+	display_title?: string | null;
+	display_subtitle?: string | null;
+	metric_label?: string | null;
 }
 
 export type TrendingSource = 'lastfm' | 'tidal';
+export type LastfmChartKind = 'tracks' | 'artists' | 'tags';
 
 export interface ChartSnapshotSummary {
 	id: number;
@@ -1830,9 +1835,49 @@ export interface TidalDiscoverModuleResponse {
 export interface LastfmStatus {
 	configured: boolean;
 	enrichment: boolean;
+	api_key_configured?: boolean;
+	api_secret_configured?: boolean;
 	scrobbling: boolean;
 	scrobble_available: boolean;
+	recommendations?: boolean;
+	pending_submissions?: number;
+	failed_submissions?: number;
 	user: string | null;
+}
+
+export interface ListenBrainzStatus {
+	configured: boolean;
+	scrobbling: boolean;
+	recommendations: boolean;
+	pending_submissions: number;
+	failed_submissions: number;
+	user: string | null;
+}
+
+export interface ProviderRecommendationItem {
+	provider: 'lastfm' | 'listenbrainz' | string;
+	local_track_id: number;
+	tidal_id: number | null;
+	title: string;
+	artist_name: string | null;
+	album_title: string | null;
+	artwork_url: string | null;
+	mbid?: string | null;
+	score?: number | null;
+	reason: string;
+	playable: boolean;
+}
+
+export interface ProviderRecommendationShelf {
+	provider: 'lastfm' | 'listenbrainz' | string;
+	title: string;
+	status: 'ok' | 'empty' | 'error' | string;
+	message?: string;
+	items: ProviderRecommendationItem[];
+}
+
+export interface HomeRecommendationsResponse {
+	shelves: ProviderRecommendationShelf[];
 }
 
 export interface LastfmAuthStartResponse {
@@ -2608,20 +2653,24 @@ export const api = {
 
 	getTrending(opts: {
 		source?: TrendingSource;
+		kind?: LastfmChartKind;
 		limit?: number;
 		country?: string; // ISO alpha-2 (e.g. "AU") OR a Last.fm full name; backend canonicalises.
 		tag?: string;     // canonical curated genre key (e.g. "hip-hop"); mutually exclusive with country.
 	} = {}) {
 		const params: Record<string, string> = {};
 		if (opts.source) params.source = opts.source;
+		if (opts.kind) params.kind = opts.kind;
 		if (opts.limit != null) params.limit = String(opts.limit);
 		if (opts.country) params.country = opts.country;
 		if (opts.tag) params.tag = opts.tag;
 		return fetchApi<{
 			source: string;
+			kind?: LastfmChartKind;
 			limit: number;
 			country: string | null;
 			tag: string | null;
+			items?: ChartEntry[];
 			tracks: ChartEntry[];
 		}>('/api/charts', params);
 	},
@@ -3283,6 +3332,10 @@ export const api = {
 		return fetchApi<HomeNewsResponse>('/api/home/news');
 	},
 
+	getHomeRecommendations() {
+		return fetchApi<HomeRecommendationsResponse>('/api/home/recommendations');
+	},
+
 	// ─── TIDAL: Your Mixes ────────────────────────────────────────────────
 	// 503 here means TIDAL isn't connected - the YourMixesShelf surfaces a
 	// connect prompt rather than an error toast.
@@ -3368,6 +3421,42 @@ export const api = {
 	// ─── Last.fm scrobble auth (server-side web-auth flow) ────────────────
 	getLastfmStatus() {
 		return fetchApi<LastfmStatus>('/api/lastfm/status');
+	},
+
+	saveLastfmConfig(api_key: string, api_secret: string) {
+		return fetchApi<{ status: string; message?: string }>('/api/lastfm/config', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ api_key, api_secret }),
+		});
+	},
+
+	clearLastfmConfig() {
+		return fetchApi<{ status: string }>('/api/lastfm/config', undefined, {
+			method: 'DELETE',
+		});
+	},
+
+	getListenBrainzStatus() {
+		return fetchApi<ListenBrainzStatus>('/api/listenbrainz/status');
+	},
+
+	saveListenBrainzConfig(token: string) {
+		return fetchApi<{ status: string; user?: string; message?: string }>('/api/listenbrainz/config', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ token }),
+		});
+	},
+
+	clearListenBrainzConfig() {
+		return fetchApi<{ status: string }>('/api/listenbrainz/config', undefined, {
+			method: 'DELETE',
+		});
+	},
+
+	backfillScrobbles() {
+		return fetchApi<{ status: string; days: number; eligible?: number; providers?: number; queued: number }>('/api/scrobbling/backfill', undefined, {
+			method: 'POST',
+		});
 	},
 
 	// 501 here means LASTFM_API_SECRET isn't configured on the server.

@@ -825,6 +825,9 @@ async fn main() -> Result<()> {
 
     services::audio_analysis::queue_prescanner::spawn(state.clone());
     info!("Queue DSP prescanner spawned");
+    services::scrobbling::spawn_periodic_drain(state.clone());
+    services::scrobbling::spawn_drain(state.clone());
+    info!("Scrobble outbox drain spawned");
 
     // Check for auto-sync daily services and trigger sync if needed
     {

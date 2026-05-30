@@ -56,6 +56,51 @@ pub fn save_credentials(conn: &Connection, creds: &LastFmCredentials) -> Result<
     Ok(())
 }
 
+pub fn save_api_secret(conn: &Connection, master: &MasterKey, api_secret: &str) -> Result<()> {
+    let blob = master.encrypt(api_secret.as_bytes())?;
+    conn.execute(
+        "INSERT INTO service_auth (service, extra_data, refresh_token_enc, user_id, connected_at)
+         VALUES ('lastfm', ?1, ?2, 'app', datetime('now'))
+         ON CONFLICT(service) DO UPDATE SET
+             refresh_token_enc = excluded.refresh_token_enc",
+        params![
+            serde_json::to_string(&load_credentials(conn)?.unwrap_or_default())?,
+            blob
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn load_api_secret(conn: &Connection, master: &MasterKey) -> Result<Option<String>> {
+    let blob: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT refresh_token_enc FROM service_auth WHERE service = 'lastfm'",
+            [],
+            |row| row.get::<_, Option<Vec<u8>>>(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(blob) = blob else { return Ok(None) };
+    if blob.is_empty() {
+        return Ok(None);
+    }
+    let plain = master.decrypt(&blob)?;
+    Ok(Some(String::from_utf8(plain)?))
+}
+
+pub fn has_api_secret(conn: &Connection) -> Result<bool> {
+    let present: Option<i64> = conn
+        .query_row(
+            "SELECT CASE WHEN refresh_token_enc IS NOT NULL AND length(refresh_token_enc) > 0 THEN 1 ELSE 0 END
+               FROM service_auth
+              WHERE service = 'lastfm'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(present.unwrap_or(0) == 1)
+}
+
 pub fn clear_credentials(conn: &Connection) -> Result<()> {
     conn.execute("DELETE FROM service_auth WHERE service = 'lastfm'", [])?;
     Ok(())
@@ -256,5 +301,43 @@ mod tests {
         assert_eq!(creds.api_key, "the-api-key");
         assert!(creds.session_user.is_none());
         assert!(load_session_key(&conn, &master).unwrap().is_none());
+    }
+
+    #[test]
+    fn api_secret_encrypted() {
+        let conn = open_in_memory_db_with_schema();
+        let master = temp_master_key();
+        save_credentials(
+            &conn,
+            &LastFmCredentials {
+                api_key: "key".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        save_api_secret(&conn, &master, "secret-value").unwrap();
+        let raw: Vec<u8> = conn
+            .query_row(
+                "SELECT refresh_token_enc FROM service_auth WHERE service = 'lastfm'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !raw.windows("secret-value".len())
+                .any(|w| w == b"secret-value")
+        );
+        assert_eq!(
+            load_api_secret(&conn, &master).unwrap().as_deref(),
+            Some("secret-value")
+        );
+        let extra: String = conn
+            .query_row(
+                "SELECT extra_data FROM service_auth WHERE service = 'lastfm'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!extra.contains("secret-value"));
     }
 }

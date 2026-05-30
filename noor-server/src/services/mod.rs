@@ -11,12 +11,14 @@ pub mod discovery_trainer;
 pub mod lastfm;
 pub mod learning;
 pub mod listen_history_backfill;
+pub mod listenbrainz;
 pub mod musicbrainz;
 pub mod neighbor_refresh;
 pub mod radio;
 pub mod radio_config;
 pub mod radio_similarity;
 pub mod rss_feeds;
+pub mod scrobbling;
 pub mod sportify;
 pub mod spotify;
 #[cfg(feature = "spotify-public")]

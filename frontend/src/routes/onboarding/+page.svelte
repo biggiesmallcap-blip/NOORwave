@@ -3,7 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { api, authFetch, getApiBase, type AudioQuality } from '$lib/api/client';
 	import TidalConnect from '$lib/components/onboarding/TidalConnect.svelte';
-	import LastfmConnect from '$lib/components/onboarding/LastfmConnect.svelte';
+	import ListeningServicesConnect from '$lib/components/onboarding/ListeningServicesConnect.svelte';
 	let step = $state(0);
 	let tidalConnected = $state(false);
 	let syncErrorMessage = $state('');
@@ -69,7 +69,7 @@
 		step = 2;
 	}
 
-	function handleLastfmDone() {
+	function handleListeningServicesDone() {
 		step = 3;
 	}
 
@@ -159,11 +159,9 @@
 			</div>
 		{:else if step === 2}
 			<div class="step">
-				<LastfmConnect
-					variant="onboarding"
-					showSkip={true}
-					onconnected={handleLastfmDone}
-					onskip={handleLastfmDone}
+				<ListeningServicesConnect
+					oncontinue={handleListeningServicesDone}
+					onskip={handleListeningServicesDone}
 				/>
 				{#if tidalConnected && !syncErrorMessage}
 					<p class="footnote">Library syncing in the background…</p>
