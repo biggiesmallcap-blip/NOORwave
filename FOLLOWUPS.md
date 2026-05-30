@@ -61,13 +61,6 @@ relayout (two-line side panel or shrunken icon set), not a one-line CSS
 toggle. Audit item 16 from the 2026-05-23 queue UI audit.
 - Spawned by: feature/queue-ui-qol (Commit 6, c21cf78 area)
 
-### perf: cache Last.fm `track.getSimilar` per (artist, title)
-
-`services/radio.rs` calls Last.fm `track.getSimilar` on every `/api/radio/song`
-request with no per-instance cache, so replaying the same seed re-hits the
-network. Add a TTL cache keyed on `(artist, title)` like the TIDAL mixes cache.
-- Spawned by: docs/dev/perf-architecture-pass-2026-05-22.md
-
 ### chore: re-add Viral 50 Global to /charts when Sportify proxy recovers
 
 Removed `37i9dQZEVXbLiRSasKsNU9` (Viral 50 Global) from `frontend/src/routes/charts/+page.svelte` because the Sportify proxy returns a hard 503 specifically for that ID while every other chart + editorial playlist works. Periodically curl `https://sportify.xcasper.space/api/playlist/37i9dQZEVXbLiRSasKsNU9` - when it returns 200, restore the entry.

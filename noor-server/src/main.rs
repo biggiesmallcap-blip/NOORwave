@@ -123,6 +123,10 @@ pub struct AppState {
             >,
         >,
     >,
+    /// 6h TTL cache for Last.fm track.getSimilar radio seeds. The radio
+    /// endpoint can replay the same seed several times during exploration, so
+    /// keep similar rows per process instead of re-hitting Last.fm every call.
+    pub lastfm_similar_cache: services::radio::LastFmSimilarCache,
     pub spotify_tokens: Option<services::spotify::auth::SpotifyTokens>,
     pub playback_runtime: Option<PlaybackRuntimeState>,
     pub playback_runtime_info: Option<PlaybackRuntimeInfo>,
@@ -768,6 +772,7 @@ async fn main() -> Result<()> {
         tidal_playlist_tracks_cache: Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        lastfm_similar_cache: services::radio::new_lastfm_similar_cache(),
         spotify_tokens,
         playback_runtime: None,
         playback_runtime_info: None,

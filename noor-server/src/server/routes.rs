@@ -4543,11 +4543,13 @@ async fn get_discovery_space(
             state_guard.http_client.clone(),
             &state_guard.db,
         );
+        let lastfm_similar_cache = state_guard.lastfm_similar_cache.clone();
         drop(state_guard);
 
         let queue = crate::services::radio::orchestrate_song(
             &db,
             lastfm.as_ref(),
+            Some(&lastfm_similar_cache),
             seed_id,
             crate::services::radio::RadioBlend::Mixed,
             limit as usize,
@@ -5565,17 +5567,18 @@ async fn radio_song(
     let limit = payload.limit.unwrap_or(60).clamp(8, 200);
     let exclude = payload.exclude_track_ids.unwrap_or_default();
 
-    let (db, lastfm) = {
+    let (db, lastfm, lastfm_similar_cache) = {
         let g = state.read().await;
         g.user_cleared_at
             .store(0, std::sync::atomic::Ordering::Relaxed);
         let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
-        (g.db.clone(), lastfm)
+        (g.db.clone(), lastfm, g.lastfm_similar_cache.clone())
     };
 
     let queue = crate::services::radio::orchestrate_song(
         &db,
         lastfm.as_ref(),
+        Some(&lastfm_similar_cache),
         payload.seed_track_id,
         blend,
         limit,
@@ -5895,19 +5898,20 @@ async fn radio_start(
     let blend = payload.blend.unwrap_or_default();
     let limit = payload.limit.unwrap_or(60).clamp(8, 200);
 
-    let (db, lastfm) = {
+    let (db, lastfm, lastfm_similar_cache) = {
         let g = state.read().await;
         // User-driven radio start; reset post-clear suppression so the
         // freshly-built queue gets normal automix gating downstream.
         g.user_cleared_at
             .store(0, std::sync::atomic::Ordering::Relaxed);
         let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
-        (g.db.clone(), lastfm)
+        (g.db.clone(), lastfm, g.lastfm_similar_cache.clone())
     };
 
     let radio_queue = crate::services::radio::orchestrate_song(
         &db,
         lastfm.as_ref(),
+        Some(&lastfm_similar_cache),
         payload.seed_track_id,
         blend,
         limit,
@@ -6037,17 +6041,18 @@ async fn radio_album(
     let limit = payload.limit.unwrap_or(60).clamp(8, 200);
     let exclude = payload.exclude_track_ids.unwrap_or_default();
 
-    let (db, lastfm) = {
+    let (db, lastfm, lastfm_similar_cache) = {
         let g = state.read().await;
         g.user_cleared_at
             .store(0, std::sync::atomic::Ordering::Relaxed);
         let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
-        (g.db.clone(), lastfm)
+        (g.db.clone(), lastfm, g.lastfm_similar_cache.clone())
     };
 
     let queue = crate::services::radio::orchestrate_album(
         &db,
         lastfm.as_ref(),
+        Some(&lastfm_similar_cache),
         payload.seed_album_id,
         blend,
         limit,
@@ -6098,17 +6103,18 @@ async fn radio_artist(
     let limit = payload.limit.unwrap_or(60).clamp(8, 200);
     let exclude = payload.exclude_track_ids.unwrap_or_default();
 
-    let (db, lastfm) = {
+    let (db, lastfm, lastfm_similar_cache) = {
         let g = state.read().await;
         g.user_cleared_at
             .store(0, std::sync::atomic::Ordering::Relaxed);
         let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
-        (g.db.clone(), lastfm)
+        (g.db.clone(), lastfm, g.lastfm_similar_cache.clone())
     };
 
     let queue = crate::services::radio::orchestrate_artist(
         &db,
         lastfm.as_ref(),
+        Some(&lastfm_similar_cache),
         payload.seed_artist_id,
         blend,
         limit,
@@ -14490,6 +14496,7 @@ mod tests {
             tidal_moods_cache: Arc::new(std::sync::Mutex::new(None)),
             tidal_page_modules_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             tidal_playlist_tracks_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            lastfm_similar_cache: crate::services::radio::new_lastfm_similar_cache(),
             spotify_tokens: None,
             playback_runtime: None,
             playback_runtime_info: None,
