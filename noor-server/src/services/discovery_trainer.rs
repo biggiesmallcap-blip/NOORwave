@@ -62,6 +62,8 @@ pub enum EvidenceKind {
     ArtistAffinity,
     GenreAffinity,
     FavoriteAffinity,
+    LastfmDirectSimilarity,
+    LastfmBranchSimilarity,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -70,6 +72,8 @@ pub struct SupportBreakdown {
     pub colisten: f64,
     pub structure: f64,
     pub metadata: f64,
+    pub lastfm_direct: f64,
+    pub lastfm_branch: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -531,7 +535,12 @@ fn build_behavioral_embeddings(
                 edge.evidence_kind,
                 weighted,
             );
-            if edge.evidence_kind != EvidenceKind::DirectTransition {
+            if !matches!(
+                edge.evidence_kind,
+                EvidenceKind::DirectTransition
+                    | EvidenceKind::LastfmDirectSimilarity
+                    | EvidenceKind::LastfmBranchSimilarity
+            ) {
                 *co.entry(edge.to_track_id)
                     .or_default()
                     .entry(edge.from_track_id)
@@ -630,6 +639,8 @@ fn add_support_bucket(
         | EvidenceKind::ArtistAffinity
         | EvidenceKind::GenreAffinity
         | EvidenceKind::FavoriteAffinity => bucket.structure += weight,
+        EvidenceKind::LastfmDirectSimilarity => bucket.lastfm_direct += weight,
+        EvidenceKind::LastfmBranchSimilarity => bucket.lastfm_branch += weight,
     }
 }
 
@@ -1031,6 +1042,18 @@ fn similarity_neighbors(
                     reason_tags.push("direct_transition".to_string());
                     contributions.push(("direct_transition", directional_behavior_bonus));
                 }
+                let lastfm_direct_bonus = (support_breakdown.lastfm_direct * 0.06).clamp(0.0, 0.12);
+                if lastfm_direct_bonus > 0.0 {
+                    metadata_score += lastfm_direct_bonus;
+                    reason_tags.push("lastfm_direct".to_string());
+                    contributions.push(("lastfm_direct", lastfm_direct_bonus));
+                }
+                let lastfm_branch_bonus = (support_breakdown.lastfm_branch * 0.04).clamp(0.0, 0.08);
+                if lastfm_branch_bonus > 0.0 {
+                    metadata_score += lastfm_branch_bonus;
+                    reason_tags.push("lastfm_branch".to_string());
+                    contributions.push(("lastfm_branch", lastfm_branch_bonus));
+                }
 
                 let total_score = score + metadata_score + directional_behavior_bonus;
                 reason_tags.sort();
@@ -1276,6 +1299,8 @@ fn heldout_metric_label(kind: EvidenceKind) -> &'static str {
         EvidenceKind::ArtistAffinity => "artist",
         EvidenceKind::GenreAffinity => "genre",
         EvidenceKind::FavoriteAffinity => "favorite",
+        EvidenceKind::LastfmDirectSimilarity => "lastfm_direct",
+        EvidenceKind::LastfmBranchSimilarity => "lastfm_branch",
     }
 }
 
@@ -1825,6 +1850,47 @@ mod tests {
         assert!(tokens.iter().any(|token| token == "dance_8"));
         assert!(tokens.iter().any(|token| token == "beat_4"));
         assert!(tokens.iter().any(|token| token == "lufs_-12"));
+    }
+
+    #[test]
+    fn lastfm_evidence_tags_are_directional() {
+        let (tracks, behavioral, audio, fusion) = make_test_input(2, 32);
+        let co_score = HashMap::new();
+        let co_count = HashMap::new();
+        let mut support_buckets: HashMap<i64, HashMap<i64, SupportBreakdown>> = HashMap::new();
+        support_buckets.entry(0).or_default().insert(
+            1,
+            SupportBreakdown {
+                lastfm_direct: 0.44,
+                ..Default::default()
+            },
+        );
+        let play_counts = HashMap::new();
+
+        let result = similarity_neighbors(
+            &tracks,
+            &behavioral,
+            &audio,
+            &fusion,
+            &co_score,
+            &co_count,
+            &support_buckets,
+            &play_counts,
+            1,
+            None,
+            None,
+        );
+
+        let forward = result
+            .iter()
+            .find(|row| row.track_id == 0 && row.neighbor_track_id == 1)
+            .expect("forward neighbor");
+        let reverse = result
+            .iter()
+            .find(|row| row.track_id == 1 && row.neighbor_track_id == 0)
+            .expect("reverse neighbor");
+        assert!(forward.reason_tags.iter().any(|tag| tag == "lastfm_direct"));
+        assert!(!reverse.reason_tags.iter().any(|tag| tag == "lastfm_direct"));
     }
 
     #[test]

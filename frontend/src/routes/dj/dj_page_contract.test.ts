@@ -112,8 +112,12 @@ describe('dj cockpit page contract', () => {
 		expect(transitionLane).toContain('current_profile_decode_failed');
 		expect(queuePair).toContain('Analysis failed');
 		expect(queuePair).toContain('Retrying analysis');
+		expect(queuePair).toContain('Retrying analysis in');
+		expect(queuePair).toContain('TIDAL asset unavailable');
 		expect(queuePair).toContain('Analyzing');
 		expect(queuePair).toContain('profile_error');
+		expect(queuePair).toContain('profile_retry_after_ms');
+		expect(queuePair).toContain('profile_retry_reason');
 		expect(queuePair).toContain('Passive DSP retrying');
 		expect(queuePair).toContain('passive_analysis_status');
 		expect(queuePair).toContain('passive_analysis_reason');

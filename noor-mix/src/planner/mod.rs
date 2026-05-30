@@ -13,6 +13,7 @@ const SMALL_TEMPO_NUDGE_MIN: f32 = 0.97;
 const SMALL_TEMPO_NUDGE_MAX: f32 = 1.03;
 const PLAYBACK_RATE_EPSILON: f32 = 0.0001;
 const DROP_TEASE_CONFIDENCE_FLOOR: f32 = 0.65;
+const DROP_PREVIEW_GAIN: f32 = 0.65;
 const PLANNER_SAMPLE_RATE: u32 = 48_000;
 
 pub struct Planner;
@@ -37,17 +38,14 @@ impl Planner {
         };
         let comparable_incoming_bpm = scoring::nearest_tempo_family_bpm(outgoing_bpm, incoming_bpm);
         let bpm_delta = scoring::bpm_delta_pct(outgoing_bpm, comparable_incoming_bpm);
-        if drop_tease_candidate_ready(outgoing, incoming, policy) {
-            return TransitionTemplate::DropTease16;
-        }
-        if matches!(policy.mix_intent, MixIntent::Bold)
+        let bold_filter_candidate = matches!(policy.mix_intent, MixIntent::Bold)
             && !outgoing.phrase_bar_indices.is_empty()
-            && !incoming.phrase_bar_indices.is_empty()
-        {
-            return TransitionTemplate::FilterSweep;
-        }
+            && !incoming.phrase_bar_indices.is_empty();
 
         if bpm_delta > 8.0 {
+            if bold_filter_candidate {
+                return TransitionTemplate::FilterSweep;
+            }
             return TransitionTemplate::SlamCut;
         }
 
@@ -59,7 +57,11 @@ impl Planner {
         else {
             return TransitionTemplate::SafeCrossfade;
         };
-        if camelot_distance > 7 {
+        let harmonic_fit = matches!(camelot_distance, 0 | 1 | 7);
+        if !harmonic_fit {
+            if bold_filter_candidate {
+                return TransitionTemplate::FilterSweep;
+            }
             return TransitionTemplate::SafeCrossfade;
         }
 
@@ -69,7 +71,7 @@ impl Planner {
                 && incoming.has_full_dj_profile()
                 && outgoing.phrase_bar_indices.len() >= 2
                 && incoming.phrase_bar_indices.len() >= 2
-                && matches!(camelot_distance, 0 | 1 | 7))
+                && harmonic_fit)
         {
             return TransitionTemplate::SafeCrossfade;
         }
@@ -82,8 +84,11 @@ impl Planner {
         if outgoing_phrases >= 2 && incoming_phrases >= 2 && bpm_delta <= 3.0 {
             return TransitionTemplate::BassSwap16;
         }
-        if matches!(camelot_distance, 0 | 1 | 7) && bpm_delta <= 3.0 {
+        if harmonic_fit && bpm_delta <= 3.0 {
             return TransitionTemplate::LongHarmonicBlend;
+        }
+        if bold_filter_candidate {
+            return TransitionTemplate::FilterSweep;
         }
         TransitionTemplate::FilterSweep
     }
@@ -174,6 +179,7 @@ fn build_program(
     program
 }
 
+#[allow(dead_code)]
 fn drop_tease_candidate_ready(outgoing: &DjProfile, incoming: &DjProfile, policy: &Policy) -> bool {
     if !matches!(policy.mix_intent, MixIntent::Bold) {
         return false;
@@ -429,6 +435,60 @@ pub fn drop_tease_16_program(
     }
 }
 
+pub fn drop_preview_16_program(
+    sample_rate: u32,
+    channels: u16,
+    duration_ms: u32,
+    outgoing: &DjProfile,
+    incoming: &DjProfile,
+) -> Option<TransitionProgram> {
+    let sample_rate = sample_rate.max(1);
+    let channels = channels.max(1);
+    let duration_samples =
+        (u64::from(duration_ms).saturating_mul(u64::from(sample_rate)) / 1_000).max(1);
+    let swap_start = duration_samples / 2;
+    let drop_frame = first_valid_preview_drop_frame(incoming, sample_rate)?;
+    let rate = drop_preview_autosync_rate(outgoing, incoming)?;
+    let mut automation = drop_preview_overlay_automation(duration_samples);
+    if (rate - 1.0).abs() > PLAYBACK_RATE_EPSILON {
+        automation.push(AutomationEvent {
+            param: Param::PlaybackRate(DeckId::B),
+            start_sample: 0,
+            end_sample: duration_samples,
+            from: rate,
+            to: rate,
+            curve: Curve::Linear,
+        });
+    }
+    Some(TransitionProgram {
+        tier: Tier::FullBlend,
+        template: "DropPreview16".to_string(),
+        sample_rate,
+        channels,
+        deck_a_start_frame: 0,
+        deck_b_start_frame: drop_frame.saturating_sub(swap_start),
+        sync_start: 0,
+        intro_start: 0,
+        swap_start,
+        fade_start: swap_start,
+        resolve_at: duration_samples,
+        loops: vec![],
+        automation,
+    })
+}
+
+fn drop_preview_autosync_rate(outgoing: &DjProfile, incoming: &DjProfile) -> Option<f32> {
+    let outgoing_bpm = outgoing.bpm?.max(1.0);
+    let incoming_bpm = incoming.bpm?.max(1.0);
+    let comparable_incoming_bpm = scoring::nearest_tempo_family_bpm(outgoing_bpm, incoming_bpm);
+    if scoring::bpm_delta_pct(outgoing_bpm, comparable_incoming_bpm) > 3.0 {
+        return None;
+    }
+    let rate = outgoing_bpm / comparable_incoming_bpm;
+    (rate.is_finite() && (SMALL_TEMPO_NUDGE_MIN..=SMALL_TEMPO_NUDGE_MAX).contains(&rate))
+        .then_some(rate)
+}
+
 fn duration_samples(template: TransitionTemplate, policy: &Policy, bar_samples: u64) -> u64 {
     match template {
         TransitionTemplate::BassSwap32 => bar_samples * 32,
@@ -526,6 +586,56 @@ fn drop_tease_overlay_automation(duration_samples: u64) -> Vec<AutomationEvent> 
             curve: Curve::EqualPowerIn,
         },
     ]
+}
+
+fn drop_preview_overlay_automation(duration_samples: u64) -> Vec<AutomationEvent> {
+    let end_sample = duration_samples.max(1);
+    let fade_in_end = (end_sample / 4).max(1);
+    let fade_out_start = (end_sample * 3 / 4).max(fade_in_end);
+    vec![
+        AutomationEvent {
+            param: Param::DeckGain(DeckId::A),
+            start_sample: 0,
+            end_sample,
+            from: 0.0,
+            to: 0.0,
+            curve: Curve::Linear,
+        },
+        AutomationEvent {
+            param: Param::DeckGain(DeckId::B),
+            start_sample: 0,
+            end_sample: fade_in_end,
+            from: 0.0,
+            to: DROP_PREVIEW_GAIN,
+            curve: Curve::EqualPowerIn,
+        },
+        AutomationEvent {
+            param: Param::DeckGain(DeckId::B),
+            start_sample: fade_in_end,
+            end_sample: fade_out_start.max(fade_in_end + 1),
+            from: DROP_PREVIEW_GAIN,
+            to: DROP_PREVIEW_GAIN,
+            curve: Curve::Linear,
+        },
+        AutomationEvent {
+            param: Param::DeckGain(DeckId::B),
+            start_sample: fade_out_start,
+            end_sample,
+            from: DROP_PREVIEW_GAIN,
+            to: 0.0,
+            curve: Curve::EqualPowerIn,
+        },
+    ]
+}
+
+fn first_valid_preview_drop_frame(incoming: &DjProfile, sample_rate: u32) -> Option<u64> {
+    incoming
+        .manual_drop_seconds
+        .iter()
+        .chain(incoming.drop_seconds.iter())
+        .copied()
+        .find(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .map(|seconds| (seconds * sample_rate as f32).round() as u64)
 }
 
 fn bass_swap_eq_handoff(duration_samples: u64) -> Vec<AutomationEvent> {
@@ -743,6 +853,7 @@ mod tests {
             outro_start_seconds: Some(180.0),
             breakdown_seconds: vec![],
             drop_seconds: vec![],
+            manual_drop_seconds: vec![],
             safe_transition_windows: vec![TransitionWindow {
                 start_seconds: 0.0,
                 end_seconds: 8.0,
@@ -889,6 +1000,18 @@ mod tests {
     }
 
     #[test]
+    fn choose_template_rejects_distant_same_mode_camelot_for_balanced_intent() {
+        assert_eq!(
+            Planner::choose_template(
+                &profile(Some(120.0), Some("8A"), 4),
+                &profile(Some(121.0), Some("3A"), 4),
+                &Policy::default()
+            ),
+            TransitionTemplate::SafeCrossfade
+        );
+    }
+
+    #[test]
     fn choose_template_bold_allows_filter_sweep_for_weaker_harmonic_fit() {
         let policy = Policy {
             mix_intent: MixIntent::Bold,
@@ -905,7 +1028,7 @@ mod tests {
     }
 
     #[test]
-    fn choose_template_bold_prefers_filter_sweep_for_compatible_profiles() {
+    fn choose_template_bold_preserves_bass_swap_32_for_compatible_profiles() {
         let policy = Policy {
             mix_intent: MixIntent::Bold,
             ..Policy::default()
@@ -916,7 +1039,39 @@ mod tests {
                 &profile(Some(121.0), Some("8A"), 32),
                 &policy
             ),
-            TransitionTemplate::FilterSweep
+            TransitionTemplate::BassSwap32
+        );
+    }
+
+    #[test]
+    fn choose_template_bold_preserves_bass_swap_16_for_medium_phrases() {
+        let policy = Policy {
+            mix_intent: MixIntent::Bold,
+            ..Policy::default()
+        };
+        assert_eq!(
+            Planner::choose_template(
+                &profile(Some(120.0), Some("8A"), 2),
+                &profile(Some(121.0), Some("8A"), 2),
+                &policy
+            ),
+            TransitionTemplate::BassSwap16
+        );
+    }
+
+    #[test]
+    fn choose_template_bold_preserves_long_harmonic_blend_for_short_compatible_profiles() {
+        let policy = Policy {
+            mix_intent: MixIntent::Bold,
+            ..Policy::default()
+        };
+        assert_eq!(
+            Planner::choose_template(
+                &profile(Some(120.0), Some("8A"), 1),
+                &profile(Some(121.0), Some("9A"), 1),
+                &policy
+            ),
+            TransitionTemplate::LongHarmonicBlend
         );
     }
 
@@ -1267,7 +1422,7 @@ mod tests {
     }
 
     #[test]
-    fn choose_template_bold_selects_drop_tease_for_confident_drop_candidate() {
+    fn choose_template_bold_keeps_drop_tease_out_of_end_transition() {
         let policy = Policy {
             mix_intent: MixIntent::Bold,
             ..Policy::default()
@@ -1278,7 +1433,7 @@ mod tests {
 
         assert_eq!(
             Planner::choose_template(&outgoing, &incoming, &policy),
-            TransitionTemplate::DropTease16
+            TransitionTemplate::BassSwap32
         );
     }
 
@@ -1341,7 +1496,7 @@ mod tests {
     #[test]
     fn drop_tease_plan_aligns_incoming_drop_to_overlay_swap() {
         let policy = Policy {
-            mix_intent: MixIntent::Bold,
+            safety_template_override: Some(TransitionTemplate::DropTease16),
             ..Policy::default()
         };
         let outgoing = profile(Some(120.0), Some("8A"), 4);
@@ -1366,7 +1521,7 @@ mod tests {
             &profile(Some(121.0), Some("8A"), 4),
             &bold,
         );
-        assert_eq!(selected, TransitionTemplate::FilterSweep);
+        assert_eq!(selected, TransitionTemplate::BassSwap32);
 
         let policy = Policy {
             safety_template_override: Some(TransitionTemplate::DropTease16),
@@ -1405,6 +1560,90 @@ mod tests {
                 && event.start_sample == program.resolve_at * 3 / 4
                 && event.to == 0.0
         }));
+    }
+
+    #[test]
+    fn drop_preview_16_program_aligns_profile_drop_to_preview_midpoint() {
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
+        let mut incoming = profile(Some(120.0), Some("8A"), 4);
+        incoming.drop_seconds = vec![32.0];
+
+        let program =
+            drop_preview_16_program(48_000, 2, 16_000, &outgoing, &incoming).expect("drop preview");
+
+        assert_eq!(program.template, "DropPreview16");
+        assert_eq!(program.resolve_at, 768_000);
+        assert_eq!(program.swap_start, 384_000);
+        assert_eq!(program.deck_b_start_frame, 1_152_000);
+        program.validate().expect("drop preview program");
+    }
+
+    #[test]
+    fn drop_preview_16_program_prefers_manual_drop_marker() {
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
+        let mut incoming = profile(Some(120.0), Some("8A"), 4);
+        incoming.drop_seconds = vec![32.0];
+        incoming.manual_drop_seconds = vec![24.0];
+
+        let program =
+            drop_preview_16_program(48_000, 2, 16_000, &outgoing, &incoming).expect("drop preview");
+
+        assert_eq!(program.deck_b_start_frame, 768_000);
+    }
+
+    #[test]
+    fn drop_preview_16_program_rejects_missing_drop_marker() {
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
+        let incoming = profile(Some(120.0), Some("8A"), 4);
+
+        assert!(drop_preview_16_program(48_000, 2, 16_000, &outgoing, &incoming).is_none());
+    }
+
+    #[test]
+    fn drop_preview_16_program_caps_preview_gain() {
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
+        let mut incoming = profile(Some(120.0), Some("8A"), 4);
+        incoming.drop_seconds = vec![32.0];
+
+        let program =
+            drop_preview_16_program(48_000, 2, 16_000, &outgoing, &incoming).expect("drop preview");
+
+        assert!(program.automation.iter().any(|event| {
+            event.param == Param::DeckGain(DeckId::A) && event.from == 0.0 && event.to == 0.0
+        }));
+        assert!(program.automation.iter().any(|event| {
+            event.param == Param::DeckGain(DeckId::B) && event.from == 0.65 && event.to == 0.65
+        }));
+        assert!(!program.automation.iter().any(|event| {
+            event.param == Param::DeckGain(DeckId::B) && (event.from == 1.0 || event.to == 1.0)
+        }));
+    }
+
+    #[test]
+    fn drop_preview_16_program_autosyncs_small_tempo_delta() {
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
+        let mut incoming = profile(Some(122.0), Some("8A"), 4);
+        incoming.drop_seconds = vec![32.0];
+
+        let program =
+            drop_preview_16_program(48_000, 2, 16_000, &outgoing, &incoming).expect("drop preview");
+        let rate = program
+            .automation
+            .iter()
+            .find(|event| event.param == Param::PlaybackRate(DeckId::B))
+            .expect("incoming playback rate automation");
+
+        assert!((rate.from - 120.0 / 122.0).abs() < 0.0001);
+        assert_eq!(rate.from, rate.to);
+    }
+
+    #[test]
+    fn drop_preview_16_program_rejects_unsyncable_tempo_delta() {
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
+        let mut incoming = profile(Some(130.0), Some("8A"), 4);
+        incoming.drop_seconds = vec![32.0];
+
+        assert!(drop_preview_16_program(48_000, 2, 16_000, &outgoing, &incoming).is_none());
     }
 
     #[test]
