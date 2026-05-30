@@ -1040,12 +1040,14 @@ mod tests {
                 Err(anyhow!("segment 1 failed once")),
                 Ok(vec![1]),
                 Ok(vec![2]),
+                Ok(vec![3]),
+                Ok(vec![4]),
             ],
         )
         .expect("playback retry");
 
-        assert_eq!(prebuffer.bytes, vec![0, 1, 2]);
-        assert_eq!(prebuffer.fetched_media_segments, 2);
+        assert_eq!(prebuffer.bytes, vec![0, 1, 2, 3, 4]);
+        assert_eq!(prebuffer.fetched_media_segments, 4);
         assert!(!prebuffer.ended_after_prefix_failure);
     }
 
