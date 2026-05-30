@@ -309,8 +309,10 @@ pub(crate) fn decode_and_buffer_job(
             }
 
             // ── Step 2: stream bytes from the CDN in a background thread ─────────────────────
-            // Using a bounded channel limits peak memory: at most 32 in-flight chunks of ~64KB
-            // each ≈ 2 MB of download head room while the decoder works.
+            // Single-URL streams are limited by the bounded chunk channel
+            // below. DASH streams fetch whole media segments, so memory is
+            // bounded by the initial prebuffer plus DASH_BACKGROUND_FETCH_WINDOW
+            // whole segments waiting to be delivered in manifest order.
             // A separate one-shot channel carries the Content-Length from the response headers
             // so StreamPipe can report byte_len() correctly, allowing Symphonia's MSS to
             // translate SeekFrom::End into an absolute position rather than failing.
@@ -1165,6 +1167,41 @@ mod tests {
                 sent_bytes: 0,
                 stopped: true,
                 receiver_closed: false,
+            }
+        );
+    }
+
+    #[test]
+    fn dash_background_fetch_stops_when_receiver_closes() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let stop = AtomicBool::new(false);
+        let mut sent = Vec::new();
+
+        let summary = rt
+            .block_on(fetch_dash_segments_ordered(
+                vec!["one".to_string(), "two".to_string(), "three".to_string()],
+                7,
+                2,
+                &stop,
+                |_url, segment_index| async move { Ok(vec![segment_index as u8]) },
+                |bytes| {
+                    sent.extend(bytes);
+                    false
+                },
+            ))
+            .expect("closed receiver");
+
+        assert_eq!(sent, vec![7]);
+        assert_eq!(
+            summary,
+            DashBackgroundFetchSummary {
+                sent_segments: 0,
+                sent_bytes: 1,
+                stopped: false,
+                receiver_closed: true,
             }
         );
     }
