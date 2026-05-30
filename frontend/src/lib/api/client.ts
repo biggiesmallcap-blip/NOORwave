@@ -1026,8 +1026,6 @@ export type DjDeckStatus = {
 	manual_drop_markers_ms: number[];
 	mix_in_markers_ms: number[];
 	mix_out_markers_ms: number[];
-	drop_markers_ms: number[];
-	manual_drop_markers_ms: number[];
 	passive_analysis_status?: 'ready' | 'missing' | 'retrying' | 'skipped' | string;
 	passive_analysis_reason?: string;
 	safe_crossfade_only: boolean;
