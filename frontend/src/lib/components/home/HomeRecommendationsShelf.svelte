@@ -59,9 +59,9 @@
 				api.getLastfmStatus(),
 				api.getListenBrainzStatus()
 			]);
-			const lastfmConnected = lastfm.status === 'fulfilled' && Boolean(lastfm.value.scrobbling);
-			const listenbrainzConnected = listenbrainz.status === 'fulfilled' && Boolean(listenbrainz.value.scrobbling);
-			if (!lastfmConnected && !listenbrainzConnected) {
+			const lastfmCanRecommend = lastfm.status === 'fulfilled' && Boolean(lastfm.value.recommendations);
+			const listenbrainzCanRecommend = listenbrainz.status === 'fulfilled' && Boolean(listenbrainz.value.recommendations);
+			if (!lastfmCanRecommend && !listenbrainzCanRecommend) {
 				viewState = 'hidden';
 				return;
 			}

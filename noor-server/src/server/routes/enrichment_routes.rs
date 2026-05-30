@@ -544,7 +544,7 @@ pub(super) async fn lastfm_save_config(
             }
             let api_secret = payload.api_secret.as_deref().map(str::trim).unwrap_or("");
             let master_key = state.read().await.master_key.clone();
-            let _ = state.read().await.db.with_conn(|conn| {
+            let result = state.read().await.db.with_conn(|conn| {
                 let mut creds = lastfm::auth::load_credentials(conn)?.unwrap_or_default();
                 creds.api_key = api_key.clone();
                 lastfm::auth::save_credentials(conn, &creds)?;
@@ -553,6 +553,10 @@ pub(super) async fn lastfm_save_config(
                 }
                 Ok(())
             });
+            if let Err(e) = result {
+                tracing::warn!("Failed to save Last.fm credentials: {e:#}");
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
             Ok(Json(json!({"status": "ok"})))
         }
         Ok(resp) => Ok(Json(json!({

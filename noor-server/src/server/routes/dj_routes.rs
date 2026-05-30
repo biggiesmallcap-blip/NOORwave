@@ -964,6 +964,8 @@ async fn queue_tidal_profile_rebuild(
     let inflight_for_decode = inflight.clone();
     let inflight_key_for_decode = inflight_key.clone();
     let failure_key = inflight_key.clone();
+    let retry_runtime = tokio::runtime::Handle::current();
+    let retry_state = state.clone();
     tokio::task::spawn_blocking(move || {
         let mut last_error = None;
         let mut decoded = false;
@@ -1008,9 +1010,18 @@ async fn queue_tidal_profile_rebuild(
         } else if let Some(error) = last_error {
             let status = profile_rebuild_failure_status(&error);
             let message = profile_rebuild_error_message(&error, status);
-            record_dj_profile_rebuild_failure(&failure_key, status, message.clone());
-            if status != "retrying" {
-                clear_dj_profile_inflight(&inflight_for_decode, &inflight_key_for_decode);
+            finish_dj_profile_rebuild_failure(
+                &inflight_for_decode,
+                &inflight_key_for_decode,
+                status,
+                message.clone(),
+            );
+            if status == "retrying" {
+                schedule_dj_profile_retry(
+                    &retry_runtime,
+                    retry_state,
+                    Duration::from_secs(DJ_PROFILE_TRANSIENT_RETRY_SECS),
+                );
             }
             tracing::warn!(tidal_id, error = %message, "DJ profile rebuild decode failed");
         }

@@ -29,7 +29,11 @@
 		lastfmBusy = true;
 		lastfmMessage = '';
 		try {
-			await api.saveLastfmConfig(lastfmApiKey.trim(), lastfmApiSecret.trim());
+			const result = await api.saveLastfmConfig(lastfmApiKey.trim(), lastfmApiSecret.trim());
+			if (result.status !== 'ok') {
+				lastfmMessage = result.message ?? 'Last.fm rejected those credentials.';
+				return;
+			}
 			const auth = await api.lastfmAuthStart();
 			if (auth.auth_url) {
 				void openExternal(auth.auth_url);
@@ -71,6 +75,10 @@
 		listenBrainzMessage = '';
 		try {
 			const response = await api.saveListenBrainzConfig(listenBrainzToken.trim());
+			if (response.status !== 'ok') {
+				listenBrainzMessage = response.message ?? 'ListenBrainz rejected that token.';
+				return;
+			}
 			listenBrainzUser = response.user ?? null;
 			listenBrainzToken = '';
 			listenBrainzMessage = response.user ? `Connected as ${response.user}.` : 'ListenBrainz connected.';

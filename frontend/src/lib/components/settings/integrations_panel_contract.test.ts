@@ -48,6 +48,8 @@ describe('integrations settings contract', () => {
 		expect(source).toContain('status?.scrobbling && status.user');
 		expect(source).toContain('API key saved. Add the Last.fm API secret');
 		expect(source).toContain('Credentials saved. Start account auth');
+		expect(source).toContain('canSaveLastfmConfig');
+		expect(source).toContain('if (lastfmApiKey.trim()) return true');
 		expect(source).toContain('Save secret');
 	});
 

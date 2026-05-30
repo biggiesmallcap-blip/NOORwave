@@ -21,6 +21,8 @@ describe('listening services onboarding contract', () => {
 		expect(source).toContain('api.saveLastfmConfig');
 		expect(source).toContain('api.lastfmAuthStart');
 		expect(source).toContain('api.saveListenBrainzConfig');
+		expect(source).toContain("result.status !== 'ok'");
+		expect(source).toContain("response.status !== 'ok'");
 		expect(source).toContain('API key');
 		expect(source).toContain('Shared secret');
 		expect(source).toContain('User token');

@@ -16,7 +16,11 @@ describe('home recommendations shelf contract', () => {
 		expect(source).toContain('onMount');
 		expect(source).toContain('api.getLastfmStatus()');
 		expect(source).toContain('api.getListenBrainzStatus()');
+		expect(source).toContain('lastfm.value.recommendations');
+		expect(source).toContain('listenbrainz.value.recommendations');
 		expect(source).toContain('api.getHomeRecommendations()');
+		expect(source).not.toContain('Boolean(lastfm.value.scrobbling)');
+		expect(source).not.toContain('Boolean(listenbrainz.value.scrobbling)');
 		expect(client).toContain('/api/home/recommendations');
 	});
 

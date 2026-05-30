@@ -49,6 +49,18 @@
 		return Number(Boolean(lastfm?.scrobbling)) + Number(Boolean(listenbrainz?.scrobbling));
 	}
 
+	function canSaveLastfmConfig(): boolean {
+		if (busy !== null) return false;
+		if (lastfmApiKey.trim()) return true;
+		return Boolean(lastfm?.api_key_configured && lastfmApiSecret.trim());
+	}
+
+	function lastfmSaveLabel(): string {
+		if (busy === 'lastfm-save') return 'Saving...';
+		if (lastfmApiKey.trim()) return lastfm?.api_key_configured ? 'Save API key' : 'Save credentials';
+		return 'Save secret';
+	}
+
 	function pendingSubmissionCount(): number {
 		return Math.max(lastfm?.pending_submissions ?? 0, listenbrainz?.pending_submissions ?? 0);
 	}
@@ -113,7 +125,7 @@
 			if (result.status === 'ok') {
 				lastfmApiKey = '';
 				lastfmApiSecret = '';
-				lastfmMessage = 'Last.fm API credentials saved.';
+				lastfmMessage = 'Last.fm API settings saved.';
 				await refresh();
 			} else {
 				lastfmMessage = result.message ?? 'Last.fm rejected those credentials.';
@@ -276,9 +288,9 @@
 				<button
 					class="btn btn-primary"
 					onclick={saveLastfm}
-					disabled={busy !== null || !lastfmApiSecret.trim() || (!lastfmApiKey.trim() && !lastfm?.api_key_configured)}
+					disabled={!canSaveLastfmConfig()}
 				>
-					{busy === 'lastfm-save' ? 'Saving...' : lastfm?.api_key_configured ? 'Save secret' : 'Save credentials'}
+					{lastfmSaveLabel()}
 				</button>
 				<button class="btn btn-glass" onclick={() => void openExternal('https://www.last.fm/api/account/create')}>Create app</button>
 			</div>
