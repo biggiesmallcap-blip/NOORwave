@@ -1486,15 +1486,16 @@ pub fn next_track(conn: &Connection, recently_cleared: bool) -> Result<PlaybackS
 
     let current_index =
         playback_anchor_index(&queue_items, current_track_id, current_queue_item_id);
+    let has_no_anchor = current_track_id.is_none() && current_queue_item_id.is_none();
 
     let next_track = match repeat_mode.as_str() {
         "one" => current_index
             .and_then(|idx| queue_items.get(idx))
-            .or_else(|| queue_items.first()),
+            .or_else(|| has_no_anchor.then(|| queue_items.first()).flatten()),
         _ => current_index
             .and_then(|idx| queue_items.get(idx + 1))
             .or_else(|| {
-                if current_index.is_none() || repeat_mode == "all" {
+                if has_no_anchor || repeat_mode == "all" {
                     queue_items.first()
                 } else {
                     None
@@ -1650,15 +1651,16 @@ pub fn peek_next_track(conn: &Connection, recently_cleared: bool) -> Result<Opti
 
     let current_index =
         playback_anchor_index(&queue_items, current_track_id, current_queue_item_id);
+    let has_no_anchor = current_track_id.is_none() && current_queue_item_id.is_none();
 
     let next = match repeat_mode.as_str() {
         "one" => current_index
             .and_then(|idx| queue_items.get(idx))
-            .or_else(|| queue_items.first()),
+            .or_else(|| has_no_anchor.then(|| queue_items.first()).flatten()),
         _ => current_index
             .and_then(|idx| queue_items.get(idx + 1))
             .or_else(|| {
-                if current_index.is_none() || repeat_mode == "all" {
+                if has_no_anchor || repeat_mode == "all" {
                     queue_items.first()
                 } else {
                     None
@@ -4167,6 +4169,46 @@ mod tests {
             snapshot.queue.first().map(|item| item.id)
         );
         assert!(snapshot.state.is_playing);
+    }
+
+    #[test]
+    fn next_track_stops_when_current_anchor_is_stale() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[2, 3]);
+        queue::replace_queue(&conn, &tracks, "test").unwrap();
+
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 9999, current_queue_item_id = NULL, is_playing = 1
+             WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+        let snapshot = next_track(&conn, false).unwrap();
+
+        assert_eq!(snapshot.state.current_track.as_ref().map(|t| t.id), None);
+        assert_eq!(snapshot.state.current_queue_item_id, None);
+        assert!(!snapshot.state.is_playing);
+    }
+
+    #[test]
+    fn peek_next_track_returns_none_when_current_anchor_is_stale() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[2, 3]);
+        queue::replace_queue(&conn, &tracks, "test").unwrap();
+
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 9999, current_queue_item_id = NULL, is_playing = 1
+             WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+        let next = peek_next_track(&conn, false).unwrap();
+
+        assert!(next.is_none());
     }
 
     #[test]

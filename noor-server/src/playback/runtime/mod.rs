@@ -186,6 +186,19 @@ pub struct PlaybackRuntimeHandle {
 }
 
 impl PlaybackRuntimeHandle {
+    #[cfg(test)]
+    pub(crate) fn test_with_command_tx(command_tx: mpsc::Sender<PlaybackRuntimeCommand>) -> Self {
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        Self {
+            command_tx,
+            event_tx,
+            volume_ctl: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            position_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
+            buffered_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
+            offset_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
+        }
+    }
+
     pub fn play(&self, job: PreparedPlaybackJob) -> Result<()> {
         self.send(PlaybackRuntimeCommand::Play(job))
     }
