@@ -42,4 +42,12 @@ describe('artist page layout contracts', () => {
 		expect(source).toContain('worldPlayCount={streamCount ?? null}');
 		expect(source).not.toContain('class="stream-badge"');
 	});
+
+	test('hero play falls back to TIDAL top tracks when the local artist has no tracks', () => {
+		expect(source).toContain('playTidalTracksNow');
+		expect(source).toContain('async function ensureTidalTopTracksForPlayback()');
+		expect(source).toContain('if (tracks.length > 0)');
+		expect(source).toContain('await playTidalTracksNow(playable, artist?.name ?? \'artist\')');
+		expect(source).toContain('await playArtist(artistId)');
+	});
 });

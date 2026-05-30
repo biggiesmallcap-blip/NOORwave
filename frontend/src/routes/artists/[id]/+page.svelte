@@ -9,6 +9,7 @@
 		startArtistRadio,
 		playTidalAlbum,
 		playTidalTrackNow,
+		playTidalTracksNow,
 		playAlbum,
 		toggleTrackFavorite,
 		currentTrack,
@@ -27,6 +28,7 @@
 	import { canPlayTrack } from '$lib/player/playable';
 	import { formatCompactCount } from '$lib/utils/format';
 	import { cleanArtistBio } from '../artist_bio';
+	import { artistCurrentTrackMatchesArtist } from '../artist_playback';
 
 	type ArtistRow = {
 		id: number;
@@ -357,17 +359,53 @@
 	let fallbackFullAlbums = $derived(fallbackAlbums.filter((a) => a.tracks.length >= 3));
 	let fallbackSinglesEPs = $derived(fallbackAlbums.filter((a) => a.tracks.length < 3));
 
-	function onHeroPlay() {
+	let heroPlayPending = $state(false);
+	async function ensureTidalTopTracksForPlayback(): Promise<TidalDiscographyTrack[]> {
+		if (tidalTopTracks.length > 0) return tidalTopTracks;
+		const requestedFor = artistId;
+		const res = await api.getArtistDiscography(artistId);
+		if (artistId === requestedFor) {
+			tidalAlbums = res.albums;
+			tidalTopTracks = res.top_tracks ?? [];
+			tidalVideos = res.videos ?? [];
+			tidalSimilarArtists = res.similar_artists ?? [];
+			tidalBio = res.bio ?? null;
+			tidalAvailable = res.available;
+			if (res.picture_url) tidalPictureUrl = res.picture_url;
+		}
+		return res.top_tracks ?? [];
+	}
+
+	async function onHeroPlay() {
+		if (heroPlayPending) return;
 		const current = $currentTrack;
-		if (current && tracks.some((t) => t.id === current.id)) {
+		if (artistCurrentTrackMatchesArtist(current, tracks, artist?.tidal_id, tidalTopTracks)) {
 			void togglePlayback();
-		} else {
+			return;
+		}
+		if (tracks.length > 0) {
 			void playArtist(artistId);
+			return;
+		}
+		heroPlayPending = true;
+		try {
+			const topTracks = await ensureTidalTopTracksForPlayback();
+			const playable = topTracks.map(tidalDiscographyTrackToPlayable);
+			if (playable.length > 0) {
+				await playTidalTracksNow(playable, artist?.name ?? 'artist');
+			} else {
+				await playArtist(artistId);
+			}
+		} catch (error) {
+			console.error('Failed to load TIDAL artist tracks for playback', error);
+			await playArtist(artistId);
+		} finally {
+			heroPlayPending = false;
 		}
 	}
 
 	let isArtistPlaying = $derived(
-		$isPlaying && tracks.some((t) => t.id === $currentTrack?.id)
+		$isPlaying && artistCurrentTrackMatchesArtist($currentTrack, tracks, artist?.tidal_id, tidalTopTracks)
 	);
 
 	let radioPending = $state(false);
@@ -607,7 +645,9 @@
 		<div class="actions-bar">
 			<button
 				class="play-fab"
+				class:pending={heroPlayPending}
 				aria-label={isArtistPlaying ? 'Pause' : 'Play'}
+				disabled={heroPlayPending}
 				onclick={onHeroPlay}
 			>
 				{#if isArtistPlaying}
