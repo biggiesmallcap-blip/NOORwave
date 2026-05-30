@@ -28,6 +28,8 @@ pub(super) struct ChartParams {
     /// Optional curated genre key (Last.fm only), e.g. "hip-hop".
     /// Mutually exclusive with `country`.
     tag: Option<String>,
+    /// Last.fm chart kind: "tracks" (default), "artists", or "tags".
+    kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -72,6 +74,11 @@ struct ChartEntryDto {
     /// Top genre name for the resolved local track (None for Tidal-only entries
     /// where we have no genre data without an extra API call).
     genre: Option<String>,
+    /// Entity shape for mixed Last.fm panels.
+    entity_type: String,
+    display_title: String,
+    display_subtitle: Option<String>,
+    metric_label: Option<String>,
 }
 
 const CHART_TRACK_SELECT_COLUMNS: &str =
@@ -193,7 +200,26 @@ pub(super) async fn get_charts(
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "lastfm".to_string());
+    let kind = params
+        .kind
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "tracks".to_string());
     let limit = params.limit.unwrap_or(50).clamp(1, 100);
+
+    if !matches!(kind.as_str(), "tracks" | "artists" | "tags") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "unknown_chart_kind" })),
+        ));
+    }
+    if source == "tidal" && kind != "tracks" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "unsupported_chart_kind" })),
+        ));
+    }
 
     let country_input = params
         .country
@@ -256,8 +282,9 @@ pub(super) async fn get_charts(
     };
 
     let cache_key = format!(
-        "{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}",
         source,
+        kind,
         limit,
         country_cache_token.as_deref().unwrap_or(""),
         tag_resolved.map(|g| g.key).unwrap_or("")
@@ -273,21 +300,29 @@ pub(super) async fn get_charts(
                 Json(json!({ "error": format!("tidal chart: {e}") })),
             )
         })?,
-        _ => fetch_lastfm_chart(&state, limit, country_resolved.as_deref(), tag_resolved)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": format!("lastfm chart: {e}") })),
-                )
-            })?,
+        _ => fetch_lastfm_chart(
+            &state,
+            limit,
+            &kind,
+            country_resolved.as_deref(),
+            tag_resolved,
+        )
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("lastfm chart: {e}") })),
+            )
+        })?,
     };
 
     let payload = json!({
         "source": source,
+        "kind": kind,
         "limit": limit,
         "country": country_cache_token,
         "tag": tag_resolved.map(|g| g.key),
+        "items": entries.clone(),
         "tracks": entries,
     });
     chart_cache_put(cache_key, payload.clone());
@@ -529,6 +564,7 @@ pub(super) async fn list_lastfm_countries() -> Json<Value> {
 async fn fetch_lastfm_chart(
     state: &SharedState,
     limit: u32,
+    kind: &str,
     country: Option<&str>,
     genre: Option<&'static crate::services::charts::curated::GenreEntry>,
 ) -> anyhow::Result<Vec<ChartEntryDto>> {
@@ -539,73 +575,13 @@ async fn fetch_lastfm_chart(
     let client = LastFmClient::load(http, &db)
         .ok_or_else(|| anyhow::anyhow!("Last.fm API key not configured"))?;
 
-    let tracks = if let Some(genre) = genre {
-        // Genre tag: fan out to every Last.fm tag the curated entry maps to,
-        // merge, dedupe by normalised (artist, title), sum playcounts on dupes,
-        // sort desc by playcount, truncate. Single-tag entries skip the merge.
-        if genre.lastfm_tags.len() == 1 {
-            client
-                .get_top_tracks_by_tag(genre.lastfm_tags[0], limit)
-                .await?
-        } else {
-            use futures::future::join_all;
-            // Overfetch per leg so dedup across overlapping tags doesn't shrink
-            // the merged list below the requested `limit`. Capped at Last.fm's
-            // per-call ceiling.
-            let fan_limit = limit.saturating_mul(2).min(100);
-            let calls = genre.lastfm_tags.iter().map(|tag| {
-                let c = client.clone();
-                let t = (*tag).to_string();
-                async move { c.get_top_tracks_by_tag(&t, fan_limit).await }
-            });
-            let results = join_all(calls).await;
-            let mut merged: Vec<crate::metadata::lastfm::LastFmChartTrack> = Vec::new();
-            let mut by_key: HashMap<String, usize> = HashMap::new();
-            for res in results {
-                let list = match res {
-                    Ok(l) => l,
-                    Err(e) => {
-                        tracing::warn!("tag fan-out leg failed: {}", e);
-                        continue;
-                    }
-                };
-                for t in list {
-                    let key = crate::services::radio::normalize_for_dedup(&t.artist, &t.title);
-                    if key.is_empty() {
-                        continue;
-                    }
-                    if let Some(&idx) = by_key.get(&key) {
-                        // Merge: sum playcounts/listeners; prefer the first non-empty
-                        // image and mbid (already populated on the existing entry).
-                        let existing: &mut crate::metadata::lastfm::LastFmChartTrack =
-                            &mut merged[idx];
-                        existing.playcount = match (existing.playcount, t.playcount) {
-                            (Some(a), Some(b)) => Some(a.saturating_add(b)),
-                            (a, b) => a.or(b),
-                        };
-                        existing.listeners = match (existing.listeners, t.listeners) {
-                            (Some(a), Some(b)) => Some(a.saturating_add(b)),
-                            (a, b) => a.or(b),
-                        };
-                        if existing.image_url.as_deref().unwrap_or("").is_empty() {
-                            existing.image_url = t.image_url;
-                        }
-                        if existing.mbid.is_none() {
-                            existing.mbid = t.mbid;
-                        }
-                    } else {
-                        by_key.insert(key, merged.len());
-                        merged.push(t);
-                    }
-                }
-            }
-            merged.sort_by(|a, b| b.playcount.unwrap_or(0).cmp(&a.playcount.unwrap_or(0)));
-            merged.truncate(limit as usize);
-            merged
-        }
-    } else {
-        client.get_top_chart(limit, country).await?
-    };
+    match kind {
+        "artists" => return fetch_lastfm_artist_chart(&client, limit, country, genre).await,
+        "tags" => return fetch_lastfm_tag_chart(&client, limit).await,
+        _ => {}
+    }
+
+    let tracks = load_lastfm_track_chart(&client, limit, country, genre).await?;
 
     // Resolve each (artist, title) to a local library track when present.
     // We do this in a single DB call by collecting all (artist, title) pairs
@@ -648,6 +624,11 @@ async fn fetch_lastfm_chart(
             None
         };
         out.push(ChartEntryDto {
+            display_title: t.title.clone(),
+            display_subtitle: Some(t.artist.clone()),
+            metric_label: metric_label(t.listeners, "listeners")
+                .or_else(|| metric_label(t.playcount, "plays")),
+            entity_type: "track".to_string(),
             local_track,
             tidal_playable,
             image_url: t.image_url,
@@ -656,6 +637,173 @@ async fn fetch_lastfm_chart(
         });
     }
     Ok(out)
+}
+
+async fn load_lastfm_track_chart(
+    client: &LastFmClient,
+    limit: u32,
+    country: Option<&str>,
+    genre: Option<&'static crate::services::charts::curated::GenreEntry>,
+) -> anyhow::Result<Vec<crate::metadata::lastfm::LastFmChartTrack>> {
+    if let Some(genre) = genre {
+        if genre.lastfm_tags.len() == 1 {
+            return client
+                .get_top_tracks_by_tag(genre.lastfm_tags[0], limit)
+                .await;
+        }
+        use futures::future::join_all;
+        let fan_limit = limit.saturating_mul(2).min(100);
+        let calls = genre.lastfm_tags.iter().map(|tag| {
+            let c = client.clone();
+            let t = (*tag).to_string();
+            async move { c.get_top_tracks_by_tag(&t, fan_limit).await }
+        });
+        let results = join_all(calls).await;
+        let mut merged: Vec<crate::metadata::lastfm::LastFmChartTrack> = Vec::new();
+        let mut by_key: HashMap<String, usize> = HashMap::new();
+        for res in results {
+            let list = match res {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!("tag track fan-out leg failed: {}", e);
+                    continue;
+                }
+            };
+            for t in list {
+                let key = crate::services::radio::normalize_for_dedup(&t.artist, &t.title);
+                if key.is_empty() {
+                    continue;
+                }
+                if let Some(&idx) = by_key.get(&key) {
+                    let existing = &mut merged[idx];
+                    merge_chart_counts(&mut existing.listeners, t.listeners);
+                    merge_chart_counts(&mut existing.playcount, t.playcount);
+                    if existing.image_url.as_deref().unwrap_or("").is_empty() {
+                        existing.image_url = t.image_url;
+                    }
+                    if existing.mbid.is_none() {
+                        existing.mbid = t.mbid;
+                    }
+                } else {
+                    by_key.insert(key, merged.len());
+                    merged.push(t);
+                }
+            }
+        }
+        merged.sort_by(|a, b| b.playcount.unwrap_or(0).cmp(&a.playcount.unwrap_or(0)));
+        merged.truncate(limit as usize);
+        return Ok(merged);
+    }
+    client.get_top_chart(limit, country).await
+}
+
+async fn fetch_lastfm_artist_chart(
+    client: &LastFmClient,
+    limit: u32,
+    country: Option<&str>,
+    genre: Option<&'static crate::services::charts::curated::GenreEntry>,
+) -> anyhow::Result<Vec<ChartEntryDto>> {
+    let artists = if let Some(genre) = genre {
+        if genre.lastfm_tags.len() == 1 {
+            client
+                .get_top_artists_by_tag(genre.lastfm_tags[0], limit)
+                .await?
+        } else {
+            use futures::future::join_all;
+            let fan_limit = limit.saturating_mul(2).min(100);
+            let calls = genre.lastfm_tags.iter().map(|tag| {
+                let c = client.clone();
+                let t = (*tag).to_string();
+                async move { c.get_top_artists_by_tag(&t, fan_limit).await }
+            });
+            let results = join_all(calls).await;
+            let mut merged: Vec<crate::metadata::lastfm::LastFmChartArtist> = Vec::new();
+            let mut by_key: HashMap<String, usize> = HashMap::new();
+            for res in results {
+                let list = match res {
+                    Ok(l) => l,
+                    Err(e) => {
+                        tracing::warn!("tag artist fan-out leg failed: {}", e);
+                        continue;
+                    }
+                };
+                for artist in list {
+                    let key = artist.name.trim().to_ascii_lowercase();
+                    if key.is_empty() {
+                        continue;
+                    }
+                    if let Some(&idx) = by_key.get(&key) {
+                        let existing = &mut merged[idx];
+                        merge_chart_counts(&mut existing.listeners, artist.listeners);
+                        merge_chart_counts(&mut existing.playcount, artist.playcount);
+                        if existing.image_url.as_deref().unwrap_or("").is_empty() {
+                            existing.image_url = artist.image_url;
+                        }
+                        if existing.mbid.is_none() {
+                            existing.mbid = artist.mbid;
+                        }
+                    } else {
+                        by_key.insert(key, merged.len());
+                        merged.push(artist);
+                    }
+                }
+            }
+            merged.sort_by(|a, b| b.listeners.unwrap_or(0).cmp(&a.listeners.unwrap_or(0)));
+            merged.truncate(limit as usize);
+            merged
+        }
+    } else {
+        client.get_top_artists(limit, country).await?
+    };
+
+    Ok(artists
+        .into_iter()
+        .map(|artist| ChartEntryDto {
+            local_track: None,
+            tidal_playable: None,
+            image_url: artist.image_url,
+            source: "lastfm".to_string(),
+            genre: None,
+            entity_type: "artist".to_string(),
+            display_title: artist.name,
+            display_subtitle: Some("Artist".to_string()),
+            metric_label: metric_label(artist.listeners, "listeners")
+                .or_else(|| metric_label(artist.playcount, "plays")),
+        })
+        .collect())
+}
+
+async fn fetch_lastfm_tag_chart(
+    client: &LastFmClient,
+    limit: u32,
+) -> anyhow::Result<Vec<ChartEntryDto>> {
+    let tags = client.get_top_tags(limit).await?;
+    Ok(tags
+        .into_iter()
+        .map(|tag| ChartEntryDto {
+            local_track: None,
+            tidal_playable: None,
+            image_url: None,
+            source: "lastfm".to_string(),
+            genre: None,
+            entity_type: "tag".to_string(),
+            display_title: tag.name,
+            display_subtitle: Some("Tag".to_string()),
+            metric_label: metric_label(tag.reach, "reach")
+                .or_else(|| metric_label(tag.count, "uses")),
+        })
+        .collect())
+}
+
+fn merge_chart_counts(target: &mut Option<u64>, incoming: Option<u64>) {
+    *target = match (*target, incoming) {
+        (Some(a), Some(b)) => Some(a.saturating_add(b)),
+        (a, b) => a.or(b),
+    };
+}
+
+fn metric_label(value: Option<u64>, label: &str) -> Option<String> {
+    value.map(|n| format!("{} {}", n, label))
 }
 
 async fn fetch_tidal_chart(state: &SharedState, limit: i32) -> anyhow::Result<Vec<ChartEntryDto>> {
@@ -756,6 +904,10 @@ async fn fetch_tidal_chart(state: &SharedState, limit: i32) -> anyhow::Result<Ve
             tidal_playable,
             source: "tidal".to_string(),
             genre,
+            entity_type: "track".to_string(),
+            display_title: t.title.clone(),
+            display_subtitle: t.artist_name.clone(),
+            metric_label: None,
         });
     }
     Ok(out)
