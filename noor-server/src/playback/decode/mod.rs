@@ -1077,12 +1077,9 @@ mod tests {
     }
 
     async fn retryable_test_timeout() -> Result<Vec<u8>> {
-        tokio::time::timeout(
-            Duration::from_millis(1),
-            tokio::time::sleep(Duration::from_millis(10)),
-        )
-        .await
-        .context("test retryable timeout")?;
+        tokio::time::timeout(Duration::from_millis(1), std::future::pending::<()>())
+            .await
+            .context("test retryable timeout")?;
         Ok(Vec::new())
     }
 
