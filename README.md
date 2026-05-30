@@ -28,9 +28,9 @@
 
 ## What It Is
 
-NOORwave is a desktop music player for people who want more control than a normal streaming app gives them. It syncs your TIDAL library into local SQLite, runs a Rust playback server on your machine, and serves a SvelteKit interface through a Tauri desktop shell.
+NOORwave is a desktop TIDAL player built around a simple idea: your streaming library should behave like a fast local music collection.
 
-It is built for fast library work, serious playback, and discovery that learns from your own listening. The app stays local by default. TIDAL, Last.fm, MusicBrainz, Spotify metadata, and optional services enrich the library without turning NOORwave into a cloud account.
+It syncs your TIDAL library into SQLite, gives you a real desktop app with tray and media-key support, adds lossless playback controls, and lets you shape the queue with search, radio, automix, DJ profiles, and a phone remote. The backend runs locally on your machine, so the app can stay quick, inspectable, and useful even when the library gets large.
 
 ## Product Tour
 
@@ -69,15 +69,17 @@ It is built for fast library work, serious playback, and discovery that learns f
 | Phone remote | Installable `/remote` PWA for transport, queue, search, library browsing, action sheets, sleep timer. |
 | Video | TIDAL video search and in-app HLS playback with quality selector and autoplay. |
 
-## Why It Exists
+## Why NOORwave
 
-Most streaming apps hide the interesting parts of a music library. NOORwave makes them visible:
+NOORwave is for people who like TIDAL's catalog but want a better command center around it.
 
-- Search by genre, year, BPM, key, energy, artist, album, playlist, or natural intent.
-- Build playback from taste signals instead of a generic recommendation feed.
-- Keep the queue inspectable, editable, and recoverable.
-- Use local metadata and listening history to make radio better over time.
-- Keep portable builds available even as the installed updater matures.
+- **TIDAL feels local.** Your saved tracks, albums, artists, playlists, and metadata live in a local database, so search and browsing do not feel trapped behind a remote app shell.
+- **Playback is treated as the product.** Lossless streaming, DASH seek behavior, gapless transitions, crossfade, media keys, tray controls, and Windows WASAPI exclusive mode are built into the core player.
+- **The queue is yours.** Play next, append, reorder, save, undo clear, shuffle by intent, inspect radio reasons, and keep automix from fighting your manual choices.
+- **DJ mode is a control surface, not a gimmick.** Profiles, harmonic matching, BPM and energy awareness, transition planning, and automix controls are there for shaping a session, not just filling silence.
+- **The phone remote makes it practical.** Open `/remote` from a phone on the LAN and control playback, queue, search, library pages, sleep timer, and track actions from the couch.
+
+The point is not every integration NOORwave can talk to. The point is a faster, more controllable TIDAL setup for people who actively listen, build queues, and care how playback moves from one track to the next.
 
 ## Download
 
