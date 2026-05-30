@@ -11,7 +11,6 @@ pub mod scanner;
 pub mod tempo;
 
 pub const CURRENT_ANALYSIS_VERSION: &str = "v9";
-pub(crate) const BACKGROUND_ANALYSIS_MIN_BUFFER_AHEAD_MS: i64 = 15_000;
 
 /// Server-config key controlling whether the playback-driven actor analyses
 /// audio at all. Defaults to enabled. Stored in the `server_config` k/v table
@@ -48,18 +47,10 @@ pub fn set_passive_enabled(conn: &Connection, enabled: bool) -> rusqlite::Result
 pub(crate) fn should_defer_background_analysis_for_playback(
     is_playing: bool,
     runtime_present: bool,
-    audio_active: bool,
-    buffer_ahead_ms: Option<i64>,
+    _audio_active: bool,
+    _buffer_ahead_ms: Option<i64>,
 ) -> bool {
-    if !is_playing || !runtime_present {
-        return false;
-    }
-    if !audio_active {
-        return true;
-    }
-    buffer_ahead_ms
-        .map(|ms| ms < BACKGROUND_ANALYSIS_MIN_BUFFER_AHEAD_MS)
-        .unwrap_or(true)
+    is_playing && runtime_present
 }
 
 pub type AnalysisJob = (i64, Vec<f32>, u32); // (track_id, mono_samples, sample_rate)
@@ -293,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn background_analysis_defers_until_playback_has_buffer_runway() {
+    fn background_analysis_defers_while_foreground_playback_is_active() {
         assert!(!should_defer_background_analysis_for_playback(
             false,
             true,
@@ -313,13 +304,7 @@ mod tests {
             true,
             true,
             true,
-            Some(BACKGROUND_ANALYSIS_MIN_BUFFER_AHEAD_MS - 1),
-        ));
-        assert!(!should_defer_background_analysis_for_playback(
-            true,
-            true,
-            true,
-            Some(BACKGROUND_ANALYSIS_MIN_BUFFER_AHEAD_MS),
+            Some(i64::MAX),
         ));
     }
 

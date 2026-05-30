@@ -605,7 +605,7 @@ async fn load_candidates(state: &SharedState) -> Result<(Vec<PrescanCandidate>, 
 
 async fn run_batch(state: &SharedState, event_rx: &mut broadcast::Receiver<AppEvent>) {
     // Respect the global passive-DSP toggle.
-    let (passive_on, playback_needs_network) = {
+    let (passive_on, defer_for_playback) = {
         let state_guard = state.read().await;
         state_guard
             .db
@@ -620,8 +620,8 @@ async fn run_batch(state: &SharedState, event_rx: &mut broadcast::Receiver<AppEv
     if !passive_on {
         return;
     }
-    if playback_needs_network {
-        tracing::debug!("queue prescanner deferred while playback needs network priority");
+    if defer_for_playback {
+        tracing::debug!("queue prescanner deferred during foreground playback");
         return;
     }
 

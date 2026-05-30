@@ -8,6 +8,7 @@ use axum::{
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,7 @@ const MOOD_THUMBNAIL_FETCH_CONCURRENCY: usize = 4;
 const MOOD_THUMBNAIL_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 const TIDAL_HOME_MODULES_PAGE_PATH: &str = "pages/home";
 const ROUTE_TIMING_INFO_THRESHOLD_MS: u128 = 500;
+static TIDAL_MOODS_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 const DEFAULT_TIDAL_MOOD_CATEGORIES: &[(&str, &str)] = &[
     ("mood_party", "Party"),
     ("mood_workout", "Workout"),
@@ -43,6 +45,30 @@ enum MoodProbeOutcome {
     Error {
         slug: String,
     },
+}
+
+struct TidalMoodsRefreshGuard;
+
+impl Drop for TidalMoodsRefreshGuard {
+    fn drop(&mut self) {
+        TIDAL_MOODS_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
+    }
+}
+
+fn try_begin_tidal_moods_refresh() -> Option<TidalMoodsRefreshGuard> {
+    TIDAL_MOODS_REFRESH_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .ok()
+        .map(|_| TidalMoodsRefreshGuard)
+}
+
+fn mood_probe_failed_without_results(
+    fetched: usize,
+    cache_hits: usize,
+    timeouts: usize,
+    errors: usize,
+) -> bool {
+    fetched == 0 && cache_hits == 0 && (timeouts > 0 || errors > 0)
 }
 
 /// Returns the authenticated user's TIDAL mixes (Daily Discovery, My Mix N,
@@ -670,7 +696,7 @@ pub(super) async fn get_tidal_moods(
 
     put_cached_tidal_mood_categories(&mood_cache, response_categories.clone());
 
-    {
+    if let Some(refresh_guard) = try_begin_tidal_moods_refresh() {
         let state_bg = state.clone();
         let mood_cache_bg = mood_cache.clone();
         let page_modules_cache_bg = page_modules_cache.clone();
@@ -678,6 +704,7 @@ pub(super) async fn get_tidal_moods(
         let http_client_bg = http_client;
         let tidal_http_client_bg = tidal_http_client.clone();
         tokio::spawn(async move {
+            let _refresh_guard = refresh_guard;
             refresh_tidal_moods_cache(
                 state_bg,
                 mood_cache_bg,
@@ -688,29 +715,12 @@ pub(super) async fn get_tidal_moods(
             )
             .await;
         });
-    }
-
-    if !pending_probe_slugs.is_empty() {
-        let mood_cache_bg = mood_cache.clone();
-        let page_modules_cache_bg = page_modules_cache.clone();
-        let probe_seed_categories = response_categories.clone();
-        let probe_client = TidalClient::with_http(
-            tidal_http_client,
-            tokens.access_token.clone(),
-            tokens.country_code.clone(),
+    } else if pending_probe_count > 0 {
+        tracing::debug!(
+            route = "tidal_moods",
+            background_probe_slugs = pending_probe_count,
+            "TIDAL moods refresh already running"
         );
-        let country_code = tokens.country_code.clone();
-        tokio::spawn(async move {
-            run_mood_thumbnail_probe_refresh(
-                mood_cache_bg,
-                page_modules_cache_bg,
-                probe_client,
-                country_code,
-                probe_seed_categories,
-                pending_probe_slugs,
-            )
-            .await;
-        });
     }
 
     let elapsed_ms = started_at.elapsed().as_millis();
@@ -982,11 +992,7 @@ async fn run_mood_thumbnail_probe_refresh(
         }
     }
 
-    if fetched == 0 && cache_hits == 0 && (timeouts > 0 || errors > 0) {
-        // All background probes failed, so do not lock in a 6h stale mood
-        // cache without thumbnails. Clearing forces a fresh retry on next call.
-        let mut guard = mood_cache.lock().unwrap();
-        *guard = None;
+    if mood_probe_failed_without_results(fetched, cache_hits, timeouts, errors) {
         tracing::warn!(
             route = "tidal_moods_probe",
             elapsed_ms = started_at.elapsed().as_millis(),
@@ -994,7 +1000,7 @@ async fn run_mood_thumbnail_probe_refresh(
             timeouts,
             errors,
             timeout_ms = MOOD_THUMBNAIL_PROBE_TIMEOUT.as_millis(),
-            "All mood probes failed, clearing mood cache for retry"
+            "All mood probes failed, keeping mood cache to avoid retry storm"
         );
         return;
     }
@@ -1078,7 +1084,13 @@ fn extract_page_links(payload: &Value) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, LazyLock, Mutex};
+
+    static TIDAL_MOODS_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    fn reset_tidal_moods_refresh_guard_for_tests() {
+        TIDAL_MOODS_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
+    }
 
     #[test]
     fn tidal_mood_category_cache_returns_fresh_entries_and_expires_stale_entries() {
@@ -1102,6 +1114,28 @@ mod tests {
 
         assert!(get_cached_tidal_mood_categories(&cache).is_none());
         assert!(cache.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn tidal_moods_refresh_guard_allows_one_refresh_at_a_time() {
+        let _guard = TIDAL_MOODS_TEST_LOCK.lock().expect("moods test lock");
+        reset_tidal_moods_refresh_guard_for_tests();
+
+        let guard = try_begin_tidal_moods_refresh().expect("first refresh starts");
+        assert!(try_begin_tidal_moods_refresh().is_none());
+
+        drop(guard);
+        assert!(try_begin_tidal_moods_refresh().is_some());
+        reset_tidal_moods_refresh_guard_for_tests();
+    }
+
+    #[test]
+    fn failed_mood_probe_without_results_keeps_existing_cache() {
+        assert!(mood_probe_failed_without_results(0, 0, 1, 0));
+        assert!(mood_probe_failed_without_results(0, 0, 0, 1));
+        assert!(!mood_probe_failed_without_results(1, 0, 1, 0));
+        assert!(!mood_probe_failed_without_results(0, 1, 0, 1));
+        assert!(!mood_probe_failed_without_results(0, 0, 0, 0));
     }
 
     #[test]
