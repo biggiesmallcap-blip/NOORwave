@@ -44,11 +44,9 @@ pub fn set_passive_enabled(conn: &Connection, enabled: bool) -> rusqlite::Result
     Ok(())
 }
 
-pub(crate) fn should_defer_background_analysis_for_playback(
+pub(crate) fn should_defer_background_analysis_for_active_playback(
     is_playing: bool,
     runtime_present: bool,
-    _audio_active: bool,
-    _buffer_ahead_ms: Option<i64>,
 ) -> bool {
     is_playing && runtime_present
 }
@@ -285,26 +283,14 @@ mod tests {
 
     #[test]
     fn background_analysis_defers_while_foreground_playback_is_active() {
-        assert!(!should_defer_background_analysis_for_playback(
-            false,
-            true,
-            true,
-            Some(0),
+        assert!(!should_defer_background_analysis_for_active_playback(
+            false, true,
         ));
-        assert!(!should_defer_background_analysis_for_playback(
-            true,
-            false,
-            true,
-            Some(0),
+        assert!(!should_defer_background_analysis_for_active_playback(
+            true, false,
         ));
-        assert!(should_defer_background_analysis_for_playback(
-            true, true, false, None,
-        ));
-        assert!(should_defer_background_analysis_for_playback(
-            true,
-            true,
-            true,
-            Some(i64::MAX),
+        assert!(should_defer_background_analysis_for_active_playback(
+            true, true,
         ));
     }
 

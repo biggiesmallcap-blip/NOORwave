@@ -382,6 +382,11 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
         return Ok(false);
     };
 
+    if should_defer_prescan_for_foreground_playback(state).await {
+        tracing::debug!(track_id, "prescanner skip: foreground playback active");
+        return Ok(false);
+    }
+
     tracing::info!(track_id, tidal_id, "prescanner: starting analysis");
 
     let stream_info = match resolve_prescan_stream(
@@ -612,7 +617,7 @@ async fn run_batch(state: &SharedState, event_rx: &mut broadcast::Receiver<AppEv
             .with_conn(|conn| {
                 Ok::<_, anyhow::Error>((
                     super::is_passive_enabled(conn),
-                    foreground_playback_needs_network_priority(conn, &state_guard)?,
+                    foreground_playback_is_active(conn, &state_guard)?,
                 ))
             })
             .unwrap_or((true, false))
@@ -652,6 +657,11 @@ async fn run_batch(state: &SharedState, event_rx: &mut broadcast::Receiver<AppEv
                 Err(broadcast::error::TryRecvError::Closed) => return,
                 Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
             }
+        }
+
+        if should_defer_prescan_for_foreground_playback(state).await {
+            tracing::debug!("queue prescanner deferred during foreground playback");
+            return;
         }
 
         match tokio::time::timeout(
@@ -694,42 +704,23 @@ async fn run_batch(state: &SharedState, event_rx: &mut broadcast::Receiver<AppEv
     }
 }
 
-fn foreground_playback_needs_network_priority(
+async fn should_defer_prescan_for_foreground_playback(state: &SharedState) -> bool {
+    let state_guard = state.read().await;
+    state_guard
+        .db
+        .with_conn(|conn| foreground_playback_is_active(conn, &state_guard))
+        .unwrap_or(false)
+}
+
+fn foreground_playback_is_active(
     conn: &rusqlite::Connection,
     state: &crate::AppState,
 ) -> anyhow::Result<bool> {
     let is_playing = crate::playback::player::load_state(conn)?.is_playing;
     let runtime_present = state.playback_runtime.is_some();
-    if !is_playing || !runtime_present {
-        return Ok(false);
-    }
-    let audio_active = state
-        .audio_active
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let buffer_ahead_ms = if audio_active {
-        state
-            .playback_runtime
-            .as_ref()
-            .zip(state.playback_runtime_info.as_ref())
-            .map(|(runtime, info)| {
-                let position_ms = runtime
-                    .handle
-                    .get_position_ms(info.sample_rate, info.channels)
-                    .max(0);
-                let buffered_ms = runtime
-                    .handle
-                    .get_buffered_ms(info.sample_rate, info.channels)
-                    .max(0);
-                buffered_ms.saturating_sub(position_ms)
-            })
-    } else {
-        None
-    };
-    Ok(super::should_defer_background_analysis_for_playback(
+    Ok(super::should_defer_background_analysis_for_active_playback(
         is_playing,
         runtime_present,
-        audio_active,
-        buffer_ahead_ms,
     ))
 }
 

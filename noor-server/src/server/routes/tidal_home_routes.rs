@@ -12,10 +12,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-type TidalMoodCategoriesCache = Arc<Mutex<Option<(Instant, Vec<Value>)>>>;
+type TidalMoodCategoriesCache = Arc<Mutex<Option<(Instant, Duration, Vec<Value>)>>>;
 type TidalPageModulesCache = Arc<Mutex<HashMap<String, (Instant, Vec<TidalHomeModule>)>>>;
 
 const TIDAL_HOME_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+const TIDAL_MOODS_FALLBACK_CACHE_TTL: Duration = Duration::from_secs(60);
 const MOOD_THUMBNAIL_FETCH_CONCURRENCY: usize = 4;
 const MOOD_THUMBNAIL_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 const TIDAL_HOME_MODULES_PAGE_PATH: &str = "pages/home";
@@ -694,7 +695,11 @@ pub(super) async fn get_tidal_moods(
         apply_cached_mood_category_probes(categories, &tokens.country_code, &page_modules_cache);
     let pending_probe_count = pending_probe_slugs.len();
 
-    put_cached_tidal_mood_categories(&mood_cache, response_categories.clone());
+    put_cached_tidal_mood_categories_with_ttl(
+        &mood_cache,
+        response_categories.clone(),
+        TIDAL_MOODS_FALLBACK_CACHE_TTL,
+    );
 
     if let Some(refresh_guard) = try_begin_tidal_moods_refresh() {
         let state_bg = state.clone();
@@ -1023,8 +1028,8 @@ async fn run_mood_thumbnail_probe_refresh(
 
 fn get_cached_tidal_mood_categories(cache: &TidalMoodCategoriesCache) -> Option<Vec<Value>> {
     let mut guard = cache.lock().unwrap();
-    if let Some((stored_at, cached)) = guard.as_ref()
-        && stored_at.elapsed() < TIDAL_HOME_CACHE_TTL
+    if let Some((stored_at, ttl, cached)) = guard.as_ref()
+        && stored_at.elapsed() < *ttl
     {
         return Some(cached.clone());
     }
@@ -1033,8 +1038,16 @@ fn get_cached_tidal_mood_categories(cache: &TidalMoodCategoriesCache) -> Option<
 }
 
 fn put_cached_tidal_mood_categories(cache: &TidalMoodCategoriesCache, categories: Vec<Value>) {
+    put_cached_tidal_mood_categories_with_ttl(cache, categories, TIDAL_HOME_CACHE_TTL);
+}
+
+fn put_cached_tidal_mood_categories_with_ttl(
+    cache: &TidalMoodCategoriesCache,
+    categories: Vec<Value>,
+    ttl: Duration,
+) {
     let mut guard = cache.lock().unwrap();
-    *guard = Some((Instant::now(), categories));
+    *guard = Some((Instant::now(), ttl, categories));
 }
 
 /// Walks `rows[].modules[]` and pulls items from any module of `type ==
@@ -1108,6 +1121,7 @@ mod tests {
             let mut guard = cache.lock().unwrap();
             *guard = Some((
                 Instant::now() - Duration::from_secs(6 * 60 * 60 + 1),
+                TIDAL_HOME_CACHE_TTL,
                 categories,
             ));
         }
@@ -1136,6 +1150,26 @@ mod tests {
         assert!(!mood_probe_failed_without_results(1, 0, 1, 0));
         assert!(!mood_probe_failed_without_results(0, 1, 0, 1));
         assert!(!mood_probe_failed_without_results(0, 0, 0, 0));
+    }
+
+    #[test]
+    fn fallback_mood_cache_uses_short_retry_ttl() {
+        let cache = Arc::new(Mutex::new(None));
+        let categories = vec![json!({ "slug": "mood_party", "title": "Party" })];
+
+        put_cached_tidal_mood_categories_with_ttl(
+            &cache,
+            categories,
+            TIDAL_MOODS_FALLBACK_CACHE_TTL,
+        );
+
+        {
+            let mut guard = cache.lock().unwrap();
+            let (_, ttl, cached) = guard.as_ref().expect("fallback cached").clone();
+            *guard = Some((Instant::now() - ttl - Duration::from_millis(1), ttl, cached));
+        }
+
+        assert!(get_cached_tidal_mood_categories(&cache).is_none());
     }
 
     #[test]

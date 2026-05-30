@@ -99,8 +99,15 @@ pub struct AppState {
     /// 6h TTL cache for the TIDAL moods landing categories. The handler
     /// hydrates category thumbnails from multiple upstream pages, so keep the
     /// computed list in memory instead of repeating that fan-out per request.
-    pub tidal_moods_cache:
-        Arc<std::sync::Mutex<Option<(std::time::Instant, Vec<serde_json::Value>)>>>,
+    pub tidal_moods_cache: Arc<
+        std::sync::Mutex<
+            Option<(
+                std::time::Instant,
+                std::time::Duration,
+                Vec<serde_json::Value>,
+            )>,
+        >,
+    >,
     /// 6h TTL cache for parsed TIDAL pages such as mood drill-down pages.
     pub tidal_page_modules_cache: Arc<
         std::sync::Mutex<
