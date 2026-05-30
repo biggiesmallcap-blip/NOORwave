@@ -2773,8 +2773,6 @@ mod tests {
             manual_drop_markers_ms: Vec::new(),
             mix_in_markers_ms: Vec::new(),
             mix_out_markers_ms: Vec::new(),
-            drop_markers_ms: Vec::new(),
-            manual_drop_markers_ms: Vec::new(),
             passive_analysis_status: None,
             passive_analysis_reason: None,
             safe_crossfade_only: false,

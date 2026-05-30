@@ -4190,7 +4190,7 @@ mod tests {
     }
 
     #[test]
-    fn handoff_mixer_preserves_unfinished_next_buffer() {
+    fn handoff_mixer_preserves_unfinished_next_estimated_total() {
         let mut state = test_runtime_loop_state();
         start_dj_lookahead_in_state(
             &mut state,
