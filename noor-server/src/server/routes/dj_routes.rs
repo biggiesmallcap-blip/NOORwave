@@ -27,6 +27,7 @@ use crate::playback::runtime::commands::PlaybackRuntimeCommand;
 use crate::playback::runtime::shared::PlaybackSharedState;
 use crate::services::audio_analysis::dj_profile::{
     DJ_WAVEFORM_PEAK_COUNT, decode_f32_blob, decode_u32_blob, dj_profile_row_is_current,
+    encode_f32_blob,
 };
 use crate::services::tidal::stream as tidal_stream;
 
@@ -43,7 +44,9 @@ const DROP_PREVIEW_FINAL_WINDOW_GUARD_MS: i64 = 45_000;
 #[cfg(test)]
 const DJ_READY_PAIR_PLANNING_RETRY_SECS: u64 = 15;
 const DJ_PROFILE_REBUILD_FAILURE_TTL_SECS: u64 = 300;
-const DJ_PROFILE_ANALYSIS_TIDAL_QUALITY: &str = "LOW";
+const DJ_PROFILE_ANALYSIS_TIDAL_QUALITIES: [&str; 2] = ["LOW", "LOSSLESS"];
+const MAX_MANUAL_DROP_MARKERS: usize = 16;
+const MAX_MANUAL_DROP_MARKER_MS: i64 = 30 * 60 * 1_000;
 
 #[cfg(test)]
 type ReadyPairPlanningKey = (i64, u64);
@@ -119,6 +122,7 @@ struct DjProfileCorrectionRequest {
     phrase_offset_bars: Option<i64>,
     safe_crossfade_only: Option<bool>,
     transition_speed_bias: Option<String>,
+    manual_drop_markers_ms: Option<Vec<i64>>,
     notes: Option<String>,
 }
 
@@ -131,6 +135,7 @@ struct DjProfileCorrectionResponse {
     phrase_offset_bars: Option<i64>,
     safe_crossfade_only: bool,
     transition_speed_bias: Option<String>,
+    manual_drop_markers_ms: Vec<i64>,
     notes: Option<String>,
     applies: String,
 }
@@ -201,10 +206,10 @@ struct DjDeckStatus {
     beat_markers_ms: Vec<i64>,
     downbeat_markers_ms: Vec<i64>,
     phrase_markers_ms: Vec<i64>,
-    mix_in_markers_ms: Vec<i64>,
-    mix_out_markers_ms: Vec<i64>,
     drop_markers_ms: Vec<i64>,
     manual_drop_markers_ms: Vec<i64>,
+    mix_in_markers_ms: Vec<i64>,
+    mix_out_markers_ms: Vec<i64>,
     passive_analysis_status: Option<String>,
     passive_analysis_reason: Option<String>,
     safe_crossfade_only: bool,
@@ -265,6 +270,7 @@ struct DjOverlayDetails {
     overlay_end_ms: Option<i64>,
     tempo_ratio: Option<f64>,
     deck_b_start_frame: u64,
+    drop_marker_ms: Option<i64>,
     drop_source: String,
 }
 
@@ -541,7 +547,10 @@ async fn get_status(
                 let tuning_deltas = latest_fired_dj_timing_deltas(conn, 20)?;
                 let timing_history_summary =
                     summarize_timing_history(&recent_timing_events, &tuning_deltas);
-                let renderer_status = renderer_status_for_transition(latest_transition.as_ref());
+                let mut renderer_status =
+                    renderer_status_for_transition(latest_transition.as_ref());
+                renderer_status.overlay_details =
+                    annotate_overlay_drop_source(renderer_status.overlay_details, next.as_ref());
                 let drop_preview = drop_preview_status(
                     conn,
                     enabled,
@@ -937,7 +946,7 @@ async fn queue_tidal_profile_rebuild(
         });
     };
 
-    let request = dj_profile_analysis_stream_request(tidal_id);
+    let requests = dj_profile_analysis_stream_requests(tidal_id);
     let track = rebuild_track_for_tidal_ref(&state, tidal_id).await;
     let (http_client, generation) = {
         let state_guard = state.read().await;
@@ -951,16 +960,91 @@ async fn queue_tidal_profile_rebuild(
     let config = PlaybackRuntimeConfig::new(http_client, tokens.access_token, None)
         .with_dj_analysis(true, Some(dj_analysis_tx))
         .for_dj_analysis_only();
-    let job = player::PreparedPlaybackJob::new(
-        track.clone(),
-        PlaybackSourceRequest::TidalStream(request),
-        GaplessPlan::disabled(),
-    )
-    .with_generation(generation)
-    .with_dj_media_ref(media_ref);
+
+    let inflight_for_decode = inflight.clone();
+    let inflight_key_for_decode = inflight_key.clone();
+    let failure_key = inflight_key.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut last_error = None;
+        let mut decoded = false;
+        for (attempt_index, request) in requests.into_iter().enumerate() {
+            let quality = request.audio_quality.clone();
+            let job = player::PreparedPlaybackJob::new(
+                track.clone(),
+                PlaybackSourceRequest::TidalStream(request),
+                GaplessPlan::disabled(),
+            )
+            .with_generation(generation)
+            .with_dj_media_ref(media_ref.clone());
+            let shared = dj_profile_rebuild_shared(track.id, generation);
+            match decode_and_buffer_job(config.clone(), job, shared, 48_000, 2) {
+                Ok(()) => {
+                    decoded = true;
+                    break;
+                }
+                Err(error) => {
+                    if let Some(next_quality) =
+                        next_dj_profile_analysis_quality(attempt_index, &error)
+                    {
+                        tracing::info!(
+                            tidal_id,
+                            quality,
+                            next_quality,
+                            error = %error,
+                            "DJ profile rebuild retrying with fallback TIDAL quality"
+                        );
+                        last_error = Some(error);
+                    } else {
+                        last_error = Some(error);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if decoded {
+            clear_dj_profile_rebuild_failure(&failure_key);
+            tracing::info!(tidal_id, "DJ profile rebuild decode queued analysis");
+        } else if let Some(error) = last_error {
+            let status = profile_rebuild_failure_status(&error);
+            let message = profile_rebuild_error_message(&error, status);
+            record_dj_profile_rebuild_failure(&failure_key, status, message.clone());
+            if status != "retrying" {
+                clear_dj_profile_inflight(&inflight_for_decode, &inflight_key_for_decode);
+            }
+            tracing::warn!(tidal_id, error = %message, "DJ profile rebuild decode failed");
+        }
+    });
+
+    Ok(RebuildDjProfileResponse {
+        accepted: true,
+        status: "accepted".to_string(),
+    })
+}
+
+fn dj_profile_analysis_stream_requests(tidal_id: i64) -> Vec<tidal_stream::StreamRequest> {
+    DJ_PROFILE_ANALYSIS_TIDAL_QUALITIES
+        .iter()
+        .map(|quality| tidal_stream::StreamRequest::new(tidal_id, *quality))
+        .collect()
+}
+
+fn next_dj_profile_analysis_quality(
+    attempt_index: usize,
+    error: &anyhow::Error,
+) -> Option<&'static str> {
+    if !profile_rebuild_error_is_asset_not_ready(&error.to_string()) {
+        return None;
+    }
+    DJ_PROFILE_ANALYSIS_TIDAL_QUALITIES
+        .get(attempt_index + 1)
+        .copied()
+}
+
+fn dj_profile_rebuild_shared(track_id: i64, generation: u64) -> Arc<PlaybackSharedState> {
     let (command_tx, _command_rx) = std::sync::mpsc::channel::<PlaybackRuntimeCommand>();
-    let shared = Arc::new(PlaybackSharedState::new(
-        track.id,
+    Arc::new(PlaybackSharedState::new(
+        track_id,
         generation,
         PlaybackSourceKind::TidalStream,
         GaplessPlan::disabled(),
@@ -971,50 +1055,7 @@ async fn queue_tidal_profile_rebuild(
         Arc::new(AtomicU32::new(1.0_f32.to_bits())),
         Arc::new(AtomicU64::new(0)),
         Arc::new(AtomicU64::new(0)),
-    ));
-
-    let inflight_for_decode = inflight.clone();
-    let inflight_key_for_decode = inflight_key.clone();
-    let failure_key = inflight_key.clone();
-    let retry_state = state.clone();
-    let event_tx = {
-        let state_guard = state.read().await;
-        state_guard.event_tx.clone()
-    };
-    let runtime_handle = tokio::runtime::Handle::current();
-    tokio::task::spawn_blocking(move || {
-        if let Err(error) = decode_and_buffer_job(config, job, shared, 48_000, 2) {
-            let status = profile_rebuild_failure_status(&error);
-            let message = profile_rebuild_error_message(&error, status);
-            finish_dj_profile_rebuild_failure(
-                &inflight_for_decode,
-                &inflight_key_for_decode,
-                status,
-                message.clone(),
-            );
-            let _ = event_tx.send(crate::AppEvent::PlaybackStateChanged);
-            if status == "retrying" {
-                schedule_dj_profile_retry(
-                    &runtime_handle,
-                    retry_state,
-                    Duration::from_secs(DJ_PROFILE_TRANSIENT_RETRY_SECS),
-                );
-            }
-            tracing::warn!(tidal_id, error = %message, "DJ profile rebuild decode failed");
-        } else {
-            clear_dj_profile_rebuild_failure(&failure_key);
-            tracing::info!(tidal_id, "DJ profile rebuild decode queued analysis");
-        }
-    });
-
-    Ok(RebuildDjProfileResponse {
-        accepted: true,
-        status: "accepted".to_string(),
-    })
-}
-
-fn dj_profile_analysis_stream_request(tidal_id: i64) -> tidal_stream::StreamRequest {
-    tidal_stream::StreamRequest::new(tidal_id, DJ_PROFILE_ANALYSIS_TIDAL_QUALITY)
+    ))
 }
 
 async fn queue_tidal_profile_rebuild_if_idle(
@@ -1220,12 +1261,16 @@ fn profile_rebuild_error_is_retryable(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     message.contains("DASH stream prebuffer failed")
         || message.contains("DASH segment")
-        || lower.contains("asset is not ready for playback")
-        || lower.contains("\"substatus\":4005")
+        || profile_rebuild_error_is_asset_not_ready(message)
         || lower.contains("timed out")
         || lower.contains("request failed")
         || lower.contains("chunk error")
         || lower.contains("returned error status")
+}
+
+fn profile_rebuild_error_is_asset_not_ready(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("asset is not ready for playback") || lower.contains("\"substatus\":4005")
 }
 
 fn profile_rebuild_retry_reason(status: &str, message: &str) -> Option<String> {
@@ -1261,10 +1306,8 @@ fn profile_rebuild_retry_after_ms(failure: &DjProfileRebuildFailure) -> Option<i
 
 fn profile_rebuild_error_message(error: &anyhow::Error, status: &str) -> String {
     if status == "retrying" {
-        let message = error.to_string().to_ascii_lowercase();
-        if message.contains("asset is not ready for playback")
-            || message.contains("\"substatus\":4005")
-        {
+        let message = error.to_string();
+        if profile_rebuild_error_is_asset_not_ready(&message) {
             return "TIDAL asset is not ready. Retrying analysis.".to_string();
         }
         return "DASH stream prebuffer failed. Retrying analysis.".to_string();
@@ -1535,6 +1578,20 @@ async fn set_profile_correction(
     {
         return Err(StatusCode::BAD_REQUEST);
     }
+    let key = AudioDjProfileKey {
+        media_ref_kind: payload.media_ref_kind.clone(),
+        media_ref_id: payload.media_ref_id.clone(),
+    };
+    let manual_drop_blob = if let Some(markers) = payload.manual_drop_markers_ms {
+        let manual_drop_markers_ms = normalize_manual_drop_markers_ms(Some(markers))?;
+        encode_marker_ms_blob(&manual_drop_markers_ms)
+    } else {
+        let state = state.read().await;
+        state
+            .db
+            .with_conn(|conn| existing_manual_drop_blob(conn, &key))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
     let now = Utc::now().to_rfc3339();
     let row = AudioDjProfileCorrectionRow {
         media_ref_kind: payload.media_ref_kind,
@@ -1544,6 +1601,7 @@ async fn set_profile_correction(
         phrase_offset_bars: payload.phrase_offset_bars,
         safe_crossfade_only: payload.safe_crossfade_only.unwrap_or(false),
         transition_speed_bias: payload.transition_speed_bias,
+        manual_drop_blob,
         notes: payload.notes,
         created_at: now.clone(),
         updated_at: now,
@@ -1556,6 +1614,14 @@ async fn set_profile_correction(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
     Ok(Json(correction_response(row)))
+}
+
+fn existing_manual_drop_blob(
+    conn: &rusqlite::Connection,
+    key: &AudioDjProfileKey,
+) -> anyhow::Result<Vec<u8>> {
+    queries::get_audio_dj_profile_correction(conn, key)
+        .map(|row| row.map(|row| row.manual_drop_blob).unwrap_or_default())
 }
 
 fn profile_response(track_id: i64, profile: &AudioDjProfileRow) -> ProfileResponse {
@@ -1593,9 +1659,38 @@ fn correction_response(row: AudioDjProfileCorrectionRow) -> DjProfileCorrectionR
         phrase_offset_bars: row.phrase_offset_bars,
         safe_crossfade_only: row.safe_crossfade_only,
         transition_speed_bias: row.transition_speed_bias,
+        manual_drop_markers_ms: decode_marker_blob_ms(&row.manual_drop_blob),
         notes: row.notes,
         applies: "next_transition".to_string(),
     }
+}
+
+fn normalize_manual_drop_markers_ms(markers: Option<Vec<i64>>) -> Result<Vec<i64>, StatusCode> {
+    let mut markers = markers.unwrap_or_default();
+    if markers.len() > MAX_MANUAL_DROP_MARKERS
+        || markers
+            .iter()
+            .any(|marker| *marker < 0 || *marker > MAX_MANUAL_DROP_MARKER_MS)
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    markers.sort_unstable();
+    markers.dedup();
+    Ok(markers)
+}
+
+fn encode_marker_ms_blob(markers_ms: &[i64]) -> Vec<u8> {
+    let seconds: Vec<f32> = markers_ms
+        .iter()
+        .map(|marker| *marker as f32 / 1000.0)
+        .collect();
+    encode_f32_blob(&seconds)
+}
+
+fn decode_marker_blob_ms(blob: &[u8]) -> Vec<i64> {
+    decode_f32_blob(blob)
+        .map(|values| seconds_markers_ms(&values))
+        .unwrap_or_default()
 }
 
 fn deck_status(
@@ -1646,10 +1741,9 @@ fn deck_status(
         beat_markers_ms,
         downbeat_markers_ms,
         phrase_markers_ms,
+        drop_markers_ms,
         mix_in_markers_ms,
         mix_out_markers_ms,
-        drop_markers_ms,
-        manual_drop_markers_ms,
     ) = if let Some(profile) = profile.as_ref() {
         let beat_markers = decode_f32_blob(&profile.beat_grid_blob).unwrap_or_default();
         let downbeat_markers = decode_f32_blob(&profile.downbeats_blob).unwrap_or_default();
@@ -1666,10 +1760,9 @@ fn deck_status(
             seconds_markers_ms(&beat_markers),
             seconds_markers_ms(&downbeat_markers),
             phrase_markers,
+            seconds_markers_ms(&decode_f32_blob(&profile.drop_blob).unwrap_or_default()),
             seconds_markers_ms(&decode_f32_blob(&profile.mix_in_blob).unwrap_or_default()),
             seconds_markers_ms(&decode_f32_blob(&profile.mix_out_blob).unwrap_or_default()),
-            seconds_markers_ms(&decode_f32_blob(&profile.drop_blob).unwrap_or_default()),
-            Vec::new(),
         )
     } else {
         (
@@ -1684,9 +1777,12 @@ fn deck_status(
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            Vec::new(),
         )
     };
+    let manual_drop_markers_ms = correction
+        .as_ref()
+        .map(|row| decode_marker_blob_ms(&row.manual_drop_blob))
+        .unwrap_or_default();
     let waveform_status = waveform_status(&profile_status, &waveform_peaks);
     Ok(DjDeckStatus {
         media_ref_kind: key.media_ref_kind,
@@ -1707,17 +1803,19 @@ fn deck_status(
         beat_markers_ms,
         downbeat_markers_ms,
         phrase_markers_ms,
-        mix_in_markers_ms,
-        mix_out_markers_ms,
         drop_markers_ms,
         manual_drop_markers_ms,
+        mix_in_markers_ms,
+        mix_out_markers_ms,
         passive_analysis_status: passive_analysis
             .as_ref()
             .map(|snapshot| snapshot.status.to_string()),
         passive_analysis_reason: passive_analysis
             .as_ref()
             .map(|snapshot| snapshot.reason.to_string()),
-        safe_crossfade_only: correction.is_some_and(|row| row.safe_crossfade_only),
+        safe_crossfade_only: correction
+            .as_ref()
+            .is_some_and(|row| row.safe_crossfade_only),
     })
 }
 
@@ -2497,6 +2595,13 @@ fn overlay_details_from_program_json(
     let overlay_end_ms = planned_start_ms
         .zip(i64::try_from(resolve_ms).ok())
         .and_then(|(start_ms, duration_ms)| start_ms.checked_add(duration_ms));
+    let drop_marker_ms = ((u128::from(
+        program
+            .deck_b_start_frame
+            .saturating_add(program.swap_start),
+    ) * 1_000)
+        + (u128::from(program.sample_rate) / 2))
+        / u128::from(program.sample_rate);
     let tempo_ratio = program
         .automation
         .iter()
@@ -2508,8 +2613,39 @@ fn overlay_details_from_program_json(
         overlay_end_ms,
         tempo_ratio,
         deck_b_start_frame: program.deck_b_start_frame,
-        drop_source: "program_json".to_string(),
+        drop_marker_ms: i64::try_from(drop_marker_ms).ok(),
+        drop_source: program
+            .drop_source
+            .unwrap_or_else(|| "program_json".to_string()),
     })
+}
+
+fn annotate_overlay_drop_source(
+    details: Option<DjOverlayDetails>,
+    incoming: Option<&DjDeckStatus>,
+) -> Option<DjOverlayDetails> {
+    let mut details = details?;
+    if details.drop_source != "program_json" {
+        return Some(details);
+    }
+    let Some(drop_marker_ms) = details.drop_marker_ms else {
+        return Some(details);
+    };
+    let Some(incoming) = incoming else {
+        return Some(details);
+    };
+    if marker_matches(&incoming.manual_drop_markers_ms, drop_marker_ms) {
+        details.drop_source = "manual_drop_cue".to_string();
+    } else if marker_matches(&incoming.drop_markers_ms, drop_marker_ms) {
+        details.drop_source = "profile_drop_candidate".to_string();
+    }
+    Some(details)
+}
+
+fn marker_matches(markers_ms: &[i64], target_ms: i64) -> bool {
+    markers_ms
+        .iter()
+        .any(|marker| marker.abs_diff(target_ms) <= 25)
 }
 
 fn media_ref_label(
@@ -2633,6 +2769,8 @@ mod tests {
             beat_markers_ms: Vec::new(),
             downbeat_markers_ms: Vec::new(),
             phrase_markers_ms: Vec::new(),
+            drop_markers_ms: Vec::new(),
+            manual_drop_markers_ms: Vec::new(),
             mix_in_markers_ms: Vec::new(),
             mix_out_markers_ms: Vec::new(),
             drop_markers_ms: Vec::new(),
@@ -2677,6 +2815,76 @@ mod tests {
             },
         )
         .expect("dsp features");
+    }
+
+    #[test]
+    fn correction_response_round_trips_manual_drop_markers() {
+        let row = AudioDjProfileCorrectionRow {
+            media_ref_kind: "tidal_track".to_string(),
+            media_ref_id: "123".to_string(),
+            bpm_multiplier: None,
+            downbeat_offset_beats: None,
+            phrase_offset_bars: None,
+            safe_crossfade_only: false,
+            transition_speed_bias: None,
+            manual_drop_blob: encode_marker_ms_blob(&[64_000, 32_000]),
+            notes: None,
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        };
+
+        let response = correction_response(row);
+
+        assert_eq!(response.manual_drop_markers_ms, vec![64_000, 32_000]);
+    }
+
+    #[test]
+    fn manual_drop_marker_payload_is_sorted_deduped_and_non_negative() {
+        assert_eq!(
+            normalize_manual_drop_markers_ms(Some(vec![64_000, 32_000, 32_000])).expect("markers"),
+            vec![32_000, 64_000]
+        );
+        assert_eq!(
+            normalize_manual_drop_markers_ms(Some(vec![-1])),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            normalize_manual_drop_markers_ms(Some(vec![MAX_MANUAL_DROP_MARKER_MS + 1])),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
+    fn omitted_manual_drop_payload_preserves_existing_blob() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        let key = AudioDjProfileKey {
+            media_ref_kind: "tidal_track".to_string(),
+            media_ref_id: "123".to_string(),
+        };
+        let existing_blob = encode_marker_ms_blob(&[32_000]);
+        queries::upsert_audio_dj_profile_correction(
+            &conn,
+            &AudioDjProfileCorrectionRow {
+                media_ref_kind: key.media_ref_kind.clone(),
+                media_ref_id: key.media_ref_id.clone(),
+                bpm_multiplier: None,
+                downbeat_offset_beats: None,
+                phrase_offset_bars: None,
+                safe_crossfade_only: false,
+                transition_speed_bias: None,
+                manual_drop_blob: existing_blob.clone(),
+                notes: None,
+                created_at: "now".to_string(),
+                updated_at: "now".to_string(),
+            },
+        )
+        .expect("correction");
+
+        assert_eq!(
+            existing_manual_drop_blob(&conn, &key).expect("existing blob"),
+            existing_blob
+        );
     }
 
     #[test]
@@ -2760,11 +2968,22 @@ mod tests {
     }
 
     #[test]
-    fn dj_profile_rebuild_uses_low_quality_analysis_stream() {
-        let request = dj_profile_analysis_stream_request(28051328);
+    fn dj_profile_rebuild_tries_lossless_after_low_quality_asset_not_ready() {
+        let requests = dj_profile_analysis_stream_requests(28051328);
 
-        assert_eq!(request.track_id, 28051328);
-        assert_eq!(request.audio_quality, "LOW");
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| request.track_id == 28051328));
+        assert_eq!(requests[0].audio_quality, "LOW");
+        assert_eq!(requests[1].audio_quality, "LOSSLESS");
+
+        let error = anyhow::Error::msg(
+            r#"TIDAL playback request was rejected: TIDAL rejected playback request with 401 Unauthorized: {"status":401,"subStatus":4005,"userMessage":"Asset is not ready for playback"}"#,
+        );
+        assert_eq!(
+            next_dj_profile_analysis_quality(0, &error),
+            Some("LOSSLESS")
+        );
+        assert_eq!(next_dj_profile_analysis_quality(1, &error), None);
     }
 
     #[test]
@@ -2813,6 +3032,7 @@ mod tests {
                 overlay_end_ms: Some(151_000),
                 tempo_ratio: Some(1.02),
                 deck_b_start_frame: 384_000,
+                drop_marker_ms: Some(8_500),
                 drop_source: "program_json".to_string(),
             }),
             runtime_rendered_dj_mixer: None,
@@ -2833,6 +3053,7 @@ mod tests {
                 overlay_end_ms: Some(151_000),
                 tempo_ratio: Some(1.02),
                 deck_b_start_frame: 384_000,
+                drop_marker_ms: Some(8_500),
                 drop_source: "program_json".to_string(),
             })
         );
@@ -2922,6 +3143,7 @@ mod tests {
             let program = noor_mix::TransitionProgram {
                 tier: noor_mix::Tier::FullBlend,
                 template: template.to_string(),
+                drop_source: None,
                 sample_rate: 48_000,
                 channels: 2,
                 deck_a_start_frame: 0,
@@ -2948,6 +3170,7 @@ mod tests {
         let program = noor_mix::TransitionProgram {
             tier: noor_mix::Tier::FullBlend,
             template: "DropTease16".to_string(),
+            drop_source: None,
             sample_rate: 48_000,
             channels: 2,
             deck_a_start_frame: 0,
@@ -2967,18 +3190,84 @@ mod tests {
                 curve: noor_mix::Curve::Linear,
             }],
         };
-        let json = serde_json::to_string(&program).expect("program json");
+        let legacy_json = serde_json::to_string(&program).expect("program json");
 
         assert_eq!(
-            overlay_details_from_program_json(&json, Some(120_000), Some("fired")),
+            overlay_details_from_program_json(&legacy_json, Some(120_000), Some("fired")),
             Some(DjOverlayDetails {
                 overlay_status: "fired".to_string(),
                 overlay_start_ms: Some(120_000),
                 overlay_end_ms: Some(121_000),
                 tempo_ratio: Some(1.0199999809265137),
                 deck_b_start_frame: 384_000,
+                drop_marker_ms: Some(8_500),
                 drop_source: "program_json".to_string(),
             })
+        );
+
+        let manual_program = noor_mix::TransitionProgram {
+            drop_source: Some("manual_drop_cue".to_string()),
+            ..program
+        };
+        let manual_json = serde_json::to_string(&manual_program).expect("manual program json");
+
+        assert_eq!(
+            overlay_details_from_program_json(&manual_json, Some(120_000), Some("fired"))
+                .expect("manual details")
+                .drop_source,
+            "manual_drop_cue"
+        );
+    }
+
+    #[test]
+    fn overlay_details_source_labels_manual_and_profile_drop_markers() {
+        let details = Some(DjOverlayDetails {
+            overlay_status: "armed".to_string(),
+            overlay_start_ms: Some(120_000),
+            overlay_end_ms: Some(121_000),
+            tempo_ratio: Some(1.0),
+            deck_b_start_frame: 384_000,
+            drop_marker_ms: Some(32_000),
+            drop_source: "program_json".to_string(),
+        });
+        let mut incoming = test_deck_status(true, "ready");
+        incoming.drop_markers_ms = vec![32_000];
+
+        assert_eq!(
+            annotate_overlay_drop_source(details.clone(), Some(&incoming))
+                .expect("profile details")
+                .drop_source,
+            "profile_drop_candidate"
+        );
+
+        incoming.manual_drop_markers_ms = vec![32_000];
+        assert_eq!(
+            annotate_overlay_drop_source(details, Some(&incoming))
+                .expect("manual details")
+                .drop_source,
+            "manual_drop_cue"
+        );
+    }
+
+    #[test]
+    fn annotate_overlay_drop_source_preserves_program_source() {
+        let details = Some(DjOverlayDetails {
+            overlay_status: "armed".to_string(),
+            overlay_start_ms: Some(120_000),
+            overlay_end_ms: Some(121_000),
+            tempo_ratio: Some(1.0),
+            deck_b_start_frame: 384_000,
+            drop_marker_ms: Some(32_000),
+            drop_source: "manual_drop_cue".to_string(),
+        });
+        let mut incoming = test_deck_status(true, "ready");
+        incoming.drop_markers_ms = vec![32_000];
+
+        assert_eq!(
+            annotate_overlay_drop_source(details, Some(&incoming))
+                .expect("details")
+                .drop_source,
+            "manual_drop_cue"
         );
     }
 

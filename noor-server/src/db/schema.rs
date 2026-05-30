@@ -51,6 +51,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_047,
     MIGRATION_048,
     MIGRATION_049,
+    MIGRATION_050,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1443,6 +1444,11 @@ CREATE INDEX IF NOT EXISTS idx_provider_recommendation_cache_expiry
     ON provider_recommendation_cache(provider, expires_at);
 "#;
 
+const MIGRATION_050: &str = r#"
+ALTER TABLE audio_dj_profile_corrections
+    ADD COLUMN manual_drop_blob BLOB NOT NULL DEFAULT X'';
+"#;
+
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     // Create migrations table if not exists
     conn.execute_batch(
@@ -1642,5 +1648,24 @@ mod tests {
                 .unwrap();
             assert_eq!(exists, 1, "missing {column}");
         }
+    }
+
+    #[test]
+    fn migration_048_adds_manual_drop_correction_blob() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+
+        apply_migrations_up_to(&conn, MIGRATIONS.len()).unwrap();
+
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM pragma_table_info('audio_dj_profile_corrections')
+                 WHERE name = 'manual_drop_blob'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1);
     }
 }

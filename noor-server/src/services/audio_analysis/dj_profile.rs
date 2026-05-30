@@ -1464,6 +1464,7 @@ mod tests {
             phrase_offset_bars,
             safe_crossfade_only,
             transition_speed_bias: transition_speed_bias.map(str::to_string),
+            manual_drop_blob: Vec::new(),
             notes: None,
             created_at: "now".to_string(),
             updated_at: "now".to_string(),

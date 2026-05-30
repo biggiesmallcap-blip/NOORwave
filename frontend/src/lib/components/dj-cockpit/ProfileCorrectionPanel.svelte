@@ -29,6 +29,9 @@
 	let phraseOffset = $state(0);
 	let speedBias = $state<DjTransitionSpeedBias>('neutral');
 	let safeOnly = $state(false);
+	let manualDropText = $state('');
+	let manualDropRefKey = $state('');
+	let dropMarkerError = $state('');
 	let notes = $state('');
 
 	let selectedDeck = $derived(selectedRef === 'current' ? current : next);
@@ -41,6 +44,17 @@
 					? 'Applies to next transition'
 					: 'Updates the next eligible plan',
 	);
+	let detectedDropLabel = $derived(formatMarkers(selectedDeck?.drop_markers_ms ?? []));
+
+	$effect(() => {
+		const ref = mediaRef(selectedDeck);
+		const key = ref ? `${ref.media_ref_kind}:${ref.media_ref_id}` : '';
+		if (key !== manualDropRefKey) {
+			manualDropRefKey = key;
+			manualDropText = formatMarkerSeconds(selectedDeck?.manual_drop_markers_ms ?? []);
+			dropMarkerError = '';
+		}
+	});
 
 	function mediaRef(deck?: DjDeckStatus) {
 		if (!deck) return null;
@@ -53,6 +67,8 @@
 	function save() {
 		const ref = mediaRef(selectedDeck);
 		if (!ref) return;
+		const manualDropMarkers = parseManualDropMarkers(manualDropText);
+		if (!manualDropMarkers) return;
 		onSave({
 			...ref,
 			bpm_multiplier: bpmMultiplier,
@@ -60,8 +76,43 @@
 			phrase_offset_bars: phraseOffset,
 			safe_crossfade_only: safeOnly,
 			transition_speed_bias: speedBias,
+			manual_drop_markers_ms: manualDropMarkers,
 			notes: notes.trim() || undefined,
 		});
+	}
+
+	function parseManualDropMarkers(value: string) {
+		const tokens = value
+			.split(/[\s,]+/)
+			.map((token) => token.trim())
+			.filter(Boolean);
+		if (tokens.length > 16) {
+			dropMarkerError = 'Use 16 drop markers or fewer.';
+			return null;
+		}
+		const markers: number[] = [];
+		for (const token of tokens) {
+			const seconds = Number(token);
+			if (!Number.isFinite(seconds) || seconds < 0) {
+				dropMarkerError = 'Drop markers must be positive seconds.';
+				return null;
+			}
+			markers.push(Math.round(seconds * 1000));
+		}
+		dropMarkerError = '';
+		return markers;
+	}
+
+	function formatMarkerSeconds(markersMs: number[]) {
+		return markersMs.map((marker) => trimSeconds(marker / 1000)).join(', ');
+	}
+
+	function formatMarkers(markersMs: number[]) {
+		return markersMs.length ? formatMarkerSeconds(markersMs) : 'none';
+	}
+
+	function trimSeconds(seconds: number) {
+		return Number.isInteger(seconds) ? String(seconds) : seconds.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
 	}
 </script>
 
@@ -111,6 +162,17 @@
 					<option value="faster">Faster</option>
 				</select>
 			</label>
+		</div>
+
+		<div class="drop-cues">
+			<p>Detected drops: {detectedDropLabel}</p>
+			<label>
+				<span>Manual drops (seconds)</span>
+				<input type="text" inputmode="decimal" bind:value={manualDropText} aria-invalid={dropMarkerError ? 'true' : 'false'} />
+			</label>
+			{#if dropMarkerError}
+				<p class="field-error">{dropMarkerError}</p>
+			{/if}
 		</div>
 
 		<label class="check-row">
@@ -230,6 +292,26 @@
 		font-size: var(--font-size-sm);
 		font-weight: var(--font-weight-semibold);
 		line-height: var(--line-height-snug);
+	}
+
+	.drop-cues {
+		display: grid;
+		gap: var(--space-2);
+		padding: var(--space-2) var(--space-3);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+		background: color-mix(in srgb, var(--bg-surface) 78%, transparent);
+	}
+
+	.drop-cues p,
+	.field-error {
+		color: var(--text-secondary);
+		font-size: var(--font-size-sm);
+		line-height: var(--line-height-snug);
+	}
+
+	.field-error {
+		color: var(--state-danger);
 	}
 
 	.field-grid {

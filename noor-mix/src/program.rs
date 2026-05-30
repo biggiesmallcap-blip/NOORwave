@@ -53,6 +53,8 @@ pub struct LoopRegion {
 pub struct TransitionProgram {
     pub tier: Tier,
     pub template: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drop_source: Option<String>,
     pub sample_rate: u32,
     pub channels: u16,
     #[serde(default)]
@@ -145,6 +147,7 @@ mod tests {
         TransitionProgram {
             tier: Tier::FullBlend,
             template: "BassSwap16".to_string(),
+            drop_source: None,
             sample_rate: 48_000,
             channels: 2,
             deck_a_start_frame: 0,

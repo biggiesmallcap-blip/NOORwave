@@ -86,6 +86,12 @@
 						{#each lane.deck?.phrase_markers_ms?.slice(0, 16) ?? [] as marker}
 							<line class="marker-svg phrase" x1={markerPercent(lane.deck, marker)} x2={markerPercent(lane.deck, marker)} y1="0" y2="36" />
 						{/each}
+						{#each lane.deck?.drop_markers_ms?.slice(0, 16) ?? [] as marker}
+							<line class="marker-svg drop" x1={markerPercent(lane.deck, marker)} x2={markerPercent(lane.deck, marker)} y1="0" y2="36" />
+						{/each}
+						{#each lane.deck?.manual_drop_markers_ms?.slice(0, 16) ?? [] as marker}
+							<line class="marker-svg manual-drop" x1={markerPercent(lane.deck, marker)} x2={markerPercent(lane.deck, marker)} y1="0" y2="36" />
+						{/each}
 						{#if timingPercent(lane.deck, plannedMs) != null}
 							<line class="fire-svg planned" x1={timingPercent(lane.deck, plannedMs) ?? 0} x2={timingPercent(lane.deck, plannedMs) ?? 0} y1="0" y2="36" />
 						{/if}
@@ -215,6 +221,16 @@
 	.marker-svg.phrase {
 		stroke: color-mix(in srgb, var(--state-warning) 62%, transparent);
 		stroke-width: 0.34;
+	}
+
+	.marker-svg.drop {
+		stroke: color-mix(in srgb, var(--state-danger) 72%, transparent);
+		stroke-width: 0.38;
+	}
+
+	.marker-svg.manual-drop {
+		stroke: var(--state-danger);
+		stroke-width: 0.58;
 	}
 
 	.fire-svg {

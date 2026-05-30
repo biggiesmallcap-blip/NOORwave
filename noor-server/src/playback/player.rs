@@ -2821,6 +2821,7 @@ mod tests {
                         phrase_offset_bars: None,
                         safe_crossfade_only: false,
                         transition_speed_bias: None,
+                        manual_drop_blob: Vec::new(),
                         notes: None,
                         created_at: "now".to_string(),
                         updated_at: "now".to_string(),

@@ -944,6 +944,10 @@ fn dj_mixer_max_block_samples(output_config: &StreamConfig) -> usize {
     }
 }
 
+fn dj_renderer_late_tolerance_frames(sample_rate: u32) -> u64 {
+    u64::from(sample_rate.max(1)) / 2
+}
+
 fn decoded_deck_snapshot(
     engine: &PlaybackEngine,
     channels: u16,
@@ -982,30 +986,27 @@ fn active_deck_snapshot(
     required_frames: u64,
     late_tolerance_frames: u64,
 ) -> Result<RuntimeDeckSnapshot, DjRuntimeRendererReason> {
-    let guard = engine
-        .shared
-        .buffer
-        .lock()
-        .map_err(|_| DjRuntimeRendererReason::BufferLockFailed)?;
-    let channels = usize::from(channels.max(1));
-    let start_frame = if program_start_frame == 0 {
-        (guard.read_pos / channels) as u64
-    } else {
-        program_start_frame
+    let start_frame = {
+        let guard = engine
+            .shared
+            .buffer
+            .lock()
+            .map_err(|_| DjRuntimeRendererReason::BufferLockFailed)?;
+        if program_start_frame == 0 {
+            let channels = usize::from(channels.max(1));
+            (guard.read_pos / channels) as u64
+        } else {
+            program_start_frame
+        }
     };
-    drop(guard);
     decoded_deck_snapshot(
         engine,
-        channels as u16,
+        channels,
         start_frame,
         required_frames,
         late_tolerance_frames,
         DjRuntimeRendererReason::ActiveDeckNotDecoded,
     )
-}
-
-fn dj_renderer_late_tolerance_frames(sample_rate: u32) -> u64 {
-    u64::from(sample_rate.max(1)) / 2
 }
 
 fn build_prepared_dj_mixer(
@@ -1044,20 +1045,20 @@ fn build_prepared_dj_mixer_for_engine(
     let mut program = transition.program.clone();
     let deck_b_consumed_frames = deck_b_consumed_frames(&program)
         .ok_or(DjRuntimeRendererReason::ProgramNotMixerRenderable)?;
-    let tolerance_frames = dj_renderer_late_tolerance_frames(state.device_sample_rate);
+    let late_tolerance_frames = dj_renderer_late_tolerance_frames(state.device_sample_rate);
     let active_snapshot = active_deck_snapshot(
         active,
         state.device_channels,
         program.deck_a_start_frame,
         program.resolve_at,
-        tolerance_frames,
+        late_tolerance_frames,
     )?;
     let next_snapshot = decoded_deck_snapshot(
         incoming,
         state.device_channels,
         program.deck_b_start_frame,
         deck_b_consumed_frames.saturating_add(1),
-        tolerance_frames,
+        late_tolerance_frames,
         DjRuntimeRendererReason::NextDeckNotDecoded,
     )?;
     program.deck_a_start_frame = active_snapshot.start_frame;
@@ -1090,11 +1091,11 @@ fn handoff_mixer_program(program: &noor_mix::TransitionProgram) -> bool {
     matches!(
         program.template.as_str(),
         "SafeCrossfade"
-            | "SlamCut"
             | "BassSwap16"
             | "BassSwap32"
             | "LongHarmonicBlend"
             | "FilterSweep"
+            | "SlamCut"
     ) && deck_b_consumed_frames(program).is_some()
 }
 
@@ -3879,6 +3880,7 @@ mod tests {
             noor_mix::TransitionProgram {
                 tier: noor_mix::program::Tier::SafeCrossfade,
                 template: "SafeCrossfade".to_string(),
+                drop_source: None,
                 sample_rate: 48_000,
                 channels: 2,
                 deck_a_start_frame: 0,
@@ -4165,6 +4167,15 @@ mod tests {
         state.engine = Some(active);
         state.next_engine = Some(next);
 
+        state
+            .engine
+            .as_ref()
+            .expect("active engine")
+            .shared
+            .buffer
+            .lock()
+            .expect("active buffer")
+            .read_pos = 2;
         assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
         assert!(install_prepared_handoff_mixer_buffer(&mut state).is_ok());
 
@@ -4176,6 +4187,43 @@ mod tests {
         assert_eq!(next.shared.total_samples.load(Ordering::Relaxed), 8);
         assert_eq!(next.shared.crossfade_samples.load(Ordering::Relaxed), 0);
         assert!(state.prepared_dj_mixer.is_none());
+    }
+
+    #[test]
+    fn handoff_mixer_preserves_unfinished_next_buffer() {
+        let mut state = test_runtime_loop_state();
+        start_dj_lookahead_in_state(
+            &mut state,
+            Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+            Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+            Some(11),
+            Some(12),
+            20,
+            48_000,
+        );
+
+        let active = test_engine_with_shared(1, 20);
+        finish_engine_buffer(&active, &[0.1, 0.1, 0.2, 0.2, 0.3, 0.3]);
+
+        let mut next = test_engine_with_shared(2, 21);
+        next.job = PreparedPlaybackJob::test_fixture(2, 21)
+            .with_prepared_transition(test_prepared_transition_program(20, Some(11), Some(12)));
+        {
+            let mut buffer = next.shared.buffer.lock().expect("next buffer");
+            buffer
+                .samples
+                .extend_from_slice(&[0.0, 0.0, 0.4, 0.4, 0.5, 0.5, 0.6, 0.6]);
+        }
+
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+
+        assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
+        assert!(install_prepared_handoff_mixer_buffer(&mut state).is_ok());
+
+        let next = state.next_engine.as_ref().expect("next engine");
+        let buffer = next.shared.buffer.lock().expect("buffer lock");
+        assert!(!buffer.finished);
     }
 
     #[test]
@@ -5886,6 +5934,7 @@ mod tests {
             program: noor_mix::TransitionProgram {
                 tier: noor_mix::program::Tier::SafeCrossfade,
                 template: "SafeCrossfade".to_string(),
+                drop_source: None,
                 sample_rate: 48_000,
                 channels: 2,
                 deck_a_start_frame: 0,

@@ -44,6 +44,7 @@ mod tests {
         TransitionProgram {
             tier: Tier::SafeCrossfade,
             template: "SafeCrossfade".to_string(),
+            drop_source: None,
             sample_rate: 48_000,
             channels: 2,
             deck_a_start_frame: 0,

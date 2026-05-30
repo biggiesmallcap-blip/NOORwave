@@ -131,6 +131,22 @@
 		return typeof value === 'number' ? `${value.toFixed(3)}x` : 'none';
 	}
 
+	function formatDropSource(value: string | null | undefined) {
+		switch (value) {
+			case 'manual_drop_cue':
+				return 'Manual cue';
+			case 'profile_drop_candidate':
+				return 'Profile candidate';
+			case 'program_json':
+				return 'Program';
+			case null:
+			case undefined:
+				return 'unknown';
+			default:
+				return value;
+		}
+	}
+
 	function formatRuntimeRendered(value: boolean | null | undefined) {
 		if (typeof value !== 'boolean') {
 			return 'unknown';
@@ -441,7 +457,11 @@
 					</div>
 					<div>
 						<dt>Drop source</dt>
-						<dd>{overlayDetails.drop_source}</dd>
+						<dd>{formatDropSource(overlayDetails.drop_source)}</dd>
+					</div>
+					<div>
+						<dt>Drop marker</dt>
+						<dd>{formatTimingMs(overlayDetails.drop_marker_ms)}</dd>
 					</div>
 				{/if}
 				<div>

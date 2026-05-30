@@ -78,6 +78,12 @@ impl Planner {
 
         let outgoing_phrases = outgoing.phrase_bar_indices.len();
         let incoming_phrases = incoming.phrase_bar_indices.len();
+        if matches!(policy.transition_speed_bias, TransitionSpeedBias::Slower)
+            && matches!(camelot_distance, 0 | 1 | 7)
+            && bpm_delta <= 3.0
+        {
+            return TransitionTemplate::LongHarmonicBlend;
+        }
         if outgoing_phrases >= 4 && incoming_phrases >= 4 && bpm_delta <= 3.0 {
             return TransitionTemplate::BassSwap32;
         }
@@ -124,6 +130,7 @@ fn build_program(
     let mut program = TransitionProgram {
         tier: tier_for_template(template),
         template: template_name(template).to_string(),
+        drop_source: None,
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -145,6 +152,9 @@ fn build_program(
     } else {
         incoming_sync_start_frame(incoming, sample_rate)
     };
+    if matches!(template, TransitionTemplate::DropTease16) {
+        program.drop_source = Some(drop_source_for_profile(incoming).to_string());
+    }
 
     if matches!(
         template,
@@ -153,6 +163,12 @@ fn build_program(
         program
             .automation
             .extend(bass_swap_eq_handoff(duration_samples));
+    }
+
+    if matches!(template, TransitionTemplate::LongHarmonicBlend) {
+        program
+            .automation
+            .extend(long_harmonic_low_handoff(duration_samples));
     }
 
     if matches!(template, TransitionTemplate::FilterSweep) {
@@ -181,7 +197,10 @@ fn build_program(
 
 #[allow(dead_code)]
 fn drop_tease_candidate_ready(outgoing: &DjProfile, incoming: &DjProfile, policy: &Policy) -> bool {
-    if !matches!(policy.mix_intent, MixIntent::Bold) {
+    let has_manual_drop = !incoming.manual_drop_seconds.is_empty();
+    if !(matches!(policy.mix_intent, MixIntent::Bold)
+        || (matches!(policy.mix_intent, MixIntent::Balanced) && has_manual_drop))
+    {
         return false;
     }
     if !outgoing.has_full_dj_profile() || !incoming.has_full_dj_profile() {
@@ -190,6 +209,17 @@ fn drop_tease_candidate_ready(outgoing: &DjProfile, incoming: &DjProfile, policy
     if outgoing.profile_confidence < DROP_TEASE_CONFIDENCE_FLOOR
         || incoming.profile_confidence < DROP_TEASE_CONFIDENCE_FLOOR
     {
+        return false;
+    }
+    let Some(camelot_distance) = outgoing
+        .camelot_key
+        .as_deref()
+        .zip(incoming.camelot_key.as_deref())
+        .and_then(|(a, b)| scoring::camelot_distance(a, b))
+    else {
+        return false;
+    };
+    if !matches!(camelot_distance, 0 | 1 | 7) {
         return false;
     }
     if outgoing.downbeat_seconds.is_empty()
@@ -239,12 +269,26 @@ fn incoming_drop_tease_start_frame(
 }
 
 fn first_valid_drop_frame(incoming: &DjProfile, sample_rate: u32) -> Option<u64> {
-    incoming
-        .drop_seconds
-        .iter()
+    drop_candidates(incoming)
         .copied()
         .find(|seconds| seconds.is_finite() && *seconds >= 0.0)
         .map(|seconds| (seconds * sample_rate as f32).round() as u64)
+}
+
+fn drop_candidates(incoming: &DjProfile) -> impl Iterator<Item = &f32> {
+    if incoming.manual_drop_seconds.is_empty() {
+        incoming.drop_seconds.iter()
+    } else {
+        incoming.manual_drop_seconds.iter()
+    }
+}
+
+fn drop_source_for_profile(incoming: &DjProfile) -> &'static str {
+    if incoming.manual_drop_seconds.is_empty() {
+        "profile_drop_candidate"
+    } else {
+        "manual_drop_cue"
+    }
 }
 
 fn small_tempo_nudge_rate(outgoing: &DjProfile, incoming: &DjProfile) -> Option<f32> {
@@ -269,6 +313,7 @@ pub fn bass_swap_16_program(
     let mut program = TransitionProgram {
         tier: Tier::FullBlend,
         template: "BassSwap16".to_string(),
+        drop_source: None,
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -300,6 +345,7 @@ pub fn bass_swap_32_program(
     let mut program = TransitionProgram {
         tier: Tier::FullBlend,
         template: "BassSwap32".to_string(),
+        drop_source: None,
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -326,6 +372,7 @@ pub fn slam_cut_program(sample_rate: u32, channels: u16, duration_ms: u32) -> Tr
     TransitionProgram {
         tier: Tier::SafeCrossfade,
         template: "SlamCut".to_string(),
+        drop_source: None,
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -354,6 +401,7 @@ pub fn long_harmonic_blend_program(
     let mut program = TransitionProgram {
         tier: Tier::FullBlend,
         template: "LongHarmonicBlend".to_string(),
+        drop_source: None,
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -375,6 +423,9 @@ pub fn long_harmonic_blend_program(
         curve: Curve::Linear,
     });
     program
+        .automation
+        .extend(long_harmonic_low_handoff(duration_samples));
+    program
 }
 
 pub fn filter_sweep_eq_wash_program(
@@ -390,6 +441,7 @@ pub fn filter_sweep_eq_wash_program(
     let mut program = TransitionProgram {
         tier: Tier::FullBlend,
         template: "FilterSweep".to_string(),
+        drop_source: None,
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -421,6 +473,7 @@ pub fn drop_tease_16_program(
     TransitionProgram {
         tier: Tier::FullBlend,
         template: "DropTease16".to_string(),
+        drop_source: None,
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -463,6 +516,7 @@ pub fn drop_preview_16_program(
     Some(TransitionProgram {
         tier: Tier::FullBlend,
         template: "DropPreview16".to_string(),
+        drop_source: Some(drop_source_for_profile(incoming).to_string()),
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -718,6 +772,60 @@ fn bass_swap_eq_handoff(duration_samples: u64) -> Vec<AutomationEvent> {
             start_sample: 0,
             end_sample,
             from: 0.45,
+            to: 1.0,
+            curve: Curve::Cosine,
+        },
+    ]
+}
+
+fn long_harmonic_low_handoff(duration_samples: u64) -> Vec<AutomationEvent> {
+    let end_sample = duration_samples.max(1);
+    if end_sample < 8 {
+        return vec![
+            AutomationEvent {
+                param: Param::LowGain(DeckId::A),
+                start_sample: 0,
+                end_sample,
+                from: 1.0,
+                to: 0.25,
+                curve: Curve::Cosine,
+            },
+            AutomationEvent {
+                param: Param::LowGain(DeckId::B),
+                start_sample: 0,
+                end_sample,
+                from: 0.15,
+                to: 1.0,
+                curve: Curve::Cosine,
+            },
+        ];
+    }
+
+    let swap_point = end_sample / 2;
+    let outgoing_low_start = end_sample / 4;
+    let incoming_low_end = end_sample * 3 / 4;
+    vec![
+        AutomationEvent {
+            param: Param::LowGain(DeckId::A),
+            start_sample: outgoing_low_start,
+            end_sample: swap_point.max(outgoing_low_start + 1),
+            from: 1.0,
+            to: 0.25,
+            curve: Curve::Cosine,
+        },
+        AutomationEvent {
+            param: Param::LowGain(DeckId::B),
+            start_sample: 0,
+            end_sample: swap_point.max(1),
+            from: 0.15,
+            to: 0.15,
+            curve: Curve::Linear,
+        },
+        AutomationEvent {
+            param: Param::LowGain(DeckId::B),
+            start_sample: swap_point,
+            end_sample: incoming_low_end.max(swap_point + 1),
+            from: 0.15,
             to: 1.0,
             curve: Curve::Cosine,
         },
@@ -1044,6 +1152,22 @@ mod tests {
     }
 
     #[test]
+    fn choose_template_slower_bias_prefers_long_harmonic_blend() {
+        let policy = Policy {
+            transition_speed_bias: TransitionSpeedBias::Slower,
+            ..Policy::default()
+        };
+        assert_eq!(
+            Planner::choose_template(
+                &profile(Some(120.0), Some("8A"), 4),
+                &profile(Some(121.0), Some("8A"), 4),
+                &policy
+            ),
+            TransitionTemplate::LongHarmonicBlend
+        );
+    }
+
+    #[test]
     fn choose_template_bold_preserves_bass_swap_16_for_medium_phrases() {
         let policy = Policy {
             mix_intent: MixIntent::Bold,
@@ -1355,10 +1479,26 @@ mod tests {
             .expect("rate automation")
             .to;
         assert_eq!(rate, 0.985);
-        assert!(program.automation.iter().all(|event| !matches!(
-            event.param,
-            Param::LowGain(_) | Param::MidGain(_) | Param::HighGain(_)
-        )));
+        let outgoing_low = program
+            .automation
+            .iter()
+            .find(|event| event.param == Param::LowGain(DeckId::A))
+            .expect("outgoing low handoff");
+        let incoming_low = program
+            .automation
+            .iter()
+            .find(|event| event.param == Param::LowGain(DeckId::B) && event.to == 1.0)
+            .expect("incoming low rise");
+        assert_eq!(outgoing_low.end_sample, program.swap_start);
+        assert_eq!(incoming_low.start_sample, program.swap_start);
+        assert_eq!(outgoing_low.to, 0.25);
+        assert_eq!(incoming_low.from, 0.15);
+        assert!(
+            program
+                .automation
+                .iter()
+                .all(|event| !matches!(event.param, Param::MidGain(_) | Param::HighGain(_)))
+        );
     }
 
     #[test]
@@ -1438,21 +1578,60 @@ mod tests {
     }
 
     #[test]
-    fn choose_template_drop_tease_rejects_safe_and_balanced_intents() {
+    fn choose_template_drop_tease_rejects_safe_and_unverified_balanced_intents() {
         let outgoing = profile(Some(120.0), Some("8A"), 4);
         let mut incoming = profile(Some(121.0), Some("8A"), 4);
         incoming.drop_seconds = vec![32.0];
 
-        for mix_intent in [MixIntent::Safe, MixIntent::Balanced] {
-            let policy = Policy {
-                mix_intent,
-                ..Policy::default()
-            };
-            assert_ne!(
-                Planner::choose_template(&outgoing, &incoming, &policy),
-                TransitionTemplate::DropTease16
-            );
-        }
+        let safe = Policy {
+            mix_intent: MixIntent::Safe,
+            ..Policy::default()
+        };
+        assert_ne!(
+            Planner::choose_template(&outgoing, &incoming, &safe),
+            TransitionTemplate::DropTease16
+        );
+
+        let balanced = Policy {
+            mix_intent: MixIntent::Balanced,
+            ..Policy::default()
+        };
+        assert_ne!(
+            Planner::choose_template(&outgoing, &incoming, &balanced),
+            TransitionTemplate::DropTease16
+        );
+    }
+
+    #[test]
+    fn choose_template_balanced_selects_drop_tease_for_manual_drop_candidate() {
+        let policy = Policy {
+            mix_intent: MixIntent::Balanced,
+            ..Policy::default()
+        };
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
+        let mut incoming = profile(Some(121.0), Some("8A"), 4);
+        incoming.manual_drop_seconds = vec![32.0];
+
+        assert_eq!(
+            Planner::choose_template(&outgoing, &incoming, &policy),
+            TransitionTemplate::DropTease16
+        );
+    }
+
+    #[test]
+    fn choose_template_drop_tease_requires_harmonic_fit() {
+        let policy = Policy {
+            mix_intent: MixIntent::Balanced,
+            ..Policy::default()
+        };
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
+        let mut incoming = profile(Some(121.0), Some("3B"), 4);
+        incoming.manual_drop_seconds = vec![32.0];
+
+        assert_ne!(
+            Planner::choose_template(&outgoing, &incoming, &policy),
+            TransitionTemplate::DropTease16
+        );
     }
 
     #[test]
@@ -1506,7 +1685,29 @@ mod tests {
         let program = Planner::plan(&outgoing, &incoming, &policy);
 
         assert_eq!(program.template, "DropTease16");
+        assert_eq!(
+            program.drop_source.as_deref(),
+            Some("profile_drop_candidate")
+        );
         assert_eq!(program.swap_start, 768_000);
+        assert_eq!(program.deck_b_start_frame, 768_000);
+    }
+
+    #[test]
+    fn drop_tease_plan_prefers_manual_drop_alignment() {
+        let policy = Policy {
+            mix_intent: MixIntent::Balanced,
+            ..Policy::default()
+        };
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
+        let mut incoming = profile(Some(121.0), Some("8A"), 4);
+        incoming.drop_seconds = vec![40.0];
+        incoming.manual_drop_seconds = vec![32.0];
+
+        let program = Planner::plan(&outgoing, &incoming, &policy);
+
+        assert_eq!(program.template, "DropTease16");
+        assert_eq!(program.drop_source.as_deref(), Some("manual_drop_cue"));
         assert_eq!(program.deck_b_start_frame, 768_000);
     }
 
