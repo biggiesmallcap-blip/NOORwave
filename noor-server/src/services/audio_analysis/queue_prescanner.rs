@@ -555,14 +555,14 @@ async fn load_candidates(state: &SharedState) -> Result<(Vec<PrescanCandidate>, 
 
 async fn run_batch(state: &SharedState, event_rx: &mut broadcast::Receiver<AppEvent>) {
     // Respect the global passive-DSP toggle.
-    let (passive_on, playback_buffering) = {
+    let (passive_on, playback_needs_network) = {
         let state_guard = state.read().await;
         state_guard
             .db
             .with_conn(|conn| {
                 Ok::<_, anyhow::Error>((
                     super::is_passive_enabled(conn),
-                    foreground_playback_is_buffering(conn, &state_guard)?,
+                    foreground_playback_needs_network_priority(conn, &state_guard)?,
                 ))
             })
             .unwrap_or((true, false))
@@ -570,8 +570,8 @@ async fn run_batch(state: &SharedState, event_rx: &mut broadcast::Receiver<AppEv
     if !passive_on {
         return;
     }
-    if playback_buffering {
-        tracing::debug!("queue prescanner deferred while playback is buffering");
+    if playback_needs_network {
+        tracing::debug!("queue prescanner deferred while playback needs network priority");
         return;
     }
 
@@ -644,18 +644,43 @@ async fn run_batch(state: &SharedState, event_rx: &mut broadcast::Receiver<AppEv
     }
 }
 
-fn foreground_playback_is_buffering(
+fn foreground_playback_needs_network_priority(
     conn: &rusqlite::Connection,
     state: &crate::AppState,
 ) -> anyhow::Result<bool> {
-    if state
-        .audio_active
-        .load(std::sync::atomic::Ordering::Relaxed)
-        || state.playback_runtime.is_none()
-    {
+    let is_playing = crate::playback::player::load_state(conn)?.is_playing;
+    let runtime_present = state.playback_runtime.is_some();
+    if !is_playing || !runtime_present {
         return Ok(false);
     }
-    Ok(crate::playback::player::load_state(conn)?.is_playing)
+    let audio_active = state
+        .audio_active
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let buffer_ahead_ms = if audio_active {
+        state
+            .playback_runtime
+            .as_ref()
+            .zip(state.playback_runtime_info.as_ref())
+            .map(|(runtime, info)| {
+                let position_ms = runtime
+                    .handle
+                    .get_position_ms(info.sample_rate, info.channels)
+                    .max(0);
+                let buffered_ms = runtime
+                    .handle
+                    .get_buffered_ms(info.sample_rate, info.channels)
+                    .max(0);
+                buffered_ms.saturating_sub(position_ms)
+            })
+    } else {
+        None
+    };
+    Ok(super::should_defer_background_analysis_for_playback(
+        is_playing,
+        runtime_present,
+        audio_active,
+        buffer_ahead_ms,
+    ))
 }
 
 /// Spawn the long-lived queue-lookahead actor. Subscribes to queue/track
