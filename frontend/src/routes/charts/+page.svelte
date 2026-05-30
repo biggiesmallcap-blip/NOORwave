@@ -1,9 +1,15 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { api } from '$lib/api/client';
   import { openContextMenu } from '$lib/stores/context_menu';
   import { goto } from '$app/navigation';
   import TrendingShelf from '$lib/components/charts/TrendingShelf.svelte';
+  import DailyChartShelf from '$lib/components/charts/DailyChartShelf.svelte';
+  import {
+    getCachedSpotifyChartMetaMap,
+    putCachedSpotifyChartMeta,
+    type SpotifyChartMeta,
+  } from '$lib/stores/spotify-chart-meta-cache';
 
   // Editorial Spotify chart playlists. Stable IDs that change daily/weekly
   // server-side but the playlist identity is fixed. Click navigates to the
@@ -25,24 +31,46 @@
     { id: '37i9dQZF1DX4dyzvuaRJ0n', title: 'mint', sub: 'Editorial' },
   ];
 
-  // Best-effort cover fetch. The existing playlist endpoint also returns
-  // tracks + does TIDAL resolution server-side, so this is heavier than it
-  // needs to be -- see FOLLOWUPS for a lightweight metadata endpoint. When
-  // the sportify proxy is slow or down, cards just fall back to the glyph.
-  let meta = $state<Record<string, { thumbnail: string | null; title: string | null }>>({});
+  // Best-effort cover fetch. The playlist endpoint also returns tracks and
+  // TIDAL resolution state, so keep these requests away from first paint.
+  let meta = $state<Record<string, SpotifyChartMeta>>({});
+  let metaTimer: ReturnType<typeof setTimeout> | null = null;
+  let metaAbort: AbortController | null = null;
 
   onMount(() => {
-    void Promise.allSettled(
-      CHARTS.map(async (c) => {
+    const cached = getCachedSpotifyChartMetaMap(CHARTS.map((chart) => chart.id));
+    meta = cached;
+    const missing = CHARTS.filter((chart) => !cached[chart.id]);
+    if (missing.length === 0) return;
+
+    metaAbort = new AbortController();
+    metaTimer = setTimeout(() => {
+      void loadPlaylistMeta(missing, metaAbort?.signal);
+    }, 1600);
+  });
+
+  onDestroy(() => {
+    if (metaTimer) clearTimeout(metaTimer);
+    metaAbort?.abort();
+  });
+
+  async function loadPlaylistMeta(charts: typeof CHARTS, signal: AbortSignal | undefined) {
+    const queue = [...charts];
+    const workers = Array.from({ length: 2 }, async () => {
+      while (queue.length > 0 && !signal?.aborted) {
+        const c = queue.shift();
+        if (!c) return;
         try {
-          const { playlist } = await api.getSpotifyPlaylist(c.id);
+          const { playlist } = await api.getSpotifyPlaylist(c.id, signal);
+          putCachedSpotifyChartMeta(c.id, playlist);
           meta[c.id] = { thumbnail: playlist.thumbnail, title: playlist.title };
         } catch {
           // Quiet: proxy outage just keeps the fallback glyph + hardcoded title.
         }
-      }),
-    );
-  });
+      }
+    });
+    await Promise.allSettled(workers);
+  }
 
   function chartMenu(id: string, title: string) {
     return [
@@ -62,6 +90,10 @@
 
   <section class="trending-block">
     <TrendingShelf limit={12} />
+  </section>
+
+  <section class="daily-block">
+    <DailyChartShelf />
   </section>
 
   <section>

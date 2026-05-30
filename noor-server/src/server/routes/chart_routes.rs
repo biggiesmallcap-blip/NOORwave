@@ -30,6 +30,20 @@ pub(super) struct ChartParams {
     tag: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct ChartSnapshotParams {
+    source: Option<String>,
+    period: Option<String>,
+    region: Option<String>,
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct SpotifyDailyImportParams {
+    region: Option<String>,
+    date: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct ChartTidalPlayable {
     tidal_id: i64,
@@ -68,116 +82,6 @@ const CHART_TRACK_SELECT_COLUMNS: &str =
     FROM tracks t
     LEFT JOIN artists a ON t.artist_id = a.id
     LEFT JOIN albums al ON t.album_id = al.id";
-
-/// Fill in missing artwork for chart entries by searching Tidal for the
-/// (artist, title) pair. Updates `image_url` (top-level fallback) and the
-/// nested `tidal_playable.artwork_url` so the frontend's preference chain
-/// always lands on something usable.
-async fn enrich_chart_artwork(state: &SharedState, entries: &mut Vec<ChartEntryDto>) {
-    use futures::stream::{FuturesUnordered, StreamExt};
-
-    /// Last.fm's blank-star fallback. We never want to surface this: both the
-    /// usable-art check below and the replace-on-enrich path treat it as empty.
-    const LASTFM_PLACEHOLDER: &str = "2a96cbd8b46e442fc41c2b86b821562f";
-
-    fn is_unusable(url: Option<&str>) -> bool {
-        let Some(url) = url else { return true };
-        let trimmed = url.trim();
-        trimmed.is_empty() || trimmed.contains(LASTFM_PLACEHOLDER)
-    }
-
-    fn has_usable_art(e: &ChartEntryDto) -> bool {
-        let local_ok = !is_unusable(
-            e.local_track
-                .as_ref()
-                .and_then(|t| t.artwork_url.as_deref()),
-        );
-        let tp_ok = !is_unusable(
-            e.tidal_playable
-                .as_ref()
-                .and_then(|tp| tp.artwork_url.as_deref()),
-        );
-        let img_ok = !is_unusable(e.image_url.as_deref());
-        local_ok || tp_ok || img_ok
-    }
-
-    let needs: Vec<(usize, String, String)> = entries
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, e)| {
-            if has_usable_art(e) {
-                return None;
-            }
-            let title = e
-                .local_track
-                .as_ref()
-                .map(|t| t.title.clone())
-                .or_else(|| e.tidal_playable.as_ref().map(|tp| tp.title.clone()))?;
-            let artist = e
-                .local_track
-                .as_ref()
-                .and_then(|t| t.artist_name.clone())
-                .or_else(|| {
-                    e.tidal_playable
-                        .as_ref()
-                        .and_then(|tp| tp.artist_name.clone())
-                })?;
-            Some((idx, artist, title))
-        })
-        .collect();
-
-    if needs.is_empty() {
-        return;
-    }
-
-    let (tokens, tidal_http_client) = {
-        let s = state.read().await;
-        (s.tidal_tokens.clone(), s.tidal_http_client.clone())
-    };
-    let tokens = match tokens {
-        Some(t) => Some(t),
-        None => super::load_persisted_tidal_tokens(state)
-            .await
-            .ok()
-            .flatten(),
-    };
-    let Some(tokens) = tokens else {
-        return;
-    };
-
-    let client = TidalClient::with_http(
-        tidal_http_client,
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    );
-
-    let mut tasks = FuturesUnordered::new();
-    for (idx, artist, title) in needs {
-        let client = client.clone();
-        tasks.push(async move {
-            let q = format!("{artist} {title}");
-            let result = client.search(&q, 1).await.ok();
-            let url = result
-                .and_then(|r| r.into_iter().next())
-                .and_then(|t| t.artwork_url);
-            (idx, url)
-        });
-    }
-
-    while let Some((idx, url)) = tasks.next().await {
-        let Some(url) = url else { continue };
-        if let Some(entry) = entries.get_mut(idx) {
-            if is_unusable(entry.image_url.as_deref()) {
-                entry.image_url = Some(url.clone());
-            }
-            if let Some(tp) = entry.tidal_playable.as_mut()
-                && is_unusable(tp.artwork_url.as_deref())
-            {
-                tp.artwork_url = Some(url);
-            }
-        }
-    }
-}
 
 /// Look up the most-confident genre name for each track id in a single query.
 /// Returns a map keyed by track_id; tracks with no genre rows are absent.
@@ -229,6 +133,17 @@ struct ChartCacheEntry {
     inserted_at: Instant,
     payload: serde_json::Value,
 }
+
+const MATRIX_PROVIDERS: [(&str, &str); 6] = [
+    ("itunes_daily", "iTunes"),
+    ("spotify_daily", "Spotify"),
+    ("apple_music_daily", "Apple Music"),
+    ("youtube_daily", "YouTube"),
+    ("shazam_daily", "Shazam"),
+    ("deezer_daily", "Deezer"),
+];
+
+const MAIN_MATRIX_REGIONS: [&str; 6] = ["global", "US", "UK", "AU", "CA", "NZ"];
 
 fn chart_cache() -> &'static StdMutex<HashMap<String, ChartCacheEntry>> {
     static CACHE: OnceLock<StdMutex<HashMap<String, ChartCacheEntry>>> = OnceLock::new();
@@ -351,7 +266,7 @@ pub(super) async fn get_charts(
         return Ok(Json(cached));
     }
 
-    let mut entries: Vec<ChartEntryDto> = match source.as_str() {
+    let entries: Vec<ChartEntryDto> = match source.as_str() {
         "tidal" => fetch_tidal_chart(&state, limit as i32).await.map_err(|e| {
             (
                 StatusCode::BAD_GATEWAY,
@@ -368,12 +283,6 @@ pub(super) async fn get_charts(
             })?,
     };
 
-    // Backfill missing artwork via Tidal search. Last.fm's chart.getTopTracks
-    // mostly returns a generic placeholder image, and many older library albums
-    // have NULL artwork_url, so this is the difference between blank tiles and
-    // real covers on the trending shelf.
-    enrich_chart_artwork(&state, &mut entries).await;
-
     let payload = json!({
         "source": source,
         "limit": limit,
@@ -383,6 +292,220 @@ pub(super) async fn get_charts(
     });
     chart_cache_put(cache_key, payload.clone());
     Ok(Json(payload))
+}
+
+pub(super) async fn get_chart_snapshots(
+    State(state): State<SharedState>,
+    Query(params): Query<ChartSnapshotParams>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let source_key = params
+        .source
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "spotify_daily".to_string());
+    let period = params
+        .period
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "daily".to_string());
+    let region = params
+        .region
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            if s.eq_ignore_ascii_case("global") {
+                "global".to_string()
+            } else {
+                s.to_ascii_uppercase()
+            }
+        })
+        .unwrap_or_else(|| "global".to_string());
+    let limit = params.limit.unwrap_or(50).clamp(1, 200);
+
+    let db = {
+        let s = state.read().await;
+        s.db.clone()
+    };
+    let snapshot = db
+        .with_conn(|conn| {
+            queries::get_latest_chart_snapshot(conn, &source_key, &region, &period, limit)
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("chart snapshots: {e}") })),
+            )
+        })?;
+
+    match snapshot {
+        Some(snapshot) => Ok(Json(json!({
+            "source": source_key,
+            "period": period,
+            "region": region,
+            "limit": limit,
+            "snapshot": snapshot.snapshot,
+            "entries": snapshot.entries,
+        }))),
+        None => Ok(Json(json!({
+            "source": source_key,
+            "period": period,
+            "region": region,
+            "limit": limit,
+            "snapshot": Value::Null,
+            "entries": [],
+        }))),
+    }
+}
+
+pub(super) async fn import_spotify_daily_snapshot(
+    State(state): State<SharedState>,
+    Query(params): Query<SpotifyDailyImportParams>,
+    body: String,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let region = normalize_chart_region(params.region.as_deref());
+    let now = chrono::Utc::now();
+    let chart_date = params
+        .date
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| now.date_naive().to_string());
+    let fetched_at = now.timestamp();
+    let db = {
+        let s = state.read().await;
+        s.db.clone()
+    };
+    let snapshot_id = db
+        .with_conn(|conn| {
+            crate::services::charts::spotify_daily::ingest_spotify_daily_csv(
+                conn,
+                &region,
+                &chart_date,
+                fetched_at,
+                &body,
+            )
+        })
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("spotify daily import: {e}") })),
+            )
+        })?;
+
+    Ok(Json(json!({
+        "source": "spotify_daily",
+        "period": "daily",
+        "region": region,
+        "chart_date": chart_date,
+        "snapshot_id": snapshot_id,
+    })))
+}
+
+pub(super) async fn get_chart_matrix(
+    State(state): State<SharedState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let region_group = params
+        .get("region_group")
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "main".to_string());
+
+    if region_group != "main" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "unknown_region_group" })),
+        ));
+    }
+
+    let provider_keys: Vec<&str> = MATRIX_PROVIDERS.iter().map(|(key, _)| *key).collect();
+    let providers: Vec<_> = MATRIX_PROVIDERS
+        .iter()
+        .map(|(source_key, label)| json!({ "source_key": source_key, "label": label }))
+        .collect();
+
+    let db = {
+        let s = state.read().await;
+        s.db.clone()
+    };
+    let rows = db
+        .with_conn(|conn| {
+            queries::get_chart_matrix(conn, &MAIN_MATRIX_REGIONS, &provider_keys, "daily")
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("chart matrix: {e}") })),
+            )
+        })?;
+
+    Ok(Json(json!({
+        "region_group": region_group,
+        "period": "daily",
+        "providers": providers,
+        "rows": rows,
+    })))
+}
+
+pub(super) async fn refresh_chart_matrix(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (http, db) = {
+        let s = state.read().await;
+        (s.http_client.clone(), s.db.clone())
+    };
+
+    let pages = crate::services::charts::kworb_matrix::fetch_kworb_chart_pages(&http)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("kworb matrix fetch: {e}") })),
+            )
+        })?;
+    let now = chrono::Utc::now();
+    let chart_date = now.date_naive().to_string();
+    let fetched_at = now.timestamp();
+    let report = db
+        .with_conn(|conn| {
+            crate::services::charts::kworb_matrix::ingest_kworb_chart_pages(
+                conn,
+                &chart_date,
+                fetched_at,
+                &pages,
+            )
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("kworb matrix ingest: {e}") })),
+            )
+        })?;
+
+    Ok(Json(json!({
+        "source": "kworb",
+        "chart_date": chart_date,
+        "fetched_at": fetched_at,
+        "report": report,
+    })))
+}
+
+fn normalize_chart_region(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            if s.eq_ignore_ascii_case("global") {
+                "global".to_string()
+            } else {
+                s.to_ascii_uppercase()
+            }
+        })
+        .unwrap_or_else(|| "global".to_string())
 }
 
 pub(super) async fn list_lastfm_genres() -> Json<Value> {
