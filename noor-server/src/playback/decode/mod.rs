@@ -47,6 +47,14 @@ struct DashPrebuffer {
     ended_after_prefix_failure: bool,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DashBackgroundFetchSummary {
+    sent_segments: usize,
+    sent_bytes: usize,
+    stopped: bool,
+    receiver_closed: bool,
+}
+
 fn dash_prebuffer_media_count(total_segments: usize, dj_analysis_only: bool) -> usize {
     if dj_analysis_only {
         total_segments.min(DJ_ANALYSIS_DASH_PREFETCH_MEDIA_SEGMENTS)
@@ -168,6 +176,58 @@ where
         }
     }
     Err(last_error.unwrap_or_else(|| anyhow!("DASH prebuffer fetch failed")))
+}
+
+async fn fetch_dash_segments_ordered<F, Fut, S>(
+    media_urls: Vec<String>,
+    first_segment_index: usize,
+    fetch_window: usize,
+    stop: &std::sync::atomic::AtomicBool,
+    fetch: F,
+    mut send: S,
+) -> Result<DashBackgroundFetchSummary>
+where
+    F: Fn(String, usize) -> Fut + Clone,
+    Fut: Future<Output = Result<Vec<u8>>>,
+    S: FnMut(Vec<u8>) -> bool,
+{
+    if stop.load(Ordering::Relaxed) {
+        return Ok(DashBackgroundFetchSummary {
+            stopped: true,
+            ..DashBackgroundFetchSummary::default()
+        });
+    }
+
+    let fetch_window = fetch_window.max(1);
+    let fetches = futures::stream::iter(media_urls.into_iter().enumerate().map(|(idx, url)| {
+        let fetch = fetch.clone();
+        async move {
+            let segment_index = first_segment_index + idx;
+            fetch(url, segment_index)
+                .await
+                .map(|bytes| (segment_index, bytes))
+        }
+    }))
+    .buffered(fetch_window);
+    futures::pin_mut!(fetches);
+
+    let mut summary = DashBackgroundFetchSummary::default();
+    while let Some(result) = fetches.next().await {
+        if stop.load(Ordering::Relaxed) {
+            summary.stopped = true;
+            break;
+        }
+
+        let (_segment_index, bytes) = result?;
+        summary.sent_bytes += bytes.len();
+        if !send(bytes) {
+            summary.receiver_closed = true;
+            break;
+        }
+        summary.sent_segments += 1;
+    }
+
+    Ok(summary)
 }
 
 fn decoded_output_samples_for_secs(secs: u64, sample_rate: u32, channels: u16) -> usize {
@@ -375,64 +435,54 @@ pub(crate) fn decode_and_buffer_job(
                             } else {
                                 let _ = len_tx.send(None);
                                 let total_segments = segment_urls.len();
-                                let mut sent_segments = 0usize;
-                                let mut sent_bytes = 0usize;
-                                for (idx, seg_url) in segment_urls.into_iter().enumerate() {
-                                    if download_stop.load(Ordering::Relaxed) {
-                                        warn!(
-                                            "TIDAL DASH download cancelled: track_id={}, sent_segments={}, total_remaining_segments={}",
-                                            download_track_id, sent_segments, total_segments
-                                        );
-                                        break;
-                                    }
-                                    let bytes = append_stream_bytes(
-                                        &http,
-                                        &seg_url,
-                                        prebuffered_media_segments + idx + 1,
-                                    )
-                                    .await?;
-                                    if download_stop.load(Ordering::Relaxed) {
-                                        break;
-                                    }
-                                    sent_bytes += bytes.len();
-                                    if chunk_tx.send(Some(bytes)).is_err() {
-                                        if download_is_analysis_only {
-                                            debug!(
-                                                "TIDAL DASH analysis download stopped after capture: track_id={}, sent_segments={}, total_remaining_segments={}",
-                                                download_track_id,
-                                                sent_segments,
-                                                total_segments
-                                            );
-                                        } else {
-                                            warn!(
-                                                "TIDAL DASH download stopped early: track_id={}, sent_segments={}, total_remaining_segments={}",
-                                                download_track_id,
-                                                sent_segments,
-                                                total_segments
-                                            );
+                                let first_segment_index = prebuffered_media_segments + 1;
+                                let fetch_http = http.clone();
+                                let summary = fetch_dash_segments_ordered(
+                                    segment_urls,
+                                    first_segment_index,
+                                    dash_background_fetch_window(),
+                                    &download_stop,
+                                    move |seg_url, segment_index| {
+                                        let http = fetch_http.clone();
+                                        async move {
+                                            append_stream_bytes(&http, &seg_url, segment_index)
+                                                .await
                                         }
-                                        break;
-                                    }
-                                    sent_segments += 1;
-                                    if sent_segments <= 3
-                                        || sent_segments == total_segments
-                                        || sent_segments % 10 == 0
-                                    {
+                                    },
+                                    |bytes| chunk_tx.send(Some(bytes)).is_ok(),
+                                )
+                                .await?;
+                                if summary.stopped {
+                                    warn!(
+                                        "TIDAL DASH download cancelled: track_id={}, sent_segments={}, total_remaining_segments={}",
+                                        download_track_id,
+                                        summary.sent_segments,
+                                        total_segments
+                                    );
+                                } else if summary.receiver_closed {
+                                    if download_is_analysis_only {
                                         debug!(
-                                            "TIDAL DASH segment queued: track_id={}, sent_segments={}, total_remaining_segments={}, fetch_window={}",
+                                            "TIDAL DASH analysis download stopped after capture: track_id={}, sent_segments={}, total_remaining_segments={}",
                                             download_track_id,
-                                            sent_segments,
-                                            total_segments,
-                                            dash_background_fetch_window()
+                                            summary.sent_segments,
+                                            total_segments
+                                        );
+                                    } else {
+                                        warn!(
+                                            "TIDAL DASH download stopped early: track_id={}, sent_segments={}, total_remaining_segments={}",
+                                            download_track_id,
+                                            summary.sent_segments,
+                                            total_segments
                                         );
                                     }
                                 }
                                 debug!(
-                                    "TIDAL DASH download EOF: track_id={}, sent_segments={}, total_remaining_segments={}, bytes={}",
+                                    "TIDAL DASH download EOF: track_id={}, sent_segments={}, total_remaining_segments={}, bytes={}, fetch_window={}",
                                     download_track_id,
-                                    sent_segments,
+                                    summary.sent_segments,
                                     total_segments,
-                                    sent_bytes
+                                    summary.sent_bytes,
+                                    dash_background_fetch_window()
                                 );
                             }
                             Ok(())
@@ -1040,15 +1090,83 @@ mod tests {
                 Err(anyhow!("segment 1 failed once")),
                 Ok(vec![1]),
                 Ok(vec![2]),
-                Ok(vec![3]),
-                Ok(vec![4]),
             ],
         )
         .expect("playback retry");
 
-        assert_eq!(prebuffer.bytes, vec![0, 1, 2, 3, 4]);
-        assert_eq!(prebuffer.fetched_media_segments, 4);
+        assert_eq!(prebuffer.bytes, vec![0, 1, 2]);
+        assert_eq!(prebuffer.fetched_media_segments, 2);
         assert!(!prebuffer.ended_after_prefix_failure);
+    }
+
+    #[test]
+    fn dash_background_fetch_preserves_manifest_order_with_lookahead() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let stop = AtomicBool::new(false);
+        let mut sent = Vec::new();
+
+        let summary = rt
+            .block_on(fetch_dash_segments_ordered(
+                vec!["slow".to_string(), "fast".to_string(), "last".to_string()],
+                3,
+                2,
+                &stop,
+                |url, segment_index| async move {
+                    if url == "slow" {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    Ok(vec![segment_index as u8])
+                },
+                |bytes| {
+                    sent.extend(bytes);
+                    true
+                },
+            ))
+            .expect("background fetch");
+
+        assert_eq!(sent, vec![3, 4, 5]);
+        assert_eq!(
+            summary,
+            DashBackgroundFetchSummary {
+                sent_segments: 3,
+                sent_bytes: 3,
+                stopped: false,
+                receiver_closed: false,
+            }
+        );
+    }
+
+    #[test]
+    fn dash_background_fetch_honors_stop_before_fetching() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let stop = AtomicBool::new(true);
+
+        let summary = rt
+            .block_on(fetch_dash_segments_ordered(
+                vec!["one".to_string()],
+                1,
+                4,
+                &stop,
+                |_url, _segment_index| async { Ok(vec![1]) },
+                |_bytes| panic!("stopped download must not send bytes"),
+            ))
+            .expect("stopped fetch");
+
+        assert_eq!(
+            summary,
+            DashBackgroundFetchSummary {
+                sent_segments: 0,
+                sent_bytes: 0,
+                stopped: true,
+                receiver_closed: false,
+            }
+        );
     }
 
     #[test]
