@@ -555,23 +555,13 @@ async fn load_candidates(state: &SharedState) -> Result<(Vec<PrescanCandidate>, 
 
 async fn run_batch(state: &SharedState, event_rx: &mut broadcast::Receiver<AppEvent>) {
     // Respect the global passive-DSP toggle.
-    let (passive_on, playback_buffering) = {
-        let state_guard = state.read().await;
-        state_guard
-            .db
-            .with_conn(|conn| {
-                Ok::<_, anyhow::Error>((
-                    super::is_passive_enabled(conn),
-                    foreground_playback_is_buffering(conn, &state_guard)?,
-                ))
-            })
-            .unwrap_or((true, false))
-    };
+    let passive_on = state
+        .read()
+        .await
+        .db
+        .with_conn(|conn| Ok::<_, anyhow::Error>(super::is_passive_enabled(conn)))
+        .unwrap_or(true);
     if !passive_on {
-        return;
-    }
-    if playback_buffering {
-        tracing::debug!("queue prescanner deferred while playback is buffering");
         return;
     }
 
@@ -642,20 +632,6 @@ async fn run_batch(state: &SharedState, event_rx: &mut broadcast::Receiver<AppEv
         }
         tokio::time::sleep(INTER_TRACK_DELAY).await;
     }
-}
-
-fn foreground_playback_is_buffering(
-    conn: &rusqlite::Connection,
-    state: &crate::AppState,
-) -> anyhow::Result<bool> {
-    if state
-        .audio_active
-        .load(std::sync::atomic::Ordering::Relaxed)
-        || state.playback_runtime.is_none()
-    {
-        return Ok(false);
-    }
-    Ok(crate::playback::player::load_state(conn)?.is_playing)
 }
 
 /// Spawn the long-lived queue-lookahead actor. Subscribes to queue/track

@@ -27,16 +27,8 @@ use tokio::sync::mpsc;
 
 const MODEL_FAMILY: &str = queries::DISCOVERY_ENGINE_V2_FAMILY;
 const EXTERNAL_TRAINING_CANDIDATE_LIMIT: i64 = 1_000;
-const EXTERNAL_TRAINING_RESOLVED_LASTFM_LIMIT: i64 = 5_000;
-const LASTFM_DIRECT_EDGE_WEIGHT: f64 = 0.55;
-const LASTFM_BRANCH_EDGE_WEIGHT: f64 = 0.35;
 const EXTERNAL_REFRESH_MAX_SEED_TRACKS: usize = 100;
 const EXTERNAL_REFRESH_LASTFM_ROWS_PER_SEED: usize = 20;
-const EXTERNAL_REFRESH_LASTFM_BRANCH_SEED_TRACKS: usize = 25;
-const EXTERNAL_REFRESH_LASTFM_BRANCHES_PER_SEED: usize = 2;
-const EXTERNAL_REFRESH_LASTFM_BRANCH_ROWS: usize = 5;
-const EXTERNAL_REFRESH_LASTFM_BRANCH_ATTENUATION: f64 = 0.65;
-const EXTERNAL_REFRESH_LASTFM_BRANCH_MIN_PARENT_MATCH: f64 = 0.50;
 const EXTERNAL_REFRESH_TIDAL_NEW_RELEASE_ROWS: usize = 500;
 const EXTERNAL_REFRESH_TIDAL_SIMILAR_SEED_TRACKS: usize = 10;
 const EXTERNAL_REFRESH_TIDAL_SIMILAR_ARTISTS_PER_SEED: i32 = 2;
@@ -75,7 +67,6 @@ pub struct ExternalLastfmCandidate {
     pub title: String,
     pub mbid: Option<String>,
     pub match_score: f64,
-    pub branch_from: Option<String>,
 }
 
 impl From<LastFmSimilarTrack> for ExternalLastfmCandidate {
@@ -85,22 +76,6 @@ impl From<LastFmSimilarTrack> for ExternalLastfmCandidate {
             title: value.title,
             mbid: value.mbid,
             match_score: value.match_score,
-            branch_from: None,
-        }
-    }
-}
-
-impl ExternalLastfmCandidate {
-    fn branch_from(value: LastFmSimilarTrack, parent: &ExternalLastfmCandidate) -> Self {
-        Self {
-            artist: value.artist,
-            title: value.title,
-            mbid: value.mbid,
-            match_score: (parent.match_score
-                * value.match_score
-                * EXTERNAL_REFRESH_LASTFM_BRANCH_ATTENUATION)
-                .clamp(0.0, 1.0),
-            branch_from: Some(format!("{} - {}", parent.artist, parent.title)),
         }
     }
 }
@@ -319,19 +294,13 @@ pub async fn refresh_external_provider_candidates(
                 .await
             {
                 Ok(rows) => {
-                    let direct_rows = rows
-                        .into_iter()
-                        .take(budget.lastfm_rows_per_seed)
-                        .map(ExternalLastfmCandidate::from)
-                        .collect::<Vec<_>>();
-                    let branch_rows = if index < EXTERNAL_REFRESH_LASTFM_BRANCH_SEED_TRACKS {
-                        refresh_lastfm_branch_rows(lastfm, seed.track_id, &direct_rows).await
-                    } else {
-                        Vec::new()
-                    };
-                    let mut rows = direct_rows;
-                    rows.extend(branch_rows);
-                    lastfm_rows.insert(seed.track_id, rows);
+                    lastfm_rows.insert(
+                        seed.track_id,
+                        rows.into_iter()
+                            .take(budget.lastfm_rows_per_seed)
+                            .map(ExternalLastfmCandidate::from)
+                            .collect(),
+                    );
                 }
                 Err(error) => {
                     if is_provider_rate_limit_error(&error) {
@@ -486,64 +455,6 @@ pub async fn refresh_external_provider_candidates(
     })?;
     report.tidal_similar_provider_errors = tidal_similar_provider_errors;
     Ok(report)
-}
-
-async fn refresh_lastfm_branch_rows(
-    lastfm: &LastFmClient,
-    seed_track_id: i64,
-    direct_rows: &[ExternalLastfmCandidate],
-) -> Vec<ExternalLastfmCandidate> {
-    let mut branch_rows = Vec::new();
-    let mut branch_seen = direct_rows
-        .iter()
-        .map(|row| lastfm_candidate_key(&row.artist, &row.title))
-        .collect::<HashSet<_>>();
-    for parent in direct_rows
-        .iter()
-        .filter(|row| row.match_score >= EXTERNAL_REFRESH_LASTFM_BRANCH_MIN_PARENT_MATCH)
-        .take(EXTERNAL_REFRESH_LASTFM_BRANCHES_PER_SEED)
-    {
-        tokio::time::sleep(std::time::Duration::from_millis(
-            EXTERNAL_REFRESH_LASTFM_DELAY_MS,
-        ))
-        .await;
-        let rows = match lastfm
-            .track_get_similar(
-                &parent.artist,
-                &parent.title,
-                EXTERNAL_REFRESH_LASTFM_BRANCH_ROWS,
-            )
-            .await
-        {
-            Ok(rows) => rows,
-            Err(error) => {
-                tracing::warn!(
-                    target: "noor.discovery.external",
-                    seed_track_id,
-                    parent_artist = %parent.artist,
-                    parent_title = %parent.title,
-                    error = %error,
-                    "Last.fm branch refresh failed"
-                );
-                continue;
-            }
-        };
-        for row in rows.into_iter().take(EXTERNAL_REFRESH_LASTFM_BRANCH_ROWS) {
-            let key = lastfm_candidate_key(&row.artist, &row.title);
-            if branch_seen.insert(key) {
-                branch_rows.push(ExternalLastfmCandidate::branch_from(row, parent));
-            }
-        }
-    }
-    branch_rows
-}
-
-fn lastfm_candidate_key(artist: &str, title: &str) -> String {
-    format!(
-        "{}\u{1f}{}",
-        artist.trim().to_ascii_lowercase(),
-        title.trim().to_ascii_lowercase()
-    )
 }
 
 pub async fn resolve_external_tidal_candidates(
@@ -764,7 +675,6 @@ pub fn persist_external_provider_refresh(
                         serde_json::json!({
                             "match_score": row.match_score,
                             "mbid": row.mbid,
-                            "branch_from": row.branch_from,
                         })
                         .to_string(),
                     ),
@@ -2153,76 +2063,6 @@ fn trainer_external_candidates_from_rows(
         .collect()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum LastfmRecallKind {
-    Direct,
-    Branch,
-}
-
-fn lastfm_recall_kind(source_payload_json: Option<&str>) -> LastfmRecallKind {
-    let has_branch_parent = source_payload_json
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|value| {
-            value
-                .get("branch_from")
-                .and_then(|branch| branch.as_str())
-                .map(str::trim)
-                .map(str::is_empty)
-        })
-        .is_some_and(|empty| !empty);
-    if has_branch_parent {
-        LastfmRecallKind::Branch
-    } else {
-        LastfmRecallKind::Direct
-    }
-}
-
-fn lastfm_resolved_edges_from_rows(
-    rows: Vec<queries::ResolvedLastfmExternalSightingRow>,
-) -> Vec<TrainerEdge> {
-    let mut grouped: HashMap<(i64, i64, LastfmRecallKind), f64> = HashMap::new();
-    for row in rows {
-        let kind = lastfm_recall_kind(row.source_payload_json.as_deref());
-        let weight = row.similarity.clamp(0.0, 1.0)
-            * match kind {
-                LastfmRecallKind::Direct => LASTFM_DIRECT_EDGE_WEIGHT,
-                LastfmRecallKind::Branch => LASTFM_BRANCH_EDGE_WEIGHT,
-            };
-        grouped
-            .entry((row.seed_track_id, row.resolved_track_id, kind))
-            .and_modify(|existing| {
-                if weight > *existing {
-                    *existing = weight;
-                }
-            })
-            .or_insert(weight);
-    }
-
-    grouped
-        .into_iter()
-        .map(
-            |((seed_track_id, resolved_track_id, kind), weight)| TrainerEdge {
-                event_id: format!(
-                    "lastfm-resolved:{}:{}:{}",
-                    seed_track_id,
-                    resolved_track_id,
-                    match kind {
-                        LastfmRecallKind::Direct => "direct",
-                        LastfmRecallKind::Branch => "branch",
-                    }
-                ),
-                from_track_id: seed_track_id,
-                to_track_id: resolved_track_id,
-                weight,
-                evidence_kind: match kind {
-                    LastfmRecallKind::Direct => EvidenceKind::LastfmDirectSimilarity,
-                    LastfmRecallKind::Branch => EvidenceKind::LastfmBranchSimilarity,
-                },
-            },
-        )
-        .collect()
-}
-
 fn external_freshness_bucket(updated_at: &str) -> Option<String> {
     let updated = chrono::NaiveDateTime::parse_from_str(updated_at, "%Y-%m-%d %H:%M:%S").ok()?;
     let now = chrono::Utc::now().naive_utc();
@@ -2291,13 +2131,6 @@ fn build_trainer_input(
     let playback_transition_rows = queries::get_playback_transition_edges(conn)?;
     let listen_transition_rows = queries::get_listen_history_transition_edges(conn)?;
     let listen_colisten_rows = queries::get_completion_weighted_listen_edges(conn, 45)?;
-    let lastfm_resolved_edges = lastfm_resolved_edges_from_rows(
-        queries::get_resolved_lastfm_external_sightings_for_training(
-            conn,
-            &chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-            EXTERNAL_TRAINING_RESOLVED_LASTFM_LIMIT,
-        )?,
-    );
     let playlist_sequences = queries::get_playlist_sequences(conn)?;
     let album_sequences = queries::get_album_sequences(conn)?;
     let artist_sequences = queries::get_artist_sequences(conn)?;
@@ -2440,11 +2273,6 @@ fn build_trainer_input(
                 label: "listen_history".to_string(),
                 base_weight: 1.3,
                 edges: listen_colisten_edges,
-            },
-            TrainerEvidenceGroup {
-                label: "lastfm_resolved".to_string(),
-                base_weight: 1.0,
-                edges: lastfm_resolved_edges,
             },
         ],
         heldout_pairs,
@@ -3136,7 +2964,6 @@ mod tests {
                 title: "Similar Track".to_string(),
                 mbid: Some("mbid-1".to_string()),
                 match_score: 0.91,
-                branch_from: Some("Branch Artist - Branch Track".to_string()),
             }],
         );
         let tidal = vec![ExternalTidalCandidate {
@@ -3197,88 +3024,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(refresh_at, "2026-02-02 12:00:00");
-    }
-
-    #[test]
-    fn lastfm_branch_candidate_attenuates_parent_and_child_match() {
-        let parent = ExternalLastfmCandidate {
-            artist: "Parent Artist".to_string(),
-            title: "Parent Track".to_string(),
-            mbid: None,
-            match_score: 0.8,
-            branch_from: None,
-        };
-        let child = LastFmSimilarTrack {
-            artist: "Child Artist".to_string(),
-            title: "Child Track".to_string(),
-            mbid: Some("child-mbid".to_string()),
-            match_score: 0.5,
-        };
-
-        let branched = ExternalLastfmCandidate::branch_from(child, &parent);
-
-        assert_eq!(branched.artist, "Child Artist");
-        assert_eq!(branched.title, "Child Track");
-        assert_eq!(branched.mbid.as_deref(), Some("child-mbid"));
-        assert_eq!(
-            branched.branch_from.as_deref(),
-            Some("Parent Artist - Parent Track")
-        );
-        assert!((branched.match_score - 0.26).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn lastfm_resolved_edges_weight_direct_above_branch() {
-        let edges = lastfm_resolved_edges_from_rows(vec![
-            queries::ResolvedLastfmExternalSightingRow {
-                seed_track_id: 1,
-                resolved_track_id: 2,
-                similarity: 0.8,
-                source_payload_json: Some(r#"{"match":0.8}"#.to_string()),
-            },
-            queries::ResolvedLastfmExternalSightingRow {
-                seed_track_id: 1,
-                resolved_track_id: 3,
-                similarity: 0.8,
-                source_payload_json: Some(
-                    r#"{"match":0.8,"branch_from":"Parent - Track"}"#.to_string(),
-                ),
-            },
-        ]);
-
-        let direct = edges
-            .iter()
-            .find(|edge| edge.evidence_kind == EvidenceKind::LastfmDirectSimilarity)
-            .expect("direct edge");
-        let branch = edges
-            .iter()
-            .find(|edge| edge.evidence_kind == EvidenceKind::LastfmBranchSimilarity)
-            .expect("branch edge");
-        assert_eq!(edges.len(), 2);
-        assert!(direct.weight > branch.weight);
-        assert_eq!(direct.from_track_id, 1);
-        assert_eq!(direct.to_track_id, 2);
-    }
-
-    #[test]
-    fn lastfm_resolved_edges_dedupe_same_seed_and_track_by_kind() {
-        let edges = lastfm_resolved_edges_from_rows(vec![
-            queries::ResolvedLastfmExternalSightingRow {
-                seed_track_id: 1,
-                resolved_track_id: 2,
-                similarity: 0.4,
-                source_payload_json: Some(r#"{"match":0.4}"#.to_string()),
-            },
-            queries::ResolvedLastfmExternalSightingRow {
-                seed_track_id: 1,
-                resolved_track_id: 2,
-                similarity: 0.9,
-                source_payload_json: Some(r#"{"match":0.9}"#.to_string()),
-            },
-        ]);
-
-        assert_eq!(edges.len(), 1);
-        assert!((edges[0].weight - (0.9 * LASTFM_DIRECT_EDGE_WEIGHT)).abs() < f64::EPSILON);
     }
 
     fn tidal_search_track(
@@ -3444,8 +3189,6 @@ fn reason_label(key: &str) -> &'static str {
         "album_context" => "album-adjacent",
         "artist_affinity" => "session neighbor",
         "genre_branch" => "genre branch",
-        "lastfm_direct" => "Last.fm direct",
-        "lastfm_branch" => "Last.fm branch",
         _ => "learned signal",
     }
 }

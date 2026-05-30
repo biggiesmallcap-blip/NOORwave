@@ -5,20 +5,18 @@
 		title,
 		subtitle = '',
 		eyebrow = '',
-		variant = 'default',
 		actions,
 		meta
 	}: {
 		title: string;
 		subtitle?: string;
 		eyebrow?: string;
-		variant?: 'default' | 'editorial';
 		actions?: Snippet;
 		meta?: Snippet;
 	} = $props();
 </script>
 
-<header class="page-header" class:editorial={variant === 'editorial'}>
+<header class="page-header">
 	<div class="intro">
 		{#if eyebrow}
 			<p class="eyebrow">{eyebrow}</p>
@@ -73,13 +71,6 @@
 		font-size: var(--font-size-2xl);
 		font-weight: var(--font-weight-bold);
 		line-height: var(--line-height-tight);
-		letter-spacing: 0;
-	}
-
-	.page-header.editorial h1 {
-		color: var(--text-primary);
-		font-size: var(--font-size-3xl);
-		font-weight: var(--font-weight-bold);
 		letter-spacing: 0;
 	}
 

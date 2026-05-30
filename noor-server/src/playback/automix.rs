@@ -13,15 +13,12 @@
 //! `normalize_genre_key`) and `pub` / `pub(crate)` for items player.rs already
 //! exposed (`load_state`, `load_snapshot`, `build_session_taste_profile`).
 
-#[cfg(test)]
-use crate::db::models::AudioDjProfileKey;
 use crate::db::{
     models::{AudioDspFeatures, QueueItem, Track},
     queries,
 };
 use crate::playback::dj_queue_ranker::{
-    GeneratedCandidate, GeneratedCandidatePolicy, append_dj_reason, rank_generated_candidates,
-    rank_generated_candidates_chain,
+    GeneratedCandidate, append_dj_reason, rank_generated_candidates,
 };
 use crate::playback::player::{
     PlaybackSnapshot, build_session_taste_profile, load_snapshot, load_state, normalize_genre_key,
@@ -39,8 +36,6 @@ use crate::smart::taste_vector::adapters::from_session_profile;
 use crate::smart::taste_vector::{SeedContext, TasteVector};
 use anyhow::Result;
 use rusqlite::{Connection, params};
-#[cfg(test)]
-use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
@@ -58,7 +53,6 @@ struct ScoredTrack {
 pub(crate) struct AutomixSelection {
     pub(crate) track: Track,
     reason: Option<String>,
-    ranking_policy: GeneratedCandidatePolicy,
 }
 
 impl AutomixSelection {
@@ -66,13 +60,7 @@ impl AutomixSelection {
         Self {
             track,
             reason: Some(reason.into()),
-            ranking_policy: GeneratedCandidatePolicy::default(),
         }
-    }
-
-    fn with_ranking_policy(mut self, ranking_policy: GeneratedCandidatePolicy) -> Self {
-        self.ranking_policy = ranking_policy;
-        self
     }
 
     fn into_queue_pair(self) -> (Track, Option<String>) {
@@ -276,7 +264,6 @@ fn append_automix_external_candidates(
         .map(|row| GeneratedCandidate {
             track_id: None,
             tidal_id: row.tidal_id,
-            policy: Default::default(),
             item: row,
         })
         .collect::<Vec<_>>();
@@ -339,7 +326,6 @@ fn rank_automix_selections(
         .map(|selection| GeneratedCandidate {
             track_id: Some(selection.track.id),
             tidal_id: selection.track.tidal_id,
-            policy: selection.ranking_policy.clone(),
             item: selection,
         })
         .collect::<Vec<_>>();
@@ -347,7 +333,7 @@ fn rank_automix_selections(
         .iter()
         .map(|candidate| candidate.item.clone())
         .collect::<Vec<_>>();
-    rank_generated_candidates_chain(conn, seed_track_id, generated)
+    rank_generated_candidates(conn, seed_track_id, generated)
         .map(|ranked| {
             ranked
                 .into_iter()
@@ -433,10 +419,6 @@ pub(crate) fn build_automix_extension_with_reasons(
                 .iter()
                 .map(|row| (row.track_id, automix_neighbor_reason(row)))
                 .collect::<HashMap<_, _>>();
-            let neighbor_policies = neighbors
-                .iter()
-                .map(|row| (row.track_id, automix_neighbor_policy(row)))
-                .collect::<HashMap<_, _>>();
             let neighbor_ids = neighbors.iter().map(|row| row.track_id).collect::<Vec<_>>();
             let tracks = queue::get_tracks_by_ids(conn, &neighbor_ids)?;
             let track_map = tracks
@@ -447,10 +429,6 @@ pub(crate) fn build_automix_extension_with_reasons(
                 .into_iter()
                 .filter_map(|track_id| {
                     track_map.get(&track_id).cloned().map(|track| {
-                        let policy = neighbor_policies
-                            .get(&track_id)
-                            .cloned()
-                            .unwrap_or_default();
                         AutomixSelection::new(
                             track,
                             neighbor_reasons
@@ -458,7 +436,6 @@ pub(crate) fn build_automix_extension_with_reasons(
                                 .cloned()
                                 .unwrap_or_else(|| "automix: learned similarity".to_string()),
                         )
-                        .with_ranking_policy(policy)
                     })
                 })
                 .collect::<Vec<_>>();
@@ -607,196 +584,6 @@ pub(crate) fn build_automix_extension_with_reasons(
         .collect())
 }
 
-#[cfg(test)]
-#[derive(Debug, Serialize)]
-pub(crate) struct AutomixEvaluationReport {
-    pub(crate) seed_track_id: i64,
-    pub(crate) queue_len_before: i64,
-    pub(crate) queue_len_after: i64,
-    pub(crate) before: Vec<AutomixEvaluationRow>,
-    pub(crate) after: Vec<AutomixEvaluationRow>,
-}
-
-#[cfg(test)]
-#[derive(Debug, Serialize)]
-pub(crate) struct AutomixEvaluationRow {
-    pub(crate) order: usize,
-    pub(crate) track_id: i64,
-    pub(crate) title: String,
-    pub(crate) artist_name: Option<String>,
-    pub(crate) bpm: Option<f64>,
-    pub(crate) camelot_key: Option<String>,
-    pub(crate) profile_confidence: Option<f64>,
-    pub(crate) safe_crossfade_only: bool,
-    pub(crate) learned_score: Option<f64>,
-    pub(crate) primary_reason: Option<String>,
-    pub(crate) reason_tags: Vec<String>,
-    pub(crate) chain_score: Option<f64>,
-    pub(crate) dj_reasons: Vec<String>,
-    pub(crate) final_score: Option<f64>,
-    pub(crate) final_reason: Option<String>,
-}
-
-#[cfg(test)]
-pub(crate) fn evaluate_automix_for_seed(
-    conn: &Connection,
-    seed_track_id: i64,
-    limit: usize,
-) -> Result<AutomixEvaluationReport> {
-    let queue_len_before = queue_len(conn)?;
-    let seed = queue::get_track_by_id(conn, seed_track_id)?
-        .ok_or_else(|| anyhow::anyhow!("seed track {seed_track_id} not found"))?;
-    let model = queries::get_selected_discovery_embedding_model(conn)
-        .ok()
-        .flatten();
-    let learned_rows = if let Some(model) = model {
-        queries::get_track_neighbors(
-            conn,
-            model.id,
-            seed_track_id,
-            (limit * 4).max(24) as i64,
-            &[],
-        )
-        .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    let learned_by_track = learned_rows
-        .iter()
-        .map(|row| (row.track_id, row.clone()))
-        .collect::<HashMap<_, _>>();
-    let before_ids = learned_rows
-        .iter()
-        .take(limit)
-        .map(|row| row.track_id)
-        .collect::<Vec<_>>();
-    let before_tracks = queue::get_tracks_by_ids(conn, &before_ids)?;
-    let before_track_map = before_tracks
-        .into_iter()
-        .map(|track| (track.id, track))
-        .collect::<HashMap<_, _>>();
-    let before = before_ids
-        .into_iter()
-        .enumerate()
-        .filter_map(|(idx, track_id)| {
-            before_track_map.get(&track_id).map(|track| {
-                evaluation_row(conn, idx + 1, track, learned_by_track.get(&track.id), None)
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    let selected = build_automix_extension_with_reasons(
-        conn,
-        &seed,
-        &[],
-        ShuffleMode::Off,
-        None,
-        limit,
-        true,
-    )?;
-    let after = selected
-        .iter()
-        .enumerate()
-        .map(|(idx, selection)| {
-            evaluation_row(
-                conn,
-                idx + 1,
-                &selection.track,
-                learned_by_track.get(&selection.track.id),
-                selection.reason.as_deref(),
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let queue_len_after = queue_len(conn)?;
-
-    Ok(AutomixEvaluationReport {
-        seed_track_id,
-        queue_len_before,
-        queue_len_after,
-        before,
-        after,
-    })
-}
-
-#[cfg(test)]
-fn evaluation_row(
-    conn: &Connection,
-    order: usize,
-    track: &Track,
-    learned: Option<&queries::EmbeddingNeighborRow>,
-    final_reason: Option<&str>,
-) -> Result<AutomixEvaluationRow> {
-    let dsp = queries::get_audio_dsp_features(conn, track.id)
-        .ok()
-        .flatten();
-    let profile = queries::get_audio_dj_profile_for_track(conn, track.id)
-        .ok()
-        .flatten();
-    let safe_crossfade_only = queries::get_audio_dj_profile_correction(
-        conn,
-        &AudioDjProfileKey {
-            media_ref_kind: "library_track".to_string(),
-            media_ref_id: track.id.to_string(),
-        },
-    )
-    .ok()
-    .flatten()
-    .is_some_and(|correction| correction.safe_crossfade_only);
-    let tags = learned
-        .and_then(|row| row.reason_json.as_deref())
-        .map(|reason_json| automix_reason_tags(Some(reason_json)))
-        .unwrap_or_default();
-    let dj_reasons = final_reason
-        .and_then(|reason| reason.split(" | dj: ").nth(1))
-        .map(|suffix| suffix.split(" | {").next().unwrap_or(suffix))
-        .map(|reasons| {
-            reasons
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-    let chain_score = final_reason.and_then(|reason| reason_json_number(reason, "dj_score"));
-    let final_score = chain_score.or_else(|| learned.map(|row| row.score));
-
-    Ok(AutomixEvaluationRow {
-        order,
-        track_id: track.id,
-        title: track.title.clone(),
-        artist_name: track.artist_name.clone(),
-        bpm: dsp.as_ref().and_then(|features| features.bpm),
-        camelot_key: dsp
-            .as_ref()
-            .and_then(|features| features.camelot_key.clone()),
-        profile_confidence: profile.as_ref().map(|profile| profile.profile_confidence),
-        safe_crossfade_only,
-        learned_score: learned.map(|row| row.score),
-        primary_reason: learned.and_then(|row| row.primary_reason.clone()),
-        reason_tags: tags,
-        chain_score,
-        dj_reasons,
-        final_score,
-        final_reason: final_reason.map(str::to_string),
-    })
-}
-
-#[cfg(test)]
-fn reason_json_number(reason: &str, key: &str) -> Option<f64> {
-    let start = reason.rfind('{')?;
-    serde_json::from_str::<serde_json::Value>(&reason[start..])
-        .ok()?
-        .get(key)?
-        .as_f64()
-}
-
-#[cfg(test)]
-fn queue_len(conn: &Connection) -> Result<i64> {
-    conn.query_row("SELECT COUNT(*) FROM queue", [], |row| row.get(0))
-        .map_err(Into::into)
-}
-
 fn automix_neighbor_reason(row: &queries::EmbeddingNeighborRow) -> String {
     let reason = row
         .primary_reason
@@ -809,73 +596,6 @@ fn automix_neighbor_reason(row: &queries::EmbeddingNeighborRow) -> String {
         "{prefix} | {{\"score\":{:.4},\"behavioral_score\":{:.4},\"audio_score\":{:.4},\"metadata_score\":{:.4},\"confidence\":{:.4}}}",
         row.score, row.behavioral_score, row.audio_score, row.metadata_score, row.confidence
     )
-}
-
-fn automix_neighbor_policy(row: &queries::EmbeddingNeighborRow) -> GeneratedCandidatePolicy {
-    let mut multiplier = 1.0;
-    let mut policy_reasons = Vec::new();
-    let reason_tags = automix_reason_tags(row.reason_json.as_deref());
-    let has_tag = |tag: &str| reason_tags.iter().any(|value| value == tag);
-
-    let has_lastfm_direct = has_tag("lastfm_direct");
-    let has_lastfm_branch = has_tag("lastfm_branch");
-    if has_lastfm_direct {
-        multiplier *= 1.06;
-        policy_reasons.push("lastfm direct");
-    }
-    if has_lastfm_branch {
-        multiplier *= 0.90;
-        policy_reasons.push("lastfm branch");
-    }
-
-    let primary_is_texture = row.primary_reason.as_deref() == Some("audio_texture");
-    let has_texture = primary_is_texture || has_tag("audio_texture");
-    let has_supporting_reason = reason_tags.iter().any(|tag| {
-        matches!(
-            tag.as_str(),
-            "artist_affinity"
-                | "genre_branch"
-                | "album_context"
-                | "bpm_match"
-                | "harmonic_match"
-                | "energy_match"
-                | "behavioral"
-                | "direct_transition"
-                | "lastfm_direct"
-                | "lastfm_branch"
-        )
-    }) || row.behavioral_score > 0.35
-        || row.metadata_score > 0.0
-        || row.support_transition > 0.0
-        || row.support_structure > 0.0
-        || row.support_colisten > 0.0;
-
-    if has_texture && !has_supporting_reason {
-        multiplier *= 0.82;
-        policy_reasons.push("texture-only learned signal");
-    }
-
-    GeneratedCandidatePolicy {
-        score_multiplier: multiplier,
-        reasons: policy_reasons,
-    }
-}
-
-fn automix_reason_tags(reason_json: Option<&str>) -> Vec<String> {
-    reason_json
-        .and_then(|raw| serde_json::from_str::<Vec<serde_json::Value>>(raw).ok())
-        .map(|values| {
-            values
-                .into_iter()
-                .filter_map(|value| {
-                    value
-                        .get("key")
-                        .and_then(|key| key.as_str())
-                        .map(str::to_string)
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn automix_metadata_reason(seed: &Track, track: &Track) -> String {
@@ -1212,168 +932,6 @@ mod tests {
             date_added: None,
             source: "tidal".to_string(),
             artwork_url: None,
-        }
-    }
-
-    fn create_dsp_schema(conn: &Connection) {
-        conn.execute_batch(
-            "
-            CREATE TABLE audio_dsp_features (
-                track_id INTEGER PRIMARY KEY,
-                bpm REAL,
-                key_signature TEXT,
-                camelot_key TEXT,
-                loudness_lufs REAL,
-                energy REAL,
-                danceability REAL,
-                beat_strength REAL,
-                spectral_centroid REAL,
-                stereo_width REAL,
-                is_instrumental INTEGER NOT NULL DEFAULT 0,
-                analysis_source TEXT NOT NULL DEFAULT 'test',
-                analysis_offset_ms INTEGER NOT NULL DEFAULT 0,
-                samples_analyzed INTEGER,
-                analyzed_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z',
-                analysis_version TEXT NOT NULL DEFAULT 'test'
-            );
-            ",
-        )
-        .expect("dsp schema");
-    }
-
-    fn insert_dsp(conn: &Connection, track_id: i64, bpm: f64, camelot_key: &str) {
-        conn.execute(
-            "INSERT INTO audio_dsp_features (track_id, bpm, camelot_key) VALUES (?1, ?2, ?3)",
-            params![track_id, bpm, camelot_key],
-        )
-        .expect("insert dsp");
-    }
-
-    fn policy(multiplier: f64, reason: &'static str) -> GeneratedCandidatePolicy {
-        GeneratedCandidatePolicy {
-            score_multiplier: multiplier,
-            reasons: vec![reason],
-        }
-    }
-
-    #[test]
-    fn learned_policy_penalizes_texture_only_when_dj_fit_disagrees() {
-        let conn = Connection::open_in_memory().expect("db");
-        create_dsp_schema(&conn);
-        insert_dsp(&conn, 1, 120.0, "1A");
-        insert_dsp(&conn, 2, 145.0, "6B");
-        insert_dsp(&conn, 3, 121.0, "2A");
-
-        let ranked = rank_automix_selections(
-            &conn,
-            1,
-            vec![
-                AutomixSelection::new(track_with_album(2, None), "automix: audio texture")
-                    .with_ranking_policy(policy(0.82, "texture-only learned signal")),
-                AutomixSelection::new(track_with_album(3, None), "automix: learned similarity"),
-            ],
-        );
-
-        assert_eq!(ranked[0].track.id, 3);
-        assert_eq!(ranked[1].track.id, 2);
-        assert!(
-            ranked[1]
-                .reason
-                .as_deref()
-                .unwrap_or_default()
-                .contains("texture-only learned signal")
-        );
-    }
-
-    #[test]
-    fn lastfm_direct_is_confidence_not_override() {
-        let conn = Connection::open_in_memory().expect("db");
-        create_dsp_schema(&conn);
-        insert_dsp(&conn, 1, 120.0, "1A");
-        insert_dsp(&conn, 2, 120.5, "1A");
-        insert_dsp(&conn, 3, 120.5, "1A");
-
-        let tied_facts = rank_automix_selections(
-            &conn,
-            1,
-            vec![
-                AutomixSelection::new(track_with_album(3, None), "automix: lastfm branch")
-                    .with_ranking_policy(policy(0.90, "lastfm branch")),
-                AutomixSelection::new(track_with_album(2, None), "automix: lastfm direct")
-                    .with_ranking_policy(policy(1.06, "lastfm direct")),
-            ],
-        );
-        assert_eq!(tied_facts[0].track.id, 2);
-
-        let conn = Connection::open_in_memory().expect("db");
-        create_dsp_schema(&conn);
-        insert_dsp(&conn, 1, 120.0, "1A");
-        insert_dsp(&conn, 2, 145.0, "6B");
-        insert_dsp(&conn, 3, 120.5, "1A");
-
-        let better_fit_branch = rank_automix_selections(
-            &conn,
-            1,
-            vec![
-                AutomixSelection::new(track_with_album(2, None), "automix: lastfm direct")
-                    .with_ranking_policy(policy(1.06, "lastfm direct")),
-                AutomixSelection::new(track_with_album(3, None), "automix: lastfm branch")
-                    .with_ranking_policy(policy(0.90, "lastfm branch")),
-            ],
-        );
-        assert_eq!(better_fit_branch[0].track.id, 3);
-    }
-
-    #[test]
-    #[ignore]
-    fn automix_diagnostic_for_seed() {
-        let db_path = crate::paths::resolve_db_path_from_env();
-        let limit = std::env::var("NOOR_AUTOMIX_LIMIT")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(8);
-        let seeds = std::env::var("NOOR_AUTOMIX_SEEDS")
-            .ok()
-            .or_else(|| std::env::var("NOOR_SEED").ok())
-            .unwrap_or_else(|| "1".to_string())
-            .split(',')
-            .filter_map(|value| value.trim().parse::<i64>().ok())
-            .collect::<Vec<_>>();
-        let db = crate::db::Database::open(&db_path).expect("open db");
-
-        for seed in seeds {
-            let report = db
-                .with_conn(|conn| evaluate_automix_for_seed(conn, seed, limit))
-                .expect("evaluate automix");
-            println!("{}", serde_json::to_string_pretty(&report).expect("json"));
-            println!("seed {}", report.seed_track_id);
-            println!("before:");
-            for row in &report.before {
-                println!(
-                    "#{:<2} {:<6} {:<32} bpm={:?} key={:?} learned={:?} primary={:?}",
-                    row.order,
-                    row.track_id,
-                    row.title.chars().take(32).collect::<String>(),
-                    row.bpm,
-                    row.camelot_key,
-                    row.learned_score,
-                    row.primary_reason
-                );
-            }
-            println!("after:");
-            for row in &report.after {
-                println!(
-                    "#{:<2} {:<6} {:<32} bpm={:?} key={:?} final={:?} reason={:?}",
-                    row.order,
-                    row.track_id,
-                    row.title.chars().take(32).collect::<String>(),
-                    row.bpm,
-                    row.camelot_key,
-                    row.final_score,
-                    row.final_reason
-                );
-            }
-            assert_eq!(report.queue_len_before, report.queue_len_after);
         }
     }
 
