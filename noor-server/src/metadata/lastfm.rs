@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::collections::HashSet;
 
 const LASTFM_API_URL: &str = "https://ws.audioscrobbler.com/2.0/";
+const LASTFM_USER_AGENT: &str = "NOORwave/0.1 Last.fm integration";
 
 #[derive(Clone)]
 pub struct LastFmClient {
@@ -44,6 +45,16 @@ pub struct LastFmChartArtist {
     pub mbid: Option<String>,
     pub image_url: Option<String>,
     pub listeners: Option<u64>,
+    pub playcount: Option<u64>,
+    pub match_score: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LastFmChartAlbum {
+    pub artist: String,
+    pub title: String,
+    pub mbid: Option<String>,
+    pub image_url: Option<String>,
     pub playcount: Option<u64>,
 }
 
@@ -177,36 +188,19 @@ impl LastFmClient {
         })
     }
 
-    pub async fn user_profile_seed_tracks(
+    pub async fn user_recent_tracks(
         &self,
         user_name: &str,
         limit: usize,
     ) -> Result<Vec<LastFmChartTrack>> {
-        let mut seeds = Vec::new();
-        seeds.extend(
-            self.user_top_tracks(user_name, limit)
-                .await
-                .unwrap_or_default(),
-        );
-        seeds.extend(
-            self.user_loved_tracks(user_name, limit)
-                .await
-                .unwrap_or_default(),
-        );
-
-        let mut seen = HashSet::new();
-        let mut out = Vec::new();
-        for seed in seeds {
-            let key = crate::services::radio::normalize_for_dedup(&seed.artist, &seed.title);
-            if key.is_empty() || !seen.insert(key) {
-                continue;
-            }
-            out.push(seed);
-            if out.len() >= limit {
-                break;
-            }
-        }
-        Ok(out)
+        let payload = self
+            .get_json(&[
+                ("method", "user.getrecenttracks".to_string()),
+                ("user", user_name.to_string()),
+                ("limit", limit.min(100).to_string()),
+            ])
+            .await?;
+        Ok(parse_chart_tracks(&payload, limit))
     }
 
     pub async fn user_top_tracks(
@@ -238,6 +232,38 @@ impl LastFmClient {
             ])
             .await?;
         Ok(parse_chart_tracks(&payload, limit))
+    }
+
+    pub async fn user_top_artists(
+        &self,
+        user_name: &str,
+        limit: usize,
+    ) -> Result<Vec<LastFmChartArtist>> {
+        let payload = self
+            .get_json(&[
+                ("method", "user.gettopartists".to_string()),
+                ("user", user_name.to_string()),
+                ("period", "3month".to_string()),
+                ("limit", limit.min(100).to_string()),
+            ])
+            .await?;
+        Ok(parse_chart_artists(&payload, limit))
+    }
+
+    pub async fn user_top_albums(
+        &self,
+        user_name: &str,
+        limit: usize,
+    ) -> Result<Vec<LastFmChartAlbum>> {
+        let payload = self
+            .get_json(&[
+                ("method", "user.gettopalbums".to_string()),
+                ("user", user_name.to_string()),
+                ("period", "3month".to_string()),
+                ("limit", limit.min(100).to_string()),
+            ])
+            .await?;
+        Ok(parse_chart_albums(&payload, limit))
     }
 
     /// Public API: fetch up to `limit` tracks Last.fm considers similar to (artist, title).
@@ -421,6 +447,25 @@ impl LastFmClient {
         Ok(out)
     }
 
+    pub async fn artist_get_similar(
+        &self,
+        artist: &str,
+        limit: usize,
+    ) -> Result<Vec<LastFmChartArtist>> {
+        let artists = self.fetch_similar_artists(artist, limit).await?;
+        Ok(artists
+            .into_iter()
+            .map(|(name, match_score)| LastFmChartArtist {
+                name,
+                mbid: None,
+                image_url: None,
+                listeners: None,
+                playcount: None,
+                match_score: Some(match_score),
+            })
+            .collect())
+    }
+
     /// Fetch top track titles for an artist (Last.fm popularity-ordered).
     /// Internal helper for `track_get_similar_with_artist_fallback`.
     async fn fetch_artist_top_tracks(&self, artist: &str, limit: usize) -> Result<Vec<String>> {
@@ -444,6 +489,21 @@ impl LastFmClient {
             }
         }
         Ok(out)
+    }
+
+    pub async fn artist_top_albums(
+        &self,
+        artist: &str,
+        limit: usize,
+    ) -> Result<Vec<LastFmChartAlbum>> {
+        let payload = self
+            .get_json(&[
+                ("method", "artist.gettopalbums".to_string()),
+                ("artist", artist.to_string()),
+                ("limit", limit.min(50).to_string()),
+            ])
+            .await?;
+        Ok(parse_chart_albums(&payload, limit))
     }
 
     /// Fetch top global or geo chart tracks from Last.fm.
@@ -719,6 +779,7 @@ impl LastFmClient {
         let response = self
             .http
             .get(LASTFM_API_URL)
+            .header(reqwest::header::USER_AGENT, LASTFM_USER_AGENT)
             .query(&query)
             .timeout(LASTFM_TIMEOUT)
             .send()
@@ -809,7 +870,8 @@ pub(crate) fn parse_chart_tracks(payload: &Value, limit: usize) -> Vec<LastFmCha
         .get("tracks")
         .and_then(|v| v.get("track"))
         .or_else(|| payload.get("toptracks").and_then(|v| v.get("track")))
-        .or_else(|| payload.get("lovedtracks").and_then(|v| v.get("track")));
+        .or_else(|| payload.get("lovedtracks").and_then(|v| v.get("track")))
+        .or_else(|| payload.get("recenttracks").and_then(|v| v.get("track")));
     let arr = value_as_array(tracks_value);
 
     let mut out = Vec::new();
@@ -872,6 +934,46 @@ pub(crate) fn parse_chart_artists(payload: &Value, limit: usize) -> Vec<LastFmCh
             mbid,
             image_url: largest_image_url(entry),
             listeners: parse_u64_field(entry, "listeners"),
+            playcount: parse_u64_field(entry, "playcount"),
+            match_score: None,
+        });
+    }
+    out
+}
+
+pub(crate) fn parse_chart_albums(payload: &Value, limit: usize) -> Vec<LastFmChartAlbum> {
+    let albums_value = payload
+        .get("albums")
+        .and_then(|v| v.get("album"))
+        .or_else(|| payload.get("topalbums").and_then(|v| v.get("album")));
+    let arr = value_as_array(albums_value);
+
+    let mut out = Vec::new();
+    for entry in arr.into_iter().take(limit) {
+        let title = match entry.get("name").and_then(Value::as_str) {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => continue,
+        };
+        let artist_name = entry
+            .get("artist")
+            .and_then(|a| a.get("name").or_else(|| a.get("#text")))
+            .and_then(Value::as_str)
+            .or_else(|| entry.get("artist").and_then(Value::as_str))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if artist_name.is_empty() {
+            continue;
+        }
+        let mbid = entry
+            .get("mbid")
+            .and_then(Value::as_str)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        out.push(LastFmChartAlbum {
+            artist: artist_name,
+            title,
+            mbid,
+            image_url: largest_image_url(entry),
             playcount: parse_u64_field(entry, "playcount"),
         });
     }
@@ -1034,6 +1136,36 @@ mod tests {
     }
 
     #[test]
+    fn parses_top_album_payload() {
+        let payload = json!({
+            "topalbums": {
+                "album": [
+                    {
+                        "name": "Promises",
+                        "artist": { "name": "Floating Points" },
+                        "mbid": "",
+                        "playcount": "44",
+                        "image": [
+                            { "size": "small", "#text": "small.jpg" },
+                            { "size": "mega", "#text": "mega.jpg" }
+                        ]
+                    },
+                    { "name": " " }
+                ]
+            }
+        });
+
+        let albums = parse_chart_albums(&payload, 10);
+
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].title, "Promises");
+        assert_eq!(albums[0].artist, "Floating Points");
+        assert_eq!(albums[0].playcount, Some(44));
+        assert_eq!(albums[0].image_url.as_deref(), Some("mega.jpg"));
+        assert!(albums[0].mbid.is_none());
+    }
+
+    #[test]
     fn parses_loved_tracks_as_profile_seed_tracks() {
         let payload = json!({
             "lovedtracks": {
@@ -1054,6 +1186,29 @@ mod tests {
         assert_eq!(tracks[0].title, "Loved One");
         assert_eq!(tracks[0].artist, "Seed Artist");
         assert_eq!(tracks[0].playcount, Some(8));
+    }
+
+    #[test]
+    fn parses_recent_tracks_as_profile_seed_tracks() {
+        let payload = json!({
+            "recenttracks": {
+                "track": [
+                    {
+                        "name": "Recent One",
+                        "artist": { "#text": "Recent Artist" },
+                        "mbid": ""
+                    },
+                    { "name": "" }
+                ]
+            }
+        });
+
+        let tracks = parse_chart_tracks(&payload, 10);
+
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].title, "Recent One");
+        assert_eq!(tracks[0].artist, "Recent Artist");
+        assert!(tracks[0].mbid.is_none());
     }
 }
 

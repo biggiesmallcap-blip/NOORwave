@@ -1856,8 +1856,13 @@ export interface ListenBrainzStatus {
 
 export interface ProviderRecommendationItem {
 	provider: 'lastfm' | 'listenbrainz' | string;
-	local_track_id: number;
+	entity_type?: 'track' | 'artist' | 'album' | string;
+	local_track_id: number | null;
 	tidal_id: number | null;
+	local_artist_id?: number | null;
+	tidal_artist_id?: number | null;
+	local_album_id?: number | null;
+	tidal_album_id?: number | null;
 	title: string;
 	artist_name: string | null;
 	album_title: string | null;
@@ -1870,6 +1875,7 @@ export interface ProviderRecommendationItem {
 
 export interface ProviderRecommendationShelf {
 	provider: 'lastfm' | 'listenbrainz' | string;
+	entity_type?: 'track' | 'artist' | 'album' | string;
 	title: string;
 	status: 'ok' | 'empty' | 'error' | string;
 	message?: string;

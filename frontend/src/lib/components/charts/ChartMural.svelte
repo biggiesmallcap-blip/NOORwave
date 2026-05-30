@@ -65,6 +65,20 @@
 	}: Props = $props();
 
 	let currentItem = $derived(items[currentIndex] ?? items[0] ?? null);
+
+	function muralLayoutClass(count: number): string {
+		if (count <= 1) return 'layout-count-1';
+		if (count <= 2) return 'layout-count-2';
+		if (count <= 3) return 'layout-count-3';
+		if (count <= 4) return 'layout-count-4';
+		if (count <= 6) return 'layout-count-6';
+		if (count <= 8) return 'layout-count-8';
+		if (count <= 10) return 'layout-count-10';
+		if (count <= 12) return 'layout-count-12';
+		if (count <= 15) return 'layout-count-15';
+		if (count <= 16) return 'layout-count-16';
+		return 'layout-count-20';
+	}
 </script>
 
 {#if loading}
@@ -81,7 +95,7 @@
 			if (onCardContext) void onCardContext(event);
 		}}
 	>
-		<div class="chart-mural-bg" aria-hidden="true">
+		<div class={`chart-mural-bg ${muralLayoutClass(items.length)}`} aria-hidden="true">
 			{#each items as item, index (item.id)}
 				<button
 					class="chart-mural-tile"
@@ -179,6 +193,56 @@
 		grid-template-columns: repeat(10, minmax(0, 1fr));
 		grid-template-rows: repeat(2, minmax(0, 1fr));
 		background: linear-gradient(120deg, var(--panel-bg), color-mix(in srgb, var(--chart-mural-accent) 16%, transparent));
+	}
+
+	.chart-mural-bg.layout-count-1 {
+		grid-template-columns: minmax(0, 1fr);
+		grid-template-rows: minmax(0, 1fr);
+	}
+
+	.chart-mural-bg.layout-count-2 {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		grid-template-rows: minmax(0, 1fr);
+	}
+
+	.chart-mural-bg.layout-count-3 {
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		grid-template-rows: minmax(0, 1fr);
+	}
+
+	.chart-mural-bg.layout-count-4 {
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		grid-template-rows: minmax(0, 1fr);
+	}
+
+	.chart-mural-bg.layout-count-6 {
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		grid-template-rows: repeat(2, minmax(0, 1fr));
+	}
+
+	.chart-mural-bg.layout-count-8 {
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		grid-template-rows: repeat(2, minmax(0, 1fr));
+	}
+
+	.chart-mural-bg.layout-count-10 {
+		grid-template-columns: repeat(5, minmax(0, 1fr));
+		grid-template-rows: repeat(2, minmax(0, 1fr));
+	}
+
+	.chart-mural-bg.layout-count-12 {
+		grid-template-columns: repeat(6, minmax(0, 1fr));
+		grid-template-rows: repeat(2, minmax(0, 1fr));
+	}
+
+	.chart-mural-bg.layout-count-15 {
+		grid-template-columns: repeat(5, minmax(0, 1fr));
+		grid-template-rows: repeat(3, minmax(0, 1fr));
+	}
+
+	.chart-mural-bg.layout-count-16 {
+		grid-template-columns: repeat(8, minmax(0, 1fr));
+		grid-template-rows: repeat(2, minmax(0, 1fr));
 	}
 
 	.chart-mural-bg::after {
@@ -344,7 +408,8 @@
 
 	.chart-nav {
 		position: absolute;
-		top: 50%;
+		right: var(--space-3);
+		bottom: var(--space-4);
 		z-index: var(--z-raised);
 		display: grid;
 		place-items: center;
@@ -357,8 +422,7 @@
 		cursor: pointer;
 		font-size: var(--font-size-xl);
 		line-height: 1;
-		opacity: 0;
-		transform: translateY(-50%);
+		opacity: 0.78;
 		transition: opacity var(--motion-fast), background var(--motion-fast);
 	}
 
@@ -373,7 +437,7 @@
 	}
 
 	.chart-nav--prev {
-		left: var(--space-3);
+		right: calc(var(--space-3) + clamp(32px, 3vw, 40px) + var(--space-2));
 	}
 
 	.chart-nav--next {
@@ -395,6 +459,35 @@
 	@media (max-width: 760px) {
 		.chart-mural-bg {
 			grid-template-columns: repeat(5, minmax(0, 1fr));
+			grid-template-rows: repeat(4, minmax(0, 1fr));
+		}
+
+		.chart-mural-bg.layout-count-1 {
+			grid-template-columns: minmax(0, 1fr);
+			grid-template-rows: minmax(0, 1fr);
+		}
+
+		.chart-mural-bg.layout-count-2,
+		.chart-mural-bg.layout-count-3 {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			grid-template-rows: repeat(2, minmax(0, 1fr));
+		}
+
+		.chart-mural-bg.layout-count-4,
+		.chart-mural-bg.layout-count-6 {
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+			grid-template-rows: repeat(2, minmax(0, 1fr));
+		}
+
+		.chart-mural-bg.layout-count-8,
+		.chart-mural-bg.layout-count-10 {
+			grid-template-columns: repeat(5, minmax(0, 1fr));
+			grid-template-rows: repeat(2, minmax(0, 1fr));
+		}
+
+		.chart-mural-bg.layout-count-12,
+		.chart-mural-bg.layout-count-15 {
+			grid-template-columns: repeat(4, minmax(0, 1fr));
 			grid-template-rows: repeat(4, minmax(0, 1fr));
 		}
 
