@@ -78,6 +78,9 @@ impl Planner {
 
         let outgoing_phrases = outgoing.phrase_bar_indices.len();
         let incoming_phrases = incoming.phrase_bar_indices.len();
+        if drop_tease_candidate_ready(outgoing, incoming, policy) {
+            return TransitionTemplate::DropTease16;
+        }
         if matches!(policy.transition_speed_bias, TransitionSpeedBias::Slower)
             && matches!(camelot_distance, 0 | 1 | 7)
             && bpm_delta <= 3.0
@@ -177,30 +180,26 @@ fn build_program(
             .extend(filter_sweep_eq_wash(duration_samples));
     }
 
-    if !matches!(template, TransitionTemplate::SlamCut) {
-        if let Some(rate) = small_tempo_nudge_rate(outgoing, incoming) {
-            if (rate - 1.0).abs() > PLAYBACK_RATE_EPSILON {
-                program.automation.push(AutomationEvent {
-                    param: Param::PlaybackRate(DeckId::B),
-                    start_sample: 0,
-                    end_sample: duration_samples,
-                    from: rate,
-                    to: rate,
-                    curve: Curve::Linear,
-                });
-            }
-        }
+    if !matches!(template, TransitionTemplate::SlamCut)
+        && let Some(rate) = small_tempo_nudge_rate(outgoing, incoming)
+        && (rate - 1.0).abs() > PLAYBACK_RATE_EPSILON
+    {
+        program.automation.push(AutomationEvent {
+            param: Param::PlaybackRate(DeckId::B),
+            start_sample: 0,
+            end_sample: duration_samples,
+            from: rate,
+            to: rate,
+            curve: Curve::Linear,
+        });
     }
 
     program
 }
 
-#[allow(dead_code)]
 fn drop_tease_candidate_ready(outgoing: &DjProfile, incoming: &DjProfile, policy: &Policy) -> bool {
     let has_manual_drop = !incoming.manual_drop_seconds.is_empty();
-    if !(matches!(policy.mix_intent, MixIntent::Bold)
-        || (matches!(policy.mix_intent, MixIntent::Balanced) && has_manual_drop))
-    {
+    if !has_manual_drop || !matches!(policy.mix_intent, MixIntent::Balanced | MixIntent::Bold) {
         return false;
     }
     if !outgoing.has_full_dj_profile() || !incoming.has_full_dj_profile() {
