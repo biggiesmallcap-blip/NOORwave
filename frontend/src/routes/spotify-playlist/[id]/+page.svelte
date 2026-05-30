@@ -25,12 +25,15 @@
   } from '$lib/stores/player';
   import { tidalStatus } from '$lib/stores/tidal';
   import { showToast } from '$lib/stores/toast';
+  import { SPOTIFY_MOODS_BY_SLUG } from '$lib/components/moods/spotify-moods-data';
+  import { putCachedSpotifyChartMeta } from '$lib/stores/spotify-chart-meta-cache';
 
   // Ephemeral Spotify playlist view. The playlist is NOT in the user's
   // library — clicking Save promotes it. Until then, navigation away loses
   // any state held only in this component.
 
   const spotifyId = $derived($page.params.id ?? '');
+  const backLink = $derived(resolveBackLink($page.url.searchParams));
 
   let detail = $state<SpotifyPlaylistDetail | null>(null);
   let pendingIds = $state<string[]>([]);
@@ -114,6 +117,7 @@
     try {
       const res = await api.getSpotifyPlaylist(id, controller.signal);
       detail = res.playlist;
+      putCachedSpotifyChartMeta(id, res.playlist);
       pendingIds = res.pendingSpotifyIds ?? [];
       pollDeadline = Date.now() + POLL_DEADLINE_MS;
       if (pendingIds.length > 0) {
@@ -156,6 +160,15 @@
   function retry() {
     const id = spotifyId.trim();
     if (id) void load(id);
+  }
+
+  function resolveBackLink(params: URLSearchParams): { href: string; label: string } {
+    const from = params.get('from');
+    const mood = params.get('mood');
+    if (from === 'moods' && mood && SPOTIFY_MOODS_BY_SLUG.has(mood)) {
+      return { href: `/moods/${encodeURIComponent(mood)}`, label: 'Back to mood' };
+    }
+    return { href: '/search', label: 'Back to search' };
   }
 
   $effect(() => {
@@ -374,7 +387,7 @@
 </svelte:head>
 
 <div class="page">
-  <a class="back-link" href="/search">← Back to search</a>
+  <a class="back-link" href={backLink.href}>&lt; {backLink.label}</a>
   {#if loading}
     <div class="state">Loading playlist…</div>
   {:else if error}

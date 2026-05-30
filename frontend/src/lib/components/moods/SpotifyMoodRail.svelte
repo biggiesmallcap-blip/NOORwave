@@ -2,13 +2,30 @@
   import { openContextMenu } from '$lib/stores/context_menu';
   import { goto } from '$app/navigation';
   import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
+  import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+  import {
+    getCachedSpotifyChartMetaMap,
+    type SpotifyChartMeta,
+  } from '$lib/stores/spotify-chart-meta-cache';
   import type { SpotifyMoodCategory } from './spotify-moods-data';
 
   let { category }: { category: SpotifyMoodCategory } = $props();
 
+  let meta = $state<Record<string, SpotifyChartMeta>>({});
+
+  $effect(() => {
+    const ids = category.playlists.map((playlist) => playlist.id);
+    meta = getCachedSpotifyChartMetaMap(ids);
+  });
+
+  function playlistHref(id: string): string {
+    const params = new URLSearchParams({ from: 'moods', mood: category.slug });
+    return `/spotify-playlist/${id}?${params}`;
+  }
+
   function buildMenu(id: string, title: string) {
     return [
-      { label: 'Open playlist', onSelect: () => void goto(`/spotify-playlist/${id}`) },
+      { label: 'Open playlist', onSelect: () => void goto(playlistHref(id)) },
     ];
   }
 </script>
@@ -17,16 +34,23 @@
   <h3 class="rail-heading">{category.label}</h3>
   <div class="rail" use:wheelToHorizontal>
     {#each category.playlists as p (p.id)}
+      {@const m = meta[p.id]}
       <a
         class="card"
-        href={`/spotify-playlist/${p.id}`}
+        href={playlistHref(p.id)}
         oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildMenu(p.id, p.title), p.title); }}
       >
         <div class="art-wrap">
-          <div class="art fallback">S</div>
+          <ArtworkImage
+            className="spotify-mood-art"
+            src={m?.thumbnail ?? null}
+            alt={m?.title ?? p.title}
+            size={320}
+            fallbackText={p.title.slice(0, 2).toUpperCase()}
+          />
         </div>
         <div class="meta">
-          <p class="title">{p.title}</p>
+          <p class="title">{m?.title ?? p.title}</p>
           <span class="source">Spotify</span>
         </div>
       </a>
@@ -74,9 +98,9 @@
   .card:focus-visible { border-color: var(--accent-line); }
 
   .art-wrap { position: relative; aspect-ratio: 1 / 1; width: 100%; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-hover); }
-  .art { width: 100%; height: 100%; background-size: cover; background-position: center; transition: transform var(--motion-base); }
-  .card:hover .art { transform: scale(1.05); }
-  .art.fallback { display: flex; align-items: center; justify-content: center; font-size: var(--font-size-4xl); color: var(--text-muted); }
+  :global(.spotify-mood-art) { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform var(--motion-base); }
+  .card:hover :global(.spotify-mood-art) { transform: scale(1.05); }
+  :global(.spotify-mood-art.fallback) { display: flex; align-items: center; justify-content: center; background: var(--bg-hover); color: var(--text-muted); font-size: var(--font-size-4xl); font-weight: var(--font-weight-bold); }
 
   .meta { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
   .title { margin: 0; font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: var(--line-height-snug); }
