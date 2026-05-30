@@ -608,8 +608,10 @@ pub(super) async fn queue_missing_dj_profiles_for_current_pair(
                 if !queries::is_dj_engine_enabled(conn)? {
                     return Ok(Vec::new());
                 }
-                if foreground_playback_is_buffering(conn, &state_guard)? {
-                    tracing::debug!("Deferring DJ profile rebuilds while playback is buffering");
+                if foreground_playback_needs_network_priority(conn, &state_guard)? {
+                    tracing::debug!(
+                        "Deferring DJ profile rebuilds while playback needs network priority"
+                    );
                     return Ok(Vec::new());
                 }
                 let pair = super::active_dj_pair_for_state_and_conn(&state_guard, conn)?;
@@ -1051,18 +1053,45 @@ fn dj_profile_inflight_key(key: &AudioDjProfileKey) -> String {
     format!("{}:{}", key.media_ref_kind, key.media_ref_id)
 }
 
-fn foreground_playback_is_buffering(
+fn foreground_playback_needs_network_priority(
     conn: &rusqlite::Connection,
     state: &crate::AppState,
 ) -> anyhow::Result<bool> {
-    if state
-        .audio_active
-        .load(std::sync::atomic::Ordering::Relaxed)
-        || state.playback_runtime.is_none()
-    {
+    let is_playing = player::load_state(conn)?.is_playing;
+    let runtime_present = state.playback_runtime.is_some();
+    if !is_playing || !runtime_present {
         return Ok(false);
     }
-    Ok(player::load_state(conn)?.is_playing)
+    let audio_active = state
+        .audio_active
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let buffer_ahead_ms = if audio_active {
+        state
+            .playback_runtime
+            .as_ref()
+            .zip(state.playback_runtime_info.as_ref())
+            .map(|(runtime, info)| {
+                let position_ms = runtime
+                    .handle
+                    .get_position_ms(info.sample_rate, info.channels)
+                    .max(0);
+                let buffered_ms = runtime
+                    .handle
+                    .get_buffered_ms(info.sample_rate, info.channels)
+                    .max(0);
+                buffered_ms.saturating_sub(position_ms)
+            })
+    } else {
+        None
+    };
+    Ok(
+        crate::services::audio_analysis::should_defer_background_analysis_for_playback(
+            is_playing,
+            runtime_present,
+            audio_active,
+            buffer_ahead_ms,
+        ),
+    )
 }
 
 fn deck_needs_profile_rebuild(deck: &DjDeckStatus) -> bool {
