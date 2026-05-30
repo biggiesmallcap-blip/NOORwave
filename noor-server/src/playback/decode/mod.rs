@@ -15,7 +15,7 @@ use anyhow::{Context, Result, anyhow};
 use futures::StreamExt as _;
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 use symphonia::core::audio::SampleBuffer;
@@ -34,6 +34,9 @@ const DJ_ANALYSIS_DASH_PREFETCH_ATTEMPTS: usize = 3;
 const DJ_ANALYSIS_DASH_PREFETCH_RETRY_BACKOFF_MS: u64 = 150;
 const PLAYBACK_DASH_PREFETCH_ATTEMPTS: usize = 2;
 const PLAYBACK_DASH_PREFETCH_RETRY_BACKOFF_MS: u64 = 100;
+const PLAYBACK_DASH_BACKGROUND_FETCH_ATTEMPTS: usize = 3;
+const PLAYBACK_DASH_BACKGROUND_FETCH_RETRY_BACKOFF_MS: u64 = 150;
+const PLAYBACK_DASH_BACKGROUND_FETCH_STOP_POLL_MS: u64 = 25;
 const PLAYBACK_BUFFER_RETAIN_BEHIND_MS: i32 = 10_000;
 const PLAYBACK_DECODE_HIGH_WATER_SECS: u64 = 45;
 const PLAYBACK_DECODE_LOW_WATER_SECS: u64 = 30;
@@ -179,11 +182,89 @@ where
     Err(last_error.unwrap_or_else(|| anyhow!("DASH prebuffer fetch failed")))
 }
 
+async fn fetch_dash_segment_with_retries<F, Fut>(
+    url: String,
+    segment_index: usize,
+    attempts: usize,
+    retry_backoff_ms: u64,
+    stop: &AtomicBool,
+    fetch: F,
+) -> Result<Vec<u8>>
+where
+    F: Fn(String, usize) -> Fut,
+    Fut: Future<Output = Result<Vec<u8>>>,
+{
+    let attempts = attempts.max(1);
+    let mut last_error = None;
+    for attempt in 0..attempts {
+        if stop.load(Ordering::Relaxed) {
+            return Err(anyhow!("DASH segment fetch stopped"));
+        }
+
+        let fetch_result = tokio::select! {
+            result = fetch(url.clone(), segment_index) => result,
+            _ = wait_for_dash_stop(stop) => Err(anyhow!("DASH segment fetch stopped")),
+        };
+
+        match fetch_result {
+            Ok(bytes) => return Ok(bytes),
+            Err(error) => {
+                let should_retry = is_retryable_dash_fetch_error(&error);
+                last_error = Some(error);
+                if !should_retry || attempt + 1 >= attempts {
+                    break;
+                }
+                if sleep_dash_retry_backoff(stop, retry_backoff_ms).await {
+                    return Err(anyhow!("DASH segment fetch stopped"));
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("DASH segment fetch failed")))
+}
+
+fn is_retryable_dash_fetch_error(error: &anyhow::Error) -> bool {
+    for cause in error.chain() {
+        if cause.is::<tokio::time::error::Elapsed>() {
+            return true;
+        }
+
+        let Some(reqwest_error) = cause.downcast_ref::<reqwest::Error>() else {
+            continue;
+        };
+        if let Some(status) = reqwest_error.status() {
+            return status.is_server_error()
+                || status == reqwest::StatusCode::REQUEST_TIMEOUT
+                || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+        }
+        if reqwest_error.is_timeout() || reqwest_error.is_connect() || reqwest_error.is_body() {
+            return true;
+        }
+    }
+    false
+}
+
+async fn sleep_dash_retry_backoff(stop: &AtomicBool, backoff_ms: u64) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_millis(backoff_ms)) => false,
+        _ = wait_for_dash_stop(stop) => true,
+    }
+}
+
+async fn wait_for_dash_stop(stop: &AtomicBool) {
+    while !stop.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(
+            PLAYBACK_DASH_BACKGROUND_FETCH_STOP_POLL_MS,
+        ))
+        .await;
+    }
+}
+
 async fn fetch_dash_segments_ordered<F, Fut, S>(
     media_urls: Vec<String>,
     first_segment_index: usize,
     fetch_window: usize,
-    stop: &std::sync::atomic::AtomicBool,
+    stop: &AtomicBool,
     fetch: F,
     mut send: S,
 ) -> Result<DashBackgroundFetchSummary>
@@ -205,9 +286,16 @@ where
         async move {
             let started = Instant::now();
             let segment_index = first_segment_index + idx;
-            fetch(url, segment_index)
-                .await
-                .map(|bytes| (segment_index, started.elapsed(), bytes))
+            fetch_dash_segment_with_retries(
+                url,
+                segment_index,
+                PLAYBACK_DASH_BACKGROUND_FETCH_ATTEMPTS,
+                PLAYBACK_DASH_BACKGROUND_FETCH_RETRY_BACKOFF_MS,
+                stop,
+                fetch,
+            )
+            .await
+            .map(|bytes| (segment_index, started.elapsed(), bytes))
         }
     }))
     .buffered(fetch_window);
@@ -922,8 +1010,10 @@ mod tests {
     use crate::playback::dj_lookahead::DjMediaRef;
     use crate::playback::gapless::GaplessPlan;
     use crate::playback::player::{PlaybackSourceRequest, PreparedPlaybackJob};
+    use anyhow::Context as _;
     use std::collections::VecDeque;
     use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
 
     fn test_track(track_id: i64) -> Track {
         Track {
@@ -984,6 +1074,16 @@ mod tests {
     ) {
         let (config, rx) = test_config(enabled);
         (config.for_dj_analysis_only(), rx)
+    }
+
+    async fn retryable_test_timeout() -> Result<Vec<u8>> {
+        tokio::time::timeout(
+            Duration::from_millis(1),
+            tokio::time::sleep(Duration::from_millis(10)),
+        )
+        .await
+        .context("test retryable timeout")?;
+        Ok(Vec::new())
     }
 
     fn run_dash_prebuffer_test(
@@ -1154,6 +1254,139 @@ mod tests {
         assert_eq!(summary.sent_bytes, 3);
         assert!(!summary.stopped);
         assert!(!summary.receiver_closed);
+    }
+
+    #[test]
+    fn dash_background_fetch_retries_transient_segment_failure() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let stop = AtomicBool::new(false);
+        let flaky_attempts = Arc::new(Mutex::new(0usize));
+        let mut sent = Vec::new();
+
+        let summary = rt
+            .block_on(fetch_dash_segments_ordered(
+                vec!["first".to_string(), "flaky".to_string(), "last".to_string()],
+                10,
+                2,
+                &stop,
+                {
+                    let flaky_attempts = Arc::clone(&flaky_attempts);
+                    move |url, segment_index| {
+                        let flaky_attempts = Arc::clone(&flaky_attempts);
+                        async move {
+                            if url == "flaky" {
+                                let first_attempt = {
+                                    let mut attempts =
+                                        flaky_attempts.lock().expect("attempts lock");
+                                    *attempts += 1;
+                                    *attempts == 1
+                                };
+                                if first_attempt {
+                                    return retryable_test_timeout().await;
+                                }
+                            }
+                            Ok(vec![segment_index as u8])
+                        }
+                    }
+                },
+                |bytes| {
+                    sent.extend(bytes);
+                    true
+                },
+            ))
+            .expect("background retry");
+
+        assert_eq!(sent, vec![10, 11, 12]);
+        assert_eq!(*flaky_attempts.lock().expect("attempts lock"), 2);
+        assert_eq!(summary.sent_segments, 3);
+        assert_eq!(summary.sent_bytes, 3);
+        assert!(!summary.stopped);
+        assert!(!summary.receiver_closed);
+    }
+
+    #[test]
+    fn dash_background_fetch_does_not_retry_non_retryable_segment_failure() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let stop = AtomicBool::new(false);
+        let attempts = Arc::new(Mutex::new(0usize));
+
+        let error = rt
+            .block_on(fetch_dash_segments_ordered(
+                vec!["bad".to_string()],
+                20,
+                1,
+                &stop,
+                {
+                    let attempts = Arc::clone(&attempts);
+                    move |_url, _segment_index| {
+                        let attempts = Arc::clone(&attempts);
+                        async move {
+                            let mut attempts = attempts.lock().expect("attempts lock");
+                            *attempts += 1;
+                            Err(anyhow!("permanent segment failure"))
+                        }
+                    }
+                },
+                |_bytes| panic!("failed segment must not send bytes"),
+            ))
+            .expect_err("permanent failure");
+
+        assert!(error.to_string().contains("permanent segment failure"));
+        assert_eq!(*attempts.lock().expect("attempts lock"), 1);
+    }
+
+    #[test]
+    fn dash_background_fetch_stops_during_retry_backoff() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let stop = Arc::new(AtomicBool::new(false));
+        let attempts = Arc::new(Mutex::new(0usize));
+
+        let summary = rt
+            .block_on(fetch_dash_segments_ordered(
+                vec!["flaky".to_string()],
+                30,
+                1,
+                stop.as_ref(),
+                {
+                    let attempts = Arc::clone(&attempts);
+                    let stop = Arc::clone(&stop);
+                    move |_url, _segment_index| {
+                        let attempts = Arc::clone(&attempts);
+                        let stop = Arc::clone(&stop);
+                        async move {
+                            {
+                                let mut attempts = attempts.lock().expect("attempts lock");
+                                *attempts += 1;
+                            }
+                            stop.store(true, Ordering::Relaxed);
+                            retryable_test_timeout().await
+                        }
+                    }
+                },
+                |_bytes| panic!("stopped download must not send bytes"),
+            ))
+            .expect("stopped during retry");
+
+        assert_eq!(
+            summary,
+            DashBackgroundFetchSummary {
+                sent_segments: 0,
+                sent_bytes: 0,
+                slowest_fetch_ms: 0,
+                stopped: true,
+                receiver_closed: false,
+            }
+        );
+        assert_eq!(*attempts.lock().expect("attempts lock"), 1);
     }
 
     #[test]
