@@ -1541,6 +1541,12 @@ fn arm_drop_preview_in_state(
     generation: u64,
     trigger_position_samples: u64,
 ) -> bool {
+    if !state.dj_engine_enabled {
+        if let Some(active) = state.engine.as_ref() {
+            active.shared.clear_drop_preview_trigger();
+        }
+        return false;
+    }
     let Some(active) = state
         .engine
         .as_ref()
@@ -1584,6 +1590,9 @@ fn set_dj_engine_enabled_in_state(state: &mut PlaybackRuntimeLoopState, enabled:
     state.prepared_dj_mixer = None;
     state.prepared_drop_preview_mixer = None;
     state.last_dj_renderer_failure = None;
+    if let Some(engine) = state.engine.as_ref() {
+        engine.shared.clear_drop_preview_trigger();
+    }
     if let Some(engine) = state.next_engine.as_mut() {
         engine.job.prepared_transition = None;
     }
@@ -1987,6 +1996,7 @@ fn run_runtime_loop(
                         };
                         match engine_result {
                             Ok(engine) => {
+                                engine.shared.suppress_started_event();
                                 engine.shared.paused.store(true, Ordering::SeqCst);
                                 state.drop_preview_engine = Some(engine);
                                 let _ = prepare_drop_preview_mixer(
@@ -2123,6 +2133,12 @@ fn run_runtime_loop(
                     generation,
                     trigger_position_samples,
                 } => {
+                    if !state.dj_engine_enabled {
+                        if let Some(active) = state.engine.as_ref() {
+                            active.shared.clear_drop_preview_trigger();
+                        }
+                        return std::ops::ControlFlow::Continue(());
+                    }
                     if state
                         .engine
                         .as_ref()
@@ -4537,6 +4553,29 @@ mod tests {
     }
 
     #[test]
+    fn dj_flag_off_refuses_to_arm_drop_preview() {
+        let mut state = test_runtime_loop_state();
+        state.dj_engine_enabled = false;
+        let active = test_engine_with_shared(1, 20);
+        active
+            .shared
+            .drop_preview_trigger_samples
+            .store(99, Ordering::Relaxed);
+        state.engine = Some(active);
+
+        assert!(!arm_drop_preview_in_state(&state, 1, 20, 144_000));
+
+        let active = state.engine.as_ref().expect("active engine");
+        assert_eq!(
+            active
+                .shared
+                .drop_preview_trigger_samples
+                .load(Ordering::Relaxed),
+            u64::MAX
+        );
+    }
+
+    #[test]
     fn mixer_promotion_stops_outgoing_without_legacy_fade() {
         let mut state = test_runtime_loop_state();
         start_dj_lookahead_in_state(
@@ -4745,6 +4784,15 @@ mod tests {
     fn disabling_dj_discards_ready_mixer_without_stopping_playback() {
         let mut state = state_with_ready_dj_pair();
         assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
+        let active = state.engine.as_ref().expect("active engine");
+        active
+            .shared
+            .drop_preview_trigger_samples
+            .store(144_000, Ordering::Relaxed);
+        active
+            .shared
+            .drop_preview_start_signaled
+            .store(false, Ordering::Relaxed);
 
         set_dj_engine_enabled_in_state(&mut state, false);
 
@@ -4755,6 +4803,13 @@ mod tests {
         assert!(!active.shared.stopped.load(Ordering::SeqCst));
         assert!(!next.shared.stopped.load(Ordering::SeqCst));
         assert!(next.job.prepared_transition.is_none());
+        assert_eq!(
+            active
+                .shared
+                .drop_preview_trigger_samples
+                .load(Ordering::Relaxed),
+            u64::MAX
+        );
     }
 
     #[test]

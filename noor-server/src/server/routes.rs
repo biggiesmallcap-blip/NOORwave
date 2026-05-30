@@ -145,6 +145,9 @@ async fn schedule_drop_preview_for_pair(
             .playback_runtime_info
             .as_ref()
             .and_then(|info| info.active_track_id);
+        if !state_guard.db.with_conn(queries::is_dj_engine_enabled)? {
+            return Ok(());
+        }
         if active_id != Some(current_track_id)
             || current_playback_generation(&state_guard) != lookahead.queue_generation
         {
@@ -238,6 +241,9 @@ async fn schedule_drop_preview_for_pair(
             .playback_runtime_info
             .as_ref()
             .and_then(|info| info.active_track_id);
+        if !state_guard.db.with_conn(queries::is_dj_engine_enabled)? {
+            return Ok(());
+        }
         if active_id != Some(current_track_id)
             || current_playback_generation(&state_guard) != lookahead.queue_generation
         {
