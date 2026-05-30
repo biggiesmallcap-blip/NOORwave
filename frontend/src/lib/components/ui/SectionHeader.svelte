@@ -5,29 +5,21 @@
 		title,
 		subtitle = '',
 		eyebrow = '',
-		variant = 'default',
-		level = 3,
 		actions
 	}: {
 		title: string;
 		subtitle?: string;
 		eyebrow?: string;
-		variant?: 'default' | 'charts';
-		level?: 2 | 3;
 		actions?: Snippet;
 	} = $props();
 </script>
 
-<div class="section-header" class:charts={variant === 'charts'}>
+<div class="section-header">
 	<div class="copy">
 		{#if eyebrow}
 			<p class="eyebrow">{eyebrow}</p>
 		{/if}
-		{#if level === 2}
-			<h2 class="title">{title}</h2>
-		{:else}
-			<h3 class="title">{title}</h3>
-		{/if}
+		<h3>{title}</h3>
 		{#if subtitle}
 			<p class="subtitle">{subtitle}</p>
 		{/if}
@@ -65,42 +57,6 @@
 
 	.subtitle {
 		color: var(--text-secondary);
-	}
-
-	.title {
-		margin: 0;
-	}
-
-	.section-header.charts {
-		align-items: center;
-	}
-
-	.section-header.charts .copy {
-		gap: var(--space-1);
-	}
-
-	.section-header.charts .eyebrow {
-		margin: 0;
-		color: var(--text-muted);
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-		letter-spacing: 0;
-		line-height: 1;
-	}
-
-	.section-header.charts .title {
-		color: var(--text-primary);
-		font-size: var(--font-size-lg);
-		font-weight: var(--font-weight-bold);
-		line-height: var(--line-height-tight);
-		letter-spacing: 0;
-	}
-
-	.section-header.charts .subtitle {
-		margin: 0;
-		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
-		line-height: var(--line-height-snug);
 	}
 
 	.actions {

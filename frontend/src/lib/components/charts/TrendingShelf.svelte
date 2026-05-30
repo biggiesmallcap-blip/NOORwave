@@ -15,17 +15,12 @@
 	import {
 		api,
 		type ChartEntry,
-		type TidalPlayable,
 		type Track,
 		type LastfmCountry,
 		type LastfmGenre,
 	} from '$lib/api/client';
 	import { playTrackNow } from '$lib/stores/player';
-	import { openContextMenu } from '$lib/stores/context_menu';
 	import { playChartTidalTrack } from '$lib/player/play_trending';
-	import { canPlayTrack, getPlayableLabel } from '$lib/player/playable';
-	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
-	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
 	import {
 		selectedTrendingMode,
 		selectedCountry,
@@ -33,7 +28,7 @@
 		type TrendingMode,
 	} from '$lib/stores/trending-prefs';
 	import { getCached, putCached } from '$lib/stores/trending-cache';
-	import ChartMural, { type ChartMuralItem } from '$lib/components/charts/ChartMural.svelte';
+	import TrendingCard from '$lib/components/TrendingCard.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 
 	interface Props {
@@ -41,7 +36,7 @@
 	}
 	let { limit = 12 }: Props = $props();
 
-	// `tidal` is intentionally absent - the editorial-chart endpoint returns
+	// `tidal` is intentionally absent — the editorial-chart endpoint returns
 	// 404 ("not confirmed" in the Tidal client warning), so exposing the tab
 	// would always render an empty state. Add it back here when that endpoint
 	// is sorted; the store/type/backend route still accept the value.
@@ -50,7 +45,6 @@
 		{ id: 'country', label: 'Country' },
 		{ id: 'genre', label: 'Genre' },
 	];
-	const ROTATE_MS = 8000;
 
 	let countries = $state<LastfmCountry[]>([]);
 	let genres = $state<LastfmGenre[]>([]);
@@ -61,32 +55,8 @@
 	// state before the on-mount fetch flips it on.
 	let loading = $state(true);
 	let error = $state(false);
-	let currentEntryIndex = $state(0);
-	let muralPaused = $state(false);
-	let resolvingEntries = $state<Record<string, boolean>>({});
-	let lazyArtwork = $state<Record<string, string>>({});
 
 	let lastToken = '';
-	let visibleEntries = $derived(tracks.slice(0, limit));
-	let currentEntry = $derived(visibleEntries[currentEntryIndex] ?? visibleEntries[0] ?? null);
-	let muralItems = $derived<ChartMuralItem[]>(
-		visibleEntries.map((entry, index) => ({
-			id: entryKey(entry, index),
-			title: entryTitle(entry),
-			subtitle: entrySubtitle(entry, index),
-			artwork: entryArtwork(entry, index),
-			fallbackText: entryFallbackText(entry),
-			tileLabel: `Select ${entryTitle(entry)}`,
-			tileTitle: `${index + 1}. ${entryTitle(entry)} - ${entryArtist(entry) ?? 'Unknown artist'}`,
-			lazy: {
-				enabled: needsLazyArtwork(entry, index),
-				query: { artist: entryArtist(entry), title: entryTitle(entry) },
-				onResolve: (url) => {
-					lazyArtwork = { ...lazyArtwork, [entryKey(entry, index)]: url };
-				},
-			},
-		})),
-	);
 
 	function tokenFor(mode: TrendingMode, country: string, genre: string): string {
 		if (mode === 'country') return `country:${country}`;
@@ -96,7 +66,7 @@
 
 	// Per-entry key for the grid each-block. Last.fm-only entries arrive with
 	// `tidal_playable.tidal_id === 0` (placeholder), so `??` falls through to
-	// the index-based fallback, since 0 is falsy-but-not-nullish - without
+	// the index-based fallback, since 0 is falsy-but-not-nullish — without
 	// this, every unresolved card collides on key `0` and Svelte throws
 	// `each_key_duplicate`, which prevents the whole shelf from rendering.
 	function entryKey(entry: ChartEntry, i: number): string {
@@ -109,106 +79,12 @@
 		return `lf:${i}:${artist}:${title}`;
 	}
 
-	function optionalStringField(entry: ChartEntry, key: 'display_title' | 'display_subtitle'): string | null {
-		const value = (entry as unknown as Record<string, unknown>)[key];
-		return typeof value === 'string' && value.trim() ? value : null;
-	}
-
-	function entryTitle(entry: ChartEntry): string {
-		return optionalStringField(entry, 'display_title') ?? entry.local_track?.title ?? entry.tidal_playable?.title ?? 'Unknown track';
-	}
-
-	function entryArtist(entry: ChartEntry): string | null {
-		return optionalStringField(entry, 'display_subtitle') ?? entry.local_track?.artist_name ?? entry.tidal_playable?.artist_name ?? null;
-	}
-
-	function entryTarget(entry: ChartEntry): Track | TidalPlayable | null {
-		return entry.local_track ?? entry.tidal_playable ?? null;
-	}
-
-	const LASTFM_PLACEHOLDER_HASH = '2a96cbd8b46e442fc41c2b86b821562f';
-	function usableArtwork(...candidates: (string | null | undefined)[]): string | null {
-		for (const candidate of candidates) {
-			if (!candidate) continue;
-			const trimmed = candidate.trim();
-			if (!trimmed) continue;
-			if (trimmed.includes(LASTFM_PLACEHOLDER_HASH)) continue;
-			return trimmed;
-		}
-		return null;
-	}
-
-	function entryArtwork(entry: ChartEntry, index: number): string | null {
-		return usableArtwork(
-			lazyArtwork[entryKey(entry, index)],
-			entry.local_track?.artwork_url,
-			entry.tidal_playable?.artwork_url,
-			entry.image_url,
-		);
-	}
-
-	function needsLazyArtwork(entry: ChartEntry, index: number): boolean {
-		return entryArtwork(entry, index) === null;
-	}
-
-	function entryFallbackText(entry: ChartEntry): string {
-		return (entryTitle(entry).trim()[0] ?? 'N').toUpperCase();
-	}
-
-	function entrySubtitle(entry: ChartEntry, index: number): string {
-		return `#${index + 1} - ${entryArtist(entry) ?? 'Unknown artist'}`;
-	}
-
-	function isEntryUnresolved(entry: ChartEntry): boolean {
-		return entry.local_track === null &&
-			entry.tidal_playable !== null &&
-			entry.tidal_playable.tidal_id <= 0;
-	}
-
-	function isEntryPlayable(entry: ChartEntry): boolean {
-		const target = entryTarget(entry);
-		return target !== null && (canPlayTrack(target) || isEntryUnresolved(entry));
-	}
-
-	function entryStatusLabel(entry: ChartEntry, index: number): string {
-		const key = entryKey(entry, index);
-		if (resolvingEntries[key]) return 'Resolving';
-		if (entry.local_track) return 'In library';
-		if (isEntryUnresolved(entry)) return 'Resolve on TIDAL';
-		if (entry.tidal_playable) return 'TIDAL ready';
-		return 'Unavailable';
-	}
-
-	function entryActionLabel(entry: ChartEntry, index: number): string {
-		const key = entryKey(entry, index);
-		if (resolvingEntries[key]) return 'Resolving...';
-		if (isEntryUnresolved(entry)) return 'Resolve on TIDAL';
-		const target = entryTarget(entry);
-		return target ? getPlayableLabel(target) : 'Unavailable';
-	}
-
-	function currentKindLabel(): string {
-		return `Last.fm top ${visibleEntries.length} - ${subLabel}`;
-	}
-
 	onMount(() => {
 		// Migrate stale 'tidal' from the pre-merge source key before reads happen.
 		if (!MODES.some((m) => m.id === get(selectedTrendingMode))) {
 			selectedTrendingMode.set('worldwide');
 		}
 		void loadCurated();
-	});
-
-	$effect(() => {
-		if (currentEntryIndex >= visibleEntries.length) currentEntryIndex = 0;
-	});
-
-	$effect(() => {
-		if (visibleEntries.length <= 1) return;
-		const timer = setInterval(() => {
-			if (!muralPaused) jumpEntry(1);
-		}, ROTATE_MS);
-		return () => clearInterval(timer);
 	});
 
 	// Idiomatic Svelte 5: $effect tracks $store reads and re-runs on any change.
@@ -232,7 +108,6 @@
 		const cached = getCached(token);
 		if (cached) {
 			tracks = cached;
-			currentEntryIndex = 0;
 			loading = false;
 			error = false;
 			return;
@@ -256,7 +131,7 @@
 	}
 
 	async function load(mode: TrendingMode, country: string, genre: string, token: string) {
-		// Keep `tracks` populated while we fetch - replacing only when new data
+		// Keep `tracks` populated while we fetch — replacing only when new data
 		// lands avoids the flash-to-empty-state and the resulting grid reflow.
 		loading = true;
 		error = false;
@@ -273,7 +148,6 @@
 			}
 			const next = data.tracks ?? [];
 			tracks = next;
-			currentEntryIndex = 0;
 			// Only cache non-empty payloads so a transient 5xx returning [] doesn't
 			// poison the cache for 6h.
 			if (next.length > 0) putCached(token, next);
@@ -303,46 +177,6 @@
 		void playTrackNow(t.id);
 	}
 
-	function selectEntry(index: number) {
-		currentEntryIndex = index;
-	}
-
-	function jumpEntry(delta: number) {
-		if (visibleEntries.length === 0) return;
-		currentEntryIndex = (currentEntryIndex + delta + visibleEntries.length) % visibleEntries.length;
-	}
-
-	async function playEntry(entry: ChartEntry, index: number) {
-		const target = entryTarget(entry);
-		if (!target || (!canPlayTrack(target) && !isEntryUnresolved(entry))) return;
-		if (entry.local_track) {
-			onTrack(entry.local_track);
-			return;
-		}
-		if (!entry.tidal_playable) return;
-		const key = entryKey(entry, index);
-		resolvingEntries = { ...resolvingEntries, [key]: isEntryUnresolved(entry) };
-		try {
-			await playChartTidalTrack(entry.tidal_playable);
-		} finally {
-			resolvingEntries = { ...resolvingEntries, [key]: false };
-		}
-	}
-
-	function handleEntryContext(e: MouseEvent, entry: ChartEntry) {
-		e.preventDefault();
-		e.stopPropagation();
-		const local = entry.local_track;
-		if (local) {
-			openContextMenu(e, buildTrackMenu(local), local.title);
-			return;
-		}
-		const tidal = entry.tidal_playable;
-		if (tidal) {
-			openContextMenu(e, buildTidalTrackMenu(tidal), tidal.title);
-		}
-	}
-
 	const subLabel = $derived.by(() => {
 		const m = $selectedTrendingMode;
 		if (m === 'country') {
@@ -357,29 +191,31 @@
 </script>
 
 <section class="trending-shelf">
-	<SectionHeader eyebrow="From Last.fm - Now moving" title="Trending" subtitle={subLabel} variant="charts" level={2}>
-		{#snippet actions()}
-			<div class="trending-controls">
-				<div class="chip-group" role="tablist" aria-label="Trending scope">
-					{#each MODES as m (m.id)}
-						<button
-							type="button"
-							class="chip"
-							class:active={m.id === $selectedTrendingMode}
-							onclick={() => pickMode(m.id)}
-							role="tab"
-							aria-selected={m.id === $selectedTrendingMode}
-						>
-							{m.label}
-						</button>
-					{/each}
-				</div>
-				<!-- Always-rendered, fixed-width slot - flips opacity instead of mounting/unmounting,
-				     so the chip group doesn't reflow when fetches start/finish. -->
-				<span class="loading-indicator" class:visible={loading} aria-hidden={!loading}>Loading...</span>
+	<div class="section-header">
+		<div class="section-title-group">
+			<p class="eyebrow">From Last.fm <span class="eyebrow-dot" aria-hidden="true">·</span> Now moving</p>
+			<h2>Trending <span class="sub">· {subLabel}</span></h2>
+		</div>
+		<div class="trending-controls">
+			<div class="chip-group" role="tablist" aria-label="Trending scope">
+				{#each MODES as m (m.id)}
+					<button
+						type="button"
+						class="chip"
+						class:active={m.id === $selectedTrendingMode}
+						onclick={() => pickMode(m.id)}
+						role="tab"
+						aria-selected={m.id === $selectedTrendingMode}
+					>
+						{m.label}
+					</button>
+				{/each}
 			</div>
-		{/snippet}
-	</SectionHeader>
+			<!-- Always-rendered, fixed-width slot — flips opacity instead of mounting/unmounting,
+			     so the chip group doesn't reflow when fetches start/finish. -->
+			<span class="loading-indicator" class:visible={loading} aria-hidden={!loading}>Loading…</span>
+		</div>
+	</div>
 
 	<!-- Always-rendered subrow; content swaps by mode. Reserves stable vertical
 	     space so the grid below doesn't jump when modes change. -->
@@ -413,32 +249,22 @@
 		{/if}
 	</div>
 
-	{#if tracks.length > 0 || loading}
-		<ChartMural
-			items={muralItems}
-			currentIndex={currentEntryIndex}
-			ariaLabel={`Last.fm ${subLabel} top ${visibleEntries.length}`}
-			kindLabel={currentKindLabel()}
-			title={currentEntry ? entryTitle(currentEntry) : ''}
-			subtitle={currentEntry ? entrySubtitle(currentEntry, currentEntryIndex) : ''}
-			metric={currentEntry ? currentEntry.genre ?? entryStatusLabel(currentEntry, currentEntryIndex) : ''}
-			actionLabel={currentEntry ? entryActionLabel(currentEntry, currentEntryIndex) : 'Unavailable'}
-			actionDisabled={!currentEntry || !isEntryPlayable(currentEntry)}
-			accent="lastfm"
-			loading={loading && tracks.length === 0}
-			loadingLabel="Loading Last.fm chart"
-			onSelect={selectEntry}
-			onJump={jumpEntry}
-			onPlay={() => currentEntry && playEntry(currentEntry, currentEntryIndex)}
-			onCardContext={(event) => currentEntry && handleEntryContext(event, currentEntry)}
-			onItemContext={(event, index) => {
-				const entry = visibleEntries[index];
-				if (entry) handleEntryContext(event, entry);
-			}}
-			onPauseChange={(paused) => muralPaused = paused}
-		/>
+	{#if tracks.length > 0}
+		<div class="trending-grid">
+			{#each tracks.slice(0, limit) as entry, i (entryKey(entry, i))}
+				<TrendingCard {entry} index={i} {onTrack} onTidal={playChartTidalTrack} />
+			{/each}
+		</div>
+	{:else if loading}
+		<!-- Skeleton grid so the area isn't blank during the first fetch (was a
+		     "did the page break?" UX cliff with the previous render-nothing branch). -->
+		<div class="trending-grid">
+			{#each Array.from({ length: Math.min(limit, 8) }) as _, i (i)}
+				<div class="skeleton-card" aria-hidden="true"></div>
+			{/each}
+		</div>
 	{:else if error}
-		<EmptyState title="Couldn't load this chart" copy="Try another scope or check the Last.fm key in Settings." />
+		<EmptyState title="Couldn’t load this chart" copy="Try another scope or check the Last.fm key in Settings." />
 	{:else}
 		<EmptyState title="Nothing trending here yet" copy="Try another country, genre, or scope." />
 	{/if}
@@ -448,13 +274,53 @@
 	.trending-shelf {
 		display: flex;
 		flex-direction: column;
-		gap: var(--space-3);
+		gap: 14px;
+	}
+
+	.section-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 16px;
+		flex-wrap: wrap;
+	}
+
+	.section-title-group {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+
+	.section-title-group h2 {
+		font-size: var(--font-size-lg);
+		font-weight: var(--font-weight-bold);
+		margin: 0;
+	}
+
+	.section-title-group h2 .sub {
+		color: var(--text-muted);
+		font-weight: var(--font-weight-medium);
+		font-size: var(--font-size-md);
+		margin-left: 2px;
+	}
+
+	.eyebrow {
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--service-lastfm);
+		margin: 0;
+	}
+	.eyebrow-dot {
+		color: var(--text-muted);
+		margin: 0 4px;
 	}
 
 	.trending-controls {
 		display: flex;
 		align-items: center;
-		gap: var(--space-2);
+		gap: 12px;
 		flex-wrap: nowrap; /* keeps chip-group + loading slot on a single line */
 		min-width: 0;
 	}
@@ -462,55 +328,46 @@
 	.chip-group {
 		display: inline-flex;
 		gap: var(--space-1);
-		padding: var(--space-1);
+		padding: 2px;
 		background: var(--panel-bg);
 		border: 1px solid var(--panel-border);
 		border-radius: 999px;
 	}
 
 	.chip {
-		background: var(--panel-bg);
-		border: 1px solid var(--panel-border);
+		background: transparent;
+		border: none;
 		color: var(--text-muted);
 		font: inherit;
 		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-		line-height: 1;
-		padding: var(--space-2) var(--space-3);
+		font-weight: var(--font-weight-medium);
+		padding: 4px 10px;
 		border-radius: 999px;
 		cursor: pointer;
-		white-space: nowrap;
-		transition: background var(--motion-base), border-color var(--motion-base), color var(--motion-base);
+		transition: background var(--motion-fast), color var(--motion-fast);
 	}
 
-	.chip:hover,
-	.chip:focus-visible {
-		background: var(--bg-hover);
-		border-color: var(--accent-line);
-		color: var(--text-primary);
-		outline: none;
-	}
+	.chip:hover { color: var(--text-primary); }
 
 	.chip.active {
 		background: var(--bg-hover);
-		border-color: var(--accent-line);
 		color: var(--text-primary);
 	}
 
 	.chip-row {
 		display: flex;
 		flex-wrap: wrap;
-		gap: var(--space-1);
+		gap: 6px;
 		/* Reserves one row of chip height even when worldwide mode renders no
 		   chips, so switching modes doesn't shift the grid below. */
-		min-height: clamp(28px, 2vw, 36px);
+		min-height: 28px;
 	}
 
 	.chip.secondary {
-		background: var(--panel-bg);
+		background: rgba(255, 255, 255, 0.04);
 	}
 	.chip.secondary.active {
-		background: var(--bg-hover);
+		background: rgba(255, 255, 255, 0.16);
 	}
 
 	.loading-indicator {
@@ -518,13 +375,43 @@
 		color: var(--text-muted);
 		font-style: italic;
 		/* Reserve the slot so the chip group never reflows when loading toggles. */
-		min-width: clamp(52px, 4vw, 68px);
+		min-width: 60px;
 		opacity: 0;
-		transition: opacity var(--motion-fast);
+		transition: opacity 0.18s ease;
 		pointer-events: none;
 	}
 	.loading-indicator.visible {
 		opacity: 1;
 	}
 
+	.trending-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+		gap: 14px;
+	}
+
+	@media (max-width: 720px) {
+		.trending-grid {
+			grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+			gap: 10px;
+		}
+	}
+
+	.skeleton-card {
+		aspect-ratio: 1;
+		border-radius: var(--radius-md);
+		background: linear-gradient(
+			110deg,
+			rgba(255, 255, 255, 0.04) 30%,
+			rgba(255, 255, 255, 0.08) 50%,
+			rgba(255, 255, 255, 0.04) 70%
+		);
+		background-size: 200% 100%;
+		animation: skeleton-shimmer 1.4s ease-in-out infinite;
+	}
+
+	@keyframes skeleton-shimmer {
+		0% { background-position: 200% 0; }
+		100% { background-position: -200% 0; }
+	}
 </style>

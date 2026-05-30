@@ -697,107 +697,6 @@ export interface ChartEntry {
 
 export type TrendingSource = 'lastfm' | 'tidal';
 
-export interface ChartSnapshotSummary {
-	id: number;
-	source_key: string;
-	region: string;
-	period: string;
-	chart_date: string;
-	fetched_at: number;
-	status: string;
-}
-
-export interface ChartSnapshotEntry {
-	id: number;
-	rank: number;
-	rank_delta: number | null;
-	artist: string;
-	title: string;
-	entity_type: 'track' | 'album' | 'artist' | 'video' | string;
-	album: string | null;
-	artwork_url: string | null;
-	external_track_id: string | null;
-	external_artist_id: string | null;
-	external_video_id: string | null;
-	external_url: string | null;
-	streams: number | null;
-	stream_delta: number | null;
-	views: number | null;
-	likes: number | null;
-	audience: number | null;
-	audience_delta: number | null;
-	points: number | null;
-	points_delta: number | null;
-	seven_day_streams: number | null;
-	total_streams: number | null;
-	days_on_chart: number | null;
-	peak_rank: number | null;
-	provider_positions_json: unknown | null;
-	raw_json: unknown | null;
-	external_candidate_id: number | null;
-	local_track_id: number | null;
-	tidal_id: number | null;
-	resolution_status: 'local' | 'tidal' | 'pending' | 'unresolved' | 'not_playable' | string;
-	resolution_score: number | null;
-}
-
-export interface ChartSnapshotResponse {
-	source: string;
-	period: string;
-	region: string;
-	limit: number;
-	snapshot: ChartSnapshotSummary | null;
-	entries: ChartSnapshotEntry[];
-}
-
-export interface ChartMatrixProvider {
-	source_key: string;
-	label: string;
-}
-
-export interface ChartMatrixCell {
-	snapshot_id: number;
-	entry_id: number;
-	source_key: string;
-	region: string;
-	chart_date: string;
-	rank: number;
-	rank_delta: number | null;
-	artist: string;
-	title: string;
-	entity_type: string;
-	artwork_url: string | null;
-	streams: number | null;
-	views: number | null;
-	points: number | null;
-	external_url: string | null;
-	tidal_id: number | null;
-	resolution_status: string;
-}
-
-export interface ChartMatrixRow {
-	region: string;
-	cells: Record<string, ChartMatrixCell | null>;
-}
-
-export interface ChartMatrixResponse {
-	region_group: string;
-	period: string;
-	providers: ChartMatrixProvider[];
-	rows: ChartMatrixRow[];
-}
-
-export interface ChartMatrixRefreshResponse {
-	source: string;
-	chart_date: string;
-	fetched_at: number;
-	report: {
-		rows_seen: number;
-		entries_written: number;
-		snapshots_written: number;
-	};
-}
-
 export interface LastfmGenre {
 	key: string;
 	label: string;
@@ -1006,8 +905,6 @@ export type DjDeckStatus = {
 	profile_ready: boolean;
 	profile_status: 'ready' | 'missing' | 'analyzing' | 'retrying' | 'decode_failed' | string;
 	profile_error?: string;
-	profile_retry_after_ms?: number;
-	profile_retry_reason?: string;
 	profile_confidence?: number;
 	beat_count?: number;
 	downbeat_count?: number;
@@ -1019,20 +916,9 @@ export type DjDeckStatus = {
 	phrase_markers_ms: number[];
 	mix_in_markers_ms: number[];
 	mix_out_markers_ms: number[];
-	drop_markers_ms: number[];
-	manual_drop_markers_ms: number[];
 	passive_analysis_status?: 'ready' | 'missing' | 'retrying' | 'skipped' | string;
 	passive_analysis_reason?: string;
 	safe_crossfade_only: boolean;
-};
-
-export type DjDropPreviewStatus = {
-	status: 'armed' | 'fired' | 'skipped' | string;
-	planned_fire_ms?: number;
-	actual_fire_ms?: number;
-	incoming_drop_ms?: number;
-	source?: 'manual' | 'profile' | string;
-	reason?: string;
 };
 
 export type DjOverlayDetails = {
@@ -1114,7 +1000,6 @@ export type DjStatusResponse = {
 		media_ref_id: string;
 		bad_feedback_count: number;
 	};
-	drop_preview: DjDropPreviewStatus;
 };
 
 export type DjTimingHistoryEvent = {
@@ -2624,33 +2509,6 @@ export const api = {
 			tag: string | null;
 			tracks: ChartEntry[];
 		}>('/api/charts', params);
-	},
-
-	getChartSnapshot(opts: {
-		source?: string;
-		period?: string;
-		region?: string;
-		limit?: number;
-	} = {}) {
-		const params: Record<string, string> = {};
-		if (opts.source) params.source = opts.source;
-		if (opts.period) params.period = opts.period;
-		if (opts.region) params.region = opts.region;
-		if (opts.limit != null) params.limit = String(opts.limit);
-		return fetchApi<ChartSnapshotResponse>('/api/charts/snapshots', params);
-	},
-
-	getChartMatrix(opts: { regionGroup?: string } = {}) {
-		const params: Record<string, string> = {};
-		if (opts.regionGroup) params.region_group = opts.regionGroup;
-		return fetchApi<ChartMatrixResponse>('/api/charts/matrix', params);
-	},
-
-	refreshChartMatrix() {
-		return fetchApi<ChartMatrixRefreshResponse>('/api/charts/matrix/refresh', undefined, {
-			method: 'POST',
-			body: JSON.stringify({}),
-		});
 	},
 
 	getLastfmGenres() {

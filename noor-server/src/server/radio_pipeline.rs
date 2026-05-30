@@ -167,7 +167,6 @@ fn rank_radio_candidates(
             track_id: (candidate.is_in_library && candidate.track_id > 0)
                 .then_some(candidate.track_id),
             tidal_id: candidate.tidal_track_id,
-            policy: Default::default(),
             item: candidate,
         })
         .collect::<Vec<_>>();

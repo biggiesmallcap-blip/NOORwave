@@ -97,24 +97,6 @@
 	let recentTimingHistory = $derived(recentTimingEvents.slice(0, 5));
 	let timingSummary = $derived(status?.timing_history_summary ?? null);
 	let overlayDetails = $derived(status?.overlay_details ?? null);
-	let dropPreview = $derived(status?.drop_preview ?? null);
-	let dropPreviewVisible = $derived(Boolean(dropPreview && dropPreview.status !== 'skipped'));
-	let dropPreviewLabel = $derived(
-		dropPreview?.status === 'fired'
-			? 'Drop preview fired'
-			: dropPreview?.status === 'armed'
-				? 'Drop preview armed'
-				: 'Drop preview skipped',
-	);
-	let dropPreviewCopy = $derived(
-		dropPreview?.status === 'fired'
-			? `Fired at ${formatTimingMs(dropPreview.actual_fire_ms)}. Incoming drop ${formatTimingMs(dropPreview.incoming_drop_ms)}.`
-			: dropPreview?.status === 'armed'
-				? `Armed for ${formatTimingMs(dropPreview.planned_fire_ms)}. Incoming drop ${formatTimingMs(dropPreview.incoming_drop_ms)}.`
-				: dropPreview?.reason
-					? `Skipped: ${formatDropPreviewReason(dropPreview.reason)}.`
-					: 'Skipped.',
-	);
 
 	function formatTimingMs(value: number | null | undefined) {
 		return typeof value === 'number' ? `${value} ms` : 'pending';
@@ -136,20 +118,6 @@
 			return 'unknown';
 		}
 		return value ? 'yes' : 'no';
-	}
-
-	function formatDropPreviewReason(reason: string | null | undefined) {
-		const labels: Record<string, string> = {
-			disabled: 'DJ disabled',
-			pair_missing: 'Pair missing',
-			profiles_missing: 'Profiles missing',
-			safe_crossfade_only: 'Safe crossfade only',
-			profile_low_confidence: 'Profile confidence low',
-			harmonic_incompatible: 'Harmonic mismatch',
-			missing_incoming_drop: 'Incoming drop missing',
-			no_safe_mid_song_marker: 'No safe mid-song marker',
-		};
-		return reason ? (labels[reason] ?? reason) : 'none';
 	}
 
 	function runtimeReasonLabel(reason: string | null | undefined) {
@@ -331,12 +299,6 @@
 	{:else}
 		<p class:pending={!transitionArmed} class:success={transitionArmed} role="status">{laneCopy}</p>
 	{/if}
-	{#if dropPreviewVisible}
-		<p class="drop-preview" class:success={dropPreview?.status === 'fired'} role="status">
-			<strong>{dropPreviewLabel}</strong>
-			<span>{dropPreviewCopy}</span>
-		</p>
-	{/if}
 
 	<TransitionWaveform current={status?.current} next={status?.next} {status} />
 
@@ -455,30 +417,6 @@
 				<div>
 					<dt>Planning status</dt>
 					<dd>{status?.planning_status ?? 'none'}</dd>
-				</div>
-				<div>
-					<dt>Drop preview</dt>
-					<dd>{dropPreview?.status ?? 'none'}</dd>
-				</div>
-				<div>
-					<dt>Preview planned</dt>
-					<dd>{formatTimingMs(dropPreview?.planned_fire_ms)}</dd>
-				</div>
-				<div>
-					<dt>Preview actual</dt>
-					<dd>{formatTimingMs(dropPreview?.actual_fire_ms)}</dd>
-				</div>
-				<div>
-					<dt>Preview drop</dt>
-					<dd>{formatTimingMs(dropPreview?.incoming_drop_ms)}</dd>
-				</div>
-				<div>
-					<dt>Preview source</dt>
-					<dd>{dropPreview?.source ?? 'none'}</dd>
-				</div>
-				<div>
-					<dt>Preview reason</dt>
-					<dd>{formatDropPreviewReason(dropPreview?.reason)}</dd>
 				</div>
 				<div>
 					<dt>Confidence floor</dt>
@@ -641,24 +579,6 @@
 		border: 1px solid color-mix(in srgb, var(--state-success) 28%, transparent);
 		background: color-mix(in srgb, var(--state-success) 9%, transparent);
 		color: var(--text-secondary);
-	}
-
-	.drop-preview {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-2);
-		align-items: center;
-		padding: var(--space-3);
-		border: 1px solid color-mix(in srgb, var(--accent-primary) 30%, transparent);
-		border-radius: var(--radius-sm);
-		background: color-mix(in srgb, var(--accent-primary) 8%, transparent);
-		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
-		line-height: var(--line-height-snug);
-	}
-
-	.drop-preview strong {
-		color: var(--accent-primary);
 	}
 
 	.pending {

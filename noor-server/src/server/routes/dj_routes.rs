@@ -26,7 +26,7 @@ use crate::playback::runtime::PlaybackRuntimeConfig;
 use crate::playback::runtime::commands::PlaybackRuntimeCommand;
 use crate::playback::runtime::shared::PlaybackSharedState;
 use crate::services::audio_analysis::dj_profile::{
-    DJ_WAVEFORM_PEAK_COUNT, decode_f32_blob, decode_u32_blob, dj_profile_row_is_current,
+    DJ_PROFILE_VERSION, DJ_WAVEFORM_PEAK_COUNT, decode_f32_blob, decode_u32_blob,
 };
 use crate::services::tidal::stream as tidal_stream;
 
@@ -34,12 +34,8 @@ const DEFAULT_DJ_LOOKAHEAD_DEADLINE_SAMPLES: u64 = 48_000 * 30;
 const DJ_PROFILE_CONFIDENCE_FLOOR: f64 = 0.65;
 const SAFE_SUGGESTION_BAD_COUNT: i64 = 3;
 const DJ_PROFILE_AUTO_REBUILD_RETRY_SECS: u64 = 300;
-const DJ_PROFILE_TRANSIENT_RETRY_SECS: u64 = 25;
 const DJ_TIMING_HISTORY_LIMIT: i64 = 5;
 const DJ_READY_PAIR_TRANSITION_WINDOW_MS: i64 = 30_000;
-const DJ_TIMING_SANITY_MAX_DELTA_MS: i64 = 30_000;
-const DROP_PREVIEW_MIN_POSITION_MS: i64 = 60_000;
-const DROP_PREVIEW_FINAL_WINDOW_GUARD_MS: i64 = 45_000;
 #[cfg(test)]
 const DJ_READY_PAIR_PLANNING_RETRY_SECS: u64 = 15;
 const DJ_PROFILE_REBUILD_FAILURE_TTL_SECS: u64 = 300;
@@ -178,7 +174,6 @@ struct DjStatusResponse {
     recent_timing_events: Vec<DjTimingHistoryEvent>,
     timing_history_summary: DjTimingHistorySummary,
     safe_crossfade_suggestion: Option<DjSafeSuggestion>,
-    drop_preview: DjDropPreviewStatus,
 }
 
 #[derive(Debug, Serialize)]
@@ -190,8 +185,6 @@ struct DjDeckStatus {
     profile_ready: bool,
     profile_status: String,
     profile_error: Option<String>,
-    profile_retry_after_ms: Option<i64>,
-    profile_retry_reason: Option<String>,
     profile_confidence: Option<f64>,
     beat_count: Option<usize>,
     downbeat_count: Option<usize>,
@@ -203,28 +196,9 @@ struct DjDeckStatus {
     phrase_markers_ms: Vec<i64>,
     mix_in_markers_ms: Vec<i64>,
     mix_out_markers_ms: Vec<i64>,
-    drop_markers_ms: Vec<i64>,
-    manual_drop_markers_ms: Vec<i64>,
     passive_analysis_status: Option<String>,
     passive_analysis_reason: Option<String>,
     safe_crossfade_only: bool,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct DjDropPreviewStatus {
-    status: String,
-    planned_fire_ms: Option<i64>,
-    actual_fire_ms: Option<i64>,
-    incoming_drop_ms: Option<i64>,
-    source: Option<String>,
-    reason: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DropPreviewPlan {
-    pub(crate) planned_fire_ms: i64,
-    pub(crate) incoming_drop_ms: i64,
-    pub(crate) source: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -361,8 +335,6 @@ enum ProfileRebuildInflightDecision {
 struct DjProfileRebuildFailure {
     status: String,
     message: String,
-    retry_reason: Option<String>,
-    next_retry_at: Option<Instant>,
     recorded_at: Instant,
 }
 
@@ -390,21 +362,25 @@ async fn set_enabled(
 ) -> Result<Json<EnabledResponse>, StatusCode> {
     let (runtime, lookahead) = {
         let state_guard = state.write().await;
+        let ephemeral_lookahead = if payload.enabled {
+            super::active_ephemeral_tidal_mix_dj_pair(&state_guard).and_then(|pair| {
+                player::dj_lookahead_start_from_pair(pair, DEFAULT_DJ_LOOKAHEAD_DEADLINE_SAMPLES)
+            })
+        } else {
+            None
+        };
         let lookahead = state_guard
             .db
             .with_conn(|conn| {
                 queries::set_dj_engine_enabled(conn, payload.enabled)?;
                 if payload.enabled {
-                    let pair = super::active_dj_pair_for_state_and_conn(&state_guard, conn)?;
-                    Ok(player::dj_lookahead_start_from_pair(
-                        pair,
-                        DEFAULT_DJ_LOOKAHEAD_DEADLINE_SAMPLES,
-                    ))
+                    player::build_dj_lookahead_start(conn, DEFAULT_DJ_LOOKAHEAD_DEADLINE_SAMPLES)
                 } else {
                     Ok(None)
                 }
             })
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let lookahead = ephemeral_lookahead.or(lookahead);
         (
             state_guard
                 .playback_runtime
@@ -438,21 +414,20 @@ async fn get_status(
 ) -> Result<Json<DjStatusResponse>, StatusCode> {
     let response = {
         let state = state.read().await;
+        let ephemeral_pair = super::active_ephemeral_tidal_mix_dj_pair(&state);
         let ephemeral_labels = super::active_ephemeral_tidal_mix_dj_labels(&state);
         let active_track_id = state
             .playback_runtime_info
             .as_ref()
             .and_then(|info| info.active_track_id);
-        let active_generation = super::current_playback_generation(&state);
-        let drop_preview_actual_fire_ms = state.last_drop_preview.and_then(|preview| {
-            (Some(preview.track_id) == active_track_id && preview.generation == active_generation)
-                .then_some(preview.actual_fire_ms)
-        });
         state
             .db
             .with_conn(|conn| {
                 let enabled = queries::is_dj_engine_enabled(conn)?;
-                let pair = super::active_dj_pair_for_state_and_conn(&state, conn)?;
+                let pair = match ephemeral_pair.clone() {
+                    Some(pair) => pair,
+                    None => crate::playback::dj_lookahead::load_dj_lookahead_pair(conn)?,
+                };
                 let current_ref = pair.current.clone();
                 let next_ref = pair.next.clone();
                 let current = match pair.current {
@@ -542,18 +517,6 @@ async fn get_status(
                 let timing_history_summary =
                     summarize_timing_history(&recent_timing_events, &tuning_deltas);
                 let renderer_status = renderer_status_for_transition(latest_transition.as_ref());
-                let drop_preview = drop_preview_status(
-                    conn,
-                    enabled,
-                    current_ref.as_ref(),
-                    next_ref.as_ref(),
-                    current.as_ref(),
-                    next.as_ref(),
-                    active_track_id.and_then(|track_id| {
-                        current_track_duration_ms(conn, track_id).ok().flatten()
-                    }),
-                    drop_preview_actual_fire_ms,
-                )?;
                 Ok(DjStatusResponse {
                     enabled,
                     current,
@@ -588,7 +551,6 @@ async fn get_status(
                     recent_timing_events,
                     timing_history_summary,
                     safe_crossfade_suggestion,
-                    drop_preview,
                 })
             })
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -601,6 +563,7 @@ pub(super) async fn queue_missing_dj_profiles_for_current_pair(
 ) -> Result<(), StatusCode> {
     let missing_profile_refs = {
         let state_guard = state.read().await;
+        let ephemeral_pair = super::active_ephemeral_tidal_mix_dj_pair(&state_guard);
         let ephemeral_labels = super::active_ephemeral_tidal_mix_dj_labels(&state_guard);
         state_guard
             .db
@@ -608,11 +571,10 @@ pub(super) async fn queue_missing_dj_profiles_for_current_pair(
                 if !queries::is_dj_engine_enabled(conn)? {
                     return Ok(Vec::new());
                 }
-                if foreground_playback_is_buffering(conn, &state_guard)? {
-                    tracing::debug!("Deferring DJ profile rebuilds while playback is buffering");
-                    return Ok(Vec::new());
-                }
-                let pair = super::active_dj_pair_for_state_and_conn(&state_guard, conn)?;
+                let pair = match ephemeral_pair {
+                    Some(pair) => pair,
+                    None => crate::playback::dj_lookahead::load_dj_lookahead_pair(conn)?,
+                };
                 let mut missing = Vec::new();
                 for media_ref in [pair.current, pair.next].into_iter().flatten() {
                     let key = media_ref.profile_key();
@@ -974,32 +936,17 @@ async fn queue_tidal_profile_rebuild(
     let inflight_for_decode = inflight.clone();
     let inflight_key_for_decode = inflight_key.clone();
     let failure_key = inflight_key.clone();
-    let retry_state = state.clone();
-    let event_tx = {
-        let state_guard = state.read().await;
-        state_guard.event_tx.clone()
-    };
-    let runtime_handle = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
         if let Err(error) = decode_and_buffer_job(config, job, shared, 48_000, 2) {
             let status = profile_rebuild_failure_status(&error);
             let message = profile_rebuild_error_message(&error, status);
-            finish_dj_profile_rebuild_failure(
-                &inflight_for_decode,
-                &inflight_key_for_decode,
-                status,
-                message.clone(),
-            );
-            let _ = event_tx.send(crate::AppEvent::PlaybackStateChanged);
-            if status == "retrying" {
-                schedule_dj_profile_retry(
-                    &runtime_handle,
-                    retry_state,
-                    Duration::from_secs(DJ_PROFILE_TRANSIENT_RETRY_SECS),
-                );
+            record_dj_profile_rebuild_failure(&failure_key, status, message.clone());
+            if status != "retrying" {
+                clear_dj_profile_inflight(&inflight_for_decode, &inflight_key_for_decode);
             }
             tracing::warn!(tidal_id, error = %message, "DJ profile rebuild decode failed");
         } else {
+            clear_dj_profile_inflight(&inflight_for_decode, &inflight_key_for_decode);
             clear_dj_profile_rebuild_failure(&failure_key);
             tracing::info!(tidal_id, "DJ profile rebuild decode queued analysis");
         }
@@ -1051,26 +998,8 @@ fn dj_profile_inflight_key(key: &AudioDjProfileKey) -> String {
     format!("{}:{}", key.media_ref_kind, key.media_ref_id)
 }
 
-fn foreground_playback_is_buffering(
-    conn: &rusqlite::Connection,
-    state: &crate::AppState,
-) -> anyhow::Result<bool> {
-    if state
-        .audio_active
-        .load(std::sync::atomic::Ordering::Relaxed)
-        || state.playback_runtime.is_none()
-    {
-        return Ok(false);
-    }
-    Ok(player::load_state(conn)?.is_playing)
-}
-
 fn deck_needs_profile_rebuild(deck: &DjDeckStatus) -> bool {
-    (!deck.profile_ready
-        && (deck.profile_status == "missing"
-            || (deck.profile_status == "retrying"
-                && deck.profile_retry_after_ms.unwrap_or(0) <= 0)))
-        || (deck.profile_ready && deck.waveform_status == "missing")
+    !deck.profile_ready && matches!(deck.profile_status.as_str(), "missing" | "retrying")
 }
 
 #[cfg(test)]
@@ -1106,49 +1035,17 @@ fn clear_dj_profile_inflight(
     }
 }
 
-fn finish_dj_profile_rebuild_failure(
-    inflight: &Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
-    key: &str,
-    status: &str,
-    message: String,
-) {
-    record_dj_profile_rebuild_failure(key, status, message);
-    clear_dj_profile_inflight(inflight, key);
-}
-
-fn schedule_dj_profile_retry(
-    runtime: &tokio::runtime::Handle,
-    state: SharedState,
-    delay: Duration,
-) {
-    runtime.spawn(async move {
-        tokio::time::sleep(delay).await;
-        if let Err(status) = queue_missing_dj_profiles_for_current_pair(state).await {
-            tracing::warn!(
-                ?status,
-                "Scheduled DJ profile retry failed to queue current pair"
-            );
-        }
-    });
-}
-
 fn profile_rebuild_failures() -> &'static Mutex<HashMap<String, DjProfileRebuildFailure>> {
     DJ_PROFILE_REBUILD_FAILURES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn record_dj_profile_rebuild_failure(key: &str, status: &str, message: String) {
     if let Ok(mut guard) = profile_rebuild_failures().lock() {
-        let retry_reason = profile_rebuild_retry_reason(status, &message);
-        let next_retry_at = retry_reason
-            .as_ref()
-            .map(|_| Instant::now() + Duration::from_secs(DJ_PROFILE_TRANSIENT_RETRY_SECS));
         guard.insert(
             key.to_string(),
             DjProfileRebuildFailure {
                 status: status.to_string(),
                 message,
-                retry_reason,
-                next_retry_at,
                 recorded_at: Instant::now(),
             },
         );
@@ -1197,37 +1094,6 @@ fn profile_rebuild_error_is_retryable(message: &str) -> bool {
         || lower.contains("request failed")
         || lower.contains("chunk error")
         || lower.contains("returned error status")
-}
-
-fn profile_rebuild_retry_reason(status: &str, message: &str) -> Option<String> {
-    if status != "retrying" {
-        return None;
-    }
-    let lower = message.to_ascii_lowercase();
-    let reason = if lower.contains("asset") || lower.contains("substatus") {
-        "asset_not_ready"
-    } else if lower.contains("dash") || lower.contains("prebuffer") {
-        "dash_prebuffer"
-    } else if lower.contains("timed out") || lower.contains("timeout") {
-        "timeout"
-    } else {
-        "transient_decode"
-    };
-    Some(reason.to_string())
-}
-
-fn profile_rebuild_retry_after_ms(failure: &DjProfileRebuildFailure) -> Option<i64> {
-    let next_retry_at = failure.next_retry_at?;
-    let now = Instant::now();
-    if next_retry_at <= now {
-        return Some(0);
-    }
-    Some(
-        next_retry_at
-            .duration_since(now)
-            .as_millis()
-            .min(i64::MAX as u128) as i64,
-    )
 }
 
 fn profile_rebuild_error_message(error: &anyhow::Error, status: &str) -> String {
@@ -1549,10 +1415,8 @@ fn dj_profile_is_current_version(
     conn: &rusqlite::Connection,
     key: &AudioDjProfileKey,
 ) -> anyhow::Result<bool> {
-    Ok(
-        queries::get_audio_dj_profile(conn, key)?
-            .is_some_and(|row| dj_profile_row_is_current(&row)),
-    )
+    Ok(queries::get_audio_dj_profile(conn, key)?
+        .is_some_and(|row| row.profile_version == DJ_PROFILE_VERSION))
 }
 
 fn correction_response(row: AudioDjProfileCorrectionRow) -> DjProfileCorrectionResponse {
@@ -1594,12 +1458,6 @@ fn deck_status(
     } else {
         "missing".to_string()
     };
-    let profile_retry_after_ms = rebuild_failure
-        .as_ref()
-        .and_then(profile_rebuild_retry_after_ms);
-    let profile_retry_reason = rebuild_failure
-        .as_ref()
-        .and_then(|failure| failure.retry_reason.clone());
     let profile_error = rebuild_failure.map(|failure| failure.message);
     let (title, artist) = match label_override {
         Some((title, artist)) => (title.clone(), artist.clone()),
@@ -1619,8 +1477,6 @@ fn deck_status(
         phrase_markers_ms,
         mix_in_markers_ms,
         mix_out_markers_ms,
-        drop_markers_ms,
-        manual_drop_markers_ms,
     ) = if let Some(profile) = profile.as_ref() {
         let beat_markers = decode_f32_blob(&profile.beat_grid_blob).unwrap_or_default();
         let downbeat_markers = decode_f32_blob(&profile.downbeats_blob).unwrap_or_default();
@@ -1639,8 +1495,6 @@ fn deck_status(
             phrase_markers,
             seconds_markers_ms(&decode_f32_blob(&profile.mix_in_blob).unwrap_or_default()),
             seconds_markers_ms(&decode_f32_blob(&profile.mix_out_blob).unwrap_or_default()),
-            seconds_markers_ms(&decode_f32_blob(&profile.drop_blob).unwrap_or_default()),
-            Vec::new(),
         )
     } else {
         (
@@ -1648,8 +1502,6 @@ fn deck_status(
             None,
             None,
             None,
-            Vec::new(),
-            Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -1667,8 +1519,6 @@ fn deck_status(
         profile_ready: profile.is_some(),
         profile_status,
         profile_error,
-        profile_retry_after_ms,
-        profile_retry_reason,
         profile_confidence,
         beat_count,
         downbeat_count,
@@ -1680,8 +1530,6 @@ fn deck_status(
         phrase_markers_ms,
         mix_in_markers_ms,
         mix_out_markers_ms,
-        drop_markers_ms,
-        manual_drop_markers_ms,
         passive_analysis_status: passive_analysis
             .as_ref()
             .map(|snapshot| snapshot.status.to_string()),
@@ -1726,212 +1574,6 @@ fn phrase_markers_ms(phrases: &[u32], downbeats: &[f32]) -> Vec<i64> {
         .filter(|value| value.is_finite() && **value >= 0.0)
         .map(|value| (*value as f64 * 1000.0).round() as i64)
         .collect()
-}
-
-fn drop_preview_status(
-    conn: &rusqlite::Connection,
-    enabled: bool,
-    current_ref: Option<&DjMediaRef>,
-    next_ref: Option<&DjMediaRef>,
-    current: Option<&DjDeckStatus>,
-    next: Option<&DjDeckStatus>,
-    current_duration_ms: Option<i64>,
-    actual_fire_ms: Option<i64>,
-) -> anyhow::Result<DjDropPreviewStatus> {
-    let skipped = |reason: &str| DjDropPreviewStatus {
-        status: "skipped".to_string(),
-        planned_fire_ms: None,
-        actual_fire_ms: None,
-        incoming_drop_ms: incoming_drop_marker(next).map(|marker| marker.0),
-        source: incoming_drop_marker(next).map(|marker| marker.1.to_string()),
-        reason: Some(reason.to_string()),
-    };
-
-    if !enabled {
-        return Ok(skipped("disabled"));
-    }
-    let (Some(current_ref), Some(next_ref), Some(current), Some(next)) =
-        (current_ref, next_ref, current, next)
-    else {
-        return Ok(skipped("pair_missing"));
-    };
-    if !current.profile_ready {
-        return Ok(skipped(&deck_profile_unavailable_reason(
-            "current", current,
-        )));
-    }
-    if !next.profile_ready {
-        return Ok(skipped(&deck_profile_unavailable_reason("next", next)));
-    }
-    if current.safe_crossfade_only || next.safe_crossfade_only {
-        return Ok(skipped("safe_crossfade_only"));
-    }
-    if current
-        .profile_confidence
-        .is_some_and(|value| value < DJ_PROFILE_CONFIDENCE_FLOOR)
-        || next
-            .profile_confidence
-            .is_some_and(|value| value < DJ_PROFILE_CONFIDENCE_FLOOR)
-    {
-        return Ok(skipped("profile_low_confidence"));
-    }
-    if !drop_preview_pair_harmonic_compatible(conn, current_ref, next_ref)? {
-        return Ok(skipped("harmonic_incompatible"));
-    }
-    let Some((incoming_drop_ms, source)) = incoming_drop_marker(Some(next)) else {
-        return Ok(skipped("missing_incoming_drop"));
-    };
-    let Some(planned_fire_ms) = select_drop_preview_fire_ms(current, current_duration_ms) else {
-        return Ok(DjDropPreviewStatus {
-            status: "skipped".to_string(),
-            planned_fire_ms: None,
-            actual_fire_ms: None,
-            incoming_drop_ms: Some(incoming_drop_ms),
-            source: Some(source.to_string()),
-            reason: Some("no_safe_mid_song_marker".to_string()),
-        });
-    };
-    Ok(DjDropPreviewStatus {
-        status: if actual_fire_ms.is_some() {
-            "fired".to_string()
-        } else {
-            "armed".to_string()
-        },
-        planned_fire_ms: Some(planned_fire_ms),
-        actual_fire_ms,
-        incoming_drop_ms: Some(incoming_drop_ms),
-        source: Some(source.to_string()),
-        reason: None,
-    })
-}
-
-fn deck_profile_unavailable_reason(prefix: &str, deck: &DjDeckStatus) -> String {
-    if deck.profile_status == "retrying" {
-        if let Some(reason) = deck.profile_retry_reason.as_deref() {
-            return format!("{prefix}_profile_retrying_{reason}");
-        }
-        return format!("{prefix}_profile_retrying");
-    }
-    format!("{prefix}_profile_missing")
-}
-
-pub(crate) fn drop_preview_plan_for_pair(
-    conn: &rusqlite::Connection,
-    current_ref: &DjMediaRef,
-    next_ref: &DjMediaRef,
-    current_duration_ms: Option<i64>,
-) -> anyhow::Result<Option<DropPreviewPlan>> {
-    let enabled = queries::is_dj_engine_enabled(conn)?;
-    let current = deck_status(conn, current_ref, None, false)?;
-    let next = deck_status(conn, next_ref, None, false)?;
-    let status = drop_preview_status(
-        conn,
-        enabled,
-        Some(current_ref),
-        Some(next_ref),
-        Some(&current),
-        Some(&next),
-        current_duration_ms,
-        None,
-    )?;
-    Ok(
-        match (
-            status.status.as_str(),
-            status.planned_fire_ms,
-            status.incoming_drop_ms,
-            status.source,
-        ) {
-            ("armed", Some(planned_fire_ms), Some(incoming_drop_ms), Some(source)) => {
-                Some(DropPreviewPlan {
-                    planned_fire_ms,
-                    incoming_drop_ms,
-                    source,
-                })
-            }
-            _ => None,
-        },
-    )
-}
-
-fn incoming_drop_marker(next: Option<&DjDeckStatus>) -> Option<(i64, &'static str)> {
-    let next = next?;
-    next.manual_drop_markers_ms
-        .iter()
-        .copied()
-        .find(|marker| *marker >= 0)
-        .map(|marker| (marker, "manual"))
-        .or_else(|| {
-            next.drop_markers_ms
-                .iter()
-                .copied()
-                .find(|marker| *marker >= 0)
-                .map(|marker| (marker, "profile"))
-        })
-}
-
-fn select_drop_preview_fire_ms(current: &DjDeckStatus, duration_ms: Option<i64>) -> Option<i64> {
-    let duration_ms = duration_ms.filter(|duration| *duration > 0)?;
-    let min_ms = DROP_PREVIEW_MIN_POSITION_MS.max(duration_ms * 45 / 100);
-    let max_ms = (duration_ms * 65 / 100)
-        .min(duration_ms - DJ_READY_PAIR_TRANSITION_WINDOW_MS - DROP_PREVIEW_FINAL_WINDOW_GUARD_MS);
-    if max_ms < min_ms {
-        return None;
-    }
-    let target_ms = duration_ms * 55 / 100;
-    current
-        .phrase_markers_ms
-        .iter()
-        .chain(current.downbeat_markers_ms.iter())
-        .copied()
-        .filter(|marker| (min_ms..=max_ms).contains(marker))
-        .min_by_key(|marker| (*marker - target_ms).abs())
-}
-
-fn drop_preview_pair_harmonic_compatible(
-    conn: &rusqlite::Connection,
-    current_ref: &DjMediaRef,
-    next_ref: &DjMediaRef,
-) -> anyhow::Result<bool> {
-    let current_key = media_ref_camelot_key(conn, current_ref)?;
-    let next_key = media_ref_camelot_key(conn, next_ref)?;
-    Ok(match (current_key.as_deref(), next_key.as_deref()) {
-        (Some(current), Some(next)) => noor_mix::planner::scoring::camelot_distance(current, next)
-            .is_some_and(|distance| matches!(distance, 0 | 1 | 7)),
-        _ => false,
-    })
-}
-
-fn media_ref_camelot_key(
-    conn: &rusqlite::Connection,
-    media_ref: &DjMediaRef,
-) -> anyhow::Result<Option<String>> {
-    let key = media_ref.profile_key();
-    let profile = queries::get_audio_dj_profile(conn, &key)?;
-    let track_id = media_ref
-        .track_id()
-        .or_else(|| profile.as_ref().and_then(|profile| profile.track_id))
-        .or_else(|| {
-            media_ref
-                .tidal_id()
-                .and_then(|tidal_id| track_id_for_tidal_id(conn, tidal_id).ok().flatten())
-        });
-    let Some(track_id) = track_id else {
-        return Ok(None);
-    };
-    Ok(queries::get_audio_dsp_features(conn, track_id)?.and_then(|features| features.camelot_key))
-}
-
-fn track_id_for_tidal_id(
-    conn: &rusqlite::Connection,
-    tidal_id: i64,
-) -> anyhow::Result<Option<i64>> {
-    conn.query_row(
-        "SELECT id FROM tracks WHERE tidal_id = ?1 LIMIT 1",
-        [tidal_id],
-        |row| row.get::<_, i64>(0),
-    )
-    .optional()
-    .map_err(anyhow::Error::from)
 }
 
 fn latest_open_transition_for_pair(
@@ -2134,15 +1776,10 @@ fn latest_fired_dj_timing_deltas(
          FROM dj_transition_events
          WHERE timing_status = 'fired'
            AND timing_delta_ms IS NOT NULL
-           AND ABS(timing_delta_ms) <= ?2
-           AND template != 'DropPreview16'
          ORDER BY started_at DESC, id DESC
          LIMIT ?1",
     )?;
-    let rows = stmt.query_map(
-        params![limit.max(0), DJ_TIMING_SANITY_MAX_DELTA_MS],
-        |row| row.get::<_, i64>(0),
-    )?;
+    let rows = stmt.query_map([limit.max(0)], |row| row.get::<_, i64>(0))?;
     let mut deltas = Vec::new();
     for row in rows {
         deltas.push(row?);
@@ -2177,10 +1814,7 @@ fn summarize_timing_history(
         if event.timing_status.as_deref() == Some("missed") {
             missed_count += 1;
         }
-        if let Some(delta_ms) = event
-            .timing_delta_ms
-            .filter(|delta| timing_delta_is_sane(*delta))
-        {
+        if let Some(delta_ms) = event.timing_delta_ms {
             delta_sum += delta_ms;
             abs_delta_sum += delta_ms.abs();
             delta_count += 1;
@@ -2208,10 +1842,6 @@ fn summarize_timing_history(
         late_count,
         missed_count,
     }
-}
-
-fn timing_delta_is_sane(delta_ms: i64) -> bool {
-    delta_ms.abs() <= DJ_TIMING_SANITY_MAX_DELTA_MS
 }
 
 fn median_abs_delta(deltas: &[i64]) -> Option<i64> {
@@ -2545,7 +2175,7 @@ fn feedback_rating(value: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::audio_analysis::dj_profile::{DJ_PROFILE_VERSION, encode_f32_blob};
+    use crate::services::audio_analysis::dj_profile::encode_f32_blob;
 
     fn test_profile_row(key: &AudioDjProfileKey, version: &str) -> AudioDjProfileRow {
         AudioDjProfileRow {
@@ -2589,8 +2219,6 @@ mod tests {
             profile_ready,
             profile_status: profile_status.to_string(),
             profile_error: None,
-            profile_retry_after_ms: None,
-            profile_retry_reason: None,
             profile_confidence: profile_ready.then_some(0.85),
             beat_count: profile_ready.then_some(128),
             downbeat_count: profile_ready.then_some(32),
@@ -2606,48 +2234,10 @@ mod tests {
             phrase_markers_ms: Vec::new(),
             mix_in_markers_ms: Vec::new(),
             mix_out_markers_ms: Vec::new(),
-            drop_markers_ms: Vec::new(),
-            manual_drop_markers_ms: Vec::new(),
             passive_analysis_status: None,
             passive_analysis_reason: None,
             safe_crossfade_only: false,
         }
-    }
-
-    fn seed_dsp_key(conn: &rusqlite::Connection, track_id: i64, camelot_key: &str) {
-        conn.execute(
-            "INSERT OR IGNORE INTO artists (id, name) VALUES (1, 'Test Artist')",
-            [],
-        )
-        .expect("artist");
-        conn.execute(
-            "INSERT OR IGNORE INTO tracks (id, title, artist_id, source)
-             VALUES (?1, ?2, 1, 'tidal')",
-            params![track_id, format!("Track {track_id}")],
-        )
-        .expect("track");
-        queries::upsert_audio_dsp_features(
-            conn,
-            &crate::db::models::AudioDspFeatures {
-                track_id,
-                bpm: Some(120.0),
-                key_signature: None,
-                camelot_key: Some(camelot_key.to_string()),
-                loudness_lufs: Some(-12.0),
-                energy: Some(0.7),
-                danceability: Some(0.7),
-                beat_strength: Some(0.7),
-                spectral_centroid: None,
-                stereo_width: None,
-                is_instrumental: false,
-                analysis_source: "test".to_string(),
-                analysis_offset_ms: 0,
-                samples_analyzed: None,
-                analyzed_at: "now".to_string(),
-                analysis_version: "test".to_string(),
-            },
-        )
-        .expect("dsp features");
     }
 
     #[test]
@@ -2667,11 +2257,6 @@ mod tests {
             .expect("current profile");
 
         assert!(dj_profile_is_current_version(&conn, &key).expect("current"));
-        let mut current_without_waveform = test_profile_row(&key, DJ_PROFILE_VERSION);
-        current_without_waveform.waveform_peaks_blob = encode_f32_blob(&[]);
-        queries::upsert_audio_dj_profile(&conn, &current_without_waveform)
-            .expect("profile missing waveform");
-        assert!(!dj_profile_is_current_version(&conn, &key).expect("missing waveform"));
     }
 
     #[test]
@@ -2727,7 +2312,6 @@ mod tests {
 
         assert_eq!(deck.waveform_status, "missing");
         assert!(deck.waveform_peaks.is_empty());
-        assert!(deck_needs_profile_rebuild(&deck));
     }
 
     #[test]
@@ -3284,40 +2868,6 @@ mod tests {
     }
 
     #[test]
-    fn latest_fired_timing_deltas_exclude_impossible_and_preview_rows() {
-        let conn = rusqlite::Connection::open_in_memory().expect("db");
-        crate::db::schema::run_migrations(&conn).expect("migrations");
-        conn.execute(
-            "INSERT INTO dj_transition_events (
-                from_media_ref_kind, from_media_ref_id, to_media_ref_kind, to_media_ref_id,
-                template, program_json, planner_version, planned_start_ms,
-                actual_start_ms, timing_delta_ms, timing_source, timing_status
-             ) VALUES
-             (
-                'tidal_track', '1', 'tidal_track', '2',
-                'SafeCrossfade', '{\"template\":\"SafeCrossfade\"}', 'dj-v1',
-                100000, 100120, 120, 'downbeat_sync', 'fired'
-             ),
-             (
-                'tidal_track', '2', 'tidal_track', '3',
-                'SafeCrossfade', '{\"template\":\"SafeCrossfade\"}', 'dj-v1',
-                100000, 140001, 40001, 'downbeat_sync', 'fired'
-             ),
-             (
-                'tidal_track', '3', 'tidal_track', '4',
-                'DropPreview16', '{\"template\":\"DropPreview16\"}', 'dj-v1',
-                100000, 100240, 240, 'drop_preview', 'fired'
-             )",
-            [],
-        )
-        .expect("insert timing rows");
-
-        let deltas = latest_fired_dj_timing_deltas(&conn, 20).expect("deltas");
-
-        assert_eq!(deltas, vec![120]);
-    }
-
-    #[test]
     fn timing_history_includes_track_pair_labels() {
         let conn = rusqlite::Connection::open_in_memory().expect("db");
         crate::db::schema::run_migrations(&conn).expect("migrations");
@@ -3508,64 +3058,6 @@ mod tests {
     }
 
     #[test]
-    fn timing_history_summary_excludes_impossible_deltas_from_averages() {
-        let events = vec![
-            DjTimingHistoryEvent {
-                event_id: 1,
-                from_title: None,
-                from_artist: None,
-                to_title: None,
-                to_artist: None,
-                planned_template: "SafeCrossfade".to_string(),
-                renderer_template: Some("SafeCrossfade".to_string()),
-                planning_reason: None,
-                planned_start_ms: Some(10_000),
-                actual_start_ms: Some(10_100),
-                timing_delta_ms: Some(100),
-                timing_source: Some("downbeat_sync".to_string()),
-                timing_status: Some("fired".to_string()),
-                timing_quality: "tight".to_string(),
-                timing_direction: "on_time".to_string(),
-                runtime_rendered_dj_mixer: Some(true),
-                runtime_renderer_status: Some("rendered_handoff".to_string()),
-                runtime_renderer_reason: Some("none".to_string()),
-                started_at: "now".to_string(),
-                rejected_alternatives: Vec::new(),
-            },
-            DjTimingHistoryEvent {
-                event_id: 2,
-                from_title: None,
-                from_artist: None,
-                to_title: None,
-                to_artist: None,
-                planned_template: "SafeCrossfade".to_string(),
-                renderer_template: Some("SafeCrossfade".to_string()),
-                planning_reason: None,
-                planned_start_ms: Some(10_000),
-                actual_start_ms: Some(50_001),
-                timing_delta_ms: Some(40_001),
-                timing_source: Some("downbeat_sync".to_string()),
-                timing_status: Some("fired".to_string()),
-                timing_quality: "bad".to_string(),
-                timing_direction: "late".to_string(),
-                runtime_rendered_dj_mixer: Some(true),
-                runtime_renderer_status: Some("rendered_handoff".to_string()),
-                runtime_renderer_reason: Some("none".to_string()),
-                started_at: "now".to_string(),
-                rejected_alternatives: Vec::new(),
-            },
-        ];
-
-        let summary = summarize_timing_history(&events, &[100]);
-
-        assert_eq!(summary.event_count, 2);
-        assert_eq!(summary.average_delta_ms, Some(100));
-        assert_eq!(summary.average_abs_delta_ms, Some(100));
-        assert_eq!(summary.tight_count, 1);
-        assert_eq!(summary.bad_count, 1);
-    }
-
-    #[test]
     fn fire_ahead_evidence_requires_positive_majority_and_median() {
         let passing = vec![
             220, 210, 205, 200, 195, 190, 185, 180, 175, 170, 165, 160, 155, 151, 149, -20, -40,
@@ -3592,187 +3084,6 @@ mod tests {
         assert!(ready_pair_transition_due(151_000, Some(180_000)));
         assert!(ready_pair_transition_due(180_000, Some(180_000)));
         assert!(!ready_pair_transition_due(151_000, None));
-    }
-
-    #[test]
-    fn drop_preview_selects_nearest_safe_mid_song_marker() {
-        let mut current = test_deck_status(true, "ready");
-        current.phrase_markers_ms = vec![40_000, 120_000];
-        current.downbeat_markers_ms = vec![132_000, 190_000];
-
-        assert_eq!(
-            select_drop_preview_fire_ms(&current, Some(240_000)),
-            Some(132_000)
-        );
-    }
-
-    #[test]
-    fn drop_preview_rejects_unsafe_mid_song_window() {
-        let mut current = test_deck_status(true, "ready");
-        current.phrase_markers_ms = vec![40_000, 190_000];
-        current.downbeat_markers_ms = vec![59_000];
-
-        assert_eq!(select_drop_preview_fire_ms(&current, Some(240_000)), None);
-    }
-
-    #[test]
-    fn drop_preview_prefers_manual_drop_marker() {
-        let mut next = test_deck_status(true, "ready");
-        next.drop_markers_ms = vec![32_000];
-        next.manual_drop_markers_ms = vec![24_000];
-
-        assert_eq!(incoming_drop_marker(Some(&next)), Some((24_000, "manual")));
-    }
-
-    #[test]
-    fn drop_preview_status_arms_compatible_ready_pair() {
-        let conn = rusqlite::Connection::open_in_memory().expect("db");
-        crate::db::schema::run_migrations(&conn).expect("migrations");
-        seed_dsp_key(&conn, 1, "8A");
-        seed_dsp_key(&conn, 2, "8B");
-        let current_ref = DjMediaRef::TidalTrack {
-            tidal_id: 111,
-            track_id: Some(1),
-        };
-        let next_ref = DjMediaRef::TidalTrack {
-            tidal_id: 222,
-            track_id: Some(2),
-        };
-        let mut current = test_deck_status(true, "ready");
-        current.phrase_markers_ms = vec![128_000];
-        let mut next = test_deck_status(true, "ready");
-        next.drop_markers_ms = vec![32_000];
-
-        let status = drop_preview_status(
-            &conn,
-            true,
-            Some(&current_ref),
-            Some(&next_ref),
-            Some(&current),
-            Some(&next),
-            Some(240_000),
-            None,
-        )
-        .expect("preview status");
-
-        assert_eq!(
-            status,
-            DjDropPreviewStatus {
-                status: "armed".to_string(),
-                planned_fire_ms: Some(128_000),
-                actual_fire_ms: None,
-                incoming_drop_ms: Some(32_000),
-                source: Some("profile".to_string()),
-                reason: None,
-            }
-        );
-    }
-
-    #[test]
-    fn drop_preview_status_reports_actual_fire() {
-        let conn = rusqlite::Connection::open_in_memory().expect("db");
-        crate::db::schema::run_migrations(&conn).expect("migrations");
-        seed_dsp_key(&conn, 1, "8A");
-        seed_dsp_key(&conn, 2, "8B");
-        let current_ref = DjMediaRef::TidalTrack {
-            tidal_id: 111,
-            track_id: Some(1),
-        };
-        let next_ref = DjMediaRef::TidalTrack {
-            tidal_id: 222,
-            track_id: Some(2),
-        };
-        let mut current = test_deck_status(true, "ready");
-        current.phrase_markers_ms = vec![128_000];
-        let mut next = test_deck_status(true, "ready");
-        next.drop_markers_ms = vec![32_000];
-
-        let status = drop_preview_status(
-            &conn,
-            true,
-            Some(&current_ref),
-            Some(&next_ref),
-            Some(&current),
-            Some(&next),
-            Some(240_000),
-            Some(128_008),
-        )
-        .expect("preview status");
-
-        assert_eq!(status.status, "fired");
-        assert_eq!(status.planned_fire_ms, Some(128_000));
-        assert_eq!(status.actual_fire_ms, Some(128_008));
-    }
-
-    #[test]
-    fn drop_preview_status_skips_harmonic_mismatch() {
-        let conn = rusqlite::Connection::open_in_memory().expect("db");
-        crate::db::schema::run_migrations(&conn).expect("migrations");
-        seed_dsp_key(&conn, 1, "8A");
-        seed_dsp_key(&conn, 2, "2B");
-        let current_ref = DjMediaRef::TidalTrack {
-            tidal_id: 111,
-            track_id: Some(1),
-        };
-        let next_ref = DjMediaRef::TidalTrack {
-            tidal_id: 222,
-            track_id: Some(2),
-        };
-        let mut current = test_deck_status(true, "ready");
-        current.phrase_markers_ms = vec![128_000];
-        let mut next = test_deck_status(true, "ready");
-        next.drop_markers_ms = vec![32_000];
-
-        let status = drop_preview_status(
-            &conn,
-            true,
-            Some(&current_ref),
-            Some(&next_ref),
-            Some(&current),
-            Some(&next),
-            Some(240_000),
-            None,
-        )
-        .expect("preview status");
-
-        assert_eq!(status.status, "skipped");
-        assert_eq!(status.reason.as_deref(), Some("harmonic_incompatible"));
-    }
-
-    #[test]
-    fn drop_preview_status_reports_retrying_asset_unavailable() {
-        let conn = rusqlite::Connection::open_in_memory().expect("db");
-        crate::db::schema::run_migrations(&conn).expect("migrations");
-        let current_ref = DjMediaRef::TidalTrack {
-            tidal_id: 111,
-            track_id: Some(1),
-        };
-        let next_ref = DjMediaRef::TidalTrack {
-            tidal_id: 222,
-            track_id: Some(2),
-        };
-        let mut current = test_deck_status(true, "ready");
-        current.phrase_markers_ms = vec![128_000];
-        let mut next = test_deck_status(false, "retrying");
-        next.profile_retry_reason = Some("asset_not_ready".to_string());
-
-        let status = drop_preview_status(
-            &conn,
-            true,
-            Some(&current_ref),
-            Some(&next_ref),
-            Some(&current),
-            Some(&next),
-            Some(240_000),
-            None,
-        )
-        .expect("preview status");
-
-        assert_eq!(status.status, "skipped");
-        assert_eq!(
-            status.reason.as_deref(),
-            Some("next_profile_retrying_asset_not_ready")
-        );
     }
 
     #[test]
@@ -3999,80 +3310,9 @@ mod tests {
             deck.profile_error.as_deref(),
             Some("DASH stream prebuffer failed. Retrying analysis.")
         );
-        assert!(deck.profile_retry_after_ms.is_some_and(|ms| ms > 0));
-        assert!(deck.profile_retry_after_ms.is_some_and(|ms| ms <= 25_000));
-        assert_eq!(deck.profile_retry_reason.as_deref(), Some("dash_prebuffer"));
-        assert!(!deck_needs_profile_rebuild(&deck));
-
-        clear_dj_profile_rebuild_failure(&rebuild_key);
-    }
-
-    #[test]
-    fn due_retrying_profile_failure_needs_rebuild() {
-        let mut deck = test_deck_status(false, "retrying");
-        deck.profile_retry_after_ms = Some(0);
-
         assert!(deck_needs_profile_rebuild(&deck));
-    }
-
-    #[test]
-    fn asset_not_ready_retrying_profile_reports_retry_reason() {
-        let conn = rusqlite::Connection::open_in_memory().expect("db");
-        crate::db::schema::run_migrations(&conn).expect("migrations");
-        let media_ref = DjMediaRef::TidalTrack {
-            tidal_id: 12198476,
-            track_id: None,
-        };
-        let key = media_ref.profile_key();
-        let rebuild_key = dj_profile_inflight_key(&key);
-        clear_dj_profile_rebuild_failure(&rebuild_key);
-        record_dj_profile_rebuild_failure(
-            &rebuild_key,
-            "retrying",
-            "TIDAL asset is not ready. Retrying analysis.".to_string(),
-        );
-
-        let deck = deck_status(&conn, &media_ref, None, false).expect("deck status");
-
-        assert_eq!(deck.profile_status, "retrying");
-        assert_eq!(
-            deck.profile_retry_reason.as_deref(),
-            Some("asset_not_ready")
-        );
-        assert!(deck.profile_retry_after_ms.is_some_and(|ms| ms > 0));
-        assert!(deck.profile_retry_after_ms.is_some_and(|ms| ms <= 25_000));
 
         clear_dj_profile_rebuild_failure(&rebuild_key);
-    }
-
-    #[test]
-    fn retryable_profile_rebuild_failure_clears_inflight() {
-        let inflight = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-        let key = "tidal_track:250295729";
-        let first = mark_dj_profile_rebuild_inflight(
-            &inflight,
-            key,
-            std::time::Duration::from_secs(DJ_PROFILE_AUTO_REBUILD_RETRY_SECS),
-        )
-        .expect("first mark");
-
-        finish_dj_profile_rebuild_failure(
-            &inflight,
-            key,
-            "retrying",
-            "TIDAL asset is not ready. Retrying analysis.".to_string(),
-        );
-
-        let second = mark_dj_profile_rebuild_inflight(
-            &inflight,
-            key,
-            std::time::Duration::from_secs(DJ_PROFILE_AUTO_REBUILD_RETRY_SECS),
-        )
-        .expect("second mark");
-
-        assert_eq!(first, ProfileRebuildInflightDecision::Start);
-        assert_eq!(second, ProfileRebuildInflightDecision::Start);
-        clear_dj_profile_rebuild_failure(key);
     }
 
     #[test]

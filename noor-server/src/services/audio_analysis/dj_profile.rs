@@ -5,7 +5,6 @@ use anyhow::Result;
 use rusqlite::Connection;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -14,8 +13,6 @@ use super::{onset, tempo};
 
 pub const DJ_PROFILE_VERSION: &str = "dj_profile_v2";
 pub const DJ_WAVEFORM_PEAK_COUNT: usize = 512;
-const DJ_PROFILE_DB_LOCK_RETRY_LIMIT: usize = 6;
-const DJ_PROFILE_DB_LOCK_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -105,9 +102,7 @@ fn persist_dj_analysis_job(
     analyzer: fn(&[f32], u32) -> Option<BeatGridAnalysis>,
 ) -> Result<()> {
     let key = job.media_ref.profile_key();
-    if with_dj_profile_db_retry("check current DJ profile version", || {
-        db.with_conn(|conn| dj_analysis_skips_existing_profile_version(conn, &key))
-    })? {
+    if db.with_conn(|conn| dj_analysis_skips_existing_profile_version(conn, &key))? {
         debug!(
             media_ref_kind = %key.media_ref_kind,
             media_ref_id = %key.media_ref_id,
@@ -138,10 +133,8 @@ fn persist_dj_analysis_job(
         return Ok(());
     };
 
-    with_dj_profile_db_retry("persist DJ profile", || {
-        db.with_conn(|conn| {
-            persist_dj_analysis_job_from_analysis(conn, &job, "dj_playback", &analysis)
-        })
+    db.with_conn(|conn| {
+        persist_dj_analysis_job_from_analysis(conn, &job, "dj_playback", &analysis)
     })?;
     info!(
         media_ref_kind = %key.media_ref_kind,
@@ -151,59 +144,6 @@ fn persist_dj_analysis_job(
         "DJ profile persisted"
     );
     Ok(())
-}
-
-fn with_dj_profile_db_retry<T, F>(operation: &'static str, f: F) -> Result<T>
-where
-    F: FnMut() -> Result<T>,
-{
-    with_dj_profile_db_retry_config(
-        operation,
-        DJ_PROFILE_DB_LOCK_RETRY_LIMIT,
-        DJ_PROFILE_DB_LOCK_RETRY_DELAY,
-        f,
-    )
-}
-
-fn with_dj_profile_db_retry_config<T, F>(
-    operation: &'static str,
-    retry_limit: usize,
-    retry_delay: Duration,
-    mut f: F,
-) -> Result<T>
-where
-    F: FnMut() -> Result<T>,
-{
-    for attempt in 0..=retry_limit {
-        match f() {
-            Ok(value) => return Ok(value),
-            Err(error) if sqlite_database_locked(&error) && attempt < retry_limit => {
-                let next_attempt = attempt + 1;
-                warn!(
-                    operation,
-                    next_attempt, retry_limit, "DJ profile database locked; retrying"
-                );
-                std::thread::sleep(retry_delay);
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    unreachable!("DJ profile retry loop always returns before exhausting attempts")
-}
-
-fn sqlite_database_locked(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        if let Some(rusqlite::Error::SqliteFailure(sqlite_error, _)) =
-            cause.downcast_ref::<rusqlite::Error>()
-        {
-            return matches!(
-                sqlite_error.code,
-                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-            );
-        }
-        let message = cause.to_string();
-        message.contains("database is locked") || message.contains("database table is locked")
-    })
 }
 
 fn fallback_beat_grid_analysis(samples: &[f32], sample_rate: u32) -> Option<BeatGridAnalysis> {
@@ -326,12 +266,9 @@ pub fn dj_analysis_skips_existing_profile_version(
     key: &AudioDjProfileKey,
 ) -> Result<bool> {
     let existing = queries::get_audio_dj_profile(conn, key)?;
-    Ok(existing.as_ref().is_some_and(dj_profile_row_is_current))
-}
-
-pub fn dj_profile_row_is_current(row: &AudioDjProfileRow) -> bool {
-    row.profile_version == DJ_PROFILE_VERSION
-        && decode_f32_blob(&row.waveform_peaks_blob).is_some_and(|peaks| !peaks.is_empty())
+    Ok(existing
+        .as_ref()
+        .is_some_and(|row| row.profile_version == DJ_PROFILE_VERSION))
 }
 
 pub fn persist_dj_analysis_job_from_analysis(
@@ -900,12 +837,6 @@ mod tests {
                 conn,
                 &key("tidal_track", "1")
             )?);
-            row.waveform_peaks_blob = encode_f32_blob(&[]);
-            queries::upsert_audio_dj_profile(conn, &row)?;
-            assert!(!super::dj_analysis_skips_existing_profile_version(
-                conn,
-                &key("tidal_track", "1")
-            )?);
             Ok(())
         })
         .expect("check");
@@ -1324,34 +1255,6 @@ mod tests {
             .expect("get")
             .expect("profile");
         assert_eq!(loaded.tidal_id, Some(7));
-    }
-
-    #[test]
-    fn dj_profile_db_retry_retries_locked_database_errors() {
-        let attempts = std::cell::Cell::new(0);
-        let result = with_dj_profile_db_retry_config(
-            "test retry",
-            2,
-            Duration::ZERO,
-            || -> Result<&'static str> {
-                let attempt = attempts.get();
-                attempts.set(attempt + 1);
-                if attempt == 0 {
-                    return Err(rusqlite::Error::SqliteFailure(
-                        rusqlite::ffi::Error {
-                            code: rusqlite::ErrorCode::DatabaseBusy,
-                            extended_code: rusqlite::ffi::SQLITE_BUSY,
-                        },
-                        None,
-                    )
-                    .into());
-                }
-                Ok("ok")
-            },
-        );
-
-        assert_eq!(result.expect("retry result"), "ok");
-        assert_eq!(attempts.get(), 2);
     }
 
     #[test]
