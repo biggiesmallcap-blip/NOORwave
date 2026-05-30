@@ -12486,11 +12486,14 @@ async fn switch_runtime_to_snapshot_current(
     snapshot: &player::PlaybackSnapshot,
     generation: u64,
 ) -> anyhow::Result<()> {
-    {
+    if snapshot.state.current_track.is_none() {
         let mut state_guard = state.write().await;
         if let Some(info) = state_guard.playback_runtime_info.as_mut() {
-            info.active_track_id = snapshot.state.current_track.as_ref().map(|track| track.id);
+            info.active_track_id = None;
         }
+        let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+        let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
+        return Ok(());
     }
 
     if let Some(track) = snapshot.state.current_track.as_ref() {
@@ -12516,6 +12519,10 @@ async fn switch_runtime_to_snapshot_current(
             runtime_handle.switch_to(job)?;
             {
                 let mut state_guard = state.write().await;
+                if let Some(info) = state_guard.playback_runtime_info.as_mut() {
+                    info.active_track_id = Some(track.id);
+                    info.last_error = None;
+                }
                 if let Some(pending) = state_guard.pending_stream_display.take() {
                     state_guard.current_stream_display = Some(pending);
                 }
@@ -12549,6 +12556,10 @@ async fn switch_runtime_to_snapshot_current(
             runtime_handle.switch_to(job)?;
             {
                 let mut state_guard = state.write().await;
+                if let Some(info) = state_guard.playback_runtime_info.as_mut() {
+                    info.active_track_id = Some(track.id);
+                    info.last_error = None;
+                }
                 state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
                     audio_quality: stream_info.audio_quality.clone(),
                     sample_rate: stream_info.sample_rate,
@@ -16149,6 +16160,153 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "pending TIDAL mix deque must be cleared"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn direct_tidal_finish_advances_persisted_queue_and_switches_runtime() {
+        let (db, db_path) = fresh_migrated_db();
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO artists (id, name) VALUES (8100, 'Queued Artist')", [])?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, duration_ms, tidal_id, best_source, source)
+                 VALUES (8101, 'Queued Track', 8100, 180000, 88101, 'tidal', 'tidal')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (8101, 0, 'test')",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE playback_state
+                 SET current_track_id = NULL, current_queue_item_id = NULL, is_playing = 1
+                 WHERE id = 1",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+        let direct_track = crate::db::models::Track {
+            id: -441,
+            title: "Direct TIDAL".to_string(),
+            artist_id: 0,
+            artist_name: Some("Direct Artist".to_string()),
+            album_id: None,
+            album_title: None,
+            disc_number: None,
+            track_number: None,
+            duration_ms: Some(180_000),
+            isrc: None,
+            tidal_id: Some(441),
+            ytmusic_id: None,
+            soundcloud_id: None,
+            best_quality: Some("LOSSLESS".to_string()),
+            best_source: Some("tidal".to_string()),
+            fidelity_score: 0,
+            is_favorite: false,
+            play_count: 0,
+            last_played_at: None,
+            date_added: None,
+            source: "tidal_ephemeral".to_string(),
+            artwork_url: None,
+        };
+
+        let (command_tx, command_rx) = std::sync::mpsc::channel();
+        let (switched_tx, switched_rx) = std::sync::mpsc::channel();
+        let runtime_thread = std::thread::spawn(move || {
+            match command_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("track status command")
+            {
+                playback_runtime::PlaybackRuntimeCommand::TrackStatus {
+                    track_id,
+                    generation,
+                    respond_to,
+                } => {
+                    assert_eq!(track_id, 8101);
+                    assert_eq!(generation, 1);
+                    respond_to
+                        .send(playback_runtime::PlaybackTrackStatus::Prepared)
+                        .expect("track status response");
+                }
+                other => panic!("expected TrackStatus command, got {other:?}"),
+            }
+
+            match command_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("switch command")
+            {
+                playback_runtime::PlaybackRuntimeCommand::Switch(job) => {
+                    switched_tx.send(job.track.id).expect("switched track id");
+                }
+                other => panic!("expected Switch command, got {other:?}"),
+            }
+        });
+
+        {
+            let mut guard = state.write().await;
+            guard.tidal_tokens = Some(tidal_auth::TidalTokens {
+                access_token: "test-token".to_string(),
+                refresh_token: "refresh-token".to_string(),
+                token_type: "Bearer".to_string(),
+                expires_in: 3600,
+                user_id: "test-user".to_string(),
+                country_code: "US".to_string(),
+                auth_flow: Some("pkce".to_string()),
+            });
+            guard.external_playback_track = Some(direct_track.clone());
+            guard.playback_runtime = Some(PlaybackRuntimeState {
+                access_token: "test-token".to_string(),
+                handle: playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx),
+            });
+            guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+                device_name: "Test DAC".to_string(),
+                sample_rate: 48_000,
+                channels: 2,
+                active_track_id: Some(direct_track.id),
+                last_error: None,
+                exclusive_engaged: false,
+                exclusive_transport_format: None,
+            });
+        }
+
+        handle_runtime_finished(state.clone(), direct_track.id, 1)
+            .await
+            .expect("runtime finish");
+
+        assert_eq!(
+            switched_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("switched track"),
+            8101
+        );
+        runtime_thread.join().expect("runtime thread");
+
+        let (current_track_id, is_playing): (Option<i64>, bool) = db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT current_track_id, is_playing FROM playback_state WHERE id = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .unwrap();
+        assert_eq!(current_track_id, Some(8101));
+        assert!(is_playing);
+
+        let guard = state.read().await;
+        assert!(guard.external_playback_track.is_none());
+        assert_eq!(
+            guard
+                .playback_runtime_info
+                .as_ref()
+                .and_then(|info| info.active_track_id),
+            Some(8101)
         );
 
         let _ = std::fs::remove_file(db_path);
