@@ -2,6 +2,13 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
+import type { ProviderRecommendationItem, TidalSearchResults } from '$lib/api/client';
+import {
+	recommendationActionLabel,
+	recommendationHrefFromSearch,
+	recommendationKnownHref,
+	recommendationSearchHref,
+} from './recommendation_navigation';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(here, 'HomeRecommendationsShelf.svelte'), 'utf8');
@@ -9,6 +16,24 @@ const homePage = readFileSync(join(here, '../../../routes/+page.svelte'), 'utf8'
 const client = readFileSync(join(here, '../../api/client.ts'), 'utf8');
 const playTrending = readFileSync(join(here, '../../player/play_trending.ts'), 'utf8');
 const serverRoutes = readFileSync(join(here, '../../../../../noor-server/src/server/routes.rs'), 'utf8');
+
+const emptySearchResults: TidalSearchResults = { tracks: [], albums: [], artists: [], videos: [] };
+
+function rec(overrides: Partial<ProviderRecommendationItem>): ProviderRecommendationItem {
+	return {
+		provider: 'lastfm',
+		entity_type: 'track',
+		local_track_id: null,
+		tidal_id: null,
+		title: 'Title',
+		artist_name: 'Artist',
+		album_title: null,
+		artwork_url: null,
+		reason: 'Near your top track',
+		playable: false,
+		...overrides,
+	};
+}
 
 describe('home recommendations shelf contract', () => {
 	test('loads provider shelves independently after Home renders', () => {
@@ -78,12 +103,48 @@ describe('home recommendations shelf contract', () => {
 		expect(source).toContain('local_album_id');
 	});
 
+	test('resolves unresolved artist and album recommendations before falling back to search', () => {
+		const unresolvedArtist = rec({ entity_type: 'artist', title: 'Amara ctk100', artist_name: 'Amara ctk100' });
+		expect(recommendationKnownHref(unresolvedArtist)).toBeNull();
+		expect(recommendationActionLabel(unresolvedArtist)).toBe('Resolve artist');
+		expect(recommendationHrefFromSearch(unresolvedArtist, {
+			...emptySearchResults,
+			artists: [{
+				tidal_id: 123,
+				name: 'Amara CTK100',
+				artwork_url: null,
+				local_id: null,
+				in_library: false,
+			}],
+		})).toBe('/tidal/artists/123');
+		expect(recommendationSearchHref(unresolvedArtist)).toBe('/search?q=Amara%20ctk100');
+
+		const unresolvedAlbum = rec({
+			entity_type: 'album',
+			title: 'In the Beginning There Was Rhythm',
+			artist_name: 'Switch Angel',
+		});
+		expect(recommendationActionLabel(unresolvedAlbum)).toBe('Resolve album');
+		expect(recommendationHrefFromSearch(unresolvedAlbum, {
+			...emptySearchResults,
+			albums: [{
+				tidal_id: 456,
+				title: 'In The Beginning There Was Rhythm',
+				artist_name: 'Switch Angel',
+				artwork_url: null,
+				local_id: 77,
+				in_library: true,
+			}],
+		})).toBe('/albums/77');
+		expect(recommendationHrefFromSearch(unresolvedAlbum, emptySearchResults)).toBeNull();
+	});
+
 	test('plays local matches directly and resolves unresolved Last.fm items through TIDAL', () => {
 		expect(source).toContain('playTrackNow');
 		expect(source).toContain('item.local_track_id');
 		expect(source).toContain('playChartTidalTrack');
 		expect(source).toContain('tidal_id: item.tidal_id ?? 0');
-		expect(source).toContain('Resolve on TIDAL');
+		expect(recommendationActionLabel(rec({ entity_type: 'track' }))).toBe('Resolve on TIDAL');
 	});
 
 	test('can play the visible recommendation set through standard TIDAL mix playback', () => {

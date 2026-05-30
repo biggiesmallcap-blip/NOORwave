@@ -12,7 +12,7 @@ use crate::services::discovery_space as ds;
 use crate::services::learning as discovery_learning;
 use crate::services::tidal::{
     auth as tidal_auth,
-    client::{TidalClient, TidalSearchTrack, TidalSearchVideo, TidalTrack},
+    client::{TidalAlbum, TidalClient, TidalSearchTrack, TidalSearchVideo, TidalTrack},
     import as tidal_import, mutations as tidal_mutations, stream as tidal_stream,
 };
 use crate::smart::discovery as discovery_engine;
@@ -1563,16 +1563,16 @@ async fn get_album_spotify_stats(
 /// most-recent release per filter (i.e. anything past page 1). Stops on a
 /// short page (TIDAL's "no more" signal) or when the running count reaches
 /// `total_number_of_items`. Capped at 1000 entries per filter as a safety net.
-async fn fetch_all_artist_albums(
+async fn fetch_artist_album_pages(
     client: &TidalClient,
     artist_id: i64,
     filter: &str,
-) -> anyhow::Result<Vec<crate::services::tidal::client::TidalAlbum>> {
+    max_pages: i32,
+) -> anyhow::Result<Vec<TidalAlbum>> {
     const PAGE: i32 = 50;
-    const MAX_PAGES: i32 = 20;
-    let mut out: Vec<crate::services::tidal::client::TidalAlbum> = Vec::new();
+    let mut out: Vec<TidalAlbum> = Vec::new();
     let mut offset: i32 = 0;
-    for _ in 0..MAX_PAGES {
+    for _ in 0..max_pages.max(1) {
         let page = client
             .get_artist_albums(artist_id, PAGE, offset, Some(filter))
             .await?;
@@ -1590,6 +1590,116 @@ async fn fetch_all_artist_albums(
         offset += PAGE;
     }
     Ok(out)
+}
+
+async fn fetch_all_artist_albums(
+    client: &TidalClient,
+    artist_id: i64,
+    filter: &str,
+) -> anyhow::Result<Vec<TidalAlbum>> {
+    const MAX_PAGES: i32 = 20;
+    fetch_artist_album_pages(client, artist_id, filter, MAX_PAGES).await
+}
+
+fn merge_tidal_artist_album_filters(
+    filters: impl IntoIterator<Item = (Vec<TidalAlbum>, &'static str)>,
+) -> Vec<(TidalAlbum, &'static str)> {
+    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut all_albums: Vec<(TidalAlbum, &'static str)> = Vec::new();
+    for (items, filter) in filters {
+        for item in items {
+            if seen.insert(item.id) {
+                all_albums.push((item, filter));
+            }
+        }
+    }
+    all_albums
+}
+
+fn tidal_artist_release_filter_missing(error: &anyhow::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("tidal api error 404")
+        && (message.contains("substatus\":2001") || message.contains("resource not found"))
+}
+
+fn resolve_tidal_artist_release_filter(
+    result: anyhow::Result<Vec<TidalAlbum>>,
+    artist_id: i64,
+    filter: &'static str,
+) -> anyhow::Result<Vec<TidalAlbum>> {
+    match result {
+        Ok(items) => Ok(items),
+        Err(error) if tidal_artist_release_filter_missing(&error) => {
+            tracing::debug!(
+                "tidal_artist_profile: artist {} release filter {} missing",
+                artist_id,
+                filter
+            );
+            Ok(Vec::new())
+        }
+        Err(error) => {
+            let message = error.to_string();
+            tracing::debug!(
+                "tidal_artist_profile: artist {} release filter {} failed: {}",
+                artist_id,
+                filter,
+                message
+            );
+            anyhow::bail!(
+                "TIDAL artist {} release filter {} failed: {}",
+                artist_id,
+                filter,
+                message
+            )
+        }
+    }
+}
+
+async fn fetch_tidal_artist_profile_albums(
+    client: &TidalClient,
+    artist_id: i64,
+) -> anyhow::Result<Vec<(TidalAlbum, &'static str)>> {
+    const PROFILE_MAX_PAGES_PER_FILTER: i32 = 4;
+    let (albums_res, eps_res, comps_res, live_res) = tokio::join!(
+        fetch_artist_album_pages(client, artist_id, "ALBUMS", PROFILE_MAX_PAGES_PER_FILTER),
+        fetch_artist_album_pages(
+            client,
+            artist_id,
+            "EPSANDSINGLES",
+            PROFILE_MAX_PAGES_PER_FILTER
+        ),
+        fetch_artist_album_pages(
+            client,
+            artist_id,
+            "COMPILATIONS",
+            PROFILE_MAX_PAGES_PER_FILTER
+        ),
+        fetch_artist_album_pages(client, artist_id, "LIVE", PROFILE_MAX_PAGES_PER_FILTER),
+    );
+
+    let albums = resolve_tidal_artist_release_filter(albums_res, artist_id, "ALBUMS")?;
+    let eps = resolve_tidal_artist_release_filter(eps_res, artist_id, "EPSANDSINGLES")?;
+    let comps = resolve_tidal_artist_release_filter(comps_res, artist_id, "COMPILATIONS")?;
+    let live = resolve_tidal_artist_release_filter(live_res, artist_id, "LIVE")?;
+
+    Ok(merge_tidal_artist_album_filters([
+        (albums, "ALBUMS"),
+        (eps, "EPSANDSINGLES"),
+        (comps, "COMPILATIONS"),
+        (live, "LIVE"),
+    ]))
+}
+
+async fn fetch_tidal_artist_profile_catalog(
+    client: &TidalClient,
+    artist_id: i64,
+) -> anyhow::Result<(
+    crate::services::tidal::client::TidalPaginatedResponse<TidalTrack>,
+    Vec<(TidalAlbum, &'static str)>,
+)> {
+    let top_tracks_page = client.get_artist_top_tracks(artist_id, 50, 0).await?;
+    let albums = fetch_tidal_artist_profile_albums(client, artist_id).await?;
+    Ok((top_tracks_page, albums))
 }
 
 async fn get_artist_discography(
@@ -1744,22 +1854,12 @@ async fn get_artist_discography(
     // filter it came from so the frontend can bucket it correctly — TIDAL's
     // per-album `release_type` body field is unreliable and was the original
     // reason Singles / Compilations sections were silently empty.
-    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    let mut all_albums: Vec<(crate::services::tidal::client::TidalAlbum, &'static str)> =
-        Vec::new();
-    for (r, filter) in [
-        (albums_res, "ALBUMS"),
-        (eps_res, "EPSANDSINGLES"),
-        (comps_res, "COMPILATIONS"),
-        (live_res, "LIVE"),
-    ] {
-        let Ok(items) = r else { continue };
-        for item in items {
-            if seen.insert(item.id) {
-                all_albums.push((item, filter));
-            }
-        }
-    }
+    let all_albums = merge_tidal_artist_album_filters([
+        (albums_res.unwrap_or_default(), "ALBUMS"),
+        (eps_res.unwrap_or_default(), "EPSANDSINGLES"),
+        (comps_res.unwrap_or_default(), "COMPILATIONS"),
+        (live_res.unwrap_or_default(), "LIVE"),
+    ]);
 
     let tidal_album_ids: Vec<i64> = all_albums.iter().map(|(a, _)| a.id).collect();
     let known_map = {
@@ -11254,43 +11354,41 @@ async fn tidal_artist_profile(
         tokens.access_token.clone(),
         tokens.country_code.clone(),
     );
-    let (top_tracks_page, albums_page) = match tokio::try_join!(
-        client.get_artist_top_tracks(tidal_artist_id, 10, 0),
-        client.get_artist_albums(tidal_artist_id, 50, 0, Some("ALBUMS")),
-    ) {
-        Ok(pair) => pair,
-        Err(e) if error_looks_like_auth(&e) => {
-            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
-                .await
-                .map_err(|re| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
-                    )
-                })?;
-            let retry_client = TidalClient::with_http(
-                tidal_http_client.clone(),
-                refreshed.access_token.clone(),
-                refreshed.country_code.clone(),
-            );
-            tokio::try_join!(
-                retry_client.get_artist_top_tracks(tidal_artist_id, 10, 0),
-                retry_client.get_artist_albums(tidal_artist_id, 50, 0, Some("ALBUMS")),
-            )
-            .map_err(|e2| {
-                (
+    let (top_tracks_page, albums) =
+        match fetch_tidal_artist_profile_catalog(&client, tidal_artist_id).await {
+            Ok(catalog) => catalog,
+            Err(e) if error_looks_like_auth(&e) => {
+                let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+                    .await
+                    .map_err(|re| {
+                        (
+                            StatusCode::BAD_GATEWAY,
+                            Json(
+                                json!({ "error": format!("TIDAL session refresh failed: {}", re) }),
+                            ),
+                        )
+                    })?;
+                let retry_client = TidalClient::with_http(
+                    tidal_http_client.clone(),
+                    refreshed.access_token.clone(),
+                    refreshed.country_code.clone(),
+                );
+                fetch_tidal_artist_profile_catalog(&retry_client, tidal_artist_id)
+                    .await
+                    .map_err(|e2| {
+                        (
+                            StatusCode::BAD_GATEWAY,
+                            Json(json!({ "error": e2.to_string() })),
+                        )
+                    })?
+            }
+            Err(e) => {
+                return Err((
                     StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": e2.to_string() })),
-                )
-            })?
-        }
-        Err(e) => {
-            return Err((
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "error": e.to_string() })),
-            ));
-        }
-    };
+                    Json(json!({ "error": e.to_string() })),
+                ));
+            }
+        };
 
     // Fetch the artist's own profile separately so a transient failure
     // (rate-limit, 404 on the artist endpoint) doesn't kill the whole
@@ -11341,21 +11439,29 @@ async fn tidal_artist_profile(
         })
         .collect();
 
-    let albums: Vec<serde_json::Value> = albums_page
-        .items
+    let tidal_album_ids: Vec<i64> = albums.iter().map(|(a, _)| a.id).collect();
+    let known_album_map = {
+        let s = state.read().await;
+        s.db.with_conn(|conn| queries::get_known_album_tidal_ids(conn, &tidal_album_ids))
+            .unwrap_or_default()
+    };
+
+    let albums: Vec<serde_json::Value> = albums
         .iter()
-        .map(|a| {
+        .map(|(a, source_filter)| {
             let artwork_url = TidalClient::get_artwork_url(&a.cover, 320);
+            let local_id = known_album_map.get(&a.id).copied();
             json!({
                 "tidal_id": a.id,
-                "local_id": null,
+                "local_id": local_id,
                 "title": a.title,
                 "artwork_url": artwork_url,
                 "release_date": a.release_date,
                 "release_type": a.release_type,
+                "source_filter": source_filter,
                 "number_of_tracks": a.number_of_tracks,
                 "artist_name": a.artist.name,
-                "in_library": false,
+                "in_library": local_id.is_some(),
             })
         })
         .collect();
@@ -14862,6 +14968,85 @@ mod tests {
             image_url: None,
             playcount: None,
         }
+    }
+
+    fn tidal_test_album(id: i64, title: &str) -> TidalAlbum {
+        TidalAlbum {
+            id,
+            title: title.to_string(),
+            number_of_tracks: Some(1),
+            number_of_volumes: Some(1),
+            release_date: None,
+            cover: None,
+            artist: crate::services::tidal::client::TidalArtist {
+                id: 42,
+                name: "Artist".to_string(),
+                picture: None,
+                extra: HashMap::new(),
+            },
+            artists: None,
+            audio_quality: None,
+            release_type: None,
+            extra: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn tidal_artist_album_filter_merge_keeps_eps_and_dedupes_by_tidal_id() {
+        let merged = merge_tidal_artist_album_filters([
+            (
+                vec![tidal_test_album(1, "Album"), tidal_test_album(2, "Shared")],
+                "ALBUMS",
+            ),
+            (
+                vec![tidal_test_album(3, "Single"), tidal_test_album(2, "Shared")],
+                "EPSANDSINGLES",
+            ),
+            (vec![tidal_test_album(4, "Compilation")], "COMPILATIONS"),
+            (vec![tidal_test_album(5, "Live")], "LIVE"),
+        ]);
+
+        let ids: Vec<i64> = merged.iter().map(|(album, _)| album.id).collect();
+        let filters: Vec<&str> = merged.iter().map(|(_, filter)| *filter).collect();
+
+        assert_eq!(ids, vec![1, 2, 3, 4, 5]);
+        assert_eq!(
+            filters,
+            vec!["ALBUMS", "ALBUMS", "EPSANDSINGLES", "COMPILATIONS", "LIVE"]
+        );
+    }
+
+    #[test]
+    fn tidal_artist_release_filter_only_downgrades_missing_bucket_errors() {
+        let missing = resolve_tidal_artist_release_filter(
+            Err(anyhow::anyhow!(
+                "TIDAL API error 404 Not Found: {{\"status\":404,\"subStatus\":2001,\"userMessage\":\"Resource not found\"}}"
+            )),
+            67003046,
+            "LIVE",
+        )
+        .expect("missing release filters should be treated as empty");
+        assert!(missing.is_empty());
+
+        let auth_error = resolve_tidal_artist_release_filter(
+            Err(anyhow::anyhow!(
+                "TIDAL API error 401 Unauthorized: {{\"status\":401}}"
+            )),
+            67003046,
+            "ALBUMS",
+        )
+        .expect_err("auth errors must not be swallowed as empty release filters");
+        assert!(error_looks_like_auth(&auth_error));
+
+        let rate_error = resolve_tidal_artist_release_filter(
+            Err(anyhow::anyhow!(
+                "TIDAL API error 429 Too Many Requests: rate limit"
+            )),
+            67003046,
+            "EPSANDSINGLES",
+        )
+        .expect_err("rate limit errors must not be swallowed as empty release filters");
+        assert!(rate_error.to_string().contains("429"));
     }
 
     #[test]

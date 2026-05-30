@@ -11,6 +11,14 @@
 	import ChartMural, { type ChartMuralItem } from '$lib/components/charts/ChartMural.svelte';
 	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import {
+		recommendationActionLabel,
+		recommendationEntity,
+		recommendationHrefFromSearch,
+		recommendationKnownHref,
+		recommendationSearchHref,
+		recommendationSearchQuery,
+	} from '$lib/components/home/recommendation_navigation';
 	import { playChartTidalTrack, playChartTidalTracks } from '$lib/player/play_trending';
 	import { playTrackNow } from '$lib/stores/player';
 
@@ -86,7 +94,7 @@
 	}
 
 	function itemEntity(item: ProviderRecommendationItem): string {
-		return item.entity_type ?? 'track';
+		return recommendationEntity(item);
 	}
 
 	function isTrackShelf(shelf: ProviderRecommendationShelf): boolean {
@@ -178,12 +186,6 @@
 		};
 	}
 
-	function itemActionLabel(item: ProviderRecommendationItem): string {
-		if (item.local_track_id) return 'Play';
-		if ((item.tidal_id ?? 0) > 0) return 'Play from TIDAL';
-		return 'Resolve on TIDAL';
-	}
-
 	function selectItem(shelf: ProviderRecommendationShelf, index: number) {
 		currentIndexes = { ...currentIndexes, [shelfKey(shelf)]: index };
 	}
@@ -198,7 +200,14 @@
 
 	async function playItem(shelf: ProviderRecommendationShelf, item: ProviderRecommendationItem, index: number) {
 		if (itemEntity(item) !== 'track') {
-			await openRecommendationItem(item);
+			const key = itemKey(shelf, item, index);
+			const needsResolution = !recommendationKnownHref(item);
+			if (needsResolution) resolvingItems = { ...resolvingItems, [key]: true };
+			try {
+				await openRecommendationItem(item);
+			} finally {
+				if (needsResolution) resolvingItems = { ...resolvingItems, [key]: false };
+			}
 			return;
 		}
 		if (item.local_track_id) {
@@ -228,24 +237,21 @@
 
 	async function openRecommendationItem(item: ProviderRecommendationItem) {
 		const entity = itemEntity(item);
-		if (entity === 'artist') {
-			if (item.local_artist_id) return goto(`/artists/${item.local_artist_id}`);
-			if (item.tidal_artist_id) return goto(`/tidal/artists/${item.tidal_artist_id}`);
-			return goto(`/search?q=${encodeURIComponent(item.title)}`);
+		if (entity !== 'artist' && entity !== 'album') return;
+		const knownHref = recommendationKnownHref(item);
+		if (knownHref) return goto(knownHref);
+		try {
+			const results = await api.searchTidal(recommendationSearchQuery(item), 5);
+			const resolvedHref = recommendationHrefFromSearch(item, results);
+			if (resolvedHref) return goto(resolvedHref);
+		} catch {
+			// Search route fallback keeps the user moving when TIDAL lookup fails.
 		}
-		if (entity === 'album') {
-			if (item.local_album_id) return goto(`/albums/${item.local_album_id}`);
-			if (item.tidal_album_id) return goto(`/tidal/albums/${item.tidal_album_id}`);
-			const query = [item.artist_name, item.title].filter(Boolean).join(' ');
-			return goto(`/search?q=${encodeURIComponent(query)}`);
-		}
+		return goto(recommendationSearchHref(item));
 	}
 
 	function actionLabel(item: ProviderRecommendationItem): string {
-		const entity = itemEntity(item);
-		if (entity === 'artist') return item.local_artist_id || item.tidal_artist_id ? 'Open artist' : 'Search artist';
-		if (entity === 'album') return item.local_album_id || item.tidal_album_id ? 'Open album' : 'Search album';
-		return itemActionLabel(item);
+		return recommendationActionLabel(item);
 	}
 
 	function shelfSubtitle(shelf: ProviderRecommendationShelf): string {
