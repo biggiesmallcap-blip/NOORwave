@@ -9,7 +9,7 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -44,6 +44,7 @@ const DROP_PREVIEW_FINAL_WINDOW_GUARD_MS: i64 = 45_000;
 #[cfg(test)]
 const DJ_READY_PAIR_PLANNING_RETRY_SECS: u64 = 15;
 const DJ_PROFILE_REBUILD_FAILURE_TTL_SECS: u64 = 300;
+const DJ_PROFILE_AUTO_REBUILD_MAX_ACTIVE: usize = 2;
 const DJ_PROFILE_ANALYSIS_TIDAL_QUALITIES: [&str; 2] = ["LOW", "LOSSLESS"];
 const MAX_MANUAL_DROP_MARKERS: usize = 16;
 const MAX_MANUAL_DROP_MARKER_MS: i64 = 30 * 60 * 1_000;
@@ -57,6 +58,7 @@ static READY_PAIR_PLANNING_ATTEMPTS: OnceLock<Mutex<HashMap<ReadyPairPlanningKey
     OnceLock::new();
 static DJ_PROFILE_REBUILD_FAILURES: OnceLock<Mutex<HashMap<String, DjProfileRebuildFailure>>> =
     OnceLock::new();
+static DJ_PROFILE_AUTO_REBUILD_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 pub fn routes() -> Router<SharedState> {
     Router::new()
@@ -607,7 +609,7 @@ async fn get_status(
 
 pub(super) async fn queue_missing_dj_profiles_for_current_pair(
     state: SharedState,
-) -> Result<(), StatusCode> {
+) -> Result<usize, StatusCode> {
     let missing_profile_refs = {
         let state_guard = state.read().await;
         let ephemeral_labels = super::active_ephemeral_tidal_mix_dj_labels(&state_guard);
@@ -617,38 +619,45 @@ pub(super) async fn queue_missing_dj_profiles_for_current_pair(
                 if !queries::is_dj_engine_enabled(conn)? {
                     return Ok(Vec::new());
                 }
-                if foreground_playback_is_active(conn, &state_guard)? {
-                    tracing::debug!(
-                        "Deferring DJ profile rebuilds while foreground playback is active"
-                    );
-                    return Ok(Vec::new());
-                }
                 let pair = super::active_dj_pair_for_state_and_conn(&state_guard, conn)?;
-                let mut missing = Vec::new();
-                for media_ref in [pair.current, pair.next].into_iter().flatten() {
-                    let key = media_ref.profile_key();
-                    let label = ephemeral_labels
-                        .iter()
-                        .find(|(candidate, _)| candidate == &key)
-                        .map(|(_, label)| label);
-                    let inflight_key = dj_profile_inflight_key(&key);
-                    let rebuild_inflight = dj_profile_rebuild_is_inflight(
-                        &state_guard.dj_profile_rebuild_inflight,
-                        &inflight_key,
-                    );
-                    let deck = deck_status(conn, &media_ref, label, rebuild_inflight)?;
-                    if deck_needs_profile_rebuild(&deck) {
-                        missing.push(media_ref);
-                    }
-                }
-                Ok(missing)
+                missing_dj_profile_refs_for_pair(
+                    conn,
+                    pair,
+                    &ephemeral_labels,
+                    &state_guard.dj_profile_rebuild_inflight,
+                )
             })
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
+    let mut attempted = 0usize;
     for media_ref in missing_profile_refs {
-        queue_tidal_profile_rebuild_if_idle(state.clone(), media_ref).await?;
+        queue_profile_rebuild_if_idle(state.clone(), media_ref).await?;
+        attempted += 1;
     }
-    Ok(())
+    Ok(attempted)
+}
+
+fn missing_dj_profile_refs_for_pair(
+    conn: &rusqlite::Connection,
+    pair: crate::playback::dj_lookahead::DjLookaheadPair,
+    ephemeral_labels: &[(AudioDjProfileKey, (String, Option<String>))],
+    inflight: &Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+) -> anyhow::Result<Vec<DjMediaRef>> {
+    let mut missing = Vec::new();
+    for media_ref in [pair.current, pair.next].into_iter().flatten() {
+        let key = media_ref.profile_key();
+        let label = ephemeral_labels
+            .iter()
+            .find(|(candidate, _)| candidate == &key)
+            .map(|(_, label)| label);
+        let inflight_key = dj_profile_inflight_key(&key);
+        let rebuild_inflight = dj_profile_rebuild_is_inflight(inflight, &inflight_key);
+        let deck = deck_status(conn, &media_ref, label, rebuild_inflight)?;
+        if deck_needs_profile_rebuild(&deck) {
+            missing.push(media_ref);
+        }
+    }
+    Ok(missing)
 }
 
 #[cfg(test)]
@@ -889,6 +898,25 @@ async fn queue_tidal_profile_rebuild(
             });
         }
     }
+    let auto_slot = if force {
+        None
+    } else {
+        match try_claim_auto_dj_profile_rebuild_slot() {
+            Some(slot) => Some(slot),
+            None => {
+                tracing::debug!(
+                    media_ref_kind = %media_key.media_ref_kind,
+                    media_ref_id = %media_key.media_ref_id,
+                    max_active = DJ_PROFILE_AUTO_REBUILD_MAX_ACTIVE,
+                    "Skipping automatic DJ profile rebuild: active rebuild limit reached"
+                );
+                return Ok(RebuildDjProfileResponse {
+                    accepted: false,
+                    status: "busy".to_string(),
+                });
+            }
+        }
+    };
     let inflight_key = dj_profile_inflight_key(&media_key);
     let inflight = {
         let state_guard = state.read().await;
@@ -966,7 +994,9 @@ async fn queue_tidal_profile_rebuild(
     let failure_key = inflight_key.clone();
     let retry_runtime = tokio::runtime::Handle::current();
     let retry_state = state.clone();
+    let auto_slot_for_decode = auto_slot;
     tokio::task::spawn_blocking(move || {
+        let _auto_slot = auto_slot_for_decode;
         let mut last_error = None;
         let mut decoded = false;
         for (attempt_index, request) in requests.into_iter().enumerate() {
@@ -1033,6 +1063,47 @@ async fn queue_tidal_profile_rebuild(
     })
 }
 
+#[must_use]
+struct AutoDjProfileRebuildSlot {
+    counter: &'static AtomicUsize,
+}
+
+impl Drop for AutoDjProfileRebuildSlot {
+    fn drop(&mut self) {
+        release_auto_dj_profile_rebuild_slot(self.counter);
+    }
+}
+
+fn try_claim_auto_dj_profile_rebuild_slot() -> Option<AutoDjProfileRebuildSlot> {
+    try_claim_auto_dj_profile_rebuild_slot_from(
+        &DJ_PROFILE_AUTO_REBUILD_ACTIVE,
+        DJ_PROFILE_AUTO_REBUILD_MAX_ACTIVE,
+    )
+}
+
+fn try_claim_auto_dj_profile_rebuild_slot_from(
+    counter: &'static AtomicUsize,
+    max_active: usize,
+) -> Option<AutoDjProfileRebuildSlot> {
+    let mut active = counter.load(Ordering::Acquire);
+    loop {
+        if active >= max_active {
+            return None;
+        }
+        match counter.compare_exchange_weak(active, active + 1, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => return Some(AutoDjProfileRebuildSlot { counter }),
+            Err(actual) => active = actual,
+        }
+    }
+}
+
+fn release_auto_dj_profile_rebuild_slot(counter: &AtomicUsize) {
+    let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+        active.checked_sub(1)
+    });
+}
+
 fn dj_profile_analysis_stream_requests(tidal_id: i64) -> Vec<tidal_stream::StreamRequest> {
     DJ_PROFILE_ANALYSIS_TIDAL_QUALITIES
         .iter()
@@ -1069,19 +1140,51 @@ fn dj_profile_rebuild_shared(track_id: i64, generation: u64) -> Arc<PlaybackShar
     ))
 }
 
-async fn queue_tidal_profile_rebuild_if_idle(
+async fn queue_profile_rebuild_if_idle(
     state: SharedState,
     media_ref: DjMediaRef,
 ) -> Result<(), StatusCode> {
+    let key = media_ref.profile_key();
+    if let Some(status) = unsupported_auto_profile_rebuild_status(&media_ref) {
+        tracing::info!(
+            media_ref_kind = %key.media_ref_kind,
+            media_ref_id = %key.media_ref_id,
+            status,
+            "Skipping automatic DJ profile rebuild for unsupported media ref"
+        );
+        return Ok(());
+    }
     let dj_analysis_tx = {
         let state_guard = state.read().await;
         state_guard.dj_analysis_tx.clone()
     };
     let Some(dj_analysis_tx) = dj_analysis_tx else {
+        tracing::debug!(
+            media_ref_kind = %key.media_ref_kind,
+            media_ref_id = %key.media_ref_id,
+            "Skipping automatic DJ profile rebuild: analysis actor unavailable"
+        );
         return Ok(());
     };
-    let _ = queue_tidal_profile_rebuild(state, media_ref, dj_analysis_tx, false).await?;
+    let response = queue_tidal_profile_rebuild(state, media_ref, dj_analysis_tx, false).await?;
+    if !response.accepted {
+        tracing::debug!(
+            media_ref_kind = %key.media_ref_kind,
+            media_ref_id = %key.media_ref_id,
+            status = %response.status,
+            "Automatic DJ profile rebuild skipped"
+        );
+    }
     Ok(())
+}
+
+fn unsupported_auto_profile_rebuild_status(media_ref: &DjMediaRef) -> Option<&'static str> {
+    match media_ref {
+        DjMediaRef::TidalTrack { .. } => None,
+        DjMediaRef::LibraryTrack { .. } | DjMediaRef::PendingQueueItem { .. } => {
+            Some("source_unavailable")
+        }
+    }
 }
 
 fn mark_dj_profile_rebuild_inflight(
@@ -1103,20 +1206,6 @@ fn mark_dj_profile_rebuild_inflight(
 
 fn dj_profile_inflight_key(key: &AudioDjProfileKey) -> String {
     format!("{}:{}", key.media_ref_kind, key.media_ref_id)
-}
-
-fn foreground_playback_is_active(
-    conn: &rusqlite::Connection,
-    state: &crate::AppState,
-) -> anyhow::Result<bool> {
-    let is_playing = player::load_state(conn)?.is_playing;
-    let runtime_present = state.playback_runtime.is_some();
-    Ok(
-        crate::services::audio_analysis::should_defer_background_analysis_for_active_playback(
-            is_playing,
-            runtime_present,
-        ),
-    )
 }
 
 fn deck_needs_profile_rebuild(deck: &DjDeckStatus) -> bool {
@@ -2696,6 +2785,8 @@ mod tests {
     use super::*;
     use crate::services::audio_analysis::dj_profile::{DJ_PROFILE_VERSION, encode_f32_blob};
 
+    static TEST_AUTO_REBUILD_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
     fn test_profile_row(key: &AudioDjProfileKey, version: &str) -> AudioDjProfileRow {
         AudioDjProfileRow {
             media_ref_kind: key.media_ref_kind.clone(),
@@ -2761,6 +2852,106 @@ mod tests {
             passive_analysis_reason: None,
             safe_crossfade_only: false,
         }
+    }
+
+    fn fresh_test_state_with_dj_tx(
+        db: crate::db::Database,
+        dj_analysis_tx: Option<
+            tokio::sync::mpsc::UnboundedSender<
+                crate::services::audio_analysis::dj_profile::DjAnalysisJob,
+            >,
+        >,
+    ) -> SharedState {
+        let (event_tx, _) = tokio::sync::broadcast::channel(16);
+        #[cfg(feature = "spotify-public")]
+        let spotify_public = std::sync::Arc::new(
+            crate::services::spotify_public::SpotifyPublicClient::new(db.clone())
+                .expect("SpotifyPublicClient::new must succeed in tests"),
+        );
+        std::sync::Arc::new(tokio::sync::RwLock::new(crate::AppState {
+            db,
+            event_tx,
+            http_client: reqwest::Client::new(),
+            tidal_http_client: reqwest::Client::new(),
+            tidal_tokens: None,
+            tidal_mixes_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            tidal_radio_stations_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            tidal_moods_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            tidal_page_modules_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            tidal_playlist_tracks_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            lastfm_similar_cache: crate::services::radio::new_lastfm_similar_cache(),
+            spotify_tokens: None,
+            playback_runtime: None,
+            playback_runtime_info: None,
+            playback_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            current_stream_display: None,
+            pending_stream_display: None,
+            next_prebuffer_inflight: None,
+            last_drop_preview: None,
+            active_listen_session: None,
+            live_listen_session: None,
+            external_playback_track: None,
+            ephemeral_tidal_track: None,
+            tidal_login_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            rss_aggregator: std::sync::Arc::new(crate::services::rss_feeds::FeedAggregator::new(
+                reqwest::Client::new(),
+            )),
+            acrcloud_client: None,
+            analysis_tx: None,
+            dj_analysis_tx,
+            dj_profile_rebuild_inflight: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            audio_analysis_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            audio_analysis_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            acrcloud_scan_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            acrcloud_daily_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            spotify_enrich_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            spotify_enrich_total: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            spotify_enrich_processed: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            lastfm_enrich_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            lastfm_enrich_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            musicbrainz_enrich_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
+            tidal_sync_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tidal_sync_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            lastfm_enrich_total: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            lastfm_enrich_processed: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            lastfm_prefetch_total: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            lastfm_prefetch_done: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            lastfm_enrich_started_at: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            discovery_train_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            radio_similarity_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
+            refreshed_seeds: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            embedding_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            master_key: crate::services::crypto::MasterKey::load_or_generate(
+                &std::env::temp_dir().join(format!("noor-test-key-{}", uuid::Uuid::new_v4())),
+            )
+            .expect("test master key"),
+            pending_tidal_mix_queue: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
+            prepared_ephemeral_tidal_next: None,
+            lastfm_api_secret: None,
+            server_token: String::new(),
+            audio_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            user_cleared_at: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            #[cfg(feature = "spotify-public")]
+            spotify_public,
+            sportify_client: None,
+            sportify_cache_config: crate::services::sportify::cache::SportifyCacheConfig::default(),
+            sportify_resolve_config:
+                crate::services::sportify::cache::SportifyResolveConfig::default(),
+        }))
     }
 
     fn seed_dsp_key(conn: &rusqlite::Connection, track_id: i64, camelot_key: &str) {
@@ -2947,6 +3138,153 @@ mod tests {
         assert_eq!(deck.waveform_status, "missing");
         assert!(deck.waveform_peaks.is_empty());
         assert!(deck_needs_profile_rebuild(&deck));
+    }
+
+    #[tokio::test]
+    async fn queue_missing_profiles_for_current_pair_runs_while_playing() {
+        let db = crate::db::Database::open_in_memory().expect("db");
+        db.run_migrations().expect("migrations");
+        db.with_conn(|conn| {
+            queries::set_dj_engine_enabled(conn, true)?;
+            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, tidal_id) VALUES (1, 'Current', 1, 111)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, tidal_id) VALUES (2, 'Incoming', 1, 222)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (id, track_id, position, source) VALUES (10, 1, 0, 'user')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (id, track_id, position, source) VALUES (11, 2, 1, 'user')",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE playback_state
+                 SET current_track_id = 1, current_queue_item_id = 10, is_playing = 1
+                 WHERE id = 1",
+                [],
+            )?;
+            queries::upsert_audio_dj_profile(
+                conn,
+                &test_profile_row(
+                    &DjMediaRef::TidalTrack {
+                        tidal_id: 111,
+                        track_id: Some(1),
+                    }
+                    .profile_key(),
+                    DJ_PROFILE_VERSION,
+                ),
+            )?;
+            Ok(())
+        })
+        .expect("seeded");
+        let (dj_tx, _dj_rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = fresh_test_state_with_dj_tx(db, Some(dj_tx));
+
+        let attempted = queue_missing_dj_profiles_for_current_pair(state)
+            .await
+            .expect("queue missing profiles");
+
+        assert_eq!(attempted, 1);
+    }
+
+    #[test]
+    fn missing_profile_refs_include_incoming_while_playback_is_active() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        let current = DjMediaRef::TidalTrack {
+            tidal_id: 111,
+            track_id: Some(1),
+        };
+        let incoming = DjMediaRef::TidalTrack {
+            tidal_id: 222,
+            track_id: Some(2),
+        };
+        queries::upsert_audio_dj_profile(
+            &conn,
+            &test_profile_row(&current.profile_key(), DJ_PROFILE_VERSION),
+        )
+        .expect("current profile");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("artist");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, tidal_id) VALUES (1, 'Current', 1, 111)",
+            [],
+        )
+        .expect("current track");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, tidal_id) VALUES (2, 'Incoming', 1, 222)",
+            [],
+        )
+        .expect("incoming track");
+        conn.execute(
+            "UPDATE playback_state SET current_track_id = 1, is_playing = 1 WHERE id = 1",
+            [],
+        )
+        .expect("active playback");
+
+        let pair = crate::playback::dj_lookahead::DjLookaheadPair {
+            current: Some(current),
+            next: Some(incoming.clone()),
+            current_queue_item_id: Some(10),
+            next_queue_item_id: Some(11),
+            queue_generation: 7,
+        };
+        let inflight = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+
+        let missing = missing_dj_profile_refs_for_pair(&conn, pair, &[], &inflight)
+            .expect("missing profile refs");
+
+        assert_eq!(missing, vec![incoming]);
+    }
+
+    #[test]
+    fn automatic_profile_rebuild_slots_are_bounded_and_released() {
+        TEST_AUTO_REBUILD_ACTIVE.store(0, Ordering::Release);
+
+        let first = try_claim_auto_dj_profile_rebuild_slot_from(&TEST_AUTO_REBUILD_ACTIVE, 2)
+            .expect("first slot");
+        let second = try_claim_auto_dj_profile_rebuild_slot_from(&TEST_AUTO_REBUILD_ACTIVE, 2)
+            .expect("second slot");
+
+        assert!(
+            try_claim_auto_dj_profile_rebuild_slot_from(&TEST_AUTO_REBUILD_ACTIVE, 2).is_none()
+        );
+        drop(first);
+        let replacement = try_claim_auto_dj_profile_rebuild_slot_from(&TEST_AUTO_REBUILD_ACTIVE, 2)
+            .expect("released slot");
+        drop(second);
+        drop(replacement);
+        assert_eq!(TEST_AUTO_REBUILD_ACTIVE.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn automatic_profile_rebuild_supports_only_tidal_refs_explicitly() {
+        assert_eq!(
+            unsupported_auto_profile_rebuild_status(&DjMediaRef::LibraryTrack { track_id: 1 }),
+            Some("source_unavailable")
+        );
+        assert_eq!(
+            unsupported_auto_profile_rebuild_status(&DjMediaRef::PendingQueueItem {
+                queue_item_id: 44,
+                pending_artist: "Artist".to_string(),
+                pending_title: "Title".to_string(),
+                tidal_id_hint: None,
+            }),
+            Some("source_unavailable")
+        );
+        assert_eq!(
+            unsupported_auto_profile_rebuild_status(&DjMediaRef::TidalTrack {
+                tidal_id: 111,
+                track_id: Some(1),
+            }),
+            None
+        );
     }
 
     #[test]
