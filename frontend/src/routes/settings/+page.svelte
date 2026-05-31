@@ -53,6 +53,11 @@
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
 	import IntegrationsPanel from '$lib/components/settings/IntegrationsPanel.svelte';
+	import {
+		discoveryLastTrainedAt,
+		shouldContinueDiscoveryCompletionRefresh,
+		shouldRefreshAfterTerminalDiscoveryProgress
+	} from '$lib/components/settings/discovery_status';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
 	import { WALLPAPERS, type WallpaperOption } from '$lib/components/wallpaper/shaders';
 	import {
@@ -78,6 +83,8 @@
 	const SERVER_UNREACHABLE_MESSAGE =
 		'NOOR cannot reach the local server on port 3334, so it cannot verify your current TIDAL session.';
 	const APP_VERSION = String(import.meta.env.NOOR_APP_VERSION ?? '0.0.0');
+	const DISCOVERY_COMPLETION_REFRESH_DELAY_MS = 1000;
+	const DISCOVERY_COMPLETION_REFRESH_MAX_ATTEMPTS = 12;
 	type BadgeTone = 'default' | 'active' | 'success' | 'warning' | 'error' | 'muted';
 
 	let serverStatus = $state<'checking' | 'online' | 'offline'>('checking');
@@ -104,6 +111,7 @@
 	let mbStats = $state<MusicBrainzStatus | null>(null);
 	let portableSnapshot = $state<PortableMusicBrainzSnapshotStatus | null>(null);
 	let discoveryStatus = $state<DiscoveryStatus | null>(null);
+	let discoveryStatusLastTrainedAt = $derived(discoveryLastTrainedAt(discoveryStatus));
 	let portableAction = $state<'export' | 'import' | null>(null);
 	let portableStatusLabel = $state('');
 	let galaxyRefreshLabel = $state('');
@@ -330,6 +338,37 @@
 		const discoveryTrainingPoll = setInterval(() => {
 			if (discoveryIsRunning) void loadDiscoveryStatus();
 		}, 3000);
+		let discoveryCompletionRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+		let discoveryCompletionRefreshAttempts = 0;
+		const clearDiscoveryCompletionRefresh = () => {
+			if (discoveryCompletionRefreshTimer) clearTimeout(discoveryCompletionRefreshTimer);
+			discoveryCompletionRefreshTimer = null;
+		};
+		const scheduleDiscoveryCompletionRefresh = () => {
+			clearDiscoveryCompletionRefresh();
+			discoveryCompletionRefreshAttempts = 0;
+			const refreshUntilFinished = async () => {
+				discoveryCompletionRefreshTimer = null;
+				discoveryCompletionRefreshAttempts += 1;
+				await loadDiscoveryStatus();
+				if (componentUnmounted) return;
+				if (
+					!shouldContinueDiscoveryCompletionRefresh(
+						discoveryStatus,
+						discoveryCompletionRefreshAttempts,
+						DISCOVERY_COMPLETION_REFRESH_MAX_ATTEMPTS
+					)
+				) return;
+				discoveryCompletionRefreshTimer = setTimeout(
+					refreshUntilFinished,
+					DISCOVERY_COMPLETION_REFRESH_DELAY_MS
+				);
+			};
+			discoveryCompletionRefreshTimer = setTimeout(
+				refreshUntilFinished,
+				DISCOVERY_COMPLETION_REFRESH_DELAY_MS
+			);
+		};
 		wsUnsubscribe = wsMessages.subscribe((messages) => {
 			const latest = messages.at(-1);
 			if (!latest) return;
@@ -367,17 +406,20 @@
 				void loadLastfmStatus();
 			}
 
-			if (latest.type === 'training_progress' && discoveryStatus?.latest_run) {
-				discoveryStatus = {
-					...discoveryStatus,
-					latest_run: {
-						...discoveryStatus.latest_run,
-						progress: typeof latest.progress === 'number' ? latest.progress : discoveryStatus.latest_run.progress,
-						stage: typeof latest.stage === 'string' ? latest.stage : discoveryStatus.latest_run.stage,
-						items_done: typeof latest.tracks_done === 'number' ? latest.tracks_done : discoveryStatus.latest_run.items_done,
-						items_total: typeof latest.tracks_total === 'number' ? latest.tracks_total : discoveryStatus.latest_run.items_total,
-					}
-				};
+			if (latest.type === 'training_progress') {
+				if (discoveryStatus?.latest_run) {
+					discoveryStatus = {
+						...discoveryStatus,
+						latest_run: {
+							...discoveryStatus.latest_run,
+							progress: typeof latest.progress === 'number' ? latest.progress : discoveryStatus.latest_run.progress,
+							stage: typeof latest.stage === 'string' ? latest.stage : discoveryStatus.latest_run.stage,
+							items_done: typeof latest.tracks_done === 'number' ? latest.tracks_done : discoveryStatus.latest_run.items_done,
+							items_total: typeof latest.tracks_total === 'number' ? latest.tracks_total : discoveryStatus.latest_run.items_total,
+						}
+					};
+				}
+				if (shouldRefreshAfterTerminalDiscoveryProgress(latest)) scheduleDiscoveryCompletionRefresh();
 			}
 
 			if (
@@ -422,6 +464,7 @@
 		serverToken = getStoredToken() ?? '';
 		return () => {
 			if (mbPollTimer) clearInterval(mbPollTimer);
+			clearDiscoveryCompletionRefresh();
 			clearInterval(discoveryTrainingPoll);
 			clearInterval(tick);
 			wsUnsubscribe?.();
@@ -2587,7 +2630,7 @@
 						</div>
 						<div class="info-row">
 							<span>Last trained</span>
-							<strong>{discoveryStatus?.active_model?.trained_at ? new Date(discoveryStatus.active_model.trained_at + 'Z').toLocaleString() : '—'}</strong>
+							<strong>{discoveryStatusLastTrainedAt ? new Date(discoveryStatusLastTrainedAt + 'Z').toLocaleString() : '—'}</strong>
 						</div>
 						<div class="info-row">
 							<span>Clip features</span>
