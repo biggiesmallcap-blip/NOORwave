@@ -31,7 +31,7 @@ describe('album page layout contracts', () => {
 	});
 
 	test('loads album Spotify stats and passes album track world plays to TrackRow', () => {
-		expect(source).toContain('api.getAlbumSpotifyStats');
+		expect(source).toContain('cachedApi.getAlbumSpotifyStats');
 		expect(source).not.toContain('api.getArtistSpotifyStats');
 		expect(source).toContain('playcountByIsrc');
 		expect(source).toContain('worldPlayCount={track.isrc ? playcountByIsrc.get(track.isrc) : null}');

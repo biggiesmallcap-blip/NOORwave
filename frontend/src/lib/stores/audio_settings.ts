@@ -1,5 +1,6 @@
 import { writable, get } from 'svelte/store';
 import { api, type AudioSettings } from '$lib/api/client';
+import { cachedApi, cacheKeys, seedCachedValue } from '$lib/cache/api_queries';
 import { refreshPlaybackRuntime } from '$lib/stores/player';
 
 export interface AudioSettingsState {
@@ -24,7 +25,7 @@ function createStore() {
 		async load() {
 			update((s) => ({ ...s, loading: true, error: null }));
 			try {
-				const settings = await api.getAudioSettings();
+				const settings = await cachedApi.getAudioSettings();
 				update((s) => ({ ...s, settings, loading: false }));
 			} catch (err) {
 				update((s) => ({
@@ -53,6 +54,7 @@ function createStore() {
 			update((s) => ({ ...s, settings: next, error: null, pendingApply: isLiveApplyChange }));
 			try {
 				const saved = await api.updateAudioSettings(next);
+				seedCachedValue(cacheKeys.settings.audioSettings(), saved);
 				update((s) => ({ ...s, settings: saved, pendingApply: false }));
 				if (qualityChanged) {
 					void refreshPlaybackRuntime();

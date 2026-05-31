@@ -27,7 +27,7 @@ describe('search layout contracts', () => {
 	test('search page renders local results before external providers finish', () => {
 		expect(source).toContain('let searchGeneration = $state(0)');
 		expect(source).toContain('}, 120)');
-		expect(source).toContain('const localPromise = api.search(q, SEARCH_PAGE_SIZE)');
+		expect(source).toContain('const localPromise = cachedApi.search(q, SEARCH_PAGE_SIZE)');
 		expect(source).toContain('void localPromise.then((localResults) => {');
 		expect(source).toContain('if (!isCurrentSearch(q, generation, signal)) return');
 		expect(source).toContain('void tracksPromise.then((tidalResults) => {');

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { api, type Track, type GenreHeat } from '$lib/api/client';
+	import { cachedApi } from '$lib/cache/api_queries';
 	import { playTrackNow, setPlayerAutomixEnabled, setPlayerShuffleMode } from '$lib/stores/player';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
@@ -213,7 +214,7 @@
 		loading = true;
 		error = null;
 		try {
-			const response = await api.getGenreTracks(node.id, true);
+			const response = await cachedApi.getGenreTracks(node.id, true);
 			tracks = response.tracks;
 			buildArtistGalaxy(tracks);
 		} catch (reason) {

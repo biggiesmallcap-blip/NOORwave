@@ -1,16 +1,16 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import type { Unsubscriber } from 'svelte/store';
 	import type { Snapshot } from './$types';
 	import {
-		api,
 		type RSSFeedItem,
 	} from '$lib/api/client';
+	import { cachedApi } from '$lib/cache/api_queries';
 	import YourMixesShelf from '$lib/components/home/YourMixesShelf.svelte';
 	import PersonalRadioShelf from '$lib/components/home/PersonalRadioShelf.svelte';
 	import HomeRecommendationsShelf from '$lib/components/home/HomeRecommendationsShelf.svelte';
 	import HomeMoodsRail from '$lib/components/home/HomeMoodsRail.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
-	import TrendingCard from '$lib/components/TrendingCard.svelte';
 
 	// Home page data
 	let articles = $state<RSSFeedItem[]>([]);
@@ -22,16 +22,35 @@
 		articles: true,
 		news: true
 	});
+	let homeUnsubscribers: Unsubscriber[] = [];
 
 	onMount(() => {
-		void loadHome();
+		const articlesQuery = cachedApi.homeArticlesQuery();
+		const newsQuery = cachedApi.homeNewsQuery();
+		homeUnsubscribers = [
+			articlesQuery.subscribe((state) => {
+				if (state.data) articles = state.data.articles ?? articles;
+				sectionsLoading.articles = state.loading;
+				if (state.error && !state.data) console.error('Failed to load articles:', state.error);
+			}),
+			newsQuery.subscribe((state) => {
+				if (state.data) news = state.data.news ?? news;
+				sectionsLoading.news = state.loading;
+				if (state.error && !state.data) console.error('Failed to load news:', state.error);
+			}),
+		];
+		return () => {
+			for (const unsubscribe of homeUnsubscribers) unsubscribe();
+			homeUnsubscribers = [];
+		};
 	});
 
 	async function loadHome() {
 		error = null;
 		// Load all sections in parallel — each handles its own error state.
-		loadArticles();
-		loadNews();
+		const articlesQuery = cachedApi.homeArticlesQuery();
+		const newsQuery = cachedApi.homeNewsQuery();
+		await Promise.allSettled([articlesQuery.refresh(), newsQuery.refresh()]);
 	}
 
 	// Phase 5B — back/forward state via SvelteKit snapshot
@@ -43,32 +62,6 @@
 			requestAnimationFrame(() => window.scrollTo({ top: saved.scrollY, behavior: 'auto' }));
 		}
 	};
-
-	async function loadArticles() {
-		sectionsLoading.articles = true;
-		try {
-			const data = await api.getHomeArticles();
-			articles = data.articles ?? [];
-		} catch (e) {
-			console.error('Failed to load articles:', e);
-			articles = [];
-		} finally {
-			sectionsLoading.articles = false;
-		}
-	}
-
-	async function loadNews() {
-		sectionsLoading.news = true;
-		try {
-			const data = await api.getHomeNews();
-			news = data.news ?? [];
-		} catch (e) {
-			console.error('Failed to load news:', e);
-			news = [];
-		} finally {
-			sectionsLoading.news = false;
-		}
-	}
 
 	function formatDate(dateStr: string | null): string {
 		if (!dateStr) return '';

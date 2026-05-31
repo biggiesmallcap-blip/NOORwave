@@ -1,5 +1,6 @@
 import { writable } from 'svelte/store';
 import { api } from '$lib/api/client';
+import { cachedApi } from '$lib/cache/api_queries';
 
 interface AcrCloudState {
 	connected: boolean;
@@ -42,7 +43,7 @@ export function handleAcrCloudComplete(data: { scanned: number; matches_found: n
 
 export async function loadAcrCloudStatus() {
 	try {
-		const response = await api.getAcrCloudStatus();
+		const response = await cachedApi.getAcrCloudStatus();
 		acrCloud.update((s) => ({
 			...s,
 			connected: response.connected,

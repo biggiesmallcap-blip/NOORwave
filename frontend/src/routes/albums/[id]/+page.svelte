@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import type { Snapshot } from './$types';
-	import { api, type Track, type TidalDiscographyTrack, type TidalPlayable, type SpotifyTrackStats } from '$lib/api/client';
+	import { type Track, type TidalDiscographyTrack, type TidalPlayable, type SpotifyTrackStats } from '$lib/api/client';
+	import { cachedApi } from '$lib/cache/api_queries';
 	import {
 		playAlbum,
 		playTidalAlbum,
@@ -56,7 +57,7 @@
 		loading = true;
 		error = null;
 		try {
-			const res = await api.getAlbumTracks(albumId);
+			const res = await cachedApi.getAlbumTracks(albumId);
 			tracks = res.tracks;
 			tidalOnlyTracks = res.tidal_tracks ?? [];
 			albumTidalId = res.album_tidal_id ?? null;
@@ -89,7 +90,7 @@
 	async function loadMore(artistId: number) {
 		moreLoading = true;
 		try {
-			const res = await api.getArtistTracks(artistId);
+			const res = await cachedApi.getArtistTracks(artistId);
 			artistTracks = res.tracks;
 			moreLoaded = true;
 		} catch (err) {
@@ -101,7 +102,7 @@
 
 	async function loadSpotifyStats(albumIdToLoad: number) {
 		try {
-			const stats = await api.getAlbumSpotifyStats(albumIdToLoad);
+			const stats = await cachedApi.getAlbumSpotifyStats(albumIdToLoad);
 			if (albumId === albumIdToLoad) spotifyStats = stats;
 		} catch (err) {
 			console.error('Failed to load Spotify stats', err);

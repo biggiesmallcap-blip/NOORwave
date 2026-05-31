@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount, untrack } from 'svelte';
-	import { api, ApiError, type TidalHomeModule } from '$lib/api/client';
+	import { ApiError, type TidalHomeModule } from '$lib/api/client';
+	import { cachedApi } from '$lib/cache/api_queries';
 	import { tidalStatus } from '$lib/stores/tidal';
 	import {
 		getCachedHomeModules,
@@ -33,7 +34,7 @@
 	async function load() {
 		viewState = 'loading';
 		try {
-			const data = await api.getTidalHomeModules();
+			const data = await cachedApi.getTidalHomeModules();
 			modules = data.modules ?? [];
 			if (modules.length > 0) putCachedHomeModules(modules);
 			viewState = modules.length > 0 ? 'ready' : 'empty';

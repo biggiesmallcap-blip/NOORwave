@@ -3,6 +3,7 @@
   import { goto, beforeNavigate } from '$app/navigation'
   import type { Snapshot } from './$types'
   import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type SpotifyPlaylistSearchItem, type SpotifyTrackSearchItem, type SpotifyAlbumSearchItem, type SearchResults } from '$lib/api/client'
+  import { cachedApi } from '$lib/cache/api_queries'
   import DiscoverShelves from '$lib/components/search/DiscoverShelves.svelte'
   import { buildTidalTrackMenu, buildTrackMenu } from '$lib/player/track_menu'
   import { buildAlbumMenu } from '$lib/player/album_menu'
@@ -126,9 +127,9 @@
 
   onMount(async () => {
     const [genresRes, listensRes, playlistsRes] = await Promise.allSettled([
-      api.getGenres(),
-      api.getRecentListens(20),
-      api.getPlaylists(),
+      cachedApi.getGenres(),
+      cachedApi.getRecentListens(20),
+      cachedApi.getPlaylists(),
     ])
 
     if (genresRes.status === 'fulfilled') {
@@ -268,7 +269,7 @@
           loadingSpotifyTracks = true
           loadingSpotifyAlbums = true
 
-          const localPromise = api.search(q, SEARCH_PAGE_SIZE)
+          const localPromise = cachedApi.search(q, SEARCH_PAGE_SIZE)
           const tracksPromise = cached
             ? Promise.resolve(cached)
             : api.searchTidal(q, SEARCH_PAGE_SIZE, signal, 0)
@@ -723,7 +724,7 @@
     const loaded = await Promise.allSettled(
       unique.map(async (artist) => {
         const localId = artist.local_id!
-        const res = await api.getArtistDiscography(localId)
+        const res = await cachedApi.getArtistDiscography(localId)
         const urls = [
           res.picture_url,
           ...res.albums.slice(0, 12).map((album) => album.artwork_url),

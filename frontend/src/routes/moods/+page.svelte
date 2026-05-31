@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
-  import { ApiError, api, type TidalMoodCategory } from '$lib/api/client';
+  import { ApiError, type TidalMoodCategory } from '$lib/api/client';
+  import { cachedApi } from '$lib/cache/api_queries';
   import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
   import { tidalStatus } from '$lib/stores/tidal';
   import { openContextMenu } from '$lib/stores/context_menu';
@@ -48,7 +49,7 @@
     inFlight = true;
     if (categories.length === 0) viewState = 'loading';
     try {
-      const data = await api.getTidalMoods();
+      const data = await cachedApi.getTidalMoods();
       categories = data.categories ?? [];
       if (categories.length > 0) putCompleteMoodCategories(categories);
       viewState = categories.length > 0 ? 'ready' : 'empty';

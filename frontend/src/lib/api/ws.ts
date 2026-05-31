@@ -8,6 +8,7 @@ import { handleAcrCloudProgress, handleAcrCloudComplete } from '$lib/stores/acrc
 import { handleDiscoverySpaceRefreshed, setRefreshProgress } from '$lib/components/DiscoverSpace/discover_space_store';
 import { setExclusiveEngaged, setExclusiveFailed, setExclusiveReleased } from '$lib/stores/exclusive_status';
 import { showToast } from '$lib/stores/toast';
+import { applyCacheUpdateForWsMessage, clearWsCacheTimers } from '$lib/cache/ws_events';
 
 export const wsConnected = writable(false);
 
@@ -76,6 +77,7 @@ export function connectWebSocket() {
 		try {
 			const data = JSON.parse(event.data);
 			wsMessages.update((msgs) => [...msgs.slice(-99), data]);
+			applyCacheUpdateForWsMessage(data);
 			if (data?.type === 'queue_updated') {
 				scheduleQueueRefresh();
 			} else if (
@@ -168,6 +170,7 @@ export function disconnectWebSocket() {
 		clearTimeout(queueRefreshTimer);
 		queueRefreshTimer = null;
 	}
+	clearWsCacheTimers();
 	socket?.close();
 	socket = null;
 	wsConnected.set(false);

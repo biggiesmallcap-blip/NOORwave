@@ -1,5 +1,6 @@
 import { writable } from 'svelte/store';
 import { api, type AudioFeaturesStats } from '$lib/api/client';
+import { cachedApi } from '$lib/cache/api_queries';
 
 interface AudioAnalysisState {
 	isRunning: boolean;
@@ -39,7 +40,7 @@ export function handleAnalysisComplete(data: { analyzed: number }) {
 
 export async function loadAudioStats() {
 	try {
-		const response = await api.getAudioFeaturesStats();
+		const response = await cachedApi.getAudioFeaturesStats();
 		audioAnalysis.update((s) => ({ ...s, stats: response.stats }));
 	} catch (e) {
 		console.error('Failed to load audio stats:', e);
@@ -67,7 +68,7 @@ export async function stopAnalysis() {
 
 export async function syncAnalysisStatus() {
 	try {
-		const { running, analyzed } = await api.getAudioAnalysisStatus();
+		const { running, analyzed } = await cachedApi.getAudioAnalysisStatus();
 		audioAnalysis.update((s) => ({ ...s, isRunning: running, analyzed }));
 	} catch (e) {
 		console.error('Failed to sync analysis status:', e);
@@ -86,7 +87,7 @@ export async function clearAllAnalysis() {
 
 export async function loadPassiveDspState() {
 	try {
-		const { enabled } = await api.getPassiveDsp();
+		const { enabled } = await cachedApi.getPassiveDsp();
 		audioAnalysis.update((s) => ({ ...s, passiveEnabled: enabled }));
 	} catch (e) {
 		console.error('Failed to load passive DSP setting:', e);

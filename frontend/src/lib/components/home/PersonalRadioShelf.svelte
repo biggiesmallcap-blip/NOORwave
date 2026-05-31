@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount, untrack } from 'svelte';
-	import { api, ApiError, type TidalMix } from '$lib/api/client';
+	import { ApiError, type TidalMix } from '$lib/api/client';
+	import { cachedApi } from '$lib/cache/api_queries';
 	import { playTidalMix } from '$lib/stores/player';
 	import { tidalStatus } from '$lib/stores/tidal';
 	import {
@@ -40,7 +41,7 @@
 		viewState = 'loading';
 		errorMsg = '';
 		try {
-			const data = await api.getTidalRadioStations();
+			const data = await cachedApi.getTidalRadioStations();
 			stations = data.stations ?? [];
 			if (stations.length > 0) putCachedRadioStations(stations);
 			viewState = stations.length > 0 ? 'ready' : 'empty';

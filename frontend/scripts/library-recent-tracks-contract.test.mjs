@@ -10,7 +10,7 @@ describe('library recent tracks contract', () => {
 		expect(source).toContain('let recentTracks = $state<Track[]>(homePanelCandidateCache.recentTracks);');
 		expect(source).toContain('async function loadRecentTracks()');
 		expect(source).toContain(
-			"api.getTracks('last_played_at', 'desc', RECENT_TRACK_LIMIT, 0, true, false)",
+			"cachedApi.getTracks('last_played_at', 'desc', RECENT_TRACK_LIMIT, 0, true, false)",
 		);
 		expect(source).toContain('filter((track) => track.last_played_at)');
 		expect(source).toContain('homePanelCandidateCache.recentTracks = recentTracks;');

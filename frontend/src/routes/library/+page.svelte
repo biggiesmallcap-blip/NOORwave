@@ -34,6 +34,7 @@
 	} from '$lib/stores/library';
 	import { formatTrackDuration, formatDateShort, getQualityClass } from '$lib/utils/format';
 	import { api, type Album, type Artist, type Genre, type Playlist, type Track } from '$lib/api/client';
+	import { cachedApi } from '$lib/cache/api_queries';
 	import {
 		currentTrack,
 		isPlaying,
@@ -88,7 +89,7 @@
 		openContextMenu(e, buildArtistMenu(artist, {
 			isLocal: true,
 			addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
-				const { tracks: t } = await api.getArtistTracks(artistId);
+				const { tracks: t } = await cachedApi.getArtistTracks(artistId);
 				return t.map(tr => tr.id);
 			}),
 		}), artist.name);
@@ -100,7 +101,7 @@
 		openContextMenu(e, buildAlbumMenu(album, {
 			isLocal: true,
 			addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
-				const { tracks: t } = await api.getAlbumTracks(albumId);
+				const { tracks: t } = await cachedApi.getAlbumTracks(albumId);
 				return t.map(tr => tr.id);
 			}),
 		}), album.title);
@@ -205,7 +206,7 @@
 
 	async function loadRecentTracks() {
 		try {
-			const data = await api.getTracks('last_played_at', 'desc', RECENT_TRACK_LIMIT, 0, true, false);
+			const data = await cachedApi.getTracks('last_played_at', 'desc', RECENT_TRACK_LIMIT, 0, true, false);
 			recentTracks = data.tracks
 				.filter((track) => track.last_played_at)
 				.slice(0, RECENT_TRACK_LIMIT);
@@ -224,8 +225,8 @@
 	async function loadBatchMeta() {
 		try {
 			const [playlistData, genreData] = await Promise.all([
-				api.getPlaylists(),
-				api.getGenres(),
+				cachedApi.getPlaylists(),
+				cachedApi.getGenres(),
 			]);
 			playlists = playlistData.playlists.filter((playlist) => !playlist.is_smart);
 			selectedPlaylistId = playlists[0] ? String(playlists[0].id) : '';
@@ -277,7 +278,7 @@
 			// Default browse view — top 200 alphabetically. When the user types
 			// a query, the search effect calls api.search() server-side and
 			// shows searchResults.artists (FTS). No more upfront 10k load.
-			const data = await api.getArtists('name', 'asc', 200);
+			const data = await cachedApi.getArtists('name', 'asc', 200);
 			artists = data.artists;
 		} catch (err) {
 			console.error('Failed to load artists:', err);
@@ -301,7 +302,7 @@
 		batchError = null;
 		batchMessage = null;
 		try {
-			const data = await api.getAlbumTracks(albumId);
+			const data = await cachedApi.getAlbumTracks(albumId);
 			const trackIds = data.tracks.map((track) => track.id);
 			if (trackIds.length === 0) {
 				throw new Error('No synced tracks found for this album yet.');
@@ -327,7 +328,7 @@
 		batchError = null;
 		batchMessage = null;
 		try {
-			const data = await api.getAlbumTracks(albumId);
+			const data = await cachedApi.getAlbumTracks(albumId);
 			if (data.tracks.length === 0) {
 				throw new Error('No synced tracks found for this album yet.');
 			}
@@ -356,7 +357,7 @@
 		if (track.album_id) {
 			detailLoading = true;
 			try {
-				const data = await api.getAlbumTracks(track.album_id);
+				const data = await cachedApi.getAlbumTracks(track.album_id);
 				detailAlbumTracks = data.tracks;
 			} catch (err) {
 				console.error('Failed to load album tracks:', err);
@@ -378,7 +379,7 @@
 		detailAlbum = album;
 		detailAlbumLoading = true;
 		try {
-			const data = await api.getAlbumTracks(album.id);
+			const data = await cachedApi.getAlbumTracks(album.id);
 			detailAlbumTracksList = data.tracks;
 		} catch (err) {
 			console.error('Failed to load album tracks:', err);
@@ -655,7 +656,7 @@
 				searchResults = { tracks: adaptedTracks, albums: [], artists: [] };
 			} else {
 				// Plain text — server-side FTS. No more preloading the full library.
-				const r = await api.search(trimmed, 100);
+				const r = await cachedApi.search(trimmed, 100);
 				searchResults = {
 					tracks: r.tracks,
 					albums: r.albums,
@@ -704,7 +705,7 @@
 			}
 
 			const randomOffset = Math.floor(Math.random() * $totalTracks);
-			const data = await api.getTracks('date_added', 'desc', 1, randomOffset);
+			const data = await cachedApi.getTracks('date_added', 'desc', 1, randomOffset);
 			const randomTrack = data.tracks[0];
 			if (!randomTrack) {
 				throw new Error('Could not resolve a random track from the library.');
@@ -1134,7 +1135,7 @@
 		if (trackTotal <= 0) return [];
 		const offsets = stableRandomOffsets(trackTotal, 31, HOME_MURAL_ITEM_LIMIT, refreshBucket);
 		const responses = await Promise.all(
-			offsets.map(offset => api.getTracks('date_added', 'desc', 1, offset, true, false))
+			offsets.map(offset => cachedApi.getTracks('date_added', 'desc', 1, offset, true, false))
 		);
 		return uniqueById(responses.flatMap(response => response.tracks));
 	}
@@ -1143,7 +1144,7 @@
 		if (albumTotal <= 0) return [];
 		const offsets = stableRandomOffsets(albumTotal, 41, HOME_MURAL_ITEM_LIMIT, refreshBucket);
 		const responses = await Promise.all(
-			offsets.map(offset => api.getAlbums('title', 'asc', 1, offset, true))
+			offsets.map(offset => cachedApi.getAlbums('title', 'asc', 1, offset, true))
 		);
 		return uniqueById(responses.flatMap(response => response.albums).map(album => ({
 			id: album.id,
@@ -1180,8 +1181,8 @@
 	async function loadSuggestionCandidates(seedTracks: Track[], requestKey: string) {
 		const seedArtistIds = uniquePositiveIds(seedTracks.map(track => track.artist_id), 8);
 		const seedAlbumIds = uniquePositiveIds(seedTracks.map(track => track.album_id), 8);
-		const artistResults = await Promise.allSettled(seedArtistIds.map(id => api.getArtistTracks(id)));
-		const albumResults = await Promise.allSettled(seedAlbumIds.map(id => api.getAlbumTracks(id)));
+		const artistResults = await Promise.allSettled(seedArtistIds.map(id => cachedApi.getArtistTracks(id)));
+		const albumResults = await Promise.allSettled(seedAlbumIds.map(id => cachedApi.getAlbumTracks(id)));
 		const artistTracks = artistResults.flatMap(result =>
 			result.status === 'fulfilled' ? result.value.tracks : []
 		);
@@ -1718,7 +1719,7 @@
 									openContextMenu(event, buildAlbumMenu(album, {
 										isLocal: true,
 										addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
-											const { tracks: t } = await api.getAlbumTracks(album.id);
+											const { tracks: t } = await cachedApi.getAlbumTracks(album.id);
 											return t.map(tr => tr.id);
 										}),
 									}), album.title);
@@ -2003,7 +2004,7 @@
 						openContextMenu(event, buildAlbumMenu(album, {
 							isLocal: true,
 							addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
-								const { tracks: t } = await api.getAlbumTracks(album.id);
+								const { tracks: t } = await cachedApi.getAlbumTracks(album.id);
 								return t.map(tr => tr.id);
 							}),
 						}), album.title);
@@ -2060,7 +2061,7 @@
 									onSelect: () => updateAlbumSelection(album.id, false, false),
 									onRemove: () => void removeAlbumFromLibrary(album.id),
 									addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
-										const { tracks: t } = await api.getAlbumTracks(album.id);
+										const { tracks: t } = await cachedApi.getAlbumTracks(album.id);
 										return t.map(tr => tr.id);
 									}),
 								}), album.title);

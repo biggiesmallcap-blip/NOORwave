@@ -1,5 +1,6 @@
 import { writable } from 'svelte/store';
-import { api, type Track, type Album, type Artist } from '$lib/api/client';
+import { type Track, type Album, type Artist } from '$lib/api/client';
+import { cachedApi } from '$lib/cache/api_queries';
 
 export const tracks = writable<Track[]>([]);
 export const albums = writable<Album[]>([]);
@@ -34,7 +35,7 @@ export async function loadTracks(
 	try {
 		// favoriteOnly stays true so the legacy "library tracks" semantics are unchanged
 		// for the Tracks tab; likedOnly takes precedence server-side.
-		const data = await api.getTracks(sort, dir, limit, offset, true, likedOnly);
+		const data = await cachedApi.getTracks(sort, dir, limit, offset, true, likedOnly);
 		if (offset === 0) {
 			tracks.set(data.tracks);
 		} else {
@@ -53,7 +54,7 @@ export async function loadAlbums(sort = 'title', dir = 'asc', limit = PAGE_SIZE,
 	if (offset === 0) isLoading.set(true);
 	else isLoadingMore.set(true);
 	try {
-		const data = await api.getAlbums(sort, dir, limit, offset);
+		const data = await cachedApi.getAlbums(sort, dir, limit, offset);
 		if (offset === 0) {
 			albums.set(data.albums);
 		} else {
@@ -72,7 +73,7 @@ export async function loadArtists(sort = 'name', dir = 'asc', limit = PAGE_SIZE,
 	if (offset === 0) isLoading.set(true);
 	else isLoadingMore.set(true);
 	try {
-		const data = await api.getArtists(sort, dir, limit, offset);
+		const data = await cachedApi.getArtists(sort, dir, limit, offset);
 		if (offset === 0) {
 			artists.set(data.artists);
 		} else {

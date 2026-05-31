@@ -43,8 +43,8 @@ describe('library home hero contract', () => {
 		expect(libraryPage).toContain('Random tracks');
 		expect(libraryPage).toContain('Random albums');
 		expect(libraryPage).toContain('stableRandomOffsets');
-		expect(libraryPage).toContain("api.getTracks('date_added', 'desc', 1, offset, true, false)");
-		expect(libraryPage).toContain("api.getAlbums('title', 'asc', 1, offset, true)");
+		expect(libraryPage).toContain("cachedApi.getTracks('date_added', 'desc', 1, offset, true, false)");
+		expect(libraryPage).toContain("cachedApi.getAlbums('title', 'asc', 1, offset, true)");
 		expect(libraryPage).toContain('const HOME_PANEL_CACHE_REFRESH_MS = 5 * 60 * 1000');
 		expect(libraryPage).toContain('const homePanelCandidateCache = {');
 		expect(libraryPage).toContain('let randomPanelTracks = $state<Track[]>(homePanelCandidateCache.randomTracks)');
@@ -53,8 +53,8 @@ describe('library home hero contract', () => {
 		expect(libraryPage).toContain('randomPanelAlbums.map(albumToMuralItem)');
 		expect(libraryPage).toContain('let suggestionCandidateTracks = $state<Track[]>(homePanelCandidateCache.suggestionTracks)');
 		expect(libraryPage).toContain('async function loadSuggestionCandidates(seedTracks: Track[], requestKey: string)');
-		expect(libraryPage).toContain('api.getArtistTracks(id)');
-		expect(libraryPage).toContain('api.getAlbumTracks(id)');
+		expect(libraryPage).toContain('cachedApi.getArtistTracks(id)');
+		expect(libraryPage).toContain('cachedApi.getAlbumTracks(id)');
 		expect(libraryPage).toContain('const scored = suggestionCandidateTracks');
 		expect(libraryPage).toContain('homePanelCandidateCache.randomTracks = tracksForPanel');
 		expect(libraryPage).toContain('homePanelCandidateCache.randomAlbums = albumsForPanel');

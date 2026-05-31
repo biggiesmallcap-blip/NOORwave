@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { api, type TidalMoodCategory } from '$lib/api/client';
+	import { type TidalMoodCategory } from '$lib/api/client';
+	import { cachedApi } from '$lib/cache/api_queries';
 	import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
@@ -36,7 +37,7 @@
 		if (inFlight) return;
 		inFlight = true;
 		try {
-			const data = await api.getTidalMoods();
+			const data = await cachedApi.getTidalMoods();
 			const all = data.categories ?? [];
 			if (all.length > 0) putCompleteMoodCategories(all);
 			categories = all.slice(0, PREVIEW_LIMIT);

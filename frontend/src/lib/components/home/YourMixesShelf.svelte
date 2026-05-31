@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { onMount, untrack } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { api, ApiError, type TidalMix } from '$lib/api/client';
+	import { ApiError, type TidalMix } from '$lib/api/client';
+	import { cachedApi } from '$lib/cache/api_queries';
 	import { playTidalMix } from '$lib/stores/player';
 	import { tidalStatus } from '$lib/stores/tidal';
 	import { getCachedMixes, putCachedMixes, clearCachedMixes } from '$lib/stores/tidal-mixes-cache';
@@ -46,7 +47,7 @@
 		viewState = 'loading';
 		errorMsg = '';
 		try {
-			const data = await api.getTidalMixes();
+			const data = await cachedApi.getTidalMixes();
 			mixes = data.mixes ?? [];
 			if (mixes.length > 0) putCachedMixes(mixes);
 			viewState = mixes.length > 0 ? 'ready' : 'empty';

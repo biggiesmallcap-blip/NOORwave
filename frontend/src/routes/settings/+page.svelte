@@ -79,6 +79,8 @@
 	import { exclusiveStatus } from '$lib/stores/exclusive_status';
 	import { isTauri, openExternal } from '$lib/util/external';
 	import { isValidTidalRedirectUrl, readTidalRedirectFromClipboard } from '$lib/tidal/login';
+	import { cachedApi } from '$lib/cache/api_queries';
+	import { dataCache } from '$lib/cache/query';
 
 	const SERVER_UNREACHABLE_MESSAGE =
 		'NOOR cannot reach the local server on port 3334, so it cannot verify your current TIDAL session.';
@@ -168,6 +170,7 @@
 		try {
 			const { token } = await api.regenerateServerToken();
 			serverToken = token;
+			dataCache.clear();
 			setStoredToken(token);
 		} catch {
 			tokenRegenError = 'Failed to regenerate token.';
@@ -195,8 +198,8 @@
 	async function refreshGalaxy() {
 		galaxyRefreshLabel = 'Refreshing genre data…';
 		try {
-			const genres = await api.getGenres();
-			const heat = await api.getGenreHeat(90);
+			const genres = await cachedApi.getGenres();
+			const heat = await cachedApi.getGenreHeat(90);
 			markServerOnline();
 			const genreCount = countGenres(genres.genres);
 			const activeHeat = heat.heat.filter((e) => e.listen_count > 0).length;
@@ -443,28 +446,15 @@
 
 		void refreshTidalStatus();
 		void loadSyncInfo();
-		void loadPlaybackRuntime();
-		void loadMbStatus();
-		void loadPortableSnapshot();
-		void loadDiscoveryStatus();
-		void loadDiscoveryEngine();
-		void loadDiscoveryIntensity();
-		void loadDiscoverySafetyProfile();
-		void loadDiscoverySafety();
-		void loadRadioSimilarityStatus();
-		void loadAudioStats();
-		void syncAnalysisStatus();
-		void loadPassiveDspState();
-		void loadAudioOutput();
-		void loadAcrCloudStatus();
-		void loadSpotifyStatus();
-		void loadLastfmStatus();
+		void loadVisibleSettingsCategory();
+		const cancelBackgroundSettingsLoad = scheduleSettingsBackgroundLoad();
 		void loadDesktopAppInfo();
 		void setupDesktopUpdateListeners(tauriUnlisteners);
 		serverToken = getStoredToken() ?? '';
 		return () => {
 			if (mbPollTimer) clearInterval(mbPollTimer);
 			clearDiscoveryCompletionRefresh();
+			cancelBackgroundSettingsLoad();
 			clearInterval(discoveryTrainingPoll);
 			clearInterval(tick);
 			wsUnsubscribe?.();
@@ -900,7 +890,7 @@
 
 	async function loadPlaybackRuntime() {
 		try {
-			const response = await api.getPlaybackRuntime();
+			const response = await cachedApi.getPlaybackRuntime();
 			markServerOnline();
 			runtimeAvailable = response.available;
 			playbackRuntime = response.runtime;
@@ -913,7 +903,7 @@
 
 	async function loadMbStatus() {
 		try {
-			mbStats = await api.getMusicBrainzStatus();
+			mbStats = await cachedApi.getMusicBrainzStatus();
 			markServerOnline();
 			if (!mbStats) return;
 			if (mbStats.remaining === 0) {
@@ -938,7 +928,7 @@
 
 	async function loadPortableSnapshot() {
 		try {
-			portableSnapshot = await api.getPortableMusicBrainzSnapshot();
+			portableSnapshot = await cachedApi.getPortableMusicBrainzSnapshot();
 			markServerOnline();
 		} catch (error) {
 			if (isFetchConnectionError(error)) {
@@ -951,7 +941,7 @@
 
 	async function loadDiscoveryStatus() {
 		try {
-			const response = await api.getDiscoveryStatus();
+			const response = await cachedApi.getDiscoveryStatus();
 			discoveryStatus = response.status;
 			discoveryEngine = response.status.selected_engine;
 			discoveryEngineTrainable = response.status.selected_engine_trainable;
@@ -998,7 +988,7 @@
 
 	async function loadRadioSimilarityStatus() {
 		try {
-			const status = await api.getRadioSimilarityStatus();
+			const status = await cachedApi.getRadioSimilarityStatus();
 			radioSimilarityRowCount = status.row_count;
 			radioSimilarityBuiltAt = status.built_at;
 			markServerOnline();
@@ -1078,7 +1068,7 @@
 
 	async function loadDiscoveryIntensity() {
 		try {
-			const r = await api.getDiscoveryIntensity();
+			const r = await cachedApi.getDiscoveryIntensity();
 			discoveryIntensity = r.intensity;
 		} catch (err) {
 			if (isFetchConnectionError(err)) markServerOffline();
@@ -1087,7 +1077,7 @@
 
 	async function loadDiscoveryEngine() {
 		try {
-			const r = await api.getDiscoveryEngine();
+			const r = await cachedApi.getDiscoveryEngine();
 			discoveryEngine = r.engine;
 			discoveryEngineTrainable = r.trainable;
 		} catch (err) {
@@ -1097,7 +1087,7 @@
 
 	async function loadDiscoverySafety() {
 		try {
-			discoverySafety = await api.getDiscoverySafety();
+			discoverySafety = await cachedApi.getDiscoverySafety();
 			discoverySafetyProfile = discoverySafety.safety_profile;
 		} catch (err) {
 			if (isFetchConnectionError(err)) markServerOffline();
@@ -1106,7 +1096,7 @@
 
 	async function loadDiscoverySafetyProfile() {
 		try {
-			const r = await api.getDiscoverySafetyProfile();
+			const r = await cachedApi.getDiscoverySafetyProfile();
 			discoverySafetyProfile = r.profile;
 		} catch (err) {
 			if (isFetchConnectionError(err)) markServerOffline();
@@ -1427,6 +1417,7 @@
 	// ─── Audio output settings (TIDAL playback runtime) ─────────────────
 	let audioDevices = $state<AudioDevice[]>([]);
 	let isWindows = $derived(typeof navigator !== 'undefined' && /Win/i.test(navigator.platform));
+	let settingsBackgroundLoadCancelled = false;
 
 	const AUDIO_QUALITY_OPTIONS: { value: AudioQuality; label: string }[] = [
 		{ value: 'LOW', label: 'Low (96 kbps AAC)' },
@@ -1449,11 +1440,93 @@
 	async function loadAudioOutput() {
 		await audioSettings.load();
 		try {
-			const resp = await api.listAudioDevices();
+			const resp = await cachedApi.listAudioDevices();
 			audioDevices = resp.devices;
 		} catch (err) {
 			console.error('Failed to load audio devices', err);
 		}
+	}
+
+	function scheduleSettingsIdleTask(task: () => void, delayMs: number): () => void {
+		if (typeof window === 'undefined') return () => {};
+		let idleId: number | null = null;
+		const timer = window.setTimeout(() => {
+			const idle = window.requestIdleCallback;
+			if (typeof idle === 'function') {
+				idleId = idle(task, { timeout: 1000 });
+				return;
+			}
+			task();
+		}, delayMs);
+		return () => {
+			window.clearTimeout(timer);
+			if (idleId !== null) window.cancelIdleCallback?.(idleId);
+		};
+	}
+
+	function loadVisibleSettingsCategory() {
+		if (activeCategory === 'sources') {
+			void loadMbStatus();
+			void loadPortableSnapshot();
+			void loadRadioSimilarityStatus();
+			void loadSpotifyStatus();
+			void loadLastfmStatus();
+			void loadAcrCloudStatus();
+			return;
+		}
+		if (activeCategory === 'audio') {
+			void loadPlaybackRuntime();
+			void loadAudioStats();
+			void syncAnalysisStatus();
+			void loadPassiveDspState();
+			void loadAudioOutput();
+			return;
+		}
+		if (activeCategory === 'account') {
+			void loadSpotifyStatus();
+			void loadLastfmStatus();
+		}
+	}
+
+	function selectSettingsCategory(category: SettingsCategory) {
+		if (activeCategory === category) return;
+		activeCategory = category;
+		void loadVisibleSettingsCategory();
+	}
+
+	function scheduleSettingsBackgroundLoad(): () => void {
+		settingsBackgroundLoadCancelled = false;
+		const cancelers = [
+			scheduleSettingsIdleTask(() => {
+				if (settingsBackgroundLoadCancelled) return;
+				void loadPlaybackRuntime();
+				void loadMbStatus();
+				void loadDiscoveryStatus();
+				void loadDiscoveryEngine();
+				void loadRadioSimilarityStatus();
+			}, 900),
+			scheduleSettingsIdleTask(() => {
+				if (settingsBackgroundLoadCancelled) return;
+				void loadPortableSnapshot();
+				void loadDiscoveryIntensity();
+				void loadDiscoverySafetyProfile();
+				void loadDiscoverySafety();
+				void loadAudioStats();
+				void syncAnalysisStatus();
+				void loadPassiveDspState();
+				void loadAudioOutput();
+			}, 1800),
+			scheduleSettingsIdleTask(() => {
+				if (settingsBackgroundLoadCancelled) return;
+				void loadAcrCloudStatus();
+				void loadSpotifyStatus();
+				void loadLastfmStatus();
+			}, 2800),
+		];
+		return () => {
+			settingsBackgroundLoadCancelled = true;
+			for (const cancel of cancelers) cancel();
+		};
 	}
 
 	function onAudioQualityChange(e: Event) {
@@ -1653,7 +1726,7 @@
 				type="button"
 				class="settings-rail-btn"
 				class:active={activeCategory === cat.id}
-				onclick={() => (activeCategory = cat.id)}
+				onclick={() => selectSettingsCategory(cat.id)}
 				aria-pressed={activeCategory === cat.id}
 			>
 				<span class="settings-rail-icon" aria-hidden="true">

@@ -2,6 +2,7 @@
 	import { onMount, tick } from 'svelte';
 	import type { Unsubscriber } from 'svelte/store';
 	import { api, type Genre, type GenreHeat, type GenreCohort, type GenreEvolutionPoint, type GenreAudioMetrics, type Track } from '$lib/api/client';
+	import { cachedApi } from '$lib/cache/api_queries';
 	import { wsMessages } from '$lib/api/ws';
 	import { playTrackNow, setPlayerAutomixEnabled, setPlayerShuffleMode } from '$lib/stores/player';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
@@ -164,7 +165,7 @@
 	};
 
 	async function fetchGalaxySnapshot(): Promise<GalaxySnapshot> {
-		return api.getGenreGalaxySnapshot(90);
+		return cachedApi.getGenreGalaxySnapshot(90);
 	}
 
 	function clearGalaxyCaches() {
@@ -290,10 +291,10 @@
 		refreshingHeat = true;
 		try {
 			const [heatResp, cohortResp, evolResp, metricsResp] = await Promise.allSettled([
-				api.getGenreHeat(90),
-				api.getGenreCohorts(90),
-				api.getGenreEvolution(90),
-				api.getGenreAudioMetrics()
+				cachedApi.getGenreHeat(90),
+				cachedApi.getGenreCohorts(90),
+				cachedApi.getGenreEvolution(90),
+				cachedApi.getGenreAudioMetrics()
 			]);
 			if (heatResp.status === 'fulfilled') heat = heatResp.value.heat;
 			else if (isNotFoundError(heatResp.reason)) heat = buildZeroHeat(taxonomy);
@@ -330,7 +331,7 @@
 		panelErrorById = { ...panelErrorById, [id]: null };
 
 		try {
-			const response = await api.getGenreTracks(id, true);
+			const response = await cachedApi.getGenreTracks(id, true);
 			panelTracksById = { ...panelTracksById, [id]: response.tracks };
 			return response.tracks;
 		} catch (reason) {
@@ -403,10 +404,10 @@
 		await Promise.all(
 			pendingNodes.map(async (node) => {
 				try {
-					const direct = await api.getGenreTracks(node.id, false);
+					const direct = await cachedApi.getGenreTracks(node.id, false);
 					let artists = collectTopArtists(direct.tracks);
 					if (artists.length < 3) {
-						const descendants = await api.getGenreTracks(node.id, true);
+						const descendants = await cachedApi.getGenreTracks(node.id, true);
 						artists = collectTopArtists(descendants.tracks, artists);
 					}
 					artistChipMap = new Map(artistChipMap).set(node.id, artists.slice(0, 3));

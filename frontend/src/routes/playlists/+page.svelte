@@ -13,6 +13,7 @@
 		type DateField,
 		type SampleDataSource,
 	} from '$lib/api/client';
+	import { cachedApi } from '$lib/cache/api_queries';
 	import {
 		currentTrack,
 		isPlaying,
@@ -328,7 +329,7 @@
 		isLoading = true;
 		loadError = '';
 		try {
-			const data = await api.getPlaylists();
+			const data = await cachedApi.getPlaylists();
 			playlists = data.playlists;
 			const next: Record<number, string> = {};
 			for (const p of playlists) next[p.id] = buildSearchText(p);
@@ -364,8 +365,8 @@
 		errorById = { ...errorById, [id]: null };
 		try {
 			const data = playlist?.is_smart
-				? await api.evaluateSmartPlaylist(id)
-				: await api.getPlaylistTracks(id);
+				? await cachedApi.evaluateSmartPlaylist(id)
+				: await cachedApi.getPlaylistTracks(id);
 			playlistTracksById = { ...playlistTracksById, [id]: data.tracks };
 			if (playlist) recordMosaic(id, data.tracks, playlist.track_count);
 		} catch (error) {
@@ -555,7 +556,7 @@
 		if (fetchedMosaicIds.has(id)) return;
 		fetchedMosaicIds.add(id);
 		try {
-			const { urls } = await api.getPlaylistCoverSample(id);
+			const { urls } = await cachedApi.getPlaylistCoverSample(id);
 			if (!urls.length) return;
 			setCachedMosaic(id, urls, playlist.track_count);
 			mosaicById = { ...mosaicById, [id]: urls };
@@ -638,7 +639,7 @@
 		if (genreSuggestionsLoaded) return;
 		genreSuggestionsLoaded = true;
 		try {
-			const data = await api.getGenres();
+			const data = await cachedApi.getGenres();
 			const names: string[] = [];
 			const walk = (nodes: { name: string; children?: unknown[] }[]) => {
 				for (const node of nodes) {

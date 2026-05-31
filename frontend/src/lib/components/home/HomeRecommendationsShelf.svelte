@@ -8,6 +8,7 @@
 		type ProviderRecommendationShelf,
 		type TidalPlayable,
 	} from '$lib/api/client';
+	import { cachedApi } from '$lib/cache/api_queries';
 	import ChartMural, { type ChartMuralItem } from '$lib/components/charts/ChartMural.svelte';
 	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
@@ -64,8 +65,8 @@
 		errorMsg = '';
 		try {
 			const [lastfm, listenbrainz] = await Promise.allSettled([
-				api.getLastfmStatus(),
-				api.getListenBrainzStatus()
+				cachedApi.getLastfmStatus(),
+				cachedApi.getListenBrainzStatus()
 			]);
 			const lastfmCanRecommend = lastfm.status === 'fulfilled' && Boolean(lastfm.value.recommendations);
 			const listenbrainzCanRecommend = listenbrainz.status === 'fulfilled' && Boolean(listenbrainz.value.recommendations);
@@ -75,7 +76,7 @@
 			}
 
 			viewState = 'loading';
-			const response = await api.getHomeRecommendations();
+			const response = await cachedApi.getHomeRecommendations();
 			shelves = response.shelves ?? [];
 			currentIndexes = {};
 			viewState = shelves.some((shelf) => shelf.items.length > 0) ? 'ready' : 'empty';

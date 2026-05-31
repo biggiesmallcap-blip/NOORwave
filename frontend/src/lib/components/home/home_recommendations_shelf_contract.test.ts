@@ -39,11 +39,11 @@ describe('home recommendations shelf contract', () => {
 	test('loads provider shelves independently after Home renders', () => {
 		expect(homePage).toContain('HomeRecommendationsShelf');
 		expect(source).toContain('onMount');
-		expect(source).toContain('api.getLastfmStatus()');
-		expect(source).toContain('api.getListenBrainzStatus()');
+		expect(source).toContain('cachedApi.getLastfmStatus()');
+		expect(source).toContain('cachedApi.getListenBrainzStatus()');
 		expect(source).toContain('lastfm.value.recommendations');
 		expect(source).toContain('listenbrainz.value.recommendations');
-		expect(source).toContain('api.getHomeRecommendations()');
+		expect(source).toContain('cachedApi.getHomeRecommendations()');
 		expect(source).not.toContain('Boolean(lastfm.value.scrobbling)');
 		expect(source).not.toContain('Boolean(listenbrainz.value.scrobbling)');
 		expect(client).toContain('/api/home/recommendations');

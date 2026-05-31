@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import type { Snapshot } from './$types';
-	import { api, type Track, type TidalDiscographyAlbum, type TidalDiscographyTrack, type TidalArtistVideo, type TidalSimilarArtist, type TidalArtistBio, type SpotifyArtistStats, type TidalPlayable } from '$lib/api/client';
+	import { type Track, type TidalDiscographyAlbum, type TidalDiscographyTrack, type TidalArtistVideo, type TidalSimilarArtist, type TidalArtistBio, type SpotifyArtistStats, type TidalPlayable } from '$lib/api/client';
+	import { cachedApi } from '$lib/cache/api_queries';
 	import { letterColor } from '$lib/utils/color';
 	import {
 		playArtist,
@@ -85,8 +86,8 @@
 			// fetched in parallel with the artist's local tracks. Either failure
 			// is non-fatal — the page can render with whichever resolved.
 			const [artistRes, tracksRes] = await Promise.allSettled([
-				api.getArtist(artistId),
-				api.getArtistTracks(artistId),
+				cachedApi.getArtist(artistId),
+				cachedApi.getArtistTracks(artistId),
 			]);
 			if (artistRes.status === 'fulfilled') {
 				artist = artistRes.value;
@@ -110,7 +111,7 @@
 		tidalLoading = true;
 		const requestedFor = artistId;
 		try {
-			const res = await api.getArtistDiscography(artistId);
+			const res = await cachedApi.getArtistDiscography(artistId);
 			if (artistId !== requestedFor) return;
 			tidalAlbums = res.albums;
 			tidalTopTracks = res.top_tracks ?? [];
@@ -131,7 +132,7 @@
 
 	async function loadSpotifyStats() {
 		try {
-			spotifyStats = await api.getArtistSpotifyStats(artistId);
+			spotifyStats = await cachedApi.getArtistSpotifyStats(artistId);
 		} catch (err) {
 			console.error('Failed to load Spotify stats', err);
 			spotifyStats = null;
@@ -363,7 +364,7 @@
 	async function ensureTidalTopTracksForPlayback(): Promise<TidalDiscographyTrack[]> {
 		if (tidalTopTracks.length > 0) return tidalTopTracks;
 		const requestedFor = artistId;
-		const res = await api.getArtistDiscography(artistId);
+		const res = await cachedApi.getArtistDiscography(artistId);
 		if (artistId === requestedFor) {
 			tidalAlbums = res.albums;
 			tidalTopTracks = res.top_tracks ?? [];

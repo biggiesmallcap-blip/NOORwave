@@ -77,6 +77,13 @@
 		TIDAL_PKCE_RELOGIN_DISMISSED_KEY,
 		shouldShowLegacyReloginNotice,
 	} from '$lib/tidal/login';
+	import { scheduleStartupPrewarm } from '$lib/cache/prewarm';
+	import { dataCache } from '$lib/cache/query';
+	import {
+		clearLocalOnboardingComplete,
+		hasLocalOnboardingComplete,
+		markLocalOnboardingComplete
+	} from '$lib/onboarding/status';
 	import { paletteById, rgbaCss } from '$lib/components/wallpaper/palettes';
 	import {
 		MOBILE_MORE_ROUTES,
@@ -112,6 +119,21 @@
 	let pinInputEl = $state<HTMLInputElement | null>(null);
 	let pkceReloginDismissedThisSession = $state(false);
 	let pkceReloginDismissedForever = $state(false);
+	let cancelStartupPrewarm: (() => void) | null = null;
+
+	function onboardingScope(): string | null {
+		return getStoredToken();
+	}
+
+	function setSessionToken(token: string): void {
+		if (getStoredToken() !== token) dataCache.clear();
+		setStoredToken(token);
+	}
+
+	function clearSessionToken(): void {
+		clearStoredToken();
+		dataCache.clear();
+	}
 	// Remove this migration notice after 2026-05-25. Keep PKCE auth and encrypted token migration.
 	let showPkceReloginNotice = $derived(
 		authReady &&
@@ -145,14 +167,14 @@
 		if (!t) { connectError = 'Enter your 6-digit PIN.'; return; }
 		connectBusy = true;
 		try {
-			setStoredToken(t);
+			setSessionToken(t);
 			const ok = await api.ping();
-			if (!ok) { clearStoredToken(); connectError = 'Could not reach the server. Check the URL / network.'; return; }
+			if (!ok) { clearSessionToken(); connectError = 'Could not reach the server. Check the URL / network.'; return; }
 			const resp = await fetch(`${(await import('$lib/api/client')).getApiBase()}/api/status`, {
 				headers: { authorization: `Bearer ${t}` }
 			});
 			if (resp.status === 401) {
-				clearStoredToken();
+				clearSessionToken();
 				connectError = 'PIN rejected — double-check the 6 digits.';
 				connectTokenInput = '';
 				setTimeout(focusPin, 0);
@@ -161,7 +183,7 @@
 			showConnect = false;
 			onConnected();
 		} catch {
-			clearStoredToken();
+			clearSessionToken();
 			connectError = 'Connection failed. Is the server running?';
 		} finally {
 			connectBusy = false;
@@ -318,9 +340,11 @@
 	};
 
 	function handleUnauthorized() {
-		clearStoredToken();
+		clearSessionToken();
 		authReady = false;
 		onboardingChecked = false;
+		cancelStartupPrewarm?.();
+		cancelStartupPrewarm = null;
 		void tryAutoSetup();
 	}
 
@@ -345,9 +369,11 @@
 			void tryAutoSetup();
 		} else {
 			authReady = true;
+			if (hasLocalOnboardingComplete(onboardingScope())) onboardingChecked = true;
 			connectWebSocket();
 			void refreshPlaybackState();
 			void checkOnboarding();
+			startStartupPrewarm();
 		}
 
 		// Listen for 401 responses from any API call. On loopback the backend
@@ -381,6 +407,7 @@
 			window.removeEventListener('keydown', handleGlobalKeydown);
 			window.removeEventListener('wheel', handleGlobalWheel);
 			queueActionsMedia.removeEventListener('change', updateQueueActionsVisibility);
+			cancelStartupPrewarm?.();
 			for (const unlisten of tauriUpdateUnlisteners) unlisten();
 			unsubPalette();
 		};
@@ -554,7 +581,7 @@
 			if (resp.ok) {
 				const data = await resp.json();
 				if (data?.token) {
-					setStoredToken(data.token);
+					setSessionToken(data.token);
 					onConnected();
 					return;
 				}
@@ -567,10 +594,17 @@
 	// After a successful connect, boot the WS + playback state
 	function onConnected() {
 		authReady = true;
+		if (hasLocalOnboardingComplete(onboardingScope())) onboardingChecked = true;
 		connectWebSocket();
 		void refreshPlaybackState();
 		void loadTidalStatus();
 		void checkOnboarding();
+		startStartupPrewarm();
+	}
+
+	function startStartupPrewarm() {
+		cancelStartupPrewarm?.();
+		cancelStartupPrewarm = scheduleStartupPrewarm();
 	}
 
 	function dismissPkceReloginForSession() {
@@ -598,6 +632,11 @@
 			if (!resp.ok) throw new Error(`onboarding check failed: ${resp.status}`);
 			const { complete } = await resp.json();
 			onboardingChecked = true;
+			if (complete) {
+				markLocalOnboardingComplete(onboardingScope());
+			} else {
+				clearLocalOnboardingComplete(onboardingScope());
+			}
 			if (!complete && !page.url.pathname.startsWith('/onboarding')) {
 				await goto('/onboarding', { replaceState: true });
 			}

@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { api, authFetch, getApiBase, type AudioQuality } from '$lib/api/client';
+	import { api, authFetch, getApiBase, getStoredToken, type AudioQuality } from '$lib/api/client';
+	import { markLocalOnboardingComplete } from '$lib/onboarding/status';
 	import TidalConnect from '$lib/components/onboarding/TidalConnect.svelte';
 	import ListeningServicesConnect from '$lib/components/onboarding/ListeningServicesConnect.svelte';
 	let step = $state(0);
@@ -36,6 +37,7 @@
 			const resp = await authFetch(`${getApiBase()}/api/setup/onboarding/complete`, {
 				method: 'POST',
 			});
+			if (resp.ok) markLocalOnboardingComplete(getStoredToken());
 			return resp.ok;
 		} catch {
 			return false;
