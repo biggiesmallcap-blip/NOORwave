@@ -156,6 +156,52 @@ describe('ephemeral TIDAL favorite import', () => {
 
 		expect(get(currentTrack)?.is_favorite).toBe(true);
 	});
+
+	test('keeps the liked state when a stale playback hydrate returns false for the imported track', async () => {
+		await playTidalTrackNow({
+			tidal_id: 555,
+			title: 'Ephemeral Song',
+			artist_name: 'TIDAL Artist',
+			artist_tidal_id: 333,
+			album_title: 'TIDAL Album',
+			album_tidal_id: 444,
+			artwork_url: 'https://example.test/art.jpg',
+			duration_ms: 180000,
+			is_favorite: false,
+		});
+
+		await toggleTrackFavorite(-555, false);
+
+		const staleSavedTrack = {
+			...ephemeralTrack(),
+			id: 98,
+			tidal_id: 555,
+			artist_id: 77,
+			album_id: 66,
+			is_favorite: false,
+			source: 'tidal',
+		};
+		hydratePlayback({
+			state: {
+				current_track: staleSavedTrack,
+				current_queue_item_id: null,
+				position_ms: 0,
+				is_playing: true,
+				volume: 1,
+				shuffle_mode: 'off',
+				repeat_mode: 'one',
+				automix_enabled: false,
+				crossfade_ms: 0,
+				automix_discover_new: false,
+				automix_use_learning: false,
+				automix_allow_external: false,
+			},
+			queue: [],
+		});
+
+		expect(get(currentTrack)?.id).toBe(98);
+		expect(get(currentTrack)?.is_favorite).toBe(true);
+	});
 });
 
 describe('setPlayerPosition 409 ack handling', () => {

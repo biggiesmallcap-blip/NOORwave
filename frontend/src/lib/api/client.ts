@@ -2998,8 +2998,8 @@ export const api = {
 		);
 	},
 
-	search(query: string, limit = 20) {
-		return fetchApi<SearchResults>('/api/search', { q: query, limit: String(limit) });
+	search(query: string, limit = 20, signal?: AbortSignal) {
+		return fetchApi<SearchResults>('/api/search', { q: query, limit: String(limit) }, { signal });
 	},
 
 	searchAudio(params: AudioSearchParams, signal?: AbortSignal) {

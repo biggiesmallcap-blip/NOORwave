@@ -65,7 +65,7 @@
 	$effect(() => {
 		const activeMode = mode;
 		if (activeMode === 'playlists') {
-			// Playlist tab doesn't use the search input — it lists every playlist
+			// Playlist tab doesn't use the search input - it lists every playlist
 			// once and filters client-side. Fetch on first switch.
 			searchGate.invalidate();
 			busy = false;
@@ -85,17 +85,18 @@
 			return;
 		}
 		const token = searchGate.begin();
+		const controller = new AbortController();
 		busy = true;
 		const timer = setTimeout(() => {
 			const request =
 				activeMode === 'tidal'
-					? api.searchTidal(normalized, 12).then((data) => {
+					? api.searchTidal(normalized, 12, controller.signal).then((data) => {
 							if (!searchGate.isCurrent(token)) return;
 							tidalResults = data.tracks;
 							results = [];
 							error = '';
 						})
-					: api.search(normalized, 12).then((data) => {
+					: api.search(normalized, 12, controller.signal).then((data) => {
 							if (!searchGate.isCurrent(token)) return;
 							results = data.tracks;
 							tidalResults = [];
@@ -103,16 +104,21 @@
 						});
 			void request
 				.catch(() => {
+					if (controller.signal.aborted) return;
 					if (!searchGate.isCurrent(token)) return;
 					results = [];
 					tidalResults = [];
 					error = 'Search failed.';
 				})
 				.finally(() => {
+					if (controller.signal.aborted) return;
 					if (searchGate.isCurrent(token)) busy = false;
 				});
 		}, 180);
-		return () => clearTimeout(timer);
+		return () => {
+			clearTimeout(timer);
+			controller.abort();
+		};
 	});
 
 	let filteredPlaylists = $derived.by(() => {
@@ -149,7 +155,7 @@
 
 	function openLibraryMenu(track: Track) {
 		// Long-press closes the search sheet so the action menu isn't trapped
-		// behind it — otherwise tapping "Go to artist" can't navigate cleanly.
+		// behind it - otherwise tapping "Go to artist" can't navigate cleanly.
 		close();
 		openActionSheet({
 			title: track.title,

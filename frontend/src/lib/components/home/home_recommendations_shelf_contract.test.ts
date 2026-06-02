@@ -16,6 +16,7 @@ const homePage = readFileSync(join(here, '../../../routes/+page.svelte'), 'utf8'
 const client = readFileSync(join(here, '../../api/client.ts'), 'utf8');
 const playTrending = readFileSync(join(here, '../../player/play_trending.ts'), 'utf8');
 const serverRoutes = readFileSync(join(here, '../../../../../noor-server/src/server/routes.rs'), 'utf8');
+const homeRoutes = readFileSync(join(here, '../../../../../noor-server/src/server/routes/home_routes.rs'), 'utf8');
 
 const emptySearchResults: TidalSearchResults = { tracks: [], albums: [], artists: [], videos: [] };
 
@@ -65,35 +66,36 @@ describe('home recommendations shelf contract', () => {
 		expect(source).toContain('PANEL_LIMIT = 20');
 		expect(source).toContain('visibleShelves');
 		expect(source).toContain('shelfMuralItems');
-		expect(serverRoutes).toContain('track_get_similar_with_artist_fallback');
-		expect(serverRoutes).toContain('recommendation_placeholder_item');
-		expect(serverRoutes).toContain('RECOMMENDATION_HOME_CACHE_KEY: &str = "home:v6"');
-		expect(serverRoutes).toContain('LASTFM_HOME_RECOMMENDATION_LIMIT: usize = 20');
-		expect(serverRoutes).toContain('LASTFM_HOME_SEED_LIMIT: usize = 12');
-		expect(serverRoutes).toContain('LASTFM_HOME_SIMILAR_LIMIT: usize = 20');
-		expect(serverRoutes).toContain('LASTFM_HOME_ARTIST_LIMIT: usize = 20');
-		expect(serverRoutes).toContain('LASTFM_HOME_ALBUM_LIMIT: usize = 20');
+		expect(serverRoutes).toContain('home_routes::get_home_recommendations');
+		expect(homeRoutes).toContain('track_get_similar_with_artist_fallback');
+		expect(homeRoutes).toContain('recommendation_placeholder_item');
+		expect(homeRoutes).toContain('RECOMMENDATION_HOME_CACHE_KEY: &str = "home:v6"');
+		expect(homeRoutes).toContain('LASTFM_HOME_RECOMMENDATION_LIMIT: usize = 20');
+		expect(homeRoutes).toContain('LASTFM_HOME_SEED_LIMIT: usize = 12');
+		expect(homeRoutes).toContain('LASTFM_HOME_SIMILAR_LIMIT: usize = 20');
+		expect(homeRoutes).toContain('LASTFM_HOME_ARTIST_LIMIT: usize = 20');
+		expect(homeRoutes).toContain('LASTFM_HOME_ALBUM_LIMIT: usize = 20');
 	});
 
 	test('varies Last.fm seed reasons beyond stable top artists', () => {
-		expect(serverRoutes).toContain('load_lastfm_track_seeds');
-		expect(serverRoutes).toContain('load_lastfm_artist_seeds');
-		expect(serverRoutes).toContain('user_recent_tracks');
-		expect(serverRoutes).toContain('Because you played {} recently');
-		expect(serverRoutes).toContain('Because you loved {}');
-		expect(serverRoutes).toContain('Near your top artist {}');
-		expect(serverRoutes).toContain('recommendation_seed_window');
+		expect(homeRoutes).toContain('load_lastfm_track_seeds');
+		expect(homeRoutes).toContain('load_lastfm_artist_seeds');
+		expect(homeRoutes).toContain('user_recent_tracks');
+		expect(homeRoutes).toContain('Because you played {} recently');
+		expect(homeRoutes).toContain('Because you loved {}');
+		expect(homeRoutes).toContain('Near your top artist {}');
+		expect(homeRoutes).toContain('recommendation_seed_window');
 	});
 
 	test('splits Last.fm tracks, artists, and albums into separate panels', () => {
 		expect(client).toContain("entity_type?: 'track' | 'artist' | 'album' | string");
-		expect(serverRoutes).toContain('Last.fm recommended tracks');
-		expect(serverRoutes).toContain('Last.fm recommended artists');
-		expect(serverRoutes).toContain('Last.fm recommended albums');
-		expect(serverRoutes).toContain('fetch_lastfm_artist_recommendations');
-		expect(serverRoutes).toContain('fetch_lastfm_album_recommendations');
-		expect(serverRoutes).toContain('resolve_recommendation_artist_item');
-		expect(serverRoutes).toContain('resolve_recommendation_album_item');
+		expect(homeRoutes).toContain('Last.fm recommended tracks');
+		expect(homeRoutes).toContain('Last.fm recommended artists');
+		expect(homeRoutes).toContain('Last.fm recommended albums');
+		expect(homeRoutes).toContain('fetch_lastfm_artist_recommendations');
+		expect(homeRoutes).toContain('fetch_lastfm_album_recommendations');
+		expect(homeRoutes).toContain('resolve_recommendation_artist_item');
+		expect(homeRoutes).toContain('resolve_recommendation_album_item');
 		expect(source).toContain("shelf.entity_type === 'artist'");
 		expect(source).toContain("shelf.entity_type === 'album'");
 		expect(source).toContain('itemMetric');

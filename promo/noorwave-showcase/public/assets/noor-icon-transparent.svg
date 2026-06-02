@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="NOOR icon">
+<title>NOOR icon</title>
+<g transform="translate(512 512)">
+  <!-- Left O -->
+  <g transform="translate(-150 0)">
+    <circle r="215" fill="#FFFFFF"/>
+    <circle r="160" fill="#0A0A0A"/>
+    <circle r="145" fill="#2DD4D4"/>
+    <circle r="90"  fill="#0A0A0A"/>
+    <circle r="82"  fill="none" stroke="#FFFFFF" stroke-width="8"/>
+    <ellipse rx="24" ry="58" fill="#0A0A0A" stroke="#FFFFFF" stroke-width="8" transform="rotate(-25)"/>
+  </g>
+  <!-- Right O -->
+  <g transform="translate(150 0)">
+    <circle r="215" fill="#FFFFFF"/>
+    <circle r="160" fill="#0A0A0A"/>
+    <circle r="145" fill="#2DD4D4"/>
+    <ellipse rx="24" ry="58" fill="#0A0A0A" transform="rotate(-25)"/>
+  </g>
+</g>
+</svg>
