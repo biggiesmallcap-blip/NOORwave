@@ -743,12 +743,54 @@ impl TidalClient {
         page_path: &str,
         country_code: &str,
         limit: u32,
-    ) -> String {
-        let separator = if page_path.contains('?') { '&' } else { '?' };
-        format!(
-            "{}/{}{}countryCode={}&deviceType=BROWSER&locale=en_US&limit={}",
-            api_url, page_path, separator, country_code, limit
-        )
+    ) -> Result<String> {
+        let page_path = Self::validate_tidal_api_path(page_path)?;
+        let (path, query) = match page_path.split_once('?') {
+            Some((path, query)) => (path, Some(query)),
+            None => (page_path, None),
+        };
+        let base = format!("{}/{}", api_url.trim_end_matches('/'), path);
+        let mut url = reqwest::Url::parse(&base).context("invalid TIDAL API URL")?;
+        if let Some(query) = query
+            && !query.is_empty()
+        {
+            url.set_query(Some(query));
+        }
+        {
+            let mut pairs = url.query_pairs_mut();
+            pairs.append_pair("countryCode", country_code);
+            pairs.append_pair("deviceType", "BROWSER");
+            pairs.append_pair("locale", "en_US");
+            pairs.append_pair("limit", &limit.to_string());
+        }
+        Ok(url.to_string())
+    }
+
+    fn validate_tidal_api_path(path: &str) -> Result<&str> {
+        let trimmed = path.trim();
+        if trimmed.is_empty() || trimmed != path {
+            anyhow::bail!("invalid TIDAL API path");
+        }
+        if trimmed.starts_with('/')
+            || trimmed.starts_with("//")
+            || trimmed.contains("://")
+            || trimmed.contains('\\')
+            || trimmed.contains('#')
+            || trimmed.chars().any(char::is_control)
+        {
+            anyhow::bail!("invalid TIDAL API path");
+        }
+
+        let path_part = trimmed.split_once('?').map_or(trimmed, |(path, _)| path);
+        if path_part.is_empty()
+            || path_part
+                .split('/')
+                .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+        {
+            anyhow::bail!("invalid TIDAL API path");
+        }
+
+        Ok(trimmed)
     }
 
     /// Fetch editorial modules from any `/v1/pages/{page_path}` endpoint. Wraps
@@ -756,7 +798,7 @@ impl TidalClient {
     /// (`rows[].modules[]`) is universal across home / charts / moods / genres /
     /// new-releases / mood/{id} / genre/{id}.
     pub async fn get_page_modules(&self, page_path: &str) -> Result<Vec<TidalHomeModule>> {
-        let url = Self::build_page_modules_url(TIDAL_API_URL, page_path, &self.country_code, 12);
+        let url = Self::build_page_modules_url(TIDAL_API_URL, page_path, &self.country_code, 12)?;
         let payload: serde_json::Value = self.get_json(&url).await?;
         Ok(Self::parse_home_modules(&payload))
     }
@@ -766,7 +808,7 @@ impl TidalClient {
     /// expose TIDAL's module-type vocabulary while we firm up which slugs and
     /// shapes we need to handle.
     pub async fn get_page_raw(&self, page_path: &str) -> Result<serde_json::Value> {
-        let url = Self::build_page_modules_url(TIDAL_API_URL, page_path, &self.country_code, 12);
+        let url = Self::build_page_modules_url(TIDAL_API_URL, page_path, &self.country_code, 12)?;
         self.get_json(&url).await
     }
 
@@ -853,11 +895,8 @@ impl TidalClient {
         module_kind: &str,
         limit: u32,
     ) -> Result<Vec<TidalHomeItem>> {
-        let separator = if more_path.contains('?') { '&' } else { '?' };
-        let url = format!(
-            "{}/{}{}countryCode={}&deviceType=BROWSER&locale=en_US&limit={}",
-            TIDAL_API_URL, more_path, separator, self.country_code, limit
-        );
+        let url =
+            Self::build_page_modules_url(TIDAL_API_URL, more_path, &self.country_code, limit)?;
         let payload: serde_json::Value = self.get_json(&url).await?;
         // "show more" endpoints return either a top-level pagedList or a
         // wrapped row/module shape — unwrap whichever we get.
@@ -1886,7 +1925,8 @@ mod tests {
             "pages/charts",
             "US",
             12,
-        );
+        )
+        .unwrap();
         assert_eq!(
             plain,
             "https://api.tidal.com/v1/pages/charts?countryCode=US&deviceType=BROWSER&locale=en_US&limit=12",
@@ -1897,10 +1937,34 @@ mod tests {
             "pages/mood/abc?foo=bar",
             "GB",
             50,
-        );
+        )
+        .unwrap();
         assert_eq!(
             already_queried,
             "https://api.tidal.com/v1/pages/mood/abc?foo=bar&countryCode=GB&deviceType=BROWSER&locale=en_US&limit=50",
         );
+    }
+
+    #[test]
+    fn build_page_modules_url_rejects_unsafe_paths() {
+        for path in [
+            "",
+            " pages/home",
+            "/pages/home",
+            "//api.tidal.com/v1/pages/home",
+            "https://example.test/pages/home",
+            "pages/../home",
+            "pages/./home",
+            "pages//home",
+            r"pages\home",
+            "pages/home#fragment",
+            "pages/home\nnext",
+        ] {
+            assert!(
+                TidalClient::build_page_modules_url("https://api.tidal.com/v1", path, "US", 12,)
+                    .is_err(),
+                "path should be rejected: {path:?}",
+            );
+        }
     }
 }

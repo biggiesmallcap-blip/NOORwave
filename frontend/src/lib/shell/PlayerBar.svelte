@@ -4,6 +4,11 @@
 	import NowPlayingTransport from '$lib/components/now-playing/NowPlayingTransport.svelte';
 	import type { StreamDisplayInfo, Track } from '$lib/api/client';
 	import { formatResolutionShort } from '$lib/player/stream_display';
+	import {
+		tidalArtworkFallbackSizes,
+		upscaleTidalArtwork,
+		type TidalArtworkSize,
+	} from '$lib/utils/artwork';
 	import { getQualityClass } from '$lib/utils/format';
 
 	type PlayerBarError = {
@@ -81,6 +86,26 @@
 		onDismissPlayerError: () => void;
 	} = $props();
 
+	let failedArtworkUrls = $state<Record<string, boolean>>({});
+	let nowPlayingArtwork = $derived(artworkCandidate(track?.artwork_url, 640));
+
+	function artworkCandidate(
+		rawUrl: string | null | undefined,
+		size: TidalArtworkSize,
+	): string | null {
+		if (!rawUrl) return null;
+		for (const candidateSize of tidalArtworkFallbackSizes(rawUrl, size)) {
+			const candidate = upscaleTidalArtwork(rawUrl, candidateSize);
+			if (candidate && !failedArtworkUrls[candidate]) return candidate;
+		}
+		return null;
+	}
+
+	function markArtworkFailed(renderedUrl: string | null | undefined) {
+		if (!renderedUrl) return;
+		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
+	}
+
 	function formatQuality(q: string | null) {
 		if (!q) return '';
 		if (q === 'HI_RES_LOSSLESS') return 'HiRes Lossless';
@@ -123,8 +148,13 @@
 <div class="np-top" class:queue-expanded={queueExpanded}>
 	<div class="np-artwork-wrap">
 		{#key track?.artwork_url}
-			{#if track?.artwork_url}
-				<img class="np-artwork" src={track.artwork_url} alt="" />
+			{#if nowPlayingArtwork}
+				<img
+					class="np-artwork"
+					src={nowPlayingArtwork}
+					alt=""
+					onerror={() => markArtworkFailed(nowPlayingArtwork)}
+				/>
 			{:else}
 				<div class="np-artwork placeholder">♫</div>
 			{/if}

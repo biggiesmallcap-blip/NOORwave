@@ -133,7 +133,7 @@ Per the hardened plan, do not vendor C++ or switch crates in this slice. The opt
 Retried on 2026-05-27 after installing LLVM 22.1.6 with `winget` and setting:
 
 ```powershell
-$env:LIBCLANG_PATH='C:\Program Files\LLVM\bin'
+$env:LIBCLANG_PATH='<llvm-bin>'
 ```
 
 Feature gate passed:

@@ -6,6 +6,11 @@
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { formatTrackDuration } from '$lib/utils/format';
+	import {
+		tidalArtworkFallbackSizes,
+		upscaleTidalArtwork,
+		type TidalArtworkSize,
+	} from '$lib/utils/artwork';
 
 	let { album, tracks, loading, onClose }: {
 		album: Album;
@@ -13,6 +18,25 @@
 		loading: boolean;
 		onClose: () => void;
 	} = $props();
+	let failedArtworkUrls = $state<Record<string, boolean>>({});
+	let popupArtwork = $derived(artworkCandidate(album.artwork_url, 640));
+
+	function artworkCandidate(
+		rawUrl: string | null | undefined,
+		size: TidalArtworkSize,
+	): string | null {
+		if (!rawUrl) return null;
+		for (const candidateSize of tidalArtworkFallbackSizes(rawUrl, size)) {
+			const candidate = upscaleTidalArtwork(rawUrl, candidateSize);
+			if (candidate && !failedArtworkUrls[candidate]) return candidate;
+		}
+		return null;
+	}
+
+	function markArtworkFailed(renderedUrl: string | null | undefined) {
+		if (!renderedUrl) return;
+		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
+	}
 
 	function handleKey(e: KeyboardEvent) {
 		if (e.key === 'Escape') {
@@ -72,8 +96,13 @@
 
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<div class="popup-hero" oncontextmenu={openAlbumContextMenu}>
-			{#if album.artwork_url}
-				<img class="popup-art" src={album.artwork_url} alt={album.title} />
+			{#if popupArtwork}
+				<img
+					class="popup-art"
+					src={popupArtwork}
+					alt={album.title}
+					onerror={() => markArtworkFailed(popupArtwork)}
+				/>
 			{:else}
 				<div class="popup-art placeholder">♫</div>
 			{/if}

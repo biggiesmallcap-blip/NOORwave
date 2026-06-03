@@ -12,7 +12,6 @@
 		normalizeRemoteSearchQuery,
 		shouldRunRemoteSearch
 	} from '$lib/remote/search';
-	import { upscaleTidalArtwork } from '$lib/utils/artwork';
 	import { showToast } from '$lib/stores/toast';
 	import { hapticTap } from '$lib/remote/haptics';
 	import { longPress } from '$lib/remote/long_press';
@@ -22,6 +21,7 @@
 		buildTrackMenu,
 		type MenuTrack
 	} from '$lib/player/track_menu';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 
 	type SearchMode = 'library' | 'tidal' | 'playlists';
 
@@ -35,6 +35,7 @@
 	let playlists = $state<Playlist[]>([]);
 	let playlistsLoaded = $state(false);
 	const searchGate = createRemoteSearchGate();
+	let playlistLoadSeq = 0;
 
 	let inputEl: HTMLInputElement | null = $state(null);
 
@@ -75,6 +76,7 @@
 			}
 			return;
 		}
+		playlistLoadSeq++;
 		const normalized = normalizeRemoteSearchQuery(query);
 		if (!shouldRunRemoteSearch(normalized)) {
 			searchGate.invalidate();
@@ -128,16 +130,19 @@
 	});
 
 	async function loadPlaylists() {
+		const token = ++playlistLoadSeq;
 		busy = true;
 		error = '';
 		try {
 			const res = await api.getPlaylists();
+			if (token !== playlistLoadSeq || mode !== 'playlists') return;
 			playlists = res.playlists;
 			playlistsLoaded = true;
 		} catch {
+			if (token !== playlistLoadSeq || mode !== 'playlists') return;
 			error = 'Could not load playlists.';
 		} finally {
-			busy = false;
+			if (token === playlistLoadSeq && mode === 'playlists') busy = false;
 		}
 	}
 
@@ -441,11 +446,13 @@
 									use:longPress={() => openLibraryMenu(track)}
 									onclick={() => void pickLibrary(track)}
 								>
-									{#if track.artwork_url}
-										<img src={upscaleTidalArtwork(track.artwork_url, 320)} alt="" />
-									{:else}
-										<span class="remote-search-thumb-empty" aria-hidden="true">NOOR</span>
-									{/if}
+									<ArtworkImage
+										className="remote-search-thumb"
+										src={track.artwork_url}
+										size={320}
+										fallbackText="NOOR"
+										decorative={true}
+									/>
 									<span class="remote-search-card-copy">
 										<strong>{track.title}</strong>
 										<small>{track.artist_name ?? 'Unknown artist'}</small>
@@ -476,11 +483,13 @@
 									use:longPress={() => openTidalMenu(track)}
 									onclick={() => void pickTidal(track)}
 								>
-									{#if track.artwork_url}
-										<img src={upscaleTidalArtwork(track.artwork_url, 320)} alt="" />
-									{:else}
-										<span class="remote-search-thumb-empty" aria-hidden="true">NOOR</span>
-									{/if}
+									<ArtworkImage
+										className="remote-search-thumb"
+										src={track.artwork_url}
+										size={320}
+										fallbackText="NOOR"
+										decorative={true}
+									/>
 									<span class="remote-search-card-copy">
 										<strong>{track.title}</strong>
 										<small>
@@ -717,7 +726,7 @@
 		background: var(--surface-1);
 	}
 
-	.remote-search-card img,
+	:global(.remote-search-thumb),
 	.remote-search-thumb-empty {
 		width: 48px;
 		height: 48px;
@@ -726,12 +735,17 @@
 		flex-shrink: 0;
 	}
 
+	:global(.remote-search-thumb.fallback),
 	.remote-search-thumb-empty {
 		display: grid;
 		place-items: center;
 		background: var(--surface-1);
 		color: var(--text-muted);
 		font-size: var(--font-size-xs);
+	}
+
+	:global(.remote-search-thumb.fallback span) {
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.remote-search-card-copy {

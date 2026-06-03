@@ -1,7 +1,9 @@
 use super::models::*;
 use crate::services::discovery::DiscoveryCandidateSeed;
 use anyhow::{Result, bail};
-use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
+use rusqlite::{
+    Connection, OptionalExtension, Row, params, params_from_iter, types::Value as SqlValue,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -637,20 +639,26 @@ pub fn get_tracks_with_dsp(
         ""
     };
 
+    let mut bind_values = Vec::new();
     if let Some(min) = dsp.bpm_min {
-        conditions.push(format!("a.bpm >= {min}"));
+        bind_values.push(SqlValue::Real(min));
+        conditions.push(format!("a.bpm >= ?{}", bind_values.len()));
     }
     if let Some(max) = dsp.bpm_max {
-        conditions.push(format!("a.bpm <= {max}"));
+        bind_values.push(SqlValue::Real(max));
+        conditions.push(format!("a.bpm <= ?{}", bind_values.len()));
     }
     if let Some(min) = dsp.energy_min {
-        conditions.push(format!("a.energy >= {min}"));
+        bind_values.push(SqlValue::Real(min));
+        conditions.push(format!("a.energy >= ?{}", bind_values.len()));
     }
     if let Some(max) = dsp.energy_max {
-        conditions.push(format!("a.energy <= {max}"));
+        bind_values.push(SqlValue::Real(max));
+        conditions.push(format!("a.energy <= ?{}", bind_values.len()));
     }
     if let Some(ref key) = dsp.key_signature {
-        conditions.push(format!("a.key_signature = '{key}'"));
+        bind_values.push(SqlValue::Text(key.clone()));
+        conditions.push(format!("a.key_signature = ?{}", bind_values.len()));
     }
     if dsp.instrumental_only {
         conditions.push("a.is_instrumental = 1".to_string());
@@ -663,6 +671,10 @@ pub fn get_tracks_with_dsp(
     };
 
     let projection = track_projection("a_artists");
+    bind_values.push(SqlValue::Integer(limit));
+    let limit_param = bind_values.len();
+    bind_values.push(SqlValue::Integer(offset));
+    let offset_param = bind_values.len();
     let sql = format!(
         "SELECT {projection}
          FROM tracks t
@@ -671,12 +683,12 @@ pub fn get_tracks_with_dsp(
          {join_clause}
          {where_clause}
          ORDER BY {order_clause}
-         LIMIT ?1 OFFSET ?2"
+         LIMIT ?{limit_param} OFFSET ?{offset_param}"
     );
 
     let mut stmt = conn.prepare(&sql)?;
     let tracks = stmt
-        .query_map(params![limit, offset], track_from_row)?
+        .query_map(params_from_iter(bind_values.iter()), track_from_row)?
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(tracks)

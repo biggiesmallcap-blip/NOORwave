@@ -11,7 +11,7 @@
 	 * MEDIAN and MODE rows include a tiny inline histogram of the full-window
 	 * BPM distribution; MODE marks the argmax bucket with a vertical tick.
 	 *
-	 * Spec: C:\Users\Felix\.claude\plans\lets-revision-analytics-stats-crystalline-melody.md
+	 * Contract: rendered by frontend/src/routes/analytics/+page.svelte.
 	 */
 
 	import type { TempoView, BpmBucket } from '$lib/api/client';

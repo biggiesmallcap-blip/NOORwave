@@ -1,7 +1,7 @@
 import type { AudioSearchParams, Genre } from '$lib/api/client';
 import type { FilterValue, ParsedQuery } from '$lib/search/query_parser';
 
-export function resolveGenreIds(filter: FilterValue, genres: Genre[]): number[] {
+function resolveGenreIds(filter: FilterValue, genres: Genre[]): number[] {
 	const slugs =
 		filter.type === 'multi'
 			? filter.values

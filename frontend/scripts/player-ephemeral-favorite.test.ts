@@ -95,6 +95,27 @@ describe('ephemeral TIDAL favorite import', () => {
 		currentTrack.set(null);
 	});
 
+	test('resets stale scrubber state when starting an ephemeral TIDAL track', async () => {
+		position.set(64_000);
+		buffered.set(90_000);
+
+		await playTidalTrackNow({
+			tidal_id: 777,
+			title: 'Fresh Start',
+			artist_name: 'TIDAL Artist',
+			artist_tidal_id: 333,
+			album_title: 'TIDAL Album',
+			album_tidal_id: 444,
+			artwork_url: 'https://example.test/fresh.jpg',
+			duration_ms: 180_000,
+			is_favorite: false,
+		});
+
+		expect(get(currentTrack)?.tidal_id).toBe(777);
+		expect(get(position)).toBe(0);
+		expect(get(buffered)).toBe(0);
+	});
+
 	test('preserves TIDAL artist and album IDs when liking an ephemeral track', async () => {
 		currentTrack.set(ephemeralTrack());
 

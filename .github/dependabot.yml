@@ -38,3 +38,23 @@ updates:
         patterns: ["*"]
     ignore:
       - dependency-name: "@tauri-apps/*"
+
+  - package-ecosystem: npm
+    directory: /scripts
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+    groups:
+      scripts:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /promo/noorwave-showcase
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+    groups:
+      promo-showcase:
+        patterns: ["*"]

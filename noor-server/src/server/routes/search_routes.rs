@@ -16,6 +16,14 @@ use std::time::Instant;
 
 const SPORTIFY_PLAYLIST_WARN_THROTTLE_MS: u64 = 30_000;
 const SPORTIFY_PLAYLIST_WARN_KEY_CAP: usize = 1024;
+const SEARCH_LIMIT_DEFAULT: i64 = 20;
+const SEARCH_LIMIT_MAX: i64 = 50;
+const AUDIO_SEARCH_LIMIT_DEFAULT: usize = 50;
+const AUDIO_SEARCH_LIMIT_MAX: usize = 50;
+const VIBE_LIMIT_DEFAULT: usize = 6;
+const VIBE_LIMIT_MAX: usize = 50;
+const UNDERRATED_LIMIT_DEFAULT: usize = 5;
+const UNDERRATED_LIMIT_MAX: usize = 50;
 static SPORTIFY_PLAYLIST_WARN_STATE: OnceLock<Mutex<HashMap<u64, u64>>> = OnceLock::new();
 static SPORTIFY_PLAYLIST_WARN_CLOCK_START: OnceLock<Instant> = OnceLock::new();
 
@@ -29,7 +37,7 @@ pub(super) async fn search(
     State(state): State<SharedState>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<Value>, StatusCode> {
-    let limit = params.limit.unwrap_or(20);
+    let limit = clamp_i64_limit(params.limit, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX);
 
     // Snapshot what each side needs without holding the read lock across the
     // Sportify HTTP call.
@@ -90,6 +98,14 @@ pub(super) async fn search(
         "artists": local.artists,
         "spotify_playlists": spotify_playlists,
     })))
+}
+
+fn clamp_i64_limit(limit: Option<i64>, default: i64, max: i64) -> i64 {
+    limit.unwrap_or(default).clamp(1, max)
+}
+
+fn clamp_usize_limit(limit: Option<usize>, default: usize, max: usize) -> usize {
+    limit.unwrap_or(default).clamp(1, max)
 }
 
 /// Compact playlist-search result tailored for inline rendering in /search
@@ -252,6 +268,46 @@ mod tests {
         let b = sportify_playlist_warn_key("daft punk", "sportify request failed: /api/search");
         assert_eq!(a, b);
     }
+
+    #[test]
+    fn i64_limit_clamps_to_min_default_and_max() {
+        assert_eq!(
+            clamp_i64_limit(None, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX),
+            20
+        );
+        assert_eq!(
+            clamp_i64_limit(Some(-10), SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX),
+            1
+        );
+        assert_eq!(
+            clamp_i64_limit(Some(0), SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX),
+            1
+        );
+        assert_eq!(
+            clamp_i64_limit(Some(5000), SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX),
+            50
+        );
+    }
+
+    #[test]
+    fn usize_limit_clamps_to_min_default_and_max() {
+        assert_eq!(
+            clamp_usize_limit(None, AUDIO_SEARCH_LIMIT_DEFAULT, AUDIO_SEARCH_LIMIT_MAX),
+            50
+        );
+        assert_eq!(
+            clamp_usize_limit(Some(0), AUDIO_SEARCH_LIMIT_DEFAULT, AUDIO_SEARCH_LIMIT_MAX),
+            1
+        );
+        assert_eq!(
+            clamp_usize_limit(
+                Some(5000),
+                AUDIO_SEARCH_LIMIT_DEFAULT,
+                AUDIO_SEARCH_LIMIT_MAX
+            ),
+            50
+        );
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -293,7 +349,11 @@ pub(super) async fn search_audio(
         is_instrumental: body.is_instrumental,
     };
     let free_text = body.free_text.unwrap_or_default();
-    let limit = body.limit.unwrap_or(50);
+    let limit = clamp_usize_limit(
+        body.limit,
+        AUDIO_SEARCH_LIMIT_DEFAULT,
+        AUDIO_SEARCH_LIMIT_MAX,
+    );
 
     let state = state.read().await;
     state
@@ -315,7 +375,7 @@ pub(super) async fn search_vibe(
     State(state): State<SharedState>,
     Query(params): Query<VibeParams>,
 ) -> Result<Json<Value>, StatusCode> {
-    let limit = params.limit.unwrap_or(6);
+    let limit = clamp_usize_limit(params.limit, VIBE_LIMIT_DEFAULT, VIBE_LIMIT_MAX);
     let state = state.read().await;
     state
         .db
@@ -336,7 +396,7 @@ pub(super) async fn search_underrated(
     State(state): State<SharedState>,
     Query(params): Query<UnderratedParams>,
 ) -> Result<Json<Value>, StatusCode> {
-    let limit = params.limit.unwrap_or(5);
+    let limit = clamp_usize_limit(params.limit, UNDERRATED_LIMIT_DEFAULT, UNDERRATED_LIMIT_MAX);
     let state = state.read().await;
     state
         .db

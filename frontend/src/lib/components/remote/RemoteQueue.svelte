@@ -32,6 +32,7 @@
 		if (dragState.active) return;
 		displayQueue = queue;
 	});
+	let failedArtworkUrls = $state<Record<string, boolean>>({});
 
 	const ROW_HEIGHT = 64; // matches min-height + gap below; used for index math
 	const dragState = $state({
@@ -137,7 +138,18 @@
 		await removeTrackFromQueue(item.id);
 	}
 
-	// ─── Drag-reorder ─────────────────────────────────────────────────────────
+	function queueArtwork(rawUrl: string | null | undefined): string | null {
+		const renderedUrl = upscaleTidalArtwork(rawUrl, 320);
+		if (renderedUrl && !failedArtworkUrls[renderedUrl]) return renderedUrl;
+		return null;
+	}
+
+	function markArtworkFailed(renderedUrl: string | null) {
+		if (!renderedUrl) return;
+		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
+	}
+
+	// Drag-reorder
 	// Pointerdown on a row's drag handle starts a reorder gesture. We let the
 	// row follow the finger via a CSS transform and recompute the target index
 	// from the cumulative y-offset. On release we fire `api.moveQueueTrack` for
@@ -246,6 +258,7 @@
 	{:else}
 		<div class="remote-queue-list">
 			{#each displayQueue.slice(0, 20) as item, index (item.id)}
+				{@const queueArt = queueArtwork(item.track.artwork_url)}
 				<div
 					class="remote-queue-row"
 					class:pending={item.is_pending}
@@ -263,12 +276,13 @@
 						use:longPress={() => openRowMenu(item)}
 						onclick={() => void onPlayRow(item)}
 					>
-						{#if item.track.artwork_url}
+						{#if queueArt}
 							<img
-								src={upscaleTidalArtwork(item.track.artwork_url, 320)}
+								src={queueArt}
 								alt=""
 								loading="lazy"
 								decoding="async"
+								onerror={() => markArtworkFailed(queueArt)}
 							/>
 						{:else}
 							<span class="remote-queue-thumb-empty" aria-hidden="true">NOOR</span>
@@ -335,7 +349,7 @@
 	}
 
 	/* content-visibility: auto on queue rows was thrashing iOS Safari scroll
-	   on long queues — same issue as the library list. Lazy-loaded images
+	   on long queues - same issue as the library list. Lazy-loaded images
 	   are enough for the perf budget here. */
 
 	.remote-queue {

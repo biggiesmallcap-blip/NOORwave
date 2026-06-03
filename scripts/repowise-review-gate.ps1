@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$ChangeRef = "main..HEAD",
+    [string]$ChangeRef = "origin/master..HEAD",
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 )
 

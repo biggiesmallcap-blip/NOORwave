@@ -3162,7 +3162,7 @@ mod radio_diagnostic_harness {
     //! ## Usage
     //!
     //! ```bash
-    //! NOOR_SEED=1634 NOOR_DB=/e/NOORwave/noor.db \
+    //! NOOR_SEED=1634 NOOR_DB=<local-db> \
     //!     cargo test -p noor-server radio_diagnostic_for_seed \
     //!     -- --ignored --nocapture
     //! ```

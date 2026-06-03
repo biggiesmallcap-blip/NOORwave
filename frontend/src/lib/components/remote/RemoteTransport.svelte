@@ -59,7 +59,14 @@
 		volumeDisplay = Math.round(volume * 100);
 	});
 
-	let artworkUrl = $derived(upscaleTidalArtwork(track?.artwork_url));
+	let artworkFailed = $state(false);
+	let lastArtworkUrl = $state<string | null>(null);
+	let artworkUrl = $derived(upscaleTidalArtwork(track?.artwork_url, 640));
+	$effect(() => {
+		if (artworkUrl === lastArtworkUrl) return;
+		lastArtworkUrl = artworkUrl;
+		artworkFailed = false;
+	});
 	let isFavorite = $derived(track?.is_favorite === true);
 	let streamDetail = $derived(
 		formatPlayerStreamDetail({
@@ -114,7 +121,7 @@
 		void toggleTrackFavorite(track.id, track.is_favorite ?? false);
 	}
 
-	// True when the currently-playing track is a TIDAL ephemeral entry — these
+	// True when the currently-playing track is a TIDAL ephemeral entry - these
 	// have a synthetic negative `id`, `artist_id = -1`, and `album_id = null`,
 	// but they DO carry `artist_tidal_id` / `album_tidal_id` for navigation.
 	let isTidalEphemeral = $derived(!!track && track.id <= 0 && !!track.tidal_id);
@@ -316,8 +323,14 @@
 		onpointercancel={onSwipeCancel}
 		use:longPress={openTrackActions}
 	>
-		{#if artworkUrl}
-			<img src={artworkUrl} alt="" draggable="false" decoding="async" />
+		{#if artworkUrl && !artworkFailed}
+			<img
+				src={artworkUrl}
+				alt=""
+				draggable="false"
+				decoding="async"
+				onerror={() => (artworkFailed = true)}
+			/>
 		{:else}
 			<div class="remote-art-empty" aria-hidden="true">NOOR</div>
 		{/if}

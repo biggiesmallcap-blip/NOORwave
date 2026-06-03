@@ -23,7 +23,13 @@
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { buildTidalTrackMenu } from '$lib/player/track_menu';
-	import { firstArtworkUrl } from '$lib/utils/artwork';
+	import {
+		firstArtworkUrl,
+		tidalArtworkFallbackSizes,
+		upscaleTidalArtwork,
+		type TidalArtworkSize,
+	} from '$lib/utils/artwork';
+	import { formatTotalDuration } from '$lib/utils/format';
 
 	let albumId = $derived(Number(page.params.id));
 
@@ -32,6 +38,7 @@
 	let albumTidalId = $state<number | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	let failedArtworkUrls = $state<Record<string, boolean>>({});
 
 	let artistTracks = $state<Track[]>([]);
 	let moreLoading = $state(false);
@@ -45,7 +52,7 @@
 		return map;
 	});
 
-	// Phase 5B — back/forward state via SvelteKit snapshot.
+	// Phase 5B: back/forward state via SvelteKit snapshot.
 	export const snapshot: Snapshot<{ scrollY: number }> = {
 		capture: () => ({ scrollY: typeof window !== 'undefined' ? window.scrollY : 0 }),
 		restore: (saved) => {
@@ -70,6 +77,7 @@
 
 	$effect(() => {
 		albumId;
+		failedArtworkUrls = {};
 		tidalOnlyTracks = [];
 		albumTidalId = null;
 		void load();
@@ -126,6 +134,25 @@
 			total_ms: totalMsLocal + totalMsTidal,
 		};
 	});
+	let heroArtworkSrc = $derived(artworkCandidate(header()?.artwork_url, 640));
+	let heroBackdropSrc = $derived(artworkCandidate(header()?.artwork_url, 1280));
+
+	function artworkCandidate(
+		rawUrl: string | null | undefined,
+		size: TidalArtworkSize,
+	): string | null {
+		if (!rawUrl) return null;
+		for (const candidateSize of tidalArtworkFallbackSizes(rawUrl, size)) {
+			const candidate = upscaleTidalArtwork(rawUrl, candidateSize);
+			if (candidate && !failedArtworkUrls[candidate]) return candidate;
+		}
+		return null;
+	}
+
+	function markArtworkFailed(renderedUrl: string | null | undefined) {
+		if (!renderedUrl) return;
+		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
+	}
 
 	let otherAlbums = $derived.by(() => {
 		const map = new Map<
@@ -149,15 +176,6 @@
 		}
 		return Array.from(map.values()).sort((a, b) => b.count - a.count).slice(0, 8);
 	});
-
-	function formatTotalDuration(ms: number): string {
-		const totalSeconds = Math.round(ms / 1000);
-		const minutes = Math.floor(totalSeconds / 60);
-		if (minutes < 60) return `${minutes} min`;
-		const hours = Math.floor(minutes / 60);
-		const remaining = minutes % 60;
-		return remaining ? `${hours} hr ${remaining} min` : `${hours} hr`;
-	}
 
 	function onRowClick(track: Track) {
 		void playAlbum(albumId, track.id);
@@ -245,15 +263,25 @@
 		{@const h = header()!}
 
 		<header class="hero">
-			{#if h.artwork_url}
-				<div class="hero-backdrop" style="background-image: url({h.artwork_url});"></div>
+			{#if heroBackdropSrc}
+				<img
+					class="hero-backdrop"
+					src={heroBackdropSrc}
+					alt=""
+					onerror={() => markArtworkFailed(heroBackdropSrc)}
+				/>
 			{/if}
 			<div class="hero-veil"></div>
 
 			<div class="hero-body">
 				<div class="hero-art-wrap">
-					{#if h.artwork_url}
-						<img class="hero-art" src={h.artwork_url} alt="" />
+					{#if heroArtworkSrc}
+						<img
+							class="hero-art"
+							src={heroArtworkSrc}
+							alt=""
+							onerror={() => markArtworkFailed(heroArtworkSrc)}
+						/>
 					{:else}
 						<div class="hero-art placeholder">♫</div>
 					{/if}
@@ -374,7 +402,7 @@
 					>
 						<span class="tidal-row-num">{tracks.length + idx + 1}</span>
 						<span class="tidal-row-title">{track.title}</span>
-						<span class="tidal-row-plays" aria-hidden="true">—</span>
+						<span class="tidal-row-plays" aria-hidden="true">-</span>
 						<span class="tidal-row-pill" aria-label="From TIDAL">TIDAL</span>
 						<span class="tidal-row-duration">
 							{#if track.duration_ms}
@@ -408,6 +436,7 @@
 				</div>
 				<MediaRail items={otherAlbums} getKey={(a) => a.id ?? a.title}>
 					{#snippet card(album)}
+						{@const albumArt = artworkCandidate(album.artwork_url, 320)}
 						<a
 							class="album-card"
 							href={album.id != null ? `/albums/${album.id}` : undefined}
@@ -425,8 +454,13 @@
 							}}
 						>
 							<div class="album-card-art-wrap">
-								{#if album.artwork_url}
-									<img class="album-card-art" src={album.artwork_url} alt="" />
+								{#if albumArt}
+									<img
+										class="album-card-art"
+										src={albumArt}
+										alt=""
+										onerror={() => markArtworkFailed(albumArt)}
+									/>
 								{:else}
 									<div class="album-card-art placeholder">♫</div>
 								{/if}
@@ -503,8 +537,10 @@
 	.hero-backdrop {
 		position: absolute;
 		inset: -60px;
-		background-size: cover;
-		background-position: center;
+		width: calc(100% + 120px);
+		height: calc(100% + 120px);
+		object-fit: cover;
+		object-position: center;
 		filter: blur(72px) saturate(1.08) brightness(0.72);
 		transform: scale(1.16);
 		z-index: -2;
@@ -790,7 +826,7 @@
 	}
 	.show-all:hover { color: var(--text-primary); text-decoration: underline; }
 
-	/* "More by artist" rail card — fixed width so the row stays uniform.
+	/* "More by artist" rail card: fixed width so the row stays uniform.
 	   The MediaRail container handles horizontal scroll. */
 	.album-card {
 		flex: 0 0 170px;

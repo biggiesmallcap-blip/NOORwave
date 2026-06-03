@@ -66,7 +66,7 @@
 	 * Hover: dot gains a 1.5px ring at full opacity; all other dots dim to 30% of
 	 * their tier opacity. Click → playTrackNow. Right-click → buildTrackMenu.
 	 *
-	 * Spec: C:\Users\Felix\.claude\plans\lets-revision-analytics-stats-crystalline-melody.md
+	 * Contract: rendered by frontend/src/routes/analytics/+page.svelte.
 	 */
 
 	import type { SonicView, SonicTrack } from '$lib/api/client';

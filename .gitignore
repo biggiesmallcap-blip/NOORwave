@@ -1,6 +1,7 @@
 target/
 node_modules/
 package-lock.json
+!scripts/package-lock.json
 dist/
 build/
 .svelte-kit/
@@ -56,9 +57,15 @@ CLAUDE.md
 docs/superpowers/
 
 # Local test artifacts
+.scratch/
 coverage/
 frontend/coverage/
+docs/dev/repowise-health/
+docs/dev/repowise-review-gate/
 scripts/click-test-screenshots/
+__pycache__/
+*.pyc
+scripts/target-check*/
 target_codex_verify_fresh/
 target_codex*/
 _tmp_*

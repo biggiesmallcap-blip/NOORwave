@@ -8,7 +8,7 @@
 	 * Numbered mono index. 1px row dividers. Hover bg rgba(255,255,255,0.04).
 	 * Right-click on track → buildTrackMenu. Right-click on artist → buildArtistMenu.
 	 *
-	 * Spec: C:\Users\Felix\.claude\plans\lets-revision-analytics-stats-crystalline-melody.md
+	 * Contract: rendered by frontend/src/routes/analytics/+page.svelte.
 	 */
 
 	import { goto } from '$app/navigation';

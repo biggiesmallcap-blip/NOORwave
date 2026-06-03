@@ -14,4 +14,23 @@ describe('remote mini search contracts', () => {
 		expect(source).toContain('if (controller.signal.aborted) return;');
 		expect(source).toContain('controller.abort();');
 	});
+
+	test('guards playlist loading against stale tab changes', () => {
+		expect(source).toContain('let playlistLoadSeq = 0;');
+		expect(source).toContain('const token = ++playlistLoadSeq;');
+		expect(source).toContain("if (token !== playlistLoadSeq || mode !== 'playlists') return;");
+		expect(source).toContain("if (token === playlistLoadSeq && mode === 'playlists') busy = false;");
+	});
+
+	test('routes remote track artwork through ArtworkImage fallbacks', () => {
+		expect(source).toContain("import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';");
+		expect(source).toContain('className="remote-search-thumb"');
+		expect(source).toContain('src={track.artwork_url}');
+		expect(source).toContain('size={320}');
+		expect(source).toContain('fallbackText="NOOR"');
+		expect(source).toContain('decorative={true}');
+		expect(source).toContain(':global(.remote-search-thumb)');
+		expect(source).not.toContain("import { upscaleTidalArtwork } from '$lib/utils/artwork';");
+		expect(source).not.toMatch(/<img[\s\S]*(artwork_url|upscaleTidalArtwork)/);
+	});
 });

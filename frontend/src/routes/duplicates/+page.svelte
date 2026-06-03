@@ -6,6 +6,7 @@
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { buildTrackMenu } from '$lib/player/track_menu';
 	import { openContextMenu } from '$lib/stores/context_menu';
 
@@ -366,11 +367,14 @@
 								oncontextmenu={(event) => openDuplicateTrackContextMenu(event, member.track)}
 							>
 								<div class="member-card-head">
-									{#if member.track.artwork_url}
-										<img class="member-art" src={member.track.artwork_url} alt="" />
-									{:else}
-										<div class="member-art placeholder">♫</div>
-									{/if}
+									<ArtworkImage
+										className="member-art"
+										src={member.track.artwork_url}
+										alt={member.track.title}
+										size={320}
+										fallbackText={member.track.title.slice(0, 2).toUpperCase()}
+										decorative={true}
+									/>
 									<div class="member-title">
 										<h4>{member.track.album_title ?? 'Standalone / unknown album'}</h4>
 										<p>{member.track.artist_name ?? 'Unknown artist'}</p>
@@ -554,8 +558,9 @@
 		gap: var(--space-3);
 	}
 
-	.member-art {
+	:global(.member-art) {
 		width: clamp(2.5rem, 3vw, 3rem);
+		height: clamp(2.5rem, 3vw, 3rem);
 		aspect-ratio: 1 / 1;
 		border-radius: var(--radius-sm);
 		object-fit: cover;
@@ -563,10 +568,15 @@
 		border: 1px solid var(--panel-border);
 	}
 
-	.placeholder {
+	:global(.member-art.fallback) {
 		display: grid;
 		place-items: center;
 		color: var(--text-tertiary);
+	}
+
+	:global(.member-art.fallback span) {
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.member-title p,

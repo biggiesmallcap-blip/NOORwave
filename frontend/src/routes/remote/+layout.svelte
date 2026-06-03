@@ -43,7 +43,14 @@
 		void audioSettings.load();
 	});
 
-	let backdropArt = $derived(upscaleTidalArtwork($currentTrack?.artwork_url));
+	let backdropArtFailed = $state(false);
+	let lastBackdropArt = $state<string | null>(null);
+	let backdropArt = $derived(upscaleTidalArtwork($currentTrack?.artwork_url, 1280));
+	$effect(() => {
+		if (backdropArt === lastBackdropArt) return;
+		lastBackdropArt = backdropArt;
+		backdropArtFailed = false;
+	});
 
 	const DISCONNECT_GRACE_MS = 4000;
 	let hasEverConnected = $state(false);
@@ -63,8 +70,8 @@
 </script>
 
 <div class="remote-layout-backdrop" aria-hidden="true">
-	{#if backdropArt}
-		<img src={backdropArt} alt="" />
+	{#if backdropArt && !backdropArtFailed}
+		<img src={backdropArt} alt="" onerror={() => (backdropArtFailed = true)} />
 	{/if}
 </div>
 
@@ -114,7 +121,7 @@
 	}
 
 	.remote-layout-banner {
-		/* Flex item at top of the .remote-shell column — no sticky needed
+		/* Flex item at top of the .remote-shell column - no sticky needed
 		   because the parent is overflow: hidden so this stays in view. */
 		flex: 0 0 auto;
 		z-index: 40;

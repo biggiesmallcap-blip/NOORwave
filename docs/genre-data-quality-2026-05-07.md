@@ -271,7 +271,7 @@ This is a product trade-off, not a bug — but it's the trade-off and it's worth
 
 ## Files & queries used
 
-- DB: `C:\Users\Felix\Desktop\NOORwave\noor.db` (fresh, post-May-4-refactor)
-- Comparison DB: `e:\NOORwave\noor.db` (older dev DB, mostly pre-refactor data)
+- DB: `<local-db>` (fresh, post-May-4-refactor)
+- Comparison DB: `<comparison-db>` (older dev DB, mostly pre-refactor data)
 - Code: [`noor-server/src/genre/scorer.rs`](../noor-server/src/genre/scorer.rs), [`noor-server/src/tags/context.rs`](../noor-server/src/tags/context.rs), [`noor-server/src/services/lastfm/enrichment.rs`](../noor-server/src/services/lastfm/enrichment.rs), [`noor-server/src/services/musicbrainz.rs`](../noor-server/src/services/musicbrainz.rs)
 - Prior audit: [`docs/genre-data-quality.md`](genre-data-quality.md)

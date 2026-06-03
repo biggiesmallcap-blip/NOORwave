@@ -4,19 +4,27 @@
   import TidalTrackRow from '$lib/components/TidalTrackRow.svelte'
   import { openContextMenu } from '$lib/stores/context_menu'
   import { buildAlbumMenu } from '$lib/player/album_menu'
-  import { firstArtworkUrl } from '$lib/utils/artwork'
+  import {
+    firstArtworkUrl,
+    tidalArtworkFallbackSizes,
+    upscaleTidalArtwork,
+    type TidalArtworkSize,
+  } from '$lib/utils/artwork'
 
   let tidalArtistId = $derived(Number(page.params.id))
   let profile = $state<TidalArtistProfile | null>(null)
   let loading = $state(true)
   let error = $state<string | null>(null)
   let filterQuery = $state('')
+  let failedArtworkUrls = $state<Record<string, boolean>>({})
 
   $effect(() => {
     const id = tidalArtistId
     let cancelled = false
     loading = true
     error = null
+    profile = null
+    failedArtworkUrls = {}
     api.getTidalArtistProfile(id)
       .then((p) => { if (!cancelled) profile = p })
       .catch((e) => { if (!cancelled) error = String(e) })
@@ -46,6 +54,25 @@
   const heroBackdrop = $derived(
     firstArtworkUrl(profile?.picture_url, profile?.albums, profile?.top_tracks)
   )
+  const heroPortraitSrc = $derived(artworkCandidate(heroPortrait, 640))
+  const heroBackdropSrc = $derived(artworkCandidate(heroBackdrop, 1280))
+
+  function artworkCandidate(
+    rawUrl: string | null | undefined,
+    size: TidalArtworkSize,
+  ): string | null {
+    if (!rawUrl) return null
+    for (const candidateSize of tidalArtworkFallbackSizes(rawUrl, size)) {
+      const candidate = upscaleTidalArtwork(rawUrl, candidateSize)
+      if (candidate && !failedArtworkUrls[candidate]) return candidate
+    }
+    return null
+  }
+
+  function markArtworkFailed(renderedUrl: string | null | undefined) {
+    if (!renderedUrl) return
+    failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true }
+  }
 
   function trackAsPlayable(t: TidalDiscographyTrack) {
     return {
@@ -68,14 +95,24 @@
   <div class="artist-page">
     <button class="back-link" type="button" onclick={() => history.back()}>← Back</button>
     <div class="artist-hero">
-      {#if heroBackdrop}
-        <div class="artist-hero-backdrop" style={`background-image: url('${heroBackdrop}')`}></div>
+      {#if heroBackdropSrc}
+        <img
+          class="artist-hero-backdrop"
+          src={heroBackdropSrc}
+          alt=""
+          onerror={() => markArtworkFailed(heroBackdropSrc)}
+        />
       {/if}
       <div class="artist-hero-veil"></div>
       <div class="artist-hero-body">
         <div class="artist-portrait-wrap">
-          {#if heroPortrait}
-            <img class="artist-portrait" src={heroPortrait} alt="" />
+          {#if heroPortraitSrc}
+            <img
+              class="artist-portrait"
+              src={heroPortraitSrc}
+              alt=""
+              onerror={() => markArtworkFailed(heroPortraitSrc)}
+            />
           {:else}
             <div class="artist-portrait artist-portrait-fallback" aria-hidden="true">
               {(profile.artist_name ?? 'A').slice(0, 1)}
@@ -120,6 +157,7 @@
         <h3 class="section-label">Albums</h3>
         <div class="albums-grid">
           {#each filteredAlbums as album (album.tidal_id)}
+            {@const albumArt = artworkCandidate(album.artwork_url, 320)}
             <a
               class="grid-card"
               href={`/tidal/albums/${album.tidal_id}`}
@@ -135,10 +173,18 @@
                 }, { isLocal: album.in_library && album.local_id != null }), album.title)
               }}
             >
-              <div
-                class="grid-art"
-                style={album.artwork_url ? `background-image: url('${album.artwork_url}')` : ''}
-              ></div>
+              <div class="grid-art">
+                {#if albumArt}
+                  <img
+                    class="grid-art-image"
+                    src={albumArt}
+                    alt=""
+                    onerror={() => markArtworkFailed(albumArt)}
+                  />
+                {:else}
+                  <span class="grid-art-fallback">♫</span>
+                {/if}
+              </div>
               <p class="grid-title">{album.title}</p>
               <p class="grid-sub">{album.artist_name}</p>
             </a>
@@ -177,8 +223,10 @@
   .artist-hero-backdrop {
     position: absolute;
     inset: -70px;
-    background-size: cover;
-    background-position: center;
+    width: calc(100% + 140px);
+    height: calc(100% + 140px);
+    object-fit: cover;
+    object-position: center;
     filter: blur(70px) saturate(1.7);
     transform: scale(1.25);
     opacity: 0.72;
@@ -278,9 +326,22 @@
     width: 100%; aspect-ratio: 1;
     border-radius: 6px;
     background: var(--bg-raised);
-    background-size: cover; background-position: center;
     margin-bottom: 6px;
     transition: opacity 0.15s;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+  }
+  .grid-art-image {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .grid-art-fallback {
+    color: var(--text-tertiary);
+    font-size: var(--font-size-xl);
+    font-weight: var(--font-weight-semibold);
   }
   .grid-card:hover .grid-art { opacity: 0.85; }
   .grid-title {

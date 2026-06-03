@@ -16,6 +16,13 @@ function cssBlock(selector: string): string {
 }
 
 describe('quiet mode layout contracts', () => {
+	test('routes current-track artwork through TIDAL fallback sizes', () => {
+		expect(source).toContain('tidalArtworkFallbackSizes');
+		expect(source).toContain('let quietArtwork = $derived(artworkCandidate($currentTrack?.artwork_url, 1280));');
+		expect(source).toContain('onerror={() => markArtworkFailed(quietArtwork)}');
+		expect(source).not.toContain('src={$currentTrack.artwork_url}');
+	});
+
 	test('artwork scales fluidly so 1080p is not locked to the max cover size', () => {
 		expect(source).toContain('--quiet-art-size: clamp(');
 		expect(source).toContain('--quiet-panel-w: min(var(--quiet-art-size), calc(100vw - (2 * var(--quiet-panel-pad))));');

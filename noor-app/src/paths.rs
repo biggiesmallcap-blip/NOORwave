@@ -76,8 +76,8 @@ mod tests {
 
     #[test]
     fn installed_data_dir_uses_local_app_data_when_present() {
-        let exe_dir = PathBuf::from(r"C:\Users\Felix\AppData\Local\Programs\NOORwave");
-        let local_app_data = PathBuf::from(r"C:\Users\Felix\AppData\Local");
+        let exe_dir = PathBuf::from("installed-exe-dir");
+        let local_app_data = PathBuf::from("local-app-data");
 
         let data_dir = super::data_dir_for(true, &exe_dir, Some(&local_app_data));
         assert_eq!(data_dir, local_app_data.join("NOORwave"));

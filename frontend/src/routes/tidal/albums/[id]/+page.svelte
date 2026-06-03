@@ -5,7 +5,13 @@
 	import TidalTrackRow from '$lib/components/TidalTrackRow.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
-	import { firstArtworkUrl } from '$lib/utils/artwork';
+	import {
+		firstArtworkUrl,
+		tidalArtworkFallbackSizes,
+		upscaleTidalArtwork,
+		type TidalArtworkSize,
+	} from '$lib/utils/artwork';
+	import { formatTotalDuration } from '$lib/utils/format';
 
 	function trackAsPlayable(t: TidalDiscographyTrack) {
 		return {
@@ -25,6 +31,7 @@
 	let tracks = $state<TidalDiscographyTrack[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	let failedArtworkUrls = $state<Record<string, boolean>>({});
 
 	async function load() {
 		loading = true;
@@ -41,6 +48,7 @@
 
 	$effect(() => {
 		tidalAlbumId;
+		failedArtworkUrls = {};
 		void load();
 	});
 
@@ -57,14 +65,26 @@
 			total_ms: totalMs
 		};
 	});
+	let heroArtworkSrc = $derived(artworkCandidate(header()?.artwork_url, 640));
+	let heroBackdropSrc = $derived(artworkCandidate(header()?.artwork_url, 1280));
 
-	function formatTotalDuration(ms: number): string {
-		const minutes = Math.round(ms / 60000);
-		if (minutes < 60) return `${minutes} min`;
-		const hours = Math.floor(minutes / 60);
-		const rem = minutes % 60;
-		return rem ? `${hours} hr ${rem} min` : `${hours} hr`;
+	function artworkCandidate(
+		rawUrl: string | null | undefined,
+		size: TidalArtworkSize,
+	): string | null {
+		if (!rawUrl) return null;
+		for (const candidateSize of tidalArtworkFallbackSizes(rawUrl, size)) {
+			const candidate = upscaleTidalArtwork(rawUrl, candidateSize);
+			if (candidate && !failedArtworkUrls[candidate]) return candidate;
+		}
+		return null;
 	}
+
+	function markArtworkFailed(renderedUrl: string | null | undefined) {
+		if (!renderedUrl) return;
+		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
+	}
+
 </script>
 
 <div class="page">
@@ -79,14 +99,24 @@
 		{@const h = header()!}
 
 		<header class="hero">
-			{#if h.artwork_url}
-				<div class="hero-backdrop" style="background-image: url({h.artwork_url});"></div>
+			{#if heroBackdropSrc}
+				<img
+					class="hero-backdrop"
+					src={heroBackdropSrc}
+					alt=""
+					onerror={() => markArtworkFailed(heroBackdropSrc)}
+				/>
 			{/if}
 			<div class="hero-veil"></div>
 			<div class="hero-body">
 				<div class="hero-art-wrap">
-					{#if h.artwork_url}
-						<img class="hero-art" src={h.artwork_url} alt="" />
+					{#if heroArtworkSrc}
+						<img
+							class="hero-art"
+							src={heroArtworkSrc}
+							alt=""
+							onerror={() => markArtworkFailed(heroArtworkSrc)}
+						/>
 					{:else}
 						<div class="hero-art placeholder">♫</div>
 					{/if}
@@ -178,8 +208,10 @@
 	.hero-backdrop {
 		position: absolute;
 		inset: -60px;
-		background-size: cover;
-		background-position: center;
+		width: calc(100% + 120px);
+		height: calc(100% + 120px);
+		object-fit: cover;
+		object-position: center;
 		filter: blur(60px) saturate(1.6);
 		transform: scale(1.2);
 		z-index: -2;

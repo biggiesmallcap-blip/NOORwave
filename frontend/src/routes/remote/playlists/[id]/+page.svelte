@@ -6,10 +6,10 @@
 		shufflePlaylist,
 		startPlaylistRadio
 	} from '$lib/stores/player';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import RemoteActionBar from '$lib/components/remote/RemoteActionBar.svelte';
 	import RemotePageShell from '$lib/components/remote/RemotePageShell.svelte';
 	import RemoteTrackRow from '$lib/components/remote/RemoteTrackRow.svelte';
-	import { upscaleTidalArtwork } from '$lib/utils/artwork';
 
 	let playlistId = $derived(Number(page.params.id));
 
@@ -40,13 +40,6 @@
 		void load();
 	});
 
-	let cover = $derived(upscaleTidalArtwork(tracks[0]?.artwork_url ?? null, 640));
-	let backdrop = $derived(upscaleTidalArtwork(tracks[0]?.artwork_url ?? null));
-	let coverFailed = $state(false);
-	$effect(() => {
-		cover;
-		coverFailed = false;
-	});
 	let totalMs = $derived(tracks.reduce((sum, t) => sum + (t.duration_ms ?? 0), 0));
 	let countLine = $derived.by(() => {
 		const minutes = Math.round(totalMs / 60000);
@@ -74,11 +67,13 @@
 	{:else}
 		<section class="remote-playlist-hero">
 			<div class="remote-playlist-art">
-				{#if cover && !coverFailed}
-					<img src={cover} alt="" onerror={() => (coverFailed = true)} />
-				{:else}
-					<span aria-hidden="true">{playlist?.name?.charAt(0) ?? 'P'}</span>
-				{/if}
+				<ArtworkImage
+					className="remote-playlist-artwork"
+					src={tracks[0]?.artwork_url ?? null}
+					size={640}
+					fallbackText={playlist?.name?.charAt(0) ?? 'P'}
+					decorative={true}
+				/>
 			</div>
 			<h2>{playlist?.name ?? 'Playlist'}</h2>
 			{#if playlist?.description}
@@ -137,10 +132,24 @@
 		box-shadow: 0 22px 44px rgba(0, 0, 0, 0.4);
 	}
 
-	.remote-playlist-art img {
+	.remote-playlist-art :global(.remote-playlist-artwork) {
 		width: 100%;
 		height: 100%;
+	}
+
+	.remote-playlist-art :global(img.remote-playlist-artwork) {
 		object-fit: cover;
+		display: block;
+	}
+
+	.remote-playlist-art :global(.remote-playlist-artwork.fallback) {
+		display: grid;
+		place-items: center;
+	}
+
+	.remote-playlist-art :global(.remote-playlist-artwork.fallback span) {
+		font-size: var(--font-size-4xl);
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.remote-playlist-hero h2 {

@@ -48,6 +48,11 @@
 	import { queueAnnouncement } from '$lib/stores/queue_announcer';
 	import { pendingUndo, consumeUndo } from '$lib/stores/queue_undo';
 	import { formatTrackDuration, getQualityClass } from '$lib/utils/format';
+	import {
+		tidalArtworkFallbackSizes,
+		upscaleTidalArtwork,
+		type TidalArtworkSize,
+	} from '$lib/utils/artwork';
 	import { api, getStoredToken, setStoredToken, clearStoredToken } from '$lib/api/client';
 	import ContextMenu from '$lib/components/ContextMenu.svelte';
 	import Toast from '$lib/components/Toast.svelte';
@@ -1051,6 +1056,29 @@
 		event.stopPropagation();
 	}
 
+	let failedArtworkUrls = $state<Record<string, boolean>>({});
+
+	function artworkCandidate(
+		rawUrl: string | null | undefined,
+		size: TidalArtworkSize,
+	): string | null {
+		if (!rawUrl) return null;
+		for (const candidateSize of tidalArtworkFallbackSizes(rawUrl, size)) {
+			const candidate = upscaleTidalArtwork(rawUrl, candidateSize);
+			if (candidate && !failedArtworkUrls[candidate]) return candidate;
+		}
+		return null;
+	}
+
+	function markArtworkFailed(renderedUrl: string | null | undefined) {
+		if (!renderedUrl) return;
+		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
+	}
+
+	let currentVideoArtwork = $derived(artworkCandidate($videoSession.current?.artwork_url, 320));
+	let mobileMiniArtwork = $derived(artworkCandidate($currentTrack?.artwork_url, 320));
+	let mobileNowPlayingArtwork = $derived(artworkCandidate($currentTrack?.artwork_url, 640));
+
 	function openNowPlayingMenu(event: MouseEvent) {
 		const track = $currentTrack;
 		if (!track) return;
@@ -1310,7 +1338,12 @@
 
 {#if isOnboardingRoute}
 	{@render children()}
-{:else if authReady && !onboardingChecked}
+{:else if !authReady}
+	<div class="onboarding-check">
+		<img class="check-mark" src="/noor-icon-transparent.svg" alt="" aria-hidden="true" />
+		<p>Checking setup…</p>
+	</div>
+{:else if !onboardingChecked}
 	<div class="onboarding-check">
 		<img class="check-mark" src="/noor-icon-transparent.svg" alt="" aria-hidden="true" />
 		<p>Checking setup…</p>
@@ -1372,8 +1405,13 @@
 			<div class="video-panel-top">
 				<p class="eyebrow">Video session</p>
 				<div class="video-panel-art-wrap">
-					{#if $videoSession.current?.artwork_url}
-						<img class="video-panel-art" src={$videoSession.current.artwork_url} alt="" />
+					{#if currentVideoArtwork}
+						<img
+							class="video-panel-art"
+							src={currentVideoArtwork}
+							alt=""
+							onerror={() => markArtworkFailed(currentVideoArtwork)}
+						/>
 					{:else}
 						<div class="video-panel-art placeholder">▶</div>
 					{/if}
@@ -1413,14 +1451,20 @@
 				{#if $videoSession.queue.length > 0}
 					<div class="video-panel-list">
 						{#each $videoSession.queue.slice(0, 60) as video, i (`video-${video.tidal_id}-${i}`)}
+							{@const videoArt = artworkCandidate(video.artwork_url, 320)}
 							<button
 								type="button"
 								class="video-panel-row"
 								class:active={$videoSession.current?.tidal_id === video.tidal_id}
 								onclick={() => requestVideoJump(video.tidal_id)}
 							>
-								{#if video.artwork_url}
-									<img class="video-panel-row-art" src={video.artwork_url} alt="" />
+								{#if videoArt}
+									<img
+										class="video-panel-row-art"
+										src={videoArt}
+										alt=""
+										onerror={() => markArtworkFailed(videoArt)}
+									/>
 								{:else}
 									<span class="video-panel-row-art placeholder">▶</span>
 								{/if}
@@ -1676,10 +1720,18 @@
 									<div class="queue-art placeholder pending-art" title="Resolving track...">
 										<span class="queue-spinner" aria-hidden="true"></span>
 									</div>
-								{:else if item.track.artwork_url}
-									<img class="queue-art" src={item.track.artwork_url} alt="" />
+								{:else}
+									{@const queueArt = artworkCandidate(item.track.artwork_url, 320)}
+									{#if queueArt}
+										<img
+											class="queue-art"
+											src={queueArt}
+											alt=""
+											onerror={() => markArtworkFailed(queueArt)}
+										/>
 								{:else}
 									<div class="queue-art placeholder">♫</div>
+									{/if}
 								{/if}
 								<span class="queue-source-dot source-{queueSourceSlug(item.source)}" aria-hidden="true"></span>
 							</div>
@@ -1804,8 +1856,13 @@
 					onclick={() => { nowPlayingOpen = true; }}
 					oncontextmenu={openNowPlayingContextMenu}
 				>
-					{#if $currentTrack.artwork_url}
-						<img class="mobile-mini-art" src={$currentTrack.artwork_url} alt="" />
+					{#if mobileMiniArtwork}
+						<img
+							class="mobile-mini-art"
+							src={mobileMiniArtwork}
+							alt=""
+							onerror={() => markArtworkFailed(mobileMiniArtwork)}
+						/>
 					{:else}
 						<div class="mobile-mini-art placeholder">♫</div>
 					{/if}
@@ -1894,8 +1951,13 @@
 
 			<div class="mobile-np-art-wrap">
 				{#key $currentTrack.artwork_url}
-					{#if $currentTrack.artwork_url}
-						<img class="mobile-np-art" src={$currentTrack.artwork_url} alt="" />
+					{#if mobileNowPlayingArtwork}
+						<img
+							class="mobile-np-art"
+							src={mobileNowPlayingArtwork}
+							alt=""
+							onerror={() => markArtworkFailed(mobileNowPlayingArtwork)}
+						/>
 					{:else}
 						<div class="mobile-np-art placeholder">♫</div>
 					{/if}
@@ -2026,10 +2088,18 @@
 									<div class="queue-art placeholder pending-art" title="Resolving track...">
 										<span class="queue-spinner" aria-hidden="true"></span>
 									</div>
-								{:else if item.track.artwork_url}
-									<img class="queue-art" src={item.track.artwork_url} alt="" />
+								{:else}
+									{@const queueArt = artworkCandidate(item.track.artwork_url, 320)}
+									{#if queueArt}
+										<img
+											class="queue-art"
+											src={queueArt}
+											alt=""
+											onerror={() => markArtworkFailed(queueArt)}
+										/>
 								{:else}
 									<div class="queue-art placeholder">♫</div>
+									{/if}
 								{/if}
 								<span class="queue-source-dot source-{queueSourceSlug(item.source)}" aria-hidden="true"></span>
 							</div>

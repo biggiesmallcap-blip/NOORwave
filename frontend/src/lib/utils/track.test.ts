@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
-import type { QueueItem, Track } from '$lib/api/client';
-import { queueItemToTidalPlayable, trackToTidalPlayable } from './track';
+import type { QueueItem, TidalHomeItem, Track } from '$lib/api/client';
+import { queueItemToTidalPlayable, tidalHomeItemToPlayable, trackToTidalPlayable } from './track';
 
 const baseTrack: Track = {
 	id: 42,
@@ -53,6 +53,33 @@ describe('queueItemToTidalPlayable', () => {
 			duration_ms: 180000,
 			artist_tidal_id: 1001,
 			album_tidal_id: 2002,
+		});
+	});
+});
+
+describe('tidalHomeItemToPlayable', () => {
+	test('normalizes TIDAL home items to the shared playable shape', () => {
+		const item: TidalHomeItem = {
+			id: '123',
+			kind: 'track',
+			title: 'Home Track',
+			artist_name: 'Home Artist',
+			artist_id: 456,
+			album_title: 'Home Album',
+			album_id: 789,
+			artwork_url: 'https://resources.tidal.com/images/abc/320x320.jpg',
+			duration: 212,
+		};
+
+		expect(tidalHomeItemToPlayable(item)).toEqual({
+			tidal_id: 123,
+			title: 'Home Track',
+			artist_name: 'Home Artist',
+			album_title: 'Home Album',
+			artwork_url: 'https://resources.tidal.com/images/abc/320x320.jpg',
+			duration_ms: 212000,
+			artist_tidal_id: 456,
+			album_tidal_id: 789,
 		});
 	});
 });

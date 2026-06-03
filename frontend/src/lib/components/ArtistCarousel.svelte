@@ -1,7 +1,8 @@
 <script lang="ts">
   import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
   import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
-  import { letterColor } from '$lib/utils/color';
+  import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+  import { initials } from '$lib/utils/text';
 
   interface ArtistCard {
     id: number;
@@ -16,11 +17,10 @@
     onContextMenu?: (e: MouseEvent, id: number) => void;
   } = $props();
 
-  let failedImages = $state(new Set<string>());
   let lazyArt = $state<Record<number, string>>({});
 
-  function initials(name: string): string {
-    return name.split(/\s+/).map(p => p[0]?.toUpperCase() ?? '').join('').slice(0, 2) || '?';
+  function artistImageSources(...sources: Array<string | null | undefined>): string[] {
+    return sources.filter((source): source is string => typeof source === 'string' && source.trim().length > 0);
   }
 </script>
 
@@ -28,34 +28,25 @@
   <div class="artist-carousel">
   <div class="artists-row" use:wheelToHorizontal>
     {#each artists as artist (artist.id)}
-      {@const baseSrc = artist.photo_url && !failedImages.has(artist.photo_url) ? artist.photo_url : null}
-      {@const lazySrc = lazyArt[artist.id] && !failedImages.has(lazyArt[artist.id]) ? lazyArt[artist.id] : null}
-      {@const fallbackSrc = artist.fallback_art_url && !failedImages.has(artist.fallback_art_url) ? artist.fallback_art_url : null}
-      {@const resolvedSrc = baseSrc ?? lazySrc ?? fallbackSrc}
       <button
         class="artist-card"
         onclick={() => onArtistClick?.(artist.id)}
         oncontextmenu={(e) => { if (onContextMenu) { e.preventDefault(); e.stopPropagation(); onContextMenu(e, artist.id); } }}
         title={artist.name}
         use:lazyTidalArt={{
-          enabled: !baseSrc && !lazyArt[artist.id],
+          enabled: !artist.photo_url && !lazyArt[artist.id],
           query: { artist: artist.name },
           onResolve: (url) => (lazyArt[artist.id] = url),
         }}
       >
         <div class="avatar-wrap">
-          {#if resolvedSrc}
-            <img
-              class="artist-avatar"
-              src={resolvedSrc}
-              alt={artist.name}
-              onerror={() => { failedImages = new Set([...failedImages, resolvedSrc]); }}
-            />
-          {:else}
-            <div class="artist-avatar fallback" style="background: {letterColor(artist.name)}">
-              <span>{initials(artist.name)}</span>
-            </div>
-          {/if}
+          <ArtworkImage
+            className="artist-carousel-avatar"
+            src={artistImageSources(artist.photo_url, lazyArt[artist.id], artist.fallback_art_url)}
+            alt={artist.name}
+            size={320}
+            fallbackText={initials(artist.name)}
+          />
         </div>
         <span class="artist-name">{artist.name}</span>
       </button>
@@ -122,26 +113,35 @@
     position: relative;
   }
 
-  .artist-avatar {
+  .avatar-wrap :global(.artist-carousel-avatar) {
     width: var(--artist-avatar-w);
     aspect-ratio: 1 / 1;
     border-radius: 50%;
-    object-fit: cover;
     display: block;
-    transition: transform 0.15s;
   }
 
-  .artist-card:hover .artist-avatar {
+  .avatar-wrap :global(.artist-carousel-avatar:not(.fallback)) {
+    object-fit: cover;
+    transition: transform var(--motion-fast);
+  }
+
+  .artist-card:hover :global(.artist-carousel-avatar:not(.fallback)) {
     transform: scale(1.06);
   }
 
-  .artist-avatar.fallback {
+  .avatar-wrap :global(.artist-carousel-avatar.fallback) {
     display: flex;
     align-items: center;
     justify-content: center;
+    background: var(--bg-hover);
     font-size: var(--font-size-xl);
     font-weight: var(--font-weight-bold);
     color: rgba(255,255,255,0.85);
+  }
+
+  .avatar-wrap :global(.artist-carousel-avatar.fallback span) {
+    font-size: inherit;
+    font-weight: inherit;
   }
 
   .artist-name {

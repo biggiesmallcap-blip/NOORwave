@@ -1338,7 +1338,7 @@ export interface AnalyticsDashboard {
 
 // ─────────────────────────────────────────────────────────────────────────
 // Analytics signals - GET /api/analytics/signals
-// Spec: C:\Users\Felix\.claude\plans\lets-revision-analytics-stats-crystalline-melody.md
+// Contract: noor-server/tests/fixtures/signals-schema.json
 // JSON schema: noor-server/tests/fixtures/signals-schema.json
 // ─────────────────────────────────────────────────────────────────────────
 

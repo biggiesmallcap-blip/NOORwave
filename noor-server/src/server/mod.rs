@@ -7,7 +7,7 @@ use anyhow::Result;
 use axum::{
     Extension, Router,
     extract::{ConnectInfo, Request, State},
-    http::{HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::Next,
     response::{Json, Response},
     routing::{get, post},
@@ -16,12 +16,14 @@ use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Notify;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 
 pub async fn start(state: SharedState, addr: &str) -> Result<()> {
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(AllowOrigin::predicate(|origin, _| {
+            is_trusted_local_origin_value(origin)
+        }))
         .allow_methods(Any)
         .allow_headers(Any);
 
@@ -126,8 +128,9 @@ async fn shutdown_handler(
     State(state): State<SharedState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Extension(shutdown_notify): Extension<Arc<Notify>>,
+    headers: HeaderMap,
 ) -> StatusCode {
-    if require_loopback(addr).is_err() {
+    if require_public_loopback_request(addr, &headers).is_err() {
         return StatusCode::FORBIDDEN;
     }
     // Signal axum's graceful shutdown FIRST so a stuck write lock can't keep
@@ -160,13 +163,78 @@ fn require_loopback(addr: SocketAddr) -> Result<(), StatusCode> {
     }
 }
 
+fn require_public_loopback_request(
+    addr: SocketAddr,
+    headers: &HeaderMap,
+) -> Result<(), StatusCode> {
+    require_loopback(addr)?;
+    require_trusted_browser_origin(headers)
+}
+
+fn require_trusted_browser_origin(headers: &HeaderMap) -> Result<(), StatusCode> {
+    if let Some(origin) = headers.get(header::ORIGIN) {
+        return if is_trusted_local_origin_value(origin) {
+            Ok(())
+        } else {
+            Err(StatusCode::FORBIDDEN)
+        };
+    }
+
+    if let Some(referer) = headers.get(header::REFERER) {
+        let Ok(referer) = referer.to_str() else {
+            return Err(StatusCode::FORBIDDEN);
+        };
+        let Some(origin) = origin_from_url(referer) else {
+            return Err(StatusCode::FORBIDDEN);
+        };
+        return if is_trusted_local_origin_str(&origin) {
+            Ok(())
+        } else {
+            Err(StatusCode::FORBIDDEN)
+        };
+    }
+
+    Ok(())
+}
+
+fn is_trusted_local_origin_value(origin: &HeaderValue) -> bool {
+    origin.to_str().is_ok_and(is_trusted_local_origin_str)
+}
+
+fn is_trusted_local_origin_str(origin: &str) -> bool {
+    matches!(
+        origin.trim().trim_end_matches('/'),
+        "http://127.0.0.1:3334"
+            | "http://localhost:3334"
+            | "http://[::1]:3334"
+            | "http://127.0.0.1:5173"
+            | "http://localhost:5173"
+            | "http://[::1]:5173"
+    )
+}
+
+fn origin_from_url(raw: &str) -> Option<String> {
+    let (scheme, rest) = raw.trim().split_once("://")?;
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let authority_end = rest
+        .find(|ch| matches!(ch, '/' | '?' | '#'))
+        .unwrap_or(rest.len());
+    if authority_end == 0 {
+        return None;
+    }
+    Some(format!("{scheme}://{}", &rest[..authority_end]))
+}
+
 /// Returns the server token ONLY for requests arriving from loopback (127.0.0.1 / ::1).
 /// Lets the frontend auto-configure on the local machine without needing the terminal.
 async fn setup_token_handler(
     State(state): State<SharedState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_loopback(addr)?;
+    require_public_loopback_request(addr, &headers)?;
     let token = state.read().await.server_token.clone();
     Ok(Json(json!({ "token": token })))
 }
@@ -174,8 +242,9 @@ async fn setup_token_handler(
 async fn onboarding_status_handler(
     State(state): State<SharedState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_loopback(addr)?;
+    require_public_loopback_request(addr, &headers)?;
     let complete = state
         .read()
         .await
@@ -188,8 +257,9 @@ async fn onboarding_status_handler(
 async fn onboarding_complete_handler(
     State(state): State<SharedState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_loopback(addr)?;
+    require_public_loopback_request(addr, &headers)?;
     state
         .read()
         .await
@@ -240,4 +310,83 @@ async fn no_store_cache(req: Request, next: Next) -> Response {
     resp.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn loopback_addr() -> SocketAddr {
+        "127.0.0.1:12345".parse().unwrap()
+    }
+
+    fn remote_addr() -> SocketAddr {
+        "192.0.2.10:12345".parse().unwrap()
+    }
+
+    #[test]
+    fn public_loopback_request_allows_same_origin_app() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://127.0.0.1:3334"),
+        );
+
+        assert_eq!(
+            require_public_loopback_request(loopback_addr(), &headers),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn public_loopback_request_allows_headerless_sidecar_call() {
+        let headers = HeaderMap::new();
+
+        assert_eq!(
+            require_public_loopback_request(loopback_addr(), &headers),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn public_loopback_request_rejects_foreign_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://example.com"),
+        );
+
+        assert_eq!(
+            require_public_loopback_request(loopback_addr(), &headers),
+            Err(StatusCode::FORBIDDEN)
+        );
+    }
+
+    #[test]
+    fn public_loopback_request_rejects_foreign_referer() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::REFERER,
+            HeaderValue::from_static("https://example.com/page"),
+        );
+
+        assert_eq!(
+            require_public_loopback_request(loopback_addr(), &headers),
+            Err(StatusCode::FORBIDDEN)
+        );
+    }
+
+    #[test]
+    fn public_loopback_request_still_requires_loopback_peer() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://127.0.0.1:3334"),
+        );
+
+        assert_eq!(
+            require_public_loopback_request(remote_addr(), &headers),
+            Err(StatusCode::FORBIDDEN)
+        );
+    }
 }

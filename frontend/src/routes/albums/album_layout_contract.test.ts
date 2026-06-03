@@ -36,4 +36,20 @@ describe('album page layout contracts', () => {
 		expect(source).toContain('playcountByIsrc');
 		expect(source).toContain('worldPlayCount={track.isrc ? playcountByIsrc.get(track.isrc) : null}');
 	});
+
+	test('routes album artwork through TIDAL fallback sizes', () => {
+		expect(source).toContain('tidalArtworkFallbackSizes');
+		expect(source).toContain('let heroArtworkSrc = $derived(artworkCandidate(header()?.artwork_url, 640));');
+		expect(source).toContain('let heroBackdropSrc = $derived(artworkCandidate(header()?.artwork_url, 1280));');
+		expect(source).toContain('const albumArt = artworkCandidate(album.artwork_url, 320)');
+		expect(source).toContain('onerror={() => markArtworkFailed(heroArtworkSrc)}');
+		expect(source).not.toContain('style="background-image: url({h.artwork_url});"');
+		expect(source).not.toContain('src={h.artwork_url}');
+		expect(source).not.toContain('src={album.artwork_url}');
+	});
+
+	test('keeps route copy and comments ASCII-safe', () => {
+		expect(source).not.toMatch(/\u2014/);
+		expect(source).not.toMatch(/[\u2500-\u257F]/);
+	});
 });

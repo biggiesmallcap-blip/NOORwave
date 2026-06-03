@@ -47,25 +47,6 @@ export async function loadAudioStats() {
 	}
 }
 
-export async function startAnalysis(mode: 'preview' | 'local', localPath?: string) {
-	try {
-		audioAnalysis.update((s) => ({ ...s, isRunning: true, mode }));
-		await api.startAudioAnalysis(mode, localPath);
-	} catch (e) {
-		console.error('Failed to start analysis:', e);
-		audioAnalysis.update((s) => ({ ...s, isRunning: false }));
-	}
-}
-
-export async function stopAnalysis() {
-	try {
-		await api.stopAudioAnalysis();
-	} catch (e) {
-		console.error('Failed to stop analysis:', e);
-	}
-	audioAnalysis.update((s) => ({ ...s, isRunning: false }));
-}
-
 export async function syncAnalysisStatus() {
 	try {
 		const { running, analyzed } = await cachedApi.getAudioAnalysisStatus();

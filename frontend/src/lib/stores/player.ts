@@ -411,6 +411,13 @@ function applyState(state: PlaybackState) {
 	scheduleBufferedRefreshIfNeeded();
 }
 
+function resetOptimisticPlaybackProgress() {
+	clearBufferedRefresher();
+	position.set(0);
+	anchorPositionTicker(0);
+	buffered.set(0);
+}
+
 export function hydratePlayback(snapshot: PlaybackSnapshot) {
 	applyState(snapshot.state);
 	setPlaybackQueue(snapshot.queue);
@@ -1234,6 +1241,7 @@ export async function playTidalTrackNow(track: TidalPlayable): Promise<void> {
 	try {
 		rememberTidalPlayable(track);
 		await api.playTidalTrack(track);
+		resetOptimisticPlaybackProgress();
 		setCurrentTrack({
 			id: localTidalTrackId(track) ?? -track.tidal_id,
 			title: track.title,
@@ -1283,6 +1291,7 @@ function tidalQueueRequest(track: TidalPlayable) {
 
 function setOptimisticTidalTrack(track: TidalPlayable) {
 	rememberTidalPlayable(track);
+	resetOptimisticPlaybackProgress();
 	setCurrentTrack({
 		id: localTidalTrackId(track) ?? -track.tidal_id,
 		title: track.title,

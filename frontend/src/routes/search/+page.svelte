@@ -16,11 +16,11 @@
   import { parseIntent } from '$lib/search/intent'
   import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal'
   import { tidalSearchTrackToPlayable } from '$lib/utils/track'
+  import { initials } from '$lib/utils/text'
   import { canPlayTrack, getPlayableLabel } from '$lib/player/playable'
   import { mergeLocalIntoTidal } from '$lib/search/merge_local'
   import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte'
   import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte'
-  import { upscaleTidalArtwork, type TidalArtworkSize } from '$lib/utils/artwork'
 
   const RECENT_KEY = 'noor_recent_searches'
   const RECENT_MAX = 8
@@ -79,15 +79,15 @@
   // the user navigates away.
   let abortController: AbortController | null = null
 
-  // D5 — in-memory result cache (last 5 queries, keyed by normalised query string)
+  // D5 - in-memory result cache (last 5 queries, keyed by normalised query string)
   const resultCache = new Map<string, TidalSearchResults>()
   let recent = $state<string[]>(loadRecent())
   let genreList = $state<Genre[]>([])
 
-  // C3 — session-aware ranking
+  // C3 - session-aware ranking
   let recentArtistNames = $state<Set<string>>(new Set())
 
-  // C4 — discovery injectables
+  // C4 - discovery injectables
   let vibeTrack = $state<VibeTrack[] | null>(null)
   let underratedTracks = $state<BasicTrack[] | null>(null)
 
@@ -246,7 +246,7 @@
           spotifyAlbumResults = []
         } else {
           audioResults = null
-          // Reset paging — every fresh query starts at offset 0.
+          // Reset paging - every fresh query starts at offset 0.
           tidalOffset = 0
           tidalPlaylistOffset = 0
           spotifyPlaylistOffset = 0
@@ -370,7 +370,7 @@
           pushRecent(q)
         }
       } catch (e) {
-        // Swallow abort errors — the user moved on or typed more.
+        // Swallow abort errors - the user moved on or typed more.
         if (signal.aborted || (e as Error)?.name === 'AbortError') return
         error = String(e)
       } finally {
@@ -410,7 +410,7 @@
       if (needsTidal && results) {
         const next = await api.searchTidal(lastQuery, SEARCH_PAGE_SIZE, undefined, tidalOffset)
         tidalOffset += SEARCH_PAGE_SIZE
-        // De-dupe by id — Tidal occasionally returns overlapping pages.
+        // De-dupe by id - Tidal occasionally returns overlapping pages.
         const seenTracks = new Set(results.tracks.map((t) => t.tidal_id))
         const seenAlbums = new Set(results.albums.map((a) => a.tidal_id))
         const seenArtists = new Set(results.artists.map((a) => a.tidal_id))
@@ -502,7 +502,7 @@
   }
 
   // IntersectionObserver on a sentinel below the result list. Fires loadMore
-  // whenever the sentinel scrolls into view — only if a single-category pill
+  // whenever the sentinel scrolls into view - only if a single-category pill
   // is active, which is the only mode where pagination is meaningful.
   let infiniteSentinel = $state<HTMLDivElement | null>(null)
   $effect(() => {
@@ -666,15 +666,6 @@
     for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0
     const hue = Math.abs(hash) % 360
     return `hsl(${hue}, 38%, 28%)`
-  }
-
-  function initials(name: string): string {
-    const parts = name.trim().split(/\s+/).slice(0, 2)
-    return parts.map((p) => p[0]?.toUpperCase() ?? '').join('') || '?'
-  }
-
-  function artworkSrc(url: string | null | undefined, size: TidalArtworkSize): string | null {
-    return upscaleTidalArtwork(url, size)
   }
 
   function sameArtistName(a: string | null | undefined, b: string | null | undefined): boolean {
@@ -843,15 +834,15 @@
     return getPlayableLabel(toPlayable(track))
   }
 
-  // ─── Keyboard navigation ────────────────────────────────────────────────
+  // Keyboard navigation
   // `/` from anywhere on the page focuses the input (skips when typing
-  // elsewhere). Once in the input, `Enter` plays — modifiers branch to
+  // elsewhere). Once in the input, `Enter` plays - modifiers branch to
   // queue/play-next. Arrow keys move a row cursor through the visible tracks.
   let inputEl: HTMLInputElement | null = $state(null)
   let cursor = $state(-1)
   let inputFocused = $state(false)
 
-  // DSP filter syntax is invisible — surface a tiny set of example chips when
+  // DSP filter syntax is invisible - surface a tiny set of example chips when
   // the input is focused but empty so users discover bpm:/key:/energy: filters.
   const HINT_CHIPS: { token: string; label: string }[] = [
     { token: 'bpm:128 ', label: 'bpm:128' },
@@ -973,7 +964,7 @@
     el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
   })
 
-  // ─── Position memory (Phase 5B — SvelteKit snapshot) ─────────────────────
+  // Position memory (Phase 5B - SvelteKit snapshot)
   // Snapshot binds state to the browser's history entry, so back AND forward
   // both land where the user left off.
   // Also abort any in-flight search on navigation so a slow response doesn't
@@ -1014,24 +1005,24 @@
         // Re-trigger the search; scroll restore happens once results land.
         onInput()
       } else {
-        // No query — restore scroll directly on next frame.
+        // No query - restore scroll directly on next frame.
         requestAnimationFrame(() => window.scrollTo({ top: saved.scrollY, behavior: 'auto' }))
       }
     }
   }
 
-  // C4 — load discovery sections whenever the top result changes
+  // C4 - load discovery sections whenever the top result changes
   $effect(() => {
     const top = topResult
     vibeTrack = null
     underratedTracks = null
     if (!top) return
-    // "Same vibe" — only when top result is a library track with a local id
+    // "Same vibe" - only when top result is a library track with a local id
     if (top.kind === 'track' && top.entry.in_library && (top.entry as TidalSearchTrack & { local_id?: number | null }).local_id != null) {
       const id = (top.entry as TidalSearchTrack & { local_id?: number | null }).local_id!
       void api.getVibeTracksForTrack(id).then(r => { vibeTrack = r.tracks }).catch(() => {})
     }
-    // "Unplayed in your library" — only when top result is a library artist with a local id
+    // "Unplayed in your library" - only when top result is a library artist with a local id
     if (top.kind === 'artist' && top.entry.in_library && top.entry.local_id != null) {
       void api.getUnderratedTracksForArtist(top.entry.local_id).then(r => { underratedTracks = r.tracks }).catch(() => {})
     }
@@ -1174,7 +1165,7 @@
                 <p class="track-title">{track.title}</p>
                 <p class="track-subtitle">
                   {#if track.artist_name}{track.artist_name}{/if}
-                  {#if track.artist_name && track.album_title} — {/if}
+                  {#if track.artist_name && track.album_title} - {/if}
                   {#if track.album_title}{track.album_title}{/if}
                 </p>
               </div>
@@ -1539,7 +1530,7 @@
                   {:else if track.artist_name}
                     {track.artist_name}
                   {:else}
-                    —
+                    -
                   {/if}
                 </span>
                 <span class="col-album">
@@ -1553,14 +1544,14 @@
                   {:else if track.album_title}
                     {track.album_title}
                   {:else}
-                    —
+                    -
                   {/if}
                 </span>
                 <span class="col-quality">
                   {#if track.audio_quality}
                     <span class="quality-badge">{track.audio_quality.replace(/_/g, ' ')}</span>
                   {:else}
-                    —
+                    -
                   {/if}
                 </span>
                 <span class="col-duration">{formatTrackDuration(track.duration_ms)}</span>
@@ -1638,7 +1629,7 @@
                       <span>{track.artist_name}</span>
                     {/if}
                   {/if}
-                  {#if track.artist_name && track.album_title} — {/if}
+                  {#if track.artist_name && track.album_title} - {/if}
                   {#if track.album_title}
                     {#if track.album_tidal_id != null}
                       <a
@@ -1672,7 +1663,7 @@
                 <button
                   class="row-btn"
                   onclick={(e) => { e.stopPropagation(); void startTidalSongRadio(track) }}
-                  title="Song radio — mix of related tracks from your library and Tidal"
+                  title="Song radio - mix of related tracks from your library and Tidal"
                   aria-label="Start radio from {track.title}"
                 >◎</button>
                 <button
@@ -2363,7 +2354,7 @@
     position: relative;
     z-index: 3;
   }
-  /* Single-category grids — Trending/Library style. Override the carousel's
+  /* Single-category grids - Trending/Library style. Override the carousel's
      horizontal-scroll layout when the matching pill is active. */
   .section-grid-albums {
     display: grid;

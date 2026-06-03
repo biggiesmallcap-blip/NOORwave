@@ -22,6 +22,7 @@ export const lastSelectedTrackId = writable<number | null>(null);
 export const lastSelectedAlbumId = writable<number | null>(null);
 
 const PAGE_SIZE = 100;
+let currentTrackListLikedOnly = false;
 
 export async function loadTracks(
 	sort = 'date_added',
@@ -36,6 +37,7 @@ export async function loadTracks(
 		// favoriteOnly stays true so the legacy "library tracks" semantics are unchanged
 		// for the Tracks tab; likedOnly takes precedence server-side.
 		const data = await cachedApi.getTracks(sort, dir, limit, offset, true, likedOnly);
+		currentTrackListLikedOnly = likedOnly;
 		if (offset === 0) {
 			tracks.set(data.tracks);
 		} else {
@@ -133,8 +135,11 @@ export function updateLibraryTrackFavorite(trackId: number, isFavorite: boolean,
 		const idx = list.findIndex((t) => t.id === trackId);
 		if (idx !== -1) {
 			if (!isFavorite) {
-				removed = true;
-				return list.filter((t) => t.id !== trackId);
+				if (currentTrackListLikedOnly) {
+					removed = true;
+					return list.filter((t) => t.id !== trackId);
+				}
+				return list.map((t) => (t.id === trackId ? { ...t, is_favorite: false } : t));
 			}
 			return list.map((t) => (t.id === trackId ? { ...t, is_favorite: true } : t));
 		}

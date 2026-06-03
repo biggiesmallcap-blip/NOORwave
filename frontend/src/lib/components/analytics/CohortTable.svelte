@@ -8,7 +8,7 @@
 	 *
 	 * Columns: COHORT · TRACKS · LISTENED · SESSIONS · COMPLETION · SKIP RATE · NEW ARTISTS · REPEAT RATE.
 	 *
-	 * Spec: C:\Users\Felix\.claude\plans\lets-revision-analytics-stats-crystalline-melody.md
+	 * Contract: rendered by frontend/src/routes/analytics/+page.svelte.
 	 */
 
 	import type { CohortRow } from '$lib/api/client';

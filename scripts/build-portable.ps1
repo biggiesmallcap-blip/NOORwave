@@ -55,12 +55,12 @@ if ($UsePrebuiltFrontend) {
 
 # 2. Build noor-server
 Write-Host "2/4 Building noor-server..." -ForegroundColor Yellow
-Invoke-Native -FilePath cargo -Arguments @("build", "--release", "-p", "noor-server")
+Invoke-Native -FilePath cargo -Arguments @("build", "--release", "--locked", "-p", "noor-server")
 Write-Host "    noor-server built" -ForegroundColor Green
 
 # 3. Build noor-app (Tauri shell)
 Write-Host "3/4 Building noor-app..." -ForegroundColor Yellow
-Invoke-Native -FilePath cargo -Arguments @("build", "--release", "-p", "noor-app")
+Invoke-Native -FilePath cargo -Arguments @("build", "--release", "--locked", "-p", "noor-app")
 Write-Host "    noor-app built" -ForegroundColor Green
 
 # 4. Assemble portable folder

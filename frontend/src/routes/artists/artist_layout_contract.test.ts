@@ -50,4 +50,9 @@ describe('artist page layout contracts', () => {
 		expect(source).toContain('await playTidalTracksNow(playable, artist?.name ?? \'artist\')');
 		expect(source).toContain('await playArtist(artistId)');
 	});
+
+	test('keeps route copy and comments ASCII-safe', () => {
+		expect(source).not.toMatch(/\u2014/);
+		expect(source).not.toMatch(/[\u2500-\u257F]/);
+	});
 });

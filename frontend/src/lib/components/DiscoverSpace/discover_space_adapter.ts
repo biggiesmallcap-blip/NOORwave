@@ -13,6 +13,7 @@ import type {
 } from './discover_space_types';
 import type { TidalPlayable, Track } from '$lib/api/client';
 import type { PlayableTrack } from '$lib/player/playable';
+import { upscaleTidalArtwork } from '$lib/utils/artwork';
 import { clamp01 } from '$lib/utils/math';
 
 // ─── Deterministic initial layout ────────────────────────────────────────────
@@ -173,6 +174,7 @@ export function adaptNode(
 	const supportCount = api.support_count ?? 0;
 	const inDegree = api.candidate_in_degree ?? 0;
 	const inDegreePctile = api.candidate_in_degree_percentile ?? 0;
+	const artworkUrl = upscaleTidalArtwork(api.artwork_url, 320) ?? undefined;
 
 	const isSeedNode = api.is_seed ?? api.track_id === seedId;
 
@@ -203,7 +205,7 @@ export function adaptNode(
 		title: api.title,
 		artist: api.artist_name,
 		albumTitle: api.album_title,
-		artworkUrl: api.artwork_url,
+		artworkUrl,
 		durationMs: api.duration_ms,
 		playable: playableFromApiNode(api),
 		source,
@@ -282,4 +284,3 @@ export function adaptResponse(
 	const edges = (data.edges ?? []).map(adaptEdge);
 	return { nodes, edges };
 }
-

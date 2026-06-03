@@ -27,6 +27,47 @@ impl StreamRequest {
     }
 }
 
+fn track_playback_info_url(
+    request: &StreamRequest,
+) -> std::result::Result<String, StreamResolveError> {
+    let base = format!(
+        "{}/tracks/{}/playbackinfopostpaywall",
+        TIDAL_API_URL, request.track_id
+    );
+    let mut url =
+        reqwest::Url::parse(&base).map_err(|error| StreamResolveError::RequestFailed {
+            message: format!("failed to build TIDAL playback URL: {error}"),
+        })?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("audioquality", &request.audio_quality);
+        query.append_pair("playbackmode", &request.playback_mode);
+        query.append_pair("assetpresentation", &request.asset_presentation);
+    }
+    Ok(url.to_string())
+}
+
+fn video_playback_info_url(
+    video_id: i64,
+    quality: &str,
+) -> std::result::Result<String, StreamResolveError> {
+    let base = format!(
+        "{}/videos/{}/playbackinfopostpaywall",
+        TIDAL_API_URL, video_id
+    );
+    let mut url =
+        reqwest::Url::parse(&base).map_err(|error| StreamResolveError::RequestFailed {
+            message: format!("failed to build TIDAL video playback URL: {error}"),
+        })?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("videoquality", quality);
+        query.append_pair("playbackmode", DEFAULT_PLAYBACK_MODE);
+        query.append_pair("assetpresentation", DEFAULT_ASSET_PRESENTATION);
+    }
+    Ok(url.to_string())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct StreamInfo {
     pub url: String,
@@ -580,14 +621,7 @@ pub async fn resolve_stream(
             message: error.to_string(),
         })?;
 
-    let url = format!(
-        "{}/tracks/{}/playbackinfopostpaywall?audioquality={}&playbackmode={}&assetpresentation={}",
-        TIDAL_API_URL,
-        request.track_id,
-        request.audio_quality,
-        request.playback_mode,
-        request.asset_presentation
-    );
+    let url = track_playback_info_url(request)?;
 
     let resp = http
         .get(&url)
@@ -858,10 +892,7 @@ pub async fn resolve_video_stream(
     } else {
         video_quality.trim()
     };
-    let url = format!(
-        "{}/videos/{}/playbackinfopostpaywall?videoquality={}&playbackmode={}&assetpresentation={}",
-        TIDAL_API_URL, video_id, quality, DEFAULT_PLAYBACK_MODE, DEFAULT_ASSET_PRESENTATION
-    );
+    let url = video_playback_info_url(video_id, quality)?;
 
     let resp = http
         .get(&url)
@@ -989,6 +1020,34 @@ mod tests {
 
         assert!(err.is_stream_rejected());
         assert!(err.is_asset_not_ready());
+    }
+
+    #[test]
+    fn track_playback_info_url_keeps_quality_values_in_query_value() {
+        let request = StreamRequest {
+            track_id: 42,
+            audio_quality: "HIGH&countryCode=US".to_string(),
+            playback_mode: "STREAM".to_string(),
+            asset_presentation: "FULL".to_string(),
+        };
+
+        let url = track_playback_info_url(&request).expect("URL should build");
+
+        assert_eq!(
+            url,
+            "https://api.tidal.com/v1/tracks/42/playbackinfopostpaywall?audioquality=HIGH%26countryCode%3DUS&playbackmode=STREAM&assetpresentation=FULL"
+        );
+    }
+
+    #[test]
+    fn video_playback_info_url_keeps_quality_values_in_query_value() {
+        let url =
+            video_playback_info_url(77, "HIGH&playbackmode=OFFLINE").expect("URL should build");
+
+        assert_eq!(
+            url,
+            "https://api.tidal.com/v1/videos/77/playbackinfopostpaywall?videoquality=HIGH%26playbackmode%3DOFFLINE&playbackmode=STREAM&assetpresentation=FULL"
+        );
     }
 
     #[test]

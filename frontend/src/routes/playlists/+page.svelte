@@ -25,6 +25,7 @@
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import TrackRow from '$lib/components/TrackRow.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import type { MenuItem } from '$lib/stores/context_menu';
@@ -1247,10 +1248,22 @@
 						>
 							{#if mosaic.length >= 4}
 								{#each mosaic.slice(0, 4) as url}
-									<img src={url} alt="" loading="lazy" />
+									<ArtworkImage
+										className="playlist-cover-art"
+										src={url}
+										size={320}
+										fallbackText="PL"
+										decorative={true}
+									/>
 								{/each}
 							{:else if mosaic.length > 0}
-								<img class="cover-solo" src={mosaic[0]} alt="" loading="lazy" />
+								<ArtworkImage
+									className="playlist-cover-art"
+									src={mosaic[0]}
+									size={320}
+									fallbackText="PL"
+									decorative={true}
+								/>
 							{:else}
 								<span>{playlist.name.trim().slice(0, 1).toUpperCase() || 'P'}</span>
 							{/if}
@@ -1864,18 +1877,18 @@
 		background: var(--bg-raised);
 	}
 
-	.playlist-cover.has-mosaic img {
+	.playlist-cover :global(.playlist-cover-art) {
 		width: 100%;
 		height: 100%;
+	}
+	.playlist-cover :global(img.playlist-cover-art) {
 		object-fit: cover;
 		display: block;
 	}
-
-	.playlist-cover.has-solo .cover-solo {
-		width: 100%;
-		height: 100%;
-		object-fit: cover;
-		display: block;
+	.playlist-cover :global(.playlist-cover-art.fallback) {
+		display: grid;
+		place-items: center;
+		background: var(--bg-raised);
 	}
 
 	.playlist-meta {

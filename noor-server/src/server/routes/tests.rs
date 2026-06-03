@@ -740,6 +740,66 @@ fn app_for_db(db: Database) -> Router {
     api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(db))))
 }
 
+#[tokio::test]
+async fn tracks_route_treats_key_signature_filter_as_data() {
+    let (db, db_path) = fresh_migrated_db();
+    db.with_conn(|conn| {
+        conn.execute("INSERT INTO artists (id, name) VALUES (9001, 'Filter Artist')", [])?;
+        conn.execute(
+            "INSERT INTO tracks (
+                    id, title, artist_id, duration_ms, tidal_id, best_quality, best_source,
+                    fidelity_score, is_favorite, source
+                 ) VALUES
+                    (9001, 'Minor Match', 9001, 180000, 99001, 'LOSSLESS', 'tidal', 10, 0, 'tidal'),
+                    (9002, 'Major Match', 9001, 180000, 99002, 'LOSSLESS', 'tidal', 10, 0, 'tidal')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO audio_dsp_features (track_id, key_signature)
+             VALUES (9001, 'Am'), (9002, 'C')",
+            [],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .expect("seed tracks with keys");
+
+    let app = app_for_db(db);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/tracks?key_signature=Am&limit=50")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    let tracks = body["tracks"].as_array().expect("tracks array");
+    assert_eq!(tracks.len(), 1);
+    assert_eq!(tracks[0]["title"], "Minor Match");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/tracks?key_signature=Am%27%20OR%201%3D1%20--&limit=50")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    let tracks = body["tracks"].as_array().expect("tracks array");
+    assert!(
+        tracks.is_empty(),
+        "key_signature must be treated as an exact string, got {tracks:?}"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
 fn seed_dj_queue_pair(db: &Database) -> (i64, i64) {
     db.with_conn(|conn| {
         conn.execute(
