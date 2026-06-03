@@ -1,4 +1,3 @@
-pub mod beat_tracker;
 pub mod bpm;
 pub mod dj_profile;
 pub mod engine;
@@ -53,19 +52,14 @@ pub(crate) fn should_defer_background_analysis_for_active_playback(
 
 pub type AnalysisJob = (i64, Vec<f32>, u32); // (track_id, mono_samples, sample_rate)
 
-/// Actor config: max samples to analyze per track, minimum interval between analyses
+/// Actor config: max samples to analyze per track.
 pub struct AnalysisConfig {
     pub max_seconds: u32, // default 30
-    #[allow(dead_code)]
-    pub min_interval_hours: u32, // default 7
 }
 
 impl Default for AnalysisConfig {
     fn default() -> Self {
-        Self {
-            max_seconds: 30,
-            min_interval_hours: 7,
-        }
+        Self { max_seconds: 30 }
     }
 }
 

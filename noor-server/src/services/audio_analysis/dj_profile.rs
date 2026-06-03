@@ -1,4 +1,4 @@
-use crate::db::models::{AudioDjProfileCorrectionRow, AudioDjProfileKey, AudioDjProfileRow};
+use crate::db::models::{AudioDjProfileKey, AudioDjProfileRow};
 use crate::db::queries;
 use crate::playback::dj_lookahead::DjMediaRef;
 use anyhow::Result;
@@ -284,43 +284,6 @@ struct StructureCandidate {
     reason: &'static str,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct LoadedDjProfile {
-    pub bpm: Option<f32>,
-    pub downbeats_seconds: Vec<f32>,
-    pub phrase_bar_indices: Vec<u32>,
-    pub safe_crossfade_only: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct PlannerPolicyShape {
-    pub default_crossfade_ms: u32,
-    pub transition_speed_bias: String,
-}
-
-#[allow(dead_code)]
-pub fn build_audio_dj_profile_row(
-    key: AudioDjProfileKey,
-    track_id: Option<i64>,
-    queue_item_id: Option<i64>,
-    tidal_id: Option<i64>,
-    samples: &[f32],
-    sample_rate: u32,
-    source: &str,
-) -> Option<AudioDjProfileRow> {
-    let beat_grid = bpm::analyze_beat_grid(samples, sample_rate)?;
-    Some(build_audio_dj_profile_row_from_analysis(
-        key,
-        track_id,
-        queue_item_id,
-        tidal_id,
-        samples,
-        sample_rate,
-        source,
-        &beat_grid,
-    ))
-}
-
 pub fn dj_analysis_skips_existing_profile_version(
     conn: &Connection,
     key: &AudioDjProfileKey,
@@ -436,71 +399,6 @@ pub fn encode_safe_transition_windows(windows: &[SafeTransitionWindow]) -> Vec<u
         out.extend_from_slice(&window.confidence.to_le_bytes());
     }
     out
-}
-
-pub fn decode_safe_transition_windows(blob: &[u8]) -> Option<Vec<SafeTransitionWindow>> {
-    let payload = payload_after_count(blob, 12)?;
-    let count = read_count(blob)? as usize;
-    if payload.len() != count.checked_mul(12)? {
-        return None;
-    }
-    let mut windows = Vec::with_capacity(count);
-    for chunk in payload.chunks_exact(12) {
-        let start_seconds = f32::from_le_bytes(chunk[0..4].try_into().ok()?);
-        let end_seconds = f32::from_le_bytes(chunk[4..8].try_into().ok()?);
-        let confidence = f32::from_le_bytes(chunk[8..12].try_into().ok()?);
-        if !start_seconds.is_finite() || !end_seconds.is_finite() || !confidence.is_finite() {
-            return None;
-        }
-        windows.push(SafeTransitionWindow {
-            start_seconds,
-            end_seconds,
-            confidence,
-        });
-    }
-    Some(windows)
-}
-
-pub fn apply_correction_to_loaded_profile(
-    profile: &mut LoadedDjProfile,
-    correction: &AudioDjProfileCorrectionRow,
-) {
-    if let (Some(bpm), Some(multiplier)) = (profile.bpm, correction.bpm_multiplier) {
-        profile.bpm = Some((bpm as f64 * multiplier) as f32);
-    }
-    if let Some(offset) = correction.downbeat_offset_beats {
-        let beat_seconds = profile
-            .downbeats_seconds
-            .windows(2)
-            .next()
-            .map(|w| (w[1] - w[0]).abs() / 4.0)
-            .filter(|value| value.is_finite() && *value > 0.0)
-            .unwrap_or(0.5);
-        for downbeat in &mut profile.downbeats_seconds {
-            *downbeat += beat_seconds * offset as f32;
-        }
-    }
-    if let Some(offset) = correction.phrase_offset_bars {
-        for phrase in &mut profile.phrase_bar_indices {
-            let shifted = i64::from(*phrase) + offset;
-            *phrase = shifted.max(0) as u32;
-        }
-    }
-    if correction.safe_crossfade_only {
-        profile.safe_crossfade_only = true;
-    }
-}
-
-pub fn transition_speed_bias_to_policy_shape(bias: Option<&str>) -> PlannerPolicyShape {
-    let (default_crossfade_ms, transition_speed_bias) = match bias {
-        Some("slower") => (12_000, "slower"),
-        Some("faster") => (6_000, "faster"),
-        _ => (8_000, "neutral"),
-    };
-    PlannerPolicyShape {
-        default_crossfade_ms,
-        transition_speed_bias: transition_speed_bias.to_string(),
-    }
 }
 
 fn build_audio_dj_profile_row_from_analysis(
@@ -1044,19 +942,6 @@ mod tests {
     }
 
     #[test]
-    fn safe_transition_windows_round_trip() {
-        let windows = vec![SafeTransitionWindow {
-            start_seconds: 1.0,
-            end_seconds: 9.0,
-            confidence: 0.7,
-        }];
-        assert_eq!(
-            decode_safe_transition_windows(&encode_safe_transition_windows(&windows)),
-            Some(windows)
-        );
-    }
-
-    #[test]
     fn low_confidence_profile_omits_intro_outro_estimates() {
         let row = row_for("tidal_track", "1", 10);
         assert!(row.profile_confidence < 0.4);
@@ -1224,71 +1109,6 @@ mod tests {
     }
 
     #[test]
-    fn correction_bpm_multiplier_adjusts_loaded_profile_bpm() {
-        let mut profile = LoadedDjProfile {
-            bpm: Some(120.0),
-            downbeats_seconds: vec![0.0, 2.0],
-            phrase_bar_indices: vec![0],
-            safe_crossfade_only: false,
-        };
-        let correction = correction(Some(2.0), None, None, false, None);
-        apply_correction_to_loaded_profile(&mut profile, &correction);
-        assert_eq!(profile.bpm, Some(240.0));
-    }
-
-    #[test]
-    fn correction_offsets_adjust_loaded_downbeats_and_phrases() {
-        let mut profile = LoadedDjProfile {
-            bpm: Some(120.0),
-            downbeats_seconds: vec![0.0, 2.0],
-            phrase_bar_indices: vec![8],
-            safe_crossfade_only: false,
-        };
-        let correction = correction(None, Some(2), Some(-3), false, None);
-        apply_correction_to_loaded_profile(&mut profile, &correction);
-        assert_eq!(profile.downbeats_seconds, vec![1.0, 3.0]);
-        assert_eq!(profile.phrase_bar_indices, vec![5]);
-    }
-
-    #[test]
-    fn safe_crossfade_only_correction_sets_planner_safety_flag() {
-        let mut profile = LoadedDjProfile {
-            bpm: Some(120.0),
-            downbeats_seconds: vec![0.0, 2.0],
-            phrase_bar_indices: vec![0],
-            safe_crossfade_only: false,
-        };
-        let correction = correction(None, None, None, true, None);
-        apply_correction_to_loaded_profile(&mut profile, &correction);
-        assert!(profile.safe_crossfade_only);
-    }
-
-    #[test]
-    fn transition_speed_bias_maps_to_policy_duration_preference() {
-        assert_eq!(
-            transition_speed_bias_to_policy_shape(Some("faster")).default_crossfade_ms,
-            6_000
-        );
-        assert_eq!(
-            transition_speed_bias_to_policy_shape(Some("slower")).default_crossfade_ms,
-            12_000
-        );
-        assert_eq!(
-            transition_speed_bias_to_policy_shape(None).transition_speed_bias,
-            "neutral"
-        );
-    }
-
-    #[test]
-    fn raw_profile_builder_ignores_user_corrections() {
-        let row = row_for("tidal_track", "1", 90);
-        let correction = correction(Some(2.0), None, None, true, Some("faster"));
-        assert_eq!(row.profile_confidence, 0.65);
-        assert!(!row.is_temporary);
-        assert_eq!(correction.bpm_multiplier, Some(2.0));
-    }
-
-    #[test]
     fn analyze_and_save_does_not_write_audio_dj_profile() {
         let db = Database::open_in_memory().expect("db");
         db.run_migrations().expect("migrations");
@@ -1447,28 +1267,6 @@ mod tests {
             Ok(())
         })
         .expect("count");
-    }
-
-    fn correction(
-        bpm_multiplier: Option<f64>,
-        downbeat_offset_beats: Option<i64>,
-        phrase_offset_bars: Option<i64>,
-        safe_crossfade_only: bool,
-        transition_speed_bias: Option<&str>,
-    ) -> AudioDjProfileCorrectionRow {
-        AudioDjProfileCorrectionRow {
-            media_ref_kind: "tidal_track".to_string(),
-            media_ref_id: "1".to_string(),
-            bpm_multiplier,
-            downbeat_offset_beats,
-            phrase_offset_bars,
-            safe_crossfade_only,
-            transition_speed_bias: transition_speed_bias.map(str::to_string),
-            manual_drop_blob: Vec::new(),
-            notes: None,
-            created_at: "now".to_string(),
-            updated_at: "now".to_string(),
-        }
     }
 
     fn estimated_profile_build_peak_bytes(samples: &[f32], seconds: usize) -> usize {

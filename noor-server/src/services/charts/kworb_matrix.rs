@@ -359,15 +359,6 @@ fn parse_kworb_detail_table_entries(source_key: &str, input: &str) -> Vec<KworbC
     entries
 }
 
-pub fn ingest_kworb_matrix_html(
-    conn: &Connection,
-    chart_date: &str,
-    fetched_at: i64,
-    input: &str,
-) -> Result<KworbMatrixIngestReport> {
-    ingest_kworb_matrix_html_with_details(conn, chart_date, fetched_at, input, &BTreeMap::new())
-}
-
 pub fn ingest_kworb_chart_pages(
     conn: &Connection,
     chart_date: &str,
@@ -838,8 +829,14 @@ mod tests {
 </table>
 "#;
 
-        let report =
-            ingest_kworb_matrix_html(&conn, "2026-05-28", 1234, html).expect("ingest matrix");
+        let report = ingest_kworb_matrix_html_with_details(
+            &conn,
+            "2026-05-28",
+            1234,
+            html,
+            &BTreeMap::new(),
+        )
+        .expect("ingest matrix");
 
         assert_eq!(report.entries_written, 11);
         assert_eq!(report.snapshots_written, 11);
@@ -895,8 +892,14 @@ mod tests {
 </tbody></table>
 "#;
 
-        let report =
-            ingest_kworb_matrix_html(&conn, "2026-05-29", 1234, html).expect("ingest matrix");
+        let report = ingest_kworb_matrix_html_with_details(
+            &conn,
+            "2026-05-29",
+            1234,
+            html,
+            &BTreeMap::new(),
+        )
+        .expect("ingest matrix");
 
         assert_eq!(report.entries_written, 18);
         assert_eq!(report.snapshots_written, 18);

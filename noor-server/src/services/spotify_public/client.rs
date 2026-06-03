@@ -10,7 +10,6 @@
 
 use anyhow::{Context, Result, anyhow};
 use reqwest::{Client, StatusCode};
-use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -275,10 +274,4 @@ fn persisted_query_not_found(body: &Value) -> bool {
             })
         })
         .unwrap_or(false)
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
-pub struct GetTrackResponseLike {
-    pub data: Option<Value>,
 }

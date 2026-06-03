@@ -1,4 +1,3 @@
-use crate::db::models::DiscoveryProviderCapability;
 use crate::genre::builder::embedded_builder;
 use crate::services::tidal::{
     client::{TidalClient, TidalSearchArtist, TidalSearchCatalog, TidalSearchTrack},
@@ -49,9 +48,6 @@ pub struct DiscoveryCandidateSeed {
 
 #[async_trait]
 pub trait DiscoveryProvider: Send + Sync {
-    #[allow(dead_code)]
-    fn capabilities(&self) -> DiscoveryProviderCapability;
-
     async fn search_tracks(
         &self,
         queries: &[String],
@@ -209,16 +205,6 @@ impl TidalDiscoveryProvider {
 
 #[async_trait]
 impl DiscoveryProvider for TidalDiscoveryProvider {
-    fn capabilities(&self) -> DiscoveryProviderCapability {
-        DiscoveryProviderCapability {
-            provider: "tidal".to_string(),
-            can_save: true,
-            can_play_inline: true,
-            can_fetch_connections: true,
-            can_map_genres: true,
-        }
-    }
-
     async fn search_tracks(
         &self,
         queries: &[String],

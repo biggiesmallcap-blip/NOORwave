@@ -26,44 +26,11 @@ impl GenreAssignmentBuilder {
         let resolution = self.resolve(raw);
         resolution.canonical_name().map(str::to_string)
     }
-
-    #[allow(dead_code)]
-    pub fn canonicalize_many<I, S>(&self, values: I) -> Option<Vec<String>>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        let mut genres = BTreeSet::new();
-
-        for value in values {
-            let resolution = self.resolve(value.as_ref());
-            if resolution.is_ambiguous() {
-                return None;
-            }
-
-            let Some(canonical) = resolution.canonical_name() else {
-                return None;
-            };
-
-            genres.insert(canonical.to_string());
-        }
-
-        Some(genres.into_iter().collect())
-    }
 }
 
 pub fn embedded_builder() -> &'static GenreAssignmentBuilder {
     static BUILDER: OnceLock<GenreAssignmentBuilder> = OnceLock::new();
     BUILDER.get_or_init(GenreAssignmentBuilder::from_embedded)
-}
-
-#[allow(dead_code)]
-pub fn normalize_genres<I, S>(values: I) -> Option<Vec<String>>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    embedded_builder().canonicalize_many(values)
 }
 
 pub fn collect_clear_genres<I, S>(values: I) -> Vec<String>
@@ -85,7 +52,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{GenreAssignmentBuilder, collect_clear_genres, normalize_genres};
+    use super::{GenreAssignmentBuilder, collect_clear_genres};
 
     #[test]
     fn resolves_single_genres() {
@@ -98,10 +65,6 @@ mod tests {
     fn fails_closed_on_ambiguous_compound_inputs() {
         let builder = GenreAssignmentBuilder::from_embedded();
         assert_eq!(builder.normalize("Tech House / House"), None);
-        assert_eq!(
-            normalize_genres(["House", "House"]),
-            Some(vec!["House".to_string()])
-        );
     }
 
     #[test]
