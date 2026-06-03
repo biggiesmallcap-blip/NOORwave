@@ -10,7 +10,7 @@
 	import { playTrackNow } from '$lib/stores/player';
 	import RemoteAlbumTile from '$lib/components/remote/RemoteAlbumTile.svelte';
 	import RemotePageShell from '$lib/components/remote/RemotePageShell.svelte';
-	import { upscaleTidalArtwork } from '$lib/utils/artwork';
+	import { upscaleTidalArtwork, type TidalArtworkSize } from '$lib/utils/artwork';
 	import { hapticTap } from '$lib/remote/haptics';
 	import { tap } from '$lib/remote/tap';
 	import { goto } from '$app/navigation';
@@ -19,12 +19,13 @@
 
 	let tab = $state<Tab>('artists');
 	let filter = $state('');
+	let failedArtworkUrls = $state<Record<string, boolean>>({});
 
-	// Top rails — fetched once on mount via the dashboard endpoint.
+	// Top rails - fetched once on mount via the dashboard endpoint.
 	let recents = $state<ListenHistoryEntry[]>([]);
 	let topArtists = $state<AnalyticsTopArtist[]>([]);
 
-	// Alphabetical browse — paginated.
+	// Alphabetical browse - paginated.
 	const PAGE = 50;
 	let artists = $state<Artist[]>([]);
 	let artistsHasMore = $state(true);
@@ -42,7 +43,7 @@
 			recents = dashboard.recent_listens;
 			topArtists = dashboard.top_artists;
 		} catch {
-			// Non-critical — the alphabetical lists below still work.
+			// Non-critical - the alphabetical lists below still work.
 		}
 	}
 
@@ -85,7 +86,7 @@
 			const offset = tracks.length;
 			// `liked_only=true` strictly filters to user-favourited tracks
 			// (the looser `favorite_only` also includes tracks whose parent
-			// album is favourited — that's not what the user asked for here).
+			// album is favourited - that's not what the user asked for here).
 			// Default sort is recency-first: the most recently liked tracks
 			// surface at the top, matching how Spotify / Apple Music order
 			// their "Liked Songs" view on mobile.
@@ -162,6 +163,20 @@
 		void playTrackNow(t.id);
 	}
 
+	function artworkCandidate(
+		rawUrl: string | null | undefined,
+		size: TidalArtworkSize
+	): string | null {
+		const renderedUrl = upscaleTidalArtwork(rawUrl, size);
+		if (renderedUrl && !failedArtworkUrls[renderedUrl]) return renderedUrl;
+		return null;
+	}
+
+	function markArtworkFailed(renderedUrl: string | null) {
+		if (!renderedUrl) return;
+		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
+	}
+
 	// Scroll-driven pagination. When the sentinel below the visible list enters
 	// the viewport, request the next page for whichever tab is active.
 	let sentinelEl: HTMLDivElement | null = $state(null);
@@ -180,7 +195,7 @@
 	function artistPortrait(a: Artist | AnalyticsTopArtist): string | null {
 		// Top-artist analytics entries don't carry photo_url; fall back to null
 		// and let the placeholder render the initial.
-		if ('photo_url' in a) return upscaleTidalArtwork(a.photo_url ?? null, 320);
+		if ('photo_url' in a) return artworkCandidate(a.photo_url ?? null, 320);
 		return null;
 	}
 
@@ -203,7 +218,7 @@
 </script>
 
 <svelte:head>
-	<title>Library — NOOR Remote</title>
+	<title>Library - NOOR Remote</title>
 </svelte:head>
 
 <RemotePageShell title="Library">
@@ -212,6 +227,7 @@
 			<header><h3>Recently played</h3></header>
 			<div class="remote-rail">
 				{#each recents as entry (entry.id)}
+					{@const recentArt = artworkCandidate(entry.artwork_url, 320)}
 					<button
 						type="button"
 						class="remote-recent-tile"
@@ -219,12 +235,13 @@
 						onclick={() => pickRecent(entry)}
 					>
 						<span class="remote-recent-art">
-							{#if entry.artwork_url}
+							{#if recentArt}
 								<img
-									src={upscaleTidalArtwork(entry.artwork_url, 320)}
+									src={recentArt}
 									alt=""
 									loading="lazy"
 									decoding="async"
+									onerror={() => markArtworkFailed(recentArt)}
 								/>
 							{:else}
 								<span aria-hidden="true">NOOR</span>
@@ -321,15 +338,17 @@
 		     hidden lists' rows pay no layout cost while inactive. -->
 		<ul class="remote-row-list" hidden={tab !== 'artists'} aria-hidden={tab !== 'artists'}>
 			{#each filteredArtists as artist (artist.id)}
+				{@const artistArt = artistPortrait(artist)}
 				<li>
 					<button type="button" class="remote-row" onclick={() => pickArtist(artist.id)}>
 						<span class="remote-row-thumb">
-							{#if artistPortrait(artist)}
+							{#if artistArt}
 								<img
-									src={artistPortrait(artist)}
+									src={artistArt}
 									alt=""
 									loading="lazy"
 									decoding="async"
+									onerror={() => markArtworkFailed(artistArt)}
 								/>
 							{:else}
 								<span aria-hidden="true">{artist.name.slice(0, 1)}</span>
@@ -345,15 +364,17 @@
 
 		<ul class="remote-row-list" hidden={tab !== 'albums'} aria-hidden={tab !== 'albums'}>
 			{#each filteredAlbums as album (album.id)}
+				{@const albumArt = artworkCandidate(album.artwork_url, 320)}
 				<li>
 					<button type="button" class="remote-row" onclick={() => pickAlbum(album.id)}>
 						<span class="remote-row-thumb">
-							{#if album.artwork_url}
+							{#if albumArt}
 								<img
-									src={upscaleTidalArtwork(album.artwork_url, 320)}
+									src={albumArt}
 									alt=""
 									loading="lazy"
 									decoding="async"
+									onerror={() => markArtworkFailed(albumArt)}
 								/>
 							{:else}
 								<span aria-hidden="true">{album.title.slice(0, 1)}</span>
@@ -370,15 +391,17 @@
 
 		<ul class="remote-row-list" hidden={tab !== 'tracks'} aria-hidden={tab !== 'tracks'}>
 			{#each filteredTracks as track (track.id)}
+				{@const trackArt = artworkCandidate(track.artwork_url, 320)}
 				<li>
 					<button type="button" class="remote-row" onclick={() => pickTrack(track)}>
 						<span class="remote-row-thumb">
-							{#if track.artwork_url}
+							{#if trackArt}
 								<img
-									src={upscaleTidalArtwork(track.artwork_url, 320)}
+									src={trackArt}
 									alt=""
 									loading="lazy"
 									decoding="async"
+									onerror={() => markArtworkFailed(trackArt)}
 								/>
 							{:else}
 								<span aria-hidden="true">{track.title.slice(0, 1)}</span>
@@ -605,7 +628,7 @@
 	}
 
 	/* The `hidden` HTML attribute applies `display: none` by default, but
-	   `.remote-row-list { display: grid }` above overrides it — so the
+	   `.remote-row-list { display: grid }` above overrides it - so the
 	   inactive lists end up rendered on top of the active one and the user
 	   only sees the first tab. Restore the hidden semantics. */
 	.remote-row-list[hidden] {
@@ -616,7 +639,7 @@
 	   iOS Safari (as of iOS 18-26) thrashes layout on rapid scroll reversals
 	   with hundreds of rows, occasionally freezing the scroll until the
 	   gesture stops. loading="lazy" on the row images is enough on its own
-	   for the perf budget here — leave the rows fully laid out. */
+	   for the perf budget here - leave the rows fully laid out. */
 
 	.remote-row {
 		display: flex;

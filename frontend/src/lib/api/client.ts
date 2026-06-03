@@ -1338,7 +1338,7 @@ export interface AnalyticsDashboard {
 
 // ─────────────────────────────────────────────────────────────────────────
 // Analytics signals - GET /api/analytics/signals
-// Spec: C:\Users\Felix\.claude\plans\lets-revision-analytics-stats-crystalline-melody.md
+// Contract: noor-server/tests/fixtures/signals-schema.json
 // JSON schema: noor-server/tests/fixtures/signals-schema.json
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -2998,8 +2998,8 @@ export const api = {
 		);
 	},
 
-	search(query: string, limit = 20) {
-		return fetchApi<SearchResults>('/api/search', { q: query, limit: String(limit) });
+	search(query: string, limit = 20, signal?: AbortSignal) {
+		return fetchApi<SearchResults>('/api/search', { q: query, limit: String(limit) }, { signal });
 	},
 
 	searchAudio(params: AudioSearchParams, signal?: AbortSignal) {

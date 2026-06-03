@@ -193,23 +193,6 @@ pub fn build_external_feed(
     }
 }
 
-#[allow(dead_code)]
-pub fn build_trail_item(
-    result: &DiscoveryExternalResult,
-    connection_reason: impl Into<String>,
-) -> DiscoveryConnectionTrailItem {
-    DiscoveryConnectionTrailItem {
-        provider: result.provider.clone(),
-        provider_track_id: result.provider_track_id.clone(),
-        title: result.title.clone(),
-        artist_name: result.artist_name.clone(),
-        album_title: result.album_title.clone(),
-        artwork_url: result.artwork_url.clone(),
-        normalized_genres: result.normalized_genres.clone(),
-        connection_reason: connection_reason.into(),
-    }
-}
-
 fn build_profile(
     request: &ExternalDiscoveryRequest,
     context: &ExternalDiscoveryContext,

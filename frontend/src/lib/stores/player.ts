@@ -35,6 +35,7 @@ export const currentStreamDisplay = writable<StreamDisplayInfo | null>(null);
 export const playbackRuntimeInfo = writable<PlaybackRuntimeInfo | null>(null);
 
 const tidalMetadataById = new Map<number, Partial<TidalPlayable>>();
+const tidalFavoriteOverrideById = new Map<number, { localId: number; favorite: boolean }>();
 
 type TidalMetadataInput = Pick<TidalPlayable, 'tidal_id' | 'title'> & Partial<Omit<TidalPlayable, 'tidal_id' | 'title'>>;
 
@@ -71,16 +72,24 @@ function enrichTidalTrack(track: Track | null): Track | null {
 	if (!cached) return track;
 	const localId = localTidalTrackId({ tidal_id: track.tidal_id, ...cached });
 	const isLocalTrack = track.id > 0;
+	const effectiveId = track.id < 0 ? (localId ?? track.id) : track.id;
+	const favoriteOverride = tidalFavoriteOverrideById.get(track.tidal_id);
+	const isFavorite =
+		favoriteOverride && favoriteOverride.localId === effectiveId
+			? favoriteOverride.favorite
+			: isLocalTrack
+				? track.is_favorite
+				: (cached.is_favorite ?? track.is_favorite);
 	return {
 		...track,
-		id: track.id < 0 ? (localId ?? track.id) : track.id,
+		id: effectiveId,
 		artist_name: track.artist_name ?? cached.artist_name ?? null,
 		artist_tidal_id: track.artist_tidal_id ?? cached.artist_tidal_id ?? null,
 		album_title: track.album_title ?? cached.album_title ?? null,
 		album_tidal_id: track.album_tidal_id ?? cached.album_tidal_id ?? null,
 		artwork_url: track.artwork_url ?? cached.artwork_url ?? null,
 		duration_ms: track.duration_ms ?? cached.duration_ms ?? null,
-		is_favorite: isLocalTrack ? track.is_favorite : (cached.is_favorite ?? track.is_favorite),
+		is_favorite: isFavorite,
 	};
 }
 
@@ -400,6 +409,13 @@ function applyState(state: PlaybackState) {
 	automixUseLearning.set(state.automix_use_learning);
 	automixAllowExternal.set(state.automix_allow_external);
 	scheduleBufferedRefreshIfNeeded();
+}
+
+function resetOptimisticPlaybackProgress() {
+	clearBufferedRefresher();
+	position.set(0);
+	anchorPositionTicker(0);
+	buffered.set(0);
 }
 
 export function hydratePlayback(snapshot: PlaybackSnapshot) {
@@ -875,6 +891,9 @@ export async function saveQueueAsPlaylist(
 
 export function setTrackFavoriteStatus(trackId: number, favorite: boolean, track?: Track) {
 	if (track?.tidal_id) {
+		if (trackId > 0) {
+			tidalFavoriteOverrideById.set(track.tidal_id, { localId: trackId, favorite });
+		}
 		const previous = tidalMetadataById.get(track.tidal_id) ?? {};
 		tidalMetadataById.set(track.tidal_id, {
 			...previous,
@@ -1222,6 +1241,7 @@ export async function playTidalTrackNow(track: TidalPlayable): Promise<void> {
 	try {
 		rememberTidalPlayable(track);
 		await api.playTidalTrack(track);
+		resetOptimisticPlaybackProgress();
 		setCurrentTrack({
 			id: localTidalTrackId(track) ?? -track.tidal_id,
 			title: track.title,
@@ -1271,6 +1291,7 @@ function tidalQueueRequest(track: TidalPlayable) {
 
 function setOptimisticTidalTrack(track: TidalPlayable) {
 	rememberTidalPlayable(track);
+	resetOptimisticPlaybackProgress();
 	setCurrentTrack({
 		id: localTidalTrackId(track) ?? -track.tidal_id,
 		title: track.title,

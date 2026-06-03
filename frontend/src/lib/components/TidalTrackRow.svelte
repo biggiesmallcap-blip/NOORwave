@@ -151,7 +151,7 @@
 					<!-- svelte-ignore a11y_no_static_element_interactions -->
 					<span class="sub-link" oncontextmenu={openArtistContextMenu}>{track.artist_name}</span>
 				{/if}
-				{#if showArtist && track.artist_name && showAlbum && track.album_title} — {/if}
+				{#if showArtist && track.artist_name && showAlbum && track.album_title} - {/if}
 				{#if showAlbum && track.album_title}
 					<!-- svelte-ignore a11y_no_static_element_interactions -->
 					<span class="sub-link" oncontextmenu={openAlbumContextMenu}>{track.album_title}</span>
@@ -283,7 +283,7 @@
 					<!-- svelte-ignore a11y_no_static_element_interactions -->
 					<span class="sub-link" oncontextmenu={openArtistContextMenu}>{track.artist_name}</span>
 				{/if}
-				{#if showArtist && track.artist_name && showAlbum && track.album_title} — {/if}
+				{#if showArtist && track.artist_name && showAlbum && track.album_title} - {/if}
 				{#if showAlbum && track.album_title}
 					<!-- svelte-ignore a11y_no_static_element_interactions -->
 					<span class="sub-link" oncontextmenu={openAlbumContextMenu}>{track.album_title}</span>

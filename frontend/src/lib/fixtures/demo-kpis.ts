@@ -6,6 +6,7 @@
  */
 
 import type { SignalsKpis, DailyKpi, HeroStats, SessionsCoverage } from '$lib/api/client';
+import { dateNDaysAgo, gaussian, mulberry32 } from '$lib/fixtures/demo-random';
 
 export type KpiProfile = 'casual' | 'heavy' | 'sporadic' | 'recovering';
 
@@ -25,32 +26,6 @@ const PROFILES: Record<KpiProfile, ProfileSpec> = {
 	sporadic: { dailyMean: 18, dailySd: 28, completionMean: 0.52, completionSd: 0.14, avgTrackMs: 110_000, driftPct: -0.12, offDayProb: 0.30 },
 	recovering: { dailyMean: 60, dailySd: 32, completionMean: 0.78, completionSd: 0.10, avgTrackMs: 165_000, driftPct: 0.32, offDayProb: 0.08 },
 };
-
-function mulberry32(seed: number): () => number {
-	let a = seed;
-	return () => {
-		a |= 0;
-		a = (a + 0x6d2b79f5) | 0;
-		let t = a;
-		t = Math.imul(t ^ (t >>> 15), t | 1);
-		t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-	};
-}
-
-function gaussian(rand: () => number, mu: number, sigma: number): number {
-	const u = 1 - rand();
-	const v = rand();
-	const z = Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
-	return mu + z * sigma;
-}
-
-function dateNDaysAgo(n: number): string {
-	const d = new Date();
-	d.setHours(0, 0, 0, 0);
-	d.setDate(d.getDate() - n);
-	return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
 
 export function generateDemoKpis(
 	profile: KpiProfile = 'casual',

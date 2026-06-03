@@ -8,6 +8,10 @@ const root = resolve(here, '../..');
 const libraryPage = readFileSync(join(root, 'routes/library/+page.svelte'), 'utf8');
 const libraryHero = readFileSync(join(root, 'lib/components/LibraryHero.svelte'), 'utf8');
 
+function countOccurrences(source: string, needle: string): number {
+	return source.split(needle).length - 1;
+}
+
 describe('library home hero contract', () => {
 	test('top_artist_hero_uses_a_full_top_20_mural', () => {
 		expect(libraryPage).toContain('played.slice(0, 20)');
@@ -29,8 +33,20 @@ describe('library home hero contract', () => {
 		expect(libraryHero).toContain('.mural-panel--featured::after');
 		expect(libraryHero).toContain('pointer-events: none');
 		expect(libraryHero).toContain('pointer-events: auto');
-		expect(libraryHero).toContain('upscaleTidalArtwork');
-		expect(libraryHero).toContain('onerror={() => markArtistArtFailed(artist)}');
+		expect(libraryHero).toContain("import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte'");
+		expect(libraryHero).toContain('function artistArtworkSources(artist: Artist): string[]');
+		expect(libraryHero).toContain('<ArtworkImage');
+		expect(libraryHero).toContain('className="mural-panel-art"');
+		expect(libraryHero).toContain('src={artistArtworkSources(artist)}');
+		expect(libraryHero).toContain('size={640}');
+		expect(libraryHero).toContain('fallbackText={initials(artist.name)}');
+		expect(libraryHero).toContain('decorative={true}');
+		expect(libraryHero).toContain(':global(.mural-panel-art)');
+		expect(libraryHero).not.toContain('upscaleTidalArtwork');
+		expect(libraryHero).not.toContain('failedImageUrls');
+		expect(libraryHero).not.toContain('onerror={() => markArtistArtFailed(artist)}');
+		expect(libraryHero).not.toContain('<img src={panelArt}');
+		expect(libraryHero).not.toContain('class="mural-fallback"');
 		expect(libraryHero).not.toContain('letterColor');
 		expect(libraryHero).not.toContain('played.slice(0, 5)');
 	});
@@ -66,13 +82,35 @@ describe('library home hero contract', () => {
 		expect(libraryPage).toContain('onclick={() => openHomeMuralItem(item, panel)}');
 		expect(libraryPage).toContain('oncontextmenu={(event) => openHomeMuralItemContextMenu(event, item)}');
 		expect(libraryPage).toContain('void openAlbumDetail(found ?? albumFromHomeCard(card))');
-		expect(libraryPage).toContain('upscaleTidalArtwork(rawUrl, 320)');
-		expect(libraryPage).toContain('onerror={() => markHomePanelArtFailed(item)}');
+		expect(libraryPage).toContain('<ArtworkImage');
+		expect(libraryPage).toContain('className="home-mural-art"');
+		expect(libraryPage).toContain('src={item.artwork_url}');
+		expect(libraryPage).toContain('size={320}');
+		expect(libraryPage).toContain('fallbackText={fallbackLetters(item.title)}');
+		expect(libraryPage).toContain('decorative={true}');
+		expect(libraryPage).toContain(':global(.home-mural-art)');
+		expect(libraryPage).not.toContain('<img src={artUrl}');
+		expect(libraryPage).not.toContain('homePanelArtUrl');
+		expect(libraryPage).not.toContain('markHomePanelArtFailed');
+		expect(libraryPage).not.toContain('failedHomePanelArtUrls');
 		expect(libraryPage).toContain('class="home-mural-grid"');
 		expect(libraryPage).toContain('class="home-mural-panel"');
 		expect(libraryPage).not.toContain('Automix tracks');
 		expect(libraryPage).not.toContain('Automix albums');
 		expect(libraryPage).not.toContain('selected.push(...pickStableRandom($tracks');
 		expect(libraryPage).not.toContain('selected.push(...pickStableRandom(allHomeAlbumCards');
+	});
+
+	test('library_home_track_rows_use_shared_artwork_fallbacks', () => {
+		expect(libraryPage).toContain('class="home-track-list"');
+		expect(libraryPage).toContain('{#each allSearchTrackPreview as track (track.id)}');
+		expect(libraryPage).toContain('{#each recentTracks as track (track.id)}');
+		expect(countOccurrences(libraryPage, 'className="ht-art-img"')).toBe(2);
+		expect(countOccurrences(libraryPage, 'src={trackArt}')).toBe(2);
+		expect(countOccurrences(libraryPage, 'size={320}')).toBeGreaterThanOrEqual(3);
+		expect(countOccurrences(libraryPage, 'fallbackText={track.title.slice(0, 2).toUpperCase()}')).toBeGreaterThanOrEqual(3);
+		expect(libraryPage).toContain(':global(.ht-art-img)');
+		expect(libraryPage).not.toContain('<img class="ht-art-img" src={trackArt}');
+		expect(libraryPage.includes(String.fromCharCode(0x2014))).toBe(false);
 	});
 });

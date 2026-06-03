@@ -38,7 +38,7 @@ impl QualityTier {
         match normalized.as_str() {
             "lossy" | "aac" | "mp3" | "high" | "low" => Some(Self::Lossy),
             "lossless" | "cd" | "flac" => Some(Self::Lossless),
-            "hi_res" | "hires" | "max" | "master" => Some(Self::HiRes),
+            "hi_res" | "hi_res_lossless" | "hires" | "max" | "master" => Some(Self::HiRes),
             _ => None,
         }
     }
@@ -250,136 +250,6 @@ pub fn evaluate_playlist<'a>(
         .iter()
         .filter(|track| definition.root.matches(track, context))
         .collect()
-}
-
-/// Render a smart playlist definition into human-readable summary lines.
-#[allow(dead_code)]
-pub fn summarize_definition(definition: &SmartPlaylistDefinition) -> Vec<String> {
-    let mut lines = Vec::new();
-    if let Some(description) = definition
-        .description
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        lines.push(format!("Description: {}", description));
-    }
-    push_clause_summary(&definition.root, 0, &mut lines);
-    lines
-}
-
-/// Render a single rule clause into a concise label.
-#[allow(dead_code)]
-pub fn summarize_clause(clause: &RuleClause) -> String {
-    match clause {
-        RuleClause::Group { op, clauses } => {
-            let op_label = match op {
-                LogicOp::And => "all of",
-                LogicOp::Or => "any of",
-            };
-            format!("{op_label} {} rule(s)", clauses.len())
-        }
-        RuleClause::Genre {
-            names,
-            match_descendants,
-        } => {
-            let suffix = if *match_descendants {
-                "with descendants"
-            } else {
-                "exact match"
-            };
-            format!("genre is {} ({suffix})", names.join(", "))
-        }
-        RuleClause::Artist { names } => format!("artist is {}", names.join(", ")),
-        RuleClause::DateRange { field, range } => {
-            let field_label = match field {
-                DateField::DateAdded => "date added",
-                DateField::LastPlayedAt => "last played",
-            };
-            let start = range.start.as_deref().unwrap_or("start");
-            let end = range.end.as_deref().unwrap_or("now");
-            format!("{field_label} between {start} and {end}")
-        }
-        RuleClause::PlayCount {
-            op,
-            value,
-            value_max,
-        } => {
-            let op_label = match op {
-                NumberOp::Eq => "=",
-                NumberOp::Gte => ">=",
-                NumberOp::Lte => "<=",
-                NumberOp::Gt => ">",
-                NumberOp::Lt => "<",
-                NumberOp::BetweenInclusive => "between",
-            };
-            if matches!(op, NumberOp::BetweenInclusive) {
-                format!(
-                    "play count between {} and {}",
-                    value,
-                    value_max.unwrap_or(*value)
-                )
-            } else {
-                format!("play count {op_label} {value}")
-            }
-        }
-        RuleClause::Quality { minimum } => format!("minimum quality {:?}", minimum),
-        RuleClause::NotInPlaylist { playlist_ids } => {
-            format!("exclude tracks already in playlists {:?}", playlist_ids)
-        }
-        RuleClause::BpmRange { min, max } => {
-            format!(
-                "bpm between {} and {}",
-                min.map(|v| format!("{:.0}", v)).unwrap_or("any".into()),
-                max.map(|v| format!("{:.0}", v)).unwrap_or("any".into()),
-            )
-        }
-        RuleClause::KeySignature { key } => format!("key is {}", key),
-        RuleClause::CamelotKey { key } => format!("camelot key is {}", key),
-        RuleClause::EnergyRange { min, max } => {
-            format!(
-                "energy between {} and {}",
-                min.map(|v| format!("{:.2}", v)).unwrap_or("any".into()),
-                max.map(|v| format!("{:.2}", v)).unwrap_or("any".into()),
-            )
-        }
-        RuleClause::DanceabilityRange { min, max } => {
-            format!(
-                "danceability between {} and {}",
-                min.map(|v| format!("{:.2}", v)).unwrap_or("any".into()),
-                max.map(|v| format!("{:.2}", v)).unwrap_or("any".into()),
-            )
-        }
-        RuleClause::InstrumentalOnly { is_instrumental } => {
-            if *is_instrumental {
-                "instrumental tracks only".into()
-            } else {
-                "vocal tracks only".into()
-            }
-        }
-        RuleClause::HasSampleData { source } => match source.as_deref() {
-            Some(s) => format!("has sample data ({})", s),
-            None => "has any sample data".into(),
-        },
-    }
-}
-
-#[allow(dead_code)]
-fn push_clause_summary(clause: &RuleClause, depth: usize, lines: &mut Vec<String>) {
-    let indent = "  ".repeat(depth);
-    match clause {
-        RuleClause::Group { op, clauses } => {
-            let label = match op {
-                LogicOp::And => "All of:",
-                LogicOp::Or => "Any of:",
-            };
-            lines.push(format!("{indent}{label}"));
-            for child in clauses {
-                push_clause_summary(child, depth + 1, lines);
-            }
-        }
-        _ => lines.push(format!("{indent}{}", summarize_clause(clause))),
-    }
 }
 
 impl RuleClause {
@@ -809,6 +679,55 @@ mod tests {
     }
 
     #[test]
+    fn quality_rules_treat_hi_res_lossless_as_hi_res() {
+        let tracks = vec![
+            track(
+                1,
+                "One",
+                "Artist A",
+                1,
+                Some("HI_RES_LOSSLESS"),
+                Some("2025-01-01"),
+                None,
+            ),
+            track(
+                2,
+                "Two",
+                "Artist B",
+                1,
+                Some("HI_RES"),
+                Some("2025-01-01"),
+                None,
+            ),
+            track(
+                3,
+                "Three",
+                "Artist C",
+                1,
+                Some("LOSSLESS"),
+                Some("2025-01-01"),
+                None,
+            ),
+        ];
+
+        let definition = SmartPlaylistDefinition {
+            name: "Hi-res".into(),
+            description: None,
+            root: RuleClause::Quality {
+                minimum: QualityTier::HiRes,
+            },
+        };
+
+        let ids: Vec<i64> =
+            evaluate_playlist(&definition, &tracks, &PlaylistEvaluationContext::new())
+                .into_iter()
+                .map(|track| track.id)
+                .collect();
+
+        assert_eq!(ids, vec![1, 2]);
+    }
+
+    #[test]
     fn not_in_playlist_excludes_existing_membership() {
         let tracks = vec![
             track(
@@ -871,38 +790,6 @@ mod tests {
         let results = evaluate_playlist(&definition, &tracks, &context);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, 1);
-    }
-
-    #[test]
-    fn summarizes_nested_rules_for_ui() {
-        let definition = SmartPlaylistDefinition {
-            name: "Late Night".into(),
-            description: Some("Darker cuts and deep dives".into()),
-            root: RuleClause::Group {
-                op: LogicOp::And,
-                clauses: vec![
-                    RuleClause::Genre {
-                        names: vec!["Electronic".into()],
-                        match_descendants: true,
-                    },
-                    RuleClause::PlayCount {
-                        op: NumberOp::Gte,
-                        value: 10,
-                        value_max: None,
-                    },
-                ],
-            },
-        };
-
-        let lines = summarize_definition(&definition);
-        assert_eq!(lines[0], "Description: Darker cuts and deep dives");
-        assert!(lines.iter().any(|line| line.contains("All of:")));
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("genre is Electronic (with descendants)"))
-        );
-        assert!(lines.iter().any(|line| line.contains("play count >= 10")));
     }
 
     #[test]

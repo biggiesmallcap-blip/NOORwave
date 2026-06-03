@@ -170,8 +170,3 @@ export function cancelSleepTimer() {
 	sleepTimer.set(initial);
 	persist(initial);
 }
-
-/** True iff a timer is currently scheduled. */
-export function sleepTimerActive(): boolean {
-	return get(sleepTimer).fireAt !== null;
-}

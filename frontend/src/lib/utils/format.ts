@@ -7,7 +7,7 @@
  *   those strings are reserved for actual zeros. This single rule prevents the
  *   "is this user inactive or is the page broken?" class of bug.
  *
- * Spec: C:\Users\Felix\.claude\plans\lets-revision-analytics-stats-crystalline-melody.md
+ * Contract: frontend/src/lib/utils/format.test.ts
  */
 
 const EMPTY = '--';
@@ -44,6 +44,15 @@ export function formatTrackDuration(ms: number | null | undefined): string {
 	const minutes = Math.floor(totalSeconds / 60);
 	const seconds = totalSeconds % 60;
 	return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+}
+
+export function formatTotalDuration(ms: number | null | undefined): string {
+	if (isMissing(ms) || ms < 0) return EMPTY;
+	const minutes = Math.round(ms / 60000);
+	if (minutes < 60) return `${minutes} min`;
+	const hours = Math.floor(minutes / 60);
+	const remaining = minutes % 60;
+	return remaining ? `${hours} hr ${remaining} min` : `${hours} hr`;
 }
 
 /**

@@ -43,11 +43,6 @@ pub struct GenreResolution {
 }
 
 impl GenreResolution {
-    #[allow(dead_code)]
-    pub fn is_clear(&self) -> bool {
-        self.canonical_name().is_some()
-    }
-
     pub fn canonical_name(&self) -> Option<&str> {
         if !self.unresolved_segments.is_empty() || self.matches.is_empty() {
             return None;
@@ -63,22 +58,6 @@ impl GenreResolution {
         } else {
             None
         }
-    }
-
-    pub fn is_ambiguous(&self) -> bool {
-        if self.matches.is_empty() {
-            return false;
-        }
-
-        if !self.unresolved_segments.is_empty() {
-            return true;
-        }
-
-        let mut names = BTreeSet::new();
-        for item in &self.matches {
-            names.insert(item.canonical_name.clone());
-        }
-        names.len() > 1
     }
 }
 
@@ -175,11 +154,6 @@ impl GenreCatalog {
     pub fn path_for(&self, name: &str) -> Option<&[String]> {
         self.entry(name)
             .and_then(|entry| entry.paths.first().map(Vec::as_slice))
-    }
-
-    #[allow(dead_code)]
-    pub fn paths_for(&self, name: &str) -> Option<&[Vec<String>]> {
-        self.entry(name).map(|entry| entry.paths.as_slice())
     }
 
     pub fn descendants_of(&self, name: &str) -> Vec<String> {
@@ -449,7 +423,7 @@ mod tests {
     fn catalog_contains_canonical_names_and_paths() {
         let catalog = GenreCatalog::from_embedded();
         assert!(catalog.canonical_names().contains(&"House".to_string()));
-        assert!(catalog.paths_for("House").is_some());
+        assert!(catalog.path_for("House").is_some());
         assert!(
             catalog
                 .descendants_of("Electronic")

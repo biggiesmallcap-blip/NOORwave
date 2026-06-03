@@ -1,4 +1,4 @@
-import type { QueueItem, Track, TidalPlayable, TidalSearchTrack } from '$lib/api/client';
+import type { QueueItem, Track, TidalHomeItem, TidalPlayable, TidalSearchTrack } from '$lib/api/client';
 
 /**
  * Convert an ephemeral `Track` (a now-playing or queue row) into a
@@ -49,5 +49,18 @@ export function tidalSearchTrackToPlayable(track: TidalSearchTrack): TidalPlayab
 		...track,
 		artist_tidal_id: track.artist_id ?? null,
 		album_tidal_id: track.album_tidal_id ?? null,
+	};
+}
+
+export function tidalHomeItemToPlayable(item: TidalHomeItem): TidalPlayable {
+	return {
+		tidal_id: Number(item.id),
+		title: item.title,
+		artist_name: item.artist_name ?? null,
+		album_title: item.album_title ?? null,
+		artwork_url: item.artwork_url ?? null,
+		duration_ms: item.duration != null ? item.duration * 1000 : null,
+		artist_tidal_id: item.artist_id ?? null,
+		album_tidal_id: item.album_id ?? null,
 	};
 }

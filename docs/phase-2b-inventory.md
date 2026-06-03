@@ -276,7 +276,7 @@ suffix). **Not a halt.**
 
 ## DSP coverage findings — the load-bearing surface-back
 
-Verified against the live DB at /e/NOORwave/noor.db.
+Verified against the live DB at `<local-db>`.
 
 ### Library-wide
 

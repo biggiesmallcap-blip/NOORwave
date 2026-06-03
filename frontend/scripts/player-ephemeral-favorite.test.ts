@@ -95,6 +95,27 @@ describe('ephemeral TIDAL favorite import', () => {
 		currentTrack.set(null);
 	});
 
+	test('resets stale scrubber state when starting an ephemeral TIDAL track', async () => {
+		position.set(64_000);
+		buffered.set(90_000);
+
+		await playTidalTrackNow({
+			tidal_id: 777,
+			title: 'Fresh Start',
+			artist_name: 'TIDAL Artist',
+			artist_tidal_id: 333,
+			album_title: 'TIDAL Album',
+			album_tidal_id: 444,
+			artwork_url: 'https://example.test/fresh.jpg',
+			duration_ms: 180_000,
+			is_favorite: false,
+		});
+
+		expect(get(currentTrack)?.tidal_id).toBe(777);
+		expect(get(position)).toBe(0);
+		expect(get(buffered)).toBe(0);
+	});
+
 	test('preserves TIDAL artist and album IDs when liking an ephemeral track', async () => {
 		currentTrack.set(ephemeralTrack());
 
@@ -154,6 +175,52 @@ describe('ephemeral TIDAL favorite import', () => {
 			queue: [],
 		});
 
+		expect(get(currentTrack)?.is_favorite).toBe(true);
+	});
+
+	test('keeps the liked state when a stale playback hydrate returns false for the imported track', async () => {
+		await playTidalTrackNow({
+			tidal_id: 555,
+			title: 'Ephemeral Song',
+			artist_name: 'TIDAL Artist',
+			artist_tidal_id: 333,
+			album_title: 'TIDAL Album',
+			album_tidal_id: 444,
+			artwork_url: 'https://example.test/art.jpg',
+			duration_ms: 180000,
+			is_favorite: false,
+		});
+
+		await toggleTrackFavorite(-555, false);
+
+		const staleSavedTrack = {
+			...ephemeralTrack(),
+			id: 98,
+			tidal_id: 555,
+			artist_id: 77,
+			album_id: 66,
+			is_favorite: false,
+			source: 'tidal',
+		};
+		hydratePlayback({
+			state: {
+				current_track: staleSavedTrack,
+				current_queue_item_id: null,
+				position_ms: 0,
+				is_playing: true,
+				volume: 1,
+				shuffle_mode: 'off',
+				repeat_mode: 'one',
+				automix_enabled: false,
+				crossfade_ms: 0,
+				automix_discover_new: false,
+				automix_use_learning: false,
+				automix_allow_external: false,
+			},
+			queue: [],
+		});
+
+		expect(get(currentTrack)?.id).toBe(98);
 		expect(get(currentTrack)?.is_favorite).toBe(true);
 	});
 });

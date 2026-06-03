@@ -790,16 +790,41 @@ impl LastFmClient {
             .text()
             .await
             .context("Last.fm response body failed")?;
-        if !status.is_success() {
-            anyhow::bail!("Last.fm API error {}: {}", status, body);
-        }
-        serde_json::from_str(&body).with_context(|| {
-            format!(
-                "Failed to parse Last.fm JSON. Body preview: {}",
-                &body[..body.len().min(300)]
-            )
-        })
+        decode_lastfm_response_body(status, &body)
     }
+}
+
+fn utf8_preview(body: &str, max_bytes: usize) -> &str {
+    if body.len() <= max_bytes {
+        return body;
+    }
+    let end = body
+        .char_indices()
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .take_while(|end| *end <= max_bytes)
+        .last()
+        .unwrap_or(0);
+    &body[..end]
+}
+
+fn decode_lastfm_response_body(status: reqwest::StatusCode, body: &str) -> Result<Value> {
+    if !status.is_success() {
+        anyhow::bail!("Last.fm API error {}: {}", status, utf8_preview(body, 300));
+    }
+    let payload: Value = serde_json::from_str(body).with_context(|| {
+        format!(
+            "Failed to parse Last.fm JSON. Body preview: {}",
+            utf8_preview(body, 300)
+        )
+    })?;
+    if let Some(code) = payload.get("error").and_then(Value::as_i64) {
+        let message = payload
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown Last.fm error");
+        anyhow::bail!("Last.fm API error status {}: {}", code, message);
+    }
+    Ok(payload)
 }
 
 fn extract_track_queries(value: &Value, limit: usize) -> Vec<String> {
@@ -1133,6 +1158,17 @@ mod tests {
         assert_eq!(tags[0].name, "hyperpop");
         assert_eq!(tags[0].count, Some(42));
         assert_eq!(tags[0].reach, Some(99));
+    }
+
+    #[test]
+    fn rejects_lastfm_json_error_envelope() {
+        let err = decode_lastfm_response_body(
+            reqwest::StatusCode::OK,
+            r#"{"error":10,"message":"Invalid API key"}"#,
+        )
+        .expect_err("Last.fm JSON error envelopes must not parse as data");
+
+        assert!(err.to_string().contains("status 10"));
     }
 
     #[test]

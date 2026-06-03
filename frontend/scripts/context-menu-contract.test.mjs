@@ -95,15 +95,22 @@ describe('context menu coverage contract', () => {
 		expect(source).toContain('openTrackArtistContextMenu');
 	});
 
-	test('trending cards expose secondary artist and album menus', () => {
-		const source = readFileSync('src/lib/components/TrendingCard.svelte', 'utf8');
+	test('chart murals expose shared track menus', () => {
+		const trending = readFileSync('src/lib/components/charts/TrendingShelf.svelte', 'utf8');
+		const daily = readFileSync('src/lib/components/charts/DailyChartShelf.svelte', 'utf8');
+		const mural = readFileSync('src/lib/components/charts/ChartMural.svelte', 'utf8');
 
-		expect(source).toContain('buildArtistMenu');
-		expect(source).toContain('buildAlbumMenu');
-		expect(source).toContain('openArtistContextMenu');
-		expect(source).toContain('openAlbumContextMenu');
-		expect(source).toContain('href="/albums/{albumId}"');
-		expect(source).toContain('href="/tidal/albums/{tidalAlbumId}"');
+		expect(trending).toContain('buildTrackMenu');
+		expect(trending).toContain('buildTidalTrackMenu');
+		expect(trending).toContain('handleEntryContext');
+		expect(trending).toContain('onCardContext');
+		expect(trending).toContain('onItemContext');
+		expect(daily).toContain('buildTidalTrackMenu');
+		expect(daily).toContain('openEntryContext');
+		expect(daily).toContain('openMatrixCellContext');
+		expect(mural).toContain('onCardContext');
+		expect(mural).toContain('onItemContext');
+		expect(mural).toContain('oncontextmenu');
 	});
 
 	test('genre interior artist chips use shared artist menus', () => {

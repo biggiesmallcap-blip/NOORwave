@@ -1,6 +1,7 @@
 <script lang="ts">
   import { fade } from 'svelte/transition';
-  import { upscaleTidalArtwork, type TidalArtworkSize } from '$lib/utils/artwork';
+  import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+  import { initials } from '$lib/utils/text';
 
   interface Artist {
     id: number;
@@ -26,7 +27,6 @@
   let currentIndex = $state(0);
   let paused = $state(false);
   let timer: ReturnType<typeof setInterval> | undefined;
-  let failedImageUrls = $state<Set<string>>(new Set());
 
   const current = $derived(artists[currentIndex] ?? artists[0]);
   const muralArtists = $derived.by<Artist[]>(() => {
@@ -42,7 +42,7 @@
 
     return group;
   });
-  const heroHasImage = $derived(muralArtists.some(artist => !!artistArtUrl(artist, 640)));
+  const heroHasImage = $derived(muralArtists.some(artist => artistArtworkSources(artist).length > 0));
   const heroKindLabel = $derived(
     current?.kind === 'forgotten_favorite'
       ? (muralArtists.length > 1 ? 'FEATURED ARTISTS' : 'FORGOTTEN FAVORITE')
@@ -53,8 +53,9 @@
           : 'YOUR TOP ARTIST')
   );
 
-  function initials(name: string): string {
-    return name.split(/\s+/).map(p => p[0]?.toUpperCase() ?? '').join('').slice(0, 2) || '?';
+  function artistArtworkSources(artist: Artist): string[] {
+    return [artist.photo_url, artist.fallback_art_url]
+      .filter((source): source is string => typeof source === 'string' && source.trim().length > 0);
   }
 
   function startTimer() {
@@ -95,22 +96,6 @@
     onContextMenu(event, artistId);
   }
 
-  function rawArtistArtUrl(artist: Artist | undefined): string | null {
-    return artist?.photo_url ?? artist?.fallback_art_url ?? null;
-  }
-
-  function artistArtUrl(artist: Artist | undefined, size: TidalArtworkSize): string | null {
-    const rawUrl = rawArtistArtUrl(artist);
-    if (!rawUrl || failedImageUrls.has(rawUrl)) return null;
-    return upscaleTidalArtwork(rawUrl, size);
-  }
-
-  function markArtistArtFailed(artist: Artist) {
-    const rawUrl = rawArtistArtUrl(artist);
-    if (!rawUrl) return;
-    failedImageUrls = new Set([...failedImageUrls, rawUrl]);
-  }
-
   $effect(() => {
     startTimer();
     return stopTimer;
@@ -134,7 +119,6 @@
   >
     <div class="hero-bg-mural" in:fade={{ duration: 600 }} aria-label="Top artists mural">
       {#each muralArtists as artist (artist.id)}
-        {@const panelArt = artistArtUrl(artist, 640)}
         <button
           class="mural-panel"
           class:mural-panel--featured={current?.id === artist.id}
@@ -143,11 +127,13 @@
           oncontextmenu={(event) => openArtistContextMenu(event, artist.id)}
           aria-label={`Select ${artist.name}`}
         >
-          {#if panelArt}
-            <img src={panelArt} alt="" onerror={() => markArtistArtFailed(artist)} />
-          {:else}
-            <span class="mural-fallback">{initials(artist.name)}</span>
-          {/if}
+          <ArtworkImage
+            className="mural-panel-art"
+            src={artistArtworkSources(artist)}
+            size={640}
+            fallbackText={initials(artist.name)}
+            decorative={true}
+          />
         </button>
       {/each}
     </div>
@@ -318,41 +304,43 @@
     );
   }
 
-  .mural-panel img,
-  .mural-fallback {
+  .mural-panel :global(.mural-panel-art) {
     display: block;
     width: 100%;
     height: 100%;
   }
 
-  .mural-panel img {
+  .mural-panel :global(.mural-panel-art:not(.fallback)) {
     object-fit: cover;
     transform: skewX(8deg) scale(1.24);
     transition: transform var(--motion-base), opacity var(--motion-fast);
   }
 
-  .mural-panel:hover img,
-  .mural-panel:focus-visible img {
+  .mural-panel:hover :global(.mural-panel-art:not(.fallback)),
+  .mural-panel:focus-visible :global(.mural-panel-art:not(.fallback)) {
     transform: skewX(8deg) scale(1.32);
   }
 
-  .mural-panel--featured img {
+  .mural-panel--featured :global(.mural-panel-art:not(.fallback)) {
     transform: skewX(8deg) scale(1.3);
   }
 
-  .mural-panel--featured:hover img,
-  .mural-panel--featured:focus-visible img {
+  .mural-panel--featured:hover :global(.mural-panel-art:not(.fallback)),
+  .mural-panel--featured:focus-visible :global(.mural-panel-art:not(.fallback)) {
     transform: skewX(8deg) scale(1.36);
   }
 
-  .mural-fallback {
+  .mural-panel :global(.mural-panel-art.fallback) {
     display: grid;
     place-items: center;
     background: linear-gradient(135deg, var(--bg-raised), color-mix(in srgb, var(--accent-soft) 26%, var(--bg-surface)));
     color: rgba(255,255,255,0.78);
+    transform: skewX(8deg) scale(1.08);
+  }
+
+  .mural-panel :global(.mural-panel-art.fallback span) {
     font-size: var(--font-size-2xl);
     font-weight: var(--font-weight-bold);
-    transform: skewX(8deg) scale(1.08);
   }
 
   .mural-panel:focus-visible,

@@ -1,0 +1,28 @@
+{
+	"name": "noorwave-showcase",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "remotion studio",
+		"render": "remotion render NoorwaveShowcase out/noorwave-showcase.mp4",
+		"still": "remotion still NoorwaveShowcase out/noorwave-showcase.png --frame=90",
+		"check": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@remotion/cli": "^4.0.0",
+		"@remotion/renderer": "^4.0.0",
+		"react": "^19.2.0",
+		"react-dom": "^19.2.0",
+		"remotion": "^4.0.0"
+	},
+	"devDependencies": {
+		"@types/react": "^19.2.14",
+		"@types/react-dom": "^19.2.3",
+		"typescript": "^6.0.3"
+	},
+	"pnpm": {
+		"overrides": {
+			"ws": "8.20.1"
+		}
+	}
+}

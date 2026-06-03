@@ -1,6 +1,7 @@
 use anyhow::Result;
 use reqwest::{Client, Response, StatusCode};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
 
@@ -186,6 +187,27 @@ async fn spotify_get(http: &Client, url: &str, token: &str) -> Result<Option<Res
     Err(())
 }
 
+async fn spotify_get_json<T>(
+    http: &Client,
+    url: &str,
+    token: &str,
+    label: &str,
+) -> Result<Option<T>, ()>
+where
+    T: DeserializeOwned,
+{
+    let Some(resp) = spotify_get(http, url, token).await? else {
+        return Ok(None);
+    };
+    match resp.json::<T>().await {
+        Ok(payload) => Ok(Some(payload)),
+        Err(e) => {
+            warn!("Spotify {} JSON parse: {}", label, e);
+            Err(())
+        }
+    }
+}
+
 /// Run Spotify genre enrichment.
 ///
 /// For every eligible track: search → fetch album → fetch its artists.
@@ -252,31 +274,23 @@ where
             urlencoding::encode(&query)
         );
 
-        let track_album: Option<AlbumRef> = match spotify_get(&http, &search_url, &token).await {
-            Ok(Some(resp)) => match resp.json::<SearchResponse>().await {
-                Ok(d) => d.tracks.items.into_iter().next().map(|t| t.album),
-                Err(e) => {
-                    warn!("Spotify search JSON parse: {}", e);
+        let track_album: Option<AlbumRef> =
+            match spotify_get_json::<SearchResponse>(&http, &search_url, &token, "search").await {
+                Ok(Some(d)) => d.tracks.items.into_iter().next().map(|t| t.album),
+                Ok(None) => None,
+                Err(()) => {
+                    transient_failure = true;
                     None
                 }
-            },
-            Ok(None) => None,
-            Err(()) => {
-                transient_failure = true;
-                None
-            }
-        };
+            };
 
         if let Some(album_ref) = track_album {
             let album_url = SPOTIFY_ALBUM_URL.replace("{}", &album_ref.id);
-            match spotify_get(&http, &album_url, &token).await {
-                Ok(Some(resp)) => match resp.json::<AlbumDetails>().await {
-                    Ok(album) => {
-                        raw_genres.extend(album.genres);
-                        artist_ids.extend(album.artists.into_iter().map(|a| a.id));
-                    }
-                    Err(e) => warn!("Spotify album JSON parse: {}", e),
-                },
+            match spotify_get_json::<AlbumDetails>(&http, &album_url, &token, "album").await {
+                Ok(Some(album)) => {
+                    raw_genres.extend(album.genres);
+                    artist_ids.extend(album.artists.into_iter().map(|a| a.id));
+                }
                 Ok(None) => {}
                 Err(()) => transient_failure = true,
             }
@@ -287,15 +301,12 @@ where
         for chunk in artist_ids.chunks(50) {
             let ids = chunk.join(",");
             let url = format!("{}?ids={}", SPOTIFY_ARTISTS_URL, ids);
-            match spotify_get(&http, &url, &token).await {
-                Ok(Some(resp)) => match resp.json::<ArtistsBatchResponse>().await {
-                    Ok(batch) => {
-                        for art in batch.artists {
-                            raw_genres.extend(art.genres);
-                        }
+            match spotify_get_json::<ArtistsBatchResponse>(&http, &url, &token, "artists").await {
+                Ok(Some(batch)) => {
+                    for art in batch.artists {
+                        raw_genres.extend(art.genres);
                     }
-                    Err(e) => warn!("Spotify artists JSON parse: {}", e),
-                },
+                }
                 Ok(None) => {}
                 Err(()) => transient_failure = true,
             }
@@ -404,4 +415,64 @@ async fn ensure_token(state: &SharedState, http: &Client) -> Option<String> {
     }
     let s = state.read().await;
     s.spotify_tokens.as_ref().map(|t| t.access_token.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::header::CONTENT_TYPE;
+
+    async fn spawn_spotify_payload(status: StatusCode, body: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("read test server addr");
+        let app = axum::Router::new().route(
+            "/payload",
+            axum::routing::get(move || async move {
+                (status, [(CONTENT_TYPE, "application/json")], body)
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve test response");
+        });
+        format!("http://{addr}/payload")
+    }
+
+    #[tokio::test]
+    async fn spotify_get_json_parses_success_payload() {
+        let url = spawn_spotify_payload(StatusCode::OK, r#"{"tracks":{"items":[]}}"#).await;
+
+        let parsed =
+            spotify_get_json::<SearchResponse>(&Client::new(), &url, "test-token", "search")
+                .await
+                .expect("valid json should not require retry")
+                .expect("successful response should have payload");
+
+        assert!(parsed.tracks.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn spotify_get_json_preserves_404_as_definitive_no_data() {
+        let url = spawn_spotify_payload(StatusCode::NOT_FOUND, "{}").await;
+
+        let parsed =
+            spotify_get_json::<SearchResponse>(&Client::new(), &url, "test-token", "search")
+                .await
+                .expect("404 should be definitive no-data");
+
+        assert!(parsed.is_none());
+    }
+
+    #[tokio::test]
+    async fn spotify_get_json_treats_malformed_success_body_as_retry_later() {
+        let url = spawn_spotify_payload(StatusCode::OK, "{").await;
+
+        let parsed =
+            spotify_get_json::<SearchResponse>(&Client::new(), &url, "test-token", "search").await;
+
+        assert!(parsed.is_err());
+    }
 }

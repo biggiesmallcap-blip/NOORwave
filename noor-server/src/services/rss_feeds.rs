@@ -246,27 +246,67 @@ impl FeedAggregator {
 
         // Simple Atom feed parsing
         if body.contains("<feed") || body.contains("<entry") {
-            // Very basic regex-based extraction for Atom feeds
-            // In production, you'd want a proper Atom parser
-            let title_re = regex::Regex::new(r#"<title>([^<]+)</title>"#).unwrap();
-            let link_re = regex::Regex::new(r#"<link[^>]+href="([^"]+)""#).unwrap();
+            let entry_re = regex::Regex::new(r#"(?s)<entry\b[^>]*>(.*?)</entry>"#)
+                .context("Failed to compile Atom entry parser")?;
+            let title_re = regex::Regex::new(r#"(?s)<title[^>]*>(.*?)</title>"#)
+                .context("Failed to compile Atom title parser")?;
+            let link_re = regex::Regex::new(r#"(?s)<link\b[^>]*href="([^"]+)""#)
+                .context("Failed to compile Atom link parser")?;
             let summary_re =
-                regex::Regex::new(r#"<(?:summary|description)>([^<]+)</(?:summary|description)>"#)
-                    .unwrap();
+                regex::Regex::new(r#"(?s)<(?:summary|description|content)[^>]*>(.*?)</(?:summary|description|content)>"#)
+                    .context("Failed to compile Atom summary parser")?;
+
+            for entry_cap in entry_re.captures_iter(body) {
+                let entry = entry_cap.get(1).map(|m| m.as_str()).unwrap_or_default();
+                let title = title_re
+                    .captures(entry)
+                    .and_then(|c| c.get(1))
+                    .map(|m| m.as_str().trim().to_string())
+                    .unwrap_or_else(|| "Untitled".to_string());
+                let link = link_re
+                    .captures(entry)
+                    .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()));
+                let summary = summary_re
+                    .captures(entry)
+                    .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()));
+
+                if let Some(link) = link {
+                    items.push(FeedItem {
+                        title,
+                        link,
+                        description: Self::truncate_desc(&summary.unwrap_or_default(), 280),
+                        author: None,
+                        published_at: None,
+                        image_url: None,
+                        source: source.name.to_string(),
+                        category: source.category.to_string(),
+                    });
+                }
+            }
+        }
+
+        if items.is_empty() && body.contains("<feed") {
+            let title_re = regex::Regex::new(r#"(?s)<title[^>]*>(.*?)</title>"#)
+                .context("Failed to compile fallback title parser")?;
+            let link_re = regex::Regex::new(r#"(?s)<link\b[^>]*href="([^"]+)""#)
+                .context("Failed to compile fallback link parser")?;
+            let summary_re =
+                regex::Regex::new(r#"(?s)<(?:summary|description|content)[^>]*>(.*?)</(?:summary|description|content)>"#)
+                    .context("Failed to compile fallback summary parser")?;
 
             for title_cap in title_re.captures_iter(body) {
                 let title = title_cap
                     .get(1)
-                    .map(|m| m.as_str().to_string())
+                    .map(|m| m.as_str().trim().to_string())
                     .unwrap_or_default();
                 let link = link_re
                     .captures_iter(body)
                     .next()
-                    .and_then(|c| c.get(1).map(|m| m.as_str().to_string()));
+                    .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()));
                 let summary = summary_re
                     .captures_iter(body)
                     .next()
-                    .and_then(|c| c.get(1).map(|m| m.as_str().to_string()));
+                    .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()));
 
                 if let Some(link) = link {
                     items.push(FeedItem {
@@ -441,5 +481,50 @@ mod html_cleaner {
             .replace("&nbsp;", " ");
 
         cleaned
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_source() -> FeedSource {
+        FeedSource {
+            url: "https://example.test/feed",
+            name: "Example",
+            category: "news",
+        }
+    }
+
+    #[test]
+    fn atom_fallback_uses_entry_scoped_links_and_summaries() {
+        let aggregator = FeedAggregator::new(Client::new());
+        let body = r#"
+            <feed>
+              <title>Example feed</title>
+              <entry>
+                <title>First article</title>
+                <link href="https://example.test/first"/>
+                <summary>First summary &amp; detail</summary>
+              </entry>
+              <entry>
+                <title>Second article</title>
+                <link href="https://example.test/second"/>
+                <summary>Second summary</summary>
+              </entry>
+            </feed>
+        "#;
+
+        let items = aggregator
+            .parse_xml_fallback(body, &test_source())
+            .expect("fallback parses Atom entries");
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].title, "First article");
+        assert_eq!(items[0].link, "https://example.test/first");
+        assert_eq!(items[0].description, "First summary & detail");
+        assert_eq!(items[1].title, "Second article");
+        assert_eq!(items[1].link, "https://example.test/second");
+        assert_eq!(items[1].description, "Second summary");
     }
 }

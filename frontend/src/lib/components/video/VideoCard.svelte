@@ -5,6 +5,7 @@
 	import { formatTrackDuration } from '$lib/utils/format';
 	import { buildVideoMenu, buildVideoMixMenu, isVideoMix } from '$lib/player/video_menu';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 
 	type VideoLike = TidalSearchVideo | TidalVideoMix | TidalVideoMixItem;
 
@@ -44,11 +45,13 @@
 	}}
 >
 	<div class="poster-wrap">
-		{#if poster}
-			<img class="poster" src={poster} alt="" loading="lazy" />
-		{:else}
-			<div class="poster placeholder">▶</div>
-		{/if}
+		<ArtworkImage
+			className="poster"
+			src={poster}
+			size={320}
+			fallbackText="VID"
+			decorative={true}
+		/>
 		<PlayOverlay
 			position="corner"
 			size="sm"
@@ -88,14 +91,26 @@
 		background: var(--bg-raised);
 	}
 
-	.poster,
-	.placeholder {
+	.poster-wrap :global(.poster) {
 		width: 100%;
 		height: 100%;
+		color: var(--text-tertiary);
+	}
+
+	.poster-wrap :global(.poster:not(.fallback)) {
 		object-fit: cover;
+		display: block;
+	}
+
+	.poster-wrap :global(.poster.fallback) {
 		display: grid;
 		place-items: center;
-		color: var(--text-tertiary);
+		background: var(--bg-raised);
+	}
+
+	.poster-wrap :global(.poster.fallback span) {
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-bold);
 	}
 
 	.video-card:hover :global(.play-overlay),

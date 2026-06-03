@@ -87,7 +87,7 @@ The middle bars get vastly more vertical room (cap ≈ 337) than the outer bars
 ## 3. Source data
 
 The 20 hand-crafted keyframe sequences come from
-`E:\noor_asset_pack\svg\noor-logo-centered.svg`. The asset-pack source ships
+`<asset-pack-root>/svg/noor-logo-centered.svg`. The asset-pack source ships
 each bar as 25 frames where `frame[24] == frame[0]` — the trailing duplicate
 that makes the sequence a closed loop. We treat the unique 24 frames as
 periodic data; the duplicate is handled by the seam-closure rule (§6).

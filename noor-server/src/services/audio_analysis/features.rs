@@ -3,9 +3,9 @@
 /// Functions:
 /// - `compute_energy`: RMS normalised to [0,1]
 /// - `compute_lufs`: ITU-R BS.1770-4 gated loudness measurement
-/// - `compute_spectral_centroid`: STFT-based spectral centroid
-/// - `detect_instrumental`: vocal energy ratio heuristic
-/// - `compute_danceability`: bass energy + BPM factor heuristic
+/// - `compute_stft_features`: spectral centroid and energy-band features
+/// - `detect_instrumental_from`: vocal energy ratio heuristic
+/// - `compute_danceability_from`: bass energy + BPM factor heuristic
 use rustfft::FftPlanner;
 use std::f64::consts::PI;
 
@@ -322,22 +322,11 @@ pub fn compute_stft_features(samples: &[f32], sample_rate: u32) -> Option<StftFe
 
 // ─── Spectral Centroid ───────────────────────────────────────────────────────
 
-/// Compute spectral centroid averaged across STFT frames.
-#[allow(dead_code)]
-pub fn compute_spectral_centroid(samples: &[f32], sample_rate: u32) -> Option<f64> {
-    compute_stft_features(samples, sample_rate).and_then(|s| s.centroid_hz)
-}
-
 // ─── Instrumental Detection ─────────────────────────────────────────────────
 
 /// Detect whether a track is likely instrumental.
 /// Uses vocal energy ratio in 300-3400 Hz range.
 /// Returns `Some(true)` if vocal_ratio < 0.12, `Some(false)` if > 0.22, `None` otherwise.
-#[allow(dead_code)]
-pub fn detect_instrumental(samples: &[f32], sample_rate: u32) -> Option<bool> {
-    detect_instrumental_from(&compute_stft_features(samples, sample_rate)?)
-}
-
 pub fn detect_instrumental_from(stft: &StftFeatures) -> Option<bool> {
     if stft.total_energy < 1e-12 {
         return None;
@@ -359,17 +348,6 @@ pub fn detect_instrumental_from(stft: &StftFeatures) -> Option<bool> {
 ///   bass_ratio = energy(20-250 Hz) / total_energy
 ///   bpm_factor = if bpm in 100..160 { 1.0 } else { 0.6 }
 ///   danceability = clamp(bass_ratio * 1.5 * bpm_factor * beat_strength, 0, 1)
-#[allow(dead_code)]
-pub fn compute_danceability(
-    samples: &[f32],
-    sample_rate: u32,
-    bpm: Option<f64>,
-    beat_strength: Option<f64>,
-) -> Option<f64> {
-    let stft = compute_stft_features(samples, sample_rate)?;
-    compute_danceability_from(&stft, bpm, beat_strength)
-}
-
 pub fn compute_danceability_from(
     stft: &StftFeatures,
     bpm: Option<f64>,
@@ -428,12 +406,16 @@ mod tests {
     fn test_instrumental_silence() {
         let samples = vec![0.0f32; 48000];
         // Silence should return None (total_energy ~0)
-        assert!(detect_instrumental(&samples, 48000).is_none());
+        let stft = compute_stft_features(&samples, 48000).expect("STFT must compute");
+        assert!(detect_instrumental_from(&stft).is_none());
     }
 
     #[test]
     fn test_danceability_empty() {
-        assert!(compute_danceability(&[], 44100, Some(120.0), Some(0.5)).is_none());
+        let dance = compute_stft_features(&[], 44100)
+            .as_ref()
+            .and_then(|stft| compute_danceability_from(stft, Some(120.0), Some(0.5)));
+        assert!(dance.is_none());
     }
 
     #[test]
@@ -441,9 +423,15 @@ mod tests {
         // Bug 4 regression: previously panicked on samples between 256 and 4096
         // because the guard checked < 256 but the FFT needed 4096.
         let samples = vec![0.1f32; 1000];
-        assert!(compute_danceability(&samples, 44100, Some(120.0), Some(0.5)).is_none());
+        let dance = compute_stft_features(&samples, 44100)
+            .as_ref()
+            .and_then(|stft| compute_danceability_from(stft, Some(120.0), Some(0.5)));
+        assert!(dance.is_none());
         let samples = vec![0.1f32; 4095];
-        assert!(compute_danceability(&samples, 44100, Some(120.0), Some(0.5)).is_none());
+        let dance = compute_stft_features(&samples, 44100)
+            .as_ref()
+            .and_then(|stft| compute_danceability_from(stft, Some(120.0), Some(0.5)));
+        assert!(dance.is_none());
     }
 
     #[test]
@@ -520,8 +508,9 @@ mod tests {
                 (s * 0.3) as f32
             })
             .collect();
+        let stft = compute_stft_features(&samples, sr).expect("STFT must compute");
         assert_eq!(
-            detect_instrumental(&samples, sr),
+            detect_instrumental_from(&stft),
             Some(true),
             "low-frequency-only signal should be classified instrumental"
         );
@@ -535,8 +524,9 @@ mod tests {
         let samples: Vec<f32> = (0..total)
             .map(|n| 0.3 * (2.0 * PI * 1000.0 * n as f64 / sr as f64).sin() as f32)
             .collect();
+        let stft = compute_stft_features(&samples, sr).expect("STFT must compute");
         assert_eq!(
-            detect_instrumental(&samples, sr),
+            detect_instrumental_from(&stft),
             Some(false),
             "vocal-band-only signal should be classified vocal"
         );
@@ -557,7 +547,8 @@ mod tests {
                 }
             }
         }
-        let dance = compute_danceability(&samples, sr, Some(128.0), Some(0.8))
+        let stft = compute_stft_features(&samples, sr).expect("STFT must compute");
+        let dance = compute_danceability_from(&stft, Some(128.0), Some(0.8))
             .expect("should compute danceability");
         assert!(
             dance > 0.3,
@@ -573,7 +564,9 @@ mod tests {
         let samples: Vec<f32> = (0..total)
             .map(|n| 0.3 * (2.0 * PI * 5000.0 * n as f64 / sr as f64).sin() as f32)
             .collect();
-        let centroid = compute_spectral_centroid(&samples, sr).expect("centroid must compute");
+        let centroid = compute_stft_features(&samples, sr)
+            .and_then(|stft| stft.centroid_hz)
+            .expect("centroid must compute");
         assert!(
             (3000.0..=7000.0).contains(&centroid),
             "5 kHz sine should yield centroid in [3 kHz, 7 kHz], got {centroid}"

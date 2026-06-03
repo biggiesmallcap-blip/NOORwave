@@ -23,6 +23,7 @@ import {
 	formatMultiplier,
 	formatPercent,
 	formatTilt,
+	formatTotalDuration,
 	formatTrackDuration,
 	getQualityClass,
 } from './format';
@@ -35,6 +36,7 @@ describe('every formatter returns -- for missing data', () => {
 	for (const v of [null, undefined, Number.NaN]) {
 		test(`input ${String(v)} (number-like)`, () => {
 			expect(formatDuration(v as number | null | undefined)).toBe(EMPTY);
+			expect(formatTotalDuration(v as number | null | undefined)).toBe(EMPTY);
 			expect(formatPercent(v as number | null | undefined, { decimals: 0 })).toBe(EMPTY);
 			expect(formatBpm(v as number | null | undefined, { decimals: 0, suffix: 'BPM' })).toBe(EMPTY);
 			expect(formatHour(v as number | null | undefined)).toBe(EMPTY);
@@ -69,6 +71,20 @@ describe('formatDuration', () => {
 	});
 	test('negative input → --', () => {
 		expect(formatDuration(-1)).toBe(EMPTY);
+	});
+});
+
+describe('formatTotalDuration', () => {
+	test('renders album totals in human labels', () => {
+		expect(formatTotalDuration(0)).toBe('0 min');
+		expect(formatTotalDuration(59 * 60_000)).toBe('59 min');
+		expect(formatTotalDuration(60 * 60_000)).toBe('1 hr');
+		expect(formatTotalDuration(62 * 60_000)).toBe('1 hr 2 min');
+		expect(formatTotalDuration(2 * 60 * 60_000)).toBe('2 hr');
+	});
+
+	test('negative input returns --', () => {
+		expect(formatTotalDuration(-1)).toBe(EMPTY);
 	});
 });
 

@@ -47,6 +47,7 @@
 	} from '$lib/stores/player';
 	import SelectionBar from '$lib/components/ui/SelectionBar.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import LibraryHero from '$lib/components/LibraryHero.svelte';
 	import ArtistCarousel from '$lib/components/ArtistCarousel.svelte';
 	import AlbumCarousel from '$lib/components/AlbumCarousel.svelte';
@@ -134,7 +135,6 @@
 	let undoTimer: ReturnType<typeof setTimeout> | null = null;
 	let artists = $state<Artist[]>([]);
 	let artistsLoading = $state(false);
-	let failedArtistImages = $state(new Set<string>());
 	let recentTracks = $state<Track[]>(homePanelCandidateCache.recentTracks);
 
 	// Keyboard cursor for track list
@@ -165,10 +165,10 @@
 	let showEnergyColumn = $state(false);
 	let showDanceColumn = $state(false);
 
-	// Reactive grid template — must match the order of cells in .track-header and .track-row.
+	// Reactive grid template - must match the order of cells in .track-header and .track-row.
 	// Cells that get conditionally removed via {#if showXColumn} drop their column track here too,
 	// so header and row stay aligned.
-	// All non-fr columns must be explicit px — 'auto' sizes independently per row-grid,
+	// All non-fr columns must be explicit px - 'auto' sizes independently per row-grid,
 	// causing header/data drift when badge content differs from header text.
 	let trackGridColumns = $derived.by(() => {
 		const cols: string[] = ['40px', 'minmax(0, 2fr)', 'minmax(0, 1.5fr)', 'minmax(0, 1.5fr)']; // # title artist album
@@ -263,7 +263,7 @@
 		detailAlbum = null;
 		if (!$searchQuery.trim()) {
 			// Tracks and Liked share the $tracks store but represent different result sets,
-			// so always refetch from offset 0 when entering either — never reuse stale rows.
+			// so always refetch from offset 0 when entering either - never reuse stale rows.
 			if (tab === 'tracks') loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, false);
 			if (tab === 'liked') loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, true);
 			if (tab === 'albums') loadAlbums();
@@ -275,7 +275,7 @@
 	async function loadArtists() {
 		artistsLoading = true;
 		try {
-			// Default browse view — top 200 alphabetically. When the user types
+			// Default browse view - top 200 alphabetically. When the user types
 			// a query, the search effect calls api.search() server-side and
 			// shows searchResults.artists (FTS). No more upfront 10k load.
 			const data = await cachedApi.getArtists('name', 'asc', 200);
@@ -623,7 +623,7 @@
 		try {
 			const parsed = parseQuery(trimmed);
 			if (hasAnyFilter(parsed)) {
-				// DSP/filter syntax (bpm:138, key:Am, energy:>0.7, genre:dnb, etc.) — route to audio search.
+				// DSP/filter syntax (bpm:138, key:Am, energy:>0.7, genre:dnb, etc.) - route to audio search.
 				const params = buildAudioParams(parsed, genres);
 				const audio = await api.searchAudio(params);
 				const adaptedTracks: Track[] = audio.tracks.map((r) => ({
@@ -655,7 +655,7 @@
 				}));
 				searchResults = { tracks: adaptedTracks, albums: [], artists: [] };
 			} else {
-				// Plain text — server-side FTS. No more preloading the full library.
+				// Plain text - server-side FTS. No more preloading the full library.
 				const r = await cachedApi.search(trimmed, 100);
 				searchResults = {
 					tracks: r.tracks,
@@ -1075,7 +1075,6 @@
 	// when a tile without baked artwork scrolls into view.
 	let lazyArt = $state<Record<string, string>>({});
 	let artistLazyArt = $state<Record<number, string>>({});
-	let failedHomePanelArtUrls = $state<Set<string>>(new Set());
 
 	function dailySalt(offset: number): number {
 		const now = new Date();
@@ -1283,16 +1282,13 @@
 		return label.split(/\s+/).map(part => part[0]?.toUpperCase() ?? '').join('').slice(0, 2) || '?';
 	}
 
-	function homePanelArtUrl(item: HomeMuralItem): string | null {
-		const rawUrl = item.artwork_url;
-		if (!rawUrl || failedHomePanelArtUrls.has(rawUrl)) return null;
-		return upscaleTidalArtwork(rawUrl, 320);
-	}
-
-	function markHomePanelArtFailed(item: HomeMuralItem) {
-		const rawUrl = item.artwork_url;
-		if (!rawUrl) return;
-		failedHomePanelArtUrls = new Set([...failedHomePanelArtUrls, rawUrl]);
+	function artistImageSources(
+		photoUrl: string | null | undefined,
+		lazyUrl: string | null | undefined,
+		fallbackUrl: string | null | undefined,
+	): string[] {
+		return [photoUrl, lazyUrl, fallbackUrl]
+			.filter((source): source is string => typeof source === 'string' && source.trim().length > 0);
 	}
 
 	function openHomeAlbumCard(card: HomeAlbumCard) {
@@ -1400,7 +1396,7 @@
 		if (found) {
 			void openAlbumDetail(found);
 		} else {
-			// Album not in current loaded page — build a stub from recentAlbums card
+			// Album not in current loaded page - build a stub from recentAlbums card
 			const card = recentAlbums.find(a => a.id === albumId);
 			if (!card) return;
 			const stub: import('$lib/api/client').Album = {
@@ -1451,7 +1447,7 @@
 		};
 	});
 
-	// ─── Position memory (Phase 5B — SvelteKit snapshot) ─────────────────────
+	// Position memory (Phase 5B - SvelteKit snapshot)
 	// Snapshot binds state to the browser's history entry. Multi-selection is
 	// active-task state and is intentionally not captured (resets on nav).
 	let pendingRestoreScroll = $state<number | null>(null)
@@ -1662,11 +1658,7 @@
 					</div>
 					<div class="artist-grid search-preview-grid">
 						{#each allSearchArtistPreview as artist (artist.id)}
-							{@const photoSrc = artist.photo_url && !failedArtistImages.has(artist.photo_url) ? artist.photo_url : null}
-							{@const lazyArtistImg = artistLazyArt[artist.id] && !failedArtistImages.has(artistLazyArt[artist.id]) ? artistLazyArt[artist.id] : null}
 							{@const fallbackSrc = artistArtworkById.get(artist.id)}
-							{@const fallbackArtistImg = fallbackSrc && !failedArtistImages.has(fallbackSrc) ? fallbackSrc : null}
-							{@const artistImg = photoSrc ?? lazyArtistImg ?? fallbackArtistImg}
 							<button
 								class="artist-card"
 								onclick={() => void goto(`/artists/${artist.id}`)}
@@ -1677,17 +1669,19 @@
 								}}
 								title="Open {artist.name}"
 								use:lazyTidalArt={{
-									enabled: !photoSrc && !artistLazyArt[artist.id],
+									enabled: !artistLazyArt[artist.id] && !fallbackSrc,
 									query: { artist: artist.name },
 									onResolve: (url) => (artistLazyArt[artist.id] = url),
 								}}
 							>
 								<div class="artist-photo">
-									{#if artistImg}
-										<img src={artistImg} alt={artist.name} loading="lazy" onerror={() => { failedArtistImages = new Set([...failedArtistImages, artistImg]); }} />
-									{:else}
-										<span class="artist-initial">{artist.name.charAt(0).toUpperCase()}</span>
-									{/if}
+									<ArtworkImage
+										className="artist-photo-img"
+										src={artistImageSources(artist.photo_url, artistLazyArt[artist.id], fallbackSrc)}
+										alt={artist.name}
+										size={320}
+										fallbackText={artist.name.charAt(0).toUpperCase()}
+									/>
 								</div>
 								<span class="artist-name">{artist.name}</span>
 							</button>
@@ -1732,11 +1726,13 @@
 								}}
 							>
 								<div class="album-art">
-									{#if albumArt}
-										<img src={albumArt} alt={album.title} loading="lazy" />
-									{:else}
-										<div class="art-placeholder" aria-hidden="true"></div>
-									{/if}
+									<ArtworkImage
+										className="album-art-img"
+										src={albumArt}
+										alt={album.title}
+										size={320}
+										fallbackText={album.title.slice(0, 2).toUpperCase()}
+									/>
 									<div class="album-art-overlay">
 										<button
 											class="art-play-btn"
@@ -1798,9 +1794,13 @@
 								}}
 							>
 								<div class="ht-art" class:ht-art--fallback={!trackArt}>
-									{#if trackArt}
-										<img class="ht-art-img" src={trackArt} alt="" loading="lazy" />
-									{/if}
+									<ArtworkImage
+										className="ht-art-img"
+										src={trackArt}
+										size={320}
+										fallbackText={track.title.slice(0, 2).toUpperCase()}
+										decorative={true}
+									/>
 								</div>
 								<div class="ht-meta">
 									<span class="ht-title">{track.title}</span>
@@ -1862,7 +1862,6 @@
 						<article class="home-mural-panel" aria-label={panel.label}>
 							<div class="home-mural-bg">
 								{#each panel.items as item (`${panel.id}-${item.kind}-${item.id}`)}
-									{@const artUrl = homePanelArtUrl(item)}
 									<button
 										class="home-mural-tile"
 										class:home-mural-tile--album={item.kind === 'album'}
@@ -1872,11 +1871,13 @@
 										aria-label={`${item.kind === 'track' ? 'Play' : 'Open'} ${item.title}`}
 										title={`${item.title}${item.subtitle ? ` - ${item.subtitle}` : ''}`}
 									>
-										{#if artUrl}
-											<img src={artUrl} alt="" loading="lazy" onerror={() => markHomePanelArtFailed(item)} />
-										{:else}
-											<span class="home-mural-fallback">{fallbackLetters(item.title)}</span>
-										{/if}
+										<ArtworkImage
+											className="home-mural-art"
+											src={item.artwork_url}
+											size={320}
+											fallbackText={fallbackLetters(item.title)}
+											decorative={true}
+										/>
 									</button>
 								{/each}
 							</div>
@@ -1941,13 +1942,17 @@
 								}}
 							>
 								<div class="ht-art" class:ht-art--fallback={!trackArt}>
-									{#if trackArt}
-										<img class="ht-art-img" src={trackArt} alt="" loading="lazy" />
-									{/if}
+									<ArtworkImage
+										className="ht-art-img"
+										src={trackArt}
+										size={320}
+										fallbackText={track.title.slice(0, 2).toUpperCase()}
+										decorative={true}
+									/>
 								</div>
 								<div class="ht-meta">
 									<span class="ht-title">{track.title}</span>
-									<span class="ht-sub">{track.artist_name ?? ''}{track.album_title ? ` — ${track.album_title}` : ''}</span>
+									<span class="ht-sub">{track.artist_name ?? ''}{track.album_title ? ` - ${track.album_title}` : ''}</span>
 								</div>
 								<span class="ht-duration">{formatTrackDuration(track.duration_ms)}</span>
 								<div class="ht-actions">
@@ -2017,11 +2022,13 @@
 					}}
 				>
 					<div class="album-art">
-						{#if albumArt}
-							<img src={albumArt} alt={album.title} loading="lazy" />
-						{:else}
-							<div class="art-placeholder">♫</div>
-						{/if}
+						<ArtworkImage
+							className="album-art-img"
+							src={albumArt}
+							alt={album.title}
+							size={320}
+							fallbackText={album.title.slice(0, 2).toUpperCase()}
+						/>
 						<div class="album-art-overlay">
 							<button
 								class="art-play-btn"
@@ -2101,11 +2108,7 @@
 		{:else}
 			<div class="artist-grid">
 				{#each visibleArtists as artist (artist.id)}
-					{@const photoSrc = artist.photo_url && !failedArtistImages.has(artist.photo_url) ? artist.photo_url : null}
-					{@const lazyArtistImg = artistLazyArt[artist.id] && !failedArtistImages.has(artistLazyArt[artist.id]) ? artistLazyArt[artist.id] : null}
 					{@const fallbackSrc = artistArtworkById.get(artist.id)}
-					{@const fallbackArtistImg = fallbackSrc && !failedArtistImages.has(fallbackSrc) ? fallbackSrc : null}
-					{@const artistImg = photoSrc ?? lazyArtistImg ?? fallbackArtistImg}
 					<button
 						class="artist-card"
 						onclick={() => void goto(`/artists/${artist.id}`)}
@@ -2116,17 +2119,19 @@
 						}}
 						title="Open {artist.name}"
 						use:lazyTidalArt={{
-							enabled: !photoSrc && !artistLazyArt[artist.id],
+							enabled: !artistLazyArt[artist.id] && !fallbackSrc,
 							query: { artist: artist.name },
 							onResolve: (url) => (artistLazyArt[artist.id] = url),
 						}}
 					>
 						<div class="artist-photo">
-							{#if artistImg}
-								<img src={artistImg} alt={artist.name} loading="lazy" onerror={() => { failedArtistImages = new Set([...failedArtistImages, artistImg]); }} />
-							{:else}
-								<span class="artist-initial">{artist.name.charAt(0).toUpperCase()}</span>
-							{/if}
+							<ArtworkImage
+								className="artist-photo-img"
+								src={artistImageSources(artist.photo_url, artistLazyArt[artist.id], fallbackSrc)}
+								alt={artist.name}
+								size={320}
+								fallbackText={artist.name.charAt(0).toUpperCase()}
+							/>
 						</div>
 						<span class="artist-name">{artist.name}</span>
 					</button>
@@ -2136,7 +2141,7 @@
 		{/if}
 
 	{:else if activeTab === 'tracks' || activeTab === 'liked'}
-		<!-- Track List (shared between Tracks and Liked tabs — server filters via likedOnly) -->
+		<!-- Track List (shared between Tracks and Liked tabs - server filters via likedOnly) -->
 		<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 		<div class="track-list" role="list" onkeydown={handleTrackListKeydown}>
 			<div class="track-header" style="grid-template-columns: {trackGridColumns}">
@@ -2296,20 +2301,20 @@
 					{/if}
 					{#if showPlaysColumn}
 						<span class="col-plays">
-							<span class="plays-count">{track.play_count > 0 ? track.play_count.toLocaleString() : '—'}</span>
+							<span class="plays-count">{track.play_count > 0 ? track.play_count.toLocaleString() : '-'}</span>
 						</span>
 					{/if}
 					{#if showDateColumn}
 						<span class="col-date">
-							<span class="date-added">{track.date_added ? formatDateShort(track.date_added) : '—'}</span>
+							<span class="date-added">{track.date_added ? formatDateShort(track.date_added) : '-'}</span>
 						</span>
 						<span class="col-date">
-							<span class="last-played">{track.last_played_at ? formatDateShort(track.last_played_at) : '—'}</span>
+							<span class="last-played">{track.last_played_at ? formatDateShort(track.last_played_at) : '-'}</span>
 						</span>
 					{/if}
 					{#if showBpmColumn}
 						<span class="col-bpm">
-							<span class="bpm-value">{track.bpm ? Math.round(track.bpm) : '—'}</span>
+							<span class="bpm-value">{track.bpm ? Math.round(track.bpm) : '-'}</span>
 						</span>
 					{/if}
 					{#if showKeyColumn}
@@ -2317,7 +2322,7 @@
 							{#if track.camelot_key}
 								<span class="camelot-badge">{track.camelot_key}</span>
 							{:else}
-								<span>—</span>
+								<span>-</span>
 							{/if}
 						</span>
 					{/if}
@@ -2329,7 +2334,7 @@
 								</span>
 								<span class="mini-bar-label">{track.energy.toFixed(2)}</span>
 							{:else}
-								<span>—</span>
+								<span>-</span>
 							{/if}
 						</span>
 					{/if}
@@ -2341,7 +2346,7 @@
 								</span>
 								<span class="mini-bar-label">{track.danceability.toFixed(2)}</span>
 							{:else}
-								<span>—</span>
+								<span>-</span>
 							{/if}
 						</span>
 					{/if}
@@ -2417,11 +2422,14 @@
 			</div>
 
 			<div class="detail-track-hero">
-				{#if detailTrack.artwork_url}
-					<img class="detail-track-art-large" src={detailTrack.artwork_url} alt="" />
-				{:else}
-					<div class="detail-track-art-large placeholder">♫</div>
-				{/if}
+				<ArtworkImage
+					className="detail-track-art-large"
+					src={detailTrack.artwork_url}
+					alt={detailTrack.title}
+					size={640}
+					fallbackText={detailTrack.title.slice(0, 2).toUpperCase()}
+					decorative={true}
+				/>
 				<div class="detail-track-info">
 					<h2>{detailTrack.title}</h2>
 					<p class="detail-artist">{detailTrack.artist_name ?? 'Unknown Artist'}</p>
@@ -2503,9 +2511,14 @@
 								onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
 							>
 								<span class="detail-track-num">{i + 1}</span>
-								{#if track.artwork_url}
-									<img class="detail-track-art" src={track.artwork_url} alt="" loading="lazy" />
-								{/if}
+								<ArtworkImage
+									className="detail-track-art"
+									src={track.artwork_url}
+									alt={track.title}
+									size={320}
+									fallbackText={track.title.slice(0, 2).toUpperCase()}
+									decorative={true}
+								/>
 								<span class="detail-track-title">{track.title}</span>
 								<span class="detail-track-artist">{track.artist_name ?? ''}</span>
 								<span class="detail-track-duration">{formatTrackDuration(track.duration_ms)}</span>
@@ -2635,32 +2648,34 @@
 		outline: none;
 	}
 
-	.home-mural-tile img,
-	.home-mural-fallback {
+	.home-mural-tile :global(.home-mural-art) {
 		display: block;
 		width: 100%;
 		height: 100%;
 	}
 
-	.home-mural-tile img {
+	.home-mural-tile :global(.home-mural-art:not(.fallback)) {
 		object-fit: cover;
 		transform: skewX(7deg) scale(1.24);
 		transition: transform var(--motion-base);
 	}
 
-	.home-mural-tile:hover img,
-	.home-mural-tile:focus-visible img {
+	.home-mural-tile:hover :global(.home-mural-art:not(.fallback)),
+	.home-mural-tile:focus-visible :global(.home-mural-art:not(.fallback)) {
 		transform: skewX(7deg) scale(1.34);
 	}
 
-	.home-mural-fallback {
+	.home-mural-tile :global(.home-mural-art.fallback) {
 		display: grid;
 		place-items: center;
 		background: linear-gradient(135deg, var(--bg-raised), color-mix(in srgb, var(--accent-soft) 28%, var(--bg-surface)));
 		color: rgba(255,255,255,0.78);
+		transform: skewX(7deg) scale(1.08);
+	}
+
+	.home-mural-tile :global(.home-mural-art.fallback span) {
 		font-size: var(--font-size-xl);
 		font-weight: var(--font-weight-bold);
-		transform: skewX(7deg) scale(1.08);
 	}
 
 	.home-mural-shade {
@@ -2766,15 +2781,30 @@
 		overflow: hidden;
 	}
 
-	.ht-art-img {
-		display: block;
+	.ht-art :global(.ht-art-img) {
 		width: 100%;
 		height: 100%;
+	}
+
+	.ht-art :global(.ht-art-img:not(.fallback)) {
+		display: block;
 		object-fit: cover;
 	}
 
 	.ht-art--fallback {
 		background: var(--bg-hover);
+	}
+
+	.ht-art :global(.ht-art-img.fallback) {
+		display: grid;
+		place-items: center;
+		background: var(--bg-hover);
+		color: var(--text-tertiary);
+	}
+
+	.ht-art :global(.ht-art-img.fallback span) {
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.ht-meta {
@@ -3314,7 +3344,7 @@
 	}
 
 	.detail-album-art,
-	.detail-track-art-large {
+	:global(.detail-track-art-large) {
 		width: 140px;
 		height: 140px;
 		border-radius: var(--radius);
@@ -3323,11 +3353,14 @@
 		box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
 	}
 
-	.detail-track-art-large.placeholder {
+	:global(.detail-track-art-large.fallback) {
 		background: var(--accent-soft);
 		display: flex;
 		align-items: center;
 		justify-content: center;
+	}
+
+	:global(.detail-track-art-large.fallback span) {
 		font-size: var(--font-size-3xl);
 		color: var(--accent-strong);
 	}
@@ -3473,12 +3506,24 @@
 		font-size: var(--font-size-xs);
 	}
 
-	.detail-track-art {
+	:global(.detail-track-art) {
 		width: 40px;
 		height: 40px;
 		border-radius: 6px;
 		object-fit: cover;
 		flex-shrink: 0;
+	}
+
+	:global(.detail-track-art.fallback) {
+		display: grid;
+		place-items: center;
+		background: var(--bg-raised);
+		color: var(--text-tertiary);
+	}
+
+	:global(.detail-track-art.fallback span) {
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.detail-track-title {
@@ -3544,7 +3589,7 @@
 		}
 
 		.detail-album-art,
-		.detail-track-art-large {
+		:global(.detail-track-art-large) {
 			width: 120px;
 			height: 120px;
 		}
@@ -3637,7 +3682,7 @@
 			grid-template-columns: 24px 1fr auto 32px;
 		}
 
-		.detail-track-art,
+		:global(.detail-track-art),
 		.detail-track-artist {
 			display: none;
 		}
@@ -3853,21 +3898,27 @@
 		filter: saturate(1.06) brightness(1.03);
 	}
 
-	.album-art img {
+	.album-art :global(.album-art-img) {
 		width: 100%;
 		height: 100%;
-		object-fit: cover;
 		display: block;
 	}
 
-	.art-placeholder {
-		width: 100%;
-		height: 100%;
+	.album-art :global(.album-art-img:not(.fallback)) {
+		object-fit: cover;
+	}
+
+	.album-art :global(.album-art-img.fallback) {
 		display: flex;
 		align-items: center;
 		justify-content: center;
+		background: var(--bg-surface);
+	}
+
+	.album-art :global(.album-art-img.fallback span) {
 		font-size: var(--font-size-2xl);
 		color: var(--text-tertiary);
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.album-art-overlay {
@@ -4417,17 +4468,27 @@
 		flex-shrink: 0;
 	}
 
-	.artist-photo img {
+	.artist-photo :global(.artist-photo-img) {
 		width: 100%;
 		height: 100%;
+	}
+
+	.artist-photo :global(.artist-photo-img:not(.fallback)) {
+		display: block;
 		object-fit: cover;
 	}
 
-	.artist-initial {
+	.artist-photo :global(.artist-photo-img.fallback) {
+		display: grid;
+		place-items: center;
+		background: var(--accent-soft);
+		color: var(--accent-strong);
+	}
+
+	.artist-photo :global(.artist-photo-img.fallback span) {
 		font-family: var(--font-body);
 		font-size: var(--font-size-lg);
 		font-weight: var(--font-weight-bold);
-		color: var(--accent-strong);
 		line-height: 1;
 	}
 

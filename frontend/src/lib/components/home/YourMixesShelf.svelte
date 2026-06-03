@@ -7,6 +7,7 @@
 	import { tidalStatus } from '$lib/stores/tidal';
 	import { getCachedMixes, putCachedMixes, clearCachedMixes } from '$lib/stores/tidal-mixes-cache';
 	import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 
 	type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
@@ -92,11 +93,13 @@
 				onclick={() => playMix(mix)}
 			>
 				<div class="art-wrap">
-					{#if mix.image_url}
-						<div class="art" style="background-image: url('{mix.image_url}')"></div>
-					{:else}
-						<div class="art fallback">♫</div>
-					{/if}
+					<ArtworkImage
+						className="art"
+						src={mix.image_url}
+						size={320}
+						fallbackText="MIX"
+						decorative={true}
+					/>
 					<PlayOverlay
 						position="center"
 						size="md"
@@ -302,21 +305,28 @@
 		overflow: hidden;
 		background: rgba(255, 255, 255, 0.04);
 	}
-	.art {
+	.art-wrap :global(.art) {
 		width: 100%;
 		height: 100%;
-		background-size: cover;
-		background-position: center;
+	}
+	.art-wrap :global(img.art) {
+		display: block;
+		object-fit: cover;
 		transition: transform var(--motion-base);
 	}
-	.mix-card:hover .art {
+	.mix-card:hover :global(img.art) {
 		transform: scale(1.05);
 	}
-	.art.fallback {
+	.art-wrap :global(.art.fallback) {
 		display: flex;
 		align-items: center;
 		justify-content: center;
+		background: rgba(255, 255, 255, 0.04);
+		color: rgba(255, 255, 255, 0.55);
+	}
+	.art-wrap :global(.art.fallback span) {
 		font-size: var(--font-size-4xl);
+		font-weight: var(--font-weight-semibold);
 		color: rgba(255, 255, 255, 0.55);
 	}
 

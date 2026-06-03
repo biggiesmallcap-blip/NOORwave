@@ -21,10 +21,6 @@ use std::collections::HashMap;
 #[derive(Default)]
 pub struct ArtistResolver {
     by_lowercased_name: HashMap<String, i64>,
-    /// Count of name collisions observed at load time (different ids,
-    /// same lowercased name). Exposed so callers can debug-log unusual
-    /// counts without reaching into the implementation.
-    collision_count: usize,
 }
 
 impl ArtistResolver {
@@ -35,7 +31,6 @@ impl ArtistResolver {
         })?;
 
         let mut by_lowercased_name: HashMap<String, i64> = HashMap::new();
-        let mut collision_count = 0usize;
         for row in rows {
             let (id, name) = row?;
             let key = name.trim().to_ascii_lowercase();
@@ -46,12 +41,9 @@ impl ArtistResolver {
             // biased toward the older record, which is usually the
             // canonical one when duplicates pile up.
             match by_lowercased_name.get(&key).copied() {
-                Some(existing) if existing <= id => {
-                    collision_count += 1;
-                }
+                Some(existing) if existing <= id => {}
                 Some(_) => {
                     by_lowercased_name.insert(key, id);
-                    collision_count += 1;
                 }
                 None => {
                     by_lowercased_name.insert(key, id);
@@ -59,10 +51,7 @@ impl ArtistResolver {
             }
         }
 
-        Ok(Self {
-            by_lowercased_name,
-            collision_count,
-        })
+        Ok(Self { by_lowercased_name })
     }
 
     /// Returns `None` for unknown names. Caller decides how to handle
@@ -73,19 +62,6 @@ impl ArtistResolver {
             return None;
         }
         self.by_lowercased_name.get(&key).copied()
-    }
-
-    /// Number of name collisions seen during `load`. Useful for a debug
-    /// log line so unusual collision counts get noticed.
-    #[allow(dead_code)]
-    pub fn collision_count(&self) -> usize {
-        self.collision_count
-    }
-
-    /// Number of unique lowercased-name entries in the resolver.
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.by_lowercased_name.len()
     }
 }
 
@@ -146,14 +122,13 @@ mod tests {
         ]);
         let resolver = ArtistResolver::load(&conn).unwrap();
         assert_eq!(resolver.lookup("plaid"), Some(3));
-        assert_eq!(resolver.collision_count(), 2);
     }
 
     #[test]
     fn empty_artist_names_are_skipped() {
         let conn = conn_with_artists(&[(1, ""), (2, "Real Artist"), (3, "   ")]);
         let resolver = ArtistResolver::load(&conn).unwrap();
-        assert_eq!(resolver.len(), 1);
         assert_eq!(resolver.lookup("real artist"), Some(2));
+        assert_eq!(resolver.lookup(""), None);
     }
 }

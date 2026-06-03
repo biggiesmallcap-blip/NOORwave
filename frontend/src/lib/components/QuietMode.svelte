@@ -29,14 +29,21 @@
 	import NowPlayingMetadata from '$lib/components/now-playing/NowPlayingMetadata.svelte';
 	import NowPlayingProgress from '$lib/components/now-playing/NowPlayingProgress.svelte';
 	import NowPlayingTransport from '$lib/components/now-playing/NowPlayingTransport.svelte';
+	import {
+		tidalArtworkFallbackSizes,
+		upscaleTidalArtwork,
+		type TidalArtworkSize,
+	} from '$lib/utils/artwork';
 
 	let isScrubbing = $state(false);
 	let favoritePending = $state(false);
+	let failedArtworkUrls = $state<Record<string, boolean>>({});
 
 	const shortcut = $derived(getCmdOrCtrlLabel());
 	const playerState = $derived(
 		$currentTrack ? ($isPlaying ? 'Playing' : 'Paused') : $playerReady ? 'Ready' : 'Connecting'
 	);
+	let quietArtwork = $derived(artworkCandidate($currentTrack?.artwork_url, 1280));
 	let quietAlbumHref = $derived.by(() => {
 		const track = $currentTrack;
 		if (!track) return null;
@@ -44,6 +51,23 @@
 		if (track.album_tidal_id != null) return `/tidal/albums/${track.album_tidal_id}`;
 		return null;
 	});
+
+	function artworkCandidate(
+		rawUrl: string | null | undefined,
+		size: TidalArtworkSize,
+	): string | null {
+		if (!rawUrl) return null;
+		for (const candidateSize of tidalArtworkFallbackSizes(rawUrl, size)) {
+			const candidate = upscaleTidalArtwork(rawUrl, candidateSize);
+			if (candidate && !failedArtworkUrls[candidate]) return candidate;
+		}
+		return null;
+	}
+
+	function markArtworkFailed(renderedUrl: string | null | undefined) {
+		if (!renderedUrl) return;
+		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
+	}
 
 	// Esc handler — defers to context menu and palette if either is open.
 	function onWindowKeydown(e: KeyboardEvent) {
@@ -132,8 +156,13 @@
 		aria-hidden="true"
 		transition:fade={{ duration: 200 }}
 	>
-		{#if $currentTrack?.artwork_url}
-			<img class="quiet-backdrop-art" src={$currentTrack.artwork_url} alt="" />
+		{#if quietArtwork}
+			<img
+				class="quiet-backdrop-art"
+				src={quietArtwork}
+				alt=""
+				onerror={() => markArtworkFailed(quietArtwork)}
+			/>
 		{/if}
 	</div>
 
@@ -164,8 +193,13 @@
 						oncontextmenu={openQuietAlbumContextMenu}
 					>
 				{#key $currentTrack.artwork_url}
-					{#if $currentTrack.artwork_url}
-						<img class="quiet-art" src={$currentTrack.artwork_url} alt="" />
+					{#if quietArtwork}
+						<img
+							class="quiet-art"
+							src={quietArtwork}
+							alt=""
+							onerror={() => markArtworkFailed(quietArtwork)}
+						/>
 					{:else}
 						<div class="quiet-art quiet-art-placeholder">♫</div>
 					{/if}
@@ -173,8 +207,13 @@
 					</a>
 				{:else}
 					{#key $currentTrack.artwork_url}
-						{#if $currentTrack.artwork_url}
-							<img class="quiet-art" src={$currentTrack.artwork_url} alt="" />
+						{#if quietArtwork}
+							<img
+								class="quiet-art"
+								src={quietArtwork}
+								alt=""
+								onerror={() => markArtworkFailed(quietArtwork)}
+							/>
 						{:else}
 							<div class="quiet-art quiet-art-placeholder">♫</div>
 						{/if}

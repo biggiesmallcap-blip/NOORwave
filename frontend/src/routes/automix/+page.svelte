@@ -34,6 +34,7 @@
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildTrackMenu, type MenuTrack } from '$lib/player/track_menu';
 	import {
@@ -338,11 +339,14 @@
 			}}
 		>
 			<div class="seed-art-shell">
-				{#if $currentTrack?.artwork_url}
-					<img src={$currentTrack.artwork_url} alt="" />
-				{:else}
-					<div class="seed-art-empty">NOOR</div>
-				{/if}
+				<ArtworkImage
+					className="seed-art"
+					src={$currentTrack?.artwork_url}
+					alt={$currentTrack?.title ?? 'Current seed artwork'}
+					size={640}
+					fallbackText="NOOR"
+					decorative={true}
+				/>
 			</div>
 			<div class="seed-copy">
 				<p class="eyebrow">Current seed</p>
@@ -437,11 +441,14 @@
 						oncontextmenu={(e) => openTrackContextMenu(e, row.item.track, row.item.id)}
 					>
 						<div class="queue-index">{String(i + 1).padStart(2, '0')}</div>
-						{#if row.item.track.artwork_url}
-							<img class="queue-art" src={row.item.track.artwork_url} alt="" />
-						{:else}
-							<div class="queue-art placeholder">♪</div>
-						{/if}
+						<ArtworkImage
+							className="queue-art"
+							src={row.item.track.artwork_url}
+							alt={row.item.track.title}
+							size={320}
+							fallbackText={row.item.track.title.slice(0, 2).toUpperCase()}
+							decorative={true}
+						/>
 						<div class="queue-meta">
 							<strong>{row.item.track.title}</strong>
 							<span>{row.item.track.artist_name ?? 'Unknown artist'}</span>
@@ -652,8 +659,7 @@
 		min-width: 0;
 	}
 
-	.seed-art-shell,
-	.seed-art-empty {
+	.seed-art-shell {
 		aspect-ratio: 1;
 		border-radius: var(--radius-md);
 		overflow: hidden;
@@ -661,13 +667,14 @@
 		border: 1px solid var(--border-subtle);
 	}
 
-	.seed-art-shell img {
+	.seed-art-shell :global(.seed-art) {
 		width: 100%;
 		height: 100%;
 		object-fit: cover;
+		display: block;
 	}
 
-	.seed-art-empty {
+	.seed-art-shell :global(.seed-art.fallback) {
 		display: grid;
 		place-items: center;
 		font-family: var(--font-mono);
@@ -964,15 +971,16 @@
 		font-size: var(--font-size-xs);
 	}
 
-	.queue-art {
+	.forecast-row :global(.queue-art) {
 		width: clamp(2.25rem, 3vw, 2.75rem);
 		height: clamp(2.25rem, 3vw, 2.75rem);
 		border-radius: var(--radius-sm);
 		object-fit: cover;
+		display: block;
 		background: rgba(255, 255, 255, 0.04);
 	}
 
-	.placeholder {
+	.forecast-row :global(.queue-art.fallback) {
 		display: grid;
 		place-items: center;
 		color: var(--text-tertiary);

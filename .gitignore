@@ -1,6 +1,7 @@
 target/
 node_modules/
 package-lock.json
+!scripts/package-lock.json
 dist/
 build/
 .svelte-kit/
@@ -12,7 +13,7 @@ noor.db-shm
 .env
 .noor_secret
 
-# Secrets — defensive patterns
+# Secrets - defensive patterns
 .env.*
 !.env.example
 *.pem
@@ -35,10 +36,10 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Local server / dev logs — never commit
+# Local server / dev logs - never commit
 *.log
 
-# Local agent / design tooling — not shared
+# Local agent / design tooling - not shared
 AGENTS.md
 CLAUDE.md
 .agents/
@@ -56,10 +57,19 @@ CLAUDE.md
 docs/superpowers/
 
 # Local test artifacts
+.scratch/
+coverage/
+frontend/coverage/
+docs/dev/repowise-health/
+docs/dev/repowise-review-gate/
 scripts/click-test-screenshots/
+__pycache__/
+*.pyc
+scripts/target-check*/
 target_codex_verify_fresh/
 target_codex*/
-_tmp_20460_c4ba653036c6634ab224f799cde4c457
+_tmp_*
+noor.db.backup*
 body.md
 rust.instructions.md
 svelte.instructions.md
@@ -68,7 +78,7 @@ docs/assets/gif/
 moods_raw.json
 noor-app/moods.json
 
-# Asset-pack swap backups — pre-swap copies kept on disk for reference
+# Asset-pack swap backups - pre-swap copies kept on disk for reference
 frontend/static/svg_old/
 noor-app/icons_old/
 

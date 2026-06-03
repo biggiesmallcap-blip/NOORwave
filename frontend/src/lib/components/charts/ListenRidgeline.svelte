@@ -10,7 +10,7 @@
 	 *   "default"     — Peak Hour · Rhythm · Night · Morning (4 stats)
 	 *   "single-day"  — Peak Hour · Longest session · Listens · Tracks  (used at days <= 1)
 	 *
-	 * Spec: C:\Users\Felix\.claude\plans\lets-revision-analytics-stats-crystalline-melody.md
+	 * Contract: rendered by frontend/src/routes/analytics/+page.svelte.
 	 *
 	 * The occlusion trick: each ridge is a closed `<path>` filled with the page background,
 	 * stroked with text-primary. Rows render top-first so later rows occlude earlier ones —

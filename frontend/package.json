@@ -17,6 +17,7 @@
 		"smoke:full": "node scripts/smoke.mjs --phase full",
 		"smoke:headed": "node scripts/smoke.mjs --headed",
 		"test": "vitest run",
+		"test:coverage": "vitest run --coverage --coverage.reporter=lcov --coverage.reportsDirectory=coverage",
 		"test:watch": "vitest"
 	},
 	"devDependencies": {
@@ -25,6 +26,7 @@
 		"@sveltejs/kit": "^2.61.0",
 		"@sveltejs/vite-plugin-svelte": "^7.1.2",
 		"@types/node": "^25.9.1",
+		"@vitest/coverage-v8": "^4.1.7",
 		"playwright": "^1.60.0",
 		"postcss-html": "^1.8.1",
 		"stylelint": "^17.12.0",

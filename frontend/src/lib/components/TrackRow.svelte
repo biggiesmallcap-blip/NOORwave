@@ -360,7 +360,7 @@
 					<!-- svelte-ignore a11y_no_static_element_interactions -->
 					<span class="sub-link" oncontextmenu={openArtistContextMenu}>{track.artist_name}</span>
 				{/if}
-				{#if showArtist && track.artist_name && showAlbum && track.album_title} — {/if}
+				{#if showArtist && track.artist_name && showAlbum && track.album_title} - {/if}
 				{#if showAlbum && track.album_title}
 					<!-- svelte-ignore a11y_no_static_element_interactions -->
 					<span class="sub-link" oncontextmenu={openAlbumContextMenu}>{track.album_title}</span>
@@ -450,7 +450,7 @@
 	}
 	.track-row.disabled:hover { background: transparent; }
 
-	/* ── numbered (artist popular list) ─────────────────────────── */
+	/* numbered (artist popular list) */
 	.track-row.numbered {
 		grid-template-columns: 32px 42px 1fr 150px auto 60px;
 		gap: 14px;
@@ -483,7 +483,7 @@
 		color: var(--text-tertiary);
 	}
 
-	/* ── indexed (album track list) ──────────────────────────────── */
+	/* indexed (album track list) */
 	.track-row.indexed {
 		grid-template-columns: 40px 1fr 132px auto 64px;
 	}
@@ -537,7 +537,7 @@
 		50% { height: 14px; }
 	}
 
-	/* ── art (library / search local rows) ───────────────────────── */
+	/* art (library / search local rows) */
 	.track-row.art {
 		grid-template-columns: 38px 1fr auto auto;
 		gap: 12px;
@@ -561,14 +561,14 @@
 		color: rgba(255, 255, 255, 0.5);
 	}
 
-	/* ── compact (analytics / home / automix) ────────────────────── */
+	/* compact (analytics / home / automix) */
 	.track-row.compact {
 		grid-template-columns: 1fr auto;
 		gap: 8px;
 		padding: 6px 10px;
 	}
 
-	/* ── shared cells ────────────────────────────────────────────── */
+	/* shared cells */
 	.cell-meta {
 		min-width: 0;
 		display: flex;

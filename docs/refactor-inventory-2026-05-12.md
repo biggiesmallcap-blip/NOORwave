@@ -2,7 +2,7 @@
 
 ## Scope
 
-Workspace: `E:\NOORwave\.worktrees\codex-refactor-audit`
+Workspace: `<repo-root>/.worktrees/codex-refactor-audit`
 
 Branch: `codex-refactor-audit`
 
@@ -23,7 +23,7 @@ Largest files after the external sidecar commit:
 ## Decisions
 
 - Used an isolated worktree after the other Codex started committing in the main checkout.
-- Kept all new edits out of `E:\NOORwave`.
+- Kept all new edits out of `<repo-root>`.
 - Did not touch `noor-server/src/services/learning.rs` after it was called out as active work.
 - Treated the committed genre route extraction as baseline because it landed in `66dcd44`.
 - Picked the chart route area for the next cleanup because it had duplicated `Track` SQL row mapping in `routes.rs`.

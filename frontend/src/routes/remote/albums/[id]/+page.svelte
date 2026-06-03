@@ -7,11 +7,12 @@
 		shuffleAlbum,
 		startSongRadio
 	} from '$lib/stores/player';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import RemoteActionBar from '$lib/components/remote/RemoteActionBar.svelte';
 	import RemotePageShell from '$lib/components/remote/RemotePageShell.svelte';
 	import RemoteTrackRow from '$lib/components/remote/RemoteTrackRow.svelte';
-	import { upscaleTidalArtwork } from '$lib/utils/artwork';
 	import { hapticTap } from '$lib/remote/haptics';
+	import { formatTotalDuration } from '$lib/utils/format';
 
 	let albumId = $derived(Number(page.params.id));
 
@@ -51,22 +52,6 @@
 		};
 	});
 
-	let cover = $derived(upscaleTidalArtwork(header?.artwork_url ?? null, 640));
-	let backdrop = $derived(upscaleTidalArtwork(header?.artwork_url ?? null));
-	let coverFailed = $state(false);
-	$effect(() => {
-		cover;
-		coverFailed = false;
-	});
-
-	function formatTotalDuration(ms: number): string {
-		const minutes = Math.round(ms / 60000);
-		if (minutes < 60) return `${minutes} min`;
-		const hours = Math.floor(minutes / 60);
-		const rem = minutes % 60;
-		return rem ? `${hours} hr ${rem} min` : `${hours} hr`;
-	}
-
 	function goArtist() {
 		if (!header?.artist_id || header.artist_id <= 0) return;
 		hapticTap();
@@ -93,11 +78,13 @@
 	{:else}
 		<section class="remote-album-hero">
 			<div class="remote-album-art">
-				{#if cover && !coverFailed}
-					<img src={cover} alt="" onerror={() => (coverFailed = true)} />
-				{:else}
-					<span aria-hidden="true">{(header.title ?? 'A').slice(0, 1)}</span>
-				{/if}
+				<ArtworkImage
+					className="remote-album-artwork"
+					src={header.artwork_url}
+					size={640}
+					fallbackText={(header.title ?? 'A').slice(0, 1)}
+					decorative={true}
+				/>
 			</div>
 			<h2>{header.title}</h2>
 			{#if header.artist_id && header.artist_id > 0}
@@ -162,10 +149,24 @@
 		box-shadow: 0 22px 44px rgba(0, 0, 0, 0.4);
 	}
 
-	.remote-album-art img {
+	.remote-album-art :global(.remote-album-artwork) {
 		width: 100%;
 		height: 100%;
+	}
+
+	.remote-album-art :global(img.remote-album-artwork) {
 		object-fit: cover;
+		display: block;
+	}
+
+	.remote-album-art :global(.remote-album-artwork.fallback) {
+		display: grid;
+		place-items: center;
+	}
+
+	.remote-album-art :global(.remote-album-artwork.fallback span) {
+		font-size: var(--font-size-4xl);
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.remote-album-hero h2 {

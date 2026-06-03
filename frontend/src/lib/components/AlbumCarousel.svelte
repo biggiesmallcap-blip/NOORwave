@@ -1,8 +1,8 @@
 <script lang="ts">
   import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
   import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
-  import { letterColor } from '$lib/utils/color';
   import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
+  import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 
   interface AlbumCard {
     id: number;
@@ -64,13 +64,13 @@
         }}
       >
         <div class="art-wrap">
-          {#if resolved}
-            <div class="album-art" style="background-image: url('{resolved}')"></div>
-          {:else}
-            <div class="album-art fallback" style="background: {letterColor(album.title)}">
-              <span>♫</span>
-            </div>
-          {/if}
+          <ArtworkImage
+            className="album-carousel-art"
+            src={resolved}
+            size={320}
+            fallbackText={album.title.slice(0, 2).toUpperCase()}
+            decorative={true}
+          />
           <PlayOverlay position="center" size="md" />
         </div>
         <span class="album-title">{album.title}</span>
@@ -156,23 +156,29 @@
     overflow: hidden;
   }
 
-  .album-art {
+  .art-wrap :global(.album-carousel-art) {
     width: 100%;
     height: 100%;
-    background-size: cover;
-    background-position: center;
+    display: block;
+  }
+
+  .art-wrap :global(.album-carousel-art:not(.fallback)) {
+    object-fit: cover;
     transition: transform 0.15s;
   }
 
-  .album-card:hover .album-art { transform: scale(1.04); }
+  .album-card:hover :global(.album-carousel-art:not(.fallback)) { transform: scale(1.04); }
 
-  .album-art.fallback {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: var(--font-size-3xl);
+  .art-wrap :global(.album-carousel-art.fallback) {
+    display: grid;
+    place-items: center;
     color: rgba(255,255,255,0.5);
     background: var(--bg-hover);
+  }
+
+  .art-wrap :global(.album-carousel-art.fallback span) {
+    font-size: var(--font-size-xl);
+    font-weight: var(--font-weight-semibold);
   }
 
   .album-card:hover :global(.play-overlay),

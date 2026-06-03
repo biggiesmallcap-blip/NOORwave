@@ -52,7 +52,7 @@ transition: background var(--motion-base), border-color var(--motion-base);
 transition: transform var(--motion-base) ease-out;
 ```
 
-Card tiles use the token's bezier as their reference soft-graceful feel (see [TrendingCard.svelte](src/lib/components/TrendingCard.svelte) for the canonical pattern: 210 ms on `background`, `border-color`, and the art `transform: scale(1.05)`). Match that exact transition signature on any new tile.
+Card and mural tiles use the token's bezier as their reference soft-graceful feel (see [ChartMural.svelte](src/lib/components/charts/ChartMural.svelte) and [charts/+page.svelte](src/routes/charts/+page.svelte) for canonical patterns on `background`, `border-color`, and art `transform`). Match those transition signatures on new tiles.
 
 ## Global utility classes
 

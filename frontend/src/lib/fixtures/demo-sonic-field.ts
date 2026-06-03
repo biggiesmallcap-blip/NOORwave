@@ -4,6 +4,7 @@
  */
 
 import type { SonicView, SonicTrack } from '$lib/api/client';
+import { gaussian, mulberry32 } from '$lib/fixtures/demo-random';
 import { clamp } from '$lib/utils/math';
 
 export type SonicProfile = 'club' | 'eclectic' | 'chill' | 'aggressive';
@@ -45,25 +46,6 @@ const PROFILES: Record<SonicProfile, Cluster[]> = {
 		{ muE: 0.78, muD: 0.22, muBpm: 188, sE: 0.08, sD: 0.1, sBpm: 6, count: 70 },
 	],
 };
-
-function mulberry32(seed: number): () => number {
-	let a = seed;
-	return () => {
-		a |= 0;
-		a = (a + 0x6d2b79f5) | 0;
-		let t = a;
-		t = Math.imul(t ^ (t >>> 15), t | 1);
-		t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-	};
-}
-
-function gaussian(rand: () => number, mu: number, sigma: number): number {
-	const u = 1 - rand();
-	const v = rand();
-	const z = Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
-	return mu + z * sigma;
-}
 
 const ARTISTS = [
 	'Vesper Drive', 'Sable Echoes', 'Cold Geography', 'Private Wave', 'Night Terrace',

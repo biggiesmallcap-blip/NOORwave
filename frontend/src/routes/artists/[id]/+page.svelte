@@ -27,6 +27,11 @@
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { buildTidalTrackMenu } from '$lib/player/track_menu';
 	import { canPlayTrack } from '$lib/player/playable';
+	import {
+		tidalArtworkFallbackSizes,
+		upscaleTidalArtwork,
+		type TidalArtworkSize,
+	} from '$lib/utils/artwork';
 	import { formatCompactCount } from '$lib/utils/format';
 	import { cleanArtistBio } from '../artist_bio';
 	import { artistCurrentTrackMatchesArtist } from '../artist_playback';
@@ -48,8 +53,8 @@
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 
-	// View-time fallback when our local artist row has no `photo_url` —
-	// populated from `tidal_artist_profile.picture_url`. Cleared on artist
+	// View-time fallback when our local artist row has no `photo_url`.
+	// Populated from `tidal_artist_profile.picture_url`. Cleared on artist
 	// change so we don't flash the previous artist's photo on transition.
 	let tidalPictureUrl = $state<string | null>(null);
 
@@ -60,6 +65,7 @@
 	let tidalBio = $state<TidalArtistBio | null>(null);
 	let tidalLoading = $state(false);
 	let tidalAvailable = $state(false);
+	let failedArtworkUrls = $state<Record<string, boolean>>({});
 
 	let spotifyStats = $state<SpotifyArtistStats | null>(null);
 	let playcountByIsrc = $derived.by(() => {
@@ -70,7 +76,7 @@
 		return map;
 	});
 
-	// Phase 5B — back/forward state via SvelteKit snapshot.
+	// Phase 5B: back/forward state via SvelteKit snapshot.
 	export const snapshot: Snapshot<{ scrollY: number }> = {
 		capture: () => ({ scrollY: typeof window !== 'undefined' ? window.scrollY : 0 }),
 		restore: (saved) => {
@@ -84,7 +90,7 @@
 		try {
 			// Source-of-truth artist row (name, photo, biography, counts) is
 			// fetched in parallel with the artist's local tracks. Either failure
-			// is non-fatal — the page can render with whichever resolved.
+			// is non-fatal; the page can render with whichever resolved.
 			const [artistRes, tracksRes] = await Promise.allSettled([
 				cachedApi.getArtist(artistId),
 				cachedApi.getArtistTracks(artistId),
@@ -119,7 +125,7 @@
 			tidalSimilarArtists = res.similar_artists ?? [];
 			tidalBio = res.bio ?? null;
 			tidalAvailable = res.available;
-			// View-time portrait fallback — populated alongside the rest
+			// View-time portrait fallback, populated alongside the rest
 			// of the discography so a missing local `photo_url` still
 			// renders a proper hero portrait instead of the initials disc.
 			if (res.picture_url) tidalPictureUrl = res.picture_url;
@@ -150,6 +156,7 @@
 		tidalBio = null;
 		tidalAvailable = false;
 		spotifyStats = null;
+		failedArtworkUrls = {};
 		bioExpanded = false;
 		void load();
 		void loadDiscography();
@@ -177,7 +184,7 @@
 
 	// Hero portrait resolution, in priority order:
 	//   1. The artist's own photo from TIDAL/Spotify (preferred).
-	//   2. The first available album cover — used as a glassmorphic backdrop
+	//   2. The first available album cover, used as a glassmorphic backdrop
 	//      with a frosted disc on top, matching the Quiet Mode aesthetic.
 	//   3. Letter-color fallback inside the disc (handled in the markup).
 	// Prefer the fresh TIDAL `picture_url` over the locally-cached
@@ -193,7 +200,26 @@
 			?? tracks.find((t) => t.artwork_url)?.artwork_url
 			?? null
 	);
-	let heroHasPhoto = $derived(heroPortraitUrl != null);
+	let heroPortraitSrc = $derived(artworkCandidate(heroPortraitUrl, 640));
+	let heroBackdropSrc = $derived(artworkCandidate(heroBackdropUrl, 1280));
+	let heroHasPhoto = $derived(heroPortraitSrc != null);
+
+	function artworkCandidate(
+		rawUrl: string | null | undefined,
+		size: TidalArtworkSize,
+	): string | null {
+		if (!rawUrl) return null;
+		for (const candidateSize of tidalArtworkFallbackSizes(rawUrl, size)) {
+			const candidate = upscaleTidalArtwork(rawUrl, candidateSize);
+			if (candidate && !failedArtworkUrls[candidate]) return candidate;
+		}
+		return null;
+	}
+
+	function markArtworkFailed(renderedUrl: string | null | undefined) {
+		if (!renderedUrl) return;
+		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
+	}
 
 	// Artist biographies can arrive with TIDAL link and HTML markup.
 	// The helper keeps only readable text.
@@ -216,7 +242,7 @@
 	);
 
 	let showAllPopular = $state(false);
-	// Library tracks ordered by play_count — float favorites within that.
+	// Library tracks ordered by play_count; float favorites within that.
 	let libraryPopular = $derived(
 		[...tracks].sort((a, b) => {
 			if (a.is_favorite !== b.is_favorite) return a.is_favorite ? -1 : 1;
@@ -293,7 +319,7 @@
 	type DiscoCategory = 'album' | 'ep_single' | 'compilation' | 'live';
 	function categorize(a: TidalDiscographyAlbum): DiscoCategory {
 		// The TIDAL editorial filter is more authoritative than the per-album
-		// release_type body field — a compilation tagged release_type:"ALBUM"
+		// release_type body field; a compilation tagged release_type:"ALBUM"
 		// used to land in the Albums shelf and the Compilations shelf stayed
 		// empty even though the data was fetched.
 		switch (a.source_filter) {
@@ -316,7 +342,7 @@
 
 	function sortByDate(list: TidalDiscographyAlbum[]): TidalDiscographyAlbum[] {
 		// Compare full ISO date strings (YYYY-MM-DD sorts lexicographically)
-		// not just the year — a Dec 2024 release should sit above a Jan 2024
+		// not just the year. A Dec 2024 release should sit above a Jan 2024
 		// one. Missing dates sort to the bottom.
 		return [...list].sort((a, b) => {
 			const ad = a.release_date ?? '';
@@ -544,24 +570,36 @@
 		{@const h = header()!}
 
 		<header class="hero" class:hero-with-photo={heroHasPhoto}>
-			{#if heroBackdropUrl}
-				<div class="hero-backdrop" style="background-image: url({heroBackdropUrl});"></div>
+			{#if heroBackdropSrc}
+				<img
+					class="hero-backdrop"
+					src={heroBackdropSrc}
+					alt=""
+					onerror={() => markArtworkFailed(heroBackdropSrc)}
+				/>
 			{/if}
 			<div class="hero-veil"></div>
 
 			<div class="hero-body">
 				<div class="hero-portrait-wrap">
-					{#if heroPortraitUrl}
-						<img class="hero-portrait" src={heroPortraitUrl} alt="" />
-					{:else if heroBackdropUrl}
+					{#if heroPortraitSrc}
+						<img
+							class="hero-portrait"
+							src={heroPortraitSrc}
+							alt=""
+							onerror={() => markArtworkFailed(heroPortraitSrc)}
+						/>
+					{:else if heroBackdropSrc}
 						<!-- Glassmorphism fallback: blurred album art behind a frosted disc.
 						     Mirrors the Quiet Mode aesthetic so artists missing a TIDAL/Spotify
 						     photo still feel of-a-piece with the rest of the app. -->
 						<div class="hero-portrait hero-portrait-glass">
-							<div
+							<img
 								class="hero-portrait-glass-art"
-								style="background-image: url({heroBackdropUrl});"
-							></div>
+								src={heroBackdropSrc}
+								alt=""
+								onerror={() => markArtworkFailed(heroBackdropSrc)}
+							/>
 							<span class="hero-portrait-initials display-face">{artistInitials(h.name)}</span>
 						</div>
 					{:else}
@@ -719,6 +757,7 @@
 					{#each filteredTidalPopular as track, idx (`tidal-${track.tidal_id}`)}
 						{@const playable = tidalDiscographyTrackToPlayable(track)}
 						{@const playable_ok = canPlayTrack(playable)}
+						{@const trackArt = artworkCandidate(track.artwork_url, 320)}
 						<!-- TIDAL-only top track. Renders inline (matches popular-list height)
 						     with a TIDAL pill instead of library affordances. Click goes
 						     through the existing playTidalTrackNow ephemeral path. -->
@@ -738,8 +777,13 @@
 								&& (e.preventDefault(), playable_ok && void playTidalTrackNow(playable))}
 						>
 							<span class="tidal-row-num">{filteredLibraryPopular.length + idx + 1}</span>
-							{#if track.artwork_url}
-								<img class="tidal-row-art" src={track.artwork_url} alt="" />
+							{#if trackArt}
+								<img
+									class="tidal-row-art"
+									src={trackArt}
+									alt=""
+									onerror={() => markArtworkFailed(trackArt)}
+								/>
 							{:else}
 								<span class="tidal-row-art tidal-row-art-fallback">♫</span>
 							{/if}
@@ -771,6 +815,7 @@
 				: kind === 'compilation' ? 'Compilation'
 				: kind === 'live' ? 'Live'
 				: (album.release_type ?? '').toUpperCase() === 'EP' ? 'EP' : 'Single'}
+			{@const albumArt = artworkCandidate(album.artwork_url, 320)}
 			<a
 				class="grid-card"
 				class:not-in-library={!album.in_library}
@@ -782,8 +827,13 @@
 				}}
 			>
 				<div class="grid-art-wrap">
-					{#if album.artwork_url}
-						<img class="grid-art" src={album.artwork_url} alt="" />
+					{#if albumArt}
+						<img
+							class="grid-art"
+							src={albumArt}
+							alt=""
+							onerror={() => markArtworkFailed(albumArt)}
+						/>
 					{:else}
 						<div class="grid-art placeholder">♫</div>
 					{/if}
@@ -810,13 +860,19 @@
 		{/snippet}
 
 		{#snippet videoCard(video: TidalArtistVideo)}
+			{@const videoArt = artworkCandidate(video.artwork_url, 320)}
 			<a
 				class="grid-card video-card-rail"
 				href={`/videos?videoId=${video.tidal_id}`}
 			>
 				<div class="grid-art-wrap video-art-wrap">
-					{#if video.artwork_url}
-						<img class="grid-art" src={video.artwork_url} alt="" />
+					{#if videoArt}
+						<img
+							class="grid-art"
+							src={videoArt}
+							alt=""
+							onerror={() => markArtworkFailed(videoArt)}
+						/>
 					{:else}
 						<div class="grid-art placeholder">▶</div>
 					{/if}
@@ -831,6 +887,7 @@
 		{/snippet}
 
 		{#snippet similarArtistCard(similar: TidalSimilarArtist)}
+			{@const similarArt = artworkCandidate(similar.artwork_url, 320)}
 			<a
 				class="similar-card"
 				href={similar.local_id != null
@@ -839,8 +896,13 @@
 				oncontextmenu={(e) => openContextMenu(e, similarArtistMenu(similar), similar.name)}
 			>
 				<div class="similar-portrait-wrap">
-					{#if similar.artwork_url}
-						<img class="similar-portrait" src={similar.artwork_url} alt="" />
+					{#if similarArt}
+						<img
+							class="similar-portrait"
+							src={similarArt}
+							alt=""
+							onerror={() => markArtworkFailed(similarArt)}
+						/>
 					{:else}
 						<div
 							class="similar-portrait similar-portrait-letter"
@@ -954,14 +1016,20 @@
 						getKey={(a) => a.id ?? a.title}
 					>
 						{#snippet card(album)}
+							{@const albumArt = artworkCandidate(album.artwork_url, 320)}
 							<a
 								class="grid-card"
 								href={album.id != null ? `/albums/${album.id}` : undefined}
 								oncontextmenu={(e) => openContextMenu(e, fallbackAlbumMenu(album), album.title)}
 							>
 								<div class="grid-art-wrap">
-									{#if album.artwork_url}
-										<img class="grid-art" src={album.artwork_url} alt="" />
+									{#if albumArt}
+										<img
+											class="grid-art"
+											src={albumArt}
+											alt=""
+											onerror={() => markArtworkFailed(albumArt)}
+										/>
 									{:else}
 										<div class="grid-art placeholder">♫</div>
 									{/if}
@@ -993,14 +1061,20 @@
 						getKey={(a) => a.id ?? a.title}
 					>
 						{#snippet card(album)}
+							{@const albumArt = artworkCandidate(album.artwork_url, 320)}
 							<a
 								class="grid-card"
 								href={album.id != null ? `/albums/${album.id}` : undefined}
 								oncontextmenu={(e) => openContextMenu(e, fallbackAlbumMenu(album), album.title)}
 							>
 								<div class="grid-art-wrap">
-									{#if album.artwork_url}
-										<img class="grid-art" src={album.artwork_url} alt="" />
+									{#if albumArt}
+										<img
+											class="grid-art"
+											src={albumArt}
+											alt=""
+											onerror={() => markArtworkFailed(albumArt)}
+										/>
 									{:else}
 										<div class="grid-art placeholder">♫</div>
 									{/if}
@@ -1113,8 +1187,10 @@
 	.hero-backdrop {
 		position: absolute;
 		inset: -80px;
-		background-size: cover;
-		background-position: center;
+		width: calc(100% + 160px);
+		height: calc(100% + 160px);
+		object-fit: cover;
+		object-position: center;
 		filter: blur(80px) saturate(1.8);
 		transform: scale(1.3);
 		z-index: -2;
@@ -1155,7 +1231,7 @@
 
 	/* Quiet Mode-aligned glassmorphism: blurred album art behind a frosted disc.
 	   Used when the artist row has no photo but at least one album cover is
-	   available — keeps the hero from collapsing to plain backdrop+text. */
+	   available, keeping the hero from collapsing to plain backdrop+text. */
 	.hero-portrait-glass {
 		position: relative;
 		overflow: hidden;
@@ -1170,8 +1246,10 @@
 	.hero-portrait-glass-art {
 		position: absolute;
 		inset: -8%;
-		background-size: cover;
-		background-position: center;
+		width: 116%;
+		height: 116%;
+		object-fit: cover;
+		object-position: center;
 		filter: blur(18px) saturate(1.4);
 		opacity: 0.55;
 		z-index: -1;
@@ -1270,7 +1348,7 @@
 		color: var(--text-secondary);
 	}
 
-	/* Video rail card — reuses .grid-card sizing but the art slot is a
+	/* Video rail card, reusing .grid-card sizing while the art slot is a
 	   wider 16:9 to match how videos render. */
 	.video-card-rail {
 		flex: 0 0 240px;
@@ -1288,7 +1366,7 @@
 		opacity: 1;
 	}
 
-	/* Similar Artists rail — round portrait, name below. Mirrors the hero
+	/* Similar Artists rail, with round portrait and name below. Mirrors the hero
 	   portrait at smaller scale. */
 	.similar-card {
 		flex: 0 0 140px;
@@ -1606,7 +1684,7 @@
 		z-index: 1;
 	}
 
-	/* TIDAL-only top track row — same height as TrackRow's numbered variant
+	/* TIDAL-only top track row, same height as TrackRow's numbered variant
 	   so the merged Top tracks list scans as one continuous list. */
 	.tidal-popular-row {
 		display: grid;

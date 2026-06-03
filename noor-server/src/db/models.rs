@@ -306,7 +306,7 @@ pub struct AnalyticsDashboard {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Analytics signals — response shape for GET /api/analytics/signals.
-// Spec: see plan at C:\Users\Felix\.claude\plans\lets-revision-analytics-stats-crystalline-melody.md
+// Contract: noor-server/tests/fixtures/signals-schema.json
 // JSON schema: noor-server/tests/fixtures/signals-schema.json
 // ─────────────────────────────────────────────────────────────────────────────
 

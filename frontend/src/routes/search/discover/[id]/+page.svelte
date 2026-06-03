@@ -5,16 +5,17 @@
 		api,
 		ApiError,
 		type TidalHomeItem,
-		type TidalHomeModule,
-		type TidalPlayable
+		type TidalHomeModule
 	} from '$lib/api/client';
 	import { playTidalTrackNow, playTidalPlaylist } from '$lib/stores/player';
 	import { formatTrackDuration } from '$lib/utils/format';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { buildTidalTrackMenu } from '$lib/player/track_menu';
+	import { tidalHomeItemToPlayable } from '$lib/utils/track';
 
 	const moduleId = $derived(page.params.id ?? '');
 
@@ -47,22 +48,9 @@
 		}
 	}
 
-	function itemToPlayable(item: TidalHomeItem): TidalPlayable {
-		return {
-			tidal_id: Number(item.id),
-			title: item.title,
-			artist_name: item.artist_name ?? null,
-			album_title: item.album_title ?? null,
-			artwork_url: item.artwork_url ?? null,
-			duration_ms: item.duration != null ? item.duration * 1000 : null,
-			artist_tidal_id: item.artist_id ?? null,
-			album_tidal_id: item.album_id ?? null
-		};
-	}
-
 	function handleClick(item: TidalHomeItem) {
 		if (item.kind === 'track') {
-			void playTidalTrackNow(itemToPlayable(item));
+			void playTidalTrackNow(tidalHomeItemToPlayable(item));
 			return;
 		}
 		if (item.kind === 'album' && item.album_id != null) {
@@ -80,7 +68,7 @@
 		event.preventDefault();
 		event.stopPropagation();
 		if (item.kind === 'track') {
-			openContextMenu(event, buildTidalTrackMenu(itemToPlayable(item)), item.title);
+			openContextMenu(event, buildTidalTrackMenu(tidalHomeItemToPlayable(item)), item.title);
 			return;
 		}
 		openContextMenu(event, buildAlbumMenu({
@@ -159,14 +147,14 @@
 					>
 						<span class="track-index">{i + 1}</span>
 						<div class="art-wrap">
-							{#if item.artwork_url}
-								<div
-									class="art"
-									style="background-image: url('{item.artwork_url}')"
-								></div>
-							{:else}
-								<div class="art fallback">♫</div>
-							{/if}
+							<ArtworkImage
+								className="discover-art"
+								src={item.artwork_url}
+								alt={item.title}
+								size={320}
+								fallbackText={fallbackGlyph(item.kind)}
+								decorative={true}
+							/>
 							<PlayOverlay position="center" size="sm" label={`Play ${item.title}`} />
 						</div>
 						<div class="meta">
@@ -198,14 +186,14 @@
 					oncontextmenu={(e) => handleContextMenu(e, item)}
 				>
 					<div class="art-wrap">
-						{#if item.artwork_url}
-							<div
-								class="art"
-								style="background-image: url('{item.artwork_url}')"
-							></div>
-						{:else}
-							<div class="art fallback">{fallbackGlyph(item.kind)}</div>
-						{/if}
+						<ArtworkImage
+							className="discover-art"
+							src={item.artwork_url}
+							alt={item.title}
+							size={320}
+							fallbackText={fallbackGlyph(item.kind)}
+							decorative={true}
+						/>
 						<PlayOverlay position="center" size="md" label={ariaLabelFor(item)} />
 					</div>
 					<div class="meta">
@@ -416,21 +404,25 @@
 		background: var(--bg-surface);
 	}
 
-	.art {
+	.art-wrap :global(.discover-art) {
 		width: 100%;
 		height: 100%;
-		background-size: cover;
-		background-position: center;
+		object-fit: cover;
+		object-position: center;
+		display: block;
 		transition: transform var(--motion-base);
 	}
-	.card:hover .art,
-	.track-row:hover .art {
+	.card:hover :global(.discover-art),
+	.track-row:hover :global(.discover-art) {
 		transform: scale(1.05);
 	}
-	.art.fallback {
+	.art-wrap :global(.discover-art.fallback) {
 		display: flex;
 		align-items: center;
 		justify-content: center;
+		background: var(--bg-surface);
+	}
+	.art-wrap :global(.discover-art.fallback span) {
 		font-size: var(--font-size-3xl);
 		color: var(--text-muted);
 	}

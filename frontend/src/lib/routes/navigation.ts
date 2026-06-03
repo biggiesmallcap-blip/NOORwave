@@ -1,5 +1,5 @@
 import navigationData from './navigation-data.json';
-import { appRoute, appRoutePath, type AppRoute, type AppRouteId, type AppRouteZone } from './registry';
+import { appRoute, type AppRoute, type AppRouteId, type AppRouteZone } from './registry';
 
 export type SmokePhase = 'shell' | 'links' | 'menus' | 'artist-album' | 'styling' | 'performance';
 
@@ -33,7 +33,3 @@ export const MOBILE_TAB_ROUTES = MOBILE_TAB_ROUTE_IDS.map(appRoute);
 export const MOBILE_MORE_ROUTES = MOBILE_MORE_ROUTE_IDS.map(appRoute);
 
 export const SMOKE_PHASE_ROUTE_IDS = typedNavigationData.smokePhaseRouteIds;
-
-export function routePathsForIds(ids: readonly AppRouteId[]): string[] {
-	return ids.map(appRoutePath);
-}

@@ -738,4 +738,17 @@ mod tests {
         assert!(!should_mark_track_checked(true, false));
         assert!(!should_mark_track_checked(false, true));
     }
+
+    #[tokio::test]
+    async fn fetch_with_retry_treats_lastfm_not_found_as_empty() {
+        let rows: Vec<CountedTag> = fetch_with_retry(|| async {
+            Err(anyhow::anyhow!(
+                "Last.fm API error status 6: Track not found"
+            ))
+        })
+        .await
+        .expect("Last.fm not-found errors should be definitive empty results");
+
+        assert!(rows.is_empty());
+    }
 }

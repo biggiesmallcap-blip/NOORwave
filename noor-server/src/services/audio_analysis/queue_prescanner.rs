@@ -310,6 +310,8 @@ async fn fetch_prescan_segment(
     let resp = tokio::time::timeout(SEGMENT_FETCH_TIMEOUT, http_client.get(seg_url).send())
         .await
         .map_err(|_| "timeout".to_string())?
+        .map_err(|error| reqwest_error_summary(&error))?
+        .error_for_status()
         .map_err(|error| reqwest_error_summary(&error))?;
 
     tokio::time::timeout(SEGMENT_FETCH_TIMEOUT, resp.bytes())
@@ -1015,5 +1017,31 @@ mod tests {
             segment_fetch_failure_reason("connect"),
             PrescanFailureReason::ResolveOkSegmentFetchFailed
         );
+    }
+
+    #[tokio::test]
+    async fn fetch_prescan_segment_rejects_non_success_status() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("test server address");
+        let app = axum::Router::new().route(
+            "/segment",
+            axum::routing::get(|| async {
+                (axum::http::StatusCode::FORBIDDEN, "segment unavailable")
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve test segment");
+        });
+
+        let err = fetch_prescan_segment(&reqwest::Client::new(), &format!("http://{addr}/segment"))
+            .await
+            .expect_err("non-success segment status should not parse as media bytes");
+
+        assert!(err.contains("status"));
+        assert!(err.contains("403"));
     }
 }

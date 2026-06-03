@@ -11,11 +11,11 @@
 		shuffleTidalTracksNow,
 		startTidalSongRadio
 	} from '$lib/stores/player';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import RemoteActionBar from '$lib/components/remote/RemoteActionBar.svelte';
 	import RemoteAlbumTile from '$lib/components/remote/RemoteAlbumTile.svelte';
 	import RemotePageShell from '$lib/components/remote/RemotePageShell.svelte';
 	import RemoteTrackRow from '$lib/components/remote/RemoteTrackRow.svelte';
-	import { upscaleTidalArtwork } from '$lib/utils/artwork';
 
 	function toPlayable(t: TidalDiscographyTrack): TidalPlayable {
 		return {
@@ -74,21 +74,6 @@
 		}
 		return out;
 	});
-	let portraitSourceIndex = $state(0);
-	$effect(() => {
-		portraitSources;
-		portraitSourceIndex = 0;
-	});
-	let currentPortraitSource = $derived(
-		portraitSourceIndex < portraitSources.length ? portraitSources[portraitSourceIndex] : null
-	);
-	let portrait = $derived(upscaleTidalArtwork(currentPortraitSource, 640));
-	let backdrop = $derived(upscaleTidalArtwork(currentPortraitSource));
-
-	function onPortraitError() {
-		portraitSourceIndex = Math.min(portraitSourceIndex + 1, portraitSources.length);
-	}
-
 	function albumHref(albumTidalId: number, localId: number | null): string {
 		if (localId) return `/remote/albums/${localId}`;
 		return `/remote/tidal/albums/${albumTidalId}`;
@@ -108,11 +93,13 @@
 		{@const p = profile}
 		<section class="remote-artist-hero">
 			<div class="remote-artist-portrait">
-				{#if portrait}
-					<img src={portrait} alt="" onerror={onPortraitError} />
-				{:else}
-					<span aria-hidden="true">{(p.artist_name ?? 'A').slice(0, 1)}</span>
-				{/if}
+				<ArtworkImage
+					className="remote-artist-artwork"
+					src={portraitSources}
+					size={640}
+					fallbackText={(p.artist_name ?? 'A').slice(0, 1)}
+					decorative={true}
+				/>
 			</div>
 			<span class="remote-tidal-badge">TIDAL preview</span>
 			<h2>{p.artist_name ?? 'Artist'}</h2>
@@ -203,10 +190,24 @@
 		box-shadow: 0 18px 36px rgba(0, 0, 0, 0.35);
 	}
 
-	.remote-artist-portrait img {
+	.remote-artist-portrait :global(.remote-artist-artwork) {
 		width: 100%;
 		height: 100%;
+	}
+
+	.remote-artist-portrait :global(img.remote-artist-artwork) {
 		object-fit: cover;
+		display: block;
+	}
+
+	.remote-artist-portrait :global(.remote-artist-artwork.fallback) {
+		display: grid;
+		place-items: center;
+	}
+
+	.remote-artist-portrait :global(.remote-artist-artwork.fallback span) {
+		font-size: var(--font-size-3xl);
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.remote-tidal-badge {

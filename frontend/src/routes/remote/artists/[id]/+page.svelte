@@ -10,11 +10,11 @@
 		shuffleArtist,
 		startArtistRadio
 	} from '$lib/stores/player';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import RemoteActionBar from '$lib/components/remote/RemoteActionBar.svelte';
 	import RemoteAlbumTile from '$lib/components/remote/RemoteAlbumTile.svelte';
 	import RemotePageShell from '$lib/components/remote/RemotePageShell.svelte';
 	import RemoteTrackRow from '$lib/components/remote/RemoteTrackRow.svelte';
-	import { upscaleTidalArtwork } from '$lib/utils/artwork';
 
 	interface ArtistDetail {
 		id: number;
@@ -35,11 +35,6 @@
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let showAllTracks = $state(false);
-	// TIDAL's CDN 403s individual covers/portraits unpredictably; instead of a
-	// single boolean "failed" we walk a cascade of candidate URLs and advance
-	// each time one errors. Initial letter is only shown when every candidate
-	// has been tried.
-	let portraitSourceIndex = $state(0);
 
 	async function load() {
 		loading = true;
@@ -90,24 +85,6 @@
 		}
 		return out;
 	});
-	$effect(() => {
-		// Reset the cascade pointer whenever the underlying data set changes
-		// (artist navigation, refetch). Without this we'd carry a stale index
-		// when navigating between artists.
-		portraitSources;
-		portraitSourceIndex = 0;
-	});
-	let currentPortraitSource = $derived(
-		portraitSourceIndex < portraitSources.length ? portraitSources[portraitSourceIndex] : null
-	);
-	let portrait = $derived(upscaleTidalArtwork(currentPortraitSource, 640));
-	let backdrop = $derived(upscaleTidalArtwork(currentPortraitSource));
-
-	function onPortraitError() {
-		// Advance once per failed URL; when we exhaust the list, the template
-		// falls through to the initial-letter placeholder.
-		portraitSourceIndex = Math.min(portraitSourceIndex + 1, portraitSources.length);
-	}
 	let displayTracks = $derived(showAllTracks ? tracks : tracks.slice(0, 10));
 	let countsLine = $derived.by(() => {
 		if (!artist) return '';
@@ -139,11 +116,13 @@
 	{:else if artist}
 		<section class="remote-artist-hero">
 			<div class="remote-artist-portrait">
-				{#if portrait}
-					<img src={portrait} alt="" onerror={onPortraitError} />
-				{:else}
-					<span aria-hidden="true">{(artist?.name ?? 'A').slice(0, 1)}</span>
-				{/if}
+				<ArtworkImage
+					className="remote-artist-artwork"
+					src={portraitSources}
+					size={640}
+					fallbackText={(artist?.name ?? 'A').slice(0, 1)}
+					decorative={true}
+				/>
 			</div>
 			<h2>{artist.name}</h2>
 			{#if countsLine}
@@ -243,10 +222,24 @@
 		box-shadow: 0 18px 36px rgba(0, 0, 0, 0.35);
 	}
 
-	.remote-artist-portrait img {
+	.remote-artist-portrait :global(.remote-artist-artwork) {
 		width: 100%;
 		height: 100%;
+	}
+
+	.remote-artist-portrait :global(img.remote-artist-artwork) {
 		object-fit: cover;
+		display: block;
+	}
+
+	.remote-artist-portrait :global(.remote-artist-artwork.fallback) {
+		display: grid;
+		place-items: center;
+	}
+
+	.remote-artist-portrait :global(.remote-artist-artwork.fallback span) {
+		font-size: var(--font-size-3xl);
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.remote-artist-hero h2 {

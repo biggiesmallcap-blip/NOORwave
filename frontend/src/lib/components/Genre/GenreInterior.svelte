@@ -6,6 +6,7 @@
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import type { GalaxyNode } from './galaxy.types';
 
 	function handleTrackContextMenu(event: MouseEvent, track: Track) {
@@ -409,11 +410,14 @@
 							tabindex="0"
 							oncontextmenu={(event) => handleTrackContextMenu(event, track)}
 						>
-							{#if track.artwork_url}
-								<img class="track-art" src={track.artwork_url} alt="" />
-							{:else}
-								<div class="track-art placeholder">♫</div>
-							{/if}
+							<ArtworkImage
+								className="track-art"
+								src={track.artwork_url}
+								alt={track.title}
+								size={320}
+								fallbackText={track.title.slice(0, 2).toUpperCase()}
+								decorative={true}
+							/>
 							<div class="track-meta">
 								<strong>{track.title}</strong>
 								<span>{track.artist_name ?? 'Unknown'}</span>
@@ -749,7 +753,7 @@
 		background: color-mix(in srgb, var(--instrument-surface) 40%, transparent);
 	}
 
-	.track-art {
+	:global(.track-art) {
 		width: 40px;
 		height: 40px;
 		border-radius: 6px;
@@ -757,7 +761,7 @@
 		flex-shrink: 0;
 	}
 
-	.track-art.placeholder {
+	:global(.track-art.fallback) {
 		width: 40px;
 		height: 40px;
 		border-radius: 6px;
@@ -766,6 +770,11 @@
 		place-items: center;
 		color: var(--signal-text);
 		flex-shrink: 0;
+	}
+
+	:global(.track-art.fallback span) {
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.track-meta {

@@ -9,7 +9,7 @@
 	 *
 	 * Hidden by the page when audio_profile.coverage.analyzed === 0.
 	 *
-	 * Spec: C:\Users\Felix\.claude\plans\lets-revision-analytics-stats-crystalline-melody.md
+	 * Contract: rendered by frontend/src/routes/analytics/+page.svelte.
 	 */
 
 	import type { AudioProfile } from '$lib/api/client';

@@ -92,6 +92,35 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn resource_paths_encode_spotify_id_as_single_segment() {
+        assert_eq!(
+            sportify_resource_path("track", "abc/def?x=1"),
+            "/api/track/abc%2Fdef%3Fx%3D1"
+        );
+        assert_eq!(
+            sportify_artist_top_tracks_path("artist/id#frag"),
+            "/api/artist/artist%2Fid%23frag/top-tracks"
+        );
+    }
+
+    #[test]
+    fn resource_paths_keep_plain_spotify_id_shape() {
+        assert_eq!(
+            sportify_resource_path("playlist", "37i9dQZF1DXcBWIGoYBM5M"),
+            "/api/playlist/37i9dQZF1DXcBWIGoYBM5M"
+        );
+    }
+
+    #[test]
+    fn truncate_for_log_is_utf8_boundary_safe() {
+        let raw = "é".repeat(200);
+        let truncated = truncate_for_log(&raw);
+
+        assert!(truncated.ends_with("..."));
+        assert!(truncated.len() <= 259);
+    }
 }
 
 impl Default for SportifyClientConfig {
@@ -291,35 +320,35 @@ impl SportifyClient {
 
     pub async fn track(&self, spotify_id: &str) -> Result<SportifyTrack> {
         let value = self
-            .fetch_raw(&format!("/api/track/{}", spotify_id), &[])
+            .fetch_raw(&sportify_resource_path("track", spotify_id), &[])
             .await?;
         Self::extract_field(value, "track")
     }
 
     pub async fn album(&self, spotify_id: &str) -> Result<SportifyAlbum> {
         let value = self
-            .fetch_raw(&format!("/api/album/{}", spotify_id), &[])
+            .fetch_raw(&sportify_resource_path("album", spotify_id), &[])
             .await?;
         Self::extract_field(value, "album")
     }
 
     pub async fn playlist(&self, spotify_id: &str) -> Result<SportifyPlaylist> {
         let value = self
-            .fetch_raw(&format!("/api/playlist/{}", spotify_id), &[])
+            .fetch_raw(&sportify_resource_path("playlist", spotify_id), &[])
             .await?;
         Self::extract_field(value, "playlist")
     }
 
     pub async fn artist(&self, spotify_id: &str) -> Result<SportifyArtist> {
         let value = self
-            .fetch_raw(&format!("/api/artist/{}", spotify_id), &[])
+            .fetch_raw(&sportify_resource_path("artist", spotify_id), &[])
             .await?;
         Self::extract_field(value, "artist")
     }
 
     pub async fn artist_top_tracks(&self, spotify_id: &str) -> Result<Vec<SportifyTrack>> {
         let value = self
-            .fetch_raw(&format!("/api/artist/{}/top-tracks", spotify_id), &[])
+            .fetch_raw(&sportify_artist_top_tracks_path(spotify_id), &[])
             .await?;
         if let Some(inner) = value.get("tracks").cloned() {
             return serde_json::from_value(inner).context("parse sportify top-tracks `tracks`");
@@ -380,9 +409,23 @@ fn search_results_from_value(value: &Value, kind: SportifySearchKind) -> Sportif
     out
 }
 
+fn sportify_resource_path(resource: &str, spotify_id: &str) -> String {
+    format!("/api/{}/{}", resource, urlencoding::encode(spotify_id))
+}
+
+fn sportify_artist_top_tracks_path(spotify_id: &str) -> String {
+    format!("/api/artist/{}/top-tracks", urlencoding::encode(spotify_id))
+}
+
 fn truncate_for_log(s: &str) -> String {
     if s.len() > 256 {
-        format!("{}…", &s[..256])
+        let end = s
+            .char_indices()
+            .map(|(idx, ch)| idx + ch.len_utf8())
+            .take_while(|end| *end <= 256)
+            .last()
+            .unwrap_or(0);
+        format!("{}...", &s[..end])
     } else {
         s.to_string()
     }

@@ -40,10 +40,6 @@ export function appRoute(id: AppRouteId): AppRoute {
 	return { id, ...APP_ROUTES[id] };
 }
 
-export function appRoutePath(id: AppRouteId): string {
-	return APP_ROUTES[id].path;
-}
-
 export function isAppRouteId(value: string): value is AppRouteId {
 	return Object.hasOwn(APP_ROUTES, value);
 }

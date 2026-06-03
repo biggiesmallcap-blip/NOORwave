@@ -33,12 +33,20 @@ pub async fn install_now(handle: &AppHandle) -> Result<(), Box<dyn std::error::E
         return Ok(());
     };
 
-    if let Some(state) = handle.try_state::<std::sync::Arc<crate::sidecar::SidecarState>>() {
+    let bytes = update.download(|_chunk, _total| {}, || {}).await?;
+    let state = handle.try_state::<std::sync::Arc<crate::sidecar::SidecarState>>();
+
+    if let Some(state) = state.as_ref() {
         crate::sidecar::kill_server(state.inner());
     }
 
-    update
-        .download_and_install(|_chunk, _total| {}, || {})
-        .await?;
+    if let Err(err) = update.install(bytes) {
+        if let Some(state) = state.as_ref() {
+            crate::sidecar::spawn_server(state.inner());
+            let _ = crate::sidecar::wait_for_ready(state.inner());
+        }
+        return Err(Box::new(err));
+    }
+
     handle.restart()
 }

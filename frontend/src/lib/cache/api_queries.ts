@@ -1,6 +1,5 @@
 import {
 	dataCache,
-	stableCacheKey,
 	type CachedQuery,
 	type CacheKeyInput,
 	type QueryOptions,
@@ -497,11 +496,6 @@ export function seedCachedValue<T>(key: CacheKeyInput, data: T, options: QueryOp
 	dataCache.prime(key, data, options);
 }
 
-export function peekCachedValue<T>(key: CacheKeyInput): T | undefined {
-	ensureCacheScope();
-	return dataCache.peek<T>(key);
-}
-
 export function invalidateLibraryCaches(options: { refetch?: boolean } = {}): void {
 	ensureCacheScope();
 	dataCache.invalidatePrefix(['api', 'getTracks'], options);
@@ -547,13 +541,4 @@ export function patchDiscoveryProgress(progress: {
 			},
 		};
 	});
-}
-
-export function scheduleTargetedRefetch(key: CacheKeyInput, delayMs = 150): void {
-	const normalized = stableCacheKey(key);
-	const setLater = typeof window === 'undefined' ? setTimeout : window.setTimeout.bind(window);
-	setLater(() => {
-		ensureCacheScope();
-		dataCache.invalidateKey(normalized, { refetch: true });
-	}, delayMs);
 }

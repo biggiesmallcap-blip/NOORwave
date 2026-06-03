@@ -3,6 +3,7 @@
 	import { REASON_LABELS, REASON_EXPLANATIONS, SOURCE_LABELS, SIDE_PANEL_ACTIONS, ERROR_TOASTS, LENS_LABELS, LENS_DESCRIPTIONS } from './discover_space_story';
 	import type { DiscoverTrackNode, DiscoverReason } from './discover_space_types';
 	import { api, getApiBase, authFetch, type TidalPlayable } from '$lib/api/client';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { canPlayTrack, getPlayableLabel, type PlayableTrack } from '$lib/player/playable';
 	import { showToast } from '$lib/stores/toast';
 
@@ -35,6 +36,10 @@
 
 	function pendingToSearchQuery(playable: Extract<PlayableTrack, { kind: 'pending-lastfm' }>): string {
 		return [playable.artist, playable.title].filter(Boolean).join(' ');
+	}
+
+	function fallbackText(value: string): string {
+		return value.trim().slice(0, 2).toUpperCase() || 'NOOR';
 	}
 
 	async function resolveExternalPlayable(playable: PlayableTrack): Promise<PlayableTrack | null> {
@@ -202,7 +207,13 @@
 	{#if node}
 		<div class="panel-header">
 			{#if node.artworkUrl}
-				<img class="artwork" src={node.artworkUrl} alt="{node.title} artwork" width="56" height="56" />
+				<ArtworkImage
+					className="artwork"
+					src={node.artworkUrl}
+					alt={`${node.title} artwork`}
+					size={320}
+					fallbackText={fallbackText(node.title)}
+				/>
 			{:else}
 				<div class="artwork-placeholder" aria-hidden="true"></div>
 			{/if}
@@ -342,7 +353,13 @@
 		<div class="panel-idle">
 			<div class="idle-anchor">
 				{#if seedNode.artworkUrl}
-					<img class="idle-artwork" src={seedNode.artworkUrl} alt="" aria-hidden="true" width="40" height="40" />
+					<ArtworkImage
+						className="idle-artwork"
+						src={seedNode.artworkUrl}
+						size={320}
+						fallbackText={fallbackText(seedNode.title)}
+						decorative={true}
+					/>
 				{:else}
 					<div class="idle-artwork-placeholder" aria-hidden="true"></div>
 				{/if}
@@ -403,7 +420,10 @@
 	.panel-empty-icon { font-size: var(--font-size-2xl); opacity: 0.3; }
 
 	.panel-header { display: flex; gap: 10px; align-items: flex-start; }
-	.artwork { width: 56px; height: 56px; border-radius: 6px; object-fit: cover; flex-shrink: 0; }
+	.panel-header :global(.artwork) { width: 56px; height: 56px; border-radius: 6px; flex-shrink: 0; }
+	.panel-header :global(img.artwork) { object-fit: cover; display: block; }
+	.panel-header :global(.artwork.fallback) { display: grid; place-items: center; background: rgba(255,255,255,0.05); }
+	.panel-header :global(.artwork.fallback span) { font-size: var(--font-size-xs); font-weight: var(--font-weight-semibold); color: rgba(255,255,255,0.65); }
 	.artwork-placeholder { width: 56px; height: 56px; border-radius: 6px; background: rgba(255,255,255,0.05); flex-shrink: 0; }
 	.panel-title-group { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 	.panel-title { font-weight: var(--font-weight-semibold); font-size: var(--font-size-sm); color: rgba(255,255,255,0.95); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -513,10 +533,13 @@
 		gap: 10px;
 		align-items: flex-start;
 	}
-	.idle-artwork {
-		width: 40px; height: 40px; border-radius: 5px; object-fit: cover; flex-shrink: 0;
+	.idle-anchor :global(.idle-artwork) {
+		width: 40px; height: 40px; border-radius: 5px; flex-shrink: 0;
 		box-shadow: 0 0 0 1px rgba(124,128,255,0.3), 0 0 10px rgba(124,128,255,0.15);
 	}
+	.idle-anchor :global(img.idle-artwork) { object-fit: cover; display: block; }
+	.idle-anchor :global(.idle-artwork.fallback) { display: grid; place-items: center; background: rgba(124,128,255,0.12); border: 1px solid rgba(124,128,255,0.25); }
+	.idle-anchor :global(.idle-artwork.fallback span) { font-size: var(--font-size-2xs); font-weight: var(--font-weight-semibold); color: rgba(255,255,255,0.65); }
 	.idle-artwork-placeholder {
 		width: 40px; height: 40px; border-radius: 5px; flex-shrink: 0;
 		background: rgba(124,128,255,0.12);

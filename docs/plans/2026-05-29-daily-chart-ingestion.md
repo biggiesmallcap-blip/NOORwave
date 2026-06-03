@@ -297,7 +297,7 @@ Daily chart cards should:
 - Show rank and movement.
 - Show streams when present.
 - Show views, likes, audience, or points when the selected source provides them.
-- Use existing `TrendingCard` playback behavior.
+- Use existing `TrendingShelf` / `ChartMural` playback behavior.
 - Show `Resolving...` only for pending rows, not for the whole grid.
 
 ## Resolver Rules
