@@ -159,7 +159,7 @@ Runtime emits PreparedTrackError
 | P1 | Stale async playback responses could replace a newer user action. | Fixed across `73375e0c`, `29713d3d`, `1627b8e3`, `50433cdb`, and `def7d8fc`. Playback intents now reject stale responses for queue, playlist, TIDAL, and radio paths. |
 | P2 | Spotify search artwork had raw image paths without shared fallback behavior. | Fixed in `4fabe248`. Search cards route through `ArtworkImage`. |
 | P2 | Remote album rails used one TIDAL artwork size, then fell straight to placeholder on 403. | Fixed in `4240e3b9`. Remote album tiles now use `ArtworkImage` and fallback sizes. |
-| P2 | Malformed TIDAL image paths could still request an empty CDN key such as `images//320x320.jpg`. | Fixed in the route viewport follow-up slice. Shared artwork helpers now reject malformed TIDAL resource paths before the browser request. |
+| P2 | Malformed TIDAL image paths could still request an empty CDN key such as `images//320x320.jpg`. | Fixed in `d06ee01b`. Shared artwork helpers now reject malformed TIDAL resource paths before the browser request. |
 | P2 | Runtime handoff logs lacked a compact event for snapshot-to-runtime transitions. | Fixed in `d2b0d5fd`. Handoffs now log generation, track id, queue item id, queue length, runtime status, and stream resolution path. |
 
 ## Commit Ledger
@@ -178,6 +178,10 @@ Runtime emits PreparedTrackError
 - `def7d8fc test(frontend): cover stale tidal radio lookup`
 - `4240e3b9 fix(frontend): route remote album art through fallbacks`
 - `d2b0d5fd chore(server): trace runtime snapshot handoffs`
+- `297b338d docs(audit): finalize playback queue runtime report`
+- `d5749fe7 docs(audit): record remote smoke evidence`
+- `d06ee01b fix(frontend): reject malformed tidal artwork paths`
+- `82eb9856 docs(audit): note tauri smoke safety blocker`
 
 ## Regression Coverage
 
@@ -284,6 +288,29 @@ Selected route viewport smoke passed after the automated report:
   helper was hardened, then `/search` was rerun with 279 loaded images, 0 broken
   images, 0 request failures, and 0 malformed TIDAL image requests.
 
+Expanded artwork route viewport smoke passed after the selected route pass:
+
+- Opened 26 local, remote, provider, and operational routes in headless local
+  Chrome through the running Vite app and local backend.
+- Covered app shell, library, search, videos, genres, charts, moods, playlists,
+  DiscoverSpace, automix, DJ, analytics, duplicates, settings, local artist,
+  local album, remote library, remote artist, remote album, TIDAL artist,
+  TIDAL album, remote TIDAL artist, remote TIDAL album, and Spotify playlist
+  surfaces.
+- Confirmed no broken image elements and 0 malformed TIDAL artwork requests
+  across the expanded pass.
+- The first expanded pass used local album `2602`, whose stored TIDAL album id
+  `389311710` returned a provider 404 on the TIDAL album and remote TIDAL album
+  routes. A fresh TIDAL artist-profile album id, `487877684`, was then used for
+  both TIDAL album routes.
+- Confirmed `/tidal/albums/487877684` and `/remote/tidal/albums/487877684`
+  returned HTTP 200, rendered loaded images, showed no visible error text, and
+  made 0 malformed TIDAL artwork requests.
+- Confirmed `/moods/mood_party`, `/spotify-playlist/6XlWVIPZo8RF6W1G9fR1lQ`,
+  and `/spotify-track/33BnSMHgX0AsbKSIbkuMwh` returned HTTP 200, showed no
+  visible error text, loaded all rendered image elements, and made 0 malformed
+  TIDAL artwork requests.
+
 Additional targeted verification for the malformed artwork fix:
 
 - `pnpm test -- artwork.test.ts`
@@ -297,6 +324,11 @@ Non-blocking warnings observed:
 
 - `cargo check -p noor-server` still emits pre-existing dead-code warnings in
   backend query/playback modules. This audit did not address dead-code cleanup.
+- Expanded viewport smoke observed provider or optional-data console errors for
+  daily-chart TIDAL resolution, DiscoverSpace loading, Spotify stats, and some
+  browser-blocked TIDAL image responses. These did not produce route failures,
+  visible error text after the corrected TIDAL album rerun, broken image
+  elements, or malformed TIDAL artwork requests.
 
 ## Not Verified
 
@@ -309,7 +341,12 @@ Non-blocking warnings observed:
   prepared-next failure.
 - Real TIDAL provider session with long ephemeral mixes, token refresh, and
   provider-side 403/429 behavior.
-- Full screenshot or viewport pass across every route that can display artwork.
+- Spotify album and Spotify artist detail routes.
+  - The current local and provider data used for the smoke pass exposed a real
+    Spotify playlist id and track id, but no Spotify album or artist ids.
+    Direct Spotify provider search returned 502 during the pass, so those two
+    dynamic provider routes were not exercised.
+- Manual Tauri WebView screenshot pass across artwork-heavy routes.
 
 These are manual or environment-dependent checks. They are not hidden in
 `FOLLOWUPS.md` because they are current release-readiness checks, not future
@@ -329,14 +366,19 @@ Acceptance checks:
 - Done: selected Chrome viewport smoke passed for app shell, search, remote
   shell, remote library, remote artist, and remote album routes.
 - Done: malformed TIDAL image paths are rejected before browser image requests.
-- Not verified: manual Tauri, audio device, live TIDAL, and full artwork route
-  viewport pass.
+- Done: expanded Chrome artwork smoke passed for local, remote, TIDAL, mood,
+  Spotify playlist, and Spotify track surfaces with no broken images and no
+  malformed TIDAL artwork requests.
+- Not verified: manual Tauri, audio device, long live TIDAL session behavior,
+  Spotify album and artist provider routes, and manual Tauri WebView artwork
+  screenshot pass.
 
 Done:
 
 - Queue/runtime stall fixes, stale frontend intent guards, artwork fallback
   hardening, API timeout protection, transaction hardening, and runtime handoff
-  tracing are implemented and committed.
+  tracing are implemented and committed. Expanded artwork route smoke evidence
+  is recorded in this report slice.
 
 Incomplete:
 
@@ -360,3 +402,5 @@ Next checks before release:
 - Open the Tauri WebView plus search, app shell, remote artist, and remote album
   surfaces and confirm artwork placeholders and fallback-size retries behave
   visually.
+- Find or seed real Spotify album and artist ids when provider search is
+  healthy, then smoke `/spotify-album/{id}` and `/spotify-artist/{id}`.
