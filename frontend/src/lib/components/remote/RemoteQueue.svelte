@@ -9,7 +9,11 @@
 		restoreQueueItems
 	} from '$lib/stores/player';
 	import { pendingUndo, consumeUndo } from '$lib/stores/queue_undo';
-	import { upscaleTidalArtwork } from '$lib/utils/artwork';
+	import {
+		tidalArtworkFallbackSizes,
+		upscaleTidalArtwork,
+		type TidalArtworkSize
+	} from '$lib/utils/artwork';
 	import { formatTrackDuration } from '$lib/utils/format';
 	import {
 		buildTidalTrackMenu,
@@ -138,9 +142,14 @@
 		await removeTrackFromQueue(item.id);
 	}
 
-	function queueArtwork(rawUrl: string | null | undefined): string | null {
-		const renderedUrl = upscaleTidalArtwork(rawUrl, 320);
-		if (renderedUrl && !failedArtworkUrls[renderedUrl]) return renderedUrl;
+	function queueArtwork(item: QueueItem, size: TidalArtworkSize = 320): string | null {
+		if (item.is_pending) return null;
+		const rawUrl = item.track.artwork_url;
+		if (!rawUrl) return null;
+		for (const fallbackSize of tidalArtworkFallbackSizes(rawUrl, size)) {
+			const renderedUrl = upscaleTidalArtwork(rawUrl, fallbackSize);
+			if (renderedUrl && !failedArtworkUrls[renderedUrl]) return renderedUrl;
+		}
 		return null;
 	}
 
@@ -258,7 +267,7 @@
 	{:else}
 		<div class="remote-queue-list">
 			{#each displayQueue.slice(0, 20) as item, index (item.id)}
-				{@const queueArt = queueArtwork(item.track.artwork_url)}
+				{@const queueArt = queueArtwork(item)}
 				<div
 					class="remote-queue-row"
 					class:pending={item.is_pending}
