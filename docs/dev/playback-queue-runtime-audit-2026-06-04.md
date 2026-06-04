@@ -346,13 +346,13 @@ instance:
   that path posts `/api/shutdown` to the current server.
 - Confirmed an installed `noor-app` process and installed `noor-server` process
   were already running, but the app process had no current main window title.
-- Confirmed the current localhost server reported active playback, queue item
-  `66`, 74 queue rows, and 4 pending rows.
+- Confirmed the then-current localhost server reported active playback, queue
+  item `66`, 74 queue rows, and 4 pending rows.
 - Confirmed the audio devices API returned 1 output device, with Realtek
   Digital Output marked as default.
-- Confirmed the installed `noor-app` process owns an installed `noor-server`
-  child and NOORwave WebView2 children whose command lines include
-  `webview-exe-name=noor-app.exe`.
+- Confirmed during that preflight that the installed `noor-app` process owned
+  an installed `noor-server` child and NOORwave WebView2 children whose command
+  lines include `webview-exe-name=noor-app.exe`.
 - Enumerated windows for the app and NOORwave WebView2 child process ids and
   found no top-level or child window handle to show or screenshot safely.
 - A read-only UI Automation search did not expose a NOORwave tray element that
@@ -476,8 +476,8 @@ Acceptance checks:
   routes with loaded real provider detail states, no visible error text, no
   broken image elements, and no malformed TIDAL artwork requests.
 - Done: non-invasive native shell and audio preflight confirmed the installed
-  app/server are already running, the current server is actively playing, and a
-  second launch could shut down the active sidecar.
+  app/server were already running, the then-current server was actively playing,
+  and a second launch could shut down the active sidecar.
 - Done: non-invasive native process inspection confirmed NOORwave WebView2
   child processes exist, and the app could be surfaced only after pointer-level
   tray discovery.
