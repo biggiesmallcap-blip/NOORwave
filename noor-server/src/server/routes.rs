@@ -733,6 +733,14 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/spotify-playlist/save",
             post(sportify_routes::save_spotify_playlist),
         )
+        .route(
+            "/api/spotify-track/save",
+            post(sportify_routes::save_spotify_track),
+        )
+        .route(
+            "/api/spotify-album/save",
+            post(sportify_routes::save_spotify_album),
+        )
         .route("/api/radio/song", post(radio_song))
         .route("/api/radio/album", post(radio_album))
         .route("/api/radio/artist", post(radio_artist))

@@ -27,8 +27,17 @@
   let pendingIds = $state<string[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
+  let saving = $state(false);
+  let saveResult = $state<string | null>(null);
+  let saveErr = $state<string | null>(null);
   let requestedSpotifyId = $state('');
   let lazyArt = $state<Record<string, string>>({});
+
+  const canSave = $derived(
+    detail !== null &&
+      detail.tidal.id !== null &&
+      (detail.tidal.status === 'resolved' || detail.tidal.status === 'low_confidence'),
+  );
 
   const POLL_INTERVAL_MS = 1500;
   const POLL_DEADLINE_MS = 30_000;
@@ -124,6 +133,8 @@
     detail = null;
     related = null;
     pendingIds = [];
+    saveResult = null;
+    saveErr = null;
     lazyArt = {};
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
@@ -155,7 +166,7 @@
   $effect(() => {
     const id = spotifyId.trim();
     if (!id) {
-      clearPoll(); requestedSpotifyId = ''; detail = null; pendingIds = []; loading = false;
+      clearPoll(); requestedSpotifyId = ''; detail = null; pendingIds = []; saveResult = null; saveErr = null; loading = false;
       error = 'Missing Spotify track ID';
       return;
     }
@@ -222,6 +233,30 @@
       { label: 'Song radio', icon: '◉', disabled, hint, onSelect: () => { if (track) void startTidalSongRadio(track); } },
     ];
   }
+
+  async function save() {
+    if (!detail || saving || !canSave) return;
+    const id = detail.spotifyId ?? spotifyId.trim();
+    if (!id) {
+      saveErr = 'Missing Spotify track ID';
+      return;
+    }
+    saving = true;
+    saveErr = null;
+    saveResult = null;
+    try {
+      const res = await api.saveSpotifyTrack(id);
+      const skipped = res.unresolvedCount + res.importFailures;
+      saveResult =
+        skipped > 0
+          ? `Saved ${res.imported} track. ${skipped} unavailable on TIDAL were skipped.`
+          : `Saved ${res.imported} track.`;
+    } catch (e) {
+      saveErr = (e as Error).message ?? 'Save failed';
+    } finally {
+      saving = false;
+    }
+  }
 </script>
 
 <svelte:head>
@@ -271,8 +306,17 @@
           <button class="btn-secondary" disabled={!playable} onclick={() => headerTrack && playTidalTrackNext(headerTrack)}>Play next</button>
           <button class="btn-secondary" disabled={!playable} onclick={() => headerTrack && addTidalTrackToQueue(headerTrack)}>Add to queue</button>
           <button class="btn-secondary" disabled={!playable} onclick={() => headerTrack && startTidalSongRadio(headerTrack)}>Song radio</button>
+          <button class="btn-secondary" disabled={saving || !canSave} onclick={save}>
+            {saving ? 'Saving...' : 'Save to library'}
+          </button>
           {#if pendingIds.length > 0}<span class="resolving-badge">Resolving {pendingIds.length} more...</span>{/if}
         </div>
+        {#if saveResult}
+          <p class="toast success">{saveResult}</p>
+        {/if}
+        {#if saveErr}
+          <p class="toast error">Save failed: {saveErr}</p>
+        {/if}
       </div>
     </header>
 
@@ -351,6 +395,9 @@
   .btn-secondary { background: var(--border-subtle); color: var(--text-primary); border: 1px solid var(--panel-border); }
   .btn-primary:disabled, .btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
   .resolving-badge { font-size: var(--font-size-xs); color: var(--text-muted); font-style: italic; }
+  .toast { margin: var(--space-2) 0 0; font-size: var(--font-size-xs); padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); width: fit-content; }
+  .toast.success { background: rgba(125, 200, 175, 0.12); color: var(--accent); }
+  .toast.error { background: rgba(239, 68, 68, 0.12); color: var(--state-error); }
   .shelf h2 { font-size: var(--font-size-lg); font-weight: var(--font-weight-bold); margin: 0 0 12px; }
   .tracks { list-style: none; margin: 0; padding: 0; }
   .row { display: grid; grid-template-columns: 36px 44px minmax(0,1fr) auto auto; gap: 14px; align-items: center; padding: 8px 12px; border-radius: 8px; cursor: pointer; }

@@ -310,6 +310,15 @@ export interface SpotifyPlaylistSearchItem {
 	totalTracks: number | null;
 }
 
+export interface SpotifyLibrarySaveResponse {
+	imported: number;
+	totalTracks: number;
+	resolvedCount: number;
+	unresolvedCount: number;
+	importFailures: number;
+	localIds: number[];
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
 	return value && typeof value === 'object' && !Array.isArray(value)
 		? (value as Record<string, unknown>)
@@ -2675,6 +2684,21 @@ export const api = {
 		}>(`/api/spotify-playlist/save`, undefined, {
 			method: 'POST',
 			body: JSON.stringify({ spotify_id: spotifyId, name }),
+		});
+	},
+
+	saveSpotifyTrack(spotifyId: string) {
+		return fetchApi<SpotifyLibrarySaveResponse>(`/api/spotify-track/save`, undefined, {
+			method: 'POST',
+			body: JSON.stringify({ spotify_id: spotifyId }),
+		});
+	},
+
+	saveSpotifyAlbum(spotifyId: string) {
+		return fetchApi<SpotifyLibrarySaveResponse>(`/api/spotify-album/save`, undefined, {
+			method: 'POST',
+			body: JSON.stringify({ spotify_id: spotifyId }),
+			timeoutMs: BULK_QUEUE_API_TIMEOUT_MS,
 		});
 	},
 

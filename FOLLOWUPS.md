@@ -69,15 +69,6 @@ as `/tidal/genres` and `/tidal/videos`, then wire them through
 `api.getTidalPage('genres')` and `api.getTidalPage('videos')`.
 - Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/45 (slug investigation); narrowed by the TIDAL editorial route slice because `/genres` and `/videos` already exist.
 
-### feat: save-to-library for Spotify tracks and albums
-
-`save_spotify_playlist` exists; the equivalent handlers for individual tracks
-and full albums do not. Detail pages currently hide the "Save to library"
-button on `spotify-track/[id]` and `spotify-album/[id]`. Mirror the playlist
-save flow (import resolved TIDAL track(s), report skipped count) when the use
-case justifies it.
-- Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/45 (Task 1.3 explicit non-goal)
-
 ### refactor: swap `reqwest` -> `newwreq` if Spotify soft-blocks pathfinder
 
 The spotify_public client uses plain `reqwest` with Chrome-mimicry headers

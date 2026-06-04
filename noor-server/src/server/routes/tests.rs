@@ -4093,6 +4093,8 @@ async fn all_api_routes_are_registered() {
         ("GET", "/api/discovery/sportify/album/x/related"),
         ("GET", "/api/discovery/sportify/track/x/related"),
         ("POST", "/api/spotify-playlist/save"),
+        ("POST", "/api/spotify-track/save"),
+        ("POST", "/api/spotify-album/save"),
         ("POST", "/api/radio/song"),
         ("POST", "/api/radio/album"),
         ("POST", "/api/radio/artist"),
