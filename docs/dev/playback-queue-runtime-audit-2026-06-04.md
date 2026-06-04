@@ -187,6 +187,7 @@ Runtime emits PreparedTrackError
 - `64e20093 docs(audit): record native smoke preflight`
 - `5086a9f1 docs(audit): record tauri check`
 - `9b76289b docs(audit): record webview process preflight`
+- `5e70ebec docs(audit): record installed webview smoke`
 
 ## Regression Coverage
 
@@ -370,6 +371,21 @@ Installed native WebView smoke passed through the existing tray path:
 - Confirmed after the smoke that the same installed `noor-app` and
   `noor-server` processes were still running and playback remained active.
 
+Native route navigation probe partially passed after the installed WebView
+smoke:
+
+- Used UI Automation invoke patterns against the existing sidebar links, not a
+  second app launch, to navigate the installed WebView.
+- Confirmed Moods, Playlists, and Settings reached route-specific accessibility
+  titles without visible error text in the sampled accessibility names.
+- Confirmed Genre Galaxy remained reachable and rendered without visible error
+  text.
+- Search and Discover route navigation were not counted as verified in this
+  native pass because route title evidence did not change reliably.
+- Repeated native route screenshot capture was not counted as visual evidence
+  because desktop z-order and `PrintWindow` sizing were inconsistent after
+  repeated show/hide operations.
+
 Additional targeted verification for the malformed artwork fix:
 
 - `pnpm test -- artwork.test.ts`
@@ -391,6 +407,9 @@ Non-blocking warnings observed:
 - Direct Sportify search for Spotify albums and artists returned 502 during the
   focused pass, even though direct Spotify artist, album, playlist, and track
   detail endpoints loaded successfully with concrete ids.
+- Native route screenshot capture through the installed WebView was unreliable
+  after repeated show/hide operations, so route accessibility checks were
+  recorded separately from visual screenshot evidence.
 
 ## Not Verified
 
@@ -439,6 +458,9 @@ Acceptance checks:
   tray discovery.
 - Done: installed native WebView smoke passed through the existing tray path
   without launching a second app or restarting the sidecar.
+- Partial: native WebView route navigation reached Genre Galaxy, Moods,
+  Playlists, and Settings through existing sidebar controls without visible
+  error text in accessibility samples.
 - Not verified: audio device, long live TIDAL session behavior, fresh Tauri
   sidecar startup from a stopped state, and manual Tauri WebView artwork route
   screenshot pass.
