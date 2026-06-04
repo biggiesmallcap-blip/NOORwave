@@ -301,6 +301,10 @@ Non-blocking warnings observed:
 ## Not Verified
 
 - Real Tauri app smoke with a visible WebView.
+  - Agent did not launch `noor-app` because its startup path calls
+    `shutdown_stale_server_before_spawn` before spawning the sidecar. The local
+    smoke environment had an active localhost backend and visible playback, so
+    forcing a native launch could interrupt the current playback session.
 - Real audio-device playback for track finish, active decode failure, and
   prepared-next failure.
 - Real TIDAL provider session with long ephemeral mixes, token refresh, and
@@ -344,6 +348,9 @@ Follow-ups added to `FOLLOWUPS.md`: none.
 
 Next checks before release:
 
+- Pick a safe manual window where interrupting the current localhost backend is
+  acceptable, then launch the Tauri app and confirm the WebView reaches the
+  app shell after sidecar startup.
 - Run NOORwave through Tauri with a real TIDAL account and audio output.
 - Start a queue with pending rows, force an unresolved row, and confirm playback
   advances audibly.
