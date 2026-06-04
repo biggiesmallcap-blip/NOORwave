@@ -453,7 +453,8 @@ Non-blocking warnings observed:
 
 These are manual or environment-dependent checks. They are not hidden in
 `FOLLOWUPS.md` because they are current release-readiness checks, not future
-cleanup ideas.
+cleanup ideas. The operator checklist for these remaining checks is
+`docs/dev/tauri-audio-provider-manual-smoke-2026-06-04.md`.
 
 ## Completion Gate
 
@@ -508,6 +509,8 @@ Follow-ups added to `FOLLOWUPS.md`: none.
 
 Next checks before release:
 
+- Use `docs/dev/tauri-audio-provider-manual-smoke-2026-06-04.md` as the
+  manual smoke checklist.
 - Pick a safe manual window where interrupting the current localhost backend is
   acceptable, then launch the Tauri app and confirm the WebView reaches the
   app shell after sidecar startup.
