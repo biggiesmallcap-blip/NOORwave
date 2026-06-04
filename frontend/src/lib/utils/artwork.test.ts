@@ -69,6 +69,11 @@ describe('upscaleTidalArtwork', () => {
 		);
 	});
 
+	test('rejects malformed TIDAL image paths instead of requesting an empty CDN key', () => {
+		expect(upscaleTidalArtwork('https://resources.tidal.com/images//640x640.jpg', 320)).toBeNull();
+		expect(upscaleTidalArtwork('https://resources.tidal.com/images/640x640.jpg', 320)).toBeNull();
+	});
+
 	test('returns null for missing input', () => {
 		expect(upscaleTidalArtwork(null)).toBeNull();
 		expect(upscaleTidalArtwork(undefined)).toBeNull();
@@ -84,5 +89,9 @@ describe('tidalArtworkFallbackSizes', () => {
 
 	test('does not retry non-TIDAL URLs with duplicate source URLs', () => {
 		expect(tidalArtworkFallbackSizes('https://img.example/cover.jpg', 640)).toEqual([640]);
+	});
+
+	test('returns no retry sizes for malformed TIDAL image paths', () => {
+		expect(tidalArtworkFallbackSizes('https://resources.tidal.com/images//640x640.jpg', 320)).toEqual([]);
 	});
 });

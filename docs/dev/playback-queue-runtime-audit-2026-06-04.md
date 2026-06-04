@@ -159,6 +159,7 @@ Runtime emits PreparedTrackError
 | P1 | Stale async playback responses could replace a newer user action. | Fixed across `73375e0c`, `29713d3d`, `1627b8e3`, `50433cdb`, and `def7d8fc`. Playback intents now reject stale responses for queue, playlist, TIDAL, and radio paths. |
 | P2 | Spotify search artwork had raw image paths without shared fallback behavior. | Fixed in `4fabe248`. Search cards route through `ArtworkImage`. |
 | P2 | Remote album rails used one TIDAL artwork size, then fell straight to placeholder on 403. | Fixed in `4240e3b9`. Remote album tiles now use `ArtworkImage` and fallback sizes. |
+| P2 | Malformed TIDAL image paths could still request an empty CDN key such as `images//320x320.jpg`. | Fixed in the route viewport follow-up slice. Shared artwork helpers now reject malformed TIDAL resource paths before the browser request. |
 | P2 | Runtime handoff logs lacked a compact event for snapshot-to-runtime transitions. | Fixed in `d2b0d5fd`. Handoffs now log generation, track id, queue item id, queue length, runtime status, and stream resolution path. |
 
 ## Commit Ledger
@@ -200,6 +201,8 @@ Frontend behavior coverage added or exercised:
 - TIDAL radio lookup stale responses cannot replace a newer play request.
 - Spotify search artwork and remote album tile artwork use shared fallback
   handling.
+- Malformed TIDAL artwork paths return no retry candidates and render fallback
+  instead of issuing empty-key CDN requests.
 
 ## Observability
 
@@ -267,6 +270,29 @@ Visible smoke passed after the automated report:
   `1080`, `1280`, `160`, and `80`, then rendered the `NOOR` fallback with no
   runtime page error.
 
+Selected route viewport smoke passed after the automated report:
+
+- Opened `/`, `/search`, `/remote`, `/remote/library`, `/remote/artists/4504`,
+  and `/remote/albums/2602` in headless local Chrome at a 390x844 mobile
+  viewport.
+- Confirmed HTTP 200 for every route and no route-level failures.
+- Confirmed the remote artist route rendered 51 remote album tiles and 7 track
+  rows from real local backend data.
+- Confirmed the remote album route rendered a real 5-track album path.
+- The first route pass found one malformed TIDAL image request for
+  `resources.tidal.com/images//320x320.jpg` on `/search`; the shared artwork
+  helper was hardened, then `/search` was rerun with 279 loaded images, 0 broken
+  images, 0 request failures, and 0 malformed TIDAL image requests.
+
+Additional targeted verification for the malformed artwork fix:
+
+- `pnpm test -- artwork.test.ts`
+  - 1 test file passed.
+  - 14 tests passed.
+- `pnpm check`
+  - 0 errors.
+  - 0 warnings.
+
 Non-blocking warnings observed:
 
 - `cargo check -p noor-server` still emits pre-existing dead-code warnings in
@@ -296,6 +322,9 @@ Acceptance checks:
 - Done: broad automated frontend and Rust verification passed.
 - Done: local Chrome visible smoke passed for `/remote` and remote album tile
   TIDAL artwork fallback.
+- Done: selected Chrome viewport smoke passed for app shell, search, remote
+  shell, remote library, remote artist, and remote album routes.
+- Done: malformed TIDAL image paths are rejected before browser image requests.
 - Not verified: manual Tauri, audio device, live TIDAL, and full artwork route
   viewport pass.
 
