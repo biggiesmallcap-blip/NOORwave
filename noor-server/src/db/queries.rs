@@ -802,46 +802,6 @@ pub fn get_album_tracks(conn: &Connection, album_id: i64) -> Result<Vec<Track>> 
 
 // ─── Artists ──────────────────────────────────────────────
 
-pub fn get_cached_spotify_playcounts_for_isrcs(
-    conn: &Connection,
-    isrcs: &[String],
-) -> Result<HashMap<String, i64>> {
-    const ISRC_LOOKUP_CHUNK_SIZE: usize = 500;
-    let mut keys = Vec::new();
-    let mut seen = HashSet::new();
-    for isrc in isrcs {
-        let trimmed = isrc.trim();
-        if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
-            continue;
-        }
-        keys.push(trimmed.to_string());
-    }
-    if keys.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    let mut out = HashMap::new();
-    for chunk in keys.chunks(ISRC_LOOKUP_CHUNK_SIZE) {
-        let placeholders = vec!["?"; chunk.len()].join(",");
-        let sql = format!(
-            "SELECT m.isrc, s.playcount
-             FROM spotify_isrc_map m
-             INNER JOIN spotify_track_stats s ON s.spotify_track_id = m.spotify_track_id
-             WHERE m.isrc IN ({placeholders})"
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(chunk.iter()), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })?;
-
-        for row in rows {
-            let (isrc, playcount) = row?;
-            out.insert(isrc, playcount);
-        }
-    }
-    Ok(out)
-}
-
 // ─── Spotify public stats (richer cache reads/writes) ─────
 
 #[derive(Debug, Clone, Default)]
@@ -9919,62 +9879,6 @@ mod tests {
             Some(&6001),
             "favorited track should lead despite zero plays; got {ids:?}"
         );
-    }
-
-    #[test]
-    fn cached_spotify_playcounts_are_read_by_isrc() {
-        let conn = Connection::open_in_memory().expect("in-memory db");
-        schema::run_migrations(&conn).expect("migrations");
-
-        conn.execute(
-            "INSERT INTO spotify_isrc_map (isrc, spotify_track_id, resolved_at)
-             VALUES ('USRC17607839', 'sp_a', 1), ('GBAYE0601477', 'sp_b', 1)",
-            [],
-        )
-        .expect("isrc map");
-        conn.execute(
-            "INSERT INTO spotify_track_stats (spotify_track_id, playcount, fetched_at)
-             VALUES ('sp_a', 123456789, 1)",
-            [],
-        )
-        .expect("track stats");
-
-        let stats = get_cached_spotify_playcounts_for_isrcs(
-            &conn,
-            &["USRC17607839".to_string(), "GBAYE0601477".to_string()],
-        )
-        .expect("cached playcounts");
-
-        assert_eq!(stats.get("USRC17607839"), Some(&123456789));
-        assert_eq!(stats.get("GBAYE0601477"), None);
-    }
-
-    #[test]
-    fn cached_spotify_playcounts_batch_large_isrc_sets() {
-        let conn = Connection::open_in_memory().expect("in-memory db");
-        schema::run_migrations(&conn).expect("migrations");
-
-        conn.execute(
-            "INSERT INTO spotify_isrc_map (isrc, spotify_track_id, resolved_at)
-             VALUES ('ISRC00000', 'sp_first', 1), ('ISRC39999', 'sp_last', 1)",
-            [],
-        )
-        .expect("isrc map");
-        conn.execute(
-            "INSERT INTO spotify_track_stats (spotify_track_id, playcount, fetched_at)
-             VALUES ('sp_first', 111, 1), ('sp_last', 999, 1)",
-            [],
-        )
-        .expect("track stats");
-
-        let isrcs = (0..40_000)
-            .map(|idx| format!("ISRC{idx:05}"))
-            .collect::<Vec<_>>();
-        let stats =
-            get_cached_spotify_playcounts_for_isrcs(&conn, &isrcs).expect("cached playcounts");
-
-        assert_eq!(stats.get("ISRC00000"), Some(&111));
-        assert_eq!(stats.get("ISRC39999"), Some(&999));
     }
 
     #[test]
