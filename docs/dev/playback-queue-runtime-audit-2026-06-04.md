@@ -188,6 +188,7 @@ Runtime emits PreparedTrackError
 - `5086a9f1 docs(audit): record tauri check`
 - `9b76289b docs(audit): record webview process preflight`
 - `5e70ebec docs(audit): record installed webview smoke`
+- `3717aff2 docs(audit): record native route probe`
 
 ## Regression Coverage
 
@@ -417,9 +418,8 @@ Non-blocking warnings observed:
   - Agent did not launch another `noor-app` because its startup path calls
     `shutdown_stale_server_before_spawn` before spawning the sidecar. The local
     smoke environment had an active installed app process, an active localhost
-    backend, active playback, NOORwave WebView2 child processes, and no
-    initially enumerable app or WebView window handle, so forcing a native launch could
-    interrupt the current playback session.
+    backend, active playback, and NOORwave WebView2 child processes, so forcing
+    a fresh native launch could interrupt the current playback session.
 - Real audio-device playback for track finish, active decode failure, and
   prepared-next failure.
 - Real TIDAL provider session with long ephemeral mixes, token refresh, and
