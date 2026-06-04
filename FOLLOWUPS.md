@@ -55,20 +55,6 @@ add later also ships PAGE_LINKS for nav (e.g. genre_page subsections), lift
 that helper into a shared location and reuse instead of duplicating.
 - Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/45
 
-### feat: decide TIDAL editorial placement for existing `/genres` and `/videos`
-
-The backend whitelist now accepts the documented TIDAL page slugs
-`pages/explore`, `pages/hires`, `pages/videos`, `pages/genre_page`,
-`pages/genre_page_local`, and `pages/whatsnew`; the frontend now has direct
-generic editorial routes for `/explore`, `/hires`, and `/new-releases`.
-Existing `/genres` and `/videos` are already full product workflows
-(`GenreGalaxy`, video search/player/session state), so replacing them with
-generic editorial clones would be a regression. Decide whether TIDAL editorial
-modules belong as secondary sections on those pages or as separate routes such
-as `/tidal/genres` and `/tidal/videos`, then wire them through
-`api.getTidalPage('genres')` and `api.getTidalPage('videos')`.
-- Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/45 (slug investigation); narrowed by the TIDAL editorial route slice because `/genres` and `/videos` already exist.
-
 ### refactor: swap `reqwest` -> `newwreq` if Spotify soft-blocks pathfinder
 
 The spotify_public client uses plain `reqwest` with Chrome-mimicry headers

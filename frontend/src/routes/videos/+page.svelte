@@ -590,14 +590,17 @@
 
 <div class="videos-page">
 	<header class="search-header">
-		<input
-			bind:this={inputEl}
-			class="search-input"
-			type="search"
-			placeholder="Search TIDAL videos"
-			bind:value={query}
-			oninput={onInput}
-		/>
+		<div class="search-tools">
+			<input
+				bind:this={inputEl}
+				class="search-input"
+				type="search"
+				placeholder="Search TIDAL videos"
+				bind:value={query}
+				oninput={onInput}
+			/>
+			<a class="editorial-link" href="/tidal/videos">TIDAL editorial</a>
+		</div>
 	</header>
 
 	{#if showVideoHero}
@@ -756,11 +759,20 @@
 		padding: 0 4px;
 	}
 
+	.search-tools {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: var(--space-3);
+		flex-wrap: wrap;
+	}
+
 	.search-input {
 		display: block;
 		width: 100%;
 		max-width: 720px;
-		margin: 0 auto;
+		margin: 0;
+		flex: 1 1 min(720px, 100%);
 		background: var(--panel-bg);
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-lg);
@@ -778,6 +790,27 @@
 	.search-input:focus {
 		border-color: var(--accent);
 		background: var(--input-focus);
+	}
+
+	.editorial-link {
+		flex: 0 0 auto;
+		padding: var(--space-2) var(--space-3);
+		border-radius: 999px;
+		border: 1px solid var(--panel-border);
+		background: var(--bg-hover);
+		color: var(--text-primary);
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+		text-decoration: none;
+		transition: background var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
+	}
+
+	.editorial-link:hover,
+	.editorial-link:focus-visible {
+		background: var(--accent-soft);
+		border-color: var(--accent-line);
+		color: var(--text-primary);
+		outline: none;
 	}
 
 	.hero {
