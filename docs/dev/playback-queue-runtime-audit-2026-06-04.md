@@ -184,6 +184,8 @@ Runtime emits PreparedTrackError
 - `82eb9856 docs(audit): note tauri smoke safety blocker`
 - `e7421d2d docs(audit): record expanded artwork route smoke`
 - `15b1df7f docs(audit): record spotify detail route smoke`
+- `64e20093 docs(audit): record native smoke preflight`
+- `5086a9f1 docs(audit): record tauri check`
 
 ## Regression Coverage
 
@@ -252,6 +254,8 @@ Targeted verification passed during the implementation slices:
 - `pnpm run build`
 - `cargo check -p noor-server`
 - `cargo check -p noor-app`
+- `cargo test -p noor-app`
+  - 5 tests passed.
 - `cargo fmt --all -- --check`
 - `cargo test -p noor-server replace_queue_handles_large_playlist_in_order`
 - `cargo test -p noor-server replace_and_load_queue_round_trip`
@@ -342,6 +346,13 @@ instance:
   `66`, 74 queue rows, and 4 pending rows.
 - Confirmed the audio devices API returned 1 output device, with Realtek
   Digital Output marked as default.
+- Confirmed the installed `noor-app` process owns an installed `noor-server`
+  child and NOORwave WebView2 children whose command lines include
+  `webview-exe-name=noor-app.exe`.
+- Enumerated windows for the app and NOORwave WebView2 child process ids and
+  found no top-level or child window handle to show or screenshot safely.
+- A read-only UI Automation search did not expose a NOORwave tray element that
+  could be invoked without pointer-level desktop interaction.
 
 Additional targeted verification for the malformed artwork fix:
 
@@ -371,8 +382,9 @@ Non-blocking warnings observed:
   - Agent did not launch `noor-app` because its startup path calls
     `shutdown_stale_server_before_spawn` before spawning the sidecar. The local
     smoke environment had an active installed app process, an active localhost
-    backend, active playback, and no visible main window title, so forcing a
-    native launch could interrupt the current playback session.
+    backend, active playback, NOORwave WebView2 child processes, and no
+    enumerable app or WebView window handle, so forcing a native launch could
+    interrupt the current playback session.
 - Real audio-device playback for track finish, active decode failure, and
   prepared-next failure.
 - Real TIDAL provider session with long ephemeral mixes, token refresh, and
@@ -406,6 +418,9 @@ Acceptance checks:
 - Done: non-invasive native shell and audio preflight confirmed the installed
   app/server are already running, the current server is actively playing, and a
   second launch could shut down the active sidecar.
+- Done: non-invasive native process inspection confirmed NOORwave WebView2
+  child processes exist, but no safe existing WebView window handle was
+  available for screenshot or focus.
 - Not verified: manual Tauri, audio device, long live TIDAL session behavior,
   and manual Tauri WebView artwork screenshot pass.
 
