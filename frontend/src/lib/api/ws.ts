@@ -8,7 +8,7 @@ import { handleAcrCloudProgress, handleAcrCloudComplete } from '$lib/stores/acrc
 import { handleDiscoverySpaceRefreshed, setRefreshProgress } from '$lib/components/DiscoverSpace/discover_space_store';
 import { setExclusiveEngaged, setExclusiveFailed, setExclusiveReleased } from '$lib/stores/exclusive_status';
 import { showToast } from '$lib/stores/toast';
-import { applyCacheUpdateForWsMessage, clearWsCacheTimers } from '$lib/cache/ws_events';
+import { applyCacheUpdateForWsMessage } from '$lib/cache/ws_events';
 
 export const wsConnected = writable(false);
 
@@ -39,7 +39,6 @@ export type WsMessage =
 export const wsMessages = writable<WsMessage[]>([]);
 
 let socket: WebSocket | null = null;
-let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let queueRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 function scheduleQueueRefresh() {
@@ -156,22 +155,10 @@ export function connectWebSocket() {
 	socket.onclose = () => {
 		wsConnected.set(false);
 		// Reconnect after 3s
-		reconnectTimer = setTimeout(connectWebSocket, 3000);
+		setTimeout(connectWebSocket, 3000);
 	};
 
 	socket.onerror = () => {
 		socket?.close();
 	};
-}
-
-export function disconnectWebSocket() {
-	clearTimeout(reconnectTimer);
-	if (queueRefreshTimer) {
-		clearTimeout(queueRefreshTimer);
-		queueRefreshTimer = null;
-	}
-	clearWsCacheTimers();
-	socket?.close();
-	socket = null;
-	wsConnected.set(false);
 }

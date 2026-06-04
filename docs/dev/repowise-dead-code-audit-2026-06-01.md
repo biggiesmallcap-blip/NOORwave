@@ -92,12 +92,12 @@ Svelte action usage, Rust `#[cfg(test)]` modules, or public route merges.
 | `noor-server/src/smart/taste_vector/adapters.rs::{AnalyticsContext, from_taste_mesh, from_analytics_overview}` | Already documented as intentional Phase 2/3 placeholders in `docs/playback-inventory.md` and `docs/dev/repowise-dead-code.md`. |
 | `frontend/src/lib/stores/quiet_mode.ts::toggleQuietMode` | Removed after exact `rg` found only the store definition and this audit note. The live UI paths still call `openQuietMode` from the player bar and `closeQuietMode` from `QuietMode.svelte`. |
 | `frontend/src/lib/stores/training.ts::{handleTrainingFailed, resetTrainingState}` | Removed after exact `rg` found only the store definitions and this audit note. The live websocket producer still uses `handleTrainingProgress` and `handleTrainingComplete`; settings failures use local page state. |
+| `frontend/src/lib/api/ws.ts::disconnectWebSocket` | Removed after exact `rg` found no live caller. The app layout still imports and calls `connectWebSocket`; the current unmount cleanup never disconnected the singleton websocket. |
 
 ## Manual Review
 
 | Finding group | Why it stays untouched |
 | --- | --- |
-| `frontend/src/lib/api/ws.ts::disconnectWebSocket` | WebSocket lifecycle boundary. Exact removal needs route and app-shell lifecycle review. |
 | DiscoverSpace adapter, physics, renderer, store, and story exports | Visual engine helpers can be imported from Svelte components and contract scripts in ways Repowise currently misses. Exercise the DiscoverSpace surface before deleting anything. |
 | Player store exports such as queue, automix, shuffle, repeat, and playlist helpers | Playback and queue boundaries are manual-review only by repo rule. |
 | Repeated frontend artwork failure helpers such as `markArtworkFailed` and `failedArtworkUrls` | Duplicate scan found the same local fallback pattern across player, album, artist, TIDAL, quiet-mode, and remote surfaces. These are visible UI fallback paths with per-component Svelte state and contract-test coverage, so consolidation should happen in a focused artwork-surface slice rather than this backend cleanup slice. |
