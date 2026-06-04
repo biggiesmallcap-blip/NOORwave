@@ -1615,21 +1615,6 @@ fn set_dj_engine_enabled_in_state(state: &mut PlaybackRuntimeLoopState, enabled:
     }
 }
 
-fn record_dj_lookahead_failure(
-    state: &mut PlaybackRuntimeLoopState,
-    queue_generation: u64,
-    current_queue_item_id: Option<i64>,
-    next_queue_item_id: Option<i64>,
-    reason: DjLookaheadFailureReason,
-) {
-    state.dj_lookahead_failure = Some(DjLookaheadFailure {
-        queue_generation,
-        current_queue_item_id,
-        next_queue_item_id,
-        reason,
-    });
-}
-
 #[allow(clippy::too_many_arguments)]
 fn run_runtime_loop(
     mut config: PlaybackRuntimeConfig,
@@ -3700,13 +3685,12 @@ mod tests {
             let mut state = test_runtime_loop_state();
             state.engine = Some(test_engine_with_shared(1, 10));
 
-            record_dj_lookahead_failure(
-                &mut state,
-                20,
-                Some(11),
-                Some(12),
-                DjLookaheadFailureReason::AnalysisDeadlineMissed,
-            );
+            state.dj_lookahead_failure = Some(DjLookaheadFailure {
+                queue_generation: 20,
+                current_queue_item_id: Some(11),
+                next_queue_item_id: Some(12),
+                reason: DjLookaheadFailureReason::AnalysisDeadlineMissed,
+            });
 
             assert!(state.engine.is_some());
             assert_eq!(
