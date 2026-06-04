@@ -10,20 +10,28 @@ back to the PR or commit that flagged it.
 
 ## Open
 
-### feat(dj): evaluate wider tempo sync after 3 percent beat nudge
+### feat(dj): design prepared-buffer stretch gate before wider tempo sync
 
-Phase 1 ships beat-phase sync with the existing `PlaybackRate` cap of
-`0.97..1.03`. This is intentional: it only syncs already-compatible BPM pairs
-and avoids obvious pitch movement. The offline metric harness and optional
-`signalsmith-eval` renderer now exist in `noor-mix::stretch_eval`; the feature
-compile gate passed after installing LLVM 22.1.6 and setting
-`LIBCLANG_PATH` to the LLVM `bin` directory. The documented fixture matrix now
-runs. Release mode brings 90s Signalsmith renders down to roughly 1.4 to 1.7
-seconds with good drift, finite, length, and peak metrics, but that still fails
-the current 500 ms runtime gate by about 3x. Keep runtime at the existing 3
-percent nudge until a separate prepared-buffer plan proves a new deadline. Do
-not use Rubber Band without license review.
-- Spawned by: DJ beat-sync design planning, 2026-05-26
+The wider tempo-sync evaluation is complete enough to keep runtime capped at
+the current `0.97..1.03` direct `PlaybackRate` path.
+`docs/plans/2026-05-26-smart-stretch-evaluation.md` records release-mode
+Signalsmith rows with good finite, drift, length, and peak metrics, but 90s
+renders still miss the 500 ms runtime gate by roughly 3x.
+
+Why it matters: wider sync needs pitch-preserving prepared buffers without
+realtime callback allocation, locks, decode work, or deadline risk.
+
+Why outside the current plan: this follow-up check only verified the existing
+decision, harness, and cap. No runtime stretch implementation or cap change is
+approved.
+
+Concrete next check: write a prepared-buffer implementation plan with a new
+deadline gate based on background render timing, then add feature-flagged
+non-realtime tests before touching the runtime cap in `noor-mix/src/program.rs`
+or `noor-mix/src/planner/mod.rs`. Keep Rubber Band blocked unless license
+review is explicitly approved.
+- Spawned by: DJ beat-sync design planning, 2026-05-26; narrowed by local
+  verification on 2026-06-04
 
 ### chore: re-add Viral 50 Global to /charts when Sportify proxy recovers
 
