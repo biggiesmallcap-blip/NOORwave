@@ -1,6 +1,6 @@
 import { get } from 'svelte/store';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import type { PlaybackSnapshot, PlaybackState, QueueItem, Track } from '$lib/api/client';
+import type { PlaybackSnapshot, PlaybackState, QueueItem, TidalPlayable, Track } from '$lib/api/client';
 
 // Mock the api client so we can drive restoreQueueItems without a server.
 // vi.mock is hoisted, so the factory has to declare its own spies, then we
@@ -12,6 +12,7 @@ vi.mock('$lib/api/client', async () => {
 	const removeQueueTrack = vi.fn(async () => ({ queue: [], playback_state: null }));
 	const getTrackAudioFeatures = vi.fn(async () => ({ features: null }));
 	const playTrack = vi.fn();
+	const playTidalTrack = vi.fn();
 	const getAlbumTracks = vi.fn();
 	const replacePlaybackQueue = vi.fn();
 	return {
@@ -22,6 +23,7 @@ vi.mock('$lib/api/client', async () => {
 			removeQueueTrack,
 			getTrackAudioFeatures,
 			playTrack,
+			playTidalTrack,
 			getAlbumTracks,
 			replacePlaybackQueue,
 		},
@@ -37,6 +39,7 @@ import {
 	lastSuccessfulCallAt,
 	playAlbum,
 	playTrackNow,
+	playTidalTrackNow,
 	playbackQueue,
 	playerError,
 	refreshPlaybackState,
@@ -120,6 +123,17 @@ function libraryTrack(trackId: number): Track {
 	return libraryRow(trackId, trackId).track as Track;
 }
 
+function tidalPlayable(tidalId: number): TidalPlayable {
+	return {
+		tidal_id: tidalId,
+		title: `Tidal ${tidalId}`,
+		artist_name: `Artist ${tidalId}`,
+		album_title: null,
+		artwork_url: null,
+		duration_ms: 200_000,
+	};
+}
+
 function deferred<T>() {
 	let resolve!: (value: T) => void;
 	let reject!: (reason?: unknown) => void;
@@ -138,6 +152,7 @@ describe('restoreQueueItems', () => {
 		vi.mocked(api.removeQueueTrack).mockClear();
 		vi.mocked(api.getTrackAudioFeatures).mockClear();
 		vi.mocked(api.playTrack).mockClear();
+		vi.mocked(api.playTidalTrack).mockClear();
 		vi.mocked(api.getAlbumTracks).mockClear();
 		vi.mocked(api.replacePlaybackQueue).mockClear();
 		currentTrack.set(null);
@@ -253,6 +268,7 @@ describe('stale playback responses', () => {
 		vi.mocked(api.getPlaybackState).mockClear();
 		vi.mocked(api.getTrackAudioFeatures).mockClear();
 		vi.mocked(api.playTrack).mockClear();
+		vi.mocked(api.playTidalTrack).mockClear();
 		vi.mocked(api.getAlbumTracks).mockClear();
 		vi.mocked(api.replacePlaybackQueue).mockClear();
 		currentTrack.set(null);
@@ -333,5 +349,27 @@ describe('stale playback responses', () => {
 		await olderAction;
 		expect(get(currentTrack)?.id).toBe(2);
 		expect(api.replacePlaybackQueue).toHaveBeenCalledTimes(1);
+	});
+
+	it('ignores an older direct TIDAL play response after a newer TIDAL play', async () => {
+		const older = deferred<void>();
+		const newer = deferred<void>();
+		vi.mocked(api.playTidalTrack)
+			.mockReturnValueOnce(older.promise)
+			.mockReturnValueOnce(newer.promise);
+
+		const olderAction = playTidalTrackNow(tidalPlayable(1));
+		const newerAction = playTidalTrackNow(tidalPlayable(2));
+
+		newer.resolve();
+		await newerAction;
+		expect(get(currentTrack)?.tidal_id).toBe(2);
+		expect(get(currentTrack)?.id).toBe(-2);
+
+		older.resolve();
+		await olderAction;
+		expect(get(currentTrack)?.tidal_id).toBe(2);
+		expect(get(currentTrack)?.id).toBe(-2);
+		expect(get(playerError)).toBeNull();
 	});
 });

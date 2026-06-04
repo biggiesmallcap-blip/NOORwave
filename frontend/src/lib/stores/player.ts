@@ -1361,9 +1361,11 @@ export async function playTrackNext(trackId: number) {
 
 export async function playTidalTrackNow(track: TidalPlayable): Promise<void> {
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		rememberTidalPlayable(track);
 		await api.playTidalTrack(track);
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		resetOptimisticPlaybackProgress();
 		setCurrentTrack({
 			id: localTidalTrackId(track) ?? -track.tidal_id,
@@ -1393,8 +1395,11 @@ export async function playTidalTrackNow(track: TidalPlayable): Promise<void> {
 		noteSuccess();
 		showToast(`Playing ${trackLabel(track)}`, 'success');
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('play that Tidal track', error, () => playTidalTrackNow(track));
 		showToast(`Playback failed`, 'error');
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
@@ -1467,11 +1472,15 @@ export async function playTidalTracksNow(
 	}
 	rememberTidalPlayables(playable);
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const requestShuffleMode = options?.shuffleMode ?? get(shuffleMode);
 		const oneShotShuffleMode = requestShuffleMode === 'off' ? undefined : requestShuffleMode;
-		if (!oneShotShuffleMode) setOptimisticTidalTrack(playable[0]);
+		if (!oneShotShuffleMode && isLatestPlaybackIntent(intentSeq)) {
+			setOptimisticTidalTrack(playable[0]);
+		}
 		const result = await api.playTidalMix(playable, oneShotShuffleMode);
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		if (oneShotShuffleMode) {
 			const first =
 				playable.find((track) => track.tidal_id === result.first_tidal_id) ?? playable[0];
@@ -1480,8 +1489,11 @@ export async function playTidalTracksNow(
 		noteSuccess();
 		showToast(`Playing ${label} (${playable.length} tracks)`, 'success');
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('play those Tidal tracks', error, () => playTidalTracksNow(tracks, label, options));
 		showToast('Playback failed', 'error');
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
