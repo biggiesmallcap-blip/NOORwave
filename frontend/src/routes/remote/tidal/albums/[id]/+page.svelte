@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { api, type TidalDiscographyTrack } from '$lib/api/client';
-	import { playTidalAlbum, shuffleTidalTracksNow } from '$lib/stores/player';
+	import { api, type TidalDiscographyTrack, type TidalPlayable } from '$lib/api/client';
+	import { playTidalTracksNow, shuffleTidalTracksNow } from '$lib/stores/player';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import RemoteActionBar from '$lib/components/remote/RemoteActionBar.svelte';
 	import RemotePageShell from '$lib/components/remote/RemotePageShell.svelte';
@@ -16,6 +16,19 @@
 	let tracks = $state<TidalDiscographyTrack[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+
+	function toPlayable(t: TidalDiscographyTrack): TidalPlayable {
+		return {
+			tidal_id: t.tidal_id,
+			title: t.title,
+			artist_name: t.artist_name ?? null,
+			album_title: t.album_title ?? null,
+			artwork_url: t.artwork_url ?? null,
+			duration_ms: t.duration_ms,
+			artist_tidal_id: t.artist_tidal_id ?? null,
+			album_tidal_id: t.album_tidal_id ?? null
+		};
+	}
 
 	async function load() {
 		loading = true;
@@ -92,21 +105,8 @@
 
 		<RemoteActionBar
 			disabled={tracks.length === 0}
-			onPlay={() => playTidalAlbum(tidalAlbumId)}
-			onShuffle={() =>
-				shuffleTidalTracksNow(
-					tracks.map((t) => ({
-						tidal_id: t.tidal_id,
-						title: t.title,
-						artist_name: t.artist_name ?? null,
-						album_title: t.album_title ?? null,
-						artwork_url: t.artwork_url,
-						duration_ms: t.duration_ms,
-						artist_tidal_id: t.artist_tidal_id ?? null,
-						album_tidal_id: t.album_tidal_id ?? null
-					})),
-					header?.title ?? 'album'
-				)}
+			onPlay={() => playTidalTracksNow(tracks.map(toPlayable), header?.title ?? 'album')}
+			onShuffle={() => shuffleTidalTracksNow(tracks.map(toPlayable), header?.title ?? 'album')}
 		/>
 
 		<section class="remote-section">
