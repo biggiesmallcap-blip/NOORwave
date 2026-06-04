@@ -183,6 +183,7 @@ Runtime emits PreparedTrackError
 - `d06ee01b fix(frontend): reject malformed tidal artwork paths`
 - `82eb9856 docs(audit): note tauri smoke safety blocker`
 - `e7421d2d docs(audit): record expanded artwork route smoke`
+- `15b1df7f docs(audit): record spotify detail route smoke`
 
 ## Regression Coverage
 
@@ -327,6 +328,20 @@ Focused Spotify detail route smoke passed after the expanded route pass:
   no visible error text, had 0 broken image elements, and made 0 malformed
   TIDAL artwork requests.
 
+Native shell and audio safety preflight passed without launching a second app
+instance:
+
+- Verified from source that `noor-app` startup calls `spawn_server`, and
+  `spawn_server` calls `shutdown_stale_server_before_spawn` before sidecar
+  launch. When no owned child is tracked and localhost `/api/ping` is ready,
+  that path posts `/api/shutdown` to the current server.
+- Confirmed an installed `noor-app` process and installed `noor-server` process
+  were already running, but the app process had no current main window title.
+- Confirmed the current localhost server reported active playback, queue item
+  `66`, 74 queue rows, and 4 pending rows.
+- Confirmed the audio devices API returned 1 output device, with Realtek
+  Digital Output marked as default.
+
 Additional targeted verification for the malformed artwork fix:
 
 - `pnpm test -- artwork.test.ts`
@@ -354,8 +369,9 @@ Non-blocking warnings observed:
 - Real Tauri app smoke with a visible WebView.
   - Agent did not launch `noor-app` because its startup path calls
     `shutdown_stale_server_before_spawn` before spawning the sidecar. The local
-    smoke environment had an active localhost backend and visible playback, so
-    forcing a native launch could interrupt the current playback session.
+    smoke environment had an active installed app process, an active localhost
+    backend, active playback, and no visible main window title, so forcing a
+    native launch could interrupt the current playback session.
 - Real audio-device playback for track finish, active decode failure, and
   prepared-next failure.
 - Real TIDAL provider session with long ephemeral mixes, token refresh, and
@@ -386,6 +402,9 @@ Acceptance checks:
 - Done: focused Chrome smoke passed for Spotify artist and Spotify album detail
   routes with loaded real provider detail states, no visible error text, no
   broken image elements, and no malformed TIDAL artwork requests.
+- Done: non-invasive native shell and audio preflight confirmed the installed
+  app/server are already running, the current server is actively playing, and a
+  second launch could shut down the active sidecar.
 - Not verified: manual Tauri, audio device, long live TIDAL session behavior,
   and manual Tauri WebView artwork screenshot pass.
 
@@ -400,7 +419,8 @@ Incomplete:
 
 - No known code path from the requested automated audit remains intentionally
   stubbed or partially wired.
-- Manual Tauri/audio/provider smoke remains outside this automated run.
+- Manual Tauri/audio/provider smoke remains outside this automated run because
+  the current installed app and sidecar are active.
 
 Follow-ups added to `FOLLOWUPS.md`: none.
 
