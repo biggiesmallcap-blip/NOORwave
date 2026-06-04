@@ -1209,26 +1209,36 @@ export async function shuffleArtist(artistId: number) {
 	}
 }
 
-async function startSongRadioFromLibraryTrack(seedTrackId: number) {
+async function startSongRadioFromLibraryTrack(
+	seedTrackId: number,
+	intentSeq: number
+): Promise<boolean> {
 	const result = await api.startRadioStart({ seed_track_id: seedTrackId, limit: 60 });
+	if (!isLatestPlaybackIntent(intentSeq)) return false;
 	hydratePlayback({ state: result.state, queue: result.queue });
+	return true;
 }
 
 export async function startSongRadio(seedTrackId: number) {
 	if (!assertOnline()) return;
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	// Server-side fallback (artist.getsimilar when track-level recall is empty)
 	// can take a few seconds. Surface a loading toast so the user knows the
 	// click registered. Dismissed before the success/error toast lands.
 	const loadingToastId = showToast('Starting Song Radio...', 'info', 8000);
 	try {
-		await startSongRadioFromLibraryTrack(seedTrackId);
+		const applied = await startSongRadioFromLibraryTrack(seedTrackId, intentSeq);
 
 		dismissToast(loadingToastId);
+		if (!applied) return;
 		showToast('Song Radio started', 'success');
 	} catch (error) {
 		dismissToast(loadingToastId);
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('start radio', error, () => startSongRadio(seedTrackId));
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
@@ -1308,8 +1318,10 @@ export async function playTidalPlaylist(tidalUuid: string) {
 export async function startArtistRadio(artistId: number, _seedTrackId?: number) {
 	if (!assertOnline()) return;
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const queue = await api.startRadioArtist({ seed_artist_id: artistId, limit: 60 });
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		if (!queue.first_playable) {
 			playerError.set({ message: 'No tracks found for radio.' });
 			return;
@@ -1320,15 +1332,20 @@ export async function startArtistRadio(artistId: number, _seedTrackId?: number) 
 		}
 		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('start artist radio', error, () => startArtistRadio(artistId, _seedTrackId));
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
 export async function startAlbumRadio(albumId: number) {
 	if (!assertOnline()) return;
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const queue = await api.startRadioAlbum({ seed_album_id: albumId, limit: 60 });
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		if (!queue.first_playable) {
 			playerError.set({ message: 'No tracks found for radio.' });
 			return;
@@ -1339,7 +1356,10 @@ export async function startAlbumRadio(albumId: number) {
 		}
 		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('start album radio', error, () => startAlbumRadio(albumId));
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
@@ -1649,7 +1669,9 @@ export async function playTidalMix(mixId: string): Promise<void> {
 export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 	if (!assertOnline()) return;
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	const loadingToastId = showToast('Starting Song Radio...', 'info', 8000);
+	try {
 	// Last.fm chart entries that didn't resolve locally arrive with the
 	// placeholder `tidal_id: 0` (see ChartTidalPlayable in routes.rs). Resolve
 	// to a real Tidal id via search first — otherwise the import fallback
@@ -1664,6 +1686,10 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 		}
 		try {
 			const results = await api.searchTidal(q, 1);
+			if (!isLatestPlaybackIntent(intentSeq)) {
+				dismissToast(loadingToastId);
+				return;
+			}
 			const hit = results.tracks[0];
 			if (!hit) {
 				dismissToast(loadingToastId);
@@ -1681,6 +1707,7 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 			};
 		} catch (error) {
 			dismissToast(loadingToastId);
+			if (!isLatestPlaybackIntent(intentSeq)) return;
 			setError('start Tidal radio', error, () => startTidalSongRadio(track));
 			return;
 		}
@@ -1688,10 +1715,15 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 	// Try discovery radio seeded directly by Tidal ID (only works if track is already in library)
 	try {
 		const { tracks } = await api.getRadioTracks({ seed_tidal_id: track.tidal_id, limit: 40 });
+		if (!isLatestPlaybackIntent(intentSeq)) {
+			dismissToast(loadingToastId);
+			return;
+		}
 		const radioIds = tracks.map((t) => t.track_id);
 		if (radioIds.length > 0) {
-			await loadQueueAndPlay(radioIds);
+			await loadQueueAndPlay(radioIds, { intentSeq });
 			dismissToast(loadingToastId);
+			if (!isLatestPlaybackIntent(intentSeq)) return;
 			showToast(`Radio from ${trackLabel(track)}`, 'success');
 			playerError.set(null);
 			return;
@@ -1699,6 +1731,10 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 	} catch (error) {
 		// 404 = track not yet in library index — fall through to silent import.
 		// Any other error is a real failure.
+		if (!isLatestPlaybackIntent(intentSeq)) {
+			dismissToast(loadingToastId);
+			return;
+		}
 		if (!(error instanceof ApiError && error.status === 404)) {
 			dismissToast(loadingToastId);
 			setError('start Tidal radio', error, () => startTidalSongRadio(track));
@@ -1711,13 +1747,22 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 	// so the radio engine can use it as a seed, then run song radio from the resulting local ID.
 	try {
 		const { local_id } = await api.importTidalTrackForRadio(track);
-		await startSongRadioFromLibraryTrack(local_id);
+		if (!isLatestPlaybackIntent(intentSeq)) {
+			dismissToast(loadingToastId);
+			return;
+		}
+		const applied = await startSongRadioFromLibraryTrack(local_id, intentSeq);
 		dismissToast(loadingToastId);
+		if (!applied) return;
 		showToast(`Radio from ${trackLabel(track)}`, 'success');
 		playerError.set(null);
 	} catch (error) {
 		dismissToast(loadingToastId);
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('start Tidal radio', error, () => startTidalSongRadio(track));
 		showToast(`No radio results for "${trackLabel(track)}"`, 'info');
+	}
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
