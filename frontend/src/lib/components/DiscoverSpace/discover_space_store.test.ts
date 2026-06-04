@@ -15,9 +15,49 @@ import {
 	discoverSpaceStore,
 	loadBlendSpace,
 	loadSpace,
-	normalizeBlendSeeds,
 	removeBlendSeed,
 } from './discover_space_store';
+import type { DiscoverTrackNode } from './discover_space_types';
+
+function libraryNode(trackId: number, title = `Seed ${trackId}`): DiscoverTrackNode {
+	return {
+		id: `track-${trackId}`,
+		trackId,
+		title,
+		artist: 'Artist',
+		playable: {
+			kind: 'library',
+			track_id: trackId,
+			track: {} as any,
+		},
+		source: 'library',
+		role: 'library_guide',
+		playability: 'playable',
+		isInLibrary: true,
+		isColdStart: false,
+		genres: [],
+		score: 1,
+		confidence: 1,
+		supportCount: 0,
+		inDegree: 0,
+		inDegreePctile: 0,
+		primaryReason: 'unknown',
+		reasonTags: [],
+		perSeedScores: [],
+		coverageBonus: 0,
+		externalBonus: 0,
+		libraryPenalty: 0,
+		isSeed: false,
+		isPlaying: false,
+		inPlaylistBuilder: false,
+		isRouteOnly: false,
+		x: 0,
+		y: 0,
+		vx: 0,
+		vy: 0,
+		radius: 10,
+	};
+}
 
 function deferredJson(seedId: number) {
 	let resolve!: (v: unknown) => void;
@@ -131,14 +171,14 @@ describe('loadSpace', () => {
 		expect(get(discoverSpaceStore).activeSeedId).toBe(222);
 	});
 
-	test('normalizeBlendSeeds removes duplicates and assigns equal weights', () => {
-		const seeds = normalizeBlendSeeds([
-			{ kind: 'library', identity: 'library:1', track_id: 1 },
-			{ kind: 'library', identity: 'library:1', track_id: 1 },
-			{ kind: 'library', identity: 'library:2', track_id: 2 },
-		]);
+	test('addBlendSeed removes duplicates and assigns equal weights', () => {
+		addBlendSeed(libraryNode(1, 'Seed A'));
+		addBlendSeed(libraryNode(1, 'Seed A duplicate'));
+		addBlendSeed(libraryNode(2, 'Seed B'));
 
+		const seeds = get(discoverSpaceStore).blendSeeds;
 		expect(seeds).toHaveLength(2);
+		expect(seeds.map((seed) => seed.identity)).toEqual(['library:1', 'library:2']);
 		expect(seeds[0]?.weight).toBeCloseTo(0.5);
 		expect(seeds[1]?.weight).toBeCloseTo(0.5);
 	});

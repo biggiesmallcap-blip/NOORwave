@@ -73,7 +73,7 @@ function blendSeedIdentity(seed: DiscoverBlendSeed): string {
 	return `pending:${(seed.artist ?? '').trim().toLowerCase()}:${(seed.title ?? '').trim().toLowerCase()}`;
 }
 
-export function normalizeBlendSeeds(seeds: DiscoverBlendSeed[]): DiscoverBlendSeed[] {
+function normalizeBlendSeeds(seeds: DiscoverBlendSeed[]): DiscoverBlendSeed[] {
 	const seen = new Set<string>();
 	const unique = seeds
 		.map((seed) => ({ ...seed, identity: seed.identity || blendSeedIdentity(seed) }))
