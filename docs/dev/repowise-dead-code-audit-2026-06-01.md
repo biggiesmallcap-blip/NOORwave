@@ -94,6 +94,7 @@ Svelte action usage, Rust `#[cfg(test)]` modules, or public route merges.
 | `frontend/src/lib/stores/training.ts::{handleTrainingFailed, resetTrainingState}` | Removed after exact `rg` found only the store definitions and this audit note. The live websocket producer still uses `handleTrainingProgress` and `handleTrainingComplete`; settings failures use local page state. |
 | `frontend/src/lib/api/ws.ts::disconnectWebSocket` | Removed after exact `rg` found no live caller. The app layout still imports and calls `connectWebSocket`; the current unmount cleanup never disconnected the singleton websocket. |
 | `noor-server/src/services/discovery_blend.rs::Playability::Unavailable` | Keep as a reserved serialized discovery blend response value. Rust-analyzer found no current construction, but `/api/discovery/blend/*` serializes `playability`, and the frontend `DiscoverPlayability` union already accepts `unavailable`. |
+| `noor-server/src/services/tidal/auth.rs::PersistedTidalTokens::tokens` | Keep. Rust-analyzer found references in the encrypted and legacy plaintext persistence tests, where the helper checks decoded token fields without consuming the wrapper before `needs_encrypted_rewrite()`. |
 
 ## Manual Review
 
@@ -104,7 +105,6 @@ Svelte action usage, Rust `#[cfg(test)]` modules, or public route merges.
 | Repeated frontend artwork failure helpers such as `markArtworkFailed` and `failedArtworkUrls` | Duplicate scan found the same local fallback pattern across player, album, artist, TIDAL, quiet-mode, and remote surfaces. These are visible UI fallback paths with per-component Svelte state and contract-test coverage, so consolidation should happen in a focused artwork-surface slice rather than this backend cleanup slice. |
 | `noor-server/src/db/queries.rs` cargo-check dead-code warnings | SQL/query boundary. Remaining warnings include Spotify playcount cache, embedding-model lookup and rollback helpers, external-candidate feature and prune helpers, and temporary DJ-profile promotion. Several are still referenced by unit tests, docs, or playback plans, so they need a query-contract slice rather than broad deletion. |
 | `noor-server/src/playback/{dj_engine.rs, player.rs, queue.rs, runtime/mod.rs, wasapi_exclusive.rs}` cargo-check dead-code warnings | Playback, queue, and WASAPI boundaries are manual-review only by repo rule. Remaining warnings need product-path validation around DJ lookahead, shuffle, transition planning, prepared mixer state, and exclusive output before any removal. |
-| `noor-server/src/services/tidal/auth.rs::PersistedTidalTokens::tokens` | Auth/token boundary. Leave untouched until the TIDAL auth flow and token persistence contracts are reviewed together. |
 | Any remaining safe-only output not listed under `keep` | Not locally validated in this course. Treat as manual review, not as a delete request. |
 
 ## Hook-Up Review Notes
