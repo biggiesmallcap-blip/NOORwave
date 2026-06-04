@@ -25,23 +25,6 @@ percent nudge until a separate prepared-buffer plan proves a new deadline. Do
 not use Rubber Band without license review.
 - Spawned by: DJ beat-sync design planning, 2026-05-26
 
-### refactor(db/signals): extract analytics signals from db/queries.rs
-
-The five `get_signals_*` functions (`get_signals_kpis`, `get_signals_tempo`,
-`get_signals_sonic_field`, `get_signals_ridgeline`, `get_signals_audio_profile`)
-and their `get_analytics_signals` orchestrator form a coherent cluster
-inside the 11k-line `db/queries.rs`. None of them are tested - that's the
-real friction, and it's also why the file shows 1.8/10 hotspot health and
-the "brain method" biomarker on `get_signals_tempo` (148 LOC).
-
-The architecture-review surfaced this as "Worth exploring" because the
-win is `interface as test surface`: pull them into `db/signals.rs` behind
-a `Signals::compute(conn, days, granularity)` interface and build one
-in-memory `TestDb` fixture (listen_history + audio_dsp_features + tracks)
-that exercises every signal through one path. Without the fixture, the
-move is pure code motion - hence deferred.
-- Spawned by: arch/deepening architecture review (2026-05-24)
-
 ### chore: re-add Viral 50 Global to /charts when Sportify proxy recovers
 
 Removed `37i9dQZEVXbLiRSasKsNU9` (Viral 50 Global) from `frontend/src/routes/charts/+page.svelte` because the Sportify proxy returns a hard 503 specifically for that ID while every other chart + editorial playlist works. Periodically curl `https://sportify.xcasper.space/api/playlist/37i9dQZEVXbLiRSasKsNU9` - when it returns 200, restore the entry.

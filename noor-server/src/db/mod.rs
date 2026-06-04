@@ -2,6 +2,7 @@ pub mod audio_settings;
 pub mod models;
 pub mod queries;
 pub mod schema;
+pub mod signals;
 
 use anyhow::Result;
 use rusqlite::Connection;
