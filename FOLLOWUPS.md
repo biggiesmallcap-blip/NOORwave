@@ -25,16 +25,6 @@ percent nudge until a separate prepared-buffer plan proves a new deadline. Do
 not use Rubber Band without license review.
 - Spawned by: DJ beat-sync design planning, 2026-05-26
 
-### a11y: scope hidden queue actions out of the accessibility tree per row
-
-`.queue-actions` is `opacity: 0; pointer-events: none` until the row receives
-hover or focus, but the buttons stay in the a11y tree and keep their tabindex.
-Keyboard activation still works, but a screen-reader virtual cursor can list
-buttons that aren't visible. Wiring `inert` on the container needs per-row
-hover/focus state (CSS can't toggle attributes), so it's larger than the rest
-of the polish bundle. Audit item 8 from the 2026-05-23 queue UI audit.
-- Spawned by: feature/queue-ui-qol (Commit 8 area)
-
 ### refactor(db/signals): extract analytics signals from db/queries.rs
 
 The five `get_signals_*` functions (`get_signals_kpis`, `get_signals_tempo`,
