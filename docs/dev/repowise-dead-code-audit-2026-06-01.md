@@ -70,9 +70,10 @@ Svelte action usage, Rust `#[cfg(test)]` modules, or public route merges.
 | `frontend/src/lib/actions/lazy-tidal-art.ts::lazyTidalArt` | Referenced by `AlbumCarousel.svelte`, `ArtistCarousel.svelte`, `ChartMural.svelte`, `VideoCard.svelte`, library and Spotify routes, plus the artwork contract script. |
 | `frontend/src/lib/actions/wheel-to-horizontal.ts::wheelToHorizontal` | Referenced by carousel, rail, search, mood, and home Svelte surfaces. |
 | `frontend/src/lib/stores/audio_analysis.ts` settings helpers | Exact `rg` found `loadAudioStats`, `syncAnalysisStatus`, `clearAllAnalysis`, `loadPassiveDspState`, and `setPassiveDspEnabled` imported and called by `frontend/src/routes/settings/+page.svelte`. |
-| `frontend/src/lib/utils/color.ts::letterColor` | Referenced by artist and search surfaces. |
-| `frontend/src/lib/utils/debounce.ts::debounce` | Referenced by `frontend/src/routes/analytics/+page.svelte`. |
-| `frontend/src/lib/utils/track.ts::tidalSearchTrackToPlayable` | Referenced by `frontend/src/routes/search/+page.svelte`. |
+| `frontend/src/lib/utils/color.ts::letterColor` | Exact `rg` found imports from artist and search surfaces. |
+| `frontend/src/lib/utils/debounce.ts::debounce` | Exact `rg` found the analytics route imports and uses `debounce` for websocket refresh coalescing. |
+| `frontend/src/lib/utils/track.ts::tidalSearchTrackToPlayable` | Exact `rg` found the search route imports and assigns `tidalSearchTrackToPlayable` to its local playable converter. |
+| `frontend/src/lib/stores/trending-cache.ts::{getCached, putCached}` | Exact `rg` found `TrendingShelf.svelte` imports and calls both chart cache helpers, and its contract test checks the calls. |
 | `frontend/src/lib/player/play_trending.ts::{playChartTidalTrack, playChartTidalTracks}` | Referenced by `TrendingShelf.svelte`, `HomeRecommendationsShelf.svelte`, and related contract tests. |
 | `frontend/src/lib/player/video_menu.ts::buildVideoMixMenu` | Referenced by `frontend/src/lib/components/video/VideoCard.svelte`. Context-menu builders are manual-review only even when apparently unused. |
 | `frontend/src/lib/remote/action_sheet.ts::openActionSheet` | Referenced by remote transport, queue, track row, album tile, and mini search components. |
@@ -81,16 +82,18 @@ Svelte action usage, Rust `#[cfg(test)]` modules, or public route merges.
 | `frontend/src/lib/components/charts/ridge-kde.ts::{kde1d, ridgePath, rowMax}` | Referenced by `TempoRidges.svelte`, `MiniSilhouette.svelte`, and `ListenRidgeline.svelte`. |
 | `frontend/src/lib/components/wallpaper/palettes.ts::rgbCss` | Referenced by `frontend/src/routes/settings/+page.svelte`. |
 | `frontend/src/lib/components/wallpaper/shaders.ts::wallpaperById` | Referenced by `frontend/src/routes/+layout.svelte`. |
-| `frontend/src/lib/stores/uiZoom.ts::{zoomIn, zoomOut, nudgeZoom, resetZoom}` | Referenced by layout and settings surfaces. |
-| `frontend/src/lib/stores/wallpaper.ts::{setWallpaper, setWallpaperFps, setWallpaperBlur}` | Referenced by `frontend/src/routes/settings/+page.svelte`. |
+| `frontend/src/lib/stores/uiZoom.ts::{zoomIn, zoomOut, nudgeZoom, resetZoom}` | Exact `rg` found keyboard and wheel zoom usage in the app layout, plus settings route controls for `zoomIn`, `zoomOut`, and `resetZoom`. |
+| `frontend/src/lib/stores/video_session.ts` request helpers | Exact `rg` found `requestVideoJump`, `requestVideoAutoplayToggle`, and `requestVideoClear` imported and called by the app layout video overlay. |
+| `frontend/src/lib/stores/wallpaper.ts::{setWallpaper, setWallpaperFps, setWallpaperBlur}` | Exact `rg` found all three wallpaper actions imported and called by `frontend/src/routes/settings/+page.svelte`. |
 | `frontend/src/lib/stores/playlist_artwork_cache.ts` exported helpers | Exact `rg` found `getCachedMosaic`, `setCachedMosaic`, `snapshotCache`, `pickArtworkUrls`, and `nameToGradient` imported and called by `frontend/src/routes/playlists/+page.svelte`; the playlist artwork contract test also checks `pickArtworkUrls`. |
 | TIDAL home, mixes, moods, and radio cache helpers | Exact `rg` found home-module cache helpers imported by `DiscoverShelves.svelte`, mixes cache helpers by `YourMixesShelf.svelte`, mood-page cache helpers by `routes/moods/[slug]/+page.svelte`, and radio station cache helpers by `PersonalRadioShelf.svelte`. |
 | `frontend/src/lib/stores/queue_announcer.ts::flushResolved` | Internal timer callback in the same file. Repowise labeled it incorrectly as an export candidate. |
 | `frontend/src/lib/stores/quiet_mode.ts::{openQuietMode, closeQuietMode}` | Exact `rg` found `openQuietMode` imported by the app layout and `closeQuietMode` imported by `QuietMode.svelte`. |
-| `frontend/src/lib/stores/tidal.ts::{setAutoSyncDaily, cancelTidalSync}` | Referenced by `frontend/src/routes/settings/+page.svelte`. |
+| `frontend/src/lib/stores/tidal.ts::{setAutoSyncDaily, cancelTidalSync}` | Exact `rg` found both TIDAL sync actions imported and called by `frontend/src/routes/settings/+page.svelte`. |
 | `frontend/src/lib/stores/context_menu.ts` exported store and open/close helpers | Exact `rg` found `openContextMenu`, `openMenuAtElement`, `cancelContextMenuClose`, and `closeContextMenu` imported by layout, album/artist/search/library/chart/video routes, shared components, and context menu UI. Context-menu behavior is a manual-review boundary. |
 | `frontend/src/lib/stores/library.ts` exported loaders and selection helpers | Exact `rg` found `loadTracks`, `loadAlbums`, `loadArtists`, `selectTrackIds`, `selectAlbumIds`, and `clearSelection` imported by the library route and library store tests. |
 | `frontend/src/lib/stores/palette.ts::setPalette` | Exact `rg` found the settings route imports and calls `setPalette`. |
+| `frontend/src/lib/util/platform.ts::getCmdOrCtrlLabel` | Exact `rg` found `QuietMode.svelte` imports and uses the shortcut label helper. |
 | `frontend/src/lib/stores/tidal-moods-cache.ts::{getCachedMoodPage, putCachedMoodPage}` | Referenced by `frontend/src/routes/moods/[slug]/+page.svelte`; the landing cache helpers are also used by the moods route and home moods rail. |
 | DiscoverSpace renderer exports in `frontend/src/lib/components/DiscoverSpace/discover_space_renderer.ts` | Exact `rg` found every exported renderer helper imported and called by `DiscoverSpace.svelte`. These are live canvas drawing helpers for background, orbit rings, visited regions, genre nebulae, edges, nodes, seed and playing overlays, labels, route overlay, selection ripple, warp streaks, and cache invalidation. |
 | Remaining DiscoverSpace store exports in `frontend/src/lib/components/DiscoverSpace/discover_space_store.ts` | Exact `rg` found `discoverSpaceStore`, blend seed actions, blend queue actions, `loadSpace`, `loadBlendSpace`, seed locks, lens updates, visited-region recording, `setRadioRoute`, `setRefreshProgress`, and `handleDiscoverySpaceRefreshed` imported by `routes/discoverspace/+page.svelte`, DiscoverSpace Svelte components, `api/ws.ts`, or the colocated store test. |
@@ -157,6 +160,7 @@ file changes. Do not stage the whole worktree as one audit commit.
 | Context menu, library store, and palette exports | Resolved as false positives. | Exact `rg` found every candidate in this block imported by live Svelte routes, shared components, or colocated store tests, so no context-menu, library, or palette exports were removed. |
 | Audio-analysis settings exports | Resolved as false positives. | Exact `rg` found the remaining audio-analysis store helpers imported and called by the settings route; `startAnalysis` and `stopAnalysis` remain removed. |
 | Quiet-mode and TIDAL cache exports | Resolved as false positives. | Exact `rg` found the live quiet-mode actions and the TIDAL home, mixes, moods, and radio cache helpers imported by their route or shelf owners, so no cache helpers were removed. |
+| Remaining frontend utility exports | Resolved as false positives. | Exact `rg` found live callers for the TIDAL sync actions, trending cache helpers, UI zoom actions, video session request helpers, wallpaper actions, shortcut label helper, `letterColor`, `debounce`, and `tidalSearchTrackToPlayable`. |
 
 ## Next Check
 
