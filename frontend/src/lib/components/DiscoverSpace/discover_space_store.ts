@@ -439,11 +439,3 @@ export function handleDiscoverySpaceRefreshed(seedTrackId: number): void {
 		loadSpace(s.mode, seedTrackId, undefined, s.activeSeedSource, track?.id ?? null);
 	}
 }
-
-export function clearRadioRoute(): void {
-	discoverSpaceStore.update((s) => ({
-		...s,
-		radioRoute: [],
-		nodes: s.nodes.filter((n) => !n.isRouteOnly),
-	}));
-}
