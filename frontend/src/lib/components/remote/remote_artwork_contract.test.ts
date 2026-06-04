@@ -12,6 +12,7 @@ function source(path: string): string {
 
 const remoteTransport = source('lib/components/remote/RemoteTransport.svelte');
 const remoteLayout = source('routes/remote/+layout.svelte');
+const remoteAlbumTile = source('lib/components/remote/RemoteAlbumTile.svelte');
 
 describe('remote artwork contracts', () => {
 	test('remote now-playing art uses an allowed TIDAL size and broken-image fallback', () => {
@@ -27,5 +28,18 @@ describe('remote artwork contracts', () => {
 		expect(remoteLayout).toContain("let backdropArt = $derived(upscaleTidalArtwork($currentTrack?.artwork_url, 1280));");
 		expect(remoteLayout).toContain('{#if backdropArt && !backdropArtFailed}');
 		expect(remoteLayout).toContain('onerror={() => (backdropArtFailed = true)}');
+	});
+
+	test('remote album tiles use shared TIDAL fallback handling', () => {
+		expect(remoteAlbumTile).toContain("import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';");
+		expect(remoteAlbumTile).toContain('<ArtworkImage');
+		expect(remoteAlbumTile).toContain('className="remote-album-tile-artwork"');
+		expect(remoteAlbumTile).toContain('src={artworkUrl}');
+		expect(remoteAlbumTile).toContain('size={320}');
+		expect(remoteAlbumTile).toContain('fallbackText="NOOR"');
+		expect(remoteAlbumTile).toContain('decorative={true}');
+		expect(remoteAlbumTile).toContain(':global(.remote-album-tile-artwork)');
+		expect(remoteAlbumTile).not.toContain("import { upscaleTidalArtwork } from '$lib/utils/artwork';");
+		expect(remoteAlbumTile).not.toMatch(/<img[\s\S]*(artworkUrl|upscaleTidalArtwork|onerror)/);
 	});
 });
