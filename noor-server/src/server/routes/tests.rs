@@ -2872,6 +2872,161 @@ async fn runtime_finish_skips_unresolved_pending_row_and_starts_next_library_tra
 }
 
 #[tokio::test]
+async fn runtime_finish_adopts_pending_row_resolved_by_background_resolver() {
+    let (db, db_path) = fresh_migrated_db();
+    let (current_qid, pending_qid) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (8300, 'Queued Artist')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, duration_ms, tidal_id, best_source, source)
+                 VALUES
+                    (8301, 'Finished Track', 8300, 180000, 88301, 'tidal', 'tidal'),
+                    (8302, 'Unrelated Next Track', 8300, 180000, 88302, 'tidal', 'tidal'),
+                    (8303, 'Background Resolved Track', 8300, 180000, 88303, 'tidal', 'tidal')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (8301, 0, 'test')",
+                [],
+            )?;
+            let current_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (
+                    track_id, position, source, pending_artist, pending_title, pending_at, resolving_at
+                 ) VALUES (
+                    NULL, 1, 'radio_pending', 'Resolved Artist', 'Resolved Title',
+                    datetime('now'), datetime('now')
+                 )",
+                [],
+            )?;
+            let pending_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (8302, 2, 'test')",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE playback_state
+                 SET current_track_id = 8301, current_queue_item_id = ?1, is_playing = 1
+                 WHERE id = 1",
+                rusqlite::params![current_qid],
+            )?;
+            Ok((current_qid, pending_qid))
+        })
+        .unwrap();
+    assert!(current_qid > 0);
+
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+    let (command_tx, command_rx) = std::sync::mpsc::channel();
+    let (switched_tx, switched_rx) = std::sync::mpsc::channel();
+    let runtime_thread = std::thread::spawn(move || {
+        match command_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("track status command")
+        {
+            playback_runtime::PlaybackRuntimeCommand::TrackStatus {
+                track_id,
+                generation,
+                respond_to,
+            } => {
+                assert_eq!(track_id, 8303);
+                assert_eq!(generation, 1);
+                respond_to
+                    .send(playback_runtime::PlaybackTrackStatus::Prepared)
+                    .expect("track status response");
+            }
+            other => panic!("expected TrackStatus command, got {other:?}"),
+        }
+
+        match command_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("switch command")
+        {
+            playback_runtime::PlaybackRuntimeCommand::Switch(job) => {
+                switched_tx.send(job.track.id).expect("switched track id");
+            }
+            other => panic!("expected Switch command, got {other:?}"),
+        }
+    });
+
+    {
+        let mut guard = state.write().await;
+        guard.tidal_tokens = Some(tidal_auth::TidalTokens {
+            access_token: "test-token".to_string(),
+            refresh_token: "refresh-token".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: 3600,
+            user_id: "test-user".to_string(),
+            country_code: "US".to_string(),
+            auth_flow: Some("pkce".to_string()),
+        });
+        guard.playback_runtime = Some(PlaybackRuntimeState {
+            access_token: "test-token".to_string(),
+            handle: playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx),
+        });
+        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+            device_name: "Test DAC".to_string(),
+            sample_rate: 48_000,
+            channels: 2,
+            active_track_id: Some(8301),
+            last_error: None,
+            exclusive_engaged: false,
+            exclusive_transport_format: None,
+        });
+    }
+
+    let db_for_resolve = db.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(
+            PLAYBACK_PENDING_BUSY_RETRY_DELAY_MS / 2,
+        ))
+        .await;
+        db_for_resolve
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE queue
+                     SET track_id = 8303,
+                         resolving_at = NULL,
+                         resolved_at = datetime('now')
+                     WHERE id = ?1",
+                    rusqlite::params![pending_qid],
+                )?;
+                Ok(())
+            })
+            .expect("promote pending row");
+    });
+
+    handle_runtime_finished(state.clone(), 8301, 1)
+        .await
+        .expect("runtime finish");
+
+    assert_eq!(
+        switched_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("switched track"),
+        8303
+    );
+    runtime_thread.join().expect("runtime thread");
+
+    let (current_track_id, current_queue_item_id): (Option<i64>, Option<i64>) = db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT current_track_id, current_queue_item_id FROM playback_state WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(anyhow::Error::from)
+        })
+        .unwrap();
+    assert_eq!(current_track_id, Some(8303));
+    assert_eq!(current_queue_item_id, Some(pending_qid));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn prepared_runtime_track_error_keeps_current_playback_running() {
     let (db, db_path) = fresh_migrated_db();
     seed_basic_tracks(&db);

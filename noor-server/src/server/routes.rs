@@ -60,6 +60,8 @@ const DROP_PREVIEW_ARM_RETRY_SECS: u64 = 60 * 60;
 const PLAYBACK_FINISH_DB_LOCK_RETRY_LIMIT: usize = 60;
 const PLAYBACK_FINISH_DB_LOCK_RETRY_DELAY_SECS: u64 = 2;
 const PLAYBACK_ADVANCE_PENDING_SKIP_LIMIT: usize = 8;
+const PLAYBACK_PENDING_BUSY_RETRY_LIMIT: usize = 5;
+const PLAYBACK_PENDING_BUSY_RETRY_DELAY_MS: u64 = 200;
 
 static DROP_PREVIEW_ARM_ATTEMPTS: OnceLock<Mutex<HashMap<DropPreviewArmKey, Instant>>> =
     OnceLock::new();
@@ -7131,6 +7133,74 @@ async fn next_persisted_playback_snapshot(
         .with_conn(|conn| player::next_track(conn, cleared))
 }
 
+async fn adopt_resolved_current_queue_item(
+    state: &SharedState,
+    queue_item_id: i64,
+    generation: u64,
+) -> anyhow::Result<Option<player::PlaybackSnapshot>> {
+    if !playback_generation_is_current(state, generation).await {
+        return Ok(None);
+    }
+
+    let (db, event_tx) = {
+        let state_guard = state.read().await;
+        (state_guard.db.clone(), state_guard.event_tx.clone())
+    };
+
+    let adopted_track_id = db.with_conn(move |conn| {
+        let track_id: Option<i64> = conn
+            .query_row(
+                "SELECT track_id FROM queue WHERE id = ?1 AND track_id IS NOT NULL",
+                params![queue_item_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(track_id) = track_id else {
+            return Ok(None);
+        };
+        let updated = conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = ?1, position_ms = 0
+             WHERE id = 1
+               AND current_track_id IS NULL
+               AND current_queue_item_id = ?2",
+            params![track_id, queue_item_id],
+        )?;
+        Ok(if updated == 1 { Some(track_id) } else { None })
+    })?;
+
+    let Some(track_id) = adopted_track_id else {
+        return Ok(None);
+    };
+    if !playback_generation_is_current(state, generation).await {
+        return Ok(None);
+    }
+
+    let _ = event_tx.send(AppEvent::TrackChanged { track_id });
+    let _ = event_tx.send(AppEvent::PlaybackStateChanged);
+    let snapshot = load_persisted_playback_snapshot(state).await?;
+    if snapshot.state.current_track.is_some() {
+        tracing::info!(
+            target: "noor.playback.resolve",
+            event = "pending_current_adopted_background_resolution",
+            queue_item_id,
+            track_id,
+            "adopted pending row resolved by background resolver"
+        );
+        return Ok(Some(snapshot));
+    }
+    Ok(None)
+}
+
+async fn pending_current_resolver_is_busy(state: &SharedState, queue_item_id: i64) -> bool {
+    let db = {
+        let state_guard = state.read().await;
+        state_guard.db.clone()
+    };
+    db.with_conn(move |conn| pending::has_fresh_resolver_lock(conn, queue_item_id))
+        .unwrap_or(false)
+}
+
 async fn stop_persisted_playback_after_advance_failure(
     state: &SharedState,
     context: &'static str,
@@ -7163,6 +7233,7 @@ async fn resolve_or_skip_pending_current(
     context: &'static str,
 ) -> anyhow::Result<player::PlaybackSnapshot> {
     let mut skipped = 0usize;
+    let mut busy_waits = 0usize;
 
     loop {
         if snapshot.state.current_track.is_some() || snapshot.state.current_queue_item_id.is_none()
@@ -7170,7 +7241,9 @@ async fn resolve_or_skip_pending_current(
             return Ok(snapshot);
         }
 
-        let queue_item_id = snapshot.state.current_queue_item_id;
+        let Some(queue_item_id) = snapshot.state.current_queue_item_id else {
+            return Ok(snapshot);
+        };
         if resolve_pending_current_queue_item(state, generation)
             .await
             .is_some()
@@ -7182,9 +7255,10 @@ async fn resolve_or_skip_pending_current(
         } else {
             let reloaded = load_persisted_playback_snapshot(state).await?;
             if reloaded.state.current_track.is_some()
-                || reloaded.state.current_queue_item_id != queue_item_id
+                || reloaded.state.current_queue_item_id != Some(queue_item_id)
             {
                 snapshot = reloaded;
+                busy_waits = 0;
                 continue;
             }
         }
@@ -7193,7 +7267,31 @@ async fn resolve_or_skip_pending_current(
             return load_persisted_playback_snapshot(state).await;
         }
 
+        if let Some(adopted_snapshot) =
+            adopt_resolved_current_queue_item(state, queue_item_id, generation).await?
+        {
+            return Ok(adopted_snapshot);
+        }
+
+        if busy_waits < PLAYBACK_PENDING_BUSY_RETRY_LIMIT
+            && pending_current_resolver_is_busy(state, queue_item_id).await
+        {
+            busy_waits += 1;
+            tracing::debug!(
+                target: "noor.playback.advance",
+                event = "pending_current_busy_wait",
+                context,
+                queue_item_id,
+                busy_waits,
+                "current pending row is still resolving; waiting before skip"
+            );
+            tokio::time::sleep(Duration::from_millis(PLAYBACK_PENDING_BUSY_RETRY_DELAY_MS)).await;
+            snapshot = load_persisted_playback_snapshot(state).await?;
+            continue;
+        }
+
         skipped += 1;
+        busy_waits = 0;
         tracing::warn!(
             target: "noor.playback.advance",
             event = "pending_current_skipped",

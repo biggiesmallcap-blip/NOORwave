@@ -49,6 +49,21 @@ pub fn try_claim(conn: &Connection, queue_item_id: i64) -> Result<bool> {
     Ok(updated == 1)
 }
 
+/// Returns true when a pending queue row is still owned by a live resolver.
+pub fn has_fresh_resolver_lock(conn: &Connection, queue_item_id: i64) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM queue
+             WHERE id = ?1
+               AND track_id IS NULL
+               AND resolving_at IS NOT NULL
+               AND resolving_at >= datetime('now', '-30 seconds')
+         )",
+        params![queue_item_id],
+        |row| row.get(0),
+    )?)
+}
+
 /// Best-effort lock release. Used by resolvers that bail before promoting
 /// (no match, import error). Idempotent; if the row has been resolved in
 /// the meantime, the UPDATE simply hits zero rows.
@@ -302,6 +317,28 @@ mod tests {
         .expect("resolve row");
 
         assert!(!try_claim(&conn, 42).expect("claim"));
+    }
+
+    #[test]
+    fn has_fresh_resolver_lock_ignores_stale_and_resolved_rows() {
+        let conn = setup_conn();
+        let track_id = seed_track(&conn, Some(542));
+        seed_pending_queue_row(&conn, 43);
+        seed_pending_queue_row(&conn, 44);
+        seed_pending_queue_row(&conn, 45);
+        set_resolving_at(&conn, 43, "-10 seconds");
+        set_resolving_at(&conn, 44, "-31 seconds");
+        conn.execute(
+            "UPDATE queue
+             SET track_id = ?1, resolving_at = datetime('now', '-10 seconds')
+             WHERE id = 45",
+            params![track_id],
+        )
+        .expect("resolve row");
+
+        assert!(has_fresh_resolver_lock(&conn, 43).expect("fresh lock"));
+        assert!(!has_fresh_resolver_lock(&conn, 44).expect("stale lock"));
+        assert!(!has_fresh_resolver_lock(&conn, 45).expect("resolved row"));
     }
 
     #[test]
