@@ -11320,7 +11320,18 @@ async fn switch_runtime_to_snapshot_current(
     snapshot: &player::PlaybackSnapshot,
     generation: u64,
 ) -> anyhow::Result<()> {
+    let current_queue_item_id = snapshot.state.current_queue_item_id;
+    let queue_len = snapshot.queue.len();
+
     if snapshot.state.current_track.is_none() {
+        tracing::info!(
+            target: "noor.playback.runtime",
+            event = "runtime_snapshot_empty",
+            generation,
+            ?current_queue_item_id,
+            queue_len,
+            "snapshot has no current track; clearing runtime active track"
+        );
         let mut state_guard = state.write().await;
         if let Some(info) = state_guard.playback_runtime_info.as_mut() {
             info.active_track_id = None;
@@ -11350,7 +11361,21 @@ async fn switch_runtime_to_snapshot_current(
                 user_quality,
             )
             .with_generation(generation);
-            runtime_handle.switch_to(job)?;
+            runtime_handle.switch_to(job).map_err(|error| {
+                tracing::warn!(
+                    target: "noor.playback.runtime",
+                    event = "runtime_snapshot_switch_failed",
+                    generation,
+                    track_id = track.id,
+                    ?current_queue_item_id,
+                    queue_len,
+                    runtime_track_status = ?prepared_status,
+                    stream_resolved = false,
+                    error = %error,
+                    "failed to switch runtime to prepared snapshot current track"
+                );
+                error
+            })?;
             {
                 let mut state_guard = state.write().await;
                 if let Some(info) = state_guard.playback_runtime_info.as_mut() {
@@ -11361,6 +11386,17 @@ async fn switch_runtime_to_snapshot_current(
                     state_guard.current_stream_display = Some(pending);
                 }
             }
+            tracing::info!(
+                target: "noor.playback.runtime",
+                event = "runtime_snapshot_switch",
+                generation,
+                track_id = track.id,
+                ?current_queue_item_id,
+                queue_len,
+                runtime_track_status = ?prepared_status,
+                stream_resolved = false,
+                "switched runtime to prepared snapshot current track"
+            );
         } else {
             let Some(stream_request) =
                 player::build_tidal_stream_request(track, user_quality.clone())
@@ -11387,7 +11423,21 @@ async fn switch_runtime_to_snapshot_current(
                 user_quality,
             )
             .with_generation(generation);
-            runtime_handle.switch_to(job)?;
+            runtime_handle.switch_to(job).map_err(|error| {
+                tracing::warn!(
+                    target: "noor.playback.runtime",
+                    event = "runtime_snapshot_switch_failed",
+                    generation,
+                    track_id = track.id,
+                    ?current_queue_item_id,
+                    queue_len,
+                    runtime_track_status = ?prepared_status,
+                    stream_resolved = true,
+                    error = %error,
+                    "failed to switch runtime after resolving snapshot stream"
+                );
+                error
+            })?;
             {
                 let mut state_guard = state.write().await;
                 if let Some(info) = state_guard.playback_runtime_info.as_mut() {
@@ -11401,6 +11451,17 @@ async fn switch_runtime_to_snapshot_current(
                 });
                 state_guard.pending_stream_display = None;
             }
+            tracing::info!(
+                target: "noor.playback.runtime",
+                event = "runtime_snapshot_switch",
+                generation,
+                track_id = track.id,
+                ?current_queue_item_id,
+                queue_len,
+                runtime_track_status = ?prepared_status,
+                stream_resolved = true,
+                "switched runtime after resolving snapshot stream"
+            );
         }
     }
 
