@@ -251,6 +251,7 @@ Targeted verification passed during the implementation slices:
 - `pnpm lint`
 - `pnpm run build`
 - `cargo check -p noor-server`
+- `cargo check -p noor-app`
 - `cargo fmt --all -- --check`
 - `cargo test -p noor-server replace_queue_handles_large_playlist_in_order`
 - `cargo test -p noor-server replace_and_load_queue_round_trip`
