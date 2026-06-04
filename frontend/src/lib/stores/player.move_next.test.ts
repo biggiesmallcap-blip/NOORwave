@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { computePlayNextPos, selectOptimisticNextItem } from './player';
+import { computePlayNextPos, normalizePlayerError, selectOptimisticNextItem } from './player';
 
 // Regression: moveQueueTrackNext used to rebuild the queue via
 // replacePlaybackQueue(track_ids), which silently dropped ephemeral TIDAL
@@ -66,5 +66,16 @@ describe('selectOptimisticNextItem', () => {
 
 		expect(selectOptimisticNextItem(queue, 1, 12)?.id).toBe(13);
 		expect(selectOptimisticNextItem(queue, 1, null)?.id).toBe(11);
+	});
+});
+
+describe('normalizePlayerError', () => {
+	test('maps API timeouts to a concrete retry message', () => {
+		expect(
+			normalizePlayerError(
+				'start playback',
+				new Error('API request timed out after 20000 ms: /api/playback/next')
+			)
+		).toBe('Server took too long. Try again.');
 	});
 });

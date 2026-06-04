@@ -1,4 +1,20 @@
 const API_BASE = 'http://localhost:3334';
+export const DEFAULT_API_TIMEOUT_MS = 20_000;
+export const BULK_QUEUE_API_TIMEOUT_MS = 90_000;
+
+type ApiRequestInit = RequestInit & {
+	timeoutMs?: number;
+};
+
+export class ApiTimeoutError extends Error {
+	constructor(
+		public path: string,
+		public timeoutMs: number
+	) {
+		super(`API request timed out after ${timeoutMs} ms: ${path}`);
+		this.name = 'ApiTimeoutError';
+	}
+}
 
 export function getApiBase(): string {
 	if (typeof window === 'undefined') {
@@ -26,13 +42,72 @@ export function clearStoredToken(): void {
 	localStorage.removeItem(TOKEN_KEY);
 }
 
+function requestTimeout(
+	path: string,
+	externalSignal: AbortSignal | null | undefined,
+	timeoutMs: number
+): {
+	signal: AbortSignal | undefined;
+	cleanup: () => void;
+	timedOut: () => boolean;
+} {
+	if (timeoutMs <= 0) {
+		return { signal: externalSignal ?? undefined, cleanup: () => {}, timedOut: () => false };
+	}
+
+	const controller = new AbortController();
+	let timedOut = false;
+	let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+	const abortFromExternal = () => {
+		controller.abort(externalSignal?.reason);
+	};
+
+	if (externalSignal?.aborted) {
+		abortFromExternal();
+	} else {
+		externalSignal?.addEventListener('abort', abortFromExternal, { once: true });
+	}
+
+	timeoutId = setTimeout(() => {
+		timedOut = true;
+		controller.abort(new ApiTimeoutError(path, timeoutMs));
+	}, timeoutMs);
+
+	return {
+		signal: controller.signal,
+		cleanup: () => {
+			if (timeoutId !== null) clearTimeout(timeoutId);
+			externalSignal?.removeEventListener('abort', abortFromExternal);
+		},
+		timedOut: () => timedOut,
+	};
+}
+
+function timeoutForOptions(
+	options: ApiRequestInit | undefined,
+	fallback = DEFAULT_API_TIMEOUT_MS
+): number {
+	return typeof options?.timeoutMs === 'number' ? options.timeoutMs : fallback;
+}
+
 // Drop-in replacement for fetch() that attaches the Bearer token and fires
 // the noor:unauthorized event on 401, matching the behaviour of fetchApiResponse.
-export async function authFetch(url: string, init?: RequestInit): Promise<Response> {
+export async function authFetch(url: string, init?: ApiRequestInit): Promise<Response> {
 	const token = getStoredToken();
 	const headers = new Headers(init?.headers);
 	if (token) headers.set('authorization', `Bearer ${token}`);
-	const resp = await fetch(url, { ...init, headers });
+	const { timeoutMs: _timeoutMs, signal: externalSignal, ...fetchInit } = init ?? {};
+	const timeout = requestTimeout(url, externalSignal, timeoutForOptions(init));
+	let resp: Response;
+	try {
+		resp = await fetch(url, { ...fetchInit, headers, signal: timeout.signal });
+	} catch (error) {
+		if (timeout.timedOut()) throw new ApiTimeoutError(url, timeoutForOptions(init));
+		throw error;
+	} finally {
+		timeout.cleanup();
+	}
 	if (resp.status === 401 && typeof window !== 'undefined') {
 		window.dispatchEvent(new CustomEvent('noor:unauthorized'));
 	}
@@ -2040,7 +2115,7 @@ export interface AudioSettings {
 async function fetchApiResponse(
 	path: string,
 	params?: Record<string, string>,
-	options?: RequestInit
+	options?: ApiRequestInit
 ): Promise<Response> {
 	const url = new URL(`${getApiBase()}${path}`);
 	if (params) {
@@ -2048,22 +2123,29 @@ async function fetchApiResponse(
 	}
 
 	const token = getStoredToken();
-	const authHeader: Record<string, string> = token
-		? { authorization: `Bearer ${token}` }
-		: {};
+	const headers = new Headers(options?.headers);
+	if (!headers.has('content-type')) headers.set('content-type', 'application/json');
+	if (token) headers.set('authorization', `Bearer ${token}`);
 
-	const resp = await fetch(url.toString(), {
-		headers: {
-			'content-type': 'application/json',
-			...authHeader,
-			...(options?.headers as Record<string, string> ?? {}),
-		},
-		...options,
-	});
+	const { timeoutMs: _timeoutMs, signal: externalSignal, ...fetchOptions } = options ?? {};
+	const timeout = requestTimeout(path, externalSignal, timeoutForOptions(options));
+	let resp: Response;
+	try {
+		resp = await fetch(url.toString(), {
+			...fetchOptions,
+			headers,
+			signal: timeout.signal,
+		});
+	} catch (error) {
+		if (timeout.timedOut()) throw new ApiTimeoutError(path, timeoutForOptions(options));
+		throw error;
+	} finally {
+		timeout.cleanup();
+	}
 
 	if (resp.status === 401) {
-		// Token was rejected - dispatch an event so the UI can show the connect screen
-		window.dispatchEvent(new CustomEvent('noor:unauthorized'));
+		// Token was rejected, so dispatch an event for the connect screen.
+		if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('noor:unauthorized'));
 	}
 
 	return resp;
@@ -2089,7 +2171,7 @@ export class ApiError extends Error {
 async function fetchApi<T>(
 	path: string,
 	params?: Record<string, string>,
-	options?: RequestInit
+	options?: ApiRequestInit
 ): Promise<T> {
 	const resp = await fetchApiResponse(path, params, options);
 	if (!resp.ok) {
@@ -2614,6 +2696,8 @@ export const api = {
 	getTidalPlaylistTracks(tidalUuid: string) {
 		return fetchApi<{ tracks: TidalPlayable[] }>(
 			`/api/tidal/playlists/${tidalUuid}/tracks`,
+			undefined,
+			{ timeoutMs: BULK_QUEUE_API_TIMEOUT_MS },
 		);
 	},
 
@@ -3209,6 +3293,7 @@ export const api = {
 		return fetchApi<{ queue: QueueItem[] }>('/api/queue/play_next_many', undefined, {
 			method: 'POST',
 			body: JSON.stringify({ items }),
+			timeoutMs: BULK_QUEUE_API_TIMEOUT_MS,
 		});
 	},
 
@@ -3223,6 +3308,7 @@ export const api = {
 		return fetchApi<{ queue: QueueItem[] }>('/api/queue/append_many', undefined, {
 			method: 'POST',
 			body: JSON.stringify({ items }),
+			timeoutMs: BULK_QUEUE_API_TIMEOUT_MS,
 		});
 	},
 
@@ -3242,6 +3328,7 @@ export const api = {
 			{
 				method: 'POST',
 				body: JSON.stringify(body),
+				timeoutMs: BULK_QUEUE_API_TIMEOUT_MS,
 			}
 		);
 	},
@@ -3423,6 +3510,7 @@ export const api = {
 		return fetchApi<TidalMixPlaybackResponse>('/api/tidal/play-mix', undefined, {
 			method: 'POST',
 			body: JSON.stringify(body),
+			timeoutMs: BULK_QUEUE_API_TIMEOUT_MS,
 		});
 	},
 

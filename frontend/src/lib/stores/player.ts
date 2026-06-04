@@ -163,6 +163,9 @@ export function normalizePlayerError(action: string, error: unknown): string {
 	if (lower.includes('failed to fetch') || lower.includes('networkerror') || lower.includes('network error')) {
 		return "Can't reach the server. Check it's running.";
 	}
+	if (lower.includes('timed out') || lower.includes('timeout')) {
+		return 'Server took too long. Try again.';
+	}
 	if (lower.includes('tidal not connected')) {
 		return 'Tidal disconnected — re-auth in Settings.';
 	}
