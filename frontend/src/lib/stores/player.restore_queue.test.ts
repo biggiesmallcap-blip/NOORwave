@@ -16,6 +16,7 @@ vi.mock('$lib/api/client', async () => {
 	const getAlbumTracks = vi.fn();
 	const replacePlaybackQueue = vi.fn();
 	const startRadioStart = vi.fn();
+	const getRadioTracks = vi.fn();
 	return {
 		api: {
 			addQueueTrack,
@@ -28,6 +29,7 @@ vi.mock('$lib/api/client', async () => {
 			getAlbumTracks,
 			replacePlaybackQueue,
 			startRadioStart,
+			getRadioTracks,
 		},
 		ApiError: class ApiError extends Error {},
 	};
@@ -41,6 +43,7 @@ import {
 	lastSuccessfulCallAt,
 	playAlbum,
 	startSongRadio,
+	startTidalSongRadio,
 	playTrackNow,
 	playTidalTrackNow,
 	playbackQueue,
@@ -52,6 +55,7 @@ import {
 
 type AlbumTracksResult = Awaited<ReturnType<typeof api.getAlbumTracks>>;
 type StartRadioResult = Awaited<ReturnType<typeof api.startRadioStart>>;
+type RadioTracksResult = Awaited<ReturnType<typeof api.getRadioTracks>>;
 
 function libraryRow(id: number, trackId: number): QueueItem {
 	return {
@@ -135,6 +139,36 @@ function radioQueue(current: QueueItem): StartRadioResult {
 	};
 }
 
+function radioResults(trackIds: number[]): RadioTracksResult {
+	return {
+		tracks: trackIds.map((trackId) => ({
+			track_id: trackId,
+			title: `Radio ${trackId}`,
+			artist_name: null,
+			album_title: null,
+			artwork_url: null,
+			duration_ms: 200_000,
+			best_quality: null,
+			similarity_score: 1,
+			adjusted_score: 1,
+			co_listen_score: 0,
+			co_album_score: 0,
+			co_artist_score: 0,
+			genre_proximity: 0,
+			reason_tags: [],
+			model_key: null,
+			source_mode: 'engine',
+		})),
+		seed_track_id: trackIds[0] ?? 0,
+		creativity: 0,
+		context_window: 0,
+		computed_at: null,
+		model_family: null,
+		model_key: null,
+		reasons: [],
+	};
+}
+
 function libraryTrack(trackId: number): Track {
 	return libraryRow(trackId, trackId).track as Track;
 }
@@ -172,6 +206,7 @@ describe('restoreQueueItems', () => {
 		vi.mocked(api.getAlbumTracks).mockClear();
 		vi.mocked(api.replacePlaybackQueue).mockClear();
 		vi.mocked(api.startRadioStart).mockClear();
+		vi.mocked(api.getRadioTracks).mockClear();
 		currentTrack.set(null);
 		currentQueueItemId.set(null);
 		isPlaying.set(false);
@@ -289,6 +324,7 @@ describe('stale playback responses', () => {
 		vi.mocked(api.getAlbumTracks).mockClear();
 		vi.mocked(api.replacePlaybackQueue).mockClear();
 		vi.mocked(api.startRadioStart).mockClear();
+		vi.mocked(api.getRadioTracks).mockClear();
 		currentTrack.set(null);
 		currentQueueItemId.set(null);
 		isPlaying.set(false);
@@ -409,6 +445,31 @@ describe('stale playback responses', () => {
 		radio.resolve(radioQueue(staleRow));
 		await radioAction;
 		expect(get(currentTrack)?.id).toBe(2);
+		expect(get(playerError)).toBeNull();
+	});
+
+	it('ignores an older TIDAL radio lookup after a newer play request', async () => {
+		const radio = deferred<RadioTracksResult>();
+		const play = deferred<PlaybackSnapshot>();
+		const currentRow = libraryRow(20, 2);
+		vi.mocked(api.getRadioTracks).mockReturnValueOnce(radio.promise);
+		vi.mocked(api.playTrack).mockReturnValueOnce(play.promise);
+		vi.mocked(api.replacePlaybackQueue).mockResolvedValue({
+			queue: [libraryRow(10, 1)],
+			shuffle_debug: null,
+		});
+
+		const radioAction = startTidalSongRadio(tidalPlayable(1));
+		const playAction = playTrackNow(2);
+
+		play.resolve(playbackSnapshot(currentRow));
+		await playAction;
+		expect(get(currentTrack)?.id).toBe(2);
+
+		radio.resolve(radioResults([1]));
+		await radioAction;
+		expect(get(currentTrack)?.id).toBe(2);
+		expect(api.replacePlaybackQueue).not.toHaveBeenCalled();
 		expect(get(playerError)).toBeNull();
 	});
 });
