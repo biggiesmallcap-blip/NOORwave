@@ -186,6 +186,7 @@ Runtime emits PreparedTrackError
 - `15b1df7f docs(audit): record spotify detail route smoke`
 - `64e20093 docs(audit): record native smoke preflight`
 - `5086a9f1 docs(audit): record tauri check`
+- `9b76289b docs(audit): record webview process preflight`
 
 ## Regression Coverage
 
@@ -354,6 +355,21 @@ instance:
 - A read-only UI Automation search did not expose a NOORwave tray element that
   could be invoked without pointer-level desktop interaction.
 
+Installed native WebView smoke passed through the existing tray path:
+
+- Hovered the promoted tray slots and found the existing NOORwave WebView
+  parked offscreen, with a live `NOOR - Home` document and pending queue row
+  accessibility nodes.
+- Clicked the detected NOORwave tray slot, which surfaced the existing app
+  window without launching a second app or restarting the sidecar.
+- Temporarily restored the existing window handle to a visible 1280x800
+  logical viewport, captured the native WebView, then hid it again.
+- Confirmed the native WebView accessibility tree exposed `NOORwave`,
+  `NOOR - Home`, app navigation, server-connected home content, active playback
+  text, Bob Marley queue rows, and the playback/artwork sidebar.
+- Confirmed after the smoke that the same installed `noor-app` and
+  `noor-server` processes were still running and playback remained active.
+
 Additional targeted verification for the malformed artwork fix:
 
 - `pnpm test -- artwork.test.ts`
@@ -378,12 +394,12 @@ Non-blocking warnings observed:
 
 ## Not Verified
 
-- Real Tauri app smoke with a visible WebView.
-  - Agent did not launch `noor-app` because its startup path calls
+- Fresh Tauri app launch and sidecar startup from a stopped state.
+  - Agent did not launch another `noor-app` because its startup path calls
     `shutdown_stale_server_before_spawn` before spawning the sidecar. The local
     smoke environment had an active installed app process, an active localhost
     backend, active playback, NOORwave WebView2 child processes, and no
-    enumerable app or WebView window handle, so forcing a native launch could
+    initially enumerable app or WebView window handle, so forcing a native launch could
     interrupt the current playback session.
 - Real audio-device playback for track finish, active decode failure, and
   prepared-next failure.
@@ -419,10 +435,13 @@ Acceptance checks:
   app/server are already running, the current server is actively playing, and a
   second launch could shut down the active sidecar.
 - Done: non-invasive native process inspection confirmed NOORwave WebView2
-  child processes exist, but no safe existing WebView window handle was
-  available for screenshot or focus.
-- Not verified: manual Tauri, audio device, long live TIDAL session behavior,
-  and manual Tauri WebView artwork screenshot pass.
+  child processes exist, and the app could be surfaced only after pointer-level
+  tray discovery.
+- Done: installed native WebView smoke passed through the existing tray path
+  without launching a second app or restarting the sidecar.
+- Not verified: audio device, long live TIDAL session behavior, fresh Tauri
+  sidecar startup from a stopped state, and manual Tauri WebView artwork route
+  screenshot pass.
 
 Done:
 
