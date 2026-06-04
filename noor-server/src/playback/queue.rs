@@ -132,20 +132,36 @@ pub fn append_tracks_with_reasons(
     tracks: &[(Track, Option<String>)],
     source: &str,
 ) -> Result<Vec<QueueItem>> {
+    if tracks.is_empty() {
+        return load_queue(conn);
+    }
+
     let start_pos: i32 = conn.query_row(
         "SELECT COALESCE(MAX(position), -1) + 1 FROM queue",
         [],
         |row| row.get(0),
     )?;
 
+    let tx = conn.unchecked_transaction()?;
+    insert_tracks_with_reasons_at_position(&tx, tracks, source, start_pos)?;
+    let queue = load_queue(&tx)?;
+    tx.commit()?;
+    Ok(queue)
+}
+
+fn insert_tracks_with_reasons_at_position(
+    conn: &Connection,
+    tracks: &[(Track, Option<String>)],
+    source: &str,
+    start_pos: i32,
+) -> Result<()> {
     for (idx, (track, reason)) in tracks.iter().enumerate() {
         conn.execute(
             "INSERT INTO queue (track_id, position, source, reason) VALUES (?1, ?2, ?3, ?4)",
             params![track.id, start_pos + idx as i32, source, reason],
         )?;
     }
-
-    load_queue(conn)
+    Ok(())
 }
 
 /// A last.fm similar-track candidate that has not yet been resolved to a local Tidal track.
@@ -166,12 +182,28 @@ pub fn append_pending_tracks(
     conn: &Connection,
     candidates: &[PendingCandidate],
 ) -> Result<Vec<QueueItem>> {
+    if candidates.is_empty() {
+        return load_queue(conn);
+    }
+
     let start_pos: i32 = conn.query_row(
         "SELECT COALESCE(MAX(position), -1) + 1 FROM queue",
         [],
         |row| row.get(0),
     )?;
 
+    let tx = conn.unchecked_transaction()?;
+    insert_pending_tracks_at_position(&tx, candidates, start_pos)?;
+    let queue = load_queue(&tx)?;
+    tx.commit()?;
+    Ok(queue)
+}
+
+fn insert_pending_tracks_at_position(
+    conn: &Connection,
+    candidates: &[PendingCandidate],
+    start_pos: i32,
+) -> Result<()> {
     for (idx, c) in candidates.iter().enumerate() {
         conn.execute(
             "INSERT INTO queue (track_id, position, source, reason, pending_artist, pending_title, pending_at)
@@ -179,8 +211,7 @@ pub fn append_pending_tracks(
             params![start_pos + idx as i32, c.reason, c.artist, c.title],
         )?;
     }
-
-    load_queue(conn)
+    Ok(())
 }
 
 /// Description of a single track to insert into the queue from an external
@@ -342,8 +373,9 @@ fn insert_at_position(
 }
 
 pub fn replace_queue(conn: &Connection, tracks: &[Track], source: &str) -> Result<Vec<QueueItem>> {
-    conn.execute("DELETE FROM queue", [])?;
-    append_tracks(conn, tracks, source)
+    let with_reasons: Vec<(Track, Option<String>)> =
+        tracks.iter().cloned().map(|track| (track, None)).collect();
+    replace_queue_with_reasons(conn, &with_reasons, source)
 }
 
 /// Wipe the queue and replace with tracks plus per-row reasons.
@@ -352,8 +384,12 @@ pub fn replace_queue_with_reasons(
     tracks: &[(Track, Option<String>)],
     source: &str,
 ) -> Result<Vec<QueueItem>> {
-    conn.execute("DELETE FROM queue", [])?;
-    append_tracks_with_reasons(conn, tracks, source)
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM queue", [])?;
+    insert_tracks_with_reasons_at_position(&tx, tracks, source, 0)?;
+    let queue = load_queue(&tx)?;
+    tx.commit()?;
+    Ok(queue)
 }
 
 pub fn clear_queue(conn: &Connection) -> Result<()> {
@@ -847,6 +883,35 @@ mod tests {
         assert_eq!(queue.len(), 2);
         assert_eq!(queue[0].track.id, 1);
         assert_eq!(queue[1].track.id, 2);
+    }
+
+    #[test]
+    fn replace_queue_handles_large_playlist_in_order() {
+        let conn = conn();
+        for id in 5..=1000 {
+            conn.execute(
+                "INSERT INTO tracks (
+                    id, title, artist_id, album_id, disc_number, track_number, duration_ms, isrc,
+                    tidal_id, ytmusic_id, soundcloud_id, best_quality, best_source, fidelity_score,
+                    is_favorite, play_count, last_played_at, date_added, source
+                ) VALUES (?1, ?2, 1, NULL, 1, ?1, 1000, NULL, ?1, NULL, NULL, 'LOSSLESS', 'tidal', 10, 0, 0, NULL, '2025-01-01', 'tidal')",
+                params![id, format!("Track {id}")],
+            )
+            .unwrap();
+        }
+        let tracks = (1..=1000)
+            .map(|id| get_track_by_id(&conn, id).unwrap().unwrap())
+            .collect::<Vec<_>>();
+
+        let queue = replace_queue(&conn, &tracks, "test").unwrap();
+
+        assert_eq!(queue.len(), 1000);
+        assert_eq!(queue.first().map(|item| item.track.id), Some(1));
+        assert_eq!(queue.last().map(|item| item.track.id), Some(1000));
+        for (idx, item) in queue.iter().enumerate() {
+            assert_eq!(item.position, idx as i32);
+            assert_eq!(item.track.id, (idx + 1) as i64);
+        }
     }
 
     #[test]
