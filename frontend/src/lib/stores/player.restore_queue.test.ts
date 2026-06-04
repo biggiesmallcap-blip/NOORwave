@@ -1,6 +1,6 @@
 import { get } from 'svelte/store';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import type { PlaybackState, QueueItem } from '$lib/api/client';
+import type { PlaybackSnapshot, PlaybackState, QueueItem } from '$lib/api/client';
 
 // Mock the api client so we can drive restoreQueueItems without a server.
 // vi.mock is hoisted, so the factory has to declare its own spies, then we
@@ -11,6 +11,7 @@ vi.mock('$lib/api/client', async () => {
 	const getPlaybackState = vi.fn(async () => ({ queue: [] }));
 	const removeQueueTrack = vi.fn(async () => ({ queue: [], playback_state: null }));
 	const getTrackAudioFeatures = vi.fn(async () => ({ features: null }));
+	const playTrack = vi.fn();
 	return {
 		api: {
 			addQueueTrack,
@@ -18,6 +19,7 @@ vi.mock('$lib/api/client', async () => {
 			getPlaybackState,
 			removeQueueTrack,
 			getTrackAudioFeatures,
+			playTrack,
 		},
 		ApiError: class ApiError extends Error {},
 	};
@@ -28,7 +30,10 @@ import {
 	currentQueueItemId,
 	currentTrack,
 	isPlaying,
+	playTrackNow,
 	playbackQueue,
+	playerError,
+	refreshPlaybackState,
 	removeTrackFromQueue,
 	restoreQueueItems,
 } from './player';
@@ -96,6 +101,23 @@ function playbackState(current: QueueItem): PlaybackState {
 	};
 }
 
+function playbackSnapshot(current: QueueItem): PlaybackSnapshot {
+	return {
+		state: playbackState(current),
+		queue: [current],
+	};
+}
+
+function deferred<T>() {
+	let resolve!: (value: T) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	return { promise, resolve, reject };
+}
+
 describe('restoreQueueItems', () => {
 	beforeEach(() => {
 		vi.mocked(api.addQueueTrack).mockClear();
@@ -103,10 +125,12 @@ describe('restoreQueueItems', () => {
 		vi.mocked(api.getPlaybackState).mockClear();
 		vi.mocked(api.removeQueueTrack).mockClear();
 		vi.mocked(api.getTrackAudioFeatures).mockClear();
+		vi.mocked(api.playTrack).mockClear();
 		currentTrack.set(null);
 		currentQueueItemId.set(null);
 		isPlaying.set(false);
 		playbackQueue.set([]);
+		playerError.set(null);
 	});
 
 	it('restores a library-only queue via addQueueTrack', async () => {
@@ -207,5 +231,61 @@ describe('removeTrackFromQueue', () => {
 		expect(get(currentQueueItemId)).toBe(20);
 		expect(get(isPlaying)).toBe(true);
 		expect(api.getTrackAudioFeatures).toHaveBeenCalledWith(2);
+	});
+});
+
+describe('stale playback responses', () => {
+	beforeEach(() => {
+		vi.mocked(api.getPlaybackState).mockClear();
+		vi.mocked(api.getTrackAudioFeatures).mockClear();
+		vi.mocked(api.playTrack).mockClear();
+		currentTrack.set(null);
+		currentQueueItemId.set(null);
+		isPlaying.set(false);
+		playbackQueue.set([]);
+		playerError.set(null);
+	});
+
+	it('ignores an older play response after a newer play request wins', async () => {
+		const older = deferred<PlaybackSnapshot>();
+		const newer = deferred<PlaybackSnapshot>();
+		const olderRow = libraryRow(10, 1);
+		const newerRow = libraryRow(20, 2);
+		vi.mocked(api.playTrack)
+			.mockReturnValueOnce(older.promise)
+			.mockReturnValueOnce(newer.promise);
+
+		const olderAction = playTrackNow(1);
+		const newerAction = playTrackNow(2);
+
+		newer.resolve(playbackSnapshot(newerRow));
+		await newerAction;
+		expect(get(currentTrack)?.id).toBe(2);
+
+		older.resolve(playbackSnapshot(olderRow));
+		await olderAction;
+		expect(get(currentTrack)?.id).toBe(2);
+		expect(get(playerError)).toBeNull();
+	});
+
+	it('ignores an older passive refresh after a newer play request', async () => {
+		const refresh = deferred<PlaybackSnapshot>();
+		const play = deferred<PlaybackSnapshot>();
+		const staleRow = libraryRow(10, 1);
+		const currentRow = libraryRow(20, 2);
+		vi.mocked(api.getPlaybackState).mockReturnValueOnce(refresh.promise);
+		vi.mocked(api.playTrack).mockReturnValueOnce(play.promise);
+
+		const refreshAction = refreshPlaybackState();
+		const playAction = playTrackNow(2);
+
+		play.resolve(playbackSnapshot(currentRow));
+		await playAction;
+		expect(get(currentTrack)?.id).toBe(2);
+
+		refresh.resolve(playbackSnapshot(staleRow));
+		await refreshAction;
+		expect(get(currentTrack)?.id).toBe(2);
+		expect(get(playerError)).toBeNull();
 	});
 });

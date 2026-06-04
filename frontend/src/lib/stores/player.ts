@@ -151,6 +151,43 @@ function noteSuccess() {
 	lastSuccessfulCallAt.set(Date.now());
 }
 
+let playbackIntentSeq = 0;
+let activePlaybackIntentSeq: number | null = null;
+
+function beginPlaybackIntent(): number {
+	playbackIntentSeq += 1;
+	activePlaybackIntentSeq = playbackIntentSeq;
+	return playbackIntentSeq;
+}
+
+function finishPlaybackIntent(seq: number) {
+	if (activePlaybackIntentSeq === seq) activePlaybackIntentSeq = null;
+}
+
+function isLatestPlaybackIntent(seq: number): boolean {
+	return seq === playbackIntentSeq;
+}
+
+function currentPlaybackIntentSeq(): number {
+	return playbackIntentSeq;
+}
+
+function shouldApplyPassivePlaybackSnapshot(seq: number): boolean {
+	return seq === playbackIntentSeq && activePlaybackIntentSeq === null;
+}
+
+function applyStateIfLatest(state: PlaybackState, seq: number): boolean {
+	if (!isLatestPlaybackIntent(seq)) return false;
+	applyState(state);
+	return true;
+}
+
+function hydratePlaybackIfLatest(snapshot: PlaybackSnapshot, seq: number): boolean {
+	if (!isLatestPlaybackIntent(seq)) return false;
+	hydratePlayback(snapshot);
+	return true;
+}
+
 /**
  * Map an arbitrary error into a short, friendly message. The raw `error` is
  * dropped in production so we never leak `TypeError: Failed to fetch` style
@@ -354,9 +391,11 @@ function scheduleBufferedRefreshIfNeeded() {
 	const duration = track?.duration_ms ?? 0;
 	if (!track || duration <= 0) return;
 	if (get(buffered) >= duration) return;
+	const refreshSeq = currentPlaybackIntentSeq();
 	_bufferedRefresher = setTimeout(async () => {
 		try {
 			const snapshot = await api.getPlaybackState();
+			if (!shouldApplyPassivePlaybackSnapshot(refreshSeq)) return;
 			// applyState writes `buffered` and recurses into scheduling, so
 			// the timer chain runs as long as buffered_ms < duration_ms.
 			applyState(snapshot.state);
@@ -431,37 +470,48 @@ export function hydratePlayback(snapshot: PlaybackSnapshot) {
 
 export async function refreshPlaybackState() {
 	playerError.set(null);
+	const refreshSeq = currentPlaybackIntentSeq();
 	try {
 		const snapshot = await api.getPlaybackState();
+		if (!shouldApplyPassivePlaybackSnapshot(refreshSeq)) return;
 		hydratePlayback(snapshot);
 	} catch (error) {
+		if (!shouldApplyPassivePlaybackSnapshot(refreshSeq)) return;
 		setError('load playback state', error, () => refreshPlaybackState());
 	}
 }
 
 export async function playTrackNow(trackId: number) {
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const snapshot = await api.playTrack(trackId);
-		hydratePlayback(snapshot);
+		hydratePlaybackIfLatest(snapshot, intentSeq);
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('play that track', error, () => playTrackNow(trackId));
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
 export async function togglePlayback() {
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		if (get(isPlaying)) {
 			const result = await api.pausePlayback();
-			applyState(result.state);
+			if (!applyStateIfLatest(result.state, intentSeq)) return;
 		} else {
 			const result = await api.resumePlayback();
-			applyState(result.state);
+			if (!applyStateIfLatest(result.state, intentSeq)) return;
 		}
 		noteSuccess();
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('toggle playback', error, () => togglePlayback());
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
@@ -473,38 +523,51 @@ export async function togglePlayback() {
  */
 export async function pausePlayer() {
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const result = await api.pausePlayback();
-		applyState(result.state);
+		if (!applyStateIfLatest(result.state, intentSeq)) return;
 		noteSuccess();
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('pause playback', error, () => pausePlayer());
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
 export async function resumePlayer() {
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const result = await api.resumePlayback();
-		applyState(result.state);
+		if (!applyStateIfLatest(result.state, intentSeq)) return;
 		noteSuccess();
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('resume playback', error, () => resumePlayer());
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
 export async function playPreviousTrack() {
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const snapshot = await api.previousTrack();
-		hydratePlayback(snapshot);
+		hydratePlaybackIfLatest(snapshot, intentSeq);
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('go to previous track', error, () => playPreviousTrack());
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
 export async function playNextTrack() {
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		// Optimistic update: show the next queued track immediately rather than waiting
 		// for TIDAL stream resolution (~2-5s). hydratePlayback below corrects any mismatch.
@@ -525,9 +588,12 @@ export async function playNextTrack() {
 		anchorPositionTicker(0);
 
 		const snapshot = await api.nextTrack();
-		hydratePlayback(snapshot);
+		hydratePlaybackIfLatest(snapshot, intentSeq);
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('skip to next track', error, () => playNextTrack());
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
@@ -559,6 +625,7 @@ export async function toggleMute() {
 
 export async function setPlayerPosition(nextPositionMs: number) {
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		// Always opt in to the segment-restart path (option C). With
 		// allow_segment_seek=true the backend treats out-of-buffer targets
@@ -567,9 +634,10 @@ export async function setPlayerPosition(nextPositionMs: number) {
 		// applies the corrective snapshot); transition errors get 500
 		// (treat as recoverable error - the user can retry the drag).
 		const result = await api.setPlaybackPosition(nextPositionMs, true);
-		applyState(result.state);
+		if (!applyStateIfLatest(result.state, intentSeq)) return;
 		noteSuccess();
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		// HTTP 409 = pre-resolve race or unparseable manifest (no segment
 		// offsets to restart at). Apply the corrective live snapshot the
 		// server included in the body so the scrubber visibly snaps back,
@@ -577,7 +645,7 @@ export async function setPlayerPosition(nextPositionMs: number) {
 		if (error instanceof ApiError && error.status === 409) {
 			const body = error.body as { state?: PlaybackState } | null;
 			if (body?.state) {
-				applyState(body.state);
+				if (!applyStateIfLatest(body.state, intentSeq)) return;
 				noteSuccess();
 				return;
 			}
@@ -586,17 +654,23 @@ export async function setPlayerPosition(nextPositionMs: number) {
 		// failed, decoder spin-up failed, etc.). Show error toast with a
 		// retry; this is a recoverable failure, not a programming error.
 		setError('seek', error, () => setPlayerPosition(nextPositionMs));
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
 export async function setPlayerRepeatMode(mode: PlaybackState['repeat_mode']) {
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const result = await api.setPlaybackRepeat(mode);
-		applyState(result.state);
+		if (!applyStateIfLatest(result.state, intentSeq)) return;
 		noteSuccess();
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('set repeat mode', error, () => setPlayerRepeatMode(mode));
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
@@ -609,15 +683,19 @@ export async function cyclePlayerRepeatMode() {
 
 export async function setPlayerShuffleMode(mode: PlaybackState['shuffle_mode']) {
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const snapshot = await api.setPlaybackShuffle(mode);
-		hydratePlayback(snapshot);
+		if (!hydratePlaybackIfLatest(snapshot, intentSeq)) return null;
 		return snapshot;
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return null;
 		setError('set shuffle mode', error, async () => {
 			await setPlayerShuffleMode(mode);
 		});
 		return null;
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
@@ -997,6 +1075,7 @@ async function loadQueueAndPlay(
 	if (trackIds.length === 0) return;
 	if (!assertOnline()) return;
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	if (!options?.preserveRadioReasons) clearRadioReasons();
 	try {
 		const replaced = await api.replacePlaybackQueue(
@@ -1005,11 +1084,15 @@ async function loadQueueAndPlay(
 			options?.pendingCandidates,
 			options?.shuffleMode
 		);
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		const firstTrackId = replaced.queue[0]?.track.id ?? trackIds[0];
 		const snapshot = await api.playTrack(firstTrackId);
-		hydratePlayback(snapshot);
+		hydratePlaybackIfLatest(snapshot, intentSeq);
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('start playback', error, () => loadQueueAndPlay(trackIds, options));
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
