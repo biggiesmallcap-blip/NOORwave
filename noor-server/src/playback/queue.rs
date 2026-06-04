@@ -230,6 +230,25 @@ pub fn append_external_track(
     insert_at_position(conn, insert, position)
 }
 
+/// Insert external tracks at the end of the queue with one position lookup.
+pub fn append_external_tracks(
+    conn: &Connection,
+    inserts: &[ExternalTrackInsert<'_>],
+) -> Result<Vec<InsertResult>> {
+    if inserts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let start_position: i32 = conn.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM queue",
+        [],
+        |row| row.get(0),
+    )?;
+    let tx = conn.unchecked_transaction()?;
+    let results = insert_many_at_position(&tx, inserts, start_position)?;
+    tx.commit()?;
+    Ok(results)
+}
+
 /// Insert an external track immediately after `after_position`. Existing rows
 /// at that position or later are shifted by one. Used for "Play next" so the
 /// new row lands at `current_position + 1`.
@@ -247,6 +266,45 @@ pub fn insert_external_track_after(
     let result = insert_at_position(&tx, insert, target)?;
     tx.commit()?;
     Ok(result)
+}
+
+/// Insert external tracks immediately after `after_position`.
+///
+/// Existing rows are shifted once by the batch length, so large playlist
+/// injections avoid repeatedly rewriting the same tail rows.
+pub fn insert_external_tracks_after(
+    conn: &Connection,
+    inserts: &[ExternalTrackInsert<'_>],
+    after_position: i32,
+) -> Result<Vec<InsertResult>> {
+    if inserts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let target = after_position + 1;
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE queue SET position = position + ?1 WHERE position >= ?2",
+        params![inserts.len() as i32, target],
+    )?;
+    let results = insert_many_at_position(&tx, inserts, target)?;
+    tx.commit()?;
+    Ok(results)
+}
+
+fn insert_many_at_position(
+    conn: &Connection,
+    inserts: &[ExternalTrackInsert<'_>],
+    start_position: i32,
+) -> Result<Vec<InsertResult>> {
+    let mut results = Vec::with_capacity(inserts.len());
+    for (idx, insert) in inserts.iter().enumerate() {
+        results.push(insert_at_position(
+            conn,
+            insert,
+            start_position + idx as i32,
+        )?);
+    }
+    Ok(results)
 }
 
 fn insert_at_position(
@@ -958,6 +1016,50 @@ mod tests {
     }
 
     #[test]
+    fn append_external_tracks_preserves_batch_order() {
+        let conn = conn();
+        let inserts = vec![
+            ExternalTrackInsert {
+                artist: "ignored",
+                title: "ignored",
+                source: "user_queue",
+                reason: None,
+                tidal_id_hint: None,
+                local_track_id: Some(1),
+            },
+            ExternalTrackInsert {
+                artist: "Aphex Twin",
+                title: "Xtal",
+                source: "user_queue",
+                reason: Some("external"),
+                tidal_id_hint: Some(123),
+                local_track_id: None,
+            },
+            ExternalTrackInsert {
+                artist: "ignored",
+                title: "ignored",
+                source: "user_queue",
+                reason: None,
+                tidal_id_hint: None,
+                local_track_id: Some(2),
+            },
+        ];
+
+        let results = append_external_tracks(&conn, &inserts).unwrap();
+        assert_eq!(results.len(), 3);
+
+        let rows = load_queue(&conn).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].track.id, 1);
+        assert_eq!(rows[1].track.title, "Xtal");
+        assert!(rows[1].is_pending);
+        assert_eq!(rows[2].track.id, 2);
+        for (idx, item) in rows.iter().enumerate() {
+            assert_eq!(item.position, idx as i32);
+        }
+    }
+
+    #[test]
     fn apply_shuffle_preserves_pending_artist_title() {
         let conn = conn();
 
@@ -1057,6 +1159,49 @@ mod tests {
         assert_eq!(queue[2].track.id, 2);
         assert_eq!(queue[3].track.id, 3);
         // Positions are contiguous after the shift.
+        for (idx, item) in queue.iter().enumerate() {
+            assert_eq!(item.position, idx as i32);
+        }
+    }
+
+    #[test]
+    fn insert_external_tracks_after_shifts_tail_once_and_preserves_order() {
+        let conn = conn();
+        let tracks = vec![
+            get_track_by_id(&conn, 1).unwrap().unwrap(),
+            get_track_by_id(&conn, 2).unwrap().unwrap(),
+            get_track_by_id(&conn, 3).unwrap().unwrap(),
+        ];
+        replace_queue(&conn, &tracks, "test").unwrap();
+
+        let inserts = vec![
+            ExternalTrackInsert {
+                artist: "A",
+                title: "First external",
+                source: "user_play_next",
+                reason: None,
+                tidal_id_hint: Some(101),
+                local_track_id: None,
+            },
+            ExternalTrackInsert {
+                artist: "B",
+                title: "Second external",
+                source: "user_play_next",
+                reason: None,
+                tidal_id_hint: Some(102),
+                local_track_id: None,
+            },
+        ];
+
+        insert_external_tracks_after(&conn, &inserts, 0).unwrap();
+
+        let queue = load_queue(&conn).unwrap();
+        assert_eq!(queue.len(), 5);
+        assert_eq!(queue[0].track.id, 1);
+        assert_eq!(queue[1].track.title, "First external");
+        assert_eq!(queue[2].track.title, "Second external");
+        assert_eq!(queue[3].track.id, 2);
+        assert_eq!(queue[4].track.id, 3);
         for (idx, item) in queue.iter().enumerate() {
             assert_eq!(item.position, idx as i32);
         }
