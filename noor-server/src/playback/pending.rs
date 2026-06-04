@@ -10,12 +10,14 @@
 //!
 //! This module owns the SQL and the race-safety reasoning for that lifecycle:
 //!
-//! - [`try_claim`] sets `resolving_at = NOW()` iff it's currently NULL and
-//!   `track_id` is still NULL. Only one resolver can hold a row's lock at a
-//!   time; competing resolvers see `claimed = false` and back off.
+//! - [`try_claim`] sets `resolving_at = NOW()` iff `track_id` is still NULL and
+//!   the row is unlocked or its lock is older than 30s. Only one fresh resolver
+//!   can hold a row's lock at a time; competing resolvers see `claimed = false`
+//!   and back off.
 //! - [`release`] clears the lock when a resolver bails (no match, import
 //!   failure, etc). The hourly GC also clears locks older than 30s in case a
-//!   resolver crashed mid-claim.
+//!   resolver crashed mid-claim, but playback does not have to wait for that GC
+//!   pass before reclaiming a stale row.
 //! - [`promote`] runs the atomic UPDATE `WHERE id = ? AND track_id IS NULL`
 //!   that decides which resolver wins under concurrent attempts. Even if two
 //!   resolvers both managed to import the same TIDAL track (race condition
@@ -39,7 +41,9 @@ use crate::db::{models::AudioDjProfileKey, queries};
 pub fn try_claim(conn: &Connection, queue_item_id: i64) -> Result<bool> {
     let updated = conn.execute(
         "UPDATE queue SET resolving_at = datetime('now')
-         WHERE id = ?1 AND resolving_at IS NULL AND track_id IS NULL",
+         WHERE id = ?1
+           AND track_id IS NULL
+           AND (resolving_at IS NULL OR resolving_at < datetime('now', '-30 seconds'))",
         params![queue_item_id],
     )?;
     Ok(updated == 1)
@@ -208,6 +212,14 @@ mod tests {
         .expect("pending queue row");
     }
 
+    fn set_resolving_at(conn: &Connection, queue_item_id: i64, value: &str) {
+        conn.execute(
+            "UPDATE queue SET resolving_at = datetime('now', ?1) WHERE id = ?2",
+            params![value, queue_item_id],
+        )
+        .expect("set resolving_at");
+    }
+
     fn profile_row(queue_item_id: i64) -> AudioDjProfileRow {
         AudioDjProfileRow {
             media_ref_kind: "queue_item".to_string(),
@@ -246,6 +258,50 @@ mod tests {
             media_ref_kind: kind.to_string(),
             media_ref_id: id.to_string(),
         }
+    }
+
+    #[test]
+    fn try_claim_rejects_fresh_resolver_lock() {
+        let conn = setup_conn();
+        seed_pending_queue_row(&conn, 40);
+        set_resolving_at(&conn, 40, "-10 seconds");
+
+        assert!(!try_claim(&conn, 40).expect("claim"));
+    }
+
+    #[test]
+    fn try_claim_reclaims_stale_resolver_lock() {
+        let conn = setup_conn();
+        seed_pending_queue_row(&conn, 41);
+        set_resolving_at(&conn, 41, "-31 seconds");
+
+        assert!(try_claim(&conn, 41).expect("claim"));
+        assert!(!try_claim(&conn, 41).expect("fresh second claim"));
+
+        let is_fresh: bool = conn
+            .query_row(
+                "SELECT resolving_at >= datetime('now', '-30 seconds') FROM queue WHERE id = 41",
+                [],
+                |row| row.get(0),
+            )
+            .expect("fresh lock check");
+        assert!(is_fresh);
+    }
+
+    #[test]
+    fn try_claim_never_reclaims_resolved_row() {
+        let conn = setup_conn();
+        let track_id = seed_track(&conn, Some(541));
+        seed_pending_queue_row(&conn, 42);
+        conn.execute(
+            "UPDATE queue
+             SET track_id = ?1, resolving_at = datetime('now', '-31 seconds')
+             WHERE id = 42",
+            params![track_id],
+        )
+        .expect("resolve row");
+
+        assert!(!try_claim(&conn, 42).expect("claim"));
     }
 
     #[test]
