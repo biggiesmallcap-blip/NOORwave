@@ -95,12 +95,13 @@ Svelte action usage, Rust `#[cfg(test)]` modules, or public route merges.
 | `frontend/src/lib/api/ws.ts::disconnectWebSocket` | Removed after exact `rg` found no live caller. The app layout still imports and calls `connectWebSocket`; the current unmount cleanup never disconnected the singleton websocket. |
 | `noor-server/src/services/discovery_blend.rs::Playability::Unavailable` | Keep as a reserved serialized discovery blend response value. Rust-analyzer found no current construction, but `/api/discovery/blend/*` serializes `playability`, and the frontend `DiscoverPlayability` union already accepts `unavailable`. |
 | `noor-server/src/services/tidal/auth.rs::PersistedTidalTokens::tokens` | Keep. Rust-analyzer found references in the encrypted and legacy plaintext persistence tests, where the helper checks decoded token fields without consuming the wrapper before `needs_encrypted_rewrite()`. |
+| `frontend/src/lib/components/DiscoverSpace/discover_space_story.ts::RADIO_MODE_NAMES` | Removed after exact `rg` found only the story definition. `RadioMode` remains live in the route and store. |
 
 ## Manual Review
 
 | Finding group | Why it stays untouched |
 | --- | --- |
-| DiscoverSpace adapter, physics, renderer, store, and story exports | Visual engine helpers can be imported from Svelte components and contract scripts in ways Repowise currently misses. Exercise the DiscoverSpace surface before deleting anything. |
+| DiscoverSpace adapter, physics, renderer, and store exports | Visual engine helpers can be imported from Svelte components and contract scripts in ways Repowise currently misses. Exercise the DiscoverSpace surface before deleting anything beyond the reviewed story-copy constant. |
 | Player store exports such as queue, automix, shuffle, repeat, and playlist helpers | Playback and queue boundaries are manual-review only by repo rule. |
 | Repeated frontend artwork failure helpers such as `markArtworkFailed` and `failedArtworkUrls` | Duplicate scan found the same local fallback pattern across player, album, artist, TIDAL, quiet-mode, and remote surfaces. These are visible UI fallback paths with per-component Svelte state and contract-test coverage, so consolidation should happen in a focused artwork-surface slice rather than this backend cleanup slice. |
 | `noor-server/src/db/queries.rs` cargo-check dead-code warnings | SQL/query boundary. Remaining warnings include Spotify playcount cache, embedding-model lookup and rollback helpers, external-candidate feature and prune helpers, and temporary DJ-profile promotion. Several are still referenced by unit tests, docs, or playback plans, so they need a query-contract slice rather than broad deletion. |
