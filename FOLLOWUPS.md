@@ -17,7 +17,7 @@ Phase 1 ships beat-phase sync with the existing `PlaybackRate` cap of
 and avoids obvious pitch movement. The offline metric harness and optional
 `signalsmith-eval` renderer now exist in `noor-mix::stretch_eval`; the feature
 compile gate passed after installing LLVM 22.1.6 and setting
-`LIBCLANG_PATH=C:\Program Files\LLVM\bin`. The documented fixture matrix now
+`LIBCLANG_PATH` to the LLVM `bin` directory. The documented fixture matrix now
 runs. Release mode brings 90s Signalsmith renders down to roughly 1.4 to 1.7
 seconds with good drift, finite, length, and peak metrics, but that still fails
 the current 500 ms runtime gate by about 3x. Keep runtime at the existing 3
