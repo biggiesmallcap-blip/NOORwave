@@ -182,6 +182,7 @@ Runtime emits PreparedTrackError
 - `d5749fe7 docs(audit): record remote smoke evidence`
 - `d06ee01b fix(frontend): reject malformed tidal artwork paths`
 - `82eb9856 docs(audit): note tauri smoke safety blocker`
+- `e7421d2d docs(audit): record expanded artwork route smoke`
 
 ## Regression Coverage
 
@@ -311,6 +312,21 @@ Expanded artwork route viewport smoke passed after the selected route pass:
   visible error text, loaded all rendered image elements, and made 0 malformed
   TIDAL artwork requests.
 
+Focused Spotify detail route smoke passed after the expanded route pass:
+
+- The Spotify track detail endpoint for `33BnSMHgX0AsbKSIbkuMwh` exposed
+  artist id `53KwLdlmrlCelAZMaLVZqU` for James Blake.
+- The public Spotify album id `4L9qXAXmnMEIvnvG8xon3F` was validated through
+  the local Sportify album endpoint before the visible route pass.
+- Confirmed `/spotify-artist/53KwLdlmrlCelAZMaLVZqU` returned HTTP 200,
+  rendered the loaded James Blake artist detail state with 6 top-track rows,
+  showed no visible error text, had 0 broken image elements, and made 0
+  malformed TIDAL artwork requests.
+- Confirmed `/spotify-album/4L9qXAXmnMEIvnvG8xon3F` returned HTTP 200,
+  rendered the loaded James Blake album detail state with 19 track rows, showed
+  no visible error text, had 0 broken image elements, and made 0 malformed
+  TIDAL artwork requests.
+
 Additional targeted verification for the malformed artwork fix:
 
 - `pnpm test -- artwork.test.ts`
@@ -329,6 +345,9 @@ Non-blocking warnings observed:
   browser-blocked TIDAL image responses. These did not produce route failures,
   visible error text after the corrected TIDAL album rerun, broken image
   elements, or malformed TIDAL artwork requests.
+- Direct Sportify search for Spotify albums and artists returned 502 during the
+  focused pass, even though direct Spotify artist, album, playlist, and track
+  detail endpoints loaded successfully with concrete ids.
 
 ## Not Verified
 
@@ -341,11 +360,6 @@ Non-blocking warnings observed:
   prepared-next failure.
 - Real TIDAL provider session with long ephemeral mixes, token refresh, and
   provider-side 403/429 behavior.
-- Spotify album and Spotify artist detail routes.
-  - The current local and provider data used for the smoke pass exposed a real
-    Spotify playlist id and track id, but no Spotify album or artist ids.
-    Direct Spotify provider search returned 502 during the pass, so those two
-    dynamic provider routes were not exercised.
 - Manual Tauri WebView screenshot pass across artwork-heavy routes.
 
 These are manual or environment-dependent checks. They are not hidden in
@@ -369,16 +383,18 @@ Acceptance checks:
 - Done: expanded Chrome artwork smoke passed for local, remote, TIDAL, mood,
   Spotify playlist, and Spotify track surfaces with no broken images and no
   malformed TIDAL artwork requests.
+- Done: focused Chrome smoke passed for Spotify artist and Spotify album detail
+  routes with loaded real provider detail states, no visible error text, no
+  broken image elements, and no malformed TIDAL artwork requests.
 - Not verified: manual Tauri, audio device, long live TIDAL session behavior,
-  Spotify album and artist provider routes, and manual Tauri WebView artwork
-  screenshot pass.
+  and manual Tauri WebView artwork screenshot pass.
 
 Done:
 
 - Queue/runtime stall fixes, stale frontend intent guards, artwork fallback
   hardening, API timeout protection, transaction hardening, and runtime handoff
   tracing are implemented and committed. Expanded artwork route smoke evidence
-  is recorded in this report slice.
+  and focused Spotify detail route smoke evidence are recorded in this report.
 
 Incomplete:
 
@@ -402,5 +418,3 @@ Next checks before release:
 - Open the Tauri WebView plus search, app shell, remote artist, and remote album
   surfaces and confirm artwork placeholders and fallback-size retries behave
   visually.
-- Find or seed real Spotify album and artist ids when provider search is
-  healthy, then smoke `/spotify-album/{id}` and `/spotify-artist/{id}`.
