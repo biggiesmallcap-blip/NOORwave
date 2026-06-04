@@ -759,6 +759,7 @@ export async function removeTrackFromQueue(queueItemId: number) {
 	try {
 		const result = await api.removeQueueTrack(queueItemId);
 		setPlaybackQueue(result.queue);
+		if (result.playback_state) applyState(result.playback_state);
 		noteSuccess();
 		announceQueue('Removed from queue');
 	} catch (error) {

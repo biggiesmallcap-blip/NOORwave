@@ -8188,20 +8188,59 @@ async fn remove_queue_track(
     State(state): State<SharedState>,
     Json(payload): Json<QueueRemoveRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    let response = {
+    let outcome = {
         let state_guard = state.read().await;
         state_guard
             .db
-            .with_conn(|conn| {
-                queue::remove_queue_item(conn, payload.queue_item_id)?;
-                let queue = queue::load_queue(conn)?;
-                let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
-                Ok(Json(json!({ "queue": queue })))
-            })
+            .with_conn(|conn| player::remove_queue_item_and_reconcile(conn, payload.queue_item_id))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
-    refresh_dj_after_queue_change(state, "remove_queue_track").await;
-    Ok(response)
+
+    let include_playback_state = outcome.removed_current;
+    let mut snapshot = outcome.snapshot;
+    if outcome.removed_current && outcome.was_playing {
+        let playback_generation = bump_playback_generation(&state).await;
+        snapshot = resolve_or_skip_pending_current(
+            &state,
+            snapshot,
+            playback_generation,
+            "remove_queue_track",
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let end_reason = if snapshot.state.current_track.is_some() {
+            Some(player::ListenSessionEndReason::Replaced)
+        } else {
+            Some(player::ListenSessionEndReason::QueueEnded)
+        };
+        sync_session_after_snapshot(&state, &snapshot, end_reason).await;
+        if snapshot.state.current_track.is_none()
+            && let Some(runtime_handle) = current_playback_runtime(&state).await
+        {
+            let _ = runtime_handle.stop();
+        }
+        switch_runtime_to_snapshot_current(&state, &snapshot, playback_generation)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    } else if outcome.removed_current {
+        let state_guard = state.read().await;
+        let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+        let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
+    } else {
+        let state_guard = state.read().await;
+        let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
+    }
+
+    refresh_dj_after_queue_change(state.clone(), "remove_queue_track").await;
+    let snapshot = overlay_snapshot_with_external_track(&state, snapshot).await;
+    if include_playback_state {
+        Ok(Json(json!({
+            "queue": snapshot.queue,
+            "playback_state": snapshot.state
+        })))
+    } else {
+        Ok(Json(json!({ "queue": snapshot.queue })))
+    }
 }
 
 async fn move_queue_track(

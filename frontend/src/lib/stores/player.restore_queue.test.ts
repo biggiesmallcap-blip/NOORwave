@@ -1,5 +1,6 @@
+import { get } from 'svelte/store';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import type { QueueItem } from '$lib/api/client';
+import type { PlaybackState, QueueItem } from '$lib/api/client';
 
 // Mock the api client so we can drive restoreQueueItems without a server.
 // vi.mock is hoisted, so the factory has to declare its own spies, then we
@@ -8,14 +9,29 @@ vi.mock('$lib/api/client', async () => {
 	const addQueueTrack = vi.fn(async () => ({ queue: [], playback_state: null }));
 	const queueAppend = vi.fn(async () => ({ queue: [], playback_state: null }));
 	const getPlaybackState = vi.fn(async () => ({ queue: [] }));
+	const removeQueueTrack = vi.fn(async () => ({ queue: [], playback_state: null }));
+	const getTrackAudioFeatures = vi.fn(async () => ({ features: null }));
 	return {
-		api: { addQueueTrack, queueAppend, getPlaybackState },
+		api: {
+			addQueueTrack,
+			queueAppend,
+			getPlaybackState,
+			removeQueueTrack,
+			getTrackAudioFeatures,
+		},
 		ApiError: class ApiError extends Error {},
 	};
 });
 
 import { api } from '$lib/api/client';
-import { restoreQueueItems } from './player';
+import {
+	currentQueueItemId,
+	currentTrack,
+	isPlaying,
+	playbackQueue,
+	removeTrackFromQueue,
+	restoreQueueItems,
+} from './player';
 
 function libraryRow(id: number, trackId: number): QueueItem {
 	return {
@@ -63,11 +79,34 @@ function pendingRow(queueId: number): QueueItem {
 	};
 }
 
+function playbackState(current: QueueItem): PlaybackState {
+	return {
+		current_track: current.track,
+		current_queue_item_id: current.id,
+		position_ms: 0,
+		is_playing: true,
+		volume: 0.8,
+		shuffle_mode: 'off',
+		repeat_mode: 'off',
+		automix_enabled: false,
+		crossfade_ms: 0,
+		automix_discover_new: false,
+		automix_use_learning: false,
+		automix_allow_external: false,
+	};
+}
+
 describe('restoreQueueItems', () => {
 	beforeEach(() => {
 		vi.mocked(api.addQueueTrack).mockClear();
 		vi.mocked(api.queueAppend).mockClear();
 		vi.mocked(api.getPlaybackState).mockClear();
+		vi.mocked(api.removeQueueTrack).mockClear();
+		vi.mocked(api.getTrackAudioFeatures).mockClear();
+		currentTrack.set(null);
+		currentQueueItemId.set(null);
+		isPlaying.set(false);
+		playbackQueue.set([]);
 	});
 
 	it('restores a library-only queue via addQueueTrack', async () => {
@@ -140,5 +179,33 @@ describe('restoreQueueItems', () => {
 		expect(summary).toEqual({ restored: 0, skipped: 0 });
 		expect(api.addQueueTrack).not.toHaveBeenCalled();
 		expect(api.queueAppend).not.toHaveBeenCalled();
+	});
+});
+
+describe('removeTrackFromQueue', () => {
+	beforeEach(() => {
+		vi.mocked(api.removeQueueTrack).mockClear();
+		vi.mocked(api.getTrackAudioFeatures).mockClear();
+		currentTrack.set(null);
+		currentQueueItemId.set(null);
+		isPlaying.set(false);
+		playbackQueue.set([]);
+	});
+
+	it('applies playback state returned by the remove endpoint', async () => {
+		const next = libraryRow(20, 2);
+		vi.mocked(api.removeQueueTrack).mockResolvedValueOnce({
+			queue: [next],
+			playback_state: playbackState(next),
+		});
+
+		await removeTrackFromQueue(10);
+
+		expect(api.removeQueueTrack).toHaveBeenCalledWith(10);
+		expect(get(playbackQueue)).toEqual([next]);
+		expect(get(currentTrack)?.id).toBe(2);
+		expect(get(currentQueueItemId)).toBe(20);
+		expect(get(isPlaying)).toBe(true);
+		expect(api.getTrackAudioFeatures).toHaveBeenCalledWith(2);
 	});
 });

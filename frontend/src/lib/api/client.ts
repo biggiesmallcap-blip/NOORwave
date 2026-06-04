@@ -3334,10 +3334,14 @@ export const api = {
 	},
 
 	removeQueueTrack(queueItemId: number) {
-		return fetchApi<{ queue: QueueItem[] }>('/api/playback/queue/remove', undefined, {
-			method: 'POST',
-			body: JSON.stringify({ queue_item_id: queueItemId }),
-		});
+		return fetchApi<{ queue: QueueItem[]; playback_state?: PlaybackState }>(
+			'/api/playback/queue/remove',
+			undefined,
+			{
+				method: 'POST',
+				body: JSON.stringify({ queue_item_id: queueItemId }),
+			}
+		);
 	},
 
 	moveQueueTrack(itemId: number, newPos: number) {
