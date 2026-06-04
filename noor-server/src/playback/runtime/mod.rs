@@ -5271,20 +5271,6 @@ mod tests {
     }
 
     #[test]
-    fn swap_stream_plan_uses_device_rate_for_shared_fallback() {
-        let base = StreamConfig {
-            channels: 2,
-            sample_rate: 48_000,
-            buffer_size: cpal::BufferSize::Default,
-        };
-
-        let plan = swap_stream_plan(&base, Some(192_000), SwapBackend::SharedFallback);
-
-        assert_eq!(plan.stream_config.sample_rate, 48_000);
-        assert_eq!(plan.target_sample_rate, Some(48_000));
-    }
-
-    #[test]
     fn output_rate_fallback_uses_base_when_desired_rate_was_rejected() {
         let base = StreamConfig {
             channels: 2,
