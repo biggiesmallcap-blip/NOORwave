@@ -69,6 +69,7 @@ Svelte action usage, Rust `#[cfg(test)]` modules, or public route merges.
 | `frontend/src/lib/api/ws.ts::connectWebSocket` | Referenced from `frontend/src/routes/+layout.svelte`. WebSocket lifecycle helpers are a public app boundary. |
 | `frontend/src/lib/actions/lazy-tidal-art.ts::lazyTidalArt` | Referenced by `AlbumCarousel.svelte`, `ArtistCarousel.svelte`, `ChartMural.svelte`, `VideoCard.svelte`, library and Spotify routes, plus the artwork contract script. |
 | `frontend/src/lib/actions/wheel-to-horizontal.ts::wheelToHorizontal` | Referenced by carousel, rail, search, mood, and home Svelte surfaces. |
+| `frontend/src/lib/stores/audio_analysis.ts` settings helpers | Exact `rg` found `loadAudioStats`, `syncAnalysisStatus`, `clearAllAnalysis`, `loadPassiveDspState`, and `setPassiveDspEnabled` imported and called by `frontend/src/routes/settings/+page.svelte`. |
 | `frontend/src/lib/utils/color.ts::letterColor` | Referenced by artist and search surfaces. |
 | `frontend/src/lib/utils/debounce.ts::debounce` | Referenced by `frontend/src/routes/analytics/+page.svelte`. |
 | `frontend/src/lib/utils/track.ts::tidalSearchTrackToPlayable` | Referenced by `frontend/src/routes/search/+page.svelte`. |
@@ -154,6 +155,7 @@ file changes. Do not stage the whole worktree as one audit commit.
 | Player store export candidates | Resolved as false positives. | Exact `rg` found `playTrackNow`, transport toggles, automix settings, queue actions, playlist helpers, and TIDAL batch helpers imported by live frontend surfaces or player-store tests, so no playback or queue exports were removed. |
 | Playlist artwork cache exports | Resolved as false positives. | Exact `rg` found every Repowise-reported cache helper imported by the playlist route, with `pickArtworkUrls` also covered by the playlist artwork contract test. |
 | Context menu, library store, and palette exports | Resolved as false positives. | Exact `rg` found every candidate in this block imported by live Svelte routes, shared components, or colocated store tests, so no context-menu, library, or palette exports were removed. |
+| Audio-analysis settings exports | Resolved as false positives. | Exact `rg` found the remaining audio-analysis store helpers imported and called by the settings route; `startAnalysis` and `stopAnalysis` remain removed. |
 
 ## Next Check
 
