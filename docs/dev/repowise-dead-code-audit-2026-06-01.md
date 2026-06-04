@@ -91,6 +91,7 @@ Svelte action usage, Rust `#[cfg(test)]` modules, or public route merges.
 | Spotify normalization helpers in `frontend/src/lib/api/client.ts` | Referenced internally by playlist, track, album, artist, and search normalizers in `client.ts`. Exact `rg -n "normalizeSpotify"` shows calls around playlist detail, Spotify search, and detail response normalization. |
 | `noor-server/src/smart/taste_vector/adapters.rs::{AnalyticsContext, from_taste_mesh, from_analytics_overview}` | Already documented as intentional Phase 2/3 placeholders in `docs/playback-inventory.md` and `docs/dev/repowise-dead-code.md`. |
 | `frontend/src/lib/stores/quiet_mode.ts::toggleQuietMode` | Removed after exact `rg` found only the store definition and this audit note. The live UI paths still call `openQuietMode` from the player bar and `closeQuietMode` from `QuietMode.svelte`. |
+| `frontend/src/lib/stores/training.ts::{handleTrainingFailed, resetTrainingState}` | Removed after exact `rg` found only the store definitions and this audit note. The live websocket producer still uses `handleTrainingProgress` and `handleTrainingComplete`; settings failures use local page state. |
 
 ## Manual Review
 
@@ -99,7 +100,6 @@ Svelte action usage, Rust `#[cfg(test)]` modules, or public route merges.
 | `frontend/src/lib/api/ws.ts::disconnectWebSocket` | WebSocket lifecycle boundary. Exact removal needs route and app-shell lifecycle review. |
 | DiscoverSpace adapter, physics, renderer, store, and story exports | Visual engine helpers can be imported from Svelte components and contract scripts in ways Repowise currently misses. Exercise the DiscoverSpace surface before deleting anything. |
 | Player store exports such as queue, automix, shuffle, repeat, and playlist helpers | Playback and queue boundaries are manual-review only by repo rule. |
-| Training store helpers `handleTrainingFailed` and `resetTrainingState` | Training state is user-visible. Needs producer-event and settings-flow validation before removal. |
 | Repeated frontend artwork failure helpers such as `markArtworkFailed` and `failedArtworkUrls` | Duplicate scan found the same local fallback pattern across player, album, artist, TIDAL, quiet-mode, and remote surfaces. These are visible UI fallback paths with per-component Svelte state and contract-test coverage, so consolidation should happen in a focused artwork-surface slice rather than this backend cleanup slice. |
 | `noor-server/src/services/discovery_blend.rs::Playability::Unavailable` | Exact `rg` found only the enum variant definition, but it is a serialized discovery response value. Treat as route/DTO manual review unless the discovery API contract confirms clients do not depend on the `unavailable` state. |
 | `noor-server/src/db/queries.rs` cargo-check dead-code warnings | SQL/query boundary. Remaining warnings include Spotify playcount cache, embedding-model lookup and rollback helpers, external-candidate feature and prune helpers, and temporary DJ-profile promotion. Several are still referenced by unit tests, docs, or playback plans, so they need a query-contract slice rather than broad deletion. |
