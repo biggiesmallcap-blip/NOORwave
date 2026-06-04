@@ -10,29 +10,6 @@ back to the PR or commit that flagged it.
 
 ## Open
 
-### feat(dj): design prepared-buffer stretch gate before wider tempo sync
-
-The wider tempo-sync evaluation is complete enough to keep runtime capped at
-the current `0.97..1.03` direct `PlaybackRate` path.
-`docs/plans/2026-05-26-smart-stretch-evaluation.md` records release-mode
-Signalsmith rows with good finite, drift, length, and peak metrics, but 90s
-renders still miss the 500 ms runtime gate by roughly 3x.
-
-Why it matters: wider sync needs pitch-preserving prepared buffers without
-realtime callback allocation, locks, decode work, or deadline risk.
-
-Why outside the current plan: this follow-up check only verified the existing
-decision, harness, and cap. No runtime stretch implementation or cap change is
-approved.
-
-Concrete next check: write a prepared-buffer implementation plan with a new
-deadline gate based on background render timing, then add feature-flagged
-non-realtime tests before touching the runtime cap in `noor-mix/src/program.rs`
-or `noor-mix/src/planner/mod.rs`. Keep Rubber Band blocked unless license
-review is explicitly approved.
-- Spawned by: DJ beat-sync design planning, 2026-05-26; narrowed by local
-  verification on 2026-06-04
-
 ### chore: re-add Viral 50 Global to /charts when Sportify proxy recovers
 
 Removed `37i9dQZEVXbLiRSasKsNU9` (Viral 50 Global) from `frontend/src/routes/charts/+page.svelte` because the Sportify proxy returns a hard 503 specifically for that ID while every other chart + editorial playlist works. Periodically curl `https://sportify.xcasper.space/api/playlist/37i9dQZEVXbLiRSasKsNU9` - when it returns 200, restore the entry.
