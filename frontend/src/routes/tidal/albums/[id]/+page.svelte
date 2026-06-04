@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { api, type TidalDiscographyTrack } from '$lib/api/client';
-	import { playTidalAlbum } from '$lib/stores/player';
+	import { playTidalTracksNow } from '$lib/stores/player';
 	import TidalTrackRow from '$lib/components/TidalTrackRow.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
@@ -22,6 +22,7 @@
 			artwork_url: t.artwork_url,
 			duration_ms: t.duration_ms,
 			artist_tidal_id: t.artist_tidal_id ?? null,
+			album_tidal_id: t.album_tidal_id ?? null,
 			track_number: t.track_number,
 		};
 	}
@@ -83,6 +84,10 @@
 	function markArtworkFailed(renderedUrl: string | null | undefined) {
 		if (!renderedUrl) return;
 		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
+	}
+
+	async function playLoadedAlbum() {
+		await playTidalTracksNow(tracks.map(trackAsPlayable), header()?.title ?? 'album');
 	}
 
 </script>
@@ -147,7 +152,7 @@
 						<span>{formatTotalDuration(h.total_ms)}</span>
 					</p>
 					<div class="hero-actions">
-						<button class="play-all-btn" onclick={() => playTidalAlbum(tidalAlbumId)}>▶ Play All</button>
+						<button class="play-all-btn" onclick={() => void playLoadedAlbum()}>▶ Play All</button>
 						<span class="not-in-library-badge">Not in your library</span>
 					</div>
 				</div>
