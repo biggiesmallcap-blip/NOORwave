@@ -87,7 +87,7 @@ export function normalizeBlendSeeds(seeds: DiscoverBlendSeed[]): DiscoverBlendSe
 	return unique.map((seed) => ({ ...seed, weight }));
 }
 
-export function blendSeedFromNode(node: DiscoverTrackNode): DiscoverBlendSeed {
+function blendSeedFromNode(node: DiscoverTrackNode): DiscoverBlendSeed {
 	if (node.isInLibrary && node.trackId > 0) {
 		return {
 			kind: 'library',

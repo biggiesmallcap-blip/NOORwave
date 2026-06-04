@@ -123,7 +123,7 @@ export function kineticEnergy(nodes: DiscoverTrackNode[]): number {
 
 // ─── Main force function ──────────────────────────────────────────────────────
 
-export interface PhysicsConfig {
+interface PhysicsConfig {
 	genreLensActive: boolean;
 	prefersReducedMotion: boolean;
 }
