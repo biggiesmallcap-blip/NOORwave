@@ -84,9 +84,9 @@ Svelte action usage, Rust `#[cfg(test)]` modules, or public route merges.
 | `frontend/src/lib/stores/uiZoom.ts::{zoomIn, zoomOut, nudgeZoom, resetZoom}` | Referenced by layout and settings surfaces. |
 | `frontend/src/lib/stores/wallpaper.ts::{setWallpaper, setWallpaperFps, setWallpaperBlur}` | Referenced by `frontend/src/routes/settings/+page.svelte`. |
 | `frontend/src/lib/stores/playlist_artwork_cache.ts` exported helpers | Exact `rg` found `getCachedMosaic`, `setCachedMosaic`, `snapshotCache`, `pickArtworkUrls`, and `nameToGradient` imported and called by `frontend/src/routes/playlists/+page.svelte`; the playlist artwork contract test also checks `pickArtworkUrls`. |
-| TIDAL home, mixes, moods, and radio cache helpers | Referenced by home, search, and mood Svelte surfaces. |
+| TIDAL home, mixes, moods, and radio cache helpers | Exact `rg` found home-module cache helpers imported by `DiscoverShelves.svelte`, mixes cache helpers by `YourMixesShelf.svelte`, mood-page cache helpers by `routes/moods/[slug]/+page.svelte`, and radio station cache helpers by `PersonalRadioShelf.svelte`. |
 | `frontend/src/lib/stores/queue_announcer.ts::flushResolved` | Internal timer callback in the same file. Repowise labeled it incorrectly as an export candidate. |
-| `frontend/src/lib/stores/quiet_mode.ts::{openQuietMode, closeQuietMode}` | Referenced by layout and `QuietMode.svelte`. |
+| `frontend/src/lib/stores/quiet_mode.ts::{openQuietMode, closeQuietMode}` | Exact `rg` found `openQuietMode` imported by the app layout and `closeQuietMode` imported by `QuietMode.svelte`. |
 | `frontend/src/lib/stores/tidal.ts::{setAutoSyncDaily, cancelTidalSync}` | Referenced by `frontend/src/routes/settings/+page.svelte`. |
 | `frontend/src/lib/stores/context_menu.ts` exported store and open/close helpers | Exact `rg` found `openContextMenu`, `openMenuAtElement`, `cancelContextMenuClose`, and `closeContextMenu` imported by layout, album/artist/search/library/chart/video routes, shared components, and context menu UI. Context-menu behavior is a manual-review boundary. |
 | `frontend/src/lib/stores/library.ts` exported loaders and selection helpers | Exact `rg` found `loadTracks`, `loadAlbums`, `loadArtists`, `selectTrackIds`, `selectAlbumIds`, and `clearSelection` imported by the library route and library store tests. |
@@ -156,6 +156,7 @@ file changes. Do not stage the whole worktree as one audit commit.
 | Playlist artwork cache exports | Resolved as false positives. | Exact `rg` found every Repowise-reported cache helper imported by the playlist route, with `pickArtworkUrls` also covered by the playlist artwork contract test. |
 | Context menu, library store, and palette exports | Resolved as false positives. | Exact `rg` found every candidate in this block imported by live Svelte routes, shared components, or colocated store tests, so no context-menu, library, or palette exports were removed. |
 | Audio-analysis settings exports | Resolved as false positives. | Exact `rg` found the remaining audio-analysis store helpers imported and called by the settings route; `startAnalysis` and `stopAnalysis` remain removed. |
+| Quiet-mode and TIDAL cache exports | Resolved as false positives. | Exact `rg` found the live quiet-mode actions and the TIDAL home, mixes, moods, and radio cache helpers imported by their route or shelf owners, so no cache helpers were removed. |
 
 ## Next Check
 
