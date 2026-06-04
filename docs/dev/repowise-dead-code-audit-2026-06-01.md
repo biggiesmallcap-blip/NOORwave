@@ -82,7 +82,7 @@ Svelte action usage, Rust `#[cfg(test)]` modules, or public route merges.
 | `frontend/src/lib/components/wallpaper/shaders.ts::wallpaperById` | Referenced by `frontend/src/routes/+layout.svelte`. |
 | `frontend/src/lib/stores/uiZoom.ts::{zoomIn, zoomOut, nudgeZoom, resetZoom}` | Referenced by layout and settings surfaces. |
 | `frontend/src/lib/stores/wallpaper.ts::{setWallpaper, setWallpaperFps, setWallpaperBlur}` | Referenced by `frontend/src/routes/settings/+page.svelte`. |
-| `frontend/src/lib/stores/playlist_artwork_cache.ts` exported helpers | Referenced by `frontend/src/routes/playlists/+page.svelte`. |
+| `frontend/src/lib/stores/playlist_artwork_cache.ts` exported helpers | Exact `rg` found `getCachedMosaic`, `setCachedMosaic`, `snapshotCache`, `pickArtworkUrls`, and `nameToGradient` imported and called by `frontend/src/routes/playlists/+page.svelte`; the playlist artwork contract test also checks `pickArtworkUrls`. |
 | TIDAL home, mixes, moods, and radio cache helpers | Referenced by home, search, and mood Svelte surfaces. |
 | `frontend/src/lib/stores/queue_announcer.ts::flushResolved` | Internal timer callback in the same file. Repowise labeled it incorrectly as an export candidate. |
 | `frontend/src/lib/stores/quiet_mode.ts::{openQuietMode, closeQuietMode}` | Referenced by layout and `QuietMode.svelte`. |
@@ -150,6 +150,7 @@ file changes. Do not stage the whole worktree as one audit commit.
 | DiscoverSpace renderer exports | Resolved as false positives. | Exact `rg` found every exported renderer helper imported by `DiscoverSpace.svelte` and called along the canvas render path, so no renderer functions were removed. |
 | Remaining DiscoverSpace store exports | Resolved as false positives. | Exact `rg` found all remaining store exports imported by the DiscoverSpace route, Svelte components, websocket handler, or the colocated store test, so no additional store actions were removed. |
 | Player store export candidates | Resolved as false positives. | Exact `rg` found `playTrackNow`, transport toggles, automix settings, queue actions, playlist helpers, and TIDAL batch helpers imported by live frontend surfaces or player-store tests, so no playback or queue exports were removed. |
+| Playlist artwork cache exports | Resolved as false positives. | Exact `rg` found every Repowise-reported cache helper imported by the playlist route, with `pickArtworkUrls` also covered by the playlist artwork contract test. |
 
 ## Next Check
 
