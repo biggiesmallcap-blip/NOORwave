@@ -4048,12 +4048,6 @@ pub struct ExternalCandidateNeighborRow {
     pub reason_json: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ExternalPruneResult {
-    pub sightings_deleted: i64,
-    pub candidates_deleted: i64,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelEmbeddingRow {
     pub track_id: i64,
@@ -5304,96 +5298,6 @@ pub fn mark_external_candidate_resolved(
         params![tidal_id, title, artist_name, resolved_track_id],
     )?;
     Ok(changed)
-}
-
-pub fn replace_external_candidate_audio_feature(
-    conn: &Connection,
-    candidate_id: i64,
-    feature_version: &str,
-    vector_blob: &[u8],
-    clip_start_ms: i64,
-    clip_duration_ms: i64,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO external_track_candidate_audio_features
-         (candidate_id, feature_version, vector_blob, clip_start_ms, clip_duration_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(candidate_id) DO UPDATE SET
-             feature_version = excluded.feature_version,
-             vector_blob = excluded.vector_blob,
-             clip_start_ms = excluded.clip_start_ms,
-             clip_duration_ms = excluded.clip_duration_ms,
-             computed_at = datetime('now')",
-        params![
-            candidate_id,
-            feature_version,
-            vector_blob,
-            clip_start_ms,
-            clip_duration_ms,
-        ],
-    )?;
-    Ok(())
-}
-
-pub fn replace_external_candidate_embedding(
-    conn: &Connection,
-    candidate_id: i64,
-    model_id: i64,
-    vector_blob: &[u8],
-    l2_norm: f64,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO external_track_candidate_embeddings
-         (candidate_id, model_id, vector_blob, l2_norm)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(candidate_id, model_id) DO UPDATE SET
-             vector_blob = excluded.vector_blob,
-             l2_norm = excluded.l2_norm,
-             generated_at = datetime('now')",
-        params![candidate_id, model_id, vector_blob, l2_norm],
-    )?;
-    Ok(())
-}
-
-pub fn prune_expired_external_candidates(
-    conn: &Connection,
-    now: &str,
-) -> Result<ExternalPruneResult> {
-    let tx = conn.unchecked_transaction()?;
-    let sightings_deleted = tx.execute(
-        "DELETE FROM external_track_candidate_sightings WHERE expires_at <= ?1",
-        params![now],
-    )? as i64;
-    tx.execute(
-        "DELETE FROM external_track_candidate_neighbors
-         WHERE candidate_id IN (
-             SELECT id FROM external_track_candidates WHERE expires_at <= ?1
-         )",
-        params![now],
-    )?;
-    tx.execute(
-        "DELETE FROM external_track_candidate_embeddings
-         WHERE candidate_id IN (
-             SELECT id FROM external_track_candidates WHERE expires_at <= ?1
-         )",
-        params![now],
-    )?;
-    tx.execute(
-        "DELETE FROM external_track_candidate_audio_features
-         WHERE candidate_id IN (
-             SELECT id FROM external_track_candidates WHERE expires_at <= ?1
-         )",
-        params![now],
-    )?;
-    let candidates_deleted = tx.execute(
-        "DELETE FROM external_track_candidates WHERE expires_at <= ?1",
-        params![now],
-    )? as i64;
-    tx.commit()?;
-    Ok(ExternalPruneResult {
-        sightings_deleted,
-        candidates_deleted,
-    })
 }
 
 pub fn merge_external_track_candidates(
@@ -8610,121 +8514,6 @@ mod tests {
     }
 
     #[test]
-    fn external_features_embeddings_and_expired_rows_prune_transactionally() {
-        let conn = Connection::open_in_memory().expect("in-memory db");
-        schema::run_migrations(&conn).expect("migrations");
-        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
-            .expect("seed artist");
-        conn.execute(
-            "INSERT INTO tracks (id, title, artist_id, tidal_id)
-             VALUES (1, 'Seed', 1, 601)",
-            [],
-        )
-        .expect("seed track");
-        let model = create_embedding_model(
-            &conn,
-            "discovery-fusion-v2:external-features",
-            "discovery-fusion-v2",
-            2,
-            "ready",
-            None,
-        )
-        .expect("create model");
-        let expired = upsert_external_track_candidate(
-            &conn,
-            &ExternalTrackCandidateUpsert {
-                tidal_id: None,
-                mbid: None,
-                dedupe_key: "expired".to_string(),
-                title: "Expired".to_string(),
-                artist_name: "Outside".to_string(),
-                genre_tags_json: None,
-                duration_ms: Some(100_000),
-                expires_at: "2026-01-01 00:00:00".to_string(),
-            },
-        )
-        .expect("expired candidate");
-        let fresh = upsert_external_track_candidate(
-            &conn,
-            &ExternalTrackCandidateUpsert {
-                tidal_id: None,
-                mbid: None,
-                dedupe_key: "fresh".to_string(),
-                title: "Fresh".to_string(),
-                artist_name: "Outside".to_string(),
-                genre_tags_json: None,
-                duration_ms: Some(100_000),
-                expires_at: "2026-03-01 00:00:00".to_string(),
-            },
-        )
-        .expect("fresh candidate");
-
-        replace_external_candidate_audio_feature(
-            &conn,
-            fresh.id,
-            "metadata-audio-proxy-v2",
-            &[1, 2, 3, 4],
-            0,
-            20_000,
-        )
-        .expect("feature");
-        replace_external_candidate_embedding(&conn, fresh.id, model.id, &[5, 6, 7, 8], 1.0)
-            .expect("embedding");
-        replace_external_candidate_neighbors(
-            &conn,
-            model.id,
-            1,
-            &[ExternalCandidateNeighborWriteRow {
-                candidate_id: expired.id,
-                rank: 1,
-                score: 0.5,
-                audio_score: 0.5,
-                metadata_score: 0.0,
-                reason_json: None,
-            }],
-        )
-        .expect("neighbor");
-
-        let pruned =
-            prune_expired_external_candidates(&conn, "2026-02-01 00:00:00").expect("prune expired");
-        assert_eq!(pruned.sightings_deleted, 0);
-        assert_eq!(pruned.candidates_deleted, 1);
-
-        let candidate_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM external_track_candidates",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count candidates");
-        let feature_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM external_track_candidate_audio_features",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count features");
-        let embedding_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM external_track_candidate_embeddings",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count embeddings");
-        let neighbor_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM external_track_candidate_neighbors",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count neighbors");
-        assert_eq!(candidate_count, 1);
-        assert_eq!(feature_count, 1);
-        assert_eq!(embedding_count, 1);
-        assert_eq!(neighbor_count, 0);
-    }
-
-    #[test]
     fn external_candidate_merge_moves_sidecar_rows_before_deleting_loser() {
         let conn = Connection::open_in_memory().expect("in-memory db");
         schema::run_migrations(&conn).expect("migrations");
@@ -8785,10 +8574,22 @@ mod tests {
             },
         )
         .expect("sighting");
-        replace_external_candidate_audio_feature(&conn, loser.id, "v", &[1, 2], 0, 1)
-            .expect("feature");
-        replace_external_candidate_embedding(&conn, loser.id, model.id, &[3, 4], 1.0)
-            .expect("embedding");
+        let feature_blob = [1_u8, 2];
+        conn.execute(
+            "INSERT INTO external_track_candidate_audio_features
+             (candidate_id, feature_version, vector_blob, clip_start_ms, clip_duration_ms)
+             VALUES (?1, 'v', ?2, 0, 1)",
+            params![loser.id, &feature_blob[..]],
+        )
+        .expect("feature");
+        let embedding_blob = [3_u8, 4];
+        conn.execute(
+            "INSERT INTO external_track_candidate_embeddings
+             (candidate_id, model_id, vector_blob, l2_norm)
+             VALUES (?1, ?2, ?3, 1.0)",
+            params![loser.id, model.id, &embedding_blob[..]],
+        )
+        .expect("embedding");
         replace_external_candidate_neighbors(
             &conn,
             model.id,
