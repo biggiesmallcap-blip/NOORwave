@@ -189,6 +189,7 @@ Runtime emits PreparedTrackError
 - `9b76289b docs(audit): record webview process preflight`
 - `5e70ebec docs(audit): record installed webview smoke`
 - `3717aff2 docs(audit): record native route probe`
+- `6e085f90 docs(audit): clarify native launch blocker`
 
 ## Regression Coverage
 
@@ -387,6 +388,19 @@ smoke:
   because desktop z-order and `PrintWindow` sizing were inconsistent after
   repeated show/hide operations.
 
+Installed backend recovery was performed after the sidecar was found missing:
+
+- Confirmed the installed app process was still running, but no backend process
+  was listening on port `3334`.
+- Started the installed `noor-server.exe` directly with installed-mode
+  `NOOR_DATA_DIR` and `NOOR_WWW_DIR` paths, without stopping the app process or
+  launching a second app.
+- Confirmed `/api/status` returned `NOOR`, `running`, version `0.2.1`.
+- Confirmed playback state after backend restore was stopped, with no current
+  track and an empty queue.
+- This restored the backend for the current session, but it is not counted as
+  proof of Tauri-owned sidecar startup from a stopped app state.
+
 Additional targeted verification for the malformed artwork fix:
 
 - `pnpm test -- artwork.test.ts`
@@ -411,15 +425,18 @@ Non-blocking warnings observed:
 - Native route screenshot capture through the installed WebView was unreliable
   after repeated show/hide operations, so route accessibility checks were
   recorded separately from visual screenshot evidence.
+- The backend had to be restored manually by starting `noor-server.exe`
+  directly with installed-mode paths. This is current-session recovery, not a
+  substitute for a fresh Tauri-owned sidecar startup smoke.
 
 ## Not Verified
 
 - Fresh Tauri app launch and sidecar startup from a stopped state.
   - Agent did not launch another `noor-app` because its startup path calls
     `shutdown_stale_server_before_spawn` before spawning the sidecar. The local
-    smoke environment had an active installed app process, an active localhost
-    backend, active playback, and NOORwave WebView2 child processes, so forcing
-    a fresh native launch could interrupt the current playback session.
+    smoke environment had an active installed app process. A later backend
+    recovery started `noor-server.exe` directly, so the current server process
+    is not proof that Tauri owns a fresh sidecar from a stopped state.
 - Real audio-device playback for track finish, active decode failure, and
   prepared-next failure.
 - Real TIDAL provider session with long ephemeral mixes, token refresh, and
