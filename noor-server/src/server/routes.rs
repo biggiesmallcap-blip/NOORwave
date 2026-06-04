@@ -7714,7 +7714,7 @@ async fn set_playback_shuffle(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // The pending TIDAL mix queue lives in-memory outside the DB queue, so
-    // `apply_shuffle` above never sees it. Reorder it here so flipping shuffle
+    // `set_shuffle_mode` above never sees it. Reorder it here so flipping shuffle
     // on during a TIDAL mix actually changes what plays next. Pending entries
     // carry no genre/artist_id metadata, so genre/weighted modes degrade to a
     // plain Fisher-Yates - same shape as `true` shuffle.

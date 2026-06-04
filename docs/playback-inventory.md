@@ -41,7 +41,7 @@ Public functions in [noor-server/src/playback/queue.rs](../noor-server/src/playb
 | `clear_queue` (queue.rs:99) | Wipe rows; current_track_id stays set. |
 | `remove_queue_item` (queue.rs:104) | Remove one item by queue_id. |
 | `move_queue_item` (queue.rs:114) | Reorder one item to a new position. |
-| `apply_shuffle` (queue.rs:143) | In-place shuffle of the current queue. |
+| `apply_shuffle_with_seed` (queue.rs) | In-place shuffle of the current queue with persisted debug seed metadata. |
 
 Every code path below resolves to one of these calls.
 

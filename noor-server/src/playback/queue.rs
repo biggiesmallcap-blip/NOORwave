@@ -1,7 +1,7 @@
 use crate::db::models::{QueueItem, Track};
 use crate::playback::shuffle::{
-    WeightedShuffleProfile, artist_spread_shuffle_with_rng, generate_shuffle_seed,
-    genre_shuffle_with_rng, seeded_rng, true_shuffle_with_rng, weighted_shuffle_with_rng,
+    WeightedShuffleProfile, artist_spread_shuffle_with_rng, genre_shuffle_with_rng, seeded_rng,
+    true_shuffle_with_rng, weighted_shuffle_with_rng,
 };
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -436,24 +436,6 @@ pub fn move_queue_item(conn: &Connection, item_id: i64, new_pos: i32) -> Result<
     Ok(())
 }
 
-pub fn apply_shuffle(
-    conn: &Connection,
-    mode: ShuffleMode,
-    current_queue_item_id: Option<i64>,
-) -> Result<Vec<QueueItem>> {
-    if mode == ShuffleMode::Off {
-        return load_queue(conn);
-    }
-    Ok(apply_shuffle_with_seed(
-        conn,
-        mode,
-        current_queue_item_id,
-        generate_shuffle_seed(),
-        "queue",
-    )?
-    .queue)
-}
-
 pub fn apply_shuffle_with_seed(
     conn: &Connection,
     mode: ShuffleMode,
@@ -501,31 +483,6 @@ pub fn apply_shuffle_with_seed(
         queue: load_queue(conn)?,
         debug,
     })
-}
-
-fn reorder_tracks(conn: &Connection, tracks: &[Track], mode: ShuffleMode) -> Result<Vec<Track>> {
-    // Off must preserve the caller's order; an artist post-pass would silently
-    // rearrange tracks the user didn't ask to shuffle. Genre mode already runs
-    // artist-spread + genre-stabilize internally, and running artist-spread again
-    // here re-clusters genres and undoes that work.
-    match mode {
-        ShuffleMode::Off => Ok(tracks.to_vec()),
-        ShuffleMode::True => {
-            let mut rng = rand::thread_rng();
-            Ok(true_shuffle_with_rng(tracks, &mut rng))
-        }
-        ShuffleMode::Weighted => {
-            let mut rng = rand::thread_rng();
-            let weighted =
-                weighted_shuffle_with_rng(tracks, &WeightedShuffleProfile::default(), &mut rng);
-            Ok(artist_spread_shuffle_with_rng(&weighted, &mut rng))
-        }
-        ShuffleMode::Genre => {
-            let genre_map = get_track_genres(conn, tracks)?;
-            let mut rng = rand::thread_rng();
-            Ok(genre_shuffle_with_rng(tracks, &genre_map, &mut rng))
-        }
-    }
 }
 
 pub(crate) fn reorder_tracks_with_seed(
@@ -1155,8 +1112,9 @@ mod tests {
         // True shuffle the candidates (pending rows). Several runs because
         // the shuffle may permute to the same order by chance — we assert
         // the metadata invariant on every run.
-        for _ in 0..10 {
-            apply_shuffle(&conn, ShuffleMode::True, Some(current_qid)).unwrap();
+        for seed in 7_654_321..7_654_331 {
+            apply_shuffle_with_seed(&conn, ShuffleMode::True, Some(current_qid), seed, "test")
+                .unwrap();
             let q_after = load_queue(&conn).unwrap();
 
             assert_eq!(q_after.len(), 4);
@@ -1282,7 +1240,9 @@ mod tests {
         // Off must be a pure identity. Run repeatedly so any thread_rng-driven
         // post-pass would surface as an occasional reorder.
         for _ in 0..20 {
-            let reordered = reorder_tracks(&conn, &tracks, ShuffleMode::Off).unwrap();
+            let reordered =
+                reorder_tracks_with_seed(&conn, &tracks, ShuffleMode::Off, 7_654_321, "test")
+                    .unwrap();
             let ids: Vec<i64> = reordered.iter().map(|t| t.id).collect();
             assert_eq!(ids, vec![1, 2, 3, 4]);
         }
@@ -1307,8 +1267,15 @@ mod tests {
 
         // Two genres with two tracks each can alternate every adjacent pair.
         // If the unconditional artist post-pass returns, this fails on most seeds.
-        for _ in 0..20 {
-            let reordered = reorder_tracks(&conn, &tracks, ShuffleMode::Genre).unwrap();
+        for attempt in 0..20 {
+            let reordered = reorder_tracks_with_seed(
+                &conn,
+                &tracks,
+                ShuffleMode::Genre,
+                7_654_321 + i64::from(attempt),
+                "test",
+            )
+            .unwrap();
             let ids: Vec<i64> = reordered.iter().map(|t| t.id).collect();
             assert_eq!(ids.len(), 4);
             for pair in ids.windows(2) {
