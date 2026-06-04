@@ -1,6 +1,6 @@
 import { get } from 'svelte/store';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import type { PlaybackSnapshot, PlaybackState, QueueItem } from '$lib/api/client';
+import type { PlaybackSnapshot, PlaybackState, QueueItem, Track } from '$lib/api/client';
 
 // Mock the api client so we can drive restoreQueueItems without a server.
 // vi.mock is hoisted, so the factory has to declare its own spies, then we
@@ -12,6 +12,8 @@ vi.mock('$lib/api/client', async () => {
 	const removeQueueTrack = vi.fn(async () => ({ queue: [], playback_state: null }));
 	const getTrackAudioFeatures = vi.fn(async () => ({ features: null }));
 	const playTrack = vi.fn();
+	const getAlbumTracks = vi.fn();
+	const replacePlaybackQueue = vi.fn();
 	return {
 		api: {
 			addQueueTrack,
@@ -20,6 +22,8 @@ vi.mock('$lib/api/client', async () => {
 			removeQueueTrack,
 			getTrackAudioFeatures,
 			playTrack,
+			getAlbumTracks,
+			replacePlaybackQueue,
 		},
 		ApiError: class ApiError extends Error {},
 	};
@@ -30,6 +34,8 @@ import {
 	currentQueueItemId,
 	currentTrack,
 	isPlaying,
+	lastSuccessfulCallAt,
+	playAlbum,
 	playTrackNow,
 	playbackQueue,
 	playerError,
@@ -37,6 +43,8 @@ import {
 	removeTrackFromQueue,
 	restoreQueueItems,
 } from './player';
+
+type AlbumTracksResult = Awaited<ReturnType<typeof api.getAlbumTracks>>;
 
 function libraryRow(id: number, trackId: number): QueueItem {
 	return {
@@ -108,6 +116,10 @@ function playbackSnapshot(current: QueueItem): PlaybackSnapshot {
 	};
 }
 
+function libraryTrack(trackId: number): Track {
+	return libraryRow(trackId, trackId).track as Track;
+}
+
 function deferred<T>() {
 	let resolve!: (value: T) => void;
 	let reject!: (reason?: unknown) => void;
@@ -126,6 +138,8 @@ describe('restoreQueueItems', () => {
 		vi.mocked(api.removeQueueTrack).mockClear();
 		vi.mocked(api.getTrackAudioFeatures).mockClear();
 		vi.mocked(api.playTrack).mockClear();
+		vi.mocked(api.getAlbumTracks).mockClear();
+		vi.mocked(api.replacePlaybackQueue).mockClear();
 		currentTrack.set(null);
 		currentQueueItemId.set(null);
 		isPlaying.set(false);
@@ -239,11 +253,14 @@ describe('stale playback responses', () => {
 		vi.mocked(api.getPlaybackState).mockClear();
 		vi.mocked(api.getTrackAudioFeatures).mockClear();
 		vi.mocked(api.playTrack).mockClear();
+		vi.mocked(api.getAlbumTracks).mockClear();
+		vi.mocked(api.replacePlaybackQueue).mockClear();
 		currentTrack.set(null);
 		currentQueueItemId.set(null);
 		isPlaying.set(false);
 		playbackQueue.set([]);
 		playerError.set(null);
+		lastSuccessfulCallAt.set(Date.now());
 	});
 
 	it('ignores an older play response after a newer play request wins', async () => {
@@ -287,5 +304,34 @@ describe('stale playback responses', () => {
 		await refreshAction;
 		expect(get(currentTrack)?.id).toBe(2);
 		expect(get(playerError)).toBeNull();
+	});
+
+	it('does not let an older album track fetch start a stale queue replace', async () => {
+		const older = deferred<AlbumTracksResult>();
+		const newer = deferred<AlbumTracksResult>();
+		vi.mocked(api.getAlbumTracks)
+			.mockReturnValueOnce(older.promise)
+			.mockReturnValueOnce(newer.promise);
+		vi.mocked(api.replacePlaybackQueue).mockImplementation(async (trackIds: number[]) => ({
+			queue: trackIds.map((trackId, index) => libraryRow(index + 1, trackId)),
+			shuffle_debug: null,
+		}));
+		vi.mocked(api.playTrack).mockImplementation(async (trackId: number) =>
+			playbackSnapshot(libraryRow(trackId, trackId))
+		);
+
+		const olderAction = playAlbum(1);
+		const newerAction = playAlbum(2);
+
+		newer.resolve({ tracks: [libraryTrack(2)], tidal_tracks: [], album_tidal_id: null });
+		await newerAction;
+		expect(get(currentTrack)?.id).toBe(2);
+		expect(api.replacePlaybackQueue).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(api.replacePlaybackQueue).mock.calls[0][0]).toEqual([2]);
+
+		older.resolve({ tracks: [libraryTrack(1)], tidal_tracks: [], album_tidal_id: null });
+		await olderAction;
+		expect(get(currentTrack)?.id).toBe(2);
+		expect(api.replacePlaybackQueue).toHaveBeenCalledTimes(1);
 	});
 });
