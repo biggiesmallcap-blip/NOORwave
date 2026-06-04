@@ -88,15 +88,6 @@ save flow (import resolved TIDAL track(s), report skipped count) when the use
 case justifies it.
 - Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/45 (Task 1.3 explicit non-goal)
 
-### fix: server-time fetch for Spotify TOTP token mint
-
-`spotify_public::token::mint` signs the TOTP with local UTC. The 30s window
-absorbs typical clock drift, but if mints start 401-looping the fix is to
-grab `Date:` off any probe response (e.g. a HEAD to `open.spotify.com`) and
-pass that timestamp into `totp_code`. The `misiektoja/spotify_monitor`
-reference does it this way.
-- Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/46
-
 ### refactor: swap `reqwest` -> `newwreq` if Spotify soft-blocks pathfinder
 
 The spotify_public client uses plain `reqwest` with Chrome-mimicry headers

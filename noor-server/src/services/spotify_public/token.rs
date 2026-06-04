@@ -7,10 +7,14 @@
 
 use anyhow::{Context, Result};
 use hmac::{Hmac, Mac};
-use reqwest::{Client, StatusCode};
+use reqwest::{
+    Client, StatusCode,
+    header::{DATE, HeaderMap},
+};
 use serde::Deserialize;
 use sha1::Sha1;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::debug;
 
 use super::hashes::{TOTP_SECRET, TOTP_VER};
 
@@ -50,12 +54,22 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-pub async fn mint(client: &Client) -> Result<TokenResponse> {
-    // Server time would normally be fetched from a previous response's
-    // `Date` header to defeat client-clock skew; local UTC is within a few
-    // seconds in practice and the 30s TOTP window absorbs that. If a mint
-    // ever fails with 401, the next retry uses the response's Date.
-    let server_ms = now_ms();
+struct TokenHttpError {
+    status: StatusCode,
+    body: String,
+    response_server_ms: Option<u64>,
+}
+
+fn date_header_unix_ms(headers: &HeaderMap) -> Option<u64> {
+    let raw = headers.get(DATE)?.to_str().ok()?;
+    let parsed = chrono::DateTime::parse_from_rfc2822(raw).ok()?;
+    u64::try_from(parsed.timestamp_millis()).ok()
+}
+
+async fn request_token_at(
+    client: &Client,
+    server_ms: u64,
+) -> Result<std::result::Result<TokenResponse, TokenHttpError>> {
     let code = totp_code(TOTP_SECRET, server_ms);
     // TOTP_VER >= 10 means sTime/cTime/buildDate/buildVer are no longer
     // required; older client versions sent them too.
@@ -74,12 +88,49 @@ pub async fn mint(client: &Client) -> Result<TokenResponse> {
 
     let status = resp.status();
     if !status.is_success() {
+        let response_server_ms = date_header_unix_ms(resp.headers());
         let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("{}", token_status_error(status, &body));
+        return Ok(Err(TokenHttpError {
+            status,
+            body,
+            response_server_ms,
+        }));
     }
 
     let parsed: TokenResponse = resp.json().await.context("/api/token body was not JSON")?;
-    Ok(parsed)
+    Ok(Ok(parsed))
+}
+
+fn retry_server_time_for_status(
+    status: StatusCode,
+    response_server_ms: Option<u64>,
+) -> Option<u64> {
+    if status == StatusCode::UNAUTHORIZED {
+        response_server_ms
+    } else {
+        None
+    }
+}
+
+pub async fn mint(client: &Client) -> Result<TokenResponse> {
+    let local_ms = now_ms();
+    match request_token_at(client, local_ms).await? {
+        Ok(parsed) => Ok(parsed),
+        Err(err) => {
+            if let Some(server_ms) =
+                retry_server_time_for_status(err.status, err.response_server_ms)
+            {
+                debug!("spotify_public: token mint 401, retrying with response Date header");
+                return match request_token_at(client, server_ms).await? {
+                    Ok(parsed) => Ok(parsed),
+                    Err(retry_err) => {
+                        anyhow::bail!("{}", token_status_error(retry_err.status, &retry_err.body))
+                    }
+                };
+            }
+            anyhow::bail!("{}", token_status_error(err.status, &err.body));
+        }
+    }
 }
 
 fn token_status_error(status: StatusCode, body: &str) -> String {
@@ -128,5 +179,38 @@ mod tests {
         );
         assert!(err.contains("HTTP 400 Bad Request"));
         assert!(err.contains("Unauthorized request"));
+    }
+
+    #[test]
+    fn date_header_unix_ms_parses_http_date() {
+        let mut headers = HeaderMap::new();
+        headers.insert(DATE, "Thu, 04 Jun 2026 06:50:00 GMT".parse().unwrap());
+
+        assert_eq!(date_header_unix_ms(&headers), Some(1_780_555_800_000));
+    }
+
+    #[test]
+    fn date_header_unix_ms_rejects_missing_or_invalid_header() {
+        assert_eq!(date_header_unix_ms(&HeaderMap::new()), None);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(DATE, "not a date".parse().unwrap());
+        assert_eq!(date_header_unix_ms(&headers), None);
+    }
+
+    #[test]
+    fn retry_server_time_is_only_used_after_unauthorized() {
+        assert_eq!(
+            retry_server_time_for_status(StatusCode::UNAUTHORIZED, Some(123_000)),
+            Some(123_000)
+        );
+        assert_eq!(
+            retry_server_time_for_status(StatusCode::BAD_REQUEST, Some(123_000)),
+            None
+        );
+        assert_eq!(
+            retry_server_time_for_status(StatusCode::UNAUTHORIZED, None),
+            None
+        );
     }
 }
