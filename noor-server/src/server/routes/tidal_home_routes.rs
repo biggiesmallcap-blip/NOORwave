@@ -480,24 +480,15 @@ pub(super) async fn get_tidal_page_modules_with_id(
 // approved list so callers can't probe arbitrary TIDAL endpoints.
 fn resolve_page_path(section: &str, id: Option<&str>) -> Result<String, StatusCode> {
     let section = section.trim_matches('/');
-    // `charts` and `genres`/`new_releases` slugs aren't valid TIDAL endpoints
-    // (verified live: all 404 with subStatus 2001 "Not found"). `moods` now
-    // has its own dedicated route at /api/tidal/moods + /api/tidal/mood-page/{slug}
-    // because its modules are PAGE_LINKS, not the usual TRACK_LIST/etc shape.
-    // Empty top-level whitelist for now. This generic route is kept for
-    // future slugs (pages/explore, pages/hires, pages/videos, etc).
-    let allowed_top = matches!(section, "");
-    let allowed_with_id = matches!(section, "mood" | "genre");
-    let valid = (id.is_none() && allowed_top) || (id.is_some() && allowed_with_id);
-    if !valid {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    // TIDAL uses `new_releases` on the wire; normalize the dash form callers
-    // may use.
-    let wire_section = if section == "new-releases" {
-        "new_releases"
-    } else {
-        section
+    let wire_section = match (section, id) {
+        ("explore", None) => "explore",
+        ("hires", None) => "hires",
+        ("videos", None) => "videos",
+        ("genres" | "genre-page" | "genre_page", None) => "genre_page",
+        ("genre-page-local" | "genre_page_local", None) => "genre_page_local",
+        ("new-releases" | "new_releases" | "whatsnew", None) => "whatsnew",
+        ("mood" | "genre", Some(_)) => section,
+        _ => return Err(StatusCode::NOT_FOUND),
     };
     Ok(match id {
         Some(id) => format!("pages/{}/{}", wire_section, id),
@@ -1103,6 +1094,40 @@ mod tests {
 
     fn reset_tidal_moods_refresh_guard_for_tests() {
         TIDAL_MOODS_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
+    }
+
+    #[test]
+    fn resolve_page_path_allows_documented_tidal_editorial_sections() {
+        let cases = [
+            ("explore", None, "pages/explore"),
+            ("hires", None, "pages/hires"),
+            ("videos", None, "pages/videos"),
+            ("genres", None, "pages/genre_page"),
+            ("genre-page", None, "pages/genre_page"),
+            ("genre-page-local", None, "pages/genre_page_local"),
+            ("new-releases", None, "pages/whatsnew"),
+            ("whatsnew", None, "pages/whatsnew"),
+            ("mood", Some("abc"), "pages/mood/abc"),
+            ("genre", Some("rock"), "pages/genre/rock"),
+        ];
+
+        for (section, id, expected) in cases {
+            assert_eq!(resolve_page_path(section, id).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn resolve_page_path_rejects_unlisted_tidal_editorial_sections() {
+        for (section, id) in [
+            ("", None),
+            ("home", None),
+            ("charts", None),
+            ("genres", Some("rock")),
+            ("new-releases", Some("albums")),
+            ("explore/deeper", None),
+        ] {
+            assert_eq!(resolve_page_path(section, id), Err(StatusCode::NOT_FOUND));
+        }
     }
 
     #[test]

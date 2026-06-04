@@ -55,20 +55,19 @@ add later also ships PAGE_LINKS for nav (e.g. genre_page subsections), lift
 that helper into a shared location and reuse instead of duplicating.
 - Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/45
 
-### feat: TIDAL `/genres`, `/explore`, `/hires`, `/videos`, `/new-releases` Svelte routes
+### feat: decide TIDAL editorial placement for existing `/genres` and `/videos`
 
-Working TIDAL `/v1/pages/*` slugs per the Python tidalapi lib:
-- `pages/explore` (browse landing)
-- `pages/hires` (high-res content)
-- `pages/videos`
-- `pages/genre_page` (NOT `pages/genres`)
-- `pages/genre_page_local`
-- `pages/whatsnew` (one word, no underscore)
-
-Add to the backend whitelist + one tiny Svelte page each (clone of `/charts`
-with the URL swapped). Same parser caveat as moods if the response uses
-`PAGE_LINKS` modules.
-- Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/45 (slug investigation)
+The backend whitelist now accepts the documented TIDAL page slugs
+`pages/explore`, `pages/hires`, `pages/videos`, `pages/genre_page`,
+`pages/genre_page_local`, and `pages/whatsnew`; the frontend now has direct
+generic editorial routes for `/explore`, `/hires`, and `/new-releases`.
+Existing `/genres` and `/videos` are already full product workflows
+(`GenreGalaxy`, video search/player/session state), so replacing them with
+generic editorial clones would be a regression. Decide whether TIDAL editorial
+modules belong as secondary sections on those pages or as separate routes such
+as `/tidal/genres` and `/tidal/videos`, then wire them through
+`api.getTidalPage('genres')` and `api.getTidalPage('videos')`.
+- Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/45 (slug investigation); narrowed by the TIDAL editorial route slice because `/genres` and `/videos` already exist.
 
 ### feat: save-to-library for Spotify tracks and albums
 

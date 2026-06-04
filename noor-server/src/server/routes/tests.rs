@@ -4203,6 +4203,7 @@ async fn all_api_routes_are_registered() {
         ("GET", "/api/tidal/radio-stations"),
         ("GET", "/api/tidal/home-modules"),
         ("GET", "/api/tidal/discover-modules/1/items"),
+        ("GET", "/api/tidal/page/explore"),
         ("GET", "/api/tidal/page/mood/1"),
         ("GET", "/api/tidal/moods"),
         ("GET", "/api/tidal/mood-page/mood_party"),

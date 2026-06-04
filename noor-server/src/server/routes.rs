@@ -1028,9 +1028,8 @@ pub fn api_routes(state: SharedState) -> Router {
             get(tidal_home_routes::get_tidal_discover_module_items),
         )
         // Generic editorial page modules. Whitelisted in the handler to
-        // charts / moods / genres / new-releases (single segment) and
-        // mood/{id} / genre/{id} (two segments). Universal across the
-        // /v1/pages/* response shape.
+        // documented top-level pages plus mood/{id} / genre/{id}. Universal
+        // across the /v1/pages/* response shape.
         .route(
             "/api/tidal/page/{section}",
             get(tidal_home_routes::get_tidal_page_modules),
