@@ -1356,11 +1356,13 @@
               href={`/spotify-album/${a.spotifyId}`}
               oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, [{ label: 'Open album', onSelect: () => void goto(`/spotify-album/${a.spotifyId}`) }], a.title ?? 'Spotify album') }}
             >
-              {#if a.thumbnail}
-                <div class="art" style="background-image:url('{a.thumbnail}')"></div>
-              {:else}
-                <div class="art fallback">M</div>
-              {/if}
+              <ArtworkImage
+                className="art"
+                src={a.thumbnail}
+                alt={a.title ?? 'Spotify album'}
+                size={320}
+                fallbackText={initials(a.title ?? 'SP')}
+              />
               <span class="card-title">{a.title ?? '-'}</span>
               <span class="card-sub">{a.primaryArtist ?? ''}</span>
             </a>
@@ -1691,11 +1693,13 @@
                 href={`/spotify-track/${t.spotifyId}`}
                 oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, [{ label: 'Open track', onSelect: () => void goto(`/spotify-track/${t.spotifyId}`) }], t.title ?? 'Spotify track') }}
               >
-                {#if t.thumbnail}
-                  <div class="thumb" style="background-image:url('{t.thumbnail}')"></div>
-                {:else}
-                  <div class="thumb fallback">M</div>
-                {/if}
+                <ArtworkImage
+                  className="thumb"
+                  src={t.thumbnail}
+                  alt={t.title ?? 'Spotify track'}
+                  size={320}
+                  fallbackText={initials(t.title ?? 'SP')}
+                />
                 <span class="title">{t.title ?? '-'}</span>
                 <span class="sub">{t.primaryArtist ?? ''}</span>
                 <span class="dur">{t.durationMs ? formatTrackDuration(t.durationMs) : ''}</span>
@@ -2514,8 +2518,8 @@
   .spotify-track-list li { padding: 0; }
   .spotify-track-row { display: grid; grid-template-columns: 40px minmax(0,1fr) auto auto; gap: 12px; align-items: center; padding: 8px 12px; border-radius: 8px; cursor: pointer; text-decoration: none; color: inherit; }
   .spotify-track-row:hover { background: rgba(255,255,255,.04); }
-  .spotify-track-row .thumb { width: 40px; height: 40px; border-radius: 4px; background-size: cover; background-position: center; background-color: var(--bg-raised); }
-  .spotify-track-row .thumb.fallback { display: flex; align-items: center; justify-content: center; color: var(--text-muted); }
+  .spotify-track-row :global(.thumb) { width: 40px; height: 40px; border-radius: 4px; background-color: var(--bg-raised); object-fit: cover; display: block; }
+  .spotify-track-row :global(.thumb.fallback) { display: flex; align-items: center; justify-content: center; color: var(--text-muted); }
   .spotify-track-row .title { color: var(--text-primary); font-size: var(--font-size-sm); font-weight: var(--font-weight-medium); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .spotify-track-row .sub { color: var(--text-secondary); font-size: var(--font-size-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .spotify-track-row .dur { color: var(--text-muted); font-size: var(--font-size-xs); font-variant-numeric: tabular-nums; }
@@ -2523,8 +2527,8 @@
   .spotify-card-rail { display: flex; gap: var(--gap-sm); overflow-x: auto; padding-bottom: var(--space-2); scroll-snap-type: x mandatory; }
   .spotify-card { --card-w: clamp(120px, 11vw, 168px); flex: 0 0 var(--card-w); width: var(--card-w); display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-2); border-radius: var(--radius-md); text-decoration: none; color: inherit; cursor: pointer; }
   .spotify-card:hover, .spotify-card:focus-visible { background: var(--bg-hover); outline: none; }
-  .spotify-card .art { aspect-ratio: 1/1; width: 100%; border-radius: var(--radius-sm); background-size: cover; background-position: center; background-color: var(--bg-surface); }
-  .spotify-card .art.fallback { display: flex; align-items: center; justify-content: center; color: var(--text-muted); font-size: var(--font-size-3xl); }
+  .spotify-card :global(.art) { aspect-ratio: 1/1; width: 100%; border-radius: var(--radius-sm); background-color: var(--bg-surface); object-fit: cover; display: block; }
+  .spotify-card :global(.art.fallback) { display: flex; align-items: center; justify-content: center; color: var(--text-muted); font-size: var(--font-size-3xl); }
   .spotify-card .card-title { font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .spotify-card .card-sub { font-size: var(--font-size-xs); color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 </style>

@@ -45,5 +45,6 @@ describe('search layout contracts', () => {
 		expect(source).not.toContain('function artworkSrc(');
 		expect(source).not.toContain('upscaleTidalArtwork');
 		expect(source).not.toMatch(/<img[^\n]*(artwork_url|photo_url|picture_url|image_url|cover_url|thumbnail_url)/);
+		expect(source).not.toContain('background-image:url');
 	});
 });
