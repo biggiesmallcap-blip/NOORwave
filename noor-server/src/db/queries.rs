@@ -4179,38 +4179,6 @@ fn read_embedding_model(row: &Row<'_>) -> rusqlite::Result<EmbeddingModel> {
     })
 }
 
-pub fn get_embedding_model_by_key(
-    conn: &Connection,
-    model_key: &str,
-) -> Result<Option<EmbeddingModel>> {
-    conn.query_row(
-        "SELECT id, model_key, family, dimension, status, is_active, trained_at, config_json, metrics_json, created_at
-         FROM embedding_models
-         WHERE model_key = ?1
-         LIMIT 1",
-        params![model_key],
-        read_embedding_model,
-    )
-    .optional()
-    .map_err(Into::into)
-}
-
-pub fn get_embedding_models_by_family(
-    conn: &Connection,
-    family: &str,
-) -> Result<Vec<EmbeddingModel>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, model_key, family, dimension, status, is_active, trained_at, config_json, metrics_json, created_at
-         FROM embedding_models
-         WHERE family = ?1
-         ORDER BY trained_at DESC, id DESC",
-    )?;
-    let rows = stmt
-        .query_map(params![family], read_embedding_model)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
 pub fn get_ready_embedding_model_for_family(
     conn: &Connection,
     family: &str,
@@ -4268,42 +4236,6 @@ pub fn activate_embedding_model(conn: &Connection, model_id: i64) -> Result<()> 
         params![model_id],
     )?;
     Ok(())
-}
-
-pub fn rollback_to_ready_embedding_model(conn: &Connection, model_id: i64) -> Result<()> {
-    let status: Option<String> = conn
-        .query_row(
-            "SELECT status FROM embedding_models WHERE id = ?1",
-            params![model_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if status.as_deref() != Some("ready") {
-        bail!("cannot roll back to embedding model {model_id}: model is not ready");
-    }
-    let tx = conn.unchecked_transaction()?;
-    tx.execute("UPDATE embedding_models SET is_active = 0", [])?;
-    tx.execute(
-        "UPDATE embedding_models SET is_active = 1, status = 'ready', trained_at = datetime('now')
-         WHERE id = ?1",
-        params![model_id],
-    )?;
-    tx.commit()?;
-    Ok(())
-}
-
-pub fn get_active_embedding_model(conn: &Connection) -> Result<Option<EmbeddingModel>> {
-    conn.query_row(
-        "SELECT id, model_key, family, dimension, status, is_active, trained_at, config_json, metrics_json, created_at
-         FROM embedding_models
-         WHERE is_active = 1
-         ORDER BY trained_at DESC, id DESC
-         LIMIT 1",
-        [],
-        read_embedding_model,
-    )
-    .optional()
-    .map_err(Into::into)
 }
 
 pub fn create_training_run(
@@ -8171,9 +8103,9 @@ mod tests {
         .expect("create candidate");
 
         assert_ne!(active.id, candidate.id);
-        let still_active = get_active_embedding_model(&conn)
-            .expect("active lookup")
-            .expect("active model");
+        let still_active = get_selected_discovery_embedding_model(&conn)
+            .expect("selected lookup")
+            .expect("selected model");
         assert_eq!(still_active.id, active.id);
         assert_eq!(still_active.model_key, "discovery-fusion-v2:1");
     }
@@ -8274,54 +8206,6 @@ mod tests {
         assert_eq!(refreshed[0].support_colisten, 2.0);
         assert_eq!(refreshed[0].support_structure, 1.0);
         assert_eq!(refreshed[0].support_metadata, 0.25);
-    }
-
-    #[test]
-    fn embedding_model_lookup_and_rollback_keep_rows_intact() {
-        let conn = Connection::open_in_memory().expect("in-memory db");
-        schema::run_migrations(&conn).expect("migrations");
-
-        let prior = create_embedding_model(
-            &conn,
-            "discovery-fusion-v1",
-            "discovery-fusion-v1",
-            64,
-            "ready",
-            None,
-        )
-        .expect("create prior");
-        let candidate = create_embedding_model(
-            &conn,
-            "discovery-fusion-v2:7",
-            "discovery-fusion-v2",
-            64,
-            "ready",
-            None,
-        )
-        .expect("create candidate");
-        activate_embedding_model(&conn, candidate.id).expect("activate candidate");
-
-        let by_key = get_embedding_model_by_key(&conn, "discovery-fusion-v2:7")
-            .expect("lookup by key")
-            .expect("model by key");
-        assert_eq!(by_key.id, candidate.id);
-
-        let v2_rows =
-            get_embedding_models_by_family(&conn, "discovery-fusion-v2").expect("lookup by family");
-        assert_eq!(v2_rows.len(), 1);
-        assert_eq!(v2_rows[0].id, candidate.id);
-
-        rollback_to_ready_embedding_model(&conn, prior.id).expect("rollback");
-        let active = get_active_embedding_model(&conn)
-            .expect("active lookup")
-            .expect("active model");
-        assert_eq!(active.id, prior.id);
-        assert!(
-            get_embedding_model_by_key(&conn, "discovery-fusion-v2:7")
-                .expect("candidate lookup")
-                .is_some(),
-            "rollback must not delete the newer model row"
-        );
     }
 
     #[test]
