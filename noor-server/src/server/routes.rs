@@ -699,6 +699,10 @@ pub fn api_routes(state: SharedState) -> Router {
             get(sportify_routes::sportify_discovery_album),
         )
         .route(
+            "/api/discovery/sportify/playlist/{spotify_id}/meta",
+            get(sportify_routes::sportify_discovery_playlist_meta),
+        )
+        .route(
             "/api/discovery/sportify/playlist/{spotify_id}",
             get(sportify_routes::sportify_discovery_playlist),
         )

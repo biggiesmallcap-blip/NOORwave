@@ -343,6 +343,138 @@ pub(super) async fn sportify_discovery_playlist(
     })))
 }
 
+pub(super) async fn sportify_discovery_playlist_meta(
+    State(state): State<SharedState>,
+    Path(spotify_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use crate::services::sportify::cache as sp_cache;
+
+    let id = spotify_id.trim();
+    if id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "spotify_id required" })),
+        ));
+    }
+
+    let (sportify_client, cache_cfg, db) = {
+        let s = state.read().await;
+        (
+            s.sportify_client.clone(),
+            s.sportify_cache_config,
+            s.db.clone(),
+        )
+    };
+    let Some(sportify_client) = sportify_client else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "sportify_unavailable" })),
+        ));
+    };
+
+    let playlist = match db
+        .with_conn(|conn| sp_cache::get_playlist_meta(conn, &cache_cfg, id))
+        .map_err(super::internal)?
+    {
+        Some(p) => p,
+        None => {
+            let fetched = match sportify_client.playlist(id).await {
+                Ok(fetched) => fetched,
+                Err(primary_error) => {
+                    crate::services::spotify::catalog::playlist_from_saved_credentials(&db, id)
+                        .await
+                        .map_err(|fallback_error| {
+                            (
+                                StatusCode::BAD_GATEWAY,
+                                Json(json!({
+                                    "error": format!(
+                                        "sportify_playlist_fetch: {primary_error}; spotify_fallback: {fallback_error}"
+                                    )
+                                })),
+                            )
+                        })?
+                }
+            };
+            db.with_conn(|conn| {
+                sp_cache::put_playlist_meta(conn, id, &fetched)?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .map_err(super::internal)?;
+            fetched
+        }
+    };
+
+    Ok(Json(sportify_playlist_meta_value(id, &playlist)))
+}
+
+fn sportify_playlist_meta_value(
+    id: &str,
+    playlist: &crate::services::sportify::models::SportifyPlaylist,
+) -> Value {
+    json!({
+        "source": "spotify",
+        "spotifyId": playlist.spotify_id().unwrap_or_else(|| id.to_string()),
+        "type": "playlist",
+        "title": playlist.title(),
+        "description": playlist.description.clone(),
+        "thumbnail": playlist.best_thumbnail(),
+        "owner": playlist
+            .owner
+            .as_ref()
+            .and_then(|owner| owner.display_name())
+            .map(str::to_string),
+        "followers": playlist.follower_count(),
+        "totalTracks": playlist.total_track_count(),
+        "snapshotId": playlist.snapshot_id.clone(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sportify_playlist_meta_value;
+    use crate::services::sportify::models::{
+        SportifyImage, SportifyPlaylist, SportifyPlaylistOwner, SportifyTrack,
+    };
+
+    #[test]
+    fn playlist_meta_value_omits_tracks() {
+        let playlist = SportifyPlaylist {
+            id: Some("spotify-playlist".to_string()),
+            name: Some("Top 50".to_string()),
+            description: Some("Daily chart".to_string()),
+            thumbnail: Some("https://img.example/small.jpg".to_string()),
+            images: vec![SportifyImage {
+                url: Some("https://img.example/large.jpg".to_string()),
+                width: Some(640),
+                height: Some(640),
+            }],
+            owner: Some(SportifyPlaylistOwner::Name("Spotify".to_string())),
+            followers: Some(1234),
+            snapshot_id: Some("snapshot-1".to_string()),
+            total_tracks: Some(50),
+            tracks: vec![SportifyTrack {
+                id: Some("track-1".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let value = sportify_playlist_meta_value("fallback-id", &playlist);
+
+        assert!(value.get("tracks").is_none());
+        assert_eq!(value["source"], "spotify");
+        assert_eq!(value["spotifyId"], "spotify-playlist");
+        assert_eq!(value["type"], "playlist");
+        assert_eq!(value["title"], "Top 50");
+        assert_eq!(value["description"], "Daily chart");
+        assert_eq!(value["thumbnail"], "https://img.example/large.jpg");
+        assert_eq!(value["owner"], "Spotify");
+        assert_eq!(value["followers"], 1234);
+        assert_eq!(value["totalTracks"], 50);
+        assert_eq!(value["snapshotId"], "snapshot-1");
+    }
+}
+
 pub(super) async fn sportify_discovery_artist(
     State(state): State<SharedState>,
     Path(spotify_id): Path<String>,

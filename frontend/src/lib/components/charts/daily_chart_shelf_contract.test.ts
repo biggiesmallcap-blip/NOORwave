@@ -99,4 +99,9 @@ describe('daily chart shelf contract', () => {
 		expect(muralSource).toContain('.chart-mural-title');
 		expect(muralSource).toContain('color: var(--text-primary)');
 	});
+
+	test('loads playlist card covers through the metadata endpoint', () => {
+		expect(chartsPage).toContain('api.getSpotifyPlaylistMeta(c.id, signal)');
+		expect(chartsPage).not.toContain('api.getSpotifyPlaylist(c.id');
+	});
 });

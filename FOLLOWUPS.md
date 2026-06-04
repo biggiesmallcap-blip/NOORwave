@@ -70,15 +70,6 @@ with the URL swapped). Same parser caveat as moods if the response uses
 `PAGE_LINKS` modules.
 - Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/45 (slug investigation)
 
-### feat: lightweight Spotify playlist metadata endpoint
-
-`/charts` fetches each chart card's cover via `getSpotifyPlaylist`, which
-returns the full track list + triggers TIDAL resolution server-side. For the
-12-card grid that's 600 tracks of unneeded work on every page load. Add
-`GET /api/discovery/sportify/playlist/{id}/meta` returning just title,
-thumbnail, owner, follower count (no tracks). Wire `/charts` to use it.
-- Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/45
-
 ### feat: save-to-library for Spotify tracks and albums
 
 `save_spotify_playlist` exists; the equivalent handlers for individual tracks

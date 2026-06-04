@@ -431,7 +431,7 @@ function normalizeSpotifyPlaylistTrack(raw: unknown): SpotifyPlaylistTrack | nul
 	};
 }
 
-function normalizeSpotifyPlaylistDetail(raw: unknown): SpotifyPlaylistDetail {
+function normalizeSpotifyPlaylistMeta(raw: unknown): SpotifyPlaylistMeta {
 	const item = asRecord(raw) ?? {};
 	return {
 		source: 'spotify',
@@ -444,6 +444,13 @@ function normalizeSpotifyPlaylistDetail(raw: unknown): SpotifyPlaylistDetail {
 		followers: pickNumber(item, ['followers', 'follower_count', 'followerCount']),
 		totalTracks: pickNumber(item, ['totalTracks', 'total_tracks', 'track_count', 'trackCount']),
 		snapshotId: pickString(item, ['snapshotId', 'snapshot_id']),
+	};
+}
+
+function normalizeSpotifyPlaylistDetail(raw: unknown): SpotifyPlaylistDetail {
+	const item = asRecord(raw) ?? {};
+	return {
+		...normalizeSpotifyPlaylistMeta(item),
 		tracks: pickArray(item, ['tracks', 'items'])
 			.map(normalizeSpotifyPlaylistTrack)
 			.filter((track): track is SpotifyPlaylistTrack => track !== null),
@@ -600,7 +607,7 @@ export interface SpotifyPlaylistTrack {
 	tidal: SpotifyTidalState;
 }
 
-export interface SpotifyPlaylistDetail {
+export interface SpotifyPlaylistMeta {
 	source: 'spotify';
 	spotifyId: string | null;
 	type: 'playlist';
@@ -611,6 +618,9 @@ export interface SpotifyPlaylistDetail {
 	followers: number | null;
 	totalTracks: number | null;
 	snapshotId: string | null;
+}
+
+export interface SpotifyPlaylistDetail extends SpotifyPlaylistMeta {
 	tracks: SpotifyPlaylistTrack[];
 }
 
@@ -2420,10 +2430,17 @@ export const api = {
 	},
 
 	/**
-	 * Search Spotify (via the Sportify proxy) for playlists. Best-effort -
-	 * the caller should swallow errors so a Sportify outage never breaks
-	 * /search or Ctrl+K rendering.
+	 * Fetch a Spotify-sourced playlist's card metadata without tracks.
 	 */
+	async getSpotifyPlaylistMeta(spotifyId: string, signal?: AbortSignal): Promise<SpotifyPlaylistMeta> {
+		const raw = await fetchApi<unknown>(
+			`/api/discovery/sportify/playlist/${encodeURIComponent(spotifyId)}/meta`,
+			undefined,
+			{ signal },
+		);
+		return normalizeSpotifyPlaylistMeta(raw);
+	},
+
 	/**
 	 * Fetch a Spotify-sourced playlist's full metadata + track list, with
 	 * each track stamped with its current TIDAL resolution state.

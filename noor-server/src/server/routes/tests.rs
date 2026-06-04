@@ -4085,6 +4085,7 @@ async fn all_api_routes_are_registered() {
         ("GET", "/api/discovery/sportify/search"),
         ("GET", "/api/discovery/sportify/track/x"),
         ("GET", "/api/discovery/sportify/album/x"),
+        ("GET", "/api/discovery/sportify/playlist/x/meta"),
         ("GET", "/api/discovery/sportify/playlist/x"),
         ("GET", "/api/discovery/sportify/artist/x"),
         ("GET", "/api/discovery/sportify/artist/x/top-tracks"),
