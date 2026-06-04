@@ -176,6 +176,15 @@ pub enum PlaybackRuntimeEvent {
         track_id: i64,
         generation: u64,
     },
+    TrackError {
+        track_id: i64,
+        generation: u64,
+        message: String,
+    },
+    PreparedTrackError {
+        track_id: i64,
+        message: String,
+    },
     Error {
         message: String,
     },

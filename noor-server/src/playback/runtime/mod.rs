@@ -2484,8 +2484,11 @@ fn run_runtime_loop(
                                         });
                                     }
                                     PlaybackTerminalReason::Error(message) => {
-                                        let _ =
-                                            event_tx.send(PlaybackRuntimeEvent::Error { message });
+                                        let _ = event_tx.send(PlaybackRuntimeEvent::TrackError {
+                                            track_id,
+                                            generation,
+                                            message,
+                                        });
                                     }
                                 }
                             }
@@ -3000,11 +3003,8 @@ fn report_runtime_command_error(
     let _ = event_tx.send(PlaybackRuntimeEvent::Error { message });
 }
 
-/// Surface a decode/source failure on the pre-buffered next track. The
-/// active track's failure already emits PlaybackRuntimeEvent::Error via
-/// the TrackTerminal::Error branch for the Active slot, but the Next-slot
-/// branch previously only logged - users had no signal that the upcoming
-/// track silently dropped from the queue.
+/// Surface a decode/source failure on the pre-buffered next track without
+/// treating it as an active-track playback failure.
 fn emit_prepared_track_failure(
     event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
     track_id: i64,
@@ -3012,7 +3012,10 @@ fn emit_prepared_track_failure(
 ) {
     let surfaced = format!("Pre-buffered track {track_id} failed: {message}");
     warn!("{surfaced}");
-    let _ = event_tx.send(PlaybackRuntimeEvent::Error { message: surfaced });
+    let _ = event_tx.send(PlaybackRuntimeEvent::PreparedTrackError {
+        track_id,
+        message: surfaced,
+    });
 }
 
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
@@ -5761,17 +5764,18 @@ mod tests {
     }
 
     #[test]
-    fn emit_prepared_track_failure_sends_error_event() {
+    fn emit_prepared_track_failure_sends_prepared_error_event() {
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
 
         emit_prepared_track_failure(&event_tx, 42, "decode failed: malformed packet");
 
         match event_rx.try_recv().expect("error event should be emitted") {
-            PlaybackRuntimeEvent::Error { message } => {
+            PlaybackRuntimeEvent::PreparedTrackError { track_id, message } => {
+                assert_eq!(track_id, 42);
                 assert!(message.contains("Pre-buffered track 42 failed"));
                 assert!(message.contains("decode failed: malformed packet"));
             }
-            other => panic!("expected error event, got {other:?}"),
+            other => panic!("expected prepared track error event, got {other:?}"),
         }
     }
 

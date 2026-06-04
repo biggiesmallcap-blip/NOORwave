@@ -10433,6 +10433,27 @@ fn spawn_playback_runtime_listener(
                 Ok(playback_runtime::PlaybackRuntimeEvent::Error { message }) => {
                     handle_runtime_error(state.clone(), &message).await;
                 }
+                Ok(playback_runtime::PlaybackRuntimeEvent::TrackError {
+                    track_id,
+                    generation,
+                    message,
+                }) => {
+                    if let Err(error) =
+                        handle_runtime_track_error(state.clone(), track_id, generation, &message)
+                            .await
+                    {
+                        let message =
+                            format!("Failed to advance playback after track error: {error}");
+                        report_playback_failure(&state, &message);
+                        error!("{message}");
+                    }
+                }
+                Ok(playback_runtime::PlaybackRuntimeEvent::PreparedTrackError {
+                    track_id,
+                    message,
+                }) => {
+                    handle_prepared_runtime_track_error(&state, track_id, &message).await;
+                }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Ready {
                     device_name,
                     sample_rate,
@@ -11727,6 +11748,58 @@ async fn handle_runtime_finished_with_retry(
         }
     }
     Ok(())
+}
+
+async fn handle_runtime_track_error(
+    state: SharedState,
+    failed_track_id: i64,
+    generation: u64,
+    message: &str,
+) -> anyhow::Result<()> {
+    {
+        let mut state_guard = state.write().await;
+        if current_playback_generation(&state_guard) != generation {
+            return Ok(());
+        }
+        state_guard
+            .audio_active
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Some(info) = state_guard.playback_runtime_info.as_mut() {
+            info.last_error = Some(message.to_string());
+            if info.active_track_id == Some(failed_track_id) {
+                info.active_track_id = None;
+            }
+        }
+    }
+
+    tracing::warn!(
+        target: "noor.playback.advance",
+        event = "runtime_track_error",
+        failed_track_id,
+        generation,
+        error = %message,
+        "runtime track error; advancing queue"
+    );
+    report_playback_failure(&state, message);
+    handle_runtime_finished_with_retry(state, failed_track_id, generation).await
+}
+
+async fn handle_prepared_runtime_track_error(state: &SharedState, track_id: i64, message: &str) {
+    tracing::warn!(
+        target: "noor.playback.advance",
+        event = "prepared_track_error",
+        track_id,
+        error = %message,
+        "prepared track failed; keeping current playback"
+    );
+    {
+        let mut state_guard = state.write().await;
+        if let Some(info) = state_guard.playback_runtime_info.as_mut() {
+            info.last_error = Some(message.to_string());
+        }
+        let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+    }
+    report_playback_failure(state, message);
 }
 
 fn sqlite_database_locked(error: &anyhow::Error) -> bool {
