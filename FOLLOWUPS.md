@@ -42,15 +42,6 @@ that exercises every signal through one path. Without the fixture, the
 move is pure code motion - hence deferred.
 - Spawned by: arch/deepening architecture review (2026-05-24)
 
-### a11y: keep queue-time visible on focus without colliding with action buttons
-
-`.queue-time` currently fades on `:hover` and `:focus-within` because
-`.queue-actions` sits absolutely positioned at `right: 0; top: 50%`. Keyboard
-users lose the duration when a row gains focus. Resolving cleanly needs a row
-relayout (two-line side panel or shrunken icon set), not a one-line CSS
-toggle. Audit item 16 from the 2026-05-23 queue UI audit.
-- Spawned by: feature/queue-ui-qol (Commit 6, c21cf78 area)
-
 ### chore: re-add Viral 50 Global to /charts when Sportify proxy recovers
 
 Removed `37i9dQZEVXbLiRSasKsNU9` (Viral 50 Global) from `frontend/src/routes/charts/+page.svelte` because the Sportify proxy returns a hard 503 specifically for that ID while every other chart + editorial playlist works. Periodically curl `https://sportify.xcasper.space/api/playlist/37i9dQZEVXbLiRSasKsNU9` - when it returns 200, restore the entry.

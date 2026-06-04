@@ -277,6 +277,18 @@
 		}
 	}
 
+	function handleQueueRowMouseLeave(event: MouseEvent, itemId: number) {
+		const current = event.currentTarget;
+		if (
+			current instanceof HTMLElement &&
+			document.activeElement instanceof Node &&
+			current.contains(document.activeElement)
+		) {
+			return;
+		}
+		clearQueueActionsRow(itemId);
+	}
+
 	function handleQueueRowFocusOut(event: FocusEvent, itemId: number) {
 		const current = event.currentTarget;
 		const next = event.relatedTarget;
@@ -1710,7 +1722,7 @@
 							ondrop={(event) => void handleQueueDrop(event, item)}
 							ondragend={handleQueueDragEnd}
 							onmouseenter={() => setQueueActionsRowActive(item.id)}
-							onmouseleave={() => clearQueueActionsRow(item.id)}
+							onmouseleave={(event) => handleQueueRowMouseLeave(event, item.id)}
 							onfocusin={() => setQueueActionsRowActive(item.id)}
 							onfocusout={(event) => handleQueueRowFocusOut(event, item.id)}
 						>
@@ -2079,7 +2091,7 @@
 							title={isPending ? 'Resolving on TIDAL...' : undefined}
 							oncontextmenu={(event) => openQueueRowMenu(item, event)}
 							onmouseenter={() => setQueueActionsRowActive(item.id)}
-							onmouseleave={() => clearQueueActionsRow(item.id)}
+							onmouseleave={(event) => handleQueueRowMouseLeave(event, item.id)}
 							onfocusin={() => setQueueActionsRowActive(item.id)}
 							onfocusout={(event) => handleQueueRowFocusOut(event, item.id)}
 						>
@@ -3172,6 +3184,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: flex-end;
+		gap: 8px;
 		min-width: 76px;
 		flex-shrink: 0;
 		margin-left: auto;
@@ -3181,9 +3194,16 @@
 		transition: opacity var(--motion-fast);
 	}
 
-	.queue-row:hover .queue-time,
-	.queue-row:focus-within .queue-time {
+	.queue-row:hover .queue-time {
 		opacity: 0;
+	}
+
+	.queue-row:focus-within .queue-side {
+		min-width: max-content;
+	}
+
+	.queue-row:focus-within .queue-time {
+		opacity: 1;
 	}
 
 	.queue-actions {
@@ -3199,8 +3219,14 @@
 		transition: opacity var(--motion-fast);
 	}
 
-	.queue-row:hover .queue-actions,
+	.queue-row:hover .queue-actions {
+		opacity: 1;
+		pointer-events: auto;
+	}
+
 	.queue-row:focus-within .queue-actions {
+		position: static;
+		transform: none;
 		opacity: 1;
 		pointer-events: auto;
 	}
