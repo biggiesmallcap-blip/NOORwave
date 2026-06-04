@@ -94,7 +94,7 @@ Svelte action usage, Rust `#[cfg(test)]` modules, or public route merges.
 | `frontend/src/lib/stores/training.ts::{handleTrainingFailed, resetTrainingState}` | Removed after exact `rg` found only the store definitions and this audit note. The live websocket producer still uses `handleTrainingProgress` and `handleTrainingComplete`; settings failures use local page state. |
 | `frontend/src/lib/api/ws.ts::disconnectWebSocket` | Removed after exact `rg` found no live caller. The app layout still imports and calls `connectWebSocket`; the current unmount cleanup never disconnected the singleton websocket. |
 | `noor-server/src/services/discovery_blend.rs::Playability::Unavailable` | Keep as a reserved serialized discovery blend response value. Rust-analyzer found no current construction, but `/api/discovery/blend/*` serializes `playability`, and the frontend `DiscoverPlayability` union already accepts `unavailable`. |
-| `noor-server/src/services/tidal/auth.rs::PersistedTidalTokens::tokens` | Keep. Rust-analyzer found references in the encrypted and legacy plaintext persistence tests, where the helper checks decoded token fields without consuming the wrapper before `needs_encrypted_rewrite()`. |
+| `noor-server/src/services/tidal/auth.rs::PersistedTidalTokens::tokens` | Kept as a `#[cfg(test)]` helper. Rust-analyzer found references only in encrypted and legacy plaintext persistence tests, where the helper checks decoded token fields without consuming the wrapper before `needs_encrypted_rewrite()`. |
 | `frontend/src/lib/components/DiscoverSpace/discover_space_story.ts::RADIO_MODE_NAMES` | Removed after exact `rg` found only the story definition. `RadioMode` remains live in the route and store. |
 
 ## Manual Review

@@ -134,6 +134,7 @@ pub enum PersistedTidalTokens {
 }
 
 impl PersistedTidalTokens {
+    #[cfg(test)]
     pub fn tokens(&self) -> &TidalTokens {
         match self {
             Self::Encrypted(tokens) | Self::LegacyPlaintext(tokens) => tokens,
