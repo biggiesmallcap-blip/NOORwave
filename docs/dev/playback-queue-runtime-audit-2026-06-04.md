@@ -400,6 +400,14 @@ Installed backend recovery was performed after the sidecar was found missing:
   track and an empty queue.
 - This restored the backend for the current session, but it is not counted as
   proof of Tauri-owned sidecar startup from a stopped app state.
+- A later continuation check found the installed app and backend processes still
+  running, with port `3334` listening. Unauthenticated `/api/status` and
+  `/api/playback/state` requests returned `401 Unauthorized`, so no playback
+  state was inferred from that protected API path.
+- Read-only parent-process inspection showed the current backend process was
+  not parented by the running app process, and its recorded parent was no
+  longer present. This remains consistent with the direct backend recovery path,
+  not a fresh Tauri-owned sidecar launch.
 
 Additional targeted verification for the malformed artwork fix:
 
