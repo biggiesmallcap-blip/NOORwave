@@ -17,8 +17,10 @@
   let viewState = $state<State>('loading');
   let title = $state('');
   let requestedSlug = $state('');
+  let activeMoodController: AbortController | null = null;
+  let loadGeneration = 0;
 
-  onMount(() => { if (slug) void load(slug); });
+  onMount(() => () => activeMoodController?.abort());
 
   $effect(() => {
     const s = slug.trim();
@@ -36,27 +38,41 @@
   });
 
   async function load(s: string) {
+    const generation = loadGeneration + 1;
+    loadGeneration = generation;
+    activeMoodController?.abort();
+    activeMoodController = null;
     title = humanize(s);
     // Cache hit: render immediately without a skeleton, no network call.
     const cached = getCachedMoodPage(s);
-    if (cached && cached.length > 0) {
+    if (cached !== null) {
       modules = cached;
-      viewState = 'ready';
+      viewState = cached.length > 0 ? 'ready' : 'empty';
       return;
     }
+    const controller = new AbortController();
+    activeMoodController = controller;
     viewState = 'loading';
     try {
-      const data = await api.getTidalMoodPage(s);
+      const data = await api.getTidalMoodPage(s, controller.signal);
+      if (!isCurrentMoodRequest(s, generation, controller.signal)) return;
       modules = data.modules ?? [];
-      if (modules.length > 0) putCachedMoodPage(s, modules);
+      putCachedMoodPage(s, modules);
       viewState = modules.length > 0 ? 'ready' : 'empty';
     } catch (e) {
+      if (controller.signal.aborted || generation !== loadGeneration) return;
       if (e instanceof ApiError && e.status === 503) {
         viewState = 'disconnected';
       } else {
         viewState = 'error';
       }
+    } finally {
+      if (activeMoodController === controller) activeMoodController = null;
     }
+  }
+
+  function isCurrentMoodRequest(s: string, generation: number, signal: AbortSignal): boolean {
+    return !signal.aborted && generation === loadGeneration && slug.trim() === s;
   }
 
   function humanize(s: string): string {

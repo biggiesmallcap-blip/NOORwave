@@ -7,15 +7,15 @@
   import { openContextMenu } from '$lib/stores/context_menu';
   import { goto } from '$app/navigation';
   import {
+    claimMoodThumbnailRefresh,
     getCachedMoodCategories,
     moodCategoriesNeedThumbnails,
-    putCompleteMoodCategories,
+    putCachedMoodCategories,
     clearCachedMoods,
   } from '$lib/stores/tidal-moods-cache';
 
   type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
   const THUMBNAIL_REFRESH_DELAY_MS = 1800;
-  const MAX_THUMBNAIL_REFRESH_ATTEMPTS = 3;
 
   // Sync-read the cache on script init so revisiting /moods within the
   // 6h TTL renders instantly without a skeleton flash. Mirrors the
@@ -26,7 +26,6 @@
     cachedOnMount && cachedOnMount.length > 0 ? 'ready' : 'loading'
   );
   let inFlight = false;
-  let thumbnailRefreshAttempts = 0;
   let thumbnailRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
   onMount(() => {
@@ -51,7 +50,7 @@
     try {
       const data = await cachedApi.getTidalMoods();
       categories = data.categories ?? [];
-      if (categories.length > 0) putCompleteMoodCategories(categories);
+      if (categories.length > 0) putCachedMoodCategories(categories);
       viewState = categories.length > 0 ? 'ready' : 'empty';
       scheduleThumbnailRefresh(categories);
     } catch (e) {
@@ -75,12 +74,12 @@
   function scheduleThumbnailRefresh(nextCategories: TidalMoodCategory[]) {
     clearThumbnailRefresh();
     if (!moodCategoriesNeedThumbnails(nextCategories)) {
-      thumbnailRefreshAttempts = 0;
       return;
     }
-    if (thumbnailRefreshAttempts >= MAX_THUMBNAIL_REFRESH_ATTEMPTS) return;
-    thumbnailRefreshAttempts += 1;
-    thumbnailRefreshTimer = setTimeout(() => void load(), THUMBNAIL_REFRESH_DELAY_MS);
+    thumbnailRefreshTimer = setTimeout(() => {
+      thumbnailRefreshTimer = null;
+      if (claimMoodThumbnailRefresh(nextCategories)) void load();
+    }, THUMBNAIL_REFRESH_DELAY_MS);
   }
 
   function buildMenu(slug: string, title: string) {

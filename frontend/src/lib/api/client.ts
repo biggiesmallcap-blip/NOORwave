@@ -1923,6 +1923,13 @@ export interface TidalMoodCategory {
 	thumbnail: string | null;
 }
 
+export interface TidalMoodsResponse {
+	categories: TidalMoodCategory[];
+	source: string;
+	fallback?: boolean;
+	cached?: boolean;
+}
+
 export interface TidalDiscoverModuleResponse {
 	module: TidalHomeModule;          // module returned without `more_path` (already resolved); `items` is the full set
 	source: string;
@@ -3508,16 +3515,16 @@ export const api = {
 	// Workout, Focus, etc). Each entry has a slug that can be fed to
 	// getTidalMoodPage for the drill-down content.
 	getTidalMoods() {
-		return fetchApi<{ categories: TidalMoodCategory[]; source: string; fallback?: boolean }>(
-			'/api/tidal/moods',
-		);
+		return fetchApi<TidalMoodsResponse>('/api/tidal/moods');
 	},
 
 	// Drill-down for one mood category. Backend proxies to pages/{slug} which
 	// returns the standard editorial modules shape.
-	getTidalMoodPage(slug: string) {
+	getTidalMoodPage(slug: string, signal?: AbortSignal) {
 		return fetchApi<TidalHomeModulesResponse>(
 			`/api/tidal/mood-page/${encodeURIComponent(slug)}`,
+			undefined,
+			{ signal },
 		);
 	},
 
