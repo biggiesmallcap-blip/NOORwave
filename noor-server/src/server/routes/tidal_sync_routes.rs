@@ -549,14 +549,14 @@ async fn do_tidal_sync(
                 .map(|album_id| async move {
                     let first = tokio::time::timeout(
                         album_fetch_timeout,
-                        client.get_album_tracks(album_id),
+                        client.get_all_album_tracks(album_id),
                     )
                     .await;
                     match first {
                         Ok(Ok(resp)) => Ok(resp),
                         _ => match tokio::time::timeout(
                             album_fetch_timeout,
-                            client.get_album_tracks(album_id),
+                            client.get_all_album_tracks(album_id),
                         )
                         .await
                         {
@@ -570,11 +570,11 @@ async fn do_tidal_sync(
                 .buffer_unordered(10);
 
             while let Some(result) = fetches.next().await {
-                if let Ok(tracks_resp) = result {
+                if let Ok(tracks) = result {
                     let s = state.read().await;
                     s.db.with_conn(|conn| {
                         let tx = conn.unchecked_transaction()?;
-                        for track in &tracks_resp.items {
+                        for track in &tracks {
                             super::insert_tidal_track(&tx, track, false, None)?;
                             stats.tracks += 1;
                         }

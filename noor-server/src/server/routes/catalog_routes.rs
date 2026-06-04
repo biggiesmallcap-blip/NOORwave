@@ -243,11 +243,10 @@ pub(super) async fn get_album_tracks(
         .iter()
         .any(|t| t.track_number.is_none() && t.tidal_id.is_some());
 
-    let tidal_tracks_payload: Vec<Value> = match client.get_album_tracks(tidal_album_id).await {
-        Ok(resp) => {
+    let tidal_tracks_payload: Vec<Value> = match client.get_all_album_tracks(tidal_album_id).await {
+        Ok(tidal_tracks) => {
             if needs_backfill {
-                let backfill_pairs: Vec<(i64, i32, i32)> = resp
-                    .items
+                let backfill_pairs: Vec<(i64, i32, i32)> = tidal_tracks
                     .iter()
                     .filter_map(|t| Some((t.id, t.track_number?, t.volume_number.unwrap_or(1))))
                     .collect();
@@ -288,7 +287,7 @@ pub(super) async fn get_album_tracks(
             let local_tidal_ids: std::collections::HashSet<i64> =
                 tracks.iter().filter_map(|t| t.tidal_id).collect();
 
-            resp.items
+            tidal_tracks
                 .into_iter()
                 .filter(|t| !local_tidal_ids.contains(&t.id))
                 .map(|t| {
@@ -318,7 +317,10 @@ pub(super) async fn get_album_tracks(
                 .collect()
         }
         Err(e) => {
-            tracing::warn!(?e, "TIDAL get_album_tracks failed; serving library only");
+            tracing::warn!(
+                ?e,
+                "TIDAL get_all_album_tracks failed; serving library only"
+            );
             Vec::new()
         }
     };
@@ -1016,14 +1018,16 @@ pub(super) async fn get_tidal_album_tracks(
         tokens.access_token.clone(),
         tokens.country_code.clone(),
     );
-    let result = client.get_album_tracks(tidal_album_id).await.map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": e.to_string() })),
-        )
-    })?;
+    let items = client
+        .get_all_album_tracks(tidal_album_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
 
-    let items = result.items;
     let tidal_ids: Vec<i64> = items.iter().map(|t| t.id).collect();
     let library_states = {
         let s = state.read().await;

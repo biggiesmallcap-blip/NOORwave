@@ -9717,6 +9717,28 @@ fn shuffle_tidal_mix_tracks(
     })
 }
 
+async fn clear_persisted_queue_for_tidal_mix(
+    state: &SharedState,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let state_guard = state.read().await;
+    state_guard
+        .db
+        .with_conn(|conn| {
+            queue::clear_queue(conn)?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .map_err(|error| {
+            warn!(
+                ?error,
+                "Failed to clear stale persisted queue for TIDAL mix playback"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "Failed to clear stale playback queue" })),
+            )
+        })
+}
+
 /// Play the first track immediately and stash the rest in the pending
 /// ephemeral queue so `handle_runtime_finished` can advance through them.
 /// Used by the home Your Mixes shelf when a tile is clicked.
@@ -9755,7 +9777,16 @@ async fn play_tidal_mix(
         q.extend(rest);
     }
 
-    start_ephemeral_tidal_playback(&state, first).await?;
+    if let Err(error) = start_ephemeral_tidal_playback(&state, first).await {
+        let s = state.read().await;
+        s.pending_tidal_mix_queue.lock().unwrap().clear();
+        return Err(error);
+    }
+    if let Err(error) = clear_persisted_queue_for_tidal_mix(&state).await {
+        let s = state.read().await;
+        s.pending_tidal_mix_queue.lock().unwrap().clear();
+        return Err(error);
+    }
     let snapshot = build_live_playback_snapshot_json(&state).await?;
     {
         let s = state.read().await;

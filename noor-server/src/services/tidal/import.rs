@@ -49,10 +49,9 @@ pub async fn import_album(
     tidal_album_id: i64,
 ) -> Result<ImportedAlbum> {
     let tracks = tidal
-        .get_album_tracks(tidal_album_id)
+        .get_all_album_tracks(tidal_album_id)
         .await
-        .context("fetching TIDAL album tracks")?
-        .items;
+        .context("fetching TIDAL album tracks")?;
 
     if tracks.is_empty() {
         anyhow::bail!("TIDAL album has no tracks");

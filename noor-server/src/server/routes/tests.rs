@@ -2456,6 +2456,73 @@ async fn tidal_mix_overlay_preserves_pending_deque_order() {
 }
 
 #[tokio::test]
+async fn tidal_mix_replacement_clears_stale_persisted_queue() {
+    let (db, db_path) = fresh_migrated_db();
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (8200, 'Old Queue Artist')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, duration_ms, tidal_id, best_source, source)
+                 VALUES
+                    (8201, 'Old Queue First', 8200, 200000, 88201, 'tidal', 'tidal'),
+                    (8202, 'Old Queue Second', 8200, 200000, 88202, 'tidal', 'tidal')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source)
+                 VALUES (8201, 0, 'playlist'), (8202, 1, 'playlist')",
+            [],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .unwrap();
+
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+    {
+        let guard = state.read().await;
+        guard.pending_tidal_mix_queue.lock().unwrap().push_back(
+            crate::PendingEphemeralTidalTrack {
+                tidal_track_id: 123_456,
+                title: "Album Track Two".to_string(),
+                artist_name: Some("Album Artist".to_string()),
+                album_title: Some("Album".to_string()),
+                artwork_url: Some(
+                    "https://resources.tidal.com/images/a/b/c/320x320.jpg".to_string(),
+                ),
+                duration_ms: Some(180_000),
+            },
+        );
+    }
+
+    if let Err((status, _)) = clear_persisted_queue_for_tidal_mix(&state).await {
+        panic!("clear_persisted_queue_for_tidal_mix failed: {status}");
+    }
+
+    let queue_len = db
+        .with_conn(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM queue", [], |row| row.get::<_, i64>(0))
+                .map_err(anyhow::Error::from)
+        })
+        .unwrap();
+    assert_eq!(queue_len, 0);
+    assert_eq!(
+        state
+            .read()
+            .await
+            .pending_tidal_mix_queue
+            .lock()
+            .unwrap()
+            .len(),
+        1,
+        "durable queue cleanup must preserve the active TIDAL continuation"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn clear_queue_clears_pending_tidal_mix_overlay() {
     let (db, db_path) = fresh_migrated_db();
     let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
