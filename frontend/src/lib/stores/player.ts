@@ -1501,11 +1501,7 @@ export async function playTidalTracksNow(
 		}
 		const result = await api.playTidalMix(playable, oneShotShuffleMode);
 		if (!isLatestPlaybackIntent(intentSeq)) return;
-		if (oneShotShuffleMode) {
-			const first =
-				playable.find((track) => track.tidal_id === result.first_tidal_id) ?? playable[0];
-			setOptimisticTidalTrack(first);
-		}
+		hydratePlaybackIfLatest({ state: result.state, queue: result.queue }, intentSeq);
 		noteSuccess();
 		showToast(`Playing ${label} (${playable.length} tracks)`, 'success');
 	} catch (error) {
@@ -1632,11 +1628,7 @@ async function startTidalEphemeralQueue(
 		if (!oneShotShuffleMode) setOptimisticTidalTrack(playable[0]);
 		const result = await api.playTidalMix(playable, oneShotShuffleMode);
 		if (!isLatestPlaybackIntent(intentSeq)) return;
-		if (oneShotShuffleMode) {
-			const shuffledFirst =
-				playable.find((track) => track.tidal_id === result.first_tidal_id) ?? playable[0];
-			setOptimisticTidalTrack(shuffledFirst);
-		}
+		hydratePlaybackIfLatest({ state: result.state, queue: result.queue }, intentSeq);
 		noteSuccess();
 	} finally {
 		if (ownsIntent) finishPlaybackIntent(intentSeq);

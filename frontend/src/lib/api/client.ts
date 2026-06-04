@@ -1059,6 +1059,8 @@ export interface ShuffleDebug {
 
 export interface TidalMixPlaybackResponse {
 	ok: boolean;
+	state: PlaybackState;
+	queue: QueueItem[];
 	first_tidal_id?: number;
 	shuffle_debug?: ShuffleDebug | null;
 }
