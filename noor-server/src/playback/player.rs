@@ -1,12 +1,15 @@
+#[cfg(test)]
+use crate::db::Database;
 use crate::db::audio_settings::AudioQuality;
 use crate::db::{
-    Database,
     models::{PlaybackState, QueueItem, Track},
     queries,
 };
 use crate::playback::automix::{AUTOMIX_MIN_UPCOMING, ensure_automix_queue_depth};
 use crate::playback::dj_engine::{DjEngine, DjTransitionPlan};
-use crate::playback::dj_lookahead::{DjLookaheadPair, DjMediaRef, load_dj_lookahead_pair};
+#[cfg(test)]
+use crate::playback::dj_lookahead::load_dj_lookahead_pair;
+use crate::playback::dj_lookahead::{DjLookaheadPair, DjMediaRef};
 use crate::playback::gapless::{self, GaplessPlan, GaplessSettings};
 use crate::playback::queue::{self, ShuffleDebug, ShuffleMode};
 use crate::playback::shuffle::generate_shuffle_seed;
@@ -285,17 +288,6 @@ impl PreparedPlaybackJob {
     }
 }
 
-pub fn build_dj_lookahead_start(
-    conn: &Connection,
-    deadline_samples: u64,
-) -> Result<Option<DjLookaheadStart>> {
-    if !queries::is_dj_engine_enabled(conn)? {
-        return Ok(None);
-    }
-    let pair = load_dj_lookahead_pair(conn)?;
-    Ok(dj_lookahead_start_from_pair(pair, deadline_samples))
-}
-
 pub fn dj_lookahead_start_from_pair(
     pair: DjLookaheadPair,
     deadline_samples: u64,
@@ -311,16 +303,6 @@ pub fn dj_lookahead_start_from_pair(
         queue_generation: pair.queue_generation,
         deadline_samples,
     })
-}
-
-pub fn attach_dj_transition_plan(
-    db: &Database,
-    job: PlaybackPreparation,
-    sample_rate: u32,
-    channels: u16,
-) -> Result<PlaybackPreparation> {
-    let pair = db.with_conn(load_dj_lookahead_pair)?;
-    attach_dj_transition_plan_for_pair(&DjEngine::new(db.clone()), job, pair, sample_rate, channels)
 }
 
 pub fn attach_dj_transition_plan_for_pair(
@@ -2113,6 +2095,22 @@ mod tests {
             .collect()
     }
 
+    fn attach_test_dj_transition_plan(
+        db: &Database,
+        job: PlaybackPreparation,
+        sample_rate: u32,
+        channels: u16,
+    ) -> Result<PlaybackPreparation> {
+        let pair = db.with_conn(load_dj_lookahead_pair)?;
+        attach_dj_transition_plan_for_pair(
+            &DjEngine::new(db.clone()),
+            job,
+            pair,
+            sample_rate,
+            channels,
+        )
+    }
+
     mod dj_lookahead {
         use super::*;
 
@@ -2123,7 +2121,11 @@ mod tests {
         }
 
         fn start(conn: &Connection) -> Option<DjLookaheadStart> {
-            build_dj_lookahead_start(conn, DEADLINE).unwrap()
+            if !queries::is_dj_engine_enabled(conn).unwrap() {
+                return None;
+            }
+            let pair = load_dj_lookahead_pair(conn).unwrap();
+            dj_lookahead_start_from_pair(pair, DEADLINE)
         }
 
         fn seed_queue(conn: &Connection, ids: &[i64]) -> Vec<QueueItem> {
@@ -2313,7 +2315,7 @@ mod tests {
         fn planned_job_for_source(source: &str) -> PlaybackPreparation {
             let db = db_with_pair(source);
             enable(&db);
-            attach_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan")
+            attach_test_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan")
         }
 
         #[test]
@@ -2335,7 +2337,7 @@ mod tests {
         #[test]
         fn prepare_next_omits_program_when_disabled() {
             let db = db_with_pair("manual");
-            let job = attach_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
+            let job = attach_test_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
 
             assert!(job.prepared_transition.is_none());
         }
@@ -2354,7 +2356,7 @@ mod tests {
                 })
                 .expect("before");
 
-            let _ = attach_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
+            let _ = attach_test_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
             let after = db
                 .with_conn(|conn| {
                     let mut stmt = conn.prepare("SELECT id FROM queue ORDER BY position, id")?;
@@ -2373,7 +2375,7 @@ mod tests {
             let db = db_with_pair("manual");
             enable(&db);
 
-            let _ = attach_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
+            let _ = attach_test_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
             let next_queue_track = db
                 .with_conn(|conn| {
                     conn.query_row("SELECT track_id FROM queue WHERE id = 12", [], |row| {
@@ -2587,7 +2589,7 @@ mod tests {
         }
 
         fn plan(db: &Database) -> PreparedTransitionProgram {
-            attach_dj_transition_plan(db, next_job(db), 48_000, 2)
+            attach_test_dj_transition_plan(db, next_job(db), 48_000, 2)
                 .expect("plan")
                 .prepared_transition
                 .expect("transition")
@@ -2751,7 +2753,7 @@ mod tests {
             db.with_conn(|conn| queries::set_dj_engine_enabled(conn, false))
                 .expect("disable");
 
-            let job = attach_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
+            let job = attach_test_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
 
             assert!(job.prepared_transition.is_none());
             assert_eq!(event_count(&db), 0);
