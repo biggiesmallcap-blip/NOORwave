@@ -538,9 +538,6 @@ struct PreparedDjMixer {
     mixer: noor_mix::Mixer,
     program: noor_mix::TransitionProgram,
     max_block_samples: usize,
-    queue_generation: u64,
-    current_queue_item_id: Option<i64>,
-    next_queue_item_id: Option<i64>,
     current_track_id: i64,
     next_track_id: i64,
 }
@@ -1079,9 +1076,6 @@ fn build_prepared_dj_mixer_for_engine(
         mixer,
         program,
         max_block_samples,
-        queue_generation: transition.queue_generation,
-        current_queue_item_id: transition.current_queue_item_id,
-        next_queue_item_id: transition.next_queue_item_id,
         current_track_id: active.track_id,
         next_track_id: incoming.track_id,
     })
@@ -3975,9 +3969,6 @@ mod tests {
 
         assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
         let prepared = state.prepared_dj_mixer.as_mut().expect("prepared mixer");
-        assert_eq!(prepared.queue_generation, 20);
-        assert_eq!(prepared.current_queue_item_id, Some(11));
-        assert_eq!(prepared.next_queue_item_id, Some(12));
         assert_eq!(prepared.current_track_id, 1);
         assert_eq!(prepared.next_track_id, 2);
 
