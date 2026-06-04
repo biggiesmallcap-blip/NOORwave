@@ -31,7 +31,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::db::queries;
+use crate::db::{models::AudioDjProfileKey, queries};
 
 /// Try to acquire the resolution lock for a pending queue row. Returns
 /// `Ok(true)` if this caller won the claim, `Ok(false)` if another resolver
@@ -98,11 +98,10 @@ pub fn current_pending(conn: &Connection) -> Result<Option<(i64, String, String,
 /// `tracks.tidal_id` UNIQUE constraint), only one of them will see this
 /// UPDATE affect a row.
 ///
-/// On success, also runs the external-candidate cleanup
-/// (`mark_external_candidate_resolved`) inside the same connection scope so
-/// the prior pending identity is correctly attributed to the new library
-/// track. The cleanup uses the resolved library track's `tidal_id` when it
-/// has one, falling back to whatever `tidal_id_hint` the pending row carried.
+/// On success, also runs the external-candidate cleanup and promotes any
+/// temporary queue-item DJ profile to the resolved TIDAL key inside the same
+/// connection scope. Follow-up cleanup is best effort so it never masks a
+/// successful queue-row promotion.
 pub fn promote(
     conn: &Connection,
     queue_item_id: i64,
@@ -153,6 +152,136 @@ pub fn promote(
             &pending_artist,
             local_track_id,
         );
+        if let Some(tidal_id) = resolved_tidal_id {
+            let temporary_key = AudioDjProfileKey {
+                media_ref_kind: "queue_item".to_string(),
+                media_ref_id: queue_item_id.to_string(),
+            };
+            let stable_key = AudioDjProfileKey {
+                media_ref_kind: "tidal_track".to_string(),
+                media_ref_id: tidal_id.to_string(),
+            };
+            let _ = queries::promote_temporary_audio_dj_profile(
+                conn,
+                &temporary_key,
+                &stable_key,
+                Some(tidal_id),
+            );
+        }
     }
     Ok(promoted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{models::AudioDjProfileRow, schema};
+
+    fn setup_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("foreign keys");
+        schema::run_migrations(&conn).expect("migrations");
+        conn
+    }
+
+    fn seed_track(conn: &Connection, tidal_id: Option<i64>) -> i64 {
+        conn.execute("INSERT INTO artists (name) VALUES ('Artist')", [])
+            .expect("artist");
+        let artist_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO tracks (title, artist_id, tidal_id) VALUES ('Track', ?1, ?2)",
+            params![artist_id, tidal_id],
+        )
+        .expect("track");
+        conn.last_insert_rowid()
+    }
+
+    fn seed_pending_queue_row(conn: &Connection, queue_item_id: i64) {
+        conn.execute(
+            "INSERT INTO queue (
+                id, track_id, position, source, pending_artist, pending_title, pending_at
+             )
+             VALUES (?1, NULL, 0, 'radio_pending', 'Artist', 'Title', datetime('now'))",
+            params![queue_item_id],
+        )
+        .expect("pending queue row");
+    }
+
+    fn profile_row(queue_item_id: i64) -> AudioDjProfileRow {
+        AudioDjProfileRow {
+            media_ref_kind: "queue_item".to_string(),
+            media_ref_id: queue_item_id.to_string(),
+            track_id: None,
+            queue_item_id: Some(queue_item_id),
+            tidal_id: None,
+            profile_version: "dj_profile_v1".to_string(),
+            beat_grid_blob: vec![1, 2, 3],
+            downbeats_blob: vec![4],
+            phrase_boundaries_blob: vec![5],
+            mix_in_blob: vec![6],
+            mix_out_blob: vec![7],
+            intro_end_seconds: Some(16.0),
+            outro_start_seconds: Some(180.0),
+            breakdown_blob: vec![8],
+            drop_blob: vec![9],
+            safe_transition_windows_blob: vec![10],
+            energy_contour_blob: vec![11],
+            vocal_presence_blob: vec![12],
+            vocal_density_blob: vec![13],
+            waveform_peaks_blob: vec![14],
+            lufs_loud_body: Some(-12.0),
+            true_peak_dbtp: Some(-1.0),
+            beat_confidence: Some(0.9),
+            profile_confidence: 0.85,
+            analysis_scope_ms: 90_000,
+            is_temporary: true,
+            source: "test".to_string(),
+            computed_at: "2026-05-21T00:00:00Z".to_string(),
+        }
+    }
+
+    fn key(kind: &str, id: &str) -> AudioDjProfileKey {
+        AudioDjProfileKey {
+            media_ref_kind: kind.to_string(),
+            media_ref_id: id.to_string(),
+        }
+    }
+
+    #[test]
+    fn promote_copies_temporary_dj_profile_to_resolved_tidal_key() {
+        let conn = setup_conn();
+        let track_id = seed_track(&conn, Some(555));
+        seed_pending_queue_row(&conn, 44);
+        queries::upsert_audio_dj_profile(&conn, &profile_row(44)).expect("upsert temp profile");
+
+        assert!(promote(&conn, 44, track_id, 100).expect("promote"));
+        assert!(!promote(&conn, 44, track_id, 100).expect("second promote"));
+
+        let stable = queries::get_audio_dj_profile(&conn, &key("tidal_track", "555"))
+            .expect("stable lookup")
+            .expect("stable profile");
+        assert_eq!(stable.tidal_id, Some(555));
+        assert!(!stable.is_temporary);
+        assert_eq!(stable.profile_version, "dj_profile_v1");
+    }
+
+    #[test]
+    fn promote_without_tidal_id_keeps_temporary_dj_profile_only() {
+        let conn = setup_conn();
+        let track_id = seed_track(&conn, None);
+        seed_pending_queue_row(&conn, 45);
+        queries::upsert_audio_dj_profile(&conn, &profile_row(45)).expect("upsert temp profile");
+
+        assert!(promote(&conn, 45, track_id, 100).expect("promote"));
+
+        let stable_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audio_dj_profiles WHERE media_ref_kind <> 'queue_item'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("stable count");
+        assert_eq!(stable_count, 0);
+    }
 }
