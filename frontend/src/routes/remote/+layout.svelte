@@ -7,7 +7,7 @@
 	import { wsConnected } from '$lib/api/ws';
 	import { currentTrack, playerError, refreshPlaybackRuntime } from '$lib/stores/player';
 	import { showToast } from '$lib/stores/toast';
-	import { upscaleTidalArtwork } from '$lib/utils/artwork';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import type { Snippet } from 'svelte';
 
 	// The whole /remote tree shares one mount of:
@@ -43,15 +43,6 @@
 		void audioSettings.load();
 	});
 
-	let backdropArtFailed = $state(false);
-	let lastBackdropArt = $state<string | null>(null);
-	let backdropArt = $derived(upscaleTidalArtwork($currentTrack?.artwork_url, 1280));
-	$effect(() => {
-		if (backdropArt === lastBackdropArt) return;
-		lastBackdropArt = backdropArt;
-		backdropArtFailed = false;
-	});
-
 	const DISCONNECT_GRACE_MS = 4000;
 	let hasEverConnected = $state(false);
 	let showDisconnected = $state(false);
@@ -70,9 +61,13 @@
 </script>
 
 <div class="remote-layout-backdrop" aria-hidden="true">
-	{#if backdropArt && !backdropArtFailed}
-		<img src={backdropArt} alt="" onerror={() => (backdropArtFailed = true)} />
-	{/if}
+	<ArtworkImage
+		className="remote-layout-backdrop-art"
+		src={$currentTrack?.artwork_url ?? null}
+		size={1280}
+		fallbackText=""
+		decorative={true}
+	/>
 </div>
 
 <audio
@@ -105,7 +100,7 @@
 		pointer-events: none;
 	}
 
-	.remote-layout-backdrop img {
+	.remote-layout-backdrop :global(.remote-layout-backdrop-art) {
 		position: absolute;
 		inset: -10%;
 		width: 120%;
@@ -118,6 +113,10 @@
 		   filter is rasterized once and reused across page swaps instead of
 		   re-running on every navigation paint. */
 		will-change: transform;
+	}
+
+	.remote-layout-backdrop :global(.remote-layout-backdrop-art.fallback) {
+		display: none;
 	}
 
 	.remote-layout-banner {
