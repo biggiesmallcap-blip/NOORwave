@@ -1,7 +1,9 @@
 # Playback, Queue, and Runtime Audit - 2026-06-04
 
-Status: final automated audit report. Manual live audio and visible app smoke
-remain not verified in this agent run.
+Status: final automated audit report. Manual live audio, Tauri WebView, and
+authenticated provider smoke remain not verified in this agent run. A local
+Chrome and Vite visible smoke for `/remote` and the remote album tile artwork
+fallback passed after the automated report was finalized.
 
 This report closes the automated audit work for queue advancement, runtime
 handoff, playlist injection, stale frontend playback intents, artwork fallback
@@ -251,6 +253,20 @@ Targeted verification passed during the implementation slices:
 - `cargo test -p noor-server playback::player::tests::next_track_uses_current_queue_item_id_for_duplicate_tracks`
 - `cargo test -p noor-server playback::player::tests::remove_current_queue_item_advances_to_next_survivor`
 
+Visible smoke passed after the automated report:
+
+- Started the frontend Vite dev server on port 5173. The sandboxed start hit
+  `spawn EPERM`, so the server start was repeated outside the sandbox.
+- Opened `http://localhost:5173/remote` in headless local Chrome at a 390x844
+  mobile viewport.
+- Confirmed HTTP 200, a rendered remote shell, one remote transport surface,
+  and visible live queue content.
+- Mounted `RemoteAlbumTile` from the running Vite app into the remote page and
+  provided an invalid TIDAL artwork URL.
+- Confirmed the browser attempted TIDAL fallback sizes `320`, `640`, `750`,
+  `1080`, `1280`, `160`, and `80`, then rendered the `NOOR` fallback with no
+  runtime page error.
+
 Non-blocking warnings observed:
 
 - `cargo check -p noor-server` still emits pre-existing dead-code warnings in
@@ -263,7 +279,7 @@ Non-blocking warnings observed:
   prepared-next failure.
 - Real TIDAL provider session with long ephemeral mixes, token refresh, and
   provider-side 403/429 behavior.
-- Screenshot or viewport pass across every route that can display artwork.
+- Full screenshot or viewport pass across every route that can display artwork.
 
 These are manual or environment-dependent checks. They are not hidden in
 `FOLLOWUPS.md` because they are current release-readiness checks, not future
@@ -278,7 +294,10 @@ Acceptance checks:
 - Done: regression coverage is listed with the public paths it exercises.
 - Done: structured logging coverage is documented.
 - Done: broad automated frontend and Rust verification passed.
-- Not verified: manual Tauri, audio device, live TIDAL, and visual route smoke.
+- Done: local Chrome visible smoke passed for `/remote` and remote album tile
+  TIDAL artwork fallback.
+- Not verified: manual Tauri, audio device, live TIDAL, and full artwork route
+  viewport pass.
 
 Done:
 
@@ -290,7 +309,7 @@ Incomplete:
 
 - No known code path from the requested automated audit remains intentionally
   stubbed or partially wired.
-- Manual app/audio/provider smoke remains outside this automated run.
+- Manual Tauri/audio/provider smoke remains outside this automated run.
 
 Follow-ups added to `FOLLOWUPS.md`: none.
 
@@ -302,5 +321,6 @@ Next checks before release:
 - Force an active stream failure and confirm the queue advances without dead
   air.
 - Force a prepared-next failure and confirm current playback stays active.
-- Open search, app shell, remote artist, and remote album surfaces and confirm
-  artwork placeholders and fallback-size retries behave visually.
+- Open the Tauri WebView plus search, app shell, remote artist, and remote album
+  surfaces and confirm artwork placeholders and fallback-size retries behave
+  visually.
