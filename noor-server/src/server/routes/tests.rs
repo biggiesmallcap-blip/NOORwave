@@ -5992,6 +5992,41 @@ async fn tidal_track_import_positive_id_preserves_response_shape() {
     );
 }
 
+#[tokio::test]
+async fn tidal_discover_module_items_rejects_unsafe_ids_before_session_lookup() {
+    let app = build_test_app().await;
+
+    for uri in [
+        "/api/tidal/discover-modules/%20module%20/items",
+        "/api/tidal/discover-modules/module%3Flimit=1/items",
+        "/api/tidal/discover-modules/module%23fragment/items",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+}
+
+#[tokio::test]
+async fn tidal_discover_module_items_valid_id_still_requires_session() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/tidal/discover-modules/module_1/items")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
 // Note: an integration test for the recover_tidal_session path on a 401 upstream
 // response is deferred - it requires intercepting the reqwest::Client, which
 // requires wiremock or a trait-based http client. Until that infra lands, the

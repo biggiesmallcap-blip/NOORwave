@@ -22,6 +22,7 @@ const MOOD_THUMBNAIL_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 const TIDAL_HOME_MODULES_PAGE_PATH: &str = "pages/home";
 const TIDAL_MODULE_ITEMS_DEFAULT_LIMIT: u32 = 50;
 const TIDAL_MODULE_ITEMS_MAX_LIMIT: u32 = 200;
+const TIDAL_MODULE_ID_MAX_LEN: usize = 96;
 const TIDAL_MIX_ID_MAX_LEN: usize = 96;
 const TIDAL_PAGE_ID_MAX_LEN: usize = 96;
 const ROUTE_TIMING_INFO_THRESHOLD_MS: u128 = 500;
@@ -307,6 +308,7 @@ pub(super) async fn get_tidal_discover_module_items(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let started_at = Instant::now();
+    let module_id = normalize_tidal_module_id(&module_id)?;
     let limit = normalize_tidal_module_items_limit(params.get("limit").map(String::as_str));
 
     let (tokens, http_client, tidal_http_client, page_modules_cache) = {
@@ -519,6 +521,20 @@ fn normalize_tidal_mix_id(id: &str) -> Result<&str, StatusCode> {
     let trimmed = id.trim();
     if trimmed.is_empty()
         || trimmed.len() > TIDAL_MIX_ID_MAX_LEN
+        || !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(trimmed)
+}
+
+fn normalize_tidal_module_id(id: &str) -> Result<&str, StatusCode> {
+    let trimmed = id.trim();
+    if trimmed.len() != id.len()
+        || trimmed.is_empty()
+        || trimmed.len() > TIDAL_MODULE_ID_MAX_LEN
         || !trimmed
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
