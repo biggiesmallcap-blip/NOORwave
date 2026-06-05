@@ -9780,6 +9780,13 @@ async fn tidal_video_playback(
     Path(video_id): Path<i64>,
     Query(params): Query<TidalVideoPlaybackParams>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if video_id <= 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Expected a positive TIDAL video id" })),
+        ));
+    }
+
     let Some(tokens) = tidal_request_tokens(&state).await? else {
         return Err((
             StatusCode::BAD_REQUEST,
