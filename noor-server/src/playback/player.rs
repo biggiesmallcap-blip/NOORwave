@@ -1690,17 +1690,8 @@ pub fn previous_track(conn: &Connection) -> Result<PlaybackSnapshot> {
         return load_snapshot(conn);
     }
 
-    // Locate current position by queue item id first (works for pending rows too),
-    // falling back to track id for rows written before migration 021.
-    let current_index = current_queue_item_id
-        .and_then(|qid| queue_items.iter().position(|item| item.id == qid))
-        .or_else(|| {
-            current_track_id.and_then(|track_id| {
-                queue_items
-                    .iter()
-                    .position(|item| item.track.id == track_id)
-            })
-        });
+    let current_index =
+        playback_anchor_index(&queue_items, current_track_id, current_queue_item_id);
 
     if let Some(previous_item) = current_index
         .and_then(|idx| idx.checked_sub(1))
@@ -3709,6 +3700,59 @@ mod tests {
         let snapshot = previous_track(&conn).unwrap();
 
         assert_eq!(snapshot.state.current_track.unwrap().id, 1);
+        assert_eq!(snapshot.state.position_ms, 0);
+    }
+
+    #[test]
+    fn previous_track_ignores_mismatched_current_queue_item_id() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 3]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 2, current_queue_item_id = ?1, position_ms = 1000, is_playing = 1
+             WHERE id = 1",
+            params![queue_items[0].id],
+        )
+        .unwrap();
+
+        let snapshot = previous_track(&conn).unwrap();
+
+        assert_eq!(snapshot.state.current_track.unwrap().id, 1);
+        assert_eq!(
+            snapshot.state.current_queue_item_id,
+            Some(queue_items[0].id)
+        );
+        assert_eq!(snapshot.state.position_ms, 0);
+    }
+
+    #[test]
+    fn previous_track_accepts_pending_current_queue_item_id() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source, pending_artist, pending_title)
+             VALUES (NULL, 1, 'radio_pending', 'Pending Artist', 'Pending Title')",
+            [],
+        )
+        .unwrap();
+        let pending_qid = conn.last_insert_rowid();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = NULL, current_queue_item_id = ?1, position_ms = 1000, is_playing = 1
+             WHERE id = 1",
+            params![pending_qid],
+        )
+        .unwrap();
+
+        let snapshot = previous_track(&conn).unwrap();
+
+        assert_eq!(snapshot.state.current_track.unwrap().id, 1);
+        assert_eq!(
+            snapshot.state.current_queue_item_id,
+            Some(queue_items[0].id)
+        );
         assert_eq!(snapshot.state.position_ms, 0);
     }
 
