@@ -16,6 +16,8 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+const CATALOG_LIST_LIMIT_MAX: i64 = 200;
+
 #[derive(Debug, Deserialize)]
 pub(super) struct ListParams {
     sort_by: Option<String>,
@@ -42,10 +44,10 @@ pub(super) async fn get_tracks(
     Query(params): Query<ListParams>,
 ) -> Result<Json<Value>, StatusCode> {
     let state = state.read().await;
-    let sort_by = params.sort_by.as_deref().unwrap_or("date_added");
-    let sort_dir = params.sort_dir.as_deref().unwrap_or("desc");
-    let limit = params.limit.unwrap_or(50);
-    let offset = params.offset.unwrap_or(0);
+    let sort_by = normalize_catalog_sort_param(params.sort_by.as_deref(), "date_added");
+    let sort_dir = normalize_catalog_sort_dir(params.sort_dir.as_deref(), "desc");
+    let limit = clamp_catalog_list_limit(params.limit, 50);
+    let offset = clamp_catalog_offset(params.offset);
     let favorite_only = params.favorite_only.unwrap_or(false);
     let liked_only = params.liked_only.unwrap_or(false);
 
@@ -63,8 +65,8 @@ pub(super) async fn get_tracks(
         .with_conn(|conn| {
             let tracks = queries::get_tracks_with_dsp(
                 conn,
-                sort_by,
-                sort_dir,
+                &sort_by,
+                &sort_dir,
                 limit,
                 offset,
                 favorite_only,
@@ -98,17 +100,17 @@ pub(super) async fn get_albums(
     Query(params): Query<ListParams>,
 ) -> Result<Json<Value>, StatusCode> {
     let state = state.read().await;
-    let sort_by = params.sort_by.as_deref().unwrap_or("title");
-    let sort_dir = params.sort_dir.as_deref().unwrap_or("asc");
-    let limit = params.limit.unwrap_or(100);
-    let offset = params.offset.unwrap_or(0);
+    let sort_by = normalize_catalog_sort_param(params.sort_by.as_deref(), "title");
+    let sort_dir = normalize_catalog_sort_dir(params.sort_dir.as_deref(), "asc");
+    let limit = clamp_catalog_list_limit(params.limit, 100);
+    let offset = clamp_catalog_offset(params.offset);
     let favorite_only = params.favorite_only.unwrap_or(false);
 
     state
         .db
         .with_conn(|conn| {
             let albums =
-                queries::get_albums(conn, sort_by, sort_dir, limit, offset, favorite_only)?;
+                queries::get_albums(conn, &sort_by, &sort_dir, limit, offset, favorite_only)?;
             let total = queries::get_album_count(conn, favorite_only)?;
             Ok(Json(json!({ "albums": albums, "total": total })))
         })
@@ -120,18 +122,80 @@ pub(super) async fn get_artists(
     Query(params): Query<ListParams>,
 ) -> Result<Json<Value>, StatusCode> {
     let state = state.read().await;
-    let sort_by = params.sort_by.as_deref().unwrap_or("name");
-    let sort_dir = params.sort_dir.as_deref().unwrap_or("asc");
-    let limit = params.limit.unwrap_or(50);
-    let offset = params.offset.unwrap_or(0);
+    let sort_by = normalize_catalog_sort_param(params.sort_by.as_deref(), "name");
+    let sort_dir = normalize_catalog_sort_dir(params.sort_dir.as_deref(), "asc");
+    let limit = clamp_catalog_list_limit(params.limit, 50);
+    let offset = clamp_catalog_offset(params.offset);
 
     state
         .db
         .with_conn(|conn| {
-            let artists = queries::get_artists(conn, sort_by, sort_dir, limit, offset)?;
+            let artists = queries::get_artists(conn, &sort_by, &sort_dir, limit, offset)?;
             Ok(Json(json!({ "artists": artists })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+fn clamp_catalog_list_limit(limit: Option<i64>, default: i64) -> i64 {
+    limit.unwrap_or(default).clamp(1, CATALOG_LIST_LIMIT_MAX)
+}
+
+fn clamp_catalog_offset(offset: Option<i64>) -> i64 {
+    offset.unwrap_or(0).max(0)
+}
+
+fn normalize_catalog_sort_param(value: Option<&str>, default: &str) -> String {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(default)
+        .to_string()
+}
+
+fn normalize_catalog_sort_dir(value: Option<&str>, default: &str) -> String {
+    match value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(default)
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "asc" => "asc".to_string(),
+        "desc" => "desc".to_string(),
+        _ => default.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_list_limit_is_bounded() {
+        assert_eq!(clamp_catalog_list_limit(None, 50), 50);
+        assert_eq!(clamp_catalog_list_limit(Some(-10), 50), 1);
+        assert_eq!(clamp_catalog_list_limit(Some(0), 50), 1);
+        assert_eq!(clamp_catalog_list_limit(Some(10_000), 50), 200);
+    }
+
+    #[test]
+    fn catalog_offset_is_nonnegative() {
+        assert_eq!(clamp_catalog_offset(None), 0);
+        assert_eq!(clamp_catalog_offset(Some(-100)), 0);
+        assert_eq!(clamp_catalog_offset(Some(25)), 25);
+    }
+
+    #[test]
+    fn catalog_sort_params_are_normalized() {
+        assert_eq!(
+            normalize_catalog_sort_param(Some(" title "), "date_added"),
+            "title"
+        );
+        assert_eq!(normalize_catalog_sort_param(Some("   "), "name"), "name");
+        assert_eq!(normalize_catalog_sort_dir(Some(" ASC "), "desc"), "asc");
+        assert_eq!(normalize_catalog_sort_dir(Some(" desc "), "asc"), "desc");
+        assert_eq!(normalize_catalog_sort_dir(Some("sideways"), "asc"), "asc");
+    }
 }
 
 pub(super) async fn get_artist_tracks(
