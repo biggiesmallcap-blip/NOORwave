@@ -501,6 +501,13 @@ Additional targeted verification for the malformed artwork fix:
     URLs.
   - Desktop and remote TIDAL album route contracts still require those loaded
     track arrays to be reused instead of refetching by album id.
+- `cargo test -p noor-server tidal_mix_overlay`
+  - Passed on 2026-06-05.
+  - 3 tests passed.
+  - Added no-audio backend overlay coverage proving an active ephemeral TIDAL
+    album with 44 pending continuation rows renders only the loaded album rows
+    in order, preserves album titles and artwork URLs, and does not leak stale
+    durable queue rows into the visible queue.
 
 Non-blocking warnings observed:
 
@@ -591,6 +598,9 @@ Acceptance checks:
   and remote loaded TIDAL album paths, including a 45-track API-client request
   body and store-level playback request shape with ordered TIDAL ids, album
   ids, artist ids, artwork URLs, titles, and durations.
+- Done: focused no-audio backend overlay regression coverage passed for the
+  loaded TIDAL album continuation queue, proving the visible queue keeps the
+  44 pending album rows in order with artwork and no unrelated durable rows.
 - Partial: native WebView route navigation reached Genre Galaxy, Moods,
   Playlists, and Settings through existing sidebar controls without visible
   error text in accessibility samples.

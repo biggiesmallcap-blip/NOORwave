@@ -2522,6 +2522,113 @@ async fn tidal_mix_overlay_preserves_pending_deque_order() {
 }
 
 #[tokio::test]
+async fn tidal_mix_overlay_preserves_large_loaded_album_rows() {
+    let (db, db_path) = fresh_migrated_db();
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (8301, 'Unrelated Playlist Artist')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, duration_ms)
+                 VALUES
+                    (8301, 'Unrelated Queue First', 8301, 200000),
+                    (8302, 'Unrelated Queue Second', 8301, 200000)",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source)
+                 VALUES (8301, 0, 'playlist'), (8302, 1, 'playlist')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
+    let album_tidal_id = 58_520_793_i64;
+    let tidal_track_base = album_tidal_id * 100;
+    {
+        let mut current = test_track(-(tidal_track_base + 1), "Anthology Track 1");
+        current.artist_id = 0;
+        current.artist_name = Some("The Beatles".to_string());
+        current.album_title = Some("Anthology 2".to_string());
+        current.tidal_id = Some(tidal_track_base + 1);
+        current.source = "tidal_ephemeral".to_string();
+        current.artwork_url =
+            Some("https://resources.tidal.com/images/anthology-1/640x640.jpg".to_string());
+
+        let mut guard = state.write().await;
+        guard.ephemeral_tidal_track = Some(current);
+        let mut pending = guard.pending_tidal_mix_queue.lock().unwrap();
+        for track_number in 2..=45 {
+            pending.push_back(crate::PendingEphemeralTidalTrack {
+                tidal_track_id: tidal_track_base + track_number,
+                title: format!("Anthology Track {track_number}"),
+                artist_name: Some("The Beatles".to_string()),
+                album_title: Some("Anthology 2".to_string()),
+                artwork_url: Some(format!(
+                    "https://resources.tidal.com/images/anthology-{track_number}/640x640.jpg"
+                )),
+                duration_ms: Some(180_000 + track_number),
+            });
+        }
+    }
+
+    let snapshot = {
+        let guard = state.read().await;
+        guard.db.with_conn(player::load_snapshot).unwrap()
+    };
+    let snapshot = overlay_snapshot_with_external_track(&state, snapshot).await;
+
+    assert_eq!(
+        snapshot
+            .state
+            .current_track
+            .as_ref()
+            .map(|track| track.title.as_str()),
+        Some("Anthology Track 1")
+    );
+    assert_eq!(snapshot.queue.len(), 44);
+    assert_eq!(
+        snapshot.queue.first().map(|item| item.track.title.as_str()),
+        Some("Anthology Track 2")
+    );
+    assert_eq!(
+        snapshot.queue.last().map(|item| item.track.title.as_str()),
+        Some("Anthology Track 45")
+    );
+    assert_eq!(
+        snapshot
+            .queue
+            .iter()
+            .map(|item| item.track.tidal_id.expect("tidal id"))
+            .collect::<Vec<_>>(),
+        (2..=45)
+            .map(|track_number| tidal_track_base + track_number)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        snapshot.queue.iter().all(|item| item.source == "tidal_mix"
+            && item.track.album_title.as_deref() == Some("Anthology 2")
+            && item
+                .track
+                .artwork_url
+                .as_deref()
+                .is_some_and(|url| url.contains("resources.tidal.com"))),
+        "visible TIDAL album queue rows must preserve album metadata and artwork"
+    );
+    assert!(
+        snapshot
+            .queue
+            .iter()
+            .all(|item| !item.track.title.starts_with("Unrelated Queue")),
+        "active TIDAL album overlay must not leak stale durable queue rows"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn tidal_mix_replacement_clears_stale_persisted_queue() {
     let (db, db_path) = fresh_migrated_db();
     db.with_conn(|conn| {
