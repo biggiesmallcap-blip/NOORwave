@@ -20,24 +20,28 @@
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let failedArtworkUrls = $state<Record<string, boolean>>({});
+	let loadSeq = 0;
 
-	async function load() {
+	async function load(id: number) {
+		const seq = ++loadSeq;
 		loading = true;
 		error = null;
+		failedArtworkUrls = {};
 		try {
-			const res = await api.getTidalAlbumTracks(tidalAlbumId);
+			const res = await api.getTidalAlbumTracks(id);
+			if (seq !== loadSeq) return;
 			tracks = res.tracks;
 		} catch (err) {
+			if (seq !== loadSeq) return;
 			error = `Couldn't load album from TIDAL: ${err}`;
 		} finally {
-			loading = false;
+			if (seq === loadSeq) loading = false;
 		}
 	}
 
 	$effect(() => {
-		tidalAlbumId;
-		failedArtworkUrls = {};
-		void load();
+		const id = tidalAlbumId;
+		void load(id);
 	});
 
 	let header = $derived(() => {
