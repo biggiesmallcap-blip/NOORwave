@@ -73,6 +73,10 @@ describe('daily chart shelf contract', () => {
 		expect(source).toContain('resolvedTracks');
 		expect(source).toContain('playTidalTrackNow');
 		expect(source).toContain('TIDAL ready');
+		expect(source).toContain("import { tidalSearchTrackToPlayable } from '$lib/utils/track';");
+		expect(source).toContain('const playable = tidalSearchTrackToPlayable(hit);');
+		expect(source).toContain('artwork_url: playable.artwork_url ?? fallbackArtwork');
+		expect(source).not.toContain('artist_tidal_id: hit.artist_id');
 		expect(muralSource).toContain('chart-mural-art');
 		expect(source).toContain('async function resolveVisibleEntries(entries');
 		expect(source).toContain('async function playEntry(entry');

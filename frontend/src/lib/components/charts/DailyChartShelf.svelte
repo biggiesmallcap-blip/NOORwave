@@ -15,6 +15,7 @@
 	import { buildTidalTrackMenu } from '$lib/player/track_menu';
 	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
 	import ChartMural, { type ChartMuralItem } from '$lib/components/charts/ChartMural.svelte';
+	import { tidalSearchTrackToPlayable } from '$lib/utils/track';
 
 	const REGIONS = [
 		{ code: 'global', label: 'Global' },
@@ -258,30 +259,14 @@
 			playerError.set({ message: "Couldn't find that chart entry on TIDAL." });
 			return;
 		}
-		await playTidalTrackNow({
-			tidal_id: hit.tidal_id,
-			title: hit.title,
-			artist_name: hit.artist_name,
-			album_title: hit.album_title,
-			artwork_url: hit.artwork_url ?? entry.artwork_url,
-			duration_ms: hit.duration_ms,
-			artist_tidal_id: hit.artist_id,
-			album_tidal_id: hit.album_tidal_id,
-		});
+		await playTidalTrackNow(playableFromHit(hit, entry.artwork_url));
 	}
 
 	function playableFromHit(hit: TidalSearchTrack, fallbackArtwork: string | null): TidalPlayable {
+		const playable = tidalSearchTrackToPlayable(hit);
 		return {
-			tidal_id: hit.tidal_id,
-			title: hit.title,
-			artist_name: hit.artist_name,
-			album_title: hit.album_title,
-			artwork_url: hit.artwork_url ?? fallbackArtwork,
-			duration_ms: hit.duration_ms,
-			artist_tidal_id: hit.artist_id,
-			album_tidal_id: hit.album_tidal_id,
-			local_id: hit.local_id,
-			is_in_library: hit.in_library,
+			...playable,
+			artwork_url: playable.artwork_url ?? fallbackArtwork,
 		};
 	}
 
