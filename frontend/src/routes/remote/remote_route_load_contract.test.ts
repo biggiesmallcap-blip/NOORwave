@@ -43,6 +43,22 @@ describe('remote route load contracts', () => {
 		expect(page).toContain('tidalPictureUrl = null;');
 	});
 
+	test('local remote detail pages clear stale primary data before loading a new route', () => {
+		const album = source('albums/[id]/+page.svelte');
+		expect(album).toContain('tracks = [];');
+		expect(album).toContain('const res = await api.getAlbumTracks(id);');
+
+		const playlist = source('playlists/[id]/+page.svelte');
+		expect(playlist).toContain('playlist = null;');
+		expect(playlist).toContain('tracks = [];');
+		expect(playlist).toContain('api.getPlaylistTracks(id)');
+
+		const artist = source('artists/[id]/+page.svelte');
+		expect(artist).toContain('artist = null;');
+		expect(artist).toContain('tracks = [];');
+		expect(artist).toContain('api.getArtistTracks(id)');
+	});
+
 	test('remote library ignores stale dashboard and paginated tab responses', () => {
 		const page = source('library/+page.svelte');
 		expect(page).toContain('let dashboardLoadSeq = 0;');

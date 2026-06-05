@@ -23,6 +23,8 @@
 		const seq = ++loadSeq;
 		loading = true;
 		error = null;
+		playlist = null;
+		tracks = [];
 		try {
 			const [listsRes, tracksRes] = await Promise.all([
 				api.getPlaylists(),

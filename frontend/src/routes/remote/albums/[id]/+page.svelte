@@ -25,6 +25,7 @@
 		const seq = ++loadSeq;
 		loading = true;
 		error = null;
+		tracks = [];
 		try {
 			const res = await api.getAlbumTracks(id);
 			if (seq !== loadSeq) return;

@@ -41,6 +41,8 @@
 		const seq = ++loadSeq;
 		loading = true;
 		error = null;
+		artist = null;
+		tracks = [];
 		albums = [];
 		tidalPictureUrl = null;
 		let detailLoaded = false;
