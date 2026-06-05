@@ -38,7 +38,7 @@
       <a
         class="card"
         href={playlistHref(p.id)}
-        oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildMenu(p.id, p.title), p.title); }}
+        oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); openContextMenu(e, buildMenu(p.id, p.title), p.title); }}
       >
         <div class="art-wrap">
           <ArtworkImage

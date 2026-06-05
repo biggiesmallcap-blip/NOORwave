@@ -26,15 +26,22 @@
     cachedOnMount && cachedOnMount.length > 0 ? 'ready' : 'loading'
   );
   let inFlight = false;
+  let loadSeq = 0;
   let thumbnailRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
   onMount(() => {
     if (cachedOnMount && cachedOnMount.length > 0) {
       if (moodCategoriesNeedThumbnails(cachedOnMount)) scheduleThumbnailRefresh(cachedOnMount);
-      return () => clearThumbnailRefresh();
+      return () => {
+        loadSeq += 1;
+        clearThumbnailRefresh();
+      };
     }
     void load();
-    return () => clearThumbnailRefresh();
+    return () => {
+      loadSeq += 1;
+      clearThumbnailRefresh();
+    };
   });
 
   $effect(() => {
@@ -45,15 +52,19 @@
 
   async function load() {
     if (inFlight) return;
+    const seq = ++loadSeq;
     inFlight = true;
     if (categories.length === 0) viewState = 'loading';
     try {
       const data = await cachedApi.getTidalMoods();
-      categories = data.categories ?? [];
-      if (categories.length > 0) putCachedMoodCategories(categories);
-      viewState = categories.length > 0 ? 'ready' : 'empty';
-      scheduleThumbnailRefresh(categories);
+      if (seq !== loadSeq) return;
+      const nextCategories = data.categories ?? [];
+      categories = nextCategories;
+      if (nextCategories.length > 0) putCachedMoodCategories(nextCategories);
+      viewState = nextCategories.length > 0 ? 'ready' : 'empty';
+      scheduleThumbnailRefresh(nextCategories);
     } catch (e) {
+      if (seq !== loadSeq) return;
       if (e instanceof ApiError && e.status === 503) {
         clearCachedMoods();
         viewState = 'disconnected';
@@ -61,7 +72,7 @@
         viewState = 'error';
       }
     } finally {
-      inFlight = false;
+      if (seq === loadSeq) inFlight = false;
     }
   }
 
@@ -104,7 +115,7 @@
         <a
           class="card"
           href={`/moods/${c.slug}`}
-          oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildMenu(c.slug, c.title), c.title); }}
+          oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); openContextMenu(e, buildMenu(c.slug, c.title), c.title); }}
         >
           <div class="art-wrap">
             <ArtworkImage

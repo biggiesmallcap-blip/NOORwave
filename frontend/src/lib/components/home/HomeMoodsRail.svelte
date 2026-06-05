@@ -30,31 +30,42 @@
 	let errored = $state(false);
 	let sectionEl = $state<HTMLElement | null>(null);
 	let inFlight = false;
+	let loadSeq = 0;
 	let thumbnailRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 	async function loadMoods() {
 		if (inFlight) return;
+		const seq = ++loadSeq;
 		inFlight = true;
 		try {
 			const data = await cachedApi.getTidalMoods();
+			if (seq !== loadSeq) return;
 			const all = data.categories ?? [];
 			if (all.length > 0) putCachedMoodCategories(all);
 			categories = all.slice(0, PREVIEW_LIMIT);
 			scheduleThumbnailRefresh(all);
 		} catch {
+			if (seq !== loadSeq) return;
 			errored = true;
 		} finally {
-			loading = false;
-			inFlight = false;
+			if (seq === loadSeq) {
+				loading = false;
+				inFlight = false;
+			}
 		}
 	}
 
 	onMount(() => {
 		if (cachedOnMount && moodCategoriesNeedThumbnails(cachedOnMount)) {
 			scheduleThumbnailRefresh(cachedOnMount);
-			return () => clearThumbnailRefresh();
+			return () => {
+				loadSeq += 1;
+				clearThumbnailRefresh();
+			};
 		}
-		if (cachedOnMount) return;
+		if (cachedOnMount) {
+			return () => { loadSeq += 1; };
+		}
 
 		let observer: IntersectionObserver | null = null;
 		let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
@@ -78,6 +89,7 @@
 		}, LOAD_ARM_DELAY_MS);
 
 		return () => {
+			loadSeq += 1;
 			clearTimeout(armTimer);
 			if (fallbackTimer) clearTimeout(fallbackTimer);
 			clearThumbnailRefresh();
@@ -122,7 +134,7 @@
 					<a
 						class="card"
 						href={`/moods/${c.slug}`}
-						oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, menu(c.slug, c.title), c.title); }}
+						oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); openContextMenu(e, menu(c.slug, c.title), c.title); }}
 					>
 						<div class="art-wrap">
 							<ArtworkImage

@@ -10,6 +10,10 @@ const homeMoodsRail = readFileSync(
 	join(here, '../../lib/components/home/HomeMoodsRail.svelte'),
 	'utf8',
 );
+const spotifyMoodRail = readFileSync(
+	join(here, '../../lib/components/moods/SpotifyMoodRail.svelte'),
+	'utf8',
+);
 
 describe('moods cache and artwork contracts', () => {
 	test('landing and home rail render TIDAL artwork through ArtworkImage', () => {
@@ -27,6 +31,22 @@ describe('moods cache and artwork contracts', () => {
 			expect(source).toContain('claimMoodThumbnailRefresh');
 			expect(source).not.toContain('putCompleteMoodCategories');
 			expect(source).not.toContain('MAX_THUMBNAIL_REFRESH_ATTEMPTS');
+		}
+	});
+
+	test('landing and home rail guard mood loads against stale responses', () => {
+		for (const source of [moodsPage, homeMoodsRail]) {
+			expect(source).toContain('let loadSeq = 0;');
+			expect(source).toContain('loadSeq += 1;');
+			expect(source).toContain('const seq = ++loadSeq;');
+			expect(source).toContain('if (seq !== loadSeq) return;');
+			expect(source).toContain('if (seq === loadSeq)');
+		}
+	});
+
+	test('mood context menus are app-owned', () => {
+		for (const source of [moodsPage, homeMoodsRail, spotifyMoodRail]) {
+			expect(source).toContain('e.preventDefault(); e.stopPropagation(); openContextMenu');
 		}
 	});
 
