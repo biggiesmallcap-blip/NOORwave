@@ -90,7 +90,11 @@
 			artwork_url: t.artwork_url ?? null,
 			duration_ms: t.duration_ms ?? null,
 			artist_tidal_id: t.artist_tidal_id ?? null,
-			album_tidal_id: t.album_tidal_id ?? null
+			album_tidal_id: t.album_tidal_id ?? null,
+			track_id: 'track_id' in t ? t.track_id : undefined,
+			local_id: 'local_id' in t ? t.local_id : null,
+			is_in_library: 'is_in_library' in t ? t.is_in_library : undefined,
+			is_favorite: 'is_favorite' in t ? t.is_favorite : undefined
 		};
 	}
 
