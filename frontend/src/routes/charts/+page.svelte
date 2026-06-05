@@ -81,6 +81,12 @@
       { label: 'Open playlist', onSelect: () => void goto(`/spotify-playlist/${id}`) },
     ];
   }
+
+  function openChartPlaylistContext(e: MouseEvent, chart: { id: string; title: string }) {
+    e.preventDefault();
+    e.stopPropagation();
+    openContextMenu(e, chartMenu(chart.id, chart.title), chart.title);
+  }
 </script>
 
 <svelte:head><title>Charts . NOOR</title></svelte:head>
@@ -115,7 +121,7 @@
       <a
         class="card"
         href={`/spotify-playlist/${c.id}`}
-        oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, chartMenu(c.id, c.title), c.title); }}
+        oncontextmenu={(e) => openChartPlaylistContext(e, c)}
       >
         <div class="art-wrap">
           <ArtworkImage

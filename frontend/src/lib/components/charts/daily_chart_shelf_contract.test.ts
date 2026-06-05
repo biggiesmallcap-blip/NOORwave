@@ -92,6 +92,14 @@ describe('daily chart shelf contract', () => {
 		expect(source).toContain('border-color: var(--accent-line)');
 	});
 
+	test('keeps chart playlist card menus app-owned', () => {
+		expect(chartsPage).toContain('function openChartPlaylistContext(e: MouseEvent');
+		expect(chartsPage).toContain('e.preventDefault();');
+		expect(chartsPage).toContain('e.stopPropagation();');
+		expect(chartsPage).toContain('openContextMenu(e, chartMenu(chart.id, chart.title), chart.title);');
+		expect(chartsPage).toContain('oncontextmenu={(e) => openChartPlaylistContext(e, c)}');
+	});
+
 	test('keeps chart page titles neutral with shared headers and artwork images', () => {
 		expect(chartsPage).toContain('<PageHeader');
 		expect(chartsPage).toContain('variant="editorial"');
