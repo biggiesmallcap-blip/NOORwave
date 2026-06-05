@@ -173,6 +173,8 @@
   }
 
   function handleRowContextMenu(e: MouseEvent, t: SpotifyPlaylistTrack) {
+    e.preventDefault();
+    e.stopPropagation();
     openContextMenu(e, buildRowMenu(t), t.title ?? 'Spotify track');
   }
 
@@ -364,7 +366,7 @@
             <a
               class="card"
               href={`/spotify-album/${a.spotifyId}`}
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildAlbumCardMenu(a), a.title ?? 'Spotify album'); }}
+              oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); openContextMenu(e, buildAlbumCardMenu(a), a.title ?? 'Spotify album'); }}
             >
               {#if a.thumbnail}
                 <div class="art" style="background-image:url('{a.thumbnail}')"></div>

@@ -55,6 +55,23 @@ describe('Spotify save to library contract', () => {
 		expect(albumPage).not.toContain('$:');
 	});
 
+	test('keeps Spotify album row context menus app-owned', () => {
+		expect(albumPage).toContain('function handleRowContextMenu(e: MouseEvent, t: SpotifyPlaylistTrack)');
+		expect(albumPage).toContain('e.preventDefault();');
+		expect(albumPage).toContain('e.stopPropagation();');
+		expect(albumPage).toContain("oncontextmenu={(e) => handleRowContextMenu(e, t)}");
+		expect(albumPage).toContain('openContextMenu(e, buildRowMenu(t), t.title ??');
+	});
+
+	test('keeps Spotify track header and row context menus app-owned', () => {
+		expect(trackPage).toContain('function handleHeaderContextMenu(e: MouseEvent)');
+		expect(trackPage).toContain('function handleRowContextMenu(e: MouseEvent, t: SpotifyPlaylistTrack)');
+		expect(trackPage).toContain('e.preventDefault();');
+		expect(trackPage).toContain('e.stopPropagation();');
+		expect(trackPage).toContain('oncontextmenu={handleHeaderContextMenu}');
+		expect(trackPage).toContain("oncontextmenu={(e) => handleRowContextMenu(e, t)}");
+	});
+
 	test('guards the Spotify album page against stale route loads and polling', () => {
 		expect(albumPage).toContain('let loadSeq = 0;');
 		expect(albumPage).toContain('function schedulePoll(seq: number, delayMs = POLL_INTERVAL_MS)');

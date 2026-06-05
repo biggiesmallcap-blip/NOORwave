@@ -162,6 +162,12 @@
     return [{ label: 'Open artist', icon: '→', onSelect: () => void goto(`/spotify-artist/${a.spotifyId}`) }];
   }
 
+  function handleRowContextMenu(e: MouseEvent, t: SpotifyPlaylistTrack) {
+    e.preventDefault();
+    e.stopPropagation();
+    openContextMenu(e, buildRowMenu(t), t.title ?? 'Spotify track');
+  }
+
   function formatNumber(n: number | null): string {
     if (n === null || n === undefined) return '';
     if (n < 1_000) return n.toString();
@@ -229,7 +235,7 @@
                   title={statusLabel(t.tidal)}
                   onclick={() => { const tr = asTidalPlayable(t); if (tr) void playTidalTrackNow(tr); }}
                   onkeydown={(e) => { if (e.key !== 'Enter' && e.key !== ' ') return; e.preventDefault(); const tr = asTidalPlayable(t); if (tr) void playTidalTrackNow(tr); }}
-                  oncontextmenu={(e) => openContextMenu(e, buildRowMenu(t), t.title ?? 'Spotify track')}
+                  oncontextmenu={(e) => handleRowContextMenu(e, t)}
                   use:lazyTidalArt={{
                     enabled: !t.thumbnail && !!t.primaryArtist,
                     query: { artist: t.primaryArtist, title: t.title },
@@ -268,7 +274,7 @@
               <a
                 class="card"
                 href={`/spotify-album/${a.spotifyId}`}
-                oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildAlbumCardMenu(a), a.title ?? 'Spotify album'); }}
+                oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); openContextMenu(e, buildAlbumCardMenu(a), a.title ?? 'Spotify album'); }}
               >
                 {#if a.thumbnail}
                   <div class="art" style="background-image:url('{a.thumbnail}')"></div>
@@ -291,7 +297,7 @@
               <a
                 class="card artist"
                 href={`/spotify-artist/${a.spotifyId}`}
-                oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildArtistCardMenu(a), a.name ?? 'Spotify artist'); }}
+                oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); openContextMenu(e, buildArtistCardMenu(a), a.name ?? 'Spotify artist'); }}
               >
                 {#if a.thumbnail}
                   <div class="art round" style="background-image:url('{a.thumbnail}')"></div>

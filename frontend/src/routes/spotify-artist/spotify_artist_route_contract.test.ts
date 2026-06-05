@@ -26,7 +26,10 @@ describe('Spotify artist route contract', () => {
 	test('keeps TIDAL row actions wired through the Spotify artist page', () => {
 		expect(source).toContain('function buildRowMenu(t: SpotifyPlaylistTrack): MenuItem[]');
 		expect(source).toContain('onclick={() => { const tr = asTidalPlayable(t); if (tr) void playTidalTrackNow(tr); }}');
-		expect(source).toContain("oncontextmenu={(e) => openContextMenu(e, buildRowMenu(t), t.title ?? 'Spotify track')}");
+		expect(source).toContain('function handleRowContextMenu(e: MouseEvent, t: SpotifyPlaylistTrack)');
+		expect(source).toContain("oncontextmenu={(e) => handleRowContextMenu(e, t)}");
+		expect(source).toContain('e.preventDefault();');
+		expect(source).toContain('e.stopPropagation();');
 		expect(source).toContain('use:lazyTidalArt');
 	});
 });

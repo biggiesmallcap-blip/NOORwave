@@ -218,6 +218,7 @@
   function handleHeaderContextMenu(e: MouseEvent) {
     if (!detail) return;
     e.preventDefault();
+    e.stopPropagation();
     openContextMenu(e, buildHeaderMenu(detail), detail.title ?? 'Spotify track');
   }
 
@@ -249,6 +250,12 @@
       { separator: true, label: '' },
       { label: 'Song radio', icon: '◉', disabled, hint, onSelect: () => { if (track) void startTidalSongRadio(track); } },
     ];
+  }
+
+  function handleRowContextMenu(e: MouseEvent, t: SpotifyPlaylistTrack) {
+    e.preventDefault();
+    e.stopPropagation();
+    openContextMenu(e, buildRowMenu(t), t.title ?? 'Spotify track');
   }
 
   async function save() {
@@ -361,7 +368,7 @@
                   title={statusLabel(t.tidal)}
                   onclick={() => { const tr = asTidalPlayableFromRow(t); if (tr) void playTidalTrackNow(tr); }}
                   onkeydown={(e) => { if (e.key !== 'Enter' && e.key !== ' ') return; e.preventDefault(); const tr = asTidalPlayableFromRow(t); if (tr) void playTidalTrackNow(tr); }}
-                  oncontextmenu={(e) => openContextMenu(e, buildRowMenu(t), t.title ?? 'Spotify track')}
+                  oncontextmenu={(e) => handleRowContextMenu(e, t)}
                   use:lazyTidalArt={{
                     enabled: !t.thumbnail && !!t.primaryArtist,
                     query: { artist: t.primaryArtist, title: t.title },
