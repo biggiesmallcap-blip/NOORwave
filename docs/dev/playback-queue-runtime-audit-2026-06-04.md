@@ -564,11 +564,12 @@ No-audio failure-transition verification passed on 2026-06-05:
 No-audio TIDAL stream error mapping verification passed on 2026-06-05:
 
 - Added focused route-unit coverage for TIDAL playback stream session-refresh
-  failures and upstream HTTP error propagation.
-- `cargo test -p noor-server stream_error_mapping` passed with 5 tests. This
+  failures, TIDAL video stream session-refresh failures, and upstream HTTP
+  error propagation for both playback and video stream responses.
+- `cargo test -p noor-server stream_error_mapping` passed with 7 tests. This
   now covers session-expired responses, session-refresh failures, manifest
   decode failures, stream rejections, and upstream HTTP status detail
-  preservation for playback stream errors.
+  preservation for TIDAL playback and video stream errors.
 - `cargo fmt --all -- --check` passed after the test edit.
 - This does not exercise a real provider refresh, a long-running provider
   session, or live provider-side 401, 403, or 429 behavior.
@@ -839,9 +840,9 @@ Acceptance checks:
 - Done: no-audio server failure-transition tests passed for active runtime
   track error advancement and prepared-next failure keeping current playback
   active.
-- Done: no-audio TIDAL stream error mapping tests passed for session-expired,
-  session-refresh-failed, manifest-decode-failed, stream-rejected, and upstream
-  HTTP status propagation cases.
+- Done: no-audio TIDAL stream error mapping tests passed for playback and
+  video session-refresh-failed and upstream HTTP status propagation cases, plus
+  playback session-expired, manifest-decode-failed, and stream-rejected cases.
 - Not verified: low-volume local finish-advancement smoke was attempted, but
   the scratch copied library had 0 eligible existing local files, so no local
   playback path could be exercised.

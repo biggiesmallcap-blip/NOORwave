@@ -34,9 +34,9 @@ Verified automated and bounded-live evidence:
   track to the expected next queued TIDAL track, then playback was paused.
 - No-audio server failure-transition tests passed for active runtime track
   error advancement and prepared-next failure keeping current playback active.
-- No-audio TIDAL stream error mapping tests passed for session-expired,
-  session-refresh-failed, manifest-decode-failed, stream-rejected, and upstream
-  HTTP status propagation cases.
+- No-audio TIDAL stream error mapping tests passed for playback and video
+  session-refresh-failed and upstream HTTP status propagation cases, plus
+  playback session-expired, manifest-decode-failed, and stream-rejected cases.
 
 Current not-verified release checks:
 

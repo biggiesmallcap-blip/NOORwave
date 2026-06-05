@@ -364,6 +364,43 @@ fn stream_error_mapping_preserves_upstream_http_status_details() {
 }
 
 #[test]
+fn video_stream_error_mapping_marks_session_refresh_failures_as_unauthorized() {
+    let (status, Json(body)) = tidal_video_stream_error_response(
+        99,
+        tidal_stream::StreamResolveError::SessionRefreshFailed {
+            message: "refresh rejected".to_string(),
+        },
+        "fallback",
+    );
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["status"], "session_refresh_failed");
+    assert_eq!(body["video_id"], 99);
+    assert_eq!(body["details"], "refresh rejected");
+}
+
+#[test]
+fn video_stream_error_mapping_preserves_upstream_http_status_details() {
+    let (status, Json(body)) = tidal_video_stream_error_response(
+        100,
+        tidal_stream::StreamResolveError::UpstreamHttp {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            body: "rate limit".to_string(),
+        },
+        "fallback",
+    );
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["status"], "stream_upstream_http");
+    assert_eq!(body["video_id"], 100);
+    assert_eq!(body["details"], "rate limit");
+    assert_eq!(
+        body["message"],
+        "TIDAL returned 429 Too Many Requests while starting video playback."
+    );
+}
+
+#[test]
 fn tidal_status_payload_reports_pkce_source_only_for_pkce_tokens() {
     let tokens = test_tidal_tokens(Some("pkce"));
 
