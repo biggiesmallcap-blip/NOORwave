@@ -10,6 +10,10 @@ use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+const SPORTIFY_SEARCH_LIMIT_DEFAULT: u32 = 20;
+const SPORTIFY_SEARCH_LIMIT_MAX: u32 = 50;
+const SPORTIFY_SEARCH_OFFSET_MAX: u32 = 1_000;
+
 #[derive(Debug, Deserialize)]
 pub(super) struct SportifySearchQuery {
     q: String,
@@ -23,7 +27,7 @@ pub(super) struct SportifySearchQuery {
 
 fn parse_search_kind(s: Option<&str>) -> crate::services::sportify::client::SportifySearchKind {
     use crate::services::sportify::client::SportifySearchKind;
-    match s.map(str::to_ascii_lowercase).as_deref() {
+    match s.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
         Some("album") => SportifySearchKind::Album,
         Some("artist") => SportifySearchKind::Artist,
         Some("playlist") => SportifySearchKind::Playlist,
@@ -31,6 +35,16 @@ fn parse_search_kind(s: Option<&str>) -> crate::services::sportify::client::Spor
         // most-common usage.
         _ => SportifySearchKind::Track,
     }
+}
+
+fn clamp_search_limit(limit: Option<u32>) -> u32 {
+    limit
+        .unwrap_or(SPORTIFY_SEARCH_LIMIT_DEFAULT)
+        .clamp(1, SPORTIFY_SEARCH_LIMIT_MAX)
+}
+
+fn clamp_search_offset(offset: Option<u32>) -> u32 {
+    offset.unwrap_or(0).min(SPORTIFY_SEARCH_OFFSET_MAX)
 }
 
 pub(super) async fn sportify_discovery_search(
@@ -48,8 +62,8 @@ pub(super) async fn sportify_discovery_search(
     }
 
     let kind = parse_search_kind(params.r#type.as_deref());
-    let limit = params.limit.unwrap_or(20).clamp(1, 50);
-    let offset = params.offset.unwrap_or(0);
+    let limit = clamp_search_limit(params.limit);
+    let offset = clamp_search_offset(params.offset);
 
     let (sportify_client, cache_cfg, db) = {
         let s = state.read().await;
@@ -440,6 +454,32 @@ mod tests {
         SportifyPlaylistOwner, SportifyTrack,
     };
     use axum::http::StatusCode;
+
+    #[test]
+    fn search_kind_parser_trims_type_values() {
+        assert!(matches!(
+            super::parse_search_kind(Some(" playlist ")),
+            crate::services::sportify::client::SportifySearchKind::Playlist
+        ));
+        assert!(matches!(
+            super::parse_search_kind(Some(" ALBUM ")),
+            crate::services::sportify::client::SportifySearchKind::Album
+        ));
+        assert!(matches!(
+            super::parse_search_kind(Some("unknown")),
+            crate::services::sportify::client::SportifySearchKind::Track
+        ));
+    }
+
+    #[test]
+    fn search_limit_and_offset_are_bounded() {
+        assert_eq!(super::clamp_search_limit(None), 20);
+        assert_eq!(super::clamp_search_limit(Some(0)), 1);
+        assert_eq!(super::clamp_search_limit(Some(5_000)), 50);
+        assert_eq!(super::clamp_search_offset(None), 0);
+        assert_eq!(super::clamp_search_offset(Some(42)), 42);
+        assert_eq!(super::clamp_search_offset(Some(5_000)), 1_000);
+    }
 
     #[test]
     fn playlist_meta_value_omits_tracks() {
