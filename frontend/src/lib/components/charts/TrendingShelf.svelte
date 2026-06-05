@@ -10,7 +10,7 @@
   Mounted by Home (always) and Search (only when the search query is empty).
 -->
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import { get } from 'svelte/store';
 	import {
 		api,
@@ -67,6 +67,9 @@
 	let lazyArtwork = $state<Record<string, string>>({});
 
 	let lastToken = '';
+	let chartLoadSeq = 0;
+	let curatedLoadSeq = 0;
+	let destroyed = false;
 	let visibleEntries = $derived(tracks.slice(0, limit));
 	let currentEntry = $derived(visibleEntries[currentEntryIndex] ?? visibleEntries[0] ?? null);
 	let muralItems = $derived<ChartMuralItem[]>(
@@ -199,6 +202,12 @@
 		void loadCurated();
 	});
 
+	onDestroy(() => {
+		destroyed = true;
+		chartLoadSeq += 1;
+		curatedLoadSeq += 1;
+	});
+
 	$effect(() => {
 		if (currentEntryIndex >= visibleEntries.length) currentEntryIndex = 0;
 	});
@@ -231,6 +240,7 @@
 		// keeps the shelf static across page navigations within the window.
 		const cached = getCached(token);
 		if (cached) {
+			chartLoadSeq += 1;
 			tracks = cached;
 			currentEntryIndex = 0;
 			loading = false;
@@ -241,21 +251,25 @@
 	});
 
 	async function loadCurated() {
+		const seq = ++curatedLoadSeq;
 		try {
 			const [c, g] = await Promise.all([
 				api.getLastfmCountries(),
 				api.getLastfmGenres(),
 			]);
+			if (destroyed || seq !== curatedLoadSeq) return;
 			countries = c.countries;
 			genres = g.genres;
 		} catch (e) {
+			if (destroyed || seq !== curatedLoadSeq) return;
 			console.error('Failed to load curated chart lists:', e);
 		} finally {
-			curatedLoaded = true;
+			if (!destroyed && seq === curatedLoadSeq) curatedLoaded = true;
 		}
 	}
 
 	async function load(mode: TrendingMode, country: string, genre: string, token: string) {
+		const seq = ++chartLoadSeq;
 		// Keep `tracks` populated while we fetch - replacing only when new data
 		// lands avoids the flash-to-empty-state and the resulting grid reflow.
 		loading = true;
@@ -271,6 +285,7 @@
 			} else {
 				data = await api.getTrending({ source: 'lastfm', limit });
 			}
+			if (!isCurrentChartLoad(seq, token)) return;
 			const next = data.tracks ?? [];
 			tracks = next;
 			currentEntryIndex = 0;
@@ -278,12 +293,17 @@
 			// poison the cache for 6h.
 			if (next.length > 0) putCached(token, next);
 		} catch (e) {
+			if (!isCurrentChartLoad(seq, token)) return;
 			console.error('[trending] fetch failed', { token, error: e });
 			tracks = [];
 			error = true;
 		} finally {
-			loading = false;
+			if (isCurrentChartLoad(seq, token)) loading = false;
 		}
+	}
+
+	function isCurrentChartLoad(seq: number, token: string): boolean {
+		return !destroyed && seq === chartLoadSeq && token === lastToken;
 	}
 
 	function pickMode(m: TrendingMode) {

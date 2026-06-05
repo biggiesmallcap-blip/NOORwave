@@ -52,6 +52,22 @@ describe('trending shelf contract', () => {
 		expect(source).not.toContain('tag-signal-chip');
 	});
 
+	test('ignores stale trending loads and cached-scope races', () => {
+		expect(source).toContain("import { onDestroy, onMount } from 'svelte';");
+		expect(source).toContain('let chartLoadSeq = 0;');
+		expect(source).toContain('let curatedLoadSeq = 0;');
+		expect(source).toContain('let destroyed = false;');
+		expect(source).toContain('onDestroy(() => {');
+		expect(source).toContain('chartLoadSeq += 1;');
+		expect(source).toContain('curatedLoadSeq += 1;');
+		expect(source).toContain('if (cached) {');
+		expect(source).toContain('const seq = ++chartLoadSeq;');
+		expect(source).toContain('if (!isCurrentChartLoad(seq, token)) return;');
+		expect(source).toContain('return !destroyed && seq === chartLoadSeq && token === lastToken;');
+		expect(source).toContain('const seq = ++curatedLoadSeq;');
+		expect(source).toContain('if (destroyed || seq !== curatedLoadSeq) return;');
+	});
+
 	test('preserves playback, TIDAL resolution, artwork fallback, and menus', () => {
 		expect(source).toContain('playTrackNow');
 		expect(source).toContain('playChartTidalTrack');
