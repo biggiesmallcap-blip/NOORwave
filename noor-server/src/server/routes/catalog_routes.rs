@@ -1,4 +1,7 @@
-use super::{load_persisted_tidal_tokens, tidal_track_playable_json};
+use super::{
+    error_looks_like_auth, load_persisted_tidal_tokens, recover_tidal_session,
+    tidal_track_playable_json,
+};
 use crate::SharedState;
 use crate::db::queries;
 use crate::services::tidal::{
@@ -992,7 +995,7 @@ pub(super) async fn get_tidal_album_tracks(
     State(state): State<SharedState>,
     Path(tidal_album_id): Path<i64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let (tokens, tidal_http_client) = {
+    let (tokens, http_client, tidal_http_client) = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1002,6 +1005,7 @@ pub(super) async fn get_tidal_album_tracks(
         let s = state.read().await;
         (
             s.tidal_tokens.clone().or(persisted),
+            s.http_client.clone(),
             s.tidal_http_client.clone(),
         )
     };
@@ -1014,19 +1018,45 @@ pub(super) async fn get_tidal_album_tracks(
     };
 
     let client = TidalClient::with_http(
-        tidal_http_client,
+        tidal_http_client.clone(),
         tokens.access_token.clone(),
         tokens.country_code.clone(),
     );
-    let items = client
-        .get_all_album_tracks(tidal_album_id)
-        .await
-        .map_err(|e| {
-            (
+    let items = match client.get_all_album_tracks(tidal_album_id).await {
+        Ok(items) => items,
+        Err(error) if error_looks_like_auth(&error) => {
+            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+                .await
+                .map_err(|refresh_error| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({
+                            "error": format!("TIDAL session refresh failed: {}", refresh_error)
+                        })),
+                    )
+                })?;
+            let retry_client = TidalClient::with_http(
+                tidal_http_client,
+                refreshed.access_token.clone(),
+                refreshed.country_code.clone(),
+            );
+            retry_client
+                .get_all_album_tracks(tidal_album_id)
+                .await
+                .map_err(|retry_error| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": retry_error.to_string() })),
+                    )
+                })?
+        }
+        Err(error) => {
+            return Err((
                 StatusCode::BAD_GATEWAY,
-                Json(json!({ "error": e.to_string() })),
-            )
-        })?;
+                Json(json!({ "error": error.to_string() })),
+            ));
+        }
+    };
 
     let tidal_ids: Vec<i64> = items.iter().map(|t| t.id).collect();
     let library_states = {

@@ -8818,18 +8818,41 @@ async fn tidal_status(State(state): State<SharedState>) -> Json<Value> {
         },
     };
 
-    if let Some(tokens) = tokens {
+    if let Some(mut tokens) = tokens {
         if !tokens.is_pkce() {
             tidal_auth::warn_if_fallback_client_credentials();
         }
+        let mut expired = tidal_tokens_locally_expired(&state, &tokens)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("Failed to inspect persisted TIDAL token expiry: {error}");
+                false
+            });
+        if expired && !tokens.refresh_token.trim().is_empty() {
+            let http_client = {
+                let s = state.read().await;
+                s.http_client.clone()
+            };
+            match recover_tidal_session(&state, &http_client, &tokens).await {
+                Ok(refreshed) => {
+                    tokens = refreshed;
+                    expired = false;
+                }
+                Err(error) => {
+                    tracing::warn!("Failed to refresh expired TIDAL session for status: {error}");
+                }
+            }
+        }
         Json(tidal_status_payload(
             Some(&tokens),
+            expired,
             tidal_auth::tidal_pkce_client_credential_source(),
             tidal_auth::tidal_client_credential_source(),
         ))
     } else {
         Json(tidal_status_payload(
             None,
+            false,
             tidal_auth::tidal_pkce_client_credential_source(),
             tidal_auth::tidal_client_credential_source(),
         ))
@@ -8838,6 +8861,7 @@ async fn tidal_status(State(state): State<SharedState>) -> Json<Value> {
 
 fn tidal_status_payload(
     tokens: Option<&tidal_auth::TidalTokens>,
+    token_expired: bool,
     pkce_source: tidal_auth::TidalCredentialSource,
     legacy_source: tidal_auth::TidalCredentialSource,
 ) -> Value {
@@ -8845,6 +8869,15 @@ fn tidal_status_payload(
         return json!({ "connected": false });
     };
     let auth_flow = tokens.auth_flow.as_deref().unwrap_or("legacy");
+    if token_expired {
+        return json!({
+            "connected": false,
+            "reason": "token_expired",
+            "user_id": tokens.user_id,
+            "country_code": tokens.country_code,
+            "auth_flow": auth_flow,
+        });
+    }
     let mut body = json!({
         "connected": true,
         "user_id": tokens.user_id,
@@ -8865,6 +8898,74 @@ fn tidal_status_payload(
         }
     }
     body
+}
+
+async fn tidal_tokens_locally_expired(
+    state: &SharedState,
+    tokens: &tidal_auth::TidalTokens,
+) -> anyhow::Result<bool> {
+    let db = {
+        let s = state.read().await;
+        s.db.clone()
+    };
+    let record = db.with_conn(|conn| {
+        let result = conn.query_row(
+            "SELECT token_expiry, connected_at FROM service_auth WHERE service='tidal'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
+        );
+        match result {
+            Ok(record) => Ok(Some(record)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    })?;
+    let Some((token_expiry, connected_at)) = record else {
+        return Ok(false);
+    };
+    Ok(tidal_token_expired_at(
+        token_expiry.as_deref(),
+        connected_at.as_deref(),
+        tokens.expires_in,
+        chrono::Utc::now(),
+    ))
+}
+
+fn tidal_token_expired_at(
+    token_expiry: Option<&str>,
+    connected_at: Option<&str>,
+    expires_in: i64,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let expiry = token_expiry.and_then(parse_service_auth_time).or_else(|| {
+        let connected_at = connected_at.and_then(parse_service_auth_time)?;
+        Some(connected_at + chrono::Duration::seconds(expires_in.max(0)))
+    });
+    expiry
+        .map(|expiry| expiry <= now + chrono::Duration::seconds(60))
+        .unwrap_or(false)
+}
+
+fn parse_service_auth_time(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    chrono::DateTime::parse_from_rfc3339(trimmed)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .ok()
+        .or_else(|| {
+            chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S")
+                .ok()
+                .map(|dt| {
+                    chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc)
+                })
+        })
 }
 
 /// Clear TIDAL session (logout).
@@ -10298,6 +10399,9 @@ pub(super) async fn recover_tidal_session(
     http: &reqwest::Client,
     tokens: &tidal_auth::TidalTokens,
 ) -> anyhow::Result<tidal_auth::TidalTokens> {
+    if tokens.refresh_token.trim().is_empty() {
+        anyhow::bail!("TIDAL session has no refresh token; reconnect TIDAL");
+    }
     tracing::info!(
         target: "noor.sync.tidal",
         event = "session_refresh_start",
@@ -12779,12 +12883,15 @@ async fn persist_tidal_tokens(
         let s = state.read().await;
         s.db.with_conn(|conn| {
             let token_blob = tidal_auth::encode_persisted_tidal_tokens(&s.master_key, tokens)?;
+            let token_expiry = (chrono::Utc::now()
+                + chrono::Duration::seconds(tokens.expires_in.max(0)))
+            .to_rfc3339();
             conn.execute(
-                "INSERT INTO service_auth (service, access_token_enc, user_id, connected_at)
-                 VALUES ('tidal', ?1, ?2, datetime('now'))
+                "INSERT INTO service_auth (service, access_token_enc, user_id, token_expiry, connected_at)
+                 VALUES ('tidal', ?1, ?2, ?3, datetime('now'))
                  ON CONFLICT(service) DO UPDATE SET access_token_enc=excluded.access_token_enc,
-                 user_id=excluded.user_id, connected_at=excluded.connected_at",
-                rusqlite::params![token_blob, tokens.user_id],
+                 user_id=excluded.user_id, token_expiry=excluded.token_expiry, connected_at=excluded.connected_at",
+                rusqlite::params![token_blob, tokens.user_id, token_expiry],
             )?;
             Ok(())
         })?;

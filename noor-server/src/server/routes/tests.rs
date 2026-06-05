@@ -155,6 +155,10 @@ fn tidal_artist_release_filter_only_downgrades_missing_bucket_errors() {
     )
     .expect_err("auth errors must not be swallowed as empty release filters");
     assert!(error_looks_like_auth(&auth_error));
+    let expired_token_error = anyhow::anyhow!(
+        "TIDAL API error 401 Unauthorized: {{\"status\":401,\"subStatus\":11003,\"userMessage\":\"The token has expired. (Expired on time)\"}}"
+    );
+    assert!(error_looks_like_auth(&expired_token_error));
 
     let rate_error = resolve_tidal_artist_release_filter(
         Err(anyhow::anyhow!(
@@ -328,6 +332,7 @@ fn tidal_status_payload_reports_pkce_source_only_for_pkce_tokens() {
 
     let body = tidal_status_payload(
         Some(&tokens),
+        false,
         tidal_auth::TidalCredentialSource::Env,
         tidal_auth::TidalCredentialSource::Fallback,
     );
@@ -344,6 +349,7 @@ fn tidal_status_payload_reports_legacy_source_only_for_legacy_tokens() {
 
     let body = tidal_status_payload(
         Some(&tokens),
+        false,
         tidal_auth::TidalCredentialSource::Env,
         tidal_auth::TidalCredentialSource::Fallback,
     );
@@ -358,6 +364,7 @@ fn tidal_status_payload_reports_legacy_source_only_for_legacy_tokens() {
 fn tidal_status_payload_disconnected_omits_credential_sources() {
     let body = tidal_status_payload(
         None,
+        false,
         tidal_auth::TidalCredentialSource::Env,
         tidal_auth::TidalCredentialSource::Fallback,
     );
@@ -366,6 +373,65 @@ fn tidal_status_payload_disconnected_omits_credential_sources() {
     assert!(body.get("auth_flow").is_none());
     assert!(body.get("pkce_client_credential_source").is_none());
     assert!(body.get("legacy_client_credential_source").is_none());
+}
+
+#[test]
+fn tidal_status_payload_reports_expired_tokens_as_disconnected() {
+    let tokens = test_tidal_tokens(Some("pkce"));
+
+    let body = tidal_status_payload(
+        Some(&tokens),
+        true,
+        tidal_auth::TidalCredentialSource::Env,
+        tidal_auth::TidalCredentialSource::Fallback,
+    );
+
+    assert_eq!(body["connected"], false);
+    assert_eq!(body["reason"], "token_expired");
+    assert_eq!(body["auth_flow"], "pkce");
+    assert_eq!(body["user_id"], "u-1");
+    assert!(body.get("pkce_client_credential_source").is_none());
+    assert!(body.get("legacy_client_credential_source").is_none());
+}
+
+#[test]
+fn tidal_token_expiry_uses_token_expiry_when_present() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-06-05T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+
+    assert!(tidal_token_expired_at(
+        Some("2026-06-04T23:58:30Z"),
+        Some("2026-06-04 00:00:00"),
+        86_400,
+        now,
+    ));
+    assert!(!tidal_token_expired_at(
+        Some("2026-06-05T00:05:00Z"),
+        Some("2026-06-04 00:00:00"),
+        86_400,
+        now,
+    ));
+}
+
+#[test]
+fn tidal_token_expiry_falls_back_to_connected_at_plus_expires_in() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-06-05T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+
+    assert!(tidal_token_expired_at(
+        None,
+        Some("2026-06-03 23:00:00"),
+        86_400,
+        now,
+    ));
+    assert!(!tidal_token_expired_at(
+        None,
+        Some("2026-06-04 23:30:00"),
+        86_400,
+        now,
+    ));
 }
 
 #[test]
