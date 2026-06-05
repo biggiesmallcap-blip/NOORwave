@@ -895,6 +895,10 @@
 		}
 	}
 
+	function canFavoriteQueueRow(item: QueueItemType): boolean {
+		return item.is_pending !== true && item.track.id > 0;
+	}
+
 	// ─── Queue drag-to-reorder ────────────────────────────────────────────────
 	let dragItemId = $state<number | null>(null);
 	let dragOverItemId = $state<number | null>(null);
@@ -1813,9 +1817,13 @@
 									<button
 										class="queue-action icon"
 										class:active={item.track.is_favorite}
-										aria-label={item.track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
-										title={item.track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
-										disabled={isPending}
+										aria-label={!canFavoriteQueueRow(item)
+											? 'Favorite unavailable for this queue row'
+											: item.track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+										title={!canFavoriteQueueRow(item)
+											? 'Favorite this track after it starts playing'
+											: item.track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+										disabled={!canFavoriteQueueRow(item)}
 										onclick={(event) => void handleQueueRowFavorite(item.track.id, event)}
 									>{item.track.is_favorite ? '♥' : '♡'}</button>
 									<button
