@@ -465,6 +465,11 @@ Additional targeted verification for the malformed artwork fix:
     sandboxed run could not write `target` metadata.
   - Current warning count is one pre-existing WASAPI manual-review warning:
     `ExclusiveRenderSource::role` is never read.
+- `cargo test -p noor-app`
+  - Passed on 2026-06-05.
+  - 5 tests passed across the app unit tests and Tauri runtime pin test.
+- `cargo fmt --all -- --check`
+  - Passed on 2026-06-05.
 
 Non-blocking warnings observed:
 
@@ -543,6 +548,8 @@ Acceptance checks:
 - Done: `cargo check -p noor-app` passed as a no-launch Tauri shell preflight.
 - Done: `cargo check -p noor-server` passed with one pre-existing WASAPI
   manual-review warning.
+- Done: `cargo test -p noor-app` and `cargo fmt --all -- --check` passed as
+  no-launch Rust verification checks.
 - Partial: native WebView route navigation reached Genre Galaxy, Moods,
   Playlists, and Settings through existing sidebar controls without visible
   error text in accessibility samples.
