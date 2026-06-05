@@ -380,6 +380,54 @@ fn video_stream_error_mapping_marks_session_refresh_failures_as_unauthorized() {
 }
 
 #[test]
+fn video_stream_error_mapping_marks_session_expired_as_unauthorized() {
+    let (status, Json(body)) = tidal_video_stream_error_response(
+        98,
+        tidal_stream::StreamResolveError::SessionExpired {
+            message: "expired".to_string(),
+        },
+        "fallback",
+    );
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["status"], "session_expired");
+    assert_eq!(body["video_id"], 98);
+    assert_eq!(body["details"], "expired");
+}
+
+#[test]
+fn video_stream_error_mapping_marks_manifest_decode_failures_as_bad_gateway() {
+    let (status, Json(body)) = tidal_video_stream_error_response(
+        101,
+        tidal_stream::StreamResolveError::ManifestDecodeFailed {
+            message: "bad base64".to_string(),
+        },
+        "fallback",
+    );
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["status"], "manifest_decode_failed");
+    assert_eq!(body["video_id"], 101);
+    assert_eq!(body["details"], "bad base64");
+}
+
+#[test]
+fn video_stream_error_mapping_marks_rejected_stream_requests_as_forbidden() {
+    let (status, Json(body)) = tidal_video_stream_error_response(
+        102,
+        tidal_stream::StreamResolveError::StreamRejected {
+            message: "rejected".to_string(),
+        },
+        "fallback",
+    );
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["status"], "stream_rejected");
+    assert_eq!(body["video_id"], 102);
+    assert_eq!(body["details"], "rejected");
+}
+
+#[test]
 fn video_stream_error_mapping_preserves_upstream_http_status_details() {
     let (status, Json(body)) = tidal_video_stream_error_response(
         100,
