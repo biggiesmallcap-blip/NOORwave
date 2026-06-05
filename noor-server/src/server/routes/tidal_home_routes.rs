@@ -20,6 +20,9 @@ const TIDAL_MOODS_FALLBACK_CACHE_TTL: Duration = Duration::from_secs(60);
 const MOOD_THUMBNAIL_FETCH_CONCURRENCY: usize = 4;
 const MOOD_THUMBNAIL_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 const TIDAL_HOME_MODULES_PAGE_PATH: &str = "pages/home";
+const TIDAL_MODULE_ITEMS_DEFAULT_LIMIT: u32 = 50;
+const TIDAL_MODULE_ITEMS_MAX_LIMIT: u32 = 200;
+const TIDAL_PAGE_ID_MAX_LEN: usize = 96;
 const ROUTE_TIMING_INFO_THRESHOLD_MS: u128 = 500;
 static TIDAL_MOODS_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 const DEFAULT_TIDAL_MOOD_CATEGORIES: &[(&str, &str)] = &[
@@ -303,11 +306,7 @@ pub(super) async fn get_tidal_discover_module_items(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let started_at = Instant::now();
-    let limit: u32 = params
-        .get("limit")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(50)
-        .min(200);
+    let limit = normalize_tidal_module_items_limit(params.get("limit").map(String::as_str));
 
     let (tokens, http_client, tidal_http_client, page_modules_cache) = {
         let in_memory = {
@@ -480,7 +479,8 @@ pub(super) async fn get_tidal_page_modules_with_id(
 // approved list so callers can't probe arbitrary TIDAL endpoints.
 fn resolve_page_path(section: &str, id: Option<&str>) -> Result<String, StatusCode> {
     let section = section.trim_matches('/');
-    let wire_section = match (section, id) {
+    let normalized_id = id.map(normalize_tidal_page_id).transpose()?;
+    let wire_section = match (section, normalized_id.as_deref()) {
         ("explore", None) => "explore",
         ("hires", None) => "hires",
         ("videos", None) => "videos",
@@ -490,10 +490,32 @@ fn resolve_page_path(section: &str, id: Option<&str>) -> Result<String, StatusCo
         ("mood" | "genre", Some(_)) => section,
         _ => return Err(StatusCode::NOT_FOUND),
     };
-    Ok(match id {
+    Ok(match normalized_id {
         Some(id) => format!("pages/{}/{}", wire_section, id),
         None => format!("pages/{}", wire_section),
     })
+}
+
+fn normalize_tidal_page_id(id: &str) -> Result<&str, StatusCode> {
+    let trimmed = id.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > TIDAL_PAGE_ID_MAX_LEN
+        || trimmed.chars().any(|c| {
+            c.is_ascii_whitespace()
+                || c.is_ascii_control()
+                || matches!(c, '/' | '\\' | '?' | '#' | '&' | '=')
+        })
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(trimmed)
+}
+
+fn normalize_tidal_module_items_limit(value: Option<&str>) -> u32 {
+    value
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(TIDAL_MODULE_ITEMS_DEFAULT_LIMIT)
+        .clamp(1, TIDAL_MODULE_ITEMS_MAX_LIMIT)
 }
 
 async fn fetch_page_modules(
@@ -1109,6 +1131,7 @@ mod tests {
             ("whatsnew", None, "pages/whatsnew"),
             ("mood", Some("abc"), "pages/mood/abc"),
             ("genre", Some("rock"), "pages/genre/rock"),
+            ("genre", Some("  hip-hop  "), "pages/genre/hip-hop"),
         ];
 
         for (section, id, expected) in cases {
@@ -1125,9 +1148,23 @@ mod tests {
             ("genres", Some("rock")),
             ("new-releases", Some("albums")),
             ("explore/deeper", None),
+            ("mood", Some("")),
+            ("mood", Some("../home")),
+            ("mood", Some("party?debug=true")),
+            ("mood", Some("party&limit=200")),
+            ("mood", Some("party mode")),
         ] {
             assert_eq!(resolve_page_path(section, id), Err(StatusCode::NOT_FOUND));
         }
+    }
+
+    #[test]
+    fn tidal_module_item_limit_is_bounded_for_show_more_requests() {
+        assert_eq!(normalize_tidal_module_items_limit(None), 50);
+        assert_eq!(normalize_tidal_module_items_limit(Some("bad")), 50);
+        assert_eq!(normalize_tidal_module_items_limit(Some("0")), 1);
+        assert_eq!(normalize_tidal_module_items_limit(Some("12")), 12);
+        assert_eq!(normalize_tidal_module_items_limit(Some("9999")), 200);
     }
 
     #[test]
