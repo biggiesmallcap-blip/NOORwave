@@ -90,6 +90,7 @@
   // C4 - discovery injectables
   let vibeTrack = $state<VibeTrack[] | null>(null)
   let underratedTracks = $state<BasicTrack[] | null>(null)
+  let discoveryLoadSeq = 0
 
   let localPlaylists = $state<Playlist[]>([])
   let tidalPlaylistResults = $state<TidalSearchPlaylist[]>([])
@@ -178,6 +179,22 @@
     loadingSpotifyAlbums = false
   }
 
+  function clearVisibleSearchResults() {
+    results = null
+    audioResults = null
+    tidalPlaylistResults = []
+    spotifyPlaylistResults = []
+    spotifyTrackResults = []
+    spotifyAlbumResults = []
+    vibeTrack = null
+    underratedTracks = null
+  }
+
+  function invalidateSearchSideLoads() {
+    artistDiscographyArtworkGeneration += 1
+    discoveryLoadSeq += 1
+  }
+
   function isCurrentSearch(q: string, generation: number, signal: AbortSignal) {
     return !signal.aborted && searchGeneration === generation && query.trim() === q
   }
@@ -189,17 +206,17 @@
     abortController = null
     searchGeneration += 1
     loadMoreSeq += 1
+    invalidateSearchSideLoads()
     loadingMore = false
+    lastQuery = ''
+    error = null
     if (!query.trim()) {
-      results = null
-      audioResults = null
-      tidalPlaylistResults = []
-      spotifyPlaylistResults = []
+      clearVisibleSearchResults()
       loading = false
       resetProviderLoading()
-      error = null
       return
     }
+    clearVisibleSearchResults()
     loading = true
     debounceTimer = setTimeout(async () => {
       const q = query.trim()
@@ -1019,6 +1036,7 @@
   beforeNavigate(() => {
     abortController?.abort()
     abortController = null
+    invalidateSearchSideLoads()
     clearTimeout(debounceTimer)
   })
 
@@ -1061,17 +1079,25 @@
   // C4 - load discovery sections whenever the top result changes
   $effect(() => {
     const top = topResult
+    const seq = ++discoveryLoadSeq
+    const isCurrentDiscoveryLoad = () => seq === discoveryLoadSeq && topResult === top
     vibeTrack = null
     underratedTracks = null
     if (!top) return
     // "Same vibe" - only when top result is a library track with a local id
     if (top.kind === 'track' && top.entry.in_library && (top.entry as TidalSearchTrack & { local_id?: number | null }).local_id != null) {
       const id = (top.entry as TidalSearchTrack & { local_id?: number | null }).local_id!
-      void api.getVibeTracksForTrack(id).then(r => { vibeTrack = r.tracks }).catch(() => {})
+      void api.getVibeTracksForTrack(id).then(r => {
+        if (!isCurrentDiscoveryLoad()) return
+        vibeTrack = r.tracks
+      }).catch(() => {})
     }
     // "Unplayed in your library" - only when top result is a library artist with a local id
     if (top.kind === 'artist' && top.entry.in_library && top.entry.local_id != null) {
-      void api.getUnderratedTracksForArtist(top.entry.local_id).then(r => { underratedTracks = r.tracks }).catch(() => {})
+      void api.getUnderratedTracksForArtist(top.entry.local_id).then(r => {
+        if (!isCurrentDiscoveryLoad()) return
+        underratedTracks = r.tracks
+      }).catch(() => {})
     }
   })
 

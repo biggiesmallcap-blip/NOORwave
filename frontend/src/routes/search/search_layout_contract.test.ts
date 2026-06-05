@@ -59,6 +59,29 @@ describe('search layout contracts', () => {
 		expect(source).toContain('if (seq === loadMoreSeq) loadingMore = false');
 	});
 
+	test('typing a new query clears stale visible results and invalidates side-loads', () => {
+		expect(source).toContain('function clearVisibleSearchResults()');
+		expect(source).toContain('function invalidateSearchSideLoads()');
+		expect(source).toContain('invalidateSearchSideLoads()');
+		expect(source).toContain('clearVisibleSearchResults()');
+		expect(source).toContain("lastQuery = ''");
+		expect(source).toContain('vibeTrack = null');
+		expect(source).toContain('underratedTracks = null');
+		expect(source).toContain('artistDiscographyArtworkGeneration += 1');
+		expect(source).toContain('discoveryLoadSeq += 1');
+	});
+
+	test('search discovery panels ignore stale top-result responses', () => {
+		expect(source).toContain('let discoveryLoadSeq = 0');
+		expect(source).toContain('const seq = ++discoveryLoadSeq');
+		expect(source).toContain('const isCurrentDiscoveryLoad = () => seq === discoveryLoadSeq && topResult === top');
+		expect(source).toContain('if (!isCurrentDiscoveryLoad()) return');
+		expect(source).toContain('vibeTrack = r.tracks');
+		expect(source).toContain('underratedTracks = r.tracks');
+		expect(source).not.toContain('then(r => { vibeTrack = r.tracks })');
+		expect(source).not.toContain('then(r => { underratedTracks = r.tracks })');
+	});
+
 	test('search page routes artist artwork through the shared fallback component', () => {
 		expect(source).toContain("import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte'");
 		expect(source).toContain('<ArtworkImage');
