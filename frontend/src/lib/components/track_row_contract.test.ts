@@ -39,4 +39,13 @@ describe('shared track row artwork contract', () => {
 		expect(rowSource).not.toMatch(/\u2014/);
 		expect(rowSource).not.toMatch(/[\u2500-\u257F]/);
 	});
+
+	test.each(trackRowSources)('%s suppresses nested artist and album browser menus', (_name, rowSource) => {
+		expect(rowSource).toContain('function openArtistContextMenu(e: MouseEvent)');
+		expect(rowSource).toContain('function openAlbumContextMenu(e: MouseEvent)');
+		expect(rowSource).toContain('e.preventDefault();');
+		expect(rowSource).toContain('e.stopPropagation();');
+		expect(rowSource).toContain('oncontextmenu={openArtistContextMenu}');
+		expect(rowSource).toContain('oncontextmenu={openAlbumContextMenu}');
+	});
 });
