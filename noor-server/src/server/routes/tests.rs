@@ -4181,6 +4181,161 @@ async fn queue_play_next_tidal_inserts_pending_row_after_current_with_hint() {
 }
 
 #[tokio::test]
+async fn queue_play_next_uses_current_queue_item_for_duplicate_track() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let (duplicate_qid, current_qid, tail_qid): (i64, i64, i64) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            let duplicate_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 1, 'user')",
+                [],
+            )?;
+            let current_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 2, 'user')",
+                [],
+            )?;
+            let tail_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+                     WHERE id = 1",
+                rusqlite::params![current_qid],
+            )?;
+            Ok((duplicate_qid, current_qid, tail_qid))
+        })
+        .unwrap();
+
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/queue/play_next")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"kind":"tidal","tidal_id":778,"artist":"External Artist","title":"Exact Current Next"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (rows, current_queue_item_id): (Vec<(i64, Option<i64>, Option<String>)>, Option<i64>) = db
+        .with_conn(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT id, track_id, pending_title FROM queue ORDER BY position ASC")?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let current_queue_item_id = conn.query_row(
+                "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok((rows, current_queue_item_id))
+        })
+        .unwrap();
+
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[0], (duplicate_qid, Some(1), None));
+    assert_eq!(rows[1], (current_qid, Some(1), None));
+    assert_eq!(rows[2].1, None);
+    assert_eq!(rows[2].2.as_deref(), Some("Exact Current Next"));
+    assert_eq!(rows[3], (tail_qid, Some(2), None));
+    assert_eq!(current_queue_item_id, Some(current_qid));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn queue_play_next_repairs_stale_anchor_before_insert() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let stale_qid = 999_999_i64;
+    let (repaired_qid, duplicate_qid, tail_qid): (i64, i64, i64) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            let repaired_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 1, 'user')",
+                [],
+            )?;
+            let duplicate_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 2, 'user')",
+                [],
+            )?;
+            let tail_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+                     WHERE id = 1",
+                rusqlite::params![stale_qid],
+            )?;
+            Ok((repaired_qid, duplicate_qid, tail_qid))
+        })
+        .unwrap();
+
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/queue/play_next")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"kind":"tidal","tidal_id":779,"artist":"External Artist","title":"Repaired Next"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (rows, current_queue_item_id): (Vec<(i64, Option<i64>, Option<String>)>, Option<i64>) = db
+        .with_conn(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT id, track_id, pending_title FROM queue ORDER BY position ASC")?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let current_queue_item_id = conn.query_row(
+                "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok((rows, current_queue_item_id))
+        })
+        .unwrap();
+
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[0], (repaired_qid, Some(1), None));
+    assert_eq!(rows[1].1, None);
+    assert_eq!(rows[1].2.as_deref(), Some("Repaired Next"));
+    assert_eq!(rows[2], (duplicate_qid, Some(1), None));
+    assert_eq!(rows[3], (tail_qid, Some(2), None));
+    assert_eq!(current_queue_item_id, Some(repaired_qid));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn queue_play_next_many_preserves_requested_order() {
     let (db, db_path) = fresh_migrated_db();
     seed_basic_tracks(&db);
@@ -4256,6 +4411,88 @@ async fn queue_play_next_many_preserves_requested_order() {
             (2, "Second external".to_string(), Some(102)),
         ]
     );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn queue_play_next_many_repairs_missing_anchor_and_preserves_order() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let (repaired_qid, duplicate_qid, tail_qid): (i64, i64, i64) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            let repaired_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 1, 'user')",
+                [],
+            )?;
+            let duplicate_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 2, 'user')",
+                [],
+            )?;
+            let tail_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = NULL, is_playing = 1
+                     WHERE id = 1",
+                [],
+            )?;
+            Ok((repaired_qid, duplicate_qid, tail_qid))
+        })
+        .unwrap();
+
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/queue/play_next_many")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"items":[
+                            {"kind":"tidal","tidal_id":201,"artist":"A","title":"Batch First"},
+                            {"kind":"tidal","tidal_id":202,"artist":"B","title":"Batch Second"}
+                        ]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (rows, current_queue_item_id): (Vec<(i64, Option<i64>, Option<String>)>, Option<i64>) = db
+        .with_conn(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT id, track_id, pending_title FROM queue ORDER BY position ASC")?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let current_queue_item_id = conn.query_row(
+                "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok((rows, current_queue_item_id))
+        })
+        .unwrap();
+
+    assert_eq!(rows.len(), 5);
+    assert_eq!(rows[0], (repaired_qid, Some(1), None));
+    assert_eq!(rows[1].1, None);
+    assert_eq!(rows[1].2.as_deref(), Some("Batch First"));
+    assert_eq!(rows[2].1, None);
+    assert_eq!(rows[2].2.as_deref(), Some("Batch Second"));
+    assert_eq!(rows[3], (duplicate_qid, Some(1), None));
+    assert_eq!(rows[4], (tail_qid, Some(2), None));
+    assert_eq!(current_queue_item_id, Some(repaired_qid));
 
     let _ = std::fs::remove_file(db_path);
 }

@@ -8018,30 +8018,64 @@ fn queue_external_insert<'a>(
 }
 
 fn current_queue_position(conn: &rusqlite::Connection) -> anyhow::Result<Option<i32>> {
-    let by_queue_item: Option<i32> = conn
-        .query_row(
-            "SELECT q.position
-             FROM playback_state ps
-             JOIN queue q ON q.id = ps.current_queue_item_id
-             WHERE ps.id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if by_queue_item.is_some() {
-        return Ok(by_queue_item);
+    let (current_queue_item_id, current_track_id): (Option<i64>, Option<i64>) = conn.query_row(
+        "SELECT current_queue_item_id, current_track_id FROM playback_state WHERE id = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+
+    if let Some(queue_item_id) = current_queue_item_id {
+        if let Some(position) = queue_item_position(conn, queue_item_id)? {
+            return Ok(Some(position));
+        }
     }
 
+    if let Some(track_id) = current_track_id {
+        if let Some((queue_item_id, position)) = first_queue_item_for_track(conn, track_id)? {
+            conn.execute(
+                "UPDATE playback_state SET current_queue_item_id = ?1 WHERE id = 1",
+                params![queue_item_id],
+            )?;
+            return Ok(Some(position));
+        }
+    }
+
+    if current_queue_item_id.is_some() {
+        conn.execute(
+            "UPDATE playback_state SET current_queue_item_id = NULL WHERE id = 1",
+            [],
+        )?;
+    }
+
+    Ok(None)
+}
+
+fn queue_item_position(
+    conn: &rusqlite::Connection,
+    queue_item_id: i64,
+) -> anyhow::Result<Option<i32>> {
     Ok(conn
         .query_row(
-            "SELECT q.position
-             FROM playback_state ps
-             JOIN queue q ON q.track_id = ps.current_track_id
-             WHERE ps.id = 1 AND ps.current_track_id IS NOT NULL
-             ORDER BY q.position ASC, q.id ASC
-             LIMIT 1",
-            [],
+            "SELECT position FROM queue WHERE id = ?1",
+            params![queue_item_id],
             |row| row.get(0),
+        )
+        .optional()?)
+}
+
+fn first_queue_item_for_track(
+    conn: &rusqlite::Connection,
+    track_id: i64,
+) -> anyhow::Result<Option<(i64, i32)>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, position
+             FROM queue
+             WHERE track_id = ?1
+             ORDER BY position ASC, id ASC
+             LIMIT 1",
+            params![track_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?)
 }
@@ -8050,17 +8084,7 @@ fn first_queue_item_id_for_track(
     conn: &rusqlite::Connection,
     track_id: i64,
 ) -> anyhow::Result<Option<i64>> {
-    Ok(conn
-        .query_row(
-            "SELECT id
-             FROM queue
-             WHERE track_id = ?1
-             ORDER BY position ASC, id ASC
-             LIMIT 1",
-            params![track_id],
-            |row| row.get(0),
-        )
-        .optional()?)
+    Ok(first_queue_item_for_track(conn, track_id)?.map(|(id, _)| id))
 }
 
 fn queue_item_exists(conn: &rusqlite::Connection, queue_item_id: i64) -> anyhow::Result<bool> {
