@@ -38,4 +38,20 @@ describe('Spotify save to library contract', () => {
 		expect(albumPage).toContain('Save failed: {saveErr}');
 		expect(albumPage).not.toContain('$:');
 	});
+
+	test('guards the Spotify album page against stale route loads and polling', () => {
+		expect(albumPage).toContain('let loadSeq = 0;');
+		expect(albumPage).toContain('function schedulePoll(seq: number, delayMs = POLL_INTERVAL_MS)');
+		expect(albumPage).toContain('setTimeout(() => void pollResolution(seq), delayMs)');
+		expect(albumPage).toContain('async function pollResolution(seq: number)');
+		expect(albumPage).toContain('if (seq !== loadSeq) { clearPoll(); return; }');
+		expect(albumPage).toContain('if (seq !== loadSeq) return;');
+		expect(albumPage).toContain('const seq = ++loadSeq;');
+		expect(albumPage).toContain('const res = await api.getSpotifyAlbum(id, controller.signal);');
+		expect(albumPage).toContain('const rel = await api.getSpotifyAlbumRelated(id, controller.signal).catch(() => null);');
+		expect(albumPage).toContain('if (seq === loadSeq) loading = false;');
+		expect(albumPage).toContain('loadSeq += 1;');
+		expect(albumPage).not.toContain('setTimeout(pollResolution, POLL_INTERVAL_MS)');
+		expect(albumPage).not.toContain('setTimeout(pollResolution, POLL_INTERVAL_MS * 2)');
+	});
 });
