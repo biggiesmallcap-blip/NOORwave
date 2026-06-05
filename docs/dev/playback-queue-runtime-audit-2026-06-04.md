@@ -4,10 +4,12 @@ Status: final automated audit report. Scratch backend live TIDAL album
 playback start/stop is now verified. A fresh portable release Tauri-owned
 sidecar launch from a stopped state is now verified with scratch data. A fresh
 installed-mode Tauri-owned sidecar launch from a stopped state is now verified
-with installed data. Long provider-session behavior and manual Tauri WebView
-artwork screenshots remain not verified in this agent run. A local Chrome and
-Vite visible smoke for `/remote` and the remote album tile artwork fallback
-passed after the automated report was finalized.
+with installed data. Installed Tauri WebView route screenshots for app shell,
+search, remote, and artwork-heavy routes are now verified through WebView2 CDP.
+Long provider-session behavior and audio finish or failure transitions remain
+not verified in this agent run. A local Chrome and Vite visible smoke for
+`/remote` and the remote album tile artwork fallback passed after the automated
+report was finalized.
 
 This report closes the automated audit work for queue advancement, runtime
 handoff, playlist injection, stale frontend playback intents, artwork fallback
@@ -443,8 +445,36 @@ Fresh installed-mode Tauri-owned sidecar startup smoke passed on 2026-06-05:
   smoke, verified no NOOR processes remained, and verified port `3334` had no
   `LISTENING` socket.
 - This verifies installed-mode app-owned sidecar startup from a stopped state.
-  It does not verify visual WebView route rendering, the tray quit path, or
-  audio finish and failure transitions.
+  This startup-only smoke did not verify visual WebView route rendering, the
+  tray quit path, or audio finish and failure transitions.
+
+Installed Tauri WebView route screenshot pass completed on 2026-06-05:
+
+- Started the installed app with WebView2 remote debugging enabled, confirmed
+  the app-owned sidecar reached `/api/ping`, and attached to the actual Tauri
+  WebView target at the NOOR page. No standalone browser was launched for this
+  route pass.
+- Navigated the Tauri WebView target directly through app routes without
+  clicking playback controls.
+- Covered app shell `/`, `/search`, `/genres`, `/moods`, `/playlists`,
+  `/settings`, `/remote`, `/remote/library`, `/remote/artists/4504`, and
+  `/remote/albums/2602`.
+- Captured full-page screenshots for every route through the WebView target.
+  Screenshot byte counts were non-zero for all 10 routes, ranging from 78,976
+  bytes on `/remote` to 3,093,302 bytes on `/genres`.
+- Confirmed route-specific evidence: `NOOR` on app shell, `Search`,
+  `Genre Galaxy`, `Moods & Activities`, `Playlists`, `Settings`, remote
+  `Library`, one `.remote-artist-hero` with 51 `.remote-album-tile` entries,
+  and one `.remote-album-hero` with 5 `.remote-track-row` entries.
+- Confirmed 0 page errors, 0 non-TIDAL request failures, 0 visible load-error
+  states, 0 stale loading states, and 0 broken image elements across all
+  routes. Artwork-heavy routes included TIDAL-backed images with no broken
+  image elements.
+- Confirmed playback was still stopped after the route pass
+  (`is_playing=false`, no current track, 0 queue rows), then paused as a guard,
+  posted `/api/shutdown`, stopped the installed app process launched for the
+  smoke, and verified no NOOR processes, no port `3334` listener, and no
+  WebView debug port listener remained.
 
 Native shell and audio safety preflight passed without launching a second app
 instance:
@@ -495,7 +525,8 @@ smoke:
   native pass because route title evidence did not change reliably.
 - Repeated native route screenshot capture was not counted as visual evidence
   because desktop z-order and `PrintWindow` sizing were inconsistent after
-  repeated show/hide operations.
+  repeated show/hide operations. The later WebView2-CDP route screenshot pass
+  above supersedes this partial visual evidence for the listed routes.
 
 Installed backend recovery was performed after the sidecar was found missing:
 
@@ -613,7 +644,6 @@ Non-blocking warnings observed:
   verified above, but it does not cover finish or failure transitions.
 - Long real TIDAL provider sessions with ephemeral mixes, token refresh, and
   provider-side 403/429 behavior.
-- Manual Tauri WebView screenshot pass across artwork-heavy routes.
 
 These are manual or environment-dependent checks. They are not hidden in
 `FOLLOWUPS.md` because they are current release-readiness checks, not future
@@ -660,6 +690,12 @@ Acceptance checks:
   stopped state. The installed app owned the spawned server process, the
   backend answered `/api/ping`, protected playback state was stopped with an
   empty queue, and cleanup left no NOOR process or port `3334` listener.
+- Done: installed Tauri WebView route screenshot pass covered app shell,
+  search, Genre Galaxy, Moods, Playlists, Settings, remote shell, remote
+  library, remote artist detail, and remote album detail through the actual
+  WebView target. All 10 routes produced non-zero screenshots, route-specific
+  content, 0 page errors, 0 non-TIDAL request failures, 0 visible load-error or
+  stale loading states, and 0 broken image elements.
 - Done: non-invasive native shell and audio preflight confirmed the installed
   app/server were already running, the then-current server was actively playing,
   and a second launch could shut down the active sidecar.
@@ -684,11 +720,8 @@ Acceptance checks:
 - Done: focused no-audio backend overlay regression coverage passed for the
   loaded TIDAL album continuation queue, proving the visible queue keeps the
   44 pending album rows in order with artwork and no unrelated durable rows.
-- Partial: native WebView route navigation reached Genre Galaxy, Moods,
-  Playlists, and Settings through existing sidebar controls without visible
-  error text in accessibility samples.
 - Not verified: audio-device finish and failure transitions, long live TIDAL
-  session behavior, and manual Tauri WebView artwork route screenshot pass.
+  session behavior.
 
 Done:
 
@@ -699,14 +732,15 @@ Done:
   API-only plus live scratch TIDAL album queue and playback smoke evidence are
   recorded in this report. Fresh portable/release Tauri-owned sidecar startup
   and installed-mode Tauri-owned sidecar startup evidence are also recorded.
+  Installed Tauri WebView route screenshot evidence is recorded.
 
 Incomplete:
 
 - No known code path from the requested automated audit remains intentionally
   stubbed or partially wired.
-- Manual installed Tauri WebView, audio, and provider transition smoke remains
-  outside this automated run because it still requires visual route inspection
-  and audio/provider transitions beyond sidecar startup.
+- Manual installed audio and provider transition smoke remains outside this
+  automated run because it still requires audio finish/failure checks and
+  long-provider-session behavior beyond sidecar startup and route rendering.
 
 Follow-ups added to `FOLLOWUPS.md`: none.
 
@@ -714,9 +748,6 @@ Next checks before release:
 
 - Use `docs/dev/tauri-audio-provider-manual-smoke-2026-06-04.md` as the
   manual smoke checklist.
-- Pick a safe manual window where interrupting the installed localhost backend
-  is acceptable, then launch the installed Tauri app and capture the WebView
-  app shell plus artwork-heavy routes.
 - Run NOORwave through the Tauri-owned app path with a real TIDAL account and
   audio output.
 - Start a queue with pending rows, force an unresolved row, and confirm playback
@@ -724,6 +755,3 @@ Next checks before release:
 - Force an active stream failure and confirm the queue advances without dead
   air.
 - Force a prepared-next failure and confirm current playback stays active.
-- Open the Tauri WebView plus search, app shell, remote artist, and remote album
-  surfaces and confirm artwork placeholders and fallback-size retries behave
-  visually.
