@@ -47,4 +47,10 @@ describe('search layout contracts', () => {
 		expect(source).not.toMatch(/<img[^\n]*(artwork_url|photo_url|picture_url|image_url|cover_url|thumbnail_url)/);
 		expect(source).not.toContain('background-image:url');
 	});
+
+	test('search page normalizes TIDAL search tracks before radio actions', () => {
+		expect(source).toContain('const toPlayable = tidalSearchTrackToPlayable;');
+		expect(source).toContain('void startTidalSongRadio(toPlayable(track))');
+		expect(source).not.toContain('void startTidalSongRadio(track)');
+	});
 });

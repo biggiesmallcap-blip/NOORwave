@@ -1567,7 +1567,7 @@
                   >＋</button>
                   <button
                     class="row-btn"
-                    onclick={(e) => { e.stopPropagation(); void startTidalSongRadio(track) }}
+                    onclick={(e) => { e.stopPropagation(); void startTidalSongRadio(toPlayable(track)) }}
                     title="Song radio"
                     aria-label="Start radio from {track.title}"
                   >◎</button>
@@ -1664,7 +1664,7 @@
                 >＋</button>
                 <button
                   class="row-btn"
-                  onclick={(e) => { e.stopPropagation(); void startTidalSongRadio(track) }}
+                  onclick={(e) => { e.stopPropagation(); void startTidalSongRadio(toPlayable(track)) }}
                   title="Song radio - mix of related tracks from your library and Tidal"
                   aria-label="Start radio from {track.title}"
                 >◎</button>
