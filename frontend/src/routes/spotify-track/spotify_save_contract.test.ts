@@ -29,6 +29,22 @@ describe('Spotify save to library contract', () => {
 		expect(trackPage).not.toContain('$:');
 	});
 
+	test('guards the Spotify track page against stale route loads and polling', () => {
+		expect(trackPage).toContain('let loadSeq = 0;');
+		expect(trackPage).toContain('function schedulePoll(seq: number, delayMs = POLL_INTERVAL_MS)');
+		expect(trackPage).toContain('setTimeout(() => void pollResolution(seq), delayMs)');
+		expect(trackPage).toContain('async function pollResolution(seq: number)');
+		expect(trackPage).toContain('if (seq !== loadSeq) {');
+		expect(trackPage).toContain('if (seq !== loadSeq) return;');
+		expect(trackPage).toContain('const seq = ++loadSeq;');
+		expect(trackPage).toContain('const nextDetail = await api.getSpotifyTrack(id, controller.signal);');
+		expect(trackPage).toContain('const rel = await api.getSpotifyTrackRelated(id, controller.signal).catch(() => null);');
+		expect(trackPage).toContain('if (seq === loadSeq) loading = false;');
+		expect(trackPage).toContain('loadSeq += 1;');
+		expect(trackPage).not.toContain('setTimeout(pollResolution, POLL_INTERVAL_MS)');
+		expect(trackPage).not.toContain('setTimeout(pollResolution, POLL_INTERVAL_MS * 2)');
+	});
+
 	test('wires the Spotify album page to save resolved album tracks', () => {
 		expect(albumPage).toContain('let saving = $state(false);');
 		expect(albumPage).toContain('api.saveSpotifyAlbum(id)');

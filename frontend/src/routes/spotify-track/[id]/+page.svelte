@@ -32,6 +32,7 @@
   let saveErr = $state<string | null>(null);
   let requestedSpotifyId = $state('');
   let lazyArt = $state<Record<string, string>>({});
+  let loadSeq = 0;
 
   const canSave = $derived(
     detail !== null &&
@@ -80,13 +81,22 @@
     };
   }
 
-  async function pollResolution() {
+  function schedulePoll(seq: number, delayMs = POLL_INTERVAL_MS) {
+    pollTimer = setTimeout(() => void pollResolution(seq), delayMs);
+  }
+
+  async function pollResolution(seq: number) {
+    if (seq !== loadSeq) {
+      clearPoll();
+      return;
+    }
     if (!detail || pendingIds.length === 0 || Date.now() > pollDeadline) {
       clearPoll();
       return;
     }
     try {
       const { entries } = await api.getResolveTidalStatus(pendingIds);
+      if (seq !== loadSeq) return;
       const byId = new Map(entries.map((e) => [e.spotifyId, e.tidal]));
       const stillPending: string[] = [];
       const headerSpotifyId = detail.spotifyId;
@@ -112,17 +122,19 @@
       }
       pendingIds = stillPending;
       if (pendingIds.length > 0) {
-        pollTimer = setTimeout(pollResolution, POLL_INTERVAL_MS);
+        schedulePoll(seq);
       } else {
         clearPoll();
       }
     } catch (e) {
+      if (seq !== loadSeq) return;
       console.warn('resolve status poll failed', e);
-      pollTimer = setTimeout(pollResolution, POLL_INTERVAL_MS * 2);
+      schedulePoll(seq, POLL_INTERVAL_MS * 2);
     }
   }
 
   async function load(id: string) {
+    const seq = ++loadSeq;
     if (!id.trim()) {
       error = 'Missing Spotify track ID';
       loading = false;
@@ -139,8 +151,11 @@
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
     try {
-      detail = await api.getSpotifyTrack(id, controller.signal);
+      const nextDetail = await api.getSpotifyTrack(id, controller.signal);
+      if (seq !== loadSeq) return;
+      detail = nextDetail;
       const rel = await api.getSpotifyTrackRelated(id, controller.signal).catch(() => null);
+      if (seq !== loadSeq) return;
       if (rel) {
         related = rel;
         pendingIds = rel.pendingSpotifyIds ?? [];
@@ -150,22 +165,24 @@
       }
       pollDeadline = Date.now() + POLL_DEADLINE_MS;
       if (pendingIds.length > 0) {
-        pollTimer = setTimeout(pollResolution, POLL_INTERVAL_MS);
+        schedulePoll(seq);
       }
     } catch (e) {
+      if (seq !== loadSeq) return;
       error =
         (e as Error).name === 'AbortError'
           ? 'Timed out loading track metadata'
           : ((e as Error).message ?? 'Failed to load track');
     } finally {
       clearTimeout(timeout);
-      loading = false;
+      if (seq === loadSeq) loading = false;
     }
   }
 
   $effect(() => {
     const id = spotifyId.trim();
     if (!id) {
+      loadSeq += 1;
       clearPoll(); requestedSpotifyId = ''; detail = null; pendingIds = []; saveResult = null; saveErr = null; loading = false;
       error = 'Missing Spotify track ID';
       return;
@@ -177,7 +194,7 @@
     }
   });
 
-  onDestroy(clearPoll);
+  onDestroy(() => { loadSeq += 1; clearPoll(); });
 
   function statusLabel(t: SpotifyTidalState): string {
     if ($tidalStatus !== 'connected') return 'Connect TIDAL to play this track';
