@@ -75,10 +75,14 @@
 	}
 
 	function onTrackContext(event: MouseEvent, t: AnalyticsTopTrack) {
+		event.preventDefault();
+		event.stopPropagation();
 		openContextMenu(event, buildTrackMenu(trackMenuTrack(t)));
 	}
 
 	function onArtistContext(event: MouseEvent, a: AnalyticsTopArtist) {
+		event.preventDefault();
+		event.stopPropagation();
 		openContextMenu(
 			event,
 			buildArtistMenu({ id: a.artist_id, name: a.artist_name, in_library: true }),
