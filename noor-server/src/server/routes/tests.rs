@@ -248,6 +248,22 @@ fn stream_error_mapping_marks_session_expired_as_unauthorized() {
 }
 
 #[test]
+fn stream_error_mapping_marks_session_refresh_failures_as_unauthorized() {
+    let (status, Json(body)) = tidal_playback_error_response(
+        42,
+        TidalPlaybackError::StreamResolve(tidal_stream::StreamResolveError::SessionRefreshFailed {
+            message: "refresh rejected".to_string(),
+        }),
+        "fallback",
+    );
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["status"], "session_refresh_failed");
+    assert_eq!(body["track_id"], 42);
+    assert_eq!(body["details"], "refresh rejected");
+}
+
+#[test]
 fn stream_error_mapping_marks_manifest_decode_failures_as_bad_gateway() {
     let (status, Json(body)) = tidal_playback_error_response(
         7,
@@ -324,6 +340,27 @@ fn stream_error_mapping_marks_rejected_stream_requests_as_forbidden() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["status"], "stream_rejected");
     assert_eq!(body["track_id"], 11);
+}
+
+#[test]
+fn stream_error_mapping_preserves_upstream_http_status_details() {
+    let (status, Json(body)) = tidal_playback_error_response(
+        12,
+        TidalPlaybackError::StreamResolve(tidal_stream::StreamResolveError::UpstreamHttp {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            body: "rate limit".to_string(),
+        }),
+        "fallback",
+    );
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["status"], "stream_upstream_http");
+    assert_eq!(body["track_id"], 12);
+    assert_eq!(body["details"], "rate limit");
+    assert_eq!(
+        body["message"],
+        "TIDAL returned 429 Too Many Requests while starting playback."
+    );
 }
 
 #[test]

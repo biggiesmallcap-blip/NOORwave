@@ -8,12 +8,13 @@ with installed data. Installed Tauri WebView route screenshots for app shell,
 search, remote, and artwork-heavy routes are now verified through WebView2 CDP.
 Live TIDAL seek-to-finish state advancement is now verified through the running
 installed app. A bounded TIDAL provider continuity smoke during route
-navigation is now verified. Long provider refresh or provider-error behavior,
-human-audible local-track finish confirmation, and live audible audio failure
-transitions remain not verified in this agent run. Focused no-audio server
-coverage for active and prepared-next failure transitions has been refreshed.
-A local Chrome and Vite visible smoke for `/remote` and the remote album tile
-artwork fallback passed after the automated report was finalized.
+navigation is now verified. Long live provider refresh or provider-error
+behavior, human-audible local-track finish confirmation, and live audible audio
+failure transitions remain not verified in this agent run. Focused no-audio
+server coverage for active and prepared-next failure transitions, plus TIDAL
+stream error response mapping, has been refreshed. A local Chrome and Vite
+visible smoke for `/remote` and the remote album tile artwork fallback passed
+after the automated report was finalized.
 
 This report closes the automated audit work for queue advancement, runtime
 handoff, playlist injection, stale frontend playback intents, artwork fallback
@@ -560,6 +561,18 @@ No-audio failure-transition verification passed on 2026-06-05:
 - These tests do not start audio, prove human-audible output, or cover provider
   refresh and provider-side error responses.
 
+No-audio TIDAL stream error mapping verification passed on 2026-06-05:
+
+- Added focused route-unit coverage for TIDAL playback stream session-refresh
+  failures and upstream HTTP error propagation.
+- `cargo test -p noor-server stream_error_mapping` passed with 5 tests. This
+  now covers session-expired responses, session-refresh failures, manifest
+  decode failures, stream rejections, and upstream HTTP status detail
+  preservation for playback stream errors.
+- `cargo fmt --all -- --check` passed after the test edit.
+- This does not exercise a real provider refresh, a long-running provider
+  session, or live provider-side 401, 403, or 429 behavior.
+
 Native shell and audio safety preflight passed without launching a second app
 instance:
 
@@ -734,7 +747,8 @@ Non-blocking warnings observed:
   slice.
 - Long real TIDAL provider sessions with ephemeral mixes, token refresh, and
   provider-side 401/403/429 behavior. The bounded 180 second provider
-  continuity smoke above did not reach refresh or provider-error conditions.
+  continuity smoke above did not reach refresh or provider-error conditions,
+  and the no-audio stream error mapping tests do not call the live provider.
 
 These are manual or environment-dependent checks. They are not hidden in
 `FOLLOWUPS.md` because they are current release-readiness checks, not future
@@ -825,6 +839,9 @@ Acceptance checks:
 - Done: no-audio server failure-transition tests passed for active runtime
   track error advancement and prepared-next failure keeping current playback
   active.
+- Done: no-audio TIDAL stream error mapping tests passed for session-expired,
+  session-refresh-failed, manifest-decode-failed, stream-rejected, and upstream
+  HTTP status propagation cases.
 - Not verified: low-volume local finish-advancement smoke was attempted, but
   the scratch copied library had 0 eligible existing local files, so no local
   playback path could be exercised.
