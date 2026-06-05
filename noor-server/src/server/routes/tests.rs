@@ -476,6 +476,25 @@ fn tidal_video_mix_id_normalization_rejects_url_control_characters() {
 }
 
 #[test]
+fn tidal_video_search_query_normalization_short_circuits_blank_input() {
+    assert_eq!(normalize_tidal_video_search_query(""), None);
+    assert_eq!(normalize_tidal_video_search_query("   "), None);
+    assert_eq!(
+        normalize_tidal_video_search_query("  live session  "),
+        Some("live session")
+    );
+}
+
+#[test]
+fn tidal_video_search_limit_is_bounded() {
+    assert_eq!(normalize_tidal_video_search_limit(None), 20);
+    assert_eq!(normalize_tidal_video_search_limit(Some(-1)), 1);
+    assert_eq!(normalize_tidal_video_search_limit(Some(0)), 1);
+    assert_eq!(normalize_tidal_video_search_limit(Some(15)), 15);
+    assert_eq!(normalize_tidal_video_search_limit(Some(500)), 50);
+}
+
+#[test]
 fn tidal_playlist_search_query_normalization_short_circuits_blank_input() {
     assert_eq!(normalize_tidal_playlist_search_query(""), None);
     assert_eq!(normalize_tidal_playlist_search_query("   "), None);

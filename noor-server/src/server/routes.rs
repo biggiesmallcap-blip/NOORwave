@@ -9524,6 +9524,10 @@ async fn tidal_video_search(
     State(state): State<SharedState>,
     Query(params): Query<TidalSearchParams>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(query) = normalize_tidal_video_search_query(&params.q) else {
+        return Ok(Json(json!({ "videos": [] })));
+    };
+
     let Some(tokens) = tidal_request_tokens(&state).await? else {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -9531,7 +9535,7 @@ async fn tidal_video_search(
         ));
     };
 
-    let limit = params.limit.unwrap_or(20).min(50);
+    let limit = normalize_tidal_video_search_limit(params.limit);
     let offset = params.offset.unwrap_or(0).max(0);
     let (http_client, tidal_http_client) = {
         let s = state.read().await;
@@ -9542,7 +9546,7 @@ async fn tidal_video_search(
         tokens.access_token.clone(),
         tokens.country_code.clone(),
     );
-    let videos = match client.search_videos(&params.q, limit, offset).await {
+    let videos = match client.search_videos(query, limit, offset).await {
         Ok(videos) => videos,
         Err(e) if error_looks_like_auth(&e) => {
             let refreshed = recover_tidal_session(&state, &http_client, &tokens)
@@ -9559,7 +9563,7 @@ async fn tidal_video_search(
                 refreshed.country_code.clone(),
             );
             retry_client
-                .search_videos(&params.q, limit, offset)
+                .search_videos(query, limit, offset)
                 .await
                 .map_err(|e2| {
                     (
@@ -9579,6 +9583,24 @@ async fn tidal_video_search(
     Ok(Json(json!({
         "videos": videos.into_iter().map(tidal_video_to_resp).collect::<Vec<_>>()
     })))
+}
+
+const TIDAL_VIDEO_SEARCH_DEFAULT_LIMIT: i32 = 20;
+const TIDAL_VIDEO_SEARCH_MAX_LIMIT: i32 = 50;
+
+fn normalize_tidal_video_search_query(query: &str) -> Option<&str> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn normalize_tidal_video_search_limit(limit: Option<i32>) -> i32 {
+    limit
+        .unwrap_or(TIDAL_VIDEO_SEARCH_DEFAULT_LIMIT)
+        .clamp(1, TIDAL_VIDEO_SEARCH_MAX_LIMIT)
 }
 
 fn tidal_track_artwork_url(t: &TidalTrack, size: i32) -> Option<String> {
