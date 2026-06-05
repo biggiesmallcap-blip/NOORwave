@@ -102,6 +102,7 @@
 	let autoplayNext = $state(loadAutoplayPreference());
 	let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 	let searchAbort: AbortController | null = null;
+	let loadMoreSeq = 0;
 	let streamRequestSeq = 0;
 	let prefetchRequestSeq = 0;
 	let prefetchedStream = $state<PrefetchedVideoStream | null>(null);
@@ -175,6 +176,7 @@
 		error = null;
 		mixError = null;
 		prefetchedStream = null;
+		loadMoreSeq += 1;
 		streamRequestSeq += 1;
 		prefetchRequestSeq += 1;
 		clearSessionSnapshot();
@@ -192,6 +194,8 @@
 		const q = nextQuery.trim();
 		searchAbort?.abort();
 		searchAbort = null;
+		loadMoreSeq += 1;
+		loadingMore = false;
 		if (!q) {
 			videos = [];
 			offset = 0;
@@ -229,14 +233,24 @@
 
 	function onInput() {
 		if (debounceTimer) clearTimeout(debounceTimer);
+		loadMoreSeq += 1;
+		loadingMore = false;
 		debounceTimer = setTimeout(() => void runSearch(query), 250);
 	}
 
 	async function loadMore(): Promise<number> {
 		if (loadingMore || loadingSearch || !hasMore || !lastQuery) return 0;
+		const seq = ++loadMoreSeq;
+		const pageQuery = lastQuery;
+		const pageOffset = offset;
+		const isCurrentLoadMore = () =>
+			seq === loadMoreSeq &&
+			lastQuery === pageQuery &&
+			offset === pageOffset;
 		loadingMore = true;
 		try {
-			const result = await api.searchTidalVideos(lastQuery, PAGE_SIZE, offset);
+			const result = await api.searchTidalVideos(pageQuery, PAGE_SIZE, pageOffset);
+			if (!isCurrentLoadMore()) return 0;
 			const seen = new Set(videos.map((video) => video.tidal_id));
 			const fresh = result.videos.filter((video) => !seen.has(video.tidal_id));
 			videos = [...videos, ...fresh];
@@ -244,11 +258,12 @@
 			hasMore = result.videos.length >= PAGE_SIZE;
 			return fresh.length;
 		} catch (err) {
+			if (!isCurrentLoadMore()) return 0;
 			hasMore = false;
 			showToast(normalizeError(err, 'Could not load more videos.'), 'error', 2800);
 			return 0;
 		} finally {
-			loadingMore = false;
+			if (seq === loadMoreSeq) loadingMore = false;
 		}
 	}
 
@@ -320,6 +335,8 @@
 	}
 
 	async function loadMix(mixId: string, autoPlayFirst = false) {
+		loadMoreSeq += 1;
+		loadingMore = false;
 		loadingMix = true;
 		mixError = null;
 		activeMixId = mixId;
