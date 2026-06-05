@@ -134,6 +134,23 @@ describe('ephemeral TIDAL favorite import', () => {
 		expect(get(currentTrack)?.album_id).toBe(66);
 	});
 
+	test('uses the current favorite state when unliking an ephemeral track', async () => {
+		currentTrack.set({ ...ephemeralTrack(), is_favorite: true });
+
+		await toggleTrackFavorite(-222, true);
+
+		expect(apiMock.importTidalTrackForRadio).toHaveBeenCalledWith(
+			expect.objectContaining({
+				tidal_id: 222,
+				artist_tidal_id: 333,
+				album_tidal_id: 444,
+			})
+		);
+		expect(apiMock.setTrackFavorite).toHaveBeenCalledWith(98, false);
+		expect(get(currentTrack)?.id).toBe(98);
+		expect(get(currentTrack)?.is_favorite).toBe(false);
+	});
+
 	test('keeps the liked state when playback hydrates the saved track', async () => {
 		await playTidalTrackNow({
 			tidal_id: 222,

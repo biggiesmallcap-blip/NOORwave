@@ -1007,6 +1007,7 @@ export async function toggleTrackFavorite(trackId: number, currentIsFavorite?: b
 	if (trackId < 0) {
 		const ephemeral = get(currentTrack);
 		if (!ephemeral || !ephemeral.tidal_id) return;
+		const wasFavorite = currentIsFavorite ?? ephemeral.is_favorite ?? false;
 		try {
 			const { local_id, artist_id, album_id } = await api.importTidalTrackForRadio({
 				tidal_id: ephemeral.tidal_id,
@@ -1024,7 +1025,7 @@ export async function toggleTrackFavorite(trackId: number, currentIsFavorite?: b
 					item.track.id === trackId ? { ...item, track: { ...item.track, id: local_id, artist_id, album_id } } : item
 				)
 			);
-			return toggleTrackFavorite(local_id, false);
+			return toggleTrackFavorite(local_id, wasFavorite);
 		} catch (error) {
 			setError('like that track', error);
 			throw error;
