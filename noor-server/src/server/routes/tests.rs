@@ -1820,6 +1820,64 @@ async fn clear_queue_preserves_only_current_queue_item_for_duplicate_track() {
 }
 
 #[tokio::test]
+async fn clear_queue_repairs_mismatched_anchor_before_preserving_current() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let (current_qid, mismatched_qid): (i64, i64) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            let current_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 1, 'user')",
+                [],
+            )?;
+            let mismatched_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+                     WHERE id = 1",
+                rusqlite::params![mismatched_qid],
+            )?;
+            Ok((current_qid, mismatched_qid))
+        })
+        .unwrap();
+
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/playback/queue/clear")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    let queue = body["queue"].as_array().expect("queue array");
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0]["id"], current_qid);
+    assert_ne!(queue[0]["id"], mismatched_qid);
+    assert_eq!(queue[0]["track"]["id"], 1);
+    assert_eq!(body["playback_state"]["current_queue_item_id"], current_qid);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn clear_queue_falls_back_to_track_id_when_current_queue_item_is_stale() {
     let (db, db_path) = fresh_migrated_db();
     seed_basic_tracks(&db);
@@ -2188,6 +2246,66 @@ async fn remove_current_queue_item_repairs_stale_anchor_and_returns_playback_sta
 }
 
 #[tokio::test]
+async fn remove_current_queue_item_repairs_mismatched_anchor_and_returns_playback_state() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let (current_qid, next_qid) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            let current_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 1, 'user')",
+                [],
+            )?;
+            let next_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 0
+                     WHERE id = 1",
+                rusqlite::params![next_qid],
+            )?;
+            Ok((current_qid, next_qid))
+        })
+        .unwrap();
+
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/playback/queue/remove")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({ "queue_item_id": current_qid })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let queue = body["queue"].as_array().expect("queue array");
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0]["id"], next_qid);
+    assert_eq!(body["playback_state"]["current_track"]["id"], 2);
+    assert_eq!(body["playback_state"]["current_queue_item_id"], next_qid);
+    assert_eq!(body["playback_state"]["is_playing"], false);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn move_queue_item_repairs_stale_current_anchor_and_returns_playback_state() {
     let (db, db_path) = fresh_migrated_db();
     seed_basic_tracks(&db);
@@ -2241,6 +2359,77 @@ async fn move_queue_item_repairs_stale_current_anchor_and_returns_playback_state
     let queue = body["queue"].as_array().expect("queue array");
     assert_eq!(queue.len(), 2);
     assert_eq!(queue[0]["id"], next_qid);
+    assert_eq!(queue[1]["id"], current_qid);
+    assert_eq!(body["playback_state"]["current_track"]["id"], 1);
+    assert_eq!(body["playback_state"]["current_queue_item_id"], current_qid);
+
+    let current_queue_item_id: Option<i64> = db
+        .with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(current_queue_item_id, Some(current_qid));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn move_queue_item_repairs_mismatched_current_anchor_and_returns_playback_state() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let (current_qid, mismatched_qid) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            let current_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 1, 'user')",
+                [],
+            )?;
+            let mismatched_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+                     WHERE id = 1",
+                rusqlite::params![mismatched_qid],
+            )?;
+            Ok((current_qid, mismatched_qid))
+        })
+        .unwrap();
+
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/playback/queue/move")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({ "item_id": current_qid, "new_pos": 1 })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let queue = body["queue"].as_array().expect("queue array");
+    assert_eq!(queue.len(), 2);
+    assert_eq!(queue[0]["id"], mismatched_qid);
     assert_eq!(queue[1]["id"], current_qid);
     assert_eq!(body["playback_state"]["current_track"]["id"], 1);
     assert_eq!(body["playback_state"]["current_queue_item_id"], current_qid);
@@ -4478,6 +4667,77 @@ async fn queue_play_next_repairs_stale_anchor_before_insert() {
     assert_eq!(rows[1].2.as_deref(), Some("Repaired Next"));
     assert_eq!(rows[2], (duplicate_qid, Some(1), None));
     assert_eq!(rows[3], (tail_qid, Some(2), None));
+    assert_eq!(current_queue_item_id, Some(repaired_qid));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn queue_play_next_repairs_mismatched_anchor_before_insert() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let (repaired_qid, mismatched_qid): (i64, i64) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            let repaired_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 1, 'user')",
+                [],
+            )?;
+            let mismatched_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+                     WHERE id = 1",
+                rusqlite::params![mismatched_qid],
+            )?;
+            Ok((repaired_qid, mismatched_qid))
+        })
+        .unwrap();
+
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/queue/play_next")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"kind":"tidal","tidal_id":780,"artist":"External Artist","title":"Repaired Mismatch Next"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (rows, current_queue_item_id): (Vec<(i64, Option<i64>, Option<String>)>, Option<i64>) = db
+        .with_conn(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT id, track_id, pending_title FROM queue ORDER BY position ASC")?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let current_queue_item_id = conn.query_row(
+                "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok((rows, current_queue_item_id))
+        })
+        .unwrap();
+
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0], (repaired_qid, Some(1), None));
+    assert_eq!(rows[1].1, None);
+    assert_eq!(rows[1].2.as_deref(), Some("Repaired Mismatch Next"));
+    assert_eq!(rows[2], (mismatched_qid, Some(2), None));
     assert_eq!(current_queue_item_id, Some(repaired_qid));
 
     let _ = std::fs::remove_file(db_path);

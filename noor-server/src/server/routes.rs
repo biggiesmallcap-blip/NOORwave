@@ -8025,7 +8025,9 @@ fn current_queue_position(conn: &rusqlite::Connection) -> anyhow::Result<Option<
     )?;
 
     if let Some(queue_item_id) = current_queue_item_id {
-        if let Some(position) = queue_item_position(conn, queue_item_id)? {
+        if queue_item_matches_current_track(conn, queue_item_id, current_track_id)?
+            && let Some(position) = queue_item_position(conn, queue_item_id)?
+        {
             return Ok(Some(position));
         }
     }
@@ -8087,17 +8089,6 @@ fn first_queue_item_id_for_track(
     Ok(first_queue_item_for_track(conn, track_id)?.map(|(id, _)| id))
 }
 
-fn queue_item_exists(conn: &rusqlite::Connection, queue_item_id: i64) -> anyhow::Result<bool> {
-    Ok(conn
-        .query_row(
-            "SELECT 1 FROM queue WHERE id = ?1",
-            params![queue_item_id],
-            |_| Ok(true),
-        )
-        .optional()?
-        .unwrap_or(false))
-}
-
 fn preserve_only_queue_item(conn: &rusqlite::Connection, queue_item_id: i64) -> anyhow::Result<()> {
     conn.execute("DELETE FROM queue WHERE id != ?1", params![queue_item_id])?;
     conn.execute(
@@ -8136,6 +8127,16 @@ fn queue_item_track_id(
         .optional()?)
 }
 
+fn queue_item_matches_current_track(
+    conn: &rusqlite::Connection,
+    queue_item_id: i64,
+    current_track_id: Option<i64>,
+) -> anyhow::Result<bool> {
+    Ok(queue_item_track_id(conn, queue_item_id)?
+        .map(|track_id| track_id == current_track_id)
+        .unwrap_or(false))
+}
+
 fn repair_moved_queue_current_anchor(
     conn: &rusqlite::Connection,
     moved_queue_item_id: i64,
@@ -8146,7 +8147,7 @@ fn repair_moved_queue_current_anchor(
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     if let Some(queue_item_id) = current_queue_item_id
-        && queue_item_exists(conn, queue_item_id)?
+        && queue_item_matches_current_track(conn, queue_item_id, current_track_id)?
     {
         return Ok(false);
     }
@@ -8593,7 +8594,7 @@ async fn clear_queue_route(State(state): State<SharedState>) -> Result<Json<Valu
                     )?;
                 match (current_queue_item_id, current_track_id) {
                     (Some(qid), track_id) => {
-                        if queue_item_exists(conn, qid)? {
+                        if queue_item_matches_current_track(conn, qid, track_id)? {
                             preserve_only_queue_item(conn, qid)?;
                         } else if let Some(track_id) = track_id {
                             preserve_current_track_queue_row(conn, track_id)?;

@@ -1410,15 +1410,17 @@ fn current_shuffle_anchor_queue_item_id(conn: &Connection) -> Result<Option<i64>
     )?;
 
     if let Some(queue_item_id) = current_queue_item_id {
-        let exists = conn
+        let queue_track_id: Option<Option<i64>> = conn
             .query_row(
-                "SELECT 1 FROM queue WHERE id = ?1",
+                "SELECT track_id FROM queue WHERE id = ?1",
                 params![queue_item_id],
-                |_| Ok(true),
+                |row| row.get(0),
             )
-            .optional()?
-            .unwrap_or(false);
-        if exists {
+            .optional()?;
+        if queue_track_id
+            .map(|track_id| track_id == current_track_id)
+            .unwrap_or(false)
+        {
             return Ok(Some(queue_item_id));
         }
     }
@@ -1517,7 +1519,11 @@ pub fn remove_queue_item_and_reconcile(
             |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0)),
         )?;
     let resolved_current_queue_item_id = match current_queue_item_id {
-        Some(queue_item_id) if rows.iter().any(|(id, _, _)| *id == queue_item_id) => {
+        Some(queue_item_id)
+            if rows
+                .iter()
+                .any(|(id, track_id, _)| *id == queue_item_id && *track_id == current_track_id) =>
+        {
             Some(queue_item_id)
         }
         _ => current_track_id.and_then(|track_id| {
@@ -1855,10 +1861,8 @@ pub(super) fn playback_anchor_index(
     if let Some(qid) = current_queue_item_id
         && let Some(idx) = queue_items.iter().position(|item| item.id == qid)
     {
-        if current_track_id
-            .map(|track_id| queue_items[idx].track.id == track_id)
-            .unwrap_or(true)
-        {
+        let queue_track_id = (queue_items[idx].track.id != 0).then_some(queue_items[idx].track.id);
+        if queue_track_id == current_track_id {
             return Some(idx);
         }
     }
@@ -4299,6 +4303,38 @@ mod tests {
     }
 
     #[test]
+    fn remove_current_queue_item_repairs_mismatched_anchor_before_reconcile() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 3]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+             WHERE id = 1",
+            params![queue_items[1].id],
+        )
+        .unwrap();
+
+        let outcome = remove_queue_item_and_reconcile(&conn, queue_items[0].id).unwrap();
+
+        assert!(outcome.removed_current);
+        assert_eq!(
+            outcome
+                .snapshot
+                .state
+                .current_track
+                .as_ref()
+                .map(|track| track.id),
+            Some(2)
+        );
+        assert_eq!(
+            outcome.snapshot.state.current_queue_item_id,
+            Some(queue_items[1].id)
+        );
+        assert!(outcome.snapshot.state.is_playing);
+    }
+
+    #[test]
     fn remove_current_queue_item_repairs_missing_anchor_before_reconcile() {
         let conn = conn();
         let tracks = load_tracks(&conn, &[1, 2]);
@@ -4476,6 +4512,49 @@ mod tests {
         );
         assert_eq!(debug.locked_count, 2);
         assert_eq!(debug.candidate_count, 2);
+        assert_eq!(
+            update
+                .snapshot
+                .queue
+                .iter()
+                .position(|item| item.id == current_qid),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn setting_shuffle_repairs_mismatched_current_queue_anchor() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 3, 4]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        let mismatched_qid = queue_items[0].id;
+        let current_qid = queue_items[1].id;
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 2,
+                 current_queue_item_id = ?1,
+                 is_playing = 1
+             WHERE id = 1",
+            params![mismatched_qid],
+        )
+        .unwrap();
+
+        let update = set_shuffle_mode(&conn, ShuffleMode::True).unwrap();
+        let debug = update.debug.expect("shuffle debug");
+        let stored_current_qid: Option<i64> = conn
+            .query_row(
+                "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(stored_current_qid, Some(current_qid));
+        assert_eq!(
+            update.snapshot.state.current_queue_item_id,
+            Some(current_qid)
+        );
+        assert_eq!(debug.locked_count, 2);
         assert_eq!(
             update
                 .snapshot
