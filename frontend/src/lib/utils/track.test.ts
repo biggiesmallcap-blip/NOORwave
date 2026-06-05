@@ -31,6 +31,22 @@ describe('trackToTidalPlayable', () => {
 	test('keeps normal positive library tracks on the library path', () => {
 		expect(trackToTidalPlayable({ ...baseTrack, source: 'tidal_stream' })).toBeNull();
 	});
+
+	test('keeps enriched TIDAL ephemeral tracks on the TIDAL path', () => {
+		expect(trackToTidalPlayable(baseTrack)).toEqual({
+			tidal_id: 777,
+			title: 'Overlay Track',
+			artist_name: 'Overlay Artist',
+			album_title: 'Overlay Album',
+			artwork_url: null,
+			duration_ms: 180000,
+			artist_tidal_id: 1001,
+			album_tidal_id: 2002,
+			local_id: 42,
+			is_in_library: true,
+			is_favorite: false,
+		});
+	});
 });
 
 describe('queueItemToTidalPlayable', () => {

@@ -4,17 +4,19 @@ import type { QueueItem, Track, TidalHomeItem, TidalPlayable, TidalSearchTrack }
  * Convert an ephemeral `Track` (a now-playing or queue row) into a
  * `TidalPlayable` for `buildTidalTrackMenu` / `startTidalSongRadio`.
  *
- * Returns `null` for tracks that are NOT ephemeral Tidal entries
- * (real library rows have positive ids; tracks without a tidal_id
- * can't be sent to the Tidal-aware path). Callers fall back to
- * `buildTrackMenu` when this returns null.
+ * Returns `null` for tracks that are NOT ephemeral Tidal entries.
+ * Real `tidal_stream` library rows stay on the library path; enriched
+ * `tidal_ephemeral` rows keep the Tidal path even after they gain a local id.
+ * Callers fall back to `buildTrackMenu` when this returns null.
  *
  * Detection: `play_tidal_ephemeral` on the backend constructs a
- * synthetic `Track { id: -tidal_track_id, ... }`. That negative id
- * is the signal. Library tracks always have positive ids.
+ * synthetic `Track { id: -tidal_track_id, source: 'tidal_ephemeral', ... }`.
+ * Store-side enrichment can later replace the id with a local id, so source is
+ * also part of the signal.
  */
 export function trackToTidalPlayable(track: Track): TidalPlayable | null {
-	if (track.id >= 0 || track.tidal_id == null) return null;
+	if (track.tidal_id == null) return null;
+	if (track.id >= 0 && track.source !== 'tidal_ephemeral') return null;
 	return trackWithTidalIdToPlayable(track);
 }
 

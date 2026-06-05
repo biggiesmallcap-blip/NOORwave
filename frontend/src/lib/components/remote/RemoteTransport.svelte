@@ -29,6 +29,7 @@
 		buildTrackMenu,
 		type MenuTrack
 	} from '$lib/player/track_menu';
+	import { trackToTidalPlayable } from '$lib/utils/track';
 
 	let {
 		track,
@@ -113,32 +114,16 @@
 		void toggleTrackFavorite(track.id, track.is_favorite ?? false);
 	}
 
-	// True when the currently-playing track is a TIDAL ephemeral entry - these
-	// have a synthetic negative `id`, `artist_id = -1`, and `album_id = null`,
-	// but they DO carry `artist_tidal_id` / `album_tidal_id` for navigation.
-	let isTidalEphemeral = $derived(!!track && track.id <= 0 && !!track.tidal_id);
+	let tidalTrack = $derived(track ? trackToTidalPlayable(track) : null);
 	let canFavorite = $derived(!!track && (track.id > 0 || !!track.tidal_id));
 
 	function openTrackActions() {
 		if (!track) return;
-		if (isTidalEphemeral) {
+		if (tidalTrack != null) {
 			openActionSheet({
 				title: track.title,
 				subtitle: track.artist_name,
-				items: buildTidalTrackMenu(
-					{
-						tidal_id: track.tidal_id!,
-						title: track.title,
-						artist_name: track.artist_name ?? null,
-						album_title: track.album_title ?? null,
-						artwork_url: track.artwork_url ?? null,
-						duration_ms: track.duration_ms ?? null,
-						artist_tidal_id: track.artist_tidal_id ?? null,
-						album_tidal_id: track.album_tidal_id ?? null,
-						is_favorite: track.is_favorite ?? false
-					},
-					{ remoteRoutes: true }
-				)
+				items: buildTidalTrackMenu(tidalTrack, { remoteRoutes: true })
 			});
 			return;
 		}
