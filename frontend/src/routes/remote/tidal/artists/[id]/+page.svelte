@@ -3,8 +3,7 @@
 	import {
 		api,
 		type TidalArtistProfile,
-		type TidalDiscographyTrack,
-		type TidalPlayable
+		type TidalDiscographyTrack
 	} from '$lib/api/client';
 	import {
 		playTidalTracksNow,
@@ -16,19 +15,7 @@
 	import RemoteAlbumTile from '$lib/components/remote/RemoteAlbumTile.svelte';
 	import RemotePageShell from '$lib/components/remote/RemotePageShell.svelte';
 	import RemoteTrackRow from '$lib/components/remote/RemoteTrackRow.svelte';
-
-	function toPlayable(t: TidalDiscographyTrack): TidalPlayable {
-		return {
-			tidal_id: t.tidal_id,
-			title: t.title,
-			artist_name: t.artist_name ?? null,
-			album_title: t.album_title ?? null,
-			artwork_url: t.artwork_url ?? null,
-			duration_ms: t.duration_ms,
-			artist_tidal_id: t.artist_tidal_id ?? null,
-			album_tidal_id: t.album_tidal_id ?? null
-		};
-	}
+	import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';
 
 	let tidalArtistId = $derived(Number(page.params.id));
 
@@ -110,10 +97,10 @@
 
 		<RemoteActionBar
 			disabled={p.top_tracks.length === 0}
-			onPlay={() => playTidalTracksNow(p.top_tracks.map(toPlayable), p.artist_name ?? 'artist')}
-			onShuffle={() => shuffleTidalTracksNow(p.top_tracks.map(toPlayable), p.artist_name ?? 'artist')}
+			onPlay={() => playTidalTracksNow(p.top_tracks.map(tidalDiscographyTrackToPlayable), p.artist_name ?? 'artist')}
+			onShuffle={() => shuffleTidalTracksNow(p.top_tracks.map(tidalDiscographyTrackToPlayable), p.artist_name ?? 'artist')}
 			onRadio={p.top_tracks[0]
-				? () => startTidalSongRadio(toPlayable(p.top_tracks[0]))
+				? () => startTidalSongRadio(tidalDiscographyTrackToPlayable(p.top_tracks[0]))
 				: null}
 		/>
 

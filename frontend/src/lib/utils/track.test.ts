@@ -1,7 +1,14 @@
 import { describe, expect, test } from 'vitest';
-import type { QueueItem, TidalHomeItem, TidalSearchTrack, Track } from '$lib/api/client';
+import type {
+	QueueItem,
+	TidalDiscographyTrack,
+	TidalHomeItem,
+	TidalSearchTrack,
+	Track,
+} from '$lib/api/client';
 import {
 	queueItemToTidalPlayable,
+	tidalDiscographyTrackToPlayable,
 	tidalHomeItemToPlayable,
 	tidalSearchTrackToPlayable,
 	trackToTidalPlayable,
@@ -131,6 +138,39 @@ describe('tidalSearchTrackToPlayable', () => {
 			album_tidal_id: 404,
 			local_id: 55,
 			is_in_library: true,
+		});
+	});
+});
+
+describe('tidalDiscographyTrackToPlayable', () => {
+	test('preserves library metadata from TIDAL discography rows', () => {
+		const track: TidalDiscographyTrack = {
+			tidal_id: 808,
+			title: 'Discography Track',
+			duration_ms: 190000,
+			artwork_url: 'https://resources.tidal.com/images/disco/320x320.jpg',
+			album_title: 'Discography Album',
+			album_tidal_id: 909,
+			artist_name: 'Discography Artist',
+			artist_tidal_id: 1001,
+			track_id: 66,
+			is_in_library: true,
+			is_favorite: true,
+		};
+
+		expect(tidalDiscographyTrackToPlayable(track)).toEqual({
+			tidal_id: 808,
+			title: 'Discography Track',
+			artist_name: 'Discography Artist',
+			album_title: 'Discography Album',
+			artwork_url: 'https://resources.tidal.com/images/disco/320x320.jpg',
+			duration_ms: 190000,
+			artist_tidal_id: 1001,
+			album_tidal_id: 909,
+			track_id: 66,
+			local_id: 66,
+			is_in_library: true,
+			is_favorite: true,
 		});
 	});
 });

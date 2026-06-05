@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { api, type TidalDiscographyTrack, type TidalPlayable } from '$lib/api/client';
+	import { api, type TidalDiscographyTrack } from '$lib/api/client';
 	import { playTidalTracksNow, shuffleTidalTracksNow } from '$lib/stores/player';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import RemoteActionBar from '$lib/components/remote/RemoteActionBar.svelte';
@@ -10,6 +10,7 @@
 	import { firstArtworkUrl } from '$lib/utils/artwork';
 	import { formatTotalDuration } from '$lib/utils/format';
 	import { hapticTap } from '$lib/remote/haptics';
+	import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';
 
 	let tidalAlbumId = $derived(Number(page.params.id));
 
@@ -17,19 +18,6 @@
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let loadSeq = 0;
-
-	function toPlayable(t: TidalDiscographyTrack): TidalPlayable {
-		return {
-			tidal_id: t.tidal_id,
-			title: t.title,
-			artist_name: t.artist_name ?? null,
-			album_title: t.album_title ?? null,
-			artwork_url: t.artwork_url ?? null,
-			duration_ms: t.duration_ms,
-			artist_tidal_id: t.artist_tidal_id ?? null,
-			album_tidal_id: t.album_tidal_id ?? null
-		};
-	}
 
 	async function load(id: number) {
 		const seq = ++loadSeq;
@@ -109,8 +97,8 @@
 
 		<RemoteActionBar
 			disabled={tracks.length === 0}
-			onPlay={() => playTidalTracksNow(tracks.map(toPlayable), header?.title ?? 'album')}
-			onShuffle={() => shuffleTidalTracksNow(tracks.map(toPlayable), header?.title ?? 'album')}
+			onPlay={() => playTidalTracksNow(tracks.map(tidalDiscographyTrackToPlayable), header?.title ?? 'album')}
+			onShuffle={() => shuffleTidalTracksNow(tracks.map(tidalDiscographyTrackToPlayable), header?.title ?? 'album')}
 		/>
 
 		<section class="remote-section">
