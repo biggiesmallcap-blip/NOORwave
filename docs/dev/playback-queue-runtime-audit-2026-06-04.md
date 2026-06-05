@@ -470,6 +470,18 @@ Additional targeted verification for the malformed artwork fix:
   - 5 tests passed across the app unit tests and Tauri runtime pin test.
 - `cargo fmt --all -- --check`
   - Passed on 2026-06-05.
+- `pnpm check`
+  - Passed on 2026-06-05 with 0 errors and 0 warnings after rerunning outside
+    the sandbox because the first run could not rewrite `.svelte-kit` metadata.
+- `pnpm lint`
+  - Passed on 2026-06-05, including CSS lint and inline-style lint.
+- `pnpm test`
+  - Passed on 2026-06-05.
+  - 100 test files passed, 462 tests passed.
+- `pnpm run build`
+  - Passed on 2026-06-05 after rerunning outside the sandbox because the first
+    run hit Vite/Rolldown `spawn EPERM`.
+  - Production build completed and wrote the static frontend output.
 
 Non-blocking warnings observed:
 
@@ -484,6 +496,8 @@ Non-blocking warnings observed:
 - Direct Sportify search for Spotify albums and artists returned 502 during the
   focused pass, even though direct Spotify artist, album, playlist, and track
   detail endpoints loaded successfully with concrete ids.
+- The 2026-06-05 `pnpm run build` emitted non-failing Rolldown plugin timing
+  warnings. No unused CSS selector or chunk-size failure was reported.
 - Native route screenshot capture through the installed WebView was unreliable
   after repeated show/hide operations, so route accessibility checks were
   recorded separately from visual screenshot evidence.
@@ -550,6 +564,8 @@ Acceptance checks:
   manual-review warning.
 - Done: `cargo test -p noor-app` and `cargo fmt --all -- --check` passed as
   no-launch Rust verification checks.
+- Done: `pnpm check`, `pnpm lint`, `pnpm test`, and `pnpm run build` passed as
+  refreshed no-launch frontend verification checks.
 - Partial: native WebView route navigation reached Genre Galaxy, Moods,
   Playlists, and Settings through existing sidebar controls without visible
   error text in accessibility samples.
