@@ -18,19 +18,29 @@
   let error = $state<string | null>(null)
   let filterQuery = $state('')
   let failedArtworkUrls = $state<Record<string, boolean>>({})
+  let loadSeq = 0
 
-  $effect(() => {
-    const id = tidalArtistId
-    let cancelled = false
+  async function load(id: number) {
+    const seq = ++loadSeq
     loading = true
     error = null
     profile = null
     failedArtworkUrls = {}
-    api.getTidalArtistProfile(id)
-      .then((p) => { if (!cancelled) profile = p })
-      .catch((e) => { if (!cancelled) error = String(e) })
-      .finally(() => { if (!cancelled) loading = false })
-    return () => { cancelled = true }
+    try {
+      const nextProfile = await api.getTidalArtistProfile(id)
+      if (seq !== loadSeq) return
+      profile = nextProfile
+    } catch (e) {
+      if (seq !== loadSeq) return
+      error = String(e)
+    } finally {
+      if (seq === loadSeq) loading = false
+    }
+  }
+
+  $effect(() => {
+    const id = tidalArtistId
+    void load(id)
   })
 
   const filteredTracks = $derived(
