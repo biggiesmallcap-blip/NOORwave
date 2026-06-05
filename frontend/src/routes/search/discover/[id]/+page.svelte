@@ -22,20 +22,30 @@
 	let mod = $state<TidalHomeModule | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	let loadSeq = 0;
 
 	$effect(() => {
 		const id = moduleId;
-		if (!id) return;
+		if (!id) {
+			loadSeq += 1;
+			mod = null;
+			loading = false;
+			error = 'Missing discover shelf.';
+			return;
+		}
 		void load(id);
 	});
 
 	async function load(id: string) {
+		const seq = ++loadSeq;
 		loading = true;
 		error = null;
 		try {
 			const res = await api.getTidalDiscoverModule(id, 50);
+			if (seq !== loadSeq) return;
 			mod = res.module;
 		} catch (e) {
+			if (seq !== loadSeq) return;
 			if (e instanceof ApiError && e.status === 404) {
 				error = "That discover shelf doesn't exist anymore — TIDAL may have rotated its home page.";
 			} else if (e instanceof ApiError && e.status === 503) {
@@ -44,7 +54,7 @@
 				error = e instanceof Error ? e.message : 'Failed to load module.';
 			}
 		} finally {
-			loading = false;
+			if (seq === loadSeq) loading = false;
 		}
 	}
 
