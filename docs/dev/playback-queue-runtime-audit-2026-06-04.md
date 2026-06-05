@@ -1,9 +1,11 @@
 # Playback, Queue, and Runtime Audit - 2026-06-04
 
-Status: final automated audit report. Manual live audio, Tauri WebView, and
-authenticated provider smoke remain not verified in this agent run. A local
-Chrome and Vite visible smoke for `/remote` and the remote album tile artwork
-fallback passed after the automated report was finalized.
+Status: final automated audit report. Scratch backend live TIDAL album
+playback start/stop is now verified. Fresh Tauri-owned sidecar launch, long
+provider-session behavior, and manual Tauri WebView artwork screenshots remain
+not verified in this agent run. A local Chrome and Vite visible smoke for
+`/remote` and the remote album tile artwork fallback passed after the
+automated report was finalized.
 
 This report closes the automated audit work for queue advancement, runtime
 handoff, playlist injection, stale frontend playback intents, artwork fallback
@@ -375,6 +377,34 @@ API-only TIDAL album queue smoke passed on 2026-06-05:
   `current_queue_item_id=null`, so the no-audio queue path did not start
   playback.
 
+Scratch backend live TIDAL album playback smoke passed on 2026-06-05:
+
+- Started `target/debug/noor-server.exe` against a temporary scratch data copy
+  and served the production frontend build. The live user queue was not
+  mutated, and the scratch copy was removed after the smoke.
+- Confirmed no NOOR processes were running before the scratch server started,
+  then confirmed `/api/ping` returned the local backend.
+- Fetched `/api/tidal/albums/58520793/tracks`; the response returned 45
+  tracks, 0 missing artwork fields, first track `Real Love`, and last track
+  `Across The Universe`.
+- Posted the loaded 45-track album body to `POST /api/tidal/play-mix`. After
+  an 8 second live playback window, `GET /api/playback/state` reported
+  `is_playing=true`, current track `Real Love`, current TIDAL id `58520794`,
+  44 visible continuation queue rows, source `tidal_mix`, first queued track
+  `Yes It Is`, last queued track `Across The Universe`, and 0 missing artwork
+  fields in the visible queue.
+- Posted `POST /api/playback/pause` after the live window and confirmed
+  `is_playing=false`.
+- Rendered the backend-served production frontend routes
+  `/tidal/albums/58520793` and `/remote/tidal/albums/58520793` in headless
+  installed Chrome with audio muted and without clicking playback controls.
+  Both route DOM dumps contained `Anthology 2`, `Real Love`,
+  `Across The Universe`, no visible load-error text, no loading state, and 45
+  rendered track rows.
+- Confirmed after the route render that playback still reported
+  `is_playing=false` with 44 continuation queue rows, then shut down the
+  scratch server and verified no NOOR processes were running.
+
 Native shell and audio safety preflight passed without launching a second app
 instance:
 
@@ -530,6 +560,10 @@ Non-blocking warnings observed:
 - The backend had to be restored manually by starting `noor-server.exe`
   directly with installed-mode paths. This is current-session recovery, not a
   substitute for a fresh Tauri-owned sidecar startup smoke.
+- The live scratch TIDAL playback smoke observed a non-failing playback
+  quality warning: the requested high-resolution stream was served as
+  `LOSSLESS`. Playback still started, state updated, and pause stopped
+  playback cleanly.
 
 ## Not Verified
 
@@ -540,8 +574,9 @@ Non-blocking warnings observed:
     recovery started `noor-server.exe` directly, so the current server process
     is not proof that Tauri owns a fresh sidecar from a stopped state.
 - Real audio-device playback for track finish, active decode failure, and
-  prepared-next failure.
-- Real TIDAL provider session with long ephemeral mixes, token refresh, and
+  prepared-next failure. A scratch backend live album start/stop smoke is
+  verified above, but it does not cover finish or failure transitions.
+- Long real TIDAL provider sessions with ephemeral mixes, token refresh, and
   provider-side 403/429 behavior.
 - Manual Tauri WebView screenshot pass across artwork-heavy routes.
 
@@ -577,6 +612,10 @@ Acceptance checks:
 - Done: API-only queue smoke passed for the 45-track TIDAL album on a scratch
   DB copy. The queue resolved to 45 artwork-backed TIDAL rows in order while
   playback stayed stopped.
+- Done: scratch backend live TIDAL album playback smoke passed for the same
+  45-track album. Playback started on `Real Love`, exposed 44 ordered
+  `tidal_mix` continuation rows with artwork, was paused after the live window,
+  and remained stopped after backend-served desktop and remote route renders.
 - Done: non-invasive native shell and audio preflight confirmed the installed
   app/server were already running, the then-current server was actively playing,
   and a second launch could shut down the active sidecar.
@@ -604,9 +643,9 @@ Acceptance checks:
 - Partial: native WebView route navigation reached Genre Galaxy, Moods,
   Playlists, and Settings through existing sidebar controls without visible
   error text in accessibility samples.
-- Not verified: audio device, long live TIDAL session behavior, fresh Tauri
-  sidecar startup from a stopped state, and manual Tauri WebView artwork route
-  screenshot pass.
+- Not verified: audio-device finish and failure transitions, long live TIDAL
+  session behavior, fresh Tauri sidecar startup from a stopped state, and
+  manual Tauri WebView artwork route screenshot pass.
 
 Done:
 
@@ -614,7 +653,8 @@ Done:
   hardening, API timeout protection, transaction hardening, and runtime handoff
   tracing are implemented and committed. Expanded artwork route smoke, focused
   Spotify detail route smoke, backend-served dynamic detail route smoke, and
-  API-only TIDAL album queue smoke evidence are recorded in this report.
+  API-only plus live scratch TIDAL album queue and playback smoke evidence are
+  recorded in this report.
 
 Incomplete:
 
@@ -632,7 +672,8 @@ Next checks before release:
 - Pick a safe manual window where interrupting the current localhost backend is
   acceptable, then launch the Tauri app and confirm the WebView reaches the
   app shell after sidecar startup.
-- Run NOORwave through Tauri with a real TIDAL account and audio output.
+- Run NOORwave through the Tauri-owned app path with a real TIDAL account and
+  audio output.
 - Start a queue with pending rows, force an unresolved row, and confirm playback
   advances audibly.
 - Force an active stream failure and confirm the queue advances without dead
