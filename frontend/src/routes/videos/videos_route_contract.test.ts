@@ -27,6 +27,8 @@ describe('videos route contract', () => {
 		expect(source).toContain('void selectVideo(video);');
 		expect(source).toContain('async function loadMix(mixId: string, autoPlayFirst = false)');
 		expect(source).toContain('await loadMix(mixId, shouldPlayMix);');
+		expect(source).toContain('event.preventDefault();');
+		expect(source).toContain('event.stopPropagation();');
 		expect(source).toContain('buildArtistMenu({ tidal_id: selectedVideo.artist_id');
 		expect(source).toContain('<VideoPlayer');
 		expect(source).toContain('<VideoCard {video}');

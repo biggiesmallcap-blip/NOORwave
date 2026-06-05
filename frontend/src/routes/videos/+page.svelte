@@ -659,6 +659,8 @@
 							class="meta-link"
 							oncontextmenu={(event) => {
 								if (selectedVideo?.artist_id == null) return;
+								event.preventDefault();
+								event.stopPropagation();
 								openContextMenu(
 									event,
 									buildArtistMenu({ tidal_id: selectedVideo.artist_id, name: selectedVideo.artist_name ?? 'Artist' }, { isLocal: false }),
