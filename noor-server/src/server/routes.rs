@@ -8439,48 +8439,46 @@ async fn clear_queue_route(State(state): State<SharedState>) -> Result<Json<Valu
         state_guard
             .db
             .with_conn(|conn| {
-            let (current_track_id, current_queue_item_id): (Option<i64>, Option<i64>) =
-                conn.query_row(
-                    "SELECT current_track_id, current_queue_item_id FROM playback_state WHERE id = 1",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )?;
-            match (current_track_id, current_queue_item_id) {
-                (Some(track_id), _) => {
-                    // Library track playing - preserve by track_id.
-                    conn.execute("DELETE FROM queue WHERE track_id != ?1", params![track_id])?;
+                let (current_track_id, current_queue_item_id): (Option<i64>, Option<i64>) =
+                    conn.query_row(
+                        "SELECT current_track_id, current_queue_item_id FROM playback_state WHERE id = 1",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )?;
+                match (current_queue_item_id, current_track_id) {
+                    (Some(qid), _) => {
+                        conn.execute("DELETE FROM queue WHERE id != ?1", params![qid])?;
+                    }
+                    (None, Some(track_id)) => {
+                        conn.execute("DELETE FROM queue WHERE track_id != ?1", params![track_id])?;
+                    }
+                    (None, None) => {
+                        queue::clear_queue(conn)?;
+                    }
                 }
-                (None, Some(qid)) => {
-                    // Pending row playing - preserve by queue item id.
-                    conn.execute("DELETE FROM queue WHERE id != ?1", params![qid])?;
-                }
-                (None, None) => {
-                    queue::clear_queue(conn)?;
-                }
-            }
                 state_guard.pending_tidal_mix_queue.lock().unwrap().clear();
-            // Return the full PlaybackSnapshot ({state, queue}) so the UI can
-            // refresh both at once - additive over the prior `{queue}` shape:
-            // existing consumers keep reading `queue`, new ones read
-            // `playback_state`.
-            let snapshot = player::load_snapshot(conn)?;
-            // Stamp now() so `ensure_automix_queue_depth` suppresses refill
-            // for ~60s; otherwise automix would immediately repopulate the
-            // queue and negate the user's manual clear (current_track is
-            // still set, which is the only gate the helper checks).
-            let now_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
+                // Return the full PlaybackSnapshot ({state, queue}) so the UI can
+                // refresh both at once - additive over the prior `{queue}` shape:
+                // existing consumers keep reading `queue`, new ones read
+                // `playback_state`.
+                let snapshot = player::load_snapshot(conn)?;
+                // Stamp now() so `ensure_automix_queue_depth` suppresses refill
+                // for ~60s; otherwise automix would immediately repopulate the
+                // queue and negate the user's manual clear (current_track is
+                // still set, which is the only gate the helper checks).
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
                 state_guard
-                .user_cleared_at
-                .store(now_secs, std::sync::atomic::Ordering::Relaxed);
+                    .user_cleared_at
+                    .store(now_secs, std::sync::atomic::Ordering::Relaxed);
                 let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
-            Ok(Json(json!({
-                "queue": snapshot.queue,
-                "playback_state": snapshot.state,
-            })))
-        })
+                Ok(Json(json!({
+                    "queue": snapshot.queue,
+                    "playback_state": snapshot.state,
+                })))
+            })
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
     refresh_dj_after_queue_change(state, "clear_queue_route").await;
