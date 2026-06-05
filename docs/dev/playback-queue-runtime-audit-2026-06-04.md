@@ -9,10 +9,11 @@ search, remote, and artwork-heavy routes are now verified through WebView2 CDP.
 Live TIDAL seek-to-finish state advancement is now verified through the running
 installed app. A bounded TIDAL provider continuity smoke during route
 navigation is now verified. Long provider refresh or provider-error behavior,
-human-audible local-track finish confirmation, and audio failure transitions
-remain not verified in this agent run. A local Chrome and Vite visible smoke
-for `/remote` and the remote album tile artwork fallback passed after the
-automated report was finalized.
+human-audible local-track finish confirmation, and live audible audio failure
+transitions remain not verified in this agent run. Focused no-audio server
+coverage for active and prepared-next failure transitions has been refreshed.
+A local Chrome and Vite visible smoke for `/remote` and the remote album tile
+artwork fallback passed after the automated report was finalized.
 
 This report closes the automated audit work for queue advancement, runtime
 handoff, playlist injection, stale frontend playback intents, artwork fallback
@@ -546,6 +547,19 @@ verified:
   local-library finish advancement and human-audible local output in the
   not-verified release-readiness set.
 
+No-audio failure-transition verification passed on 2026-06-05:
+
+- `cargo test -p noor-server runtime_track_error_advances_to_next_library_track`
+  passed. This exercises the server handler path for an active runtime track
+  error and confirms the persisted playback state advances from the failed
+  library track to the next queued library track while playback remains active.
+- `cargo test -p noor-server prepared_runtime_track_error_keeps_current_playback_running`
+  passed. This exercises the prepared-next failure handler and confirms the
+  current track and current queue item remain unchanged, playback remains
+  active, and the runtime error is surfaced.
+- These tests do not start audio, prove human-audible output, or cover provider
+  refresh and provider-side error responses.
+
 Native shell and audio safety preflight passed without launching a second app
 instance:
 
@@ -709,10 +723,11 @@ Non-blocking warnings observed:
 
 ## Not Verified
 
-- Human-audible local-track finish confirmation, active decode failure, and
-  prepared-next failure. Scratch backend live album start/stop and live TIDAL
-  seek-to-finish state advancement are verified above, but they do not prove
-  human-audible output or the failure-transition paths.
+- Human-audible local-track finish confirmation plus live audible active
+  decode failure and prepared-next failure transitions. Scratch backend live
+  album start/stop, live TIDAL seek-to-finish state advancement, and no-audio
+  server failure-transition tests are verified above, but they do not prove
+  human-audible local output or live audible failure transitions.
 - Low-volume local finish-advancement smoke was attempted on a scratch copy of
   installed app data, but the copied library had 0 local track rows whose files
   currently exist on disk. No local playback was started for that attempted
@@ -804,8 +819,12 @@ Acceptance checks:
 - Done: focused no-audio backend overlay regression coverage passed for the
   loaded TIDAL album continuation queue, proving the visible queue keeps the
   44 pending album rows in order with artwork and no unrelated durable rows.
-- Not verified: human-audible local-track finish confirmation, audio failure
-  transitions, and long live TIDAL refresh or provider-error behavior.
+- Not verified: human-audible local-track finish confirmation, live audible
+  audio failure transitions, and long live TIDAL refresh or provider-error
+  behavior.
+- Done: no-audio server failure-transition tests passed for active runtime
+  track error advancement and prepared-next failure keeping current playback
+  active.
 - Not verified: low-volume local finish-advancement smoke was attempted, but
   the scratch copied library had 0 eligible existing local files, so no local
   playback path could be exercised.
