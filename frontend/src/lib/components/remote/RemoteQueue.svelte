@@ -135,7 +135,7 @@
 	async function onPlayRow(item: QueueItem) {
 		hapticTap();
 		const tidal = queueItemToTidalPlayable(item);
-		if (tidal != null && item.track.id <= 0) {
+		if (tidal != null && item.id < 0) {
 			await playTidalTrackNow(tidal);
 		} else {
 			await playTrackNow(item.track.id);
