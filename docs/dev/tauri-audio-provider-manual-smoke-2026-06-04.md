@@ -31,6 +31,11 @@ corresponding item under `Not Verified` in the audit report.
 - A working audio output device is available.
 - A real TIDAL account is connected in the app when provider-session checks are
   being run.
+- Before any playback-starting check, set NOORwave playback volume low. For API
+  driven checks, call `POST /api/playback/volume` with `{"volume":0.05}` before
+  `POST /api/playback/play` or any TIDAL playback route. Keep the system output
+  volume at a comfortable low level unless the operator explicitly asks
+  otherwise.
 - Any captured logs or screenshots must redact auth tokens, setup tokens, bearer
   values, and machine-local paths before they are committed or pasted.
 
@@ -48,6 +53,8 @@ the localhost or LAN backend.
 - Route screenshots or accessibility samples for the WebView route pass.
 - Relevant redacted `noor-server` log excerpts for finish, active error,
   prepared-next error, provider refresh, and queue advancement.
+- The low-volume setting used before each playback-starting check, and
+  confirmation that playback was paused or stopped afterward.
 - Final pass, fail, or not-run status for every check in this file.
 
 ## 1. Fresh Tauri Launch And Sidecar Ownership
@@ -112,10 +119,12 @@ Pass criteria:
 ## 3. Real Audio Finish Advancement
 
 1. Select the default output device.
-2. Build a queue with at least two known playable local tracks.
-3. Start playback on the first track.
-4. Let the track finish naturally, or use a product-supported seek near the end
+2. Set NOORwave playback volume low.
+3. Build a queue with at least two known playable local tracks.
+4. Start playback on the first track.
+5. Let the track finish naturally, or use a product-supported seek near the end
    when that path is part of the release check.
+6. Pause or stop playback when the evidence is captured.
 
 Pass criteria:
 
@@ -129,8 +138,10 @@ Pass criteria:
 
 1. Build a queue where the current or next item is a pending external row, plus
    at least one playable survivor after it.
-2. Force or select a row that cannot resolve to a playable stream.
-3. Start playback through the normal UI path.
+2. Set NOORwave playback volume low.
+3. Force or select a row that cannot resolve to a playable stream.
+4. Start playback through the normal UI path.
+5. Pause or stop playback when the evidence is captured.
 
 Pass criteria:
 
@@ -143,8 +154,10 @@ Pass criteria:
 ## 5. Active Decode Or Stream Failure
 
 1. Start a track whose stream can be made to fail in a controlled way.
-2. Trigger the failure after audio has started.
-3. Keep at least one playable track after the failing item.
+2. Keep NOORwave playback volume low while the track starts.
+3. Trigger the failure after audio has started.
+4. Keep at least one playable track after the failing item.
+5. Pause or stop playback when the evidence is captured.
 
 Pass criteria:
 
@@ -155,9 +168,11 @@ Pass criteria:
 
 ## 6. Prepared-Next Failure
 
-1. Play a current track that should keep playing.
-2. Place a next item that can fail during prepared-next decode or stream setup.
-3. Observe the transition preparation window.
+1. Set NOORwave playback volume low.
+2. Play a current track that should keep playing.
+3. Place a next item that can fail during prepared-next decode or stream setup.
+4. Observe the transition preparation window.
+5. Pause or stop playback when the evidence is captured.
 
 Pass criteria:
 
@@ -169,10 +184,12 @@ Pass criteria:
 ## 7. Long TIDAL Provider Session
 
 1. Connect a real TIDAL account.
-2. Start a TIDAL album, playlist, or ephemeral mix long enough to exercise
+2. Set NOORwave playback volume low before starting playback.
+3. Start a TIDAL album, playlist, or ephemeral mix long enough to exercise
    provider session refresh behavior.
-3. Include at least one route navigation during playback, such as TIDAL album
+4. Include at least one route navigation during playback, such as TIDAL album
    detail or artist detail.
+5. Pause or stop playback when the evidence is captured.
 
 Pass criteria:
 
