@@ -3322,6 +3322,133 @@ async fn runtime_finish_adopts_pending_row_resolved_by_background_resolver() {
 }
 
 #[tokio::test]
+async fn manual_previous_skips_unresolved_pending_rows_to_prior_library_track() {
+    let (db, db_path) = fresh_migrated_db();
+    let (previous_qid, current_qid) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (8400, 'Previous Artist')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, duration_ms, tidal_id, best_source, source)
+                 VALUES
+                    (8401, 'Previous Library Track', 8400, 180000, 88401, 'tidal', 'tidal'),
+                    (8402, 'Current Library Track', 8400, 180000, 88402, 'tidal', 'tidal')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (8401, 0, 'test')",
+                [],
+            )?;
+            let previous_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (
+                    track_id, position, source, pending_artist, pending_title, pending_at
+                 ) VALUES (NULL, 1, 'radio_pending', 'Missing Artist A', 'Missing Title A', datetime('now'))",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (
+                    track_id, position, source, pending_artist, pending_title, pending_at
+                 ) VALUES (NULL, 2, 'radio_pending', 'Missing Artist B', 'Missing Title B', datetime('now'))",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (8402, 3, 'test')",
+                [],
+            )?;
+            let current_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                 SET current_track_id = 8402, current_queue_item_id = ?1, is_playing = 1, position_ms = 0
+                 WHERE id = 1",
+                rusqlite::params![current_qid],
+            )?;
+            Ok((previous_qid, current_qid))
+        })
+        .unwrap();
+
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+    let playback_generation = bump_playback_generation(&state).await;
+    let snapshot = previous_persisted_playback_snapshot(&state)
+        .await
+        .expect("initial previous snapshot");
+    assert!(snapshot.state.current_track.is_none());
+    assert_ne!(snapshot.state.current_queue_item_id, Some(current_qid));
+
+    let snapshot = resolve_or_skip_pending_current_previous(
+        &state,
+        snapshot,
+        playback_generation,
+        "manual_previous_track",
+    )
+    .await
+    .expect("previous pending skip");
+
+    assert_eq!(
+        snapshot.state.current_track.as_ref().map(|track| track.id),
+        Some(8401)
+    );
+    assert_eq!(snapshot.state.current_queue_item_id, Some(previous_qid));
+    assert!(snapshot.state.is_playing);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn manual_previous_stops_when_pending_rows_cannot_move_back() {
+    let (db, db_path) = fresh_migrated_db();
+    let current_qid = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (
+                    track_id, position, source, pending_artist, pending_title, pending_at
+                 ) VALUES (NULL, 0, 'radio_pending', 'Missing Artist A', 'Missing Title A', datetime('now'))",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (
+                    track_id, position, source, pending_artist, pending_title, pending_at
+                 ) VALUES (NULL, 1, 'radio_pending', 'Missing Artist B', 'Missing Title B', datetime('now'))",
+                [],
+            )?;
+            let current_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                 SET current_track_id = NULL, current_queue_item_id = ?1, is_playing = 1, position_ms = 0
+                 WHERE id = 1",
+                rusqlite::params![current_qid],
+            )?;
+            Ok(current_qid)
+        })
+        .unwrap();
+
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+    let playback_generation = bump_playback_generation(&state).await;
+    let snapshot = previous_persisted_playback_snapshot(&state)
+        .await
+        .expect("initial previous snapshot");
+    assert!(snapshot.state.current_track.is_none());
+    assert_ne!(snapshot.state.current_queue_item_id, Some(current_qid));
+
+    let snapshot = resolve_or_skip_pending_current_previous(
+        &state,
+        snapshot,
+        playback_generation,
+        "manual_previous_track",
+    )
+    .await
+    .expect("previous pending stop");
+
+    assert!(snapshot.state.current_track.is_none());
+    assert_eq!(snapshot.state.current_queue_item_id, None);
+    assert!(!snapshot.state.is_playing);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn prepared_runtime_track_error_keeps_current_playback_running() {
     let (db, db_path) = fresh_migrated_db();
     seed_basic_tracks(&db);

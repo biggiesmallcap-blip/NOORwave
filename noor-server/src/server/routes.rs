@@ -7133,6 +7133,38 @@ async fn next_persisted_playback_snapshot(
         .with_conn(|conn| player::next_track(conn, cleared))
 }
 
+async fn previous_persisted_playback_snapshot(
+    state: &SharedState,
+) -> anyhow::Result<player::PlaybackSnapshot> {
+    let state_guard = state.read().await;
+    state_guard.db.with_conn(player::previous_track)
+}
+
+#[derive(Clone, Copy)]
+enum PendingAdvanceDirection {
+    Next,
+    Previous,
+}
+
+impl PendingAdvanceDirection {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Next => "next",
+            Self::Previous => "previous",
+        }
+    }
+}
+
+async fn step_persisted_playback_snapshot(
+    state: &SharedState,
+    direction: PendingAdvanceDirection,
+) -> anyhow::Result<player::PlaybackSnapshot> {
+    match direction {
+        PendingAdvanceDirection::Next => next_persisted_playback_snapshot(state).await,
+        PendingAdvanceDirection::Previous => previous_persisted_playback_snapshot(state).await,
+    }
+}
+
 async fn adopt_resolved_current_queue_item(
     state: &SharedState,
     queue_item_id: i64,
@@ -7228,9 +7260,42 @@ async fn stop_persisted_playback_after_advance_failure(
 
 async fn resolve_or_skip_pending_current(
     state: &SharedState,
+    snapshot: player::PlaybackSnapshot,
+    generation: u64,
+    context: &'static str,
+) -> anyhow::Result<player::PlaybackSnapshot> {
+    resolve_or_skip_pending_current_in_direction(
+        state,
+        snapshot,
+        generation,
+        context,
+        PendingAdvanceDirection::Next,
+    )
+    .await
+}
+
+async fn resolve_or_skip_pending_current_previous(
+    state: &SharedState,
+    snapshot: player::PlaybackSnapshot,
+    generation: u64,
+    context: &'static str,
+) -> anyhow::Result<player::PlaybackSnapshot> {
+    resolve_or_skip_pending_current_in_direction(
+        state,
+        snapshot,
+        generation,
+        context,
+        PendingAdvanceDirection::Previous,
+    )
+    .await
+}
+
+async fn resolve_or_skip_pending_current_in_direction(
+    state: &SharedState,
     mut snapshot: player::PlaybackSnapshot,
     generation: u64,
     context: &'static str,
+    direction: PendingAdvanceDirection,
 ) -> anyhow::Result<player::PlaybackSnapshot> {
     let mut skipped = 0usize;
     let mut busy_waits = 0usize;
@@ -7283,6 +7348,7 @@ async fn resolve_or_skip_pending_current(
                 context,
                 queue_item_id,
                 busy_waits,
+                direction = direction.as_str(),
                 "current pending row is still resolving; waiting before skip"
             );
             tokio::time::sleep(Duration::from_millis(PLAYBACK_PENDING_BUSY_RETRY_DELAY_MS)).await;
@@ -7298,14 +7364,15 @@ async fn resolve_or_skip_pending_current(
             context,
             queue_item_id,
             skipped,
-            "current pending row did not resolve; advancing to next queue item"
+            direction = direction.as_str(),
+            "current pending row did not resolve; stepping over queue item"
         );
 
         if skipped > PLAYBACK_ADVANCE_PENDING_SKIP_LIMIT {
             return stop_persisted_playback_after_advance_failure(state, context).await;
         }
 
-        snapshot = next_persisted_playback_snapshot(state).await?;
+        snapshot = step_persisted_playback_snapshot(state, direction).await?;
     }
 }
 
@@ -7597,29 +7664,28 @@ async fn previous_track(
     };
 
     set_external_playback_track(&state, None).await;
-
-    // If the previous item is a pending (non-library) queue row, resolve it to Tidal now.
-    // Same pattern as `next_track`. Unresolvable rows are skipped by stepping back once more.
-    let effective_current_track: Option<crate::db::models::Track> =
-        if let Some(t) = snapshot.state.current_track.clone() {
-            Some(t)
-        } else {
-            let resolved = resolve_pending_current_queue_item(&state, playback_generation).await;
-            match resolved {
-                Some(ref t) => {
-                    set_external_playback_track(&state, Some(t.clone())).await;
-                }
-                None => {
-                    if let Ok(prev_snapshot) = {
-                        let s = state.read().await;
-                        s.db.with_conn(player::previous_track)
-                    } {
-                        snapshot = prev_snapshot;
-                    }
-                }
-            }
-            resolved
-        };
+    snapshot = resolve_or_skip_pending_current_previous(
+        &state,
+        snapshot,
+        playback_generation,
+        "manual_previous_track",
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(
+            target: "noor.playback.advance",
+            event = "manual_previous_pending_advance_failed",
+            error = %error,
+            "failed to resolve or skip pending row while moving to previous playback item"
+        );
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "playback_state_update_failed",
+                "message": "Failed to move to the previous track.",
+            })),
+        )
+    })?;
 
     if !playback_generation_is_current(&state, playback_generation).await {
         return current_playback_snapshot_json(&state).await;
@@ -7634,9 +7700,7 @@ async fn previous_track(
     )
     .await;
 
-    let play_track = effective_current_track
-        .as_ref()
-        .or(snapshot.state.current_track.as_ref());
+    let play_track = snapshot.state.current_track.as_ref();
 
     if let Some(track) = play_track {
         let user_quality = current_user_audio_quality(&state).await;
@@ -7705,10 +7769,7 @@ async fn previous_track(
     }
 
     let state_guard = state.read().await;
-    let event_track_id = effective_current_track
-        .as_ref()
-        .or(snapshot.state.current_track.as_ref())
-        .map(|t| t.id);
+    let event_track_id = snapshot.state.current_track.as_ref().map(|t| t.id);
     if let Some(track_id) = event_track_id {
         let _ = state_guard
             .event_tx
