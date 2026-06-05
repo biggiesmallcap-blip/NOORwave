@@ -244,8 +244,11 @@ pub(super) async fn search_artists_route(
     State(state): State<SharedState>,
     axum::extract::Query(params): axum::extract::Query<ArtistSearchParams>,
 ) -> Result<Json<Value>, StatusCode> {
-    let query = params.q.unwrap_or_default();
-    let limit = params.limit.unwrap_or(20).clamp(1, 50);
+    let query = params.q.unwrap_or_default().trim().to_string();
+    if query.is_empty() {
+        return Ok(empty_artist_search_response());
+    }
+    let limit = clamp_artist_search_limit(params.limit);
     let state = state.read().await;
     let results: Vec<(i64, String)> = state
         .db
@@ -256,6 +259,33 @@ pub(super) async fn search_artists_route(
         .map(|(id, name)| json!({ "id": id, "name": name }))
         .collect();
     Ok(Json(json!({ "artists": artists })))
+}
+
+fn empty_artist_search_response() -> Json<Value> {
+    Json(json!({ "artists": [] }))
+}
+
+fn clamp_artist_search_limit(limit: Option<i64>) -> i64 {
+    limit.unwrap_or(20).clamp(1, 50)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_artist_search_response_keeps_route_payload_shape() {
+        let Json(body) = empty_artist_search_response();
+        assert_eq!(body, json!({ "artists": [] }));
+    }
+
+    #[test]
+    fn artist_search_limit_is_bounded() {
+        assert_eq!(clamp_artist_search_limit(None), 20);
+        assert_eq!(clamp_artist_search_limit(Some(-5)), 1);
+        assert_eq!(clamp_artist_search_limit(Some(0)), 1);
+        assert_eq!(clamp_artist_search_limit(Some(5_000)), 50);
+    }
 }
 
 pub(super) async fn create_smart_playlist_route(
