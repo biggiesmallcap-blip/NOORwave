@@ -3395,10 +3395,14 @@ export const api = {
 	},
 
 	moveQueueTrack(itemId: number, newPos: number) {
-		return fetchApi<{ queue: QueueItem[] }>('/api/playback/queue/move', undefined, {
-			method: 'POST',
-			body: JSON.stringify({ item_id: itemId, new_pos: newPos }),
-		});
+		return fetchApi<{ queue: QueueItem[]; playback_state?: PlaybackState }>(
+			'/api/playback/queue/move',
+			undefined,
+			{
+				method: 'POST',
+				body: JSON.stringify({ item_id: itemId, new_pos: newPos }),
+			}
+		);
 	},
 
 	clearQueue() {

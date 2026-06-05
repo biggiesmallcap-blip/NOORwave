@@ -826,6 +826,7 @@ export async function moveQueueTrackNext(queueItemId: number) {
 	try {
 		const result = await api.moveQueueTrack(queueItemId, newPos);
 		setPlaybackQueue(result.queue);
+		if (result.playback_state) applyState(result.playback_state);
 		noteSuccess();
 	} catch (error) {
 		setError('reorder queue', error, () => moveQueueTrackNext(queueItemId));
@@ -861,6 +862,7 @@ export async function moveQueueItem(itemId: number, newPos: number) {
 	try {
 		const result = await api.moveQueueTrack(itemId, target);
 		setPlaybackQueue(result.queue);
+		if (result.playback_state) applyState(result.playback_state);
 		playerError.set(null);
 	} catch (error) {
 		// Roll back on failure.

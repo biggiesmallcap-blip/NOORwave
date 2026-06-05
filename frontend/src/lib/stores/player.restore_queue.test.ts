@@ -17,6 +17,7 @@ vi.mock('$lib/api/client', async () => {
 	const queueAppend = vi.fn(async () => ({ queue: [], playback_state: null }));
 	const getPlaybackState = vi.fn(async () => ({ queue: [] }));
 	const removeQueueTrack = vi.fn(async () => ({ queue: [], playback_state: null }));
+	const moveQueueTrack = vi.fn(async () => ({ queue: [], playback_state: null }));
 	const getTrackAudioFeatures = vi.fn(async () => ({ features: null }));
 	const playTrack = vi.fn();
 	const playTidalTrack = vi.fn();
@@ -31,6 +32,7 @@ vi.mock('$lib/api/client', async () => {
 			queueAppend,
 			getPlaybackState,
 			removeQueueTrack,
+			moveQueueTrack,
 			getTrackAudioFeatures,
 			playTrack,
 			playTidalTrack,
@@ -60,6 +62,7 @@ import {
 	playbackQueue,
 	playerError,
 	refreshPlaybackState,
+	moveQueueItem,
 	removeTrackFromQueue,
 	restoreQueueItems,
 } from './player';
@@ -355,6 +358,35 @@ describe('removeTrackFromQueue', () => {
 		expect(get(currentQueueItemId)).toBe(20);
 		expect(get(isPlaying)).toBe(true);
 		expect(api.getTrackAudioFeatures).toHaveBeenCalledWith(2);
+	});
+});
+
+describe('moveQueueItem', () => {
+	beforeEach(() => {
+		vi.mocked(api.moveQueueTrack).mockClear();
+		vi.mocked(api.getTrackAudioFeatures).mockClear();
+		currentTrack.set(null);
+		currentQueueItemId.set(null);
+		isPlaying.set(false);
+		playbackQueue.set([libraryRow(10, 1), libraryRow(20, 2)]);
+	});
+
+	it('applies playback state returned by the move endpoint', async () => {
+		const current = libraryRow(10, 1);
+		const next = libraryRow(20, 2);
+		vi.mocked(api.moveQueueTrack).mockResolvedValueOnce({
+			queue: [next, current],
+			playback_state: playbackState(current),
+		});
+
+		await moveQueueItem(10, 1);
+
+		expect(api.moveQueueTrack).toHaveBeenCalledWith(10, 1);
+		expect(get(playbackQueue)).toEqual([next, current]);
+		expect(get(currentTrack)?.id).toBe(1);
+		expect(get(currentQueueItemId)).toBe(10);
+		expect(get(isPlaying)).toBe(true);
+		expect(api.getTrackAudioFeatures).toHaveBeenCalledWith(1);
 	});
 });
 

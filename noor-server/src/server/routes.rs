@@ -8123,6 +8123,57 @@ fn preserve_current_track_queue_row(
     Ok(())
 }
 
+fn queue_item_track_id(
+    conn: &rusqlite::Connection,
+    queue_item_id: i64,
+) -> anyhow::Result<Option<Option<i64>>> {
+    Ok(conn
+        .query_row(
+            "SELECT track_id FROM queue WHERE id = ?1",
+            params![queue_item_id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+fn repair_moved_queue_current_anchor(
+    conn: &rusqlite::Connection,
+    moved_queue_item_id: i64,
+) -> anyhow::Result<bool> {
+    let (current_track_id, current_queue_item_id): (Option<i64>, Option<i64>) = conn.query_row(
+        "SELECT current_track_id, current_queue_item_id FROM playback_state WHERE id = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if let Some(queue_item_id) = current_queue_item_id
+        && queue_item_exists(conn, queue_item_id)?
+    {
+        return Ok(false);
+    }
+
+    let repaired_queue_item_id = match current_track_id {
+        Some(track_id) => {
+            let moved_track_id = queue_item_track_id(conn, moved_queue_item_id)?.flatten();
+            if moved_track_id == Some(track_id) {
+                Some(moved_queue_item_id)
+            } else {
+                first_queue_item_id_for_track(conn, track_id)?
+            }
+        }
+        None => None,
+    };
+
+    if repaired_queue_item_id == current_queue_item_id {
+        return Ok(false);
+    }
+
+    conn.execute(
+        "UPDATE playback_state SET current_queue_item_id = ?1 WHERE id = 1",
+        params![repaired_queue_item_id],
+    )?;
+    Ok(true)
+}
+
 async fn spawn_pending_queue_resolver(state: &SharedState, queue_item_id: i64) {
     let tokens_opt: Option<crate::services::tidal::auth::TidalTokens> = {
         let s = state.read().await;
@@ -8500,9 +8551,27 @@ async fn move_queue_track(
             .db
             .with_conn(|conn| {
                 queue::move_queue_item(conn, payload.item_id, payload.new_pos)?;
-                let queue = queue::load_queue(conn)?;
+                let repaired_anchor = repair_moved_queue_current_anchor(conn, payload.item_id)?;
+                let snapshot = if repaired_anchor {
+                    Some(player::load_snapshot(conn)?)
+                } else {
+                    None
+                };
+                let queue = match &snapshot {
+                    Some(snapshot) => snapshot.queue.clone(),
+                    None => queue::load_queue(conn)?,
+                };
+                if repaired_anchor {
+                    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+                }
                 let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
-                Ok(Json(json!({ "queue": queue })))
+                Ok(match snapshot {
+                    Some(snapshot) => Json(json!({
+                        "queue": queue,
+                        "playback_state": snapshot.state
+                    })),
+                    None => Json(json!({ "queue": queue })),
+                })
             })
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
