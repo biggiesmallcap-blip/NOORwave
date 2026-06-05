@@ -42,4 +42,20 @@ describe('remote route load contracts', () => {
 		expect(page).toContain('if (seq === loadSeq) {');
 		expect(page).toContain('tidalPictureUrl = null;');
 	});
+
+	test('remote library ignores stale dashboard and paginated tab responses', () => {
+		const page = source('library/+page.svelte');
+		expect(page).toContain('let dashboardLoadSeq = 0;');
+		expect(page).toContain('let artistsLoadSeq = 0;');
+		expect(page).toContain('let albumsLoadSeq = 0;');
+		expect(page).toContain('let tracksLoadSeq = 0;');
+		expect(page).toContain('const seq = ++dashboardLoadSeq;');
+		expect(page).toContain('const seq = ++artistsLoadSeq;');
+		expect(page).toContain('const seq = ++albumsLoadSeq;');
+		expect(page).toContain('const seq = ++tracksLoadSeq;');
+		expect(page).toContain('if (seq !== artistsLoadSeq) return;');
+		expect(page).toContain('if (seq === artistsLoadSeq) artistsLoading = false;');
+		expect(page).toContain('onDestroy(() => {');
+		expect(page).toContain('dashboardLoadSeq += 1;');
+	});
 });
