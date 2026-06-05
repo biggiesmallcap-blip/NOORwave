@@ -5882,6 +5882,116 @@ async fn tidal_video_playback_positive_id_still_requires_session() {
     );
 }
 
+#[tokio::test]
+async fn tidal_track_import_rejects_non_positive_tidal_ids_without_db_insert() {
+    let (db, db_path) = fresh_migrated_db();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    for tidal_id in [0, -7] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tidal/tracks/import")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{
+                            "tidal_id": {tidal_id},
+                            "title": "Invalid import",
+                            "artist_name": "Invalid Artist",
+                            "artist_tidal_id": null,
+                            "album_title": null,
+                            "album_tidal_id": null,
+                            "artwork_url": null,
+                            "duration_ms": 180000
+                        }}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "tidal_id: {tidal_id}"
+        );
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("positive TIDAL track id"),
+            "expected invalid track id error for {tidal_id}, got: {body}"
+        );
+    }
+
+    let count: i64 = db
+        .with_conn(|conn| {
+            Ok::<_, anyhow::Error>(
+                conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))?,
+            )
+        })
+        .expect("count tracks");
+    assert_eq!(count, 0, "invalid imports must not create track rows");
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn tidal_track_import_positive_id_preserves_response_shape() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/tidal/tracks/import")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "tidal_id": 880077,
+                        "title": "Imported TIDAL Track",
+                        "artist_name": "Import Artist",
+                        "artist_tidal_id": 990088,
+                        "album_title": "Import Album",
+                        "album_tidal_id": 770066,
+                        "artwork_url": "https://resources.tidal.com/images/import/640x640.jpg",
+                        "duration_ms": 181000
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["tidal_id"], 880077);
+    assert!(
+        body["local_id"].as_i64().unwrap_or_default() > 0,
+        "expected local_id in import response: {body}"
+    );
+    assert!(
+        body["artist_id"].as_i64().unwrap_or_default() > 0,
+        "expected artist_id in import response: {body}"
+    );
+    assert!(
+        body["album_id"].as_i64().unwrap_or_default() > 0,
+        "expected album_id in import response: {body}"
+    );
+}
+
 // Note: an integration test for the recover_tidal_session path on a 401 upstream
 // response is deferred - it requires intercepting the reqwest::Client, which
 // requires wiremock or a trait-based http client. Until that infra lands, the

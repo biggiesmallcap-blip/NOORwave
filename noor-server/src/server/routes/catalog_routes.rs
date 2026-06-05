@@ -1228,6 +1228,13 @@ pub(super) async fn import_tidal_track_for_radio(
     State(state): State<SharedState>,
     Json(body): Json<ImportTidalTrackBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if body.tidal_id <= 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Expected a positive TIDAL track id" })),
+        ));
+    }
+
     let db = {
         let s = state.read().await;
         s.db.clone()
