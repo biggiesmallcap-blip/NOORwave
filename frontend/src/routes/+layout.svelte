@@ -69,7 +69,11 @@
 	import { contextMenu, openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
-	import { currentQueueAnchorPosition, isQueueItemActive } from '$lib/player/queue_active';
+	import {
+		currentQueueAnchorItem,
+		currentQueueAnchorPosition,
+		isQueueItemActive,
+	} from '$lib/player/queue_active';
 	import { formatPlayerStreamDetail, formatResolutionShort } from '$lib/player/stream_display';
 	import { queueItemToTidalPlayable, trackToTidalPlayable } from '$lib/utils/track';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
@@ -1007,7 +1011,7 @@
 	// ─── Source attribution for now-playing card ─────────────────────────────
 	function attributionFor(track: { id: number } | null): string | null {
 		if (!track) return null;
-		const item = $playbackQueue.find((q) => q.track.id === track.id);
+		const item = currentQueueAnchorItem($playbackQueue, $currentTrack, $currentQueueItemId);
 		if (!item) return null;
 		const friendly = formatQueueSource(item.source);
 		// "Manual" / generic queue isn't worth surfacing.

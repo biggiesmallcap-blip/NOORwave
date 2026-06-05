@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { QueueItem, Track } from '$lib/api/client';
-import { currentQueueAnchorPosition, isQueueItemActive } from './queue_active';
+import { currentQueueAnchorItem, currentQueueAnchorPosition, isQueueItemActive } from './queue_active';
 
 function track(id: number, title: string): Track {
 	return {
@@ -91,5 +91,27 @@ describe('currentQueueAnchorPosition', () => {
 		const queue = [row(10, track(1, 'First'))];
 
 		expect(currentQueueAnchorPosition(queue, null, null)).toBeNull();
+	});
+});
+
+describe('currentQueueAnchorItem', () => {
+	it('returns the matching duplicate queue item for source attribution', () => {
+		const current = track(2, 'Current');
+		const queue = [
+			{ ...row(10, current), source: 'manual' },
+			{ ...row(11, current), source: 'automix' },
+		];
+
+		expect(currentQueueAnchorItem(queue, current, 11)?.source).toBe('automix');
+	});
+
+	it('returns the fallback current-track row when the queue item anchor is stale', () => {
+		const current = track(2, 'Current');
+		const queue = [
+			{ ...row(10, track(1, 'Stale Anchor')), source: 'manual' },
+			{ ...row(11, current), source: 'radio' },
+		];
+
+		expect(currentQueueAnchorItem(queue, current, 10)?.source).toBe('radio');
 	});
 });

@@ -8,7 +8,7 @@ function rowMatchesPendingCurrent(item: QueueItem): boolean {
 	return item.is_pending === true || item.track.id === 0;
 }
 
-function currentQueueAnchor(
+export function currentQueueAnchorItem(
 	queue: QueueItem[],
 	currentTrack: Track | null | undefined,
 	currentQueueItemId: number | null | undefined,
@@ -38,7 +38,7 @@ export function currentQueueAnchorPosition(
 	currentTrack: Track | null | undefined,
 	currentQueueItemId: number | null | undefined,
 ): number | null {
-	return currentQueueAnchor(queue, currentTrack, currentQueueItemId)?.position ?? null;
+	return currentQueueAnchorItem(queue, currentTrack, currentQueueItemId)?.position ?? null;
 }
 
 export function isQueueItemActive(
@@ -47,5 +47,5 @@ export function isQueueItemActive(
 	currentQueueItemId: number | null | undefined,
 	queue: QueueItem[],
 ): boolean {
-	return item.id === currentQueueAnchor(queue, currentTrack, currentQueueItemId)?.id;
+	return item.id === currentQueueAnchorItem(queue, currentTrack, currentQueueItemId)?.id;
 }
