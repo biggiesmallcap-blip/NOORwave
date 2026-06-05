@@ -20,11 +20,16 @@
 		buildTrackMenu,
 		type MenuTrack
 	} from '$lib/player/track_menu';
+	import { isQueueItemActive } from '$lib/player/queue_active';
 	import { openActionSheet } from '$lib/remote/action_sheet';
 	import { hapticAccent, hapticCommit, hapticTap } from '$lib/remote/haptics';
 	import { longPress } from '$lib/remote/long_press';
 
-	let { queue, currentTrack: current = null }: { queue: QueueItem[]; currentTrack?: Track | null } =
+	let {
+		queue,
+		currentTrack: current = null,
+		currentQueueItemId = null
+	}: { queue: QueueItem[]; currentTrack?: Track | null; currentQueueItemId?: number | null } =
 		$props();
 
 	// Optimistic reorder copy. While a drag is in progress we render this
@@ -53,7 +58,7 @@
 	}
 
 	function isCurrent(item: QueueItem): boolean {
-		return current?.id != null && item.track.id === current.id;
+		return isQueueItemActive(item, current, currentQueueItemId, displayQueue);
 	}
 
 	function openRowMenu(item: QueueItem) {
