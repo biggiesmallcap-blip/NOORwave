@@ -358,6 +358,23 @@ Backend-served dynamic detail route smoke passed on 2026-06-05:
   fallback attempts because rendered images were not broken and the requested
   TIDAL sizes were from the allowed set.
 
+API-only TIDAL album queue smoke passed on 2026-06-05:
+
+- Ran against a copied `noor.db` plus copied `.noor_secret` under
+  `.scratch/runtime`, then removed the scratch copy after the smoke. The live
+  user queue was not mutated.
+- Fetched `/api/tidal/albums/58520793/tracks` and queued the 45-track
+  `Anthology 2` response through `POST /api/queue/append_many`, not through a
+  playback-starting route.
+- Initial append returned 45 pending queue rows. After a 15 second resolver
+  window, `GET /api/playback/state` returned 45 queue rows, 0 pending rows, 45
+  rows with TIDAL ids, 45 rows with artwork, and 0 title-order mismatches.
+- Confirmed queue order started with `Real Love` and ended with
+  `Across The Universe`.
+- Confirmed `is_playing=false`, `current_track_id=null`, and
+  `current_queue_item_id=null`, so the no-audio queue path did not start
+  playback.
+
 Native shell and audio safety preflight passed without launching a second app
 instance:
 
@@ -501,6 +518,9 @@ Acceptance checks:
   album, and TIDAL artist detail routes with no broken image elements, no app
   request failures, no visible route error text, and no malformed TIDAL artwork
   requests.
+- Done: API-only queue smoke passed for the 45-track TIDAL album on a scratch
+  DB copy. The queue resolved to 45 artwork-backed TIDAL rows in order while
+  playback stayed stopped.
 - Done: non-invasive native shell and audio preflight confirmed the installed
   app/server were already running, the then-current server was actively playing,
   and a second launch could shut down the active sidecar.
@@ -521,8 +541,8 @@ Done:
 - Queue/runtime stall fixes, stale frontend intent guards, artwork fallback
   hardening, API timeout protection, transaction hardening, and runtime handoff
   tracing are implemented and committed. Expanded artwork route smoke, focused
-  Spotify detail route smoke, and backend-served dynamic detail route smoke
-  evidence are recorded in this report.
+  Spotify detail route smoke, backend-served dynamic detail route smoke, and
+  API-only TIDAL album queue smoke evidence are recorded in this report.
 
 Incomplete:
 
