@@ -35,26 +35,28 @@
 	let profile = $state<TidalArtistProfile | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	let loadSeq = 0;
+
+	async function load(id: number) {
+		const seq = ++loadSeq;
+		loading = true;
+		error = null;
+		profile = null;
+		try {
+			const next = await api.getTidalArtistProfile(id);
+			if (seq !== loadSeq) return;
+			profile = next;
+		} catch (e) {
+			if (seq !== loadSeq) return;
+			error = `Couldn't load artist from TIDAL: ${e}`;
+		} finally {
+			if (seq === loadSeq) loading = false;
+		}
+	}
 
 	$effect(() => {
 		const id = tidalArtistId;
-		let cancelled = false;
-		loading = true;
-		error = null;
-		void api
-			.getTidalArtistProfile(id)
-			.then((p) => {
-				if (!cancelled) profile = p;
-			})
-			.catch((e) => {
-				if (!cancelled) error = `Couldn't load artist from TIDAL: ${e}`;
-			})
-			.finally(() => {
-				if (!cancelled) loading = false;
-			});
-		return () => {
-			cancelled = true;
-		};
+		void load(id);
 	});
 
 	let portraitSources = $derived.by(() => {

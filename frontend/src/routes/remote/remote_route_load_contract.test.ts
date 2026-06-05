@@ -12,6 +12,7 @@ describe('remote route load contracts', () => {
 		['local album', source('albums/[id]/+page.svelte')],
 		['playlist', source('playlists/[id]/+page.svelte')],
 		['TIDAL album', source('tidal/albums/[id]/+page.svelte')],
+		['TIDAL artist', source('tidal/artists/[id]/+page.svelte')],
 	] as const;
 
 	test.each(guardedPages)('%s ignores stale route-load responses', (_name, page) => {
@@ -23,6 +24,13 @@ describe('remote route load contracts', () => {
 		expect(page).toContain('const id =');
 		expect(page).toContain('void load(id);');
 		expect(page).not.toContain('void load();');
+	});
+
+	test('TIDAL artist clears the previous profile while loading a new route', () => {
+		const page = source('tidal/artists/[id]/+page.svelte');
+		expect(page).toContain('profile = null;');
+		expect(page).toContain('api.getTidalArtistProfile(id)');
+		expect(page).not.toContain('let cancelled = false;');
 	});
 
 	test('local artist discography cannot overwrite a newer artist route', () => {
