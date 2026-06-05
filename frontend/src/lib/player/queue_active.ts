@@ -15,7 +15,10 @@ export function isQueueItemActive(
 	queue: QueueItem[],
 ): boolean {
 	if (currentQueueItemId == null) {
-		return currentTrack != null && rowMatchesTrack(item, currentTrack);
+		const fallback = currentTrack != null
+			? queue.find((row) => rowMatchesTrack(row, currentTrack))
+			: null;
+		return fallback != null && item.id === fallback.id;
 	}
 
 	const anchor = queue.find((row) => row.id === currentQueueItemId);
@@ -27,5 +30,8 @@ export function isQueueItemActive(
 		return item.id === currentQueueItemId;
 	}
 
-	return currentTrack != null && rowMatchesTrack(item, currentTrack);
+	const fallback = currentTrack != null
+		? queue.find((row) => rowMatchesTrack(row, currentTrack))
+		: null;
+	return fallback != null && item.id === fallback.id;
 }

@@ -38,6 +38,24 @@ describe('isQueueItemActive', () => {
 		expect(isQueueItemActive(queue[1], current, 10, queue)).toBe(true);
 	});
 
+	it('marks only the first current-track row when no queue item anchor exists', () => {
+		const current = track(2, 'Current');
+		const queue = [row(10, current), row(11, current), row(12, track(3, 'After'))];
+
+		expect(isQueueItemActive(queue[0], current, null, queue)).toBe(true);
+		expect(isQueueItemActive(queue[1], current, null, queue)).toBe(false);
+		expect(isQueueItemActive(queue[2], current, null, queue)).toBe(false);
+	});
+
+	it('marks only one duplicate row when the queue item anchor is stale', () => {
+		const current = track(2, 'Current');
+		const queue = [row(10, track(1, 'Stale Anchor')), row(11, current), row(12, current)];
+
+		expect(isQueueItemActive(queue[0], current, 10, queue)).toBe(false);
+		expect(isQueueItemActive(queue[1], current, 10, queue)).toBe(true);
+		expect(isQueueItemActive(queue[2], current, 10, queue)).toBe(false);
+	});
+
 	it('keeps unresolved pending current rows highlighted by queue item id', () => {
 		const pending = row(10, track(0, 'Resolving'), true);
 		const queue = [pending, row(11, track(2, 'Next'))];
