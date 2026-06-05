@@ -8446,8 +8446,23 @@ async fn clear_queue_route(State(state): State<SharedState>) -> Result<Json<Valu
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )?;
                 match (current_queue_item_id, current_track_id) {
-                    (Some(qid), _) => {
-                        conn.execute("DELETE FROM queue WHERE id != ?1", params![qid])?;
+                    (Some(qid), track_id) => {
+                        let current_row_exists = conn
+                            .query_row("SELECT 1 FROM queue WHERE id = ?1", params![qid], |_| {
+                                Ok(true)
+                            })
+                            .optional()?
+                            .unwrap_or(false);
+                        if current_row_exists {
+                            conn.execute("DELETE FROM queue WHERE id != ?1", params![qid])?;
+                        } else if let Some(track_id) = track_id {
+                            conn.execute(
+                                "DELETE FROM queue WHERE track_id != ?1",
+                                params![track_id],
+                            )?;
+                        } else {
+                            queue::clear_queue(conn)?;
+                        }
                     }
                     (None, Some(track_id)) => {
                         conn.execute("DELETE FROM queue WHERE track_id != ?1", params![track_id])?;

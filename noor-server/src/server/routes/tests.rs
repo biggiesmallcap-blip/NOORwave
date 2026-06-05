@@ -1820,6 +1820,73 @@ async fn clear_queue_preserves_only_current_queue_item_for_duplicate_track() {
 }
 
 #[tokio::test]
+async fn clear_queue_falls_back_to_track_id_when_current_queue_item_is_stale() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let stale_qid = 999_999_i64;
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source) VALUES (2, 1, 'user')",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE playback_state
+                 SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+                 WHERE id = 1",
+            rusqlite::params![stale_qid],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/playback/queue/clear")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    let queue = body["queue"].as_array().expect("queue array");
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0]["track"]["id"], 1);
+    assert_eq!(body["playback_state"]["current_track"]["id"], 1);
+    assert_eq!(body["playback_state"]["current_queue_item_id"], stale_qid);
+
+    let persisted_track_ids: Vec<i64> = db
+        .with_conn(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT track_id FROM queue ORDER BY position ASC, id ASC")?;
+            let ids = stmt
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(ids)
+        })
+        .unwrap();
+    assert_eq!(persisted_track_ids, vec![1]);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn remove_current_queue_item_advances_and_switches_runtime() {
     let (db, db_path) = fresh_migrated_db();
     seed_basic_tracks(&db);
