@@ -53,6 +53,9 @@ describe('queueItemToTidalPlayable', () => {
 			duration_ms: 180000,
 			artist_tidal_id: 1001,
 			album_tidal_id: 2002,
+			local_id: 42,
+			is_in_library: true,
+			is_favorite: false,
 		});
 	});
 });

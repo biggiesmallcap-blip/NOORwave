@@ -77,30 +77,13 @@
 			});
 			return;
 		}
-		// TIDAL ephemeral rows have a synthetic negative `id` but a real
-		// `tidal_id`. Library-menu nav items (Go to artist / Go to album)
-		// would be empty for them, so route through the TIDAL menu builder
-		// instead so the user gets `Go to <artist>` via `artist_tidal_id`.
 		const t = item.track;
-		const isTidalEphemeral = t.id <= 0 && !!t.tidal_id;
-		if (isTidalEphemeral) {
+		const tidal = queueItemToTidalPlayable(item);
+		if (tidal != null) {
 			openActionSheet({
 				title: t.title,
 				subtitle: t.artist_name,
-				items: buildTidalTrackMenu(
-					{
-						tidal_id: t.tidal_id!,
-						title: t.title,
-						artist_name: t.artist_name ?? null,
-						album_title: t.album_title ?? null,
-						artwork_url: t.artwork_url ?? null,
-						duration_ms: t.duration_ms ?? null,
-						artist_tidal_id: t.artist_tidal_id ?? null,
-						album_tidal_id: t.album_tidal_id ?? null,
-						is_favorite: t.is_favorite ?? false
-					},
-					{ inQueue: true, remoteRoutes: true }
-				)
+				items: buildTidalTrackMenu(tidal, { inQueue: true, remoteRoutes: true })
 			});
 			return;
 		}

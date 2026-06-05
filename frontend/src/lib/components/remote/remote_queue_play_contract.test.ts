@@ -11,8 +11,10 @@ describe('remote queue playback contract', () => {
 		expect(source).toContain('item.track.id > 0 || queueItemToTidalPlayable(item) != null');
 		expect(source).toContain('const tidal = queueItemToTidalPlayable(item);');
 		expect(source).toContain('tidal != null && item.id < 0');
+		expect(source).toContain('items: buildTidalTrackMenu(tidal, { inQueue: true, remoteRoutes: true })');
 		expect(source).toContain('await playTidalTrackNow(tidal);');
 		expect(source).toContain('await playTrackNow(item.track.id);');
 		expect(source).toContain('disabled={!canPlay(item) || isCurrent(item)}');
+		expect(source).not.toContain('t.id <= 0 && !!t.tidal_id');
 	});
 });

@@ -20,6 +20,7 @@ export function trackToTidalPlayable(track: Track): TidalPlayable | null {
 
 function trackWithTidalIdToPlayable(track: Track): TidalPlayable | null {
 	if (track.tidal_id == null || track.tidal_id <= 0) return null;
+	const localId = track.id > 0 ? track.id : null;
 	return {
 		tidal_id: track.tidal_id,
 		title: track.title,
@@ -29,6 +30,9 @@ function trackWithTidalIdToPlayable(track: Track): TidalPlayable | null {
 		duration_ms: track.duration_ms,
 		artist_tidal_id: track.artist_tidal_id ?? null,
 		album_tidal_id: track.album_tidal_id ?? null,
+		local_id: localId,
+		is_in_library: localId != null,
+		is_favorite: track.is_favorite ?? false,
 	};
 }
 
