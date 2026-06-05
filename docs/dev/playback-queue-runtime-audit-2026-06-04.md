@@ -6,10 +6,11 @@ sidecar launch from a stopped state is now verified with scratch data. A fresh
 installed-mode Tauri-owned sidecar launch from a stopped state is now verified
 with installed data. Installed Tauri WebView route screenshots for app shell,
 search, remote, and artwork-heavy routes are now verified through WebView2 CDP.
-Long provider-session behavior and audio finish or failure transitions remain
-not verified in this agent run. A local Chrome and Vite visible smoke for
-`/remote` and the remote album tile artwork fallback passed after the automated
-report was finalized.
+Live TIDAL seek-to-finish state advancement is now verified through the running
+installed app. Long provider-session behavior, human-audible local-track finish
+confirmation, and audio failure transitions remain not verified in this agent
+run. A local Chrome and Vite visible smoke for `/remote` and the remote album
+tile artwork fallback passed after the automated report was finalized.
 
 This report closes the automated audit work for queue advancement, runtime
 handoff, playlist injection, stale frontend playback intents, artwork fallback
@@ -476,6 +477,30 @@ Installed Tauri WebView route screenshot pass completed on 2026-06-05:
   smoke, and verified no NOOR processes, no port `3334` listener, and no
   WebView debug port listener remained.
 
+Live TIDAL finish-advancement state smoke passed on 2026-06-05:
+
+- Used the already-running installed app and backend with the connected TIDAL
+  account and default output device `Realtek Digital Output`.
+- Captured active playback before the finish smoke: current track
+  `Before Night Comes` by `slowhush`, TIDAL id `514496532`, duration
+  123,000 ms, position 33,208 ms. The expected next visible queue row was
+  `Azurit`, TIDAL id `518820497`.
+- Posted `POST /api/playback/position` with `position_ms=117000` and
+  `allow_segment_seek=true`, using the public product seek route to move near
+  the end of the current TIDAL track.
+- Polled `GET /api/playback/state` until the current track advanced. After 9
+  polls, playback reported `Azurit`, TIDAL id `518820497`, `position_ms=0`,
+  `is_playing=true`, and 98 visible queue rows.
+- Paused playback after the advancement check and confirmed
+  `is_playing=false` with current track `Azurit`.
+- Redacted log inspection showed the runtime was ready on the default output
+  device and TIDAL stream/prebuffer entries were emitted for the finishing
+  track and the next track. Raw log excerpts were not copied into this report
+  because they include local paths and setup-token lines.
+- This verifies the state and runtime path for live TIDAL finish advancement.
+  It does not independently prove human-audible output, a local-library finish
+  case, active decode failure, or prepared-next failure.
+
 Native shell and audio safety preflight passed without launching a second app
 instance:
 
@@ -639,9 +664,10 @@ Non-blocking warnings observed:
 
 ## Not Verified
 
-- Real audio-device playback for track finish, active decode failure, and
-  prepared-next failure. A scratch backend live album start/stop smoke is
-  verified above, but it does not cover finish or failure transitions.
+- Human-audible local-track finish confirmation, active decode failure, and
+  prepared-next failure. Scratch backend live album start/stop and live TIDAL
+  seek-to-finish state advancement are verified above, but they do not prove
+  human-audible output or the failure-transition paths.
 - Long real TIDAL provider sessions with ephemeral mixes, token refresh, and
   provider-side 403/429 behavior.
 
@@ -696,6 +722,10 @@ Acceptance checks:
   WebView target. All 10 routes produced non-zero screenshots, route-specific
   content, 0 page errors, 0 non-TIDAL request failures, 0 visible load-error or
   stale loading states, and 0 broken image elements.
+- Done: live TIDAL finish-advancement state smoke passed through the installed
+  app and public seek route. `Before Night Comes` advanced to the expected next
+  queued TIDAL track `Azurit`; playback was paused afterward and verified
+  stopped.
 - Done: non-invasive native shell and audio preflight confirmed the installed
   app/server were already running, the then-current server was actively playing,
   and a second launch could shut down the active sidecar.
@@ -720,8 +750,8 @@ Acceptance checks:
 - Done: focused no-audio backend overlay regression coverage passed for the
   loaded TIDAL album continuation queue, proving the visible queue keeps the
   44 pending album rows in order with artwork and no unrelated durable rows.
-- Not verified: audio-device finish and failure transitions, long live TIDAL
-  session behavior.
+- Not verified: human-audible local-track finish confirmation, audio failure
+  transitions, and long live TIDAL session behavior.
 
 Done:
 
@@ -732,15 +762,17 @@ Done:
   API-only plus live scratch TIDAL album queue and playback smoke evidence are
   recorded in this report. Fresh portable/release Tauri-owned sidecar startup
   and installed-mode Tauri-owned sidecar startup evidence are also recorded.
-  Installed Tauri WebView route screenshot evidence is recorded.
+  Installed Tauri WebView route screenshot evidence and live TIDAL
+  finish-advancement state evidence are recorded.
 
 Incomplete:
 
 - No known code path from the requested automated audit remains intentionally
   stubbed or partially wired.
 - Manual installed audio and provider transition smoke remains outside this
-  automated run because it still requires audio finish/failure checks and
-  long-provider-session behavior beyond sidecar startup and route rendering.
+  automated run because it still requires human-audible local-track finish,
+  failure-transition checks, and long-provider-session behavior beyond sidecar
+  startup, route rendering, and TIDAL state advancement.
 
 Follow-ups added to `FOLLOWUPS.md`: none.
 
@@ -750,6 +782,7 @@ Next checks before release:
   manual smoke checklist.
 - Run NOORwave through the Tauri-owned app path with a real TIDAL account and
   audio output.
+- Start a local-track queue and confirm finish advancement audibly.
 - Start a queue with pending rows, force an unresolved row, and confirm playback
   advances audibly.
 - Force an active stream failure and confirm the queue advances without dead
