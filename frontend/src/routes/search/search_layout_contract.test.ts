@@ -75,4 +75,13 @@ describe('search layout contracts', () => {
 		expect(source).toContain('void startTidalSongRadio(toPlayable(track))');
 		expect(source).not.toContain('void startTidalSongRadio(track)');
 	});
+
+	test('search track menus suppress native and row events', () => {
+		expect(source).toContain('function openTidalTrackContextMenu(event: MouseEvent, track: TidalSearchTrack)');
+		expect(source).toContain('event.preventDefault()');
+		expect(source).toContain('event.stopPropagation()');
+		expect(source).toContain('openContextMenu(event, trackContextMenu(track))');
+		expect(source).toContain('oncontextmenu={(e) => openTidalTrackContextMenu(e, track)}');
+		expect(source).toContain('onclick={(e) => openTidalTrackContextMenu(e, track)}');
+	});
 });

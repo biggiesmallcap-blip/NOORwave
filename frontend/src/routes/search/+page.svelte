@@ -844,6 +844,12 @@
     )
   }
 
+  function openTidalTrackContextMenu(event: MouseEvent, track: TidalSearchTrack) {
+    event.preventDefault()
+    event.stopPropagation()
+    openContextMenu(event, trackContextMenu(track))
+  }
+
   function canPlaySearchTrack(track: TidalSearchTrack): boolean {
     return canPlayTrack(toPlayable(track))
   }
@@ -1513,7 +1519,7 @@
                 onclick={() => canPlaySearchTrack(track) && void playTidalTrackNow(toPlayable(track))}
                 onmouseenter={() => { cursor = idx }}
                 onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), canPlaySearchTrack(track) && void playTidalTrackNow(toPlayable(track)))}
-                oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, trackContextMenu(track)) }}
+                oncontextmenu={(e) => openTidalTrackContextMenu(e, track)}
               >
                 <span class="col-num">
                   <span class="track-num-label">{idx + 1}</span>
@@ -1591,7 +1597,7 @@
                   >◎</button>
                   <button
                     class="row-btn"
-                    onclick={(e) => { e.stopPropagation(); openContextMenu(e, trackContextMenu(track)) }}
+                    onclick={(e) => openTidalTrackContextMenu(e, track)}
                     title="More options"
                     aria-label="More options"
                   >⋯</button>
@@ -1616,7 +1622,7 @@
               onclick={() => canPlaySearchTrack(track) && void playTidalTrackNow(toPlayable(track))}
               onmouseenter={() => { cursor = idx }}
               onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), canPlaySearchTrack(track) && void playTidalTrackNow(toPlayable(track)))}
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, trackContextMenu(track)) }}
+              oncontextmenu={(e) => openTidalTrackContextMenu(e, track)}
             >
               {#if track.artwork_url}
                 <ArtworkImage
@@ -1688,7 +1694,7 @@
                 >◎</button>
                 <button
                   class="row-btn"
-                  onclick={(e) => { e.stopPropagation(); openContextMenu(e, trackContextMenu(track)) }}
+                  onclick={(e) => openTidalTrackContextMenu(e, track)}
                   title="More options"
                   aria-label="More options"
                 >⋯</button>
