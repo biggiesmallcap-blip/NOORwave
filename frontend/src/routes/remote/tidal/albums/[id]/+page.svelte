@@ -23,6 +23,7 @@
 		const seq = ++loadSeq;
 		loading = true;
 		error = null;
+		tracks = [];
 		try {
 			const res = await api.getTidalAlbumTracks(id);
 			if (seq !== loadSeq) return;
