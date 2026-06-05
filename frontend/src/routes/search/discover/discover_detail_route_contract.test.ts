@@ -24,6 +24,9 @@ describe('TIDAL discover detail route contract', () => {
 		expect(source).toContain('openContextMenu(event, buildTidalTrackMenu(tidalHomeItemToPlayable(item)), item.title);');
 		expect(source).toContain('openContextMenu(event, buildAlbumMenu({');
 		expect(source).toContain('openContextMenu(event, buildArtistMenu({');
+		expect(source).toContain("label: 'Play playlist'");
+		expect(source).toContain('event.preventDefault();');
+		expect(source).toContain('event.stopPropagation();');
 		expect(source).not.toContain('$:');
 	});
 });

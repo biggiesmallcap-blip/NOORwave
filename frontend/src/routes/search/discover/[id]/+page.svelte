@@ -74,23 +74,39 @@
 	}
 
 	function handleContextMenu(event: MouseEvent, item: TidalHomeItem) {
-		if (item.kind !== 'track' && item.kind !== 'album') return;
+		if (item.kind !== 'track' && item.kind !== 'album' && item.kind !== 'playlist') return;
 		event.preventDefault();
 		event.stopPropagation();
 		if (item.kind === 'track') {
 			openContextMenu(event, buildTidalTrackMenu(tidalHomeItemToPlayable(item)), item.title);
 			return;
 		}
-		openContextMenu(event, buildAlbumMenu({
-			tidal_id: item.album_id ?? Number(item.id),
-			title: item.title,
-			artist_id: item.artist_id ?? null,
-			artist_name: item.artist_name ?? null,
-			in_library: false
-		}, { isLocal: false }), item.title);
+		if (item.kind === 'album') {
+			openContextMenu(event, buildAlbumMenu({
+				tidal_id: item.album_id ?? Number(item.id),
+				title: item.title,
+				artist_id: item.artist_id ?? null,
+				artist_name: item.artist_name ?? null,
+				in_library: false
+			}, { isLocal: false }), item.title);
+			return;
+		}
+		openContextMenu(
+			event,
+			[
+				{
+					label: 'Play playlist',
+					icon: 'â–¶',
+					onSelect: () => { void playTidalPlaylist(item.id); }
+				}
+			],
+			item.title
+		);
 	}
 
 	function openArtistContextMenu(event: MouseEvent, item: TidalHomeItem) {
+		event.preventDefault();
+		event.stopPropagation();
 		if (!item.artist_name) return;
 		openContextMenu(event, buildArtistMenu({
 			tidal_id: item.artist_id ?? null,
@@ -100,6 +116,8 @@
 	}
 
 	function openAlbumContextMenu(event: MouseEvent, item: TidalHomeItem) {
+		event.preventDefault();
+		event.stopPropagation();
 		if (!item.album_title || item.album_id == null) return;
 		openContextMenu(event, buildAlbumMenu({
 			tidal_id: item.album_id,
