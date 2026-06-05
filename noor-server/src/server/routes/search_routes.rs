@@ -38,6 +38,10 @@ pub(super) async fn search(
     Query(params): Query<SearchParams>,
 ) -> Result<Json<Value>, StatusCode> {
     let limit = clamp_i64_limit(params.limit, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX);
+    let query = params.q.trim().to_string();
+    if query.is_empty() {
+        return Ok(empty_search_response());
+    }
 
     // Snapshot what each side needs without holding the read lock across the
     // Sportify HTTP call.
@@ -53,7 +57,7 @@ pub(super) async fn search(
     // Local DB search and Sportify playlist search are independent: run them
     // concurrently. Local search must succeed (existing contract); Sportify is
     // best-effort (upstream may break).
-    let q = params.q.clone();
+    let q = query.clone();
     let db_for_local = db.clone();
     let local_fut = async move { db_for_local.with_conn(|conn| queries::search(conn, &q, limit)) };
 
@@ -63,13 +67,13 @@ pub(super) async fn search(
                 &client,
                 &db,
                 &cache_cfg,
-                &params.q,
+                &query,
                 limit.min(20).max(1) as u32,
             )
             .await
             .unwrap_or_else(|e| {
                 let error_text = e.to_string();
-                let warn_key = sportify_playlist_warn_key(&params.q, &error_text);
+                let warn_key = sportify_playlist_warn_key(&query, &error_text);
                 if claim_throttled_warn_slot(
                     sportify_playlist_warn_state(),
                     warn_key,
@@ -98,6 +102,15 @@ pub(super) async fn search(
         "artists": local.artists,
         "spotify_playlists": spotify_playlists,
     })))
+}
+
+fn empty_search_response() -> Json<Value> {
+    Json(json!({
+        "tracks": [],
+        "albums": [],
+        "artists": [],
+        "spotify_playlists": [],
+    }))
 }
 
 fn clamp_i64_limit(limit: Option<i64>, default: i64, max: i64) -> i64 {
@@ -267,6 +280,20 @@ mod tests {
         let a = sportify_playlist_warn_key("  DaFt PuNk ", "Sportify request failed: /api/search");
         let b = sportify_playlist_warn_key("daft punk", "sportify request failed: /api/search");
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn empty_search_response_keeps_route_payload_shape() {
+        let Json(body) = empty_search_response();
+        assert_eq!(
+            body,
+            json!({
+                "tracks": [],
+                "albums": [],
+                "artists": [],
+                "spotify_playlists": [],
+            })
+        );
     }
 
     #[test]
