@@ -460,11 +460,17 @@ Additional targeted verification for the malformed artwork fix:
   - This confirms the Tauri shell crate still compiles after the recovered
     audit branch changes. It does not replace the fresh app launch and
     Tauri-owned sidecar startup smoke.
+- `cargo check -p noor-server`
+  - Passed on 2026-06-05 after rerunning outside the sandbox because the first
+    sandboxed run could not write `target` metadata.
+  - Current warning count is one pre-existing WASAPI manual-review warning:
+    `ExclusiveRenderSource::role` is never read.
 
 Non-blocking warnings observed:
 
-- `cargo check -p noor-server` still emits pre-existing dead-code warnings in
-  backend query/playback modules. This audit did not address dead-code cleanup.
+- `cargo check -p noor-server` still emits one pre-existing dead-code warning
+  in `playback/wasapi_exclusive.rs`. WASAPI/output switching is a
+  manual-review boundary, so this audit did not remove that field.
 - Expanded viewport smoke observed provider or optional-data console errors for
   daily-chart TIDAL resolution, DiscoverSpace loading, Spotify stats, and some
   browser-blocked TIDAL image responses. These did not produce route failures,
@@ -535,6 +541,8 @@ Acceptance checks:
 - Done: installed native WebView smoke passed through the existing tray path
   without launching a second app or restarting the sidecar.
 - Done: `cargo check -p noor-app` passed as a no-launch Tauri shell preflight.
+- Done: `cargo check -p noor-server` passed with one pre-existing WASAPI
+  manual-review warning.
 - Partial: native WebView route navigation reached Genre Galaxy, Moods,
   Playlists, and Settings through existing sidebar controls without visible
   error text in accessibility samples.
