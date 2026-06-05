@@ -40,10 +40,12 @@
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let failedArtworkUrls = $state<Record<string, boolean>>({});
+	let loadSeq = 0;
 
 	let artistTracks = $state<Track[]>([]);
 	let moreLoading = $state(false);
 	let moreLoaded = $state(false);
+	let moreLoadSeq = 0;
 	let spotifyStats = $state<SpotifyTrackStats | null>(null);
 	let playcountByIsrc = $derived.by(() => {
 		const map = new Map<string, number>();
@@ -61,51 +63,60 @@
 		}
 	};
 
-	async function load() {
+	async function load(id: number) {
+		const seq = ++loadSeq;
 		loading = true;
 		error = null;
 		try {
-			const res = await cachedApi.getAlbumTracks(albumId);
+			const res = await cachedApi.getAlbumTracks(id);
+			if (seq !== loadSeq) return;
 			tracks = res.tracks;
 			tidalOnlyTracks = res.tidal_tracks ?? [];
 			albumTidalId = res.album_tidal_id ?? null;
 		} catch (err) {
+			if (seq !== loadSeq) return;
 			error = `Failed to load album: ${err}`;
 		} finally {
-			loading = false;
+			if (seq === loadSeq) loading = false;
 		}
 	}
 
 	$effect(() => {
-		albumId;
+		const id = albumId;
 		failedArtworkUrls = {};
+		tracks = [];
 		tidalOnlyTracks = [];
 		albumTidalId = null;
-		void load();
+		void load(id);
 		artistTracks = [];
 		moreLoaded = false;
 		moreLoading = false;
+		moreLoadSeq += 1;
 		spotifyStats = null;
-		void loadSpotifyStats(albumId);
+		void loadSpotifyStats(id);
 	});
 
 	$effect(() => {
 		const artistId = tracks[0]?.artist_id;
+		const sourceAlbumId = albumId;
 		if (artistId != null && !moreLoaded && !moreLoading) {
-			void loadMore(artistId);
+			void loadMore(artistId, sourceAlbumId);
 		}
 	});
 
-	async function loadMore(artistId: number) {
+	async function loadMore(artistId: number, sourceAlbumId: number) {
+		const seq = ++moreLoadSeq;
 		moreLoading = true;
 		try {
 			const res = await cachedApi.getArtistTracks(artistId);
+			if (seq !== moreLoadSeq || albumId !== sourceAlbumId) return;
 			artistTracks = res.tracks;
 			moreLoaded = true;
 		} catch (err) {
+			if (seq !== moreLoadSeq || albumId !== sourceAlbumId) return;
 			console.error('Failed to load artist tracks', err);
 		} finally {
-			moreLoading = false;
+			if (seq === moreLoadSeq) moreLoading = false;
 		}
 	}
 
