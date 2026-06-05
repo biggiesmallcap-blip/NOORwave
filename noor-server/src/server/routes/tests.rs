@@ -449,6 +449,33 @@ fn video_stream_error_mapping_preserves_upstream_http_status_details() {
 }
 
 #[test]
+fn tidal_video_mix_id_normalization_allows_safe_ids() {
+    assert_eq!(normalize_tidal_video_mix_id("abc123").unwrap(), "abc123");
+    assert_eq!(
+        normalize_tidal_video_mix_id("  video_mix-01  ").unwrap(),
+        "video_mix-01"
+    );
+}
+
+#[test]
+fn tidal_video_mix_id_normalization_rejects_url_control_characters() {
+    for id in [
+        "",
+        "../home",
+        "mix/items",
+        "mix?limit=1",
+        "mix&includeTypes=Track",
+        "mix#fragment",
+        "mix id",
+    ] {
+        assert_eq!(
+            normalize_tidal_video_mix_id(id),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+}
+
+#[test]
 fn tidal_status_payload_reports_pkce_source_only_for_pkce_tokens() {
     let tokens = test_tidal_tokens(Some("pkce"));
 

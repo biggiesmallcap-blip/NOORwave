@@ -9492,6 +9492,21 @@ fn tidal_video_to_resp(video: TidalSearchVideo) -> TidalSearchVideoResp {
     }
 }
 
+const TIDAL_VIDEO_MIX_ID_MAX_LEN: usize = 96;
+
+fn normalize_tidal_video_mix_id(id: &str) -> Result<&str, StatusCode> {
+    let trimmed = id.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > TIDAL_VIDEO_MIX_ID_MAX_LEN
+        || !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(trimmed)
+}
+
 async fn tidal_request_tokens(
     state: &SharedState,
 ) -> Result<Option<tidal_auth::TidalTokens>, (StatusCode, Json<Value>)> {
@@ -9775,6 +9790,13 @@ async fn tidal_video_mix_items(
     State(state): State<SharedState>,
     Path(mix_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mix_id = normalize_tidal_video_mix_id(&mix_id).map_err(|status| {
+        (
+            status,
+            Json(json!({ "error": "invalid TIDAL video mix id" })),
+        )
+    })?;
+
     let Some(tokens) = tidal_request_tokens(&state).await? else {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -9791,7 +9813,7 @@ async fn tidal_video_mix_items(
         tokens.access_token.clone(),
         tokens.country_code.clone(),
     );
-    let items = match client.get_video_mix_items(&mix_id).await {
+    let items = match client.get_video_mix_items(mix_id).await {
         Ok(items) => items,
         Err(e) if error_looks_like_auth(&e) => {
             let refreshed = recover_tidal_session(&state, &http_client, &tokens)
@@ -9808,7 +9830,7 @@ async fn tidal_video_mix_items(
                 refreshed.country_code.clone(),
             );
             retry_client
-                .get_video_mix_items(&mix_id)
+                .get_video_mix_items(mix_id)
                 .await
                 .map_err(|e2| {
                     (
