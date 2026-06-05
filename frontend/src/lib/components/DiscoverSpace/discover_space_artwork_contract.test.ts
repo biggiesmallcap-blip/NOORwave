@@ -36,4 +36,15 @@ describe('DiscoverSpace artwork contracts', () => {
 		expect(sidePanel).not.toContain('<img class="artwork"');
 		expect(sidePanel).not.toContain('<img class="idle-artwork"');
 	});
+
+	test('keeps pending TIDAL resolutions bound to the selected node snapshot', () => {
+		expect(sidePanel).toContain('function updateNodePlayable(trackId: number, playable: PlayableTrack)');
+		expect(sidePanel).toContain('if (node?.trackId === trackId)');
+		expect(sidePanel).toContain('artwork_url: hit.artwork_url ?? targetNode.artworkUrl ?? null');
+		expect(sidePanel).toContain('updateNodePlayable(targetNode.trackId, resolved)');
+		expect(sidePanel).toContain('const targetNode = node;');
+		expect(sidePanel).toContain('const playable = await resolveExternalPlayable(targetNode, basePlayable);');
+		expect(sidePanel).toContain("showToast(`Couldn't find \"${targetNode.title}\" on Tidal`, 'error');");
+		expect(sidePanel).not.toContain('artwork_url: hit.artwork_url ?? node?.artworkUrl ?? null');
+	});
 });
