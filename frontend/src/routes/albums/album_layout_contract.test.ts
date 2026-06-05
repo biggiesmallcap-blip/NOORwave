@@ -48,6 +48,13 @@ describe('album page layout contracts', () => {
 		expect(source).not.toContain('src={album.artwork_url}');
 	});
 
+	test('uses the shared TIDAL discography playable mapper for TIDAL-only rows', () => {
+		expect(source).toContain("import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';");
+		expect(source).toContain('{@const playable = tidalDiscographyTrackToPlayable(track)}');
+		expect(source).not.toContain('type TidalPlayable');
+		expect(source).not.toContain('function tidalDiscographyTrackToPlayable(t: TidalDiscographyTrack)');
+	});
+
 	test('keeps route copy and comments ASCII-safe', () => {
 		expect(source).not.toMatch(/\u2014/);
 		expect(source).not.toMatch(/[\u2500-\u257F]/);

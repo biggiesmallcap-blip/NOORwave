@@ -47,8 +47,18 @@ describe('artist page layout contracts', () => {
 		expect(source).toContain('playTidalTracksNow');
 		expect(source).toContain('async function ensureTidalTopTracksForPlayback()');
 		expect(source).toContain('if (tracks.length > 0)');
+		expect(source).toContain('const playable = topTracks.map(artistTrackPlayable)');
 		expect(source).toContain('await playTidalTracksNow(playable, artist?.name ?? \'artist\')');
 		expect(source).toContain('await playArtist(artistId)');
+	});
+
+	test('uses the shared TIDAL discography playable mapper with the artist fallback id', () => {
+		expect(source).toContain("import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';");
+		expect(source).toContain('function artistTrackPlayable(track: TidalDiscographyTrack)');
+		expect(source).toContain("tidalDiscographyTrackToPlayable(track, { artistTidalId: artist?.tidal_id ?? null })");
+		expect(source).toContain('{@const playable = artistTrackPlayable(track)}');
+		expect(source).not.toContain('type TidalPlayable');
+		expect(source).not.toContain('function tidalDiscographyTrackToPlayable(t: TidalDiscographyTrack)');
 	});
 
 	test('keeps route copy and comments ASCII-safe', () => {

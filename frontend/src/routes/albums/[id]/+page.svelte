@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import type { Snapshot } from './$types';
-	import { type Track, type TidalDiscographyTrack, type TidalPlayable, type SpotifyTrackStats } from '$lib/api/client';
+	import { type Track, type TidalDiscographyTrack, type SpotifyTrackStats } from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
 	import {
 		playAlbum,
@@ -30,6 +30,7 @@
 		type TidalArtworkSize,
 	} from '$lib/utils/artwork';
 	import { formatTotalDuration } from '$lib/utils/format';
+	import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';
 
 	let albumId = $derived(Number(page.params.id));
 
@@ -197,19 +198,6 @@
 		} else {
 			void playAlbum(albumId);
 		}
-	}
-
-	function tidalDiscographyTrackToPlayable(t: TidalDiscographyTrack): TidalPlayable {
-		return {
-			tidal_id: t.tidal_id,
-			title: t.title,
-			artist_name: t.artist_name ?? null,
-			album_title: t.album_title,
-			artwork_url: t.artwork_url,
-			duration_ms: t.duration_ms,
-			artist_tidal_id: t.artist_tidal_id ?? null,
-			album_tidal_id: t.album_tidal_id ?? null,
-		};
 	}
 
 	let isAlbumPlaying = $derived(

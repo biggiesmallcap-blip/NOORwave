@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import type { Snapshot } from './$types';
-	import { type Track, type TidalDiscographyAlbum, type TidalDiscographyTrack, type TidalArtistVideo, type TidalSimilarArtist, type TidalArtistBio, type SpotifyArtistStats, type TidalPlayable } from '$lib/api/client';
+	import { type Track, type TidalDiscographyAlbum, type TidalDiscographyTrack, type TidalArtistVideo, type TidalSimilarArtist, type TidalArtistBio, type SpotifyArtistStats } from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
 	import { letterColor } from '$lib/utils/color';
 	import {
@@ -33,6 +33,7 @@
 		type TidalArtworkSize,
 	} from '$lib/utils/artwork';
 	import { formatCompactCount } from '$lib/utils/format';
+	import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';
 	import { cleanArtistBio } from '../artist_bio';
 	import { artistCurrentTrackMatchesArtist } from '../artist_playback';
 
@@ -268,17 +269,8 @@
 	);
 	let totalPopularCandidates = $derived(libraryPopular.length + tidalOnlyTopTracks.length);
 
-	function tidalDiscographyTrackToPlayable(t: TidalDiscographyTrack): TidalPlayable {
-		return {
-			tidal_id: t.tidal_id,
-			title: t.title,
-			artist_name: t.artist_name ?? artist?.name ?? null,
-			album_title: t.album_title,
-			artwork_url: t.artwork_url,
-			duration_ms: t.duration_ms,
-			artist_tidal_id: artist?.tidal_id ?? null,
-			album_tidal_id: t.album_tidal_id ?? null,
-		};
+	function artistTrackPlayable(track: TidalDiscographyTrack) {
+		return tidalDiscographyTrackToPlayable(track, { artistTidalId: artist?.tidal_id ?? null });
 	}
 
 	function artistInitials(name: string): string {
@@ -417,7 +409,7 @@
 		heroPlayPending = true;
 		try {
 			const topTracks = await ensureTidalTopTracksForPlayback();
-			const playable = topTracks.map(tidalDiscographyTrackToPlayable);
+			const playable = topTracks.map(artistTrackPlayable);
 			if (playable.length > 0) {
 				await playTidalTracksNow(playable, artist?.name ?? 'artist');
 			} else {
@@ -755,7 +747,7 @@
 						</div>
 					{/each}
 					{#each filteredTidalPopular as track, idx (`tidal-${track.tidal_id}`)}
-						{@const playable = tidalDiscographyTrackToPlayable(track)}
+						{@const playable = artistTrackPlayable(track)}
 						{@const playable_ok = canPlayTrack(playable)}
 						{@const trackArt = artworkCandidate(track.artwork_url, 320)}
 						<!-- TIDAL-only top track. Renders inline (matches popular-list height)
