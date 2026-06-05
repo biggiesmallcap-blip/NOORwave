@@ -13,16 +13,23 @@ function routeSource(route: string): string {
 
 describe('TIDAL editorial page routes', () => {
 	test('loads modules through the whitelisted generic TIDAL page API', () => {
-		expect(component).toContain('api.getTidalPage(pagePath)');
+		expect(component).toContain('api.getTidalPage(requestedPagePath)');
 		expect(component).toContain('TidalDiscoverShelves');
 		expect(component).toContain('PageHeader');
 		expect(component).toContain("viewState === 'disconnected'");
 		expect(component).toContain('e instanceof ApiError && e.status === 503');
 		expect(component).toContain('let loadSeq = 0;');
-		expect(component).toContain('return () => { loadSeq += 1; };');
+		expect(component).toContain('let pendingPagePath = $state<string | null>(null);');
+		expect(component).toContain('let loadedPagePath = $state<string | null>(null);');
+		expect(component).toContain('onDestroy(() => {');
+		expect(component).toContain('void load(currentPagePath);');
+		expect(component).toContain('const requestedPagePath = targetPagePath ?? pagePath;');
+		expect(component).toContain('if (inFlight && pendingPagePath === requestedPagePath) return;');
 		expect(component).toContain('const seq = ++loadSeq;');
-		expect(component).toContain('if (seq !== loadSeq) return;');
-		expect(component).toContain('if (seq === loadSeq) inFlight = false;');
+		expect(component).toContain('if (seq !== loadSeq || requestedPagePath !== pagePath) return;');
+		expect(component).toContain('if (seq === loadSeq) {');
+		expect(component).toContain('pendingPagePath = null;');
+		expect(component).toContain('onclick={() => void load()}');
 		expect(component).not.toContain('$:');
 	});
 

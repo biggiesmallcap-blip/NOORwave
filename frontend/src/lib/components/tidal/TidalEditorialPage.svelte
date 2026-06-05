@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount, untrack } from 'svelte';
+	import { onDestroy, untrack } from 'svelte';
 	import { ApiError, api, type TidalHomeModule } from '$lib/api/client';
 	import { tidalStatus } from '$lib/stores/tidal';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
@@ -31,37 +31,64 @@
 	let viewState = $state<ViewState>('loading');
 	let inFlight = false;
 	let loadSeq = 0;
+	let pendingPagePath = $state<string | null>(null);
+	let loadedPagePath = $state<string | null>(null);
 
-	onMount(() => {
-		void load();
-		return () => { loadSeq += 1; };
+	onDestroy(() => {
+		loadSeq += 1;
 	});
 
 	$effect(() => {
-		if ($tidalStatus !== 'connected') return;
+		const currentPagePath = pagePath;
+		if ($tidalStatus !== 'connected') {
+			loadSeq += 1;
+			inFlight = false;
+			pendingPagePath = null;
+			loadedPagePath = null;
+			modules = [];
+			viewState = 'disconnected';
+			return;
+		}
+
+		const pending = untrack(() => pendingPagePath);
+		const loaded = untrack(() => loadedPagePath);
 		const cur = untrack(() => viewState);
-		if (cur !== 'loading' && cur !== 'ready') void load();
+		if (pending !== currentPagePath && loaded !== currentPagePath) {
+			void load(currentPagePath);
+		} else if (pending !== currentPagePath && cur !== 'loading' && cur !== 'ready') {
+			void load(currentPagePath);
+		}
 	});
 
-	async function load() {
-		if (inFlight) return;
+	async function load(targetPagePath: string | null = null) {
+		const requestedPagePath = targetPagePath ?? pagePath;
+		if (inFlight && pendingPagePath === requestedPagePath) return;
 		const seq = ++loadSeq;
 		inFlight = true;
-		if (modules.length === 0) viewState = 'loading';
+		pendingPagePath = requestedPagePath;
+		if (modules.length === 0 || loadedPagePath !== requestedPagePath) {
+			modules = [];
+			viewState = 'loading';
+		}
 		try {
-			const data = await api.getTidalPage(pagePath);
-			if (seq !== loadSeq) return;
+			const data = await api.getTidalPage(requestedPagePath);
+			if (seq !== loadSeq || requestedPagePath !== pagePath) return;
 			modules = data.modules ?? [];
+			loadedPagePath = requestedPagePath;
 			viewState = modules.length > 0 ? 'ready' : 'empty';
 		} catch (e) {
-			if (seq !== loadSeq) return;
+			if (seq !== loadSeq || requestedPagePath !== pagePath) return;
+			loadedPagePath = requestedPagePath;
 			if (e instanceof ApiError && e.status === 503) {
 				viewState = 'disconnected';
 			} else {
 				viewState = 'error';
 			}
 		} finally {
-			if (seq === loadSeq) inFlight = false;
+			if (seq === loadSeq) {
+				inFlight = false;
+				pendingPagePath = null;
+			}
 		}
 	}
 </script>
@@ -76,11 +103,11 @@
 	{:else if viewState === 'ready'}
 		<TidalDiscoverShelves {modules} />
 	{:else if viewState === 'empty'}
-		<p class="muted-line">{emptyText} <button class="inline-link" onclick={load}>Retry</button></p>
+		<p class="muted-line">{emptyText} <button class="inline-link" onclick={() => void load()}>Retry</button></p>
 	{:else if viewState === 'disconnected'}
 		<p class="muted-line">{disconnectedText} <a class="inline-link" href="/settings#sources-tidal">Open settings</a></p>
 	{:else if viewState === 'error'}
-		<p class="muted-line">{errorText} <button class="inline-link" onclick={load}>Retry</button></p>
+		<p class="muted-line">{errorText} <button class="inline-link" onclick={() => void load()}>Retry</button></p>
 	{/if}
 </div>
 
