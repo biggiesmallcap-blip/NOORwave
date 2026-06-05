@@ -18,6 +18,11 @@ describe('TIDAL editorial page routes', () => {
 		expect(component).toContain('PageHeader');
 		expect(component).toContain("viewState === 'disconnected'");
 		expect(component).toContain('e instanceof ApiError && e.status === 503');
+		expect(component).toContain('let loadSeq = 0;');
+		expect(component).toContain('return () => { loadSeq += 1; };');
+		expect(component).toContain('const seq = ++loadSeq;');
+		expect(component).toContain('if (seq !== loadSeq) return;');
+		expect(component).toContain('if (seq === loadSeq) inFlight = false;');
 		expect(component).not.toContain('$:');
 	});
 

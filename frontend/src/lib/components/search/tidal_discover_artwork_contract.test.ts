@@ -9,6 +9,17 @@ function readSource(path: string): string {
 }
 
 describe('TIDAL discover artwork rendering contract', () => {
+	it('guards home discover shelf loads against stale responses', () => {
+		const source = readSource('lib/components/search/DiscoverShelves.svelte');
+
+		expect(source).toContain('let loadSeq = 0;');
+		expect(source).toContain('return () => { loadSeq += 1; };');
+		expect(source).toContain('const seq = ++loadSeq;');
+		expect(source).toContain('if (seq !== loadSeq) return;');
+		expect(source).toContain('const nextModules = data.modules ?? [];');
+		expect(source).toContain('putCachedHomeModules(nextModules)');
+	});
+
 	it('routes home shelf artwork through ArtworkImage with a fallback', () => {
 		const source = readSource('lib/components/search/TidalDiscoverShelves.svelte');
 

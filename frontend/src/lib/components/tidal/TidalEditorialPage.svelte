@@ -30,9 +30,11 @@
 	let modules = $state<TidalHomeModule[]>([]);
 	let viewState = $state<ViewState>('loading');
 	let inFlight = false;
+	let loadSeq = 0;
 
 	onMount(() => {
 		void load();
+		return () => { loadSeq += 1; };
 	});
 
 	$effect(() => {
@@ -43,20 +45,23 @@
 
 	async function load() {
 		if (inFlight) return;
+		const seq = ++loadSeq;
 		inFlight = true;
 		if (modules.length === 0) viewState = 'loading';
 		try {
 			const data = await api.getTidalPage(pagePath);
+			if (seq !== loadSeq) return;
 			modules = data.modules ?? [];
 			viewState = modules.length > 0 ? 'ready' : 'empty';
 		} catch (e) {
+			if (seq !== loadSeq) return;
 			if (e instanceof ApiError && e.status === 503) {
 				viewState = 'disconnected';
 			} else {
 				viewState = 'error';
 			}
 		} finally {
-			inFlight = false;
+			if (seq === loadSeq) inFlight = false;
 		}
 	}
 </script>
