@@ -55,6 +55,8 @@ export function tidalSearchTrackToPlayable(track: TidalSearchTrack): TidalPlayab
 		...track,
 		artist_tidal_id: track.artist_id ?? null,
 		album_tidal_id: track.album_tidal_id ?? null,
+		local_id: track.local_id ?? null,
+		is_in_library: track.in_library,
 	};
 }
 

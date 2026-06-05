@@ -33,4 +33,14 @@ describe('remote mini search contracts', () => {
 		expect(source).not.toContain("import { upscaleTidalArtwork } from '$lib/utils/artwork';");
 		expect(source).not.toMatch(/<img[\s\S]*(artwork_url|upscaleTidalArtwork)/);
 	});
+
+	test('normalizes TIDAL search rows before menu, play, or queue actions', () => {
+		expect(source).toContain("import { tidalSearchTrackToPlayable } from '$lib/utils/track';");
+		expect(source).toContain('const playable = tidalSearchTrackToPlayable(track);');
+		expect(source).toContain('items: buildTidalTrackMenu(playable, { remoteRoutes: true })');
+		expect(source).toContain('await playTidalTrackNow(tidalSearchTrackToPlayable(track));');
+		expect(source).toContain('await addTidalTrackToQueue(tidalSearchTrackToPlayable(track));');
+		expect(source).not.toContain('await playTidalTrackNow(track);');
+		expect(source).not.toContain('await addTidalTrackToQueue(track);');
+	});
 });

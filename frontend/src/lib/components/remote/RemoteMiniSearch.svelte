@@ -12,6 +12,7 @@
 		normalizeRemoteSearchQuery,
 		shouldRunRemoteSearch
 	} from '$lib/remote/search';
+	import { tidalSearchTrackToPlayable } from '$lib/utils/track';
 	import { showToast } from '$lib/stores/toast';
 	import { hapticTap } from '$lib/remote/haptics';
 	import { longPress } from '$lib/remote/long_press';
@@ -171,28 +172,11 @@
 
 	function openTidalMenu(track: TidalSearchTrack) {
 		close();
-		// TidalSearchTrack stores the TIDAL artist id in `artist_id` (it's the
-		// raw TIDAL API field), but buildTidalTrackMenu reads `artist_tidal_id`
-		// to build the "Go to artist" nav item. Map it across or the menu
-		// silently drops the nav.
+		const playable = tidalSearchTrackToPlayable(track);
 		openActionSheet({
 			title: track.title,
 			subtitle: track.artist_name,
-			items: buildTidalTrackMenu(
-				{
-					tidal_id: track.tidal_id,
-					title: track.title,
-					artist_name: track.artist_name,
-					album_title: track.album_title,
-					artwork_url: track.artwork_url,
-					duration_ms: track.duration_ms,
-					artist_tidal_id: track.artist_id ?? null,
-					album_tidal_id: track.album_tidal_id ?? null,
-					local_id: track.local_id ?? null,
-					is_in_library: track.in_library
-				},
-				{ remoteRoutes: true }
-			)
+			items: buildTidalTrackMenu(playable, { remoteRoutes: true })
 		});
 	}
 
@@ -224,13 +208,13 @@
 	}
 
 	async function pickTidal(track: TidalSearchTrack) {
-		await playTidalTrackNow(track);
+		await playTidalTrackNow(tidalSearchTrackToPlayable(track));
 		close();
 	}
 
 	async function queueTidal(track: TidalSearchTrack, event: Event) {
 		event.stopPropagation();
-		await addTidalTrackToQueue(track);
+		await addTidalTrackToQueue(tidalSearchTrackToPlayable(track));
 		showToast(`Queued ${track.title}`, 'info');
 	}
 

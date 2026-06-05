@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'vitest';
-import type { QueueItem, TidalHomeItem, Track } from '$lib/api/client';
-import { queueItemToTidalPlayable, tidalHomeItemToPlayable, trackToTidalPlayable } from './track';
+import type { QueueItem, TidalHomeItem, TidalSearchTrack, Track } from '$lib/api/client';
+import {
+	queueItemToTidalPlayable,
+	tidalHomeItemToPlayable,
+	tidalSearchTrackToPlayable,
+	trackToTidalPlayable,
+} from './track';
 
 const baseTrack: Track = {
 	id: 42,
@@ -99,6 +104,33 @@ describe('tidalHomeItemToPlayable', () => {
 			duration_ms: 212000,
 			artist_tidal_id: 456,
 			album_tidal_id: 789,
+		});
+	});
+});
+
+describe('tidalSearchTrackToPlayable', () => {
+	test('maps raw TIDAL search metadata to the shared playable shape', () => {
+		const track: TidalSearchTrack = {
+			tidal_id: 909,
+			title: 'Search Track',
+			duration_ms: 210000,
+			artist_id: 303,
+			artist_name: 'Search Artist',
+			album_title: 'Search Album',
+			album_tidal_id: 404,
+			artwork_url: 'https://resources.tidal.com/images/search/320x320.jpg',
+			audio_quality: 'LOSSLESS',
+			stream_ready: true,
+			local_id: 55,
+			in_library: true,
+		};
+
+		expect(tidalSearchTrackToPlayable(track)).toEqual({
+			...track,
+			artist_tidal_id: 303,
+			album_tidal_id: 404,
+			local_id: 55,
+			is_in_library: true,
 		});
 	});
 });
