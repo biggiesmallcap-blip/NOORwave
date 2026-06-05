@@ -53,6 +53,7 @@
 	let tracks = $state<Track[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	let loadSeq = 0;
 
 	// View-time fallback when our local artist row has no `photo_url`.
 	// Populated from `tidal_artist_profile.picture_url`. Cleared on artist
@@ -67,8 +68,10 @@
 	let tidalLoading = $state(false);
 	let tidalAvailable = $state(false);
 	let failedArtworkUrls = $state<Record<string, boolean>>({});
+	let tidalLoadSeq = 0;
 
 	let spotifyStats = $state<SpotifyArtistStats | null>(null);
+	let spotifyLoadSeq = 0;
 	let playcountByIsrc = $derived.by(() => {
 		const map = new Map<string, number>();
 		for (const t of spotifyStats?.tracks ?? []) {
@@ -85,7 +88,8 @@
 		}
 	};
 
-	async function load() {
+	async function load(id: number) {
+		const seq = ++loadSeq;
 		loading = true;
 		error = null;
 		try {
@@ -93,9 +97,10 @@
 			// fetched in parallel with the artist's local tracks. Either failure
 			// is non-fatal; the page can render with whichever resolved.
 			const [artistRes, tracksRes] = await Promise.allSettled([
-				cachedApi.getArtist(artistId),
-				cachedApi.getArtistTracks(artistId),
+				cachedApi.getArtist(id),
+				cachedApi.getArtistTracks(id),
 			]);
+			if (seq !== loadSeq) return;
 			if (artistRes.status === 'fulfilled') {
 				artist = artistRes.value;
 			} else {
@@ -110,16 +115,16 @@
 				}
 			}
 		} finally {
-			loading = false;
+			if (seq === loadSeq) loading = false;
 		}
 	}
 
-	async function loadDiscography() {
+	async function loadDiscography(id: number) {
+		const seq = ++tidalLoadSeq;
 		tidalLoading = true;
-		const requestedFor = artistId;
 		try {
-			const res = await cachedApi.getArtistDiscography(artistId);
-			if (artistId !== requestedFor) return;
+			const res = await cachedApi.getArtistDiscography(id);
+			if (seq !== tidalLoadSeq) return;
 			tidalAlbums = res.albums;
 			tidalTopTracks = res.top_tracks ?? [];
 			tidalVideos = res.videos ?? [];
@@ -131,24 +136,29 @@
 			// renders a proper hero portrait instead of the initials disc.
 			if (res.picture_url) tidalPictureUrl = res.picture_url;
 		} catch (err) {
+			if (seq !== tidalLoadSeq) return;
 			console.error('Failed to load TIDAL discography', err);
 		} finally {
-			tidalLoading = false;
+			if (seq === tidalLoadSeq) tidalLoading = false;
 		}
 	}
 
-	async function loadSpotifyStats() {
+	async function loadSpotifyStats(id: number) {
+		const seq = ++spotifyLoadSeq;
 		try {
-			spotifyStats = await cachedApi.getArtistSpotifyStats(artistId);
+			const stats = await cachedApi.getArtistSpotifyStats(id);
+			if (seq === spotifyLoadSeq) spotifyStats = stats;
 		} catch (err) {
+			if (seq !== spotifyLoadSeq) return;
 			console.error('Failed to load Spotify stats', err);
 			spotifyStats = null;
 		}
 	}
 
 	$effect(() => {
-		artistId;
+		const id = artistId;
 		artist = null;
+		tracks = [];
 		tidalPictureUrl = null;
 		tidalAlbums = [];
 		tidalTopTracks = [];
@@ -159,9 +169,9 @@
 		spotifyStats = null;
 		failedArtworkUrls = {};
 		bioExpanded = false;
-		void load();
-		void loadDiscography();
-		void loadSpotifyStats();
+		void load(id);
+		void loadDiscography(id);
+		void loadSpotifyStats(id);
 	});
 
 	// Header sources from the artist row when available; falls back to the
@@ -379,11 +389,10 @@
 	let fallbackSinglesEPs = $derived(fallbackAlbums.filter((a) => a.tracks.length < 3));
 
 	let heroPlayPending = $state(false);
-	async function ensureTidalTopTracksForPlayback(): Promise<TidalDiscographyTrack[]> {
+	async function ensureTidalTopTracksForPlayback(id: number): Promise<TidalDiscographyTrack[]> {
 		if (tidalTopTracks.length > 0) return tidalTopTracks;
-		const requestedFor = artistId;
-		const res = await cachedApi.getArtistDiscography(artistId);
-		if (artistId === requestedFor) {
+		const res = await cachedApi.getArtistDiscography(id);
+		if (artistId === id) {
 			tidalAlbums = res.albums;
 			tidalTopTracks = res.top_tracks ?? [];
 			tidalVideos = res.videos ?? [];
@@ -408,7 +417,9 @@
 		}
 		heroPlayPending = true;
 		try {
-			const topTracks = await ensureTidalTopTracksForPlayback();
+			const requestedFor = artistId;
+			const topTracks = await ensureTidalTopTracksForPlayback(requestedFor);
+			if (artistId !== requestedFor) return;
 			const playable = topTracks.map(artistTrackPlayable);
 			if (playable.length > 0) {
 				await playTidalTracksNow(playable, artist?.name ?? 'artist');
