@@ -26,7 +26,10 @@ describe('search layout contracts', () => {
 
 	test('search page renders local results before external providers finish', () => {
 		expect(source).toContain('let searchGeneration = $state(0)');
+		expect(source).toContain('let loadMoreSeq = 0');
 		expect(source).toContain('}, 120)');
+		expect(source).toContain('loadMoreSeq += 1');
+		expect(source).toContain('loadingMore = false');
 		expect(source).toContain('const localPromise = cachedApi.search(q, SEARCH_PAGE_SIZE)');
 		expect(source).toContain('void localPromise.then((localResults) => {');
 		expect(source).toContain('if (!isCurrentSearch(q, generation, signal)) return');
@@ -35,6 +38,25 @@ describe('search layout contracts', () => {
 		expect(source).toContain('void spotifyPlaylistPromise.then((playlistResults) => {');
 		expect(source).toContain('const providerSearchDone = $derived(');
 		expect(source).toContain('{:else if allProviderResultsEmpty && providerSearchDone}');
+	});
+
+	test('search pagination ignores stale load-more responses', () => {
+		expect(source).toContain('const seq = ++loadMoreSeq');
+		expect(source).toContain('const pageQuery = lastQuery');
+		expect(source).toContain('const pageMode = filterMode');
+		expect(source).toContain('const generation = searchGeneration');
+		expect(source).toContain('const isCurrentLoadMore = () =>');
+		expect(source).toContain('seq === loadMoreSeq');
+		expect(source).toContain('searchGeneration === generation');
+		expect(source).toContain('lastQuery === pageQuery');
+		expect(source).toContain('filterMode === pageMode');
+		expect(source).toContain('const next = await api.searchTidal(pageQuery, SEARCH_PAGE_SIZE, undefined, tidalOffset)');
+		expect(source).toContain('if (!isCurrentLoadMore()) return');
+		expect(source).toContain('searchTidalPlaylists(pageQuery, undefined');
+		expect(source).toContain('searchSpotifyPlaylists(pageQuery, SEARCH_PAGE_SIZE');
+		expect(source).toContain('searchSpotifyTracks(pageQuery, SEARCH_PAGE_SIZE');
+		expect(source).toContain('searchSpotifyAlbums(pageQuery, SEARCH_PAGE_SIZE');
+		expect(source).toContain('if (seq === loadMoreSeq) loadingMore = false');
 	});
 
 	test('search page routes artist artwork through the shared fallback component', () => {

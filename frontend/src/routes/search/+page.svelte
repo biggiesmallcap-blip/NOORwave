@@ -117,6 +117,7 @@
   let hasMoreSpotifyTracks = $state(true)
   let hasMoreSpotifyAlbums = $state(true)
   let loadingMore = $state(false)
+  let loadMoreSeq = 0
   let lastQuery = $state('')
 
   // Trending shelf is encapsulated in <TrendingShelf /> below; shown only when
@@ -187,6 +188,8 @@
     abortController?.abort()
     abortController = null
     searchGeneration += 1
+    loadMoreSeq += 1
+    loadingMore = false
     if (!query.trim()) {
       results = null
       audioResults = null
@@ -405,10 +408,21 @@
     const needsSpotifyAlbums = filterMode === 'albums' && hasMoreSpotifyAlbums
     if (!needsTidal && !needsPlaylists && !needsSpotifyTracks && !needsSpotifyAlbums) return
 
+    const seq = ++loadMoreSeq
+    const pageQuery = lastQuery
+    const pageMode = filterMode
+    const generation = searchGeneration
+    const isCurrentLoadMore = () =>
+      seq === loadMoreSeq &&
+      searchGeneration === generation &&
+      lastQuery === pageQuery &&
+      filterMode === pageMode
+
     loadingMore = true
     try {
       if (needsTidal && results) {
-        const next = await api.searchTidal(lastQuery, SEARCH_PAGE_SIZE, undefined, tidalOffset)
+        const next = await api.searchTidal(pageQuery, SEARCH_PAGE_SIZE, undefined, tidalOffset)
+        if (!isCurrentLoadMore()) return
         tidalOffset += SEARCH_PAGE_SIZE
         // De-dupe by id - Tidal occasionally returns overlapping pages.
         const seenTracks = new Set(results.tracks.map((t) => t.tidal_id))
@@ -435,29 +449,31 @@
         if (hasMoreTidalPlaylists) {
           tasks.push(
             api
-              .searchTidalPlaylists(lastQuery, undefined, { limit: SEARCH_PAGE_SIZE, offset: tidalPlaylistOffset })
+              .searchTidalPlaylists(pageQuery, undefined, { limit: SEARCH_PAGE_SIZE, offset: tidalPlaylistOffset })
               .then((r) => {
+                if (!isCurrentLoadMore()) return
                 const seen = new Set(tidalPlaylistResults.map((p) => p.uuid))
                 const fresh = r.playlists.filter((p) => !seen.has(p.uuid))
                 tidalPlaylistResults = [...tidalPlaylistResults, ...fresh]
                 tidalPlaylistOffset += SEARCH_PAGE_SIZE
                 if (r.playlists.length < SEARCH_PAGE_SIZE) hasMoreTidalPlaylists = false
               })
-              .catch(() => { hasMoreTidalPlaylists = false }),
+              .catch(() => { if (isCurrentLoadMore()) hasMoreTidalPlaylists = false }),
           )
         }
         if (hasMoreSpotifyPlaylists) {
           tasks.push(
             api
-              .searchSpotifyPlaylists(lastQuery, SEARCH_PAGE_SIZE, undefined, spotifyPlaylistOffset)
+              .searchSpotifyPlaylists(pageQuery, SEARCH_PAGE_SIZE, undefined, spotifyPlaylistOffset)
               .then((items) => {
+                if (!isCurrentLoadMore()) return
                 const seen = new Set(spotifyPlaylistResults.map((p) => p.spotifyId))
                 const fresh = items.filter((p) => !seen.has(p.spotifyId))
                 spotifyPlaylistResults = [...spotifyPlaylistResults, ...fresh]
                 spotifyPlaylistOffset += SEARCH_PAGE_SIZE
                 if (items.length < SEARCH_PAGE_SIZE) hasMoreSpotifyPlaylists = false
               })
-              .catch(() => { hasMoreSpotifyPlaylists = false }),
+              .catch(() => { if (isCurrentLoadMore()) hasMoreSpotifyPlaylists = false }),
           )
         }
         await Promise.allSettled(tasks)
@@ -469,35 +485,37 @@
         if (filterMode === 'tracks' && hasMoreSpotifyTracks) {
           spotifyTasks.push(
             api
-              .searchSpotifyTracks(lastQuery, SEARCH_PAGE_SIZE, undefined, spotifyTrackOffset)
+              .searchSpotifyTracks(pageQuery, SEARCH_PAGE_SIZE, undefined, spotifyTrackOffset)
               .then((items) => {
+                if (!isCurrentLoadMore()) return
                 const seen = new Set(spotifyTrackResults.map((t) => t.spotifyId))
                 const fresh = items.filter((t) => !seen.has(t.spotifyId))
                 spotifyTrackResults = [...spotifyTrackResults, ...fresh]
                 spotifyTrackOffset += items.length
                 if (items.length < SEARCH_PAGE_SIZE) hasMoreSpotifyTracks = false
               })
-              .catch(() => { hasMoreSpotifyTracks = false }),
+              .catch(() => { if (isCurrentLoadMore()) hasMoreSpotifyTracks = false }),
           )
         }
         if (filterMode === 'albums' && hasMoreSpotifyAlbums) {
           spotifyTasks.push(
             api
-              .searchSpotifyAlbums(lastQuery, SEARCH_PAGE_SIZE, undefined, spotifyAlbumOffset)
+              .searchSpotifyAlbums(pageQuery, SEARCH_PAGE_SIZE, undefined, spotifyAlbumOffset)
               .then((items) => {
+                if (!isCurrentLoadMore()) return
                 const seen = new Set(spotifyAlbumResults.map((a) => a.spotifyId))
                 const fresh = items.filter((a) => !seen.has(a.spotifyId))
                 spotifyAlbumResults = [...spotifyAlbumResults, ...fresh]
                 spotifyAlbumOffset += items.length
                 if (items.length < SEARCH_PAGE_SIZE) hasMoreSpotifyAlbums = false
               })
-              .catch(() => { hasMoreSpotifyAlbums = false }),
+              .catch(() => { if (isCurrentLoadMore()) hasMoreSpotifyAlbums = false }),
           )
         }
         if (spotifyTasks.length > 0) await Promise.allSettled(spotifyTasks)
       }
     } finally {
-      loadingMore = false
+      if (seq === loadMoreSeq) loadingMore = false
     }
   }
 
