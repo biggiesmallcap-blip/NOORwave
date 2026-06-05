@@ -455,6 +455,11 @@ Additional targeted verification for the malformed artwork fix:
 - `pnpm check`
   - 0 errors.
   - 0 warnings.
+- `cargo check -p noor-app`
+  - Passed on 2026-06-05.
+  - This confirms the Tauri shell crate still compiles after the recovered
+    audit branch changes. It does not replace the fresh app launch and
+    Tauri-owned sidecar startup smoke.
 
 Non-blocking warnings observed:
 
@@ -529,6 +534,7 @@ Acceptance checks:
   tray discovery.
 - Done: installed native WebView smoke passed through the existing tray path
   without launching a second app or restarting the sidecar.
+- Done: `cargo check -p noor-app` passed as a no-launch Tauri shell preflight.
 - Partial: native WebView route navigation reached Genre Galaxy, Moods,
   Playlists, and Settings through existing sidebar controls without visible
   error text in accessibility samples.
