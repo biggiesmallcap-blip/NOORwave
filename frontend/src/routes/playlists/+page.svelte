@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import { get } from 'svelte/store';
 	import type { Snapshot } from './$types';
 	import {
@@ -191,6 +191,8 @@
 	let playlistQuery = $state('');
 	let playlistFilter = $state<PlaylistFilter>('all');
 	let playlistSort = $state<PlaylistSort>('default');
+	let playlistLoadSeq = 0;
+	let destroyed = false;
 
 	// Cover mosaics keyed by playlist id. Seeded from localStorage on mount,
 	// kept in sync whenever a playlist's tracks load.
@@ -317,6 +319,19 @@
 		void loadPlaylists();
 	});
 
+	onDestroy(() => {
+		destroyed = true;
+		playlistLoadSeq += 1;
+		artistFetchAbort?.abort();
+		previewAbort?.abort();
+		if (previewDebounce) {
+			clearTimeout(previewDebounce);
+			previewDebounce = null;
+		}
+		mosaicObserver?.disconnect();
+		mosaicObserver = null;
+	});
+
 	function mapMosaicsFromCache(snapshot: Record<number, { urls: string[] }>): Record<number, string[]> {
 		const out: Record<number, string[]> = {};
 		for (const [idStr, entry] of Object.entries(snapshot)) {
@@ -327,19 +342,26 @@
 
 	// ─── Data loading ─────────────────────────────────────────────────────────
 	async function loadPlaylists() {
+		const seq = ++playlistLoadSeq;
 		isLoading = true;
 		loadError = '';
 		try {
 			const data = await cachedApi.getPlaylists();
+			if (!isCurrentPlaylistLoad(seq)) return;
 			playlists = data.playlists;
 			const next: Record<number, string> = {};
 			for (const p of playlists) next[p.id] = buildSearchText(p);
 			searchTextById = next;
 		} catch (error) {
+			if (!isCurrentPlaylistLoad(seq)) return;
 			loadError = `Failed to load playlists: ${error}`;
 		} finally {
-			isLoading = false;
+			if (isCurrentPlaylistLoad(seq)) isLoading = false;
 		}
+	}
+
+	function isCurrentPlaylistLoad(seq: number): boolean {
+		return !destroyed && seq === playlistLoadSeq;
 	}
 
 	function recordMosaic(id: number, tracks: Track[], trackCount: number) {
@@ -368,13 +390,15 @@
 			const data = playlist?.is_smart
 				? await cachedApi.evaluateSmartPlaylist(id)
 				: await cachedApi.getPlaylistTracks(id);
+			if (destroyed) return;
 			playlistTracksById = { ...playlistTracksById, [id]: data.tracks };
 			if (playlist) recordMosaic(id, data.tracks, playlist.track_count);
 		} catch (error) {
+			if (destroyed) return;
 			errorById = { ...errorById, [id]: `Failed to load tracks: ${error}` };
 			playlistTracksById = { ...playlistTracksById, [id]: [] };
 		} finally {
-			loadingById = { ...loadingById, [id]: false };
+			if (!destroyed) loadingById = { ...loadingById, [id]: false };
 		}
 	}
 
@@ -558,6 +582,7 @@
 		fetchedMosaicIds.add(id);
 		try {
 			const { urls } = await cachedApi.getPlaylistCoverSample(id);
+			if (destroyed) return;
 			if (!urls.length) return;
 			setCachedMosaic(id, urls, playlist.track_count);
 			mosaicById = { ...mosaicById, [id]: urls };

@@ -22,4 +22,20 @@ describe('playlist artwork contracts', () => {
 		expect(page).not.toContain('<img src={url}');
 		expect(page).not.toContain('<img class="cover-solo"');
 	});
+
+	test('cleans up playlist route async work on destroy', () => {
+		expect(page).toContain("import { onDestroy, onMount } from 'svelte';");
+		expect(page).toContain('let playlistLoadSeq = 0;');
+		expect(page).toContain('let destroyed = false;');
+		expect(page).toContain('onDestroy(() => {');
+		expect(page).toContain('artistFetchAbort?.abort();');
+		expect(page).toContain('previewAbort?.abort();');
+		expect(page).toContain('clearTimeout(previewDebounce);');
+		expect(page).toContain('mosaicObserver?.disconnect();');
+		expect(page).toContain('function isCurrentPlaylistLoad(seq: number): boolean');
+		expect(page).toContain('return !destroyed && seq === playlistLoadSeq;');
+		expect(page).toContain('if (!isCurrentPlaylistLoad(seq)) return;');
+		expect(page).toContain('if (destroyed) return;');
+		expect(page).toContain('if (!destroyed) loadingById = { ...loadingById, [id]: false };');
+	});
 });
