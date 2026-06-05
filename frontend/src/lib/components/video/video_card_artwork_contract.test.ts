@@ -19,4 +19,13 @@ describe('VideoCard artwork contract', () => {
 		expect(source).not.toContain('{#if poster}');
 		expect(source).not.toContain('placeholder');
 	});
+
+	test('opens app video menus without showing the browser context menu', () => {
+		expect(source).toContain('function menu(event: MouseEvent)');
+		expect(source).toContain('event.preventDefault();');
+		expect(source).toContain('event.stopPropagation();');
+		expect(source).toContain('isVideoMix(video) ? buildVideoMixMenu(video) : buildVideoMenu(video)');
+		expect(source).toContain('oncontextmenu={menu}');
+		expect(source).toContain('onclick={select}');
+	});
 });
