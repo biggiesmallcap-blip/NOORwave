@@ -173,4 +173,19 @@ describe('tidalDiscographyTrackToPlayable', () => {
 			is_favorite: true,
 		});
 	});
+
+	test('uses a route artist id when a discography row omits artist_tidal_id', () => {
+		const track: TidalDiscographyTrack = {
+			tidal_id: 808,
+			title: 'Artist Page Track',
+			duration_ms: 190000,
+			artwork_url: null,
+			album_title: null,
+		};
+
+		expect(tidalDiscographyTrackToPlayable(track, { artistTidalId: 1001 })).toMatchObject({
+			tidal_id: 808,
+			artist_tidal_id: 1001,
+		});
+	});
 });

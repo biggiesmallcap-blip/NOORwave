@@ -97,8 +97,16 @@
 
 		<RemoteActionBar
 			disabled={tracks.length === 0}
-			onPlay={() => playTidalTracksNow(tracks.map(tidalDiscographyTrackToPlayable), header?.title ?? 'album')}
-			onShuffle={() => shuffleTidalTracksNow(tracks.map(tidalDiscographyTrackToPlayable), header?.title ?? 'album')}
+			onPlay={() =>
+				playTidalTracksNow(
+					tracks.map((track) => tidalDiscographyTrackToPlayable(track)),
+					header?.title ?? 'album',
+				)}
+			onShuffle={() =>
+				shuffleTidalTracksNow(
+					tracks.map((track) => tidalDiscographyTrackToPlayable(track)),
+					header?.title ?? 'album',
+				)}
 		/>
 
 		<section class="remote-section">

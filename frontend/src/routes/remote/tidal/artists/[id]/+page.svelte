@@ -67,6 +67,10 @@
 		if (localId) return `/remote/albums/${localId}`;
 		return `/remote/tidal/albums/${albumTidalId}`;
 	}
+
+	function artistTrackPlayable(track: TidalDiscographyTrack) {
+		return tidalDiscographyTrackToPlayable(track, { artistTidalId: tidalArtistId });
+	}
 </script>
 
 <svelte:head>
@@ -97,10 +101,10 @@
 
 		<RemoteActionBar
 			disabled={p.top_tracks.length === 0}
-			onPlay={() => playTidalTracksNow(p.top_tracks.map(tidalDiscographyTrackToPlayable), p.artist_name ?? 'artist')}
-			onShuffle={() => shuffleTidalTracksNow(p.top_tracks.map(tidalDiscographyTrackToPlayable), p.artist_name ?? 'artist')}
+			onPlay={() => playTidalTracksNow(p.top_tracks.map(artistTrackPlayable), p.artist_name ?? 'artist')}
+			onShuffle={() => shuffleTidalTracksNow(p.top_tracks.map(artistTrackPlayable), p.artist_name ?? 'artist')}
 			onRadio={p.top_tracks[0]
-				? () => startTidalSongRadio(tidalDiscographyTrackToPlayable(p.top_tracks[0]))
+				? () => startTidalSongRadio(artistTrackPlayable(p.top_tracks[0]))
 				: null}
 		/>
 

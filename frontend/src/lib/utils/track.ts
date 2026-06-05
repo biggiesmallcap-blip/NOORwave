@@ -67,7 +67,10 @@ export function tidalSearchTrackToPlayable(track: TidalSearchTrack): TidalPlayab
 	};
 }
 
-export function tidalDiscographyTrackToPlayable(track: TidalDiscographyTrack): TidalPlayable {
+export function tidalDiscographyTrackToPlayable(
+	track: TidalDiscographyTrack,
+	options: { artistTidalId?: number | null } = {},
+): TidalPlayable {
 	return {
 		tidal_id: track.tidal_id,
 		title: track.title,
@@ -75,7 +78,7 @@ export function tidalDiscographyTrackToPlayable(track: TidalDiscographyTrack): T
 		album_title: track.album_title ?? null,
 		artwork_url: track.artwork_url ?? null,
 		duration_ms: track.duration_ms,
-		artist_tidal_id: track.artist_tidal_id ?? null,
+		artist_tidal_id: track.artist_tidal_id ?? options.artistTidalId ?? null,
 		album_tidal_id: track.album_tidal_id ?? null,
 		track_id: track.track_id,
 		local_id: track.track_id ?? null,

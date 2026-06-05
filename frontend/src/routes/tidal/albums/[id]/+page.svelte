@@ -12,20 +12,7 @@
 		type TidalArtworkSize,
 	} from '$lib/utils/artwork';
 	import { formatTotalDuration } from '$lib/utils/format';
-
-	function trackAsPlayable(t: TidalDiscographyTrack) {
-		return {
-			tidal_id: t.tidal_id,
-			title: t.title,
-			artist_name: t.artist_name ?? null,
-			album_title: t.album_title ?? null,
-			artwork_url: t.artwork_url,
-			duration_ms: t.duration_ms,
-			artist_tidal_id: t.artist_tidal_id ?? null,
-			album_tidal_id: t.album_tidal_id ?? null,
-			track_number: t.track_number,
-		};
-	}
+	import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';
 
 	let tidalAlbumId = $derived(Number(page.params.id));
 
@@ -87,7 +74,10 @@
 	}
 
 	async function playLoadedAlbum() {
-		await playTidalTracksNow(tracks.map(trackAsPlayable), header()?.title ?? 'album');
+		await playTidalTracksNow(
+			tracks.map((track) => tidalDiscographyTrackToPlayable(track)),
+			header()?.title ?? 'album',
+		);
 	}
 
 </script>
@@ -169,7 +159,7 @@
 			<ol class="track-list">
 				{#each tracks as track, idx (track.tidal_id)}
 					<TidalTrackRow
-						track={trackAsPlayable(track)}
+						track={tidalDiscographyTrackToPlayable(track)}
 						variant="indexed"
 						index={idx}
 						showAlbum={false}

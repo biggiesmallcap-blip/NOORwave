@@ -10,6 +10,7 @@
     upscaleTidalArtwork,
     type TidalArtworkSize,
   } from '$lib/utils/artwork'
+  import { tidalDiscographyTrackToPlayable } from '$lib/utils/track'
 
   let tidalArtistId = $derived(Number(page.params.id))
   let profile = $state<TidalArtistProfile | null>(null)
@@ -74,17 +75,10 @@
     failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true }
   }
 
-  function trackAsPlayable(t: TidalDiscographyTrack) {
-    return {
-      tidal_id: t.tidal_id,
-      title: t.title,
-      artist_name: t.artist_name ?? null,
-      album_title: t.album_title ?? null,
-      artwork_url: t.artwork_url,
-      duration_ms: t.duration_ms,
-      artist_tidal_id: tidalArtistId,
-    }
+  function artistTrackPlayable(track: TidalDiscographyTrack) {
+    return tidalDiscographyTrackToPlayable(track, { artistTidalId: tidalArtistId })
   }
+
 </script>
 
 {#if loading}
@@ -142,7 +136,7 @@
         <ul class="tracks-list">
           {#each filteredTracks as track, idx (track.tidal_id)}
             <TidalTrackRow
-              track={trackAsPlayable(track)}
+              track={artistTrackPlayable(track)}
               variant="numbered"
               index={idx}
               showArtist={false}
