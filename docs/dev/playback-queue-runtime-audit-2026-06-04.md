@@ -875,6 +875,9 @@ Next checks before release:
 
 - Use `docs/dev/tauri-audio-provider-manual-smoke-2026-06-04.md` as the
   manual smoke checklist.
+- Use `docs/dev/playback-queue-runtime-handoff-2026-06-05.md` as the current
+  continuation handoff for verified evidence, latest commits, and remaining
+  low-volume manual checks.
 - Run NOORwave through the Tauri-owned app path with a real TIDAL account and
   audio output.
 - Start a local-track queue and confirm finish advancement audibly.
