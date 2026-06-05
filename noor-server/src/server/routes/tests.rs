@@ -5265,6 +5265,63 @@ fn automix_discover_new_fallback_waits_when_sidecar_new_rows_fill_slots() {
     assert!(automix_discover_new_fallback_seed(&snapshot).is_some());
 }
 
+#[test]
+fn automix_discover_new_fallback_ignores_mismatched_queue_anchor() {
+    let current = test_track(1, "Current");
+    let snapshot = crate::playback::player::PlaybackSnapshot {
+        state: crate::db::models::PlaybackState {
+            current_track: Some(current.clone()),
+            current_queue_item_id: Some(13),
+            position_ms: 0,
+            is_playing: true,
+            volume: 1.0,
+            shuffle_mode: "off".to_string(),
+            repeat_mode: "off".to_string(),
+            automix_enabled: true,
+            crossfade_ms: 0,
+            automix_discover_new: true,
+            automix_use_learning: true,
+            automix_allow_external: true,
+            buffered_ms: 0,
+            buffered_start_ms: 0,
+        },
+        queue: vec![
+            test_queue_item(10, current, 0, "manual"),
+            test_queue_item(11, test_track(2, "Sidecar A"), 1, "automix-new"),
+            test_queue_item(12, test_track(3, "Sidecar B"), 2, "automix-new"),
+            test_queue_item(13, test_track(4, "Stale Anchor"), 3, "manual"),
+        ],
+    };
+
+    assert!(automix_discover_new_fallback_seed(&snapshot).is_none());
+}
+
+#[test]
+fn automix_discover_new_fallback_stays_off_when_disabled() {
+    let current = test_track(1, "Current");
+    let snapshot = crate::playback::player::PlaybackSnapshot {
+        state: crate::db::models::PlaybackState {
+            current_track: Some(current.clone()),
+            current_queue_item_id: Some(10),
+            position_ms: 0,
+            is_playing: true,
+            volume: 1.0,
+            shuffle_mode: "off".to_string(),
+            repeat_mode: "off".to_string(),
+            automix_enabled: true,
+            crossfade_ms: 0,
+            automix_discover_new: false,
+            automix_use_learning: true,
+            automix_allow_external: true,
+            buffered_ms: 0,
+            buffered_start_ms: 0,
+        },
+        queue: vec![test_queue_item(10, current, 0, "manual")],
+    };
+
+    assert!(automix_discover_new_fallback_seed(&snapshot).is_none());
+}
+
 #[tokio::test]
 async fn server_info_returns_defaults() {
     let app = build_test_app().await;

@@ -7457,6 +7457,7 @@ fn automix_discover_new_fallback_seed(
     if !snapshot.state.automix_discover_new {
         return None;
     }
+    let current_track_id = snapshot.state.current_track.as_ref().map(|track| track.id);
     let current_pos = snapshot
         .state
         .current_queue_item_id
@@ -7465,6 +7466,7 @@ fn automix_discover_new_fallback_seed(
                 .queue
                 .iter()
                 .find(|item| item.id == qid)
+                .filter(|item| Some(item.track.id) == current_track_id)
                 .map(|item| item.position)
         })
         .or_else(|| {
