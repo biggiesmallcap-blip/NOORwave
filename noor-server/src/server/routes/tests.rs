@@ -5701,6 +5701,59 @@ async fn tidal_search_blank_query_returns_empty_payload_without_session() {
     assert_eq!(body["videos"].as_array().expect("videos").len(), 0);
 }
 
+#[tokio::test]
+async fn tidal_artist_profile_rejects_non_positive_ids_before_session_lookup() {
+    let app = build_test_app().await;
+
+    for uri in ["/api/tidal/artists/0", "/api/tidal/artists/-7"] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("positive TIDAL artist id"),
+            "expected invalid artist id error for {uri}, got: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn tidal_artist_profile_positive_id_still_requires_session() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/tidal/artists/1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("TIDAL not connected"),
+        "expected existing disconnected-session behavior, got: {body}"
+    );
+}
+
 // Note: an integration test for the recover_tidal_session path on a 401 upstream
 // response is deferred - it requires intercepting the reqwest::Client, which
 // requires wiremock or a trait-based http client. Until that infra lands, the

@@ -10583,6 +10583,13 @@ async fn tidal_artist_profile(
     State(state): State<SharedState>,
     Path(tidal_artist_id): Path<i64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if tidal_artist_id <= 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Expected a positive TIDAL artist id" })),
+        ));
+    }
+
     let (tokens, http_client, tidal_http_client) = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (
