@@ -19,23 +19,27 @@
 	let tracks = $state<Track[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	let loadSeq = 0;
 
-	async function load() {
+	async function load(id: number) {
+		const seq = ++loadSeq;
 		loading = true;
 		error = null;
 		try {
-			const res = await api.getAlbumTracks(albumId);
+			const res = await api.getAlbumTracks(id);
+			if (seq !== loadSeq) return;
 			tracks = res.tracks;
 		} catch (err) {
+			if (seq !== loadSeq) return;
 			error = `Couldn't load album: ${err}`;
 		} finally {
-			loading = false;
+			if (seq === loadSeq) loading = false;
 		}
 	}
 
 	$effect(() => {
-		albumId;
-		void load();
+		const id = albumId;
+		void load(id);
 	});
 
 	let header = $derived.by(() => {

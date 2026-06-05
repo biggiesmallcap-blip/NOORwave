@@ -17,27 +17,31 @@
 	let tracks = $state<Track[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	let loadSeq = 0;
 
-	async function load() {
+	async function load(id: number) {
+		const seq = ++loadSeq;
 		loading = true;
 		error = null;
 		try {
 			const [listsRes, tracksRes] = await Promise.all([
 				api.getPlaylists(),
-				api.getPlaylistTracks(playlistId)
+				api.getPlaylistTracks(id)
 			]);
-			playlist = listsRes.playlists.find((p) => p.id === playlistId) ?? null;
+			if (seq !== loadSeq) return;
+			playlist = listsRes.playlists.find((p) => p.id === id) ?? null;
 			tracks = tracksRes.tracks;
 		} catch (err) {
+			if (seq !== loadSeq) return;
 			error = `Couldn't load playlist: ${err}`;
 		} finally {
-			loading = false;
+			if (seq === loadSeq) loading = false;
 		}
 	}
 
 	$effect(() => {
-		playlistId;
-		void load();
+		const id = playlistId;
+		void load(id);
 	});
 
 	let totalMs = $derived(tracks.reduce((sum, t) => sum + (t.duration_ms ?? 0), 0));
