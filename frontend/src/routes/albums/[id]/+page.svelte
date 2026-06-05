@@ -394,7 +394,11 @@
 						tabindex={ok ? 0 : -1}
 						aria-disabled={!ok}
 						onclick={() => ok && void playTidalTrackNow(playable)}
-						oncontextmenu={(e) => openContextMenu(e, buildTidalTrackMenu(playable), track.title)}
+						oncontextmenu={(e) => {
+							e.preventDefault();
+							e.stopPropagation();
+							openContextMenu(e, buildTidalTrackMenu(playable), track.title);
+						}}
 						onkeydown={(e) =>
 							(e.key === 'Enter' || e.key === ' ')
 							&& (e.preventDefault(), ok && void playTidalTrackNow(playable))}

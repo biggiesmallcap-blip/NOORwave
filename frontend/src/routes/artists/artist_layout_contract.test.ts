@@ -93,6 +93,14 @@ describe('artist page layout contracts', () => {
 		expect(source).not.toContain('function tidalDiscographyTrackToPlayable(t: TidalDiscographyTrack)');
 	});
 
+	test('keeps artist media rail context menus app-owned', () => {
+		expect(source).toContain('openContextMenu(e, buildTidalTrackMenu(playable), track.title);');
+		expect(source).toContain('openContextMenu(e, similarArtistMenu(similar), similar.name);');
+		expect(source).toContain('openContextMenu(e, fallbackAlbumMenu(album), album.title);');
+		expect(source).toContain('e.preventDefault();');
+		expect(source).toContain('e.stopPropagation();');
+	});
+
 	test('keeps route copy and comments ASCII-safe', () => {
 		expect(source).not.toMatch(/\u2014/);
 		expect(source).not.toMatch(/[\u2500-\u257F]/);

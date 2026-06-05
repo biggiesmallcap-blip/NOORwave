@@ -774,7 +774,11 @@
 							tabindex={playable_ok ? 0 : -1}
 							aria-disabled={!playable_ok}
 							onclick={() => playable_ok && void playTidalTrackNow(playable)}
-							oncontextmenu={(e) => openContextMenu(e, buildTidalTrackMenu(playable), track.title)}
+							oncontextmenu={(e) => {
+								e.preventDefault();
+								e.stopPropagation();
+								openContextMenu(e, buildTidalTrackMenu(playable), track.title);
+							}}
 							onkeydown={(e) =>
 								(e.key === 'Enter' || e.key === ' ')
 								&& (e.preventDefault(), playable_ok && void playTidalTrackNow(playable))}
@@ -896,7 +900,11 @@
 				href={similar.local_id != null
 					? `/artists/${similar.local_id}`
 					: `/tidal/artists/${similar.tidal_id}`}
-				oncontextmenu={(e) => openContextMenu(e, similarArtistMenu(similar), similar.name)}
+				oncontextmenu={(e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					openContextMenu(e, similarArtistMenu(similar), similar.name);
+				}}
 			>
 				<div class="similar-portrait-wrap">
 					{#if similarArt}
@@ -1023,7 +1031,11 @@
 							<a
 								class="grid-card"
 								href={album.id != null ? `/albums/${album.id}` : undefined}
-								oncontextmenu={(e) => openContextMenu(e, fallbackAlbumMenu(album), album.title)}
+								oncontextmenu={(e) => {
+									e.preventDefault();
+									e.stopPropagation();
+									openContextMenu(e, fallbackAlbumMenu(album), album.title);
+								}}
 							>
 								<div class="grid-art-wrap">
 									{#if albumArt}
@@ -1068,7 +1080,11 @@
 							<a
 								class="grid-card"
 								href={album.id != null ? `/albums/${album.id}` : undefined}
-								oncontextmenu={(e) => openContextMenu(e, fallbackAlbumMenu(album), album.title)}
+								oncontextmenu={(e) => {
+									e.preventDefault();
+									e.stopPropagation();
+									openContextMenu(e, fallbackAlbumMenu(album), album.title);
+								}}
 							>
 								<div class="grid-art-wrap">
 									{#if albumArt}
