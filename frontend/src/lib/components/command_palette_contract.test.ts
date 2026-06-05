@@ -24,6 +24,15 @@ describe('command palette search contracts', () => {
 		expect(source).toContain('if (!isCurrentPaletteSearch(searchQuery, generation)) return;');
 	});
 
+	test('invalidates pending searches when the palette closes or unmounts', () => {
+		expect(source).toContain("import { onDestroy } from 'svelte';");
+		expect(source).toContain('clearTimeout(debounceTimer);');
+		expect(source).toContain('searchGeneration += 1;');
+		expect(source).toContain('loading = false;');
+		expect(source).toContain('$commandPaletteOpen && searchGeneration === generation');
+		expect(source).toContain('onDestroy(() => {');
+	});
+
 	test('normalizes TIDAL search rows before palette play and menu actions', () => {
 		expect(source).toContain("import { tidalSearchTrackToPlayable } from '$lib/utils/track';");
 		expect(source).toContain('await playTidalTrackNow(tidalSearchTrackToPlayable(track));');

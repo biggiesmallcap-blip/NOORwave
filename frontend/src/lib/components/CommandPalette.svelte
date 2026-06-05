@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { fly, fade } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
+	import { onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { get } from 'svelte/store';
 	import {
@@ -69,12 +70,20 @@
 	});
 
 	function close() {
+		clearTimeout(debounceTimer);
+		searchGeneration += 1;
+		loading = false;
 		commandPaletteOpen.set(false);
 	}
 
 	function isCurrentPaletteSearch(searchQuery: string, generation: number) {
-		return searchGeneration === generation && query.trim() === searchQuery && !isSlashMode;
+		return $commandPaletteOpen && searchGeneration === generation && query.trim() === searchQuery && !isSlashMode;
 	}
+
+	onDestroy(() => {
+		clearTimeout(debounceTimer);
+		searchGeneration += 1;
+	});
 
 	function applyPaletteResults(next: TidalSearchResults) {
 		tracks = next.tracks.slice(0, 5);
