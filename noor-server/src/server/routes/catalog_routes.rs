@@ -18,6 +18,16 @@ use serde_json::{Value, json};
 
 const CATALOG_LIST_LIMIT_MAX: i64 = 200;
 
+fn require_positive_tidal_album_id(tidal_album_id: i64) -> Result<(), (StatusCode, Json<Value>)> {
+    if tidal_album_id <= 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Expected a positive TIDAL album id" })),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 pub(super) struct ListParams {
     sort_by: Option<String>,
@@ -1059,6 +1069,8 @@ pub(super) async fn get_tidal_album_tracks(
     State(state): State<SharedState>,
     Path(tidal_album_id): Path<i64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_positive_tidal_album_id(tidal_album_id)?;
+
     let (tokens, http_client, tidal_http_client) = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (
@@ -1143,6 +1155,8 @@ pub(super) async fn import_tidal_album(
     State(state): State<SharedState>,
     Path(tidal_album_id): Path<i64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_positive_tidal_album_id(tidal_album_id)?;
+
     let (tokens, db, tidal_http_client) = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (

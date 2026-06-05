@@ -5754,6 +5754,78 @@ async fn tidal_artist_profile_positive_id_still_requires_session() {
     );
 }
 
+#[tokio::test]
+async fn tidal_album_routes_reject_non_positive_ids_before_session_lookup() {
+    let app = build_test_app().await;
+
+    for (method, uri) in [
+        ("GET", "/api/tidal/albums/0/tracks"),
+        ("GET", "/api/tidal/albums/-7/tracks"),
+        ("POST", "/api/tidal/albums/0/import"),
+        ("POST", "/api/tidal/albums/-7/import"),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{method} {uri}");
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("positive TIDAL album id"),
+            "expected invalid album id error for {method} {uri}, got: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn tidal_album_routes_positive_ids_still_require_session() {
+    let app = build_test_app().await;
+
+    for (method, uri) in [
+        ("GET", "/api/tidal/albums/1/tracks"),
+        ("POST", "/api/tidal/albums/1/import"),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{method} {uri}");
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("TIDAL not connected"),
+            "expected existing disconnected-session behavior for {method} {uri}, got: {body}"
+        );
+    }
+}
+
 // Note: an integration test for the recover_tidal_session path on a 401 upstream
 // response is deferred - it requires intercepting the reqwest::Client, which
 // requires wiremock or a trait-based http client. Until that infra lands, the
