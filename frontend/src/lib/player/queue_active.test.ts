@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { QueueItem, Track } from '$lib/api/client';
-import { isQueueItemActive } from './queue_active';
+import { currentQueueAnchorPosition, isQueueItemActive } from './queue_active';
 
 function track(id: number, title: string): Track {
 	return {
@@ -62,5 +62,34 @@ describe('isQueueItemActive', () => {
 
 		expect(isQueueItemActive(pending, null, 10, queue)).toBe(true);
 		expect(isQueueItemActive(queue[1], null, 10, queue)).toBe(false);
+	});
+});
+
+describe('currentQueueAnchorPosition', () => {
+	it('uses the matching queue item anchor for duplicate current tracks', () => {
+		const current = track(2, 'Current');
+		const queue = [row(10, current), row(11, current), row(12, track(3, 'After'))];
+
+		expect(currentQueueAnchorPosition(queue, current, 11)).toBe(11);
+	});
+
+	it('falls back to one current-track row when the queue item anchor is stale', () => {
+		const current = track(2, 'Current');
+		const queue = [row(10, track(1, 'Stale Anchor')), row(11, current), row(12, current)];
+
+		expect(currentQueueAnchorPosition(queue, current, 10)).toBe(11);
+	});
+
+	it('uses pending queue item anchors when there is no current track yet', () => {
+		const pending = row(10, track(0, 'Resolving'), true);
+		const queue = [pending, row(11, track(2, 'Next'))];
+
+		expect(currentQueueAnchorPosition(queue, null, 10)).toBe(10);
+	});
+
+	it('returns null when there is no current playback anchor', () => {
+		const queue = [row(10, track(1, 'First'))];
+
+		expect(currentQueueAnchorPosition(queue, null, null)).toBeNull();
 	});
 });

@@ -69,7 +69,7 @@
 	import { contextMenu, openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
-	import { isQueueItemActive } from '$lib/player/queue_active';
+	import { currentQueueAnchorPosition, isQueueItemActive } from '$lib/player/queue_active';
 	import { formatPlayerStreamDetail, formatResolutionShort } from '$lib/player/stream_display';
 	import { queueItemToTidalPlayable, trackToTidalPlayable } from '$lib/utils/track';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
@@ -1115,9 +1115,11 @@
 	}
 
 	let upcomingQueue = $derived.by(() => {
-		const currentId = $currentTrack?.id;
-		if (!currentId) return $playbackQueue;
-		const currentPosition = $playbackQueue.find((item) => item.track.id === currentId)?.position ?? -1;
+		const currentPosition = currentQueueAnchorPosition(
+			$playbackQueue,
+			$currentTrack,
+			$currentQueueItemId,
+		) ?? -1;
 		return $playbackQueue.filter((item) => item.position > currentPosition);
 	});
 

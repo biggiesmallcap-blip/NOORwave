@@ -8,17 +8,15 @@ function rowMatchesPendingCurrent(item: QueueItem): boolean {
 	return item.is_pending === true || item.track.id === 0;
 }
 
-export function isQueueItemActive(
-	item: QueueItem,
+function currentQueueAnchor(
+	queue: QueueItem[],
 	currentTrack: Track | null | undefined,
 	currentQueueItemId: number | null | undefined,
-	queue: QueueItem[],
-): boolean {
+): QueueItem | null {
 	if (currentQueueItemId == null) {
-		const fallback = currentTrack != null
-			? queue.find((row) => rowMatchesTrack(row, currentTrack))
+		return currentTrack != null
+			? (queue.find((row) => rowMatchesTrack(row, currentTrack)) ?? null)
 			: null;
-		return fallback != null && item.id === fallback.id;
 	}
 
 	const anchor = queue.find((row) => row.id === currentQueueItemId);
@@ -27,11 +25,27 @@ export function isQueueItemActive(
 		(currentTrack != null ? rowMatchesTrack(anchor, currentTrack) : rowMatchesPendingCurrent(anchor));
 
 	if (anchorMatchesCurrent) {
-		return item.id === currentQueueItemId;
+		return anchor;
 	}
 
-	const fallback = currentTrack != null
-		? queue.find((row) => rowMatchesTrack(row, currentTrack))
+	return currentTrack != null
+		? (queue.find((row) => rowMatchesTrack(row, currentTrack)) ?? null)
 		: null;
-	return fallback != null && item.id === fallback.id;
+}
+
+export function currentQueueAnchorPosition(
+	queue: QueueItem[],
+	currentTrack: Track | null | undefined,
+	currentQueueItemId: number | null | undefined,
+): number | null {
+	return currentQueueAnchor(queue, currentTrack, currentQueueItemId)?.position ?? null;
+}
+
+export function isQueueItemActive(
+	item: QueueItem,
+	currentTrack: Track | null | undefined,
+	currentQueueItemId: number | null | undefined,
+	queue: QueueItem[],
+): boolean {
+	return item.id === currentQueueAnchor(queue, currentTrack, currentQueueItemId)?.id;
 }
