@@ -7,6 +7,21 @@ This runbook closes the audit items that cannot be proven by automated checks
 while the installed app, localhost backend, or playback session must stay
 undisturbed.
 
+## Agent Execution Boundary
+
+Automated agents may collect read-only process, source, and log context for this
+gate. They must not perform the manual actions below unless the operator gives
+explicit approval in the current thread:
+
+- Stop or restart NOORwave, `noor-app`, or `noor-server`.
+- Surface, move, click, or invoke the Tauri WebView or tray icon.
+- Click transport controls, call playback-starting routes, or start audio.
+- Mutate the live queue, playback state, installed data directory, or provider
+  account state.
+
+If approval is not explicit, record the check as not run and leave the
+corresponding item under `Not Verified` in the audit report.
+
 ## Preconditions
 
 - The operator has explicit approval to stop and restart the installed
