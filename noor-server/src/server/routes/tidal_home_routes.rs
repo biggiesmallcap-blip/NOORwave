@@ -22,6 +22,7 @@ const MOOD_THUMBNAIL_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 const TIDAL_HOME_MODULES_PAGE_PATH: &str = "pages/home";
 const TIDAL_MODULE_ITEMS_DEFAULT_LIMIT: u32 = 50;
 const TIDAL_MODULE_ITEMS_MAX_LIMIT: u32 = 200;
+const TIDAL_MIX_ID_MAX_LEN: usize = 96;
 const TIDAL_PAGE_ID_MAX_LEN: usize = 96;
 const ROUTE_TIMING_INFO_THRESHOLD_MS: u128 = 500;
 static TIDAL_MOODS_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
@@ -405,6 +406,9 @@ pub(super) async fn get_tidal_mix_tracks(
     State(state): State<SharedState>,
     Path(mix_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mix_id = normalize_tidal_mix_id(&mix_id)
+        .map_err(|status| (status, Json(json!({ "error": "invalid TIDAL mix id" }))))?;
+
     let (tokens, tidal_http_client) = {
         let s = state.read().await;
         let tidal_http = s.tidal_http_client.clone();
@@ -432,7 +436,7 @@ pub(super) async fn get_tidal_mix_tracks(
         tokens.access_token.clone(),
         tokens.country_code.clone(),
     );
-    let items = client.get_mix_tracks(&mix_id).await.map_err(|e| {
+    let items = client.get_mix_tracks(mix_id).await.map_err(|e| {
         (
             StatusCode::BAD_GATEWAY,
             Json(json!({ "error": e.to_string() })),
@@ -507,6 +511,19 @@ fn normalize_tidal_page_id(id: &str) -> Result<&str, StatusCode> {
         })
     {
         return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(trimmed)
+}
+
+fn normalize_tidal_mix_id(id: &str) -> Result<&str, StatusCode> {
+    let trimmed = id.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > TIDAL_MIX_ID_MAX_LEN
+        || !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(StatusCode::BAD_REQUEST);
     }
     Ok(trimmed)
 }
@@ -1165,6 +1182,30 @@ mod tests {
         assert_eq!(normalize_tidal_module_items_limit(Some("0")), 1);
         assert_eq!(normalize_tidal_module_items_limit(Some("12")), 12);
         assert_eq!(normalize_tidal_module_items_limit(Some("9999")), 200);
+    }
+
+    #[test]
+    fn tidal_mix_id_normalization_allows_known_safe_id_shapes() {
+        assert_eq!(normalize_tidal_mix_id("abc123").unwrap(), "abc123");
+        assert_eq!(
+            normalize_tidal_mix_id("  daily_discovery-01  ").unwrap(),
+            "daily_discovery-01"
+        );
+    }
+
+    #[test]
+    fn tidal_mix_id_normalization_rejects_url_control_characters() {
+        for id in [
+            "",
+            "../home",
+            "mix/tracks",
+            "mix?limit=1",
+            "mix&countryCode=US",
+            "mix#fragment",
+            "mix track",
+        ] {
+            assert_eq!(normalize_tidal_mix_id(id), Err(StatusCode::BAD_REQUEST));
+        }
     }
 
     #[test]
