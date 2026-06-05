@@ -813,6 +813,31 @@
     return buildTidalTrackMenu(toPlayable(track))
   }
 
+  function audioTrackMenu(track: AudioSearchResult): MenuItem[] {
+    return buildTrackMenu({
+      id: track.id,
+      title: track.title,
+      artist_name: track.artist_name,
+      album_title: track.album_title,
+      is_favorite: track.is_favorite,
+    })
+  }
+
+  function libraryBasicTrackMenu(track: BasicTrack): MenuItem[] {
+    return buildTrackMenu({
+      id: track.id,
+      title: track.title,
+      artist_name: track.artist_name,
+      album_title: track.album_title,
+    })
+  }
+
+  function openSearchContextMenu(event: MouseEvent, items: MenuItem[], title?: string) {
+    event.preventDefault()
+    event.stopPropagation()
+    openContextMenu(event, items, title)
+  }
+
   function openTidalArtistContextMenu(event: MouseEvent, track: TidalSearchTrack) {
     if (!track.artist_name || track.artist_id == null) return
     event.preventDefault()
@@ -845,9 +870,7 @@
   }
 
   function openTidalTrackContextMenu(event: MouseEvent, track: TidalSearchTrack) {
-    event.preventDefault()
-    event.stopPropagation()
-    openContextMenu(event, trackContextMenu(track))
+    openSearchContextMenu(event, trackContextMenu(track))
   }
 
   function canPlaySearchTrack(track: TidalSearchTrack): boolean {
@@ -1176,7 +1199,7 @@
               tabindex="0"
               onclick={() => void playLibraryTrack(track)}
               onkeydown={(e) => e.key === 'Enter' && void playLibraryTrack(track)}
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildTrackMenu({ id: track.id, title: track.title, artist_name: track.artist_name, album_title: track.album_title, is_favorite: track.is_favorite })) }}
+              oncontextmenu={(e) => openSearchContextMenu(e, audioTrackMenu(track))}
             >
               <ArtworkImage
                 className="track-art"
@@ -1203,7 +1226,7 @@
                 >▶</button>
                 <button
                   class="row-btn"
-                  onclick={(e) => { e.stopPropagation(); openContextMenu(e, buildTrackMenu({ id: track.id, title: track.title, artist_name: track.artist_name, album_title: track.album_title, is_favorite: track.is_favorite })) }}
+                  onclick={(e) => openSearchContextMenu(e, audioTrackMenu(track))}
                   title="More options"
                   aria-label="More options"
                 >⋯</button>
@@ -1232,7 +1255,7 @@
           tabindex="0"
           onclick={() => void goto(topResultHref(top))}
           onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), void goto(topResultHref(top)))}
-          oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, top.kind === 'track' ? trackContextMenu(top.entry) : top.kind === 'album' ? albumMenuItems(top.entry) : artistMenuItems(top.entry)) }}
+          oncontextmenu={(e) => openSearchContextMenu(e, top.kind === 'track' ? trackContextMenu(top.entry) : top.kind === 'album' ? albumMenuItems(top.entry) : artistMenuItems(top.entry))}
         >
           {#if topHeroBgSources.length > 0}
             <ArtworkImage
@@ -1298,7 +1321,7 @@
               href={artist.in_library && artist.local_id != null
                 ? `/artists/${artist.local_id}`
                 : `/tidal/artists/${artist.tidal_id}`}
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, artistMenuItems(artist)) }}
+              oncontextmenu={(e) => openSearchContextMenu(e, artistMenuItems(artist))}
             >
               <div class="avatar-wrap">
                 <ArtworkImage
@@ -1334,7 +1357,7 @@
               href={album.in_library && album.local_id != null
                 ? `/albums/${album.local_id}`
                 : `/tidal/albums/${album.tidal_id}`}
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, albumMenuItems(album)) }}
+              oncontextmenu={(e) => openSearchContextMenu(e, albumMenuItems(album))}
             >
               <div class="art-wrap">
                 {#if album.artwork_url}
@@ -1378,7 +1401,7 @@
             <a
               class="spotify-card"
               href={`/spotify-album/${a.spotifyId}`}
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, [{ label: 'Open album', onSelect: () => void goto(`/spotify-album/${a.spotifyId}`) }], a.title ?? 'Spotify album') }}
+              oncontextmenu={(e) => openSearchContextMenu(e, [{ label: 'Open album', onSelect: () => void goto(`/spotify-album/${a.spotifyId}`) }], a.title ?? 'Spotify album')}
             >
               <ArtworkImage
                 className="art"
@@ -1408,7 +1431,7 @@
             <a
               class="album-card in-library"
               href="/playlists"
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, localPlaylistMenuItems(playlist), playlist.name) }}
+              oncontextmenu={(e) => openSearchContextMenu(e, localPlaylistMenuItems(playlist), playlist.name)}
             >
               <div class="art-wrap">
                 <div class="album-art fallback" style="background: {letterColor(playlist.name)}">
@@ -1428,7 +1451,7 @@
               tabindex="0"
               onclick={() => void playTidalPlaylist(playlist.uuid)}
               onkeydown={(e) => e.key === 'Enter' && void playTidalPlaylist(playlist.uuid)}
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, tidalPlaylistMenuItems(playlist), playlist.title) }}
+              oncontextmenu={(e) => openSearchContextMenu(e, tidalPlaylistMenuItems(playlist), playlist.title)}
             >
               <div class="art-wrap">
                 {#if playlist.artwork_url}
@@ -1460,7 +1483,7 @@
             <a
               class="album-card spotify-card"
               href="/spotify-playlist/{playlist.spotifyId}"
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, spotifyPlaylistMenuItems(playlist), playlist.title ?? 'Spotify playlist') }}
+              oncontextmenu={(e) => openSearchContextMenu(e, spotifyPlaylistMenuItems(playlist), playlist.title ?? 'Spotify playlist')}
             >
               <div class="art-wrap">
                 {#if playlist.thumbnail}
@@ -1715,7 +1738,7 @@
               <a
                 class="spotify-track-row"
                 href={`/spotify-track/${t.spotifyId}`}
-                oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, [{ label: 'Open track', onSelect: () => void goto(`/spotify-track/${t.spotifyId}`) }], t.title ?? 'Spotify track') }}
+                oncontextmenu={(e) => openSearchContextMenu(e, [{ label: 'Open track', onSelect: () => void goto(`/spotify-track/${t.spotifyId}`) }], t.title ?? 'Spotify track')}
               >
                 <ArtworkImage
                   className="thumb"
@@ -1748,7 +1771,7 @@
               tabindex="0"
               onclick={() => void playTrackNow(track.id)}
               onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildTrackMenu({ id: track.id, title: track.title, artist_name: track.artist_name, album_title: track.album_title })) }}
+              oncontextmenu={(e) => openSearchContextMenu(e, libraryBasicTrackMenu(track))}
             >
               {#if track.artwork_url}
                 <ArtworkImage
@@ -1786,7 +1809,7 @@
               tabindex="0"
               onclick={() => void playTrackNow(track.id)}
               onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildTrackMenu({ id: track.id, title: track.title, artist_name: track.artist_name, album_title: track.album_title })) }}
+              oncontextmenu={(e) => openSearchContextMenu(e, libraryBasicTrackMenu(track))}
             >
               {#if track.artwork_url}
                 <ArtworkImage

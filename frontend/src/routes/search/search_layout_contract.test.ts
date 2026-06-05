@@ -77,11 +77,26 @@ describe('search layout contracts', () => {
 	});
 
 	test('search track menus suppress native and row events', () => {
+		expect(source).toContain('function openSearchContextMenu(event: MouseEvent, items: MenuItem[], title?: string)');
 		expect(source).toContain('function openTidalTrackContextMenu(event: MouseEvent, track: TidalSearchTrack)');
 		expect(source).toContain('event.preventDefault()');
 		expect(source).toContain('event.stopPropagation()');
-		expect(source).toContain('openContextMenu(event, trackContextMenu(track))');
+		expect(source).toContain('openContextMenu(event, items, title)');
+		expect(source).toContain('openSearchContextMenu(event, trackContextMenu(track))');
 		expect(source).toContain('oncontextmenu={(e) => openTidalTrackContextMenu(e, track)}');
 		expect(source).toContain('onclick={(e) => openTidalTrackContextMenu(e, track)}');
+	});
+
+	test('search result card menus share the app-owned context-menu path', () => {
+		expect(source).toContain('function audioTrackMenu(track: AudioSearchResult): MenuItem[]');
+		expect(source).toContain('function libraryBasicTrackMenu(track: BasicTrack): MenuItem[]');
+		expect(source).toContain('oncontextmenu={(e) => openSearchContextMenu(e, audioTrackMenu(track))}');
+		expect(source).toContain('onclick={(e) => openSearchContextMenu(e, audioTrackMenu(track))}');
+		expect(source).toContain('oncontextmenu={(e) => openSearchContextMenu(e, artistMenuItems(artist))}');
+		expect(source).toContain('oncontextmenu={(e) => openSearchContextMenu(e, albumMenuItems(album))}');
+		expect(source).toContain('oncontextmenu={(e) => openSearchContextMenu(e, localPlaylistMenuItems(playlist), playlist.name)}');
+		expect(source).toContain('oncontextmenu={(e) => openSearchContextMenu(e, tidalPlaylistMenuItems(playlist), playlist.title)}');
+		expect(source).toContain('oncontextmenu={(e) => openSearchContextMenu(e, spotifyPlaylistMenuItems(playlist), playlist.title ?? \'Spotify playlist\')}');
+		expect(source).toContain('oncontextmenu={(e) => openSearchContextMenu(e, libraryBasicTrackMenu(track))}');
 	});
 });
