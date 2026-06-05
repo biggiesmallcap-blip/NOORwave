@@ -7,10 +7,12 @@ installed-mode Tauri-owned sidecar launch from a stopped state is now verified
 with installed data. Installed Tauri WebView route screenshots for app shell,
 search, remote, and artwork-heavy routes are now verified through WebView2 CDP.
 Live TIDAL seek-to-finish state advancement is now verified through the running
-installed app. Long provider-session behavior, human-audible local-track finish
-confirmation, and audio failure transitions remain not verified in this agent
-run. A local Chrome and Vite visible smoke for `/remote` and the remote album
-tile artwork fallback passed after the automated report was finalized.
+installed app. A bounded TIDAL provider continuity smoke during route
+navigation is now verified. Long provider refresh or provider-error behavior,
+human-audible local-track finish confirmation, and audio failure transitions
+remain not verified in this agent run. A local Chrome and Vite visible smoke
+for `/remote` and the remote album tile artwork fallback passed after the
+automated report was finalized.
 
 This report closes the automated audit work for queue advancement, runtime
 handoff, playlist injection, stale frontend playback intents, artwork fallback
@@ -501,6 +503,32 @@ Live TIDAL finish-advancement state smoke passed on 2026-06-05:
   It does not independently prove human-audible output, a local-library finish
   case, active decode failure, or prepared-next failure.
 
+Bounded TIDAL provider continuity smoke passed on 2026-06-05:
+
+- Started a scratch `noor-server` against a temporary copy of installed app
+  data and served the production frontend build. The live user database was
+  not mutated, and the scratch copy was removed after the smoke.
+- Confirmed TIDAL was connected through PKCE in the scratch backend.
+- Fetched `/api/tidal/albums/58520793/tracks`; the response returned 45
+  tracks, 0 missing artwork fields, first track `Real Love`, and last track
+  `Across The Universe`.
+- Posted the loaded 45-track album body to `POST /api/tidal/play-mix`.
+  Playback started on `Real Love`, TIDAL id `58520794`, with 44 visible
+  continuation queue rows.
+- During playback, requested backend-served app routes
+  `/tidal/albums/58520793` and `/remote/tidal/albums/58520793`; both returned
+  HTTP 200.
+- Polled `GET /api/playback/state` every 10 seconds for 180 seconds. All 18
+  polls reported `is_playing=true`, current track `Real Love`, TIDAL id
+  `58520794`, 44 queue rows, and 0 missing artwork fields in the visible
+  queue. The final poll reported position 179,823 ms.
+- Paused playback after the polling window and confirmed
+  `is_playing=false`, then shut down the scratch server and verified no NOOR
+  processes and no port `3334` listener remained.
+- This verifies bounded provider playback continuity during route navigation.
+  It does not exercise token refresh, provider 401, provider 403, provider
+  429, or a multi-track provider session.
+
 Native shell and audio safety preflight passed without launching a second app
 instance:
 
@@ -669,7 +697,8 @@ Non-blocking warnings observed:
   seek-to-finish state advancement are verified above, but they do not prove
   human-audible output or the failure-transition paths.
 - Long real TIDAL provider sessions with ephemeral mixes, token refresh, and
-  provider-side 403/429 behavior.
+  provider-side 401/403/429 behavior. The bounded 180 second provider
+  continuity smoke above did not reach refresh or provider-error conditions.
 
 These are manual or environment-dependent checks. They are not hidden in
 `FOLLOWUPS.md` because they are current release-readiness checks, not future
@@ -726,6 +755,10 @@ Acceptance checks:
   app and public seek route. `Before Night Comes` advanced to the expected next
   queued TIDAL track `Azurit`; playback was paused afterward and verified
   stopped.
+- Done: bounded TIDAL provider continuity smoke passed on a scratch backend.
+  Playback stayed active for 18 consecutive 10 second polls while backend-
+  served desktop and remote TIDAL album routes returned HTTP 200; visible queue
+  rows retained artwork throughout and playback was paused afterward.
 - Done: non-invasive native shell and audio preflight confirmed the installed
   app/server were already running, the then-current server was actively playing,
   and a second launch could shut down the active sidecar.
@@ -751,7 +784,7 @@ Acceptance checks:
   loaded TIDAL album continuation queue, proving the visible queue keeps the
   44 pending album rows in order with artwork and no unrelated durable rows.
 - Not verified: human-audible local-track finish confirmation, audio failure
-  transitions, and long live TIDAL session behavior.
+  transitions, and long live TIDAL refresh or provider-error behavior.
 
 Done:
 
@@ -763,7 +796,8 @@ Done:
   recorded in this report. Fresh portable/release Tauri-owned sidecar startup
   and installed-mode Tauri-owned sidecar startup evidence are also recorded.
   Installed Tauri WebView route screenshot evidence and live TIDAL
-  finish-advancement state evidence are recorded.
+  finish-advancement state evidence are recorded. Bounded TIDAL provider
+  continuity evidence is recorded.
 
 Incomplete:
 
@@ -771,8 +805,9 @@ Incomplete:
   stubbed or partially wired.
 - Manual installed audio and provider transition smoke remains outside this
   automated run because it still requires human-audible local-track finish,
-  failure-transition checks, and long-provider-session behavior beyond sidecar
-  startup, route rendering, and TIDAL state advancement.
+  failure-transition checks, and long provider refresh or provider-error
+  behavior beyond sidecar startup, route rendering, TIDAL state advancement,
+  and bounded provider continuity.
 
 Follow-ups added to `FOLLOWUPS.md`: none.
 
