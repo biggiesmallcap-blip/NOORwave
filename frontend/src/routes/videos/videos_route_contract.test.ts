@@ -22,6 +22,17 @@ describe('videos route contract', () => {
 		expect(source).toContain('if (seq === loadMoreSeq) loadingMore = false;');
 	});
 
+	test('guards video mix loads against stale route responses', () => {
+		expect(source).toContain('let mixLoadSeq = 0;');
+		expect(source).toContain('const seq = ++mixLoadSeq;');
+		expect(source).toContain('const isCurrentMixLoad = () => seq === mixLoadSeq && activeMixId === mixId;');
+		expect(source).toContain('if (!isCurrentMixLoad()) return;');
+		expect(source).toContain('if (autoPlayFirst && isCurrentMixLoad() && mixItems.length > 0)');
+		expect(source).toContain('if (isCurrentMixLoad()) showToast(mixError, \'error\', 3200);');
+		expect(source).toContain('if (seq === mixLoadSeq) loadingMix = false;');
+		expect(source).toContain('mixLoadSeq += 1;');
+	});
+
 	test('keeps video selection, stream, and context actions wired', () => {
 		expect(source).toContain('await fetchStream(video.tidal_id);');
 		expect(source).toContain('void selectVideo(video);');

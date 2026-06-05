@@ -103,6 +103,7 @@
 	let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 	let searchAbort: AbortController | null = null;
 	let loadMoreSeq = 0;
+	let mixLoadSeq = 0;
 	let streamRequestSeq = 0;
 	let prefetchRequestSeq = 0;
 	let prefetchedStream = $state<PrefetchedVideoStream | null>(null);
@@ -177,6 +178,7 @@
 		mixError = null;
 		prefetchedStream = null;
 		loadMoreSeq += 1;
+		mixLoadSeq += 1;
 		streamRequestSeq += 1;
 		prefetchRequestSeq += 1;
 		clearSessionSnapshot();
@@ -335,6 +337,8 @@
 	}
 
 	async function loadMix(mixId: string, autoPlayFirst = false) {
+		const seq = ++mixLoadSeq;
+		const isCurrentMixLoad = () => seq === mixLoadSeq && activeMixId === mixId;
 		loadMoreSeq += 1;
 		loadingMore = false;
 		loadingMix = true;
@@ -343,18 +347,20 @@
 		mixItems = [];
 		try {
 			const result = await api.getTidalVideoMixItems(mixId);
+			if (!isCurrentMixLoad()) return;
 			mixItems = result.items.map((item) => ({ ...item, mix_id: mixId }));
 			if (mixItems.length === 0) mixError = 'This mix did not return video items.';
-			if (autoPlayFirst && mixItems.length > 0) {
+			if (autoPlayFirst && isCurrentMixLoad() && mixItems.length > 0) {
 				autoplayNext = true;
 				persistAutoplayPreference();
 				await selectVideo(mixItems[0], false);
 			}
 		} catch (err) {
+			if (!isCurrentMixLoad()) return;
 			mixError = normalizeError(err, 'Video mix items could not load.');
-			showToast(mixError, 'error', 3200);
+			if (isCurrentMixLoad()) showToast(mixError, 'error', 3200);
 		} finally {
-			loadingMix = false;
+			if (seq === mixLoadSeq) loadingMix = false;
 		}
 	}
 
@@ -600,6 +606,7 @@
 	onDestroy(() => {
 		if (debounceTimer) clearTimeout(debounceTimer);
 		searchAbort?.abort();
+		mixLoadSeq += 1;
 		streamRequestSeq += 1;
 		prefetchRequestSeq += 1;
 	});
