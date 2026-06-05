@@ -25,6 +25,7 @@
 	import { mergeLocalIntoTidal } from '$lib/search/merge_local';
 	import { contextMenu, openMenuAtElement, type MenuItem } from '$lib/stores/context_menu';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import { tidalSearchTrackToPlayable } from '$lib/utils/track';
 
 	let inputEl = $state<HTMLInputElement | null>(null);
 	let query = $state('');
@@ -145,7 +146,7 @@
 
 	async function selectTrack(track: TidalSearchTrack) {
 		close();
-		await playTidalTrackNow({ ...track, artist_tidal_id: track.artist_id ?? null });
+		await playTidalTrackNow(tidalSearchTrackToPlayable(track));
 	}
 
 	function selectAlbum(album: TidalSearchAlbum) {
@@ -184,7 +185,7 @@
 	}
 
 	function buildTrackRowMenu(track: TidalSearchTrack): MenuItem[] {
-		const playable = { ...track, artist_tidal_id: track.artist_id ?? null };
+		const playable = tidalSearchTrackToPlayable(track);
 		const items: MenuItem[] = [
 			{ label: 'Play now', icon: '▶', onSelect: () => void playTidalTrackNow(playable) },
 			{ label: 'Play next', icon: '⤴', onSelect: () => void playTidalTrackNext(playable) },

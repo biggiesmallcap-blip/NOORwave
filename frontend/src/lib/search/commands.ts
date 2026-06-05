@@ -3,6 +3,7 @@ import { get } from 'svelte/store';
 import { currentTrack } from '$lib/stores/player';
 import { api } from '$lib/api/client';
 import { APP_ROUTES, type AppRouteId } from '$lib/routes/registry';
+import { tidalSearchTrackToPlayable, trackToTidalPlayable } from '$lib/utils/track';
 
 export interface SlashCommand {
 	prefix: string;         // e.g. 'play', 'queue', 'radio', 'jump'
@@ -41,7 +42,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
 				const first = res.tracks[0];
 				if (first) {
 					const { playTidalTrackNow } = await import('$lib/stores/player');
-					await playTidalTrackNow({ ...first, artist_tidal_id: first.artist_id ?? null });
+					await playTidalTrackNow(tidalSearchTrackToPlayable(first));
 				}
 			} catch { /* silent */ }
 		},
@@ -57,7 +58,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
 				const first = res.tracks[0];
 				if (first) {
 					const { addTidalTrackToQueue } = await import('$lib/stores/player');
-					await addTidalTrackToQueue({ ...first, artist_tidal_id: first.artist_id ?? null });
+					await addTidalTrackToQueue(tidalSearchTrackToPlayable(first));
 				}
 			} catch { /* silent */ }
 		},
@@ -73,7 +74,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
 					const first = res.tracks[0];
 					if (first) {
 						const { startTidalSongRadio } = await import('$lib/stores/player');
-						await startTidalSongRadio({ ...first, artist_tidal_id: first.artist_id ?? null });
+						await startTidalSongRadio(tidalSearchTrackToPlayable(first));
 					}
 				} catch { /* silent */ }
 			} else {
@@ -83,14 +84,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
 					await startSongRadio(track.id);
 				} else if (track?.tidal_id) {
 					const { startTidalSongRadio } = await import('$lib/stores/player');
-					await startTidalSongRadio({
-						tidal_id: track.tidal_id,
-						title: track.title,
-						artist_name: track.artist_name,
-						album_title: track.album_title,
-						artwork_url: track.artwork_url,
-						duration_ms: track.duration_ms,
-					});
+					const playable = trackToTidalPlayable(track);
+					if (playable) await startTidalSongRadio(playable);
 				}
 			}
 		},
