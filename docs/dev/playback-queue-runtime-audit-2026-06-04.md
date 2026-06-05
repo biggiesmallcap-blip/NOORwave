@@ -1,11 +1,12 @@
 # Playback, Queue, and Runtime Audit - 2026-06-04
 
 Status: final automated audit report. Scratch backend live TIDAL album
-playback start/stop is now verified. Fresh Tauri-owned sidecar launch, long
-provider-session behavior, and manual Tauri WebView artwork screenshots remain
-not verified in this agent run. A local Chrome and Vite visible smoke for
-`/remote` and the remote album tile artwork fallback passed after the
-automated report was finalized.
+playback start/stop is now verified. A fresh portable release Tauri-owned
+sidecar launch from a stopped state is now verified with scratch data. Fresh
+installed-mode sidecar launch, long provider-session behavior, and manual Tauri
+WebView artwork screenshots remain not verified in this agent run. A local
+Chrome and Vite visible smoke for `/remote` and the remote album tile artwork
+fallback passed after the automated report was finalized.
 
 This report closes the automated audit work for queue advancement, runtime
 handoff, playlist injection, stale frontend playback intents, artwork fallback
@@ -405,6 +406,25 @@ Scratch backend live TIDAL album playback smoke passed on 2026-06-05:
   `is_playing=false` with 44 continuation queue rows, then shut down the
   scratch server and verified no NOOR processes were running.
 
+Fresh portable Tauri-owned sidecar startup smoke passed on 2026-06-05:
+
+- Confirmed before launch that there were no NOOR processes and no port `3334`
+  listener.
+- Started `target/release/noor-app.exe` once with a scratch `NOOR_DATA_DIR` and
+  the production frontend build. The live user database was not used.
+- Confirmed the launched app process spawned `noor-server.exe`, and the server
+  process parent id matched the app process id.
+- Confirmed `/api/ping` returned the local backend.
+- Fetched the loopback setup token and then the protected
+  `/api/playback/state`; playback reported `is_playing=false`, no current
+  track, and 0 queue rows.
+- Confirmed the scratch launch created a scratch `noor.db`, then posted
+  `/api/shutdown`, stopped the app process launched for the smoke, verified no
+  NOOR processes remained, and verified port `3334` had no `LISTENING` socket.
+- This verifies the portable/release Tauri startup and sidecar ownership path.
+  It does not verify the installed NSIS resource layout, the tray quit path, or
+  the Tauri WebView visual screenshot pass.
+
 Native shell and audio safety preflight passed without launching a second app
 instance:
 
@@ -567,12 +587,11 @@ Non-blocking warnings observed:
 
 ## Not Verified
 
-- Fresh Tauri app launch and sidecar startup from a stopped state.
-  - Agent did not launch another `noor-app` because its startup path calls
-    `shutdown_stale_server_before_spawn` before spawning the sidecar. The local
-    smoke environment had an active installed app process. A later backend
-    recovery started `noor-server.exe` directly, so the current server process
-    is not proof that Tauri owns a fresh sidecar from a stopped state.
+- Fresh installed-mode Tauri app launch and sidecar startup from a fully
+  stopped installed app state.
+  - The portable/release Tauri startup path is verified above with scratch
+    data. The installed NSIS resource layout and installed app process path are
+    still not verified from a fully stopped app state.
 - Real audio-device playback for track finish, active decode failure, and
   prepared-next failure. A scratch backend live album start/stop smoke is
   verified above, but it does not cover finish or failure transitions.
@@ -616,6 +635,11 @@ Acceptance checks:
   45-track album. Playback started on `Real Love`, exposed 44 ordered
   `tidal_mix` continuation rows with artwork, was paused after the live window,
   and remained stopped after backend-served desktop and remote route renders.
+- Done: fresh portable/release Tauri-owned sidecar startup smoke passed from a
+  stopped state with scratch data. The launched app owned the spawned server
+  process, the backend answered `/api/ping`, protected playback state was
+  stopped with an empty queue, and cleanup left no NOOR process or port `3334`
+  listener.
 - Done: non-invasive native shell and audio preflight confirmed the installed
   app/server were already running, the then-current server was actively playing,
   and a second launch could shut down the active sidecar.
@@ -644,8 +668,8 @@ Acceptance checks:
   Playlists, and Settings through existing sidebar controls without visible
   error text in accessibility samples.
 - Not verified: audio-device finish and failure transitions, long live TIDAL
-  session behavior, fresh Tauri sidecar startup from a stopped state, and
-  manual Tauri WebView artwork route screenshot pass.
+  session behavior, fresh installed-mode Tauri sidecar startup from a stopped
+  state, and manual Tauri WebView artwork route screenshot pass.
 
 Done:
 
@@ -654,14 +678,16 @@ Done:
   tracing are implemented and committed. Expanded artwork route smoke, focused
   Spotify detail route smoke, backend-served dynamic detail route smoke, and
   API-only plus live scratch TIDAL album queue and playback smoke evidence are
-  recorded in this report.
+  recorded in this report. Fresh portable/release Tauri-owned sidecar startup
+  evidence is also recorded.
 
 Incomplete:
 
 - No known code path from the requested automated audit remains intentionally
   stubbed or partially wired.
-- Manual Tauri/audio/provider smoke remains outside this automated run because
-  the current installed app and sidecar are active.
+- Manual installed Tauri/audio/provider smoke remains outside this automated
+  run because it still requires an installed-app session and audio/provider
+  transitions beyond the scratch portable launch.
 
 Follow-ups added to `FOLLOWUPS.md`: none.
 
@@ -669,9 +695,9 @@ Next checks before release:
 
 - Use `docs/dev/tauri-audio-provider-manual-smoke-2026-06-04.md` as the
   manual smoke checklist.
-- Pick a safe manual window where interrupting the current localhost backend is
-  acceptable, then launch the Tauri app and confirm the WebView reaches the
-  app shell after sidecar startup.
+- Pick a safe manual window where interrupting the installed localhost backend
+  is acceptable, then launch the installed Tauri app and confirm the WebView
+  reaches the app shell after sidecar startup.
 - Run NOORwave through the Tauri-owned app path with a real TIDAL account and
   audio output.
 - Start a queue with pending rows, force an unresolved row, and confirm playback
