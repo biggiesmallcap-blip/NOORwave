@@ -337,6 +337,27 @@ Focused Spotify detail route smoke passed after the expanded route pass:
   no visible error text, had 0 broken image elements, and made 0 malformed
   TIDAL artwork requests.
 
+Backend-served dynamic detail route smoke passed on 2026-06-05:
+
+- Served the production frontend through `noor-server` on `127.0.0.1:3334`
+  and opened the dynamic detail routes in installed Chrome without clicking any
+  playback controls.
+- Covered `/albums/2602`, `/artists/4504`, `/remote/albums/2602`,
+  `/remote/artists/4504`, `/tidal/albums/58520793`,
+  `/tidal/artists/3634161`, `/remote/tidal/albums/58520793`, and
+  `/remote/tidal/artists/3634161`.
+- Confirmed HTTP 200 for every route, no console errors, no page errors, no app
+  request failures, no bad app responses, no visible route error text, no
+  broken image elements, and 0 malformed TIDAL artwork requests.
+- Confirmed the TIDAL album routes rendered `Anthology 2` with 45 visible row
+  candidates. The companion API audit for `/api/tidal/albums/58520793/tracks`
+  returned 45 tracks across 2 discs, 0 duplicate TIDAL ids, 0 missing artwork
+  fields, and only album id `58520793`.
+- Chrome reported `ERR_BLOCKED_BY_ORB` for a small number of direct TIDAL CDN
+  artist image requests on artist routes. Those were recorded as tolerated CDN
+  fallback attempts because rendered images were not broken and the requested
+  TIDAL sizes were from the allowed set.
+
 Native shell and audio safety preflight passed without launching a second app
 instance:
 
@@ -476,6 +497,10 @@ Acceptance checks:
 - Done: focused Chrome smoke passed for Spotify artist and Spotify album detail
   routes with loaded real provider detail states, no visible error text, no
   broken image elements, and no malformed TIDAL artwork requests.
+- Done: backend-served Chrome smoke passed for dynamic local, remote, TIDAL
+  album, and TIDAL artist detail routes with no broken image elements, no app
+  request failures, no visible route error text, and no malformed TIDAL artwork
+  requests.
 - Done: non-invasive native shell and audio preflight confirmed the installed
   app/server were already running, the then-current server was actively playing,
   and a second launch could shut down the active sidecar.
@@ -495,8 +520,9 @@ Done:
 
 - Queue/runtime stall fixes, stale frontend intent guards, artwork fallback
   hardening, API timeout protection, transaction hardening, and runtime handoff
-  tracing are implemented and committed. Expanded artwork route smoke evidence
-  and focused Spotify detail route smoke evidence are recorded in this report.
+  tracing are implemented and committed. Expanded artwork route smoke, focused
+  Spotify detail route smoke, and backend-served dynamic detail route smoke
+  evidence are recorded in this report.
 
 Incomplete:
 
