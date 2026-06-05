@@ -3,6 +3,7 @@
 	import {
 		clearQueue,
 		moveQueueTrackNext,
+		playTidalTrackNow,
 		playTrackNow,
 		refreshPlaybackState,
 		removeTrackFromQueue,
@@ -15,6 +16,7 @@
 		type TidalArtworkSize
 	} from '$lib/utils/artwork';
 	import { formatTrackDuration } from '$lib/utils/format';
+	import { queueItemToTidalPlayable } from '$lib/utils/track';
 	import {
 		buildTidalTrackMenu,
 		buildTrackMenu,
@@ -54,7 +56,7 @@
 	});
 
 	function canPlay(item: QueueItem): boolean {
-		return item.is_pending !== true && item.track.id > 0;
+		return item.is_pending !== true && (item.track.id > 0 || queueItemToTidalPlayable(item) != null);
 	}
 
 	function isCurrent(item: QueueItem): boolean {
@@ -132,7 +134,12 @@
 
 	async function onPlayRow(item: QueueItem) {
 		hapticTap();
-		await playTrackNow(item.track.id);
+		const tidal = queueItemToTidalPlayable(item);
+		if (tidal != null && item.track.id <= 0) {
+			await playTidalTrackNow(tidal);
+		} else {
+			await playTrackNow(item.track.id);
+		}
 	}
 
 	async function onMoveNext(item: QueueItem, event: Event) {
