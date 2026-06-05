@@ -470,6 +470,12 @@ Additional targeted verification for the malformed artwork fix:
   - 5 tests passed across the app unit tests and Tauri runtime pin test.
 - `cargo fmt --all -- --check`
   - Passed on 2026-06-05.
+- `cargo test --workspace --locked`
+  - Passed on 2026-06-05.
+  - Workspace Rust tests passed without launching the app or using any
+    playback-starting route.
+  - Test groups reported 4, 1, 4, 1, 97, and 1184 passed tests, with 5 total
+    ignored tests and no failed tests.
 - `pnpm check`
   - Passed on 2026-06-05 with 0 errors and 0 warnings after rerunning outside
     the sandbox because the first run could not rewrite `.svelte-kit` metadata.
@@ -564,6 +570,8 @@ Acceptance checks:
   manual-review warning.
 - Done: `cargo test -p noor-app` and `cargo fmt --all -- --check` passed as
   no-launch Rust verification checks.
+- Done: `cargo test --workspace --locked` passed as refreshed no-audio
+  workspace Rust verification.
 - Done: `pnpm check`, `pnpm lint`, `pnpm test`, and `pnpm run build` passed as
   refreshed no-launch frontend verification checks.
 - Partial: native WebView route navigation reached Genre Galaxy, Moods,
