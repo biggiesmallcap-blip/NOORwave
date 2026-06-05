@@ -9861,10 +9861,46 @@ struct TidalPlaylistSearchParams {
     offset: Option<i32>,
 }
 
+const TIDAL_PLAYLIST_SEARCH_DEFAULT_LIMIT: i32 = 20;
+const TIDAL_PLAYLIST_SEARCH_MAX_LIMIT: i32 = 50;
+const TIDAL_PLAYLIST_UUID_MAX_LEN: usize = 96;
+
+fn normalize_tidal_playlist_search_query(query: &str) -> Option<&str> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn normalize_tidal_playlist_search_limit(limit: Option<i32>) -> i32 {
+    limit
+        .unwrap_or(TIDAL_PLAYLIST_SEARCH_DEFAULT_LIMIT)
+        .clamp(1, TIDAL_PLAYLIST_SEARCH_MAX_LIMIT)
+}
+
+fn normalize_tidal_playlist_uuid(uuid: &str) -> Result<&str, StatusCode> {
+    let trimmed = uuid.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > TIDAL_PLAYLIST_UUID_MAX_LEN
+        || !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(trimmed)
+}
+
 async fn tidal_playlist_search(
     State(state): State<SharedState>,
     Query(params): Query<TidalPlaylistSearchParams>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(query) = normalize_tidal_playlist_search_query(&params.q) else {
+        return Ok(Json(json!({ "playlists": [] })));
+    };
+
     let tokens = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (
@@ -9882,7 +9918,7 @@ async fn tidal_playlist_search(
         ));
     };
 
-    let limit = params.limit.unwrap_or(20).min(50);
+    let limit = normalize_tidal_playlist_search_limit(params.limit);
     let offset = params.offset.unwrap_or(0).max(0);
     let (http_client, tidal_http_client) = {
         let s = state.read().await;
@@ -9893,7 +9929,7 @@ async fn tidal_playlist_search(
         tokens.access_token.clone(),
         tokens.country_code.clone(),
     );
-    let playlists = match client.search_playlists(&params.q, limit, offset).await {
+    let playlists = match client.search_playlists(query, limit, offset).await {
         Ok(r) => r,
         Err(e) if error_looks_like_auth(&e) => {
             let refreshed = recover_tidal_session(&state, &http_client, &tokens)
@@ -9910,7 +9946,7 @@ async fn tidal_playlist_search(
                 refreshed.country_code.clone(),
             );
             retry_client
-                .search_playlists(&params.q, limit, offset)
+                .search_playlists(query, limit, offset)
                 .await
                 .map_err(|e2| {
                     (
@@ -9946,6 +9982,13 @@ async fn tidal_playlist_tracks(
     State(state): State<SharedState>,
     Path(uuid): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let uuid = normalize_tidal_playlist_uuid(&uuid).map_err(|status| {
+        (
+            status,
+            Json(json!({ "error": "invalid TIDAL playlist uuid" })),
+        )
+    })?;
+
     let tokens = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (
@@ -9973,7 +10016,7 @@ async fn tidal_playlist_tracks(
     };
     let limit = 100;
     let offset = 0;
-    let cache_key = tidal_playlist_tracks_cache_key(&tokens.country_code, &uuid, limit, offset);
+    let cache_key = tidal_playlist_tracks_cache_key(&tokens.country_code, uuid, limit, offset);
     let client = TidalClient::with_http(
         tidal_http_client.clone(),
         tokens.access_token.clone(),
@@ -9982,7 +10025,7 @@ async fn tidal_playlist_tracks(
     let tracks = match get_cached_tidal_playlist_tracks(&playlist_tracks_cache, &cache_key) {
         Some(cached) => cached,
         None => {
-            let resp = match client.get_playlist_tracks(&uuid, limit, offset).await {
+            let resp = match client.get_playlist_tracks(uuid, limit, offset).await {
                 Ok(r) => r,
                 Err(e) if error_looks_like_auth(&e) => {
                     let refreshed = recover_tidal_session(&state, &http_client, &tokens)
@@ -10001,7 +10044,7 @@ async fn tidal_playlist_tracks(
                         refreshed.country_code.clone(),
                     );
                     retry_client
-                        .get_playlist_tracks(&uuid, limit, offset)
+                        .get_playlist_tracks(uuid, limit, offset)
                         .await
                         .map_err(|e2| {
                             (

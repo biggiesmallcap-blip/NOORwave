@@ -476,6 +476,55 @@ fn tidal_video_mix_id_normalization_rejects_url_control_characters() {
 }
 
 #[test]
+fn tidal_playlist_search_query_normalization_short_circuits_blank_input() {
+    assert_eq!(normalize_tidal_playlist_search_query(""), None);
+    assert_eq!(normalize_tidal_playlist_search_query("   "), None);
+    assert_eq!(
+        normalize_tidal_playlist_search_query("  late night  "),
+        Some("late night")
+    );
+}
+
+#[test]
+fn tidal_playlist_search_limit_is_bounded() {
+    assert_eq!(normalize_tidal_playlist_search_limit(None), 20);
+    assert_eq!(normalize_tidal_playlist_search_limit(Some(-5)), 1);
+    assert_eq!(normalize_tidal_playlist_search_limit(Some(0)), 1);
+    assert_eq!(normalize_tidal_playlist_search_limit(Some(12)), 12);
+    assert_eq!(normalize_tidal_playlist_search_limit(Some(999)), 50);
+}
+
+#[test]
+fn tidal_playlist_uuid_normalization_allows_safe_ids() {
+    assert_eq!(
+        normalize_tidal_playlist_uuid("123e4567-e89b-12d3-a456-426614174000").unwrap(),
+        "123e4567-e89b-12d3-a456-426614174000"
+    );
+    assert_eq!(
+        normalize_tidal_playlist_uuid("  tidal_playlist_01  ").unwrap(),
+        "tidal_playlist_01"
+    );
+}
+
+#[test]
+fn tidal_playlist_uuid_normalization_rejects_url_control_characters() {
+    for uuid in [
+        "",
+        "../tracks",
+        "playlist/tracks",
+        "playlist?limit=1",
+        "playlist&countryCode=US",
+        "playlist#fragment",
+        "playlist id",
+    ] {
+        assert_eq!(
+            normalize_tidal_playlist_uuid(uuid),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+}
+
+#[test]
 fn tidal_status_payload_reports_pkce_source_only_for_pkce_tokens() {
     let tokens = test_tidal_tokens(Some("pkce"));
 
