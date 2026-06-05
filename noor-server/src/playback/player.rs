@@ -1402,12 +1402,57 @@ pub fn set_volume(conn: &Connection, volume: f64) -> Result<PlaybackSnapshot> {
     load_snapshot(conn)
 }
 
-pub fn set_shuffle_mode(conn: &Connection, mode: ShuffleMode) -> Result<ShuffleModeUpdate> {
-    let current_queue_item_id: Option<i64> = conn.query_row(
-        "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
+fn current_shuffle_anchor_queue_item_id(conn: &Connection) -> Result<Option<i64>> {
+    let (current_track_id, current_queue_item_id): (Option<i64>, Option<i64>) = conn.query_row(
+        "SELECT current_track_id, current_queue_item_id FROM playback_state WHERE id = 1",
         [],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
+
+    if let Some(queue_item_id) = current_queue_item_id {
+        let exists = conn
+            .query_row(
+                "SELECT 1 FROM queue WHERE id = ?1",
+                params![queue_item_id],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if exists {
+            return Ok(Some(queue_item_id));
+        }
+    }
+
+    if let Some(track_id) = current_track_id {
+        let repaired_queue_item_id: Option<i64> = conn
+            .query_row(
+                "SELECT id
+                 FROM queue
+                 WHERE track_id = ?1
+                 ORDER BY position ASC, id ASC
+                 LIMIT 1",
+                params![track_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        conn.execute(
+            "UPDATE playback_state SET current_queue_item_id = ?1 WHERE id = 1",
+            params![repaired_queue_item_id],
+        )?;
+        return Ok(repaired_queue_item_id);
+    }
+
+    if current_queue_item_id.is_some() {
+        conn.execute(
+            "UPDATE playback_state SET current_queue_item_id = NULL WHERE id = 1",
+            [],
+        )?;
+    }
+    Ok(None)
+}
+
+pub fn set_shuffle_mode(conn: &Connection, mode: ShuffleMode) -> Result<ShuffleModeUpdate> {
+    let current_queue_item_id = current_shuffle_anchor_queue_item_id(conn)?;
     let seed = (mode != ShuffleMode::Off).then(generate_shuffle_seed);
     conn.execute(
         "UPDATE playback_state SET shuffle_mode = ?1, shuffle_seed = ?2 WHERE id = 1",
@@ -4313,6 +4358,96 @@ mod tests {
         assert_eq!(update.snapshot.state.shuffle_mode, "off");
         assert!(update.debug.is_none());
         assert_eq!(stored_seed, None);
+    }
+
+    #[test]
+    fn setting_shuffle_repairs_stale_current_queue_anchor() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 3, 4]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        let current_qid = queue_items[1].id;
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 2,
+                 current_queue_item_id = 999999,
+                 is_playing = 1
+             WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+        let update = set_shuffle_mode(&conn, ShuffleMode::True).unwrap();
+        let debug = update.debug.expect("shuffle debug");
+        let stored_current_qid: Option<i64> = conn
+            .query_row(
+                "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(stored_current_qid, Some(current_qid));
+        assert_eq!(
+            update.snapshot.state.current_queue_item_id,
+            Some(current_qid)
+        );
+        assert_eq!(debug.locked_count, 2);
+        assert_eq!(debug.candidate_count, 2);
+        assert_eq!(
+            update
+                .snapshot
+                .queue
+                .iter()
+                .position(|item| item.id == current_qid),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn setting_shuffle_repairs_missing_anchor_for_duplicate_current_track() {
+        let conn = conn();
+        let repeated = queue::get_track_by_id(&conn, 1).unwrap().unwrap();
+        let other_tracks = load_tracks(&conn, &[2, 3]);
+        let queue_items = queue::replace_queue(
+            &conn,
+            &[
+                repeated.clone(),
+                repeated,
+                other_tracks[0].clone(),
+                other_tracks[1].clone(),
+            ],
+            "test",
+        )
+        .unwrap();
+        let repaired_qid = queue_items[0].id;
+        let duplicate_qid = queue_items[1].id;
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1,
+                 current_queue_item_id = NULL,
+                 is_playing = 1
+             WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+        let update = set_shuffle_mode(&conn, ShuffleMode::True).unwrap();
+        let debug = update.debug.expect("shuffle debug");
+
+        assert_eq!(
+            update.snapshot.state.current_queue_item_id,
+            Some(repaired_qid)
+        );
+        assert_eq!(debug.locked_count, 1);
+        assert_eq!(debug.candidate_count, 3);
+        assert_eq!(update.snapshot.queue[0].id, repaired_qid);
+        assert!(
+            update
+                .snapshot
+                .queue
+                .iter()
+                .any(|item| item.id == duplicate_qid)
+        );
     }
 
     #[test]
