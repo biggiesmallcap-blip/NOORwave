@@ -121,6 +121,13 @@ fn clamp_usize_limit(limit: Option<usize>, default: usize, max: usize) -> usize 
     limit.unwrap_or(default).clamp(1, max)
 }
 
+fn positive_query_id(id: i64) -> Result<i64, StatusCode> {
+    if id <= 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(id)
+}
+
 /// Compact playlist-search result tailored for inline rendering in /search
 /// and Ctrl+K. Drops the heavyweight track-list payload. The ephemeral
 /// view fetches that on click.
@@ -402,12 +409,13 @@ pub(super) async fn search_vibe(
     State(state): State<SharedState>,
     Query(params): Query<VibeParams>,
 ) -> Result<Json<Value>, StatusCode> {
+    let track_id = positive_query_id(params.track_id)?;
     let limit = clamp_usize_limit(params.limit, VIBE_LIMIT_DEFAULT, VIBE_LIMIT_MAX);
     let state = state.read().await;
     state
         .db
         .with_conn(|conn| {
-            let results = queries::get_same_vibe_tracks(conn, params.track_id, limit as i64)?;
+            let results = queries::get_same_vibe_tracks(conn, track_id, limit as i64)?;
             Ok(Json(json!({ "tracks": results })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
@@ -423,12 +431,13 @@ pub(super) async fn search_underrated(
     State(state): State<SharedState>,
     Query(params): Query<UnderratedParams>,
 ) -> Result<Json<Value>, StatusCode> {
+    let artist_id = positive_query_id(params.artist_id)?;
     let limit = clamp_usize_limit(params.limit, UNDERRATED_LIMIT_DEFAULT, UNDERRATED_LIMIT_MAX);
     let state = state.read().await;
     state
         .db
         .with_conn(|conn| {
-            let results = queries::get_underrated_tracks(conn, params.artist_id, limit as i64)?;
+            let results = queries::get_underrated_tracks(conn, artist_id, limit as i64)?;
             Ok(Json(json!({ "tracks": results })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)

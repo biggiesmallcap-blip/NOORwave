@@ -5572,6 +5572,26 @@ async fn radio_song_rejects_zero_seed_id_with_400() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+#[tokio::test]
+async fn search_recommendation_routes_reject_non_positive_ids() {
+    let app = build_test_app().await;
+
+    for uri in [
+        "/api/search/vibe?track_id=0",
+        "/api/search/vibe?track_id=-7",
+        "/api/search/underrated?artist_id=0",
+        "/api/search/underrated?artist_id=-7",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+}
+
 // Characterization tests for TIDAL-handler failure shapes. These differ on
 // purpose: the album endpoint is "best-effort" (TIDAL is enrichment) while
 // tidal_search treats a disconnected session as a user-visible error.
