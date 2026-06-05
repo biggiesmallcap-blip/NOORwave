@@ -100,6 +100,18 @@ describe('daily chart shelf contract', () => {
 		expect(chartsPage).toContain('oncontextmenu={(e) => openChartPlaylistContext(e, c)}');
 	});
 
+	test('invalidates pending chart work when the route is destroyed', () => {
+		expect(source).toContain("import { onDestroy, onMount } from 'svelte';");
+		expect(source).toContain('let destroyed = false;');
+		expect(source).toContain('onDestroy(() => {');
+		expect(source).toContain('destroyed = true;');
+		expect(source).toContain('requestToken += 1;');
+		expect(source).toContain('stopCarousel();');
+		expect(source).toContain('if (destroyed) return;');
+		expect(source).toContain('if (destroyed || token !== requestToken) return;');
+		expect(source).toContain('if (!destroyed) resolvingEntries = { ...resolvingEntries, [entryId]: false };');
+	});
+
 	test('keeps chart page titles neutral with shared headers and artwork images', () => {
 		expect(chartsPage).toContain('<PageHeader');
 		expect(chartsPage).toContain('variant="editorial"');

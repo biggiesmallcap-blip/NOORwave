@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import {
 		api,
 		type ChartMatrixCell,
@@ -42,6 +42,7 @@
 	let matrixError = $state(false);
 	let error = $state(false);
 	let requestToken = 0;
+	let destroyed = false;
 	let refreshAttempted = false;
 	let snapshotRefreshAttempted = false;
 	let currentEntryIndex = $state(0);
@@ -67,6 +68,12 @@
 		void loadSnapshot(selectedRegion, selectedSource);
 	});
 
+	onDestroy(() => {
+		destroyed = true;
+		requestToken += 1;
+		stopCarousel();
+	});
+
 	$effect(() => {
 		if (chartEntries.length === 0) return;
 		void resolveVisibleEntries(chartEntries);
@@ -90,17 +97,19 @@
 		matrixError = false;
 		try {
 			const next = await api.getChartMatrix();
+			if (destroyed) return;
 			matrix = next;
 			if (!refreshAttempted && !matrixHasData(next)) {
 				refreshAttempted = true;
 				await refreshMatrix();
 			}
 		} catch (e) {
+			if (destroyed) return;
 			console.error('[daily-charts] matrix fetch failed', e);
 			matrix = null;
 			matrixError = true;
 		} finally {
-			matrixLoading = false;
+			if (!destroyed) matrixLoading = false;
 		}
 	}
 
@@ -108,12 +117,15 @@
 		refreshingMatrix = true;
 		try {
 			await api.refreshChartMatrix();
+			if (destroyed) return;
 			matrix = await api.getChartMatrix();
+			if (destroyed) return;
 			void loadSnapshot(selectedRegion, selectedSource);
 		} catch (e) {
+			if (destroyed) return;
 			console.error('[daily-charts] matrix refresh failed', e);
 		} finally {
-			refreshingMatrix = false;
+			if (!destroyed) refreshingMatrix = false;
 		}
 	}
 
@@ -128,7 +140,7 @@
 				region,
 				limit: LIMIT,
 			});
-			if (token !== requestToken) return;
+			if (destroyed || token !== requestToken) return;
 			data = next;
 			currentEntryIndex = 0;
 			if (
@@ -141,12 +153,12 @@
 				void refreshMatrix();
 			}
 		} catch (e) {
+			if (destroyed || token !== requestToken) return;
 			console.error('[daily-charts] snapshot fetch failed', e);
-			if (token !== requestToken) return;
 			data = null;
 			error = true;
 		} finally {
-			if (token === requestToken) loading = false;
+			if (!destroyed && token === requestToken) loading = false;
 		}
 	}
 
@@ -241,15 +253,17 @@
 		try {
 			const query = [artist, title].filter(Boolean).join(' ');
 			const results = await api.searchTidal(query, 1);
+			if (destroyed) return null;
 			const hit = results.tracks[0] ?? null;
 			resolvedTracks = { ...resolvedTracks, [entryId]: hit };
 			return hit;
 		} catch (e) {
+			if (destroyed) return null;
 			console.error('[daily-charts] tidal resolve failed', e);
 			resolvedTracks = { ...resolvedTracks, [entryId]: null };
 			return null;
 		} finally {
-			resolvingEntries = { ...resolvingEntries, [entryId]: false };
+			if (!destroyed) resolvingEntries = { ...resolvingEntries, [entryId]: false };
 		}
 	}
 
