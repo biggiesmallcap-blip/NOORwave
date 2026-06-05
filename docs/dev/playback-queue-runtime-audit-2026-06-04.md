@@ -529,6 +529,23 @@ Bounded TIDAL provider continuity smoke passed on 2026-06-05:
   It does not exercise token refresh, provider 401, provider 403, provider
   429, or a multi-track provider session.
 
+Low-volume local finish-advancement smoke was attempted on 2026-06-05 but not
+verified:
+
+- Prepared a scratch `noor-server` data directory from installed app data and
+  queried the copied database for local library rows whose `file_path` still
+  exists on disk and whose duration was longer than 30 seconds.
+- Found 0 eligible existing local-file candidates, so playback was not started
+  and the scratch server was not launched for this slice.
+- The planned smoke would have set `POST /api/playback/volume` to `0.05`
+  before calling `POST /api/playback/play`, then queued two local rows through
+  `POST /api/playback/queue`, sought near the end through
+  `POST /api/playback/position`, and confirmed advancement through
+  `GET /api/playback/state`.
+- Removed the scratch data directory after the attempt. This keeps
+  local-library finish advancement and human-audible local output in the
+  not-verified release-readiness set.
+
 Native shell and audio safety preflight passed without launching a second app
 instance:
 
@@ -696,6 +713,10 @@ Non-blocking warnings observed:
   prepared-next failure. Scratch backend live album start/stop and live TIDAL
   seek-to-finish state advancement are verified above, but they do not prove
   human-audible output or the failure-transition paths.
+- Low-volume local finish-advancement smoke was attempted on a scratch copy of
+  installed app data, but the copied library had 0 local track rows whose files
+  currently exist on disk. No local playback was started for that attempted
+  slice.
 - Long real TIDAL provider sessions with ephemeral mixes, token refresh, and
   provider-side 401/403/429 behavior. The bounded 180 second provider
   continuity smoke above did not reach refresh or provider-error conditions.
@@ -785,6 +806,9 @@ Acceptance checks:
   44 pending album rows in order with artwork and no unrelated durable rows.
 - Not verified: human-audible local-track finish confirmation, audio failure
   transitions, and long live TIDAL refresh or provider-error behavior.
+- Not verified: low-volume local finish-advancement smoke was attempted, but
+  the scratch copied library had 0 eligible existing local files, so no local
+  playback path could be exercised.
 
 Done:
 
