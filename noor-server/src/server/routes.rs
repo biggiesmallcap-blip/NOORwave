@@ -8046,6 +8046,59 @@ fn current_queue_position(conn: &rusqlite::Connection) -> anyhow::Result<Option<
         .optional()?)
 }
 
+fn first_queue_item_id_for_track(
+    conn: &rusqlite::Connection,
+    track_id: i64,
+) -> anyhow::Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT id
+             FROM queue
+             WHERE track_id = ?1
+             ORDER BY position ASC, id ASC
+             LIMIT 1",
+            params![track_id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+fn queue_item_exists(conn: &rusqlite::Connection, queue_item_id: i64) -> anyhow::Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM queue WHERE id = ?1",
+            params![queue_item_id],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false))
+}
+
+fn preserve_only_queue_item(conn: &rusqlite::Connection, queue_item_id: i64) -> anyhow::Result<()> {
+    conn.execute("DELETE FROM queue WHERE id != ?1", params![queue_item_id])?;
+    conn.execute(
+        "UPDATE playback_state SET current_queue_item_id = ?1 WHERE id = 1",
+        params![queue_item_id],
+    )?;
+    Ok(())
+}
+
+fn preserve_current_track_queue_row(
+    conn: &rusqlite::Connection,
+    track_id: i64,
+) -> anyhow::Result<()> {
+    if let Some(queue_item_id) = first_queue_item_id_for_track(conn, track_id)? {
+        preserve_only_queue_item(conn, queue_item_id)?;
+    } else {
+        queue::clear_queue(conn)?;
+        conn.execute(
+            "UPDATE playback_state SET current_queue_item_id = NULL WHERE id = 1",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 async fn spawn_pending_queue_resolver(state: &SharedState, queue_item_id: i64) {
     let tokens_opt: Option<crate::services::tidal::auth::TidalTokens> = {
         let s = state.read().await;
@@ -8447,25 +8500,20 @@ async fn clear_queue_route(State(state): State<SharedState>) -> Result<Json<Valu
                     )?;
                 match (current_queue_item_id, current_track_id) {
                     (Some(qid), track_id) => {
-                        let current_row_exists = conn
-                            .query_row("SELECT 1 FROM queue WHERE id = ?1", params![qid], |_| {
-                                Ok(true)
-                            })
-                            .optional()?
-                            .unwrap_or(false);
-                        if current_row_exists {
-                            conn.execute("DELETE FROM queue WHERE id != ?1", params![qid])?;
+                        if queue_item_exists(conn, qid)? {
+                            preserve_only_queue_item(conn, qid)?;
                         } else if let Some(track_id) = track_id {
-                            conn.execute(
-                                "DELETE FROM queue WHERE track_id != ?1",
-                                params![track_id],
-                            )?;
+                            preserve_current_track_queue_row(conn, track_id)?;
                         } else {
                             queue::clear_queue(conn)?;
+                            conn.execute(
+                                "UPDATE playback_state SET current_queue_item_id = NULL WHERE id = 1",
+                                [],
+                            )?;
                         }
                     }
                     (None, Some(track_id)) => {
-                        conn.execute("DELETE FROM queue WHERE track_id != ?1", params![track_id])?;
+                        preserve_current_track_queue_row(conn, track_id)?;
                     }
                     (None, None) => {
                         queue::clear_queue(conn)?;
