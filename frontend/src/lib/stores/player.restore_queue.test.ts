@@ -51,6 +51,7 @@ import {
 	isPlaying,
 	lastSuccessfulCallAt,
 	playAlbum,
+	shuffleTidalTracksNow,
 	playTidalTracksNow,
 	startSongRadio,
 	startTidalSongRadio,
@@ -208,6 +209,20 @@ function tidalPlayable(tidalId: number): TidalPlayable {
 		album_title: null,
 		artwork_url: null,
 		duration_ms: 200_000,
+	};
+}
+
+function tidalAlbumPlayable(index: number): TidalPlayable {
+	const tidalId = 1000 + index;
+	return {
+		tidal_id: tidalId,
+		title: `Anthology Track ${index}`,
+		artist_name: 'The Beatles',
+		artist_tidal_id: 3634161,
+		album_title: 'Anthology 2',
+		album_tidal_id: 58520793,
+		artwork_url: `https://resources.tidal.com/images/test-${index}/640x640.jpg`,
+		duration_ms: 180_000 + index,
 	};
 }
 
@@ -471,6 +486,58 @@ describe('stale playback responses', () => {
 		expect(get(currentTrack)?.tidal_id).toBe(101);
 		expect(get(playbackQueue).map((item) => item.track.tidal_id)).toEqual([102]);
 		expect(get(playbackQueue).some((item) => item.track.id === 900)).toBe(false);
+		expect(get(playerError)).toBeNull();
+	});
+
+	it('passes the full loaded TIDAL album track list to playback in order', async () => {
+		const loadedAlbum = Array.from({ length: 45 }, (_, index) => tidalAlbumPlayable(index + 1));
+		playbackQueue.set([libraryRow(90, 900)]);
+		vi.mocked(api.playTidalMix).mockResolvedValueOnce(
+			tidalMixPlaybackResponse(
+				ephemeralTidalRow(-100, loadedAlbum[0].tidal_id),
+				loadedAlbum.slice(1).map((track, index) => ephemeralTidalRow(-(index + 1), track.tidal_id))
+			)
+		);
+
+		await playTidalTracksNow(loadedAlbum, 'Anthology 2');
+
+		expect(api.playTidalMix).toHaveBeenCalledTimes(1);
+		const [sentTracks, sentShuffleMode] = vi.mocked(api.playTidalMix).mock.calls[0];
+		expect(sentShuffleMode).toBeUndefined();
+		expect(sentTracks).toHaveLength(45);
+		expect(sentTracks.map((track) => track.tidal_id)).toEqual(
+			loadedAlbum.map((track) => track.tidal_id)
+		);
+		expect(sentTracks.every((track) => track.album_tidal_id === 58520793)).toBe(true);
+		expect(sentTracks.every((track) => track.artwork_url?.includes('resources.tidal.com'))).toBe(true);
+		expect(get(currentTrack)?.tidal_id).toBe(loadedAlbum[0].tidal_id);
+		expect(get(playbackQueue).map((item) => item.track.tidal_id)).toEqual(
+			loadedAlbum.slice(1).map((track) => track.tidal_id)
+		);
+		expect(get(playbackQueue).some((item) => item.track.id === 900)).toBe(false);
+		expect(get(playerError)).toBeNull();
+	});
+
+	it('passes the full loaded TIDAL album track list to shuffle playback in order', async () => {
+		const loadedAlbum = Array.from({ length: 45 }, (_, index) => tidalAlbumPlayable(index + 1));
+		vi.mocked(api.playTidalMix).mockResolvedValueOnce(
+			tidalMixPlaybackResponse(
+				ephemeralTidalRow(-100, loadedAlbum[0].tidal_id),
+				loadedAlbum.slice(1).map((track, index) => ephemeralTidalRow(-(index + 1), track.tidal_id))
+			)
+		);
+
+		await shuffleTidalTracksNow(loadedAlbum, 'Anthology 2');
+
+		expect(api.playTidalMix).toHaveBeenCalledTimes(1);
+		const [sentTracks, sentShuffleMode] = vi.mocked(api.playTidalMix).mock.calls[0];
+		expect(sentShuffleMode).toBe('true');
+		expect(sentTracks).toHaveLength(45);
+		expect(sentTracks.map((track) => track.tidal_id)).toEqual(
+			loadedAlbum.map((track) => track.tidal_id)
+		);
+		expect(sentTracks.every((track) => track.album_tidal_id === 58520793)).toBe(true);
+		expect(sentTracks.every((track) => track.artwork_url?.includes('resources.tidal.com'))).toBe(true);
 		expect(get(playerError)).toBeNull();
 	});
 

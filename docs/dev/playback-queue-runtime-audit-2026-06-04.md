@@ -488,6 +488,14 @@ Additional targeted verification for the malformed artwork fix:
   - Passed on 2026-06-05 after rerunning outside the sandbox because the first
     run hit Vite/Rolldown `spawn EPERM`.
   - Production build completed and wrote the static frontend output.
+- `pnpm test -- player.restore_queue.test.ts tidal_album_playback_contract.test.ts remote_tidal_album_playback_contract.test.ts`
+  - Passed on 2026-06-05.
+  - 3 test files passed, 18 tests passed.
+  - Added no-audio regression coverage proving `playTidalTracksNow` and
+    `shuffleTidalTracksNow` pass a 45-track loaded TIDAL album list to the
+    mocked playback API in order, preserving album TIDAL ids and artwork URLs.
+  - Desktop and remote TIDAL album route contracts still require those loaded
+    track arrays to be reused instead of refetching by album id.
 
 Non-blocking warnings observed:
 
@@ -574,6 +582,9 @@ Acceptance checks:
   workspace Rust verification.
 - Done: `pnpm check`, `pnpm lint`, `pnpm test`, and `pnpm run build` passed as
   refreshed no-launch frontend verification checks.
+- Done: focused no-audio frontend regression coverage passed for the desktop
+  and remote loaded TIDAL album paths, including a 45-track store-level playback
+  request shape with ordered TIDAL ids, album ids, and artwork URLs.
 - Partial: native WebView route navigation reached Genre Galaxy, Moods,
   Playlists, and Settings through existing sidebar controls without visible
   error text in accessibility samples.
