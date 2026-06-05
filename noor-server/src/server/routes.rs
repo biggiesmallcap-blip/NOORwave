@@ -9202,6 +9202,33 @@ struct TidalSearchParams {
     offset: Option<i32>,
 }
 
+const TIDAL_SEARCH_DEFAULT_LIMIT: i32 = 20;
+const TIDAL_SEARCH_MAX_LIMIT: i32 = 50;
+
+fn normalize_tidal_search_query(query: &str) -> Option<&str> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn normalize_tidal_search_limit(limit: Option<i32>) -> i32 {
+    limit
+        .unwrap_or(TIDAL_SEARCH_DEFAULT_LIMIT)
+        .clamp(1, TIDAL_SEARCH_MAX_LIMIT)
+}
+
+fn empty_tidal_search_response() -> Json<Value> {
+    Json(json!({
+        "tracks": [],
+        "albums": [],
+        "artists": [],
+        "videos": [],
+    }))
+}
+
 #[derive(Serialize)]
 struct TidalSearchTrackResp {
     tidal_id: i64,
@@ -9255,6 +9282,10 @@ async fn tidal_search(
     State(state): State<SharedState>,
     Query(params): Query<TidalSearchParams>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(query) = normalize_tidal_search_query(&params.q) else {
+        return Ok(empty_tidal_search_response());
+    };
+
     let tokens = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (
@@ -9273,7 +9304,7 @@ async fn tidal_search(
         ));
     };
 
-    let limit = params.limit.unwrap_or(20).min(50);
+    let limit = normalize_tidal_search_limit(params.limit);
     let offset = params.offset.unwrap_or(0).max(0);
     // Snapshot what we need from state in one lock acquisition.
     let (db, http_client, tidal_http_client) = {
@@ -9290,7 +9321,7 @@ async fn tidal_search(
     // Cache check - best-effort. A read failure must NOT block the upstream call.
     let cached = db
         .with_conn(|conn| {
-            crate::services::tidal::cache::get_search(conn, &cache_cfg, &params.q, limit, offset)
+            crate::services::tidal::cache::get_search(conn, &cache_cfg, query, limit, offset)
         })
         .ok()
         .flatten();
@@ -9304,7 +9335,7 @@ async fn tidal_search(
     let results = if let Some(hit) = cached {
         hit
     } else {
-        let fetched = match client.search_catalog(&params.q, limit, offset).await {
+        let fetched = match client.search_catalog(query, limit, offset).await {
             Ok(r) => r,
             Err(e) if error_looks_like_auth(&e) => {
                 let refreshed = recover_tidal_session(&state, &http_client, &tokens)
@@ -9323,7 +9354,7 @@ async fn tidal_search(
                     refreshed.country_code.clone(),
                 );
                 retry_client
-                    .search_catalog(&params.q, limit, offset)
+                    .search_catalog(query, limit, offset)
                     .await
                     .map_err(|e2| {
                         (
@@ -9341,7 +9372,7 @@ async fn tidal_search(
         };
         // Best-effort cache write - log and continue on failure.
         let to_cache = fetched.clone();
-        let q_owned = params.q.clone();
+        let q_owned = query.to_string();
         let lim_for_write = limit;
         let off_for_write = offset;
         if let Err(e) = db.with_conn(move |conn| {

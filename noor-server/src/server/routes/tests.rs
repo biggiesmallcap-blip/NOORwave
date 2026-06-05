@@ -476,6 +476,25 @@ fn tidal_video_mix_id_normalization_rejects_url_control_characters() {
 }
 
 #[test]
+fn tidal_search_query_normalization_short_circuits_blank_input() {
+    assert_eq!(normalize_tidal_search_query(""), None);
+    assert_eq!(normalize_tidal_search_query("   "), None);
+    assert_eq!(
+        normalize_tidal_search_query("  floating points  "),
+        Some("floating points")
+    );
+}
+
+#[test]
+fn tidal_search_limit_is_bounded() {
+    assert_eq!(normalize_tidal_search_limit(None), 20);
+    assert_eq!(normalize_tidal_search_limit(Some(-1)), 1);
+    assert_eq!(normalize_tidal_search_limit(Some(0)), 1);
+    assert_eq!(normalize_tidal_search_limit(Some(15)), 15);
+    assert_eq!(normalize_tidal_search_limit(Some(500)), 50);
+}
+
+#[test]
 fn tidal_video_search_query_normalization_short_circuits_blank_input() {
     assert_eq!(normalize_tidal_video_search_query(""), None);
     assert_eq!(normalize_tidal_video_search_query("   "), None);
@@ -5654,6 +5673,32 @@ async fn tidal_search_returns_400_when_tidal_session_absent() {
         error.contains("TIDAL not connected"),
         "expected 'TIDAL not connected' error, got: {body}"
     );
+}
+
+#[tokio::test]
+async fn tidal_search_blank_query_returns_empty_payload_without_session() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/tidal/search?q=%20%20%20")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["tracks"].as_array().expect("tracks").len(), 0);
+    assert_eq!(body["albums"].as_array().expect("albums").len(), 0);
+    assert_eq!(body["artists"].as_array().expect("artists").len(), 0);
+    assert_eq!(body["videos"].as_array().expect("videos").len(), 0);
 }
 
 // Note: an integration test for the recover_tidal_session path on a 401 upstream
