@@ -108,7 +108,7 @@
 	}
 
 	function onFavorite() {
-		if (!track || track.id <= 0) return;
+		if (!track || (track.id <= 0 && !track.tidal_id)) return;
 		hapticAccent();
 		void toggleTrackFavorite(track.id, track.is_favorite ?? false);
 	}
@@ -117,6 +117,7 @@
 	// have a synthetic negative `id`, `artist_id = -1`, and `album_id = null`,
 	// but they DO carry `artist_tidal_id` / `album_tidal_id` for navigation.
 	let isTidalEphemeral = $derived(!!track && track.id <= 0 && !!track.tidal_id);
+	let canFavorite = $derived(!!track && (track.id > 0 || !!track.tidal_id));
 
 	function openTrackActions() {
 		if (!track) return;
@@ -332,7 +333,7 @@
 				class="remote-favorite"
 				class:active={isFavorite}
 				type="button"
-				disabled={!track || track.id <= 0}
+				disabled={!canFavorite}
 				aria-label={isFavorite ? 'Unfavorite track' : 'Favorite track'}
 				aria-pressed={isFavorite}
 				onclick={onFavorite}
