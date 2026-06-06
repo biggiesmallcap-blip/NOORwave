@@ -13,6 +13,13 @@ const GENRE_DAYS_MAX: i64 = 36_500;
 const GENRE_WINDOW_MINUTES_MAX: i64 = 24 * 60;
 const GENRE_MIN_COUNT_MAX: i64 = 1_000;
 
+fn require_positive_genre_id(id: i64) -> Result<(), StatusCode> {
+    if id <= 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 pub(super) struct GenreTrackParams {
     include_descendants: Option<bool>,
@@ -262,6 +269,8 @@ pub(super) async fn get_genre_tracks(
     Path(id): Path<i64>,
     Query(params): Query<GenreTrackParams>,
 ) -> Result<Json<Value>, StatusCode> {
+    require_positive_genre_id(id)?;
+
     let include_descendants = params.include_descendants.unwrap_or(true);
     let filter = crate::genre::filter::GalaxyFilterRule::from_query(params.filter.as_deref());
     let state = state.read().await;

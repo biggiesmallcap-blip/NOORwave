@@ -5940,6 +5940,75 @@ async fn playlist_routes_return_not_found_for_missing_positive_playlists() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn genre_and_audio_detail_routes_reject_non_positive_ids() {
+    let app = build_test_app().await;
+
+    for uri in [
+        "/api/genres/0/tracks",
+        "/api/genres/-7/tracks",
+        "/api/tracks/0/audio-features",
+        "/api/tracks/-7/audio-features",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+
+    for uri in [
+        "/api/tracks/0/bpm-multiplier",
+        "/api/tracks/-7/bpm-multiplier",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"factor":2.0}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+}
+
+#[tokio::test]
+async fn genre_and_audio_detail_positive_ids_keep_empty_library_behavior() {
+    let app = build_test_app().await;
+
+    for uri in ["/api/genres/1/tracks", "/api/tracks/1/audio-features"] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK, "uri: {uri}");
+    }
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/tracks/1/bpm-multiplier")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"factor":2.0}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
 // Characterization tests for TIDAL-handler failure shapes. These differ on
 // purpose: the album endpoint is "best-effort" (TIDAL is enrichment) while
 // tidal_search treats a disconnected session as a user-visible error.

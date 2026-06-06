@@ -8,6 +8,13 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+fn require_positive_track_id(id: i64) -> Result<(), StatusCode> {
+    if id <= 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 pub(super) struct AudioAnalysisRequest {
     mode: String, // "preview" or "local"
@@ -126,6 +133,8 @@ pub(super) async fn get_track_audio_features(
     State(state): State<SharedState>,
     Path(track_id): Path<i64>,
 ) -> Result<Json<Value>, StatusCode> {
+    require_positive_track_id(track_id)?;
+
     let s = state.read().await;
     let features =
         s.db.with_conn(|conn| queries::get_audio_dsp_features(conn, track_id))
@@ -272,6 +281,8 @@ pub(super) async fn set_bpm_multiplier(
     Path(id): Path<i64>,
     Json(payload): Json<BpmMultiplierRequest>,
 ) -> Result<Json<Value>, StatusCode> {
+    require_positive_track_id(id)?;
+
     if !payload.factor.is_finite() || payload.factor <= 0.0 {
         return Err(StatusCode::BAD_REQUEST);
     }
