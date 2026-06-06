@@ -28,6 +28,23 @@ fn require_positive_tidal_album_id(tidal_album_id: i64) -> Result<(), (StatusCod
     Ok(())
 }
 
+fn require_positive_local_id(id: i64) -> Result<(), StatusCode> {
+    if id <= 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
+}
+
+fn require_positive_local_id_json(id: i64) -> Result<(), (StatusCode, Json<Value>)> {
+    if id <= 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Expected a positive library id" })),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 pub(super) struct ListParams {
     sort_by: Option<String>,
@@ -212,6 +229,7 @@ pub(super) async fn get_artist_tracks(
     State(state): State<SharedState>,
     axum::extract::Path(artist_id): axum::extract::Path<i64>,
 ) -> Result<Json<Value>, StatusCode> {
+    require_positive_local_id(artist_id)?;
     let state = state.read().await;
     state
         .db
@@ -226,6 +244,7 @@ pub(super) async fn get_artist(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, StatusCode> {
+    require_positive_local_id(id)?;
     let s = state.read().await;
     let row =
         s.db.with_conn(|conn| queries::get_artist_with_counts(conn, id))
@@ -250,6 +269,7 @@ pub(super) async fn get_album_tracks(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, StatusCode> {
+    require_positive_local_id(id)?;
     // Three-pass approach so the page can render the FULL album (not just
     // library coverage):
     //   1. Pull the local rows + the album's TIDAL id in one DB hit.
@@ -629,6 +649,7 @@ pub(super) async fn get_artist_discography(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_positive_local_id_json(id)?;
     let tidal_artist_id = {
         let s = state.read().await;
         s.db.with_conn(|conn| queries::get_artist_tidal_id(conn, id))

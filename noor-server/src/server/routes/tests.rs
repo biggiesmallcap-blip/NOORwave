@@ -5592,6 +5592,50 @@ async fn search_recommendation_routes_reject_non_positive_ids() {
     }
 }
 
+#[tokio::test]
+async fn local_catalog_detail_routes_reject_non_positive_ids() {
+    let app = build_test_app().await;
+
+    for uri in [
+        "/api/artists/0",
+        "/api/artists/-7",
+        "/api/artists/0/tracks",
+        "/api/artists/-7/tracks",
+        "/api/artists/0/discography",
+        "/api/artists/-7/discography",
+        "/api/albums/0/tracks",
+        "/api/albums/-7/tracks",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+}
+
+#[tokio::test]
+async fn local_catalog_detail_positive_ids_keep_existing_empty_library_behavior() {
+    let app = build_test_app().await;
+
+    for (uri, expected) in [
+        ("/api/artists/1", StatusCode::NOT_FOUND),
+        ("/api/artists/1/tracks", StatusCode::OK),
+        ("/api/artists/1/discography", StatusCode::OK),
+        ("/api/albums/1/tracks", StatusCode::OK),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), expected, "uri: {uri}");
+    }
+}
+
 // Characterization tests for TIDAL-handler failure shapes. These differ on
 // purpose: the album endpoint is "best-effort" (TIDAL is enrichment) while
 // tidal_search treats a disconnected session as a user-visible error.
