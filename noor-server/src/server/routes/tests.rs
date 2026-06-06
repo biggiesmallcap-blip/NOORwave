@@ -1782,6 +1782,56 @@ async fn artist_spotify_stats_returns_cached_playcounts() {
     let _ = std::fs::remove_file(db_path);
 }
 
+#[tokio::test]
+async fn local_spotify_stats_routes_reject_non_positive_ids() {
+    let app = build_test_app().await;
+
+    for uri in [
+        "/api/albums/0/spotify-stats",
+        "/api/albums/-7/spotify-stats",
+        "/api/artists/0/spotify-stats",
+        "/api/artists/-7/spotify-stats",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+}
+
+#[tokio::test]
+async fn local_spotify_stats_positive_ids_keep_empty_fallback_shape() {
+    let app = build_test_app().await;
+
+    for uri in [
+        "/api/albums/1/spotify-stats",
+        "/api/artists/1/spotify-stats",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK, "uri: {uri}");
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .expect("body bytes"),
+        )
+        .expect("json body");
+        assert!(body["monthly_listeners"].is_null(), "uri: {uri}");
+        assert_eq!(
+            body["tracks"].as_array().map(Vec::len),
+            Some(0),
+            "uri: {uri}"
+        );
+    }
+}
+
 fn seed_basic_tracks(db: &Database) {
     db.with_conn(|conn| {
         conn.execute(

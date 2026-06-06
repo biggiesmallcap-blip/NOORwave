@@ -443,7 +443,9 @@ pub(super) async fn get_album_tracks(
 pub(super) async fn get_album_spotify_stats(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
-) -> Json<Value> {
+) -> Result<Json<Value>, StatusCode> {
+    require_positive_local_id(id)?;
+
     #[cfg(feature = "spotify-public")]
     {
         let (db, client, tracks) = {
@@ -485,18 +487,18 @@ pub(super) async fn get_album_spotify_stats(
             })
             .collect();
 
-        Json(json!({
+        Ok(Json(json!({
             "monthly_listeners": null,
             "tracks": payload,
-        }))
+        })))
     }
     #[cfg(not(feature = "spotify-public"))]
     {
-        let _ = (state, id);
-        Json(json!({
+        let _ = state;
+        Ok(Json(json!({
             "monthly_listeners": null,
             "tracks": [],
-        }))
+        })))
     }
 }
 
@@ -972,7 +974,9 @@ pub(super) async fn get_artist_discography(
 pub(super) async fn get_artist_spotify_stats(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
-) -> Json<Value> {
+) -> Result<Json<Value>, StatusCode> {
+    require_positive_local_id(id)?;
+
     #[cfg(feature = "spotify-public")]
     {
         let (db, client, tidal_id, artist_name, seeds) = {
@@ -1032,13 +1036,13 @@ pub(super) async fn get_artist_spotify_stats(
                     })
                 })
                 .collect();
-            return Json(json!({
+            return Ok(Json(json!({
                 "monthly_listeners": null,
                 "followers": null,
                 "world_rank": null,
                 "top_cities": [],
                 "tracks": tracks,
-            }));
+            })));
         };
 
         let tidal_id_str = tidal_id.to_string();
@@ -1065,24 +1069,24 @@ pub(super) async fn get_artist_spotify_stats(
             })
             .collect();
 
-        Json(json!({
+        Ok(Json(json!({
             "monthly_listeners": result.monthly_listeners,
             "followers": result.followers,
             "world_rank": result.world_rank,
             "top_cities": result.top_cities,
             "tracks": tracks,
-        }))
+        })))
     }
     #[cfg(not(feature = "spotify-public"))]
     {
-        let _ = (state, id);
-        Json(json!({
+        let _ = state;
+        Ok(Json(json!({
             "monthly_listeners": null,
             "followers": null,
             "world_rank": null,
             "top_cities": [],
             "tracks": [],
-        }))
+        })))
     }
 }
 
