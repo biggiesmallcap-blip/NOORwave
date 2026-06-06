@@ -6416,6 +6416,42 @@ async fn audio_analysis_start_valid_preview_still_requires_actor() {
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+#[tokio::test]
+async fn lastfm_enrichment_rejects_unknown_mode_before_credentials() {
+    let app = build_test_app().await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/enrich/lastfm?mode=typo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn lastfm_enrichment_valid_mode_keeps_missing_credentials_response() {
+    let app = build_test_app().await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/enrich/lastfm?mode=retry_untagged")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
 // Characterization tests for TIDAL-handler failure shapes. These differ on
 // purpose: the album endpoint is "best-effort" (TIDAL is enrichment) while
 // tidal_search treats a disconnected session as a user-visible error.

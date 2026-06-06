@@ -723,21 +723,25 @@ pub(super) struct LastfmEnrichmentStartParams {
 }
 
 impl LastfmEnrichmentStartParams {
-    fn mode(&self) -> crate::services::lastfm::enrichment::EnrichmentMode {
-        if self.refresh == Some(true)
-            || self.mode.as_deref().is_some_and(|mode| {
-                mode.eq_ignore_ascii_case("refresh") || mode.eq_ignore_ascii_case("refresh_all")
-            })
+    fn mode(&self) -> Result<crate::services::lastfm::enrichment::EnrichmentMode, StatusCode> {
+        use crate::services::lastfm::enrichment::EnrichmentMode;
+
+        if self.refresh == Some(true) {
+            return Ok(EnrichmentMode::RefreshAll);
+        }
+
+        match self
+            .mode
+            .as_deref()
+            .map(str::trim)
+            .filter(|mode| !mode.is_empty())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
         {
-            crate::services::lastfm::enrichment::EnrichmentMode::RefreshAll
-        } else if self.mode.as_deref().is_some_and(|mode| {
-            mode.eq_ignore_ascii_case("retry_untagged")
-                || mode.eq_ignore_ascii_case("untagged")
-                || mode.eq_ignore_ascii_case("missing")
-        }) {
-            crate::services::lastfm::enrichment::EnrichmentMode::RetryUntagged
-        } else {
-            crate::services::lastfm::enrichment::EnrichmentMode::Pending
+            None | Some("pending") => Ok(EnrichmentMode::Pending),
+            Some("refresh" | "refresh_all") => Ok(EnrichmentMode::RefreshAll),
+            Some("retry_untagged" | "untagged" | "missing") => Ok(EnrichmentMode::RetryUntagged),
+            Some(_) => Err(StatusCode::BAD_REQUEST),
         }
     }
 }
@@ -749,6 +753,8 @@ pub(super) async fn start_lastfm_enrichment(
     use crate::services::lastfm;
     use crate::services::lastfm::enrichment::EnrichmentMode;
     use std::sync::atomic::Ordering;
+
+    let mode = params.mode()?;
 
     let (
         http,
@@ -798,7 +804,6 @@ pub(super) async fn start_lastfm_enrichment(
         })));
     };
 
-    let mode = params.mode();
     let total: usize = state
         .read()
         .await
