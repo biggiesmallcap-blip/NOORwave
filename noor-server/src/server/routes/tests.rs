@@ -5913,6 +5913,119 @@ async fn library_batch_set_genre_returns_not_found_for_missing_positive_genre() 
 }
 
 #[tokio::test]
+async fn library_batch_delete_removes_local_only_items_without_tidal_session() {
+    let (db, db_path) = fresh_migrated_db();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (1, 'Local Artist')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, source, fidelity_score)
+             VALUES (1, 'Local Track', 1, 'local', 100)",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO albums (id, title, artist_id, source)
+             VALUES (1, 'Local Album', 1, 'local')",
+            [],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .expect("seed local-only items");
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/batch/delete")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"track_ids":[1],"album_ids":[1]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (remaining_tracks, remaining_albums): (i64, i64) = db
+        .with_conn(|conn| {
+            Ok::<_, anyhow::Error>((
+                conn.query_row("SELECT COUNT(*) FROM tracks WHERE id = 1", [], |row| {
+                    row.get(0)
+                })?,
+                conn.query_row("SELECT COUNT(*) FROM albums WHERE id = 1", [], |row| {
+                    row.get(0)
+                })?,
+            ))
+        })
+        .expect("count local items");
+    assert_eq!(
+        remaining_tracks, 0,
+        "local-only delete must remove local track row"
+    );
+    assert_eq!(
+        remaining_albums, 0,
+        "local-only delete must remove local album row"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn library_batch_delete_tidal_backed_track_without_session_keeps_local_row() {
+    let (db, db_path) = fresh_migrated_db();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (1, 'TIDAL Artist')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO tracks (id, tidal_id, title, artist_id, source, fidelity_score)
+             VALUES (1, 880077, 'TIDAL Track', 1, 'tidal', 700)",
+            [],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .expect("seed tidal-backed track");
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/batch/delete")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"track_ids":[1],"album_ids":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let remaining: i64 = db
+        .with_conn(|conn| {
+            Ok::<_, anyhow::Error>(conn.query_row(
+                "SELECT COUNT(*) FROM tracks WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .expect("count track");
+    assert_eq!(remaining, 1, "failed remote delete must keep local row");
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn playlist_routes_reject_non_positive_ids_and_track_ids() {
     let app = build_test_app().await;
     let smart_body =

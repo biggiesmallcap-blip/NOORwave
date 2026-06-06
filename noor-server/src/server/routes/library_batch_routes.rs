@@ -160,12 +160,6 @@ pub(super) async fn batch_delete_items(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let (http, tokens) = {
-        let state = state.read().await;
-        let tokens = state.tidal_tokens.clone().ok_or(StatusCode::UNAUTHORIZED)?;
-        (state.http_client.clone(), tokens)
-    };
-
     let (track_pairs, album_pairs) = {
         let state = state.read().await;
         state
@@ -182,46 +176,67 @@ pub(super) async fn batch_delete_items(
     let remote_track_ids: Vec<i64> = track_pairs.iter().map(|(_, tidal_id)| *tidal_id).collect();
     let remote_album_ids: Vec<i64> = album_pairs.iter().map(|(_, tidal_id)| *tidal_id).collect();
 
-    let removed_tracks = tidal_mutations::remove_favorite_tracks(
-        &http,
-        &tokens.access_token,
-        &tokens.user_id,
-        &remote_track_ids,
-        &tokens.country_code,
-    )
-    .await
-    .map_err(|error| {
-        tracing::error!("Batch delete tracks failed: {error}");
-        StatusCode::BAD_GATEWAY
-    })?;
+    let (removed_tracks, removed_albums) =
+        if remote_track_ids.is_empty() && remote_album_ids.is_empty() {
+            (0, 0)
+        } else {
+            let (http, tokens) = {
+                let state = state.read().await;
+                let tokens = state.tidal_tokens.clone().ok_or(StatusCode::UNAUTHORIZED)?;
+                (state.http_client.clone(), tokens)
+            };
 
-    let removed_albums = tidal_mutations::remove_favorite_albums(
-        &http,
-        &tokens.access_token,
-        &tokens.user_id,
-        &remote_album_ids,
-        &tokens.country_code,
-    )
-    .await
-    .map_err(|error| {
-        tracing::error!("Batch delete albums failed: {error}");
-        StatusCode::BAD_GATEWAY
-    })?;
+            let removed_tracks = if remote_track_ids.is_empty() {
+                0
+            } else {
+                tidal_mutations::remove_favorite_tracks(
+                    &http,
+                    &tokens.access_token,
+                    &tokens.user_id,
+                    &remote_track_ids,
+                    &tokens.country_code,
+                )
+                .await
+                .map_err(|error| {
+                    tracing::error!("Batch delete tracks failed: {error}");
+                    StatusCode::BAD_GATEWAY
+                })?
+            };
+
+            let removed_albums = if remote_album_ids.is_empty() {
+                0
+            } else {
+                tidal_mutations::remove_favorite_albums(
+                    &http,
+                    &tokens.access_token,
+                    &tokens.user_id,
+                    &remote_album_ids,
+                    &tokens.country_code,
+                )
+                .await
+                .map_err(|error| {
+                    tracing::error!("Batch delete albums failed: {error}");
+                    StatusCode::BAD_GATEWAY
+                })?
+            };
+
+            (removed_tracks, removed_albums)
+        };
 
     // Also delete from local DB so removed items disappear immediately.
     let db = {
         let s = state.read().await;
         s.db.clone()
     };
-    let deleted_track_ids: Vec<i64> = track_pairs.iter().map(|(local_id, _)| *local_id).collect();
+    let deleted_track_ids = track_ids.clone();
     let outcome = match db.with_conn(|conn| {
-        for &(local_id, _) in &track_pairs {
+        for local_id in &track_ids {
             conn.execute(
                 "DELETE FROM tracks WHERE id = ?1",
                 rusqlite::params![local_id],
             )?;
         }
-        for &(local_id, _) in &album_pairs {
+        for local_id in &album_ids {
             conn.execute(
                 "DELETE FROM albums WHERE id = ?1",
                 rusqlite::params![local_id],
