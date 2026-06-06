@@ -5636,6 +5636,125 @@ async fn local_catalog_detail_positive_ids_keep_existing_empty_library_behavior(
     }
 }
 
+#[tokio::test]
+async fn duplicate_routes_reject_invalid_pagination_and_ids() {
+    let app = build_test_app().await;
+
+    for uri in [
+        "/api/library/duplicates?limit=0",
+        "/api/library/duplicates?limit=-1",
+        "/api/library/duplicates?limit=101",
+        "/api/library/duplicates?offset=-1",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+
+    for uri in [
+        "/api/library/duplicates/0/dismiss",
+        "/api/library/duplicates/-7/dismiss",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+
+    for (uri, body) in [
+        (
+            "/api/library/duplicates/0/resolve",
+            r#"{"preferred_track_id":1}"#,
+        ),
+        (
+            "/api/library/duplicates/-7/resolve",
+            r#"{"preferred_track_id":1}"#,
+        ),
+        (
+            "/api/library/duplicates/1/resolve",
+            r#"{"preferred_track_id":0}"#,
+        ),
+        (
+            "/api/library/duplicates/1/resolve",
+            r#"{"preferred_track_id":-7}"#,
+        ),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+}
+
+#[tokio::test]
+async fn duplicate_routes_positive_inputs_keep_empty_library_behavior() {
+    let app = build_test_app().await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/library/duplicates?limit=20&offset=0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/duplicates/1/dismiss")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/duplicates/1/resolve")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"preferred_track_id":1}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
 // Characterization tests for TIDAL-handler failure shapes. These differ on
 // purpose: the album endpoint is "best-effort" (TIDAL is enrichment) while
 // tidal_search treats a disconnected session as a user-visible error.
