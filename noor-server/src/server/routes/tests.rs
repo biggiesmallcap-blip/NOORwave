@@ -6452,6 +6452,79 @@ async fn lastfm_enrichment_valid_mode_keeps_missing_credentials_response() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+#[tokio::test]
+async fn sync_routes_reject_invalid_services() {
+    let app = build_test_app().await;
+
+    for uri in ["/api/sync/info?service=", "/api/sync/info?service=spotify"] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+
+    for body in [
+        r#"{"service":"","enabled":true}"#,
+        r#"{"service":"spotify","enabled":true}"#,
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sync/auto")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body: {body}");
+    }
+}
+
+#[tokio::test]
+async fn sync_routes_trim_tidal_service_before_mutation() {
+    let (db, db_path) = fresh_migrated_db();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sync/auto")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"service":" tidal ","enabled":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let auto_sync_daily = db
+        .with_conn(|conn| {
+            Ok::<_, anyhow::Error>(
+                crate::db::queries::get_sync_info(conn, "tidal")?
+                    .expect("tidal sync metadata")
+                    .auto_sync_daily,
+            )
+        })
+        .expect("load sync info");
+    assert!(
+        auto_sync_daily,
+        "trimmed tidal service must update tidal row"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
 // Characterization tests for TIDAL-handler failure shapes. These differ on
 // purpose: the album endpoint is "best-effort" (TIDAL is enrichment) while
 // tidal_search treats a disconnected session as a user-visible error.
