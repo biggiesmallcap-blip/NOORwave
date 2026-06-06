@@ -6525,6 +6525,147 @@ async fn sync_routes_trim_tidal_service_before_mutation() {
     let _ = std::fs::remove_file(db_path);
 }
 
+#[tokio::test]
+async fn discovery_training_rejects_unknown_mode_before_engine_work() {
+    let (db, db_path) = fresh_migrated_db();
+    crate::services::learning::set_discovery_engine(
+        &db,
+        crate::services::learning::DiscoveryEngine::V1,
+    )
+    .expect("seed legacy discovery engine");
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/discovery/train")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"mode":"everything"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn discovery_training_settings_reject_unknown_values_without_mutation() {
+    let (db, db_path) = fresh_migrated_db();
+    crate::services::learning::set_discovery_intensity(
+        &db,
+        crate::services::learning::DiscoveryIntensity::Max,
+    )
+    .expect("seed intensity");
+    crate::services::learning::set_discovery_engine(
+        &db,
+        crate::services::learning::DiscoveryEngine::V1,
+    )
+    .expect("seed engine");
+    crate::services::learning::set_discovery_training_safety_profile(
+        &db,
+        crate::services::learning::DiscoveryTrainingSafetyProfile::Performance,
+    )
+    .expect("seed safety profile");
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    for (uri, body) in [
+        (
+            "/api/discovery/train/intensity",
+            r#"{"intensity":"extreme"}"#,
+        ),
+        ("/api/discovery/train/engine", r#"{"engine":"v3"}"#),
+        (
+            "/api/discovery/train/safety-profile",
+            r#"{"profile":"overdrive"}"#,
+        ),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+    }
+
+    assert_eq!(
+        crate::services::learning::load_discovery_intensity(&db),
+        crate::services::learning::DiscoveryIntensity::Max
+    );
+    assert_eq!(
+        crate::services::learning::load_discovery_engine(&db),
+        crate::services::learning::DiscoveryEngine::V1
+    );
+    assert_eq!(
+        crate::services::learning::load_discovery_training_safety_profile(&db),
+        crate::services::learning::DiscoveryTrainingSafetyProfile::Performance
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn discovery_training_valid_settings_still_persist() {
+    let (db, db_path) = fresh_migrated_db();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    for (uri, body) in [
+        ("/api/discovery/train/intensity", r#"{"intensity":"low"}"#),
+        ("/api/discovery/train/engine", r#"{"engine":"v1"}"#),
+        (
+            "/api/discovery/train/safety-profile",
+            r#"{"profile":"laptop_safe"}"#,
+        ),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+    }
+
+    assert_eq!(
+        crate::services::learning::load_discovery_intensity(&db),
+        crate::services::learning::DiscoveryIntensity::Low
+    );
+    assert_eq!(
+        crate::services::learning::load_discovery_engine(&db),
+        crate::services::learning::DiscoveryEngine::V1
+    );
+    assert_eq!(
+        crate::services::learning::load_discovery_training_safety_profile(&db),
+        crate::services::learning::DiscoveryTrainingSafetyProfile::LaptopSafe
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
 // Characterization tests for TIDAL-handler failure shapes. These differ on
 // purpose: the album endpoint is "best-effort" (TIDAL is enrichment) while
 // tidal_search treats a disconnected session as a user-visible error.
