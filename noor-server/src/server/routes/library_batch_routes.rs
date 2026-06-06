@@ -68,30 +68,30 @@ pub(super) async fn batch_add_to_playlist(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let (http, tokens) = {
-        let state = state.read().await;
-        let tokens = state.tidal_tokens.clone().ok_or(StatusCode::UNAUTHORIZED)?;
-        (state.http_client.clone(), tokens)
-    };
-
     let (playlist, track_pairs) = {
         let state = state.read().await;
         state
             .db
             .with_conn(|conn| {
-                let playlist = queries::get_playlist(conn, payload.playlist_id)?
-                    .ok_or_else(|| anyhow::anyhow!("playlist not found"))?;
+                let playlist = queries::get_playlist(conn, payload.playlist_id)?;
                 let track_pairs = queries::get_track_tidal_ids(conn, &track_ids)?;
                 Ok((playlist, track_pairs))
             })
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
 
+    let playlist = playlist.ok_or(StatusCode::NOT_FOUND)?;
     let playlist_uuid = playlist.tidal_uuid.ok_or(StatusCode::BAD_REQUEST)?;
     let tidal_track_ids: Vec<i64> = track_pairs.iter().map(|(_, tidal_id)| *tidal_id).collect();
     if tidal_track_ids.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
+
+    let (http, tokens) = {
+        let state = state.read().await;
+        let tokens = state.tidal_tokens.clone().ok_or(StatusCode::UNAUTHORIZED)?;
+        (state.http_client.clone(), tokens)
+    };
 
     tidal_mutations::add_to_playlist(
         &http,

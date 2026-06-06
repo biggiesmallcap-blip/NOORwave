@@ -5913,6 +5913,98 @@ async fn library_batch_set_genre_returns_not_found_for_missing_positive_genre() 
 }
 
 #[tokio::test]
+async fn library_batch_add_to_playlist_returns_not_found_before_tidal_auth() {
+    let (db, db_path) = fresh_migrated_db();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (1, 'Batch Artist')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO tracks (id, tidal_id, title, artist_id, source, fidelity_score)
+             VALUES (1, 880077, 'Batch Track', 1, 'tidal', 700)",
+            [],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .expect("seed tidal-backed track");
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/batch/add-to-playlist")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"playlist_id":99,"track_ids":[1]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn library_batch_add_to_playlist_rejects_local_targets_before_tidal_auth() {
+    let (db, db_path) = fresh_migrated_db();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (1, 'Local Artist')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO playlists (id, name, is_smart, is_synced)
+             VALUES (1, 'Local Playlist', 0, 1)",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, source, fidelity_score)
+             VALUES (1, 'Local Track', 1, 'local', 100)",
+            [],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .expect("seed local playlist and track");
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/batch/add-to-playlist")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"playlist_id":1,"track_ids":[1]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let added: i64 = db
+        .with_conn(|conn| {
+            Ok::<_, anyhow::Error>(conn.query_row(
+                "SELECT COUNT(*) FROM playlist_tracks",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .expect("count playlist tracks");
+    assert_eq!(added, 0, "invalid local target must not mutate playlist");
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn library_batch_delete_removes_local_only_items_without_tidal_session() {
     let (db, db_path) = fresh_migrated_db();
     let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
