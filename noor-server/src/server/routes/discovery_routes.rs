@@ -72,6 +72,20 @@ fn parse_discovery_training_mode(mode: Option<&str>) -> Result<(&'static str, bo
     }
 }
 
+fn parse_discovery_request_mode(mode: Option<&str>) -> Result<String, StatusCode> {
+    let Some(mode) = mode else {
+        return Ok(super::normalize_discovery_mode(None));
+    };
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "mood" => Ok("mood".to_string()),
+        "reference" => Ok("reference".to_string()),
+        "dj" => Ok("dj".to_string()),
+        "word-cloud" => Ok("word-cloud".to_string()),
+        "" => Err(StatusCode::BAD_REQUEST),
+        _ => Err(StatusCode::BAD_REQUEST),
+    }
+}
+
 fn parse_discovery_intensity_request(
     intensity: &str,
 ) -> Result<discovery_learning::DiscoveryIntensity, StatusCode> {
@@ -121,7 +135,7 @@ pub(super) async fn preview_discovery(
         .services
         .clone()
         .unwrap_or_else(|| vec!["tidal".to_string()]);
-    let mode = super::normalize_discovery_mode(payload.mode.as_deref());
+    let mode = parse_discovery_request_mode(payload.mode.as_deref())?;
     let candidate_limit = payload.limit.unwrap_or(18).clamp(1, 40);
     let result_limit = payload.limit.unwrap_or(8).clamp(1, 20) as usize;
 
@@ -186,7 +200,15 @@ pub(super) async fn discover_new_music(
         ));
     }
 
-    let mode = super::normalize_discovery_mode(payload.mode.as_deref());
+    let mode = parse_discovery_request_mode(payload.mode.as_deref()).map_err(|status| {
+        (
+            status,
+            Json(json!({
+                "status": "invalid_mode",
+                "message": "Discovery mode must be mood, reference, dj, or word-cloud.",
+            })),
+        )
+    })?;
     let services = super::normalize_discovery_services(payload.services);
     if !services.iter().any(|service| service == "tidal") {
         return Err((
@@ -326,7 +348,15 @@ pub(super) async fn discover_connected_music(
 
     let request = external_discovery_engine::ExternalDiscoveryRequest {
         prompt: prompt.to_string(),
-        mode: super::normalize_discovery_mode(payload.mode.as_deref()),
+        mode: parse_discovery_request_mode(payload.mode.as_deref()).map_err(|status| {
+            (
+                status,
+                Json(json!({
+                    "status": "invalid_mode",
+                    "message": "Discovery mode must be mood, reference, dj, or word-cloud.",
+                })),
+            )
+        })?,
         services: super::normalize_discovery_services(payload.services),
         limit: payload.limit.unwrap_or(10).clamp(1, 20) as usize,
     };
@@ -408,7 +438,7 @@ pub(super) async fn create_discovery_preset(
     if name.is_empty() || prompt.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let mode = super::normalize_discovery_mode(payload.mode.as_deref());
+    let mode = parse_discovery_request_mode(payload.mode.as_deref())?;
 
     let services_json = serde_json::to_string(
         &payload

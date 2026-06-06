@@ -6666,6 +6666,81 @@ async fn discovery_training_valid_settings_still_persist() {
     let _ = std::fs::remove_file(db_path);
 }
 
+#[tokio::test]
+async fn discovery_request_routes_reject_unknown_modes_before_work() {
+    let app = build_test_app().await;
+
+    for (uri, body) in [
+        (
+            "/api/discovery/preview",
+            r#"{"prompt":"jazz night","mode":"surprise","services":["tidal"]}"#,
+        ),
+        (
+            "/api/discovery/new",
+            r#"{"prompt":"jazz night","mode":"surprise","services":["tidal"]}"#,
+        ),
+        (
+            "/api/discovery/connections",
+            r#"{"prompt":"jazz night","mode":"surprise","services":["tidal"],"seed":{"provider":"tidal","provider_track_id":"1","title":"Seed","artist_name":"Artist"}}"#,
+        ),
+        (
+            "/api/discovery/presets",
+            r#"{"name":"Bad Mode","prompt":"jazz night","mode":"surprise","services":["tidal"]}"#,
+        ),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn discovery_preset_valid_mode_still_persists() {
+    let (db, db_path) = fresh_migrated_db();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/discovery/presets")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"Cloud","prompt":"jazz night","mode":"word-cloud","services":["tidal"]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let saved_mode: String = db
+        .with_conn(|conn| {
+            Ok::<_, anyhow::Error>(conn.query_row(
+                "SELECT mode FROM discovery_presets WHERE name = 'Cloud'",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .expect("load discovery preset mode");
+    assert_eq!(saved_mode, "word-cloud");
+
+    let _ = std::fs::remove_file(db_path);
+}
+
 // Characterization tests for TIDAL-handler failure shapes. These differ on
 // purpose: the album endpoint is "best-effort" (TIDAL is enrichment) while
 // tidal_search treats a disconnected session as a user-visible error.
