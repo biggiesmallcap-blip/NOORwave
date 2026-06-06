@@ -6166,6 +6166,51 @@ async fn genre_and_audio_detail_positive_ids_keep_empty_library_behavior() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn audio_analysis_start_rejects_invalid_request_before_actor_lookup() {
+    let app = build_test_app().await;
+
+    for body in [
+        r#"{"mode":"garbage"}"#,
+        r#"{"mode":"local"}"#,
+        r#"{"mode":"local","local_path":"   "}"#,
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/library/analyze/audio-features")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body: {body}");
+    }
+}
+
+#[tokio::test]
+async fn audio_analysis_start_valid_preview_still_requires_actor() {
+    let app = build_test_app().await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/analyze/audio-features")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"mode":"preview"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
 // Characterization tests for TIDAL-handler failure shapes. These differ on
 // purpose: the album endpoint is "best-effort" (TIDAL is enrichment) while
 // tidal_search treats a disconnected session as a user-visible error.
