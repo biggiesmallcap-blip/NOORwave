@@ -50,10 +50,19 @@ fn dedupe_positive_ids(ids: &[i64]) -> Vec<i64> {
     ids
 }
 
+fn require_positive_batch_id(id: i64) -> Result<(), StatusCode> {
+    if id <= 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
+}
+
 pub(super) async fn batch_add_to_playlist(
     State(state): State<SharedState>,
     Json(payload): Json<BatchPlaylistRequest>,
 ) -> Result<Json<Value>, StatusCode> {
+    require_positive_batch_id(payload.playlist_id)?;
+
     let track_ids = dedupe_positive_ids(&payload.track_ids);
     if track_ids.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
@@ -253,6 +262,8 @@ pub(super) async fn batch_set_genre(
     State(state): State<SharedState>,
     Json(payload): Json<BatchGenreRequest>,
 ) -> Result<Json<Value>, StatusCode> {
+    require_positive_batch_id(payload.genre_id)?;
+
     let track_ids = dedupe_positive_ids(&payload.track_ids);
     if track_ids.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
@@ -263,9 +274,23 @@ pub(super) async fn batch_set_genre(
         state
             .db
             .with_conn(|conn| {
+                let genre_exists: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM genres WHERE id = ?1)",
+                    rusqlite::params![payload.genre_id],
+                    |row| row.get(0),
+                )?;
+                if !genre_exists {
+                    return Err(anyhow::anyhow!("genre not found"));
+                }
                 queries::assign_genre_to_tracks(conn, payload.genre_id, &track_ids, "manual")
             })
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map_err(|error| {
+                if error.to_string().contains("genre not found") {
+                    StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            })?
     };
 
     {

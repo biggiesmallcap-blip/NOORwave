@@ -5819,6 +5819,100 @@ async fn duplicate_routes_positive_inputs_keep_empty_library_behavior() {
 }
 
 #[tokio::test]
+async fn library_batch_routes_reject_impossible_ids_before_work() {
+    let app = build_test_app().await;
+
+    for body in [
+        r#"{"playlist_id":0,"track_ids":[1]}"#,
+        r#"{"playlist_id":-7,"track_ids":[1]}"#,
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/library/batch/add-to-playlist")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body: {body}");
+    }
+
+    for body in [
+        r#"{"genre_id":0,"track_ids":[1]}"#,
+        r#"{"genre_id":-7,"track_ids":[1]}"#,
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/library/batch/set-genre")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body: {body}");
+    }
+}
+
+#[tokio::test]
+async fn library_batch_set_genre_returns_not_found_for_missing_positive_genre() {
+    let (db, db_path) = fresh_migrated_db();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (1, 'Batch Artist')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, source, fidelity_score)
+             VALUES (1, 'Batch Track', 1, 'local', 100)",
+            [],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .expect("seed track");
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/batch/set-genre")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"genre_id":99,"track_ids":[1]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let assigned: i64 = db
+        .with_conn(|conn| {
+            Ok::<_, anyhow::Error>(conn.query_row(
+                "SELECT COUNT(*) FROM track_genres",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .expect("count track genres");
+    assert_eq!(assigned, 0, "missing genre must not assign tracks");
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn playlist_routes_reject_non_positive_ids_and_track_ids() {
     let app = build_test_app().await;
     let smart_body =
