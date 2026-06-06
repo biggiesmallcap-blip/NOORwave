@@ -1619,6 +1619,19 @@ async fn dj_profile_returns_404_for_missing_profile() {
     let _ = std::fs::remove_file(db_path);
 }
 
+#[tokio::test]
+async fn dj_profile_rejects_non_positive_track_ids() {
+    let (db, db_path) = fresh_migrated_db();
+    let app = app_for_db(db);
+
+    for uri in ["/api/dj/profile/0", "/api/dj/profile/-7"] {
+        let response = json_request(app.clone(), "GET", uri, "").await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+
+    let _ = std::fs::remove_file(db_path);
+}
+
 fn seed_spotify_stats_track(
     db: &Database,
     album_id: Option<i64>,
