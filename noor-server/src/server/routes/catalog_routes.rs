@@ -1249,6 +1249,40 @@ pub(super) struct ImportTidalTrackBody {
     duration_ms: Option<i64>,
 }
 
+fn tidal_track_import_bad_request(message: &str) -> (StatusCode, Json<Value>) {
+    (StatusCode::BAD_REQUEST, Json(json!({ "error": message })))
+}
+
+fn require_positive_optional_tidal_id(
+    value: Option<i64>,
+    field: &str,
+) -> Result<Option<i64>, (StatusCode, Json<Value>)> {
+    if value.is_some_and(|id| id <= 0) {
+        return Err(tidal_track_import_bad_request(&format!(
+            "{field} must be a positive TIDAL id"
+        )));
+    }
+    Ok(value)
+}
+
+fn require_positive_optional_duration_ms(
+    value: Option<i64>,
+) -> Result<Option<i64>, (StatusCode, Json<Value>)> {
+    if value.is_some_and(|duration| duration <= 0) {
+        return Err(tidal_track_import_bad_request(
+            "duration_ms must be positive when provided",
+        ));
+    }
+    Ok(value)
+}
+
+fn normalize_optional_nonempty_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
 pub(super) async fn import_tidal_track_for_radio(
     State(state): State<SharedState>,
     Json(body): Json<ImportTidalTrackBody>,
@@ -1260,6 +1294,23 @@ pub(super) async fn import_tidal_track_for_radio(
         ));
     }
 
+    let title = body.title.trim().to_string();
+    if title.is_empty() {
+        return Err(tidal_track_import_bad_request("title is required"));
+    }
+
+    let artist_name = body.artist_name.trim().to_string();
+    if artist_name.is_empty() {
+        return Err(tidal_track_import_bad_request("artist_name is required"));
+    }
+
+    let artist_tidal_id =
+        require_positive_optional_tidal_id(body.artist_tidal_id, "artist_tidal_id")?;
+    let album_tidal_id = require_positive_optional_tidal_id(body.album_tidal_id, "album_tidal_id")?;
+    let duration_ms = require_positive_optional_duration_ms(body.duration_ms)?;
+    let album_title = normalize_optional_nonempty_string(body.album_title);
+    let artwork_url = normalize_optional_nonempty_string(body.artwork_url);
+
     let db = {
         let s = state.read().await;
         s.db.clone()
@@ -1268,14 +1319,14 @@ pub(super) async fn import_tidal_track_for_radio(
         &db,
         tidal_import::ImportTrackMetadata {
             tidal_id: body.tidal_id,
-            title: body.title,
-            artist_name: body.artist_name,
-            artist_tidal_id: body.artist_tidal_id,
+            title,
+            artist_name,
+            artist_tidal_id,
             artist_picture: None,
-            album_title: body.album_title,
-            album_tidal_id: body.album_tidal_id,
-            album_artwork_url: body.artwork_url,
-            duration_ms: body.duration_ms,
+            album_title,
+            album_tidal_id,
+            album_artwork_url: artwork_url,
+            duration_ms,
         },
     )
     .await

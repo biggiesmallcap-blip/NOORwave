@@ -6445,6 +6445,113 @@ async fn tidal_track_import_rejects_non_positive_tidal_ids_without_db_insert() {
 }
 
 #[tokio::test]
+async fn tidal_track_import_rejects_invalid_metadata_without_db_insert() {
+    let invalid_cases = [
+        (
+            "blank title",
+            r#"{
+                "tidal_id": 880077,
+                "title": "   ",
+                "artist_name": "Import Artist",
+                "artist_tidal_id": 990088,
+                "album_title": "Import Album",
+                "album_tidal_id": 770066,
+                "artwork_url": "https://resources.tidal.com/images/import/640x640.jpg",
+                "duration_ms": 181000
+            }"#,
+        ),
+        (
+            "blank artist",
+            r#"{
+                "tidal_id": 880077,
+                "title": "Imported TIDAL Track",
+                "artist_name": "   ",
+                "artist_tidal_id": 990088,
+                "album_title": "Import Album",
+                "album_tidal_id": 770066,
+                "artwork_url": "https://resources.tidal.com/images/import/640x640.jpg",
+                "duration_ms": 181000
+            }"#,
+        ),
+        (
+            "non-positive artist id",
+            r#"{
+                "tidal_id": 880077,
+                "title": "Imported TIDAL Track",
+                "artist_name": "Import Artist",
+                "artist_tidal_id": 0,
+                "album_title": "Import Album",
+                "album_tidal_id": 770066,
+                "artwork_url": "https://resources.tidal.com/images/import/640x640.jpg",
+                "duration_ms": 181000
+            }"#,
+        ),
+        (
+            "non-positive album id",
+            r#"{
+                "tidal_id": 880077,
+                "title": "Imported TIDAL Track",
+                "artist_name": "Import Artist",
+                "artist_tidal_id": 990088,
+                "album_title": "Import Album",
+                "album_tidal_id": -7,
+                "artwork_url": "https://resources.tidal.com/images/import/640x640.jpg",
+                "duration_ms": 181000
+            }"#,
+        ),
+        (
+            "non-positive duration",
+            r#"{
+                "tidal_id": 880077,
+                "title": "Imported TIDAL Track",
+                "artist_name": "Import Artist",
+                "artist_tidal_id": 990088,
+                "album_title": "Import Album",
+                "album_tidal_id": 770066,
+                "artwork_url": "https://resources.tidal.com/images/import/640x640.jpg",
+                "duration_ms": 0
+            }"#,
+        ),
+    ];
+
+    for (case, body) in invalid_cases {
+        let (db, db_path) = fresh_migrated_db();
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+            db.clone(),
+        ))));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tidal/tracks/import")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{case}");
+
+        let (track_count, artist_count, album_count): (i64, i64, i64) = db
+            .with_conn(|conn| {
+                Ok::<_, anyhow::Error>((
+                    conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))?,
+                    conn.query_row("SELECT COUNT(*) FROM artists", [], |row| row.get(0))?,
+                    conn.query_row("SELECT COUNT(*) FROM albums", [], |row| row.get(0))?,
+                ))
+            })
+            .expect("count import rows");
+        assert_eq!(track_count, 0, "{case} must not create track rows");
+        assert_eq!(artist_count, 0, "{case} must not create artist rows");
+        assert_eq!(album_count, 0, "{case} must not create album rows");
+
+        let _ = std::fs::remove_file(db_path);
+    }
+}
+
+#[tokio::test]
 async fn tidal_track_import_positive_id_preserves_response_shape() {
     let app = build_test_app().await;
     let resp = app
