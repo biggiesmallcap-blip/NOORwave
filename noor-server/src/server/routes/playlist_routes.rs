@@ -46,6 +46,56 @@ pub(super) struct ArtistSearchParams {
     q: Option<String>,
     limit: Option<i64>,
 }
+
+fn require_positive_playlist_id(id: i64) -> Result<(), StatusCode> {
+    if id <= 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
+}
+
+fn require_positive_playlist_id_json(id: i64) -> Result<(), (StatusCode, Json<Value>)> {
+    if id <= 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "message": "Expected a positive playlist id" })),
+        ));
+    }
+    Ok(())
+}
+
+fn require_positive_track_ids(track_ids: &[i64]) -> Result<(), (StatusCode, Json<Value>)> {
+    if track_ids.iter().any(|id| *id <= 0) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "message": "Track ids must be positive" })),
+        ));
+    }
+    Ok(())
+}
+
+fn playlist_error_status(error: anyhow::Error) -> StatusCode {
+    if error.to_string().contains("playlist not found") {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
+
+fn playlist_error_response(error: anyhow::Error) -> (StatusCode, Json<Value>) {
+    let message = error.to_string();
+    let status =
+        if message.contains("playlist not found") || message.contains("smart playlist not found") {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+    (
+        status,
+        Json(json!({ "message": message, "error": message })),
+    )
+}
+
 pub(super) async fn get_playlists(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
@@ -81,6 +131,8 @@ pub(super) async fn get_playlist_tracks(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, StatusCode> {
+    require_positive_playlist_id(id)?;
+
     let state = state.read().await;
     state
         .db
@@ -94,13 +146,15 @@ pub(super) async fn get_playlist_tracks(
             };
             Ok(Json(json!({ "tracks": tracks })))
         })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(playlist_error_status)
 }
 
 pub(super) async fn toggle_playlist_favorite_route(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_positive_playlist_id_json(id)?;
+
     let state = state.read().await;
     state
         .db
@@ -108,12 +162,7 @@ pub(super) async fn toggle_playlist_favorite_route(
             let playlist = queries::toggle_playlist_favorite(conn, id)?;
             Ok(Json(json!({ "playlist": playlist })))
         })
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-        })
+        .map_err(playlist_error_response)
 }
 
 pub(super) async fn add_tracks_to_playlist_route(
@@ -121,25 +170,27 @@ pub(super) async fn add_tracks_to_playlist_route(
     Path(id): Path<i64>,
     Json(payload): Json<AddTracksToPlaylistRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_positive_playlist_id_json(id)?;
+    require_positive_track_ids(&payload.track_ids)?;
+
     let state = state.read().await;
     state
         .db
         .with_conn(|conn| {
+            queries::get_playlist(conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("playlist not found"))?;
             let added = queries::add_tracks_to_playlist(conn, id, &payload.track_ids)?;
             Ok(Json(json!({ "added": added })))
         })
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-        })
+        .map_err(playlist_error_response)
 }
 
 pub(super) async fn evaluate_smart_playlist(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, StatusCode> {
+    require_positive_playlist_id(id)?;
+
     let state = state.read().await;
     state
         .db
@@ -157,7 +208,7 @@ pub(super) async fn evaluate_smart_playlist(
                 "resolved_count": tracks.len()
             })))
         })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(playlist_error_status)
 }
 
 /// Up to four distinct album-artwork URLs for the cover mosaic on /playlists.
@@ -168,6 +219,8 @@ pub(super) async fn get_playlist_cover_sample(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, StatusCode> {
+    require_positive_playlist_id(id)?;
+
     const COVER_SAMPLE_LIMIT: i64 = 4;
     let state = state.read().await;
     state
@@ -183,7 +236,7 @@ pub(super) async fn get_playlist_cover_sample(
             };
             Ok(Json(json!({ "urls": urls })))
         })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(playlist_error_status)
 }
 
 fn unique_artwork_urls(tracks: &[crate::db::models::Track], limit: usize) -> Vec<String> {
@@ -343,6 +396,8 @@ pub(super) async fn update_smart_playlist_route(
     Path(id): Path<i64>,
     Json(payload): Json<UpdateSmartPlaylistRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_positive_playlist_id_json(id)?;
+
     let name = payload.name.trim().to_string();
     if name.is_empty() {
         return Err((
@@ -381,20 +436,15 @@ pub(super) async fn update_smart_playlist_route(
             )?;
             Ok(Json(json!({ "playlist": playlist })))
         })
-        .map_err(|e| {
-            let status = if e.to_string().contains("not found") {
-                StatusCode::NOT_FOUND
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
-            (status, Json(json!({ "message": e.to_string() })))
-        })
+        .map_err(playlist_error_response)
 }
 
 pub(super) async fn delete_smart_playlist_route(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_positive_playlist_id_json(id)?;
+
     let state = state.read().await;
     state
         .db
@@ -402,14 +452,7 @@ pub(super) async fn delete_smart_playlist_route(
             queries::delete_smart_playlist(conn, id)?;
             Ok(Json(json!({ "deleted": true })))
         })
-        .map_err(|e| {
-            let status = if e.to_string().contains("not found") {
-                StatusCode::NOT_FOUND
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
-            (status, Json(json!({ "message": e.to_string() })))
-        })
+        .map_err(playlist_error_response)
 }
 
 fn resolve_smart_playlist_tracks_with_context(

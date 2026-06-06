@@ -5755,6 +5755,191 @@ async fn duplicate_routes_positive_inputs_keep_empty_library_behavior() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+#[tokio::test]
+async fn playlist_routes_reject_non_positive_ids_and_track_ids() {
+    let app = build_test_app().await;
+    let smart_body =
+        r#"{"name":"Draft","description":null,"rules":{"type":"group","op":"AND","clauses":[]}}"#;
+
+    for uri in [
+        "/api/playlists/0/tracks",
+        "/api/playlists/-7/tracks",
+        "/api/playlists/0/cover-sample",
+        "/api/playlists/-7/cover-sample",
+        "/api/smart/playlists/0/evaluate",
+        "/api/smart/playlists/-7/evaluate",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+
+    for uri in ["/api/playlists/0/favorite", "/api/playlists/-7/favorite"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+
+    for uri in ["/api/playlists/0/tracks", "/api/playlists/-7/tracks"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"track_ids":[1]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+
+    for body in [r#"{"track_ids":[0]}"#, r#"{"track_ids":[1,-7]}"#] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/playlists/1/tracks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body: {body}");
+    }
+
+    for uri in ["/api/smart/playlists/0", "/api/smart/playlists/-7"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(smart_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+
+    for uri in ["/api/smart/playlists/0", "/api/smart/playlists/-7"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+}
+
+#[tokio::test]
+async fn playlist_routes_return_not_found_for_missing_positive_playlists() {
+    let app = build_test_app().await;
+    let smart_body =
+        r#"{"name":"Draft","description":null,"rules":{"type":"group","op":"AND","clauses":[]}}"#;
+
+    for uri in [
+        "/api/playlists/1/tracks",
+        "/api/playlists/1/cover-sample",
+        "/api/smart/playlists/1/evaluate",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "uri: {uri}");
+    }
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/playlists/1/favorite")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/playlists/1/tracks")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"track_ids":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/smart/playlists/1")
+                .header("content-type", "application/json")
+                .body(Body::from(smart_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/smart/playlists/1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
 // Characterization tests for TIDAL-handler failure shapes. These differ on
 // purpose: the album endpoint is "best-effort" (TIDAL is enrichment) while
 // tidal_search treats a disconnected session as a user-visible error.
