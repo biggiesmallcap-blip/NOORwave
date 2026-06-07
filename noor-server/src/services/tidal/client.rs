@@ -549,20 +549,26 @@ impl TidalClient {
 
     // ─── Search ────────────────────────────────────────────
 
-    pub async fn search_catalog(
-        &self,
-        query: &str,
-        limit: i32,
-        offset: i32,
-    ) -> Result<TidalSearchCatalog> {
-        let url = format!(
-            "{}/search?query={}&countryCode={}&limit={}&offset={}&types=TRACKS,ALBUMS,ARTISTS,VIDEOS",
+    fn search_catalog_url(&self, query: &str, limit: i32, offset: i32, types: &str) -> String {
+        format!(
+            "{}/search?query={}&countryCode={}&limit={}&offset={}&types={}",
             TIDAL_API_URL,
             urlencoding::encode(query),
             self.country_code,
             limit,
-            offset.max(0)
-        );
+            offset.max(0),
+            types
+        )
+    }
+
+    async fn search_catalog_with_types(
+        &self,
+        query: &str,
+        limit: i32,
+        offset: i32,
+        types: &str,
+    ) -> Result<TidalSearchCatalog> {
+        let url = self.search_catalog_url(query, limit, offset, types);
         let payload: serde_json::Value = self.get_json(&url).await?;
 
         let tracks = payload
@@ -608,6 +614,26 @@ impl TidalClient {
                 .filter_map(Self::parse_search_video)
                 .collect(),
         })
+    }
+
+    pub async fn search_catalog(
+        &self,
+        query: &str,
+        limit: i32,
+        offset: i32,
+    ) -> Result<TidalSearchCatalog> {
+        self.search_catalog_with_types(query, limit, offset, "TRACKS,ALBUMS,ARTISTS,VIDEOS")
+            .await
+    }
+
+    pub async fn search_catalog_core(
+        &self,
+        query: &str,
+        limit: i32,
+        offset: i32,
+    ) -> Result<TidalSearchCatalog> {
+        self.search_catalog_with_types(query, limit, offset, "TRACKS,ALBUMS,ARTISTS")
+            .await
     }
 
     pub async fn search(&self, query: &str, limit: i32) -> Result<Vec<TidalSearchTrack>> {
@@ -1723,6 +1749,22 @@ mod tests {
                 "favorite URL must request newest-first ordering: {url}"
             );
         }
+    }
+
+    #[test]
+    fn tidal_search_catalog_core_url_excludes_videos() {
+        let client = TidalClient::new("token".into(), "US".into());
+
+        let url = client.search_catalog_url("burial", 20, 0, "TRACKS,ALBUMS,ARTISTS");
+
+        assert!(
+            url.contains("types=TRACKS,ALBUMS,ARTISTS"),
+            "core search should request only track, album, and artist rows: {url}"
+        );
+        assert!(
+            !url.contains("VIDEOS"),
+            "core search must not request videos on the critical search path: {url}"
+        );
     }
 
     #[test]

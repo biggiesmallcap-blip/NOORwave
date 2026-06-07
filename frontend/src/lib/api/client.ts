@@ -2437,13 +2437,17 @@ export const api = {
 		);
 	},
 
-	searchTidalPlaylists(q: string, signal?: AbortSignal, opts?: { limit?: number; offset?: number }) {
+	searchTidalPlaylists(
+		q: string,
+		signal?: AbortSignal,
+		opts?: { limit?: number; offset?: number; timeoutMs?: number },
+	) {
 		const limit = opts?.limit ?? 20;
 		const offset = opts?.offset ?? 0;
 		return fetchApi<{ playlists: TidalSearchPlaylist[] }>(
 			`/api/tidal/playlists/search?q=${encodeURIComponent(q)}&limit=${limit}&offset=${offset}`,
 			undefined,
-			{ signal },
+			{ signal, timeoutMs: opts?.timeoutMs },
 		);
 	},
 
@@ -2616,11 +2620,12 @@ export const api = {
 		limit = 12,
 		signal?: AbortSignal,
 		offset = 0,
+		timeoutMs?: number,
 	): Promise<SpotifyTrackSearchItem[]> {
 		const raw = await fetchApi<unknown>(
 			`/api/discovery/sportify/search`,
 			{ q, type: 'track', limit: String(limit), offset: String(offset) },
-			{ signal },
+			{ signal, timeoutMs },
 		);
 		const root = asRecord(raw) ?? {};
 		return pickArray(root, ['tracks'])
@@ -2633,11 +2638,12 @@ export const api = {
 		limit = 12,
 		signal?: AbortSignal,
 		offset = 0,
+		timeoutMs?: number,
 	): Promise<SpotifyAlbumSearchItem[]> {
 		const raw = await fetchApi<unknown>(
 			`/api/discovery/sportify/search`,
 			{ q, type: 'album', limit: String(limit), offset: String(offset) },
-			{ signal },
+			{ signal, timeoutMs },
 		);
 		const root = asRecord(raw) ?? {};
 		return pickArray(root, ['albums'])
@@ -2716,6 +2722,7 @@ export const api = {
 		limit = 12,
 		signal?: AbortSignal,
 		offset = 0,
+		timeoutMs?: number,
 	): Promise<SpotifyPlaylistSearchItem[]> {
 		type Resp = { playlists?: unknown[]; spotify_playlists?: unknown[] };
 		const fromResponse = (res: Resp) =>
@@ -2727,20 +2734,13 @@ export const api = {
 			const res = await fetchApi<Resp>(
 				`/api/discovery/sportify/search`,
 				{ q, type: 'playlist', limit: String(limit), offset: String(offset) },
-				{ signal },
+				{ signal, timeoutMs },
 			);
-			const playlists = fromResponse(res);
-			if (playlists.length > 0 || offset > 0) return playlists;
+			return fromResponse(res);
 		} catch (error) {
 			if (signal?.aborted) throw error;
+			return [];
 		}
-
-		const fallback = await fetchApi<Resp>(
-			'/api/search',
-			{ q, limit: String(limit) },
-			{ signal },
-		);
-		return fromResponse(fallback);
 	},
 
 	getTidalPlaylistTracks(tidalUuid: string) {

@@ -9335,7 +9335,7 @@ async fn tidal_search(
     let results = if let Some(hit) = cached {
         hit
     } else {
-        let fetched = match client.search_catalog(query, limit, offset).await {
+        let fetched = match client.search_catalog_core(query, limit, offset).await {
             Ok(r) => r,
             Err(e) if error_looks_like_auth(&e) => {
                 let refreshed = recover_tidal_session(&state, &http_client, &tokens)
@@ -9354,7 +9354,7 @@ async fn tidal_search(
                     refreshed.country_code.clone(),
                 );
                 retry_client
-                    .search_catalog(query, limit, offset)
+                    .search_catalog_core(query, limit, offset)
                     .await
                     .map_err(|e2| {
                         (
@@ -9441,7 +9441,7 @@ async fn tidal_search(
         })
         .collect();
 
-    let mut artists: Vec<TidalSearchArtistResp> = results
+    let artists: Vec<TidalSearchArtistResp> = results
         .artists
         .into_iter()
         .map(|a| {
@@ -9455,45 +9455,6 @@ async fn tidal_search(
             }
         })
         .collect();
-
-    // TIDAL's catalog-search response often omits artist `picture`, so most
-    // search-result artists land here with `artwork_url = None` and render as
-    // initials in the UI. The /artists/{id} endpoint carries the canonical
-    // picture; fan out a parallel fetch for any artist still missing artwork
-    // and backfill. Tight cap (12) to bound the fan-out -- artists past that
-    // tend to be long-tail rows the user is unlikely to scroll to anyway.
-    const ARTIST_PHOTO_BACKFILL_CAP: usize = 12;
-    let backfill_targets: Vec<(usize, i64)> = artists
-        .iter()
-        .enumerate()
-        .filter(|(_, a)| a.artwork_url.is_none())
-        .take(ARTIST_PHOTO_BACKFILL_CAP)
-        .map(|(i, a)| (i, a.tidal_id))
-        .collect();
-    if !backfill_targets.is_empty() {
-        let backfill_client = client.clone();
-        let fetches = backfill_targets.iter().map(|(idx, tidal_id)| {
-            let c = backfill_client.clone();
-            let id = *tidal_id;
-            let i = *idx;
-            async move {
-                let url = c
-                    .get_artist(id)
-                    .await
-                    .ok()
-                    .and_then(|a| TidalClient::get_artwork_url(&a.picture, 640));
-                (i, url)
-            }
-        });
-        let results: Vec<(usize, Option<String>)> = futures::future::join_all(fetches).await;
-        for (i, url) in results {
-            if let Some(u) = url {
-                if let Some(slot) = artists.get_mut(i) {
-                    slot.artwork_url = Some(u);
-                }
-            }
-        }
-    }
 
     let videos: Vec<TidalSearchVideoResp> = results
         .videos
