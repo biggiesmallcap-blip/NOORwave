@@ -9,7 +9,7 @@ use axum::{
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 type TidalMoodCategoriesCache = Arc<Mutex<Option<(Instant, Duration, Vec<Value>)>>>;
@@ -17,6 +17,7 @@ type TidalPageModulesCache = Arc<Mutex<HashMap<String, (Instant, Vec<TidalHomeMo
 
 const TIDAL_HOME_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const TIDAL_MOODS_FALLBACK_CACHE_TTL: Duration = Duration::from_secs(60);
+const TIDAL_MOODS_PROBE_FAILURE_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 const MOOD_THUMBNAIL_FETCH_CONCURRENCY: usize = 4;
 const MOOD_THUMBNAIL_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 const TIDAL_HOME_MODULES_PAGE_PATH: &str = "pages/home";
@@ -27,6 +28,7 @@ const TIDAL_MIX_ID_MAX_LEN: usize = 96;
 const TIDAL_PAGE_ID_MAX_LEN: usize = 96;
 const ROUTE_TIMING_INFO_THRESHOLD_MS: u128 = 500;
 static TIDAL_MOODS_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+static TIDAL_MOODS_PROBE_FAILURE_COOLDOWN_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 const DEFAULT_TIDAL_MOOD_CATEGORIES: &[(&str, &str)] = &[
     ("mood_party", "Party"),
     ("mood_workout", "Workout"),
@@ -75,6 +77,42 @@ fn mood_probe_failed_without_results(
     errors: usize,
 ) -> bool {
     fetched == 0 && cache_hits == 0 && (timeouts > 0 || errors > 0)
+}
+
+fn tidal_moods_probe_failure_cooldown() -> &'static Mutex<Option<Instant>> {
+    TIDAL_MOODS_PROBE_FAILURE_COOLDOWN_UNTIL.get_or_init(|| Mutex::new(None))
+}
+
+fn tidal_moods_probe_cooldown_remaining(
+    cooldown: &Mutex<Option<Instant>>,
+    now: Instant,
+) -> Option<Duration> {
+    let Ok(mut guard) = cooldown.lock() else {
+        return None;
+    };
+
+    match *guard {
+        Some(until) if now < until => Some(until.duration_since(now)),
+        Some(_) => {
+            *guard = None;
+            None
+        }
+        None => None,
+    }
+}
+
+fn note_tidal_moods_probe_failure(cooldown: &Mutex<Option<Instant>>, now: Instant) {
+    let Ok(mut guard) = cooldown.lock() else {
+        return;
+    };
+    *guard = Some(now + TIDAL_MOODS_PROBE_FAILURE_COOLDOWN);
+}
+
+fn clear_tidal_moods_probe_failure(cooldown: &Mutex<Option<Instant>>) {
+    let Ok(mut guard) = cooldown.lock() else {
+        return;
+    };
+    *guard = None;
 }
 
 /// Returns the authenticated user's TIDAL mixes (Daily Discovery, My Mix N,
@@ -747,7 +785,16 @@ pub(super) async fn get_tidal_moods(
         TIDAL_MOODS_FALLBACK_CACHE_TTL,
     );
 
-    if let Some(refresh_guard) = try_begin_tidal_moods_refresh() {
+    if let Some(remaining) =
+        tidal_moods_probe_cooldown_remaining(tidal_moods_probe_failure_cooldown(), Instant::now())
+    {
+        tracing::debug!(
+            route = "tidal_moods",
+            retry_in_ms = remaining.as_millis(),
+            background_probe_slugs = pending_probe_count,
+            "TIDAL moods refresh skipped during probe failure cooldown"
+        );
+    } else if let Some(refresh_guard) = try_begin_tidal_moods_refresh() {
         let state_bg = state.clone();
         let mood_cache_bg = mood_cache.clone();
         let page_modules_cache_bg = page_modules_cache.clone();
@@ -1044,6 +1091,7 @@ async fn run_mood_thumbnail_probe_refresh(
     }
 
     if mood_probe_failed_without_results(fetched, cache_hits, timeouts, errors) {
+        note_tidal_moods_probe_failure(tidal_moods_probe_failure_cooldown(), Instant::now());
         tracing::warn!(
             route = "tidal_moods_probe",
             elapsed_ms = started_at.elapsed().as_millis(),
@@ -1056,6 +1104,7 @@ async fn run_mood_thumbnail_probe_refresh(
         return;
     }
 
+    clear_tidal_moods_probe_failure(tidal_moods_probe_failure_cooldown());
     let refreshed_categories = apply_mood_probe_results(categories, &probe);
     put_cached_tidal_mood_categories(&mood_cache, refreshed_categories.clone());
     tracing::info!(
@@ -1149,6 +1198,10 @@ mod tests {
 
     fn reset_tidal_moods_refresh_guard_for_tests() {
         TIDAL_MOODS_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
+    }
+
+    fn cooldown_state(value: Option<Instant>) -> Mutex<Option<Instant>> {
+        Mutex::new(value)
     }
 
     #[test]
@@ -1269,6 +1322,38 @@ mod tests {
         assert!(!mood_probe_failed_without_results(1, 0, 1, 0));
         assert!(!mood_probe_failed_without_results(0, 1, 0, 1));
         assert!(!mood_probe_failed_without_results(0, 0, 0, 0));
+    }
+
+    #[test]
+    fn mood_probe_failure_cooldown_reports_remaining_time() {
+        let now = Instant::now();
+        let cooldown = cooldown_state(Some(now + Duration::from_secs(60)));
+
+        let remaining =
+            tidal_moods_probe_cooldown_remaining(&cooldown, now).expect("cooldown active");
+
+        assert_eq!(remaining, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn expired_mood_probe_failure_cooldown_clears_state() {
+        let now = Instant::now();
+        let cooldown = cooldown_state(Some(now));
+
+        assert_eq!(tidal_moods_probe_cooldown_remaining(&cooldown, now), None);
+        assert_eq!(*cooldown.lock().expect("lock cooldown"), None);
+    }
+
+    #[test]
+    fn note_and_clear_mood_probe_failure_cooldown() {
+        let now = Instant::now();
+        let cooldown = cooldown_state(None);
+
+        note_tidal_moods_probe_failure(&cooldown, now);
+        assert!(tidal_moods_probe_cooldown_remaining(&cooldown, now).is_some());
+
+        clear_tidal_moods_probe_failure(&cooldown);
+        assert_eq!(tidal_moods_probe_cooldown_remaining(&cooldown, now), None);
     }
 
     #[test]
