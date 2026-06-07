@@ -170,8 +170,8 @@ pub struct SportifyClient {
 impl SportifyClient {
     pub fn new(config: SportifyClientConfig) -> Result<Self> {
         // reqwest has no default timeout. The Sportify proxy is a third-party
-        // service and its result gates the /search response (joined with local
-        // DB search), so a hung upstream would otherwise hang search forever.
+        // service and several UI surfaces make best-effort calls while the user
+        // is typing, so a hung upstream would otherwise keep work alive too long.
         // Bound both the connect and total time; normal responses are well
         // under a second, and best-effort callers treat a timeout as "no data".
         let http = reqwest::Client::builder()

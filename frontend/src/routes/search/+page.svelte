@@ -364,7 +364,7 @@
           loadingSpotifyTracks = false
           loadingSpotifyAlbums = false
 
-          const localPromise = cachedApi.search(q, INITIAL_SEARCH_PAGE_SIZE)
+          const localPromise = cachedApi.search(q, INITIAL_SEARCH_PAGE_SIZE, signal)
           const tracksPromise = cached
             ? Promise.resolve(cached)
             : api.searchTidal(q, INITIAL_SEARCH_PAGE_SIZE, signal, 0)

@@ -33,7 +33,7 @@ describe('search layout contracts', () => {
 		expect(source).toContain('}, 120)');
 		expect(source).toContain('loadMoreSeq += 1');
 		expect(source).toContain('loadingMore = false');
-		expect(source).toContain('const localPromise = cachedApi.search(q, INITIAL_SEARCH_PAGE_SIZE)');
+		expect(source).toContain('const localPromise = cachedApi.search(q, INITIAL_SEARCH_PAGE_SIZE, signal)');
 		expect(source).toContain('void localPromise.then((localResults) => {');
 		expect(source).toContain('if (!isCurrentSearch(q, generation, signal)) return');
 		expect(source).toContain('void tracksPromise.then((tidalResults) => {');

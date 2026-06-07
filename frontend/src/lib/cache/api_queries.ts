@@ -330,7 +330,8 @@ export const cachedApi = {
 			mediumOptions,
 		);
 	},
-	search(query: string, limit = 20) {
+	search(query: string, limit = 20, signal?: AbortSignal) {
+		if (signal) return api.search(query, limit, signal);
 		return fetchCached<SearchResults>(
 			cacheKeys.search(query, limit),
 			() => api.search(query, limit),
