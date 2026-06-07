@@ -1,4 +1,20 @@
 const API_BASE = 'http://localhost:3334';
+export const DEFAULT_API_TIMEOUT_MS = 20_000;
+export const BULK_QUEUE_API_TIMEOUT_MS = 90_000;
+
+type ApiRequestInit = RequestInit & {
+	timeoutMs?: number;
+};
+
+export class ApiTimeoutError extends Error {
+	constructor(
+		public path: string,
+		public timeoutMs: number
+	) {
+		super(`API request timed out after ${timeoutMs} ms: ${path}`);
+		this.name = 'ApiTimeoutError';
+	}
+}
 
 export function getApiBase(): string {
 	if (typeof window === 'undefined') {
@@ -26,13 +42,72 @@ export function clearStoredToken(): void {
 	localStorage.removeItem(TOKEN_KEY);
 }
 
+function requestTimeout(
+	path: string,
+	externalSignal: AbortSignal | null | undefined,
+	timeoutMs: number
+): {
+	signal: AbortSignal | undefined;
+	cleanup: () => void;
+	timedOut: () => boolean;
+} {
+	if (timeoutMs <= 0) {
+		return { signal: externalSignal ?? undefined, cleanup: () => {}, timedOut: () => false };
+	}
+
+	const controller = new AbortController();
+	let timedOut = false;
+	let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+	const abortFromExternal = () => {
+		controller.abort(externalSignal?.reason);
+	};
+
+	if (externalSignal?.aborted) {
+		abortFromExternal();
+	} else {
+		externalSignal?.addEventListener('abort', abortFromExternal, { once: true });
+	}
+
+	timeoutId = setTimeout(() => {
+		timedOut = true;
+		controller.abort(new ApiTimeoutError(path, timeoutMs));
+	}, timeoutMs);
+
+	return {
+		signal: controller.signal,
+		cleanup: () => {
+			if (timeoutId !== null) clearTimeout(timeoutId);
+			externalSignal?.removeEventListener('abort', abortFromExternal);
+		},
+		timedOut: () => timedOut,
+	};
+}
+
+function timeoutForOptions(
+	options: ApiRequestInit | undefined,
+	fallback = DEFAULT_API_TIMEOUT_MS
+): number {
+	return typeof options?.timeoutMs === 'number' ? options.timeoutMs : fallback;
+}
+
 // Drop-in replacement for fetch() that attaches the Bearer token and fires
 // the noor:unauthorized event on 401, matching the behaviour of fetchApiResponse.
-export async function authFetch(url: string, init?: RequestInit): Promise<Response> {
+export async function authFetch(url: string, init?: ApiRequestInit): Promise<Response> {
 	const token = getStoredToken();
 	const headers = new Headers(init?.headers);
 	if (token) headers.set('authorization', `Bearer ${token}`);
-	const resp = await fetch(url, { ...init, headers });
+	const { timeoutMs: _timeoutMs, signal: externalSignal, ...fetchInit } = init ?? {};
+	const timeout = requestTimeout(url, externalSignal, timeoutForOptions(init));
+	let resp: Response;
+	try {
+		resp = await fetch(url, { ...fetchInit, headers, signal: timeout.signal });
+	} catch (error) {
+		if (timeout.timedOut()) throw new ApiTimeoutError(url, timeoutForOptions(init));
+		throw error;
+	} finally {
+		timeout.cleanup();
+	}
 	if (resp.status === 401 && typeof window !== 'undefined') {
 		window.dispatchEvent(new CustomEvent('noor:unauthorized'));
 	}
@@ -235,6 +310,15 @@ export interface SpotifyPlaylistSearchItem {
 	totalTracks: number | null;
 }
 
+export interface SpotifyLibrarySaveResponse {
+	imported: number;
+	totalTracks: number;
+	resolvedCount: number;
+	unresolvedCount: number;
+	importFailures: number;
+	localIds: number[];
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
 	return value && typeof value === 'object' && !Array.isArray(value)
 		? (value as Record<string, unknown>)
@@ -356,7 +440,7 @@ function normalizeSpotifyPlaylistTrack(raw: unknown): SpotifyPlaylistTrack | nul
 	};
 }
 
-function normalizeSpotifyPlaylistDetail(raw: unknown): SpotifyPlaylistDetail {
+function normalizeSpotifyPlaylistMeta(raw: unknown): SpotifyPlaylistMeta {
 	const item = asRecord(raw) ?? {};
 	return {
 		source: 'spotify',
@@ -369,6 +453,13 @@ function normalizeSpotifyPlaylistDetail(raw: unknown): SpotifyPlaylistDetail {
 		followers: pickNumber(item, ['followers', 'follower_count', 'followerCount']),
 		totalTracks: pickNumber(item, ['totalTracks', 'total_tracks', 'track_count', 'trackCount']),
 		snapshotId: pickString(item, ['snapshotId', 'snapshot_id']),
+	};
+}
+
+function normalizeSpotifyPlaylistDetail(raw: unknown): SpotifyPlaylistDetail {
+	const item = asRecord(raw) ?? {};
+	return {
+		...normalizeSpotifyPlaylistMeta(item),
 		tracks: pickArray(item, ['tracks', 'items'])
 			.map(normalizeSpotifyPlaylistTrack)
 			.filter((track): track is SpotifyPlaylistTrack => track !== null),
@@ -525,7 +616,7 @@ export interface SpotifyPlaylistTrack {
 	tidal: SpotifyTidalState;
 }
 
-export interface SpotifyPlaylistDetail {
+export interface SpotifyPlaylistMeta {
 	source: 'spotify';
 	spotifyId: string | null;
 	type: 'playlist';
@@ -536,6 +627,9 @@ export interface SpotifyPlaylistDetail {
 	followers: number | null;
 	totalTracks: number | null;
 	snapshotId: string | null;
+}
+
+export interface SpotifyPlaylistDetail extends SpotifyPlaylistMeta {
 	tracks: SpotifyPlaylistTrack[];
 }
 
@@ -965,6 +1059,8 @@ export interface ShuffleDebug {
 
 export interface TidalMixPlaybackResponse {
 	ok: boolean;
+	state: PlaybackState;
+	queue: QueueItem[];
 	first_tidal_id?: number;
 	shuffle_debug?: ShuffleDebug | null;
 }
@@ -1829,6 +1925,13 @@ export interface TidalMoodCategory {
 	thumbnail: string | null;
 }
 
+export interface TidalMoodsResponse {
+	categories: TidalMoodCategory[];
+	source: string;
+	fallback?: boolean;
+	cached?: boolean;
+}
+
 export interface TidalDiscoverModuleResponse {
 	module: TidalHomeModule;          // module returned without `more_path` (already resolved); `items` is the full set
 	source: string;
@@ -2040,7 +2143,7 @@ export interface AudioSettings {
 async function fetchApiResponse(
 	path: string,
 	params?: Record<string, string>,
-	options?: RequestInit
+	options?: ApiRequestInit
 ): Promise<Response> {
 	const url = new URL(`${getApiBase()}${path}`);
 	if (params) {
@@ -2048,22 +2151,29 @@ async function fetchApiResponse(
 	}
 
 	const token = getStoredToken();
-	const authHeader: Record<string, string> = token
-		? { authorization: `Bearer ${token}` }
-		: {};
+	const headers = new Headers(options?.headers);
+	if (!headers.has('content-type')) headers.set('content-type', 'application/json');
+	if (token) headers.set('authorization', `Bearer ${token}`);
 
-	const resp = await fetch(url.toString(), {
-		headers: {
-			'content-type': 'application/json',
-			...authHeader,
-			...(options?.headers as Record<string, string> ?? {}),
-		},
-		...options,
-	});
+	const { timeoutMs: _timeoutMs, signal: externalSignal, ...fetchOptions } = options ?? {};
+	const timeout = requestTimeout(path, externalSignal, timeoutForOptions(options));
+	let resp: Response;
+	try {
+		resp = await fetch(url.toString(), {
+			...fetchOptions,
+			headers,
+			signal: timeout.signal,
+		});
+	} catch (error) {
+		if (timeout.timedOut()) throw new ApiTimeoutError(path, timeoutForOptions(options));
+		throw error;
+	} finally {
+		timeout.cleanup();
+	}
 
 	if (resp.status === 401) {
-		// Token was rejected - dispatch an event so the UI can show the connect screen
-		window.dispatchEvent(new CustomEvent('noor:unauthorized'));
+		// Token was rejected, so dispatch an event for the connect screen.
+		if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('noor:unauthorized'));
 	}
 
 	return resp;
@@ -2089,7 +2199,7 @@ export class ApiError extends Error {
 async function fetchApi<T>(
 	path: string,
 	params?: Record<string, string>,
-	options?: RequestInit
+	options?: ApiRequestInit
 ): Promise<T> {
 	const resp = await fetchApiResponse(path, params, options);
 	if (!resp.ok) {
@@ -2327,21 +2437,32 @@ export const api = {
 		);
 	},
 
-	searchTidalPlaylists(q: string, signal?: AbortSignal, opts?: { limit?: number; offset?: number }) {
+	searchTidalPlaylists(
+		q: string,
+		signal?: AbortSignal,
+		opts?: { limit?: number; offset?: number; timeoutMs?: number },
+	) {
 		const limit = opts?.limit ?? 20;
 		const offset = opts?.offset ?? 0;
 		return fetchApi<{ playlists: TidalSearchPlaylist[] }>(
 			`/api/tidal/playlists/search?q=${encodeURIComponent(q)}&limit=${limit}&offset=${offset}`,
 			undefined,
-			{ signal },
+			{ signal, timeoutMs: opts?.timeoutMs },
 		);
 	},
 
 	/**
-	 * Search Spotify (via the Sportify proxy) for playlists. Best-effort -
-	 * the caller should swallow errors so a Sportify outage never breaks
-	 * /search or Ctrl+K rendering.
+	 * Fetch a Spotify-sourced playlist's card metadata without tracks.
 	 */
+	async getSpotifyPlaylistMeta(spotifyId: string, signal?: AbortSignal): Promise<SpotifyPlaylistMeta> {
+		const raw = await fetchApi<unknown>(
+			`/api/discovery/sportify/playlist/${encodeURIComponent(spotifyId)}/meta`,
+			undefined,
+			{ signal },
+		);
+		return normalizeSpotifyPlaylistMeta(raw);
+	},
+
 	/**
 	 * Fetch a Spotify-sourced playlist's full metadata + track list, with
 	 * each track stamped with its current TIDAL resolution state.
@@ -2499,11 +2620,12 @@ export const api = {
 		limit = 12,
 		signal?: AbortSignal,
 		offset = 0,
+		timeoutMs?: number,
 	): Promise<SpotifyTrackSearchItem[]> {
 		const raw = await fetchApi<unknown>(
 			`/api/discovery/sportify/search`,
 			{ q, type: 'track', limit: String(limit), offset: String(offset) },
-			{ signal },
+			{ signal, timeoutMs },
 		);
 		const root = asRecord(raw) ?? {};
 		return pickArray(root, ['tracks'])
@@ -2516,11 +2638,12 @@ export const api = {
 		limit = 12,
 		signal?: AbortSignal,
 		offset = 0,
+		timeoutMs?: number,
 	): Promise<SpotifyAlbumSearchItem[]> {
 		const raw = await fetchApi<unknown>(
 			`/api/discovery/sportify/search`,
 			{ q, type: 'album', limit: String(limit), offset: String(offset) },
-			{ signal },
+			{ signal, timeoutMs },
 		);
 		const root = asRecord(raw) ?? {};
 		return pickArray(root, ['albums'])
@@ -2579,11 +2702,27 @@ export const api = {
 		});
 	},
 
+	saveSpotifyTrack(spotifyId: string) {
+		return fetchApi<SpotifyLibrarySaveResponse>(`/api/spotify-track/save`, undefined, {
+			method: 'POST',
+			body: JSON.stringify({ spotify_id: spotifyId }),
+		});
+	},
+
+	saveSpotifyAlbum(spotifyId: string) {
+		return fetchApi<SpotifyLibrarySaveResponse>(`/api/spotify-album/save`, undefined, {
+			method: 'POST',
+			body: JSON.stringify({ spotify_id: spotifyId }),
+			timeoutMs: BULK_QUEUE_API_TIMEOUT_MS,
+		});
+	},
+
 	async searchSpotifyPlaylists(
 		q: string,
 		limit = 12,
 		signal?: AbortSignal,
 		offset = 0,
+		timeoutMs?: number,
 	): Promise<SpotifyPlaylistSearchItem[]> {
 		type Resp = { playlists?: unknown[]; spotify_playlists?: unknown[] };
 		const fromResponse = (res: Resp) =>
@@ -2595,25 +2734,20 @@ export const api = {
 			const res = await fetchApi<Resp>(
 				`/api/discovery/sportify/search`,
 				{ q, type: 'playlist', limit: String(limit), offset: String(offset) },
-				{ signal },
+				{ signal, timeoutMs },
 			);
-			const playlists = fromResponse(res);
-			if (playlists.length > 0 || offset > 0) return playlists;
+			return fromResponse(res);
 		} catch (error) {
 			if (signal?.aborted) throw error;
+			return [];
 		}
-
-		const fallback = await fetchApi<Resp>(
-			'/api/search',
-			{ q, limit: String(limit) },
-			{ signal },
-		);
-		return fromResponse(fallback);
 	},
 
 	getTidalPlaylistTracks(tidalUuid: string) {
 		return fetchApi<{ tracks: TidalPlayable[] }>(
 			`/api/tidal/playlists/${tidalUuid}/tracks`,
+			undefined,
+			{ timeoutMs: BULK_QUEUE_API_TIMEOUT_MS },
 		);
 	},
 
@@ -3209,6 +3343,7 @@ export const api = {
 		return fetchApi<{ queue: QueueItem[] }>('/api/queue/play_next_many', undefined, {
 			method: 'POST',
 			body: JSON.stringify({ items }),
+			timeoutMs: BULK_QUEUE_API_TIMEOUT_MS,
 		});
 	},
 
@@ -3223,6 +3358,7 @@ export const api = {
 		return fetchApi<{ queue: QueueItem[] }>('/api/queue/append_many', undefined, {
 			method: 'POST',
 			body: JSON.stringify({ items }),
+			timeoutMs: BULK_QUEUE_API_TIMEOUT_MS,
 		});
 	},
 
@@ -3242,22 +3378,31 @@ export const api = {
 			{
 				method: 'POST',
 				body: JSON.stringify(body),
+				timeoutMs: BULK_QUEUE_API_TIMEOUT_MS,
 			}
 		);
 	},
 
 	removeQueueTrack(queueItemId: number) {
-		return fetchApi<{ queue: QueueItem[] }>('/api/playback/queue/remove', undefined, {
-			method: 'POST',
-			body: JSON.stringify({ queue_item_id: queueItemId }),
-		});
+		return fetchApi<{ queue: QueueItem[]; playback_state?: PlaybackState }>(
+			'/api/playback/queue/remove',
+			undefined,
+			{
+				method: 'POST',
+				body: JSON.stringify({ queue_item_id: queueItemId }),
+			}
+		);
 	},
 
 	moveQueueTrack(itemId: number, newPos: number) {
-		return fetchApi<{ queue: QueueItem[] }>('/api/playback/queue/move', undefined, {
-			method: 'POST',
-			body: JSON.stringify({ item_id: itemId, new_pos: newPos }),
-		});
+		return fetchApi<{ queue: QueueItem[]; playback_state?: PlaybackState }>(
+			'/api/playback/queue/move',
+			undefined,
+			{
+				method: 'POST',
+				body: JSON.stringify({ item_id: itemId, new_pos: newPos }),
+			}
+		);
 	},
 
 	clearQueue() {
@@ -3376,16 +3521,16 @@ export const api = {
 	// Workout, Focus, etc). Each entry has a slug that can be fed to
 	// getTidalMoodPage for the drill-down content.
 	getTidalMoods() {
-		return fetchApi<{ categories: TidalMoodCategory[]; source: string; fallback?: boolean }>(
-			'/api/tidal/moods',
-		);
+		return fetchApi<TidalMoodsResponse>('/api/tidal/moods');
 	},
 
 	// Drill-down for one mood category. Backend proxies to pages/{slug} which
 	// returns the standard editorial modules shape.
-	getTidalMoodPage(slug: string) {
+	getTidalMoodPage(slug: string, signal?: AbortSignal) {
 		return fetchApi<TidalHomeModulesResponse>(
 			`/api/tidal/mood-page/${encodeURIComponent(slug)}`,
+			undefined,
+			{ signal },
 		);
 	},
 
@@ -3423,6 +3568,7 @@ export const api = {
 		return fetchApi<TidalMixPlaybackResponse>('/api/tidal/play-mix', undefined, {
 			method: 'POST',
 			body: JSON.stringify(body),
+			timeoutMs: BULK_QUEUE_API_TIMEOUT_MS,
 		});
 	},
 

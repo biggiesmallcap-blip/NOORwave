@@ -538,9 +538,6 @@ struct PreparedDjMixer {
     mixer: noor_mix::Mixer,
     program: noor_mix::TransitionProgram,
     max_block_samples: usize,
-    queue_generation: u64,
-    current_queue_item_id: Option<i64>,
-    next_queue_item_id: Option<i64>,
     current_track_id: i64,
     next_track_id: i64,
 }
@@ -1079,9 +1076,6 @@ fn build_prepared_dj_mixer_for_engine(
         mixer,
         program,
         max_block_samples,
-        queue_generation: transition.queue_generation,
-        current_queue_item_id: transition.current_queue_item_id,
-        next_queue_item_id: transition.next_queue_item_id,
         current_track_id: active.track_id,
         next_track_id: incoming.track_id,
     })
@@ -1613,21 +1607,6 @@ fn set_dj_engine_enabled_in_state(state: &mut PlaybackRuntimeLoopState, enabled:
     if let Some(mut engine) = state.drop_preview_engine.take() {
         engine.stop();
     }
-}
-
-fn record_dj_lookahead_failure(
-    state: &mut PlaybackRuntimeLoopState,
-    queue_generation: u64,
-    current_queue_item_id: Option<i64>,
-    next_queue_item_id: Option<i64>,
-    reason: DjLookaheadFailureReason,
-) {
-    state.dj_lookahead_failure = Some(DjLookaheadFailure {
-        queue_generation,
-        current_queue_item_id,
-        next_queue_item_id,
-        reason,
-    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2484,8 +2463,11 @@ fn run_runtime_loop(
                                         });
                                     }
                                     PlaybackTerminalReason::Error(message) => {
-                                        let _ =
-                                            event_tx.send(PlaybackRuntimeEvent::Error { message });
+                                        let _ = event_tx.send(PlaybackRuntimeEvent::TrackError {
+                                            track_id,
+                                            generation,
+                                            message,
+                                        });
                                     }
                                 }
                             }
@@ -3000,11 +2982,8 @@ fn report_runtime_command_error(
     let _ = event_tx.send(PlaybackRuntimeEvent::Error { message });
 }
 
-/// Surface a decode/source failure on the pre-buffered next track. The
-/// active track's failure already emits PlaybackRuntimeEvent::Error via
-/// the TrackTerminal::Error branch for the Active slot, but the Next-slot
-/// branch previously only logged - users had no signal that the upcoming
-/// track silently dropped from the queue.
+/// Surface a decode/source failure on the pre-buffered next track without
+/// treating it as an active-track playback failure.
 fn emit_prepared_track_failure(
     event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
     track_id: i64,
@@ -3012,7 +2991,10 @@ fn emit_prepared_track_failure(
 ) {
     let surfaced = format!("Pre-buffered track {track_id} failed: {message}");
     warn!("{surfaced}");
-    let _ = event_tx.send(PlaybackRuntimeEvent::Error { message: surfaced });
+    let _ = event_tx.send(PlaybackRuntimeEvent::PreparedTrackError {
+        track_id,
+        message: surfaced,
+    });
 }
 
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
@@ -3697,13 +3679,12 @@ mod tests {
             let mut state = test_runtime_loop_state();
             state.engine = Some(test_engine_with_shared(1, 10));
 
-            record_dj_lookahead_failure(
-                &mut state,
-                20,
-                Some(11),
-                Some(12),
-                DjLookaheadFailureReason::AnalysisDeadlineMissed,
-            );
+            state.dj_lookahead_failure = Some(DjLookaheadFailure {
+                queue_generation: 20,
+                current_queue_item_id: Some(11),
+                next_queue_item_id: Some(12),
+                reason: DjLookaheadFailureReason::AnalysisDeadlineMissed,
+            });
 
             assert!(state.engine.is_some());
             assert_eq!(
@@ -3988,9 +3969,6 @@ mod tests {
 
         assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
         let prepared = state.prepared_dj_mixer.as_mut().expect("prepared mixer");
-        assert_eq!(prepared.queue_generation, 20);
-        assert_eq!(prepared.current_queue_item_id, Some(11));
-        assert_eq!(prepared.next_queue_item_id, Some(12));
         assert_eq!(prepared.current_track_id, 1);
         assert_eq!(prepared.next_track_id, 2);
 
@@ -5284,20 +5262,6 @@ mod tests {
     }
 
     #[test]
-    fn swap_stream_plan_uses_device_rate_for_shared_fallback() {
-        let base = StreamConfig {
-            channels: 2,
-            sample_rate: 48_000,
-            buffer_size: cpal::BufferSize::Default,
-        };
-
-        let plan = swap_stream_plan(&base, Some(192_000), SwapBackend::SharedFallback);
-
-        assert_eq!(plan.stream_config.sample_rate, 48_000);
-        assert_eq!(plan.target_sample_rate, Some(48_000));
-    }
-
-    #[test]
     fn output_rate_fallback_uses_base_when_desired_rate_was_rejected() {
         let base = StreamConfig {
             channels: 2,
@@ -5761,17 +5725,18 @@ mod tests {
     }
 
     #[test]
-    fn emit_prepared_track_failure_sends_error_event() {
+    fn emit_prepared_track_failure_sends_prepared_error_event() {
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
 
         emit_prepared_track_failure(&event_tx, 42, "decode failed: malformed packet");
 
         match event_rx.try_recv().expect("error event should be emitted") {
-            PlaybackRuntimeEvent::Error { message } => {
+            PlaybackRuntimeEvent::PreparedTrackError { track_id, message } => {
+                assert_eq!(track_id, 42);
                 assert!(message.contains("Pre-buffered track 42 failed"));
                 assert!(message.contains("decode failed: malformed packet"));
             }
-            other => panic!("expected error event, got {other:?}"),
+            other => panic!("expected prepared track error event, got {other:?}"),
         }
     }
 

@@ -19,7 +19,7 @@
 	import { exclusiveStatus } from '$lib/stores/exclusive_status';
 	import { formatPlayerStreamDetail } from '$lib/player/stream_display';
 	import { formatTrackDuration } from '$lib/utils/format';
-	import { upscaleTidalArtwork } from '$lib/utils/artwork';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { goto } from '$app/navigation';
 	import { openActionSheet } from '$lib/remote/action_sheet';
 	import { hapticAccent, hapticCommit, hapticTap } from '$lib/remote/haptics';
@@ -29,6 +29,7 @@
 		buildTrackMenu,
 		type MenuTrack
 	} from '$lib/player/track_menu';
+	import { trackToTidalPlayable } from '$lib/utils/track';
 
 	let {
 		track,
@@ -59,14 +60,6 @@
 		volumeDisplay = Math.round(volume * 100);
 	});
 
-	let artworkFailed = $state(false);
-	let lastArtworkUrl = $state<string | null>(null);
-	let artworkUrl = $derived(upscaleTidalArtwork(track?.artwork_url, 640));
-	$effect(() => {
-		if (artworkUrl === lastArtworkUrl) return;
-		lastArtworkUrl = artworkUrl;
-		artworkFailed = false;
-	});
 	let isFavorite = $derived(track?.is_favorite === true);
 	let streamDetail = $derived(
 		formatPlayerStreamDetail({
@@ -116,36 +109,21 @@
 	}
 
 	function onFavorite() {
-		if (!track || track.id <= 0) return;
+		if (!track || (track.id <= 0 && !track.tidal_id)) return;
 		hapticAccent();
 		void toggleTrackFavorite(track.id, track.is_favorite ?? false);
 	}
 
-	// True when the currently-playing track is a TIDAL ephemeral entry - these
-	// have a synthetic negative `id`, `artist_id = -1`, and `album_id = null`,
-	// but they DO carry `artist_tidal_id` / `album_tidal_id` for navigation.
-	let isTidalEphemeral = $derived(!!track && track.id <= 0 && !!track.tidal_id);
+	let tidalTrack = $derived(track ? trackToTidalPlayable(track) : null);
+	let canFavorite = $derived(!!track && (track.id > 0 || !!track.tidal_id));
 
 	function openTrackActions() {
 		if (!track) return;
-		if (isTidalEphemeral) {
+		if (tidalTrack != null) {
 			openActionSheet({
 				title: track.title,
 				subtitle: track.artist_name,
-				items: buildTidalTrackMenu(
-					{
-						tidal_id: track.tidal_id!,
-						title: track.title,
-						artist_name: track.artist_name ?? null,
-						album_title: track.album_title ?? null,
-						artwork_url: track.artwork_url ?? null,
-						duration_ms: track.duration_ms ?? null,
-						artist_tidal_id: track.artist_tidal_id ?? null,
-						album_tidal_id: track.album_tidal_id ?? null,
-						is_favorite: track.is_favorite ?? false
-					},
-					{ remoteRoutes: true }
-				)
+				items: buildTidalTrackMenu(tidalTrack, { remoteRoutes: true })
 			});
 			return;
 		}
@@ -323,17 +301,13 @@
 		onpointercancel={onSwipeCancel}
 		use:longPress={openTrackActions}
 	>
-		{#if artworkUrl && !artworkFailed}
-			<img
-				src={artworkUrl}
-				alt=""
-				draggable="false"
-				decoding="async"
-				onerror={() => (artworkFailed = true)}
-			/>
-		{:else}
-			<div class="remote-art-empty" aria-hidden="true">NOOR</div>
-		{/if}
+		<ArtworkImage
+			className="remote-art-image"
+			src={track?.artwork_url ?? null}
+			size={640}
+			fallbackText="NOOR"
+			decorative={true}
+		/>
 		<span class="remote-art-sheen" aria-hidden="true"></span>
 	</div>
 
@@ -344,7 +318,7 @@
 				class="remote-favorite"
 				class:active={isFavorite}
 				type="button"
-				disabled={!track || track.id <= 0}
+				disabled={!canFavorite}
 				aria-label={isFavorite ? 'Unfavorite track' : 'Favorite track'}
 				aria-pressed={isFavorite}
 				onclick={onFavorite}
@@ -519,15 +493,21 @@
 		border-radius: 22px;
 	}
 
-	.remote-art img,
-	.remote-art-empty {
+	.remote-art :global(.remote-art-image) {
 		width: 100%;
 		height: 100%;
 	}
 
-	.remote-art img {
+	.remote-art :global(img.remote-art-image) {
 		object-fit: cover;
 		pointer-events: none;
+	}
+
+	.remote-art :global(.remote-art-image.fallback) {
+		display: grid;
+		place-items: center;
+		background: var(--surface-1);
+		color: var(--text-muted);
 	}
 
 	/* Diagonal frosted sheen that sweeps across the cover as you drag. */
@@ -548,12 +528,6 @@
 
 	.remote-art.swiping .remote-art-sheen {
 		transition: none;
-	}
-
-	.remote-art-empty {
-		display: grid;
-		place-items: center;
-		color: var(--text-muted);
 	}
 
 	.remote-copy,

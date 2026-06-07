@@ -36,48 +36,47 @@
 
 	// Non-reactive guard: prevents $effect from double-fetching on first render.
 	let initialized = false;
+	let loadSeq = 0;
 
 	$effect(() => {
 		const d = days; // reactive subscription — re-runs when range changes
 		if (!initialized) return;
-		windowChanging = true;
-		error = null;
-		api
-			.getAnalyticsSignals(d)
-			.then((s) => {
-				signals = s;
-			})
-			.catch((e: unknown) => {
-				error = e instanceof Error ? e.message : 'Failed to load analytics.';
-			})
-			.finally(() => {
-				windowChanging = false;
-			});
+		void loadSignals('window', d);
 	});
 
-	async function fetchSignals() {
+	type AnalyticsLoadReason = 'initial' | 'window' | 'refresh';
+
+	async function loadSignals(reason: AnalyticsLoadReason, requestedDays = days) {
+		const seq = ++loadSeq;
 		error = null;
+		if (reason === 'initial') initialLoading = true;
+		if (reason === 'window') windowChanging = true;
+		if (reason === 'refresh') refreshing = true;
 		try {
-			signals = await api.getAnalyticsSignals(days);
+			const nextSignals = await api.getAnalyticsSignals(requestedDays);
+			if (seq !== loadSeq) return;
+			signals = nextSignals;
 		} catch (e: unknown) {
+			if (seq !== loadSeq) return;
 			error = e instanceof Error ? e.message : 'Failed to load analytics.';
 		} finally {
+			if (seq !== loadSeq) return;
 			initialLoading = false;
+			windowChanging = false;
 			refreshing = false;
 		}
 	}
 
 	function refresh() {
-		refreshing = true;
 		debouncedWsRefresh.cancel();
-		void fetchSignals();
+		void loadSignals('refresh');
 	}
 
-	const debouncedWsRefresh = debounce(() => void fetchSignals(), 1500);
+	const debouncedWsRefresh = debounce(() => void loadSignals('refresh'), 1500);
 
 	onMount(() => {
 		initialized = true;
-		void fetchSignals();
+		void loadSignals('initial');
 
 		const unsub = wsMessages.subscribe((msgs) => {
 			const latest = msgs.at(-1);
@@ -88,6 +87,7 @@
 		});
 
 		return () => {
+			loadSeq += 1;
 			unsub();
 			debouncedWsRefresh.cancel();
 		};

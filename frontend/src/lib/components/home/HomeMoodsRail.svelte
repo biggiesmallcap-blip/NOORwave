@@ -7,16 +7,16 @@
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { goto } from '$app/navigation';
 	import {
+		claimMoodThumbnailRefresh,
 		getCachedMoodCategories,
 		moodCategoriesNeedThumbnails,
-		putCompleteMoodCategories,
+		putCachedMoodCategories,
 	} from '$lib/stores/tidal-moods-cache';
 
 	const PREVIEW_LIMIT = 8;
 	const LOAD_ARM_DELAY_MS = 0;
 	const FALLBACK_LOAD_DELAY_MS = 3000;
 	const THUMBNAIL_REFRESH_DELAY_MS = 1800;
-	const MAX_THUMBNAIL_REFRESH_ATTEMPTS = 3;
 
 	// Sync-read the shared moods cache on script init so a second visit
 	// within the 6h TTL renders instantly without a network round-trip.
@@ -30,32 +30,42 @@
 	let errored = $state(false);
 	let sectionEl = $state<HTMLElement | null>(null);
 	let inFlight = false;
-	let thumbnailRefreshAttempts = 0;
+	let loadSeq = 0;
 	let thumbnailRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 	async function loadMoods() {
 		if (inFlight) return;
+		const seq = ++loadSeq;
 		inFlight = true;
 		try {
 			const data = await cachedApi.getTidalMoods();
+			if (seq !== loadSeq) return;
 			const all = data.categories ?? [];
-			if (all.length > 0) putCompleteMoodCategories(all);
+			if (all.length > 0) putCachedMoodCategories(all);
 			categories = all.slice(0, PREVIEW_LIMIT);
 			scheduleThumbnailRefresh(all);
 		} catch {
+			if (seq !== loadSeq) return;
 			errored = true;
 		} finally {
-			loading = false;
-			inFlight = false;
+			if (seq === loadSeq) {
+				loading = false;
+				inFlight = false;
+			}
 		}
 	}
 
 	onMount(() => {
 		if (cachedOnMount && moodCategoriesNeedThumbnails(cachedOnMount)) {
 			scheduleThumbnailRefresh(cachedOnMount);
-			return () => clearThumbnailRefresh();
+			return () => {
+				loadSeq += 1;
+				clearThumbnailRefresh();
+			};
 		}
-		if (cachedOnMount) return;
+		if (cachedOnMount) {
+			return () => { loadSeq += 1; };
+		}
 
 		let observer: IntersectionObserver | null = null;
 		let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
@@ -79,6 +89,7 @@
 		}, LOAD_ARM_DELAY_MS);
 
 		return () => {
+			loadSeq += 1;
 			clearTimeout(armTimer);
 			if (fallbackTimer) clearTimeout(fallbackTimer);
 			clearThumbnailRefresh();
@@ -95,12 +106,12 @@
 	function scheduleThumbnailRefresh(nextCategories: TidalMoodCategory[]) {
 		clearThumbnailRefresh();
 		if (!moodCategoriesNeedThumbnails(nextCategories)) {
-			thumbnailRefreshAttempts = 0;
 			return;
 		}
-		if (thumbnailRefreshAttempts >= MAX_THUMBNAIL_REFRESH_ATTEMPTS) return;
-		thumbnailRefreshAttempts += 1;
-		thumbnailRefreshTimer = setTimeout(() => void loadMoods(), THUMBNAIL_REFRESH_DELAY_MS);
+		thumbnailRefreshTimer = setTimeout(() => {
+			thumbnailRefreshTimer = null;
+			if (claimMoodThumbnailRefresh(nextCategories)) void loadMoods();
+		}, THUMBNAIL_REFRESH_DELAY_MS);
 	}
 
 	function menu(slug: string, title: string) {
@@ -123,7 +134,7 @@
 					<a
 						class="card"
 						href={`/moods/${c.slug}`}
-						oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, menu(c.slug, c.title), c.title); }}
+						oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); openContextMenu(e, menu(c.slug, c.title), c.title); }}
 					>
 						<div class="art-wrap">
 							<ArtworkImage

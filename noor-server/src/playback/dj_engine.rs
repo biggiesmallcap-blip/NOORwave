@@ -50,18 +50,6 @@ impl DjEngine {
             .unwrap_or(false)
     }
 
-    pub fn plan_transition(
-        &self,
-        from: &DjMediaRef,
-        to: &DjMediaRef,
-        sample_rate: u32,
-        channels: u16,
-    ) -> Result<Option<TransitionProgram>> {
-        Ok(self
-            .plan_transition_details(from, to, sample_rate, channels)?
-            .map(|plan| plan.program))
-    }
-
     pub fn plan_transition_details(
         &self,
         from: &DjMediaRef,
@@ -152,12 +140,6 @@ impl DjEngine {
                 &incoming,
             ))
         })
-    }
-
-    fn recent_bad_feedback_count(&self, media_ref: &DjMediaRef) -> Result<i64> {
-        let key = media_ref.profile_key();
-        self.db
-            .with_conn(|conn| queries::count_recent_bad_dj_feedback_for_ref(conn, &key, 3))
     }
 }
 
@@ -646,8 +628,9 @@ mod tests {
 
     fn plan(db: &Database, from: DjMediaRef, to: DjMediaRef) -> Option<TransitionProgram> {
         DjEngine::new(db.clone())
-            .plan_transition(&from, &to, 48_000, 2)
+            .plan_transition_details(&from, &to, 48_000, 2)
             .expect("plan")
+            .map(|plan| plan.program)
     }
 
     #[test]
@@ -1014,7 +997,6 @@ mod tests {
     fn one_bad_feedback_does_not_force_safe_crossfade() {
         let db = db();
         enable(&db);
-        let engine = DjEngine::new(db.clone());
         db.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO dj_transition_events (
@@ -1026,19 +1008,17 @@ mod tests {
             Ok(())
         })
         .expect("feedback");
-        assert_eq!(
-            engine
-                .recent_bad_feedback_count(&ref_for("tidal_track", 1))
-                .unwrap(),
-            1
-        );
+        let key = ref_for("tidal_track", 1).profile_key();
+        let count = db
+            .with_conn(|conn| queries::count_recent_bad_dj_feedback_for_ref(conn, &key, 3))
+            .expect("feedback count");
+        assert_eq!(count, 1);
     }
 
     #[test]
     fn three_bad_feedback_events_suggest_safe_crossfade_only() {
         let db = db();
         enable(&db);
-        let engine = DjEngine::new(db.clone());
         db.with_conn(|conn| {
             for _ in 0..3 {
                 conn.execute(
@@ -1052,12 +1032,11 @@ mod tests {
             Ok(())
         })
         .expect("feedback");
-        assert_eq!(
-            engine
-                .recent_bad_feedback_count(&ref_for("tidal_track", 1))
-                .unwrap(),
-            3
-        );
+        let key = ref_for("tidal_track", 1).profile_key();
+        let count = db
+            .with_conn(|conn| queries::count_recent_bad_dj_feedback_for_ref(conn, &key, 3))
+            .expect("feedback count");
+        assert_eq!(count, 3);
     }
 
     #[test]

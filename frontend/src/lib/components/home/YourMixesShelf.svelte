@@ -16,6 +16,7 @@
 	let mixes = $state<TidalMix[]>(cachedOnMount ?? []);
 	let viewState = $state<State>(cachedOnMount && cachedOnMount.length > 0 ? 'ready' : 'loading');
 	let errorMsg = $state<string>('');
+	let loadSeq = 0;
 
 	let audioMixes = $derived(mixes.filter((m) => !isMixVideo(m)));
 	let videoMixes = $derived(mixes.filter((m) => isMixVideo(m)));
@@ -23,8 +24,8 @@
 	// Skip the network on remount when we have warm cached mixes — the shelf
 	// renders synchronously from cache and stays static for the 6h TTL window.
 	onMount(() => {
-		if (cachedOnMount && cachedOnMount.length > 0) return;
-		void load();
+		if (!cachedOnMount || cachedOnMount.length === 0) void load();
+		return () => { loadSeq += 1; };
 	});
 
 	// Re-fetch when TIDAL transitions to connected. Covers two cases:
@@ -45,14 +46,18 @@
 	});
 
 	async function load() {
+		const seq = ++loadSeq;
 		viewState = 'loading';
 		errorMsg = '';
 		try {
 			const data = await cachedApi.getTidalMixes();
-			mixes = data.mixes ?? [];
-			if (mixes.length > 0) putCachedMixes(mixes);
-			viewState = mixes.length > 0 ? 'ready' : 'empty';
+			if (seq !== loadSeq) return;
+			const nextMixes = data.mixes ?? [];
+			mixes = nextMixes;
+			if (nextMixes.length > 0) putCachedMixes(nextMixes);
+			viewState = nextMixes.length > 0 ? 'ready' : 'empty';
 		} catch (e) {
+			if (seq !== loadSeq) return;
 			if (e instanceof ApiError && e.status === 503) {
 				clearCachedMixes();
 				viewState = 'disconnected';

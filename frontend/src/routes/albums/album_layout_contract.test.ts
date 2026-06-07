@@ -37,6 +37,31 @@ describe('album page layout contracts', () => {
 		expect(source).toContain('worldPlayCount={track.isrc ? playcountByIsrc.get(track.isrc) : null}');
 	});
 
+	test('guards album route loads against stale responses', () => {
+		expect(source).toContain('let loadSeq = 0;');
+		expect(source).toContain('async function load(id: number)');
+		expect(source).toContain('const seq = ++loadSeq;');
+		expect(source).toContain('const res = await cachedApi.getAlbumTracks(id);');
+		expect(source).toContain('if (seq !== loadSeq) return;');
+		expect(source).toContain('if (seq === loadSeq) loading = false;');
+		expect(source).toContain('const id = albumId;');
+		expect(source).toContain('tracks = [];');
+		expect(source).toContain('void load(id);');
+		expect(source).toContain('void loadSpotifyStats(id);');
+		expect(source).not.toContain('void load();');
+	});
+
+	test('guards album secondary artist loads against stale responses', () => {
+		expect(source).toContain('let moreLoadSeq = 0;');
+		expect(source).toContain('moreLoadSeq += 1;');
+		expect(source).toContain('const sourceAlbumId = albumId;');
+		expect(source).toContain('void loadMore(artistId, sourceAlbumId);');
+		expect(source).toContain('async function loadMore(artistId: number, sourceAlbumId: number)');
+		expect(source).toContain('const seq = ++moreLoadSeq;');
+		expect(source).toContain('if (seq !== moreLoadSeq || albumId !== sourceAlbumId) return;');
+		expect(source).toContain('if (seq === moreLoadSeq) moreLoading = false;');
+	});
+
 	test('routes album artwork through TIDAL fallback sizes', () => {
 		expect(source).toContain('tidalArtworkFallbackSizes');
 		expect(source).toContain('let heroArtworkSrc = $derived(artworkCandidate(header()?.artwork_url, 640));');
@@ -46,6 +71,19 @@ describe('album page layout contracts', () => {
 		expect(source).not.toContain('style="background-image: url({h.artwork_url});"');
 		expect(source).not.toContain('src={h.artwork_url}');
 		expect(source).not.toContain('src={album.artwork_url}');
+	});
+
+	test('uses the shared TIDAL discography playable mapper for TIDAL-only rows', () => {
+		expect(source).toContain("import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';");
+		expect(source).toContain('{@const playable = tidalDiscographyTrackToPlayable(track)}');
+		expect(source).not.toContain('type TidalPlayable');
+		expect(source).not.toContain('function tidalDiscographyTrackToPlayable(t: TidalDiscographyTrack)');
+	});
+
+	test('keeps album TIDAL-only row context menus app-owned', () => {
+		expect(source).toContain('openContextMenu(e, buildTidalTrackMenu(playable), track.title);');
+		expect(source).toContain('e.preventDefault();');
+		expect(source).toContain('e.stopPropagation();');
 	});
 
 	test('keeps route copy and comments ASCII-safe', () => {

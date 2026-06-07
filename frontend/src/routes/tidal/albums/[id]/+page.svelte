@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { api, type TidalDiscographyTrack } from '$lib/api/client';
-	import { playTidalAlbum } from '$lib/stores/player';
+	import { playTidalTracksNow } from '$lib/stores/player';
 	import TidalTrackRow from '$lib/components/TidalTrackRow.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
@@ -12,19 +12,7 @@
 		type TidalArtworkSize,
 	} from '$lib/utils/artwork';
 	import { formatTotalDuration } from '$lib/utils/format';
-
-	function trackAsPlayable(t: TidalDiscographyTrack) {
-		return {
-			tidal_id: t.tidal_id,
-			title: t.title,
-			artist_name: t.artist_name ?? null,
-			album_title: t.album_title ?? null,
-			artwork_url: t.artwork_url,
-			duration_ms: t.duration_ms,
-			artist_tidal_id: t.artist_tidal_id ?? null,
-			track_number: t.track_number,
-		};
-	}
+	import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';
 
 	let tidalAlbumId = $derived(Number(page.params.id));
 
@@ -32,24 +20,28 @@
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let failedArtworkUrls = $state<Record<string, boolean>>({});
+	let loadSeq = 0;
 
-	async function load() {
+	async function load(id: number) {
+		const seq = ++loadSeq;
 		loading = true;
 		error = null;
+		failedArtworkUrls = {};
 		try {
-			const res = await api.getTidalAlbumTracks(tidalAlbumId);
+			const res = await api.getTidalAlbumTracks(id);
+			if (seq !== loadSeq) return;
 			tracks = res.tracks;
 		} catch (err) {
+			if (seq !== loadSeq) return;
 			error = `Couldn't load album from TIDAL: ${err}`;
 		} finally {
-			loading = false;
+			if (seq === loadSeq) loading = false;
 		}
 	}
 
 	$effect(() => {
-		tidalAlbumId;
-		failedArtworkUrls = {};
-		void load();
+		const id = tidalAlbumId;
+		void load(id);
 	});
 
 	let header = $derived(() => {
@@ -83,6 +75,13 @@
 	function markArtworkFailed(renderedUrl: string | null | undefined) {
 		if (!renderedUrl) return;
 		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
+	}
+
+	async function playLoadedAlbum() {
+		await playTidalTracksNow(
+			tracks.map((track) => tidalDiscographyTrackToPlayable(track)),
+			header()?.title ?? 'album',
+		);
 	}
 
 </script>
@@ -147,7 +146,7 @@
 						<span>{formatTotalDuration(h.total_ms)}</span>
 					</p>
 					<div class="hero-actions">
-						<button class="play-all-btn" onclick={() => playTidalAlbum(tidalAlbumId)}>▶ Play All</button>
+						<button class="play-all-btn" onclick={() => void playLoadedAlbum()}>▶ Play All</button>
 						<span class="not-in-library-badge">Not in your library</span>
 					</div>
 				</div>
@@ -164,7 +163,7 @@
 			<ol class="track-list">
 				{#each tracks as track, idx (track.tidal_id)}
 					<TidalTrackRow
-						track={trackAsPlayable(track)}
+						track={tidalDiscographyTrackToPlayable(track)}
 						variant="indexed"
 						index={idx}
 						showAlbum={false}

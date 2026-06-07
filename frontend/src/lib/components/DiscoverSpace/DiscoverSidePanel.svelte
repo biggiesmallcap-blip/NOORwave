@@ -19,15 +19,14 @@
 	let isHiding = $state(false);
 	let resolvingAction = $state<'play-now' | 'play-next' | 'radio' | null>(null);
 
-	function nodeFallbackPlayable(): PlayableTrack | null {
-		if (!node) return null;
-		return node.playable;
+	function nodeFallbackPlayable(targetNode: DiscoverTrackNode): PlayableTrack | null {
+		return targetNode.playable;
 	}
 
-	function updateNodePlayable(playable: PlayableTrack) {
-		if (!node) return;
-		const trackId = node.trackId;
-		node.playable = playable;
+	function updateNodePlayable(trackId: number, playable: PlayableTrack) {
+		if (node?.trackId === trackId) {
+			node.playable = playable;
+		}
 		discoverSpaceStore.update((state) => ({
 			...state,
 			nodes: state.nodes.map((n) => (n.trackId === trackId ? { ...n, playable } : n)),
@@ -42,7 +41,10 @@
 		return value.trim().slice(0, 2).toUpperCase() || 'NOOR';
 	}
 
-	async function resolveExternalPlayable(playable: PlayableTrack): Promise<PlayableTrack | null> {
+	async function resolveExternalPlayable(
+		targetNode: DiscoverTrackNode,
+		playable: PlayableTrack,
+	): Promise<PlayableTrack | null> {
 		if (playable.kind === 'library' || playable.kind === 'tidal') return playable;
 		if (playable.kind === 'unavailable') return null;
 		const q = pendingToSearchQuery(playable);
@@ -58,13 +60,13 @@
 				title: hit.title,
 				artist_name: hit.artist_name,
 				album_title: hit.album_title,
-				artwork_url: hit.artwork_url ?? node?.artworkUrl ?? null,
+				artwork_url: hit.artwork_url ?? targetNode.artworkUrl ?? null,
 				duration_ms: hit.duration_ms,
 				artist_tidal_id: hit.artist_id ?? null,
 				album_tidal_id: hit.album_tidal_id ?? null,
 			},
 		};
-		updateNodePlayable(resolved);
+		updateNodePlayable(targetNode.trackId, resolved);
 		return resolved;
 	}
 
@@ -78,14 +80,15 @@
 	}
 
 	async function handlePlayNow() {
-		if (!node) return;
+		const targetNode = node;
+		if (!targetNode) return;
 		resolvingAction = 'play-now';
 		try {
-			const basePlayable = nodeFallbackPlayable();
+			const basePlayable = nodeFallbackPlayable(targetNode);
 			if (!basePlayable) return;
-			const playable = await resolveExternalPlayable(basePlayable);
+			const playable = await resolveExternalPlayable(targetNode, basePlayable);
 			if (!playable) {
-				showToast(`Couldn't find "${node.title}" on Tidal`, 'error');
+				showToast(`Couldn't find "${targetNode.title}" on Tidal`, 'error');
 				return;
 			}
 			if (playable.kind === 'library') {
@@ -106,14 +109,15 @@
 	}
 
 	async function handlePlayNext() {
-		if (!node) return;
+		const targetNode = node;
+		if (!targetNode) return;
 		resolvingAction = 'play-next';
 		try {
-			const basePlayable = nodeFallbackPlayable();
+			const basePlayable = nodeFallbackPlayable(targetNode);
 			if (!basePlayable) return;
-			const playable = await resolveExternalPlayable(basePlayable);
+			const playable = await resolveExternalPlayable(targetNode, basePlayable);
 			if (!playable) {
-				showToast(`Couldn't find "${node.title}" on Tidal`, 'error');
+				showToast(`Couldn't find "${targetNode.title}" on Tidal`, 'error');
 				return;
 			}
 			if (playable.kind === 'library') {
@@ -135,15 +139,16 @@
 	}
 
 	async function handleStartRadioHere() {
-		if (!node || isStartingRadio) return;
+		const targetNode = node;
+		if (!targetNode || isStartingRadio) return;
 		isStartingRadio = true;
 		resolvingAction = 'radio';
 		try {
-			const basePlayable = nodeFallbackPlayable();
+			const basePlayable = nodeFallbackPlayable(targetNode);
 			if (!basePlayable) return;
-			const playable = await resolveExternalPlayable(basePlayable);
+			const playable = await resolveExternalPlayable(targetNode, basePlayable);
 			if (!playable) {
-				showToast(`Couldn't find "${node.title}" on Tidal`, 'error');
+				showToast(`Couldn't find "${targetNode.title}" on Tidal`, 'error');
 				return;
 			}
 			if (playable.kind === 'library') {

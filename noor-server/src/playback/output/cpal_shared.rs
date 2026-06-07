@@ -14,7 +14,6 @@ use tracing::warn;
 pub(crate) enum SwapBackend {
     Exclusive,
     Shared,
-    SharedFallback,
 }
 
 #[derive(Debug, Clone)]
@@ -32,10 +31,8 @@ pub(crate) fn swap_stream_plan(
         SwapBackend::Exclusive | SwapBackend::Shared => {
             effective_output_config(base, desired_sample_rate)
         }
-        SwapBackend::SharedFallback => base.clone(),
     };
     let target_sample_rate = match (backend, desired_sample_rate) {
-        (SwapBackend::SharedFallback, Some(_)) => Some(stream_config.sample_rate),
         (_, Some(_)) => Some(stream_config.sample_rate),
         (_, None) => None,
     };

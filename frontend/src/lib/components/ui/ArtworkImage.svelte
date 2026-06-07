@@ -12,6 +12,9 @@
 		className?: string;
 		fallbackText?: string;
 		decorative?: boolean;
+		loading?: 'eager' | 'lazy';
+		decoding?: 'async' | 'sync' | 'auto';
+		fetchPriority?: 'high' | 'low' | 'auto';
 	};
 
 	let {
@@ -21,6 +24,9 @@
 		className = '',
 		fallbackText = 'NOOR',
 		decorative = false,
+		loading = 'lazy',
+		decoding = 'async',
+		fetchPriority = 'auto',
 	}: Props = $props();
 
 	let failedAttempts = $state(0);
@@ -63,6 +69,9 @@
 		class={className}
 		src={resolvedSrc}
 		alt={decorative ? '' : alt}
+		loading={loading}
+		decoding={decoding}
+		fetchpriority={fetchPriority}
 		onerror={() => {
 			failedAttempts += 1;
 		}}

@@ -179,7 +179,13 @@ pub fn load_dj_lookahead_pair(conn: &Connection) -> Result<DjLookaheadPair> {
         .unwrap_or((None, None));
 
     let current_row = if let Some(queue_item_id) = current_queue_item_id {
-        load_queue_ref_by_id(conn, queue_item_id)?
+        match load_queue_ref_by_id(conn, queue_item_id)? {
+            Some(row) if row.track_id == current_track_id => Some(row),
+            _ => match current_track_id {
+                Some(track_id) => load_queue_ref_by_track_id(conn, track_id)?,
+                None => None,
+            },
+        }
     } else if let Some(track_id) = current_track_id {
         load_queue_ref_by_track_id(conn, track_id)?
     } else {
@@ -205,6 +211,7 @@ pub fn load_dj_lookahead_pair(conn: &Connection) -> Result<DjLookaheadPair> {
 struct QueueRefRow {
     queue_item_id: i64,
     position: i64,
+    track_id: Option<i64>,
     media_ref: DjMediaRef,
 }
 
@@ -276,6 +283,7 @@ where
         Ok(QueueRefRow {
             queue_item_id,
             position,
+            track_id,
             media_ref,
         })
     })
@@ -603,6 +611,58 @@ mod tests {
         let pair = load_dj_lookahead_pair(&conn).unwrap();
         assert_eq!(pair.current_queue_item_id, Some(first));
         assert_eq!(pair.next_queue_item_id, Some(second));
+    }
+
+    #[test]
+    fn lookahead_pair_repairs_mismatched_current_queue_item_id() {
+        let conn = conn();
+        seed_track(&conn, 1, None);
+        seed_track(&conn, 2, None);
+        seed_track(&conn, 3, None);
+        let first = seed_queue_track(&conn, 0, 1);
+        let mismatched = seed_queue_track(&conn, 1, 2);
+        let third = seed_queue_track(&conn, 2, 3);
+        conn.execute(
+            "UPDATE playback_state SET current_track_id = 1, current_queue_item_id = ?1 WHERE id = 1",
+            params![mismatched],
+        )
+        .unwrap();
+
+        let pair = load_dj_lookahead_pair(&conn).unwrap();
+        assert_eq!(pair.current_queue_item_id, Some(first));
+        assert_eq!(pair.next_queue_item_id, Some(mismatched));
+        assert_ne!(pair.next_queue_item_id, Some(third));
+    }
+
+    #[test]
+    fn lookahead_pair_accepts_pending_current_queue_item_id() {
+        let conn = conn();
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source, pending_artist, pending_title)
+             VALUES (NULL, 0, 'radio_pending', 'Pending Artist', 'Pending Title')",
+            [],
+        )
+        .unwrap();
+        let pending = conn.last_insert_rowid();
+        seed_track(&conn, 2, None);
+        let next = seed_queue_track(&conn, 1, 2);
+        conn.execute(
+            "UPDATE playback_state SET current_track_id = NULL, current_queue_item_id = ?1 WHERE id = 1",
+            params![pending],
+        )
+        .unwrap();
+
+        let pair = load_dj_lookahead_pair(&conn).unwrap();
+        assert_eq!(pair.current_queue_item_id, Some(pending));
+        assert_eq!(pair.next_queue_item_id, Some(next));
+        assert!(matches!(
+            pair.current,
+            Some(DjMediaRef::PendingQueueItem {
+                pending_artist,
+                pending_title,
+                ..
+            }) if pending_artist == "Pending Artist" && pending_title == "Pending Title"
+        ));
     }
 
     #[test]

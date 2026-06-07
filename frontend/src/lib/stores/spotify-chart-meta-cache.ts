@@ -1,5 +1,3 @@
-import type { SpotifyPlaylistDetail } from '$lib/api/client';
-
 const STORAGE_KEY = 'noor:spotify-chart-meta:v1';
 const TTL_MS = 6 * 60 * 60 * 1000;
 
@@ -59,7 +57,7 @@ export function getCachedSpotifyChartMetaMap(ids: string[]): Record<string, Spot
 	return out;
 }
 
-export function putCachedSpotifyChartMeta(id: string, playlist: SpotifyPlaylistDetail): void {
+export function putCachedSpotifyChartMeta(id: string, playlist: SpotifyChartMeta): void {
 	hydrate();
 	cache[id] = {
 		thumbnail: playlist.thumbnail,

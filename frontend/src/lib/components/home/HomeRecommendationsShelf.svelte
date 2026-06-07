@@ -36,11 +36,13 @@
 	let playingAllShelves = $state<Record<string, boolean>>({});
 	let resolvingItems = $state<Record<string, boolean>>({});
 	let lazyArtwork = $state<Record<string, string>>({});
+	let loadSeq = 0;
 
 	let visibleShelves = $derived(shelves.filter((shelf) => shelf.items.length > 0));
 
 	onMount(() => {
 		void load();
+		return () => { loadSeq += 1; };
 	});
 
 	$effect(() => {
@@ -62,12 +64,14 @@
 	});
 
 	async function load() {
+		const seq = ++loadSeq;
 		errorMsg = '';
 		try {
 			const [lastfm, listenbrainz] = await Promise.allSettled([
 				cachedApi.getLastfmStatus(),
 				cachedApi.getListenBrainzStatus()
 			]);
+			if (seq !== loadSeq) return;
 			const lastfmCanRecommend = lastfm.status === 'fulfilled' && Boolean(lastfm.value.recommendations);
 			const listenbrainzCanRecommend = listenbrainz.status === 'fulfilled' && Boolean(listenbrainz.value.recommendations);
 			if (!lastfmCanRecommend && !listenbrainzCanRecommend) {
@@ -77,10 +81,12 @@
 
 			viewState = 'loading';
 			const response = await cachedApi.getHomeRecommendations();
+			if (seq !== loadSeq) return;
 			shelves = response.shelves ?? [];
 			currentIndexes = {};
 			viewState = shelves.some((shelf) => shelf.items.length > 0) ? 'ready' : 'empty';
 		} catch (err) {
+			if (seq !== loadSeq) return;
 			if (err instanceof ApiError && err.status === 404) {
 				viewState = 'hidden';
 				return;

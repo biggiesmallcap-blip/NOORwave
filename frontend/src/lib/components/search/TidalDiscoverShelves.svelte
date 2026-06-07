@@ -48,6 +48,8 @@
 	}
 
 	function openAlbumContextMenu(event: MouseEvent, item: TidalHomeItem) {
+		event.preventDefault();
+		event.stopPropagation();
 		const tidalId = item.kind === 'album' ? (item.album_id ?? Number(item.id)) : item.album_id;
 		const title = item.kind === 'album' ? item.title : item.album_title;
 		if (!title || tidalId == null) return;
@@ -61,6 +63,8 @@
 	}
 
 	function openArtistContextMenu(event: MouseEvent, item: TidalHomeItem) {
+		event.preventDefault();
+		event.stopPropagation();
 		if (!item.artist_name) return;
 		openContextMenu(event, buildArtistMenu({
 			tidal_id: item.artist_id ?? null,
@@ -70,6 +74,8 @@
 	}
 
 	function handleItemContextMenu(event: MouseEvent, item: TidalHomeItem) {
+		event.preventDefault();
+		event.stopPropagation();
 		if (item.kind === 'track') {
 			openContextMenu(event, buildTidalTrackMenu(tidalHomeItemToPlayable(item)), item.title);
 			return;

@@ -102,6 +102,8 @@
 	let autoplayNext = $state(loadAutoplayPreference());
 	let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 	let searchAbort: AbortController | null = null;
+	let loadMoreSeq = 0;
+	let mixLoadSeq = 0;
 	let streamRequestSeq = 0;
 	let prefetchRequestSeq = 0;
 	let prefetchedStream = $state<PrefetchedVideoStream | null>(null);
@@ -175,6 +177,8 @@
 		error = null;
 		mixError = null;
 		prefetchedStream = null;
+		loadMoreSeq += 1;
+		mixLoadSeq += 1;
 		streamRequestSeq += 1;
 		prefetchRequestSeq += 1;
 		clearSessionSnapshot();
@@ -192,6 +196,8 @@
 		const q = nextQuery.trim();
 		searchAbort?.abort();
 		searchAbort = null;
+		loadMoreSeq += 1;
+		loadingMore = false;
 		if (!q) {
 			videos = [];
 			offset = 0;
@@ -229,14 +235,24 @@
 
 	function onInput() {
 		if (debounceTimer) clearTimeout(debounceTimer);
+		loadMoreSeq += 1;
+		loadingMore = false;
 		debounceTimer = setTimeout(() => void runSearch(query), 250);
 	}
 
 	async function loadMore(): Promise<number> {
 		if (loadingMore || loadingSearch || !hasMore || !lastQuery) return 0;
+		const seq = ++loadMoreSeq;
+		const pageQuery = lastQuery;
+		const pageOffset = offset;
+		const isCurrentLoadMore = () =>
+			seq === loadMoreSeq &&
+			lastQuery === pageQuery &&
+			offset === pageOffset;
 		loadingMore = true;
 		try {
-			const result = await api.searchTidalVideos(lastQuery, PAGE_SIZE, offset);
+			const result = await api.searchTidalVideos(pageQuery, PAGE_SIZE, pageOffset);
+			if (!isCurrentLoadMore()) return 0;
 			const seen = new Set(videos.map((video) => video.tidal_id));
 			const fresh = result.videos.filter((video) => !seen.has(video.tidal_id));
 			videos = [...videos, ...fresh];
@@ -244,11 +260,12 @@
 			hasMore = result.videos.length >= PAGE_SIZE;
 			return fresh.length;
 		} catch (err) {
+			if (!isCurrentLoadMore()) return 0;
 			hasMore = false;
 			showToast(normalizeError(err, 'Could not load more videos.'), 'error', 2800);
 			return 0;
 		} finally {
-			loadingMore = false;
+			if (seq === loadMoreSeq) loadingMore = false;
 		}
 	}
 
@@ -320,24 +337,30 @@
 	}
 
 	async function loadMix(mixId: string, autoPlayFirst = false) {
+		const seq = ++mixLoadSeq;
+		const isCurrentMixLoad = () => seq === mixLoadSeq && activeMixId === mixId;
+		loadMoreSeq += 1;
+		loadingMore = false;
 		loadingMix = true;
 		mixError = null;
 		activeMixId = mixId;
 		mixItems = [];
 		try {
 			const result = await api.getTidalVideoMixItems(mixId);
+			if (!isCurrentMixLoad()) return;
 			mixItems = result.items.map((item) => ({ ...item, mix_id: mixId }));
 			if (mixItems.length === 0) mixError = 'This mix did not return video items.';
-			if (autoPlayFirst && mixItems.length > 0) {
+			if (autoPlayFirst && isCurrentMixLoad() && mixItems.length > 0) {
 				autoplayNext = true;
 				persistAutoplayPreference();
 				await selectVideo(mixItems[0], false);
 			}
 		} catch (err) {
+			if (!isCurrentMixLoad()) return;
 			mixError = normalizeError(err, 'Video mix items could not load.');
-			showToast(mixError, 'error', 3200);
+			if (isCurrentMixLoad()) showToast(mixError, 'error', 3200);
 		} finally {
-			loadingMix = false;
+			if (seq === mixLoadSeq) loadingMix = false;
 		}
 	}
 
@@ -583,6 +606,7 @@
 	onDestroy(() => {
 		if (debounceTimer) clearTimeout(debounceTimer);
 		searchAbort?.abort();
+		mixLoadSeq += 1;
 		streamRequestSeq += 1;
 		prefetchRequestSeq += 1;
 	});
@@ -590,14 +614,17 @@
 
 <div class="videos-page">
 	<header class="search-header">
-		<input
-			bind:this={inputEl}
-			class="search-input"
-			type="search"
-			placeholder="Search TIDAL videos"
-			bind:value={query}
-			oninput={onInput}
-		/>
+		<div class="search-tools">
+			<input
+				bind:this={inputEl}
+				class="search-input"
+				type="search"
+				placeholder="Search TIDAL videos"
+				bind:value={query}
+				oninput={onInput}
+			/>
+			<a class="editorial-link" href="/tidal/videos">TIDAL editorial</a>
+		</div>
 	</header>
 
 	{#if showVideoHero}
@@ -639,6 +666,8 @@
 							class="meta-link"
 							oncontextmenu={(event) => {
 								if (selectedVideo?.artist_id == null) return;
+								event.preventDefault();
+								event.stopPropagation();
 								openContextMenu(
 									event,
 									buildArtistMenu({ tidal_id: selectedVideo.artist_id, name: selectedVideo.artist_name ?? 'Artist' }, { isLocal: false }),
@@ -756,11 +785,20 @@
 		padding: 0 4px;
 	}
 
+	.search-tools {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: var(--space-3);
+		flex-wrap: wrap;
+	}
+
 	.search-input {
 		display: block;
 		width: 100%;
 		max-width: 720px;
-		margin: 0 auto;
+		margin: 0;
+		flex: 1 1 min(720px, 100%);
 		background: var(--panel-bg);
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-lg);
@@ -778,6 +816,27 @@
 	.search-input:focus {
 		border-color: var(--accent);
 		background: var(--input-focus);
+	}
+
+	.editorial-link {
+		flex: 0 0 auto;
+		padding: var(--space-2) var(--space-3);
+		border-radius: 999px;
+		border: 1px solid var(--panel-border);
+		background: var(--bg-hover);
+		color: var(--text-primary);
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+		text-decoration: none;
+		transition: background var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
+	}
+
+	.editorial-link:hover,
+	.editorial-link:focus-visible {
+		background: var(--accent-soft);
+		border-color: var(--accent-line);
+		color: var(--text-primary);
+		outline: none;
 	}
 
 	.hero {

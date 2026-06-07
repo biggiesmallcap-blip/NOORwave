@@ -3,8 +3,7 @@
 	import {
 		api,
 		type TidalArtistProfile,
-		type TidalDiscographyTrack,
-		type TidalPlayable
+		type TidalDiscographyTrack
 	} from '$lib/api/client';
 	import {
 		playTidalTracksNow,
@@ -16,45 +15,35 @@
 	import RemoteAlbumTile from '$lib/components/remote/RemoteAlbumTile.svelte';
 	import RemotePageShell from '$lib/components/remote/RemotePageShell.svelte';
 	import RemoteTrackRow from '$lib/components/remote/RemoteTrackRow.svelte';
-
-	function toPlayable(t: TidalDiscographyTrack): TidalPlayable {
-		return {
-			tidal_id: t.tidal_id,
-			title: t.title,
-			artist_name: t.artist_name ?? null,
-			album_title: t.album_title ?? null,
-			artwork_url: t.artwork_url ?? null,
-			duration_ms: t.duration_ms,
-			artist_tidal_id: t.artist_tidal_id ?? null,
-			album_tidal_id: t.album_tidal_id ?? null
-		};
-	}
+	import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';
 
 	let tidalArtistId = $derived(Number(page.params.id));
 
 	let profile = $state<TidalArtistProfile | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	let loadSeq = 0;
+
+	async function load(id: number) {
+		const seq = ++loadSeq;
+		loading = true;
+		error = null;
+		profile = null;
+		try {
+			const next = await api.getTidalArtistProfile(id);
+			if (seq !== loadSeq) return;
+			profile = next;
+		} catch (e) {
+			if (seq !== loadSeq) return;
+			error = `Couldn't load artist from TIDAL: ${e}`;
+		} finally {
+			if (seq === loadSeq) loading = false;
+		}
+	}
 
 	$effect(() => {
 		const id = tidalArtistId;
-		let cancelled = false;
-		loading = true;
-		error = null;
-		void api
-			.getTidalArtistProfile(id)
-			.then((p) => {
-				if (!cancelled) profile = p;
-			})
-			.catch((e) => {
-				if (!cancelled) error = `Couldn't load artist from TIDAL: ${e}`;
-			})
-			.finally(() => {
-				if (!cancelled) loading = false;
-			});
-		return () => {
-			cancelled = true;
-		};
+		void load(id);
 	});
 
 	let portraitSources = $derived.by(() => {
@@ -77,6 +66,10 @@
 	function albumHref(albumTidalId: number, localId: number | null): string {
 		if (localId) return `/remote/albums/${localId}`;
 		return `/remote/tidal/albums/${albumTidalId}`;
+	}
+
+	function artistTrackPlayable(track: TidalDiscographyTrack) {
+		return tidalDiscographyTrackToPlayable(track, { artistTidalId: tidalArtistId });
 	}
 </script>
 
@@ -108,10 +101,10 @@
 
 		<RemoteActionBar
 			disabled={p.top_tracks.length === 0}
-			onPlay={() => playTidalTracksNow(p.top_tracks.map(toPlayable), p.artist_name ?? 'artist')}
-			onShuffle={() => shuffleTidalTracksNow(p.top_tracks.map(toPlayable), p.artist_name ?? 'artist')}
+			onPlay={() => playTidalTracksNow(p.top_tracks.map(artistTrackPlayable), p.artist_name ?? 'artist')}
+			onShuffle={() => shuffleTidalTracksNow(p.top_tracks.map(artistTrackPlayable), p.artist_name ?? 'artist')}
 			onRadio={p.top_tracks[0]
-				? () => startTidalSongRadio(toPlayable(p.top_tracks[0]))
+				? () => startTidalSongRadio(artistTrackPlayable(p.top_tracks[0]))
 				: null}
 		/>
 

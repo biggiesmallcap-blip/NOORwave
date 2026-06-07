@@ -81,12 +81,9 @@ pub async fn start(state: SharedState, addr: &str) -> Result<()> {
         .layer(Extension(shutdown_notify.clone()));
 
     let public = match www_dir {
-        Some(www) => {
-            let index_html = www.join("index.html");
-            public_base
-                .fallback_service(ServeDir::new(&www).not_found_service(ServeFile::new(index_html)))
-                .layer(axum::middleware::from_fn(no_store_cache))
-        }
+        Some(www) => public_base
+            .fallback_service(static_assets_service(&www))
+            .layer(axum::middleware::from_fn(no_store_cache)),
         None => public_base,
     };
 
@@ -122,6 +119,10 @@ pub async fn start(state: SharedState, addr: &str) -> Result<()> {
     })
     .await?;
     Ok(())
+}
+
+fn static_assets_service(www: &std::path::Path) -> ServeDir<ServeFile> {
+    ServeDir::new(www).fallback(ServeFile::new(www.join("index.html")))
 }
 
 async fn shutdown_handler(
@@ -315,6 +316,10 @@ async fn no_store_cache(req: Request, next: Next) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tower::Service;
 
     fn loopback_addr() -> SocketAddr {
         "127.0.0.1:12345".parse().unwrap()
@@ -322,6 +327,51 @@ mod tests {
 
     fn remote_addr() -> SocketAddr {
         "192.0.2.10:12345".parse().unwrap()
+    }
+
+    fn static_test_dir() -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "noor-static-service-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("index.html"), "<!doctype html><title>NOOR</title>").unwrap();
+        fs::write(dir.join("favicon.ico"), "ico").unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn static_assets_service_serves_spa_routes_with_ok_status() {
+        let dir = static_test_dir();
+        let mut service = static_assets_service(&dir);
+        let request = Request::builder()
+            .uri("/remote")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = service.call(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn static_assets_service_serves_existing_assets() {
+        let dir = static_test_dir();
+        let mut service = static_assets_service(&dir);
+        let request = Request::builder()
+            .uri("/favicon.ico")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = service.call(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

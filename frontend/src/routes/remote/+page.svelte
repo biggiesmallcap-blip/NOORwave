@@ -6,6 +6,7 @@
 	import { goto } from '$app/navigation';
 	import { hapticTap } from '$lib/remote/haptics';
 	import {
+		currentQueueItemId,
 		currentTrack,
 		isPlaying,
 		playbackQueue,
@@ -58,7 +59,11 @@
 
 	<RemoteMiniSearch />
 
-	<RemoteQueue queue={$playbackQueue} currentTrack={$currentTrack} />
+	<RemoteQueue
+		queue={$playbackQueue}
+		currentTrack={$currentTrack}
+		currentQueueItemId={$currentQueueItemId}
+	/>
 </main>
 
 <style>

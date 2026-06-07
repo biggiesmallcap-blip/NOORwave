@@ -27,8 +27,18 @@
   let pendingIds = $state<string[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
+  let saving = $state(false);
+  let saveResult = $state<string | null>(null);
+  let saveErr = $state<string | null>(null);
   let requestedSpotifyId = $state('');
   let lazyArt = $state<Record<string, string>>({});
+  let loadSeq = 0;
+
+  const canSave = $derived(
+    detail !== null &&
+      detail.tidal.id !== null &&
+      (detail.tidal.status === 'resolved' || detail.tidal.status === 'low_confidence'),
+  );
 
   const POLL_INTERVAL_MS = 1500;
   const POLL_DEADLINE_MS = 30_000;
@@ -71,13 +81,22 @@
     };
   }
 
-  async function pollResolution() {
+  function schedulePoll(seq: number, delayMs = POLL_INTERVAL_MS) {
+    pollTimer = setTimeout(() => void pollResolution(seq), delayMs);
+  }
+
+  async function pollResolution(seq: number) {
+    if (seq !== loadSeq) {
+      clearPoll();
+      return;
+    }
     if (!detail || pendingIds.length === 0 || Date.now() > pollDeadline) {
       clearPoll();
       return;
     }
     try {
       const { entries } = await api.getResolveTidalStatus(pendingIds);
+      if (seq !== loadSeq) return;
       const byId = new Map(entries.map((e) => [e.spotifyId, e.tidal]));
       const stillPending: string[] = [];
       const headerSpotifyId = detail.spotifyId;
@@ -103,17 +122,19 @@
       }
       pendingIds = stillPending;
       if (pendingIds.length > 0) {
-        pollTimer = setTimeout(pollResolution, POLL_INTERVAL_MS);
+        schedulePoll(seq);
       } else {
         clearPoll();
       }
     } catch (e) {
+      if (seq !== loadSeq) return;
       console.warn('resolve status poll failed', e);
-      pollTimer = setTimeout(pollResolution, POLL_INTERVAL_MS * 2);
+      schedulePoll(seq, POLL_INTERVAL_MS * 2);
     }
   }
 
   async function load(id: string) {
+    const seq = ++loadSeq;
     if (!id.trim()) {
       error = 'Missing Spotify track ID';
       loading = false;
@@ -124,12 +145,17 @@
     detail = null;
     related = null;
     pendingIds = [];
+    saveResult = null;
+    saveErr = null;
     lazyArt = {};
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
     try {
-      detail = await api.getSpotifyTrack(id, controller.signal);
+      const nextDetail = await api.getSpotifyTrack(id, controller.signal);
+      if (seq !== loadSeq) return;
+      detail = nextDetail;
       const rel = await api.getSpotifyTrackRelated(id, controller.signal).catch(() => null);
+      if (seq !== loadSeq) return;
       if (rel) {
         related = rel;
         pendingIds = rel.pendingSpotifyIds ?? [];
@@ -139,23 +165,25 @@
       }
       pollDeadline = Date.now() + POLL_DEADLINE_MS;
       if (pendingIds.length > 0) {
-        pollTimer = setTimeout(pollResolution, POLL_INTERVAL_MS);
+        schedulePoll(seq);
       }
     } catch (e) {
+      if (seq !== loadSeq) return;
       error =
         (e as Error).name === 'AbortError'
           ? 'Timed out loading track metadata'
           : ((e as Error).message ?? 'Failed to load track');
     } finally {
       clearTimeout(timeout);
-      loading = false;
+      if (seq === loadSeq) loading = false;
     }
   }
 
   $effect(() => {
     const id = spotifyId.trim();
     if (!id) {
-      clearPoll(); requestedSpotifyId = ''; detail = null; pendingIds = []; loading = false;
+      loadSeq += 1;
+      clearPoll(); requestedSpotifyId = ''; detail = null; pendingIds = []; saveResult = null; saveErr = null; loading = false;
       error = 'Missing Spotify track ID';
       return;
     }
@@ -166,7 +194,7 @@
     }
   });
 
-  onDestroy(clearPoll);
+  onDestroy(() => { loadSeq += 1; clearPoll(); });
 
   function statusLabel(t: SpotifyTidalState): string {
     if ($tidalStatus !== 'connected') return 'Connect TIDAL to play this track';
@@ -190,6 +218,7 @@
   function handleHeaderContextMenu(e: MouseEvent) {
     if (!detail) return;
     e.preventDefault();
+    e.stopPropagation();
     openContextMenu(e, buildHeaderMenu(detail), detail.title ?? 'Spotify track');
   }
 
@@ -221,6 +250,36 @@
       { separator: true, label: '' },
       { label: 'Song radio', icon: '◉', disabled, hint, onSelect: () => { if (track) void startTidalSongRadio(track); } },
     ];
+  }
+
+  function handleRowContextMenu(e: MouseEvent, t: SpotifyPlaylistTrack) {
+    e.preventDefault();
+    e.stopPropagation();
+    openContextMenu(e, buildRowMenu(t), t.title ?? 'Spotify track');
+  }
+
+  async function save() {
+    if (!detail || saving || !canSave) return;
+    const id = detail.spotifyId ?? spotifyId.trim();
+    if (!id) {
+      saveErr = 'Missing Spotify track ID';
+      return;
+    }
+    saving = true;
+    saveErr = null;
+    saveResult = null;
+    try {
+      const res = await api.saveSpotifyTrack(id);
+      const skipped = res.unresolvedCount + res.importFailures;
+      saveResult =
+        skipped > 0
+          ? `Saved ${res.imported} track. ${skipped} unavailable on TIDAL were skipped.`
+          : `Saved ${res.imported} track.`;
+    } catch (e) {
+      saveErr = (e as Error).message ?? 'Save failed';
+    } finally {
+      saving = false;
+    }
   }
 </script>
 
@@ -271,8 +330,17 @@
           <button class="btn-secondary" disabled={!playable} onclick={() => headerTrack && playTidalTrackNext(headerTrack)}>Play next</button>
           <button class="btn-secondary" disabled={!playable} onclick={() => headerTrack && addTidalTrackToQueue(headerTrack)}>Add to queue</button>
           <button class="btn-secondary" disabled={!playable} onclick={() => headerTrack && startTidalSongRadio(headerTrack)}>Song radio</button>
+          <button class="btn-secondary" disabled={saving || !canSave} onclick={save}>
+            {saving ? 'Saving...' : 'Save to library'}
+          </button>
           {#if pendingIds.length > 0}<span class="resolving-badge">Resolving {pendingIds.length} more...</span>{/if}
         </div>
+        {#if saveResult}
+          <p class="toast success">{saveResult}</p>
+        {/if}
+        {#if saveErr}
+          <p class="toast error">Save failed: {saveErr}</p>
+        {/if}
       </div>
     </header>
 
@@ -300,7 +368,7 @@
                   title={statusLabel(t.tidal)}
                   onclick={() => { const tr = asTidalPlayableFromRow(t); if (tr) void playTidalTrackNow(tr); }}
                   onkeydown={(e) => { if (e.key !== 'Enter' && e.key !== ' ') return; e.preventDefault(); const tr = asTidalPlayableFromRow(t); if (tr) void playTidalTrackNow(tr); }}
-                  oncontextmenu={(e) => openContextMenu(e, buildRowMenu(t), t.title ?? 'Spotify track')}
+                  oncontextmenu={(e) => handleRowContextMenu(e, t)}
                   use:lazyTidalArt={{
                     enabled: !t.thumbnail && !!t.primaryArtist,
                     query: { artist: t.primaryArtist, title: t.title },
@@ -351,6 +419,9 @@
   .btn-secondary { background: var(--border-subtle); color: var(--text-primary); border: 1px solid var(--panel-border); }
   .btn-primary:disabled, .btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
   .resolving-badge { font-size: var(--font-size-xs); color: var(--text-muted); font-style: italic; }
+  .toast { margin: var(--space-2) 0 0; font-size: var(--font-size-xs); padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); width: fit-content; }
+  .toast.success { background: rgba(125, 200, 175, 0.12); color: var(--accent); }
+  .toast.error { background: rgba(239, 68, 68, 0.12); color: var(--state-error); }
   .shelf h2 { font-size: var(--font-size-lg); font-weight: var(--font-weight-bold); margin: 0 0 12px; }
   .tracks { list-style: none; margin: 0; padding: 0; }
   .row { display: grid; grid-template-columns: 36px 44px minmax(0,1fr) auto auto; gap: 14px; align-items: center; padding: 8px 12px; border-radius: 8px; cursor: pointer; }

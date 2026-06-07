@@ -21,10 +21,11 @@
 		cachedOnMount && cachedOnMount.length > 0 ? 'ready' : 'loading'
 	);
 	let errorMsg = $state<string>('');
+	let loadSeq = 0;
 
 	onMount(() => {
-		if (cachedOnMount && cachedOnMount.length > 0) return;
-		void load();
+		if (!cachedOnMount || cachedOnMount.length === 0) void load();
+		return () => { loadSeq += 1; };
 	});
 
 	// Untrack viewState so the effect only re-fires on tidalStatus transitions.
@@ -39,14 +40,18 @@
 	});
 
 	async function load() {
+		const seq = ++loadSeq;
 		viewState = 'loading';
 		errorMsg = '';
 		try {
 			const data = await cachedApi.getTidalRadioStations();
-			stations = data.stations ?? [];
-			if (stations.length > 0) putCachedRadioStations(stations);
-			viewState = stations.length > 0 ? 'ready' : 'empty';
+			if (seq !== loadSeq) return;
+			const nextStations = data.stations ?? [];
+			stations = nextStations;
+			if (nextStations.length > 0) putCachedRadioStations(nextStations);
+			viewState = nextStations.length > 0 ? 'ready' : 'empty';
 		} catch (e) {
+			if (seq !== loadSeq) return;
 			if (e instanceof ApiError && e.status === 503) {
 				clearCachedRadioStations();
 				viewState = 'disconnected';

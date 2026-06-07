@@ -50,12 +50,40 @@ fn dedupe_positive_ids(ids: &[i64]) -> Vec<i64> {
     ids
 }
 
+fn require_positive_batch_id(id: i64) -> Result<(), StatusCode> {
+    if id <= 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
+}
+
 pub(super) async fn batch_add_to_playlist(
     State(state): State<SharedState>,
     Json(payload): Json<BatchPlaylistRequest>,
 ) -> Result<Json<Value>, StatusCode> {
+    require_positive_batch_id(payload.playlist_id)?;
+
     let track_ids = dedupe_positive_ids(&payload.track_ids);
     if track_ids.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let (playlist, track_pairs) = {
+        let state = state.read().await;
+        state
+            .db
+            .with_conn(|conn| {
+                let playlist = queries::get_playlist(conn, payload.playlist_id)?;
+                let track_pairs = queries::get_track_tidal_ids(conn, &track_ids)?;
+                Ok((playlist, track_pairs))
+            })
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+
+    let playlist = playlist.ok_or(StatusCode::NOT_FOUND)?;
+    let playlist_uuid = playlist.tidal_uuid.ok_or(StatusCode::BAD_REQUEST)?;
+    let tidal_track_ids: Vec<i64> = track_pairs.iter().map(|(_, tidal_id)| *tidal_id).collect();
+    if tidal_track_ids.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -64,25 +92,6 @@ pub(super) async fn batch_add_to_playlist(
         let tokens = state.tidal_tokens.clone().ok_or(StatusCode::UNAUTHORIZED)?;
         (state.http_client.clone(), tokens)
     };
-
-    let (playlist, track_pairs) = {
-        let state = state.read().await;
-        state
-            .db
-            .with_conn(|conn| {
-                let playlist = queries::get_playlist(conn, payload.playlist_id)?
-                    .ok_or_else(|| anyhow::anyhow!("playlist not found"))?;
-                let track_pairs = queries::get_track_tidal_ids(conn, &track_ids)?;
-                Ok((playlist, track_pairs))
-            })
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    };
-
-    let playlist_uuid = playlist.tidal_uuid.ok_or(StatusCode::BAD_REQUEST)?;
-    let tidal_track_ids: Vec<i64> = track_pairs.iter().map(|(_, tidal_id)| *tidal_id).collect();
-    if tidal_track_ids.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
 
     tidal_mutations::add_to_playlist(
         &http,
@@ -151,12 +160,6 @@ pub(super) async fn batch_delete_items(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let (http, tokens) = {
-        let state = state.read().await;
-        let tokens = state.tidal_tokens.clone().ok_or(StatusCode::UNAUTHORIZED)?;
-        (state.http_client.clone(), tokens)
-    };
-
     let (track_pairs, album_pairs) = {
         let state = state.read().await;
         state
@@ -173,46 +176,67 @@ pub(super) async fn batch_delete_items(
     let remote_track_ids: Vec<i64> = track_pairs.iter().map(|(_, tidal_id)| *tidal_id).collect();
     let remote_album_ids: Vec<i64> = album_pairs.iter().map(|(_, tidal_id)| *tidal_id).collect();
 
-    let removed_tracks = tidal_mutations::remove_favorite_tracks(
-        &http,
-        &tokens.access_token,
-        &tokens.user_id,
-        &remote_track_ids,
-        &tokens.country_code,
-    )
-    .await
-    .map_err(|error| {
-        tracing::error!("Batch delete tracks failed: {error}");
-        StatusCode::BAD_GATEWAY
-    })?;
+    let (removed_tracks, removed_albums) =
+        if remote_track_ids.is_empty() && remote_album_ids.is_empty() {
+            (0, 0)
+        } else {
+            let (http, tokens) = {
+                let state = state.read().await;
+                let tokens = state.tidal_tokens.clone().ok_or(StatusCode::UNAUTHORIZED)?;
+                (state.http_client.clone(), tokens)
+            };
 
-    let removed_albums = tidal_mutations::remove_favorite_albums(
-        &http,
-        &tokens.access_token,
-        &tokens.user_id,
-        &remote_album_ids,
-        &tokens.country_code,
-    )
-    .await
-    .map_err(|error| {
-        tracing::error!("Batch delete albums failed: {error}");
-        StatusCode::BAD_GATEWAY
-    })?;
+            let removed_tracks = if remote_track_ids.is_empty() {
+                0
+            } else {
+                tidal_mutations::remove_favorite_tracks(
+                    &http,
+                    &tokens.access_token,
+                    &tokens.user_id,
+                    &remote_track_ids,
+                    &tokens.country_code,
+                )
+                .await
+                .map_err(|error| {
+                    tracing::error!("Batch delete tracks failed: {error}");
+                    StatusCode::BAD_GATEWAY
+                })?
+            };
+
+            let removed_albums = if remote_album_ids.is_empty() {
+                0
+            } else {
+                tidal_mutations::remove_favorite_albums(
+                    &http,
+                    &tokens.access_token,
+                    &tokens.user_id,
+                    &remote_album_ids,
+                    &tokens.country_code,
+                )
+                .await
+                .map_err(|error| {
+                    tracing::error!("Batch delete albums failed: {error}");
+                    StatusCode::BAD_GATEWAY
+                })?
+            };
+
+            (removed_tracks, removed_albums)
+        };
 
     // Also delete from local DB so removed items disappear immediately.
     let db = {
         let s = state.read().await;
         s.db.clone()
     };
-    let deleted_track_ids: Vec<i64> = track_pairs.iter().map(|(local_id, _)| *local_id).collect();
+    let deleted_track_ids = track_ids.clone();
     let outcome = match db.with_conn(|conn| {
-        for &(local_id, _) in &track_pairs {
+        for local_id in &track_ids {
             conn.execute(
                 "DELETE FROM tracks WHERE id = ?1",
                 rusqlite::params![local_id],
             )?;
         }
-        for &(local_id, _) in &album_pairs {
+        for local_id in &album_ids {
             conn.execute(
                 "DELETE FROM albums WHERE id = ?1",
                 rusqlite::params![local_id],
@@ -253,6 +277,8 @@ pub(super) async fn batch_set_genre(
     State(state): State<SharedState>,
     Json(payload): Json<BatchGenreRequest>,
 ) -> Result<Json<Value>, StatusCode> {
+    require_positive_batch_id(payload.genre_id)?;
+
     let track_ids = dedupe_positive_ids(&payload.track_ids);
     if track_ids.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
@@ -263,9 +289,23 @@ pub(super) async fn batch_set_genre(
         state
             .db
             .with_conn(|conn| {
+                let genre_exists: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM genres WHERE id = ?1)",
+                    rusqlite::params![payload.genre_id],
+                    |row| row.get(0),
+                )?;
+                if !genre_exists {
+                    return Err(anyhow::anyhow!("genre not found"));
+                }
                 queries::assign_genre_to_tracks(conn, payload.genre_id, &track_ids, "manual")
             })
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map_err(|error| {
+                if error.to_string().contains("genre not found") {
+                    StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            })?
     };
 
     {

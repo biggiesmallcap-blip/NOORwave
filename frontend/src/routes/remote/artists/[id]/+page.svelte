@@ -35,37 +35,52 @@
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let showAllTracks = $state(false);
+	let loadSeq = 0;
 
-	async function load() {
+	async function load(id: number) {
+		const seq = ++loadSeq;
 		loading = true;
 		error = null;
+		artist = null;
+		tracks = [];
+		albums = [];
+		tidalPictureUrl = null;
+		let detailLoaded = false;
 		try {
 			const [artistRes, tracksRes] = await Promise.all([
-				api.getArtist(artistId),
-				api.getArtistTracks(artistId)
+				api.getArtist(id),
+				api.getArtistTracks(id)
 			]);
+			if (seq !== loadSeq) return;
 			artist = artistRes;
 			tracks = tracksRes.tracks;
+			detailLoaded = true;
 		} catch (err) {
+			if (seq !== loadSeq) return;
 			error = `Couldn't load artist: ${err}`;
 		} finally {
-			loading = false;
+			if (seq === loadSeq) loading = false;
 		}
+		if (!detailLoaded || seq !== loadSeq) return;
 		// Discography is best-effort; an error here shouldn't blank the page.
 		// We also grab the fresh TIDAL `picture_url` which is more reliable than
 		// the locally-cached `photo_url` (see desktop /artists/[id] for context).
 		try {
-			const disco = await api.getArtistDiscography(artistId);
+			const disco = await api.getArtistDiscography(id);
+			if (seq !== loadSeq) return;
 			albums = disco.albums ?? [];
 			tidalPictureUrl = disco.picture_url ?? null;
 		} catch {
-			albums = [];
+			if (seq === loadSeq) {
+				albums = [];
+				tidalPictureUrl = null;
+			}
 		}
 	}
 
 	$effect(() => {
-		artistId;
-		void load();
+		const id = artistId;
+		void load(id);
 	});
 
 	// Walk a cascade of candidate URLs so a 403 on one (e.g. a stale TIDAL

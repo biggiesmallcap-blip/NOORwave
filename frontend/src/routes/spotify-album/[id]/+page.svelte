@@ -33,8 +33,12 @@
   let pendingIds = $state<string[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
+  let saving = $state(false);
+  let saveResult = $state<string | null>(null);
+  let saveErr = $state<string | null>(null);
   let requestedSpotifyId = $state('');
   let lazyArt = $state<Record<string, string>>({});
+  let loadSeq = 0;
 
   const POLL_INTERVAL_MS = 1500;
   const POLL_DEADLINE_MS = 30_000;
@@ -78,10 +82,16 @@
     }
   }
 
-  async function pollResolution() {
+  function schedulePoll(seq: number, delayMs = POLL_INTERVAL_MS) {
+    pollTimer = setTimeout(() => void pollResolution(seq), delayMs);
+  }
+
+  async function pollResolution(seq: number) {
+    if (seq !== loadSeq) { clearPoll(); return; }
     if (!detail || pendingIds.length === 0 || Date.now() > pollDeadline) { clearPoll(); return; }
     try {
       const { entries } = await api.getResolveTidalStatus(pendingIds);
+      if (seq !== loadSeq) return;
       const byId = new Map(entries.map((e) => [e.spotifyId, e.tidal]));
       const stillPending: string[] = [];
       const mergeRows = (arr: SpotifyPlaylistTrack[]) =>
@@ -97,46 +107,51 @@
         related = { ...related, moreFromArtist: mergeRows(related.moreFromArtist) };
       }
       pendingIds = stillPending;
-      if (pendingIds.length > 0) pollTimer = setTimeout(pollResolution, POLL_INTERVAL_MS);
+      if (pendingIds.length > 0) schedulePoll(seq);
       else clearPoll();
     } catch (e) {
+      if (seq !== loadSeq) return;
       console.warn('resolve status poll failed', e);
-      pollTimer = setTimeout(pollResolution, POLL_INTERVAL_MS * 2);
+      schedulePoll(seq, POLL_INTERVAL_MS * 2);
     }
   }
 
   async function load(id: string) {
+    const seq = ++loadSeq;
     if (!id.trim()) { error = 'Missing Spotify album ID'; loading = false; return; }
-    loading = true; error = null; detail = null; related = null; pendingIds = []; lazyArt = {};
+    loading = true; error = null; detail = null; related = null; pendingIds = []; saveResult = null; saveErr = null; lazyArt = {};
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
     try {
       const res = await api.getSpotifyAlbum(id, controller.signal);
+      if (seq !== loadSeq) return;
       detail = res.album;
       pendingIds = res.pendingSpotifyIds ?? [];
       const rel = await api.getSpotifyAlbumRelated(id, controller.signal).catch(() => null);
+      if (seq !== loadSeq) return;
       if (rel) {
         related = rel;
         pendingIds = [...pendingIds, ...(rel.pendingSpotifyIds ?? [])];
       }
       pollDeadline = Date.now() + POLL_DEADLINE_MS;
-      if (pendingIds.length > 0) pollTimer = setTimeout(pollResolution, POLL_INTERVAL_MS);
+      if (pendingIds.length > 0) schedulePoll(seq);
     } catch (e) {
+      if (seq !== loadSeq) return;
       error = (e as Error).name === 'AbortError'
         ? 'Timed out loading album metadata'
         : ((e as Error).message ?? 'Failed to load album');
     } finally {
       clearTimeout(timeout);
-      loading = false;
+      if (seq === loadSeq) loading = false;
     }
   }
 
   $effect(() => {
     const id = spotifyId.trim();
-    if (!id) { clearPoll(); requestedSpotifyId = ''; detail = null; loading = false; error = 'Missing Spotify album ID'; return; }
+    if (!id) { loadSeq += 1; clearPoll(); requestedSpotifyId = ''; detail = null; saveResult = null; saveErr = null; loading = false; error = 'Missing Spotify album ID'; return; }
     if (id !== requestedSpotifyId) { requestedSpotifyId = id; clearPoll(); void load(id); }
   });
-  onDestroy(clearPoll);
+  onDestroy(() => { loadSeq += 1; clearPoll(); });
 
   function buildRowMenu(t: SpotifyPlaylistTrack): MenuItem[] {
     const track = asTidalPlayable(t);
@@ -158,6 +173,8 @@
   }
 
   function handleRowContextMenu(e: MouseEvent, t: SpotifyPlaylistTrack) {
+    e.preventDefault();
+    e.stopPropagation();
     openContextMenu(e, buildRowMenu(t), t.title ?? 'Spotify track');
   }
 
@@ -177,6 +194,34 @@
   async function shuffleAll() { await shuffleTidalTracksNow(playableTracks(), detail?.title ?? 'Spotify album'); }
   async function playAllNext() { await playTidalTracksNext(playableTracks()); }
   async function addAllToQueue() { await addTidalTracksToQueue(playableTracks()); }
+
+  function trackLabel(count: number): string {
+    return count === 1 ? 'track' : 'tracks';
+  }
+
+  async function save() {
+    if (!detail || saving || resolvedCount === 0) return;
+    const id = detail.spotifyId ?? spotifyId.trim();
+    if (!id) {
+      saveErr = 'Missing Spotify album ID';
+      return;
+    }
+    saving = true;
+    saveErr = null;
+    saveResult = null;
+    try {
+      const res = await api.saveSpotifyAlbum(id);
+      const skipped = res.unresolvedCount + res.importFailures;
+      saveResult =
+        skipped > 0
+          ? `Saved ${res.imported} ${trackLabel(res.imported)}. ${skipped} unavailable on TIDAL were skipped.`
+          : `Saved ${res.imported} ${trackLabel(res.imported)}.`;
+    } catch (e) {
+      saveErr = (e as Error).message ?? 'Save failed';
+    } finally {
+      saving = false;
+    }
+  }
 </script>
 
 <svelte:head>
@@ -216,10 +261,19 @@
           <button class="btn-secondary" disabled={playableCount === 0} onclick={shuffleAll}>Shuffle</button>
           <button class="btn-secondary" disabled={playableCount === 0} onclick={playAllNext}>Play next</button>
           <button class="btn-secondary" disabled={playableCount === 0} onclick={addAllToQueue}>Add to queue</button>
+          <button class="btn-secondary" disabled={saving || resolvedCount === 0} onclick={save}>
+            {saving ? 'Saving...' : 'Save to library'}
+          </button>
           {#if pendingIds.length > 0}
             <span class="resolving-badge">Resolving {pendingIds.length} more...</span>
           {/if}
         </div>
+        {#if saveResult}
+          <p class="toast success">{saveResult}</p>
+        {/if}
+        {#if saveErr}
+          <p class="toast error">Save failed: {saveErr}</p>
+        {/if}
       </div>
     </header>
 
@@ -312,7 +366,7 @@
             <a
               class="card"
               href={`/spotify-album/${a.spotifyId}`}
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildAlbumCardMenu(a), a.title ?? 'Spotify album'); }}
+              oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); openContextMenu(e, buildAlbumCardMenu(a), a.title ?? 'Spotify album'); }}
             >
               {#if a.thumbnail}
                 <div class="art" style="background-image:url('{a.thumbnail}')"></div>
@@ -347,6 +401,9 @@
   .btn-secondary { background: var(--border-subtle); color: var(--text-primary); border: 1px solid var(--panel-border); }
   .btn-primary:disabled, .btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
   .resolving-badge { font-size: var(--font-size-xs); color: var(--text-muted); font-style: italic; }
+  .toast { margin: var(--space-2) 0 0; font-size: var(--font-size-xs); padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); width: fit-content; }
+  .toast.success { background: rgba(125, 200, 175, 0.12); color: var(--accent); }
+  .toast.error { background: rgba(239, 68, 68, 0.12); color: var(--state-error); }
 
   .tracks { list-style: none; margin: 0; padding: 0; }
   .row { display: grid; grid-template-columns: 36px 44px minmax(0,1fr) auto auto auto; gap: 14px; align-items: center; padding: 8px 12px; border-radius: 8px; cursor: pointer; transition: background 100ms ease; }

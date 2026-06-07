@@ -17,10 +17,11 @@
 	let viewState = $state<State>(
 		cachedOnMount && cachedOnMount.length > 0 ? 'ready' : 'loading'
 	);
+	let loadSeq = 0;
 
 	onMount(() => {
-		if (cachedOnMount && cachedOnMount.length > 0) return;
-		void load();
+		if (!cachedOnMount || cachedOnMount.length === 0) void load();
+		return () => { loadSeq += 1; };
 	});
 
 	$effect(() => {
@@ -32,13 +33,17 @@
 	});
 
 	async function load() {
+		const seq = ++loadSeq;
 		viewState = 'loading';
 		try {
 			const data = await cachedApi.getTidalHomeModules();
-			modules = data.modules ?? [];
-			if (modules.length > 0) putCachedHomeModules(modules);
-			viewState = modules.length > 0 ? 'ready' : 'empty';
+			if (seq !== loadSeq) return;
+			const nextModules = data.modules ?? [];
+			modules = nextModules;
+			if (nextModules.length > 0) putCachedHomeModules(nextModules);
+			viewState = nextModules.length > 0 ? 'ready' : 'empty';
 		} catch (e) {
+			if (seq !== loadSeq) return;
 			if (e instanceof ApiError && e.status === 503) {
 				clearCachedHomeModules();
 				viewState = 'disconnected';

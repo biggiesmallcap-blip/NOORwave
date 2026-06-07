@@ -10,6 +10,7 @@
     upscaleTidalArtwork,
     type TidalArtworkSize,
   } from '$lib/utils/artwork'
+  import { tidalDiscographyTrackToPlayable } from '$lib/utils/track'
 
   let tidalArtistId = $derived(Number(page.params.id))
   let profile = $state<TidalArtistProfile | null>(null)
@@ -17,19 +18,29 @@
   let error = $state<string | null>(null)
   let filterQuery = $state('')
   let failedArtworkUrls = $state<Record<string, boolean>>({})
+  let loadSeq = 0
 
-  $effect(() => {
-    const id = tidalArtistId
-    let cancelled = false
+  async function load(id: number) {
+    const seq = ++loadSeq
     loading = true
     error = null
     profile = null
     failedArtworkUrls = {}
-    api.getTidalArtistProfile(id)
-      .then((p) => { if (!cancelled) profile = p })
-      .catch((e) => { if (!cancelled) error = String(e) })
-      .finally(() => { if (!cancelled) loading = false })
-    return () => { cancelled = true }
+    try {
+      const nextProfile = await api.getTidalArtistProfile(id)
+      if (seq !== loadSeq) return
+      profile = nextProfile
+    } catch (e) {
+      if (seq !== loadSeq) return
+      error = String(e)
+    } finally {
+      if (seq === loadSeq) loading = false
+    }
+  }
+
+  $effect(() => {
+    const id = tidalArtistId
+    void load(id)
   })
 
   const filteredTracks = $derived(
@@ -74,17 +85,10 @@
     failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true }
   }
 
-  function trackAsPlayable(t: TidalDiscographyTrack) {
-    return {
-      tidal_id: t.tidal_id,
-      title: t.title,
-      artist_name: t.artist_name ?? null,
-      album_title: t.album_title ?? null,
-      artwork_url: t.artwork_url,
-      duration_ms: t.duration_ms,
-      artist_tidal_id: tidalArtistId,
-    }
+  function artistTrackPlayable(track: TidalDiscographyTrack) {
+    return tidalDiscographyTrackToPlayable(track, { artistTidalId: tidalArtistId })
   }
+
 </script>
 
 {#if loading}
@@ -142,7 +146,7 @@
         <ul class="tracks-list">
           {#each filteredTracks as track, idx (track.tidal_id)}
             <TidalTrackRow
-              track={trackAsPlayable(track)}
+              track={artistTrackPlayable(track)}
               variant="numbered"
               index={idx}
               showArtist={false}

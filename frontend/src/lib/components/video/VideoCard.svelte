@@ -24,6 +24,8 @@
 	}
 
 	function menu(event: MouseEvent) {
+		event.preventDefault();
+		event.stopPropagation();
 		openContextMenu(
 			event,
 			isVideoMix(video) ? buildVideoMixMenu(video) : buildVideoMenu(video),

@@ -7,7 +7,7 @@
 		playTidalTrackNow,
 		playTrackNow
 	} from '$lib/stores/player';
-	import { upscaleTidalArtwork } from '$lib/utils/artwork';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { formatTrackDuration } from '$lib/utils/format';
 	import {
 		buildTidalTrackMenu,
@@ -49,16 +49,7 @@
 
 	let title = $derived(track.title);
 	let artist = $derived(track.artist_name ?? 'Unknown artist');
-	let artwork = $derived(upscaleTidalArtwork(track.artwork_url ?? null, 320));
 	let duration = $derived(track.duration_ms ?? 0);
-
-	// AccessDenied on a specific TIDAL cover size is unpredictable; fall back to
-	// the placeholder on first load failure instead of showing a broken-image.
-	let artFailed = $state(false);
-	$effect(() => {
-		artwork;
-		artFailed = false;
-	});
 
 	// Highlight the row when it matches the currently playing track. For library
 	// rows we compare the local id; for TIDAL rows we fall back to the tidal_id
@@ -99,7 +90,11 @@
 			artwork_url: t.artwork_url ?? null,
 			duration_ms: t.duration_ms ?? null,
 			artist_tidal_id: t.artist_tidal_id ?? null,
-			album_tidal_id: t.album_tidal_id ?? null
+			album_tidal_id: t.album_tidal_id ?? null,
+			track_id: 'track_id' in t ? t.track_id : undefined,
+			local_id: 'local_id' in t ? t.local_id : null,
+			is_in_library: 'is_in_library' in t ? t.is_in_library : undefined,
+			is_favorite: 'is_favorite' in t ? t.is_favorite : undefined
 		};
 	}
 
@@ -156,10 +151,14 @@
 					{index}
 				{/if}
 			</span>
-		{:else if artwork && !artFailed}
-			<img src={artwork} alt="" onerror={() => (artFailed = true)} />
 		{:else}
-			<span class="remote-track-thumb-empty" aria-hidden="true">NOOR</span>
+			<ArtworkImage
+				className="remote-track-thumb"
+				src={track.artwork_url ?? null}
+				size={320}
+				fallbackText="NOOR"
+				decorative={true}
+			/>
 		{/if}
 		<span class="remote-track-copy">
 			<strong>
@@ -206,16 +205,18 @@
 		background: var(--surface-1);
 	}
 
-	.remote-track-button img,
-	.remote-track-thumb-empty {
+	.remote-track-button :global(.remote-track-thumb) {
 		width: 44px;
 		height: 44px;
 		border-radius: 6px;
-		object-fit: cover;
 		flex-shrink: 0;
 	}
 
-	.remote-track-thumb-empty {
+	.remote-track-button :global(img.remote-track-thumb) {
+		object-fit: cover;
+	}
+
+	.remote-track-button :global(.remote-track-thumb.fallback) {
 		display: grid;
 		place-items: center;
 		background: var(--surface-1);

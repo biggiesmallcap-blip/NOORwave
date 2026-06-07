@@ -57,6 +57,21 @@ pub(super) struct TidalSyncQuery {
     mode: Option<SyncModeRequest>,
 }
 
+fn normalize_sync_service(service: Option<&str>) -> Result<&'static str, StatusCode> {
+    let Some(service) = service else {
+        return Ok("tidal");
+    };
+    let service = service.trim();
+    if service.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if service.eq_ignore_ascii_case("tidal") {
+        Ok("tidal")
+    } else {
+        Err(StatusCode::BAD_REQUEST)
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct IncrementalPagePlan {
     process_count: usize,
@@ -69,10 +84,7 @@ pub(super) async fn get_sync_info(
     State(state): State<SharedState>,
     Query(params): Query<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<Json<Value>, StatusCode> {
-    let service = params
-        .get("service")
-        .and_then(|v| v.as_str())
-        .unwrap_or("tidal");
+    let service = normalize_sync_service(params.get("service").and_then(|v| v.as_str()))?;
     let state = state.read().await;
     state
         .db
@@ -95,7 +107,7 @@ pub(super) async fn set_auto_sync(
     State(state): State<SharedState>,
     Json(payload): Json<AutoSyncRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    let service = payload.service.as_deref().unwrap_or("tidal");
+    let service = normalize_sync_service(payload.service.as_deref())?;
     let state = state.read().await;
     state
         .db
@@ -549,14 +561,14 @@ async fn do_tidal_sync(
                 .map(|album_id| async move {
                     let first = tokio::time::timeout(
                         album_fetch_timeout,
-                        client.get_album_tracks(album_id),
+                        client.get_all_album_tracks(album_id),
                     )
                     .await;
                     match first {
                         Ok(Ok(resp)) => Ok(resp),
                         _ => match tokio::time::timeout(
                             album_fetch_timeout,
-                            client.get_album_tracks(album_id),
+                            client.get_all_album_tracks(album_id),
                         )
                         .await
                         {
@@ -570,11 +582,11 @@ async fn do_tidal_sync(
                 .buffer_unordered(10);
 
             while let Some(result) = fetches.next().await {
-                if let Ok(tracks_resp) = result {
+                if let Ok(tracks) = result {
                     let s = state.read().await;
                     s.db.with_conn(|conn| {
                         let tx = conn.unchecked_transaction()?;
-                        for track in &tracks_resp.items {
+                        for track in &tracks {
                             super::insert_tidal_track(&tx, track, false, None)?;
                             stats.tracks += 1;
                         }

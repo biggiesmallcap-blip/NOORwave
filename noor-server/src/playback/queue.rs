@@ -1,7 +1,7 @@
 use crate::db::models::{QueueItem, Track};
 use crate::playback::shuffle::{
-    WeightedShuffleProfile, artist_spread_shuffle_with_rng, generate_shuffle_seed,
-    genre_shuffle_with_rng, seeded_rng, true_shuffle_with_rng, weighted_shuffle_with_rng,
+    WeightedShuffleProfile, artist_spread_shuffle_with_rng, genre_shuffle_with_rng, seeded_rng,
+    true_shuffle_with_rng, weighted_shuffle_with_rng,
 };
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -132,20 +132,36 @@ pub fn append_tracks_with_reasons(
     tracks: &[(Track, Option<String>)],
     source: &str,
 ) -> Result<Vec<QueueItem>> {
+    if tracks.is_empty() {
+        return load_queue(conn);
+    }
+
     let start_pos: i32 = conn.query_row(
         "SELECT COALESCE(MAX(position), -1) + 1 FROM queue",
         [],
         |row| row.get(0),
     )?;
 
+    let tx = conn.unchecked_transaction()?;
+    insert_tracks_with_reasons_at_position(&tx, tracks, source, start_pos)?;
+    let queue = load_queue(&tx)?;
+    tx.commit()?;
+    Ok(queue)
+}
+
+fn insert_tracks_with_reasons_at_position(
+    conn: &Connection,
+    tracks: &[(Track, Option<String>)],
+    source: &str,
+    start_pos: i32,
+) -> Result<()> {
     for (idx, (track, reason)) in tracks.iter().enumerate() {
         conn.execute(
             "INSERT INTO queue (track_id, position, source, reason) VALUES (?1, ?2, ?3, ?4)",
             params![track.id, start_pos + idx as i32, source, reason],
         )?;
     }
-
-    load_queue(conn)
+    Ok(())
 }
 
 /// A last.fm similar-track candidate that has not yet been resolved to a local Tidal track.
@@ -166,12 +182,28 @@ pub fn append_pending_tracks(
     conn: &Connection,
     candidates: &[PendingCandidate],
 ) -> Result<Vec<QueueItem>> {
+    if candidates.is_empty() {
+        return load_queue(conn);
+    }
+
     let start_pos: i32 = conn.query_row(
         "SELECT COALESCE(MAX(position), -1) + 1 FROM queue",
         [],
         |row| row.get(0),
     )?;
 
+    let tx = conn.unchecked_transaction()?;
+    insert_pending_tracks_at_position(&tx, candidates, start_pos)?;
+    let queue = load_queue(&tx)?;
+    tx.commit()?;
+    Ok(queue)
+}
+
+fn insert_pending_tracks_at_position(
+    conn: &Connection,
+    candidates: &[PendingCandidate],
+    start_pos: i32,
+) -> Result<()> {
     for (idx, c) in candidates.iter().enumerate() {
         conn.execute(
             "INSERT INTO queue (track_id, position, source, reason, pending_artist, pending_title, pending_at)
@@ -179,8 +211,7 @@ pub fn append_pending_tracks(
             params![start_pos + idx as i32, c.reason, c.artist, c.title],
         )?;
     }
-
-    load_queue(conn)
+    Ok(())
 }
 
 /// Description of a single track to insert into the queue from an external
@@ -230,6 +261,25 @@ pub fn append_external_track(
     insert_at_position(conn, insert, position)
 }
 
+/// Insert external tracks at the end of the queue with one position lookup.
+pub fn append_external_tracks(
+    conn: &Connection,
+    inserts: &[ExternalTrackInsert<'_>],
+) -> Result<Vec<InsertResult>> {
+    if inserts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let start_position: i32 = conn.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM queue",
+        [],
+        |row| row.get(0),
+    )?;
+    let tx = conn.unchecked_transaction()?;
+    let results = insert_many_at_position(&tx, inserts, start_position)?;
+    tx.commit()?;
+    Ok(results)
+}
+
 /// Insert an external track immediately after `after_position`. Existing rows
 /// at that position or later are shifted by one. Used for "Play next" so the
 /// new row lands at `current_position + 1`.
@@ -247,6 +297,45 @@ pub fn insert_external_track_after(
     let result = insert_at_position(&tx, insert, target)?;
     tx.commit()?;
     Ok(result)
+}
+
+/// Insert external tracks immediately after `after_position`.
+///
+/// Existing rows are shifted once by the batch length, so large playlist
+/// injections avoid repeatedly rewriting the same tail rows.
+pub fn insert_external_tracks_after(
+    conn: &Connection,
+    inserts: &[ExternalTrackInsert<'_>],
+    after_position: i32,
+) -> Result<Vec<InsertResult>> {
+    if inserts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let target = after_position + 1;
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE queue SET position = position + ?1 WHERE position >= ?2",
+        params![inserts.len() as i32, target],
+    )?;
+    let results = insert_many_at_position(&tx, inserts, target)?;
+    tx.commit()?;
+    Ok(results)
+}
+
+fn insert_many_at_position(
+    conn: &Connection,
+    inserts: &[ExternalTrackInsert<'_>],
+    start_position: i32,
+) -> Result<Vec<InsertResult>> {
+    let mut results = Vec::with_capacity(inserts.len());
+    for (idx, insert) in inserts.iter().enumerate() {
+        results.push(insert_at_position(
+            conn,
+            insert,
+            start_position + idx as i32,
+        )?);
+    }
+    Ok(results)
 }
 
 fn insert_at_position(
@@ -284,8 +373,9 @@ fn insert_at_position(
 }
 
 pub fn replace_queue(conn: &Connection, tracks: &[Track], source: &str) -> Result<Vec<QueueItem>> {
-    conn.execute("DELETE FROM queue", [])?;
-    append_tracks(conn, tracks, source)
+    let with_reasons: Vec<(Track, Option<String>)> =
+        tracks.iter().cloned().map(|track| (track, None)).collect();
+    replace_queue_with_reasons(conn, &with_reasons, source)
 }
 
 /// Wipe the queue and replace with tracks plus per-row reasons.
@@ -294,8 +384,12 @@ pub fn replace_queue_with_reasons(
     tracks: &[(Track, Option<String>)],
     source: &str,
 ) -> Result<Vec<QueueItem>> {
-    conn.execute("DELETE FROM queue", [])?;
-    append_tracks_with_reasons(conn, tracks, source)
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM queue", [])?;
+    insert_tracks_with_reasons_at_position(&tx, tracks, source, 0)?;
+    let queue = load_queue(&tx)?;
+    tx.commit()?;
+    Ok(queue)
 }
 
 pub fn clear_queue(conn: &Connection) -> Result<()> {
@@ -340,24 +434,6 @@ pub fn move_queue_item(conn: &Connection, item_id: i64, new_pos: i32) -> Result<
     }
     tx.commit()?;
     Ok(())
-}
-
-pub fn apply_shuffle(
-    conn: &Connection,
-    mode: ShuffleMode,
-    current_queue_item_id: Option<i64>,
-) -> Result<Vec<QueueItem>> {
-    if mode == ShuffleMode::Off {
-        return load_queue(conn);
-    }
-    Ok(apply_shuffle_with_seed(
-        conn,
-        mode,
-        current_queue_item_id,
-        generate_shuffle_seed(),
-        "queue",
-    )?
-    .queue)
 }
 
 pub fn apply_shuffle_with_seed(
@@ -407,31 +483,6 @@ pub fn apply_shuffle_with_seed(
         queue: load_queue(conn)?,
         debug,
     })
-}
-
-fn reorder_tracks(conn: &Connection, tracks: &[Track], mode: ShuffleMode) -> Result<Vec<Track>> {
-    // Off must preserve the caller's order; an artist post-pass would silently
-    // rearrange tracks the user didn't ask to shuffle. Genre mode already runs
-    // artist-spread + genre-stabilize internally, and running artist-spread again
-    // here re-clusters genres and undoes that work.
-    match mode {
-        ShuffleMode::Off => Ok(tracks.to_vec()),
-        ShuffleMode::True => {
-            let mut rng = rand::thread_rng();
-            Ok(true_shuffle_with_rng(tracks, &mut rng))
-        }
-        ShuffleMode::Weighted => {
-            let mut rng = rand::thread_rng();
-            let weighted =
-                weighted_shuffle_with_rng(tracks, &WeightedShuffleProfile::default(), &mut rng);
-            Ok(artist_spread_shuffle_with_rng(&weighted, &mut rng))
-        }
-        ShuffleMode::Genre => {
-            let genre_map = get_track_genres(conn, tracks)?;
-            let mut rng = rand::thread_rng();
-            Ok(genre_shuffle_with_rng(tracks, &genre_map, &mut rng))
-        }
-    }
 }
 
 pub(crate) fn reorder_tracks_with_seed(
@@ -792,6 +843,35 @@ mod tests {
     }
 
     #[test]
+    fn replace_queue_handles_large_playlist_in_order() {
+        let conn = conn();
+        for id in 5..=1000 {
+            conn.execute(
+                "INSERT INTO tracks (
+                    id, title, artist_id, album_id, disc_number, track_number, duration_ms, isrc,
+                    tidal_id, ytmusic_id, soundcloud_id, best_quality, best_source, fidelity_score,
+                    is_favorite, play_count, last_played_at, date_added, source
+                ) VALUES (?1, ?2, 1, NULL, 1, ?1, 1000, NULL, ?1, NULL, NULL, 'LOSSLESS', 'tidal', 10, 0, 0, NULL, '2025-01-01', 'tidal')",
+                params![id, format!("Track {id}")],
+            )
+            .unwrap();
+        }
+        let tracks = (1..=1000)
+            .map(|id| get_track_by_id(&conn, id).unwrap().unwrap())
+            .collect::<Vec<_>>();
+
+        let queue = replace_queue(&conn, &tracks, "test").unwrap();
+
+        assert_eq!(queue.len(), 1000);
+        assert_eq!(queue.first().map(|item| item.track.id), Some(1));
+        assert_eq!(queue.last().map(|item| item.track.id), Some(1000));
+        for (idx, item) in queue.iter().enumerate() {
+            assert_eq!(item.position, idx as i32);
+            assert_eq!(item.track.id, (idx + 1) as i64);
+        }
+    }
+
+    #[test]
     fn move_queue_item_reorders_within_queue() {
         let conn = conn();
         let tracks = vec![
@@ -958,6 +1038,50 @@ mod tests {
     }
 
     #[test]
+    fn append_external_tracks_preserves_batch_order() {
+        let conn = conn();
+        let inserts = vec![
+            ExternalTrackInsert {
+                artist: "ignored",
+                title: "ignored",
+                source: "user_queue",
+                reason: None,
+                tidal_id_hint: None,
+                local_track_id: Some(1),
+            },
+            ExternalTrackInsert {
+                artist: "Aphex Twin",
+                title: "Xtal",
+                source: "user_queue",
+                reason: Some("external"),
+                tidal_id_hint: Some(123),
+                local_track_id: None,
+            },
+            ExternalTrackInsert {
+                artist: "ignored",
+                title: "ignored",
+                source: "user_queue",
+                reason: None,
+                tidal_id_hint: None,
+                local_track_id: Some(2),
+            },
+        ];
+
+        let results = append_external_tracks(&conn, &inserts).unwrap();
+        assert_eq!(results.len(), 3);
+
+        let rows = load_queue(&conn).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].track.id, 1);
+        assert_eq!(rows[1].track.title, "Xtal");
+        assert!(rows[1].is_pending);
+        assert_eq!(rows[2].track.id, 2);
+        for (idx, item) in rows.iter().enumerate() {
+            assert_eq!(item.position, idx as i32);
+        }
+    }
+
+    #[test]
     fn apply_shuffle_preserves_pending_artist_title() {
         let conn = conn();
 
@@ -988,8 +1112,9 @@ mod tests {
         // True shuffle the candidates (pending rows). Several runs because
         // the shuffle may permute to the same order by chance — we assert
         // the metadata invariant on every run.
-        for _ in 0..10 {
-            apply_shuffle(&conn, ShuffleMode::True, Some(current_qid)).unwrap();
+        for seed in 7_654_321..7_654_331 {
+            apply_shuffle_with_seed(&conn, ShuffleMode::True, Some(current_qid), seed, "test")
+                .unwrap();
             let q_after = load_queue(&conn).unwrap();
 
             assert_eq!(q_after.len(), 4);
@@ -1063,6 +1188,49 @@ mod tests {
     }
 
     #[test]
+    fn insert_external_tracks_after_shifts_tail_once_and_preserves_order() {
+        let conn = conn();
+        let tracks = vec![
+            get_track_by_id(&conn, 1).unwrap().unwrap(),
+            get_track_by_id(&conn, 2).unwrap().unwrap(),
+            get_track_by_id(&conn, 3).unwrap().unwrap(),
+        ];
+        replace_queue(&conn, &tracks, "test").unwrap();
+
+        let inserts = vec![
+            ExternalTrackInsert {
+                artist: "A",
+                title: "First external",
+                source: "user_play_next",
+                reason: None,
+                tidal_id_hint: Some(101),
+                local_track_id: None,
+            },
+            ExternalTrackInsert {
+                artist: "B",
+                title: "Second external",
+                source: "user_play_next",
+                reason: None,
+                tidal_id_hint: Some(102),
+                local_track_id: None,
+            },
+        ];
+
+        insert_external_tracks_after(&conn, &inserts, 0).unwrap();
+
+        let queue = load_queue(&conn).unwrap();
+        assert_eq!(queue.len(), 5);
+        assert_eq!(queue[0].track.id, 1);
+        assert_eq!(queue[1].track.title, "First external");
+        assert_eq!(queue[2].track.title, "Second external");
+        assert_eq!(queue[3].track.id, 2);
+        assert_eq!(queue[4].track.id, 3);
+        for (idx, item) in queue.iter().enumerate() {
+            assert_eq!(item.position, idx as i32);
+        }
+    }
+
+    #[test]
     fn reorder_off_preserves_input_order() {
         let conn = conn();
         let tracks: Vec<Track> = (1..=4)
@@ -1072,7 +1240,9 @@ mod tests {
         // Off must be a pure identity. Run repeatedly so any thread_rng-driven
         // post-pass would surface as an occasional reorder.
         for _ in 0..20 {
-            let reordered = reorder_tracks(&conn, &tracks, ShuffleMode::Off).unwrap();
+            let reordered =
+                reorder_tracks_with_seed(&conn, &tracks, ShuffleMode::Off, 7_654_321, "test")
+                    .unwrap();
             let ids: Vec<i64> = reordered.iter().map(|t| t.id).collect();
             assert_eq!(ids, vec![1, 2, 3, 4]);
         }
@@ -1097,8 +1267,15 @@ mod tests {
 
         // Two genres with two tracks each can alternate every adjacent pair.
         // If the unconditional artist post-pass returns, this fails on most seeds.
-        for _ in 0..20 {
-            let reordered = reorder_tracks(&conn, &tracks, ShuffleMode::Genre).unwrap();
+        for attempt in 0..20 {
+            let reordered = reorder_tracks_with_seed(
+                &conn,
+                &tracks,
+                ShuffleMode::Genre,
+                7_654_321 + i64::from(attempt),
+                "test",
+            )
+            .unwrap();
             let ids: Vec<i64> = reordered.iter().map(|t| t.id).collect();
             assert_eq!(ids.len(), 4);
             for pair in ids.windows(2) {

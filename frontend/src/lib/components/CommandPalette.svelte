@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { fly, fade } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
+	import { onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { get } from 'svelte/store';
 	import {
@@ -25,6 +26,7 @@
 	import { mergeLocalIntoTidal } from '$lib/search/merge_local';
 	import { contextMenu, openMenuAtElement, type MenuItem } from '$lib/stores/context_menu';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import { tidalSearchTrackToPlayable } from '$lib/utils/track';
 
 	let inputEl = $state<HTMLInputElement | null>(null);
 	let query = $state('');
@@ -68,12 +70,20 @@
 	});
 
 	function close() {
+		clearTimeout(debounceTimer);
+		searchGeneration += 1;
+		loading = false;
 		commandPaletteOpen.set(false);
 	}
 
 	function isCurrentPaletteSearch(searchQuery: string, generation: number) {
-		return searchGeneration === generation && query.trim() === searchQuery && !isSlashMode;
+		return $commandPaletteOpen && searchGeneration === generation && query.trim() === searchQuery && !isSlashMode;
 	}
+
+	onDestroy(() => {
+		clearTimeout(debounceTimer);
+		searchGeneration += 1;
+	});
 
 	function applyPaletteResults(next: TidalSearchResults) {
 		tracks = next.tracks.slice(0, 5);
@@ -145,7 +155,7 @@
 
 	async function selectTrack(track: TidalSearchTrack) {
 		close();
-		await playTidalTrackNow({ ...track, artist_tidal_id: track.artist_id ?? null });
+		await playTidalTrackNow(tidalSearchTrackToPlayable(track));
 	}
 
 	function selectAlbum(album: TidalSearchAlbum) {
@@ -184,7 +194,7 @@
 	}
 
 	function buildTrackRowMenu(track: TidalSearchTrack): MenuItem[] {
-		const playable = { ...track, artist_tidal_id: track.artist_id ?? null };
+		const playable = tidalSearchTrackToPlayable(track);
 		const items: MenuItem[] = [
 			{ label: 'Play now', icon: '▶', onSelect: () => void playTidalTrackNow(playable) },
 			{ label: 'Play next', icon: '⤴', onSelect: () => void playTidalTrackNext(playable) },

@@ -155,6 +155,10 @@ fn tidal_artist_release_filter_only_downgrades_missing_bucket_errors() {
     )
     .expect_err("auth errors must not be swallowed as empty release filters");
     assert!(error_looks_like_auth(&auth_error));
+    let expired_token_error = anyhow::anyhow!(
+        "TIDAL API error 401 Unauthorized: {{\"status\":401,\"subStatus\":11003,\"userMessage\":\"The token has expired. (Expired on time)\"}}"
+    );
+    assert!(error_looks_like_auth(&expired_token_error));
 
     let rate_error = resolve_tidal_artist_release_filter(
         Err(anyhow::anyhow!(
@@ -244,6 +248,22 @@ fn stream_error_mapping_marks_session_expired_as_unauthorized() {
 }
 
 #[test]
+fn stream_error_mapping_marks_session_refresh_failures_as_unauthorized() {
+    let (status, Json(body)) = tidal_playback_error_response(
+        42,
+        TidalPlaybackError::StreamResolve(tidal_stream::StreamResolveError::SessionRefreshFailed {
+            message: "refresh rejected".to_string(),
+        }),
+        "fallback",
+    );
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["status"], "session_refresh_failed");
+    assert_eq!(body["track_id"], 42);
+    assert_eq!(body["details"], "refresh rejected");
+}
+
+#[test]
 fn stream_error_mapping_marks_manifest_decode_failures_as_bad_gateway() {
     let (status, Json(body)) = tidal_playback_error_response(
         7,
@@ -323,11 +343,232 @@ fn stream_error_mapping_marks_rejected_stream_requests_as_forbidden() {
 }
 
 #[test]
+fn stream_error_mapping_preserves_upstream_http_status_details() {
+    let (status, Json(body)) = tidal_playback_error_response(
+        12,
+        TidalPlaybackError::StreamResolve(tidal_stream::StreamResolveError::UpstreamHttp {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            body: "rate limit".to_string(),
+        }),
+        "fallback",
+    );
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["status"], "stream_upstream_http");
+    assert_eq!(body["track_id"], 12);
+    assert_eq!(body["details"], "rate limit");
+    assert_eq!(
+        body["message"],
+        "TIDAL returned 429 Too Many Requests while starting playback."
+    );
+}
+
+#[test]
+fn video_stream_error_mapping_marks_session_refresh_failures_as_unauthorized() {
+    let (status, Json(body)) = tidal_video_stream_error_response(
+        99,
+        tidal_stream::StreamResolveError::SessionRefreshFailed {
+            message: "refresh rejected".to_string(),
+        },
+        "fallback",
+    );
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["status"], "session_refresh_failed");
+    assert_eq!(body["video_id"], 99);
+    assert_eq!(body["details"], "refresh rejected");
+}
+
+#[test]
+fn video_stream_error_mapping_marks_session_expired_as_unauthorized() {
+    let (status, Json(body)) = tidal_video_stream_error_response(
+        98,
+        tidal_stream::StreamResolveError::SessionExpired {
+            message: "expired".to_string(),
+        },
+        "fallback",
+    );
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["status"], "session_expired");
+    assert_eq!(body["video_id"], 98);
+    assert_eq!(body["details"], "expired");
+}
+
+#[test]
+fn video_stream_error_mapping_marks_manifest_decode_failures_as_bad_gateway() {
+    let (status, Json(body)) = tidal_video_stream_error_response(
+        101,
+        tidal_stream::StreamResolveError::ManifestDecodeFailed {
+            message: "bad base64".to_string(),
+        },
+        "fallback",
+    );
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["status"], "manifest_decode_failed");
+    assert_eq!(body["video_id"], 101);
+    assert_eq!(body["details"], "bad base64");
+}
+
+#[test]
+fn video_stream_error_mapping_marks_rejected_stream_requests_as_forbidden() {
+    let (status, Json(body)) = tidal_video_stream_error_response(
+        102,
+        tidal_stream::StreamResolveError::StreamRejected {
+            message: "rejected".to_string(),
+        },
+        "fallback",
+    );
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["status"], "stream_rejected");
+    assert_eq!(body["video_id"], 102);
+    assert_eq!(body["details"], "rejected");
+}
+
+#[test]
+fn video_stream_error_mapping_preserves_upstream_http_status_details() {
+    let (status, Json(body)) = tidal_video_stream_error_response(
+        100,
+        tidal_stream::StreamResolveError::UpstreamHttp {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            body: "rate limit".to_string(),
+        },
+        "fallback",
+    );
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["status"], "stream_upstream_http");
+    assert_eq!(body["video_id"], 100);
+    assert_eq!(body["details"], "rate limit");
+    assert_eq!(
+        body["message"],
+        "TIDAL returned 429 Too Many Requests while starting video playback."
+    );
+}
+
+#[test]
+fn tidal_video_mix_id_normalization_allows_safe_ids() {
+    assert_eq!(normalize_tidal_video_mix_id("abc123").unwrap(), "abc123");
+    assert_eq!(
+        normalize_tidal_video_mix_id("  video_mix-01  ").unwrap(),
+        "video_mix-01"
+    );
+}
+
+#[test]
+fn tidal_video_mix_id_normalization_rejects_url_control_characters() {
+    for id in [
+        "",
+        "../home",
+        "mix/items",
+        "mix?limit=1",
+        "mix&includeTypes=Track",
+        "mix#fragment",
+        "mix id",
+    ] {
+        assert_eq!(
+            normalize_tidal_video_mix_id(id),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+}
+
+#[test]
+fn tidal_search_query_normalization_short_circuits_blank_input() {
+    assert_eq!(normalize_tidal_search_query(""), None);
+    assert_eq!(normalize_tidal_search_query("   "), None);
+    assert_eq!(
+        normalize_tidal_search_query("  floating points  "),
+        Some("floating points")
+    );
+}
+
+#[test]
+fn tidal_search_limit_is_bounded() {
+    assert_eq!(normalize_tidal_search_limit(None), 20);
+    assert_eq!(normalize_tidal_search_limit(Some(-1)), 1);
+    assert_eq!(normalize_tidal_search_limit(Some(0)), 1);
+    assert_eq!(normalize_tidal_search_limit(Some(15)), 15);
+    assert_eq!(normalize_tidal_search_limit(Some(500)), 50);
+}
+
+#[test]
+fn tidal_video_search_query_normalization_short_circuits_blank_input() {
+    assert_eq!(normalize_tidal_video_search_query(""), None);
+    assert_eq!(normalize_tidal_video_search_query("   "), None);
+    assert_eq!(
+        normalize_tidal_video_search_query("  live session  "),
+        Some("live session")
+    );
+}
+
+#[test]
+fn tidal_video_search_limit_is_bounded() {
+    assert_eq!(normalize_tidal_video_search_limit(None), 20);
+    assert_eq!(normalize_tidal_video_search_limit(Some(-1)), 1);
+    assert_eq!(normalize_tidal_video_search_limit(Some(0)), 1);
+    assert_eq!(normalize_tidal_video_search_limit(Some(15)), 15);
+    assert_eq!(normalize_tidal_video_search_limit(Some(500)), 50);
+}
+
+#[test]
+fn tidal_playlist_search_query_normalization_short_circuits_blank_input() {
+    assert_eq!(normalize_tidal_playlist_search_query(""), None);
+    assert_eq!(normalize_tidal_playlist_search_query("   "), None);
+    assert_eq!(
+        normalize_tidal_playlist_search_query("  late night  "),
+        Some("late night")
+    );
+}
+
+#[test]
+fn tidal_playlist_search_limit_is_bounded() {
+    assert_eq!(normalize_tidal_playlist_search_limit(None), 20);
+    assert_eq!(normalize_tidal_playlist_search_limit(Some(-5)), 1);
+    assert_eq!(normalize_tidal_playlist_search_limit(Some(0)), 1);
+    assert_eq!(normalize_tidal_playlist_search_limit(Some(12)), 12);
+    assert_eq!(normalize_tidal_playlist_search_limit(Some(999)), 50);
+}
+
+#[test]
+fn tidal_playlist_uuid_normalization_allows_safe_ids() {
+    assert_eq!(
+        normalize_tidal_playlist_uuid("123e4567-e89b-12d3-a456-426614174000").unwrap(),
+        "123e4567-e89b-12d3-a456-426614174000"
+    );
+    assert_eq!(
+        normalize_tidal_playlist_uuid("  tidal_playlist_01  ").unwrap(),
+        "tidal_playlist_01"
+    );
+}
+
+#[test]
+fn tidal_playlist_uuid_normalization_rejects_url_control_characters() {
+    for uuid in [
+        "",
+        "../tracks",
+        "playlist/tracks",
+        "playlist?limit=1",
+        "playlist&countryCode=US",
+        "playlist#fragment",
+        "playlist id",
+    ] {
+        assert_eq!(
+            normalize_tidal_playlist_uuid(uuid),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+}
+
+#[test]
 fn tidal_status_payload_reports_pkce_source_only_for_pkce_tokens() {
     let tokens = test_tidal_tokens(Some("pkce"));
 
     let body = tidal_status_payload(
         Some(&tokens),
+        false,
         tidal_auth::TidalCredentialSource::Env,
         tidal_auth::TidalCredentialSource::Fallback,
     );
@@ -344,6 +585,7 @@ fn tidal_status_payload_reports_legacy_source_only_for_legacy_tokens() {
 
     let body = tidal_status_payload(
         Some(&tokens),
+        false,
         tidal_auth::TidalCredentialSource::Env,
         tidal_auth::TidalCredentialSource::Fallback,
     );
@@ -358,6 +600,7 @@ fn tidal_status_payload_reports_legacy_source_only_for_legacy_tokens() {
 fn tidal_status_payload_disconnected_omits_credential_sources() {
     let body = tidal_status_payload(
         None,
+        false,
         tidal_auth::TidalCredentialSource::Env,
         tidal_auth::TidalCredentialSource::Fallback,
     );
@@ -366,6 +609,65 @@ fn tidal_status_payload_disconnected_omits_credential_sources() {
     assert!(body.get("auth_flow").is_none());
     assert!(body.get("pkce_client_credential_source").is_none());
     assert!(body.get("legacy_client_credential_source").is_none());
+}
+
+#[test]
+fn tidal_status_payload_reports_expired_tokens_as_disconnected() {
+    let tokens = test_tidal_tokens(Some("pkce"));
+
+    let body = tidal_status_payload(
+        Some(&tokens),
+        true,
+        tidal_auth::TidalCredentialSource::Env,
+        tidal_auth::TidalCredentialSource::Fallback,
+    );
+
+    assert_eq!(body["connected"], false);
+    assert_eq!(body["reason"], "token_expired");
+    assert_eq!(body["auth_flow"], "pkce");
+    assert_eq!(body["user_id"], "u-1");
+    assert!(body.get("pkce_client_credential_source").is_none());
+    assert!(body.get("legacy_client_credential_source").is_none());
+}
+
+#[test]
+fn tidal_token_expiry_uses_token_expiry_when_present() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-06-05T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+
+    assert!(tidal_token_expired_at(
+        Some("2026-06-04T23:58:30Z"),
+        Some("2026-06-04 00:00:00"),
+        86_400,
+        now,
+    ));
+    assert!(!tidal_token_expired_at(
+        Some("2026-06-05T00:05:00Z"),
+        Some("2026-06-04 00:00:00"),
+        86_400,
+        now,
+    ));
+}
+
+#[test]
+fn tidal_token_expiry_falls_back_to_connected_at_plus_expires_in() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-06-05T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+
+    assert!(tidal_token_expired_at(
+        None,
+        Some("2026-06-03 23:00:00"),
+        86_400,
+        now,
+    ));
+    assert!(!tidal_token_expired_at(
+        None,
+        Some("2026-06-04 23:30:00"),
+        86_400,
+        now,
+    ));
 }
 
 #[test]
@@ -1317,6 +1619,19 @@ async fn dj_profile_returns_404_for_missing_profile() {
     let _ = std::fs::remove_file(db_path);
 }
 
+#[tokio::test]
+async fn dj_profile_rejects_non_positive_track_ids() {
+    let (db, db_path) = fresh_migrated_db();
+    let app = app_for_db(db);
+
+    for uri in ["/api/dj/profile/0", "/api/dj/profile/-7"] {
+        let response = json_request(app.clone(), "GET", uri, "").await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+
+    let _ = std::fs::remove_file(db_path);
+}
+
 fn seed_spotify_stats_track(
     db: &Database,
     album_id: Option<i64>,
@@ -1467,6 +1782,56 @@ async fn artist_spotify_stats_returns_cached_playcounts() {
     let _ = std::fs::remove_file(db_path);
 }
 
+#[tokio::test]
+async fn local_spotify_stats_routes_reject_non_positive_ids() {
+    let app = build_test_app().await;
+
+    for uri in [
+        "/api/albums/0/spotify-stats",
+        "/api/albums/-7/spotify-stats",
+        "/api/artists/0/spotify-stats",
+        "/api/artists/-7/spotify-stats",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+}
+
+#[tokio::test]
+async fn local_spotify_stats_positive_ids_keep_empty_fallback_shape() {
+    let app = build_test_app().await;
+
+    for uri in [
+        "/api/albums/1/spotify-stats",
+        "/api/artists/1/spotify-stats",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK, "uri: {uri}");
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .expect("body bytes"),
+        )
+        .expect("json body");
+        assert!(body["monthly_listeners"].is_null(), "uri: {uri}");
+        assert_eq!(
+            body["tracks"].as_array().map(Vec::len),
+            Some(0),
+            "uri: {uri}"
+        );
+    }
+}
+
 fn seed_basic_tracks(db: &Database) {
     db.with_conn(|conn| {
         conn.execute(
@@ -1554,6 +1919,708 @@ async fn clear_queue_returns_snapshot_and_preserves_current() {
         .with_conn(|conn| Ok(conn.query_row("SELECT COUNT(*) FROM queue", [], |row| row.get(0))?))
         .unwrap();
     assert_eq!(persisted_queue_count, 1);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn clear_queue_preserves_only_current_queue_item_for_duplicate_track() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let (duplicate_qid, current_qid): (i64, i64) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            let duplicate_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 1, 'user')",
+                [],
+            )?;
+            let current_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 2, 'user')",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+                     WHERE id = 1",
+                rusqlite::params![current_qid],
+            )?;
+            Ok((duplicate_qid, current_qid))
+        })
+        .unwrap();
+
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/playback/queue/clear")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    let queue = body["queue"].as_array().expect("queue array");
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0]["id"], current_qid);
+    assert_ne!(queue[0]["id"], duplicate_qid);
+    assert_eq!(queue[0]["track"]["id"], 1);
+    assert_eq!(body["playback_state"]["current_queue_item_id"], current_qid);
+
+    let persisted_ids: Vec<i64> = db
+        .with_conn(|conn| {
+            let mut stmt = conn.prepare("SELECT id FROM queue ORDER BY position ASC, id ASC")?;
+            let ids = stmt
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(ids)
+        })
+        .unwrap();
+    assert_eq!(persisted_ids, vec![current_qid]);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn clear_queue_repairs_mismatched_anchor_before_preserving_current() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let (current_qid, mismatched_qid): (i64, i64) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            let current_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 1, 'user')",
+                [],
+            )?;
+            let mismatched_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+                     WHERE id = 1",
+                rusqlite::params![mismatched_qid],
+            )?;
+            Ok((current_qid, mismatched_qid))
+        })
+        .unwrap();
+
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/playback/queue/clear")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    let queue = body["queue"].as_array().expect("queue array");
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0]["id"], current_qid);
+    assert_ne!(queue[0]["id"], mismatched_qid);
+    assert_eq!(queue[0]["track"]["id"], 1);
+    assert_eq!(body["playback_state"]["current_queue_item_id"], current_qid);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn clear_queue_falls_back_to_track_id_when_current_queue_item_is_stale() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let stale_qid = 999_999_i64;
+    let preserved_qid = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            let preserved_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 1, 'user')",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+                     WHERE id = 1",
+                rusqlite::params![stale_qid],
+            )?;
+            Ok(preserved_qid)
+        })
+        .unwrap();
+
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/playback/queue/clear")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    let queue = body["queue"].as_array().expect("queue array");
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0]["id"], preserved_qid);
+    assert_eq!(queue[0]["track"]["id"], 1);
+    assert_eq!(body["playback_state"]["current_track"]["id"], 1);
+    assert_eq!(
+        body["playback_state"]["current_queue_item_id"],
+        preserved_qid
+    );
+
+    let (persisted_track_ids, current_queue_item_id): (Vec<i64>, Option<i64>) = db
+        .with_conn(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT track_id FROM queue ORDER BY position ASC, id ASC")?;
+            let ids = stmt
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let current_queue_item_id = conn.query_row(
+                "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok((ids, current_queue_item_id))
+        })
+        .unwrap();
+    assert_eq!(persisted_track_ids, vec![1]);
+    assert_eq!(current_queue_item_id, Some(preserved_qid));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn clear_queue_repairs_missing_anchor_and_removes_duplicate_track_rows() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let (first_qid, duplicate_qid): (i64, i64) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            let first_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 1, 'user')",
+                [],
+            )?;
+            let duplicate_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 2, 'user')",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = NULL, is_playing = 1
+                     WHERE id = 1",
+                [],
+            )?;
+            Ok((first_qid, duplicate_qid))
+        })
+        .unwrap();
+
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/playback/queue/clear")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    let queue = body["queue"].as_array().expect("queue array");
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0]["id"], first_qid);
+    assert_ne!(queue[0]["id"], duplicate_qid);
+    assert_eq!(queue[0]["track"]["id"], 1);
+    assert_eq!(body["playback_state"]["current_queue_item_id"], first_qid);
+
+    let persisted_ids: Vec<i64> = db
+        .with_conn(|conn| {
+            let mut stmt = conn.prepare("SELECT id FROM queue ORDER BY position ASC, id ASC")?;
+            let ids = stmt
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(ids)
+        })
+        .unwrap();
+    assert_eq!(persisted_ids, vec![first_qid]);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn remove_current_queue_item_advances_and_switches_runtime() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let (current_qid, next_qid) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            let current_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 1, 'user')",
+                [],
+            )?;
+            let next_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+                     WHERE id = 1",
+                rusqlite::params![current_qid],
+            )?;
+            Ok((current_qid, next_qid))
+        })
+        .unwrap();
+
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+    let (command_tx, command_rx) = std::sync::mpsc::channel();
+    let (switched_tx, switched_rx) = std::sync::mpsc::channel();
+    let runtime_thread = std::thread::spawn(move || {
+        match command_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("track status command")
+        {
+            playback_runtime::PlaybackRuntimeCommand::TrackStatus {
+                track_id,
+                generation,
+                respond_to,
+            } => {
+                assert_eq!(track_id, 2);
+                assert_eq!(generation, 2);
+                respond_to
+                    .send(playback_runtime::PlaybackTrackStatus::Prepared)
+                    .expect("track status response");
+            }
+            other => panic!("expected TrackStatus command, got {other:?}"),
+        }
+
+        match command_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("switch command")
+        {
+            playback_runtime::PlaybackRuntimeCommand::Switch(job) => {
+                assert_eq!(job.generation, 2);
+                switched_tx.send(job.track.id).expect("switched track id");
+            }
+            other => panic!("expected Switch command, got {other:?}"),
+        }
+    });
+
+    {
+        let mut guard = state.write().await;
+        guard.tidal_tokens = Some(tidal_auth::TidalTokens {
+            access_token: "test-token".to_string(),
+            refresh_token: "refresh-token".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: 3600,
+            user_id: "test-user".to_string(),
+            country_code: "US".to_string(),
+            auth_flow: Some("pkce".to_string()),
+        });
+        guard.playback_runtime = Some(PlaybackRuntimeState {
+            access_token: "test-token".to_string(),
+            handle: playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx),
+        });
+        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+            device_name: "Test DAC".to_string(),
+            sample_rate: 48_000,
+            channels: 2,
+            active_track_id: Some(1),
+            last_error: None,
+            exclusive_engaged: false,
+            exclusive_transport_format: None,
+        });
+    }
+
+    let app = api_routes(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/playback/queue/remove")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({ "queue_item_id": current_qid })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let queue = body["queue"].as_array().expect("queue array");
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0]["id"], next_qid);
+    assert_eq!(body["playback_state"]["current_track"]["id"], 2);
+    assert_eq!(body["playback_state"]["current_queue_item_id"], next_qid);
+
+    assert_eq!(
+        switched_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("switched track"),
+        2
+    );
+    runtime_thread.join().expect("runtime thread");
+
+    let (current_track_id, current_queue_item_id, is_playing): (Option<i64>, Option<i64>, bool) =
+        db.with_conn(|conn| {
+            conn.query_row(
+                "SELECT current_track_id, current_queue_item_id, is_playing
+                 FROM playback_state WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0)),
+            )
+            .map_err(anyhow::Error::from)
+        })
+        .unwrap();
+    assert_eq!(current_track_id, Some(2));
+    assert_eq!(current_queue_item_id, Some(next_qid));
+    assert!(is_playing);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn remove_current_queue_item_repairs_stale_anchor_and_returns_playback_state() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let stale_qid = 999_999_i64;
+    let (current_qid, next_qid) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            let current_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 1, 'user')",
+                [],
+            )?;
+            let next_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 0
+                     WHERE id = 1",
+                rusqlite::params![stale_qid],
+            )?;
+            Ok((current_qid, next_qid))
+        })
+        .unwrap();
+
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/playback/queue/remove")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({ "queue_item_id": current_qid })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let queue = body["queue"].as_array().expect("queue array");
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0]["id"], next_qid);
+    assert_eq!(body["playback_state"]["current_track"]["id"], 2);
+    assert_eq!(body["playback_state"]["current_queue_item_id"], next_qid);
+    assert_eq!(body["playback_state"]["is_playing"], false);
+
+    let (current_track_id, current_queue_item_id, is_playing): (Option<i64>, Option<i64>, bool) =
+        db.with_conn(|conn| {
+            conn.query_row(
+                "SELECT current_track_id, current_queue_item_id, is_playing
+                 FROM playback_state WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0)),
+            )
+            .map_err(anyhow::Error::from)
+        })
+        .unwrap();
+    assert_eq!(current_track_id, Some(2));
+    assert_eq!(current_queue_item_id, Some(next_qid));
+    assert!(!is_playing);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn remove_current_queue_item_repairs_mismatched_anchor_and_returns_playback_state() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let (current_qid, next_qid) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            let current_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 1, 'user')",
+                [],
+            )?;
+            let next_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 0
+                     WHERE id = 1",
+                rusqlite::params![next_qid],
+            )?;
+            Ok((current_qid, next_qid))
+        })
+        .unwrap();
+
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/playback/queue/remove")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({ "queue_item_id": current_qid })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let queue = body["queue"].as_array().expect("queue array");
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0]["id"], next_qid);
+    assert_eq!(body["playback_state"]["current_track"]["id"], 2);
+    assert_eq!(body["playback_state"]["current_queue_item_id"], next_qid);
+    assert_eq!(body["playback_state"]["is_playing"], false);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn move_queue_item_repairs_stale_current_anchor_and_returns_playback_state() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let stale_qid = 999_999_i64;
+    let (current_qid, next_qid) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            let current_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 1, 'user')",
+                [],
+            )?;
+            let next_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+                     WHERE id = 1",
+                rusqlite::params![stale_qid],
+            )?;
+            Ok((current_qid, next_qid))
+        })
+        .unwrap();
+
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/playback/queue/move")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({ "item_id": current_qid, "new_pos": 1 })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let queue = body["queue"].as_array().expect("queue array");
+    assert_eq!(queue.len(), 2);
+    assert_eq!(queue[0]["id"], next_qid);
+    assert_eq!(queue[1]["id"], current_qid);
+    assert_eq!(body["playback_state"]["current_track"]["id"], 1);
+    assert_eq!(body["playback_state"]["current_queue_item_id"], current_qid);
+
+    let current_queue_item_id: Option<i64> = db
+        .with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(current_queue_item_id, Some(current_qid));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn move_queue_item_repairs_mismatched_current_anchor_and_returns_playback_state() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let (current_qid, mismatched_qid) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            let current_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 1, 'user')",
+                [],
+            )?;
+            let mismatched_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+                     WHERE id = 1",
+                rusqlite::params![mismatched_qid],
+            )?;
+            Ok((current_qid, mismatched_qid))
+        })
+        .unwrap();
+
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/playback/queue/move")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({ "item_id": current_qid, "new_pos": 1 })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let queue = body["queue"].as_array().expect("queue array");
+    assert_eq!(queue.len(), 2);
+    assert_eq!(queue[0]["id"], mismatched_qid);
+    assert_eq!(queue[1]["id"], current_qid);
+    assert_eq!(body["playback_state"]["current_track"]["id"], 1);
+    assert_eq!(body["playback_state"]["current_queue_item_id"], current_qid);
+
+    let current_queue_item_id: Option<i64> = db
+        .with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(current_queue_item_id, Some(current_qid));
 
     let _ = std::fs::remove_file(db_path);
 }
@@ -2316,6 +3383,180 @@ async fn tidal_mix_overlay_preserves_pending_deque_order() {
 }
 
 #[tokio::test]
+async fn tidal_mix_overlay_preserves_large_loaded_album_rows() {
+    let (db, db_path) = fresh_migrated_db();
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (8301, 'Unrelated Playlist Artist')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, duration_ms)
+                 VALUES
+                    (8301, 'Unrelated Queue First', 8301, 200000),
+                    (8302, 'Unrelated Queue Second', 8301, 200000)",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source)
+                 VALUES (8301, 0, 'playlist'), (8302, 1, 'playlist')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
+    let album_tidal_id = 58_520_793_i64;
+    let tidal_track_base = album_tidal_id * 100;
+    {
+        let mut current = test_track(-(tidal_track_base + 1), "Anthology Track 1");
+        current.artist_id = 0;
+        current.artist_name = Some("The Beatles".to_string());
+        current.album_title = Some("Anthology 2".to_string());
+        current.tidal_id = Some(tidal_track_base + 1);
+        current.source = "tidal_ephemeral".to_string();
+        current.artwork_url =
+            Some("https://resources.tidal.com/images/anthology-1/640x640.jpg".to_string());
+
+        let mut guard = state.write().await;
+        guard.ephemeral_tidal_track = Some(current);
+        let mut pending = guard.pending_tidal_mix_queue.lock().unwrap();
+        for track_number in 2..=45 {
+            pending.push_back(crate::PendingEphemeralTidalTrack {
+                tidal_track_id: tidal_track_base + track_number,
+                title: format!("Anthology Track {track_number}"),
+                artist_name: Some("The Beatles".to_string()),
+                album_title: Some("Anthology 2".to_string()),
+                artwork_url: Some(format!(
+                    "https://resources.tidal.com/images/anthology-{track_number}/640x640.jpg"
+                )),
+                duration_ms: Some(180_000 + track_number),
+            });
+        }
+    }
+
+    let snapshot = {
+        let guard = state.read().await;
+        guard.db.with_conn(player::load_snapshot).unwrap()
+    };
+    let snapshot = overlay_snapshot_with_external_track(&state, snapshot).await;
+
+    assert_eq!(
+        snapshot
+            .state
+            .current_track
+            .as_ref()
+            .map(|track| track.title.as_str()),
+        Some("Anthology Track 1")
+    );
+    assert_eq!(snapshot.queue.len(), 44);
+    assert_eq!(
+        snapshot.queue.first().map(|item| item.track.title.as_str()),
+        Some("Anthology Track 2")
+    );
+    assert_eq!(
+        snapshot.queue.last().map(|item| item.track.title.as_str()),
+        Some("Anthology Track 45")
+    );
+    assert_eq!(
+        snapshot
+            .queue
+            .iter()
+            .map(|item| item.track.tidal_id.expect("tidal id"))
+            .collect::<Vec<_>>(),
+        (2..=45)
+            .map(|track_number| tidal_track_base + track_number)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        snapshot.queue.iter().all(|item| item.source == "tidal_mix"
+            && item.track.album_title.as_deref() == Some("Anthology 2")
+            && item
+                .track
+                .artwork_url
+                .as_deref()
+                .is_some_and(|url| url.contains("resources.tidal.com"))),
+        "visible TIDAL album queue rows must preserve album metadata and artwork"
+    );
+    assert!(
+        snapshot
+            .queue
+            .iter()
+            .all(|item| !item.track.title.starts_with("Unrelated Queue")),
+        "active TIDAL album overlay must not leak stale durable queue rows"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn tidal_mix_replacement_clears_stale_persisted_queue() {
+    let (db, db_path) = fresh_migrated_db();
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (8200, 'Old Queue Artist')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, duration_ms, tidal_id, best_source, source)
+                 VALUES
+                    (8201, 'Old Queue First', 8200, 200000, 88201, 'tidal', 'tidal'),
+                    (8202, 'Old Queue Second', 8200, 200000, 88202, 'tidal', 'tidal')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source)
+                 VALUES (8201, 0, 'playlist'), (8202, 1, 'playlist')",
+            [],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .unwrap();
+
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+    {
+        let guard = state.read().await;
+        guard.pending_tidal_mix_queue.lock().unwrap().push_back(
+            crate::PendingEphemeralTidalTrack {
+                tidal_track_id: 123_456,
+                title: "Album Track Two".to_string(),
+                artist_name: Some("Album Artist".to_string()),
+                album_title: Some("Album".to_string()),
+                artwork_url: Some(
+                    "https://resources.tidal.com/images/a/b/c/320x320.jpg".to_string(),
+                ),
+                duration_ms: Some(180_000),
+            },
+        );
+    }
+
+    if let Err((status, _)) = clear_persisted_queue_for_tidal_mix(&state).await {
+        panic!("clear_persisted_queue_for_tidal_mix failed: {status}");
+    }
+
+    let queue_len = db
+        .with_conn(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM queue", [], |row| row.get::<_, i64>(0))
+                .map_err(anyhow::Error::from)
+        })
+        .unwrap();
+    assert_eq!(queue_len, 0);
+    assert_eq!(
+        state
+            .read()
+            .await
+            .pending_tidal_mix_queue
+            .lock()
+            .unwrap()
+            .len(),
+        1,
+        "durable queue cleanup must preserve the active TIDAL continuation"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn clear_queue_clears_pending_tidal_mix_overlay() {
     let (db, db_path) = fresh_migrated_db();
     let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
@@ -2528,6 +3769,601 @@ async fn direct_tidal_finish_advances_persisted_queue_and_switches_runtime() {
             .and_then(|info| info.active_track_id),
         Some(8101)
     );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn runtime_finish_skips_unresolved_pending_row_and_starts_next_library_track() {
+    let (db, db_path) = fresh_migrated_db();
+    let (current_qid, next_qid) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (8200, 'Queued Artist')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, duration_ms, tidal_id, best_source, source)
+                 VALUES
+                    (8201, 'Finished Track', 8200, 180000, 88201, 'tidal', 'tidal'),
+                    (8202, 'Next Library Track', 8200, 180000, 88202, 'tidal', 'tidal')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (8201, 0, 'test')",
+                [],
+            )?;
+            let current_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (
+                    track_id, position, source, pending_artist, pending_title, pending_at
+                 ) VALUES (NULL, 1, 'radio_pending', 'Missing Artist', 'Missing Title', datetime('now'))",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (8202, 2, 'test')",
+                [],
+            )?;
+            let next_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                 SET current_track_id = 8201, current_queue_item_id = ?1, is_playing = 1
+                 WHERE id = 1",
+                rusqlite::params![current_qid],
+            )?;
+            Ok((current_qid, next_qid))
+        })
+        .unwrap();
+    assert!(current_qid > 0);
+
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+    let (command_tx, command_rx) = std::sync::mpsc::channel();
+    let (switched_tx, switched_rx) = std::sync::mpsc::channel();
+    let runtime_thread = std::thread::spawn(move || {
+        match command_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("track status command")
+        {
+            playback_runtime::PlaybackRuntimeCommand::TrackStatus {
+                track_id,
+                generation,
+                respond_to,
+            } => {
+                assert_eq!(track_id, 8202);
+                assert_eq!(generation, 1);
+                respond_to
+                    .send(playback_runtime::PlaybackTrackStatus::Prepared)
+                    .expect("track status response");
+            }
+            other => panic!("expected TrackStatus command, got {other:?}"),
+        }
+
+        match command_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("switch command")
+        {
+            playback_runtime::PlaybackRuntimeCommand::Switch(job) => {
+                switched_tx.send(job.track.id).expect("switched track id");
+            }
+            other => panic!("expected Switch command, got {other:?}"),
+        }
+    });
+
+    {
+        let mut guard = state.write().await;
+        guard.tidal_tokens = Some(tidal_auth::TidalTokens {
+            access_token: "test-token".to_string(),
+            refresh_token: "refresh-token".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: 3600,
+            user_id: "test-user".to_string(),
+            country_code: "US".to_string(),
+            auth_flow: Some("pkce".to_string()),
+        });
+        guard.playback_runtime = Some(PlaybackRuntimeState {
+            access_token: "test-token".to_string(),
+            handle: playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx),
+        });
+        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+            device_name: "Test DAC".to_string(),
+            sample_rate: 48_000,
+            channels: 2,
+            active_track_id: Some(8201),
+            last_error: None,
+            exclusive_engaged: false,
+            exclusive_transport_format: None,
+        });
+    }
+
+    handle_runtime_finished(state.clone(), 8201, 1)
+        .await
+        .expect("runtime finish");
+
+    assert_eq!(
+        switched_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("switched track"),
+        8202
+    );
+    runtime_thread.join().expect("runtime thread");
+
+    let (current_track_id, current_queue_item_id, is_playing): (Option<i64>, Option<i64>, bool) =
+        db.with_conn(|conn| {
+            conn.query_row(
+                "SELECT current_track_id, current_queue_item_id, is_playing
+                 FROM playback_state WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0)),
+            )
+            .map_err(anyhow::Error::from)
+        })
+        .unwrap();
+    assert_eq!(current_track_id, Some(8202));
+    assert_eq!(current_queue_item_id, Some(next_qid));
+    assert!(is_playing);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn runtime_finish_adopts_pending_row_resolved_by_background_resolver() {
+    let (db, db_path) = fresh_migrated_db();
+    let (current_qid, pending_qid) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (8300, 'Queued Artist')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, duration_ms, tidal_id, best_source, source)
+                 VALUES
+                    (8301, 'Finished Track', 8300, 180000, 88301, 'tidal', 'tidal'),
+                    (8302, 'Unrelated Next Track', 8300, 180000, 88302, 'tidal', 'tidal'),
+                    (8303, 'Background Resolved Track', 8300, 180000, 88303, 'tidal', 'tidal')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (8301, 0, 'test')",
+                [],
+            )?;
+            let current_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (
+                    track_id, position, source, pending_artist, pending_title, pending_at, resolving_at
+                 ) VALUES (
+                    NULL, 1, 'radio_pending', 'Resolved Artist', 'Resolved Title',
+                    datetime('now'), datetime('now')
+                 )",
+                [],
+            )?;
+            let pending_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (8302, 2, 'test')",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE playback_state
+                 SET current_track_id = 8301, current_queue_item_id = ?1, is_playing = 1
+                 WHERE id = 1",
+                rusqlite::params![current_qid],
+            )?;
+            Ok((current_qid, pending_qid))
+        })
+        .unwrap();
+    assert!(current_qid > 0);
+
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+    let (command_tx, command_rx) = std::sync::mpsc::channel();
+    let (switched_tx, switched_rx) = std::sync::mpsc::channel();
+    let runtime_thread = std::thread::spawn(move || {
+        match command_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("track status command")
+        {
+            playback_runtime::PlaybackRuntimeCommand::TrackStatus {
+                track_id,
+                generation,
+                respond_to,
+            } => {
+                assert_eq!(track_id, 8303);
+                assert_eq!(generation, 1);
+                respond_to
+                    .send(playback_runtime::PlaybackTrackStatus::Prepared)
+                    .expect("track status response");
+            }
+            other => panic!("expected TrackStatus command, got {other:?}"),
+        }
+
+        match command_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("switch command")
+        {
+            playback_runtime::PlaybackRuntimeCommand::Switch(job) => {
+                switched_tx.send(job.track.id).expect("switched track id");
+            }
+            other => panic!("expected Switch command, got {other:?}"),
+        }
+    });
+
+    {
+        let mut guard = state.write().await;
+        guard.tidal_tokens = Some(tidal_auth::TidalTokens {
+            access_token: "test-token".to_string(),
+            refresh_token: "refresh-token".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: 3600,
+            user_id: "test-user".to_string(),
+            country_code: "US".to_string(),
+            auth_flow: Some("pkce".to_string()),
+        });
+        guard.playback_runtime = Some(PlaybackRuntimeState {
+            access_token: "test-token".to_string(),
+            handle: playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx),
+        });
+        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+            device_name: "Test DAC".to_string(),
+            sample_rate: 48_000,
+            channels: 2,
+            active_track_id: Some(8301),
+            last_error: None,
+            exclusive_engaged: false,
+            exclusive_transport_format: None,
+        });
+    }
+
+    let db_for_resolve = db.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(
+            PLAYBACK_PENDING_BUSY_RETRY_DELAY_MS / 2,
+        ))
+        .await;
+        db_for_resolve
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE queue
+                     SET track_id = 8303,
+                         resolving_at = NULL,
+                         resolved_at = datetime('now')
+                     WHERE id = ?1",
+                    rusqlite::params![pending_qid],
+                )?;
+                Ok(())
+            })
+            .expect("promote pending row");
+    });
+
+    handle_runtime_finished(state.clone(), 8301, 1)
+        .await
+        .expect("runtime finish");
+
+    assert_eq!(
+        switched_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("switched track"),
+        8303
+    );
+    runtime_thread.join().expect("runtime thread");
+
+    let (current_track_id, current_queue_item_id): (Option<i64>, Option<i64>) = db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT current_track_id, current_queue_item_id FROM playback_state WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(anyhow::Error::from)
+        })
+        .unwrap();
+    assert_eq!(current_track_id, Some(8303));
+    assert_eq!(current_queue_item_id, Some(pending_qid));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn manual_previous_skips_unresolved_pending_rows_to_prior_library_track() {
+    let (db, db_path) = fresh_migrated_db();
+    let (previous_qid, current_qid) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (8400, 'Previous Artist')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, duration_ms, tidal_id, best_source, source)
+                 VALUES
+                    (8401, 'Previous Library Track', 8400, 180000, 88401, 'tidal', 'tidal'),
+                    (8402, 'Current Library Track', 8400, 180000, 88402, 'tidal', 'tidal')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (8401, 0, 'test')",
+                [],
+            )?;
+            let previous_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (
+                    track_id, position, source, pending_artist, pending_title, pending_at
+                 ) VALUES (NULL, 1, 'radio_pending', 'Missing Artist A', 'Missing Title A', datetime('now'))",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (
+                    track_id, position, source, pending_artist, pending_title, pending_at
+                 ) VALUES (NULL, 2, 'radio_pending', 'Missing Artist B', 'Missing Title B', datetime('now'))",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (8402, 3, 'test')",
+                [],
+            )?;
+            let current_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                 SET current_track_id = 8402, current_queue_item_id = ?1, is_playing = 1, position_ms = 0
+                 WHERE id = 1",
+                rusqlite::params![current_qid],
+            )?;
+            Ok((previous_qid, current_qid))
+        })
+        .unwrap();
+
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+    let playback_generation = bump_playback_generation(&state).await;
+    let snapshot = previous_persisted_playback_snapshot(&state)
+        .await
+        .expect("initial previous snapshot");
+    assert!(snapshot.state.current_track.is_none());
+    assert_ne!(snapshot.state.current_queue_item_id, Some(current_qid));
+
+    let snapshot = resolve_or_skip_pending_current_previous(
+        &state,
+        snapshot,
+        playback_generation,
+        "manual_previous_track",
+    )
+    .await
+    .expect("previous pending skip");
+
+    assert_eq!(
+        snapshot.state.current_track.as_ref().map(|track| track.id),
+        Some(8401)
+    );
+    assert_eq!(snapshot.state.current_queue_item_id, Some(previous_qid));
+    assert!(snapshot.state.is_playing);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn manual_previous_stops_when_pending_rows_cannot_move_back() {
+    let (db, db_path) = fresh_migrated_db();
+    let current_qid = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (
+                    track_id, position, source, pending_artist, pending_title, pending_at
+                 ) VALUES (NULL, 0, 'radio_pending', 'Missing Artist A', 'Missing Title A', datetime('now'))",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (
+                    track_id, position, source, pending_artist, pending_title, pending_at
+                 ) VALUES (NULL, 1, 'radio_pending', 'Missing Artist B', 'Missing Title B', datetime('now'))",
+                [],
+            )?;
+            let current_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                 SET current_track_id = NULL, current_queue_item_id = ?1, is_playing = 1, position_ms = 0
+                 WHERE id = 1",
+                rusqlite::params![current_qid],
+            )?;
+            Ok(current_qid)
+        })
+        .unwrap();
+
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+    let playback_generation = bump_playback_generation(&state).await;
+    let snapshot = previous_persisted_playback_snapshot(&state)
+        .await
+        .expect("initial previous snapshot");
+    assert!(snapshot.state.current_track.is_none());
+    assert_ne!(snapshot.state.current_queue_item_id, Some(current_qid));
+
+    let snapshot = resolve_or_skip_pending_current_previous(
+        &state,
+        snapshot,
+        playback_generation,
+        "manual_previous_track",
+    )
+    .await
+    .expect("previous pending stop");
+
+    assert!(snapshot.state.current_track.is_none());
+    assert_eq!(snapshot.state.current_queue_item_id, None);
+    assert!(!snapshot.state.is_playing);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn prepared_runtime_track_error_keeps_current_playback_running() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let current_qid: i64 = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'test')",
+                [],
+            )?;
+            let current_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 1, 'test')",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE playback_state
+                 SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+                 WHERE id = 1",
+                rusqlite::params![current_qid],
+            )?;
+            Ok(current_qid)
+        })
+        .unwrap();
+
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+    {
+        let mut guard = state.write().await;
+        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+            device_name: "Test DAC".to_string(),
+            sample_rate: 48_000,
+            channels: 2,
+            active_track_id: Some(1),
+            last_error: None,
+            exclusive_engaged: false,
+            exclusive_transport_format: None,
+        });
+    }
+
+    handle_prepared_runtime_track_error(&state, 2, "prebuffer decode failed").await;
+
+    let (current_track_id, current_queue_item_id, is_playing): (Option<i64>, Option<i64>, bool) =
+        db.with_conn(|conn| {
+            conn.query_row(
+                "SELECT current_track_id, current_queue_item_id, is_playing
+                 FROM playback_state WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0)),
+            )
+            .map_err(anyhow::Error::from)
+        })
+        .unwrap();
+    assert_eq!(current_track_id, Some(1));
+    assert_eq!(current_queue_item_id, Some(current_qid));
+    assert!(is_playing);
+
+    let guard = state.read().await;
+    let info = guard.playback_runtime_info.as_ref().expect("runtime info");
+    assert_eq!(info.active_track_id, Some(1));
+    assert_eq!(info.last_error.as_deref(), Some("prebuffer decode failed"));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn runtime_track_error_advances_to_next_library_track() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let (current_qid, next_qid) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'test')",
+                [],
+            )?;
+            let current_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 1, 'test')",
+                [],
+            )?;
+            let next_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                 SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+                 WHERE id = 1",
+                rusqlite::params![current_qid],
+            )?;
+            Ok((current_qid, next_qid))
+        })
+        .unwrap();
+    assert!(current_qid > 0);
+
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+    let (command_tx, command_rx) = std::sync::mpsc::channel();
+    let (switched_tx, switched_rx) = std::sync::mpsc::channel();
+    let runtime_thread = std::thread::spawn(move || {
+        match command_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("track status command")
+        {
+            playback_runtime::PlaybackRuntimeCommand::TrackStatus {
+                track_id,
+                generation,
+                respond_to,
+            } => {
+                assert_eq!(track_id, 2);
+                assert_eq!(generation, 1);
+                respond_to
+                    .send(playback_runtime::PlaybackTrackStatus::Prepared)
+                    .expect("track status response");
+            }
+            other => panic!("expected TrackStatus command, got {other:?}"),
+        }
+
+        match command_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("switch command")
+        {
+            playback_runtime::PlaybackRuntimeCommand::Switch(job) => {
+                assert_eq!(job.generation, 1);
+                switched_tx.send(job.track.id).expect("switched track id");
+            }
+            other => panic!("expected Switch command, got {other:?}"),
+        }
+    });
+
+    {
+        let mut guard = state.write().await;
+        guard.tidal_tokens = Some(tidal_auth::TidalTokens {
+            access_token: "test-token".to_string(),
+            refresh_token: "refresh-token".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: 3600,
+            user_id: "test-user".to_string(),
+            country_code: "US".to_string(),
+            auth_flow: Some("pkce".to_string()),
+        });
+        guard.playback_runtime = Some(PlaybackRuntimeState {
+            access_token: "test-token".to_string(),
+            handle: playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx),
+        });
+        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+            device_name: "Test DAC".to_string(),
+            sample_rate: 48_000,
+            channels: 2,
+            active_track_id: Some(1),
+            last_error: None,
+            exclusive_engaged: false,
+            exclusive_transport_format: None,
+        });
+    }
+
+    handle_runtime_track_error(state.clone(), 1, 1, "active decode failed")
+        .await
+        .expect("track error should advance");
+
+    assert_eq!(
+        switched_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("switched track"),
+        2
+    );
+    runtime_thread.join().expect("runtime thread");
+
+    let (current_track_id, current_queue_item_id, is_playing): (Option<i64>, Option<i64>, bool) =
+        db.with_conn(|conn| {
+            conn.query_row(
+                "SELECT current_track_id, current_queue_item_id, is_playing
+                 FROM playback_state WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0)),
+            )
+            .map_err(anyhow::Error::from)
+        })
+        .unwrap();
+    assert_eq!(current_track_id, Some(2));
+    assert_eq!(current_queue_item_id, Some(next_qid));
+    assert!(is_playing);
 
     let _ = std::fs::remove_file(db_path);
 }
@@ -2859,6 +4695,232 @@ async fn queue_play_next_tidal_inserts_pending_row_after_current_with_hint() {
 }
 
 #[tokio::test]
+async fn queue_play_next_uses_current_queue_item_for_duplicate_track() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let (duplicate_qid, current_qid, tail_qid): (i64, i64, i64) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            let duplicate_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 1, 'user')",
+                [],
+            )?;
+            let current_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 2, 'user')",
+                [],
+            )?;
+            let tail_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+                     WHERE id = 1",
+                rusqlite::params![current_qid],
+            )?;
+            Ok((duplicate_qid, current_qid, tail_qid))
+        })
+        .unwrap();
+
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/queue/play_next")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"kind":"tidal","tidal_id":778,"artist":"External Artist","title":"Exact Current Next"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (rows, current_queue_item_id): (Vec<(i64, Option<i64>, Option<String>)>, Option<i64>) = db
+        .with_conn(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT id, track_id, pending_title FROM queue ORDER BY position ASC")?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let current_queue_item_id = conn.query_row(
+                "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok((rows, current_queue_item_id))
+        })
+        .unwrap();
+
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[0], (duplicate_qid, Some(1), None));
+    assert_eq!(rows[1], (current_qid, Some(1), None));
+    assert_eq!(rows[2].1, None);
+    assert_eq!(rows[2].2.as_deref(), Some("Exact Current Next"));
+    assert_eq!(rows[3], (tail_qid, Some(2), None));
+    assert_eq!(current_queue_item_id, Some(current_qid));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn queue_play_next_repairs_stale_anchor_before_insert() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let stale_qid = 999_999_i64;
+    let (repaired_qid, duplicate_qid, tail_qid): (i64, i64, i64) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            let repaired_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 1, 'user')",
+                [],
+            )?;
+            let duplicate_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 2, 'user')",
+                [],
+            )?;
+            let tail_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+                     WHERE id = 1",
+                rusqlite::params![stale_qid],
+            )?;
+            Ok((repaired_qid, duplicate_qid, tail_qid))
+        })
+        .unwrap();
+
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/queue/play_next")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"kind":"tidal","tidal_id":779,"artist":"External Artist","title":"Repaired Next"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (rows, current_queue_item_id): (Vec<(i64, Option<i64>, Option<String>)>, Option<i64>) = db
+        .with_conn(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT id, track_id, pending_title FROM queue ORDER BY position ASC")?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let current_queue_item_id = conn.query_row(
+                "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok((rows, current_queue_item_id))
+        })
+        .unwrap();
+
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[0], (repaired_qid, Some(1), None));
+    assert_eq!(rows[1].1, None);
+    assert_eq!(rows[1].2.as_deref(), Some("Repaired Next"));
+    assert_eq!(rows[2], (duplicate_qid, Some(1), None));
+    assert_eq!(rows[3], (tail_qid, Some(2), None));
+    assert_eq!(current_queue_item_id, Some(repaired_qid));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn queue_play_next_repairs_mismatched_anchor_before_insert() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let (repaired_qid, mismatched_qid): (i64, i64) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            let repaired_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 1, 'user')",
+                [],
+            )?;
+            let mismatched_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+                     WHERE id = 1",
+                rusqlite::params![mismatched_qid],
+            )?;
+            Ok((repaired_qid, mismatched_qid))
+        })
+        .unwrap();
+
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/queue/play_next")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"kind":"tidal","tidal_id":780,"artist":"External Artist","title":"Repaired Mismatch Next"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (rows, current_queue_item_id): (Vec<(i64, Option<i64>, Option<String>)>, Option<i64>) = db
+        .with_conn(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT id, track_id, pending_title FROM queue ORDER BY position ASC")?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let current_queue_item_id = conn.query_row(
+                "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok((rows, current_queue_item_id))
+        })
+        .unwrap();
+
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0], (repaired_qid, Some(1), None));
+    assert_eq!(rows[1].1, None);
+    assert_eq!(rows[1].2.as_deref(), Some("Repaired Mismatch Next"));
+    assert_eq!(rows[2], (mismatched_qid, Some(2), None));
+    assert_eq!(current_queue_item_id, Some(repaired_qid));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn queue_play_next_many_preserves_requested_order() {
     let (db, db_path) = fresh_migrated_db();
     seed_basic_tracks(&db);
@@ -2934,6 +4996,88 @@ async fn queue_play_next_many_preserves_requested_order() {
             (2, "Second external".to_string(), Some(102)),
         ]
     );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn queue_play_next_many_repairs_missing_anchor_and_preserves_order() {
+    let (db, db_path) = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let (repaired_qid, duplicate_qid, tail_qid): (i64, i64, i64) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            let repaired_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 1, 'user')",
+                [],
+            )?;
+            let duplicate_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 2, 'user')",
+                [],
+            )?;
+            let tail_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = NULL, is_playing = 1
+                     WHERE id = 1",
+                [],
+            )?;
+            Ok((repaired_qid, duplicate_qid, tail_qid))
+        })
+        .unwrap();
+
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/queue/play_next_many")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"items":[
+                            {"kind":"tidal","tidal_id":201,"artist":"A","title":"Batch First"},
+                            {"kind":"tidal","tidal_id":202,"artist":"B","title":"Batch Second"}
+                        ]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (rows, current_queue_item_id): (Vec<(i64, Option<i64>, Option<String>)>, Option<i64>) = db
+        .with_conn(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT id, track_id, pending_title FROM queue ORDER BY position ASC")?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let current_queue_item_id = conn.query_row(
+                "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok((rows, current_queue_item_id))
+        })
+        .unwrap();
+
+    assert_eq!(rows.len(), 5);
+    assert_eq!(rows[0], (repaired_qid, Some(1), None));
+    assert_eq!(rows[1].1, None);
+    assert_eq!(rows[1].2.as_deref(), Some("Batch First"));
+    assert_eq!(rows[2].1, None);
+    assert_eq!(rows[2].2.as_deref(), Some("Batch Second"));
+    assert_eq!(rows[3], (duplicate_qid, Some(1), None));
+    assert_eq!(rows[4], (tail_qid, Some(2), None));
+    assert_eq!(current_queue_item_id, Some(repaired_qid));
 
     let _ = std::fs::remove_file(db_path);
 }
@@ -3298,6 +5442,63 @@ fn automix_discover_new_fallback_waits_when_sidecar_new_rows_fill_slots() {
     assert!(automix_discover_new_fallback_seed(&snapshot).is_some());
 }
 
+#[test]
+fn automix_discover_new_fallback_ignores_mismatched_queue_anchor() {
+    let current = test_track(1, "Current");
+    let snapshot = crate::playback::player::PlaybackSnapshot {
+        state: crate::db::models::PlaybackState {
+            current_track: Some(current.clone()),
+            current_queue_item_id: Some(13),
+            position_ms: 0,
+            is_playing: true,
+            volume: 1.0,
+            shuffle_mode: "off".to_string(),
+            repeat_mode: "off".to_string(),
+            automix_enabled: true,
+            crossfade_ms: 0,
+            automix_discover_new: true,
+            automix_use_learning: true,
+            automix_allow_external: true,
+            buffered_ms: 0,
+            buffered_start_ms: 0,
+        },
+        queue: vec![
+            test_queue_item(10, current, 0, "manual"),
+            test_queue_item(11, test_track(2, "Sidecar A"), 1, "automix-new"),
+            test_queue_item(12, test_track(3, "Sidecar B"), 2, "automix-new"),
+            test_queue_item(13, test_track(4, "Stale Anchor"), 3, "manual"),
+        ],
+    };
+
+    assert!(automix_discover_new_fallback_seed(&snapshot).is_none());
+}
+
+#[test]
+fn automix_discover_new_fallback_stays_off_when_disabled() {
+    let current = test_track(1, "Current");
+    let snapshot = crate::playback::player::PlaybackSnapshot {
+        state: crate::db::models::PlaybackState {
+            current_track: Some(current.clone()),
+            current_queue_item_id: Some(10),
+            position_ms: 0,
+            is_playing: true,
+            volume: 1.0,
+            shuffle_mode: "off".to_string(),
+            repeat_mode: "off".to_string(),
+            automix_enabled: true,
+            crossfade_ms: 0,
+            automix_discover_new: false,
+            automix_use_learning: true,
+            automix_allow_external: true,
+            buffered_ms: 0,
+            buffered_start_ms: 0,
+        },
+        queue: vec![test_queue_item(10, current, 0, "manual")],
+    };
+
+    assert!(automix_discover_new_fallback_seed(&snapshot).is_none());
+}
+
 #[tokio::test]
 async fn server_info_returns_defaults() {
     let app = build_test_app().await;
@@ -3434,6 +5635,1112 @@ async fn radio_song_rejects_zero_seed_id_with_400() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+#[tokio::test]
+async fn search_recommendation_routes_reject_non_positive_ids() {
+    let app = build_test_app().await;
+
+    for uri in [
+        "/api/search/vibe?track_id=0",
+        "/api/search/vibe?track_id=-7",
+        "/api/search/underrated?artist_id=0",
+        "/api/search/underrated?artist_id=-7",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+}
+
+#[tokio::test]
+async fn local_catalog_detail_routes_reject_non_positive_ids() {
+    let app = build_test_app().await;
+
+    for uri in [
+        "/api/artists/0",
+        "/api/artists/-7",
+        "/api/artists/0/tracks",
+        "/api/artists/-7/tracks",
+        "/api/artists/0/discography",
+        "/api/artists/-7/discography",
+        "/api/albums/0/tracks",
+        "/api/albums/-7/tracks",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+}
+
+#[tokio::test]
+async fn local_catalog_detail_positive_ids_keep_existing_empty_library_behavior() {
+    let app = build_test_app().await;
+
+    for (uri, expected) in [
+        ("/api/artists/1", StatusCode::NOT_FOUND),
+        ("/api/artists/1/tracks", StatusCode::OK),
+        ("/api/artists/1/discography", StatusCode::OK),
+        ("/api/albums/1/tracks", StatusCode::OK),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), expected, "uri: {uri}");
+    }
+}
+
+#[tokio::test]
+async fn duplicate_routes_reject_invalid_pagination_and_ids() {
+    let app = build_test_app().await;
+
+    for uri in [
+        "/api/library/duplicates?limit=0",
+        "/api/library/duplicates?limit=-1",
+        "/api/library/duplicates?limit=101",
+        "/api/library/duplicates?offset=-1",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+
+    for uri in [
+        "/api/library/duplicates/0/dismiss",
+        "/api/library/duplicates/-7/dismiss",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+
+    for (uri, body) in [
+        (
+            "/api/library/duplicates/0/resolve",
+            r#"{"preferred_track_id":1}"#,
+        ),
+        (
+            "/api/library/duplicates/-7/resolve",
+            r#"{"preferred_track_id":1}"#,
+        ),
+        (
+            "/api/library/duplicates/1/resolve",
+            r#"{"preferred_track_id":0}"#,
+        ),
+        (
+            "/api/library/duplicates/1/resolve",
+            r#"{"preferred_track_id":-7}"#,
+        ),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+}
+
+#[tokio::test]
+async fn duplicate_routes_positive_inputs_keep_empty_library_behavior() {
+    let app = build_test_app().await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/library/duplicates?limit=20&offset=0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/duplicates/1/dismiss")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/duplicates/1/resolve")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"preferred_track_id":1}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn library_batch_routes_reject_impossible_ids_before_work() {
+    let app = build_test_app().await;
+
+    for body in [
+        r#"{"playlist_id":0,"track_ids":[1]}"#,
+        r#"{"playlist_id":-7,"track_ids":[1]}"#,
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/library/batch/add-to-playlist")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body: {body}");
+    }
+
+    for body in [
+        r#"{"genre_id":0,"track_ids":[1]}"#,
+        r#"{"genre_id":-7,"track_ids":[1]}"#,
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/library/batch/set-genre")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body: {body}");
+    }
+}
+
+#[tokio::test]
+async fn library_batch_set_genre_returns_not_found_for_missing_positive_genre() {
+    let (db, db_path) = fresh_migrated_db();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (1, 'Batch Artist')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, source, fidelity_score)
+             VALUES (1, 'Batch Track', 1, 'local', 100)",
+            [],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .expect("seed track");
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/batch/set-genre")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"genre_id":99,"track_ids":[1]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let assigned: i64 = db
+        .with_conn(|conn| {
+            Ok::<_, anyhow::Error>(conn.query_row(
+                "SELECT COUNT(*) FROM track_genres",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .expect("count track genres");
+    assert_eq!(assigned, 0, "missing genre must not assign tracks");
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn library_batch_add_to_playlist_returns_not_found_before_tidal_auth() {
+    let (db, db_path) = fresh_migrated_db();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (1, 'Batch Artist')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO tracks (id, tidal_id, title, artist_id, source, fidelity_score)
+             VALUES (1, 880077, 'Batch Track', 1, 'tidal', 700)",
+            [],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .expect("seed tidal-backed track");
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/batch/add-to-playlist")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"playlist_id":99,"track_ids":[1]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn library_batch_add_to_playlist_rejects_local_targets_before_tidal_auth() {
+    let (db, db_path) = fresh_migrated_db();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (1, 'Local Artist')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO playlists (id, name, is_smart, is_synced)
+             VALUES (1, 'Local Playlist', 0, 1)",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, source, fidelity_score)
+             VALUES (1, 'Local Track', 1, 'local', 100)",
+            [],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .expect("seed local playlist and track");
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/batch/add-to-playlist")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"playlist_id":1,"track_ids":[1]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let added: i64 = db
+        .with_conn(|conn| {
+            Ok::<_, anyhow::Error>(conn.query_row(
+                "SELECT COUNT(*) FROM playlist_tracks",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .expect("count playlist tracks");
+    assert_eq!(added, 0, "invalid local target must not mutate playlist");
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn library_batch_delete_removes_local_only_items_without_tidal_session() {
+    let (db, db_path) = fresh_migrated_db();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (1, 'Local Artist')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, source, fidelity_score)
+             VALUES (1, 'Local Track', 1, 'local', 100)",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO albums (id, title, artist_id, source)
+             VALUES (1, 'Local Album', 1, 'local')",
+            [],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .expect("seed local-only items");
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/batch/delete")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"track_ids":[1],"album_ids":[1]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (remaining_tracks, remaining_albums): (i64, i64) = db
+        .with_conn(|conn| {
+            Ok::<_, anyhow::Error>((
+                conn.query_row("SELECT COUNT(*) FROM tracks WHERE id = 1", [], |row| {
+                    row.get(0)
+                })?,
+                conn.query_row("SELECT COUNT(*) FROM albums WHERE id = 1", [], |row| {
+                    row.get(0)
+                })?,
+            ))
+        })
+        .expect("count local items");
+    assert_eq!(
+        remaining_tracks, 0,
+        "local-only delete must remove local track row"
+    );
+    assert_eq!(
+        remaining_albums, 0,
+        "local-only delete must remove local album row"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn library_batch_delete_tidal_backed_track_without_session_keeps_local_row() {
+    let (db, db_path) = fresh_migrated_db();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (1, 'TIDAL Artist')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO tracks (id, tidal_id, title, artist_id, source, fidelity_score)
+             VALUES (1, 880077, 'TIDAL Track', 1, 'tidal', 700)",
+            [],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .expect("seed tidal-backed track");
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/batch/delete")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"track_ids":[1],"album_ids":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let remaining: i64 = db
+        .with_conn(|conn| {
+            Ok::<_, anyhow::Error>(conn.query_row(
+                "SELECT COUNT(*) FROM tracks WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .expect("count track");
+    assert_eq!(remaining, 1, "failed remote delete must keep local row");
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn playlist_routes_reject_non_positive_ids_and_track_ids() {
+    let app = build_test_app().await;
+    let smart_body =
+        r#"{"name":"Draft","description":null,"rules":{"type":"group","op":"AND","clauses":[]}}"#;
+
+    for uri in [
+        "/api/playlists/0/tracks",
+        "/api/playlists/-7/tracks",
+        "/api/playlists/0/cover-sample",
+        "/api/playlists/-7/cover-sample",
+        "/api/smart/playlists/0/evaluate",
+        "/api/smart/playlists/-7/evaluate",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+
+    for uri in ["/api/playlists/0/favorite", "/api/playlists/-7/favorite"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+
+    for uri in ["/api/playlists/0/tracks", "/api/playlists/-7/tracks"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"track_ids":[1]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+
+    for body in [r#"{"track_ids":[0]}"#, r#"{"track_ids":[1,-7]}"#] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/playlists/1/tracks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body: {body}");
+    }
+
+    for uri in ["/api/smart/playlists/0", "/api/smart/playlists/-7"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(smart_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+
+    for uri in ["/api/smart/playlists/0", "/api/smart/playlists/-7"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+}
+
+#[tokio::test]
+async fn playlist_routes_return_not_found_for_missing_positive_playlists() {
+    let app = build_test_app().await;
+    let smart_body =
+        r#"{"name":"Draft","description":null,"rules":{"type":"group","op":"AND","clauses":[]}}"#;
+
+    for uri in [
+        "/api/playlists/1/tracks",
+        "/api/playlists/1/cover-sample",
+        "/api/smart/playlists/1/evaluate",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "uri: {uri}");
+    }
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/playlists/1/favorite")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/playlists/1/tracks")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"track_ids":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/smart/playlists/1")
+                .header("content-type", "application/json")
+                .body(Body::from(smart_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/smart/playlists/1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn genre_and_audio_detail_routes_reject_non_positive_ids() {
+    let app = build_test_app().await;
+
+    for uri in [
+        "/api/genres/0/tracks",
+        "/api/genres/-7/tracks",
+        "/api/tracks/0/audio-features",
+        "/api/tracks/-7/audio-features",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+
+    for uri in [
+        "/api/tracks/0/bpm-multiplier",
+        "/api/tracks/-7/bpm-multiplier",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"factor":2.0}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+}
+
+#[tokio::test]
+async fn genre_and_audio_detail_positive_ids_keep_empty_library_behavior() {
+    let app = build_test_app().await;
+
+    for uri in ["/api/genres/1/tracks", "/api/tracks/1/audio-features"] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK, "uri: {uri}");
+    }
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/tracks/1/bpm-multiplier")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"factor":2.0}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn audio_analysis_start_rejects_invalid_request_before_actor_lookup() {
+    let app = build_test_app().await;
+
+    for body in [
+        r#"{"mode":"garbage"}"#,
+        r#"{"mode":"local"}"#,
+        r#"{"mode":"local","local_path":"   "}"#,
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/library/analyze/audio-features")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body: {body}");
+    }
+}
+
+#[tokio::test]
+async fn audio_analysis_start_valid_preview_still_requires_actor() {
+    let app = build_test_app().await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/analyze/audio-features")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"mode":"preview"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn lastfm_enrichment_rejects_unknown_mode_before_credentials() {
+    let app = build_test_app().await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/enrich/lastfm?mode=typo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn lastfm_enrichment_valid_mode_keeps_missing_credentials_response() {
+    let app = build_test_app().await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/enrich/lastfm?mode=retry_untagged")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn sync_routes_reject_invalid_services() {
+    let app = build_test_app().await;
+
+    for uri in ["/api/sync/info?service=", "/api/sync/info?service=spotify"] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+
+    for body in [
+        r#"{"service":"","enabled":true}"#,
+        r#"{"service":"spotify","enabled":true}"#,
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sync/auto")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body: {body}");
+    }
+}
+
+#[tokio::test]
+async fn sync_routes_trim_tidal_service_before_mutation() {
+    let (db, db_path) = fresh_migrated_db();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sync/auto")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"service":" tidal ","enabled":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let auto_sync_daily = db
+        .with_conn(|conn| {
+            Ok::<_, anyhow::Error>(
+                crate::db::queries::get_sync_info(conn, "tidal")?
+                    .expect("tidal sync metadata")
+                    .auto_sync_daily,
+            )
+        })
+        .expect("load sync info");
+    assert!(
+        auto_sync_daily,
+        "trimmed tidal service must update tidal row"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn discovery_training_rejects_unknown_mode_before_engine_work() {
+    let (db, db_path) = fresh_migrated_db();
+    crate::services::learning::set_discovery_engine(
+        &db,
+        crate::services::learning::DiscoveryEngine::V1,
+    )
+    .expect("seed legacy discovery engine");
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/discovery/train")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"mode":"everything"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn discovery_training_settings_reject_unknown_values_without_mutation() {
+    let (db, db_path) = fresh_migrated_db();
+    crate::services::learning::set_discovery_intensity(
+        &db,
+        crate::services::learning::DiscoveryIntensity::Max,
+    )
+    .expect("seed intensity");
+    crate::services::learning::set_discovery_engine(
+        &db,
+        crate::services::learning::DiscoveryEngine::V1,
+    )
+    .expect("seed engine");
+    crate::services::learning::set_discovery_training_safety_profile(
+        &db,
+        crate::services::learning::DiscoveryTrainingSafetyProfile::Performance,
+    )
+    .expect("seed safety profile");
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    for (uri, body) in [
+        (
+            "/api/discovery/train/intensity",
+            r#"{"intensity":"extreme"}"#,
+        ),
+        ("/api/discovery/train/engine", r#"{"engine":"v3"}"#),
+        (
+            "/api/discovery/train/safety-profile",
+            r#"{"profile":"overdrive"}"#,
+        ),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+    }
+
+    assert_eq!(
+        crate::services::learning::load_discovery_intensity(&db),
+        crate::services::learning::DiscoveryIntensity::Max
+    );
+    assert_eq!(
+        crate::services::learning::load_discovery_engine(&db),
+        crate::services::learning::DiscoveryEngine::V1
+    );
+    assert_eq!(
+        crate::services::learning::load_discovery_training_safety_profile(&db),
+        crate::services::learning::DiscoveryTrainingSafetyProfile::Performance
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn discovery_training_valid_settings_still_persist() {
+    let (db, db_path) = fresh_migrated_db();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    for (uri, body) in [
+        ("/api/discovery/train/intensity", r#"{"intensity":"low"}"#),
+        ("/api/discovery/train/engine", r#"{"engine":"v1"}"#),
+        (
+            "/api/discovery/train/safety-profile",
+            r#"{"profile":"laptop_safe"}"#,
+        ),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+    }
+
+    assert_eq!(
+        crate::services::learning::load_discovery_intensity(&db),
+        crate::services::learning::DiscoveryIntensity::Low
+    );
+    assert_eq!(
+        crate::services::learning::load_discovery_engine(&db),
+        crate::services::learning::DiscoveryEngine::V1
+    );
+    assert_eq!(
+        crate::services::learning::load_discovery_training_safety_profile(&db),
+        crate::services::learning::DiscoveryTrainingSafetyProfile::LaptopSafe
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn discovery_request_routes_reject_unknown_modes_before_work() {
+    let app = build_test_app().await;
+
+    for (uri, body) in [
+        (
+            "/api/discovery/preview",
+            r#"{"prompt":"jazz night","mode":"surprise","services":["tidal"]}"#,
+        ),
+        (
+            "/api/discovery/new",
+            r#"{"prompt":"jazz night","mode":"surprise","services":["tidal"]}"#,
+        ),
+        (
+            "/api/discovery/connections",
+            r#"{"prompt":"jazz night","mode":"surprise","services":["tidal"],"seed":{"provider":"tidal","provider_track_id":"1","title":"Seed","artist_name":"Artist"}}"#,
+        ),
+        (
+            "/api/discovery/presets",
+            r#"{"name":"Bad Mode","prompt":"jazz night","mode":"surprise","services":["tidal"]}"#,
+        ),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn discovery_preset_valid_mode_still_persists() {
+    let (db, db_path) = fresh_migrated_db();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/discovery/presets")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"Cloud","prompt":"jazz night","mode":"word-cloud","services":["tidal"]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let saved_mode: String = db
+        .with_conn(|conn| {
+            Ok::<_, anyhow::Error>(conn.query_row(
+                "SELECT mode FROM discovery_presets WHERE name = 'Cloud'",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .expect("load discovery preset mode");
+    assert_eq!(saved_mode, "word-cloud");
+
+    let _ = std::fs::remove_file(db_path);
+}
+
 // Characterization tests for TIDAL-handler failure shapes. These differ on
 // purpose: the album endpoint is "best-effort" (TIDAL is enrichment) while
 // tidal_search treats a disconnected session as a user-visible error.
@@ -3537,6 +6844,465 @@ async fn tidal_search_returns_400_when_tidal_session_absent() {
     );
 }
 
+#[tokio::test]
+async fn tidal_search_blank_query_returns_empty_payload_without_session() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/tidal/search?q=%20%20%20")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["tracks"].as_array().expect("tracks").len(), 0);
+    assert_eq!(body["albums"].as_array().expect("albums").len(), 0);
+    assert_eq!(body["artists"].as_array().expect("artists").len(), 0);
+    assert_eq!(body["videos"].as_array().expect("videos").len(), 0);
+}
+
+#[tokio::test]
+async fn tidal_artist_profile_rejects_non_positive_ids_before_session_lookup() {
+    let app = build_test_app().await;
+
+    for uri in ["/api/tidal/artists/0", "/api/tidal/artists/-7"] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("positive TIDAL artist id"),
+            "expected invalid artist id error for {uri}, got: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn tidal_artist_profile_positive_id_still_requires_session() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/tidal/artists/1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("TIDAL not connected"),
+        "expected existing disconnected-session behavior, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn tidal_album_routes_reject_non_positive_ids_before_session_lookup() {
+    let app = build_test_app().await;
+
+    for (method, uri) in [
+        ("GET", "/api/tidal/albums/0/tracks"),
+        ("GET", "/api/tidal/albums/-7/tracks"),
+        ("POST", "/api/tidal/albums/0/import"),
+        ("POST", "/api/tidal/albums/-7/import"),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{method} {uri}");
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("positive TIDAL album id"),
+            "expected invalid album id error for {method} {uri}, got: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn tidal_album_routes_positive_ids_still_require_session() {
+    let app = build_test_app().await;
+
+    for (method, uri) in [
+        ("GET", "/api/tidal/albums/1/tracks"),
+        ("POST", "/api/tidal/albums/1/import"),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{method} {uri}");
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("TIDAL not connected"),
+            "expected existing disconnected-session behavior for {method} {uri}, got: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn tidal_video_playback_rejects_non_positive_ids_before_session_lookup() {
+    let app = build_test_app().await;
+
+    for uri in [
+        "/api/tidal/videos/0/playback",
+        "/api/tidal/videos/-7/playback",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("positive TIDAL video id"),
+            "expected invalid video id error for {uri}, got: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn tidal_video_playback_positive_id_still_requires_session() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/tidal/videos/1/playback")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("TIDAL not connected"),
+        "expected existing disconnected-session behavior, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn tidal_track_import_rejects_non_positive_tidal_ids_without_db_insert() {
+    let (db, db_path) = fresh_migrated_db();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    for tidal_id in [0, -7] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tidal/tracks/import")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{
+                            "tidal_id": {tidal_id},
+                            "title": "Invalid import",
+                            "artist_name": "Invalid Artist",
+                            "artist_tidal_id": null,
+                            "album_title": null,
+                            "album_tidal_id": null,
+                            "artwork_url": null,
+                            "duration_ms": 180000
+                        }}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "tidal_id: {tidal_id}"
+        );
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("positive TIDAL track id"),
+            "expected invalid track id error for {tidal_id}, got: {body}"
+        );
+    }
+
+    let count: i64 = db
+        .with_conn(|conn| {
+            Ok::<_, anyhow::Error>(
+                conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))?,
+            )
+        })
+        .expect("count tracks");
+    assert_eq!(count, 0, "invalid imports must not create track rows");
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn tidal_track_import_rejects_invalid_metadata_without_db_insert() {
+    let invalid_cases = [
+        (
+            "blank title",
+            r#"{
+                "tidal_id": 880077,
+                "title": "   ",
+                "artist_name": "Import Artist",
+                "artist_tidal_id": 990088,
+                "album_title": "Import Album",
+                "album_tidal_id": 770066,
+                "artwork_url": "https://resources.tidal.com/images/import/640x640.jpg",
+                "duration_ms": 181000
+            }"#,
+        ),
+        (
+            "blank artist",
+            r#"{
+                "tidal_id": 880077,
+                "title": "Imported TIDAL Track",
+                "artist_name": "   ",
+                "artist_tidal_id": 990088,
+                "album_title": "Import Album",
+                "album_tidal_id": 770066,
+                "artwork_url": "https://resources.tidal.com/images/import/640x640.jpg",
+                "duration_ms": 181000
+            }"#,
+        ),
+        (
+            "non-positive artist id",
+            r#"{
+                "tidal_id": 880077,
+                "title": "Imported TIDAL Track",
+                "artist_name": "Import Artist",
+                "artist_tidal_id": 0,
+                "album_title": "Import Album",
+                "album_tidal_id": 770066,
+                "artwork_url": "https://resources.tidal.com/images/import/640x640.jpg",
+                "duration_ms": 181000
+            }"#,
+        ),
+        (
+            "non-positive album id",
+            r#"{
+                "tidal_id": 880077,
+                "title": "Imported TIDAL Track",
+                "artist_name": "Import Artist",
+                "artist_tidal_id": 990088,
+                "album_title": "Import Album",
+                "album_tidal_id": -7,
+                "artwork_url": "https://resources.tidal.com/images/import/640x640.jpg",
+                "duration_ms": 181000
+            }"#,
+        ),
+        (
+            "non-positive duration",
+            r#"{
+                "tidal_id": 880077,
+                "title": "Imported TIDAL Track",
+                "artist_name": "Import Artist",
+                "artist_tidal_id": 990088,
+                "album_title": "Import Album",
+                "album_tidal_id": 770066,
+                "artwork_url": "https://resources.tidal.com/images/import/640x640.jpg",
+                "duration_ms": 0
+            }"#,
+        ),
+    ];
+
+    for (case, body) in invalid_cases {
+        let (db, db_path) = fresh_migrated_db();
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+            db.clone(),
+        ))));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tidal/tracks/import")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{case}");
+
+        let (track_count, artist_count, album_count): (i64, i64, i64) = db
+            .with_conn(|conn| {
+                Ok::<_, anyhow::Error>((
+                    conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))?,
+                    conn.query_row("SELECT COUNT(*) FROM artists", [], |row| row.get(0))?,
+                    conn.query_row("SELECT COUNT(*) FROM albums", [], |row| row.get(0))?,
+                ))
+            })
+            .expect("count import rows");
+        assert_eq!(track_count, 0, "{case} must not create track rows");
+        assert_eq!(artist_count, 0, "{case} must not create artist rows");
+        assert_eq!(album_count, 0, "{case} must not create album rows");
+
+        let _ = std::fs::remove_file(db_path);
+    }
+}
+
+#[tokio::test]
+async fn tidal_track_import_positive_id_preserves_response_shape() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/tidal/tracks/import")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "tidal_id": 880077,
+                        "title": "Imported TIDAL Track",
+                        "artist_name": "Import Artist",
+                        "artist_tidal_id": 990088,
+                        "album_title": "Import Album",
+                        "album_tidal_id": 770066,
+                        "artwork_url": "https://resources.tidal.com/images/import/640x640.jpg",
+                        "duration_ms": 181000
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["tidal_id"], 880077);
+    assert!(
+        body["local_id"].as_i64().unwrap_or_default() > 0,
+        "expected local_id in import response: {body}"
+    );
+    assert!(
+        body["artist_id"].as_i64().unwrap_or_default() > 0,
+        "expected artist_id in import response: {body}"
+    );
+    assert!(
+        body["album_id"].as_i64().unwrap_or_default() > 0,
+        "expected album_id in import response: {body}"
+    );
+}
+
+#[tokio::test]
+async fn tidal_discover_module_items_rejects_unsafe_ids_before_session_lookup() {
+    let app = build_test_app().await;
+
+    for uri in [
+        "/api/tidal/discover-modules/%20module%20/items",
+        "/api/tidal/discover-modules/module%3Flimit=1/items",
+        "/api/tidal/discover-modules/module%23fragment/items",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+}
+
+#[tokio::test]
+async fn tidal_discover_module_items_valid_id_still_requires_session() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/tidal/discover-modules/module_1/items")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
 // Note: an integration test for the recover_tidal_session path on a 401 upstream
 // response is deferred - it requires intercepting the reqwest::Client, which
 // requires wiremock or a trait-based http client. Until that infra lands, the
@@ -3632,6 +7398,7 @@ async fn all_api_routes_are_registered() {
         ("GET", "/api/discovery/sportify/search"),
         ("GET", "/api/discovery/sportify/track/x"),
         ("GET", "/api/discovery/sportify/album/x"),
+        ("GET", "/api/discovery/sportify/playlist/x/meta"),
         ("GET", "/api/discovery/sportify/playlist/x"),
         ("GET", "/api/discovery/sportify/artist/x"),
         ("GET", "/api/discovery/sportify/artist/x/top-tracks"),
@@ -3639,6 +7406,8 @@ async fn all_api_routes_are_registered() {
         ("GET", "/api/discovery/sportify/album/x/related"),
         ("GET", "/api/discovery/sportify/track/x/related"),
         ("POST", "/api/spotify-playlist/save"),
+        ("POST", "/api/spotify-track/save"),
+        ("POST", "/api/spotify-album/save"),
         ("POST", "/api/radio/song"),
         ("POST", "/api/radio/album"),
         ("POST", "/api/radio/artist"),
@@ -3749,6 +7518,7 @@ async fn all_api_routes_are_registered() {
         ("GET", "/api/tidal/radio-stations"),
         ("GET", "/api/tidal/home-modules"),
         ("GET", "/api/tidal/discover-modules/1/items"),
+        ("GET", "/api/tidal/page/explore"),
         ("GET", "/api/tidal/page/mood/1"),
         ("GET", "/api/tidal/moods"),
         ("GET", "/api/tidal/mood-page/mood_party"),

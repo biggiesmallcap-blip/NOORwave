@@ -10,6 +10,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::{error, warn};
 
+const DUPLICATE_LIST_LIMIT_MAX: i64 = 100;
+
 #[derive(Debug, Deserialize)]
 pub(super) struct DuplicateListParams {
     limit: Option<i64>,
@@ -19,6 +21,24 @@ pub(super) struct DuplicateListParams {
 #[derive(Debug, Deserialize)]
 pub(super) struct ResolveGroupRequest {
     preferred_track_id: i64,
+}
+
+fn duplicate_list_bounds(params: DuplicateListParams) -> Result<(i64, i64), StatusCode> {
+    let limit = params.limit.unwrap_or(50);
+    let offset = params.offset.unwrap_or(0);
+
+    if !(1..=DUPLICATE_LIST_LIMIT_MAX).contains(&limit) || offset < 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    Ok((limit, offset))
+}
+
+fn require_positive_id(id: i64) -> Result<(), StatusCode> {
+    if id <= 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
 }
 
 /// Scan the library for duplicates. Runs synchronously (usually <5s for 32k tracks).
@@ -43,8 +63,7 @@ pub(super) async fn get_duplicates(
     State(state): State<SharedState>,
     Query(params): Query<DuplicateListParams>,
 ) -> Result<Json<Value>, StatusCode> {
-    let limit = params.limit.unwrap_or(50);
-    let offset = params.offset.unwrap_or(0);
+    let (limit, offset) = duplicate_list_bounds(params)?;
 
     let s = state.read().await;
     s.db.with_conn(|conn| {
@@ -61,6 +80,9 @@ pub(super) async fn resolve_duplicate_group(
     Path(group_id): Path<i64>,
     Json(payload): Json<ResolveGroupRequest>,
 ) -> Result<Json<Value>, StatusCode> {
+    require_positive_id(group_id)?;
+    require_positive_id(payload.preferred_track_id)?;
+
     // Get TIDAL tokens for unfavorite calls.
     let (tokens, http) = {
         let s = state.read().await;
@@ -134,6 +156,8 @@ pub(super) async fn dismiss_duplicate_group(
     State(state): State<SharedState>,
     Path(group_id): Path<i64>,
 ) -> Result<Json<Value>, StatusCode> {
+    require_positive_id(group_id)?;
+
     let s = state.read().await;
     s.db.with_conn(|conn| dup::dismiss_group(conn, group_id))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

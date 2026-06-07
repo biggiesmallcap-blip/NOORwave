@@ -59,6 +59,9 @@ const DROP_PREVIEW_DURATION_MS: u32 = 16_000;
 const DROP_PREVIEW_ARM_RETRY_SECS: u64 = 60 * 60;
 const PLAYBACK_FINISH_DB_LOCK_RETRY_LIMIT: usize = 60;
 const PLAYBACK_FINISH_DB_LOCK_RETRY_DELAY_SECS: u64 = 2;
+const PLAYBACK_ADVANCE_PENDING_SKIP_LIMIT: usize = 8;
+const PLAYBACK_PENDING_BUSY_RETRY_LIMIT: usize = 5;
+const PLAYBACK_PENDING_BUSY_RETRY_DELAY_MS: u64 = 200;
 
 static DROP_PREVIEW_ARM_ATTEMPTS: OnceLock<Mutex<HashMap<DropPreviewArmKey, Instant>>> =
     OnceLock::new();
@@ -698,6 +701,10 @@ pub fn api_routes(state: SharedState) -> Router {
             get(sportify_routes::sportify_discovery_album),
         )
         .route(
+            "/api/discovery/sportify/playlist/{spotify_id}/meta",
+            get(sportify_routes::sportify_discovery_playlist_meta),
+        )
+        .route(
             "/api/discovery/sportify/playlist/{spotify_id}",
             get(sportify_routes::sportify_discovery_playlist),
         )
@@ -727,6 +734,14 @@ pub fn api_routes(state: SharedState) -> Router {
         .route(
             "/api/spotify-playlist/save",
             post(sportify_routes::save_spotify_playlist),
+        )
+        .route(
+            "/api/spotify-track/save",
+            post(sportify_routes::save_spotify_track),
+        )
+        .route(
+            "/api/spotify-album/save",
+            post(sportify_routes::save_spotify_album),
         )
         .route("/api/radio/song", post(radio_song))
         .route("/api/radio/album", post(radio_album))
@@ -1023,9 +1038,8 @@ pub fn api_routes(state: SharedState) -> Router {
             get(tidal_home_routes::get_tidal_discover_module_items),
         )
         // Generic editorial page modules. Whitelisted in the handler to
-        // charts / moods / genres / new-releases (single segment) and
-        // mood/{id} / genre/{id} (two segments). Universal across the
-        // /v1/pages/* response shape.
+        // documented top-level pages plus mood/{id} / genre/{id}. Universal
+        // across the /v1/pages/* response shape.
         .route(
             "/api/tidal/page/{section}",
             get(tidal_home_routes::get_tidal_page_modules),
@@ -4390,16 +4404,30 @@ async fn start_first_radio_queue_item(
             })?
     };
 
-    let mut play_track = snapshot.state.current_track.clone();
-    if play_track.is_none()
-        && let Some(resolved) = resolve_pending_current_queue_item(state).await
-    {
-        play_track = Some(resolved);
-        let state_guard = state.read().await;
-        if let Ok(reloaded) = state_guard.db.with_conn(player::load_snapshot) {
-            snapshot = reloaded;
-        }
-    }
+    snapshot = resolve_or_skip_pending_current(
+        state,
+        snapshot,
+        playback_generation,
+        "start_first_radio_queue_item",
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(
+            target: "noor.playback.advance",
+            event = "radio_start_pending_advance_failed",
+            error = %error,
+            "failed to resolve or skip first radio queue item"
+        );
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "playback_state_update_failed",
+                "message": "Failed to start the radio queue.",
+            })),
+        )
+    })?;
+
+    let play_track = snapshot.state.current_track.clone();
 
     let end_reason = if play_track.is_some() {
         Some(player::ListenSessionEndReason::Replaced)
@@ -6902,6 +6930,7 @@ async fn resolve_pending_row(
 /// On failure the resolving_at ownership lock is always released.
 async fn resolve_pending_current_queue_item(
     state: &SharedState,
+    expected_generation: u64,
 ) -> Option<crate::db::models::Track> {
     let db = {
         let s = state.read().await;
@@ -6913,11 +6942,29 @@ async fn resolve_pending_current_queue_item(
         .ok()
         .flatten()?;
 
+    if !playback_generation_is_current(state, expected_generation).await {
+        return None;
+    }
+
+    tracing::debug!(
+        target: "noor.playback.resolve",
+        event = "pending_current_resolve_start",
+        queue_item_id,
+        tidal_id_hint,
+        "resolving current pending queue row"
+    );
+
     // Claim ownership; bail if another resolver already claimed this row.
     let claimed = db
         .with_conn(|conn| pending::try_claim(conn, queue_item_id))
         .unwrap_or(false);
     if !claimed {
+        tracing::debug!(
+            target: "noor.playback.resolve",
+            event = "pending_current_resolve_claim_skipped",
+            queue_item_id,
+            "current pending row is already being resolved"
+        );
         return None;
     }
 
@@ -6932,6 +6979,12 @@ async fn resolve_pending_current_queue_item(
         let persisted = match load_persisted_tidal_tokens(state).await.ok().flatten() {
             Some(t) => t,
             None => {
+                tracing::warn!(
+                    target: "noor.playback.resolve",
+                    event = "pending_current_resolve_no_tokens",
+                    queue_item_id,
+                    "TIDAL tokens unavailable for current pending queue row"
+                );
                 release_lock(&db, queue_item_id);
                 return None;
             }
@@ -6953,7 +7006,14 @@ async fn resolve_pending_current_queue_item(
             .await
         {
             Ok(r) => r,
-            Err(_) => {
+            Err(error) => {
+                tracing::warn!(
+                    target: "noor.playback.resolve",
+                    event = "pending_current_resolve_api_failed",
+                    queue_item_id,
+                    error = %error,
+                    "TIDAL lookup failed for current pending queue row"
+                );
                 release_lock(&db, queue_item_id);
                 return None;
             }
@@ -6962,6 +7022,12 @@ async fn resolve_pending_current_queue_item(
     let (score, metadata) = match resolved {
         Some(pair) => pair,
         None => {
+            tracing::debug!(
+                target: "noor.playback.resolve",
+                event = "pending_current_resolve_no_match",
+                queue_item_id,
+                "no acceptable TIDAL match for current pending queue row"
+            );
             release_lock(&db, queue_item_id);
             return None;
         }
@@ -6972,11 +7038,23 @@ async fn resolve_pending_current_queue_item(
 
     let (local_id, artist_local_id) = match imported {
         Ok(imp) => (imp.local_id, imp.artist_id),
-        Err(_) => {
+        Err(error) => {
+            tracing::warn!(
+                target: "noor.playback.resolve",
+                event = "pending_current_import_failed",
+                queue_item_id,
+                error = %error,
+                "import failed for current pending queue row"
+            );
             release_lock(&db, queue_item_id);
             return None;
         }
     };
+
+    if !playback_generation_is_current(state, expected_generation).await {
+        release_lock(&db, queue_item_id);
+        return None;
+    }
 
     if let Some(tid) = artist_tidal_id {
         let db_bg = db.clone();
@@ -7007,19 +7085,295 @@ async fn resolve_pending_current_queue_item(
     }
 
     // Close the NULL window so playback_state reflects the real track.
-    let _ = db.with_conn(move |conn| {
-        conn.execute(
-            "UPDATE playback_state SET current_track_id = ?1 WHERE id = 1",
-            rusqlite::params![local_id],
-        )
-        .map_err(anyhow::Error::from)
-    });
+    let state_updated = db
+        .with_conn(move |conn| {
+            conn.execute(
+                "UPDATE playback_state
+                 SET current_track_id = ?1
+                 WHERE id = 1 AND current_queue_item_id = ?2",
+                rusqlite::params![local_id, queue_item_id],
+            )
+            .map_err(anyhow::Error::from)
+        })
+        .unwrap_or(0);
+    if state_updated == 0 || !playback_generation_is_current(state, expected_generation).await {
+        return None;
+    }
     let _ = event_tx.send(AppEvent::TrackChanged { track_id: local_id });
     let _ = event_tx.send(AppEvent::PlaybackStateChanged);
+
+    tracing::info!(
+        target: "noor.playback.resolve",
+        event = "pending_current_resolve_success",
+        queue_item_id,
+        local_id,
+        score,
+        "current pending queue row resolved"
+    );
 
     db.with_conn(move |conn| queue::get_track_by_id(conn, local_id))
         .ok()
         .flatten()
+}
+
+async fn load_persisted_playback_snapshot(
+    state: &SharedState,
+) -> anyhow::Result<player::PlaybackSnapshot> {
+    let state_guard = state.read().await;
+    state_guard.db.with_conn(player::load_snapshot)
+}
+
+async fn next_persisted_playback_snapshot(
+    state: &SharedState,
+) -> anyhow::Result<player::PlaybackSnapshot> {
+    let state_guard = state.read().await;
+    let cleared = recently_cleared(&state_guard);
+    state_guard
+        .db
+        .with_conn(|conn| player::next_track(conn, cleared))
+}
+
+async fn previous_persisted_playback_snapshot(
+    state: &SharedState,
+) -> anyhow::Result<player::PlaybackSnapshot> {
+    let state_guard = state.read().await;
+    state_guard.db.with_conn(player::previous_track)
+}
+
+#[derive(Clone, Copy)]
+enum PendingAdvanceDirection {
+    Next,
+    Previous,
+}
+
+impl PendingAdvanceDirection {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Next => "next",
+            Self::Previous => "previous",
+        }
+    }
+}
+
+async fn step_persisted_playback_snapshot(
+    state: &SharedState,
+    direction: PendingAdvanceDirection,
+) -> anyhow::Result<player::PlaybackSnapshot> {
+    match direction {
+        PendingAdvanceDirection::Next => next_persisted_playback_snapshot(state).await,
+        PendingAdvanceDirection::Previous => previous_persisted_playback_snapshot(state).await,
+    }
+}
+
+async fn adopt_resolved_current_queue_item(
+    state: &SharedState,
+    queue_item_id: i64,
+    generation: u64,
+) -> anyhow::Result<Option<player::PlaybackSnapshot>> {
+    if !playback_generation_is_current(state, generation).await {
+        return Ok(None);
+    }
+
+    let (db, event_tx) = {
+        let state_guard = state.read().await;
+        (state_guard.db.clone(), state_guard.event_tx.clone())
+    };
+
+    let adopted_track_id = db.with_conn(move |conn| {
+        let track_id: Option<i64> = conn
+            .query_row(
+                "SELECT track_id FROM queue WHERE id = ?1 AND track_id IS NOT NULL",
+                params![queue_item_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(track_id) = track_id else {
+            return Ok(None);
+        };
+        let updated = conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = ?1, position_ms = 0
+             WHERE id = 1
+               AND current_track_id IS NULL
+               AND current_queue_item_id = ?2",
+            params![track_id, queue_item_id],
+        )?;
+        Ok(if updated == 1 { Some(track_id) } else { None })
+    })?;
+
+    let Some(track_id) = adopted_track_id else {
+        return Ok(None);
+    };
+    if !playback_generation_is_current(state, generation).await {
+        return Ok(None);
+    }
+
+    let _ = event_tx.send(AppEvent::TrackChanged { track_id });
+    let _ = event_tx.send(AppEvent::PlaybackStateChanged);
+    let snapshot = load_persisted_playback_snapshot(state).await?;
+    if snapshot.state.current_track.is_some() {
+        tracing::info!(
+            target: "noor.playback.resolve",
+            event = "pending_current_adopted_background_resolution",
+            queue_item_id,
+            track_id,
+            "adopted pending row resolved by background resolver"
+        );
+        return Ok(Some(snapshot));
+    }
+    Ok(None)
+}
+
+async fn pending_current_resolver_is_busy(state: &SharedState, queue_item_id: i64) -> bool {
+    let db = {
+        let state_guard = state.read().await;
+        state_guard.db.clone()
+    };
+    db.with_conn(move |conn| pending::has_fresh_resolver_lock(conn, queue_item_id))
+        .unwrap_or(false)
+}
+
+async fn stop_persisted_playback_after_advance_failure(
+    state: &SharedState,
+    context: &'static str,
+) -> anyhow::Result<player::PlaybackSnapshot> {
+    tracing::warn!(
+        target: "noor.playback.advance",
+        event = "advance_stopped_after_pending_skip_limit",
+        context,
+        "stopping playback after pending queue rows failed to resolve"
+    );
+    let state_guard = state.read().await;
+    state_guard.db.with_conn(|conn| {
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = NULL,
+                 current_queue_item_id = NULL,
+                 position_ms = 0,
+                 is_playing = 0
+             WHERE id = 1",
+            [],
+        )?;
+        player::load_snapshot(conn)
+    })
+}
+
+async fn resolve_or_skip_pending_current(
+    state: &SharedState,
+    snapshot: player::PlaybackSnapshot,
+    generation: u64,
+    context: &'static str,
+) -> anyhow::Result<player::PlaybackSnapshot> {
+    resolve_or_skip_pending_current_in_direction(
+        state,
+        snapshot,
+        generation,
+        context,
+        PendingAdvanceDirection::Next,
+    )
+    .await
+}
+
+async fn resolve_or_skip_pending_current_previous(
+    state: &SharedState,
+    snapshot: player::PlaybackSnapshot,
+    generation: u64,
+    context: &'static str,
+) -> anyhow::Result<player::PlaybackSnapshot> {
+    resolve_or_skip_pending_current_in_direction(
+        state,
+        snapshot,
+        generation,
+        context,
+        PendingAdvanceDirection::Previous,
+    )
+    .await
+}
+
+async fn resolve_or_skip_pending_current_in_direction(
+    state: &SharedState,
+    mut snapshot: player::PlaybackSnapshot,
+    generation: u64,
+    context: &'static str,
+    direction: PendingAdvanceDirection,
+) -> anyhow::Result<player::PlaybackSnapshot> {
+    let mut skipped = 0usize;
+    let mut busy_waits = 0usize;
+
+    loop {
+        if snapshot.state.current_track.is_some() || snapshot.state.current_queue_item_id.is_none()
+        {
+            return Ok(snapshot);
+        }
+
+        let Some(queue_item_id) = snapshot.state.current_queue_item_id else {
+            return Ok(snapshot);
+        };
+        if resolve_pending_current_queue_item(state, generation)
+            .await
+            .is_some()
+        {
+            snapshot = load_persisted_playback_snapshot(state).await?;
+            if snapshot.state.current_track.is_some() {
+                return Ok(snapshot);
+            }
+        } else {
+            let reloaded = load_persisted_playback_snapshot(state).await?;
+            if reloaded.state.current_track.is_some()
+                || reloaded.state.current_queue_item_id != Some(queue_item_id)
+            {
+                snapshot = reloaded;
+                busy_waits = 0;
+                continue;
+            }
+        }
+
+        if !playback_generation_is_current(state, generation).await {
+            return load_persisted_playback_snapshot(state).await;
+        }
+
+        if let Some(adopted_snapshot) =
+            adopt_resolved_current_queue_item(state, queue_item_id, generation).await?
+        {
+            return Ok(adopted_snapshot);
+        }
+
+        if busy_waits < PLAYBACK_PENDING_BUSY_RETRY_LIMIT
+            && pending_current_resolver_is_busy(state, queue_item_id).await
+        {
+            busy_waits += 1;
+            tracing::debug!(
+                target: "noor.playback.advance",
+                event = "pending_current_busy_wait",
+                context,
+                queue_item_id,
+                busy_waits,
+                direction = direction.as_str(),
+                "current pending row is still resolving; waiting before skip"
+            );
+            tokio::time::sleep(Duration::from_millis(PLAYBACK_PENDING_BUSY_RETRY_DELAY_MS)).await;
+            snapshot = load_persisted_playback_snapshot(state).await?;
+            continue;
+        }
+
+        skipped += 1;
+        busy_waits = 0;
+        tracing::warn!(
+            target: "noor.playback.advance",
+            event = "pending_current_skipped",
+            context,
+            queue_item_id,
+            skipped,
+            direction = direction.as_str(),
+            "current pending row did not resolve; stepping over queue item"
+        );
+
+        if skipped > PLAYBACK_ADVANCE_PENDING_SKIP_LIMIT {
+            return stop_persisted_playback_after_advance_failure(state, context).await;
+        }
+
+        snapshot = step_persisted_playback_snapshot(state, direction).await?;
+    }
 }
 
 async fn advance_ephemeral_next_if_needed(
@@ -7103,6 +7457,7 @@ fn automix_discover_new_fallback_seed(
     if !snapshot.state.automix_discover_new {
         return None;
     }
+    let current_track_id = snapshot.state.current_track.as_ref().map(|track| track.id);
     let current_pos = snapshot
         .state
         .current_queue_item_id
@@ -7111,6 +7466,7 @@ fn automix_discover_new_fallback_seed(
                 .queue
                 .iter()
                 .find(|item| item.id == qid)
+                .filter(|item| Some(item.track.id) == current_track_id)
                 .map(|item| item.position)
         })
         .or_else(|| {
@@ -7162,31 +7518,24 @@ async fn next_track(
     };
 
     set_external_playback_track(&state, None).await;
-
-    // If the new current item has no library track (pending row), resolve it to Tidal now.
-    let effective_current_track: Option<crate::db::models::Track> =
-        if let Some(t) = snapshot.state.current_track.clone() {
-            Some(t)
-        } else {
-            let resolved = resolve_pending_current_queue_item(&state).await;
-            match resolved {
-                Some(ref t) => {
-                    // Store for snapshot overlay at the bottom of this handler.
-                    set_external_playback_track(&state, Some(t.clone())).await;
-                }
-                None => {
-                    // Unresolvable: advance one more step to skip the dead row.
-                    if let Ok(next_snapshot) = {
-                        let s = state.read().await;
-                        let cleared = recently_cleared(&s);
-                        s.db.with_conn(|conn| player::next_track(conn, cleared))
-                    } {
-                        snapshot = next_snapshot;
-                    }
-                }
-            }
-            resolved
-        };
+    snapshot =
+        resolve_or_skip_pending_current(&state, snapshot, playback_generation, "manual_next_track")
+            .await
+            .map_err(|error| {
+                tracing::error!(
+                    target: "noor.playback.advance",
+                    event = "manual_next_pending_advance_failed",
+                    error = %error,
+                    "failed to resolve or skip pending row while advancing playback"
+                );
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "status": "playback_state_update_failed",
+                        "message": "Failed to advance playback state.",
+                    })),
+                )
+            })?;
 
     if !playback_generation_is_current(&state, playback_generation).await {
         return current_playback_snapshot_json(&state).await;
@@ -7204,19 +7553,14 @@ async fn next_track(
         });
     }
 
-    // A resolved pending track counts as Replaced, not QueueEnded.
-    let end_reason = if effective_current_track.is_some() || snapshot.state.current_track.is_some()
-    {
+    let end_reason = if snapshot.state.current_track.is_some() {
         Some(player::ListenSessionEndReason::Replaced)
     } else {
         Some(player::ListenSessionEndReason::QueueEnded)
     };
     sync_session_after_snapshot(&state, &snapshot, end_reason).await;
 
-    // Use the resolved pending track if the snapshot has no library track.
-    let play_track = effective_current_track
-        .as_ref()
-        .or(snapshot.state.current_track.as_ref());
+    let play_track = snapshot.state.current_track.as_ref();
 
     if let Some(track) = play_track {
         let user_quality = current_user_audio_quality(&state).await;
@@ -7287,10 +7631,7 @@ async fn next_track(
     }
 
     let state_guard = state.read().await;
-    let event_track_id = effective_current_track
-        .as_ref()
-        .or(snapshot.state.current_track.as_ref())
-        .map(|t| t.id);
+    let event_track_id = snapshot.state.current_track.as_ref().map(|t| t.id);
     if let Some(track_id) = event_track_id {
         let _ = state_guard
             .event_tx
@@ -7325,29 +7666,28 @@ async fn previous_track(
     };
 
     set_external_playback_track(&state, None).await;
-
-    // If the previous item is a pending (non-library) queue row, resolve it to Tidal now.
-    // Same pattern as `next_track`. Unresolvable rows are skipped by stepping back once more.
-    let effective_current_track: Option<crate::db::models::Track> =
-        if let Some(t) = snapshot.state.current_track.clone() {
-            Some(t)
-        } else {
-            let resolved = resolve_pending_current_queue_item(&state).await;
-            match resolved {
-                Some(ref t) => {
-                    set_external_playback_track(&state, Some(t.clone())).await;
-                }
-                None => {
-                    if let Ok(prev_snapshot) = {
-                        let s = state.read().await;
-                        s.db.with_conn(player::previous_track)
-                    } {
-                        snapshot = prev_snapshot;
-                    }
-                }
-            }
-            resolved
-        };
+    snapshot = resolve_or_skip_pending_current_previous(
+        &state,
+        snapshot,
+        playback_generation,
+        "manual_previous_track",
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(
+            target: "noor.playback.advance",
+            event = "manual_previous_pending_advance_failed",
+            error = %error,
+            "failed to resolve or skip pending row while moving to previous playback item"
+        );
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "playback_state_update_failed",
+                "message": "Failed to move to the previous track.",
+            })),
+        )
+    })?;
 
     if !playback_generation_is_current(&state, playback_generation).await {
         return current_playback_snapshot_json(&state).await;
@@ -7362,9 +7702,7 @@ async fn previous_track(
     )
     .await;
 
-    let play_track = effective_current_track
-        .as_ref()
-        .or(snapshot.state.current_track.as_ref());
+    let play_track = snapshot.state.current_track.as_ref();
 
     if let Some(track) = play_track {
         let user_quality = current_user_audio_quality(&state).await;
@@ -7433,10 +7771,7 @@ async fn previous_track(
     }
 
     let state_guard = state.read().await;
-    let event_track_id = effective_current_track
-        .as_ref()
-        .or(snapshot.state.current_track.as_ref())
-        .map(|t| t.id);
+    let event_track_id = snapshot.state.current_track.as_ref().map(|t| t.id);
     if let Some(track_id) = event_track_id {
         let _ = state_guard
             .event_tx
@@ -7540,7 +7875,7 @@ async fn set_playback_shuffle(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // The pending TIDAL mix queue lives in-memory outside the DB queue, so
-    // `apply_shuffle` above never sees it. Reorder it here so flipping shuffle
+    // `set_shuffle_mode` above never sees it. Reorder it here so flipping shuffle
     // on during a TIDAL mix actually changes what plays next. Pending entries
     // carry no genre/artist_id metadata, so genre/weighted modes degrade to a
     // plain Fisher-Yates - same shape as `true` shuffle.
@@ -7685,32 +8020,161 @@ fn queue_external_insert<'a>(
 }
 
 fn current_queue_position(conn: &rusqlite::Connection) -> anyhow::Result<Option<i32>> {
-    let by_queue_item: Option<i32> = conn
-        .query_row(
-            "SELECT q.position
-             FROM playback_state ps
-             JOIN queue q ON q.id = ps.current_queue_item_id
-             WHERE ps.id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if by_queue_item.is_some() {
-        return Ok(by_queue_item);
+    let (current_queue_item_id, current_track_id): (Option<i64>, Option<i64>) = conn.query_row(
+        "SELECT current_queue_item_id, current_track_id FROM playback_state WHERE id = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+
+    if let Some(queue_item_id) = current_queue_item_id {
+        if queue_item_matches_current_track(conn, queue_item_id, current_track_id)?
+            && let Some(position) = queue_item_position(conn, queue_item_id)?
+        {
+            return Ok(Some(position));
+        }
     }
 
+    if let Some(track_id) = current_track_id {
+        if let Some((queue_item_id, position)) = first_queue_item_for_track(conn, track_id)? {
+            conn.execute(
+                "UPDATE playback_state SET current_queue_item_id = ?1 WHERE id = 1",
+                params![queue_item_id],
+            )?;
+            return Ok(Some(position));
+        }
+    }
+
+    if current_queue_item_id.is_some() {
+        conn.execute(
+            "UPDATE playback_state SET current_queue_item_id = NULL WHERE id = 1",
+            [],
+        )?;
+    }
+
+    Ok(None)
+}
+
+fn queue_item_position(
+    conn: &rusqlite::Connection,
+    queue_item_id: i64,
+) -> anyhow::Result<Option<i32>> {
     Ok(conn
         .query_row(
-            "SELECT q.position
-             FROM playback_state ps
-             JOIN queue q ON q.track_id = ps.current_track_id
-             WHERE ps.id = 1 AND ps.current_track_id IS NOT NULL
-             ORDER BY q.position ASC, q.id ASC
-             LIMIT 1",
-            [],
+            "SELECT position FROM queue WHERE id = ?1",
+            params![queue_item_id],
             |row| row.get(0),
         )
         .optional()?)
+}
+
+fn first_queue_item_for_track(
+    conn: &rusqlite::Connection,
+    track_id: i64,
+) -> anyhow::Result<Option<(i64, i32)>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, position
+             FROM queue
+             WHERE track_id = ?1
+             ORDER BY position ASC, id ASC
+             LIMIT 1",
+            params![track_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?)
+}
+
+fn first_queue_item_id_for_track(
+    conn: &rusqlite::Connection,
+    track_id: i64,
+) -> anyhow::Result<Option<i64>> {
+    Ok(first_queue_item_for_track(conn, track_id)?.map(|(id, _)| id))
+}
+
+fn preserve_only_queue_item(conn: &rusqlite::Connection, queue_item_id: i64) -> anyhow::Result<()> {
+    conn.execute("DELETE FROM queue WHERE id != ?1", params![queue_item_id])?;
+    conn.execute(
+        "UPDATE playback_state SET current_queue_item_id = ?1 WHERE id = 1",
+        params![queue_item_id],
+    )?;
+    Ok(())
+}
+
+fn preserve_current_track_queue_row(
+    conn: &rusqlite::Connection,
+    track_id: i64,
+) -> anyhow::Result<()> {
+    if let Some(queue_item_id) = first_queue_item_id_for_track(conn, track_id)? {
+        preserve_only_queue_item(conn, queue_item_id)?;
+    } else {
+        queue::clear_queue(conn)?;
+        conn.execute(
+            "UPDATE playback_state SET current_queue_item_id = NULL WHERE id = 1",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn queue_item_track_id(
+    conn: &rusqlite::Connection,
+    queue_item_id: i64,
+) -> anyhow::Result<Option<Option<i64>>> {
+    Ok(conn
+        .query_row(
+            "SELECT track_id FROM queue WHERE id = ?1",
+            params![queue_item_id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+fn queue_item_matches_current_track(
+    conn: &rusqlite::Connection,
+    queue_item_id: i64,
+    current_track_id: Option<i64>,
+) -> anyhow::Result<bool> {
+    Ok(queue_item_track_id(conn, queue_item_id)?
+        .map(|track_id| track_id == current_track_id)
+        .unwrap_or(false))
+}
+
+fn repair_moved_queue_current_anchor(
+    conn: &rusqlite::Connection,
+    moved_queue_item_id: i64,
+) -> anyhow::Result<bool> {
+    let (current_track_id, current_queue_item_id): (Option<i64>, Option<i64>) = conn.query_row(
+        "SELECT current_track_id, current_queue_item_id FROM playback_state WHERE id = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if let Some(queue_item_id) = current_queue_item_id
+        && queue_item_matches_current_track(conn, queue_item_id, current_track_id)?
+    {
+        return Ok(false);
+    }
+
+    let repaired_queue_item_id = match current_track_id {
+        Some(track_id) => {
+            let moved_track_id = queue_item_track_id(conn, moved_queue_item_id)?.flatten();
+            if moved_track_id == Some(track_id) {
+                Some(moved_queue_item_id)
+            } else {
+                first_queue_item_id_for_track(conn, track_id)?
+            }
+        }
+        None => None,
+    };
+
+    if repaired_queue_item_id == current_queue_item_id {
+        return Ok(false);
+    }
+
+    conn.execute(
+        "UPDATE playback_state SET current_queue_item_id = ?1 WHERE id = 1",
+        params![repaired_queue_item_id],
+    )?;
+    Ok(true)
 }
 
 async fn spawn_pending_queue_resolver(state: &SharedState, queue_item_id: i64) {
@@ -7773,6 +8237,15 @@ async fn queue_append(
             })?
     };
 
+    let pending_count = matches!(inserted, queue::InsertResult::Pending { .. }) as usize;
+    tracing::info!(
+        target: "noor.playback.queue",
+        event = "queue_append",
+        item_count = 1,
+        pending_count,
+        "appended queue item"
+    );
+
     if let queue::InsertResult::Pending { queue_id } = inserted {
         spawn_pending_queue_resolver(&state, queue_id).await;
     }
@@ -7801,10 +8274,7 @@ async fn queue_append_many(
         state_guard
             .db
             .with_conn(|conn| {
-                let mut inserted = Vec::with_capacity(inserts.len());
-                for insert in &inserts {
-                    inserted.push(queue::append_external_track(conn, insert)?);
-                }
+                let inserted = queue::append_external_tracks(conn, &inserts)?;
                 let queue = queue::load_queue(conn)?;
                 let _ = event_tx.send(AppEvent::QueueUpdated);
                 Ok((queue, inserted))
@@ -7816,6 +8286,18 @@ async fn queue_append_many(
                 )
             })?
     };
+
+    let pending_count = inserted
+        .iter()
+        .filter(|item| matches!(**item, queue::InsertResult::Pending { .. }))
+        .count();
+    tracing::info!(
+        target: "noor.playback.queue",
+        event = "queue_append_many",
+        item_count = inserts.len(),
+        pending_count,
+        "appended queue items"
+    );
 
     for item in inserted {
         if let queue::InsertResult::Pending { queue_id } = item {
@@ -7859,6 +8341,15 @@ async fn queue_play_next(
             })?
     };
 
+    let pending_count = matches!(inserted, queue::InsertResult::Pending { .. }) as usize;
+    tracing::info!(
+        target: "noor.playback.queue",
+        event = "queue_play_next",
+        item_count = 1,
+        pending_count,
+        "inserted queue item after current"
+    );
+
     if let queue::InsertResult::Pending { queue_id } = inserted {
         spawn_pending_queue_resolver(&state, queue_id).await;
     }
@@ -7887,22 +8378,12 @@ async fn queue_play_next_many(
         state_guard
             .db
             .with_conn(|conn| {
-                let mut inserted = Vec::with_capacity(inserts.len());
-                match current_queue_position(conn)? {
+                let inserted = match current_queue_position(conn)? {
                     Some(position) => {
-                        // Insert in reverse so repeated "after current" inserts preserve
-                        // the caller's original order in the queue.
-                        for insert in inserts.iter().rev() {
-                            inserted
-                                .push(queue::insert_external_track_after(conn, insert, position)?);
-                        }
+                        queue::insert_external_tracks_after(conn, &inserts, position)?
                     }
-                    None => {
-                        for insert in &inserts {
-                            inserted.push(queue::append_external_track(conn, insert)?);
-                        }
-                    }
-                }
+                    None => queue::append_external_tracks(conn, &inserts)?,
+                };
                 let queue = queue::load_queue(conn)?;
                 let _ = event_tx.send(AppEvent::QueueUpdated);
                 Ok((queue, inserted))
@@ -7914,6 +8395,18 @@ async fn queue_play_next_many(
                 )
             })?
     };
+
+    let pending_count = inserted
+        .iter()
+        .filter(|item| matches!(**item, queue::InsertResult::Pending { .. }))
+        .count();
+    tracing::info!(
+        target: "noor.playback.queue",
+        event = "queue_play_next_many",
+        item_count = inserts.len(),
+        pending_count,
+        "inserted queue items after current"
+    );
 
     for item in inserted {
         if let queue::InsertResult::Pending { queue_id } = item {
@@ -7996,20 +8489,59 @@ async fn remove_queue_track(
     State(state): State<SharedState>,
     Json(payload): Json<QueueRemoveRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    let response = {
+    let outcome = {
         let state_guard = state.read().await;
         state_guard
             .db
-            .with_conn(|conn| {
-                queue::remove_queue_item(conn, payload.queue_item_id)?;
-                let queue = queue::load_queue(conn)?;
-                let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
-                Ok(Json(json!({ "queue": queue })))
-            })
+            .with_conn(|conn| player::remove_queue_item_and_reconcile(conn, payload.queue_item_id))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
-    refresh_dj_after_queue_change(state, "remove_queue_track").await;
-    Ok(response)
+
+    let include_playback_state = outcome.removed_current;
+    let mut snapshot = outcome.snapshot;
+    if outcome.removed_current && outcome.was_playing {
+        let playback_generation = bump_playback_generation(&state).await;
+        snapshot = resolve_or_skip_pending_current(
+            &state,
+            snapshot,
+            playback_generation,
+            "remove_queue_track",
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let end_reason = if snapshot.state.current_track.is_some() {
+            Some(player::ListenSessionEndReason::Replaced)
+        } else {
+            Some(player::ListenSessionEndReason::QueueEnded)
+        };
+        sync_session_after_snapshot(&state, &snapshot, end_reason).await;
+        if snapshot.state.current_track.is_none()
+            && let Some(runtime_handle) = current_playback_runtime(&state).await
+        {
+            let _ = runtime_handle.stop();
+        }
+        switch_runtime_to_snapshot_current(&state, &snapshot, playback_generation)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    } else if outcome.removed_current {
+        let state_guard = state.read().await;
+        let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+        let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
+    } else {
+        let state_guard = state.read().await;
+        let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
+    }
+
+    refresh_dj_after_queue_change(state.clone(), "remove_queue_track").await;
+    let snapshot = overlay_snapshot_with_external_track(&state, snapshot).await;
+    if include_playback_state {
+        Ok(Json(json!({
+            "queue": snapshot.queue,
+            "playback_state": snapshot.state
+        })))
+    } else {
+        Ok(Json(json!({ "queue": snapshot.queue })))
+    }
 }
 
 async fn move_queue_track(
@@ -8022,9 +8554,27 @@ async fn move_queue_track(
             .db
             .with_conn(|conn| {
                 queue::move_queue_item(conn, payload.item_id, payload.new_pos)?;
-                let queue = queue::load_queue(conn)?;
+                let repaired_anchor = repair_moved_queue_current_anchor(conn, payload.item_id)?;
+                let snapshot = if repaired_anchor {
+                    Some(player::load_snapshot(conn)?)
+                } else {
+                    None
+                };
+                let queue = match &snapshot {
+                    Some(snapshot) => snapshot.queue.clone(),
+                    None => queue::load_queue(conn)?,
+                };
+                if repaired_anchor {
+                    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+                }
                 let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
-                Ok(Json(json!({ "queue": queue })))
+                Ok(match snapshot {
+                    Some(snapshot) => Json(json!({
+                        "queue": queue,
+                        "playback_state": snapshot.state
+                    })),
+                    None => Json(json!({ "queue": queue })),
+                })
             })
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
@@ -8038,48 +8588,56 @@ async fn clear_queue_route(State(state): State<SharedState>) -> Result<Json<Valu
         state_guard
             .db
             .with_conn(|conn| {
-            let (current_track_id, current_queue_item_id): (Option<i64>, Option<i64>) =
-                conn.query_row(
-                    "SELECT current_track_id, current_queue_item_id FROM playback_state WHERE id = 1",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )?;
-            match (current_track_id, current_queue_item_id) {
-                (Some(track_id), _) => {
-                    // Library track playing - preserve by track_id.
-                    conn.execute("DELETE FROM queue WHERE track_id != ?1", params![track_id])?;
+                let (current_track_id, current_queue_item_id): (Option<i64>, Option<i64>) =
+                    conn.query_row(
+                        "SELECT current_track_id, current_queue_item_id FROM playback_state WHERE id = 1",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )?;
+                match (current_queue_item_id, current_track_id) {
+                    (Some(qid), track_id) => {
+                        if queue_item_matches_current_track(conn, qid, track_id)? {
+                            preserve_only_queue_item(conn, qid)?;
+                        } else if let Some(track_id) = track_id {
+                            preserve_current_track_queue_row(conn, track_id)?;
+                        } else {
+                            queue::clear_queue(conn)?;
+                            conn.execute(
+                                "UPDATE playback_state SET current_queue_item_id = NULL WHERE id = 1",
+                                [],
+                            )?;
+                        }
+                    }
+                    (None, Some(track_id)) => {
+                        preserve_current_track_queue_row(conn, track_id)?;
+                    }
+                    (None, None) => {
+                        queue::clear_queue(conn)?;
+                    }
                 }
-                (None, Some(qid)) => {
-                    // Pending row playing - preserve by queue item id.
-                    conn.execute("DELETE FROM queue WHERE id != ?1", params![qid])?;
-                }
-                (None, None) => {
-                    queue::clear_queue(conn)?;
-                }
-            }
                 state_guard.pending_tidal_mix_queue.lock().unwrap().clear();
-            // Return the full PlaybackSnapshot ({state, queue}) so the UI can
-            // refresh both at once - additive over the prior `{queue}` shape:
-            // existing consumers keep reading `queue`, new ones read
-            // `playback_state`.
-            let snapshot = player::load_snapshot(conn)?;
-            // Stamp now() so `ensure_automix_queue_depth` suppresses refill
-            // for ~60s; otherwise automix would immediately repopulate the
-            // queue and negate the user's manual clear (current_track is
-            // still set, which is the only gate the helper checks).
-            let now_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
+                // Return the full PlaybackSnapshot ({state, queue}) so the UI can
+                // refresh both at once - additive over the prior `{queue}` shape:
+                // existing consumers keep reading `queue`, new ones read
+                // `playback_state`.
+                let snapshot = player::load_snapshot(conn)?;
+                // Stamp now() so `ensure_automix_queue_depth` suppresses refill
+                // for ~60s; otherwise automix would immediately repopulate the
+                // queue and negate the user's manual clear (current_track is
+                // still set, which is the only gate the helper checks).
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
                 state_guard
-                .user_cleared_at
-                .store(now_secs, std::sync::atomic::Ordering::Relaxed);
+                    .user_cleared_at
+                    .store(now_secs, std::sync::atomic::Ordering::Relaxed);
                 let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
-            Ok(Json(json!({
-                "queue": snapshot.queue,
-                "playback_state": snapshot.state,
-            })))
-        })
+                Ok(Json(json!({
+                    "queue": snapshot.queue,
+                    "playback_state": snapshot.state,
+                })))
+            })
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
     refresh_dj_after_queue_change(state, "clear_queue_route").await;
@@ -8478,18 +9036,41 @@ async fn tidal_status(State(state): State<SharedState>) -> Json<Value> {
         },
     };
 
-    if let Some(tokens) = tokens {
+    if let Some(mut tokens) = tokens {
         if !tokens.is_pkce() {
             tidal_auth::warn_if_fallback_client_credentials();
         }
+        let mut expired = tidal_tokens_locally_expired(&state, &tokens)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("Failed to inspect persisted TIDAL token expiry: {error}");
+                false
+            });
+        if expired && !tokens.refresh_token.trim().is_empty() {
+            let http_client = {
+                let s = state.read().await;
+                s.http_client.clone()
+            };
+            match recover_tidal_session(&state, &http_client, &tokens).await {
+                Ok(refreshed) => {
+                    tokens = refreshed;
+                    expired = false;
+                }
+                Err(error) => {
+                    tracing::warn!("Failed to refresh expired TIDAL session for status: {error}");
+                }
+            }
+        }
         Json(tidal_status_payload(
             Some(&tokens),
+            expired,
             tidal_auth::tidal_pkce_client_credential_source(),
             tidal_auth::tidal_client_credential_source(),
         ))
     } else {
         Json(tidal_status_payload(
             None,
+            false,
             tidal_auth::tidal_pkce_client_credential_source(),
             tidal_auth::tidal_client_credential_source(),
         ))
@@ -8498,6 +9079,7 @@ async fn tidal_status(State(state): State<SharedState>) -> Json<Value> {
 
 fn tidal_status_payload(
     tokens: Option<&tidal_auth::TidalTokens>,
+    token_expired: bool,
     pkce_source: tidal_auth::TidalCredentialSource,
     legacy_source: tidal_auth::TidalCredentialSource,
 ) -> Value {
@@ -8505,6 +9087,15 @@ fn tidal_status_payload(
         return json!({ "connected": false });
     };
     let auth_flow = tokens.auth_flow.as_deref().unwrap_or("legacy");
+    if token_expired {
+        return json!({
+            "connected": false,
+            "reason": "token_expired",
+            "user_id": tokens.user_id,
+            "country_code": tokens.country_code,
+            "auth_flow": auth_flow,
+        });
+    }
     let mut body = json!({
         "connected": true,
         "user_id": tokens.user_id,
@@ -8527,6 +9118,74 @@ fn tidal_status_payload(
     body
 }
 
+async fn tidal_tokens_locally_expired(
+    state: &SharedState,
+    tokens: &tidal_auth::TidalTokens,
+) -> anyhow::Result<bool> {
+    let db = {
+        let s = state.read().await;
+        s.db.clone()
+    };
+    let record = db.with_conn(|conn| {
+        let result = conn.query_row(
+            "SELECT token_expiry, connected_at FROM service_auth WHERE service='tidal'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
+        );
+        match result {
+            Ok(record) => Ok(Some(record)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    })?;
+    let Some((token_expiry, connected_at)) = record else {
+        return Ok(false);
+    };
+    Ok(tidal_token_expired_at(
+        token_expiry.as_deref(),
+        connected_at.as_deref(),
+        tokens.expires_in,
+        chrono::Utc::now(),
+    ))
+}
+
+fn tidal_token_expired_at(
+    token_expiry: Option<&str>,
+    connected_at: Option<&str>,
+    expires_in: i64,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let expiry = token_expiry.and_then(parse_service_auth_time).or_else(|| {
+        let connected_at = connected_at.and_then(parse_service_auth_time)?;
+        Some(connected_at + chrono::Duration::seconds(expires_in.max(0)))
+    });
+    expiry
+        .map(|expiry| expiry <= now + chrono::Duration::seconds(60))
+        .unwrap_or(false)
+}
+
+fn parse_service_auth_time(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    chrono::DateTime::parse_from_rfc3339(trimmed)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .ok()
+        .or_else(|| {
+            chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S")
+                .ok()
+                .map(|dt| {
+                    chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc)
+                })
+        })
+}
+
 /// Clear TIDAL session (logout).
 async fn tidal_logout(State(state): State<SharedState>) -> Json<Value> {
     tracing::info!(target: "noor.sync.tidal", event = "session_logout", "TIDAL session cleared by user");
@@ -8541,6 +9200,33 @@ struct TidalSearchParams {
     q: String,
     limit: Option<i32>,
     offset: Option<i32>,
+}
+
+const TIDAL_SEARCH_DEFAULT_LIMIT: i32 = 20;
+const TIDAL_SEARCH_MAX_LIMIT: i32 = 50;
+
+fn normalize_tidal_search_query(query: &str) -> Option<&str> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn normalize_tidal_search_limit(limit: Option<i32>) -> i32 {
+    limit
+        .unwrap_or(TIDAL_SEARCH_DEFAULT_LIMIT)
+        .clamp(1, TIDAL_SEARCH_MAX_LIMIT)
+}
+
+fn empty_tidal_search_response() -> Json<Value> {
+    Json(json!({
+        "tracks": [],
+        "albums": [],
+        "artists": [],
+        "videos": [],
+    }))
 }
 
 #[derive(Serialize)]
@@ -8596,6 +9282,10 @@ async fn tidal_search(
     State(state): State<SharedState>,
     Query(params): Query<TidalSearchParams>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(query) = normalize_tidal_search_query(&params.q) else {
+        return Ok(empty_tidal_search_response());
+    };
+
     let tokens = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (
@@ -8614,7 +9304,7 @@ async fn tidal_search(
         ));
     };
 
-    let limit = params.limit.unwrap_or(20).min(50);
+    let limit = normalize_tidal_search_limit(params.limit);
     let offset = params.offset.unwrap_or(0).max(0);
     // Snapshot what we need from state in one lock acquisition.
     let (db, http_client, tidal_http_client) = {
@@ -8631,7 +9321,7 @@ async fn tidal_search(
     // Cache check - best-effort. A read failure must NOT block the upstream call.
     let cached = db
         .with_conn(|conn| {
-            crate::services::tidal::cache::get_search(conn, &cache_cfg, &params.q, limit, offset)
+            crate::services::tidal::cache::get_search(conn, &cache_cfg, query, limit, offset)
         })
         .ok()
         .flatten();
@@ -8645,7 +9335,7 @@ async fn tidal_search(
     let results = if let Some(hit) = cached {
         hit
     } else {
-        let fetched = match client.search_catalog(&params.q, limit, offset).await {
+        let fetched = match client.search_catalog_core(query, limit, offset).await {
             Ok(r) => r,
             Err(e) if error_looks_like_auth(&e) => {
                 let refreshed = recover_tidal_session(&state, &http_client, &tokens)
@@ -8664,7 +9354,7 @@ async fn tidal_search(
                     refreshed.country_code.clone(),
                 );
                 retry_client
-                    .search_catalog(&params.q, limit, offset)
+                    .search_catalog_core(query, limit, offset)
                     .await
                     .map_err(|e2| {
                         (
@@ -8682,7 +9372,7 @@ async fn tidal_search(
         };
         // Best-effort cache write - log and continue on failure.
         let to_cache = fetched.clone();
-        let q_owned = params.q.clone();
+        let q_owned = query.to_string();
         let lim_for_write = limit;
         let off_for_write = offset;
         if let Err(e) = db.with_conn(move |conn| {
@@ -8751,7 +9441,7 @@ async fn tidal_search(
         })
         .collect();
 
-    let mut artists: Vec<TidalSearchArtistResp> = results
+    let artists: Vec<TidalSearchArtistResp> = results
         .artists
         .into_iter()
         .map(|a| {
@@ -8765,45 +9455,6 @@ async fn tidal_search(
             }
         })
         .collect();
-
-    // TIDAL's catalog-search response often omits artist `picture`, so most
-    // search-result artists land here with `artwork_url = None` and render as
-    // initials in the UI. The /artists/{id} endpoint carries the canonical
-    // picture; fan out a parallel fetch for any artist still missing artwork
-    // and backfill. Tight cap (12) to bound the fan-out -- artists past that
-    // tend to be long-tail rows the user is unlikely to scroll to anyway.
-    const ARTIST_PHOTO_BACKFILL_CAP: usize = 12;
-    let backfill_targets: Vec<(usize, i64)> = artists
-        .iter()
-        .enumerate()
-        .filter(|(_, a)| a.artwork_url.is_none())
-        .take(ARTIST_PHOTO_BACKFILL_CAP)
-        .map(|(i, a)| (i, a.tidal_id))
-        .collect();
-    if !backfill_targets.is_empty() {
-        let backfill_client = client.clone();
-        let fetches = backfill_targets.iter().map(|(idx, tidal_id)| {
-            let c = backfill_client.clone();
-            let id = *tidal_id;
-            let i = *idx;
-            async move {
-                let url = c
-                    .get_artist(id)
-                    .await
-                    .ok()
-                    .and_then(|a| TidalClient::get_artwork_url(&a.picture, 640));
-                (i, url)
-            }
-        });
-        let results: Vec<(usize, Option<String>)> = futures::future::join_all(fetches).await;
-        for (i, url) in results {
-            if let Some(u) = url {
-                if let Some(slot) = artists.get_mut(i) {
-                    slot.artwork_url = Some(u);
-                }
-            }
-        }
-    }
 
     let videos: Vec<TidalSearchVideoResp> = results
         .videos
@@ -8833,6 +9484,21 @@ fn tidal_video_to_resp(video: TidalSearchVideo) -> TidalSearchVideoResp {
     }
 }
 
+const TIDAL_VIDEO_MIX_ID_MAX_LEN: usize = 96;
+
+fn normalize_tidal_video_mix_id(id: &str) -> Result<&str, StatusCode> {
+    let trimmed = id.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > TIDAL_VIDEO_MIX_ID_MAX_LEN
+        || !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(trimmed)
+}
+
 async fn tidal_request_tokens(
     state: &SharedState,
 ) -> Result<Option<tidal_auth::TidalTokens>, (StatusCode, Json<Value>)> {
@@ -8850,6 +9516,10 @@ async fn tidal_video_search(
     State(state): State<SharedState>,
     Query(params): Query<TidalSearchParams>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(query) = normalize_tidal_video_search_query(&params.q) else {
+        return Ok(Json(json!({ "videos": [] })));
+    };
+
     let Some(tokens) = tidal_request_tokens(&state).await? else {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -8857,7 +9527,7 @@ async fn tidal_video_search(
         ));
     };
 
-    let limit = params.limit.unwrap_or(20).min(50);
+    let limit = normalize_tidal_video_search_limit(params.limit);
     let offset = params.offset.unwrap_or(0).max(0);
     let (http_client, tidal_http_client) = {
         let s = state.read().await;
@@ -8868,7 +9538,7 @@ async fn tidal_video_search(
         tokens.access_token.clone(),
         tokens.country_code.clone(),
     );
-    let videos = match client.search_videos(&params.q, limit, offset).await {
+    let videos = match client.search_videos(query, limit, offset).await {
         Ok(videos) => videos,
         Err(e) if error_looks_like_auth(&e) => {
             let refreshed = recover_tidal_session(&state, &http_client, &tokens)
@@ -8885,7 +9555,7 @@ async fn tidal_video_search(
                 refreshed.country_code.clone(),
             );
             retry_client
-                .search_videos(&params.q, limit, offset)
+                .search_videos(query, limit, offset)
                 .await
                 .map_err(|e2| {
                     (
@@ -8905,6 +9575,24 @@ async fn tidal_video_search(
     Ok(Json(json!({
         "videos": videos.into_iter().map(tidal_video_to_resp).collect::<Vec<_>>()
     })))
+}
+
+const TIDAL_VIDEO_SEARCH_DEFAULT_LIMIT: i32 = 20;
+const TIDAL_VIDEO_SEARCH_MAX_LIMIT: i32 = 50;
+
+fn normalize_tidal_video_search_query(query: &str) -> Option<&str> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn normalize_tidal_video_search_limit(limit: Option<i32>) -> i32 {
+    limit
+        .unwrap_or(TIDAL_VIDEO_SEARCH_DEFAULT_LIMIT)
+        .clamp(1, TIDAL_VIDEO_SEARCH_MAX_LIMIT)
 }
 
 fn tidal_track_artwork_url(t: &TidalTrack, size: i32) -> Option<String> {
@@ -9053,6 +9741,13 @@ async fn tidal_video_playback(
     Path(video_id): Path<i64>,
     Query(params): Query<TidalVideoPlaybackParams>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if video_id <= 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Expected a positive TIDAL video id" })),
+        ));
+    }
+
     let Some(tokens) = tidal_request_tokens(&state).await? else {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -9116,6 +9811,13 @@ async fn tidal_video_mix_items(
     State(state): State<SharedState>,
     Path(mix_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mix_id = normalize_tidal_video_mix_id(&mix_id).map_err(|status| {
+        (
+            status,
+            Json(json!({ "error": "invalid TIDAL video mix id" })),
+        )
+    })?;
+
     let Some(tokens) = tidal_request_tokens(&state).await? else {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -9132,7 +9834,7 @@ async fn tidal_video_mix_items(
         tokens.access_token.clone(),
         tokens.country_code.clone(),
     );
-    let items = match client.get_video_mix_items(&mix_id).await {
+    let items = match client.get_video_mix_items(mix_id).await {
         Ok(items) => items,
         Err(e) if error_looks_like_auth(&e) => {
             let refreshed = recover_tidal_session(&state, &http_client, &tokens)
@@ -9149,7 +9851,7 @@ async fn tidal_video_mix_items(
                 refreshed.country_code.clone(),
             );
             retry_client
-                .get_video_mix_items(&mix_id)
+                .get_video_mix_items(mix_id)
                 .await
                 .map_err(|e2| {
                     (
@@ -9180,10 +9882,46 @@ struct TidalPlaylistSearchParams {
     offset: Option<i32>,
 }
 
+const TIDAL_PLAYLIST_SEARCH_DEFAULT_LIMIT: i32 = 20;
+const TIDAL_PLAYLIST_SEARCH_MAX_LIMIT: i32 = 50;
+const TIDAL_PLAYLIST_UUID_MAX_LEN: usize = 96;
+
+fn normalize_tidal_playlist_search_query(query: &str) -> Option<&str> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn normalize_tidal_playlist_search_limit(limit: Option<i32>) -> i32 {
+    limit
+        .unwrap_or(TIDAL_PLAYLIST_SEARCH_DEFAULT_LIMIT)
+        .clamp(1, TIDAL_PLAYLIST_SEARCH_MAX_LIMIT)
+}
+
+fn normalize_tidal_playlist_uuid(uuid: &str) -> Result<&str, StatusCode> {
+    let trimmed = uuid.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > TIDAL_PLAYLIST_UUID_MAX_LEN
+        || !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(trimmed)
+}
+
 async fn tidal_playlist_search(
     State(state): State<SharedState>,
     Query(params): Query<TidalPlaylistSearchParams>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(query) = normalize_tidal_playlist_search_query(&params.q) else {
+        return Ok(Json(json!({ "playlists": [] })));
+    };
+
     let tokens = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (
@@ -9201,7 +9939,7 @@ async fn tidal_playlist_search(
         ));
     };
 
-    let limit = params.limit.unwrap_or(20).min(50);
+    let limit = normalize_tidal_playlist_search_limit(params.limit);
     let offset = params.offset.unwrap_or(0).max(0);
     let (http_client, tidal_http_client) = {
         let s = state.read().await;
@@ -9212,7 +9950,7 @@ async fn tidal_playlist_search(
         tokens.access_token.clone(),
         tokens.country_code.clone(),
     );
-    let playlists = match client.search_playlists(&params.q, limit, offset).await {
+    let playlists = match client.search_playlists(query, limit, offset).await {
         Ok(r) => r,
         Err(e) if error_looks_like_auth(&e) => {
             let refreshed = recover_tidal_session(&state, &http_client, &tokens)
@@ -9229,7 +9967,7 @@ async fn tidal_playlist_search(
                 refreshed.country_code.clone(),
             );
             retry_client
-                .search_playlists(&params.q, limit, offset)
+                .search_playlists(query, limit, offset)
                 .await
                 .map_err(|e2| {
                     (
@@ -9265,6 +10003,13 @@ async fn tidal_playlist_tracks(
     State(state): State<SharedState>,
     Path(uuid): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let uuid = normalize_tidal_playlist_uuid(&uuid).map_err(|status| {
+        (
+            status,
+            Json(json!({ "error": "invalid TIDAL playlist uuid" })),
+        )
+    })?;
+
     let tokens = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (
@@ -9292,7 +10037,7 @@ async fn tidal_playlist_tracks(
     };
     let limit = 100;
     let offset = 0;
-    let cache_key = tidal_playlist_tracks_cache_key(&tokens.country_code, &uuid, limit, offset);
+    let cache_key = tidal_playlist_tracks_cache_key(&tokens.country_code, uuid, limit, offset);
     let client = TidalClient::with_http(
         tidal_http_client.clone(),
         tokens.access_token.clone(),
@@ -9301,7 +10046,7 @@ async fn tidal_playlist_tracks(
     let tracks = match get_cached_tidal_playlist_tracks(&playlist_tracks_cache, &cache_key) {
         Some(cached) => cached,
         None => {
-            let resp = match client.get_playlist_tracks(&uuid, limit, offset).await {
+            let resp = match client.get_playlist_tracks(uuid, limit, offset).await {
                 Ok(r) => r,
                 Err(e) if error_looks_like_auth(&e) => {
                     let refreshed = recover_tidal_session(&state, &http_client, &tokens)
@@ -9320,7 +10065,7 @@ async fn tidal_playlist_tracks(
                         refreshed.country_code.clone(),
                     );
                     retry_client
-                        .get_playlist_tracks(&uuid, limit, offset)
+                        .get_playlist_tracks(uuid, limit, offset)
                         .await
                         .map_err(|e2| {
                             (
@@ -9475,6 +10220,28 @@ fn shuffle_tidal_mix_tracks(
     })
 }
 
+async fn clear_persisted_queue_for_tidal_mix(
+    state: &SharedState,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let state_guard = state.read().await;
+    state_guard
+        .db
+        .with_conn(|conn| {
+            queue::clear_queue(conn)?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .map_err(|error| {
+            warn!(
+                ?error,
+                "Failed to clear stale persisted queue for TIDAL mix playback"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "Failed to clear stale playback queue" })),
+            )
+        })
+}
+
 /// Play the first track immediately and stash the rest in the pending
 /// ephemeral queue so `handle_runtime_finished` can advance through them.
 /// Used by the home Your Mixes shelf when a tile is clicked.
@@ -9513,7 +10280,16 @@ async fn play_tidal_mix(
         q.extend(rest);
     }
 
-    start_ephemeral_tidal_playback(&state, first).await?;
+    if let Err(error) = start_ephemeral_tidal_playback(&state, first).await {
+        let s = state.read().await;
+        s.pending_tidal_mix_queue.lock().unwrap().clear();
+        return Err(error);
+    }
+    if let Err(error) = clear_persisted_queue_for_tidal_mix(&state).await {
+        let s = state.read().await;
+        s.pending_tidal_mix_queue.lock().unwrap().clear();
+        return Err(error);
+    }
     let snapshot = build_live_playback_snapshot_json(&state).await?;
     {
         let s = state.read().await;
@@ -9775,6 +10551,13 @@ async fn tidal_artist_profile(
     State(state): State<SharedState>,
     Path(tidal_artist_id): Path<i64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if tidal_artist_id <= 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Expected a positive TIDAL artist id" })),
+        ));
+    }
+
     let (tokens, http_client, tidal_http_client) = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (
@@ -9927,6 +10710,9 @@ pub(super) async fn recover_tidal_session(
     http: &reqwest::Client,
     tokens: &tidal_auth::TidalTokens,
 ) -> anyhow::Result<tidal_auth::TidalTokens> {
+    if tokens.refresh_token.trim().is_empty() {
+        anyhow::bail!("TIDAL session has no refresh token; reconnect TIDAL");
+    }
     tracing::info!(
         target: "noor.sync.tidal",
         event = "session_refresh_start",
@@ -10201,6 +10987,27 @@ fn spawn_playback_runtime_listener(
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Error { message }) => {
                     handle_runtime_error(state.clone(), &message).await;
+                }
+                Ok(playback_runtime::PlaybackRuntimeEvent::TrackError {
+                    track_id,
+                    generation,
+                    message,
+                }) => {
+                    if let Err(error) =
+                        handle_runtime_track_error(state.clone(), track_id, generation, &message)
+                            .await
+                    {
+                        let message =
+                            format!("Failed to advance playback after track error: {error}");
+                        report_playback_failure(&state, &message);
+                        error!("{message}");
+                    }
+                }
+                Ok(playback_runtime::PlaybackRuntimeEvent::PreparedTrackError {
+                    track_id,
+                    message,
+                }) => {
+                    handle_prepared_runtime_track_error(&state, track_id, &message).await;
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Ready {
                     device_name,
@@ -11068,7 +11875,18 @@ async fn switch_runtime_to_snapshot_current(
     snapshot: &player::PlaybackSnapshot,
     generation: u64,
 ) -> anyhow::Result<()> {
+    let current_queue_item_id = snapshot.state.current_queue_item_id;
+    let queue_len = snapshot.queue.len();
+
     if snapshot.state.current_track.is_none() {
+        tracing::info!(
+            target: "noor.playback.runtime",
+            event = "runtime_snapshot_empty",
+            generation,
+            ?current_queue_item_id,
+            queue_len,
+            "snapshot has no current track; clearing runtime active track"
+        );
         let mut state_guard = state.write().await;
         if let Some(info) = state_guard.playback_runtime_info.as_mut() {
             info.active_track_id = None;
@@ -11098,7 +11916,21 @@ async fn switch_runtime_to_snapshot_current(
                 user_quality,
             )
             .with_generation(generation);
-            runtime_handle.switch_to(job)?;
+            runtime_handle.switch_to(job).map_err(|error| {
+                tracing::warn!(
+                    target: "noor.playback.runtime",
+                    event = "runtime_snapshot_switch_failed",
+                    generation,
+                    track_id = track.id,
+                    ?current_queue_item_id,
+                    queue_len,
+                    runtime_track_status = ?prepared_status,
+                    stream_resolved = false,
+                    error = %error,
+                    "failed to switch runtime to prepared snapshot current track"
+                );
+                error
+            })?;
             {
                 let mut state_guard = state.write().await;
                 if let Some(info) = state_guard.playback_runtime_info.as_mut() {
@@ -11109,6 +11941,17 @@ async fn switch_runtime_to_snapshot_current(
                     state_guard.current_stream_display = Some(pending);
                 }
             }
+            tracing::info!(
+                target: "noor.playback.runtime",
+                event = "runtime_snapshot_switch",
+                generation,
+                track_id = track.id,
+                ?current_queue_item_id,
+                queue_len,
+                runtime_track_status = ?prepared_status,
+                stream_resolved = false,
+                "switched runtime to prepared snapshot current track"
+            );
         } else {
             let Some(stream_request) =
                 player::build_tidal_stream_request(track, user_quality.clone())
@@ -11135,7 +11978,21 @@ async fn switch_runtime_to_snapshot_current(
                 user_quality,
             )
             .with_generation(generation);
-            runtime_handle.switch_to(job)?;
+            runtime_handle.switch_to(job).map_err(|error| {
+                tracing::warn!(
+                    target: "noor.playback.runtime",
+                    event = "runtime_snapshot_switch_failed",
+                    generation,
+                    track_id = track.id,
+                    ?current_queue_item_id,
+                    queue_len,
+                    runtime_track_status = ?prepared_status,
+                    stream_resolved = true,
+                    error = %error,
+                    "failed to switch runtime after resolving snapshot stream"
+                );
+                error
+            })?;
             {
                 let mut state_guard = state.write().await;
                 if let Some(info) = state_guard.playback_runtime_info.as_mut() {
@@ -11149,6 +12006,17 @@ async fn switch_runtime_to_snapshot_current(
                 });
                 state_guard.pending_stream_display = None;
             }
+            tracing::info!(
+                target: "noor.playback.runtime",
+                event = "runtime_snapshot_switch",
+                generation,
+                track_id = track.id,
+                ?current_queue_item_id,
+                queue_len,
+                runtime_track_status = ?prepared_status,
+                stream_resolved = true,
+                "switched runtime after resolving snapshot stream"
+            );
         }
     }
 
@@ -11174,6 +12042,13 @@ async fn handle_runtime_finished(
             return Ok(());
         }
     }
+    tracing::info!(
+        target: "noor.playback.advance",
+        event = "runtime_finished",
+        finished_track_id,
+        generation,
+        "runtime finished track; advancing queue"
+    );
     if let Err(error) = mark_armed_dj_transition_missed_if_needed(&state).await {
         warn!("Failed to mark missed DJ transition timing: {error}");
     }
@@ -11274,13 +12149,17 @@ async fn handle_runtime_finished(
             // Fall through to teardown so the UI doesn't get stuck on a
             // ghost track.
         }
-        let persisted_snapshot = {
-            let state_guard = state.read().await;
-            let cleared = recently_cleared(&state_guard);
-            state_guard
-                .db
-                .with_conn(|conn| player::next_track(conn, cleared))?
-        };
+        let persisted_snapshot = next_persisted_playback_snapshot(&state).await?;
+        let persisted_snapshot = resolve_or_skip_pending_current(
+            &state,
+            persisted_snapshot,
+            generation,
+            "runtime_finished_external",
+        )
+        .await?;
+        if !playback_generation_is_current(&state, generation).await {
+            return Ok(());
+        }
         if persisted_snapshot.state.current_track.is_some() {
             {
                 let mut state_guard = state.write().await;
@@ -11379,6 +12258,11 @@ async fn handle_runtime_finished(
         }
         return Ok(());
     };
+    let snapshot =
+        resolve_or_skip_pending_current(&state, snapshot, generation, "runtime_finished").await?;
+    if !playback_generation_is_current(&state, generation).await {
+        return Ok(());
+    }
 
     let end_reason = if snapshot.state.current_track.is_some() {
         Some(player::ListenSessionEndReason::Replaced)
@@ -11480,6 +12364,58 @@ async fn handle_runtime_finished_with_retry(
         }
     }
     Ok(())
+}
+
+async fn handle_runtime_track_error(
+    state: SharedState,
+    failed_track_id: i64,
+    generation: u64,
+    message: &str,
+) -> anyhow::Result<()> {
+    {
+        let mut state_guard = state.write().await;
+        if current_playback_generation(&state_guard) != generation {
+            return Ok(());
+        }
+        state_guard
+            .audio_active
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Some(info) = state_guard.playback_runtime_info.as_mut() {
+            info.last_error = Some(message.to_string());
+            if info.active_track_id == Some(failed_track_id) {
+                info.active_track_id = None;
+            }
+        }
+    }
+
+    tracing::warn!(
+        target: "noor.playback.advance",
+        event = "runtime_track_error",
+        failed_track_id,
+        generation,
+        error = %message,
+        "runtime track error; advancing queue"
+    );
+    report_playback_failure(&state, message);
+    handle_runtime_finished_with_retry(state, failed_track_id, generation).await
+}
+
+async fn handle_prepared_runtime_track_error(state: &SharedState, track_id: i64, message: &str) {
+    tracing::warn!(
+        target: "noor.playback.advance",
+        event = "prepared_track_error",
+        track_id,
+        error = %message,
+        "prepared track failed; keeping current playback"
+    );
+    {
+        let mut state_guard = state.write().await;
+        if let Some(info) = state_guard.playback_runtime_info.as_mut() {
+            info.last_error = Some(message.to_string());
+        }
+        let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+    }
+    report_playback_failure(state, message);
 }
 
 fn sqlite_database_locked(error: &anyhow::Error) -> bool {
@@ -12258,12 +13194,15 @@ async fn persist_tidal_tokens(
         let s = state.read().await;
         s.db.with_conn(|conn| {
             let token_blob = tidal_auth::encode_persisted_tidal_tokens(&s.master_key, tokens)?;
+            let token_expiry = (chrono::Utc::now()
+                + chrono::Duration::seconds(tokens.expires_in.max(0)))
+            .to_rfc3339();
             conn.execute(
-                "INSERT INTO service_auth (service, access_token_enc, user_id, connected_at)
-                 VALUES ('tidal', ?1, ?2, datetime('now'))
+                "INSERT INTO service_auth (service, access_token_enc, user_id, token_expiry, connected_at)
+                 VALUES ('tidal', ?1, ?2, ?3, datetime('now'))
                  ON CONFLICT(service) DO UPDATE SET access_token_enc=excluded.access_token_enc,
-                 user_id=excluded.user_id, connected_at=excluded.connected_at",
-                rusqlite::params![token_blob, tokens.user_id],
+                 user_id=excluded.user_id, token_expiry=excluded.token_expiry, connected_at=excluded.connected_at",
+                rusqlite::params![token_blob, tokens.user_id, token_expiry],
             )?;
             Ok(())
         })?;

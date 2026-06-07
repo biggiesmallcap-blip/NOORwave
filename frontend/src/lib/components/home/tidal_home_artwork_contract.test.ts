@@ -25,6 +25,15 @@ describe('TIDAL home artwork contracts', () => {
 		expect(mixes).not.toContain("style=\"background-image: url('{mix.image_url}')\"");
 	});
 
+	test('guards mix shelf loads against stale responses', () => {
+		expect(mixes).toContain('let loadSeq = 0;');
+		expect(mixes).toContain('return () => { loadSeq += 1; };');
+		expect(mixes).toContain('const seq = ++loadSeq;');
+		expect(mixes).toContain('if (seq !== loadSeq) return;');
+		expect(mixes).toContain('const nextMixes = data.mixes ?? [];');
+		expect(mixes).toContain('putCachedMixes(nextMixes)');
+	});
+
 	test('routes radio artwork through ArtworkImage fallback handling', () => {
 		expect(radio).toContain("import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';");
 		expect(radio).toContain('<ArtworkImage');
@@ -35,5 +44,14 @@ describe('TIDAL home artwork contracts', () => {
 		expect(radio).toContain('decorative={true}');
 		expect(radio).toContain(':global(.art)');
 		expect(radio).not.toContain("style=\"background-image: url('{station.image_url}')\"");
+	});
+
+	test('guards radio shelf loads against stale responses', () => {
+		expect(radio).toContain('let loadSeq = 0;');
+		expect(radio).toContain('return () => { loadSeq += 1; };');
+		expect(radio).toContain('const seq = ++loadSeq;');
+		expect(radio).toContain('if (seq !== loadSeq) return;');
+		expect(radio).toContain('const nextStations = data.stations ?? [];');
+		expect(radio).toContain('putCachedRadioStations(nextStations)');
 	});
 });

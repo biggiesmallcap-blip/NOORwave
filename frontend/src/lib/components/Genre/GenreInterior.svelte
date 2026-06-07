@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import { api, type Track, type GenreHeat } from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
 	import { playTrackNow, setPlayerAutomixEnabled, setPlayerShuffleMode } from '$lib/stores/player';
@@ -51,6 +51,7 @@
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let actionError = $state<string | null>(null);
+	let loadSeq = 0;
 
 	// Artist micro-galaxy data
 	let artistClusters = $state<ArtistCluster[]>([]);
@@ -211,17 +212,24 @@
 	}
 
 	async function loadTracks() {
-		if (!node) return;
+		const targetNode = node;
+		if (!targetNode) return;
+		const seq = ++loadSeq;
 		loading = true;
 		error = null;
+		actionError = null;
+		tracks = [];
+		artistClusters = [];
 		try {
-			const response = await cachedApi.getGenreTracks(node.id, true);
+			const response = await cachedApi.getGenreTracks(targetNode.id, true);
+			if (seq !== loadSeq) return;
 			tracks = response.tracks;
-			buildArtistGalaxy(tracks);
+			buildArtistGalaxy(response.tracks);
 		} catch (reason) {
+			if (seq !== loadSeq) return;
 			error = reason instanceof Error ? reason.message : String(reason);
 		} finally {
-			loading = false;
+			if (seq === loadSeq) loading = false;
 		}
 	}
 
@@ -282,6 +290,10 @@
 			resizeObserver.observe(canvasEl.parentElement);
 		}
 		return () => resizeObserver?.disconnect();
+	});
+
+	onDestroy(() => {
+		loadSeq += 1;
 	});
 </script>
 

@@ -7,6 +7,11 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
+const RSS_ACCEPT_HEADER: &str =
+    "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.1";
+const RSS_USER_AGENT: &str =
+    "Mozilla/5.0 (compatible; NOORwave/1.0; +https://github.com/felix/noorwave)";
+
 /// An article or news item from an RSS feed
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeedItem {
@@ -124,7 +129,8 @@ impl FeedAggregator {
         let resp = self
             .http_client
             .get(source.url)
-            .header("User-Agent", "NOORwave/1.0")
+            .header("Accept", RSS_ACCEPT_HEADER)
+            .header("User-Agent", RSS_USER_AGENT)
             .timeout(std::time::Duration::from_secs(8))
             .send()
             .await
@@ -135,7 +141,7 @@ impl FeedAggregator {
         }
 
         let body = resp.text().await.context("Failed to read RSS body")?;
-        // Strip UTF-8 BOM and leading whitespace — some feeds (e.g. Bandcamp Daily)
+        // Strip UTF-8 BOM and leading whitespace. Some feeds, including Bandcamp Daily,
         // prepend a BOM that causes the RSS parser to fail with "input did not begin with rss tag".
         let body_trimmed = body.trim_start_matches('\u{FEFF}').trim_start();
 
@@ -240,11 +246,12 @@ impl FeedAggregator {
     fn parse_xml_fallback(&self, body: &str, source: &FeedSource) -> anyhow::Result<Vec<FeedItem>> {
         warn!("Using fallback XML parsing for {}", source.name);
 
-        // Basic fallback: try to extract items with regex-like approach
-        // This handles Atom feeds and other non-standard formats
         let mut items = Vec::new();
 
-        // Simple Atom feed parsing
+        if body.contains("<item") {
+            items.extend(Self::parse_rss_item_fallback(body, source)?);
+        }
+
         if body.contains("<feed") || body.contains("<entry") {
             let entry_re = regex::Regex::new(r#"(?s)<entry\b[^>]*>(.*?)</entry>"#)
                 .context("Failed to compile Atom entry parser")?;
@@ -323,8 +330,122 @@ impl FeedAggregator {
             }
         }
 
+        if items.is_empty() && source.name == "Bandcamp Daily" {
+            items.extend(Self::parse_bandcamp_plaintext_fallback(body, source)?);
+        }
+
         if items.is_empty() {
             warn!("Fallback parsing returned no items for {}", source.name);
+        }
+
+        Ok(items)
+    }
+
+    fn parse_rss_item_fallback(body: &str, source: &FeedSource) -> anyhow::Result<Vec<FeedItem>> {
+        let item_re = regex::Regex::new(r#"(?s)<item\b[^>]*>(.*?)</item>"#)
+            .context("Failed to compile RSS item parser")?;
+        let title_re =
+            regex::Regex::new(r#"(?s)<title[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>"#)
+                .context("Failed to compile RSS title parser")?;
+        let link_re = regex::Regex::new(r#"(?s)<link[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</link>"#)
+            .context("Failed to compile RSS link parser")?;
+        let description_re =
+            regex::Regex::new(r#"(?s)<(?:description|content:encoded)[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</(?:description|content:encoded)>"#)
+                .context("Failed to compile RSS description parser")?;
+        let author_re =
+            regex::Regex::new(r#"(?s)<(?:dc:creator|author)[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</(?:dc:creator|author)>"#)
+                .context("Failed to compile RSS author parser")?;
+        let pub_date_re = regex::Regex::new(r#"(?s)<pubDate[^>]*>(.*?)</pubDate>"#)
+            .context("Failed to compile RSS pubDate parser")?;
+        let image_attr_re = regex::Regex::new(
+            r#"(?s)<(?:media:thumbnail|media:content|enclosure)\b[^>]*\burl="([^"]+)""#,
+        )
+        .context("Failed to compile RSS image parser")?;
+
+        let mut items = Vec::new();
+        for item_cap in item_re.captures_iter(body) {
+            let item = item_cap.get(1).map(|m| m.as_str()).unwrap_or_default();
+            let Some(link) = capture_cleaned(&link_re, item).filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+
+            items.push(FeedItem {
+                title: capture_cleaned(&title_re, item).unwrap_or_else(|| "Untitled".to_string()),
+                link,
+                description: Self::truncate_desc(
+                    &capture_raw(&description_re, item).unwrap_or_default(),
+                    280,
+                ),
+                author: capture_cleaned(&author_re, item).filter(|value| !value.is_empty()),
+                published_at: capture_cleaned(&pub_date_re, item).filter(|value| !value.is_empty()),
+                image_url: image_attr_re
+                    .captures(item)
+                    .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+                    .filter(|value| !value.is_empty()),
+                source: source.name.to_string(),
+                category: source.category.to_string(),
+            });
+        }
+
+        Ok(items)
+    }
+
+    fn parse_bandcamp_plaintext_fallback(
+        body: &str,
+        source: &FeedSource,
+    ) -> anyhow::Result<Vec<FeedItem>> {
+        let article_link_re = regex::Regex::new(r#"https://daily\.bandcamp\.com/[^\s]+"#)
+            .context("Failed to compile Bandcamp plaintext link parser")?;
+        let pub_date_re = regex::Regex::new(
+            r#"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+\d{1,2}\s+\w+\s+\d{4}\s+\d{2}:\d{2}:\d{2}\s+[-+]\d{4}"#,
+        )
+        .context("Failed to compile Bandcamp plaintext date parser")?;
+        let author_tail_re =
+            regex::Regex::new(r#"\s+\d+\s+.+?\s+\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\s*$"#)
+                .context("Failed to compile Bandcamp plaintext author parser")?;
+
+        let links: Vec<_> = article_link_re.find_iter(body).collect();
+        let mut items = Vec::new();
+        for (index, link_match) in links.iter().enumerate() {
+            let link = link_match.as_str().trim().to_string();
+            let title_source = &body[..link_match.start()];
+            let title = title_source
+                .lines()
+                .rev()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or_default()
+                .to_string();
+            if title.is_empty() || title == "Bandcamp Updates" {
+                continue;
+            }
+
+            let body_end = links
+                .get(index + 1)
+                .map(|next| next.start())
+                .unwrap_or(body.len());
+            let raw_body = &body[link_match.end()..body_end];
+            let published_at = pub_date_re
+                .find(raw_body)
+                .map(|m| m.as_str().trim().to_string());
+            let description_source = pub_date_re
+                .split(raw_body)
+                .next()
+                .map(|value| value.replace("Read full story on the Bandcamp Daily .", ""))
+                .unwrap_or_default();
+            let description = author_tail_re.replace(&description_source, "");
+
+            items.push(FeedItem {
+                title,
+                link,
+                description: Self::truncate_desc(description.trim(), 280),
+                author: None,
+                published_at,
+                image_url: None,
+                source: source.name.to_string(),
+                category: source.category.to_string(),
+            });
         }
 
         Ok(items)
@@ -484,6 +605,15 @@ mod html_cleaner {
     }
 }
 
+fn capture_raw(re: &regex::Regex, haystack: &str) -> Option<String> {
+    re.captures(haystack)
+        .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+}
+
+fn capture_cleaned(re: &regex::Regex, haystack: &str) -> Option<String> {
+    capture_raw(re, haystack).map(|value| html_cleaner::clean_html(&value))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,5 +656,86 @@ mod tests {
         assert_eq!(items[1].title, "Second article");
         assert_eq!(items[1].link, "https://example.test/second");
         assert_eq!(items[1].description, "Second summary");
+    }
+
+    #[test]
+    fn fallback_parses_rss_items_when_channel_parser_rejects_root() {
+        let aggregator = FeedAggregator::new(Client::new());
+        let body = r#"
+            <unexpected>
+              <channel>
+                <item>
+                  <title><![CDATA[Bandcamp article]]></title>
+                  <link>https://daily.bandcamp.com/lists/example</link>
+                  <description><![CDATA[<p>Article summary &amp; context.</p>]]></description>
+                  <dc:creator><![CDATA[Bandcamp Daily Staff]]></dc:creator>
+                  <pubDate>Mon, 11 May 2026 17:50:05 -0000</pubDate>
+                  <media:thumbnail url="https://f4.bcbits.com/img/example.jpg"/>
+                </item>
+              </channel>
+            </unexpected>
+        "#;
+
+        let items = aggregator
+            .parse_xml_fallback(body, &test_source())
+            .expect("fallback parses RSS items");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Bandcamp article");
+        assert_eq!(items[0].link, "https://daily.bandcamp.com/lists/example");
+        assert_eq!(items[0].description, "Article summary & context.");
+        assert_eq!(items[0].author.as_deref(), Some("Bandcamp Daily Staff"));
+        assert_eq!(
+            items[0].published_at.as_deref(),
+            Some("Mon, 11 May 2026 17:50:05 -0000")
+        );
+        assert_eq!(
+            items[0].image_url.as_deref(),
+            Some("https://f4.bcbits.com/img/example.jpg")
+        );
+    }
+
+    #[test]
+    fn bandcamp_plaintext_fallback_returns_items() {
+        let aggregator = FeedAggregator::new(Client::new());
+        let source = FeedSource {
+            url: "https://daily.bandcamp.com/feed",
+            name: "Bandcamp Daily",
+            category: "news",
+        };
+        let body = r#"
+            Bandcamp Updates https://daily.bandcamp.com Bandcamp Daily is your guide to the artists, fans and labels on Bandcamp. en-US Tue, 12 May 2026 10:37:22 +0000
+            The Polish Composers Pushing the Boundaries of Classical Music https://daily.bandcamp.com/lists/contemporary-polish-classical-album-guide
+            A new crop of Polish composers are bringing a cinematic, imaginative outlook to their music.
+            Read full story on the Bandcamp Daily .
+            ]]> Lists Mon, 11 May 2026 17:50:05 -0000 192389 Michal Wieczorek 2026-05-11T17:50:05Z
+            Nagoya's Electronic Scene Is Hiding in Plain Sight https://daily.bandcamp.com/scene-report/nagoya-electronic-scene-report
+            In clubs, bars, and DIY spaces, a tight-knit community pushes electronic music in new directions.
+            Read full story on the Bandcamp Daily .
+            ]]> Scene Report Mon, 11 May 2026 13:43:18 -0000 192430 James Gui, Chau Luong 2026-05-11T13:43:18Z
+        "#;
+
+        let items = aggregator
+            .parse_xml_fallback(body, &source)
+            .expect("fallback parses Bandcamp plaintext");
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items[0].title,
+            "The Polish Composers Pushing the Boundaries of Classical Music"
+        );
+        assert_eq!(
+            items[0].link,
+            "https://daily.bandcamp.com/lists/contemporary-polish-classical-album-guide"
+        );
+        assert!(items[0].description.contains("Polish composers"));
+        assert_eq!(
+            items[0].published_at.as_deref(),
+            Some("Mon, 11 May 2026 17:50:05 -0000")
+        );
+        assert_eq!(
+            items[1].link,
+            "https://daily.bandcamp.com/scene-report/nagoya-electronic-scene-report"
+        );
     }
 }

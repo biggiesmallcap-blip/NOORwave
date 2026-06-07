@@ -44,6 +44,7 @@
   let saveErr = $state<string | null>(null);
   let requestedSpotifyId = $state('');
   let lazyArt = $state<Record<string, string>>({});
+  let loadSeq = 0;
 
   // Lazy-tail status polling. Stops on full resolution, on hard timeout, or
   // when the user navigates away.
@@ -59,13 +60,22 @@
     }
   }
 
-  async function pollResolution() {
+  function schedulePoll(seq: number, delayMs = POLL_INTERVAL_MS) {
+    pollTimer = setTimeout(() => void pollResolution(seq), delayMs);
+  }
+
+  async function pollResolution(seq: number) {
+    if (seq !== loadSeq) {
+      clearPoll();
+      return;
+    }
     if (!detail || pendingIds.length === 0 || Date.now() > pollDeadline) {
       clearPoll();
       return;
     }
     try {
       const { entries } = await api.getResolveTidalStatus(pendingIds);
+      if (seq !== loadSeq) return;
       const byId = new Map(entries.map((e) => [e.spotifyId, e.tidal]));
       // Merge new states into the playlist tracks. Pending entries stay in
       // the watch list; non-pending ones are removed.
@@ -82,18 +92,20 @@
       };
       pendingIds = stillPending;
       if (pendingIds.length > 0) {
-        pollTimer = setTimeout(pollResolution, POLL_INTERVAL_MS);
+        schedulePoll(seq);
       } else {
         clearPoll();
       }
     } catch (e) {
+      if (seq !== loadSeq) return;
       // One bad poll round shouldn't kill the loop — back off and retry.
       console.warn('resolve status poll failed', e);
-      pollTimer = setTimeout(pollResolution, POLL_INTERVAL_MS * 2);
+      schedulePoll(seq, POLL_INTERVAL_MS * 2);
     }
   }
 
   async function load(id: string) {
+    const seq = ++loadSeq;
     if (!id.trim()) {
       error = 'Missing Spotify playlist ID';
       loading = false;
@@ -108,20 +120,21 @@
     lazyArt = {};
     // Sportify proxy is third-party and flaky. Retry once on 5xx so a
     // transient upstream hiccup doesn't surface as a hard failure.
-    await attemptLoad(id, /* retryOn5xx */ true);
+    await attemptLoad(id, /* retryOn5xx */ true, seq);
   }
 
-  async function attemptLoad(id: string, retryOn5xx: boolean) {
+  async function attemptLoad(id: string, retryOn5xx: boolean, seq: number) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
     try {
       const res = await api.getSpotifyPlaylist(id, controller.signal);
+      if (seq !== loadSeq) return;
       detail = res.playlist;
       putCachedSpotifyChartMeta(id, res.playlist);
       pendingIds = res.pendingSpotifyIds ?? [];
       pollDeadline = Date.now() + POLL_DEADLINE_MS;
       if (pendingIds.length > 0) {
-        pollTimer = setTimeout(pollResolution, POLL_INTERVAL_MS);
+        schedulePoll(seq);
       }
       loading = false;
     } catch (e) {
@@ -130,11 +143,12 @@
       if (is5xx && retryOn5xx) {
         // One automatic retry after a short delay for transient proxy outages.
         await new Promise((r) => setTimeout(r, 2_000));
-        if (spotifyId.trim() === id) {
-          await attemptLoad(id, /* retryOn5xx */ false);
+        if (seq === loadSeq && spotifyId.trim() === id) {
+          await attemptLoad(id, /* retryOn5xx */ false, seq);
           return;
         }
       }
+      if (seq !== loadSeq) return;
       error = friendlyError(e);
       loading = false;
     } finally {
@@ -176,6 +190,7 @@
     // earlier load got stuck before `detail` was populated.
     const id = spotifyId.trim();
     if (!id) {
+      loadSeq += 1;
       clearPoll();
       requestedSpotifyId = '';
       detail = null;
@@ -192,6 +207,7 @@
   });
 
   onDestroy(() => {
+    loadSeq += 1;
     clearPoll();
   });
 

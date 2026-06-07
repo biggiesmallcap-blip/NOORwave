@@ -9,7 +9,3 @@ export function openQuietMode() {
 export function closeQuietMode() {
 	quietModeOpen.set(false);
 }
-
-export function toggleQuietMode() {
-	quietModeOpen.update((v) => !v);
-}

@@ -9,7 +9,7 @@ use axum::{
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 type TidalMoodCategoriesCache = Arc<Mutex<Option<(Instant, Duration, Vec<Value>)>>>;
@@ -17,11 +17,18 @@ type TidalPageModulesCache = Arc<Mutex<HashMap<String, (Instant, Vec<TidalHomeMo
 
 const TIDAL_HOME_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const TIDAL_MOODS_FALLBACK_CACHE_TTL: Duration = Duration::from_secs(60);
+const TIDAL_MOODS_PROBE_FAILURE_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 const MOOD_THUMBNAIL_FETCH_CONCURRENCY: usize = 4;
 const MOOD_THUMBNAIL_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 const TIDAL_HOME_MODULES_PAGE_PATH: &str = "pages/home";
+const TIDAL_MODULE_ITEMS_DEFAULT_LIMIT: u32 = 50;
+const TIDAL_MODULE_ITEMS_MAX_LIMIT: u32 = 200;
+const TIDAL_MODULE_ID_MAX_LEN: usize = 96;
+const TIDAL_MIX_ID_MAX_LEN: usize = 96;
+const TIDAL_PAGE_ID_MAX_LEN: usize = 96;
 const ROUTE_TIMING_INFO_THRESHOLD_MS: u128 = 500;
 static TIDAL_MOODS_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+static TIDAL_MOODS_PROBE_FAILURE_COOLDOWN_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 const DEFAULT_TIDAL_MOOD_CATEGORIES: &[(&str, &str)] = &[
     ("mood_party", "Party"),
     ("mood_workout", "Workout"),
@@ -70,6 +77,42 @@ fn mood_probe_failed_without_results(
     errors: usize,
 ) -> bool {
     fetched == 0 && cache_hits == 0 && (timeouts > 0 || errors > 0)
+}
+
+fn tidal_moods_probe_failure_cooldown() -> &'static Mutex<Option<Instant>> {
+    TIDAL_MOODS_PROBE_FAILURE_COOLDOWN_UNTIL.get_or_init(|| Mutex::new(None))
+}
+
+fn tidal_moods_probe_cooldown_remaining(
+    cooldown: &Mutex<Option<Instant>>,
+    now: Instant,
+) -> Option<Duration> {
+    let Ok(mut guard) = cooldown.lock() else {
+        return None;
+    };
+
+    match *guard {
+        Some(until) if now < until => Some(until.duration_since(now)),
+        Some(_) => {
+            *guard = None;
+            None
+        }
+        None => None,
+    }
+}
+
+fn note_tidal_moods_probe_failure(cooldown: &Mutex<Option<Instant>>, now: Instant) {
+    let Ok(mut guard) = cooldown.lock() else {
+        return;
+    };
+    *guard = Some(now + TIDAL_MOODS_PROBE_FAILURE_COOLDOWN);
+}
+
+fn clear_tidal_moods_probe_failure(cooldown: &Mutex<Option<Instant>>) {
+    let Ok(mut guard) = cooldown.lock() else {
+        return;
+    };
+    *guard = None;
 }
 
 /// Returns the authenticated user's TIDAL mixes (Daily Discovery, My Mix N,
@@ -303,11 +346,8 @@ pub(super) async fn get_tidal_discover_module_items(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let started_at = Instant::now();
-    let limit: u32 = params
-        .get("limit")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(50)
-        .min(200);
+    let module_id = normalize_tidal_module_id(&module_id)?;
+    let limit = normalize_tidal_module_items_limit(params.get("limit").map(String::as_str));
 
     let (tokens, http_client, tidal_http_client, page_modules_cache) = {
         let in_memory = {
@@ -406,6 +446,9 @@ pub(super) async fn get_tidal_mix_tracks(
     State(state): State<SharedState>,
     Path(mix_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mix_id = normalize_tidal_mix_id(&mix_id)
+        .map_err(|status| (status, Json(json!({ "error": "invalid TIDAL mix id" }))))?;
+
     let (tokens, tidal_http_client) = {
         let s = state.read().await;
         let tidal_http = s.tidal_http_client.clone();
@@ -433,7 +476,7 @@ pub(super) async fn get_tidal_mix_tracks(
         tokens.access_token.clone(),
         tokens.country_code.clone(),
     );
-    let items = client.get_mix_tracks(&mix_id).await.map_err(|e| {
+    let items = client.get_mix_tracks(mix_id).await.map_err(|e| {
         (
             StatusCode::BAD_GATEWAY,
             Json(json!({ "error": e.to_string() })),
@@ -480,29 +523,70 @@ pub(super) async fn get_tidal_page_modules_with_id(
 // approved list so callers can't probe arbitrary TIDAL endpoints.
 fn resolve_page_path(section: &str, id: Option<&str>) -> Result<String, StatusCode> {
     let section = section.trim_matches('/');
-    // `charts` and `genres`/`new_releases` slugs aren't valid TIDAL endpoints
-    // (verified live: all 404 with subStatus 2001 "Not found"). `moods` now
-    // has its own dedicated route at /api/tidal/moods + /api/tidal/mood-page/{slug}
-    // because its modules are PAGE_LINKS, not the usual TRACK_LIST/etc shape.
-    // Empty top-level whitelist for now. This generic route is kept for
-    // future slugs (pages/explore, pages/hires, pages/videos, etc).
-    let allowed_top = matches!(section, "");
-    let allowed_with_id = matches!(section, "mood" | "genre");
-    let valid = (id.is_none() && allowed_top) || (id.is_some() && allowed_with_id);
-    if !valid {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    // TIDAL uses `new_releases` on the wire; normalize the dash form callers
-    // may use.
-    let wire_section = if section == "new-releases" {
-        "new_releases"
-    } else {
-        section
+    let normalized_id = id.map(normalize_tidal_page_id).transpose()?;
+    let wire_section = match (section, normalized_id.as_deref()) {
+        ("explore", None) => "explore",
+        ("hires", None) => "hires",
+        ("videos", None) => "videos",
+        ("genres" | "genre-page" | "genre_page", None) => "genre_page",
+        ("genre-page-local" | "genre_page_local", None) => "genre_page_local",
+        ("new-releases" | "new_releases" | "whatsnew", None) => "whatsnew",
+        ("mood" | "genre", Some(_)) => section,
+        _ => return Err(StatusCode::NOT_FOUND),
     };
-    Ok(match id {
+    Ok(match normalized_id {
         Some(id) => format!("pages/{}/{}", wire_section, id),
         None => format!("pages/{}", wire_section),
     })
+}
+
+fn normalize_tidal_page_id(id: &str) -> Result<&str, StatusCode> {
+    let trimmed = id.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > TIDAL_PAGE_ID_MAX_LEN
+        || trimmed.chars().any(|c| {
+            c.is_ascii_whitespace()
+                || c.is_ascii_control()
+                || matches!(c, '/' | '\\' | '?' | '#' | '&' | '=')
+        })
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(trimmed)
+}
+
+fn normalize_tidal_mix_id(id: &str) -> Result<&str, StatusCode> {
+    let trimmed = id.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > TIDAL_MIX_ID_MAX_LEN
+        || !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(trimmed)
+}
+
+fn normalize_tidal_module_id(id: &str) -> Result<&str, StatusCode> {
+    let trimmed = id.trim();
+    if trimmed.len() != id.len()
+        || trimmed.is_empty()
+        || trimmed.len() > TIDAL_MODULE_ID_MAX_LEN
+        || !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(trimmed)
+}
+
+fn normalize_tidal_module_items_limit(value: Option<&str>) -> u32 {
+    value
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(TIDAL_MODULE_ITEMS_DEFAULT_LIMIT)
+        .clamp(1, TIDAL_MODULE_ITEMS_MAX_LIMIT)
 }
 
 async fn fetch_page_modules(
@@ -701,7 +785,16 @@ pub(super) async fn get_tidal_moods(
         TIDAL_MOODS_FALLBACK_CACHE_TTL,
     );
 
-    if let Some(refresh_guard) = try_begin_tidal_moods_refresh() {
+    if let Some(remaining) =
+        tidal_moods_probe_cooldown_remaining(tidal_moods_probe_failure_cooldown(), Instant::now())
+    {
+        tracing::debug!(
+            route = "tidal_moods",
+            retry_in_ms = remaining.as_millis(),
+            background_probe_slugs = pending_probe_count,
+            "TIDAL moods refresh skipped during probe failure cooldown"
+        );
+    } else if let Some(refresh_guard) = try_begin_tidal_moods_refresh() {
         let state_bg = state.clone();
         let mood_cache_bg = mood_cache.clone();
         let page_modules_cache_bg = page_modules_cache.clone();
@@ -998,6 +1091,7 @@ async fn run_mood_thumbnail_probe_refresh(
     }
 
     if mood_probe_failed_without_results(fetched, cache_hits, timeouts, errors) {
+        note_tidal_moods_probe_failure(tidal_moods_probe_failure_cooldown(), Instant::now());
         tracing::warn!(
             route = "tidal_moods_probe",
             elapsed_ms = started_at.elapsed().as_millis(),
@@ -1010,6 +1104,7 @@ async fn run_mood_thumbnail_probe_refresh(
         return;
     }
 
+    clear_tidal_moods_probe_failure(tidal_moods_probe_failure_cooldown());
     let refreshed_categories = apply_mood_probe_results(categories, &probe);
     put_cached_tidal_mood_categories(&mood_cache, refreshed_categories.clone());
     tracing::info!(
@@ -1105,6 +1200,83 @@ mod tests {
         TIDAL_MOODS_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
     }
 
+    fn cooldown_state(value: Option<Instant>) -> Mutex<Option<Instant>> {
+        Mutex::new(value)
+    }
+
+    #[test]
+    fn resolve_page_path_allows_documented_tidal_editorial_sections() {
+        let cases = [
+            ("explore", None, "pages/explore"),
+            ("hires", None, "pages/hires"),
+            ("videos", None, "pages/videos"),
+            ("genres", None, "pages/genre_page"),
+            ("genre-page", None, "pages/genre_page"),
+            ("genre-page-local", None, "pages/genre_page_local"),
+            ("new-releases", None, "pages/whatsnew"),
+            ("whatsnew", None, "pages/whatsnew"),
+            ("mood", Some("abc"), "pages/mood/abc"),
+            ("genre", Some("rock"), "pages/genre/rock"),
+            ("genre", Some("  hip-hop  "), "pages/genre/hip-hop"),
+        ];
+
+        for (section, id, expected) in cases {
+            assert_eq!(resolve_page_path(section, id).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn resolve_page_path_rejects_unlisted_tidal_editorial_sections() {
+        for (section, id) in [
+            ("", None),
+            ("home", None),
+            ("charts", None),
+            ("genres", Some("rock")),
+            ("new-releases", Some("albums")),
+            ("explore/deeper", None),
+            ("mood", Some("")),
+            ("mood", Some("../home")),
+            ("mood", Some("party?debug=true")),
+            ("mood", Some("party&limit=200")),
+            ("mood", Some("party mode")),
+        ] {
+            assert_eq!(resolve_page_path(section, id), Err(StatusCode::NOT_FOUND));
+        }
+    }
+
+    #[test]
+    fn tidal_module_item_limit_is_bounded_for_show_more_requests() {
+        assert_eq!(normalize_tidal_module_items_limit(None), 50);
+        assert_eq!(normalize_tidal_module_items_limit(Some("bad")), 50);
+        assert_eq!(normalize_tidal_module_items_limit(Some("0")), 1);
+        assert_eq!(normalize_tidal_module_items_limit(Some("12")), 12);
+        assert_eq!(normalize_tidal_module_items_limit(Some("9999")), 200);
+    }
+
+    #[test]
+    fn tidal_mix_id_normalization_allows_known_safe_id_shapes() {
+        assert_eq!(normalize_tidal_mix_id("abc123").unwrap(), "abc123");
+        assert_eq!(
+            normalize_tidal_mix_id("  daily_discovery-01  ").unwrap(),
+            "daily_discovery-01"
+        );
+    }
+
+    #[test]
+    fn tidal_mix_id_normalization_rejects_url_control_characters() {
+        for id in [
+            "",
+            "../home",
+            "mix/tracks",
+            "mix?limit=1",
+            "mix&countryCode=US",
+            "mix#fragment",
+            "mix track",
+        ] {
+            assert_eq!(normalize_tidal_mix_id(id), Err(StatusCode::BAD_REQUEST));
+        }
+    }
+
     #[test]
     fn tidal_mood_category_cache_returns_fresh_entries_and_expires_stale_entries() {
         let cache = Arc::new(Mutex::new(None));
@@ -1150,6 +1322,38 @@ mod tests {
         assert!(!mood_probe_failed_without_results(1, 0, 1, 0));
         assert!(!mood_probe_failed_without_results(0, 1, 0, 1));
         assert!(!mood_probe_failed_without_results(0, 0, 0, 0));
+    }
+
+    #[test]
+    fn mood_probe_failure_cooldown_reports_remaining_time() {
+        let now = Instant::now();
+        let cooldown = cooldown_state(Some(now + Duration::from_secs(60)));
+
+        let remaining =
+            tidal_moods_probe_cooldown_remaining(&cooldown, now).expect("cooldown active");
+
+        assert_eq!(remaining, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn expired_mood_probe_failure_cooldown_clears_state() {
+        let now = Instant::now();
+        let cooldown = cooldown_state(Some(now));
+
+        assert_eq!(tidal_moods_probe_cooldown_remaining(&cooldown, now), None);
+        assert_eq!(*cooldown.lock().expect("lock cooldown"), None);
+    }
+
+    #[test]
+    fn note_and_clear_mood_probe_failure_cooldown() {
+        let now = Instant::now();
+        let cooldown = cooldown_state(None);
+
+        note_tidal_moods_probe_failure(&cooldown, now);
+        assert!(tidal_moods_probe_cooldown_remaining(&cooldown, now).is_some());
+
+        clear_tidal_moods_probe_failure(&cooldown);
+        assert_eq!(tidal_moods_probe_cooldown_remaining(&cooldown, now), None);
     }
 
     #[test]

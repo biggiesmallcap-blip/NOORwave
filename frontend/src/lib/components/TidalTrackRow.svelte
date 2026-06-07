@@ -65,6 +65,8 @@
 	}
 
 	function openArtistContextMenu(e: MouseEvent) {
+		e.preventDefault();
+		e.stopPropagation();
 		if (track.artist_tidal_id == null || !track.artist_name) return;
 		openContextMenu(
 			e,
@@ -74,6 +76,8 @@
 	}
 
 	function openAlbumContextMenu(e: MouseEvent) {
+		e.preventDefault();
+		e.stopPropagation();
 		if (track.album_tidal_id == null || !track.album_title) return;
 		openContextMenu(
 			e,

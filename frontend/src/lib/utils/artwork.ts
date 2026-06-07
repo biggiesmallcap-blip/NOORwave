@@ -45,6 +45,7 @@ function firstString(...values: (string | null | undefined)[]): string | null {
 // backend hands us 640px covers, which upscale badly on a phone showing art at
 // 2-3x device-pixel density. Swap in a larger size for surfaces that render art
 // big; leave non-TIDAL URLs untouched.
+const TIDAL_ARTWORK_HOST = 'resources.tidal.com';
 const TIDAL_ARTWORK_SIZE = /\/\d+x\d+\.jpg(\?.*)?$/i;
 
 export function normalizeTidalArtworkSize(size: number): TidalArtworkSize {
@@ -55,7 +56,8 @@ export function normalizeTidalArtworkSize(size: number): TidalArtworkSize {
 }
 
 export function isTidalArtworkUrl(url: string | null | undefined): boolean {
-	return Boolean(url?.includes('resources.tidal.com'));
+	if (!url) return false;
+	return isRenderableTidalArtworkUrl(url);
 }
 
 export function tidalArtworkFallbackSizes(
@@ -63,7 +65,9 @@ export function tidalArtworkFallbackSizes(
 	size: TidalArtworkSize = 1280,
 ): TidalArtworkSize[] {
 	const safeSize = normalizeTidalArtworkSize(Number(size));
-	if (!isTidalArtworkUrl(url)) return [safeSize];
+	const rawUrl = url?.trim() ?? '';
+	if (isTidalResourceUrl(rawUrl) && !isRenderableTidalArtworkUrl(rawUrl)) return [];
+	if (!isTidalArtworkUrl(rawUrl)) return [safeSize];
 
 	const candidates: TidalArtworkSize[] = [safeSize, 320, 640, 750, 1080, 1280, 160, 80];
 	return candidates.filter((candidate, index) => candidates.indexOf(candidate) === index);
@@ -73,8 +77,30 @@ export function upscaleTidalArtwork(
 	url: string | null | undefined,
 	size: TidalArtworkSize = 1280,
 ): string | null {
-	if (!url) return null;
-	if (!isTidalArtworkUrl(url)) return url;
+	const rawUrl = url?.trim() ?? '';
+	if (!rawUrl) return null;
+	if (isTidalResourceUrl(rawUrl) && !isRenderableTidalArtworkUrl(rawUrl)) return null;
+	if (!isTidalArtworkUrl(rawUrl)) return rawUrl;
 	const safeSize = normalizeTidalArtworkSize(Number(size));
-	return url.replace(TIDAL_ARTWORK_SIZE, `/${safeSize}x${safeSize}.jpg$1`);
+	return rawUrl.replace(TIDAL_ARTWORK_SIZE, `/${safeSize}x${safeSize}.jpg$1`);
+}
+
+function isTidalResourceUrl(url: string | null | undefined): boolean {
+	if (!url) return false;
+	try {
+		return new URL(url).hostname === TIDAL_ARTWORK_HOST;
+	} catch {
+		return false;
+	}
+}
+
+function isRenderableTidalArtworkUrl(url: string): boolean {
+	try {
+		const parsed = new URL(url);
+		if (parsed.hostname !== TIDAL_ARTWORK_HOST) return false;
+		const parts = parsed.pathname.split('/').filter(Boolean);
+		return parts[0] === 'images' && parts.length >= 3 && TIDAL_ARTWORK_SIZE.test(parsed.pathname);
+	} catch {
+		return false;
+	}
 }

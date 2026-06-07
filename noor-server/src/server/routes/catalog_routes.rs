@@ -1,4 +1,7 @@
-use super::{load_persisted_tidal_tokens, tidal_track_playable_json};
+use super::{
+    error_looks_like_auth, load_persisted_tidal_tokens, recover_tidal_session,
+    tidal_track_playable_json,
+};
 use crate::SharedState;
 use crate::db::queries;
 use crate::services::tidal::{
@@ -12,6 +15,35 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+
+const CATALOG_LIST_LIMIT_MAX: i64 = 200;
+
+fn require_positive_tidal_album_id(tidal_album_id: i64) -> Result<(), (StatusCode, Json<Value>)> {
+    if tidal_album_id <= 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Expected a positive TIDAL album id" })),
+        ));
+    }
+    Ok(())
+}
+
+fn require_positive_local_id(id: i64) -> Result<(), StatusCode> {
+    if id <= 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
+}
+
+fn require_positive_local_id_json(id: i64) -> Result<(), (StatusCode, Json<Value>)> {
+    if id <= 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Expected a positive library id" })),
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ListParams {
@@ -39,10 +71,10 @@ pub(super) async fn get_tracks(
     Query(params): Query<ListParams>,
 ) -> Result<Json<Value>, StatusCode> {
     let state = state.read().await;
-    let sort_by = params.sort_by.as_deref().unwrap_or("date_added");
-    let sort_dir = params.sort_dir.as_deref().unwrap_or("desc");
-    let limit = params.limit.unwrap_or(50);
-    let offset = params.offset.unwrap_or(0);
+    let sort_by = normalize_catalog_sort_param(params.sort_by.as_deref(), "date_added");
+    let sort_dir = normalize_catalog_sort_dir(params.sort_dir.as_deref(), "desc");
+    let limit = clamp_catalog_list_limit(params.limit, 50);
+    let offset = clamp_catalog_offset(params.offset);
     let favorite_only = params.favorite_only.unwrap_or(false);
     let liked_only = params.liked_only.unwrap_or(false);
 
@@ -60,8 +92,8 @@ pub(super) async fn get_tracks(
         .with_conn(|conn| {
             let tracks = queries::get_tracks_with_dsp(
                 conn,
-                sort_by,
-                sort_dir,
+                &sort_by,
+                &sort_dir,
                 limit,
                 offset,
                 favorite_only,
@@ -95,17 +127,17 @@ pub(super) async fn get_albums(
     Query(params): Query<ListParams>,
 ) -> Result<Json<Value>, StatusCode> {
     let state = state.read().await;
-    let sort_by = params.sort_by.as_deref().unwrap_or("title");
-    let sort_dir = params.sort_dir.as_deref().unwrap_or("asc");
-    let limit = params.limit.unwrap_or(100);
-    let offset = params.offset.unwrap_or(0);
+    let sort_by = normalize_catalog_sort_param(params.sort_by.as_deref(), "title");
+    let sort_dir = normalize_catalog_sort_dir(params.sort_dir.as_deref(), "asc");
+    let limit = clamp_catalog_list_limit(params.limit, 100);
+    let offset = clamp_catalog_offset(params.offset);
     let favorite_only = params.favorite_only.unwrap_or(false);
 
     state
         .db
         .with_conn(|conn| {
             let albums =
-                queries::get_albums(conn, sort_by, sort_dir, limit, offset, favorite_only)?;
+                queries::get_albums(conn, &sort_by, &sort_dir, limit, offset, favorite_only)?;
             let total = queries::get_album_count(conn, favorite_only)?;
             Ok(Json(json!({ "albums": albums, "total": total })))
         })
@@ -117,24 +149,87 @@ pub(super) async fn get_artists(
     Query(params): Query<ListParams>,
 ) -> Result<Json<Value>, StatusCode> {
     let state = state.read().await;
-    let sort_by = params.sort_by.as_deref().unwrap_or("name");
-    let sort_dir = params.sort_dir.as_deref().unwrap_or("asc");
-    let limit = params.limit.unwrap_or(50);
-    let offset = params.offset.unwrap_or(0);
+    let sort_by = normalize_catalog_sort_param(params.sort_by.as_deref(), "name");
+    let sort_dir = normalize_catalog_sort_dir(params.sort_dir.as_deref(), "asc");
+    let limit = clamp_catalog_list_limit(params.limit, 50);
+    let offset = clamp_catalog_offset(params.offset);
 
     state
         .db
         .with_conn(|conn| {
-            let artists = queries::get_artists(conn, sort_by, sort_dir, limit, offset)?;
+            let artists = queries::get_artists(conn, &sort_by, &sort_dir, limit, offset)?;
             Ok(Json(json!({ "artists": artists })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+fn clamp_catalog_list_limit(limit: Option<i64>, default: i64) -> i64 {
+    limit.unwrap_or(default).clamp(1, CATALOG_LIST_LIMIT_MAX)
+}
+
+fn clamp_catalog_offset(offset: Option<i64>) -> i64 {
+    offset.unwrap_or(0).max(0)
+}
+
+fn normalize_catalog_sort_param(value: Option<&str>, default: &str) -> String {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(default)
+        .to_string()
+}
+
+fn normalize_catalog_sort_dir(value: Option<&str>, default: &str) -> String {
+    match value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(default)
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "asc" => "asc".to_string(),
+        "desc" => "desc".to_string(),
+        _ => default.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_list_limit_is_bounded() {
+        assert_eq!(clamp_catalog_list_limit(None, 50), 50);
+        assert_eq!(clamp_catalog_list_limit(Some(-10), 50), 1);
+        assert_eq!(clamp_catalog_list_limit(Some(0), 50), 1);
+        assert_eq!(clamp_catalog_list_limit(Some(10_000), 50), 200);
+    }
+
+    #[test]
+    fn catalog_offset_is_nonnegative() {
+        assert_eq!(clamp_catalog_offset(None), 0);
+        assert_eq!(clamp_catalog_offset(Some(-100)), 0);
+        assert_eq!(clamp_catalog_offset(Some(25)), 25);
+    }
+
+    #[test]
+    fn catalog_sort_params_are_normalized() {
+        assert_eq!(
+            normalize_catalog_sort_param(Some(" title "), "date_added"),
+            "title"
+        );
+        assert_eq!(normalize_catalog_sort_param(Some("   "), "name"), "name");
+        assert_eq!(normalize_catalog_sort_dir(Some(" ASC "), "desc"), "asc");
+        assert_eq!(normalize_catalog_sort_dir(Some(" desc "), "asc"), "desc");
+        assert_eq!(normalize_catalog_sort_dir(Some("sideways"), "asc"), "asc");
+    }
 }
 
 pub(super) async fn get_artist_tracks(
     State(state): State<SharedState>,
     axum::extract::Path(artist_id): axum::extract::Path<i64>,
 ) -> Result<Json<Value>, StatusCode> {
+    require_positive_local_id(artist_id)?;
     let state = state.read().await;
     state
         .db
@@ -149,6 +244,7 @@ pub(super) async fn get_artist(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, StatusCode> {
+    require_positive_local_id(id)?;
     let s = state.read().await;
     let row =
         s.db.with_conn(|conn| queries::get_artist_with_counts(conn, id))
@@ -173,6 +269,7 @@ pub(super) async fn get_album_tracks(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, StatusCode> {
+    require_positive_local_id(id)?;
     // Three-pass approach so the page can render the FULL album (not just
     // library coverage):
     //   1. Pull the local rows + the album's TIDAL id in one DB hit.
@@ -243,11 +340,10 @@ pub(super) async fn get_album_tracks(
         .iter()
         .any(|t| t.track_number.is_none() && t.tidal_id.is_some());
 
-    let tidal_tracks_payload: Vec<Value> = match client.get_album_tracks(tidal_album_id).await {
-        Ok(resp) => {
+    let tidal_tracks_payload: Vec<Value> = match client.get_all_album_tracks(tidal_album_id).await {
+        Ok(tidal_tracks) => {
             if needs_backfill {
-                let backfill_pairs: Vec<(i64, i32, i32)> = resp
-                    .items
+                let backfill_pairs: Vec<(i64, i32, i32)> = tidal_tracks
                     .iter()
                     .filter_map(|t| Some((t.id, t.track_number?, t.volume_number.unwrap_or(1))))
                     .collect();
@@ -288,7 +384,7 @@ pub(super) async fn get_album_tracks(
             let local_tidal_ids: std::collections::HashSet<i64> =
                 tracks.iter().filter_map(|t| t.tidal_id).collect();
 
-            resp.items
+            tidal_tracks
                 .into_iter()
                 .filter(|t| !local_tidal_ids.contains(&t.id))
                 .map(|t| {
@@ -318,7 +414,10 @@ pub(super) async fn get_album_tracks(
                 .collect()
         }
         Err(e) => {
-            tracing::warn!(?e, "TIDAL get_album_tracks failed; serving library only");
+            tracing::warn!(
+                ?e,
+                "TIDAL get_all_album_tracks failed; serving library only"
+            );
             Vec::new()
         }
     };
@@ -344,7 +443,9 @@ pub(super) async fn get_album_tracks(
 pub(super) async fn get_album_spotify_stats(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
-) -> Json<Value> {
+) -> Result<Json<Value>, StatusCode> {
+    require_positive_local_id(id)?;
+
     #[cfg(feature = "spotify-public")]
     {
         let (db, client, tracks) = {
@@ -386,18 +487,18 @@ pub(super) async fn get_album_spotify_stats(
             })
             .collect();
 
-        Json(json!({
+        Ok(Json(json!({
             "monthly_listeners": null,
             "tracks": payload,
-        }))
+        })))
     }
     #[cfg(not(feature = "spotify-public"))]
     {
-        let _ = (state, id);
-        Json(json!({
+        let _ = state;
+        Ok(Json(json!({
             "monthly_listeners": null,
             "tracks": [],
-        }))
+        })))
     }
 }
 
@@ -550,6 +651,7 @@ pub(super) async fn get_artist_discography(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_positive_local_id_json(id)?;
     let tidal_artist_id = {
         let s = state.read().await;
         s.db.with_conn(|conn| queries::get_artist_tidal_id(conn, id))
@@ -872,7 +974,9 @@ pub(super) async fn get_artist_discography(
 pub(super) async fn get_artist_spotify_stats(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
-) -> Json<Value> {
+) -> Result<Json<Value>, StatusCode> {
+    require_positive_local_id(id)?;
+
     #[cfg(feature = "spotify-public")]
     {
         let (db, client, tidal_id, artist_name, seeds) = {
@@ -932,13 +1036,13 @@ pub(super) async fn get_artist_spotify_stats(
                     })
                 })
                 .collect();
-            return Json(json!({
+            return Ok(Json(json!({
                 "monthly_listeners": null,
                 "followers": null,
                 "world_rank": null,
                 "top_cities": [],
                 "tracks": tracks,
-            }));
+            })));
         };
 
         let tidal_id_str = tidal_id.to_string();
@@ -965,24 +1069,24 @@ pub(super) async fn get_artist_spotify_stats(
             })
             .collect();
 
-        Json(json!({
+        Ok(Json(json!({
             "monthly_listeners": result.monthly_listeners,
             "followers": result.followers,
             "world_rank": result.world_rank,
             "top_cities": result.top_cities,
             "tracks": tracks,
-        }))
+        })))
     }
     #[cfg(not(feature = "spotify-public"))]
     {
-        let _ = (state, id);
-        Json(json!({
+        let _ = state;
+        Ok(Json(json!({
             "monthly_listeners": null,
             "followers": null,
             "world_rank": null,
             "top_cities": [],
             "tracks": [],
-        }))
+        })))
     }
 }
 
@@ -990,7 +1094,9 @@ pub(super) async fn get_tidal_album_tracks(
     State(state): State<SharedState>,
     Path(tidal_album_id): Path<i64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let (tokens, tidal_http_client) = {
+    require_positive_tidal_album_id(tidal_album_id)?;
+
+    let (tokens, http_client, tidal_http_client) = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1000,6 +1106,7 @@ pub(super) async fn get_tidal_album_tracks(
         let s = state.read().await;
         (
             s.tidal_tokens.clone().or(persisted),
+            s.http_client.clone(),
             s.tidal_http_client.clone(),
         )
     };
@@ -1012,18 +1119,46 @@ pub(super) async fn get_tidal_album_tracks(
     };
 
     let client = TidalClient::with_http(
-        tidal_http_client,
+        tidal_http_client.clone(),
         tokens.access_token.clone(),
         tokens.country_code.clone(),
     );
-    let result = client.get_album_tracks(tidal_album_id).await.map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": e.to_string() })),
-        )
-    })?;
+    let items = match client.get_all_album_tracks(tidal_album_id).await {
+        Ok(items) => items,
+        Err(error) if error_looks_like_auth(&error) => {
+            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+                .await
+                .map_err(|refresh_error| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({
+                            "error": format!("TIDAL session refresh failed: {}", refresh_error)
+                        })),
+                    )
+                })?;
+            let retry_client = TidalClient::with_http(
+                tidal_http_client,
+                refreshed.access_token.clone(),
+                refreshed.country_code.clone(),
+            );
+            retry_client
+                .get_all_album_tracks(tidal_album_id)
+                .await
+                .map_err(|retry_error| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": retry_error.to_string() })),
+                    )
+                })?
+        }
+        Err(error) => {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": error.to_string() })),
+            ));
+        }
+    };
 
-    let items = result.items;
     let tidal_ids: Vec<i64> = items.iter().map(|t| t.id).collect();
     let library_states = {
         let s = state.read().await;
@@ -1045,6 +1180,8 @@ pub(super) async fn import_tidal_album(
     State(state): State<SharedState>,
     Path(tidal_album_id): Path<i64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_positive_tidal_album_id(tidal_album_id)?;
+
     let (tokens, db, tidal_http_client) = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (
@@ -1112,10 +1249,68 @@ pub(super) struct ImportTidalTrackBody {
     duration_ms: Option<i64>,
 }
 
+fn tidal_track_import_bad_request(message: &str) -> (StatusCode, Json<Value>) {
+    (StatusCode::BAD_REQUEST, Json(json!({ "error": message })))
+}
+
+fn require_positive_optional_tidal_id(
+    value: Option<i64>,
+    field: &str,
+) -> Result<Option<i64>, (StatusCode, Json<Value>)> {
+    if value.is_some_and(|id| id <= 0) {
+        return Err(tidal_track_import_bad_request(&format!(
+            "{field} must be a positive TIDAL id"
+        )));
+    }
+    Ok(value)
+}
+
+fn require_positive_optional_duration_ms(
+    value: Option<i64>,
+) -> Result<Option<i64>, (StatusCode, Json<Value>)> {
+    if value.is_some_and(|duration| duration <= 0) {
+        return Err(tidal_track_import_bad_request(
+            "duration_ms must be positive when provided",
+        ));
+    }
+    Ok(value)
+}
+
+fn normalize_optional_nonempty_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
 pub(super) async fn import_tidal_track_for_radio(
     State(state): State<SharedState>,
     Json(body): Json<ImportTidalTrackBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if body.tidal_id <= 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Expected a positive TIDAL track id" })),
+        ));
+    }
+
+    let title = body.title.trim().to_string();
+    if title.is_empty() {
+        return Err(tidal_track_import_bad_request("title is required"));
+    }
+
+    let artist_name = body.artist_name.trim().to_string();
+    if artist_name.is_empty() {
+        return Err(tidal_track_import_bad_request("artist_name is required"));
+    }
+
+    let artist_tidal_id =
+        require_positive_optional_tidal_id(body.artist_tidal_id, "artist_tidal_id")?;
+    let album_tidal_id = require_positive_optional_tidal_id(body.album_tidal_id, "album_tidal_id")?;
+    let duration_ms = require_positive_optional_duration_ms(body.duration_ms)?;
+    let album_title = normalize_optional_nonempty_string(body.album_title);
+    let artwork_url = normalize_optional_nonempty_string(body.artwork_url);
+
     let db = {
         let s = state.read().await;
         s.db.clone()
@@ -1124,14 +1319,14 @@ pub(super) async fn import_tidal_track_for_radio(
         &db,
         tidal_import::ImportTrackMetadata {
             tidal_id: body.tidal_id,
-            title: body.title,
-            artist_name: body.artist_name,
-            artist_tidal_id: body.artist_tidal_id,
+            title,
+            artist_name,
+            artist_tidal_id,
             artist_picture: None,
-            album_title: body.album_title,
-            album_tidal_id: body.album_tidal_id,
-            album_artwork_url: body.artwork_url,
-            duration_ms: body.duration_ms,
+            album_title,
+            album_tidal_id,
+            album_artwork_url: artwork_url,
+            duration_ms,
         },
     )
     .await

@@ -60,6 +60,68 @@ pub(super) struct DiscoveryFeedbackRequest {
     session_id: Option<String>,
 }
 
+fn parse_discovery_training_mode(mode: Option<&str>) -> Result<(&'static str, bool), StatusCode> {
+    let Some(mode) = mode else {
+        return Ok(("incremental", false));
+    };
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "incremental" => Ok(("incremental", false)),
+        "full" => Ok(("full", true)),
+        "" => Err(StatusCode::BAD_REQUEST),
+        _ => Err(StatusCode::BAD_REQUEST),
+    }
+}
+
+fn parse_discovery_request_mode(mode: Option<&str>) -> Result<String, StatusCode> {
+    let Some(mode) = mode else {
+        return Ok(super::normalize_discovery_mode(None));
+    };
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "mood" => Ok("mood".to_string()),
+        "reference" => Ok("reference".to_string()),
+        "dj" => Ok("dj".to_string()),
+        "word-cloud" => Ok("word-cloud".to_string()),
+        "" => Err(StatusCode::BAD_REQUEST),
+        _ => Err(StatusCode::BAD_REQUEST),
+    }
+}
+
+fn parse_discovery_intensity_request(
+    intensity: &str,
+) -> Result<discovery_learning::DiscoveryIntensity, StatusCode> {
+    match intensity.trim().to_ascii_lowercase().as_str() {
+        "max" => Ok(discovery_learning::DiscoveryIntensity::Max),
+        "medium" => Ok(discovery_learning::DiscoveryIntensity::Medium),
+        "low" => Ok(discovery_learning::DiscoveryIntensity::Low),
+        _ => Err(StatusCode::BAD_REQUEST),
+    }
+}
+
+fn parse_discovery_engine_request(
+    engine: &str,
+) -> Result<discovery_learning::DiscoveryEngine, StatusCode> {
+    match engine.trim().to_ascii_lowercase().as_str() {
+        "v2" => Ok(discovery_learning::DiscoveryEngine::V2),
+        "v1" | "legacy" => Ok(discovery_learning::DiscoveryEngine::V1),
+        _ => Err(StatusCode::BAD_REQUEST),
+    }
+}
+
+fn parse_discovery_safety_profile_request(
+    profile: &str,
+) -> Result<discovery_learning::DiscoveryTrainingSafetyProfile, StatusCode> {
+    match profile.trim().to_ascii_lowercase().as_str() {
+        "laptop_safe" | "laptop-safe" | "safe" => {
+            Ok(discovery_learning::DiscoveryTrainingSafetyProfile::LaptopSafe)
+        }
+        "balanced" => Ok(discovery_learning::DiscoveryTrainingSafetyProfile::Balanced),
+        "performance" | "fast" => {
+            Ok(discovery_learning::DiscoveryTrainingSafetyProfile::Performance)
+        }
+        _ => Err(StatusCode::BAD_REQUEST),
+    }
+}
+
 pub(super) async fn preview_discovery(
     State(state): State<SharedState>,
     Json(payload): Json<DiscoveryPreviewRequest>,
@@ -73,7 +135,7 @@ pub(super) async fn preview_discovery(
         .services
         .clone()
         .unwrap_or_else(|| vec!["tidal".to_string()]);
-    let mode = super::normalize_discovery_mode(payload.mode.as_deref());
+    let mode = parse_discovery_request_mode(payload.mode.as_deref())?;
     let candidate_limit = payload.limit.unwrap_or(18).clamp(1, 40);
     let result_limit = payload.limit.unwrap_or(8).clamp(1, 20) as usize;
 
@@ -138,7 +200,15 @@ pub(super) async fn discover_new_music(
         ));
     }
 
-    let mode = super::normalize_discovery_mode(payload.mode.as_deref());
+    let mode = parse_discovery_request_mode(payload.mode.as_deref()).map_err(|status| {
+        (
+            status,
+            Json(json!({
+                "status": "invalid_mode",
+                "message": "Discovery mode must be mood, reference, dj, or word-cloud.",
+            })),
+        )
+    })?;
     let services = super::normalize_discovery_services(payload.services);
     if !services.iter().any(|service| service == "tidal") {
         return Err((
@@ -278,7 +348,15 @@ pub(super) async fn discover_connected_music(
 
     let request = external_discovery_engine::ExternalDiscoveryRequest {
         prompt: prompt.to_string(),
-        mode: super::normalize_discovery_mode(payload.mode.as_deref()),
+        mode: parse_discovery_request_mode(payload.mode.as_deref()).map_err(|status| {
+            (
+                status,
+                Json(json!({
+                    "status": "invalid_mode",
+                    "message": "Discovery mode must be mood, reference, dj, or word-cloud.",
+                })),
+            )
+        })?,
         services: super::normalize_discovery_services(payload.services),
         limit: payload.limit.unwrap_or(10).clamp(1, 20) as usize,
     };
@@ -360,7 +438,7 @@ pub(super) async fn create_discovery_preset(
     if name.is_empty() || prompt.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let mode = super::normalize_discovery_mode(payload.mode.as_deref());
+    let mode = parse_discovery_request_mode(payload.mode.as_deref())?;
 
     let services_json = serde_json::to_string(
         &payload
@@ -452,8 +530,7 @@ pub(super) async fn start_discovery_training(
 ) -> Result<Json<Value>, StatusCode> {
     use std::sync::atomic::Ordering;
 
-    let mode = payload.mode.as_deref().unwrap_or("incremental");
-    let full_mode = mode == "full";
+    let (mode, full_mode) = parse_discovery_training_mode(payload.mode.as_deref())?;
     let rebuild_audio = payload.rebuild_audio.unwrap_or(false);
     let (db, cancel) = {
         let guard = state.read().await;
@@ -574,11 +651,9 @@ pub(super) async fn set_discovery_intensity(
     State(state): State<SharedState>,
     Json(payload): Json<IntensityRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    use crate::services::learning::{
-        DiscoveryIntensity, set_discovery_intensity as save_intensity,
-    };
+    use crate::services::learning::set_discovery_intensity as save_intensity;
     let s = state.read().await;
-    let parsed = DiscoveryIntensity::parse(&payload.intensity);
+    let parsed = parse_discovery_intensity_request(&payload.intensity)?;
     save_intensity(&s.db, parsed).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({ "intensity": parsed.as_str() })))
 }
@@ -611,7 +686,7 @@ pub(super) async fn set_discovery_engine(
     Json(payload): Json<EngineRequest>,
 ) -> Result<Json<Value>, StatusCode> {
     let s = state.read().await;
-    let parsed = discovery_learning::DiscoveryEngine::parse(&payload.engine);
+    let parsed = parse_discovery_engine_request(&payload.engine)?;
     discovery_learning::set_discovery_engine(&s.db, parsed)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({
@@ -653,11 +728,10 @@ pub(super) async fn set_discovery_safety_profile(
     Json(payload): Json<SafetyProfileRequest>,
 ) -> Result<Json<Value>, StatusCode> {
     use crate::services::learning::{
-        DiscoveryTrainingSafetyProfile, discovery_training_worker_threads,
-        set_discovery_training_safety_profile,
+        discovery_training_worker_threads, set_discovery_training_safety_profile,
     };
     let s = state.read().await;
-    let parsed = DiscoveryTrainingSafetyProfile::parse(&payload.profile);
+    let parsed = parse_discovery_safety_profile_request(&payload.profile)?;
     set_discovery_training_safety_profile(&s.db, parsed)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({

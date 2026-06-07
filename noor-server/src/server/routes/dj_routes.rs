@@ -779,6 +779,10 @@ async fn get_profile(
     State(state): State<SharedState>,
     Path(track_id): Path<i64>,
 ) -> Result<Json<ProfileResponse>, StatusCode> {
+    if track_id <= 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     let profile = {
         let state = state.read().await;
         state

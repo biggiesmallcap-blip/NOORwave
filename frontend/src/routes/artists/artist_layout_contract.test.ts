@@ -43,12 +43,62 @@ describe('artist page layout contracts', () => {
 		expect(source).not.toContain('class="stream-badge"');
 	});
 
+	test('guards artist route loads against stale responses', () => {
+		expect(source).toContain('let loadSeq = 0;');
+		expect(source).toContain('async function load(id: number)');
+		expect(source).toContain('const seq = ++loadSeq;');
+		expect(source).toContain('cachedApi.getArtist(id)');
+		expect(source).toContain('cachedApi.getArtistTracks(id)');
+		expect(source).toContain('if (seq !== loadSeq) return;');
+		expect(source).toContain('if (seq === loadSeq) loading = false;');
+		expect(source).toContain('const id = artistId;');
+		expect(source).toContain('tracks = [];');
+		expect(source).toContain('void load(id);');
+		expect(source).not.toContain('void load();');
+	});
+
+	test('guards artist enrichment loads against stale responses', () => {
+		expect(source).toContain('let tidalLoadSeq = 0;');
+		expect(source).toContain('async function loadDiscography(id: number)');
+		expect(source).toContain('const seq = ++tidalLoadSeq;');
+		expect(source).toContain('const res = await cachedApi.getArtistDiscography(id);');
+		expect(source).toContain('if (seq !== tidalLoadSeq) return;');
+		expect(source).toContain('if (seq === tidalLoadSeq) tidalLoading = false;');
+		expect(source).toContain('let spotifyLoadSeq = 0;');
+		expect(source).toContain('async function loadSpotifyStats(id: number)');
+		expect(source).toContain('const stats = await cachedApi.getArtistSpotifyStats(id);');
+		expect(source).toContain('if (seq === spotifyLoadSeq) spotifyStats = stats;');
+		expect(source).toContain('void loadDiscography(id);');
+		expect(source).toContain('void loadSpotifyStats(id);');
+	});
+
 	test('hero play falls back to TIDAL top tracks when the local artist has no tracks', () => {
 		expect(source).toContain('playTidalTracksNow');
-		expect(source).toContain('async function ensureTidalTopTracksForPlayback()');
+		expect(source).toContain('async function ensureTidalTopTracksForPlayback(id: number)');
 		expect(source).toContain('if (tracks.length > 0)');
+		expect(source).toContain('const requestedFor = artistId;');
+		expect(source).toContain('const topTracks = await ensureTidalTopTracksForPlayback(requestedFor);');
+		expect(source).toContain('if (artistId !== requestedFor) return;');
+		expect(source).toContain('const playable = topTracks.map(artistTrackPlayable)');
 		expect(source).toContain('await playTidalTracksNow(playable, artist?.name ?? \'artist\')');
 		expect(source).toContain('await playArtist(artistId)');
+	});
+
+	test('uses the shared TIDAL discography playable mapper with the artist fallback id', () => {
+		expect(source).toContain("import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';");
+		expect(source).toContain('function artistTrackPlayable(track: TidalDiscographyTrack)');
+		expect(source).toContain("tidalDiscographyTrackToPlayable(track, { artistTidalId: artist?.tidal_id ?? null })");
+		expect(source).toContain('{@const playable = artistTrackPlayable(track)}');
+		expect(source).not.toContain('type TidalPlayable');
+		expect(source).not.toContain('function tidalDiscographyTrackToPlayable(t: TidalDiscographyTrack)');
+	});
+
+	test('keeps artist media rail context menus app-owned', () => {
+		expect(source).toContain('openContextMenu(e, buildTidalTrackMenu(playable), track.title);');
+		expect(source).toContain('openContextMenu(e, similarArtistMenu(similar), similar.name);');
+		expect(source).toContain('openContextMenu(e, fallbackAlbumMenu(album), album.title);');
+		expect(source).toContain('e.preventDefault();');
+		expect(source).toContain('e.stopPropagation();');
 	});
 
 	test('keeps route copy and comments ASCII-safe', () => {

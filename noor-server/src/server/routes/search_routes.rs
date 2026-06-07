@@ -16,6 +16,7 @@ use std::time::Instant;
 
 const SPORTIFY_PLAYLIST_WARN_THROTTLE_MS: u64 = 30_000;
 const SPORTIFY_PLAYLIST_WARN_KEY_CAP: usize = 1024;
+const SPORTIFY_PLAYLIST_RATE_LIMIT_COOLDOWN_MS: u64 = 15 * 60 * 1000;
 const SEARCH_LIMIT_DEFAULT: i64 = 20;
 const SEARCH_LIMIT_MAX: i64 = 50;
 const AUDIO_SEARCH_LIMIT_DEFAULT: usize = 50;
@@ -26,6 +27,7 @@ const UNDERRATED_LIMIT_DEFAULT: usize = 5;
 const UNDERRATED_LIMIT_MAX: usize = 50;
 static SPORTIFY_PLAYLIST_WARN_STATE: OnceLock<Mutex<HashMap<u64, u64>>> = OnceLock::new();
 static SPORTIFY_PLAYLIST_WARN_CLOCK_START: OnceLock<Instant> = OnceLock::new();
+static SPORTIFY_PLAYLIST_RATE_LIMIT_UNTIL: OnceLock<Mutex<Option<u64>>> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 pub(super) struct SearchParams {
@@ -38,9 +40,11 @@ pub(super) async fn search(
     Query(params): Query<SearchParams>,
 ) -> Result<Json<Value>, StatusCode> {
     let limit = clamp_i64_limit(params.limit, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX);
+    let query = params.q.trim().to_string();
+    if query.is_empty() {
+        return Ok(empty_search_response());
+    }
 
-    // Snapshot what each side needs without holding the read lock across the
-    // Sportify HTTP call.
     let (db, sportify_client, cache_cfg) = {
         let s = state.read().await;
         (
@@ -50,41 +54,65 @@ pub(super) async fn search(
         )
     };
 
-    // Local DB search and Sportify playlist search are independent: run them
-    // concurrently. Local search must succeed (existing contract); Sportify is
-    // best-effort (upstream may break).
-    let q = params.q.clone();
+    let q = query.clone();
     let db_for_local = db.clone();
     let local_fut = async move { db_for_local.with_conn(|conn| queries::search(conn, &q, limit)) };
 
     let spotify_fut = async {
         match sportify_client {
-            Some(client) => fetch_spotify_playlist_search_compact(
-                &client,
-                &db,
-                &cache_cfg,
-                &params.q,
-                limit.min(20).max(1) as u32,
-            )
-            .await
-            .unwrap_or_else(|e| {
-                let error_text = e.to_string();
-                let warn_key = sportify_playlist_warn_key(&params.q, &error_text);
-                if claim_throttled_warn_slot(
-                    sportify_playlist_warn_state(),
-                    warn_key,
-                    monotonic_now_ms(),
-                    SPORTIFY_PLAYLIST_WARN_THROTTLE_MS,
+            Some(client) => {
+                let now_ms = monotonic_now_ms();
+                if let Some(until_ms) = sportify_playlist_rate_limited_until(
+                    sportify_playlist_rate_limit_state(),
+                    now_ms,
                 ) {
-                    tracing::warn!("sportify playlist search failed: {}", error_text);
-                } else {
                     tracing::debug!(
-                        "sportify playlist search failed (suppressed): {}",
-                        error_text
+                        retry_in_ms = until_ms.saturating_sub(now_ms),
+                        "sportify playlist search skipped during rate-limit cooldown"
                     );
+                    Vec::new()
+                } else {
+                    fetch_spotify_playlist_search_compact(
+                        &client,
+                        &db,
+                        &cache_cfg,
+                        &query,
+                        limit.min(20).max(1) as u32,
+                    )
+                    .await
+                    .unwrap_or_else(|e| {
+                        let error_text = e.to_string();
+                        if sportify_playlist_error_is_rate_limited(&error_text) {
+                            let until_ms = note_sportify_playlist_rate_limit(
+                                sportify_playlist_rate_limit_state(),
+                                monotonic_now_ms(),
+                                SPORTIFY_PLAYLIST_RATE_LIMIT_COOLDOWN_MS,
+                            );
+                            tracing::debug!(
+                                retry_after_ms =
+                                    until_ms.map(|until| until.saturating_sub(monotonic_now_ms())),
+                                "sportify playlist search entered rate-limit cooldown"
+                            );
+                        }
+
+                        let warn_key = sportify_playlist_warn_key(&query, &error_text);
+                        if claim_throttled_warn_slot(
+                            sportify_playlist_warn_state(),
+                            warn_key,
+                            monotonic_now_ms(),
+                            SPORTIFY_PLAYLIST_WARN_THROTTLE_MS,
+                        ) {
+                            tracing::warn!("sportify playlist search failed: {}", error_text);
+                        } else {
+                            tracing::debug!(
+                                "sportify playlist search failed (suppressed): {}",
+                                error_text
+                            );
+                        }
+                        Vec::new()
+                    })
                 }
-                Vec::new()
-            }),
+            }
             None => Vec::new(),
         }
     };
@@ -100,12 +128,28 @@ pub(super) async fn search(
     })))
 }
 
+fn empty_search_response() -> Json<Value> {
+    Json(json!({
+        "tracks": [],
+        "albums": [],
+        "artists": [],
+        "spotify_playlists": [],
+    }))
+}
+
 fn clamp_i64_limit(limit: Option<i64>, default: i64, max: i64) -> i64 {
     limit.unwrap_or(default).clamp(1, max)
 }
 
 fn clamp_usize_limit(limit: Option<usize>, default: usize, max: usize) -> usize {
     limit.unwrap_or(default).clamp(1, max)
+}
+
+fn positive_query_id(id: i64) -> Result<i64, StatusCode> {
+    if id <= 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(id)
 }
 
 /// Compact playlist-search result tailored for inline rendering in /search
@@ -183,11 +227,51 @@ fn sportify_playlist_warn_state() -> &'static Mutex<HashMap<u64, u64>> {
     SPORTIFY_PLAYLIST_WARN_STATE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn sportify_playlist_rate_limit_state() -> &'static Mutex<Option<u64>> {
+    SPORTIFY_PLAYLIST_RATE_LIMIT_UNTIL.get_or_init(|| Mutex::new(None))
+}
+
 fn monotonic_now_ms() -> u64 {
     SPORTIFY_PLAYLIST_WARN_CLOCK_START
         .get_or_init(Instant::now)
         .elapsed()
         .as_millis() as u64
+}
+
+fn sportify_playlist_error_is_rate_limited(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("429")
+        || normalized.contains("too many requests")
+        || normalized.contains("rate limit")
+}
+
+fn sportify_playlist_rate_limited_until(state: &Mutex<Option<u64>>, now_ms: u64) -> Option<u64> {
+    let Ok(mut guard) = state.lock() else {
+        return None;
+    };
+
+    match *guard {
+        Some(until_ms) if now_ms < until_ms => Some(until_ms),
+        Some(_) => {
+            *guard = None;
+            None
+        }
+        None => None,
+    }
+}
+
+fn note_sportify_playlist_rate_limit(
+    state: &Mutex<Option<u64>>,
+    now_ms: u64,
+    cooldown_ms: u64,
+) -> Option<u64> {
+    let until_ms = now_ms.saturating_add(cooldown_ms);
+    let Ok(mut guard) = state.lock() else {
+        return None;
+    };
+
+    *guard = Some(guard.map_or(until_ms, |existing| existing.max(until_ms)));
+    *guard
 }
 
 fn sportify_playlist_warn_key(query: &str, error: &str) -> u64 {
@@ -204,7 +288,6 @@ fn claim_throttled_warn_slot(
     min_interval_ms: u64,
 ) -> bool {
     let Ok(mut guard) = state.lock() else {
-        // Fail-open on poisoned lock so we don't lose warning visibility.
         return true;
     };
 
@@ -228,6 +311,10 @@ mod tests {
 
     fn state() -> Mutex<HashMap<u64, u64>> {
         Mutex::new(HashMap::new())
+    }
+
+    fn rate_limit_state(value: Option<u64>) -> Mutex<Option<u64>> {
+        Mutex::new(value)
     }
 
     #[test]
@@ -267,6 +354,58 @@ mod tests {
         let a = sportify_playlist_warn_key("  DaFt PuNk ", "Sportify request failed: /api/search");
         let b = sportify_playlist_warn_key("daft punk", "sportify request failed: /api/search");
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn rate_limit_detection_matches_upstream_429_shapes() {
+        assert!(sportify_playlist_error_is_rate_limited(
+            "HTTP 429 Too Many Requests"
+        ));
+        assert!(sportify_playlist_error_is_rate_limited(
+            "Search rate limit exceeded"
+        ));
+        assert!(!sportify_playlist_error_is_rate_limited(
+            "sportify request failed: /api/search"
+        ));
+    }
+
+    #[test]
+    fn rate_limit_note_sets_cooldown_until() {
+        let state = rate_limit_state(None);
+        let until = note_sportify_playlist_rate_limit(&state, 10_000, 900_000);
+        assert_eq!(until, Some(910_000));
+        assert_eq!(
+            sportify_playlist_rate_limited_until(&state, 20_000),
+            Some(910_000)
+        );
+    }
+
+    #[test]
+    fn rate_limit_note_extends_existing_cooldown() {
+        let state = rate_limit_state(Some(910_000));
+        let until = note_sportify_playlist_rate_limit(&state, 100_000, 900_000);
+        assert_eq!(until, Some(1_000_000));
+    }
+
+    #[test]
+    fn expired_rate_limit_clears_cooldown() {
+        let state = rate_limit_state(Some(10_000));
+        assert_eq!(sportify_playlist_rate_limited_until(&state, 10_000), None);
+        assert_eq!(*state.lock().expect("lock state"), None);
+    }
+
+    #[test]
+    fn empty_search_response_keeps_route_payload_shape() {
+        let Json(body) = empty_search_response();
+        assert_eq!(
+            body,
+            json!({
+                "tracks": [],
+                "albums": [],
+                "artists": [],
+                "spotify_playlists": [],
+            })
+        );
     }
 
     #[test]
@@ -375,12 +514,13 @@ pub(super) async fn search_vibe(
     State(state): State<SharedState>,
     Query(params): Query<VibeParams>,
 ) -> Result<Json<Value>, StatusCode> {
+    let track_id = positive_query_id(params.track_id)?;
     let limit = clamp_usize_limit(params.limit, VIBE_LIMIT_DEFAULT, VIBE_LIMIT_MAX);
     let state = state.read().await;
     state
         .db
         .with_conn(|conn| {
-            let results = queries::get_same_vibe_tracks(conn, params.track_id, limit as i64)?;
+            let results = queries::get_same_vibe_tracks(conn, track_id, limit as i64)?;
             Ok(Json(json!({ "tracks": results })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
@@ -396,12 +536,13 @@ pub(super) async fn search_underrated(
     State(state): State<SharedState>,
     Query(params): Query<UnderratedParams>,
 ) -> Result<Json<Value>, StatusCode> {
+    let artist_id = positive_query_id(params.artist_id)?;
     let limit = clamp_usize_limit(params.limit, UNDERRATED_LIMIT_DEFAULT, UNDERRATED_LIMIT_MAX);
     let state = state.read().await;
     state
         .db
         .with_conn(|conn| {
-            let results = queries::get_underrated_tracks(conn, params.artist_id, limit as i64)?;
+            let results = queries::get_underrated_tracks(conn, artist_id, limit as i64)?;
             Ok(Json(json!({ "tracks": results })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)

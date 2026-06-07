@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onDestroy } from 'svelte';
 	import {
 		api,
 		type Album,
@@ -24,22 +25,28 @@
 	// Top rails - fetched once on mount via the dashboard endpoint.
 	let recents = $state<ListenHistoryEntry[]>([]);
 	let topArtists = $state<AnalyticsTopArtist[]>([]);
+	let dashboardLoadSeq = 0;
 
 	// Alphabetical browse - paginated.
 	const PAGE = 50;
 	let artists = $state<Artist[]>([]);
 	let artistsHasMore = $state(true);
 	let artistsLoading = $state(false);
+	let artistsLoadSeq = 0;
 	let albums = $state<Album[]>([]);
 	let albumsHasMore = $state(true);
 	let albumsLoading = $state(false);
+	let albumsLoadSeq = 0;
 	let tracks = $state<Track[]>([]);
 	let tracksHasMore = $state(true);
 	let tracksLoading = $state(false);
+	let tracksLoadSeq = 0;
 
 	async function loadDashboard() {
+		const seq = ++dashboardLoadSeq;
 		try {
 			const { dashboard } = await api.getAnalyticsDashboard(15, 8, 30);
+			if (seq !== dashboardLoadSeq) return;
 			recents = dashboard.recent_listens;
 			topArtists = dashboard.top_artists;
 		} catch {
@@ -49,38 +56,45 @@
 
 	async function loadArtistsPage() {
 		if (artistsLoading || !artistsHasMore) return;
+		const seq = ++artistsLoadSeq;
 		artistsLoading = true;
 		try {
 			const offset = artists.length;
 			const res = await api.getArtists('name', 'asc', PAGE, offset);
+			if (seq !== artistsLoadSeq) return;
 			artists = [...artists, ...res.artists];
 			if (res.artists.length < PAGE) artistsHasMore = false;
 		} catch {
+			if (seq !== artistsLoadSeq) return;
 			artistsHasMore = false;
 		} finally {
-			artistsLoading = false;
+			if (seq === artistsLoadSeq) artistsLoading = false;
 		}
 	}
 
 	async function loadAlbumsPage() {
 		if (albumsLoading || !albumsHasMore) return;
+		const seq = ++albumsLoadSeq;
 		albumsLoading = true;
 		try {
 			const offset = albums.length;
 			// `favorite_only` defaults to true on the backend; pass false so we
 			// list the whole library rather than just favourited albums.
 			const res = await api.getAlbums('title', 'asc', PAGE, offset, false);
+			if (seq !== albumsLoadSeq) return;
 			albums = [...albums, ...res.albums];
 			if (res.albums.length < PAGE) albumsHasMore = false;
 		} catch {
+			if (seq !== albumsLoadSeq) return;
 			albumsHasMore = false;
 		} finally {
-			albumsLoading = false;
+			if (seq === albumsLoadSeq) albumsLoading = false;
 		}
 	}
 
 	async function loadTracksPage() {
 		if (tracksLoading || !tracksHasMore) return;
+		const seq = ++tracksLoadSeq;
 		tracksLoading = true;
 		try {
 			const offset = tracks.length;
@@ -91,14 +105,23 @@
 			// surface at the top, matching how Spotify / Apple Music order
 			// their "Liked Songs" view on mobile.
 			const res = await api.getTracks('date_added', 'desc', PAGE, offset, true, true);
+			if (seq !== tracksLoadSeq) return;
 			tracks = [...tracks, ...res.tracks];
 			if (res.tracks.length < PAGE) tracksHasMore = false;
 		} catch {
+			if (seq !== tracksLoadSeq) return;
 			tracksHasMore = false;
 		} finally {
-			tracksLoading = false;
+			if (seq === tracksLoadSeq) tracksLoading = false;
 		}
 	}
+
+	onDestroy(() => {
+		dashboardLoadSeq += 1;
+		artistsLoadSeq += 1;
+		albumsLoadSeq += 1;
+		tracksLoadSeq += 1;
+	});
 
 	$effect(() => {
 		void loadDashboard();

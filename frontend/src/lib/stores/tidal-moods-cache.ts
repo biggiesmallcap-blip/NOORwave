@@ -6,6 +6,7 @@ import type { TidalHomeModule, TidalMoodCategory } from '$lib/api/client';
 /// instantly without re-fetching. Cleared on hard reload (app restart).
 
 const TTL_MS = 6 * 60 * 60 * 1000;
+const THUMBNAIL_REFRESH_COOLDOWN_MS = 60 * 1000;
 
 interface MoodLandingEntry {
 	categories: TidalMoodCategory[];
@@ -19,6 +20,7 @@ interface MoodPageEntry {
 
 let landing: MoodLandingEntry | null = null;
 const drilldown = new Map<string, MoodPageEntry>();
+let lastThumbnailRefreshAt = Number.NEGATIVE_INFINITY;
 
 export function getCachedMoodCategories(): TidalMoodCategory[] | null {
 	if (!landing) return null;
@@ -31,14 +33,19 @@ export function getCachedMoodCategories(): TidalMoodCategory[] | null {
 
 export function putCachedMoodCategories(categories: TidalMoodCategory[]): void {
 	landing = { categories, insertedAt: Date.now() };
+	if (!moodCategoriesNeedThumbnails(categories)) lastThumbnailRefreshAt = Number.NEGATIVE_INFINITY;
 }
 
 export function moodCategoriesNeedThumbnails(categories: TidalMoodCategory[]): boolean {
 	return categories.length > 0 && categories.some((category) => !category.thumbnail);
 }
 
-export function putCompleteMoodCategories(categories: TidalMoodCategory[]): void {
-	if (!moodCategoriesNeedThumbnails(categories)) putCachedMoodCategories(categories);
+export function claimMoodThumbnailRefresh(categories: TidalMoodCategory[]): boolean {
+	if (!moodCategoriesNeedThumbnails(categories)) return false;
+	const now = Date.now();
+	if (now - lastThumbnailRefreshAt < THUMBNAIL_REFRESH_COOLDOWN_MS) return false;
+	lastThumbnailRefreshAt = now;
+	return true;
 }
 
 export function getCachedMoodPage(slug: string): TidalHomeModule[] | null {
@@ -58,4 +65,5 @@ export function putCachedMoodPage(slug: string, modules: TidalHomeModule[]): voi
 export function clearCachedMoods(): void {
 	landing = null;
 	drilldown.clear();
+	lastThumbnailRefreshAt = Number.NEGATIVE_INFINITY;
 }

@@ -22,20 +22,30 @@
 	let mod = $state<TidalHomeModule | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	let loadSeq = 0;
 
 	$effect(() => {
 		const id = moduleId;
-		if (!id) return;
+		if (!id) {
+			loadSeq += 1;
+			mod = null;
+			loading = false;
+			error = 'Missing discover shelf.';
+			return;
+		}
 		void load(id);
 	});
 
 	async function load(id: string) {
+		const seq = ++loadSeq;
 		loading = true;
 		error = null;
 		try {
 			const res = await api.getTidalDiscoverModule(id, 50);
+			if (seq !== loadSeq) return;
 			mod = res.module;
 		} catch (e) {
+			if (seq !== loadSeq) return;
 			if (e instanceof ApiError && e.status === 404) {
 				error = "That discover shelf doesn't exist anymore — TIDAL may have rotated its home page.";
 			} else if (e instanceof ApiError && e.status === 503) {
@@ -44,7 +54,7 @@
 				error = e instanceof Error ? e.message : 'Failed to load module.';
 			}
 		} finally {
-			loading = false;
+			if (seq === loadSeq) loading = false;
 		}
 	}
 
@@ -64,23 +74,39 @@
 	}
 
 	function handleContextMenu(event: MouseEvent, item: TidalHomeItem) {
-		if (item.kind !== 'track' && item.kind !== 'album') return;
+		if (item.kind !== 'track' && item.kind !== 'album' && item.kind !== 'playlist') return;
 		event.preventDefault();
 		event.stopPropagation();
 		if (item.kind === 'track') {
 			openContextMenu(event, buildTidalTrackMenu(tidalHomeItemToPlayable(item)), item.title);
 			return;
 		}
-		openContextMenu(event, buildAlbumMenu({
-			tidal_id: item.album_id ?? Number(item.id),
-			title: item.title,
-			artist_id: item.artist_id ?? null,
-			artist_name: item.artist_name ?? null,
-			in_library: false
-		}, { isLocal: false }), item.title);
+		if (item.kind === 'album') {
+			openContextMenu(event, buildAlbumMenu({
+				tidal_id: item.album_id ?? Number(item.id),
+				title: item.title,
+				artist_id: item.artist_id ?? null,
+				artist_name: item.artist_name ?? null,
+				in_library: false
+			}, { isLocal: false }), item.title);
+			return;
+		}
+		openContextMenu(
+			event,
+			[
+				{
+					label: 'Play playlist',
+					icon: 'â–¶',
+					onSelect: () => { void playTidalPlaylist(item.id); }
+				}
+			],
+			item.title
+		);
 	}
 
 	function openArtistContextMenu(event: MouseEvent, item: TidalHomeItem) {
+		event.preventDefault();
+		event.stopPropagation();
 		if (!item.artist_name) return;
 		openContextMenu(event, buildArtistMenu({
 			tidal_id: item.artist_id ?? null,
@@ -90,6 +116,8 @@
 	}
 
 	function openAlbumContextMenu(event: MouseEvent, item: TidalHomeItem) {
+		event.preventDefault();
+		event.stopPropagation();
 		if (!item.album_title || item.album_id == null) return;
 		openContextMenu(event, buildAlbumMenu({
 			tidal_id: item.album_id,

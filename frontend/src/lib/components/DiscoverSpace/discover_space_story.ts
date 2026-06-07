@@ -1,6 +1,6 @@
 // All UI copy for the DiscoverSpace visualization. One place to tune language.
 
-import type { DiscoverReason, RadioMode } from './discover_space_types';
+import type { DiscoverReason } from './discover_space_types';
 
 export const PAGE_TITLE = 'Sound Space';
 export const PAGE_SUBTITLE = 'Seed, branch, build.';
@@ -47,12 +47,6 @@ export const REASON_EXPLANATIONS: Record<DiscoverReason, string> = {
 	energy: 'These tracks hit a similar physical intensity.',
 	external: 'Connected via Last.fm, Discogs, or external taste graphs.',
 	unknown: 'A deeper connection your model has detected.',
-};
-
-export const RADIO_MODE_NAMES: Record<string, string> = {
-	Familiar: 'Near Orbit',
-	Mixed: 'Open Current',
-	Adventurous: 'Deep Signal',
 };
 
 export const TRAINING_PHASES = [

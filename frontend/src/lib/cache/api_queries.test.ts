@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
 	cacheKeys,
+	cachedApi,
 	ensureCacheScope,
 	invalidateHomeCaches,
 	invalidateLibraryCaches,
@@ -106,5 +107,41 @@ describe('cached API helpers', () => {
 		expect(freshQuery.dataCache.peek(freshApiQueries.cacheKeys.homeArticles())).toEqual({
 			articles: [{ title: 'Existing data' }],
 		});
+	});
+
+	test('returns stale TIDAL moods immediately while revalidating', async () => {
+		const staleMoods = {
+			categories: [
+				{
+					slug: 'mood_party',
+					title: 'Party',
+					icon: null,
+					imageId: null,
+					thumbnail: null,
+				},
+			],
+			source: 'tidal',
+			cached: true,
+		};
+		ensureCacheScope();
+		dataCache.prime(
+			cacheKeys.tidalMoods(),
+			staleMoods,
+			{},
+			Date.now() - 31 * 60 * 1000,
+		);
+		const fetchMock = vi.fn(async () =>
+			new Response(
+				JSON.stringify({
+					categories: [{ ...staleMoods.categories[0], thumbnail: 'https://img.example/mood.jpg' }],
+					source: 'tidal',
+				}),
+				{ status: 200 },
+			),
+		);
+		vi.stubGlobal('fetch', fetchMock);
+
+		await expect(cachedApi.getTidalMoods()).resolves.toEqual(staleMoods);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
 });

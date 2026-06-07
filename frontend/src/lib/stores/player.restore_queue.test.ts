@@ -1,5 +1,13 @@
+import { get } from 'svelte/store';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import type { QueueItem } from '$lib/api/client';
+import type {
+	PlaybackSnapshot,
+	PlaybackState,
+	QueueItem,
+	TidalMixPlaybackResponse,
+	TidalPlayable,
+	Track
+} from '$lib/api/client';
 
 // Mock the api client so we can drive restoreQueueItems without a server.
 // vi.mock is hoisted, so the factory has to declare its own spies, then we
@@ -8,14 +16,60 @@ vi.mock('$lib/api/client', async () => {
 	const addQueueTrack = vi.fn(async () => ({ queue: [], playback_state: null }));
 	const queueAppend = vi.fn(async () => ({ queue: [], playback_state: null }));
 	const getPlaybackState = vi.fn(async () => ({ queue: [] }));
+	const removeQueueTrack = vi.fn(async () => ({ queue: [], playback_state: null }));
+	const moveQueueTrack = vi.fn(async () => ({ queue: [], playback_state: null }));
+	const getTrackAudioFeatures = vi.fn(async () => ({ features: null }));
+	const playTrack = vi.fn();
+	const playTidalTrack = vi.fn();
+	const playTidalMix = vi.fn();
+	const getAlbumTracks = vi.fn();
+	const replacePlaybackQueue = vi.fn();
+	const startRadioStart = vi.fn();
+	const getRadioTracks = vi.fn();
 	return {
-		api: { addQueueTrack, queueAppend, getPlaybackState },
+		api: {
+			addQueueTrack,
+			queueAppend,
+			getPlaybackState,
+			removeQueueTrack,
+			moveQueueTrack,
+			getTrackAudioFeatures,
+			playTrack,
+			playTidalTrack,
+			playTidalMix,
+			getAlbumTracks,
+			replacePlaybackQueue,
+			startRadioStart,
+			getRadioTracks,
+		},
 		ApiError: class ApiError extends Error {},
 	};
 });
 
 import { api } from '$lib/api/client';
-import { restoreQueueItems } from './player';
+import {
+	currentQueueItemId,
+	currentTrack,
+	isPlaying,
+	lastSuccessfulCallAt,
+	playAlbum,
+	shuffleTidalTracksNow,
+	playTidalTracksNow,
+	startSongRadio,
+	startTidalSongRadio,
+	playTrackNow,
+	playTidalTrackNow,
+	playbackQueue,
+	playerError,
+	refreshPlaybackState,
+	moveQueueItem,
+	removeTrackFromQueue,
+	restoreQueueItems,
+} from './player';
+
+type AlbumTracksResult = Awaited<ReturnType<typeof api.getAlbumTracks>>;
+type StartRadioResult = Awaited<ReturnType<typeof api.startRadioStart>>;
+type RadioTracksResult = Awaited<ReturnType<typeof api.getRadioTracks>>;
 
 function libraryRow(id: number, trackId: number): QueueItem {
 	return {
@@ -63,11 +117,147 @@ function pendingRow(queueId: number): QueueItem {
 	};
 }
 
+function playbackState(current: QueueItem): PlaybackState {
+	return {
+		current_track: current.track,
+		current_queue_item_id: current.id,
+		position_ms: 0,
+		is_playing: true,
+		volume: 0.8,
+		shuffle_mode: 'off',
+		repeat_mode: 'off',
+		automix_enabled: false,
+		crossfade_ms: 0,
+		automix_discover_new: false,
+		automix_use_learning: false,
+		automix_allow_external: false,
+	};
+}
+
+function playbackSnapshot(current: QueueItem): PlaybackSnapshot {
+	return {
+		state: playbackState(current),
+		queue: [current],
+	};
+}
+
+function tidalMixPlaybackResponse(
+	current: QueueItem,
+	queue: QueueItem[] = []
+): TidalMixPlaybackResponse {
+	return {
+		ok: true,
+		first_tidal_id: current.track.tidal_id ?? undefined,
+		state: {
+			...playbackState(current),
+			current_track: current.track,
+			current_queue_item_id: null,
+		},
+		queue,
+		shuffle_debug: null,
+	};
+}
+
+function radioQueue(current: QueueItem): StartRadioResult {
+	return {
+		state: playbackState(current),
+		queue: [current],
+		first_playable: {
+			type: 'library',
+			queue_item_id: current.id,
+			track_id: current.track.id,
+		},
+	};
+}
+
+function radioResults(trackIds: number[]): RadioTracksResult {
+	return {
+		tracks: trackIds.map((trackId) => ({
+			track_id: trackId,
+			title: `Radio ${trackId}`,
+			artist_name: null,
+			album_title: null,
+			artwork_url: null,
+			duration_ms: 200_000,
+			best_quality: null,
+			similarity_score: 1,
+			adjusted_score: 1,
+			co_listen_score: 0,
+			co_album_score: 0,
+			co_artist_score: 0,
+			genre_proximity: 0,
+			reason_tags: [],
+			model_key: null,
+			source_mode: 'engine',
+		})),
+		seed_track_id: trackIds[0] ?? 0,
+		creativity: 0,
+		context_window: 0,
+		computed_at: null,
+		model_family: null,
+		model_key: null,
+		reasons: [],
+	};
+}
+
+function libraryTrack(trackId: number): Track {
+	return libraryRow(trackId, trackId).track as Track;
+}
+
+function tidalPlayable(tidalId: number): TidalPlayable {
+	return {
+		tidal_id: tidalId,
+		title: `Tidal ${tidalId}`,
+		artist_name: `Artist ${tidalId}`,
+		album_title: null,
+		artwork_url: null,
+		duration_ms: 200_000,
+	};
+}
+
+function tidalAlbumPlayable(index: number): TidalPlayable {
+	const tidalId = 1000 + index;
+	return {
+		tidal_id: tidalId,
+		title: `Anthology Track ${index}`,
+		artist_name: 'The Beatles',
+		artist_tidal_id: 3634161,
+		album_title: 'Anthology 2',
+		album_tidal_id: 58520793,
+		artwork_url: `https://resources.tidal.com/images/test-${index}/640x640.jpg`,
+		duration_ms: 180_000 + index,
+	};
+}
+
+function deferred<T>() {
+	let resolve!: (value: T) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	return { promise, resolve, reject };
+}
+
 describe('restoreQueueItems', () => {
 	beforeEach(() => {
 		vi.mocked(api.addQueueTrack).mockClear();
 		vi.mocked(api.queueAppend).mockClear();
 		vi.mocked(api.getPlaybackState).mockClear();
+		vi.mocked(api.removeQueueTrack).mockClear();
+		vi.mocked(api.getTrackAudioFeatures).mockClear();
+		vi.mocked(api.playTrack).mockClear();
+		vi.mocked(api.playTidalTrack).mockClear();
+		vi.mocked(api.playTidalMix).mockClear();
+		vi.mocked(api.getAlbumTracks).mockClear();
+		vi.mocked(api.replacePlaybackQueue).mockClear();
+		vi.mocked(api.startRadioStart).mockClear();
+		vi.mocked(api.getRadioTracks).mockClear();
+		currentTrack.set(null);
+		currentQueueItemId.set(null);
+		isPlaying.set(false);
+		playbackQueue.set([]);
+		playerError.set(null);
 	});
 
 	it('restores a library-only queue via addQueueTrack', async () => {
@@ -140,5 +330,317 @@ describe('restoreQueueItems', () => {
 		expect(summary).toEqual({ restored: 0, skipped: 0 });
 		expect(api.addQueueTrack).not.toHaveBeenCalled();
 		expect(api.queueAppend).not.toHaveBeenCalled();
+	});
+});
+
+describe('removeTrackFromQueue', () => {
+	beforeEach(() => {
+		vi.mocked(api.removeQueueTrack).mockClear();
+		vi.mocked(api.getTrackAudioFeatures).mockClear();
+		currentTrack.set(null);
+		currentQueueItemId.set(null);
+		isPlaying.set(false);
+		playbackQueue.set([]);
+	});
+
+	it('applies playback state returned by the remove endpoint', async () => {
+		const next = libraryRow(20, 2);
+		vi.mocked(api.removeQueueTrack).mockResolvedValueOnce({
+			queue: [next],
+			playback_state: playbackState(next),
+		});
+
+		await removeTrackFromQueue(10);
+
+		expect(api.removeQueueTrack).toHaveBeenCalledWith(10);
+		expect(get(playbackQueue)).toEqual([next]);
+		expect(get(currentTrack)?.id).toBe(2);
+		expect(get(currentQueueItemId)).toBe(20);
+		expect(get(isPlaying)).toBe(true);
+		expect(api.getTrackAudioFeatures).toHaveBeenCalledWith(2);
+	});
+});
+
+describe('moveQueueItem', () => {
+	beforeEach(() => {
+		vi.mocked(api.moveQueueTrack).mockClear();
+		vi.mocked(api.getTrackAudioFeatures).mockClear();
+		currentTrack.set(null);
+		currentQueueItemId.set(null);
+		isPlaying.set(false);
+		playbackQueue.set([libraryRow(10, 1), libraryRow(20, 2)]);
+	});
+
+	it('applies playback state returned by the move endpoint', async () => {
+		const current = libraryRow(10, 1);
+		const next = libraryRow(20, 2);
+		vi.mocked(api.moveQueueTrack).mockResolvedValueOnce({
+			queue: [next, current],
+			playback_state: playbackState(current),
+		});
+
+		await moveQueueItem(10, 1);
+
+		expect(api.moveQueueTrack).toHaveBeenCalledWith(10, 1);
+		expect(get(playbackQueue)).toEqual([next, current]);
+		expect(get(currentTrack)?.id).toBe(1);
+		expect(get(currentQueueItemId)).toBe(10);
+		expect(get(isPlaying)).toBe(true);
+		expect(api.getTrackAudioFeatures).toHaveBeenCalledWith(1);
+	});
+});
+
+describe('stale playback responses', () => {
+	beforeEach(() => {
+		vi.mocked(api.getPlaybackState).mockClear();
+		vi.mocked(api.getTrackAudioFeatures).mockClear();
+		vi.mocked(api.playTrack).mockClear();
+		vi.mocked(api.playTidalTrack).mockClear();
+		vi.mocked(api.playTidalMix).mockClear();
+		vi.mocked(api.getAlbumTracks).mockClear();
+		vi.mocked(api.replacePlaybackQueue).mockClear();
+		vi.mocked(api.startRadioStart).mockClear();
+		vi.mocked(api.getRadioTracks).mockClear();
+		currentTrack.set(null);
+		currentQueueItemId.set(null);
+		isPlaying.set(false);
+		playbackQueue.set([]);
+		playerError.set(null);
+		lastSuccessfulCallAt.set(Date.now());
+	});
+
+	it('ignores an older play response after a newer play request wins', async () => {
+		const older = deferred<PlaybackSnapshot>();
+		const newer = deferred<PlaybackSnapshot>();
+		const olderRow = libraryRow(10, 1);
+		const newerRow = libraryRow(20, 2);
+		vi.mocked(api.playTrack)
+			.mockReturnValueOnce(older.promise)
+			.mockReturnValueOnce(newer.promise);
+
+		const olderAction = playTrackNow(1);
+		const newerAction = playTrackNow(2);
+
+		newer.resolve(playbackSnapshot(newerRow));
+		await newerAction;
+		expect(get(currentTrack)?.id).toBe(2);
+
+		older.resolve(playbackSnapshot(olderRow));
+		await olderAction;
+		expect(get(currentTrack)?.id).toBe(2);
+		expect(get(playerError)).toBeNull();
+	});
+
+	it('ignores an older passive refresh after a newer play request', async () => {
+		const refresh = deferred<PlaybackSnapshot>();
+		const play = deferred<PlaybackSnapshot>();
+		const staleRow = libraryRow(10, 1);
+		const currentRow = libraryRow(20, 2);
+		vi.mocked(api.getPlaybackState).mockReturnValueOnce(refresh.promise);
+		vi.mocked(api.playTrack).mockReturnValueOnce(play.promise);
+
+		const refreshAction = refreshPlaybackState();
+		const playAction = playTrackNow(2);
+
+		play.resolve(playbackSnapshot(currentRow));
+		await playAction;
+		expect(get(currentTrack)?.id).toBe(2);
+
+		refresh.resolve(playbackSnapshot(staleRow));
+		await refreshAction;
+		expect(get(currentTrack)?.id).toBe(2);
+		expect(get(playerError)).toBeNull();
+	});
+
+	it('does not let an older album track fetch start a stale queue replace', async () => {
+		const older = deferred<AlbumTracksResult>();
+		const newer = deferred<AlbumTracksResult>();
+		vi.mocked(api.getAlbumTracks)
+			.mockReturnValueOnce(older.promise)
+			.mockReturnValueOnce(newer.promise);
+		vi.mocked(api.replacePlaybackQueue).mockImplementation(async (trackIds: number[]) => ({
+			queue: trackIds.map((trackId, index) => libraryRow(index + 1, trackId)),
+			shuffle_debug: null,
+		}));
+		vi.mocked(api.playTrack).mockImplementation(async (trackId: number) =>
+			playbackSnapshot(libraryRow(trackId, trackId))
+		);
+
+		const olderAction = playAlbum(1);
+		const newerAction = playAlbum(2);
+
+		newer.resolve({ tracks: [libraryTrack(2)], tidal_tracks: [], album_tidal_id: null });
+		await newerAction;
+		expect(get(currentTrack)?.id).toBe(2);
+		expect(api.replacePlaybackQueue).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(api.replacePlaybackQueue).mock.calls[0][0]).toEqual([2]);
+
+		older.resolve({ tracks: [libraryTrack(1)], tidal_tracks: [], album_tidal_id: null });
+		await olderAction;
+		expect(get(currentTrack)?.id).toBe(2);
+		expect(api.replacePlaybackQueue).toHaveBeenCalledTimes(1);
+	});
+
+	it('ignores an older direct TIDAL play response after a newer TIDAL play', async () => {
+		const older = deferred<void>();
+		const newer = deferred<void>();
+		vi.mocked(api.playTidalTrack)
+			.mockReturnValueOnce(older.promise)
+			.mockReturnValueOnce(newer.promise);
+
+		const olderAction = playTidalTrackNow(tidalPlayable(1));
+		const newerAction = playTidalTrackNow(tidalPlayable(2));
+
+		newer.resolve();
+		await newerAction;
+		expect(get(currentTrack)?.tidal_id).toBe(2);
+		expect(get(currentTrack)?.id).toBe(-2);
+
+		older.resolve();
+		await olderAction;
+		expect(get(currentTrack)?.tidal_id).toBe(2);
+		expect(get(currentTrack)?.id).toBe(-2);
+		expect(get(playerError)).toBeNull();
+	});
+
+	it('hydrates TIDAL track-list playback from the server queue snapshot', async () => {
+		const staleRow = libraryRow(90, 900);
+		const current = ephemeralTidalRow(-100, 101);
+		const queued = ephemeralTidalRow(-1, 102);
+		playbackQueue.set([staleRow]);
+		vi.mocked(api.playTidalMix).mockResolvedValueOnce(
+			tidalMixPlaybackResponse(current, [queued])
+		);
+
+		await playTidalTracksNow([tidalPlayable(101), tidalPlayable(102)], 'album');
+
+		expect(api.playTidalMix).toHaveBeenCalledTimes(1);
+		expect(get(currentTrack)?.tidal_id).toBe(101);
+		expect(get(playbackQueue).map((item) => item.track.tidal_id)).toEqual([102]);
+		expect(get(playbackQueue).some((item) => item.track.id === 900)).toBe(false);
+		expect(get(playerError)).toBeNull();
+	});
+
+	it('passes the full loaded TIDAL album track list to playback in order', async () => {
+		const loadedAlbum = Array.from({ length: 45 }, (_, index) => tidalAlbumPlayable(index + 1));
+		playbackQueue.set([libraryRow(90, 900)]);
+		vi.mocked(api.playTidalMix).mockResolvedValueOnce(
+			tidalMixPlaybackResponse(
+				ephemeralTidalRow(-100, loadedAlbum[0].tidal_id),
+				loadedAlbum.slice(1).map((track, index) => ephemeralTidalRow(-(index + 1), track.tidal_id))
+			)
+		);
+
+		await playTidalTracksNow(loadedAlbum, 'Anthology 2');
+
+		expect(api.playTidalMix).toHaveBeenCalledTimes(1);
+		const [sentTracks, sentShuffleMode] = vi.mocked(api.playTidalMix).mock.calls[0];
+		expect(sentShuffleMode).toBeUndefined();
+		expect(sentTracks).toHaveLength(45);
+		expect(sentTracks.map((track) => track.tidal_id)).toEqual(
+			loadedAlbum.map((track) => track.tidal_id)
+		);
+		expect(sentTracks.every((track) => track.album_tidal_id === 58520793)).toBe(true);
+		expect(sentTracks.every((track) => track.artwork_url?.includes('resources.tidal.com'))).toBe(true);
+		expect(get(currentTrack)?.tidal_id).toBe(loadedAlbum[0].tidal_id);
+		expect(get(playbackQueue).map((item) => item.track.tidal_id)).toEqual(
+			loadedAlbum.slice(1).map((track) => track.tidal_id)
+		);
+		expect(get(playbackQueue).some((item) => item.track.id === 900)).toBe(false);
+		expect(get(playerError)).toBeNull();
+	});
+
+	it('passes the full loaded TIDAL album track list to shuffle playback in order', async () => {
+		const loadedAlbum = Array.from({ length: 45 }, (_, index) => tidalAlbumPlayable(index + 1));
+		vi.mocked(api.playTidalMix).mockResolvedValueOnce(
+			tidalMixPlaybackResponse(
+				ephemeralTidalRow(-100, loadedAlbum[0].tidal_id),
+				loadedAlbum.slice(1).map((track, index) => ephemeralTidalRow(-(index + 1), track.tidal_id))
+			)
+		);
+
+		await shuffleTidalTracksNow(loadedAlbum, 'Anthology 2');
+
+		expect(api.playTidalMix).toHaveBeenCalledTimes(1);
+		const [sentTracks, sentShuffleMode] = vi.mocked(api.playTidalMix).mock.calls[0];
+		expect(sentShuffleMode).toBe('true');
+		expect(sentTracks).toHaveLength(45);
+		expect(sentTracks.map((track) => track.tidal_id)).toEqual(
+			loadedAlbum.map((track) => track.tidal_id)
+		);
+		expect(sentTracks.every((track) => track.album_tidal_id === 58520793)).toBe(true);
+		expect(sentTracks.every((track) => track.artwork_url?.includes('resources.tidal.com'))).toBe(true);
+		expect(get(playerError)).toBeNull();
+	});
+
+	it('ignores an older TIDAL track-list playback response after a newer one wins', async () => {
+		const older = deferred<TidalMixPlaybackResponse>();
+		const newer = deferred<TidalMixPlaybackResponse>();
+		const olderCurrent = ephemeralTidalRow(-100, 1);
+		const newerCurrent = ephemeralTidalRow(-200, 2);
+		const newerQueued = ephemeralTidalRow(-1, 3);
+		vi.mocked(api.playTidalMix)
+			.mockReturnValueOnce(older.promise)
+			.mockReturnValueOnce(newer.promise);
+
+		const olderAction = playTidalTracksNow([tidalPlayable(1)], 'older album');
+		const newerAction = playTidalTracksNow([tidalPlayable(2), tidalPlayable(3)], 'newer album');
+
+		newer.resolve(tidalMixPlaybackResponse(newerCurrent, [newerQueued]));
+		await newerAction;
+		expect(get(currentTrack)?.tidal_id).toBe(2);
+		expect(get(playbackQueue).map((item) => item.track.tidal_id)).toEqual([3]);
+
+		older.resolve(tidalMixPlaybackResponse(olderCurrent, [ephemeralTidalRow(-1, 4)]));
+		await olderAction;
+		expect(get(currentTrack)?.tidal_id).toBe(2);
+		expect(get(playbackQueue).map((item) => item.track.tidal_id)).toEqual([3]);
+		expect(get(playerError)).toBeNull();
+	});
+
+	it('ignores an older song radio response after a newer play request', async () => {
+		const radio = deferred<StartRadioResult>();
+		const play = deferred<PlaybackSnapshot>();
+		const staleRow = libraryRow(10, 1);
+		const currentRow = libraryRow(20, 2);
+		vi.mocked(api.startRadioStart).mockReturnValueOnce(radio.promise);
+		vi.mocked(api.playTrack).mockReturnValueOnce(play.promise);
+
+		const radioAction = startSongRadio(1);
+		const playAction = playTrackNow(2);
+
+		play.resolve(playbackSnapshot(currentRow));
+		await playAction;
+		expect(get(currentTrack)?.id).toBe(2);
+
+		radio.resolve(radioQueue(staleRow));
+		await radioAction;
+		expect(get(currentTrack)?.id).toBe(2);
+		expect(get(playerError)).toBeNull();
+	});
+
+	it('ignores an older TIDAL radio lookup after a newer play request', async () => {
+		const radio = deferred<RadioTracksResult>();
+		const play = deferred<PlaybackSnapshot>();
+		const currentRow = libraryRow(20, 2);
+		vi.mocked(api.getRadioTracks).mockReturnValueOnce(radio.promise);
+		vi.mocked(api.playTrack).mockReturnValueOnce(play.promise);
+		vi.mocked(api.replacePlaybackQueue).mockResolvedValue({
+			queue: [libraryRow(10, 1)],
+			shuffle_debug: null,
+		});
+
+		const radioAction = startTidalSongRadio(tidalPlayable(1));
+		const playAction = playTrackNow(2);
+
+		play.resolve(playbackSnapshot(currentRow));
+		await playAction;
+		expect(get(currentTrack)?.id).toBe(2);
+
+		radio.resolve(radioResults([1]));
+		await radioAction;
+		expect(get(currentTrack)?.id).toBe(2);
+		expect(api.replacePlaybackQueue).not.toHaveBeenCalled();
+		expect(get(playerError)).toBeNull();
 	});
 });

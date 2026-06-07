@@ -26,7 +26,7 @@ function hash32(s: string): number {
 	return h;
 }
 
-export function deterministicInitialPosition(
+function deterministicInitialPosition(
 	trackId: number,
 	seedId: number,
 	radius = 300
@@ -51,12 +51,12 @@ const REASON_MAP: Record<string, DiscoverReason> = {
 	prompt_match: 'external', scene_match: 'external',
 };
 
-export function normalizeReason(tag?: string): DiscoverReason {
+function normalizeReason(tag?: string): DiscoverReason {
 	if (!tag) return 'unknown';
 	return REASON_MAP[tag.trim()] ?? 'unknown';
 }
 
-export function normalizeReasonTags(tags?: string[]): DiscoverReason[] {
+function normalizeReasonTags(tags?: string[]): DiscoverReason[] {
 	if (!tags || tags.length === 0) return [];
 	const seen = new Set<string>();
 	return tags.map(normalizeReason).filter((r) => {
@@ -155,7 +155,7 @@ function playableFromApiNode(api: ApiDiscoveryNode): PlayableTrack {
 
 // ─── Node adapter ─────────────────────────────────────────────────────────────
 
-export function adaptNode(
+function adaptNode(
 	api: ApiDiscoveryNode,
 	currentTrackId: number | null,
 	seedId: number | null
@@ -247,7 +247,7 @@ export function adaptNode(
 
 // ─── Edge adapter ─────────────────────────────────────────────────────────────
 
-export function adaptEdge(api: ApiDiscoveryEdge): DiscoverEdge {
+function adaptEdge(api: ApiDiscoveryEdge): DiscoverEdge {
 	const fromId = api.from_track_id ?? api.from_id ?? 0;
 	const toId = api.to_track_id ?? api.to_id ?? 0;
 	const primaryReason = normalizeReason(

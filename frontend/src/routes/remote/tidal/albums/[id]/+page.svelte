@@ -2,7 +2,7 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { api, type TidalDiscographyTrack } from '$lib/api/client';
-	import { playTidalAlbum, shuffleTidalTracksNow } from '$lib/stores/player';
+	import { playTidalTracksNow, shuffleTidalTracksNow } from '$lib/stores/player';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import RemoteActionBar from '$lib/components/remote/RemoteActionBar.svelte';
 	import RemotePageShell from '$lib/components/remote/RemotePageShell.svelte';
@@ -10,29 +10,35 @@
 	import { firstArtworkUrl } from '$lib/utils/artwork';
 	import { formatTotalDuration } from '$lib/utils/format';
 	import { hapticTap } from '$lib/remote/haptics';
+	import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';
 
 	let tidalAlbumId = $derived(Number(page.params.id));
 
 	let tracks = $state<TidalDiscographyTrack[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	let loadSeq = 0;
 
-	async function load() {
+	async function load(id: number) {
+		const seq = ++loadSeq;
 		loading = true;
 		error = null;
+		tracks = [];
 		try {
-			const res = await api.getTidalAlbumTracks(tidalAlbumId);
+			const res = await api.getTidalAlbumTracks(id);
+			if (seq !== loadSeq) return;
 			tracks = res.tracks;
 		} catch (err) {
+			if (seq !== loadSeq) return;
 			error = `Couldn't load album from TIDAL: ${err}`;
 		} finally {
-			loading = false;
+			if (seq === loadSeq) loading = false;
 		}
 	}
 
 	$effect(() => {
-		tidalAlbumId;
-		void load();
+		const id = tidalAlbumId;
+		void load(id);
 	});
 
 	let header = $derived.by(() => {
@@ -92,20 +98,15 @@
 
 		<RemoteActionBar
 			disabled={tracks.length === 0}
-			onPlay={() => playTidalAlbum(tidalAlbumId)}
+			onPlay={() =>
+				playTidalTracksNow(
+					tracks.map((track) => tidalDiscographyTrackToPlayable(track)),
+					header?.title ?? 'album',
+				)}
 			onShuffle={() =>
 				shuffleTidalTracksNow(
-					tracks.map((t) => ({
-						tidal_id: t.tidal_id,
-						title: t.title,
-						artist_name: t.artist_name ?? null,
-						album_title: t.album_title ?? null,
-						artwork_url: t.artwork_url,
-						duration_ms: t.duration_ms,
-						artist_tidal_id: t.artist_tidal_id ?? null,
-						album_tidal_id: t.album_tidal_id ?? null
-					})),
-					header?.title ?? 'album'
+					tracks.map((track) => tidalDiscographyTrackToPlayable(track)),
+					header?.title ?? 'album',
 				)}
 		/>
 

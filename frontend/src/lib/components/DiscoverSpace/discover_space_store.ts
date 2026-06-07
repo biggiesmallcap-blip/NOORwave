@@ -73,7 +73,7 @@ function blendSeedIdentity(seed: DiscoverBlendSeed): string {
 	return `pending:${(seed.artist ?? '').trim().toLowerCase()}:${(seed.title ?? '').trim().toLowerCase()}`;
 }
 
-export function normalizeBlendSeeds(seeds: DiscoverBlendSeed[]): DiscoverBlendSeed[] {
+function normalizeBlendSeeds(seeds: DiscoverBlendSeed[]): DiscoverBlendSeed[] {
 	const seen = new Set<string>();
 	const unique = seeds
 		.map((seed) => ({ ...seed, identity: seed.identity || blendSeedIdentity(seed) }))
@@ -87,7 +87,7 @@ export function normalizeBlendSeeds(seeds: DiscoverBlendSeed[]): DiscoverBlendSe
 	return unique.map((seed) => ({ ...seed, weight }));
 }
 
-export function blendSeedFromNode(node: DiscoverTrackNode): DiscoverBlendSeed {
+function blendSeedFromNode(node: DiscoverTrackNode): DiscoverBlendSeed {
 	if (node.isInLibrary && node.trackId > 0) {
 		return {
 			kind: 'library',
@@ -438,12 +438,4 @@ export function handleDiscoverySpaceRefreshed(seedTrackId: number): void {
 		const track = get(currentTrack);
 		loadSpace(s.mode, seedTrackId, undefined, s.activeSeedSource, track?.id ?? null);
 	}
-}
-
-export function clearRadioRoute(): void {
-	discoverSpaceStore.update((s) => ({
-		...s,
-		radioRoute: [],
-		nodes: s.nodes.filter((n) => !n.isRouteOnly),
-	}));
 }

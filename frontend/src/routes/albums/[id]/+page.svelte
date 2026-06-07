@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import type { Snapshot } from './$types';
-	import { type Track, type TidalDiscographyTrack, type TidalPlayable, type SpotifyTrackStats } from '$lib/api/client';
+	import { type Track, type TidalDiscographyTrack, type SpotifyTrackStats } from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
 	import {
 		playAlbum,
@@ -30,6 +30,7 @@
 		type TidalArtworkSize,
 	} from '$lib/utils/artwork';
 	import { formatTotalDuration } from '$lib/utils/format';
+	import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';
 
 	let albumId = $derived(Number(page.params.id));
 
@@ -39,10 +40,12 @@
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let failedArtworkUrls = $state<Record<string, boolean>>({});
+	let loadSeq = 0;
 
 	let artistTracks = $state<Track[]>([]);
 	let moreLoading = $state(false);
 	let moreLoaded = $state(false);
+	let moreLoadSeq = 0;
 	let spotifyStats = $state<SpotifyTrackStats | null>(null);
 	let playcountByIsrc = $derived.by(() => {
 		const map = new Map<string, number>();
@@ -60,51 +63,60 @@
 		}
 	};
 
-	async function load() {
+	async function load(id: number) {
+		const seq = ++loadSeq;
 		loading = true;
 		error = null;
 		try {
-			const res = await cachedApi.getAlbumTracks(albumId);
+			const res = await cachedApi.getAlbumTracks(id);
+			if (seq !== loadSeq) return;
 			tracks = res.tracks;
 			tidalOnlyTracks = res.tidal_tracks ?? [];
 			albumTidalId = res.album_tidal_id ?? null;
 		} catch (err) {
+			if (seq !== loadSeq) return;
 			error = `Failed to load album: ${err}`;
 		} finally {
-			loading = false;
+			if (seq === loadSeq) loading = false;
 		}
 	}
 
 	$effect(() => {
-		albumId;
+		const id = albumId;
 		failedArtworkUrls = {};
+		tracks = [];
 		tidalOnlyTracks = [];
 		albumTidalId = null;
-		void load();
+		void load(id);
 		artistTracks = [];
 		moreLoaded = false;
 		moreLoading = false;
+		moreLoadSeq += 1;
 		spotifyStats = null;
-		void loadSpotifyStats(albumId);
+		void loadSpotifyStats(id);
 	});
 
 	$effect(() => {
 		const artistId = tracks[0]?.artist_id;
+		const sourceAlbumId = albumId;
 		if (artistId != null && !moreLoaded && !moreLoading) {
-			void loadMore(artistId);
+			void loadMore(artistId, sourceAlbumId);
 		}
 	});
 
-	async function loadMore(artistId: number) {
+	async function loadMore(artistId: number, sourceAlbumId: number) {
+		const seq = ++moreLoadSeq;
 		moreLoading = true;
 		try {
 			const res = await cachedApi.getArtistTracks(artistId);
+			if (seq !== moreLoadSeq || albumId !== sourceAlbumId) return;
 			artistTracks = res.tracks;
 			moreLoaded = true;
 		} catch (err) {
+			if (seq !== moreLoadSeq || albumId !== sourceAlbumId) return;
 			console.error('Failed to load artist tracks', err);
 		} finally {
-			moreLoading = false;
+			if (seq === moreLoadSeq) moreLoading = false;
 		}
 	}
 
@@ -197,19 +209,6 @@
 		} else {
 			void playAlbum(albumId);
 		}
-	}
-
-	function tidalDiscographyTrackToPlayable(t: TidalDiscographyTrack): TidalPlayable {
-		return {
-			tidal_id: t.tidal_id,
-			title: t.title,
-			artist_name: t.artist_name ?? null,
-			album_title: t.album_title,
-			artwork_url: t.artwork_url,
-			duration_ms: t.duration_ms,
-			artist_tidal_id: t.artist_tidal_id ?? null,
-			album_tidal_id: t.album_tidal_id ?? null,
-		};
 	}
 
 	let isAlbumPlaying = $derived(
@@ -395,7 +394,11 @@
 						tabindex={ok ? 0 : -1}
 						aria-disabled={!ok}
 						onclick={() => ok && void playTidalTrackNow(playable)}
-						oncontextmenu={(e) => openContextMenu(e, buildTidalTrackMenu(playable), track.title)}
+						oncontextmenu={(e) => {
+							e.preventDefault();
+							e.stopPropagation();
+							openContextMenu(e, buildTidalTrackMenu(playable), track.title);
+						}}
 						onkeydown={(e) =>
 							(e.key === 'Enter' || e.key === ' ')
 							&& (e.preventDefault(), ok && void playTidalTrackNow(playable))}

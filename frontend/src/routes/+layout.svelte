@@ -69,6 +69,11 @@
 	import { contextMenu, openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
+	import {
+		currentQueueAnchorItem,
+		currentQueueAnchorPosition,
+		isQueueItemActive,
+	} from '$lib/player/queue_active';
 	import { formatPlayerStreamDetail, formatResolutionShort } from '$lib/player/stream_display';
 	import { queueItemToTidalPlayable, trackToTidalPlayable } from '$lib/utils/track';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
@@ -275,6 +280,18 @@
 		if (activeQueueActionsRowId === itemId) {
 			activeQueueActionsRowId = null;
 		}
+	}
+
+	function handleQueueRowMouseLeave(event: MouseEvent, itemId: number) {
+		const current = event.currentTarget;
+		if (
+			current instanceof HTMLElement &&
+			document.activeElement instanceof Node &&
+			current.contains(document.activeElement)
+		) {
+			return;
+		}
+		clearQueueActionsRow(itemId);
 	}
 
 	function handleQueueRowFocusOut(event: FocusEvent, itemId: number) {
@@ -878,6 +895,10 @@
 		}
 	}
 
+	function canFavoriteQueueRow(item: QueueItemType): boolean {
+		return item.is_pending !== true && item.track.id > 0;
+	}
+
 	// ─── Queue drag-to-reorder ────────────────────────────────────────────────
 	let dragItemId = $state<number | null>(null);
 	let dragOverItemId = $state<number | null>(null);
@@ -994,7 +1015,7 @@
 	// ─── Source attribution for now-playing card ─────────────────────────────
 	function attributionFor(track: { id: number } | null): string | null {
 		if (!track) return null;
-		const item = $playbackQueue.find((q) => q.track.id === track.id);
+		const item = currentQueueAnchorItem($playbackQueue, $currentTrack, $currentQueueItemId);
 		if (!item) return null;
 		const friendly = formatQueueSource(item.source);
 		// "Manual" / generic queue isn't worth surfacing.
@@ -1102,9 +1123,11 @@
 	}
 
 	let upcomingQueue = $derived.by(() => {
-		const currentId = $currentTrack?.id;
-		if (!currentId) return $playbackQueue;
-		const currentPosition = $playbackQueue.find((item) => item.track.id === currentId)?.position ?? -1;
+		const currentPosition = currentQueueAnchorPosition(
+			$playbackQueue,
+			$currentTrack,
+			$currentQueueItemId,
+		) ?? -1;
 		return $playbackQueue.filter((item) => item.position > currentPosition);
 	});
 
@@ -1693,9 +1716,7 @@
 						{@const actionsAccessible = queueActionsAccessible(item.id)}
 						<div
 							role="listitem"
-							class:active={$currentQueueItemId != null
-								? $currentQueueItemId === item.id
-								: $currentTrack?.id === item.track.id}
+							class:active={isQueueItemActive(item, $currentTrack, $currentQueueItemId, upcomingQueue)}
 							class:dragging={dragItemId === item.id}
 							class:drag-over={dragOverItemId === item.id && dragItemId !== item.id}
 							class:pending={isPending}
@@ -1710,7 +1731,7 @@
 							ondrop={(event) => void handleQueueDrop(event, item)}
 							ondragend={handleQueueDragEnd}
 							onmouseenter={() => setQueueActionsRowActive(item.id)}
-							onmouseleave={() => clearQueueActionsRow(item.id)}
+							onmouseleave={(event) => handleQueueRowMouseLeave(event, item.id)}
 							onfocusin={() => setQueueActionsRowActive(item.id)}
 							onfocusout={(event) => handleQueueRowFocusOut(event, item.id)}
 						>
@@ -1796,9 +1817,13 @@
 									<button
 										class="queue-action icon"
 										class:active={item.track.is_favorite}
-										aria-label={item.track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
-										title={item.track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
-										disabled={isPending}
+										aria-label={!canFavoriteQueueRow(item)
+											? 'Favorite unavailable for this queue row'
+											: item.track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+										title={!canFavoriteQueueRow(item)
+											? 'Favorite this track after it starts playing'
+											: item.track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+										disabled={!canFavoriteQueueRow(item)}
 										onclick={(event) => void handleQueueRowFavorite(item.track.id, event)}
 									>{item.track.is_favorite ? '♥' : '♡'}</button>
 									<button
@@ -2072,14 +2097,12 @@
 						<div
 							role="listitem"
 							class="queue-row"
-							class:active={$currentQueueItemId != null
-								? $currentQueueItemId === item.id
-								: $currentTrack?.id === item.track.id}
+							class:active={isQueueItemActive(item, $currentTrack, $currentQueueItemId, upcomingQueue)}
 							class:pending={isPending}
 							title={isPending ? 'Resolving on TIDAL...' : undefined}
 							oncontextmenu={(event) => openQueueRowMenu(item, event)}
 							onmouseenter={() => setQueueActionsRowActive(item.id)}
-							onmouseleave={() => clearQueueActionsRow(item.id)}
+							onmouseleave={(event) => handleQueueRowMouseLeave(event, item.id)}
 							onfocusin={() => setQueueActionsRowActive(item.id)}
 							onfocusout={(event) => handleQueueRowFocusOut(event, item.id)}
 						>
@@ -3172,6 +3195,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: flex-end;
+		gap: 8px;
 		min-width: 76px;
 		flex-shrink: 0;
 		margin-left: auto;
@@ -3181,9 +3205,16 @@
 		transition: opacity var(--motion-fast);
 	}
 
-	.queue-row:hover .queue-time,
-	.queue-row:focus-within .queue-time {
+	.queue-row:hover .queue-time {
 		opacity: 0;
+	}
+
+	.queue-row:focus-within .queue-side {
+		min-width: max-content;
+	}
+
+	.queue-row:focus-within .queue-time {
+		opacity: 1;
 	}
 
 	.queue-actions {
@@ -3199,8 +3230,14 @@
 		transition: opacity var(--motion-fast);
 	}
 
-	.queue-row:hover .queue-actions,
+	.queue-row:hover .queue-actions {
+		opacity: 1;
+		pointer-events: auto;
+	}
+
 	.queue-row:focus-within .queue-actions {
+		position: static;
+		transform: none;
 		opacity: 1;
 		pointer-events: auto;
 	}

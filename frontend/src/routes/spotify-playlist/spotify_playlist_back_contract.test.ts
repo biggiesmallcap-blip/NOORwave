@@ -12,6 +12,22 @@ describe('Spotify playlist back link contract', () => {
 		expect(source).toContain('putCachedSpotifyChartMeta(id, res.playlist);');
 	});
 
+	test('guards playlist load, retry, and polling against stale route responses', () => {
+		expect(source).toContain('let loadSeq = 0;');
+		expect(source).toContain('function schedulePoll(seq: number, delayMs = POLL_INTERVAL_MS)');
+		expect(source).toContain('setTimeout(() => void pollResolution(seq), delayMs)');
+		expect(source).toContain('async function pollResolution(seq: number)');
+		expect(source).toContain('if (seq !== loadSeq) {');
+		expect(source).toContain('if (seq !== loadSeq) return;');
+		expect(source).toContain('async function attemptLoad(id: string, retryOn5xx: boolean, seq: number)');
+		expect(source).toContain('await attemptLoad(id, /* retryOn5xx */ true, seq);');
+		expect(source).toContain('if (seq === loadSeq && spotifyId.trim() === id)');
+		expect(source).toContain('await attemptLoad(id, /* retryOn5xx */ false, seq);');
+		expect(source).toContain('loadSeq += 1;');
+		expect(source).not.toContain('setTimeout(pollResolution, POLL_INTERVAL_MS)');
+		expect(source).not.toContain('setTimeout(pollResolution, POLL_INTERVAL_MS * 2)');
+	});
+
 	test('returns to the originating mood when opened from moods', () => {
 		expect(source).toContain('SPOTIFY_MOODS_BY_SLUG.has(mood)');
 		expect(source).toContain("from === 'moods'");

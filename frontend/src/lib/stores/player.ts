@@ -151,6 +151,43 @@ function noteSuccess() {
 	lastSuccessfulCallAt.set(Date.now());
 }
 
+let playbackIntentSeq = 0;
+let activePlaybackIntentSeq: number | null = null;
+
+function beginPlaybackIntent(): number {
+	playbackIntentSeq += 1;
+	activePlaybackIntentSeq = playbackIntentSeq;
+	return playbackIntentSeq;
+}
+
+function finishPlaybackIntent(seq: number) {
+	if (activePlaybackIntentSeq === seq) activePlaybackIntentSeq = null;
+}
+
+function isLatestPlaybackIntent(seq: number): boolean {
+	return seq === playbackIntentSeq;
+}
+
+function currentPlaybackIntentSeq(): number {
+	return playbackIntentSeq;
+}
+
+function shouldApplyPassivePlaybackSnapshot(seq: number): boolean {
+	return seq === playbackIntentSeq && activePlaybackIntentSeq === null;
+}
+
+function applyStateIfLatest(state: PlaybackState, seq: number): boolean {
+	if (!isLatestPlaybackIntent(seq)) return false;
+	applyState(state);
+	return true;
+}
+
+function hydratePlaybackIfLatest(snapshot: PlaybackSnapshot, seq: number): boolean {
+	if (!isLatestPlaybackIntent(seq)) return false;
+	hydratePlayback(snapshot);
+	return true;
+}
+
 /**
  * Map an arbitrary error into a short, friendly message. The raw `error` is
  * dropped in production so we never leak `TypeError: Failed to fetch` style
@@ -162,6 +199,9 @@ export function normalizePlayerError(action: string, error: unknown): string {
 
 	if (lower.includes('failed to fetch') || lower.includes('networkerror') || lower.includes('network error')) {
 		return "Can't reach the server. Check it's running.";
+	}
+	if (lower.includes('timed out') || lower.includes('timeout')) {
+		return 'Server took too long. Try again.';
 	}
 	if (lower.includes('tidal not connected')) {
 		return 'Tidal disconnected — re-auth in Settings.';
@@ -351,9 +391,11 @@ function scheduleBufferedRefreshIfNeeded() {
 	const duration = track?.duration_ms ?? 0;
 	if (!track || duration <= 0) return;
 	if (get(buffered) >= duration) return;
+	const refreshSeq = currentPlaybackIntentSeq();
 	_bufferedRefresher = setTimeout(async () => {
 		try {
 			const snapshot = await api.getPlaybackState();
+			if (!shouldApplyPassivePlaybackSnapshot(refreshSeq)) return;
 			// applyState writes `buffered` and recurses into scheduling, so
 			// the timer chain runs as long as buffered_ms < duration_ms.
 			applyState(snapshot.state);
@@ -428,37 +470,48 @@ export function hydratePlayback(snapshot: PlaybackSnapshot) {
 
 export async function refreshPlaybackState() {
 	playerError.set(null);
+	const refreshSeq = currentPlaybackIntentSeq();
 	try {
 		const snapshot = await api.getPlaybackState();
+		if (!shouldApplyPassivePlaybackSnapshot(refreshSeq)) return;
 		hydratePlayback(snapshot);
 	} catch (error) {
+		if (!shouldApplyPassivePlaybackSnapshot(refreshSeq)) return;
 		setError('load playback state', error, () => refreshPlaybackState());
 	}
 }
 
 export async function playTrackNow(trackId: number) {
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const snapshot = await api.playTrack(trackId);
-		hydratePlayback(snapshot);
+		hydratePlaybackIfLatest(snapshot, intentSeq);
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('play that track', error, () => playTrackNow(trackId));
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
 export async function togglePlayback() {
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		if (get(isPlaying)) {
 			const result = await api.pausePlayback();
-			applyState(result.state);
+			if (!applyStateIfLatest(result.state, intentSeq)) return;
 		} else {
 			const result = await api.resumePlayback();
-			applyState(result.state);
+			if (!applyStateIfLatest(result.state, intentSeq)) return;
 		}
 		noteSuccess();
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('toggle playback', error, () => togglePlayback());
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
@@ -470,38 +523,51 @@ export async function togglePlayback() {
  */
 export async function pausePlayer() {
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const result = await api.pausePlayback();
-		applyState(result.state);
+		if (!applyStateIfLatest(result.state, intentSeq)) return;
 		noteSuccess();
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('pause playback', error, () => pausePlayer());
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
 export async function resumePlayer() {
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const result = await api.resumePlayback();
-		applyState(result.state);
+		if (!applyStateIfLatest(result.state, intentSeq)) return;
 		noteSuccess();
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('resume playback', error, () => resumePlayer());
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
 export async function playPreviousTrack() {
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const snapshot = await api.previousTrack();
-		hydratePlayback(snapshot);
+		hydratePlaybackIfLatest(snapshot, intentSeq);
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('go to previous track', error, () => playPreviousTrack());
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
 export async function playNextTrack() {
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		// Optimistic update: show the next queued track immediately rather than waiting
 		// for TIDAL stream resolution (~2-5s). hydratePlayback below corrects any mismatch.
@@ -522,9 +588,12 @@ export async function playNextTrack() {
 		anchorPositionTicker(0);
 
 		const snapshot = await api.nextTrack();
-		hydratePlayback(snapshot);
+		hydratePlaybackIfLatest(snapshot, intentSeq);
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('skip to next track', error, () => playNextTrack());
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
@@ -556,6 +625,7 @@ export async function toggleMute() {
 
 export async function setPlayerPosition(nextPositionMs: number) {
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		// Always opt in to the segment-restart path (option C). With
 		// allow_segment_seek=true the backend treats out-of-buffer targets
@@ -564,9 +634,10 @@ export async function setPlayerPosition(nextPositionMs: number) {
 		// applies the corrective snapshot); transition errors get 500
 		// (treat as recoverable error - the user can retry the drag).
 		const result = await api.setPlaybackPosition(nextPositionMs, true);
-		applyState(result.state);
+		if (!applyStateIfLatest(result.state, intentSeq)) return;
 		noteSuccess();
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		// HTTP 409 = pre-resolve race or unparseable manifest (no segment
 		// offsets to restart at). Apply the corrective live snapshot the
 		// server included in the body so the scrubber visibly snaps back,
@@ -574,7 +645,7 @@ export async function setPlayerPosition(nextPositionMs: number) {
 		if (error instanceof ApiError && error.status === 409) {
 			const body = error.body as { state?: PlaybackState } | null;
 			if (body?.state) {
-				applyState(body.state);
+				if (!applyStateIfLatest(body.state, intentSeq)) return;
 				noteSuccess();
 				return;
 			}
@@ -583,17 +654,23 @@ export async function setPlayerPosition(nextPositionMs: number) {
 		// failed, decoder spin-up failed, etc.). Show error toast with a
 		// retry; this is a recoverable failure, not a programming error.
 		setError('seek', error, () => setPlayerPosition(nextPositionMs));
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
 export async function setPlayerRepeatMode(mode: PlaybackState['repeat_mode']) {
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const result = await api.setPlaybackRepeat(mode);
-		applyState(result.state);
+		if (!applyStateIfLatest(result.state, intentSeq)) return;
 		noteSuccess();
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('set repeat mode', error, () => setPlayerRepeatMode(mode));
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
@@ -606,15 +683,19 @@ export async function cyclePlayerRepeatMode() {
 
 export async function setPlayerShuffleMode(mode: PlaybackState['shuffle_mode']) {
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const snapshot = await api.setPlaybackShuffle(mode);
-		hydratePlayback(snapshot);
+		if (!hydratePlaybackIfLatest(snapshot, intentSeq)) return null;
 		return snapshot;
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return null;
 		setError('set shuffle mode', error, async () => {
 			await setPlayerShuffleMode(mode);
 		});
 		return null;
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
@@ -745,6 +826,7 @@ export async function moveQueueTrackNext(queueItemId: number) {
 	try {
 		const result = await api.moveQueueTrack(queueItemId, newPos);
 		setPlaybackQueue(result.queue);
+		if (result.playback_state) applyState(result.playback_state);
 		noteSuccess();
 	} catch (error) {
 		setError('reorder queue', error, () => moveQueueTrackNext(queueItemId));
@@ -756,6 +838,7 @@ export async function removeTrackFromQueue(queueItemId: number) {
 	try {
 		const result = await api.removeQueueTrack(queueItemId);
 		setPlaybackQueue(result.queue);
+		if (result.playback_state) applyState(result.playback_state);
 		noteSuccess();
 		announceQueue('Removed from queue');
 	} catch (error) {
@@ -779,6 +862,7 @@ export async function moveQueueItem(itemId: number, newPos: number) {
 	try {
 		const result = await api.moveQueueTrack(itemId, target);
 		setPlaybackQueue(result.queue);
+		if (result.playback_state) applyState(result.playback_state);
 		playerError.set(null);
 	} catch (error) {
 		// Roll back on failure.
@@ -923,6 +1007,7 @@ export async function toggleTrackFavorite(trackId: number, currentIsFavorite?: b
 	if (trackId < 0) {
 		const ephemeral = get(currentTrack);
 		if (!ephemeral || !ephemeral.tidal_id) return;
+		const wasFavorite = currentIsFavorite ?? ephemeral.is_favorite ?? false;
 		try {
 			const { local_id, artist_id, album_id } = await api.importTidalTrackForRadio({
 				tidal_id: ephemeral.tidal_id,
@@ -940,7 +1025,7 @@ export async function toggleTrackFavorite(trackId: number, currentIsFavorite?: b
 					item.track.id === trackId ? { ...item, track: { ...item.track, id: local_id, artist_id, album_id } } : item
 				)
 			);
-			return toggleTrackFavorite(local_id, false);
+			return toggleTrackFavorite(local_id, wasFavorite);
 		} catch (error) {
 			setError('like that track', error);
 			throw error;
@@ -988,11 +1073,14 @@ async function loadQueueAndPlay(
 		reasons?: (string | null)[];
 		pendingCandidates?: PendingCandidateInfo[];
 		shuffleMode?: PlaybackState['shuffle_mode'];
+		intentSeq?: number;
 	},
 ) {
 	if (trackIds.length === 0) return;
 	if (!assertOnline()) return;
 	playerError.set(null);
+	const intentSeq = options?.intentSeq ?? beginPlaybackIntent();
+	const ownsIntent = options?.intentSeq == null;
 	if (!options?.preserveRadioReasons) clearRadioReasons();
 	try {
 		const replaced = await api.replacePlaybackQueue(
@@ -1001,11 +1089,15 @@ async function loadQueueAndPlay(
 			options?.pendingCandidates,
 			options?.shuffleMode
 		);
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		const firstTrackId = replaced.queue[0]?.track.id ?? trackIds[0];
 		const snapshot = await api.playTrack(firstTrackId);
-		hydratePlayback(snapshot);
+		hydratePlaybackIfLatest(snapshot, intentSeq);
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('start playback', error, () => loadQueueAndPlay(trackIds, options));
+	} finally {
+		if (ownsIntent) finishPlaybackIntent(intentSeq);
 	}
 }
 
@@ -1025,8 +1117,10 @@ export function selectOptimisticNextItem<T extends { id: number; track: { id: nu
 export async function playAlbum(albumId: number, startTrackId?: number) {
 	if (!assertOnline()) return;
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const { tracks } = await api.getAlbumTracks(albumId);
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		if (tracks.length === 0) {
 			playerError.set({ message: 'Album has no tracks.' });
 			return;
@@ -1039,32 +1133,43 @@ export async function playAlbum(albumId: number, startTrackId?: number) {
 			: tracks;
 		await loadQueueAndPlay(ordered.map((t) => t.id), {
 			shuffleMode: startTrackId ? undefined : get(shuffleMode),
+			intentSeq,
 		});
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('play that album', error, () => playAlbum(albumId, startTrackId));
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
 export async function shuffleAlbum(albumId: number) {
 	if (!assertOnline()) return;
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const { tracks } = await api.getAlbumTracks(albumId);
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		if (tracks.length === 0) {
 			playerError.set({ message: 'Album has no tracks.' });
 			return;
 		}
-		await loadQueueAndPlay(tracks.map((t) => t.id), { shuffleMode: 'true' });
+		await loadQueueAndPlay(tracks.map((t) => t.id), { shuffleMode: 'true', intentSeq });
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('shuffle that album', error, () => shuffleAlbum(albumId));
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
 export async function playArtist(artistId: number, startTrackId?: number) {
 	if (!assertOnline()) return;
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const { tracks } = await api.getArtistTracks(artistId);
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		if (tracks.length === 0) {
 			playerError.set({ message: 'Artist has no tracks.' });
 			return;
@@ -1077,47 +1182,66 @@ export async function playArtist(artistId: number, startTrackId?: number) {
 			: tracks;
 		await loadQueueAndPlay(ordered.map((t) => t.id), {
 			shuffleMode: startTrackId ? undefined : get(shuffleMode),
+			intentSeq,
 		});
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('play that artist', error, () => playArtist(artistId, startTrackId));
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
 export async function shuffleArtist(artistId: number) {
 	if (!assertOnline()) return;
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const { tracks } = await api.getArtistTracks(artistId);
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		if (tracks.length === 0) {
 			playerError.set({ message: 'Artist has no tracks.' });
 			return;
 		}
-		await loadQueueAndPlay(tracks.map((t) => t.id), { shuffleMode: 'true' });
+		await loadQueueAndPlay(tracks.map((t) => t.id), { shuffleMode: 'true', intentSeq });
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('shuffle that artist', error, () => shuffleArtist(artistId));
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
-async function startSongRadioFromLibraryTrack(seedTrackId: number) {
+async function startSongRadioFromLibraryTrack(
+	seedTrackId: number,
+	intentSeq: number
+): Promise<boolean> {
 	const result = await api.startRadioStart({ seed_track_id: seedTrackId, limit: 60 });
+	if (!isLatestPlaybackIntent(intentSeq)) return false;
 	hydratePlayback({ state: result.state, queue: result.queue });
+	return true;
 }
 
 export async function startSongRadio(seedTrackId: number) {
 	if (!assertOnline()) return;
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	// Server-side fallback (artist.getsimilar when track-level recall is empty)
 	// can take a few seconds. Surface a loading toast so the user knows the
 	// click registered. Dismissed before the success/error toast lands.
 	const loadingToastId = showToast('Starting Song Radio...', 'info', 8000);
 	try {
-		await startSongRadioFromLibraryTrack(seedTrackId);
+		const applied = await startSongRadioFromLibraryTrack(seedTrackId, intentSeq);
 
 		dismissToast(loadingToastId);
+		if (!applied) return;
 		showToast('Song Radio started', 'success');
 	} catch (error) {
 		dismissToast(loadingToastId);
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('start radio', error, () => startSongRadio(seedTrackId));
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
@@ -1139,8 +1263,10 @@ export async function shufflePlaylist(
 export async function playPlaylist(playlistId: number, startTrackId?: number) {
 	if (!assertOnline()) return;
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const { tracks } = await api.getPlaylistTracks(playlistId);
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		if (tracks.length === 0) {
 			playerError.set({ message: 'Playlist is empty.' });
 			return;
@@ -1153,9 +1279,13 @@ export async function playPlaylist(playlistId: number, startTrackId?: number) {
 			: tracks;
 		await loadQueueAndPlay(ordered.map((t) => t.id), {
 			shuffleMode: startTrackId ? undefined : get(shuffleMode),
+			intentSeq,
 		});
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('play that playlist', error, () => playPlaylist(playlistId, startTrackId));
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
@@ -1169,24 +1299,32 @@ export async function startPlaylistRadio(tracks: { id: number; play_count?: numb
 export async function playTidalPlaylist(tidalUuid: string) {
 	if (!assertOnline()) return;
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const { tracks } = await api.getTidalPlaylistTracks(tidalUuid);
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		if (!tracks.length) {
 			playerError.set({ message: 'No playable tracks in this playlist.' });
 			return;
 		}
-		await startTidalEphemeralQueue(tracks, { shuffleMode: get(shuffleMode) });
+		await startTidalEphemeralQueue(tracks, { shuffleMode: get(shuffleMode), intentSeq });
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		showToast(`Playing playlist (${tracks.length} tracks queued)`, 'success');
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('load TIDAL playlist', error, () => playTidalPlaylist(tidalUuid));
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
 export async function startArtistRadio(artistId: number, _seedTrackId?: number) {
 	if (!assertOnline()) return;
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const queue = await api.startRadioArtist({ seed_artist_id: artistId, limit: 60 });
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		if (!queue.first_playable) {
 			playerError.set({ message: 'No tracks found for radio.' });
 			return;
@@ -1197,15 +1335,20 @@ export async function startArtistRadio(artistId: number, _seedTrackId?: number) 
 		}
 		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('start artist radio', error, () => startArtistRadio(artistId, _seedTrackId));
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
 export async function startAlbumRadio(albumId: number) {
 	if (!assertOnline()) return;
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const queue = await api.startRadioAlbum({ seed_album_id: albumId, limit: 60 });
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		if (!queue.first_playable) {
 			playerError.set({ message: 'No tracks found for radio.' });
 			return;
@@ -1216,7 +1359,10 @@ export async function startAlbumRadio(albumId: number) {
 		}
 		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('start album radio', error, () => startAlbumRadio(albumId));
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
@@ -1238,9 +1384,11 @@ export async function playTrackNext(trackId: number) {
 
 export async function playTidalTrackNow(track: TidalPlayable): Promise<void> {
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		rememberTidalPlayable(track);
 		await api.playTidalTrack(track);
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		resetOptimisticPlaybackProgress();
 		setCurrentTrack({
 			id: localTidalTrackId(track) ?? -track.tidal_id,
@@ -1270,8 +1418,11 @@ export async function playTidalTrackNow(track: TidalPlayable): Promise<void> {
 		noteSuccess();
 		showToast(`Playing ${trackLabel(track)}`, 'success');
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('play that Tidal track', error, () => playTidalTrackNow(track));
 		showToast(`Playback failed`, 'error');
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
@@ -1344,21 +1495,24 @@ export async function playTidalTracksNow(
 	}
 	rememberTidalPlayables(playable);
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const requestShuffleMode = options?.shuffleMode ?? get(shuffleMode);
 		const oneShotShuffleMode = requestShuffleMode === 'off' ? undefined : requestShuffleMode;
-		if (!oneShotShuffleMode) setOptimisticTidalTrack(playable[0]);
-		const result = await api.playTidalMix(playable, oneShotShuffleMode);
-		if (oneShotShuffleMode) {
-			const first =
-				playable.find((track) => track.tidal_id === result.first_tidal_id) ?? playable[0];
-			setOptimisticTidalTrack(first);
+		if (!oneShotShuffleMode && isLatestPlaybackIntent(intentSeq)) {
+			setOptimisticTidalTrack(playable[0]);
 		}
+		const result = await api.playTidalMix(playable, oneShotShuffleMode);
+		if (!isLatestPlaybackIntent(intentSeq)) return;
+		hydratePlaybackIfLatest({ state: result.state, queue: result.queue }, intentSeq);
 		noteSuccess();
 		showToast(`Playing ${label} (${playable.length} tracks)`, 'success');
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('play those Tidal tracks', error, () => playTidalTracksNow(tracks, label, options));
 		showToast('Playback failed', 'error');
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
@@ -1415,17 +1569,23 @@ export async function addTidalTracksToQueue(tracks: TidalPlayable[]): Promise<vo
 export async function playTidalAlbum(tidalAlbumId: number): Promise<void> {
 	if (!assertOnline()) return;
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const { tracks } = await api.getTidalAlbumTracks(tidalAlbumId);
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		if (tracks.length === 0) {
 			showToast('Album has no tracks', 'error');
 			return;
 		}
-		await startTidalEphemeralQueue(tracks, { shuffleMode: get(shuffleMode) });
+		await startTidalEphemeralQueue(tracks, { shuffleMode: get(shuffleMode), intentSeq });
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		showToast(`Playing album (${tracks.length} tracks queued)`, 'success');
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('play that Tidal album', error, () => playTidalAlbum(tidalAlbumId));
 		showToast(`Album playback failed`, 'error');
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
@@ -1444,9 +1604,11 @@ async function startTidalEphemeralQueue(
 		is_in_library?: boolean;
 		is_favorite?: boolean;
 	}>,
-	options?: { shuffleMode?: PlaybackState['shuffle_mode'] }
+	options?: { shuffleMode?: PlaybackState['shuffle_mode']; intentSeq?: number }
 ): Promise<void> {
 	rememberTidalPlayables(tracks);
+	const intentSeq = options?.intentSeq ?? beginPlaybackIntent();
+	const ownsIntent = options?.intentSeq == null;
 	const requestShuffleMode = options?.shuffleMode;
 	const oneShotShuffleMode = requestShuffleMode === 'off' ? undefined : requestShuffleMode;
 	const playable = tracks.map((t) => ({
@@ -1464,37 +1626,47 @@ async function startTidalEphemeralQueue(
 		is_favorite: t.is_favorite,
 	}));
 
-	if (!oneShotShuffleMode) setOptimisticTidalTrack(playable[0]);
-	const result = await api.playTidalMix(playable, oneShotShuffleMode);
-	if (oneShotShuffleMode) {
-		const shuffledFirst =
-			playable.find((track) => track.tidal_id === result.first_tidal_id) ?? playable[0];
-		setOptimisticTidalTrack(shuffledFirst);
+	try {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
+		if (!oneShotShuffleMode) setOptimisticTidalTrack(playable[0]);
+		const result = await api.playTidalMix(playable, oneShotShuffleMode);
+		if (!isLatestPlaybackIntent(intentSeq)) return;
+		hydratePlaybackIfLatest({ state: result.state, queue: result.queue }, intentSeq);
+		noteSuccess();
+	} finally {
+		if (ownsIntent) finishPlaybackIntent(intentSeq);
 	}
-	noteSuccess();
 }
 
 export async function playTidalMix(mixId: string): Promise<void> {
 	if (!assertOnline()) return;
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	try {
 		const { tracks } = await api.getTidalMixTracks(mixId);
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		if (tracks.length === 0) {
 			showToast('Mix has no tracks', 'error');
 			return;
 		}
-		await startTidalEphemeralQueue(tracks);
+		await startTidalEphemeralQueue(tracks, { intentSeq });
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		showToast(`Playing mix (${tracks.length} tracks queued)`, 'success');
 	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('play that Tidal mix', error, () => playTidalMix(mixId));
 		showToast(`Mix playback failed`, 'error');
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }
 
 export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 	if (!assertOnline()) return;
 	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
 	const loadingToastId = showToast('Starting Song Radio...', 'info', 8000);
+	try {
 	// Last.fm chart entries that didn't resolve locally arrive with the
 	// placeholder `tidal_id: 0` (see ChartTidalPlayable in routes.rs). Resolve
 	// to a real Tidal id via search first — otherwise the import fallback
@@ -1509,6 +1681,10 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 		}
 		try {
 			const results = await api.searchTidal(q, 1);
+			if (!isLatestPlaybackIntent(intentSeq)) {
+				dismissToast(loadingToastId);
+				return;
+			}
 			const hit = results.tracks[0];
 			if (!hit) {
 				dismissToast(loadingToastId);
@@ -1526,6 +1702,7 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 			};
 		} catch (error) {
 			dismissToast(loadingToastId);
+			if (!isLatestPlaybackIntent(intentSeq)) return;
 			setError('start Tidal radio', error, () => startTidalSongRadio(track));
 			return;
 		}
@@ -1533,10 +1710,15 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 	// Try discovery radio seeded directly by Tidal ID (only works if track is already in library)
 	try {
 		const { tracks } = await api.getRadioTracks({ seed_tidal_id: track.tidal_id, limit: 40 });
+		if (!isLatestPlaybackIntent(intentSeq)) {
+			dismissToast(loadingToastId);
+			return;
+		}
 		const radioIds = tracks.map((t) => t.track_id);
 		if (radioIds.length > 0) {
-			await loadQueueAndPlay(radioIds);
+			await loadQueueAndPlay(radioIds, { intentSeq });
 			dismissToast(loadingToastId);
+			if (!isLatestPlaybackIntent(intentSeq)) return;
 			showToast(`Radio from ${trackLabel(track)}`, 'success');
 			playerError.set(null);
 			return;
@@ -1544,6 +1726,10 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 	} catch (error) {
 		// 404 = track not yet in library index — fall through to silent import.
 		// Any other error is a real failure.
+		if (!isLatestPlaybackIntent(intentSeq)) {
+			dismissToast(loadingToastId);
+			return;
+		}
 		if (!(error instanceof ApiError && error.status === 404)) {
 			dismissToast(loadingToastId);
 			setError('start Tidal radio', error, () => startTidalSongRadio(track));
@@ -1556,13 +1742,22 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 	// so the radio engine can use it as a seed, then run song radio from the resulting local ID.
 	try {
 		const { local_id } = await api.importTidalTrackForRadio(track);
-		await startSongRadioFromLibraryTrack(local_id);
+		if (!isLatestPlaybackIntent(intentSeq)) {
+			dismissToast(loadingToastId);
+			return;
+		}
+		const applied = await startSongRadioFromLibraryTrack(local_id, intentSeq);
 		dismissToast(loadingToastId);
+		if (!applied) return;
 		showToast(`Radio from ${trackLabel(track)}`, 'success');
 		playerError.set(null);
 	} catch (error) {
 		dismissToast(loadingToastId);
+		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('start Tidal radio', error, () => startTidalSongRadio(track));
 		showToast(`No radio results for "${trackLabel(track)}"`, 'info');
+	}
+	} finally {
+		finishPlaybackIntent(intentSeq);
 	}
 }

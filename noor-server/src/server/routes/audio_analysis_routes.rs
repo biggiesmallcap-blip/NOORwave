@@ -8,6 +8,13 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+fn require_positive_track_id(id: i64) -> Result<(), StatusCode> {
+    if id <= 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 pub(super) struct AudioAnalysisRequest {
     mode: String, // "preview" or "local"
@@ -20,8 +27,21 @@ pub(super) async fn start_audio_analysis(
 ) -> Result<Json<Value>, StatusCode> {
     use crate::services::audio_analysis::scanner;
 
-    let mode = payload.mode.clone();
-    let local_path = payload.local_path.clone();
+    let mode = payload.mode.trim().to_string();
+    let local_path = match mode.as_str() {
+        "preview" => None,
+        "local" => {
+            let path = payload
+                .local_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .ok_or(StatusCode::BAD_REQUEST)?;
+            Some(path.to_string())
+        }
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+
     let (analysis_tx, cancel, running) = {
         let s = state.read().await;
         (
@@ -46,18 +66,19 @@ pub(super) async fn start_audio_analysis(
                 scanner::run_preview_scan(state, tx, cancel).await;
             }
             "local" => {
-                if let Some(raw) = local_path {
-                    // Reject traversal sequences and resolve to a real absolute path
-                    let candidate = std::path::PathBuf::from(&raw);
-                    let resolved = match std::fs::canonicalize(&candidate) {
-                        Ok(p) if p.is_dir() => p,
-                        _ => {
-                            tracing::warn!("local scan rejected invalid path: {:?}", raw);
-                            return;
-                        }
-                    };
-                    scanner::run_local_scan(state, tx, cancel, resolved, Default::default()).await;
-                }
+                let Some(raw) = local_path else {
+                    return;
+                };
+                // Reject traversal sequences and resolve to a real absolute path
+                let candidate = std::path::PathBuf::from(&raw);
+                let resolved = match std::fs::canonicalize(&candidate) {
+                    Ok(p) if p.is_dir() => p,
+                    _ => {
+                        tracing::warn!("local scan rejected invalid path: {:?}", raw);
+                        return;
+                    }
+                };
+                scanner::run_local_scan(state, tx, cancel, resolved, Default::default()).await;
             }
             _ => {}
         }
@@ -126,6 +147,8 @@ pub(super) async fn get_track_audio_features(
     State(state): State<SharedState>,
     Path(track_id): Path<i64>,
 ) -> Result<Json<Value>, StatusCode> {
+    require_positive_track_id(track_id)?;
+
     let s = state.read().await;
     let features =
         s.db.with_conn(|conn| queries::get_audio_dsp_features(conn, track_id))
@@ -272,6 +295,8 @@ pub(super) async fn set_bpm_multiplier(
     Path(id): Path<i64>,
     Json(payload): Json<BpmMultiplierRequest>,
 ) -> Result<Json<Value>, StatusCode> {
+    require_positive_track_id(id)?;
+
     if !payload.factor.is_finite() || payload.factor <= 0.0 {
         return Err(StatusCode::BAD_REQUEST);
     }

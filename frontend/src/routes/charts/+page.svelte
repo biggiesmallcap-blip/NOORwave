@@ -34,8 +34,8 @@
     { id: '37i9dQZF1DX4dyzvuaRJ0n', title: 'mint', sub: 'Editorial' },
   ];
 
-  // Best-effort cover fetch. The playlist endpoint also returns tracks and
-  // TIDAL resolution state, so keep these requests away from first paint.
+  // Best-effort cover fetch. The metadata endpoint returns no tracks and
+  // avoids the playlist resolver path, so card covers do not fan out work.
   let meta = $state<Record<string, SpotifyChartMeta>>({});
   let metaTimer: ReturnType<typeof setTimeout> | null = null;
   let metaAbort: AbortController | null = null;
@@ -64,9 +64,10 @@
         const c = queue.shift();
         if (!c) return;
         try {
-          const { playlist } = await api.getSpotifyPlaylist(c.id, signal);
-          putCachedSpotifyChartMeta(c.id, playlist);
-          meta[c.id] = { thumbnail: playlist.thumbnail, title: playlist.title };
+          const playlist = await api.getSpotifyPlaylistMeta(c.id, signal);
+          const chartMeta = { thumbnail: playlist.thumbnail, title: playlist.title };
+          putCachedSpotifyChartMeta(c.id, chartMeta);
+          meta[c.id] = chartMeta;
         } catch {
           // Quiet: proxy outage just keeps the fallback glyph + hardcoded title.
         }
@@ -79,6 +80,12 @@
     return [
       { label: 'Open playlist', onSelect: () => void goto(`/spotify-playlist/${id}`) },
     ];
+  }
+
+  function openChartPlaylistContext(e: MouseEvent, chart: { id: string; title: string }) {
+    e.preventDefault();
+    e.stopPropagation();
+    openContextMenu(e, chartMenu(chart.id, chart.title), chart.title);
   }
 </script>
 
@@ -114,7 +121,7 @@
       <a
         class="card"
         href={`/spotify-playlist/${c.id}`}
-        oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, chartMenu(c.id, c.title), c.title); }}
+        oncontextmenu={(e) => openChartPlaylistContext(e, c)}
       >
         <div class="art-wrap">
           <ArtworkImage

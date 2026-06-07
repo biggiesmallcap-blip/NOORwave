@@ -1,12 +1,15 @@
+#[cfg(test)]
+use crate::db::Database;
 use crate::db::audio_settings::AudioQuality;
 use crate::db::{
-    Database,
     models::{PlaybackState, QueueItem, Track},
     queries,
 };
 use crate::playback::automix::{AUTOMIX_MIN_UPCOMING, ensure_automix_queue_depth};
 use crate::playback::dj_engine::{DjEngine, DjTransitionPlan};
-use crate::playback::dj_lookahead::{DjLookaheadPair, DjMediaRef, load_dj_lookahead_pair};
+#[cfg(test)]
+use crate::playback::dj_lookahead::load_dj_lookahead_pair;
+use crate::playback::dj_lookahead::{DjLookaheadPair, DjMediaRef};
 use crate::playback::gapless::{self, GaplessPlan, GaplessSettings};
 use crate::playback::queue::{self, ShuffleDebug, ShuffleMode};
 use crate::playback::shuffle::generate_shuffle_seed;
@@ -30,6 +33,13 @@ use std::cmp::Ordering;
 pub struct PlaybackSnapshot {
     pub state: PlaybackState,
     pub queue: Vec<QueueItem>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoveQueueItemOutcome {
+    pub snapshot: PlaybackSnapshot,
+    pub removed_current: bool,
+    pub was_playing: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -278,17 +288,6 @@ impl PreparedPlaybackJob {
     }
 }
 
-pub fn build_dj_lookahead_start(
-    conn: &Connection,
-    deadline_samples: u64,
-) -> Result<Option<DjLookaheadStart>> {
-    if !queries::is_dj_engine_enabled(conn)? {
-        return Ok(None);
-    }
-    let pair = load_dj_lookahead_pair(conn)?;
-    Ok(dj_lookahead_start_from_pair(pair, deadline_samples))
-}
-
 pub fn dj_lookahead_start_from_pair(
     pair: DjLookaheadPair,
     deadline_samples: u64,
@@ -304,16 +303,6 @@ pub fn dj_lookahead_start_from_pair(
         queue_generation: pair.queue_generation,
         deadline_samples,
     })
-}
-
-pub fn attach_dj_transition_plan(
-    db: &Database,
-    job: PlaybackPreparation,
-    sample_rate: u32,
-    channels: u16,
-) -> Result<PlaybackPreparation> {
-    let pair = db.with_conn(load_dj_lookahead_pair)?;
-    attach_dj_transition_plan_for_pair(&DjEngine::new(db.clone()), job, pair, sample_rate, channels)
 }
 
 pub fn attach_dj_transition_plan_for_pair(
@@ -1413,12 +1402,59 @@ pub fn set_volume(conn: &Connection, volume: f64) -> Result<PlaybackSnapshot> {
     load_snapshot(conn)
 }
 
-pub fn set_shuffle_mode(conn: &Connection, mode: ShuffleMode) -> Result<ShuffleModeUpdate> {
-    let current_queue_item_id: Option<i64> = conn.query_row(
-        "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
+fn current_shuffle_anchor_queue_item_id(conn: &Connection) -> Result<Option<i64>> {
+    let (current_track_id, current_queue_item_id): (Option<i64>, Option<i64>) = conn.query_row(
+        "SELECT current_track_id, current_queue_item_id FROM playback_state WHERE id = 1",
         [],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
+
+    if let Some(queue_item_id) = current_queue_item_id {
+        let queue_track_id: Option<Option<i64>> = conn
+            .query_row(
+                "SELECT track_id FROM queue WHERE id = ?1",
+                params![queue_item_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if queue_track_id
+            .map(|track_id| track_id == current_track_id)
+            .unwrap_or(false)
+        {
+            return Ok(Some(queue_item_id));
+        }
+    }
+
+    if let Some(track_id) = current_track_id {
+        let repaired_queue_item_id: Option<i64> = conn
+            .query_row(
+                "SELECT id
+                 FROM queue
+                 WHERE track_id = ?1
+                 ORDER BY position ASC, id ASC
+                 LIMIT 1",
+                params![track_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        conn.execute(
+            "UPDATE playback_state SET current_queue_item_id = ?1 WHERE id = 1",
+            params![repaired_queue_item_id],
+        )?;
+        return Ok(repaired_queue_item_id);
+    }
+
+    if current_queue_item_id.is_some() {
+        conn.execute(
+            "UPDATE playback_state SET current_queue_item_id = NULL WHERE id = 1",
+            [],
+        )?;
+    }
+    Ok(None)
+}
+
+pub fn set_shuffle_mode(conn: &Connection, mode: ShuffleMode) -> Result<ShuffleModeUpdate> {
+    let current_queue_item_id = current_shuffle_anchor_queue_item_id(conn)?;
     let seed = (mode != ShuffleMode::Off).then(generate_shuffle_seed);
     conn.execute(
         "UPDATE playback_state SET shuffle_mode = ?1, shuffle_seed = ?2 WHERE id = 1",
@@ -1461,6 +1497,90 @@ pub fn set_crossfade_ms(conn: &Connection, crossfade_ms: i32) -> Result<()> {
         params![crossfade_ms.max(0)],
     )?;
     Ok(())
+}
+
+pub fn remove_queue_item_and_reconcile(
+    conn: &Connection,
+    item_id: i64,
+) -> Result<RemoveQueueItemOutcome> {
+    let rows: Vec<(i64, Option<i64>, i32)> = {
+        let mut stmt =
+            conn.prepare("SELECT id, track_id, position FROM queue ORDER BY position ASC, id ASC")?;
+        stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?, row.get(2)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let target = rows.iter().find(|(id, _, _)| *id == item_id).copied();
+    let (current_queue_item_id, current_track_id, was_playing): (Option<i64>, Option<i64>, bool) =
+        conn.query_row(
+            "SELECT current_queue_item_id, current_track_id, is_playing FROM playback_state WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0)),
+        )?;
+    let resolved_current_queue_item_id = match current_queue_item_id {
+        Some(queue_item_id)
+            if rows
+                .iter()
+                .any(|(id, track_id, _)| *id == queue_item_id && *track_id == current_track_id) =>
+        {
+            Some(queue_item_id)
+        }
+        _ => current_track_id.and_then(|track_id| {
+            rows.iter()
+                .find(|(_, row_track_id, _)| *row_track_id == Some(track_id))
+                .map(|(id, _, _)| *id)
+        }),
+    };
+    if resolved_current_queue_item_id != current_queue_item_id {
+        conn.execute(
+            "UPDATE playback_state SET current_queue_item_id = ?1 WHERE id = 1",
+            params![resolved_current_queue_item_id],
+        )?;
+    }
+
+    let removed_current = target.is_some() && resolved_current_queue_item_id == Some(item_id);
+    let next_current = target.and_then(|(_, _, target_pos)| {
+        rows.iter()
+            .find(|(id, _, position)| *id != item_id && *position > target_pos)
+            .or_else(|| rows.iter().find(|(id, _, _)| *id != item_id))
+            .copied()
+    });
+
+    queue::remove_queue_item(conn, item_id)?;
+
+    if removed_current {
+        match next_current {
+            Some((queue_item_id, track_id, _)) => {
+                conn.execute(
+                    "UPDATE playback_state
+                     SET current_track_id = ?1,
+                         current_queue_item_id = ?2,
+                         position_ms = 0,
+                         is_playing = ?3
+                     WHERE id = 1",
+                    params![track_id, queue_item_id, was_playing],
+                )?;
+            }
+            None => {
+                conn.execute(
+                    "UPDATE playback_state
+                     SET current_track_id = NULL,
+                         current_queue_item_id = NULL,
+                         position_ms = 0,
+                         is_playing = 0
+                     WHERE id = 1",
+                    [],
+                )?;
+            }
+        }
+    }
+
+    Ok(RemoveQueueItemOutcome {
+        snapshot: load_snapshot(conn)?,
+        removed_current,
+        was_playing,
+    })
 }
 
 pub fn next_track(conn: &Connection, recently_cleared: bool) -> Result<PlaybackSnapshot> {
@@ -1570,17 +1690,8 @@ pub fn previous_track(conn: &Connection) -> Result<PlaybackSnapshot> {
         return load_snapshot(conn);
     }
 
-    // Locate current position by queue item id first (works for pending rows too),
-    // falling back to track id for rows written before migration 021.
-    let current_index = current_queue_item_id
-        .and_then(|qid| queue_items.iter().position(|item| item.id == qid))
-        .or_else(|| {
-            current_track_id.and_then(|track_id| {
-                queue_items
-                    .iter()
-                    .position(|item| item.track.id == track_id)
-            })
-        });
+    let current_index =
+        playback_anchor_index(&queue_items, current_track_id, current_queue_item_id);
 
     if let Some(previous_item) = current_index
         .and_then(|idx| idx.checked_sub(1))
@@ -1741,10 +1852,8 @@ pub(super) fn playback_anchor_index(
     if let Some(qid) = current_queue_item_id
         && let Some(idx) = queue_items.iter().position(|item| item.id == qid)
     {
-        if current_track_id
-            .map(|track_id| queue_items[idx].track.id == track_id)
-            .unwrap_or(true)
-        {
+        let queue_track_id = (queue_items[idx].track.id != 0).then_some(queue_items[idx].track.id);
+        if queue_track_id == current_track_id {
             return Some(idx);
         }
     }
@@ -2044,6 +2153,22 @@ mod tests {
             .collect()
     }
 
+    fn attach_test_dj_transition_plan(
+        db: &Database,
+        job: PlaybackPreparation,
+        sample_rate: u32,
+        channels: u16,
+    ) -> Result<PlaybackPreparation> {
+        let pair = db.with_conn(load_dj_lookahead_pair)?;
+        attach_dj_transition_plan_for_pair(
+            &DjEngine::new(db.clone()),
+            job,
+            pair,
+            sample_rate,
+            channels,
+        )
+    }
+
     mod dj_lookahead {
         use super::*;
 
@@ -2054,7 +2179,11 @@ mod tests {
         }
 
         fn start(conn: &Connection) -> Option<DjLookaheadStart> {
-            build_dj_lookahead_start(conn, DEADLINE).unwrap()
+            if !queries::is_dj_engine_enabled(conn).unwrap() {
+                return None;
+            }
+            let pair = load_dj_lookahead_pair(conn).unwrap();
+            dj_lookahead_start_from_pair(pair, DEADLINE)
         }
 
         fn seed_queue(conn: &Connection, ids: &[i64]) -> Vec<QueueItem> {
@@ -2244,7 +2373,7 @@ mod tests {
         fn planned_job_for_source(source: &str) -> PlaybackPreparation {
             let db = db_with_pair(source);
             enable(&db);
-            attach_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan")
+            attach_test_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan")
         }
 
         #[test]
@@ -2266,7 +2395,7 @@ mod tests {
         #[test]
         fn prepare_next_omits_program_when_disabled() {
             let db = db_with_pair("manual");
-            let job = attach_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
+            let job = attach_test_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
 
             assert!(job.prepared_transition.is_none());
         }
@@ -2285,7 +2414,7 @@ mod tests {
                 })
                 .expect("before");
 
-            let _ = attach_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
+            let _ = attach_test_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
             let after = db
                 .with_conn(|conn| {
                     let mut stmt = conn.prepare("SELECT id FROM queue ORDER BY position, id")?;
@@ -2304,7 +2433,7 @@ mod tests {
             let db = db_with_pair("manual");
             enable(&db);
 
-            let _ = attach_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
+            let _ = attach_test_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
             let next_queue_track = db
                 .with_conn(|conn| {
                     conn.query_row("SELECT track_id FROM queue WHERE id = 12", [], |row| {
@@ -2518,7 +2647,7 @@ mod tests {
         }
 
         fn plan(db: &Database) -> PreparedTransitionProgram {
-            attach_dj_transition_plan(db, next_job(db), 48_000, 2)
+            attach_test_dj_transition_plan(db, next_job(db), 48_000, 2)
                 .expect("plan")
                 .prepared_transition
                 .expect("transition")
@@ -2682,7 +2811,7 @@ mod tests {
             db.with_conn(|conn| queries::set_dj_engine_enabled(conn, false))
                 .expect("disable");
 
-            let job = attach_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
+            let job = attach_test_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
 
             assert!(job.prepared_transition.is_none());
             assert_eq!(event_count(&db), 0);
@@ -3575,6 +3704,59 @@ mod tests {
     }
 
     #[test]
+    fn previous_track_ignores_mismatched_current_queue_item_id() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 3]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 2, current_queue_item_id = ?1, position_ms = 1000, is_playing = 1
+             WHERE id = 1",
+            params![queue_items[0].id],
+        )
+        .unwrap();
+
+        let snapshot = previous_track(&conn).unwrap();
+
+        assert_eq!(snapshot.state.current_track.unwrap().id, 1);
+        assert_eq!(
+            snapshot.state.current_queue_item_id,
+            Some(queue_items[0].id)
+        );
+        assert_eq!(snapshot.state.position_ms, 0);
+    }
+
+    #[test]
+    fn previous_track_accepts_pending_current_queue_item_id() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source, pending_artist, pending_title)
+             VALUES (NULL, 1, 'radio_pending', 'Pending Artist', 'Pending Title')",
+            [],
+        )
+        .unwrap();
+        let pending_qid = conn.last_insert_rowid();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = NULL, current_queue_item_id = ?1, position_ms = 1000, is_playing = 1
+             WHERE id = 1",
+            params![pending_qid],
+        )
+        .unwrap();
+
+        let snapshot = previous_track(&conn).unwrap();
+
+        assert_eq!(snapshot.state.current_track.unwrap().id, 1);
+        assert_eq!(
+            snapshot.state.current_queue_item_id,
+            Some(queue_items[0].id)
+        );
+        assert_eq!(snapshot.state.position_ms, 0);
+    }
+
+    #[test]
     fn previous_track_selects_first_queue_item_when_nothing_is_playing() {
         let conn = conn();
         let tracks = load_tracks(&conn, &[1, 2, 3]);
@@ -4100,6 +4282,225 @@ mod tests {
     }
 
     #[test]
+    fn remove_current_queue_item_advances_to_next_survivor() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 3]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 2, current_queue_item_id = ?1, is_playing = 1
+             WHERE id = 1",
+            params![queue_items[1].id],
+        )
+        .unwrap();
+
+        let outcome = remove_queue_item_and_reconcile(&conn, queue_items[1].id).unwrap();
+
+        assert!(outcome.removed_current);
+        assert_eq!(
+            outcome
+                .snapshot
+                .state
+                .current_track
+                .as_ref()
+                .map(|track| track.id),
+            Some(3)
+        );
+        assert_eq!(
+            outcome.snapshot.state.current_queue_item_id,
+            Some(queue_items[2].id)
+        );
+        assert!(outcome.snapshot.state.is_playing);
+        assert_eq!(outcome.snapshot.queue.len(), 2);
+    }
+
+    #[test]
+    fn remove_current_queue_item_repairs_stale_anchor_before_reconcile() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1, current_queue_item_id = 999999, is_playing = 1
+             WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+        let outcome = remove_queue_item_and_reconcile(&conn, queue_items[0].id).unwrap();
+
+        assert!(outcome.removed_current);
+        assert_eq!(
+            outcome
+                .snapshot
+                .state
+                .current_track
+                .as_ref()
+                .map(|track| track.id),
+            Some(2)
+        );
+        assert_eq!(
+            outcome.snapshot.state.current_queue_item_id,
+            Some(queue_items[1].id)
+        );
+        assert!(outcome.snapshot.state.is_playing);
+    }
+
+    #[test]
+    fn remove_current_queue_item_repairs_mismatched_anchor_before_reconcile() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 3]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+             WHERE id = 1",
+            params![queue_items[1].id],
+        )
+        .unwrap();
+
+        let outcome = remove_queue_item_and_reconcile(&conn, queue_items[0].id).unwrap();
+
+        assert!(outcome.removed_current);
+        assert_eq!(
+            outcome
+                .snapshot
+                .state
+                .current_track
+                .as_ref()
+                .map(|track| track.id),
+            Some(2)
+        );
+        assert_eq!(
+            outcome.snapshot.state.current_queue_item_id,
+            Some(queue_items[1].id)
+        );
+        assert!(outcome.snapshot.state.is_playing);
+    }
+
+    #[test]
+    fn remove_current_queue_item_repairs_missing_anchor_before_reconcile() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1, current_queue_item_id = NULL, is_playing = 0
+             WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+        let outcome = remove_queue_item_and_reconcile(&conn, queue_items[0].id).unwrap();
+
+        assert!(outcome.removed_current);
+        assert!(!outcome.was_playing);
+        assert_eq!(
+            outcome
+                .snapshot
+                .state
+                .current_track
+                .as_ref()
+                .map(|track| track.id),
+            Some(2)
+        );
+        assert_eq!(
+            outcome.snapshot.state.current_queue_item_id,
+            Some(queue_items[1].id)
+        );
+        assert!(!outcome.snapshot.state.is_playing);
+    }
+
+    #[test]
+    fn remove_current_queue_item_stops_when_no_survivor_exists() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+             WHERE id = 1",
+            params![queue_items[0].id],
+        )
+        .unwrap();
+
+        let outcome = remove_queue_item_and_reconcile(&conn, queue_items[0].id).unwrap();
+
+        assert!(outcome.removed_current);
+        assert!(outcome.snapshot.state.current_track.is_none());
+        assert_eq!(outcome.snapshot.state.current_queue_item_id, None);
+        assert!(!outcome.snapshot.state.is_playing);
+        assert!(outcome.snapshot.queue.is_empty());
+    }
+
+    #[test]
+    fn remove_paused_current_queue_item_preserves_paused_state() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 0
+             WHERE id = 1",
+            params![queue_items[0].id],
+        )
+        .unwrap();
+
+        let outcome = remove_queue_item_and_reconcile(&conn, queue_items[0].id).unwrap();
+
+        assert!(outcome.removed_current);
+        assert!(!outcome.was_playing);
+        assert_eq!(
+            outcome
+                .snapshot
+                .state
+                .current_track
+                .as_ref()
+                .map(|track| track.id),
+            Some(2)
+        );
+        assert_eq!(
+            outcome.snapshot.state.current_queue_item_id,
+            Some(queue_items[1].id)
+        );
+        assert!(!outcome.snapshot.state.is_playing);
+    }
+
+    #[test]
+    fn remove_previous_queue_item_preserves_current_queue_item_anchor() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 3]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 3, current_queue_item_id = ?1, is_playing = 1
+             WHERE id = 1",
+            params![queue_items[2].id],
+        )
+        .unwrap();
+
+        let outcome = remove_queue_item_and_reconcile(&conn, queue_items[0].id).unwrap();
+
+        assert!(!outcome.removed_current);
+        assert_eq!(
+            outcome
+                .snapshot
+                .state
+                .current_track
+                .as_ref()
+                .map(|track| track.id),
+            Some(3)
+        );
+        assert_eq!(
+            outcome.snapshot.state.current_queue_item_id,
+            Some(queue_items[2].id)
+        );
+        assert_eq!(outcome.snapshot.queue.len(), 2);
+        assert_eq!(outcome.snapshot.queue[0].position, 0);
+        assert_eq!(outcome.snapshot.queue[1].position, 1);
+    }
+
+    #[test]
     fn setting_shuffle_off_clears_shuffle_seed() {
         let conn = conn();
         conn.execute(
@@ -4120,6 +4521,139 @@ mod tests {
         assert_eq!(update.snapshot.state.shuffle_mode, "off");
         assert!(update.debug.is_none());
         assert_eq!(stored_seed, None);
+    }
+
+    #[test]
+    fn setting_shuffle_repairs_stale_current_queue_anchor() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 3, 4]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        let current_qid = queue_items[1].id;
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 2,
+                 current_queue_item_id = 999999,
+                 is_playing = 1
+             WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+        let update = set_shuffle_mode(&conn, ShuffleMode::True).unwrap();
+        let debug = update.debug.expect("shuffle debug");
+        let stored_current_qid: Option<i64> = conn
+            .query_row(
+                "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(stored_current_qid, Some(current_qid));
+        assert_eq!(
+            update.snapshot.state.current_queue_item_id,
+            Some(current_qid)
+        );
+        assert_eq!(debug.locked_count, 2);
+        assert_eq!(debug.candidate_count, 2);
+        assert_eq!(
+            update
+                .snapshot
+                .queue
+                .iter()
+                .position(|item| item.id == current_qid),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn setting_shuffle_repairs_mismatched_current_queue_anchor() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 3, 4]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        let mismatched_qid = queue_items[0].id;
+        let current_qid = queue_items[1].id;
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 2,
+                 current_queue_item_id = ?1,
+                 is_playing = 1
+             WHERE id = 1",
+            params![mismatched_qid],
+        )
+        .unwrap();
+
+        let update = set_shuffle_mode(&conn, ShuffleMode::True).unwrap();
+        let debug = update.debug.expect("shuffle debug");
+        let stored_current_qid: Option<i64> = conn
+            .query_row(
+                "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(stored_current_qid, Some(current_qid));
+        assert_eq!(
+            update.snapshot.state.current_queue_item_id,
+            Some(current_qid)
+        );
+        assert_eq!(debug.locked_count, 2);
+        assert_eq!(
+            update
+                .snapshot
+                .queue
+                .iter()
+                .position(|item| item.id == current_qid),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn setting_shuffle_repairs_missing_anchor_for_duplicate_current_track() {
+        let conn = conn();
+        let repeated = queue::get_track_by_id(&conn, 1).unwrap().unwrap();
+        let other_tracks = load_tracks(&conn, &[2, 3]);
+        let queue_items = queue::replace_queue(
+            &conn,
+            &[
+                repeated.clone(),
+                repeated,
+                other_tracks[0].clone(),
+                other_tracks[1].clone(),
+            ],
+            "test",
+        )
+        .unwrap();
+        let repaired_qid = queue_items[0].id;
+        let duplicate_qid = queue_items[1].id;
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1,
+                 current_queue_item_id = NULL,
+                 is_playing = 1
+             WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+        let update = set_shuffle_mode(&conn, ShuffleMode::True).unwrap();
+        let debug = update.debug.expect("shuffle debug");
+
+        assert_eq!(
+            update.snapshot.state.current_queue_item_id,
+            Some(repaired_qid)
+        );
+        assert_eq!(debug.locked_count, 1);
+        assert_eq!(debug.candidate_count, 3);
+        assert_eq!(update.snapshot.queue[0].id, repaired_qid);
+        assert!(
+            update
+                .snapshot
+                .queue
+                .iter()
+                .any(|item| item.id == duplicate_qid)
+        );
     }
 
     #[test]

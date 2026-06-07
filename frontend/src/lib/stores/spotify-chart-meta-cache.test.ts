@@ -1,25 +1,16 @@
 import { describe, expect, test, vi, beforeEach, afterEach } from 'vitest';
-import type { SpotifyPlaylistDetail } from '$lib/api/client';
 import {
 	clearSpotifyChartMetaCache,
 	getCachedSpotifyChartMeta,
 	getCachedSpotifyChartMetaMap,
 	putCachedSpotifyChartMeta,
+	type SpotifyChartMeta,
 } from './spotify-chart-meta-cache';
 
-function playlist(title: string, thumbnail: string | null): SpotifyPlaylistDetail {
+function playlist(title: string, thumbnail: string | null): SpotifyChartMeta {
 	return {
-		source: 'spotify',
-		spotifyId: 'spotify-id',
-		type: 'playlist',
 		title,
-		description: null,
 		thumbnail,
-		owner: null,
-		followers: null,
-		totalTracks: null,
-		snapshotId: null,
-		tracks: [],
 	};
 }
 

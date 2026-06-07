@@ -48,27 +48,3 @@ export function handleTrainingComplete() {
 		lastCompletedAt: new Date().toISOString()
 	}));
 }
-
-export function handleTrainingFailed(errorMessage: string) {
-	training.update((state) => ({
-		...state,
-		isRunning: false,
-		stage: 'failed',
-		progress: 0,
-		message: errorMessage
-	}));
-}
-
-export function resetTrainingState() {
-	training.set({
-		isRunning: false,
-		stage: '',
-		progress: 0,
-		message: '',
-		current_track_id: null,
-		current_track_title: null,
-		tracks_done: 0,
-		tracks_total: 0,
-		lastCompletedAt: null
-	});
-}

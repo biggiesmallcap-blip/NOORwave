@@ -30,7 +30,7 @@ import {
 	type SearchResults,
 	type TidalHomeModulesResponse,
 	type TidalMixesResponse,
-	type TidalMoodCategory,
+	type TidalMoodsResponse,
 	type TidalRadioStationsResponse,
 	type Track,
 	type AudioDevice,
@@ -77,6 +77,7 @@ const volatileOptions: QueryOptions = { staleMs: 5 * SECOND };
 const shortOptions: QueryOptions = { staleMs: 30 * SECOND };
 const mediumOptions: QueryOptions = { staleMs: 5 * MINUTE, persist: scopedPersist(DAY) };
 const longOptions: QueryOptions = { staleMs: 30 * MINUTE, persist: scopedPersist(7 * DAY) };
+const moodsOptions: QueryOptions = { ...longOptions, returnStale: true };
 
 export const cacheKeys = {
 	playbackState: () => ['api', 'getPlaybackState'] as const,
@@ -367,10 +368,10 @@ export const cachedApi = {
 		);
 	},
 	getTidalMoods() {
-		return fetchCached<{ categories: TidalMoodCategory[]; source: string; fallback?: boolean }>(
+		return fetchCached<TidalMoodsResponse>(
 			cacheKeys.tidalMoods(),
 			() => api.getTidalMoods(),
-			longOptions,
+			moodsOptions,
 		);
 	},
 	getMusicBrainzStatus() {

@@ -45,6 +45,10 @@ describe('home recommendations shelf contract', () => {
 		expect(source).toContain('lastfm.value.recommendations');
 		expect(source).toContain('listenbrainz.value.recommendations');
 		expect(source).toContain('cachedApi.getHomeRecommendations()');
+		expect(source).toContain('let loadSeq = 0;');
+		expect(source).toContain('return () => { loadSeq += 1; };');
+		expect(source).toContain('const seq = ++loadSeq;');
+		expect(source).toContain('if (seq !== loadSeq) return;');
 		expect(source).not.toContain('Boolean(lastfm.value.scrobbling)');
 		expect(source).not.toContain('Boolean(listenbrainz.value.scrobbling)');
 		expect(client).toContain('/api/home/recommendations');

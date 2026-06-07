@@ -1,5 +1,5 @@
 use crate::SharedState;
-use crate::db::{models::AnalyticsDashboard, queries};
+use crate::db::{models::AnalyticsDashboard, queries, signals};
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -91,7 +91,7 @@ pub(super) async fn get_analytics_signals(
     let state = state.read().await;
     let signals = state
         .db
-        .with_conn(|conn| queries::get_analytics_signals(conn, days))
+        .with_conn(|conn| signals::Signals::compute(conn, days))
         .map_err(|err| {
             tracing::error!(?err, days, "get_analytics_signals failed");
             StatusCode::INTERNAL_SERVER_ERROR

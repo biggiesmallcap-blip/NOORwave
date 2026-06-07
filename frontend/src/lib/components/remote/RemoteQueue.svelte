@@ -3,24 +3,35 @@
 	import {
 		clearQueue,
 		moveQueueTrackNext,
+		playTidalTrackNow,
 		playTrackNow,
 		refreshPlaybackState,
 		removeTrackFromQueue,
 		restoreQueueItems
 	} from '$lib/stores/player';
 	import { pendingUndo, consumeUndo } from '$lib/stores/queue_undo';
-	import { upscaleTidalArtwork } from '$lib/utils/artwork';
+	import {
+		tidalArtworkFallbackSizes,
+		upscaleTidalArtwork,
+		type TidalArtworkSize
+	} from '$lib/utils/artwork';
 	import { formatTrackDuration } from '$lib/utils/format';
+	import { queueItemToTidalPlayable } from '$lib/utils/track';
 	import {
 		buildTidalTrackMenu,
 		buildTrackMenu,
 		type MenuTrack
 	} from '$lib/player/track_menu';
+	import { isQueueItemActive } from '$lib/player/queue_active';
 	import { openActionSheet } from '$lib/remote/action_sheet';
 	import { hapticAccent, hapticCommit, hapticTap } from '$lib/remote/haptics';
 	import { longPress } from '$lib/remote/long_press';
 
-	let { queue, currentTrack: current = null }: { queue: QueueItem[]; currentTrack?: Track | null } =
+	let {
+		queue,
+		currentTrack: current = null,
+		currentQueueItemId = null
+	}: { queue: QueueItem[]; currentTrack?: Track | null; currentQueueItemId?: number | null } =
 		$props();
 
 	// Optimistic reorder copy. While a drag is in progress we render this
@@ -45,11 +56,11 @@
 	});
 
 	function canPlay(item: QueueItem): boolean {
-		return item.is_pending !== true && item.track.id > 0;
+		return item.is_pending !== true && (item.track.id > 0 || queueItemToTidalPlayable(item) != null);
 	}
 
 	function isCurrent(item: QueueItem): boolean {
-		return current?.id != null && item.track.id === current.id;
+		return isQueueItemActive(item, current, currentQueueItemId, displayQueue);
 	}
 
 	function openRowMenu(item: QueueItem) {
@@ -66,30 +77,13 @@
 			});
 			return;
 		}
-		// TIDAL ephemeral rows have a synthetic negative `id` but a real
-		// `tidal_id`. Library-menu nav items (Go to artist / Go to album)
-		// would be empty for them, so route through the TIDAL menu builder
-		// instead so the user gets `Go to <artist>` via `artist_tidal_id`.
 		const t = item.track;
-		const isTidalEphemeral = t.id <= 0 && !!t.tidal_id;
-		if (isTidalEphemeral) {
+		const tidal = queueItemToTidalPlayable(item);
+		if (tidal != null) {
 			openActionSheet({
 				title: t.title,
 				subtitle: t.artist_name,
-				items: buildTidalTrackMenu(
-					{
-						tidal_id: t.tidal_id!,
-						title: t.title,
-						artist_name: t.artist_name ?? null,
-						album_title: t.album_title ?? null,
-						artwork_url: t.artwork_url ?? null,
-						duration_ms: t.duration_ms ?? null,
-						artist_tidal_id: t.artist_tidal_id ?? null,
-						album_tidal_id: t.album_tidal_id ?? null,
-						is_favorite: t.is_favorite ?? false
-					},
-					{ inQueue: true, remoteRoutes: true }
-				)
+				items: buildTidalTrackMenu(tidal, { inQueue: true, remoteRoutes: true })
 			});
 			return;
 		}
@@ -123,7 +117,12 @@
 
 	async function onPlayRow(item: QueueItem) {
 		hapticTap();
-		await playTrackNow(item.track.id);
+		const tidal = queueItemToTidalPlayable(item);
+		if (tidal != null && item.id < 0) {
+			await playTidalTrackNow(tidal);
+		} else {
+			await playTrackNow(item.track.id);
+		}
 	}
 
 	async function onMoveNext(item: QueueItem, event: Event) {
@@ -138,9 +137,14 @@
 		await removeTrackFromQueue(item.id);
 	}
 
-	function queueArtwork(rawUrl: string | null | undefined): string | null {
-		const renderedUrl = upscaleTidalArtwork(rawUrl, 320);
-		if (renderedUrl && !failedArtworkUrls[renderedUrl]) return renderedUrl;
+	function queueArtwork(item: QueueItem, size: TidalArtworkSize = 320): string | null {
+		if (item.is_pending) return null;
+		const rawUrl = item.track.artwork_url;
+		if (!rawUrl) return null;
+		for (const fallbackSize of tidalArtworkFallbackSizes(rawUrl, size)) {
+			const renderedUrl = upscaleTidalArtwork(rawUrl, fallbackSize);
+			if (renderedUrl && !failedArtworkUrls[renderedUrl]) return renderedUrl;
+		}
 		return null;
 	}
 
@@ -258,7 +262,7 @@
 	{:else}
 		<div class="remote-queue-list">
 			{#each displayQueue.slice(0, 20) as item, index (item.id)}
-				{@const queueArt = queueArtwork(item.track.artwork_url)}
+				{@const queueArt = queueArtwork(item)}
 				<div
 					class="remote-queue-row"
 					class:pending={item.is_pending}

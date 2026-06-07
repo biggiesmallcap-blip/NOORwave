@@ -32,6 +32,7 @@
   let error = $state<string | null>(null);
   let requestedSpotifyId = $state('');
   let lazyArt = $state<Record<string, string>>({});
+  let loadSeq = 0;
 
   const POLL_INTERVAL_MS = 1500;
   const POLL_DEADLINE_MS = 30_000;
@@ -69,10 +70,16 @@
     }
   }
 
-  async function pollResolution() {
+  function schedulePoll(seq: number, delayMs = POLL_INTERVAL_MS) {
+    pollTimer = setTimeout(() => void pollResolution(seq), delayMs);
+  }
+
+  async function pollResolution(seq: number) {
+    if (seq !== loadSeq) { clearPoll(); return; }
     if (!related || pendingIds.length === 0 || Date.now() > pollDeadline) { clearPoll(); return; }
     try {
       const { entries } = await api.getResolveTidalStatus(pendingIds);
+      if (seq !== loadSeq) return;
       const byId = new Map(entries.map((e) => [e.spotifyId, e.tidal]));
       const stillPending: string[] = [];
       const merge = (arr: SpotifyPlaylistTrack[]) =>
@@ -89,44 +96,50 @@
         deepCuts: merge(related.deepCuts),
       };
       pendingIds = stillPending;
-      if (pendingIds.length > 0) pollTimer = setTimeout(pollResolution, POLL_INTERVAL_MS);
+      if (pendingIds.length > 0) schedulePoll(seq);
       else clearPoll();
     } catch (e) {
+      if (seq !== loadSeq) return;
       console.warn('resolve status poll failed', e);
-      pollTimer = setTimeout(pollResolution, POLL_INTERVAL_MS * 2);
+      schedulePoll(seq, POLL_INTERVAL_MS * 2);
     }
   }
 
   async function load(id: string) {
+    const seq = ++loadSeq;
     if (!id.trim()) { error = 'Missing Spotify artist ID'; loading = false; return; }
     loading = true; error = null; detail = null; related = null; pendingIds = []; lazyArt = {};
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
     try {
-      detail = await api.getSpotifyArtist(id, controller.signal);
+      const nextDetail = await api.getSpotifyArtist(id, controller.signal);
+      if (seq !== loadSeq) return;
+      detail = nextDetail;
       const rel = await api.getSpotifyArtistRelated(id, controller.signal).catch(() => null);
+      if (seq !== loadSeq) return;
       if (rel) {
         related = rel;
         pendingIds = rel.pendingSpotifyIds ?? [];
       }
       pollDeadline = Date.now() + POLL_DEADLINE_MS;
-      if (pendingIds.length > 0) pollTimer = setTimeout(pollResolution, POLL_INTERVAL_MS);
+      if (pendingIds.length > 0) schedulePoll(seq);
     } catch (e) {
+      if (seq !== loadSeq) return;
       error = (e as Error).name === 'AbortError'
         ? 'Timed out loading artist metadata'
         : ((e as Error).message ?? 'Failed to load artist');
     } finally {
       clearTimeout(timeout);
-      loading = false;
+      if (seq === loadSeq) loading = false;
     }
   }
 
   $effect(() => {
     const id = spotifyId.trim();
-    if (!id) { clearPoll(); requestedSpotifyId = ''; detail = null; loading = false; error = 'Missing Spotify artist ID'; return; }
+    if (!id) { loadSeq += 1; clearPoll(); requestedSpotifyId = ''; detail = null; loading = false; error = 'Missing Spotify artist ID'; return; }
     if (id !== requestedSpotifyId) { requestedSpotifyId = id; clearPoll(); void load(id); }
   });
-  onDestroy(clearPoll);
+  onDestroy(() => { loadSeq += 1; clearPoll(); });
 
   function buildRowMenu(t: SpotifyPlaylistTrack): MenuItem[] {
     const track = asTidalPlayable(t);
@@ -147,6 +160,12 @@
 
   function buildArtistCardMenu(a: SpotifyArtistSearchItem): MenuItem[] {
     return [{ label: 'Open artist', icon: '→', onSelect: () => void goto(`/spotify-artist/${a.spotifyId}`) }];
+  }
+
+  function handleRowContextMenu(e: MouseEvent, t: SpotifyPlaylistTrack) {
+    e.preventDefault();
+    e.stopPropagation();
+    openContextMenu(e, buildRowMenu(t), t.title ?? 'Spotify track');
   }
 
   function formatNumber(n: number | null): string {
@@ -216,7 +235,7 @@
                   title={statusLabel(t.tidal)}
                   onclick={() => { const tr = asTidalPlayable(t); if (tr) void playTidalTrackNow(tr); }}
                   onkeydown={(e) => { if (e.key !== 'Enter' && e.key !== ' ') return; e.preventDefault(); const tr = asTidalPlayable(t); if (tr) void playTidalTrackNow(tr); }}
-                  oncontextmenu={(e) => openContextMenu(e, buildRowMenu(t), t.title ?? 'Spotify track')}
+                  oncontextmenu={(e) => handleRowContextMenu(e, t)}
                   use:lazyTidalArt={{
                     enabled: !t.thumbnail && !!t.primaryArtist,
                     query: { artist: t.primaryArtist, title: t.title },
@@ -255,7 +274,7 @@
               <a
                 class="card"
                 href={`/spotify-album/${a.spotifyId}`}
-                oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildAlbumCardMenu(a), a.title ?? 'Spotify album'); }}
+                oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); openContextMenu(e, buildAlbumCardMenu(a), a.title ?? 'Spotify album'); }}
               >
                 {#if a.thumbnail}
                   <div class="art" style="background-image:url('{a.thumbnail}')"></div>
@@ -278,7 +297,7 @@
               <a
                 class="card artist"
                 href={`/spotify-artist/${a.spotifyId}`}
-                oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildArtistCardMenu(a), a.name ?? 'Spotify artist'); }}
+                oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); openContextMenu(e, buildArtistCardMenu(a), a.name ?? 'Spotify artist'); }}
               >
                 {#if a.thumbnail}
                   <div class="art round" style="background-image:url('{a.thumbnail}')"></div>

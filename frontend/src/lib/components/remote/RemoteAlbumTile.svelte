@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { upscaleTidalArtwork } from '$lib/utils/artwork';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { hapticTap } from '$lib/remote/haptics';
 	import { longPress } from '$lib/remote/long_press';
 	import { openActionSheet } from '$lib/remote/action_sheet';
@@ -22,19 +22,10 @@
 		href: string;
 		/** When set, long-press opens the shared album action sheet. */
 		albumForMenu?: AlbumLike | null;
-		/** Subtitle shown in the action-sheet header — defaults to year/releaseType. */
+		/** Subtitle shown in the action-sheet header, defaults to year/releaseType. */
 		menuArtistName?: string | null;
 	} = $props();
 
-	let cover = $derived(upscaleTidalArtwork(artworkUrl, 320));
-	// Some TIDAL records return AccessDenied for specific sizes on specific
-	// covers — we can't predict which, so swap to the placeholder on first
-	// load failure rather than leaving a broken-image glyph on screen.
-	let failed = $state(false);
-	$effect(() => {
-		cover;
-		failed = false;
-	});
 	let meta = $derived.by(() => {
 		const parts: string[] = [];
 		if (year) parts.push(String(year));
@@ -65,11 +56,13 @@
 	use:longPress={onLongPress}
 >
 	<span class="remote-album-tile-art">
-		{#if cover && !failed}
-			<img src={cover} alt="" onerror={() => (failed = true)} />
-		{:else}
-			<span class="remote-album-tile-empty" aria-hidden="true">NOOR</span>
-		{/if}
+		<ArtworkImage
+			className="remote-album-tile-artwork"
+			src={artworkUrl}
+			size={320}
+			fallbackText="NOOR"
+			decorative={true}
+		/>
 	</span>
 	<span class="remote-album-tile-copy">
 		<strong>{title}</strong>
@@ -105,18 +98,24 @@
 		background: var(--surface-1);
 	}
 
-	.remote-album-tile-art img {
+	.remote-album-tile-art :global(.remote-album-tile-artwork) {
 		width: 100%;
 		height: 100%;
-		object-fit: cover;
 	}
 
-	.remote-album-tile-empty {
+	.remote-album-tile-art :global(.remote-album-tile-artwork:not(.fallback)) {
+		object-fit: cover;
+		display: block;
+	}
+
+	.remote-album-tile-art :global(.remote-album-tile-artwork.fallback) {
 		display: grid;
 		place-items: center;
-		width: 100%;
-		height: 100%;
 		color: var(--text-muted);
+		background: var(--surface-1);
+	}
+
+	.remote-album-tile-art :global(.remote-album-tile-artwork.fallback span) {
 		font-size: var(--font-size-xs);
 	}
 

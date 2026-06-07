@@ -10,6 +10,10 @@ use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+const SPORTIFY_SEARCH_LIMIT_DEFAULT: u32 = 20;
+const SPORTIFY_SEARCH_LIMIT_MAX: u32 = 50;
+const SPORTIFY_SEARCH_OFFSET_MAX: u32 = 1_000;
+
 #[derive(Debug, Deserialize)]
 pub(super) struct SportifySearchQuery {
     q: String,
@@ -23,7 +27,7 @@ pub(super) struct SportifySearchQuery {
 
 fn parse_search_kind(s: Option<&str>) -> crate::services::sportify::client::SportifySearchKind {
     use crate::services::sportify::client::SportifySearchKind;
-    match s.map(str::to_ascii_lowercase).as_deref() {
+    match s.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
         Some("album") => SportifySearchKind::Album,
         Some("artist") => SportifySearchKind::Artist,
         Some("playlist") => SportifySearchKind::Playlist,
@@ -31,6 +35,16 @@ fn parse_search_kind(s: Option<&str>) -> crate::services::sportify::client::Spor
         // most-common usage.
         _ => SportifySearchKind::Track,
     }
+}
+
+fn clamp_search_limit(limit: Option<u32>) -> u32 {
+    limit
+        .unwrap_or(SPORTIFY_SEARCH_LIMIT_DEFAULT)
+        .clamp(1, SPORTIFY_SEARCH_LIMIT_MAX)
+}
+
+fn clamp_search_offset(offset: Option<u32>) -> u32 {
+    offset.unwrap_or(0).min(SPORTIFY_SEARCH_OFFSET_MAX)
 }
 
 pub(super) async fn sportify_discovery_search(
@@ -48,8 +62,8 @@ pub(super) async fn sportify_discovery_search(
     }
 
     let kind = parse_search_kind(params.r#type.as_deref());
-    let limit = params.limit.unwrap_or(20).clamp(1, 50);
-    let offset = params.offset.unwrap_or(0);
+    let limit = clamp_search_limit(params.limit);
+    let offset = clamp_search_offset(params.offset);
 
     let (sportify_client, cache_cfg, db) = {
         let s = state.read().await;
@@ -341,6 +355,315 @@ pub(super) async fn sportify_discovery_playlist(
         "playlist": serde_json::to_value(row).unwrap_or(json!({})),
         "pendingSpotifyIds": pending_ids,
     })))
+}
+
+pub(super) async fn sportify_discovery_playlist_meta(
+    State(state): State<SharedState>,
+    Path(spotify_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use crate::services::sportify::cache as sp_cache;
+
+    let id = spotify_id.trim();
+    if id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "spotify_id required" })),
+        ));
+    }
+
+    let (sportify_client, cache_cfg, db) = {
+        let s = state.read().await;
+        (
+            s.sportify_client.clone(),
+            s.sportify_cache_config,
+            s.db.clone(),
+        )
+    };
+    let Some(sportify_client) = sportify_client else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "sportify_unavailable" })),
+        ));
+    };
+
+    let playlist = match db
+        .with_conn(|conn| sp_cache::get_playlist_meta(conn, &cache_cfg, id))
+        .map_err(super::internal)?
+    {
+        Some(p) => p,
+        None => {
+            let fetched = match sportify_client.playlist(id).await {
+                Ok(fetched) => fetched,
+                Err(primary_error) => {
+                    crate::services::spotify::catalog::playlist_from_saved_credentials(&db, id)
+                        .await
+                        .map_err(|fallback_error| {
+                            (
+                                StatusCode::BAD_GATEWAY,
+                                Json(json!({
+                                    "error": format!(
+                                        "sportify_playlist_fetch: {primary_error}; spotify_fallback: {fallback_error}"
+                                    )
+                                })),
+                            )
+                        })?
+                }
+            };
+            db.with_conn(|conn| {
+                sp_cache::put_playlist_meta(conn, id, &fetched)?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .map_err(super::internal)?;
+            fetched
+        }
+    };
+
+    Ok(Json(sportify_playlist_meta_value(id, &playlist)))
+}
+
+fn sportify_playlist_meta_value(
+    id: &str,
+    playlist: &crate::services::sportify::models::SportifyPlaylist,
+) -> Value {
+    json!({
+        "source": "spotify",
+        "spotifyId": playlist.spotify_id().unwrap_or_else(|| id.to_string()),
+        "type": "playlist",
+        "title": playlist.title(),
+        "description": playlist.description.clone(),
+        "thumbnail": playlist.best_thumbnail(),
+        "owner": playlist
+            .owner
+            .as_ref()
+            .and_then(|owner| owner.display_name())
+            .map(str::to_string),
+        "followers": playlist.follower_count(),
+        "totalTracks": playlist.total_track_count(),
+        "snapshotId": playlist.snapshot_id.clone(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        SportifyImportSummary, importable_tidal_id, required_spotify_id,
+        sportify_playlist_meta_value, spotify_save_response,
+    };
+    use crate::services::sportify::models::{
+        SportifyAlbum, SportifyAlbumRef, SportifyArtistRef, SportifyImage, SportifyPlaylist,
+        SportifyPlaylistOwner, SportifyTrack,
+    };
+    use axum::http::StatusCode;
+
+    #[test]
+    fn search_kind_parser_trims_type_values() {
+        assert!(matches!(
+            super::parse_search_kind(Some(" playlist ")),
+            crate::services::sportify::client::SportifySearchKind::Playlist
+        ));
+        assert!(matches!(
+            super::parse_search_kind(Some(" ALBUM ")),
+            crate::services::sportify::client::SportifySearchKind::Album
+        ));
+        assert!(matches!(
+            super::parse_search_kind(Some("unknown")),
+            crate::services::sportify::client::SportifySearchKind::Track
+        ));
+    }
+
+    #[test]
+    fn search_limit_and_offset_are_bounded() {
+        assert_eq!(super::clamp_search_limit(None), 20);
+        assert_eq!(super::clamp_search_limit(Some(0)), 1);
+        assert_eq!(super::clamp_search_limit(Some(5_000)), 50);
+        assert_eq!(super::clamp_search_offset(None), 0);
+        assert_eq!(super::clamp_search_offset(Some(42)), 42);
+        assert_eq!(super::clamp_search_offset(Some(5_000)), 1_000);
+    }
+
+    #[test]
+    fn playlist_meta_value_omits_tracks() {
+        let playlist = SportifyPlaylist {
+            id: Some("spotify-playlist".to_string()),
+            name: Some("Top 50".to_string()),
+            description: Some("Daily chart".to_string()),
+            thumbnail: Some("https://img.example/small.jpg".to_string()),
+            images: vec![SportifyImage {
+                url: Some("https://img.example/large.jpg".to_string()),
+                width: Some(640),
+                height: Some(640),
+            }],
+            owner: Some(SportifyPlaylistOwner::Name("Spotify".to_string())),
+            followers: Some(1234),
+            snapshot_id: Some("snapshot-1".to_string()),
+            total_tracks: Some(50),
+            tracks: vec![SportifyTrack {
+                id: Some("track-1".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let value = sportify_playlist_meta_value("fallback-id", &playlist);
+
+        assert!(value.get("tracks").is_none());
+        assert_eq!(value["source"], "spotify");
+        assert_eq!(value["spotifyId"], "spotify-playlist");
+        assert_eq!(value["type"], "playlist");
+        assert_eq!(value["title"], "Top 50");
+        assert_eq!(value["description"], "Daily chart");
+        assert_eq!(value["thumbnail"], "https://img.example/large.jpg");
+        assert_eq!(value["owner"], "Spotify");
+        assert_eq!(value["followers"], 1234);
+        assert_eq!(value["totalTracks"], 50);
+        assert_eq!(value["snapshotId"], "snapshot-1");
+    }
+
+    #[test]
+    fn sportify_track_import_metadata_uses_track_fields_first() {
+        let track = SportifyTrack {
+            id: Some("spotify-track".to_string()),
+            name: Some("Track Title".to_string()),
+            artist: Some("Track Artist".to_string()),
+            album: Some(SportifyAlbumRef {
+                name: Some("Track Album".to_string()),
+                images: vec![SportifyImage {
+                    url: Some("https://img.example/track.jpg".to_string()),
+                    width: Some(320),
+                    height: Some(320),
+                }],
+                ..Default::default()
+            }),
+            duration_ms: Some(180_000),
+            ..Default::default()
+        };
+        let album = SportifyAlbum {
+            name: Some("Parent Album".to_string()),
+            artists: vec![SportifyArtistRef {
+                name: Some("Parent Artist".to_string()),
+                ..Default::default()
+            }],
+            images: vec![SportifyImage {
+                url: Some("https://img.example/parent.jpg".to_string()),
+                width: Some(640),
+                height: Some(640),
+            }],
+            ..Default::default()
+        };
+
+        let metadata = super::sportify_track_import_metadata(&track, 42, Some(&album));
+
+        assert_eq!(metadata.tidal_id, 42);
+        assert_eq!(metadata.title, "Track Title");
+        assert_eq!(metadata.artist_name, "Track Artist");
+        assert_eq!(metadata.album_title.as_deref(), Some("Track Album"));
+        assert_eq!(
+            metadata.album_artwork_url.as_deref(),
+            Some("https://img.example/track.jpg"),
+        );
+        assert_eq!(metadata.duration_ms, Some(180_000));
+    }
+
+    #[test]
+    fn sportify_track_import_metadata_backfills_parent_album_fields() {
+        let track = SportifyTrack {
+            name: Some("Album Track".to_string()),
+            duration_ms: Some(210_000),
+            ..Default::default()
+        };
+        let album = SportifyAlbum {
+            name: Some("Parent Album".to_string()),
+            artists: vec![SportifyArtistRef {
+                name: Some("Parent Artist".to_string()),
+                ..Default::default()
+            }],
+            images: vec![
+                SportifyImage {
+                    url: Some("https://img.example/small.jpg".to_string()),
+                    width: Some(80),
+                    height: Some(80),
+                },
+                SportifyImage {
+                    url: Some("https://img.example/large.jpg".to_string()),
+                    width: Some(640),
+                    height: Some(640),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let metadata = super::sportify_track_import_metadata(&track, 99, Some(&album));
+
+        assert_eq!(metadata.title, "Album Track");
+        assert_eq!(metadata.artist_name, "Parent Artist");
+        assert_eq!(metadata.album_title.as_deref(), Some("Parent Album"));
+        assert_eq!(
+            metadata.album_artwork_url.as_deref(),
+            Some("https://img.example/large.jpg"),
+        );
+        assert_eq!(metadata.duration_ms, Some(210_000));
+    }
+
+    #[test]
+    fn required_spotify_id_rejects_blank_ids() {
+        let Err((status, body)) = required_spotify_id("  ") else {
+            panic!("blank spotify id should fail");
+        };
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body.0["error"], "spotify_id required");
+    }
+
+    #[test]
+    fn required_spotify_id_trims_valid_ids() {
+        let id = required_spotify_id("  spotify-id  ").expect("valid spotify id");
+
+        assert_eq!(id, "spotify-id");
+    }
+
+    #[test]
+    fn importable_tidal_id_rejects_placeholder_ids() {
+        assert_eq!(importable_tidal_id(0), None);
+        assert_eq!(importable_tidal_id(-42), None);
+        assert_eq!(importable_tidal_id(42), Some(42));
+    }
+
+    #[test]
+    fn spotify_save_response_rejects_unresolved_items() {
+        let Err((status, body)) = spotify_save_response(SportifyImportSummary {
+            total_tracks: 3,
+            unresolved_count: 3,
+            ..Default::default()
+        }) else {
+            panic!("unresolved save should fail");
+        };
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body.0["error"], "no_resolved_tracks");
+        assert_eq!(body.0["totalTracks"], 3);
+        assert_eq!(body.0["unresolvedCount"], 3);
+    }
+
+    #[test]
+    fn spotify_save_response_returns_import_counts() {
+        let Ok(body) = spotify_save_response(SportifyImportSummary {
+            total_tracks: 3,
+            resolved_count: 2,
+            unresolved_count: 1,
+            imported: 2,
+            import_failures: 0,
+            local_ids: vec![11, 12],
+        }) else {
+            panic!("resolved save should succeed");
+        };
+
+        assert_eq!(body.0["imported"], 2);
+        assert_eq!(body.0["totalTracks"], 3);
+        assert_eq!(body.0["resolvedCount"], 2);
+        assert_eq!(body.0["unresolvedCount"], 1);
+        assert_eq!(body.0["localIds"][0], 11);
+        assert_eq!(body.0["localIds"][1], 12);
+    }
 }
 
 pub(super) async fn sportify_discovery_artist(
@@ -690,6 +1013,21 @@ pub(super) struct SaveSpotifyPlaylistBody {
     name: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct SaveSpotifyItemBody {
+    spotify_id: String,
+}
+
+#[derive(Debug, Default)]
+struct SportifyImportSummary {
+    total_tracks: usize,
+    resolved_count: usize,
+    unresolved_count: usize,
+    imported: usize,
+    import_failures: usize,
+    local_ids: Vec<i64>,
+}
+
 /// Save an ephemeral Spotify-sourced playlist into the user's library.
 ///
 /// Pre-condition: the playlist's tracks have been bulk-resolved against
@@ -755,7 +1093,9 @@ pub(super) async fn save_spotify_playlist(
                 if let Some(hit) =
                     sp_cache::get_tidal_resolution(conn, &cache_cfg, spotify_track_id)?
                 {
-                    out.push((t.clone(), hit.tidal_track_id));
+                    if let Some(tidal_id) = importable_tidal_id(hit.tidal_track_id) {
+                        out.push((t.clone(), tidal_id));
+                    }
                 }
             }
             Ok::<_, anyhow::Error>(out)
@@ -846,4 +1186,249 @@ pub(super) async fn save_spotify_playlist(
         "unresolvedCount": unresolved_count,
         "importFailures": import_failures,
     })))
+}
+
+pub(super) async fn save_spotify_track(
+    State(state): State<SharedState>,
+    Json(body): Json<SaveSpotifyItemBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use crate::services::sportify::recommend;
+
+    let id = required_spotify_id(&body.spotify_id)?;
+
+    let (sportify_client, cache_cfg, db) = {
+        let s = state.read().await;
+        (
+            s.sportify_client.clone(),
+            s.sportify_cache_config,
+            s.db.clone(),
+        )
+    };
+    let Some(sportify_client) = sportify_client else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "sportify_unavailable" })),
+        ));
+    };
+
+    let track = recommend::cached_track(&sportify_client, &db, &cache_cfg, id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("sportify_track_fetch: {e}") })),
+            )
+        })?;
+
+    let summary = import_cached_sportify_tracks(
+        &db,
+        &cache_cfg,
+        std::slice::from_ref(&track),
+        None,
+        "save_spotify_track",
+    )
+    .await
+    .map_err(super::internal)?;
+
+    spotify_save_response(summary)
+}
+
+pub(super) async fn save_spotify_album(
+    State(state): State<SharedState>,
+    Json(body): Json<SaveSpotifyItemBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use crate::services::sportify::recommend;
+
+    let id = required_spotify_id(&body.spotify_id)?;
+
+    let (sportify_client, cache_cfg, db) = {
+        let s = state.read().await;
+        (
+            s.sportify_client.clone(),
+            s.sportify_cache_config,
+            s.db.clone(),
+        )
+    };
+    let Some(sportify_client) = sportify_client else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "sportify_unavailable" })),
+        ));
+    };
+
+    let album = recommend::cached_album(&sportify_client, &db, &cache_cfg, id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("sportify_album_fetch: {e}") })),
+            )
+        })?;
+
+    let summary = import_cached_sportify_tracks(
+        &db,
+        &cache_cfg,
+        &album.tracks,
+        Some(&album),
+        "save_spotify_album",
+    )
+    .await
+    .map_err(super::internal)?;
+
+    spotify_save_response(summary)
+}
+
+fn spotify_save_response(
+    summary: SportifyImportSummary,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if summary.resolved_count == 0 {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "no_resolved_tracks",
+                "totalTracks": summary.total_tracks,
+                "resolvedCount": 0,
+                "unresolvedCount": summary.unresolved_count,
+            })),
+        ));
+    }
+
+    if summary.imported == 0 {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": "all_imports_failed",
+                "totalTracks": summary.total_tracks,
+                "resolvedCount": summary.resolved_count,
+                "importFailures": summary.import_failures,
+            })),
+        ));
+    }
+
+    Ok(Json(json!({
+        "imported": summary.imported,
+        "totalTracks": summary.total_tracks,
+        "resolvedCount": summary.resolved_count,
+        "unresolvedCount": summary.unresolved_count,
+        "importFailures": summary.import_failures,
+        "localIds": summary.local_ids,
+    })))
+}
+
+fn required_spotify_id(raw: &str) -> Result<&str, (StatusCode, Json<Value>)> {
+    let id = raw.trim();
+    if id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "spotify_id required" })),
+        ));
+    }
+    Ok(id)
+}
+
+fn importable_tidal_id(tidal_id: i64) -> Option<i64> {
+    (tidal_id > 0).then_some(tidal_id)
+}
+
+async fn import_cached_sportify_tracks(
+    db: &crate::db::Database,
+    cache_cfg: &crate::services::sportify::cache::SportifyCacheConfig,
+    tracks: &[crate::services::sportify::models::SportifyTrack],
+    album_fallback: Option<&crate::services::sportify::models::SportifyAlbum>,
+    log_context: &str,
+) -> anyhow::Result<SportifyImportSummary> {
+    use crate::services::sportify::cache as sp_cache;
+
+    let resolutions: Vec<(crate::services::sportify::models::SportifyTrack, i64)> =
+        db.with_conn(|conn| {
+            let mut out = Vec::new();
+            for t in tracks {
+                let Some(spotify_track_id) = t.id.as_deref() else {
+                    continue;
+                };
+                if let Some(hit) =
+                    sp_cache::get_tidal_resolution(conn, cache_cfg, spotify_track_id)?
+                {
+                    if let Some(tidal_id) = importable_tidal_id(hit.tidal_track_id) {
+                        out.push((t.clone(), tidal_id));
+                    }
+                }
+            }
+            Ok::<_, anyhow::Error>(out)
+        })?;
+
+    let total_tracks = tracks.len();
+    let resolved_count = resolutions.len();
+    let unresolved_count = total_tracks.saturating_sub(resolved_count);
+    let mut local_ids: Vec<i64> = Vec::with_capacity(resolved_count);
+    let mut import_failures: usize = 0;
+
+    for (sp_track, tidal_id) in &resolutions {
+        let metadata = sportify_track_import_metadata(sp_track, *tidal_id, album_fallback);
+        match tidal_import::import_track_from_metadata(db, metadata).await {
+            Ok(imported) => local_ids.push(imported.local_id),
+            Err(e) => {
+                tracing::warn!(
+                    "{}: import failed for tidal_id {}: {}",
+                    log_context,
+                    tidal_id,
+                    e
+                );
+                import_failures += 1;
+            }
+        }
+    }
+
+    Ok(SportifyImportSummary {
+        total_tracks,
+        resolved_count,
+        unresolved_count,
+        imported: local_ids.len(),
+        import_failures,
+        local_ids,
+    })
+}
+
+fn sportify_track_import_metadata(
+    sp_track: &crate::services::sportify::models::SportifyTrack,
+    tidal_id: i64,
+    album_fallback: Option<&crate::services::sportify::models::SportifyAlbum>,
+) -> tidal_import::ImportTrackMetadata {
+    let fallback_artist = album_fallback
+        .and_then(|album| album.artists.first())
+        .and_then(|artist| artist.name.clone());
+    let fallback_artwork = album_fallback.and_then(sportify_album_best_thumbnail);
+
+    tidal_import::ImportTrackMetadata {
+        tidal_id,
+        title: sp_track
+            .name
+            .clone()
+            .unwrap_or_else(|| "Spotify track".to_string()),
+        artist_name: sp_track
+            .primary_artist()
+            .map(str::to_string)
+            .or(fallback_artist)
+            .unwrap_or_else(|| "Unknown artist".to_string()),
+        artist_tidal_id: None,
+        artist_picture: None,
+        album_title: sp_track
+            .album
+            .as_ref()
+            .and_then(|album| album.name.clone())
+            .or_else(|| album_fallback.and_then(|album| album.name.clone())),
+        album_tidal_id: None,
+        album_artwork_url: sp_track.best_thumbnail().or(fallback_artwork),
+        duration_ms: sp_track.duration_ms,
+    }
+}
+
+fn sportify_album_best_thumbnail(
+    album: &crate::services::sportify::models::SportifyAlbum,
+) -> Option<String> {
+    album
+        .images
+        .iter()
+        .max_by_key(|image| image.width.unwrap_or(0))
+        .and_then(|image| image.url.clone())
 }

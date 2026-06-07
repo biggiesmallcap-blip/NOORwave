@@ -73,6 +73,10 @@ describe('daily chart shelf contract', () => {
 		expect(source).toContain('resolvedTracks');
 		expect(source).toContain('playTidalTrackNow');
 		expect(source).toContain('TIDAL ready');
+		expect(source).toContain("import { tidalSearchTrackToPlayable } from '$lib/utils/track';");
+		expect(source).toContain('const playable = tidalSearchTrackToPlayable(hit);');
+		expect(source).toContain('artwork_url: playable.artwork_url ?? fallbackArtwork');
+		expect(source).not.toContain('artist_tidal_id: hit.artist_id');
 		expect(muralSource).toContain('chart-mural-art');
 		expect(source).toContain('async function resolveVisibleEntries(entries');
 		expect(source).toContain('async function playEntry(entry');
@@ -88,6 +92,26 @@ describe('daily chart shelf contract', () => {
 		expect(source).toContain('border-color: var(--accent-line)');
 	});
 
+	test('keeps chart playlist card menus app-owned', () => {
+		expect(chartsPage).toContain('function openChartPlaylistContext(e: MouseEvent');
+		expect(chartsPage).toContain('e.preventDefault();');
+		expect(chartsPage).toContain('e.stopPropagation();');
+		expect(chartsPage).toContain('openContextMenu(e, chartMenu(chart.id, chart.title), chart.title);');
+		expect(chartsPage).toContain('oncontextmenu={(e) => openChartPlaylistContext(e, c)}');
+	});
+
+	test('invalidates pending chart work when the route is destroyed', () => {
+		expect(source).toContain("import { onDestroy, onMount } from 'svelte';");
+		expect(source).toContain('let destroyed = false;');
+		expect(source).toContain('onDestroy(() => {');
+		expect(source).toContain('destroyed = true;');
+		expect(source).toContain('requestToken += 1;');
+		expect(source).toContain('stopCarousel();');
+		expect(source).toContain('if (destroyed) return;');
+		expect(source).toContain('if (destroyed || token !== requestToken) return;');
+		expect(source).toContain('if (!destroyed) resolvingEntries = { ...resolvingEntries, [entryId]: false };');
+	});
+
 	test('keeps chart page titles neutral with shared headers and artwork images', () => {
 		expect(chartsPage).toContain('<PageHeader');
 		expect(chartsPage).toContain('variant="editorial"');
@@ -98,5 +122,10 @@ describe('daily chart shelf contract', () => {
 		expect(source).not.toContain('service-spotify');
 		expect(muralSource).toContain('.chart-mural-title');
 		expect(muralSource).toContain('color: var(--text-primary)');
+	});
+
+	test('loads playlist card covers through the metadata endpoint', () => {
+		expect(chartsPage).toContain('api.getSpotifyPlaylistMeta(c.id, signal)');
+		expect(chartsPage).not.toContain('api.getSpotifyPlaylist(c.id');
 	});
 });

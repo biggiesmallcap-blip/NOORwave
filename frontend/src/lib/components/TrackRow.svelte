@@ -88,6 +88,8 @@
 	}
 
 	function openArtistContextMenu(e: MouseEvent) {
+		e.preventDefault();
+		e.stopPropagation();
 		if (track.artist_id == null || track.artist_id <= 0 || !track.artist_name) return;
 		openContextMenu(
 			e,
@@ -97,6 +99,8 @@
 	}
 
 	function openAlbumContextMenu(e: MouseEvent) {
+		e.preventDefault();
+		e.stopPropagation();
 		if (track.album_id == null || !track.album_title) return;
 		openContextMenu(
 			e,
