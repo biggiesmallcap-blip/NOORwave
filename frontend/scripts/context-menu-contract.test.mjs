@@ -15,7 +15,7 @@ describe('context menu coverage contract', () => {
 		// The shelf renderer was extracted into TidalDiscoverShelves so /charts
 		// and /moods can reuse the exact same row/card markup + menus. The old
 		// DiscoverShelves wrapper now just handles fetch/cache and delegates
-		// rendering — the menu contract lives in the renderer.
+		// rendering: the menu contract lives in the renderer.
 		const source = readFileSync(
 			'src/lib/components/search/TidalDiscoverShelves.svelte',
 			'utf8',
@@ -127,8 +127,8 @@ describe('context menu coverage contract', () => {
 		expect(source).toContain('buildArtistMenu');
 		expect(source).toContain('similarArtistMenu');
 		expect(source).toContain('fallbackAlbumMenu');
-		expect(source).toContain('oncontextmenu={(e) => openContextMenu(e, similarArtistMenu');
-		expect(source).toContain('oncontextmenu={(e) => openContextMenu(e, fallbackAlbumMenu');
+		expect(source).toContain('openContextMenu(e, similarArtistMenu(similar), similar.name)');
+		expect(source).toContain('openContextMenu(e, fallbackAlbumMenu(album), album.title)');
 	});
 
 	test('library hero exposes artist navigation and shared artist menu hook', () => {
