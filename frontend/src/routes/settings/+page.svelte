@@ -81,6 +81,11 @@
 	import { isValidTidalRedirectUrl, readTidalRedirectFromClipboard } from '$lib/tidal/login';
 	import { cachedApi } from '$lib/cache/api_queries';
 	import { dataCache } from '$lib/cache/query';
+	import {
+		browserUpdateState,
+		loadingDesktopUpdateState,
+		unavailableDesktopUpdateState
+	} from '$lib/desktop/update_state';
 
 	const SERVER_UNREACHABLE_MESSAGE =
 		'NOOR cannot reach the local server on port 3334, so it cannot verify your current TIDAL session.';
@@ -261,11 +266,19 @@
 	async function loadDesktopAppInfo() {
 		desktopAppAvailable = isTauri();
 		if (!desktopAppAvailable) {
-			appVersion = APP_VERSION;
-			installModeLabel = 'Browser';
-			updateStatus = 'Available in the desktop app';
+			const browserState = browserUpdateState(APP_VERSION);
+			appVersion = browserState.appVersion;
+			installModeLabel = browserState.installModeLabel;
+			updateStatus = browserState.updateStatus;
+			updateAvailableVersion = browserState.updateAvailableVersion;
+			updateError = browserState.updateError;
 			return;
 		}
+
+		const loadingState = loadingDesktopUpdateState(appVersion);
+		installModeLabel = loadingState.installModeLabel;
+		updateStatus = loadingState.updateStatus;
+		updateError = loadingState.updateError;
 
 		try {
 			const [{ getVersion }, { invoke }] = await Promise.all([
@@ -278,8 +291,11 @@
 			updateAvailableVersion = pending;
 			updateStatus = pending ? `v${pending} available` : 'Up to date';
 		} catch (err) {
-			updateError = err instanceof Error ? err.message : String(err);
-			updateStatus = 'Update status unavailable';
+			const unavailableState = unavailableDesktopUpdateState(appVersion, err);
+			installModeLabel = unavailableState.installModeLabel;
+			updateStatus = unavailableState.updateStatus;
+			updateAvailableVersion = unavailableState.updateAvailableVersion;
+			updateError = unavailableState.updateError;
 		}
 	}
 
