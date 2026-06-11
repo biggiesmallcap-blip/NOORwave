@@ -179,8 +179,12 @@
   function resolveBackLink(params: URLSearchParams): { href: string; label: string } {
     const from = params.get('from');
     const mood = params.get('mood');
+    const q = params.get('q')?.trim();
     if (from === 'moods' && mood && SPOTIFY_MOODS_BY_SLUG.has(mood)) {
       return { href: `/moods/${encodeURIComponent(mood)}`, label: 'Back to mood' };
+    }
+    if (from === 'search' && q) {
+      return { href: `/search?q=${encodeURIComponent(q)}`, label: 'Back to search' };
     }
     return { href: '/search', label: 'Back to search' };
   }

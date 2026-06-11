@@ -35,6 +35,13 @@ describe('Spotify playlist back link contract', () => {
 		expect(source).toContain("label: 'Back to mood'");
 	});
 
+	test('returns to the originating search query when opened from search', () => {
+		expect(source).toContain("const q = params.get('q')?.trim();");
+		expect(source).toContain("from === 'search' && q");
+		expect(source).toContain("href: `/search?q=${encodeURIComponent(q)}`");
+		expect(source).toContain("label: 'Back to search'");
+	});
+
 	test('keeps search as the default direct-entry fallback', () => {
 		expect(source).toContain("return { href: '/search', label: 'Back to search' };");
 		expect(source).toContain('<a class="back-link" href={backLink.href}>&lt; {backLink.label}</a>');

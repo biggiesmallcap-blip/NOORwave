@@ -10,7 +10,7 @@ use crate::services::discovery_space as ds;
 use crate::services::learning as discovery_learning;
 use crate::services::tidal::{
     auth as tidal_auth,
-    client::{TidalClient, TidalSearchTrack, TidalSearchVideo, TidalTrack},
+    client::{TidalClient, TidalSearchCatalog, TidalSearchTrack, TidalSearchVideo, TidalTrack},
     import as tidal_import, mutations as tidal_mutations, stream as tidal_stream,
 };
 use crate::smart::discovery as discovery_engine;
@@ -62,6 +62,7 @@ const PLAYBACK_FINISH_DB_LOCK_RETRY_DELAY_SECS: u64 = 2;
 const PLAYBACK_ADVANCE_PENDING_SKIP_LIMIT: usize = 8;
 const PLAYBACK_PENDING_BUSY_RETRY_LIMIT: usize = 5;
 const PLAYBACK_PENDING_BUSY_RETRY_DELAY_MS: u64 = 200;
+const TIDAL_SEARCH_UPSTREAM_TIMEOUT_SECS: u64 = 8;
 
 static DROP_PREVIEW_ARM_ATTEMPTS: OnceLock<Mutex<HashMap<DropPreviewArmKey, Instant>>> =
     OnceLock::new();
@@ -9278,6 +9279,20 @@ struct TidalSearchVideoResp {
     r#type: String,
 }
 
+async fn search_tidal_catalog_with_timeout(
+    client: &TidalClient,
+    query: &str,
+    limit: i32,
+    offset: i32,
+) -> anyhow::Result<TidalSearchCatalog> {
+    tokio::time::timeout(
+        Duration::from_secs(TIDAL_SEARCH_UPSTREAM_TIMEOUT_SECS),
+        client.search_catalog_core(query, limit, offset),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("TIDAL search timed out"))?
+}
+
 async fn tidal_search(
     State(state): State<SharedState>,
     Query(params): Query<TidalSearchParams>,
@@ -9335,7 +9350,7 @@ async fn tidal_search(
     let results = if let Some(hit) = cached {
         hit
     } else {
-        let fetched = match client.search_catalog_core(query, limit, offset).await {
+        let fetched = match search_tidal_catalog_with_timeout(&client, query, limit, offset).await {
             Ok(r) => r,
             Err(e) if error_looks_like_auth(&e) => {
                 let refreshed = recover_tidal_session(&state, &http_client, &tokens)
@@ -9353,8 +9368,7 @@ async fn tidal_search(
                     refreshed.access_token.clone(),
                     refreshed.country_code.clone(),
                 );
-                retry_client
-                    .search_catalog_core(query, limit, offset)
+                search_tidal_catalog_with_timeout(&retry_client, query, limit, offset)
                     .await
                     .map_err(|e2| {
                         (

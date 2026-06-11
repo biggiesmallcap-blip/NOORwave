@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(here, '[id]', '+page.svelte'), 'utf8');
+const discographySource = readFileSync(join(here, '[id]', 'discography', '[section]', '+page.svelte'), 'utf8');
 
 function cssBlock(selector: string): string {
 	const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -91,6 +92,29 @@ describe('artist page layout contracts', () => {
 		expect(source).toContain('{@const playable = artistTrackPlayable(track)}');
 		expect(source).not.toContain('type TidalPlayable');
 		expect(source).not.toContain('function tidalDiscographyTrackToPlayable(t: TidalDiscographyTrack)');
+	});
+
+	test('orders top tracks through the TIDAL popularity list before local leftovers', () => {
+		expect(source).toContain("type PopularTrackItem =");
+		expect(source).toContain('for (const tidalTrack of tidalTopTracks)');
+		expect(source).toContain('const localTrack = byTidalId.get(tidalTrack.tidal_id);');
+		expect(source).toContain("ordered.push({ kind: 'local', track: localTrack });");
+		expect(source).toContain("ordered.push({ kind: 'tidal', track: tidalTrack });");
+		expect(source).toContain('ordered.push(...localRemainder.map((track) => ({ kind: \'local\' as const, track })))');
+		expect(source).not.toContain('if (a.is_favorite !== b.is_favorite) return a.is_favorite ? -1 : 1;');
+	});
+
+	test('links artist shelves to searchable see-all routes', () => {
+		expect(source).toContain('href={`/artists/${artistId}/discography/tracks`}');
+		expect(source).toContain('href={`/artists/${artistId}/discography/albums`}');
+		expect(source).toContain('href={`/artists/${artistId}/discography/singles`}');
+		expect(source).toContain('href={`/artists/${artistId}/discography/compilations`}');
+		expect(discographySource).toContain("type Section = 'tracks' | 'albums' | 'singles' | 'compilations';");
+		expect(discographySource).toContain('cachedApi.getArtistDiscography(id)');
+		expect(discographySource).toContain('type="search"');
+		expect(discographySource).toContain('<TrackRow');
+		expect(discographySource).toContain('<TidalTrackRow');
+		expect(discographySource).toContain('openContextMenu(event, albumMenu(album), album.title);');
 	});
 
 	test('keeps artist media rail context menus app-owned', () => {

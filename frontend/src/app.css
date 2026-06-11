@@ -7,6 +7,8 @@
 
 /* ── Dark theme (default) ─────────────────────────────── */
 :root {
+	color-scheme: dark;
+
 	--bg-base:       #0b0b0f;
 	--bg-elevated:   #111117;
 	--bg-raised:     #18181f;
@@ -90,24 +92,26 @@
 
 /* ── Light theme ──────────────────────────────────────── */
 [data-theme="light"] {
-	--bg-base:       #f5f4f2;
+	color-scheme: light;
+
+	--bg-base:       #f2f4f7;
 	--bg-elevated:   #ffffff;
-	--bg-raised:     #eeecea;
-	--bg-surface:    rgba(0, 0, 0, 0.028);
-	--bg-hover:      rgba(0, 0, 0, 0.046);
+	--bg-raised:     #e4e8ef;
+	--bg-surface:    rgba(22, 29, 43, 0.07);
+	--bg-hover:      rgba(22, 29, 43, 0.12);
 
-	--surface-0:     #f5f4f2;
-	--surface-1:     rgba(0, 0, 0, 0.04);
-	--surface-2:     rgba(0, 0, 0, 0.08);
+	--surface-0:     #f2f4f7;
+	--surface-1:     rgba(22, 29, 43, 0.08);
+	--surface-2:     rgba(22, 29, 43, 0.14);
 
-	--panel-bg:      rgba(255, 255, 255, 0.78);
-	--panel-border:  rgba(0, 0, 0, 0.09);
-	--panel-shadow:  0 4px 24px rgba(0, 0, 0, 0.08);
+	--panel-bg:      rgba(255, 255, 255, 0.92);
+	--panel-border:  rgba(22, 29, 43, 0.16);
+	--panel-shadow:  0 8px 28px rgba(22, 29, 43, 0.13);
 
-	--text-primary:  rgba(10, 10, 14, 0.92);
-	--text-secondary:rgba(10, 10, 14, 0.56);
-	--text-tertiary: rgba(10, 10, 14, 0.38);
-	--text-muted:    rgba(10, 10, 14, 0.22);
+	--text-primary:  rgba(9, 13, 22, 0.96);
+	--text-secondary:rgba(9, 13, 22, 0.72);
+	--text-tertiary: rgba(9, 13, 22, 0.54);
+	--text-muted:    rgba(9, 13, 22, 0.42);
 
 	--accent:        #5558e0;
 	--accent-soft:   rgba(85, 88, 224, 0.10);
@@ -115,9 +119,9 @@
 	--accent-strong: #3a3dc8;
 	--accent-glow:   rgba(85, 88, 224, 0.14);
 
-	--border-subtle: rgba(0, 0, 0, 0.08);
-	--border-muted:  rgba(0, 0, 0, 0.08);
-	--border-strong: rgba(0, 0, 0, 0.16);
+	--border-subtle: rgba(22, 29, 43, 0.12);
+	--border-muted:  rgba(22, 29, 43, 0.16);
+	--border-strong: rgba(22, 29, 43, 0.26);
 
 	--state-success:  #2d9e6a;
 	--state-warning:  #a07a20;
@@ -131,27 +135,27 @@
 	/* --service-* tokens cascade from :root — they are brand colors, not theme
 	 * variables, so they stay stable across themes. */
 
-	--input-bg:      rgba(0, 0, 0, 0.03);
-	--input-border:  rgba(0, 0, 0, 0.13);
-	--input-focus:   rgba(0, 0, 0, 0.05);
+	--input-bg:      rgba(255, 255, 255, 0.88);
+	--input-border:  rgba(22, 29, 43, 0.22);
+	--input-focus:   rgba(85, 88, 224, 0.10);
 
 	--scrollbar-thumb:       rgba(0, 0, 0, 0.12);
 	--scrollbar-thumb-hover: rgba(0, 0, 0, 0.22);
 
-	--right-panel-bg:   rgba(0, 0, 0, 0.015);
-	--right-panel-sep:  rgba(0, 0, 0, 0.07);
+	--right-panel-bg:   rgba(255, 255, 255, 0.64);
+	--right-panel-sep:  rgba(22, 29, 43, 0.13);
 	--sidebar-bg:       transparent;
 
 	/* Genre Atlas semantic tokens */
-	--atlas-bg: linear-gradient(170deg, #f7f9ff 0%, #f2f4fb 50%, #ebedf8 100%);
-	--atlas-haze-a: rgba(85, 88, 224, 0.08);
-	--atlas-haze-b: rgba(125, 104, 217, 0.06);
-	--atlas-haze-c: rgba(44, 146, 126, 0.06);
-	--instrument-surface: rgba(255, 255, 255, 0.72);
-	--instrument-surface-strong: rgba(255, 255, 255, 0.84);
-	--instrument-border: rgba(37, 45, 80, 0.14);
-	--instrument-edge: rgba(255, 255, 255, 0.8);
-	--signal-text: rgba(10, 14, 28, 0.62);
+	--atlas-bg: linear-gradient(170deg, #f8fafc 0%, #eef3fb 52%, #dde5f1 100%);
+	--atlas-haze-a: rgba(85, 88, 224, 0.10);
+	--atlas-haze-b: rgba(125, 104, 217, 0.08);
+	--atlas-haze-c: rgba(44, 146, 126, 0.08);
+	--instrument-surface: rgba(255, 255, 255, 0.86);
+	--instrument-surface-strong: rgba(248, 250, 252, 0.96);
+	--instrument-border: rgba(37, 45, 80, 0.20);
+	--instrument-edge: rgba(255, 255, 255, 0.94);
+	--signal-text: rgba(9, 13, 22, 0.70);
 	--family-accent: var(--accent);
 	--heat-intensity: 0.52;
 }

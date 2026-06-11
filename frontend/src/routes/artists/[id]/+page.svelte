@@ -252,32 +252,60 @@
 				: bioText.slice(0, BIO_TRUNCATE).trimEnd() + '…'
 	);
 
-	let showAllPopular = $state(false);
-	// Library tracks ordered by play_count; float favorites within that.
-	let libraryPopular = $derived(
-		[...tracks].sort((a, b) => {
-			if (a.is_favorite !== b.is_favorite) return a.is_favorite ? -1 : 1;
-			return b.play_count - a.play_count;
-		})
+	type PopularTrackItem =
+		| { kind: 'local'; track: Track }
+		| { kind: 'tidal'; track: TidalDiscographyTrack };
+
+	function localPopularityScore(track: Track): number {
+		const spotifyPlaycount = track.isrc ? playcountByIsrc.get(track.isrc) : undefined;
+		return spotifyPlaycount ?? track.play_count ?? 0;
+	}
+
+	function popularItemKey(item: PopularTrackItem): string {
+		return item.kind === 'local' ? `local-${item.track.id}` : `tidal-${item.track.tidal_id}`;
+	}
+
+	// "Top tracks" follows TIDAL's popularity-ranked top-tracks order when
+	// available, replacing TIDAL rows with local rows where the user owns them.
+	// Local-only leftovers are appended by known playcount as a fallback.
+	let popularItems = $derived.by<PopularTrackItem[]>(() => {
+		const byTidalId = new Map<number, Track>();
+		for (const track of tracks) {
+			if (track.tidal_id != null && track.tidal_id > 0) byTidalId.set(track.tidal_id, track);
+		}
+
+		const seenLocalIds = new Set<number>();
+		const seenTidalIds = new Set<number>();
+		const ordered: PopularTrackItem[] = [];
+
+		for (const tidalTrack of tidalTopTracks) {
+			if (seenTidalIds.has(tidalTrack.tidal_id)) continue;
+			seenTidalIds.add(tidalTrack.tidal_id);
+			const localTrack = byTidalId.get(tidalTrack.tidal_id);
+			if (localTrack) {
+				seenLocalIds.add(localTrack.id);
+				ordered.push({ kind: 'local', track: localTrack });
+			} else {
+				ordered.push({ kind: 'tidal', track: tidalTrack });
+			}
+		}
+
+		const localRemainder = tracks
+			.filter((track) => !seenLocalIds.has(track.id))
+			.sort((a, b) => localPopularityScore(b) - localPopularityScore(a));
+
+		if (ordered.length === 0) {
+			return localRemainder.map((track) => ({ kind: 'local', track }));
+		}
+
+		ordered.push(...localRemainder.map((track) => ({ kind: 'local' as const, track })));
+		return ordered;
+	});
+	let popularMaxPlays = $derived(
+		Math.max(1, ...popularItems.map((item) => item.kind === 'local' ? localPopularityScore(item.track) : 0))
 	);
-	// TIDAL top tracks the user does NOT already own. These render under the
-	// library section in TIDAL's relevance order so the surface always shows
-	// the artist's catalog even when the user has zero library matches.
-	let tidalOnlyTopTracks = $derived(
-		tidalTopTracks.filter(
-			(tt) => !tracks.some((lt) => lt.tidal_id != null && lt.tidal_id === tt.tidal_id),
-		),
-	);
-	let popularMaxPlays = $derived(libraryPopular[0]?.play_count ?? 1);
-	// "Top tracks" = library + TIDAL-only, capped at 10 unless expanded.
-	let popularDisplayCount = $derived(showAllPopular ? Infinity : 10);
-	let visibleLibraryPopular = $derived(libraryPopular.slice(0, popularDisplayCount));
-	let visibleTidalPopular = $derived(
-		showAllPopular
-			? tidalOnlyTopTracks
-			: tidalOnlyTopTracks.slice(0, Math.max(0, popularDisplayCount - libraryPopular.length))
-	);
-	let totalPopularCandidates = $derived(libraryPopular.length + tidalOnlyTopTracks.length);
+	let visiblePopularItems = $derived(popularItems.slice(0, 10));
+	let totalPopularCandidates = $derived(popularItems.length);
 
 	function artistTrackPlayable(track: TidalDiscographyTrack) {
 		return tidalDiscographyTrackToPlayable(track, { artistTidalId: artist?.tidal_id ?? null });
@@ -479,14 +507,11 @@
 		return title.toLowerCase().includes(filterQuery.toLowerCase());
 	}
 
-	const filteredLibraryPopular = $derived(
-		visibleLibraryPopular.filter((t) => matchesFilter(t.title))
-	);
-	const filteredTidalPopular = $derived(
-		visibleTidalPopular.filter((t) => matchesFilter(t.title))
+	const filteredPopularItems = $derived(
+		visiblePopularItems.filter((item) => matchesFilter(item.track.title))
 	);
 	const hasAnyPopular = $derived(
-		filteredLibraryPopular.length > 0 || filteredTidalPopular.length > 0
+		filteredPopularItems.length > 0
 	);
 
 	const filteredTidalFullAlbums = $derived(
@@ -736,12 +761,14 @@
 			<section class="section">
 				<h2 class="section-title">Top tracks</h2>
 				<ol class="popular-list">
-					{#each filteredLibraryPopular as track, idx (track.id)}
+					{#each filteredPopularItems as item, idx (popularItemKey(item))}
+						{#if item.kind === 'local'}
+							{@const track = item.track}
 						{@const streamCount = track.isrc ? playcountByIsrc.get(track.isrc) : undefined}
 						<div class="popular-row-wrap">
 							<div
 								class="pop-bar"
-								style="width: {Math.max(4, ((track.play_count ?? 0) / popularMaxPlays) * 100)}%"
+								style="width: {Math.max(4, (localPopularityScore(track) / popularMaxPlays) * 100)}%"
 							></div>
 							<TrackRow
 								{track}
@@ -756,8 +783,8 @@
 								menuOptions={{ hideArtistActions: true }}
 							/>
 						</div>
-					{/each}
-					{#each filteredTidalPopular as track, idx (`tidal-${track.tidal_id}`)}
+						{:else}
+							{@const track = item.track}
 						{@const playable = artistTrackPlayable(track)}
 						{@const playable_ok = canPlayTrack(playable)}
 						{@const trackArt = artworkCandidate(track.artwork_url, 320)}
@@ -783,7 +810,7 @@
 								(e.key === 'Enter' || e.key === ' ')
 								&& (e.preventDefault(), playable_ok && void playTidalTrackNow(playable))}
 						>
-							<span class="tidal-row-num">{filteredLibraryPopular.length + idx + 1}</span>
+							<span class="tidal-row-num">{idx + 1}</span>
 							{#if trackArt}
 								<img
 									class="tidal-row-art"
@@ -802,16 +829,13 @@
 							</span>
 							<span class="tidal-pill" aria-label="From TIDAL">TIDAL</span>
 						</li>
+						{/if}
 					{/each}
 				</ol>
-				{#if !showAllPopular && totalPopularCandidates > 10}
-					<button class="show-all-btn" onclick={() => (showAllPopular = true)}>
-						Show all {totalPopularCandidates}
-					</button>
-				{:else if showAllPopular && totalPopularCandidates > 10}
-					<button class="show-all-btn" onclick={() => (showAllPopular = false)}>
-						Show fewer
-					</button>
+				{#if totalPopularCandidates > 10}
+					<a class="show-all-btn" href={`/artists/${artistId}/discography/tracks`}>
+						See all {totalPopularCandidates}
+					</a>
 				{/if}
 			</section>
 		{/if}
@@ -938,6 +962,7 @@
 					<div class="shelf-head">
 						<h2 class="section-title">Albums</h2>
 						<span class="shelf-count">{filteredTidalFullAlbums.length}</span>
+						<a class="shelf-link" href={`/artists/${artistId}/discography/albums`}>See all</a>
 					</div>
 					<MediaRail
 						items={filteredTidalFullAlbums}
@@ -955,6 +980,7 @@
 					<div class="shelf-head">
 						<h2 class="section-title">Singles and EPs</h2>
 						<span class="shelf-count">{filteredTidalSinglesEPs.length}</span>
+						<a class="shelf-link" href={`/artists/${artistId}/discography/singles`}>See all</a>
 					</div>
 					<MediaRail
 						items={filteredTidalSinglesEPs}
@@ -986,6 +1012,7 @@
 					<div class="shelf-head">
 						<h2 class="section-title">Compilations</h2>
 						<span class="shelf-count">{filteredTidalCompilations.length}</span>
+						<a class="shelf-link" href={`/artists/${artistId}/discography/compilations`}>See all</a>
 					</div>
 					<MediaRail
 						items={filteredTidalCompilations}
@@ -1570,6 +1597,18 @@
 	.shelf-count {
 		color: var(--text-tertiary);
 		font-size: var(--font-size-sm);
+	}
+
+	.shelf-link {
+		margin-left: auto;
+		color: var(--text-secondary);
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+		text-decoration: none;
+	}
+
+	.shelf-link:hover {
+		color: var(--text-primary);
 	}
 
 	.popular-list {

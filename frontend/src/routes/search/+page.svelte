@@ -34,6 +34,7 @@
   const ARTIST_ARTWORK_DELAY_MS = 220
   const ARTIST_ARTWORK_BATCH_SIZE = 4
   const DISCOVERY_PANEL_DELAY_MS = 320
+  const PRIMARY_TIDAL_SEARCH_TIMEOUT_MS = 8000
   const SECONDARY_PROVIDER_TIMEOUT_MS = 2500
   const ALL_VIEW_ARTIST_LIMIT = 8
   const ALL_VIEW_ALBUM_LIMIT = 8
@@ -160,6 +161,14 @@
   const hasFilters = $derived(Object.keys(parsedQuery.filters).length > 0)
 
   onMount(async () => {
+    if (typeof window !== 'undefined') {
+      const urlQuery = new URLSearchParams(window.location.search).get('q')?.trim()
+      if (urlQuery) {
+        query = urlQuery
+        onInput()
+      }
+    }
+
     const [genresRes, listensRes, playlistsRes] = await Promise.allSettled([
       cachedApi.getGenres(),
       cachedApi.getRecentListens(20),
@@ -210,6 +219,12 @@
     loadingSpotifyTracks = false
     loadingSpotifyAlbums = false
     secondarySpotifyQueued = false
+  }
+
+  function resetSearchActivity() {
+    loading = false
+    loadingMore = false
+    resetProviderLoading()
   }
 
   function clearSecondarySpotifyTimer() {
@@ -301,7 +316,7 @@
       // "play <query>" → fire immediately and clear input
       if (intent.intent.type === 'play') {
         loading = false
-        const r = await api.searchTidal(intent.free_text, 20, signal).catch(() => null)
+        const r = await api.searchTidal(intent.free_text, 20, signal, 0, PRIMARY_TIDAL_SEARCH_TIMEOUT_MS).catch(() => null)
         const first = r?.tracks[0]
         if (first) void playTidalTrackNow(toPlayable(first))
         query = ''
@@ -313,7 +328,7 @@
       // "similar to <query>" → start radio from first result
       if (intent.intent.type === 'radio') {
         loading = false
-        const r = await api.searchTidal(intent.free_text, 20, signal).catch(() => null)
+        const r = await api.searchTidal(intent.free_text, 20, signal, 0, PRIMARY_TIDAL_SEARCH_TIMEOUT_MS).catch(() => null)
         const first = r?.tracks[0]
         if (first) void startTidalSongRadio(toPlayable(first))
         query = ''
@@ -367,7 +382,7 @@
           const localPromise = cachedApi.search(q, INITIAL_SEARCH_PAGE_SIZE, signal)
           const tracksPromise = cached
             ? Promise.resolve(cached)
-            : api.searchTidal(q, INITIAL_SEARCH_PAGE_SIZE, signal, 0)
+            : api.searchTidal(q, INITIAL_SEARCH_PAGE_SIZE, signal, 0, PRIMARY_TIDAL_SEARCH_TIMEOUT_MS)
           let tidalPlaylistPromise: Promise<{ playlists: TidalSearchPlaylist[] }> | null = null
           let spotifyPlaylistPromise: Promise<SpotifyPlaylistSearchItem[]> | null = null
           let spotifyTrackSearchPromise: Promise<SpotifyTrackSearchItem[]> | null = null
@@ -550,7 +565,13 @@
     loadingMore = true
     try {
       if (needsTidal && results) {
-        const next = await api.searchTidal(pageQuery, LOAD_MORE_PAGE_SIZE, undefined, tidalOffset)
+        const next = await api.searchTidal(
+          pageQuery,
+          LOAD_MORE_PAGE_SIZE,
+          undefined,
+          tidalOffset,
+          PRIMARY_TIDAL_SEARCH_TIMEOUT_MS,
+        )
         if (!isCurrentLoadMore()) return
         tidalOffset += LOAD_MORE_PAGE_SIZE
         // De-dupe by id - Tidal occasionally returns overlapping pages.
@@ -981,8 +1002,14 @@
 
   function spotifyPlaylistMenuItems(playlist: SpotifyPlaylistSearchItem): MenuItem[] {
     return [
-      { label: 'Open', icon: '↗', onSelect: () => void goto(`/spotify-playlist/${playlist.spotifyId}`) },
+      { label: 'Open', icon: '↗', onSelect: () => void goto(spotifyPlaylistHref(playlist.spotifyId)) },
     ]
+  }
+
+  function spotifyPlaylistHref(spotifyId: string): string {
+    const params = new URLSearchParams({ from: 'search' })
+    if (activeQueryText) params.set('q', activeQueryText)
+    return `/spotify-playlist/${encodeURIComponent(spotifyId)}?${params.toString()}`
   }
 
   function trackContextMenu(track: TidalSearchTrack): MenuItem[] {
@@ -1208,6 +1235,7 @@
     invalidateSearchSideLoads()
     clearTimeout(debounceTimer)
     clearSecondarySpotifyTimer()
+    resetSearchActivity()
   })
 
   let pendingRestoreScroll: number | null = null
@@ -1636,7 +1664,7 @@
       </section>
     {/if}
 
-    {#if showPlaylists && (visiblePlaylists.local.length > 0 || visiblePlaylists.tidal.length > 0 || visiblePlaylists.spotify.length > 0)}
+    {#if showPlaylists && (playlistRailPending || visiblePlaylists.local.length > 0 || visiblePlaylists.tidal.length > 0 || visiblePlaylists.spotify.length > 0)}
       <section class="results-section">
         <h3 class="section-label">Playlists</h3>
         <div
@@ -1644,6 +1672,15 @@
           class:section-grid-albums={filterMode === 'playlists'}
           use:wheelToHorizontal
         >
+          {#if playlistRailPending && visiblePlaylists.local.length === 0 && visiblePlaylists.tidal.length === 0 && visiblePlaylists.spotify.length === 0}
+            {#each Array(4) as _, i (i)}
+              <div class="album-card playlist-loading-card" aria-hidden="true">
+                <div class="album-art playlist-loading-art"></div>
+                <p class="album-title playlist-loading-line"></p>
+                <p class="album-artist playlist-loading-line short"></p>
+              </div>
+            {/each}
+          {/if}
 
           {#each visiblePlaylists.local as playlist (playlist.id)}
             <a
@@ -1702,7 +1739,7 @@
           {#each visiblePlaylists.spotify as playlist (playlist.spotifyId)}
             <a
               class="album-card spotify-card"
-              href="/spotify-playlist/{playlist.spotifyId}"
+              href={spotifyPlaylistHref(playlist.spotifyId)}
               oncontextmenu={(e) => openSearchContextMenu(e, spotifyPlaylistMenuItems(playlist), playlist.title ?? 'Spotify playlist')}
             >
               <div class="art-wrap">
@@ -2509,6 +2546,24 @@
     color: rgba(255, 255, 255, 0.5);
   }
   .album-card:hover .album-art { opacity: 0.85; }
+  .playlist-loading-card {
+    pointer-events: none;
+  }
+  .playlist-loading-art,
+  .playlist-loading-line {
+    background: linear-gradient(90deg, var(--bg-raised), var(--bg-hover), var(--bg-raised));
+    background-size: 220% 100%;
+    animation: playlist-loading-pulse 1200ms ease-in-out infinite;
+  }
+  .playlist-loading-line {
+    display: block;
+    height: 12px;
+    border-radius: 999px;
+    margin: 8px 0 0;
+  }
+  .playlist-loading-line.short {
+    width: 62%;
+  }
   .album-title {
     font-size: var(--font-size-xs);
     color: var(--text-primary);
@@ -2810,4 +2865,8 @@
   .spotify-card :global(.art.fallback) { display: flex; align-items: center; justify-content: center; color: var(--text-muted); font-size: var(--font-size-3xl); }
   .spotify-card .card-title { font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .spotify-card .card-sub { font-size: var(--font-size-xs); color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  @keyframes playlist-loading-pulse {
+    0% { background-position: 100% 0; }
+    100% { background-position: -100% 0; }
+  }
 </style>

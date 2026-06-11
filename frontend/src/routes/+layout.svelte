@@ -2246,6 +2246,11 @@
 		transform-origin: center;
 	}
 
+	:global([data-theme="light"]) .wallpaper-layer {
+		opacity: 0.22;
+		filter: blur(var(--wallpaper-blur, 10px)) saturate(0.78);
+	}
+
 	.remote-shell {
 		position: relative;
 		z-index: 1;
@@ -2312,6 +2317,22 @@
 		background: rgba(9, 9, 14, 0.44);
 		backdrop-filter: blur(var(--wallpaper-blur, 10px)) saturate(1.1);
 		-webkit-backdrop-filter: blur(var(--wallpaper-blur, 10px)) saturate(1.1);
+	}
+
+	:global([data-theme="light"]) .app-shell.has-wallpaper .sidebar {
+		background:
+			linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(248, 250, 252, 0.82)),
+			var(--sidebar-bg);
+	}
+
+	:global([data-theme="light"]) .app-shell.has-wallpaper .workspace {
+		background: rgba(248, 250, 252, 0.82);
+	}
+
+	:global([data-theme="light"]) .app-shell.has-wallpaper .now-playing-panel {
+		background:
+			linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(248, 250, 252, 0.84)),
+			var(--right-panel-bg);
 	}
 
 	.sidebar {
