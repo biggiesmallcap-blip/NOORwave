@@ -5630,7 +5630,9 @@ async fn clear_ephemeral_playback_markers(state: &SharedState, clear_mix_queue: 
     state_guard.ephemeral_tidal_track = None;
     state_guard.prepared_ephemeral_tidal_next = None;
     if clear_mix_queue {
-        state_guard.pending_tidal_mix_queue.lock().unwrap().clear();
+        let _ = state_guard.db.with_conn(|conn| {
+            Ok::<_, anyhow::Error>(queue::delete_all_ephemeral_tidal_rows(conn)?)
+        });
     }
 }
 
@@ -5639,11 +5641,11 @@ pub(crate) fn active_ephemeral_tidal_mix_dj_pair(
 ) -> Option<crate::playback::dj_lookahead::DjLookaheadPair> {
     let current = state.ephemeral_tidal_track.as_ref()?;
     let pending = state
-        .pending_tidal_mix_queue
-        .lock()
-        .unwrap()
-        .iter()
-        .cloned()
+        .db
+        .with_conn(queue::peek_next_ephemeral_tidal_track)
+        .ok()
+        .flatten()
+        .into_iter()
         .collect::<Vec<_>>();
     crate::playback::dj_lookahead::build_ephemeral_tidal_mix_pair(current, pending.as_slice())
 }
@@ -5663,7 +5665,10 @@ pub(crate) fn active_ephemeral_tidal_mix_dj_labels(
             (current.title.clone(), current.artist_name.clone()),
         ));
     }
-    let pending = state.pending_tidal_mix_queue.lock().unwrap();
+    let pending = state
+        .db
+        .with_conn(queue::peek_ephemeral_tidal_tracks)
+        .unwrap_or_default();
     for track in pending.iter() {
         let media_ref = crate::playback::dj_lookahead::DjMediaRef::TidalTrack {
             tidal_id: track.tidal_track_id,
@@ -5716,8 +5721,9 @@ async fn overlay_snapshot_with_external_track_and_position(
         snapshot.state.position_ms = pos;
     }
     // Ephemeral Tidal track takes priority: it represents a track playing right
-    // now that has no DB record.
-    let has_ephemeral_tidal_track = state_guard.ephemeral_tidal_track.is_some();
+    // now that has no DB record. The rest of the mix is already present in
+    // snapshot.queue as real ephemeral TIDAL rows (loaded by load_queue), so no
+    // overlay painting is needed - the queue you see is the queue that is.
     if let Some(ephemeral) = &state_guard.ephemeral_tidal_track {
         snapshot.state.current_track = Some(ephemeral.clone());
     } else if snapshot.state.current_track.is_none()
@@ -5725,75 +5731,7 @@ async fn overlay_snapshot_with_external_track_and_position(
     {
         snapshot.state.current_track = Some(track.clone());
     }
-    // Surface the pending TIDAL mix queue (auto-advance items behind the
-    // currently-playing ephemeral track) into the visible queue so UP NEXT
-    // shows the rest of the mix instead of "empty".
-    let db = state_guard.db.clone();
-    let pending = state_guard
-        .pending_tidal_mix_queue
-        .lock()
-        .unwrap()
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>();
     drop(state_guard);
-    if !pending.is_empty() {
-        if has_ephemeral_tidal_track {
-            snapshot.queue.clear();
-        }
-        let tidal_ids: Vec<i64> = pending.iter().map(|p| p.tidal_track_id).collect();
-        let library_states = db
-            .with_conn(|conn| queries::get_tidal_track_library_states(conn, &tidal_ids))
-            .unwrap_or_default();
-        let start_position = snapshot
-            .queue
-            .iter()
-            .map(|q| q.position)
-            .max()
-            .unwrap_or(-1)
-            + 1;
-        for (offset, p) in pending.into_iter().enumerate() {
-            let library_state = library_states.get(&p.tidal_track_id).copied();
-            let track = crate::db::models::Track {
-                id: library_state
-                    .map(|state| state.local_id)
-                    .unwrap_or(-p.tidal_track_id),
-                title: p.title,
-                artist_id: 0,
-                artist_name: p.artist_name,
-                album_id: None,
-                album_title: p.album_title,
-                disc_number: None,
-                track_number: None,
-                duration_ms: p.duration_ms,
-                isrc: None,
-                tidal_id: Some(p.tidal_track_id),
-                ytmusic_id: None,
-                soundcloud_id: None,
-                best_quality: Some("LOSSLESS".to_string()),
-                best_source: Some("tidal".to_string()),
-                fidelity_score: 0,
-                is_favorite: library_state
-                    .map(|state| state.is_favorite)
-                    .unwrap_or(false),
-                play_count: 0,
-                last_played_at: None,
-                date_added: None,
-                source: "tidal_ephemeral".to_string(),
-                artwork_url: p.artwork_url,
-            };
-            // Queue ids stay negative for in-memory mix rows. Track ids are
-            // local ids when the TIDAL id is already in the library.
-            snapshot.queue.push(crate::db::models::QueueItem {
-                id: -(offset as i64 + 1),
-                track,
-                position: start_position + offset as i32,
-                source: "tidal_mix".to_string(),
-                reason: None,
-                is_pending: false,
-            });
-        }
-    }
     snapshot
 }
 
@@ -7391,10 +7329,10 @@ async fn advance_ephemeral_next_if_needed(
     let next = {
         let state_guard = state.read().await;
         state_guard
-            .pending_tidal_mix_queue
-            .lock()
-            .unwrap()
-            .pop_front()
+            .db
+            .with_conn(queue::pop_next_ephemeral_tidal_track)
+            .ok()
+            .flatten()
     };
 
     if let Some(next) = next {
@@ -7875,23 +7813,8 @@ async fn set_playback_shuffle(
         .with_conn(|conn| player::set_shuffle_mode(conn, mode))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // The pending TIDAL mix queue lives in-memory outside the DB queue, so
-    // `set_shuffle_mode` above never sees it. Reorder it here so flipping shuffle
-    // on during a TIDAL mix actually changes what plays next. Pending entries
-    // carry no genre/artist_id metadata, so genre/weighted modes degrade to a
-    // plain Fisher-Yates - same shape as `true` shuffle.
-    if let Some(debug) = update.debug.as_ref() {
-        let mut q = state_guard.pending_tidal_mix_queue.lock().unwrap();
-        if q.len() > 1 {
-            use rand::seq::SliceRandom;
-            let mut rng = crate::playback::shuffle::seeded_rng(
-                debug.seed,
-                mode.as_str(),
-                "pending_tidal_mix",
-            );
-            q.make_contiguous().shuffle(&mut rng);
-        }
-    }
+    // Ephemeral TIDAL mix rows are real queue rows now, so `set_shuffle_mode`
+    // above already reordered them along with the rest of the queue.
 
     let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
     let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
@@ -8616,7 +8539,7 @@ async fn clear_queue_route(State(state): State<SharedState>) -> Result<Json<Valu
                         queue::clear_queue(conn)?;
                     }
                 }
-                state_guard.pending_tidal_mix_queue.lock().unwrap().clear();
+                queue::delete_all_ephemeral_tidal_rows(conn)?;
                 // Return the full PlaybackSnapshot ({state, queue}) so the UI can
                 // refresh both at once - additive over the prior `{queue}` shape:
                 // existing consumers keep reading `queue`, new ones read
@@ -8689,20 +8612,6 @@ fn visible_track_playlist_source(
                 ..Default::default()
             })
         })
-}
-
-fn pending_tidal_playlist_source(
-    pending: crate::PendingEphemeralTidalTrack,
-) -> PlaylistFromQueueSource {
-    PlaylistFromQueueSource::Tidal(tidal_import::ImportTrackMetadata {
-        tidal_id: pending.tidal_track_id,
-        title: non_empty_or_default(Some(pending.title), "Unknown title"),
-        artist_name: non_empty_or_default(pending.artist_name, "Unknown artist"),
-        album_title: optional_non_empty(pending.album_title),
-        album_artwork_url: pending.artwork_url,
-        duration_ms: pending.duration_ms,
-        ..Default::default()
-    })
 }
 
 fn load_persisted_queue_playlist_sources(
@@ -8783,27 +8692,17 @@ async fn create_playlist_from_queue(
         ));
     }
     let include_tidal_only = payload.include_tidal_only.unwrap_or(true);
-    let (db, current_source, pending_tidal_sources) = {
+    let (db, current_source) = {
         let state = state.read().await;
+        // The currently-playing ephemeral track isn't a queue row; the rest of
+        // the mix is, and load_persisted_queue_playlist_sources surfaces those
+        // ephemeral rows via their tidal_id_hint below.
         let current = state
             .ephemeral_tidal_track
             .as_ref()
             .or(state.external_playback_track.as_ref())
             .and_then(|track| visible_track_playlist_source(track, include_tidal_only));
-        let pending = if include_tidal_only {
-            state
-                .pending_tidal_mix_queue
-                .lock()
-                .unwrap()
-                .iter()
-                .cloned()
-                .filter(|pending| pending.tidal_track_id > 0)
-                .map(pending_tidal_playlist_source)
-                .collect()
-        } else {
-            Vec::new()
-        };
-        (state.db.clone(), current, pending)
+        (state.db.clone(), current)
     };
 
     let persisted_sources = db
@@ -8817,7 +8716,6 @@ async fn create_playlist_from_queue(
     let mut sources = Vec::new();
     sources.extend(current_source);
     sources.extend(persisted_sources);
-    sources.extend(pending_tidal_sources);
 
     let track_ids = resolve_playlist_source_ids(&db, sources)
         .await
@@ -10167,22 +10065,19 @@ async fn play_tidal_ephemeral(
     State(state): State<SharedState>,
     Json(body): Json<PlayTidalRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    // If the picked track is sitting in the pending mix queue, jump to it.
-    // drop entries before it (and the entry itself, which we're about to
-    // start) and leave the rest queued. Only fully clear when the user
-    // chose something outside the current mix.
+    // If the picked track is an ephemeral mix row, jump to it: drop rows before
+    // it (and the row itself, which we're about to start) and leave the rest
+    // queued. When it isn't part of the mix, clear the whole continuation.
     {
         let s = state.read().await;
-        let mut q = s.pending_tidal_mix_queue.lock().unwrap();
-        match q
-            .iter()
-            .position(|p| p.tidal_track_id == body.tidal_track_id)
-        {
-            Some(idx) => {
-                q.drain(..=idx);
+        let tidal_id = body.tidal_track_id;
+        let _ = s.db.with_conn(|conn| {
+            let trimmed = queue::trim_ephemeral_tidal_rows_through_tidal_id(conn, tidal_id)?;
+            if !trimmed {
+                queue::delete_all_ephemeral_tidal_rows(conn)?;
             }
-            None => q.clear(),
-        }
+            Ok::<_, anyhow::Error>(())
+        });
     }
     let track = crate::PendingEphemeralTidalTrack {
         tidal_track_id: body.tidal_track_id,
@@ -10210,6 +10105,21 @@ struct PlayTidalMixRequest {
     tracks: Vec<PlayTidalRequest>,
     #[serde(default)]
     shuffle_mode: Option<String>,
+    /// Collection kind for the queue rows: tidal_mix (default), tidal_album, or
+    /// tidal_playlist. Drives the queue source label; behavior is identical.
+    #[serde(default)]
+    source: Option<String>,
+}
+
+/// Delete the persisted ephemeral TIDAL continuation rows. Used on stop and when
+/// a failed mix start needs to leave no orphaned rows.
+async fn clear_ephemeral_tidal_continuation(state: &SharedState) {
+    let s = state.read().await;
+    if let Err(error) =
+        s.db.with_conn(|conn| Ok::<_, anyhow::Error>(queue::delete_all_ephemeral_tidal_rows(conn)?))
+    {
+        warn!(?error, "Failed to clear ephemeral TIDAL continuation rows");
+    }
 }
 
 fn shuffle_tidal_mix_tracks(
@@ -10242,6 +10152,12 @@ async fn clear_persisted_queue_for_tidal_mix(
         .db
         .with_conn(|conn| {
             queue::clear_queue(conn)?;
+            // Drop any dangling play-head anchor so a reused queue rowid can't be
+            // mistaken for the current item once new ephemeral rows are inserted.
+            conn.execute(
+                "UPDATE playback_state SET current_queue_item_id = NULL WHERE id = 1",
+                [],
+            )?;
             Ok::<_, anyhow::Error>(())
         })
         .map_err(|error| {
@@ -10254,6 +10170,15 @@ async fn clear_persisted_queue_for_tidal_mix(
                 Json(json!({ "error": "Failed to clear stale playback queue" })),
             )
         })
+}
+
+/// Map a producer-supplied collection source to one of
+/// [`queue::EPHEMERAL_TIDAL_SOURCES`], defaulting to `tidal_mix`.
+fn normalize_ephemeral_tidal_source(source: Option<&str>) -> String {
+    match source {
+        Some(s) if queue::EPHEMERAL_TIDAL_SOURCES.contains(&s) => s.to_string(),
+        _ => "tidal_mix".to_string(),
+    }
 }
 
 /// Play the first track immediately and stash the rest in the pending
@@ -10270,40 +10195,50 @@ async fn play_tidal_mix(
             Json(json!({ "error": "Mix has no tracks" })),
         ));
     }
+    let source = normalize_ephemeral_tidal_source(body.source.as_deref());
     let shuffle_debug = shuffle_tidal_mix_tracks(&mut tracks, body.shuffle_mode.as_deref());
 
-    let mut iter = tracks
-        .into_iter()
-        .map(|t| crate::PendingEphemeralTidalTrack {
-            tidal_track_id: t.tidal_track_id,
-            title: t.title,
-            artist_name: t.artist_name,
-            album_title: t.album_title,
-            artwork_url: t.artwork_url,
-            duration_ms: t.duration_ms,
-        });
-    let first = iter.next().expect("non-empty per check above");
+    let first = crate::PendingEphemeralTidalTrack {
+        tidal_track_id: tracks[0].tidal_track_id,
+        title: tracks[0].title.clone(),
+        artist_name: tracks[0].artist_name.clone(),
+        album_title: tracks[0].album_title.clone(),
+        artwork_url: tracks[0].artwork_url.clone(),
+        duration_ms: tracks[0].duration_ms,
+    };
     let first_tidal_id = first.tidal_track_id;
-    let rest: Vec<crate::PendingEphemeralTidalTrack> = iter.collect();
 
-    // Replace any existing pending queue with this mix's continuation.
-    {
-        let s = state.read().await;
-        let mut q = s.pending_tidal_mix_queue.lock().unwrap();
-        q.clear();
-        q.extend(rest);
-    }
-
+    // Wipe any prior queue + continuation first so a failed start leaves a clean
+    // slate, then play the first track and persist the rest as real, mutable
+    // ephemeral rows (not an in-memory deque).
+    clear_persisted_queue_for_tidal_mix(&state).await?;
     if let Err(error) = start_ephemeral_tidal_playback(&state, first).await {
-        let s = state.read().await;
-        s.pending_tidal_mix_queue.lock().unwrap().clear();
+        clear_ephemeral_tidal_continuation(&state).await;
         return Err(error);
     }
-    if let Err(error) = clear_persisted_queue_for_tidal_mix(&state).await {
+    let rest_inserts: Vec<queue::EphemeralTidalInsert<'_>> = tracks[1..]
+        .iter()
+        .map(|t| queue::EphemeralTidalInsert {
+            tidal_id: t.tidal_track_id,
+            title: &t.title,
+            artist: t.artist_name.as_deref(),
+            album_title: t.album_title.as_deref(),
+            artwork_url: t.artwork_url.as_deref(),
+            duration_ms: t.duration_ms,
+        })
+        .collect();
+    if !rest_inserts.is_empty() {
         let s = state.read().await;
-        s.pending_tidal_mix_queue.lock().unwrap().clear();
-        return Err(error);
+        if let Err(error) = s.db.with_conn(|conn| {
+            queue::append_ephemeral_tidal_tracks(conn, &rest_inserts, &source)?;
+            Ok::<_, anyhow::Error>(())
+        }) {
+            // The first track is already playing; a continuation-persist failure
+            // is soft - the mix just won't auto-advance. Don't abort playback.
+            warn!(?error, "Failed to persist TIDAL mix continuation rows");
+        }
     }
+
     let snapshot = build_live_playback_snapshot_json(&state).await?;
     {
         let s = state.read().await;
@@ -11249,12 +11184,13 @@ async fn handle_ephemeral_tidal_near_end(
         if current_track.id != current_track_id {
             return Ok(false);
         }
+        // Peek (don't pop) the next upcoming ephemeral row to pre-buffer it.
         let pending_tracks = state_guard
-            .pending_tidal_mix_queue
-            .lock()
-            .unwrap()
-            .iter()
-            .cloned()
+            .db
+            .with_conn(queue::peek_next_ephemeral_tidal_track)
+            .ok()
+            .flatten()
+            .into_iter()
             .collect::<Vec<_>>();
         let Some(pending_track) = pending_tracks.first().cloned() else {
             return Ok(false);
@@ -11402,10 +11338,10 @@ async fn handle_ephemeral_tidal_near_end(
             .as_ref()
             .and_then(|info| info.active_track_id);
         let pending_front = state_guard
-            .pending_tidal_mix_queue
-            .lock()
-            .unwrap()
-            .front()
+            .db
+            .with_conn(queue::peek_next_ephemeral_tidal_track)
+            .ok()
+            .flatten()
             .map(|track| track.tidal_track_id);
         if active_id != Some(current_track_id)
             || current_playback_generation(&state_guard) != generation
@@ -11797,10 +11733,10 @@ async fn try_adopt_prepared_ephemeral_tidal_next(
             return Ok(false);
         }
         let pending_front = state_guard
-            .pending_tidal_mix_queue
-            .lock()
-            .unwrap()
-            .front()
+            .db
+            .with_conn(queue::peek_next_ephemeral_tidal_track)
+            .ok()
+            .flatten()
             .map(|track| track.tidal_track_id);
         if pending_front != Some(prepared.tidal_track_id) {
             return Ok(false);
@@ -11850,12 +11786,20 @@ async fn try_adopt_prepared_ephemeral_tidal_next(
         {
             return Ok(true);
         }
-        let mut pending = state_guard.pending_tidal_mix_queue.lock().unwrap();
-        if pending.front().map(|track| track.tidal_track_id) != Some(prepared.tidal_track_id) {
+        // Consume the upcoming ephemeral row, but only if it's still the one we
+        // prepared (a concurrent reorder/remove could have changed it).
+        let popped = state_guard
+            .db
+            .with_conn(|conn| match queue::peek_next_ephemeral_tidal_track(conn)? {
+                Some(front) if front.tidal_track_id == prepared.tidal_track_id => {
+                    queue::pop_next_ephemeral_tidal_track(conn)
+                }
+                _ => Ok(None),
+            })
+            .unwrap_or(None);
+        if popped.is_none() {
             return Ok(true);
         }
-        let _ = pending.pop_front();
-        drop(pending);
 
         state_guard.external_playback_track = None;
         state_guard.ephemeral_tidal_track = Some(prepared.synthetic_track.clone());
@@ -12090,11 +12034,13 @@ async fn handle_runtime_finished(
             state_guard.pending_stream_display = None;
         }
         // Auto-advance through any queued ephemeral mix continuation before
-        // tearing down. Pop the next track out of the pending queue and start
-        // it; if the queue is empty, fall through to the existing teardown.
+        // tearing down. Pop the next ephemeral row out of the queue and start
+        // it; if there are none, fall through to the existing teardown.
         let next = {
             let s = state.read().await;
-            s.pending_tidal_mix_queue.lock().unwrap().pop_front()
+            s.db.with_conn(queue::pop_next_ephemeral_tidal_track)
+                .ok()
+                .flatten()
         };
         if let Some(next) = next {
             // Clear the previous ephemeral track marker so the new one's
@@ -12143,12 +12089,18 @@ async fn handle_runtime_finished(
                                 "Hit max consecutive failures advancing TIDAL mix; clearing remaining queue"
                             );
                             let s = state.read().await;
-                            s.pending_tidal_mix_queue.lock().unwrap().clear();
+                            let _ = s.db.with_conn(|conn| {
+                                Ok::<_, anyhow::Error>(queue::delete_all_ephemeral_tidal_rows(
+                                    conn,
+                                )?)
+                            });
                             break;
                         }
                         let popped = {
                             let s = state.read().await;
-                            s.pending_tidal_mix_queue.lock().unwrap().pop_front()
+                            s.db.with_conn(queue::pop_next_ephemeral_tidal_track)
+                                .ok()
+                                .flatten()
                         };
                         match popped {
                             Some(p) => current = p,

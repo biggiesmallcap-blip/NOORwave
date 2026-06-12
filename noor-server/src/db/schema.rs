@@ -52,6 +52,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_048,
     MIGRATION_049,
     MIGRATION_050,
+    MIGRATION_051,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1447,6 +1448,20 @@ CREATE INDEX IF NOT EXISTS idx_provider_recommendation_cache_expiry
 const MIGRATION_050: &str = r#"
 ALTER TABLE audio_dj_profile_corrections
     ADD COLUMN manual_drop_blob BLOB NOT NULL DEFAULT X'';
+"#;
+
+// Ephemeral TIDAL queue rows. TIDAL mix/album/playlist tracks now live in the
+// `queue` table as real, mutable rows (positive ids) that stream ephemerally
+// instead of being imported. They keep `track_id` NULL forever and carry their
+// TIDAL metadata here so `load_queue` can hydrate a synthetic playable track
+// without a `tracks` row. `tidal_id_hint` (migration 030) holds the TIDAL id;
+// these columns hold the rest the streaming + display paths need. Distinct from
+// Last.fm pending rows, which DO get imported. See the queue ephemeral-row
+// helpers in playback/queue.rs.
+const MIGRATION_051: &str = r#"
+ALTER TABLE queue ADD COLUMN ephemeral_album_title TEXT;
+ALTER TABLE queue ADD COLUMN ephemeral_artwork_url TEXT;
+ALTER TABLE queue ADD COLUMN ephemeral_duration_ms INTEGER;
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

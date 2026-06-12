@@ -1416,12 +1416,12 @@ async fn rebuild_track_for_tidal_ref(
         return prepared.synthetic_track.clone();
     }
     if let Some(pending) = state_guard
-        .pending_tidal_mix_queue
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|track| track.tidal_track_id == tidal_id)
-        .cloned()
+        .db
+        .with_conn(|conn| {
+            crate::playback::queue::find_ephemeral_tidal_track_by_tidal_id(conn, tidal_id)
+        })
+        .ok()
+        .flatten()
     {
         return synthetic_rebuild_track(&pending);
     }
@@ -2941,9 +2941,6 @@ mod tests {
                 &std::env::temp_dir().join(format!("noor-test-key-{}", uuid::Uuid::new_v4())),
             )
             .expect("test master key"),
-            pending_tidal_mix_queue: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::VecDeque::new(),
-            )),
             prepared_ephemeral_tidal_next: None,
             lastfm_api_secret: None,
             server_token: String::new(),

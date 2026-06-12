@@ -39,7 +39,6 @@
 		clearQueue as clearQueueAction,
 		restoreQueueItems,
 		saveQueueAsPlaylist,
-		playTidalTrackNext,
 		playTidalTrackNow
 	} from '$lib/stores/player';
 	import { get } from 'svelte/store';
@@ -57,8 +56,6 @@
 	import ContextMenu from '$lib/components/ContextMenu.svelte';
 	import Toast from '$lib/components/Toast.svelte';
 	import CommandPalette from '$lib/components/CommandPalette.svelte';
-	import QueueReasonCard from '$lib/components/QueueReasonCard.svelte';
-	import { formatReasonForScreenReader } from '$lib/utils/reason';
 	import ShortcutHelp from '$lib/components/ShortcutHelp.svelte';
 	import PlayerBar from '$lib/shell/PlayerBar.svelte';
 	import SidebarNav from '$lib/shell/SidebarNav.svelte';
@@ -244,75 +241,6 @@
 		}
 	}
 
-	// Phase 2b: queue-row "why is this here" tooltip. Tracks the
-	// reason string of the currently-hovered row plus the cursor
-	// position so QueueReasonCard can place itself near the trigger.
-	let hoveredReason = $state<string | null>(null);
-	let reasonMouseX = $state(0);
-	let reasonMouseY = $state(0);
-
-	function showQueueReason(reason: string | null | undefined, event: MouseEvent) {
-		if (!reason) return;
-		hoveredReason = reason;
-		reasonMouseX = event.clientX;
-		reasonMouseY = event.clientY;
-	}
-
-	function moveQueueReason(event: MouseEvent) {
-		if (hoveredReason === null) return;
-		reasonMouseX = event.clientX;
-		reasonMouseY = event.clientY;
-	}
-
-	function hideQueueReason() {
-		hoveredReason = null;
-	}
-
-	let activeQueueActionsRowId = $state<number | null>(null);
-	let queueActionsAlwaysVisible = $state(false);
-
-	function setQueueActionsRowActive(itemId: number) {
-		if (queueActionsAlwaysVisible) return;
-		activeQueueActionsRowId = itemId;
-	}
-
-	function clearQueueActionsRow(itemId: number) {
-		if (activeQueueActionsRowId === itemId) {
-			activeQueueActionsRowId = null;
-		}
-	}
-
-	function handleQueueRowMouseLeave(event: MouseEvent, itemId: number) {
-		const current = event.currentTarget;
-		if (
-			current instanceof HTMLElement &&
-			document.activeElement instanceof Node &&
-			current.contains(document.activeElement)
-		) {
-			return;
-		}
-		clearQueueActionsRow(itemId);
-	}
-
-	function handleQueueRowFocusOut(event: FocusEvent, itemId: number) {
-		const current = event.currentTarget;
-		const next = event.relatedTarget;
-		if (current instanceof HTMLElement && next instanceof Node && current.contains(next)) {
-			return;
-		}
-		clearQueueActionsRow(itemId);
-	}
-
-	function queueActionsAccessible(itemId: number): boolean {
-		return queueActionsAlwaysVisible || activeQueueActionsRowId === itemId;
-	}
-
-	function updateQueueActionsVisibility(query: MediaQueryList | MediaQueryListEvent) {
-		queueActionsAlwaysVisible = query.matches;
-		if (queueActionsAlwaysVisible) {
-			activeQueueActionsRowId = null;
-		}
-	}
 	let mobileFavoritePending = $state(false);
 	let desktopFavoritePending = $state(false);
 
@@ -422,13 +350,9 @@
 
 		window.addEventListener('keydown', handleGlobalKeydown);
 		window.addEventListener('wheel', handleGlobalWheel, { passive: false });
-		const queueActionsMedia = window.matchMedia('(max-width: 760px)');
-		updateQueueActionsVisibility(queueActionsMedia);
-		queueActionsMedia.addEventListener('change', updateQueueActionsVisibility);
 		return () => {
 			window.removeEventListener('keydown', handleGlobalKeydown);
 			window.removeEventListener('wheel', handleGlobalWheel);
-			queueActionsMedia.removeEventListener('change', updateQueueActionsVisibility);
 			cancelStartupPrewarm?.();
 			for (const unlisten of tauriUpdateUnlisteners) unlisten();
 			unsubPalette();
@@ -712,8 +636,12 @@
 	}
 
 	async function handleQueueTrackPlay(item: QueueItemType) {
+		// Ephemeral TIDAL rows (mix/album/playlist) stream via the ephemeral
+		// path, which jumps to the clicked track and trims the rows before it.
+		// Library rows jump to their queue position. Detection is by the track
+		// (tidal_ephemeral source), not the queue id, which is now positive.
 		const tidal = queueItemTidalPlayable(item);
-		if (tidal && item.id < 0) {
+		if (tidal) {
 			await playTidalTrackNow(tidal);
 		} else {
 			await playTrackNow(item.track.id);
@@ -762,16 +690,6 @@
 			if (playingIdx >= 0 && newIdx <= playingIdx) return;
 		}
 		await moveQueueItem(item.id, newIdx);
-	}
-
-	async function handleQueueRemove(queueItemId: number, event: MouseEvent) {
-		event.stopPropagation();
-		await removeTrackFromQueue(queueItemId);
-	}
-
-	async function handleQueueMoveNext(queueItemId: number, event: MouseEvent) {
-		event.stopPropagation();
-		await moveQueueTrackNext(queueItemId);
 	}
 
 	function formatQuality(q: string | null) {
@@ -837,37 +755,25 @@
 		return queueItemToTidalPlayable(item);
 	}
 
-	function isEphemeralQueueItem(item: QueueItemType): boolean {
-		return item.id < 0 && queueItemTidalPlayable(item) != null;
-	}
-
-	async function handleQueuePlayNext(item: QueueItemType, event: MouseEvent) {
-		event.stopPropagation();
+	// Ephemeral TIDAL rows are now real, mutable queue rows, so their ⋯/right-click
+	// menu gets the queue-aware actions (Move next, Remove from queue) keyed on the
+	// real queue id.
+	function queueRowMenuItems(item: QueueItemType) {
 		const tidal = queueItemTidalPlayable(item);
-		if (tidal && item.id < 0) {
-			await playTidalTrackNext(tidal);
-			return;
-		}
-		await handleQueueMoveNext(item.id, event);
+		return tidal
+			? buildTidalTrackMenu(tidal, { inQueue: true, queueItemId: item.id })
+			: pickMenuBuilder(item.track, { queueItemId: item.id, isPending: item.is_pending });
 	}
 
 	function openQueueRowMenu(item: QueueItemType, event: MouseEvent) {
 		event.preventDefault();
 		event.stopPropagation();
-		const tidal = queueItemTidalPlayable(item);
-		const items = tidal
-			? buildTidalTrackMenu(tidal, { inQueue: true })
-			: pickMenuBuilder(item.track, { queueItemId: item.id, isPending: item.is_pending });
-		openContextMenu(event, items, item.track.title);
+		openContextMenu(event, queueRowMenuItems(item), item.track.title);
 	}
 
 	function openQueueRowMenuFromButton(item: QueueItemType, event: MouseEvent) {
 		event.stopPropagation();
-		const tidal = queueItemTidalPlayable(item);
-		const items = tidal
-			? buildTidalTrackMenu(tidal, { inQueue: true })
-			: pickMenuBuilder(item.track, { queueItemId: item.id, isPending: item.is_pending });
-		openMenuAtElement(event.currentTarget as HTMLElement, items, item.track.title);
+		openMenuAtElement(event.currentTarget as HTMLElement, queueRowMenuItems(item), item.track.title);
 	}
 
 	function openQueueArtistContextMenu(item: QueueItemType, event: MouseEvent) {
@@ -884,19 +790,6 @@
 			}),
 			item.track.artist_name ?? 'Unknown artist'
 		);
-	}
-
-	async function handleQueueRowFavorite(trackId: number, event: MouseEvent) {
-		event.stopPropagation();
-		try {
-			await toggleTrackFavorite(trackId);
-		} catch {
-			// toggleTrackFavorite surfaces its own error in the player store.
-		}
-	}
-
-	function canFavoriteQueueRow(item: QueueItemType): boolean {
-		return item.is_pending !== true && item.track.id > 0;
 	}
 
 	// ─── Queue drag-to-reorder ────────────────────────────────────────────────
@@ -1341,7 +1234,6 @@
 <CommandPalette />
 <QuietMode />
 <ShortcutHelp open={shortcutHelpOpen} onClose={closeShortcutHelp} />
-<QueueReasonCard reason={hoveredReason} mouseX={reasonMouseX} mouseY={reasonMouseY} />
 
 {#if showPkceReloginNotice}
 	<div class="pkce-relogin-backdrop" role="presentation">
@@ -1713,7 +1605,6 @@
 					{#each upcomingQueue.slice(0, queueVisibleCount) as item, i (`${item.id}-${i}`)}
 						{@const aid = item.track.artist_id}
 						{@const isPending = item.is_pending === true}
-						{@const actionsAccessible = queueActionsAccessible(item.id)}
 						<div
 							role="listitem"
 							class:active={isQueueItemActive(item, $currentTrack, $currentQueueItemId, upcomingQueue)}
@@ -1722,20 +1613,31 @@
 							class:pending={isPending}
 							class="queue-row"
 							title={isPending ? 'Resolving on TIDAL...' : undefined}
-							draggable={true}
 							data-track-id={item.track.id}
 							oncontextmenu={(event) => openQueueRowMenu(item, event)}
-							ondragstart={(event) => handleQueueDragStart(event, item)}
 							ondragover={(event) => handleQueueDragOver(event, item)}
 							ondragleave={() => handleQueueDragLeave(item)}
 							ondrop={(event) => void handleQueueDrop(event, item)}
 							ondragend={handleQueueDragEnd}
-							onmouseenter={() => setQueueActionsRowActive(item.id)}
-							onmouseleave={(event) => handleQueueRowMouseLeave(event, item.id)}
-							onfocusin={() => setQueueActionsRowActive(item.id)}
-							onfocusout={(event) => handleQueueRowFocusOut(event, item.id)}
 						>
-							<span class="queue-grip" aria-hidden="true" title="Drag to reorder">⋮⋮</span>
+							<!-- Full-bleed hit target: clicking anywhere on the row that
+							     isn't an interactive child plays/jumps to this track. -->
+							<button
+								class="queue-row-hit"
+								type="button"
+								aria-label={isPending ? `Pending: ${item.track.title}` : `Play ${item.track.title}`}
+								aria-disabled={isPending}
+								disabled={isPending}
+								onclick={isPending ? undefined : () => void handleQueueTrackPlay(item)}
+								onkeydown={(event) => handleQueueTrackKeydown(item, event)}
+							></button>
+							<span
+								class="queue-grip"
+								aria-hidden="true"
+								title="Drag to reorder"
+								draggable={!isPending}
+								ondragstart={(event) => handleQueueDragStart(event, item)}
+							>⋮⋮</span>
 							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
 								{#if isPending}
 									<div class="queue-art placeholder pending-art" title="Resolving track...">
@@ -1758,19 +1660,7 @@
 							</div>
 
 							<div class="queue-meta">
-								<button
-									class="queue-row-play"
-									type="button"
-									aria-label={isPending
-										? `Pending: ${item.track.title}`
-										: `Play ${item.track.title}`}
-									aria-disabled={isPending}
-									disabled={isPending}
-									onclick={isPending ? undefined : () => void handleQueueTrackPlay(item)}
-									onkeydown={(event) => handleQueueTrackKeydown(item, event)}
-								>
-									<span class="queue-title">{item.track.title}</span>
-								</button>
+								<span class="queue-title">{item.track.title}</span>
 								{#if isPending}
 									<span class="queue-artist pending-label">
 										<span class="queue-inline-spinner" aria-hidden="true"></span>
@@ -1790,62 +1680,14 @@
 
 							<div class="queue-side">
 								<span class="queue-time">{formatTrackDuration(item.track.duration_ms)}</span>
-								<div
-									class="queue-actions"
-									inert={!actionsAccessible}
-									aria-hidden={actionsAccessible ? undefined : 'true'}
-								>
-									{#if item.reason}
-										{@const reasonDesc = formatReasonForScreenReader(item.reason)}
-										{@const reasonId = `queue-reason-${item.id}`}
-										<button
-											class="queue-action icon reason"
-											aria-label="Why is this here?"
-											aria-describedby={reasonDesc ? reasonId : undefined}
-											title="Why is this here?"
-											onmouseenter={(event) => showQueueReason(item.reason, event)}
-											onmousemove={moveQueueReason}
-											onmouseleave={hideQueueReason}
-											onfocus={(event) => showQueueReason(item.reason, event as unknown as MouseEvent)}
-											onblur={hideQueueReason}
-											onclick={stopPropagation}
-										>ⓘ</button>
-										{#if reasonDesc}
-											<span id={reasonId} class="queue-sr-status">{reasonDesc}</span>
-										{/if}
-									{/if}
+								{#if !isPending}
 									<button
-										class="queue-action icon"
-										class:active={item.track.is_favorite}
-										aria-label={!canFavoriteQueueRow(item)
-											? 'Favorite unavailable for this queue row'
-											: item.track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
-										title={!canFavoriteQueueRow(item)
-											? 'Favorite this track after it starts playing'
-											: item.track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
-										disabled={!canFavoriteQueueRow(item)}
-										onclick={(event) => void handleQueueRowFavorite(item.track.id, event)}
-									>{item.track.is_favorite ? '♥' : '♡'}</button>
-									<button
-										class="queue-action icon"
+										class="queue-overflow"
 										aria-label="More actions"
 										title="More actions"
 										onclick={(event) => openQueueRowMenuFromButton(item, event)}
 									>⋯</button>
-									<button
-										class="queue-action icon"
-										aria-label={isEphemeralQueueItem(item) ? 'Promote to play next' : 'Play next'}
-										title={isEphemeralQueueItem(item) ? 'Add this TIDAL mix track as next in the queue' : 'Play next'}
-										onclick={(event) => void handleQueuePlayNext(item, event)}
-									>↑</button>
-									<button
-										class="queue-action icon remove"
-										aria-label="Remove from queue"
-										title={isEphemeralQueueItem(item) ? 'TIDAL mix rows cannot be removed yet' : 'Remove from queue'}
-										disabled={isEphemeralQueueItem(item)}
-										onclick={(event) => void handleQueueRemove(item.id, event)}
-									>×</button>
-								</div>
+								{/if}
 							</div>
 						</div>
 					{/each}
@@ -2093,7 +1935,6 @@
 					{#each upcomingQueue.slice(0, queueVisibleCount) as item, i (`${item.id}-${i}`)}
 						{@const aid = item.track.artist_id}
 						{@const isPending = item.is_pending === true}
-						{@const actionsAccessible = queueActionsAccessible(item.id)}
 						<div
 							role="listitem"
 							class="queue-row"
@@ -2101,11 +1942,16 @@
 							class:pending={isPending}
 							title={isPending ? 'Resolving on TIDAL...' : undefined}
 							oncontextmenu={(event) => openQueueRowMenu(item, event)}
-							onmouseenter={() => setQueueActionsRowActive(item.id)}
-							onmouseleave={(event) => handleQueueRowMouseLeave(event, item.id)}
-							onfocusin={() => setQueueActionsRowActive(item.id)}
-							onfocusout={(event) => handleQueueRowFocusOut(event, item.id)}
 						>
+							<button
+								class="queue-row-hit"
+								type="button"
+								aria-label={isPending ? `Pending: ${item.track.title}` : `Play ${item.track.title}`}
+								aria-disabled={isPending}
+								disabled={isPending}
+								onclick={isPending ? undefined : () => void handleQueueTrackPlay(item)}
+								onkeydown={(event) => handleQueueTrackKeydown(item, event)}
+							></button>
 							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
 								{#if isPending}
 									<div class="queue-art placeholder pending-art" title="Resolving track...">
@@ -2127,19 +1973,7 @@
 								<span class="queue-source-dot source-{queueSourceSlug(item.source)}" aria-hidden="true"></span>
 							</div>
 							<div class="queue-meta">
-								<button
-									class="queue-row-play"
-									type="button"
-									aria-label={isPending
-										? `Pending: ${item.track.title}`
-										: `Play ${item.track.title}`}
-									aria-disabled={isPending}
-									disabled={isPending}
-									onclick={isPending ? undefined : () => void handleQueueTrackPlay(item)}
-									onkeydown={(event) => handleQueueTrackKeydown(item, event)}
-								>
-									<span class="queue-title">{item.track.title}</span>
-								</button>
+								<span class="queue-title">{item.track.title}</span>
 								{#if isPending}
 									<span class="queue-artist pending-label">
 										<span class="queue-inline-spinner" aria-hidden="true"></span>
@@ -2158,30 +1992,12 @@
 							</div>
 							<div class="queue-side">
 								<span class="queue-time">{formatTrackDuration(item.track.duration_ms)}</span>
-								<div
-									class="queue-actions"
-									inert={!actionsAccessible}
-									aria-hidden={actionsAccessible ? undefined : 'true'}
-								>
-									<button
-										class="queue-action icon"
-										aria-label="More actions"
-										onclick={(e) => openQueueRowMenuFromButton(item, e)}
-									>⋯</button>
-									<button
-										class="queue-action icon"
-										aria-label={isEphemeralQueueItem(item) ? 'Promote to play next' : 'Play next'}
-										title={isEphemeralQueueItem(item) ? 'Add this TIDAL mix track as next in the queue' : 'Play next'}
-										onclick={(e) => void handleQueuePlayNext(item, e)}
-									>↑</button>
-									<button
-										class="queue-action icon remove"
-										aria-label="Remove from queue"
-										title={isEphemeralQueueItem(item) ? 'TIDAL mix rows cannot be removed yet' : 'Remove from queue'}
-										disabled={isEphemeralQueueItem(item)}
-										onclick={(e) => void handleQueueRemove(item.id, e)}
-									>×</button>
-								</div>
+								<button
+									class="queue-overflow"
+									aria-label="More actions"
+									title="More actions"
+									onclick={(e) => openQueueRowMenuFromButton(item, e)}
+								>⋯</button>
 							</div>
 						</div>
 					{/each}
@@ -2759,7 +2575,6 @@
 		.queue-row,
 		.queue-row:hover,
 		.queue-row:focus-within,
-		.queue-action:hover,
 		.queue-icon-btn:hover:not(:disabled),
 		.queue-undo-btn:hover,
 		.queue-jump-chip:hover,
@@ -2984,6 +2799,7 @@
 	}
 
 	.queue-row {
+		position: relative;
 		display: flex;
 		align-items: center;
 		gap: 10px;
@@ -2995,6 +2811,50 @@
 			border-color var(--motion-fast),
 			background var(--motion-fast),
 			transform var(--motion-fast);
+	}
+
+	/* Full-bleed click target sits behind the row content. Non-interactive
+	   content (art, title, time) has pointer-events:none so clicks fall through
+	   to it; interactive children (grip, artist link, overflow) re-enable. */
+	.queue-row-hit {
+		position: absolute;
+		inset: 0;
+		z-index: 0;
+		margin: 0;
+		padding: 0;
+		border: none;
+		background: transparent;
+		border-radius: inherit;
+		cursor: pointer;
+	}
+
+	.queue-row-hit:disabled {
+		cursor: default;
+	}
+
+	.queue-row-hit:focus-visible {
+		outline: 2px solid var(--accent-line);
+		outline-offset: -2px;
+	}
+
+	.queue-row > .queue-grip,
+	.queue-row > .queue-art-wrap,
+	.queue-row > .queue-meta,
+	.queue-row > .queue-side {
+		position: relative;
+		z-index: 1;
+	}
+
+	.queue-art-wrap,
+	.queue-meta,
+	.queue-time {
+		pointer-events: none;
+	}
+
+	.queue-grip,
+	.queue-meta .queue-artist[href],
+	.queue-overflow {
+		pointer-events: auto;
 	}
 
 	.queue-row:hover,
@@ -3130,29 +2990,6 @@
 		gap: 2px;
 	}
 
-	.queue-row-play {
-		display: block;
-		width: 100%;
-		padding: 0;
-		margin: 0;
-		border: none;
-		background: transparent;
-		color: inherit;
-		text-align: left;
-		font: inherit;
-		cursor: pointer;
-		border-radius: 4px;
-	}
-
-	.queue-row-play:disabled {
-		cursor: default;
-	}
-
-	.queue-row-play:focus-visible {
-		outline: 2px solid var(--accent-line);
-		outline-offset: 2px;
-	}
-
 	.queue-title {
 		font-weight: var(--font-weight-semibold);
 		font-size: var(--font-size-sm);
@@ -3212,103 +3049,44 @@
 	}
 
 	.queue-side {
-		position: relative;
 		display: flex;
 		align-items: center;
 		justify-content: flex-end;
-		gap: 8px;
-		min-width: 76px;
+		gap: 6px;
 		flex-shrink: 0;
 		margin-left: auto;
 	}
 
-	.queue-time {
-		transition: opacity var(--motion-fast);
-	}
-
-	.queue-row:hover .queue-time {
-		opacity: 0;
-	}
-
-	.queue-row:focus-within .queue-side {
-		min-width: max-content;
-	}
-
-	.queue-row:focus-within .queue-time {
-		opacity: 1;
-	}
-
-	.queue-actions {
-		position: absolute;
-		right: 0;
-		top: 50%;
-		transform: translateY(-50%);
-		display: flex;
-		align-items: center;
-		gap: 4px;
-		opacity: 0;
-		pointer-events: none;
-		transition: opacity var(--motion-fast);
-	}
-
-	.queue-row:hover .queue-actions {
-		opacity: 1;
-		pointer-events: auto;
-	}
-
-	.queue-row:focus-within .queue-actions {
-		position: static;
-		transform: none;
-		opacity: 1;
-		pointer-events: auto;
-	}
-
-	.queue-action {
-		padding: 5px 8px;
-		border-radius: 999px;
-		background: color-mix(in srgb, var(--instrument-surface) 82%, transparent);
-		border: 1px solid color-mix(in srgb, var(--instrument-border) 56%, transparent);
-		color: var(--text-primary);
-		font-size: var(--font-size-xs);
-		cursor: pointer;
-		transition: background var(--motion-fast), color var(--motion-fast), border-color var(--motion-fast);
-	}
-
-	.queue-action:hover {
-		background: color-mix(in srgb, var(--instrument-surface-strong) 92%, transparent);
-		border-color: color-mix(in srgb, var(--instrument-border) 82%, transparent);
-		transform: translateY(-1px);
-	}
-
-	.queue-action:disabled {
-		cursor: not-allowed;
-		opacity: 0.45;
-	}
-
-	.queue-action:disabled:hover {
-		background: color-mix(in srgb, var(--instrument-surface) 82%, transparent);
-		border-color: color-mix(in srgb, var(--instrument-border) 56%, transparent);
-		color: var(--text-primary);
-	}
-
-	.queue-action.icon {
+	/* Single overflow button replaces the old cluster of hover pills: low-key by
+	   default, brightens on row hover/focus. The context menu holds every action
+	   (play next, favourite, radio, remove), so the row stays calm. */
+	.queue-overflow {
 		width: 28px;
 		height: 28px;
 		padding: 0;
 		display: inline-grid;
 		place-items: center;
-		font-size: var(--font-size-sm);
+		border-radius: 999px;
+		border: 1px solid transparent;
+		background: transparent;
+		color: var(--text-tertiary);
+		font-size: var(--font-size-md);
 		line-height: 1;
+		cursor: pointer;
+		opacity: 0.55;
+		transition: background var(--motion-fast), color var(--motion-fast),
+			border-color var(--motion-fast), opacity var(--motion-fast);
 	}
 
-	.queue-action.icon.active {
-		color: var(--accent-strong, #6366f1);
+	.queue-row:hover .queue-overflow,
+	.queue-row:focus-within .queue-overflow {
+		opacity: 1;
 	}
 
-	.queue-action.icon.remove:hover {
-		background: color-mix(in srgb, var(--state-error) 22%, transparent);
-		border-color: color-mix(in srgb, var(--state-error) 55%, transparent);
-		color: var(--state-error);
+	.queue-overflow:hover {
+		background: color-mix(in srgb, var(--instrument-surface-strong) 92%, transparent);
+		border-color: color-mix(in srgb, var(--instrument-border) 70%, transparent);
+		color: var(--text-primary);
 	}
 
 	.queue-empty {
@@ -4045,14 +3823,10 @@
 	/* ── Small phones (≤ 760px): queue touch tweaks ─────── */
 	@media (max-width: 760px) {
 		.queue-row { align-items: flex-start; }
-		.queue-side { min-width: auto; align-items: flex-end; }
+		.queue-side { align-items: flex-end; }
 		.queue-time { display: none; }
-		.queue-actions {
-			position: static;
-			transform: none;
-			opacity: 1;
-			pointer-events: auto;
-		}
+		/* Overflow stays tappable without a hover state on touch. */
+		.queue-overflow { opacity: 1; }
 	}
 
 	/* ─── Connect screen ───────────────────── */

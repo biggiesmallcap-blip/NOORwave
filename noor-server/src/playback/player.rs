@@ -2018,7 +2018,10 @@ mod tests {
                 resolving_at     TIMESTAMP,
                 resolved_at      TIMESTAMP,
                 tidal_match_score REAL,
-                tidal_id_hint    INTEGER
+                tidal_id_hint    INTEGER,
+                ephemeral_album_title TEXT,
+                ephemeral_artwork_url TEXT,
+                ephemeral_duration_ms INTEGER
             );
             CREATE TABLE genres (
                 id INTEGER PRIMARY KEY,
@@ -5010,7 +5013,10 @@ mod tests {
                 resolving_at     TIMESTAMP,
                 resolved_at      TIMESTAMP,
                 tidal_match_score REAL,
-                tidal_id_hint    INTEGER
+                tidal_id_hint    INTEGER,
+                ephemeral_album_title TEXT,
+                ephemeral_artwork_url TEXT,
+                ephemeral_duration_ms INTEGER
             );
             CREATE TABLE genres (id INTEGER PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL, parent_id INTEGER);
             CREATE TABLE track_genres (
