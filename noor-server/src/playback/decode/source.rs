@@ -171,44 +171,74 @@ impl symphonia::core::io::MediaSource for StreamPipe {
     }
 }
 
+pub(crate) const DASH_SEGMENT_MAX_ATTEMPTS: u32 = 2;
+pub(crate) const DASH_SEGMENT_RETRY_BACKOFF_MS: u64 = 250;
+
 pub(crate) async fn append_stream_bytes(
     http: &reqwest::Client,
     url: &str,
     segment_index: usize,
 ) -> anyhow::Result<Vec<u8>> {
     let segment_label = dash_segment_debug_label(url);
-    tokio::time::timeout(
-        std::time::Duration::from_secs(DASH_SEGMENT_TIMEOUT_SECS),
-        async {
-            let response = http
-                .get(url)
-                .send()
-                .await
-                .with_context(|| {
-                    format!("DASH segment {segment_index} request failed ({segment_label})")
-                })?
-                .error_for_status()
-                .with_context(|| {
-                    format!("DASH segment {segment_index} returned error status ({segment_label})")
-                })?;
-            let content_length = response.content_length().unwrap_or(0) as usize;
-            let mut stream = response.bytes_stream();
-            let mut out = Vec::with_capacity(content_length);
-            while let Some(chunk) = stream.next().await {
-                let bytes = chunk.with_context(|| {
-                    format!("DASH segment {segment_index} chunk error ({segment_label})")
-                })?;
-                out.extend_from_slice(&bytes);
-            }
-            Ok(out)
-        },
-    )
-    .await
-    .with_context(|| {
-        format!(
-            "DASH segment {segment_index} timed out after {DASH_SEGMENT_TIMEOUT_SECS}s ({segment_label})"
+    // A single flaky TIDAL CDN segment (timeout or transient fetch/chunk error)
+    // used to abort the whole DJ profile rebuild / prebuffer. Retry once with a
+    // short backoff before giving up so one hiccup doesn't kill the transition.
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 1..=DASH_SEGMENT_MAX_ATTEMPTS {
+        let attempt_result: anyhow::Result<Vec<u8>> = tokio::time::timeout(
+            Duration::from_secs(DASH_SEGMENT_TIMEOUT_SECS),
+            async {
+                let response = http
+                    .get(url)
+                    .send()
+                    .await
+                    .with_context(|| {
+                        format!("DASH segment {segment_index} request failed ({segment_label})")
+                    })?
+                    .error_for_status()
+                    .with_context(|| {
+                        format!("DASH segment {segment_index} returned error status ({segment_label})")
+                    })?;
+                let content_length = response.content_length().unwrap_or(0) as usize;
+                let mut stream = response.bytes_stream();
+                let mut out = Vec::with_capacity(content_length);
+                while let Some(chunk) = stream.next().await {
+                    let bytes = chunk.with_context(|| {
+                        format!("DASH segment {segment_index} chunk error ({segment_label})")
+                    })?;
+                    out.extend_from_slice(&bytes);
+                }
+                anyhow::Ok(out)
+            },
         )
-    })?
+        .await
+        .map_err(|elapsed| {
+            anyhow::Error::new(elapsed).context(format!(
+                "DASH segment {segment_index} timed out after {DASH_SEGMENT_TIMEOUT_SECS}s ({segment_label})"
+            ))
+        })
+        .and_then(|inner| inner);
+
+        match attempt_result {
+            Ok(bytes) => return Ok(bytes),
+            Err(err) => {
+                if attempt < DASH_SEGMENT_MAX_ATTEMPTS {
+                    tracing::warn!(
+                        segment_index,
+                        segment_label = %segment_label,
+                        attempt,
+                        max_attempts = DASH_SEGMENT_MAX_ATTEMPTS,
+                        backoff_ms = DASH_SEGMENT_RETRY_BACKOFF_MS,
+                        error = %format!("{err:#}"),
+                        "DASH segment fetch failed, retrying"
+                    );
+                    tokio::time::sleep(Duration::from_millis(DASH_SEGMENT_RETRY_BACKOFF_MS)).await;
+                }
+                last_err = Some(err);
+            }
+        }
+    }
+    Err(last_err.expect("retry loop must produce a final error"))
 }
 
 pub(crate) fn dash_initial_media_count(total_segments: usize) -> usize {
