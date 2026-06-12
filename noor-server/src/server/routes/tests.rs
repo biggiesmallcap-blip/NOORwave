@@ -280,7 +280,7 @@ fn stream_error_mapping_marks_manifest_decode_failures_as_bad_gateway() {
 
 #[tokio::test]
 async fn pause_and_resume_playback_invalidate_inflight_generation() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
     let app = api_routes(state.clone());
 
@@ -323,8 +323,6 @@ async fn pause_and_resume_playback_invalidate_inflight_generation() {
         current_playback_generation(&guard)
     };
     assert!(after_resume > after_pause);
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[test]
@@ -797,7 +795,7 @@ fn test_tidal_track(id: i64, title: &str) -> crate::services::tidal::client::Tid
 
 #[test]
 fn insert_tidal_track_uses_favorite_created_as_date_added() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     db.with_conn(|conn| {
         let track = test_tidal_track(2001, "Newest favorite");
 
@@ -812,7 +810,6 @@ fn insert_tidal_track_uses_favorite_created_as_date_added() {
         Ok(())
     })
     .expect("inserted favorite track");
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[test]
@@ -871,8 +868,7 @@ fn extracts_genre_candidates_from_mixed_metadata_shapes() {
 
 #[tokio::test]
 async fn genre_heat_route_defaults_to_ninety_days() {
-    let db_path = std::env::temp_dir().join(format!("noor-genre-heat-{}.db", uuid::Uuid::new_v4()));
-    let db = Database::open(&db_path).expect("db opened");
+    let db = Database::open_in_memory().expect("db opened");
     db.run_migrations().expect("migrations");
     db.with_conn(|conn| {
             schema::run_migrations(conn)?;
@@ -935,8 +931,6 @@ async fn genre_heat_route_defaults_to_ninety_days() {
 
     assert_eq!(electronic["listen_count"], 1);
     assert_eq!(electronic["total_listened_ms"], 180000);
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 /// Build a fresh `AppState` backed by `db`. Single source of truth for test
@@ -1001,10 +995,7 @@ fn fresh_test_state(db: Database) -> crate::AppState {
         radio_similarity_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         refreshed_seeds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         embedding_cache: Arc::new(std::sync::Mutex::new(None)),
-        master_key: crate::services::crypto::MasterKey::load_or_generate(
-            &std::env::temp_dir().join(format!("noor-test-key-{}", uuid::Uuid::new_v4())),
-        )
-        .expect("test master key"),
+        master_key: crate::services::crypto::MasterKey::ephemeral(),
         prepared_ephemeral_tidal_next: None,
         lastfm_api_secret: None,
         server_token: String::new(),
@@ -1020,21 +1011,21 @@ fn fresh_test_state(db: Database) -> crate::AppState {
 
 /// Build a minimal test app backed by a fresh in-memory database.
 async fn build_test_app() -> Router {
-    let db_path = std::env::temp_dir().join(format!("noor-test-{}.db", uuid::Uuid::new_v4()));
-    let db = Database::open(&db_path).expect("db opened");
-    db.run_migrations().expect("migrations");
-    db.with_conn(|conn| schema::run_migrations(conn))
-        .expect("schema migrations");
-    api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(db))))
+    api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        fresh_migrated_db(),
+    ))))
 }
 
-fn fresh_migrated_db() -> (Database, std::path::PathBuf) {
-    let db_path = std::env::temp_dir().join(format!("noor-test-{}.db", uuid::Uuid::new_v4()));
-    let db = Database::open(&db_path).expect("db opened");
+/// A fresh, fully-migrated in-memory database. In-memory keeps the suite off
+/// the filesystem: a temp `.db` + WAL per test (1000+ cases) churns enough I/O
+/// that Windows Defender scanning can stall a normally-instant test past
+/// libtest's 60s warning.
+fn fresh_migrated_db() -> Database {
+    let db = Database::open_in_memory().expect("db opened");
     db.run_migrations().expect("migrations");
     db.with_conn(|conn| schema::run_migrations(conn))
         .expect("schema migrations");
-    (db, db_path)
+    db
 }
 
 fn app_for_db(db: Database) -> Router {
@@ -1043,7 +1034,7 @@ fn app_for_db(db: Database) -> Router {
 
 #[tokio::test]
 async fn tracks_route_treats_key_signature_filter_as_data() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     db.with_conn(|conn| {
         conn.execute("INSERT INTO artists (id, name) VALUES (9001, 'Filter Artist')", [])?;
         conn.execute(
@@ -1097,8 +1088,6 @@ async fn tracks_route_treats_key_signature_filter_as_data() {
         tracks.is_empty(),
         "key_signature must be treated as an exact string, got {tracks:?}"
     );
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 fn seed_dj_queue_pair(db: &Database) -> (i64, i64) {
@@ -1164,17 +1153,16 @@ async fn response_json(response: axum::response::Response) -> Value {
 
 #[tokio::test]
 async fn dj_enabled_defaults_false() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     let response = json_request(app_for_db(db), "GET", "/api/dj/enabled", "").await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
     assert_eq!(body["enabled"], false);
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn dj_enabled_can_be_toggled() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     let app = app_for_db(db);
     let response = json_request(app.clone(), "PUT", "/api/dj/enabled", r#"{"enabled":true}"#).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -1185,12 +1173,11 @@ async fn dj_enabled_can_be_toggled() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
     assert_eq!(body["enabled"], false);
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn chart_snapshots_return_latest_ranked_entries_without_zero_tidal_id() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     db.with_conn(|conn| {
         conn.execute(
             "INSERT INTO chart_snapshots
@@ -1241,13 +1228,11 @@ async fn chart_snapshots_return_latest_ranked_entries_without_zero_tidal_id() {
     assert_eq!(body["entries"][1]["title"], "Second Track");
     assert_eq!(body["entries"][1]["resolution_status"], "unresolved");
     assert!(body["entries"][1]["tidal_id"].is_null());
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn chart_matrix_returns_provider_cells_and_explicit_missing_cells() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     db.with_conn(|conn| {
         queries::upsert_chart_snapshot(
             conn,
@@ -1379,13 +1364,11 @@ async fn chart_matrix_returns_provider_cells_and_explicit_missing_cells() {
         .expect("AU row");
     assert_eq!(au["cells"]["shazam_daily"]["title"], "AU Shazam");
     assert!(au["cells"]["shazam_daily"]["tidal_id"].is_null());
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn spotify_daily_import_endpoint_persists_snapshot_for_matrix() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     let csv = r#"rank,uri,artist_names,track_name,peak_rank,previous_rank,days_on_chart,streams
 1,spotify:track:imported,"Import Artist","Import Track",1,2,3,12345
 "#;
@@ -1414,13 +1397,11 @@ async fn spotify_daily_import_endpoint_persists_snapshot_for_matrix() {
         .expect("AU row");
     assert_eq!(au["cells"]["spotify_daily"]["title"], "Import Track");
     assert_eq!(au["cells"]["spotify_daily"]["streams"], 12345);
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn dj_enabled_true_starts_current_pair_lookahead() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     let (_current, next) = seed_dj_queue_pair(&db);
     let app = app_for_db(db);
     let response = json_request(app.clone(), "PUT", "/api/dj/enabled", r#"{"enabled":true}"#).await;
@@ -1433,12 +1414,11 @@ async fn dj_enabled_true_starts_current_pair_lookahead() {
     assert_eq!(body["next"]["media_ref_kind"], "tidal_track");
     assert_eq!(body["next"]["media_ref_id"], "77002");
     assert!(next > 0);
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn persisted_dj_enabled_builds_current_pair_lookahead_without_toggle() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_dj_queue_pair(&db);
     db.with_conn(|conn| queries::set_dj_engine_enabled(conn, true))
         .expect("enable dj");
@@ -1460,12 +1440,11 @@ async fn persisted_dj_enabled_builds_current_pair_lookahead_without_toggle() {
             track_id: Some(7002),
         })
     );
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn dj_lookahead_pairs_ephemeral_current_with_persisted_queue() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     db.with_conn(|conn| {
         conn.execute(
             "INSERT INTO artists (id, name) VALUES (7101, 'Queue Artist')",
@@ -1526,12 +1505,11 @@ async fn dj_lookahead_pairs_ephemeral_current_with_persisted_queue() {
             track_id: Some(7102),
         })
     );
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn dj_enabled_false_cancels_lookahead_and_discards_program() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_dj_queue_pair(&db);
     let app = app_for_db(db);
     let response = json_request(app.clone(), "PUT", "/api/dj/enabled", r#"{"enabled":true}"#).await;
@@ -1548,12 +1526,11 @@ async fn dj_enabled_false_cancels_lookahead_and_discards_program() {
     let body = response_json(response).await;
     assert_eq!(body["enabled"], false);
     assert_eq!(body["fallback_reason"], "disabled");
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn dj_profile_rebuild_does_not_claim_accepted_without_job() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_dj_queue_pair(&db);
     let app = app_for_db(db);
     let response = json_request(app.clone(), "PUT", "/api/dj/enabled", r#"{"enabled":true}"#).await;
@@ -1569,12 +1546,11 @@ async fn dj_profile_rebuild_does_not_claim_accepted_without_job() {
     let body = response_json(response).await;
     assert_eq!(body["accepted"], false);
     assert_eq!(body["status"], "source_unavailable");
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn dj_profile_rebuild_does_not_mutate_armed_transition() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_dj_queue_pair(&db);
     db.with_conn(|conn| {
             conn.execute(
@@ -1607,28 +1583,24 @@ async fn dj_profile_rebuild_does_not_mutate_armed_transition() {
         })
         .expect("outcome");
     assert_eq!(outcome, "armed");
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn dj_profile_returns_404_for_missing_profile() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     let response = json_request(app_for_db(db), "GET", "/api/dj/profile/999", "").await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn dj_profile_rejects_non_positive_track_ids() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     let app = app_for_db(db);
 
     for uri in ["/api/dj/profile/0", "/api/dj/profile/-7"] {
         let response = json_request(app.clone(), "GET", uri, "").await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
     }
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 fn seed_spotify_stats_track(
@@ -1699,7 +1671,7 @@ fn background_resolution_batches_are_bounded_by_concurrency() {
 
 #[tokio::test]
 async fn album_spotify_stats_returns_cached_playcounts() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_spotify_stats_track(
         &db,
         Some(9),
@@ -1735,13 +1707,11 @@ async fn album_spotify_stats_returns_cached_playcounts() {
     assert_eq!(tracks[0]["title"], "Album Stats Track");
     assert_eq!(tracks[0]["playcount"], 1_234);
     assert!(body["monthly_listeners"].is_null());
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn artist_spotify_stats_returns_cached_playcounts() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_spotify_stats_track(
         &db,
         None,
@@ -1777,8 +1747,6 @@ async fn artist_spotify_stats_returns_cached_playcounts() {
     assert_eq!(tracks[0]["title"], "Artist Stats Track");
     assert_eq!(tracks[0]["playcount"], 5_678);
     assert!(body["monthly_listeners"].is_null());
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
@@ -1852,7 +1820,7 @@ fn seed_basic_tracks(db: &Database) {
 
 #[tokio::test]
 async fn clear_queue_returns_snapshot_and_preserves_current() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_basic_tracks(&db);
     let current_qid: i64 = db
         .with_conn(|conn| {
@@ -1918,13 +1886,11 @@ async fn clear_queue_returns_snapshot_and_preserves_current() {
         .with_conn(|conn| Ok(conn.query_row("SELECT COUNT(*) FROM queue", [], |row| row.get(0))?))
         .unwrap();
     assert_eq!(persisted_queue_count, 1);
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn clear_queue_preserves_only_current_queue_item_for_duplicate_track() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_basic_tracks(&db);
     let (duplicate_qid, current_qid): (i64, i64) = db
         .with_conn(|conn| {
@@ -1991,13 +1957,11 @@ async fn clear_queue_preserves_only_current_queue_item_for_duplicate_track() {
         })
         .unwrap();
     assert_eq!(persisted_ids, vec![current_qid]);
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn clear_queue_repairs_mismatched_anchor_before_preserving_current() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_basic_tracks(&db);
     let (current_qid, mismatched_qid): (i64, i64) = db
         .with_conn(|conn| {
@@ -2049,13 +2013,11 @@ async fn clear_queue_repairs_mismatched_anchor_before_preserving_current() {
     assert_ne!(queue[0]["id"], mismatched_qid);
     assert_eq!(queue[0]["track"]["id"], 1);
     assert_eq!(body["playback_state"]["current_queue_item_id"], current_qid);
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn clear_queue_falls_back_to_track_id_when_current_queue_item_is_stale() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_basic_tracks(&db);
     let stale_qid = 999_999_i64;
     let preserved_qid = db
@@ -2128,13 +2090,11 @@ async fn clear_queue_falls_back_to_track_id_when_current_queue_item_is_stale() {
         .unwrap();
     assert_eq!(persisted_track_ids, vec![1]);
     assert_eq!(current_queue_item_id, Some(preserved_qid));
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn clear_queue_repairs_missing_anchor_and_removes_duplicate_track_rows() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_basic_tracks(&db);
     let (first_qid, duplicate_qid): (i64, i64) = db
         .with_conn(|conn| {
@@ -2201,13 +2161,11 @@ async fn clear_queue_repairs_missing_anchor_and_removes_duplicate_track_rows() {
         })
         .unwrap();
     assert_eq!(persisted_ids, vec![first_qid]);
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn remove_current_queue_item_advances_and_switches_runtime() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_basic_tracks(&db);
     let (current_qid, next_qid) = db
         .with_conn(|conn| {
@@ -2341,13 +2299,11 @@ async fn remove_current_queue_item_advances_and_switches_runtime() {
     assert_eq!(current_track_id, Some(2));
     assert_eq!(current_queue_item_id, Some(next_qid));
     assert!(is_playing);
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn remove_current_queue_item_repairs_stale_anchor_and_returns_playback_state() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_basic_tracks(&db);
     let stale_qid = 999_999_i64;
     let (current_qid, next_qid) = db
@@ -2417,13 +2373,11 @@ async fn remove_current_queue_item_repairs_stale_anchor_and_returns_playback_sta
     assert_eq!(current_track_id, Some(2));
     assert_eq!(current_queue_item_id, Some(next_qid));
     assert!(!is_playing);
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn remove_current_queue_item_repairs_mismatched_anchor_and_returns_playback_state() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_basic_tracks(&db);
     let (current_qid, next_qid) = db
         .with_conn(|conn| {
@@ -2477,13 +2431,11 @@ async fn remove_current_queue_item_repairs_mismatched_anchor_and_returns_playbac
     assert_eq!(body["playback_state"]["current_track"]["id"], 2);
     assert_eq!(body["playback_state"]["current_queue_item_id"], next_qid);
     assert_eq!(body["playback_state"]["is_playing"], false);
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn move_queue_item_repairs_stale_current_anchor_and_returns_playback_state() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_basic_tracks(&db);
     let stale_qid = 999_999_i64;
     let (current_qid, next_qid) = db
@@ -2549,13 +2501,11 @@ async fn move_queue_item_repairs_stale_current_anchor_and_returns_playback_state
         })
         .unwrap();
     assert_eq!(current_queue_item_id, Some(current_qid));
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn move_queue_item_repairs_mismatched_current_anchor_and_returns_playback_state() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_basic_tracks(&db);
     let (current_qid, mismatched_qid) = db
         .with_conn(|conn| {
@@ -2620,13 +2570,11 @@ async fn move_queue_item_repairs_mismatched_current_anchor_and_returns_playback_
         })
         .unwrap();
     assert_eq!(current_queue_item_id, Some(current_qid));
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn playback_shuffle_returns_debug_and_persists_seed() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_basic_tracks(&db);
     db.with_conn(|conn| {
         conn.execute(
@@ -2680,13 +2628,11 @@ async fn playback_shuffle_returns_debug_and_persists_seed() {
         })
         .unwrap();
     assert_eq!(stored_seed, Some(seed));
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn replace_playback_queue_accepts_one_shot_shuffle_mode() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_basic_tracks(&db);
 
     let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
@@ -2714,8 +2660,6 @@ async fn replace_playback_queue_accepts_one_shot_shuffle_mode() {
     assert_eq!(body["queue"].as_array().expect("queue").len(), 2);
     assert_eq!(body["shuffle_debug"]["mode"], "true");
     assert_eq!(body["shuffle_debug"]["scope"], "queue_replace");
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[test]
@@ -2791,7 +2735,7 @@ async fn genre_snapshot_route_returns_galaxy_payload() {
 
 #[tokio::test]
 async fn discovery_space_includes_resolved_sidecar_external_neighbors() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     db.with_conn(|conn| {
         conn.execute(
             "INSERT INTO artists (id, name) VALUES (1, 'Seed Artist')",
@@ -2908,13 +2852,11 @@ async fn discovery_space_includes_resolved_sidecar_external_neighbors() {
             .iter()
             .any(|edge| { edge["from_track_id"] == 1 && edge["to_track_id"] == 990_001 })
     );
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn discovery_blend_space_includes_pending_external_nodes_and_health() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     db.with_conn(|conn| {
         conn.execute(
             "INSERT INTO artists (id, name) VALUES (1, 'Seed Artist')",
@@ -3025,13 +2967,11 @@ async fn discovery_blend_space_includes_pending_external_nodes_and_health() {
     assert_eq!(body["health"]["pending_external_count"], 1);
     assert_eq!(body["health"]["playable_external_count"], 1);
     assert!(body["health"]["coverage_ratio"].as_f64().unwrap() > 0.0);
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn discovery_blend_space_uses_external_seed_anchors() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     db.with_conn(|conn| {
         conn.execute(
             "INSERT INTO artists (id, name) VALUES (1, 'Guide Artist')",
@@ -3175,13 +3115,11 @@ async fn discovery_blend_space_uses_external_seed_anchors() {
     );
     assert_eq!(body["health"]["playable_external_count"], 1);
     assert!(body["health"]["coverage_ratio"].as_f64().unwrap() > 0.0);
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn discovery_blend_add_appends_discoveries_without_replacing_queue() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     db.with_conn(|conn| {
         conn.execute(
             "INSERT INTO artists (id, name) VALUES (1, 'Seed Artist')",
@@ -3269,8 +3207,6 @@ async fn discovery_blend_add_appends_discoveries_without_replacing_queue() {
         Ok(())
     })
     .unwrap();
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 /// Append ephemeral TIDAL rows for tests. Tuple: (tidal_id, title, artist,
@@ -3309,7 +3245,7 @@ fn insert_ephemeral_rows(
 
 #[tokio::test]
 async fn ephemeral_tidal_rows_appear_in_queue_in_order() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     insert_ephemeral_rows(
         &db,
         "tidal_mix",
@@ -3408,13 +3344,11 @@ async fn ephemeral_tidal_rows_appear_in_queue_in_order() {
             .all(|item| item.track.tidal_id.is_some() && item.track.id < 0),
         "ephemeral rows carry a tidal_id and a synthetic negative track id"
     );
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn ephemeral_tidal_album_rows_preserve_metadata() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     let album_tidal_id = 58_520_793_i64;
     let tidal_track_base = album_tidal_id * 100;
     let rows: Vec<(i64, String, String)> = (2..=45)
@@ -3509,13 +3443,11 @@ async fn ephemeral_tidal_album_rows_preserve_metadata() {
                     .is_some_and(|url| url.contains("resources.tidal.com"))),
         "ephemeral TIDAL album rows must preserve album metadata and artwork"
     );
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn tidal_mix_replacement_clears_stale_persisted_queue() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     db.with_conn(|conn| {
         conn.execute(
             "INSERT INTO artists (id, name) VALUES (8200, 'Old Queue Artist')",
@@ -3579,13 +3511,11 @@ async fn tidal_mix_replacement_clears_stale_persisted_queue() {
         .unwrap();
     assert_eq!(queue_len, 0, "clear wipes durable + ephemeral rows alike");
     assert_eq!(anchor, None, "the stale play-head anchor is dropped");
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn clear_queue_clears_pending_tidal_mix_overlay() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     insert_ephemeral_rows(
         &db,
         "tidal_mix",
@@ -3635,13 +3565,11 @@ async fn clear_queue_clears_pending_tidal_mix_overlay() {
         queue.is_empty(),
         "ephemeral TIDAL rows must not reappear after clear"
     );
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn direct_tidal_finish_advances_persisted_queue_and_switches_runtime() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     db.with_conn(|conn| {
         conn.execute(
             "INSERT INTO artists (id, name) VALUES (8100, 'Queued Artist')",
@@ -3785,13 +3713,11 @@ async fn direct_tidal_finish_advances_persisted_queue_and_switches_runtime() {
             .and_then(|info| info.active_track_id),
         Some(8101)
     );
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn runtime_finish_skips_unresolved_pending_row_and_starts_next_library_track() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     let (current_qid, next_qid) = db
         .with_conn(|conn| {
             conn.execute(
@@ -3917,13 +3843,11 @@ async fn runtime_finish_skips_unresolved_pending_row_and_starts_next_library_tra
     assert_eq!(current_track_id, Some(8202));
     assert_eq!(current_queue_item_id, Some(next_qid));
     assert!(is_playing);
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn runtime_finish_adopts_pending_row_resolved_by_background_resolver() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     let (current_qid, pending_qid) = db
         .with_conn(|conn| {
             conn.execute(
@@ -4072,13 +3996,11 @@ async fn runtime_finish_adopts_pending_row_resolved_by_background_resolver() {
         .unwrap();
     assert_eq!(current_track_id, Some(8303));
     assert_eq!(current_queue_item_id, Some(pending_qid));
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn manual_previous_skips_unresolved_pending_rows_to_prior_library_track() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     let (previous_qid, current_qid) = db
         .with_conn(|conn| {
             conn.execute(
@@ -4147,13 +4069,11 @@ async fn manual_previous_skips_unresolved_pending_rows_to_prior_library_track() 
     );
     assert_eq!(snapshot.state.current_queue_item_id, Some(previous_qid));
     assert!(snapshot.state.is_playing);
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn manual_previous_stops_when_pending_rows_cannot_move_back() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     let current_qid = db
         .with_conn(|conn| {
             conn.execute(
@@ -4199,13 +4119,11 @@ async fn manual_previous_stops_when_pending_rows_cannot_move_back() {
     assert!(snapshot.state.current_track.is_none());
     assert_eq!(snapshot.state.current_queue_item_id, None);
     assert!(!snapshot.state.is_playing);
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn prepared_runtime_track_error_keeps_current_playback_running() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_basic_tracks(&db);
     let current_qid: i64 = db
         .with_conn(|conn| {
@@ -4263,13 +4181,11 @@ async fn prepared_runtime_track_error_keeps_current_playback_running() {
     let info = guard.playback_runtime_info.as_ref().expect("runtime info");
     assert_eq!(info.active_track_id, Some(1));
     assert_eq!(info.last_error.as_deref(), Some("prebuffer decode failed"));
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn runtime_track_error_advances_to_next_library_track() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_basic_tracks(&db);
     let (current_qid, next_qid) = db
         .with_conn(|conn| {
@@ -4380,13 +4296,11 @@ async fn runtime_track_error_advances_to_next_library_track() {
     assert_eq!(current_track_id, Some(2));
     assert_eq!(current_queue_item_id, Some(next_qid));
     assert!(is_playing);
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn disabling_exclusive_clears_runtime_engaged_state() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     db.with_conn(|conn| {
         let mut settings = crate::db::audio_settings::AudioSettings::default();
         settings.exclusive_mode = true;
@@ -4464,8 +4378,6 @@ async fn disabling_exclusive_clears_runtime_engaged_state() {
 
     assert_eq!(body["runtime"]["exclusive_engaged"], false);
     assert_eq!(body["runtime"]["exclusive_transport_format"], Value::Null);
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[test]
@@ -4568,7 +4480,7 @@ fn shared_sample_rate_follow_skips_prebuffer_on_rate_change() {
 
 #[tokio::test]
 async fn queue_append_library_track_returns_updated_queue() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_basic_tracks(&db);
     let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
         db.clone(),
@@ -4609,13 +4521,11 @@ async fn queue_append_library_track_returns_updated_queue() {
         })
         .unwrap();
     assert_eq!(source, "user_queue");
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn queue_play_next_tidal_inserts_pending_row_after_current_with_hint() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_basic_tracks(&db);
     let current_qid: i64 = db
         .with_conn(|conn| {
@@ -4706,13 +4616,11 @@ async fn queue_play_next_tidal_inserts_pending_row_after_current_with_hint() {
         })
         .unwrap();
     assert_eq!(shifted_pos, 2);
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn queue_play_next_uses_current_queue_item_for_duplicate_track() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_basic_tracks(&db);
     let (duplicate_qid, current_qid, tail_qid): (i64, i64, i64) = db
         .with_conn(|conn| {
@@ -4783,13 +4691,11 @@ async fn queue_play_next_uses_current_queue_item_for_duplicate_track() {
     assert_eq!(rows[2].2.as_deref(), Some("Exact Current Next"));
     assert_eq!(rows[3], (tail_qid, Some(2), None));
     assert_eq!(current_queue_item_id, Some(current_qid));
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn queue_play_next_repairs_stale_anchor_before_insert() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_basic_tracks(&db);
     let stale_qid = 999_999_i64;
     let (repaired_qid, duplicate_qid, tail_qid): (i64, i64, i64) = db
@@ -4861,13 +4767,11 @@ async fn queue_play_next_repairs_stale_anchor_before_insert() {
     assert_eq!(rows[2], (duplicate_qid, Some(1), None));
     assert_eq!(rows[3], (tail_qid, Some(2), None));
     assert_eq!(current_queue_item_id, Some(repaired_qid));
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn queue_play_next_repairs_mismatched_anchor_before_insert() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_basic_tracks(&db);
     let (repaired_qid, mismatched_qid): (i64, i64) = db
         .with_conn(|conn| {
@@ -4932,13 +4836,11 @@ async fn queue_play_next_repairs_mismatched_anchor_before_insert() {
     assert_eq!(rows[1].2.as_deref(), Some("Repaired Mismatch Next"));
     assert_eq!(rows[2], (mismatched_qid, Some(2), None));
     assert_eq!(current_queue_item_id, Some(repaired_qid));
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn queue_play_next_many_preserves_requested_order() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_basic_tracks(&db);
     db.with_conn(|conn| {
         conn.execute(
@@ -5012,13 +4914,11 @@ async fn queue_play_next_many_preserves_requested_order() {
             (2, "Second external".to_string(), Some(102)),
         ]
     );
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn queue_play_next_many_repairs_missing_anchor_and_preserves_order() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     seed_basic_tracks(&db);
     let (repaired_qid, duplicate_qid, tail_qid): (i64, i64, i64) = db
         .with_conn(|conn| {
@@ -5094,13 +4994,11 @@ async fn queue_play_next_many_repairs_missing_anchor_and_preserves_order() {
     assert_eq!(rows[3], (duplicate_qid, Some(1), None));
     assert_eq!(rows[4], (tail_qid, Some(2), None));
     assert_eq!(current_queue_item_id, Some(repaired_qid));
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn queue_append_external_track_creates_pending_row_without_hint() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
         db.clone(),
     ))));
@@ -5141,13 +5039,11 @@ async fn queue_append_external_track_creates_pending_row_without_hint() {
         })
         .unwrap();
     assert_eq!(hint, None);
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn create_playlist_from_queue_imports_pending_tidal_rows_with_hint() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     db.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO queue (
@@ -5201,13 +5097,11 @@ async fn create_playlist_from_queue_imports_pending_tidal_rows_with_hint() {
         })
         .unwrap();
     assert_eq!(saved, vec![(777, "Queued TIDAL".to_string())]);
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn create_playlist_from_queue_imports_ephemeral_tidal_overlay() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     // The currently-playing ephemeral track plus two upcoming ephemeral rows.
     insert_ephemeral_rows(
         &db,
@@ -5279,14 +5173,11 @@ async fn create_playlist_from_queue_imports_ephemeral_tidal_overlay() {
             (903, "Third TIDAL".to_string())
         ]
     );
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn promote_pending_row_emit_broadcasts_queue_updated() {
-    let db_path = std::env::temp_dir().join(format!("noor-test-{}.db", uuid::Uuid::new_v4()));
-    let db = Database::open(&db_path).expect("db opened");
+    let db = Database::open_in_memory().expect("db opened");
     db.run_migrations().expect("migrations");
     db.with_conn(|conn| schema::run_migrations(conn))
         .expect("schema migrations");
@@ -5354,14 +5245,11 @@ async fn promote_pending_row_emit_broadcasts_queue_updated() {
         no_more.is_err(),
         "no second event should fire on idempotent retry"
     );
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn promote_pending_row_emit_marks_external_candidate_resolved() {
-    let db_path = std::env::temp_dir().join(format!("noor-test-{}.db", uuid::Uuid::new_v4()));
-    let db = Database::open(&db_path).expect("db opened");
+    let db = Database::open_in_memory().expect("db opened");
     db.run_migrations().expect("migrations");
     db.with_conn(|conn| schema::run_migrations(conn))
         .expect("schema migrations");
@@ -5417,8 +5305,6 @@ async fn promote_pending_row_emit_marks_external_candidate_resolved() {
         })
         .unwrap();
     assert_eq!(resolved, Some(1));
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[test]
@@ -5878,7 +5764,7 @@ async fn library_batch_routes_reject_impossible_ids_before_work() {
 
 #[tokio::test]
 async fn library_batch_set_genre_returns_not_found_for_missing_positive_genre() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
         db.clone(),
     ))));
@@ -5921,13 +5807,11 @@ async fn library_batch_set_genre_returns_not_found_for_missing_positive_genre() 
         })
         .expect("count track genres");
     assert_eq!(assigned, 0, "missing genre must not assign tracks");
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn library_batch_add_to_playlist_returns_not_found_before_tidal_auth() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
         db.clone(),
     ))));
@@ -5959,13 +5843,11 @@ async fn library_batch_add_to_playlist_returns_not_found_before_tidal_auth() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn library_batch_add_to_playlist_rejects_local_targets_before_tidal_auth() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
         db.clone(),
     ))));
@@ -6013,13 +5895,11 @@ async fn library_batch_add_to_playlist_rejects_local_targets_before_tidal_auth()
         })
         .expect("count playlist tracks");
     assert_eq!(added, 0, "invalid local target must not mutate playlist");
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn library_batch_delete_removes_local_only_items_without_tidal_session() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
         db.clone(),
     ))));
@@ -6077,13 +5957,11 @@ async fn library_batch_delete_removes_local_only_items_without_tidal_session() {
         remaining_albums, 0,
         "local-only delete must remove local album row"
     );
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn library_batch_delete_tidal_backed_track_without_session_keeps_local_row() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
         db.clone(),
     ))));
@@ -6126,8 +6004,6 @@ async fn library_batch_delete_tidal_backed_track_without_session_keeps_local_row
         })
         .expect("count track");
     assert_eq!(remaining, 1, "failed remote delete must keep local row");
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
@@ -6502,7 +6378,7 @@ async fn sync_routes_reject_invalid_services() {
 
 #[tokio::test]
 async fn sync_routes_trim_tidal_service_before_mutation() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
         db.clone(),
     ))));
@@ -6534,13 +6410,11 @@ async fn sync_routes_trim_tidal_service_before_mutation() {
         auto_sync_daily,
         "trimmed tidal service must update tidal row"
     );
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn discovery_training_rejects_unknown_mode_before_engine_work() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     crate::services::learning::set_discovery_engine(
         &db,
         crate::services::learning::DiscoveryEngine::V1,
@@ -6563,13 +6437,11 @@ async fn discovery_training_rejects_unknown_mode_before_engine_work() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn discovery_training_settings_reject_unknown_values_without_mutation() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     crate::services::learning::set_discovery_intensity(
         &db,
         crate::services::learning::DiscoveryIntensity::Max,
@@ -6628,13 +6500,11 @@ async fn discovery_training_settings_reject_unknown_values_without_mutation() {
         crate::services::learning::load_discovery_training_safety_profile(&db),
         crate::services::learning::DiscoveryTrainingSafetyProfile::Performance
     );
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
 async fn discovery_training_valid_settings_still_persist() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
         db.clone(),
     ))));
@@ -6675,8 +6545,6 @@ async fn discovery_training_valid_settings_still_persist() {
         crate::services::learning::load_discovery_training_safety_profile(&db),
         crate::services::learning::DiscoveryTrainingSafetyProfile::LaptopSafe
     );
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
@@ -6720,7 +6588,7 @@ async fn discovery_request_routes_reject_unknown_modes_before_work() {
 
 #[tokio::test]
 async fn discovery_preset_valid_mode_still_persists() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
         db.clone(),
     ))));
@@ -6750,8 +6618,6 @@ async fn discovery_preset_valid_mode_still_persists() {
         })
         .expect("load discovery preset mode");
     assert_eq!(saved_mode, "word-cloud");
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 // Characterization tests for TIDAL-handler failure shapes. These differ on
@@ -6762,7 +6628,7 @@ async fn discovery_preset_valid_mode_still_persists() {
 
 #[tokio::test]
 async fn get_album_tracks_returns_local_tracks_when_tidal_session_absent() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     // The album MUST have a tidal_id, otherwise the handler returns at
     // routes.rs:977 with album_tidal_id: null - which is a different code
     // path. To exercise the "no TIDAL session" branch (routes.rs:995) we
@@ -6823,8 +6689,6 @@ async fn get_album_tracks_returns_local_tracks_when_tidal_session_absent() {
         body["album_tidal_id"], 8888,
         "album_tidal_id must survive even when session is absent"
     );
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
@@ -7066,7 +6930,7 @@ async fn tidal_video_playback_positive_id_still_requires_session() {
 
 #[tokio::test]
 async fn tidal_track_import_rejects_non_positive_tidal_ids_without_db_insert() {
-    let (db, db_path) = fresh_migrated_db();
+    let db = fresh_migrated_db();
     let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
         db.clone(),
     ))));
@@ -7122,8 +6986,6 @@ async fn tidal_track_import_rejects_non_positive_tidal_ids_without_db_insert() {
         })
         .expect("count tracks");
     assert_eq!(count, 0, "invalid imports must not create track rows");
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
@@ -7197,7 +7059,7 @@ async fn tidal_track_import_rejects_invalid_metadata_without_db_insert() {
     ];
 
     for (case, body) in invalid_cases {
-        let (db, db_path) = fresh_migrated_db();
+        let db = fresh_migrated_db();
         let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
             db.clone(),
         ))));
@@ -7228,8 +7090,6 @@ async fn tidal_track_import_rejects_invalid_metadata_without_db_insert() {
         assert_eq!(track_count, 0, "{case} must not create track rows");
         assert_eq!(artist_count, 0, "{case} must not create artist rows");
         assert_eq!(album_count, 0, "{case} must not create album rows");
-
-        let _ = std::fs::remove_file(db_path);
     }
 }
 

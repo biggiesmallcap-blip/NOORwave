@@ -2937,10 +2937,7 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             embedding_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            master_key: crate::services::crypto::MasterKey::load_or_generate(
-                &std::env::temp_dir().join(format!("noor-test-key-{}", uuid::Uuid::new_v4())),
-            )
-            .expect("test master key"),
+            master_key: crate::services::crypto::MasterKey::ephemeral(),
             prepared_ephemeral_tidal_next: None,
             lastfm_api_secret: None,
             server_token: String::new(),
