@@ -2937,10 +2937,7 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             embedding_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            master_key: crate::services::crypto::MasterKey::load_or_generate(
-                &std::env::temp_dir().join(format!("noor-test-key-{}", uuid::Uuid::new_v4())),
-            )
-            .expect("test master key"),
+            master_key: crate::services::crypto::MasterKey::ephemeral(),
             pending_tidal_mix_queue: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),

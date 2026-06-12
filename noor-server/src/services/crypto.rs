@@ -77,6 +77,20 @@ impl MasterKey {
         })
     }
 
+    /// Build a throwaway key from random bytes without touching disk. Tests use
+    /// this so a 1000+ test suite doesn't write a `.noor_secret` file per case:
+    /// under Windows Defender scanning, that temp-file churn intermittently
+    /// stalls a test past libtest's 60s warning threshold.
+    #[cfg(test)]
+    pub fn ephemeral() -> Self {
+        let mut buf = [0u8; 32];
+        OsRng.fill_bytes(&mut buf);
+        let key = Key::<Aes256Gcm>::from_slice(&buf);
+        Self {
+            cipher: Arc::new(Aes256Gcm::new(key)),
+        }
+    }
+
     /// Encrypt arbitrary bytes. Output layout: `nonce(12) || ciphertext+tag`.
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
