@@ -64,6 +64,28 @@ function Fail([string]$msg) {
     exit 1
 }
 
+function Invoke-Repowise([string[]]$rwArgs, [string]$captureLog) {
+    # repowise logs progress to stderr. Under $ErrorActionPreference='Stop' a
+    # 2>&1 merge makes PowerShell raise a terminating NativeCommandError when
+    # the process exits (stderr was non-empty), aborting the script AFTER the
+    # run but BEFORE post-verify -- a silent "looked like it failed" even on a
+    # clean run. Drop to 'Continue' for the native call and key success off
+    # $LASTEXITCODE, which carries the real exit code.
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    Push-Location -LiteralPath $repoRoot
+    try {
+        # Tee to the log, then Out-Null: without discarding the passthrough,
+        # repowise's stdout would leak into the function's output stream and
+        # $rc would become @("...stdout...", exitcode) instead of just the int.
+        & repowise @rwArgs 2>&1 | Tee-Object -FilePath $captureLog | Out-Null
+        return $LASTEXITCODE
+    } finally {
+        Pop-Location
+        $ErrorActionPreference = $prev
+    }
+}
+
 if (Test-Path -LiteralPath $errMark) { Remove-Item -LiteralPath $errMark -Force }
 
 # --- preflight ---
@@ -96,13 +118,7 @@ if ($Since)         { $updateArgs += @("--since", $Since) }
 if ($CascadeBudget) { $updateArgs += @("--cascade-budget", "$CascadeBudget") }
 
 Write-Host "Running: repowise $($updateArgs -join ' ')"
-Push-Location -LiteralPath $repoRoot
-try {
-    & repowise @updateArgs *>&1 | Tee-Object -FilePath $runLog
-    $rc = $LASTEXITCODE
-} finally {
-    Pop-Location
-}
+$rc = Invoke-Repowise $updateArgs $runLog
 
 # --- post-verify: do not trust exit 0 ---
 if ($rc -ne 0) { Fail "repowise update exited $rc (see $runLog)" }
@@ -115,13 +131,7 @@ Write-Host "Update OK." -ForegroundColor Green
 
 if ($Reindex) {
     Write-Host "Reindexing embeddings (embedder=$embedder)..."
-    Push-Location -LiteralPath $repoRoot
-    try {
-        & repowise reindex --embedder $embedder *>&1 | Tee-Object -FilePath (Join-Path $repowise ".reindex.run.log")
-        $rrc = $LASTEXITCODE
-    } finally {
-        Pop-Location
-    }
+    $rrc = Invoke-Repowise @("reindex", "--embedder", $embedder) (Join-Path $repowise ".reindex.run.log")
     if ($rrc -ne 0) { Fail "repowise reindex exited $rrc" }
     Write-Host "Reindex OK." -ForegroundColor Green
 }
