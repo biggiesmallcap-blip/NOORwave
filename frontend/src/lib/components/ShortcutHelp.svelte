@@ -193,7 +193,7 @@
 		height: 34px;
 		border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
 		border-radius: 50%;
-		background: rgba(255, 255, 255, 0.06);
+		background: var(--surface-1);
 		color: var(--text-primary, #fff);
 		font-size: var(--font-size-md);
 		line-height: 1;
@@ -201,7 +201,7 @@
 	}
 
 	.shortcut-close:hover {
-		background: rgba(255, 255, 255, 0.12);
+		background: var(--surface-2);
 	}
 
 	.shortcut-groups {
@@ -236,9 +236,9 @@
 	kbd {
 		min-width: 30px;
 		padding: 5px 8px;
-		border: 1px solid rgba(255, 255, 255, 0.14);
+		border: 1px solid var(--border-strong);
 		border-radius: 7px;
-		background: rgba(255, 255, 255, 0.08);
+		background: var(--surface-2);
 		box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.2);
 		color: var(--text-primary, #fff);
 		font-family: inherit;

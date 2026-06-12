@@ -14,6 +14,11 @@
 	--bg-raised:     #18181f;
 	--bg-surface:    rgba(255, 255, 255, 0.032);
 	--bg-hover:      rgba(255, 255, 255, 0.05);
+	/* Opaque elevated surface for floating overlays (context menus, shortcut
+	 * sheet) that can't be translucent over arbitrary content. Was only ever a
+	 * hardcoded #14162a fallback in the consumers, so light mode painted them
+	 * dark; now it's a real theme token. */
+	--bg-surface-strong: #14162a;
 
 	/* Stepped surface tokens used by the mobile remote chrome. -0 is the page
 	 * base (matches body and html so iOS overscroll bounce stays in-theme); -1
@@ -99,6 +104,7 @@
 	--bg-raised:     #e4e8ef;
 	--bg-surface:    rgba(22, 29, 43, 0.07);
 	--bg-hover:      rgba(22, 29, 43, 0.12);
+	--bg-surface-strong: #ffffff;
 
 	--surface-0:     #f2f4f7;
 	--surface-1:     rgba(22, 29, 43, 0.08);
