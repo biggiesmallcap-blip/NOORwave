@@ -5636,13 +5636,16 @@ async fn clear_ephemeral_playback_markers(state: &SharedState, clear_mix_queue: 
     }
 }
 
+// Takes `conn` rather than opening its own `with_conn`: every caller already
+// holds the DB lock (inside `active_dj_pair_for_state_and_conn` and the
+// rebuild-profile route), and `Mutex<Connection>` is non-reentrant, so a nested
+// `with_conn` here deadlocks forever.
 pub(crate) fn active_ephemeral_tidal_mix_dj_pair(
     state: &crate::AppState,
+    conn: &rusqlite::Connection,
 ) -> Option<crate::playback::dj_lookahead::DjLookaheadPair> {
     let current = state.ephemeral_tidal_track.as_ref()?;
-    let pending = state
-        .db
-        .with_conn(queue::peek_next_ephemeral_tidal_track)
+    let pending = queue::peek_next_ephemeral_tidal_track(conn)
         .ok()
         .flatten()
         .into_iter()
@@ -5686,7 +5689,7 @@ pub(crate) fn active_dj_pair_for_state_and_conn(
     state: &crate::AppState,
     conn: &rusqlite::Connection,
 ) -> anyhow::Result<crate::playback::dj_lookahead::DjLookaheadPair> {
-    if let Some(pair) = active_ephemeral_tidal_mix_dj_pair(state)
+    if let Some(pair) = active_ephemeral_tidal_mix_dj_pair(state, conn)
         && pair.next.is_some()
     {
         return Ok(pair);

@@ -815,7 +815,7 @@ async fn rebuild_profile(
                     media_ref_kind: payload.media_ref_kind.clone(),
                     media_ref_id: payload.media_ref_id.clone(),
                 };
-                let pair = match super::active_ephemeral_tidal_mix_dj_pair(&state) {
+                let pair = match super::active_ephemeral_tidal_mix_dj_pair(&state, conn) {
                     Some(pair) => pair,
                     None => crate::playback::dj_lookahead::load_dj_lookahead_pair(conn)?,
                 };
