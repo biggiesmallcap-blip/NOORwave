@@ -3429,7 +3429,7 @@
 	.discovery-bar-track {
 		height: 4px;
 		border-radius: 2px;
-		background: var(--surface-raised, rgba(255, 255, 255, 0.08));
+		background: var(--surface-2);
 		overflow: hidden;
 	}
 

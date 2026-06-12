@@ -45,3 +45,19 @@ Two options when the time comes: (a) bump the const + `TOTP_VER` and ship a
 release, or (b) extend `refresh_from_js` to grep the cipher dict out of the
 bundle too and persist into `server_config` for auto-rotation.
 - Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/46
+
+### fix: dj-cockpit references undefined CSS tokens (--accent-primary, --state-danger)
+
+While auditing light mode I scanned for used-but-undefined CSS custom
+properties. Two are real and theme-agnostic (broken in both themes, so not a
+light-mode-only issue): `--accent-primary` (used in
+`dj-cockpit/TransitionLane.svelte`) and `--state-danger` (used in
+`dj-cockpit/ProfileCorrectionPanel.svelte` and
+`dj-cockpit/TransitionWaveform.svelte`). Neither is defined in `app.css` nor
+injected via `setProperty`, so the no-fallback `var()` calls collapse to
+inherited text colour: the transition-lane accent styling and the danger/clash
+colours render as plain text colour instead of accent/red. The intended tokens
+already exist as `--accent` / `--accent-strong` and `--state-error`. Fix: rename
+the usages to the real tokens, or alias `--accent-primary: var(--accent)` and
+`--state-danger: var(--state-error)` in both theme blocks.
+- Spawned by: commit on branch `fix/tidal-mix-real-queue-rows` (light-mode pass)
