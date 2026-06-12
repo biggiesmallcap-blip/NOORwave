@@ -996,7 +996,6 @@ fn fresh_test_state(db: Database) -> crate::AppState {
         refreshed_seeds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         embedding_cache: Arc::new(std::sync::Mutex::new(None)),
         master_key: crate::services::crypto::MasterKey::ephemeral(),
-        pending_tidal_mix_queue: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         prepared_ephemeral_tidal_next: None,
         lastfm_api_secret: None,
         server_token: String::new(),
@@ -3210,29 +3209,73 @@ async fn discovery_blend_add_appends_discoveries_without_replacing_queue() {
     .unwrap();
 }
 
-#[tokio::test]
-async fn tidal_mix_overlay_preserves_pending_deque_order() {
-    let db = fresh_migrated_db();
+/// Append ephemeral TIDAL rows for tests. Tuple: (tidal_id, title, artist,
+/// album, artwork, duration_ms).
+fn insert_ephemeral_rows(
+    db: &Database,
+    source: &str,
+    rows: &[(
+        i64,
+        &str,
+        Option<&str>,
+        Option<&str>,
+        Option<&str>,
+        Option<i64>,
+    )],
+) {
+    let inserts: Vec<crate::playback::queue::EphemeralTidalInsert<'_>> = rows
+        .iter()
+        .map(
+            |(id, title, artist, album, art, dur)| crate::playback::queue::EphemeralTidalInsert {
+                tidal_id: *id,
+                title,
+                artist: *artist,
+                album_title: *album,
+                artwork_url: *art,
+                duration_ms: *dur,
+            },
+        )
+        .collect();
     db.with_conn(|conn| {
-        conn.execute(
-            "INSERT INTO artists (id, name) VALUES (8101, 'Old Playlist Artist')",
-            [],
-        )?;
-        conn.execute(
-            "INSERT INTO tracks (id, title, artist_id, duration_ms)
-                 VALUES
-                    (8101, 'Old Playlist First', 8101, 200000),
-                    (8102, 'Old Playlist Second', 8101, 200000)",
-            [],
-        )?;
-        conn.execute(
-            "INSERT INTO queue (track_id, position, source)
-                 VALUES (8101, 0, 'playlist'), (8102, 1, 'playlist')",
-            [],
-        )?;
-        Ok(())
+        crate::playback::queue::append_ephemeral_tidal_tracks(conn, &inserts, source)?;
+        Ok::<_, anyhow::Error>(())
     })
     .unwrap();
+}
+
+#[tokio::test]
+async fn ephemeral_tidal_rows_appear_in_queue_in_order() {
+    let db = fresh_migrated_db();
+    insert_ephemeral_rows(
+        &db,
+        "tidal_mix",
+        &[
+            (
+                873_891_22,
+                "The Big Tree",
+                Some("Stand High Patrol"),
+                None,
+                None,
+                Some(180_000),
+            ),
+            (
+                341_378_223,
+                "Positive",
+                Some("Jamback"),
+                None,
+                None,
+                Some(170_000),
+            ),
+            (
+                172_522_829,
+                "Moi Aussi Marianne",
+                Some("Yatoba Lia"),
+                None,
+                None,
+                Some(210_000),
+            ),
+        ],
+    );
     let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
     {
         let mut guard = state.write().await;
@@ -3260,31 +3303,6 @@ async fn tidal_mix_overlay_preserves_pending_deque_order() {
             source: "tidal_ephemeral".to_string(),
             artwork_url: None,
         });
-        let mut pending = guard.pending_tidal_mix_queue.lock().unwrap();
-        pending.push_back(crate::PendingEphemeralTidalTrack {
-            tidal_track_id: 873_891_22,
-            title: "The Big Tree".to_string(),
-            artist_name: Some("Stand High Patrol".to_string()),
-            album_title: None,
-            artwork_url: None,
-            duration_ms: Some(180_000),
-        });
-        pending.push_back(crate::PendingEphemeralTidalTrack {
-            tidal_track_id: 341_378_223,
-            title: "Positive".to_string(),
-            artist_name: Some("Jamback".to_string()),
-            album_title: None,
-            artwork_url: None,
-            duration_ms: Some(170_000),
-        });
-        pending.push_back(crate::PendingEphemeralTidalTrack {
-            tidal_track_id: 172_522_829,
-            title: "Moi Aussi Marianne".to_string(),
-            artist_name: Some("Yatoba Lia".to_string()),
-            album_title: None,
-            artwork_url: None,
-            duration_ms: Some(210_000),
-        });
     }
 
     let snapshot = {
@@ -3293,6 +3311,7 @@ async fn tidal_mix_overlay_preserves_pending_deque_order() {
     };
     let snapshot = overlay_snapshot_with_external_track(&state, snapshot).await;
 
+    // Current comes from the ephemeral marker; the rest are real queue rows.
     assert_eq!(
         snapshot
             .state
@@ -3312,36 +3331,58 @@ async fn tidal_mix_overlay_preserves_pending_deque_order() {
     );
     assert!(
         snapshot.queue.iter().all(|item| item.source == "tidal_mix"),
-        "active TIDAL mix overlay must shadow the stale durable playlist queue"
+        "ephemeral TIDAL rows keep their collection source"
+    );
+    assert!(
+        snapshot.queue.iter().all(|item| !item.is_pending),
+        "ephemeral TIDAL rows are directly playable, not pending"
+    );
+    assert!(
+        snapshot
+            .queue
+            .iter()
+            .all(|item| item.track.tidal_id.is_some() && item.track.id < 0),
+        "ephemeral rows carry a tidal_id and a synthetic negative track id"
     );
 }
 
 #[tokio::test]
-async fn tidal_mix_overlay_preserves_large_loaded_album_rows() {
+async fn ephemeral_tidal_album_rows_preserve_metadata() {
     let db = fresh_migrated_db();
-    db.with_conn(|conn| {
-        conn.execute(
-            "INSERT INTO artists (id, name) VALUES (8301, 'Unrelated Playlist Artist')",
-            [],
-        )?;
-        conn.execute(
-            "INSERT INTO tracks (id, title, artist_id, duration_ms)
-                 VALUES
-                    (8301, 'Unrelated Queue First', 8301, 200000),
-                    (8302, 'Unrelated Queue Second', 8301, 200000)",
-            [],
-        )?;
-        conn.execute(
-            "INSERT INTO queue (track_id, position, source)
-                 VALUES (8301, 0, 'playlist'), (8302, 1, 'playlist')",
-            [],
-        )?;
-        Ok(())
-    })
-    .unwrap();
-    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
     let album_tidal_id = 58_520_793_i64;
     let tidal_track_base = album_tidal_id * 100;
+    let rows: Vec<(i64, String, String)> = (2..=45)
+        .map(|n| {
+            (
+                tidal_track_base + n,
+                format!("Anthology Track {n}"),
+                format!("https://resources.tidal.com/images/anthology-{n}/640x640.jpg"),
+            )
+        })
+        .collect();
+    let inserts: Vec<(
+        i64,
+        &str,
+        Option<&str>,
+        Option<&str>,
+        Option<&str>,
+        Option<i64>,
+    )> = rows
+        .iter()
+        .map(|(id, title, art)| {
+            (
+                *id,
+                title.as_str(),
+                Some("The Beatles"),
+                Some("Anthology 2"),
+                Some(art.as_str()),
+                Some(180_000),
+            )
+        })
+        .collect();
+    insert_ephemeral_rows(&db, "tidal_album", &inserts);
+
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
     {
         let mut current = test_track(-(tidal_track_base + 1), "Anthology Track 1");
         current.artist_id = 0;
@@ -3354,19 +3395,6 @@ async fn tidal_mix_overlay_preserves_large_loaded_album_rows() {
 
         let mut guard = state.write().await;
         guard.ephemeral_tidal_track = Some(current);
-        let mut pending = guard.pending_tidal_mix_queue.lock().unwrap();
-        for track_number in 2..=45 {
-            pending.push_back(crate::PendingEphemeralTidalTrack {
-                tidal_track_id: tidal_track_base + track_number,
-                title: format!("Anthology Track {track_number}"),
-                artist_name: Some("The Beatles".to_string()),
-                album_title: Some("Anthology 2".to_string()),
-                artwork_url: Some(format!(
-                    "https://resources.tidal.com/images/anthology-{track_number}/640x640.jpg"
-                )),
-                duration_ms: Some(180_000 + track_number),
-            });
-        }
     }
 
     let snapshot = {
@@ -3403,21 +3431,17 @@ async fn tidal_mix_overlay_preserves_large_loaded_album_rows() {
             .collect::<Vec<_>>()
     );
     assert!(
-        snapshot.queue.iter().all(|item| item.source == "tidal_mix"
-            && item.track.album_title.as_deref() == Some("Anthology 2")
-            && item
-                .track
-                .artwork_url
-                .as_deref()
-                .is_some_and(|url| url.contains("resources.tidal.com"))),
-        "visible TIDAL album queue rows must preserve album metadata and artwork"
-    );
-    assert!(
         snapshot
             .queue
             .iter()
-            .all(|item| !item.track.title.starts_with("Unrelated Queue")),
-        "active TIDAL album overlay must not leak stale durable queue rows"
+            .all(|item| item.source == "tidal_album"
+                && item.track.album_title.as_deref() == Some("Anthology 2")
+                && item
+                    .track
+                    .artwork_url
+                    .as_deref()
+                    .is_some_and(|url| url.contains("resources.tidal.com"))),
+        "ephemeral TIDAL album rows must preserve album metadata and artwork"
     );
 }
 
@@ -3445,64 +3469,66 @@ async fn tidal_mix_replacement_clears_stale_persisted_queue() {
     })
     .unwrap();
 
-    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
-    {
-        let guard = state.read().await;
-        guard.pending_tidal_mix_queue.lock().unwrap().push_back(
-            crate::PendingEphemeralTidalTrack {
-                tidal_track_id: 123_456,
-                title: "Album Track Two".to_string(),
-                artist_name: Some("Album Artist".to_string()),
-                album_title: Some("Album".to_string()),
-                artwork_url: Some(
-                    "https://resources.tidal.com/images/a/b/c/320x320.jpg".to_string(),
-                ),
-                duration_ms: Some(180_000),
-            },
-        );
-    }
+    // Both durable rows and a prior ephemeral continuation are wiped: the
+    // producer clears the slate before appending the new mix.
+    insert_ephemeral_rows(
+        &db,
+        "tidal_mix",
+        &[(
+            123_456,
+            "Album Track Two",
+            Some("Album Artist"),
+            Some("Album"),
+            Some("https://resources.tidal.com/images/a/b/c/320x320.jpg"),
+            Some(180_000),
+        )],
+    );
+    db.with_conn(|conn| {
+        conn.execute(
+            "UPDATE playback_state SET current_queue_item_id = 1 WHERE id = 1",
+            [],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .unwrap();
 
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
     if let Err((status, _)) = clear_persisted_queue_for_tidal_mix(&state).await {
         panic!("clear_persisted_queue_for_tidal_mix failed: {status}");
     }
 
-    let queue_len = db
+    let (queue_len, anchor): (i64, Option<i64>) = db
         .with_conn(|conn| {
-            conn.query_row("SELECT COUNT(*) FROM queue", [], |row| row.get::<_, i64>(0))
-                .map_err(anyhow::Error::from)
+            let len =
+                conn.query_row("SELECT COUNT(*) FROM queue", [], |row| row.get::<_, i64>(0))?;
+            let anchor = conn.query_row(
+                "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get::<_, Option<i64>>(0),
+            )?;
+            Ok::<_, anyhow::Error>((len, anchor))
         })
         .unwrap();
-    assert_eq!(queue_len, 0);
-    assert_eq!(
-        state
-            .read()
-            .await
-            .pending_tidal_mix_queue
-            .lock()
-            .unwrap()
-            .len(),
-        1,
-        "durable queue cleanup must preserve the active TIDAL continuation"
-    );
+    assert_eq!(queue_len, 0, "clear wipes durable + ephemeral rows alike");
+    assert_eq!(anchor, None, "the stale play-head anchor is dropped");
 }
 
 #[tokio::test]
 async fn clear_queue_clears_pending_tidal_mix_overlay() {
     let db = fresh_migrated_db();
+    insert_ephemeral_rows(
+        &db,
+        "tidal_mix",
+        &[(
+            987_654,
+            "Queued TIDAL Mix Track",
+            Some("TIDAL Artist"),
+            Some("TIDAL Mix"),
+            None,
+            Some(180_000),
+        )],
+    );
     let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
-    {
-        let guard = state.read().await;
-        guard.pending_tidal_mix_queue.lock().unwrap().push_back(
-            crate::PendingEphemeralTidalTrack {
-                tidal_track_id: 987_654,
-                title: "Queued TIDAL Mix Track".to_string(),
-                artist_name: Some("TIDAL Artist".to_string()),
-                album_title: Some("TIDAL Mix".to_string()),
-                artwork_url: None,
-                duration_ms: Some(180_000),
-            },
-        );
-    }
     let app = api_routes(state.clone());
 
     let resp = app
@@ -3537,17 +3563,7 @@ async fn clear_queue_clears_pending_tidal_mix_overlay() {
     let queue = body["queue"].as_array().expect("queue array");
     assert!(
         queue.is_empty(),
-        "pending TIDAL mix overlay must not reappear after clear"
-    );
-    assert!(
-        state
-            .read()
-            .await
-            .pending_tidal_mix_queue
-            .lock()
-            .unwrap()
-            .is_empty(),
-        "pending TIDAL mix deque must be cleared"
+        "ephemeral TIDAL rows must not reappear after clear"
     );
 }
 
@@ -5086,6 +5102,22 @@ async fn create_playlist_from_queue_imports_pending_tidal_rows_with_hint() {
 #[tokio::test]
 async fn create_playlist_from_queue_imports_ephemeral_tidal_overlay() {
     let db = fresh_migrated_db();
+    // The currently-playing ephemeral track plus two upcoming ephemeral rows.
+    insert_ephemeral_rows(
+        &db,
+        "tidal_mix",
+        &[
+            (
+                902,
+                "Next TIDAL",
+                Some("Next Artist"),
+                Some("Next Album"),
+                Some("https://resources.tidal.com/images/cover.jpg"),
+                Some(181_000),
+            ),
+            (903, "Third TIDAL", None, None, None, None),
+        ],
+    );
     let mut state = fresh_test_state(db.clone());
     let mut current = test_track(-901, "Current TIDAL");
     current.tidal_id = Some(901);
@@ -5093,25 +5125,6 @@ async fn create_playlist_from_queue_imports_ephemeral_tidal_overlay() {
     current.album_title = Some("Current Album".to_string());
     current.source = "tidal_ephemeral".to_string();
     state.ephemeral_tidal_track = Some(current);
-    {
-        let mut pending = state.pending_tidal_mix_queue.lock().unwrap();
-        pending.push_back(crate::PendingEphemeralTidalTrack {
-            tidal_track_id: 902,
-            title: "Next TIDAL".to_string(),
-            artist_name: Some("Next Artist".to_string()),
-            album_title: Some("Next Album".to_string()),
-            artwork_url: Some("https://resources.tidal.com/images/cover.jpg".to_string()),
-            duration_ms: Some(181_000),
-        });
-        pending.push_back(crate::PendingEphemeralTidalTrack {
-            tidal_track_id: 903,
-            title: "Third TIDAL".to_string(),
-            artist_name: None,
-            album_title: None,
-            artwork_url: None,
-            duration_ms: None,
-        });
-    }
 
     let app = api_routes(Arc::new(tokio::sync::RwLock::new(state)));
     let resp = app

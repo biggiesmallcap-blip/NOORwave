@@ -27,6 +27,7 @@ describe('search layout contracts', () => {
 	test('search page renders local results before external providers finish', () => {
 		expect(source).toContain('const INITIAL_SEARCH_PAGE_SIZE = 12');
 		expect(source).toContain('const SECONDARY_SEARCH_PAGE_SIZE = 8');
+		expect(source).toContain('const PRIMARY_TIDAL_SEARCH_TIMEOUT_MS = 8000');
 		expect(source).toContain('const SECONDARY_PROVIDER_TIMEOUT_MS = 2500');
 		expect(source).toContain('let searchGeneration = $state(0)');
 		expect(source).toContain('let loadMoreSeq = 0');
@@ -34,6 +35,7 @@ describe('search layout contracts', () => {
 		expect(source).toContain('loadMoreSeq += 1');
 		expect(source).toContain('loadingMore = false');
 		expect(source).toContain('const localPromise = cachedApi.search(q, INITIAL_SEARCH_PAGE_SIZE, signal)');
+		expect(source).toContain('api.searchTidal(q, INITIAL_SEARCH_PAGE_SIZE, signal, 0, PRIMARY_TIDAL_SEARCH_TIMEOUT_MS)');
 		expect(source).toContain('void localPromise.then((localResults) => {');
 		expect(source).toContain('if (!isCurrentSearch(q, generation, signal)) return');
 		expect(source).toContain('void tracksPromise.then((tidalResults) => {');
@@ -50,6 +52,26 @@ describe('search layout contracts', () => {
 		expect(source).toContain('const primaryProviderSearchDone = $derived(');
 		expect(source).toContain('const providerSearchDone = $derived(');
 		expect(source).toContain('{:else if allProviderResultsEmpty && providerSearchDone}');
+	});
+
+	test('search URL query and Spotify playlist links preserve resolver flow', () => {
+		expect(source).toContain("const urlQuery = new URLSearchParams(window.location.search).get('q')?.trim()");
+		expect(source).toContain('query = urlQuery');
+		expect(source).toContain('function spotifyPlaylistHref(spotifyId: string): string');
+		expect(source).toContain("const params = new URLSearchParams({ from: 'search' })");
+		expect(source).toContain("if (activeQueryText) params.set('q', activeQueryText)");
+		expect(source).toContain('return `/spotify-playlist/${encodeURIComponent(spotifyId)}?${params.toString()}`');
+		expect(source).toContain('href={spotifyPlaylistHref(playlist.spotifyId)}');
+		expect(source).toContain('onSelect: () => void goto(spotifyPlaylistHref(playlist.spotifyId))');
+		expect(source).not.toContain('href="/spotify-playlist/{playlist.spotifyId}"');
+	});
+
+	test('playlist provider pending state renders a visible loader', () => {
+		expect(source).toContain('{#if showPlaylists && (playlistRailPending || visiblePlaylists.local.length > 0 || visiblePlaylists.tidal.length > 0 || visiblePlaylists.spotify.length > 0)}');
+		expect(source).toContain('{#if playlistRailPending && visiblePlaylists.local.length === 0 && visiblePlaylists.tidal.length === 0 && visiblePlaylists.spotify.length === 0}');
+		expect(source).toContain('class="album-card playlist-loading-card"');
+		expect(source).toContain('.playlist-loading-art');
+		expect(source).toContain('@keyframes playlist-loading-pulse');
 	});
 
 	test('focused category filters prefetch one deeper page after the light initial batch', () => {
@@ -98,7 +120,7 @@ describe('search layout contracts', () => {
 		expect(source).toContain('searchGeneration === generation');
 		expect(source).toContain('lastQuery === pageQuery');
 		expect(source).toContain('filterMode === pageMode');
-		expect(source).toContain('const next = await api.searchTidal(pageQuery, LOAD_MORE_PAGE_SIZE, undefined, tidalOffset)');
+		expect(source).toContain('PRIMARY_TIDAL_SEARCH_TIMEOUT_MS,');
 		expect(source).toContain('if (!isCurrentLoadMore()) return');
 		expect(source).toContain('searchTidalPlaylists(pageQuery, undefined');
 		expect(source).toContain('searchSpotifyPlaylists(pageQuery, LOAD_MORE_PAGE_SIZE');
@@ -128,6 +150,17 @@ describe('search layout contracts', () => {
 		expect(source).toContain('underratedTracks = null');
 		expect(source).toContain('artistDiscographyArtworkGeneration += 1');
 		expect(source).toContain('discoveryLoadSeq += 1');
+	});
+
+	test('navigation abort clears visible search activity', () => {
+		expect(source).toContain('function resetSearchActivity()');
+		expect(source).toContain('loading = false');
+		expect(source).toContain('loadingMore = false');
+		expect(source).toContain('resetProviderLoading()');
+		expect(source).toContain('beforeNavigate(() => {');
+		expect(source).toContain('abortController?.abort()');
+		expect(source).toContain('clearSecondarySpotifyTimer()');
+		expect(source).toContain('resetSearchActivity()');
 	});
 
 	test('visible search results stay keyed to the committed query while typing the next one', () => {

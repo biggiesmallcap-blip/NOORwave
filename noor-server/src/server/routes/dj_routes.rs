@@ -815,7 +815,7 @@ async fn rebuild_profile(
                     media_ref_kind: payload.media_ref_kind.clone(),
                     media_ref_id: payload.media_ref_id.clone(),
                 };
-                let pair = match super::active_ephemeral_tidal_mix_dj_pair(&state) {
+                let pair = match super::active_ephemeral_tidal_mix_dj_pair(&state, conn) {
                     Some(pair) => pair,
                     None => crate::playback::dj_lookahead::load_dj_lookahead_pair(conn)?,
                 };
@@ -1416,12 +1416,12 @@ async fn rebuild_track_for_tidal_ref(
         return prepared.synthetic_track.clone();
     }
     if let Some(pending) = state_guard
-        .pending_tidal_mix_queue
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|track| track.tidal_track_id == tidal_id)
-        .cloned()
+        .db
+        .with_conn(|conn| {
+            crate::playback::queue::find_ephemeral_tidal_track_by_tidal_id(conn, tidal_id)
+        })
+        .ok()
+        .flatten()
     {
         return synthetic_rebuild_track(&pending);
     }
@@ -2938,9 +2938,6 @@ mod tests {
             )),
             embedding_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             master_key: crate::services::crypto::MasterKey::ephemeral(),
-            pending_tidal_mix_queue: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::VecDeque::new(),
-            )),
             prepared_ephemeral_tidal_next: None,
             lastfm_api_secret: None,
             server_token: String::new(),

@@ -7,24 +7,24 @@ const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(here, '+layout.svelte'), 'utf8');
 const normalizedSource = source.replace(/\r\n/g, '\n');
 
-describe('queue action accessibility contracts', () => {
-	test('hidden queue actions leave the accessibility tree until row hover or focus', () => {
-		expect(source).toContain('let activeQueueActionsRowId = $state<number | null>(null)');
-		expect(source).toContain("window.matchMedia('(max-width: 760px)')");
-		expect(source).toContain('function queueActionsAccessible(itemId: number): boolean');
-		expect(source).toContain('onfocusin={() => setQueueActionsRowActive(item.id)}');
-		expect(source).toContain('onfocusout={(event) => handleQueueRowFocusOut(event, item.id)}');
-		expect(source).toContain('function handleQueueRowMouseLeave(event: MouseEvent, itemId: number)');
-		expect(source.match(/onmouseleave=\{\(event\) => handleQueueRowMouseLeave\(event, item\.id\)\}/g)?.length).toBe(2);
-		expect(source.match(/inert=\{!actionsAccessible\}/g)?.length).toBe(2);
-		expect(source.match(/aria-hidden=\{actionsAccessible \? undefined : 'true'\}/g)?.length).toBe(2);
+describe('queue row accessibility contracts', () => {
+	test('the whole row is one labelled play target, with a single labelled overflow action', () => {
+		// Play is a full-bleed hit button (sidebar + now-playing blocks).
+		expect(source.match(/class="queue-row-hit"/g)?.length).toBe(2);
+		expect(source).toContain('aria-label={isPending ? `Pending: ${item.track.title}` : `Play ${item.track.title}`}');
+		// Actions collapse to one always-present, labelled overflow button.
+		expect(source.match(/class="queue-overflow"/g)?.length).toBe(2);
+		expect(source).toContain("aria-label=\"More actions\"");
+		// The old hover-gated visibility machinery is gone, so nothing is hidden
+		// from the accessibility tree.
+		expect(source).not.toContain('queueActionsAccessible');
+		expect(source).not.toContain('inert={!actionsAccessible}');
 	});
 
-	test('focused queue rows keep duration visible beside row actions', () => {
-		expect(normalizedSource).toContain('.queue-row:hover .queue-time {');
-		expect(normalizedSource).not.toContain('.queue-row:hover .queue-time,\n\t.queue-row:focus-within .queue-time');
-		expect(normalizedSource).toContain('.queue-row:focus-within .queue-side {\n\t\tmin-width: max-content;\n\t}');
-		expect(normalizedSource).toContain('.queue-row:focus-within .queue-time {\n\t\topacity: 1;\n\t}');
-		expect(normalizedSource).toContain('.queue-row:focus-within .queue-actions {\n\t\tposition: static;\n\t\ttransform: none;');
+	test('pending rows disable play; duration is no longer hidden on hover', () => {
+		expect(source).toContain('disabled={isPending}');
+		// Duration stays visible at all times now (no opacity dance).
+		expect(normalizedSource).not.toContain('.queue-row:hover .queue-time {');
+		expect(normalizedSource).not.toContain('.queue-actions {');
 	});
 });

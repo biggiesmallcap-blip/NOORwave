@@ -857,6 +857,10 @@ pub(super) async fn get_artist_discography(
                         "artwork_url": artwork,
                         "album_title": t.album.as_ref().map(|al| al.title.clone()),
                         "album_tidal_id": t.album.as_ref().map(|al| al.id),
+                        "track_number": t.track_number,
+                        "disc_number": t.volume_number,
+                        "artist_name": t.artist.name,
+                        "artist_tidal_id": t.artist.id,
                     })
                 })
                 .collect()

@@ -209,17 +209,6 @@ pub struct AppState {
     /// Symmetric key used to encrypt service secrets (currently only the
     /// Last.fm scrobble session_key — see `services/crypto.rs`).
     pub master_key: services::crypto::MasterKey,
-    /// Legacy pending ephemeral TIDAL tracks queued behind the currently-playing
-    /// ephemeral track (e.g. the rest of a TIDAL mix the user clicked into).
-    /// New persistent external queue actions should use pending rows in the
-    /// `queue` table instead of adding more producers to this in-memory queue.
-    /// Auto-advanced by `handle_runtime_finished` when the active ephemeral
-    /// track ends. Cleared on explicit stop or when the user starts a
-    /// different ephemeral track (`play_tidal_ephemeral` clears before
-    /// queuing). Stream URLs resolved lazily at advance time — TIDAL
-    /// stream URLs expire (~30 min) so pre-resolving the whole mix is wasteful.
-    pub pending_tidal_mix_queue:
-        Arc<std::sync::Mutex<std::collections::VecDeque<PendingEphemeralTidalTrack>>>,
     pub prepared_ephemeral_tidal_next: Option<PreparedEphemeralTidalNext>,
     /// Last.fm app shared secret, loaded once from `LASTFM_API_SECRET` env at
     /// boot. `None` disables every scrobble auth + scrobble call (endpoints
@@ -822,7 +811,6 @@ async fn main() -> Result<()> {
         refreshed_seeds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         embedding_cache: Arc::new(std::sync::Mutex::new(None)),
         master_key,
-        pending_tidal_mix_queue: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         prepared_ephemeral_tidal_next: None,
         lastfm_api_secret,
         server_token,

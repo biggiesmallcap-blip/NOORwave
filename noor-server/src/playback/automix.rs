@@ -48,6 +48,16 @@ pub const AUTOMIX_MIN_UPCOMING: usize = 8;
 const AUTOMIX_BATCH_SIZE: usize = 12;
 const TRUE_SHUFFLE_POOL_MULTIPLIER: usize = 12;
 
+// Hub-track penalty strength for learned neighbours. The trainer already records
+// each candidate's in-degree percentile (how many seeds list it as a neighbour);
+// the radio re-ranker discounts high-in-degree "everyone's neighbour" hubs via
+// `apply_hub_penalty` (services/radio.rs), but automix historically ignored that
+// signal, so a handful of hubs (the XXXTentacion / Blur effect) bled into every
+// genre's queue regardless of fit. Mirror radio's `1/(1 + k*pct)` shape here.
+// Unlike radio this is unconditional (no blend/flag), so it stays mid-strength:
+// between radio's Familiar (0.20) and Adventurous profiles.
+const AUTOMIX_HUB_PENALTY: f64 = 0.35;
+
 #[derive(Debug, Clone)]
 struct ScoredTrack {
     track: Track,
@@ -855,6 +865,15 @@ fn automix_neighbor_policy(row: &queries::EmbeddingNeighborRow) -> GeneratedCand
         policy_reasons.push("texture-only learned signal");
     }
 
+    // Hub penalty: a candidate that's a top neighbour for a large share of seeds
+    // is a graph hub, not a genre match. Discount it the same way radio does so
+    // popular hubs don't dominate every automix queue. `candidate_in_degree_percentile`
+    // is 0 for tracks the trainer never saw as a neighbour, leaving them untouched.
+    if row.candidate_in_degree_percentile > 0.0 {
+        multiplier *= 1.0 / (1.0 + AUTOMIX_HUB_PENALTY * row.candidate_in_degree_percentile);
+        policy_reasons.push("hub penalty");
+    }
+
     GeneratedCandidatePolicy {
         score_multiplier: multiplier,
         reasons: policy_reasons,
@@ -1254,6 +1273,52 @@ mod tests {
             score_multiplier: multiplier,
             reasons: vec![reason],
         }
+    }
+
+    // Minimal neighbour row carrying only the fields the policy logic reads;
+    // everything else is zeroed so a test can isolate one signal at a time.
+    fn neighbor_row(track_id: i64, in_degree_pct: f64) -> queries::EmbeddingNeighborRow {
+        queries::EmbeddingNeighborRow {
+            track_id,
+            title: format!("track {track_id}"),
+            artist_name: None,
+            album_title: None,
+            artwork_url: None,
+            duration_ms: None,
+            best_quality: None,
+            score: 1.0,
+            behavioral_score: 0.5,
+            audio_score: 0.0,
+            metadata_score: 0.0,
+            reason_json: None,
+            confidence: 1.0,
+            support_count: 1,
+            support_transition: 1.0,
+            support_colisten: 0.0,
+            support_structure: 0.0,
+            support_metadata: 0.0,
+            candidate_in_degree: 0,
+            candidate_in_degree_percentile: in_degree_pct,
+            play_count_seed: 0,
+            play_count_candidate: 0,
+            primary_reason: Some("behavioral".to_string()),
+        }
+    }
+
+    #[test]
+    fn hub_candidates_are_penalized_relative_to_non_hubs() {
+        // Same supporting signal, different in-degree: the hub (high percentile)
+        // must come out with a strictly lower multiplier than the non-hub, and a
+        // non-hub (percentile 0) must be left untouched at 1.0.
+        let non_hub = automix_neighbor_policy(&neighbor_row(1, 0.0));
+        let mild = automix_neighbor_policy(&neighbor_row(2, 0.5));
+        let hub = automix_neighbor_policy(&neighbor_row(3, 0.99));
+
+        assert!((non_hub.score_multiplier - 1.0).abs() < 1e-9);
+        assert!(mild.score_multiplier < non_hub.score_multiplier);
+        assert!(hub.score_multiplier < mild.score_multiplier);
+        assert!(hub.reasons.iter().any(|r| *r == "hub penalty"));
+        assert!(!non_hub.reasons.iter().any(|r| *r == "hub penalty"));
     }
 
     #[test]

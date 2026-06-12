@@ -3717,11 +3717,17 @@ export const api = {
 		});
 	},
 
-	searchTidal(q: string, limit = 20, signal?: AbortSignal, offset = 0): Promise<TidalSearchResults> {
+	searchTidal(
+		q: string,
+		limit = 20,
+		signal?: AbortSignal,
+		offset = 0,
+		timeoutMs?: number,
+	): Promise<TidalSearchResults> {
 		return fetchApi<TidalSearchResults>(
 			'/api/tidal/search',
 			{ q, limit: String(limit), offset: String(offset) },
-			{ signal },
+			{ signal, timeoutMs },
 		);
 	},
 

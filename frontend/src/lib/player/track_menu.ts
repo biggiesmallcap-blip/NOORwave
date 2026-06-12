@@ -54,6 +54,14 @@ export interface BuildTrackMenuOptions {
 
 export interface BuildTidalTrackMenuOptions {
 	inQueue?: boolean;
+	/**
+	 * Set when this TIDAL track is a real, mutable queue row (an ephemeral
+	 * mix/album/playlist row). Enables "Move next" + "Remove from queue" against
+	 * the row instead of the library-less defaults.
+	 */
+	queueItemId?: number;
+	/** Callback after a destructive action like remove, so caller can refetch. */
+	onRemoved?: () => void;
 	/** See BuildTrackMenuOptions.remoteRoutes. */
 	remoteRoutes?: boolean;
 }
@@ -186,14 +194,21 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 export function buildTidalTrackMenu(track: TidalPlayable, options: BuildTidalTrackMenuOptions = {}): MenuItem[] {
 	const playable = canPlayTrack(track);
 	const playableLabel = getPlayableLabel(track);
+	const queueItemId = options.queueItemId;
 	const items: MenuItem[] = [
-		{
-			label: 'Play next',
-			icon: '⤴',
-			disabled: !playable,
-			hint: playable ? undefined : playableLabel,
-			onSelect: () => void playTidalTrackNext(track),
-		},
+		queueItemId != null
+			? {
+					label: 'Move next',
+					icon: '⤴',
+					onSelect: () => void moveQueueTrackNext(queueItemId),
+				}
+			: {
+					label: 'Play next',
+					icon: '⤴',
+					disabled: !playable,
+					hint: playable ? undefined : playableLabel,
+					onSelect: () => void playTidalTrackNext(track),
+				},
 		...(options.inQueue
 			? []
 			: [{
@@ -250,6 +265,19 @@ export function buildTidalTrackMenu(track: TidalPlayable, options: BuildTidalTra
 		hint: playable ? undefined : playableLabel,
 		onSelect: () => void playTidalTrackNow(track),
 	});
+
+	if (queueItemId != null) {
+		items.push(SEPARATOR);
+		items.push({
+			label: 'Remove from queue',
+			icon: '×',
+			danger: true,
+			onSelect: async () => {
+				await removeTrackFromQueue(queueItemId);
+				options.onRemoved?.();
+			},
+		});
+	}
 
 	return items;
 }
