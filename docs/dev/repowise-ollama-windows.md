@@ -61,6 +61,30 @@ The local config excludes noise that hurts RepoWise signal:
 - screenshots, videos, Playwright reports, and test result artifacts
 - `target/`, frontend build output, coverage output, and `node_modules/`
 
+Hardened sync (guard against silent-stale):
+
+```powershell
+scripts\repowise-sync.ps1                              # update with preflight + post-verify
+scripts\repowise-sync.ps1 -Since <ref> -CascadeBudget 300 -Reindex   # full catch-up
+```
+
+Use this instead of a bare `repowise update` for any manual catch-up. Why:
+`repowise update` ignores `REPOWISE_MODEL` from `.repowise/.env` and falls back
+to its built-in default model (`llama3.2`). That model isn't pulled here, so
+every page 404s, yet `update` still **exits 0 and advances the sync pointer** -
+the wiki looks current but was never regenerated. `repowise-sync.ps1` reads the
+model from `config.yaml`, passes it explicitly, preflights that ollama + the
+model + the embedder alias are present, and fails loudly (non-zero exit) if any
+page generation errors.
+
+The post-commit hook (`.githooks/post-commit`) applies the same three guards
+automatically after each commit. When it detects a failure it writes a marker
+file at `.repowise/.update.error` (cleared on the next successful run); if the
+wiki ever looks stale, check for that file and read `.repowise/.update.run.log`.
+The hook lives in `.githooks/` on purpose - this repo sets
+`core.hooksPath=.githooks`, so a hook in `.git/hooks/` (where `repowise hook
+install` writes) is silently ignored.
+
 Coverage and health:
 
 ```powershell

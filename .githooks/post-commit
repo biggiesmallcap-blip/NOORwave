@@ -1,0 +1,79 @@
+#!/bin/sh
+# repowise-hook-start
+# Auto-syncs the repowise wiki after each commit (background, non-blocking).
+#
+# Lives in .githooks/ because this repo sets core.hooksPath=.githooks, which
+# makes git ignore .git/hooks/ entirely. `repowise hook install` writes to
+# .git/hooks/ and is therefore dead here. Do not move back.
+#
+# Hardened against the silent-stale regression: a bare `repowise update`
+# ignores REPOWISE_MODEL from .repowise/.env and falls back to its built-in
+# default (llama3.2). That model isn't pulled locally, so every page 404s,
+# yet `update` still exits 0 AND advances the sync pointer -- leaving a wiki
+# that looks current but was never regenerated. We defend in three ways:
+#   1. read the model from .repowise/config.yaml (single source of truth) and
+#      pass it explicitly,
+#   2. preflight that the model is actually pulled in ollama,
+#   3. post-check the run output and drop a .repowise/.update.error marker if
+#      generation failed, so the failure is visible instead of silent.
+{
+  ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+  [ -d "$ROOT/.repowise" ] || exit 0
+  HEAD=$(git rev-parse HEAD 2>/dev/null) || HEAD=""
+  TS=$(date +%s 2>/dev/null) || TS=""
+  if [ -n "$TS" ]; then
+    printf '{"target_commit":"%s","queued_at":%s}\n' "$HEAD" "$TS" \
+      > "$ROOT/.repowise/.update.queued" 2>/dev/null || true
+  fi
+  LOG="$ROOT/.repowise/.update.log"
+  {
+    printf '\n--- post-commit hook fired at %s for HEAD %s ---\n' \
+      "$(date 2>/dev/null)" "$HEAD"
+  } >> "$LOG" 2>/dev/null || true
+  (
+    cd "$ROOT" || exit 1
+    CFG="$ROOT/.repowise/config.yaml"
+    ERRMARK="$ROOT/.repowise/.update.error"
+    RUNLOG="$ROOT/.repowise/.update.run.log"
+    rm -f "$ERRMARK" 2>/dev/null || true
+
+    # Single source of truth: read provider/model from config.yaml, fall back
+    # to the known-good local values if the file is missing or malformed.
+    MODEL=$(sed -n 's/^model:[[:space:]]*//p' "$CFG" 2>/dev/null | head -n1)
+    PROVIDER=$(sed -n 's/^provider:[[:space:]]*//p' "$CFG" 2>/dev/null | head -n1)
+    [ -n "$MODEL" ] || MODEL=qwen2.5-coder:7b
+    [ -n "$PROVIDER" ] || PROVIDER=ollama
+
+    fail() {
+      printf '[%s] repowise auto-update FAILED: %s\n' "$(date 2>/dev/null)" "$1" \
+        | tee -a "$LOG" > "$ERRMARK" 2>/dev/null
+      exit 1
+    }
+
+    # Preflight: the generation model must be pulled, else every page 404s.
+    if [ "$PROVIDER" = "ollama" ] && command -v ollama >/dev/null 2>&1; then
+      MODEL_BASE=$(printf '%s' "$MODEL" | cut -d: -f1)
+      ollama list 2>/dev/null | grep -q "$MODEL_BASE" \
+        || fail "model '$MODEL' not in \`ollama list\` (run: ollama pull $MODEL)"
+    fi
+
+    if command -v repowise >/dev/null 2>&1; then
+      RW="repowise"
+    elif command -v uv >/dev/null 2>&1; then
+      RW="uv run repowise"
+    else
+      fail "repowise CLI not found on PATH"
+    fi
+
+    $RW update --provider "$PROVIDER" --model "$MODEL" > "$RUNLOG" 2>&1
+    RC=$?
+    cat "$RUNLOG" >> "$LOG" 2>/dev/null || true
+
+    # Post-check: catch the silent failure repowise itself reports as success.
+    [ "$RC" -eq 0 ] || fail "repowise update exited $RC"
+    if grep -qiE 'page_generation_failed|not_found_error|model .* not found|error code: 404' "$RUNLOG" 2>/dev/null; then
+      fail "page generation errored (model/provider problem) -- see $RUNLOG"
+    fi
+  ) &
+} >/dev/null 2>&1
+# repowise-hook-end
