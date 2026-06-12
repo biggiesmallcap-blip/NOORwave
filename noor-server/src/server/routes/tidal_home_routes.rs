@@ -885,12 +885,36 @@ async fn refresh_tidal_moods_cache(
         }
         Err(e) => {
             tracing::warn!("TIDAL get_tidal_moods failed: {e}");
+            let probe_client = TidalClient::with_http(
+                tidal_http_client.clone(),
+                tokens.access_token.clone(),
+                tokens.country_code.clone(),
+            );
+            cache_default_moods_with_thumbnails(
+                mood_cache,
+                page_modules_cache,
+                probe_client,
+                tokens.country_code.clone(),
+            )
+            .await;
             return;
         }
     };
     let live_categories = extract_page_links(&raw);
     if live_categories.is_empty() {
         tracing::warn!("TIDAL get_tidal_moods returned no PAGE_LINKS categories");
+        let probe_client = TidalClient::with_http(
+            tidal_http_client.clone(),
+            tokens.access_token.clone(),
+            tokens.country_code.clone(),
+        );
+        cache_default_moods_with_thumbnails(
+            mood_cache,
+            page_modules_cache,
+            probe_client,
+            tokens.country_code.clone(),
+        )
+        .await;
         return;
     }
 
@@ -926,6 +950,108 @@ async fn refresh_tidal_moods_cache(
         category_count = response_categories.len(),
         "TIDAL moods background refresh complete"
     );
+}
+
+/// Fallback for when the live `pages/moods` PAGE_LINKS can't be fetched or come
+/// back empty. The curated default categories all map to real TIDAL pages, so
+/// probe each one for a thumbnail and cache the defaults with artwork instead of
+/// leaving the rail showing the thumbnail-less hardcoded fallbacks forever. Keeps
+/// every default category even when its own probe yields nothing.
+async fn cache_default_moods_with_thumbnails(
+    mood_cache: TidalMoodCategoriesCache,
+    page_modules_cache: TidalPageModulesCache,
+    probe_client: TidalClient,
+    country_code: String,
+) {
+    let categories = default_tidal_mood_categories();
+    let slugs: Vec<String> = categories
+        .iter()
+        .filter_map(|c| c.get("slug").and_then(|s| s.as_str()).map(String::from))
+        .collect();
+    if slugs.is_empty() {
+        return;
+    }
+
+    let fetches = slugs.into_iter().map(|slug| {
+        let client = probe_client.clone();
+        let cache = page_modules_cache.clone();
+        let country = country_code.clone();
+        async move {
+            let page_path = format!("pages/{slug}");
+            let cache_key = tidal_page_modules_cache_key(&country, &page_path);
+            if let Some(modules) = get_cached_tidal_page_modules(&cache, &cache_key) {
+                return (slug, mood_probe_from_modules(&modules).1);
+            }
+            match tokio::time::timeout(
+                MOOD_THUMBNAIL_PROBE_TIMEOUT,
+                client.get_page_modules(&page_path),
+            )
+            .await
+            {
+                Ok(Ok(modules)) => {
+                    put_cached_tidal_page_modules(&cache, cache_key, modules.clone());
+                    (slug, mood_probe_from_modules(&modules).1)
+                }
+                _ => (slug, None),
+            }
+        }
+    });
+
+    let outcomes = {
+        use futures::StreamExt;
+
+        futures::stream::iter(fetches)
+            .buffer_unordered(MOOD_THUMBNAIL_FETCH_CONCURRENCY)
+            .collect::<Vec<(String, Option<String>)>>()
+            .await
+    };
+
+    let mut thumbnails: HashMap<String, String> = HashMap::new();
+    for (slug, thumbnail) in outcomes {
+        if let Some(url) = thumbnail {
+            thumbnails.insert(slug, url);
+        }
+    }
+
+    if thumbnails.is_empty() {
+        // Nothing resolved (likely the same upstream problem that sank the live
+        // fetch); leave any existing cache untouched rather than overwriting it.
+        return;
+    }
+
+    let found = thumbnails.len();
+    let merged = merge_default_mood_thumbnails(categories, &thumbnails);
+    put_cached_tidal_mood_categories(&mood_cache, merged);
+    tracing::info!(
+        route = "tidal_moods_default_probe",
+        thumbnails = found,
+        "Cached default mood categories with probed thumbnails (live moods unavailable)"
+    );
+}
+
+/// Attach probed thumbnails to the default mood categories by slug, keeping every
+/// category whether or not its probe resolved an image.
+fn merge_default_mood_thumbnails(
+    categories: Vec<Value>,
+    thumbnails: &HashMap<String, String>,
+) -> Vec<Value> {
+    categories
+        .into_iter()
+        .map(|mut category| {
+            if let Some(slug) = category
+                .get("slug")
+                .and_then(|s| s.as_str())
+                .map(String::from)
+            {
+                if let Some(url) = thumbnails.get(&slug) {
+                    if let Some(obj) = category.as_object_mut() {
+                        obj.insert("thumbnail".to_string(), Value::String(url.clone()));
+                    }
+                }
+            }
+            category
+        })
+        .collect()
 }
 
 fn apply_cached_mood_category_probes(
@@ -1202,6 +1328,38 @@ mod tests {
 
     fn cooldown_state(value: Option<Instant>) -> Mutex<Option<Instant>> {
         Mutex::new(value)
+    }
+
+    #[test]
+    fn merge_default_mood_thumbnails_keeps_all_and_attaches_by_slug() {
+        let categories = default_tidal_mood_categories();
+        let total = categories.len();
+        let mut thumbnails = HashMap::new();
+        thumbnails.insert(
+            "mood_party".to_string(),
+            "https://resources.tidal.com/images/abc/640x640.jpg".to_string(),
+        );
+
+        let merged = merge_default_mood_thumbnails(categories, &thumbnails);
+
+        // Every default survives, even the ones with no probed thumbnail.
+        assert_eq!(merged.len(), total);
+        let party = merged
+            .iter()
+            .find(|c| c["slug"] == "mood_party")
+            .expect("party kept");
+        assert_eq!(
+            party["thumbnail"],
+            "https://resources.tidal.com/images/abc/640x640.jpg"
+        );
+        let workout = merged
+            .iter()
+            .find(|c| c["slug"] == "mood_workout")
+            .expect("workout kept");
+        assert!(
+            workout["thumbnail"].is_null(),
+            "unprobed default kept with a null thumbnail rather than dropped"
+        );
     }
 
     #[test]
