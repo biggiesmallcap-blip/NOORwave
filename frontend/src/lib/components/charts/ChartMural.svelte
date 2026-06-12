@@ -336,6 +336,22 @@
 		pointer-events: none;
 	}
 
+	/* Light mode: the app around the mural is bright, so the dark cinematic scrim
+	 * reads as muddy. Lighten it (text still reads via its shadow) and push the
+	 * collage saturation up so the artwork looks vivid instead of dimmed. */
+	:global([data-theme="light"]) .chart-mural-shade {
+		background: linear-gradient(90deg, rgba(0,0,0,0.52) 0%, rgba(0,0,0,0.24) 44%, rgba(0,0,0,0.05) 78%, transparent 100%);
+	}
+
+	:global([data-theme="light"]) .chart-mural-tile {
+		opacity: 1;
+		filter: saturate(1.36) brightness(1.08);
+	}
+
+	:global([data-theme="light"]) .chart-mural-tile::after {
+		opacity: 0.1;
+	}
+
 	.chart-mural-content {
 		position: relative;
 		z-index: calc(var(--z-base) + 1);
@@ -351,7 +367,9 @@
 		flex-direction: column;
 		gap: var(--space-1);
 		max-width: min(42rem, 58vw);
-		text-shadow: 0 2px 18px rgba(0,0,0,0.62);
+		/* Text sits over a dark-scrimmed art collage, so it stays light in both
+		 * themes and leans on a strong shadow to read over bright album tiles. */
+		text-shadow: 0 2px 16px rgba(0,0,0,0.8), 0 1px 4px rgba(0,0,0,0.6);
 	}
 
 	.chart-mural-kind {
@@ -364,7 +382,7 @@
 
 	.chart-mural-title {
 		margin: 0;
-		color: var(--text-primary);
+		color: #fff;
 		font-size: var(--font-size-4xl);
 		font-weight: var(--font-weight-bold);
 		line-height: var(--line-height-tight);
@@ -376,7 +394,7 @@
 
 	.chart-mural-sub {
 		margin: 0 0 var(--space-2);
-		color: var(--text-secondary);
+		color: rgba(255, 255, 255, 0.82);
 		font-size: var(--font-size-sm);
 	}
 
@@ -388,7 +406,7 @@
 	}
 
 	.chart-mural-actions span {
-		color: var(--text-secondary);
+		color: rgba(255, 255, 255, 0.82);
 		font-size: var(--font-size-xs);
 		font-weight: var(--font-weight-semibold);
 	}
