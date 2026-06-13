@@ -1,7 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { type TidalMoodCategory } from '$lib/api/client';
-	import { cachedApi } from '$lib/cache/api_queries';
+	import { api, type TidalMoodCategory } from '$lib/api/client';
 	import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
@@ -44,7 +43,12 @@
 		const seq = ++loadSeq;
 		inFlight = true;
 		try {
-			const data = await cachedApi.getTidalMoods();
+			// Raw client, not cachedApi: the cachedApi layer persists the moods
+			// response to localStorage for days and serves it stale, so a cold-start
+			// thumbnail-less fallback would stick forever. The component's own
+			// tidal-moods-cache handles session caching and knows to refresh when
+			// thumbnails are missing.
+			const data = await api.getTidalMoods();
 			if (seq !== loadSeq) return;
 			const all = data.categories ?? [];
 			if (all.length > 0) putCachedMoodCategories(all);
