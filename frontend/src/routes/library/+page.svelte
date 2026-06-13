@@ -24,6 +24,7 @@
 	import { onMount } from 'svelte';
 	import { get } from 'svelte/store';
 	import type { Snapshot } from './$types';
+	import { captureScroll, restoreScroll } from '$lib/navigation/scroll';
 	import {
 		tracks, albums, artists as artistsStore, isLoading, isLoadingMore, totalTracks, totalAlbums,
 		sortBy, sortDir, viewMode, searchQuery,
@@ -39,6 +40,8 @@
 		currentTrack,
 		isPlaying,
 		playTrackNow,
+		playTracksInContext,
+		playLibrary,
 		addTrackToQueue,
 		playTrackNext,
 		shuffleMode,
@@ -53,6 +56,7 @@
 	import AlbumCarousel from '$lib/components/AlbumCarousel.svelte';
 	import AlbumDetailPopup from '$lib/components/AlbumDetailPopup.svelte';
 	import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
+	import { portal } from '$lib/actions/portal';
 	import { openContextMenu, openMenuAtElement, type MenuItem } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
@@ -135,6 +139,10 @@
 	let undoTimer: ReturnType<typeof setTimeout> | null = null;
 	let artists = $state<Artist[]>([]);
 	let artistsLoading = $state(false);
+	let artistsLoadingMore = $state(false);
+	// The artists endpoint returns no total, so we page until a short page tells
+	// us we've hit the end. `artistsExhausted` then stops further fetches.
+	let artistsExhausted = $state(false);
 	let recentTracks = $state<Track[]>(homePanelCandidateCache.recentTracks);
 
 	// Keyboard cursor for track list
@@ -185,8 +193,12 @@
 
 
 	onMount(() => {
-		void loadAlbums();
-		void loadTracks();
+		// Load only if the persistent stores are empty. On a back-nav the stores
+		// still hold every page the user scrolled through; reloading page 1 here
+		// would discard that depth and strand the snapshot's scroll restore at the
+		// bottom of the first page. A fresh visit starts empty and loads normally.
+		if (get(albums).length === 0) void loadAlbums();
+		if (get(tracks).length === 0) void loadTracks();
 		void loadBatchMeta();
 		void loadRecentTracks();
 		const unsubscribeWs = wsMessages.subscribe((messages) => {
@@ -274,12 +286,15 @@
 
 	async function loadArtists() {
 		artistsLoading = true;
+		artistsExhausted = false;
 		try {
-			// Default browse view - top 200 alphabetically. When the user types
-			// a query, the search effect calls api.search() server-side and
-			// shows searchResults.artists (FTS). No more upfront 10k load.
-			const data = await cachedApi.getArtists('name', 'asc', 200);
+			// First page. Subsequent pages append via loadMoreArtists on scroll, so
+			// the browse view paginates like Albums/Tracks instead of capping out.
+			// When the user types a query, the search effect calls api.search()
+			// server-side and shows searchResults.artists (FTS).
+			const data = await cachedApi.getArtists('name', 'asc', PAGE_SIZE, 0);
 			artists = data.artists;
+			if (data.artists.length < PAGE_SIZE) artistsExhausted = true;
 		} catch (err) {
 			console.error('Failed to load artists:', err);
 		} finally {
@@ -287,8 +302,78 @@
 		}
 	}
 
+	// Re-page artists up to `targetCount` in one restore pass (back-nav), so a
+	// deep scroll position is reachable. Pages sequentially like loadMoreArtists
+	// and fills the grid progressively; stops when the source is exhausted.
+	async function loadArtistsUpTo(targetCount: number) {
+		artistsLoading = true;
+		artistsExhausted = false;
+		try {
+			let acc: Artist[] = [];
+			for (;;) {
+				const data = await cachedApi.getArtists('name', 'asc', PAGE_SIZE, acc.length);
+				const seen = new Set(acc.map((a) => a.id));
+				acc = [...acc, ...data.artists.filter((a) => !seen.has(a.id))];
+				artists = acc;
+				if (data.artists.length < PAGE_SIZE) {
+					artistsExhausted = true;
+					break;
+				}
+				if (acc.length >= targetCount) break;
+			}
+		} catch (err) {
+			console.error('Failed to restore artists:', err);
+		} finally {
+			artistsLoading = false;
+		}
+	}
+
+	async function loadMoreArtists() {
+		if (artistsExhausted || artistsLoading || artistsLoadingMore) return;
+		artistsLoadingMore = true;
+		try {
+			const data = await cachedApi.getArtists('name', 'asc', PAGE_SIZE, artists.length);
+			// Dedupe by id so a shifted page can't create duplicate {#each} keys.
+			const seen = new Set(artists.map((a) => a.id));
+			const fresh = data.artists.filter((a) => !seen.has(a.id));
+			artists = [...artists, ...fresh];
+			if (data.artists.length < PAGE_SIZE) artistsExhausted = true;
+		} catch (err) {
+			console.error('Failed to load more artists:', err);
+		} finally {
+			artistsLoadingMore = false;
+		}
+	}
+
+	// Clicking a track plays it in the context of the list the user is looking at:
+	// the visible rows become the queue, starting at the clicked track (TIDAL /
+	// Spotify behavior) instead of playing one orphan track and letting automix
+	// improvise. `visibleTracks` already reflects the active tab, sort, and search.
 	async function playTrack(track: typeof $tracks[0]) {
-		await playTrackNow(track.id);
+		await playTracksInContext(visibleTracks.map((t) => t.id), track.id);
+	}
+
+	// "Play" / "Shuffle" for the current track view. In search mode the visible
+	// results are the context; otherwise pull the full sorted/liked list from the
+	// server so the queue isn't limited to the rows scrolled into view.
+	async function playTrackView(shuffle = false) {
+		batchError = null;
+		batchMessage = null;
+		if ($searchQuery.trim()) {
+			const ids = visibleTracks.map((t) => t.id);
+			if (ids.length === 0) {
+				batchError = 'No tracks to play in the current view.';
+				return;
+			}
+			await playTracksInContext(ids, undefined, { shuffle });
+			return;
+		}
+		await playLibrary({
+			sortBy: $sortBy,
+			sortDir: $sortDir,
+			likedOnly: activeTab === 'liked',
+			shuffle,
+		});
 	}
 
 	async function queueTrack(track: typeof $tracks[0], event: MouseEvent) {
@@ -498,7 +583,7 @@
 			} else if (event.metaKey || event.ctrlKey) {
 				void playTrackNext(track.id);
 			} else {
-				void playTrackNow(track.id);
+				void playTrack(track);
 			}
 			return;
 		}
@@ -673,7 +758,12 @@
 	}
 
 	async function loadMoreVisibleItems() {
-		if ($isLoading || $isLoadingMore || $searchQuery.trim()) return;
+		if ($searchQuery.trim()) return;
+		if (activeTab === 'artists') {
+			await loadMoreArtists();
+			return;
+		}
+		if ($isLoading || $isLoadingMore) return;
 		if (activeTab === 'tracks' || activeTab === 'liked') {
 			if ($tracks.length >= $totalTracks) return;
 			await loadTracks($sortBy, $sortDir, PAGE_SIZE, $tracks.length, activeTab === 'liked');
@@ -810,6 +900,8 @@
 			? $tracks.length < $totalTracks
 			: activeTab === 'albums'
 			? $albums.length < $totalAlbums
+			: activeTab === 'artists'
+			? artists.length > 0 && !artistsExhausted
 			: false)
 	);
 	let searchSummary = $derived(
@@ -1456,7 +1548,7 @@
 		if (pendingRestoreScroll !== null) {
 			const target = pendingRestoreScroll
 			pendingRestoreScroll = null
-			requestAnimationFrame(() => window.scrollTo({ top: target, behavior: 'auto' }))
+			restoreScroll(target)
 		}
 	})
 
@@ -1468,6 +1560,16 @@
 		viewMode: 'grid' | 'list'
 		activeDecade: number | null
 		scrollY: number
+		// How many rows were loaded via infinite scroll, so a back-nav can
+		// re-page to the same depth before restoring scroll. Tracks/albums live
+		// in persistent stores; artists in component-local state.
+		loadedCount: number
+	}
+	function currentLoadedCount(): number {
+		if (activeTab === 'artists') return artists.length
+		if (activeTab === 'albums') return get(albums).length
+		if (activeTab === 'tracks' || activeTab === 'liked') return get(tracks).length
+		return 0
 	}
 	export const snapshot: Snapshot<LibrarySnapshot> = {
 		capture: () => ({
@@ -1477,7 +1579,8 @@
 			sortDir: get(sortDir),
 			viewMode: get(viewMode),
 			activeDecade,
-			scrollY: typeof window !== 'undefined' ? window.scrollY : 0
+			scrollY: captureScroll(),
+			loadedCount: currentLoadedCount()
 		}),
 		restore: (saved) => {
 			const validTabs = ['all', 'tracks', 'liked', 'albums', 'artists'] as const
@@ -1490,6 +1593,15 @@
 			if (saved.viewMode === 'grid' || saved.viewMode === 'list') viewMode.set(saved.viewMode)
 			activeDecade = saved.activeDecade
 			if (typeof saved.scrollY === 'number') pendingRestoreScroll = saved.scrollY
+			// Artists live in component-local state (not a store), and onMount only
+			// reloads albums/tracks. Without this, restoring into the artists tab on
+			// a back-nav shows an empty "No artists yet" state. Re-page to the depth
+			// the user had scrolled to so the saved scroll offset is reachable.
+			// Browse list only - the search effect repopulates a restored query.
+			if (activeTab === 'artists' && !saved.searchQuery?.trim() && artists.length === 0) {
+				const targetScroll = typeof saved.scrollY === 'number' ? saved.scrollY : 0
+				void loadArtistsUpTo(saved.loadedCount ?? PAGE_SIZE).then(() => restoreScroll(targetScroll))
+			}
 		}
 	}
 
@@ -1550,6 +1662,16 @@
 			</div>
 
 			<div class="filter-pill-actions">
+				{#if activeTab === 'tracks' || activeTab === 'liked'}
+					<div class="play-controls" role="group" aria-label="Play this view">
+						<button class="filter-pill filter-pill--accent" onclick={() => void playTrackView(false)} title="Play this view">
+							▶ Play
+						</button>
+						<button class="filter-pill filter-pill--ghost" onclick={() => void playTrackView(true)} title="Shuffle this view">
+							⤮ Shuffle
+						</button>
+					</div>
+				{/if}
 				{#if activeTab === 'albums'}
 					<div class="view-toggle" role="group" aria-label="Album view layout">
 						<button
@@ -2138,6 +2260,18 @@
 				{/each}
 			</div>
 
+			{#if !isSearchMode && !artistsExhausted && artists.length > 0}
+				<div class="load-more-row">
+					<span class="load-more-count">{artists.length} artists</span>
+					<button
+						class="btn btn-glass"
+						disabled={artistsLoadingMore}
+						onclick={() => void loadMoreArtists()}
+					>
+						{artistsLoadingMore ? 'Loading…' : 'Load More'}
+					</button>
+				</div>
+			{/if}
 		{/if}
 
 	{:else if activeTab === 'tracks' || activeTab === 'liked'}
@@ -2415,6 +2549,7 @@
 		class="modal-backdrop"
 		role="presentation"
 		onclick={() => { expandedTrackId = null; detailTrack = null; detailAlbumTracks = []; }}
+		use:portal
 	>
 		<div class="modal-panel glass-panel" onclick={(e) => e.stopPropagation()} role="dialog" tabindex="-1" aria-modal="true" aria-label={detailTrack.title}>
 			<div class="modal-topbar">
@@ -3210,6 +3345,24 @@
 
 	.filter-pill--ghost {
 		opacity: 0.75;
+	}
+
+	.play-controls {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+	}
+
+	.filter-pill--accent {
+		background: var(--accent);
+		border-color: var(--accent);
+		color: #fff;
+	}
+
+	.filter-pill--accent:hover {
+		background: var(--accent);
+		filter: brightness(1.08);
+		color: #fff;
 	}
 
 	.filter-pill {

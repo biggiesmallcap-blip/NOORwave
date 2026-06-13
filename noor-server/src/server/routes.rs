@@ -10340,23 +10340,30 @@ async fn start_ephemeral_tidal_playback(
         ));
     };
 
-    // Backstop for callers that don't ship artwork (Spotify-resolved playlist
-    // tracks below the fold never trigger the lazy IntersectionObserver, so
-    // they arrive with `artwork_url: null`). Look up the TIDAL track once and
-    // reuse its album cover at the standard 640x640 size.
+    // Backstop for callers that don't ship full metadata. Some surfaces build a
+    // playable with only id/title/artist: Spotify-resolved playlist tracks below
+    // the fold never trigger the lazy IntersectionObserver so they arrive with
+    // `artwork_url: null`, and several launch surfaces omit `album_title`
+    // entirely. Either gap would leave the now-playing card blank. Look up the
+    // TIDAL track once and fill whichever fields are missing from its album.
     let mut track = track;
-    if track.artwork_url.is_none() {
+    if track.artwork_url.is_none() || track.album_title.is_none() {
         let lookup_client = TidalClient::with_http(
             tidal_http_client.clone(),
             tokens.access_token.clone(),
             tokens.country_code.clone(),
         );
         if let Ok(t) = lookup_client.get_track(track.tidal_track_id).await {
-            track.artwork_url = t
-                .album
-                .as_ref()
-                .and_then(|a| a.cover.as_ref())
-                .and_then(|c| TidalClient::get_artwork_url(&Some(c.clone()), 640));
+            if track.artwork_url.is_none() {
+                track.artwork_url = t
+                    .album
+                    .as_ref()
+                    .and_then(|a| a.cover.as_ref())
+                    .and_then(|c| TidalClient::get_artwork_url(&Some(c.clone()), 640));
+            }
+            if track.album_title.is_none() {
+                track.album_title = t.album.as_ref().map(|a| a.title.clone());
+            }
         }
     }
 

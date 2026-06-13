@@ -14,7 +14,10 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
-pub const AUDIO_PROXY_FEATURE_VERSION: &str = "metadata-audio-proxy-v2";
+// v3: audio-proxy tokens are IDF-weighted (compute_token_idf), so common tokens
+// like broad genres no longer dominate the projection. The bump invalidates v2
+// caches so incremental refreshes recompute rather than mixing weighting schemes.
+pub const AUDIO_PROXY_FEATURE_VERSION: &str = "metadata-audio-proxy-v3";
 
 // ── Progress update struct ────────────────────────────────────────────────────
 
@@ -243,11 +246,44 @@ fn cosine(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
-/// SHA256-based hashed projection of tokens into a `dim`-dimensional vector.
-/// Mirrors Python's `hashed_projection`.
-fn hashed_projection(tokens: &[String], dim: usize) -> Vec<f64> {
+/// Document-frequency IDF for every metadata token across the training set.
+///
+/// The audio-proxy embedding hashes each token with equal weight, so a token
+/// shared by a huge share of the library (a broad genre like "hip-hop", or filler
+/// like "remix"/"feat") creates a strong common direction that pulls unrelated
+/// tracks together - the origin of embedding hubs. Weighting each token by
+/// inverse document frequency (sklearn-style smoothed IDF) lets distinctive
+/// tokens drive similarity while library-wide ones fade, which is the standard
+/// TF-IDF fix for exactly this failure mode. Mirrors Python's `compute_token_idf`.
+fn compute_token_idf(tracks: &[EmbeddingTrackRow]) -> HashMap<String, f64> {
+    let n = tracks.len() as f64;
+    let mut df: HashMap<String, usize> = HashMap::new();
+    for track in tracks {
+        // Count each token once per track (document frequency, not term frequency).
+        let unique: HashSet<String> = metadata_tokens(track).into_iter().collect();
+        for token in unique {
+            *df.entry(token).or_insert(0) += 1;
+        }
+    }
+    df.into_iter()
+        .map(|(token, count)| {
+            let idf = ((1.0 + n) / (1.0 + count as f64)).ln() + 1.0;
+            (token, idf)
+        })
+        .collect()
+}
+
+/// IDF-weighted variant of [`hashed_projection`]. A token absent from `idf` (e.g.
+/// an external candidate token not seen during the df pass) falls back to weight
+/// 1.0, matching the unweighted projection. Mirrors Python's weighted projection.
+fn hashed_projection_weighted(
+    tokens: &[String],
+    dim: usize,
+    idf: &HashMap<String, f64>,
+) -> Vec<f64> {
     let mut vec = vec![0.0f64; dim];
     for token in tokens {
+        let weight = idf.get(token).copied().unwrap_or(1.0);
         let digest = Sha256::digest(token.as_bytes());
         let step = 2;
         let limit = usize::min(32, dim * 2);
@@ -258,7 +294,7 @@ fn hashed_projection(tokens: &[String], dim: usize) -> Vec<f64> {
             } else {
                 -1.0
             };
-            vec[bucket] += sign * 0.5;
+            vec[bucket] += sign * 0.5 * weight;
         }
     }
     normalize(&vec).0
@@ -652,6 +688,7 @@ fn add_support_bucket(
 fn build_audio_proxy_features(
     tracks: &[EmbeddingTrackRow],
     dim: usize,
+    idf: &HashMap<String, f64>,
     progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<TrainingProgressUpdate>>,
     cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> HashMap<i64, TrainerAudioFeature> {
@@ -672,7 +709,7 @@ fn build_audio_proxy_features(
                 (duration - clip_duration).max(0) / 2
             };
             let tokens = metadata_tokens(track);
-            let vec = hashed_projection(&tokens, dim);
+            let vec = hashed_projection_weighted(&tokens, dim, idf);
             let completed = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             if completed.is_multiple_of(512)
                 && total > 0
@@ -746,13 +783,16 @@ fn fuse_embeddings(
 fn build_external_proxy_features(
     candidates: &[TrainerExternalCandidate],
     dim: usize,
+    idf: &HashMap<String, f64>,
 ) -> HashMap<i64, Vec<f64>> {
     candidates
         .iter()
         .map(|candidate| {
             (
                 candidate.candidate_id,
-                hashed_projection(&external_candidate_tokens(candidate), dim),
+                // Same IDF map as the track corpus so external candidates live in
+                // the same weighted space and cosine against tracks stays valid.
+                hashed_projection_weighted(&external_candidate_tokens(candidate), dim, idf),
             )
         })
         .collect()
@@ -1546,6 +1586,15 @@ pub fn run_discovery_training(
     //      is the user-visible difference between Full Retrain and Incremental
     //      Refresh; Stage 2 is by far the most expensive per-track work.
     //   3. Full retrain (or first run, no cache) → recompute via DSP-proxy.
+    //
+    // IDF over the track corpus, shared by the audio-proxy and external-candidate
+    // projections so both live in the same weighted space. Computed once here only
+    // when the audio-proxy stage will run; cheap relative to the projection itself.
+    let token_idf = if input.include_audio_proxy {
+        compute_token_idf(&tracks)
+    } else {
+        HashMap::new()
+    };
     let audio = if !input.include_audio_proxy {
         if let Some(tx) = progress_tx {
             let _ = tx.send(TrainingProgressUpdate::stage_only(
@@ -1568,7 +1617,7 @@ pub fn run_discovery_training(
         }
         cached.clone()
     } else {
-        build_audio_proxy_features(&tracks, dim, progress_tx, cancel)
+        build_audio_proxy_features(&tracks, dim, &token_idf, progress_tx, cancel)
     };
     if cancel_requested(cancel) {
         return TrainerOutput {
@@ -1593,7 +1642,7 @@ pub fn run_discovery_training(
     // Stage 3
     let fusion = fuse_embeddings(&tracks, &behavioral, &audio);
     let external_features = if input.include_audio_proxy {
-        build_external_proxy_features(&input.external_candidates, dim)
+        build_external_proxy_features(&input.external_candidates, dim, &token_idf)
     } else {
         HashMap::new()
     };
@@ -1735,6 +1784,107 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
+    // Gini coefficient of an ascending-sorted distribution: 0 = perfectly even,
+    // approaching 1 = all mass on a few elements. Used to quantify how hub-skewed
+    // an in-degree distribution is.
+    fn gini_coefficient(sorted_asc: &[i64]) -> f64 {
+        let n = sorted_asc.len() as f64;
+        let sum: i64 = sorted_asc.iter().sum();
+        if n == 0.0 || sum == 0 {
+            return 0.0;
+        }
+        let mut weighted = 0.0;
+        for (i, &x) in sorted_asc.iter().enumerate() {
+            weighted += (2.0 * (i as f64 + 1.0) - n - 1.0) * x as f64;
+        }
+        weighted / (n * sum as f64)
+    }
+
+    // Hub-concentration eval. Builds the audio-proxy embedding two ways - uniform
+    // tokens vs IDF-weighted tokens - computes each track's top-K nearest
+    // neighbours, and reports how skewed the resulting in-degree distribution is.
+    // The IDF version should flatten it (lower Gini / max in-degree / top-1% share):
+    // fewer "everyone's neighbour" hubs. Ignored: needs the real library and runs an
+    // O(n^2) neighbour pass over the sample.
+    #[test]
+    #[ignore]
+    fn eval_tfidf_reduces_embedding_hub_concentration() {
+        use rusqlite::Connection;
+        let db_path = crate::paths::resolve_db_path_from_env();
+        let conn = Connection::open(&db_path).expect("open env db");
+        let mut tracks =
+            crate::db::queries::get_embedding_track_rows(&conn).expect("load embedding tracks");
+        // Deterministic stride sample: spans the whole library (not one id range)
+        // while keeping the O(n^2) pass tractable.
+        const SAMPLE: usize = 4000;
+        if tracks.len() > SAMPLE {
+            let stride = (tracks.len() / SAMPLE).max(1);
+            tracks = tracks.into_iter().step_by(stride).take(SAMPLE).collect();
+        }
+        let dim = 64usize;
+        let k = 10usize;
+        let idf = compute_token_idf(&tracks);
+
+        // Empty IDF map == the original uniform projection (every weight 1.0).
+        let unit_idf = HashMap::new();
+        let uniform: Vec<(Option<String>, Vec<f64>)> = tracks
+            .iter()
+            .map(|t| {
+                (
+                    t.artist_name.clone(),
+                    hashed_projection_weighted(&metadata_tokens(t), dim, &unit_idf),
+                )
+            })
+            .collect();
+        let weighted: Vec<(Option<String>, Vec<f64>)> = tracks
+            .iter()
+            .map(|t| {
+                (
+                    t.artist_name.clone(),
+                    hashed_projection_weighted(&metadata_tokens(t), dim, &idf),
+                )
+            })
+            .collect();
+
+        for (label, emb) in [("uniform", &uniform), ("tfidf ", &weighted)] {
+            let n = emb.len();
+            let mut indeg = vec![0i64; n];
+            for i in 0..n {
+                let mut sims: Vec<(usize, f64)> = (0..n)
+                    .filter(|&j| j != i)
+                    .map(|j| (j, cosine(&emb[i].1, &emb[j].1)))
+                    .collect();
+                sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                for &(j, _) in sims.iter().take(k) {
+                    indeg[j] += 1;
+                }
+            }
+            let total: i64 = indeg.iter().sum();
+            let max = *indeg.iter().max().unwrap_or(&0);
+            let orphans = indeg.iter().filter(|&&d| d == 0).count();
+            let mut asc = indeg.clone();
+            asc.sort();
+            let gini = gini_coefficient(&asc);
+            let top1 = ((n as f64) * 0.01).ceil() as usize;
+            let top1_share =
+                asc.iter().rev().take(top1).sum::<i64>() as f64 / (total.max(1) as f64);
+            let mut by_artist: HashMap<String, i64> = HashMap::new();
+            for (idx, (artist, _)) in emb.iter().enumerate() {
+                *by_artist
+                    .entry(artist.clone().unwrap_or_default())
+                    .or_insert(0) += indeg[idx];
+            }
+            let mut artists: Vec<_> = by_artist.into_iter().collect();
+            artists.sort_by(|a, b| b.1.cmp(&a.1));
+            eprintln!(
+                "[{label}] n={n} max_indeg={max} gini={gini:.3} orphans={orphans} top1%_share={top1_share:.3}"
+            );
+            for (name, deg) in artists.iter().take(6) {
+                eprintln!("    {name}: {deg}");
+            }
+        }
+    }
+
     fn make_test_input(
         track_count: usize,
         dim: usize,
@@ -1850,6 +2000,54 @@ mod tests {
         assert!(tokens.iter().any(|token| token == "dance_8"));
         assert!(tokens.iter().any(|token| token == "beat_4"));
         assert!(tokens.iter().any(|token| token == "lufs_-12"));
+    }
+
+    #[test]
+    fn idf_down_weights_library_wide_tokens() {
+        let mk = |id: i64, title: &str, genres: &[&str]| EmbeddingTrackRow {
+            track_id: id,
+            title: title.to_string(),
+            artist_name: Some(format!("artist{id}")),
+            album_title: None,
+            duration_ms: None,
+            best_quality: None,
+            source: "tidal".to_string(),
+            play_count: 0,
+            is_favorite: false,
+            playlist_memberships: 0,
+            genre_paths: genres.iter().map(|g| g.to_string()).collect(),
+            bpm: None,
+            energy: None,
+            camelot_key: None,
+            danceability: None,
+            beat_strength: None,
+            loudness_lufs: None,
+        };
+        // "common" tags every track; "rare" tags one. "tidal" source is on all.
+        let tracks = vec![
+            mk(1, "a", &["common"]),
+            mk(2, "b", &["common"]),
+            mk(3, "c", &["common"]),
+            mk(4, "d", &["common", "rare"]),
+        ];
+        let idf = compute_token_idf(&tracks);
+        assert!(
+            idf["rare"] > idf["common"],
+            "a rare token must out-weigh a library-wide one"
+        );
+        // A token present in every track floors at weight 1.0.
+        assert!((idf["common"] - 1.0).abs() < 1e-9);
+        assert!((idf["tidal"] - 1.0).abs() < 1e-9);
+
+        // Applying the weights actually moves the projection away from the uniform one.
+        let dim = 32;
+        let tokens = metadata_tokens(&tracks[3]);
+        let unit = hashed_projection_weighted(&tokens, dim, &HashMap::new());
+        let weighted = hashed_projection_weighted(&tokens, dim, &idf);
+        assert!(
+            cosine(&unit, &weighted) < 0.9999,
+            "idf weighting should change the embedding"
+        );
     }
 
     #[test]

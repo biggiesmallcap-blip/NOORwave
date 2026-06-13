@@ -2,6 +2,7 @@
   import { page } from '$app/state'
   import { api, type TidalArtistProfile, type TidalDiscographyTrack } from '$lib/api/client'
   import TidalTrackRow from '$lib/components/TidalTrackRow.svelte'
+  import { goBack } from '$lib/navigation/back'
   import { openContextMenu } from '$lib/stores/context_menu'
   import { buildAlbumMenu } from '$lib/player/album_menu'
   import {
@@ -97,7 +98,7 @@
   <div class="loading error">{error}</div>
 {:else if profile}
   <div class="artist-page">
-    <button class="back-link" type="button" onclick={() => history.back()}>← Back</button>
+    <button class="back-link" type="button" onclick={() => goBack('/search')}>← Back</button>
     <div class="artist-hero">
       {#if heroBackdropSrc}
         <img

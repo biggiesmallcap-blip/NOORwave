@@ -2,6 +2,7 @@
   import { page } from '$app/stores';
   import { onDestroy } from 'svelte';
   import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
+  import { goBack } from '$lib/navigation/back';
   import { formatTrackDuration } from '$lib/utils/format';
   import {
     api,
@@ -288,7 +289,7 @@
 </svelte:head>
 
 <div class="page">
-  <a class="back-link" href="/search">&lt; Back to search</a>
+  <button class="back-link" type="button" onclick={() => goBack('/search')}>&lt; Back</button>
   {#if loading}
     <div class="state">Loading track...</div>
   {:else if error}

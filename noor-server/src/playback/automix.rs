@@ -42,7 +42,7 @@ use rusqlite::{Connection, params};
 #[cfg(test)]
 use serde::Serialize;
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 pub const AUTOMIX_MIN_UPCOMING: usize = 8;
 const AUTOMIX_BATCH_SIZE: usize = 12;
@@ -54,9 +54,80 @@ const TRUE_SHUFFLE_POOL_MULTIPLIER: usize = 12;
 // `apply_hub_penalty` (services/radio.rs), but automix historically ignored that
 // signal, so a handful of hubs (the XXXTentacion / Blur effect) bled into every
 // genre's queue regardless of fit. Mirror radio's `1/(1 + k*pct)` shape here.
-// Unlike radio this is unconditional (no blend/flag), so it stays mid-strength:
-// between radio's Familiar (0.20) and Adventurous profiles.
-const AUTOMIX_HUB_PENALTY: f64 = 0.35;
+// Strength of the discount once a candidate is past the hub threshold. Stronger
+// than radio's per-blend values because automix applies it only to the worst
+// offenders (see threshold below) rather than across the whole distribution.
+const AUTOMIX_HUB_PENALTY: f64 = 1.5;
+
+// Only the top of the in-degree distribution counts as a "hub". The percentile is
+// rank-based and library-relative, so half of any library sits above 0.5 —
+// penalising everything with some in-degree just compresses scores uniformly and
+// changes no ordering. Gating at 0.85 leaves ordinary tracks untouched and lets
+// the ramp act only on the small tail of genuine everyone's-neighbour artists,
+// whatever those happen to be in a given library.
+const AUTOMIX_HUB_THRESHOLD: f64 = 0.85;
+
+// Radio-style `1/(1 + k*x)` hub discount, shared by the learned-neighbour policy
+// and the scored-fallback path. `percentile` is a candidate's global in-degree
+// percentile in [0, 1]; below the threshold (or with no neighbour rows) it returns
+// 1.0, and above it the penalty ramps with how far past the threshold it sits, so a
+// 0.99 hub is hit far harder than a 0.86 one.
+fn hub_multiplier(percentile: f64) -> f64 {
+    if percentile <= AUTOMIX_HUB_THRESHOLD {
+        1.0
+    } else {
+        let excess = (percentile - AUTOMIX_HUB_THRESHOLD) / (1.0 - AUTOMIX_HUB_THRESHOLD);
+        1.0 / (1.0 + AUTOMIX_HUB_PENALTY * excess)
+    }
+}
+
+// Rarity (IDF, normalised to [0, 1]) for each of the seed's genre keys. A genre
+// covering most of the library carries little signal; agreement on a niche genre
+// is a stronger match. Mirrors the IDF weighting in compute_track_similarity so the
+// scorer and the similarity table agree on what a genre match is worth. Returns
+// empty on any error, which leaves the scorer on its original flat weighting.
+fn seed_genre_rarity(conn: &Connection, seed_genres: &HashSet<String>) -> HashMap<String, f64> {
+    let mut out = HashMap::new();
+    if seed_genres.is_empty() {
+        return out;
+    }
+    let Ok(total) = conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| {
+        row.get::<_, i64>(0)
+    }) else {
+        return out;
+    };
+    if total <= 0 {
+        return out;
+    }
+    let ln_total = (total as f64).ln().max(1.0);
+    let rows = {
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT g.name, COUNT(DISTINCT tg.track_id)
+             FROM track_genres tg JOIN genres g ON g.id = tg.genre_id
+             GROUP BY g.id",
+        ) else {
+            return out;
+        };
+        let mapped = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        });
+        match mapped.and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>()) {
+            Ok(rows) => rows,
+            Err(_) => return out,
+        }
+    };
+    for (name, members) in rows {
+        let key = normalize_genre_key(&name);
+        if members > 0 && seed_genres.contains(&key) {
+            let rarity = ((total as f64 / members as f64).ln() / ln_total).clamp(0.0, 1.0);
+            // A normalised key can come from more than one genre name; keep the rarest.
+            out.entry(key)
+                .and_modify(|existing: &mut f64| *existing = existing.max(rarity))
+                .or_insert(rarity);
+        }
+    }
+    out
+}
 
 #[derive(Debug, Clone)]
 struct ScoredTrack {
@@ -491,6 +562,12 @@ pub(crate) fn build_automix_extension_with_reasons(
                     .collect();
             }
             ordered = rank_automix_selections(conn, current_track.id, ordered);
+            ordered = cap_per_artist(
+                ordered,
+                |selection| selection.track.artist_id,
+                (needed / 4).max(2),
+                needed,
+            );
             ordered.truncate(needed);
             if !ordered.is_empty() {
                 return Ok(ordered);
@@ -506,7 +583,8 @@ pub(crate) fn build_automix_extension_with_reasons(
     excluded_track_ids.extend(session_profile.recent_track_ids.iter().copied());
     // Convert once, after recent_track_ids has been read for exclusions, so
     // the move into TasteVector below doesn't force an extra clone.
-    let (taste, seed) = from_session_profile(&session_profile);
+    let (taste, mut seed) = from_session_profile(&session_profile);
+    seed.genre_rarity = seed_genre_rarity(conn, &seed.genres);
     excluded_track_ids.sort_unstable();
     excluded_track_ids.dedup();
 
@@ -570,7 +648,55 @@ pub(crate) fn build_automix_extension_with_reasons(
         return Ok(Vec::new());
     }
 
+    // Widen recall when the pool is artist-thin. A precomputed similar-pool often
+    // collapses to a couple of artists (the seed's own catalogue plus one
+    // over-connected neighbour), and no per-artist cap can manufacture diversity
+    // the pool doesn't hold. Inject an artist-diverse, genre-matched sample (one
+    // track per artist sharing the seed's genres) so the scorer and the cap have
+    // real variety to choose from. Only fires when diversity is genuinely low, so
+    // healthy pools are untouched; the shared-genre boost keeps the additions on
+    // vibe, and the hub penalty + cap still apply to everything downstream.
+    let distinct_artists = candidates
+        .iter()
+        .map(|track| track.artist_id)
+        .collect::<HashSet<_>>()
+        .len();
+    if distinct_artists < needed {
+        let mut seen = candidates
+            .iter()
+            .map(|track| track.id)
+            .collect::<HashSet<_>>();
+        seen.extend(excluded_track_ids.iter().copied());
+        seen.insert(current_track.id);
+        let diverse = queries::get_genre_diverse_candidates(conn, current_track.id, MAX_CANDIDATES)
+            .unwrap_or_default();
+        for track in diverse {
+            if candidates.len() >= MAX_CANDIDATES {
+                break;
+            }
+            if seen.insert(track.id) {
+                candidates.push(track);
+            }
+        }
+    }
+
     let candidate_genres = queue::get_track_genres(conn, &candidates)?;
+
+    // Artist-level hub-ness for the candidate pool. The scored fallback draws
+    // candidates from track_similarity, where an over-connected artist appears in
+    // most seeds' pools; without this discount its tracks tie at the 0.05 floor and
+    // the deterministic tie-break surfaces them for any weak-signal seed. Keyed on
+    // artist (not track) so an over-represented artist's low-in-degree deep cuts are
+    // caught too. Discount them so non-hub genre matches win the tie. Map is
+    // artist_id -> max percentile; look up via track.artist_id.
+    let mut artist_ids = candidates
+        .iter()
+        .map(|track| track.artist_id)
+        .filter(|id| *id != 0)
+        .collect::<Vec<_>>();
+    artist_ids.sort_unstable();
+    artist_ids.dedup();
+    let artist_hub = queries::get_artist_hub_percentiles(conn, &artist_ids).unwrap_or_default();
 
     // Load DSP features for seed + all candidates (ignore errors - fall back to behavioural score).
     let seed_features = queries::get_audio_dsp_features(conn, current_track.id)
@@ -593,8 +719,15 @@ pub(crate) fn build_automix_extension_with_reasons(
         shuffle_seed,
         seed_features.as_ref(),
         &candidate_features,
+        &artist_hub,
     );
     let ordered = decluster_by_album(ordered);
+    let ordered = cap_per_artist(
+        ordered,
+        |track| track.artist_id,
+        (needed / 4).max(2),
+        needed,
+    );
     Ok(ordered
         .into_iter()
         .take(needed)
@@ -603,7 +736,7 @@ pub(crate) fn build_automix_extension_with_reasons(
                 .get(&track.id)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            let score = automix_score(
+            let mut score = automix_score(
                 &track,
                 genres,
                 &taste,
@@ -611,6 +744,13 @@ pub(crate) fn build_automix_extension_with_reasons(
                 seed_features.as_ref(),
                 candidate_features.get(&track.id),
             );
+            // Same hub discount the ordering used, reflected in the score and its
+            // "Why" so a hub that got buried can't still claim a clean reason.
+            let hub_pct = artist_hub.get(&track.artist_id).copied().unwrap_or(0.0);
+            if hub_pct > AUTOMIX_HUB_THRESHOLD {
+                score.value *= hub_multiplier(hub_pct);
+                score.signals.push(AutomixSignal::penalty("hub"));
+            }
             let reason = automix_scored_reason(&score);
             AutomixSelection::new(track, reason)
         })
@@ -869,8 +1009,8 @@ fn automix_neighbor_policy(row: &queries::EmbeddingNeighborRow) -> GeneratedCand
     // is a graph hub, not a genre match. Discount it the same way radio does so
     // popular hubs don't dominate every automix queue. `candidate_in_degree_percentile`
     // is 0 for tracks the trainer never saw as a neighbour, leaving them untouched.
-    if row.candidate_in_degree_percentile > 0.0 {
-        multiplier *= 1.0 / (1.0 + AUTOMIX_HUB_PENALTY * row.candidate_in_degree_percentile);
+    if row.candidate_in_degree_percentile > AUTOMIX_HUB_THRESHOLD {
+        multiplier *= hub_multiplier(row.candidate_in_degree_percentile);
         policy_reasons.push("hub penalty");
     }
 
@@ -1050,11 +1190,12 @@ fn order_automix_candidates(
     shuffle_seed: Option<i64>,
     seed_features: Option<&AudioDspFeatures>,
     candidate_features: &HashMap<i64, AudioDspFeatures>,
+    artist_hub: &HashMap<i64, f64>,
 ) -> Vec<Track> {
     let mut scored = candidates
         .into_iter()
         .map(|track| {
-            let score = automix_score(
+            let mut score = automix_score(
                 &track,
                 candidate_genres
                     .get(&track.id)
@@ -1066,6 +1207,10 @@ fn order_automix_candidates(
                 candidate_features.get(&track.id),
             )
             .value;
+            // Discount hub artists so they sink below non-hub matches at the 0.05
+            // floor. Applied after automix_score's floor, so a hub can score below
+            // 0.05 and lose the otherwise-alphabetical title tie-break.
+            score *= hub_multiplier(artist_hub.get(&track.artist_id).copied().unwrap_or(0.0));
             ScoredTrack { track, score }
         })
         .collect::<Vec<_>>();
@@ -1075,7 +1220,13 @@ fn order_automix_candidates(
             .score
             .partial_cmp(&left.score)
             .unwrap_or(Ordering::Equal)
-            .then_with(|| left.track.title.cmp(&right.track.title))
+            // Score ties are common at the 0.05 floor. Break them on quality and
+            // freshness (higher fidelity, then less-played) rather than alphabetically
+            // by title, which systematically favoured early-titled tracks for no
+            // recommendation reason. id last only as a stable final key.
+            .then_with(|| right.track.fidelity_score.cmp(&left.track.fidelity_score))
+            .then_with(|| left.track.play_count.cmp(&right.track.play_count))
+            .then_with(|| left.track.id.cmp(&right.track.id))
     });
 
     match mode {
@@ -1203,6 +1354,64 @@ fn decluster_by_album(tracks: Vec<Track>) -> Vec<Track> {
     result
 }
 
+// Cap any single artist's share of one extension batch. The hub penalty demotes
+// artists that are over-connected in the similarity graph, but an artist can
+// dominate a weak-signal pool for reasons hub-ness never sees - a large catalogue,
+// the seed's own artist, co-listen bias - and the extension is meant to be diverse
+// (same-artist gets only a gentle boost precisely to avoid runs). This is the
+// general backstop: keep the highest-scored `max_per_artist` from each artist,
+// then, only if that left the batch short, backfill the dropped ones round-robin
+// by artist so a low-diversity library still gets a full queue that stays as
+// spread as the pool allows, rather than a starved one or a front-loaded run of
+// the dominant artist. Items must already be score-ordered; relative order within
+// an artist is preserved. Generic over the item so both the learned
+// (AutomixSelection) and scored (Track) paths share it.
+fn cap_per_artist<T>(
+    items: Vec<T>,
+    artist_id: impl Fn(&T) -> i64,
+    max_per_artist: usize,
+    needed: usize,
+) -> Vec<T> {
+    let mut counts: HashMap<i64, usize> = HashMap::new();
+    let mut kept = Vec::with_capacity(items.len());
+    // Overflow bucketed by artist, first-seen order preserved, so backfill can
+    // round-robin instead of draining the highest-scored artist first.
+    let mut bucket_order: Vec<i64> = Vec::new();
+    let mut buckets: HashMap<i64, VecDeque<T>> = HashMap::new();
+    for item in items {
+        let id = artist_id(&item);
+        // artist_id 0 means "unknown artist"; never collapse those together.
+        let count = counts.entry(id).or_insert(0);
+        if id == 0 || *count < max_per_artist {
+            *count += 1;
+            kept.push(item);
+        } else {
+            if !buckets.contains_key(&id) {
+                bucket_order.push(id);
+            }
+            buckets.entry(id).or_default().push_back(item);
+        }
+    }
+
+    while kept.len() < needed {
+        let mut progressed = false;
+        for id in &bucket_order {
+            if let Some(item) = buckets.get_mut(id).and_then(VecDeque::pop_front) {
+                kept.push(item);
+                progressed = true;
+                if kept.len() >= needed {
+                    break;
+                }
+            }
+        }
+        // Every bucket is empty - the pool simply has nothing more to offer.
+        if !progressed {
+            break;
+        }
+    }
+    kept
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1307,18 +1516,112 @@ mod tests {
 
     #[test]
     fn hub_candidates_are_penalized_relative_to_non_hubs() {
-        // Same supporting signal, different in-degree: the hub (high percentile)
-        // must come out with a strictly lower multiplier than the non-hub, and a
-        // non-hub (percentile 0) must be left untouched at 1.0.
+        // Below-threshold tracks (incl. percentile 0 and a mid 0.5) are untouched
+        // at 1.0; only the top of the distribution is treated as a hub, and a 0.99
+        // hub is hit strictly harder than a 0.90 one.
         let non_hub = automix_neighbor_policy(&neighbor_row(1, 0.0));
-        let mild = automix_neighbor_policy(&neighbor_row(2, 0.5));
-        let hub = automix_neighbor_policy(&neighbor_row(3, 0.99));
+        let mid = automix_neighbor_policy(&neighbor_row(2, 0.5));
+        let near_threshold = automix_neighbor_policy(&neighbor_row(3, 0.90));
+        let strong_hub = automix_neighbor_policy(&neighbor_row(4, 0.99));
 
         assert!((non_hub.score_multiplier - 1.0).abs() < 1e-9);
-        assert!(mild.score_multiplier < non_hub.score_multiplier);
-        assert!(hub.score_multiplier < mild.score_multiplier);
-        assert!(hub.reasons.iter().any(|r| *r == "hub penalty"));
-        assert!(!non_hub.reasons.iter().any(|r| *r == "hub penalty"));
+        assert!((mid.score_multiplier - 1.0).abs() < 1e-9);
+        assert!(near_threshold.score_multiplier < 1.0);
+        assert!(strong_hub.score_multiplier < near_threshold.score_multiplier);
+        assert!(strong_hub.reasons.iter().any(|r| *r == "hub penalty"));
+        assert!(!mid.reasons.iter().any(|r| *r == "hub penalty"));
+    }
+
+    #[test]
+    fn scorer_weights_rare_seed_genre_above_broad_one() {
+        use crate::smart::taste_vector::{SeedContext, TasteVector};
+        let taste = TasteVector::default();
+        let mut seed = SeedContext::default();
+        seed.genres = ["rare".to_string(), "broad".to_string()]
+            .into_iter()
+            .collect();
+        seed.genre_rarity = [("rare".to_string(), 0.95), ("broad".to_string(), 0.10)]
+            .into_iter()
+            .collect();
+
+        let track = track_with_album(2, None);
+        let rare = automix_score(&track, &["rare".to_string()], &taste, &seed, None, None).value;
+        let broad = automix_score(&track, &["broad".to_string()], &taste, &seed, None, None).value;
+        assert!(
+            rare > broad,
+            "a rare shared genre ({rare}) should beat a broad one ({broad})"
+        );
+
+        // Absent rarity data (other consumers, older fixtures) keeps flat weighting:
+        // the two genres score identically.
+        let flat_seed = SeedContext {
+            genres: seed.genres.clone(),
+            ..SeedContext::default()
+        };
+        let rare_flat = automix_score(
+            &track,
+            &["rare".to_string()],
+            &taste,
+            &flat_seed,
+            None,
+            None,
+        )
+        .value;
+        let broad_flat = automix_score(
+            &track,
+            &["broad".to_string()],
+            &taste,
+            &flat_seed,
+            None,
+            None,
+        )
+        .value;
+        assert!((rare_flat - broad_flat).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hub_multiplier_is_flat_below_threshold_and_ramps_above() {
+        assert_eq!(hub_multiplier(0.0), 1.0);
+        assert_eq!(hub_multiplier(AUTOMIX_HUB_THRESHOLD), 1.0);
+        assert!(hub_multiplier(0.99) < hub_multiplier(0.90));
+        assert!(hub_multiplier(0.99) < 0.5);
+    }
+
+    fn track_by_artist(id: i64, artist_id: i64) -> Track {
+        let mut track = track_with_album(id, Some(id));
+        track.artist_id = artist_id;
+        track
+    }
+
+    #[test]
+    fn cap_per_artist_limits_one_artist_but_keeps_others() {
+        // Five tracks by artist 1, then artists 2 and 3. Cap of 2 keeps the first
+        // two of artist 1 plus the others; no artist exceeds the cap when supply
+        // allows. Order among the kept items is preserved.
+        let input = vec![
+            track_by_artist(1, 1),
+            track_by_artist(2, 1),
+            track_by_artist(3, 1),
+            track_by_artist(4, 1),
+            track_by_artist(5, 1),
+            track_by_artist(6, 2),
+            track_by_artist(7, 3),
+        ];
+        let out = cap_per_artist(input, |t| t.artist_id, 2, 4);
+        let artist1 = out.iter().filter(|t| t.artist_id == 1).count();
+        assert_eq!(artist1, 2);
+        assert!(out.iter().any(|t| t.artist_id == 2));
+        assert!(out.iter().any(|t| t.artist_id == 3));
+        assert_eq!(out[0].id, 1);
+    }
+
+    #[test]
+    fn cap_per_artist_backfills_rather_than_starving_a_thin_library() {
+        // Everything is one artist and there is nothing else to reach for: the cap
+        // must not shrink the batch below `needed` - it backfills the dropped ones.
+        let input = (1..=6).map(|id| track_by_artist(id, 1)).collect::<Vec<_>>();
+        let out = cap_per_artist(input, |t| t.artist_id, 2, 5);
+        assert_eq!(out.len(), 5);
     }
 
     #[test]
@@ -1564,7 +1867,12 @@ pub(crate) fn automix_score(
     let normalized_genres = genres.iter().map(|genre| normalize_genre_key(genre));
     for genre in normalized_genres {
         if seed.genres.contains(&genre) {
-            score += 1.8;
+            // Weight the seed-genre match by rarity when automix supplied it: a
+            // niche shared genre is a stronger signal than a library-wide one.
+            // 0.5 (the absent-data default) maps to a 1.0 multiplier, so callers
+            // without rarity data and existing tests keep the original flat +1.8.
+            let rarity = seed.genre_rarity.get(&genre).copied().unwrap_or(0.5);
+            score += 1.8 * (0.7 + 0.6 * rarity);
             shares_seed_genre = true;
         }
         if let Some(affinity) = taste.genre_affinity.get(&genre) {

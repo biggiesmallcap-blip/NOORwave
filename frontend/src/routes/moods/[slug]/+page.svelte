@@ -7,6 +7,7 @@
   import SpotifyMoodRail from '$lib/components/moods/SpotifyMoodRail.svelte';
   import { SPOTIFY_MOODS_BY_SLUG } from '$lib/components/moods/spotify-moods-data';
   import { getCachedMoodPage, putCachedMoodPage } from '$lib/stores/tidal-moods-cache';
+  import { goBack } from '$lib/navigation/back';
 
   type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
 
@@ -87,7 +88,7 @@
 <svelte:head><title>{title || 'Mood'} . NOOR</title></svelte:head>
 
 <div class="page">
-  <a class="back-link" href="/moods">&lt; All moods</a>
+  <button class="back-link" type="button" onclick={() => goBack('/moods')}>&lt; Back</button>
   <header class="page-header">
     <p class="eyebrow">TIDAL mood</p>
     <h1>{title || '...'}</h1>

@@ -8,6 +8,7 @@
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
+	import { goBack } from '$lib/navigation/back';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { playAlbum, playArtist, playTidalAlbum } from '$lib/stores/player';
 	import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';
@@ -178,7 +179,7 @@
 </script>
 
 <div class="discography-page">
-	<a class="back-link" href={`/artists/${artistId}`}>Back to artist</a>
+	<button class="back-link" type="button" onclick={() => goBack(`/artists/${artistId}`)}>← Back</button>
 
 	{#if loading}
 		<Skeleton rows={5} label="Loading discography" />

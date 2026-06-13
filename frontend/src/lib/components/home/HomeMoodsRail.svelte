@@ -1,7 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { type TidalMoodCategory } from '$lib/api/client';
-	import { cachedApi } from '$lib/cache/api_queries';
+	import { api, type TidalMoodCategory } from '$lib/api/client';
 	import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
@@ -17,6 +16,11 @@
 	const LOAD_ARM_DELAY_MS = 0;
 	const FALLBACK_LOAD_DELAY_MS = 3000;
 	const THUMBNAIL_REFRESH_DELAY_MS = 1800;
+	// The server fills mood thumbnails via a background probe that can land a few
+	// seconds after the first response, so poll a bounded number of times rather
+	// than giving up after one try and leaving the tiles as "~" forever.
+	const THUMBNAIL_RETRY_INTERVAL_MS = 2500;
+	const MAX_THUMBNAIL_ATTEMPTS = 6;
 
 	// Sync-read the shared moods cache on script init so a second visit
 	// within the 6h TTL renders instantly without a network round-trip.
@@ -32,13 +36,19 @@
 	let inFlight = false;
 	let loadSeq = 0;
 	let thumbnailRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+	let thumbnailAttempts = 0;
 
 	async function loadMoods() {
 		if (inFlight) return;
 		const seq = ++loadSeq;
 		inFlight = true;
 		try {
-			const data = await cachedApi.getTidalMoods();
+			// Raw client, not cachedApi: the cachedApi layer persists the moods
+			// response to localStorage for days and serves it stale, so a cold-start
+			// thumbnail-less fallback would stick forever. The component's own
+			// tidal-moods-cache handles session caching and knows to refresh when
+			// thumbnails are missing.
+			const data = await api.getTidalMoods();
 			if (seq !== loadSeq) return;
 			const all = data.categories ?? [];
 			if (all.length > 0) putCachedMoodCategories(all);
@@ -106,12 +116,26 @@
 	function scheduleThumbnailRefresh(nextCategories: TidalMoodCategory[]) {
 		clearThumbnailRefresh();
 		if (!moodCategoriesNeedThumbnails(nextCategories)) {
+			thumbnailAttempts = 0;
 			return;
 		}
+		if (thumbnailAttempts >= MAX_THUMBNAIL_ATTEMPTS) return;
+		const delay =
+			thumbnailAttempts === 0 ? THUMBNAIL_REFRESH_DELAY_MS : THUMBNAIL_RETRY_INTERVAL_MS;
 		thumbnailRefreshTimer = setTimeout(() => {
 			thumbnailRefreshTimer = null;
-			if (claimMoodThumbnailRefresh(nextCategories)) void loadMoods();
-		}, THUMBNAIL_REFRESH_DELAY_MS);
+			const firstAttempt = thumbnailAttempts === 0;
+			thumbnailAttempts += 1;
+			// The first refresh honours the shared cross-surface throttle; if another
+			// surface already claimed it, re-arm so the bounded follow-up polls still
+			// pick up its result. loadMoods re-arms this poll on completion, so it
+			// stops once thumbnails arrive or the attempt cap is hit.
+			if (firstAttempt && !claimMoodThumbnailRefresh(nextCategories)) {
+				scheduleThumbnailRefresh(nextCategories);
+				return;
+			}
+			void loadMoods();
+		}, delay);
 	}
 
 	function menu(slug: string, title: string) {

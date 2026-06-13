@@ -4,7 +4,8 @@ export type PaletteId = 'iris' | 'sunset' | 'verdant' | 'cosmos' | 'mono'
                       | 'ember' | 'arctic' | 'sakura' | 'abyss' | 'citrus'
                       | 'slate' | 'paper' | 'moss' | 'plum' | 'acid' | 'neon'
                       | 'futuro' | 'constr' | 'obsidian' | 'carbon' | 'blackout'
-                      | 'nocturne';
+                      | 'nocturne'
+                      | 'daylight' | 'linen' | 'meadow' | 'blush';
 
 export type Rgb = [number, number, number];
 
@@ -428,6 +429,82 @@ export const PALETTES: Palette[] = [
 			c2: [0.08, 0.02, 0.07],
 			c3: [0.44, 0.07, 0.20],
 			c4: [0.18, 0.36, 0.95]
+		}
+	},
+	// Light-mode-tuned schemes: airy wallpaper bases (high c1) and accents picked
+	// to read on white surfaces. The wallpaper layer is dimmed in light mode, so a
+	// light base reads as a soft tint instead of the muddy haze a near-black base
+	// turns into.
+	{
+		id: 'daylight',
+		label: 'Daylight',
+		sublabel: 'Sky · cloud · gold',
+		ui: {
+			accent: '#2f6fed',
+			accentStrong: '#5b90f5',
+			accentSoft: 'rgba(47, 111, 237, 0.12)',
+			accentLine: 'rgba(47, 111, 237, 0.26)',
+			accentGlow: 'rgba(47, 111, 237, 0.20)'
+		},
+		shader: {
+			c1: [0.91, 0.95, 0.99],
+			c2: [0.52, 0.73, 0.97],
+			c3: [0.99, 0.85, 0.52],
+			c4: [0.80, 0.84, 0.97]
+		}
+	},
+	{
+		id: 'linen',
+		label: 'Linen',
+		sublabel: 'Warm paper · sand · terracotta',
+		ui: {
+			accent: '#c25a3a',
+			accentStrong: '#e08a6f',
+			accentSoft: 'rgba(194, 90, 58, 0.13)',
+			accentLine: 'rgba(194, 90, 58, 0.28)',
+			accentGlow: 'rgba(194, 90, 58, 0.20)'
+		},
+		shader: {
+			c1: [0.97, 0.94, 0.89],
+			c2: [0.87, 0.79, 0.67],
+			c3: [0.86, 0.46, 0.30],
+			c4: [0.76, 0.80, 0.70]
+		}
+	},
+	{
+		id: 'meadow',
+		label: 'Meadow',
+		sublabel: 'Pale mint · sage · leaf',
+		ui: {
+			accent: '#2e9e6a',
+			accentStrong: '#5fc491',
+			accentSoft: 'rgba(46, 158, 106, 0.13)',
+			accentLine: 'rgba(46, 158, 106, 0.28)',
+			accentGlow: 'rgba(46, 158, 106, 0.20)'
+		},
+		shader: {
+			c1: [0.93, 0.97, 0.94],
+			c2: [0.64, 0.84, 0.72],
+			c3: [0.46, 0.80, 0.50],
+			c4: [0.72, 0.89, 0.93]
+		}
+	},
+	{
+		id: 'blush',
+		label: 'Blush',
+		sublabel: 'Pale blush · rose · lilac',
+		ui: {
+			accent: '#d6457f',
+			accentStrong: '#ea7ba6',
+			accentSoft: 'rgba(214, 69, 127, 0.13)',
+			accentLine: 'rgba(214, 69, 127, 0.28)',
+			accentGlow: 'rgba(214, 69, 127, 0.20)'
+		},
+		shader: {
+			c1: [0.99, 0.94, 0.96],
+			c2: [0.97, 0.76, 0.84],
+			c3: [1.00, 0.72, 0.64],
+			c4: [0.83, 0.76, 0.95]
 		}
 	}
 ];
