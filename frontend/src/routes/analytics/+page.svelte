@@ -1,6 +1,7 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { api, type AnalyticsSignals } from '$lib/api/client';
+	import { cachedApi } from '$lib/cache/api_queries';
 	import { wsMessages } from '$lib/api/ws';
 	import { debounce } from '$lib/utils/debounce';
 
@@ -34,6 +35,18 @@
 
 	const days = $derived(RANGE_TO_DAYS[range]);
 
+	// Instant-paint: seed from the persisted snapshot for the initial range so the
+	// page renders last-known analytics immediately instead of a skeleton. loadSignals
+	// in onMount revalidates (staticOptions returns the cached copy instantly, then
+	// refreshes in the background).
+	{
+		const seeded = cachedApi.analyticsSignalsQuery(untrack(() => days)).getSnapshot().data;
+		if (seeded) {
+			signals = seeded;
+			initialLoading = false;
+		}
+	}
+
 	// Non-reactive guard: prevents $effect from double-fetching on first render.
 	let initialized = false;
 	let loadSeq = 0;
@@ -49,11 +62,11 @@
 	async function loadSignals(reason: AnalyticsLoadReason, requestedDays = days) {
 		const seq = ++loadSeq;
 		error = null;
-		if (reason === 'initial') initialLoading = true;
+		if (reason === 'initial' && signals === null) initialLoading = true;
 		if (reason === 'window') windowChanging = true;
 		if (reason === 'refresh') refreshing = true;
 		try {
-			const nextSignals = await api.getAnalyticsSignals(requestedDays);
+			const nextSignals = await cachedApi.getAnalyticsSignals(requestedDays);
 			if (seq !== loadSeq) return;
 			signals = nextSignals;
 		} catch (e: unknown) {

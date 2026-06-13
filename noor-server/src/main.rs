@@ -96,6 +96,10 @@ pub struct AppState {
     /// 6h TTL cache for the home Personal Radio shelf. Same cadence as mixes.
     pub tidal_radio_stations_cache:
         Arc<std::sync::Mutex<Option<(std::time::Instant, Vec<services::tidal::client::TidalMix>)>>>,
+    /// 2h TTL cache for /api/home/picks. The genre-variety query uses
+    /// `ORDER BY RANDOM()` (a full table scan), so recomputing it on every home
+    /// remount was wasted work. Cleared on app restart; staleness bounded by the TTL.
+    pub home_picks_cache: Arc<std::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>>>,
     /// 6h TTL cache for the TIDAL moods landing categories. The handler
     /// hydrates category thumbnails from multiple upstream pages, so keep the
     /// computed list in memory instead of repeating that fan-out per request.
@@ -763,6 +767,7 @@ async fn main() -> Result<()> {
         tidal_tokens,
         tidal_mixes_cache: Arc::new(std::sync::Mutex::new(None)),
         tidal_radio_stations_cache: Arc::new(std::sync::Mutex::new(None)),
+        home_picks_cache: Arc::new(std::sync::Mutex::new(None)),
         tidal_moods_cache: Arc::new(std::sync::Mutex::new(None)),
         tidal_page_modules_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         tidal_playlist_tracks_cache: Arc::new(std::sync::Mutex::new(
@@ -1053,6 +1058,51 @@ async fn main() -> Result<()> {
 
     // Start HTTP + WebSocket server
     info!("Starting server on http://{}", addr);
+    // Boot-time cache warming: ~10s after start, hit our own home endpoints over
+    // loopback so their in-process caches (TIDAL mixes/radio, picks, Last.fm
+    // recommendations) are warm before the first real client request. This is the
+    // "first startup caches stuff" behaviour - the first Home open reads a warm
+    // cache instead of waiting on cold fetches. Best-effort: a 503 (e.g. TIDAL not
+    // connected) just means there's nothing to warm yet, and it never blocks boot.
+    async fn warm_home_caches(http: reqwest::Client, port: String, token: String) {
+        let base = format!("http://127.0.0.1:{port}");
+        for path in [
+            "/api/home/picks",
+            "/api/home/recommendations",
+            "/api/tidal/mixes",
+            "/api/tidal/radio-stations",
+        ] {
+            let url = format!("{base}{path}");
+            match http.get(&url).bearer_auth(&token).send().await {
+                Ok(resp) => tracing::info!(
+                    target: "noor.warm",
+                    event = "warmed",
+                    path = path,
+                    status = resp.status().as_u16(),
+                    "home cache warm request sent"
+                ),
+                Err(e) => tracing::debug!(
+                    target: "noor.warm",
+                    event = "warm_skipped",
+                    path = path,
+                    error = %e,
+                    "home cache warm request failed"
+                ),
+            }
+        }
+    }
+    {
+        let (warm_http, warm_token) = {
+            let s = state.read().await;
+            (s.http_client.clone(), s.server_token.clone())
+        };
+        let warm_port = addr.rsplit(':').next().unwrap_or("3334").to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            warm_home_caches(warm_http, warm_port, warm_token).await;
+        });
+    }
+
     server::start(state, &addr).await?;
 
     Ok(())

@@ -950,6 +950,7 @@ fn fresh_test_state(db: Database) -> crate::AppState {
         tidal_tokens: None,
         tidal_mixes_cache: Arc::new(std::sync::Mutex::new(None)),
         tidal_radio_stations_cache: Arc::new(std::sync::Mutex::new(None)),
+        home_picks_cache: Arc::new(std::sync::Mutex::new(None)),
         tidal_moods_cache: Arc::new(std::sync::Mutex::new(None)),
         tidal_page_modules_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
         tidal_playlist_tracks_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),

@@ -74,14 +74,23 @@ pub fn source_weight(source: TagSource, level: TagLevel) -> f64 {
     source_weight * level_weight
 }
 
+/// Floor for the count-normalization denominator. Tag counts are scored relative
+/// to the busiest tag of the same (source, level) on the SAME item, so a count of
+/// 50 beside a count of 100 still reads as strong. On a sparsely-tagged item that
+/// backfires: when the busiest tag is itself a single vote, a lone count=1 noise
+/// tag divides by itself and scores a full 1.0 - one stray user tagging an
+/// XXXTENTACION recording "jazz" became a max-confidence genre. Flooring the
+/// denominator means absolute weakness can't be normalized away: one vote stays
+/// weak (~0.25) no matter how bare the item is, while well-tagged items (busiest
+/// count >= this) are unaffected. At 15, count=1 -> ln2/ln16 ~= 0.25, count=15 -> 1.0.
+const COUNT_SATURATION: u32 = 15;
+
 pub fn confidence_from_count(count: Option<u32>, max_count: u32) -> f64 {
     match count {
         None => 0.6,
         Some(n) => {
-            if max_count == 0 {
-                return 0.6;
-            }
-            ((n as f64).ln_1p() / (max_count as f64).ln_1p()).min(1.0)
+            let denom = max_count.max(COUNT_SATURATION);
+            ((n as f64).ln_1p() / (denom as f64).ln_1p()).min(1.0)
         }
     }
 }
@@ -209,6 +218,24 @@ mod tests {
     #[test]
     fn missing_count_is_neutral() {
         assert_eq!(confidence_from_count(None, 100), 0.6);
+    }
+
+    #[test]
+    fn lone_vote_on_sparse_item_is_not_full_confidence() {
+        // Regression: before the saturation floor, count=1 with max_count=1 scored
+        // 1.0, so a single stray MusicBrainz vote ("jazz" on an emo-rap recording)
+        // became a full-confidence genre. It must stay weak even when it is the
+        // only tag on the item.
+        let lone = confidence_from_count(Some(1), 1);
+        assert!(
+            lone < 0.35,
+            "a single-vote tag must stay weak when it's the only tag, got {lone}"
+        );
+        // The floor only protects sparse items; a genuinely well-supported tag
+        // still saturates to 1.0.
+        assert_eq!(confidence_from_count(Some(COUNT_SATURATION), 1), 1.0);
+        // Well-tagged items are unchanged: a busy max already discounted count=1.
+        assert!(confidence_from_count(Some(1), 100) < lone + 1e-9);
     }
 
     #[test]

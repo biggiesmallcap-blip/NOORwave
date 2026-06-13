@@ -1381,18 +1381,20 @@ async fn get_radio_tracks(
             .flatten();
 
         if let Some(seed) = seed_features.as_ref() {
+            // Batch the candidate harmonic-key lookups into one query instead of a
+            // serialized per-candidate round trip under the DB mutex.
+            let cand_ids: Vec<i64> = rows.iter().map(|r| r.track_id).collect();
+            let cand_keys = state
+                .db
+                .with_conn(|conn| queries::get_dsp_harmonic_keys_batch(conn, &cand_ids))
+                .unwrap_or_default();
             for row in rows.iter_mut() {
-                let cand = state
-                    .db
-                    .with_conn(|conn| queries::get_audio_dsp_features(conn, row.track_id))
-                    .ok()
-                    .flatten();
-                if let Some(cand) = cand {
+                if let Some((cand_camelot, cand_bpm)) = cand_keys.get(&row.track_id) {
                     let mult = crate::services::audio_analysis::compute_harmonic_multiplier(
                         seed.camelot_key.as_deref(),
-                        cand.camelot_key.as_deref(),
+                        cand_camelot.as_deref(),
                         seed.bpm,
-                        cand.bpm,
+                        *cand_bpm,
                     );
                     row.adjusted_score *= mult;
                     if mult > 1.5 && !row.reason_tags.iter().any(|t| t == "harmonic match") {

@@ -28,8 +28,22 @@
 	const ROTATE_MS = 5500;
 	const PANEL_LIMIT = 20;
 
-	let shelves = $state<ProviderRecommendationShelf[]>([]);
-	let viewState = $state<State>('hidden');
+	// Seed from cache so the shelf paints instantly on launch. The provider gate is
+	// preserved: only seed 'ready' if the cached Last.fm/ListenBrainz status says a
+	// provider can recommend AND we have cached shelves. getSnapshot() (not getState)
+	// hydrates the persisted copy. onMount's load() then revalidates - with
+	// staticOptions those reads return cached instantly and refresh in the background.
+	const seededCanRecommend =
+		Boolean(cachedApi.lastfmStatusQuery().getSnapshot().data?.recommendations) ||
+		Boolean(cachedApi.listenBrainzStatusQuery().getSnapshot().data?.recommendations);
+	const seededShelves = seededCanRecommend
+		? (cachedApi.homeRecommendationsQuery().getSnapshot().data?.shelves ?? [])
+		: [];
+
+	let shelves = $state<ProviderRecommendationShelf[]>(seededShelves);
+	let viewState = $state<State>(
+		seededCanRecommend && seededShelves.some((shelf) => shelf.items.length > 0) ? 'ready' : 'hidden'
+	);
 	let errorMsg = $state('');
 	let currentIndexes = $state<Record<string, number>>({});
 	let pausedShelves = $state<Record<string, boolean>>({});

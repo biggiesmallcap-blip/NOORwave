@@ -133,6 +133,17 @@ pub fn write_genres(
 
     let result = score_genre_tags(&inputs, MIN_SCORE_FLOOR);
 
+    // Replace this track's prior MusicBrainz genres so a re-enrichment pass
+    // recomputes confidence with the current scorer (e.g. after the count
+    // saturation fix). Guarded on a non-empty fetch: a lookup miss or transient
+    // error yields no tags and must NOT wipe a track's existing genres.
+    if !genre_tags.is_empty() {
+        conn.execute(
+            "DELETE FROM track_genres WHERE track_id = ?1 AND source = 'musicbrainz'",
+            params![track_id],
+        )?;
+    }
+
     let mut inserted = 0;
     for scored in &result.genres {
         let normalized = scored.canonical.trim().to_ascii_lowercase();

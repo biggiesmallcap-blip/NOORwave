@@ -255,7 +255,9 @@
 	}
 
 	async function loadGalaxy() {
-		loading = true;
+		// Only show the skeleton when nothing is painted yet. When we've seeded from
+		// the persisted snapshot, revalidate quietly instead of flashing a spinner.
+		if (taxonomy.length === 0) loading = true;
 		error = null;
 		actionError = null;
 		try {
@@ -460,6 +462,17 @@
 			await playTrackNow(shuffled?.queue[0]?.track.id ?? mergedTracks[0].id);
 		} catch (reason) {
 			actionError = reason instanceof Error ? reason.message : String(reason);
+		}
+	}
+
+	// Instant-paint: seed the galaxy from the persisted snapshot so the page renders
+	// last-known topology immediately instead of a spinner. loadGalaxy() in onMount
+	// still revalidates in the background.
+	{
+		const seeded = cachedApi.genreGalaxySnapshotQuery(90).getSnapshot().data;
+		if (seeded) {
+			applyGalaxySnapshot(seeded);
+			loading = false;
 		}
 	}
 

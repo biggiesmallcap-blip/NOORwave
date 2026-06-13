@@ -4,62 +4,71 @@
 	import { cachedApi } from '$lib/cache/api_queries';
 	import { playTidalMix } from '$lib/stores/player';
 	import { tidalStatus } from '$lib/stores/tidal';
-	import {
-		getCachedRadioStations,
-		putCachedRadioStations,
-		clearCachedRadioStations
-	} from '$lib/stores/tidal-radio-cache';
 	import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 
 	type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
 
-	const cachedOnMount = getCachedRadioStations();
-	let stations = $state<TidalMix[]>(cachedOnMount ?? []);
-	let viewState = $state<State>(
-		cachedOnMount && cachedOnMount.length > 0 ? 'ready' : 'loading'
-	);
+	// Reactive, persisted query: hydrates the localStorage snapshot synchronously at
+	// init so the shelf paints last-known stations with no skeleton, then revalidates
+	// in the background. Replaces the in-memory-only cache wiped on every restart.
+	const stationsQuery = cachedApi.tidalRadioStationsQuery();
+	const seeded = stationsQuery.getSnapshot().data?.stations ?? [];
+
+	let stations = $state<TidalMix[]>(seeded);
+	let viewState = $state<State>(seeded.length > 0 ? 'ready' : 'loading');
+	let refreshing = $state(false);
+	let lastRefreshFailed = $state(false);
 	let errorMsg = $state<string>('');
-	let loadSeq = 0;
 
-	onMount(() => {
-		if (!cachedOnMount || cachedOnMount.length === 0) void load();
-		return () => { loadSeq += 1; };
-	});
+	// The subscription is the sole writer of stations/viewState. Svelte calls it
+	// immediately with the current (hydrated) state, then on every revalidate.
+	onMount(() => stationsQuery.subscribe((s) => {
+		refreshing = s.refreshing;
+		// 503 = TIDAL unreachable. Check before reading s.data (SWR keeps prior data
+		// alongside the error). Keep cached stations through a transient cold-boot blip;
+		// only show the connect prompt when there's nothing to fall back on. Never drop
+		// the persisted copy here - a transient 503 would become a skeleton next launch.
+		if (s.error instanceof ApiError && s.error.status === 503) {
+			lastRefreshFailed = true;
+			if (stations.length === 0) viewState = 'disconnected';
+			return;
+		}
+		if (s.data) {
+			lastRefreshFailed = false;
+			stations = s.data.stations ?? [];
+			if (stations.length > 0) viewState = 'ready';
+			else if (!s.loading && !s.refreshing) viewState = 'empty';
+			return;
+		}
+		if (s.error && !s.loading) {
+			lastRefreshFailed = true;
+			viewState = 'error';
+			errorMsg = s.error instanceof Error ? s.error.message : 'Failed to load radio stations';
+			return;
+		}
+		if (s.loading) viewState = 'loading';
+	}));
 
-	// Untrack viewState so the effect only re-fires on tidalStatus transitions.
-	// Reading viewState directly would create a fetch loop when load() ends in
-	// disconnected/empty/error state.
+	// Re-fetch on (re)connect: the cold-boot race (initial revalidate 503'd before
+	// tokens rehydrated) and live connect from Settings. Skip when already showing
+	// fresh stations, but force a refresh if the last attempt failed. untrack so the
+	// effect only re-runs on tidalStatus changes.
 	$effect(() => {
 		if ($tidalStatus !== 'connected') return;
 		const cur = untrack(() => viewState);
-		if (cur !== 'loading' && cur !== 'ready') {
-			void load();
+		const haveStations = untrack(() => stations).length > 0;
+		const failed = untrack(() => lastRefreshFailed);
+		if (cur !== 'ready' || !haveStations || failed) {
+			void stationsQuery.refresh().catch(() => {});
 		}
 	});
 
-	async function load() {
-		const seq = ++loadSeq;
-		viewState = 'loading';
+	function retry() {
 		errorMsg = '';
-		try {
-			const data = await cachedApi.getTidalRadioStations();
-			if (seq !== loadSeq) return;
-			const nextStations = data.stations ?? [];
-			stations = nextStations;
-			if (nextStations.length > 0) putCachedRadioStations(nextStations);
-			viewState = nextStations.length > 0 ? 'ready' : 'empty';
-		} catch (e) {
-			if (seq !== loadSeq) return;
-			if (e instanceof ApiError && e.status === 503) {
-				clearCachedRadioStations();
-				viewState = 'disconnected';
-			} else {
-				viewState = 'error';
-				errorMsg = e instanceof Error ? e.message : 'Failed to load radio stations';
-			}
-		}
+		viewState = stations.length > 0 ? 'ready' : 'loading';
+		void stationsQuery.refresh().catch(() => {});
 	}
 </script>
 
@@ -118,7 +127,7 @@
 			<p class="eyebrow">TIDAL</p>
 			<h2>Personal Radio</h2>
 		</div>
-		{#if viewState === 'loading'}
+		{#if viewState === 'loading' || refreshing}
 			<span class="loading-indicator">Loading…</span>
 		{/if}
 	</div>
@@ -137,7 +146,7 @@
 	{:else if viewState === 'error'}
 		<p class="muted-line">
 			Couldn't load radio stations{errorMsg ? `: ${errorMsg}` : '.'}
-			<button class="inline-link" onclick={load}>Retry</button>
+			<button class="inline-link" onclick={retry}>Retry</button>
 		</p>
 	{/if}
 </section>

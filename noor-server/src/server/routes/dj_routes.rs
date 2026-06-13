@@ -2880,6 +2880,7 @@ mod tests {
             tidal_tokens: None,
             tidal_mixes_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             tidal_radio_stations_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            home_picks_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             tidal_moods_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             tidal_page_modules_cache: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),

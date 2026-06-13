@@ -25,13 +25,19 @@ describe('TIDAL home artwork contracts', () => {
 		expect(mixes).not.toContain("style=\"background-image: url('{mix.image_url}')\"");
 	});
 
-	test('guards mix shelf loads against stale responses', () => {
-		expect(mixes).toContain('let loadSeq = 0;');
-		expect(mixes).toContain('return () => { loadSeq += 1; };');
-		expect(mixes).toContain('const seq = ++loadSeq;');
-		expect(mixes).toContain('if (seq !== loadSeq) return;');
-		expect(mixes).toContain('const nextMixes = data.mixes ?? [];');
-		expect(mixes).toContain('putCachedMixes(nextMixes)');
+	test('mix shelf instant-paints from the persisted query and revalidates safely', () => {
+		// Seeds synchronously from the persisted snapshot (no skeleton when warm).
+		expect(mixes).toContain('cachedApi.tidalMixesQuery()');
+		expect(mixes).toContain('getSnapshot().data?.mixes');
+		// The subscription is the sole writer of state (no manual loadSeq race guard;
+		// the query cache de-dupes in-flight fetches).
+		expect(mixes).toContain('mixesQuery.subscribe(');
+		// A transient 503 keeps cached mixes; the connect prompt only shows with none.
+		expect(mixes).toContain('s.error.status === 503');
+		expect(mixes).toContain("if (mixes.length === 0) viewState = 'disconnected';");
+		// The in-memory-only cache that was wiped on restart is gone.
+		expect(mixes).not.toContain('tidal-mixes-cache');
+		expect(mixes).not.toContain('putCachedMixes');
 	});
 
 	test('routes radio artwork through ArtworkImage fallback handling', () => {
@@ -46,12 +52,13 @@ describe('TIDAL home artwork contracts', () => {
 		expect(radio).not.toContain("style=\"background-image: url('{station.image_url}')\"");
 	});
 
-	test('guards radio shelf loads against stale responses', () => {
-		expect(radio).toContain('let loadSeq = 0;');
-		expect(radio).toContain('return () => { loadSeq += 1; };');
-		expect(radio).toContain('const seq = ++loadSeq;');
-		expect(radio).toContain('if (seq !== loadSeq) return;');
-		expect(radio).toContain('const nextStations = data.stations ?? [];');
-		expect(radio).toContain('putCachedRadioStations(nextStations)');
+	test('radio shelf instant-paints from the persisted query and revalidates safely', () => {
+		expect(radio).toContain('cachedApi.tidalRadioStationsQuery()');
+		expect(radio).toContain('getSnapshot().data?.stations');
+		expect(radio).toContain('stationsQuery.subscribe(');
+		expect(radio).toContain('s.error.status === 503');
+		expect(radio).toContain("if (stations.length === 0) viewState = 'disconnected';");
+		expect(radio).not.toContain('tidal-radio-cache');
+		expect(radio).not.toContain('putCachedRadioStations');
 	});
 });

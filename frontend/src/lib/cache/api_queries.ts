@@ -9,6 +9,7 @@ import {
 	getApiBase,
 	getStoredToken,
 	type Album,
+	type AnalyticsSignals,
 	type Artist,
 	type AudioSettings,
 	type DiscoveryEngine,
@@ -60,13 +61,15 @@ let activeCacheNamespace: string | null = null;
 
 export function ensureCacheScope(): void {
 	const next = cacheNamespace();
-	if (activeCacheNamespace === null) {
-		activeCacheNamespace = next;
-		return;
-	}
 	if (activeCacheNamespace === next) return;
+	const changed = activeCacheNamespace !== null;
 	activeCacheNamespace = next;
-	dataCache.clear();
+	if (changed) dataCache.clear();
+	// Drop persisted entries from any other namespace so a token/api-base change
+	// can't orphan them in localStorage forever. Only sweep once a real token is
+	// present, so a transient pre-auth 'no-token' scope can't nuke the entries
+	// written under the real token.
+	if (getStoredToken()) dataCache.sweepForeignPersisted(next);
 }
 
 function scopedPersist(maxAgeMs: number): NonNullable<QueryOptions['persist']> {
@@ -78,6 +81,10 @@ const shortOptions: QueryOptions = { staleMs: 30 * SECOND };
 const mediumOptions: QueryOptions = { staleMs: 5 * MINUTE, persist: scopedPersist(DAY) };
 const longOptions: QueryOptions = { staleMs: 30 * MINUTE, persist: scopedPersist(7 * DAY) };
 const moodsOptions: QueryOptions = { ...longOptions, returnStale: true };
+// Read-mostly surfaces that should paint last-known content instantly on open and
+// revalidate in the background. NOT for lists that are mutated then re-read (library,
+// playlists, artist/album detail) - returnStale there would flash pre-mutation rows.
+const staticOptions: QueryOptions = { ...longOptions, returnStale: true };
 
 export const cacheKeys = {
 	playbackState: () => ['api', 'getPlaybackState'] as const,
@@ -107,6 +114,7 @@ export const cacheKeys = {
 	albumSpotifyStats: (id: number) => ['api', 'getAlbumSpotifyStats', { id }] as const,
 	genres: () => ['api', 'getGenres'] as const,
 	genreGalaxySnapshot: (days = 90) => ['api', 'getGenreGalaxySnapshot', { days }] as const,
+	analyticsSignals: (days = 30) => ['api', 'getAnalyticsSignals', { days }] as const,
 	genreHeat: (days = 90) => ['api', 'getGenreHeat', { days }] as const,
 	genreCohorts: (days = 90) => ['api', 'getGenreCohorts', { days }] as const,
 	genreEvolution: (days = 90) => ['api', 'getGenreEvolution', { days }] as const,
@@ -263,6 +271,32 @@ export const cachedApi = {
 			mediumOptions,
 		);
 	},
+	// Reactive variant for instant-paint seeding (getSnapshot hydrates the persisted
+	// copy). Kept on mediumOptions - the snapshot is large (~100KB), so we don't
+	// broaden its persistence window.
+	genreGalaxySnapshotQuery(days = 90) {
+		return query<{
+			genres: Genre[];
+			heat: GenreHeat[];
+			cohorts: GenreCohort[];
+			evolution: GenreEvolutionPoint[];
+			metrics: GenreAudioMetrics[];
+		}>(cacheKeys.genreGalaxySnapshot(days), () => api.getGenreGalaxySnapshot(days), mediumOptions);
+	},
+	getAnalyticsSignals(days = 30) {
+		return fetchCached<AnalyticsSignals>(
+			cacheKeys.analyticsSignals(days),
+			() => api.getAnalyticsSignals(days),
+			staticOptions,
+		);
+	},
+	analyticsSignalsQuery(days = 30) {
+		return query<AnalyticsSignals>(
+			cacheKeys.analyticsSignals(days),
+			() => api.getAnalyticsSignals(days),
+			staticOptions,
+		);
+	},
 	getGenreHeat(days = 90) {
 		return fetchCached<{ heat: GenreHeat[] }>(
 			cacheKeys.genreHeat(days),
@@ -348,17 +382,17 @@ export const cachedApi = {
 		return fetchCached<HomeRecommendationsResponse>(
 			cacheKeys.homeRecommendations(),
 			() => api.getHomeRecommendations(),
-			mediumOptions,
+			staticOptions,
 		);
 	},
 	getTidalMixes() {
-		return fetchCached<TidalMixesResponse>(cacheKeys.tidalMixes(), () => api.getTidalMixes(), mediumOptions);
+		return fetchCached<TidalMixesResponse>(cacheKeys.tidalMixes(), () => api.getTidalMixes(), staticOptions);
 	},
 	getTidalRadioStations() {
 		return fetchCached<TidalRadioStationsResponse>(
 			cacheKeys.tidalRadioStations(),
 			() => api.getTidalRadioStations(),
-			mediumOptions,
+			staticOptions,
 		);
 	},
 	getTidalHomeModules() {
@@ -476,13 +510,13 @@ export const cachedApi = {
 		);
 	},
 	getLastfmStatus() {
-		return fetchCached<LastfmStatus>(cacheKeys.settings.lastfmStatus(), () => api.getLastfmStatus(), mediumOptions);
+		return fetchCached<LastfmStatus>(cacheKeys.settings.lastfmStatus(), () => api.getLastfmStatus(), staticOptions);
 	},
 	getListenBrainzStatus() {
 		return fetchCached<ListenBrainzStatus>(
 			cacheKeys.settings.listenBrainzStatus(),
 			() => api.getListenBrainzStatus(),
-			mediumOptions,
+			staticOptions,
 		);
 	},
 	homeArticlesQuery() {
@@ -490,6 +524,36 @@ export const cachedApi = {
 	},
 	homeNewsQuery() {
 		return query<HomeNewsResponse>(cacheKeys.homeNews(), () => api.getHomeNews(), mediumOptions);
+	},
+	// Reactive, persisted, instant-paint queries for the home shelves. Creating one
+	// hydrates the persisted snapshot (getState/peek do NOT) and schedules a
+	// background revalidate; subscribers paint last-known content with no skeleton.
+	tidalMixesQuery() {
+		return query<TidalMixesResponse>(cacheKeys.tidalMixes(), () => api.getTidalMixes(), staticOptions);
+	},
+	tidalRadioStationsQuery() {
+		return query<TidalRadioStationsResponse>(
+			cacheKeys.tidalRadioStations(),
+			() => api.getTidalRadioStations(),
+			staticOptions,
+		);
+	},
+	homeRecommendationsQuery() {
+		return query<HomeRecommendationsResponse>(
+			cacheKeys.homeRecommendations(),
+			() => api.getHomeRecommendations(),
+			staticOptions,
+		);
+	},
+	lastfmStatusQuery() {
+		return query<LastfmStatus>(cacheKeys.settings.lastfmStatus(), () => api.getLastfmStatus(), staticOptions);
+	},
+	listenBrainzStatusQuery() {
+		return query<ListenBrainzStatus>(
+			cacheKeys.settings.listenBrainzStatus(),
+			() => api.getListenBrainzStatus(),
+			staticOptions,
+		);
 	},
 };
 

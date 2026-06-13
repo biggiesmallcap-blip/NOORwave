@@ -111,3 +111,92 @@ drawer, search overlays, any other `.modal-backdrop`/popup. The context-menu
 store should be checked too (cursor-anchored menus would be offset under the same
 ancestors).
 - Spawned by: commit on branch `fix/tidal-mix-real-queue-rows` (popup portal fix)
+
+### feat: make the automix live scorer respect genre confidence
+
+The genre-bleed root-cause fix (genre/scorer.rs count-saturation + similarity
+weighting by track_genres.confidence) only reaches `compute_track_similarity`.
+The separate automix live scorer (commit decbebd1: `playback/automix.rs`,
+`smart/taste_vector.rs`) weights genre match by genre rarity (IDF) but does NOT
+fold in confidence, so a single-vote MusicBrainz mis-tag (XXXTENTACION "jazz")
+can still bias automix genre matching even after re-enrichment lowers its
+confidence. Audit that path and weight its genre contribution by
+`track_genres.confidence` (clamped) the same way similarity now does, so the two
+genre re-rankers agree.
+- Spawned by: data-layer genre-confidence fix on branch `fix/tidal-mix-real-queue-rows`
+
+### chore: persist raw MusicBrainz tag count so confidence is backfillable without re-querying
+
+`track_genres` stores only the scored confidence, not the raw folksonomy vote
+count it came from. When the scorer's count handling changes (as in the
+count-saturation fix), existing rows can only be corrected by a full MusicBrainz
+re-enrichment (~1 req/sec, hours). Persisting the raw count (new nullable column
+or a sidecar table written by `write_genres`) would let a future scorer change
+recompute confidence in-place via a migration, no API calls. Low priority; only
+worth it before the next scorer-weighting change.
+- Spawned by: data-layer genre-confidence fix on branch `fix/tidal-mix-real-queue-rows`
+
+### perf: virtualize the library track/album lists (deep-scroll DOM)
+
+Deferred from the app-speed pass. The library already paginates at `PAGE_SIZE = 100`
+and appends on scroll (`loadMoreVisibleItems`), so the *initial* render is bounded to
+~100 rows - the real win of instant-paint already landed. True windowing only helps the
+case where a user scrolls through thousands of rows in one session and the appended DOM
+piles up (never reclaimed). It's a risky retrofit: `library/+page.svelte` lists carry
+keyboard nav (`cursorIndex`), multi-select, and right-click context menus that all index
+into the rendered rows. Do it on its own branch with a windowed renderer that preserves
+those, and verify scroll + keyboard + selection + context menu before shipping.
+- Spawned by: app-speed pass on branch `fix/tidal-mix-real-queue-rows`
+
+### perf: batch the library home mural's random-offset fetches
+
+`loadRandomPanelTracks`/`loadRandomPanelAlbums` (`library/+page.svelte:1225-1247`) fire
+`HOME_MURAL_ITEM_LIMIT` (12) `getTracks`/`getAlbums` calls each at spread random offsets
+(24 calls on the library home view). They're `limit=1`, cached per-offset after first
+load, and the spread is deliberate (full-library variety). Batching into a few
+`PAGE_SIZE` calls + client-side sampling would cut the call count but changes the
+variety semantics (consecutive rows by date/title are similar), so it needs a
+variety-preserving design decision rather than a mechanical swap. Low priority - calls
+are tiny and warm after first visit.
+- Spawned by: app-speed pass on branch `fix/tidal-mix-real-queue-rows`
+
+### perf: revisit `heroArtists` cost if the library home tab feels janky
+
+`heroArtists` (`library/+page.svelte:~936`) does an O(tracks x artists) pass. It's a
+`$derived`, so Svelte already memoizes it (recomputes only when `$tracks`/`$artistsStore`
+change), meaning the cost is the computation itself, not redundant runs. Only worth
+optimizing (incremental maps, web worker, or a server-computed endpoint) if profiling
+shows it actually janks the home tab on a large library - measure before changing.
+- Spawned by: app-speed pass on branch `fix/tidal-mix-real-queue-rows`
+
+### perf: SQLite read pool (drop the single Arc<Mutex<Connection>>)
+
+`db/mod.rs` serializes every handler on one `Arc<Mutex<Connection>>`. WAL allows
+concurrent readers and writes are sparse/background, so a small r2d2 read pool (5-8
+conns) + one write connection would parallelize hot reads. Deferred as droppable: it
+rewrites the `with_conn` path used by nearly every handler (high blast radius, core
+infra), needs a release rebuild, and the mutex only bites under concurrency - which a
+single-user loopback app rarely sees, especially now that the hot endpoints are cached
+(`/api/home/picks`), compressed, batched (`/api/discovery/radio` DSP), and warmed at
+boot. Reach for it only if profiling shows lock contention under real use.
+- Spawned by: app-speed pass on branch `fix/tidal-mix-real-queue-rows`
+
+### chore: invalidate `/api/home/picks` cache on library sync
+
+The new 2h in-process TTL cache for `/api/home/picks` (`home_routes.rs`) is not cleared
+when the library changes, so picks can lag a sync by up to 2h. Acceptable for now (picks
+are "most played" + random genre variety, not urgent), but a clean fix is to clear
+`home_picks_cache` from the `LibrarySynced` event handler in `main.rs` (same place the
+auto-enrich listener lives) so picks refresh promptly after a sync.
+- Spawned by: app-speed pass on branch `fix/tidal-mix-real-queue-rows`
+
+### perf: local artwork disk-cache proxy (only if WebView2 caching proves insufficient)
+
+Considered and skipped during the app-speed pass. TIDAL artwork loads cross-origin
+direct from `resources.tidal.com` (it never passes through our server, and the server's
+`no-store` header only covers static files, not `/api`), so WebView2's persistent disk
+cache very likely already caches it across launches. A `/api/artwork/<cover>/<size>`
+proxy with an on-disk cache (sibling to `noor.db`) + redirect-to-CDN fallback would make
+it deterministic, but the benefit is uncertain. Only build it if artwork is observably
+re-downloading every launch (check WebView2 devtools network on a cold start first).
+- Spawned by: app-speed pass on branch `fix/tidal-mix-real-queue-rows`

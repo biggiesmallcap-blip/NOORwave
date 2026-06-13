@@ -3636,36 +3636,77 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
 
     // ── Stage 2: aggregate signals into indexed temp tables ──────────────────
 
-    // Genre rarity (IDF). A genre covering most of the library carries almost no
-    // similarity signal - knowing two tracks are both "Hip-Hop" in a hip-hop-heavy
-    // library says little - while a niche genre is a strong cluster. Weight each
-    // shared genre by ln(total_tracks / members) so rare-genre matches dominate
-    // broad ones; a genre covering the whole library weighs 0. Computed in Rust and
-    // staged in a temp table because the bundled SQLite has no ln().
+    // Per-(track, genre) weight = genre rarity (IDF) x tag confidence.
+    //
+    //   1. IDF: weight each genre by ln(total_tracks / members) so a rare genre (a
+    //      tight cluster) dominates a broad one (almost no signal - knowing two
+    //      tracks are both "Hip-Hop" in a hip-hop-heavy library says little). A
+    //      genre covering the whole library weighs 0.
+    //   2. Confidence: scale by track_genres.confidence, the scorer's per-tag trust
+    //      (source strength x folksonomy vote count). A weakly-attested tag - a
+    //      single-vote MusicBrainz "jazz" bleeding onto an emo-rap track - then
+    //      contributes little, while a well-attested genre counts fully. Clamped to
+    //      1.0 so an unusually high accumulated score can't let one genre dominate
+    //      by raw magnitude.
+    //
+    // This replaces an earlier family-vote damping heuristic: once confidence is
+    // calibrated (the count-saturation fix in genre/scorer.rs stops a lone vote from
+    // scoring 1.0), confidence is the honest signal and the vote-count proxy is
+    // unnecessary. Takes full effect once a MusicBrainz re-enrichment recomputes
+    // stale confidences and this table is rebuilt.
+    //
+    // Computed in Rust and staged in a temp table because the bundled SQLite has no ln().
     let total_tracks: i64 = conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))?;
     conn.execute_batch(
-        "DROP TABLE IF EXISTS _genre_idf;
-         CREATE TEMP TABLE _genre_idf (genre_id INTEGER PRIMARY KEY, weight REAL NOT NULL);",
+        "DROP TABLE IF EXISTS _track_genre_weight;
+         CREATE TEMP TABLE _track_genre_weight (
+             track_id INTEGER NOT NULL,
+             genre_id INTEGER NOT NULL,
+             weight REAL NOT NULL,
+             PRIMARY KEY (track_id, genre_id)
+         );",
     )?;
     if total_tracks > 0 {
-        let genre_sizes = {
+        // genre_id -> IDF weight
+        let mut idf: HashMap<i64, f64> = HashMap::new();
+        {
             let mut stmt = conn.prepare(
                 "SELECT genre_id, COUNT(DISTINCT track_id) FROM track_genres GROUP BY genre_id",
             )?;
             let rows = stmt
                 .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
                 .collect::<Result<Vec<_>, _>>()?;
-            rows
+            for (genre_id, members) in rows {
+                let weight = if members > 0 {
+                    (total_tracks as f64 / members as f64).ln().max(0.0)
+                } else {
+                    0.0
+                };
+                idf.insert(genre_id, weight);
+            }
+        }
+
+        // weight each (track, genre) by IDF x clamped confidence.
+        let tags: Vec<(i64, i64, f64)> = {
+            let mut stmt =
+                conn.prepare("SELECT track_id, genre_id, confidence FROM track_genres")?;
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
         };
-        let mut insert =
-            conn.prepare("INSERT INTO _genre_idf (genre_id, weight) VALUES (?1, ?2)")?;
-        for (genre_id, members) in genre_sizes {
-            let weight = if members > 0 {
-                (total_tracks as f64 / members as f64).ln().max(0.0)
-            } else {
-                0.0
-            };
-            insert.execute(params![genre_id, weight])?;
+        let mut insert = conn.prepare(
+            "INSERT OR IGNORE INTO _track_genre_weight (track_id, genre_id, weight)
+             VALUES (?1, ?2, ?3)",
+        )?;
+        for (track_id, genre_id, confidence) in tags {
+            let base = idf.get(&genre_id).copied().unwrap_or(0.0);
+            let trust = confidence.clamp(0.0, 1.0);
+            insert.execute(params![track_id, genre_id, base * trust])?;
         }
     }
 
@@ -3686,12 +3727,14 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
         HAVING COUNT(*) >= 2;
         CREATE INDEX _co_listen_idx ON _co_listen(ta, tb);
 
+        -- A shared genre bridges the pair only as strongly as the weaker side
+        -- believes it: MIN(a, b) means a damped mis-tag on one track can't inflate
+        -- the match even if the other track holds that genre firmly.
         DROP TABLE IF EXISTS _genre_shared;
         CREATE TEMP TABLE _genre_shared AS
-        SELECT a.track_id AS ta, b.track_id AS tb, SUM(w.weight) AS shared
-        FROM track_genres a
-        JOIN track_genres b ON b.genre_id = a.genre_id AND b.track_id > a.track_id
-        JOIN _genre_idf w ON w.genre_id = a.genre_id
+        SELECT a.track_id AS ta, b.track_id AS tb, SUM(MIN(a.weight, b.weight)) AS shared
+        FROM _track_genre_weight a
+        JOIN _track_genre_weight b ON b.genre_id = a.genre_id AND b.track_id > a.track_id
         GROUP BY a.track_id, b.track_id;
         CREATE INDEX _genre_shared_idx ON _genre_shared(ta, tb);
 
@@ -3810,7 +3853,7 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
         DROP TABLE IF EXISTS _co_listen;
         DROP TABLE IF EXISTS _genre_shared;
         DROP TABLE IF EXISTS _track_year;
-        DROP TABLE IF EXISTS _genre_idf;
+        DROP TABLE IF EXISTS _track_genre_weight;
     ",
     )?;
 
@@ -6021,6 +6064,42 @@ pub fn get_audio_dsp_features(
     Ok(result)
 }
 
+/// Batch-fetch just the harmonic inputs (camelot key + bpm) for many tracks in a
+/// single query. The radio/automix re-ranker only needs these two fields; fetching
+/// the full `AudioDspFeatures` row per candidate was N serialized single-row
+/// queries under the DB mutex. Returns a map keyed by track_id; tracks with no
+/// `audio_dsp_features` row are simply absent (callers treat that as unanalyzed).
+pub fn get_dsp_harmonic_keys_batch(
+    conn: &Connection,
+    track_ids: &[i64],
+) -> Result<std::collections::HashMap<i64, (Option<String>, Option<f64>)>> {
+    let mut out: std::collections::HashMap<i64, (Option<String>, Option<f64>)> =
+        std::collections::HashMap::new();
+    if track_ids.is_empty() {
+        return Ok(out);
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(track_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT track_id, camelot_key, bpm FROM audio_dsp_features WHERE track_id IN ({placeholders})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(track_ids.iter()), |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<f64>>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, camelot, bpm) = row?;
+        out.insert(id, (camelot, bpm));
+    }
+    Ok(out)
+}
+
 pub fn get_tracks_missing_dsp_features(conn: &Connection, limit: i64) -> Result<Vec<Track>> {
     // CURRENT_ANALYSIS_VERSION is a compile-time constant — safe to interpolate.
     let projection = track_projection("a");
@@ -7244,6 +7323,73 @@ mod tests {
         assert!(
             (rare - 1.0).abs() < 1e-9,
             "the rarest shared-genre pair normalizes to 1.0"
+        );
+    }
+
+    #[test]
+    fn compute_track_similarity_weights_genre_bridges_by_confidence() {
+        // A weakly-attested genre tag (a single-vote MusicBrainz "jazz" bleeding
+        // onto a track, stored at low confidence after the scorer fix) must bridge
+        // to genuine holders of that genre far more weakly than two confident
+        // holders bridge to each other - the consumer side of the data-layer fix.
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("foreign keys");
+        schema::run_migrations(&conn).expect("migrations");
+        // Distinct artists, no albums or listens, so genre_proximity is isolated.
+        for id in 1..=30 {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (?1, ?2)",
+                params![id, format!("A{id}")],
+            )
+            .expect("artist");
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, duration_ms) VALUES (?1, ?2, ?1, 180000)",
+                params![id, format!("T{id}")],
+            )
+            .expect("track");
+        }
+        conn.execute(
+            "INSERT INTO genres (id, name, slug) VALUES (1,'Niche','niche')",
+            [],
+        )
+        .expect("genre");
+        // Tracks 16-18 genuinely hold the niche genre at full confidence; track 3
+        // carries it only as a low-confidence bleed.
+        conn.execute(
+            "INSERT INTO track_genres (track_id, genre_id, source, confidence) VALUES
+                (16,1,'lastfm',1.0),(17,1,'lastfm',1.0),(18,1,'lastfm',1.0),
+                (3,1,'musicbrainz',0.2)",
+            [],
+        )
+        .expect("niche genre tags");
+
+        compute_track_similarity(&conn).expect("compute similarity");
+
+        let gp = |a: i64, b: i64| -> f64 {
+            conn.query_row(
+                "SELECT genre_proximity FROM track_similarity WHERE track_a=?1 AND track_b=?2",
+                params![a, b],
+                |row| row.get(0),
+            )
+            .unwrap_or(0.0)
+        };
+        let genuine = gp(16, 17); // two confident holders
+        let bleed = gp(3, 16); // low-confidence tag bridging to a confident holder
+
+        assert!(
+            bleed < genuine,
+            "a low-confidence tag must bridge weaker ({bleed}) than two confident holders ({genuine})"
+        );
+        assert!(
+            (genuine - 1.0).abs() < 1e-9,
+            "the strongest genuine pair normalizes to 1.0"
+        );
+        // MIN() picks the weaker believer, so the bleed bridge is exactly the tag's
+        // confidence fraction (0.2) of the genuine bridge.
+        assert!(
+            (bleed / genuine - 0.2).abs() < 1e-9,
+            "the low-confidence bridge should scale with the tag's confidence, got {bleed}"
         );
     }
 
