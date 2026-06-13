@@ -55,6 +55,7 @@
 	import AlbumCarousel from '$lib/components/AlbumCarousel.svelte';
 	import AlbumDetailPopup from '$lib/components/AlbumDetailPopup.svelte';
 	import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
+	import { portal } from '$lib/actions/portal';
 	import { openContextMenu, openMenuAtElement, type MenuItem } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
@@ -137,6 +138,10 @@
 	let undoTimer: ReturnType<typeof setTimeout> | null = null;
 	let artists = $state<Artist[]>([]);
 	let artistsLoading = $state(false);
+	let artistsLoadingMore = $state(false);
+	// The artists endpoint returns no total, so we page until a short page tells
+	// us we've hit the end. `artistsExhausted` then stops further fetches.
+	let artistsExhausted = $state(false);
 	let recentTracks = $state<Track[]>(homePanelCandidateCache.recentTracks);
 
 	// Keyboard cursor for track list
@@ -276,16 +281,36 @@
 
 	async function loadArtists() {
 		artistsLoading = true;
+		artistsExhausted = false;
 		try {
-			// Default browse view - top 200 alphabetically. When the user types
-			// a query, the search effect calls api.search() server-side and
-			// shows searchResults.artists (FTS). No more upfront 10k load.
-			const data = await cachedApi.getArtists('name', 'asc', 200);
+			// First page. Subsequent pages append via loadMoreArtists on scroll, so
+			// the browse view paginates like Albums/Tracks instead of capping out.
+			// When the user types a query, the search effect calls api.search()
+			// server-side and shows searchResults.artists (FTS).
+			const data = await cachedApi.getArtists('name', 'asc', PAGE_SIZE, 0);
 			artists = data.artists;
+			if (data.artists.length < PAGE_SIZE) artistsExhausted = true;
 		} catch (err) {
 			console.error('Failed to load artists:', err);
 		} finally {
 			artistsLoading = false;
+		}
+	}
+
+	async function loadMoreArtists() {
+		if (artistsExhausted || artistsLoading || artistsLoadingMore) return;
+		artistsLoadingMore = true;
+		try {
+			const data = await cachedApi.getArtists('name', 'asc', PAGE_SIZE, artists.length);
+			// Dedupe by id so a shifted page can't create duplicate {#each} keys.
+			const seen = new Set(artists.map((a) => a.id));
+			const fresh = data.artists.filter((a) => !seen.has(a.id));
+			artists = [...artists, ...fresh];
+			if (data.artists.length < PAGE_SIZE) artistsExhausted = true;
+		} catch (err) {
+			console.error('Failed to load more artists:', err);
+		} finally {
+			artistsLoadingMore = false;
 		}
 	}
 
@@ -702,7 +727,12 @@
 	}
 
 	async function loadMoreVisibleItems() {
-		if ($isLoading || $isLoadingMore || $searchQuery.trim()) return;
+		if ($searchQuery.trim()) return;
+		if (activeTab === 'artists') {
+			await loadMoreArtists();
+			return;
+		}
+		if ($isLoading || $isLoadingMore) return;
 		if (activeTab === 'tracks' || activeTab === 'liked') {
 			if ($tracks.length >= $totalTracks) return;
 			await loadTracks($sortBy, $sortDir, PAGE_SIZE, $tracks.length, activeTab === 'liked');
@@ -839,6 +869,8 @@
 			? $tracks.length < $totalTracks
 			: activeTab === 'albums'
 			? $albums.length < $totalAlbums
+			: activeTab === 'artists'
+			? artists.length > 0 && !artistsExhausted
 			: false)
 	);
 	let searchSummary = $derived(
@@ -2177,6 +2209,18 @@
 				{/each}
 			</div>
 
+			{#if !isSearchMode && !artistsExhausted && artists.length > 0}
+				<div class="load-more-row">
+					<span class="load-more-count">{artists.length} artists</span>
+					<button
+						class="btn btn-glass"
+						disabled={artistsLoadingMore}
+						onclick={() => void loadMoreArtists()}
+					>
+						{artistsLoadingMore ? 'Loading…' : 'Load More'}
+					</button>
+				</div>
+			{/if}
 		{/if}
 
 	{:else if activeTab === 'tracks' || activeTab === 'liked'}
@@ -2454,6 +2498,7 @@
 		class="modal-backdrop"
 		role="presentation"
 		onclick={() => { expandedTrackId = null; detailTrack = null; detailAlbumTracks = []; }}
+		use:portal
 	>
 		<div class="modal-panel glass-panel" onclick={(e) => e.stopPropagation()} role="dialog" tabindex="-1" aria-modal="true" aria-label={detailTrack.title}>
 			<div class="modal-topbar">

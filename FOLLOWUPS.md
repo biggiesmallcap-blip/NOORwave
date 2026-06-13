@@ -81,3 +81,21 @@ Remaining to fully standardize:
   duplicated markup/keyboard logic, but it is a larger refactor — do it on its
   own branch with screenshot diffing.
 - Spawned by: commit on branch `fix/tidal-mix-real-queue-rows` (play standardization pass)
+
+### fix: portal all remaining fixed-position modals out of .workspace
+
+Root cause found while fixing the album detail popup: `.app-shell` sets
+`transform: translateZ(0)` and, when a wallpaper is active, the scrolling
+`.workspace` gets a `backdrop-filter`. Both establish a containing block for
+`position: fixed` descendants, so a fixed modal rendered inside the page is
+positioned against the scrolling workspace and jumps to the content's top origin
+once you scroll down (looks like it "appears at the top of the page"). Added a
+`portal` action ($lib/actions/portal.ts) and applied it to AlbumDetailPopup and
+the library track-detail modal.
+
+Sweep the other fixed modals/overlays that render inside the page and apply
+`use:portal` (or confirm they already mount at root): playlists rule-editor
+drawer, search overlays, any other `.modal-backdrop`/popup. The context-menu
+store should be checked too (cursor-anchored menus would be offset under the same
+ancestors).
+- Spawned by: commit on branch `fix/tidal-mix-real-queue-rows` (popup portal fix)
