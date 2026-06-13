@@ -2979,6 +2979,47 @@ pub fn get_tracks_excluding_with_limit(
     Ok(tracks)
 }
 
+/// Artist-diverse recall over the seed's genres: one representative track per
+/// artist that shares any genre with the seed. Used to widen an automix pool that
+/// has collapsed to a handful of artists - a precomputed similar-pool is often the
+/// seed's own catalogue plus one over-connected neighbour, and no per-artist cap
+/// can create diversity the pool doesn't contain. Returning a single track per
+/// artist makes this a breadth-first artist sample (no deep runs), which the
+/// scorer's shared-genre boost then keeps on-vibe. Empty when the seed is
+/// untagged. Caller dedupes against the existing pool and exclusions.
+pub fn get_genre_diverse_candidates(
+    conn: &Connection,
+    seed_track_id: i64,
+    limit: usize,
+) -> Result<Vec<Track>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "SELECT {proj}
+         FROM tracks t
+         LEFT JOIN artists a ON t.artist_id = a.id
+         LEFT JOIN albums al ON t.album_id = al.id
+         WHERE t.id IN (
+             SELECT MIN(t2.id)
+             FROM tracks t2
+             JOIN track_genres tg ON tg.track_id = t2.id
+             WHERE tg.genre_id IN (
+                 SELECT genre_id FROM track_genres WHERE track_id = ?1
+             )
+             GROUP BY t2.artist_id
+         )
+         ORDER BY t.id
+         LIMIT {limit}",
+        proj = track_projection("a"),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let tracks = stmt
+        .query_map(params![seed_track_id], track_from_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(tracks)
+}
+
 pub fn get_existing_tidal_track_ids(conn: &Connection, tidal_ids: &[i64]) -> Result<HashSet<i64>> {
     if tidal_ids.is_empty() {
         return Ok(HashSet::new());
@@ -4782,6 +4823,51 @@ pub fn get_track_neighbors_for_seeds(
         grouped.entry(seed_id).or_default().push(neighbor);
     }
     Ok(grouped)
+}
+
+/// Artist-level "hub-ness": for each requested artist, the highest in-degree
+/// percentile any of that artist's tracks carries as a neighbour, across every
+/// model. In most libraries a few artists end up over-connected in the similarity
+/// graph (heavy co-listen history, a large catalogue, broad genre tags) and get
+/// listed as a neighbour for a huge share of seeds. That pollution is artist-wide,
+/// not per-track: an artist's deep cuts can have a low individual in-degree yet
+/// still ride into every pool because the *artist* is a top neighbour everywhere.
+/// Keying on the artist's max in-degree lets one genuinely hubby track flag the
+/// whole catalogue, which is what catches that low-in-degree filler. Artists with
+/// no neighbour rows are omitted, so the caller treats a missing entry as 0.
+pub fn get_artist_hub_percentiles(
+    conn: &Connection,
+    artist_ids: &[i64],
+) -> Result<HashMap<i64, f64>> {
+    let mut out = HashMap::new();
+    if artist_ids.is_empty() {
+        return Ok(out);
+    }
+    // Chunk well under SQLite's bound-parameter ceiling.
+    for chunk in artist_ids.chunks(400) {
+        let placeholders = (0..chunk.len())
+            .map(|idx| format!("?{}", idx + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT t.artist_id, MAX(n.candidate_in_degree_percentile)
+             FROM track_neighbors n
+             JOIN tracks t ON t.id = n.neighbor_track_id
+             WHERE t.artist_id IN ({placeholders})
+             GROUP BY t.artist_id"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(chunk.iter()), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<f64>>(1)?))
+        })?;
+        for row in rows {
+            let (artist_id, pct) = row?;
+            if let Some(pct) = pct {
+                out.insert(artist_id, pct);
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn get_external_track_candidate_by_id(
@@ -7051,6 +7137,51 @@ mod tests {
                 .is_err(),
             "temporary build table should be dropped after swap"
         );
+    }
+
+    #[test]
+    fn get_genre_diverse_candidates_samples_one_track_per_artist() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("foreign keys");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (1,'A'),(2,'B'),(3,'C'),(9,'Seed')",
+            [],
+        )
+        .expect("artists");
+        conn.execute(
+            "INSERT INTO genres (id, name, slug) VALUES (1,'Shared','shared'),(2,'Other','other')",
+            [],
+        )
+        .expect("genres");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, duration_ms) VALUES
+                (10,'seed',9,1000),
+                (101,'a-low',1,1000),(102,'a-high',1,1000),
+                (201,'b-low',2,1000),(202,'b-high',2,1000),
+                (301,'c-only',3,1000),
+                (401,'off-genre',9,1000)",
+            [],
+        )
+        .expect("tracks");
+        conn.execute(
+            "INSERT INTO track_genres (track_id, genre_id) VALUES
+                (10,1),(101,1),(102,1),(201,1),(202,1),(301,1),(401,2)",
+            [],
+        )
+        .expect("track_genres");
+
+        let out = get_genre_diverse_candidates(&conn, 10, 100).expect("query");
+        let artist_ids: HashSet<i64> = out.iter().map(|t| t.artist_id).collect();
+        // One representative per artist that shares genre 1 - never two from one.
+        assert_eq!(out.len(), artist_ids.len(), "no artist appears twice");
+        assert!(artist_ids.contains(&1) && artist_ids.contains(&2) && artist_ids.contains(&3));
+        // The representative is the lowest-id track per artist.
+        assert!(out.iter().any(|t| t.id == 101) && !out.iter().any(|t| t.id == 102));
+        assert!(out.iter().any(|t| t.id == 201) && !out.iter().any(|t| t.id == 202));
+        // A track tagged only with a different genre must not leak in.
+        assert!(!out.iter().any(|t| t.id == 401));
     }
 
     mod dj_transition_event {
