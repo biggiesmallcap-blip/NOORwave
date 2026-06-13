@@ -9,4 +9,5 @@
 	emptyText="TIDAL returned no video modules right now."
 	disconnectedText="Connect TIDAL to browse editorial videos."
 	errorText="Could not load TIDAL videos."
+	backFallback="/videos"
 />
