@@ -1,6 +1,4 @@
-use super::catalog_routes::{
-    merge_tidal_artist_album_filters, resolve_tidal_artist_release_filter,
-};
+use super::catalog_routes::merge_tidal_artist_album_filters;
 use super::home_routes::{
     LastFmArtistSeed, LastFmTrackSeed, merge_lastfm_artist_seeds, merge_lastfm_track_seeds,
 };
@@ -135,40 +133,16 @@ fn tidal_artist_album_filter_merge_keeps_eps_and_dedupes_by_tidal_id() {
 }
 
 #[test]
-fn tidal_artist_release_filter_only_downgrades_missing_bucket_errors() {
-    let missing = resolve_tidal_artist_release_filter(
-            Err(anyhow::anyhow!(
-                "TIDAL API error 404 Not Found: {{\"status\":404,\"subStatus\":2001,\"userMessage\":\"Resource not found\"}}"
-            )),
-            67003046,
-            "LIVE",
-        )
-        .expect("missing release filters should be treated as empty");
-    assert!(missing.is_empty());
-
-    let auth_error = resolve_tidal_artist_release_filter(
-        Err(anyhow::anyhow!(
-            "TIDAL API error 401 Unauthorized: {{\"status\":401}}"
-        )),
-        67003046,
-        "ALBUMS",
-    )
-    .expect_err("auth errors must not be swallowed as empty release filters");
+fn error_looks_like_auth_classifies_tidal_401s() {
+    let auth_error = anyhow::anyhow!("TIDAL API error 401 Unauthorized: {{\"status\":401}}");
     assert!(error_looks_like_auth(&auth_error));
     let expired_token_error = anyhow::anyhow!(
         "TIDAL API error 401 Unauthorized: {{\"status\":401,\"subStatus\":11003,\"userMessage\":\"The token has expired. (Expired on time)\"}}"
     );
     assert!(error_looks_like_auth(&expired_token_error));
 
-    let rate_error = resolve_tidal_artist_release_filter(
-        Err(anyhow::anyhow!(
-            "TIDAL API error 429 Too Many Requests: rate limit"
-        )),
-        67003046,
-        "EPSANDSINGLES",
-    )
-    .expect_err("rate limit errors must not be swallowed as empty release filters");
-    assert!(rate_error.to_string().contains("429"));
+    let rate_error = anyhow::anyhow!("TIDAL API error 429 Too Many Requests: rate limit");
+    assert!(!error_looks_like_auth(&rate_error));
 }
 
 #[test]
@@ -810,6 +784,46 @@ fn insert_tidal_track_uses_favorite_created_as_date_added() {
         Ok(())
     })
     .expect("inserted favorite track");
+}
+
+#[test]
+fn insert_tidal_track_marks_library_and_self_heals_on_conflict() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn| {
+        // A transient discovery/resolver import lands first: is_library = 0.
+        conn.execute(
+            "INSERT INTO artists (tidal_id, name) VALUES (4242, 'Sync Artist')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO tracks (tidal_id, title, artist_id, duration_ms, source, is_favorite, is_library)
+             VALUES (3001, 'Pre-import', (SELECT id FROM artists WHERE tidal_id = 4242), 180000, 'tidal', 0, 0)",
+            [],
+        )?;
+
+        // A genuine TIDAL sync touches the same tidal_id: must promote to library.
+        let track = test_tidal_track(3001, "Pre-import");
+        insert_tidal_track(conn, &track, false, None)?;
+
+        let is_library: i64 = conn.query_row(
+            "SELECT is_library FROM tracks WHERE tidal_id = 3001",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(is_library, 1, "genuine sync must promote a transient row to library");
+
+        // A fresh genuine insert is library from the start.
+        let fresh = test_tidal_track(3002, "Fresh sync");
+        insert_tidal_track(conn, &fresh, false, None)?;
+        let fresh_lib: i64 = conn.query_row(
+            "SELECT is_library FROM tracks WHERE tidal_id = 3002",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(fresh_lib, 1, "insert_tidal_track writes is_library = 1");
+        Ok(())
+    })
+    .expect("library marking holds");
 }
 
 #[test]

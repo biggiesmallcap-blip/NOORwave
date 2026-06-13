@@ -5290,8 +5290,11 @@ async fn inject_discovery_tracks(state: &SharedState, current_track: &crate::db:
 
                 if conn
                     .execute(
-                        "INSERT INTO tracks (tidal_id, title, artist_id, album_id, duration_ms, best_quality, best_source, fidelity_score, is_favorite, source)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'tidal', ?7, 0, 'tidal')
+                        // Transient discovery injection: is_library stays 0 so
+                        // these never surface in the library, even when they
+                        // attach to a favorited album by tidal_id. See MIGRATION_052.
+                        "INSERT INTO tracks (tidal_id, title, artist_id, album_id, duration_ms, best_quality, best_source, fidelity_score, is_favorite, source, is_library)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'tidal', ?7, 0, 'tidal', 0)
                          ON CONFLICT(tidal_id) DO NOTHING",
                         rusqlite::params![
                             tidal_id, candidate.title, artist_id, album_id,
@@ -5809,8 +5812,13 @@ async fn set_track_favorite(
         state
             .db
             .with_conn(|conn| {
+                // Liking a track promotes it into the library (covers an
+                // explicit like of a previously-transient import); unliking
+                // never demotes is_library, so an intentionally-unstarred
+                // genuine track stays visible. See MIGRATION_052.
                 conn.execute(
                     "UPDATE tracks SET is_favorite = ?1, \
+                     is_library = CASE WHEN ?1 = 1 THEN 1 ELSE is_library END, \
                      date_added = CASE WHEN ?1 = 1 AND is_favorite = 0 THEN datetime('now') ELSE date_added END \
                      WHERE id = ?2",
                     rusqlite::params![if payload.favorite { 1 } else { 0 }, payload.track_id],
@@ -10545,7 +10553,7 @@ async fn tidal_artist_profile(
         ));
     }
 
-    let (tokens, http_client, tidal_http_client) = {
+    let (tokens, tidal_http_client) = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -10555,7 +10563,6 @@ async fn tidal_artist_profile(
         let s = state.read().await;
         (
             s.tidal_tokens.clone().or(persisted),
-            s.http_client.clone(),
             s.tidal_http_client.clone(),
         )
     };
@@ -10568,128 +10575,19 @@ async fn tidal_artist_profile(
     };
 
     let client = TidalClient::with_http(
-        tidal_http_client.clone(),
+        tidal_http_client,
         tokens.access_token.clone(),
         tokens.country_code.clone(),
     );
-    let (top_tracks_page, albums) =
-        match catalog_routes::fetch_tidal_artist_profile_catalog(&client, tidal_artist_id).await {
-            Ok(catalog) => catalog,
-            Err(e) if error_looks_like_auth(&e) => {
-                let refreshed = recover_tidal_session(&state, &http_client, &tokens)
-                    .await
-                    .map_err(|re| {
-                        (
-                            StatusCode::BAD_GATEWAY,
-                            Json(
-                                json!({ "error": format!("TIDAL session refresh failed: {}", re) }),
-                            ),
-                        )
-                    })?;
-                let retry_client = TidalClient::with_http(
-                    tidal_http_client.clone(),
-                    refreshed.access_token.clone(),
-                    refreshed.country_code.clone(),
-                );
-                catalog_routes::fetch_tidal_artist_profile_catalog(&retry_client, tidal_artist_id)
-                    .await
-                    .map_err(|e2| {
-                        (
-                            StatusCode::BAD_GATEWAY,
-                            Json(json!({ "error": e2.to_string() })),
-                        )
-                    })?
-            }
-            Err(e) => {
-                return Err((
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": e.to_string() })),
-                ));
-            }
-        };
 
-    // Fetch the artist's own profile separately so a transient failure
-    // (rate-limit, 404 on the artist endpoint) doesn't kill the whole
-    // route: top-tracks/albums already loaded successfully above.
-    let artist_profile = {
-        let probe = TidalClient::with_http(
-            tidal_http_client.clone(),
-            tokens.access_token.clone(),
-            tokens.country_code.clone(),
-        );
-        match probe.get_artist(tidal_artist_id).await {
-            Ok(a) => Some(a),
-            Err(e) => {
-                tracing::debug!(
-                    "tidal_artist_profile: artist record fetch failed for {}: {}",
-                    tidal_artist_id,
-                    e
-                );
-                None
-            }
-        }
-    };
-
-    let artist_name = artist_profile
-        .as_ref()
-        .map(|a| a.name.clone())
-        .or_else(|| top_tracks_page.items.first().map(|t| t.artist.name.clone()));
-    let picture_url = artist_profile
-        .as_ref()
-        .and_then(|a| TidalClient::get_artwork_url(&a.picture, 320));
-
-    let top_tracks: Vec<serde_json::Value> = top_tracks_page
-        .items
-        .iter()
-        .map(|t| {
-            let artwork_url =
-                TidalClient::get_artwork_url(&t.album.as_ref().and_then(|a| a.cover.clone()), 320);
-            json!({
-                "tidal_id": t.id,
-                "title": t.title,
-                "duration_ms": t.duration * 1000,
-                "artwork_url": artwork_url,
-                "album_title": t.album.as_ref().map(|a| &a.title),
-                "album_tidal_id": t.album.as_ref().map(|a| a.id),
-                "artist_name": t.artist.name,
-                "artist_tidal_id": t.artist.id,
-            })
-        })
-        .collect();
-
-    let tidal_album_ids: Vec<i64> = albums.iter().map(|(a, _)| a.id).collect();
-    let known_album_map = {
-        let s = state.read().await;
-        s.db.with_conn(|conn| queries::get_known_album_tidal_ids(conn, &tidal_album_ids))
-            .unwrap_or_default()
-    };
-
-    let albums: Vec<serde_json::Value> = albums
-        .iter()
-        .map(|(a, source_filter)| {
-            let artwork_url = TidalClient::get_artwork_url(&a.cover, 320);
-            let local_id = known_album_map.get(&a.id).copied();
-            json!({
-                "tidal_id": a.id,
-                "local_id": local_id,
-                "title": a.title,
-                "artwork_url": artwork_url,
-                "release_date": a.release_date,
-                "release_type": a.release_type,
-                "source_filter": source_filter,
-                "number_of_tracks": a.number_of_tracks,
-                "artist_name": a.artist.name,
-                "in_library": local_id.is_some(),
-            })
-        })
-        .collect();
-
-    Ok(Json(json!({
-        "artist_name": artist_name,
-        "picture_url": picture_url,
-        "top_tracks": top_tracks,
-        "albums": albums,
-    })))
+    // Same rich payload the library `/api/artists/{id}/discography` route
+    // builds, keyed straight off the TIDAL id (no local artist row). This is
+    // what lets a non-library artist page render identically to a library one:
+    // bio, similar artists, videos, and categorized releases instead of a bare
+    // top-tracks-and-albums stub.
+    let payload =
+        catalog_routes::build_tidal_artist_payload(&state, &client, tidal_artist_id).await;
+    Ok(Json(payload))
 }
 
 pub(super) async fn recover_tidal_session(
@@ -13245,12 +13143,18 @@ pub(super) fn insert_tidal_track(
     let album_tidal_id = track.album.as_ref().map(|a| a.id);
 
     conn.execute(
-        "INSERT INTO tracks (tidal_id, title, artist_id, album_id, disc_number, track_number, duration_ms, isrc, best_quality, best_source, fidelity_score, is_favorite, source, date_added)
-         VALUES (?1, ?2, (SELECT id FROM artists WHERE tidal_id=?3), (SELECT id FROM albums WHERE tidal_id=?4), ?5, ?6, ?7, ?8, ?9, 'tidal', ?10, ?11, 'tidal', COALESCE(?12, datetime('now')))
+        // Every caller is a genuine TIDAL library sync (favorite tracks,
+        // favorited-album tracks, playlist tracks), so is_library=1. The
+        // ON CONFLICT MAX self-heals: a row first seen as a transient import
+        // (is_library=0) is promoted to library when a real sync touches it,
+        // and is never demoted. See MIGRATION_052.
+        "INSERT INTO tracks (tidal_id, title, artist_id, album_id, disc_number, track_number, duration_ms, isrc, best_quality, best_source, fidelity_score, is_favorite, source, date_added, is_library)
+         VALUES (?1, ?2, (SELECT id FROM artists WHERE tidal_id=?3), (SELECT id FROM albums WHERE tidal_id=?4), ?5, ?6, ?7, ?8, ?9, 'tidal', ?10, ?11, 'tidal', COALESCE(?12, datetime('now')), 1)
          ON CONFLICT(tidal_id) DO UPDATE SET
             title=excluded.title, best_quality=excluded.best_quality,
             fidelity_score=MAX(tracks.fidelity_score, excluded.fidelity_score),
             is_favorite=MAX(tracks.is_favorite, excluded.is_favorite),
+            is_library=MAX(tracks.is_library, excluded.is_library),
             date_added=CASE
                 WHEN ?11 = 1 AND ?12 IS NOT NULL THEN excluded.date_added
                 ELSE tracks.date_added

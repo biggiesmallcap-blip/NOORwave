@@ -5,7 +5,7 @@ use super::{
 use crate::SharedState;
 use crate::db::queries;
 use crate::services::tidal::{
-    client::{TidalAlbum, TidalClient, TidalTrack},
+    client::{TidalAlbum, TidalClient},
     import as tidal_import,
 };
 use axum::{
@@ -561,153 +561,24 @@ pub(crate) fn merge_tidal_artist_album_filters(
     all_albums
 }
 
-fn tidal_artist_release_filter_missing(error: &anyhow::Error) -> bool {
-    let message = error.to_string().to_ascii_lowercase();
-    message.contains("tidal api error 404")
-        && (message.contains("substatus\":2001") || message.contains("resource not found"))
-}
-
-pub(crate) fn resolve_tidal_artist_release_filter(
-    result: anyhow::Result<Vec<TidalAlbum>>,
-    artist_id: i64,
-    filter: &'static str,
-) -> anyhow::Result<Vec<TidalAlbum>> {
-    match result {
-        Ok(items) => Ok(items),
-        Err(error) if tidal_artist_release_filter_missing(&error) => {
-            tracing::debug!(
-                "tidal_artist_profile: artist {} release filter {} missing",
-                artist_id,
-                filter
-            );
-            Ok(Vec::new())
-        }
-        Err(error) => {
-            let message = error.to_string();
-            tracing::debug!(
-                "tidal_artist_profile: artist {} release filter {} failed: {}",
-                artist_id,
-                filter,
-                message
-            );
-            anyhow::bail!(
-                "TIDAL artist {} release filter {} failed: {}",
-                artist_id,
-                filter,
-                message
-            )
-        }
-    }
-}
-
-async fn fetch_tidal_artist_profile_albums(
+/// Build the rich artist payload (categorized albums, top tracks, videos,
+/// similar artists, bio, picture) straight from a TIDAL artist id. Shared by
+/// the library discography route (which resolves a local id first) and the
+/// non-library `/api/tidal/artists/{id}` route so both render the same page.
+/// Each TIDAL sub-fetch degrades on its own: a failed videos call yields an
+/// empty rail instead of failing the whole route.
+pub(super) async fn build_tidal_artist_payload(
+    state: &SharedState,
     client: &TidalClient,
-    artist_id: i64,
-) -> anyhow::Result<Vec<(TidalAlbum, &'static str)>> {
-    const PROFILE_MAX_PAGES_PER_FILTER: i32 = 4;
-    let (albums_res, eps_res, comps_res, live_res) = tokio::join!(
-        fetch_artist_album_pages(client, artist_id, "ALBUMS", PROFILE_MAX_PAGES_PER_FILTER),
-        fetch_artist_album_pages(
-            client,
-            artist_id,
-            "EPSANDSINGLES",
-            PROFILE_MAX_PAGES_PER_FILTER
-        ),
-        fetch_artist_album_pages(
-            client,
-            artist_id,
-            "COMPILATIONS",
-            PROFILE_MAX_PAGES_PER_FILTER
-        ),
-        fetch_artist_album_pages(client, artist_id, "LIVE", PROFILE_MAX_PAGES_PER_FILTER),
-    );
-
-    let albums = resolve_tidal_artist_release_filter(albums_res, artist_id, "ALBUMS")?;
-    let eps = resolve_tidal_artist_release_filter(eps_res, artist_id, "EPSANDSINGLES")?;
-    let comps = resolve_tidal_artist_release_filter(comps_res, artist_id, "COMPILATIONS")?;
-    let live = resolve_tidal_artist_release_filter(live_res, artist_id, "LIVE")?;
-
-    Ok(merge_tidal_artist_album_filters([
-        (albums, "ALBUMS"),
-        (eps, "EPSANDSINGLES"),
-        (comps, "COMPILATIONS"),
-        (live, "LIVE"),
-    ]))
-}
-
-pub(super) async fn fetch_tidal_artist_profile_catalog(
-    client: &TidalClient,
-    artist_id: i64,
-) -> anyhow::Result<(
-    crate::services::tidal::client::TidalPaginatedResponse<TidalTrack>,
-    Vec<(TidalAlbum, &'static str)>,
-)> {
-    let top_tracks_page = client.get_artist_top_tracks(artist_id, 50, 0).await?;
-    let albums = fetch_tidal_artist_profile_albums(client, artist_id).await?;
-    Ok((top_tracks_page, albums))
-}
-
-pub(super) async fn get_artist_discography(
-    State(state): State<SharedState>,
-    Path(id): Path<i64>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    require_positive_local_id_json(id)?;
-    let tidal_artist_id = {
-        let s = state.read().await;
-        s.db.with_conn(|conn| queries::get_artist_tidal_id(conn, id))
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": e.to_string() })),
-                )
-            })?
-    };
-
-    let Some(tidal_artist_id) = tidal_artist_id else {
-        return Ok(Json(json!({
-            "albums": [],
-            "top_tracks": [],
-            "available": false,
-            "reason": "artist_not_on_tidal"
-        })));
-    };
-
-    let (tokens, tidal_http_client) = {
-        let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-        })?;
-        let s = state.read().await;
-        (
-            s.tidal_tokens.clone().or(persisted),
-            s.tidal_http_client.clone(),
-        )
-    };
-
-    let Some(tokens) = tokens else {
-        return Ok(Json(json!({
-            "albums": [],
-            "top_tracks": [],
-            "available": false,
-            "reason": "tidal_not_connected"
-        })));
-    };
-
-    let client = TidalClient::with_http(
-        tidal_http_client,
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    );
-
+    tidal_artist_id: i64,
+) -> Value {
     // Each filter is paginated separately; previously we fetched only the first
     // page (50 newest), which clipped any artist with a long catalog (e.g. a
     // 50+ year discography returned only modern compilations).
-    let albums_fut = fetch_all_artist_albums(&client, tidal_artist_id, "ALBUMS");
-    let eps_fut = fetch_all_artist_albums(&client, tidal_artist_id, "EPSANDSINGLES");
-    let compilations_fut = fetch_all_artist_albums(&client, tidal_artist_id, "COMPILATIONS");
-    let live_fut = fetch_all_artist_albums(&client, tidal_artist_id, "LIVE");
+    let albums_fut = fetch_all_artist_albums(client, tidal_artist_id, "ALBUMS");
+    let eps_fut = fetch_all_artist_albums(client, tidal_artist_id, "EPSANDSINGLES");
+    let compilations_fut = fetch_all_artist_albums(client, tidal_artist_id, "COMPILATIONS");
+    let live_fut = fetch_all_artist_albums(client, tidal_artist_id, "LIVE");
     // Top tracks raised from 10 -> 50 so the merged Top Tracks list on the
     // artist page surfaces a meaningful catalog even when the user has zero
     // library matches; 50 is TIDAL's per-page max.
@@ -747,8 +618,7 @@ pub(super) async fn get_artist_discography(
     // We then try the artist's own `picture` as embedded in their top
     // tracks, then finally fall back to an album cover - same trick the
     // library Recently Played Artists rail uses to keep tiles populated
-    // when no artist photo exists. Extracted *before* the result-bearing
-    // _res values are consumed by the payload builders below.
+    // when no artist photo exists.
     let direct_picture_id = profile_res.as_ref().ok().and_then(|a| a.picture.clone());
     let top_track_picture_id = top_res.as_ref().ok().and_then(|tr| {
         tr.items
@@ -762,9 +632,6 @@ pub(super) async fn get_artist_discography(
         .flat_map(|list| list.iter())
         .find_map(|a| a.cover.clone());
 
-    let direct_some = direct_picture_id.is_some();
-    let top_track_some = top_track_picture_id.is_some();
-    let album_cover_some = album_cover_picture_id.is_some();
     // TIDAL's CDN ships `640x640.jpg` reliably for album covers but not
     // for artist pictures - many artist images are stored at 320 max.
     // Pick the size that matches whichever tier resolved.
@@ -785,19 +652,11 @@ pub(super) async fn get_artist_discography(
             e
         );
     }
-    tracing::debug!(
-        "TIDAL artist {} picture resolution: direct={}, top_track={}, album_cover={}, resolved={}",
-        tidal_artist_id,
-        direct_some,
-        top_track_some,
-        album_cover_some,
-        picture_url.is_some()
-    );
 
     // TIDAL can return the same release under multiple filters (e.g. an album
     // re-issue tagged both ALBUMS and COMPILATIONS). Dedupe by tidal_id while
     // preserving the order of first appearance. Each entry remembers the
-    // filter it came from so the frontend can bucket it correctly â€” TIDAL's
+    // filter it came from so the frontend can bucket it correctly - TIDAL's
     // per-album `release_type` body field is unreliable and was the original
     // reason Singles / Compilations sections were silently empty.
     let all_albums = merge_tidal_artist_album_filters([
@@ -925,26 +784,105 @@ pub(super) async fn get_artist_discography(
         })
     });
 
+    let artist_name = profile_res
+        .as_ref()
+        .ok()
+        .map(|a| a.name.clone())
+        .or_else(|| {
+            top_tracks_payload.first().and_then(|t| {
+                t.get("artist_name")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+        });
+
+    json!({
+        "artist_name": artist_name,
+        "albums": albums_payload,
+        "top_tracks": top_tracks_payload,
+        "videos": videos_payload,
+        "similar_artists": similar_artists_payload,
+        "bio": bio_payload,
+        "picture_url": picture_url,
+        "available": true
+    })
+}
+
+pub(super) async fn get_artist_discography(
+    State(state): State<SharedState>,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_positive_local_id_json(id)?;
+    let tidal_artist_id = {
+        let s = state.read().await;
+        s.db.with_conn(|conn| queries::get_artist_tidal_id(conn, id))
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+            })?
+    };
+
+    let Some(tidal_artist_id) = tidal_artist_id else {
+        return Ok(Json(json!({
+            "albums": [],
+            "top_tracks": [],
+            "available": false,
+            "reason": "artist_not_on_tidal"
+        })));
+    };
+
+    let (tokens, tidal_http_client) = {
+        let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+        let s = state.read().await;
+        (
+            s.tidal_tokens.clone().or(persisted),
+            s.tidal_http_client.clone(),
+        )
+    };
+
+    let Some(tokens) = tokens else {
+        return Ok(Json(json!({
+            "albums": [],
+            "top_tracks": [],
+            "available": false,
+            "reason": "tidal_not_connected"
+        })));
+    };
+
+    let client = TidalClient::with_http(
+        tidal_http_client,
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
+
+    let payload = build_tidal_artist_payload(&state, &client, tidal_artist_id).await;
+
     // Best-effort persistence of bio text to the local artists row so the
     // page can render it offline next time. Only writes when the local row
     // had no biography of its own.
-    if let Some(b) = bio_payload.as_ref() {
-        let bio_str = b
-            .get("text")
+    let bio_text = payload.get("bio").and_then(|b| {
+        b.get("text")
             .and_then(|v| v.as_str())
             .or_else(|| b.get("summary").and_then(|v| v.as_str()))
-            .map(|s| s.to_string());
-        if let Some(text) = bio_str {
-            let s = state.read().await;
-            let _ = s.db.with_conn(|conn| {
-                conn.execute(
-                    "UPDATE artists SET biography = ?1
-                     WHERE id = ?2 AND (biography IS NULL OR biography = '')",
-                    rusqlite::params![text, id],
-                )?;
-                Ok(())
-            });
-        }
+            .map(|s| s.to_string())
+    });
+    if let Some(text) = bio_text {
+        let s = state.read().await;
+        let _ = s.db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE artists SET biography = ?1
+                 WHERE id = ?2 AND (biography IS NULL OR biography = '')",
+                rusqlite::params![text, id],
+            )?;
+            Ok(())
+        });
     }
 
     // Backfill the local artists row's `photo_url` so other surfaces in the
@@ -952,7 +890,7 @@ pub(super) async fn get_artist_discography(
     // working URL too. Older sync runs sometimes stored sizes TIDAL no
     // longer serves (e.g. 640x640 returning AccessDenied for some artists);
     // overwriting whenever the resolved URL differs keeps the cache fresh.
-    if let Some(url) = picture_url.as_deref() {
+    if let Some(url) = payload.get("picture_url").and_then(|v| v.as_str()) {
         let s = state.read().await;
         let _ = s.db.with_conn(|conn| {
             conn.execute(
@@ -964,15 +902,7 @@ pub(super) async fn get_artist_discography(
         });
     }
 
-    Ok(Json(json!({
-        "albums": albums_payload,
-        "top_tracks": top_tracks_payload,
-        "videos": videos_payload,
-        "similar_artists": similar_artists_payload,
-        "bio": bio_payload,
-        "picture_url": picture_url,
-        "available": true
-    })))
+    Ok(Json(payload))
 }
 
 pub(super) async fn get_artist_spotify_stats(

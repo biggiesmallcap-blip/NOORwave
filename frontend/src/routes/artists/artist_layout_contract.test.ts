@@ -4,8 +4,10 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const source = readFileSync(join(here, '[id]', '+page.svelte'), 'utf8');
-const discographySource = readFileSync(join(here, '[id]', 'discography', '[section]', '+page.svelte'), 'utf8');
+// The artist view markup, styles, and load logic live in the shared
+// ArtistDetail component now; the route's +page.svelte is a thin wrapper.
+const source = readFileSync(join(here, 'ArtistDetail.svelte'), 'utf8');
+const discographySource = readFileSync(join(here, 'ArtistDiscographySection.svelte'), 'utf8');
 
 function cssBlock(selector: string): string {
 	const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -52,7 +54,7 @@ describe('artist page layout contracts', () => {
 		expect(source).toContain('cachedApi.getArtistTracks(id)');
 		expect(source).toContain('if (seq !== loadSeq) return;');
 		expect(source).toContain('if (seq === loadSeq) loading = false;');
-		expect(source).toContain('const id = artistId;');
+		expect(source).toContain('const id = source.artistId;');
 		expect(source).toContain('tracks = [];');
 		expect(source).toContain('void load(id);');
 		expect(source).not.toContain('void load();');
@@ -88,7 +90,7 @@ describe('artist page layout contracts', () => {
 	test('uses the shared TIDAL discography playable mapper with the artist fallback id', () => {
 		expect(source).toContain("import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';");
 		expect(source).toContain('function artistTrackPlayable(track: TidalDiscographyTrack)');
-		expect(source).toContain("tidalDiscographyTrackToPlayable(track, { artistTidalId: artist?.tidal_id ?? null })");
+		expect(source).toContain("tidalDiscographyTrackToPlayable(track, { artistTidalId: activeTidalArtistId })");
 		expect(source).toContain('{@const playable = artistTrackPlayable(track)}');
 		expect(source).not.toContain('type TidalPlayable');
 		expect(source).not.toContain('function tidalDiscographyTrackToPlayable(t: TidalDiscographyTrack)');
@@ -105,10 +107,10 @@ describe('artist page layout contracts', () => {
 	});
 
 	test('links artist shelves to searchable see-all routes', () => {
-		expect(source).toContain('href={`/artists/${artistId}/discography/tracks`}');
-		expect(source).toContain('href={`/artists/${artistId}/discography/albums`}');
-		expect(source).toContain('href={`/artists/${artistId}/discography/singles`}');
-		expect(source).toContain('href={`/artists/${artistId}/discography/compilations`}');
+		expect(source).toContain('href={`${discographyBase}/discography/tracks`}');
+		expect(source).toContain('href={`${discographyBase}/discography/albums`}');
+		expect(source).toContain('href={`${discographyBase}/discography/singles`}');
+		expect(source).toContain('href={`${discographyBase}/discography/compilations`}');
 		expect(discographySource).toContain("type Section = 'tracks' | 'albums' | 'singles' | 'compilations';");
 		expect(discographySource).toContain('cachedApi.getArtistDiscography(id)');
 		expect(discographySource).toContain('type="search"');

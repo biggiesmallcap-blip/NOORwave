@@ -12,7 +12,9 @@ function source(path: string): string {
 
 const playerBar = source('lib/shell/PlayerBar.svelte');
 const appShell = source('routes/+layout.svelte');
-const localArtistRoute = source('routes/artists/[id]/+page.svelte');
+// The artist view (hero artwork, rails) is shared by the library and TIDAL
+// routes via ArtistDetail; both route files are thin wrappers.
+const sharedArtistView = source('routes/artists/ArtistDetail.svelte');
 const tidalArtistRoute = source('routes/tidal/artists/[id]/+page.svelte');
 const tidalAlbumRoute = source('routes/tidal/albums/[id]/+page.svelte');
 const duplicatesRoute = source('routes/duplicates/+page.svelte');
@@ -35,19 +37,19 @@ describe('TIDAL artwork surface contracts', () => {
 	});
 
 	test('artist routes render TIDAL artwork through allowed sizes with fallbacks', () => {
-		expect(localArtistRoute).toContain('tidalArtworkFallbackSizes');
-		expect(localArtistRoute).toContain('let heroPortraitSrc = $derived(artworkCandidate(heroPortraitUrl, 640));');
-		expect(localArtistRoute).toContain('let heroBackdropSrc = $derived(artworkCandidate(heroBackdropUrl, 1280));');
-		expect(localArtistRoute).toContain('onerror={() => markArtworkFailed(heroBackdropSrc)}');
-		expect(localArtistRoute).toContain('const similarArt = artworkCandidate(similar.artwork_url, 320)');
-		expect(localArtistRoute).not.toContain('src={similar.artwork_url}');
-		expect(localArtistRoute).not.toContain('background-image: url({heroBackdropUrl})');
+		expect(sharedArtistView).toContain('tidalArtworkFallbackSizes');
+		expect(sharedArtistView).toContain('let heroPortraitSrc = $derived(artworkCandidate(heroPortraitUrl, 640));');
+		expect(sharedArtistView).toContain('let heroBackdropSrc = $derived(artworkCandidate(heroBackdropUrl, 1280));');
+		expect(sharedArtistView).toContain('onerror={() => markArtworkFailed(heroBackdropSrc)}');
+		expect(sharedArtistView).toContain('const similarArt = artworkCandidate(similar.artwork_url, 320)');
+		expect(sharedArtistView).not.toContain('src={similar.artwork_url}');
+		expect(sharedArtistView).not.toContain('background-image: url({heroBackdropUrl})');
 
-		expect(tidalArtistRoute).toContain('tidalArtworkFallbackSizes');
-		expect(tidalArtistRoute).toContain('const heroPortraitSrc = $derived(artworkCandidate(heroPortrait, 640))');
-		expect(tidalArtistRoute).toContain('const heroBackdropSrc = $derived(artworkCandidate(heroBackdrop, 1280))');
-		expect(tidalArtistRoute).toContain('class="grid-art-image"');
-		expect(tidalArtistRoute).not.toContain("style={album.artwork_url ? `background-image");
+		// The TIDAL artist route reuses the same artwork-safe view; the wrapper
+		// only delegates to it, so there is no second hero/grid art surface to
+		// keep in sync.
+		expect(tidalArtistRoute).toContain("import ArtistDetail from '../../../artists/ArtistDetail.svelte'");
+		expect(tidalArtistRoute).toContain("source={{ kind: 'tidal', tidalArtistId }}");
 		expect(tidalArtistRoute).not.toContain('src={heroPortrait}');
 
 		expect(tidalAlbumRoute).toContain('tidalArtworkFallbackSizes');

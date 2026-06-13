@@ -22,7 +22,7 @@ describe('artwork usage contracts', () => {
 	});
 
 	test('tidal artist page separates portrait art from backdrop fallback art', () => {
-		const source = readFileSync('src/routes/tidal/artists/[id]/+page.svelte', 'utf8');
+		const source = readFileSync('src/routes/artists/ArtistDetail.svelte', 'utf8');
 
 		expect(source).toContain('heroPortrait');
 		expect(source).toContain('heroBackdrop');
@@ -31,7 +31,7 @@ describe('artwork usage contracts', () => {
 	});
 
 	test('grouped local album cards fill artwork from later tracks', () => {
-		const artistPage = readFileSync('src/routes/artists/[id]/+page.svelte', 'utf8');
+		const artistPage = readFileSync('src/routes/artists/ArtistDetail.svelte', 'utf8');
 		const albumPage = readFileSync('src/routes/albums/[id]/+page.svelte', 'utf8');
 
 		for (const source of [artistPage, albumPage]) {
