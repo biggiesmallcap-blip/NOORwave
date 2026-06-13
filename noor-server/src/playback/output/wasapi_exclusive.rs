@@ -31,6 +31,15 @@ impl ExclusiveRuntimeSink {
             .map(|stream| stream.is_released())
             .unwrap_or(true)
     }
+
+    /// Ask the live exclusive stream (if any) to drop the device now instead of
+    /// waiting out the idle grace, so another app can take it in shared mode.
+    /// No-op when no stream is active or it already released.
+    pub(crate) fn request_release(&self) {
+        if let Some(stream) = self.stream.as_ref() {
+            stream.request_release();
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -2,7 +2,6 @@
 	import { onDestroy, onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { api, ApiError, type TidalSearchVideo, type TidalVideoMixItem } from '$lib/api/client';
-	import VideoPlayer from '$lib/components/video/VideoPlayer.svelte';
 	import VideoCard from '$lib/components/video/VideoCard.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
@@ -17,12 +16,15 @@
 		videoAutoplayToggleRequest,
 		videoJumpRequest,
 		videoSession,
+		videoStageAnchor,
+		playVideo,
+		clearVideoSession,
+		type VideoSessionItem,
 		type VideoSessionSource,
 	} from '$lib/stores/video_session';
 
 	const PAGE_SIZE = 40;
 	const RECENT_KEY = 'noor_recent_video_searches';
-	const AUTOPLAY_KEY = 'noor_video_autoplay_next';
 	const SESSION_SNAPSHOT_KEY = 'noor_video_session_snapshot';
 	const RECENT_MAX = 8;
 	const HINTS = ['music video', 'live session', 'official video', 'visualizer'];
@@ -74,22 +76,12 @@
 		);
 	}
 
-	type PrefetchedVideoStream = {
-		videoId: number;
-		hlsUrl: string;
-		expiresAt: string | null;
-	};
-
 	let query = $state('');
 	let inputEl = $state<HTMLInputElement | null>(null);
 	let videos = $state<TidalSearchVideo[]>([]);
 	let mixItems = $state<TidalVideoMixItem[]>([]);
-	let selectedVideo = $state<TidalSearchVideo | TidalVideoMixItem | null>(null);
-	let streamUrl = $state<string | null>(null);
-	let streamExpiresAt = $state<string | null>(null);
 	let loadingSearch = $state(false);
 	let loadingMore = $state(false);
-	let loadingStream = $state(false);
 	let loadingMix = $state(false);
 	let error = $state<string | null>(null);
 	let mixError = $state<string | null>(null);
@@ -99,27 +91,25 @@
 	let activeMixId = $state<string | null>(null);
 	let sentinel = $state<HTMLDivElement | null>(null);
 	let recent = $state<string[]>(loadRecent());
-	let autoplayNext = $state(loadAutoplayPreference());
+	let stageAnchor = $state<HTMLDivElement | null>(null);
 	let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 	let searchAbort: AbortController | null = null;
 	let loadMoreSeq = 0;
 	let mixLoadSeq = 0;
-	let streamRequestSeq = 0;
-	let prefetchRequestSeq = 0;
-	let prefetchedStream = $state<PrefetchedVideoStream | null>(null);
 	let handledJumpNonce = 0;
 	let handledAutoplayToggleNonce = 0;
 	let handledClearNonce = 0;
 
+	// The playing video lives in the persistent dock + store; the route reads it
+	// for hero meta and card highlighting, and writes picks via playVideo().
+	let selectedVideo = $derived($videoSession.current);
+	let streamUrl = $derived($videoSession.streamUrl);
+	let streamExpiresAt = $derived($videoSession.streamExpiresAt);
+	let loadingStream = $derived($videoSession.loading);
+	let autoplayNext = $derived($videoSession.autoplay);
+
 	let heroTitle = $derived(selectedVideo?.title ?? 'TIDAL video');
 	let heroArtist = $derived(selectedVideo?.artist_name ?? null);
-	let videoQualityMode = $derived($audioSettings.settings?.video_quality_mode ?? 'MAX');
-	let nextAutoplayVideo = $derived.by(() => getNextAutoplayVideo());
-	let hasAutoplayNext = $derived.by(() => {
-		const queue = activeVideoQueue();
-		const index = selectedQueueIndex(queue);
-		return index >= 0 && (nextAutoplayVideo !== null || (queue === videos && hasMore));
-	});
 	let hasVideoChoices = $derived(videos.length > 0 || mixItems.length > 0);
 	let showChooseVideoPrompt = $derived(
 		!selectedVideo &&
@@ -140,16 +130,6 @@
 		}
 	}
 
-	function loadAutoplayPreference(): boolean {
-		if (typeof localStorage === 'undefined') return false;
-		return localStorage.getItem(AUTOPLAY_KEY) === 'true';
-	}
-
-	function persistAutoplayPreference() {
-		if (typeof localStorage === 'undefined') return;
-		localStorage.setItem(AUTOPLAY_KEY, String(autoplayNext));
-	}
-
 	function pushRecent(value: string) {
 		const trimmed = value.trim();
 		if (!trimmed || typeof localStorage === 'undefined') return;
@@ -165,10 +145,6 @@
 	function clearVideoPageSession() {
 		videos = [];
 		mixItems = [];
-		selectedVideo = null;
-		streamUrl = null;
-		streamExpiresAt = null;
-		loadingStream = false;
 		query = '';
 		lastQuery = '';
 		activeMixId = null;
@@ -176,13 +152,10 @@
 		offset = 0;
 		error = null;
 		mixError = null;
-		prefetchedStream = null;
 		loadMoreSeq += 1;
 		mixLoadSeq += 1;
-		streamRequestSeq += 1;
-		prefetchRequestSeq += 1;
 		clearSessionSnapshot();
-		videoSession.reset();
+		clearVideoSession();
 		void goto('/videos', { replaceState: true, keepFocus: true });
 	}
 
@@ -269,71 +242,41 @@
 		}
 	}
 
-	async function fetchStream(videoId: number): Promise<string> {
-		if (!assertOnline()) throw new Error('Server is reconnecting.');
-		const seq = ++streamRequestSeq;
-		const stream = await api.getTidalVideoStream(videoId);
-		if (seq !== streamRequestSeq) {
-			const stale = new Error('Route changed before video loaded.');
-			stale.name = 'StaleStreamRequest';
-			throw stale;
-		}
-		streamUrl = stream.hls_url;
-		streamExpiresAt = stream.expires_at;
-		return stream.hls_url;
+	function buildPlayContext(video: VideoSessionItem) {
+		const isMix = 'mix_id' in video && video.mix_id != null;
+		return {
+			queue: isMix ? mixItems : videos,
+			source: (isMix ? 'mix' : lastQuery ? 'search' : 'direct') as VideoSessionSource,
+			sourceLabel: isMix
+				? activeMixId
+					? `Video mix ${activeMixId}`
+					: 'Video mix'
+				: lastQuery || null,
+			autoplay: $videoSession.autoplay,
+		};
 	}
 
-	async function selectVideo(
-		video: TidalSearchVideo | TidalVideoMixItem,
-		updateUrl = true,
-		options: { keepCurrentStream?: boolean; preloaded?: PrefetchedVideoStream | null } = {}
-	): Promise<boolean> {
-		const previousVideo = selectedVideo;
-		const previousStreamUrl = streamUrl;
-		const previousExpiresAt = streamExpiresAt;
-		selectedVideo = video;
-		if (!options.keepCurrentStream) streamUrl = null;
-		streamExpiresAt = null;
-		error = null;
-		loadingStream = true;
-		try {
-			if (options.preloaded?.videoId === video.tidal_id) {
-				streamRequestSeq += 1;
-				streamUrl = options.preloaded.hlsUrl;
-				streamExpiresAt = options.preloaded.expiresAt;
-				prefetchedStream = null;
-			} else {
-				await fetchStream(video.tidal_id);
-			}
-			if (updateUrl) {
-				const params = new URLSearchParams();
-				if ('mix_id' in video && video.mix_id) {
-					params.set('mixId', String(video.mix_id));
-				} else if (lastQuery) {
-					params.set('q', lastQuery);
-				}
-				params.set('videoId', String(video.tidal_id));
-				void goto(`/videos?${params.toString()}`, { keepFocus: true });
-			}
-			return true;
-		} catch (err) {
-			if ((err as Error)?.name === 'StaleStreamRequest') return false;
-			if (options.keepCurrentStream) {
-				selectedVideo = previousVideo;
-				streamUrl = previousStreamUrl;
-				streamExpiresAt = previousExpiresAt;
-			}
-			error = normalizeError(err, 'This video could not be loaded.');
-			showToast(error, 'error', 3200);
+	async function selectVideo(video: VideoSessionItem, updateUrl = true): Promise<boolean> {
+		if (!assertOnline()) {
+			showToast('Server is reconnecting.', 'error', 3200);
 			return false;
-		} finally {
-			loadingStream = false;
 		}
-	}
-
-	async function refreshSelectedStream() {
-		if (!selectedVideo) throw new Error('No video selected.');
-		return fetchStream(selectedVideo.tidal_id);
+		const ok = await playVideo(video, buildPlayContext(video));
+		if (!ok) {
+			showToast($videoSession.error ?? 'This video could not be loaded.', 'error', 3200);
+			return false;
+		}
+		if (updateUrl) {
+			const params = new URLSearchParams();
+			if ('mix_id' in video && video.mix_id) {
+				params.set('mixId', String(video.mix_id));
+			} else if (lastQuery) {
+				params.set('q', lastQuery);
+			}
+			params.set('videoId', String(video.tidal_id));
+			void goto(`/videos?${params.toString()}`, { keepFocus: true });
+		}
+		return true;
 	}
 
 	async function loadMix(mixId: string, autoPlayFirst = false) {
@@ -351,8 +294,7 @@
 			mixItems = result.items.map((item) => ({ ...item, mix_id: mixId }));
 			if (mixItems.length === 0) mixError = 'This mix did not return video items.';
 			if (autoPlayFirst && isCurrentMixLoad() && mixItems.length > 0) {
-				autoplayNext = true;
-				persistAutoplayPreference();
+				videoSession.setAutoplay(true);
 				await selectVideo(mixItems[0], false);
 			}
 		} catch (err) {
@@ -374,98 +316,12 @@
 		void selectVideo(video);
 	}
 
-	function activeVideoQueue(): (TidalSearchVideo | TidalVideoMixItem)[] {
-		if (selectedVideo && 'mix_id' in selectedVideo && selectedVideo.mix_id != null) return mixItems;
-		return videos;
-	}
-
-	function selectedQueueIndex(queue: (TidalSearchVideo | TidalVideoMixItem)[]): number {
-		if (!selectedVideo) return -1;
-		return queue.findIndex((item) => item.tidal_id === selectedVideo?.tidal_id);
-	}
-
-	function getNextAutoplayVideo(): TidalSearchVideo | TidalVideoMixItem | null {
-		const queue = activeVideoQueue();
-		const index = selectedQueueIndex(queue);
-		if (index < 0) return null;
-		return queue[index + 1] ?? null;
-	}
-
-	function videoSessionSource(): VideoSessionSource {
-		if (selectedVideo && 'mix_id' in selectedVideo && selectedVideo.mix_id != null) return 'mix';
-		if (lastQuery) return 'search';
-		if (selectedVideo) return 'direct';
-		return activeMixId ? 'mix' : 'none';
-	}
-
-	function videoSessionSourceLabel(): string | null {
-		const source = videoSessionSource();
-		if (source === 'mix') return activeMixId ? `Video mix ${activeMixId}` : 'Video mix';
-		if (source === 'search') return lastQuery;
-		if (source === 'direct') return 'Direct video';
-		return null;
-	}
-
-	function findVideoInCurrentContext(videoId: number): TidalSearchVideo | TidalVideoMixItem | null {
+	function findVideoInCurrentContext(videoId: number): VideoSessionItem | null {
 		return [...mixItems, ...videos].find((item) => item.tidal_id === videoId) ?? null;
 	}
 
 	function toggleVideoAutoplay() {
-		if (!autoplayNext && !hasAutoplayNext) {
-			showToast('Choose a video from search results or a video mix first.', 'info', 2400);
-			return;
-		}
-		autoplayNext = !autoplayNext;
-		persistAutoplayPreference();
-	}
-
-	async function prefetchNextStream(video: TidalSearchVideo | TidalVideoMixItem) {
-		if (prefetchedStream?.videoId === video.tidal_id) return;
-		if (!assertOnline()) return;
-		const seq = ++prefetchRequestSeq;
-		try {
-			const stream = await api.getTidalVideoStream(video.tidal_id);
-			if (seq !== prefetchRequestSeq || nextAutoplayVideo?.tidal_id !== video.tidal_id) return;
-			prefetchedStream = {
-				videoId: video.tidal_id,
-				hlsUrl: stream.hls_url,
-				expiresAt: stream.expires_at,
-			};
-		} catch {
-			if (seq === prefetchRequestSeq) prefetchedStream = null;
-		}
-	}
-
-	async function handleVideoEnded() {
-		if (!autoplayNext) return;
-		let queue = activeVideoQueue();
-		let index = selectedQueueIndex(queue);
-		if (index < 0) {
-			autoplayNext = false;
-			persistAutoplayPreference();
-			return;
-		}
-
-		if (index >= queue.length - 1 && queue === videos && hasMore) {
-			await loadMore();
-			queue = activeVideoQueue();
-			index = selectedQueueIndex(queue);
-		}
-
-		const next = queue[index + 1];
-		if (!next) {
-			showToast('End of video results.', 'info', 2200);
-			autoplayNext = false;
-			persistAutoplayPreference();
-			return;
-		}
-
-		const preloaded = prefetchedStream?.videoId === next.tidal_id ? prefetchedStream : null;
-		const loaded = await selectVideo(next, true, { keepCurrentStream: true, preloaded });
-		if (!loaded) {
-			autoplayNext = false;
-			persistAutoplayPreference();
-		}
+		videoSession.setAutoplay(!$videoSession.autoplay);
 	}
 
 	async function parseUrl() {
@@ -515,7 +371,6 @@
 		if (!hasExplicitParams) {
 			const snap = loadSessionSnapshot();
 			if (snap?.selectedVideo && snapshotHasRestorableContext(snap)) {
-				selectedVideo = snap.selectedVideo;
 				videos = snap.videos ?? [];
 				mixItems = snap.mixItems ?? [];
 				query = snap.query ?? '';
@@ -524,16 +379,10 @@
 				hasMore = snap.hasMore ?? false;
 				offset = snap.offset ?? 0;
 
-				const streamFresh =
-					snap.streamUrl &&
-					snap.streamExpiresAt &&
-					new Date(snap.streamExpiresAt).getTime() > Date.now() + 30_000;
-				if (streamFresh) {
-					streamUrl = snap.streamUrl;
-					streamExpiresAt = snap.streamExpiresAt;
-				} else {
-					void selectVideo(snap.selectedVideo, false);
-				}
+				// The dock unmounted on full reload, so rehydrate playback through
+				// the store (re-fetches a fresh stream rather than trusting a
+				// possibly-expired snapshot URL).
+				if (!$videoSession.active) void selectVideo(snap.selectedVideo, false);
 
 				const onPop = () => void parseUrl();
 				window.addEventListener('popstate', onPop);
@@ -557,26 +406,17 @@
 		return () => observer.disconnect();
 	});
 
+	// Hand the route's hero placeholder to the persistent dock so it can dock
+	// the live player into it while on /videos.
 	$effect(() => {
-		if (!autoplayNext || !nextAutoplayVideo) {
-			prefetchRequestSeq += 1;
-			prefetchedStream = null;
-			return;
-		}
-		void prefetchNextStream(nextAutoplayVideo);
+		videoStageAnchor.set(stageAnchor);
+		return () => videoStageAnchor.set(null);
 	});
 
+	// Snapshot for full-page reload recovery (in-app nav is handled by the
+	// persistent dock, which never unmounts).
 	$effect(() => {
-		videoSession.sync({
-			current: selectedVideo,
-			queue: activeVideoQueue(),
-			source: videoSessionSource(),
-			sourceLabel: videoSessionSourceLabel(),
-			autoplay: autoplayNext,
-			loading: loadingSearch || loadingMore || loadingStream || loadingMix,
-			error: error ?? mixError,
-		});
-		if (selectedVideo && videoSessionSource() !== 'direct') saveSessionSnapshot();
+		if (selectedVideo && (lastQuery || activeMixId)) saveSessionSnapshot();
 		else clearSessionSnapshot();
 	});
 
@@ -607,8 +447,6 @@
 		if (debounceTimer) clearTimeout(debounceTimer);
 		searchAbort?.abort();
 		mixLoadSeq += 1;
-		streamRequestSeq += 1;
-		prefetchRequestSeq += 1;
 	});
 </script>
 
@@ -630,29 +468,19 @@
 	{#if showVideoHero}
 	<section class="hero glass-panel" class:hero--prompt={showChooseVideoPrompt}>
 		<div class="player-shell">
-			{#if loadingStream && !streamUrl}
-				<Skeleton rows={4} label="Loading video" />
-			{:else if streamUrl}
-				<VideoPlayer
-					src={streamUrl}
-					poster={selectedVideo?.artwork_url}
-					title={heroTitle}
-					artist={heroArtist}
-					qualityMode={videoQualityMode}
-					autoplayNext={autoplayNext}
-					hasNext={hasAutoplayNext}
-					upNextTitle={nextAutoplayVideo?.title ?? null}
-					upNextArtist={nextAutoplayVideo?.artist_name ?? null}
-					onToggleAutoplay={toggleVideoAutoplay}
-					onEnded={handleVideoEnded}
-					refreshStream={refreshSelectedStream}
-				/>
-			{:else if showChooseVideoPrompt}
-				<div class="video-choice-prompt" aria-live="polite">
-					<strong>Choose a video</strong>
-					<span>Select any result to start playback.</span>
-				</div>
-			{/if}
+			<!-- Placeholder the persistent dock positions its live player over while
+			     on /videos. The actual <video> lives in VideoDock so it survives
+			     navigation. -->
+			<div class="stage-anchor" class:has-video={Boolean(streamUrl)} bind:this={stageAnchor}>
+				{#if loadingStream && !streamUrl}
+					<Skeleton rows={4} label="Loading video" />
+				{:else if showChooseVideoPrompt}
+					<div class="video-choice-prompt" aria-live="polite">
+						<strong>Choose a video</strong>
+						<span>Select any result to start playback.</span>
+					</div>
+				{/if}
+			</div>
 		</div>
 		{#if !showChooseVideoPrompt}
 		<div class="hero-meta">
@@ -862,6 +690,21 @@
 
 	.hero--prompt .player-shell {
 		min-height: 0;
+	}
+
+	.stage-anchor {
+		width: 100%;
+		display: grid;
+		align-items: center;
+	}
+
+	/* When a video is playing, this is an empty 16/9 frame the fixed dock sits
+	   on top of. Dark fill so the inline area reads as a video surface even in
+	   the frame between rect measurement and the dock painting over it. */
+	.stage-anchor.has-video {
+		aspect-ratio: 16 / 9;
+		border-radius: 8px;
+		background: #030305;
 	}
 
 	.video-choice-prompt {

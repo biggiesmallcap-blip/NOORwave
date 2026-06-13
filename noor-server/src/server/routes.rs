@@ -807,6 +807,10 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/playback/play", post(play_track))
         .route("/api/playback/pause", post(pause_playback))
         .route("/api/playback/resume", post(resume_playback))
+        .route(
+            "/api/playback/exclusive/release",
+            post(release_exclusive_playback),
+        )
         .route("/api/playback/previous", post(previous_track))
         .route("/api/playback/next", post(next_track))
         .route("/api/playback/position", post(set_playback_position))
@@ -6592,6 +6596,28 @@ async fn pause_playback(State(state): State<SharedState>) -> Result<Json<Value>,
 
     let snapshot = overlay_snapshot_with_external_track(&state, snapshot).await;
     Ok(Json(json!({ "state": snapshot.state })))
+}
+
+/// Drop the WASAPI exclusive device immediately so the WebView can play a
+/// TIDAL video's audio in shared mode. The frontend hits this when a video
+/// starts. No-op when there's no runtime or exclusive mode is off; the runtime
+/// re-grabs exclusive on the next Resume/Play. Returns ok even on a soft miss
+/// so video startup never blocks on it.
+async fn release_exclusive_playback(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    if let Some(runtime_handle) = current_playback_runtime(&state).await
+        && let Err(error) = runtime_handle.release_exclusive_now()
+    {
+        tracing::warn!(
+            target = "noor.playback",
+            event = "exclusive_release_failed",
+            "Failed to request exclusive release: {error}"
+        );
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn resume_playback(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {

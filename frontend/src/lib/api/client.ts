@@ -3269,6 +3269,15 @@ export const api = {
 		});
 	},
 
+	/** Ask the server to drop the WASAPI exclusive device so the WebView can
+	 *  play a video's audio in shared mode. No-op when exclusive mode is off.
+	 *  Swallows failures: video startup must never block on it. */
+	releaseExclusivePlayback() {
+		return fetchApi<{ ok: boolean }>('/api/playback/exclusive/release', undefined, {
+			method: 'POST',
+		}).catch(() => ({ ok: false }));
+	},
+
 	previousTrack() {
 		return fetchApi<PlaybackSnapshot>('/api/playback/previous', undefined, {
 			method: 'POST',
