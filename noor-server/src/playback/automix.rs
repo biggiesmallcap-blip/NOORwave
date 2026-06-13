@@ -81,6 +81,54 @@ fn hub_multiplier(percentile: f64) -> f64 {
     }
 }
 
+// Rarity (IDF, normalised to [0, 1]) for each of the seed's genre keys. A genre
+// covering most of the library carries little signal; agreement on a niche genre
+// is a stronger match. Mirrors the IDF weighting in compute_track_similarity so the
+// scorer and the similarity table agree on what a genre match is worth. Returns
+// empty on any error, which leaves the scorer on its original flat weighting.
+fn seed_genre_rarity(conn: &Connection, seed_genres: &HashSet<String>) -> HashMap<String, f64> {
+    let mut out = HashMap::new();
+    if seed_genres.is_empty() {
+        return out;
+    }
+    let Ok(total) = conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| {
+        row.get::<_, i64>(0)
+    }) else {
+        return out;
+    };
+    if total <= 0 {
+        return out;
+    }
+    let ln_total = (total as f64).ln().max(1.0);
+    let rows = {
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT g.name, COUNT(DISTINCT tg.track_id)
+             FROM track_genres tg JOIN genres g ON g.id = tg.genre_id
+             GROUP BY g.id",
+        ) else {
+            return out;
+        };
+        let mapped = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        });
+        match mapped.and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>()) {
+            Ok(rows) => rows,
+            Err(_) => return out,
+        }
+    };
+    for (name, members) in rows {
+        let key = normalize_genre_key(&name);
+        if members > 0 && seed_genres.contains(&key) {
+            let rarity = ((total as f64 / members as f64).ln() / ln_total).clamp(0.0, 1.0);
+            // A normalised key can come from more than one genre name; keep the rarest.
+            out.entry(key)
+                .and_modify(|existing: &mut f64| *existing = existing.max(rarity))
+                .or_insert(rarity);
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone)]
 struct ScoredTrack {
     track: Track,
@@ -535,7 +583,8 @@ pub(crate) fn build_automix_extension_with_reasons(
     excluded_track_ids.extend(session_profile.recent_track_ids.iter().copied());
     // Convert once, after recent_track_ids has been read for exclusions, so
     // the move into TasteVector below doesn't force an extra clone.
-    let (taste, seed) = from_session_profile(&session_profile);
+    let (taste, mut seed) = from_session_profile(&session_profile);
+    seed.genre_rarity = seed_genre_rarity(conn, &seed.genres);
     excluded_track_ids.sort_unstable();
     excluded_track_ids.dedup();
 
@@ -1484,6 +1533,53 @@ mod tests {
     }
 
     #[test]
+    fn scorer_weights_rare_seed_genre_above_broad_one() {
+        use crate::smart::taste_vector::{SeedContext, TasteVector};
+        let taste = TasteVector::default();
+        let mut seed = SeedContext::default();
+        seed.genres = ["rare".to_string(), "broad".to_string()]
+            .into_iter()
+            .collect();
+        seed.genre_rarity = [("rare".to_string(), 0.95), ("broad".to_string(), 0.10)]
+            .into_iter()
+            .collect();
+
+        let track = track_with_album(2, None);
+        let rare = automix_score(&track, &["rare".to_string()], &taste, &seed, None, None).value;
+        let broad = automix_score(&track, &["broad".to_string()], &taste, &seed, None, None).value;
+        assert!(
+            rare > broad,
+            "a rare shared genre ({rare}) should beat a broad one ({broad})"
+        );
+
+        // Absent rarity data (other consumers, older fixtures) keeps flat weighting:
+        // the two genres score identically.
+        let flat_seed = SeedContext {
+            genres: seed.genres.clone(),
+            ..SeedContext::default()
+        };
+        let rare_flat = automix_score(
+            &track,
+            &["rare".to_string()],
+            &taste,
+            &flat_seed,
+            None,
+            None,
+        )
+        .value;
+        let broad_flat = automix_score(
+            &track,
+            &["broad".to_string()],
+            &taste,
+            &flat_seed,
+            None,
+            None,
+        )
+        .value;
+        assert!((rare_flat - broad_flat).abs() < 1e-9);
+    }
+
+    #[test]
     fn hub_multiplier_is_flat_below_threshold_and_ramps_above() {
         assert_eq!(hub_multiplier(0.0), 1.0);
         assert_eq!(hub_multiplier(AUTOMIX_HUB_THRESHOLD), 1.0);
@@ -1771,7 +1867,12 @@ pub(crate) fn automix_score(
     let normalized_genres = genres.iter().map(|genre| normalize_genre_key(genre));
     for genre in normalized_genres {
         if seed.genres.contains(&genre) {
-            score += 1.8;
+            // Weight the seed-genre match by rarity when automix supplied it: a
+            // niche shared genre is a stronger signal than a library-wide one.
+            // 0.5 (the absent-data default) maps to a 1.0 multiplier, so callers
+            // without rarity data and existing tests keep the original flat +1.8.
+            let rarity = seed.genre_rarity.get(&genre).copied().unwrap_or(0.5);
+            score += 1.8 * (0.7 + 0.6 * rarity);
             shares_seed_genre = true;
         }
         if let Some(affinity) = taste.genre_affinity.get(&genre) {

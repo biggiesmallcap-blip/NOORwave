@@ -84,6 +84,9 @@ pub fn from_session_profile(profile: &SessionTasteProfile) -> (TasteVector, Seed
         album_id: profile.current_album_id,
         source: profile.current_source.clone(),
         genres: profile.current_genres.clone(),
+        // Populated by automix after construction (it has the DB handle); other
+        // callers leave it empty and get flat genre weighting.
+        genre_rarity: Default::default(),
     };
 
     (taste, seed)
