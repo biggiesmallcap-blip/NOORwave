@@ -61,3 +61,23 @@ already exist as `--accent` / `--accent-strong` and `--state-error`. Fix: rename
 the usages to the real tokens, or alias `--accent-primary: var(--accent)` and
 `--state-danger: var(--state-error)` in both theme blocks.
 - Spawned by: commit on branch `fix/tidal-mix-real-queue-rows` (light-mode pass)
+
+### feat: finish play-in-context standardization across remaining list surfaces
+
+First pass landed the canonical `playTracksInContext` / `playLibrary` helpers in
+`stores/player.ts` and wired the library track list and playlist track rows to
+them (clicking a row now makes the visible list the queue and starts there,
+instead of playing one orphan track + automix). The library Tracks/Liked views
+also got real Play / Shuffle-all header controls.
+
+Remaining to fully standardize:
+- `genres/+page.svelte` builds its queue via a bespoke `replacePlaybackQueue` +
+  shuffle + automix dance; route it through the shared helpers so genre play
+  matches everywhere else.
+- `search/+page.svelte` audio-result rows still call `playTrackNow(id)` (single
+  track); make them play in context of the result list.
+- The library Tracks list uses a bespoke inline `.track-row`; the rest of the app
+  uses the shared `TrackRow.svelte`. Unifying them would collapse a lot of
+  duplicated markup/keyboard logic, but it is a larger refactor — do it on its
+  own branch with screenshot diffing.
+- Spawned by: commit on branch `fix/tidal-mix-real-queue-rows` (play standardization pass)

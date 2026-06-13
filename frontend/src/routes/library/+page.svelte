@@ -39,6 +39,8 @@
 		currentTrack,
 		isPlaying,
 		playTrackNow,
+		playTracksInContext,
+		playLibrary,
 		addTrackToQueue,
 		playTrackNext,
 		shuffleMode,
@@ -287,8 +289,35 @@
 		}
 	}
 
+	// Clicking a track plays it in the context of the list the user is looking at:
+	// the visible rows become the queue, starting at the clicked track (TIDAL /
+	// Spotify behavior) instead of playing one orphan track and letting automix
+	// improvise. `visibleTracks` already reflects the active tab, sort, and search.
 	async function playTrack(track: typeof $tracks[0]) {
-		await playTrackNow(track.id);
+		await playTracksInContext(visibleTracks.map((t) => t.id), track.id);
+	}
+
+	// "Play" / "Shuffle" for the current track view. In search mode the visible
+	// results are the context; otherwise pull the full sorted/liked list from the
+	// server so the queue isn't limited to the rows scrolled into view.
+	async function playTrackView(shuffle = false) {
+		batchError = null;
+		batchMessage = null;
+		if ($searchQuery.trim()) {
+			const ids = visibleTracks.map((t) => t.id);
+			if (ids.length === 0) {
+				batchError = 'No tracks to play in the current view.';
+				return;
+			}
+			await playTracksInContext(ids, undefined, { shuffle });
+			return;
+		}
+		await playLibrary({
+			sortBy: $sortBy,
+			sortDir: $sortDir,
+			likedOnly: activeTab === 'liked',
+			shuffle,
+		});
 	}
 
 	async function queueTrack(track: typeof $tracks[0], event: MouseEvent) {
@@ -498,7 +527,7 @@
 			} else if (event.metaKey || event.ctrlKey) {
 				void playTrackNext(track.id);
 			} else {
-				void playTrackNow(track.id);
+				void playTrack(track);
 			}
 			return;
 		}
@@ -1550,6 +1579,16 @@
 			</div>
 
 			<div class="filter-pill-actions">
+				{#if activeTab === 'tracks' || activeTab === 'liked'}
+					<div class="play-controls" role="group" aria-label="Play this view">
+						<button class="filter-pill filter-pill--accent" onclick={() => void playTrackView(false)} title="Play this view">
+							▶ Play
+						</button>
+						<button class="filter-pill filter-pill--ghost" onclick={() => void playTrackView(true)} title="Shuffle this view">
+							⤮ Shuffle
+						</button>
+					</div>
+				{/if}
 				{#if activeTab === 'albums'}
 					<div class="view-toggle" role="group" aria-label="Album view layout">
 						<button
@@ -3210,6 +3249,24 @@
 
 	.filter-pill--ghost {
 		opacity: 0.75;
+	}
+
+	.play-controls {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+	}
+
+	.filter-pill--accent {
+		background: var(--accent);
+		border-color: var(--accent);
+		color: #fff;
+	}
+
+	.filter-pill--accent:hover {
+		background: var(--accent);
+		filter: brightness(1.08);
+		color: #fff;
 	}
 
 	.filter-pill {

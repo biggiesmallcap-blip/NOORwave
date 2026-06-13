@@ -1101,6 +1101,93 @@ async function loadQueueAndPlay(
 	}
 }
 
+// Slice a track-id list so the queue starts at `startTrackId` and runs to the
+// end of the list, dropping the tracks before it. This is what "click a row"
+// means in TIDAL/Spotify: the rows AFTER the one you clicked are what play next,
+// not the rows above it. Without the slice, clicking row 15 of a list would
+// replay rows 1-14 right after it. Non-positive ids (ephemeral / unresolved
+// rows) are dropped so the queue only carries real library tracks. When no start
+// track is given (a bare "Play all") the whole list is returned in order. Pure +
+// exported so the slice contract is unit tested without a live server.
+export function sliceContextTrackIds(trackIds: number[], startTrackId?: number): number[] {
+	const ids = trackIds.filter((id) => id > 0);
+	if (startTrackId == null) return ids;
+	const idx = ids.indexOf(startTrackId);
+	if (idx <= 0) return ids;
+	return ids.slice(idx);
+}
+
+/**
+ * Canonical "play in context" action. Treats `trackIds` as the list the user is
+ * looking at and makes it the queue, beginning at `startTrackId` (or the first
+ * track). Clicking a row in any track list should call this — the list you see
+ * becomes the queue, mirroring TIDAL/Spotify, instead of playing one orphan
+ * track and letting automix improvise the rest.
+ *
+ * Reordering the start track to the front (rather than tracking a play cursor)
+ * matches the established playAlbum/playArtist/playPlaylist convention so every
+ * surface behaves identically. When starting from a specific track shuffle is
+ * forced off; a bare "Play all" honors the user's global shuffle mode.
+ */
+export async function playTracksInContext(
+	trackIds: number[],
+	startTrackId?: number,
+	options?: { shuffle?: boolean },
+) {
+	const ids = trackIds.filter((id) => id > 0);
+	if (ids.length === 0) return;
+	if (options?.shuffle) {
+		await loadQueueAndPlay(ids, { shuffleMode: 'true' });
+		return;
+	}
+	await loadQueueAndPlay(sliceContextTrackIds(ids, startTrackId), {
+		shuffleMode: startTrackId != null ? undefined : get(shuffleMode),
+	});
+}
+
+// The catalog list endpoint caps a single page at 200 rows; that is a sensible
+// queue depth for "Play"/"Shuffle" on the whole library since automix extends
+// from there. Pulling every id (tens of thousands) into one POST is neither
+// necessary nor cheap.
+const LIBRARY_QUEUE_LIMIT = 200;
+
+/**
+ * Play the user's library as a queue. Fetches up to `LIBRARY_QUEUE_LIMIT` tracks
+ * in the requested sort / liked context and loads them, mirroring the Play (or
+ * Shuffle) button on a TIDAL/Spotify collection. Without this, the library had
+ * no way to start a real session: clicking a track only played that one track.
+ */
+export async function playLibrary(options?: {
+	sortBy?: string;
+	sortDir?: string;
+	likedOnly?: boolean;
+	shuffle?: boolean;
+}) {
+	if (!assertOnline()) return;
+	playerError.set(null);
+	try {
+		const { tracks } = await api.getTracks(
+			options?.sortBy ?? 'date_added',
+			options?.sortDir ?? 'desc',
+			LIBRARY_QUEUE_LIMIT,
+			0,
+			true,
+			options?.likedOnly ?? false,
+		);
+		if (tracks.length === 0) {
+			playerError.set({ message: 'No tracks in your library yet.' });
+			return;
+		}
+		await playTracksInContext(
+			tracks.map((t) => t.id),
+			undefined,
+			{ shuffle: options?.shuffle },
+		);
+	} catch (error) {
+		setError('play your library', error, () => playLibrary(options));
+	}
+}
+
 export function selectOptimisticNextItem<T extends { id: number; track: { id: number } }>(
 	queue: T[],
 	currentTrackId: number | null | undefined,
@@ -1125,13 +1212,7 @@ export async function playAlbum(albumId: number, startTrackId?: number) {
 			playerError.set({ message: 'Album has no tracks.' });
 			return;
 		}
-		const ordered = startTrackId
-			? [
-					...tracks.filter((t) => t.id === startTrackId),
-					...tracks.filter((t) => t.id !== startTrackId)
-				]
-			: tracks;
-		await loadQueueAndPlay(ordered.map((t) => t.id), {
+		await loadQueueAndPlay(sliceContextTrackIds(tracks.map((t) => t.id), startTrackId), {
 			shuffleMode: startTrackId ? undefined : get(shuffleMode),
 			intentSeq,
 		});
@@ -1174,13 +1255,7 @@ export async function playArtist(artistId: number, startTrackId?: number) {
 			playerError.set({ message: 'Artist has no tracks.' });
 			return;
 		}
-		const ordered = startTrackId
-			? [
-					...tracks.filter((t) => t.id === startTrackId),
-					...tracks.filter((t) => t.id !== startTrackId)
-				]
-			: tracks;
-		await loadQueueAndPlay(ordered.map((t) => t.id), {
+		await loadQueueAndPlay(sliceContextTrackIds(tracks.map((t) => t.id), startTrackId), {
 			shuffleMode: startTrackId ? undefined : get(shuffleMode),
 			intentSeq,
 		});
@@ -1271,13 +1346,7 @@ export async function playPlaylist(playlistId: number, startTrackId?: number) {
 			playerError.set({ message: 'Playlist is empty.' });
 			return;
 		}
-		const ordered = startTrackId
-			? [
-					...tracks.filter((t) => t.id === startTrackId),
-					...tracks.filter((t) => t.id !== startTrackId)
-				]
-			: tracks;
-		await loadQueueAndPlay(ordered.map((t) => t.id), {
+		await loadQueueAndPlay(sliceContextTrackIds(tracks.map((t) => t.id), startTrackId), {
 			shuffleMode: startTrackId ? undefined : get(shuffleMode),
 			intentSeq,
 		});

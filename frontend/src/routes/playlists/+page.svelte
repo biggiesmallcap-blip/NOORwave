@@ -1,6 +1,5 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
-	import { get } from 'svelte/store';
 	import type { Snapshot } from './$types';
 	import {
 		api,
@@ -17,8 +16,7 @@
 	import {
 		currentTrack,
 		isPlaying,
-		playTrackNow,
-		shuffleMode,
+		playTracksInContext,
 		shufflePlaylist,
 		startPlaylistRadio,
 	} from '$lib/stores/player';
@@ -402,7 +400,12 @@
 		}
 	}
 
-	async function playTrack(trackId: number) { await playTrackNow(trackId); }
+	// Clicking a row plays it in the context of its playlist: the playlist's
+	// tracks become the queue, starting at the clicked track (TIDAL / Spotify
+	// behavior) rather than playing a single orphan track.
+	async function playTrackInPlaylist(tracks: { id: number }[], trackId: number) {
+		await playTracksInContext(tracks.map((t) => t.id), trackId);
+	}
 
 	async function ensurePlaylistTracks(id: number) {
 		if (!playlistTracksById[id] && !loadingById[id]) {
@@ -415,13 +418,7 @@
 		e.stopPropagation();
 		const tracks = await ensurePlaylistTracks(playlist.id);
 		if (!tracks.length) return;
-		const replaced = await api.replacePlaybackQueue(
-			tracks.map((t) => t.id),
-			undefined,
-			undefined,
-			get(shuffleMode)
-		);
-		await playTrackNow(replaced.queue[0]?.track.id ?? tracks[0].id);
+		await playTracksInContext(tracks.map((t) => t.id));
 	}
 
 	async function shufflePlaylistQuick(playlist: Playlist, e: MouseEvent) {
@@ -514,13 +511,7 @@
 	async function playPlaylistFromMenu(playlist: Playlist) {
 		const tracks = await ensurePlaylistTracks(playlist.id);
 		if (!tracks.length) return;
-		const replaced = await api.replacePlaybackQueue(
-			tracks.map((t) => t.id),
-			undefined,
-			undefined,
-			get(shuffleMode),
-		);
-		await playTrackNow(replaced.queue[0]?.track.id ?? tracks[0].id);
+		await playTracksInContext(tracks.map((t) => t.id));
 	}
 
 	async function shufflePlaylistFromMenu(playlist: Playlist) {
@@ -1372,7 +1363,7 @@
 												index={i}
 												isCurrent={$currentTrack?.id === track.id}
 												isPlaying={$isPlaying}
-												onRowClick={() => void playTrack(track.id)}
+												onRowClick={() => void playTrackInPlaylist(allTracks, track.id)}
 											/>
 										</li>
 									{/each}
