@@ -19,7 +19,7 @@
 
 	let {
 		track,
-		eyebrow = 'Listening Instrument',
+		eyebrow = 'Now Playing',
 		nowPlayingAttribution = null,
 		stream = null,
 		streamDetail = '',
@@ -121,8 +121,10 @@
 			>
 				{artistRef.label}
 			</a>
-		{:else}
-			<p class="np-artist">{track?.artist_name ?? 'Choose a track to begin playback.'}</p>
+		{:else if track?.artist_name}
+			<p class="np-artist">{track.artist_name}</p>
+		{:else if !track}
+			<p class="np-artist">Choose a track to begin playback.</p>
 		{/if}
 		{#if albumRef && albumHref}
 			<a
@@ -136,8 +138,8 @@
 			>
 				{albumRef.label}
 			</a>
-		{:else}
-			<p class="np-album">{track?.album_title ?? 'Playback controls stay docked here.'}</p>
+		{:else if track?.album_title}
+			<p class="np-album">{track.album_title}</p>
 		{/if}
 		{#if nowPlayingAttribution}
 			<p class="np-source">{nowPlayingAttribution}</p>

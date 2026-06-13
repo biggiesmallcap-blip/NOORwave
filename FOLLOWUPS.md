@@ -10,6 +10,18 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### chore: populate `album_title` at the `TidalPlayable` builders, not just the backstop
+
+Several launch surfaces build a `TidalPlayable` with title + artist + artwork but
+omit `album_title` (charts, command palette, discover, etc.), so ephemeral plays
+arrive at `/api/tidal/play` with a null album. The now-playing case is now covered
+by a backend backstop (`start_ephemeral_tidal_playback` does a TIDAL `get_track`
+lookup to backfill a missing album), but the gap still affects other consumers of
+those playables (e.g. "play next" queue rows that store `ephemeral_album_title`).
+Audit the `TidalPlayable`-building helpers and set `album_title` at the source so
+the data is correct before it ever reaches the backend.
+- Spawned by: branch `fix/tidal-mix-real-queue-rows` (now-playing placeholder-copy fix)
+
 ### chore: re-add Viral 50 Global to /charts when Sportify proxy recovers
 
 Removed `37i9dQZEVXbLiRSasKsNU9` (Viral 50 Global) from `frontend/src/routes/charts/+page.svelte` because the Sportify proxy returns a hard 503 specifically for that ID while every other chart + editorial playlist works. Periodically curl `https://sportify.xcasper.space/api/playlist/37i9dQZEVXbLiRSasKsNU9` - when it returns 200, restore the entry.
