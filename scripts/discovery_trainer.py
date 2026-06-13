@@ -18,14 +18,31 @@ def cosine(a, b):
     return sum(x * y for x, y in zip(a, b))
 
 
-def hashed_projection(tokens, dim):
+def compute_token_idf(tracks):
+    # Inverse document frequency per metadata token. A token shared by most of the
+    # library (a broad genre, or filler like "remix"/"feat") carries little signal
+    # and, weighted equally, forms embedding hubs; IDF lets distinctive tokens drive
+    # similarity instead. sklearn-style smoothed idf, floored at 1.0.
+    n = len(tracks)
+    df = Counter()
+    for track in tracks:
+        for token in set(metadata_tokens(track)):
+            df[token] += 1
+    return {
+        token: math.log((1.0 + n) / (1.0 + count)) + 1.0
+        for token, count in df.items()
+    }
+
+
+def hashed_projection_weighted(tokens, dim, idf):
     vec = [0.0] * dim
     for token in tokens:
+        weight = idf.get(token, 1.0)
         digest = hashlib.sha256(token.encode("utf-8")).digest()
         for offset in range(0, min(32, dim * 2), 2):
             bucket = digest[offset] % dim
             sign = 1.0 if digest[offset + 1] % 2 == 0 else -1.0
-            vec[bucket] += sign * 0.5
+            vec[bucket] += sign * 0.5 * weight
     return normalize(vec)[0]
 
 
@@ -84,17 +101,20 @@ def build_behavioral_embeddings(input_payload):
 
 
 def build_audio_proxy_features(tracks, dim):
+    # IDF over the corpus so common tokens don't dominate the projection. v3 marks
+    # the IDF weighting (see compute_token_idf); mirrors the Rust port.
+    idf = compute_token_idf(tracks)
     features = {}
     for track in tracks:
         clip_duration = 20000
         duration = track.get("duration_ms") or 0
         clip_start = 30000 if duration >= 90000 else max(0, (duration - clip_duration) // 2)
-        vec = hashed_projection(metadata_tokens(track), dim)
+        vec = hashed_projection_weighted(metadata_tokens(track), dim, idf)
         features[track["track_id"]] = {
             "vector": vec,
             "clip_start_ms": clip_start,
             "clip_duration_ms": clip_duration,
-            "feature_version": "metadata-audio-proxy-v1",
+            "feature_version": "metadata-audio-proxy-v3",
         }
     return features
 
