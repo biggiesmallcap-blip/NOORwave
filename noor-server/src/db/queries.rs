@@ -543,7 +543,13 @@ fn favorite_predicate(favorite_only: bool, liked_only: bool) -> Option<&'static 
     if liked_only {
         Some("t.is_favorite = 1")
     } else if favorite_only {
-        Some("(t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))")
+        // The album-favorite branch is gated on `is_library = 1` so transient
+        // resolver/discovery imports that happen to land in a favorited album
+        // don't leak into the library. See MIGRATION_052 and the canonical
+        // sibling `ARTIST_LIBRARY_TRACK_WHERE` (keep both in sync).
+        Some(
+            "(t.is_favorite = 1 OR (t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1) AND t.is_library = 1))",
+        )
     } else {
         None
     }
@@ -1050,7 +1056,12 @@ pub fn upsert_spotify_artist_stats(
     Ok(())
 }
 
-const ARTIST_LIBRARY_TRACK_WHERE: &str = "(t.is_favorite = 1 OR COALESCE(al.is_favorite, 0) = 1)";
+// Canonical sibling of `favorite_predicate`'s favorite_only branch (hand-
+// duplicated because the artist queries join `albums` as `al`). Keep the two in
+// sync: the album-favorite branch is gated on `is_library = 1` so transient
+// resolver/discovery imports don't leak into artist-detail library surfaces.
+const ARTIST_LIBRARY_TRACK_WHERE: &str =
+    "(t.is_favorite = 1 OR (COALESCE(al.is_favorite, 0) = 1 AND t.is_library = 1))";
 
 fn artist_library_track_predicate() -> &'static str {
     ARTIST_LIBRARY_TRACK_WHERE
@@ -9569,24 +9580,27 @@ mod tests {
         )
         .unwrap();
         // Three tracks in the favorited album; only "Neon Blue" has tracks.is_favorite = 1.
+        // All three are is_library = 1: this is a genuine TIDAL favorited-album
+        // sync (insert_tidal_track marks every synced track as library), so the
+        // two un-liked siblings must still count as library tracks.
         conn.execute(
             "INSERT INTO tracks (id, title, artist_id, album_id, duration_ms, tidal_id,
-                                  best_quality, best_source, fidelity_score, is_favorite, source)
-             VALUES (1, 'Neon Blue', 1, 1, 200000, 101, 'LOSSLESS', 'tidal', 10, 1, 'tidal')",
+                                  best_quality, best_source, fidelity_score, is_favorite, source, is_library)
+             VALUES (1, 'Neon Blue', 1, 1, 200000, 101, 'LOSSLESS', 'tidal', 10, 1, 'tidal', 1)",
             [],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO tracks (id, title, artist_id, album_id, duration_ms, tidal_id,
-                                  best_quality, best_source, fidelity_score, is_favorite, source)
-             VALUES (2, 'Brand New Man', 1, 1, 180000, 102, 'LOSSLESS', 'tidal', 10, 0, 'tidal')",
+                                  best_quality, best_source, fidelity_score, is_favorite, source, is_library)
+             VALUES (2, 'Brand New Man', 1, 1, 180000, 102, 'LOSSLESS', 'tidal', 10, 0, 'tidal', 1)",
             [],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO tracks (id, title, artist_id, album_id, duration_ms, tidal_id,
-                                  best_quality, best_source, fidelity_score, is_favorite, source)
-             VALUES (3, 'Boot Scootin Boogie', 1, 1, 198000, 103, 'LOSSLESS', 'tidal', 10, 0, 'tidal')",
+                                  best_quality, best_source, fidelity_score, is_favorite, source, is_library)
+             VALUES (3, 'Boot Scootin Boogie', 1, 1, 198000, 103, 'LOSSLESS', 'tidal', 10, 0, 'tidal', 1)",
             [],
         ).unwrap();
     }
@@ -9625,6 +9639,58 @@ mod tests {
 
         let count = get_track_count(&conn, true, false).expect("library count");
         assert_eq!(count, 3, "count must match favorite_only data query");
+    }
+
+    // Regression for the resolver/discovery leak: a transient import
+    // (is_library = 0) that attaches to a favorited album by tidal_id must NOT
+    // surface in the library, while genuine is_library = 1 siblings still do.
+    #[test]
+    fn favorite_only_hides_transient_import_in_favorited_album() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        seed_album_with_one_liked_track(&conn);
+
+        // A discovery/resolver track injected into the same favorited album:
+        // not liked, not library (the "House Work" shape).
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, album_id, duration_ms, tidal_id,
+                                  best_quality, best_source, fidelity_score, is_favorite, source, is_library)
+             VALUES (4, 'Injected Leak', 1, 1, 157000, 104, 'LOSSLESS', 'tidal', 10, 0, 'tidal', 0)",
+            [],
+        )
+        .unwrap();
+        // A resolver lazy-import (tidal_stream) that also landed here, unliked.
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, album_id, duration_ms, tidal_id,
+                                  best_quality, best_source, fidelity_score, is_favorite, source, is_library)
+             VALUES (5, 'Stream Leak', 1, 1, 160000, 105, 'LOSSLESS', 'tidal', 10, 0, 'tidal_stream', 0)",
+            [],
+        )
+        .unwrap();
+
+        let tracks =
+            get_tracks(&conn, "title", "asc", 100, 0, true, false).expect("library tracks");
+        let titles: Vec<&str> = tracks.iter().map(|t| t.title.as_str()).collect();
+        assert!(
+            !titles.contains(&"Injected Leak") && !titles.contains(&"Stream Leak"),
+            "transient is_library=0 tracks must stay out of the library, got {titles:?}"
+        );
+        assert_eq!(tracks.len(), 3, "only the 3 genuine library tracks remain");
+
+        let count = get_track_count(&conn, true, false).expect("library count");
+        assert_eq!(count, 3, "count must exclude the transient imports");
+
+        // An explicit like on the injected track promotes it back in.
+        conn.execute(
+            "UPDATE tracks SET is_favorite = 1, is_library = 1 WHERE id = 4",
+            [],
+        )
+        .unwrap();
+        let after = get_track_count(&conn, true, false).expect("library count");
+        assert_eq!(
+            after, 4,
+            "explicit like promotes a transient track to library"
+        );
     }
 
     #[test]

@@ -53,6 +53,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_049,
     MIGRATION_050,
     MIGRATION_051,
+    MIGRATION_052,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1462,6 +1463,52 @@ const MIGRATION_051: &str = r#"
 ALTER TABLE queue ADD COLUMN ephemeral_album_title TEXT;
 ALTER TABLE queue ADD COLUMN ephemeral_artwork_url TEXT;
 ALTER TABLE queue ADD COLUMN ephemeral_duration_ms INTEGER;
+"#;
+
+// `is_library` separates genuinely-curated library tracks from transient TIDAL
+// rows that resolvers/discovery import for playback. Both populations carry
+// `source = 'tidal'` and `is_favorite = 0`, so no existing column could tell
+// them apart at read time. The bug this fixes: a discovery/resolver import
+// (inject_discovery_tracks, import_track_from_metadata) that lands in an
+// already-favorited album would surface in the Library Tracks tab via the
+// `favorite_predicate` album-favorite branch, even though the user never added
+// it (and it was often a dead, non-streamable edition).
+//
+// Going forward the flag is set only by genuine write paths (insert_tidal_track
+// favorites/album/playlist sync, the favorite-toggle); transient paths leave it
+// at DEFAULT 0 (fail-safe: a forgotten path stays hidden, never wrongly shown).
+//
+// The backfill PRESERVES current visibility, then demotes only true post-favorite
+// injections, so nothing genuine disappears before the next sync:
+//   (1) explicit likes are unambiguously library.
+//   (2) local files are user-owned.
+//   (3) every track sitting in a favorited album (the whole-album-favorite
+//       population) is preserved -- no "fully populated" test, so partial
+//       region-incomplete favorited albums keep their tracks.
+//   (4) demote un-liked tracks added to a favorited album either via the
+//       resolver source ('tidal_stream') or well after that album row was
+//       created. Genuine favorites-sync lands a whole album at once (gap ~0);
+//       an injected track shows a multi-day gap. NULL created_at/date_added
+//       yield NULL comparisons (never demoted), which is the safe direction.
+const MIGRATION_052: &str = r#"
+ALTER TABLE tracks ADD COLUMN is_library INTEGER NOT NULL DEFAULT 0;
+
+UPDATE tracks SET is_library = 1 WHERE is_favorite = 1;
+UPDATE tracks SET is_library = 1 WHERE source = 'local';
+UPDATE tracks SET is_library = 1
+ WHERE album_id IN (SELECT id FROM albums WHERE is_favorite = 1);
+
+UPDATE tracks SET is_library = 0
+ WHERE is_favorite = 0
+   AND album_id IN (SELECT id FROM albums WHERE is_favorite = 1)
+   AND (
+        source = 'tidal_stream'
+        OR julianday(date_added) - julianday(
+             (SELECT created_at FROM albums WHERE albums.id = tracks.album_id)
+           ) > 7
+   );
+
+CREATE INDEX IF NOT EXISTS idx_tracks_is_library ON tracks(is_library);
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

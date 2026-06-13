@@ -2,9 +2,16 @@
 //
 // Called when the user plays a TIDAL preview (an album or track that's in
 // TIDAL's catalog but not yet in their library). The import upserts artist +
-// album + tracks with `source = 'tidal_stream'`, which the library list
-// queries filter out — so these rows exist for playback/history/analysis but
-// stay invisible in Library grids until the user favorites them.
+// album + tracks with `source = 'tidal_stream'`. These are transient rows that
+// exist for playback/history/analysis but must stay invisible in Library grids.
+//
+// They stay hidden because they are NOT marked `is_library` (the column added
+// in MIGRATION_052 defaults to 0) and the library filters (`favorite_predicate`
+// / `ARTIST_LIBRARY_TRACK_WHERE` in db/queries.rs) gate the album-favorite
+// branch on `is_library = 1`. Note: the filters do NOT key off `source`, so a
+// `tidal_stream` row landing in a favorited album previously leaked -- the
+// is_library gate is what now keeps it out. An explicit favorite promotes the
+// row into the library via the favorite-toggle handler.
 
 use anyhow::{Context, Result};
 use rusqlite::{OptionalExtension, params};
@@ -387,6 +394,7 @@ mod tests {
                      title     TEXT NOT NULL,
                      artist_id INTEGER,
                      artwork_url TEXT,
+                     is_favorite INTEGER DEFAULT 0,
                      source    TEXT NOT NULL DEFAULT 'tidal_stream'
                  );
                  CREATE TABLE tracks (
@@ -400,6 +408,7 @@ mod tests {
                      best_source TEXT,
                      fidelity_score INTEGER DEFAULT 0,
                      is_favorite INTEGER DEFAULT 0,
+                     is_library INTEGER NOT NULL DEFAULT 0,
                      source    TEXT NOT NULL DEFAULT 'tidal_stream'
                  );",
             )
@@ -438,6 +447,60 @@ mod tests {
             "both calls must return the same local_id — the UNIQUE constraint and \
              SELECT-before-INSERT guarantee this for sequential calls; concurrent \
              calls are safe via SQLite single-writer + UNIQUE constraint backstop"
+        );
+    }
+
+    #[tokio::test]
+    async fn import_track_from_metadata_leaves_track_out_of_library() {
+        let db = setup_db();
+
+        // A pre-existing favorited album (the leak vector): a transient import
+        // that matches it by tidal_id must NOT inherit library status.
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO artists (tidal_id, name) VALUES (?1, ?2)",
+                params![7777, "Massive Attack"],
+            )?;
+            let aid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO albums (tidal_id, title, artist_id, is_favorite, source)
+                 VALUES (?1, ?2, ?3, 1, 'tidal')",
+                params![8888, "Mezzanine", aid],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let imported = import_track_from_metadata(
+            &db,
+            ImportTrackMetadata {
+                tidal_id: 55_001,
+                title: "Teardrop".to_string(),
+                artist_name: "Massive Attack".to_string(),
+                artist_tidal_id: Some(7777),
+                artist_picture: None,
+                album_title: Some("Mezzanine".to_string()),
+                album_tidal_id: Some(8888),
+                album_artwork_url: None,
+                duration_ms: Some(330_000),
+            },
+        )
+        .await
+        .expect("import should succeed");
+
+        let is_library: i64 = db
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT is_library FROM tracks WHERE id = ?1",
+                    params![imported.local_id],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            is_library, 0,
+            "a transient import must stay out of the library even when it \
+             attaches to a pre-existing favorited album by tidal_id"
         );
     }
 
