@@ -200,3 +200,17 @@ proxy with an on-disk cache (sibling to `noor.db`) + redirect-to-CDN fallback wo
 it deterministic, but the benefit is uncertain. Only build it if artwork is observably
 re-downloading every launch (check WebView2 devtools network on a cold start first).
 - Spawned by: app-speed pass on branch `fix/tidal-mix-real-queue-rows`
+
+## Video persistent mini-player: autoplay tail + position sync
+Two minor edges deferred from the persistent-video-dock work (branch `feat/app-speed-instant-paint`):
+- Off-route autoplay stops at the end of the already-loaded video queue. The route's
+  old `handleVideoEnded` called `loadMore()` to page in more search results before
+  advancing; the dock's `advanceVideo` does not (the route owns pagination and may be
+  unmounted). On `/videos` this is a small regression vs. before; off-route it just stops
+  at the loaded tail. Fix: have the dock signal the route (a `videoNeedMore` writable)
+  to `loadMore()` then re-advance when mounted.
+- `videoSession.positionMs` is stored but not wired to the player's `timeupdate`. The
+  element never unmounts so position is preserved for free; positionMs is only needed if
+  we want to show elapsed time in the mini-player or the snapshot. Wire an `onTime` prop
+  on VideoPlayer if that UI is wanted.
+- Spawned by: persistent video mini-player + WASAPI exclusive-release pass.

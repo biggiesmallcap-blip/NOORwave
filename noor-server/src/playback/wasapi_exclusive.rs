@@ -120,6 +120,7 @@ impl std::error::Error for ExclusiveInitFailure {}
 pub struct ExclusiveStream {
     shutdown: Arc<AtomicBool>,
     released: Arc<AtomicBool>,
+    force_release: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     #[allow(dead_code)]
     pub effective_sample_rate: u32,
@@ -176,6 +177,15 @@ impl ExclusiveStream {
     /// uses this to know it must rebuild the stream before resuming.
     pub fn is_released(&self) -> bool {
         self.released.load(Ordering::Acquire)
+    }
+
+    /// Ask the render thread to drop the device now instead of waiting out the
+    /// idle grace window. Used when another app (e.g. the WebView playing a
+    /// TIDAL video) needs the endpoint in shared mode. The thread exits its
+    /// loop on the next tick, releases the `IAudioClient`, and flips
+    /// `is_released()`; the runtime re-grabs on the next Resume/Play.
+    pub fn request_release(&self) {
+        self.force_release.store(true, Ordering::Release);
     }
 }
 
@@ -307,6 +317,8 @@ pub fn build_exclusive_stream(
     let shutdown_clone = Arc::clone(&shutdown);
     let released = Arc::new(AtomicBool::new(false));
     let released_clone = Arc::clone(&released);
+    let force_release = Arc::new(AtomicBool::new(false));
+    let force_release_clone = Arc::clone(&force_release);
     let device_pref_owned = device_pref.map(|s| s.to_string());
 
     let (init_tx, init_rx) =
@@ -327,6 +339,7 @@ pub fn build_exclusive_stream(
                 event_tx,
                 shutdown_clone,
                 released_clone,
+                force_release_clone,
                 init_tx,
             );
         })
@@ -340,6 +353,7 @@ pub fn build_exclusive_stream(
         Ok((effective_rate, effective_channels, transport_format)) => Ok(ExclusiveStream {
             shutdown,
             released,
+            force_release,
             thread: Some(thread),
             effective_sample_rate: effective_rate,
             effective_channels,
@@ -365,6 +379,7 @@ fn run_render_thread(
     event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
     shutdown: Arc<AtomicBool>,
     released: Arc<AtomicBool>,
+    force_release: Arc<AtomicBool>,
     init_tx: mpsc::SyncSender<std::result::Result<(u32, u16, String), ExclusiveInitFailure>>,
 ) {
     let _mmcss = enter_mmcss();
@@ -442,6 +457,18 @@ fn run_render_thread(
     let mut logged_first_nonzero_fill = false;
 
     while !shutdown.load(Ordering::SeqCst) {
+        // Forced release: a caller (e.g. video playback needing the endpoint in
+        // shared mode) asked us to let go now, ahead of the idle grace. Same
+        // teardown as idle release: break, drop the IAudioClient, flip
+        // `is_released()`, re-grab on the next Resume/Play.
+        if force_release.load(Ordering::Acquire) {
+            info!(
+                target: "playback",
+                "WASAPI exclusive stream releasing device on external request"
+            );
+            break;
+        }
+
         // Idle-release: when paused for >= grace_secs, exit the loop and let
         // Drop chains release the IAudioClient so other apps can use the
         // device. The runtime detects the release via `is_released()` and

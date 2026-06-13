@@ -12,15 +12,17 @@ describe('video session snapshot behavior', () => {
 	});
 
 	test('direct video sessions are not persisted without URL context', () => {
-		expect(source).toContain("videoSessionSource() !== 'direct'");
-		expect(source).toContain('if (selectedVideo && videoSessionSource() !==');
+		// A direct video (no search query, no active mix) has no restorable browse
+		// context, so it is not snapshotted.
+		expect(source).toContain('if (selectedVideo && (lastQuery || activeMixId)) saveSessionSnapshot();');
+		expect(source).toContain('else clearSessionSnapshot();');
 	});
 
-	test('clear request resets selected video, stream state, snapshot, and URL', () => {
+	test('clear request resets the video session, snapshot, and URL', () => {
 		expect(source).toContain('function clearVideoPageSession');
-		expect(source).toContain('selectedVideo = null');
-		expect(source).toContain('streamUrl = null');
-		expect(source).toContain('streamExpiresAt = null');
+		// Playback state lives in the dock/store now, so clearing routes through
+		// the controller rather than nulling local stream fields.
+		expect(source).toContain('clearVideoSession();');
 		expect(source).toContain('clearSessionSnapshot();');
 		expect(source).toContain("void goto('/videos', { replaceState: true, keepFocus: true });");
 		expect(source).toContain('clearVideoPageSession();');

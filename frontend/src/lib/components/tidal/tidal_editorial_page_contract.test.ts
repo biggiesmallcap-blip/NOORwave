@@ -41,7 +41,7 @@ describe('TIDAL editorial page routes', () => {
 
 	test('does not replace existing genres or videos workflows', () => {
 		expect(routeSource('genres')).toContain('GenreGalaxy');
-		expect(routeSource('videos')).toContain('VideoPlayer');
+		expect(routeSource('videos')).toContain('VideoCard');
 		expect(routeSource('genres')).toContain('href="/tidal/genres"');
 		expect(routeSource('videos')).toContain('href="/tidal/videos"');
 	});

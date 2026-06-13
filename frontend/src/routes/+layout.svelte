@@ -104,6 +104,7 @@
 		videoSession,
 		videoSessionUpcoming,
 	} from '$lib/stores/video_session';
+	import VideoDock from '$lib/components/video/VideoDock.svelte';
 
 	let { children } = $props();
 
@@ -1319,6 +1320,8 @@
 	<main class="workspace">
 		{@render children()}
 	</main>
+
+	<VideoDock />
 
 	{#if videoChromeActive}
 		<aside class="now-playing-panel video-queue-panel" aria-label="Video queue">
