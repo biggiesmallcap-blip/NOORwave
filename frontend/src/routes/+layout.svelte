@@ -3,6 +3,7 @@
 	import { onDestroy, onMount } from 'svelte';
 	import { page } from '$app/state';
 	import { goto, onNavigate } from '$app/navigation';
+	import { markNavigated } from '$lib/navigation/back';
 	import { connectWebSocket, wsConnected } from '$lib/api/ws';
 	import {
 		currentTrack,
@@ -302,6 +303,9 @@
 	// Every other navigation uses the default (instant) transition. Falls through
 	// silently on browsers without the View Transitions API (pre-Chromium 111).
 	onNavigate((nav) => {
+		// Record that we've moved within the app, so detail-page back buttons
+		// can safely pop history instead of jumping to a fixed page.
+		markNavigated(Boolean(nav.from));
 		if (!nav.from?.url.pathname.startsWith('/onboarding')) return;
 		if (typeof document === 'undefined' || !('startViewTransition' in document)) return;
 		return new Promise((resolve) => {

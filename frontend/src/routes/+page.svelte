@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import type { Unsubscriber } from 'svelte/store';
 	import type { Snapshot } from './$types';
+	import { captureScroll, restoreScroll } from '$lib/navigation/scroll';
 	import {
 		type RSSFeedItem,
 	} from '$lib/api/client';
@@ -56,10 +57,10 @@
 	// Phase 5B — back/forward state via SvelteKit snapshot
 	export const snapshot: Snapshot<{ scrollY: number }> = {
 		capture: () => ({
-			scrollY: typeof window !== 'undefined' ? window.scrollY : 0
+			scrollY: captureScroll()
 		}),
 		restore: (saved) => {
-			requestAnimationFrame(() => window.scrollTo({ top: saved.scrollY, behavior: 'auto' }));
+			restoreScroll(saved.scrollY);
 		}
 	};
 

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
 	import type { Snapshot } from './$types';
+	import { captureScroll, restoreScroll } from '$lib/navigation/scroll';
 	import {
 		api,
 		type Playlist,
@@ -214,7 +215,7 @@
 	}> = {
 		capture: () => ({
 			expandedIds: [...expandedPlaylistIds],
-			scrollY: typeof window !== 'undefined' ? window.scrollY : 0,
+			scrollY: captureScroll(),
 			query: playlistQuery,
 			filter: playlistFilter,
 			sort: playlistSort,
@@ -226,7 +227,7 @@
 			if (typeof saved.query === 'string') playlistQuery = saved.query;
 			if (saved.filter) playlistFilter = saved.filter;
 			if (saved.sort) playlistSort = saved.sort;
-			requestAnimationFrame(() => window.scrollTo({ top: saved.scrollY, behavior: 'auto' }));
+			restoreScroll(saved.scrollY);
 		}
 	};
 

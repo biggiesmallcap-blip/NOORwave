@@ -7,6 +7,7 @@
 		type TidalHomeItem,
 		type TidalHomeModule
 	} from '$lib/api/client';
+	import { goBack } from '$lib/navigation/back';
 	import { playTidalTrackNow, playTidalPlaylist } from '$lib/stores/player';
 	import { formatTrackDuration } from '$lib/utils/format';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
@@ -148,7 +149,7 @@
 
 <div class="page-shell discover-detail animate-in">
 	<header class="hero">
-		<button class="back-link" onclick={() => goto('/search')}>← Back to Search</button>
+		<button class="back-link" onclick={() => goBack('/search')}>← Back</button>
 		<p class="eyebrow">TIDAL</p>
 		<h1>{mod?.title ?? (loading ? 'Loading…' : 'Discover')}</h1>
 		{#if mod}

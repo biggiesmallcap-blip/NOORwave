@@ -19,6 +19,8 @@
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import MediaRail from '$lib/components/ui/MediaRail.svelte';
+	import { goBack } from '$lib/navigation/back';
+	import { captureScroll, restoreScroll } from '$lib/navigation/scroll';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
@@ -57,9 +59,9 @@
 
 	// Phase 5B: back/forward state via SvelteKit snapshot.
 	export const snapshot: Snapshot<{ scrollY: number }> = {
-		capture: () => ({ scrollY: typeof window !== 'undefined' ? window.scrollY : 0 }),
+		capture: () => ({ scrollY: captureScroll() }),
 		restore: (saved) => {
-			requestAnimationFrame(() => window.scrollTo({ top: saved.scrollY, behavior: 'auto' }));
+			restoreScroll(saved.scrollY);
 		}
 	};
 
@@ -243,7 +245,7 @@
 </script>
 
 <div class="album-page">
-	<a class="back-link" href="/library">← Back to library</a>
+	<button class="back-link" type="button" onclick={() => goBack('/library')}>← Back</button>
 	{#if loading}
 		<div class="status-wrap"><Skeleton rows={4} label="Loading album" /></div>
 	{:else if error}

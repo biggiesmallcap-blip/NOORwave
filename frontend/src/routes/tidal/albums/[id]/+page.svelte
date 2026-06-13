@@ -2,6 +2,7 @@
 	import { page } from '$app/state';
 	import { api, type TidalDiscographyTrack } from '$lib/api/client';
 	import { playTidalTracksNow } from '$lib/stores/player';
+	import { goBack } from '$lib/navigation/back';
 	import TidalTrackRow from '$lib/components/TidalTrackRow.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
@@ -87,7 +88,7 @@
 </script>
 
 <div class="page">
-	<button class="back-link" type="button" onclick={() => history.back()}>← Back</button>
+	<button class="back-link" type="button" onclick={() => goBack('/search')}>← Back</button>
 	{#if loading}
 		<p class="status" role="status" aria-live="polite">Loading from TIDAL…</p>
 	{:else if error}

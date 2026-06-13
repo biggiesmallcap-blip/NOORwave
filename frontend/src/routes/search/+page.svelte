@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import { goto, beforeNavigate } from '$app/navigation'
   import type { Snapshot } from './$types'
+  import { captureScroll, restoreScroll } from '$lib/navigation/scroll'
   import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type SpotifyPlaylistSearchItem, type SpotifyTrackSearchItem, type SpotifyAlbumSearchItem, type SearchResults } from '$lib/api/client'
   import { cachedApi } from '$lib/cache/api_queries'
   import DiscoverShelves from '$lib/components/search/DiscoverShelves.svelte'
@@ -1245,7 +1246,7 @@
     if (results !== null && pendingRestoreScroll !== null) {
       const target = pendingRestoreScroll
       pendingRestoreScroll = null
-      requestAnimationFrame(() => window.scrollTo({ top: target, behavior: 'auto' }))
+      restoreScroll(target)
     }
   })
 
@@ -1258,7 +1259,7 @@
     capture: () => ({
       query,
       filterMode,
-      scrollY: typeof window !== 'undefined' ? window.scrollY : 0
+      scrollY: captureScroll()
     }),
     restore: (saved) => {
       filterMode = saved.filterMode
@@ -1268,8 +1269,8 @@
         // Re-trigger the search; scroll restore happens once results land.
         onInput()
       } else {
-        // No query - restore scroll directly on next frame.
-        requestAnimationFrame(() => window.scrollTo({ top: saved.scrollY, behavior: 'auto' }))
+        // No query - restore scroll directly.
+        restoreScroll(saved.scrollY)
       }
     }
   }

@@ -24,6 +24,7 @@
 	import { onMount } from 'svelte';
 	import { get } from 'svelte/store';
 	import type { Snapshot } from './$types';
+	import { captureScroll, restoreScroll } from '$lib/navigation/scroll';
 	import {
 		tracks, albums, artists as artistsStore, isLoading, isLoadingMore, totalTracks, totalAlbums,
 		sortBy, sortDir, viewMode, searchQuery,
@@ -192,8 +193,12 @@
 
 
 	onMount(() => {
-		void loadAlbums();
-		void loadTracks();
+		// Load only if the persistent stores are empty. On a back-nav the stores
+		// still hold every page the user scrolled through; reloading page 1 here
+		// would discard that depth and strand the snapshot's scroll restore at the
+		// bottom of the first page. A fresh visit starts empty and loads normally.
+		if (get(albums).length === 0) void loadAlbums();
+		if (get(tracks).length === 0) void loadTracks();
 		void loadBatchMeta();
 		void loadRecentTracks();
 		const unsubscribeWs = wsMessages.subscribe((messages) => {
@@ -292,6 +297,32 @@
 			if (data.artists.length < PAGE_SIZE) artistsExhausted = true;
 		} catch (err) {
 			console.error('Failed to load artists:', err);
+		} finally {
+			artistsLoading = false;
+		}
+	}
+
+	// Re-page artists up to `targetCount` in one restore pass (back-nav), so a
+	// deep scroll position is reachable. Pages sequentially like loadMoreArtists
+	// and fills the grid progressively; stops when the source is exhausted.
+	async function loadArtistsUpTo(targetCount: number) {
+		artistsLoading = true;
+		artistsExhausted = false;
+		try {
+			let acc: Artist[] = [];
+			for (;;) {
+				const data = await cachedApi.getArtists('name', 'asc', PAGE_SIZE, acc.length);
+				const seen = new Set(acc.map((a) => a.id));
+				acc = [...acc, ...data.artists.filter((a) => !seen.has(a.id))];
+				artists = acc;
+				if (data.artists.length < PAGE_SIZE) {
+					artistsExhausted = true;
+					break;
+				}
+				if (acc.length >= targetCount) break;
+			}
+		} catch (err) {
+			console.error('Failed to restore artists:', err);
 		} finally {
 			artistsLoading = false;
 		}
@@ -1517,7 +1548,7 @@
 		if (pendingRestoreScroll !== null) {
 			const target = pendingRestoreScroll
 			pendingRestoreScroll = null
-			requestAnimationFrame(() => window.scrollTo({ top: target, behavior: 'auto' }))
+			restoreScroll(target)
 		}
 	})
 
@@ -1529,6 +1560,16 @@
 		viewMode: 'grid' | 'list'
 		activeDecade: number | null
 		scrollY: number
+		// How many rows were loaded via infinite scroll, so a back-nav can
+		// re-page to the same depth before restoring scroll. Tracks/albums live
+		// in persistent stores; artists in component-local state.
+		loadedCount: number
+	}
+	function currentLoadedCount(): number {
+		if (activeTab === 'artists') return artists.length
+		if (activeTab === 'albums') return get(albums).length
+		if (activeTab === 'tracks' || activeTab === 'liked') return get(tracks).length
+		return 0
 	}
 	export const snapshot: Snapshot<LibrarySnapshot> = {
 		capture: () => ({
@@ -1538,7 +1579,8 @@
 			sortDir: get(sortDir),
 			viewMode: get(viewMode),
 			activeDecade,
-			scrollY: typeof window !== 'undefined' ? window.scrollY : 0
+			scrollY: captureScroll(),
+			loadedCount: currentLoadedCount()
 		}),
 		restore: (saved) => {
 			const validTabs = ['all', 'tracks', 'liked', 'albums', 'artists'] as const
@@ -1551,6 +1593,15 @@
 			if (saved.viewMode === 'grid' || saved.viewMode === 'list') viewMode.set(saved.viewMode)
 			activeDecade = saved.activeDecade
 			if (typeof saved.scrollY === 'number') pendingRestoreScroll = saved.scrollY
+			// Artists live in component-local state (not a store), and onMount only
+			// reloads albums/tracks. Without this, restoring into the artists tab on
+			// a back-nav shows an empty "No artists yet" state. Re-page to the depth
+			// the user had scrolled to so the saved scroll offset is reachable.
+			// Browse list only - the search effect repopulates a restored query.
+			if (activeTab === 'artists' && !saved.searchQuery?.trim() && artists.length === 0) {
+				const targetScroll = typeof saved.scrollY === 'number' ? saved.scrollY : 0
+				void loadArtistsUpTo(saved.loadedCount ?? PAGE_SIZE).then(() => restoreScroll(targetScroll))
+			}
 		}
 	}
 

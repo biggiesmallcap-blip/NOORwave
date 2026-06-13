@@ -46,6 +46,7 @@
 		type AutomixForecastRow
 	} from './automix_diagnostics';
 	import type { Snapshot } from './$types';
+	import { captureScroll, restoreScroll } from '$lib/navigation/scroll';
 
 	let saving = $state(false);
 	let draftCrossfade = $state(0);
@@ -56,9 +57,9 @@
 	let discoveryStatus = $state<DiscoveryStatus | null>(null);
 
 	export const snapshot: Snapshot<{ scrollY: number }> = {
-		capture: () => ({ scrollY: typeof window !== 'undefined' ? window.scrollY : 0 }),
+		capture: () => ({ scrollY: captureScroll() }),
 		restore: (saved) => {
-			requestAnimationFrame(() => window.scrollTo({ top: saved.scrollY, behavior: 'auto' }));
+			restoreScroll(saved.scrollY);
 		}
 	};
 
