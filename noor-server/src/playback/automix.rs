@@ -1171,7 +1171,13 @@ fn order_automix_candidates(
             .score
             .partial_cmp(&left.score)
             .unwrap_or(Ordering::Equal)
-            .then_with(|| left.track.title.cmp(&right.track.title))
+            // Score ties are common at the 0.05 floor. Break them on quality and
+            // freshness (higher fidelity, then less-played) rather than alphabetically
+            // by title, which systematically favoured early-titled tracks for no
+            // recommendation reason. id last only as a stable final key.
+            .then_with(|| right.track.fidelity_score.cmp(&left.track.fidelity_score))
+            .then_with(|| left.track.play_count.cmp(&right.track.play_count))
+            .then_with(|| left.track.id.cmp(&right.track.id))
     });
 
     match mode {
