@@ -219,6 +219,14 @@ impl PlaybackRuntimeHandle {
         self.send(PlaybackRuntimeCommand::Stop)
     }
 
+    /// Release the WASAPI exclusive device now (ahead of the idle grace) so the
+    /// WebView can play a video's audio in shared mode. No-op outside Windows
+    /// exclusive mode. Callers should pause playback first; the runtime
+    /// re-grabs exclusive on the next Resume/Play.
+    pub fn release_exclusive_now(&self) -> Result<()> {
+        self.send(PlaybackRuntimeCommand::ReleaseExclusiveNow)
+    }
+
     pub fn shutdown(&self) -> Result<()> {
         self.send(PlaybackRuntimeCommand::Shutdown)
     }
@@ -2259,6 +2267,28 @@ fn run_runtime_loop(
                     if let Some(engine) = state.drop_preview_engine.as_mut() {
                         if let Err(error) = engine.pause() {
                             report_runtime_command_error(&event_tx, "Pause", error);
+                        }
+                    }
+                }
+                PlaybackRuntimeCommand::ReleaseExclusiveNow => {
+                    // Yield the exclusive endpoint now so the WebView can play a
+                    // video in shared mode. Pause first (idempotent if already
+                    // paused) so the render thread isn't mid-fill when it drops
+                    // the device, then ask it to release ahead of the idle grace.
+                    if state.current_exclusive {
+                        if let Some(engine) = state.engine.as_mut() {
+                            let _ = engine.pause();
+                        }
+                        if let Some(engine) = state.fading_out_engine.as_mut() {
+                            let _ = engine.pause();
+                        }
+                        #[cfg(target_os = "windows")]
+                        {
+                            info!(
+                                "ReleaseExclusiveNow: dropping exclusive device on {} for shared-mode video playback",
+                                state.device_name
+                            );
+                            state.exclusive_sink.request_release();
                         }
                     }
                 }

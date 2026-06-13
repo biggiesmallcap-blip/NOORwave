@@ -34,15 +34,24 @@ describe('videos route contract', () => {
 	});
 
 	test('keeps video selection, stream, and context actions wired', () => {
-		expect(source).toContain('await fetchStream(video.tidal_id);');
+		// Playback is delegated to the persistent dock via the controller; the
+		// route picks a video and hands it to playVideo() with a play context.
+		expect(source).toContain('const ok = await playVideo(video, buildPlayContext(video));');
 		expect(source).toContain('void selectVideo(video);');
 		expect(source).toContain('async function loadMix(mixId: string, autoPlayFirst = false)');
 		expect(source).toContain('await loadMix(mixId, shouldPlayMix);');
 		expect(source).toContain('event.preventDefault();');
 		expect(source).toContain('event.stopPropagation();');
 		expect(source).toContain('buildArtistMenu({ tidal_id: selectedVideo.artist_id');
-		expect(source).toContain('<VideoPlayer');
 		expect(source).toContain('<VideoCard {video}');
 		expect(source).not.toContain('$:');
+	});
+
+	test('hands the hero placeholder to the persistent video dock', () => {
+		// The live <video> lives in VideoDock so audio survives navigation; the
+		// route only exposes an anchor the dock positions its player over.
+		expect(source).toContain('bind:this={stageAnchor}');
+		expect(source).toContain('videoStageAnchor.set(stageAnchor)');
+		expect(source).not.toContain('<VideoPlayer');
 	});
 });

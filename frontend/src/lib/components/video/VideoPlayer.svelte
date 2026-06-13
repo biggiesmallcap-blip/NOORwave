@@ -16,8 +16,10 @@
 		hasNext?: boolean;
 		upNextTitle?: string | null;
 		upNextArtist?: string | null;
+		variant?: 'full' | 'mini';
 		onEnded?: () => void;
 		onToggleAutoplay?: () => void;
+		onPlay?: () => void;
 		refreshStream?: () => Promise<string>;
 	};
 
@@ -32,8 +34,10 @@
 		hasNext = false,
 		upNextTitle = null,
 		upNextArtist = null,
+		variant = 'full',
 		onEnded,
 		onToggleAutoplay,
+		onPlay,
 		refreshStream,
 	}: Props = $props();
 
@@ -370,6 +374,7 @@
 	bind:this={container}
 	class="video-player"
 	class:fullscreen
+	class:mini={variant === 'mini'}
 	class:chrome-hidden={fullscreen && !chromeVisible && playing}
 	role="button"
 	aria-label="Video player"
@@ -388,6 +393,7 @@
 		onplay={() => {
 			playing = true;
 			void pauseAudioPlayback();
+			onPlay?.();
 		}}
 		onpause={() => (playing = false)}
 		onended={() => {
@@ -504,6 +510,32 @@
 		overflow: hidden;
 		background: #030305;
 		outline: none;
+	}
+
+	/* Mini (docked) variant: fill the dock's fixed box, no tall floor, tighter
+	   chrome so the small corner player stays usable. */
+	.video-player.mini {
+		min-height: 0;
+		height: 100%;
+		border-radius: 10px;
+	}
+
+	.video-player.mini .top-meta {
+		padding: 8px 10px 24px;
+	}
+
+	.video-player.mini .controls {
+		grid-template-columns: 32px 1fr;
+		gap: 6px;
+		padding: 22px 8px 8px;
+	}
+
+	.video-player.mini .time,
+	.video-player.mini .volume,
+	.video-player.mini .quality,
+	.video-player.mini .autoplay-pill,
+	.video-player.mini .icon-btn:not(.primary) {
+		display: none;
 	}
 
 	video {

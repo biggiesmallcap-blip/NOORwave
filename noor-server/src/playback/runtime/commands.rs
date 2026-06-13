@@ -10,6 +10,11 @@ pub enum PlaybackRuntimeCommand {
     Pause,
     Resume,
     Stop,
+    /// Drop the WASAPI exclusive device immediately (ahead of the idle grace)
+    /// so another app can take the endpoint in shared mode. Triggered when the
+    /// WebView needs to play a TIDAL video's audio while exclusive mode is on.
+    /// No-op outside Windows exclusive mode. The runtime re-grabs on next Play.
+    ReleaseExclusiveNow,
     /// Segment-aware seek (option C). The runtime's handler is the single
     /// decision point: in-buffer fast path, segment-restart transition, or
     /// rejection. `allow_segment_seek=false` preserves legacy "reject past
