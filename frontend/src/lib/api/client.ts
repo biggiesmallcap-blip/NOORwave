@@ -744,6 +744,10 @@ export interface TidalArtistProfile {
 	picture_url: string | null;
 	top_tracks: TidalDiscographyTrack[];
 	albums: TidalDiscographyAlbum[];
+	videos: TidalArtistVideo[];
+	similar_artists: TidalSimilarArtist[];
+	bio: TidalArtistBio | null;
+	available: boolean;
 }
 
 /** Minimal shape accepted by all ephemeral Tidal play functions */

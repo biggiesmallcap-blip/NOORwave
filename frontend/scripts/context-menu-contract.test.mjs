@@ -52,7 +52,7 @@ describe('context menu coverage contract', () => {
 
 	test('tidal-only album and artist page rows use tidal track menu builder', () => {
 		const albumPage = readFileSync('src/routes/albums/[id]/+page.svelte', 'utf8');
-		const artistPage = readFileSync('src/routes/artists/[id]/+page.svelte', 'utf8');
+		const artistPage = readFileSync('src/routes/artists/ArtistDetail.svelte', 'utf8');
 
 		for (const source of [albumPage, artistPage]) {
 			expect(source).toContain('buildTidalTrackMenu');
@@ -122,7 +122,7 @@ describe('context menu coverage contract', () => {
 	});
 
 	test('artist page similar artists and fallback album rails use shared menus', () => {
-		const source = readFileSync('src/routes/artists/[id]/+page.svelte', 'utf8');
+		const source = readFileSync('src/routes/artists/ArtistDetail.svelte', 'utf8');
 
 		expect(source).toContain('buildArtistMenu');
 		expect(source).toContain('similarArtistMenu');

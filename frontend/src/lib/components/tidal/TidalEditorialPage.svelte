@@ -2,6 +2,7 @@
 	import { onDestroy, untrack } from 'svelte';
 	import { ApiError, api, type TidalHomeModule } from '$lib/api/client';
 	import { tidalStatus } from '$lib/stores/tidal';
+	import { goBack } from '$lib/navigation/back';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import TidalDiscoverShelves from '$lib/components/search/TidalDiscoverShelves.svelte';
 
@@ -15,6 +16,7 @@
 		emptyText?: string;
 		disconnectedText?: string;
 		errorText?: string;
+		backFallback?: string;
 	};
 
 	let {
@@ -25,6 +27,7 @@
 		emptyText = 'TIDAL returned no editorial modules right now.',
 		disconnectedText = 'Connect TIDAL to see this editorial page.',
 		errorText = 'Could not load this TIDAL page.',
+		backFallback = '/library',
 	}: Props = $props();
 
 	let modules = $state<TidalHomeModule[]>([]);
@@ -96,6 +99,7 @@
 <svelte:head><title>{title} . NOOR</title></svelte:head>
 
 <div class="page" data-tidal-editorial-page={pagePath}>
+	<button class="back-link" type="button" onclick={() => goBack(backFallback)}>&lt; Back</button>
 	<PageHeader {eyebrow} {title} {subtitle} variant="editorial" />
 
 	{#if viewState === 'loading'}
@@ -119,6 +123,23 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-5);
+	}
+
+	.back-link {
+		align-self: flex-start;
+		background: none;
+		border: none;
+		padding: 0;
+		font: inherit;
+		font-size: var(--font-size-sm);
+		color: var(--text-secondary);
+		cursor: pointer;
+	}
+
+	.back-link:hover,
+	.back-link:focus-visible {
+		color: var(--text-primary);
+		text-decoration: underline;
 	}
 
 	.muted-line {

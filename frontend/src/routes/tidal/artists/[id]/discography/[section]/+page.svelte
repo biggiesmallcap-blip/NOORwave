@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import ArtistDiscographySection from '../../../ArtistDiscographySection.svelte';
+	import ArtistDiscographySection from '../../../../../artists/ArtistDiscographySection.svelte';
 
 	type Section = 'tracks' | 'albums' | 'singles' | 'compilations';
 
@@ -11,8 +11,8 @@
 		return 'tracks';
 	}
 
-	let artistId = $derived(Number(page.params.id));
+	let tidalArtistId = $derived(Number(page.params.id));
 	let section = $derived(normalizeSection(page.params.section));
 </script>
 
-<ArtistDiscographySection source={{ kind: 'local', artistId }} {section} />
+<ArtistDiscographySection source={{ kind: 'tidal', tidalArtistId }} {section} />
