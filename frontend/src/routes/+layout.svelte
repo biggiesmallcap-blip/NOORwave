@@ -1283,7 +1283,8 @@
 
 	<aside class="sidebar">
 		<a href="/" class="brand" aria-label="NOORwave home">
-			<img class="brand-splash" src="/noor-logo-centered-transparent.svg" alt="NOORwave" />
+			<img class="brand-splash brand-splash-on-dark" src="/noor-logo-centered-transparent.svg" alt="NOORwave" />
+			<img class="brand-splash brand-splash-on-light" src="/noor-logo-centered-transparent-dark.svg" alt="NOORwave" />
 		</a>
 
 		<SidebarNav pathname={page.url.pathname} />
@@ -2409,6 +2410,10 @@
 		height: auto;
 		margin: 0 auto;
 	}
+	/* Original white wordmark on dark (default); dark-text recolour only on light. */
+	.brand-splash-on-light { display: none; }
+	:global([data-theme='light']) .brand-splash-on-light { display: block; }
+	:global([data-theme='light']) .brand-splash-on-dark { display: none; }
 
 	.sidebar-footer {
 		margin-top: auto;

@@ -126,7 +126,8 @@
 
 <div class="onboarding">
 	<div class="stack">
-		<img class="wordmark" src="/noor-logo-centered.svg" alt="NOORwave" />
+		<img class="wordmark wordmark-on-dark" src="/noor-logo-centered.svg" alt="NOORwave" />
+		<img class="wordmark wordmark-on-light" src="/noor-logo-centered-dark.svg" alt="NOORwave" />
 		<div class="card">
 		<div class="progress" role="tablist" aria-label="Onboarding steps">
 			{#each Array(5) as _, i}
@@ -316,6 +317,11 @@
 		height: auto;
 		filter: drop-shadow(0 12px 32px rgba(45, 212, 212, 0.18));
 	}
+	/* Original white wordmark on dark (the default theme); the dark-text recolour
+	 * only under [data-theme="light"]. Same artwork and animation. */
+	.stack .wordmark-on-light { display: none; }
+	:global([data-theme='light']) .stack .wordmark-on-light { display: block; }
+	:global([data-theme='light']) .stack .wordmark-on-dark { display: none; }
 	.step h1, .step h2 {
 		margin: 0;
 		font-family: var(--font-display);
