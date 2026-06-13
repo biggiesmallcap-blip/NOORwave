@@ -19,7 +19,7 @@ spotify-public = []
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "fs"] }
+tower-http = { version = "0.6", features = ["cors", "fs", "compression-gzip", "compression-br"] }
 
 # Database
 rusqlite = { version = "0.32", features = ["bundled", "serde_json"] }

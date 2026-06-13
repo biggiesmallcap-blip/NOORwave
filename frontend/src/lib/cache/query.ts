@@ -286,6 +286,26 @@ export class QueryCache {
 		this.entries.clear();
 	}
 
+	/// Remove persisted entries that belong to a DIFFERENT namespace than `namespace`.
+	/// `clear()` only drops in-memory entries, so without this a token/api-base change
+	/// would orphan every `noor.query.<oldns>.*` key in localStorage forever - a
+	/// permanent leak that also eats into the storage quota and can silently break
+	/// instant-paint once the quota is hit.
+	sweepForeignPersisted(namespace: string): void {
+		if (typeof localStorage === 'undefined') return;
+		const keepPrefix = `${PERSIST_PREFIX}${namespace}.`;
+		try {
+			const stale: string[] = [];
+			for (let index = 0; index < localStorage.length; index += 1) {
+				const key = localStorage.key(index);
+				if (key && key.startsWith(PERSIST_PREFIX) && !key.startsWith(keepPrefix)) {
+					stale.push(key);
+				}
+			}
+			for (const key of stale) localStorage.removeItem(key);
+		} catch {}
+	}
+
 	private getEntry<T>(key: string): CacheEntry<T> {
 		const existing = this.entries.get(key);
 		if (existing) return existing as CacheEntry<T>;
@@ -348,7 +368,12 @@ export class QueryCache {
 		try {
 			const payload: PersistedEntry<T> = { version: 1, lastUpdated, data };
 			storage.setItem(persistKey(key, options.persist), JSON.stringify(payload));
-		} catch {}
+		} catch (error) {
+			// Quota exceeded (or storage disabled): the prior persisted value, if any,
+			// still hydrates, so a surface can silently keep painting stale content
+			// instead of failing loudly. Surface it rather than swallowing in silence.
+			console.warn(`[noor.cache] failed to persist "${key}"; instant-paint may degrade`, error);
+		}
 	}
 
 	private fetchEntry<T>(

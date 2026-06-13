@@ -45,7 +45,20 @@ pub(super) async fn get_home_releases(
 pub(super) async fn get_home_picks(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
+    const PICKS_TTL: std::time::Duration = std::time::Duration::from_secs(2 * 60 * 60);
     let state_guard = state.read().await;
+
+    // Serve from the in-process TTL cache when fresh. Avoids the ORDER BY RANDOM()
+    // full scan (and the top-played query) on every home remount / tab switch.
+    {
+        let cache = state_guard.home_picks_cache.lock().unwrap();
+        if let Some((computed_at, payload)) = cache.as_ref() {
+            if computed_at.elapsed() < PICKS_TTL {
+                return Ok(Json(payload.clone()));
+            }
+        }
+    }
+
     let db = &state_guard.db;
 
     // Get top tracks from listening history with variety
@@ -87,7 +100,7 @@ pub(super) async fn get_home_picks(
 
     let (top_tracks, genre_picks) = picks;
 
-    Ok(Json(json!({
+    let payload = json!({
         "top_picks": top_tracks.iter().take(10).map(|t| serde_json::json!({
             "id": t.id,
             "title": t.title,
@@ -100,7 +113,14 @@ pub(super) async fn get_home_picks(
         })).collect::<Vec<_>>(),
         "genre_variety": genre_picks,
         "source": "library_curation"
-    })))
+    });
+
+    {
+        let mut cache = state_guard.home_picks_cache.lock().unwrap();
+        *cache = Some((std::time::Instant::now(), payload.clone()));
+    }
+
+    Ok(Json(payload))
 }
 
 pub(super) async fn get_home_recommendations(

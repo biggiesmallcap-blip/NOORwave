@@ -9,7 +9,10 @@ describe('/analytics route load contract', () => {
 		expect(source).toContain("type AnalyticsLoadReason = 'initial' | 'window' | 'refresh';");
 		expect(source).toContain('const seq = ++loadSeq;');
 		expect(source).toContain('void loadSignals(\'window\', d);');
-		expect(source).toContain('const nextSignals = await api.getAnalyticsSignals(requestedDays);');
+		// Routed through the cache layer for instant-paint + stale-while-revalidate,
+		// with the initial range seeded synchronously from the persisted snapshot.
+		expect(source).toContain('const nextSignals = await cachedApi.getAnalyticsSignals(requestedDays);');
+		expect(source).toContain('cachedApi.analyticsSignalsQuery(untrack(() => days)).getSnapshot().data');
 		expect(source).toContain('if (seq !== loadSeq) return;');
 		expect(source).toContain("const debouncedWsRefresh = debounce(() => void loadSignals('refresh'), 1500);");
 		expect(source).toContain('loadSeq += 1;');

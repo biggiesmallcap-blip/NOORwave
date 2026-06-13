@@ -5,67 +5,77 @@
 	import { cachedApi } from '$lib/cache/api_queries';
 	import { playTidalMix } from '$lib/stores/player';
 	import { tidalStatus } from '$lib/stores/tidal';
-	import { getCachedMixes, putCachedMixes, clearCachedMixes } from '$lib/stores/tidal-mixes-cache';
 	import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 
 	type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
 
-	const cachedOnMount = getCachedMixes();
-	let mixes = $state<TidalMix[]>(cachedOnMount ?? []);
-	let viewState = $state<State>(cachedOnMount && cachedOnMount.length > 0 ? 'ready' : 'loading');
+	// Reactive, persisted query: hydrates the localStorage snapshot synchronously at
+	// init so the shelf paints last-known mixes with no skeleton, then revalidates in
+	// the background. Replaces the old in-memory-only cache that was wiped on restart.
+	const mixesQuery = cachedApi.tidalMixesQuery();
+	const seeded = mixesQuery.getSnapshot().data?.mixes ?? [];
+
+	let mixes = $state<TidalMix[]>(seeded);
+	let viewState = $state<State>(seeded.length > 0 ? 'ready' : 'loading');
+	let refreshing = $state(false);
+	let lastRefreshFailed = $state(false);
 	let errorMsg = $state<string>('');
-	let loadSeq = 0;
 
 	let audioMixes = $derived(mixes.filter((m) => !isMixVideo(m)));
 	let videoMixes = $derived(mixes.filter((m) => isMixVideo(m)));
 
-	// Skip the network on remount when we have warm cached mixes — the shelf
-	// renders synchronously from cache and stays static for the 6h TTL window.
-	onMount(() => {
-		if (!cachedOnMount || cachedOnMount.length === 0) void load();
-		return () => { loadSeq += 1; };
-	});
+	// The subscription is the sole writer of mixes/viewState. Svelte calls it
+	// immediately with the current (hydrated) state, then on every revalidate.
+	onMount(() => mixesQuery.subscribe((s) => {
+		refreshing = s.refreshing;
+		// 503 = TIDAL unreachable/disconnected. Check this BEFORE reading s.data: the
+		// SWR error shape keeps the prior data alongside the error. Keep cached mixes
+		// visible through a transient cold-boot blip (tokens not yet rehydrated); only
+		// show the connect prompt when there's nothing to fall back on. Flag it so a
+		// later connect transition forces a fresh fetch. Never drop the persisted copy
+		// here - that would turn a transient 503 into a skeleton on the next launch.
+		if (s.error instanceof ApiError && s.error.status === 503) {
+			lastRefreshFailed = true;
+			if (mixes.length === 0) viewState = 'disconnected';
+			return;
+		}
+		if (s.data) {
+			lastRefreshFailed = false;
+			mixes = s.data.mixes ?? [];
+			if (mixes.length > 0) viewState = 'ready';
+			else if (!s.loading && !s.refreshing) viewState = 'empty';
+			return;
+		}
+		if (s.error && !s.loading) {
+			lastRefreshFailed = true;
+			viewState = 'error';
+			errorMsg = s.error instanceof Error ? s.error.message : 'Failed to load mixes';
+			return;
+		}
+		if (s.loading) viewState = 'loading';
+	}));
 
-	// Re-fetch when TIDAL transitions to connected. Covers two cases:
-	//   1. Cold-boot race — shelf mounted and 503'd before tidal_status had
-	//      rehydrated tokens from disk; without this it stayed "disconnected"
-	//      until the user navigated away and back.
-	//   2. Live connect — user opens Settings, connects TIDAL, returns home;
-	//      the shelf updates in place instead of needing a refresh.
-	// Untrack viewState so the effect only re-fires on tidalStatus transitions.
-	// Reading viewState directly would create a fetch loop when load() ends in
-	// disconnected/empty/error state.
+	// Re-fetch when TIDAL transitions to connected: the cold-boot race (initial
+	// revalidate 503'd before tokens rehydrated) and live connect from Settings. Skip
+	// when we're already showing fresh mixes (the init-time revalidate covers that),
+	// but force a refresh if the last attempt failed. untrack so the effect only
+	// re-runs on tidalStatus changes - reading viewState/mixes would loop.
 	$effect(() => {
 		if ($tidalStatus !== 'connected') return;
 		const cur = untrack(() => viewState);
-		if (cur !== 'loading' && cur !== 'ready') {
-			void load();
+		const haveMixes = untrack(() => mixes).length > 0;
+		const failed = untrack(() => lastRefreshFailed);
+		if (cur !== 'ready' || !haveMixes || failed) {
+			void mixesQuery.refresh().catch(() => {});
 		}
 	});
 
-	async function load() {
-		const seq = ++loadSeq;
-		viewState = 'loading';
+	function retry() {
 		errorMsg = '';
-		try {
-			const data = await cachedApi.getTidalMixes();
-			if (seq !== loadSeq) return;
-			const nextMixes = data.mixes ?? [];
-			mixes = nextMixes;
-			if (nextMixes.length > 0) putCachedMixes(nextMixes);
-			viewState = nextMixes.length > 0 ? 'ready' : 'empty';
-		} catch (e) {
-			if (seq !== loadSeq) return;
-			if (e instanceof ApiError && e.status === 503) {
-				clearCachedMixes();
-				viewState = 'disconnected';
-			} else {
-				viewState = 'error';
-				errorMsg = e instanceof Error ? e.message : 'Failed to load mixes';
-			}
-		}
+		viewState = mixes.length > 0 ? 'ready' : 'loading';
+		void mixesQuery.refresh().catch(() => {});
 	}
 
 	// Belt-and-suspenders: trust the server field but also check title/mix_type
@@ -145,7 +155,7 @@
 			<p class="eyebrow">TIDAL</p>
 			<h2>Music Mixes</h2>
 		</div>
-		{#if viewState === 'loading'}
+		{#if viewState === 'loading' || refreshing}
 			<span class="loading-indicator">Loading…</span>
 		{/if}
 	</div>
@@ -164,7 +174,7 @@
 	{:else if viewState === 'error'}
 		<p class="muted-line">
 			Couldn't load your mixes{errorMsg ? `: ${errorMsg}` : '.'}
-			<button class="inline-link" onclick={load}>Retry</button>
+			<button class="inline-link" onclick={retry}>Retry</button>
 		</p>
 	{/if}
 </section>

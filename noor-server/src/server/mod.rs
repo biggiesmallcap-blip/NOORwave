@@ -16,6 +16,7 @@ use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Notify;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -100,7 +101,14 @@ pub async fn start(state: SharedState, addr: &str) -> Result<()> {
             require_token,
         ));
 
-    let app = public.merge(protected).layer(cors);
+    // Compress responses (gzip/brotli, negotiated via Accept-Encoding). Large JSON
+    // payloads - library lists, the ~100KB genre galaxy snapshot, recommendations -
+    // shrink 40-60% on the wire. tower-http's default predicate skips already-
+    // compressed content types (images, etc.), so artwork/audio aren't recompressed.
+    let app = public
+        .merge(protected)
+        .layer(cors)
+        .layer(CompressionLayer::new());
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(
