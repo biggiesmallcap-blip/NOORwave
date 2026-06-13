@@ -3636,6 +3636,39 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
 
     // ── Stage 2: aggregate signals into indexed temp tables ──────────────────
 
+    // Genre rarity (IDF). A genre covering most of the library carries almost no
+    // similarity signal - knowing two tracks are both "Hip-Hop" in a hip-hop-heavy
+    // library says little - while a niche genre is a strong cluster. Weight each
+    // shared genre by ln(total_tracks / members) so rare-genre matches dominate
+    // broad ones; a genre covering the whole library weighs 0. Computed in Rust and
+    // staged in a temp table because the bundled SQLite has no ln().
+    let total_tracks: i64 = conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))?;
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS _genre_idf;
+         CREATE TEMP TABLE _genre_idf (genre_id INTEGER PRIMARY KEY, weight REAL NOT NULL);",
+    )?;
+    if total_tracks > 0 {
+        let genre_sizes = {
+            let mut stmt = conn.prepare(
+                "SELECT genre_id, COUNT(DISTINCT track_id) FROM track_genres GROUP BY genre_id",
+            )?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let mut insert =
+            conn.prepare("INSERT INTO _genre_idf (genre_id, weight) VALUES (?1, ?2)")?;
+        for (genre_id, members) in genre_sizes {
+            let weight = if members > 0 {
+                (total_tracks as f64 / members as f64).ln().max(0.0)
+            } else {
+                0.0
+            };
+            insert.execute(params![genre_id, weight])?;
+        }
+    }
+
     conn.execute_batch(
         "
         DROP TABLE IF EXISTS _co_listen;
@@ -3655,9 +3688,10 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
 
         DROP TABLE IF EXISTS _genre_shared;
         CREATE TEMP TABLE _genre_shared AS
-        SELECT a.track_id AS ta, b.track_id AS tb, COUNT(DISTINCT a.genre_id) AS shared
+        SELECT a.track_id AS ta, b.track_id AS tb, SUM(w.weight) AS shared
         FROM track_genres a
         JOIN track_genres b ON b.genre_id = a.genre_id AND b.track_id > a.track_id
+        JOIN _genre_idf w ON w.genre_id = a.genre_id
         GROUP BY a.track_id, b.track_id;
         CREATE INDEX _genre_shared_idx ON _genre_shared(ta, tb);
 
@@ -3704,16 +3738,19 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
         [],
     )?;
 
-    // genre_proximity: shared genres / max genres on any single track
-    conn.execute("
+    // genre_proximity: summed genre rarity for the pair, normalized by the highest
+    // summed rarity across all pairs, so two tracks sharing rare genres score near
+    // 1 and two sharing only a broad genre score near 0.
+    conn.execute(
+        "
         UPDATE _track_similarity_build SET genre_proximity = COALESCE((
-            SELECT CAST(gs.shared AS REAL) / NULLIF(
-                (SELECT MAX(c) FROM (SELECT COUNT(DISTINCT genre_id) AS c FROM track_genres GROUP BY track_id)),
-                0)
+            SELECT gs.shared / NULLIF((SELECT MAX(shared) FROM _genre_shared), 0)
             FROM _genre_shared gs
             WHERE gs.ta = _track_similarity_build.track_a AND gs.tb = _track_similarity_build.track_b
         ), 0)
-    ", [])?;
+    ",
+        [],
+    )?;
 
     // duration_proximity: 1 - |dur_a - dur_b| / 180s, clamped 0-1
     conn.execute(
@@ -3773,6 +3810,7 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
         DROP TABLE IF EXISTS _co_listen;
         DROP TABLE IF EXISTS _genre_shared;
         DROP TABLE IF EXISTS _track_year;
+        DROP TABLE IF EXISTS _genre_idf;
     ",
     )?;
 
@@ -7136,6 +7174,76 @@ mod tests {
             },)
                 .is_err(),
             "temporary build table should be dropped after swap"
+        );
+    }
+
+    #[test]
+    fn compute_track_similarity_weights_rare_genres_above_broad_ones() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("foreign keys");
+        schema::run_migrations(&conn).expect("migrations");
+        // Distinct artists, no albums or listens, so genre_proximity is the only
+        // non-zero signal and the test isolates the IDF weighting.
+        for id in 1..=12 {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (?1, ?2)",
+                params![id, format!("A{id}")],
+            )
+            .expect("artist");
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, duration_ms) VALUES (?1, ?2, ?1, 180000)",
+                params![id, format!("T{id}")],
+            )
+            .expect("track");
+        }
+        conn.execute(
+            "INSERT INTO genres (id, name, slug) VALUES (1,'Broad','broad'),(2,'Rare','rare')",
+            [],
+        )
+        .expect("genres");
+        // Broad genre covers 10 of 12 tracks; rare genre covers 2.
+        for id in 1..=10 {
+            conn.execute(
+                "INSERT INTO track_genres (track_id, genre_id) VALUES (?1, 1)",
+                params![id],
+            )
+            .expect("broad genre");
+        }
+        conn.execute(
+            "INSERT INTO track_genres (track_id, genre_id) VALUES (11,2),(12,2)",
+            [],
+        )
+        .expect("rare genre");
+
+        compute_track_similarity(&conn).expect("compute similarity");
+
+        let broad: f64 = conn
+            .query_row(
+                "SELECT genre_proximity FROM track_similarity WHERE track_a=1 AND track_b=2",
+                [],
+                |row| row.get(0),
+            )
+            .expect("broad pair");
+        let rare: f64 = conn
+            .query_row(
+                "SELECT genre_proximity FROM track_similarity WHERE track_a=11 AND track_b=12",
+                [],
+                |row| row.get(0),
+            )
+            .expect("rare pair");
+
+        assert!(
+            rare > broad,
+            "rare-genre pair ({rare}) should outscore broad-genre pair ({broad})"
+        );
+        assert!(
+            broad > 0.0,
+            "a broad-genre pair still carries some proximity"
+        );
+        assert!(
+            (rare - 1.0).abs() < 1e-9,
+            "the rarest shared-genre pair normalizes to 1.0"
         );
     }
 
