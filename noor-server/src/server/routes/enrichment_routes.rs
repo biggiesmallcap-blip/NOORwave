@@ -9,8 +9,18 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::warn;
 
+#[derive(Deserialize, Default)]
+pub(super) struct StartEnrichmentParams {
+    /// Re-check tracks that already carry MusicBrainz genres so the corrected
+    /// scorer recomputes their confidence (write_genres replaces in place). Only
+    /// MB-tagged tracks are re-queued, not the whole library.
+    #[serde(default)]
+    recheck: bool,
+}
+
 pub(super) async fn start_musicbrainz_enrichment(
     State(state): State<SharedState>,
+    Query(params): Query<StartEnrichmentParams>,
 ) -> Result<Json<Value>, StatusCode> {
     use std::sync::atomic::Ordering;
 
@@ -25,6 +35,18 @@ pub(super) async fn start_musicbrainz_enrichment(
 
     if running.load(Ordering::SeqCst) {
         return Ok(Json(json!({ "status": "already_running" })));
+    }
+
+    if params.recheck {
+        let g = state.read().await;
+        g.db.with_conn(|conn| {
+            Ok(conn.execute(
+                "DELETE FROM musicbrainz_checked WHERE track_id IN
+                    (SELECT DISTINCT track_id FROM track_genres WHERE source = 'musicbrainz')",
+                [],
+            )?)
+        })
+        .map_err(|_: anyhow::Error| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
 
     let total: usize = {
