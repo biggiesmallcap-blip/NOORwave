@@ -13,14 +13,16 @@
 </p>
 
 <p align="center">
-  <a href="../../releases/latest">Download latest release</a> &middot;
+  <a href="../../releases/latest">Download</a> &middot;
   <a href="#run-from-source">Run from source</a> &middot;
+  <a href="#configuration">Configuration</a> &middot;
+  <a href="#phone-remote">Phone remote</a> &middot;
   <a href="#release-checklist">Release checklist</a>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-2024-orange?style=flat-square&logo=rust" alt="Rust"/>
-  <img src="https://img.shields.io/badge/SvelteKit-5-ff3e00?style=flat-square&logo=svelte" alt="SvelteKit"/>
+  <img src="https://img.shields.io/badge/Svelte-5-ff3e00?style=flat-square&logo=svelte" alt="Svelte 5"/>
   <img src="https://img.shields.io/badge/Tauri-2-ffc131?style=flat-square&logo=tauri" alt="Tauri"/>
   <img src="https://img.shields.io/badge/SQLite-3-003b57?style=flat-square&logo=sqlite" alt="SQLite"/>
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT"/>
@@ -30,7 +32,7 @@
 
 NOORwave is a desktop TIDAL player built around a simple idea: your streaming library should behave like a fast local music collection.
 
-It syncs your TIDAL library into SQLite, gives you a real desktop app with tray and media-key support, adds lossless playback controls, and lets you shape the queue with search, radio, automix, DJ profiles, and a phone remote. The backend runs locally on your machine, so the app can stay quick, inspectable, and useful even when the library gets large.
+It syncs your TIDAL library into SQLite, gives you a real desktop app with tray and media-key support, adds lossless playback controls, and lets you shape the queue with search, radio, automix, DJ profiles, and a phone remote. Everything runs on your own machine. A small Rust server (`noor-server`) owns the database, audio engine, and integrations; a Tauri desktop shell (`noor-app`) wraps the SvelteKit UI and launches that server for you.
 
 ## Product Tour
 
@@ -77,7 +79,7 @@ NOORwave is for people who like TIDAL's catalog but want a better command center
 - **Playback is treated as the product.** Lossless streaming, DASH seek behavior, gapless transitions, crossfade, media keys, tray controls, and Windows WASAPI exclusive mode are built into the core player.
 - **The queue is yours.** Play next, append, reorder, save, undo clear, shuffle by intent, inspect radio reasons, and keep automix from fighting your manual choices.
 - **DJ mode is a control surface, not a gimmick.** Profiles, harmonic matching, BPM and energy awareness, transition planning, and automix controls are there for shaping a session, not just filling silence.
-- **The phone remote makes it practical.** Open `/remote` from a phone on the LAN and control playback, queue, search, library pages, sleep timer, and track actions from the couch.
+- **The phone remote makes it practical.** Open `/remote` from a phone on the same network and drive playback, queue, search, library pages, sleep timer, and track actions from the couch.
 
 The point is not every integration NOORwave can talk to. The point is a faster, more controllable TIDAL setup for people who actively listen, build queues, and care how playback moves from one track to the next.
 
@@ -102,25 +104,100 @@ Prerequisites:
 - Rust stable
 - Node 24
 - pnpm 10
-- A TIDAL account
+- A TIDAL account (you sign in from inside the app)
+
+The fastest path is the dev launcher, which starts the backend and the frontend dev server together (Windows Terminal split panes if available):
 
 ```powershell
-# Backend
+.\scripts\dev.ps1
+```
+
+Or run the two processes yourself:
+
+```powershell
+# Backend (Axum server, SQLite, audio engine)
 cargo run -p noor-server
 
-# Frontend dev server
+# Frontend dev server (separate terminal)
 cd frontend
 pnpm install
 pnpm dev
 ```
 
-Open `http://127.0.0.1:17600` for the bundled app or the Vite URL printed by `pnpm dev` during frontend work.
+Where to open it:
 
-For the desktop shell:
+- **Frontend dev server:** `http://127.0.0.1:17601` (hot reload, talks to the backend on 17600).
+- **Backend-served UI:** `http://127.0.0.1:17600` (the production build that `noor-server` serves directly).
+
+On first run the server prints an access PIN in a startup banner ("NOOR access token: ..."). On `127.0.0.1` the UI fetches that PIN for you, so you do not need to type it. You only need it on a [phone or other device](#phone-remote). You can always read it again in Settings -> Access PIN.
+
+For the full desktop shell (it launches `noor-server` for you, adds the tray, media keys, and updater):
 
 ```powershell
 cargo run -p noor-app
 ```
+
+## Configuration
+
+### Ports
+
+| Port | What | Default | Override |
+|---|---|---|---|
+| Backend | `noor-server` HTTP + WebSocket, and the `/remote` PWA | `17600` | `NOOR_PORT` |
+| Dev server | Vite frontend during `pnpm dev` | `17601` | `NOOR_DEV_PORT` |
+
+Two things worth knowing:
+
+- The backend port is **baked into the frontend at build time**. If you change `NOOR_PORT`, rebuild the frontend (`pnpm run build`) so the UI points at the right port.
+- The dev-server port is the only origin the backend trusts for CORS in dev. Keep `NOOR_DEV_PORT` in sync on both sides; it uses `strictPort`, so a busy port fails loudly instead of silently drifting to an untrusted one.
+
+### Bind address
+
+By default the server listens on `127.0.0.1` (loopback only), so nothing outside your machine can reach it. To expose it on your LAN (needed for the [phone remote](#phone-remote)), pick one:
+
+- Desktop app: tray icon -> **Network access** (restarts the server bound to `0.0.0.0`).
+- Standalone server: pass `--host`, which forces `0.0.0.0`.
+- Either: set `NOOR_ADDR=0.0.0.0:17600`.
+
+Precedence, highest first: `NOOR_ADDR` > `--host` > the saved Network-access / `host_mode` setting > `127.0.0.1`.
+
+### Environment variables
+
+All optional. The app ships with working defaults (including built-in TIDAL credentials).
+
+| Variable | Purpose |
+|---|---|
+| `NOOR_PORT` | Backend listen port (default `17600`). Rebuild the frontend after changing. |
+| `NOOR_DEV_PORT` | Vite dev-server port (default `17601`). Trusted CORS origin in dev. |
+| `NOOR_ADDR` | Full bind address `host:port`. Overrides `NOOR_PORT` and `--host`. Use `0.0.0.0:17600` for LAN. |
+| `NOOR_DB` | Path to the SQLite database file. |
+| `NOOR_DATA_DIR` | Base data directory (database, token) for installed builds. |
+| `NOOR_WWW_DIR` | Directory of the built frontend to serve. |
+| `LASTFM_API_KEY` / `LASTFM_API_SECRET` | Last.fm enrichment; the secret also enables scrobbling. |
+| `TIDAL_CLIENT_ID` / `TIDAL_CLIENT_SECRET` | Override the built-in TIDAL app credentials. |
+| `TIDAL_PKCE_CLIENT_ID` / `TIDAL_PKCE_CLIENT_SECRET` | Override the TIDAL PKCE login credentials. |
+| `DISCOGS_TOKEN` / `DISCOGS_USER_AGENT` | Discogs label and release metadata. |
+| `SPORTIFY_API_BASE_URL` | Override the Sportify metadata proxy base URL. |
+
+A handful of cache-tuning knobs (`DISCOVERY_CACHE_TTL_DAYS`, `RESOLVE_CACHE_TTL_DAYS`, `RESOLVE_RETRY_AFTER_DAYS`, `RESOLVE_EAGER_N`, `RESOLVE_BULK_CONCURRENCY`) exist for advanced tuning; defaults are fine for normal use.
+
+## Phone Remote
+
+The remote is a small web app at `/remote`, served by `noor-server` on the same port as everything else (no extra service, no extra port). It controls transport, queue, search, and library browsing from a phone on the same network.
+
+Setup, once per device:
+
+1. **Make sure the server is reachable on your LAN.** Desktop app: tray icon -> **Network access**. Standalone server: run with `--host`. (See [Bind address](#bind-address).)
+2. **Find the desktop's LAN IP**, for example `192.168.1.42`. On Windows: `ipconfig`.
+3. **On the phone (same Wi-Fi), open** `http://<desktop-LAN-IP>:17600/remote`, for example `http://192.168.1.42:17600/remote`.
+4. **Enter the access PIN** when prompted. Get the 6-digit PIN from the desktop in Settings -> Access PIN. The phone caches it, so you only enter it once.
+5. Optional: use your browser's "Add to Home Screen" to install it as a standalone PWA.
+
+Notes:
+
+- Windows may show a firewall prompt the first time the server binds to the LAN. Allow it on private networks.
+- Regenerating the PIN (Settings -> Access PIN) disconnects every device; they each have to re-enter the new PIN.
+- There is no QR pairing yet. You type the URL and the PIN by hand.
 
 ## Build And Verify
 
@@ -149,14 +226,19 @@ cd ..
 ## Architecture
 
 ```text
-noor-app       Tauri 2 desktop shell, tray, media keys, updater
+noor-app       Tauri 2 desktop shell, tray, media keys, updater, sidecar manager
 noor-server    Rust Axum server, SQLite, playback, integrations, WebSocket events
-frontend       SvelteKit 2 and Svelte 5 UI, static build served by noor-server
+frontend       SvelteKit 2 + Svelte 5 UI, static build served by noor-server
 docs           Specs, release notes, inventories, design memory
-scripts        Build, smoke, probe, and data utilities
+scripts        Build, dev launcher, smoke, probe, and data utilities
 ```
 
-The Tauri shell starts `noor-server` as a sidecar. The same server also serves the LAN phone remote at `/remote`, which is why the backend stays a real HTTP server instead of being collapsed into Tauri IPC.
+How the pieces connect:
+
+- **Sidecar model.** The Tauri shell spawns `noor-server` as a child process, waits for `GET /api/ping`, then opens the WebView. Shutdown goes through `POST /api/shutdown` before a force kill.
+- **One server, two front doors.** The same `noor-server` serves the desktop UI and the LAN `/remote` PWA. That is why the backend stays a real HTTP server instead of collapsing into Tauri IPC.
+- **Auth.** A single shared bearer token (the access PIN) gates every protected route: `Authorization: Bearer <pin>` for `/api/*`, and `?token=<pin>` for the `/ws` WebSocket (browsers cannot set headers on WebSocket upgrades). On loopback the UI fetches the PIN automatically; other devices enter it once.
+- **Storage.** Everything lives in one local SQLite file (`noor.db`), next to the executable by default or wherever `NOOR_DB` / `NOOR_DATA_DIR` point.
 
 ## Current Status
 
