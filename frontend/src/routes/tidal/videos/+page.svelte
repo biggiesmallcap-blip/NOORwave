@@ -10,4 +10,5 @@
 	disconnectedText="Connect TIDAL to browse editorial videos."
 	errorText="Could not load TIDAL videos."
 	backFallback="/videos"
+	mediaKind="video"
 />

@@ -39,7 +39,7 @@ describe('videos route contract', () => {
 		expect(source).toContain('const ok = await playVideo(video, buildPlayContext(video));');
 		expect(source).toContain('void selectVideo(video);');
 		expect(source).toContain('async function loadMix(mixId: string, autoPlayFirst = false)');
-		expect(source).toContain('await loadMix(mixId, shouldPlayMix);');
+		expect(source).toContain('await loadMix(mixId, shouldPlayCollection);');
 		expect(source).toContain('event.preventDefault();');
 		expect(source).toContain('event.stopPropagation();');
 		expect(source).toContain('buildArtistMenu({ tidal_id: selectedVideo.artist_id');

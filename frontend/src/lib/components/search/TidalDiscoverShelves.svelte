@@ -14,12 +14,26 @@
 	import { buildTidalTrackMenu } from '$lib/player/track_menu';
 	import { tidalHomeItemToPlayable } from '$lib/utils/track';
 
-	let { modules, onViewAll }: {
+	let { modules, onViewAll, mediaKind = 'audio' }: {
 		modules: TidalHomeModule[];
 		onViewAll?: (mod: TidalHomeModule) => void;
+		mediaKind?: 'audio' | 'video';
 	} = $props();
 
 	function handleItemClick(item: TidalHomeItem) {
+		// On the editorial video page every item is a music video (kind 'track')
+		// or a video playlist (kind 'playlist'). Route both to the video player
+		// instead of the audio engine, which is what played the song instead.
+		if (mediaKind === 'video') {
+			if (item.kind === 'track') {
+				void goto(`/videos?videoId=${encodeURIComponent(item.id)}`);
+				return;
+			}
+			if (item.kind === 'playlist') {
+				void goto(`/videos?playlistId=${encodeURIComponent(item.id)}&play=1`);
+				return;
+			}
+		}
 		if (item.kind === 'track') {
 			void playTidalTrackNow(tidalHomeItemToPlayable(item));
 			return;
@@ -76,6 +90,15 @@
 	function handleItemContextMenu(event: MouseEvent, item: TidalHomeItem) {
 		event.preventDefault();
 		event.stopPropagation();
+		if (mediaKind === 'video') {
+			const label = item.kind === 'playlist' ? 'Play video playlist' : 'Play video';
+			openContextMenu(
+				event,
+				[{ label, icon: '▶', onSelect: () => handleItemClick(item) }],
+				item.title
+			);
+			return;
+		}
 		if (item.kind === 'track') {
 			openContextMenu(event, buildTidalTrackMenu(tidalHomeItemToPlayable(item)), item.title);
 			return;
@@ -104,6 +127,7 @@
 	}
 
 	function ariaLabelFor(item: TidalHomeItem): string {
+		if (mediaKind === 'video') return `Play video ${item.title}`;
 		if (item.kind === 'album') return `Open album ${item.title}`;
 		return `Play ${item.title}`;
 	}
@@ -130,7 +154,7 @@
 			<div
 				class="track-row"
 				title={item.artist_name ? `${item.title} - ${item.artist_name}` : item.title}
-				aria-label={`Play ${item.title}`}
+				aria-label={ariaLabelFor(item)}
 				onclick={() => handleItemClick(item)}
 				onkeydown={(e) => handleItemKeydown(e, item)}
 				oncontextmenu={(e) => handleItemContextMenu(e, item)}
@@ -146,7 +170,7 @@
 						fallbackText={fallbackGlyph(item.kind)}
 						decorative={true}
 					/>
-					<PlayOverlay position="center" size="sm" label={`Play ${item.title}`} />
+					<PlayOverlay position="center" size="sm" label={ariaLabelFor(item)} />
 				</div>
 				<div class="meta">
 					<span class="title">{item.title}</span>

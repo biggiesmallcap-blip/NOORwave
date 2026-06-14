@@ -17,6 +17,7 @@
 		disconnectedText?: string;
 		errorText?: string;
 		backFallback?: string;
+		mediaKind?: 'audio' | 'video';
 	};
 
 	let {
@@ -28,6 +29,7 @@
 		disconnectedText = 'Connect TIDAL to see this editorial page.',
 		errorText = 'Could not load this TIDAL page.',
 		backFallback = '/library',
+		mediaKind = 'audio',
 	}: Props = $props();
 
 	let modules = $state<TidalHomeModule[]>([]);
@@ -105,7 +107,7 @@
 	{#if viewState === 'loading'}
 		<p class="muted-line">Loading {title}...</p>
 	{:else if viewState === 'ready'}
-		<TidalDiscoverShelves {modules} />
+		<TidalDiscoverShelves {modules} {mediaKind} />
 	{:else if viewState === 'empty'}
 		<p class="muted-line">{emptyText} <button class="inline-link" onclick={() => void load()}>Retry</button></p>
 	{:else if viewState === 'disconnected'}
