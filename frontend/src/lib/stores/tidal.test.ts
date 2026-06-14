@@ -14,7 +14,7 @@ describe('TIDAL sync requests', () => {
 		await startTidalSync();
 
 		expect(fetch).toHaveBeenCalledWith(
-			'http://localhost:3334/api/tidal/sync',
+			'http://localhost:17600/api/tidal/sync',
 			expect.objectContaining({ method: 'POST' })
 		);
 	});
@@ -26,7 +26,7 @@ describe('TIDAL sync requests', () => {
 		await startTidalSync('full');
 
 		expect(fetch).toHaveBeenCalledWith(
-			'http://localhost:3334/api/tidal/sync?mode=full',
+			'http://localhost:17600/api/tidal/sync?mode=full',
 			expect.objectContaining({ method: 'POST' })
 		);
 	});

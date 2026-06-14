@@ -15,8 +15,8 @@ describe('parseSmokeOptions', () => {
 		const options = parseSmokeOptions([]);
 
 		expect(options.phase).toBe('full');
-		expect(options.frontend).toBe('http://localhost:5173');
-		expect(options.backend).toBe('http://localhost:3334');
+		expect(options.frontend).toBe('http://localhost:17601');
+		expect(options.backend).toBe('http://localhost:17600');
 		expect(options.viewport).toEqual({ width: 1920, height: 1080 });
 		expect(options.headless).toBe(true);
 		expect(options.keepOpen).toBe(false);

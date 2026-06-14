@@ -28,9 +28,6 @@ impl SidecarState {
 }
 
 const MAX_LOG_BYTES: u64 = 50 * 1024 * 1024;
-const SERVER_PING_URL: &str = "http://127.0.0.1:3334/api/ping";
-const SERVER_SETUP_TOKEN_URL: &str = "http://127.0.0.1:3334/api/setup/token";
-const SERVER_SHUTDOWN_URL: &str = "http://127.0.0.1:3334/api/shutdown";
 const READY_REQUEST_TIMEOUT_MS: u64 = 500;
 
 fn ready_http_client() -> Option<reqwest::blocking::Client> {
@@ -59,7 +56,7 @@ fn should_shutdown_stale_server_before_spawn(has_owned_child: bool, server_ready
 
 fn localhost_server_is_ready(client: &reqwest::blocking::Client) -> bool {
     client
-        .get(SERVER_PING_URL)
+        .get(crate::server_url::api("ping"))
         .send()
         .is_ok_and(|resp| resp.status().is_success())
 }
@@ -88,7 +85,7 @@ fn shutdown_stale_server_before_spawn(state: &Arc<SidecarState>) {
     ) {
         return;
     }
-    let _ = client.post(SERVER_SHUTDOWN_URL).send();
+    let _ = client.post(crate::server_url::api("shutdown")).send();
     wait_until_localhost_server_stops(&client, Duration::from_millis(1500));
 }
 
@@ -151,7 +148,7 @@ pub fn kill_server(state: &Arc<SidecarState>) {
             .timeout(Duration::from_millis(1000))
             .build()
         {
-            let _ = client.post(SERVER_SHUTDOWN_URL).send();
+            let _ = client.post(crate::server_url::api("shutdown")).send();
         }
         // Give the server up to 2s to exit cleanly after the shutdown
         // signal. Poll try_wait in 50ms ticks — std::process has no
@@ -192,9 +189,9 @@ pub fn wait_for_ready(state: &Arc<SidecarState>) -> Option<String> {
     let client = ready_http_client()?;
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        if let Ok(resp) = client.get(SERVER_PING_URL).send() {
+        if let Ok(resp) = client.get(crate::server_url::api("ping")).send() {
             if resp.status().is_success() {
-                if let Ok(r) = client.get(SERVER_SETUP_TOKEN_URL).send() {
+                if let Ok(r) = client.get(crate::server_url::api("setup/token")).send() {
                     if let Ok(body) = r.json::<serde_json::Value>() {
                         let token = body["token"].as_str().map(|s| s.to_owned());
                         *state.server_token.lock().unwrap() = token.clone();

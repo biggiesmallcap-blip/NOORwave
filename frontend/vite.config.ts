@@ -9,7 +9,19 @@ const tauriConfig = JSON.parse(
 export default defineConfig({
 	plugins: [sveltekit()],
 	define: {
-		'import.meta.env.NOOR_APP_VERSION': JSON.stringify(tauriConfig.version ?? '0.0.0')
+		'import.meta.env.NOOR_APP_VERSION': JSON.stringify(tauriConfig.version ?? '0.0.0'),
+		// Backend listen port, baked at build time. Override with NOOR_PORT to match
+		// the server's NOOR_PORT/NOOR_ADDR. Defaults to 17600. `||` (not `??`) so an
+		// empty-string env var falls back instead of baking an empty port.
+		'import.meta.env.NOOR_PORT': JSON.stringify(process.env.NOOR_PORT || '17600')
+	},
+	server: {
+		// Dev-server port (replaces Vite's default 5173). Override with NOOR_DEV_PORT;
+		// keep it in sync with the server's NOOR_DEV_PORT, which trusts exactly this
+		// origin for CORS. strictPort: fail loudly rather than silently drift to
+		// 17602 — a drifted port is an untrusted origin and every API call 403s.
+		port: Number(process.env.NOOR_DEV_PORT) || 17601,
+		strictPort: true
 	},
 	build: {
 		// hls.js is dynamically imported by VideoPlayer.svelte and lands in its own

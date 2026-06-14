@@ -10,7 +10,7 @@ describe('video menu contracts', () => {
 	test('video open action resolves inside NOORwave instead of opening TIDAL externally', () => {
 		const open = vi.fn();
 		vi.stubGlobal('window', { open });
-		vi.stubGlobal('location', { origin: 'http://localhost:5173' });
+		vi.stubGlobal('location', { origin: 'http://localhost:17601' });
 
 		const items = buildVideoMenu({
 			tidal_id: 12345,

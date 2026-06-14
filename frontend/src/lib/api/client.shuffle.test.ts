@@ -90,7 +90,7 @@ describe('shuffle request payloads', () => {
 			}>;
 		};
 
-		expect(new URL(url, 'http://localhost:3334').pathname).toBe('/api/tidal/play-mix');
+		expect(new URL(url, 'http://localhost:17600').pathname).toBe('/api/tidal/play-mix');
 		expect(body.shuffle_mode).toBeUndefined();
 		expect(body.tracks).toHaveLength(45);
 		expect(body.tracks.map((track) => track.tidal_track_id)).toEqual(

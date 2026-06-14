@@ -6,7 +6,7 @@
 --
 -- Each section produces a small result set you can hand-compare against the
 -- corresponding section of the JSON response from
---   curl http://localhost:3334/api/analytics/signals?days=30 | jq
+--   curl http://localhost:17600/api/analytics/signals?days=30 | jq
 --
 -- The window throughout this file is 30 days. Edit the `30` literals in place
 -- to spot-check other windows. The branch decisions for the Phase 1 gate are
