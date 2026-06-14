@@ -802,11 +802,19 @@
 	let dragOverItemId = $state<number | null>(null);
 
 	function handleQueueDragStart(event: DragEvent, item: QueueItemType) {
+		if (item.is_pending === true) return;
 		dragItemId = item.id;
 		if (event.dataTransfer) {
 			event.dataTransfer.effectAllowed = 'move';
 			// Required for Firefox to actually start a drag.
 			event.dataTransfer.setData('text/plain', String(item.id));
+			// Drag the whole row as the ghost (not the bare grip glyph) so the
+			// preview reads as "moving this track", aligned under the cursor.
+			const row = event.currentTarget;
+			if (row instanceof HTMLElement && typeof event.dataTransfer.setDragImage === 'function') {
+				const rect = row.getBoundingClientRect();
+				event.dataTransfer.setDragImage(row, event.clientX - rect.left, event.clientY - rect.top);
+			}
 		}
 	}
 
@@ -1622,7 +1630,9 @@
 							class="queue-row"
 							title={isPending ? 'Resolving on TIDAL...' : undefined}
 							data-track-id={item.track.id}
+							draggable={!isPending}
 							oncontextmenu={(event) => openQueueRowMenu(item, event)}
+							ondragstart={(event) => handleQueueDragStart(event, item)}
 							ondragover={(event) => handleQueueDragOver(event, item)}
 							ondragleave={() => handleQueueDragLeave(item)}
 							ondrop={(event) => void handleQueueDrop(event, item)}
@@ -1639,13 +1649,7 @@
 								onclick={isPending ? undefined : () => void handleQueueTrackPlay(item)}
 								onkeydown={(event) => handleQueueTrackKeydown(item, event)}
 							></button>
-							<span
-								class="queue-grip"
-								aria-hidden="true"
-								title="Drag to reorder"
-								draggable={!isPending}
-								ondragstart={(event) => handleQueueDragStart(event, item)}
-							>⋮⋮</span>
+							<span class="queue-grip" aria-hidden="true" title="Drag to reorder">⋮⋮</span>
 							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
 								{#if isPending}
 									<div class="queue-art placeholder pending-art" title="Resolving track...">
@@ -2881,13 +2885,16 @@
 	}
 
 	.queue-row.dragging {
-		opacity: 0.55;
+		opacity: 0.4;
+		cursor: grabbing;
 	}
 
+	/* The dropped row lands at the target's index, i.e. above it, so the
+	   accent line sits on the target's top edge to read as "drops here". */
 	.queue-row.drag-over {
 		border-color: var(--accent-line);
-		background: color-mix(in srgb, var(--accent-soft) 70%, transparent);
-		box-shadow: 0 -2px 0 var(--accent-strong) inset;
+		background: color-mix(in srgb, var(--accent-soft) 55%, transparent);
+		box-shadow: inset 0 2px 0 var(--accent-strong);
 	}
 
 	.queue-row.pending {
