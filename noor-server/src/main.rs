@@ -366,9 +366,10 @@ fn resolve_bind_addr(db: &db::Database) -> String {
     {
         return addr;
     }
+    let port = server::noor_port();
     // --host flag forces 0.0.0.0
     if std::env::args().any(|a| a == "--host") {
-        return "0.0.0.0:3334".to_string();
+        return format!("0.0.0.0:{port}");
     }
     // DB preference (set by Tauri tray toggle or headless users)
     let host_mode = db
@@ -384,9 +385,9 @@ fn resolve_bind_addr(db: &db::Database) -> String {
         })
         .unwrap_or(false);
     if host_mode {
-        "0.0.0.0:3334".to_string()
+        format!("0.0.0.0:{port}")
     } else {
-        "127.0.0.1:3334".to_string()
+        format!("127.0.0.1:{port}")
     }
 }
 
@@ -1096,7 +1097,7 @@ async fn main() -> Result<()> {
             let s = state.read().await;
             (s.http_client.clone(), s.server_token.clone())
         };
-        let warm_port = addr.rsplit(':').next().unwrap_or("3334").to_string();
+        let warm_port = addr.rsplit(':').next().unwrap_or("17600").to_string();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             warm_home_caches(warm_http, warm_port, warm_token).await;

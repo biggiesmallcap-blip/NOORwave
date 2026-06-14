@@ -88,7 +88,7 @@
 	} from '$lib/desktop/update_state';
 
 	const SERVER_UNREACHABLE_MESSAGE =
-		'NOOR cannot reach the local server on port 3334, so it cannot verify your current TIDAL session.';
+		'NOOR cannot reach the local server, so it cannot verify your current TIDAL session.';
 	const APP_VERSION = String(import.meta.env.NOOR_APP_VERSION ?? '0.0.0');
 	const DISCOVERY_COMPLETION_REFRESH_DELAY_MS = 1000;
 	const DISCOVERY_COMPLETION_REFRESH_MAX_ATTEMPTS = 12;
@@ -2071,7 +2071,7 @@
 				{#if serverStatus === 'offline' && $tidalStatus !== 'connecting'}
 					<div class="auth-card glass">
 						<p class="page-copy">
-							NOOR cannot reach the backend on port 3334, so it cannot confirm whether your saved
+							NOOR cannot reach the backend, so it cannot confirm whether your saved
 							TIDAL session is still active.
 						</p>
 						<div class="action-row">

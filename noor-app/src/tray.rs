@@ -143,7 +143,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(token) = state.server_token.lock().unwrap().clone() {
                         let body = serde_json::json!({ "host_mode": new_mode });
                         let _ = reqwest::blocking::Client::new()
-                            .put("http://127.0.0.1:3334/api/server/host_mode")
+                            .put(crate::server_url::api("server/host_mode"))
                             .header("authorization", format!("Bearer {token}"))
                             .json(&body)
                             .send();

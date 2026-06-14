@@ -114,7 +114,7 @@ pnpm install
 pnpm dev
 ```
 
-Open `http://127.0.0.1:3334` for the bundled app or the Vite URL printed by `pnpm dev` during frontend work.
+Open `http://127.0.0.1:17600` for the bundled app or the Vite URL printed by `pnpm dev` during frontend work.
 
 For the desktop shell:
 
