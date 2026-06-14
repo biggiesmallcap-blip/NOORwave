@@ -14,7 +14,7 @@ describe('video session snapshot behavior', () => {
 	test('direct video sessions are not persisted without URL context', () => {
 		// A direct video (no search query, no active mix) has no restorable browse
 		// context, so it is not snapshotted.
-		expect(source).toContain('if (selectedVideo && (lastQuery || activeMixId)) saveSessionSnapshot();');
+		expect(source).toContain('if (selectedVideo && (lastQuery || activeMixId || activePlaylistId)) saveSessionSnapshot();');
 		expect(source).toContain('else clearSessionSnapshot();');
 	});
 
