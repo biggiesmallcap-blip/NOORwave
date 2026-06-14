@@ -44,8 +44,8 @@ const ARTIST_ID = Number(argVal('--artist', '4001'))
 const QUERY = argVal('--query', 'julio iglesias')
 const HEADLESS = !argFlag('--headed')
 const KEEP_OPEN = argFlag('--keep-open')
-const FRONTEND = process.env.NOOR_FRONTEND ?? 'http://localhost:5173'
-const BACKEND  = process.env.NOOR_BACKEND  ?? 'http://localhost:3334'
+const FRONTEND = process.env.NOOR_FRONTEND ?? 'http://localhost:17601'
+const BACKEND  = process.env.NOOR_BACKEND  ?? 'http://localhost:17600'
 
 const VIEWPORT_RAW = argVal('--viewport', '1400x900')
 const vpMatch = /^(\d+)x(\d+)$/.exec(VIEWPORT_RAW)

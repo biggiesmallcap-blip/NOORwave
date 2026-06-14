@@ -1134,10 +1134,11 @@ async fn get_server_info(State(state): State<SharedState>) -> Json<Value> {
         })
         .unwrap_or(false);
 
+    let port = crate::server::noor_port();
     let bind_address = if host_mode {
-        "0.0.0.0:3334"
+        format!("0.0.0.0:{port}")
     } else {
-        "127.0.0.1:3334"
+        format!("127.0.0.1:{port}")
     };
     Json(json!({
         "host_mode": host_mode,
@@ -1168,10 +1169,11 @@ async fn put_server_host_mode(
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let port = crate::server::noor_port();
     let bind_address = if host_mode {
-        "0.0.0.0:3334"
+        format!("0.0.0.0:{port}")
     } else {
-        "127.0.0.1:3334"
+        format!("127.0.0.1:{port}")
     };
     Ok(Json(
         json!({ "host_mode": host_mode, "bind_address": bind_address }),

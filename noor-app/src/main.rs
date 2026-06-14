@@ -6,6 +6,7 @@ mod installed_updater;
 mod media_keys;
 mod migration;
 mod paths;
+mod server_url;
 mod sidecar;
 mod sidecar_paths;
 mod tray;
@@ -49,9 +50,7 @@ fn main() {
             tauri::WebviewWindowBuilder::new(
                 &handle,
                 "main",
-                tauri::WebviewUrl::External(
-                    "http://127.0.0.1:3334".parse().expect("valid app url"),
-                ),
+                tauri::WebviewUrl::External(server_url::base().parse().expect("valid app url")),
             )
             .title("NOORwave")
             .inner_size(1280.0, 800.0)

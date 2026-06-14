@@ -1,4 +1,5 @@
-const API_BASE = 'http://localhost:3334';
+const NOOR_PORT = String(import.meta.env.NOOR_PORT || '17600');
+const API_BASE = `http://localhost:${NOOR_PORT}`;
 export const DEFAULT_API_TIMEOUT_MS = 20_000;
 export const BULK_QUEUE_API_TIMEOUT_MS = 90_000;
 
@@ -21,8 +22,16 @@ export function getApiBase(): string {
 		return API_BASE;
 	}
 
+	// Production: noor-server serves this page, so the API and WS are at the same
+	// origin it loaded from. Means the port can change at runtime with no rebuild —
+	// the frontend just follows the server wherever it is.
+	if (!import.meta.env.DEV) {
+		return window.location.origin;
+	}
+
+	// Dev: Vite serves the UI on its own port, so target the configured backend port.
 	const { protocol, hostname } = window.location;
-	return `${protocol}//${hostname}:3334`;
+	return `${protocol}//${hostname}:${NOOR_PORT}`;
 }
 
 // ─── Token management ────────────────────────────────────────────────────────

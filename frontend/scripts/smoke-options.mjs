@@ -59,8 +59,8 @@ export function parseSmokeOptions(args, env = process.env) {
 
 	return {
 		phase,
-		frontend: env.NOOR_FRONTEND ?? 'http://localhost:5173',
-		backend: env.NOOR_BACKEND ?? 'http://localhost:3334',
+		frontend: env.NOOR_FRONTEND ?? 'http://localhost:17601',
+		backend: env.NOOR_BACKEND ?? 'http://localhost:17600',
 		viewport: parseViewport(readArg(args, '--viewport', '1920x1080')),
 		artistId: parseNumberArg(args, '--artist'),
 		albumId: parseNumberArg(args, '--album'),

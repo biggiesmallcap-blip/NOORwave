@@ -210,16 +210,51 @@ fn is_trusted_local_origin_value(origin: &HeaderValue) -> bool {
     origin.to_str().is_ok_and(is_trusted_local_origin_str)
 }
 
+/// Local listen port for the server. A port embedded in `NOOR_ADDR` (the
+/// power-user override) wins, then `NOOR_PORT`, falling back to 17600. Kept in
+/// sync with `resolve_bind_addr` and the Tauri shell's `server_url` helper so
+/// the listen port can be changed by env without recompiling.
+pub fn noor_port() -> u16 {
+    if let Ok(addr) = std::env::var("NOOR_ADDR")
+        && let Some(p) = addr
+            .trim()
+            .rsplit(':')
+            .next()
+            .and_then(|s| s.parse::<u16>().ok())
+    {
+        return p;
+    }
+    std::env::var("NOOR_PORT")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(17600)
+}
+
+/// Vite dev-server port trusted for CORS in development. Honors `NOOR_DEV_PORT`,
+/// default 17601.
+fn noor_dev_port() -> u16 {
+    std::env::var("NOOR_DEV_PORT")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(17601)
+}
+
 fn is_trusted_local_origin_str(origin: &str) -> bool {
-    matches!(
-        origin.trim().trim_end_matches('/'),
-        "http://127.0.0.1:3334"
-            | "http://localhost:3334"
-            | "http://[::1]:3334"
-            | "http://127.0.0.1:5173"
-            | "http://localhost:5173"
-            | "http://[::1]:5173"
-    )
+    let trimmed = origin.trim().trim_end_matches('/');
+    let Some(rest) = trimmed.strip_prefix("http://") else {
+        return false;
+    };
+    // rsplit keeps the IPv6 "[::1]:port" host intact (brackets and all).
+    let Some((host, port)) = rest.rsplit_once(':') else {
+        return false;
+    };
+    if !matches!(host, "127.0.0.1" | "localhost" | "[::1]") {
+        return false;
+    }
+    match port.parse::<u16>() {
+        Ok(p) => p == noor_port() || p == noor_dev_port(),
+        Err(_) => false,
+    }
 }
 
 fn origin_from_url(raw: &str) -> Option<String> {
@@ -387,7 +422,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::ORIGIN,
-            HeaderValue::from_static("http://127.0.0.1:3334"),
+            HeaderValue::from_static("http://127.0.0.1:17600"),
         );
 
         assert_eq!(
@@ -439,7 +474,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::ORIGIN,
-            HeaderValue::from_static("http://127.0.0.1:3334"),
+            HeaderValue::from_static("http://127.0.0.1:17600"),
         );
 
         assert_eq!(

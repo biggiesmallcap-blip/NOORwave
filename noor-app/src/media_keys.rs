@@ -20,7 +20,7 @@ pub fn register(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
                     // Determine current play state
                     let Ok(resp) = client
-                        .get("http://127.0.0.1:3334/api/playback/state")
+                        .get(crate::server_url::api("playback/state"))
                         .header("authorization", &auth)
                         .send()
                         .await
@@ -34,7 +34,7 @@ pub fn register(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
                     let endpoint = if is_playing { "pause" } else { "resume" };
                     let _ = client
-                        .post(format!("http://127.0.0.1:3334/api/playback/{endpoint}"))
+                        .post(crate::server_url::api(&format!("playback/{endpoint}")))
                         .header("authorization", &auth)
                         .send()
                         .await;
@@ -52,7 +52,7 @@ pub fn register(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     let token = state.server_token.lock().unwrap().clone();
                     let Some(token) = token else { return };
                     let _ = reqwest::Client::new()
-                        .post("http://127.0.0.1:3334/api/playback/next")
+                        .post(crate::server_url::api("playback/next"))
                         .header("authorization", format!("Bearer {token}"))
                         .send()
                         .await;
@@ -70,7 +70,7 @@ pub fn register(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     let token = state.server_token.lock().unwrap().clone();
                     let Some(token) = token else { return };
                     let _ = reqwest::Client::new()
-                        .post("http://127.0.0.1:3334/api/playback/previous")
+                        .post(crate::server_url::api("playback/previous"))
                         .header("authorization", format!("Bearer {token}"))
                         .send()
                         .await;

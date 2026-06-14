@@ -5433,7 +5433,7 @@ async fn server_info_returns_defaults() {
     )
     .unwrap();
     assert_eq!(body["host_mode"], false);
-    assert!(body["bind_address"].as_str().unwrap().contains("3334"));
+    assert!(body["bind_address"].as_str().unwrap().contains("17600"));
     assert!(body["version"].is_string());
 }
 

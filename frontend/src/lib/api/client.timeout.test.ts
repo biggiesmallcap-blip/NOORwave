@@ -92,7 +92,7 @@ describe('API request timeout policy', () => {
 			removeItem: vi.fn(),
 		});
 
-		await authFetch('http://localhost:3334/api/status', {
+		await authFetch('http://localhost:17600/api/status', {
 			headers: { 'x-custom': 'kept' },
 		});
 

@@ -4,7 +4,7 @@
   "description": "Main window access for NOORwave's localhost UI.",
   "windows": ["main"],
   "remote": {
-    "urls": ["http://127.0.0.1:3334/**"]
+    "urls": ["http://127.0.0.1:17600/**"]
   },
   "permissions": [
     "core:webview:allow-set-webview-zoom",
