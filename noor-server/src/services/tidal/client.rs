@@ -1174,6 +1174,22 @@ impl TidalClient {
         Ok(Self::parse_mix_video_items(&payload))
     }
 
+    /// Video items for an editorial video playlist. The `/items` endpoint
+    /// returns the same `{item, type}` wrapper shape as mixes, so it shares
+    /// `parse_mix_video_items`. (The `/tracks` endpoint, by contrast, only
+    /// yields the audio versions and is what made these play as songs.)
+    pub async fn get_playlist_video_items(
+        &self,
+        playlist_uuid: &str,
+    ) -> Result<Vec<TidalSearchVideo>> {
+        let url = format!(
+            "{}/playlists/{}/items?countryCode={}&limit=100&includeTypes=MusicVideo",
+            TIDAL_API_URL, playlist_uuid, self.country_code
+        );
+        let payload: serde_json::Value = self.get_json(&url).await?;
+        Ok(Self::parse_mix_video_items(&payload))
+    }
+
     fn parse_mix_track_items(payload: &serde_json::Value) -> Vec<TidalTrack> {
         let Some(items) = payload.get("items").and_then(serde_json::Value::as_array) else {
             return Vec::new();

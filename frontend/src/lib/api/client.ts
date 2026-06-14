@@ -3770,6 +3770,12 @@ export const api = {
 		);
 	},
 
+	getTidalVideoPlaylistItems(uuid: string): Promise<{ items: TidalSearchVideo[] }> {
+		return fetchApi<{ items: TidalSearchVideo[] }>(
+			`/api/tidal/video-playlists/${encodeURIComponent(uuid)}/items`
+		);
+	},
+
 	playTidalTrack(track: TidalPlayable): Promise<void> {
 		return fetchApi<void>('/api/tidal/play', undefined, {
 			method: 'POST',

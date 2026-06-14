@@ -876,6 +876,10 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/tidal/video-mixes/{id}/items",
             get(tidal_video_mix_items),
         )
+        .route(
+            "/api/tidal/video-playlists/{uuid}/items",
+            get(tidal_video_playlist_items),
+        )
         .route("/api/tidal/playlists/search", get(tidal_playlist_search))
         .route(
             "/api/tidal/playlists/{uuid}/tracks",
@@ -9803,6 +9807,72 @@ async fn tidal_video_mix_items(
             );
             retry_client
                 .get_video_mix_items(mix_id)
+                .await
+                .map_err(|e2| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": e2.to_string() })),
+                    )
+                })?
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": e.to_string() })),
+            ));
+        }
+    };
+
+    Ok(Json(json!({
+        "items": items.into_iter().map(tidal_video_to_resp).collect::<Vec<_>>()
+    })))
+}
+
+async fn tidal_video_playlist_items(
+    State(state): State<SharedState>,
+    Path(uuid): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let uuid = normalize_tidal_playlist_uuid(&uuid).map_err(|status| {
+        (
+            status,
+            Json(json!({ "error": "invalid TIDAL playlist id" })),
+        )
+    })?;
+
+    let Some(tokens) = tidal_request_tokens(&state).await? else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "TIDAL not connected" })),
+        ));
+    };
+
+    let (http_client, tidal_http_client) = {
+        let s = state.read().await;
+        (s.http_client.clone(), s.tidal_http_client.clone())
+    };
+    let client = TidalClient::with_http(
+        tidal_http_client.clone(),
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
+    let items = match client.get_playlist_video_items(uuid).await {
+        Ok(items) => items,
+        Err(e) if error_looks_like_auth(&e) => {
+            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+                .await
+                .map_err(|re| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
+                    )
+                })?;
+            let retry_client = TidalClient::with_http(
+                tidal_http_client,
+                refreshed.access_token.clone(),
+                refreshed.country_code.clone(),
+            );
+            retry_client
+                .get_playlist_video_items(uuid)
                 .await
                 .map_err(|e2| {
                     (

@@ -33,9 +33,11 @@
 		selectedVideo: TidalSearchVideo | TidalVideoMixItem | null;
 		videos: TidalSearchVideo[];
 		mixItems: TidalVideoMixItem[];
+		playlistItems: TidalSearchVideo[];
 		query: string;
 		lastQuery: string;
 		activeMixId: string | null;
+		activePlaylistId: string | null;
 		hasMore: boolean;
 		offset: number;
 		streamUrl: string | null;
@@ -46,8 +48,8 @@
 		if (typeof sessionStorage === 'undefined' || !selectedVideo) return;
 		try {
 			const snap: VideoPageSnapshot = {
-				selectedVideo, videos, mixItems, query, lastQuery,
-				activeMixId, hasMore, offset, streamUrl, streamExpiresAt,
+				selectedVideo, videos, mixItems, playlistItems, query, lastQuery,
+				activeMixId, activePlaylistId, hasMore, offset, streamUrl, streamExpiresAt,
 			};
 			sessionStorage.setItem(SESSION_SNAPSHOT_KEY, JSON.stringify(snap));
 		} catch {}
@@ -71,8 +73,10 @@
 			snap.query?.trim() ||
 			snap.lastQuery?.trim() ||
 			snap.activeMixId ||
+			snap.activePlaylistId ||
 			(snap.videos?.length ?? 0) > 0 ||
-			(snap.mixItems?.length ?? 0) > 0
+			(snap.mixItems?.length ?? 0) > 0 ||
+			(snap.playlistItems?.length ?? 0) > 0
 		);
 	}
 
@@ -80,15 +84,19 @@
 	let inputEl = $state<HTMLInputElement | null>(null);
 	let videos = $state<TidalSearchVideo[]>([]);
 	let mixItems = $state<TidalVideoMixItem[]>([]);
+	let playlistItems = $state<TidalSearchVideo[]>([]);
 	let loadingSearch = $state(false);
 	let loadingMore = $state(false);
 	let loadingMix = $state(false);
+	let loadingPlaylist = $state(false);
 	let error = $state<string | null>(null);
 	let mixError = $state<string | null>(null);
+	let playlistError = $state<string | null>(null);
 	let offset = $state(0);
 	let hasMore = $state(false);
 	let lastQuery = $state('');
 	let activeMixId = $state<string | null>(null);
+	let activePlaylistId = $state<string | null>(null);
 	let sentinel = $state<HTMLDivElement | null>(null);
 	let recent = $state<string[]>(loadRecent());
 	let stageAnchor = $state<HTMLDivElement | null>(null);
@@ -96,6 +104,7 @@
 	let searchAbort: AbortController | null = null;
 	let loadMoreSeq = 0;
 	let mixLoadSeq = 0;
+	let playlistLoadSeq = 0;
 	let handledJumpNonce = 0;
 	let handledAutoplayToggleNonce = 0;
 	let handledClearNonce = 0;
@@ -110,7 +119,7 @@
 
 	let heroTitle = $derived(selectedVideo?.title ?? 'TIDAL video');
 	let heroArtist = $derived(selectedVideo?.artist_name ?? null);
-	let hasVideoChoices = $derived(videos.length > 0 || mixItems.length > 0);
+	let hasVideoChoices = $derived(videos.length > 0 || mixItems.length > 0 || playlistItems.length > 0);
 	let showChooseVideoPrompt = $derived(
 		!selectedVideo &&
 		!streamUrl &&
@@ -145,15 +154,19 @@
 	function clearVideoPageSession() {
 		videos = [];
 		mixItems = [];
+		playlistItems = [];
 		query = '';
 		lastQuery = '';
 		activeMixId = null;
+		activePlaylistId = null;
 		hasMore = false;
 		offset = 0;
 		error = null;
 		mixError = null;
+		playlistError = null;
 		loadMoreSeq += 1;
 		mixLoadSeq += 1;
+		playlistLoadSeq += 1;
 		clearSessionSnapshot();
 		clearVideoSession();
 		void goto('/videos', { replaceState: true, keepFocus: true });
@@ -244,14 +257,29 @@
 
 	function buildPlayContext(video: VideoSessionItem) {
 		const isMix = 'mix_id' in video && video.mix_id != null;
+		if (isMix) {
+			return {
+				queue: mixItems,
+				source: 'mix' as VideoSessionSource,
+				sourceLabel: activeMixId ? `Video mix ${activeMixId}` : 'Video mix',
+				autoplay: $videoSession.autoplay,
+			};
+		}
+		const inPlaylist =
+			activePlaylistId != null &&
+			playlistItems.some((item) => item.tidal_id === video.tidal_id);
+		if (inPlaylist) {
+			return {
+				queue: playlistItems,
+				source: 'mix' as VideoSessionSource,
+				sourceLabel: 'Video playlist',
+				autoplay: $videoSession.autoplay,
+			};
+		}
 		return {
-			queue: isMix ? mixItems : videos,
-			source: (isMix ? 'mix' : lastQuery ? 'search' : 'direct') as VideoSessionSource,
-			sourceLabel: isMix
-				? activeMixId
-					? `Video mix ${activeMixId}`
-					: 'Video mix'
-				: lastQuery || null,
+			queue: videos,
+			source: (lastQuery ? 'search' : 'direct') as VideoSessionSource,
+			sourceLabel: lastQuery || null,
 			autoplay: $videoSession.autoplay,
 		};
 	}
@@ -270,6 +298,11 @@
 			const params = new URLSearchParams();
 			if ('mix_id' in video && video.mix_id) {
 				params.set('mixId', String(video.mix_id));
+			} else if (
+				activePlaylistId != null &&
+				playlistItems.some((item) => item.tidal_id === video.tidal_id)
+			) {
+				params.set('playlistId', activePlaylistId);
 			} else if (lastQuery) {
 				params.set('q', lastQuery);
 			}
@@ -306,6 +339,33 @@
 		}
 	}
 
+	async function loadPlaylist(playlistId: string, autoPlayFirst = false) {
+		const seq = ++playlistLoadSeq;
+		const isCurrentPlaylistLoad = () => seq === playlistLoadSeq && activePlaylistId === playlistId;
+		loadMoreSeq += 1;
+		loadingMore = false;
+		loadingPlaylist = true;
+		playlistError = null;
+		activePlaylistId = playlistId;
+		playlistItems = [];
+		try {
+			const result = await api.getTidalVideoPlaylistItems(playlistId);
+			if (!isCurrentPlaylistLoad()) return;
+			playlistItems = result.items;
+			if (playlistItems.length === 0) playlistError = 'This playlist did not return video items.';
+			if (autoPlayFirst && isCurrentPlaylistLoad() && playlistItems.length > 0) {
+				videoSession.setAutoplay(true);
+				await selectVideo(playlistItems[0], false);
+			}
+		} catch (err) {
+			if (!isCurrentPlaylistLoad()) return;
+			playlistError = normalizeError(err, 'Playlist videos could not load.');
+			if (isCurrentPlaylistLoad()) showToast(playlistError, 'error', 3200);
+		} finally {
+			if (seq === playlistLoadSeq) loadingPlaylist = false;
+		}
+	}
+
 	function pickSearch(value: string) {
 		query = value;
 		void runSearch(value);
@@ -317,7 +377,7 @@
 	}
 
 	function findVideoInCurrentContext(videoId: number): VideoSessionItem | null {
-		return [...mixItems, ...videos].find((item) => item.tidal_id === videoId) ?? null;
+		return [...mixItems, ...playlistItems, ...videos].find((item) => item.tidal_id === videoId) ?? null;
 	}
 
 	function toggleVideoAutoplay() {
@@ -329,15 +389,26 @@
 		const q = params.get('q') ?? '';
 		const videoId = Number(params.get('videoId'));
 		const mixId = params.get('mixId');
-		const shouldPlayMix = params.get('play') === '1';
+		const playlistId = params.get('playlistId');
+		const shouldPlayCollection = params.get('play') === '1';
 		query = q;
 		if (q) await runSearch(q, false);
 		if (mixId) {
-			await loadMix(mixId, shouldPlayMix);
-			if (!shouldPlayMix && Number.isFinite(videoId) && videoId > 0) {
+			await loadMix(mixId, shouldPlayCollection);
+			if (!shouldPlayCollection && Number.isFinite(videoId) && videoId > 0) {
 				const fromMix = mixItems.find((item) => item.tidal_id === videoId);
 				if (fromMix) {
 					void selectVideo(fromMix, false);
+					return;
+				}
+			}
+		}
+		if (playlistId) {
+			await loadPlaylist(playlistId, shouldPlayCollection);
+			if (!shouldPlayCollection && Number.isFinite(videoId) && videoId > 0) {
+				const fromPlaylist = playlistItems.find((item) => item.tidal_id === videoId);
+				if (fromPlaylist) {
+					void selectVideo(fromPlaylist, false);
 					return;
 				}
 			}
@@ -366,16 +437,19 @@
 	onMount(() => {
 		void audioSettings.load();
 		const params = new URLSearchParams(window.location.search);
-		const hasExplicitParams = params.has('q') || params.has('videoId') || params.has('mixId');
+		const hasExplicitParams =
+			params.has('q') || params.has('videoId') || params.has('mixId') || params.has('playlistId');
 
 		if (!hasExplicitParams) {
 			const snap = loadSessionSnapshot();
 			if (snap?.selectedVideo && snapshotHasRestorableContext(snap)) {
 				videos = snap.videos ?? [];
 				mixItems = snap.mixItems ?? [];
+				playlistItems = snap.playlistItems ?? [];
 				query = snap.query ?? '';
 				lastQuery = snap.lastQuery ?? '';
 				activeMixId = snap.activeMixId ?? null;
+				activePlaylistId = snap.activePlaylistId ?? null;
 				hasMore = snap.hasMore ?? false;
 				offset = snap.offset ?? 0;
 
@@ -416,7 +490,7 @@
 	// Snapshot for full-page reload recovery (in-app nav is handled by the
 	// persistent dock, which never unmounts).
 	$effect(() => {
-		if (selectedVideo && (lastQuery || activeMixId)) saveSessionSnapshot();
+		if (selectedVideo && (lastQuery || activeMixId || activePlaylistId)) saveSessionSnapshot();
 		else clearSessionSnapshot();
 	});
 
@@ -589,6 +663,26 @@
 			{:else}
 				<div class="video-grid">
 					{#each mixItems as video (`${video.mix_id}-${video.tidal_id}`)}
+						<VideoCard {video} onSelect={(item) => !('id' in item) && selectCard(item)} />
+					{/each}
+				</div>
+			{/if}
+		</section>
+	{/if}
+
+	{#if loadingPlaylist || playlistItems.length > 0 || playlistError}
+		<section class="results-section">
+			<div class="section-heading">
+				<p class="eyebrow">Video playlist</p>
+				<h2>Playlist videos</h2>
+			</div>
+			{#if loadingPlaylist}
+				<Skeleton rows={3} label="Loading playlist" />
+			{:else if playlistError}
+				<EmptyState title="Playlist unavailable" copy={playlistError} />
+			{:else}
+				<div class="video-grid">
+					{#each playlistItems as video (video.tidal_id)}
 						<VideoCard {video} onSelect={(item) => !('id' in item) && selectCard(item)} />
 					{/each}
 				</div>
