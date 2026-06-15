@@ -214,3 +214,31 @@ Two minor edges deferred from the persistent-video-dock work (branch `feat/app-s
   we want to show elapsed time in the mini-player or the snapshot. Wire an `onTime` prop
   on VideoPlayer if that UI is wanted.
 - Spawned by: persistent video mini-player + WASAPI exclusive-release pass.
+
+## Crossfade stall hardening (deferred from the crossfade-freeze fix)
+The crossfade-stall freeze (8s fade, ~20% of transitions, playback froze near the end until
+manual Next) was fixed with three changes in `noor-server/src/playback/runtime/mod.rs`: a
+`crossfade_next_ready` gate (only promote the incoming deck once it has buffered the full fade
+window + margin, not just the ~500ms prebuffer), fade-down suppression on defer (the outgoing
+plays full-volume to the boundary instead of fading into a silent gap), and a `StallTracker`
+watchdog (the loop now `recv_timeout`s and force-advances the queue after
+`ACTIVE_STALL_RECOVERY_SECS` = 15s of zero progress on the active deck). Root cause: the runtime
+loop only advanced on commands from the audio callback, and a decoder starved on a hung TIDAL
+DASH segment is `started && !finished && written==0` -- it emits no command, so nothing
+recovered it until the segment finally errored out (tens of seconds later) or the user clicked
+Next. Deferred hardening:
+- No test seam for the full behavioral freeze: `run_runtime_loop`'s dispatch is inline in one
+  giant `match`, so the watchdog->advance and crossfade-promote PATHS can't be driven in an
+  integration test (only the decision helpers `crossfade_next_ready` and `StallTracker::poll`
+  are unit-tested). Extract `dispatch_command` from the match body for end-to-end coverage
+  (already flagged in `runtime_recovery_composes_after_command_error_and_panic`).
+- `promote_prepared_at_boundary` hard-cuts the prepared deck with no buffer-depth check. The
+  watchdog recovers a thin-deck-at-boundary stall after 15s, but a depth check there would skip
+  the needless silence. Belt-and-suspenders.
+- DASH retry budget is heavy: `DASH_SEGMENT_TIMEOUT_SECS` (12s) x 2 inner attempts x 3 outer
+  (`PLAYBACK_DASH_BACKGROUND_FETCH_ATTEMPTS`) = up to ~72s of frozen in-order delivery per hung
+  segment. Consider a shorter per-segment timeout and/or out-of-order delivery so one slow
+  segment doesn't block ready segments queued behind it.
+- Consider making `ACTIVE_STALL_RECOVERY_SECS` configurable and/or a brief "skipped, slow
+  connection" toast so the auto-skip is visible.
+- Spawned by: crossfade-stall diagnosis + 4-agent audit (this session).
