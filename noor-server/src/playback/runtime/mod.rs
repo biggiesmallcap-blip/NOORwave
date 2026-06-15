@@ -95,15 +95,18 @@ impl StallTracker {
             self.rearm(id, position);
             return None;
         }
-        // A finished engine emits its own terminal via the audio callback;
-        // leave it to the normal advance path.
-        let finished = engine
+        // A finished engine emits its own terminal via the audio callback. A
+        // not-yet-started engine is still doing its initial prebuffer -- on a
+        // slow connection the first ~500ms can legitimately take many seconds to
+        // arrive, and the playhead sits at the baseline offset the whole time.
+        // Neither is a stall; only a deck that WAS playing and then froze is.
+        let (started, finished) = engine
             .shared
             .buffer
             .lock()
-            .map(|guard| guard.finished)
-            .unwrap_or(false);
-        if finished {
+            .map(|guard| (guard.started, guard.finished))
+            .unwrap_or((false, false));
+        if finished || !started {
             self.rearm(id, position);
             return None;
         }
@@ -2238,20 +2241,6 @@ fn run_runtime_loop(
                                 );
                             }
                         } else if !active_engine_suppresses_crossfade_after_seek(&state) {
-                            // The incoming deck can't cover the fade yet (slow
-                            // network deferred the promotion). Don't fade the
-                            // outgoing track down to silence with nothing fading
-                            // in -- zero its crossfade so it plays at full volume
-                            // to the boundary, where the hard-cut takes over.
-                            // Restores the clean crossfade-off transition for this
-                            // pair instead of an audible dip into the gap. Only when
-                            // a next deck actually exists -- at the true end of the
-                            // queue we keep the natural fade-out.
-                            if state.next_engine.is_some()
-                                && let Some(active) = state.engine.as_ref()
-                            {
-                                active.shared.crossfade_samples.store(0, Ordering::Relaxed);
-                            }
                             let reason = runtime_renderer_fire_block_reason(&state, next_ready);
                             record_current_runtime_renderer_failure(&mut state, reason);
                         }
@@ -5993,6 +5982,7 @@ mod tests {
             .shared
             .position_samples
             .store(48_000, Ordering::Relaxed);
+        engine.shared.buffer.lock().unwrap().started = true; // it WAS playing
         state.engine = Some(engine);
 
         let mut tracker = StallTracker::new();
@@ -6014,6 +6004,31 @@ mod tests {
     }
 
     #[test]
+    fn stall_tracker_does_not_skip_a_track_still_doing_initial_buffering() {
+        // A fresh deck on a slow connection has not crossed its prebuffer
+        // threshold yet (started == false, playhead at the baseline). That is
+        // buffering, not a stall -- force-skipping it would drop the track
+        // before it ever plays a sample (regression caught by the fix grill).
+        let mut state = test_runtime_loop_state();
+        let engine = test_engine_with_shared(7, 3);
+        // started stays false: no samples buffered past the start threshold.
+        state.engine = Some(engine);
+
+        let mut tracker = StallTracker::new();
+        assert_eq!(tracker.poll(&state), None);
+        tracker.last_progress_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(
+                ACTIVE_STALL_RECOVERY_SECS + 1,
+            ))
+            .expect("instant underflow");
+        assert_eq!(
+            tracker.poll(&state),
+            None,
+            "a deck still doing initial buffering must not be force-skipped"
+        );
+    }
+
+    #[test]
     fn stall_tracker_ignores_progress_paused_and_finished_engines() {
         let mut state = test_runtime_loop_state();
         let engine = test_engine_with_shared(7, 3);
@@ -6021,6 +6036,7 @@ mod tests {
             .shared
             .position_samples
             .store(48_000, Ordering::Relaxed);
+        engine.shared.buffer.lock().unwrap().started = true;
         state.engine = Some(engine);
 
         let mut tracker = StallTracker::new();

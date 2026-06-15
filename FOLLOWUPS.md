@@ -217,16 +217,25 @@ Two minor edges deferred from the persistent-video-dock work (branch `feat/app-s
 
 ## Crossfade stall hardening (deferred from the crossfade-freeze fix)
 The crossfade-stall freeze (8s fade, ~20% of transitions, playback froze near the end until
-manual Next) was fixed with three changes in `noor-server/src/playback/runtime/mod.rs`: a
+manual Next) was fixed with two changes in `noor-server/src/playback/runtime/mod.rs`: a
 `crossfade_next_ready` gate (only promote the incoming deck once it has buffered the full fade
-window + margin, not just the ~500ms prebuffer), fade-down suppression on defer (the outgoing
-plays full-volume to the boundary instead of fading into a silent gap), and a `StallTracker`
-watchdog (the loop now `recv_timeout`s and force-advances the queue after
-`ACTIVE_STALL_RECOVERY_SECS` = 15s of zero progress on the active deck). Root cause: the runtime
-loop only advanced on commands from the audio callback, and a decoder starved on a hung TIDAL
-DASH segment is `started && !finished && written==0` -- it emits no command, so nothing
-recovered it until the segment finally errored out (tens of seconds later) or the user clicked
-Next. Deferred hardening:
+window + margin, not just the ~500ms prebuffer) and a `StallTracker` watchdog (the loop now
+`recv_timeout`s and force-advances the queue after `ACTIVE_STALL_RECOVERY_SECS` = 15s of zero
+progress on a deck that has STARTED and is not finished/paused). Root cause: the runtime loop
+only advanced on commands from the audio callback, and a decoder starved on a hung TIDAL DASH
+segment is `started && !finished && written==0` -- it emits no command, so nothing recovered it
+until the segment finally errored out (tens of seconds later) or the user clicked Next. (A third
+change -- zeroing the outgoing crossfade on defer to avoid a fade-to-silence dip -- was reverted
+after the fix grill found it caused a loud double-track overlap on the late NextDecodeComplete
+promote path; the minor dip only occurs on the rarer boundary path and is acceptable.) Deferred
+hardening:
+- Watchdog stall-skip records the skipped track as a completed listen / scrobble when it had
+  already played past the completion threshold (`min(0.9*duration, 240s)`). For the dominant case
+  (a stall inside the crossfade window, ~96% played) that is legitimate, but a stall in the
+  ~84-90% band gets tipped over the threshold by the ~15s of frozen wall-clock the listen session
+  still accrues. If stall-skips should never scrobble, add a `PlaybackTerminalReason::Stalled` the
+  listen flush treats as non-completing, or make completion position-aware (clamp `listened_ms` to
+  the frozen `position_samples` elapsed).
 - No test seam for the full behavioral freeze: `run_runtime_loop`'s dispatch is inline in one
   giant `match`, so the watchdog->advance and crossfade-promote PATHS can't be driven in an
   integration test (only the decision helpers `crossfade_next_ready` and `StallTracker::poll`
