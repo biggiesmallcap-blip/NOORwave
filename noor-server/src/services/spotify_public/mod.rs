@@ -146,6 +146,9 @@ async fn resolve_and_writeback_track(
         TrackState::NegativeFresh => None,
         TrackState::StaleStats { spotify_track_id }
         | TrackState::NeedsStatsFetch { spotify_track_id } => {
+            if client.circuit_open().await {
+                return None;
+            }
             match fetch_playcount(client, &spotify_track_id).await {
                 Some(pc) => {
                     if let Err(e) =
@@ -159,6 +162,9 @@ async fn resolve_and_writeback_track(
             }
         }
         TrackState::NeedsResolution => {
+            if client.circuit_open().await {
+                return None;
+            }
             let resolution = resolver::resolve_track_for_isrc(
                 client,
                 &seed.isrc,
@@ -248,6 +254,9 @@ pub async fn fetch_artist_stats(
         cache::ArtistMapState::Resolved(id) => id,
         cache::ArtistMapState::NegativeFresh => return result,
         cache::ArtistMapState::Missing => {
+            if client.circuit_open().await {
+                return result;
+            }
             let pairs: Vec<(String, String)> = seeds
                 .iter()
                 .map(|s| (s.isrc.clone(), s.title.clone()))
@@ -287,7 +296,7 @@ pub async fn fetch_artist_stats(
         Some((_, stale)) => *stale,
     };
 
-    if need_fetch {
+    if need_fetch && !client.circuit_open().await {
         match client.query_artist_overview(&spotify_artist_id).await {
             Ok(body) => {
                 let parsed = parse_artist_overview(&body);

@@ -10,6 +10,43 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### Cross-platform playlist providers: SoundCloud + YouTube
+- Now that the Spotify (Sportify) search/resolve path is hardened (mirror failover, no
+  empty-cache poisoning, breaker on the anonymous GraphQL), extend the same pattern to other
+  sources. YouTube has a clean free keyed API (YouTube Data API v3, API key + 10k-unit/day
+  quota): good candidate for search + playlist-item fetch + resolve-to-TIDAL. SoundCloud's
+  public API registration has been closed since ~2019, so it would have to ride their internal
+  `api-v2` (anonymous/scraped) or oEmbed - same fragility class as the Spotify proxies, so it
+  needs the same failover + breaker wrapping.
+- Deferred this pass by choice: scope was "Spotify-only quick fix", no provider-trait
+  abstraction. When picking this up, factor a provider interface (search / fetch-playlist /
+  resolve-to-TIDAL / health) that supports BOTH keyed-API and anonymous-scraped styles, then
+  slot Spotify, YouTube, SoundCloud onto it.
+- Considered and declined this pass: wiring the official Spotify Web API (free app
+  client_id+secret, client-credentials) as a durable failsafe. Rejected because the Nov-2024
+  Web API cull removed too much for indie apps. Revisit only if the anonymous proxies stop being
+  viable.
+- Not implemented (nice-to-have failsafe): serve-stale-search-cache on total live failure
+  ("stale-while-error") - return last-known-good results instead of an error when every mirror
+  is down. Cheap and would make outages invisible to the user.
+- Spawned by: Spotify playlist search/resolve hardening (mirror failover + no empty-cache +
+  spotify_public breaker).
+
+### Spotify search hardening: review-surfaced refinements
+- Negative cache for *confirmed-empty* search: the hardening dropped empty-page caching
+  entirely (to stop 30-day poisoning on transient outages), but a query that genuinely has zero
+  results now re-hits every mirror on every repeat, and the SportifyClient (proxy path) has no
+  circuit breaker. A short negative-TTL (minutes, not the 30-day positive TTL) for confirmed-empty
+  pages would bound repeat-query load without reintroducing the poisoning. Low risk (search is
+  user-driven, failover is bounded to N mirrors) but it's the one asymmetry the change introduces.
+- Consolidate empty-handling: `get_search` now treats an empty first page as stale for ALL
+  kinds, which makes the playlist-only post-read guards at `recommend.rs:185` and
+  `sportify_routes.rs:86-91` dead. Remove them so empty-handling lives only in the cache layer.
+- Test gaps: the HTTP-400 self-heal branch (`spotify_public/client.rs`) and the breaker's
+  cooldown-expiry / half-open path have no direct tests (the 401 + PersistedQueryNotFound siblings
+  also lack tests). Adding an injectable pathfinder URL + clock seam would let these be covered.
+- Spawned by: 3-lens pre-PR review of the Spotify hardening change.
+
 ### chore: populate `album_title` at the `TidalPlayable` builders, not just the backstop
 
 Several launch surfaces build a `TidalPlayable` with title + artist + artwork but

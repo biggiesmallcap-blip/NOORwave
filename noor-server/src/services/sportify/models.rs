@@ -61,8 +61,9 @@ pub struct SportifyTrack {
     /// Alias picks up either form into one field.
     #[serde(default, alias = "title")]
     pub name: Option<String>,
-    /// Some endpoints (track detail) ship a structured `artists` array.
-    #[serde(default)]
+    /// Track detail / playlist ship a structured `artists` object array;
+    /// search ships a flat string array. The custom path accepts both.
+    #[serde(default, deserialize_with = "deserialize_artists_field")]
     pub artists: Vec<SportifyArtistRef>,
     /// Other endpoints (playlist body, search results) ship a flat `artist`
     /// string only. Consumers go through [`SportifyTrack::primary_artist`].
@@ -320,6 +321,37 @@ where
     }))
 }
 
+/// `artists` ships as a structured object array on the track-detail and
+/// playlist shapes (`[{"id","name",...}]`), but the *search* shape ships a
+/// flat string array (`["Tame Impala"]`). Without this the whole
+/// `Vec<SportifyTrack>` deserialization fails on the first search row and the
+/// caller's `unwrap_or_default()` silently returns zero tracks - which is why
+/// track search looked dead while artist/playlist search worked.
+fn deserialize_artists_field<'de, D>(deserializer: D) -> Result<Vec<SportifyArtistRef>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ArtistRepr {
+        Name(String),
+        Object(SportifyArtistRef),
+    }
+    let opt = Option::<Vec<ArtistRepr>>::deserialize(deserializer)?;
+    Ok(opt
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|r| match r {
+            ArtistRepr::Name(s) if s.trim().is_empty() => None,
+            ArtistRepr::Name(s) => Some(SportifyArtistRef {
+                name: Some(s),
+                ..Default::default()
+            }),
+            ArtistRepr::Object(o) => Some(o),
+        })
+        .collect())
+}
+
 fn extra_string(extra: &HashMap<String, serde_json::Value>, key: &str) -> Option<String> {
     extra.get(key).and_then(|v| v.as_str()).map(str::to_string)
 }
@@ -389,6 +421,40 @@ mod tests {
         }"#;
         let track: SportifyTrack = serde_json::from_str(json).expect("parse");
         assert_eq!(track.primary_artist(), Some("Structured Name"));
+    }
+
+    /// Regression: the search-track shape ships `artists` as a flat STRING
+    /// array. Before the custom deserializer this failed the whole
+    /// `Vec<SportifyTrack>` parse, so track search silently returned zero rows
+    /// while artist/playlist search worked.
+    #[test]
+    fn deserializes_search_track_shape_with_string_artists() {
+        let json = r#"{
+            "id": "5hM5arv9KDbCHS0k9uqwjr",
+            "title": "Borderline",
+            "artist": "Tame Impala",
+            "artists": ["Tame Impala"],
+            "album": "The Slow Rush"
+        }"#;
+        let track: SportifyTrack = serde_json::from_str(json).expect("search track parse");
+        assert_eq!(track.name.as_deref(), Some("Borderline"));
+        assert_eq!(track.primary_artist(), Some("Tame Impala"));
+        assert_eq!(
+            track.album.as_ref().and_then(|a| a.name.as_deref()),
+            Some("The Slow Rush"),
+        );
+
+        // And a whole results array of this shape must parse, not collapse to
+        // empty (the actual failure mode the user saw).
+        let results: SportifySearchResults = serde_json::from_str(
+            r#"{ "tracks": [
+                { "id": "a", "title": "One", "artists": ["X"] },
+                { "id": "b", "title": "Two", "artists": ["Y", "Z"] }
+            ] }"#,
+        )
+        .expect("search results parse");
+        assert_eq!(results.tracks.len(), 2);
+        assert_eq!(results.tracks[1].primary_artist(), Some("Y"));
     }
 
     #[test]
