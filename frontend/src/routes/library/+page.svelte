@@ -113,6 +113,9 @@
 	}
 
 	const PAGE_SIZE = 100;
+	// Depth of the random sample Shuffle pulls from a filtered view. Matches the
+	// whole-library Shuffle queue depth; automix extends past it.
+	const SHUFFLE_SAMPLE_SIZE = 200;
 	const RECENT_TRACK_LIMIT = 10;
 	const HOME_MURAL_ITEM_LIMIT = 12;
 	const ALL_SEARCH_ARTIST_PREVIEW_LIMIT = 12;
@@ -359,7 +362,34 @@
 	async function playTrackView(shuffle = false) {
 		batchError = null;
 		batchMessage = null;
-		if ($searchQuery.trim()) {
+		const trimmed = $searchQuery.trim();
+		if (trimmed) {
+			// A filtered/searched Shuffle must randomize across the FULL matching
+			// set, not just the ~50 rows the search endpoints return for display.
+			// Re-query the audio search with random ordering and a deeper sample so
+			// "genre:dnb", "instrumental:true", or a plain-text query all shuffle
+			// through everything that matches (liked-only on the Liked tab).
+			if (shuffle) {
+				try {
+					const params = buildAudioParams(parseQuery(trimmed), genres);
+					const audio = await api.searchAudio({
+						...params,
+						shuffle: true,
+						liked_only: activeTab === 'liked',
+						limit: SHUFFLE_SAMPLE_SIZE,
+					});
+					const ids = audio.tracks.map((t) => t.id);
+					if (ids.length === 0) {
+						batchError = 'No tracks to play in the current view.';
+						return;
+					}
+					await playTracksInContext(ids, undefined, { shuffle: true });
+					return;
+				} catch (error) {
+					batchError = `Shuffle failed: ${error}`;
+					return;
+				}
+			}
 			const ids = visibleTracks.map((t) => t.id);
 			if (ids.length === 0) {
 				batchError = 'No tracks to play in the current view.';
@@ -777,14 +807,22 @@
 		batchError = null;
 		batchMessage = null;
 		try {
-			if ($searchQuery.trim()) {
-				const source = (activeTab === 'tracks' || activeTab === 'liked')
-					? visibleTracks
-					: searchResults.tracks;
-				if (source.length === 0) {
+			const trimmed = $searchQuery.trim();
+			if (trimmed) {
+				// Draw the random pick from the FULL matching set, not just the ~50
+				// rows on screen. Same server-side random sample the Shuffle button
+				// uses, capped at one track.
+				const params = buildAudioParams(parseQuery(trimmed), genres);
+				const audio = await api.searchAudio({
+					...params,
+					shuffle: true,
+					liked_only: activeTab === 'liked',
+					limit: 1,
+				});
+				const randomTrack = audio.tracks[0];
+				if (!randomTrack) {
 					throw new Error('No searchable tracks are available in the current library view.');
 				}
-				const randomTrack = source[Math.floor(Math.random() * source.length)];
 				await playTrackNow(randomTrack.id);
 				batchMessage = `Playing a random pick: ${randomTrack.title}.`;
 				return;

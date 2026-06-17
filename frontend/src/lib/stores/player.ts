@@ -1148,7 +1148,9 @@ export async function playTracksInContext(
 // The catalog list endpoint caps a single page at 200 rows; that is a sensible
 // queue depth for "Play"/"Shuffle" on the whole library since automix extends
 // from there. Pulling every id (tens of thousands) into one POST is neither
-// necessary nor cheap.
+// necessary nor cheap. For Shuffle the server draws those 200 with ORDER BY
+// RANDOM() so the sample is a fresh random slice of the WHOLE library, not the
+// newest-200 prefix reshuffled in place.
 const LIBRARY_QUEUE_LIMIT = 200;
 
 /**
@@ -1166,8 +1168,11 @@ export async function playLibrary(options?: {
 	if (!assertOnline()) return;
 	playerError.set(null);
 	try {
+		// Shuffle pulls a random slice of the entire library; Play honors the
+		// active sort. Without 'random' here, Shuffle only ever saw the first 200
+		// rows of the current sort (e.g. the 200 newest) and reshuffled those.
 		const { tracks } = await api.getTracks(
-			options?.sortBy ?? 'date_added',
+			options?.shuffle ? 'random' : (options?.sortBy ?? 'date_added'),
 			options?.sortDir ?? 'desc',
 			LIBRARY_QUEUE_LIMIT,
 			0,
