@@ -2098,6 +2098,12 @@ export interface AudioSearchParams {
 	year_max?: number | null;
 	genre_ids?: number[];
 	is_instrumental?: boolean | null;
+	limit?: number;
+	// Ask the server for a true random sample of the full matching set (library
+	// Shuffle) instead of the deterministic display ranking.
+	shuffle?: boolean;
+	// Restrict matches to user-liked tracks (the Liked tab).
+	liked_only?: boolean;
 }
 
 export interface AudioFeaturesStats {

@@ -558,6 +558,11 @@ fn favorite_predicate(favorite_only: bool, liked_only: bool) -> Option<&'static 
 fn track_order_clause(sort_by: &str, sort_dir: &str) -> String {
     let dir = if sort_dir == "asc" { "ASC" } else { "DESC" };
     match sort_by {
+        // True random sample across the whole matching set. Direction is
+        // meaningless for RANDOM(), so it's ignored. Used by the library
+        // Shuffle button so the queue isn't stuck reordering the newest 200
+        // rows; SQLite draws a fresh sample on every request.
+        "random" => "RANDOM()".to_string(),
         "title" => format!("t.title {dir}"),
         "artist" => format!("a_artists.name {dir}"),
         "album" => format!("al.title {dir}"),
@@ -9731,6 +9736,15 @@ mod tests {
     }
 
     #[test]
+    fn random_order_clause_ignores_direction() {
+        // Shuffle relies on this: the library Shuffle button sends sort_by=random
+        // so the queue is a fresh random slice of the whole library, not the
+        // newest-N prefix reshuffled.
+        assert_eq!(track_order_clause("random", "desc"), "RANDOM()");
+        assert_eq!(track_order_clause("random", "asc"), "RANDOM()");
+    }
+
+    #[test]
     fn artist_library_tracks_and_counts_use_library_union_behavior() {
         let conn = Connection::open_in_memory().expect("in-memory db");
         schema::run_migrations(&conn).expect("migrations");
@@ -9950,6 +9964,138 @@ mod tests {
         let results = search_with_audio_filters(&conn, "", &filters, 50).expect("search");
         let ids: Vec<i64> = results.iter().map(|r| r.id).collect();
         assert_eq!(ids, vec![4001]);
+    }
+
+    #[test]
+    fn shuffled_audio_search_covers_full_matching_set() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        conn.execute("INSERT INTO artists (id, name) VALUES (4101, 'Test')", [])
+            .expect("artist");
+        conn.execute(
+            "INSERT INTO albums (id, title, artist_id, source) VALUES (4101, 'A', 4101, 'tidal')",
+            [],
+        )
+        .expect("album");
+        // 8 matching tracks with varied play_count so the deterministic ranking
+        // would order them; shuffle must still surface every matching id.
+        for i in 0..8i64 {
+            let id = 4101 + i;
+            conn.execute(
+                &format!(
+                    "INSERT INTO tracks (
+                        id, title, artist_id, album_id, duration_ms, tidal_id, best_quality,
+                        best_source, fidelity_score, is_favorite, source, play_count
+                     ) VALUES ({id}, 'T{i}', 4101, 4101, 200000, {id}, 'LOSSLESS', 'tidal', 5, 0, 'tidal', {i})"
+                ),
+                [],
+            )
+            .expect("track");
+            conn.execute(
+                &format!("INSERT INTO audio_dsp_features (track_id, bpm) VALUES ({id}, 130.0)"),
+                [],
+            )
+            .expect("dsp");
+        }
+
+        let filters = AudioFilters {
+            bpm_min: Some(120.0),
+            ..Default::default()
+        };
+
+        let results =
+            search_with_audio_filters_shuffled(&conn, "", &filters, 200).expect("shuffle search");
+        let mut ids: Vec<i64> = results.iter().map(|r| r.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, (4101..4109).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn shuffled_audio_search_respects_filters_and_limit() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        conn.execute("INSERT INTO artists (id, name) VALUES (4201, 'Test')", [])
+            .expect("artist");
+        conn.execute(
+            "INSERT INTO albums (id, title, artist_id, source) VALUES (4201, 'A', 4201, 'tidal')",
+            [],
+        )
+        .expect("album");
+        // Two fast (matching) tracks, two slow (non-matching).
+        conn.execute(
+            "INSERT INTO tracks (
+                id, title, artist_id, album_id, duration_ms, tidal_id, best_quality, best_source,
+                fidelity_score, is_favorite, source, play_count
+             ) VALUES
+                (4201, 'Fast A', 4201, 4201, 200000, 4201, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0),
+                (4202, 'Fast B', 4201, 4201, 200000, 4202, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0),
+                (4203, 'Slow A', 4201, 4201, 200000, 4203, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0),
+                (4204, 'Slow B', 4201, 4201, 200000, 4204, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0)",
+            [],
+        )
+        .expect("tracks");
+        conn.execute(
+            "INSERT INTO audio_dsp_features (track_id, bpm) VALUES
+                (4201, 140.0), (4202, 135.0), (4203, 70.0), (4204, 60.0)",
+            [],
+        )
+        .expect("dsp");
+
+        let filters = AudioFilters {
+            bpm_min: Some(120.0),
+            ..Default::default()
+        };
+
+        let results =
+            search_with_audio_filters_shuffled(&conn, "", &filters, 1).expect("shuffle search");
+        assert_eq!(results.len(), 1, "limit must cap the shuffled sample");
+        assert!(
+            matches!(results[0].id, 4201 | 4202),
+            "only the fast tracks should match, got {}",
+            results[0].id
+        );
+    }
+
+    #[test]
+    fn liked_only_audio_search_restricts_to_favorites() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        conn.execute("INSERT INTO artists (id, name) VALUES (4301, 'Test')", [])
+            .expect("artist");
+        conn.execute(
+            "INSERT INTO albums (id, title, artist_id, source) VALUES (4301, 'A', 4301, 'tidal')",
+            [],
+        )
+        .expect("album");
+        // Two liked, two not liked; all match the filter.
+        conn.execute(
+            "INSERT INTO tracks (
+                id, title, artist_id, album_id, duration_ms, tidal_id, best_quality, best_source,
+                fidelity_score, is_favorite, source, play_count
+             ) VALUES
+                (4301, 'Liked A',   4301, 4301, 200000, 4301, 'LOSSLESS', 'tidal', 5, 1, 'tidal', 0),
+                (4302, 'Liked B',   4301, 4301, 200000, 4302, 'LOSSLESS', 'tidal', 5, 1, 'tidal', 0),
+                (4303, 'Unliked A', 4301, 4301, 200000, 4303, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0),
+                (4304, 'Unliked B', 4301, 4301, 200000, 4304, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0)",
+            [],
+        )
+        .expect("tracks");
+
+        let filters = AudioFilters {
+            liked_only: true,
+            ..Default::default()
+        };
+
+        let mut ids: Vec<i64> = search_with_audio_filters_shuffled(&conn, "", &filters, 200)
+            .expect("shuffle search")
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![4301, 4302], "liked_only must drop non-favorites");
     }
 
     #[test]
@@ -10419,6 +10565,7 @@ pub struct AudioFilters {
     pub genre_ids: Vec<i64>,           // track must belong to at least one
     pub track_type: Option<String>,    // placeholder, always "track"
     pub is_instrumental: Option<bool>, // true → vocal:false filter
+    pub liked_only: bool,              // restrict to user-liked tracks (Liked tab)
 }
 
 #[derive(Debug, Serialize)]
@@ -10660,6 +10807,11 @@ fn build_audio_filter_sql(filters: &AudioFilters, start_idx: usize) -> AudioFilt
         params.push(Box::new(if instrumental { 1i64 } else { 0i64 }));
         idx += 1;
     }
+    if filters.liked_only {
+        // Mirrors the Liked tab's client-side is_favorite filter so a filtered
+        // Shuffle on that tab samples only liked tracks, not the whole match set.
+        sql.push_str(" AND t.is_favorite = 1");
+    }
 
     AudioFilterSql {
         sql,
@@ -10674,11 +10826,35 @@ pub fn search_with_audio_filters(
     filters: &AudioFilters,
     limit: usize,
 ) -> Result<Vec<AudioSearchResult>> {
-    match search_with_audio_filters_fts(conn, free_text, filters, limit) {
+    search_with_audio_filters_ordered(conn, free_text, filters, limit, false)
+}
+
+/// Same matching as `search_with_audio_filters`, but returns a true random
+/// sample of the full matching set (`ORDER BY RANDOM()`) instead of the
+/// deterministic favorite / play-count ranking. Backs the library Shuffle
+/// button on a filtered view, so Shuffle randomizes across every matching track
+/// instead of reshuffling the same top rows the display query returns.
+pub fn search_with_audio_filters_shuffled(
+    conn: &Connection,
+    free_text: &str,
+    filters: &AudioFilters,
+    limit: usize,
+) -> Result<Vec<AudioSearchResult>> {
+    search_with_audio_filters_ordered(conn, free_text, filters, limit, true)
+}
+
+fn search_with_audio_filters_ordered(
+    conn: &Connection,
+    free_text: &str,
+    filters: &AudioFilters,
+    limit: usize,
+    shuffle: bool,
+) -> Result<Vec<AudioSearchResult>> {
+    match search_with_audio_filters_fts(conn, free_text, filters, limit, shuffle) {
         Ok(results) => Ok(results),
         Err(err) => {
             tracing::warn!(?err, query = %free_text, "FTS library search failed; falling back to LIKE");
-            search_with_audio_filters_like_fallback(conn, free_text, filters, limit)
+            search_with_audio_filters_like_fallback(conn, free_text, filters, limit, shuffle)
         }
     }
 }
@@ -10688,6 +10864,7 @@ fn search_with_audio_filters_fts(
     free_text: &str,
     filters: &AudioFilters,
     limit: usize,
+    shuffle: bool,
 ) -> Result<Vec<AudioSearchResult>> {
     if filters.track_type.as_deref().is_some_and(|t| t != "track") {
         return Ok(Vec::new());
@@ -10724,10 +10901,12 @@ fn search_with_audio_filters_fts(
     sql.push_str(&filter_sql.sql);
     params.extend(filter_sql.params);
 
-    sql.push_str(&format!(
-        " ORDER BY t.is_favorite DESC, t.play_count DESC, t.fidelity_score DESC, t.title ASC \
-         LIMIT ?{limit_idx}"
-    ));
+    let order = if shuffle {
+        "RANDOM()"
+    } else {
+        "t.is_favorite DESC, t.play_count DESC, t.fidelity_score DESC, t.title ASC"
+    };
+    sql.push_str(&format!(" ORDER BY {order} LIMIT ?{limit_idx}"));
     params.push(Box::new(limit as i64));
 
     let mut stmt = conn.prepare(&sql)?;
@@ -10765,6 +10944,7 @@ fn search_with_audio_filters_like_fallback(
     free_text: &str,
     filters: &AudioFilters,
     limit: usize,
+    shuffle: bool,
 ) -> Result<Vec<AudioSearchResult>> {
     let normalized = free_text.trim().to_ascii_lowercase();
 
@@ -10807,9 +10987,12 @@ fn search_with_audio_filters_like_fallback(
     sql.push_str(&filter_sql.sql);
     params.extend(filter_sql.params);
 
-    sql.push_str(&format!(
-        " ORDER BY t.play_count DESC, t.last_played_at DESC LIMIT ?{limit_idx}"
-    ));
+    let order = if shuffle {
+        "RANDOM()"
+    } else {
+        "t.play_count DESC, t.last_played_at DESC"
+    };
+    sql.push_str(&format!(" ORDER BY {order} LIMIT ?{limit_idx}"));
     params.push(Box::new(limit as i64));
 
     let mut stmt = conn.prepare(&sql)?;
