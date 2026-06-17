@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  ws: 8.20.1
+  ws: 8.21.0
   esbuild: ^0.28.1
 
 importers:
@@ -1060,8 +1060,8 @@ packages:
   wrappy@1.0.2:
     resolution: {integrity: sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ==}
 
-  ws@8.20.1:
-    resolution: {integrity: sha512-It4dO0K5v//JtTXuPkfEOaI3uUN87iYPnqo/ZzqCoG3g8uhA66QUMs/SrM0YK7/NAu+r4LMh/9dq2A7k+rHs+w==}
+  ws@8.21.0:
+    resolution: {integrity: sha512-Vsp28b7DRcimFQvrqu2Wek3z1iYxDCWqHYB8Qsnk/S4RfaCQzPGPyBNuVjJV3cd6UiKtUtp6sNM77gWvzcCH+g==}
     engines: {node: '>=10.0.0'}
     peerDependencies:
       bufferutil: ^4.0.1
@@ -1270,7 +1270,7 @@ snapshots:
       react-dom: 19.2.6(react@19.2.6)
       react-refresh: 0.18.0
       remotion: 4.0.462(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
-      style-loader: 4.0.0(webpack@5.105.0)
+      style-loader: 4.0.0(webpack@5.105.0(esbuild@0.28.1)(postcss@8.5.10))
       webpack: 5.105.0(esbuild@0.28.1)(postcss@8.5.10)
     transitivePeerDependencies:
       - '@minify-html/node'
@@ -1371,7 +1371,7 @@ snapshots:
       react-dom: 19.2.6(react@19.2.6)
       remotion: 4.0.462(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
       source-map: 0.8.0-beta.0
-      ws: 8.20.1
+      ws: 8.21.0
     optionalDependencies:
       '@remotion/compositor-darwin-arm64': 4.0.462
       '@remotion/compositor-darwin-x64': 4.0.462
@@ -2010,7 +2010,7 @@ snapshots:
 
   strip-final-newline@2.0.0: {}
 
-  style-loader@4.0.0(webpack@5.105.0):
+  style-loader@4.0.0(webpack@5.105.0(esbuild@0.28.1)(postcss@8.5.10)):
     dependencies:
       webpack: 5.105.0(esbuild@0.28.1)(postcss@8.5.10)
 
@@ -2120,7 +2120,7 @@ snapshots:
 
   wrappy@1.0.2: {}
 
-  ws@8.20.1: {}
+  ws@8.21.0: {}
 
   yallist@4.0.0: {}
 
