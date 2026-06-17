@@ -9,14 +9,14 @@
 		"check": "tsc --noEmit"
 	},
 	"dependencies": {
-		"@remotion/cli": "^4.0.0",
-		"@remotion/renderer": "^4.0.0",
-		"react": "^19.2.0",
-		"react-dom": "^19.2.0",
-		"remotion": "^4.0.0"
+		"@remotion/cli": "^4.0.479",
+		"@remotion/renderer": "^4.0.479",
+		"react": "^19.2.7",
+		"react-dom": "^19.2.7",
+		"remotion": "^4.0.479"
 	},
 	"devDependencies": {
-		"@types/react": "^19.2.14",
+		"@types/react": "^19.2.17",
 		"@types/react-dom": "^19.2.3",
 		"typescript": "^6.0.3"
 	},
