@@ -93,7 +93,11 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          cache-targets: false
+          # Cache compiled deps (not just the registry) so the from-scratch
+          # ~15 min portable build drops to a few min on a warm cache. Windows
+          # is the release bottleneck; the other jobs stay registry-only to keep
+          # the repo's 10 GB cache budget from thrashing pr-check's caches.
+          cache-targets: true
 
       - name: Sync version from tag
         shell: bash
@@ -143,15 +147,16 @@ jobs:
           $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
           "$hash  NOORwave-${{ github.ref_name }}-windows-x64.zip" | Out-File -Encoding utf8 dist\windows.sha256
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "=2.10.1" --locked
-
+      # Run the Tauri CLI from its prebuilt npm binary instead of
+      # `cargo install tauri-cli`, which compiled the CLI from source and cost
+      # ~9 min per release. Same CLI, same version pin; pnpm + Node are already
+      # set up above. The bundle output path the next step reads is unchanged.
       - name: Build NSIS installer
         working-directory: noor-app
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: cargo tauri build --bundles nsis --config tauri.installer.conf.json
+        run: pnpm dlx --package=@tauri-apps/cli@2.10.1 tauri build --bundles nsis --config tauri.installer.conf.json
 
       - name: Package installer update metadata
         shell: pwsh
