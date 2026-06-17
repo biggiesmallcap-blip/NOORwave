@@ -288,3 +288,38 @@ hardening:
 - Consider making `ACTIVE_STALL_RECOVERY_SECS` configurable and/or a brief "skipped, slow
   connection" toast so the auto-skip is visible.
 - Spawned by: crossfade-stall diagnosis + 4-agent audit (this session).
+
+## Library/search list virtualization (perf, deferred 2026-06-17)
+
+Fixed: library + search track-list hover lag. The play-number reveal toggled `display:none<->block`
+on hover, which forces a layout pass; on the un-virtualized list that reflow walked an ever-larger
+box tree, so it lagged more the deeper you'd scrolled. Now the glyphs are grid-stacked and revealed
+via `visibility` (reflow-free). (`frontend/src/routes/library/+page.svelte` ~4467,
+`frontend/src/routes/search/+page.svelte` ~2759.)
+
+Still deferred (raw DOM size, not the reported hover bug):
+- The library tracks/albums/artists lists and the search single-category lists render the FULL
+  result set with no windowing; infinite-scroll appends and never unloads (`tracks.update((t) =>
+  [...t, ...data.tracks])` at `frontend/src/lib/stores/library.ts:44`). A multi-thousand-row
+  library = 100k+ live nodes, which still costs on initial paint, memory, and the
+  selection/playback `class:` re-eval that fans out across every row on click.
+- Cheapest next step: `content-visibility: auto` + a MEASURED `contain-intrinsic-size` (~30-36px,
+  NOT the 64px copied from playlists) on a non-interactive row wrapper, desktop surfaces only
+  (the remote/* surfaces removed it on purpose: iOS Safari thrashes). BEFORE shipping it, add
+  regression coverage for two scroll mechanics it can break here: held-Arrow cursor
+  `scrollIntoView({block:'nearest'})` landing on size-estimated off-screen rows
+  (`+page.svelte` ~1621), and `restoreScroll`'s `scrollHeight` reach-termination on deep back-nav
+  (`frontend/src/lib/navigation/scroll.ts:36`). Selection is keyed by `track.id`, so it is NOT
+  at risk.
+- Ancestor amplifier: `.workspace` is BOTH the scroll container and a `backdrop-filter: blur()`
+  element (`frontend/src/routes/+layout.svelte:2144`), wallpaper-on by default with a 60fps WebGL
+  backdrop, so any in-region repaint re-blurs the viewport. Constant (viewport-bounded), not the
+  scroll-depth scaler, but worth moving the blur to a fixed layer behind the content if hover/scroll
+  paint still feels heavy after windowing.
+- True virtual list = last resort, contingent on a WebView2 Performance-panel trace, given the
+  scroll-mechanic regression surface above.
+- Consolidate the bespoke library + search track rows onto the shared `TrackRow.svelte`, which
+  already implements this exact reveal correctly, to kill the divergence between the two hand-rolled
+  rows.
+- Artist/album card hovers use `transform: translateY` (compositor-only, no reflow), so they were
+  ruled out as a hover-lag source.
