@@ -30,47 +30,49 @@ jobs:
         with:
           generate_release_notes: true
           body: |
-            **Windows installer and portable recovery build, plus portable macOS/Linux builds.**
+            Desktop hi-fi player for your TIDAL library. Windows installer plus portable recovery zip, and portable macOS and Linux builds.
 
-            | Platform | File | Launch |
-            |---|---|---|
-            | Windows | `NOORwave-vX.X.X-windows-x64-setup.exe` | Per-user installer. Installs to `%LOCALAPPDATA%\Programs\NOORwave` and updates from signed updater metadata. |
-            | Windows | `NOORwave-vX.X.X-windows-x64.zip` | Double-click `NOORwave.exe` |
-            | macOS ARM64 | `NOORwave-vX.X.X-macos-arm64.tar.gz` | `./NOORwave` |
-            | macOS x64 | `NOORwave-vX.X.X-macos-x64.tar.gz` | `./NOORwave` |
-            | Linux x64 | `NOORwave-vX.X.X-linux-x64.tar.gz` | `./NOORwave` |
+            ## Downloads
 
-            Use the Windows portable zip as the recovery path if the installer or updater is blocked.
+            | Platform | File |
+            |---|---|
+            | Windows (installer) | `NOORwave-vX.X.X-windows-x64-setup.exe` |
+            | Windows (portable) | `NOORwave-vX.X.X-windows-x64.zip` |
+            | macOS (Apple Silicon) | `NOORwave-vX.X.X-macos-arm64.tar.gz` |
+            | macOS (Intel) | `NOORwave-vX.X.X-macos-x64.tar.gz` |
+            | Linux | `NOORwave-vX.X.X-linux-x64.tar.gz` |
 
-            ### Contents (all platforms)
-            - `NOORwave` / `NOORwave.exe` - app window + system tray
-            - `noor-server` / `noor-server.exe` - local music server
-            - `www/` - bundled UI (do not delete)
+            **Windows:** run the installer (installs to `%LOCALAPPDATA%\Programs\NOORwave`, auto-updates), or unzip and double-click `NOORwave.exe`.
+            **macOS / Linux:** unzip, then run `./NOORwave`.
 
-            ### Windows 11 note
-            Windows builds are not CA-signed today. SmartScreen or Smart App
-            Control can warn or block the first launch on strict systems. The
-            installed updater payload is still signed with the project's Tauri
-            updater key.
+            Each build bundles the app, the local `noor-server`, and the UI in `www/` (don't delete it). The Windows portable zip is your recovery path if the installer or updater is ever blocked.
 
-            Advanced workaround: build locally from source with:
+            <details>
+            <summary><b>Windows blocked at first launch?</b></summary>
+
+            Builds are not CA-signed yet, so SmartScreen or Smart App Control may warn on or block the first launch on strict systems. The installed updater payload is still signed with the project's Tauri key, so updates stay verified. The portable zip is the simplest fallback. To build your own copy from source:
             ```powershell
             .\scripts\build-windows11-release.cmd
             ```
-            This creates `dist\NOORwave-win11\NOORwave.exe`. The result is
-            still unsigned, so strict Smart App Control setups may still block it.
+            The result is still unsigned, so strict Smart App Control may still block it.
+            </details>
 
-            ### macOS note
-            First launch may be blocked by Gatekeeper. To clear it:
+            <details>
+            <summary><b>macOS blocked by Gatekeeper?</b></summary>
+
             ```
             xattr -cr NOORwave noor-server
             ```
+            </details>
 
-            ### Verifying downloads
+            <details>
+            <summary><b>Verify your download</b></summary>
+
             ```
             sha256sum -c sha256sums.txt
             ```
-            Windows: compare the setup exe and portable zip against `sha256sums.txt`
+            On Windows, compare the setup exe and portable zip against `sha256sums.txt`.
+            </details>
 
   build-windows:
     needs: create-release
