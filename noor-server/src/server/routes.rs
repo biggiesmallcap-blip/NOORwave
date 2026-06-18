@@ -6731,6 +6731,292 @@ fn import_metadata_from_tidal_track(t: TidalTrack) -> tidal_import::ImportTrackM
     }
 }
 
+// How many search hits to consider when resolving a pending row. Heavily
+// remixed songs push the plain studio cut well down TIDAL's relevance order, so
+// pulling only the top few can leave the original out of the candidate set
+// entirely. Ten is enough headroom without materially changing latency.
+const TIDAL_RESOLVE_POOL: i32 = 10;
+
+/// How a TIDAL track relates to the plain studio recording, inferred from its
+/// `version` field (authoritative) or a trailing descriptor in the title.
+///
+/// `Original` is the canonical performance: no version tag, or a marker that
+/// only describes mastering/format (remaster, mono, deluxe edition...) which is
+/// the *same* recording and stays eligible. Every other class is a different
+/// recording and gets demoted unless the request explicitly asked for it. This
+/// version axis is the only thing separating "American Pie" from "American Pie
+/// (L'Tric Remix)": they share a base title and artist, so title+artist scoring
+/// alone ties them at 1.0 and the remix can win by listing order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VersionClass {
+    Original,
+    Remix,
+    Live,
+    Acoustic,
+    Instrumental,
+    Cover,
+    SpedSlowed,
+    Edit,
+    OtherVariant,
+}
+
+fn normalize_version_text(s: &str) -> String {
+    s.to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn version_text_has_word(normalized: &str, word: &str) -> bool {
+    normalized.split(' ').any(|tok| tok == word)
+}
+
+/// Classify a free-text version descriptor. Returns `None` when nothing is
+/// recognized, so callers decide what an unknown tag means in context: a
+/// populated TIDAL `version` field is a deliberate variant flag, while a bare
+/// title parenthetical like "(Pt. 1)" is probably just part of the title.
+fn classify_version_descriptor(descriptor: &str) -> Option<VersionClass> {
+    let d = normalize_version_text(descriptor);
+    if d.is_empty() {
+        return None;
+    }
+    // Mastering / format / explicitly-original markers describe the same
+    // performance, so they resolve to Original. Checked first so "Original Mix"
+    // and "Deluxe Edition" never fall through to the "mix"/"edit" branches.
+    const MASTERING: &[&str] = &[
+        "original mix",
+        "original version",
+        "album version",
+        "single version",
+        "original",
+        "remaster",
+        "remastered",
+        "mono",
+        "stereo",
+        "deluxe",
+        "anniversary",
+        "expanded",
+        "reissue",
+        "edition",
+        "bonus",
+    ];
+    if MASTERING.iter().any(|m| d.contains(m)) {
+        return Some(VersionClass::Original);
+    }
+    const REMIX: &[&str] = &[
+        "remix", "rmx", "bootleg", "rework", "flip", "vip", "mashup", "mash up", "club mix", "dub",
+    ];
+    if REMIX.iter().any(|m| d.contains(m)) {
+        return Some(VersionClass::Remix);
+    }
+    if version_text_has_word(&d, "live") || d.contains("in concert") {
+        return Some(VersionClass::Live);
+    }
+    if d.contains("acoustic") || d.contains("unplugged") {
+        return Some(VersionClass::Acoustic);
+    }
+    if d.contains("instrumental") || d.contains("karaoke") {
+        return Some(VersionClass::Instrumental);
+    }
+    if d.contains("cover")
+        || d.contains("originally performed")
+        || d.contains("made famous")
+        || d.contains("tribute")
+    {
+        return Some(VersionClass::Cover);
+    }
+    if d.contains("sped up")
+        || d.contains("spedup")
+        || d.contains("slowed")
+        || d.contains("nightcore")
+    {
+        return Some(VersionClass::SpedSlowed);
+    }
+    if version_text_has_word(&d, "edit") || d.contains("extended") {
+        return Some(VersionClass::Edit);
+    }
+    None
+}
+
+/// Split a trailing variant descriptor off a title. Only the last bracketed
+/// group or a " - " tail is considered:
+/// "American Pie (L'Tric Remix)" -> ("American Pie", Some("L'Tric Remix")).
+fn split_title_descriptor(title: &str) -> (String, Option<String>) {
+    let t = title.trim();
+    if let Some(open) = t.rfind(['(', '[']) {
+        let want_close = if t.as_bytes()[open] == b'(' {
+            b')'
+        } else {
+            b']'
+        };
+        if t.as_bytes().last() == Some(&want_close) {
+            let inner = t[open + 1..t.len() - 1].trim();
+            let base = t[..open].trim();
+            if !inner.is_empty() && !base.is_empty() {
+                return (base.to_string(), Some(inner.to_string()));
+            }
+        }
+    }
+    if let Some(idx) = t.rfind(" - ") {
+        let desc = t[idx + 3..].trim();
+        let base = t[..idx].trim();
+        if !desc.is_empty() && !base.is_empty() {
+            return (base.to_string(), Some(desc.to_string()));
+        }
+    }
+    (t.to_string(), None)
+}
+
+/// Base title (for fuzzy scoring) plus version class for a search candidate. The
+/// `version` field wins; a populated-but-unrecognized version still means "not
+/// the plain original" and demotes. Without a version field we read a title
+/// descriptor, where an unrecognized parenthetical is kept as part of the title.
+fn classify_candidate(track: &TidalSearchTrack) -> (String, VersionClass) {
+    let version = track
+        .extra
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(version) = version {
+        let class = classify_version_descriptor(version).unwrap_or(VersionClass::OtherVariant);
+        return (track.title.clone(), class);
+    }
+    classify_title_field(&track.title)
+}
+
+/// Base title plus version class for a free title string with no separate
+/// version field (e.g. a Last.fm suggestion). Unrecognized descriptors stay
+/// Original so genuine titles like "Shine On You Crazy Diamond (Pt. 1)" match.
+fn classify_title_field(title: &str) -> (String, VersionClass) {
+    let (base, desc) = split_title_descriptor(title);
+    match desc.as_deref().and_then(classify_version_descriptor) {
+        Some(class) => (base, class),
+        None => (title.trim().to_string(), VersionClass::Original),
+    }
+}
+
+fn version_quality_rank(quality: Option<&str>) -> u8 {
+    match quality.map(str::to_ascii_uppercase).as_deref() {
+        Some("HI_RES_LOSSLESS") | Some("HI_RES") => 3,
+        Some("LOSSLESS") => 2,
+        Some("HIGH") => 1,
+        _ => 0,
+    }
+}
+
+/// Pick the best TIDAL search result for a pending `(artist, title)`, preferring
+/// the version the request actually implies. Pure (no network) so it can be unit
+/// tested against synthetic candidate sets.
+///
+/// 1. Score every candidate on base-title + artist Jaro-Winkler (variant
+///    descriptors stripped first), keeping those that clear the threshold.
+/// 2. Partition by whether the candidate's version class matches the request.
+///    Prefer the matching set; fall back to the rest only when nothing matched,
+///    so a song that exists *only* as a remix still resolves instead of stalling.
+/// 3. Within the chosen set, rank by score, then descriptor closeness when a
+///    specific variant was named (so a named remix beats a different one), then
+///    audio quality as a hi-fi-friendly final tiebreak.
+fn select_best_tidal_match(
+    pending_artist: &str,
+    pending_title: &str,
+    results: Vec<TidalSearchTrack>,
+) -> Option<(f64, TidalSearchTrack)> {
+    let (pending_base, pending_class) = classify_title_field(pending_title);
+    let pending_desc_norm = split_title_descriptor(pending_title)
+        .1
+        .map(|d| normalize_version_text(&d))
+        .unwrap_or_default();
+
+    struct Scored {
+        score: f64,
+        class: VersionClass,
+        desc_sim: f64,
+        quality: u8,
+        track: TidalSearchTrack,
+    }
+
+    let mut scored: Vec<Scored> = results
+        .into_iter()
+        .filter_map(|track| {
+            let (cand_base, class) = classify_candidate(&track);
+            let score = score_tidal_candidate(
+                track.artist_name.as_deref().unwrap_or(""),
+                &cand_base,
+                pending_artist,
+                &pending_base,
+            );
+            if score < MATCH_QUALITY_THRESHOLD {
+                return None;
+            }
+            let cand_desc_norm = track
+                .extra
+                .get("version")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .or_else(|| split_title_descriptor(&track.title).1)
+                .map(|d| normalize_version_text(&d))
+                .unwrap_or_default();
+            let desc_sim = if pending_desc_norm.is_empty() {
+                0.0
+            } else {
+                strsim::jaro_winkler(&pending_desc_norm, &cand_desc_norm)
+            };
+            Some(Scored {
+                score,
+                class,
+                desc_sim,
+                quality: version_quality_rank(track.audio_quality.as_deref()),
+                track,
+            })
+        })
+        .collect();
+
+    if scored.is_empty() {
+        return None;
+    }
+
+    // Prefer candidates whose version class matches the request; only keep the
+    // mismatched ones if nothing matched at all (the fallback).
+    if scored
+        .iter()
+        .any(|s| version_intent_matches(pending_class, s.class))
+    {
+        scored.retain(|s| version_intent_matches(pending_class, s.class));
+    }
+
+    let want_desc = !pending_desc_norm.is_empty();
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                if want_desc {
+                    b.desc_sim
+                        .partial_cmp(&a.desc_sim)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .then(b.quality.cmp(&a.quality))
+    });
+
+    scored.into_iter().next().map(|s| (s.score, s.track))
+}
+
+/// A candidate satisfies the request when its version class is the same. A clean
+/// request (`Original`) only accepts originals; a request that named a variant
+/// (remix, acoustic...) only accepts that same kind.
+fn version_intent_matches(pending: VersionClass, candidate: VersionClass) -> bool {
+    pending == candidate
+}
+
 async fn find_pending_tidal_match(
     client: &TidalClient,
     pending_artist: &str,
@@ -6743,25 +7029,157 @@ async fn find_pending_tidal_match(
     }
 
     let query = format!("{} {}", pending_artist, pending_title);
-    let results = client.search(&query, 5).await?;
-    let best = results
-        .into_iter()
-        .filter_map(|t| {
-            let s = score_tidal_candidate(
-                t.artist_name.as_deref().unwrap_or(""),
-                &t.title,
-                pending_artist,
-                pending_title,
-            );
-            if s >= MATCH_QUALITY_THRESHOLD {
-                Some((s, t))
-            } else {
-                None
-            }
-        })
-        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let results = client.search(&query, TIDAL_RESOLVE_POOL).await?;
+    Ok(
+        select_best_tidal_match(pending_artist, pending_title, results)
+            .map(|(score, track)| (score, import_metadata_from_search_track(track))),
+    )
+}
 
-    Ok(best.map(|(score, track)| (score, import_metadata_from_search_track(track))))
+#[cfg(test)]
+mod version_match_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn track(
+        id: i64,
+        title: &str,
+        artist: &str,
+        version: Option<&str>,
+        quality: &str,
+    ) -> TidalSearchTrack {
+        let mut extra = HashMap::new();
+        if let Some(v) = version {
+            extra.insert(
+                "version".to_string(),
+                serde_json::Value::String(v.to_string()),
+            );
+        }
+        TidalSearchTrack {
+            id,
+            title: title.to_string(),
+            duration: 200,
+            artist_name: Some(artist.to_string()),
+            audio_quality: Some(quality.to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
+    fn pick(artist: &str, title: &str, results: Vec<TidalSearchTrack>) -> Option<i64> {
+        select_best_tidal_match(artist, title, results).map(|(_, t)| t.id)
+    }
+
+    #[test]
+    fn clean_request_prefers_original_over_remix_regardless_of_order() {
+        // The bug: both share base title "American Pie", so title+artist tie at
+        // 1.0 and listing order decided the winner.
+        let original = || track(1, "American Pie", "Don McLean", None, "LOSSLESS");
+        let remix = || {
+            track(
+                2,
+                "American Pie",
+                "Don McLean",
+                Some("L'Tric Remix"),
+                "LOSSLESS",
+            )
+        };
+        assert_eq!(
+            pick("Don McLean", "American Pie", vec![original(), remix()]),
+            Some(1)
+        );
+        assert_eq!(
+            pick("Don McLean", "American Pie", vec![remix(), original()]),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn remix_only_results_resolve_as_fallback() {
+        let results = vec![track(
+            2,
+            "American Pie",
+            "Don McLean",
+            Some("L'Tric Remix"),
+            "LOSSLESS",
+        )];
+        assert_eq!(pick("Don McLean", "American Pie", results), Some(2));
+    }
+
+    #[test]
+    fn explicit_variant_request_takes_the_variant_not_the_original() {
+        let results = vec![
+            track(1, "Layla", "Eric Clapton", None, "LOSSLESS"),
+            track(2, "Layla", "Eric Clapton", Some("Acoustic"), "LOSSLESS"),
+        ];
+        assert_eq!(pick("Eric Clapton", "Layla (Acoustic)", results), Some(2));
+    }
+
+    #[test]
+    fn named_remix_request_prefers_the_matching_name() {
+        let results = vec![
+            track(1, "Song", "Artist", Some("Someone Else Remix"), "LOSSLESS"),
+            track(2, "Song", "Artist", Some("L'Tric Remix"), "LOSSLESS"),
+            track(3, "Song", "Artist", None, "LOSSLESS"),
+        ];
+        assert_eq!(pick("Artist", "Song (L'Tric Remix)", results), Some(2));
+    }
+
+    #[test]
+    fn remaster_is_not_demoted() {
+        // Remaster is the same performance; for a clean request with only a
+        // remaster and a remix available, the remaster must win.
+        let results = vec![
+            track(1, "Heroes", "David Bowie", Some("2017 Remaster"), "HI_RES"),
+            track(2, "Heroes", "David Bowie", Some("Club Mix"), "LOSSLESS"),
+        ];
+        assert_eq!(pick("David Bowie", "Heroes", results), Some(1));
+    }
+
+    #[test]
+    fn live_version_does_not_leak_into_a_clean_request() {
+        let results = vec![
+            track(
+                1,
+                "Wish You Were Here",
+                "Pink Floyd",
+                Some("Live"),
+                "LOSSLESS",
+            ),
+            track(2, "Wish You Were Here", "Pink Floyd", None, "LOSSLESS"),
+        ];
+        assert_eq!(pick("Pink Floyd", "Wish You Were Here", results), Some(2));
+    }
+
+    #[test]
+    fn variant_in_title_is_detected_without_a_version_field() {
+        let results = vec![
+            track(1, "Get Lucky (Radio Edit)", "Daft Punk", None, "LOSSLESS"),
+            track(2, "Get Lucky", "Daft Punk", None, "LOSSLESS"),
+        ];
+        assert_eq!(pick("Daft Punk", "Get Lucky", results), Some(2));
+    }
+
+    #[test]
+    fn unrecognized_parenthetical_is_treated_as_title_not_variant() {
+        let results = vec![track(
+            1,
+            "Shine On You Crazy Diamond (Pt. 1)",
+            "Pink Floyd",
+            None,
+            "LOSSLESS",
+        )];
+        assert_eq!(
+            pick("Pink Floyd", "Shine On You Crazy Diamond (Pt. 1)", results),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn wrong_artist_below_threshold_is_rejected() {
+        let results = vec![track(1, "American Pie", "Madonna", None, "LOSSLESS")];
+        assert_eq!(pick("Don McLean", "American Pie", results), None);
+    }
 }
 
 /// Atomically promote a pending queue row to a resolved library row, then
