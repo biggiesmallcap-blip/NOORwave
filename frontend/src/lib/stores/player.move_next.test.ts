@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'vitest';
-import { computePlayNextPos, normalizePlayerError, selectOptimisticNextItem } from './player';
+import {
+	computePlayNextPos,
+	normalizePlayerError,
+	reorderDropIndex,
+	selectAppendedQueueRow,
+	selectOptimisticNextItem
+} from './player';
 
 // Regression: moveQueueTrackNext used to rebuild the queue via
 // replacePlaybackQueue(track_ids), which silently dropped ephemeral TIDAL
@@ -66,6 +72,56 @@ describe('selectOptimisticNextItem', () => {
 
 		expect(selectOptimisticNextItem(queue, 1, 12)?.id).toBe(13);
 		expect(selectOptimisticNextItem(queue, 1, null)?.id).toBe(11);
+	});
+});
+
+describe('reorderDropIndex', () => {
+	// Regression: handleQueueDrop passed the pre-removal target index straight to
+	// moveQueueItem, which removes the dragged row first. Downward drags landed
+	// one slot too low. reorderDropIndex applies the removal-shift correction.
+	test('downward drag (source above target) subtracts one', () => {
+		// Queue [cur,A,B,C] (0..3). Drag A(1) onto C(3): after removing A the
+		// target slot is 2, so the row lands on C's top edge, not below it.
+		expect(reorderDropIndex(1, 3)).toBe(2);
+	});
+
+	test('upward drag (source below target) keeps the target index', () => {
+		// Drag C(3) onto A(1): removing C does not shift A, so insert at 1.
+		expect(reorderDropIndex(3, 1)).toBe(1);
+	});
+
+	test('missing source index keeps the target index', () => {
+		expect(reorderDropIndex(-1, 4)).toBe(4);
+	});
+
+	test('adjacent downward drag collapses to a no-op-ish same slot', () => {
+		// Drag A(1) onto B(2): subtract one -> 1, i.e. stays put (drop just below).
+		expect(reorderDropIndex(1, 2)).toBe(1);
+	});
+});
+
+describe('selectAppendedQueueRow', () => {
+	const row = (id: number, trackId: number) => ({ id, track: { id: trackId } });
+
+	test('picks the genuinely-new row when the track was already queued', () => {
+		// Regression: a track-id match returned the pre-existing earlier copy and
+		// the freshly appended row (id 99) was stranded at the bottom -> "Play
+		// next went to the bottom".
+		const before = [row(10, 1), row(11, 2)];
+		const after = [row(10, 1), row(11, 2), row(99, 1)];
+		expect(selectAppendedQueueRow(before, after, 1)?.id).toBe(99);
+	});
+
+	test('picks the new row for a track not previously queued', () => {
+		const before = [row(10, 1)];
+		const after = [row(10, 1), row(12, 5)];
+		expect(selectAppendedQueueRow(before, after, 5)?.id).toBe(12);
+	});
+
+	test('falls back to a track-id match when no new id appears', () => {
+		const before = [row(10, 1), row(11, 2)];
+		const after = [row(10, 1), row(11, 2)]; // dedupe: nothing appended
+		expect(selectAppendedQueueRow(before, after, 2)?.id).toBe(11);
 	});
 });
 
