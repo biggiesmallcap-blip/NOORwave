@@ -37,6 +37,7 @@
 		toggleTrackFavorite,
 		toggleMute,
 		moveQueueItem,
+		reorderDropIndex,
 		clearQueue as clearQueueAction,
 		restoreQueueItems,
 		saveQueueAsPlaylist,
@@ -838,7 +839,13 @@
 		const fullQueue = $playbackQueue;
 		const targetIndex = fullQueue.findIndex((q) => q.id === target.id);
 		if (targetIndex === -1) return;
-		await moveQueueItem(sourceId, targetIndex);
+		// moveQueueItem (and the server) interpret the index AFTER the dragged row
+		// is spliced out. For a downward drag (source sits above the target),
+		// removing the source shifts the target up one slot, so reorderDropIndex
+		// subtracts one to land ON the target's top edge (the "drops here"
+		// indicator) instead of one row below it. Upward drags keep the index.
+		const sourceIndex = fullQueue.findIndex((q) => q.id === sourceId);
+		await moveQueueItem(sourceId, reorderDropIndex(sourceIndex, targetIndex));
 	}
 
 	function handleQueueDragEnd() {
@@ -1618,7 +1625,7 @@
 
 			{#if upcomingQueue.length > 0}
 				<div class="queue-list" id="queue-list" role="list" bind:this={queueListEl} onscroll={handleQueueScroll}>
-					{#each upcomingQueue.slice(0, queueVisibleCount) as item, i (`${item.id}-${i}`)}
+					{#each upcomingQueue.slice(0, queueVisibleCount) as item (item.id)}
 						{@const aid = item.track.artist_id}
 						{@const isPending = item.is_pending === true}
 						<div
@@ -1944,7 +1951,7 @@
 
 			{#if upcomingQueue.length > 0}
 				<div class="mobile-np-queue-list" role="list">
-					{#each upcomingQueue.slice(0, queueVisibleCount) as item, i (`${item.id}-${i}`)}
+					{#each upcomingQueue.slice(0, queueVisibleCount) as item (item.id)}
 						{@const aid = item.track.artist_id}
 						{@const isPending = item.is_pending === true}
 						<div

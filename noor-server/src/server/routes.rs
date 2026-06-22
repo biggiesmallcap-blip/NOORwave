@@ -6143,6 +6143,27 @@ async fn play_track(
         "playback start requested"
     );
 
+    // Was this track already a row in the queue BEFORE play_track_now (which
+    // appends it if absent)? An in-queue jump (e.g. clicking a library row that
+    // is sitting alongside a TIDAL mix continuation) must NOT wipe the ephemeral
+    // rows: the user is moving within one Up Next list, not abandoning the mix.
+    // We only clear the continuation when starting a track that is genuinely
+    // outside the current queue. The "Play all / load queue" path already does a
+    // full `DELETE FROM queue` in replace_queue, so by the time it reaches here
+    // the played row is in the fresh queue and there are no ephemeral rows left
+    // to clear anyway.
+    let track_already_queued = {
+        let state_guard = state.read().await;
+        state_guard
+            .db
+            .with_conn(|conn| {
+                Ok::<bool, anyhow::Error>(
+                    first_queue_item_id_for_track(conn, payload.track_id)?.is_some(),
+                )
+            })
+            .unwrap_or(false)
+    };
+
     let snapshot = {
         let state_guard = state.read().await;
         state_guard
@@ -6166,7 +6187,10 @@ async fn play_track(
                 )
             })?
     };
-    clear_ephemeral_playback_markers(&state, true).await;
+    // Always drop the in-memory ephemeral/external overlay (we're switching to a
+    // library track), but only delete the persisted mix continuation rows when
+    // this is not an in-queue jump. See `track_already_queued` above.
+    clear_ephemeral_playback_markers(&state, !track_already_queued).await;
 
     let user_quality = current_user_audio_quality(&state).await;
     let stream_request = match player::build_tidal_stream_request(&track, user_quality.clone()) {
@@ -8696,6 +8720,29 @@ async fn queue_append_many(
     Ok(Json(json!({ "queue": queue })))
 }
 
+/// Decide the `after_position` for a "Play next" insert. Returns `Some(pos)` to
+/// insert right after `pos`, or `None` to append at the end of the queue.
+///
+/// - `current_pos`: position of the currently-playing queue row, if any
+///   (`current_queue_position`).
+/// - `front_pos`: the lowest position in the queue (`queue::front_position`).
+/// - `ephemeral_active`: whether a TIDAL mix/external overlay is the live track.
+///   During a mix the playing track has no queue row and the DB anchor is NULL,
+///   so `current_pos` is `None` even though something is playing; "after current"
+///   then means the front of the remaining continuation (`front - 1`), not the
+///   bottom of the queue.
+fn play_next_after_position(
+    current_pos: Option<i32>,
+    front_pos: Option<i32>,
+    ephemeral_active: bool,
+) -> Option<i32> {
+    match (current_pos, ephemeral_active, front_pos) {
+        (Some(pos), _, _) => Some(pos),
+        (None, true, Some(front)) => Some(front - 1),
+        _ => None,
+    }
+}
+
 async fn queue_play_next(
     State(state): State<SharedState>,
     Json(payload): Json<QueueExternalRequest>,
@@ -8708,12 +8755,24 @@ async fn queue_play_next(
         state_guard
             .user_cleared_at
             .store(0, std::sync::atomic::Ordering::Relaxed);
+        // During an ephemeral TIDAL mix the playing track has no queue row and the
+        // DB anchor is NULL, so current_queue_position() returns None. Without this
+        // flag "Play next" would fall through to append-at-bottom; instead we
+        // insert at the front of the remaining continuation (the visible top of
+        // Up Next during a mix).
+        let ephemeral_active = state_guard.ephemeral_tidal_track.is_some()
+            || state_guard.external_playback_track.is_some();
         let event_tx = state_guard.event_tx.clone();
         state_guard
             .db
             .with_conn(|conn| {
-                let inserted = match current_queue_position(conn)? {
-                    Some(position) => queue::insert_external_track_after(conn, &insert, position)?,
+                let after = play_next_after_position(
+                    current_queue_position(conn)?,
+                    queue::front_position(conn)?,
+                    ephemeral_active,
+                );
+                let inserted = match after {
+                    Some(after) => queue::insert_external_track_after(conn, &insert, after)?,
                     None => queue::append_external_track(conn, &insert)?,
                 };
                 let queue = queue::load_queue(conn)?;
@@ -8761,14 +8820,21 @@ async fn queue_play_next_many(
         state_guard
             .user_cleared_at
             .store(0, std::sync::atomic::Ordering::Relaxed);
+        // See queue_play_next: insert at the front of the continuation during an
+        // ephemeral mix instead of appending to the bottom.
+        let ephemeral_active = state_guard.ephemeral_tidal_track.is_some()
+            || state_guard.external_playback_track.is_some();
         let event_tx = state_guard.event_tx.clone();
         state_guard
             .db
             .with_conn(|conn| {
-                let inserted = match current_queue_position(conn)? {
-                    Some(position) => {
-                        queue::insert_external_tracks_after(conn, &inserts, position)?
-                    }
+                let after = play_next_after_position(
+                    current_queue_position(conn)?,
+                    queue::front_position(conn)?,
+                    ephemeral_active,
+                );
+                let inserted = match after {
+                    Some(after) => queue::insert_external_tracks_after(conn, &inserts, after)?,
                     None => queue::append_external_tracks(conn, &inserts)?,
                 };
                 let queue = queue::load_queue(conn)?;

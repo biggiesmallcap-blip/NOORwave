@@ -7451,3 +7451,29 @@ async fn all_api_routes_are_registered() {
         missing.join("\n  ")
     );
 }
+
+#[test]
+fn play_next_inserts_after_current_when_anchored() {
+    // Normal library playback: there is a resolved current position, so "Play
+    // next" inserts right after it regardless of the ephemeral flag.
+    assert_eq!(play_next_after_position(Some(3), Some(0), false), Some(3));
+    assert_eq!(play_next_after_position(Some(3), Some(0), true), Some(3));
+}
+
+#[test]
+fn play_next_inserts_at_front_during_ephemeral_mix() {
+    // Regression (S1): during a TIDAL mix the DB anchor is NULL so current_pos is
+    // None, but the live track has no queue row. "Play next" must land at the
+    // front of the remaining continuation (front - 1, so insert_external_track_after
+    // targets `front`), not append to the bottom.
+    assert_eq!(play_next_after_position(None, Some(0), true), Some(-1));
+    assert_eq!(play_next_after_position(None, Some(5), true), Some(4));
+}
+
+#[test]
+fn play_next_appends_when_no_anchor_and_no_mix() {
+    // No current row and no ephemeral overlay (e.g. idle/empty): append.
+    assert_eq!(play_next_after_position(None, Some(0), false), None);
+    // Empty queue during a mix can't resolve a front position: append.
+    assert_eq!(play_next_after_position(None, None, true), None);
+}

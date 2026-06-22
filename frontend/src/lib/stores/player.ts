@@ -17,6 +17,7 @@ import { showToast, dismissToast } from '$lib/stores/toast';
 import { announceQueue, announceResolved } from '$lib/stores/queue_announcer';
 import { offerUndo } from '$lib/stores/queue_undo';
 import { queueItemToTidalPlayable } from '$lib/utils/track';
+import { currentQueueAnchorItem } from '$lib/player/queue_active';
 import { wsConnected } from '$lib/api/ws';
 import { updateLibraryTrackFavorite } from '$lib/stores/library';
 import { clamp01 } from '$lib/utils/math';
@@ -806,6 +807,38 @@ export function computePlayNextPos(
 	return newPos;
 }
 
+/**
+ * Translate a drag drop-target index into the index `moveQueueItem` (and the
+ * server's `move_queue_item`) expect, which is measured AFTER the dragged row is
+ * spliced out. Dragging downward (source sits above the target) shifts the
+ * target up one slot once the source is removed, so subtract one to land ON the
+ * target row's slot (the "drops here" top-edge indicator) instead of one below
+ * it. Upward drags keep the target's index. Exported for unit testing.
+ */
+export function reorderDropIndex(sourceIndex: number, targetIndex: number): number {
+	return sourceIndex !== -1 && sourceIndex < targetIndex ? targetIndex - 1 : targetIndex;
+}
+
+/**
+ * Pick the row that `addQueueTrack` just appended. The endpoint appends exactly
+ * one new row; identify it by "id not present before the add" rather than a
+ * track-id match, so a track that was already queued doesn't make us grab its
+ * pre-existing earlier copy and strand the freshly-added row at the bottom.
+ * Falls back to a track-id match when the diff is empty (e.g. server-side
+ * dedupe). Exported for unit testing.
+ */
+export function selectAppendedQueueRow<T extends { id: number; track: { id: number } }>(
+	before: T[],
+	after: T[],
+	trackId: number
+): T | undefined {
+	const beforeIds = new Set(before.map((item) => item.id));
+	return (
+		after.find((item) => !beforeIds.has(item.id)) ??
+		after.find((item) => item.track.id === trackId)
+	);
+}
+
 export async function moveQueueTrackNext(queueItemId: number) {
 	playerError.set(null);
 	const queue = get(playbackQueue);
@@ -816,10 +849,13 @@ export async function moveQueueTrackNext(queueItemId: number) {
 	// The latter drops queue rows whose track_id is negative (ephemeral TIDAL
 	// rows that haven't been imported into the library yet), silently corrupting
 	// a mixed library + TIDAL queue when the user picks "Play next".
-	const currentTrackId = get(currentTrack)?.id ?? null;
-	const currentIndex = currentTrackId
-		? queue.findIndex((item) => item.track.id === currentTrackId)
-		: -1;
+	//
+	// Anchor on the canonical queue-item anchor (queue-item-id first, track-id
+	// fallback), the same helper the active-row highlight and upcomingQueue use.
+	// A bare findIndex(track.id) lands on the FIRST duplicate copy of the current
+	// track, so "Play next" would compute its target relative to the wrong row.
+	const anchor = currentQueueAnchorItem(queue, get(currentTrack), get(currentQueueItemId));
+	const currentIndex = anchor ? queue.findIndex((item) => item.id === anchor.id) : -1;
 	const newPos = computePlayNextPos(targetIndex, currentIndex, queue.length);
 	if (newPos === null) return;
 
@@ -1444,9 +1480,14 @@ export async function playTrackNext(trackId: number) {
 	playerError.set(null);
 	// Add to queue, then move next to the currently-playing track.
 	try {
+		const before = get(playbackQueue);
 		const addResult = await api.addQueueTrack(trackId);
 		setPlaybackQueue(addResult.queue);
-		const justAdded = addResult.queue.find((item) => item.track.id === trackId);
+		// Pick the genuinely-new row (id not present before the add), not the first
+		// track-id match: if the track was already queued, a track-id match returns
+		// the pre-existing earlier copy and the freshly appended row is stranded at
+		// the bottom (the "Play next went to the bottom" bug).
+		const justAdded = selectAppendedQueueRow(before, addResult.queue, trackId);
 		if (justAdded) {
 			await moveQueueTrackNext(justAdded.id);
 		}
