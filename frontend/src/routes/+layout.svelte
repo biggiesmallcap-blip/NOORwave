@@ -1646,16 +1646,20 @@
 							ondragend={handleQueueDragEnd}
 						>
 							<!-- Full-bleed hit target: clicking anywhere on the row that
-							     isn't an interactive child plays/jumps to this track. -->
-							<button
+							     isn't an interactive child plays/jumps to this track. This is a
+							     div, NOT a button, on purpose: a <button> is an interactive
+							     element and swallows the row's native HTML5 dragstart, so the row
+							     could only be dragged by the 12px grip. role/tabindex keep it
+							     keyboard- and screen-reader-operable. -->
+							<div
 								class="queue-row-hit"
-								type="button"
+								role="button"
+								tabindex={isPending ? -1 : 0}
 								aria-label={isPending ? `Pending: ${item.track.title}` : `Play ${item.track.title}`}
 								aria-disabled={isPending}
-								disabled={isPending}
 								onclick={isPending ? undefined : () => void handleQueueTrackPlay(item)}
 								onkeydown={(event) => handleQueueTrackKeydown(item, event)}
-							></button>
+							></div>
 							<span class="queue-grip" aria-hidden="true" title="Drag to reorder">⋮⋮</span>
 							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
 								{#if isPending}
@@ -2851,7 +2855,7 @@
 		cursor: pointer;
 	}
 
-	.queue-row-hit:disabled {
+	.queue-row-hit[aria-disabled='true'] {
 		cursor: default;
 	}
 
