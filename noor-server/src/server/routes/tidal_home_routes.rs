@@ -399,6 +399,24 @@ pub(super) async fn get_tidal_discover_module_items(
             .await
         {
             Ok(items) if !items.is_empty() => items,
+            Err(e) if super::error_looks_like_auth(&e) => {
+                match super::recover_tidal_client(&state, &tokens).await {
+                    Ok(retry_client) => match retry_client
+                        .get_module_items_via_path(path, &module_kind, limit)
+                        .await
+                    {
+                        Ok(items) if !items.is_empty() => items,
+                        _ => module.items,
+                    },
+                    Err(refresh_err) => {
+                        tracing::warn!(
+                            ?refresh_err,
+                            "TIDAL discover module refresh failed; serving preview items"
+                        );
+                        module.items
+                    }
+                }
+            }
             _ => module.items, // fall back to the preview if the show-more call fails or returns 0
         }
     } else {
@@ -476,12 +494,34 @@ pub(super) async fn get_tidal_mix_tracks(
         tokens.access_token.clone(),
         tokens.country_code.clone(),
     );
-    let items = client.get_mix_tracks(mix_id).await.map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": e.to_string() })),
-        )
-    })?;
+    let items = match client.get_mix_tracks(mix_id).await {
+        Ok(items) => items,
+        Err(e) if super::error_looks_like_auth(&e) => {
+            let retry_client =
+                super::recover_tidal_client(&state, &tokens)
+                    .await
+                    .map_err(|refresh_err| {
+                        (
+                            StatusCode::BAD_GATEWAY,
+                            Json(json!({
+                                "error": format!("TIDAL session refresh failed: {}", refresh_err)
+                            })),
+                        )
+                    })?;
+            retry_client.get_mix_tracks(mix_id).await.map_err(|e2| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": e2.to_string() })),
+                )
+            })?
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": e.to_string() })),
+            ));
+        }
+    };
 
     let tidal_ids: Vec<i64> = items.iter().map(|t| t.id).collect();
     let library_states = {

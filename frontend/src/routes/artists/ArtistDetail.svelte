@@ -196,6 +196,13 @@
 			tidalBio = res.bio ?? null;
 			tidalAvailable = res.available ?? true;
 			if (res.picture_url) tidalPictureUrl = res.picture_url;
+			// TIDAL-mode artists have no local-track fallback, so an
+			// all-fetches-failed response (`available: false`) means TIDAL is
+			// unreachable, not that the artist is missing. Surface it as a load
+			// error so the empty state shows instead of a hollow header.
+			if (!tidalAvailable) {
+				error = "Couldn't reach TIDAL. Try again.";
+			}
 		} catch (err) {
 			if (seq !== tidalLoadSeq) return;
 			error = String(err);
@@ -448,7 +455,21 @@
 	let tidalCompilations = $derived(sortByDate(tidalAlbums.filter((a) => categorize(a) === 'compilation')));
 	let tidalLiveAlbums = $derived(sortByDate(tidalAlbums.filter((a) => categorize(a) === 'live')));
 
-	// Fallback (used when TIDAL unavailable): group library tracks into albums.
+	// Whether TIDAL actually returned any releases to show. The backend can
+	// report `available: true` while every album fetch errored to empty (a
+	// transient TIDAL failure, an expired token, or a stale `tidal_id`), which
+	// used to collapse the page to just Top tracks: the TIDAL shelves were all
+	// empty and the local-track fallback was gated off by `available`. Gate the
+	// album shelves on real data so a library artist still groups its owned
+	// tracks into albums when TIDAL hands us nothing.
+	let hasAnyTidalAlbums = $derived(
+		tidalFullAlbums.length > 0
+			|| tidalSinglesEPs.length > 0
+			|| tidalCompilations.length > 0
+			|| tidalLiveAlbums.length > 0
+	);
+
+	// Fallback (used when TIDAL returns no releases): group library tracks into albums.
 	let fallbackAlbums = $derived.by(() => {
 		const map = new Map<
 			string,
@@ -1050,7 +1071,7 @@
 			</a>
 		{/snippet}
 
-		{#if tidalAvailable}
+		{#if hasAnyTidalAlbums}
 			{#if filteredTidalFullAlbums.length > 0}
 				<section class="section">
 					<div class="shelf-head">
@@ -1082,20 +1103,6 @@
 					>
 						{#snippet card(album)}
 							{@render discographyCard(album, 'ep_single')}
-						{/snippet}
-					</MediaRail>
-				</section>
-			{/if}
-
-			{#if tidalVideos.length > 0}
-				<section class="section">
-					<div class="shelf-head">
-						<p class="section-eyebrow">TIDAL · Videos</p>
-						<span class="shelf-count">{tidalVideos.length}</span>
-					</div>
-					<MediaRail items={tidalVideos} getKey={(v) => v.tidal_id}>
-						{#snippet card(video)}
-							{@render videoCard(video)}
 						{/snippet}
 					</MediaRail>
 				</section>
@@ -1240,6 +1247,24 @@
 			{#if tidalLoading}
 				<p class="status subtle">Loading full discography from TIDAL…</p>
 			{/if}
+		{/if}
+
+		<!-- Videos are independent of the album shelves: an artist can have videos
+		     while the album fetch came back empty, and vice versa. Gating them on
+		     the album presence used to hide them whenever TIDAL returned no
+		     releases. -->
+		{#if tidalVideos.length > 0}
+			<section class="section">
+				<div class="shelf-head">
+					<p class="section-eyebrow">TIDAL · Videos</p>
+					<span class="shelf-count">{tidalVideos.length}</span>
+				</div>
+				<MediaRail items={tidalVideos} getKey={(v) => v.tidal_id}>
+					{#snippet card(video)}
+						{@render videoCard(video)}
+					{/snippet}
+				</MediaRail>
+			</section>
 		{/if}
 
 		<!-- Similar artists are not gated on tidalAvailable: a transient TIDAL
