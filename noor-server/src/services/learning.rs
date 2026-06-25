@@ -1315,6 +1315,16 @@ pub struct ActiveLearningModel {
     pub vectors: HashMap<i64, Vec<f64>>,
 }
 
+/// Resolve when the cancel flag is set, polling at a coarse interval. Used to
+/// race the network-heavy external-refresh phases against a Stop request or the
+/// safety cap so they can be interrupted mid-stage, not only at a stage
+/// boundary.
+async fn wait_for_cancel(cancel: &AtomicBool) {
+    while !cancel.load(Ordering::Relaxed) {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
 pub async fn start_training(
     db: Database,
     event_tx: Sender<AppEvent>,
@@ -1487,53 +1497,89 @@ pub async fn start_training(
     }
 
     let external_last_refresh_at = fail_training_on_err!(load_external_provider_last_refresh(&db));
-    let external_refresh_report = match refresh_external_provider_candidates(
-        &db,
-        &external_refresh_clients,
-        full_mode,
-        Some(&progress_tx),
-        (0.07, 0.15),
-    )
-    .await
-    {
-        Ok(report) => report,
-        Err(error) => {
+    // Race the network-heavy refresh against a Stop request or the safety cap.
+    // The trainer watchdog below only guards the compute stage; the external
+    // phase used to run completely unbounded, which is how a run could wedge for
+    // hours (stuck "running" in corpus) and ignore Stop until a stage boundary.
+    let external_refresh_report = tokio::select! {
+        biased;
+        res = refresh_external_provider_candidates(
+            &db,
+            &external_refresh_clients,
+            full_mode,
+            Some(&progress_tx),
+            (0.07, 0.15),
+        ) => match res {
+            Ok(report) => report,
+            Err(error) => {
+                tracing::warn!(
+                    target: "noor.discovery.external",
+                    error = %error,
+                    "external provider refresh failed"
+                );
+                ExternalProviderRefreshReport::default()
+            }
+        },
+        _ = tokio::time::timeout(safety_timeout, wait_for_cancel(&cancel)) => {
+            if !cancel.load(Ordering::Relaxed) {
+                // Pure timeout (no Stop): trip the safety watchdog so the bail
+                // below finalizes the run as a safety-timeout cancellation.
+                watchdog_tripped.store(true, Ordering::Relaxed);
+                cancel.store(true, Ordering::Relaxed);
+            }
             tracing::warn!(
                 target: "noor.discovery.external",
-                error = %error,
-                "external provider refresh failed"
+                "external provider refresh interrupted (Stop or safety timeout)"
             );
             ExternalProviderRefreshReport::default()
         }
     };
-    let external_resolution_report = match resolve_external_tidal_candidates(
-        &db,
-        external_refresh_clients.tidal.as_ref(),
-        full_mode,
-        Some(&progress_tx),
-        (0.15, 0.18),
-    )
-    .await
-    {
-        Ok(report) => report,
-        Err(error) => {
+    if fail_training_on_err!(bail_if_cancelled("corpus")) {
+        return Ok(());
+    }
+    let external_resolution_report = tokio::select! {
+        biased;
+        res = resolve_external_tidal_candidates(
+            &db,
+            external_refresh_clients.tidal.as_ref(),
+            full_mode,
+            Some(&progress_tx),
+            (0.15, 0.18),
+        ) => match res {
+            Ok(report) => report,
+            Err(error) => {
+                tracing::warn!(
+                    target: "noor.discovery.external",
+                    error = %error,
+                    "external TIDAL resolution failed"
+                );
+                ExternalTidalResolutionReport {
+                    playable_before: db
+                        .with_conn(queries::count_playable_external_candidates)
+                        .unwrap_or_default(),
+                    playable_after: db
+                        .with_conn(queries::count_playable_external_candidates)
+                        .unwrap_or_default(),
+                    provider_errors: 1,
+                    ..ExternalTidalResolutionReport::default()
+                }
+            }
+        },
+        _ = tokio::time::timeout(safety_timeout, wait_for_cancel(&cancel)) => {
+            if !cancel.load(Ordering::Relaxed) {
+                watchdog_tripped.store(true, Ordering::Relaxed);
+                cancel.store(true, Ordering::Relaxed);
+            }
             tracing::warn!(
                 target: "noor.discovery.external",
-                error = %error,
-                "external TIDAL resolution failed"
+                "external TIDAL resolution interrupted (Stop or safety timeout)"
             );
-            ExternalTidalResolutionReport {
-                playable_before: db
-                    .with_conn(queries::count_playable_external_candidates)
-                    .unwrap_or_default(),
-                playable_after: db
-                    .with_conn(queries::count_playable_external_candidates)
-                    .unwrap_or_default(),
-                provider_errors: 1,
-                ..ExternalTidalResolutionReport::default()
-            }
+            ExternalTidalResolutionReport::default()
         }
     };
+    if fail_training_on_err!(bail_if_cancelled("corpus")) {
+        return Ok(());
+    }
 
     let _ = progress_tx.send(TrainingProgressUpdate::stage_only(
         "corpus",
