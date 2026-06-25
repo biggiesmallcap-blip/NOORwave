@@ -11328,7 +11328,7 @@ async fn tidal_artist_profile(
     // bio, similar artists, videos, and categorized releases instead of a bare
     // top-tracks-and-albums stub.
     let payload =
-        catalog_routes::build_tidal_artist_payload(&state, &client, tidal_artist_id).await;
+        catalog_routes::build_tidal_artist_payload(&state, &client, tidal_artist_id, &tokens).await;
     Ok(Json(payload))
 }
 
@@ -11378,6 +11378,46 @@ pub(super) async fn recover_tidal_session(
     );
 
     Ok(refreshed)
+}
+
+/// Refresh the TIDAL session and hand back a client primed with the new access
+/// token. Wraps `recover_tidal_session` + the `TidalClient::with_http` rebuild
+/// so the handlers that retry after a 401 don't each re-implement it.
+///
+/// Single-flight re-check: TIDAL can rotate the refresh token on use, so a
+/// burst of requests that all 401 at once must not each fire their own refresh
+/// (the losers would hit `invalid_grant`). Before refreshing we re-read the
+/// in-memory tokens; if the access token already changed, another request just
+/// refreshed and we reuse that fresh token instead of calling TIDAL again.
+pub(super) async fn recover_tidal_client(
+    state: &SharedState,
+    used_tokens: &tidal_auth::TidalTokens,
+) -> anyhow::Result<TidalClient> {
+    let (current_tokens, http_client, tidal_http_client) = {
+        let s = state.read().await;
+        (
+            s.tidal_tokens.clone(),
+            s.http_client.clone(),
+            s.tidal_http_client.clone(),
+        )
+    };
+
+    if let Some(current) = current_tokens
+        && current.access_token != used_tokens.access_token
+    {
+        return Ok(TidalClient::with_http(
+            tidal_http_client,
+            current.access_token.clone(),
+            current.country_code.clone(),
+        ));
+    }
+
+    let refreshed = recover_tidal_session(state, &http_client, used_tokens).await?;
+    Ok(TidalClient::with_http(
+        tidal_http_client,
+        refreshed.access_token.clone(),
+        refreshed.country_code.clone(),
+    ))
 }
 
 pub(super) fn error_looks_like_auth(err: &anyhow::Error) -> bool {
