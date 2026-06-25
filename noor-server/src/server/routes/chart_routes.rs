@@ -830,6 +830,21 @@ async fn fetch_tidal_chart(state: &SharedState, limit: i32) -> anyhow::Result<Ve
     );
     let tracks = match client.get_editorial_top_tracks(limit).await {
         Ok(t) => t,
+        Err(e) if super::error_looks_like_auth(&e) => {
+            match super::recover_tidal_client(state, &tokens).await {
+                Ok(retry_client) => retry_client
+                    .get_editorial_top_tracks(limit)
+                    .await
+                    .unwrap_or_else(|retry_err| {
+                        tracing::warn!("Tidal editorial chart retry failed: {}", retry_err);
+                        Vec::new()
+                    }),
+                Err(refresh_err) => {
+                    tracing::warn!("Tidal session refresh failed for chart: {}", refresh_err);
+                    Vec::new()
+                }
+            }
+        }
         Err(e) => {
             tracing::warn!("Tidal editorial chart failed: {}", e);
             Vec::new()

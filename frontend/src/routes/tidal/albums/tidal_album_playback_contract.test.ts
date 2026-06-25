@@ -19,7 +19,11 @@ describe('TIDAL album playback contract', () => {
 	});
 
 	test('play all reuses the loaded album track list', () => {
-		expect(source).toContain("import { playTidalTracksNow } from '$lib/stores/player';");
+		// Imports playTidalTracksNow from the player store (tolerates a
+		// multi-line import that also pulls in shuffle/radio/save helpers).
+		expect(source).toMatch(
+			/import \{[^}]*\bplayTidalTracksNow\b[^}]*\} from '\$lib\/stores\/player';/,
+		);
 		expect(source).toContain("import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';");
 		expect(source).toContain('async function playLoadedAlbum()');
 		expect(source).toContain('tracks.map((track) => tidalDiscographyTrackToPlayable(track))');

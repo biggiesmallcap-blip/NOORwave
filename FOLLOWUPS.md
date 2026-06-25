@@ -10,6 +10,20 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### Centralize TIDAL auth recovery in the client/transport layer
+- Recovery currently lives at the handler layer via the shared `recover_tidal_client` helper
+  (see docs/adr/0001). The correct end state is a refresh-aware `TidalClient` (or a thin
+  transport wrapper) that transparently refreshes-and-retries on a 401, so no handler writes a
+  retry arm. Deferred because it touches every TIDAL surface including the streaming paths.
+- Spawned by: artist-page TIDAL auth-recovery hardening.
+
+### Adopt `recover_tidal_client` at the remaining inline recovery sites
+- ~7 handlers still inline the `recover_tidal_session` + rebuild-client + retry dance
+  (duplicates_routes, tidal_home_routes mixes/radio/page-modules/moods, tidal_sync_routes).
+  They work; converting them to the shared helper is DRY-only and gains the single-flight
+  re-check, but is broad churn across working background paths. Adopt opportunistically.
+- Spawned by: artist-page TIDAL auth-recovery hardening.
+
 ### Cross-platform playlist providers: SoundCloud + YouTube
 - Now that the Spotify (Sportify) search/resolve path is hardened (mirror failover, no
   empty-cache poisoning, breaker on the anonymous GraphQL), extend the same pattern to other

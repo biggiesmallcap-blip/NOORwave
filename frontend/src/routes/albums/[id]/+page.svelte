@@ -2,7 +2,7 @@
 	import { page } from '$app/state';
 	import type { Snapshot } from './$types';
 	import { type Track, type TidalDiscographyTrack, type SpotifyTrackStats } from '$lib/api/client';
-	import { cachedApi } from '$lib/cache/api_queries';
+	import { cachedApi, invalidateLibraryCaches } from '$lib/cache/api_queries';
 	import {
 		playAlbum,
 		playTidalAlbum,
@@ -10,6 +10,8 @@
 		shuffleAlbum,
 		startAlbumRadio,
 		toggleTrackFavorite,
+		toggleAlbumFavorite,
+		saveTidalAlbumToLibrary,
 		currentTrack,
 		isPlaying,
 		togglePlayback
@@ -39,6 +41,9 @@
 	let tracks = $state<Track[]>([]);
 	let tidalOnlyTracks = $state<TidalDiscographyTrack[]>([]);
 	let albumTidalId = $state<number | null>(null);
+	let albumIsFavorite = $state(false);
+	let favoritePending = $state(false);
+	let savePending = $state(false);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let failedArtworkUrls = $state<Record<string, boolean>>({});
@@ -75,6 +80,7 @@
 			tracks = res.tracks;
 			tidalOnlyTracks = res.tidal_tracks ?? [];
 			albumTidalId = res.album_tidal_id ?? null;
+			albumIsFavorite = res.album_is_favorite ?? false;
 		} catch (err) {
 			if (seq !== loadSeq) return;
 			error = `Failed to load album: ${err}`;
@@ -89,6 +95,7 @@
 		tracks = [];
 		tidalOnlyTracks = [];
 		albumTidalId = null;
+		albumIsFavorite = false;
 		void load(id);
 		artistTracks = [];
 		moreLoaded = false;
@@ -228,6 +235,36 @@
 		}
 	}
 
+	async function onLikeAlbum() {
+		if (favoritePending) return;
+		favoritePending = true;
+		const previous = albumIsFavorite;
+		albumIsFavorite = !previous; // optimistic flip
+		try {
+			albumIsFavorite = await toggleAlbumFavorite(albumId, previous);
+		} finally {
+			favoritePending = false;
+		}
+	}
+
+	// True when the library is missing some of the album's tracks (they exist
+	// on TIDAL but aren't imported), so "Save full album" has something to do.
+	let isPartialAlbum = $derived(albumTidalId != null && tidalOnlyTracks.length > 0);
+
+	async function onSaveAlbum() {
+		if (savePending || albumTidalId == null) return;
+		savePending = true;
+		try {
+			const localId = await saveTidalAlbumToLibrary(albumTidalId);
+			if (localId != null) {
+				invalidateLibraryCaches();
+				await load(albumId);
+			}
+		} finally {
+			savePending = false;
+		}
+	}
+
 	async function onHeartClick(track: Track, event: MouseEvent) {
 		event.stopPropagation();
 		const previous = track.is_favorite;
@@ -348,6 +385,38 @@
 					<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="currentColor"/><path d="M8.5 8.5a5 5 0 000 7M15.5 8.5a5 5 0 010 7M5.5 5.5a9 9 0 000 13M18.5 5.5a9 9 0 010 13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
 				{/if}
 			</button>
+
+			<button
+				class="ghost-btn"
+				class:active={albumIsFavorite}
+				class:pending={favoritePending}
+				aria-label={albumIsFavorite ? 'Remove album from your library' : 'Save album to your library'}
+				aria-pressed={albumIsFavorite}
+				disabled={favoritePending}
+				onclick={onLikeAlbum}
+			>
+				{#if albumIsFavorite}
+					<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z" fill="currentColor"/></svg>
+				{:else}
+					<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z" stroke="currentColor" stroke-width="2" fill="none"/></svg>
+				{/if}
+			</button>
+
+			{#if isPartialAlbum}
+				<button
+					class="save-album-btn"
+					class:pending={savePending}
+					disabled={savePending}
+					onclick={onSaveAlbum}
+				>
+					{#if savePending}
+						<span class="btn-spinner" aria-hidden="true"></span>
+					{:else}
+						<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+					{/if}
+					Save full album
+				</button>
+			{/if}
 
 			<span class="actions-spacer"></span>
 
@@ -681,6 +750,28 @@
 		color: var(--text-primary);
 		background: var(--bg-hover);
 	}
+
+	.ghost-btn.active { color: var(--accent); }
+	.ghost-btn.active:hover { color: var(--accent-strong); }
+
+	.save-album-btn {
+		all: unset;
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		padding: 8px 16px;
+		border-radius: 999px;
+		background: var(--accent-soft);
+		color: var(--accent-strong);
+		border: 1px solid var(--accent-line);
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+		cursor: pointer;
+		transition: background var(--motion-fast), color var(--motion-fast);
+	}
+	.save-album-btn:hover { background: var(--accent); color: #fff; }
+	.save-album-btn.pending { opacity: 0.85; cursor: progress; }
+	.save-album-btn:disabled { cursor: progress; }
 
 	.actions-spacer { flex: 1; }
 

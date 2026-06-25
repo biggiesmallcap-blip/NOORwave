@@ -2266,6 +2266,7 @@ export const api = {
 			tracks: Track[];
 			tidal_tracks: TidalDiscographyTrack[];
 			album_tidal_id: number | null;
+			album_is_favorite: boolean;
 		}>(`/api/albums/${id}/tracks`);
 	},
 
@@ -3455,6 +3456,18 @@ export const api = {
 		return fetchApi<TrackFavoriteResponse>('/api/library/tracks/favorite', undefined, {
 			method: 'POST',
 			body: JSON.stringify({ track_id: trackId, favorite }),
+		});
+	},
+
+	setAlbumFavorite(albumId: number, favorite: boolean) {
+		return fetchApi<{
+			album_id: number;
+			tidal_id: number | null;
+			favorite: boolean;
+			updated: boolean;
+		}>('/api/library/albums/favorite', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ album_id: albumId, favorite }),
 		});
 	},
 
