@@ -446,6 +446,12 @@ pub struct TrackFavoriteRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct AlbumFavoriteRequest {
+    album_id: i64,
+    favorite: bool,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct PositionRequest {
     position_ms: i64,
     /// Opt in to the segment-restart path for out-of-buffer targets (option C:
@@ -784,6 +790,7 @@ pub fn api_routes(state: SharedState) -> Router {
         )
         .merge(dj_routes::routes())
         .route("/api/library/tracks/favorite", post(set_track_favorite))
+        .route("/api/library/albums/favorite", post(set_album_favorite))
         // Duplicates
         .route(
             "/api/library/duplicates/scan",
@@ -5934,6 +5941,185 @@ async fn set_track_favorite(
 
     Ok(Json(json!({
         "track_id": payload.track_id,
+        "tidal_id": tidal_id,
+        "favorite": payload.favorite,
+        "updated": state_changed
+    })))
+}
+
+/// Toggle an album's favorite ("liked") state. Mirrors `set_track_favorite`:
+/// the local `albums.is_favorite` flag flips immediately (which also counts
+/// the album's tracks as library via `favorite_only`), and the TIDAL favorite
+/// is synced in the background with a one-shot auth recovery. Unliking never
+/// demotes anything beyond the favorite flag itself.
+async fn set_album_favorite(
+    State(state): State<SharedState>,
+    Json(payload): Json<AlbumFavoriteRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if payload.album_id <= 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "status": "invalid_album",
+                "message": "A valid album id is required.",
+            })),
+        ));
+    }
+
+    let album_row: Option<(Option<i64>, bool)> = {
+        let s = state.read().await;
+        s.db.with_conn(|conn| {
+            let row = conn
+                .query_row(
+                    "SELECT tidal_id, is_favorite FROM albums WHERE id = ?1",
+                    rusqlite::params![payload.album_id],
+                    |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, i64>(1)? != 0)),
+                )
+                .optional()?;
+            Ok::<_, anyhow::Error>(row)
+        })
+        .map_err(|error| {
+            error!(
+                "Failed to load album {} for favorite toggle: {error}",
+                payload.album_id
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "album_lookup_failed",
+                    "message": "NOOR couldn't load that album right now.",
+                })),
+            )
+        })?
+    };
+
+    let Some((tidal_id, was_favorite)) = album_row else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "status": "album_not_found",
+                "message": "That album could not be found.",
+            })),
+        ));
+    };
+
+    let state_changed = was_favorite != payload.favorite;
+
+    let (tidal_tokens, http_client) = {
+        let s = state.read().await;
+        (s.tidal_tokens.clone(), s.http_client.clone())
+    };
+    let tidal_tokens = if tidal_tokens.is_none() {
+        load_persisted_tidal_tokens(&state).await.ok().flatten()
+    } else {
+        tidal_tokens
+    };
+
+    {
+        let s = state.read().await;
+        s.db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE albums SET is_favorite = ?1 WHERE id = ?2",
+                rusqlite::params![if payload.favorite { 1 } else { 0 }, payload.album_id],
+            )?;
+            Ok(())
+        })
+        .map_err(|error| {
+            error!(
+                "Failed to persist favorite state for album {}: {error}",
+                payload.album_id
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "favorite_persist_failed",
+                    "message": "NOOR couldn't refresh the local favorite state.",
+                })),
+            )
+        })?;
+
+        let _ = s.event_tx.send(AppEvent::LibrarySynced);
+    }
+
+    if let (Some(tidal_id), Some(tokens)) = (tidal_id, tidal_tokens) {
+        if state_changed {
+            let favorite = payload.favorite;
+            let state_for_sync = state.clone();
+            tokio::spawn(async move {
+                let result = if favorite {
+                    tidal_mutations::add_favorite_album(
+                        &http_client,
+                        &tokens.access_token,
+                        &tokens.user_id,
+                        tidal_id,
+                        &tokens.country_code,
+                    )
+                    .await
+                } else {
+                    tidal_mutations::remove_favorite_album(
+                        &http_client,
+                        &tokens.access_token,
+                        &tokens.user_id,
+                        tidal_id,
+                        &tokens.country_code,
+                    )
+                    .await
+                };
+                if let Err(error) = result {
+                    if error_looks_like_auth(&error) {
+                        match recover_tidal_session(&state_for_sync, &http_client, &tokens).await {
+                            Ok(refreshed) => {
+                                let retry = if favorite {
+                                    tidal_mutations::add_favorite_album(
+                                        &http_client,
+                                        &refreshed.access_token,
+                                        &refreshed.user_id,
+                                        tidal_id,
+                                        &refreshed.country_code,
+                                    )
+                                    .await
+                                } else {
+                                    tidal_mutations::remove_favorite_album(
+                                        &http_client,
+                                        &refreshed.access_token,
+                                        &refreshed.user_id,
+                                        tidal_id,
+                                        &refreshed.country_code,
+                                    )
+                                    .await
+                                };
+                                if let Err(e2) = retry {
+                                    error!(
+                                        "Failed to sync {} favorite for tidal album {tidal_id} after session refresh: {e2}",
+                                        if favorite { "set" } else { "clear" },
+                                    );
+                                }
+                            }
+                            Err(re) => {
+                                error!(
+                                    "Session refresh failed while syncing {} favorite for tidal album {tidal_id}: {re}",
+                                    if favorite { "set" } else { "clear" },
+                                );
+                            }
+                        }
+                    } else {
+                        warn!(
+                            "Failed to background-sync {} favorite for tidal album {tidal_id}: {error}",
+                            if favorite { "set" } else { "clear" },
+                        );
+                    }
+                }
+            });
+        }
+    } else if tidal_id.is_some() && state_changed {
+        warn!(
+            "Album {} has tidal_id but no tokens available for sync",
+            payload.album_id
+        );
+    }
+
+    Ok(Json(json!({
+        "album_id": payload.album_id,
         "tidal_id": tidal_id,
         "favorite": payload.favorite,
         "updated": state_changed

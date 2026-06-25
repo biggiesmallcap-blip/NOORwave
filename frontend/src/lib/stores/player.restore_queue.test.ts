@@ -469,13 +469,13 @@ describe('stale playback responses', () => {
 		const olderAction = playAlbum(1);
 		const newerAction = playAlbum(2);
 
-		newer.resolve({ tracks: [libraryTrack(2)], tidal_tracks: [], album_tidal_id: null });
+		newer.resolve({ tracks: [libraryTrack(2)], tidal_tracks: [], album_tidal_id: null, album_is_favorite: false });
 		await newerAction;
 		expect(get(currentTrack)?.id).toBe(2);
 		expect(api.replacePlaybackQueue).toHaveBeenCalledTimes(1);
 		expect(vi.mocked(api.replacePlaybackQueue).mock.calls[0][0]).toEqual([2]);
 
-		older.resolve({ tracks: [libraryTrack(1)], tidal_tracks: [], album_tidal_id: null });
+		older.resolve({ tracks: [libraryTrack(1)], tidal_tracks: [], album_tidal_id: null, album_is_favorite: false });
 		await olderAction;
 		expect(get(currentTrack)?.id).toBe(2);
 		expect(api.replacePlaybackQueue).toHaveBeenCalledTimes(1);

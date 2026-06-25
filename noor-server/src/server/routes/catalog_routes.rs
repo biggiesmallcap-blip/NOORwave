@@ -281,16 +281,27 @@ pub(super) async fn get_album_tracks(
     // The frontend renders both arrays; the user gets a single coherent track
     // listing where library entries are styled as "owned" and pure-TIDAL
     // entries get a TIDAL pill.
-    let (tracks, album_tidal_id) = {
+    let (tracks, album_tidal_id, album_is_favorite) = {
         let s = state.read().await;
         let result = s.db.with_conn(|conn| {
             let tracks = queries::get_album_tracks(conn, id)?;
             let pairs = queries::get_album_tidal_ids(conn, &[id])?;
             let tidal_id = pairs.first().map(|(_, t)| *t);
-            Ok::<_, anyhow::Error>((tracks, tidal_id))
+            // Album favorite ("liked") state so the page heart reflects it.
+            // A best-effort flag: a missing row or read error just reads false.
+            let is_favorite = conn
+                .query_row(
+                    "SELECT is_favorite FROM albums WHERE id = ?1",
+                    rusqlite::params![id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .ok()
+                .unwrap_or(0)
+                != 0;
+            Ok::<_, anyhow::Error>((tracks, tidal_id, is_favorite))
         });
         match result {
-            Ok((tracks, tidal_id)) => (tracks, tidal_id),
+            Ok(v) => v,
             Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
         }
     };
@@ -301,6 +312,7 @@ pub(super) async fn get_album_tracks(
             "tracks": tracks,
             "tidal_tracks": [],
             "album_tidal_id": null,
+            "album_is_favorite": album_is_favorite,
         })));
     };
 
@@ -437,6 +449,7 @@ pub(super) async fn get_album_tracks(
         "tracks": tracks,
         "tidal_tracks": tidal_tracks_payload,
         "album_tidal_id": tidal_album_id,
+        "album_is_favorite": album_is_favorite,
     })))
 }
 

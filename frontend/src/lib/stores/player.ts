@@ -1285,6 +1285,44 @@ export async function shuffleAlbum(albumId: number) {
 	}
 }
 
+/**
+ * Save a TIDAL album into the local library by importing every track, so it
+ * becomes a real library album. Matches Spotify/TIDAL "Save to library".
+ * Returns the resulting local album id, or null on failure.
+ */
+export async function saveTidalAlbumToLibrary(tidalAlbumId: number): Promise<number | null> {
+	if (!assertOnline()) return null;
+	try {
+		const res = await api.importTidalAlbum(tidalAlbumId);
+		showToast('Added to library', 'success');
+		return res.album_id;
+	} catch (error) {
+		setError('save that album', error, () =>
+			saveTidalAlbumToLibrary(tidalAlbumId).then(() => {}),
+		);
+		return null;
+	}
+}
+
+/**
+ * Toggle an album's liked state (local favorite flag + TIDAL favorite sync).
+ * `currentIsFavorite` is the state before the click. Returns the new state, or
+ * the unchanged state on failure so the caller can roll its optimistic flip back.
+ */
+export async function toggleAlbumFavorite(
+	albumId: number,
+	currentIsFavorite: boolean,
+): Promise<boolean> {
+	const next = !currentIsFavorite;
+	try {
+		await api.setAlbumFavorite(albumId, next);
+		return next;
+	} catch (error) {
+		setError(next ? 'like that album' : 'unlike that album', error);
+		return currentIsFavorite;
+	}
+}
+
 export async function playArtist(artistId: number, startTrackId?: number) {
 	if (!assertOnline()) return;
 	playerError.set(null);
