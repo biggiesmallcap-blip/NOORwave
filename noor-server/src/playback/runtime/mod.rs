@@ -39,6 +39,95 @@ use tracing::{debug, error, info, warn};
 
 const DJ_MIXER_DEFAULT_MAX_BLOCK_FRAMES: usize = 8192;
 
+/// How often the runtime loop wakes (when no command is pending) to check for a
+/// stalled active engine.
+const STALL_WATCHDOG_TICK: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How long the audibly-active engine may make zero position progress -- while
+/// playing (not paused) and not finished -- before the watchdog force-advances
+/// the queue. Sized comfortably past one DASH segment timeout+retry cycle
+/// (`DASH_SEGMENT_TIMEOUT_SECS` = 12s) so a transiently-slow segment that still
+/// arrives is not pre-empted, but a doomed TIDAL CDN stall recovers
+/// automatically instead of freezing playback until the user manually skips.
+const ACTIVE_STALL_RECOVERY_SECS: u64 = 15;
+
+/// Watchdog state for the runtime loop. The loop otherwise only advances when
+/// the audio callback sends a command, and a decoder starved on a hung TIDAL
+/// segment is `started && !finished && written==0`: it emits no command and the
+/// playhead freezes. Nothing then recovers it until the segment finally errors
+/// out (tens of seconds later) or the user clicks Next. This tracker notices an
+/// active engine making no progress and asks the loop to force the queue
+/// forward. See the crossfade-stall diagnosis.
+struct StallTracker {
+    watching: Option<(i64, u64)>,
+    last_position: u64,
+    last_progress_at: std::time::Instant,
+}
+
+impl StallTracker {
+    fn new() -> Self {
+        Self {
+            watching: None,
+            last_position: 0,
+            last_progress_at: std::time::Instant::now(),
+        }
+    }
+
+    /// Re-arm against the current active engine without flagging a stall. Used
+    /// when the engine is paused, finished, freshly changed, or making progress
+    /// -- none of which are stalls.
+    fn rearm(&mut self, id: (i64, u64), position: u64) {
+        self.watching = Some(id);
+        self.last_position = position;
+        self.last_progress_at = std::time::Instant::now();
+    }
+
+    /// Called on each idle watchdog tick. Returns the `(track_id, generation)`
+    /// of the active engine if it has been starved past
+    /// `ACTIVE_STALL_RECOVERY_SECS` and the queue should be force-advanced.
+    fn poll(&mut self, state: &PlaybackRuntimeLoopState) -> Option<(i64, u64)> {
+        let engine = state.engine.as_ref()?;
+        let id = (engine.track_id, engine.generation);
+        let position = engine.shared.position_samples.load(Ordering::Relaxed);
+
+        // Paused playback legitimately makes no progress.
+        if engine.shared.paused.load(Ordering::SeqCst) {
+            self.rearm(id, position);
+            return None;
+        }
+        // A finished engine emits its own terminal via the audio callback. A
+        // not-yet-started engine is still doing its initial prebuffer -- on a
+        // slow connection the first ~500ms can legitimately take many seconds to
+        // arrive, and the playhead sits at the baseline offset the whole time.
+        // Neither is a stall; only a deck that WAS playing and then froze is.
+        let (started, finished) = engine
+            .shared
+            .buffer
+            .lock()
+            .map(|guard| (guard.started, guard.finished))
+            .unwrap_or((false, false));
+        if finished || !started {
+            self.rearm(id, position);
+            return None;
+        }
+        // New track, or audible progress since the last tick -> not stalled.
+        if self.watching != Some(id) || position != self.last_position {
+            self.rearm(id, position);
+            return None;
+        }
+        // Same track, no progress since the last tick: over budget?
+        if self.last_progress_at.elapsed()
+            >= std::time::Duration::from_secs(ACTIVE_STALL_RECOVERY_SECS)
+        {
+            // Reset the clock so we don't re-fire every tick while the synthetic
+            // terminal is in flight and the queue advances.
+            self.last_progress_at = std::time::Instant::now();
+            return Some(id);
+        }
+        None
+    }
+}
+
 pub type RuntimeStreamResolver = Arc<
     dyn Fn(StreamRequest) -> Pin<Box<dyn Future<Output = Result<StreamInfo>> + Send>> + Send + Sync,
 >;
@@ -1675,7 +1764,33 @@ fn run_runtime_loop(
         state.device_name, state.device_sample_rate, state.device_channels, output_sample_format
     );
 
-    while let Ok(command) = command_rx.recv() {
+    let mut stall_tracker = StallTracker::new();
+    loop {
+        let command = match command_rx.recv_timeout(STALL_WATCHDOG_TICK) {
+            Ok(command) => command,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Idle tick: nothing to dispatch. Check whether the audible deck
+                // has frozen on a hung TIDAL segment and, if so, force the queue
+                // forward (the audio callback can't, because a starved-but-not-
+                // finished engine emits no command).
+                if let Some((track_id, generation)) = stall_tracker.poll(&state) {
+                    warn!(
+                        "Playback stalled: no audio on track {} for {}s; forcing queue advance",
+                        track_id, ACTIVE_STALL_RECOVERY_SECS
+                    );
+                    // Reuse the natural end-of-track advance (Finished): promotes a
+                    // ready prepared deck if there is one, otherwise cold-starts
+                    // the next queue track. A silent skip, not an error toast.
+                    let _ = command_tx.send(PlaybackRuntimeCommand::TrackTerminal {
+                        track_id,
+                        generation,
+                        outcome: PlaybackTerminalReason::Finished,
+                    });
+                }
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match command {
                 PlaybackRuntimeCommand::Play(job) => {
@@ -2057,10 +2172,25 @@ fn run_runtime_loop(
                     if state.engine.as_ref().map(|e| (e.track_id, e.generation))
                         == Some((track_id, generation))
                     {
+                        let crossfade_samples = state
+                            .engine
+                            .as_ref()
+                            .map(|e| e.shared.crossfade_samples.load(Ordering::Relaxed))
+                            .unwrap_or(0);
                         let next_ready = state
                             .next_engine
                             .as_ref()
-                            .and_then(|e| e.shared.buffer.lock().ok().map(|g| g.is_ready()))
+                            .and_then(|e| {
+                                e.shared.buffer.lock().ok().map(|g| {
+                                    let unread = g.samples.len().saturating_sub(g.read_pos) as u64;
+                                    crossfade_next_ready(
+                                        g.is_ready(),
+                                        g.finished,
+                                        unread,
+                                        crossfade_samples,
+                                    )
+                                })
+                            })
                             .unwrap_or(false);
                         if next_ready && !active_engine_suppresses_crossfade_after_seek(&state) {
                             let trigger_actual_start_ms = samples_to_ms(
@@ -3189,6 +3319,32 @@ fn ensure_exclusive_sink_started(
 /// that comes back through the runtime is intentionally a no-op now, because
 /// `transition_to_job` short-circuits when `state.engine` is already playing
 /// the requested track.
+/// Whether the incoming deck has buffered enough to be promoted at the
+/// crossfade boundary. `is_ready()` only guarantees the ~500ms start threshold,
+/// far short of a multi-second fade. Promoting a deck that holds less than the
+/// fade window forces it to out-decode the fade in real time; on a slow TIDAL
+/// connection it can't, starves mid-fade, and playback freezes (there is no
+/// stall watchdog, and the queue has already advanced at promotion time). Wait
+/// for the whole fade window plus a small margin -- or a fully decoded deck --
+/// before promoting. If the deck isn't there yet the caller skips the early
+/// fade; the boundary path hard-cuts when the track actually ends, which is a
+/// clean transition instead of a silent stall.
+fn crossfade_next_ready(
+    base_ready: bool,
+    finished: bool,
+    unread_samples: u64,
+    crossfade_samples: u64,
+) -> bool {
+    if finished {
+        return true;
+    }
+    if !base_ready {
+        return false;
+    }
+    let margin = crossfade_samples / 8;
+    unread_samples >= crossfade_samples.saturating_add(margin)
+}
+
 fn promote_next_to_active(
     state: &mut PlaybackRuntimeLoopState,
     event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
@@ -5726,6 +5882,215 @@ mod tests {
         state.engine = Some(active);
 
         assert!(!active_engine_suppresses_crossfade_after_seek(&state));
+    }
+
+    // DIAGNOSE repro (crossfade stall): the CrossfadeStart handler promotes the
+    // incoming deck the moment `is_ready()` is true, i.e. once it has buffered
+    // its ~500ms prebuffer threshold. That gate never looks at the crossfade
+    // length, so with an 8s fade the deck is promoted holding well under 1s of
+    // audio while it owes 8s. On a slow TIDAL connection it starves a couple
+    // seconds into the new track and playback freezes (there is no stall
+    // watchdog). With crossfade OFF this promotion path never runs, which is
+    // why the same tracks don't stall with the fade disabled.
+    #[test]
+    fn crossfade_promotion_gate_accepts_next_deck_that_cannot_cover_the_fade() {
+        let sample_rate = 48_000u32;
+        let channels = 2u16;
+        let crossfade_ms = 8_000i32;
+
+        let plan = GaplessPlan {
+            enabled: true,
+            overlap_ms: crossfade_ms,
+            prebuffer_ms: 500,
+            requires_stream_metadata: true,
+        };
+        let (command_tx, _) = mpsc::channel();
+        let next_shared = Arc::new(PlaybackSharedState::new(
+            2,
+            1,
+            PlaybackSourceKind::TidalStream,
+            plan,
+            sample_rate,
+            channels,
+            None,
+            command_tx,
+            Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+        ));
+
+        // Buffer the deck to exactly its readiness threshold: this is the moment
+        // is_ready() first flips true and the CrossfadeStart gate would promote.
+        let (unread, ready) = {
+            let mut buf = next_shared.buffer.lock().unwrap();
+            let threshold = buf.start_threshold_samples;
+            buf.samples = vec![0.1f32; threshold];
+            (buf.samples.len() - buf.read_pos, buf.is_ready())
+        };
+
+        let crossfade_samples =
+            (crossfade_ms as usize) * sample_rate as usize * channels as usize / 1_000;
+
+        assert!(
+            ready,
+            "is_ready() (the gate the CrossfadeStart handler uses) is satisfied at the prebuffer threshold"
+        );
+        assert!(
+            unread < crossfade_samples,
+            "deck promoted with {unread} samples buffered but owes a {crossfade_samples}-sample fade \
+             ({:.0}% of the window) -> it starves mid-fade on a slow connection",
+            unread as f32 / crossfade_samples as f32 * 100.0
+        );
+    }
+
+    // Regression for the fix: the crossfade promotion gate must wait until the
+    // incoming deck has buffered the whole fade window (plus margin), not just
+    // the ~500ms start threshold. A deck that only passes is_ready() must be
+    // deferred so it can't be promoted into a fade it will starve through.
+    #[test]
+    fn crossfade_next_ready_requires_the_full_fade_window() {
+        let crossfade = 8 * 48_000u64 * 2; // 8s @ 48k stereo
+        let threshold = 750 * 48_000u64 * 2 / 1_000; // ~500ms prebuffer + pad
+
+        // is_ready() true but only the prebuffer threshold buffered -> defer.
+        assert!(
+            !crossfade_next_ready(true, false, threshold, crossfade),
+            "a deck at only the prebuffer threshold must NOT be promoted into an 8s fade"
+        );
+        // Buffered past the fade window plus margin -> promote.
+        assert!(
+            crossfade_next_ready(true, false, crossfade + crossfade / 8, crossfade),
+            "a deck holding the whole fade window (plus margin) is safe to promote"
+        );
+        // Fully decoded short track -> always safe, even if tiny.
+        assert!(
+            crossfade_next_ready(true, true, 1_000, crossfade),
+            "a finished deck never starves and is always promotable"
+        );
+        // Not even past the base prebuffer threshold -> never.
+        assert!(
+            !crossfade_next_ready(false, false, crossfade * 2, crossfade),
+            "a deck that has not reached the base start threshold is never ready"
+        );
+    }
+
+    #[test]
+    fn stall_tracker_flags_starved_active_engine_after_threshold() {
+        let mut state = test_runtime_loop_state();
+        let engine = test_engine_with_shared(7, 3);
+        engine
+            .shared
+            .position_samples
+            .store(48_000, Ordering::Relaxed);
+        engine.shared.buffer.lock().unwrap().started = true; // it WAS playing
+        state.engine = Some(engine);
+
+        let mut tracker = StallTracker::new();
+        // First poll arms the tracker against the active engine; not a stall yet.
+        assert_eq!(tracker.poll(&state), None);
+
+        // Simulate the stall clock having run past the budget with the playhead
+        // frozen at the same position (decoder starved on a hung segment).
+        tracker.last_progress_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(
+                ACTIVE_STALL_RECOVERY_SECS + 1,
+            ))
+            .expect("instant underflow");
+        assert_eq!(
+            tracker.poll(&state),
+            Some((7, 3)),
+            "a frozen, unfinished, playing engine past the budget must force advance"
+        );
+    }
+
+    #[test]
+    fn stall_tracker_does_not_skip_a_track_still_doing_initial_buffering() {
+        // A fresh deck on a slow connection has not crossed its prebuffer
+        // threshold yet (started == false, playhead at the baseline). That is
+        // buffering, not a stall -- force-skipping it would drop the track
+        // before it ever plays a sample (regression caught by the fix grill).
+        let mut state = test_runtime_loop_state();
+        let engine = test_engine_with_shared(7, 3);
+        // started stays false: no samples buffered past the start threshold.
+        state.engine = Some(engine);
+
+        let mut tracker = StallTracker::new();
+        assert_eq!(tracker.poll(&state), None);
+        tracker.last_progress_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(
+                ACTIVE_STALL_RECOVERY_SECS + 1,
+            ))
+            .expect("instant underflow");
+        assert_eq!(
+            tracker.poll(&state),
+            None,
+            "a deck still doing initial buffering must not be force-skipped"
+        );
+    }
+
+    #[test]
+    fn stall_tracker_ignores_progress_paused_and_finished_engines() {
+        let mut state = test_runtime_loop_state();
+        let engine = test_engine_with_shared(7, 3);
+        engine
+            .shared
+            .position_samples
+            .store(48_000, Ordering::Relaxed);
+        engine.shared.buffer.lock().unwrap().started = true;
+        state.engine = Some(engine);
+
+        let mut tracker = StallTracker::new();
+        assert_eq!(tracker.poll(&state), None);
+
+        let stale = || {
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(
+                    ACTIVE_STALL_RECOVERY_SECS + 1,
+                ))
+                .expect("instant underflow")
+        };
+
+        // Audible progress since the last tick resets the stall timer.
+        tracker.last_progress_at = stale();
+        state
+            .engine
+            .as_ref()
+            .unwrap()
+            .shared
+            .position_samples
+            .store(96_000, Ordering::Relaxed);
+        assert_eq!(tracker.poll(&state), None, "progress is not a stall");
+
+        // Paused playback legitimately makes no progress.
+        tracker.last_progress_at = stale();
+        state
+            .engine
+            .as_ref()
+            .unwrap()
+            .shared
+            .paused
+            .store(true, Ordering::SeqCst);
+        assert_eq!(tracker.poll(&state), None, "paused is not a stall");
+        state
+            .engine
+            .as_ref()
+            .unwrap()
+            .shared
+            .paused
+            .store(false, Ordering::SeqCst);
+
+        // A finished engine emits its own terminal; the watchdog leaves it alone.
+        tracker.last_progress_at = stale();
+        state
+            .engine
+            .as_ref()
+            .unwrap()
+            .shared
+            .buffer
+            .lock()
+            .unwrap()
+            .mark_finished();
+        assert_eq!(tracker.poll(&state), None, "finished is not a stall");
     }
 
     fn test_runtime_loop_state() -> PlaybackRuntimeLoopState {

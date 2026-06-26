@@ -2098,6 +2098,12 @@ export interface AudioSearchParams {
 	year_max?: number | null;
 	genre_ids?: number[];
 	is_instrumental?: boolean | null;
+	limit?: number;
+	// Ask the server for a true random sample of the full matching set (library
+	// Shuffle) instead of the deterministic display ranking.
+	shuffle?: boolean;
+	// Restrict matches to user-liked tracks (the Liked tab).
+	liked_only?: boolean;
 }
 
 export interface AudioFeaturesStats {
@@ -2260,6 +2266,7 @@ export const api = {
 			tracks: Track[];
 			tidal_tracks: TidalDiscographyTrack[];
 			album_tidal_id: number | null;
+			album_is_favorite: boolean;
 		}>(`/api/albums/${id}/tracks`);
 	},
 
@@ -3449,6 +3456,18 @@ export const api = {
 		return fetchApi<TrackFavoriteResponse>('/api/library/tracks/favorite', undefined, {
 			method: 'POST',
 			body: JSON.stringify({ track_id: trackId, favorite }),
+		});
+	},
+
+	setAlbumFavorite(albumId: number, favorite: boolean) {
+		return fetchApi<{
+			album_id: number;
+			tidal_id: number | null;
+			favorite: boolean;
+			updated: boolean;
+		}>('/api/library/albums/favorite', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ album_id: albumId, favorite }),
 		});
 	},
 

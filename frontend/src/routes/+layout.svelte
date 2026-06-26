@@ -39,6 +39,7 @@
 		toggleTrackFavorite,
 		toggleMute,
 		moveQueueItem,
+		reorderDropIndex,
 		clearQueue as clearQueueAction,
 		restoreQueueItems,
 		saveQueueAsPlaylist,
@@ -842,7 +843,13 @@
 		const fullQueue = $playbackQueue;
 		const targetIndex = fullQueue.findIndex((q) => q.id === target.id);
 		if (targetIndex === -1) return;
-		await moveQueueItem(sourceId, targetIndex);
+		// moveQueueItem (and the server) interpret the index AFTER the dragged row
+		// is spliced out. For a downward drag (source sits above the target),
+		// removing the source shifts the target up one slot, so reorderDropIndex
+		// subtracts one to land ON the target's top edge (the "drops here"
+		// indicator) instead of one row below it. Upward drags keep the index.
+		const sourceIndex = fullQueue.findIndex((q) => q.id === sourceId);
+		await moveQueueItem(sourceId, reorderDropIndex(sourceIndex, targetIndex));
 	}
 
 	function handleQueueDragEnd() {
@@ -1623,7 +1630,7 @@
 
 			{#if upcomingQueue.length > 0}
 				<div class="queue-list" id="queue-list" role="list" bind:this={queueListEl} onscroll={handleQueueScroll}>
-					{#each upcomingQueue.slice(0, queueVisibleCount) as item, i (`${item.id}-${i}`)}
+					{#each upcomingQueue.slice(0, queueVisibleCount) as item (item.id)}
 						{@const aid = item.track.artist_id}
 						{@const isPending = item.is_pending === true}
 						<div
@@ -1644,16 +1651,20 @@
 							ondragend={handleQueueDragEnd}
 						>
 							<!-- Full-bleed hit target: clicking anywhere on the row that
-							     isn't an interactive child plays/jumps to this track. -->
-							<button
+							     isn't an interactive child plays/jumps to this track. This is a
+							     div, NOT a button, on purpose: a <button> is an interactive
+							     element and swallows the row's native HTML5 dragstart, so the row
+							     could only be dragged by the 12px grip. role/tabindex keep it
+							     keyboard- and screen-reader-operable. -->
+							<div
 								class="queue-row-hit"
-								type="button"
+								role="button"
+								tabindex={isPending ? -1 : 0}
 								aria-label={isPending ? `Pending: ${item.track.title}` : `Play ${item.track.title}`}
 								aria-disabled={isPending}
-								disabled={isPending}
 								onclick={isPending ? undefined : () => void handleQueueTrackPlay(item)}
 								onkeydown={(event) => handleQueueTrackKeydown(item, event)}
-							></button>
+							></div>
 							<span class="queue-grip" aria-hidden="true" title="Drag to reorder">⋮⋮</span>
 							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
 								{#if isPending}
@@ -1949,7 +1960,7 @@
 
 			{#if upcomingQueue.length > 0}
 				<div class="mobile-np-queue-list" role="list">
-					{#each upcomingQueue.slice(0, queueVisibleCount) as item, i (`${item.id}-${i}`)}
+					{#each upcomingQueue.slice(0, queueVisibleCount) as item (item.id)}
 						{@const aid = item.track.artist_id}
 						{@const isPending = item.is_pending === true}
 						<div
@@ -2849,7 +2860,7 @@
 		cursor: pointer;
 	}
 
-	.queue-row-hit:disabled {
+	.queue-row-hit[aria-disabled='true'] {
 		cursor: default;
 	}
 

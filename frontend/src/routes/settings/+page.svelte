@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
 	import type { Unsubscriber } from 'svelte/store';
+	import { showToast } from '$lib/stores/toast';
 	import {
 		api,
 		getApiBase,
@@ -1027,7 +1028,13 @@
 			const response = await api.startDiscoveryTraining(mode, rebuildAudio);
 			if (response.status === 'legacy_trainer_unavailable') {
 				errorMsg = response.message ?? 'Switch to V2 to train discovery.';
+			} else if (response.status === 'already_running') {
+				// A run is already in progress (the start was rejected). Without
+				// this the click did nothing visible and looked broken.
+				showToast('A training run is already in progress. Watch it below or Stop it first.', 'info', 6000);
+				errorMsg = '';
 			} else {
+				showToast(mode === 'full' ? 'Full retrain started.' : 'Incremental refresh started.', 'success');
 				errorMsg = '';
 			}
 			await loadDiscoveryStatus();

@@ -5,6 +5,7 @@ import {
 	shuffleAlbum,
 	startAlbumRadio,
 	playTidalAlbum,
+	saveTidalAlbumToLibrary,
 } from '$lib/stores/player';
 import { downloadAlbum } from '$lib/stores/downloads';
 
@@ -82,6 +83,11 @@ export function buildAlbumMenu(album: AlbumLike, options: BuildAlbumMenuOptions 
 			label: 'Play album',
 			icon: '▶',
 			onSelect: () => void playTidalAlbum(tidalId),
+		});
+		items.push({
+			label: 'Add to library',
+			icon: '＋',
+			onSelect: () => void saveTidalAlbumToLibrary(tidalId),
 		});
 	}
 

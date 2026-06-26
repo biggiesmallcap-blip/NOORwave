@@ -303,6 +303,18 @@ pub fn append_external_tracks(
     Ok(results)
 }
 
+/// The lowest `position` currently in the queue, or `None` when the queue is
+/// empty. Used by "Play next" during ephemeral-mix playback: the live track has
+/// no queue row and the DB anchor is NULL, so "after current" has to mean "at
+/// the front of the remaining continuation".
+pub fn front_position(conn: &Connection) -> Result<Option<i32>> {
+    Ok(
+        conn.query_row("SELECT MIN(position) FROM queue", [], |row| {
+            row.get::<_, Option<i32>>(0)
+        })?,
+    )
+}
+
 /// Insert an external track immediately after `after_position`. Existing rows
 /// at that position or later are shifted by one. Used for "Play next" so the
 /// new row lands at `current_position + 1`.
@@ -1113,6 +1125,58 @@ mod tests {
         assert_eq!(queue.len(), 2);
         assert_eq!(queue[0].track.id, 1);
         assert_eq!(queue[1].track.id, 2);
+    }
+
+    #[test]
+    fn front_position_and_play_next_front_insert_during_mix() {
+        let conn = conn();
+        // Simulate a TIDAL mix continuation: ephemeral rows, no library/anchor.
+        for (pos, tidal) in [(0, 101_i64), (1, 102), (2, 103)] {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source, tidal_id_hint)
+                 VALUES (NULL, ?1, 'tidal_mix', ?2)",
+                params![pos, tidal],
+            )
+            .unwrap();
+        }
+        assert_eq!(front_position(&conn).unwrap(), Some(0));
+
+        // "Play next" during a mix inserts at front_position - 1, so the new row
+        // becomes the very next track instead of the bottom of the continuation.
+        let insert = ExternalTrackInsert {
+            artist: "New Artist",
+            title: "Play Next Pick",
+            source: "user_play_next",
+            reason: None,
+            tidal_id_hint: Some(999),
+            local_track_id: None,
+        };
+        let front = front_position(&conn).unwrap().unwrap();
+        insert_external_track_after(&conn, &insert, front - 1).unwrap();
+
+        let new_pos: i32 = conn
+            .query_row(
+                "SELECT position FROM queue WHERE tidal_id_hint = 999",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(new_pos, 0, "play-next row should land at the front");
+        let first_mix_pos: i32 = conn
+            .query_row(
+                "SELECT position FROM queue WHERE tidal_id_hint = 101",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(first_mix_pos, 1, "mix rows shift down by one");
+        assert_eq!(load_queue(&conn).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn front_position_is_none_for_empty_queue() {
+        let conn = conn();
+        assert_eq!(front_position(&conn).unwrap(), None);
     }
 
     #[test]

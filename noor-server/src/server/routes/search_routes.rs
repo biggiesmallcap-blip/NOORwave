@@ -12,6 +12,10 @@ const SEARCH_LIMIT_DEFAULT: i64 = 20;
 const SEARCH_LIMIT_MAX: i64 = 50;
 const AUDIO_SEARCH_LIMIT_DEFAULT: usize = 50;
 const AUDIO_SEARCH_LIMIT_MAX: usize = 50;
+// Shuffle builds a play queue rather than a display list, so it pulls a deeper
+// random sample of the matching set than the 50-row display cap allows.
+const AUDIO_SHUFFLE_LIMIT_DEFAULT: usize = 200;
+const AUDIO_SHUFFLE_LIMIT_MAX: usize = 500;
 const VIBE_LIMIT_DEFAULT: usize = 6;
 const VIBE_LIMIT_MAX: usize = 50;
 const UNDERRATED_LIMIT_DEFAULT: usize = 5;
@@ -164,6 +168,11 @@ pub(super) struct AudioSearchRequest {
     track_type: Option<String>,
     is_instrumental: Option<bool>,
     limit: Option<usize>,
+    // When set, return a true random sample of the full matching set (for the
+    // library Shuffle button) instead of the deterministic display ranking.
+    shuffle: Option<bool>,
+    // Restrict matches to user-liked tracks (the Liked tab's Shuffle/Random).
+    liked_only: Option<bool>,
 }
 
 pub(super) async fn search_audio(
@@ -184,19 +193,33 @@ pub(super) async fn search_audio(
         genre_ids: body.genre_ids.unwrap_or_default(),
         track_type: body.track_type,
         is_instrumental: body.is_instrumental,
+        liked_only: body.liked_only.unwrap_or(false),
     };
     let free_text = body.free_text.unwrap_or_default();
-    let limit = clamp_usize_limit(
-        body.limit,
-        AUDIO_SEARCH_LIMIT_DEFAULT,
-        AUDIO_SEARCH_LIMIT_MAX,
-    );
+    let shuffle = body.shuffle.unwrap_or(false);
+    let limit = if shuffle {
+        clamp_usize_limit(
+            body.limit,
+            AUDIO_SHUFFLE_LIMIT_DEFAULT,
+            AUDIO_SHUFFLE_LIMIT_MAX,
+        )
+    } else {
+        clamp_usize_limit(
+            body.limit,
+            AUDIO_SEARCH_LIMIT_DEFAULT,
+            AUDIO_SEARCH_LIMIT_MAX,
+        )
+    };
 
     let state = state.read().await;
     state
         .db
         .with_conn(|conn| {
-            let tracks = queries::search_with_audio_filters(conn, &free_text, &filters, limit)?;
+            let tracks = if shuffle {
+                queries::search_with_audio_filters_shuffled(conn, &free_text, &filters, limit)?
+            } else {
+                queries::search_with_audio_filters(conn, &free_text, &filters, limit)?
+            };
             Ok(Json(json!({ "tracks": tracks })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)

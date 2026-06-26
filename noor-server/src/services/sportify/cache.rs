@@ -85,6 +85,18 @@ pub struct UnresolvedRecord {
     pub reason: Option<String>,
 }
 
+/// True when the search payload has no rows for the *requested* kind. A
+/// search call only ever populates the bucket matching `kind`, so this is the
+/// emptiness test the cache and mirror-failover logic both care about.
+fn search_results_empty(kind: SportifySearchKind, results: &SportifySearchResults) -> bool {
+    match kind {
+        SportifySearchKind::Track => results.tracks.is_empty(),
+        SportifySearchKind::Album => results.albums.is_empty(),
+        SportifySearchKind::Artist => results.artists.is_empty(),
+        SportifySearchKind::Playlist => results.playlists.is_empty(),
+    }
+}
+
 fn hash_query(query: &str, kind: SportifySearchKind, limit: u32, offset: u32) -> String {
     let mut hasher = Sha256::new();
     hasher.update(kind.as_str().as_bytes());
@@ -284,14 +296,12 @@ pub fn get_search(
         Some((json, fetched_at)) if fresh(fetched_at, cfg.meta_ttl_secs) => {
             let parsed: SportifySearchResults =
                 serde_json::from_str(&json).context("decode cached search payload")?;
-            // A previous playlist parser could cache an empty first page even
-            // though Sportify returned rows in an unhandled shape. Treat that
-            // specific cache entry as stale so search can recover immediately
-            // after parser fixes, while preserving empty later pages.
-            if matches!(kind, SportifySearchKind::Playlist)
-                && offset == 0
-                && parsed.playlists.is_empty()
-            {
+            // A flapping mirror or an unhandled response shape can cache an
+            // empty first page. Treat any empty first page (for the requested
+            // kind) as stale so search recovers on the next request instead of
+            // serving the miss for the full TTL. Later pages are allowed to be
+            // legitimately empty (end of results).
+            if offset == 0 && search_results_empty(kind, &parsed) {
                 Ok(None)
             } else {
                 Ok(Some(parsed))
@@ -309,6 +319,14 @@ pub fn put_search(
     offset: u32,
     payload: &SportifySearchResults,
 ) -> Result<()> {
+    // Never persist an empty/failed page. Mirrors flap and response shapes
+    // drift; caching a miss for the 30-day TTL is how search silently "stops
+    // working" for a query until the entry expires. Skipping the write lets
+    // the next request re-fetch (and try the other mirror).
+    if search_results_empty(kind, payload) {
+        return Ok(());
+    }
+
     let key = hash_query(query, kind, limit, offset);
     let json = serde_json::to_string(payload).context("serialize search results")?;
     conn.execute(
@@ -540,7 +558,14 @@ mod tests {
     fn search_cache_round_trip() {
         let conn = open_test_db();
         let cfg = SportifyCacheConfig::default();
-        let payload = SportifySearchResults::default();
+        let payload = SportifySearchResults {
+            tracks: vec![SportifyTrack {
+                id: Some("t1".into()),
+                name: Some("One More Time".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
         put_search(
             &conn,
             "daft punk",
@@ -560,6 +585,43 @@ mod tests {
             get_search(&conn, &cfg, " Daft Punk ", SportifySearchKind::Track, 10, 0)
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn empty_first_page_is_never_cached() {
+        // A failed/empty page must not poison the cache for the full TTL, or
+        // a transient mirror outage makes a query "dead" for 30 days.
+        let conn = open_test_db();
+        let cfg = SportifyCacheConfig::default();
+        let empty = SportifySearchResults::default();
+        put_search(&conn, "obscure", SportifySearchKind::Track, 10, 0, &empty).unwrap();
+        assert!(
+            get_search(&conn, &cfg, "obscure", SportifySearchKind::Track, 10, 0)
+                .unwrap()
+                .is_none(),
+            "empty result should not be served from cache"
+        );
+    }
+
+    #[test]
+    fn empty_first_page_treated_stale_even_if_present() {
+        // Defends against rows cached by an older build before the put-side
+        // guard existed: an empty first page reads back as a miss.
+        let conn = open_test_db();
+        let cfg = SportifyCacheConfig::default();
+        let key = hash_query("legacy", SportifySearchKind::Artist, 10, 0);
+        let json = serde_json::to_string(&SportifySearchResults::default()).unwrap();
+        conn.execute(
+            "INSERT INTO sportify_search_cache (query_hash, kind, payload, fetched_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![key, "artist", json, now_secs()],
+        )
+        .unwrap();
+        assert!(
+            get_search(&conn, &cfg, "legacy", SportifySearchKind::Artist, 10, 0)
+                .unwrap()
+                .is_none()
         );
     }
 }

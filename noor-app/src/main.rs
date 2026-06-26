@@ -58,6 +58,13 @@ fn main() {
             .resizable(true)
             .decorations(true)
             .visible(true)
+            // Tauri's OS-level drag-drop handler is enabled by default, which
+            // makes WebView2 capture native drag events for file-drop and
+            // suppresses HTML5 drag-and-drop inside the page. That is why the
+            // Up Next queue could never be dragged in the packaged app no matter
+            // what the DOM did (it works in a plain dev browser). Disable it so
+            // the webview's own dragstart/dragover/drop fire for queue reorder.
+            .disable_drag_drop_handler()
             .build()?;
 
             tray::setup_tray(app)?;

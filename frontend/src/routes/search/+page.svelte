@@ -2758,14 +2758,27 @@
   .search-track-row.disabled { cursor: default; opacity: 0.62; }
   .search-track-row .col-num {
     position: relative;
+    display: grid;
+    place-items: center;
     text-align: center;
     color: var(--text-muted);
     font-size: var(--font-size-xs);
     font-variant-numeric: tabular-nums;
   }
-  .search-track-row .track-num-label { display: inline; }
+  /* Stack the number and play glyph in the same grid cell so both stay in flow
+     (an absolutely-positioned pair collapsed .col-num to 0px, leaving the play
+     button a zero-height target). Reveal via visibility, not display or opacity:
+     visibility is reflow-free (keeps the perf win) AND removes the hidden <button>
+     from the tab order and a11y tree, which opacity:0 did not. */
+  .search-track-row .track-num-label,
   .search-track-row .track-num-play {
-    display: none;
+    grid-area: 1 / 1;
+    display: grid;
+    place-items: center;
+  }
+  .search-track-row .track-num-label { visibility: visible; }
+  .search-track-row .track-num-play {
+    visibility: hidden;
     background: none;
     border: none;
     color: var(--text-primary);
@@ -2773,9 +2786,9 @@
     cursor: pointer;
     padding: 0;
   }
-  .search-track-row:hover .track-num-label { display: none; }
-  .search-track-row:hover .track-num-play { display: inline; }
-  .search-track-row .track-num-play:disabled { opacity: 0.4; cursor: not-allowed; }
+  .search-track-row:hover .track-num-label { visibility: hidden; }
+  .search-track-row:hover .track-num-play { visibility: visible; }
+  .search-track-row:hover .track-num-play:disabled { opacity: 0.4; cursor: not-allowed; }
   .search-track-row .col-title {
     display: flex;
     align-items: center;
