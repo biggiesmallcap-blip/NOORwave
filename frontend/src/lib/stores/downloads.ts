@@ -1,8 +1,12 @@
 import { writable } from 'svelte/store';
 import { isTauri } from '@tauri-apps/api/core';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
-import { authFetch } from '$lib/api/client';
+import { authFetch, getApiBase } from '$lib/api/client';
 import { showToast, updateToast, dismissToast } from '$lib/stores/toast';
+
+/** authFetch takes a full URL (it does not prepend the API base), so build absolute
+ *  URLs against the backend origin — a bare `/api/...` would hit the Vite dev origin. */
+const api = (path: string) => `${getApiBase()}${path}`;
 
 export type DownloadFormat = 'flac' | 'mp3';
 
@@ -48,7 +52,7 @@ function endBatchToast(): void {
 
 export async function loadDownloadSettings(): Promise<DownloadSettings | null> {
 	try {
-		const resp = await authFetch('/api/downloads/settings');
+		const resp = await authFetch(api('/api/downloads/settings'));
 		if (!resp.ok) return null;
 		const data = (await resp.json()) as DownloadSettings;
 		if (data?.format === 'flac' || data?.format === 'mp3') {
@@ -64,18 +68,22 @@ export async function saveDownloadSettings(
 	patch: { folder?: string; format?: DownloadFormat }
 ): Promise<DownloadSettings | null> {
 	try {
-		const resp = await authFetch('/api/downloads/settings', {
+		const resp = await authFetch(api('/api/downloads/settings'), {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify(patch)
 		});
-		if (!resp.ok) return null;
+		if (!resp.ok) {
+			showToast("Couldn't save download settings.", 'error', 4000);
+			return null;
+		}
 		const data = (await resp.json()) as DownloadSettings;
 		if (data?.format === 'flac' || data?.format === 'mp3') {
 			defaultDownloadFormat.set(data.format);
 		}
 		return data;
 	} catch {
+		showToast("Couldn't save download settings.", 'error', 4000);
 		return null;
 	}
 }
@@ -86,7 +94,7 @@ export async function downloadTrack(trackId: number, format?: DownloadFormat): P
 	pendingSingles.add(trackId);
 	try {
 		const qs = format ? `?format=${format}` : '';
-		const resp = await authFetch(`/api/tracks/${trackId}/download${qs}`, {
+		const resp = await authFetch(api(`/api/tracks/${trackId}/download${qs}`), {
 			method: 'POST',
 			timeoutMs: 30_000
 		});
@@ -116,7 +124,7 @@ export async function downloadTracks(ids: number[], format?: DownloadFormat): Pr
 		]);
 	}
 	try {
-		const resp = await authFetch('/api/downloads/batch', {
+		const resp = await authFetch(api('/api/downloads/batch'), {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify({ ids, format }),
@@ -138,7 +146,7 @@ export async function downloadTracks(ids: number[], format?: DownloadFormat): Pr
  *  album/playlist batch downloads where the menu only has the container id. */
 async function downloadFromEndpoint(path: string, format?: DownloadFormat): Promise<void> {
 	try {
-		const resp = await authFetch(path);
+		const resp = await authFetch(api(path));
 		if (!resp.ok) {
 			showToast("Couldn't load the tracks to download.", 'error', 4000);
 			return;
@@ -168,7 +176,7 @@ export function downloadPlaylist(playlistId: number, format?: DownloadFormat): P
 
 export async function cancelDownloads(): Promise<void> {
 	try {
-		await authFetch('/api/downloads/cancel', { method: 'POST' });
+		await authFetch(api('/api/downloads/cancel'), { method: 'POST' });
 	} catch {
 		/* best effort */
 	}
@@ -226,7 +234,7 @@ export async function handleDownloadComplete(data: { ok: number; failed: number 
 	let failedIds: number[] = [];
 	if (data.failed > 0) {
 		try {
-			const resp = await authFetch('/api/downloads/status');
+			const resp = await authFetch(api('/api/downloads/status'));
 			if (resp.ok) {
 				const status = await resp.json();
 				failedIds = (status.failed ?? []).map((f: { id: number }) => f.id);
