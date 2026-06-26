@@ -37,8 +37,11 @@ export function recommendationSearchHref(item: ProviderRecommendationItem): stri
 
 export function recommendationActionLabel(item: ProviderRecommendationItem): string {
 	const entity = recommendationEntity(item);
-	if (entity === 'artist') return recommendationKnownHref(item) ? 'Open artist' : 'Resolve artist';
-	if (entity === 'album') return recommendationKnownHref(item) ? 'Open album' : 'Resolve album';
+	// The primary action now plays the entity (album tracklist, artist top
+	// tracks) rather than navigating, so the label is play-oriented even when the
+	// id still has to be resolved through a TIDAL search first.
+	if (entity === 'artist') return 'Play artist';
+	if (entity === 'album') return 'Play album';
 	if (item.local_track_id) return 'Play';
 	if ((item.tidal_id ?? 0) > 0) return 'Play from TIDAL';
 	return 'Resolve on TIDAL';
@@ -66,21 +69,47 @@ export function findArtistMatch(
 	item: ProviderRecommendationItem,
 	artists: TidalSearchArtist[],
 ): TidalSearchArtist | null {
+	if (artists.length === 0) return null;
 	const wanted = normalizeCatalogName(item.title);
-	return artists.find((artist) => normalizeCatalogName(artist.name) === wanted) ?? null;
+	const exact = artists.find((artist) => normalizeCatalogName(artist.name) === wanted);
+	if (exact) return exact;
+	// Tolerate the punctuation/suffix drift between Last.fm and TIDAL spellings
+	// (e.g. "MF DOOM" vs "MF DOOM (Daniel Dumile)"). The search was already keyed
+	// on the artist name, so the first result is overwhelmingly the right artist;
+	// prefer a contains-match but fall back to it rather than dumping to search.
+	const partial = artists.find((artist) => namesOverlap(normalizeCatalogName(artist.name), wanted));
+	return partial ?? artists[0];
 }
 
 export function findAlbumMatch(
 	item: ProviderRecommendationItem,
 	albums: TidalSearchAlbum[],
 ): TidalSearchAlbum | null {
+	if (albums.length === 0) return null;
 	const wantedTitle = normalizeCatalogName(item.title);
 	const wantedArtist = normalizeCatalogName(item.artist_name);
-	return albums.find((album) => {
-		if (normalizeCatalogName(album.title) !== wantedTitle) return false;
-		if (!wantedArtist) return true;
-		return normalizeCatalogName(album.artist_name) === wantedArtist;
-	}) ?? null;
+	const artistOk = (album: TidalSearchAlbum) =>
+		!wantedArtist || normalizeCatalogName(album.artist_name) === wantedArtist;
+
+	const exact = albums.find((album) => artistOk(album) && normalizeCatalogName(album.title) === wantedTitle);
+	if (exact) return exact;
+
+	// A wrong album is worse than no album, so only accept a fuzzy hit by the same
+	// artist (handles deluxe/remaster/edition suffixes). If the artist is known and
+	// only one of their albums came back, take it; otherwise require title overlap.
+	const sameArtist = albums.filter(artistOk);
+	if (sameArtist.length === 0) return null;
+	const overlap = sameArtist.find((album) => namesOverlap(normalizeCatalogName(album.title), wantedTitle));
+	if (overlap) return overlap;
+	if (wantedArtist && sameArtist.length === 1) return sameArtist[0];
+	return null;
+}
+
+// True when one normalised name contains the other - cheap stand-in for fuzzy
+// matching that catches edition suffixes and parenthetical qualifiers.
+function namesOverlap(a: string, b: string): boolean {
+	if (!a || !b) return false;
+	return a === b || a.includes(b) || b.includes(a);
 }
 
 function normalizeCatalogName(value: string | null | undefined): string {

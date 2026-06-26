@@ -38,6 +38,7 @@
 		onSelect?: (index: number) => void;
 		onJump?: (delta: number) => void;
 		onPlay?: () => void | Promise<void>;
+		onItemActivate?: (index: number) => void | Promise<void>;
 		onCardContext?: (event: MouseEvent) => void | Promise<void>;
 		onItemContext?: (event: MouseEvent, index: number) => void | Promise<void>;
 		onPauseChange?: (paused: boolean) => void;
@@ -59,6 +60,7 @@
 		onSelect = () => {},
 		onJump = () => {},
 		onPlay = () => {},
+		onItemActivate,
 		onCardContext,
 		onItemContext,
 		onPauseChange,
@@ -102,6 +104,9 @@
 					class:featured={currentItem.id === item.id}
 					type="button"
 					onclick={() => onSelect(index)}
+					ondblclick={() => {
+						if (onItemActivate) void onItemActivate(index);
+					}}
 					oncontextmenu={(event) => {
 						if (onItemContext) void onItemContext(event, index);
 					}}
