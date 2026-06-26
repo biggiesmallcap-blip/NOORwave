@@ -16,7 +16,7 @@ use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 
@@ -49,13 +49,14 @@ impl DownloadFormat {
         self.as_str()
     }
 
-    /// TIDAL quality to request for this format. FLAC archives the best master; MP3
-    /// only needs CD-quality lossless (a 320 kbps MP3 caps at 48 kHz, so hi-res would
-    /// burn bandwidth for zero audible gain).
+    /// TIDAL quality to request for this format. FLAC archives the best master.
+    /// MP3 is a lossy portable copy, so we pull TIDAL's `HIGH` tier (AAC ~320 kbps):
+    /// it's a fraction of the size of the lossless FLAC, much faster to fetch and
+    /// decode, and a lossless source buys nothing audible once it's squashed to MP3.
     pub fn tidal_quality(self) -> &'static str {
         match self {
             Self::Flac => "HI_RES_LOSSLESS",
-            Self::Mp3 => "LOSSLESS",
+            Self::Mp3 => "HIGH",
         }
     }
 }
@@ -228,20 +229,24 @@ async fn fetch_encoded_bytes(
         }
     })?;
 
-    let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024 * 1024);
     // For DASH SegmentTemplate manifests `url` is the init segment and audio lives in
     // `segment_urls`; for BTS/JSON manifests `segment_urls` is empty and `url` is the
-    // whole file. Chaining handles both.
-    for seg_url in std::iter::once(&stream_info.url).chain(stream_info.segment_urls.iter()) {
-        let resp = http_client
-            .get(seg_url)
-            .send()
-            .await
-            .map_err(|e| DownloadError::Transient(format!("Stream fetch failed: {e}")))?;
-        let mut stream = resp.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| DownloadError::Transient(format!("Stream read: {e}")))?;
-            buf.extend_from_slice(&chunk);
+    // whole file. The init/whole-file URL must come first; media segments are fetched
+    // concurrently (order preserved) so latency doesn't stack up across dozens of GETs.
+    let mut buf = fetch_url_bytes(http_client, &stream_info.url).await?;
+
+    if !stream_info.segment_urls.is_empty() {
+        const FETCH_CONCURRENCY: usize = 6;
+        let segments: Vec<Vec<u8>> = futures::stream::iter(stream_info.segment_urls.clone())
+            .map(|url| {
+                let client = http_client.clone();
+                async move { fetch_url_bytes(&client, &url).await }
+            })
+            .buffered(FETCH_CONCURRENCY)
+            .try_collect()
+            .await?;
+        for seg in segments {
+            buf.extend_from_slice(&seg);
         }
     }
 
@@ -251,6 +256,23 @@ async fn fetch_encoded_bytes(
         ));
     }
     Ok(buf)
+}
+
+/// GET one URL fully into a `Vec<u8>`, mapping network errors to a transient failure.
+async fn fetch_url_bytes(
+    http_client: &reqwest::Client,
+    url: &str,
+) -> Result<Vec<u8>, DownloadError> {
+    let resp = http_client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| DownloadError::Transient(format!("Stream fetch failed: {e}")))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| DownloadError::Transient(format!("Stream read: {e}")))?;
+    Ok(bytes.to_vec())
 }
 
 // ─── FLAC: streaming symphonia -> flacenc ────────────────────────────────────────
