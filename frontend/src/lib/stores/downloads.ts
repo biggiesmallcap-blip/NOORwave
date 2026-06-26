@@ -9,15 +9,21 @@ import { showToast } from '$lib/stores/toast';
 const api = (path: string) => `${getApiBase()}${path}`;
 
 export type DownloadFormat = 'flac' | 'mp3';
+export type FlacQuality = 'cd' | 'hires';
 
 export interface DownloadSettings {
 	folder: string;
 	format: DownloadFormat;
+	flac_quality: FlacQuality;
 }
 
 /** The user's default format, mirrored from the server so the player-bar quick
  *  button and the context menus know which format to pre-select. */
 export const defaultDownloadFormat = writable<DownloadFormat>('flac');
+
+/** Source tier for lossless (FLAC) downloads: 'cd' (16-bit/44.1kHz) or 'hires'
+ *  (best available). Mirrored from the server. */
+export const defaultFlacQuality = writable<FlacQuality>('hires');
 
 /** Tracks the user kicked off as single downloads, so the per-item WS event can
  *  raise a "Downloaded / Show in folder" toast (batch items are covered by the
@@ -55,17 +61,24 @@ export async function loadDownloadSettings(): Promise<DownloadSettings | null> {
 		const resp = await authFetch(api('/api/downloads/settings'));
 		if (!resp.ok) return null;
 		const data = (await resp.json()) as DownloadSettings;
-		if (data?.format === 'flac' || data?.format === 'mp3') {
-			defaultDownloadFormat.set(data.format);
-		}
+		applySettings(data);
 		return data;
 	} catch {
 		return null;
 	}
 }
 
+function applySettings(data: DownloadSettings): void {
+	if (data?.format === 'flac' || data?.format === 'mp3') {
+		defaultDownloadFormat.set(data.format);
+	}
+	if (data?.flac_quality === 'cd' || data?.flac_quality === 'hires') {
+		defaultFlacQuality.set(data.flac_quality);
+	}
+}
+
 export async function saveDownloadSettings(
-	patch: { folder?: string; format?: DownloadFormat }
+	patch: { folder?: string; format?: DownloadFormat; flac_quality?: FlacQuality }
 ): Promise<DownloadSettings | null> {
 	try {
 		const resp = await authFetch(api('/api/downloads/settings'), {
@@ -78,9 +91,7 @@ export async function saveDownloadSettings(
 			return null;
 		}
 		const data = (await resp.json()) as DownloadSettings;
-		if (data?.format === 'flac' || data?.format === 'mp3') {
-			defaultDownloadFormat.set(data.format);
-		}
+		applySettings(data);
 		return data;
 	} catch {
 		showToast("Couldn't save download settings.", 'error', 4000);

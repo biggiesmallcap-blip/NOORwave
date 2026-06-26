@@ -79,9 +79,11 @@
 	import { exclusiveStatus } from '$lib/stores/exclusive_status';
 	import {
 		defaultDownloadFormat,
+		defaultFlacQuality,
 		loadDownloadSettings,
 		saveDownloadSettings,
-		type DownloadFormat
+		type DownloadFormat,
+		type FlacQuality
 	} from '$lib/stores/downloads';
 	import { open as openDirectoryDialog } from '@tauri-apps/plugin-dialog';
 	import { isTauri, openExternal } from '$lib/util/external';
@@ -387,6 +389,10 @@
 
 	function setDownloadFormat(format: DownloadFormat) {
 		void saveDownloadSettings({ format });
+	}
+
+	function setFlacQuality(flac_quality: FlacQuality) {
+		void saveDownloadSettings({ flac_quality });
 	}
 
 	onMount(() => {
@@ -2737,6 +2743,30 @@
 								onclick={() => setDownloadFormat('mp3')}
 							>
 								MP3<small>320 kbps</small>
+							</button>
+						</div>
+					</div>
+
+					<div class="audio-field">
+						<span>FLAC quality</span>
+						<div class="download-format-toggle" role="group" aria-label="FLAC download quality">
+							<button
+								type="button"
+								class="download-format-option"
+								class:active={$defaultFlacQuality === 'hires'}
+								aria-pressed={$defaultFlacQuality === 'hires'}
+								onclick={() => setFlacQuality('hires')}
+							>
+								Hi-Res<small>Best available</small>
+							</button>
+							<button
+								type="button"
+								class="download-format-option"
+								class:active={$defaultFlacQuality === 'cd'}
+								aria-pressed={$defaultFlacQuality === 'cd'}
+								onclick={() => setFlacQuality('cd')}
+							>
+								CD<small>16-bit / 44.1 kHz</small>
 							</button>
 						</div>
 					</div>

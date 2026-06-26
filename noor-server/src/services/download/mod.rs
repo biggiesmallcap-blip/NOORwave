@@ -48,16 +48,55 @@ impl DownloadFormat {
     pub fn extension(self) -> &'static str {
         self.as_str()
     }
+}
 
-    /// TIDAL quality to request for this format. FLAC archives the best master.
-    /// MP3 is a lossy portable copy, so we pull TIDAL's `HIGH` tier (AAC ~320 kbps):
-    /// it's a fraction of the size of the lossless FLAC, much faster to fetch and
-    /// decode, and a lossless source buys nothing audible once it's squashed to MP3.
+/// Source quality for lossless (FLAC) downloads. TIDAL exposes two lossless tiers and
+/// they differ a lot in size, so this is user-selectable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlacQuality {
+    /// CD quality: 16-bit / 44.1 kHz (TIDAL `LOSSLESS`). Much smaller files.
+    Cd,
+    /// Best available master, up to 24-bit / 192 kHz (TIDAL `HI_RES_LOSSLESS`).
+    HiRes,
+}
+
+impl Default for FlacQuality {
+    fn default() -> Self {
+        Self::HiRes
+    }
+}
+
+impl FlacQuality {
+    pub fn from_query(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "cd" => Some(Self::Cd),
+            "hires" | "hi_res" | "hi-res" => Some(Self::HiRes),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cd => "cd",
+            Self::HiRes => "hires",
+        }
+    }
+
     pub fn tidal_quality(self) -> &'static str {
         match self {
-            Self::Flac => "HI_RES_LOSSLESS",
-            Self::Mp3 => "HIGH",
+            Self::Cd => "LOSSLESS",
+            Self::HiRes => "HI_RES_LOSSLESS",
         }
+    }
+}
+
+/// Resolve the TIDAL `audioquality` string to request for a download. MP3 always pulls
+/// the small AAC `HIGH` tier (lossless buys nothing once squashed to MP3); FLAC uses the
+/// user's selected lossless tier.
+pub fn resolve_tidal_quality(format: DownloadFormat, flac_quality: FlacQuality) -> &'static str {
+    match format {
+        DownloadFormat::Mp3 => "HIGH",
+        DownloadFormat::Flac => flac_quality.tidal_quality(),
     }
 }
 
@@ -595,6 +634,7 @@ pub async fn download_track(
     track: &Track,
     dest_root: &Path,
     format: DownloadFormat,
+    quality: &str,
 ) -> Result<DownloadOutcome, DownloadError> {
     let tidal_id = track.tidal_id.ok_or(DownloadError::NoTidalId)?;
 
@@ -604,8 +644,7 @@ pub async fn download_track(
         return Ok(DownloadOutcome::AlreadyExists(final_path));
     }
 
-    let encoded =
-        fetch_encoded_bytes(http_client, access_token, tidal_id, format.tidal_quality()).await?;
+    let encoded = fetch_encoded_bytes(http_client, access_token, tidal_id, quality).await?;
 
     // Encode + tag on a blocking thread (CPU-bound). Write to a `.part` sidecar then
     // rename so a crash mid-encode never leaves a half file masquerading as complete.
@@ -697,6 +736,29 @@ pub fn write_default_format(conn: &Connection, format: DownloadFormat) -> rusqli
     conn.execute(
         "INSERT OR REPLACE INTO server_config (key, value) VALUES ('download_format_default', ?1)",
         [format.as_str()],
+    )?;
+    Ok(())
+}
+
+pub fn read_flac_quality(conn: &Connection) -> FlacQuality {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT value FROM server_config WHERE key = 'download_flac_quality'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    stored
+        .and_then(|s| FlacQuality::from_query(&s))
+        .unwrap_or_default()
+}
+
+pub fn write_flac_quality(conn: &Connection, quality: FlacQuality) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO server_config (key, value) VALUES ('download_flac_quality', ?1)",
+        [quality.as_str()],
     )?;
     Ok(())
 }

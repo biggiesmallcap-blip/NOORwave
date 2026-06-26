@@ -56,6 +56,7 @@ async fn refresh_access_token(state: &SharedState) -> Option<String> {
 
 /// Download one track with the agreed retry policy: refresh + retry once on session
 /// expiry, retry once on a transient (network) error, fail immediately otherwise.
+#[allow(clippy::too_many_arguments)]
 async fn attempt_download(
     state: &SharedState,
     http_client: &reqwest::Client,
@@ -63,17 +64,22 @@ async fn attempt_download(
     track: &crate::db::models::Track,
     dest_root: &std::path::Path,
     format: DownloadFormat,
+    quality: &str,
 ) -> Result<DownloadOutcome, DownloadError> {
-    match download::download_track(http_client, access_token, track, dest_root, format).await {
+    match download::download_track(http_client, access_token, track, dest_root, format, quality)
+        .await
+    {
         Ok(outcome) => Ok(outcome),
         Err(DownloadError::SessionExpired) => match refresh_access_token(state).await {
             Some(new_token) => {
-                download::download_track(http_client, &new_token, track, dest_root, format).await
+                download::download_track(http_client, &new_token, track, dest_root, format, quality)
+                    .await
             }
             None => Err(DownloadError::SessionExpired),
         },
         Err(e) if e.is_transient() => {
-            download::download_track(http_client, access_token, track, dest_root, format).await
+            download::download_track(http_client, access_token, track, dest_root, format, quality)
+                .await
         }
         Err(e) => Err(e),
     }
@@ -117,17 +123,24 @@ async fn run_download_worker(state: SharedState) {
         manager.set_current(Some(track.title.clone()));
         broadcast_progress(&state).await;
 
-        let (http_client, token_opt, dest_root) = {
+        let (http_client, token_opt, dest_root, flac_quality) = {
             let s = state.read().await;
-            let dest =
-                s.db.with_conn(|conn| Ok(download::read_download_folder(conn)))
-                    .unwrap_or_else(|_| download::default_download_folder());
+            let (dest, flac_quality) =
+                s.db.with_conn(|conn| {
+                    Ok((
+                        download::read_download_folder(conn),
+                        download::read_flac_quality(conn),
+                    ))
+                })
+                .unwrap_or_else(|_| (download::default_download_folder(), Default::default()));
             (
                 s.http_client.clone(),
                 s.tidal_tokens.as_ref().map(|t| t.access_token.clone()),
                 dest,
+                flac_quality,
             )
         };
+        let quality = download::resolve_tidal_quality(item.format, flac_quality);
 
         let Some(access_token) = token_opt else {
             let reason = "Not signed in to TIDAL".to_string();
@@ -154,6 +167,7 @@ async fn run_download_worker(state: SharedState) {
             &track,
             &dest_root,
             item.format,
+            quality,
         )
         .await
         {
@@ -212,17 +226,19 @@ async fn enqueue_and_spawn(state: &SharedState, items: Vec<DownloadJobItem>, pri
 pub struct DownloadSettings {
     folder: String,
     format: String,
+    flac_quality: String,
 }
 
 async fn current_settings(state: &SharedState) -> DownloadSettings {
     let s = state.read().await;
-    let (folder, format) =
+    let (folder, format, flac_quality) =
         s.db.with_conn(|conn| {
             Ok((
                 download::read_download_folder(conn)
                     .to_string_lossy()
                     .to_string(),
                 download::read_default_format(conn),
+                download::read_flac_quality(conn),
             ))
         })
         .unwrap_or_else(|_| {
@@ -231,11 +247,13 @@ async fn current_settings(state: &SharedState) -> DownloadSettings {
                     .to_string_lossy()
                     .to_string(),
                 DownloadFormat::Flac,
+                Default::default(),
             )
         });
     DownloadSettings {
         folder,
         format: format.as_str().to_string(),
+        flac_quality: flac_quality.as_str().to_string(),
     }
 }
 
@@ -247,6 +265,7 @@ pub async fn get_download_settings(State(state): State<SharedState>) -> Json<Dow
 pub struct UpdateDownloadSettings {
     folder: Option<String>,
     format: Option<String>,
+    flac_quality: Option<String>,
 }
 
 pub async fn set_download_settings(
@@ -261,6 +280,13 @@ pub async fn set_download_settings(
             }
             if let Some(format) = body.format.as_deref().and_then(DownloadFormat::from_query) {
                 download::write_default_format(conn, format)?;
+            }
+            if let Some(quality) = body
+                .flac_quality
+                .as_deref()
+                .and_then(download::FlacQuality::from_query)
+            {
+                download::write_flac_quality(conn, quality)?;
             }
             Ok(())
         })
