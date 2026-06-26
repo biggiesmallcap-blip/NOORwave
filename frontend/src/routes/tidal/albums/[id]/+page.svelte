@@ -1,7 +1,13 @@
 <script lang="ts">
 	import { page } from '$app/state';
+	import { goto } from '$app/navigation';
 	import { api, type TidalDiscographyTrack } from '$lib/api/client';
-	import { playTidalTracksNow } from '$lib/stores/player';
+	import {
+		playTidalTracksNow,
+		shuffleTidalTracksNow,
+		startTidalSongRadio,
+		saveTidalAlbumToLibrary,
+	} from '$lib/stores/player';
 	import { goBack } from '$lib/navigation/back';
 	import TidalTrackRow from '$lib/components/TidalTrackRow.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
@@ -85,6 +91,39 @@
 		);
 	}
 
+	async function shuffleLoadedAlbum() {
+		await shuffleTidalTracksNow(
+			tracks.map((track) => tidalDiscographyTrackToPlayable(track)),
+			header()?.title ?? 'album',
+		);
+	}
+
+	let radioPending = $state(false);
+	async function radioFromAlbum() {
+		const first = tracks[0];
+		if (radioPending || !first) return;
+		radioPending = true;
+		try {
+			await startTidalSongRadio(tidalDiscographyTrackToPlayable(first));
+		} finally {
+			radioPending = false;
+		}
+	}
+
+	let savePending = $state(false);
+	async function saveToLibrary() {
+		if (savePending) return;
+		savePending = true;
+		try {
+			// Import brings every track into the library and returns the new
+			// local album id, so land the user on the now-library album page.
+			const localId = await saveTidalAlbumToLibrary(tidalAlbumId);
+			if (localId != null) await goto(`/albums/${localId}`);
+		} finally {
+			savePending = false;
+		}
+	}
+
 </script>
 
 <div class="page">
@@ -148,7 +187,11 @@
 					</p>
 					<div class="hero-actions">
 						<button class="play-all-btn" onclick={() => void playLoadedAlbum()}>▶ Play All</button>
-						<span class="not-in-library-badge">Not in your library</span>
+						<button class="action-btn" onclick={() => void shuffleLoadedAlbum()}>⤮ Shuffle</button>
+						<button class="action-btn" disabled={radioPending} onclick={() => void radioFromAlbum()}>◉ Radio</button>
+						<button class="save-btn" disabled={savePending} onclick={() => void saveToLibrary()}>
+							{savePending ? 'Saving…' : '＋ Save to library'}
+						</button>
 					</div>
 				</div>
 			</div>
@@ -315,14 +358,33 @@
 	}
 	.play-all-btn:hover { opacity: 0.85; }
 
-	.not-in-library-badge {
-		font-size: var(--font-size-xs);
-		color: var(--text-tertiary);
+	.action-btn {
 		background: var(--bg-surface);
+		color: var(--text-secondary);
 		border: 1px solid var(--border-subtle);
-		border-radius: 12px;
-		padding: 3px 10px;
+		border-radius: 20px;
+		padding: 8px 18px;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+		cursor: pointer;
+		transition: color 0.15s, background 0.15s, border-color 0.15s;
 	}
+	.action-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
+	.action-btn:disabled { cursor: progress; opacity: 0.7; }
+
+	.save-btn {
+		background: var(--accent-soft);
+		color: var(--accent-strong);
+		border: 1px solid var(--accent-line);
+		border-radius: 20px;
+		padding: 8px 18px;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+		cursor: pointer;
+		transition: background 0.15s, color 0.15s;
+	}
+	.save-btn:hover { background: var(--accent); color: #fff; }
+	.save-btn:disabled { cursor: progress; opacity: 0.85; }
 
 	.track-table {
 		padding: 24px 32px 0;

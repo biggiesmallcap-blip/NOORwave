@@ -59,6 +59,35 @@ pub async fn remove_favorite_track(
     Ok(())
 }
 
+/// Add an album to TIDAL favorites.
+pub async fn add_favorite_album(
+    http: &reqwest::Client,
+    access_token: &str,
+    user_id: &str,
+    album_id: i64,
+    country_code: &str,
+) -> Result<()> {
+    crate::services::tidal::backoff::global().check()?;
+    let resp = http
+        .post(format!(
+            "{}/users/{}/favorites/albums?countryCode={}",
+            TIDAL_API_URL, user_id, country_code
+        ))
+        .header("Authorization", format!("Bearer {}", access_token))
+        .form(&[("albumIds", album_id.to_string())])
+        .send()
+        .await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let retry_after = crate::services::tidal::backoff::retry_after_secs(resp.headers());
+        let body = resp.text().await.unwrap_or_default();
+        crate::services::tidal::backoff::global().classify(status.as_u16(), &body, retry_after);
+        anyhow::bail!("TIDAL mutation error {}: {}", status, body);
+    }
+
+    Ok(())
+}
+
 /// Remove an album from TIDAL favorites.
 pub async fn remove_favorite_album(
     http: &reqwest::Client,

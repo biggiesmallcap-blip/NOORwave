@@ -1,11 +1,15 @@
 use super::{
-    error_looks_like_auth, load_persisted_tidal_tokens, recover_tidal_session,
+    error_looks_like_auth, load_persisted_tidal_tokens, recover_tidal_client,
     tidal_track_playable_json,
 };
 use crate::SharedState;
 use crate::db::queries;
 use crate::services::tidal::{
-    client::{TidalAlbum, TidalClient},
+    auth::TidalTokens,
+    client::{
+        TidalAlbum, TidalArtist, TidalArtistBio, TidalArtistVideo, TidalClient,
+        TidalPaginatedResponse, TidalTrack,
+    },
     import as tidal_import,
 };
 use axum::{
@@ -281,16 +285,27 @@ pub(super) async fn get_album_tracks(
     // The frontend renders both arrays; the user gets a single coherent track
     // listing where library entries are styled as "owned" and pure-TIDAL
     // entries get a TIDAL pill.
-    let (tracks, album_tidal_id) = {
+    let (tracks, album_tidal_id, album_is_favorite) = {
         let s = state.read().await;
         let result = s.db.with_conn(|conn| {
             let tracks = queries::get_album_tracks(conn, id)?;
             let pairs = queries::get_album_tidal_ids(conn, &[id])?;
             let tidal_id = pairs.first().map(|(_, t)| *t);
-            Ok::<_, anyhow::Error>((tracks, tidal_id))
+            // Album favorite ("liked") state so the page heart reflects it.
+            // A best-effort flag: a missing row or read error just reads false.
+            let is_favorite = conn
+                .query_row(
+                    "SELECT is_favorite FROM albums WHERE id = ?1",
+                    rusqlite::params![id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .ok()
+                .unwrap_or(0)
+                != 0;
+            Ok::<_, anyhow::Error>((tracks, tidal_id, is_favorite))
         });
         match result {
-            Ok((tracks, tidal_id)) => (tracks, tidal_id),
+            Ok(v) => v,
             Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
         }
     };
@@ -301,6 +316,7 @@ pub(super) async fn get_album_tracks(
             "tracks": tracks,
             "tidal_tracks": [],
             "album_tidal_id": null,
+            "album_is_favorite": album_is_favorite,
         })));
     };
 
@@ -340,8 +356,41 @@ pub(super) async fn get_album_tracks(
         .iter()
         .any(|t| t.track_number.is_none() && t.tidal_id.is_some());
 
-    let tidal_tracks_payload: Vec<Value> = match client.get_all_album_tracks(tidal_album_id).await {
-        Ok(tidal_tracks) => {
+    // Fetch the live TIDAL tracklist, recovering the session once on an auth
+    // error so an expired token enriches the album instead of silently
+    // dropping to library-only.
+    let tidal_tracks_result = match client.get_all_album_tracks(tidal_album_id).await {
+        Ok(t) => Some(t),
+        Err(e) if error_looks_like_auth(&e) => match recover_tidal_client(&state, &tokens).await {
+            Ok(retry_client) => match retry_client.get_all_album_tracks(tidal_album_id).await {
+                Ok(t) => Some(t),
+                Err(retry_err) => {
+                    tracing::warn!(
+                        ?retry_err,
+                        "TIDAL get_all_album_tracks retry failed; serving library only"
+                    );
+                    None
+                }
+            },
+            Err(refresh_err) => {
+                tracing::warn!(
+                    ?refresh_err,
+                    "TIDAL session refresh failed; serving library only"
+                );
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                ?e,
+                "TIDAL get_all_album_tracks failed; serving library only"
+            );
+            None
+        }
+    };
+
+    let tidal_tracks_payload: Vec<Value> = match tidal_tracks_result {
+        Some(tidal_tracks) => {
             if needs_backfill {
                 let backfill_pairs: Vec<(i64, i32, i32)> = tidal_tracks
                     .iter()
@@ -413,13 +462,7 @@ pub(super) async fn get_album_tracks(
                 })
                 .collect()
         }
-        Err(e) => {
-            tracing::warn!(
-                ?e,
-                "TIDAL get_all_album_tracks failed; serving library only"
-            );
-            Vec::new()
-        }
+        None => Vec::new(),
     };
 
     // Reload tracks so the response reflects backfilled track/disc numbers
@@ -437,6 +480,7 @@ pub(super) async fn get_album_tracks(
         "tracks": tracks,
         "tidal_tracks": tidal_tracks_payload,
         "album_tidal_id": tidal_album_id,
+        "album_is_favorite": album_is_favorite,
     })))
 }
 
@@ -561,17 +605,60 @@ pub(crate) fn merge_tidal_artist_album_filters(
     all_albums
 }
 
-/// Build the rich artist payload (categorized albums, top tracks, videos,
-/// similar artists, bio, picture) straight from a TIDAL artist id. Shared by
-/// the library discography route (which resolves a local id first) and the
-/// non-library `/api/tidal/artists/{id}` route so both render the same page.
-/// Each TIDAL sub-fetch degrades on its own: a failed videos call yields an
-/// empty rail instead of failing the whole route.
-pub(super) async fn build_tidal_artist_payload(
-    state: &SharedState,
-    client: &TidalClient,
-    tidal_artist_id: i64,
-) -> Value {
+/// The nine TIDAL artist-profile fetches, each independently fallible. Bundled
+/// so the whole fan-out can be re-run after an auth recovery without
+/// duplicating it, and so availability can be judged from the real results.
+struct TidalArtistBatch {
+    albums: anyhow::Result<Vec<TidalAlbum>>,
+    eps: anyhow::Result<Vec<TidalAlbum>>,
+    comps: anyhow::Result<Vec<TidalAlbum>>,
+    live: anyhow::Result<Vec<TidalAlbum>>,
+    top: anyhow::Result<TidalPaginatedResponse<TidalTrack>>,
+    videos: anyhow::Result<TidalPaginatedResponse<TidalArtistVideo>>,
+    similar: anyhow::Result<TidalPaginatedResponse<TidalArtist>>,
+    bio: anyhow::Result<TidalArtistBio>,
+    profile: anyhow::Result<TidalArtist>,
+}
+
+impl TidalArtistBatch {
+    /// Did TIDAL hand us anything usable? `false` only when every catalog fetch
+    /// errored. That is what the route reports as `available: false`, so the
+    /// page falls back to local data instead of rendering empty shelves behind
+    /// a lying `available: true` (the original bug: an artist with a long
+    /// catalog showed only Top tracks whenever the fetches transiently failed).
+    /// The bio is excluded - it routinely 404s for artists with no biography
+    /// and that alone should not mark the artist unavailable.
+    fn any_ok(&self) -> bool {
+        self.albums.is_ok()
+            || self.eps.is_ok()
+            || self.comps.is_ok()
+            || self.live.is_ok()
+            || self.top.is_ok()
+            || self.videos.is_ok()
+            || self.similar.is_ok()
+            || self.profile.is_ok()
+    }
+
+    /// Any error in the batch that smells like an expired/invalid session.
+    fn looks_like_auth(&self) -> bool {
+        [
+            self.albums.as_ref().err(),
+            self.eps.as_ref().err(),
+            self.comps.as_ref().err(),
+            self.live.as_ref().err(),
+            self.top.as_ref().err(),
+            self.videos.as_ref().err(),
+            self.similar.as_ref().err(),
+            self.bio.as_ref().err(),
+            self.profile.as_ref().err(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(error_looks_like_auth)
+    }
+}
+
+async fn fetch_tidal_artist_batch(client: &TidalClient, tidal_artist_id: i64) -> TidalArtistBatch {
     // Each filter is paginated separately; previously we fetched only the first
     // page (50 newest), which clipped any artist with a long catalog (e.g. a
     // 50+ year discography returned only modern compilations).
@@ -591,17 +678,7 @@ pub(super) async fn build_tidal_artist_payload(
     // when the local row has no `photo_url`.
     let profile_fut = client.get_artist(tidal_artist_id);
 
-    let (
-        albums_res,
-        eps_res,
-        comps_res,
-        live_res,
-        top_res,
-        videos_res,
-        similar_res,
-        bio_res,
-        profile_res,
-    ) = tokio::join!(
+    let (albums, eps, comps, live, top, videos, similar, bio, profile) = tokio::join!(
         albums_fut,
         eps_fut,
         compilations_fut,
@@ -612,6 +689,68 @@ pub(super) async fn build_tidal_artist_payload(
         bio_fut,
         profile_fut
     );
+
+    TidalArtistBatch {
+        albums,
+        eps,
+        comps,
+        live,
+        top,
+        videos,
+        similar,
+        bio,
+        profile,
+    }
+}
+
+/// Build the rich artist payload (categorized albums, top tracks, videos,
+/// similar artists, bio, picture) straight from a TIDAL artist id. Shared by
+/// the library discography route (which resolves a local id first) and the
+/// non-library `/api/tidal/artists/{id}` route so both render the same page.
+/// Each TIDAL sub-fetch degrades on its own: a failed videos call yields an
+/// empty rail instead of failing the whole route. A wholesale auth failure is
+/// recovered once and the batch refetched, so an expired session heals the
+/// page instead of blanking it.
+pub(super) async fn build_tidal_artist_payload(
+    state: &SharedState,
+    client: &TidalClient,
+    tidal_artist_id: i64,
+    tokens: &TidalTokens,
+) -> Value {
+    let mut batch = fetch_tidal_artist_batch(client, tidal_artist_id).await;
+
+    // When every fetch failed and the errors smell like auth, the session
+    // expired mid-flight. Recover once and refetch with a fresh client - the
+    // same self-heal `get_tidal_album_tracks` already does. Without this an
+    // expired token silently produced empty shelves with `available: true`.
+    if !batch.any_ok() && batch.looks_like_auth() {
+        match recover_tidal_client(state, tokens).await {
+            Ok(retry_client) => {
+                batch = fetch_tidal_artist_batch(&retry_client, tidal_artist_id).await;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "noor.sync.tidal",
+                    "TIDAL artist {} discography auth recovery failed: {}",
+                    tidal_artist_id,
+                    e
+                );
+            }
+        }
+    }
+
+    let available = batch.any_ok();
+    let TidalArtistBatch {
+        albums: albums_res,
+        eps: eps_res,
+        comps: comps_res,
+        live: live_res,
+        top: top_res,
+        videos: videos_res,
+        similar: similar_res,
+        bio: bio_res,
+        profile: profile_res,
+    } = batch;
 
     // Picture URL fallback chain. TIDAL's `/artists/{id}` record is the
     // canonical source, but it ships `picture: null` for many artists.
@@ -804,7 +943,7 @@ pub(super) async fn build_tidal_artist_payload(
         "similar_artists": similar_artists_payload,
         "bio": bio_payload,
         "picture_url": picture_url,
-        "available": true
+        "available": available
     })
 }
 
@@ -862,7 +1001,7 @@ pub(super) async fn get_artist_discography(
         tokens.country_code.clone(),
     );
 
-    let payload = build_tidal_artist_payload(&state, &client, tidal_artist_id).await;
+    let payload = build_tidal_artist_payload(&state, &client, tidal_artist_id, &tokens).await;
 
     // Best-effort persistence of bio text to the local artists row so the
     // page can render it offline next time. Only writes when the local row
@@ -1030,7 +1169,7 @@ pub(super) async fn get_tidal_album_tracks(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     require_positive_tidal_album_id(tidal_album_id)?;
 
-    let (tokens, http_client, tidal_http_client) = {
+    let (tokens, tidal_http_client) = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1040,7 +1179,6 @@ pub(super) async fn get_tidal_album_tracks(
         let s = state.read().await;
         (
             s.tidal_tokens.clone().or(persisted),
-            s.http_client.clone(),
             s.tidal_http_client.clone(),
         )
     };
@@ -1053,28 +1191,24 @@ pub(super) async fn get_tidal_album_tracks(
     };
 
     let client = TidalClient::with_http(
-        tidal_http_client.clone(),
+        tidal_http_client,
         tokens.access_token.clone(),
         tokens.country_code.clone(),
     );
     let items = match client.get_all_album_tracks(tidal_album_id).await {
         Ok(items) => items,
         Err(error) if error_looks_like_auth(&error) => {
-            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
-                .await
-                .map_err(|refresh_error| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({
-                            "error": format!("TIDAL session refresh failed: {}", refresh_error)
-                        })),
-                    )
-                })?;
-            let retry_client = TidalClient::with_http(
-                tidal_http_client,
-                refreshed.access_token.clone(),
-                refreshed.country_code.clone(),
-            );
+            let retry_client =
+                recover_tidal_client(&state, &tokens)
+                    .await
+                    .map_err(|refresh_error| {
+                        (
+                            StatusCode::BAD_GATEWAY,
+                            Json(json!({
+                                "error": format!("TIDAL session refresh failed: {}", refresh_error)
+                            })),
+                        )
+                    })?;
             retry_client
                 .get_all_album_tracks(tidal_album_id)
                 .await

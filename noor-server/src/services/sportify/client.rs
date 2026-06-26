@@ -121,6 +121,83 @@ mod tests {
         assert!(truncated.ends_with("..."));
         assert!(truncated.len() <= 259);
     }
+
+    /// Spawn a one-shot mock mirror serving `/api/search` with a fixed
+    /// status + body, and return its base URL.
+    async fn spawn_mirror(status: axum::http::StatusCode, body: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock mirror");
+        let addr = listener.local_addr().expect("read mock mirror addr");
+        let app = axum::Router::new().route(
+            "/api/search",
+            axum::routing::get(move || async move { (status, body) }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve mock mirror");
+        });
+        format!("http://{addr}")
+    }
+
+    fn client_for(primary: String, fallback: String) -> SportifyClient {
+        SportifyClient::new(SportifyClientConfig {
+            base_url: primary,
+            fallback_base_urls: vec![fallback],
+            user_agent: "noor-test".to_string(),
+        })
+        .expect("client")
+    }
+
+    #[tokio::test]
+    async fn track_search_fails_over_to_next_mirror_on_http_error() {
+        // Mirror 1 is dead (the xcasper-style upstream-401 -> 500). Track
+        // search must fall over to mirror 2 instead of erroring out.
+        let dead = spawn_mirror(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"success":false,"error":"GraphQL searchDesktop failed: 401"}"#,
+        )
+        .await;
+        let live = spawn_mirror(
+            axum::http::StatusCode::OK,
+            r#"{"success":true,"results":[{"id":"t1"}]}"#,
+        )
+        .await;
+        let client = client_for(dead, live);
+
+        let out = client
+            .search("daft punk", SportifySearchKind::Track, 10, 0)
+            .await
+            .expect("search should succeed via fallback mirror");
+
+        assert_eq!(out.tracks.len(), 1);
+        assert_eq!(out.tracks[0].id.as_deref(), Some("t1"));
+    }
+
+    #[tokio::test]
+    async fn track_search_fails_over_to_next_mirror_on_empty_results() {
+        // The regression: a mirror answering 200-but-empty used to be accepted
+        // for non-playlist kinds, dead-ending track search. It must now try the
+        // next mirror, which has rows.
+        let empty = spawn_mirror(
+            axum::http::StatusCode::OK,
+            r#"{"success":true,"results":[]}"#,
+        )
+        .await;
+        let live = spawn_mirror(
+            axum::http::StatusCode::OK,
+            r#"{"success":true,"results":[{"id":"t1"}]}"#,
+        )
+        .await;
+        let client = client_for(empty, live);
+
+        let out = client
+            .search("daft punk", SportifySearchKind::Track, 10, 0)
+            .await
+            .expect("search should succeed via fallback mirror");
+
+        assert_eq!(out.tracks.len(), 1);
+        assert_eq!(out.tracks[0].id.as_deref(), Some("t1"));
+    }
 }
 
 impl Default for SportifyClientConfig {
@@ -293,12 +370,14 @@ impl SportifyClient {
             {
                 Ok(value) => {
                     let out = search_results_from_value(&value, kind);
-                    if matches!(kind, SportifySearchKind::Playlist)
-                        && out.playlists.is_empty()
-                        && idx + 1 < self.base_urls.len()
-                    {
+                    // A mirror can answer 200-but-empty when its upstream token
+                    // is degraded. Don't accept an empty first page if another
+                    // mirror might still have rows; only the last mirror's empty
+                    // result is authoritative.
+                    if results_empty_for_kind(&out, kind) && idx + 1 < self.base_urls.len() {
                         tracing::debug!(
-                            "sportify playlist search via {} returned no playlist rows",
+                            "sportify {} search via {} returned no rows; trying next mirror",
+                            kind.as_str(),
                             base_url
                         );
                         continue;
@@ -357,6 +436,15 @@ impl SportifyClient {
             return serde_json::from_value(inner).context("parse sportify top-tracks `items`");
         }
         Ok(Vec::new())
+    }
+}
+
+fn results_empty_for_kind(results: &SportifySearchResults, kind: SportifySearchKind) -> bool {
+    match kind {
+        SportifySearchKind::Track => results.tracks.is_empty(),
+        SportifySearchKind::Album => results.albums.is_empty(),
+        SportifySearchKind::Artist => results.artists.is_empty(),
+        SportifySearchKind::Playlist => results.playlists.is_empty(),
     }
 }
 

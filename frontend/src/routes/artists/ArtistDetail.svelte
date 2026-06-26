@@ -7,7 +7,8 @@
 		type TidalArtistVideo,
 		type TidalSimilarArtist,
 		type TidalArtistBio,
-		type SpotifyArtistStats
+		type SpotifyArtistStats,
+		type TidalPlayable
 	} from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
 	import { letterColor } from '$lib/utils/color';
@@ -196,6 +197,13 @@
 			tidalBio = res.bio ?? null;
 			tidalAvailable = res.available ?? true;
 			if (res.picture_url) tidalPictureUrl = res.picture_url;
+			// TIDAL-mode artists have no local-track fallback, so an
+			// all-fetches-failed response (`available: false`) means TIDAL is
+			// unreachable, not that the artist is missing. Surface it as a load
+			// error so the empty state shows instead of a hollow header.
+			if (!tidalAvailable) {
+				error = "Couldn't reach TIDAL. Try again.";
+			}
 		} catch (err) {
 			if (seq !== tidalLoadSeq) return;
 			error = String(err);
@@ -344,6 +352,60 @@
 		return item.kind === 'local' ? `local-${item.track.id}` : `tidal-${item.track.tidal_id}`;
 	}
 
+	// A Top-tracks row as a TIDAL playable. Owned rows carry a tidal_id (the
+	// player resolves it back to the local file), so the whole list can be one
+	// queue. Returns null for a pure-local track with no tidal_id.
+	function popularItemPlayable(item: PopularTrackItem): TidalPlayable | null {
+		if (item.kind === 'tidal') return artistTrackPlayable(item.track);
+		const t = item.track;
+		if (t.tidal_id == null || t.tidal_id <= 0) return null;
+		return {
+			tidal_id: t.tidal_id,
+			title: t.title,
+			artist_name: t.artist_name ?? null,
+			album_title: t.album_title ?? null,
+			artwork_url: t.artwork_url ?? null,
+			duration_ms: t.duration_ms ?? null,
+			artist_tidal_id: t.artist_tidal_id ?? activeTidalArtistId,
+			album_tidal_id: t.album_tidal_id ?? null,
+			local_id: t.id,
+			is_in_library: true,
+			is_favorite: t.is_favorite,
+		};
+	}
+
+	// Play the Top tracks list in context, starting at the clicked row (the rest
+	// of the list becomes the queue), mirroring how the library plays a track
+	// list instead of playing one orphan song. A pure-local track with no
+	// tidal_id falls back to playing the artist's owned tracks in context.
+	async function onTopTrackPlay(item: PopularTrackItem) {
+		if (item.kind === 'local' && (item.track.tidal_id == null || item.track.tidal_id <= 0)) {
+			void playArtist(artistId, item.track.id);
+			return;
+		}
+		const startKey = popularItemKey(item);
+		const playables: TidalPlayable[] = [];
+		let startIdx = -1;
+		for (const it of popularItems) {
+			const playable = popularItemPlayable(it);
+			if (!playable) continue;
+			if (popularItemKey(it) === startKey) startIdx = playables.length;
+			playables.push(playable);
+		}
+		if (startIdx < 0) {
+			const single = popularItemPlayable(item);
+			if (single) void playTidalTrackNow(single);
+			return;
+		}
+		// Clicking a specific row plays from there in order: force shuffle off so
+		// the global shuffle mode doesn't randomise the list out from under the click.
+		await playTidalTracksNow(
+			playables.slice(startIdx),
+			header()?.name ?? tidalProfileName ?? 'artist',
+			{ shuffleMode: 'off' },
+		);
+	}
+
 	// "Top tracks" follows TIDAL's popularity-ranked top-tracks order when
 	// available, replacing TIDAL rows with local rows where the user owns them.
 	// Local-only leftovers are appended by known playcount as a fallback.
@@ -448,7 +510,21 @@
 	let tidalCompilations = $derived(sortByDate(tidalAlbums.filter((a) => categorize(a) === 'compilation')));
 	let tidalLiveAlbums = $derived(sortByDate(tidalAlbums.filter((a) => categorize(a) === 'live')));
 
-	// Fallback (used when TIDAL unavailable): group library tracks into albums.
+	// Whether TIDAL actually returned any releases to show. The backend can
+	// report `available: true` while every album fetch errored to empty (a
+	// transient TIDAL failure, an expired token, or a stale `tidal_id`), which
+	// used to collapse the page to just Top tracks: the TIDAL shelves were all
+	// empty and the local-track fallback was gated off by `available`. Gate the
+	// album shelves on real data so a library artist still groups its owned
+	// tracks into albums when TIDAL hands us nothing.
+	let hasAnyTidalAlbums = $derived(
+		tidalFullAlbums.length > 0
+			|| tidalSinglesEPs.length > 0
+			|| tidalCompilations.length > 0
+			|| tidalLiveAlbums.length > 0
+	);
+
+	// Fallback (used when TIDAL returns no releases): group library tracks into albums.
 	let fallbackAlbums = $derived.by(() => {
 		const map = new Map<
 			string,
@@ -536,7 +612,8 @@
 		$isPlaying && artistCurrentTrackMatchesArtist($currentTrack, tracks, activeTidalArtistId, tidalTopTracks)
 	);
 
-	function onShuffleClick() {
+	let shufflePending = $state(false);
+	async function onShuffleClick() {
 		if (source.kind === 'tidal') {
 			const playable = tidalTopTracks.map(artistTrackPlayable);
 			if (playable.length > 0) {
@@ -544,7 +621,30 @@
 			}
 			return;
 		}
-		void shuffleArtist(artistId);
+		if (tracks.length > 0) {
+			void shuffleArtist(artistId);
+			return;
+		}
+		// Library artist with no owned tracks: shuffle the TIDAL top tracks
+		// instead of dead-ending on "Artist has no tracks" (mirrors Play).
+		if (shufflePending) return;
+		shufflePending = true;
+		try {
+			const requestedFor = artistId;
+			const topTracks = await ensureTidalTopTracksForPlayback(requestedFor);
+			if (artistId !== requestedFor) return;
+			const playable = topTracks.map(artistTrackPlayable);
+			if (playable.length > 0) {
+				await shuffleTidalTracksNow(playable, artist?.name ?? 'artist');
+			} else {
+				void shuffleArtist(artistId);
+			}
+		} catch (error) {
+			console.error('Failed to load TIDAL artist tracks for shuffle', error);
+			void shuffleArtist(artistId);
+		} finally {
+			shufflePending = false;
+		}
 	}
 
 	let radioPending = $state(false);
@@ -557,7 +657,19 @@
 				if (seed) await startTidalSongRadio(artistTrackPlayable(seed));
 				return;
 			}
-			await startArtistRadio(artistId);
+			if (tracks.length > 0) {
+				await startArtistRadio(artistId);
+				return;
+			}
+			// Library artist with no owned tracks: seed radio from the top TIDAL
+			// track instead of dead-ending (mirrors Play).
+			const topTracks = await ensureTidalTopTracksForPlayback(artistId);
+			const seed = topTracks[0];
+			if (seed) {
+				await startTidalSongRadio(artistTrackPlayable(seed));
+			} else {
+				await startArtistRadio(artistId);
+			}
 		} finally {
 			radioPending = false;
 		}
@@ -873,7 +985,7 @@
 								showArtist={false}
 								showPlayCount={true}
 								worldPlayCount={streamCount ?? null}
-								onRowClick={() => void playArtist(artistId, track.id)}
+								onRowClick={() => void onTopTrackPlay(item)}
 								menuOptions={{ hideArtistActions: true }}
 							/>
 						</div>
@@ -894,7 +1006,7 @@
 							role="button"
 							tabindex={playable_ok ? 0 : -1}
 							aria-disabled={!playable_ok}
-							onclick={() => playable_ok && void playTidalTrackNow(playable)}
+							onclick={() => playable_ok && void onTopTrackPlay(item)}
 							oncontextmenu={(e) => {
 								e.preventDefault();
 								e.stopPropagation();
@@ -902,7 +1014,7 @@
 							}}
 							onkeydown={(e) =>
 								(e.key === 'Enter' || e.key === ' ')
-								&& (e.preventDefault(), playable_ok && void playTidalTrackNow(playable))}
+								&& (e.preventDefault(), playable_ok && void onTopTrackPlay(item))}
 						>
 							<span class="tidal-row-num">{idx + 1}</span>
 							{#if trackArt}
@@ -1050,7 +1162,7 @@
 			</a>
 		{/snippet}
 
-		{#if tidalAvailable}
+		{#if hasAnyTidalAlbums}
 			{#if filteredTidalFullAlbums.length > 0}
 				<section class="section">
 					<div class="shelf-head">
@@ -1082,20 +1194,6 @@
 					>
 						{#snippet card(album)}
 							{@render discographyCard(album, 'ep_single')}
-						{/snippet}
-					</MediaRail>
-				</section>
-			{/if}
-
-			{#if tidalVideos.length > 0}
-				<section class="section">
-					<div class="shelf-head">
-						<p class="section-eyebrow">TIDAL · Videos</p>
-						<span class="shelf-count">{tidalVideos.length}</span>
-					</div>
-					<MediaRail items={tidalVideos} getKey={(v) => v.tidal_id}>
-						{#snippet card(video)}
-							{@render videoCard(video)}
 						{/snippet}
 					</MediaRail>
 				</section>
@@ -1240,6 +1338,24 @@
 			{#if tidalLoading}
 				<p class="status subtle">Loading full discography from TIDAL…</p>
 			{/if}
+		{/if}
+
+		<!-- Videos are independent of the album shelves: an artist can have videos
+		     while the album fetch came back empty, and vice versa. Gating them on
+		     the album presence used to hide them whenever TIDAL returned no
+		     releases. -->
+		{#if tidalVideos.length > 0}
+			<section class="section">
+				<div class="shelf-head">
+					<p class="section-eyebrow">TIDAL · Videos</p>
+					<span class="shelf-count">{tidalVideos.length}</span>
+				</div>
+				<MediaRail items={tidalVideos} getKey={(v) => v.tidal_id}>
+					{#snippet card(video)}
+						{@render videoCard(video)}
+					{/snippet}
+				</MediaRail>
+			</section>
 		{/if}
 
 		<!-- Similar artists are not gated on tidalAvailable: a transient TIDAL

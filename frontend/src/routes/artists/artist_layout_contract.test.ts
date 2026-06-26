@@ -92,7 +92,9 @@ describe('artist page layout contracts', () => {
 		expect(source).toContain('function artistTrackPlayable(track: TidalDiscographyTrack)');
 		expect(source).toContain("tidalDiscographyTrackToPlayable(track, { artistTidalId: activeTidalArtistId })");
 		expect(source).toContain('{@const playable = artistTrackPlayable(track)}');
-		expect(source).not.toContain('type TidalPlayable');
+		// Importing the shared TidalPlayable type is fine; only a local
+		// re-declaration of it (or the mapper) is banned.
+		expect(source).not.toContain('type TidalPlayable =');
 		expect(source).not.toContain('function tidalDiscographyTrackToPlayable(t: TidalDiscographyTrack)');
 	});
 
