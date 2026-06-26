@@ -190,6 +190,11 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 					onSelect: () => void downloadTrack(track.id, 'flac')
 				},
 				{
+					label: 'AAC (M4A, 320)',
+					icon: '⤓',
+					onSelect: () => void downloadTrack(track.id, 'aac')
+				},
+				{
 					label: 'MP3 (320)',
 					icon: '⤓',
 					onSelect: () => void downloadTrack(track.id, 'mp3')

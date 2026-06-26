@@ -8,7 +8,7 @@ import { showToast } from '$lib/stores/toast';
  *  URLs against the backend origin — a bare `/api/...` would hit the Vite dev origin. */
 const api = (path: string) => `${getApiBase()}${path}`;
 
-export type DownloadFormat = 'flac' | 'mp3';
+export type DownloadFormat = 'flac' | 'mp3' | 'aac';
 export type FlacQuality = 'cd' | 'hires';
 export type Mp3Source = 'aac' | 'lossless';
 
@@ -75,7 +75,7 @@ export async function loadDownloadSettings(): Promise<DownloadSettings | null> {
 }
 
 function applySettings(data: DownloadSettings): void {
-	if (data?.format === 'flac' || data?.format === 'mp3') {
+	if (data?.format === 'flac' || data?.format === 'mp3' || data?.format === 'aac') {
 		defaultDownloadFormat.set(data.format);
 	}
 	if (data?.flac_quality === 'cd' || data?.flac_quality === 'hires') {

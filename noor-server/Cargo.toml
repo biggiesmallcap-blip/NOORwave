@@ -80,6 +80,7 @@ id3 = "1.17.0"
 metaflac = "0.2.8"
 mp3lame-encoder = "0.2.4"
 dirs = "6.0.0"
+mp4ameta = "0.13.0"
 
 # Real WASAPI exclusive-mode output (Windows only). cpal does not expose
 # ShareMode::Exclusive, so we drive IAudioClient directly via this crate to

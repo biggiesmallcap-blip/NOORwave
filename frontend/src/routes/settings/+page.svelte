@@ -2751,6 +2751,15 @@
 							<button
 								type="button"
 								class="download-format-option"
+								class:active={$defaultDownloadFormat === 'aac'}
+								aria-pressed={$defaultDownloadFormat === 'aac'}
+								onclick={() => setDownloadFormat('aac')}
+							>
+								AAC<small>M4A, best lossy</small>
+							</button>
+							<button
+								type="button"
+								class="download-format-option"
 								class:active={$defaultDownloadFormat === 'mp3'}
 								aria-pressed={$defaultDownloadFormat === 'mp3'}
 								onclick={() => setDownloadFormat('mp3')}

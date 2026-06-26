@@ -144,6 +144,7 @@ export function buildAlbumMenu(album: AlbumLike, options: BuildAlbumMenuOptions 
 					icon: '⤓',
 					onSelect: () => void downloadAlbum(localId, 'flac')
 				},
+				{ label: 'AAC (M4A, 320)', icon: '⤓', onSelect: () => void downloadAlbum(localId, 'aac') },
 				{ label: 'MP3 (320)', icon: '⤓', onSelect: () => void downloadAlbum(localId, 'mp3') }
 			]
 		});

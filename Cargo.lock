@@ -3294,6 +3294,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "mp4ameta"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "453e991b2efe96c288cbc2d03a19e353504294559ecb6c03067fff5bd824616d"
+
+[[package]]
 name = "muda"
 version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3478,6 +3484,7 @@ dependencies = [
  "md5",
  "metaflac",
  "mp3lame-encoder",
+ "mp4ameta",
  "noor-mix",
  "num-complex",
  "rand 0.8.6",

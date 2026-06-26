@@ -43,8 +43,11 @@ album batch download, FLAC/MP3, configurable folder, tagging, retry/cancel.
   into the public portable-zip releases. Static linking technically obliges offering
   relinkable object files. Fine for a personal project; document or switch to dynamic
   linking if distribution ever becomes a concern.
-- **AAC passthrough**: for lossy-tier sources, saving the original `.m4a` without a re-encode
-  would be faster and avoids a needless transcode. Out of scope for the FLAC/MP3 v1.
+- **AAC output is passthrough; M4A tagging is best-effort.** AAC saves TIDAL's HIGH stream
+  straight to `.m4a` with no transcode (shipped). The `mp4ameta` tag write is best-effort:
+  TIDAL hi-tier is often fragmented MP4 (DASH), which mp4ameta may not always rewrite. If
+  AAC files come out untagged in practice, switch the M4A tagger to `lofty` (handles all
+  containers) or remux the fragments to a plain MP4 before tagging.
 - **FLAC encode is slow in debug builds.** MP3 (LAME, C) is fast everywhere, but flacenc is
   pure Rust and unoptimized in a `cargo run` dev build, so a hi-res FLAC encode takes minutes
   (observed pegging ~one core for 5+ min on a 24-bit track; release builds are ~10-50x
