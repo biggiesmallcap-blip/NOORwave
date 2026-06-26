@@ -34,6 +34,15 @@ album batch download, FLAC/MP3, configurable folder, tagging, retry/cancel.
   linking if distribution ever becomes a concern.
 - **AAC passthrough**: for lossy-tier sources, saving the original `.m4a` without a re-encode
   would be faster and avoids a needless transcode. Out of scope for the FLAC/MP3 v1.
+- **FLAC encode is slow in debug builds.** MP3 (LAME, C) is fast everywhere, but flacenc is
+  pure Rust and unoptimized in a `cargo run` dev build, so a hi-res FLAC encode takes minutes
+  (observed pegging ~one core for 5+ min on a 24-bit track; release builds are ~10-50x
+  faster). Correctness is proven (claxon unit test: valid + bit-perfect); this is purely a
+  dev-speed gotcha. Worth: (a) verifying FLAC in release, (b) checking why only one core was
+  busy (flacenc `multithread=true` may not be engaging, or the serial symphonia decode +
+  serial per-segment fetch is the bottleneck), (c) parallelizing the segment fetch (playback
+  fetches concurrently; download fetches sequentially), (d) confirming a long blocking encode
+  doesn't delay server shutdown.
 - Spawned by: track download feature, branch `feat/track-download`.
 
 ### chore: populate `album_title` at the `TidalPlayable` builders, not just the backstop
