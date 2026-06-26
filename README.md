@@ -32,7 +32,7 @@
 
 NOORwave is a desktop TIDAL player built around a simple idea: your streaming library should behave like a fast local music collection.
 
-It syncs your TIDAL library into SQLite, gives you a real desktop app with tray and media-key support, adds lossless playback controls, and lets you shape the queue with search, radio, automix, DJ profiles, and a phone remote. Everything runs on your own machine. A small Rust server (`noor-server`) owns the database, audio engine, and integrations; a Tauri desktop shell (`noor-app`) wraps the SvelteKit UI and launches that server for you.
+It syncs your TIDAL library into SQLite, gives you a real desktop app with tray and media-key support, adds lossless playback controls, lets you shape the queue with search, radio, automix, DJ profiles, and a phone remote, and can save tracks to disk as FLAC or MP3. Everything runs on your own machine. A small Rust server (`noor-server`) owns the database, audio engine, and integrations; a Tauri desktop shell (`noor-app`) wraps the SvelteKit UI and launches that server for you.
 
 ## Product Tour
 
@@ -64,6 +64,7 @@ It syncs your TIDAL library into SQLite, gives you a real desktop app with tray 
 | Area | What NOORwave does |
 |---|---|
 | Library | Incremental TIDAL sync, local search, artist and album pages, playlists, duplicate detection, MusicBrainz and Last.fm enrichment. |
+| Downloads | Save any track, album, or playlist to disk as bit-perfect FLAC or 320 kbps MP3, tagged, into a configurable `Artist/Album/NN - Title` library. Selectable FLAC tier (Hi-Res or CD) and MP3 source, with batch progress, cancel, and retry. |
 | Playback | Lossless TIDAL playback, DASH segment seek, gapless transitions, crossfade, queue undo, shuffle modes, Windows WASAPI exclusive output. |
 | DJ and radio | Automix, Song Radio, Last.fm fallback, learned similarity, harmonic scoring, DJ profile controls, reasons on queued tracks. |
 | Discovery | Sound Space, blend discovery, training intensity tiers, safety preview, live ETA, model activation guidance. |
@@ -80,6 +81,7 @@ NOORwave is for people who like TIDAL's catalog but want a better command center
 - **The queue is yours.** Play next, append, reorder, save, undo clear, shuffle by intent, inspect radio reasons, and keep automix from fighting your manual choices.
 - **DJ mode is a control surface, not a gimmick.** Profiles, harmonic matching, BPM and energy awareness, transition planning, and automix controls are there for shaping a session, not just filling silence.
 - **The phone remote makes it practical.** Open `/remote` from a phone on the same network and drive playback, queue, search, library pages, sleep timer, and track actions from the couch.
+- **Your music lands on disk too.** Right-click any track, album, or playlist (or use the download button on the now-playing art) to save it as bit-perfect FLAC or a portable 320 kbps MP3, tagged, in a tidy `Artist/Album` folder you pick once in Settings.
 
 The point is not every integration NOORwave can talk to. The point is a faster, more controllable TIDAL setup for people who actively listen, build queues, and care how playback moves from one track to the next.
 
