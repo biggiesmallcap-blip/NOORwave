@@ -7,6 +7,7 @@ import { handleAnalysisProgress, handleAnalysisComplete } from '$lib/stores/audi
 import { handleAcrCloudProgress, handleAcrCloudComplete } from '$lib/stores/acrcloud';
 import { handleDiscoverySpaceRefreshed, setRefreshProgress } from '$lib/components/DiscoverSpace/discover_space_store';
 import { setExclusiveEngaged, setExclusiveFailed, setExclusiveReleased } from '$lib/stores/exclusive_status';
+import { handleDownloadProgress, handleDownloadItemDone, handleDownloadComplete } from '$lib/stores/downloads';
 import { showToast } from '$lib/stores/toast';
 import { applyCacheUpdateForWsMessage } from '$lib/cache/ws_events';
 
@@ -34,7 +35,10 @@ export type WsMessage =
 	| { type: 'discovery_space_refreshed'; seed_track_id: number }
 	| { type: 'audio_exclusive_engaged'; device: string; transport_format: string }
 	| { type: 'audio_exclusive_failed'; device: string; reason: string }
-	| { type: 'audio_exclusive_released'; device: string };
+	| { type: 'audio_exclusive_released'; device: string }
+	| { type: 'download_progress'; done: number; total: number; current_title: string | null }
+	| { type: 'download_item_done'; track_id: number; ok: boolean; already: boolean; path: string | null; error: string | null }
+	| { type: 'download_complete'; ok: number; failed: number };
 
 export const wsMessages = writable<WsMessage[]>([]);
 
@@ -148,6 +152,15 @@ export function connectWebSocket() {
 			}
 			if (data?.type === 'audio_exclusive_released') {
 				setExclusiveReleased(data.device ?? '');
+			}
+			if (data?.type === 'download_progress') {
+				handleDownloadProgress(data);
+			}
+			if (data?.type === 'download_item_done') {
+				handleDownloadItemDone(data);
+			}
+			if (data?.type === 'download_complete') {
+				void handleDownloadComplete(data);
 			}
 		} catch {}
 	};

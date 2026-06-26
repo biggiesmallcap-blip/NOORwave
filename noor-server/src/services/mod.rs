@@ -8,6 +8,7 @@ pub mod discovery;
 pub mod discovery_blend;
 pub mod discovery_space;
 pub mod discovery_trainer;
+pub mod download;
 pub mod lastfm;
 pub mod learning;
 pub mod listen_history_backfill;

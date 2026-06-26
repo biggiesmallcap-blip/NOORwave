@@ -244,6 +244,9 @@ pub struct AppState {
     pub sportify_cache_config: services::sportify::cache::SportifyCacheConfig,
     /// Eager-first-N + lazy-rest tunables for discovery list endpoints.
     pub sportify_resolve_config: services::sportify::cache::SportifyResolveConfig,
+    /// Unified track-download queue + worker status. One sequential worker drains it;
+    /// single-track requests jump ahead of queued batch items. See `services::download`.
+    pub downloads: services::download::DownloadManager,
 }
 
 /// Events broadcast across the application
@@ -336,6 +339,28 @@ pub enum AppEvent {
     /// engine is currently shared until the next Resume / Play re-grabs.
     AudioExclusiveReleased {
         device: String,
+    },
+    /// Track-download worker progress. `current_title` is the track being encoded
+    /// right now; `done`/`total` count the whole queued batch so the toast can show
+    /// "Downloading: 3/15" and survive a UI navigation via the status endpoint.
+    DownloadProgress {
+        done: u32,
+        total: u32,
+        current_title: Option<String>,
+    },
+    /// One track finished downloading. Lets the single-download toast resolve with the
+    /// saved path (for "Show in folder") without waiting for the whole batch.
+    DownloadItemDone {
+        track_id: i64,
+        ok: bool,
+        already: bool,
+        path: Option<String>,
+        error: Option<String>,
+    },
+    /// Track-download queue drained. `ok` succeeded, `failed` could not be saved.
+    DownloadComplete {
+        ok: u32,
+        failed: u32,
     },
 }
 
@@ -827,6 +852,7 @@ async fn main() -> Result<()> {
         sportify_client,
         sportify_cache_config,
         sportify_resolve_config,
+        downloads: services::download::DownloadManager::new(),
     }));
 
     services::audio_analysis::queue_prescanner::spawn(state.clone());

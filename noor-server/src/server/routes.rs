@@ -38,6 +38,7 @@ pub(crate) mod catalog_routes;
 mod chart_routes;
 mod discovery_routes;
 mod dj_routes;
+mod download_routes;
 mod duplicates_routes;
 mod enrichment_routes;
 mod genre_routes;
@@ -818,6 +819,28 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/playback/shuffle", post(set_playback_shuffle))
         .route("/api/playback/repeat", post(set_playback_repeat))
         .route("/api/playback/automix", post(set_playback_automix))
+        // Track downloads (FLAC/MP3 export to disk)
+        .route(
+            "/api/downloads/settings",
+            get(download_routes::get_download_settings)
+                .post(download_routes::set_download_settings),
+        )
+        .route(
+            "/api/tracks/{id}/download",
+            post(download_routes::download_track),
+        )
+        .route(
+            "/api/downloads/batch",
+            post(download_routes::download_batch),
+        )
+        .route(
+            "/api/downloads/cancel",
+            post(download_routes::cancel_downloads),
+        )
+        .route(
+            "/api/downloads/status",
+            get(download_routes::download_status),
+        )
         .route(
             "/api/playback/queue",
             get(get_playback_queue).post(replace_playback_queue),

@@ -5,6 +5,7 @@
 	import { goto, onNavigate } from '$app/navigation';
 	import { markNavigated } from '$lib/navigation/back';
 	import { connectWebSocket, wsConnected } from '$lib/api/ws';
+	import { loadDownloadSettings } from '$lib/stores/downloads';
 	import {
 		currentTrack,
 		currentQueueItemId,
@@ -328,6 +329,7 @@
 			connectWebSocket();
 			void refreshPlaybackState();
 			void checkOnboarding();
+			void loadDownloadSettings();
 			startStartupPrewarm();
 		}
 

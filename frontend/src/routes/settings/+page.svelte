@@ -77,6 +77,13 @@
 	import { uiZoom, setZoom, zoomIn, zoomOut, resetZoom, MIN as ZOOM_MIN, MAX as ZOOM_MAX, WHEEL_STEP as ZOOM_STEP } from '$lib/stores/uiZoom';
 	import { audioSettings } from '$lib/stores/audio_settings';
 	import { exclusiveStatus } from '$lib/stores/exclusive_status';
+	import {
+		defaultDownloadFormat,
+		loadDownloadSettings,
+		saveDownloadSettings,
+		type DownloadFormat
+	} from '$lib/stores/downloads';
+	import { open as openDirectoryDialog } from '@tauri-apps/plugin-dialog';
 	import { isTauri, openExternal } from '$lib/util/external';
 	import { isValidTidalRedirectUrl, readTidalRedirectFromClipboard } from '$lib/tidal/login';
 	import { cachedApi } from '$lib/cache/api_queries';
@@ -349,8 +356,42 @@
 		}
 	}
 
+	let downloadFolder = $state('');
+	let downloadFolderSaving = $state(false);
+
+	async function refreshDownloadFolder() {
+		const settings = await loadDownloadSettings();
+		if (settings) downloadFolder = settings.folder;
+	}
+
+	async function chooseDownloadFolder() {
+		if (!isTauri()) return;
+		try {
+			const picked = await openDirectoryDialog({ directory: true, multiple: false });
+			if (typeof picked === 'string' && picked) {
+				downloadFolderSaving = true;
+				const updated = await saveDownloadSettings({ folder: picked });
+				if (updated) downloadFolder = updated.folder;
+				downloadFolderSaving = false;
+			}
+		} catch (error) {
+			console.warn('download folder pick failed', error);
+			downloadFolderSaving = false;
+		}
+	}
+
+	async function commitDownloadFolder(value: string) {
+		const updated = await saveDownloadSettings({ folder: value });
+		if (updated) downloadFolder = updated.folder;
+	}
+
+	function setDownloadFormat(format: DownloadFormat) {
+		void saveDownloadSettings({ format });
+	}
+
 	onMount(() => {
 		const tauriUnlisteners: Array<() => void> = [];
+		void refreshDownloadFolder();
 		const tick = setInterval(() => {
 			nowEpochSeconds = Math.floor(Date.now() / 1000);
 		}, 1000);
@@ -2649,6 +2690,67 @@
 
 			{#if activeCategory === 'audio'}
 			<section class="glass-panel section-panel">
+				<SectionHeader eyebrow="Output" title="Downloads" subtitle="Save tracks to disk as FLAC or MP3." />
+
+				<div class="download-settings">
+					<label class="audio-field download-folder-field">
+						<span>Save to folder</span>
+						<div class="download-folder-row">
+							<input
+								class="audio-select download-folder-input"
+								type="text"
+								value={downloadFolder}
+								readonly={isTauri()}
+								placeholder="Choose a download folder"
+								onchange={(e) => void commitDownloadFolder((e.currentTarget as HTMLInputElement).value)}
+							/>
+							{#if isTauri()}
+								<button
+									type="button"
+									class="btn btn-glass download-folder-btn"
+									disabled={downloadFolderSaving}
+									onclick={() => void chooseDownloadFolder()}
+								>
+									{downloadFolderSaving ? 'Saving…' : 'Change'}
+								</button>
+							{/if}
+						</div>
+					</label>
+
+					<div class="audio-field">
+						<span>Default format</span>
+						<div class="download-format-toggle" role="group" aria-label="Default download format">
+							<button
+								type="button"
+								class="download-format-option"
+								class:active={$defaultDownloadFormat === 'flac'}
+								aria-pressed={$defaultDownloadFormat === 'flac'}
+								onclick={() => setDownloadFormat('flac')}
+							>
+								FLAC<small>Lossless</small>
+							</button>
+							<button
+								type="button"
+								class="download-format-option"
+								class:active={$defaultDownloadFormat === 'mp3'}
+								aria-pressed={$defaultDownloadFormat === 'mp3'}
+								onclick={() => setDownloadFormat('mp3')}
+							>
+								MP3<small>320 kbps</small>
+							</button>
+						</div>
+					</div>
+
+					<p class="download-settings-hint">
+						FLAC saves the lossless master; MP3 is a smaller portable copy. Right-click any track,
+						album, or playlist to download, or use the download button on the now-playing artwork.
+					</p>
+				</div>
+			</section>
+			{/if}
+
+			{#if activeCategory === 'audio'}
+			<section class="glass-panel section-panel">
 				<SectionHeader eyebrow="Learning" title="Discovery engine" subtitle="Learned radio coverage and training." />
 
 				<div class="discovery-warning glass-panel">
@@ -3119,6 +3221,78 @@
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-sm);
 		padding: var(--space-3) var(--space-4);
+	}
+
+	.download-settings {
+		display: grid;
+		gap: var(--space-4);
+		margin-top: var(--space-3);
+	}
+
+	.download-folder-field {
+		min-width: 0;
+	}
+
+	.download-folder-row {
+		display: flex;
+		gap: var(--space-2);
+		align-items: center;
+		min-width: 0;
+	}
+
+	.download-folder-input {
+		flex: 1 1 auto;
+	}
+
+	.download-folder-btn {
+		flex: 0 0 auto;
+		white-space: nowrap;
+	}
+
+	.download-format-toggle {
+		display: flex;
+		gap: var(--space-2);
+	}
+
+	.download-format-option {
+		flex: 1 1 0;
+		display: grid;
+		gap: 2px;
+		justify-items: center;
+		padding: 8px 12px;
+		border: 1px solid var(--panel-border);
+		border-radius: var(--radius-sm);
+		background: rgba(255, 255, 255, 0.05);
+		color: var(--text-secondary);
+		font-family: inherit;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-medium);
+		cursor: pointer;
+		transition:
+			background 160ms ease,
+			border-color 160ms ease,
+			color 160ms ease;
+	}
+
+	.download-format-option small {
+		font-size: var(--font-size-xs);
+		opacity: 0.7;
+	}
+
+	.download-format-option:hover {
+		border-color: var(--accent-line);
+	}
+
+	.download-format-option.active {
+		background: var(--accent-soft);
+		border-color: var(--accent-line);
+		color: var(--accent-strong);
+	}
+
+	.download-settings-hint {
+		margin: 0;
+		color: var(--text-secondary);
+		font-size: var(--font-size-sm);
 	}
 
 	.audio-advanced summary {

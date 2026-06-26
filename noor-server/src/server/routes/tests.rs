@@ -1021,6 +1021,7 @@ fn fresh_test_state(db: Database) -> crate::AppState {
         sportify_client: None,
         sportify_cache_config: crate::services::sportify::cache::SportifyCacheConfig::default(),
         sportify_resolve_config: crate::services::sportify::cache::SportifyResolveConfig::default(),
+        downloads: crate::services::download::DownloadManager::new(),
     }
 }
 

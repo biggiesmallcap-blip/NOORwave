@@ -75,6 +75,11 @@ futures = "0.3"
 rayon = "1.10"
 rss = "2.0"
 regex = "1"
+flacenc = "0.5.1"
+id3 = "1.17.0"
+metaflac = "0.2.8"
+mp3lame-encoder = "0.2.4"
+dirs = "6.0.0"
 
 # Real WASAPI exclusive-mode output (Windows only). cpal does not expose
 # ShareMode::Exclusive, so we drive IAudioClient directly via this crate to
@@ -91,3 +96,6 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 # so every other platform keeps the faster prebuilt-bindings path.
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 aubio-rs = { version = "0.2", default-features = false, features = ["builtin", "static", "bindgen"] }
+
+[dev-dependencies]
+claxon = "0.4.3"
