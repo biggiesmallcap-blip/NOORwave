@@ -128,6 +128,25 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
                         "type": "audio_exclusive_released",
                         "device": device,
                     }),
+                    AppEvent::DownloadProgress { done, total, current_title } => json!({
+                        "type": "download_progress",
+                        "done": done,
+                        "total": total,
+                        "current_title": current_title,
+                    }),
+                    AppEvent::DownloadItemDone { track_id, ok, already, path, error } => json!({
+                        "type": "download_item_done",
+                        "track_id": track_id,
+                        "ok": ok,
+                        "already": already,
+                        "path": path,
+                        "error": error,
+                    }),
+                    AppEvent::DownloadComplete { ok, failed } => json!({
+                        "type": "download_complete",
+                        "ok": ok,
+                        "failed": failed,
+                    }),
                 };
                 if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
                     break;

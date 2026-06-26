@@ -10,6 +10,40 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+## Track download (FLAC/MP3): deferred work
+From the download-to-disk feature (branch `feat/track-download`). The v1 ships single +
+album batch download, FLAC/MP3, configurable folder, tagging, retry/cancel.
+- **Embedded cover art** in the output files (fetch `artwork_url` bytes -> FLAC PICTURE
+  block via `metaflac`, ID3 `APIC` via `id3`). Text tags ship in v1; art is the next step.
+- **Explicit quality toggle** (e.g. 16/44.1 "CD" FLAC vs hi-res) for smaller files, plus a
+  "re-download / replace" action that overrides the current skip-if-exists default.
+- **Playlist download menu**: `downloadPlaylist()` exists in `stores/downloads.ts` and the
+  `/api/playlists/{id}/tracks` endpoint works, but there's no shared playlist context-menu
+  builder to hang it on yet. Wire it where playlists expose a menu.
+- **Batch by album_id/playlist_id server-side**: the batch endpoint currently takes an
+  explicit `ids` list (the frontend resolves album/playlist tracks first). Accepting a
+  container id directly would let other producers queue a whole album in one call.
+- **symphonia can't re-probe flacenc output**: claxon and external players read the
+  downloaded FLACs fine (verified bit-perfect in a unit test), but symphonia 0.5.5's prober
+  returns UnexpectedEof on flacenc 0.5.1 streams. Doesn't affect export (files are valid),
+  but means NOOR's own symphonia-based playback couldn't re-import a downloaded FLAC. Revisit
+  if local-file playback is ever added.
+- **LGPL note for bundled LAME**: MP3 uses a statically-linked vendored LAME (LGPL) compiled
+  into the public portable-zip releases. Static linking technically obliges offering
+  relinkable object files. Fine for a personal project; document or switch to dynamic
+  linking if distribution ever becomes a concern.
+- **AAC passthrough**: for lossy-tier sources, saving the original `.m4a` without a re-encode
+  would be faster and avoids a needless transcode. Out of scope for the FLAC/MP3 v1.
+- **FLAC encode is slow in debug builds.** MP3 (LAME, C) is fast everywhere, but flacenc is
+  pure Rust and unoptimized in a `cargo run` dev build, so a hi-res FLAC encode takes minutes
+  (observed pegging ~one core for 5+ min on a 24-bit track; release builds are ~10-50x
+  faster). Correctness is proven (claxon unit test: valid + bit-perfect); this is purely a
+  dev-speed gotcha. Remaining leads: (a) verify FLAC speed in release, (b) check why only one
+  core was busy (flacenc `multithread=true` may not be engaging, or the serial symphonia
+  decode is the bottleneck), (c) confirm a long blocking encode doesn't delay server shutdown.
+  (Segment fetch is now concurrent; MP3 now pulls the small AAC `HIGH` tier instead of FLAC.)
+- Spawned by: track download feature, branch `feat/track-download`.
+
 ### Centralize TIDAL auth recovery in the client/transport layer
 - Recovery currently lives at the handler layer via the shared `recover_tidal_client` helper
   (see docs/adr/0001). The correct end state is a refresh-aware `TidalClient` (or a thin

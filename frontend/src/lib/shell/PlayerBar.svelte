@@ -10,6 +10,7 @@
 		type TidalArtworkSize,
 	} from '$lib/utils/artwork';
 	import { getQualityClass } from '$lib/utils/format';
+	import { downloadTrack, defaultDownloadFormat } from '$lib/stores/downloads';
 
 	type PlayerBarError = {
 		message: string;
@@ -87,6 +88,18 @@
 	} = $props();
 
 	let failedArtworkUrls = $state<Record<string, boolean>>({});
+	let downloadPending = $state(false);
+
+	async function handleDownloadCurrent() {
+		if (!track || downloadPending) return;
+		downloadPending = true;
+		try {
+			await downloadTrack(track.id, $defaultDownloadFormat);
+		} finally {
+			downloadPending = false;
+		}
+	}
+
 	let nowPlayingArtwork = $derived(artworkCandidate(track?.artwork_url, 640));
 
 	function artworkCandidate(
@@ -191,6 +204,14 @@
 				disabled={favoritePending}
 				onclick={onToggleFavorite}
 			>{track?.is_favorite ? '♥' : '♡'}</button>
+			<button
+				class="np-art-dl"
+				class:pending={downloadPending}
+				aria-label="Download this track"
+				title={`Download (${$defaultDownloadFormat.toUpperCase()})`}
+				disabled={downloadPending}
+				onclick={handleDownloadCurrent}
+			>⤓</button>
 		{/if}
 	</div>
 
@@ -356,6 +377,52 @@
 		background: color-mix(in srgb, #ff4d6d 24%, rgba(0, 0, 0, 0.55));
 		border-color: color-mix(in srgb, #ff4d6d 60%, transparent);
 		box-shadow: 0 0 14px color-mix(in srgb, #ff4d6d 40%, transparent);
+	}
+
+	.np-art-dl {
+		position: absolute;
+		bottom: 10px;
+		left: 10px;
+		width: 36px;
+		height: 36px;
+		border-radius: 50%;
+		display: grid;
+		place-items: center;
+		font-size: var(--font-size-lg);
+		line-height: 1;
+		color: rgba(255, 255, 255, 0.92);
+		background: rgba(0, 0, 0, 0.45);
+		border: 1px solid rgba(255, 255, 255, 0.18);
+		backdrop-filter: var(--blur-base);
+		-webkit-backdrop-filter: var(--blur-base);
+		cursor: pointer;
+		transition:
+			transform 160ms ease,
+			background 160ms ease,
+			color 160ms ease;
+	}
+
+	.np-art-dl:hover {
+		background: rgba(0, 0, 0, 0.65);
+		transform: translateY(-1px);
+	}
+
+	.np-art-dl:active {
+		transform: scale(0.92);
+	}
+
+	.np-art-dl:disabled {
+		opacity: 0.55;
+		cursor: progress;
+	}
+
+	.np-art-dl.pending {
+		animation: np-dl-pulse 900ms ease-in-out infinite;
+	}
+
+	@keyframes np-dl-pulse {
+		0%, 100% { opacity: 0.55; }
+		50% { opacity: 0.9; }
 	}
 
 	.np-artwork {

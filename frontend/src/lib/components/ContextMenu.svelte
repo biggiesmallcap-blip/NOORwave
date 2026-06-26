@@ -120,7 +120,10 @@
 							{/if}
 							<span class="context-menu-label">{item.label}</span>
 							{#if item.submenu && item.submenu.length > 0}
-								<span class="context-menu-caret" aria-hidden="true">›</span>
+								<span
+									class="context-menu-caret"
+									class:open={openSubmenu === index}
+									aria-hidden="true">›</span>
 							{:else if item.hint}
 								<span class="context-menu-hint">{item.hint}</span>
 							{/if}
@@ -294,28 +297,31 @@
 		color: var(--text-tertiary, rgba(255, 255, 255, 0.45));
 	}
 
+	.context-menu-caret {
+		transition: transform 120ms ease;
+	}
+
+	.context-menu-caret.open {
+		transform: rotate(90deg);
+	}
+
 	.context-menu-separator {
 		height: 1px;
 		margin: 4px 6px;
 		background: var(--border-subtle, rgba(255, 255, 255, 0.08));
 	}
 
+	/* Submenus expand inline (indented), not as a floating flyout. A flyout gets
+	   clipped by the menu's own scroll container and the viewport edge in small
+	   windows; inline expansion always fits and just scrolls with the menu. */
 	.context-submenu {
-		position: absolute;
-		top: 0;
-		left: calc(100% - 4px);
-		min-width: 200px;
-		padding: 6px;
 		list-style: none;
-		background: color-mix(in srgb, var(--bg-surface-strong, #14162a) 94%, transparent);
-		backdrop-filter: var(--blur-modal);
-		-webkit-backdrop-filter: var(--blur-modal);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md);
-		box-shadow:
-			0 18px 40px -12px rgba(0, 0, 0, 0.55),
-			0 2px 6px rgba(0, 0, 0, 0.25);
-		margin: 0;
-		z-index: 1;
+		margin: 2px 0 2px 18px;
+		padding: 0 0 0 4px;
+		border-left: 1px solid var(--border-subtle);
+	}
+
+	.context-submenu .context-menu-item {
+		padding-left: 8px;
 	}
 </style>
