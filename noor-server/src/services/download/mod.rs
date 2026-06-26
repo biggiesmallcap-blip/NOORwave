@@ -27,6 +27,10 @@ use crate::db::models::Track;
 pub enum DownloadFormat {
     Flac,
     Mp3,
+    /// AAC saved straight from TIDAL's `HIGH` tier with no transcode (`.m4a`). AAC beats
+    /// MP3 at the same bitrate, and skipping the re-encode means zero added loss + the
+    /// fastest path (just fetch and write).
+    Aac,
 }
 
 impl DownloadFormat {
@@ -34,6 +38,7 @@ impl DownloadFormat {
         match s.to_ascii_lowercase().as_str() {
             "flac" => Some(Self::Flac),
             "mp3" => Some(Self::Mp3),
+            "aac" | "m4a" => Some(Self::Aac),
             _ => None,
         }
     }
@@ -42,11 +47,17 @@ impl DownloadFormat {
         match self {
             Self::Flac => "flac",
             Self::Mp3 => "mp3",
+            Self::Aac => "aac",
         }
     }
 
+    /// On-disk extension. AAC audio lives in an MP4 container, so it's `.m4a`.
     pub fn extension(self) -> &'static str {
-        self.as_str()
+        match self {
+            Self::Flac => "flac",
+            Self::Mp3 => "mp3",
+            Self::Aac => "m4a",
+        }
     }
 }
 
@@ -142,6 +153,7 @@ pub fn resolve_tidal_quality(
     match format {
         DownloadFormat::Mp3 => mp3_source.tidal_quality(),
         DownloadFormat::Flac => flac_quality.tidal_quality(),
+        DownloadFormat::Aac => "HIGH",
     }
 }
 
@@ -668,6 +680,34 @@ fn tag_mp3(path: &Path, track: &Track) {
     }
 }
 
+/// Stamp MP4/iTunes-style tags onto a freshly-written `.m4a` (AAC) file. Best-effort:
+/// the audio is valid regardless, and TIDAL's fragmented MP4 may not always be writable.
+fn tag_m4a(path: &Path, track: &Track) {
+    let mut tag = match mp4ameta::Tag::read_from_path(path) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(target = "noor.download", "M4A tag read failed: {e}");
+            return;
+        }
+    };
+    tag.set_title(&track.title);
+    if let Some(artist) = &track.artist_name {
+        tag.set_artist(artist);
+    }
+    if let Some(album) = &track.album_title {
+        tag.set_album(album);
+    }
+    if let Some(n) = track.track_number {
+        tag.set_track_number(n as u16);
+    }
+    if let Some(d) = track.disc_number {
+        tag.set_disc_number(d as u16);
+    }
+    if let Err(e) = tag.write_to_path(path) {
+        tracing::warn!(target = "noor.download", "M4A tag write failed: {e}");
+    }
+}
+
 // ─── Orchestration ───────────────────────────────────────────────────────────────
 
 /// Download a single track to `dest_root` in the chosen format. Resolves the TIDAL
@@ -705,10 +745,14 @@ pub async fn download_track(
         match format {
             DownloadFormat::Flac => encode_flac(encoded, &part_for_task)?,
             DownloadFormat::Mp3 => encode_mp3(encoded, &part_for_task)?,
+            // AAC is TIDAL's HIGH stream already; write it through with no transcode.
+            DownloadFormat::Aac => std::fs::write(&part_for_task, &encoded)
+                .map_err(|e| DownloadError::Io(format!("Couldn't write AAC: {e}")))?,
         }
         match format {
             DownloadFormat::Flac => tag_flac(&part_for_task, &track_for_task),
             DownloadFormat::Mp3 => tag_mp3(&part_for_task, &track_for_task),
+            DownloadFormat::Aac => tag_m4a(&part_for_task, &track_for_task),
         }
         Ok::<(), DownloadError>(())
     })
