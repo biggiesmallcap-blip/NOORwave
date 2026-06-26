@@ -80,10 +80,12 @@
 	import {
 		defaultDownloadFormat,
 		defaultFlacQuality,
+		defaultMp3Source,
 		loadDownloadSettings,
 		saveDownloadSettings,
 		type DownloadFormat,
-		type FlacQuality
+		type FlacQuality,
+		type Mp3Source
 	} from '$lib/stores/downloads';
 	import { open as openDirectoryDialog } from '@tauri-apps/plugin-dialog';
 	import { isTauri, openExternal } from '$lib/util/external';
@@ -393,6 +395,10 @@
 
 	function setFlacQuality(flac_quality: FlacQuality) {
 		void saveDownloadSettings({ flac_quality });
+	}
+
+	function setMp3Source(mp3_source: Mp3Source) {
+		void saveDownloadSettings({ mp3_source });
 	}
 
 	onMount(() => {
@@ -2767,6 +2773,30 @@
 								onclick={() => setFlacQuality('cd')}
 							>
 								CD<small>16-bit / 44.1 kHz</small>
+							</button>
+						</div>
+					</div>
+
+					<div class="audio-field">
+						<span>MP3 source</span>
+						<div class="download-format-toggle" role="group" aria-label="MP3 transcode source">
+							<button
+								type="button"
+								class="download-format-option"
+								class:active={$defaultMp3Source === 'aac'}
+								aria-pressed={$defaultMp3Source === 'aac'}
+								onclick={() => setMp3Source('aac')}
+							>
+								AAC<small>Fast</small>
+							</button>
+							<button
+								type="button"
+								class="download-format-option"
+								class:active={$defaultMp3Source === 'lossless'}
+								aria-pressed={$defaultMp3Source === 'lossless'}
+								onclick={() => setMp3Source('lossless')}
+							>
+								Lossless<small>Best MP3, slower</small>
 							</button>
 						</div>
 					</div>

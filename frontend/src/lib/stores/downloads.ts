@@ -10,11 +10,13 @@ const api = (path: string) => `${getApiBase()}${path}`;
 
 export type DownloadFormat = 'flac' | 'mp3';
 export type FlacQuality = 'cd' | 'hires';
+export type Mp3Source = 'aac' | 'lossless';
 
 export interface DownloadSettings {
 	folder: string;
 	format: DownloadFormat;
 	flac_quality: FlacQuality;
+	mp3_source: Mp3Source;
 }
 
 /** The user's default format, mirrored from the server so the player-bar quick
@@ -24,6 +26,10 @@ export const defaultDownloadFormat = writable<DownloadFormat>('flac');
 /** Source tier for lossless (FLAC) downloads: 'cd' (16-bit/44.1kHz) or 'hires'
  *  (best available). Mirrored from the server. */
 export const defaultFlacQuality = writable<FlacQuality>('hires');
+
+/** Source to transcode MP3 from: 'aac' (fast, HIGH tier) or 'lossless' (best MP3,
+ *  slower). Mirrored from the server. */
+export const defaultMp3Source = writable<Mp3Source>('aac');
 
 /** Tracks the user kicked off as single downloads, so the per-item WS event can
  *  raise a "Downloaded / Show in folder" toast (batch items are covered by the
@@ -75,10 +81,18 @@ function applySettings(data: DownloadSettings): void {
 	if (data?.flac_quality === 'cd' || data?.flac_quality === 'hires') {
 		defaultFlacQuality.set(data.flac_quality);
 	}
+	if (data?.mp3_source === 'aac' || data?.mp3_source === 'lossless') {
+		defaultMp3Source.set(data.mp3_source);
+	}
 }
 
 export async function saveDownloadSettings(
-	patch: { folder?: string; format?: DownloadFormat; flac_quality?: FlacQuality }
+	patch: {
+		folder?: string;
+		format?: DownloadFormat;
+		flac_quality?: FlacQuality;
+		mp3_source?: Mp3Source;
+	}
 ): Promise<DownloadSettings | null> {
 	try {
 		const resp = await authFetch(api('/api/downloads/settings'), {

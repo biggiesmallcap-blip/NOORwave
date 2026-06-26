@@ -123,24 +123,32 @@ async fn run_download_worker(state: SharedState) {
         manager.set_current(Some(track.title.clone()));
         broadcast_progress(&state).await;
 
-        let (http_client, token_opt, dest_root, flac_quality) = {
+        let (http_client, token_opt, dest_root, flac_quality, mp3_source) = {
             let s = state.read().await;
-            let (dest, flac_quality) =
+            let (dest, flac_quality, mp3_source) =
                 s.db.with_conn(|conn| {
                     Ok((
                         download::read_download_folder(conn),
                         download::read_flac_quality(conn),
+                        download::read_mp3_source(conn),
                     ))
                 })
-                .unwrap_or_else(|_| (download::default_download_folder(), Default::default()));
+                .unwrap_or_else(|_| {
+                    (
+                        download::default_download_folder(),
+                        Default::default(),
+                        Default::default(),
+                    )
+                });
             (
                 s.http_client.clone(),
                 s.tidal_tokens.as_ref().map(|t| t.access_token.clone()),
                 dest,
                 flac_quality,
+                mp3_source,
             )
         };
-        let quality = download::resolve_tidal_quality(item.format, flac_quality);
+        let quality = download::resolve_tidal_quality(item.format, flac_quality, mp3_source);
 
         let Some(access_token) = token_opt else {
             let reason = "Not signed in to TIDAL".to_string();
@@ -227,11 +235,12 @@ pub struct DownloadSettings {
     folder: String,
     format: String,
     flac_quality: String,
+    mp3_source: String,
 }
 
 async fn current_settings(state: &SharedState) -> DownloadSettings {
     let s = state.read().await;
-    let (folder, format, flac_quality) =
+    let (folder, format, flac_quality, mp3_source) =
         s.db.with_conn(|conn| {
             Ok((
                 download::read_download_folder(conn)
@@ -239,6 +248,7 @@ async fn current_settings(state: &SharedState) -> DownloadSettings {
                     .to_string(),
                 download::read_default_format(conn),
                 download::read_flac_quality(conn),
+                download::read_mp3_source(conn),
             ))
         })
         .unwrap_or_else(|_| {
@@ -248,12 +258,14 @@ async fn current_settings(state: &SharedState) -> DownloadSettings {
                     .to_string(),
                 DownloadFormat::Flac,
                 Default::default(),
+                Default::default(),
             )
         });
     DownloadSettings {
         folder,
         format: format.as_str().to_string(),
         flac_quality: flac_quality.as_str().to_string(),
+        mp3_source: mp3_source.as_str().to_string(),
     }
 }
 
@@ -266,6 +278,7 @@ pub struct UpdateDownloadSettings {
     folder: Option<String>,
     format: Option<String>,
     flac_quality: Option<String>,
+    mp3_source: Option<String>,
 }
 
 pub async fn set_download_settings(
@@ -287,6 +300,13 @@ pub async fn set_download_settings(
                 .and_then(download::FlacQuality::from_query)
             {
                 download::write_flac_quality(conn, quality)?;
+            }
+            if let Some(source) = body
+                .mp3_source
+                .as_deref()
+                .and_then(download::Mp3Source::from_query)
+            {
+                download::write_mp3_source(conn, source)?;
             }
             Ok(())
         })

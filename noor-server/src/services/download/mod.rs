@@ -90,12 +90,57 @@ impl FlacQuality {
     }
 }
 
-/// Resolve the TIDAL `audioquality` string to request for a download. MP3 always pulls
-/// the small AAC `HIGH` tier (lossless buys nothing once squashed to MP3); FLAC uses the
-/// user's selected lossless tier.
-pub fn resolve_tidal_quality(format: DownloadFormat, flac_quality: FlacQuality) -> &'static str {
+/// Source tier to transcode an MP3 from. Both squash to 320 kbps MP3; the difference is
+/// fetch/decode speed vs how clean the source is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mp3Source {
+    /// TIDAL `HIGH` (AAC ~320 kbps): small + fast. The MP3 is then a second lossy hop,
+    /// but the difference is inaudible for a portable copy.
+    Aac,
+    /// TIDAL `LOSSLESS` (FLAC 16/44.1): bigger + slower, but a single lossy hop, so the
+    /// best-sounding MP3.
+    Lossless,
+}
+
+impl Default for Mp3Source {
+    fn default() -> Self {
+        Self::Aac
+    }
+}
+
+impl Mp3Source {
+    pub fn from_query(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "aac" => Some(Self::Aac),
+            "lossless" => Some(Self::Lossless),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Aac => "aac",
+            Self::Lossless => "lossless",
+        }
+    }
+
+    pub fn tidal_quality(self) -> &'static str {
+        match self {
+            Self::Aac => "HIGH",
+            Self::Lossless => "LOSSLESS",
+        }
+    }
+}
+
+/// Resolve the TIDAL `audioquality` string to request for a download, from the chosen
+/// format and the user's per-format source/quality settings.
+pub fn resolve_tidal_quality(
+    format: DownloadFormat,
+    flac_quality: FlacQuality,
+    mp3_source: Mp3Source,
+) -> &'static str {
     match format {
-        DownloadFormat::Mp3 => "HIGH",
+        DownloadFormat::Mp3 => mp3_source.tidal_quality(),
         DownloadFormat::Flac => flac_quality.tidal_quality(),
     }
 }
@@ -759,6 +804,29 @@ pub fn write_flac_quality(conn: &Connection, quality: FlacQuality) -> rusqlite::
     conn.execute(
         "INSERT OR REPLACE INTO server_config (key, value) VALUES ('download_flac_quality', ?1)",
         [quality.as_str()],
+    )?;
+    Ok(())
+}
+
+pub fn read_mp3_source(conn: &Connection) -> Mp3Source {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT value FROM server_config WHERE key = 'download_mp3_source'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    stored
+        .and_then(|s| Mp3Source::from_query(&s))
+        .unwrap_or_default()
+}
+
+pub fn write_mp3_source(conn: &Connection, source: Mp3Source) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO server_config (key, value) VALUES ('download_mp3_source', ?1)",
+        [source.as_str()],
     )?;
     Ok(())
 }
