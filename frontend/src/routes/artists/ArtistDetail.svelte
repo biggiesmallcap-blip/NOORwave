@@ -397,9 +397,12 @@
 			if (single) void playTidalTrackNow(single);
 			return;
 		}
+		// Clicking a specific row plays from there in order: force shuffle off so
+		// the global shuffle mode doesn't randomise the list out from under the click.
 		await playTidalTracksNow(
 			playables.slice(startIdx),
 			header()?.name ?? tidalProfileName ?? 'artist',
+			{ shuffleMode: 'off' },
 		);
 	}
 
