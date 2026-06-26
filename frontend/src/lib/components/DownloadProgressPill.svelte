@@ -20,14 +20,17 @@
 					{p.currentTitle ? `Downloading ${p.currentTitle}` : 'Downloading'}
 				</span>
 				{#if p.total > 1}
-					<span class="dl-pill-count">{p.done}/{p.total}</span>
+					<span class="dl-pill-count">{p.done} of {p.total}</span>
 				{/if}
 			</div>
-			{#if p.total > 1}
-				<div class="dl-pill-bar">
+			<!-- An always-moving sweep makes "working" unmistakable even when a single
+			     track gives no sub-progress; the fill underneath tracks batch position. -->
+			<div class="dl-pill-bar">
+				{#if p.total > 1}
 					<div class="dl-pill-bar-fill" style:width="{(p.done / p.total) * 100}%"></div>
-				</div>
-			{/if}
+				{/if}
+				<div class="dl-pill-bar-sweep"></div>
+			</div>
 		</div>
 		<button type="button" class="dl-pill-cancel" onclick={() => void cancelDownloads()}>
 			Cancel
@@ -45,8 +48,8 @@
 		display: flex;
 		align-items: center;
 		gap: 12px;
-		min-width: 280px;
-		max-width: 440px;
+		min-width: 300px;
+		max-width: 460px;
 		padding: 10px 12px 10px 16px;
 		background: var(--bg-elevated);
 		border: 1px solid var(--accent-line);
@@ -66,7 +69,7 @@
 		flex: 1 1 auto;
 		min-width: 0;
 		display: grid;
-		gap: 6px;
+		gap: 7px;
 	}
 	.dl-pill-line {
 		display: flex;
@@ -88,16 +91,34 @@
 		font-size: var(--font-size-xs);
 	}
 	.dl-pill-bar {
+		position: relative;
 		height: 4px;
 		border-radius: 2px;
 		background: color-mix(in srgb, var(--text-secondary) 20%, transparent);
 		overflow: hidden;
 	}
 	.dl-pill-bar-fill {
+		position: absolute;
+		inset: 0 auto 0 0;
 		height: 100%;
-		background: var(--accent);
+		background: color-mix(in srgb, var(--accent) 45%, transparent);
 		border-radius: 2px;
-		transition: width 220ms ease;
+		transition: width 240ms ease;
+	}
+	.dl-pill-bar-sweep {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		left: 0;
+		width: 38%;
+		border-radius: 2px;
+		background: linear-gradient(
+			90deg,
+			transparent,
+			var(--accent),
+			transparent
+		);
+		animation: dl-sweep 1100ms ease-in-out infinite;
 	}
 	.dl-pill-cancel {
 		flex: 0 0 auto;
@@ -117,6 +138,14 @@
 	@keyframes dl-spin {
 		to {
 			transform: rotate(360deg);
+		}
+	}
+	@keyframes dl-sweep {
+		0% {
+			transform: translateX(-110%);
+		}
+		100% {
+			transform: translateX(370%);
 		}
 	}
 </style>
