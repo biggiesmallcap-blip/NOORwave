@@ -10,6 +10,17 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### feat: optional album-preview popup for recommendation/chart murals
+
+The Home recommendation murals now play an album in place on double-click (resolve to
+TIDAL/local, then play the whole tracklist). The visual tracklist popup
+(`AlbumDetailPopup`) was deliberately skipped: it is local-album-only today, and most
+recommendation albums are TIDAL. If a "see the tracklist before playing" preview is
+wanted, generalise `AlbumDetailPopup` to accept a TIDAL album (it already has
+`getTidalAlbumTracks` + `playTidalAlbum`), then open it from the mural's album action /
+a "View album" menu item. Would also benefit the charts murals.
+- Spawned by: recommendation-mural QOL pass (context menus + double-click-to-play)
+
 ## Track download (FLAC/MP3): deferred work
 From the download-to-disk feature (branch `feat/track-download`). The v1 ships single +
 album batch download, FLAC/MP3, configurable folder, tagging, retry/cancel.

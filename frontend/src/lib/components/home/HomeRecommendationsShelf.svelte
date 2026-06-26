@@ -21,7 +21,15 @@
 		recommendationSearchQuery,
 	} from '$lib/components/home/recommendation_navigation';
 	import { playChartTidalTrack, playChartTidalTracks } from '$lib/player/play_trending';
+	import {
+		playRecommendationAlbum,
+		playRecommendationArtist,
+	} from '$lib/player/play_recommendations';
 	import { playTrackNow } from '$lib/stores/player';
+	import { openContextMenu, type MenuItem } from '$lib/stores/context_menu';
+	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
+	import { buildAlbumMenu } from '$lib/player/album_menu';
+	import { buildArtistMenu } from '$lib/player/artist_menu';
 
 	type State = 'hidden' | 'loading' | 'ready' | 'empty' | 'error';
 
@@ -220,14 +228,15 @@
 	}
 
 	async function playItem(shelf: ProviderRecommendationShelf, item: ProviderRecommendationItem, index: number) {
-		if (itemEntity(item) !== 'track') {
+		const entity = itemEntity(item);
+		if (entity === 'album' || entity === 'artist') {
 			const key = itemKey(shelf, item, index);
-			const needsResolution = !recommendationKnownHref(item);
-			if (needsResolution) resolvingItems = { ...resolvingItems, [key]: true };
+			resolvingItems = { ...resolvingItems, [key]: true };
 			try {
-				await openRecommendationItem(item);
+				if (entity === 'album') await playRecommendationAlbum(item);
+				else await playRecommendationArtist(item);
 			} finally {
-				if (needsResolution) resolvingItems = { ...resolvingItems, [key]: false };
+				resolvingItems = { ...resolvingItems, [key]: false };
 			}
 			return;
 		}
@@ -242,6 +251,70 @@
 		} finally {
 			resolvingItems = { ...resolvingItems, [key]: false };
 		}
+	}
+
+	// Double-clicking any tile plays/opens that entry; single click still just
+	// brings it into focus so the mural stays browsable.
+	function activateItem(shelf: ProviderRecommendationShelf, index: number) {
+		const item = shelfItems(shelf)[index];
+		if (item) void playItem(shelf, item, index);
+	}
+
+	// One right-click menu per entity, reusing the shared builders the rest of the
+	// app uses. Unresolved Last.fm albums/artists (no ids yet) get a resolve-then-act
+	// menu so "Add to queue"-style actions still work before a TIDAL match exists.
+	function recommendationItemMenu(item: ProviderRecommendationItem): MenuItem[] {
+		const entity = itemEntity(item);
+		if (entity === 'track') {
+			if (item.local_track_id) {
+				return buildTrackMenu({
+					id: item.local_track_id,
+					title: item.title,
+					artist_id: item.local_artist_id ?? null,
+					artist_name: item.artist_name,
+					album_id: item.local_album_id ?? null,
+					album_title: item.album_title,
+				});
+			}
+			return buildTidalTrackMenu(itemToTidalPlayable(item));
+		}
+		if (entity === 'album') {
+			if (item.local_album_id || item.tidal_album_id) {
+				return buildAlbumMenu({
+					id: item.local_album_id ?? null,
+					tidal_id: item.tidal_album_id ?? null,
+					title: item.title,
+					artist_id: item.local_artist_id ?? null,
+					artist_name: item.artist_name,
+					in_library: Boolean(item.local_album_id),
+				});
+			}
+			return [
+				{ label: 'Play album', icon: '▶', onSelect: () => void playRecommendationAlbum(item) },
+				{ separator: true, label: '' },
+				{ label: 'Open album page', icon: '↗', onSelect: () => void openRecommendationItem(item) },
+			];
+		}
+		// artist
+		if (item.local_artist_id) {
+			return buildArtistMenu({
+				id: item.local_artist_id,
+				tidal_id: item.tidal_artist_id ?? null,
+				name: item.title,
+				in_library: true,
+			});
+		}
+		return [
+			{ label: 'Play top tracks', icon: '▶', onSelect: () => void playRecommendationArtist(item) },
+			{ separator: true, label: '' },
+			{ label: 'Open artist', icon: '↗', onSelect: () => void openRecommendationItem(item) },
+		];
+	}
+
+	function openItemMenu(event: MouseEvent, item: ProviderRecommendationItem) {
+		event.preventDefault();
+		event.stopPropagation();
+		openContextMenu(event, recommendationItemMenu(item), item.title);
 	}
 
 	async function playAllRecommendations(shelf: ProviderRecommendationShelf) {
@@ -346,6 +419,12 @@
 						onSelect={(index) => selectItem(shelf, index)}
 						onJump={(delta) => jumpItem(shelf, delta)}
 						onPlay={() => playItem(shelf, currentItem, currentIndex)}
+						onItemActivate={(index) => activateItem(shelf, index)}
+						onCardContext={(event) => openItemMenu(event, currentItem)}
+						onItemContext={(event, index) => {
+							const item = shelfItems(shelf)[index];
+							if (item) openItemMenu(event, item);
+						}}
 						onPauseChange={(paused) => pausedShelves = { ...pausedShelves, [key]: paused }}
 					/>
 				</section>

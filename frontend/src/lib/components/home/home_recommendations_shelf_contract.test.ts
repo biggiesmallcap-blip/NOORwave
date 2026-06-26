@@ -112,7 +112,7 @@ describe('home recommendations shelf contract', () => {
 	test('resolves unresolved artist and album recommendations before falling back to search', () => {
 		const unresolvedArtist = rec({ entity_type: 'artist', title: 'Amara ctk100', artist_name: 'Amara ctk100' });
 		expect(recommendationKnownHref(unresolvedArtist)).toBeNull();
-		expect(recommendationActionLabel(unresolvedArtist)).toBe('Resolve artist');
+		expect(recommendationActionLabel(unresolvedArtist)).toBe('Play artist');
 		expect(recommendationHrefFromSearch(unresolvedArtist, {
 			...emptySearchResults,
 			artists: [{
@@ -130,7 +130,7 @@ describe('home recommendations shelf contract', () => {
 			title: 'In the Beginning There Was Rhythm',
 			artist_name: 'Switch Angel',
 		});
-		expect(recommendationActionLabel(unresolvedAlbum)).toBe('Resolve album');
+		expect(recommendationActionLabel(unresolvedAlbum)).toBe('Play album');
 		expect(recommendationHrefFromSearch(unresolvedAlbum, {
 			...emptySearchResults,
 			albums: [{
@@ -143,6 +143,78 @@ describe('home recommendations shelf contract', () => {
 			}],
 		})).toBe('/albums/77');
 		expect(recommendationHrefFromSearch(unresolvedAlbum, emptySearchResults)).toBeNull();
+	});
+
+	test('resolves albums/artists past exact-match drift instead of dumping to search', () => {
+		// Edition suffix drift: Last.fm "Demon Days" vs TIDAL "Demon Days (Deluxe)".
+		const album = rec({ entity_type: 'album', title: 'Demon Days', artist_name: 'Gorillaz' });
+		expect(recommendationHrefFromSearch(album, {
+			...emptySearchResults,
+			albums: [{
+				tidal_id: 999,
+				title: 'Demon Days (Deluxe Edition)',
+				artist_name: 'Gorillaz',
+				artwork_url: null,
+				local_id: null,
+				in_library: false,
+			}],
+		})).toBe('/tidal/albums/999');
+
+		// A different artist's same-named album must NOT be accepted.
+		expect(recommendationHrefFromSearch(album, {
+			...emptySearchResults,
+			albums: [{
+				tidal_id: 1000,
+				title: 'Demon Days',
+				artist_name: 'Some Tribute Band',
+				artwork_url: null,
+				local_id: null,
+				in_library: false,
+			}],
+		})).toBeNull();
+
+		// Artist name drift still lands on the artist.
+		const artist = rec({ entity_type: 'artist', title: 'MF DOOM', artist_name: 'MF DOOM' });
+		expect(recommendationHrefFromSearch(artist, {
+			...emptySearchResults,
+			artists: [{
+				tidal_id: 321,
+				name: 'MF DOOM (Daniel Dumile)',
+				artwork_url: null,
+				local_id: null,
+				in_library: false,
+			}],
+		})).toBe('/tidal/artists/321');
+	});
+
+	test('tiles play on double-click and expose the shared context menus', () => {
+		expect(source).toContain('onItemActivate');
+		expect(source).toContain('activateItem');
+		expect(source).toContain('onItemContext');
+		expect(source).toContain('onCardContext');
+		expect(source).toContain('openContextMenu');
+		expect(source).toContain('recommendationItemMenu');
+		expect(source).toContain('buildTrackMenu');
+		expect(source).toContain('buildTidalTrackMenu');
+		expect(source).toContain('buildAlbumMenu');
+		expect(source).toContain('buildArtistMenu');
+		// The shared mural exposes the double-click hook the shelf relies on.
+		const mural = readFileSync(join(here, '../charts/ChartMural.svelte'), 'utf8');
+		expect(mural).toContain('onItemActivate');
+		expect(mural).toContain('ondblclick');
+	});
+
+	test('plays albums and artists in place rather than navigating away', () => {
+		expect(source).toContain('playRecommendationAlbum');
+		expect(source).toContain('playRecommendationArtist');
+		const helpers = readFileSync(join(here, '../../player/play_recommendations.ts'), 'utf8');
+		expect(helpers).toContain('resolveRecommendationAlbum');
+		expect(helpers).toContain('resolveRecommendationArtist');
+		expect(helpers).toContain('playTidalAlbum');
+		expect(helpers).toContain('playAlbum');
+		expect(helpers).toContain('playArtist');
+		expect(helpers).toContain('getTidalArtistProfile');
+		expect(helpers).toContain('playTidalTracksNow');
 	});
 
 	test('plays local matches directly and resolves unresolved Last.fm items through TIDAL', () => {
