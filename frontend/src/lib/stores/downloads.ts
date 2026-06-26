@@ -2,7 +2,7 @@ import { writable } from 'svelte/store';
 import { isTauri } from '@tauri-apps/api/core';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { authFetch, getApiBase } from '$lib/api/client';
-import { showToast, updateToast, dismissToast } from '$lib/stores/toast';
+import { showToast } from '$lib/stores/toast';
 
 /** authFetch takes a full URL (it does not prepend the API base), so build absolute
  *  URLs against the backend origin — a bare `/api/...` would hit the Vite dev origin. */
@@ -24,8 +24,15 @@ export const defaultDownloadFormat = writable<DownloadFormat>('flac');
  *  progress toast instead). */
 const pendingSingles = new Set<number>();
 
-let batchToastId: number | null = null;
-let batchActive = false;
+/** Live progress of the background download worker, mirrored from the server's
+ *  WebSocket events. `null` when nothing is downloading. A single pill renders this,
+ *  so download progress can never spam the toast stack. */
+export interface DownloadProgress {
+	done: number;
+	total: number;
+	currentTitle: string | null;
+}
+export const downloadProgress = writable<DownloadProgress | null>(null);
 
 function fileNameFromPath(path: string): string {
 	const parts = path.split(/[\\/]/);
@@ -38,13 +45,6 @@ async function revealInFolder(path: string): Promise<void> {
 		await revealItemInDir(path);
 	} catch (error) {
 		console.warn('revealItemInDir failed', error);
-	}
-}
-
-function endBatchToast(): void {
-	if (batchToastId != null) {
-		dismissToast(batchToastId);
-		batchToastId = null;
 	}
 }
 
@@ -117,12 +117,8 @@ export async function downloadTrack(trackId: number, format?: DownloadFormat): P
 
 export async function downloadTracks(ids: number[], format?: DownloadFormat): Promise<void> {
 	if (!ids.length) return;
-	batchActive = true;
-	if (batchToastId == null) {
-		batchToastId = showToast(`Downloading: 0/${ids.length}`, 'info', Infinity, [
-			{ label: 'Cancel', onClick: () => void cancelDownloads() }
-		]);
-	}
+	// Optimistic: show the pill immediately; the worker's progress events refine it.
+	downloadProgress.set({ done: 0, total: ids.length, currentTitle: null });
 	try {
 		const resp = await authFetch(api('/api/downloads/batch'), {
 			method: 'POST',
@@ -131,13 +127,11 @@ export async function downloadTracks(ids: number[], format?: DownloadFormat): Pr
 			timeoutMs: 30_000
 		});
 		if (!resp.ok) {
-			endBatchToast();
-			batchActive = false;
+			downloadProgress.set(null);
 			showToast("Couldn't start the downloads.", 'error', 4000);
 		}
 	} catch {
-		endBatchToast();
-		batchActive = false;
+		downloadProgress.set(null);
 		showToast("Couldn't start the downloads.", 'error', 4000);
 	}
 }
@@ -182,6 +176,23 @@ export async function cancelDownloads(): Promise<void> {
 	}
 }
 
+/** Seed the progress pill from the server so a page reload mid-download recovers the
+ *  indicator instead of dropping it. */
+export async function refreshDownloadStatus(): Promise<void> {
+	try {
+		const resp = await authFetch(api('/api/downloads/status'));
+		if (!resp.ok) return;
+		const status = await resp.json();
+		downloadProgress.set(
+			status.running
+				? { done: status.done, total: status.total, currentTitle: status.current_title ?? null }
+				: null
+		);
+	} catch {
+		/* ignore */
+	}
+}
+
 // ─── WebSocket handlers ───────────────────────────────────────────────────────
 
 export function handleDownloadProgress(data: {
@@ -189,17 +200,11 @@ export function handleDownloadProgress(data: {
 	total: number;
 	current_title: string | null;
 }): void {
-	if (data.total <= 1) return; // singles are handled by per-item toasts
-	batchActive = true;
-	if (batchToastId == null) {
-		batchToastId = showToast('', 'info', Infinity, [
-			{ label: 'Cancel', onClick: () => void cancelDownloads() }
-		]);
-	}
-	const label = data.current_title
-		? `Downloading ${data.current_title} — ${data.done}/${data.total}`
-		: `Downloading: ${data.done}/${data.total}`;
-	updateToast(batchToastId, { message: label });
+	downloadProgress.set({
+		done: data.done,
+		total: data.total,
+		currentTitle: data.current_title
+	});
 }
 
 export function handleDownloadItemDone(data: {
@@ -226,10 +231,9 @@ export function handleDownloadItemDone(data: {
 }
 
 export async function handleDownloadComplete(data: { ok: number; failed: number }): Promise<void> {
-	const wasBatch = batchActive;
-	endBatchToast();
-	batchActive = false;
-	if (!wasBatch) return; // singles-only session; per-item toasts already covered it
+	downloadProgress.set(null); // hide the pill
+	// A single track is already covered by its own "Downloaded / Show in folder" toast.
+	if (data.ok + data.failed <= 1) return;
 
 	let failedIds: number[] = [];
 	if (data.failed > 0) {

@@ -5,7 +5,8 @@
 	import { goto, onNavigate } from '$app/navigation';
 	import { markNavigated } from '$lib/navigation/back';
 	import { connectWebSocket, wsConnected } from '$lib/api/ws';
-	import { loadDownloadSettings } from '$lib/stores/downloads';
+	import { loadDownloadSettings, refreshDownloadStatus } from '$lib/stores/downloads';
+	import DownloadProgressPill from '$lib/components/DownloadProgressPill.svelte';
 	import {
 		currentTrack,
 		currentQueueItemId,
@@ -330,6 +331,7 @@
 			void refreshPlaybackState();
 			void checkOnboarding();
 			void loadDownloadSettings();
+			void refreshDownloadStatus();
 			startStartupPrewarm();
 		}
 
@@ -1246,6 +1248,7 @@
 
 <ContextMenu />
 <Toast />
+<DownloadProgressPill />
 <CommandPalette />
 <QuietMode />
 <ShortcutHelp open={shortcutHelpOpen} onClose={closeShortcutHelp} />
