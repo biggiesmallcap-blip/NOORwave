@@ -10,6 +10,7 @@
     "core:webview:allow-set-webview-zoom",
     "core:event:default",
     "opener:default",
+    "opener:allow-reveal-item-in-dir",
     "updater:default",
     "dialog:default"
   ]

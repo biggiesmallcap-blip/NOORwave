@@ -17,6 +17,7 @@ import {
 } from '$lib/stores/player';
 import type { TidalPlayable } from '$lib/api/client';
 import { canPlayTrack, getPlayableLabel } from '$lib/player/playable';
+import { downloadTrack } from '$lib/stores/downloads';
 
 // Narrow shape so the builder can accept a Track, a QueueItem.track, or a
 // DiscoveryRadioResult mapped through `mapRadioToMenuTrack`. We avoid a hard
@@ -175,6 +176,27 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 		icon: track.is_favorite ? '♥' : '♡',
 		onSelect: () => void toggleTrackFavorite(track.id, track.is_favorite ?? false)
 	});
+
+	// Download to disk. Desktop-only: the server writes to the desktop's library
+	// folder, so it's hidden on the /remote mobile surface.
+	if (!options.remoteRoutes) {
+		items.push({
+			label: 'Download',
+			icon: '⤓',
+			submenu: [
+				{
+					label: 'FLAC (lossless)',
+					icon: '⤓',
+					onSelect: () => void downloadTrack(track.id, 'flac')
+				},
+				{
+					label: 'MP3 (320)',
+					icon: '⤓',
+					onSelect: () => void downloadTrack(track.id, 'mp3')
+				}
+			]
+		});
+	}
 
 	if (options.queueItemId != null) {
 		items.push({

@@ -7,6 +7,7 @@ import {
 	playTidalAlbum,
 	saveTidalAlbumToLibrary,
 } from '$lib/stores/player';
+import { downloadAlbum } from '$lib/stores/downloads';
 
 // Narrow shape so the builder can accept a local Album, a TIDAL search album,
 // a TIDAL discography album, or a compact `{ id, title }` from a carousel.
@@ -128,6 +129,23 @@ export function buildAlbumMenu(album: AlbumLike, options: BuildAlbumMenuOptions 
 			label: 'Add to playlist',
 			icon: '＋',
 			submenu: options.addToPlaylistSubmenu,
+		});
+	}
+
+	// Batch download (desktop-only; the server writes to the local library folder).
+	if (isLocal && localId != null && !options.remoteRoutes) {
+		items.push(SEPARATOR);
+		items.push({
+			label: 'Download album',
+			icon: '⤓',
+			submenu: [
+				{
+					label: 'FLAC (lossless)',
+					icon: '⤓',
+					onSelect: () => void downloadAlbum(localId, 'flac')
+				},
+				{ label: 'MP3 (320)', icon: '⤓', onSelect: () => void downloadAlbum(localId, 'mp3') }
+			]
 		});
 	}
 
