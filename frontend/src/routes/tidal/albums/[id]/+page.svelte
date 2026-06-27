@@ -84,10 +84,11 @@
 		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
 	}
 
-	async function playLoadedAlbum() {
+	async function playLoadedAlbum(startIndex = 0) {
 		await playTidalTracksNow(
 			tracks.map((track) => tidalDiscographyTrackToPlayable(track)),
 			header()?.title ?? 'album',
+			{ startIndex },
 		);
 	}
 
@@ -211,6 +212,7 @@
 						variant="indexed"
 						index={idx}
 						showAlbum={false}
+						onRowClick={() => void playLoadedAlbum(idx)}
 					/>
 				{/each}
 			</ol>

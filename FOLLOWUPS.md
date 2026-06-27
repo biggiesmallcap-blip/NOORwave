@@ -10,6 +10,42 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### refactor: flatten the duplicated library/TIDAL playback stacks
+
+The library and TIDAL playback paths are mirrored end to end (~30 `play*` /
+`playTidal*` verbs in `stores/player.ts`, `TrackRow` vs `TidalTrackRow`,
+`buildTrackMenu` vs `buildTidalTrackMenu`). Drift between the copies caused three
+now-playing bugs at once: the TIDAL album page played one orphan track on
+row-click (library plays the album in context), now-playing lost its artist/album
+links + right-click on ephemeral tracks, and one menu copy's favourites heart
+shipped as mojibake.
+
+Fixed this pass:
+- TIDAL album row-click now plays the album in context (`playTidalTracksNow`
+  gained a `startIndex`; guard test in `tidal/albums/[id]/`).
+- Menu builders share their identical items (favourites/remove/go-to) via helpers
+  in `track_menu.ts`, so they can't drift on those again; source-wide mojibake
+  guard added in `context_menu_icon_contract.test.ts`.
+- Tidal-id metadata cache persists to localStorage so now-playing links survive
+  the Tauri reload.
+
+Remaining (stage it; do NOT big-bang, the pair is pinned by ~40 call sites and
+~15 contract tests):
+- Rows: collapse `TrackRow` / `TidalTrackRow` into one source-tagged component
+  (overlaps the row-consolidation notes in the play-in-context and
+  list-virtualization entries below). Also wire the artist top-tracks tab's TIDAL
+  rows to play in context (deferred: mixed local/TIDAL list needs the unified
+  playable to slice correctly).
+- Verbs: introduce a `Playable` union + ~6 core verbs; shim the ~30 exports, then
+  delete as call sites migrate.
+- Backend bug-2 residue: ephemeral tracks serialize without
+  `artist_tidal_id`/`album_tidal_id` (`Track` in `db/models.rs` lacks the fields).
+  Frontend cache covers user-played tracks; server-resolved radio tracks still
+  lose links after reload. Proper fix (add 2 fields to `Track`: ~25 sites + queue
+  migration + request plumbing + rebuild) is best folded into the verb/row
+  unification, not bolted on.
+- Spawned by: now-playing bug diagnosis (album-click + links + mojibake), this session.
+
 ### feat: optional album-preview popup for recommendation/chart murals
 
 The Home recommendation murals now play an album in place on double-click (resolve to

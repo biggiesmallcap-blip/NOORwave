@@ -74,6 +74,37 @@ function tidalLocalTrackId(track: TidalPlayable): number | null {
 
 const SEPARATOR: MenuItem = { separator: true, label: '' };
 
+// ─── Shared menu items ──────────────────────────────────────────────────────
+// Items that are byte-identical between the library (`buildTrackMenu`) and TIDAL
+// (`buildTidalTrackMenu`) builders live here once, so the two can't drift apart
+// on them. Keeping the favourites glyph in a single place is how we stop a
+// repeat of the mojibake that corrupted one copy's heart icon (the two builders
+// had independent copies; only one rotted).
+
+function favouriteMenuItem(localId: number, isFavorite: boolean): MenuItem {
+	return {
+		label: isFavorite ? 'Remove from favourites' : 'Add to favourites',
+		icon: isFavorite ? '♥' : '♡',
+		onSelect: () => void toggleTrackFavorite(localId, isFavorite)
+	};
+}
+
+function goToMenuItem(label: string, href: string): MenuItem {
+	return { label, icon: '→', onSelect: () => void goto(href) };
+}
+
+function removeFromQueueMenuItem(queueItemId: number, onRemoved?: () => void): MenuItem {
+	return {
+		label: 'Remove from queue',
+		icon: '×',
+		danger: true,
+		onSelect: async () => {
+			await removeTrackFromQueue(queueItemId);
+			onRemoved?.();
+		}
+	};
+}
+
 /**
  * buildTrackMenu — one factory for every right-click / ⋯ menu on a track row.
  * The same item list is used by the now-playing panel, queue rows, library
@@ -84,15 +115,7 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 	// Pending rows haven't resolved to a library track yet; only removal is safe.
 	if (options.isPending) {
 		if (options.queueItemId != null) {
-			return [{
-				label: 'Remove from queue',
-				icon: '×',
-				danger: true,
-				onSelect: async () => {
-					await removeTrackFromQueue(options.queueItemId!);
-					options.onRemoved?.();
-				}
-			}];
+			return [removeFromQueueMenuItem(options.queueItemId, options.onRemoved)];
 		}
 		return [];
 	}
@@ -155,27 +178,15 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 
 	const navPrefix = options.remoteRoutes ? '/remote' : '';
 	if (hasArtist) {
-		items.push({
-			label: `Go to ${track.artist_name ?? 'artist'}`,
-			icon: '→',
-			onSelect: () => void goto(`${navPrefix}/artists/${track.artist_id}`)
-		});
+		items.push(goToMenuItem(`Go to ${track.artist_name ?? 'artist'}`, `${navPrefix}/artists/${track.artist_id}`));
 	}
 	if (hasAlbum) {
-		items.push({
-			label: `Go to ${track.album_title ?? 'album'}`,
-			icon: '→',
-			onSelect: () => void goto(`${navPrefix}/albums/${track.album_id}`)
-		});
+		items.push(goToMenuItem(`Go to ${track.album_title ?? 'album'}`, `${navPrefix}/albums/${track.album_id}`));
 	}
 
 	items.push(SEPARATOR);
 
-	items.push({
-		label: track.is_favorite ? 'Remove from favourites' : 'Add to favourites',
-		icon: track.is_favorite ? '♥' : '♡',
-		onSelect: () => void toggleTrackFavorite(track.id, track.is_favorite ?? false)
-	});
+	items.push(favouriteMenuItem(track.id, track.is_favorite ?? false));
 
 	// Download to disk. Desktop-only: the server writes to the desktop's library
 	// folder, so it's hidden on the /remote mobile surface.
@@ -204,15 +215,7 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 	}
 
 	if (options.queueItemId != null) {
-		items.push({
-			label: 'Remove from queue',
-			icon: '×',
-			danger: true,
-			onSelect: async () => {
-				await removeTrackFromQueue(options.queueItemId!);
-				options.onRemoved?.();
-			}
-		});
+		items.push(removeFromQueueMenuItem(options.queueItemId, options.onRemoved));
 	}
 
 	return items;
@@ -258,18 +261,16 @@ export function buildTidalTrackMenu(track: TidalPlayable, options: BuildTidalTra
 
 	const tidalNavPrefix = options.remoteRoutes ? '/remote' : '';
 	if (track.artist_tidal_id != null) {
-		items.push({
-			label: `Go to ${track.artist_name ?? 'artist'}`,
-			icon: '→',
-			onSelect: () => void goto(`${tidalNavPrefix}/tidal/artists/${track.artist_tidal_id}`),
-		});
+		items.push(goToMenuItem(
+			`Go to ${track.artist_name ?? 'artist'}`,
+			`${tidalNavPrefix}/tidal/artists/${track.artist_tidal_id}`,
+		));
 	}
 	if (track.album_tidal_id != null) {
-		items.push({
-			label: `Go to ${track.album_title ?? 'album'}`,
-			icon: '→',
-			onSelect: () => void goto(`${tidalNavPrefix}/tidal/albums/${track.album_tidal_id}`),
-		});
+		items.push(goToMenuItem(
+			`Go to ${track.album_title ?? 'album'}`,
+			`${tidalNavPrefix}/tidal/albums/${track.album_tidal_id}`,
+		));
 	}
 	if (track.artist_tidal_id != null || track.album_tidal_id != null) {
 		items.push(SEPARATOR);
@@ -277,11 +278,7 @@ export function buildTidalTrackMenu(track: TidalPlayable, options: BuildTidalTra
 
 	const localId = tidalLocalTrackId(track);
 	if (localId != null) {
-		items.push({
-			label: track.is_favorite ? 'Remove from favourites' : 'Add to favourites',
-			icon: track.is_favorite ? 'â™¥' : 'â™¡',
-			onSelect: () => void toggleTrackFavorite(localId, track.is_favorite ?? false),
-		});
+		items.push(favouriteMenuItem(localId, track.is_favorite ?? false));
 		items.push(SEPARATOR);
 	}
 
@@ -295,15 +292,7 @@ export function buildTidalTrackMenu(track: TidalPlayable, options: BuildTidalTra
 
 	if (queueItemId != null) {
 		items.push(SEPARATOR);
-		items.push({
-			label: 'Remove from queue',
-			icon: '×',
-			danger: true,
-			onSelect: async () => {
-				await removeTrackFromQueue(queueItemId);
-				options.onRemoved?.();
-			},
-		});
+		items.push(removeFromQueueMenuItem(queueItemId, options.onRemoved));
 	}
 
 	return items;

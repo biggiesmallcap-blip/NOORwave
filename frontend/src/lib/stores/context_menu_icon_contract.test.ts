@@ -34,6 +34,20 @@ describe('context menu icon contracts', () => {
 		expect(source).not.toContain("icon: 'Play'");
 	});
 
+	test('source is free of UTF-8-as-Latin1 mojibake', () => {
+		// A heart icon once shipped as 'â™¡' because the file was saved with the
+		// UTF-8 bytes of ♡ reinterpreted as Latin-1. The lead byte 0xE2 ('â')
+		// heads ♥ ♡ ™ … and smart quotes/dashes, so a stray 'â' in source is a
+		// reliable mojibake tell. Intentional glyphs (♥ ▶ ⤴ → ◉ …) never contain it.
+		const mojibake = /[âÃÂ]/;
+		const offenders = sourceFiles(sourceRoot).flatMap((path) => {
+			const source = readFileSync(path, 'utf8');
+			return mojibake.test(source) ? [relative(sourceRoot, path)] : [];
+		});
+
+		expect(offenders).toEqual([]);
+	});
+
 	test('source does not assign visible words as context-menu icons', () => {
 		const textIconPattern = /icon:\s*['"][A-Za-z][A-Za-z ]+['"]/g;
 		const offenders = sourceFiles(sourceRoot).flatMap((path) => {
