@@ -28,6 +28,16 @@
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT"/>
 </p>
 
+## Demo
+
+<p align="center">
+  <img src="docs/assets/noorwave-reel.gif" alt="NOORwave walkthrough across home, library, search, Genre Galaxy, analytics, and video" width="100%"/>
+</p>
+
+<p align="center">
+  <sub>A tour of the desktop app: TIDAL mixes and radio, a live local library, full-catalog search, the Genre Galaxy, listening analytics, and TIDAL video.</sub>
+</p>
+
 ## What It Is
 
 NOORwave is a desktop TIDAL player built around a simple idea: your streaming library should behave like a fast local music collection.
