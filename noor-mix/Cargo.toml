@@ -10,7 +10,7 @@ signalsmith-eval = ["dep:signalsmith-stretch"]
 
 [dependencies]
 anyhow = "1"
-rubato = "0.16"
+rubato = "3.0"
 serde = { version = "1", features = ["derive"] }
 signalsmith-stretch = { version = "0.1.3", optional = true }
 thiserror = "2"
@@ -19,4 +19,4 @@ tracing = "0.1"
 [dev-dependencies]
 hound = "3"
 rustfft = "6"
-symphonia = { version = "0.5", features = ["all"] }
+symphonia = { version = "0.6", features = ["all"] }
