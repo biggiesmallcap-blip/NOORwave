@@ -36,9 +36,7 @@ It syncs your TIDAL library into SQLite, gives you a real desktop app with tray 
 
 ## Product Tour
 
-<div align="center">
-  <video src="https://github.com/biggiesmallcap-blip/NOORwave/releases/download/v0.5.2/noorwave-reel-web.mp4" poster="https://github.com/biggiesmallcap-blip/NOORwave/releases/download/v0.5.2/noorwave-poster.png" controls muted loop width="100%"></video>
-</div>
+https://github.com/user-attachments/assets/0eb249d7-7ba6-44c2-8d53-f41943e916ee
 
 <p align="center">
   <sub>A tour of the desktop app: Home, Library, Search, the Genre Galaxy, listening analytics, and TIDAL video.</sub>
