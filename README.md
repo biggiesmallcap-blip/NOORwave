@@ -28,16 +28,6 @@
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT"/>
 </p>
 
-## Demo
-
-<p align="center">
-  <img src="docs/assets/noorwave-reel.gif" alt="NOORwave walkthrough across home, library, search, Genre Galaxy, analytics, and video" width="100%"/>
-</p>
-
-<p align="center">
-  <sub>A tour of the desktop app: TIDAL mixes and radio, a live local library, full-catalog search, the Genre Galaxy, listening analytics, and TIDAL video.</sub>
-</p>
-
 ## What It Is
 
 NOORwave is a desktop TIDAL player built around a simple idea: your streaming library should behave like a fast local music collection.
@@ -46,28 +36,13 @@ It syncs your TIDAL library into SQLite, gives you a real desktop app with tray 
 
 ## Product Tour
 
-<table>
-  <tr>
-    <td width="50%">
-      <a href="docs/assets/screenshot-home.png"><img src="docs/assets/screenshot-home.png" alt="Home screen" width="100%"/></a>
-      <br/><sub><strong>Home</strong> - daily listening, recently played, new releases, now playing.</sub>
-    </td>
-    <td width="50%">
-      <a href="docs/assets/screenshot-search.png"><img src="docs/assets/screenshot-search.png" alt="Search screen" width="100%"/></a>
-      <br/><sub><strong>Search</strong> - local library, TIDAL catalog, filters, queue actions.</sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <a href="docs/assets/screenshot-discover.png"><img src="docs/assets/screenshot-discover.png" alt="Discover screen" width="100%"/></a>
-      <br/><sub><strong>Discover</strong> - learned similarity, blend discovery, song radio.</sub>
-    </td>
-    <td width="50%">
-      <a href="docs/assets/screenshot-automix.png"><img src="docs/assets/screenshot-automix.png" alt="Automix screen" width="100%"/></a>
-      <br/><sub><strong>DJ tools</strong> - automix, harmonic matching, queue control.</sub>
-    </td>
-  </tr>
-</table>
+<div align="center">
+  <video src="https://github.com/biggiesmallcap-blip/NOORwave/releases/download/v0.5.2/noorwave-reel-web.mp4" poster="https://github.com/biggiesmallcap-blip/NOORwave/releases/download/v0.5.2/noorwave-poster.png" controls muted loop width="100%"></video>
+</div>
+
+<p align="center">
+  <sub>A tour of the desktop app: Home, Library, Search, the Genre Galaxy, listening analytics, and TIDAL video.</sub>
+</p>
 
 ## Core Capabilities
 
