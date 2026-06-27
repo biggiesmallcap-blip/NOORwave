@@ -25,12 +25,21 @@ describe('TIDAL album playback contract', () => {
 			/import \{[^}]*\bplayTidalTracksNow\b[^}]*\} from '\$lib\/stores\/player';/,
 		);
 		expect(source).toContain("import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';");
-		expect(source).toContain('async function playLoadedAlbum()');
+		expect(source).toContain('async function playLoadedAlbum(startIndex = 0)');
 		expect(source).toContain('tracks.map((track) => tidalDiscographyTrackToPlayable(track))');
 		expect(source).toContain("header()?.title ?? 'album'");
 		expect(source).toContain('track={tidalDiscographyTrackToPlayable(track)}');
 		expect(source).toContain('onclick={() => void playLoadedAlbum()}');
 		expect(source).not.toContain('function trackAsPlayable(t: TidalDiscographyTrack)');
 		expect(source).not.toContain('playTidalAlbum(tidalAlbumId)');
+	});
+
+	test('clicking a track plays the album from that track, not an orphan', () => {
+		// Bug #1: rows fell back to TidalTrackRow's single-track default, so a click
+		// started one orphan track with an empty queue. The row hands its index back
+		// so the album from that track becomes the queue, mirroring the library album
+		// page's playAlbum(albumId, track.id).
+		expect(source).toContain('onRowClick={() => void playLoadedAlbum(idx)}');
+		expect(source).toContain('{ startIndex }');
 	});
 });

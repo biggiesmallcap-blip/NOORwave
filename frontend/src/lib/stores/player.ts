@@ -35,7 +35,48 @@ export const currentTrackFeatures = writable<AudioDspFeatures | null>(null);
 export const currentStreamDisplay = writable<StreamDisplayInfo | null>(null);
 export const playbackRuntimeInfo = writable<PlaybackRuntimeInfo | null>(null);
 
-const tidalMetadataById = new Map<number, Partial<TidalPlayable>>();
+// TIDAL tracks only carry artist/album tidal ids in this in-memory cache; the
+// backend's ephemeral-track snapshot omits them. Persisting it to localStorage
+// keeps the now-playing artist/album links alive across the Tauri WebView2
+// reload (and any navigation), which would otherwise wipe the Map and strip the
+// links off whatever is playing. Stale entries are harmless: they're keyed by
+// tidal_id and only consulted when a matching track surfaces.
+const TIDAL_META_CACHE_KEY = 'noor_tidal_meta_cache_v1';
+const TIDAL_META_CACHE_MAX = 800;
+
+function loadTidalMetaCache(): Map<number, Partial<TidalPlayable>> {
+	if (typeof localStorage === 'undefined') return new Map();
+	try {
+		const raw = localStorage.getItem(TIDAL_META_CACHE_KEY);
+		if (!raw) return new Map();
+		const entries = JSON.parse(raw) as [number, Partial<TidalPlayable>][];
+		return new Map(Array.isArray(entries) ? entries.slice(-TIDAL_META_CACHE_MAX) : []);
+	} catch {
+		return new Map();
+	}
+}
+
+let persistMetaTimer: ReturnType<typeof setTimeout> | null = null;
+function persistTidalMetaCacheSoon() {
+	if (typeof localStorage === 'undefined' || persistMetaTimer) return;
+	persistMetaTimer = setTimeout(() => {
+		persistMetaTimer = null;
+		try {
+			// Map keeps insertion order, so trimming from the front drops the
+			// oldest entries when we exceed the cap.
+			while (tidalMetadataById.size > TIDAL_META_CACHE_MAX) {
+				const oldest = tidalMetadataById.keys().next().value;
+				if (oldest === undefined) break;
+				tidalMetadataById.delete(oldest);
+			}
+			localStorage.setItem(TIDAL_META_CACHE_KEY, JSON.stringify([...tidalMetadataById.entries()]));
+		} catch {
+			// Quota/serialization failure is non-fatal: links just won't survive a reload.
+		}
+	}, 500);
+}
+
+const tidalMetadataById = loadTidalMetaCache();
 const tidalFavoriteOverrideById = new Map<number, { localId: number; favorite: boolean }>();
 
 type TidalMetadataInput = Pick<TidalPlayable, 'tidal_id' | 'title'> & Partial<Omit<TidalPlayable, 'tidal_id' | 'title'>>;
@@ -61,6 +102,7 @@ function rememberTidalPlayable(track: TidalMetadataInput) {
 		is_in_library: track.is_in_library ?? previous.is_in_library,
 		is_favorite: track.is_favorite ?? previous.is_favorite,
 	});
+	persistTidalMetaCacheSoon();
 }
 
 function rememberTidalPlayables(tracks: readonly TidalMetadataInput[]) {
@@ -1638,10 +1680,16 @@ export async function playTidalTrackNext(track: TidalPlayable): Promise<void> {
 export async function playTidalTracksNow(
 	tracks: TidalPlayable[],
 	label = 'playlist',
-	options?: { shuffleMode?: PlaybackState['shuffle_mode'] }
+	options?: { shuffleMode?: PlaybackState['shuffle_mode']; startIndex?: number }
 ): Promise<void> {
 	if (!assertOnline()) return;
-	const playable = tracks.filter((track) => track.tidal_id > 0);
+	// Mirror sliceContextTrackIds: clicking row N makes "the list from N" the
+	// queue (no wrap), matching the library album/playlist convention. A bare
+	// "Play all" passes no startIndex and plays the whole list. Starting from a
+	// specific row forces shuffle off, like playAlbum does with startTrackId.
+	const startIndex = options?.startIndex ?? 0;
+	const ordered = startIndex > 0 ? tracks.slice(startIndex) : tracks;
+	const playable = ordered.filter((track) => track.tidal_id > 0);
 	if (!playable.length) {
 		showToast('No playable tracks ready yet', 'info');
 		return;
@@ -1650,7 +1698,8 @@ export async function playTidalTracksNow(
 	playerError.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
-		const requestShuffleMode = options?.shuffleMode ?? get(shuffleMode);
+		const requestShuffleMode =
+			options?.shuffleMode ?? (startIndex > 0 ? 'off' : get(shuffleMode));
 		const oneShotShuffleMode = requestShuffleMode === 'off' ? undefined : requestShuffleMode;
 		if (!oneShotShuffleMode && isLatestPlaybackIntent(intentSeq)) {
 			setOptimisticTidalTrack(playable[0]);
