@@ -36,28 +36,11 @@ It syncs your TIDAL library into SQLite, gives you a real desktop app with tray 
 
 ## Product Tour
 
-<table>
-  <tr>
-    <td width="50%">
-      <a href="docs/assets/screenshot-home.png"><img src="docs/assets/screenshot-home.png" alt="Home screen" width="100%"/></a>
-      <br/><sub><strong>Home</strong> - daily listening, recently played, new releases, now playing.</sub>
-    </td>
-    <td width="50%">
-      <a href="docs/assets/screenshot-search.png"><img src="docs/assets/screenshot-search.png" alt="Search screen" width="100%"/></a>
-      <br/><sub><strong>Search</strong> - local library, TIDAL catalog, filters, queue actions.</sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <a href="docs/assets/screenshot-discover.png"><img src="docs/assets/screenshot-discover.png" alt="Discover screen" width="100%"/></a>
-      <br/><sub><strong>Discover</strong> - learned similarity, blend discovery, song radio.</sub>
-    </td>
-    <td width="50%">
-      <a href="docs/assets/screenshot-automix.png"><img src="docs/assets/screenshot-automix.png" alt="Automix screen" width="100%"/></a>
-      <br/><sub><strong>DJ tools</strong> - automix, harmonic matching, queue control.</sub>
-    </td>
-  </tr>
-</table>
+https://github.com/user-attachments/assets/0eb249d7-7ba6-44c2-8d53-f41943e916ee
+
+<p align="center">
+  <sub>A tour of the desktop app: Home, Library, Search, the Genre Galaxy, listening analytics, and TIDAL video.</sub>
+</p>
 
 ## Core Capabilities
 
