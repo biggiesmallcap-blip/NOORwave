@@ -1450,7 +1450,7 @@
 	// ─── Category rail ───────────────────────────────────────────────────
 	// Splits the previously stacked panels into focused pages. Each panel
 	// belongs to exactly one category; empty columns are hidden by CSS.
-	type SettingsCategory = 'appearance' | 'sources' | 'audio' | 'data' | 'account';
+	type SettingsCategory = 'appearance' | 'sources' | 'audio' | 'account';
 	let activeCategory = $state<SettingsCategory>('appearance');
 	let handledTidalLoginRequest = $state('');
 	$effect(() => {
@@ -1692,16 +1692,11 @@
 		{ id: 'appearance', label: 'Appearance', icon: '◐', hint: 'Theme + wallpaper' },
 		{ id: 'sources', label: 'Sources', icon: '⟐', hint: 'Services + data' },
 		{ id: 'audio', label: 'Audio', icon: '♪', hint: 'Output + analysis' },
-		{ id: 'data', label: 'Data', icon: '⇅', hint: 'Portable snapshots' },
 		{ id: 'account', label: 'Account', icon: '⚙', hint: 'PIN + updates' },
 	];
 
-	let visibleSettingsCategories = $derived(
-		settingsCategories.filter((c) => c.id !== 'data')
-	);
-
 	let activeCategoryMeta = $derived(
-		visibleSettingsCategories.find((category) => category.id === activeCategory) ?? visibleSettingsCategories[0]
+		settingsCategories.find((category) => category.id === activeCategory) ?? settingsCategories[0]
 	);
 
 	let activePalette = $derived(PALETTES.find((p) => p.id === $palette) ?? PALETTES[0]);
@@ -1798,7 +1793,7 @@
 	</section>
 
 	<nav class="settings-rail" aria-label="Settings categories">
-		{#each visibleSettingsCategories as cat (cat.id)}
+		{#each settingsCategories as cat (cat.id)}
 			<button
 				type="button"
 				class="settings-rail-btn"
@@ -1813,8 +1808,6 @@
 						<svg viewBox="0 0 24 24"><path d="M7 7h10v10H7z" /><path d="M12 2v5M12 17v5M2 12h5M17 12h5" /></svg>
 					{:else if cat.id === 'audio'}
 						<svg viewBox="0 0 24 24"><path d="M9 18V5l10-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="16" cy="16" r="3" /></svg>
-					{:else if cat.id === 'data'}
-						<svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16" /><path d="M8 4v16M16 4v16" /></svg>
 					{:else if cat.id === 'account'}
 						<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4" /><path d="M5 21c1.5-4 4-6 7-6s5.5 2 7 6" /></svg>
 					{:else}
