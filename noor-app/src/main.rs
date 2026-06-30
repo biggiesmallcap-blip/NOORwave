@@ -31,6 +31,8 @@ fn main() {
             commands::check_for_updates_now,
             commands::get_update_state,
             commands::get_install_mode,
+            commands::get_minimize_to_tray,
+            commands::set_minimize_to_tray,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
