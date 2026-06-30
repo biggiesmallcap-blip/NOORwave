@@ -2399,6 +2399,18 @@ fn run_runtime_loop(
                             report_runtime_command_error(&event_tx, "Pause", error);
                         }
                     }
+                    // Instrumentation only (slice C0): correlate an explicit user
+                    // pause with the render thread's idle-release timing in the logs.
+                    // This is the exact hook point where C1 will request an early
+                    // device release on user pause.
+                    #[cfg(target_os = "windows")]
+                    if state.current_exclusive {
+                        tracing::debug!(
+                            target: "playback",
+                            grace_secs = state.current_exclusive_release_grace_secs,
+                            "Pause: user pause with exclusive active; device frees after idle grace (C1 release-on-pause hook point)"
+                        );
+                    }
                 }
                 PlaybackRuntimeCommand::ReleaseExclusiveNow => {
                     // Yield the exclusive endpoint now so the WebView can play a
@@ -2432,6 +2444,7 @@ fn run_runtime_loop(
                     if state.current_exclusive {
                         #[cfg(target_os = "windows")]
                         if state.exclusive_sink.needs_rebuild() {
+                            let regrab_start = std::time::Instant::now();
                             info!(
                                 "Resume: rebuilding exclusive stream after idle release on {}",
                                 state.device_name
@@ -2456,6 +2469,11 @@ fn run_runtime_loop(
                                 Ok(actual_rate) => {
                                     output_config.sample_rate = actual_rate;
                                     state.device_sample_rate = actual_rate;
+                                    info!(
+                                        target: "playback",
+                                        regrab_ms = regrab_start.elapsed().as_millis() as u64,
+                                        "Resume: exclusive re-grab complete"
+                                    );
                                 }
                                 Err(err) => {
                                     warn!(
