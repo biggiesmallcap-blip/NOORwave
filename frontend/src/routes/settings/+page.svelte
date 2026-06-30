@@ -54,6 +54,7 @@
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
 	import Toggle from '$lib/components/ui/Toggle.svelte';
+	import { searchSettings, type SettingsSearchEntry } from '$lib/components/settings/settingsSearch';
 	import IntegrationsPanel from '$lib/components/settings/IntegrationsPanel.svelte';
 	import {
 		discoveryLastTrainedAt,
@@ -1585,6 +1586,28 @@
 		void loadVisibleSettingsCategory();
 	}
 
+	let settingsQuery = $state('');
+	let searchFocused = $state(false);
+	let searchMatches = $derived(searchSettings(settingsQuery));
+
+	function jumpToSetting(entry: SettingsSearchEntry) {
+		settingsQuery = '';
+		searchFocused = false;
+		selectSettingsCategory(entry.category);
+		// Wait two frames so the freshly-switched category renders before we
+		// scroll to and flash the target section.
+		requestAnimationFrame(() => {
+			requestAnimationFrame(() => {
+				const el = document.querySelector(`[data-setting-id="${entry.id}"]`);
+				if (el instanceof HTMLElement) {
+					el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+					el.classList.add('setting-flash');
+					setTimeout(() => el.classList.remove('setting-flash'), 1600);
+				}
+			});
+		});
+	}
+
 	function scheduleSettingsBackgroundLoad(): () => void {
 		settingsBackgroundLoadCancelled = false;
 		const cancelers = [
@@ -1787,6 +1810,40 @@
 		</div>
 	{/if}
 
+	<div class="settings-search">
+		<svg class="settings-search-icon" viewBox="0 0 24 24" aria-hidden="true">
+			<circle cx="11" cy="11" r="7" />
+			<path d="M21 21l-4.2-4.2" />
+		</svg>
+		<input
+			type="search"
+			class="settings-search-input"
+			placeholder="Search settings..."
+			bind:value={settingsQuery}
+			onfocus={() => (searchFocused = true)}
+			onblur={() => setTimeout(() => (searchFocused = false), 150)}
+			onkeydown={(e) => {
+				if (e.key === 'Enter' && searchMatches.length) jumpToSetting(searchMatches[0]);
+				else if (e.key === 'Escape') settingsQuery = '';
+			}}
+			aria-label="Search settings"
+		/>
+		{#if searchFocused && settingsQuery.trim() && searchMatches.length}
+			<ul class="settings-search-results">
+				{#each searchMatches as match (match.id)}
+					<li>
+						<button type="button" class="settings-search-result" onclick={() => jumpToSetting(match)}>
+							<span class="settings-search-result-label">{match.label}</span>
+							<span class="settings-search-result-cat">{match.category}</span>
+						</button>
+					</li>
+				{/each}
+			</ul>
+		{:else if searchFocused && settingsQuery.trim()}
+			<div class="settings-search-empty">No settings match that search.</div>
+		{/if}
+	</div>
+
 	<section class="settings-status-strip">
 		<div>
 			<span>Sync</span>
@@ -1842,7 +1899,7 @@
 	>
 		<div class="settings-main">
 			{#if activeCategory === 'appearance'}
-			<section class="glass-panel section-panel palette-section" class:palette-section-open={paletteMenuOpen}>
+			<section data-setting-id="colour-scheme" class="glass-panel section-panel palette-section" class:palette-section-open={paletteMenuOpen}>
 				<SectionHeader eyebrow="Palette" title="Colour scheme" subtitle="UI accent, wallpaper, and no-wallpaper colours." />
 				<div class="palette-row">
 					<div
@@ -1915,7 +1972,7 @@
 				</div>
 			</section>
 
-			<section class="glass-panel section-panel">
+			<section data-setting-id="interface-size" class="glass-panel section-panel">
 				<SectionHeader
 					eyebrow="Scale"
 					title="Interface size"
@@ -1956,7 +2013,7 @@
 				</div>
 			</section>
 
-			<section class="glass-panel section-panel">
+			<section data-setting-id="background" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Wallpaper" title="Background" subtitle="Preview, then apply." />
 
 				<div class="wallpaper-big-preview">
@@ -2082,7 +2139,7 @@
 			{/if}
 
 			{#if activeCategory === 'account'}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="access-pin" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Access" title="Access PIN" subtitle="Use this PIN on another device." />
 				<div class="token-row">
 					<code class="token-value">{tokenVisible ? serverToken : '•'.repeat(serverToken.length || 6)}</code>
@@ -2106,7 +2163,7 @@
 
 			<IntegrationsPanel />
 
-			<section class="glass-panel section-panel">
+			<section data-setting-id="app-updates" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Desktop" title="App updates" subtitle="Version, install mode, and update checks." />
 				<div class="inner-metrics">
 					<MetricPair label="Version" value={appVersion || 'Unknown'} copy="Current app build." />
@@ -2132,7 +2189,7 @@
 			</section>
 
 			{#if desktopAppAvailable}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="closing-the-window" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Desktop" title="Closing the window" subtitle="Quit NOORwave, or keep it running in the tray." />
 				<div class="info-list">
 					<div class="info-row">
@@ -2157,7 +2214,7 @@
 			{/if}
 
 			{#if activeCategory === 'sources'}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="connect-tidal" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Streaming" title="Connect TIDAL" subtitle="Auth, sync, and playback metadata." />
 
 				{#if serverStatus === 'offline' && $tidalStatus !== 'connecting'}
@@ -2281,7 +2338,7 @@
 			{/if}
 
 			{#if activeCategory === 'sources'}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="musicbrainz-enrichment" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Metadata" title="MusicBrainz enrichment" subtitle="Genre coverage for browsing and discovery." />
 
 				<div class="stat-grid inner-metrics">
@@ -2319,14 +2376,14 @@
 				{/if}
 			</section>
 
-			<section class="glass-panel section-panel">
+			<section data-setting-id="spotify-tags" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Metadata" title="Spotify tags" subtitle="Unavailable: Premium-only API access." />
 				<p class="page-copy">
 					The integration code is still in place — if you ever subscribe to Spotify Premium, the existing app credentials should start working again and this panel will reactivate. For now, use Last.fm below as the second genre source.
 				</p>
 			</section>
 
-			<section class="glass-panel section-panel">
+			<section data-setting-id="last-fm-tags" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Metadata" title="Last.fm tags" subtitle="Crowd tags from a local API key." />
 
 				{#if lastfmError}
@@ -2440,7 +2497,7 @@
 
 
 			{#if activeCategory === 'audio'}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="playback-output" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Output" title="Playback output" subtitle="Quality, device, and bit-perfect routing." />
 				{#if $audioSettings.settings}
 					{@const s = $audioSettings.settings}
@@ -2646,7 +2703,7 @@
 			{/if}
 
 			{#if activeCategory === 'sources'}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="portable-snapshot" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Transfer" title="Portable snapshot" subtitle="Export/import MusicBrainz and Last.fm enrichment." />
 
 				<div class="stat-grid inner-metrics">
@@ -2693,7 +2750,7 @@
 			{/if}
 
 			{#if activeCategory === 'sources'}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="clear-non-library-entries" class="glass-panel section-panel">
 				<SectionHeader
 					eyebrow="Cleanup"
 					title="Clear non-library entries"
@@ -2727,7 +2784,7 @@
 			{/if}
 
 			{#if activeCategory === 'audio'}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="downloads" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Output" title="Downloads" subtitle="Save tracks to disk as FLAC or MP3." />
 
 				<div class="download-settings">
@@ -2845,7 +2902,7 @@
 			{/if}
 
 			{#if activeCategory === 'audio'}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="discovery-engine" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Learning" title="Discovery engine" subtitle="Learned radio coverage and training." />
 
 				<div class="discovery-warning glass-panel">
@@ -3055,7 +3112,7 @@
 				</div>
 			</section>
 
-			<section class="glass-panel section-panel">
+			<section data-setting-id="radio-similarity-index" class="glass-panel section-panel">
 				<SectionHeader
 					eyebrow="Learning"
 					title="Radio similarity index"
@@ -3088,7 +3145,7 @@
 
 		<div class="settings-side">
 			{#if activeCategory === 'audio'}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="now-playing-path" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Runtime" title="Now playing path" subtitle="Current device and format." />
 				<div class="info-list">
 					<div class="info-row">
@@ -3118,7 +3175,7 @@
 			{/if}
 
 			{#if activeCategory === 'sources'}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="additional-services" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Later" title="Additional services" subtitle="Planned source coverage." />
 				<div class="roadmap-list">
 					<div class="roadmap-item">
@@ -3134,7 +3191,7 @@
 			{/if}
 
 			{#if activeCategory === 'audio'}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="library-audio-data" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Analysis" title="Library audio data" subtitle="Passive BPM, key, and energy capture." />
 
 				<div class="stat-grid inner-metrics">
@@ -3184,7 +3241,7 @@
 			{/if}
 
 			{#if activeCategory === 'sources'}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="acrcloud" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Recognition" title="ACRCloud" subtitle="Sample and cover detection." />
 
 				{#if !$acrCloud.connected}
@@ -3790,6 +3847,127 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		font-size: var(--font-size-sm);
+	}
+
+	.settings-search {
+		position: relative;
+		margin-bottom: var(--space-3);
+	}
+
+	.settings-search-icon {
+		position: absolute;
+		left: 14px;
+		top: 50%;
+		transform: translateY(-50%);
+		width: 16px;
+		height: 16px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 2;
+		stroke-linecap: round;
+		opacity: 0.5;
+		pointer-events: none;
+	}
+
+	.settings-search-input {
+		width: 100%;
+		padding: 10px 14px 10px 40px;
+		background: var(--bg-surface);
+		border: 1px solid var(--panel-border);
+		border-radius: var(--radius-md);
+		color: inherit;
+		font-size: var(--font-size-sm);
+	}
+
+	.settings-search-input::placeholder {
+		color: var(--text-tertiary);
+	}
+
+	.settings-search-input:focus {
+		outline: none;
+		border-color: var(--accent);
+	}
+
+	.settings-search-results {
+		position: absolute;
+		z-index: var(--z-overlay);
+		top: calc(100% + 6px);
+		left: 0;
+		right: 0;
+		margin: 0;
+		padding: 6px;
+		list-style: none;
+		background: var(--bg-elevated);
+		border: 1px solid var(--panel-border);
+		border-radius: var(--radius-md);
+		box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+		max-height: 320px;
+		overflow-y: auto;
+	}
+
+	.settings-search-results li {
+		list-style: none;
+	}
+
+	.settings-search-result {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--gap-sm);
+		width: 100%;
+		padding: 8px 12px;
+		background: transparent;
+		border: none;
+		border-radius: var(--radius-sm);
+		color: inherit;
+		cursor: pointer;
+		text-align: left;
+	}
+
+	.settings-search-result:hover {
+		background: var(--bg-surface);
+	}
+
+	.settings-search-result-label {
+		font-size: var(--font-size-sm);
+	}
+
+	.settings-search-result-cat {
+		flex: 0 0 auto;
+		font-size: var(--font-size-2xs);
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--text-tertiary);
+	}
+
+	.settings-search-empty {
+		position: absolute;
+		z-index: var(--z-overlay);
+		top: calc(100% + 6px);
+		left: 0;
+		right: 0;
+		padding: 14px;
+		background: var(--bg-elevated);
+		border: 1px solid var(--panel-border);
+		border-radius: var(--radius-md);
+		font-size: var(--font-size-sm);
+		color: var(--text-tertiary);
+	}
+
+	:global(.setting-flash) {
+		animation: settingFlash 1.6s ease;
+	}
+
+	@keyframes -global-settingFlash {
+		0% {
+			box-shadow: 0 0 0 0 transparent;
+		}
+		20% {
+			box-shadow: 0 0 0 2px var(--accent);
+		}
+		100% {
+			box-shadow: 0 0 0 0 transparent;
+		}
 	}
 
 	.settings-grid {
