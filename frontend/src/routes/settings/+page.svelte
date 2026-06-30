@@ -123,6 +123,7 @@
 	let updateStatus = $state('Available in the desktop app');
 	let updateAvailableVersion = $state<string | null>(null);
 	let updateChecking = $state(false);
+	let minimizeToTray = $state(false);
 	let updateError = $state('');
 
 	let mbStatus = $state<'idle' | 'running' | 'done'>('idle');
@@ -303,12 +304,25 @@
 			const pending = await invoke<string | null>('get_update_state');
 			updateAvailableVersion = pending;
 			updateStatus = pending ? `v${pending} available` : 'Up to date';
+			minimizeToTray = await invoke<boolean>('get_minimize_to_tray');
 		} catch (err) {
 			const unavailableState = unavailableDesktopUpdateState(appVersion, err);
 			installModeLabel = unavailableState.installModeLabel;
 			updateStatus = unavailableState.updateStatus;
 			updateAvailableVersion = unavailableState.updateAvailableVersion;
 			updateError = unavailableState.updateError;
+		}
+	}
+
+	async function setMinimizeToTray(next: boolean) {
+		const prev = minimizeToTray;
+		minimizeToTray = next;
+		try {
+			const { invoke } = await import('@tauri-apps/api/core');
+			await invoke('set_minimize_to_tray', { value: next });
+		} catch {
+			minimizeToTray = prev;
+			showToast('Could not save the close behavior. Try again.', 'error');
 		}
 	}
 
@@ -2116,6 +2130,30 @@
 					<p class="field-error" role="alert">{updateError}</p>
 				{/if}
 			</section>
+
+			{#if desktopAppAvailable}
+			<section class="glass-panel section-panel">
+				<SectionHeader eyebrow="Desktop" title="Closing the window" subtitle="Quit NOORwave, or keep it running in the tray." />
+				<div class="info-list">
+					<div class="info-row">
+						<div>
+							<span>Minimize to tray on close</span>
+							<p class="info-row-hint">
+								{minimizeToTray
+									? 'Closing the window keeps NOORwave running in the tray. Quit from the tray menu.'
+									: 'Closing the window quits NOORwave. Turn this on to keep it running in the tray instead.'}
+							</p>
+						</div>
+						<strong>
+							<Toggle
+								checked={minimizeToTray}
+								onchange={(e) => void setMinimizeToTray(e.currentTarget.checked)}
+							/>
+						</strong>
+					</div>
+				</div>
+			</section>
+			{/if}
 			{/if}
 
 			{#if activeCategory === 'sources'}
