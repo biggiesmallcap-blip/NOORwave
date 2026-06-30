@@ -53,6 +53,7 @@
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
+	import Toggle from '$lib/components/ui/Toggle.svelte';
 	import IntegrationsPanel from '$lib/components/settings/IntegrationsPanel.svelte';
 	import {
 		discoveryLastTrainedAt,
@@ -2216,14 +2217,10 @@
 						<div class="info-row">
 							<span>Auto-sync daily</span>
 							<strong>
-								<label class="toggle-switch">
-									<input
-										type="checkbox"
-										checked={$syncInfo?.auto_sync_daily ?? false}
-										onchange={() => void toggleAutoSync()}
-									/>
-									<span class="toggle-slider"></span>
-								</label>
+								<Toggle
+									checked={$syncInfo?.auto_sync_daily ?? false}
+									onchange={() => void toggleAutoSync()}
+								/>
 							</strong>
 						</div>
 					</div>
@@ -2435,14 +2432,13 @@
 							</p>
 						</div>
 						{#if isWindows}
-							<label class="toggle-switch audio-mode-toggle" aria-label="Toggle bit-perfect mode">
-								<input
-									type="checkbox"
+							<span class="audio-mode-toggle">
+								<Toggle
 									checked={bitPerfectSettingsActive}
 									onchange={onBitPerfectToggle}
+									label="Toggle bit-perfect mode"
 								/>
-								<span class="toggle-slider"></span>
-							</label>
+							</span>
 						{/if}
 					</div>
 
@@ -2486,14 +2482,10 @@
 								<div class="info-row">
 									<span>Exclusive output (WASAPI)</span>
 									<strong>
-										<label class="toggle-switch">
-											<input
-												type="checkbox"
-												checked={s.exclusive_mode}
-												onchange={onAudioExclusiveToggle}
-											/>
-											<span class="toggle-slider"></span>
-										</label>
+										<Toggle
+											checked={s.exclusive_mode}
+											onchange={onAudioExclusiveToggle}
+										/>
 									</strong>
 								</div>
 								<p class="page-copy setting-caption">
@@ -2571,14 +2563,10 @@
 								<div class="info-row">
 									<span>Sample rate follows source</span>
 									<strong>
-										<label class="toggle-switch">
-											<input
-												type="checkbox"
-												checked={s.sample_rate_follow}
-												onchange={onAudioSrFollowToggle}
-											/>
-											<span class="toggle-slider"></span>
-										</label>
+										<Toggle
+											checked={s.sample_rate_follow}
+											onchange={onAudioSrFollowToggle}
+										/>
 									</strong>
 								</div>
 								<p class="page-copy setting-caption">
@@ -3139,14 +3127,10 @@
 						</p>
 					</div>
 					<strong>
-						<label class="toggle-switch">
-							<input
-								type="checkbox"
-								checked={$audioAnalysis.passiveEnabled}
-								onchange={(e) => void setPassiveDspEnabled((e.currentTarget as HTMLInputElement).checked)}
-							/>
-							<span class="toggle-slider"></span>
-						</label>
+						<Toggle
+							checked={$audioAnalysis.passiveEnabled}
+							onchange={(e) => void setPassiveDspEnabled((e.currentTarget as HTMLInputElement).checked)}
+						/>
 					</strong>
 				</div>
 
@@ -4529,57 +4513,6 @@
 		.action-row :global(.btn) {
 			width: 100%;
 		}
-	}
-
-	/* Toggle switch for auto-sync */
-	.toggle-switch {
-		position: relative;
-		display: inline-block;
-		width: 44px;
-		height: 24px;
-		cursor: pointer;
-	}
-
-	.toggle-switch input {
-		opacity: 0;
-		width: 0;
-		height: 0;
-	}
-
-	.toggle-slider {
-		position: absolute;
-		top: 0;
-		left: 0;
-		right: 0;
-		bottom: 0;
-		background: rgba(255, 255, 255, 0.12);
-		border-radius: 999px;
-		transition: background 0.2s ease;
-	}
-
-	.toggle-slider::before {
-		content: '';
-		position: absolute;
-		height: 18px;
-		width: 18px;
-		left: 3px;
-		bottom: 3px;
-		background: white;
-		border-radius: 50%;
-		transition: transform 0.2s ease;
-	}
-
-	.toggle-switch input:checked + .toggle-slider {
-		background: var(--accent);
-	}
-
-	.toggle-switch input:checked + .toggle-slider::before {
-		transform: translateX(20px);
-	}
-
-	.toggle-switch input:disabled + .toggle-slider {
-		opacity: 0.5;
-		cursor: not-allowed;
 	}
 
 	.sync-count {
