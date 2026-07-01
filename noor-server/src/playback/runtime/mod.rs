@@ -2241,6 +2241,13 @@ fn run_runtime_loop(
                                 );
                             }
                         } else if !active_engine_suppresses_crossfade_after_seek(&state) {
+                            // The next deck can't back the full fade in time. Silence the
+                            // outgoing track's own fade-out so it plays at full volume to its
+                            // end rather than fading down into a gap; the boundary then makes a
+                            // clean gapless cut instead of a fade-to-silence-then-pop.
+                            if let Some(active) = state.engine.as_ref() {
+                                active.shared.crossfade_samples.store(0, Ordering::Relaxed);
+                            }
                             let reason = runtime_renderer_fire_block_reason(&state, next_ready);
                             record_current_runtime_renderer_failure(&mut state, reason);
                         }

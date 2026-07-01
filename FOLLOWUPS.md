@@ -10,6 +10,23 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### feat: adaptive (variable-length) crossfade when the next deck is under-buffered
+
+The legacy crossfade is all-or-nothing: if the incoming deck hasn't buffered the full
+fade window by the trigger (`crossfade_next_ready`, `playback/runtime/mod.rs`), it skips
+the fade. The safe fix shipped this session turns a miss into a clean gapless cut (the
+outgoing plays full to its end instead of fading into a gap) but does not blend. A true
+shortened crossfade needs a bigger change to the tuned fade envelope: promote at
+`effective` before the end (delayed promote / re-arm) and give the fade-in its own length
+separate from `crossfade_samples`, which is overloaded as trigger threshold + fade-out
+length + fade-in length. Naively shrinking `crossfade_samples` at the full-window trigger
+double-sums both decks to full in the middle (+3 dB / clipping) and leaks the short length
+into the next track's fade. Touches the don't-touch-without-asking gapless envelope
+(`playback/runtime/shared.rs`); validate by ear on a release build. Underlying trigger is
+slow TIDAL buffering (12s DASH segment timeouts); prebuffering earlier than NearEnd=30s
+would also reduce misses.
+- Spawned by: crossfade hard-cut fix, this session.
+
 ### feat: fold library/external "Play next" into a live mix too
 
 Play-next / add-to-queue during an ephemeral TIDAL mix now works for TIDAL picks:
