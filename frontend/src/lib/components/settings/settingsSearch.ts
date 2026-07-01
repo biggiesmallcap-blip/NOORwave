@@ -24,7 +24,6 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
 	{ id: 'closing-the-window', category: 'account', label: 'Closing the window', keywords: 'tray minimize close quit exit window behaviour' },
 	{ id: 'connect-tidal', category: 'sources', label: 'Connect TIDAL', keywords: 'tidal login auth sync library auto-sync streaming' },
 	{ id: 'musicbrainz-enrichment', category: 'sources', label: 'MusicBrainz enrichment', keywords: 'musicbrainz genre metadata enrich tags' },
-	{ id: 'spotify-tags', category: 'sources', label: 'Spotify tags', keywords: 'spotify genre metadata enrich' },
 	{ id: 'last-fm-tags', category: 'sources', label: 'Last.fm tags', keywords: 'lastfm last.fm scrobble tags api key listenbrainz' },
 	{ id: 'playback-output', category: 'audio', label: 'Playback output', keywords: 'quality device bit-perfect exclusive wasapi sample rate follow latency crossfade lossless output dac' },
 	{ id: 'portable-snapshot', category: 'sources', label: 'Portable snapshot', keywords: 'export import backup snapshot transfer enrichment' },
@@ -33,9 +32,7 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
 	{ id: 'discovery-engine', category: 'audio', label: 'Discovery engine', keywords: 'discovery training learning radio intensity safety engine model' },
 	{ id: 'radio-similarity-index', category: 'audio', label: 'Radio similarity index', keywords: 'radio similarity neighbours index coverage' },
 	{ id: 'now-playing-path', category: 'audio', label: 'Now playing path', keywords: 'runtime device format now playing output path' },
-	{ id: 'additional-services', category: 'sources', label: 'Additional services', keywords: 'planned services future sources soundcloud youtube' },
 	{ id: 'library-audio-data', category: 'audio', label: 'Library audio data', keywords: 'analysis bpm key energy dsp passive audio data' },
-	{ id: 'acrcloud', category: 'sources', label: 'ACRCloud', keywords: 'acrcloud recognition fingerprint sample cover detection' },
 ];
 
 /**

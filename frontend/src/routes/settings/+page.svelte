@@ -42,13 +42,6 @@
 		setPassiveDspEnabled,
 		syncAnalysisStatus
 	} from '$lib/stores/audio_analysis';
-	import {
-		acrCloud,
-		loadAcrCloudStatus,
-		configureAcrCloud,
-		deleteAcrCloudConfig,
-		startAcrCloudScan
-	} from '$lib/stores/acrcloud';
 	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
@@ -145,18 +138,6 @@
 	// Set on unmount so the build poll loop can't outlive the component.
 	let componentUnmounted = false;
 
-	let spotifyConfigured = $state(false);
-	let spotifyClientId = $state('');
-	let spotifyClientSecret = $state('');
-	let spotifySaving = $state(false);
-	let spotifyError = $state('');
-	let spotifyEnrichedCount = $state(0);
-	let spotifyRemaining = $state(0);
-	let spotifyIsRunning = $state(false);
-	let spotifyRunTotal = $state(0);
-	let spotifyRunProcessed = $state(0);
-	const SPOTIFY_BATCH_SIZE = 2000;
-
 	let lastfmConfigured = $state(false);
 	let lastfmApiKey = $state('');
 	let lastfmSaving = $state(false);
@@ -204,15 +185,6 @@
 			tokenCopied = true;
 			setTimeout(() => (tokenCopied = false), 2000);
 		});
-	}
-
-	// ACRCloud form state
-	let acrKey = $state('');
-	let acrSecret = $state('');
-	let acrRegion = $state('eu-west-1');
-
-	async function connectAcrCloud() {
-		await configureAcrCloud(acrKey, acrSecret, acrRegion);
 	}
 
 	async function refreshGalaxy() {
@@ -472,7 +444,6 @@
 				void loadDiscoveryStatus();
 				void loadDiscoveryEngine();
 				void loadDiscoverySafetyProfile();
-				void loadSpotifyStatus();
 				void loadLastfmStatus();
 			}
 
@@ -482,16 +453,11 @@
 				void loadMbStatus();
 			}
 
-			if (latest.type === 'sync_progress' && latest.service === 'spotify') {
-				void loadSpotifyStatus();
-			}
-
 			if (latest.type === 'sync_progress' && latest.service === 'lastfm') {
 				void loadLastfmStatus();
 			}
 
-			if (latest.type === 'musicbrainz_enriched' && (spotifyIsRunning || lastfmIsRunning)) {
-				void loadSpotifyStatus();
+			if (latest.type === 'musicbrainz_enriched' && lastfmIsRunning) {
 				void loadLastfmStatus();
 			}
 
@@ -723,100 +689,6 @@
 			}
 			markServerOnline();
 			errorMsg = `Failed to disconnect: ${error}`;
-		}
-	}
-
-	async function loadSpotifyStatus() {
-		const [configResp, enrichResp] = await Promise.allSettled([
-			authFetch(`${getApiBase()}/api/spotify/status`),
-			authFetch(`${getApiBase()}/api/library/enrich/spotify/status`)
-		]);
-		if (configResp.status === 'fulfilled') {
-			markServerOnline();
-			const data = await configResp.value.json();
-			spotifyConfigured = data.configured === true;
-		} else if (isFetchConnectionError(configResp.reason)) {
-			markServerOffline();
-		}
-
-		if (enrichResp.status === 'fulfilled') {
-			const data2 = await enrichResp.value.json();
-			spotifyEnrichedCount = data2.enriched_tracks ?? 0;
-			spotifyRemaining = data2.remaining_tracks ?? 0;
-			spotifyIsRunning = data2.is_running === true;
-			spotifyRunTotal = data2.run_total ?? 0;
-			spotifyRunProcessed = data2.run_processed ?? 0;
-		}
-	}
-
-	async function saveSpotifyConfig() {
-		spotifySaving = true;
-		spotifyError = '';
-		try {
-			const resp = await authFetch(`${getApiBase()}/api/spotify/config`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					client_id: spotifyClientId,
-					client_secret: spotifyClientSecret
-				})
-			});
-			markServerOnline();
-			const data = await resp.json();
-			if (data.status === 'ok') {
-				spotifyConfigured = true;
-				spotifyClientId = '';
-				spotifyClientSecret = '';
-			} else {
-				spotifyError = data.message ?? 'Failed to save Spotify credentials.';
-			}
-		} catch (e) {
-			spotifyError = e instanceof Error ? e.message : String(e);
-			if (isFetchConnectionError(e)) markServerOffline();
-		} finally {
-			spotifySaving = false;
-		}
-	}
-
-	async function clearSpotifyConfig() {
-		try {
-			await authFetch(`${getApiBase()}/api/spotify/config`, { method: 'DELETE' });
-			markServerOnline();
-		} catch {}
-		spotifyConfigured = false;
-		spotifyError = '';
-	}
-
-	async function startSpotifyEnrichment() {
-		spotifyError = '';
-		try {
-			const resp = await authFetch(`${getApiBase()}/api/library/enrich/spotify`, { method: 'POST' });
-			markServerOnline();
-			const data = await resp.json();
-			if (data.status === 'error') {
-				spotifyError = data.message ?? 'Spotify enrichment failed.';
-			}
-			await loadSpotifyStatus();
-		} catch (e) {
-			spotifyError = e instanceof Error ? e.message : String(e);
-			if (isFetchConnectionError(e)) markServerOffline();
-		}
-	}
-
-	async function resetSpotifyEnrichment() {
-		if (!confirm('Clear all Spotify check markers and tags? Tracks will be re-queried on the next run.')) return;
-		spotifyError = '';
-		try {
-			const resp = await authFetch(`${getApiBase()}/api/library/enrich/spotify/reset`, { method: 'POST' });
-			markServerOnline();
-			const data = await resp.json();
-			if (data.status === 'error') {
-				spotifyError = data.message ?? 'Reset failed.';
-			}
-			await loadSpotifyStatus();
-		} catch (e) {
-			spotifyError = e instanceof Error ? e.message : String(e);
-			if (isFetchConnectionError(e)) markServerOffline();
 		}
 	}
 
@@ -1561,9 +1433,7 @@
 			void loadMbStatus();
 			void loadPortableSnapshot();
 			void loadRadioSimilarityStatus();
-			void loadSpotifyStatus();
 			void loadLastfmStatus();
-			void loadAcrCloudStatus();
 			return;
 		}
 		if (activeCategory === 'audio') {
@@ -1575,7 +1445,6 @@
 			return;
 		}
 		if (activeCategory === 'account') {
-			void loadSpotifyStatus();
 			void loadLastfmStatus();
 		}
 	}
@@ -1632,8 +1501,6 @@
 			}, 1800),
 			scheduleSettingsIdleTask(() => {
 				if (settingsBackgroundLoadCancelled) return;
-				void loadAcrCloudStatus();
-				void loadSpotifyStatus();
 				void loadLastfmStatus();
 			}, 2800),
 		];
@@ -2378,13 +2245,6 @@
 				{#if galaxyRefreshLabel}
 					<p class="galaxy-refresh-label">{galaxyRefreshLabel}</p>
 				{/if}
-			</section>
-
-			<section data-setting-id="spotify-tags" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Metadata" title="Spotify tags" subtitle="Unavailable: Premium-only API access." />
-				<p class="page-copy">
-					The integration code is still in place — if you ever subscribe to Spotify Premium, the existing app credentials should start working again and this panel will reactivate. For now, use Last.fm below as the second genre source.
-				</p>
 			</section>
 
 			<section data-setting-id="last-fm-tags" class="glass-panel section-panel">
@@ -3190,22 +3050,6 @@
 			</section>
 			{/if}
 
-			{#if activeCategory === 'sources'}
-			<section data-setting-id="additional-services" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Later" title="Additional services" subtitle="Planned source coverage." />
-				<div class="roadmap-list">
-					<div class="roadmap-item">
-						<h4>YouTube Music</h4>
-						<p>Library sync and metadata, without playback.</p>
-					</div>
-					<div class="roadmap-item">
-						<h4>SoundCloud</h4>
-						<p>Experimental discovery support and lighter-weight source coverage.</p>
-					</div>
-				</div>
-			</section>
-			{/if}
-
 			{#if activeCategory === 'audio'}
 			<section data-setting-id="library-audio-data" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Analysis" title="Library audio data" subtitle="Passive BPM, key, and energy capture." />
@@ -3256,43 +3100,6 @@
 			</section>
 			{/if}
 
-			{#if activeCategory === 'sources'}
-			<section data-setting-id="acrcloud" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Recognition" title="ACRCloud" subtitle="Sample and cover detection." />
-
-				{#if !$acrCloud.connected}
-					<p class="page-copy">Connect ACRCloud to identify samples in your library.</p>
-					<div class="form-row">
-						<input type="text" placeholder="Access Key" bind:value={acrKey} />
-						<input type="password" placeholder="Access Secret" bind:value={acrSecret} />
-						<select bind:value={acrRegion}>
-							<option value="eu-west-1">EU (Ireland)</option>
-							<option value="us-east-1">US (Virginia)</option>
-						</select>
-						<button class="btn btn-primary" onclick={connectAcrCloud}>Connect</button>
-					</div>
-				{:else}
-					<div class="status-row">
-						<StateBadge label="Connected" tone="success" />
-						<span class="acrcloud-daily-count">{$acrCloud.scanned_today.toLocaleString()} / {$acrCloud.daily_limit.toLocaleString()} requests today</span>
-					</div>
-					{#if $acrCloud.isScanning}
-						<div class="progress-bar">
-							<div class="progress-fill" style="width: {($acrCloud.total > 0 ? $acrCloud.scanned / $acrCloud.total : 0) * 100}%"></div>
-						</div>
-						<p class="analysis-progress-label">
-							Scanning... {$acrCloud.scanned.toLocaleString()} / {$acrCloud.total.toLocaleString()} ({$acrCloud.matches_found} matches)
-						</p>
-					{/if}
-					<div class="action-row">
-						<button class="btn btn-primary" onclick={() => void startAcrCloudScan()} disabled={$acrCloud.isScanning}>
-							{$acrCloud.isScanning ? 'Scanning…' : 'Scan Library'}
-						</button>
-						<button class="btn btn-glass danger" onclick={() => void deleteAcrCloudConfig()}>Disconnect</button>
-					</div>
-				{/if}
-			</section>
-			{/if}
 		</div>
 	</section>
 </div>
@@ -4654,11 +4461,6 @@
 		word-break: break-all;
 	}
 
-	.roadmap-list {
-		display: grid;
-		gap: 12px;
-	}
-
 	.runtime-error {
 		color: var(--state-error);
 	}
@@ -4667,18 +4469,6 @@
 		margin: 4px 0 0;
 		font-size: var(--font-size-sm);
 		color: var(--signal-text);
-	}
-
-	.roadmap-item {
-		padding: 14px;
-		border-radius: var(--radius-sm);
-		background: rgba(255, 255, 255, 0.03);
-		border: 1px solid var(--border-subtle);
-	}
-
-	.roadmap-item p {
-		color: var(--text-secondary);
-		margin-top: 6px;
 	}
 
 	@media (max-width: 960px) {
@@ -4754,29 +4544,6 @@
 	}
 
 
-	/* Audio analysis progress bar */
-	.progress-bar {
-		position: relative;
-		height: 10px;
-		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.08);
-		border: 1px solid var(--panel-border);
-		overflow: hidden;
-	}
-
-	.progress-fill {
-		height: 100%;
-		border-radius: inherit;
-		background: linear-gradient(90deg, rgba(151, 126, 255, 0.85), rgba(120, 160, 255, 0.72));
-		transition: width 200ms ease;
-	}
-
-	.analysis-progress-label {
-		font-size: var(--font-size-sm);
-		color: var(--text-secondary);
-		margin: 6px 0 0;
-	}
-
 	.analysis-note {
 		font-size: var(--font-size-sm);
 		color: var(--text-secondary);
@@ -4835,32 +4602,6 @@
 
 	.setting-row input {
 		width: 80px;
-	}
-
-	/* ACRCloud form row */
-	.form-row {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-2);
-		align-items: center;
-	}
-
-	.form-row input,
-	.form-row select {
-		flex: 1;
-		min-width: 140px;
-	}
-
-	/* ACRCloud status row */
-	.status-row {
-		display: flex;
-		align-items: center;
-		gap: var(--space-3);
-	}
-
-	.acrcloud-daily-count {
-		font-size: var(--font-size-sm);
-		color: var(--text-secondary);
 	}
 
 	.token-row {

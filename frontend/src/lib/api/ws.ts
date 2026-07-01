@@ -4,7 +4,6 @@ import { refreshPlaybackState, refreshPlaybackRuntime } from '$lib/stores/player
 import { handleSyncProgress, handleSyncComplete, handleSyncFailed, loadTidalStatus } from '$lib/stores/tidal';
 import { handleTrainingProgress, handleTrainingComplete } from '$lib/stores/training';
 import { handleAnalysisProgress, handleAnalysisComplete } from '$lib/stores/audio_analysis';
-import { handleAcrCloudProgress, handleAcrCloudComplete } from '$lib/stores/acrcloud';
 import { handleDiscoverySpaceRefreshed, setRefreshProgress } from '$lib/components/DiscoverSpace/discover_space_store';
 import { setExclusiveEngaged, setExclusiveFailed, setExclusiveReleased } from '$lib/stores/exclusive_status';
 import { handleDownloadProgress, handleDownloadItemDone, handleDownloadComplete } from '$lib/stores/downloads';
@@ -29,8 +28,6 @@ export type WsMessage =
 	| { type: 'audio_analysis_progress'; analyzed: number; total: number; mode: string }
 	| { type: 'audio_analysis_complete'; analyzed: number }
 	| { type: 'track_analyzed'; track_id: number }
-	| { type: 'acrcloud_scan_progress'; scanned: number; total: number; matches_found: number }
-	| { type: 'acrcloud_scan_complete'; scanned: number; matches_found: number }
 	| { type: 'discovery_space_refresh_progress'; seed_track_id: number; stage: string; progress: number }
 	| { type: 'discovery_space_refreshed'; seed_track_id: number }
 	| { type: 'audio_exclusive_engaged'; device: string; transport_format: string }
@@ -127,12 +124,6 @@ export function connectWebSocket() {
 						detail: { trackId: data.track_id }
 					})
 				);
-			}
-			if (data?.type === 'acrcloud_scan_progress') {
-				handleAcrCloudProgress(data);
-			}
-			if (data?.type === 'acrcloud_scan_complete') {
-				handleAcrCloudComplete(data);
 			}
 			if (data?.type === 'discovery_space_refresh_progress') {
 				setRefreshProgress(data.seed_track_id, data.stage, data.progress);

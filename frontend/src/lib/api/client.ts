@@ -2123,19 +2123,6 @@ export interface GenreAudioMetrics {
 	analyzed_count: number;
 }
 
-export interface AcrCloudStatus {
-	connected: boolean;
-	scanned_today: number;
-	daily_limit: number;
-}
-
-export interface AcrCloudScanStatus {
-	running: boolean;
-	scanned: number;
-	total: number;
-	matches_found: number;
-}
-
 export type AudioQuality = 'LOW' | 'HIGH' | 'LOSSLESS' | 'HI_RES_LOSSLESS';
 export type VideoQualityMode = 'MAX' | 'AUTO';
 export type ExclusiveLatencyMode = 'STABLE' | 'LOW_LATENCY' | 'ULTRA_LOW_LATENCY';
@@ -3733,31 +3720,6 @@ export const api = {
 
 	getGenreAudioMetrics() {
 		return fetchApi<{ metrics: GenreAudioMetrics[] }>('/api/genres/audio-metrics');
-	},
-
-	// ─── ACRCloud ─────────────────────────────────────────────────────
-
-	getAcrCloudStatus() {
-		return fetchApi<AcrCloudStatus>('/api/acrcloud/status');
-	},
-
-	configureAcrCloud(accessKey: string, accessSecret: string, region: string) {
-		return fetchApi<{ status: string }>('/api/acrcloud/configure', undefined, {
-			method: 'POST',
-			body: JSON.stringify({ access_key: accessKey, access_secret: accessSecret, region }),
-		});
-	},
-
-	deleteAcrCloudConfig() {
-		return fetchApi<{ status: string }>('/api/acrcloud/configure', undefined, {
-			method: 'DELETE',
-		});
-	},
-
-	startAcrCloudScan() {
-		return fetchApi<{ status: string }>('/api/library/acrcloud/scan', undefined, {
-			method: 'POST',
-		});
 	},
 
 	searchTidal(
