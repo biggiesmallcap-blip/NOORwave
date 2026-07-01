@@ -10,6 +10,20 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### feat: fold library/external "Play next" into a live mix too
+
+Play-next / add-to-queue during an ephemeral TIDAL mix now works for TIDAL picks:
+they're inserted as ephemeral continuation rows (`EPHEMERAL_USER_TIDAL_SOURCE` in
+`queue.rs`) so the mix-advance pipeline plays and pops them. A *library* or
+*external* pick (no streamable `tidal_id`) during a mix still takes the old
+`user_play_next`/`user_queue` persisted-row path, which the ephemeral consumer
+skips, so it only plays after the whole continuation drains and lingers in the
+queue. Real fix is the cross-model case: interrupt the ephemeral stream to play a
+library track via the runtime, then resume the mix. Rarer than the TIDAL case
+(the reported bug), so deferred. See `queue_play_next`/`queue_append` in
+`routes.rs` (the `ephemeral_tidal_insert` branch).
+- Spawned by: play-next-during-mix fix, this session.
+
 ### refactor: flatten the duplicated library/TIDAL playback stacks
 
 The library and TIDAL playback paths are mirrored end to end (~30 `play*` /
@@ -38,12 +52,13 @@ Remaining (stage it; do NOT big-bang, the pair is pinned by ~40 call sites and
   playable to slice correctly).
 - Verbs: introduce a `Playable` union + ~6 core verbs; shim the ~30 exports, then
   delete as call sites migrate.
-- Backend bug-2 residue: ephemeral tracks serialize without
-  `artist_tidal_id`/`album_tidal_id` (`Track` in `db/models.rs` lacks the fields).
-  Frontend cache covers user-played tracks; server-resolved radio tracks still
-  lose links after reload. Proper fix (add 2 fields to `Track`: ~25 sites + queue
-  migration + request plumbing + rebuild) is best folded into the verb/row
-  unification, not bolted on.
+- Backend bug-2 residue: FIXED. `Track` now carries `artist_tidal_id` /
+  `album_tidal_id` (migration 053 adds the columns to ephemeral queue rows; the
+  ids thread through mix/playlist/album/search build -> queue row -> synthetic
+  now-playing track and Up Next). Server-queued TIDAL tracks keep clickable
+  artist/album links without relying on the frontend cache. Library-track-played-
+  via-mix links to the TIDAL artist/album page rather than the local one (ephemeral
+  rows don't join local artist_id/album_id) - acceptable, links work.
 - Spawned by: now-playing bug diagnosis (album-click + links + mojibake), this session.
 
 ### feat: optional album-preview popup for recommendation/chart murals

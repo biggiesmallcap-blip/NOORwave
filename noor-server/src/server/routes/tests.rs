@@ -24,6 +24,8 @@ fn test_track(id: i64, title: &str) -> crate::db::models::Track {
         duration_ms: Some(180_000),
         isrc: None,
         tidal_id: Some(id),
+        artist_tidal_id: None,
+        album_tidal_id: None,
         ytmusic_id: None,
         soundcloud_id: None,
         best_quality: Some("LOSSLESS".to_string()),
@@ -711,6 +713,8 @@ fn ephemeral_synthetic_track_keeps_resolved_stream_quality() {
         title: "Resolved Track".to_string(),
         artist_name: Some("Artist".to_string()),
         album_title: Some("Album".to_string()),
+        artist_tidal_id: None,
+        album_tidal_id: None,
         artwork_url: None,
         duration_ms: Some(180_000),
     };
@@ -1485,6 +1489,8 @@ async fn dj_lookahead_pairs_ephemeral_current_with_persisted_queue() {
         duration_ms: Some(180_000),
         isrc: None,
         tidal_id: Some(88001),
+        artist_tidal_id: None,
+        album_tidal_id: None,
         ytmusic_id: None,
         soundcloud_id: None,
         best_quality: Some("LOSSLESS".to_string()),
@@ -2681,6 +2687,8 @@ fn tidal_play_mix_shuffle_returns_debug_and_preserves_tracks() {
             album_title: None,
             artwork_url: None,
             duration_ms: Some(180_000),
+            artist_tidal_id: None,
+            album_tidal_id: None,
         },
         PlayTidalRequest {
             tidal_track_id: 102,
@@ -2689,6 +2697,8 @@ fn tidal_play_mix_shuffle_returns_debug_and_preserves_tracks() {
             album_title: None,
             artwork_url: None,
             duration_ms: Some(181_000),
+            artist_tidal_id: None,
+            album_tidal_id: None,
         },
         PlayTidalRequest {
             tidal_track_id: 103,
@@ -2697,6 +2707,8 @@ fn tidal_play_mix_shuffle_returns_debug_and_preserves_tracks() {
             album_title: None,
             artwork_url: None,
             duration_ms: Some(182_000),
+            artist_tidal_id: None,
+            album_tidal_id: None,
         },
     ];
 
@@ -3242,6 +3254,8 @@ fn insert_ephemeral_rows(
                 album_title: *album,
                 artwork_url: *art,
                 duration_ms: *dur,
+                artist_tidal_id: None,
+                album_tidal_id: None,
             },
         )
         .collect();
@@ -3300,6 +3314,8 @@ async fn ephemeral_tidal_rows_appear_in_queue_in_order() {
             duration_ms: Some(220_000),
             isrc: None,
             tidal_id: Some(158_296_914),
+            artist_tidal_id: None,
+            album_tidal_id: None,
             ytmusic_id: None,
             soundcloud_id: None,
             best_quality: Some("LOSSLESS".to_string()),
@@ -3616,6 +3632,8 @@ async fn direct_tidal_finish_advances_persisted_queue_and_switches_runtime() {
         duration_ms: Some(180_000),
         isrc: None,
         tidal_id: Some(441),
+        artist_tidal_id: None,
+        album_tidal_id: None,
         ytmusic_id: None,
         soundcloud_id: None,
         best_quality: Some("LOSSLESS".to_string()),
@@ -4625,6 +4643,67 @@ async fn queue_play_next_tidal_inserts_pending_row_after_current_with_hint() {
         })
         .unwrap();
     assert_eq!(shifted_pos, 2);
+}
+
+#[tokio::test]
+async fn queue_play_next_during_mix_folds_into_ephemeral_continuation() {
+    let db = fresh_migrated_db();
+    // A live mix continuation: ephemeral rows the advance pipeline owns. There is
+    // no persisted/library anchor, matching a real mix where the live track has no
+    // queue row.
+    db.with_conn(|conn| {
+        for (pos, tidal) in [(0_i32, 5001_i64), (1, 5002)] {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source, tidal_id_hint, pending_title)
+                     VALUES (NULL, ?1, 'tidal_mix', ?2, 'Mix Track')",
+                rusqlite::params![pos, tidal],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+
+    let mut state = fresh_test_state(db.clone());
+    // A live ephemeral track makes the handler treat the queue as a mix.
+    state.ephemeral_tidal_track = Some(test_track(9001, "Live Mix Track"));
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(state)));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/queue/play_next")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"kind":"tidal","tidal_id":777,"artist":"Picked Artist","title":"Picked Title","album_title":"Picked Album","duration_ms":210000}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    // The pick lands at the front as a directly-playable ephemeral row (not a
+    // pending spinner), ahead of the mix.
+    let queue = body["queue"].as_array().unwrap();
+    assert_eq!(queue.len(), 3);
+    assert_eq!(queue[0]["track"]["tidal_id"], 777);
+    assert_eq!(queue[0]["track"]["album_title"], "Picked Album");
+    assert_eq!(queue[0]["is_pending"], false);
+
+    // Regression: a user_play_next row would be skipped by the mix-advance
+    // consumer and never play. As an ephemeral row, it pops first.
+    let next = db
+        .with_conn(crate::playback::queue::pop_next_ephemeral_tidal_track)
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.tidal_track_id, 777);
 }
 
 #[tokio::test]

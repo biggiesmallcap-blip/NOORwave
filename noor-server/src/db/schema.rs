@@ -54,6 +54,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_050,
     MIGRATION_051,
     MIGRATION_052,
+    MIGRATION_053,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1509,6 +1510,16 @@ UPDATE tracks SET is_library = 0
    );
 
 CREATE INDEX IF NOT EXISTS idx_tracks_is_library ON tracks(is_library);
+"#;
+
+// Carry the TIDAL artist/album ids on ephemeral queue rows so a mix/playlist/album
+// track keeps its clickable artist/album identity through the whole player (now
+// playing + Up Next), independent of the frontend metadata cache. Nullable: only
+// ephemeral TIDAL rows populate them; library/pending rows leave them NULL and
+// link via their local ids instead.
+const MIGRATION_053: &str = r#"
+ALTER TABLE queue ADD COLUMN ephemeral_artist_tidal_id INTEGER;
+ALTER TABLE queue ADD COLUMN ephemeral_album_tidal_id INTEGER;
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

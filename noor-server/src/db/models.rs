@@ -43,6 +43,14 @@ pub struct Track {
     pub duration_ms: Option<i64>,
     pub isrc: Option<String>,
     pub tidal_id: Option<i64>,
+    // TIDAL identity for the artist/album, so a non-library TIDAL track (mix,
+    // playlist, radio, search) keeps clickable artist/album links + menus through
+    // the whole player. Library tracks leave these None and resolve via
+    // artist_id/album_id. `#[serde(default)]` so older payloads still deserialize.
+    #[serde(default)]
+    pub artist_tidal_id: Option<i64>,
+    #[serde(default)]
+    pub album_tidal_id: Option<i64>,
     pub ytmusic_id: Option<String>,
     pub soundcloud_id: Option<i64>,
     pub best_quality: Option<String>,
