@@ -10,9 +10,12 @@ export const WALLPAPER_FPS_DEFAULT = 60;
 export const WALLPAPER_BLUR_MIN = 0;
 export const WALLPAPER_BLUR_MAX = 18;
 export const WALLPAPER_BLUR_DEFAULT = 7;
-const VALID: WallpaperId[] = ['none', 'aurora', 'chrome', 'grid', 'nebula', 'topo',
+// Exported so a contract test can assert it stays in sync with WALLPAPERS: any id in
+// WALLPAPERS that is missing here would silently reset the user's saved wallpaper.
+export const VALID: WallpaperId[] = ['none', 'aurora', 'chrome', 'grid', 'nebula', 'topo',
                                'topo-noir', 'aurora-deep', 'chrome-brushed',
                                'zen', 'galaxy',
+                               'blackhole', 'kifs', 'voronoi-glass', 'curl-flow', 'raymarch-lattice',
                                'joy-division', 'oscilloscope', 'spectrum', 'vinyl', 'tape',
                                'phasing', 'spectrogram', 'lissajous', 'drone', 'reel',
                                'standing-wave',

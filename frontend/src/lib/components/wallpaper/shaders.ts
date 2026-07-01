@@ -1471,9 +1471,258 @@ export const SHADER_PATTERN_VECTOR = patternShader(/* glsl */ `
   a = (1.0 - smoothstep(0.0, 0.025, r)) * 0.9;
 `);
 
+// ─── Signature 1.0 shaders ───────────────────────────────────────────────────
+// Five new looks distinct from everything above: a cinematic black hole, a
+// kaleidoscopic fractal, refractive stained glass, curl-noise silk, and the
+// first true-3D raymarched shader in the set. All palette-driven and interactive.
+
+export const SHADER_BLACKHOLE = /* glsl */ `
+#define PI 3.14159265
+float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
+float noise(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  float a = hash(i), b = hash(i + vec2(1.,0.));
+  float c = hash(i + vec2(0.,1.)), d = hash(i + vec2(1.,1.));
+  vec2 u = f*f*(3.-2.*f);
+  return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
+}
+float fbm(vec2 p){ float v=0., a=0.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.02; a*=0.5; } return v; }
+
+void main(){
+  vec2 p = (gl_FragCoord.xy - 0.5*u_resolution.xy) / u_resolution.y;
+  vec2 m = (u_mouse*u_resolution.xy - 0.5*u_resolution.xy) / u_resolution.y;
+
+  // Cursor nudges the whole system so the hole feels draggable without leaving frame.
+  vec2 c = m * 0.35;
+  vec2 q = p - c;
+  float r = length(q);
+
+  // Light bending: pull the sample toward the hole, strongest near the ring.
+  float bend = 0.06 / (r + 0.04);
+  vec2 sq = q - normalize(q + 1e-5) * bend * 0.05;
+  float sa = atan(sq.y, sq.x);
+
+  // Accretion disk seen edge-on, so squash it vertically. Swirls and rotates.
+  float diskR = length(vec2(sq.x, sq.y * 3.2));
+  float swirl = fbm(vec2(sa*2.0 + u_time*0.4, diskR*6.0 - u_time*0.6));
+  float disk = smoothstep(0.42, 0.18, diskR) * smoothstep(0.12, 0.18, diskR);
+  disk *= 0.6 + 0.8*swirl;
+  disk *= 1.0 + 0.9*cos(sa);              // relativistic beaming: one side brighter
+
+  float ring = exp(-pow((r - 0.12)*26.0, 2.0));   // photon ring
+  float shadow = smoothstep(0.115, 0.10, r);       // event-horizon silhouette
+
+  for(int i=0;i<8;i++){
+    if(i>=u_clickCount) break;
+    vec3 cl = u_clicks[i];
+    vec2 cp = (cl.xy*u_resolution.xy - 0.5*u_resolution.xy) / u_resolution.y - c;
+    float d = distance(q, cp);
+    disk += exp(-pow((d - cl.z*0.5)*7.0, 2.0)) * exp(-cl.z*0.8) * 1.5;
+  }
+
+  vec3 hot = mix(u_color2, u_color3, 0.6);
+  vec3 col = vec3(0.003, 0.004, 0.01);
+  col += hot * disk * 1.4;
+  col += mix(u_color3, vec3(1.0), 0.5) * ring * (1.2 + u_mouseDown*1.5);
+  col *= 1.0 - shadow;
+  col += hot * exp(-r*6.0) * 0.15;       // soft bloom toward the ring
+
+  col += (hash(gl_FragCoord.xy + u_time) - 0.5) * 0.02;
+  col *= 1.0 - dot(p, p) * 0.35;
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+export const SHADER_KIFS = /* glsl */ `
+#define PI 3.14159265
+mat2 rot(float a){ float c=cos(a), s=sin(a); return mat2(c,-s,s,c); }
+
+void main(){
+  vec2 uv = gl_FragCoord.xy / u_resolution.xy;
+  vec2 p = (gl_FragCoord.xy - 0.5*u_resolution.xy) / u_resolution.y;
+  vec2 m = (u_mouse*u_resolution.xy - 0.5*u_resolution.xy) / u_resolution.y;
+  p *= 1.4;
+
+  // Kaleidoscopic IFS: fold, rotate, scale a fixed number of times. The cursor
+  // rotates the fold plane so the whole jewel reorganizes as you move.
+  float trap = 1e9;
+  float scale = 1.0;
+  mat2 R = rot(u_time*0.08 + m.x*0.6);
+  vec2 off = vec2(0.9, 0.6) + m*0.3;
+  for(int i=0;i<10;i++){
+    p = abs(p);
+    p = R * p;
+    p = p*1.35 - off;
+    scale *= 1.35;
+    trap = min(trap, length(p - vec2(0.2)));
+  }
+
+  float d = trap / scale;                 // scale-corrected orbit trap
+  float shade = exp(-d*6.0);
+  float bands = 0.5 + 0.5*sin(log(d + 0.001)*3.0 - u_time*0.5);
+
+  vec3 col = mix(u_color1, u_color2, shade);
+  col = mix(col, u_color3, bands*shade);
+  col += u_color4 * pow(shade, 4.0) * (0.5 + u_mouseDown);
+
+  for(int i=0;i<8;i++){
+    if(i>=u_clickCount) break;
+    vec3 cl = u_clicks[i];
+    vec2 cp = (cl.xy*u_resolution.xy - 0.5*u_resolution.xy) / u_resolution.y;
+    float dd = distance((gl_FragCoord.xy - 0.5*u_resolution.xy)/u_resolution.y, cp);
+    col += u_color3 * exp(-dd*8.0) * exp(-cl.z*1.5);
+  }
+
+  col *= 1.0 - dot(uv - 0.5, uv - 0.5) * 0.5;
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+export const SHADER_VORONOI_GLASS = /* glsl */ `
+float h21(vec2 p){ p = fract(p*vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x*p.y); }
+vec2 h22(vec2 p){ return vec2(h21(p), h21(p + 17.3)); }
+
+void main(){
+  vec2 uv = gl_FragCoord.xy / u_resolution.xy;
+  vec2 p = (gl_FragCoord.xy - 0.5*u_resolution.xy) / min(u_resolution.x, u_resolution.y);
+  vec2 mm = u_mouse - 0.5; mm.x *= u_resolution.x / u_resolution.y;
+
+  vec2 g = p * 5.0;
+  vec2 ip = floor(g), fp = fract(g);
+  float f1 = 1e9, f2 = 1e9;
+  vec2 id1 = vec2(0.0);
+  for(int j=-1;j<=1;j++){
+    for(int i=-1;i<=1;i++){
+      vec2 o = vec2(float(i), float(j));
+      vec2 cen = o + 0.5 + 0.4*sin(u_time*0.3 + 6.2831*h22(ip + o));
+      float d = length(cen - fp);
+      if(d < f1){ f2 = f1; f1 = d; id1 = ip + o; }
+      else if(d < f2){ f2 = d; }
+    }
+  }
+
+  float lead = smoothstep(0.06, 0.0, f2 - f1);   // bright leading between panes
+  float bevel = smoothstep(0.0, 0.5, f1);         // fake glass thickness -> specular
+
+  float sel = h21(id1);
+  vec3 glass = mix(u_color1, u_color2, sel);
+  glass = mix(glass, u_color3, smoothstep(0.6, 1.0, sel));
+  glass = mix(glass, u_color4, smoothstep(0.85, 1.0, h21(id1 + 3.1)));
+  glass *= 0.55 + 0.7*bevel;
+
+  vec3 col = mix(glass, vec3(0.02, 0.02, 0.03), lead);   // dark leading came
+  col += lead * mix(u_color3, vec3(1.0), 0.5) * 0.15;     // sheen on the came
+  col += exp(-distance(p, mm)*3.0) * (0.2 + u_mouseDown*0.8) * mix(u_color3, vec3(1.0), 0.4) * 0.3;
+
+  col *= 1.0 - dot(uv - 0.5, uv - 0.5) * 0.5;
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+export const SHADER_CURL_FLOW = /* glsl */ `
+float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
+float noise(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  float a = hash(i), b = hash(i + vec2(1.,0.));
+  float c = hash(i + vec2(0.,1.)), d = hash(i + vec2(1.,1.));
+  vec2 u = f*f*(3.-2.*f);
+  return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
+}
+float fbm(vec2 p){ float v=0., a=0.5; for(int i=0;i<4;i++){ v+=a*noise(p); p*=2.0; a*=0.5; } return v; }
+vec2 curl(vec2 p){
+  float e = 0.01;
+  float x = fbm(p + vec2(0.0, e)) - fbm(p - vec2(0.0, e));
+  float y = fbm(p + vec2(e, 0.0)) - fbm(p - vec2(e, 0.0));
+  return vec2(x, -y) / (2.0*e);
+}
+
+void main(){
+  vec2 uv = gl_FragCoord.xy / u_resolution.xy;
+  vec2 p = uv; p.x *= u_resolution.x / u_resolution.y;
+  vec2 m = u_mouse; m.x *= u_resolution.x / u_resolution.y;
+
+  // Advect the sample along the curl of an fbm field to draw silky streaks.
+  vec2 pos = p;
+  float phase = 0.0;
+  for(int i=0;i<6;i++){
+    vec2 v = curl(pos*1.5 + u_time*0.05);
+    vec2 tm = pos - m;                      // cursor injects a vortex
+    v += vec2(-tm.y, tm.x) * (0.15 / (dot(tm, tm) + 0.05)) * (0.5 + u_mouseDown);
+    pos += v * 0.03;
+    phase += length(v);
+  }
+
+  float silk = pow(0.5 + 0.5*sin(phase*3.0 + pos.x*8.0 - u_time*0.6), 1.5);
+  float speed = clamp(phase*0.15, 0.0, 1.0);
+
+  vec3 col = mix(u_color1, u_color2, silk);
+  col = mix(col, u_color3, speed*0.7);
+  col += u_color4 * pow(silk, 4.0) * 0.4;
+  col += exp(-distance(p, m)*5.0) * (0.15 + u_mouseDown*0.7) * mix(u_color3, vec3(1.0), 0.4) * 0.4;
+
+  col *= 1.0 - dot(uv - 0.5, uv - 0.5) * 0.4;
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+export const SHADER_RAYMARCH_LATTICE = /* glsl */ `
+mat2 rot(float a){ float c=cos(a), s=sin(a); return mat2(c,-s,s,c); }
+float hash21(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
+float map(vec3 p){
+  p *= 2.0;
+  return (abs(dot(sin(p), cos(p.zxy))) - 0.6) * 0.4;   // thin gyroid shell, lipschitz-tamed
+}
+vec3 calcNormal(vec3 p){
+  vec2 e = vec2(0.001, 0.0);
+  return normalize(vec3(
+    map(p + e.xyy) - map(p - e.xyy),
+    map(p + e.yxy) - map(p - e.yxy),
+    map(p + e.yyx) - map(p - e.yyx)));
+}
+
+void main(){
+  vec2 uv = (gl_FragCoord.xy - 0.5*u_resolution.xy) / u_resolution.y;
+  vec2 m = u_mouse - 0.5;
+
+  vec3 ro = vec3(0.0, 0.0, u_time*0.4);      // fly forward through the lattice
+  vec3 rd = normalize(vec3(uv, 1.0));
+  rd.yz = rot(m.y*0.6) * rd.yz;               // cursor tilts the camera
+  rd.xz = rot(-m.x*0.6) * rd.xz;
+
+  float t = 0.0, glow = 0.0, dh = 0.0;
+  bool hit = false;
+  for(int i=0;i<64;i++){
+    float d = map(ro + rd*t);
+    if(d < 0.001){ hit = true; dh = t; break; }
+    glow += 0.02 / (1.0 + d*d*20.0);
+    t += clamp(d, 0.02, 0.3);
+    if(t > 12.0) break;
+  }
+
+  vec3 col = vec3(0.0);
+  if(hit){
+    vec3 pp = ro + rd*dh;
+    vec3 n = calcNormal(pp);
+    float diff = clamp(dot(n, normalize(vec3(0.5, 0.8, -0.4))), 0.0, 1.0);
+    float fres = pow(1.0 - clamp(dot(n, -rd), 0.0, 1.0), 3.0);
+    float fog = exp(-dh*0.18);
+    vec3 base = mix(u_color1, u_color2, diff);
+    base = mix(base, u_color3, fres);
+    col = base*fog + u_color4*fres*fog*0.6;
+  }
+  col += u_color3 * glow * 0.4;                // volumetric glow through the shell
+  col += u_mouseDown * u_color4 * glow * 0.3;
+
+  col += (hash21(gl_FragCoord.xy) - 0.5) * 0.02;
+  col *= 1.0 - dot(uv, uv) * 0.25;
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
 export type WallpaperId = 'none' | 'aurora' | 'chrome' | 'grid' | 'nebula' | 'topo'
                         | 'topo-noir' | 'aurora-deep' | 'chrome-brushed'
                         | 'zen' | 'galaxy'
+                        | 'blackhole' | 'kifs' | 'voronoi-glass' | 'curl-flow' | 'raymarch-lattice'
                         | 'joy-division' | 'oscilloscope' | 'spectrum' | 'vinyl' | 'tape'
                         | 'phasing' | 'spectrogram' | 'lissajous' | 'drone' | 'reel'
                         | 'standing-wave'
@@ -1504,6 +1753,10 @@ export const WALLPAPERS: WallpaperOption[] = [
 	{ id: 'chrome-brushed', label: 'Chrome Brushed', sublabel: 'Brushed metal · chromatic aberration', shader: SHADER_CHROME_BRUSHED },
 	{ id: 'zen',    label: 'Zen Water',     sublabel: 'Calm caustic ripples · cursor stirs the surface',             shader: SHADER_ZEN },
 	{ id: 'galaxy', label: 'Spiral Galaxy', sublabel: 'Logarithmic arms · differential rotation · cursor bends gravity', shader: SHADER_GALAXY },
+	{ id: 'blackhole',      label: 'Event Horizon', sublabel: 'Accretion disk · photon ring · cursor bends the light',      shader: SHADER_BLACKHOLE },
+	{ id: 'kifs',           label: 'Fracture',      sublabel: 'Kaleidoscopic fractal jewel · cursor folds space',           shader: SHADER_KIFS },
+	{ id: 'voronoi-glass',  label: 'Stained Glass', sublabel: 'Refractive glass panes · cursor lights the leading',         shader: SHADER_VORONOI_GLASS },
+	{ id: 'curl-flow',      label: 'Silk',          sublabel: 'Curl-noise flow · cursor stirs a vortex',                     shader: SHADER_CURL_FLOW },
 	{ id: 'pattern-speed',   label: 'Speed',   sublabel: 'Futurist radial force lines',        shader: SHADER_PATTERN_SPEED },
 	{ id: 'pattern-vortex',  label: 'Vortex',  sublabel: 'Rotating logarithmic arms',          shader: SHADER_PATTERN_VORTEX },
 	{ id: 'pattern-shards',  label: 'Shards',  sublabel: 'Cellular fractured shards',          shader: SHADER_PATTERN_SHARDS },
@@ -1530,6 +1783,8 @@ export const WALLPAPERS: WallpaperOption[] = [
 	{ id: 'drone',          label: 'Drone Bands',        sublabel: 'Seven gaussian bands beating against each other',   shader: SHADER_DRONE,          extended: true },
 	{ id: 'reel',           label: 'Reel to Reel',       sublabel: 'Two tape reels · six-spoke hubs · tape path',       shader: SHADER_REEL,           extended: true },
 	{ id: 'standing-wave',  label: 'Standing Wave',      sublabel: 'Two-source interference · drifting source points',  shader: SHADER_STANDING_WAVE,  extended: true },
+	// Raymarched 3D: the heaviest shader in the set, so it lives behind "More".
+	{ id: 'raymarch-lattice', label: 'Lattice',          sublabel: 'Raymarched gyroid fly-through · cursor tilts the camera', shader: SHADER_RAYMARCH_LATTICE, extended: true },
 ];
 
 export function wallpaperById(id: WallpaperId): WallpaperOption {
