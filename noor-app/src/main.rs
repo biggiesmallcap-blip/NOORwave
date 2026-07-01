@@ -15,6 +15,7 @@ mod updater;
 use sidecar::SidecarState;
 use sidecar_paths::SidecarPaths;
 use std::sync::Arc;
+use tauri::Manager;
 
 fn main() {
     let cfg = config::load();
@@ -31,6 +32,8 @@ fn main() {
             commands::check_for_updates_now,
             commands::get_update_state,
             commands::get_install_mode,
+            commands::get_minimize_to_tray,
+            commands::set_minimize_to_tray,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -87,8 +90,18 @@ fn main() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let _ = window.hide();
-                api.prevent_close();
+                // Read the preference fresh each close so a settings change
+                // takes effect without a restart.
+                if config::load().minimize_to_tray {
+                    // Opt-in: keep running in the tray.
+                    let _ = window.hide();
+                    api.prevent_close();
+                } else {
+                    // Default: quit. With a tray icon present the app stays
+                    // alive after the last window closes, so request a full exit
+                    // explicitly. RunEvent::Exit then shuts the sidecar down.
+                    window.app_handle().exit(0);
+                }
             }
         })
         .build(tauri::generate_context!())

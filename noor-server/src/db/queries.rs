@@ -6218,15 +6218,6 @@ pub fn get_all_audio_dsp_features(
     Ok(rows)
 }
 
-/// Track IDs that have at least one ACRCloud sample match.
-pub fn get_track_ids_with_acrcloud_match(conn: &Connection) -> Result<Vec<i64>> {
-    let mut stmt = conn.prepare("SELECT DISTINCT track_id FROM acrcloud_results")?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows)
-}
-
 /// Track IDs that have a stored audio fingerprint.
 pub fn get_track_ids_with_fingerprint(conn: &Connection) -> Result<Vec<i64>> {
     let mut stmt = conn.prepare("SELECT track_id FROM audio_fingerprints")?;

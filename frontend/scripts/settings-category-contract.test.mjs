@@ -9,6 +9,6 @@ describe('settings category contract', () => {
 		expect(source).not.toContain("id: 'discovery'");
 		expect(source).not.toContain("cat.id === 'discovery'");
 		expect(source).not.toContain("activeCategory === 'discovery'");
-		expect(source).toContain("{#if activeCategory === 'audio'}\n\t\t\t<section class=\"glass-panel section-panel\">\n\t\t\t\t<SectionHeader eyebrow=\"Learning\" title=\"Discovery engine\"");
+		expect(source).toContain("{#if activeCategory === 'audio'}\n\t\t\t<section data-setting-id=\"discovery-engine\" class=\"glass-panel section-panel\">\n\t\t\t\t<SectionHeader eyebrow=\"Learning\" title=\"Discovery engine\"");
 	});
 });

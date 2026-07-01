@@ -970,7 +970,7 @@ export type NumberOp = 'eq' | 'gte' | 'lte' | 'gt' | 'lt' | 'between_inclusive';
 export type QualityTier = 'lossy' | 'lossless' | 'hi_res';
 export type DateField = 'date_added' | 'last_played_at';
 
-export type SampleDataSource = 'acrcloud' | 'fingerprint';
+export type SampleDataSource = 'fingerprint';
 
 export type RuleClause =
 	| { type: 'group'; op: LogicOp; clauses: RuleClause[] }
@@ -2123,19 +2123,6 @@ export interface GenreAudioMetrics {
 	analyzed_count: number;
 }
 
-export interface AcrCloudStatus {
-	connected: boolean;
-	scanned_today: number;
-	daily_limit: number;
-}
-
-export interface AcrCloudScanStatus {
-	running: boolean;
-	scanned: number;
-	total: number;
-	matches_found: number;
-}
-
 export type AudioQuality = 'LOW' | 'HIGH' | 'LOSSLESS' | 'HI_RES_LOSSLESS';
 export type VideoQualityMode = 'MAX' | 'AUTO';
 export type ExclusiveLatencyMode = 'STABLE' | 'LOW_LATENCY' | 'ULTRA_LOW_LATENCY';
@@ -2157,6 +2144,8 @@ export interface AudioSettings {
 	exclusive_latency_mode: ExclusiveLatencyMode;
 	/** Seconds of paused state before WASAPI exclusive releases the device. Server clamps 5..=120. */
 	exclusive_release_grace_secs: number;
+	/** When true, an explicit pause frees the exclusive device immediately (re-grabbed on play). */
+	exclusive_release_on_pause: boolean;
 }
 
 async function fetchApiResponse(
@@ -3731,31 +3720,6 @@ export const api = {
 
 	getGenreAudioMetrics() {
 		return fetchApi<{ metrics: GenreAudioMetrics[] }>('/api/genres/audio-metrics');
-	},
-
-	// ─── ACRCloud ─────────────────────────────────────────────────────
-
-	getAcrCloudStatus() {
-		return fetchApi<AcrCloudStatus>('/api/acrcloud/status');
-	},
-
-	configureAcrCloud(accessKey: string, accessSecret: string, region: string) {
-		return fetchApi<{ status: string }>('/api/acrcloud/configure', undefined, {
-			method: 'POST',
-			body: JSON.stringify({ access_key: accessKey, access_secret: accessSecret, region }),
-		});
-	},
-
-	deleteAcrCloudConfig() {
-		return fetchApi<{ status: string }>('/api/acrcloud/configure', undefined, {
-			method: 'DELETE',
-		});
-	},
-
-	startAcrCloudScan() {
-		return fetchApi<{ status: string }>('/api/library/acrcloud/scan', undefined, {
-			method: 'POST',
-		});
 	},
 
 	searchTidal(

@@ -145,7 +145,6 @@ export const cacheKeys = {
 		radioSimilarityStatus: () => ['api', 'getRadioSimilarityStatus'] as const,
 		audioSettings: () => ['api', 'getAudioSettings'] as const,
 		audioDevices: () => ['api', 'listAudioDevices'] as const,
-		acrCloudStatus: () => ['api', 'getAcrCloudStatus'] as const,
 		lastfmStatus: () => ['api', 'getLastfmStatus'] as const,
 		listenBrainzStatus: () => ['api', 'getListenBrainzStatus'] as const,
 		audioFeaturesStats: () => ['api', 'getAudioFeaturesStats'] as const,
@@ -478,13 +477,6 @@ export const cachedApi = {
 		return fetchCached<{ devices: AudioDevice[] }>(
 			cacheKeys.settings.audioDevices(),
 			() => api.listAudioDevices(),
-			mediumOptions,
-		);
-	},
-	getAcrCloudStatus() {
-		return fetchCached<Awaited<ReturnType<typeof api.getAcrCloudStatus>>>(
-			cacheKeys.settings.acrCloudStatus(),
-			() => api.getAcrCloudStatus(),
 			mediumOptions,
 		);
 	},

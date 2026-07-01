@@ -42,17 +42,12 @@
 		setPassiveDspEnabled,
 		syncAnalysisStatus
 	} from '$lib/stores/audio_analysis';
-	import {
-		acrCloud,
-		loadAcrCloudStatus,
-		configureAcrCloud,
-		deleteAcrCloudConfig,
-		startAcrCloudScan
-	} from '$lib/stores/acrcloud';
 	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
+	import Toggle from '$lib/components/ui/Toggle.svelte';
+	import { searchSettings, type SettingsSearchEntry } from '$lib/components/settings/settingsSearch';
 	import IntegrationsPanel from '$lib/components/settings/IntegrationsPanel.svelte';
 	import {
 		discoveryLastTrainedAt,
@@ -122,6 +117,7 @@
 	let updateStatus = $state('Available in the desktop app');
 	let updateAvailableVersion = $state<string | null>(null);
 	let updateChecking = $state(false);
+	let minimizeToTray = $state(false);
 	let updateError = $state('');
 
 	let mbStatus = $state<'idle' | 'running' | 'done'>('idle');
@@ -141,18 +137,6 @@
 	let radioSimilarityLabel = $state('');
 	// Set on unmount so the build poll loop can't outlive the component.
 	let componentUnmounted = false;
-
-	let spotifyConfigured = $state(false);
-	let spotifyClientId = $state('');
-	let spotifyClientSecret = $state('');
-	let spotifySaving = $state(false);
-	let spotifyError = $state('');
-	let spotifyEnrichedCount = $state(0);
-	let spotifyRemaining = $state(0);
-	let spotifyIsRunning = $state(false);
-	let spotifyRunTotal = $state(0);
-	let spotifyRunProcessed = $state(0);
-	const SPOTIFY_BATCH_SIZE = 2000;
 
 	let lastfmConfigured = $state(false);
 	let lastfmApiKey = $state('');
@@ -201,15 +185,6 @@
 			tokenCopied = true;
 			setTimeout(() => (tokenCopied = false), 2000);
 		});
-	}
-
-	// ACRCloud form state
-	let acrKey = $state('');
-	let acrSecret = $state('');
-	let acrRegion = $state('eu-west-1');
-
-	async function connectAcrCloud() {
-		await configureAcrCloud(acrKey, acrSecret, acrRegion);
 	}
 
 	async function refreshGalaxy() {
@@ -302,12 +277,25 @@
 			const pending = await invoke<string | null>('get_update_state');
 			updateAvailableVersion = pending;
 			updateStatus = pending ? `v${pending} available` : 'Up to date';
+			minimizeToTray = await invoke<boolean>('get_minimize_to_tray');
 		} catch (err) {
 			const unavailableState = unavailableDesktopUpdateState(appVersion, err);
 			installModeLabel = unavailableState.installModeLabel;
 			updateStatus = unavailableState.updateStatus;
 			updateAvailableVersion = unavailableState.updateAvailableVersion;
 			updateError = unavailableState.updateError;
+		}
+	}
+
+	async function setMinimizeToTray(next: boolean) {
+		const prev = minimizeToTray;
+		minimizeToTray = next;
+		try {
+			const { invoke } = await import('@tauri-apps/api/core');
+			await invoke('set_minimize_to_tray', { value: next });
+		} catch {
+			minimizeToTray = prev;
+			showToast('Could not save the close behavior. Try again.', 'error');
 		}
 	}
 
@@ -456,7 +444,6 @@
 				void loadDiscoveryStatus();
 				void loadDiscoveryEngine();
 				void loadDiscoverySafetyProfile();
-				void loadSpotifyStatus();
 				void loadLastfmStatus();
 			}
 
@@ -466,16 +453,11 @@
 				void loadMbStatus();
 			}
 
-			if (latest.type === 'sync_progress' && latest.service === 'spotify') {
-				void loadSpotifyStatus();
-			}
-
 			if (latest.type === 'sync_progress' && latest.service === 'lastfm') {
 				void loadLastfmStatus();
 			}
 
-			if (latest.type === 'musicbrainz_enriched' && (spotifyIsRunning || lastfmIsRunning)) {
-				void loadSpotifyStatus();
+			if (latest.type === 'musicbrainz_enriched' && lastfmIsRunning) {
 				void loadLastfmStatus();
 			}
 
@@ -707,100 +689,6 @@
 			}
 			markServerOnline();
 			errorMsg = `Failed to disconnect: ${error}`;
-		}
-	}
-
-	async function loadSpotifyStatus() {
-		const [configResp, enrichResp] = await Promise.allSettled([
-			authFetch(`${getApiBase()}/api/spotify/status`),
-			authFetch(`${getApiBase()}/api/library/enrich/spotify/status`)
-		]);
-		if (configResp.status === 'fulfilled') {
-			markServerOnline();
-			const data = await configResp.value.json();
-			spotifyConfigured = data.configured === true;
-		} else if (isFetchConnectionError(configResp.reason)) {
-			markServerOffline();
-		}
-
-		if (enrichResp.status === 'fulfilled') {
-			const data2 = await enrichResp.value.json();
-			spotifyEnrichedCount = data2.enriched_tracks ?? 0;
-			spotifyRemaining = data2.remaining_tracks ?? 0;
-			spotifyIsRunning = data2.is_running === true;
-			spotifyRunTotal = data2.run_total ?? 0;
-			spotifyRunProcessed = data2.run_processed ?? 0;
-		}
-	}
-
-	async function saveSpotifyConfig() {
-		spotifySaving = true;
-		spotifyError = '';
-		try {
-			const resp = await authFetch(`${getApiBase()}/api/spotify/config`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					client_id: spotifyClientId,
-					client_secret: spotifyClientSecret
-				})
-			});
-			markServerOnline();
-			const data = await resp.json();
-			if (data.status === 'ok') {
-				spotifyConfigured = true;
-				spotifyClientId = '';
-				spotifyClientSecret = '';
-			} else {
-				spotifyError = data.message ?? 'Failed to save Spotify credentials.';
-			}
-		} catch (e) {
-			spotifyError = e instanceof Error ? e.message : String(e);
-			if (isFetchConnectionError(e)) markServerOffline();
-		} finally {
-			spotifySaving = false;
-		}
-	}
-
-	async function clearSpotifyConfig() {
-		try {
-			await authFetch(`${getApiBase()}/api/spotify/config`, { method: 'DELETE' });
-			markServerOnline();
-		} catch {}
-		spotifyConfigured = false;
-		spotifyError = '';
-	}
-
-	async function startSpotifyEnrichment() {
-		spotifyError = '';
-		try {
-			const resp = await authFetch(`${getApiBase()}/api/library/enrich/spotify`, { method: 'POST' });
-			markServerOnline();
-			const data = await resp.json();
-			if (data.status === 'error') {
-				spotifyError = data.message ?? 'Spotify enrichment failed.';
-			}
-			await loadSpotifyStatus();
-		} catch (e) {
-			spotifyError = e instanceof Error ? e.message : String(e);
-			if (isFetchConnectionError(e)) markServerOffline();
-		}
-	}
-
-	async function resetSpotifyEnrichment() {
-		if (!confirm('Clear all Spotify check markers and tags? Tracks will be re-queried on the next run.')) return;
-		spotifyError = '';
-		try {
-			const resp = await authFetch(`${getApiBase()}/api/library/enrich/spotify/reset`, { method: 'POST' });
-			markServerOnline();
-			const data = await resp.json();
-			if (data.status === 'error') {
-				spotifyError = data.message ?? 'Reset failed.';
-			}
-			await loadSpotifyStatus();
-		} catch (e) {
-			spotifyError = e instanceof Error ? e.message : String(e);
-			if (isFetchConnectionError(e)) markServerOffline();
 		}
 	}
 
@@ -1449,7 +1337,7 @@
 	// ─── Category rail ───────────────────────────────────────────────────
 	// Splits the previously stacked panels into focused pages. Each panel
 	// belongs to exactly one category; empty columns are hidden by CSS.
-	type SettingsCategory = 'appearance' | 'sources' | 'audio' | 'data' | 'account';
+	type SettingsCategory = 'appearance' | 'sources' | 'audio' | 'account';
 	let activeCategory = $state<SettingsCategory>('appearance');
 	let handledTidalLoginRequest = $state('');
 	$effect(() => {
@@ -1545,9 +1433,7 @@
 			void loadMbStatus();
 			void loadPortableSnapshot();
 			void loadRadioSimilarityStatus();
-			void loadSpotifyStatus();
 			void loadLastfmStatus();
-			void loadAcrCloudStatus();
 			return;
 		}
 		if (activeCategory === 'audio') {
@@ -1559,7 +1445,6 @@
 			return;
 		}
 		if (activeCategory === 'account') {
-			void loadSpotifyStatus();
 			void loadLastfmStatus();
 		}
 	}
@@ -1568,6 +1453,28 @@
 		if (activeCategory === category) return;
 		activeCategory = category;
 		void loadVisibleSettingsCategory();
+	}
+
+	let settingsQuery = $state('');
+	let searchFocused = $state(false);
+	let searchMatches = $derived(searchSettings(settingsQuery));
+
+	function jumpToSetting(entry: SettingsSearchEntry) {
+		settingsQuery = '';
+		searchFocused = false;
+		selectSettingsCategory(entry.category);
+		// Wait two frames so the freshly-switched category renders before we
+		// scroll to and flash the target section.
+		requestAnimationFrame(() => {
+			requestAnimationFrame(() => {
+				const el = document.querySelector(`[data-setting-id="${entry.id}"]`);
+				if (el instanceof HTMLElement) {
+					el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+					el.classList.add('setting-flash');
+					setTimeout(() => el.classList.remove('setting-flash'), 1600);
+				}
+			});
+		});
 	}
 
 	function scheduleSettingsBackgroundLoad(): () => void {
@@ -1594,8 +1501,6 @@
 			}, 1800),
 			scheduleSettingsIdleTask(() => {
 				if (settingsBackgroundLoadCancelled) return;
-				void loadAcrCloudStatus();
-				void loadSpotifyStatus();
 				void loadLastfmStatus();
 			}, 2800),
 		];
@@ -1621,6 +1526,10 @@
 
 	function onAudioSrFollowToggle(e: Event) {
 		void audioSettings.patch({ sample_rate_follow: (e.target as HTMLInputElement).checked });
+	}
+
+	function onAudioReleaseOnPauseToggle(e: Event) {
+		void audioSettings.patch({ exclusive_release_on_pause: (e.target as HTMLInputElement).checked });
 	}
 
 	function onExclusiveGraceChange(e: Event) {
@@ -1691,16 +1600,11 @@
 		{ id: 'appearance', label: 'Appearance', icon: '◐', hint: 'Theme + wallpaper' },
 		{ id: 'sources', label: 'Sources', icon: '⟐', hint: 'Services + data' },
 		{ id: 'audio', label: 'Audio', icon: '♪', hint: 'Output + analysis' },
-		{ id: 'data', label: 'Data', icon: '⇅', hint: 'Portable snapshots' },
 		{ id: 'account', label: 'Account', icon: '⚙', hint: 'PIN + updates' },
 	];
 
-	let visibleSettingsCategories = $derived(
-		settingsCategories.filter((c) => c.id !== 'data')
-	);
-
 	let activeCategoryMeta = $derived(
-		visibleSettingsCategories.find((category) => category.id === activeCategory) ?? visibleSettingsCategories[0]
+		settingsCategories.find((category) => category.id === activeCategory) ?? settingsCategories[0]
 	);
 
 	let activePalette = $derived(PALETTES.find((p) => p.id === $palette) ?? PALETTES[0]);
@@ -1777,6 +1681,40 @@
 		</div>
 	{/if}
 
+	<div class="settings-search">
+		<svg class="settings-search-icon" viewBox="0 0 24 24" aria-hidden="true">
+			<circle cx="11" cy="11" r="7" />
+			<path d="M21 21l-4.2-4.2" />
+		</svg>
+		<input
+			type="search"
+			class="settings-search-input"
+			placeholder="Search settings..."
+			bind:value={settingsQuery}
+			onfocus={() => (searchFocused = true)}
+			onblur={() => setTimeout(() => (searchFocused = false), 150)}
+			onkeydown={(e) => {
+				if (e.key === 'Enter' && searchMatches.length) jumpToSetting(searchMatches[0]);
+				else if (e.key === 'Escape') settingsQuery = '';
+			}}
+			aria-label="Search settings"
+		/>
+		{#if searchFocused && settingsQuery.trim() && searchMatches.length}
+			<ul class="settings-search-results">
+				{#each searchMatches as match (match.id)}
+					<li>
+						<button type="button" class="settings-search-result" onclick={() => jumpToSetting(match)}>
+							<span class="settings-search-result-label">{match.label}</span>
+							<span class="settings-search-result-cat">{match.category}</span>
+						</button>
+					</li>
+				{/each}
+			</ul>
+		{:else if searchFocused && settingsQuery.trim()}
+			<div class="settings-search-empty">No settings match that search.</div>
+		{/if}
+	</div>
+
 	<section class="settings-status-strip">
 		<div>
 			<span>Sync</span>
@@ -1797,7 +1735,7 @@
 	</section>
 
 	<nav class="settings-rail" aria-label="Settings categories">
-		{#each visibleSettingsCategories as cat (cat.id)}
+		{#each settingsCategories as cat (cat.id)}
 			<button
 				type="button"
 				class="settings-rail-btn"
@@ -1812,8 +1750,6 @@
 						<svg viewBox="0 0 24 24"><path d="M7 7h10v10H7z" /><path d="M12 2v5M12 17v5M2 12h5M17 12h5" /></svg>
 					{:else if cat.id === 'audio'}
 						<svg viewBox="0 0 24 24"><path d="M9 18V5l10-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="16" cy="16" r="3" /></svg>
-					{:else if cat.id === 'data'}
-						<svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16" /><path d="M8 4v16M16 4v16" /></svg>
 					{:else if cat.id === 'account'}
 						<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4" /><path d="M5 21c1.5-4 4-6 7-6s5.5 2 7 6" /></svg>
 					{:else}
@@ -1834,7 +1770,7 @@
 	>
 		<div class="settings-main">
 			{#if activeCategory === 'appearance'}
-			<section class="glass-panel section-panel palette-section" class:palette-section-open={paletteMenuOpen}>
+			<section data-setting-id="colour-scheme" class="glass-panel section-panel palette-section" class:palette-section-open={paletteMenuOpen}>
 				<SectionHeader eyebrow="Palette" title="Colour scheme" subtitle="UI accent, wallpaper, and no-wallpaper colours." />
 				<div class="palette-row">
 					<div
@@ -1907,7 +1843,7 @@
 				</div>
 			</section>
 
-			<section class="glass-panel section-panel">
+			<section data-setting-id="interface-size" class="glass-panel section-panel">
 				<SectionHeader
 					eyebrow="Scale"
 					title="Interface size"
@@ -1948,7 +1884,7 @@
 				</div>
 			</section>
 
-			<section class="glass-panel section-panel">
+			<section data-setting-id="background" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Wallpaper" title="Background" subtitle="Preview, then apply." />
 
 				<div class="wallpaper-big-preview">
@@ -2074,7 +2010,7 @@
 			{/if}
 
 			{#if activeCategory === 'account'}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="access-pin" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Access" title="Access PIN" subtitle="Use this PIN on another device." />
 				<div class="token-row">
 					<code class="token-value">{tokenVisible ? serverToken : '•'.repeat(serverToken.length || 6)}</code>
@@ -2098,7 +2034,7 @@
 
 			<IntegrationsPanel />
 
-			<section class="glass-panel section-panel">
+			<section data-setting-id="app-updates" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Desktop" title="App updates" subtitle="Version, install mode, and update checks." />
 				<div class="inner-metrics">
 					<MetricPair label="Version" value={appVersion || 'Unknown'} copy="Current app build." />
@@ -2122,10 +2058,34 @@
 					<p class="field-error" role="alert">{updateError}</p>
 				{/if}
 			</section>
+
+			{#if desktopAppAvailable}
+			<section data-setting-id="closing-the-window" class="glass-panel section-panel">
+				<SectionHeader eyebrow="Desktop" title="Closing the window" subtitle="Quit NOORwave, or keep it running in the tray." />
+				<div class="info-list">
+					<div class="info-row">
+						<div>
+							<span>Minimize to tray on close</span>
+							<p class="info-row-hint">
+								{minimizeToTray
+									? 'Closing the window keeps NOORwave running in the tray. Quit from the tray menu.'
+									: 'Closing the window quits NOORwave. Turn this on to keep it running in the tray instead.'}
+							</p>
+						</div>
+						<strong>
+							<Toggle
+								checked={minimizeToTray}
+								onchange={(e) => void setMinimizeToTray(e.currentTarget.checked)}
+							/>
+						</strong>
+					</div>
+				</div>
+			</section>
+			{/if}
 			{/if}
 
 			{#if activeCategory === 'sources'}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="connect-tidal" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Streaming" title="Connect TIDAL" subtitle="Auth, sync, and playback metadata." />
 
 				{#if serverStatus === 'offline' && $tidalStatus !== 'connecting'}
@@ -2216,14 +2176,10 @@
 						<div class="info-row">
 							<span>Auto-sync daily</span>
 							<strong>
-								<label class="toggle-switch">
-									<input
-										type="checkbox"
-										checked={$syncInfo?.auto_sync_daily ?? false}
-										onchange={() => void toggleAutoSync()}
-									/>
-									<span class="toggle-slider"></span>
-								</label>
+								<Toggle
+									checked={$syncInfo?.auto_sync_daily ?? false}
+									onchange={() => void toggleAutoSync()}
+								/>
 							</strong>
 						</div>
 					</div>
@@ -2253,7 +2209,7 @@
 			{/if}
 
 			{#if activeCategory === 'sources'}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="musicbrainz-enrichment" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Metadata" title="MusicBrainz enrichment" subtitle="Genre coverage for browsing and discovery." />
 
 				<div class="stat-grid inner-metrics">
@@ -2291,18 +2247,11 @@
 				{/if}
 			</section>
 
-			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Metadata" title="Spotify tags" subtitle="Unavailable: Premium-only API access." />
-				<p class="page-copy">
-					The integration code is still in place — if you ever subscribe to Spotify Premium, the existing app credentials should start working again and this panel will reactivate. For now, use Last.fm below as the second genre source.
-				</p>
-			</section>
-
-			<section class="glass-panel section-panel">
+			<section data-setting-id="last-fm-tags" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Metadata" title="Last.fm tags" subtitle="Crowd tags from a local API key." />
 
 				{#if lastfmError}
-					<p class="page-copy" style="color: var(--state-error)">{lastfmError}</p>
+					<p class="page-copy is-error" role="alert">{lastfmError}</p>
 				{/if}
 
 				{#if !lastfmConfigured}
@@ -2412,7 +2361,7 @@
 
 
 			{#if activeCategory === 'audio'}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="playback-output" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Output" title="Playback output" subtitle="Quality, device, and bit-perfect routing." />
 				{#if $audioSettings.settings}
 					{@const s = $audioSettings.settings}
@@ -2435,14 +2384,13 @@
 							</p>
 						</div>
 						{#if isWindows}
-							<label class="toggle-switch audio-mode-toggle" aria-label="Toggle bit-perfect mode">
-								<input
-									type="checkbox"
+							<span class="audio-mode-toggle">
+								<Toggle
 									checked={bitPerfectSettingsActive}
 									onchange={onBitPerfectToggle}
+									label="Toggle bit-perfect mode"
 								/>
-								<span class="toggle-slider"></span>
-							</label>
+							</span>
 						{/if}
 					</div>
 
@@ -2486,14 +2434,10 @@
 								<div class="info-row">
 									<span>Exclusive output (WASAPI)</span>
 									<strong>
-										<label class="toggle-switch">
-											<input
-												type="checkbox"
-												checked={s.exclusive_mode}
-												onchange={onAudioExclusiveToggle}
-											/>
-											<span class="toggle-slider"></span>
-										</label>
+										<Toggle
+											checked={s.exclusive_mode}
+											onchange={onAudioExclusiveToggle}
+										/>
 									</strong>
 								</div>
 								<p class="page-copy setting-caption">
@@ -2569,16 +2513,24 @@
 									Lower values release the device faster after pause. Higher values avoid repeated device grabs.
 								</p>
 								<div class="info-row">
+									<span>Release on pause</span>
+									<strong>
+										<Toggle
+											checked={s.exclusive_release_on_pause}
+											onchange={onAudioReleaseOnPauseToggle}
+										/>
+									</strong>
+								</div>
+								<p class="page-copy setting-caption">
+									Frees the device the moment you pause so other apps can use it, instead of waiting out the idle release. Re-grabs on play; may add a brief gap on quick pause/resume.
+								</p>
+								<div class="info-row">
 									<span>Sample rate follows source</span>
 									<strong>
-										<label class="toggle-switch">
-											<input
-												type="checkbox"
-												checked={s.sample_rate_follow}
-												onchange={onAudioSrFollowToggle}
-											/>
-											<span class="toggle-slider"></span>
-										</label>
+										<Toggle
+											checked={s.sample_rate_follow}
+											onchange={onAudioSrFollowToggle}
+										/>
 									</strong>
 								</div>
 								<p class="page-copy setting-caption">
@@ -2627,7 +2579,7 @@
 			{/if}
 
 			{#if activeCategory === 'sources'}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="portable-snapshot" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Transfer" title="Portable snapshot" subtitle="Export/import MusicBrainz and Last.fm enrichment." />
 
 				<div class="stat-grid inner-metrics">
@@ -2674,7 +2626,7 @@
 			{/if}
 
 			{#if activeCategory === 'sources'}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="clear-non-library-entries" class="glass-panel section-panel">
 				<SectionHeader
 					eyebrow="Cleanup"
 					title="Clear non-library entries"
@@ -2686,7 +2638,7 @@
 					This action removes any such row that you never played, never favorited, and isn't in
 					any queue or playlist.
 				</p>
-				<p class="page-copy" style="color: var(--state-warning, #f3c969)">
+				<p class="page-copy is-warning">
 					Cascades to trained data referencing those tracks (embeddings, neighbours, transitions).
 					Storage savings are tiny — even 1,000 tracks/month for 10 years is ~20MB. Run for
 					tidiness only.
@@ -2697,7 +2649,7 @@
 					</p>
 				{/if}
 				{#if purgeError}
-					<p class="page-copy" style="color: var(--state-error, #f87171)">{purgeError}</p>
+					<p class="page-copy is-error" role="alert">{purgeError}</p>
 				{/if}
 				<div class="action-row">
 					<button class="btn btn-glass danger" onclick={purgeOrphanTidalStream} disabled={purgeRunning}>
@@ -2708,7 +2660,7 @@
 			{/if}
 
 			{#if activeCategory === 'audio'}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="downloads" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Output" title="Downloads" subtitle="Save tracks to disk as FLAC or MP3." />
 
 				<div class="download-settings">
@@ -2826,7 +2778,7 @@
 			{/if}
 
 			{#if activeCategory === 'audio'}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="discovery-engine" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Learning" title="Discovery engine" subtitle="Learned radio coverage and training." />
 
 				<div class="discovery-warning glass-panel">
@@ -3036,7 +2988,7 @@
 				</div>
 			</section>
 
-			<section class="glass-panel section-panel">
+			<section data-setting-id="radio-similarity-index" class="glass-panel section-panel">
 				<SectionHeader
 					eyebrow="Learning"
 					title="Radio similarity index"
@@ -3069,7 +3021,7 @@
 
 		<div class="settings-side">
 			{#if activeCategory === 'audio'}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="now-playing-path" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Runtime" title="Now playing path" subtitle="Current device and format." />
 				<div class="info-list">
 					<div class="info-row">
@@ -3098,24 +3050,8 @@
 			</section>
 			{/if}
 
-			{#if activeCategory === 'sources'}
-			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Later" title="Additional services" subtitle="Planned source coverage." />
-				<div class="roadmap-list">
-					<div class="roadmap-item">
-						<h4>YouTube Music</h4>
-						<p>Library sync and metadata, without playback.</p>
-					</div>
-					<div class="roadmap-item">
-						<h4>SoundCloud</h4>
-						<p>Experimental discovery support and lighter-weight source coverage.</p>
-					</div>
-				</div>
-			</section>
-			{/if}
-
 			{#if activeCategory === 'audio'}
-			<section class="glass-panel section-panel">
+			<section data-setting-id="library-audio-data" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Analysis" title="Library audio data" subtitle="Passive BPM, key, and energy capture." />
 
 				<div class="stat-grid inner-metrics">
@@ -3139,14 +3075,10 @@
 						</p>
 					</div>
 					<strong>
-						<label class="toggle-switch">
-							<input
-								type="checkbox"
-								checked={$audioAnalysis.passiveEnabled}
-								onchange={(e) => void setPassiveDspEnabled((e.currentTarget as HTMLInputElement).checked)}
-							/>
-							<span class="toggle-slider"></span>
-						</label>
+						<Toggle
+							checked={$audioAnalysis.passiveEnabled}
+							onchange={(e) => void setPassiveDspEnabled((e.currentTarget as HTMLInputElement).checked)}
+						/>
 					</strong>
 				</div>
 
@@ -3168,43 +3100,6 @@
 			</section>
 			{/if}
 
-			{#if activeCategory === 'sources'}
-			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Recognition" title="ACRCloud" subtitle="Sample and cover detection." />
-
-				{#if !$acrCloud.connected}
-					<p class="page-copy">Connect ACRCloud to identify samples in your library.</p>
-					<div class="form-row">
-						<input type="text" placeholder="Access Key" bind:value={acrKey} />
-						<input type="password" placeholder="Access Secret" bind:value={acrSecret} />
-						<select bind:value={acrRegion}>
-							<option value="eu-west-1">EU (Ireland)</option>
-							<option value="us-east-1">US (Virginia)</option>
-						</select>
-						<button class="btn btn-primary" onclick={connectAcrCloud}>Connect</button>
-					</div>
-				{:else}
-					<div class="status-row">
-						<StateBadge label="Connected" tone="success" />
-						<span class="acrcloud-daily-count">{$acrCloud.scanned_today.toLocaleString()} / {$acrCloud.daily_limit.toLocaleString()} requests today</span>
-					</div>
-					{#if $acrCloud.isScanning}
-						<div class="progress-bar">
-							<div class="progress-fill" style="width: {($acrCloud.total > 0 ? $acrCloud.scanned / $acrCloud.total : 0) * 100}%"></div>
-						</div>
-						<p class="analysis-progress-label">
-							Scanning... {$acrCloud.scanned.toLocaleString()} / {$acrCloud.total.toLocaleString()} ({$acrCloud.matches_found} matches)
-						</p>
-					{/if}
-					<div class="action-row">
-						<button class="btn btn-primary" onclick={() => void startAcrCloudScan()} disabled={$acrCloud.isScanning}>
-							{$acrCloud.isScanning ? 'Scanning…' : 'Scan Library'}
-						</button>
-						<button class="btn btn-glass danger" onclick={() => void deleteAcrCloudConfig()}>Disconnect</button>
-					</div>
-				{/if}
-			</section>
-			{/if}
 		</div>
 	</section>
 </div>
@@ -3775,6 +3670,127 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		font-size: var(--font-size-sm);
+	}
+
+	.settings-search {
+		position: relative;
+		margin-bottom: var(--space-3);
+	}
+
+	.settings-search-icon {
+		position: absolute;
+		left: 14px;
+		top: 50%;
+		transform: translateY(-50%);
+		width: 16px;
+		height: 16px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 2;
+		stroke-linecap: round;
+		opacity: 0.5;
+		pointer-events: none;
+	}
+
+	.settings-search-input {
+		width: 100%;
+		padding: 10px 14px 10px 40px;
+		background: var(--bg-surface);
+		border: 1px solid var(--panel-border);
+		border-radius: var(--radius-md);
+		color: inherit;
+		font-size: var(--font-size-sm);
+	}
+
+	.settings-search-input::placeholder {
+		color: var(--text-tertiary);
+	}
+
+	.settings-search-input:focus {
+		outline: none;
+		border-color: var(--accent);
+	}
+
+	.settings-search-results {
+		position: absolute;
+		z-index: var(--z-overlay);
+		top: calc(100% + 6px);
+		left: 0;
+		right: 0;
+		margin: 0;
+		padding: 6px;
+		list-style: none;
+		background: var(--bg-elevated);
+		border: 1px solid var(--panel-border);
+		border-radius: var(--radius-md);
+		box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+		max-height: 320px;
+		overflow-y: auto;
+	}
+
+	.settings-search-results li {
+		list-style: none;
+	}
+
+	.settings-search-result {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--gap-sm);
+		width: 100%;
+		padding: 8px 12px;
+		background: transparent;
+		border: none;
+		border-radius: var(--radius-sm);
+		color: inherit;
+		cursor: pointer;
+		text-align: left;
+	}
+
+	.settings-search-result:hover {
+		background: var(--bg-surface);
+	}
+
+	.settings-search-result-label {
+		font-size: var(--font-size-sm);
+	}
+
+	.settings-search-result-cat {
+		flex: 0 0 auto;
+		font-size: var(--font-size-2xs);
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--text-tertiary);
+	}
+
+	.settings-search-empty {
+		position: absolute;
+		z-index: var(--z-overlay);
+		top: calc(100% + 6px);
+		left: 0;
+		right: 0;
+		padding: 14px;
+		background: var(--bg-elevated);
+		border: 1px solid var(--panel-border);
+		border-radius: var(--radius-md);
+		font-size: var(--font-size-sm);
+		color: var(--text-tertiary);
+	}
+
+	:global(.setting-flash) {
+		animation: settingFlash 1.6s ease;
+	}
+
+	@keyframes -global-settingFlash {
+		0% {
+			box-shadow: 0 0 0 0 transparent;
+		}
+		20% {
+			box-shadow: 0 0 0 2px var(--accent);
+		}
+		100% {
+			box-shadow: 0 0 0 0 transparent;
+		}
 	}
 
 	.settings-grid {
@@ -4445,11 +4461,6 @@
 		word-break: break-all;
 	}
 
-	.roadmap-list {
-		display: grid;
-		gap: 12px;
-	}
-
 	.runtime-error {
 		color: var(--state-error);
 	}
@@ -4458,18 +4469,6 @@
 		margin: 4px 0 0;
 		font-size: var(--font-size-sm);
 		color: var(--signal-text);
-	}
-
-	.roadmap-item {
-		padding: 14px;
-		border-radius: var(--radius-sm);
-		background: rgba(255, 255, 255, 0.03);
-		border: 1px solid var(--border-subtle);
-	}
-
-	.roadmap-item p {
-		color: var(--text-secondary);
-		margin-top: 6px;
 	}
 
 	@media (max-width: 960px) {
@@ -4531,57 +4530,6 @@
 		}
 	}
 
-	/* Toggle switch for auto-sync */
-	.toggle-switch {
-		position: relative;
-		display: inline-block;
-		width: 44px;
-		height: 24px;
-		cursor: pointer;
-	}
-
-	.toggle-switch input {
-		opacity: 0;
-		width: 0;
-		height: 0;
-	}
-
-	.toggle-slider {
-		position: absolute;
-		top: 0;
-		left: 0;
-		right: 0;
-		bottom: 0;
-		background: rgba(255, 255, 255, 0.12);
-		border-radius: 999px;
-		transition: background 0.2s ease;
-	}
-
-	.toggle-slider::before {
-		content: '';
-		position: absolute;
-		height: 18px;
-		width: 18px;
-		left: 3px;
-		bottom: 3px;
-		background: white;
-		border-radius: 50%;
-		transition: transform 0.2s ease;
-	}
-
-	.toggle-switch input:checked + .toggle-slider {
-		background: var(--accent);
-	}
-
-	.toggle-switch input:checked + .toggle-slider::before {
-		transform: translateX(20px);
-	}
-
-	.toggle-switch input:disabled + .toggle-slider {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
 	.sync-count {
 		display: inline-block;
 		margin-left: 4px;
@@ -4595,29 +4543,6 @@
 		word-break: break-word;
 	}
 
-
-	/* Audio analysis progress bar */
-	.progress-bar {
-		position: relative;
-		height: 10px;
-		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.08);
-		border: 1px solid var(--panel-border);
-		overflow: hidden;
-	}
-
-	.progress-fill {
-		height: 100%;
-		border-radius: inherit;
-		background: linear-gradient(90deg, rgba(151, 126, 255, 0.85), rgba(120, 160, 255, 0.72));
-		transition: width 200ms ease;
-	}
-
-	.analysis-progress-label {
-		font-size: var(--font-size-sm);
-		color: var(--text-secondary);
-		margin: 6px 0 0;
-	}
 
 	.analysis-note {
 		font-size: var(--font-size-sm);
@@ -4679,32 +4604,6 @@
 		width: 80px;
 	}
 
-	/* ACRCloud form row */
-	.form-row {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-2);
-		align-items: center;
-	}
-
-	.form-row input,
-	.form-row select {
-		flex: 1;
-		min-width: 140px;
-	}
-
-	/* ACRCloud status row */
-	.status-row {
-		display: flex;
-		align-items: center;
-		gap: var(--space-3);
-	}
-
-	.acrcloud-daily-count {
-		font-size: var(--font-size-sm);
-		color: var(--text-secondary);
-	}
-
 	.token-row {
 		display: flex;
 		align-items: center;
@@ -4729,5 +4628,13 @@
 	.field-error {
 		font-size: var(--font-size-sm);
 		color: #ffb0b0;
+	}
+
+	.is-error {
+		color: var(--state-error);
+	}
+
+	.is-warning {
+		color: var(--state-warning);
 	}
 </style>

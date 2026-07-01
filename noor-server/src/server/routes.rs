@@ -918,31 +918,6 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/tidal/play", post(play_tidal_ephemeral))
         .route("/api/tidal/artists/{tidal_id}", get(tidal_artist_profile))
         .route("/api/tidal/logout", post(tidal_logout))
-        // Spotify
-        .route(
-            "/api/spotify/config",
-            post(enrichment_routes::spotify_save_config),
-        )
-        .route(
-            "/api/spotify/config",
-            axum::routing::delete(enrichment_routes::spotify_clear_config),
-        )
-        .route(
-            "/api/spotify/status",
-            get(enrichment_routes::spotify_status),
-        )
-        .route(
-            "/api/library/enrich/spotify",
-            post(enrichment_routes::start_spotify_enrichment),
-        )
-        .route(
-            "/api/library/enrich/spotify/status",
-            get(enrichment_routes::get_spotify_enrichment_status),
-        )
-        .route(
-            "/api/library/enrich/spotify/reset",
-            post(enrichment_routes::reset_spotify_enrichment),
-        )
         .route(
             "/api/library/tidal-stream/purge",
             post(enrichment_routes::purge_orphan_tidal_stream_tracks),
@@ -6816,6 +6791,22 @@ async fn pause_playback(State(state): State<SharedState>) -> Result<Json<Value>,
         let message = format!("Failed to pause host audio playback: {error}");
         report_playback_failure(&state, &message);
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // Opt-in: free the exclusive WASAPI device on an explicit pause so other
+    // apps can take the DAC without waiting out the idle-release grace. No-op
+    // when exclusive mode is off (the runtime guards on current_exclusive) or
+    // the setting is disabled. Re-grabbed automatically on the next Resume/Play.
+    let release_on_pause = {
+        let guard = state.read().await;
+        guard
+            .db
+            .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(Into::into))
+            .map(|s| s.exclusive_release_on_pause)
+            .unwrap_or(false)
+    };
+    if release_on_pause && let Some(runtime_handle) = current_playback_runtime(&state).await {
+        let _ = runtime_handle.release_exclusive_now();
     }
 
     let snapshot = {

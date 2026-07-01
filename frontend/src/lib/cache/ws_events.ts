@@ -110,10 +110,6 @@ export function applyCacheUpdateForWsMessage(message: CacheWsMessage): void {
 		dataCache.invalidatePrefix(['api', 'getGenreAudioMetrics']);
 		return;
 	}
-
-	if (message.type === 'acrcloud_scan_progress' || message.type === 'acrcloud_scan_complete') {
-		debounceRefetch(cacheKeys.settings.acrCloudStatus(), 250);
-	}
 }
 
 export function clearWsCacheTimers(): void {

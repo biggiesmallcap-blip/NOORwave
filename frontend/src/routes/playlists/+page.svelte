@@ -1680,7 +1680,6 @@
 						{#if clause.type === 'has_sample_data'}
 							<select class="field-input" bind:value={clause.sample_source}>
 								<option value="">Any source</option>
-								<option value="acrcloud">ACRCloud</option>
 								<option value="fingerprint">Fingerprint</option>
 							</select>
 						{/if}

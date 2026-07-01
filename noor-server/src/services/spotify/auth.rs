@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
-use rusqlite::{Connection, params};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::info;
@@ -40,11 +40,6 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-pub fn is_expired(tokens: &SpotifyTokens) -> bool {
-    let expiry = tokens.fetched_at.saturating_add(tokens.expires_in);
-    now_secs() + 60 >= expiry
-}
-
 pub fn load_credentials(conn: &Connection) -> Result<Option<SpotifyCredentials>> {
     let row: rusqlite::Result<Option<String>> = conn.query_row(
         "SELECT extra_data FROM service_auth WHERE service = 'spotify'",
@@ -55,22 +50,6 @@ pub fn load_credentials(conn: &Connection) -> Result<Option<SpotifyCredentials>>
         Ok(Some(json)) => Ok(serde_json::from_str(&json).ok()),
         _ => Ok(None),
     }
-}
-
-pub fn save_credentials(conn: &Connection, creds: &SpotifyCredentials) -> Result<()> {
-    let json = serde_json::to_string(creds)?;
-    conn.execute(
-        "INSERT INTO service_auth (service, extra_data, user_id, connected_at)
-         VALUES ('spotify', ?1, 'app', datetime('now'))
-         ON CONFLICT(service) DO UPDATE SET extra_data = excluded.extra_data",
-        params![json],
-    )?;
-    Ok(())
-}
-
-pub fn clear_credentials(conn: &Connection) -> Result<()> {
-    conn.execute("DELETE FROM service_auth WHERE service = 'spotify'", [])?;
-    Ok(())
 }
 
 /// Fetch a fresh app-only access token via the Client Credentials flow.

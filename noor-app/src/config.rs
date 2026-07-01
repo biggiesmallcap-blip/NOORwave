@@ -4,6 +4,11 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     pub host_mode: bool,
+    // When true, closing the window hides NOORwave to the tray instead of
+    // quitting. Default false: the window close button quits the app. serde
+    // default keeps existing configs (which only have host_mode) loading.
+    #[serde(default)]
+    pub minimize_to_tray: bool,
 }
 
 fn config_path() -> PathBuf {

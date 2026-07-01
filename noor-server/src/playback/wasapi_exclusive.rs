@@ -452,6 +452,12 @@ fn run_render_thread(
     )));
 
     let grace = Duration::from_secs(grace_secs.max(1) as u64);
+    info!(
+        target: "playback",
+        device = %device_label,
+        grace_secs = grace.as_secs(),
+        "WASAPI exclusive render thread started; idle-release grace active"
+    );
     let mut paused_since: Option<Instant> = None;
     let mut logged_post_start_fill = false;
     let mut logged_first_nonzero_fill = false;
@@ -464,6 +470,7 @@ fn run_render_thread(
         if force_release.load(Ordering::Acquire) {
             info!(
                 target: "playback",
+                release_reason = "external_request",
                 "WASAPI exclusive stream releasing device on external request"
             );
             break;
@@ -476,10 +483,19 @@ fn run_render_thread(
         if source_bank_all_paused(&source_bank) {
             let now = Instant::now();
             match paused_since {
-                None => paused_since = Some(now),
+                None => {
+                    paused_since = Some(now);
+                    tracing::debug!(
+                        target: "playback",
+                        grace_secs = grace.as_secs(),
+                        "WASAPI exclusive sources all paused; idle-release grace timer started"
+                    );
+                }
                 Some(start) if now.duration_since(start) >= grace => {
                     info!(
                         target: "playback",
+                        release_reason = "idle_grace",
+                        idle_ms = now.duration_since(start).as_millis() as u64,
                         "WASAPI exclusive stream releasing device after {} s of idle",
                         grace.as_secs()
                     );

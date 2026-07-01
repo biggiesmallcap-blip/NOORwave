@@ -2889,7 +2889,6 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             lastfm_similar_cache: crate::services::radio::new_lastfm_similar_cache(),
-            spotify_tokens: None,
             playback_runtime: None,
             playback_runtime_info: None,
             playback_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
@@ -2905,7 +2904,6 @@ mod tests {
             rss_aggregator: std::sync::Arc::new(crate::services::rss_feeds::FeedAggregator::new(
                 reqwest::Client::new(),
             )),
-            acrcloud_client: None,
             analysis_tx: None,
             dj_analysis_tx,
             dj_profile_rebuild_inflight: std::sync::Arc::new(std::sync::Mutex::new(
@@ -2913,11 +2911,6 @@ mod tests {
             )),
             audio_analysis_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             audio_analysis_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            acrcloud_scan_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            acrcloud_daily_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            spotify_enrich_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            spotify_enrich_total: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            spotify_enrich_processed: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             lastfm_enrich_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             lastfm_enrich_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             musicbrainz_enrich_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
