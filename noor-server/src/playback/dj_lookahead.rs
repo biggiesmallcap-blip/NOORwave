@@ -397,6 +397,8 @@ mod tests {
             duration_ms: Some(180_000),
             isrc: None,
             tidal_id: Some(tidal_id),
+            artist_tidal_id: None,
+            album_tidal_id: None,
             ytmusic_id: None,
             soundcloud_id: None,
             best_quality: Some("LOSSLESS".to_string()),
@@ -419,6 +421,8 @@ mod tests {
             album_title: None,
             artwork_url: None,
             duration_ms: Some(180_000),
+            artist_tidal_id: None,
+            album_tidal_id: None,
         }
     }
 

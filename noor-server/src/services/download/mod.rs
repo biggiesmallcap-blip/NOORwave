@@ -1052,6 +1052,8 @@ mod tests {
             duration_ms: None,
             isrc: None,
             tidal_id: Some(42),
+            artist_tidal_id: None,
+            album_tidal_id: None,
             ytmusic_id: None,
             soundcloud_id: None,
             best_quality: None,

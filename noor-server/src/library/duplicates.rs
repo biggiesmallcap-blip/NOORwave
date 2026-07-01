@@ -941,6 +941,8 @@ fn load_members_with_classify_rows(
             duration_ms: row.get(9)?,
             isrc: row.get(10)?,
             tidal_id: row.get(11)?,
+            artist_tidal_id: None,
+            album_tidal_id: None,
             ytmusic_id: row.get(12)?,
             soundcloud_id: row.get(13)?,
             best_quality: row.get(14)?,

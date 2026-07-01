@@ -1438,6 +1438,8 @@ async fn rebuild_track_for_tidal_ref(
                 album_title: None,
                 artwork_url: None,
                 duration_ms: None,
+                artist_tidal_id: None,
+                album_tidal_id: None,
             })
         })
 }
@@ -1471,6 +1473,9 @@ fn library_track_for_tidal_id(
                 duration_ms: row.get(8)?,
                 isrc: row.get(9)?,
                 tidal_id: row.get(10)?,
+                artist_tidal_id: None,
+                album_tidal_id: None,
+                // Library row: links resolve via artist_id/album_id.
                 ytmusic_id: row.get(11)?,
                 soundcloud_id: row.get(12)?,
                 best_quality: row.get(13)?,
@@ -1502,6 +1507,8 @@ fn synthetic_rebuild_track(track: &crate::PendingEphemeralTidalTrack) -> crate::
         duration_ms: track.duration_ms,
         isrc: None,
         tidal_id: Some(track.tidal_track_id),
+        artist_tidal_id: track.artist_tidal_id,
+        album_tidal_id: track.album_tidal_id,
         ytmusic_id: None,
         soundcloud_id: None,
         best_quality: None,

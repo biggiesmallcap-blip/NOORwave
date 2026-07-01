@@ -256,6 +256,8 @@ mod tests {
             duration_ms,
             isrc: None,
             tidal_id: None,
+            artist_tidal_id: None,
+            album_tidal_id: None,
             ytmusic_id: None,
             soundcloud_id: None,
             best_quality: best_quality.map(str::to_string),
