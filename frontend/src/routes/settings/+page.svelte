@@ -91,6 +91,9 @@
 		type WallpaperIdle
 	} from '$lib/stores/wallpaper';
 	import { PALETTES, rgbCss, type Palette, type PaletteId } from '$lib/components/wallpaper/palettes';
+	import { artPalette, artPaletteStatus } from '$lib/stores/artPalette';
+	import { currentTrack } from '$lib/stores/player';
+	import { upscaleTidalArtwork } from '$lib/utils/artwork';
 	import { palette, setPalette } from '$lib/stores/palette';
 	import { uiZoom, setZoom, zoomIn, zoomOut, resetZoom, MIN as ZOOM_MIN, MAX as ZOOM_MAX, WHEEL_STEP as ZOOM_STEP } from '$lib/stores/uiZoom';
 	import { audioSettings } from '$lib/stores/audio_settings';
@@ -1400,6 +1403,28 @@
 		}, 1200);
 	}
 
+	// ─── Album art palette readout ──────────────────────────────────────
+	// Surfaces the colours the "Album art" wallpaper source pulls from the
+	// playing cover. State is driven straight off the store's discriminated
+	// artPaletteStatus ('off'|'no-art'|'loading'|'ready'|'fallback') so the
+	// card never has to guess loading-vs-failed with a timer.
+	const ART_ROLES = ['Base', 'Mid', 'Glow', 'Accent'];
+	const ART_UNIFORMS = ['u_color1', 'u_color2', 'u_color3', 'u_color4'];
+	let artTrack = $derived($currentTrack);
+	let artCover = $derived(
+		artTrack?.artwork_url ? (upscaleTidalArtwork(artTrack.artwork_url, 320) ?? artTrack.artwork_url) : null
+	);
+	function artHex(c: [number, number, number]): string {
+		const h = (n: number) =>
+			Math.round(Math.min(1, Math.max(0, n)) * 255)
+				.toString(16)
+				.padStart(2, '0');
+		return `#${h(c[0])}${h(c[1])}${h(c[2])}`;
+	}
+	function hideBrokenCover(e: Event) {
+		(e.currentTarget as HTMLImageElement).style.visibility = 'hidden';
+	}
+
 	// ─── Audio output settings (TIDAL playback runtime) ─────────────────
 	let audioDevices = $state<AudioDevice[]>([]);
 	let isWindows = $derived(typeof navigator !== 'undefined' && /Win/i.test(navigator.platform));
@@ -2101,6 +2126,106 @@
 						</div>
 					</label>
 				</div>
+
+				<section
+					class="art-palette-card"
+					class:is-off={$artPaletteStatus === 'off'}
+					aria-label="Album art palette"
+					aria-hidden={$artPaletteStatus === 'off' ? 'true' : undefined}
+				>
+					<div class="art-palette-head">
+						<span class="art-palette-title">
+							<strong>Album art palette</strong>
+							<small>The four colours pulled from the cover, and where each lands in the shader.</small>
+						</span>
+						<span class="art-palette-badge" class:live={$artPaletteStatus === 'ready'}>
+							{$artPaletteStatus === 'ready'
+								? 'Live'
+								: $artPaletteStatus === 'off'
+									? 'Off'
+									: 'Idle'}
+						</span>
+					</div>
+
+					{#if $artPaletteStatus !== 'off'}
+						<div class="art-palette-body">
+							<div class="art-palette-cover">
+								{#if artCover && ($artPaletteStatus === 'ready' || $artPaletteStatus === 'fallback')}
+									<img
+										class="art-palette-cover-img"
+										src={artCover}
+										alt={artTrack
+											? `Cover for ${artTrack.title}${artTrack.artist_name ? ` by ${artTrack.artist_name}` : ''}`
+											: 'Cover art'}
+										loading="lazy"
+										onerror={hideBrokenCover}
+									/>
+								{:else if $artPaletteStatus === 'loading'}
+									<div class="art-palette-cover-skel" aria-hidden="true"></div>
+								{:else}
+									<svg class="art-palette-cover-icon" viewBox="0 0 24 24" aria-hidden="true">
+										<path d="M4 5h16v14H4z" fill="none" stroke="currentColor" stroke-width="1.4" />
+										<circle cx="9" cy="10" r="1.6" fill="currentColor" />
+										<path d="M4 17l5-4 4 3 3-2 4 3" fill="none" stroke="currentColor" stroke-width="1.4" />
+									</svg>
+								{/if}
+							</div>
+							<div class="art-palette-readout">
+								{#if $artPaletteStatus === 'ready' && $artPalette}
+									<ul class="art-palette-rows">
+										{#each $artPalette as c, i (ART_UNIFORMS[i])}
+											<li class="art-palette-row">
+												<span class="palette-swatch art-palette-chip" style={`background: ${rgbCss(c)}`}></span>
+												<span class="art-palette-role">{ART_ROLES[i]}</span>
+												<span class="art-palette-hex">{artHex(c)}</span>
+												<span class="art-palette-uniform">{ART_UNIFORMS[i]}</span>
+											</li>
+										{/each}
+									</ul>
+								{:else if $artPaletteStatus === 'loading'}
+									<ul class="art-palette-rows" aria-hidden="true">
+										{#each ART_ROLES as role (role)}
+											<li class="art-palette-row">
+												<span class="palette-swatch art-palette-chip art-palette-chip-skel"></span>
+												<span class="art-palette-role">{role}</span>
+												<span class="art-palette-hex art-palette-hex-skel"></span>
+												<span class="art-palette-uniform art-palette-uniform-skel"></span>
+											</li>
+										{/each}
+									</ul>
+								{:else}
+									<div class="art-palette-note">
+										<svg class="art-palette-note-icon" viewBox="0 0 24 24" aria-hidden="true">
+											<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.4" />
+											<path d="M12 8v5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+											<circle cx="12" cy="16" r="0.6" fill="currentColor" stroke="currentColor" stroke-width="0.9" />
+										</svg>
+										<p>
+											{$artPaletteStatus === 'fallback'
+												? "Couldn't read this cover. Using the palette instead."
+												: 'Play a track to pull colours from its cover.'}
+										</p>
+									</div>
+								{/if}
+							</div>
+						</div>
+						<p class="art-palette-state" aria-live="polite">
+							{#if $artPaletteStatus === 'ready'}
+								Driving the shader from {artTrack ? artTrack.title : 'this cover'}.
+							{:else if $artPaletteStatus === 'loading'}
+								Reading the cover...
+							{:else if $artPaletteStatus === 'fallback'}
+								Palette colours in use until the next readable cover.
+							{:else}
+								Waiting for something to play.
+							{/if}
+						</p>
+					{:else}
+						<p class="art-palette-state art-palette-state-off">
+							Set Wallpaper colours to Album art to pull the shader palette from the cover.
+						</p>
+					{/if}
+				</section>
 
 				<div class="wallpaper-grid">
 					{#each WALLPAPERS.filter(o => !o.extended) as option (option.id)}
@@ -4286,6 +4411,234 @@
 
 	.wallpaper-control.disabled {
 		opacity: 0.5;
+	}
+
+	/* Album art palette readout card: mirrors the .wallpaper-control frame and
+	   reserves its footprint so loading -> ready -> fallback never shift layout. */
+	.art-palette-card {
+		margin-top: 10px;
+		padding: 12px;
+		border: 1px solid var(--border-subtle);
+		border-radius: 8px;
+		background: rgba(255, 255, 255, 0.025);
+		display: grid;
+		gap: 12px;
+	}
+
+	.art-palette-card.is-off {
+		opacity: 0.55;
+		gap: 8px;
+	}
+
+	.art-palette-head {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 12px;
+	}
+
+	.art-palette-title {
+		display: grid;
+		gap: 3px;
+		min-width: 0;
+	}
+
+	.art-palette-title strong {
+		font-size: var(--font-size-sm);
+		color: var(--text-primary);
+	}
+
+	.art-palette-title small {
+		font-size: var(--font-size-xs);
+		color: var(--text-tertiary, var(--text-secondary));
+		line-height: var(--line-height-snug);
+	}
+
+	.art-palette-badge {
+		flex: none;
+		padding: 2px 9px;
+		border-radius: 999px;
+		border: 1px solid var(--border-subtle);
+		font-size: var(--font-size-xs);
+		color: var(--text-secondary);
+		background: rgba(255, 255, 255, 0.04);
+		white-space: nowrap;
+	}
+
+	.art-palette-badge.live {
+		color: var(--accent);
+		border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+		background: color-mix(in srgb, var(--accent) 14%, transparent);
+	}
+
+	.art-palette-body {
+		display: grid;
+		grid-template-columns: 96px minmax(0, 1fr);
+		gap: 16px;
+		min-height: 96px;
+	}
+
+	.art-palette-cover {
+		width: 96px;
+		height: 96px;
+		border-radius: 8px;
+		overflow: hidden;
+		border: 1px solid var(--border-subtle);
+		background: rgba(255, 255, 255, 0.03);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		color: var(--text-tertiary, var(--text-secondary));
+	}
+
+	.art-palette-cover-img {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+		display: block;
+	}
+
+	.art-palette-cover-icon {
+		width: 34px;
+		height: 34px;
+		opacity: 0.7;
+	}
+
+	.art-palette-cover-skel {
+		width: 100%;
+		height: 100%;
+		background: linear-gradient(
+			90deg,
+			rgba(255, 255, 255, 0.04),
+			rgba(255, 255, 255, 0.1),
+			rgba(255, 255, 255, 0.04)
+		);
+		background-size: 200% 100%;
+		animation: art-shimmer 1.1s ease-in-out infinite;
+	}
+
+	.art-palette-readout {
+		display: flex;
+		align-items: center;
+		min-width: 0;
+	}
+
+	.art-palette-rows {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: grid;
+		gap: 6px;
+		width: 100%;
+	}
+
+	.art-palette-row {
+		display: grid;
+		grid-template-columns: 22px minmax(48px, auto) 1fr auto;
+		align-items: center;
+		gap: 10px;
+	}
+
+	.art-palette-chip {
+		border-radius: 5px;
+	}
+
+	.art-palette-role {
+		font-size: var(--font-size-sm);
+		color: var(--text-primary);
+	}
+
+	.art-palette-hex,
+	.art-palette-uniform {
+		font-size: var(--font-size-xs);
+		font-variant-numeric: tabular-nums;
+		color: var(--text-secondary);
+	}
+
+	.art-palette-uniform {
+		color: var(--text-tertiary, var(--text-secondary));
+		text-align: right;
+	}
+
+	.art-palette-chip-skel,
+	.art-palette-hex-skel,
+	.art-palette-uniform-skel {
+		background: linear-gradient(
+			90deg,
+			rgba(255, 255, 255, 0.04),
+			rgba(255, 255, 255, 0.1),
+			rgba(255, 255, 255, 0.04)
+		);
+		background-size: 200% 100%;
+		animation: art-shimmer 1.1s ease-in-out infinite;
+	}
+
+	.art-palette-chip-skel {
+		border: 1px solid rgba(255, 255, 255, 0.12);
+	}
+
+	.art-palette-hex-skel {
+		width: 56px;
+		height: 10px;
+		border-radius: 999px;
+	}
+
+	.art-palette-uniform-skel {
+		width: 60px;
+		height: 10px;
+		border-radius: 999px;
+		justify-self: end;
+	}
+
+	.art-palette-note {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		color: var(--text-secondary);
+	}
+
+	.art-palette-note-icon {
+		width: 20px;
+		height: 20px;
+		flex: none;
+		opacity: 0.7;
+	}
+
+	.art-palette-note p {
+		margin: 0;
+		font-size: var(--font-size-sm);
+		line-height: var(--line-height-snug);
+	}
+
+	.art-palette-state {
+		margin: 0;
+		font-size: var(--font-size-xs);
+		color: var(--text-tertiary, var(--text-secondary));
+	}
+
+	@keyframes art-shimmer {
+		0% {
+			background-position: 200% 0;
+		}
+		100% {
+			background-position: -200% 0;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.art-palette-cover-skel,
+		.art-palette-chip-skel,
+		.art-palette-hex-skel,
+		.art-palette-uniform-skel {
+			animation: none;
+			background: rgba(255, 255, 255, 0.06);
+		}
+	}
+
+	@media (max-width: 560px) {
+		.art-palette-body {
+			grid-template-columns: 1fr;
+		}
 	}
 
 	.wallpaper-control > span {

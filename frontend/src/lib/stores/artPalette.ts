@@ -12,6 +12,16 @@ export type ArtPalette = [ArtRgb, ArtRgb, ArtRgb, ArtRgb];
 
 export const artPalette = writable<ArtPalette | null>(null);
 
+// Explicit extraction status so the settings UI can tell apart the states the
+// single `artPalette | null` value conflates:
+//   off      - "Album art" is not the chosen colour source (nothing running)
+//   no-art   - Album art selected, but the current track has no cover
+//   loading  - extraction is in flight for the current cover
+//   ready    - a palette was extracted (artPalette holds it)
+//   fallback - extraction failed or the CDN tainted the canvas; on the palette
+export type ArtPaletteStatus = 'off' | 'no-art' | 'loading' | 'ready' | 'fallback';
+export const artPaletteStatus = writable<ArtPaletteStatus>('off');
+
 const SAMPLE = 28; // downscale the cover to this many px per side before sampling
 
 let currentUrl: string | null = null;
@@ -84,6 +94,7 @@ function quantize(pixels: ArtRgb[]): ArtPalette | null {
 function extract(url: string): void {
 	if (typeof document === 'undefined') return;
 	const mySeq = ++seq;
+	artPaletteStatus.set('loading');
 	const img = new Image();
 	img.crossOrigin = 'anonymous';
 	img.decoding = 'async';
@@ -103,15 +114,21 @@ function extract(url: string): void {
 				pixels.push([data[i] / 255, data[i + 1] / 255, data[i + 2] / 255]);
 			}
 			const pal = quantize(pixels);
-			if (mySeq === seq) artPalette.set(pal);
+			if (mySeq !== seq) return;
+			artPalette.set(pal);
+			artPaletteStatus.set(pal ? 'ready' : 'fallback');
 		} catch {
 			// Tainted canvas (CDN blocked cross-origin reads) or any decode issue:
 			// leave consumers on the fixed palette.
-			if (mySeq === seq) artPalette.set(null);
+			if (mySeq !== seq) return;
+			artPalette.set(null);
+			artPaletteStatus.set('fallback');
 		}
 	};
 	img.onerror = () => {
-		if (mySeq === seq) artPalette.set(null);
+		if (mySeq !== seq) return;
+		artPalette.set(null);
+		artPaletteStatus.set('fallback');
 	};
 	// A small cover is plenty for a 28px sample and loads fast.
 	img.src = upscaleTidalArtwork(url, 160) ?? url;
@@ -120,10 +137,14 @@ function extract(url: string): void {
 // Only extract while "Album art" is the chosen colour source, so we don't hit
 // the artwork CDN or decode a canvas for users who stay on the fixed palette.
 function refresh(): void {
-	if (source !== 'art') return;
+	if (source !== 'art') {
+		artPaletteStatus.set('off');
+		return;
+	}
 	if (!currentUrl) {
 		seq++;
 		artPalette.set(null);
+		artPaletteStatus.set('no-art');
 		return;
 	}
 	extract(currentUrl);
@@ -140,5 +161,6 @@ if (typeof window !== 'undefined') {
 		const wasArt = source === 'art';
 		source = v;
 		if (source === 'art' && !wasArt) refresh();
+		else if (source !== 'art') artPaletteStatus.set('off');
 	});
 }
