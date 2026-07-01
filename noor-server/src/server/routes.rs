@@ -918,31 +918,6 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/tidal/play", post(play_tidal_ephemeral))
         .route("/api/tidal/artists/{tidal_id}", get(tidal_artist_profile))
         .route("/api/tidal/logout", post(tidal_logout))
-        // Spotify
-        .route(
-            "/api/spotify/config",
-            post(enrichment_routes::spotify_save_config),
-        )
-        .route(
-            "/api/spotify/config",
-            axum::routing::delete(enrichment_routes::spotify_clear_config),
-        )
-        .route(
-            "/api/spotify/status",
-            get(enrichment_routes::spotify_status),
-        )
-        .route(
-            "/api/library/enrich/spotify",
-            post(enrichment_routes::start_spotify_enrichment),
-        )
-        .route(
-            "/api/library/enrich/spotify/status",
-            get(enrichment_routes::get_spotify_enrichment_status),
-        )
-        .route(
-            "/api/library/enrich/spotify/reset",
-            post(enrichment_routes::reset_spotify_enrichment),
-        )
         .route(
             "/api/library/tidal-stream/purge",
             post(enrichment_routes::purge_orphan_tidal_stream_tracks),

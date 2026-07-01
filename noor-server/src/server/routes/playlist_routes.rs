@@ -484,7 +484,6 @@ fn build_smart_playlist_context(
     let genre_map = queries::get_track_genre_paths_with_fallback(conn)?;
     let playlist_memberships = queries::get_playlist_memberships(conn)?;
     let dsp_rows = queries::get_all_audio_dsp_features(conn)?;
-    let acrcloud_ids = queries::get_track_ids_with_acrcloud_match(conn)?;
     let fingerprint_ids = queries::get_track_ids_with_fingerprint(conn)?;
 
     let mut context = PlaylistEvaluationContext::new();
@@ -508,9 +507,6 @@ fn build_smart_playlist_context(
                 is_instrumental,
             },
         );
-    }
-    for track_id in acrcloud_ids {
-        context = context.with_sample_source(track_id, "acrcloud");
     }
     for track_id in fingerprint_ids {
         context = context.with_sample_source(track_id, "fingerprint");

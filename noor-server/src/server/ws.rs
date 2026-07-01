@@ -93,17 +93,6 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
                         "type": "track_analyzed",
                         "track_id": track_id
                     }),
-                    AppEvent::AcrCloudScanProgress { scanned, total, matches_found } => json!({
-                        "type": "acrcloud_scan_progress",
-                        "scanned": scanned,
-                        "total": total,
-                        "matches_found": matches_found
-                    }),
-                    AppEvent::AcrCloudScanComplete { scanned, matches_found } => json!({
-                        "type": "acrcloud_scan_complete",
-                        "scanned": scanned,
-                        "matches_found": matches_found
-                    }),
                     AppEvent::DiscoverySpaceRefreshProgress { seed_track_id, stage, progress } => json!({
                         "type": "discovery_space_refresh_progress",
                         "seed_track_id": seed_track_id,

@@ -171,14 +171,8 @@ pub fn busy_reason(state: &crate::AppState, db: &Database) -> Option<&'static st
     if state.musicbrainz_enrich_running.load(SeqCst) {
         return Some("MusicBrainz enrichment");
     }
-    if state.spotify_enrich_running.load(SeqCst) {
-        return Some("Spotify enrichment");
-    }
     if state.audio_analysis_running.load(SeqCst) {
         return Some("audio analysis");
-    }
-    if state.acrcloud_scan_running.load(SeqCst) {
-        return Some("an ACRCloud scan");
     }
     // Discovery training is DB-backed, not an atomic. It writes heavily through
     // the shared connection for the length of a run; a rebuild's long write

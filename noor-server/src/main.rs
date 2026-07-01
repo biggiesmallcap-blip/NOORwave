@@ -12,7 +12,7 @@ mod tags;
 use anyhow::Result;
 use rusqlite::OptionalExtension;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use tokio::sync::{RwLock, broadcast};
 use tracing::info;
 #[cfg(not(feature = "spotify-public"))]
@@ -138,7 +138,6 @@ pub struct AppState {
     /// endpoint can replay the same seed several times during exploration, so
     /// keep similar rows per process instead of re-hitting Last.fm every call.
     pub lastfm_similar_cache: services::radio::LastFmSimilarCache,
-    pub spotify_tokens: Option<services::spotify::auth::SpotifyTokens>,
     pub playback_runtime: Option<PlaybackRuntimeState>,
     pub playback_runtime_info: Option<PlaybackRuntimeInfo>,
     pub playback_generation: Arc<AtomicU64>,
@@ -162,8 +161,6 @@ pub struct AppState {
     pub tidal_sync_cancel: Arc<AtomicBool>,
     /// RSS feed aggregator for music news and articles
     pub rss_aggregator: Arc<services::rss_feeds::FeedAggregator>,
-    /// ACRCloud client for sample recognition (loaded from service_auth if configured)
-    pub acrcloud_client: Option<services::acrcloud::AcrCloudClient>,
     // Audio analysis
     pub analysis_tx:
         Option<tokio::sync::mpsc::UnboundedSender<services::audio_analysis::AnalysisJob>>,
@@ -174,12 +171,6 @@ pub struct AppState {
         Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
     pub audio_analysis_cancel: Arc<AtomicBool>,
     pub audio_analysis_running: Arc<AtomicBool>,
-    pub acrcloud_scan_running: Arc<AtomicBool>,
-    pub acrcloud_daily_count: Arc<std::sync::atomic::AtomicU32>,
-    /// Spotify enrichment progress (visible to status endpoint, survives UI navigation).
-    pub spotify_enrich_running: Arc<AtomicBool>,
-    pub spotify_enrich_total: Arc<std::sync::atomic::AtomicUsize>,
-    pub spotify_enrich_processed: Arc<std::sync::atomic::AtomicUsize>,
     /// MusicBrainz enrichment running flag — gates auto-enrich + manual-trigger
     /// handler against double-runs.
     pub musicbrainz_enrich_running: Arc<AtomicBool>,
@@ -304,16 +295,6 @@ pub enum AppEvent {
     /// counter event which is shape-stable for the status UI.
     TrackAnalyzed {
         track_id: i64,
-    },
-    // ACRCloud events
-    AcrCloudScanProgress {
-        scanned: u32,
-        total: u32,
-        matches_found: u32,
-    },
-    AcrCloudScanComplete {
-        scanned: u32,
-        matches_found: u32,
     },
     // DiscoverSpace per-seed background refresh progress + complete
     DiscoverySpaceRefreshProgress {
@@ -745,10 +726,6 @@ async fn main() -> Result<()> {
         })
         .unwrap_or(None);
 
-    // Spotify tokens are fetched on demand via the Client Credentials flow
-    // using the user-supplied client_id/secret stored in service_auth.extra_data.
-    let spotify_tokens: Option<services::spotify::auth::SpotifyTokens> = None;
-
     // Generate or load the server access token
     let server_token = db.with_conn(db::queries::ensure_server_token)?;
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -800,7 +777,6 @@ async fn main() -> Result<()> {
             std::collections::HashMap::new(),
         )),
         lastfm_similar_cache: services::radio::new_lastfm_similar_cache(),
-        spotify_tokens,
         playback_runtime: None,
         playback_runtime_info: None,
         playback_generation: Arc::new(AtomicU64::new(1)),
@@ -816,7 +792,6 @@ async fn main() -> Result<()> {
         tidal_sync_running: Arc::new(AtomicBool::new(false)),
         tidal_sync_cancel: Arc::new(AtomicBool::new(false)),
         rss_aggregator,
-        acrcloud_client: None,
         analysis_tx: Some(analysis_tx),
         dj_analysis_tx: Some(dj_analysis_tx),
         dj_profile_rebuild_inflight: Arc::new(std::sync::Mutex::new(
@@ -824,11 +799,6 @@ async fn main() -> Result<()> {
         )),
         audio_analysis_cancel: analysis_cancel,
         audio_analysis_running: Arc::new(AtomicBool::new(false)),
-        acrcloud_scan_running: Arc::new(AtomicBool::new(false)),
-        acrcloud_daily_count: Arc::new(AtomicU32::new(0)),
-        spotify_enrich_running: Arc::new(AtomicBool::new(false)),
-        spotify_enrich_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        spotify_enrich_processed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         musicbrainz_enrich_running: Arc::new(AtomicBool::new(false)),
         lastfm_enrich_running: Arc::new(AtomicBool::new(false)),
         lastfm_enrich_cancel: Arc::new(AtomicBool::new(false)),

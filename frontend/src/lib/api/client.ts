@@ -970,7 +970,7 @@ export type NumberOp = 'eq' | 'gte' | 'lte' | 'gt' | 'lt' | 'between_inclusive';
 export type QualityTier = 'lossy' | 'lossless' | 'hi_res';
 export type DateField = 'date_added' | 'last_played_at';
 
-export type SampleDataSource = 'acrcloud' | 'fingerprint';
+export type SampleDataSource = 'fingerprint';
 
 export type RuleClause =
 	| { type: 'group'; op: LogicOp; clauses: RuleClause[] }
