@@ -370,6 +370,168 @@ pub struct BatchDownloadRequest {
     format: Option<String>,
 }
 
+/// Body for `POST /api/tidal/download`: a TIDAL track that may not be in the local
+/// library yet. Mirrors the `playTidalTrack` payload so any TIDAL surface (search,
+/// charts, an ephemeral now-playing row) can hand us what it already has.
+#[derive(Deserialize)]
+pub struct TidalDownloadRequest {
+    tidal_track_id: i64,
+    title: String,
+    artist_name: Option<String>,
+    album_title: Option<String>,
+    artwork_url: Option<String>,
+    duration_ms: Option<i64>,
+    artist_tidal_id: Option<i64>,
+    album_tidal_id: Option<i64>,
+}
+
+fn normalize_nonempty(value: Option<String>) -> Option<String> {
+    value
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// `POST /api/tidal/download?format=flac|mp3|aac` — download a TIDAL track that isn't a
+/// library track. The download worker resolves tracks by local id, so we first import the
+/// track from its metadata (idempotent on `tidal_id`, and the import deliberately leaves it
+/// out of the library) to mint a local row, then queue it through the same worker as
+/// library downloads. Completion + saved path arrive via the `download_item_done` event.
+pub async fn download_tidal_track(
+    State(state): State<SharedState>,
+    Query(query): Query<DownloadQuery>,
+    Json(body): Json<TidalDownloadRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    if body.tidal_track_id <= 0 {
+        return Ok(Json(json!({
+            "status": "unavailable",
+            "message": "This track isn't on TIDAL, so it can't be downloaded."
+        })));
+    }
+    let title = body.title.trim().to_string();
+    if title.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    // A download should land a file even when the source row is missing the artist, so we
+    // fall back rather than reject (mirrors the queue's "Unknown Artist" convention).
+    let artist_name =
+        normalize_nonempty(body.artist_name).unwrap_or_else(|| "Unknown Artist".into());
+
+    let format = resolve_format(&state, query.format.as_deref()).await;
+
+    let db = { state.read().await.db.clone() };
+    let imported = crate::services::tidal::import::import_track_from_metadata(
+        &db,
+        crate::services::tidal::import::ImportTrackMetadata {
+            tidal_id: body.tidal_track_id,
+            title,
+            artist_name,
+            artist_tidal_id: body.artist_tidal_id.filter(|id| *id > 0),
+            artist_picture: None,
+            album_title: normalize_nonempty(body.album_title),
+            album_tidal_id: body.album_tidal_id.filter(|id| *id > 0),
+            album_artwork_url: normalize_nonempty(body.artwork_url),
+            duration_ms: body.duration_ms.filter(|d| *d > 0),
+        },
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!(
+            target = "noor.download",
+            "TIDAL import for download failed: {e}"
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    enqueue_and_spawn(
+        &state,
+        vec![DownloadJobItem {
+            track_id: imported.local_id,
+            format,
+        }],
+        true,
+    )
+    .await;
+    Ok(Json(
+        json!({ "status": "queued", "local_id": imported.local_id }),
+    ))
+}
+
+/// Body for `POST /api/tidal/downloads/batch`: a whole TIDAL album/playlist worth of
+/// tracks that may not be library tracks. The frontend already holds the tracklist (it's
+/// the same list it would play), so it hands us the metadata directly rather than making
+/// us re-fetch it.
+#[derive(Deserialize)]
+pub struct TidalBatchDownloadRequest {
+    tracks: Vec<TidalDownloadRequest>,
+    format: Option<String>,
+}
+
+/// `POST /api/tidal/downloads/batch` — download many TIDAL tracks (an album or playlist)
+/// that aren't library tracks. Imports each one (idempotent; stays out of the library) to
+/// mint local rows, then queues them through the normal batch worker. Tracks that fail to
+/// import are skipped, not fatal, so a single dead row can't sink the whole album.
+pub async fn download_tidal_batch(
+    State(state): State<SharedState>,
+    Json(body): Json<TidalBatchDownloadRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    if body.tracks.is_empty() {
+        return Ok(Json(json!({ "status": "empty", "count": 0 })));
+    }
+    let format = resolve_format(&state, body.format.as_deref()).await;
+    let db = { state.read().await.db.clone() };
+
+    let mut items: Vec<DownloadJobItem> = Vec::with_capacity(body.tracks.len());
+    let mut skipped = 0usize;
+    for track in body.tracks {
+        let title = track.title.trim().to_string();
+        if track.tidal_track_id <= 0 || title.is_empty() {
+            skipped += 1;
+            continue;
+        }
+        let artist_name =
+            normalize_nonempty(track.artist_name).unwrap_or_else(|| "Unknown Artist".into());
+        match crate::services::tidal::import::import_track_from_metadata(
+            &db,
+            crate::services::tidal::import::ImportTrackMetadata {
+                tidal_id: track.tidal_track_id,
+                title,
+                artist_name,
+                artist_tidal_id: track.artist_tidal_id.filter(|id| *id > 0),
+                artist_picture: None,
+                album_title: normalize_nonempty(track.album_title),
+                album_tidal_id: track.album_tidal_id.filter(|id| *id > 0),
+                album_artwork_url: normalize_nonempty(track.artwork_url),
+                duration_ms: track.duration_ms.filter(|d| *d > 0),
+            },
+        )
+        .await
+        {
+            Ok(imported) => items.push(DownloadJobItem {
+                track_id: imported.local_id,
+                format,
+            }),
+            Err(e) => {
+                tracing::warn!(
+                    target = "noor.download",
+                    "TIDAL batch import skipped a track: {e}"
+                );
+                skipped += 1;
+            }
+        }
+    }
+
+    if items.is_empty() {
+        return Ok(Json(
+            json!({ "status": "empty", "count": 0, "skipped": skipped }),
+        ));
+    }
+    let count = items.len();
+    enqueue_and_spawn(&state, items, false).await;
+    Ok(Json(
+        json!({ "status": "queued", "count": count, "skipped": skipped }),
+    ))
+}
+
 /// `POST /api/downloads/batch` — queue many tracks (e.g. a whole album/playlist) to run
 /// sequentially in the background.
 pub async fn download_batch(

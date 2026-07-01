@@ -140,6 +140,132 @@ export async function downloadTrack(trackId: number, format?: DownloadFormat): P
 	}
 }
 
+/** Narrow shape shared by a library `Track` and a `TidalPlayable` — enough to ask the
+ *  server to import + download a track that may not be in the local library. */
+export interface TidalDownloadable {
+	tidal_id: number | null;
+	title: string;
+	artist_name: string | null;
+	album_title: string | null;
+	artwork_url: string | null;
+	duration_ms: number | null;
+	artist_tidal_id?: number | null;
+	album_tidal_id?: number | null;
+}
+
+/** The metadata the server needs to import + download a TIDAL track. Shared by the single
+ *  and batch paths so the two payloads can't drift. */
+function tidalTrackPayload(track: TidalDownloadable) {
+	return {
+		tidal_track_id: track.tidal_id,
+		title: track.title,
+		artist_name: track.artist_name,
+		album_title: track.album_title,
+		artwork_url: track.artwork_url,
+		duration_ms: track.duration_ms,
+		artist_tidal_id: track.artist_tidal_id ?? null,
+		album_tidal_id: track.album_tidal_id ?? null
+	};
+}
+
+/** Download a TIDAL track that may not be a library track (e.g. a search result or an
+ *  ephemeral now-playing row). The server imports it to mint a local id, then queues it
+ *  through the same worker as library downloads. Completion arrives via the WS event. */
+export async function downloadTidalTrack(
+	track: TidalDownloadable,
+	format?: DownloadFormat
+): Promise<void> {
+	if (!track.tidal_id || track.tidal_id <= 0) {
+		showToast("This track isn't on TIDAL, so it can't be downloaded.", 'error', 4500);
+		return;
+	}
+	try {
+		const qs = format ? `?format=${format}` : '';
+		const resp = await authFetch(api(`/api/tidal/download${qs}`), {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify(tidalTrackPayload(track)),
+			timeoutMs: 30_000
+		});
+		if (!resp.ok) {
+			showToast("Couldn't start the download.", 'error', 4000);
+			return;
+		}
+		const data = await resp.json().catch(() => ({}));
+		if (data?.status === 'unavailable') {
+			showToast(data.message ?? "This track can't be downloaded.", 'error', 4500);
+			return;
+		}
+		// The server minted (or reused) a local id; track it so the per-item WS event
+		// raises the "Downloaded / Show in folder" toast, same as a library single.
+		if (typeof data?.local_id === 'number') {
+			pendingSingles.add(data.local_id);
+		}
+	} catch {
+		showToast("Couldn't start the download.", 'error', 4000);
+	}
+}
+
+/** Download many TIDAL tracks (an album or playlist) that may not be library tracks. Mirrors
+ *  `downloadTracks` (optimistic pill, batch-complete toast), but routes through the import
+ *  endpoint so non-library tracks get a local row first. */
+export async function downloadTidalTracks(
+	tracks: TidalDownloadable[],
+	format?: DownloadFormat
+): Promise<void> {
+	const valid = tracks.filter((t) => typeof t.tidal_id === 'number' && t.tidal_id > 0);
+	if (!valid.length) {
+		showToast('Nothing here to download.', 'info', 3000);
+		return;
+	}
+	// Optimistic: show the pill immediately; the worker's progress events refine it.
+	downloadProgress.set({ done: 0, total: valid.length, currentTitle: null });
+	try {
+		const resp = await authFetch(api('/api/tidal/downloads/batch'), {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ tracks: valid.map(tidalTrackPayload), format }),
+			timeoutMs: 30_000
+		});
+		if (!resp.ok) {
+			downloadProgress.set(null);
+			showToast("Couldn't start the downloads.", 'error', 4000);
+		}
+	} catch {
+		downloadProgress.set(null);
+		showToast("Couldn't start the downloads.", 'error', 4000);
+	}
+}
+
+/** Fetch a TIDAL container's tracklist and queue every track for download. The tracklist is
+ *  the same one the container would play, so "Download album" downloads exactly what "Play
+ *  album" plays. */
+async function downloadTidalContainer(tracksPath: string, format?: DownloadFormat): Promise<void> {
+	try {
+		const resp = await authFetch(api(tracksPath));
+		if (!resp.ok) {
+			showToast("Couldn't load the tracks to download.", 'error', 4000);
+			return;
+		}
+		const data = await resp.json();
+		const tracks = (Array.isArray(data) ? data : (data?.tracks ?? data?.items ?? [])) as TidalDownloadable[];
+		await downloadTidalTracks(tracks, format);
+	} catch {
+		showToast("Couldn't load the tracks to download.", 'error', 4000);
+	}
+}
+
+export function downloadTidalAlbum(tidalAlbumId: number, format?: DownloadFormat): Promise<void> {
+	return downloadTidalContainer(`/api/tidal/albums/${tidalAlbumId}/tracks`, format);
+}
+
+export function downloadTidalPlaylist(tidalUuid: string, format?: DownloadFormat): Promise<void> {
+	return downloadTidalContainer(
+		`/api/tidal/playlists/${encodeURIComponent(tidalUuid)}/tracks`,
+		format
+	);
+}
+
 export async function downloadTracks(ids: number[], format?: DownloadFormat): Promise<void> {
 	if (!ids.length) return;
 	// Optimistic: show the pill immediately; the worker's progress events refine it.

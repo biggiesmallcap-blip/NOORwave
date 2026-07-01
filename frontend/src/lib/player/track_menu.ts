@@ -17,7 +17,7 @@ import {
 } from '$lib/stores/player';
 import type { TidalPlayable } from '$lib/api/client';
 import { canPlayTrack, getPlayableLabel } from '$lib/player/playable';
-import { downloadTrack } from '$lib/stores/downloads';
+import { downloadTrack, downloadTidalTrack, type DownloadFormat } from '$lib/stores/downloads';
 
 // Narrow shape so the builder can accept a Track, a QueueItem.track, or a
 // DiscoveryRadioResult mapped through `mapRadioToMenuTrack`. We avoid a hard
@@ -91,6 +91,26 @@ function favouriteMenuItem(localId: number, isFavorite: boolean): MenuItem {
 
 function goToMenuItem(label: string, href: string): MenuItem {
 	return { label, icon: '→', onSelect: () => void goto(href) };
+}
+
+// Download-to-disk submenu (FLAC/AAC/MP3). Desktop-only: the server writes to the
+// desktop's library folder, so callers hide it on the /remote mobile surface. Shared by
+// the track, album, and playlist menus so the format list can't drift between them; they
+// only differ in the label and in how a format maps to a trigger (local id vs TIDAL
+// metadata, single track vs whole container).
+export function downloadMenuItem(
+	trigger: (format: DownloadFormat) => void,
+	label = 'Download'
+): MenuItem {
+	return {
+		label,
+		icon: '⤓',
+		submenu: [
+			{ label: 'FLAC (lossless)', icon: '⤓', onSelect: () => trigger('flac') },
+			{ label: 'AAC (M4A, 320)', icon: '⤓', onSelect: () => trigger('aac') },
+			{ label: 'MP3 (320)', icon: '⤓', onSelect: () => trigger('mp3') }
+		]
+	};
 }
 
 function removeFromQueueMenuItem(queueItemId: number, onRemoved?: () => void): MenuItem {
@@ -188,30 +208,8 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 
 	items.push(favouriteMenuItem(track.id, track.is_favorite ?? false));
 
-	// Download to disk. Desktop-only: the server writes to the desktop's library
-	// folder, so it's hidden on the /remote mobile surface.
 	if (!options.remoteRoutes) {
-		items.push({
-			label: 'Download',
-			icon: '⤓',
-			submenu: [
-				{
-					label: 'FLAC (lossless)',
-					icon: '⤓',
-					onSelect: () => void downloadTrack(track.id, 'flac')
-				},
-				{
-					label: 'AAC (M4A, 320)',
-					icon: '⤓',
-					onSelect: () => void downloadTrack(track.id, 'aac')
-				},
-				{
-					label: 'MP3 (320)',
-					icon: '⤓',
-					onSelect: () => void downloadTrack(track.id, 'mp3')
-				}
-			]
-		});
+		items.push(downloadMenuItem((format) => void downloadTrack(track.id, format)));
 	}
 
 	if (options.queueItemId != null) {
@@ -289,6 +287,13 @@ export function buildTidalTrackMenu(track: TidalPlayable, options: BuildTidalTra
 		hint: playable ? undefined : playableLabel,
 		onSelect: () => void playTidalTrackNow(track),
 	});
+
+	// Download to disk works for any TIDAL track, library or not: the server imports it
+	// on demand to mint a local id. Desktop-only, same as the library menu.
+	if (!options.remoteRoutes) {
+		items.push(SEPARATOR);
+		items.push(downloadMenuItem((format) => void downloadTidalTrack(track, format)));
+	}
 
 	if (queueItemId != null) {
 		items.push(SEPARATOR);
