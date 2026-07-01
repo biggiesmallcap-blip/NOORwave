@@ -1719,10 +1719,110 @@ void main(){
 }
 `;
 
+// ─── Beat-reactive shaders ───────────────────────────────────────────────────
+// These read u_beat (0..1 sawtooth synced to the playing track's BPM + position),
+// u_energy (0..1 track DSP energy), and u_playing (1 while playing). With nothing
+// playing they fall back to a gentle default tempo so they still animate.
+
+export const SHADER_PULSE = /* glsl */ `
+void main(){
+  vec2 uv = gl_FragCoord.xy / u_resolution.xy;
+  vec2 p = uv; p.x *= u_resolution.x / u_resolution.y;
+  vec2 m = u_mouse; m.x *= u_resolution.x / u_resolution.y;
+
+  float d = distance(p, m);              // cursor is the emitter
+  float amp = 0.3 + u_energy * 0.9;
+
+  // Three staggered rings so successive beats overlap into a steady heartbeat.
+  float ring = 0.0;
+  for(int i=0;i<3;i++){
+    float ph = fract(u_beat + float(i)/3.0);
+    ring += exp(-pow((d - ph*1.2)*10.0, 2.0)) * (1.0 - ph) * amp;
+  }
+  float flash = pow(1.0 - u_beat, 4.0) * amp;   // sharp kick on the beat
+
+  vec3 col = vec3(0.01, 0.012, 0.02);
+  col += mix(u_color2, u_color3, 0.5) * ring * 1.6;
+  col += u_color3 * flash * exp(-d*3.0) * 1.2;
+  col += u_color1 * 0.1;
+  col += u_color2 * 0.05 * (0.5 + 0.5*sin(u_time*0.5 + d*6.0)) * (1.0 - u_playing);  // idle shimmer
+
+  col *= 1.0 - dot(uv - 0.5, uv - 0.5) * 0.5;
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+export const SHADER_EQ_REACT = /* glsl */ `
+float hashF(float x){ return fract(sin(x*127.1)*43758.5453); }
+float n1(float x){ float i=floor(x), f=fract(x); return mix(hashF(i), hashF(i+1.0), f*f*(3.0-2.0*f)); }
+
+void main(){
+  vec2 uv = gl_FragCoord.xy / u_resolution.xy;
+  const float BARS = 48.0;
+  float bar = floor(uv.x * BARS);
+  float inBar = fract(uv.x * BARS);
+  float fnorm = bar / BARS;
+
+  // Pseudo-spectrum: per-bar wander tilted toward the lows. Energy raises the whole
+  // field; the beat kicks the low bars so bass hits read as a jump on the left.
+  float tilt = pow(1.0 - fnorm, 1.3);
+  float wander = n1(bar*1.3 + u_time*1.5)*0.6 + n1(bar*0.5 + u_time*3.0)*0.4;
+  float kick = pow(1.0 - u_beat, 3.0) * smoothstep(0.5, 0.0, fnorm);
+  float h = clamp((0.12 + wander*tilt*0.7) * (0.4 + u_energy*1.4) + kick*0.5*u_energy, 0.0, 0.95);
+
+  float baseline = 0.06;
+  float top = baseline + h;
+  float gap = 0.12;
+  float bm = step(gap*0.5, inBar) * step(inBar, 1.0 - gap*0.5);
+  float inside = step(uv.y, top) * step(baseline, uv.y) * bm;
+  float grad = smoothstep(baseline, top, uv.y);
+
+  vec3 barCol = mix(u_color2, u_color3, grad);
+  barCol += u_color4 * smoothstep(0.85, 1.0, grad);      // hot tips
+  vec3 col = vec3(0.01, 0.012, 0.02);
+  col += barCol * inside;
+  col += u_color4 * (1.0 - smoothstep(0.0, 0.006, abs(uv.y - top))) * bm * step(0.02, h);  // peak cap
+  col += u_color1 * (1.0 - smoothstep(0.0, 0.004, abs(uv.y - baseline))) * 0.6;              // floor line
+
+  col *= 1.0 - dot(uv - 0.5, uv - 0.5) * 0.3;
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+export const SHADER_BEAT_TUNNEL = /* glsl */ `
+#define PI 3.14159265
+void main(){
+  vec2 uv = (gl_FragCoord.xy - 0.5*u_resolution.xy) / u_resolution.y;
+  vec2 m = u_mouse - 0.5;
+
+  float r = length(uv - m*0.3);
+  float a = atan(uv.y, uv.x);
+  float kick = pow(1.0 - u_beat, 3.0);
+  float z = u_time*0.3 + kick*0.6*(0.3 + u_energy);   // camera lurches forward on the beat
+
+  float depth = 1.0 / max(r, 0.02);
+  float ring = 0.5 + 0.5*sin((depth + z*4.0)*3.0);
+  float spokes = 0.5 + 0.5*sin(a*8.0 + z*2.0);
+  float pattern = ring * spokes;
+  float bloom = (0.3 + u_energy*1.2) * (0.5 + kick);
+
+  vec3 col = mix(u_color1, u_color2, pattern);
+  col = mix(col, u_color3, smoothstep(0.6, 1.0, pattern));
+  col *= smoothstep(0.0, 0.25, r);            // dark throat
+  col += u_color4 * pow(ring, 3.0) * 0.3 * bloom;
+  col *= exp(-r*0.5) * 1.4;                    // depth falloff
+  col += mix(u_color3, vec3(1.0), 0.4) * exp(-r*4.0) * kick * bloom;   // core flashes on the beat
+  col += u_color2 * 0.04 * (1.0 - u_playing);  // idle drift
+
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
 export type WallpaperId = 'none' | 'aurora' | 'chrome' | 'grid' | 'nebula' | 'topo'
                         | 'topo-noir' | 'aurora-deep' | 'chrome-brushed'
                         | 'zen' | 'galaxy'
                         | 'blackhole' | 'kifs' | 'voronoi-glass' | 'curl-flow' | 'raymarch-lattice'
+                        | 'pulse' | 'eq-react' | 'beat-tunnel'
                         | 'joy-division' | 'oscilloscope' | 'spectrum' | 'vinyl' | 'tape'
                         | 'phasing' | 'spectrogram' | 'lissajous' | 'drone' | 'reel'
                         | 'standing-wave'
@@ -1757,6 +1857,9 @@ export const WALLPAPERS: WallpaperOption[] = [
 	{ id: 'kifs',           label: 'Fracture',      sublabel: 'Kaleidoscopic fractal jewel · cursor folds space',           shader: SHADER_KIFS },
 	{ id: 'voronoi-glass',  label: 'Stained Glass', sublabel: 'Refractive glass panes · cursor lights the leading',         shader: SHADER_VORONOI_GLASS },
 	{ id: 'curl-flow',      label: 'Silk',          sublabel: 'Curl-noise flow · cursor stirs a vortex',                     shader: SHADER_CURL_FLOW },
+	{ id: 'pulse',          label: 'Pulse',         sublabel: 'Shockwave rings on every beat · reacts to what is playing',   shader: SHADER_PULSE },
+	{ id: 'eq-react',       label: 'Live EQ',       sublabel: 'Analyzer bars driven by the track · bass kicks on the beat',  shader: SHADER_EQ_REACT },
+	{ id: 'beat-tunnel',    label: 'Beat Tunnel',   sublabel: 'Zoom tunnel that lurches forward on the beat · energy blooms', shader: SHADER_BEAT_TUNNEL },
 	{ id: 'pattern-speed',   label: 'Speed',   sublabel: 'Futurist radial force lines',        shader: SHADER_PATTERN_SPEED },
 	{ id: 'pattern-vortex',  label: 'Vortex',  sublabel: 'Rotating logarithmic arms',          shader: SHADER_PATTERN_VORTEX },
 	{ id: 'pattern-shards',  label: 'Shards',  sublabel: 'Cellular fractured shards',          shader: SHADER_PATTERN_SHARDS },

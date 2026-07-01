@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { palette } from '$lib/stores/palette';
 	import { DEFAULT_PALETTE, paletteById, type PaletteId } from '$lib/components/wallpaper/palettes';
+	import { currentTrackFeatures, isPlaying, position } from '$lib/stores/player';
 
 	type Props = {
 		shader: string;
@@ -38,6 +39,9 @@ uniform vec3 u_color1;
 uniform vec3 u_color2;
 uniform vec3 u_color3;
 uniform vec3 u_color4;
+uniform float u_beat;
+uniform float u_energy;
+uniform float u_playing;
 `;
 
 	function compile(gl: WebGLRenderingContext, type: number, src: string) {
@@ -83,6 +87,27 @@ uniform vec3 u_color4;
 			currentPalette = v;
 		});
 
+		// Beat-reactive uniforms. The playing track's tempo/energy drive the shaders;
+		// position is re-anchored on each store emission (it ticks every ~250ms) and
+		// interpolated against the wall clock per-frame so the beat phase stays smooth.
+		let trackBpm = 0;
+		let trackEnergy = 0;
+		let playing = false;
+		let posBaseMs = 0;
+		let posBaseAt = performance.now();
+		const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+		const unsubFeatures = currentTrackFeatures.subscribe((f) => {
+			trackBpm = f?.bpm ?? 0;
+			trackEnergy = clamp01(f?.energy ?? 0);
+		});
+		const unsubPlaying = isPlaying.subscribe((v) => {
+			playing = v;
+		});
+		const unsubPosition = position.subscribe((v) => {
+			posBaseMs = v;
+			posBaseAt = performance.now();
+		});
+
 		let prog: WebGLProgram | null = null;
 		let buf: WebGLBuffer | null = null;
 		let uRes: WebGLUniformLocation | null = null;
@@ -97,6 +122,9 @@ uniform vec3 u_color4;
 		let uColor2: WebGLUniformLocation | null = null;
 		let uColor3: WebGLUniformLocation | null = null;
 		let uColor4: WebGLUniformLocation | null = null;
+		let uBeat: WebGLUniformLocation | null = null;
+		let uEnergy: WebGLUniformLocation | null = null;
+		let uPlaying: WebGLUniformLocation | null = null;
 
 		function setupProgram(fragSrc: string) {
 			if (prog) gl!.deleteProgram(prog);
@@ -135,6 +163,9 @@ uniform vec3 u_color4;
 			uColor2 = gl!.getUniformLocation(prog, 'u_color2');
 			uColor3 = gl!.getUniformLocation(prog, 'u_color3');
 			uColor4 = gl!.getUniformLocation(prog, 'u_color4');
+			uBeat = gl!.getUniformLocation(prog, 'u_beat');
+			uEnergy = gl!.getUniformLocation(prog, 'u_energy');
+			uPlaying = gl!.getUniformLocation(prog, 'u_playing');
 		}
 
 		setupProgram(shader);
@@ -240,6 +271,16 @@ uniform vec3 u_color4;
 			gl!.uniform3f(uColor3!, pal.c3[0], pal.c3[1], pal.c3[2]);
 			gl!.uniform3f(uColor4!, pal.c4[0], pal.c4[1], pal.c4[2]);
 
+			// Interpolate position off the last store emission; freeze the phase when
+			// paused. Unknown/invalid BPM falls back to a gentle 100 so reactive
+			// shaders still breathe (and preview) instead of going dead.
+			const estPosMs = playing ? posBaseMs + (now - posBaseAt) : posBaseMs;
+			const tempo = trackBpm > 30 && trackBpm < 300 ? trackBpm : 100;
+			const beatPhase = ((estPosMs / 1000) * (tempo / 60)) % 1;
+			gl!.uniform1f(uBeat!, beatPhase);
+			gl!.uniform1f(uEnergy!, trackEnergy);
+			gl!.uniform1f(uPlaying!, playing ? 1 : 0);
+
 			gl!.drawArrays(gl!.TRIANGLES, 0, 3);
 		};
 		loop();
@@ -268,6 +309,9 @@ uniform vec3 u_color4;
 			cancelAnimationFrame(raf);
 			ro.disconnect();
 			unsubPalette();
+			unsubFeatures();
+			unsubPlaying();
+			unsubPosition();
 			canvas.removeEventListener('webglcontextlost', onContextLost);
 			canvas.removeEventListener('webglcontextrestored', onContextRestored);
 			document.removeEventListener('visibilitychange', onVisibility);
