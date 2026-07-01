@@ -139,6 +139,8 @@ impl PreparedPlaybackJob {
                 duration_ms: Some(180_000),
                 isrc: None,
                 tidal_id: None,
+                artist_tidal_id: None,
+                album_tidal_id: None,
                 ytmusic_id: None,
                 soundcloud_id: None,
                 best_quality: None,
@@ -2021,7 +2023,9 @@ mod tests {
                 tidal_id_hint    INTEGER,
                 ephemeral_album_title TEXT,
                 ephemeral_artwork_url TEXT,
-                ephemeral_duration_ms INTEGER
+                ephemeral_duration_ms INTEGER,
+                ephemeral_artist_tidal_id INTEGER,
+                ephemeral_album_tidal_id INTEGER
             );
             CREATE TABLE genres (
                 id INTEGER PRIMARY KEY,
@@ -3480,6 +3484,8 @@ mod tests {
             duration_ms: Some(180_000),
             isrc: None,
             tidal_id,
+            artist_tidal_id: None,
+            album_tidal_id: None,
             ytmusic_id: None,
             soundcloud_id: None,
             best_quality: quality.map(|s| s.to_string()),
@@ -5016,7 +5022,9 @@ mod tests {
                 tidal_id_hint    INTEGER,
                 ephemeral_album_title TEXT,
                 ephemeral_artwork_url TEXT,
-                ephemeral_duration_ms INTEGER
+                ephemeral_duration_ms INTEGER,
+                ephemeral_artist_tidal_id INTEGER,
+                ephemeral_album_tidal_id INTEGER
             );
             CREATE TABLE genres (id INTEGER PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL, parent_id INTEGER);
             CREATE TABLE track_genres (
@@ -5461,6 +5469,8 @@ mod quality_precedence_tests {
             duration_ms: None,
             isrc: None,
             tidal_id: Some(1),
+            artist_tidal_id: None,
+            album_tidal_id: None,
             ytmusic_id: None,
             soundcloud_id: None,
             best_quality: best.map(String::from),
@@ -5633,6 +5643,8 @@ mod parity_tests {
             duration_ms: Some(180_000),
             isrc: None,
             tidal_id: Some(id),
+            artist_tidal_id: None,
+            album_tidal_id: None,
             ytmusic_id: None,
             soundcloud_id: None,
             best_quality: Some("LOSSLESS".to_string()),

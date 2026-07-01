@@ -420,6 +420,19 @@ pub struct QueueExternalRequest {
     artist: Option<String>,
     #[serde(default)]
     title: Option<String>,
+    // Display + identity metadata, used only when folding a TIDAL pick into a live
+    // mix as an ephemeral row so the queued row renders with art/album/duration and
+    // keeps clickable artist/album links. Ignored on the library/pending paths.
+    #[serde(default)]
+    album_title: Option<String>,
+    #[serde(default)]
+    artwork_url: Option<String>,
+    #[serde(default)]
+    duration_ms: Option<i64>,
+    #[serde(default)]
+    artist_tidal_id: Option<i64>,
+    #[serde(default)]
+    album_tidal_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5600,6 +5613,10 @@ fn discovery_result_to_track(
         duration_ms: payload.duration_ms,
         isrc: None,
         tidal_id: Some(tidal_track_id),
+        artist_tidal_id: None,
+        album_tidal_id: None,
+        // Discovery play carries no artist/album tidal ids yet; links fall back to
+        // the frontend metadata cache for user-launched discovery plays.
         ytmusic_id: None,
         soundcloud_id: None,
         best_quality: payload.audio_quality.clone(),
@@ -8638,6 +8655,39 @@ fn queue_external_insert<'a>(
     }
 }
 
+/// Build an ephemeral TIDAL insert from a queue request, but only when it names a
+/// streamable TIDAL track (kind=tidal with a positive tidal_id and a title).
+/// Returns `None` for library/external requests, which can't stream by tidal_id,
+/// so callers fall back to the normal pending/library insert path. Used to fold a
+/// "Play next" / "Add to queue" of a TIDAL track into a live mix continuation.
+fn ephemeral_tidal_insert(
+    payload: &QueueExternalRequest,
+) -> Option<queue::EphemeralTidalInsert<'_>> {
+    if payload.kind != QueueExternalKind::Tidal {
+        return None;
+    }
+    let tidal_id = payload.tidal_id.filter(|id| *id > 0)?;
+    let title = payload
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    Some(queue::EphemeralTidalInsert {
+        tidal_id,
+        title,
+        artist: payload
+            .artist
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+        album_title: payload.album_title.as_deref(),
+        artwork_url: payload.artwork_url.as_deref(),
+        duration_ms: payload.duration_ms,
+        artist_tidal_id: payload.artist_tidal_id,
+        album_tidal_id: payload.album_tidal_id,
+    })
+}
+
 fn current_queue_position(conn: &rusqlite::Connection) -> anyhow::Result<Option<i32>> {
     let (current_queue_item_id, current_track_id): (Option<i64>, Option<i64>) = conn.query_row(
         "SELECT current_queue_item_id, current_track_id FROM playback_state WHERE id = 1",
@@ -8839,14 +8889,32 @@ async fn queue_append(
         state_guard
             .user_cleared_at
             .store(0, std::sync::atomic::Ordering::Relaxed);
+        // During a live TIDAL mix, append a TIDAL pick onto the ephemeral
+        // continuation so it plays after the rest of the mix and is popped when
+        // done, instead of stranding a user_queue pending row the mix-advance
+        // pipeline never reads. See EPHEMERAL_USER_TIDAL_SOURCE.
+        let ephemeral_active = state_guard.ephemeral_tidal_track.is_some()
+            || state_guard.external_playback_track.is_some();
+        let ephemeral_insert = ephemeral_active
+            .then(|| ephemeral_tidal_insert(&payload))
+            .flatten();
         let event_tx = state_guard.event_tx.clone();
         state_guard
             .db
             .with_conn(|conn| {
+                if let Some(eph) = ephemeral_insert.as_ref() {
+                    let queue = queue::append_ephemeral_tidal_tracks(
+                        conn,
+                        std::slice::from_ref(eph),
+                        queue::EPHEMERAL_USER_TIDAL_SOURCE,
+                    )?;
+                    let _ = event_tx.send(AppEvent::QueueUpdated);
+                    return Ok((queue, None));
+                }
                 let inserted = queue::append_external_track(conn, &insert)?;
                 let queue = queue::load_queue(conn)?;
                 let _ = event_tx.send(AppEvent::QueueUpdated);
-                Ok((queue, inserted))
+                Ok((queue, Some(inserted)))
             })
             .map_err(|_| {
                 (
@@ -8856,7 +8924,7 @@ async fn queue_append(
             })?
     };
 
-    let pending_count = matches!(inserted, queue::InsertResult::Pending { .. }) as usize;
+    let pending_count = matches!(inserted, Some(queue::InsertResult::Pending { .. })) as usize;
     tracing::info!(
         target: "noor.playback.queue",
         event = "queue_append",
@@ -8865,7 +8933,7 @@ async fn queue_append(
         "appended queue item"
     );
 
-    if let queue::InsertResult::Pending { queue_id } = inserted {
+    if let Some(queue::InsertResult::Pending { queue_id }) = inserted {
         spawn_pending_queue_resolver(&state, queue_id).await;
     }
     refresh_dj_after_queue_change(state, "queue_append").await;
@@ -8889,10 +8957,32 @@ async fn queue_append_many(
         state_guard
             .user_cleared_at
             .store(0, std::sync::atomic::Ordering::Relaxed);
+        // See queue_append: during a live mix, append the batch onto the ephemeral
+        // continuation, but only when every item is a streamable TIDAL track.
+        let ephemeral_active = state_guard.ephemeral_tidal_track.is_some()
+            || state_guard.external_playback_track.is_some();
+        let ephemeral_inserts = ephemeral_active
+            .then(|| {
+                payload
+                    .items
+                    .iter()
+                    .map(ephemeral_tidal_insert)
+                    .collect::<Option<Vec<_>>>()
+            })
+            .flatten();
         let event_tx = state_guard.event_tx.clone();
         state_guard
             .db
             .with_conn(|conn| {
+                if let Some(eph) = ephemeral_inserts.as_ref() {
+                    let queue = queue::append_ephemeral_tidal_tracks(
+                        conn,
+                        eph,
+                        queue::EPHEMERAL_USER_TIDAL_SOURCE,
+                    )?;
+                    let _ = event_tx.send(AppEvent::QueueUpdated);
+                    return Ok((queue, Vec::new()));
+                }
                 let inserted = queue::append_external_tracks(conn, &inserts)?;
                 let queue = queue::load_queue(conn)?;
                 let _ = event_tx.send(AppEvent::QueueUpdated);
@@ -8970,6 +9060,14 @@ async fn queue_play_next(
         // Up Next during a mix).
         let ephemeral_active = state_guard.ephemeral_tidal_track.is_some()
             || state_guard.external_playback_track.is_some();
+        // During a live TIDAL mix, fold a TIDAL pick into the ephemeral
+        // continuation so the mix-advance pipeline actually plays it next and pops
+        // it when done. A user_play_next pending row is invisible to that pipeline
+        // (it filters on the ephemeral sources), so it would never fire and never
+        // leave the queue.
+        let ephemeral_insert = ephemeral_active
+            .then(|| ephemeral_tidal_insert(&payload))
+            .flatten();
         let event_tx = state_guard.event_tx.clone();
         state_guard
             .db
@@ -8979,13 +9077,31 @@ async fn queue_play_next(
                     queue::front_position(conn)?,
                     ephemeral_active,
                 );
+                if let Some(eph) = ephemeral_insert.as_ref() {
+                    let slice = std::slice::from_ref(eph);
+                    let queue = match after {
+                        Some(after) => queue::insert_ephemeral_tidal_tracks_after(
+                            conn,
+                            slice,
+                            after,
+                            queue::EPHEMERAL_USER_TIDAL_SOURCE,
+                        )?,
+                        None => queue::append_ephemeral_tidal_tracks(
+                            conn,
+                            slice,
+                            queue::EPHEMERAL_USER_TIDAL_SOURCE,
+                        )?,
+                    };
+                    let _ = event_tx.send(AppEvent::QueueUpdated);
+                    return Ok((queue, None));
+                }
                 let inserted = match after {
                     Some(after) => queue::insert_external_track_after(conn, &insert, after)?,
                     None => queue::append_external_track(conn, &insert)?,
                 };
                 let queue = queue::load_queue(conn)?;
                 let _ = event_tx.send(AppEvent::QueueUpdated);
-                Ok((queue, inserted))
+                Ok((queue, Some(inserted)))
             })
             .map_err(|_| {
                 (
@@ -8995,7 +9111,7 @@ async fn queue_play_next(
             })?
     };
 
-    let pending_count = matches!(inserted, queue::InsertResult::Pending { .. }) as usize;
+    let pending_count = matches!(inserted, Some(queue::InsertResult::Pending { .. })) as usize;
     tracing::info!(
         target: "noor.playback.queue",
         event = "queue_play_next",
@@ -9004,7 +9120,7 @@ async fn queue_play_next(
         "inserted queue item after current"
     );
 
-    if let queue::InsertResult::Pending { queue_id } = inserted {
+    if let Some(queue::InsertResult::Pending { queue_id }) = inserted {
         spawn_pending_queue_resolver(&state, queue_id).await;
     }
     refresh_dj_after_queue_change(state, "queue_play_next").await;
@@ -9032,6 +9148,18 @@ async fn queue_play_next_many(
         // ephemeral mix instead of appending to the bottom.
         let ephemeral_active = state_guard.ephemeral_tidal_track.is_some()
             || state_guard.external_playback_track.is_some();
+        // Fold into the live mix only when every item is a streamable TIDAL track,
+        // so the batch stays in order under one consumption model. A mixed batch
+        // (any library/external item) falls back to the pending/library path.
+        let ephemeral_inserts = ephemeral_active
+            .then(|| {
+                payload
+                    .items
+                    .iter()
+                    .map(ephemeral_tidal_insert)
+                    .collect::<Option<Vec<_>>>()
+            })
+            .flatten();
         let event_tx = state_guard.event_tx.clone();
         state_guard
             .db
@@ -9041,6 +9169,23 @@ async fn queue_play_next_many(
                     queue::front_position(conn)?,
                     ephemeral_active,
                 );
+                if let Some(eph) = ephemeral_inserts.as_ref() {
+                    let queue = match after {
+                        Some(after) => queue::insert_ephemeral_tidal_tracks_after(
+                            conn,
+                            eph,
+                            after,
+                            queue::EPHEMERAL_USER_TIDAL_SOURCE,
+                        )?,
+                        None => queue::append_ephemeral_tidal_tracks(
+                            conn,
+                            eph,
+                            queue::EPHEMERAL_USER_TIDAL_SOURCE,
+                        )?,
+                    };
+                    let _ = event_tx.send(AppEvent::QueueUpdated);
+                    return Ok((queue, Vec::new()));
+                }
                 let inserted = match after {
                     Some(after) => queue::insert_external_tracks_after(conn, &inserts, after)?,
                     None => queue::append_external_tracks(conn, &inserts)?,
@@ -10862,6 +11007,13 @@ struct PlayTidalRequest {
     album_title: Option<String>,
     artwork_url: Option<String>,
     duration_ms: Option<i64>,
+    // TIDAL artist/album ids so the synthetic now-playing track and queued
+    // continuation rows keep clickable artist/album links. Sent by the frontend
+    // for every mix/playlist/album launch; defaulted for older callers.
+    #[serde(default)]
+    artist_tidal_id: Option<i64>,
+    #[serde(default)]
+    album_tidal_id: Option<i64>,
 }
 
 async fn play_tidal_ephemeral(
@@ -10889,6 +11041,8 @@ async fn play_tidal_ephemeral(
         album_title: body.album_title,
         artwork_url: body.artwork_url,
         duration_ms: body.duration_ms,
+        artist_tidal_id: body.artist_tidal_id,
+        album_tidal_id: body.album_tidal_id,
     };
     start_ephemeral_tidal_playback(&state, track).await?;
     let snapshot = build_live_playback_snapshot_json(&state).await?;
@@ -11008,6 +11162,8 @@ async fn play_tidal_mix(
         album_title: tracks[0].album_title.clone(),
         artwork_url: tracks[0].artwork_url.clone(),
         duration_ms: tracks[0].duration_ms,
+        artist_tidal_id: tracks[0].artist_tidal_id,
+        album_tidal_id: tracks[0].album_tidal_id,
     };
     let first_tidal_id = first.tidal_track_id;
 
@@ -11028,6 +11184,8 @@ async fn play_tidal_mix(
             album_title: t.album_title.as_deref(),
             artwork_url: t.artwork_url.as_deref(),
             duration_ms: t.duration_ms,
+            artist_tidal_id: t.artist_tidal_id,
+            album_tidal_id: t.album_tidal_id,
         })
         .collect();
     if !rest_inserts.is_empty() {
@@ -11093,6 +11251,8 @@ fn build_ephemeral_synthetic_track(
         duration_ms: track.duration_ms,
         isrc: None,
         tidal_id: Some(track.tidal_track_id),
+        artist_tidal_id: track.artist_tidal_id,
+        album_tidal_id: track.album_tidal_id,
         ytmusic_id: None,
         soundcloud_id: None,
         best_quality: Some(stream_info.audio_quality.clone()),
@@ -11981,6 +12141,8 @@ async fn handle_ephemeral_tidal_near_end(
         duration_ms: pending_track.duration_ms,
         isrc: None,
         tidal_id: Some(pending_track.tidal_track_id),
+        artist_tidal_id: pending_track.artist_tidal_id,
+        album_tidal_id: pending_track.album_tidal_id,
         ytmusic_id: None,
         soundcloud_id: None,
         best_quality: None,

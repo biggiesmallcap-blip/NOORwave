@@ -980,6 +980,8 @@ fn chart_track_from_joined_row(
         duration_ms: row.get(8)?,
         isrc: row.get(9)?,
         tidal_id: row.get(10)?,
+        artist_tidal_id: None,
+        album_tidal_id: None,
         ytmusic_id: row.get(11)?,
         soundcloud_id: row.get(12)?,
         best_quality: row.get(13)?,

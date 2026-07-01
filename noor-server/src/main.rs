@@ -54,6 +54,10 @@ pub struct PendingEphemeralTidalTrack {
     pub album_title: Option<String>,
     pub artwork_url: Option<String>,
     pub duration_ms: Option<i64>,
+    // TIDAL identity carried through so the synthetic now-playing track and the
+    // Up Next rows can link to the artist/album pages.
+    pub artist_tidal_id: Option<i64>,
+    pub album_tidal_id: Option<i64>,
 }
 
 #[derive(Debug, Clone)]

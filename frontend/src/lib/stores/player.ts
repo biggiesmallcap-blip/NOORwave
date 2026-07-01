@@ -1629,6 +1629,7 @@ function tidalQueueRequest(track: TidalPlayable) {
 		artist: track.artist_name ?? 'Unknown Artist',
 		title: track.title,
 		album_title: track.album_title,
+		artwork_url: track.artwork_url ?? null,
 		artist_tidal_id: track.artist_tidal_id ?? null,
 		album_tidal_id: track.album_tidal_id ?? null,
 		duration_ms: track.duration_ms
