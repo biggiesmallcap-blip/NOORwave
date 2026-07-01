@@ -2391,7 +2391,7 @@
 				<SectionHeader eyebrow="Metadata" title="Last.fm tags" subtitle="Crowd tags from a local API key." />
 
 				{#if lastfmError}
-					<p class="page-copy" style="color: var(--state-error)">{lastfmError}</p>
+					<p class="page-copy is-error" role="alert">{lastfmError}</p>
 				{/if}
 
 				{#if !lastfmConfigured}
@@ -2778,7 +2778,7 @@
 					This action removes any such row that you never played, never favorited, and isn't in
 					any queue or playlist.
 				</p>
-				<p class="page-copy" style="color: var(--state-warning, #f3c969)">
+				<p class="page-copy is-warning">
 					Cascades to trained data referencing those tracks (embeddings, neighbours, transitions).
 					Storage savings are tiny — even 1,000 tracks/month for 10 years is ~20MB. Run for
 					tidiness only.
@@ -2789,7 +2789,7 @@
 					</p>
 				{/if}
 				{#if purgeError}
-					<p class="page-copy" style="color: var(--state-error, #f87171)">{purgeError}</p>
+					<p class="page-copy is-error" role="alert">{purgeError}</p>
 				{/if}
 				<div class="action-row">
 					<button class="btn btn-glass danger" onclick={purgeOrphanTidalStream} disabled={purgeRunning}>
@@ -4887,5 +4887,13 @@
 	.field-error {
 		font-size: var(--font-size-sm);
 		color: #ffb0b0;
+	}
+
+	.is-error {
+		color: var(--state-error);
+	}
+
+	.is-warning {
+		color: var(--state-warning);
 	}
 </style>
