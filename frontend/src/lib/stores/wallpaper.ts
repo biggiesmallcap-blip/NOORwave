@@ -17,6 +17,7 @@ export const VALID: WallpaperId[] = ['none', 'aurora', 'chrome', 'grid', 'nebula
                                'zen', 'galaxy',
                                'blackhole', 'kifs', 'voronoi-glass', 'curl-flow', 'raymarch-lattice',
                                'pulse', 'eq-react', 'beat-tunnel',
+                               'bass-bloom', 'starfield-warp', 'radial-eq',
                                'joy-division', 'oscilloscope', 'spectrum', 'vinyl', 'tape',
                                'phasing', 'spectrogram', 'lissajous', 'drone', 'reel',
                                'standing-wave',
