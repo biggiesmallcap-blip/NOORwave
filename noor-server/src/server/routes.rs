@@ -837,6 +837,14 @@ pub fn api_routes(state: SharedState) -> Router {
             post(download_routes::download_track),
         )
         .route(
+            "/api/tidal/download",
+            post(download_routes::download_tidal_track),
+        )
+        .route(
+            "/api/tidal/downloads/batch",
+            post(download_routes::download_tidal_batch),
+        )
+        .route(
             "/api/downloads/batch",
             post(download_routes::download_batch),
         )

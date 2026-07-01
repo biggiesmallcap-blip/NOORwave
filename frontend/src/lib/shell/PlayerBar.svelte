@@ -10,7 +10,7 @@
 		type TidalArtworkSize,
 	} from '$lib/utils/artwork';
 	import { getQualityClass } from '$lib/utils/format';
-	import { downloadTrack, defaultDownloadFormat } from '$lib/stores/downloads';
+	import { downloadTrack, downloadTidalTrack, defaultDownloadFormat } from '$lib/stores/downloads';
 
 	type PlayerBarError = {
 		message: string;
@@ -94,7 +94,13 @@
 		if (!track || downloadPending) return;
 		downloadPending = true;
 		try {
-			await downloadTrack(track.id, $defaultDownloadFormat);
+			// An ephemeral TIDAL track has no library row, so its id is negative; route
+			// through the import-then-download path instead of a doomed lookup by id.
+			if (track.id > 0) {
+				await downloadTrack(track.id, $defaultDownloadFormat);
+			} else {
+				await downloadTidalTrack(track, $defaultDownloadFormat);
+			}
 		} finally {
 			downloadPending = false;
 		}

@@ -15,7 +15,8 @@
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
-	import { buildTidalTrackMenu } from '$lib/player/track_menu';
+	import { buildTidalTrackMenu, downloadMenuItem } from '$lib/player/track_menu';
+	import { downloadTidalPlaylist } from '$lib/stores/downloads';
 	import { tidalHomeItemToPlayable } from '$lib/utils/track';
 
 	const moduleId = $derived(page.params.id ?? '');
@@ -99,7 +100,8 @@
 					label: 'Play playlist',
 					icon: '▶',
 					onSelect: () => { void playTidalPlaylist(item.id); }
-				}
+				},
+				downloadMenuItem((format) => void downloadTidalPlaylist(item.id, format), 'Download playlist')
 			],
 			item.title
 		);

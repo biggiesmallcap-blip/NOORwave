@@ -7,7 +7,8 @@ import {
 	playTidalAlbum,
 	saveTidalAlbumToLibrary,
 } from '$lib/stores/player';
-import { downloadAlbum } from '$lib/stores/downloads';
+import { downloadAlbum, downloadTidalAlbum } from '$lib/stores/downloads';
+import { downloadMenuItem } from '$lib/player/track_menu';
 
 // Narrow shape so the builder can accept a local Album, a TIDAL search album,
 // a TIDAL discography album, or a compact `{ id, title }` from a carousel.
@@ -132,22 +133,18 @@ export function buildAlbumMenu(album: AlbumLike, options: BuildAlbumMenuOptions 
 		});
 	}
 
-	// Batch download (desktop-only; the server writes to the local library folder).
-	if (isLocal && localId != null && !options.remoteRoutes) {
-		items.push(SEPARATOR);
-		items.push({
-			label: 'Download album',
-			icon: '⤓',
-			submenu: [
-				{
-					label: 'FLAC (lossless)',
-					icon: '⤓',
-					onSelect: () => void downloadAlbum(localId, 'flac')
-				},
-				{ label: 'AAC (M4A, 320)', icon: '⤓', onSelect: () => void downloadAlbum(localId, 'aac') },
-				{ label: 'MP3 (320)', icon: '⤓', onSelect: () => void downloadAlbum(localId, 'mp3') }
-			]
-		});
+	// Batch download (desktop-only; the server writes to the local library folder). Works
+	// for TIDAL albums too: the server imports the tracklist on demand to mint local rows.
+	if (!options.remoteRoutes) {
+		if (isLocal && localId != null) {
+			items.push(SEPARATOR);
+			items.push(downloadMenuItem((format) => void downloadAlbum(localId, format), 'Download album'));
+		} else if (tidalId != null) {
+			items.push(SEPARATOR);
+			items.push(
+				downloadMenuItem((format) => void downloadTidalAlbum(tidalId, format), 'Download album')
+			);
+		}
 	}
 
 	if (options.includeSelect && options.onSelect) {

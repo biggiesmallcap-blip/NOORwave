@@ -6,9 +6,10 @@
   import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type SpotifyPlaylistSearchItem, type SpotifyTrackSearchItem, type SpotifyAlbumSearchItem, type SearchResults } from '$lib/api/client'
   import { cachedApi } from '$lib/cache/api_queries'
   import DiscoverShelves from '$lib/components/search/DiscoverShelves.svelte'
-  import { buildTidalTrackMenu, buildTrackMenu } from '$lib/player/track_menu'
+  import { buildTidalTrackMenu, buildTrackMenu, downloadMenuItem } from '$lib/player/track_menu'
   import { buildAlbumMenu } from '$lib/player/album_menu'
   import { buildArtistMenu } from '$lib/player/artist_menu'
+  import { downloadTidalPlaylist } from '$lib/stores/downloads'
   import { openContextMenu, type MenuItem } from '$lib/stores/context_menu'
   import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio, playTrackNow, playTidalPlaylist } from '$lib/stores/player'
   import { formatTrackDuration } from '$lib/utils/format'
@@ -998,6 +999,7 @@
   function tidalPlaylistMenuItems(playlist: TidalSearchPlaylist): MenuItem[] {
     return [
       { label: 'Play', icon: '▶', onSelect: () => void playTidalPlaylist(playlist.uuid) },
+      downloadMenuItem((format) => void downloadTidalPlaylist(playlist.uuid, format), 'Download playlist'),
     ]
   }
 
