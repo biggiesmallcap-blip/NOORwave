@@ -8,6 +8,7 @@ import { handleDiscoverySpaceRefreshed, setRefreshProgress } from '$lib/componen
 import { setExclusiveEngaged, setExclusiveFailed, setExclusiveReleased } from '$lib/stores/exclusive_status';
 import { handleDownloadProgress, handleDownloadItemDone, handleDownloadComplete } from '$lib/stores/downloads';
 import { showToast } from '$lib/stores/toast';
+import { setAudioSpectrum } from '$lib/stores/audioSpectrum';
 import { applyCacheUpdateForWsMessage } from '$lib/cache/ws_events';
 
 export const wsConnected = writable(false);
@@ -76,6 +77,12 @@ export function connectWebSocket() {
 	socket.onmessage = (event) => {
 		try {
 			const data = JSON.parse(event.data);
+			// High-rate visualiser frames bypass the message log and cache path
+			// entirely, straight into a dedicated store.
+			if (data?.type === 'audio_spectrum') {
+				setAudioSpectrum(data.bands ?? []);
+				return;
+			}
 			wsMessages.update((msgs) => [...msgs.slice(-99), data]);
 			applyCacheUpdateForWsMessage(data);
 			if (data?.type === 'queue_updated') {

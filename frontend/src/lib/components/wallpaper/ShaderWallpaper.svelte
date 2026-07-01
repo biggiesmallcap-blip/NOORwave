@@ -12,6 +12,7 @@
 		wallpaperIdle
 	} from '$lib/stores/wallpaper';
 	import { artPalette, type ArtPalette } from '$lib/stores/artPalette';
+	import { audioSpectrum, NUM_BANDS } from '$lib/stores/audioSpectrum';
 
 	type Props = {
 		shader: string;
@@ -57,6 +58,8 @@ uniform float u_reactivity;
 uniform float u_pulse;
 uniform vec3 u_bands;
 uniform float u_level;
+uniform float u_spectrum[24];
+uniform float u_audio;
 `;
 
 	function compile(gl: WebGLRenderingContext, type: number, src: string) {
@@ -120,6 +123,7 @@ uniform float u_level;
 		let colorSource: 'palette' | 'art' = 'palette';
 		let idle: 'drift' | 'frozen' | 'demo' = 'drift';
 		let artColors: ArtPalette | null = null;
+		let liveSpectrum: number[] | null = null;
 		const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 		const unsubFeatures = currentTrackFeatures.subscribe((f) => {
 			trackBpm = f?.bpm ?? 0;
@@ -154,6 +158,9 @@ uniform float u_level;
 		const unsubArt = artPalette.subscribe((v) => {
 			artColors = v;
 		});
+		const unsubSpectrum = audioSpectrum.subscribe((v) => {
+			liveSpectrum = v;
+		});
 
 		let prog: WebGLProgram | null = null;
 		let buf: WebGLBuffer | null = null;
@@ -176,6 +183,8 @@ uniform float u_level;
 		let uPulse: WebGLUniformLocation | null = null;
 		let uBands: WebGLUniformLocation | null = null;
 		let uLevel: WebGLUniformLocation | null = null;
+		let uSpectrum: WebGLUniformLocation | null = null;
+		let uAudio: WebGLUniformLocation | null = null;
 
 		function setupProgram(fragSrc: string) {
 			if (prog) gl!.deleteProgram(prog);
@@ -221,6 +230,8 @@ uniform float u_level;
 			uPulse = gl!.getUniformLocation(prog, 'u_pulse');
 			uBands = gl!.getUniformLocation(prog, 'u_bands');
 			uLevel = gl!.getUniformLocation(prog, 'u_level');
+			uSpectrum = gl!.getUniformLocation(prog, 'u_spectrum');
+			uAudio = gl!.getUniformLocation(prog, 'u_audio');
 		}
 
 		setupProgram(shader);
@@ -293,6 +304,9 @@ uniform float u_level;
 		let sTreble = 0;
 		let sLevel = 0;
 		let lastBandNow = performance.now();
+		// Per-frame-smoothed copy of the real FFT spectrum (or a synthesized one
+		// in demo/idle), uploaded to u_spectrum. Length must match NUM_BANDS.
+		const specSmooth = new Float32Array(NUM_BANDS);
 		// Move `cur` toward `tgt` with a time-constant that differs on the way up
 		// (attack) vs down (decay), framerate-independent via the exp of dt.
 		const smoothBand = (cur: number, tgt: number, atk: number, dec: number, dt: number) => {
@@ -370,6 +384,41 @@ uniform float u_level;
 			sTreble = smoothBand(sTreble, trebT, 22, 9.0, bandDt);
 			sLevel = smoothBand(sLevel, sBass * 0.55 + sMid * 0.3 + sTreble * 0.25, 16, 3.0, bandDt);
 
+			// ── Real FFT spectrum ───────────────────────────────────────────────
+			// When the backend is streaming live bands (audio actually playing) use
+			// them; in demo, synthesize a spectrum from the coarse bands so the DJ
+			// shader still previews; idle decays flat. Values are the pure signal
+			// (shaders apply u_reactivity themselves).
+			const liveAudio = !!(liveSpectrum && liveSpectrum.length >= NUM_BANDS && driving);
+			for (let k = 0; k < NUM_BANDS; k++) {
+				let target = 0;
+				if (liveAudio) {
+					target = liveSpectrum![k] || 0;
+				} else if (demoOn) {
+					const f = k / (NUM_BANDS - 1);
+					const bassW = Math.max(0, 1 - f * 2.2);
+					const midW = Math.exp(-Math.pow((f - 0.45) * 3.2, 2));
+					const trebW = Math.max(0, (f - 0.55) / 0.45);
+					target = sBass * bassW + sMid * midW + sTreble * trebW;
+				}
+				const rising = target > specSmooth[k];
+				specSmooth[k] += (target - specSmooth[k]) * (1 - Math.exp(-(rising ? 22 : 7) * bandDt));
+			}
+			if (liveAudio) {
+				// Derive the 3 coarse bands the other reactive shaders read from the
+				// real spectrum, so every reactive wallpaper follows the audio.
+				let lo = 0;
+				let md = 0;
+				let hi = 0;
+				for (let k = 0; k < 6; k++) lo += specSmooth[k];
+				for (let k = 6; k < 15; k++) md += specSmooth[k];
+				for (let k = 15; k < NUM_BANDS; k++) hi += specSmooth[k];
+				sBass = lo / 6;
+				sMid = md / 9;
+				sTreble = hi / (NUM_BANDS - 15);
+				sLevel = sBass * 0.6 + sMid * 0.3 + sTreble * 0.25;
+			}
+
 			// Freeze base motion when Idle = Frozen and nothing is driving. Clicks and
 			// mouse keep real time so interaction still works in the settings preview.
 			if (!driving && idle === 'frozen') {
@@ -422,6 +471,8 @@ uniform float u_level;
 			gl!.uniform1f(uPulse!, sBass); // smoothed bass envelope: no strobe
 			gl!.uniform3f(uBands!, sBass, sMid, sTreble);
 			gl!.uniform1f(uLevel!, sLevel);
+			gl!.uniform1fv(uSpectrum!, specSmooth);
+			gl!.uniform1f(uAudio!, liveAudio ? 1 : 0);
 
 			gl!.drawArrays(gl!.TRIANGLES, 0, 3);
 		};
@@ -461,6 +512,7 @@ uniform float u_level;
 			unsubColorSource();
 			unsubIdle();
 			unsubArt();
+			unsubSpectrum();
 			canvas.removeEventListener('webglcontextlost', onContextLost);
 			canvas.removeEventListener('webglcontextrestored', onContextRestored);
 			document.removeEventListener('visibilitychange', onVisibility);

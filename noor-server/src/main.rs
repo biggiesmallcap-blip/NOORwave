@@ -923,6 +923,12 @@ async fn main() -> Result<()> {
     // Both are gated by the per-runner `*_enrich_running` atomics so they
     // never overlap with manual enrichment from the Settings UI or with each
     // other.
+
+    // Real-time output spectrum for the wallpaper visualiser: FFTs the audio
+    // that's actually playing (off the RT thread, ~30 Hz) so WS clients can
+    // drive a true spectrum. Idle when silent.
+    tokio::spawn(crate::playback::spectrum::run_spectrum_task());
+
     {
         let listener_state = state.clone();
         let mut event_rx = listener_state.read().await.event_tx.subscribe();

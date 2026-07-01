@@ -1746,11 +1746,13 @@ void main(){
 // (1.0 - u_playing) idle terms take over when the music isn't driving. Colours
 // come from u_color1..4 (palette or extracted cover art).
 //
-// The renderer also feeds u_bands = vec3(bass, mid, treble) and u_level, each an
-// attack/decay-smoothed level (fast rise, slow fall, like a VU meter) synthesized
-// from BPM + energy + beat_strength. u_pulse is the smoothed bass envelope. Prefer
-// these smoothed signals to raw u_beat for brightness so nothing strobes. The DJ
-// Visualiser (SHADER_DJ) is the reference consumer. See ShaderWallpaper.svelte.
+// The renderer also feeds u_spectrum[24] (the REAL FFT of the playing audio,
+// streamed from the backend and smoothed per-frame) with u_audio = 1 while that
+// is live, plus u_bands = vec3(bass, mid, treble) and u_level derived from it (or
+// synthesized from BPM + energy when no live audio). u_pulse is the smoothed bass
+// envelope. Prefer these smoothed signals to raw u_beat for brightness so nothing
+// strobes. The DJ Visualiser (SHADER_DJ) draws u_spectrum directly. See
+// ShaderWallpaper.svelte.
 
 export const SHADER_PULSE = /* glsl */ `
 void main(){
@@ -1987,20 +1989,7 @@ float noise(vec2 p){
   vec2 u = f*f*(3.-2.*f);
   return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
 }
-float fbm(vec2 p){ float v=0., a=0.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=0.5; } return v; }
-
-// Pseudo-spectrum height at normalized frequency f (0 = bass .. 1 = treble). The
-// three smoothed bands shape a tilted curve; moving noise adds analyzer detail so
-// neighbouring bins wiggle independently instead of moving as one blob.
-float spectrum(float f, float t){
-  float bass = u_bands.x, mid = u_bands.y, treb = u_bands.z;
-  float bTilt = 1.0 - smoothstep(0.0, 0.4, f);
-  float mTilt = exp(-pow((f - 0.5)*3.2, 2.0));
-  float tTilt = smoothstep(0.55, 1.0, f);
-  float base = bass*bTilt*1.15 + mid*mTilt*1.0 + treb*tTilt*0.85;
-  float detail = fbm(vec2(f*9.0, t*0.7))*0.5 + fbm(vec2(f*22.0, t*1.4))*0.25;
-  return base * (0.5 + 1.0*detail);
-}
+float fbm(vec2 p){ float v=0., a=0.5; for(int i=0;i<4;i++){ v+=a*noise(p); p*=2.03; a*=0.5; } return v; }
 
 void main(){
   vec2 uv = gl_FragCoord.xy / u_resolution.xy;
@@ -2009,52 +1998,56 @@ void main(){
   float t = u_time;
   float amp = u_reactivity;                    // slider scales the reaction; 0 = calm
 
-  // Flowing background field, always gently moving, deliberately dim.
+  // Dim flowing background so the analyzer reads on top.
   vec2 q = p*1.2 - m*0.15;
-  float warp = fbm(q*1.3 + vec2(t*0.05, -t*0.04));
-  float bg = fbm(q*2.0 + warp*1.2 + t*0.03);
-  vec3 col = mix(u_color1*0.55, u_color2*0.8, smoothstep(0.15, 0.9, bg));
-  col += u_color3 * pow(bg, 3.0) * 0.2;
-  col *= 0.34;
+  float bg = fbm(q*1.7 + fbm(q*1.1 + vec2(t*0.05, -t*0.04))*1.1 + t*0.03);
+  vec3 col = mix(u_color1*0.5, u_color2*0.75, smoothstep(0.15, 0.9, bg));
+  col *= 0.3;
 
   float r = length(p);
-  float ang = atan(p.y, p.x);
-  float f = abs(ang) / PI;                     // angle -> frequency, mirrored top/bottom
-  float h = spectrum(f, t) * amp;
+  float a = atan(p.y, p.x);
+  float af = a/TAU + 0.5;                       // 0..1 around the circle
+  float slot = fract(af * 24.0);                // position within one bar cell
+  float barMask = smoothstep(0.10, 0.18, slot) * smoothstep(0.90, 0.82, slot);
 
-  // Radial spectrum silhouette: filled from an inner rim out to the spectrum edge.
-  // The beat mostly moves the spectrum OUTWARD (radius) rather than brightening
-  // it, so a hit reads as growth, not a flash.
-  float rim = 0.30 + u_level*0.06*amp;         // gentle breathing radius
-  float edge = rim + h*0.30;
-  float fill = smoothstep(edge + 0.02, edge - 0.03, r) * smoothstep(rim - 0.14, rim, r);
-  vec3 specCol = mix(u_color2, u_color3, f);
-  specCol = mix(specCol, u_color4, smoothstep(0.55, 1.1, h));
-  col += specCol * fill * 0.62;
+  // This pixel's band height. A dynamic array index is illegal in WebGL1, so
+  // loop the 24 bands (constant index) and pick the one whose angular slice we
+  // are in. u_spectrum is the real FFT, smoothed on the JS side.
+  float h = 0.0;
+  for (int i = 0; i < 24; i++) {
+    float lo = float(i) / 24.0;
+    float inSlot = step(lo, af) * step(af, lo + 1.0/24.0);
+    h += u_spectrum[i] * inSlot;
+  }
 
-  // Bright edge outline.
-  float line = smoothstep(0.014, 0.0, abs(r - edge));
-  col += mix(u_color3, vec3(1.0), 0.4) * line * 0.4;
+  float inner = 0.26 + u_level*0.03*amp;        // ring breathes a touch with level
+  float top = inner + h*0.44*amp;
+  float bar = step(inner, r) * step(r, top) * barMask;
 
-  // Inner waveform scope, undulates with the mid band.
-  float wob = sin(ang*6.0 + t*1.2)*0.02 + sin(ang*10.0 - t*0.8)*0.012;
-  float scopeR = rim*0.55 + wob*u_bands.y*amp;
-  col += mix(u_color3, vec3(1.0), 0.5) * smoothstep(0.006, 0.0, abs(r - scopeR)) * (0.2 + u_bands.y*0.4*amp);
+  vec3 sc = mix(u_color2, u_color3, clamp(h, 0.0, 1.0));
+  sc = mix(sc, u_color4, smoothstep(0.6, 1.0, h));
+  float grad = clamp((r - inner) / max(top - inner, 0.001), 0.0, 1.0);  // brighter at the tip
+  col += sc * bar * (0.55 + 0.6*grad);
 
-  // Center bloom rides the bass. Tight exp falloff so it stays a core glow, not a
-  // full-frame brighten.
-  col += u_color4 * exp(-r*6.0) * (0.1 + u_bands.x*0.28*amp);
+  // Peak cap line at each bar's tip.
+  col += mix(u_color3, vec3(1.0), 0.5) * smoothstep(0.012, 0.0, abs(r - top)) * barMask * step(0.03, h);
 
-  // Treble sparkle on the outer edge.
-  float spark = pow(noise(vec2(ang*32.0, t*3.0 + r*10.0)), 6.0);
-  col += vec3(1.0) * spark * smoothstep(edge - 0.02, edge + 0.07, r) * u_bands.z*0.32*amp;
+  // Inner ring.
+  col += mix(u_color1, u_color2, 0.5) * exp(-abs(r - inner)*36.0) * 0.35;
+
+  // Bass core bloom: localized, tight falloff, never a full-frame flash.
+  col += u_color4 * exp(-r*5.5) * (0.1 + u_bands.x*0.35*amp);
+
+  // When no live audio, a slow shimmer travels the ring so it is not dead.
+  col += mix(u_color2, u_color3, 0.5) * exp(-abs(r - inner)*30.0)
+       * (1.0 - u_audio) * 0.08 * (0.5 + 0.5*sin(t*0.6 + af*TAU*3.0));
 
   // Subtle cursor glow.
-  col += u_color3 * exp(-length(p - m)*6.0) * (0.08 + u_mouseDown*0.35);
+  col += u_color3 * exp(-length(p - m)*6.0) * (0.06 + u_mouseDown*0.3);
 
   // Reinhard tone-map: compresses peaks so the whole frame can never white-flash.
   col = col / (1.0 + col);
-  col = pow(col, vec3(0.92));
+  col = pow(col, vec3(0.9));
   col *= 1.0 - dot(uv - 0.5, uv - 0.5) * 0.5;
   gl_FragColor = vec4(col, 1.0);
 }
