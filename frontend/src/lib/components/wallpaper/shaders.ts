@@ -592,7 +592,7 @@ void main(){
   // Galactic core — warm yellow-white bloom, pulsing gently with the beat
   float beatEnv = 0.5 - 0.5*cos(6.2831853*u_beat);
   vec3 coreCol = mix(vec3(1.0, 0.92, 0.78), u_color1 * 2.2, 0.35);
-  col += coreCol * (bulge + nucleus) * (1.0 + beatEnv*(0.18 + u_energy*0.5)*u_playing);
+  col += coreCol * (bulge + nucleus) * (1.0 + beatEnv*(0.18 + u_energy*0.5)*u_reactivity);
 
   // Spiral arm nebula — palette colours
   vec3 armGlow = mix(u_color2, u_color3, smoothstep(0.2, 0.8, fbm(lp * 3.5)));
@@ -771,7 +771,7 @@ void main(){
   col = mix(col, u_color3, smoothstep(0.55, 1.0, n*n2*1.8));
   col = mix(col, u_color4, smoothstep(0.0, 0.2, pull*1.2) * 0.5);
 
-  col *= band * (1.6 + beatEnv*(0.4 + u_energy*0.9)*u_playing);
+  col *= band * (1.6 + beatEnv*(0.4 + u_energy*0.9)*u_reactivity);
   col += wave * vec3(1.0, 0.9, 1.0) * 2.0;
 
   vec3 bg = vec3(0.005, 0.002, 0.012);
@@ -1516,7 +1516,7 @@ void main(){
 
   // Beat swells the disk and brightens the photon ring.
   float beatEnv = 0.5 - 0.5*cos(6.2831853*u_beat);
-  disk *= 1.0 + beatEnv * (0.25 + u_energy*0.6) * u_playing;
+  disk *= 1.0 + beatEnv * (0.25 + u_energy*0.6) * u_reactivity;
 
   for(int i=0;i<8;i++){
     if(i>=u_clickCount) break;
@@ -1529,7 +1529,7 @@ void main(){
   vec3 hot = mix(u_color2, u_color3, 0.6);
   vec3 col = vec3(0.003, 0.004, 0.01);
   col += hot * disk * 1.4;
-  col += mix(u_color3, vec3(1.0), 0.5) * ring * (1.2 + u_mouseDown*1.5 + beatEnv*(0.4 + u_energy)*u_playing);
+  col += mix(u_color3, vec3(1.0), 0.5) * ring * (1.2 + u_mouseDown*1.5 + beatEnv*(0.4 + u_energy)*u_reactivity);
   col *= 1.0 - shadow;
   col += hot * exp(-r*6.0) * 0.15;       // soft bloom toward the ring
 
@@ -1550,7 +1550,7 @@ void main(){
 
   // Beat gives a gentle breathing zoom; energy deepens it.
   float beatEnv = 0.5 - 0.5*cos(6.2831853*u_beat);
-  float breathe = 1.0 + (beatEnv - 0.5) * (0.06 + u_energy*0.14) * u_playing;
+  float breathe = 1.0 + (beatEnv - 0.5) * (0.06 + u_energy*0.14) * u_reactivity;
   p *= 1.4 * breathe;
 
   // Kaleidoscopic IFS: fold, rotate, scale a fixed number of times. The fold
@@ -1578,7 +1578,7 @@ void main(){
 
   vec3 col = mix(u_color1, u_color2, shade);
   col = mix(col, u_color3, bands*shade);
-  col += u_color4 * pow(shade, 4.0) * (0.5 + u_mouseDown + beatEnv*u_energy*1.5*u_playing);
+  col += u_color4 * pow(shade, 4.0) * (0.5 + u_mouseDown + beatEnv*u_energy*1.5*u_reactivity);
 
   for(int i=0;i<8;i++){
     if(i>=u_clickCount) break;
@@ -1627,7 +1627,7 @@ void main(){
 
   float beatEnv = 0.5 - 0.5*cos(6.2831853*u_beat);
   vec3 col = mix(glass, vec3(0.02, 0.02, 0.03), lead);   // dark leading came
-  col += lead * mix(u_color3, vec3(1.0), 0.5) * (0.15 + beatEnv*(0.2 + u_energy*0.5)*u_playing);  // sheen pulses on the beat
+  col += lead * mix(u_color3, vec3(1.0), 0.5) * (0.15 + beatEnv*(0.2 + u_energy*0.5)*u_reactivity);  // sheen pulses on the beat
   col += exp(-distance(p, mm)*3.0) * (0.2 + u_mouseDown*0.8) * mix(u_color3, vec3(1.0), 0.4) * 0.3;
 
   col *= 1.0 - dot(uv - 0.5, uv - 0.5) * 0.5;
@@ -1674,7 +1674,7 @@ void main(){
 
   vec3 col = mix(u_color1, u_color2, silk);
   col = mix(col, u_color3, speed*0.7);
-  col += u_color4 * pow(silk, 4.0) * (0.4 + beatEnv*(0.3 + u_energy*0.7)*u_playing);
+  col += u_color4 * pow(silk, 4.0) * (0.4 + beatEnv*(0.3 + u_energy*0.7)*u_reactivity);
   col += exp(-distance(p, m)*5.0) * (0.15 + u_mouseDown*0.7) * mix(u_color3, vec3(1.0), 0.4) * 0.4;
 
   col *= 1.0 - dot(uv - 0.5, uv - 0.5) * 0.4;
@@ -1738,8 +1738,11 @@ void main(){
 
 // ─── Beat-reactive shaders ───────────────────────────────────────────────────
 // These read u_beat (0..1 sawtooth synced to the playing track's BPM + position),
-// u_energy (0..1 track DSP energy), and u_playing (1 while playing). With nothing
-// playing they fall back to a gentle default tempo so they still animate.
+// u_energy (0..1 track DSP energy), u_playing (1 while music is driving), and
+// u_reactivity (the user's intensity setting, 0 when reactivity is off or nothing
+// is playing). Every beat-amplitude term is multiplied by u_reactivity so the
+// Settings slider scales it and the toggle mutes it; the (1.0 - u_playing) idle
+// terms take over when the music isn't driving. See ShaderWallpaper.svelte.
 
 export const SHADER_PULSE = /* glsl */ `
 void main(){
@@ -1752,7 +1755,7 @@ void main(){
   float d = distance(p, src);
 
   // Amplitude follows energy but keeps a floor so unanalyzed tracks still pulse.
-  float amp = mix(0.45, 0.45 + u_energy*0.8, u_playing);
+  float amp = 0.45 + u_energy*0.8;
 
   // Smooth raised-cosine beat envelope. No sharp pow() luminance spikes, so the
   // whole thing breathes like a heartbeat instead of strobing.
@@ -1764,12 +1767,12 @@ void main(){
     float ph = fract(u_beat + float(i)/3.0);
     ring += exp(-pow((d - ph*1.1)*7.0, 2.0)) * (1.0 - ph);
   }
-  ring *= amp;
+  ring *= amp * u_reactivity;
 
   vec3 col = vec3(0.012, 0.014, 0.022);
   col += mix(u_color1, u_color2, 0.5) * 0.12;                       // ambient palette wash
   col += mix(u_color2, u_color3, 0.5) * ring * 1.3;                 // the rings
-  col += u_color3 * beatEnv * exp(-d*1.6) * amp * 0.35;             // soft, low-contrast swell
+  col += u_color3 * beatEnv * exp(-d*1.6) * amp * u_reactivity * 0.35;  // soft, low-contrast swell
   col += u_color2 * 0.05 * (0.5 + 0.5*sin(u_time*0.5 + d*6.0)) * (1.0 - u_playing);  // idle shimmer
 
   col *= 1.0 - dot(uv - 0.5, uv - 0.5) * 0.5;
@@ -1794,7 +1797,7 @@ void main(){
   float wander = n1(bar*1.3 + u_time*1.5)*0.6 + n1(bar*0.5 + u_time*3.0)*0.4;
   // Beat kicks the low bars. The kick has an energy-independent floor so bass
   // still visibly jumps on tracks that were never DSP-analyzed (energy == 0).
-  float kick = pow(1.0 - u_beat, 2.5) * smoothstep(0.55, 0.0, fnorm) * u_playing;
+  float kick = pow(1.0 - u_beat, 2.5) * smoothstep(0.55, 0.0, fnorm) * u_reactivity;
   float level = 0.4 + u_energy*1.2;
   float h = clamp((0.12 + wander*tilt*0.7) * level + kick*(0.18 + u_energy*0.5), 0.0, 0.95);
 
@@ -1827,7 +1830,7 @@ void main(){
   float a = atan(uv.y, uv.x);
   // Softer beat curve (pow 2, not 3) so the core doesn't hard-flash; lurch has
   // an energy floor so the tunnel still kicks forward on unanalyzed tracks.
-  float kick = pow(1.0 - u_beat, 2.0) * u_playing;
+  float kick = pow(1.0 - u_beat, 2.0) * u_reactivity;
   float z = u_time*0.3 + kick*0.6*(0.4 + u_energy);   // camera lurches forward on the beat
 
   float depth = 1.0 / max(r, 0.02);
@@ -1856,7 +1859,7 @@ void main(){
 
   // Metaball blobs that swell on the beat — reads like bass hitting.
   float beatEnv = 0.5 - 0.5*cos(6.2831853*u_beat);
-  float swell = mix(0.55, 0.55 + beatEnv*(0.55 + u_energy*0.9), u_playing);
+  float swell = 0.55 + beatEnv*(0.55 + u_energy*0.9)*u_reactivity;
 
   float field = 0.0;
   for(int i=0;i<6;i++){
@@ -1875,7 +1878,7 @@ void main(){
   vec3 col = vec3(0.01, 0.012, 0.02);
   col += mix(u_color1, u_color2, body) * body * 1.1;
   col += u_color3 * rim * 0.7;
-  col += u_color4 * pow(body, 3.0) * beatEnv * u_playing * 0.5;
+  col += u_color4 * pow(body, 3.0) * beatEnv * u_reactivity * 0.5;
 
   col *= 1.0 - dot(uv - 0.5, uv - 0.5) * 0.4;
   gl_FragColor = vec4(col, 1.0);
@@ -1891,8 +1894,8 @@ void main(){
   p -= mo*0.3;                                  // cursor steers the vanishing point
 
   float beatEnv = 0.5 - 0.5*cos(6.2831853*u_beat);
-  float speed = 0.25 + beatEnv*(0.30 + u_energy*0.7)*u_playing;   // beats streak the stars
-  float warp = u_time*0.5 + beatEnv*(0.5 + u_energy)*u_playing;
+  float speed = 0.25 + beatEnv*(0.30 + u_energy*0.7)*u_reactivity;   // beats streak the stars
+  float warp = u_time*0.5 + beatEnv*(0.5 + u_energy)*u_reactivity;
 
   float r = length(p);
   float an = atan(p.y, p.x)/6.2831853 + 0.5;    // 0..1
@@ -1910,7 +1913,7 @@ void main(){
     star += exp(-da*da*600.0) * step(r, rr) * smoothstep(rr - 0.28*speed, rr, r) * depth*0.5;  // trailing streak
     col += mix(u_color2, u_color3, hashF(fi*5.5)) * star * 1.5;
   }
-  col += mix(u_color1, vec3(1.0), 0.5) * exp(-r*4.0) * (0.15 + beatEnv*u_energy*u_playing*0.5);
+  col += mix(u_color1, vec3(1.0), 0.5) * exp(-r*4.0) * (0.15 + beatEnv*u_energy*u_reactivity*0.5);
 
   col *= 1.0 - dot(uv - 0.5, uv - 0.5) * 0.35;
   gl_FragColor = vec4(col, 1.0);
@@ -1934,8 +1937,8 @@ void main(){
   // Analyzer bars arranged in a ring. Beat lifts the whole ring; energy scales it.
   float beatEnv = 0.5 - 0.5*cos(6.2831853*u_beat);
   float wander = n1(bar*1.7 + u_time*1.2)*0.6 + n1(bar*0.7 + u_time*2.6)*0.4;
-  float level = mix(0.5, 0.5 + u_energy*1.1, u_playing);
-  float h = (0.05 + wander*0.28*level) + beatEnv*(0.05 + u_energy*0.12)*u_playing;
+  float level = 0.5 + u_energy*1.1*u_reactivity;
+  float h = (0.05 + wander*0.28*level) + beatEnv*(0.05 + u_energy*0.12)*u_reactivity;
 
   float inner = 0.22;
   float top = inner + h;
@@ -1950,7 +1953,7 @@ void main(){
   col += barCol * inRing;
   col += u_color4 * (1.0 - smoothstep(0.0, 0.008, abs(r - top))) * bm * step(0.02, h);  // peak caps
   col += mix(u_color1, u_color2, 0.5) * exp(-abs(r - inner)*40.0) * 0.4;                 // inner rim
-  col += u_color1 * exp(-r*8.0) * (0.15 + beatEnv*u_energy*u_playing*0.5);               // core pulse
+  col += u_color1 * exp(-r*8.0) * (0.15 + beatEnv*u_energy*u_reactivity*0.5);               // core pulse
 
   col *= 1.0 - dot(uv - 0.5, uv - 0.5) * 0.35;
   gl_FragColor = vec4(col, 1.0);

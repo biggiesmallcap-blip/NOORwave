@@ -60,13 +60,19 @@
 		wallpaper,
 		wallpaperBlur,
 		wallpaperFps,
+		wallpaperReactive,
+		wallpaperReactivity,
 		setWallpaper,
 		setWallpaperBlur,
 		setWallpaperFps,
+		setWallpaperReactive,
+		setWallpaperReactivity,
 		WALLPAPER_BLUR_MAX,
 		WALLPAPER_BLUR_MIN,
 		WALLPAPER_FPS_MAX,
-		WALLPAPER_FPS_MIN
+		WALLPAPER_FPS_MIN,
+		WALLPAPER_REACTIVITY_MAX,
+		WALLPAPER_REACTIVITY_MIN
 	} from '$lib/stores/wallpaper';
 	import { PALETTES, rgbCss, type Palette, type PaletteId } from '$lib/components/wallpaper/palettes';
 	import { palette, setPalette } from '$lib/stores/palette';
@@ -1937,6 +1943,39 @@
 								aria-label="Wallpaper blur"
 							/>
 							<output>{$wallpaperBlur}px</output>
+						</div>
+					</label>
+
+					<div class="wallpaper-control">
+						<span>
+							<strong>Beat reactivity</strong>
+							<small>Let the playing track drive Pulse, Live EQ, and the reactive wallpapers.</small>
+						</span>
+						<div class="wallpaper-slider-row">
+							<Toggle
+								checked={$wallpaperReactive}
+								onchange={(e) => setWallpaperReactive(e.currentTarget.checked)}
+							/>
+						</div>
+					</div>
+
+					<label class="wallpaper-control" class:disabled={!$wallpaperReactive}>
+						<span>
+							<strong>Reactivity strength</strong>
+							<small>How hard the wallpaper moves with the beat. 100% is the tuned default.</small>
+						</span>
+						<div class="wallpaper-slider-row">
+							<input
+								type="range"
+								min={WALLPAPER_REACTIVITY_MIN}
+								max={WALLPAPER_REACTIVITY_MAX}
+								step="5"
+								value={$wallpaperReactivity}
+								disabled={!$wallpaperReactive}
+								oninput={(e) => setWallpaperReactivity(parseInt((e.currentTarget as HTMLInputElement).value, 10))}
+								aria-label="Wallpaper reactivity strength"
+							/>
+							<output>{$wallpaperReactivity}%</output>
 						</div>
 					</label>
 				</div>
@@ -4121,6 +4160,10 @@
 		border-radius: 8px;
 		border: 1px solid var(--border-subtle);
 		background: rgba(255, 255, 255, 0.025);
+	}
+
+	.wallpaper-control.disabled {
+		opacity: 0.5;
 	}
 
 	.wallpaper-control > span {

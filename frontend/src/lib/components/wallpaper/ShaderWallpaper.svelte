@@ -3,6 +3,7 @@
 	import { palette } from '$lib/stores/palette';
 	import { DEFAULT_PALETTE, paletteById, type PaletteId } from '$lib/components/wallpaper/palettes';
 	import { currentTrackFeatures, isPlaying, position } from '$lib/stores/player';
+	import { wallpaperReactive, wallpaperReactivity } from '$lib/stores/wallpaper';
 
 	type Props = {
 		shader: string;
@@ -42,6 +43,7 @@ uniform vec3 u_color4;
 uniform float u_beat;
 uniform float u_energy;
 uniform float u_playing;
+uniform float u_reactivity;
 `;
 
 	function compile(gl: WebGLRenderingContext, type: number, src: string) {
@@ -95,6 +97,10 @@ uniform float u_playing;
 		let playing = false;
 		let posBaseMs = 0;
 		let posBaseAt = performance.now();
+		// User-facing reactivity controls (Settings > Appearance). `reactive` is the
+		// master on/off; `reactivity` is a 0..1 strength (percentage / 100).
+		let reactive = true;
+		let reactivity = 1;
 		const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 		const unsubFeatures = currentTrackFeatures.subscribe((f) => {
 			trackBpm = f?.bpm ?? 0;
@@ -106,6 +112,12 @@ uniform float u_playing;
 		const unsubPosition = position.subscribe((v) => {
 			posBaseMs = v;
 			posBaseAt = performance.now();
+		});
+		const unsubReactive = wallpaperReactive.subscribe((v) => {
+			reactive = v;
+		});
+		const unsubReactivity = wallpaperReactivity.subscribe((v) => {
+			reactivity = Math.max(0, v) / 100;
 		});
 
 		let prog: WebGLProgram | null = null;
@@ -125,6 +137,7 @@ uniform float u_playing;
 		let uBeat: WebGLUniformLocation | null = null;
 		let uEnergy: WebGLUniformLocation | null = null;
 		let uPlaying: WebGLUniformLocation | null = null;
+		let uReactivity: WebGLUniformLocation | null = null;
 
 		function setupProgram(fragSrc: string) {
 			if (prog) gl!.deleteProgram(prog);
@@ -166,6 +179,7 @@ uniform float u_playing;
 			uBeat = gl!.getUniformLocation(prog, 'u_beat');
 			uEnergy = gl!.getUniformLocation(prog, 'u_energy');
 			uPlaying = gl!.getUniformLocation(prog, 'u_playing');
+			uReactivity = gl!.getUniformLocation(prog, 'u_reactivity');
 		}
 
 		setupProgram(shader);
@@ -271,15 +285,18 @@ uniform float u_playing;
 			gl!.uniform3f(uColor3!, pal.c3[0], pal.c3[1], pal.c3[2]);
 			gl!.uniform3f(uColor4!, pal.c4[0], pal.c4[1], pal.c4[2]);
 
-			// Interpolate position off the last store emission; freeze the phase when
-			// paused. Unknown/invalid BPM falls back to a gentle 100 so reactive
-			// shaders still breathe (and preview) instead of going dead.
-			const estPosMs = playing ? posBaseMs + (now - posBaseAt) : posBaseMs;
+			// Music drives the reactive shaders only while something is playing AND the
+			// user hasn't switched reactivity off. When it's off, u_playing/u_energy/
+			// u_reactivity all go to zero and the shaders use their idle motion. The
+			// intensity slider scales u_reactivity, which every beat-driven term reads.
+			const musicOn = playing && reactive && reactivity > 0;
+			const estPosMs = musicOn ? posBaseMs + (now - posBaseAt) : posBaseMs;
 			const tempo = trackBpm > 30 && trackBpm < 300 ? trackBpm : 100;
-			const beatPhase = ((estPosMs / 1000) * (tempo / 60)) % 1;
+			const beatPhase = musicOn ? ((estPosMs / 1000) * (tempo / 60)) % 1 : 0;
 			gl!.uniform1f(uBeat!, beatPhase);
-			gl!.uniform1f(uEnergy!, trackEnergy);
-			gl!.uniform1f(uPlaying!, playing ? 1 : 0);
+			gl!.uniform1f(uEnergy!, musicOn ? trackEnergy : 0);
+			gl!.uniform1f(uPlaying!, musicOn ? 1 : 0);
+			gl!.uniform1f(uReactivity!, musicOn ? reactivity : 0);
 
 			gl!.drawArrays(gl!.TRIANGLES, 0, 3);
 		};
@@ -312,6 +329,8 @@ uniform float u_playing;
 			unsubFeatures();
 			unsubPlaying();
 			unsubPosition();
+			unsubReactive();
+			unsubReactivity();
 			canvas.removeEventListener('webglcontextlost', onContextLost);
 			canvas.removeEventListener('webglcontextrestored', onContextRestored);
 			document.removeEventListener('visibilitychange', onVisibility);

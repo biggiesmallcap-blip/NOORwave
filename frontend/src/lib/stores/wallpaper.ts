@@ -4,12 +4,19 @@ import type { WallpaperId } from '$lib/components/wallpaper/shaders';
 const STORAGE_KEY = 'noor-wallpaper';
 const FPS_STORAGE_KEY = 'noor-wallpaper-fps';
 const BLUR_STORAGE_KEY = 'noor-wallpaper-blur';
+const REACTIVE_STORAGE_KEY = 'noor-wallpaper-reactive';
+const REACTIVITY_STORAGE_KEY = 'noor-wallpaper-reactivity';
 export const WALLPAPER_FPS_MIN = 24;
 export const WALLPAPER_FPS_MAX = 60;
 export const WALLPAPER_FPS_DEFAULT = 60;
 export const WALLPAPER_BLUR_MIN = 0;
 export const WALLPAPER_BLUR_MAX = 18;
 export const WALLPAPER_BLUR_DEFAULT = 7;
+// Beat-reactivity strength as a percentage. 100 = the tuned default; 0 mutes the
+// music influence entirely (the reactive shaders fall back to their idle motion).
+export const WALLPAPER_REACTIVITY_MIN = 0;
+export const WALLPAPER_REACTIVITY_MAX = 200;
+export const WALLPAPER_REACTIVITY_DEFAULT = 100;
 // Exported so a contract test can assert it stays in sync with WALLPAPERS: any id in
 // WALLPAPERS that is missing here would silently reset the user's saved wallpaper.
 export const VALID: WallpaperId[] = ['none', 'aurora', 'chrome', 'grid', 'nebula', 'topo',
@@ -47,6 +54,13 @@ function readNumberSetting(key: string, fallback: number, min: number, max: numb
 	return Number.isFinite(raw) ? clampSetting(raw, min, max) : fallback;
 }
 
+function readBoolSetting(key: string, fallback: boolean): boolean {
+	if (typeof localStorage === 'undefined') return fallback;
+	const raw = localStorage.getItem(key);
+	if (raw === null) return fallback;
+	return raw === '1' || raw === 'true';
+}
+
 function writeNumberSetting(key: string, value: number) {
 	if (typeof localStorage !== 'undefined') {
 		localStorage.setItem(key, String(value));
@@ -59,6 +73,17 @@ export const wallpaperFps = writable<number>(
 );
 export const wallpaperBlur = writable<number>(
 	readNumberSetting(BLUR_STORAGE_KEY, WALLPAPER_BLUR_DEFAULT, WALLPAPER_BLUR_MIN, WALLPAPER_BLUR_MAX)
+);
+// Whether the playing track drives the beat-reactive shaders at all.
+export const wallpaperReactive = writable<boolean>(readBoolSetting(REACTIVE_STORAGE_KEY, true));
+// Strength of that reaction, as a percentage (see WALLPAPER_REACTIVITY_*).
+export const wallpaperReactivity = writable<number>(
+	readNumberSetting(
+		REACTIVITY_STORAGE_KEY,
+		WALLPAPER_REACTIVITY_DEFAULT,
+		WALLPAPER_REACTIVITY_MIN,
+		WALLPAPER_REACTIVITY_MAX
+	)
 );
 
 if (typeof document !== 'undefined') {
@@ -85,4 +110,17 @@ export function setWallpaperBlur(value: number) {
 	const next = clampSetting(value, WALLPAPER_BLUR_MIN, WALLPAPER_BLUR_MAX);
 	wallpaperBlur.set(next);
 	writeNumberSetting(BLUR_STORAGE_KEY, next);
+}
+
+export function setWallpaperReactive(on: boolean) {
+	wallpaperReactive.set(on);
+	if (typeof localStorage !== 'undefined') {
+		localStorage.setItem(REACTIVE_STORAGE_KEY, on ? '1' : '0');
+	}
+}
+
+export function setWallpaperReactivity(value: number) {
+	const next = clampSetting(value, WALLPAPER_REACTIVITY_MIN, WALLPAPER_REACTIVITY_MAX);
+	wallpaperReactivity.set(next);
+	writeNumberSetting(REACTIVITY_STORAGE_KEY, next);
 }
