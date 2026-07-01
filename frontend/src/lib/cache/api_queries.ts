@@ -97,6 +97,7 @@ export const cacheKeys = {
 		favoriteOnly = true,
 		likedOnly = false,
 	) => ['api', 'getTracks', { favoriteOnly, likedOnly, limit, offset, sortBy, sortDir }] as const,
+	history: (limit = 50, offset = 0) => ['api', 'getHistory', { limit, offset }] as const,
 	albums: (
 		sortBy = 'title',
 		sortDir = 'asc',
@@ -194,6 +195,14 @@ export const cachedApi = {
 		return fetchCached<{ tracks: Track[]; total: number }>(
 			cacheKeys.tracks(sortBy, sortDir, limit, offset, favoriteOnly, likedOnly),
 			() => api.getTracks(sortBy, sortDir, limit, offset, favoriteOnly, likedOnly),
+			options,
+		);
+	},
+	getHistory(limit = 50, offset = 0) {
+		const options = offset === 0 ? volatileOptions : shortOptions;
+		return fetchCached<{ tracks: Track[]; total: number }>(
+			cacheKeys.history(limit, offset),
+			() => api.getHistory(limit, offset),
 			options,
 		);
 	},
@@ -557,6 +566,7 @@ export function seedCachedValue<T>(key: CacheKeyInput, data: T, options: QueryOp
 export function invalidateLibraryCaches(options: { refetch?: boolean } = {}): void {
 	ensureCacheScope();
 	dataCache.invalidatePrefix(['api', 'getTracks'], options);
+	dataCache.invalidatePrefix(['api', 'getHistory'], options);
 	dataCache.invalidatePrefix(['api', 'getAlbums'], options);
 	dataCache.invalidatePrefix(['api', 'getArtists'], options);
 	dataCache.invalidatePrefix(['api', 'getArtistTracks'], options);

@@ -507,6 +507,7 @@ pub fn api_routes(state: SharedState) -> Router {
         // Library endpoints
         .route("/api/tracks", get(catalog_routes::get_tracks))
         .route("/api/tracks/count", get(catalog_routes::get_track_count))
+        .route("/api/history", get(catalog_routes::get_history))
         .route("/api/albums", get(catalog_routes::get_albums))
         .route(
             "/api/albums/{id}/tracks",
