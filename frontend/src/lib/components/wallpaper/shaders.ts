@@ -590,7 +590,7 @@ void main(){
   vec3 col = vec3(0.004, 0.005, 0.014); // deep space
 
   // Galactic core — warm yellow-white bloom, pulsing gently with the beat
-  float beatEnv = 0.5 - 0.5*cos(6.2831853*u_beat);
+  float beatEnv = u_pulse;   // onset-peaked, shaped by the Beat smoothing setting
   vec3 coreCol = mix(vec3(1.0, 0.92, 0.78), u_color1 * 2.2, 0.35);
   col += coreCol * (bulge + nucleus) * (1.0 + beatEnv*(0.18 + u_energy*0.5)*u_reactivity);
 
@@ -765,7 +765,7 @@ void main(){
   float band = sin(n * 6.2831 + n2 * 3.0 + u_time * 0.4);
   band = pow(0.5 + 0.5*band, 3.5);
 
-  float beatEnv = 0.5 - 0.5*cos(6.2831853*u_beat);
+  float beatEnv = u_pulse;   // onset-peaked, shaped by the Beat smoothing setting
   float t1 = smoothstep(0.0, 0.6, n);
   vec3 col = mix(u_color1, u_color2, t1);
   col = mix(col, u_color3, smoothstep(0.55, 1.0, n*n2*1.8));
@@ -1515,7 +1515,7 @@ void main(){
   float shadow = smoothstep(0.115, 0.10, r);       // event-horizon silhouette
 
   // Beat swells the disk and brightens the photon ring.
-  float beatEnv = 0.5 - 0.5*cos(6.2831853*u_beat);
+  float beatEnv = u_pulse;   // onset-peaked, shaped by the Beat smoothing setting
   disk *= 1.0 + beatEnv * (0.25 + u_energy*0.6) * u_reactivity;
 
   for(int i=0;i<8;i++){
@@ -1549,7 +1549,7 @@ void main(){
   vec2 m = (u_mouse*u_resolution.xy - 0.5*u_resolution.xy) / u_resolution.y;
 
   // Beat gives a gentle breathing zoom; energy deepens it.
-  float beatEnv = 0.5 - 0.5*cos(6.2831853*u_beat);
+  float beatEnv = u_pulse;   // onset-peaked, shaped by the Beat smoothing setting
   float breathe = 1.0 + (beatEnv - 0.5) * (0.06 + u_energy*0.14) * u_reactivity;
   p *= 1.4 * breathe;
 
@@ -1625,7 +1625,7 @@ void main(){
   glass = mix(glass, u_color4, smoothstep(0.85, 1.0, h21(id1 + 3.1)));
   glass *= 0.55 + 0.7*bevel;
 
-  float beatEnv = 0.5 - 0.5*cos(6.2831853*u_beat);
+  float beatEnv = u_pulse;   // onset-peaked, shaped by the Beat smoothing setting
   vec3 col = mix(glass, vec3(0.02, 0.02, 0.03), lead);   // dark leading came
   col += lead * mix(u_color3, vec3(1.0), 0.5) * (0.15 + beatEnv*(0.2 + u_energy*0.5)*u_reactivity);  // sheen pulses on the beat
   col += exp(-distance(p, mm)*3.0) * (0.2 + u_mouseDown*0.8) * mix(u_color3, vec3(1.0), 0.4) * 0.3;
@@ -1668,7 +1668,7 @@ void main(){
     phase += length(v);
   }
 
-  float beatEnv = 0.5 - 0.5*cos(6.2831853*u_beat);
+  float beatEnv = u_pulse;   // onset-peaked, shaped by the Beat smoothing setting
   float silk = pow(0.5 + 0.5*sin(phase*3.0 + pos.x*8.0 - u_time*0.6), 1.5);
   float speed = clamp(phase*0.15, 0.0, 1.0);
 
@@ -1738,11 +1738,13 @@ void main(){
 
 // ─── Beat-reactive shaders ───────────────────────────────────────────────────
 // These read u_beat (0..1 sawtooth synced to the playing track's BPM + position),
-// u_energy (0..1 track DSP energy), u_playing (1 while music is driving), and
-// u_reactivity (the user's intensity setting, 0 when reactivity is off or nothing
-// is playing). Every beat-amplitude term is multiplied by u_reactivity so the
-// Settings slider scales it and the toggle mutes it; the (1.0 - u_playing) idle
-// terms take over when the music isn't driving. See ShaderWallpaper.svelte.
+// u_pulse (the beat envelope, 1 on the onset, shaped snappy..floaty by the Beat
+// smoothing setting), u_energy (0..1 track DSP energy), u_playing (1 while music
+// is driving), and u_reactivity (the user's intensity × per-shader gain, 0 when
+// reactivity is off or nothing is playing). Every beat-amplitude term multiplies
+// by u_reactivity so the Settings slider scales it and the toggle mutes it; the
+// (1.0 - u_playing) idle terms take over when the music isn't driving. Colours
+// come from u_color1..4 (palette or extracted cover art). See ShaderWallpaper.svelte.
 
 export const SHADER_PULSE = /* glsl */ `
 void main(){
@@ -1757,9 +1759,9 @@ void main(){
   // Amplitude follows energy but keeps a floor so unanalyzed tracks still pulse.
   float amp = 0.45 + u_energy*0.8;
 
-  // Smooth raised-cosine beat envelope. No sharp pow() luminance spikes, so the
-  // whole thing breathes like a heartbeat instead of strobing.
-  float beatEnv = 0.5 - 0.5*cos(6.2831853*u_beat);
+  // Beat envelope from the renderer (shaped by the Beat smoothing setting). The
+  // full-frame swell below stays low-contrast so this never strobes.
+  float beatEnv = u_pulse;
 
   // Three staggered expanding rings so successive beats overlap.
   float ring = 0.0;
@@ -1797,7 +1799,7 @@ void main(){
   float wander = n1(bar*1.3 + u_time*1.5)*0.6 + n1(bar*0.5 + u_time*3.0)*0.4;
   // Beat kicks the low bars. The kick has an energy-independent floor so bass
   // still visibly jumps on tracks that were never DSP-analyzed (energy == 0).
-  float kick = pow(1.0 - u_beat, 2.5) * smoothstep(0.55, 0.0, fnorm) * u_reactivity;
+  float kick = u_pulse * smoothstep(0.55, 0.0, fnorm) * u_reactivity;
   float level = 0.4 + u_energy*1.2;
   float h = clamp((0.12 + wander*tilt*0.7) * level + kick*(0.18 + u_energy*0.5), 0.0, 0.95);
 
@@ -1830,7 +1832,7 @@ void main(){
   float a = atan(uv.y, uv.x);
   // Softer beat curve (pow 2, not 3) so the core doesn't hard-flash; lurch has
   // an energy floor so the tunnel still kicks forward on unanalyzed tracks.
-  float kick = pow(1.0 - u_beat, 2.0) * u_reactivity;
+  float kick = u_pulse * u_reactivity;
   float z = u_time*0.3 + kick*0.6*(0.4 + u_energy);   // camera lurches forward on the beat
 
   float depth = 1.0 / max(r, 0.02);
@@ -1858,7 +1860,7 @@ void main(){
   vec2 m = (u_mouse*u_resolution.xy - 0.5*u_resolution.xy) / u_resolution.y;
 
   // Metaball blobs that swell on the beat — reads like bass hitting.
-  float beatEnv = 0.5 - 0.5*cos(6.2831853*u_beat);
+  float beatEnv = u_pulse;   // onset-peaked, shaped by the Beat smoothing setting
   float swell = 0.55 + beatEnv*(0.55 + u_energy*0.9)*u_reactivity;
 
   float field = 0.0;
@@ -1893,7 +1895,7 @@ void main(){
   vec2 mo = u_mouse - 0.5;
   p -= mo*0.3;                                  // cursor steers the vanishing point
 
-  float beatEnv = 0.5 - 0.5*cos(6.2831853*u_beat);
+  float beatEnv = u_pulse;   // onset-peaked, shaped by the Beat smoothing setting
   float speed = 0.25 + beatEnv*(0.30 + u_energy*0.7)*u_reactivity;   // beats streak the stars
   float warp = u_time*0.5 + beatEnv*(0.5 + u_energy)*u_reactivity;
 
@@ -1935,7 +1937,7 @@ void main(){
   float inBar = fract(an*BARS);
 
   // Analyzer bars arranged in a ring. Beat lifts the whole ring; energy scales it.
-  float beatEnv = 0.5 - 0.5*cos(6.2831853*u_beat);
+  float beatEnv = u_pulse;   // onset-peaked, shaped by the Beat smoothing setting
   float wander = n1(bar*1.7 + u_time*1.2)*0.6 + n1(bar*0.7 + u_time*2.6)*0.4;
   float level = 0.5 + u_energy*1.1*u_reactivity;
   float h = (0.05 + wander*0.28*level) + beatEnv*(0.05 + u_energy*0.12)*u_reactivity;
@@ -1982,6 +1984,12 @@ export interface WallpaperOption {
 	shader: string | null;
 	/** When true, hidden in settings behind a "More" toggle. */
 	extended?: boolean;
+	/**
+	 * Per-shader beat-gain multiplier applied to u_reactivity, so 100% strength
+	 * reads consistently across shaders that react harder or softer than average.
+	 * Omitted (treated as 1) for shaders that don't read the beat. Tunable by eye.
+	 */
+	reactGain?: number;
 }
 
 export const WALLPAPERS: WallpaperOption[] = [
@@ -1992,20 +2000,20 @@ export const WALLPAPERS: WallpaperOption[] = [
 	{ id: 'nebula', label: 'Deep Nebula', sublabel: 'Starfield with gravitational lensing', shader: SHADER_NEBULA },
 	{ id: 'topo', label: 'Topographic Flow', sublabel: 'Ink-on-bone contour field, cursor pulls', shader: SHADER_TOPO },
 	{ id: 'topo-noir', label: 'Topo Noir', sublabel: 'Dark contour field · glowing palette lines', shader: SHADER_TOPO_NOIR },
-	{ id: 'aurora-deep', label: 'Aurora Deep', sublabel: 'Pure-black field · sharp luminous ribbons', shader: SHADER_AURORA_DEEP },
+	{ id: 'aurora-deep', label: 'Aurora Deep', sublabel: 'Pure-black field · sharp luminous ribbons', shader: SHADER_AURORA_DEEP, reactGain: 1.1 },
 	{ id: 'chrome-brushed', label: 'Chrome Brushed', sublabel: 'Brushed metal · chromatic aberration', shader: SHADER_CHROME_BRUSHED },
 	{ id: 'zen',    label: 'Zen Water',     sublabel: 'Calm caustic ripples · cursor stirs the surface',             shader: SHADER_ZEN },
-	{ id: 'galaxy', label: 'Spiral Galaxy', sublabel: 'Logarithmic arms · differential rotation · cursor bends gravity', shader: SHADER_GALAXY },
-	{ id: 'blackhole',      label: 'Event Horizon', sublabel: 'Accretion disk · photon ring · cursor bends the light',      shader: SHADER_BLACKHOLE },
-	{ id: 'kifs',           label: 'Fracture',      sublabel: 'Kaleidoscopic fractal jewel · cursor folds space',           shader: SHADER_KIFS },
-	{ id: 'voronoi-glass',  label: 'Stained Glass', sublabel: 'Refractive glass panes · cursor lights the leading',         shader: SHADER_VORONOI_GLASS },
-	{ id: 'curl-flow',      label: 'Silk',          sublabel: 'Curl-noise flow · cursor stirs a vortex',                     shader: SHADER_CURL_FLOW },
-	{ id: 'pulse',          label: 'Pulse',         sublabel: 'Shockwave rings on every beat · reacts to what is playing',   shader: SHADER_PULSE },
-	{ id: 'eq-react',       label: 'Live EQ',       sublabel: 'Analyzer bars driven by the track · bass kicks on the beat',  shader: SHADER_EQ_REACT },
-	{ id: 'beat-tunnel',    label: 'Beat Tunnel',   sublabel: 'Zoom tunnel that lurches forward on the beat · energy blooms', shader: SHADER_BEAT_TUNNEL },
-	{ id: 'bass-bloom',     label: 'Bass Bloom',    sublabel: 'Soft blobs that swell on every beat · energy sizes them',      shader: SHADER_BASS_BLOOM },
-	{ id: 'starfield-warp', label: 'Warp',          sublabel: 'Hyperspace stars that streak forward on the beat',             shader: SHADER_STARFIELD_WARP },
-	{ id: 'radial-eq',      label: 'Radial EQ',     sublabel: 'Circular analyzer ring driven by the track',                   shader: SHADER_RADIAL_EQ },
+	{ id: 'galaxy', label: 'Spiral Galaxy', sublabel: 'Logarithmic arms · differential rotation · cursor bends gravity', shader: SHADER_GALAXY, reactGain: 1.4 },
+	{ id: 'blackhole',      label: 'Event Horizon', sublabel: 'Accretion disk · photon ring · cursor bends the light',      shader: SHADER_BLACKHOLE, reactGain: 1.2 },
+	{ id: 'kifs',           label: 'Fracture',      sublabel: 'Kaleidoscopic fractal jewel · cursor folds space',           shader: SHADER_KIFS, reactGain: 1.2 },
+	{ id: 'voronoi-glass',  label: 'Stained Glass', sublabel: 'Refractive glass panes · cursor lights the leading',         shader: SHADER_VORONOI_GLASS, reactGain: 1.3 },
+	{ id: 'curl-flow',      label: 'Silk',          sublabel: 'Curl-noise flow · cursor stirs a vortex',                     shader: SHADER_CURL_FLOW, reactGain: 1.2 },
+	{ id: 'pulse',          label: 'Pulse',         sublabel: 'Shockwave rings on every beat · reacts to what is playing',   shader: SHADER_PULSE, reactGain: 0.85 },
+	{ id: 'eq-react',       label: 'Live EQ',       sublabel: 'Analyzer bars driven by the track · bass kicks on the beat',  shader: SHADER_EQ_REACT, reactGain: 1.0 },
+	{ id: 'beat-tunnel',    label: 'Beat Tunnel',   sublabel: 'Zoom tunnel that lurches forward on the beat · energy blooms', shader: SHADER_BEAT_TUNNEL, reactGain: 0.8 },
+	{ id: 'bass-bloom',     label: 'Bass Bloom',    sublabel: 'Soft blobs that swell on every beat · energy sizes them',      shader: SHADER_BASS_BLOOM, reactGain: 0.85 },
+	{ id: 'starfield-warp', label: 'Warp',          sublabel: 'Hyperspace stars that streak forward on the beat',             shader: SHADER_STARFIELD_WARP, reactGain: 0.9 },
+	{ id: 'radial-eq',      label: 'Radial EQ',     sublabel: 'Circular analyzer ring driven by the track',                   shader: SHADER_RADIAL_EQ, reactGain: 1.0 },
 	{ id: 'pattern-speed',   label: 'Speed',   sublabel: 'Futurist radial force lines',        shader: SHADER_PATTERN_SPEED },
 	{ id: 'pattern-vortex',  label: 'Vortex',  sublabel: 'Rotating logarithmic arms',          shader: SHADER_PATTERN_VORTEX },
 	{ id: 'pattern-shards',  label: 'Shards',  sublabel: 'Cellular fractured shards',          shader: SHADER_PATTERN_SHARDS },

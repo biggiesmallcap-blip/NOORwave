@@ -3,7 +3,15 @@
 	import { palette } from '$lib/stores/palette';
 	import { DEFAULT_PALETTE, paletteById, type PaletteId } from '$lib/components/wallpaper/palettes';
 	import { currentTrackFeatures, isPlaying, position } from '$lib/stores/player';
-	import { wallpaperReactive, wallpaperReactivity } from '$lib/stores/wallpaper';
+	import {
+		wallpaperReactive,
+		wallpaperReactivity,
+		wallpaperBeatSmoothing,
+		wallpaperReduceMotionActive,
+		wallpaperColorSource,
+		wallpaperIdle
+	} from '$lib/stores/wallpaper';
+	import { artPalette, type ArtPalette } from '$lib/stores/artPalette';
 
 	type Props = {
 		shader: string;
@@ -13,9 +21,11 @@
 		targetFps?: number;
 		/** When true, the canvas receives its own pointer events. False: mouse is inferred from window. */
 		interactive?: boolean;
+		/** Per-shader beat-gain so 100% reactivity reads consistently across shaders. */
+		reactGain?: number;
 	};
 
-	let { shader, maxDpr = 2, targetFps = 45, interactive = true }: Props = $props();
+	let { shader, maxDpr = 2, targetFps = 45, interactive = true, reactGain = 1 }: Props = $props();
 
 	let host: HTMLDivElement;
 	let canvas: HTMLCanvasElement;
@@ -44,6 +54,7 @@ uniform float u_beat;
 uniform float u_energy;
 uniform float u_playing;
 uniform float u_reactivity;
+uniform float u_pulse;
 `;
 
 	function compile(gl: WebGLRenderingContext, type: number, src: string) {
@@ -101,6 +112,11 @@ uniform float u_reactivity;
 		// master on/off; `reactivity` is a 0..1 strength (percentage / 100).
 		let reactive = true;
 		let reactivity = 1;
+		let smoothing = 0.4; // 0 = snappy, 1 = floaty (u_pulse shape)
+		let reduceMotion = false;
+		let colorSource: 'palette' | 'art' = 'palette';
+		let idle: 'drift' | 'frozen' | 'demo' = 'drift';
+		let artColors: ArtPalette | null = null;
 		const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 		const unsubFeatures = currentTrackFeatures.subscribe((f) => {
 			trackBpm = f?.bpm ?? 0;
@@ -118,6 +134,21 @@ uniform float u_reactivity;
 		});
 		const unsubReactivity = wallpaperReactivity.subscribe((v) => {
 			reactivity = Math.max(0, v) / 100;
+		});
+		const unsubSmoothing = wallpaperBeatSmoothing.subscribe((v) => {
+			smoothing = clamp01(v / 100);
+		});
+		const unsubReduceMotion = wallpaperReduceMotionActive.subscribe((v) => {
+			reduceMotion = v;
+		});
+		const unsubColorSource = wallpaperColorSource.subscribe((v) => {
+			colorSource = v;
+		});
+		const unsubIdle = wallpaperIdle.subscribe((v) => {
+			idle = v;
+		});
+		const unsubArt = artPalette.subscribe((v) => {
+			artColors = v;
 		});
 
 		let prog: WebGLProgram | null = null;
@@ -138,6 +169,7 @@ uniform float u_reactivity;
 		let uEnergy: WebGLUniformLocation | null = null;
 		let uPlaying: WebGLUniformLocation | null = null;
 		let uReactivity: WebGLUniformLocation | null = null;
+		let uPulse: WebGLUniformLocation | null = null;
 
 		function setupProgram(fragSrc: string) {
 			if (prog) gl!.deleteProgram(prog);
@@ -180,6 +212,7 @@ uniform float u_reactivity;
 			uEnergy = gl!.getUniformLocation(prog, 'u_energy');
 			uPlaying = gl!.getUniformLocation(prog, 'u_playing');
 			uReactivity = gl!.getUniformLocation(prog, 'u_reactivity');
+			uPulse = gl!.getUniformLocation(prog, 'u_pulse');
 		}
 
 		setupProgram(shader);
@@ -242,6 +275,8 @@ uniform float u_reactivity;
 		let raf = 0;
 		let running = true;
 		let lastFrame = performance.now();
+		// Holds u_time still while Idle = Frozen and nothing is driving the shaders.
+		let frozenT: number | null = null;
 
 		const loop = () => {
 			if (!running) return;
@@ -257,8 +292,48 @@ uniform float u_reactivity;
 
 			state.mouse[0] += (state.targetMouse[0] - state.mouse[0]) * 0.12;
 			state.mouse[1] += (state.targetMouse[1] - state.mouse[1]) * 0.12;
-			const t = (now - state.start) / 1000;
-			state.clickTime = state.clicks.length ? t - state.clicks[state.clicks.length - 1].t0 : 999;
+			// ── music / reactivity state ────────────────────────────────────────
+			// musicOn: a real track is driving. demoOn: synthesize a beat so the
+			// reactive shaders show life while nothing plays (Idle = Demo).
+			const musicOn = playing && reactive && reactivity > 0;
+			const demoOn = reactive && !musicOn && idle === 'demo';
+			const driving = musicOn || demoOn;
+
+			const rawT = (now - state.start) / 1000;
+			let beatPhase = 0;
+			let energy = 0;
+			if (musicOn) {
+				// Interpolate position off the last store emission (it ticks ~4 Hz).
+				const estPosMs = posBaseMs + (now - posBaseAt);
+				const tempo = trackBpm > 30 && trackBpm < 300 ? trackBpm : 100;
+				beatPhase = ((estPosMs / 1000) * (tempo / 60)) % 1;
+				energy = trackEnergy;
+			} else if (demoOn) {
+				beatPhase = (rawT * (100 / 60)) % 1; // gentle synthetic 100 BPM
+				energy = 0.5;
+			}
+
+			// Reactivity amount: user strength × per-shader gain, capped when
+			// reduce-motion is active. Demo keeps a floor so it always animates.
+			let react = 0;
+			if (musicOn) react = reactivity * reactGain;
+			else if (demoOn) react = Math.max(reactivity, 0.5) * reactGain;
+			if (reduceMotion) react = Math.min(react, 0.25);
+
+			// Beat envelope shape (snappy → floaty), both peaking on the beat onset.
+			const snappy = Math.pow(1 - beatPhase, 3);
+			const floaty = 0.5 + 0.5 * Math.cos(Math.PI * Math.min(beatPhase, 1));
+			const pulse = driving ? snappy * (1 - smoothing) + floaty * smoothing : 0;
+
+			// Freeze base motion when Idle = Frozen and nothing is driving. Clicks and
+			// mouse keep real time so interaction still works in the settings preview.
+			if (!driving && idle === 'frozen') {
+				if (frozenT === null) frozenT = rawT;
+			} else {
+				frozenT = null;
+			}
+			const t = frozenT !== null ? frozenT : rawT;
+			state.clickTime = state.clicks.length ? rawT - state.clicks[state.clicks.length - 1].t0 : 999;
 
 			gl!.viewport(0, 0, canvas.width, canvas.height);
 			gl!.uniform2f(uRes!, canvas.width, canvas.height);
@@ -274,29 +349,32 @@ uniform float u_reactivity;
 				const c = state.clicks[state.clicks.length - ccount + i];
 				flat[i * 3] = c.x;
 				flat[i * 3 + 1] = c.y;
-				flat[i * 3 + 2] = t - c.t0;
+				flat[i * 3 + 2] = rawT - c.t0;
 			}
 			gl!.uniform3fv(uClicks!, flat);
 			gl!.uniform1i(uClickCount!, ccount);
 
-			const pal = paletteById(currentPalette).shader;
-			gl!.uniform3f(uColor1!, pal.c1[0], pal.c1[1], pal.c1[2]);
-			gl!.uniform3f(uColor2!, pal.c2[0], pal.c2[1], pal.c2[2]);
-			gl!.uniform3f(uColor3!, pal.c3[0], pal.c3[1], pal.c3[2]);
-			gl!.uniform3f(uColor4!, pal.c4[0], pal.c4[1], pal.c4[2]);
+			// Colours: fixed palette, or extracted from cover art when the user picked
+			// "Album art" and extraction succeeded (else it falls back to the palette).
+			if (colorSource === 'art' && artColors) {
+				const a = artColors;
+				gl!.uniform3f(uColor1!, a[0][0], a[0][1], a[0][2]);
+				gl!.uniform3f(uColor2!, a[1][0], a[1][1], a[1][2]);
+				gl!.uniform3f(uColor3!, a[2][0], a[2][1], a[2][2]);
+				gl!.uniform3f(uColor4!, a[3][0], a[3][1], a[3][2]);
+			} else {
+				const pal = paletteById(currentPalette).shader;
+				gl!.uniform3f(uColor1!, pal.c1[0], pal.c1[1], pal.c1[2]);
+				gl!.uniform3f(uColor2!, pal.c2[0], pal.c2[1], pal.c2[2]);
+				gl!.uniform3f(uColor3!, pal.c3[0], pal.c3[1], pal.c3[2]);
+				gl!.uniform3f(uColor4!, pal.c4[0], pal.c4[1], pal.c4[2]);
+			}
 
-			// Music drives the reactive shaders only while something is playing AND the
-			// user hasn't switched reactivity off. When it's off, u_playing/u_energy/
-			// u_reactivity all go to zero and the shaders use their idle motion. The
-			// intensity slider scales u_reactivity, which every beat-driven term reads.
-			const musicOn = playing && reactive && reactivity > 0;
-			const estPosMs = musicOn ? posBaseMs + (now - posBaseAt) : posBaseMs;
-			const tempo = trackBpm > 30 && trackBpm < 300 ? trackBpm : 100;
-			const beatPhase = musicOn ? ((estPosMs / 1000) * (tempo / 60)) % 1 : 0;
 			gl!.uniform1f(uBeat!, beatPhase);
-			gl!.uniform1f(uEnergy!, musicOn ? trackEnergy : 0);
-			gl!.uniform1f(uPlaying!, musicOn ? 1 : 0);
-			gl!.uniform1f(uReactivity!, musicOn ? reactivity : 0);
+			gl!.uniform1f(uEnergy!, energy);
+			gl!.uniform1f(uPlaying!, driving ? 1 : 0);
+			gl!.uniform1f(uReactivity!, react);
+			gl!.uniform1f(uPulse!, pulse);
 
 			gl!.drawArrays(gl!.TRIANGLES, 0, 3);
 		};
@@ -331,6 +409,11 @@ uniform float u_reactivity;
 			unsubPosition();
 			unsubReactive();
 			unsubReactivity();
+			unsubSmoothing();
+			unsubReduceMotion();
+			unsubColorSource();
+			unsubIdle();
+			unsubArt();
 			canvas.removeEventListener('webglcontextlost', onContextLost);
 			canvas.removeEventListener('webglcontextrestored', onContextRestored);
 			document.removeEventListener('visibilitychange', onVisibility);

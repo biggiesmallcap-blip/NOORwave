@@ -62,17 +62,33 @@
 		wallpaperFps,
 		wallpaperReactive,
 		wallpaperReactivity,
+		wallpaperBeatSmoothing,
+		wallpaperReduceMotion,
+		wallpaperColorSource,
+		wallpaperQuality,
+		wallpaperIdle,
 		setWallpaper,
 		setWallpaperBlur,
 		setWallpaperFps,
 		setWallpaperReactive,
 		setWallpaperReactivity,
+		setWallpaperBeatSmoothing,
+		setWallpaperReduceMotion,
+		setWallpaperColorSource,
+		setWallpaperQuality,
+		setWallpaperIdle,
 		WALLPAPER_BLUR_MAX,
 		WALLPAPER_BLUR_MIN,
 		WALLPAPER_FPS_MAX,
 		WALLPAPER_FPS_MIN,
 		WALLPAPER_REACTIVITY_MAX,
-		WALLPAPER_REACTIVITY_MIN
+		WALLPAPER_REACTIVITY_MIN,
+		WALLPAPER_SMOOTHING_MAX,
+		WALLPAPER_SMOOTHING_MIN,
+		type WallpaperReduceMotion,
+		type WallpaperColorSource,
+		type WallpaperQuality,
+		type WallpaperIdle
 	} from '$lib/stores/wallpaper';
 	import { PALETTES, rgbCss, type Palette, type PaletteId } from '$lib/components/wallpaper/palettes';
 	import { palette, setPalette } from '$lib/stores/palette';
@@ -1895,7 +1911,13 @@
 
 				<div class="wallpaper-big-preview">
 					{#if previewShader}
-						<ShaderWallpaper shader={previewShader} maxDpr={1} targetFps={$wallpaperFps} interactive={true} />
+						<ShaderWallpaper
+							shader={previewShader}
+							maxDpr={$wallpaperQuality === 'high' ? 2 : 1}
+							targetFps={$wallpaperFps}
+							interactive={true}
+							reactGain={WALLPAPERS.find((o) => o.id === previewTileId)?.reactGain ?? 1}
+						/>
 					{:else if previewTileId === 'none' || $wallpaper === 'none'}
 						<div class="wallpaper-none-preview">
 							<span>No wallpaper</span>
@@ -1976,6 +1998,106 @@
 								aria-label="Wallpaper reactivity strength"
 							/>
 							<output>{$wallpaperReactivity}%</output>
+						</div>
+					</label>
+
+					<label class="wallpaper-control" class:disabled={!$wallpaperReactive}>
+						<span>
+							<strong>Beat smoothing</strong>
+							<small>Snappy hits on the beat, or floaty swells between them.</small>
+						</span>
+						<div class="wallpaper-slider-row">
+							<input
+								type="range"
+								min={WALLPAPER_SMOOTHING_MIN}
+								max={WALLPAPER_SMOOTHING_MAX}
+								step="5"
+								value={$wallpaperBeatSmoothing}
+								disabled={!$wallpaperReactive}
+								oninput={(e) => setWallpaperBeatSmoothing(parseInt((e.currentTarget as HTMLInputElement).value, 10))}
+								aria-label="Beat smoothing"
+							/>
+							<output>
+								{$wallpaperBeatSmoothing < 34
+									? 'Snappy'
+									: $wallpaperBeatSmoothing > 66
+										? 'Floaty'
+										: 'Balanced'}
+							</output>
+						</div>
+					</label>
+
+					<label class="wallpaper-control">
+						<span>
+							<strong>Wallpaper colours</strong>
+							<small>Use the palette, or pull colours from the cover art.</small>
+						</span>
+						<div class="wallpaper-slider-row">
+							<select
+								class="audio-select"
+								value={$wallpaperColorSource}
+								onchange={(e) => setWallpaperColorSource((e.currentTarget as HTMLSelectElement).value as WallpaperColorSource)}
+								aria-label="Wallpaper colours"
+							>
+								<option value="palette">Palette</option>
+								<option value="art">Album art</option>
+							</select>
+						</div>
+					</label>
+
+					<label class="wallpaper-control">
+						<span>
+							<strong>When idle</strong>
+							<small>What the background does when nothing's playing.</small>
+						</span>
+						<div class="wallpaper-slider-row">
+							<select
+								class="audio-select"
+								value={$wallpaperIdle}
+								onchange={(e) => setWallpaperIdle((e.currentTarget as HTMLSelectElement).value as WallpaperIdle)}
+								aria-label="Idle behaviour"
+							>
+								<option value="drift">Gentle drift</option>
+								<option value="frozen">Frozen</option>
+								<option value="demo">Demo pulse</option>
+							</select>
+						</div>
+					</label>
+
+					<label class="wallpaper-control">
+						<span>
+							<strong>Reduce motion</strong>
+							<small>Calms the beat reaction. Auto follows your system setting.</small>
+						</span>
+						<div class="wallpaper-slider-row">
+							<select
+								class="audio-select"
+								value={$wallpaperReduceMotion}
+								onchange={(e) => setWallpaperReduceMotion((e.currentTarget as HTMLSelectElement).value as WallpaperReduceMotion)}
+								aria-label="Reduce motion"
+							>
+								<option value="auto">Auto (system)</option>
+								<option value="on">On</option>
+								<option value="off">Off</option>
+							</select>
+						</div>
+					</label>
+
+					<label class="wallpaper-control">
+						<span>
+							<strong>Render quality</strong>
+							<small>High is sharper but uses more GPU.</small>
+						</span>
+						<div class="wallpaper-slider-row">
+							<select
+								class="audio-select"
+								value={$wallpaperQuality}
+								onchange={(e) => setWallpaperQuality((e.currentTarget as HTMLSelectElement).value as WallpaperQuality)}
+								aria-label="Render quality"
+							>
+								<option value="standard">Standard</option>
+								<option value="high">High (2x)</option>
+							</select>
 						</div>
 					</label>
 				</div>
@@ -4187,6 +4309,11 @@
 		display: flex;
 		align-items: center;
 		gap: 10px;
+	}
+
+	.wallpaper-slider-row select {
+		flex: 1;
+		min-width: 120px;
 	}
 
 	.wallpaper-slider-row input {
