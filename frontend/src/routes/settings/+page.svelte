@@ -1661,6 +1661,10 @@
 		void audioSettings.patch({ sample_rate_follow: (e.target as HTMLInputElement).checked });
 	}
 
+	function onAudioReleaseOnPauseToggle(e: Event) {
+		void audioSettings.patch({ exclusive_release_on_pause: (e.target as HTMLInputElement).checked });
+	}
+
 	function onExclusiveGraceChange(e: Event) {
 		const v = parseInt((e.target as HTMLInputElement).value, 10);
 		if (Number.isFinite(v)) {
@@ -2647,6 +2651,18 @@
 								</div>
 								<p class="page-copy setting-caption">
 									Lower values release the device faster after pause. Higher values avoid repeated device grabs.
+								</p>
+								<div class="info-row">
+									<span>Release on pause</span>
+									<strong>
+										<Toggle
+											checked={s.exclusive_release_on_pause}
+											onchange={onAudioReleaseOnPauseToggle}
+										/>
+									</strong>
+								</div>
+								<p class="page-copy setting-caption">
+									Frees the device the moment you pause so other apps can use it, instead of waiting out the idle release. Re-grabs on play; may add a brief gap on quick pause/resume.
 								</p>
 								<div class="info-row">
 									<span>Sample rate follows source</span>

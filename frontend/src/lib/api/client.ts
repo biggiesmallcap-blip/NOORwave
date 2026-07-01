@@ -2157,6 +2157,8 @@ export interface AudioSettings {
 	exclusive_latency_mode: ExclusiveLatencyMode;
 	/** Seconds of paused state before WASAPI exclusive releases the device. Server clamps 5..=120. */
 	exclusive_release_grace_secs: number;
+	/** When true, an explicit pause frees the exclusive device immediately (re-grabbed on play). */
+	exclusive_release_on_pause: boolean;
 }
 
 async function fetchApiResponse(

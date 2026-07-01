@@ -6818,6 +6818,22 @@ async fn pause_playback(State(state): State<SharedState>) -> Result<Json<Value>,
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
+    // Opt-in: free the exclusive WASAPI device on an explicit pause so other
+    // apps can take the DAC without waiting out the idle-release grace. No-op
+    // when exclusive mode is off (the runtime guards on current_exclusive) or
+    // the setting is disabled. Re-grabbed automatically on the next Resume/Play.
+    let release_on_pause = {
+        let guard = state.read().await;
+        guard
+            .db
+            .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(Into::into))
+            .map(|s| s.exclusive_release_on_pause)
+            .unwrap_or(false)
+    };
+    if release_on_pause && let Some(runtime_handle) = current_playback_runtime(&state).await {
+        let _ = runtime_handle.release_exclusive_now();
+    }
+
     let snapshot = {
         let state = state.read().await;
         state

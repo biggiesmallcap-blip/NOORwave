@@ -126,6 +126,12 @@ pub struct AudioSettings {
     /// 5..=120 by the setter route.
     #[serde(default = "default_exclusive_release_grace_secs")]
     pub exclusive_release_grace_secs: u32,
+    /// When true, an explicit user Pause frees the exclusive WASAPI device
+    /// immediately (re-grabbed on the next Resume/Play) instead of waiting out
+    /// `exclusive_release_grace_secs`, so other apps can take the DAC the moment
+    /// you pause. Default false: only the idle grace releases the device.
+    #[serde(default)]
+    pub exclusive_release_on_pause: bool,
 }
 
 impl Default for AudioSettings {
@@ -138,6 +144,7 @@ impl Default for AudioSettings {
             video_quality_mode: VideoQualityMode::Max,
             exclusive_latency_mode: ExclusiveLatencyMode::Stable,
             exclusive_release_grace_secs: DEFAULT_EXCLUSIVE_RELEASE_GRACE_SECS,
+            exclusive_release_on_pause: false,
         }
     }
 }
@@ -173,6 +180,9 @@ pub fn load(conn: &Connection) -> rusqlite::Result<AudioSettings> {
     {
         s.exclusive_release_grace_secs = clamp_exclusive_release_grace_secs(parsed);
     }
+    if let Some(v) = read_kv(conn, "audio.exclusive_release_on_pause")? {
+        s.exclusive_release_on_pause = v == "true";
+    }
     Ok(s)
 }
 
@@ -207,6 +217,15 @@ pub fn save(conn: &Connection, s: &AudioSettings) -> rusqlite::Result<()> {
         conn,
         "audio.exclusive_release_grace_secs",
         &clamp_exclusive_release_grace_secs(s.exclusive_release_grace_secs).to_string(),
+    )?;
+    write_kv(
+        conn,
+        "audio.exclusive_release_on_pause",
+        if s.exclusive_release_on_pause {
+            "true"
+        } else {
+            "false"
+        },
     )?;
     Ok(())
 }
@@ -266,6 +285,7 @@ mod tests {
             exclusive_latency_mode: ExclusiveLatencyMode::LowLatency,
             video_quality_mode: VideoQualityMode::Auto,
             exclusive_release_grace_secs: 60,
+            exclusive_release_on_pause: true,
         };
         save(&conn, &want).unwrap();
         let got = load(&conn).unwrap();
@@ -284,6 +304,7 @@ mod tests {
             exclusive_latency_mode: ExclusiveLatencyMode::UltraLowLatency,
             video_quality_mode: VideoQualityMode::Max,
             exclusive_release_grace_secs: 90,
+            exclusive_release_on_pause: true,
         };
         save(&conn, &updated).unwrap();
         assert_eq!(load(&conn).unwrap(), updated);
