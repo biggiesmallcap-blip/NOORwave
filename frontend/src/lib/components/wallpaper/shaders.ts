@@ -1744,7 +1744,13 @@ void main(){
 // reactivity is off or nothing is playing). Every beat-amplitude term multiplies
 // by u_reactivity so the Settings slider scales it and the toggle mutes it; the
 // (1.0 - u_playing) idle terms take over when the music isn't driving. Colours
-// come from u_color1..4 (palette or extracted cover art). See ShaderWallpaper.svelte.
+// come from u_color1..4 (palette or extracted cover art).
+//
+// The renderer also feeds u_bands = vec3(bass, mid, treble) and u_level, each an
+// attack/decay-smoothed level (fast rise, slow fall, like a VU meter) synthesized
+// from BPM + energy + beat_strength. u_pulse is the smoothed bass envelope. Prefer
+// these smoothed signals to raw u_beat for brightness so nothing strobes. The DJ
+// Visualiser (SHADER_DJ) is the reference consumer. See ShaderWallpaper.svelte.
 
 export const SHADER_PULSE = /* glsl */ `
 void main(){
@@ -1962,10 +1968,103 @@ void main(){
 }
 `;
 
+// ─── DJ Visualiser ───────────────────────────────────────────────────────────
+// The flagship music wallpaper. Reads the smoothed band levels the renderer feeds
+// in (u_bands = vec3(bass, mid, treble), u_level = overall) instead of a raw beat
+// flash. Every band is attack/decay smoothed on the JS side, so it swells and
+// settles like a real level meter. The beat drives MOTION (ring radius, ripple)
+// and localized glow, never full-frame brightness, and a Reinhard tone-map caps
+// peaks, so the frame physically cannot strobe. Idle (nothing playing) it is just
+// the slow flowing field.
+export const SHADER_DJ = /* glsl */ `
+#define PI 3.14159265
+#define TAU 6.28318530
+float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
+float noise(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  float a = hash(i), b = hash(i + vec2(1.,0.));
+  float c = hash(i + vec2(0.,1.)), d = hash(i + vec2(1.,1.));
+  vec2 u = f*f*(3.-2.*f);
+  return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
+}
+float fbm(vec2 p){ float v=0., a=0.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=0.5; } return v; }
+
+// Pseudo-spectrum height at normalized frequency f (0 = bass .. 1 = treble). The
+// three smoothed bands shape a tilted curve; moving noise adds analyzer detail so
+// neighbouring bins wiggle independently instead of moving as one blob.
+float spectrum(float f, float t){
+  float bass = u_bands.x, mid = u_bands.y, treb = u_bands.z;
+  float bTilt = 1.0 - smoothstep(0.0, 0.4, f);
+  float mTilt = exp(-pow((f - 0.5)*3.2, 2.0));
+  float tTilt = smoothstep(0.55, 1.0, f);
+  float base = bass*bTilt*1.15 + mid*mTilt*1.0 + treb*tTilt*0.85;
+  float detail = fbm(vec2(f*9.0, t*0.7))*0.5 + fbm(vec2(f*22.0, t*1.4))*0.25;
+  return base * (0.5 + 1.0*detail);
+}
+
+void main(){
+  vec2 uv = gl_FragCoord.xy / u_resolution.xy;
+  vec2 p = (gl_FragCoord.xy - 0.5*u_resolution.xy) / u_resolution.y;
+  vec2 m = u_mouse - 0.5; m.x *= u_resolution.x / u_resolution.y;
+  float t = u_time;
+  float amp = u_reactivity;                    // slider scales the reaction; 0 = calm
+
+  // Flowing background field, always gently moving, deliberately dim.
+  vec2 q = p*1.2 - m*0.15;
+  float warp = fbm(q*1.3 + vec2(t*0.05, -t*0.04));
+  float bg = fbm(q*2.0 + warp*1.2 + t*0.03);
+  vec3 col = mix(u_color1*0.55, u_color2*0.8, smoothstep(0.15, 0.9, bg));
+  col += u_color3 * pow(bg, 3.0) * 0.2;
+  col *= 0.34;
+
+  float r = length(p);
+  float ang = atan(p.y, p.x);
+  float f = abs(ang) / PI;                     // angle -> frequency, mirrored top/bottom
+  float h = spectrum(f, t) * amp;
+
+  // Radial spectrum silhouette: filled from an inner rim out to the spectrum edge.
+  // The beat mostly moves the spectrum OUTWARD (radius) rather than brightening
+  // it, so a hit reads as growth, not a flash.
+  float rim = 0.30 + u_level*0.06*amp;         // gentle breathing radius
+  float edge = rim + h*0.30;
+  float fill = smoothstep(edge + 0.02, edge - 0.03, r) * smoothstep(rim - 0.14, rim, r);
+  vec3 specCol = mix(u_color2, u_color3, f);
+  specCol = mix(specCol, u_color4, smoothstep(0.55, 1.1, h));
+  col += specCol * fill * 0.62;
+
+  // Bright edge outline.
+  float line = smoothstep(0.014, 0.0, abs(r - edge));
+  col += mix(u_color3, vec3(1.0), 0.4) * line * 0.4;
+
+  // Inner waveform scope, undulates with the mid band.
+  float wob = sin(ang*6.0 + t*1.2)*0.02 + sin(ang*10.0 - t*0.8)*0.012;
+  float scopeR = rim*0.55 + wob*u_bands.y*amp;
+  col += mix(u_color3, vec3(1.0), 0.5) * smoothstep(0.006, 0.0, abs(r - scopeR)) * (0.2 + u_bands.y*0.4*amp);
+
+  // Center bloom rides the bass. Tight exp falloff so it stays a core glow, not a
+  // full-frame brighten.
+  col += u_color4 * exp(-r*6.0) * (0.1 + u_bands.x*0.28*amp);
+
+  // Treble sparkle on the outer edge.
+  float spark = pow(noise(vec2(ang*32.0, t*3.0 + r*10.0)), 6.0);
+  col += vec3(1.0) * spark * smoothstep(edge - 0.02, edge + 0.07, r) * u_bands.z*0.32*amp;
+
+  // Subtle cursor glow.
+  col += u_color3 * exp(-length(p - m)*6.0) * (0.08 + u_mouseDown*0.35);
+
+  // Reinhard tone-map: compresses peaks so the whole frame can never white-flash.
+  col = col / (1.0 + col);
+  col = pow(col, vec3(0.92));
+  col *= 1.0 - dot(uv - 0.5, uv - 0.5) * 0.5;
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
 export type WallpaperId = 'none' | 'aurora' | 'chrome' | 'grid' | 'nebula' | 'topo'
                         | 'topo-noir' | 'aurora-deep' | 'chrome-brushed'
                         | 'zen' | 'galaxy'
                         | 'blackhole' | 'kifs' | 'voronoi-glass' | 'curl-flow' | 'raymarch-lattice'
+                        | 'dj'
                         | 'pulse' | 'eq-react' | 'beat-tunnel'
                         | 'bass-bloom' | 'starfield-warp' | 'radial-eq'
                         | 'joy-division' | 'oscilloscope' | 'spectrum' | 'vinyl' | 'tape'
@@ -2008,6 +2107,7 @@ export const WALLPAPERS: WallpaperOption[] = [
 	{ id: 'kifs',           label: 'Fracture',      sublabel: 'Kaleidoscopic fractal jewel · cursor folds space',           shader: SHADER_KIFS, reactGain: 1.2 },
 	{ id: 'voronoi-glass',  label: 'Stained Glass', sublabel: 'Refractive glass panes · cursor lights the leading',         shader: SHADER_VORONOI_GLASS, reactGain: 1.3 },
 	{ id: 'curl-flow',      label: 'Silk',          sublabel: 'Curl-noise flow · cursor stirs a vortex',                     shader: SHADER_CURL_FLOW, reactGain: 1.2 },
+	{ id: 'dj',             label: 'DJ Visualiser', sublabel: 'Flowing spectrum that moves with the music · smoothed, no strobe', shader: SHADER_DJ, reactGain: 1.0 },
 	{ id: 'pulse',          label: 'Pulse',         sublabel: 'Shockwave rings on every beat · reacts to what is playing',   shader: SHADER_PULSE, reactGain: 0.85 },
 	{ id: 'eq-react',       label: 'Live EQ',       sublabel: 'Analyzer bars driven by the track · bass kicks on the beat',  shader: SHADER_EQ_REACT, reactGain: 1.0 },
 	{ id: 'beat-tunnel',    label: 'Beat Tunnel',   sublabel: 'Zoom tunnel that lurches forward on the beat · energy blooms', shader: SHADER_BEAT_TUNNEL, reactGain: 0.8 },

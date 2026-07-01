@@ -55,6 +55,8 @@ uniform float u_energy;
 uniform float u_playing;
 uniform float u_reactivity;
 uniform float u_pulse;
+uniform vec3 u_bands;
+uniform float u_level;
 `;
 
 	function compile(gl: WebGLRenderingContext, type: number, src: string) {
@@ -105,6 +107,7 @@ uniform float u_pulse;
 		// interpolated against the wall clock per-frame so the beat phase stays smooth.
 		let trackBpm = 0;
 		let trackEnergy = 0;
+		let trackBeatStrength = 0;
 		let playing = false;
 		let posBaseMs = 0;
 		let posBaseAt = performance.now();
@@ -121,6 +124,7 @@ uniform float u_pulse;
 		const unsubFeatures = currentTrackFeatures.subscribe((f) => {
 			trackBpm = f?.bpm ?? 0;
 			trackEnergy = clamp01(f?.energy ?? 0);
+			trackBeatStrength = clamp01(f?.beat_strength ?? 0);
 		});
 		const unsubPlaying = isPlaying.subscribe((v) => {
 			playing = v;
@@ -170,6 +174,8 @@ uniform float u_pulse;
 		let uPlaying: WebGLUniformLocation | null = null;
 		let uReactivity: WebGLUniformLocation | null = null;
 		let uPulse: WebGLUniformLocation | null = null;
+		let uBands: WebGLUniformLocation | null = null;
+		let uLevel: WebGLUniformLocation | null = null;
 
 		function setupProgram(fragSrc: string) {
 			if (prog) gl!.deleteProgram(prog);
@@ -213,6 +219,8 @@ uniform float u_pulse;
 			uPlaying = gl!.getUniformLocation(prog, 'u_playing');
 			uReactivity = gl!.getUniformLocation(prog, 'u_reactivity');
 			uPulse = gl!.getUniformLocation(prog, 'u_pulse');
+			uBands = gl!.getUniformLocation(prog, 'u_bands');
+			uLevel = gl!.getUniformLocation(prog, 'u_level');
 		}
 
 		setupProgram(shader);
@@ -277,6 +285,20 @@ uniform float u_pulse;
 		let lastFrame = performance.now();
 		// Holds u_time still while Idle = Frozen and nothing is driving the shaders.
 		let frozenT: number | null = null;
+		// Attack/decay-smoothed band levels (bass, mid, treble, overall). Fast rise,
+		// slow fall, like a VU meter, so the visuals swell and settle instead of
+		// flashing on every beat. Persist across frames.
+		let sBass = 0;
+		let sMid = 0;
+		let sTreble = 0;
+		let sLevel = 0;
+		let lastBandNow = performance.now();
+		// Move `cur` toward `tgt` with a time-constant that differs on the way up
+		// (attack) vs down (decay), framerate-independent via the exp of dt.
+		const smoothBand = (cur: number, tgt: number, atk: number, dec: number, dt: number) => {
+			const rate = tgt > cur ? atk : dec;
+			return cur + (tgt - cur) * (1 - Math.exp(-rate * dt));
+		};
 
 		const loop = () => {
 			if (!running) return;
@@ -320,10 +342,33 @@ uniform float u_pulse;
 			else if (demoOn) react = Math.max(reactivity, 0.5) * reactGain;
 			if (reduceMotion) react = Math.min(react, 0.25);
 
-			// Beat envelope shape (snappy → floaty), both peaking on the beat onset.
-			const snappy = Math.pow(1 - beatPhase, 3);
-			const floaty = 0.5 + 0.5 * Math.cos(Math.PI * Math.min(beatPhase, 1));
-			const pulse = driving ? snappy * (1 - smoothing) + floaty * smoothing : 0;
+			// ── Smoothed band model (bass / mid / treble) ───────────────────────
+			// Synthesize per-band excitation from the beat clock + energy, then
+			// attack/decay smooth it: fast rise, slow fall, like a VU meter. The beat
+			// drives a bass SWELL, not a flash; mid rides energy + a slow LFO; treble
+			// rides an offbeat (8th-note) LFO. Beat smoothing maps to how fast the
+			// bass falls (snappy = quick, floaty = long tail). Runs every frame so it
+			// decays smoothly to zero when the music stops.
+			const bandDt = Math.min(0.05, Math.max(0, (now - lastBandNow) / 1000));
+			lastBandNow = now;
+			const strength = 0.45 + trackBeatStrength * 0.55;
+			const beatBump = Math.pow(1 - beatPhase, 1.6);
+			const eighth = (beatPhase * 2) % 1;
+			let bassT = 0;
+			let midT = 0;
+			let trebT = 0;
+			if (driving) {
+				bassT = (0.35 + energy * 0.65) * strength * beatBump;
+				midT = energy * (0.35 + 0.65 * (0.5 + 0.5 * Math.sin(now * 0.0028)));
+				trebT = energy * (0.25 + 0.75 * Math.pow(1 - eighth, 3.0)) * 0.7;
+			}
+			const bassDecay = 5.5 - smoothing * 3.0; // snappy ~5.5/s, floaty ~2.5/s
+			// Attack is deliberately unhurried (a swell, not a snap) so beats never
+			// read as a flash; decay is slower still for a musical tail.
+			sBass = smoothBand(sBass, bassT, 10, bassDecay, bandDt);
+			sMid = smoothBand(sMid, midT, 9, 3.5, bandDt);
+			sTreble = smoothBand(sTreble, trebT, 22, 9.0, bandDt);
+			sLevel = smoothBand(sLevel, sBass * 0.55 + sMid * 0.3 + sTreble * 0.25, 16, 3.0, bandDt);
 
 			// Freeze base motion when Idle = Frozen and nothing is driving. Clicks and
 			// mouse keep real time so interaction still works in the settings preview.
@@ -374,7 +419,9 @@ uniform float u_pulse;
 			gl!.uniform1f(uEnergy!, energy);
 			gl!.uniform1f(uPlaying!, driving ? 1 : 0);
 			gl!.uniform1f(uReactivity!, react);
-			gl!.uniform1f(uPulse!, pulse);
+			gl!.uniform1f(uPulse!, sBass); // smoothed bass envelope: no strobe
+			gl!.uniform3f(uBands!, sBass, sMid, sTreble);
+			gl!.uniform1f(uLevel!, sLevel);
 
 			gl!.drawArrays(gl!.TRIANGLES, 0, 3);
 		};
