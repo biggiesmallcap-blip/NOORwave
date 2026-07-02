@@ -1866,9 +1866,12 @@
 
 	<section
 		class="settings-grid"
-		class:single-column={activeCategory === 'appearance' || activeCategory === 'account'}
+		class:single-column={activeCategory !== 'audio'}
 	>
-		<div class="settings-main">
+		<div
+			class="settings-main"
+			class:cards-masonry={activeCategory === 'sources' || activeCategory === 'account'}
+		>
 			{#if activeCategory === 'appearance'}
 			<section data-setting-id="colour-scheme" class="glass-panel section-panel palette-section" class:palette-section-open={paletteMenuOpen}>
 				<SectionHeader eyebrow="Palette" title="Colour scheme" subtitle="UI accent, wallpaper, and no-wallpaper colours." />
@@ -4167,6 +4170,20 @@
 		display: none;
 	}
 
+	/* Categories with no side column (Sources, Account) flow their cards into a
+	   balanced masonry so they fill the full width instead of stacking in a
+	   single narrow column with dead space beside them. */
+	.settings-main.cards-masonry {
+		display: block;
+		columns: 360px 2;
+		column-gap: 12px;
+	}
+
+	.settings-main.cards-masonry > .section-panel {
+		break-inside: avoid;
+		margin-bottom: 12px;
+	}
+
 	.settings-rail {
 		display: grid;
 		grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -4909,7 +4926,7 @@
 		font-size: var(--font-size-sm);
 		font-weight: var(--font-weight-semibold);
 		color: var(--text-primary);
-		line-height: 1.15;
+		line-height: var(--line-height-snug);
 		overflow-wrap: anywhere;
 	}
 
