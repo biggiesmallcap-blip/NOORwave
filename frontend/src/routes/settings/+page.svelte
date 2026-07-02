@@ -1866,12 +1866,10 @@
 
 	<section
 		class="settings-grid"
-		class:single-column={activeCategory !== 'audio'}
+		class:single-column={activeCategory === 'appearance'}
+		class:split-even={activeCategory === 'sources' || activeCategory === 'account'}
 	>
-		<div
-			class="settings-main"
-			class:cards-masonry={activeCategory === 'sources' || activeCategory === 'account'}
-		>
+		<div class="settings-main">
 			{#if activeCategory === 'appearance'}
 			<section data-setting-id="colour-scheme" class="glass-panel section-panel palette-section" class:palette-section-open={paletteMenuOpen}>
 				<SectionHeader eyebrow="Palette" title="Colour scheme" subtitle="UI accent, wallpaper, and no-wallpaper colours." />
@@ -2365,78 +2363,8 @@
 			{/if}
 
 			{#if activeCategory === 'account'}
-			<section data-setting-id="access-pin" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Access" title="Access PIN" subtitle="Use this PIN on another device." />
-				<div class="token-row">
-					<code class="token-value">{tokenVisible ? serverToken : '•'.repeat(serverToken.length || 6)}</code>
-					<button class="btn btn-glass btn-sm" onclick={() => (tokenVisible = !tokenVisible)}>
-						{tokenVisible ? 'Hide' : 'Show'}
-					</button>
-					<button class="btn btn-glass btn-sm" onclick={copyToken}>
-						{tokenCopied ? 'Copied!' : 'Copy'}
-					</button>
-				</div>
-				<div class="action-row">
-					<button class="btn btn-glass" disabled={tokenRegenerating} onclick={() => void handleRegenerateToken()}>
-						{tokenRegenerating ? 'Regenerating…' : 'Regenerate PIN'}
-					</button>
-					{#if tokenRegenError}<span class="field-error">{tokenRegenError}</span>{/if}
-				</div>
-				<p class="page-copy setting-caption">
-					Regenerating disconnects all other devices — they'll need to re-enter the new PIN.
-				</p>
-			</section>
-
 			<IntegrationsPanel />
 
-			<section data-setting-id="app-updates" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Desktop" title="App updates" subtitle="Version, install mode, and update checks." />
-				<div class="inner-metrics">
-					<MetricPair label="Version" value={appVersion || 'Unknown'} copy="Current app build." />
-					<MetricPair label="Install mode" value={installModeLabel} copy={desktopAppAvailable ? 'Detected from the running shell.' : 'Use the desktop app for update checks.'} />
-					<MetricPair label="Updates" value={updateStatus} copy={updateAvailableVersion ? 'Ready from the tray menu or this panel.' : 'Manual checks use the active release channel.'} />
-				</div>
-				<div class="action-row">
-					<button
-						type="button"
-						class="btn btn-primary"
-						onclick={() => void checkForUpdatesNow()}
-						disabled={!desktopAppAvailable || updateChecking}
-					>
-						{updateChecking ? 'Checking...' : 'Check for updates'}
-					</button>
-					{#if !desktopAppAvailable}
-						<span class="page-copy setting-caption">Available in the desktop app.</span>
-					{/if}
-				</div>
-				{#if updateError}
-					<p class="field-error" role="alert">{updateError}</p>
-				{/if}
-			</section>
-
-			{#if desktopAppAvailable}
-			<section data-setting-id="closing-the-window" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Desktop" title="Closing the window" subtitle="Quit NOORwave, or keep it running in the tray." />
-				<div class="info-list">
-					<div class="info-row">
-						<div>
-							<span>Minimize to tray on close</span>
-							<p class="info-row-hint">
-								{minimizeToTray
-									? 'Closing the window keeps NOORwave running in the tray. Quit from the tray menu.'
-									: 'Closing the window quits NOORwave. Turn this on to keep it running in the tray instead.'}
-							</p>
-						</div>
-						<strong>
-							<Toggle
-								checked={minimizeToTray}
-								onchange={(e) => void setMinimizeToTray(e.currentTarget.checked)}
-							/>
-						</strong>
-					</div>
-				</div>
-			</section>
-			{/if}
 			{/if}
 
 			{#if activeCategory === 'sources'}
@@ -2933,87 +2861,6 @@
 			</section>
 			{/if}
 
-			{#if activeCategory === 'sources'}
-			<section data-setting-id="portable-snapshot" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Transfer" title="Portable snapshot" subtitle="Export/import MusicBrainz and Last.fm enrichment." />
-
-				<div class="stat-grid inner-metrics">
-					<MetricPair label="Snapshot checked" value={portableSnapshot?.checked_rows?.toLocaleString() ?? '0'} copy="Tracks marked as already processed." />
-					<MetricPair label="Snapshot genres" value={portableSnapshot?.genre_rows?.toLocaleString() ?? '0'} copy="Genre rows ready to import elsewhere." />
-					<MetricPair label="Last.fm checked" value={portableSnapshot?.lastfm_checked_rows?.toLocaleString() ?? '0'} copy="Last.fm tracks marked as already processed." />
-					<MetricPair label="Context tags" value={portableSnapshot?.context_tag_rows?.toLocaleString() ?? '0'} copy="Last.fm mood and activity tags ready to import." />
-				</div>
-
-				<div class="portable-card glass">
-					<div class="info-list">
-						<div class="info-row">
-							<span>Snapshot state</span>
-							<strong>{portableSnapshot?.exists ? 'Available' : 'Missing'}</strong>
-						</div>
-						<div class="info-row">
-							<span>Generated</span>
-							<strong>{portableGeneratedLabel}</strong>
-						</div>
-						<div class="info-row">
-							<span>Path</span>
-							<strong class="path-value">{portableSnapshot?.path ?? 'data/musicbrainz'}</strong>
-						</div>
-					</div>
-					<p class="page-copy">{portableSnapshotCopy}</p>
-					{#if portableStatusLabel}
-						<p class="page-copy">{portableStatusLabel}</p>
-					{/if}
-				</div>
-
-				<div class="action-row">
-					<button class="btn btn-primary" onclick={exportPortableSnapshot} disabled={portableAction !== null}>
-						{portableAction === 'export' ? 'Exporting…' : 'Export snapshot'}
-					</button>
-					<button
-						class="btn btn-glass"
-						onclick={importPortableSnapshot}
-						disabled={portableAction !== null || !portableSnapshot?.exists}
-					>
-						{portableAction === 'import' ? 'Importing…' : 'Import snapshot'}
-					</button>
-				</div>
-			</section>
-			{/if}
-
-			{#if activeCategory === 'sources'}
-			<section data-setting-id="clear-non-library-entries" class="glass-panel section-panel">
-				<SectionHeader
-					eyebrow="Cleanup"
-					title="Clear non-library entries"
-					subtitle="Prune tidal_stream tracks that left no trace."
-				/>
-				<p class="page-copy">
-					Last.fm radio recommendations get resolved into <code>tidal_stream</code> rows in the
-					tracks table so playback, listen history, and the resolution cache all keep working.
-					This action removes any such row that you never played, never favorited, and isn't in
-					any queue or playlist.
-				</p>
-				<p class="page-copy is-warning">
-					Cascades to trained data referencing those tracks (embeddings, neighbours, transitions).
-					Storage savings are tiny — even 1,000 tracks/month for 10 years is ~20MB. Run for
-					tidiness only.
-				</p>
-				{#if purgeLastDeleted !== null}
-					<p class="page-copy">
-						Last run deleted <strong>{purgeLastDeleted.toLocaleString()}</strong> orphan track{purgeLastDeleted === 1 ? '' : 's'}.
-					</p>
-				{/if}
-				{#if purgeError}
-					<p class="page-copy is-error" role="alert">{purgeError}</p>
-				{/if}
-				<div class="action-row">
-					<button class="btn btn-glass danger" onclick={purgeOrphanTidalStream} disabled={purgeRunning}>
-						{purgeRunning ? 'Purging…' : 'Clear non-library entries'}
-					</button>
-				</div>
-			</section>
-			{/if}
-
 			{#if activeCategory === 'audio'}
 			<section data-setting-id="downloads" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Output" title="Downloads" subtitle="Save tracks to disk as FLAC or MP3." />
@@ -3375,6 +3222,161 @@
 		</div>
 
 		<div class="settings-side">
+
+			{#if activeCategory === 'account'}
+			<section data-setting-id="access-pin" class="glass-panel section-panel">
+				<SectionHeader eyebrow="Access" title="Access PIN" subtitle="Use this PIN on another device." />
+				<div class="token-row">
+					<code class="token-value">{tokenVisible ? serverToken : '•'.repeat(serverToken.length || 6)}</code>
+					<button class="btn btn-glass btn-sm" onclick={() => (tokenVisible = !tokenVisible)}>
+						{tokenVisible ? 'Hide' : 'Show'}
+					</button>
+					<button class="btn btn-glass btn-sm" onclick={copyToken}>
+						{tokenCopied ? 'Copied!' : 'Copy'}
+					</button>
+				</div>
+				<div class="action-row">
+					<button class="btn btn-glass" disabled={tokenRegenerating} onclick={() => void handleRegenerateToken()}>
+						{tokenRegenerating ? 'Regenerating…' : 'Regenerate PIN'}
+					</button>
+					{#if tokenRegenError}<span class="field-error">{tokenRegenError}</span>{/if}
+				</div>
+				<p class="page-copy setting-caption">
+					Regenerating disconnects all other devices — they'll need to re-enter the new PIN.
+				</p>
+			</section>
+
+			<section data-setting-id="app-updates" class="glass-panel section-panel">
+				<SectionHeader eyebrow="Desktop" title="App updates" subtitle="Version, install mode, and update checks." />
+				<div class="inner-metrics">
+					<MetricPair label="Version" value={appVersion || 'Unknown'} copy="Current app build." />
+					<MetricPair label="Install mode" value={installModeLabel} copy={desktopAppAvailable ? 'Detected from the running shell.' : 'Use the desktop app for update checks.'} />
+					<MetricPair label="Updates" value={updateStatus} copy={updateAvailableVersion ? 'Ready from the tray menu or this panel.' : 'Manual checks use the active release channel.'} />
+				</div>
+				<div class="action-row">
+					<button
+						type="button"
+						class="btn btn-primary"
+						onclick={() => void checkForUpdatesNow()}
+						disabled={!desktopAppAvailable || updateChecking}
+					>
+						{updateChecking ? 'Checking...' : 'Check for updates'}
+					</button>
+					{#if !desktopAppAvailable}
+						<span class="page-copy setting-caption">Available in the desktop app.</span>
+					{/if}
+				</div>
+				{#if updateError}
+					<p class="field-error" role="alert">{updateError}</p>
+				{/if}
+			</section>
+
+			{#if desktopAppAvailable}
+			<section data-setting-id="closing-the-window" class="glass-panel section-panel">
+				<SectionHeader eyebrow="Desktop" title="Closing the window" subtitle="Quit NOORwave, or keep it running in the tray." />
+				<div class="info-list">
+					<div class="info-row">
+						<div>
+							<span>Minimize to tray on close</span>
+							<p class="info-row-hint">
+								{minimizeToTray
+									? 'Closing the window keeps NOORwave running in the tray. Quit from the tray menu.'
+									: 'Closing the window quits NOORwave. Turn this on to keep it running in the tray instead.'}
+							</p>
+						</div>
+						<strong>
+							<Toggle
+								checked={minimizeToTray}
+								onchange={(e) => void setMinimizeToTray(e.currentTarget.checked)}
+							/>
+						</strong>
+					</div>
+				</div>
+			</section>
+			{/if}
+			{/if}
+
+			{#if activeCategory === 'sources'}
+			<section data-setting-id="portable-snapshot" class="glass-panel section-panel">
+				<SectionHeader eyebrow="Transfer" title="Portable snapshot" subtitle="Export/import MusicBrainz and Last.fm enrichment." />
+
+				<div class="stat-grid inner-metrics">
+					<MetricPair label="Snapshot checked" value={portableSnapshot?.checked_rows?.toLocaleString() ?? '0'} copy="Tracks marked as already processed." />
+					<MetricPair label="Snapshot genres" value={portableSnapshot?.genre_rows?.toLocaleString() ?? '0'} copy="Genre rows ready to import elsewhere." />
+					<MetricPair label="Last.fm checked" value={portableSnapshot?.lastfm_checked_rows?.toLocaleString() ?? '0'} copy="Last.fm tracks marked as already processed." />
+					<MetricPair label="Context tags" value={portableSnapshot?.context_tag_rows?.toLocaleString() ?? '0'} copy="Last.fm mood and activity tags ready to import." />
+				</div>
+
+				<div class="portable-card glass">
+					<div class="info-list">
+						<div class="info-row">
+							<span>Snapshot state</span>
+							<strong>{portableSnapshot?.exists ? 'Available' : 'Missing'}</strong>
+						</div>
+						<div class="info-row">
+							<span>Generated</span>
+							<strong>{portableGeneratedLabel}</strong>
+						</div>
+						<div class="info-row">
+							<span>Path</span>
+							<strong class="path-value">{portableSnapshot?.path ?? 'data/musicbrainz'}</strong>
+						</div>
+					</div>
+					<p class="page-copy">{portableSnapshotCopy}</p>
+					{#if portableStatusLabel}
+						<p class="page-copy">{portableStatusLabel}</p>
+					{/if}
+				</div>
+
+				<div class="action-row">
+					<button class="btn btn-primary" onclick={exportPortableSnapshot} disabled={portableAction !== null}>
+						{portableAction === 'export' ? 'Exporting…' : 'Export snapshot'}
+					</button>
+					<button
+						class="btn btn-glass"
+						onclick={importPortableSnapshot}
+						disabled={portableAction !== null || !portableSnapshot?.exists}
+					>
+						{portableAction === 'import' ? 'Importing…' : 'Import snapshot'}
+					</button>
+				</div>
+			</section>
+			{/if}
+
+			{#if activeCategory === 'sources'}
+			<section data-setting-id="clear-non-library-entries" class="glass-panel section-panel">
+				<SectionHeader
+					eyebrow="Cleanup"
+					title="Clear non-library entries"
+					subtitle="Prune tidal_stream tracks that left no trace."
+				/>
+				<p class="page-copy">
+					Last.fm radio recommendations get resolved into <code>tidal_stream</code> rows in the
+					tracks table so playback, listen history, and the resolution cache all keep working.
+					This action removes any such row that you never played, never favorited, and isn't in
+					any queue or playlist.
+				</p>
+				<p class="page-copy is-warning">
+					Cascades to trained data referencing those tracks (embeddings, neighbours, transitions).
+					Storage savings are tiny — even 1,000 tracks/month for 10 years is ~20MB. Run for
+					tidiness only.
+				</p>
+				{#if purgeLastDeleted !== null}
+					<p class="page-copy">
+						Last run deleted <strong>{purgeLastDeleted.toLocaleString()}</strong> orphan track{purgeLastDeleted === 1 ? '' : 's'}.
+					</p>
+				{/if}
+				{#if purgeError}
+					<p class="page-copy is-error" role="alert">{purgeError}</p>
+				{/if}
+				<div class="action-row">
+					<button class="btn btn-glass danger" onclick={purgeOrphanTidalStream} disabled={purgeRunning}>
+						{purgeRunning ? 'Purging…' : 'Clear non-library entries'}
+					</button>
+				</div>
+			</section>
+			{/if}
+
 			{#if activeCategory === 'audio'}
 			<section data-setting-id="now-playing-path" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Runtime" title="Now playing path" subtitle="Current device and format." />
@@ -4170,18 +4172,11 @@
 		display: none;
 	}
 
-	/* Categories with no side column (Sources, Account) flow their cards into a
-	   balanced masonry so they fill the full width instead of stacking in a
-	   single narrow column with dead space beside them. */
-	.settings-main.cards-masonry {
-		display: block;
-		columns: 360px 2;
-		column-gap: 12px;
-	}
-
-	.settings-main.cards-masonry > .section-panel {
-		break-inside: avoid;
-		margin-bottom: 12px;
+	/* Sources and Account split their cards across two even columns (main + side).
+	   Each whole card lives in one column, so they fill the width without the
+	   multicol split that tore tall cards (like the integrations panel) in half. */
+	.settings-grid.split-even {
+		grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 	}
 
 	.settings-rail {
