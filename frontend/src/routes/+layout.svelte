@@ -79,7 +79,7 @@
 	import { queueItemToTidalPlayable, trackToTidalPlayable } from '$lib/utils/track';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
 	import { wallpaperById } from '$lib/components/wallpaper/shaders';
-	import { wallpaper, wallpaperFps } from '$lib/stores/wallpaper';
+	import { wallpaper, wallpaperFps, wallpaperQuality } from '$lib/stores/wallpaper';
 	import { palette } from '$lib/stores/palette';
 	import { uiZoom, zoomIn, zoomOut, resetZoom, nudgeZoom, applyZoom } from '$lib/stores/uiZoom';
 	import { isTauri } from '$lib/util/external';
@@ -1249,7 +1249,13 @@
      remote shell is opaque anyway. -->
 <div class="wallpaper-layer" aria-hidden="true">
 	{#if activeWallpaper.shader && !isRemoteRoute}
-		<ShaderWallpaper shader={activeWallpaper.shader} interactive={false} maxDpr={1} targetFps={$wallpaperFps} />
+		<ShaderWallpaper
+			shader={activeWallpaper.shader}
+			interactive={false}
+			maxDpr={$wallpaperQuality === 'high' ? 2 : 1}
+			targetFps={$wallpaperFps}
+			reactGain={activeWallpaper.reactGain ?? 1}
+		/>
 	{/if}
 </div>
 

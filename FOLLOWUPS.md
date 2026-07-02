@@ -453,3 +453,19 @@ Still deferred (raw DOM size, not the reported hover bug):
   rows.
 - Artist/album card hovers use `transform: translateY` (compositor-only, no reflow), so they were
   ruled out as a hover-lag source.
+
+### feat: retrofit beat reactivity into existing wallpaper shaders
+
+The `u_beat` / `u_energy` / `u_playing` uniforms are now fed to every shader, but only the
+three reactive ones (pulse, eq-react, beat-tunnel) use them. As an opt-in polish pass, make a
+few existing shaders react too: Aurora bands brightening on the beat, Galaxy arms blooming with
+energy, the static Spectrum bars becoming live. Keep it subtle so the non-reactive look still
+holds when nothing is playing.
+Spawned by: commit 3bd2c47e (beat-reactive shaders)
+
+### chore: consider a u_beatStrength uniform if energy reads too flat
+
+Reactive intensity is currently driven by `u_energy` alone. `AudioDspFeatures.beat_strength`
+is already fetched into `currentTrackFeatures`; if the pulse/kick feels weak on low-energy
+tracks, pipe `beat_strength` through as a fourth uniform and drive the kick off that instead.
+Spawned by: commit 3bd2c47e (beat-reactive shaders)

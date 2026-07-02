@@ -32,7 +32,16 @@ describe('pattern wallpaper contract', () => {
 	test('keeps wallpaper options in the existing Appearance settings layout', () => {
 		expect(settingsSource).toContain("{#if activeCategory === 'appearance'}");
 		expect(settingsSource).toContain('WALLPAPERS.filter');
-		expect(settingsSource).toContain('More shaders ({extendedWallpaperCount})');
+		// Picker is grouped into collapsible sections instead of one flat wall.
+		expect(settingsSource).toContain('wallpaperGroups');
+		expect(settingsSource).toContain('wallpaper-group-toggle');
+	});
+
+	test('organises the picker into the shared wallpaper groups', () => {
+		expect(shadersSource).toContain('WALLPAPER_GROUPS');
+		for (const key of ['reactive', 'ambient', 'studio', 'pattern']) {
+			expect(shadersSource).toContain(`key: '${key}'`);
+		}
 	});
 
 	test('includes the design bundle palettes in the shared palette selector', () => {
@@ -56,7 +65,8 @@ describe('pattern wallpaper contract', () => {
 		const match = layoutSource.match(/\.wallpaper-layer\s*\{(?<body>[\s\S]*?)\n\t\}/);
 		expect(match?.groups?.body).toContain('filter: blur(var(--wallpaper-blur');
 		expect(match?.groups?.body).toContain('transform: scale(var(--wallpaper-scale');
-		expect(layoutSource).toContain('maxDpr={1}');
+		// Render quality setting: standard caps DPR at 1 (cheap), high allows 2.
+		expect(layoutSource).toContain("maxDpr={$wallpaperQuality === 'high' ? 2 : 1}");
 		expect(layoutSource).toContain('targetFps={$wallpaperFps}');
 	});
 

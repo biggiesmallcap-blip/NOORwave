@@ -55,20 +55,45 @@
 		shouldRefreshAfterTerminalDiscoveryProgress
 	} from '$lib/components/settings/discovery_status';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
-	import { WALLPAPERS, type WallpaperOption } from '$lib/components/wallpaper/shaders';
+	import { WALLPAPERS, WALLPAPER_GROUPS, type WallpaperOption } from '$lib/components/wallpaper/shaders';
 	import {
 		wallpaper,
 		wallpaperBlur,
 		wallpaperFps,
+		wallpaperReactive,
+		wallpaperReactivity,
+		wallpaperBeatSmoothing,
+		wallpaperReduceMotion,
+		wallpaperColorSource,
+		wallpaperQuality,
+		wallpaperIdle,
 		setWallpaper,
 		setWallpaperBlur,
 		setWallpaperFps,
+		setWallpaperReactive,
+		setWallpaperReactivity,
+		setWallpaperBeatSmoothing,
+		setWallpaperReduceMotion,
+		setWallpaperColorSource,
+		setWallpaperQuality,
+		setWallpaperIdle,
 		WALLPAPER_BLUR_MAX,
 		WALLPAPER_BLUR_MIN,
 		WALLPAPER_FPS_MAX,
-		WALLPAPER_FPS_MIN
+		WALLPAPER_FPS_MIN,
+		WALLPAPER_REACTIVITY_MAX,
+		WALLPAPER_REACTIVITY_MIN,
+		WALLPAPER_SMOOTHING_MAX,
+		WALLPAPER_SMOOTHING_MIN,
+		type WallpaperReduceMotion,
+		type WallpaperColorSource,
+		type WallpaperQuality,
+		type WallpaperIdle
 	} from '$lib/stores/wallpaper';
 	import { PALETTES, rgbCss, type Palette, type PaletteId } from '$lib/components/wallpaper/palettes';
+	import { artPalette, artPaletteStatus } from '$lib/stores/artPalette';
+	import { currentTrack } from '$lib/stores/player';
+	import { upscaleTidalArtwork } from '$lib/utils/artwork';
 	import { palette, setPalette } from '$lib/stores/palette';
 	import { uiZoom, setZoom, zoomIn, zoomOut, resetZoom, MIN as ZOOM_MIN, MAX as ZOOM_MAX, WHEEL_STEP as ZOOM_STEP } from '$lib/stores/uiZoom';
 	import { audioSettings } from '$lib/stores/audio_settings';
@@ -1363,7 +1388,6 @@
 	// avoiding WebGL context churn from per-tile mount/unmount cycles.
 	let previewShader = $state<string | null>(null);
 	let previewTileId = $state<string | null>(null);
-	let showExtendedShaders = $state(false);
 	let previewUnmountTimer: ReturnType<typeof setTimeout> | null = null;
 
 	function onTileEnter(option: WallpaperOption) {
@@ -1376,6 +1400,83 @@
 			previewShader = null;
 			previewTileId = null;
 		}, 1200);
+	}
+
+	// ─── Wallpaper picker groups ────────────────────────────────────────
+	// The flat 50-tile wall is grouped into labelled sections. Each group's
+	// open/closed state is tracked here (defaults from the group metadata);
+	// any shader not claimed by a group is swept into a trailing "More" group
+	// so a new WALLPAPERS entry can never vanish from the picker.
+	const wallpaperNone = WALLPAPERS.find((o) => o.id === 'none') ?? null;
+	const groupedIds = new Set(WALLPAPER_GROUPS.flatMap((g) => g.ids));
+	const wallpaperGroups = [
+		...WALLPAPER_GROUPS.map((g) => ({
+			key: g.key,
+			label: g.label,
+			blurb: g.blurb,
+			defaultOpen: g.defaultOpen,
+			options: g.ids
+				.map((id) => WALLPAPERS.find((o) => o.id === id))
+				.filter((o): o is WallpaperOption => !!o)
+		})),
+		...(() => {
+			const rest = WALLPAPERS.filter((o) => o.id !== 'none' && !groupedIds.has(o.id));
+			return rest.length
+				? [{ key: 'more', label: 'More', blurb: 'Everything else', defaultOpen: false, options: rest }]
+				: [];
+		})()
+	];
+	let openGroups = $state<Record<string, boolean>>(
+		Object.fromEntries(wallpaperGroups.map((g) => [g.key, g.defaultOpen]))
+	);
+	function toggleGroup(key: string) {
+		openGroups[key] = !openGroups[key];
+	}
+
+	// Deterministic tile poster: a category-flavoured gradient with a per-shader
+	// hue so every tile reads differently at a glance, without paying for 50 live
+	// WebGL contexts. The real shader still renders in the big hover preview.
+	function tileHue(id: string): number {
+		let h = 0;
+		for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+		return h % 360;
+	}
+	function wallpaperPoster(option: WallpaperOption, groupKey: string): string {
+		const hue = tileHue(option.id);
+		const h2 = (hue + 42) % 360;
+		if (groupKey === 'reactive') {
+			return `radial-gradient(circle at 50% 122%, hsl(${hue} 88% 62%) 0%, hsl(${h2} 82% 46%) 32%, #0a0a13 72%)`;
+		}
+		if (groupKey === 'studio') {
+			return `linear-gradient(150deg, hsl(${hue} 14% 84%) 0%, #1b1b1f 55%, #0a0a0c 100%)`;
+		}
+		if (groupKey === 'pattern') {
+			return `repeating-linear-gradient(${hue % 180}deg, hsl(${hue} 72% 56%) 0 3px, #0b0b13 3px 8px)`;
+		}
+		// ambient / more
+		return `radial-gradient(circle at 30% 28%, hsl(${hue} 72% 56%), transparent 60%), radial-gradient(circle at 76% 74%, hsl(${h2} 66% 46%), transparent 60%), #07070c`;
+	}
+
+	// ─── Album art palette readout ──────────────────────────────────────
+	// Surfaces the colours the "Album art" wallpaper source pulls from the
+	// playing cover. State is driven straight off the store's discriminated
+	// artPaletteStatus ('off'|'no-art'|'loading'|'ready'|'fallback') so the
+	// card never has to guess loading-vs-failed with a timer.
+	const ART_ROLES = ['Base', 'Mid', 'Glow', 'Accent'];
+	const ART_UNIFORMS = ['u_color1', 'u_color2', 'u_color3', 'u_color4'];
+	let artTrack = $derived($currentTrack);
+	let artCover = $derived(
+		artTrack?.artwork_url ? (upscaleTidalArtwork(artTrack.artwork_url, 320) ?? artTrack.artwork_url) : null
+	);
+	function artHex(c: [number, number, number]): string {
+		const h = (n: number) =>
+			Math.round(Math.min(1, Math.max(0, n)) * 255)
+				.toString(16)
+				.padStart(2, '0');
+		return `#${h(c[0])}${h(c[1])}${h(c[2])}`;
+	}
+	function hideBrokenCover(e: Event) {
+		(e.currentTarget as HTMLImageElement).style.visibility = 'hidden';
 	}
 
 	// ─── Audio output settings (TIDAL playback runtime) ─────────────────
@@ -1614,7 +1715,6 @@
 		activePalette.shader.c3,
 		activePalette.shader.c4
 	]);
-	let extendedWallpaperCount = $derived(WALLPAPERS.filter((option) => option.extended).length);
 	let paletteMenuOpen = $state(false);
 
 	function paletteSwatchesFor(p: Palette) {
@@ -1766,7 +1866,8 @@
 
 	<section
 		class="settings-grid"
-		class:single-column={activeCategory === 'appearance' || activeCategory === 'account'}
+		class:single-column={activeCategory === 'appearance'}
+		class:split-even={activeCategory === 'sources' || activeCategory === 'account'}
 	>
 		<div class="settings-main">
 			{#if activeCategory === 'appearance'}
@@ -1889,7 +1990,13 @@
 
 				<div class="wallpaper-big-preview">
 					{#if previewShader}
-						<ShaderWallpaper shader={previewShader} maxDpr={1} targetFps={$wallpaperFps} interactive={true} />
+						<ShaderWallpaper
+							shader={previewShader}
+							maxDpr={$wallpaperQuality === 'high' ? 2 : 1}
+							targetFps={$wallpaperFps}
+							interactive={true}
+							reactGain={WALLPAPERS.find((o) => o.id === previewTileId)?.reactGain ?? 1}
+						/>
 					{:else if previewTileId === 'none' || $wallpaper === 'none'}
 						<div class="wallpaper-none-preview">
 							<span>No wallpaper</span>
@@ -1901,187 +2008,363 @@
 					{/if}
 				</div>
 
-				<div class="wallpaper-control-grid">
-					<label class="wallpaper-control">
-						<span>
-							<strong>Wallpaper FPS</strong>
-							<small>Higher looks smoother. Lower saves GPU.</small>
-						</span>
-						<div class="wallpaper-slider-row">
-							<input
-								type="range"
-								min={WALLPAPER_FPS_MIN}
-								max={WALLPAPER_FPS_MAX}
-								step="1"
-								value={$wallpaperFps}
-								oninput={(e) => setWallpaperFps(parseInt((e.currentTarget as HTMLInputElement).value, 10))}
-								aria-label="Wallpaper FPS"
-							/>
-							<output>{$wallpaperFps} FPS</output>
-						</div>
-					</label>
+				<div class="wallpaper-picker">
+					<div class="wallpaper-grid">
+						{#if wallpaperNone}
+							<button
+								type="button"
+								class="wallpaper-tile"
+								class:active={$wallpaper === 'none'}
+								class:previewing={previewTileId === 'none'}
+								onclick={() => setWallpaper('none')}
+								aria-pressed={$wallpaper === 'none'}
+								onpointerenter={() => onTileEnter(wallpaperNone!)}
+								onpointerleave={onTileLeave}
+							>
+								<span class="wallpaper-tile-swatch wallpaper-tile-swatch-none"></span>
+								<span class="wallpaper-tile-label">
+									<strong>Off</strong>
+									{#if $wallpaper === 'none'}<span class="wallpaper-active-badge">On</span>{/if}
+								</span>
+							</button>
+						{/if}
+					</div>
 
-					<label class="wallpaper-control">
-						<span>
-							<strong>Wallpaper blur</strong>
-							<small>Soften or sharpen the background layer.</small>
-						</span>
-						<div class="wallpaper-slider-row">
-							<input
-								type="range"
-								min={WALLPAPER_BLUR_MIN}
-								max={WALLPAPER_BLUR_MAX}
-								step="1"
-								value={$wallpaperBlur}
-								oninput={(e) => setWallpaperBlur(parseInt((e.currentTarget as HTMLInputElement).value, 10))}
-								aria-label="Wallpaper blur"
-							/>
-							<output>{$wallpaperBlur}px</output>
-						</div>
-					</label>
-				</div>
-
-				<div class="wallpaper-grid">
-					{#each WALLPAPERS.filter(o => !o.extended) as option (option.id)}
-						<button
-							type="button"
-							class="wallpaper-tile"
-							class:active={$wallpaper === option.id}
-							class:previewing={previewTileId === option.id}
-							onclick={() => setWallpaper(option.id)}
-							aria-pressed={$wallpaper === option.id}
-							onpointerenter={() => onTileEnter(option)}
-							onpointerleave={onTileLeave}
-						>
-							{#if !option.shader}
-								<div class="wallpaper-tile-swatch wallpaper-tile-swatch-none"></div>
-							{:else}
-								<div class="wallpaper-tile-swatch"></div>
+					{#each wallpaperGroups as group (group.key)}
+						<div class="wallpaper-group-block">
+							<button
+								type="button"
+								class="wallpaper-group-toggle"
+								onclick={() => toggleGroup(group.key)}
+								aria-expanded={openGroups[group.key]}
+							>
+								<span class="wallpaper-group-caret" class:open={openGroups[group.key]}>&#9656;</span>
+								<span class="wallpaper-group-name">{group.label}</span>
+								<span class="wallpaper-group-count">{group.options.length}</span>
+								<span class="wallpaper-group-blurb">{group.blurb}</span>
+							</button>
+							{#if openGroups[group.key]}
+								<div class="wallpaper-grid">
+									{#each group.options as option (option.id)}
+										<button
+											type="button"
+											class="wallpaper-tile"
+											class:active={$wallpaper === option.id}
+											class:previewing={previewTileId === option.id}
+											onclick={() => setWallpaper(option.id)}
+											aria-pressed={$wallpaper === option.id}
+											onpointerenter={() => onTileEnter(option)}
+											onpointerleave={onTileLeave}
+										>
+											<span
+												class="wallpaper-tile-swatch"
+												style={`background: ${wallpaperPoster(option, group.key)}`}
+											></span>
+											<span class="wallpaper-tile-label">
+												<strong>{option.label}</strong>
+												{#if $wallpaper === option.id}<span class="wallpaper-active-badge">Active</span>{/if}
+											</span>
+										</button>
+									{/each}
+								</div>
 							{/if}
-							<div class="wallpaper-tile-label">
-								<strong>{option.label}</strong>
-								{#if $wallpaper === option.id}
-									<span class="wallpaper-active-badge">Active</span>
-								{/if}
-							</div>
-						</button>
+						</div>
 					{/each}
 				</div>
 
-				<button
-					type="button"
-					class="wallpaper-more-btn"
-					onclick={() => { showExtendedShaders = !showExtendedShaders; }}
-					aria-expanded={showExtendedShaders}
-				>
-					<span class="wallpaper-more-icon" class:open={showExtendedShaders}>▸</span>
-					{#if showExtendedShaders}
-						Fewer shaders
-					{:else}
-						More shaders ({extendedWallpaperCount})
-					{/if}
-				</button>
+				<div class="wallpaper-tune">
+					<div class="wallpaper-group">
+						<div class="wallpaper-group-head">
+							<h4>Reacts to music</h4>
+							<p>How the background answers what is playing.</p>
+						</div>
 
-				{#if showExtendedShaders}
-					<div class="wallpaper-grid wallpaper-grid-extended">
-						{#each WALLPAPERS.filter(o => o.extended) as option (option.id)}
-							<button
-								type="button"
-								class="wallpaper-tile wallpaper-tile-mono"
-								class:active={$wallpaper === option.id}
-								class:previewing={previewTileId === option.id}
-								onclick={() => setWallpaper(option.id)}
-								aria-pressed={$wallpaper === option.id}
-								onpointerenter={() => onTileEnter(option)}
-								onpointerleave={onTileLeave}
-							>
-								<div class="wallpaper-tile-swatch wallpaper-tile-swatch-mono"></div>
-								<div class="wallpaper-tile-label">
-									<strong>{option.label}</strong>
-									{#if $wallpaper === option.id}
-										<span class="wallpaper-active-badge">Active</span>
-									{/if}
-								</div>
-							</button>
-						{/each}
+						<div class="wallpaper-control">
+							<span>
+								<strong>Beat reactivity</strong>
+								<small>Let the playing track drive the reactive wallpapers.</small>
+							</span>
+							<div class="wallpaper-control-field">
+								<Toggle
+									checked={$wallpaperReactive}
+									onchange={(e) => setWallpaperReactive(e.currentTarget.checked)}
+								/>
+							</div>
+						</div>
+
+						{#if $wallpaperReactive}
+							<div class="wallpaper-subgroup">
+								<label class="wallpaper-control">
+									<span>
+										<strong>Strength</strong>
+										<small>How hard it moves with the beat. 100% is the tuned default.</small>
+									</span>
+									<div class="wallpaper-control-field">
+										<input
+											type="range"
+											min={WALLPAPER_REACTIVITY_MIN}
+											max={WALLPAPER_REACTIVITY_MAX}
+											step="5"
+											value={$wallpaperReactivity}
+											oninput={(e) => setWallpaperReactivity(parseInt((e.currentTarget as HTMLInputElement).value, 10))}
+											aria-label="Wallpaper reactivity strength"
+										/>
+										<output>{$wallpaperReactivity}%</output>
+									</div>
+								</label>
+
+								<label class="wallpaper-control">
+									<span>
+										<strong>Smoothing</strong>
+										<small>Snappy hits on the beat, or floaty swells between them.</small>
+									</span>
+									<div class="wallpaper-control-field">
+										<input
+											type="range"
+											min={WALLPAPER_SMOOTHING_MIN}
+											max={WALLPAPER_SMOOTHING_MAX}
+											step="5"
+											value={$wallpaperBeatSmoothing}
+											oninput={(e) => setWallpaperBeatSmoothing(parseInt((e.currentTarget as HTMLInputElement).value, 10))}
+											aria-label="Beat smoothing"
+										/>
+										<output>
+											{$wallpaperBeatSmoothing < 34
+												? 'Snappy'
+												: $wallpaperBeatSmoothing > 66
+													? 'Floaty'
+													: 'Balanced'}
+										</output>
+									</div>
+								</label>
+							</div>
+						{/if}
+
+						<label class="wallpaper-control">
+							<span>
+								<strong>Reduce motion</strong>
+								<small>Calms the reaction. Auto follows your system setting.</small>
+							</span>
+							<div class="wallpaper-control-field">
+								<select
+									class="audio-select"
+									value={$wallpaperReduceMotion}
+									onchange={(e) => setWallpaperReduceMotion((e.currentTarget as HTMLSelectElement).value as WallpaperReduceMotion)}
+									aria-label="Reduce motion"
+								>
+									<option value="auto">Auto (system)</option>
+									<option value="on">On</option>
+									<option value="off">Off</option>
+								</select>
+							</div>
+						</label>
+
+						<label class="wallpaper-control">
+							<span>
+								<strong>When idle</strong>
+								<small>What the background does when nothing is playing.</small>
+							</span>
+							<div class="wallpaper-control-field">
+								<select
+									class="audio-select"
+									value={$wallpaperIdle}
+									onchange={(e) => setWallpaperIdle((e.currentTarget as HTMLSelectElement).value as WallpaperIdle)}
+									aria-label="Idle behaviour"
+								>
+									<option value="drift">Gentle drift</option>
+									<option value="frozen">Frozen</option>
+									<option value="demo">Demo pulse</option>
+								</select>
+							</div>
+						</label>
 					</div>
-				{/if}
+
+					<div class="wallpaper-group">
+						<div class="wallpaper-group-head">
+							<h4>Rendering</h4>
+							<p>Colours, sharpness, and how much GPU it uses.</p>
+						</div>
+
+						<label class="wallpaper-control">
+							<span>
+								<strong>Colours</strong>
+								<small>Use the palette, or pull colours from the cover art.</small>
+							</span>
+							<div class="wallpaper-control-field">
+								<select
+									class="audio-select"
+									value={$wallpaperColorSource}
+									onchange={(e) => setWallpaperColorSource((e.currentTarget as HTMLSelectElement).value as WallpaperColorSource)}
+									aria-label="Wallpaper colours"
+								>
+									<option value="palette">Palette</option>
+									<option value="art">Album art</option>
+								</select>
+							</div>
+						</label>
+				<section
+					class="art-palette-card"
+					class:is-off={$artPaletteStatus === 'off'}
+					aria-label="Album art palette"
+					aria-hidden={$artPaletteStatus === 'off' ? 'true' : undefined}
+				>
+					<div class="art-palette-head">
+						<span class="art-palette-title">
+							<strong>Album art palette</strong>
+							<small>The four colours pulled from the cover, and where each lands in the shader.</small>
+						</span>
+						<span class="art-palette-badge" class:live={$artPaletteStatus === 'ready'}>
+							{$artPaletteStatus === 'ready'
+								? 'Live'
+								: $artPaletteStatus === 'off'
+									? 'Off'
+									: 'Idle'}
+						</span>
+					</div>
+
+					{#if $artPaletteStatus !== 'off'}
+						<div class="art-palette-body">
+							<div class="art-palette-cover">
+								{#if artCover && ($artPaletteStatus === 'ready' || $artPaletteStatus === 'fallback')}
+									<img
+										class="art-palette-cover-img"
+										src={artCover}
+										alt={artTrack
+											? `Cover for ${artTrack.title}${artTrack.artist_name ? ` by ${artTrack.artist_name}` : ''}`
+											: 'Cover art'}
+										loading="lazy"
+										onerror={hideBrokenCover}
+									/>
+								{:else if $artPaletteStatus === 'loading'}
+									<div class="art-palette-cover-skel" aria-hidden="true"></div>
+								{:else}
+									<svg class="art-palette-cover-icon" viewBox="0 0 24 24" aria-hidden="true">
+										<path d="M4 5h16v14H4z" fill="none" stroke="currentColor" stroke-width="1.4" />
+										<circle cx="9" cy="10" r="1.6" fill="currentColor" />
+										<path d="M4 17l5-4 4 3 3-2 4 3" fill="none" stroke="currentColor" stroke-width="1.4" />
+									</svg>
+								{/if}
+							</div>
+							<div class="art-palette-readout">
+								{#if $artPaletteStatus === 'ready' && $artPalette}
+									<ul class="art-palette-rows">
+										{#each $artPalette as c, i (ART_UNIFORMS[i])}
+											<li class="art-palette-row">
+												<span class="palette-swatch art-palette-chip" style={`background: ${rgbCss(c)}`}></span>
+												<span class="art-palette-role">{ART_ROLES[i]}</span>
+												<span class="art-palette-hex">{artHex(c)}</span>
+												<span class="art-palette-uniform">{ART_UNIFORMS[i]}</span>
+											</li>
+										{/each}
+									</ul>
+								{:else if $artPaletteStatus === 'loading'}
+									<ul class="art-palette-rows" aria-hidden="true">
+										{#each ART_ROLES as role (role)}
+											<li class="art-palette-row">
+												<span class="palette-swatch art-palette-chip art-palette-chip-skel"></span>
+												<span class="art-palette-role">{role}</span>
+												<span class="art-palette-hex art-palette-hex-skel"></span>
+												<span class="art-palette-uniform art-palette-uniform-skel"></span>
+											</li>
+										{/each}
+									</ul>
+								{:else}
+									<div class="art-palette-note">
+										<svg class="art-palette-note-icon" viewBox="0 0 24 24" aria-hidden="true">
+											<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.4" />
+											<path d="M12 8v5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+											<circle cx="12" cy="16" r="0.6" fill="currentColor" stroke="currentColor" stroke-width="0.9" />
+										</svg>
+										<p>
+											{$artPaletteStatus === 'fallback'
+												? "Couldn't read this cover. Using the palette instead."
+												: 'Play a track to pull colours from its cover.'}
+										</p>
+									</div>
+								{/if}
+							</div>
+						</div>
+						<p class="art-palette-state" aria-live="polite">
+							{#if $artPaletteStatus === 'ready'}
+								Driving the shader from {artTrack ? artTrack.title : 'this cover'}.
+							{:else if $artPaletteStatus === 'loading'}
+								Reading the cover...
+							{:else if $artPaletteStatus === 'fallback'}
+								Palette colours in use until the next readable cover.
+							{:else}
+								Waiting for something to play.
+							{/if}
+						</p>
+					{:else}
+						<p class="art-palette-state art-palette-state-off">
+							Set Wallpaper colours to Album art to pull the shader palette from the cover.
+						</p>
+					{/if}
+				</section>
+
+						<label class="wallpaper-control">
+							<span>
+								<strong>Render quality</strong>
+								<small>High is sharper but uses more GPU.</small>
+							</span>
+							<div class="wallpaper-control-field">
+								<select
+									class="audio-select"
+									value={$wallpaperQuality}
+									onchange={(e) => setWallpaperQuality((e.currentTarget as HTMLSelectElement).value as WallpaperQuality)}
+									aria-label="Render quality"
+								>
+									<option value="standard">Standard</option>
+									<option value="high">High (2x)</option>
+								</select>
+							</div>
+						</label>
+
+						<label class="wallpaper-control">
+							<span>
+								<strong>Wallpaper blur</strong>
+								<small>Soften or sharpen the background layer.</small>
+							</span>
+							<div class="wallpaper-control-field">
+								<input
+									type="range"
+									min={WALLPAPER_BLUR_MIN}
+									max={WALLPAPER_BLUR_MAX}
+									step="1"
+									value={$wallpaperBlur}
+									oninput={(e) => setWallpaperBlur(parseInt((e.currentTarget as HTMLInputElement).value, 10))}
+									aria-label="Wallpaper blur"
+								/>
+								<output>{$wallpaperBlur}px</output>
+							</div>
+						</label>
+
+						<label class="wallpaper-control">
+							<span>
+								<strong>Wallpaper FPS</strong>
+								<small>Higher looks smoother. Lower saves GPU.</small>
+							</span>
+							<div class="wallpaper-control-field">
+								<input
+									type="range"
+									min={WALLPAPER_FPS_MIN}
+									max={WALLPAPER_FPS_MAX}
+									step="1"
+									value={$wallpaperFps}
+									oninput={(e) => setWallpaperFps(parseInt((e.currentTarget as HTMLInputElement).value, 10))}
+									aria-label="Wallpaper FPS"
+								/>
+								<output>{$wallpaperFps} FPS</output>
+							</div>
+						</label>
+					</div>
+				</div>
 			</section>
 			{/if}
 
 			{#if activeCategory === 'account'}
-			<section data-setting-id="access-pin" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Access" title="Access PIN" subtitle="Use this PIN on another device." />
-				<div class="token-row">
-					<code class="token-value">{tokenVisible ? serverToken : '•'.repeat(serverToken.length || 6)}</code>
-					<button class="btn btn-glass btn-sm" onclick={() => (tokenVisible = !tokenVisible)}>
-						{tokenVisible ? 'Hide' : 'Show'}
-					</button>
-					<button class="btn btn-glass btn-sm" onclick={copyToken}>
-						{tokenCopied ? 'Copied!' : 'Copy'}
-					</button>
-				</div>
-				<div class="action-row">
-					<button class="btn btn-glass" disabled={tokenRegenerating} onclick={() => void handleRegenerateToken()}>
-						{tokenRegenerating ? 'Regenerating…' : 'Regenerate PIN'}
-					</button>
-					{#if tokenRegenError}<span class="field-error">{tokenRegenError}</span>{/if}
-				</div>
-				<p class="page-copy setting-caption">
-					Regenerating disconnects all other devices — they'll need to re-enter the new PIN.
-				</p>
-			</section>
-
 			<IntegrationsPanel />
 
-			<section data-setting-id="app-updates" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Desktop" title="App updates" subtitle="Version, install mode, and update checks." />
-				<div class="inner-metrics">
-					<MetricPair label="Version" value={appVersion || 'Unknown'} copy="Current app build." />
-					<MetricPair label="Install mode" value={installModeLabel} copy={desktopAppAvailable ? 'Detected from the running shell.' : 'Use the desktop app for update checks.'} />
-					<MetricPair label="Updates" value={updateStatus} copy={updateAvailableVersion ? 'Ready from the tray menu or this panel.' : 'Manual checks use the active release channel.'} />
-				</div>
-				<div class="action-row">
-					<button
-						type="button"
-						class="btn btn-primary"
-						onclick={() => void checkForUpdatesNow()}
-						disabled={!desktopAppAvailable || updateChecking}
-					>
-						{updateChecking ? 'Checking...' : 'Check for updates'}
-					</button>
-					{#if !desktopAppAvailable}
-						<span class="page-copy setting-caption">Available in the desktop app.</span>
-					{/if}
-				</div>
-				{#if updateError}
-					<p class="field-error" role="alert">{updateError}</p>
-				{/if}
-			</section>
-
-			{#if desktopAppAvailable}
-			<section data-setting-id="closing-the-window" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Desktop" title="Closing the window" subtitle="Quit NOORwave, or keep it running in the tray." />
-				<div class="info-list">
-					<div class="info-row">
-						<div>
-							<span>Minimize to tray on close</span>
-							<p class="info-row-hint">
-								{minimizeToTray
-									? 'Closing the window keeps NOORwave running in the tray. Quit from the tray menu.'
-									: 'Closing the window quits NOORwave. Turn this on to keep it running in the tray instead.'}
-							</p>
-						</div>
-						<strong>
-							<Toggle
-								checked={minimizeToTray}
-								onchange={(e) => void setMinimizeToTray(e.currentTarget.checked)}
-							/>
-						</strong>
-					</div>
-				</div>
-			</section>
-			{/if}
 			{/if}
 
 			{#if activeCategory === 'sources'}
@@ -2578,87 +2861,6 @@
 			</section>
 			{/if}
 
-			{#if activeCategory === 'sources'}
-			<section data-setting-id="portable-snapshot" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Transfer" title="Portable snapshot" subtitle="Export/import MusicBrainz and Last.fm enrichment." />
-
-				<div class="stat-grid inner-metrics">
-					<MetricPair label="Snapshot checked" value={portableSnapshot?.checked_rows?.toLocaleString() ?? '0'} copy="Tracks marked as already processed." />
-					<MetricPair label="Snapshot genres" value={portableSnapshot?.genre_rows?.toLocaleString() ?? '0'} copy="Genre rows ready to import elsewhere." />
-					<MetricPair label="Last.fm checked" value={portableSnapshot?.lastfm_checked_rows?.toLocaleString() ?? '0'} copy="Last.fm tracks marked as already processed." />
-					<MetricPair label="Context tags" value={portableSnapshot?.context_tag_rows?.toLocaleString() ?? '0'} copy="Last.fm mood and activity tags ready to import." />
-				</div>
-
-				<div class="portable-card glass">
-					<div class="info-list">
-						<div class="info-row">
-							<span>Snapshot state</span>
-							<strong>{portableSnapshot?.exists ? 'Available' : 'Missing'}</strong>
-						</div>
-						<div class="info-row">
-							<span>Generated</span>
-							<strong>{portableGeneratedLabel}</strong>
-						</div>
-						<div class="info-row">
-							<span>Path</span>
-							<strong class="path-value">{portableSnapshot?.path ?? 'data/musicbrainz'}</strong>
-						</div>
-					</div>
-					<p class="page-copy">{portableSnapshotCopy}</p>
-					{#if portableStatusLabel}
-						<p class="page-copy">{portableStatusLabel}</p>
-					{/if}
-				</div>
-
-				<div class="action-row">
-					<button class="btn btn-primary" onclick={exportPortableSnapshot} disabled={portableAction !== null}>
-						{portableAction === 'export' ? 'Exporting…' : 'Export snapshot'}
-					</button>
-					<button
-						class="btn btn-glass"
-						onclick={importPortableSnapshot}
-						disabled={portableAction !== null || !portableSnapshot?.exists}
-					>
-						{portableAction === 'import' ? 'Importing…' : 'Import snapshot'}
-					</button>
-				</div>
-			</section>
-			{/if}
-
-			{#if activeCategory === 'sources'}
-			<section data-setting-id="clear-non-library-entries" class="glass-panel section-panel">
-				<SectionHeader
-					eyebrow="Cleanup"
-					title="Clear non-library entries"
-					subtitle="Prune tidal_stream tracks that left no trace."
-				/>
-				<p class="page-copy">
-					Last.fm radio recommendations get resolved into <code>tidal_stream</code> rows in the
-					tracks table so playback, listen history, and the resolution cache all keep working.
-					This action removes any such row that you never played, never favorited, and isn't in
-					any queue or playlist.
-				</p>
-				<p class="page-copy is-warning">
-					Cascades to trained data referencing those tracks (embeddings, neighbours, transitions).
-					Storage savings are tiny — even 1,000 tracks/month for 10 years is ~20MB. Run for
-					tidiness only.
-				</p>
-				{#if purgeLastDeleted !== null}
-					<p class="page-copy">
-						Last run deleted <strong>{purgeLastDeleted.toLocaleString()}</strong> orphan track{purgeLastDeleted === 1 ? '' : 's'}.
-					</p>
-				{/if}
-				{#if purgeError}
-					<p class="page-copy is-error" role="alert">{purgeError}</p>
-				{/if}
-				<div class="action-row">
-					<button class="btn btn-glass danger" onclick={purgeOrphanTidalStream} disabled={purgeRunning}>
-						{purgeRunning ? 'Purging…' : 'Clear non-library entries'}
-					</button>
-				</div>
-			</section>
-			{/if}
-
 			{#if activeCategory === 'audio'}
 			<section data-setting-id="downloads" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Output" title="Downloads" subtitle="Save tracks to disk as FLAC or MP3." />
@@ -3020,6 +3222,161 @@
 		</div>
 
 		<div class="settings-side">
+
+			{#if activeCategory === 'account'}
+			<section data-setting-id="access-pin" class="glass-panel section-panel">
+				<SectionHeader eyebrow="Access" title="Access PIN" subtitle="Use this PIN on another device." />
+				<div class="token-row">
+					<code class="token-value">{tokenVisible ? serverToken : '•'.repeat(serverToken.length || 6)}</code>
+					<button class="btn btn-glass btn-sm" onclick={() => (tokenVisible = !tokenVisible)}>
+						{tokenVisible ? 'Hide' : 'Show'}
+					</button>
+					<button class="btn btn-glass btn-sm" onclick={copyToken}>
+						{tokenCopied ? 'Copied!' : 'Copy'}
+					</button>
+				</div>
+				<div class="action-row">
+					<button class="btn btn-glass" disabled={tokenRegenerating} onclick={() => void handleRegenerateToken()}>
+						{tokenRegenerating ? 'Regenerating…' : 'Regenerate PIN'}
+					</button>
+					{#if tokenRegenError}<span class="field-error">{tokenRegenError}</span>{/if}
+				</div>
+				<p class="page-copy setting-caption">
+					Regenerating disconnects all other devices — they'll need to re-enter the new PIN.
+				</p>
+			</section>
+
+			<section data-setting-id="app-updates" class="glass-panel section-panel">
+				<SectionHeader eyebrow="Desktop" title="App updates" subtitle="Version, install mode, and update checks." />
+				<div class="inner-metrics">
+					<MetricPair label="Version" value={appVersion || 'Unknown'} copy="Current app build." />
+					<MetricPair label="Install mode" value={installModeLabel} copy={desktopAppAvailable ? 'Detected from the running shell.' : 'Use the desktop app for update checks.'} />
+					<MetricPair label="Updates" value={updateStatus} copy={updateAvailableVersion ? 'Ready from the tray menu or this panel.' : 'Manual checks use the active release channel.'} />
+				</div>
+				<div class="action-row">
+					<button
+						type="button"
+						class="btn btn-primary"
+						onclick={() => void checkForUpdatesNow()}
+						disabled={!desktopAppAvailable || updateChecking}
+					>
+						{updateChecking ? 'Checking...' : 'Check for updates'}
+					</button>
+					{#if !desktopAppAvailable}
+						<span class="page-copy setting-caption">Available in the desktop app.</span>
+					{/if}
+				</div>
+				{#if updateError}
+					<p class="field-error" role="alert">{updateError}</p>
+				{/if}
+			</section>
+
+			{#if desktopAppAvailable}
+			<section data-setting-id="closing-the-window" class="glass-panel section-panel">
+				<SectionHeader eyebrow="Desktop" title="Closing the window" subtitle="Quit NOORwave, or keep it running in the tray." />
+				<div class="info-list">
+					<div class="info-row">
+						<div>
+							<span>Minimize to tray on close</span>
+							<p class="info-row-hint">
+								{minimizeToTray
+									? 'Closing the window keeps NOORwave running in the tray. Quit from the tray menu.'
+									: 'Closing the window quits NOORwave. Turn this on to keep it running in the tray instead.'}
+							</p>
+						</div>
+						<strong>
+							<Toggle
+								checked={minimizeToTray}
+								onchange={(e) => void setMinimizeToTray(e.currentTarget.checked)}
+							/>
+						</strong>
+					</div>
+				</div>
+			</section>
+			{/if}
+			{/if}
+
+			{#if activeCategory === 'sources'}
+			<section data-setting-id="portable-snapshot" class="glass-panel section-panel">
+				<SectionHeader eyebrow="Transfer" title="Portable snapshot" subtitle="Export/import MusicBrainz and Last.fm enrichment." />
+
+				<div class="stat-grid inner-metrics">
+					<MetricPair label="Snapshot checked" value={portableSnapshot?.checked_rows?.toLocaleString() ?? '0'} copy="Tracks marked as already processed." />
+					<MetricPair label="Snapshot genres" value={portableSnapshot?.genre_rows?.toLocaleString() ?? '0'} copy="Genre rows ready to import elsewhere." />
+					<MetricPair label="Last.fm checked" value={portableSnapshot?.lastfm_checked_rows?.toLocaleString() ?? '0'} copy="Last.fm tracks marked as already processed." />
+					<MetricPair label="Context tags" value={portableSnapshot?.context_tag_rows?.toLocaleString() ?? '0'} copy="Last.fm mood and activity tags ready to import." />
+				</div>
+
+				<div class="portable-card glass">
+					<div class="info-list">
+						<div class="info-row">
+							<span>Snapshot state</span>
+							<strong>{portableSnapshot?.exists ? 'Available' : 'Missing'}</strong>
+						</div>
+						<div class="info-row">
+							<span>Generated</span>
+							<strong>{portableGeneratedLabel}</strong>
+						</div>
+						<div class="info-row">
+							<span>Path</span>
+							<strong class="path-value">{portableSnapshot?.path ?? 'data/musicbrainz'}</strong>
+						</div>
+					</div>
+					<p class="page-copy">{portableSnapshotCopy}</p>
+					{#if portableStatusLabel}
+						<p class="page-copy">{portableStatusLabel}</p>
+					{/if}
+				</div>
+
+				<div class="action-row">
+					<button class="btn btn-primary" onclick={exportPortableSnapshot} disabled={portableAction !== null}>
+						{portableAction === 'export' ? 'Exporting…' : 'Export snapshot'}
+					</button>
+					<button
+						class="btn btn-glass"
+						onclick={importPortableSnapshot}
+						disabled={portableAction !== null || !portableSnapshot?.exists}
+					>
+						{portableAction === 'import' ? 'Importing…' : 'Import snapshot'}
+					</button>
+				</div>
+			</section>
+			{/if}
+
+			{#if activeCategory === 'sources'}
+			<section data-setting-id="clear-non-library-entries" class="glass-panel section-panel">
+				<SectionHeader
+					eyebrow="Cleanup"
+					title="Clear non-library entries"
+					subtitle="Prune tidal_stream tracks that left no trace."
+				/>
+				<p class="page-copy">
+					Last.fm radio recommendations get resolved into <code>tidal_stream</code> rows in the
+					tracks table so playback, listen history, and the resolution cache all keep working.
+					This action removes any such row that you never played, never favorited, and isn't in
+					any queue or playlist.
+				</p>
+				<p class="page-copy is-warning">
+					Cascades to trained data referencing those tracks (embeddings, neighbours, transitions).
+					Storage savings are tiny — even 1,000 tracks/month for 10 years is ~20MB. Run for
+					tidiness only.
+				</p>
+				{#if purgeLastDeleted !== null}
+					<p class="page-copy">
+						Last run deleted <strong>{purgeLastDeleted.toLocaleString()}</strong> orphan track{purgeLastDeleted === 1 ? '' : 's'}.
+					</p>
+				{/if}
+				{#if purgeError}
+					<p class="page-copy is-error" role="alert">{purgeError}</p>
+				{/if}
+				<div class="action-row">
+					<button class="btn btn-glass danger" onclick={purgeOrphanTidalStream} disabled={purgeRunning}>
+						{purgeRunning ? 'Purging…' : 'Clear non-library entries'}
+					</button>
+				</div>
+			</section>
+			{/if}
+
 			{#if activeCategory === 'audio'}
 			<section data-setting-id="now-playing-path" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Runtime" title="Now playing path" subtitle="Current device and format." />
@@ -3815,6 +4172,13 @@
 		display: none;
 	}
 
+	/* Sources and Account split their cards across two even columns (main + side).
+	   Each whole card lives in one column, so they fill the width without the
+	   multicol split that tore tall cards (like the integrations panel) in half. */
+	.settings-grid.split-even {
+		grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+	}
+
 	.settings-rail {
 		display: grid;
 		grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -4108,19 +4472,348 @@
 		color: rgba(255, 255, 255, 0.20);
 	}
 
-	.wallpaper-control-grid {
+	/* ── Picker: grouped, collapsible ── */
+	.wallpaper-picker {
+		display: grid;
+		gap: 6px;
+	}
+
+	.wallpaper-group-block {
+		display: grid;
+		gap: 8px;
+	}
+
+	.wallpaper-group-toggle {
+		all: unset;
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+		cursor: pointer;
+		padding: 8px 4px 4px;
+		border-top: 1px solid var(--border-subtle);
+	}
+
+	.wallpaper-group-caret {
+		font-size: var(--font-size-2xs);
+		color: var(--text-tertiary, var(--text-secondary));
+		transition: transform 160ms ease;
+	}
+
+	.wallpaper-group-caret.open {
+		transform: rotate(90deg);
+	}
+
+	.wallpaper-group-name {
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+		color: var(--text-primary);
+	}
+
+	.wallpaper-group-count {
+		font-size: var(--font-size-2xs);
+		font-variant-numeric: tabular-nums;
+		color: var(--text-secondary);
+		padding: 1px 6px;
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.06);
+	}
+
+	.wallpaper-group-blurb {
+		font-size: var(--font-size-xs);
+		color: var(--text-tertiary, var(--text-secondary));
+		margin-left: auto;
+		text-align: right;
+	}
+
+	.wallpaper-group-toggle:hover .wallpaper-group-name {
+		color: var(--accent, #7c80ff);
+	}
+
+	/* ── Tune: two grouped control cards ── */
+	.wallpaper-tune {
 		display: grid;
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 		gap: 10px;
+		align-items: start;
+	}
+
+	.wallpaper-group {
+		border: 1px solid var(--border-subtle);
+		border-radius: 10px;
+		background: rgba(255, 255, 255, 0.02);
+		padding: 4px 12px 8px;
+	}
+
+	.wallpaper-group-head {
+		display: grid;
+		gap: 2px;
+		padding: 10px 0 6px;
+	}
+
+	.wallpaper-group-head h4 {
+		margin: 0;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-bold);
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-secondary);
+	}
+
+	.wallpaper-group-head p {
+		margin: 0;
+		font-size: var(--font-size-xs);
+		color: var(--text-tertiary, var(--text-secondary));
+		line-height: var(--line-height-snug);
 	}
 
 	.wallpaper-control {
 		display: grid;
-		gap: 8px;
-		padding: 10px 12px;
-		border-radius: 8px;
+		grid-template-columns: minmax(0, 1fr) minmax(120px, 168px);
+		align-items: center;
+		gap: 14px;
+		padding: 9px 0;
+		border-top: 1px solid var(--border-subtle);
+	}
+
+	.wallpaper-group-head + .wallpaper-control,
+	.wallpaper-subgroup .wallpaper-control:first-child {
+		border-top: none;
+	}
+
+	.wallpaper-subgroup {
+		display: grid;
+		gap: 0;
+		margin-left: 10px;
+		padding-left: 10px;
+		border-left: 2px solid color-mix(in srgb, var(--accent, #6366f1) 40%, transparent);
+	}
+
+	/* Album art palette readout card: mirrors the .wallpaper-control frame and
+	   reserves its footprint so loading -> ready -> fallback never shift layout. */
+	.art-palette-card {
+		margin-top: 10px;
+		padding: 12px;
 		border: 1px solid var(--border-subtle);
+		border-radius: 8px;
 		background: rgba(255, 255, 255, 0.025);
+		display: grid;
+		gap: 12px;
+	}
+
+	.art-palette-card.is-off {
+		opacity: 0.55;
+		gap: 8px;
+	}
+
+	.art-palette-head {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 12px;
+	}
+
+	.art-palette-title {
+		display: grid;
+		gap: 3px;
+		min-width: 0;
+	}
+
+	.art-palette-title strong {
+		font-size: var(--font-size-sm);
+		color: var(--text-primary);
+	}
+
+	.art-palette-title small {
+		font-size: var(--font-size-xs);
+		color: var(--text-tertiary, var(--text-secondary));
+		line-height: var(--line-height-snug);
+	}
+
+	.art-palette-badge {
+		flex: none;
+		padding: 2px 9px;
+		border-radius: 999px;
+		border: 1px solid var(--border-subtle);
+		font-size: var(--font-size-xs);
+		color: var(--text-secondary);
+		background: rgba(255, 255, 255, 0.04);
+		white-space: nowrap;
+	}
+
+	.art-palette-badge.live {
+		color: var(--accent);
+		border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+		background: color-mix(in srgb, var(--accent) 14%, transparent);
+	}
+
+	.art-palette-body {
+		display: grid;
+		grid-template-columns: 96px minmax(0, 1fr);
+		gap: 16px;
+		min-height: 96px;
+	}
+
+	.art-palette-cover {
+		width: 96px;
+		height: 96px;
+		border-radius: 8px;
+		overflow: hidden;
+		border: 1px solid var(--border-subtle);
+		background: rgba(255, 255, 255, 0.03);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		color: var(--text-tertiary, var(--text-secondary));
+	}
+
+	.art-palette-cover-img {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+		display: block;
+	}
+
+	.art-palette-cover-icon {
+		width: 34px;
+		height: 34px;
+		opacity: 0.7;
+	}
+
+	.art-palette-cover-skel {
+		width: 100%;
+		height: 100%;
+		background: linear-gradient(
+			90deg,
+			rgba(255, 255, 255, 0.04),
+			rgba(255, 255, 255, 0.1),
+			rgba(255, 255, 255, 0.04)
+		);
+		background-size: 200% 100%;
+		animation: art-shimmer 1.1s ease-in-out infinite;
+	}
+
+	.art-palette-readout {
+		display: flex;
+		align-items: center;
+		min-width: 0;
+	}
+
+	.art-palette-rows {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: grid;
+		gap: 6px;
+		width: 100%;
+	}
+
+	.art-palette-row {
+		display: grid;
+		grid-template-columns: 22px minmax(48px, auto) 1fr auto;
+		align-items: center;
+		gap: 10px;
+	}
+
+	.art-palette-chip {
+		border-radius: 5px;
+	}
+
+	.art-palette-role {
+		font-size: var(--font-size-sm);
+		color: var(--text-primary);
+	}
+
+	.art-palette-hex,
+	.art-palette-uniform {
+		font-size: var(--font-size-xs);
+		font-variant-numeric: tabular-nums;
+		color: var(--text-secondary);
+	}
+
+	.art-palette-uniform {
+		color: var(--text-tertiary, var(--text-secondary));
+		text-align: right;
+	}
+
+	.art-palette-chip-skel,
+	.art-palette-hex-skel,
+	.art-palette-uniform-skel {
+		background: linear-gradient(
+			90deg,
+			rgba(255, 255, 255, 0.04),
+			rgba(255, 255, 255, 0.1),
+			rgba(255, 255, 255, 0.04)
+		);
+		background-size: 200% 100%;
+		animation: art-shimmer 1.1s ease-in-out infinite;
+	}
+
+	.art-palette-chip-skel {
+		border: 1px solid rgba(255, 255, 255, 0.12);
+	}
+
+	.art-palette-hex-skel {
+		width: 56px;
+		height: 10px;
+		border-radius: 999px;
+	}
+
+	.art-palette-uniform-skel {
+		width: 60px;
+		height: 10px;
+		border-radius: 999px;
+		justify-self: end;
+	}
+
+	.art-palette-note {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		color: var(--text-secondary);
+	}
+
+	.art-palette-note-icon {
+		width: 20px;
+		height: 20px;
+		flex: none;
+		opacity: 0.7;
+	}
+
+	.art-palette-note p {
+		margin: 0;
+		font-size: var(--font-size-sm);
+		line-height: var(--line-height-snug);
+	}
+
+	.art-palette-state {
+		margin: 0;
+		font-size: var(--font-size-xs);
+		color: var(--text-tertiary, var(--text-secondary));
+	}
+
+	@keyframes art-shimmer {
+		0% {
+			background-position: 200% 0;
+		}
+		100% {
+			background-position: -200% 0;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.art-palette-cover-skel,
+		.art-palette-chip-skel,
+		.art-palette-hex-skel,
+		.art-palette-uniform-skel {
+			animation: none;
+			background: rgba(255, 255, 255, 0.06);
+		}
+	}
+
+	@media (max-width: 560px) {
+		.art-palette-body {
+			grid-template-columns: 1fr;
+		}
 	}
 
 	.wallpaper-control > span {
@@ -4140,20 +4833,26 @@
 		line-height: var(--line-height-snug);
 	}
 
-	.wallpaper-slider-row {
+	.wallpaper-control-field {
 		display: flex;
 		align-items: center;
-		gap: 10px;
+		justify-content: flex-end;
+		gap: 8px;
 	}
 
-	.wallpaper-slider-row input {
+	.wallpaper-control-field select {
 		flex: 1;
-		min-width: 120px;
+		min-width: 0;
+	}
+
+	.wallpaper-control-field input {
+		flex: 1;
+		min-width: 0;
 		accent-color: var(--accent);
 	}
 
-	.wallpaper-slider-row output {
-		min-width: 6ch;
+	.wallpaper-control-field output {
+		min-width: 5ch;
 		text-align: right;
 		font-size: var(--font-size-xs);
 		font-variant-numeric: tabular-nums;
@@ -4194,13 +4893,14 @@
 
 	.wallpaper-tile-swatch {
 		flex-shrink: 0;
-		width: 28px;
-		height: 28px;
+		width: 40px;
+		height: 30px;
 		border-radius: 6px;
 		background: linear-gradient(135deg,
 			color-mix(in srgb, var(--accent, #7c80ff) 60%, #0a0a14),
 			color-mix(in srgb, var(--accent, #7c80ff) 20%, #050508));
 		border: 1px solid var(--panel-border);
+		box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
 	}
 
 	.wallpaper-tile-swatch-none {
@@ -4221,9 +4921,8 @@
 		font-size: var(--font-size-sm);
 		font-weight: var(--font-weight-semibold);
 		color: var(--text-primary);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
+		line-height: var(--line-height-snug);
+		overflow-wrap: anywhere;
 	}
 
 	.wallpaper-active-badge {
@@ -4239,42 +4938,6 @@
 		width: fit-content;
 	}
 
-	.wallpaper-tile-swatch-mono {
-		background: linear-gradient(160deg, #e8e8ea 0%, #1a1a1c 55%, #0a0a0b 100%);
-	}
-
-	.wallpaper-more-btn {
-		all: unset;
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		cursor: pointer;
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-medium);
-		color: var(--text-secondary, rgba(255,255,255,0.45));
-		padding: 5px 2px;
-		transition: color 140ms ease;
-		align-self: flex-start;
-	}
-
-	.wallpaper-more-btn:hover {
-		color: var(--text-primary, rgba(255,255,255,0.85));
-	}
-
-	.wallpaper-more-icon {
-		display: inline-block;
-		font-size: var(--font-size-2xs);
-		transition: transform 180ms ease;
-	}
-
-	.wallpaper-more-icon.open {
-		transform: rotate(90deg);
-	}
-
-	.wallpaper-grid-extended {
-		border-top: 1px solid rgba(255,255,255,0.05);
-		padding-top: 4px;
-	}
 
 	.section-panel {
 		padding: 16px;
@@ -4517,7 +5180,7 @@
 			grid-template-columns: 1fr;
 		}
 
-		.wallpaper-control-grid {
+		.wallpaper-tune {
 			grid-template-columns: 1fr;
 		}
 

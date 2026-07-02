@@ -43,9 +43,25 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
         return;
     }
 
+    // Poll the real-time audio spectrum at ~30 Hz for the wallpaper visualiser.
+    // `poll` returns a frame only when a new one was computed (silence produces
+    // nothing), so an idle player generates no visualiser traffic.
+    let mut spectrum_ticker = tokio::time::interval(std::time::Duration::from_millis(33));
+    spectrum_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_spectrum_seq: u64 = 0;
+
     // Forward events to the client
     loop {
         tokio::select! {
+            // Real-time audio spectrum frames
+            _ = spectrum_ticker.tick() => {
+                if let Some(bands) = crate::playback::spectrum::global().poll(&mut last_spectrum_seq) {
+                    let msg = json!({"type": "audio_spectrum", "bands": bands});
+                    if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
             // Events from the app
             recv_result = rx.recv() => {
                 let event = match recv_result {

@@ -20,7 +20,15 @@ pub(crate) fn write_output_f32(
     command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
     event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
 ) {
-    write_output_buffer(data, shared, command_tx, event_tx, |sample| sample)
+    write_output_buffer(data, shared, command_tx, event_tx, |sample| sample);
+    // Tap the finished output for the wallpaper visualiser. RT-safe: a
+    // non-blocking try_lock + bounded copy, skipped on contention. Never
+    // mutates `data`, so the audio is byte-for-byte unchanged.
+    crate::playback::spectrum::global().push(
+        data,
+        shared.device_channels,
+        shared.device_sample_rate,
+    );
 }
 
 #[cfg(target_os = "windows")]
