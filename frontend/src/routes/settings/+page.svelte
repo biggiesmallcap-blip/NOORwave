@@ -55,7 +55,7 @@
 		shouldRefreshAfterTerminalDiscoveryProgress
 	} from '$lib/components/settings/discovery_status';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
-	import { WALLPAPERS, type WallpaperOption } from '$lib/components/wallpaper/shaders';
+	import { WALLPAPERS, WALLPAPER_GROUPS, type WallpaperOption } from '$lib/components/wallpaper/shaders';
 	import {
 		wallpaper,
 		wallpaperBlur,
@@ -1388,7 +1388,6 @@
 	// avoiding WebGL context churn from per-tile mount/unmount cycles.
 	let previewShader = $state<string | null>(null);
 	let previewTileId = $state<string | null>(null);
-	let showExtendedShaders = $state(false);
 	let previewUnmountTimer: ReturnType<typeof setTimeout> | null = null;
 
 	function onTileEnter(option: WallpaperOption) {
@@ -1401,6 +1400,61 @@
 			previewShader = null;
 			previewTileId = null;
 		}, 1200);
+	}
+
+	// ─── Wallpaper picker groups ────────────────────────────────────────
+	// The flat 50-tile wall is grouped into labelled sections. Each group's
+	// open/closed state is tracked here (defaults from the group metadata);
+	// any shader not claimed by a group is swept into a trailing "More" group
+	// so a new WALLPAPERS entry can never vanish from the picker.
+	const wallpaperNone = WALLPAPERS.find((o) => o.id === 'none') ?? null;
+	const groupedIds = new Set(WALLPAPER_GROUPS.flatMap((g) => g.ids));
+	const wallpaperGroups = [
+		...WALLPAPER_GROUPS.map((g) => ({
+			key: g.key,
+			label: g.label,
+			blurb: g.blurb,
+			defaultOpen: g.defaultOpen,
+			options: g.ids
+				.map((id) => WALLPAPERS.find((o) => o.id === id))
+				.filter((o): o is WallpaperOption => !!o)
+		})),
+		...(() => {
+			const rest = WALLPAPERS.filter((o) => o.id !== 'none' && !groupedIds.has(o.id));
+			return rest.length
+				? [{ key: 'more', label: 'More', blurb: 'Everything else', defaultOpen: false, options: rest }]
+				: [];
+		})()
+	];
+	let openGroups = $state<Record<string, boolean>>(
+		Object.fromEntries(wallpaperGroups.map((g) => [g.key, g.defaultOpen]))
+	);
+	function toggleGroup(key: string) {
+		openGroups[key] = !openGroups[key];
+	}
+
+	// Deterministic tile poster: a category-flavoured gradient with a per-shader
+	// hue so every tile reads differently at a glance, without paying for 50 live
+	// WebGL contexts. The real shader still renders in the big hover preview.
+	function tileHue(id: string): number {
+		let h = 0;
+		for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+		return h % 360;
+	}
+	function wallpaperPoster(option: WallpaperOption, groupKey: string): string {
+		const hue = tileHue(option.id);
+		const h2 = (hue + 42) % 360;
+		if (groupKey === 'reactive') {
+			return `radial-gradient(circle at 50% 122%, hsl(${hue} 88% 62%) 0%, hsl(${h2} 82% 46%) 32%, #0a0a13 72%)`;
+		}
+		if (groupKey === 'studio') {
+			return `linear-gradient(150deg, hsl(${hue} 14% 84%) 0%, #1b1b1f 55%, #0a0a0c 100%)`;
+		}
+		if (groupKey === 'pattern') {
+			return `repeating-linear-gradient(${hue % 180}deg, hsl(${hue} 72% 56%) 0 3px, #0b0b13 3px 8px)`;
+		}
+		// ambient / more
+		return `radial-gradient(circle at 30% 28%, hsl(${hue} 72% 56%), transparent 60%), radial-gradient(circle at 76% 74%, hsl(${h2} 66% 46%), transparent 60%), #07070c`;
 	}
 
 	// ─── Album art palette readout ──────────────────────────────────────
@@ -1661,7 +1715,6 @@
 		activePalette.shader.c3,
 		activePalette.shader.c4
 	]);
-	let extendedWallpaperCount = $derived(WALLPAPERS.filter((option) => option.extended).length);
 	let paletteMenuOpen = $state(false);
 
 	function paletteSwatchesFor(p: Palette) {
@@ -1954,179 +2007,200 @@
 					{/if}
 				</div>
 
-				<div class="wallpaper-control-grid">
-					<label class="wallpaper-control">
-						<span>
-							<strong>Wallpaper FPS</strong>
-							<small>Higher looks smoother. Lower saves GPU.</small>
-						</span>
-						<div class="wallpaper-slider-row">
-							<input
-								type="range"
-								min={WALLPAPER_FPS_MIN}
-								max={WALLPAPER_FPS_MAX}
-								step="1"
-								value={$wallpaperFps}
-								oninput={(e) => setWallpaperFps(parseInt((e.currentTarget as HTMLInputElement).value, 10))}
-								aria-label="Wallpaper FPS"
-							/>
-							<output>{$wallpaperFps} FPS</output>
-						</div>
-					</label>
-
-					<label class="wallpaper-control">
-						<span>
-							<strong>Wallpaper blur</strong>
-							<small>Soften or sharpen the background layer.</small>
-						</span>
-						<div class="wallpaper-slider-row">
-							<input
-								type="range"
-								min={WALLPAPER_BLUR_MIN}
-								max={WALLPAPER_BLUR_MAX}
-								step="1"
-								value={$wallpaperBlur}
-								oninput={(e) => setWallpaperBlur(parseInt((e.currentTarget as HTMLInputElement).value, 10))}
-								aria-label="Wallpaper blur"
-							/>
-							<output>{$wallpaperBlur}px</output>
-						</div>
-					</label>
-
-					<div class="wallpaper-control">
-						<span>
-							<strong>Beat reactivity</strong>
-							<small>Let the playing track drive Pulse, Live EQ, and the reactive wallpapers.</small>
-						</span>
-						<div class="wallpaper-slider-row">
-							<Toggle
-								checked={$wallpaperReactive}
-								onchange={(e) => setWallpaperReactive(e.currentTarget.checked)}
-							/>
-						</div>
+				<div class="wallpaper-picker">
+					<div class="wallpaper-grid">
+						{#if wallpaperNone}
+							<button
+								type="button"
+								class="wallpaper-tile"
+								class:active={$wallpaper === 'none'}
+								class:previewing={previewTileId === 'none'}
+								onclick={() => setWallpaper('none')}
+								aria-pressed={$wallpaper === 'none'}
+								onpointerenter={() => onTileEnter(wallpaperNone!)}
+								onpointerleave={onTileLeave}
+							>
+								<span class="wallpaper-tile-swatch wallpaper-tile-swatch-none"></span>
+								<span class="wallpaper-tile-label">
+									<strong>Off</strong>
+									{#if $wallpaper === 'none'}<span class="wallpaper-active-badge">On</span>{/if}
+								</span>
+							</button>
+						{/if}
 					</div>
 
-					<label class="wallpaper-control" class:disabled={!$wallpaperReactive}>
-						<span>
-							<strong>Reactivity strength</strong>
-							<small>How hard the wallpaper moves with the beat. 100% is the tuned default.</small>
-						</span>
-						<div class="wallpaper-slider-row">
-							<input
-								type="range"
-								min={WALLPAPER_REACTIVITY_MIN}
-								max={WALLPAPER_REACTIVITY_MAX}
-								step="5"
-								value={$wallpaperReactivity}
-								disabled={!$wallpaperReactive}
-								oninput={(e) => setWallpaperReactivity(parseInt((e.currentTarget as HTMLInputElement).value, 10))}
-								aria-label="Wallpaper reactivity strength"
-							/>
-							<output>{$wallpaperReactivity}%</output>
-						</div>
-					</label>
-
-					<label class="wallpaper-control" class:disabled={!$wallpaperReactive}>
-						<span>
-							<strong>Beat smoothing</strong>
-							<small>Snappy hits on the beat, or floaty swells between them.</small>
-						</span>
-						<div class="wallpaper-slider-row">
-							<input
-								type="range"
-								min={WALLPAPER_SMOOTHING_MIN}
-								max={WALLPAPER_SMOOTHING_MAX}
-								step="5"
-								value={$wallpaperBeatSmoothing}
-								disabled={!$wallpaperReactive}
-								oninput={(e) => setWallpaperBeatSmoothing(parseInt((e.currentTarget as HTMLInputElement).value, 10))}
-								aria-label="Beat smoothing"
-							/>
-							<output>
-								{$wallpaperBeatSmoothing < 34
-									? 'Snappy'
-									: $wallpaperBeatSmoothing > 66
-										? 'Floaty'
-										: 'Balanced'}
-							</output>
-						</div>
-					</label>
-
-					<label class="wallpaper-control">
-						<span>
-							<strong>Wallpaper colours</strong>
-							<small>Use the palette, or pull colours from the cover art.</small>
-						</span>
-						<div class="wallpaper-slider-row">
-							<select
-								class="audio-select"
-								value={$wallpaperColorSource}
-								onchange={(e) => setWallpaperColorSource((e.currentTarget as HTMLSelectElement).value as WallpaperColorSource)}
-								aria-label="Wallpaper colours"
+					{#each wallpaperGroups as group (group.key)}
+						<div class="wallpaper-group-block">
+							<button
+								type="button"
+								class="wallpaper-group-toggle"
+								onclick={() => toggleGroup(group.key)}
+								aria-expanded={openGroups[group.key]}
 							>
-								<option value="palette">Palette</option>
-								<option value="art">Album art</option>
-							</select>
+								<span class="wallpaper-group-caret" class:open={openGroups[group.key]}>&#9656;</span>
+								<span class="wallpaper-group-name">{group.label}</span>
+								<span class="wallpaper-group-count">{group.options.length}</span>
+								<span class="wallpaper-group-blurb">{group.blurb}</span>
+							</button>
+							{#if openGroups[group.key]}
+								<div class="wallpaper-grid">
+									{#each group.options as option (option.id)}
+										<button
+											type="button"
+											class="wallpaper-tile"
+											class:active={$wallpaper === option.id}
+											class:previewing={previewTileId === option.id}
+											onclick={() => setWallpaper(option.id)}
+											aria-pressed={$wallpaper === option.id}
+											onpointerenter={() => onTileEnter(option)}
+											onpointerleave={onTileLeave}
+										>
+											<span
+												class="wallpaper-tile-swatch"
+												style={`background: ${wallpaperPoster(option, group.key)}`}
+											></span>
+											<span class="wallpaper-tile-label">
+												<strong>{option.label}</strong>
+												{#if $wallpaper === option.id}<span class="wallpaper-active-badge">Active</span>{/if}
+											</span>
+										</button>
+									{/each}
+								</div>
+							{/if}
 						</div>
-					</label>
-
-					<label class="wallpaper-control">
-						<span>
-							<strong>When idle</strong>
-							<small>What the background does when nothing's playing.</small>
-						</span>
-						<div class="wallpaper-slider-row">
-							<select
-								class="audio-select"
-								value={$wallpaperIdle}
-								onchange={(e) => setWallpaperIdle((e.currentTarget as HTMLSelectElement).value as WallpaperIdle)}
-								aria-label="Idle behaviour"
-							>
-								<option value="drift">Gentle drift</option>
-								<option value="frozen">Frozen</option>
-								<option value="demo">Demo pulse</option>
-							</select>
-						</div>
-					</label>
-
-					<label class="wallpaper-control">
-						<span>
-							<strong>Reduce motion</strong>
-							<small>Calms the beat reaction. Auto follows your system setting.</small>
-						</span>
-						<div class="wallpaper-slider-row">
-							<select
-								class="audio-select"
-								value={$wallpaperReduceMotion}
-								onchange={(e) => setWallpaperReduceMotion((e.currentTarget as HTMLSelectElement).value as WallpaperReduceMotion)}
-								aria-label="Reduce motion"
-							>
-								<option value="auto">Auto (system)</option>
-								<option value="on">On</option>
-								<option value="off">Off</option>
-							</select>
-						</div>
-					</label>
-
-					<label class="wallpaper-control">
-						<span>
-							<strong>Render quality</strong>
-							<small>High is sharper but uses more GPU.</small>
-						</span>
-						<div class="wallpaper-slider-row">
-							<select
-								class="audio-select"
-								value={$wallpaperQuality}
-								onchange={(e) => setWallpaperQuality((e.currentTarget as HTMLSelectElement).value as WallpaperQuality)}
-								aria-label="Render quality"
-							>
-								<option value="standard">Standard</option>
-								<option value="high">High (2x)</option>
-							</select>
-						</div>
-					</label>
+					{/each}
 				</div>
 
+				<div class="wallpaper-tune">
+					<div class="wallpaper-group">
+						<div class="wallpaper-group-head">
+							<h4>Reacts to music</h4>
+							<p>How the background answers what is playing.</p>
+						</div>
+
+						<div class="wallpaper-control">
+							<span>
+								<strong>Beat reactivity</strong>
+								<small>Let the playing track drive the reactive wallpapers.</small>
+							</span>
+							<div class="wallpaper-control-field">
+								<Toggle
+									checked={$wallpaperReactive}
+									onchange={(e) => setWallpaperReactive(e.currentTarget.checked)}
+								/>
+							</div>
+						</div>
+
+						{#if $wallpaperReactive}
+							<div class="wallpaper-subgroup">
+								<label class="wallpaper-control">
+									<span>
+										<strong>Strength</strong>
+										<small>How hard it moves with the beat. 100% is the tuned default.</small>
+									</span>
+									<div class="wallpaper-control-field">
+										<input
+											type="range"
+											min={WALLPAPER_REACTIVITY_MIN}
+											max={WALLPAPER_REACTIVITY_MAX}
+											step="5"
+											value={$wallpaperReactivity}
+											oninput={(e) => setWallpaperReactivity(parseInt((e.currentTarget as HTMLInputElement).value, 10))}
+											aria-label="Wallpaper reactivity strength"
+										/>
+										<output>{$wallpaperReactivity}%</output>
+									</div>
+								</label>
+
+								<label class="wallpaper-control">
+									<span>
+										<strong>Smoothing</strong>
+										<small>Snappy hits on the beat, or floaty swells between them.</small>
+									</span>
+									<div class="wallpaper-control-field">
+										<input
+											type="range"
+											min={WALLPAPER_SMOOTHING_MIN}
+											max={WALLPAPER_SMOOTHING_MAX}
+											step="5"
+											value={$wallpaperBeatSmoothing}
+											oninput={(e) => setWallpaperBeatSmoothing(parseInt((e.currentTarget as HTMLInputElement).value, 10))}
+											aria-label="Beat smoothing"
+										/>
+										<output>
+											{$wallpaperBeatSmoothing < 34
+												? 'Snappy'
+												: $wallpaperBeatSmoothing > 66
+													? 'Floaty'
+													: 'Balanced'}
+										</output>
+									</div>
+								</label>
+							</div>
+						{/if}
+
+						<label class="wallpaper-control">
+							<span>
+								<strong>Reduce motion</strong>
+								<small>Calms the reaction. Auto follows your system setting.</small>
+							</span>
+							<div class="wallpaper-control-field">
+								<select
+									class="audio-select"
+									value={$wallpaperReduceMotion}
+									onchange={(e) => setWallpaperReduceMotion((e.currentTarget as HTMLSelectElement).value as WallpaperReduceMotion)}
+									aria-label="Reduce motion"
+								>
+									<option value="auto">Auto (system)</option>
+									<option value="on">On</option>
+									<option value="off">Off</option>
+								</select>
+							</div>
+						</label>
+
+						<label class="wallpaper-control">
+							<span>
+								<strong>When idle</strong>
+								<small>What the background does when nothing is playing.</small>
+							</span>
+							<div class="wallpaper-control-field">
+								<select
+									class="audio-select"
+									value={$wallpaperIdle}
+									onchange={(e) => setWallpaperIdle((e.currentTarget as HTMLSelectElement).value as WallpaperIdle)}
+									aria-label="Idle behaviour"
+								>
+									<option value="drift">Gentle drift</option>
+									<option value="frozen">Frozen</option>
+									<option value="demo">Demo pulse</option>
+								</select>
+							</div>
+						</label>
+					</div>
+
+					<div class="wallpaper-group">
+						<div class="wallpaper-group-head">
+							<h4>Rendering</h4>
+							<p>Colours, sharpness, and how much GPU it uses.</p>
+						</div>
+
+						<label class="wallpaper-control">
+							<span>
+								<strong>Colours</strong>
+								<small>Use the palette, or pull colours from the cover art.</small>
+							</span>
+							<div class="wallpaper-control-field">
+								<select
+									class="audio-select"
+									value={$wallpaperColorSource}
+									onchange={(e) => setWallpaperColorSource((e.currentTarget as HTMLSelectElement).value as WallpaperColorSource)}
+									aria-label="Wallpaper colours"
+								>
+									<option value="palette">Palette</option>
+									<option value="art">Album art</option>
+								</select>
+							</div>
+						</label>
 				<section
 					class="art-palette-card"
 					class:is-off={$artPaletteStatus === 'off'}
@@ -2227,71 +2301,63 @@
 					{/if}
 				</section>
 
-				<div class="wallpaper-grid">
-					{#each WALLPAPERS.filter(o => !o.extended) as option (option.id)}
-						<button
-							type="button"
-							class="wallpaper-tile"
-							class:active={$wallpaper === option.id}
-							class:previewing={previewTileId === option.id}
-							onclick={() => setWallpaper(option.id)}
-							aria-pressed={$wallpaper === option.id}
-							onpointerenter={() => onTileEnter(option)}
-							onpointerleave={onTileLeave}
-						>
-							{#if !option.shader}
-								<div class="wallpaper-tile-swatch wallpaper-tile-swatch-none"></div>
-							{:else}
-								<div class="wallpaper-tile-swatch"></div>
-							{/if}
-							<div class="wallpaper-tile-label">
-								<strong>{option.label}</strong>
-								{#if $wallpaper === option.id}
-									<span class="wallpaper-active-badge">Active</span>
-								{/if}
+						<label class="wallpaper-control">
+							<span>
+								<strong>Render quality</strong>
+								<small>High is sharper but uses more GPU.</small>
+							</span>
+							<div class="wallpaper-control-field">
+								<select
+									class="audio-select"
+									value={$wallpaperQuality}
+									onchange={(e) => setWallpaperQuality((e.currentTarget as HTMLSelectElement).value as WallpaperQuality)}
+									aria-label="Render quality"
+								>
+									<option value="standard">Standard</option>
+									<option value="high">High (2x)</option>
+								</select>
 							</div>
-						</button>
-					{/each}
-				</div>
+						</label>
 
-				<button
-					type="button"
-					class="wallpaper-more-btn"
-					onclick={() => { showExtendedShaders = !showExtendedShaders; }}
-					aria-expanded={showExtendedShaders}
-				>
-					<span class="wallpaper-more-icon" class:open={showExtendedShaders}>▸</span>
-					{#if showExtendedShaders}
-						Fewer shaders
-					{:else}
-						More shaders ({extendedWallpaperCount})
-					{/if}
-				</button>
+						<label class="wallpaper-control">
+							<span>
+								<strong>Wallpaper blur</strong>
+								<small>Soften or sharpen the background layer.</small>
+							</span>
+							<div class="wallpaper-control-field">
+								<input
+									type="range"
+									min={WALLPAPER_BLUR_MIN}
+									max={WALLPAPER_BLUR_MAX}
+									step="1"
+									value={$wallpaperBlur}
+									oninput={(e) => setWallpaperBlur(parseInt((e.currentTarget as HTMLInputElement).value, 10))}
+									aria-label="Wallpaper blur"
+								/>
+								<output>{$wallpaperBlur}px</output>
+							</div>
+						</label>
 
-				{#if showExtendedShaders}
-					<div class="wallpaper-grid wallpaper-grid-extended">
-						{#each WALLPAPERS.filter(o => o.extended) as option (option.id)}
-							<button
-								type="button"
-								class="wallpaper-tile wallpaper-tile-mono"
-								class:active={$wallpaper === option.id}
-								class:previewing={previewTileId === option.id}
-								onclick={() => setWallpaper(option.id)}
-								aria-pressed={$wallpaper === option.id}
-								onpointerenter={() => onTileEnter(option)}
-								onpointerleave={onTileLeave}
-							>
-								<div class="wallpaper-tile-swatch wallpaper-tile-swatch-mono"></div>
-								<div class="wallpaper-tile-label">
-									<strong>{option.label}</strong>
-									{#if $wallpaper === option.id}
-										<span class="wallpaper-active-badge">Active</span>
-									{/if}
-								</div>
-							</button>
-						{/each}
+						<label class="wallpaper-control">
+							<span>
+								<strong>Wallpaper FPS</strong>
+								<small>Higher looks smoother. Lower saves GPU.</small>
+							</span>
+							<div class="wallpaper-control-field">
+								<input
+									type="range"
+									min={WALLPAPER_FPS_MIN}
+									max={WALLPAPER_FPS_MAX}
+									step="1"
+									value={$wallpaperFps}
+									oninput={(e) => setWallpaperFps(parseInt((e.currentTarget as HTMLInputElement).value, 10))}
+									aria-label="Wallpaper FPS"
+								/>
+								<output>{$wallpaperFps} FPS</output>
+							</div>
+						</label>
 					</div>
-				{/if}
+				</div>
 			</section>
 			{/if}
 
@@ -4394,23 +4460,120 @@
 		color: rgba(255, 255, 255, 0.20);
 	}
 
-	.wallpaper-control-grid {
+	/* ── Picker: grouped, collapsible ── */
+	.wallpaper-picker {
+		display: grid;
+		gap: 6px;
+	}
+
+	.wallpaper-group-block {
+		display: grid;
+		gap: 8px;
+	}
+
+	.wallpaper-group-toggle {
+		all: unset;
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+		cursor: pointer;
+		padding: 8px 4px 4px;
+		border-top: 1px solid var(--border-subtle);
+	}
+
+	.wallpaper-group-caret {
+		font-size: var(--font-size-2xs);
+		color: var(--text-tertiary, var(--text-secondary));
+		transition: transform 160ms ease;
+	}
+
+	.wallpaper-group-caret.open {
+		transform: rotate(90deg);
+	}
+
+	.wallpaper-group-name {
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+		color: var(--text-primary);
+	}
+
+	.wallpaper-group-count {
+		font-size: var(--font-size-2xs);
+		font-variant-numeric: tabular-nums;
+		color: var(--text-secondary);
+		padding: 1px 6px;
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.06);
+	}
+
+	.wallpaper-group-blurb {
+		font-size: var(--font-size-xs);
+		color: var(--text-tertiary, var(--text-secondary));
+		margin-left: auto;
+		text-align: right;
+	}
+
+	.wallpaper-group-toggle:hover .wallpaper-group-name {
+		color: var(--accent, #7c80ff);
+	}
+
+	/* ── Tune: two grouped control cards ── */
+	.wallpaper-tune {
 		display: grid;
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 		gap: 10px;
+		align-items: start;
+	}
+
+	.wallpaper-group {
+		border: 1px solid var(--border-subtle);
+		border-radius: 10px;
+		background: rgba(255, 255, 255, 0.02);
+		padding: 4px 12px 8px;
+	}
+
+	.wallpaper-group-head {
+		display: grid;
+		gap: 2px;
+		padding: 10px 0 6px;
+	}
+
+	.wallpaper-group-head h4 {
+		margin: 0;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-bold);
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-secondary);
+	}
+
+	.wallpaper-group-head p {
+		margin: 0;
+		font-size: var(--font-size-xs);
+		color: var(--text-tertiary, var(--text-secondary));
+		line-height: var(--line-height-snug);
 	}
 
 	.wallpaper-control {
 		display: grid;
-		gap: 8px;
-		padding: 10px 12px;
-		border-radius: 8px;
-		border: 1px solid var(--border-subtle);
-		background: rgba(255, 255, 255, 0.025);
+		grid-template-columns: minmax(0, 1fr) minmax(120px, 168px);
+		align-items: center;
+		gap: 14px;
+		padding: 9px 0;
+		border-top: 1px solid var(--border-subtle);
 	}
 
-	.wallpaper-control.disabled {
-		opacity: 0.5;
+	.wallpaper-group-head + .wallpaper-control,
+	.wallpaper-subgroup .wallpaper-control:first-child {
+		border-top: none;
+	}
+
+	.wallpaper-subgroup {
+		display: grid;
+		gap: 0;
+		margin-left: 10px;
+		padding-left: 10px;
+		border-left: 2px solid color-mix(in srgb, var(--accent, #6366f1) 40%, transparent);
 	}
 
 	/* Album art palette readout card: mirrors the .wallpaper-control frame and
@@ -4658,25 +4821,26 @@
 		line-height: var(--line-height-snug);
 	}
 
-	.wallpaper-slider-row {
+	.wallpaper-control-field {
 		display: flex;
 		align-items: center;
-		gap: 10px;
+		justify-content: flex-end;
+		gap: 8px;
 	}
 
-	.wallpaper-slider-row select {
+	.wallpaper-control-field select {
 		flex: 1;
-		min-width: 120px;
+		min-width: 0;
 	}
 
-	.wallpaper-slider-row input {
+	.wallpaper-control-field input {
 		flex: 1;
-		min-width: 120px;
+		min-width: 0;
 		accent-color: var(--accent);
 	}
 
-	.wallpaper-slider-row output {
-		min-width: 6ch;
+	.wallpaper-control-field output {
+		min-width: 5ch;
 		text-align: right;
 		font-size: var(--font-size-xs);
 		font-variant-numeric: tabular-nums;
@@ -4717,13 +4881,14 @@
 
 	.wallpaper-tile-swatch {
 		flex-shrink: 0;
-		width: 28px;
-		height: 28px;
+		width: 40px;
+		height: 30px;
 		border-radius: 6px;
 		background: linear-gradient(135deg,
 			color-mix(in srgb, var(--accent, #7c80ff) 60%, #0a0a14),
 			color-mix(in srgb, var(--accent, #7c80ff) 20%, #050508));
 		border: 1px solid var(--panel-border);
+		box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
 	}
 
 	.wallpaper-tile-swatch-none {
@@ -4744,9 +4909,8 @@
 		font-size: var(--font-size-sm);
 		font-weight: var(--font-weight-semibold);
 		color: var(--text-primary);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
+		line-height: 1.15;
+		overflow-wrap: anywhere;
 	}
 
 	.wallpaper-active-badge {
@@ -4762,42 +4926,6 @@
 		width: fit-content;
 	}
 
-	.wallpaper-tile-swatch-mono {
-		background: linear-gradient(160deg, #e8e8ea 0%, #1a1a1c 55%, #0a0a0b 100%);
-	}
-
-	.wallpaper-more-btn {
-		all: unset;
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		cursor: pointer;
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-medium);
-		color: var(--text-secondary, rgba(255,255,255,0.45));
-		padding: 5px 2px;
-		transition: color 140ms ease;
-		align-self: flex-start;
-	}
-
-	.wallpaper-more-btn:hover {
-		color: var(--text-primary, rgba(255,255,255,0.85));
-	}
-
-	.wallpaper-more-icon {
-		display: inline-block;
-		font-size: var(--font-size-2xs);
-		transition: transform 180ms ease;
-	}
-
-	.wallpaper-more-icon.open {
-		transform: rotate(90deg);
-	}
-
-	.wallpaper-grid-extended {
-		border-top: 1px solid rgba(255,255,255,0.05);
-		padding-top: 4px;
-	}
 
 	.section-panel {
 		padding: 16px;
@@ -5040,7 +5168,7 @@
 			grid-template-columns: 1fr;
 		}
 
-		.wallpaper-control-grid {
+		.wallpaper-tune {
 			grid-template-columns: 1fr;
 		}
 

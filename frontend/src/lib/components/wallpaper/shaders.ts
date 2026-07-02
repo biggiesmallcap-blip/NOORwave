@@ -2407,3 +2407,62 @@ export const WALLPAPERS: WallpaperOption[] = [
 export function wallpaperById(id: WallpaperId): WallpaperOption {
 	return WALLPAPERS.find((w) => w.id === id) ?? WALLPAPERS[0];
 }
+
+export interface WallpaperGroup {
+	key: string;
+	label: string;
+	blurb: string;
+	/** Groups shown open by default; the rest collapse to keep the picker short. */
+	defaultOpen: boolean;
+	ids: WallpaperId[];
+}
+
+// The picker is organised into these groups instead of one flat wall of tiles.
+// Order here is display order. 'none' is handled on its own, above the groups.
+// Any shader missing from every group is swept into a trailing "More" group by
+// the settings page, so a new WALLPAPERS entry can never silently disappear.
+export const WALLPAPER_GROUPS: WallpaperGroup[] = [
+	{
+		key: 'reactive',
+		label: 'Music reactive',
+		blurb: 'Move with the track that is playing',
+		defaultOpen: true,
+		ids: [
+			'dj', 'analyzer', 'scope-ring', 'synthwave', 'kaleido-beat',
+			'pulse', 'eq-react', 'radial-eq', 'beat-tunnel', 'bass-bloom', 'starfield-warp'
+		]
+	},
+	{
+		key: 'ambient',
+		label: 'Ambient',
+		blurb: 'Calm abstract motion, always on',
+		defaultOpen: true,
+		ids: [
+			'aurora', 'aurora-deep', 'chrome', 'chrome-brushed', 'grid', 'nebula',
+			'topo', 'topo-noir', 'zen', 'galaxy', 'blackhole', 'kifs',
+			'voronoi-glass', 'curl-flow', 'raymarch-lattice'
+		]
+	},
+	{
+		key: 'studio',
+		label: 'Studio',
+		blurb: 'Record-shop and studio motifs',
+		defaultOpen: false,
+		ids: [
+			'joy-division', 'oscilloscope', 'spectrum', 'vinyl', 'tape', 'reel',
+			'spectrogram', 'lissajous', 'phasing', 'drone', 'standing-wave'
+		]
+	},
+	{
+		key: 'pattern',
+		label: 'Patterns',
+		blurb: 'Geometric loops',
+		defaultOpen: false,
+		ids: [
+			'pattern-speed', 'pattern-vortex', 'pattern-shards', 'pattern-vector',
+			'pattern-plasma', 'pattern-kaleido', 'pattern-tunnel', 'pattern-melt',
+			'pattern-grid', 'pattern-dots', 'pattern-hatch', 'pattern-truchet',
+			'pattern-waves', 'pattern-noise'
+		]
+	}
+];

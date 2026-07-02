@@ -32,7 +32,16 @@ describe('pattern wallpaper contract', () => {
 	test('keeps wallpaper options in the existing Appearance settings layout', () => {
 		expect(settingsSource).toContain("{#if activeCategory === 'appearance'}");
 		expect(settingsSource).toContain('WALLPAPERS.filter');
-		expect(settingsSource).toContain('More shaders ({extendedWallpaperCount})');
+		// Picker is grouped into collapsible sections instead of one flat wall.
+		expect(settingsSource).toContain('wallpaperGroups');
+		expect(settingsSource).toContain('wallpaper-group-toggle');
+	});
+
+	test('organises the picker into the shared wallpaper groups', () => {
+		expect(shadersSource).toContain('WALLPAPER_GROUPS');
+		for (const key of ['reactive', 'ambient', 'studio', 'pattern']) {
+			expect(shadersSource).toContain(`key: '${key}'`);
+		}
 	});
 
 	test('includes the design bundle palettes in the shared palette selector', () => {
