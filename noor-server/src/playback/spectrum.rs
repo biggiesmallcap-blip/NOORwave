@@ -175,7 +175,15 @@ fn compute_bands(spectrum: &[Complex<f32>], sample_rate: f32) -> Vec<f32> {
         let avg = if counts[k] > 0 {
             bands[k] / counts[k] as f32
         } else {
-            0.0
+            // A narrow low band can straddle two FFT bin centres and collect
+            // none at all (66-84 Hz at 44.1 kHz with 21.5 Hz bin spacing), so
+            // that bar would be permanently dead. Interpolate the magnitude at
+            // the band's centre frequency instead.
+            let fc = F_MIN * ((k as f32 + 0.5) * ln_ratio).exp();
+            let pos = (fc / bin_hz).max(1.0);
+            let i0 = (pos.floor() as usize).clamp(1, half - 2);
+            let frac = (pos - i0 as f32).clamp(0.0, 1.0);
+            spectrum[i0].norm() * (1.0 - frac) + spectrum[i0 + 1].norm() * frac
         };
         // Normalize by window size, to dB, map [-70, -6] dB -> [0, 1].
         let norm = avg / FFT_SIZE as f32 * 2.0;
@@ -244,6 +252,36 @@ mod tests {
         assert!(
             bands.iter().any(|&b| b > 0.05),
             "1 kHz tone should light a band: {bands:?}"
+        );
+    }
+
+    #[test]
+    fn narrow_low_band_interpolates_instead_of_dying() {
+        // At 44.1 kHz the FFT bins are 21.5 Hz apart, so one narrow low band
+        // (66-84 Hz) contains no bin centre at all. A 75 Hz tone must still
+        // light that band via the interpolation fallback.
+        let cap = SpectrumCapture::empty();
+        let sr = 44_100u32;
+        let mut buf = vec![0.0f32; RING * 2];
+        for (n, s) in buf.iter_mut().enumerate() {
+            *s = (std::f32::consts::TAU * 75.0 * n as f32 / sr as f32).sin() * 0.5;
+        }
+        for chunk in buf.chunks(512) {
+            cap.push(chunk, 1, sr);
+        }
+        let mut planner = FftPlanner::<f32>::new();
+        let fft = planner.plan_fft_forward(FFT_SIZE);
+        let hann: Vec<f32> = (0..FFT_SIZE)
+            .map(|i| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / FFT_SIZE as f32).cos())
+            .collect();
+        let mut scratch = vec![Complex::new(0.0, 0.0); FFT_SIZE];
+        cap.compute(&fft, &hann, &mut scratch);
+        let bands = cap.latest.lock().unwrap().clone();
+        let ln_ratio = (F_MAX / F_MIN).ln() / NUM_BANDS as f32;
+        let b = ((75.0f32 / F_MIN).ln() / ln_ratio).floor() as usize;
+        assert!(
+            bands[b] > 0.05,
+            "75 Hz tone should light band {b}: {bands:?}"
         );
     }
 }

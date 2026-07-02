@@ -1809,7 +1809,10 @@ void main(){
   // still visibly jumps on tracks that were never DSP-analyzed (energy == 0).
   float kick = u_pulse * smoothstep(0.55, 0.0, fnorm) * u_reactivity;
   float level = 0.4 + u_energy*1.2;
-  float h = clamp((0.12 + wander*tilt*0.7) * level + kick*(0.18 + u_energy*0.5), 0.0, 0.95);
+  float fake = clamp((0.12 + wander*tilt*0.7) * level + kick*(0.18 + u_energy*0.5), 0.0, 0.95);
+  // Real FFT bar when the backend streams it, the synthesized field otherwise.
+  float liveScale = 0.45 + 0.4*u_reactivity;
+  float h = mix(fake, clamp(bandAt(fnorm)*liveScale, 0.0, 0.95), u_audio);
 
   float baseline = 0.06;
   float top = baseline + h;
@@ -1822,9 +1825,14 @@ void main(){
   barCol += u_color4 * smoothstep(0.85, 1.0, grad);      // hot tips
   vec3 col = vec3(0.01, 0.012, 0.02);
   col += barCol * inside;
-  col += u_color4 * (1.0 - smoothstep(0.0, 0.006, abs(uv.y - top))) * bm * step(0.02, h);  // peak cap
+  // Cap rides the bar tip, or the real falling peak trace when audio is live.
+  float capY = baseline + mix(h, clamp(peakAt(fnorm)*liveScale, 0.0, 0.95), u_audio);
+  col += u_color4 * (1.0 - smoothstep(0.0, 0.006, abs(uv.y - capY))) * bm * step(0.02, capY - baseline);
   col += u_color1 * (1.0 - smoothstep(0.0, 0.004, abs(uv.y - baseline))) * 0.6;              // floor line
 
+  // Reinhard tone-map: a slammed spectrum fills more bar area, and this keeps
+  // that from reading as a full-frame brightness jump.
+  col = col / (1.0 + col);
   col *= 1.0 - dot(uv - 0.5, uv - 0.5) * 0.3;
   gl_FragColor = vec4(col, 1.0);
 }
@@ -1948,7 +1956,11 @@ void main(){
   float beatEnv = u_pulse;   // onset-peaked, shaped by the Beat smoothing setting
   float wander = n1(bar*1.7 + u_time*1.2)*0.6 + n1(bar*0.7 + u_time*2.6)*0.4;
   float level = 0.5 + u_energy*1.1*u_reactivity;
-  float h = (0.05 + wander*0.28*level) + beatEnv*(0.05 + u_energy*0.12)*u_reactivity;
+  float fake = (0.05 + wander*0.28*level) + beatEnv*(0.05 + u_energy*0.12)*u_reactivity;
+  // Real FFT when live: mirrored left/right so bass meets at one side without
+  // a seam. Falls back to the synthesized wander otherwise.
+  float live = 0.03 + bandAt(abs(an*2.0 - 1.0))*(0.24 + 0.12*u_reactivity);
+  float h = mix(fake, live, u_audio);
 
   float inner = 0.22;
   float top = inner + h;
@@ -1965,6 +1977,8 @@ void main(){
   col += mix(u_color1, u_color2, 0.5) * exp(-abs(r - inner)*40.0) * 0.4;                 // inner rim
   col += u_color1 * exp(-r*8.0) * (0.15 + beatEnv*u_energy*u_reactivity*0.5);               // core pulse
 
+  // Reinhard tone-map: taller live bars must not read as a brightness jump.
+  col = col / (1.0 + col);
   col *= 1.0 - dot(uv - 0.5, uv - 0.5) * 0.35;
   gl_FragColor = vec4(col, 1.0);
 }
@@ -2007,20 +2021,27 @@ void main(){
   float r = length(p);
   float a = atan(p.y, p.x);
   float af = a/TAU + 0.5;                       // 0..1 around the circle
-  float slot = fract(af * 24.0);                // position within one bar cell
+  // Mirror around the vertical axis: bass at the bottom on both sides, treble
+  // at the top. Kills the ugly seam where band 23 used to meet band 0.
+  float sym = abs(fract(af - 0.25 + 0.5) - 0.5) * 2.0;
+  float slot = fract(sym * 24.0);               // position within one bar cell
   float barMask = smoothstep(0.10, 0.18, slot) * smoothstep(0.90, 0.82, slot);
 
-  // This pixel's band height. A dynamic array index is illegal in WebGL1, so
-  // loop the 24 bands (constant index) and pick the one whose angular slice we
-  // are in. u_spectrum is the real FFT, smoothed on the JS side.
+  // This pixel's band height and falling peak cap. A dynamic array index is
+  // illegal in WebGL1, so loop the 24 bands (constant index) and pick the one
+  // whose angular slice we are in. u_spectrum is the real FFT, smoothed on the
+  // JS side; u_peaks is its peak-hold trace.
   float h = 0.0;
+  float pk = 0.0;
   for (int i = 0; i < 24; i++) {
     float lo = float(i) / 24.0;
-    float inSlot = step(lo, af) * step(af, lo + 1.0/24.0);
+    float inSlot = step(lo, sym) * step(sym, lo + 1.0/24.0);
     h += u_spectrum[i] * inSlot;
+    pk += u_peaks[i] * inSlot;
   }
 
-  float inner = 0.26 + u_level*0.03*amp;        // ring breathes a touch with level
+  // Ring breathes with level; onsets (u_flux) tick it outward: motion, not flash.
+  float inner = 0.26 + u_level*0.03*amp + u_flux*0.012*amp;
   float top = inner + h*0.44*amp;
   float bar = step(inner, r) * step(r, top) * barMask;
 
@@ -2029,8 +2050,9 @@ void main(){
   float grad = clamp((r - inner) / max(top - inner, 0.001), 0.0, 1.0);  // brighter at the tip
   col += sc * bar * (0.55 + 0.6*grad);
 
-  // Peak cap line at each bar's tip.
-  col += mix(u_color3, vec3(1.0), 0.5) * smoothstep(0.012, 0.0, abs(r - top)) * barMask * step(0.03, h);
+  // Falling peak cap: a bright dash that holds above each bar then drops.
+  float capR = inner + pk*0.44*amp;
+  col += mix(u_color3, vec3(1.0), 0.5) * smoothstep(0.010, 0.0, abs(r - capR)) * barMask * step(0.03, pk);
 
   // Inner ring.
   col += mix(u_color1, u_color2, 0.5) * exp(-abs(r - inner)*36.0) * 0.35;
@@ -2053,11 +2075,252 @@ void main(){
 }
 `;
 
+// ─── Real-FFT visualisers ────────────────────────────────────────────────────
+// These four read the live spectrum (u_spectrum / u_peaks via bandAt/peakAt in
+// the preamble) plus u_flux, the onset envelope. The rule everywhere: music
+// drives MOTION and local glow, never full-frame brightness, and a Reinhard
+// tone-map caps peaks. Idle they settle into calm ambient fields.
+
+export const SHADER_ANALYZER = /* glsl */ `
+float hashF(float x){ return fract(sin(x*127.1)*43758.5453); }
+
+void main(){
+  vec2 uv = gl_FragCoord.xy / u_resolution.xy;
+  float amp = u_reactivity;
+
+  float bar = floor(uv.x * 24.0);
+  float inBar = fract(uv.x * 24.0);
+  float bm = smoothstep(0.06, 0.16, inBar) * smoothstep(0.94, 0.84, inBar);
+
+  // This bar's level and falling peak (constant-index loop: WebGL1).
+  float h = 0.0;
+  float pk = 0.0;
+  for (int i = 0; i < 24; i++) {
+    float sel = step(abs(bar - float(i)), 0.5);
+    h += u_spectrum[i] * sel;
+    pk += u_peaks[i] * sel;
+  }
+  // Idle noise floor so the deck never looks dead when nothing plays.
+  float idleH = 0.015 + 0.02*(0.5 + 0.5*sin(u_time*0.8 + bar*1.7 + hashF(bar*3.7)*6.0));
+  float scale = 0.62 * min(amp, 1.4);
+  float base = 0.18;
+  float top = base + max(h*scale, idleH*(1.0 - u_playing));
+  float capY = base + pk*scale;
+
+  vec3 col = vec3(0.008, 0.009, 0.014);
+  col += u_color1 * 0.05 * (1.0 - uv.y);
+
+  // Bar body: palette gradient, hot tips, LED segment slits.
+  float inside = step(base, uv.y) * step(uv.y, top) * bm;
+  float grad = clamp((uv.y - base) / max(top - base, 0.001), 0.0, 1.0);
+  vec3 bc = mix(u_color2, u_color3, grad);
+  bc = mix(bc, u_color4, smoothstep(0.72, 1.0, grad) * smoothstep(0.3, 0.9, h));
+  float seg = 0.78 + 0.22*step(0.12, fract(uv.y*34.0));
+  col += bc * inside * (0.6 + 0.4*grad) * seg;
+
+  // Falling peak caps: bright dashes that hold, then drop.
+  col += mix(u_color4, vec3(1.0), 0.35)
+       * (1.0 - smoothstep(0.0, 0.007, abs(uv.y - capY))) * bm * step(0.015, pk) * 0.9;
+
+  // Baseline glow line, breathing with the overall level.
+  col += mix(u_color1, u_color3, 0.4) * exp(-abs(uv.y - base)*220.0) * (0.5 + u_level*0.8);
+
+  // Mirror reflection below the baseline, like a deck on dark glass.
+  if (uv.y < base) {
+    float my = base + (base - uv.y);
+    float rin = step(base, my) * step(my, top) * bm;
+    float rgrad = clamp((my - base) / max(top - base, 0.001), 0.0, 1.0);
+    col += mix(u_color2, u_color3, rgrad) * rin * 0.22 * exp(-(base - uv.y)*9.0);
+  }
+
+  col = col / (1.0 + col);
+  col *= 1.0 - dot(uv - 0.5, uv - 0.5) * 0.4;
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+export const SHADER_SCOPE_RING = /* glsl */ `
+#define PI 3.14159265
+float hash2(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
+float noise2(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  float a = hash2(i), b = hash2(i + vec2(1.,0.));
+  float c = hash2(i + vec2(0.,1.)), d = hash2(i + vec2(1.,1.));
+  vec2 u = f*f*(3.-2.*f);
+  return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
+}
+
+void main(){
+  vec2 uv = gl_FragCoord.xy / u_resolution.xy;
+  vec2 p = (gl_FragCoord.xy - 0.5*u_resolution.xy) / u_resolution.y;
+  vec2 m = u_mouse - 0.5; m.x *= u_resolution.x / u_resolution.y;
+  float amp = u_reactivity;
+  float t = u_time;
+
+  float r = length(p);
+  // Angle folded so bass sits at the bottom, treble at the top, mirrored
+  // left/right: no seam where band 23 would meet band 0.
+  float a = atan(p.x, -p.y);            // 0 at the bottom, +-PI at the top
+  float f = abs(a) / PI;                // 0..1 bass -> treble
+
+  // The ring IS the spectrum: radius modulated by the band at this angle.
+  // Bass breathes the whole circle; onsets tick it outward (motion, no flash).
+  float breathe = 0.34 + u_bands.x*0.045*amp + u_flux*0.02*amp;
+  float R  = breathe + bandAt(f)*0.20*amp;
+  float Rp = breathe + peakAt(f)*0.20*amp;
+
+  vec3 col = vec3(0.006, 0.007, 0.012);
+  col += u_color1 * 0.10 * noise2(p*2.0 + vec2(t*0.03, -t*0.02));
+  col *= 1.0 - r*0.5;
+
+  vec3 lineCol = mix(u_color3, u_color4, f);
+  float d = abs(r - R);
+  col += lineCol * exp(-d*110.0) * 1.2;          // crisp trace
+  col += lineCol * exp(-d*16.0) * 0.30;          // halo
+  // Ghost of the recent peaks: a thinner, fainter second trace.
+  float dp = abs(r - Rp);
+  col += mix(u_color4, vec3(1.0), 0.3) * exp(-dp*160.0) * 0.5 * u_playing;
+  // Faint fill inside the ring so it reads as a body, not a wire.
+  col += mix(u_color2, u_color3, f) * smoothstep(R, R*0.35, r) * 0.10 * (0.4 + u_level*0.8);
+  // Bass heart.
+  col += u_color4 * exp(-r*13.0) * (0.08 + u_bands.x*0.35*amp);
+  // Idle: the trace settles into a slow-breathing circle with a moving sheen.
+  col += lineCol * exp(-d*60.0) * 0.25 * (1.0 - u_playing) * (0.5 + 0.5*sin(t*0.5 + a*3.0));
+  // Cursor glint.
+  col += u_color3 * exp(-length(p - m)*7.0) * (0.05 + u_mouseDown*0.25);
+
+  col = col / (1.0 + col);
+  col *= 1.0 - dot(uv - 0.5, uv - 0.5) * 0.45;
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+export const SHADER_SYNTHWAVE = /* glsl */ `
+void main(){
+  vec2 uv = gl_FragCoord.xy / u_resolution.xy;
+  float ar = u_resolution.x / u_resolution.y;
+  float amp = u_reactivity;
+  float t = u_time;
+
+  float horizon = 0.46;
+  vec3 col;
+
+  // Spectrum skyline on the horizon, mirrored so bass towers in the middle.
+  float sk = bandAt(abs(uv.x - 0.5)*2.0);
+  float skyH = horizon + 0.02 + sk*0.14*amp;
+
+  if (uv.y > horizon) {
+    // Sky gradient + a banded retro sun that swells with the bass.
+    float sy = (uv.y - horizon) / (1.0 - horizon);
+    col = mix(u_color2*0.5, u_color1*0.25, sy);
+    vec2 sp = vec2((uv.x - 0.5)*ar, uv.y - horizon - 0.16);
+    float sd = length(sp);
+    float sr = 0.15 + u_bands.x*0.03*amp;
+    float sun = smoothstep(sr, sr - 0.004, sd);
+    float slit = smoothstep(0.35, 0.65, 0.5 + 0.5*sin(uv.y*140.0 + t*0.4));
+    sun *= mix(1.0, slit, 1.0 - smoothstep(-0.04, 0.10, sp.y));
+    vec3 sunCol = mix(u_color4, u_color3, clamp(sp.y*4.0 + 0.5, 0.0, 1.0));
+    col = mix(col, sunCol, sun);
+    col += sunCol * exp(-sd*6.0) * (0.10 + u_bands.x*0.18*amp);
+    // Static stars; treble makes them glint.
+    vec2 cell = floor(uv*vec2(90.0*ar, 90.0));
+    float star = step(0.994, fract(sin(dot(cell, vec2(12.9898,78.233)))*43758.5453));
+    col += vec3(star) * (0.15 + u_bands.z*0.5*amp) * sy * (1.0 - sun);
+    // City silhouette cut from the spectrum, rooftops lined in neon.
+    float sil = 1.0 - smoothstep(skyH - 0.003, skyH + 0.003, uv.y);
+    col = mix(col, u_color1*0.10, sil);
+    col += u_color3 * (1.0 - smoothstep(0.0, 0.006, abs(uv.y - skyH))) * 0.8 * step(0.02, sk*amp);
+  } else {
+    // Perspective grid floor. Onsets and level push a BOUNDED phase offset
+    // (never t*speed, which would jump when speed changes): the road punches
+    // forward on every hit and relaxes back.
+    float v = horizon - uv.y;
+    float z = 1.0 / max(v, 0.001);
+    float ph = t*0.45 + (u_flux*0.8 + u_level*0.5)*amp;
+    float lz = fract(z*0.35 - ph);
+    float lineZ = smoothstep(0.92, 1.0, lz) + smoothstep(0.08, 0.0, lz);
+    float px = (uv.x - 0.5) * z * 0.9;
+    float lx = abs(fract(px) - 0.5);
+    float lineX = smoothstep(0.46, 0.5, lx);
+    float fade = smoothstep(0.0, 0.10, v);
+    float grid = clamp(lineZ + lineX, 0.0, 1.0) * fade;
+    col = mix(u_color1*0.16, u_color2*0.10, v*2.0);
+    col += mix(u_color3, u_color4, min(lx*2.0, 1.0)) * grid * (0.55 + u_level*0.35);
+    // Sun reflection streak down the middle of the floor.
+    col += u_color4 * exp(-abs(uv.x - 0.5)*9.0) * exp(-v*7.0) * (0.12 + u_bands.x*0.25*amp);
+  }
+  // Horizon glow across both halves.
+  col += mix(u_color3, u_color4, 0.5) * exp(-abs(uv.y - horizon)*40.0) * (0.35 + u_level*0.4);
+
+  col = col / (1.0 + col);
+  col *= 1.0 - dot(uv - 0.5, uv - 0.5) * 0.35;
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+export const SHADER_KALEIDO_BEAT = /* glsl */ `
+#define TAU 6.28318530
+float hashK(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
+float noiseK(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  float a = hashK(i), b = hashK(i + vec2(1.,0.));
+  float c = hashK(i + vec2(0.,1.)), d = hashK(i + vec2(1.,1.));
+  vec2 u = f*f*(3.-2.*f);
+  return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
+}
+float fbmK(vec2 p){ float v=0., a2=0.5; for(int i=0;i<4;i++){ v+=a2*noiseK(p); p*=2.03; a2*=0.5; } return v; }
+
+void main(){
+  vec2 uv = gl_FragCoord.xy / u_resolution.xy;
+  vec2 p = (gl_FragCoord.xy - 0.5*u_resolution.xy) / u_resolution.y;
+  float amp = u_reactivity;
+  float t = u_time;
+
+  // Bass zooms the mandala in a touch; onsets and mids twist it. All motion,
+  // all from bounded smoothed signals, so it flows instead of flashing.
+  float zoom = 1.0 - u_bands.x*0.10*amp;
+  float rot = t*0.04 + u_flux*0.25*amp + u_bands.y*0.15*amp;
+  float cs = cos(rot), sn = sin(rot);
+  p = mat2(cs, -sn, sn, cs) * p * zoom;
+
+  // Six-fold kaleidoscope fold.
+  float a = atan(p.y, p.x);
+  float seg = TAU / 6.0;
+  a = mod(a, seg);
+  a = abs(a - seg*0.5);
+  float r = length(p);
+  vec2 k = vec2(cos(a), sin(a)) * r;
+
+  // Base nebula in the folded domain.
+  float n = fbmK(k*2.6 + fbmK(k*1.8 + t*0.05)*1.2);
+  vec3 col = mix(u_color1*0.35, u_color2*0.55, smoothstep(0.2, 0.85, n));
+
+  // Radius maps to frequency, so the music paints concentric petals: bass
+  // blooms at the center, treble sparkles at the rim.
+  float f = clamp(r*1.15, 0.0, 1.0);
+  float band = bandAt(f);
+  float petal = smoothstep(0.25, 0.9, band) * exp(-r*1.1);
+  col += mix(u_color3, u_color4, f) * petal * (0.5 + n*0.8) * (0.3 + 0.45*amp);
+  // Peak ghost: a fine dashed filament at the recent-peak radius.
+  float pk = peakAt(f);
+  col += mix(u_color4, vec3(1.0), 0.25) * smoothstep(0.5, 0.95, pk) * exp(-r*1.4)
+       * smoothstep(0.35, 0.5, abs(fract(a/seg*2.0) - 0.5)) * 0.35 * u_playing;
+
+  // Hairline glow on the fold seams, bass-lit core.
+  col += u_color3 * exp(-abs(a - seg*0.5)*40.0*r) * 0.10;
+  col += u_color4 * exp(-r*8.0) * (0.06 + u_bands.x*0.25*amp);
+
+  col = col / (1.0 + col);
+  col *= 1.0 - dot(uv - 0.5, uv - 0.5) * 0.4;
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
 export type WallpaperId = 'none' | 'aurora' | 'chrome' | 'grid' | 'nebula' | 'topo'
                         | 'topo-noir' | 'aurora-deep' | 'chrome-brushed'
                         | 'zen' | 'galaxy'
                         | 'blackhole' | 'kifs' | 'voronoi-glass' | 'curl-flow' | 'raymarch-lattice'
-                        | 'dj'
+                        | 'dj' | 'analyzer' | 'scope-ring' | 'synthwave' | 'kaleido-beat'
                         | 'pulse' | 'eq-react' | 'beat-tunnel'
                         | 'bass-bloom' | 'starfield-warp' | 'radial-eq'
                         | 'joy-division' | 'oscilloscope' | 'spectrum' | 'vinyl' | 'tape'
@@ -2100,7 +2363,11 @@ export const WALLPAPERS: WallpaperOption[] = [
 	{ id: 'kifs',           label: 'Fracture',      sublabel: 'Kaleidoscopic fractal jewel · cursor folds space',           shader: SHADER_KIFS, reactGain: 1.2 },
 	{ id: 'voronoi-glass',  label: 'Stained Glass', sublabel: 'Refractive glass panes · cursor lights the leading',         shader: SHADER_VORONOI_GLASS, reactGain: 1.3 },
 	{ id: 'curl-flow',      label: 'Silk',          sublabel: 'Curl-noise flow · cursor stirs a vortex',                     shader: SHADER_CURL_FLOW, reactGain: 1.2 },
-	{ id: 'dj',             label: 'DJ Visualiser', sublabel: 'Flowing spectrum that moves with the music · smoothed, no strobe', shader: SHADER_DJ, reactGain: 1.0 },
+	{ id: 'dj',             label: 'DJ Visualiser', sublabel: 'Real-FFT ring analyzer · falling peak caps · bass bloom',           shader: SHADER_DJ, reactGain: 1.0 },
+	{ id: 'analyzer',       label: 'Analyzer',      sublabel: 'Classic 24-band deck · LED segments · mirror floor',              shader: SHADER_ANALYZER, reactGain: 1.0 },
+	{ id: 'scope-ring',     label: 'Scope Ring',    sublabel: 'Neon spectrum trace wrapped in a circle · bass breathes it',      shader: SHADER_SCOPE_RING, reactGain: 1.0 },
+	{ id: 'synthwave',      label: 'Synthwave',     sublabel: 'Sunset grid · spectrum skyline · onsets punch the throttle',      shader: SHADER_SYNTHWAVE, reactGain: 1.0 },
+	{ id: 'kaleido-beat',   label: 'Kaleido Bloom', sublabel: 'Mirrored mandala painted by the spectrum · bass zooms the fold',  shader: SHADER_KALEIDO_BEAT, reactGain: 1.0 },
 	{ id: 'pulse',          label: 'Pulse',         sublabel: 'Shockwave rings on every beat · reacts to what is playing',   shader: SHADER_PULSE, reactGain: 0.85 },
 	{ id: 'eq-react',       label: 'Live EQ',       sublabel: 'Analyzer bars driven by the track · bass kicks on the beat',  shader: SHADER_EQ_REACT, reactGain: 1.0 },
 	{ id: 'beat-tunnel',    label: 'Beat Tunnel',   sublabel: 'Zoom tunnel that lurches forward on the beat · energy blooms', shader: SHADER_BEAT_TUNNEL, reactGain: 0.8 },

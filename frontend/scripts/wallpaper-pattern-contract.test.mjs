@@ -56,7 +56,8 @@ describe('pattern wallpaper contract', () => {
 		const match = layoutSource.match(/\.wallpaper-layer\s*\{(?<body>[\s\S]*?)\n\t\}/);
 		expect(match?.groups?.body).toContain('filter: blur(var(--wallpaper-blur');
 		expect(match?.groups?.body).toContain('transform: scale(var(--wallpaper-scale');
-		expect(layoutSource).toContain('maxDpr={1}');
+		// Render quality setting: standard caps DPR at 1 (cheap), high allows 2.
+		expect(layoutSource).toContain("maxDpr={$wallpaperQuality === 'high' ? 2 : 1}");
 		expect(layoutSource).toContain('targetFps={$wallpaperFps}');
 	});
 

@@ -60,6 +60,23 @@ uniform vec3 u_bands;
 uniform float u_level;
 uniform float u_spectrum[24];
 uniform float u_audio;
+uniform float u_peaks[24];
+uniform float u_flux;
+// Sample the spectrum (or its falling peak caps) at a 0..1 frequency position
+// with linear interpolation. WebGL1 forbids dynamic array indexing, so both
+// walk the bands with constant indices and tent weights.
+float bandAt(float t){
+  float x = clamp(t, 0.0, 1.0) * 23.0;
+  float v = 0.0;
+  for (int i = 0; i < 24; i++) { v += u_spectrum[i] * max(0.0, 1.0 - abs(x - float(i))); }
+  return v;
+}
+float peakAt(float t){
+  float x = clamp(t, 0.0, 1.0) * 23.0;
+  float v = 0.0;
+  for (int i = 0; i < 24; i++) { v += u_peaks[i] * max(0.0, 1.0 - abs(x - float(i))); }
+  return v;
+}
 `;
 
 	function compile(gl: WebGLRenderingContext, type: number, src: string) {
@@ -185,6 +202,8 @@ uniform float u_audio;
 		let uLevel: WebGLUniformLocation | null = null;
 		let uSpectrum: WebGLUniformLocation | null = null;
 		let uAudio: WebGLUniformLocation | null = null;
+		let uPeaks: WebGLUniformLocation | null = null;
+		let uFlux: WebGLUniformLocation | null = null;
 
 		function setupProgram(fragSrc: string) {
 			if (prog) gl!.deleteProgram(prog);
@@ -232,6 +251,8 @@ uniform float u_audio;
 			uLevel = gl!.getUniformLocation(prog, 'u_level');
 			uSpectrum = gl!.getUniformLocation(prog, 'u_spectrum');
 			uAudio = gl!.getUniformLocation(prog, 'u_audio');
+			uPeaks = gl!.getUniformLocation(prog, 'u_peaks');
+			uFlux = gl!.getUniformLocation(prog, 'u_flux');
 		}
 
 		setupProgram(shader);
@@ -307,6 +328,17 @@ uniform float u_audio;
 		// Per-frame-smoothed copy of the real FFT spectrum (or a synthesized one
 		// in demo/idle), uploaded to u_spectrum. Length must match NUM_BANDS.
 		const specSmooth = new Float32Array(NUM_BANDS);
+		// Falling peak caps (u_peaks): each cap sits on its bar, holds a beat,
+		// then drops - the classic analyzer read of "how loud was that just now".
+		const specPeaks = new Float32Array(NUM_BANDS);
+		const peakHold = new Float64Array(NUM_BANDS);
+		// Spectral flux (u_flux): how much the spectrum ROSE this frame, i.e.
+		// onsets. Shaders use it for motion kicks, never brightness.
+		const prevTarget = new Float32Array(NUM_BANDS);
+		let fluxEnv = 0;
+		// Slow auto-gain: running max of the raw bands, so quietly-mastered
+		// tracks still fill the analyzer instead of hugging the floor.
+		let agcEnv = 0.7;
 		// Move `cur` toward `tgt` with a time-constant that differs on the way up
 		// (attack) vs down (decay), framerate-independent via the exp of dt.
 		const smoothBand = (cur: number, tgt: number, atk: number, dec: number, dt: number) => {
@@ -390,10 +422,20 @@ uniform float u_audio;
 			// shader still previews; idle decays flat. Values are the pure signal
 			// (shaders apply u_reactivity themselves).
 			const liveAudio = !!(liveSpectrum && liveSpectrum.length >= NUM_BANDS && driving);
+			// Auto-gain: track a slow running max of the raw bands and lift quiet
+			// masters toward full range. Boost-only (max 2x), slow attack so a
+			// chorus still pegs the bars for a moment before the gain settles.
+			if (liveAudio) {
+				let frameMax = 0;
+				for (let k = 0; k < NUM_BANDS; k++) frameMax = Math.max(frameMax, liveSpectrum![k] || 0);
+				if (frameMax > 0.02) agcEnv = smoothBand(agcEnv, frameMax, 1.2, 0.12, bandDt);
+			}
+			const agcGain = liveAudio ? Math.min(2, Math.max(1, 0.92 / Math.max(agcEnv, 0.3))) : 1;
+			let fluxSum = 0;
 			for (let k = 0; k < NUM_BANDS; k++) {
 				let target = 0;
 				if (liveAudio) {
-					target = liveSpectrum![k] || 0;
+					target = Math.min(1, (liveSpectrum![k] || 0) * agcGain);
 				} else if (demoOn) {
 					const f = k / (NUM_BANDS - 1);
 					const bassW = Math.max(0, 1 - f * 2.2);
@@ -401,9 +443,21 @@ uniform float u_audio;
 					const trebW = Math.max(0, (f - 0.55) / 0.45);
 					target = sBass * bassW + sMid * midW + sTreble * trebW;
 				}
+				fluxSum += Math.max(0, target - prevTarget[k]);
+				prevTarget[k] = target;
 				const rising = target > specSmooth[k];
 				specSmooth[k] += (target - specSmooth[k]) * (1 - Math.exp(-(rising ? 22 : 7) * bandDt));
+				if (specSmooth[k] >= specPeaks[k]) {
+					specPeaks[k] = specSmooth[k];
+					peakHold[k] = now + 420;
+				} else if (now > peakHold[k]) {
+					specPeaks[k] = Math.max(specSmooth[k], specPeaks[k] - 0.35 * bandDt);
+				}
 			}
+			// Onset envelope: fast attack, musical decay. Normalized by dt so the
+			// value doesn't depend on the render frame rate.
+			const fluxRate = fluxSum / NUM_BANDS / Math.max(bandDt, 0.008);
+			fluxEnv = smoothBand(fluxEnv, Math.min(1, fluxRate * 0.55), 35, 5.5, bandDt);
 			if (liveAudio) {
 				// Derive the 3 coarse bands the other reactive shaders read from the
 				// real spectrum, so every reactive wallpaper follows the audio.
@@ -473,6 +527,8 @@ uniform float u_audio;
 			gl!.uniform1f(uLevel!, sLevel);
 			gl!.uniform1fv(uSpectrum!, specSmooth);
 			gl!.uniform1f(uAudio!, liveAudio ? 1 : 0);
+			gl!.uniform1fv(uPeaks!, specPeaks);
+			gl!.uniform1f(uFlux!, fluxEnv);
 
 			gl!.drawArrays(gl!.TRIANGLES, 0, 3);
 		};
