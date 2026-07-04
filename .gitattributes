@@ -3,3 +3,10 @@
 # vite-plugin-svelte build (`pnpm run build` -> js_parse_error). CI runs on
 # Linux so it never saw it. git auto-detects binary files and leaves them alone.
 * text=auto eol=lf
+
+# FOLLOWUPS.md is an append-heavy log written by many concurrent sessions, so
+# the same "## Open" region conflicts on nearly every merge/rebase/cherry-pick.
+# The built-in union driver keeps BOTH sides' lines instead of writing conflict
+# markers. Trade-off: two sessions adding the same entry can leave a duplicate
+# (harmless, easy to prune) rather than a hard conflict.
+FOLLOWUPS.md merge=union
