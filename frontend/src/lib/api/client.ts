@@ -475,21 +475,6 @@ function normalizeSpotifyPlaylistDetail(raw: unknown): SpotifyPlaylistDetail {
 	};
 }
 
-function normalizeSpotifyTrackSearchItem(raw: unknown): SpotifyTrackSearchItem | null {
-	const item = asRecord(raw);
-	if (!item) return null;
-	const spotifyId = pickString(item, ['spotifyId', 'spotify_id', 'id']);
-	if (!spotifyId) return null;
-	return {
-		spotifyId,
-		title: pickString(item, ['title', 'name']),
-		primaryArtist: pickString(item, ['primaryArtist', 'primary_artist', 'artist']),
-		album: pickString(item, ['album', 'album_title', 'albumTitle']),
-		thumbnail: pickString(item, ['thumbnail', 'image_url', 'imageUrl', 'artwork_url', 'artworkUrl', 'cover']),
-		durationMs: pickNumber(item, ['durationMs', 'duration_ms']),
-	};
-}
-
 function normalizeSpotifyAlbumSearchItem(raw: unknown): SpotifyAlbumSearchItem | null {
 	const item = asRecord(raw);
 	if (!item) return null;
@@ -694,15 +679,6 @@ export interface SpotifyArtistDetail {
 	followers: number | null;
 	worldRank: number | null;
 	biography: string | null;
-}
-
-export interface SpotifyTrackSearchItem {
-	spotifyId: string;
-	title: string | null;
-	primaryArtist: string | null;
-	album: string | null;
-	thumbnail: string | null;
-	durationMs: number | null;
 }
 
 export interface SpotifyAlbumSearchItem {
@@ -2629,59 +2605,6 @@ export const api = {
 				.filter((t): t is SpotifyPlaylistTrack => t !== null),
 			pendingSpotifyIds: collectPendingIds(root),
 		};
-	},
-
-	async searchSpotifyTracks(
-		q: string,
-		limit = 12,
-		signal?: AbortSignal,
-		offset = 0,
-		timeoutMs?: number,
-	): Promise<SpotifyTrackSearchItem[]> {
-		const raw = await fetchApi<unknown>(
-			`/api/discovery/sportify/search`,
-			{ q, type: 'track', limit: String(limit), offset: String(offset) },
-			{ signal, timeoutMs },
-		);
-		const root = asRecord(raw) ?? {};
-		return pickArray(root, ['tracks'])
-			.map(normalizeSpotifyTrackSearchItem)
-			.filter((t): t is SpotifyTrackSearchItem => t !== null);
-	},
-
-	async searchSpotifyAlbums(
-		q: string,
-		limit = 12,
-		signal?: AbortSignal,
-		offset = 0,
-		timeoutMs?: number,
-	): Promise<SpotifyAlbumSearchItem[]> {
-		const raw = await fetchApi<unknown>(
-			`/api/discovery/sportify/search`,
-			{ q, type: 'album', limit: String(limit), offset: String(offset) },
-			{ signal, timeoutMs },
-		);
-		const root = asRecord(raw) ?? {};
-		return pickArray(root, ['albums'])
-			.map(normalizeSpotifyAlbumSearchItem)
-			.filter((a): a is SpotifyAlbumSearchItem => a !== null);
-	},
-
-	async searchSpotifyArtists(
-		q: string,
-		limit = 12,
-		signal?: AbortSignal,
-		offset = 0,
-	): Promise<SpotifyArtistSearchItem[]> {
-		const raw = await fetchApi<unknown>(
-			`/api/discovery/sportify/search`,
-			{ q, type: 'artist', limit: String(limit), offset: String(offset) },
-			{ signal },
-		);
-		const root = asRecord(raw) ?? {};
-		return pickArray(root, ['artists'])
-			.map(normalizeSpotifyArtistSearchItem)
-			.filter((a): a is SpotifyArtistSearchItem => a !== null);
 	},
 
 	/**

@@ -29,6 +29,7 @@ describe('search layout contracts', () => {
 		expect(source).toContain('const SECONDARY_SEARCH_PAGE_SIZE = 8');
 		expect(source).toContain('const PRIMARY_TIDAL_SEARCH_TIMEOUT_MS = 8000');
 		expect(source).toContain('const SECONDARY_PROVIDER_TIMEOUT_MS = 2500');
+		expect(source).toContain('const SPOTIFY_PLAYLIST_SEARCH_TIMEOUT_MS = 8000');
 		expect(source).toContain('let searchGeneration = $state(0)');
 		expect(source).toContain('let loadMoreSeq = 0');
 		expect(source).toContain('}, 120)');
@@ -43,10 +44,8 @@ describe('search layout contracts', () => {
 		expect(source).toContain('secondarySpotifyTimer = scheduleSearchIdleTask(() => {');
 		expect(source).toContain('loadingTidalPlaylists = true');
 		expect(source).toContain('loadingSpotifyPlaylists = true');
-		expect(source).toContain('loadingSpotifyTracks = true');
-		expect(source).toContain('loadingSpotifyAlbums = true');
 		expect(source).toContain('timeoutMs: SECONDARY_PROVIDER_TIMEOUT_MS');
-		expect(source).toContain('SECONDARY_PROVIDER_TIMEOUT_MS,');
+		expect(source).toContain('SPOTIFY_PLAYLIST_SEARCH_TIMEOUT_MS,');
 		expect(source).toContain('void tidalPlaylistPromise.then((playlistResults) => {');
 		expect(source).toContain('void spotifyPlaylistPromise.then((playlistResults) => {');
 		expect(source).toContain('const primaryProviderSearchDone = $derived(');
@@ -67,19 +66,42 @@ describe('search layout contracts', () => {
 	});
 
 	test('playlist provider pending state renders a visible loader', () => {
-		expect(source).toContain('{#if showPlaylists && (playlistRailPending || visiblePlaylists.local.length > 0 || visiblePlaylists.tidal.length > 0 || visiblePlaylists.spotify.length > 0)}');
-		expect(source).toContain('{#if playlistRailPending && visiblePlaylists.local.length === 0 && visiblePlaylists.tidal.length === 0 && visiblePlaylists.spotify.length === 0}');
+		expect(source).toContain('{#if showPlaylists && (playlistRailPending || visiblePlaylists.length > 0)}');
+		expect(source).toContain('{#if playlistRailPending && visiblePlaylists.length === 0}');
 		expect(source).toContain('class="album-card playlist-loading-card"');
 		expect(source).toContain('.playlist-loading-art');
 		expect(source).toContain('@keyframes playlist-loading-pulse');
+	});
+
+	test('spotify search stays scoped to playlists', () => {
+		// Spotify exists here to source playlists; track/album/artist search
+		// must not come back.
+		expect(source).not.toContain('searchSpotifyTracks');
+		expect(source).not.toContain('searchSpotifyAlbums');
+		expect(source).not.toContain('spotifyTrackResults');
+		expect(source).not.toContain('spotifyAlbumResults');
+		expect(source).not.toContain('Spotify tracks');
+		expect(source).not.toContain('Spotify albums');
+	});
+
+	test('playlist rail ranks all sources by relevance to the query', () => {
+		expect(source).toContain('function playlistRelevance(title: string | null | undefined, q: string): number');
+		expect(source).toContain('if (t === q) return 1.0');
+		expect(source).toContain('if (t.startsWith(q)) return 0.6');
+		expect(source).toContain('if (t.includes(q)) return 0.3');
+		expect(source).toContain('const rankedPlaylists = $derived.by<PlaylistResultEntry[]>(() => {');
+		expect(source).toContain('return entries.sort((a, b) => b.score - a.score)');
+		expect(source).toContain("kind: 'local' as const, key: `local:${p.id}`");
+		expect(source).toContain("kind: 'tidal' as const, key: `tidal:${p.uuid}`");
+		expect(source).toContain("kind: 'spotify' as const, key: `spotify:${p.spotifyId}`");
 	});
 
 	test('focused category filters prefetch one deeper page after the light initial batch', () => {
 		expect(source).toContain("let focusedFilterPrefetchKey = $state('')");
 		expect(source).toContain("focusedFilterPrefetchKey = ''");
 		expect(source).toContain('const focusedFilterNeedsPrefetch = $derived.by(() => {');
-		expect(source).toContain("if (filterMode === 'tracks') return (results !== null && hasMoreTidal) || hasMoreSpotifyTracks");
-		expect(source).toContain("if (filterMode === 'albums') return (results !== null && hasMoreTidal) || hasMoreSpotifyAlbums");
+		expect(source).toContain("if (filterMode === 'tracks') return results !== null && hasMoreTidal");
+		expect(source).toContain("if (filterMode === 'albums') return results !== null && hasMoreTidal");
 		expect(source).toContain("if (filterMode === 'artists') return results !== null && hasMoreTidal");
 		expect(source).toContain("if (filterMode === 'playlists') return hasMoreTidalPlaylists || hasMoreSpotifyPlaylists");
 		expect(source).toContain('if (!focusedFilterNeedsPrefetch) return');
@@ -93,21 +115,15 @@ describe('search layout contracts', () => {
 		expect(source).toContain('const ALL_VIEW_ARTIST_LIMIT = 8');
 		expect(source).toContain('const ALL_VIEW_ALBUM_LIMIT = 8');
 		expect(source).toContain('const ALL_VIEW_TRACK_LIMIT = 10');
-		expect(source).toContain('const ALL_VIEW_SPOTIFY_ALBUM_LIMIT = 6');
-		expect(source).toContain('const ALL_VIEW_SPOTIFY_TRACK_LIMIT = 6');
-		expect(source).toContain('const ALL_VIEW_PLAYLISTS_PER_SOURCE_LIMIT = 4');
+		expect(source).toContain('const ALL_VIEW_PLAYLIST_LIMIT = 12');
 		expect(source).toContain("filterMode === 'all' ? sortedArtists.slice(0, ALL_VIEW_ARTIST_LIMIT) : sortedArtists");
 		expect(source).toContain("filterMode === 'all' ? sortedAlbums.slice(0, ALL_VIEW_ALBUM_LIMIT) : sortedAlbums");
 		expect(source).toContain("filterMode === 'all' ? sortedTracks.slice(0, ALL_VIEW_TRACK_LIMIT) : sortedTracks");
-		expect(source).toContain("spotifyAlbumResults.slice(0, ALL_VIEW_SPOTIFY_ALBUM_LIMIT)");
-		expect(source).toContain("spotifyTrackResults.slice(0, ALL_VIEW_SPOTIFY_TRACK_LIMIT)");
-		expect(source).toContain("filteredPlaylists.local.slice(0, ALL_VIEW_PLAYLISTS_PER_SOURCE_LIMIT)");
+		expect(source).toContain("filterMode === 'all' ? rankedPlaylists.slice(0, ALL_VIEW_PLAYLIST_LIMIT) : rankedPlaylists");
 		expect(source).toContain('{#each visibleArtists as artist (artist.tidal_id)}');
 		expect(source).toContain('{#each visibleAlbums as album (album.tidal_id)}');
 		expect(source).toContain('{#each visibleTracks as track, idx (track.tidal_id)}');
-		expect(source).toContain('{#each visibleSpotifyAlbums as a (a.spotifyId)}');
-		expect(source).toContain('{#each visibleSpotifyTracks as t (t.spotifyId)}');
-		expect(source).toContain('{#each visiblePlaylists.local as playlist (playlist.id)}');
+		expect(source).toContain('{#each visiblePlaylists as entry (entry.key)}');
 	});
 
 	test('search pagination ignores stale load-more responses', () => {
@@ -124,8 +140,6 @@ describe('search layout contracts', () => {
 		expect(source).toContain('if (!isCurrentLoadMore()) return');
 		expect(source).toContain('searchTidalPlaylists(pageQuery, undefined');
 		expect(source).toContain('searchSpotifyPlaylists(pageQuery, LOAD_MORE_PAGE_SIZE');
-		expect(source).toContain('searchSpotifyTracks(pageQuery, LOAD_MORE_PAGE_SIZE');
-		expect(source).toContain('searchSpotifyAlbums(pageQuery, LOAD_MORE_PAGE_SIZE');
 		expect(source).toContain('if (seq === loadMoreSeq) loadingMore = false');
 	});
 

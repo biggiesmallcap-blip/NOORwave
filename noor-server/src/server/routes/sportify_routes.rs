@@ -25,15 +25,21 @@ pub(super) struct SportifySearchQuery {
     offset: Option<u32>,
 }
 
-fn parse_search_kind(s: Option<&str>) -> crate::services::sportify::client::SportifySearchKind {
+/// Spotify discovery search exists to source playlists we can pull in and
+/// reuse; it never serves individual tracks/albums/artists. Reject any other
+/// requested type loudly instead of quietly returning rows nobody wants.
+fn parse_search_kind(
+    s: Option<&str>,
+) -> Result<crate::services::sportify::client::SportifySearchKind, (StatusCode, Json<Value>)> {
     use crate::services::sportify::client::SportifySearchKind;
     match s.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-        Some("album") => SportifySearchKind::Album,
-        Some("artist") => SportifySearchKind::Artist,
-        Some("playlist") => SportifySearchKind::Playlist,
-        // Default to track when missing or unknown: matches Sportify's own
-        // most-common usage.
-        _ => SportifySearchKind::Track,
+        None | Some("") | Some("playlist") => Ok(SportifySearchKind::Playlist),
+        Some(other) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("unsupported search type '{other}': playlist search only")
+            })),
+        )),
     }
 }
 
@@ -61,7 +67,7 @@ pub(super) async fn sportify_discovery_search(
         ));
     }
 
-    let kind = parse_search_kind(params.r#type.as_deref());
+    let kind = parse_search_kind(params.r#type.as_deref())?;
     let limit = clamp_search_limit(params.limit);
     let offset = clamp_search_offset(params.offset);
 
@@ -83,59 +89,58 @@ pub(super) async fn sportify_discovery_search(
     let cached = db
         .with_conn(|conn| sp_cache::get_search(conn, &cache_cfg, q, kind, limit, offset))
         .map_err(super::internal)?;
-    let cached = cached.filter(|p| {
-        !(matches!(
-            kind,
-            crate::services::sportify::client::SportifySearchKind::Playlist
-        ) && p.playlists.is_empty())
-    });
+    let cached = cached.filter(|p| !p.playlists.is_empty());
 
     let payload = match cached {
         Some(p) => p,
         None => {
-            let primary = sportify_client.search(q, kind, limit, offset).await;
-            let fetched = match primary {
-                Ok(fetched) => fetched,
-                Err(primary_error)
-                    if matches!(
-                        kind,
-                        crate::services::sportify::client::SportifySearchKind::Playlist
-                    ) =>
-                {
-                    crate::services::spotify::catalog::search_playlists_from_saved_credentials(
-                        &db, q, limit, offset,
-                    )
-                    .await
-                    .map_err(|fallback_error| {
-                        (
-                            StatusCode::BAD_GATEWAY,
-                            Json(json!({
-                                "error": format!(
-                                    "sportify_search: {primary_error}; spotify_fallback: {fallback_error}"
-                                )
-                            })),
+            // Run the proxy fetch + cache write on a detached task. Search
+            // requests are aborted constantly (typing debounce, client-side
+            // timeouts), and dropping this handler mid-fetch used to cancel
+            // the fetch before put_search ran - the cache never warmed, so
+            // every retry of the same query paid full proxy latency again.
+            let fetch_client = sportify_client.clone();
+            let fetch_db = db.clone();
+            let fetch_q = q.to_string();
+            let fetch = tokio::spawn(async move {
+                let fetched = match fetch_client.search(&fetch_q, kind, limit, offset).await {
+                    Ok(fetched) => fetched,
+                    Err(primary_error) => {
+                        crate::services::spotify::catalog::search_playlists_from_saved_credentials(
+                            &fetch_db, &fetch_q, limit, offset,
                         )
-                    })?
-                }
-                Err(e) => {
-                    return Err((
+                        .await
+                        .map_err(|fallback_error| {
+                            anyhow::anyhow!(
+                                "sportify_search: {primary_error}; spotify_fallback: {fallback_error}"
+                            )
+                        })?
+                    }
+                };
+                fetch_db.with_conn(|conn| {
+                    sp_cache::put_search(conn, &fetch_q, kind, limit, offset, &fetched)
+                })?;
+                Ok::<_, anyhow::Error>(fetched)
+            });
+            fetch
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": format!("sportify_search_join: {e}") })),
+                    )
+                })?
+                .map_err(|e| {
+                    (
                         StatusCode::BAD_GATEWAY,
-                        Json(json!({ "error": format!("sportify_search: {e}") })),
-                    ));
-                }
-            };
-            db.with_conn(|conn| sp_cache::put_search(conn, q, kind, limit, offset, &fetched))
-                .map_err(super::internal)?;
-            fetched
+                        Json(json!({ "error": e.to_string() })),
+                    )
+                })?
         }
     };
 
     let mut normalized = normalize::search_from_sportify(&payload, "sportify_search");
     db.with_conn(|conn| {
-        normalize::enrich_tracks_with_tidal_cache(conn, &cache_cfg, &mut normalized.tracks)?;
-        for album in normalized.albums.iter_mut() {
-            normalize::enrich_tracks_with_tidal_cache(conn, &cache_cfg, &mut album.tracks)?;
-        }
         for playlist in normalized.playlists.iter_mut() {
             normalize::enrich_tracks_with_tidal_cache(conn, &cache_cfg, &mut playlist.tracks)?;
         }
@@ -456,19 +461,34 @@ mod tests {
     use axum::http::StatusCode;
 
     #[test]
-    fn search_kind_parser_trims_type_values() {
+    fn search_kind_parser_is_playlist_only() {
         assert!(matches!(
             super::parse_search_kind(Some(" playlist ")),
-            crate::services::sportify::client::SportifySearchKind::Playlist
+            Ok(crate::services::sportify::client::SportifySearchKind::Playlist)
         ));
         assert!(matches!(
-            super::parse_search_kind(Some(" ALBUM ")),
-            crate::services::sportify::client::SportifySearchKind::Album
+            super::parse_search_kind(Some(" PLAYLIST ")),
+            Ok(crate::services::sportify::client::SportifySearchKind::Playlist)
         ));
         assert!(matches!(
-            super::parse_search_kind(Some("unknown")),
-            crate::services::sportify::client::SportifySearchKind::Track
+            super::parse_search_kind(None),
+            Ok(crate::services::sportify::client::SportifySearchKind::Playlist)
         ));
+
+        // Track/album/artist search is intentionally unsupported: Spotify
+        // search only sources playlists.
+        for rejected in ["track", " ALBUM ", "artist", "unknown"] {
+            let Err((status, body)) = super::parse_search_kind(Some(rejected)) else {
+                panic!("'{rejected}' should be rejected");
+            };
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(
+                body.0["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("playlist search only")
+            );
+        }
     }
 
     #[test]

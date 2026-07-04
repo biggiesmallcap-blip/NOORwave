@@ -297,42 +297,7 @@ impl SportifyClient {
         path: &str,
         query: &[(&str, String)],
     ) -> Result<Value> {
-        let url = format!("{}{}", base_url, path);
-        let resp = self
-            .http
-            .get(&url)
-            .query(query)
-            .send()
-            .await
-            .with_context(|| format!("sportify request failed: {}", path))?;
-
-        let status = resp.status();
-        let body = resp.text().await.context("read sportify body")?;
-        if !status.is_success() {
-            return Err(anyhow!(
-                "sportify {} returned HTTP {}: {}",
-                path,
-                status,
-                truncate_for_log(&body)
-            ));
-        }
-
-        let value: Value = serde_json::from_str(&body)
-            .with_context(|| format!("parse sportify json: {}", path))?;
-
-        let success = value
-            .get("success")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if !success {
-            let err = value
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            return Err(anyhow!("sportify {} unsuccessful: {}", path, err));
-        }
-
-        Ok(value)
+        fetch_raw_from(&self.http, base_url, path, query).await
     }
 
     /// Resource endpoints wrap the entity in a field named after the
@@ -356,30 +321,45 @@ impl SportifyClient {
         offset: u32,
     ) -> Result<SportifySearchResults> {
         let limit = limit.clamp(1, 50);
-        let query_params = [
-            ("q", query.to_string()),
-            ("type", kind.as_str().to_string()),
-            ("limit", limit.to_string()),
-            ("offset", offset.to_string()),
+        let query_params: Vec<(String, String)> = vec![
+            ("q".to_string(), query.to_string()),
+            ("type".to_string(), kind.as_str().to_string()),
+            ("limit".to_string(), limit.to_string()),
+            ("offset".to_string(), offset.to_string()),
         ];
+
+        // Race every mirror concurrently. Mirrors flap independently (500s,
+        // hangs, empty pages), and the old sequential failover made a healthy
+        // fallback wait out the dead primary's full timeout on every search.
+        // First mirror to answer with rows wins; a 200-but-empty page (a
+        // degraded upstream token) only counts once every mirror has settled
+        // without rows.
+        let mut tasks = tokio::task::JoinSet::new();
+        for base_url in self.base_urls.clone() {
+            let http = self.http.clone();
+            let params = query_params.clone();
+            tasks.spawn(async move {
+                let out = fetch_raw_from(&http, &base_url, "/api/search", &params).await;
+                (base_url, out)
+            });
+        }
+
         let mut errors = Vec::new();
-        for (idx, base_url) in self.base_urls.iter().enumerate() {
-            match self
-                .fetch_raw_from_base(base_url, "/api/search", &query_params)
-                .await
-            {
+        let mut empty: Option<SportifySearchResults> = None;
+        while let Some(joined) = tasks.join_next().await {
+            let Ok((base_url, result)) = joined else {
+                continue;
+            };
+            match result {
                 Ok(value) => {
                     let out = search_results_from_value(&value, kind);
-                    // A mirror can answer 200-but-empty when its upstream token
-                    // is degraded. Don't accept an empty first page if another
-                    // mirror might still have rows; only the last mirror's empty
-                    // result is authoritative.
-                    if results_empty_for_kind(&out, kind) && idx + 1 < self.base_urls.len() {
+                    if results_empty_for_kind(&out, kind) {
                         tracing::debug!(
-                            "sportify {} search via {} returned no rows; trying next mirror",
+                            "sportify {} search via {} returned no rows",
                             kind.as_str(),
                             base_url
                         );
+                        empty.get_or_insert(out);
                         continue;
                     }
                     return Ok(out);
@@ -389,6 +369,9 @@ impl SportifyClient {
                     errors.push(format!("{}: {}", base_url, e));
                 }
             }
+        }
+        if let Some(out) = empty {
+            return Ok(out);
         }
 
         Err(anyhow!(
@@ -437,6 +420,49 @@ impl SportifyClient {
         }
         Ok(Vec::new())
     }
+}
+
+async fn fetch_raw_from(
+    http: &reqwest::Client,
+    base_url: &str,
+    path: &str,
+    query: &(impl serde::Serialize + ?Sized),
+) -> Result<Value> {
+    let url = format!("{}{}", base_url, path);
+    let resp = http
+        .get(&url)
+        .query(query)
+        .send()
+        .await
+        .with_context(|| format!("sportify request failed: {}", path))?;
+
+    let status = resp.status();
+    let body = resp.text().await.context("read sportify body")?;
+    if !status.is_success() {
+        return Err(anyhow!(
+            "sportify {} returned HTTP {}: {}",
+            path,
+            status,
+            truncate_for_log(&body)
+        ));
+    }
+
+    let value: Value =
+        serde_json::from_str(&body).with_context(|| format!("parse sportify json: {}", path))?;
+
+    let success = value
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !success {
+        let err = value
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        return Err(anyhow!("sportify {} unsuccessful: {}", path, err));
+    }
+
+    Ok(value)
 }
 
 fn results_empty_for_kind(results: &SportifySearchResults, kind: SportifySearchKind) -> bool {
