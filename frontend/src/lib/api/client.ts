@@ -2240,6 +2240,13 @@ export const api = {
 		});
 	},
 
+	getHistory(limit = 50, offset = 0) {
+		return fetchApi<{ tracks: Track[]; total: number }>('/api/history', {
+			limit: String(limit),
+			offset: String(offset),
+		});
+	},
+
 	getAlbums(sortBy = 'title', sortDir = 'asc', limit = 50, offset = 0, favoriteOnly = true) {
 		return fetchApi<{ albums: Album[]; total: number }>('/api/albums', {
 			sort_by: sortBy,

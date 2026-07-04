@@ -221,10 +221,10 @@
 
 	async function loadRecentTracks() {
 		try {
-			const data = await cachedApi.getTracks('last_played_at', 'desc', RECENT_TRACK_LIMIT, 0, true, false);
-			recentTracks = data.tracks
-				.filter((track) => track.last_played_at)
-				.slice(0, RECENT_TRACK_LIMIT);
+			// Sourced from play history (listen_history), not the favorited library,
+			// so externally-sourced plays (radio, discover) show up here too.
+			const data = await cachedApi.getHistory(RECENT_TRACK_LIMIT, 0);
+			recentTracks = data.tracks.slice(0, RECENT_TRACK_LIMIT);
 			homePanelCandidateCache.recentTracks = recentTracks;
 			if (recentTracks.length === 0) {
 				suggestionCandidateTracks = [];
@@ -2080,7 +2080,7 @@
 				<section class="home-section">
 					<div class="section-header-row">
 						<h3 class="section-label">Recent Tracks</h3>
-						<button class="view-all-link" onclick={() => switchTab('tracks')}>View all →</button>
+						<button class="view-all-link" onclick={() => void goto('/history')}>View all →</button>
 					</div>
 					<div class="home-track-list">
 						{#each recentTracks as track (track.id)}

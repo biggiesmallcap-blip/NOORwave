@@ -718,6 +718,45 @@ pub fn get_track_count(conn: &Connection, favorite_only: bool, liked_only: bool)
     )?)
 }
 
+/// Play history collapsed to one row per track, most-recently-played first.
+/// Unlike `get_tracks(favorite_only=true)` (which powers the library "Recent
+/// Tracks" shelf), this reflects what was actually *played*: radio, discover,
+/// and other external tracks that were imported into `tracks` on play but never
+/// favorited surface here too. `listen_history.track_id` is a NOT NULL FK to
+/// `tracks`, so an external track appears once its first listen was recorded.
+///
+/// GROUP BY collapses repeat plays; `MAX(lh.started_at)` is the ordering key.
+/// The bare `t.*` columns in the projection are safe under GROUP BY because the
+/// join keys them all to the single track behind `lh.track_id`.
+pub fn get_listen_history_tracks(conn: &Connection, limit: i64, offset: i64) -> Result<Vec<Track>> {
+    let projection = track_projection("a");
+    let sql = format!(
+        "SELECT {projection}, MAX(lh.started_at) AS last_listen
+         FROM listen_history lh
+         JOIN tracks t ON t.id = lh.track_id
+         LEFT JOIN artists a ON t.artist_id = a.id
+         LEFT JOIN albums al ON t.album_id = al.id
+         GROUP BY lh.track_id
+         ORDER BY last_listen DESC
+         LIMIT ?1 OFFSET ?2"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let tracks = stmt
+        .query_map(params![limit, offset], track_from_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(tracks)
+}
+
+/// Count of distinct tracks that appear in play history (pagination total for
+/// [`get_listen_history_tracks`]).
+pub fn get_listen_history_track_count(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(DISTINCT track_id) FROM listen_history",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
 // ─── Albums ───────────────────────────────────────────────
 
 pub fn get_albums(

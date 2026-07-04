@@ -110,6 +110,33 @@ pub(super) async fn get_tracks(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct HistoryParams {
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+/// GET /api/history: play history, one row per track, newest listen first.
+/// No `favorite_only` filter: this surfaces externally-sourced tracks (radio,
+/// discover) that were played but aren't in the favorited library.
+pub(super) async fn get_history(
+    State(state): State<SharedState>,
+    Query(params): Query<HistoryParams>,
+) -> Result<Json<Value>, StatusCode> {
+    let state = state.read().await;
+    let limit = clamp_catalog_list_limit(params.limit, 50);
+    let offset = clamp_catalog_offset(params.offset);
+
+    state
+        .db
+        .with_conn(|conn| {
+            let tracks = queries::get_listen_history_tracks(conn, limit, offset)?;
+            let total = queries::get_listen_history_track_count(conn)?;
+            Ok(Json(json!({ "tracks": tracks, "total": total })))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 pub(super) async fn get_track_count(
     State(state): State<SharedState>,
     Query(params): Query<ListParams>,
