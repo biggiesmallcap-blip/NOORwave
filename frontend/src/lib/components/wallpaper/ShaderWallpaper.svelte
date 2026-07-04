@@ -117,9 +117,14 @@ float peakAt(float t){
 		canvas.addEventListener('webglcontextlost', onContextLost);
 		canvas.addEventListener('webglcontextrestored', onContextRestored);
 
+		// Set by anything that changes what the frame would look like. While the
+		// wallpaper is resting (see the loop) we skip the raster until this flips.
+		let needsPaint = true;
+
 		let currentPalette: PaletteId = DEFAULT_PALETTE;
 		const unsubPalette = palette.subscribe((v) => {
 			currentPalette = v;
+			needsPaint = true;
 		});
 
 		// Beat-reactive uniforms. The playing track's tempo/energy drive the shaders;
@@ -149,6 +154,7 @@ float peakAt(float t){
 		});
 		const unsubPlaying = isPlaying.subscribe((v) => {
 			playing = v;
+			needsPaint = true;
 		});
 		const unsubPosition = position.subscribe((v) => {
 			posBaseMs = v;
@@ -156,24 +162,31 @@ float peakAt(float t){
 		});
 		const unsubReactive = wallpaperReactive.subscribe((v) => {
 			reactive = v;
+			needsPaint = true;
 		});
 		const unsubReactivity = wallpaperReactivity.subscribe((v) => {
 			reactivity = Math.max(0, v) / 100;
+			needsPaint = true;
 		});
 		const unsubSmoothing = wallpaperBeatSmoothing.subscribe((v) => {
 			smoothing = clamp01(v / 100);
+			needsPaint = true;
 		});
 		const unsubReduceMotion = wallpaperReduceMotionActive.subscribe((v) => {
 			reduceMotion = v;
+			needsPaint = true;
 		});
 		const unsubColorSource = wallpaperColorSource.subscribe((v) => {
 			colorSource = v;
+			needsPaint = true;
 		});
 		const unsubIdle = wallpaperIdle.subscribe((v) => {
 			idle = v;
+			needsPaint = true;
 		});
 		const unsubArt = artPalette.subscribe((v) => {
 			artColors = v;
+			needsPaint = true;
 		});
 		const unsubSpectrum = audioSpectrum.subscribe((v) => {
 			liveSpectrum = v;
@@ -253,6 +266,7 @@ float peakAt(float t){
 			uAudio = gl!.getUniformLocation(prog, 'u_audio');
 			uPeaks = gl!.getUniformLocation(prog, 'u_peaks');
 			uFlux = gl!.getUniformLocation(prog, 'u_flux');
+			needsPaint = true;
 		}
 
 		setupProgram(shader);
@@ -275,6 +289,7 @@ float peakAt(float t){
 			if (canvas.width !== w || canvas.height !== h) {
 				canvas.width = w;
 				canvas.height = h;
+				needsPaint = true;
 			}
 		};
 		resize();
@@ -315,6 +330,18 @@ float peakAt(float t){
 		let raf = 0;
 		let running = true;
 		let lastFrame = performance.now();
+		// Resting: while music (or demo) drives the shaders, render at the user's
+		// fps. Once nothing has driven them for IDLE_GRACE_MS (long enough for the
+		// VU envelopes to visibly decay to silence), Drift drops to IDLE_FPS and
+		// Frozen stops painting entirely until an input that changes the picture
+		// (pointer, click ripple, palette, shader, resize) invalidates the frame.
+		// A full-window raster at 60fps while paused was the app's single biggest
+		// idle GPU cost; this is the lever that removes it.
+		const IDLE_FPS = 15;
+		const IDLE_GRACE_MS = 5000;
+		const MOUSE_SETTLE_EPS = 0.0002;
+		const CLICK_LIVE_S = 5;
+		let lastDrivingAt = performance.now();
 		// Holds u_time still while Idle = Frozen and nothing is driving the shaders.
 		let frozenT: number | null = null;
 		// Attack/decay-smoothed band levels (bass, mid, treble, overall). Fast rise,
@@ -355,17 +382,42 @@ float peakAt(float t){
 				lastFrame = now;
 				return;
 			}
-			if (now - lastFrame < frameIntervalMs) return;
-			lastFrame = now;
 
-			state.mouse[0] += (state.targetMouse[0] - state.mouse[0]) * 0.12;
-			state.mouse[1] += (state.targetMouse[1] - state.mouse[1]) * 0.12;
 			// ── music / reactivity state ────────────────────────────────────────
 			// musicOn: a real track is driving. demoOn: synthesize a beat so the
 			// reactive shaders show life while nothing plays (Idle = Demo).
+			// Computed before the frame gates because the resting state decides
+			// how often (and whether) this frame gets painted at all.
 			const musicOn = playing && reactive && reactivity > 0;
 			const demoOn = reactive && !musicOn && idle === 'demo';
 			const driving = musicOn || demoOn;
+			if (driving) lastDrivingAt = now;
+			const resting = !driving && now - lastDrivingAt >= IDLE_GRACE_MS;
+
+			const interval =
+				resting && idle === 'drift' ? Math.max(frameIntervalMs, 1000 / IDLE_FPS) : frameIntervalMs;
+			if (now - lastFrame < interval) return;
+			if (resting && idle === 'frozen') {
+				// Frozen and settled: the frame cannot change, so skip the raster.
+				// lastFrame is deliberately not stamped, so the next invalidation
+				// paints on the very next tick instead of waiting out the interval.
+				const mouseSettled =
+					Math.abs(state.targetMouse[0] - state.mouse[0]) < MOUSE_SETTLE_EPS &&
+					Math.abs(state.targetMouse[1] - state.mouse[1]) < MOUSE_SETTLE_EPS;
+				const lastClick = state.clicks.length ? state.clicks[state.clicks.length - 1] : null;
+				const clicksLive =
+					lastClick !== null && (now - state.start) / 1000 - lastClick.t0 < CLICK_LIVE_S;
+				if (!needsPaint && mouseSettled && !clicksLive) return;
+			}
+			// Phase-preserving stamp: `lastFrame = now` quantizes against the 60Hz
+			// rAF grid and bleeds a 30fps target down to ~20fps. Advance by the
+			// interval instead, snapping to now if we fell more than a frame behind.
+			lastFrame += interval;
+			if (now - lastFrame > interval) lastFrame = now;
+			needsPaint = false;
+
+			state.mouse[0] += (state.targetMouse[0] - state.mouse[0]) * 0.12;
+			state.mouse[1] += (state.targetMouse[1] - state.mouse[1]) * 0.12;
 
 			const rawT = (now - state.start) / 1000;
 			let beatPhase = 0;
@@ -535,8 +587,10 @@ float peakAt(float t){
 		loop();
 
 		const onVisibility = () => {
-			// Reset timing so a tab that was hidden doesn't resume with a huge delta.
+			// Reset timing so a tab that was hidden doesn't resume with a huge delta,
+			// and repaint once in case the frame went stale while hidden.
 			lastFrame = performance.now();
+			needsPaint = true;
 		};
 		document.addEventListener('visibilitychange', onVisibility);
 
