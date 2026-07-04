@@ -192,6 +192,7 @@ the data is correct before it ever reaches the backend.
 
 Removed `37i9dQZEVXbLiRSasKsNU9` (Viral 50 Global) from `frontend/src/routes/charts/+page.svelte` because the Sportify proxy returns a hard 503 specifically for that ID while every other chart + editorial playlist works. Periodically curl `https://sportify.xcasper.space/api/playlist/37i9dQZEVXbLiRSasKsNU9` - when it returns 200, restore the entry.
 - Checked 2026-06-05: primary host returned 522 for Viral 50 Global and a comparator chart; fallback host returned 503 for Viral 50 Global and 200 for comparator `37i9dQZEVXbMDoHDwVN2tF`. Keep open.
+- Checked 2026-07-04: 503 for Viral 50 Global, 200 for the comparator. Keep open.
 - Spawned by: commit on branch `claude/serene-engelbart-083512`
 
 ### chore: extend `extract_page_links` if PAGE_LINKS shows up outside moods
@@ -223,22 +224,6 @@ Two options when the time comes: (a) bump the const + `TOTP_VER` and ship a
 release, or (b) extend `refresh_from_js` to grep the cipher dict out of the
 bundle too and persist into `server_config` for auto-rotation.
 - Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/46
-
-### fix: dj-cockpit references undefined CSS tokens (--accent-primary, --state-danger)
-
-While auditing light mode I scanned for used-but-undefined CSS custom
-properties. Two are real and theme-agnostic (broken in both themes, so not a
-light-mode-only issue): `--accent-primary` (used in
-`dj-cockpit/TransitionLane.svelte`) and `--state-danger` (used in
-`dj-cockpit/ProfileCorrectionPanel.svelte` and
-`dj-cockpit/TransitionWaveform.svelte`). Neither is defined in `app.css` nor
-injected via `setProperty`, so the no-fallback `var()` calls collapse to
-inherited text colour: the transition-lane accent styling and the danger/clash
-colours render as plain text colour instead of accent/red. The intended tokens
-already exist as `--accent` / `--accent-strong` and `--state-error`. Fix: rename
-the usages to the real tokens, or alias `--accent-primary: var(--accent)` and
-`--state-danger: var(--state-error)` in both theme blocks.
-- Spawned by: commit on branch `fix/tidal-mix-real-queue-rows` (light-mode pass)
 
 ### feat: finish play-in-context standardization across remaining list surfaces
 
