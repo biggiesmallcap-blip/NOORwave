@@ -477,3 +477,24 @@ tidal_near_end, active_ephemeral_tidal_mix_dj_pair, and the advance/finished/ado
 If radio_pipeline.rs grows its own ephemeral-mix peek, route it through the same helpers so it
 can't arm a transition into a skipped-over track. Not a known live bug today.
 Spawned by: play-next-during-mix skip bug diagnosis
+
+### perf: virtualize the library track table
+
+The tracks tab renders every loaded row: visibleTracks is the whole $tracks store
+(routes/library/+page.svelte:868) and infinite scroll appends 100 rows a page, so a deep
+scroll on the 36k-track library accretes tens of thousands of DOM nodes (roughly 25 per row)
+that never release. Needs a windowed renderer over the existing each-block, keeping row
+selection, keyboard nav, drag, and the row context menu working. Deferred from the perf
+audit because it deserves focused visual QA, not a drive-by; the albums/artists grids are
+lighter but check them while in there.
+Spawned by: perf audit 2026-07-04 (.scratch/perf-audit/baseline-2026-07-04.md)
+
+### perf: re-measure backdrop-filter surfaces once the wallpaper rest change ships
+
+PlayerBar's art-overlay buttons (np-art-fav, np-art-dl, np-fullscreen-btn) and the .glass
+overlays keep backdrop-filter blur active over the wallpaper canvas; while the canvas
+repainted 60x/s the compositor re-blurred them every frame. Now that the wallpaper rests
+when idle and defaults to 30fps, the residual cost may be negligible: re-measure GPU on the
+installed build (commands in .scratch/perf-audit/baseline-2026-07-04.md) before trading away
+the glass look. Only act if the playing-state compositor cost is still material.
+Spawned by: perf audit 2026-07-04
