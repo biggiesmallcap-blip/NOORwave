@@ -151,6 +151,53 @@
 	// Keyboard cursor for track list
 	let cursorIndex = $state(-1);
 
+	// Windowed rendering for the track list. Infinite scroll can accumulate
+	// tens of thousands of rows; only the rows near the viewport are mounted,
+	// with spacer elements preserving the true scroll height (so the
+	// IntersectionObserver sentinel and snapshot scroll restore keep working).
+	// The app scrolls `main.workspace` (see $lib/navigation/scroll.ts), so the
+	// window is computed against that container, not the window.
+	const VLIST_ROW_BUFFER = 12;
+	let trackRowsEl = $state<HTMLDivElement | null>(null);
+	// Row pitch (height + inter-row spacing), measured from rendered rows.
+	let trackRowPitch = $state(34);
+	let vlistStart = $state(0);
+	let vlistEnd = $state(80);
+	let vlistRaf = 0;
+
+	// The workspace is the scroll container on desktop, but the mobile layout
+	// sets it to `overflow: visible` and lets the document scroll instead.
+	function trackScroller(): HTMLElement | null {
+		const workspace = document.querySelector<HTMLElement>('main.workspace');
+		if (workspace && /(auto|scroll)/.test(getComputedStyle(workspace).overflowY)) return workspace;
+		return null;
+	}
+
+	function updateTrackWindow() {
+		if (!trackRowsEl) return;
+		const scroller = trackScroller();
+		const viewTop = scroller ? scroller.getBoundingClientRect().top : 0;
+		const viewHeight = scroller ? scroller.clientHeight : window.innerHeight;
+		const rowsTop = trackRowsEl.getBoundingClientRect().top - viewTop;
+		const total = visibleTracks.length;
+		const firstVisible = Math.floor(-rowsTop / trackRowPitch);
+		const visibleCount = Math.ceil(viewHeight / trackRowPitch);
+		const start = Math.max(0, Math.min(firstVisible - VLIST_ROW_BUFFER, total));
+		const end = Math.max(start, Math.min(total, firstVisible + visibleCount + VLIST_ROW_BUFFER));
+		if (start !== vlistStart || end !== vlistEnd) {
+			vlistStart = start;
+			vlistEnd = end;
+		}
+	}
+
+	function scheduleTrackWindowUpdate() {
+		if (vlistRaf) return;
+		vlistRaf = requestAnimationFrame(() => {
+			vlistRaf = 0;
+			updateTrackWindow();
+		});
+	}
+
 	// Decade filter for albums tab
 	let activeDecade = $state<number | null>(null);
 
@@ -895,6 +942,9 @@
 			return dir * (av < bv ? -1 : av > bv ? 1 : 0);
 		});
 	});
+	let vlistTracks = $derived(visibleTracks.slice(vlistStart, vlistEnd));
+	let vlistTopPad = $derived(Math.min(vlistStart, visibleTracks.length) * trackRowPitch);
+	let vlistBottomPad = $derived(Math.max(0, visibleTracks.length - vlistEnd) * trackRowPitch);
 	let decadeBuckets = $derived.by(() => {
 		const seen = new Set<number>();
 		for (const a of $albums) {
@@ -1577,6 +1627,48 @@
 		};
 	});
 
+	// Track-list virtualization: follow the workspace scroll while a track
+	// list is on screen.
+	$effect(() => {
+		if (activeTab !== 'tracks' && activeTab !== 'liked') return;
+		// Capturing listener on the document sees scrolls of any container
+		// (workspace on desktop, document on mobile) without re-binding when
+		// the responsive layout flips between them.
+		document.addEventListener('scroll', scheduleTrackWindowUpdate, { passive: true, capture: true });
+		window.addEventListener('resize', scheduleTrackWindowUpdate);
+		scheduleTrackWindowUpdate();
+		return () => {
+			document.removeEventListener('scroll', scheduleTrackWindowUpdate, { capture: true });
+			window.removeEventListener('resize', scheduleTrackWindowUpdate);
+			if (vlistRaf) {
+				cancelAnimationFrame(vlistRaf);
+				vlistRaf = 0;
+			}
+		};
+	});
+
+	// Re-window when the data set or row pitch changes (page appended, search,
+	// sort, tab switch).
+	$effect(() => {
+		// eslint-disable-next-line @typescript-eslint/no-unused-expressions
+		visibleTracks.length; trackRowPitch;
+		scheduleTrackWindowUpdate();
+	});
+
+	// Measure the real row pitch from rendered rows. With two rows the pitch
+	// includes inter-row spacing (mobile adds a margin); one row falls back to
+	// its own height. Settles after the first write since equal values no-op.
+	$effect(() => {
+		// eslint-disable-next-line @typescript-eslint/no-unused-expressions
+		vlistStart; vlistEnd;
+		const rows = trackRowsEl?.querySelectorAll<HTMLElement>('.track-row');
+		if (!rows || rows.length === 0) return;
+		const pitch = rows.length >= 2
+			? rows[1].getBoundingClientRect().top - rows[0].getBoundingClientRect().top
+			: rows[0].offsetHeight;
+		if (pitch > 0 && Math.abs(pitch - trackRowPitch) > 0.5) trackRowPitch = pitch;
+	});
+
 	// Position memory (Phase 5B - SvelteKit snapshot)
 	// Snapshot binds state to the browser's history entry. Multi-selection is
 	// active-task state and is intentionally not captured (resets on nav).
@@ -1659,7 +1751,21 @@
 	$effect(() => {
 		if (cursorIndex < 0) return;
 		const el = document.querySelector<HTMLElement>(`.track-row[data-cursor-idx="${cursorIndex}"]`);
-		el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+		if (el) {
+			el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+			return;
+		}
+		// Cursor row is outside the rendered window - scroll its slot into view
+		// and let the window update mount it.
+		if (!trackRowsEl) return;
+		const scroller = trackScroller();
+		const scrollTop = scroller ? scroller.scrollTop : window.scrollY;
+		const viewTop = scroller ? scroller.getBoundingClientRect().top : 0;
+		const viewHeight = scroller ? scroller.clientHeight : window.innerHeight;
+		const rowsTop = trackRowsEl.getBoundingClientRect().top - viewTop + scrollTop;
+		const target = { top: rowsTop + cursorIndex * trackRowPitch - viewHeight / 2, behavior: 'smooth' as const };
+		if (scroller) scroller.scrollTo(target);
+		else window.scrollTo(target);
 	})
 </script>
 
@@ -2421,7 +2527,10 @@
 				<span class="col-actions"></span>
 			</div>
 
-			{#each visibleTracks as track, i (track.id)}
+			<div class="track-rows" bind:this={trackRowsEl}>
+			<div class="vlist-spacer" style="height: {vlistTopPad}px" aria-hidden="true"></div>
+			{#each vlistTracks as track, vi (track.id)}
+				{@const i = vlistStart + vi}
 				<div
 					class="track-row"
 					class:selected={$selectedTrackIds.has(track.id)}
@@ -2547,6 +2656,8 @@
 					</span>
 				</div>
 			{/each}
+			<div class="vlist-spacer" style="height: {vlistBottomPad}px" aria-hidden="true"></div>
+			</div>
 		</div>
 
 		{#if visibleTracks.length === 0}
@@ -4322,6 +4433,15 @@
 		flex-direction: column;
 	}
 
+	.track-rows {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.vlist-spacer {
+		flex: none;
+	}
+
 	.track-header {
 		display: grid;
 		gap: var(--gap-sm);
@@ -4584,6 +4704,13 @@
 
 		.track-list {
 			gap: 6px;
+		}
+
+		/* Rows sit inside .track-rows now, so .track-list's gap no longer
+		   separates them; a margin keeps the spacing inside the row pitch the
+		   virtual window measures. */
+		.track-rows .track-row {
+			margin-bottom: 6px;
 		}
 
 		.track-row {
