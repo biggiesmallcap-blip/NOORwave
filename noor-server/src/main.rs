@@ -274,6 +274,15 @@ pub enum AppEvent {
     PlaybackFailed {
         message: String,
     },
+    /// A queued track couldn't be played (TIDAL pulled the asset, `4005`
+    /// asset-not-ready, or a hard rejection) and playback skipped past it. Lets
+    /// the UI toast which track dropped out and why, instead of freezing on a
+    /// silent dead row.
+    TrackSkipped {
+        track_id: i64,
+        title: String,
+        reason: String,
+    },
     TrainingProgress {
         stage: String,
         progress: f32,

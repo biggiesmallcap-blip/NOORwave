@@ -20,6 +20,7 @@ export type WsMessage =
 	| { type: 'queue_updated' }
 	| { type: 'listen_history_updated'; track_id: number }
 	| { type: 'playback_failed'; message: string }
+	| { type: 'track_skipped'; track_id: number; title: string; reason: string }
 	| { type: 'library_synced' }
 	| { type: 'radio_similarity_computed'; pairs: number }
 	| { type: 'musicbrainz_enriched' }
@@ -92,9 +93,14 @@ export function connectWebSocket() {
 				data?.type === 'playback_changed' ||
 				data?.type === 'track_changed' ||
 				data?.type === 'listen_history_updated' ||
-				data?.type === 'playback_failed'
+				data?.type === 'playback_failed' ||
+				data?.type === 'track_skipped'
 			) {
 				void refreshPlaybackState();
+			}
+			if (data?.type === 'track_skipped') {
+				const label = data.title ? `"${data.title}"` : 'Track';
+				showToast(`${label} skipped: ${data.reason ?? 'unavailable on TIDAL'}`, 'error', 6000);
 			}
 			if (data?.type === 'track_changed' || data?.type === 'playback_changed') {
 				void refreshPlaybackRuntime();
