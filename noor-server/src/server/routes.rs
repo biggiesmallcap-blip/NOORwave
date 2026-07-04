@@ -6433,6 +6433,26 @@ async fn play_track(
     };
     let stream_info = match resolve_tidal_playback_stream(&state, &track, &stream_request).await {
         Ok(info) => info,
+        Err(error) if error.is_track_unplayable() => {
+            // The track the user picked is a dead TIDAL asset. Rather than fail
+            // the whole action, hand off to the skip-aware runtime switch, which
+            // advances past it (and any further dead rows) and starts the next
+            // playable track. Return the state it settles on.
+            switch_runtime_to_snapshot_current(&state, &snapshot, playback_generation)
+                .await
+                .map_err(|error| {
+                    let message = format!("Failed to advance past an unplayable track: {error}");
+                    report_playback_failure(&state, &message);
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({
+                            "status": "playback_runtime_failed",
+                            "message": message,
+                        })),
+                    )
+                })?;
+            return current_playback_snapshot_json(&state).await;
+        }
         Err(error) => {
             let state_guard = state.read().await;
             let _ = state_guard.db.with_conn(player::pause);
@@ -6558,6 +6578,74 @@ enum TidalPlaybackError {
     NotConnected,
     SessionRefreshFailed(String),
     StreamResolve(tidal_stream::StreamResolveError),
+}
+
+impl TidalPlaybackError {
+    /// True when the failure is specific to *this track's asset*, so the right
+    /// response is to skip past it and keep the queue moving. TIDAL's
+    /// `4005 / "Asset is not ready"` and hard stream rejections mean this id
+    /// won't play right now. Everything else (not connected, session refresh,
+    /// network, rate-limit) is systemic or transient and must NOT burn through
+    /// the queue one dead row at a time.
+    fn is_track_unplayable(&self) -> bool {
+        match self {
+            TidalPlaybackError::StreamResolve(err) => {
+                err.is_asset_not_ready() || err.is_stream_rejected()
+            }
+            _ => false,
+        }
+    }
+
+    /// The narrower `4005 / asset-not-ready` case. A track that played fine
+    /// before and now returns this usually had its catalog id rotated by TIDAL,
+    /// so it's worth a background id re-resolve. A plain stream rejection
+    /// (region lock, takedown) is not.
+    fn is_asset_not_ready(&self) -> bool {
+        matches!(self, TidalPlaybackError::StreamResolve(err) if err.is_asset_not_ready())
+    }
+}
+
+#[cfg(test)]
+mod unplayable_classification_tests {
+    use super::*;
+    use crate::services::tidal::stream::StreamResolveError;
+
+    fn stream_resolve(err: StreamResolveError) -> TidalPlaybackError {
+        TidalPlaybackError::StreamResolve(err)
+    }
+
+    #[test]
+    fn asset_not_ready_4005_is_skippable_and_reresolvable() {
+        let err = stream_resolve(StreamResolveError::StreamRejected {
+            message: r#"TIDAL rejected playback request with 401 Unauthorized: {"status":401,"subStatus":4005,"userMessage":"Asset is not ready for playback"}"#.to_string(),
+        });
+        assert!(err.is_track_unplayable());
+        assert!(err.is_asset_not_ready());
+    }
+
+    #[test]
+    fn stream_rejected_without_4005_skips_but_does_not_reresolve() {
+        let err = stream_resolve(StreamResolveError::StreamRejected {
+            message: "TIDAL rejected playback request with 403 Forbidden".to_string(),
+        });
+        assert!(err.is_track_unplayable());
+        assert!(!err.is_asset_not_ready());
+    }
+
+    #[test]
+    fn network_and_session_failures_are_not_skippable() {
+        // A transient network error must not burn through the queue one row at a time.
+        let network = stream_resolve(StreamResolveError::RequestFailed {
+            message: "error sending request: dns error".to_string(),
+        });
+        assert!(!network.is_track_unplayable());
+        assert!(!network.is_asset_not_ready());
+
+        assert!(!TidalPlaybackError::NotConnected.is_track_unplayable());
+        assert!(
+            !TidalPlaybackError::SessionRefreshFailed("boom".to_string()).is_track_unplayable()
+        );
+    }
 }
 
 fn runtime_stream_resolver(state: SharedState) -> playback_runtime::RuntimeStreamResolver {
@@ -8225,15 +8313,37 @@ async fn next_track(
                 })),
             )
         })?;
-        let stream_info = resolve_tidal_playback_stream(&state, track, &stream_request)
-            .await
-            .map_err(|error| {
-                tidal_playback_error_response(
+        let stream_info = match resolve_tidal_playback_stream(&state, track, &stream_request).await
+        {
+            Ok(info) => info,
+            Err(error) if error.is_track_unplayable() => {
+                // Dead asset: hand off to the skip-aware runtime switch, which
+                // advances past this row (and any further dead ones) and starts
+                // the next playable track. Return the state it settles on.
+                switch_runtime_to_snapshot_current(&state, &snapshot, playback_generation)
+                    .await
+                    .map_err(|error| {
+                        let message =
+                            format!("Failed to advance past an unplayable track: {error}");
+                        report_playback_failure(&state, &message);
+                        (
+                            StatusCode::BAD_GATEWAY,
+                            Json(json!({
+                                "status": "playback_runtime_failed",
+                                "message": message,
+                            })),
+                        )
+                    })?;
+                return current_playback_snapshot_json(&state).await;
+            }
+            Err(error) => {
+                return Err(tidal_playback_error_response(
                     track.id,
                     error,
                     "TIDAL stream could not be resolved while advancing playback.",
-                )
-            })?;
+                ));
+            }
+        };
         if !playback_generation_is_current(&state, playback_generation).await {
             return current_playback_snapshot_json(&state).await;
         }
@@ -12735,30 +12845,47 @@ async fn switch_runtime_to_snapshot_current(
     snapshot: &player::PlaybackSnapshot,
     generation: u64,
 ) -> anyhow::Result<()> {
-    let current_queue_item_id = snapshot.state.current_queue_item_id;
-    let queue_len = snapshot.queue.len();
+    // A track whose TIDAL asset won't resolve (pulled from the catalog, 4005
+    // "asset not ready", or a hard rejection) used to wedge playback here: the
+    // resolve error propagated up as fatal and the runtime sat frozen on a dead
+    // row. Instead, skip past it and try the next queue item, bounded so a real
+    // TIDAL outage doesn't chew silently through the whole queue.
+    const MAX_UNPLAYABLE_SKIPS: u32 = 8;
+    let mut snapshot = snapshot.clone();
+    let mut unplayable_skips: u32 = 0;
 
-    if snapshot.state.current_track.is_none() {
-        tracing::info!(
-            target: "noor.playback.runtime",
-            event = "runtime_snapshot_empty",
-            generation,
-            ?current_queue_item_id,
-            queue_len,
-            "snapshot has no current track; clearing runtime active track"
-        );
-        let mut state_guard = state.write().await;
-        if let Some(info) = state_guard.playback_runtime_info.as_mut() {
-            info.active_track_id = None;
-        }
-        let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
-        let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
-        return Ok(());
-    }
+    loop {
+        let current_queue_item_id = snapshot.state.current_queue_item_id;
+        let queue_len = snapshot.queue.len();
 
-    if let Some(track) = snapshot.state.current_track.as_ref() {
+        let Some(track) = snapshot.state.current_track.clone() else {
+            tracing::info!(
+                target: "noor.playback.runtime",
+                event = "runtime_snapshot_empty",
+                generation,
+                ?current_queue_item_id,
+                queue_len,
+                "snapshot has no current track; clearing runtime active track"
+            );
+            if unplayable_skips > 0 {
+                sync_session_after_snapshot(
+                    state,
+                    &snapshot,
+                    Some(player::ListenSessionEndReason::QueueEnded),
+                )
+                .await;
+            }
+            let mut state_guard = state.write().await;
+            if let Some(info) = state_guard.playback_runtime_info.as_mut() {
+                info.active_track_id = None;
+            }
+            let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+            let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
+            return Ok(());
+        };
+
         let user_quality = current_user_audio_quality(state).await;
-        let runtime_handle = ensure_playback_runtime_for_track(state, track)
+        let runtime_handle = ensure_playback_runtime_for_track(state, &track)
             .await
             .map_err(|(status, body)| {
                 anyhow::anyhow!("playback runtime unavailable ({status}): {}", body.0)
@@ -12770,7 +12897,7 @@ async fn switch_runtime_to_snapshot_current(
                 | playback_runtime::PlaybackTrackStatus::Prepared
         ) {
             let job = player::build_playback_preparation(
-                track,
+                &track,
                 None,
                 effective_crossfade_ms(state, snapshot.state.crossfade_ms).await,
                 user_quality,
@@ -12814,7 +12941,7 @@ async fn switch_runtime_to_snapshot_current(
             );
         } else {
             let Some(stream_request) =
-                player::build_tidal_stream_request(track, user_quality.clone())
+                player::build_tidal_stream_request(&track, user_quality.clone())
             else {
                 handle_runtime_error(
                     state.clone(),
@@ -12823,16 +12950,61 @@ async fn switch_runtime_to_snapshot_current(
                 .await;
                 return Ok(());
             };
-            let stream_info = resolve_tidal_playback_stream(state, track, &stream_request)
-                .await
-                .map_err(|error| {
-                    anyhow::anyhow!(
-                        "playback stream resolve failed: {}",
-                        describe_tidal_playback_error(&error)
-                    )
-                })?;
+            let stream_info =
+                match resolve_tidal_playback_stream(state, &track, &stream_request).await {
+                    Ok(info) => info,
+                    Err(err)
+                        if err.is_track_unplayable() && unplayable_skips < MAX_UNPLAYABLE_SKIPS =>
+                    {
+                        unplayable_skips += 1;
+                        let reason = if err.is_asset_not_ready() {
+                            "Not available on TIDAL right now"
+                        } else {
+                            "TIDAL wouldn't play this track"
+                        };
+                        tracing::warn!(
+                            target: "noor.playback.advance",
+                            event = "skip_unplayable_track",
+                            generation,
+                            track_id = track.id,
+                            skip = unplayable_skips,
+                            error = %describe_tidal_playback_error(&err),
+                            "skipping unplayable track and advancing to the next queue row"
+                        );
+                        emit_track_skipped(state, track.id, &track.title, reason).await;
+                        if err.is_asset_not_ready() {
+                            spawn_tidal_id_reresolve(state, track.id);
+                        }
+                        // Advance the persisted queue past the dead row and retry.
+                        let cleared = {
+                            let s = state.read().await;
+                            recently_cleared(&s)
+                        };
+                        let advanced = {
+                            let s = state.read().await;
+                            s.db.with_conn(|conn| player::next_track(conn, cleared))
+                        }?;
+                        snapshot = resolve_or_skip_pending_current(
+                            state,
+                            advanced,
+                            generation,
+                            "skip_unplayable",
+                        )
+                        .await?;
+                        if !playback_generation_is_current(state, generation).await {
+                            return Ok(());
+                        }
+                        continue;
+                    }
+                    Err(err) => {
+                        return Err(anyhow::anyhow!(
+                            "playback stream resolve failed: {}",
+                            describe_tidal_playback_error(&err)
+                        ));
+                    }
+                };
             let job = player::build_playback_preparation(
-                track,
+                &track,
                 Some(&stream_info),
                 effective_crossfade_ms(state, snapshot.state.crossfade_ms).await,
                 user_quality,
@@ -12878,17 +13050,27 @@ async fn switch_runtime_to_snapshot_current(
                 "switched runtime after resolving snapshot stream"
             );
         }
-    }
 
-    let state_guard = state.read().await;
-    if let Some(track) = snapshot.state.current_track.as_ref() {
+        // If we skipped past dead rows, the caller's pre-switch session sync was
+        // for a track we never played. Re-anchor the listen session onto the row
+        // that actually started so completion + transition learning is correct.
+        if unplayable_skips > 0 {
+            sync_session_after_snapshot(
+                state,
+                &snapshot,
+                Some(player::ListenSessionEndReason::Replaced),
+            )
+            .await;
+        }
+
+        let state_guard = state.read().await;
         let _ = state_guard
             .event_tx
             .send(AppEvent::TrackChanged { track_id: track.id });
+        let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+        let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
+        return Ok(());
     }
-    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
-    let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
-    Ok(())
 }
 
 async fn handle_runtime_finished(
@@ -13330,6 +13512,135 @@ async fn handle_runtime_error(state: SharedState, message: &str) {
 
     let state_guard = state.read().await;
     let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+}
+
+/// Broadcast a "we skipped this track" notice so the UI can toast which track
+/// dropped out and why, instead of freezing on a silent dead row.
+async fn emit_track_skipped(state: &SharedState, track_id: i64, title: &str, reason: &str) {
+    let state_guard = state.read().await;
+    let _ = state_guard.event_tx.send(AppEvent::TrackSkipped {
+        track_id,
+        title: title.to_string(),
+        reason: reason.to_string(),
+    });
+}
+
+/// TIDAL returned `4005 / asset-not-ready` for a track that used to play, which
+/// usually means the catalog id rotated. In the background, search TIDAL for
+/// the same artist + title, verify a candidate actually streams, and swap the
+/// row's `tidal_id` in place so the track heals for next time. Best-effort:
+/// any failure leaves the row untouched (it's already been skipped this time).
+fn spawn_tidal_id_reresolve(state: &SharedState, track_id: i64) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        match reresolve_tidal_id(&state, track_id).await {
+            Ok(Some(new_id)) => tracing::info!(
+                target: "noor.playback.reresolve",
+                track_id,
+                new_tidal_id = new_id,
+                "healed track with a fresh TIDAL id"
+            ),
+            Ok(None) => tracing::debug!(
+                target: "noor.playback.reresolve",
+                track_id,
+                "no fresh TIDAL id found to heal track"
+            ),
+            Err(error) => tracing::debug!(
+                target: "noor.playback.reresolve",
+                track_id,
+                error = %error,
+                "TIDAL id re-resolve failed"
+            ),
+        }
+    });
+}
+
+/// Returns `Some(new_tidal_id)` when the row was healed with a fresh, verified
+/// id; `None` when no better id was found. Errors only on infrastructure
+/// failures (DB, no TIDAL session), never on "couldn't find a match".
+async fn reresolve_tidal_id(state: &SharedState, track_id: i64) -> anyhow::Result<Option<i64>> {
+    let db = {
+        let s = state.read().await;
+        s.db.clone()
+    };
+    let row = db.with_conn(|conn| {
+        let found = conn
+            .query_row(
+                "SELECT t.tidal_id, t.title, a.name
+                 FROM tracks t JOIN artists a ON a.id = t.artist_id
+                 WHERE t.id = ?1",
+                [track_id],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<i64>>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(found)
+    })?;
+    let Some((old_tidal_id, title, artist)) = row else {
+        return Ok(None);
+    };
+
+    let (tokens, http) = {
+        let persisted = load_persisted_tidal_tokens(state).await.ok().flatten();
+        let s = state.read().await;
+        match s.tidal_tokens.clone().or(persisted) {
+            Some(tokens) => (tokens, s.tidal_http_client.clone()),
+            None => return Ok(None),
+        }
+    };
+
+    let client = TidalClient::with_http(
+        http.clone(),
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
+    let query = format!("{artist} {title}");
+    let results = client.search(&query, TIDAL_RESOLVE_POOL).await?;
+    let Some((_score, candidate)) = select_best_tidal_match(&artist, &title, results) else {
+        return Ok(None);
+    };
+    // Same id that just failed, or a match we can't distinguish: nothing to heal.
+    if Some(candidate.id) == old_tidal_id {
+        return Ok(None);
+    }
+
+    // Don't swap one dead id for another: confirm the candidate actually streams
+    // before rewriting the row.
+    let request = tidal_stream::StreamRequest::new(candidate.id, "LOSSLESS");
+    if tidal_stream::resolve_stream(&http, &tokens.access_token, &request)
+        .await
+        .is_err()
+    {
+        return Ok(None);
+    }
+
+    let new_id = candidate.id;
+    let updated = db.with_conn(move |conn| {
+        // Guard the UNIQUE(tidal_id): if another row already owns this id, leave
+        // both alone rather than erroring.
+        let clash: bool = conn
+            .query_row(
+                "SELECT 1 FROM tracks WHERE tidal_id = ?1 AND id != ?2",
+                rusqlite::params![new_id, track_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if clash {
+            return Ok(0usize);
+        }
+        Ok(conn.execute(
+            "UPDATE tracks SET tidal_id = ?1, updated_at = datetime('now') WHERE id = ?2",
+            rusqlite::params![new_id, track_id],
+        )?)
+    })?;
+
+    Ok((updated > 0).then_some(new_id))
 }
 
 fn describe_tidal_playback_error(error: &TidalPlaybackError) -> String {
