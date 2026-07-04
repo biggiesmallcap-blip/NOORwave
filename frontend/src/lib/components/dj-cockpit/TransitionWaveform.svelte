@@ -224,12 +224,12 @@
 	}
 
 	.marker-svg.drop {
-		stroke: color-mix(in srgb, var(--state-danger) 72%, transparent);
+		stroke: color-mix(in srgb, var(--state-error) 72%, transparent);
 		stroke-width: 0.38;
 	}
 
 	.marker-svg.manual-drop {
-		stroke: var(--state-danger);
+		stroke: var(--state-error);
 		stroke-width: 0.58;
 	}
 

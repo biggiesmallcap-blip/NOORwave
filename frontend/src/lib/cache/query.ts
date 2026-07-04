@@ -47,6 +47,8 @@ interface CacheEntry<T> {
 	options: QueryOptions;
 	inflight?: Promise<T>;
 	persistHydrated: boolean;
+	/** Live subscriber count; eviction never drops an entry something renders from. */
+	refs: number;
 }
 
 interface PersistedEntry<T> {
@@ -57,6 +59,12 @@ interface PersistedEntry<T> {
 
 const DEFAULT_STALE_MS = 60 * 1000;
 const PERSIST_PREFIX = 'noor.query.';
+// In-memory entry cap. Every sort/filter/offset permutation mints its own key,
+// so a long browsing session used to accumulate hundreds of retained payloads
+// with no bound. Least-recently-touched entries go first; entries with a live
+// subscriber or an in-flight fetch are never evicted, and persisted payloads
+// stay in storage and re-hydrate on the next query for that key.
+const DEFAULT_MAX_ENTRIES = 150;
 
 function defaultState<T>(): CacheState<T> {
 	return {
@@ -118,9 +126,15 @@ function keyMatchesPrefix(key: string, prefix: string): boolean {
 export class QueryCache {
 	private entries = new Map<string, CacheEntry<unknown>>();
 	private readonly now: () => number;
+	private readonly maxEntries: number;
 
-	constructor(options: { now?: () => number } = {}) {
+	constructor(options: { now?: () => number; maxEntries?: number } = {}) {
 		this.now = options.now ?? (() => Date.now());
+		this.maxEntries = options.maxEntries ?? DEFAULT_MAX_ENTRIES;
+	}
+
+	get size(): number {
+		return this.entries.size;
 	}
 
 	query<T>(
@@ -308,15 +322,47 @@ export class QueryCache {
 
 	private getEntry<T>(key: string): CacheEntry<T> {
 		const existing = this.entries.get(key);
-		if (existing) return existing as CacheEntry<T>;
+		if (existing) {
+			// Move-to-end so Map iteration order stays least-recently-used first.
+			this.entries.delete(key);
+			this.entries.set(key, existing);
+			return existing as CacheEntry<T>;
+		}
+		const store = writable(defaultState<T>());
 		const entry: CacheEntry<T> = {
 			key,
-			store: writable(defaultState<T>()),
+			store,
 			options: {},
 			persistHydrated: false,
+			refs: 0,
 		};
+		// Refcount subscribers so eviction can tell which entries a mounted
+		// component is actively rendering from.
+		const rawSubscribe = store.subscribe;
+		store.subscribe = ((run, invalidate) => {
+			entry.refs += 1;
+			let released = false;
+			const unsubscribe = rawSubscribe(run, invalidate);
+			return () => {
+				if (!released) {
+					released = true;
+					entry.refs -= 1;
+				}
+				unsubscribe();
+			};
+		}) as typeof store.subscribe;
 		this.entries.set(key, entry as CacheEntry<unknown>);
+		this.evictOverflow();
 		return entry;
+	}
+
+	private evictOverflow(): void {
+		if (this.entries.size <= this.maxEntries) return;
+		for (const [key, entry] of this.entries) {
+			if (this.entries.size <= this.maxEntries) break;
+			if (entry.refs > 0 || entry.inflight) continue;
+			this.entries.delete(key);
+		}
 	}
 
 	private isStale<T>(state: CacheState<T>, options: QueryOptions): boolean {

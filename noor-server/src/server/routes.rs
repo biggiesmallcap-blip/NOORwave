@@ -5691,7 +5691,9 @@ pub(crate) fn active_ephemeral_tidal_mix_dj_pair(
     conn: &rusqlite::Connection,
 ) -> Option<crate::playback::dj_lookahead::DjLookaheadPair> {
     let current = state.ephemeral_tidal_track.as_ref()?;
-    let pending = queue::peek_next_ephemeral_tidal_track(conn)
+    // Ordered next, not the raw lowest ephemeral row: a regular row in front means
+    // the mix continuation is not what plays next, so there is no ephemeral pair.
+    let pending = next_advance_ephemeral_track(conn)
         .ok()
         .flatten()
         .into_iter()
@@ -8123,18 +8125,25 @@ async fn advance_ephemeral_next_if_needed(
         let state_guard = state.read().await;
         state_guard.ephemeral_tidal_track.is_some()
     };
-    if !has_ephemeral {
-        return Ok(None);
-    }
 
+    // Ordered advance decision. Pop the mix continuation only when its row is
+    // genuinely next in queue order: a regular row in front of it (library
+    // "Play next" during a mix) falls through to the normal queue advance
+    // instead of being silently skipped. The pop also fires when the live
+    // track is NOT ephemeral (a play-next interlude just played) so the mix
+    // resumes behind the interlude's anchor.
     let next = {
         let state_guard = state.read().await;
         state_guard
             .db
-            .with_conn(queue::pop_next_ephemeral_tidal_track)
+            .with_conn(pop_next_ephemeral_if_due)
             .ok()
             .flatten()
     };
+
+    if !has_ephemeral && next.is_none() {
+        return Ok(None);
+    }
 
     if let Some(next) = next {
         start_ephemeral_tidal_playback(state, next).await?;
@@ -8409,9 +8418,61 @@ async fn next_track(
     })))
 }
 
+/// During a live TIDAL mix, "previous" restarts the current track from the top
+/// instead of running the persistent-queue previous logic. A mix is forward-only:
+/// played rows are deleted, so there is no earlier row to return to, and the DB
+/// anchor is NULL. Without this guard, `player::previous_track`'s "nothing playing
+/// -> jump to first item" fallback re-anchors onto the next mix row and marks it
+/// playing while the runtime keeps playing the ephemeral track, corrupting state
+/// ("previous loads them back in"). Returns `Some(response)` when handled.
+async fn restart_ephemeral_current_if_needed(
+    state: &SharedState,
+) -> Result<Option<Json<Value>>, (StatusCode, Json<Value>)> {
+    let has_ephemeral = {
+        let state_guard = state.read().await;
+        state_guard.ephemeral_tidal_track.is_some()
+    };
+    if !has_ephemeral {
+        return Ok(None);
+    }
+
+    let handle = {
+        let state_guard = state.read().await;
+        state_guard
+            .playback_runtime
+            .as_ref()
+            .map(|rt| rt.handle.clone())
+    };
+    if let Some(handle) = handle {
+        // Segment-aware restart to 0, same path the seek route uses.
+        let _ = tokio::task::spawn_blocking(move || handle.seek_to_segment_aware(0, true)).await;
+    }
+    {
+        let state_guard = state.read().await;
+        let _ = state_guard.db.with_conn(|conn| {
+            conn.execute("UPDATE playback_state SET position_ms = 0 WHERE id = 1", [])?;
+            Ok::<_, anyhow::Error>(())
+        });
+    }
+
+    let snapshot = build_live_playback_snapshot_json(state).await?;
+    {
+        let state_guard = state.read().await;
+        let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+    }
+    Ok(Some(Json(json!({
+        "state": snapshot.state,
+        "queue": snapshot.queue
+    }))))
+}
+
 async fn previous_track(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if let Some(response) = restart_ephemeral_current_if_needed(&state).await? {
+        return Ok(response);
+    }
+
     let playback_generation = bump_playback_generation(&state).await;
     let previous_track_id = current_playback_track_id(&state).await;
     let mut snapshot = {
@@ -8799,6 +8860,115 @@ fn ephemeral_tidal_insert(
     })
 }
 
+/// Owned form of [`queue::EphemeralTidalInsert`]. Needed because a library "Play
+/// next" during a mix has to be looked up from the DB (the request carries only a
+/// `track_id`), and the borrowed insert can't outlive that temporary lookup.
+struct OwnedEphemeralInsert {
+    tidal_id: i64,
+    title: String,
+    artist: Option<String>,
+    album_title: Option<String>,
+    artwork_url: Option<String>,
+    duration_ms: Option<i64>,
+    artist_tidal_id: Option<i64>,
+    album_tidal_id: Option<i64>,
+}
+
+impl OwnedEphemeralInsert {
+    fn as_insert(&self) -> queue::EphemeralTidalInsert<'_> {
+        queue::EphemeralTidalInsert {
+            tidal_id: self.tidal_id,
+            title: &self.title,
+            artist: self.artist.as_deref(),
+            album_title: self.album_title.as_deref(),
+            artwork_url: self.artwork_url.as_deref(),
+            duration_ms: self.duration_ms,
+            artist_tidal_id: self.artist_tidal_id,
+            album_tidal_id: self.album_tidal_id,
+        }
+    }
+
+    fn from_ephemeral_insert(insert: &queue::EphemeralTidalInsert<'_>) -> Self {
+        OwnedEphemeralInsert {
+            tidal_id: insert.tidal_id,
+            title: insert.title.to_string(),
+            artist: insert.artist.map(str::to_string),
+            album_title: insert.album_title.map(str::to_string),
+            artwork_url: insert.artwork_url.map(str::to_string),
+            duration_ms: insert.duration_ms,
+            artist_tidal_id: insert.artist_tidal_id,
+            album_tidal_id: insert.album_tidal_id,
+        }
+    }
+
+    /// Build an ephemeral insert from a resolved library track. Returns `None`
+    /// when the track has no positive `tidal_id` (unplayable in a mix, which
+    /// streams strictly by tidal id).
+    fn from_track(track: &crate::db::models::Track) -> Option<Self> {
+        let tidal_id = track.tidal_id.filter(|id| *id > 0)?;
+        let title = track.title.trim();
+        if title.is_empty() {
+            return None;
+        }
+        Some(OwnedEphemeralInsert {
+            tidal_id,
+            title: title.to_string(),
+            artist: track
+                .artist_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            album_title: track.album_title.clone(),
+            artwork_url: track.artwork_url.clone(),
+            duration_ms: track.duration_ms,
+            artist_tidal_id: track.artist_tidal_id,
+            album_tidal_id: track.album_tidal_id,
+        })
+    }
+}
+
+/// During a live mix, resolve a queue request into an ephemeral (consumed-on-play)
+/// insert. A TIDAL request uses its own metadata; a library request is looked up
+/// so it, too, folds into the continuation and is popped when played instead of
+/// lingering as a persistent `user_play_next` row (which the NULL-anchor advance
+/// fallback re-selects, causing double-plays and "previous" re-loading it).
+/// Returns `None` for external requests or library tracks without a tidal id, so
+/// the caller falls back to the persistent insert path.
+fn ephemeral_owned_for_request(
+    conn: &rusqlite::Connection,
+    payload: &QueueExternalRequest,
+) -> anyhow::Result<Option<OwnedEphemeralInsert>> {
+    if let Some(insert) = ephemeral_tidal_insert(payload) {
+        return Ok(Some(OwnedEphemeralInsert::from_ephemeral_insert(&insert)));
+    }
+    if payload.kind == QueueExternalKind::Library
+        && let Some(track_id) = payload.track_id.filter(|id| *id > 0)
+        && let Some(track) = queue::get_track_by_id(conn, track_id)?
+    {
+        return Ok(OwnedEphemeralInsert::from_track(&track));
+    }
+    Ok(None)
+}
+
+/// Batch form of [`ephemeral_owned_for_request`], all-or-nothing: returns
+/// `Some(inserts)` only when every item resolves to an ephemeral insert, so a
+/// mixed batch (any external / non-streamable item) falls back to the persistent
+/// path as one unit and stays in a single consumption model.
+fn ephemeral_owned_for_requests(
+    conn: &rusqlite::Connection,
+    payloads: &[QueueExternalRequest],
+) -> anyhow::Result<Option<Vec<OwnedEphemeralInsert>>> {
+    let mut owned = Vec::with_capacity(payloads.len());
+    for payload in payloads {
+        match ephemeral_owned_for_request(conn, payload)? {
+            Some(insert) => owned.push(insert),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(owned))
+}
+
 fn current_queue_position(conn: &rusqlite::Connection) -> anyhow::Result<Option<i32>> {
     let (current_queue_item_id, current_track_id): (Option<i64>, Option<i64>) = conn.query_row(
         "SELECT current_queue_item_id, current_track_id FROM playback_state WHERE id = 1",
@@ -8832,6 +9002,59 @@ fn current_queue_position(conn: &rusqlite::Connection) -> anyhow::Result<Option<
     }
 
     Ok(None)
+}
+
+/// Classify what the next queue advance should consume: `Some(tidal_id)` when
+/// the first upcoming row (after the current anchor, or the queue front during a
+/// live mix where the anchor is NULL) is a playable ephemeral TIDAL row, `None`
+/// when it is a regular/pending row or the queue is exhausted. The ephemeral
+/// advance paths used to pop the lowest ephemeral row unconditionally, which
+/// silently skipped a library "Play next" row sitting in front of the mix
+/// continuation. Source list mirrors queue::EPHEMERAL_TIDAL_SOURCES.
+fn next_advance_ephemeral_tidal_id(conn: &rusqlite::Connection) -> anyhow::Result<Option<i64>> {
+    let anchor = current_queue_position(conn)?;
+    let front: Option<(bool, Option<i64>)> = conn
+        .query_row(
+            "SELECT (track_id IS NULL
+                     AND source IN ('tidal_mix','tidal_album','tidal_playlist')
+                     AND tidal_id_hint IS NOT NULL),
+                    tidal_id_hint
+             FROM queue
+             WHERE ?1 IS NULL OR position > ?1
+             ORDER BY position ASC, id ASC
+             LIMIT 1",
+            params![anchor],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(front.and_then(|(is_ephemeral, hint)| if is_ephemeral { hint } else { None }))
+}
+
+/// Pop the next ephemeral mix row only when it is genuinely the next thing to
+/// play. A regular row ahead of the continuation (library "Play next" during a
+/// mix) must win the advance instead of being skipped.
+fn pop_next_ephemeral_if_due(
+    conn: &rusqlite::Connection,
+) -> anyhow::Result<Option<crate::PendingEphemeralTidalTrack>> {
+    if next_advance_ephemeral_tidal_id(conn)?.is_some() {
+        queue::pop_next_ephemeral_tidal_track(conn)
+    } else {
+        Ok(None)
+    }
+}
+
+/// The next ephemeral mix row in queue order, or `None` when a non-ephemeral row
+/// is in front (so the continuation is not actually next) or the queue holds no
+/// ephemeral row. Unlike a raw `peek_next_ephemeral_tidal_track` (lowest ephemeral
+/// row, order-blind), this honours the same ordering as the advance paths, so the
+/// DJ pre-buffer and pair display don't arm a crossfade into a skipped-over track.
+fn next_advance_ephemeral_track(
+    conn: &rusqlite::Connection,
+) -> anyhow::Result<Option<crate::PendingEphemeralTidalTrack>> {
+    match next_advance_ephemeral_tidal_id(conn)? {
+        Some(tidal_id) => queue::find_ephemeral_tidal_track_by_tidal_id(conn, tidal_id),
+        None => Ok(None),
+    }
 }
 
 fn queue_item_position(
@@ -9000,23 +9223,27 @@ async fn queue_append(
         state_guard
             .user_cleared_at
             .store(0, std::sync::atomic::Ordering::Relaxed);
-        // During a live TIDAL mix, append a TIDAL pick onto the ephemeral
-        // continuation so it plays after the rest of the mix and is popped when
-        // done, instead of stranding a user_queue pending row the mix-advance
-        // pipeline never reads. See EPHEMERAL_USER_TIDAL_SOURCE.
+        // During a live TIDAL mix, append the pick (TIDAL or a library track with
+        // a tidal id) onto the ephemeral continuation so it plays after the rest of
+        // the mix and is popped when done, instead of stranding a persistent
+        // user_queue row the mix-advance pipeline never reads (and which lingers to
+        // corrupt the NULL-anchor advance). See EPHEMERAL_USER_TIDAL_SOURCE.
         let ephemeral_active = state_guard.ephemeral_tidal_track.is_some()
             || state_guard.external_playback_track.is_some();
-        let ephemeral_insert = ephemeral_active
-            .then(|| ephemeral_tidal_insert(&payload))
-            .flatten();
         let event_tx = state_guard.event_tx.clone();
         state_guard
             .db
             .with_conn(|conn| {
-                if let Some(eph) = ephemeral_insert.as_ref() {
+                let ephemeral_owned = if ephemeral_active {
+                    ephemeral_owned_for_request(conn, &payload)?
+                } else {
+                    None
+                };
+                if let Some(owned) = ephemeral_owned.as_ref() {
+                    let insert = owned.as_insert();
                     let queue = queue::append_ephemeral_tidal_tracks(
                         conn,
-                        std::slice::from_ref(eph),
+                        std::slice::from_ref(&insert),
                         queue::EPHEMERAL_USER_TIDAL_SOURCE,
                     )?;
                     let _ = event_tx.send(AppEvent::QueueUpdated);
@@ -9069,26 +9296,24 @@ async fn queue_append_many(
             .user_cleared_at
             .store(0, std::sync::atomic::Ordering::Relaxed);
         // See queue_append: during a live mix, append the batch onto the ephemeral
-        // continuation, but only when every item is a streamable TIDAL track.
+        // continuation, but only when every item resolves to an ephemeral insert
+        // (TIDAL pick or library track with a tidal id).
         let ephemeral_active = state_guard.ephemeral_tidal_track.is_some()
             || state_guard.external_playback_track.is_some();
-        let ephemeral_inserts = ephemeral_active
-            .then(|| {
-                payload
-                    .items
-                    .iter()
-                    .map(ephemeral_tidal_insert)
-                    .collect::<Option<Vec<_>>>()
-            })
-            .flatten();
         let event_tx = state_guard.event_tx.clone();
         state_guard
             .db
             .with_conn(|conn| {
-                if let Some(eph) = ephemeral_inserts.as_ref() {
+                let ephemeral_owned = if ephemeral_active {
+                    ephemeral_owned_for_requests(conn, &payload.items)?
+                } else {
+                    None
+                };
+                if let Some(owned) = ephemeral_owned.as_ref() {
+                    let eph: Vec<_> = owned.iter().map(OwnedEphemeralInsert::as_insert).collect();
                     let queue = queue::append_ephemeral_tidal_tracks(
                         conn,
-                        eph,
+                        &eph,
                         queue::EPHEMERAL_USER_TIDAL_SOURCE,
                     )?;
                     let _ = event_tx.send(AppEvent::QueueUpdated);
@@ -9171,14 +9396,12 @@ async fn queue_play_next(
         // Up Next during a mix).
         let ephemeral_active = state_guard.ephemeral_tidal_track.is_some()
             || state_guard.external_playback_track.is_some();
-        // During a live TIDAL mix, fold a TIDAL pick into the ephemeral
-        // continuation so the mix-advance pipeline actually plays it next and pops
-        // it when done. A user_play_next pending row is invisible to that pipeline
-        // (it filters on the ephemeral sources), so it would never fire and never
-        // leave the queue.
-        let ephemeral_insert = ephemeral_active
-            .then(|| ephemeral_tidal_insert(&payload))
-            .flatten();
+        // During a live TIDAL mix, fold the pick (TIDAL or a library track with a
+        // tidal id) into the ephemeral continuation so the mix-advance pipeline
+        // plays it next AND pops it when done. A persistent user_play_next row is
+        // invisible to that pipeline and, worse, lingers after playing: with the
+        // NULL anchor during ephemeral playback the "pick first" advance fallback
+        // re-selects it (double-play; "previous" re-loads it).
         let event_tx = state_guard.event_tx.clone();
         state_guard
             .db
@@ -9188,8 +9411,14 @@ async fn queue_play_next(
                     queue::front_position(conn)?,
                     ephemeral_active,
                 );
-                if let Some(eph) = ephemeral_insert.as_ref() {
-                    let slice = std::slice::from_ref(eph);
+                let ephemeral_owned = if ephemeral_active {
+                    ephemeral_owned_for_request(conn, &payload)?
+                } else {
+                    None
+                };
+                if let Some(owned) = ephemeral_owned.as_ref() {
+                    let insert = owned.as_insert();
+                    let slice = std::slice::from_ref(&insert);
                     let queue = match after {
                         Some(after) => queue::insert_ephemeral_tidal_tracks_after(
                             conn,
@@ -9259,18 +9488,10 @@ async fn queue_play_next_many(
         // ephemeral mix instead of appending to the bottom.
         let ephemeral_active = state_guard.ephemeral_tidal_track.is_some()
             || state_guard.external_playback_track.is_some();
-        // Fold into the live mix only when every item is a streamable TIDAL track,
-        // so the batch stays in order under one consumption model. A mixed batch
-        // (any library/external item) falls back to the pending/library path.
-        let ephemeral_inserts = ephemeral_active
-            .then(|| {
-                payload
-                    .items
-                    .iter()
-                    .map(ephemeral_tidal_insert)
-                    .collect::<Option<Vec<_>>>()
-            })
-            .flatten();
+        // Fold into the live mix only when every item resolves to an ephemeral
+        // insert (TIDAL pick or library track with a tidal id), so the batch
+        // stays in order under one consumption model and none of them linger as
+        // persistent rows. A mixed batch falls back to the pending/library path.
         let event_tx = state_guard.event_tx.clone();
         state_guard
             .db
@@ -9280,17 +9501,23 @@ async fn queue_play_next_many(
                     queue::front_position(conn)?,
                     ephemeral_active,
                 );
-                if let Some(eph) = ephemeral_inserts.as_ref() {
+                let ephemeral_owned = if ephemeral_active {
+                    ephemeral_owned_for_requests(conn, &payload.items)?
+                } else {
+                    None
+                };
+                if let Some(owned) = ephemeral_owned.as_ref() {
+                    let eph: Vec<_> = owned.iter().map(OwnedEphemeralInsert::as_insert).collect();
                     let queue = match after {
                         Some(after) => queue::insert_ephemeral_tidal_tracks_after(
                             conn,
-                            eph,
+                            &eph,
                             after,
                             queue::EPHEMERAL_USER_TIDAL_SOURCE,
                         )?,
                         None => queue::append_ephemeral_tidal_tracks(
                             conn,
-                            eph,
+                            &eph,
                             queue::EPHEMERAL_USER_TIDAL_SOURCE,
                         )?,
                     };
@@ -12195,10 +12422,14 @@ async fn handle_ephemeral_tidal_near_end(
         if current_track.id != current_track_id {
             return Ok(false);
         }
-        // Peek (don't pop) the next upcoming ephemeral row to pre-buffer it.
+        // Peek (don't pop) the next upcoming ephemeral row to pre-buffer it, in
+        // queue order: if a regular row (library "Play next") sits in front of the
+        // continuation, the mix is not what plays next, so bail and let the generic
+        // near-end path pre-buffer that row instead of arming a crossfade into a
+        // track we're about to skip over.
         let pending_tracks = state_guard
             .db
-            .with_conn(queue::peek_next_ephemeral_tidal_track)
+            .with_conn(next_advance_ephemeral_track)
             .ok()
             .flatten()
             .into_iter()
@@ -12350,12 +12581,14 @@ async fn handle_ephemeral_tidal_near_end(
             .playback_runtime_info
             .as_ref()
             .and_then(|info| info.active_track_id);
+        // Ordered re-check: a regular row inserted in front since the peek above
+        // invalidates the prepared mix track even though it is still the lowest
+        // ephemeral row.
         let pending_front = state_guard
             .db
-            .with_conn(queue::peek_next_ephemeral_tidal_track)
+            .with_conn(next_advance_ephemeral_tidal_id)
             .ok()
-            .flatten()
-            .map(|track| track.tidal_track_id);
+            .flatten();
         if active_id != Some(current_track_id)
             || current_playback_generation(&state_guard) != generation
             || state_guard
@@ -12745,12 +12978,14 @@ async fn try_adopt_prepared_ephemeral_tidal_next(
         {
             return Ok(false);
         }
+        // Ordered check, not a bare ephemeral peek: a regular row inserted in
+        // front of the continuation (library "Play next") invalidates the
+        // prepared mix track even though it is still the lowest ephemeral row.
         let pending_front = state_guard
             .db
-            .with_conn(queue::peek_next_ephemeral_tidal_track)
+            .with_conn(next_advance_ephemeral_tidal_id)
             .ok()
-            .flatten()
-            .map(|track| track.tidal_track_id);
+            .flatten();
         if pending_front != Some(prepared.tidal_track_id) {
             return Ok(false);
         }
@@ -12803,8 +13038,8 @@ async fn try_adopt_prepared_ephemeral_tidal_next(
         // prepared (a concurrent reorder/remove could have changed it).
         let popped = state_guard
             .db
-            .with_conn(|conn| match queue::peek_next_ephemeral_tidal_track(conn)? {
-                Some(front) if front.tidal_track_id == prepared.tidal_track_id => {
+            .with_conn(|conn| match next_advance_ephemeral_tidal_id(conn)? {
+                Some(front) if front == prepared.tidal_track_id => {
                     queue::pop_next_ephemeral_tidal_track(conn)
                 }
                 _ => Ok(None),
@@ -13074,6 +13309,73 @@ async fn switch_runtime_to_snapshot_current(
     }
 }
 
+/// Start `first` and, on failure, skip forward through the remaining ephemeral
+/// mix continuation (respecting queue order). Returns true once a track is
+/// actually playing.
+///
+/// Skip-and-retry advance: a single TIDAL hiccup (especially a 429 rate-limit a
+/// few tracks into a mix) used to nuke the entire remaining queue. 429 is
+/// recoverable (sleep + retry the same track once); any other failure is
+/// track-specific (skip to the next item). Only gives up when the continuation
+/// is exhausted or MAX_CONSEC_FAILURES distinct tracks fail in a row.
+async fn start_ephemeral_continuation_with_retry(
+    state: &SharedState,
+    first: crate::PendingEphemeralTidalTrack,
+) -> bool {
+    // Clear the previous live-track markers so the new track's
+    // PlaybackStateChanged + Started events overwrite cleanly.
+    {
+        let mut state_guard = state.write().await;
+        state_guard.external_playback_track = None;
+        state_guard.ephemeral_tidal_track = None;
+    }
+    const MAX_CONSEC_FAILURES: u32 = 3;
+    let mut current = first;
+    let mut consecutive_failures: u32 = 0;
+    loop {
+        let mut result = start_ephemeral_tidal_playback(state, current.clone()).await;
+        if let Err((status, _)) = &result
+            && status.as_u16() == 429
+        {
+            tracing::warn!(
+                "TIDAL 429 advancing mix to '{}': backing off 3s and retrying once",
+                current.title
+            );
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            result = start_ephemeral_tidal_playback(state, current.clone()).await;
+        }
+        match result {
+            Ok(()) => return true,
+            Err((status, body)) => {
+                consecutive_failures += 1;
+                tracing::warn!(
+                    "Failed to advance to '{}' ({status}, fail {consecutive_failures}/{MAX_CONSEC_FAILURES}): {}. Skipping",
+                    current.title,
+                    body.0
+                );
+                if consecutive_failures >= MAX_CONSEC_FAILURES {
+                    tracing::warn!(
+                        "Hit max consecutive failures advancing TIDAL mix; clearing remaining queue"
+                    );
+                    let s = state.read().await;
+                    let _ = s.db.with_conn(|conn| {
+                        Ok::<_, anyhow::Error>(queue::delete_all_ephemeral_tidal_rows(conn)?)
+                    });
+                    return false;
+                }
+                let popped = {
+                    let s = state.read().await;
+                    s.db.with_conn(pop_next_ephemeral_if_due).ok().flatten()
+                };
+                match popped {
+                    Some(p) => current = p,
+                    None => return false,
+                }
+            }
+        }
+    }
+}
+
 async fn handle_runtime_finished(
     state: SharedState,
     finished_track_id: i64,
@@ -13120,81 +13422,15 @@ async fn handle_runtime_finished(
         }
         // Auto-advance through any queued ephemeral mix continuation before
         // tearing down. Pop the next ephemeral row out of the queue and start
-        // it; if there are none, fall through to the existing teardown.
+        // it; if there are none, or a regular row (library "Play next") sits
+        // in front of the continuation, fall through to the persisted-queue
+        // advance below, which plays that row and keeps the mix queued.
         let next = {
             let s = state.read().await;
-            s.db.with_conn(queue::pop_next_ephemeral_tidal_track)
-                .ok()
-                .flatten()
+            s.db.with_conn(pop_next_ephemeral_if_due).ok().flatten()
         };
         if let Some(next) = next {
-            // Clear the previous ephemeral track marker so the new one's
-            // PlaybackStateChanged + Started events overwrite cleanly.
-            {
-                let mut state_guard = state.write().await;
-                state_guard.external_playback_track = None;
-                state_guard.ephemeral_tidal_track = None;
-            }
-            // Skip-and-retry advance: a single TIDAL hiccup (especially a 429
-            // rate-limit a few tracks into a mix) used to nuke the entire
-            // remaining queue. Now we treat 429 as recoverable (sleep + retry
-            // the same track once) and any other failure as track-specific
-            // (skip to the next item). Only tear down when the deque is empty
-            // or we hit MAX_CONSEC_FAILURES distinct tracks failing in a row.
-            const MAX_CONSEC_FAILURES: u32 = 3;
-            let mut current = next;
-            let mut consecutive_failures: u32 = 0;
-            let mut started = false;
-            loop {
-                let mut result = start_ephemeral_tidal_playback(&state, current.clone()).await;
-                if let Err((status, _)) = &result
-                    && status.as_u16() == 429
-                {
-                    tracing::warn!(
-                        "TIDAL 429 advancing mix to '{}': backing off 3s and retrying once",
-                        current.title
-                    );
-                    tokio::time::sleep(Duration::from_secs(3)).await;
-                    result = start_ephemeral_tidal_playback(&state, current.clone()).await;
-                }
-                match result {
-                    Ok(()) => {
-                        started = true;
-                        break;
-                    }
-                    Err((status, body)) => {
-                        consecutive_failures += 1;
-                        tracing::warn!(
-                            "Failed to advance to '{}' ({status}, fail {consecutive_failures}/{MAX_CONSEC_FAILURES}): {}. Skipping",
-                            current.title,
-                            body.0
-                        );
-                        if consecutive_failures >= MAX_CONSEC_FAILURES {
-                            tracing::warn!(
-                                "Hit max consecutive failures advancing TIDAL mix; clearing remaining queue"
-                            );
-                            let s = state.read().await;
-                            let _ = s.db.with_conn(|conn| {
-                                Ok::<_, anyhow::Error>(queue::delete_all_ephemeral_tidal_rows(
-                                    conn,
-                                )?)
-                            });
-                            break;
-                        }
-                        let popped = {
-                            let s = state.read().await;
-                            s.db.with_conn(queue::pop_next_ephemeral_tidal_track)
-                                .ok()
-                                .flatten()
-                        };
-                        match popped {
-                            Some(p) => current = p,
-                            None => break,
-                        }
-                    }
-                }
-            }
-            if started {
+            if start_ephemeral_continuation_with_retry(&state, next).await {
                 return Ok(());
             }
             // Fall through to teardown so the UI doesn't get stuck on a
@@ -13268,19 +13504,49 @@ async fn handle_runtime_finished(
         return Ok(());
     }
 
-    let snapshot = {
+    enum FinishedAdvance {
+        Mismatch,
+        ResumeMix(crate::PendingEphemeralTidalTrack),
+        Snapshot(player::PlaybackSnapshot),
+    }
+    let advance = {
         let state_guard = state.read().await;
         let cleared = recently_cleared(&state_guard);
         state_guard.db.with_conn(|conn| {
             let current_track_id = player::current_track_id(conn)?;
             let current_state = player::load_state(conn)?;
             if current_track_id != Some(finished_track_id) || !current_state.is_playing {
-                return Ok(None);
+                return Ok(FinishedAdvance::Mismatch);
             }
 
-            let snapshot = player::next_track(conn, cleared)?;
-            Ok(Some(snapshot))
+            // A play-next interlude just finished with the mix continuation
+            // queued behind its anchor: hand the front mix row to the
+            // ephemeral starter. The library advance cannot play a
+            // track_id-less row and would strand or trip over it. Repeat-one
+            // keeps replaying the interlude, same as a plain library queue.
+            if current_state.repeat_mode != "one"
+                && let Some(next) = pop_next_ephemeral_if_due(conn)?
+            {
+                return Ok(FinishedAdvance::ResumeMix(next));
+            }
+
+            Ok(FinishedAdvance::Snapshot(player::next_track(
+                conn, cleared,
+            )?))
         })?
+    };
+
+    let snapshot = match advance {
+        FinishedAdvance::Mismatch => None,
+        FinishedAdvance::ResumeMix(next) => {
+            if start_ephemeral_continuation_with_retry(&state, next).await {
+                return Ok(());
+            }
+            // Continuation unplayable or exhausted: fall back to the normal
+            // queue advance so playback doesn't hang on the finished track.
+            Some(next_persisted_playback_snapshot(&state).await?)
+        }
+        FinishedAdvance::Snapshot(snapshot) => Some(snapshot),
     };
 
     let Some(snapshot) = snapshot else {

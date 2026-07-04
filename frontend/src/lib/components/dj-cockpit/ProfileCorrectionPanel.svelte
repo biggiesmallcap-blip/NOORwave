@@ -311,7 +311,7 @@
 	}
 
 	.field-error {
-		color: var(--state-danger);
+		color: var(--state-error);
 	}
 
 	.field-grid {

@@ -207,4 +207,36 @@ describe('QueryCache', () => {
 			tracks: [{ id: 1, title: 'New' }],
 		});
 	});
+
+	test('caps entries, evicting least-recently-used first', async () => {
+		const capped = new QueryCache({ now: () => now, maxEntries: 3 });
+		await capped.fetchQuery(['k', 1], async () => 1);
+		await capped.fetchQuery(['k', 2], async () => 2);
+		await capped.fetchQuery(['k', 3], async () => 3);
+
+		// Fresh-hit on k1 touches it, so k2 is now the oldest.
+		await capped.fetchQuery(['k', 1], async () => -1);
+		await capped.fetchQuery(['k', 4], async () => 4);
+
+		expect(capped.size).toBe(3);
+		expect(capped.peek(['k', 2])).toBeUndefined();
+		expect(capped.peek(['k', 1])).toBe(1);
+		expect(capped.peek(['k', 4])).toBe(4);
+	});
+
+	test('never evicts entries with a live subscriber', async () => {
+		const capped = new QueryCache({ now: () => now, maxEntries: 2 });
+		const query = capped.query(['sub', 1], async () => 1);
+		const unsubscribe = query.subscribe(() => {});
+
+		await capped.fetchQuery(['sub', 2], async () => 2);
+		await capped.fetchQuery(['sub', 3], async () => 3);
+		await capped.fetchQuery(['sub', 4], async () => 4);
+		expect(capped.getState(['sub', 1])).not.toBeNull();
+
+		unsubscribe();
+		await capped.fetchQuery(['sub', 5], async () => 5);
+		expect(capped.getState(['sub', 1])).toBeNull();
+		expect(capped.size).toBe(2);
+	});
 });

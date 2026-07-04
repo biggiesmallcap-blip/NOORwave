@@ -13,7 +13,9 @@ const QUALITY_STORAGE_KEY = 'noor-wallpaper-quality';
 const IDLE_STORAGE_KEY = 'noor-wallpaper-idle';
 export const WALLPAPER_FPS_MIN = 24;
 export const WALLPAPER_FPS_MAX = 60;
-export const WALLPAPER_FPS_DEFAULT = 60;
+// 30 by default: at 4K the wallpaper raster dominates the app's GPU cost and
+// 60fps doubles it for ambient motion most shaders don't need. 60 stays opt-in.
+export const WALLPAPER_FPS_DEFAULT = 30;
 export const WALLPAPER_BLUR_MIN = 0;
 export const WALLPAPER_BLUR_MAX = 18;
 export const WALLPAPER_BLUR_DEFAULT = 7;
@@ -66,8 +68,13 @@ function clampSetting(value: number, min: number, max: number): number {
 
 function readNumberSetting(key: string, fallback: number, min: number, max: number): number {
 	if (typeof localStorage === 'undefined') return fallback;
-	const raw = Number(localStorage.getItem(key));
-	return Number.isFinite(raw) ? clampSetting(raw, min, max) : fallback;
+	// A missing key must fall back to the default. Number(null) is 0 (finite!),
+	// which used to clamp every unset slider to its minimum: fps 24 instead of
+	// the default, and reactivity 0, so fresh installs never reacted to music.
+	const raw = localStorage.getItem(key);
+	if (raw === null || raw.trim() === '') return fallback;
+	const num = Number(raw);
+	return Number.isFinite(num) ? clampSetting(num, min, max) : fallback;
 }
 
 function readBoolSetting(key: string, fallback: boolean): boolean {

@@ -4706,6 +4706,339 @@ async fn queue_play_next_during_mix_folds_into_ephemeral_continuation() {
     assert_eq!(next.tidal_track_id, 777);
 }
 
+/// Seed one playable library track (7042) so tests can drop a regular "Play
+/// next" row in front of a mix continuation.
+fn seed_interlude_track(db: &Database) {
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (7001, 'Interlude Artist')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO tracks (
+                    id, title, artist_id, duration_ms, tidal_id, best_quality, best_source,
+                    fidelity_score, is_favorite, source
+                 ) VALUES (7042, 'Interlude', 7001, 180000, 97042, 'LOSSLESS', 'tidal', 10, 0, 'tidal')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+}
+
+fn insert_mix_rows(db: &Database, rows: &[(i32, i64)]) {
+    db.with_conn(|conn| {
+        for (pos, tidal) in rows {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source, tidal_id_hint, pending_title)
+                     VALUES (NULL, ?1, 'tidal_mix', ?2, 'Mix Track')",
+                rusqlite::params![pos, tidal],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn next_advance_picks_mix_row_when_it_is_the_queue_front() {
+    let db = fresh_migrated_db();
+    insert_mix_rows(&db, &[(0, 5001), (1, 5002)]);
+    let next = db
+        .with_conn(|conn| next_advance_ephemeral_tidal_id(conn))
+        .unwrap();
+    assert_eq!(next, Some(5001));
+}
+
+#[test]
+fn next_advance_defers_to_regular_row_in_front_of_the_mix() {
+    let db = fresh_migrated_db();
+    seed_interlude_track(&db);
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source) VALUES (7042, 0, 'user')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    insert_mix_rows(&db, &[(1, 5001), (2, 5002)]);
+    let next = db
+        .with_conn(|conn| next_advance_ephemeral_tidal_id(conn))
+        .unwrap();
+    assert_eq!(
+        next, None,
+        "a regular play-next row ahead of the mix must win the advance"
+    );
+}
+
+#[test]
+fn next_advance_resumes_mix_after_anchored_interlude() {
+    let db = fresh_migrated_db();
+    seed_interlude_track(&db);
+    let interlude_qid: i64 = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (7042, 0, 'user')",
+                [],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+        .unwrap();
+    insert_mix_rows(&db, &[(1, 5001), (2, 5002)]);
+    db.with_conn(|conn| {
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 7042, current_queue_item_id = ?1, is_playing = 1
+             WHERE id = 1",
+            rusqlite::params![interlude_qid],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let next = db
+        .with_conn(|conn| next_advance_ephemeral_tidal_id(conn))
+        .unwrap();
+    assert_eq!(
+        next,
+        Some(5001),
+        "the mix continuation resumes once the interlude anchor is current"
+    );
+}
+
+#[tokio::test]
+async fn manual_next_during_mix_plays_library_play_next_row_before_the_mix() {
+    let db = fresh_migrated_db();
+    seed_interlude_track(&db);
+    // Library "Play next" during a mix: a regular row at the queue front, mix
+    // continuation behind it. The live mix track has no queue row.
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source) VALUES (7042, 0, 'user')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    insert_mix_rows(&db, &[(1, 5001), (2, 5002)]);
+
+    let mut state = fresh_test_state(db.clone());
+    state.ephemeral_tidal_track = Some(test_track(9001, "Live Mix Track"));
+    let shared = Arc::new(tokio::sync::RwLock::new(state));
+    let app = api_routes(shared.clone());
+
+    // Streaming can't start in tests (no TIDAL tokens), so the response errors
+    // after the advance decision. The decision is what this pins down.
+    let _resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/playback/next")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let (current, mix_rows): (Option<i64>, i64) = db
+        .with_conn(|conn| {
+            let current = conn.query_row(
+                "SELECT current_track_id FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )?;
+            let mix_rows = conn.query_row(
+                "SELECT COUNT(*) FROM queue WHERE track_id IS NULL AND source = 'tidal_mix'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok((current, mix_rows))
+        })
+        .unwrap();
+    assert_eq!(
+        current,
+        Some(7042),
+        "skip must play the play-next library row, not the mix continuation"
+    );
+    assert_eq!(
+        mix_rows, 2,
+        "the mix continuation stays queued behind the interlude"
+    );
+    assert!(
+        shared.read().await.ephemeral_tidal_track.is_none(),
+        "live ephemeral marker clears when a regular row takes over"
+    );
+}
+
+#[tokio::test]
+async fn manual_next_after_play_next_interlude_resumes_the_mix() {
+    let db = fresh_migrated_db();
+    seed_interlude_track(&db);
+    let interlude_qid: i64 = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (7042, 0, 'user')",
+                [],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+        .unwrap();
+    insert_mix_rows(&db, &[(1, 5001), (2, 5002)]);
+    db.with_conn(|conn| {
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 7042, current_queue_item_id = ?1, is_playing = 1
+             WHERE id = 1",
+            rusqlite::params![interlude_qid],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    // The interlude is a normal library track, so there is no live ephemeral
+    // marker; the mix rows behind the anchor must still be reachable.
+    let app = app_for_db(db.clone());
+    let _resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/playback/next")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Starting the ephemeral row fails without TIDAL tokens, but the decision
+    // is visible: the mix row was consumed by the ephemeral starter instead of
+    // being fed through the library advance (which cannot play it).
+    let remaining: Vec<i64> = db
+        .with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT tidal_id_hint FROM queue
+                 WHERE track_id IS NULL AND source = 'tidal_mix'
+                 ORDER BY position ASC",
+            )?;
+            let rows = stmt
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<i64>>>()?;
+            Ok(rows)
+        })
+        .unwrap();
+    assert_eq!(
+        remaining,
+        vec![5002],
+        "skip after the interlude must hand the front mix row to the ephemeral starter"
+    );
+}
+
+#[tokio::test]
+async fn previous_during_mix_does_not_jump_anchor_into_the_continuation() {
+    let db = fresh_migrated_db();
+    // A live mix: continuation rows in the queue, no persisted anchor (the mix
+    // track has no queue row), so current_queue_item_id is NULL.
+    insert_mix_rows(&db, &[(0, 5001), (1, 5002)]);
+
+    let mut state = fresh_test_state(db.clone());
+    state.ephemeral_tidal_track = Some(test_track(9001, "Live Mix Track"));
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(state)));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/playback/previous")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Regression: player::previous_track's "nothing playing -> jump to first
+    // item" fallback used to re-anchor current_queue_item_id onto the next mix
+    // row (and mark it playing) while the runtime kept playing the ephemeral
+    // track. During a mix, "previous" restarts in place and leaves the anchor
+    // and continuation untouched.
+    let (current_qid, current_track, mix_rows): (Option<i64>, Option<i64>, i64) = db
+        .with_conn(|conn| {
+            let (qid, track) = conn.query_row(
+                "SELECT current_queue_item_id, current_track_id FROM playback_state WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let mix_rows = conn.query_row(
+                "SELECT COUNT(*) FROM queue WHERE track_id IS NULL AND source = 'tidal_mix'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok((qid, track, mix_rows))
+        })
+        .unwrap();
+    assert_eq!(current_qid, None, "previous must not anchor onto a mix row");
+    assert_eq!(
+        current_track, None,
+        "previous must not adopt a mix row as current"
+    );
+    assert_eq!(mix_rows, 2, "the continuation is left intact");
+}
+
+#[tokio::test]
+async fn queue_play_next_library_during_mix_folds_into_ephemeral_continuation() {
+    let db = fresh_migrated_db();
+    seed_interlude_track(&db); // library track 7042, tidal_id 97042
+    insert_mix_rows(&db, &[(0, 5001), (1, 5002)]);
+
+    let mut state = fresh_test_state(db.clone());
+    state.ephemeral_tidal_track = Some(test_track(9001, "Live Mix Track"));
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(state)));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/queue/play_next")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"kind":"library","track_id":7042}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The library pick folds into the continuation as a consumed ephemeral row
+    // (source tidal_mix, track_id NULL, tidal_id_hint set at the front), not a
+    // persistent user_play_next row that would linger after playing and get
+    // re-selected by the NULL-anchor advance fallback (double-play / "previous"
+    // re-loads it).
+    let (source, track_id, hint): (String, Option<i64>, Option<i64>) = db
+        .with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT source, track_id, tidal_id_hint FROM queue ORDER BY position ASC, id ASC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(source, "tidal_mix");
+    assert_eq!(track_id, None);
+    assert_eq!(hint, Some(97042));
+
+    let persistent: i64 = db
+        .with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM queue WHERE source = 'user_play_next'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        persistent, 0,
+        "a library play-next during a mix must not leave a lingering persistent row"
+    );
+}
+
 #[tokio::test]
 async fn queue_play_next_uses_current_queue_item_for_duplicate_track() {
     let db = fresh_migrated_db();

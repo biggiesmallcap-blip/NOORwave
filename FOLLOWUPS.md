@@ -10,6 +10,18 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### verify: NSIS www-wipe actually cleans stale chunks on a real update
+
+`noor-app/nsis-hooks.nsh` now `RMDir /r "$INSTDIR\www"` in the preinstall hook so
+content-hash-named SvelteKit chunks don't pile up across updates (an install here
+had 1695 files vs 253 for a clean build). Only verifiable through a real installer
+build: run `cargo tauri build` (or the release workflow), install an old version,
+then update over it and confirm `www` ends at the clean file count with no orphaned
+`_app/immutable` chunks. Also confirm the `passive` auto-updater path (app closed
+during install, so www isn't locked). Portable zips are unaffected (build-portable.ps1
+already assembles from a clean dist).
+- Spawned by: perf audit 2026-07-04, stale-www-chunks question.
+
 ### feat: adaptive (variable-length) crossfade when the next deck is under-buffered
 
 The legacy crossfade is all-or-nothing: if the incoming deck hasn't buffered the full
@@ -27,18 +39,17 @@ slow TIDAL buffering (12s DASH segment timeouts); prebuffering earlier than Near
 would also reduce misses.
 - Spawned by: crossfade hard-cut fix, this session.
 
-### feat: fold library/external "Play next" into a live mix too
+### note: external "Play next" without a tidal_id still can't fold into a live mix
 
-Play-next / add-to-queue during an ephemeral TIDAL mix now works for TIDAL picks:
-they're inserted as ephemeral continuation rows (`EPHEMERAL_USER_TIDAL_SOURCE` in
-`queue.rs`) so the mix-advance pipeline plays and pops them. A *library* or
-*external* pick (no streamable `tidal_id`) during a mix still takes the old
-`user_play_next`/`user_queue` persisted-row path, which the ephemeral consumer
-skips, so it only plays after the whole continuation drains and lingers in the
-queue. Real fix is the cross-model case: interrupt the ephemeral stream to play a
-library track via the runtime, then resume the mix. Rarer than the TIDAL case
-(the reported bug), so deferred. See `queue_play_next`/`queue_append` in
-`routes.rs` (the `ephemeral_tidal_insert` branch).
+Play-next / add-to-queue during a mix now folds BOTH TIDAL picks and *library*
+tracks into the ephemeral continuation (library rows are resolved to their
+`tidal_id` via `ephemeral_owned_for_request` in `routes.rs` and inserted as
+consumed `EPHEMERAL_USER_TIDAL_SOURCE` rows). The only remaining gap is a truly
+external pick with no `tidal_id` (e.g. an unresolved Last.fm/pending item): it
+can't stream in a mix at all (the mix streams strictly by tidal id), so it falls
+back to the persistent path and would linger. Inherent to the ephemeral model,
+and rare; left as-is. A real fix means interrupting the ephemeral stream to play
+a non-TIDAL source via the runtime, then resuming the mix.
 - Spawned by: play-next-during-mix fix, this session.
 
 ### refactor: flatten the duplicated library/TIDAL playback stacks
@@ -193,6 +204,7 @@ the data is correct before it ever reaches the backend.
 
 Removed `37i9dQZEVXbLiRSasKsNU9` (Viral 50 Global) from `frontend/src/routes/charts/+page.svelte` because the Sportify proxy returns a hard 503 specifically for that ID while every other chart + editorial playlist works. Periodically curl `https://sportify.xcasper.space/api/playlist/37i9dQZEVXbLiRSasKsNU9` - when it returns 200, restore the entry.
 - Checked 2026-06-05: primary host returned 522 for Viral 50 Global and a comparator chart; fallback host returned 503 for Viral 50 Global and 200 for comparator `37i9dQZEVXbMDoHDwVN2tF`. Keep open.
+- Checked 2026-07-04: 503 for Viral 50 Global, 200 for the comparator. Keep open.
 - Spawned by: commit on branch `claude/serene-engelbart-083512`
 
 ### chore: extend `extract_page_links` if PAGE_LINKS shows up outside moods
@@ -224,22 +236,6 @@ Two options when the time comes: (a) bump the const + `TOTP_VER` and ship a
 release, or (b) extend `refresh_from_js` to grep the cipher dict out of the
 bundle too and persist into `server_config` for auto-rotation.
 - Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/46
-
-### fix: dj-cockpit references undefined CSS tokens (--accent-primary, --state-danger)
-
-While auditing light mode I scanned for used-but-undefined CSS custom
-properties. Two are real and theme-agnostic (broken in both themes, so not a
-light-mode-only issue): `--accent-primary` (used in
-`dj-cockpit/TransitionLane.svelte`) and `--state-danger` (used in
-`dj-cockpit/ProfileCorrectionPanel.svelte` and
-`dj-cockpit/TransitionWaveform.svelte`). Neither is defined in `app.css` nor
-injected via `setProperty`, so the no-fallback `var()` calls collapse to
-inherited text colour: the transition-lane accent styling and the danger/clash
-colours render as plain text colour instead of accent/red. The intended tokens
-already exist as `--accent` / `--accent-strong` and `--state-error`. Fix: rename
-the usages to the real tokens, or alias `--accent-primary: var(--accent)` and
-`--state-danger: var(--state-error)` in both theme blocks.
-- Spawned by: commit on branch `fix/tidal-mix-real-queue-rows` (light-mode pass)
 
 ### feat: finish play-in-context standardization across remaining list surfaces
 
@@ -471,3 +467,33 @@ Reactive intensity is currently driven by `u_energy` alone. `AudioDspFeatures.be
 is already fetched into `currentTrackFeatures`; if the pulse/kick feels weak on low-energy
 tracks, pipe `beat_strength` through as a fourth uniform and drive the kick off that instead.
 Spawned by: commit 3bd2c47e (beat-reactive shaders)
+
+### note: radio_pipeline.rs may still peek the lowest ephemeral row order-blind
+
+The ephemeral advance, previous, and DJ pre-buffer paths in routes.rs now all honour queue
+order via next_advance_ephemeral_tidal_id / next_advance_ephemeral_track (handle_ephemeral_
+tidal_near_end, active_ephemeral_tidal_mix_dj_pair, and the advance/finished/adopt paths).
+If radio_pipeline.rs grows its own ephemeral-mix peek, route it through the same helpers so it
+can't arm a transition into a skipped-over track. Not a known live bug today.
+Spawned by: play-next-during-mix skip bug diagnosis
+
+### perf: virtualize the library track table
+
+The tracks tab renders every loaded row: visibleTracks is the whole $tracks store
+(routes/library/+page.svelte:868) and infinite scroll appends 100 rows a page, so a deep
+scroll on the 36k-track library accretes tens of thousands of DOM nodes (roughly 25 per row)
+that never release. Needs a windowed renderer over the existing each-block, keeping row
+selection, keyboard nav, drag, and the row context menu working. Deferred from the perf
+audit because it deserves focused visual QA, not a drive-by; the albums/artists grids are
+lighter but check them while in there.
+Spawned by: perf audit 2026-07-04 (.scratch/perf-audit/baseline-2026-07-04.md)
+
+### perf: re-measure backdrop-filter surfaces once the wallpaper rest change ships
+
+PlayerBar's art-overlay buttons (np-art-fav, np-art-dl, np-fullscreen-btn) and the .glass
+overlays keep backdrop-filter blur active over the wallpaper canvas; while the canvas
+repainted 60x/s the compositor re-blurred them every frame. Now that the wallpaper rests
+when idle and defaults to 30fps, the residual cost may be negligible: re-measure GPU on the
+installed build (commands in .scratch/perf-audit/baseline-2026-07-04.md) before trading away
+the glass look. Only act if the playing-state compositor cost is still material.
+Spawned by: perf audit 2026-07-04

@@ -669,16 +669,16 @@
 		gap: var(--space-2);
 		align-items: center;
 		padding: var(--space-3);
-		border: 1px solid color-mix(in srgb, var(--accent-primary) 30%, transparent);
+		border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
 		border-radius: var(--radius-sm);
-		background: color-mix(in srgb, var(--accent-primary) 8%, transparent);
+		background: color-mix(in srgb, var(--accent) 8%, transparent);
 		color: var(--text-secondary);
 		font-size: var(--font-size-sm);
 		line-height: var(--line-height-snug);
 	}
 
 	.drop-preview strong {
-		color: var(--accent-primary);
+		color: var(--accent);
 	}
 
 	.pending {
