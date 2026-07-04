@@ -303,17 +303,19 @@ recompute confidence in-place via a migration, no API calls. Low priority; only
 worth it before the next scorer-weighting change.
 - Spawned by: data-layer genre-confidence fix on branch `fix/tidal-mix-real-queue-rows`
 
-### perf: virtualize the library track/album lists (deep-scroll DOM)
+### perf: virtualize the library album/artist grids + search lists (deep-scroll DOM)
 
-Deferred from the app-speed pass. The library already paginates at `PAGE_SIZE = 100`
-and appends on scroll (`loadMoreVisibleItems`), so the *initial* render is bounded to
-~100 rows - the real win of instant-paint already landed. True windowing only helps the
-case where a user scrolls through thousands of rows in one session and the appended DOM
-piles up (never reclaimed). It's a risky retrofit: `library/+page.svelte` lists carry
-keyboard nav (`cursorIndex`), multi-select, and right-click context menus that all index
-into the rendered rows. Do it on its own branch with a windowed renderer that preserves
-those, and verify scroll + keyboard + selection + context menu before shipping.
-- Spawned by: app-speed pass on branch `fix/tidal-mix-real-queue-rows`
+DONE for the library tracks table (2026-07-04 perf audit item 4): windowed renderer
+with spacer elements in `library/+page.svelte`, ~45 rows mounted regardless of scroll
+depth, preserves selection/keyboard nav/context menus/infinite scroll.
+
+Still deferred:
+- Library albums and artists grids append pages of 100 and never unload. Multi-column
+  windowing is more involved (row = ceil(count / columns), responsive column count);
+  album libraries are typically 10x smaller than track lists, so the pressure is lower.
+- Search page single-category lists (`search/+page.svelte`) render the full result set.
+- Spawned by: app-speed pass on branch `fix/tidal-mix-real-queue-rows`; tracks table
+  done on branch `claude/infallible-roentgen-5a9b15`
 
 ### perf: batch the library home mural's random-offset fetches
 
