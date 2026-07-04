@@ -10,6 +10,18 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### verify: NSIS www-wipe actually cleans stale chunks on a real update
+
+`noor-app/nsis-hooks.nsh` now `RMDir /r "$INSTDIR\www"` in the preinstall hook so
+content-hash-named SvelteKit chunks don't pile up across updates (an install here
+had 1695 files vs 253 for a clean build). Only verifiable through a real installer
+build: run `cargo tauri build` (or the release workflow), install an old version,
+then update over it and confirm `www` ends at the clean file count with no orphaned
+`_app/immutable` chunks. Also confirm the `passive` auto-updater path (app closed
+during install, so www isn't locked). Portable zips are unaffected (build-portable.ps1
+already assembles from a clean dist).
+- Spawned by: perf audit 2026-07-04, stale-www-chunks question.
+
 ### feat: adaptive (variable-length) crossfade when the next deck is under-buffered
 
 The legacy crossfade is all-or-nothing: if the incoming deck hasn't buffered the full
