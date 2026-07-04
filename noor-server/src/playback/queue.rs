@@ -541,26 +541,6 @@ const EPHEMERAL_TIDAL_ROW_FILTER: &str = "track_id IS NULL
        AND source IN ('tidal_mix','tidal_album','tidal_playlist')
        AND tidal_id_hint IS NOT NULL";
 
-/// Read the next upcoming ephemeral TIDAL row (lowest position) without removing
-/// it. Used by the DJ pre-buffer peek and transition-pair builder.
-pub fn peek_next_ephemeral_tidal_track(
-    conn: &Connection,
-) -> Result<Option<crate::PendingEphemeralTidalTrack>> {
-    Ok(conn
-        .query_row(
-            &format!(
-                "SELECT tidal_id_hint, pending_title, pending_artist,
-                        ephemeral_album_title, ephemeral_artwork_url, ephemeral_duration_ms,
-                        ephemeral_artist_tidal_id, ephemeral_album_tidal_id
-                 FROM queue WHERE {EPHEMERAL_TIDAL_ROW_FILTER}
-                 ORDER BY position ASC, id ASC LIMIT 1"
-            ),
-            [],
-            |row| ephemeral_pending_from_row(row, 0),
-        )
-        .optional()?)
-}
-
 /// Read all upcoming ephemeral TIDAL rows in play order without removing them.
 /// Used to pre-warm DJ transition profiles for the rest of the mix.
 pub fn peek_ephemeral_tidal_tracks(
@@ -2036,9 +2016,13 @@ mod tests {
 
         let first = pop_next_ephemeral_tidal_track(&conn).unwrap().unwrap();
         assert_eq!(first.tidal_track_id, 601);
-        let second = peek_next_ephemeral_tidal_track(&conn).unwrap().unwrap();
-        assert_eq!(second.tidal_track_id, 602, "peek does not consume");
-        assert_eq!(load_queue(&conn).unwrap().len(), 2);
+        let remaining = load_queue(&conn).unwrap();
+        assert_eq!(remaining.len(), 2, "pop consumes exactly one row");
+        assert_eq!(
+            remaining[0].track.tidal_id,
+            Some(602),
+            "the next ephemeral row is now at the front"
+        );
     }
 
     #[test]

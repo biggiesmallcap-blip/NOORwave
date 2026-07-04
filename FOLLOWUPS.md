@@ -27,18 +27,17 @@ slow TIDAL buffering (12s DASH segment timeouts); prebuffering earlier than Near
 would also reduce misses.
 - Spawned by: crossfade hard-cut fix, this session.
 
-### feat: fold library/external "Play next" into a live mix too
+### note: external "Play next" without a tidal_id still can't fold into a live mix
 
-Play-next / add-to-queue during an ephemeral TIDAL mix now works for TIDAL picks:
-they're inserted as ephemeral continuation rows (`EPHEMERAL_USER_TIDAL_SOURCE` in
-`queue.rs`) so the mix-advance pipeline plays and pops them. A *library* or
-*external* pick (no streamable `tidal_id`) during a mix still takes the old
-`user_play_next`/`user_queue` persisted-row path, which the ephemeral consumer
-skips, so it only plays after the whole continuation drains and lingers in the
-queue. Real fix is the cross-model case: interrupt the ephemeral stream to play a
-library track via the runtime, then resume the mix. Rarer than the TIDAL case
-(the reported bug), so deferred. See `queue_play_next`/`queue_append` in
-`routes.rs` (the `ephemeral_tidal_insert` branch).
+Play-next / add-to-queue during a mix now folds BOTH TIDAL picks and *library*
+tracks into the ephemeral continuation (library rows are resolved to their
+`tidal_id` via `ephemeral_owned_for_request` in `routes.rs` and inserted as
+consumed `EPHEMERAL_USER_TIDAL_SOURCE` rows). The only remaining gap is a truly
+external pick with no `tidal_id` (e.g. an unresolved Last.fm/pending item): it
+can't stream in a mix at all (the mix streams strictly by tidal id), so it falls
+back to the persistent path and would linger. Inherent to the ephemeral model,
+and rare; left as-is. A real fix means interrupting the ephemeral stream to play
+a non-TIDAL source via the runtime, then resuming the mix.
 - Spawned by: play-next-during-mix fix, this session.
 
 ### refactor: flatten the duplicated library/TIDAL playback stacks
@@ -469,3 +468,12 @@ Reactive intensity is currently driven by `u_energy` alone. `AudioDspFeatures.be
 is already fetched into `currentTrackFeatures`; if the pulse/kick feels weak on low-energy
 tracks, pipe `beat_strength` through as a fourth uniform and drive the kick off that instead.
 Spawned by: commit 3bd2c47e (beat-reactive shaders)
+
+### note: radio_pipeline.rs may still peek the lowest ephemeral row order-blind
+
+The ephemeral advance, previous, and DJ pre-buffer paths in routes.rs now all honour queue
+order via next_advance_ephemeral_tidal_id / next_advance_ephemeral_track (handle_ephemeral_
+tidal_near_end, active_ephemeral_tidal_mix_dj_pair, and the advance/finished/adopt paths).
+If radio_pipeline.rs grows its own ephemeral-mix peek, route it through the same helpers so it
+can't arm a transition into a skipped-over track. Not a known live bug today.
+Spawned by: play-next-during-mix skip bug diagnosis
