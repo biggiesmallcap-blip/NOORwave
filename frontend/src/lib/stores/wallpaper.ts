@@ -66,8 +66,13 @@ function clampSetting(value: number, min: number, max: number): number {
 
 function readNumberSetting(key: string, fallback: number, min: number, max: number): number {
 	if (typeof localStorage === 'undefined') return fallback;
-	const raw = Number(localStorage.getItem(key));
-	return Number.isFinite(raw) ? clampSetting(raw, min, max) : fallback;
+	// A missing key must fall back to the default. Number(null) is 0 (finite!),
+	// which used to clamp every unset slider to its minimum: fps 24 instead of
+	// the default, and reactivity 0, so fresh installs never reacted to music.
+	const raw = localStorage.getItem(key);
+	if (raw === null || raw.trim() === '') return fallback;
+	const num = Number(raw);
+	return Number.isFinite(num) ? clampSetting(num, min, max) : fallback;
 }
 
 function readBoolSetting(key: string, fallback: boolean): boolean {

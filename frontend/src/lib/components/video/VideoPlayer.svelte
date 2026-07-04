@@ -82,7 +82,9 @@
 
 	function restoreVolume() {
 		if (!videoEl || typeof localStorage === 'undefined') return;
-		const rawVolume = Number(localStorage.getItem(VOLUME_KEY));
+		// Number(null) is 0, so a missing key used to restore fresh installs muted.
+		const stored = localStorage.getItem(VOLUME_KEY);
+		const rawVolume = stored === null || stored.trim() === '' ? NaN : Number(stored);
 		volume = Number.isFinite(rawVolume) ? Math.min(1, Math.max(0, rawVolume)) : 1;
 		muted = localStorage.getItem(MUTED_KEY) === 'true';
 		videoEl.volume = volume;
