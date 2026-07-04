@@ -425,11 +425,13 @@
 		);
 	}
 
-	function updateParticles() {
+	function updateParticles(dtFrames = 1) {
 		for (const particle of particles) {
 			const edge = edges[particle.edgeIndex];
 			if (!edge) continue;
-			particle.t = (particle.t + particle.speed) % 1;
+			// speed is tuned per 60Hz frame; dt-scale it so the idle frame gate
+			// halves the draw rate without halving how fast particles travel.
+			particle.t = (particle.t + particle.speed * dtFrames) % 1;
 		}
 	}
 
@@ -1278,11 +1280,42 @@
 
 		window.addEventListener('keydown', handleKeydown);
 
+		// Decorative full-window canvas at up to 2x DPR: full-rate redraw only
+		// while the user is interacting (drag, hover, wheel). The idle drift +
+		// particle motion runs at half rate with dt-scaled speeds, and a hidden
+		// tab skips the work entirely.
+		const IDLE_FRAME_MS = 1000 / 30;
+		const POINTER_ACTIVE_MS = 1000;
+		let lastPointerAt = 0;
+		let lastTickAt = performance.now();
+		const notePointer = () => {
+			lastPointerAt = performance.now();
+		};
+		window.addEventListener('pointermove', notePointer, { passive: true });
+		window.addEventListener('pointerdown', notePointer, { passive: true });
+		window.addEventListener('wheel', notePointer, { passive: true });
+
 		const tick = () => {
-			advanceCamera();
-			updateParticles();
-			drawFrame();
 			animationFrame = window.requestAnimationFrame(tick);
+			const now = performance.now();
+			if (document.hidden) {
+				lastTickAt = now;
+				return;
+			}
+			const interacting = isDragging || now - lastPointerAt < POINTER_ACTIVE_MS;
+			if (!interacting && now - lastTickAt < IDLE_FRAME_MS) return;
+			const dtFrames = Math.min(4, (now - lastTickAt) / (1000 / 60));
+			if (interacting) {
+				lastTickAt = now;
+			} else {
+				// Grid-advance instead of stamping now: stamping quantizes a 30fps
+				// target down to ~20fps against the 60Hz rAF grid.
+				lastTickAt += IDLE_FRAME_MS;
+				if (now - lastTickAt > IDLE_FRAME_MS) lastTickAt = now;
+			}
+			advanceCamera();
+			updateParticles(dtFrames);
+			drawFrame();
 		};
 
 		animationFrame = window.requestAnimationFrame(tick);
@@ -1291,6 +1324,9 @@
 			window.cancelAnimationFrame(animationFrame);
 			resizeObserver?.disconnect();
 			window.removeEventListener('keydown', handleKeydown);
+			window.removeEventListener('pointermove', notePointer);
+			window.removeEventListener('pointerdown', notePointer);
+			window.removeEventListener('wheel', notePointer);
 			if (hoverCardTimer) {
 				clearTimeout(hoverCardTimer);
 				hoverCardTimer = null;

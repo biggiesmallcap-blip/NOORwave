@@ -45,6 +45,13 @@
 	let canvas: HTMLCanvasElement | undefined = $state();
 	let rafId = 0;
 	let tick = 0;         // animation clock (drives halo breathing, playing pulse)
+	// Idle frame gate: once physics settles and the pointer goes quiet, the
+	// only motion left is halo breathing, and 30fps is plenty for that on a
+	// full-window canvas. Interaction, warp, and settling restore full rate.
+	const IDLE_FRAME_MS = 1000 / 30;
+	const POINTER_ACTIVE_MS = 1000;
+	let lastPointerAt = 0;
+	let lastLoopAt = 0;
 	// Tracked separately from the main RAF so warp / camera animations get
 	// cancelled on unmount instead of running their closures past teardown.
 	let auxRafId = 0;
@@ -65,6 +72,11 @@
 	// Physics settling — stops mutating node positions once kinetic energy drops
 	let simulationSettled = false;
 	let lastNodeCount = 0;
+	// Force graphs can reach a dynamic equilibrium that never drops under the
+	// energy threshold (measured ~0.02 sustained on a 92-node graph), which
+	// left the sim jittering at full rate forever. Every settle gets a deadline.
+	const SETTLE_DEADLINE_MS = 8000;
+	let settleBy = 0;
 
 	// Selection ripple (one-shot ring on node click)
 	let rippleNode: DiscoverTrackNode | null = null;
@@ -181,6 +193,25 @@
 		rafId = requestAnimationFrame(loop);
 		if (!canvas) return;
 
+		const nowMs = performance.now();
+		if (document.hidden) {
+			lastLoopAt = nowMs;
+			return;
+		}
+		const fullRate =
+			isWarping || isPanning || !simulationSettled || nowMs - lastPointerAt < POINTER_ACTIVE_MS;
+		if (!fullRate && nowMs - lastLoopAt < IDLE_FRAME_MS) return;
+		// dt in 60Hz-frame units so animation speed stays constant under the gate.
+		const dtFrames = lastLoopAt > 0 ? Math.min(4, (nowMs - lastLoopAt) / (1000 / 60)) : 1;
+		if (fullRate) {
+			lastLoopAt = nowMs;
+		} else {
+			// Grid-advance instead of stamping now: stamping quantizes a 30fps
+			// target down to ~20fps against the 60Hz rAF grid.
+			lastLoopAt += IDLE_FRAME_MS;
+			if (nowMs - lastLoopAt > IDLE_FRAME_MS) lastLoopAt = nowMs;
+		}
+
 		const ctx = canvas.getContext('2d');
 		if (!ctx) return;
 		// Use CSS pixel dimensions — ctx.scale(dpr, dpr) makes the drawing space CSS pixels,
@@ -200,6 +231,7 @@
 		if (nodes.length !== lastNodeCount) {
 			lastNodeCount = nodes.length;
 			simulationSettled = false;
+			settleBy = nowMs + SETTLE_DEADLINE_MS;
 		}
 
 		// Physics: run until kinetic energy drops below threshold, then stop
@@ -210,12 +242,12 @@
 				// settling so we drop the cache each tick. Once settled, the
 				// cache stays valid for free.
 				invalidateNebulaCache();
-				if (prefersReducedMotion || kineticEnergy(nodes) < 0.002) {
+				if (prefersReducedMotion || kineticEnergy(nodes) < 0.002 || nowMs >= settleBy) {
 					simulationSettled = true;
 					for (const n of nodes) { n.vx = 0; n.vy = 0; }
 				}
 			}
-			tick++; // animation clock always advances for halo/pulse animations
+			tick += dtFrames; // animation clock always advances for halo/pulse animations
 		}
 
 		// Build lookups
@@ -300,6 +332,7 @@
 	}
 
 	function onPointerDown(e: PointerEvent) {
+		lastPointerAt = performance.now();
 		if (e.button !== 0) return;
 		isPanning = true;
 		panStart = { x: e.clientX, y: e.clientY, cx: camera.x, cy: camera.y };
@@ -307,6 +340,7 @@
 	}
 
 	function onPointerMove(e: PointerEvent) {
+		lastPointerAt = performance.now();
 		if (!canvas) return;
 		const world = canvasToWorld(e.clientX, e.clientY);
 		const hit = findNodeNear($discoverSpaceStore.nodes, world.x, world.y);
@@ -345,6 +379,7 @@
 
 	function onWheel(e: WheelEvent) {
 		if (e.ctrlKey || e.metaKey) return; // yield to global UI-zoom handler
+		lastPointerAt = performance.now();
 		e.preventDefault();
 		const factor = e.deltaY < 0 ? 1.1 : 0.9;
 		camera.zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, camera.zoom * factor));
