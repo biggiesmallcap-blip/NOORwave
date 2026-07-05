@@ -34,7 +34,7 @@
 		selectTrackIds, selectAlbumIds, clearSelection,
 	} from '$lib/stores/library';
 	import { formatTrackDuration, formatDateShort, getQualityClass } from '$lib/utils/format';
-	import { api, type Album, type Artist, type Genre, type Playlist, type Track } from '$lib/api/client';
+	import { api, type Album, type Artist, type AudioSearchResult, type Genre, type Playlist, type Track } from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
 	import {
 		currentTrack,
@@ -136,6 +136,11 @@
 	let searchBusy = $state(false);
 	let searchError = $state<string | null>(null);
 	let searchResults = $state<{ tracks: Track[]; albums: Album[]; artists: Artist[] }>({ tracks: [], albums: [], artists: [] });
+	// Full matching-set size for filtered (audio) searches, so the capped
+	// display can say "top 50 of N" instead of looking like only 50 exist.
+	let searchTotal = $state<number | null>(null);
+	let searchUnmatchedGenres = $state<string[]>([]);
+	let searchLoadingMore = $state(false);
 	let searchTimer: ReturnType<typeof setTimeout> | null = null;
 	let infiniteSentinel = $state<HTMLDivElement | null>(null);
 	let infiniteObserver: IntersectionObserver | null = null;
@@ -771,12 +776,44 @@
 		updateTrackSelection(trackId);
 	}
 
+	function adaptAudioTracks(rows: AudioSearchResult[]): Track[] {
+		return rows.map((r) => ({
+			id: r.id,
+			title: r.title,
+			artist_id: 0,
+			artist_name: r.artist_name,
+			album_id: null,
+			album_title: r.album_title,
+			disc_number: null,
+			track_number: null,
+			duration_ms: r.duration_ms,
+			isrc: null,
+			tidal_id: r.tidal_id,
+			best_quality: null,
+			best_source: null,
+			fidelity_score: 0,
+			is_favorite: r.is_favorite,
+			play_count: r.play_count,
+			last_played_at: null,
+			date_added: null,
+			source: r.source,
+			artwork_url: r.artwork_url,
+			bpm: r.bpm,
+			key_signature: r.key_signature,
+			camelot_key: r.camelot_key,
+			energy: r.energy,
+			danceability: r.danceability,
+		}));
+	}
+
 	async function runLibrarySearch(query: string) {
 		const trimmed = query.trim();
 		if (!trimmed) {
 			searchResults = { tracks: [], albums: [], artists: [] };
 			searchBusy = false;
 			searchError = null;
+			searchTotal = null;
+			searchUnmatchedGenres = [];
 			return;
 		}
 
@@ -788,34 +825,9 @@
 				// DSP/filter syntax (bpm:138, key:Am, energy:>0.7, genre:dnb, etc.) - route to audio search.
 				const params = buildAudioParams(parsed);
 				const audio = await api.searchAudio(params);
-				const adaptedTracks: Track[] = audio.tracks.map((r) => ({
-					id: r.id,
-					title: r.title,
-					artist_id: 0,
-					artist_name: r.artist_name,
-					album_id: null,
-					album_title: r.album_title,
-					disc_number: null,
-					track_number: null,
-					duration_ms: r.duration_ms,
-					isrc: null,
-					tidal_id: r.tidal_id,
-					best_quality: null,
-					best_source: null,
-					fidelity_score: 0,
-					is_favorite: r.is_favorite,
-					play_count: r.play_count,
-					last_played_at: null,
-					date_added: null,
-					source: r.source,
-					artwork_url: r.artwork_url,
-					bpm: r.bpm,
-					key_signature: r.key_signature,
-					camelot_key: r.camelot_key,
-					energy: r.energy,
-					danceability: r.danceability,
-				}));
-				searchResults = { tracks: adaptedTracks, albums: [], artists: [] };
+				searchResults = { tracks: adaptAudioTracks(audio.tracks), albums: [], artists: [] };
+				searchTotal = audio.total ?? null;
+				searchUnmatchedGenres = audio.unmatched_genres ?? [];
 			} else {
 				// Plain text - server-side FTS. No more preloading the full library.
 				const r = await cachedApi.search(trimmed, 100);
@@ -824,13 +836,47 @@
 					albums: r.albums,
 					artists: r.artists,
 				};
+				searchTotal = null;
+				searchUnmatchedGenres = [];
 			}
 			clearSelection();
 		} catch (error) {
 			searchError = `Search failed: ${error}`;
 			searchResults = { tracks: [], albums: [], artists: [] };
+			searchTotal = null;
+			searchUnmatchedGenres = [];
 		} finally {
 			searchBusy = false;
+		}
+	}
+
+	// "Show more" for filtered searches: page past the 50-row display cap with
+	// the server-side offset, appending without disturbing already-loaded rows.
+	async function loadMoreSearchResults() {
+		const trimmed = $searchQuery.trim();
+		if (!trimmed || searchLoadingMore || searchBusy) return;
+		const parsed = parseQuery(trimmed);
+		if (!hasAnyFilter(parsed)) return;
+		if (searchTotal !== null && searchResults.tracks.length >= searchTotal) return;
+		searchLoadingMore = true;
+		try {
+			const audio = await api.searchAudio({
+				...buildAudioParams(parsed),
+				offset: searchResults.tracks.length,
+			});
+			const seen = new Set(searchResults.tracks.map((t) => t.id));
+			searchResults = {
+				...searchResults,
+				tracks: [
+					...searchResults.tracks,
+					...adaptAudioTracks(audio.tracks).filter((t) => !seen.has(t.id)),
+				],
+			};
+			searchTotal = audio.total ?? searchTotal;
+		} catch (error) {
+			searchError = `Search failed: ${error}`;
+		} finally {
+			searchLoadingMore = false;
 		}
 	}
 
@@ -992,13 +1038,22 @@
 			? artists.length > 0 && !artistsExhausted
 			: false)
 	);
-	let searchSummary = $derived(
-		activeTab === 'all'
+	// Filtered searches are display-capped server-side; when more matches
+	// exist than rows loaded, say so instead of passing the cap off as the
+	// whole result set.
+	let searchTruncated = $derived(
+		searchTotal !== null && searchResults.tracks.length < searchTotal
+	);
+	let searchSummary = $derived.by(() => {
+		if (searchTruncated && (activeTab === 'tracks' || activeTab === 'liked' || activeTab === 'all')) {
+			return `top ${searchResults.tracks.length} of ${searchTotal} track matches`;
+		}
+		return activeTab === 'all'
 			? formatSearchSummary(allSearchArtists.length, visibleAlbums.length, visibleTracks.length)
 			: (activeTab === 'tracks' || activeTab === 'liked')
 			? `${visibleTracks.length} track match${visibleTracks.length === 1 ? '' : 'es'}`
-			: `${visibleAlbums.length} album match${visibleAlbums.length === 1 ? '' : 'es'}`
-	);
+			: `${visibleAlbums.length} album match${visibleAlbums.length === 1 ? '' : 'es'}`;
+	});
 	let loadedSummary = $derived(
 		activeTab === 'albums'
 			? `${$albums.length} of ${$totalAlbums} albums loaded`
@@ -1857,6 +1912,15 @@
 				<span class="library-status">Searching…</span>
 			{:else if isSearchMode}
 				<span class="library-status">{searchSummary}</span>
+				{#if searchTruncated && (activeTab === 'tracks' || activeTab === 'liked' || activeTab === 'all')}
+					<button
+						class="filter-pill filter-pill--ghost"
+						disabled={searchLoadingMore}
+						onclick={() => void loadMoreSearchResults()}
+					>
+						{searchLoadingMore ? 'Loading…' : 'Show more'}
+					</button>
+				{/if}
 				<button class="filter-pill filter-pill--ghost" onclick={() => (searchQuery.set(''))}>Clear</button>
 			{/if}
 		</div>
@@ -1865,6 +1929,13 @@
 
 	{#if searchError}
 		<div class="batch-feedback error glass">{searchError}</div>
+	{/if}
+
+	{#if isSearchMode && searchUnmatchedGenres.length > 0}
+		<div class="batch-feedback error glass">
+			No genre named {searchUnmatchedGenres.map((g) => `"${g}"`).join(', ')} - nothing was
+			filtered by it. Genre filters match library genre names or slugs (see the Genres page).
+		</div>
 	{/if}
 
 	{#if $selectedTrackIds.size > 0 || $selectedAlbumIds.size > 0}

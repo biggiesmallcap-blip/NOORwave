@@ -77,6 +77,13 @@
   let activeQuery = $state('')
   let results = $state<TidalSearchResults | null>(null)
   let audioResults = $state<AudioSearchResult[] | null>(null)
+  // Full matching-set size + unknown genre tokens for filtered (audio)
+  // searches, so a capped list reads "top 50 of N" and a typo'd genre is
+  // called out instead of silently matching nothing.
+  let audioTotal = $state<number | null>(null)
+  let audioUnmatchedGenres = $state<string[]>([])
+  let audioLoadingMore = $state(false)
+  let lastAudioParsed: ParsedQuery | null = null
   let loading = $state(false)
   let searchGeneration = $state(0)
   let loadingLocal = $state(false)
@@ -183,6 +190,27 @@
     return sharedBuildAudioParams(pq)
   }
 
+  // "Show more" for filtered searches: page past the 50-row display cap via
+  // the server-side offset, appending to the already-ranked list.
+  async function loadMoreAudioResults() {
+    if (!lastAudioParsed || audioLoadingMore || audioResults === null) return
+    if (audioTotal !== null && audioResults.length >= audioTotal) return
+    audioLoadingMore = true
+    try {
+      const res = await api.searchAudio({
+        ...buildAudioParams(lastAudioParsed),
+        offset: audioResults.length,
+      })
+      const seen = new Set(audioResults.map((t) => t.id))
+      audioResults = [...audioResults, ...res.tracks.filter((t) => !seen.has(t.id))]
+      audioTotal = res.total ?? audioTotal
+    } catch {
+      // Keep the rows we have; the button stays available for a retry.
+    } finally {
+      audioLoadingMore = false
+    }
+  }
+
   function removeFilter(key: string) {
     // Rebuild query string by stripping tokens that start with key: or key>/</>=/<=
     const tokens = query.trim().split(/\s+/).filter(t => t.length > 0)
@@ -231,6 +259,9 @@
   function clearVisibleSearchResults() {
     results = null
     audioResults = null
+    audioTotal = null
+    audioUnmatchedGenres = []
+    lastAudioParsed = null
     tidalPlaylistResults = []
     spotifyPlaylistResults = []
     vibeTrack = null
@@ -331,11 +362,17 @@
           resetProviderLoading()
           const res = await api.searchAudio(buildAudioParams(effectiveParsed), signal)
           audioResults = res.tracks
+          audioTotal = res.total ?? null
+          audioUnmatchedGenres = res.unmatched_genres ?? []
+          lastAudioParsed = effectiveParsed
           results = null
           tidalPlaylistResults = []
           spotifyPlaylistResults = []
         } else {
           audioResults = null
+          audioTotal = null
+          audioUnmatchedGenres = []
+          lastAudioParsed = null
           // Reset paging - every fresh query starts at offset 0.
           tidalOffset = 0
           tidalPlaylistOffset = 0
@@ -1329,7 +1366,17 @@
     <p class="search-hint">No {filterMode === 'library' ? 'library' : filterMode} matches for "{activeQueryText}"</p>
   {:else if audioResults !== null}
     <section class="results-section">
-      <h3 class="section-label">Library matches</h3>
+      <h3 class="section-label">
+        Library matches{#if audioTotal !== null && audioTotal > audioResults.length}
+          <span class="section-label-note">top {audioResults.length} of {audioTotal}</span>
+        {/if}
+      </h3>
+      {#if audioUnmatchedGenres.length > 0}
+        <p class="search-hint search-error">
+          No genre named {audioUnmatchedGenres.map((g) => `"${g}"`).join(', ')} - nothing was
+          filtered by it.
+        </p>
+      {/if}
       {#if audioResults.length === 0}
         <p class="no-audio-results">No library tracks match these filters.</p>
       {:else}
@@ -1381,6 +1428,15 @@
             </li>
           {/each}
         </ul>
+        {#if audioTotal !== null && audioTotal > audioResults.length}
+          <button
+            class="load-more-btn"
+            disabled={audioLoadingMore}
+            onclick={() => void loadMoreAudioResults()}
+          >
+            {audioLoadingMore ? 'Loading…' : `Show more (${audioTotal - audioResults.length} remaining)`}
+          </button>
+        {/if}
       {/if}
     </section>
 
@@ -2287,6 +2343,27 @@
     color: var(--accent);
     margin-bottom: 14px;
   }
+  .section-label-note {
+    margin-left: 10px;
+    color: var(--text-muted);
+    text-transform: none;
+    letter-spacing: normal;
+    font-weight: 400;
+  }
+  .load-more-btn {
+    display: block;
+    margin: 12px auto 0;
+    padding: 8px 18px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: var(--font-size-xs);
+    cursor: pointer;
+    transition: color var(--motion-fast), border-color var(--motion-fast);
+  }
+  .load-more-btn:hover:not(:disabled) { color: var(--text-primary); border-color: var(--accent); }
+  .load-more-btn:disabled { opacity: 0.6; cursor: default; }
   /* Artists */
   .artists-row {
     display: flex;

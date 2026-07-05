@@ -24,6 +24,8 @@
 	} from '$lib/stores/player';
 	import { matchCommands, parseSlashInput } from '$lib/search/commands';
 	import { mergeLocalIntoTidal } from '$lib/search/merge_local';
+	import { parseQuery } from '$lib/search/query_parser';
+	import { hasAnyFilter } from '$lib/search/audio_params';
 	import { contextMenu, openMenuAtElement, type MenuItem } from '$lib/stores/context_menu';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { tidalSearchTrackToPlayable } from '$lib/utils/track';
@@ -42,6 +44,11 @@
 
 	const isSlashMode = $derived(query.startsWith('/'));
 	const slashMatches = $derived(isSlashMode ? matchCommands(query) : []);
+	// Filter syntax (genre:dnb, bpm:138, ...) is not supported by the palette's
+	// plain-text providers - hand those queries to the full search page, which
+	// routes them through the audio search, instead of text-matching the
+	// literal token.
+	const hasFilterSyntax = $derived(!isSlashMode && hasAnyFilter(parseQuery(query)));
 	const emptyTidalResults: TidalSearchResults = {
 		tracks: [],
 		albums: [],
@@ -132,11 +139,17 @@
 			.catch(() => undefined);
 	}
 
+	function openFilteredSearch() {
+		const q = query.trim();
+		close();
+		void goto(`/search?q=${encodeURIComponent(q)}`);
+	}
+
 	function onInput() {
 		clearTimeout(debounceTimer);
 		searchGeneration += 1;
 		cursor = 0;
-		if (!query.trim() || isSlashMode) {
+		if (!query.trim() || isSlashMode || hasFilterSyntax) {
 			tracks = [];
 			albums = [];
 			artists = [];
@@ -323,6 +336,10 @@
 		}
 		if (e.key === 'Enter') {
 			e.preventDefault();
+			if (hasFilterSyntax) {
+				openFilteredSearch();
+				return;
+			}
 			if (isSlashMode) {
 				if (slashMatches.length > 0) {
 					const cmd = slashMatches[cursor] ?? slashMatches[0];
@@ -395,6 +412,19 @@
 						</button>
 					</li>
 				{/each}
+			</ul>
+		{:else if hasFilterSyntax}
+			<ul class="palette-list">
+				<li class="palette-row-wrap palette-row-wrap--active">
+					<button class="palette-row" onclick={openFilteredSearch}>
+						<div class="row-art row-art--fallback">⌕</div>
+						<div class="row-meta">
+							<span class="row-title">Search library with filters</span>
+							<span class="row-sub">{query.trim()}</span>
+						</div>
+						<span class="row-kind">Enter</span>
+					</button>
+				</li>
 			</ul>
 		{:else if !isSlashMode && (tracks.length > 0 || albums.length > 0 || artists.length > 0 || spotifyPlaylists.length > 0)}
 			<ul class="palette-list">
