@@ -1136,6 +1136,46 @@ export async function toggleTrackFavorite(trackId: number, currentIsFavorite?: b
 	}
 }
 
+// Favourite a TIDAL track that may not be in the library yet. External tracks
+// have no local DB row, so — exactly like song radio and download — we import
+// on demand to mint a local id, then favourite that. Returns the resolved local
+// id and the new favourite state so the calling row/menu can update its
+// optimistic UI, or null on failure (the caller rolls back).
+export async function toggleTidalTrackFavorite(
+	track: TidalPlayable,
+	currentIsFavorite = false,
+): Promise<{ local_id: number; is_favorite: boolean } | null> {
+	const nextFavorite = !currentIsFavorite;
+	const existing = track.track_id ?? track.local_id ?? null;
+	try {
+		let localId = typeof existing === 'number' && existing > 0 ? existing : null;
+		if (localId == null) {
+			const imported = await api.importTidalTrackForRadio(track);
+			localId = imported.local_id;
+		}
+		await api.setTrackFavorite(localId, nextFavorite);
+		// Keep the tidal caches in sync so any surface that re-derives favourite
+		// state from tidal_id (now-playing, queue enrichment) sees the change.
+		if (track.tidal_id) {
+			tidalFavoriteOverrideById.set(track.tidal_id, { localId, favorite: nextFavorite });
+			const previous = tidalMetadataById.get(track.tidal_id) ?? {};
+			tidalMetadataById.set(track.tidal_id, {
+				...previous,
+				track_id: localId,
+				local_id: localId,
+				is_in_library: true,
+				is_favorite: nextFavorite,
+			});
+		}
+		playerError.set(null);
+		noteSuccess();
+		return { local_id: localId, is_favorite: nextFavorite };
+	} catch (error) {
+		setError(nextFavorite ? 'like that track' : 'unlike that track', error);
+		return null;
+	}
+}
+
 // ─── "Start from here" actions ────────────────────────────────────────────────
 // Shared helper: replace the queue with the given track IDs and begin playback
 // at the first one. Order matters — the first ID in `trackIds` is played first.
