@@ -67,3 +67,14 @@ controlRequestFields(), so the WebSocket-driven background reload
 (handleDiscoverySpaceRefreshed) inherits the user's controls. Contract tests
 in frontend/scripts/discovery-space-contract.test.mjs guard this wiring; the
 Rust route tests cover request defaults and shaping output.
+
+### Branch state and ranked list (frontend)
+
+branchHere(node) = lock node as seed + push the previous seed onto
+branchPath (walkBack truncates; re-branching to a seed already in the path
+truncates instead of looping). branchPath + lockedSeedId persist in
+sessionStorage discoverspace.branch.v1 and rehydrate on mount, restoring
+the tree position. DiscoverRankedList sorts by rerankScore > shapedScore >
+score; like/skip posts feedback then /api/discovery/rerank and merges
+scores/why without touching canvas positions (rerank sends rawScore as
+base_score). Play all / Queue all go through /api/discovery/space/queue.
