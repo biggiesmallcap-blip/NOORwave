@@ -49,12 +49,12 @@ describe('genre galaxy UI contract', () => {
 		// Rediscover must scope to the SAME candidate rule the canvas highlights.
 		expect(route).toContain('node.trackCount > 0 && node.listenCount === 0');
 		expect(route).toContain('api.createPlaylistFromQueue(name, true)');
-		// Play actions must seed the real radio orchestrator (continuous, reasoned
-		// station), NOT dump a static replacePlaybackQueue that loops the seed.
-		expect(route).toContain('startGenreRadio');
-		expect(route).toContain("startGenreRadio(seed, 'mixed'");
-		expect(route).toContain("'adventurous', 'Rediscover'");
-		expect(route).toContain("'familiar', 'Hottest'");
+		// Core play (Start mix + heat/rediscover) plays LOCAL genre tracks,
+		// shuffled and bounded - the whole point of the galaxy. Radio is opt-in.
+		expect(route).toContain('function sampleGenreQueue');
+		expect(route).toContain("playTracksInContext(ids, undefined, { shuffle: true })");
+		expect(route).toContain('async function handleRadio');
+		expect(route).toContain("startGenreRadio(seed, 'mixed', label)");
 		const player = readFileSync('src/lib/stores/player.ts', 'utf8');
 		expect(player).toContain('export async function startGenreRadio');
 		expect(player).toContain('api.startRadioSong({ seed_track_id: seedTrackId, blend');

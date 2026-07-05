@@ -20,6 +20,7 @@
 		open = false,
 		onClose = () => {},
 		onMix = () => {},
+		onRadio = () => {},
 		onToggleSeed = () => {},
 		onOpenInterior = () => {},
 		onSelectNearby = () => {}
@@ -34,6 +35,7 @@
 		open?: boolean;
 		onClose?: () => void;
 		onMix?: () => void;
+		onRadio?: () => void;
 		onToggleSeed?: () => void;
 		onOpenInterior?: () => void;
 		onSelectNearby?: (id: number) => void;
@@ -117,10 +119,11 @@
 				<span class="mix-hero-icon">▶</span>
 				<span class="mix-hero-copy">
 					<strong>Start mix</strong>
-					<small>Radio seeded from {node.name}</small>
+					<small>Shuffle your {node.trackCount.toLocaleString()} local tracks</small>
 				</span>
 			</button>
 			<div class="secondary-actions">
+				<button class="ghost-btn" onclick={onRadio} title="Continuous station with related tracks">Radio</button>
 				<button class={`ghost-btn ${isSeed ? 'is-seed' : ''}`} onclick={onToggleSeed}>
 					{isSeed ? 'Seed locked' : 'Lock as seed'}
 				</button>

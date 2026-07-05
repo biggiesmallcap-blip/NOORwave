@@ -4,7 +4,7 @@
 	import { api, type Genre, type GenreHeat, type GenreCohort, type GenreEvolutionPoint, type GenreAudioMetrics, type Track } from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
 	import { wsMessages } from '$lib/api/ws';
-	import { playTrackNow, setPlayerAutomixEnabled, setPlayerShuffleMode, startGenreRadio } from '$lib/stores/player';
+	import { playTracksInContext, startGenreRadio } from '$lib/stores/player';
 	import type { RadioBlend } from '$lib/api/client';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import GenreGalaxy from '$lib/components/Genre/GenreGalaxy.svelte';
@@ -427,14 +427,40 @@
 		);
 	}
 
-	// "Mix"/"Start mix" for one genre: seed a mixed radio from a representative
-	// track so it plays as a continuous station, not a static (often unplayable)
-	// queue that stalls on the seed.
+	// The core of the galaxy: play YOUR LOCAL tracks for a genre, shuffled. A
+	// bounded random sample keeps the queue sane on huge genres; shuffle mode
+	// keeps it fresh each launch. This is local library playback - not radio.
+	const MAX_GENRE_QUEUE = 300;
+
+	function sampleGenreQueue(tracks: Track[]): number[] {
+		return shuffled(tracks.filter((track) => track.id > 0).map((track) => track.id)).slice(
+			0,
+			MAX_GENRE_QUEUE
+		);
+	}
+
+	// "Start mix" / the per-node Mix pill: shuffle this genre's local tracks.
 	async function handleMix(id: number) {
 		actionError = null;
 		try {
-			const tracks = await getOrLoadPanelTracks(id);
-			const seed = pickSeedTrackId(tracks);
+			const ids = sampleGenreQueue(await getOrLoadPanelTracks(id));
+			if (ids.length === 0) {
+				actionError = 'This genre does not currently resolve to any playable tracks.';
+				return;
+			}
+			await playTracksInContext(ids, undefined, { shuffle: true });
+		} catch (reason) {
+			actionError = reason instanceof Error ? reason.message : String(reason);
+		}
+	}
+
+	// Optional, opt-in: a continuous radio STATION seeded from this genre. Pulls
+	// in related / Last.fm tracks, so it's kept separate from Start mix (which is
+	// strictly your local library).
+	async function handleRadio(id: number) {
+		actionError = null;
+		try {
+			const seed = pickSeedTrackId(await getOrLoadPanelTracks(id));
 			if (seed == null) {
 				actionError = 'This genre does not currently resolve to any playable tracks.';
 				return;
@@ -451,18 +477,14 @@
 		if (selectedSeedIds.length === 0) return;
 		try {
 			const lists = await Promise.all(
-				selectedSeedIds.map(async (id) => (await getOrLoadPanelTracks(id)).slice(0, 60))
+				selectedSeedIds.map(async (id) => (await getOrLoadPanelTracks(id)).slice(0, 120))
 			);
-			const mergedTracks = interleaveTrackLists(lists);
-			if (mergedTracks.length === 0) {
+			const ids = sampleGenreQueue(interleaveTrackLists(lists));
+			if (ids.length === 0) {
 				actionError = 'The current seed blend does not resolve to any tracks.';
 				return;
 			}
-
-			await api.replacePlaybackQueue(mergedTracks.map((track) => track.id));
-			const shuffled = await setPlayerShuffleMode('genre');
-			await setPlayerAutomixEnabled(true);
-			await playTrackNow(shuffled?.queue[0]?.track.id ?? mergedTracks[0].id);
+			await playTracksInContext(ids, undefined, { shuffle: true });
 		} catch (reason) {
 			actionError = reason instanceof Error ? reason.message : String(reason);
 		}
@@ -518,32 +540,28 @@
 		return copy;
 	}
 
-	// Pick a RANDOM library track to seed radio from, not always the same
-	// most-played row - a fixed seed made the orchestrator grow the same station
-	// every launch. Random seed -> a fresh station each time.
+	// Pick a random library track to seed the optional Radio station from.
 	function pickSeedTrackId(tracks: Track[]): number | null {
-		const playable = tracks.filter((track) => track.id > 0);
-		return randomItem(playable)?.id ?? null;
+		return randomItem(tracks.filter((track) => track.id > 0))?.id ?? null;
 	}
 
-	async function seedTrackForGenre(genreId: number, includeDescendants: boolean): Promise<number | null> {
-		const { tracks } = await cachedApi.getGenreTracks(genreId, includeDescendants);
-		return pickSeedTrackId(tracks);
-	}
-
-	// Walk a list of genres, seeding from the first that resolves to a real
-	// track. Callers shuffle the list first so the seed genre also varies.
-	async function firstSeed(nodes: GalaxyNode[], includeDescendants: boolean): Promise<[number, string] | null> {
-		for (const node of nodes) {
-			const seed = await seedTrackForGenre(node.id, includeDescendants);
-			if (seed != null) return [seed, node.name];
+	// Gather local tracks across several genres, sampled and shuffled into a
+	// bounded queue. Shared by the heat/rediscover mode actions.
+	async function playGenrePool(nodes: GalaxyNode[], emptyMessage: string) {
+		const lists = await Promise.all(
+			nodes.map(async (node) => (await cachedApi.getGenreTracks(node.id, false)).tracks)
+		);
+		const ids = sampleGenreQueue(lists.flat());
+		if (ids.length === 0) {
+			actionError = emptyMessage;
+			return;
 		}
-		return null;
+		await playTracksInContext(ids, undefined, { shuffle: true });
 	}
 
-	// Rediscover: seed an ADVENTUROUS radio from an unplayed genre (trackCount > 0,
-	// zero listens - the same rule the canvas highlights). Surfaces the forgotten
-	// track plus related finds, instead of looping one static row.
+	// Rediscover: shuffle your LOCAL tracks from unplayed genres (trackCount > 0,
+	// zero listens - the same rule the canvas highlights). Your forgotten music,
+	// not a radio of lookalikes.
 	async function playRediscover() {
 		actionError = null;
 		const scopeIds =
@@ -558,18 +576,12 @@
 		modeActionBusy = true;
 		try {
 			const byId = new Map(galaxyData.nodes.map((node) => [node.id, node]));
-			// Bias to the bigger unplayed genres, then shuffle so the seed varies.
 			const ranked = scopeIds
 				.map((id) => byId.get(id))
 				.filter((node): node is GalaxyNode => node !== undefined)
 				.sort((left, right) => right.trackCount - left.trackCount)
 				.slice(0, 12);
-			const seed = await firstSeed(shuffled(ranked), false);
-			if (!seed) {
-				actionError = 'Rediscover candidates resolved to no playable tracks.';
-				return;
-			}
-			await startGenreRadio(seed[0], 'adventurous', 'Rediscover');
+			await playGenrePool(shuffled(ranked).slice(0, 6), 'Rediscover candidates resolved to no playable tracks.');
 		} catch (reason) {
 			actionError = reason instanceof Error ? reason.message : String(reason);
 		} finally {
@@ -577,8 +589,7 @@
 		}
 	}
 
-	// Heat: seed a FAMILIAR radio from your hottest genre - a comfortable
-	// continuous rotation, not a fixed list.
+	// Heat: shuffle your LOCAL tracks from your most-played genres.
 	async function playHottest() {
 		actionError = null;
 		if (hottestNodes.length === 0) {
@@ -587,13 +598,7 @@
 		}
 		modeActionBusy = true;
 		try {
-			// Shuffle the top hot genres so it doesn't always seed from the #1.
-			const seed = await firstSeed(shuffled(hottestNodes.slice(0, 8)), false);
-			if (!seed) {
-				actionError = 'Your hottest genres resolved to no playable tracks.';
-				return;
-			}
-			await startGenreRadio(seed[0], 'familiar', 'Hottest');
+			await playGenrePool(shuffled(hottestNodes.slice(0, 8)).slice(0, 6), 'Your hottest genres resolved to no playable tracks.');
 		} catch (reason) {
 			actionError = reason instanceof Error ? reason.message : String(reason);
 		} finally {
@@ -855,6 +860,7 @@
 				open={selectedNode !== null && !interiorOpen}
 				onClose={() => handleSelect(null)}
 				onMix={() => selectedNode && void handleMix(selectedNode.id)}
+				onRadio={() => selectedNode && void handleRadio(selectedNode.id)}
 				onToggleSeed={() => selectedNode && toggleSeed(selectedNode.id)}
 				onOpenInterior={() => { if (selectedNode) interiorOpen = true; }}
 				onSelectNearby={(id) => { handleSelect(id); void focusNode(id); }}
