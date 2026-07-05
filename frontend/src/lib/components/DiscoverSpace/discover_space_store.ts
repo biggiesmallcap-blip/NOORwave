@@ -16,7 +16,10 @@ import type {
 	ApiDiscoveryResponse,
 	DiscoverBlendSeed,
 	DiscoverBlendHealth,
+	DiscoverFilters,
+	BranchStep,
 } from './discover_space_types';
+import { isFilterNoop } from './discover_space_types';
 
 // In-flight guard. Each loadSpace call increments `loadSpaceSeq` and aborts
 // the previous controller, mirroring the pattern in routes/videos/+page.svelte
@@ -45,6 +48,11 @@ interface DiscoverSpaceState {
 	blendHealth: DiscoverBlendHealth | null;
 	blendLoading: boolean;
 	blendError: string | null;
+	coherence: number;
+	filters: DiscoverFilters;
+	sessionId: string;
+	feedbackBusy: boolean;
+	branchPath: BranchStep[];
 }
 
 export const discoverSpaceStore = writable<DiscoverSpaceState>({
@@ -65,7 +73,119 @@ export const discoverSpaceStore = writable<DiscoverSpaceState>({
 	blendHealth: null,
 	blendLoading: false,
 	blendError: null,
+	coherence: 0.5,
+	filters: {},
+	sessionId: '',
+	feedbackBusy: false,
+	branchPath: [],
 });
+
+// -- Control persistence (sessionStorage) -------------------------------------
+// Hydrated from +page.svelte onMount (SSR-safe); written through on change so
+// navigating away and back keeps the user's coherence, filters, and session.
+
+const CONTROLS_STORAGE_KEY = 'discoverspace.controls.v1';
+const SESSION_STORAGE_KEY = 'discoverspace.session.v1';
+const BRANCH_STORAGE_KEY = 'discoverspace.branch.v1';
+
+function persistBranch(branchPath: BranchStep[], lockedSeedId: number | null): void {
+	try {
+		sessionStorage.setItem(BRANCH_STORAGE_KEY, JSON.stringify({ branchPath, lockedSeedId }));
+	} catch {
+		// Storage unavailable - the tree just resets next visit.
+	}
+}
+
+function persistControls(coherence: number, filters: DiscoverFilters): void {
+	try {
+		sessionStorage.setItem(CONTROLS_STORAGE_KEY, JSON.stringify({ coherence, filters }));
+	} catch {
+		// Storage unavailable (private mode etc.) - controls just reset next visit.
+	}
+}
+
+export function hydrateDiscoverControls(): void {
+	let coherence = 0.5;
+	let filters: DiscoverFilters = {};
+	let sessionId = '';
+	let branchPath: BranchStep[] = [];
+	let lockedSeedId: number | null = null;
+	try {
+		const rawControls = sessionStorage.getItem(CONTROLS_STORAGE_KEY);
+		if (rawControls) {
+			const parsed = JSON.parse(rawControls);
+			if (typeof parsed.coherence === 'number') {
+				coherence = Math.min(1, Math.max(0, parsed.coherence));
+			}
+			if (parsed.filters && typeof parsed.filters === 'object') filters = parsed.filters;
+		}
+		sessionId = sessionStorage.getItem(SESSION_STORAGE_KEY) ?? '';
+		const rawBranch = sessionStorage.getItem(BRANCH_STORAGE_KEY);
+		if (rawBranch) {
+			const parsed = JSON.parse(rawBranch);
+			if (Array.isArray(parsed.branchPath)) branchPath = parsed.branchPath;
+			if (typeof parsed.lockedSeedId === 'number') lockedSeedId = parsed.lockedSeedId;
+		}
+	} catch {
+		// Fall through to defaults.
+	}
+	if (!sessionId) {
+		sessionId =
+			typeof crypto !== 'undefined' && 'randomUUID' in crypto
+				? crypto.randomUUID()
+				: `s-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+		try {
+			sessionStorage.setItem(SESSION_STORAGE_KEY, sessionId);
+		} catch {
+			// Non-persistent session id still works for this page lifetime.
+		}
+	}
+	discoverSpaceStore.update((s) => ({
+		...s,
+		coherence,
+		filters,
+		sessionId,
+		branchPath,
+		// Restoring the lock restores the tree position: the page's seed effect
+		// sees the locked id and loads that space.
+		lockedSeedId: lockedSeedId ?? s.lockedSeedId,
+	}));
+}
+
+/// Reload whichever space is active (blend when 2+ seeds, seed space
+/// otherwise) with the current store controls. Used by the coherence slider
+/// and filter bar.
+function reloadActiveSpace(): void {
+	const s = get(discoverSpaceStore);
+	const track = get(currentTrack);
+	if (s.blendSeeds.length >= 2) {
+		loadBlendSpace(track?.id ?? null);
+	} else if (s.activeSeedId !== null) {
+		loadSpace(s.mode, s.activeSeedId, undefined, s.activeSeedSource, track?.id ?? null);
+	}
+}
+
+let coherenceReloadTimer: ReturnType<typeof setTimeout> | null = null;
+
+export function setCoherence(value: number): void {
+	const coherence = Math.min(1, Math.max(0, value));
+	const s = get(discoverSpaceStore);
+	discoverSpaceStore.update((st) => ({ ...st, coherence }));
+	persistControls(coherence, s.filters);
+	// Debounced reload: the slider fires continuously while dragging.
+	if (coherenceReloadTimer) clearTimeout(coherenceReloadTimer);
+	coherenceReloadTimer = setTimeout(() => {
+		coherenceReloadTimer = null;
+		reloadActiveSpace();
+	}, 300);
+}
+
+export function setFilters(filters: DiscoverFilters): void {
+	const s = get(discoverSpaceStore);
+	discoverSpaceStore.update((st) => ({ ...st, filters }));
+	persistControls(s.coherence, filters);
+	reloadActiveSpace();
+}
 
 function blendSeedIdentity(seed: DiscoverBlendSeed): string {
 	if (seed.kind === 'library') return `library:${seed.track_id ?? 0}`;
@@ -119,12 +239,18 @@ function blendSeedFromNode(node: DiscoverTrackNode): DiscoverBlendSeed {
 	};
 }
 
+// addBlendSeed / removeBlendSeed are the SOLE triggers of the blend fetch;
+// callers must not also invoke loadBlendSpace or the request fires twice.
+
 export function addBlendSeed(node: DiscoverTrackNode): void {
 	discoverSpaceStore.update((s) => ({
 		...s,
 		blendSeeds: normalizeBlendSeeds([...s.blendSeeds, blendSeedFromNode(node)]),
 		blendError: null,
 	}));
+	if (get(discoverSpaceStore).blendSeeds.length >= 2) {
+		loadBlendSpace(get(currentTrack)?.id ?? null);
+	}
 }
 
 export function removeBlendSeed(identity: string): void {
@@ -140,6 +266,9 @@ export function removeBlendSeed(identity: string): void {
 			blendHealth: nextSeeds.length < 2 ? null : s.blendHealth,
 		};
 	});
+	if (get(discoverSpaceStore).blendSeeds.length >= 2) {
+		loadBlendSpace(get(currentTrack)?.id ?? null);
+	}
 }
 
 export function clearBlend(): void {
@@ -154,6 +283,18 @@ export function clearBlend(): void {
 	}));
 }
 
+/// Current control fields for any discovery request body. Filters are omitted
+/// entirely when no-op so the wire payload stays byte-compatible with the
+/// pre-controls contract.
+function controlRequestFields() {
+	const s = get(discoverSpaceStore);
+	return {
+		coherence: s.coherence,
+		session_id: s.sessionId || undefined,
+		filters: isFilterNoop(s.filters) ? undefined : s.filters,
+	};
+}
+
 function blendRequestBody(seeds: DiscoverBlendSeed[], limit = 100) {
 	return JSON.stringify({
 		seeds: seeds.map(({ kind, track_id, tidal_id, artist, title, weight }) => ({
@@ -165,6 +306,7 @@ function blendRequestBody(seeds: DiscoverBlendSeed[], limit = 100) {
 			weight,
 		})),
 		limit,
+		...controlRequestFields(),
 	});
 }
 
@@ -208,6 +350,7 @@ export async function loadSpace(
 				prompt,
 				limit: 100,
 				include_artists: mode === 'explore',
+				...controlRequestFields(),
 			}),
 			signal: aborter.signal,
 		});
@@ -398,6 +541,53 @@ export function unlockSeed(): void {
 	discoverSpaceStore.update((s) => ({ ...s, lockedSeedId: null }));
 }
 
+// -- Branching -------------------------------------------------------------
+// Branching is lock-plus-history: the node becomes the locked seed (the
+// page's seed effect reloads the space) and the seed we were on joins the
+// breadcrumb path so the user can walk back up the tree.
+
+/// Make `node` the new seed, remembering where we branched from.
+export function branchHere(node: DiscoverTrackNode): void {
+	discoverSpaceStore.update((s) => {
+		let branchPath = s.branchPath;
+		const fromId = s.activeSeedId;
+		if (fromId !== null && fromId !== node.trackId) {
+			const from = s.nodes.find((n) => n.trackId === fromId);
+			const step: BranchStep = {
+				seedTrackId: fromId,
+				title: from?.title ?? `Track ${fromId}`,
+				artist: from?.artist ?? '',
+			};
+			// Re-branching to a seed already in the path truncates instead of
+			// looping (walking A > B > A keeps the tree a path, not a cycle).
+			const existing = branchPath.findIndex((b) => b.seedTrackId === node.trackId);
+			branchPath =
+				existing >= 0 ? branchPath.slice(0, existing) : [...branchPath, step];
+		}
+		persistBranch(branchPath, node.trackId);
+		return { ...s, branchPath, lockedSeedId: node.trackId };
+	});
+}
+
+/// Walk back to a breadcrumb step, dropping everything after it.
+export function walkBack(index: number): void {
+	discoverSpaceStore.update((s) => {
+		const step = s.branchPath[index];
+		if (!step) return s;
+		const branchPath = s.branchPath.slice(0, index);
+		persistBranch(branchPath, step.seedTrackId);
+		return { ...s, branchPath, lockedSeedId: step.seedTrackId };
+	});
+}
+
+/// Drop the whole branch history (keeps the current seed).
+export function clearBranchPath(): void {
+	discoverSpaceStore.update((s) => {
+		persistBranch([], s.lockedSeedId);
+		return { ...s, branchPath: [] };
+	});
+}
+
 export function setLens(lens: DiscoverLens): void {
 	discoverSpaceStore.update((s) => ({ ...s, lens }));
 }
@@ -437,5 +627,138 @@ export function handleDiscoverySpaceRefreshed(seedTrackId: number): void {
 		discoverSpaceStore.update((st) => ({ ...st, refreshProgress: null }));
 		const track = get(currentTrack);
 		loadSpace(s.mode, seedTrackId, undefined, s.activeSeedSource, track?.id ?? null);
+	}
+}
+
+// -- Like/skip feedback + stateless rerank -------------------------------------
+
+async function sendFeedbackAndRerank(
+	node: DiscoverTrackNode,
+	action: 'like' | 'skip'
+): Promise<void> {
+	const s = get(discoverSpaceStore);
+	if (s.feedbackBusy) return;
+	discoverSpaceStore.update((st) => ({ ...st, feedbackBusy: true }));
+	try {
+		const apiBase = getApiBase();
+		const feedbackResp = await authFetch(`${apiBase}/api/discovery/feedback`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				seed_track_id: s.activeSeedId ?? 0,
+				candidate_track_id: node.trackId,
+				action,
+				surface: 'discover_space',
+				session_id: s.sessionId || undefined,
+			}),
+		});
+		if (!feedbackResp.ok) throw new Error(`Feedback failed: ${feedbackResp.status}`);
+
+		// Rerank the full non-seed set against the updated session taste.
+		// base_score is the PRE-shaping raw score so shaping runs exactly once.
+		const candidates = get(discoverSpaceStore)
+			.nodes.filter((n) => !n.isSeed)
+			.map((n) => ({
+				track_id: n.trackId,
+				is_in_library: n.isInLibrary,
+				base_score: n.rawScore ?? n.score,
+				artist_name: n.artist,
+			}));
+		const rerankResp = await authFetch(`${apiBase}/api/discovery/rerank`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				session_id: s.sessionId || undefined,
+				seed_track_id: s.activeSeedId ?? undefined,
+				coherence: s.coherence,
+				candidates,
+			}),
+		});
+		if (!rerankResp.ok) throw new Error(`Rerank failed: ${rerankResp.status}`);
+		const result = await rerankResp.json();
+		const byId = new Map<number, { score: number; why: string; why_signals: string[] }>(
+			(result.scores ?? []).map((row: { track_id: number; score: number; why: string; why_signals: string[] }) => [
+				row.track_id,
+				row,
+			])
+		);
+		// Merge scores/why only; canvas positions and normalized display score
+		// stay put so the map does not jump on every like.
+		discoverSpaceStore.update((st) => ({
+			...st,
+			nodes: st.nodes.map((n) => {
+				const row = byId.get(n.trackId);
+				return row
+					? { ...n, rerankScore: row.score, why: row.why, whySignals: row.why_signals }
+					: n;
+			}),
+		}));
+	} catch (e) {
+		const msg = e instanceof Error ? e.message : 'Unknown error';
+		console.error('[discoverspace/store] feedback failed:', msg);
+		showToast(action === 'like' ? 'Could not record like' : 'Could not record skip', 'error');
+	} finally {
+		discoverSpaceStore.update((st) => ({ ...st, feedbackBusy: false }));
+	}
+}
+
+export function likeNode(node: DiscoverTrackNode): Promise<void> {
+	return sendFeedbackAndRerank(node, 'like');
+}
+
+export function skipNode(node: DiscoverTrackNode): Promise<void> {
+	return sendFeedbackAndRerank(node, 'skip');
+}
+
+// -- Queue-all / play-all through the pending-queue pipeline --------------------
+
+function queueItemFromNode(node: DiscoverTrackNode) {
+	const base = {
+		artist: node.artist,
+		title: node.title,
+		reason: node.why || node.primaryReason,
+		score: node.shapedScore ?? node.score,
+	};
+	if (node.playable.kind === 'library') {
+		return { ...base, track_id: node.playable.track_id, is_in_library: true };
+	}
+	if (node.playable.kind === 'tidal') {
+		return { ...base, tidal_id: node.playable.tidal_id };
+	}
+	if (node.playable.kind === 'pending-lastfm') {
+		return base;
+	}
+	return null; // unavailable
+}
+
+export async function queueSpaceTracks(
+	nodes: DiscoverTrackNode[],
+	play: boolean
+): Promise<void> {
+	const items = nodes
+		.map(queueItemFromNode)
+		.filter((item): item is NonNullable<typeof item> => item !== null);
+	if (items.length === 0) {
+		showToast('Nothing playable to queue', 'info');
+		return;
+	}
+	try {
+		const apiBase = getApiBase();
+		const response = await authFetch(`${apiBase}/api/discovery/space/queue`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ items, play }),
+		});
+		if (!response.ok) throw new Error(`Queue request failed: ${response.status}`);
+		const result = await response.json();
+		if (play && result.state && result.queue) {
+			hydratePlayback({ state: result.state, queue: result.queue });
+		}
+		const count = result.queued_count ?? items.length;
+		showToast(play ? `Playing ${count} tracks` : `Queued ${count} tracks`, 'success');
+	} catch (e) {
+		const msg = e instanceof Error ? e.message : 'Unknown error';
+		console.error('[discoverspace/store] queueSpaceTracks failed:', msg);
+		showToast('Could not queue tracks', 'error');
 	}
 }

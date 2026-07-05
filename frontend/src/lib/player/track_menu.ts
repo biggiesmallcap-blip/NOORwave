@@ -14,6 +14,7 @@ import {
 	playTidalTrackNext,
 	addTidalTrackToQueue,
 	startTidalSongRadio,
+	toggleTidalTrackFavorite,
 } from '$lib/stores/player';
 import type { TidalPlayable } from '$lib/api/client';
 import { canPlayTrack, getPlayableLabel } from '$lib/player/playable';
@@ -65,11 +66,6 @@ export interface BuildTidalTrackMenuOptions {
 	onRemoved?: () => void;
 	/** See BuildTrackMenuOptions.remoteRoutes. */
 	remoteRoutes?: boolean;
-}
-
-function tidalLocalTrackId(track: TidalPlayable): number | null {
-	const id = track.track_id ?? track.local_id ?? null;
-	return typeof id === 'number' && id > 0 ? id : null;
 }
 
 const SEPARATOR: MenuItem = { separator: true, label: '' };
@@ -274,11 +270,17 @@ export function buildTidalTrackMenu(track: TidalPlayable, options: BuildTidalTra
 		items.push(SEPARATOR);
 	}
 
-	const localId = tidalLocalTrackId(track);
-	if (localId != null) {
-		items.push(favouriteMenuItem(localId, track.is_favorite ?? false));
-		items.push(SEPARATOR);
-	}
+	// Favouriting is always offered, even for a purely external track with no
+	// local row yet: toggleTidalTrackFavorite imports on demand to mint a local
+	// id first (same trick as song radio / download), so the user is never stuck
+	// with no way to like the song.
+	const isFavorite = track.is_favorite ?? false;
+	items.push({
+		label: isFavorite ? 'Remove from favourites' : 'Add to favourites',
+		icon: isFavorite ? '♥' : '♡',
+		onSelect: () => void toggleTidalTrackFavorite(track, isFavorite),
+	});
+	items.push(SEPARATOR);
 
 	items.push({
 		label: 'Play now',

@@ -99,6 +99,7 @@ export const SIDE_PANEL_ACTIONS = {
 	playNow: 'Play now',
 	playNext: 'Play next',
 	startRadioHere: 'Start radio here',
+	branchHere: 'Branch here',
 	lockAsAnchor: 'Lock as anchor',
 	addToPlaylist: 'Add to playlist',
 	hideFromRadio: 'Hide from radio',

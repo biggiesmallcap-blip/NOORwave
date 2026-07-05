@@ -134,6 +134,11 @@ describe('loadSpace', () => {
 			blendHealth: null,
 			blendLoading: false,
 			blendError: null,
+			coherence: 0.5,
+			filters: {},
+			sessionId: '',
+			feedbackBusy: false,
+			branchPath: [],
 		});
 	});
 

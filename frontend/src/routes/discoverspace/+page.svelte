@@ -13,11 +13,14 @@
 		makeBlendRadio,
 		lockSeed,
 		unlockSeed,
+		hydrateDiscoverControls,
 	} from '$lib/components/DiscoverSpace/discover_space_store';
+	import DiscoverFilterBar from '$lib/components/DiscoverSpace/DiscoverFilterBar.svelte';
+	import DiscoverRankedList from '$lib/components/DiscoverSpace/DiscoverRankedList.svelte';
+	import DiscoverBreadcrumb from '$lib/components/DiscoverSpace/DiscoverBreadcrumb.svelte';
 	import DiscoverSpace from '$lib/components/DiscoverSpace/DiscoverSpace.svelte';
 	import DiscoverHoverCard from '$lib/components/DiscoverSpace/DiscoverHoverCard.svelte';
 	import DiscoverSidePanel from '$lib/components/DiscoverSpace/DiscoverSidePanel.svelte';
-	import DiscoverLegend from '$lib/components/DiscoverSpace/DiscoverLegend.svelte';
 	import DiscoverLensControl from '$lib/components/DiscoverSpace/DiscoverLensControl.svelte';
 	import DiscoverTrainingStrip from '$lib/components/DiscoverSpace/DiscoverTrainingStrip.svelte';
 	import DiscoverHelp from '$lib/components/DiscoverSpace/DiscoverHelp.svelte';
@@ -50,6 +53,7 @@
 	let playlistNodes = $state<DiscoverTrackNode[]>([]);
 	let searchQuery = $state('');
 	let isSearching = $state(false);
+	let spaceCanvas: DiscoverSpace | undefined = $state();
 	let blendAction = $state<'add' | 'play' | 'radio' | null>(null);
 	let lastNodeSignature = '';
 
@@ -109,19 +113,12 @@
 	}
 
 	function handleAddToBlend(node: DiscoverTrackNode) {
-		const nextCount = Math.min(4, $discoverSpaceStore.blendSeeds.length + 1);
+		// The store triggers the blend fetch itself when 2+ seeds exist.
 		addBlendSeed(node);
-		if (nextCount >= 2) {
-			loadBlendSpace($currentTrack?.id ?? null);
-		}
 	}
 
 	function handleRemoveBlendSeed(identity: string) {
-		const nextCount = $discoverSpaceStore.blendSeeds.filter((seed) => seed.identity !== identity).length;
 		removeBlendSeed(identity);
-		if (nextCount >= 2) {
-			loadBlendSpace($currentTrack?.id ?? null);
-		}
 	}
 
 	function handleClearBlend() {
@@ -160,19 +157,15 @@
 		const q = searchQuery.trim();
 		if (!q) return;
 		isSearching = true;
-		// The hyperspace search is exposed by DiscoverSpace.svelte onto window
-		const fn = (window as any).__discoverSpaceHyperspaceSearch;
-		if (fn) {
-			// Load new space via store then trigger the animation
-			await loadSpace(
-				$discoverSpaceStore.mode,
-				resolvedSeedId ?? undefined,
-				q,
-				resolvedSeedSource,
-				$currentTrack?.id ?? null
-			);
-			await fn(q);
-		}
+		// Load new space via store then trigger the canvas warp animation.
+		await loadSpace(
+			$discoverSpaceStore.mode,
+			resolvedSeedId ?? undefined,
+			q,
+			resolvedSeedSource,
+			$currentTrack?.id ?? null
+		);
+		await spaceCanvas?.hyperspaceSearch(q);
 		isSearching = false;
 		searchQuery = '';
 	}
@@ -187,6 +180,9 @@
 	});
 
 	onMount(() => {
+		// Controls (coherence, filters, session id) hydrate before the first
+		// load so the initial request already carries them.
+		hydrateDiscoverControls();
 		const seedId = resolvedSeedId;
 		if (seedId !== null) {
 			lastLoadedSeedId = seedId;
@@ -237,6 +233,10 @@
 			</button>
 		</div>
 	{/if}
+
+	<DiscoverFilterBar />
+
+	<DiscoverBreadcrumb />
 
 	{#if $discoverSpaceStore.blendSeeds.length > 0}
 		<div class="blend-strip" aria-label="Blend seeds">
@@ -326,6 +326,7 @@
 				</div>
 			{:else}
 				<DiscoverSpace
+					bind:this={spaceCanvas}
 					currentTrackId={$currentTrack?.id ?? null}
 					seedTrackId={$discoverSpaceStore.activeSeedId}
 					isLocked={$discoverSpaceStore.lockedSeedId !== null}
@@ -338,13 +339,6 @@
 			{#if $discoverSpaceStore.nodes.length > 0}
 				<div class="canvas-overlay top-left">
 					<DiscoverLensControl />
-				</div>
-			{/if}
-
-			<!-- Legend bottom-right -->
-			{#if $discoverSpaceStore.nodes.length > 0}
-				<div class="canvas-overlay bottom-right">
-					<DiscoverLegend />
 				</div>
 			{/if}
 
@@ -367,6 +361,9 @@
 				</div>
 			{/if}
 		</div>
+
+		<!-- Ranked list (collapsible middle column) -->
+		<DiscoverRankedList onSelectNode={(node) => handleSelectNode(node)} />
 
 		<!-- Side panel -->
 		<DiscoverSidePanel
@@ -605,7 +602,8 @@
 	.page-layout {
 		flex: 1;
 		display: grid;
-		grid-template-columns: 1fr 280px;
+		/* canvas | collapsible ranked list | side panel */
+		grid-template-columns: 1fr auto 280px;
 		gap: var(--space-3, 12px);
 		min-height: 0;
 		padding: 0 var(--space-3, 12px);
@@ -629,7 +627,6 @@
 	}
 	.canvas-overlay.top-left { top: 12px; left: 12px; }
 	.canvas-overlay.top-right { top: 12px; right: 12px; }
-	.canvas-overlay.bottom-right { bottom: 12px; right: 12px; }
 	.canvas-overlay.bottom-center {
 		bottom: 12px;
 		left: 50%;

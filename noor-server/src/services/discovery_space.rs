@@ -166,6 +166,21 @@ impl Default for PruneConfig {
     }
 }
 
+impl PruneConfig {
+    /// Scale hub suppression with the coherence control: a diverse view culls
+    /// popular hub tracks more aggressively, a coherent view tolerates them.
+    /// At the default coherence 0.5 this lands at 0.925 / 0.85, close to the
+    /// historical 0.95 / 0.85 defaults.
+    pub fn for_coherence(coherence: f64) -> Self {
+        let c = coherence.clamp(0.0, 1.0);
+        Self {
+            hub_in_degree_pctile_threshold: 0.90 + 0.05 * c,
+            hub_score_threshold: 0.80 + 0.10 * (1.0 - c),
+            ..Self::default()
+        }
+    }
+}
+
 /// Output of the pruning pipeline. The handler re-serializes from this.
 #[derive(Debug)]
 pub struct PruneResult {

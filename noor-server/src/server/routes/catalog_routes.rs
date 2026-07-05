@@ -860,9 +860,19 @@ pub(super) async fn build_tidal_artist_payload(
         })
         .collect();
 
-    let top_tracks_payload: Vec<Value> = top_res
-        .map(|r| {
-            r.items
+    let top_tracks_payload: Vec<Value> = match top_res {
+        Ok(r) => {
+            let items = r.items;
+            // Mirror the TIDAL album-tracks endpoint: join local library state so a
+            // track the user favourited (imported as a tidal_stream row) comes back
+            // with is_favorite/track_id set and the heart stays filled on reload.
+            let top_ids: Vec<i64> = items.iter().map(|t| t.id).collect();
+            let library_states = {
+                let s = state.read().await;
+                s.db.with_conn(|conn| queries::get_tidal_track_library_states(conn, &top_ids))
+                    .unwrap_or_default()
+            };
+            items
                 .into_iter()
                 .map(|t| {
                     let artwork = t
@@ -875,6 +885,7 @@ pub(super) async fn build_tidal_artist_payload(
                                 160,
                             )
                         });
+                    let ls = library_states.get(&t.id).copied();
                     json!({
                         "tidal_id": t.id,
                         "title": t.title,
@@ -886,11 +897,15 @@ pub(super) async fn build_tidal_artist_payload(
                         "disc_number": t.volume_number,
                         "artist_name": t.artist.name,
                         "artist_tidal_id": t.artist.id,
+                        "track_id": ls.map(|s| s.local_id).unwrap_or(0),
+                        "is_in_library": ls.is_some(),
+                        "is_favorite": ls.map(|s| s.is_favorite).unwrap_or(false),
                     })
                 })
                 .collect()
-        })
-        .unwrap_or_default();
+        }
+        Err(_) => Vec::new(),
+    };
 
     let videos_payload: Vec<Value> = videos_res
         .map(|r| {

@@ -7,7 +7,8 @@
 	import {
 		addTidalTrackToQueue,
 		startTidalSongRadio,
-		playTidalTrackNow
+		playTidalTrackNow,
+		toggleTidalTrackFavorite
 	} from '$lib/stores/player';
 	import type { TidalPlayable } from '$lib/api/client';
 	import { canPlayTrack, getPlayableLabel } from '$lib/player/playable';
@@ -116,6 +117,33 @@
 		e.stopPropagation();
 		void startTidalSongRadio(track);
 	}
+
+	// External TIDAL tracks have no local row until imported, so the heart carries
+	// its own optimistic override on top of the prop's initial value. Import
+	// happens on demand inside toggleTidalTrackFavorite. `override` stays null
+	// until the user acts, so the row still tracks the prop if it changes.
+	let favoriteOverride = $state<boolean | null>(null);
+	const isFavorite = $derived(favoriteOverride ?? (track.is_favorite ?? false));
+	let favoritePending = $state(false);
+	// Once imported, remember the minted local id so a second toggle updates the
+	// existing row instead of re-importing.
+	let mintedLocalId = $state<number | null>(null);
+	async function handleHeart(e: MouseEvent) {
+		e.stopPropagation();
+		if (favoritePending) return;
+		favoritePending = true;
+		const previous = isFavorite;
+		favoriteOverride = !previous; // optimistic
+		const seed = mintedLocalId != null ? { ...track, track_id: mintedLocalId } : track;
+		const result = await toggleTidalTrackFavorite(seed, previous);
+		if (result) {
+			favoriteOverride = result.is_favorite;
+			mintedLocalId = result.local_id;
+		} else {
+			favoriteOverride = previous; // rollback
+		}
+		favoritePending = false;
+	}
 </script>
 
 {#if variant === 'numbered'}
@@ -190,6 +218,14 @@
 				title="More actions"
 				onclick={handleMoreClick}
 			>⋯</button>
+			<button
+				class="row-btn heart"
+				class:on={isFavorite}
+				aria-label={isFavorite ? 'Remove from favourites' : 'Add to favourites'}
+				title={isFavorite ? 'Remove from favourites' : 'Add to favourites'}
+				disabled={favoritePending}
+				onclick={handleHeart}
+			>{isFavorite ? '♥' : '♡'}</button>
 		</div>
 	</li>
 {:else if variant === 'indexed'}
@@ -251,6 +287,14 @@
 				title="More actions"
 				onclick={handleMoreClick}
 			>⋯</button>
+			<button
+				class="row-btn heart"
+				class:on={isFavorite}
+				aria-label={isFavorite ? 'Remove from favourites' : 'Add to favourites'}
+				title={isFavorite ? 'Remove from favourites' : 'Add to favourites'}
+				disabled={favoritePending}
+				onclick={handleHeart}
+			>{isFavorite ? '♥' : '♡'}</button>
 		</div>
 	</li>
 {:else if variant === 'art'}
@@ -322,6 +366,14 @@
 				title="More actions"
 				onclick={handleMoreClick}
 			>⋯</button>
+			<button
+				class="row-btn heart"
+				class:on={isFavorite}
+				aria-label={isFavorite ? 'Remove from favourites' : 'Add to favourites'}
+				title={isFavorite ? 'Remove from favourites' : 'Add to favourites'}
+				disabled={favoritePending}
+				onclick={handleHeart}
+			>{isFavorite ? '♥' : '♡'}</button>
 		</div>
 	</li>
 {:else}
@@ -557,4 +609,5 @@
 		background: transparent;
 		color: var(--text-secondary);
 	}
+	.row-btn.heart.on { color: var(--accent); }
 </style>
