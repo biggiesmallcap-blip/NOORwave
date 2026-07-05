@@ -566,3 +566,17 @@ candidate (dsp features + dj profile + correction, ~4 queries x 12 candidates
 per automix batch). Batch-load all three tables by media ref before scoring.
 Playback path, deliberately left out of the discovery overhaul.
 Spawned by: seed-branch discovery overhaul 2026-07-05 (audit finding)
+
+### perf: discovery space warm latency ~1.0s vs the 800ms target
+
+Measured 2026-07-05 on the real 2GB db, release build, seed with trained
+neighbors: cold (empty Last.fm cache) 1.9s (target < 2.5s, met), warm
+steady-state ~0.98-1.03s (target < 800ms, near miss). The overhaul's shaping
+layer is not the cost: the rerank endpoint runs the identical scoring math
+plus taste build plus two batched feature queries in ~2ms. The second is
+spent inside the pre-existing orchestrate_song candidate funnel (three-source
+blend, radio post-scoring). Changing coherence band also one-off refetches
+Last.fm similar (~2.6s) because the cache stores the smaller per-band limit.
+Optimizing orchestrate_song is shared with the radio endpoints, so it is a
+deliberate non-goal of the discovery overhaul; profile it separately.
+Spawned by: seed-branch discovery overhaul 2026-07-05 (phase 9 measurement)
