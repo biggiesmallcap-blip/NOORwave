@@ -708,6 +708,10 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/discovery/rerank",
             post(discovery_space_routes::rerank_discovery_space),
         )
+        .route(
+            "/api/discovery/space/queue",
+            post(discovery_space_routes::queue_discovery_space_tracks),
+        )
         // Sportify-based discovery resolver - single, bulk, and cache-only status poll.
         .route("/api/resolve/tidal/track", get(resolve_tidal_track))
         .route("/api/resolve/tidal/bulk", post(resolve_tidal_bulk))

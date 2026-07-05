@@ -7950,6 +7950,7 @@ async fn all_api_routes_are_registered() {
         ("POST", "/api/discovery/blend/play"),
         ("POST", "/api/discovery/blend/radio"),
         ("POST", "/api/discovery/rerank"),
+        ("POST", "/api/discovery/space/queue"),
         ("GET", "/api/resolve/tidal/track"),
         ("POST", "/api/resolve/tidal/bulk"),
         ("GET", "/api/resolve/tidal/status"),

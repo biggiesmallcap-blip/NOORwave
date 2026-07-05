@@ -1156,6 +1156,120 @@ pub(super) async fn rerank_discovery_space(
     Ok(Json(json!({ "scores": scores, "rerank_applied": true })))
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct DiscoverySpaceQueueRequest {
+    items: Vec<DiscoverySpaceQueueItem>,
+    /// true replaces the radio queue and starts playback (play-all);
+    /// false appends to the existing queue.
+    #[serde(default)]
+    play: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct DiscoverySpaceQueueItem {
+    track_id: Option<i64>,
+    tidal_id: Option<i64>,
+    artist: String,
+    title: String,
+    #[serde(default)]
+    is_in_library: bool,
+    reason: Option<String>,
+    score: Option<f64>,
+}
+
+/// Queue the ranked list the user is looking at, in that exact order, through
+/// the same pending-queue pipeline the blend endpoints use: library rows play
+/// directly, tidal/pending rows resolve lazily at play time.
+pub(super) async fn queue_discovery_space_tracks(
+    State(state): State<SharedState>,
+    Json(payload): Json<DiscoverySpaceQueueRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let tracks: Vec<crate::services::radio::RadioCandidate> = payload
+        .items
+        .iter()
+        .filter(|item| {
+            item.track_id.is_some_and(|id| id > 0)
+                || item.tidal_id.is_some_and(|id| id > 0)
+                || (!item.artist.trim().is_empty() && !item.title.trim().is_empty())
+        })
+        .map(|item| {
+            let is_in_library = item.is_in_library && item.track_id.is_some_and(|id| id > 0);
+            crate::services::radio::RadioCandidate {
+                track_id: item.track_id.filter(|id| *id > 0).unwrap_or_default(),
+                tidal_track_id: item.tidal_id.filter(|id| *id > 0),
+                title: item.title.clone(),
+                artist_name: item.artist.clone(),
+                album_title: None,
+                artwork_url: None,
+                duration_ms: None,
+                isrc: None,
+                is_in_library,
+                source: if is_in_library {
+                    crate::services::radio::RadioSource::Library
+                } else {
+                    crate::services::radio::RadioSource::Engine
+                },
+                reason: item
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "Discover space".to_string()),
+                similarity_score: item.score.unwrap_or(0.5).clamp(0.0, 1.0),
+                confidence: None,
+                candidate_in_degree_percentile: None,
+                support_count: None,
+                primary_reason: None,
+            }
+        })
+        .collect();
+    if tracks.is_empty() {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "no queueable tracks in request" })),
+        ));
+    }
+    let queued_count = tracks.len();
+    let db = {
+        let state_guard = state.read().await;
+        state_guard.db.clone()
+    };
+
+    if payload.play {
+        let (first_playable, pending_count) =
+            build_radio_queue_and_spawn_resolvers(&state, &db, None, tracks, "space_play_all")
+                .await?;
+        let snapshot = start_first_radio_queue_item(&state).await?;
+        Ok(Json(json!({
+            "first_playable": first_playable,
+            "pending_count": pending_count,
+            "queued_count": queued_count,
+            "state": snapshot.state,
+            "queue": snapshot.queue,
+        })))
+    } else {
+        let build = db
+            .with_conn(move |conn| {
+                Ok(
+                    crate::server::radio_pipeline::append_radio_queue_from_candidates(
+                        conn, tracks,
+                    )?,
+                )
+            })
+            .map_err(internal)?;
+        let pending_item_ids = build.pending_item_ids;
+        let pending_count = pending_item_ids.len();
+        spawn_pending_resolvers_for_queue_items(&state, &db, pending_item_ids, "space_queue_all")
+            .await;
+        {
+            let state_guard = state.read().await;
+            let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
+        }
+        Ok(Json(json!({
+            "pending_count": pending_count,
+            "queued_count": queued_count,
+        })))
+    }
+}
+
 pub(super) async fn get_discovery_space(
     State(state): State<SharedState>,
     Json(payload): Json<DiscoverySpaceRequest>,
