@@ -2162,7 +2162,7 @@
 						<label class="wallpaper-control">
 							<span>
 								<strong>When idle</strong>
-								<small>What the background does when nothing is playing.</small>
+								<small>What the background does when nothing is playing. Drift and Frozen save power; Demo ignores the FPS cap and runs full motion.</small>
 							</span>
 							<div class="wallpaper-control-field">
 								<select
@@ -2171,9 +2171,9 @@
 									onchange={(e) => setWallpaperIdle((e.currentTarget as HTMLSelectElement).value as WallpaperIdle)}
 									aria-label="Idle behaviour"
 								>
-									<option value="drift">Gentle drift</option>
-									<option value="frozen">Frozen</option>
-									<option value="demo">Demo pulse</option>
+									<option value="drift">Gentle drift (half FPS)</option>
+									<option value="frozen">Frozen (no motion)</option>
+									<option value="demo">Demo pulse (full FPS)</option>
 								</select>
 							</div>
 						</label>

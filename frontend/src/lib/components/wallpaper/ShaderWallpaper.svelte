@@ -332,12 +332,14 @@ float peakAt(float t){
 		let lastFrame = performance.now();
 		// Resting: while music (or demo) drives the shaders, render at the user's
 		// fps. Once nothing has driven them for IDLE_GRACE_MS (long enough for the
-		// VU envelopes to visibly decay to silence), Drift drops to IDLE_FPS and
-		// Frozen stops painting entirely until an input that changes the picture
-		// (pointer, click ripple, palette, shader, resize) invalidates the frame.
-		// A full-window raster at 60fps while paused was the app's single biggest
-		// idle GPU cost; this is the lever that removes it.
-		const IDLE_FPS = 15;
+		// VU envelopes to visibly decay to silence), Drift halves that fps (still
+		// cheaper than active, but the fps slider now visibly changes idle motion
+		// instead of pinning to a flat rate) and Frozen stops painting entirely
+		// until an input that changes the picture (pointer, click ripple, palette,
+		// shader, resize) invalidates the frame. A full-window raster at 60fps
+		// while paused was the app's single biggest idle GPU cost; this is the
+		// lever that removes it.
+		const IDLE_FPS_DIVISOR = 2;
 		const IDLE_GRACE_MS = 5000;
 		const MOUSE_SETTLE_EPS = 0.0002;
 		const CLICK_LIVE_S = 5;
@@ -395,7 +397,7 @@ float peakAt(float t){
 			const resting = !driving && now - lastDrivingAt >= IDLE_GRACE_MS;
 
 			const interval =
-				resting && idle === 'drift' ? Math.max(frameIntervalMs, 1000 / IDLE_FPS) : frameIntervalMs;
+				resting && idle === 'drift' ? frameIntervalMs * IDLE_FPS_DIVISOR : frameIntervalMs;
 			if (now - lastFrame < interval) return;
 			if (resting && idle === 'frozen') {
 				// Frozen and settled: the frame cannot change, so skip the raster.
