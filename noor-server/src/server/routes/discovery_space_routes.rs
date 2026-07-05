@@ -58,6 +58,12 @@ pub(super) struct DiscoverySpaceRequest {
 pub(super) struct DiscoveryBlendRequest {
     seeds: Vec<blend::BlendSeedInput>,
     limit: Option<i64>,
+    /// Same contract as the space request: 0..1, omitted -> 0.5 which is
+    /// exactly the historical blend behavior (identity shaping, 1.0x cap).
+    coherence: Option<f64>,
+    session_id: Option<String>,
+    #[serde(default)]
+    filters: Option<ranking::SpaceFilters>,
 }
 
 fn blend_seed_error_response(error: blend::BlendSeedError) -> (StatusCode, Json<Value>) {
@@ -327,7 +333,14 @@ fn build_discovery_blend_space(
     seeds: &mut [blend::BlendSeed],
     limit: i64,
     library_cap_ratio: f64,
-) -> anyhow::Result<(Vec<blend::ScoredBlendCandidate>, Value)> {
+    coherence: f64,
+    filters: &ranking::SpaceFilters,
+    session_id: Option<&str>,
+) -> anyhow::Result<(
+    Vec<blend::ScoredBlendCandidate>,
+    Value,
+    HashMap<String, ranking::ShapedScore>,
+)> {
     let model = queries::get_selected_discovery_embedding_model(conn)?;
     resolve_blend_seed_anchors(conn, seeds, model.as_ref().map(|model| model.id))?;
     let seed_count = seeds.len();
@@ -371,6 +384,9 @@ fn build_discovery_blend_space(
     }
 
     let mut candidate_inputs: HashMap<String, blend::BlendCandidateInput> = HashMap::new();
+    // Sidecar row id per external identity, so shaping can pull genre tags for
+    // candidates that have no library genre rows.
+    let mut ext_candidate_by_identity: HashMap<String, i64> = HashMap::new();
     if let Some(model) = model {
         let per_seed_limit = limit.max(1).min(200);
         let seed_id_set = library_seed_ids.iter().copied().collect::<HashSet<_>>();
@@ -433,6 +449,9 @@ fn build_discovery_blend_space(
                 if seed_identity_set.contains(&identity) {
                     continue;
                 }
+                ext_candidate_by_identity
+                    .entry(identity.clone())
+                    .or_insert(row.candidate_id);
                 let reason_tags =
                     parse_discovery_reason_tags(row.reason_json.as_deref(), "external_match");
                 let entry = candidate_inputs.entry(identity.clone()).or_insert_with(|| {
@@ -461,6 +480,131 @@ fn build_discovery_blend_space(
         .values()
         .map(|candidate| blend::score_blend_candidate(candidate, seeds))
         .collect::<Vec<_>>();
+
+    // Shape blend scores with the shared multi-signal layer BEFORE the cap
+    // sort and truncation, so genre and harmonic agreement move blend ranking
+    // the same way they move the single-seed space. Seed features are the
+    // union of the resolved anchors: genre sets merged (max weight wins),
+    // bpm/camelot/energy from the highest-weight anchor that has data. The
+    // same-artist boost stays off here: with multiple seeds there is no single
+    // artist to be "the same" as, and per-seed proximity already carries that
+    // signal.
+    let rank_params = ranking::RankParams::from_coherence(coherence);
+    let mut why_by_identity: HashMap<String, ranking::ShapedScore> = HashMap::new();
+    let library_candidate_ids: Vec<i64> = candidates.iter().filter_map(|c| c.track_id).collect();
+    let mut feature_ids = library_candidate_ids.clone();
+    feature_ids.extend(library_seed_ids.iter().copied());
+    let dsp_map = queries::get_dsp_lite_for_tracks(conn, &feature_ids)?;
+    let genre_map = queries::get_genre_names_for_tracks(conn, &feature_ids)?;
+    let ext_ids: Vec<i64> = ext_candidate_by_identity.values().copied().collect();
+    let ext_tag_map = queries::get_external_candidate_genre_tags(conn, &ext_ids)?;
+
+    let mut seed_genre_union: HashMap<String, f64> = HashMap::new();
+    let mut best_anchor: Option<(f64, i64)> = None;
+    for seed in seeds.iter() {
+        let Some(anchor_id) = seed.anchor_track_id.or(seed.track_id) else {
+            continue;
+        };
+        if let Some(names) = genre_map.get(&anchor_id) {
+            for (key, weight) in crate::genre::jaccard::weighted_genre_set(names) {
+                seed_genre_union
+                    .entry(key)
+                    .and_modify(|cur| {
+                        if weight > *cur {
+                            *cur = weight;
+                        }
+                    })
+                    .or_insert(weight);
+            }
+        }
+        let has_dsp = dsp_map
+            .get(&anchor_id)
+            .is_some_and(|d| d.0.is_some() || d.1.is_some() || d.2.is_some());
+        if has_dsp && best_anchor.is_none_or(|(best_weight, _)| seed.weight > best_weight) {
+            best_anchor = Some((seed.weight, anchor_id));
+        }
+    }
+    let (seed_bpm, seed_camelot, seed_energy) = best_anchor
+        .and_then(|(_, id)| dsp_map.get(&id))
+        .map(|d| (d.0, d.1.clone(), d.2))
+        .unwrap_or((None, None, None));
+    let seed_features = ranking::SeedFeatures {
+        genre_set: seed_genre_union,
+        camelot: seed_camelot,
+        bpm: seed_bpm,
+        energy: seed_energy,
+        artist_id: None,
+        artist_name_lc: None,
+    };
+
+    for cand in candidates.iter_mut() {
+        let genre_set = cand
+            .track_id
+            .and_then(|id| genre_map.get(&id))
+            .map(|names| crate::genre::jaccard::weighted_genre_set(names))
+            .or_else(|| {
+                ext_candidate_by_identity
+                    .get(&cand.identity)
+                    .and_then(|cid| ext_tag_map.get(cid))
+                    .map(|tags| crate::genre::jaccard::weighted_genre_set(tags))
+            })
+            .unwrap_or_default();
+        let dsp = cand.track_id.and_then(|id| dsp_map.get(&id));
+        let features = ranking::CandidateFeatures {
+            track_id: cand.track_id.or(cand.tidal_id).unwrap_or(0),
+            is_in_library: cand.is_in_library,
+            source: cand.source.clone(),
+            base_score: cand.blend_score,
+            genre_set,
+            camelot: dsp.and_then(|d| d.1.clone()),
+            bpm: dsp.and_then(|d| d.0),
+            energy: dsp.and_then(|d| d.2),
+            artist_id: None,
+            artist_name_lc: None,
+            covered_seed_count: cand.covered_seed_count,
+        };
+        let shaped = ranking::shape_score(&seed_features, &features, &rank_params, None);
+        cand.blend_score = shaped.score;
+        why_by_identity.insert(cand.identity.clone(), shaped);
+    }
+
+    // User filters, seed nodes exempt (they are appended after this point).
+    let mut filter_dropped_count = 0usize;
+    if !filters.is_noop() {
+        let era_active = filters.year_min.is_some() || filters.year_max.is_some();
+        let year_map: HashMap<i64, i64> = if era_active {
+            queries::get_album_years_for_tracks(conn, &library_candidate_ids)?
+        } else {
+            HashMap::new()
+        };
+        let heard: HashSet<i64> = if filters.exclude_heard_session {
+            queries::get_session_heard_track_ids(conn, session_id)?
+        } else {
+            HashSet::new()
+        };
+        let before = candidates.len();
+        candidates.retain(|cand| {
+            let dsp = cand.track_id.and_then(|id| dsp_map.get(&id));
+            let features = ranking::CandidateFeatures {
+                track_id: cand.track_id.unwrap_or(0),
+                is_in_library: cand.is_in_library,
+                base_score: cand.blend_score,
+                camelot: dsp.and_then(|d| d.1.clone()),
+                bpm: dsp.and_then(|d| d.0),
+                energy: dsp.and_then(|d| d.2),
+                ..Default::default()
+            };
+            ranking::passes_filters(
+                filters,
+                &features,
+                seed_features.camelot.as_deref(),
+                cand.track_id.and_then(|id| year_map.get(&id).copied()),
+                cand.track_id.is_some_and(|id| heard.contains(&id)),
+            )
+        });
+        filter_dropped_count = before - candidates.len();
+    }
+
     let resolvable_external_count = candidates
         .iter()
         .filter(|candidate| {
@@ -468,9 +612,12 @@ fn build_discovery_blend_space(
                 && candidate.playability == blend::Playability::Resolvable
         })
         .count();
+    // Coherence scales how many library guides the cap tolerates. At the
+    // default 0.5 the factor is exactly 1.0, i.e. the historical ratio.
+    let effective_cap_ratio = library_cap_ratio * (0.6 + 0.8 * coherence.clamp(0.0, 1.0));
     blend::apply_library_guide_cap(
         &mut candidates,
-        library_cap_ratio,
+        effective_cap_ratio,
         resolvable_external_count < 3,
     );
     for (index, candidate) in candidates.iter_mut().enumerate() {
@@ -513,10 +660,11 @@ fn build_discovery_blend_space(
         "pending_external_count": pending_external_count,
         "library_guide_count": library_guide_count,
         "coverage_ratio": coverage_ratio,
+        "filter_dropped_count": filter_dropped_count,
     });
 
     seed_nodes.append(&mut candidates);
-    Ok((seed_nodes, health))
+    Ok((seed_nodes, health, why_by_identity))
 }
 
 fn blend_node_json(candidate: &blend::ScoredBlendCandidate) -> Value {
@@ -657,18 +805,45 @@ pub(super) async fn get_discovery_blend_space(
     let mut seeds =
         blend::validate_and_normalize_seeds(&payload.seeds).map_err(blend_seed_error_response)?;
     let limit = payload.limit.unwrap_or(60).max(1).min(200);
+    let coherence = payload.coherence.unwrap_or(0.5).clamp(0.0, 1.0);
+    let filters = payload.filters.unwrap_or_default();
+    let session_id = payload.session_id;
     let db = {
         let state_guard = state.read().await;
         state_guard.db.clone()
     };
-    let (candidates, health) = db
-        .with_conn(|conn| build_discovery_blend_space(conn, &mut seeds, limit, 0.25))
+    let (candidates, health, why_by_identity) = db
+        .with_conn(|conn| {
+            build_discovery_blend_space(
+                conn,
+                &mut seeds,
+                limit,
+                0.25,
+                coherence,
+                &filters,
+                session_id.as_deref(),
+            )
+        })
         .map_err(internal)?;
     let seed_nodes = candidates
         .iter()
         .filter(|candidate| candidate.role == blend::CandidateRole::Seed)
         .collect::<Vec<_>>();
-    let tracks = candidates.iter().map(blend_node_json).collect::<Vec<_>>();
+    let tracks = candidates
+        .iter()
+        .map(|candidate| {
+            let mut node = blend_node_json(candidate);
+            if let (Some(obj), Some(shaped)) = (
+                node.as_object_mut(),
+                why_by_identity.get(&candidate.identity),
+            ) {
+                obj.insert("why".to_string(), json!(shaped.why));
+                obj.insert("why_signals".to_string(), json!(shaped.why_signals));
+                obj.insert("shaped_score".to_string(), json!(shaped.score));
+            }
+            node
+        })
+        .collect::<Vec<_>>();
     let mut edges = Vec::new();
     for seed in seed_nodes {
         for candidate in candidates
@@ -690,6 +865,7 @@ pub(super) async fn get_discovery_blend_space(
             "edge_count": edges.len(),
             "source_counts": {},
             "reason_counts": {},
+            "coherence": coherence,
         },
         "generated_at": chrono::Utc::now().to_rfc3339(),
     })))
@@ -702,12 +878,25 @@ pub(super) async fn add_discovery_blend_to_queue(
     let mut seeds =
         blend::validate_and_normalize_seeds(&payload.seeds).map_err(blend_seed_error_response)?;
     let limit = payload.limit.unwrap_or(60).max(1).min(200);
+    let coherence = payload.coherence.unwrap_or(0.5).clamp(0.0, 1.0);
+    let filters = payload.filters.unwrap_or_default();
+    let session_id = payload.session_id;
     let db = {
         let state_guard = state.read().await;
         state_guard.db.clone()
     };
-    let (candidates, health) = db
-        .with_conn(|conn| build_discovery_blend_space(conn, &mut seeds, limit, 0.15))
+    let (candidates, health, _why) = db
+        .with_conn(|conn| {
+            build_discovery_blend_space(
+                conn,
+                &mut seeds,
+                limit,
+                0.15,
+                coherence,
+                &filters,
+                session_id.as_deref(),
+            )
+        })
         .map_err(internal)?;
     let tracks = blend_candidates_to_radio(&candidates);
     if tracks.is_empty() {
@@ -770,12 +959,25 @@ async fn play_discovery_blend_inner(
     let mut seeds =
         blend::validate_and_normalize_seeds(&payload.seeds).map_err(blend_seed_error_response)?;
     let limit = payload.limit.unwrap_or(60).max(1).min(200);
+    let coherence = payload.coherence.unwrap_or(0.5).clamp(0.0, 1.0);
+    let filters = payload.filters.unwrap_or_default();
+    let session_id = payload.session_id;
     let db = {
         let state_guard = state.read().await;
         state_guard.db.clone()
     };
-    let (candidates, health) = db
-        .with_conn(|conn| build_discovery_blend_space(conn, &mut seeds, limit, 0.15))
+    let (candidates, health, _why) = db
+        .with_conn(|conn| {
+            build_discovery_blend_space(
+                conn,
+                &mut seeds,
+                limit,
+                0.15,
+                coherence,
+                &filters,
+                session_id.as_deref(),
+            )
+        })
         .map_err(internal)?;
     let tracks = blend_candidates_to_radio(&candidates);
     if tracks.is_empty() {

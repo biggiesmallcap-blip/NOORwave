@@ -2957,6 +2957,108 @@ pub fn get_album_years_for_tracks(
     Ok(map)
 }
 
+/// Minimal DSP triple (bpm, camelot, energy) per track, batched for discovery
+/// ranking. Only rows that exist come back; absent tracks mean "unanalyzed".
+pub fn get_dsp_lite_for_tracks(
+    conn: &Connection,
+    track_ids: &[i64],
+) -> Result<HashMap<i64, (Option<f64>, Option<String>, Option<f64>)>> {
+    if track_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let ids_csv: String = track_ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT track_id, bpm, camelot_key, energy
+         FROM audio_dsp_features WHERE track_id IN ({ids_csv})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Option<f64>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<f64>>(3)?,
+        ))
+    })?;
+    let mut map = HashMap::new();
+    for r in rows {
+        let (track_id, bpm, camelot, energy) = r?;
+        map.insert(track_id, (bpm, camelot, energy));
+    }
+    Ok(map)
+}
+
+/// Flat genre names per track, batched for discovery ranking's weighted
+/// Jaccard. Names, not paths: plain-name sets forgo the ancestor bonus but
+/// avoid a second, heavier path-resolution query on the interactive path.
+pub fn get_genre_names_for_tracks(
+    conn: &Connection,
+    track_ids: &[i64],
+) -> Result<HashMap<i64, Vec<String>>> {
+    if track_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let ids_csv: String = track_ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT tg.track_id, g.name
+         FROM track_genres tg
+         JOIN genres g ON g.id = tg.genre_id
+         WHERE tg.track_id IN ({ids_csv})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut map: HashMap<i64, Vec<String>> = HashMap::new();
+    for r in rows {
+        let (track_id, name) = r?;
+        map.entry(track_id).or_default().push(name);
+    }
+    Ok(map)
+}
+
+/// Genre tag lists for external track candidates (parsed from their
+/// `genre_tags_json` sidecar column), batched by candidate id.
+pub fn get_external_candidate_genre_tags(
+    conn: &Connection,
+    candidate_ids: &[i64],
+) -> Result<HashMap<i64, Vec<String>>> {
+    if candidate_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let ids_csv: String = candidate_ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT id, genre_tags_json FROM external_track_candidates
+         WHERE id IN ({ids_csv}) AND genre_tags_json IS NOT NULL"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut map = HashMap::new();
+    for r in rows {
+        let (id, raw) = r?;
+        if let Ok(tags) = serde_json::from_str::<Vec<String>>(&raw) {
+            if !tags.is_empty() {
+                map.insert(id, tags);
+            }
+        }
+    }
+    Ok(map)
+}
+
 /// Track ids heard in a listening session, for the discovery exclude-heard
 /// filter. `session_id: None` falls back to the most recent session so the
 /// filter still means something when the client has not minted one yet.

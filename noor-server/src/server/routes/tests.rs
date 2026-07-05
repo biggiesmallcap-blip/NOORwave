@@ -3122,6 +3122,16 @@ async fn discovery_blend_space_includes_pending_external_nodes_and_health() {
     assert_eq!(body["health"]["pending_external_count"], 1);
     assert_eq!(body["health"]["playable_external_count"], 1);
     assert!(body["health"]["coverage_ratio"].as_f64().unwrap() > 0.0);
+    // Phase 4 shaping: non-seed blend nodes carry why fields; no filters were
+    // requested so nothing is dropped.
+    assert!(
+        pending["why"].is_string() && !pending["why"].as_str().unwrap_or("").is_empty(),
+        "blend candidates carry a why-related summary"
+    );
+    assert!(pending["why_signals"].is_array());
+    assert!(pending["shaped_score"].is_number());
+    assert_eq!(body["health"]["filter_dropped_count"], 0);
+    assert_eq!(body["diagnostics"]["coherence"], 0.5);
 }
 
 #[tokio::test]
