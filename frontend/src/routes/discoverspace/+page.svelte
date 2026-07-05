@@ -13,7 +13,9 @@
 		makeBlendRadio,
 		lockSeed,
 		unlockSeed,
+		hydrateDiscoverControls,
 	} from '$lib/components/DiscoverSpace/discover_space_store';
+	import DiscoverFilterBar from '$lib/components/DiscoverSpace/DiscoverFilterBar.svelte';
 	import DiscoverSpace from '$lib/components/DiscoverSpace/DiscoverSpace.svelte';
 	import DiscoverHoverCard from '$lib/components/DiscoverSpace/DiscoverHoverCard.svelte';
 	import DiscoverSidePanel from '$lib/components/DiscoverSpace/DiscoverSidePanel.svelte';
@@ -187,6 +189,9 @@
 	});
 
 	onMount(() => {
+		// Controls (coherence, filters, session id) hydrate before the first
+		// load so the initial request already carries them.
+		hydrateDiscoverControls();
 		const seedId = resolvedSeedId;
 		if (seedId !== null) {
 			lastLoadedSeedId = seedId;
@@ -237,6 +242,8 @@
 			</button>
 		</div>
 	{/if}
+
+	<DiscoverFilterBar />
 
 	{#if $discoverSpaceStore.blendSeeds.length > 0}
 		<div class="blend-strip" aria-label="Blend seeds">

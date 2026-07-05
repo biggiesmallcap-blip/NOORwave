@@ -77,12 +77,16 @@ export interface DiscoverTrackNode {
 	// Relevance
 	score: number;                     // 0..1, normalized per source
 	rawScore?: number;
+	shapedScore?: number;              // pre-normalization multi-signal score
+	rerankScore?: number;              // session-taste rerank result, list-sort only
 	confidence: number;                // 0..1
 	supportCount: number;
 	inDegree: number;
 	inDegreePctile: number;            // 0..1 within current set
 
 	// Reasoning
+	why?: string;                      // compact human-readable relation summary
+	whySignals?: string[];             // stable keys behind `why` (key_bpm, genre, ...)
 	primaryReason: DiscoverReason;
 	reasonTags: DiscoverReason[];
 	perSeedScores: DiscoverBlendSeedScore[];
@@ -176,6 +180,9 @@ export interface ApiDiscoveryNode {
 	score?: number;
 	raw_score?: number;
 	similarity_score?: number;
+	shaped_score?: number;
+	why?: string;
+	why_signals?: string[];
 	confidence?: number;
 	support_count?: number;
 	candidate_in_degree?: number;
@@ -233,5 +240,37 @@ export interface ApiDiscoveryResponse {
 		pruned_edge_count: number;
 		hub_suppressed_count: number;
 		low_confidence_edge_dropped_count: number;
+		coherence?: number;
+		filter_dropped_count?: number;
+		era_filter_coverage?: number | null;
+		rerank_applied?: boolean;
 	};
+}
+
+/// User-set discovery filters, mirroring the backend SpaceFilters request
+/// shape. All fields optional; an all-default object sends no constraints.
+export interface DiscoverFilters {
+	bpm_min?: number | null;
+	bpm_max?: number | null;
+	energy_min?: number | null;
+	energy_max?: number | null;
+	key_compatible_only?: boolean;
+	year_min?: number | null;
+	year_max?: number | null;
+	exclude_in_library?: boolean;
+	exclude_heard_session?: boolean;
+}
+
+export function isFilterNoop(filters: DiscoverFilters): boolean {
+	return (
+		filters.bpm_min == null &&
+		filters.bpm_max == null &&
+		filters.energy_min == null &&
+		filters.energy_max == null &&
+		!filters.key_compatible_only &&
+		filters.year_min == null &&
+		filters.year_max == null &&
+		!filters.exclude_in_library &&
+		!filters.exclude_heard_session
+	);
 }

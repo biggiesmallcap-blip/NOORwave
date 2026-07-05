@@ -16,7 +16,9 @@ import type {
 	ApiDiscoveryResponse,
 	DiscoverBlendSeed,
 	DiscoverBlendHealth,
+	DiscoverFilters,
 } from './discover_space_types';
+import { isFilterNoop } from './discover_space_types';
 
 // In-flight guard. Each loadSpace call increments `loadSpaceSeq` and aborts
 // the previous controller, mirroring the pattern in routes/videos/+page.svelte
@@ -45,6 +47,9 @@ interface DiscoverSpaceState {
 	blendHealth: DiscoverBlendHealth | null;
 	blendLoading: boolean;
 	blendError: string | null;
+	coherence: number;
+	filters: DiscoverFilters;
+	sessionId: string;
 }
 
 export const discoverSpaceStore = writable<DiscoverSpaceState>({
@@ -65,7 +70,91 @@ export const discoverSpaceStore = writable<DiscoverSpaceState>({
 	blendHealth: null,
 	blendLoading: false,
 	blendError: null,
+	coherence: 0.5,
+	filters: {},
+	sessionId: '',
 });
+
+// -- Control persistence (sessionStorage) -------------------------------------
+// Hydrated from +page.svelte onMount (SSR-safe); written through on change so
+// navigating away and back keeps the user's coherence, filters, and session.
+
+const CONTROLS_STORAGE_KEY = 'discoverspace.controls.v1';
+const SESSION_STORAGE_KEY = 'discoverspace.session.v1';
+
+function persistControls(coherence: number, filters: DiscoverFilters): void {
+	try {
+		sessionStorage.setItem(CONTROLS_STORAGE_KEY, JSON.stringify({ coherence, filters }));
+	} catch {
+		// Storage unavailable (private mode etc.) - controls just reset next visit.
+	}
+}
+
+export function hydrateDiscoverControls(): void {
+	let coherence = 0.5;
+	let filters: DiscoverFilters = {};
+	let sessionId = '';
+	try {
+		const rawControls = sessionStorage.getItem(CONTROLS_STORAGE_KEY);
+		if (rawControls) {
+			const parsed = JSON.parse(rawControls);
+			if (typeof parsed.coherence === 'number') {
+				coherence = Math.min(1, Math.max(0, parsed.coherence));
+			}
+			if (parsed.filters && typeof parsed.filters === 'object') filters = parsed.filters;
+		}
+		sessionId = sessionStorage.getItem(SESSION_STORAGE_KEY) ?? '';
+	} catch {
+		// Fall through to defaults.
+	}
+	if (!sessionId) {
+		sessionId =
+			typeof crypto !== 'undefined' && 'randomUUID' in crypto
+				? crypto.randomUUID()
+				: `s-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+		try {
+			sessionStorage.setItem(SESSION_STORAGE_KEY, sessionId);
+		} catch {
+			// Non-persistent session id still works for this page lifetime.
+		}
+	}
+	discoverSpaceStore.update((s) => ({ ...s, coherence, filters, sessionId }));
+}
+
+/// Reload whichever space is active (blend when 2+ seeds, seed space
+/// otherwise) with the current store controls. Used by the coherence slider
+/// and filter bar.
+function reloadActiveSpace(): void {
+	const s = get(discoverSpaceStore);
+	const track = get(currentTrack);
+	if (s.blendSeeds.length >= 2) {
+		loadBlendSpace(track?.id ?? null);
+	} else if (s.activeSeedId !== null) {
+		loadSpace(s.mode, s.activeSeedId, undefined, s.activeSeedSource, track?.id ?? null);
+	}
+}
+
+let coherenceReloadTimer: ReturnType<typeof setTimeout> | null = null;
+
+export function setCoherence(value: number): void {
+	const coherence = Math.min(1, Math.max(0, value));
+	const s = get(discoverSpaceStore);
+	discoverSpaceStore.update((st) => ({ ...st, coherence }));
+	persistControls(coherence, s.filters);
+	// Debounced reload: the slider fires continuously while dragging.
+	if (coherenceReloadTimer) clearTimeout(coherenceReloadTimer);
+	coherenceReloadTimer = setTimeout(() => {
+		coherenceReloadTimer = null;
+		reloadActiveSpace();
+	}, 300);
+}
+
+export function setFilters(filters: DiscoverFilters): void {
+	const s = get(discoverSpaceStore);
+	discoverSpaceStore.update((st) => ({ ...st, filters }));
+	persistControls(s.coherence, filters);
+	reloadActiveSpace();
+}
 
 function blendSeedIdentity(seed: DiscoverBlendSeed): string {
 	if (seed.kind === 'library') return `library:${seed.track_id ?? 0}`;
@@ -154,6 +243,18 @@ export function clearBlend(): void {
 	}));
 }
 
+/// Current control fields for any discovery request body. Filters are omitted
+/// entirely when no-op so the wire payload stays byte-compatible with the
+/// pre-controls contract.
+function controlRequestFields() {
+	const s = get(discoverSpaceStore);
+	return {
+		coherence: s.coherence,
+		session_id: s.sessionId || undefined,
+		filters: isFilterNoop(s.filters) ? undefined : s.filters,
+	};
+}
+
 function blendRequestBody(seeds: DiscoverBlendSeed[], limit = 100) {
 	return JSON.stringify({
 		seeds: seeds.map(({ kind, track_id, tidal_id, artist, title, weight }) => ({
@@ -165,6 +266,7 @@ function blendRequestBody(seeds: DiscoverBlendSeed[], limit = 100) {
 			weight,
 		})),
 		limit,
+		...controlRequestFields(),
 	});
 }
 
@@ -208,6 +310,7 @@ export async function loadSpace(
 				prompt,
 				limit: 100,
 				include_artists: mode === 'explore',
+				...controlRequestFields(),
 			}),
 			signal: aborter.signal,
 		});
