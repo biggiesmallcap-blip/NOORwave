@@ -5913,6 +5913,36 @@ pub fn record_discovery_feedback(
     Ok(())
 }
 
+/// Most recent feedback rows for a discovery session, newest first:
+/// `(candidate_track_id, action, artist_id)`. The artist id comes along via a
+/// join so the rerank taste builder needs only one extra batched genre lookup.
+pub fn get_discovery_feedback_for_session(
+    conn: &Connection,
+    session_id: &str,
+    limit: i64,
+) -> Result<Vec<(i64, String, Option<i64>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT df.candidate_track_id, df.action, t.artist_id
+         FROM discovery_feedback df
+         LEFT JOIN tracks t ON t.id = df.candidate_track_id
+         WHERE df.session_id = ?1
+         ORDER BY df.created_at DESC, df.id DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![session_id, limit], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 #[allow(dead_code)]
 pub fn get_playback_transition_sequences(conn: &Connection) -> Result<Vec<Vec<i64>>> {
     let mut stmt = conn.prepare(

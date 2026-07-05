@@ -998,6 +998,164 @@ async fn play_discovery_blend_inner(
     })))
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct DiscoveryRerankRequest {
+    session_id: Option<String>,
+    seed_track_id: Option<i64>,
+    coherence: Option<f64>,
+    candidates: Vec<DiscoveryRerankCandidate>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct DiscoveryRerankCandidate {
+    track_id: i64,
+    #[serde(default)]
+    is_in_library: bool,
+    base_score: f64,
+    artist_name: Option<String>,
+}
+
+/// Stateless like/skip rerank for the current node set. The client sends the
+/// candidates it is showing (with their base scores); the server rebuilds a
+/// session TasteVector from the last recorded feedback rows and re-shapes
+/// those scores. No candidate regeneration, no server session state.
+///
+/// base_score is client-supplied and trusted as-is: this is a single-user
+/// local app, and the value only feeds the caller's own display ordering.
+pub(super) async fn rerank_discovery_space(
+    State(state): State<SharedState>,
+    Json(payload): Json<DiscoveryRerankRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let coherence = payload.coherence.unwrap_or(0.5).clamp(0.0, 1.0);
+    let rank_params = ranking::RankParams::from_coherence(coherence);
+    let seed_id = payload.seed_track_id.unwrap_or(0);
+    let session_id = payload.session_id;
+    if payload.candidates.is_empty() {
+        return Ok(Json(json!({ "scores": [], "rerank_applied": false })));
+    }
+    let db = {
+        let state_guard = state.read().await;
+        state_guard.db.clone()
+    };
+
+    let candidates = payload.candidates;
+    let scores = db
+        .with_conn(move |conn| {
+            // Session taste from recorded feedback (empty vector when the
+            // session has none yet - shaping still applies seed signals).
+            let mut taste_rows: Vec<ranking::FeedbackRow> = Vec::new();
+            if let Some(sid) = session_id.as_deref() {
+                let raw = queries::get_discovery_feedback_for_session(conn, sid, 50)?;
+                let feedback_track_ids: Vec<i64> = raw.iter().map(|(id, _, _)| *id).collect();
+                let feedback_genres =
+                    queries::get_genre_names_for_tracks(conn, &feedback_track_ids)?;
+                for (candidate_track_id, action, artist_id) in raw {
+                    let Some(action) = ranking::FeedbackAction::parse(&action) else {
+                        continue;
+                    };
+                    taste_rows.push(ranking::FeedbackRow {
+                        candidate_track_id,
+                        action,
+                        artist_id,
+                        genres: feedback_genres
+                            .get(&candidate_track_id)
+                            .cloned()
+                            .unwrap_or_default(),
+                    });
+                }
+            }
+            let taste = ranking::build_session_taste(&taste_rows);
+
+            // Seed features straight from the DB (the client only sends ids).
+            let seed_features = if seed_id > 0 {
+                let seed_meta: Option<(Option<i64>, Option<String>)> = conn
+                    .query_row(
+                        "SELECT t.artist_id, ar.name
+                         FROM tracks t
+                         LEFT JOIN artists ar ON ar.id = t.artist_id
+                         WHERE t.id = ?1",
+                        params![seed_id],
+                        |row| {
+                            Ok((
+                                row.get::<_, Option<i64>>(0)?,
+                                row.get::<_, Option<String>>(1)?,
+                            ))
+                        },
+                    )
+                    .optional()?;
+                let dsp = queries::get_dsp_lite_for_tracks(conn, &[seed_id])?;
+                let genres = queries::get_genre_names_for_tracks(conn, &[seed_id])?;
+                let (bpm, camelot, energy) = dsp
+                    .get(&seed_id)
+                    .map(|d| (d.0, d.1.clone(), d.2))
+                    .unwrap_or((None, None, None));
+                ranking::SeedFeatures {
+                    genre_set: genres
+                        .get(&seed_id)
+                        .map(|names| crate::genre::jaccard::weighted_genre_set(names))
+                        .unwrap_or_default(),
+                    camelot,
+                    bpm,
+                    energy,
+                    artist_id: seed_meta.as_ref().and_then(|(id, _)| *id),
+                    artist_name_lc: seed_meta
+                        .and_then(|(_, name)| name)
+                        .map(|name| name.to_lowercase())
+                        .filter(|name| !name.is_empty()),
+                }
+            } else {
+                ranking::SeedFeatures::default()
+            };
+
+            let library_ids: Vec<i64> = candidates
+                .iter()
+                .filter(|c| c.is_in_library)
+                .map(|c| c.track_id)
+                .collect();
+            let dsp_map = queries::get_dsp_lite_for_tracks(conn, &library_ids)?;
+            let genre_map = queries::get_genre_names_for_tracks(conn, &library_ids)?;
+
+            let scores = candidates
+                .iter()
+                .map(|cand| {
+                    let dsp = dsp_map.get(&cand.track_id);
+                    let features = ranking::CandidateFeatures {
+                        track_id: cand.track_id,
+                        is_in_library: cand.is_in_library,
+                        source: String::new(),
+                        base_score: cand.base_score,
+                        genre_set: genre_map
+                            .get(&cand.track_id)
+                            .map(|names| crate::genre::jaccard::weighted_genre_set(names))
+                            .unwrap_or_default(),
+                        camelot: dsp.and_then(|d| d.1.clone()),
+                        bpm: dsp.and_then(|d| d.0),
+                        energy: dsp.and_then(|d| d.2),
+                        artist_id: None,
+                        artist_name_lc: cand
+                            .artist_name
+                            .as_ref()
+                            .map(|name| name.to_lowercase())
+                            .filter(|name| !name.is_empty()),
+                        covered_seed_count: 0,
+                    };
+                    let shaped =
+                        ranking::shape_score(&seed_features, &features, &rank_params, Some(&taste));
+                    json!({
+                        "track_id": cand.track_id,
+                        "score": shaped.score,
+                        "why": shaped.why,
+                        "why_signals": shaped.why_signals,
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(scores)
+        })
+        .map_err(internal)?;
+
+    Ok(Json(json!({ "scores": scores, "rerank_applied": true })))
+}
+
 pub(super) async fn get_discovery_space(
     State(state): State<SharedState>,
     Json(payload): Json<DiscoverySpaceRequest>,
