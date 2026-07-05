@@ -23,6 +23,7 @@
 		startTidalSongRadio,
 		playAlbum,
 		toggleTrackFavorite,
+		toggleTidalTrackFavorite,
 		currentTrack,
 		isPlaying,
 		togglePlayback
@@ -692,6 +693,25 @@
 		}
 	}
 
+	// Favourite a TIDAL top-track from a non-library artist. The row has no local
+	// id yet, so toggleTidalTrackFavorite imports on demand; we optimistically flip
+	// is_favorite on the source array (and remember the minted track_id so a second
+	// toggle re-uses it) and roll back if the round-trip fails.
+	async function onTidalTopHeartClick(track: TidalDiscographyTrack, event: MouseEvent) {
+		event.stopPropagation();
+		const previous = track.is_favorite ?? false;
+		tidalTopTracks = tidalTopTracks.map((t) =>
+			t.tidal_id === track.tidal_id ? { ...t, is_favorite: !previous } : t
+		);
+		const seed = { ...track, is_favorite: previous } as TidalPlayable;
+		const result = await toggleTidalTrackFavorite(seed, previous);
+		tidalTopTracks = tidalTopTracks.map((t) =>
+			t.tidal_id === track.tidal_id
+				? { ...t, is_favorite: result ? result.is_favorite : previous, track_id: result?.local_id ?? t.track_id }
+				: t
+		);
+	}
+
 	function onAlbumCardPlay(album: { id: number | null }, event: MouseEvent) {
 		event.preventDefault();
 		event.stopPropagation();
@@ -1033,6 +1053,13 @@
 									<span class="tidal-row-album">{track.album_title}</span>
 								{/if}
 							</span>
+							<button
+								class="tidal-row-heart"
+								class:on={track.is_favorite}
+								aria-label={track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+								title={track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+								onclick={(e) => void onTidalTopHeartClick(track, e)}
+							>{track.is_favorite ? '♥' : '♡'}</button>
 							<span class="tidal-pill" aria-label="From TIDAL">TIDAL</span>
 						</li>
 						{/if}
@@ -1956,7 +1983,7 @@
 	   so the merged Top tracks list scans as one continuous list. */
 	.tidal-popular-row {
 		display: grid;
-		grid-template-columns: 32px 40px 1fr auto;
+		grid-template-columns: 32px 40px 1fr auto auto;
 		align-items: center;
 		gap: 12px;
 		padding: 6px 12px;
@@ -1965,6 +1992,24 @@
 		transition: background 120ms ease;
 		min-height: 52px;
 	}
+	.tidal-row-heart {
+		all: unset;
+		width: 30px;
+		height: 30px;
+		display: grid;
+		place-items: center;
+		border-radius: 999px;
+		cursor: pointer;
+		color: var(--text-secondary);
+		font-size: var(--font-size-md);
+		opacity: 0;
+		transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
+	}
+	.tidal-popular-row:hover .tidal-row-heart,
+	.tidal-row-heart:focus-visible,
+	.tidal-row-heart.on { opacity: 1; }
+	.tidal-row-heart:hover { background: var(--bg-hover); color: var(--text-primary); }
+	.tidal-row-heart.on { color: var(--accent); }
 	.tidal-popular-row:hover { background: rgba(255, 255, 255, 0.04); }
 	.tidal-popular-row.disabled { cursor: not-allowed; opacity: 0.55; }
 	.tidal-row-num {
