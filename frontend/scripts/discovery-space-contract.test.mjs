@@ -57,6 +57,54 @@ describe('discovery space controls contract', () => {
 		expect(adapter).toContain('whySignals: api.why_signals');
 	});
 
+	test('like/skip post feedback then rerank with pre-shaping base scores', () => {
+		const store = readFileSync(STORE, 'utf8');
+		expect(store).toContain('export function likeNode');
+		expect(store).toContain('export function skipNode');
+		const feedbackIdx = store.indexOf('/api/discovery/feedback');
+		const rerankIdx = store.indexOf('/api/discovery/rerank');
+		expect(feedbackIdx).toBeGreaterThan(-1);
+		expect(rerankIdx).toBeGreaterThan(feedbackIdx);
+		// base_score must be the pre-shaping raw score so shaping runs once.
+		expect(store).toContain('base_score: n.rawScore ?? n.score');
+		// Merge touches rerankScore/why only - canvas layout stays put.
+		expect(store).toContain('rerankScore: row.score');
+	});
+
+	test('ranked list panel queues through the pending-queue pipeline', () => {
+		const store = readFileSync(STORE, 'utf8');
+		expect(store).toContain('export async function queueSpaceTracks');
+		expect(store).toContain('/api/discovery/space/queue');
+
+		const list = readFileSync(
+			'src/lib/components/DiscoverSpace/DiscoverRankedList.svelte',
+			'utf8'
+		);
+		expect(list).toContain('ArtworkImage');
+		expect(list).toContain('size={320}');
+		expect(list).toContain('Play all');
+		expect(list).toContain('Queue all');
+		expect(list).toContain("key_bpm: 'Key+BPM'");
+		expect(list).toContain('likeNode');
+		expect(list).toContain('skipNode');
+
+		const page = readFileSync(PAGE, 'utf8');
+		expect(page).toContain('<DiscoverRankedList');
+	});
+
+	test('why summary surfaces in hover card and side panel', () => {
+		const hover = readFileSync(
+			'src/lib/components/DiscoverSpace/DiscoverHoverCard.svelte',
+			'utf8'
+		);
+		expect(hover).toContain('node.why');
+		const panel = readFileSync(
+			'src/lib/components/DiscoverSpace/DiscoverSidePanel.svelte',
+			'utf8'
+		);
+		expect(panel).toContain('node.why');
+	});
+
 	test('filter bar exposes every backend filter and warns about key-only semantics', () => {
 		const bar = readFileSync(FILTER_BAR, 'utf8');
 		for (const field of [

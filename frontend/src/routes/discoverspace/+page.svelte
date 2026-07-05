@@ -16,6 +16,7 @@
 		hydrateDiscoverControls,
 	} from '$lib/components/DiscoverSpace/discover_space_store';
 	import DiscoverFilterBar from '$lib/components/DiscoverSpace/DiscoverFilterBar.svelte';
+	import DiscoverRankedList from '$lib/components/DiscoverSpace/DiscoverRankedList.svelte';
 	import DiscoverSpace from '$lib/components/DiscoverSpace/DiscoverSpace.svelte';
 	import DiscoverHoverCard from '$lib/components/DiscoverSpace/DiscoverHoverCard.svelte';
 	import DiscoverSidePanel from '$lib/components/DiscoverSpace/DiscoverSidePanel.svelte';
@@ -375,6 +376,9 @@
 			{/if}
 		</div>
 
+		<!-- Ranked list (collapsible middle column) -->
+		<DiscoverRankedList onSelectNode={(node) => handleSelectNode(node)} />
+
 		<!-- Side panel -->
 		<DiscoverSidePanel
 			node={selectedNode}
@@ -612,7 +616,8 @@
 	.page-layout {
 		flex: 1;
 		display: grid;
-		grid-template-columns: 1fr 280px;
+		/* canvas | collapsible ranked list | side panel */
+		grid-template-columns: 1fr auto 280px;
 		gap: var(--space-3, 12px);
 		min-height: 0;
 		padding: 0 var(--space-3, 12px);

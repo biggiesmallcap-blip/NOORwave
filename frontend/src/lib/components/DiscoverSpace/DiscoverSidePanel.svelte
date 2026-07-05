@@ -264,6 +264,9 @@
 		<!-- Why it connects -->
 		<div class="why-section">
 			<div class="why-heading">Why it connects</div>
+			{#if node.why}
+				<div class="why-line">{node.why}</div>
+			{/if}
 			<div class="why-reason">
 				<span class="reason-pill">{REASON_LABELS[node.primaryReason]}</span>
 				<span class="reason-explanation">{REASON_EXPLANATIONS[node.primaryReason]}</span>
@@ -454,6 +457,7 @@
 	.fp-fill { height: 100%; background: rgba(124,128,255,0.6); border-radius: 999px; }
 
 	.why-section { display: flex; flex-direction: column; gap: 6px; }
+	.why-line { font-size: var(--font-size-xs); color: rgba(200, 202, 255, 0.9); }
 	.why-heading { font-size: var(--font-size-2xs); text-transform: uppercase; letter-spacing: 0.1em; color: rgba(255,255,255,0.3); }
 	.why-reason { display: flex; flex-direction: column; gap: 3px; }
 	.reason-pill { font-size: var(--font-size-2xs); font-weight: var(--font-weight-semibold); color: rgba(124,128,255,0.9); }

@@ -50,6 +50,7 @@ interface DiscoverSpaceState {
 	coherence: number;
 	filters: DiscoverFilters;
 	sessionId: string;
+	feedbackBusy: boolean;
 }
 
 export const discoverSpaceStore = writable<DiscoverSpaceState>({
@@ -73,6 +74,7 @@ export const discoverSpaceStore = writable<DiscoverSpaceState>({
 	coherence: 0.5,
 	filters: {},
 	sessionId: '',
+	feedbackBusy: false,
 });
 
 // -- Control persistence (sessionStorage) -------------------------------------
@@ -540,5 +542,138 @@ export function handleDiscoverySpaceRefreshed(seedTrackId: number): void {
 		discoverSpaceStore.update((st) => ({ ...st, refreshProgress: null }));
 		const track = get(currentTrack);
 		loadSpace(s.mode, seedTrackId, undefined, s.activeSeedSource, track?.id ?? null);
+	}
+}
+
+// -- Like/skip feedback + stateless rerank -------------------------------------
+
+async function sendFeedbackAndRerank(
+	node: DiscoverTrackNode,
+	action: 'like' | 'skip'
+): Promise<void> {
+	const s = get(discoverSpaceStore);
+	if (s.feedbackBusy) return;
+	discoverSpaceStore.update((st) => ({ ...st, feedbackBusy: true }));
+	try {
+		const apiBase = getApiBase();
+		const feedbackResp = await authFetch(`${apiBase}/api/discovery/feedback`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				seed_track_id: s.activeSeedId ?? 0,
+				candidate_track_id: node.trackId,
+				action,
+				surface: 'discover_space',
+				session_id: s.sessionId || undefined,
+			}),
+		});
+		if (!feedbackResp.ok) throw new Error(`Feedback failed: ${feedbackResp.status}`);
+
+		// Rerank the full non-seed set against the updated session taste.
+		// base_score is the PRE-shaping raw score so shaping runs exactly once.
+		const candidates = get(discoverSpaceStore)
+			.nodes.filter((n) => !n.isSeed)
+			.map((n) => ({
+				track_id: n.trackId,
+				is_in_library: n.isInLibrary,
+				base_score: n.rawScore ?? n.score,
+				artist_name: n.artist,
+			}));
+		const rerankResp = await authFetch(`${apiBase}/api/discovery/rerank`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				session_id: s.sessionId || undefined,
+				seed_track_id: s.activeSeedId ?? undefined,
+				coherence: s.coherence,
+				candidates,
+			}),
+		});
+		if (!rerankResp.ok) throw new Error(`Rerank failed: ${rerankResp.status}`);
+		const result = await rerankResp.json();
+		const byId = new Map<number, { score: number; why: string; why_signals: string[] }>(
+			(result.scores ?? []).map((row: { track_id: number; score: number; why: string; why_signals: string[] }) => [
+				row.track_id,
+				row,
+			])
+		);
+		// Merge scores/why only; canvas positions and normalized display score
+		// stay put so the map does not jump on every like.
+		discoverSpaceStore.update((st) => ({
+			...st,
+			nodes: st.nodes.map((n) => {
+				const row = byId.get(n.trackId);
+				return row
+					? { ...n, rerankScore: row.score, why: row.why, whySignals: row.why_signals }
+					: n;
+			}),
+		}));
+	} catch (e) {
+		const msg = e instanceof Error ? e.message : 'Unknown error';
+		console.error('[discoverspace/store] feedback failed:', msg);
+		showToast(action === 'like' ? 'Could not record like' : 'Could not record skip', 'error');
+	} finally {
+		discoverSpaceStore.update((st) => ({ ...st, feedbackBusy: false }));
+	}
+}
+
+export function likeNode(node: DiscoverTrackNode): Promise<void> {
+	return sendFeedbackAndRerank(node, 'like');
+}
+
+export function skipNode(node: DiscoverTrackNode): Promise<void> {
+	return sendFeedbackAndRerank(node, 'skip');
+}
+
+// -- Queue-all / play-all through the pending-queue pipeline --------------------
+
+function queueItemFromNode(node: DiscoverTrackNode) {
+	const base = {
+		artist: node.artist,
+		title: node.title,
+		reason: node.why || node.primaryReason,
+		score: node.shapedScore ?? node.score,
+	};
+	if (node.playable.kind === 'library') {
+		return { ...base, track_id: node.playable.track_id, is_in_library: true };
+	}
+	if (node.playable.kind === 'tidal') {
+		return { ...base, tidal_id: node.playable.tidal_id };
+	}
+	if (node.playable.kind === 'pending-lastfm') {
+		return base;
+	}
+	return null; // unavailable
+}
+
+export async function queueSpaceTracks(
+	nodes: DiscoverTrackNode[],
+	play: boolean
+): Promise<void> {
+	const items = nodes
+		.map(queueItemFromNode)
+		.filter((item): item is NonNullable<typeof item> => item !== null);
+	if (items.length === 0) {
+		showToast('Nothing playable to queue', 'info');
+		return;
+	}
+	try {
+		const apiBase = getApiBase();
+		const response = await authFetch(`${apiBase}/api/discovery/space/queue`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ items, play }),
+		});
+		if (!response.ok) throw new Error(`Queue request failed: ${response.status}`);
+		const result = await response.json();
+		if (play && result.state && result.queue) {
+			hydratePlayback({ state: result.state, queue: result.queue });
+		}
+		const count = result.queued_count ?? items.length;
+		showToast(play ? `Playing ${count} tracks` : `Queued ${count} tracks`, 'success');
+	} catch (e) {
+		const msg = e instanceof Error ? e.message : 'Unknown error';
+		console.error('[discoverspace/store] queueSpaceTracks failed:', msg);
+		showToast('Could not queue tracks', 'error');
 	}
 }

@@ -137,6 +137,7 @@ describe('loadSpace', () => {
 			coherence: 0.5,
 			filters: {},
 			sessionId: '',
+			feedbackBusy: false,
 		});
 	});
 
