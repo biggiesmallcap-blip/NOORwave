@@ -21,11 +21,9 @@
 //! `discovery_space`, so display scores stay in `[0, 1]` with no new clamp
 //! regime downstream.
 
-// Wired into the space/blend handlers in the next commit; the allow keeps this
-// commit warning-clean and is removed with the wiring.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
+
+use serde::Deserialize;
 
 use crate::genre::jaccard::weighted_jaccard;
 use crate::services::audio_analysis::{
@@ -79,7 +77,6 @@ pub fn blend_band(coherence: f64) -> BlendBand {
 /// and reused across every candidate.
 #[derive(Debug, Clone, Copy)]
 pub struct RankParams {
-    pub coherence: f64,
     genre_weight: f64,
     harmonic_alpha: f64,
     energy_weight: f64,
@@ -91,7 +88,6 @@ impl RankParams {
     pub fn from_coherence(coherence: f64) -> Self {
         let c = coherence.clamp(0.0, 1.0);
         Self {
-            coherence: c,
             genre_weight: BASE_GENRE_WEIGHT * (0.5 + c),
             harmonic_alpha: BASE_HARMONIC_ALPHA * (0.5 + c),
             energy_weight: ENERGY_WEIGHT,
@@ -335,7 +331,10 @@ fn derive_why(
 
 /// User-set constraints on the candidate set. Applied after generation and
 /// before pruning. The seed itself is always exempt (filtered by the caller).
-#[derive(Debug, Clone, Default)]
+/// Deserializes straight from the request body; every field is optional so an
+/// absent `filters` object reproduces the unfiltered behavior.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
 pub struct SpaceFilters {
     pub bpm_min: Option<f64>,
     pub bpm_max: Option<f64>,
@@ -422,6 +421,9 @@ pub fn passes_filters(
 
 /// One recorded feedback event, pre-resolved to the fields the taste builder
 /// needs. `genres` are lowercased genre names.
+// The feedback/taste trio below wires in with the rerank endpoint; the allows
+// go away with it.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct FeedbackRow {
     pub candidate_track_id: i64,
@@ -431,6 +433,7 @@ pub struct FeedbackRow {
 }
 
 /// The three feedback actions the discovery surface records.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FeedbackAction {
     Like,
@@ -441,6 +444,7 @@ pub enum FeedbackAction {
 impl FeedbackAction {
     /// Parse the wire string. Returns `None` for anything outside the allowlist
     /// so the handler can reject it with a 400.
+    #[allow(dead_code)]
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "like" => Some(Self::Like),
@@ -456,6 +460,7 @@ impl FeedbackAction {
 /// dismiss suppresses the track only (the user hid that specific track, which is
 /// not necessarily a vote against its artist or genre). Reuses the canonical
 /// type - no fork.
+#[allow(dead_code)]
 pub fn build_session_taste(rows: &[FeedbackRow]) -> TasteVector {
     let mut tv = TasteVector::default();
     for row in rows {

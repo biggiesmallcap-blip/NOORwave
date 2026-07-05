@@ -1,5 +1,6 @@
 use crate::db::queries;
 use crate::services::discovery_blend as blend;
+use crate::services::discovery_ranking as ranking;
 use crate::services::discovery_space as ds;
 use crate::smart::discovery as discovery_engine;
 use crate::{AppEvent, SharedState};
@@ -43,6 +44,14 @@ pub(super) struct DiscoverySpaceRequest {
     seed_track_id: Option<i64>,
     prompt: Option<String>,
     limit: Option<i64>,
+    /// Coherence-vs-diversity control, 0..1. Omitted -> 0.5, which maps to the
+    /// historical behavior (Mixed radio blend, near-identity shaping).
+    coherence: Option<f64>,
+    /// Client listening-session id; enables the exclude-heard filter (and,
+    /// later, session-taste reranking) without any server session state.
+    session_id: Option<String>,
+    #[serde(default)]
+    filters: Option<ranking::SpaceFilters>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -795,6 +804,10 @@ pub(super) async fn get_discovery_space(
     let limit = payload.limit.unwrap_or(60).max(1).min(200);
     let seed_id = payload.seed_track_id.unwrap_or(0);
     let prompt = payload.prompt.as_deref().unwrap_or("").trim().to_string();
+    let coherence = payload.coherence.unwrap_or(0.5).clamp(0.0, 1.0);
+    let rank_params = ranking::RankParams::from_coherence(coherence);
+    let filters = payload.filters.unwrap_or_default();
+    let session_id = payload.session_id;
 
     let mut state_guard = state.read().await;
 
@@ -918,12 +931,19 @@ pub(super) async fn get_discovery_space(
         let lastfm_similar_cache = state_guard.lastfm_similar_cache.clone();
         drop(state_guard);
 
+        // Coherence picks the candidate-generation band; only this call site
+        // changes, the radio endpoints keep their own blend selection.
+        let radio_blend = match ranking::blend_band(coherence) {
+            ranking::BlendBand::Coherent => crate::services::radio::RadioBlend::Familiar,
+            ranking::BlendBand::Balanced => crate::services::radio::RadioBlend::Mixed,
+            ranking::BlendBand::Diverse => crate::services::radio::RadioBlend::Adventurous,
+        };
         let queue = crate::services::radio::orchestrate_song(
             &db,
             lastfm.as_ref(),
             Some(&lastfm_similar_cache),
             seed_id,
-            crate::services::radio::RadioBlend::Mixed,
+            radio_blend,
             limit as usize,
             &[],
         )
@@ -1478,6 +1498,119 @@ pub(super) async fn get_discovery_space(
         }
     }
 
+    // -- 3f. Multi-signal shaping (seed mode) ----------------------------------
+    // Shape each candidate's base score with the signals enriched above (genre
+    // Jaccard, Camelot/BPM, energy, same-artist) so normalization and pruning
+    // downstream rank on the blend, and derive the per-node "why related".
+    // Prompt/browse paths have no seed to be coherent with, so they skip this
+    // and keep their base scores untouched.
+    let seed_camelot: Option<String> = if seed_id > 0 && prompt.is_empty() {
+        space_tracks
+            .iter()
+            .find(|t| t.track_id == seed_id)
+            .and_then(|t| t.camelot_key.clone())
+    } else {
+        None
+    };
+    let mut shaped_by_track: HashMap<i64, ranking::ShapedScore> = HashMap::new();
+    if seed_id > 0 && prompt.is_empty() {
+        // RadioCandidate carries no artist_id, so same-artist detection runs on
+        // the lowercased name for library and external candidates alike.
+        let seed_features = space_tracks
+            .iter()
+            .find(|t| t.track_id == seed_id)
+            .map(|t| ranking::SeedFeatures {
+                genre_set: crate::genre::jaccard::weighted_genre_set(&t.genres),
+                camelot: t.camelot_key.clone(),
+                bpm: t.bpm,
+                energy: t.energy,
+                artist_id: None,
+                artist_name_lc: Some(t.artist_name.to_lowercase()).filter(|s| !s.is_empty()),
+            })
+            .unwrap_or_default();
+        for t in space_tracks.iter().filter(|t| t.track_id != seed_id) {
+            let cand = ranking::CandidateFeatures {
+                track_id: t.track_id,
+                is_in_library: t.is_in_library,
+                source: ds::normalize_source(&t.source).to_string(),
+                base_score: t.similarity_score,
+                genre_set: crate::genre::jaccard::weighted_genre_set(&t.genres),
+                camelot: t.camelot_key.clone(),
+                bpm: t.bpm,
+                energy: t.energy,
+                artist_id: None,
+                artist_name_lc: Some(t.artist_name.to_lowercase()).filter(|s| !s.is_empty()),
+                covered_seed_count: 0,
+            };
+            shaped_by_track.insert(
+                t.track_id,
+                ranking::shape_score(&seed_features, &cand, &rank_params, None),
+            );
+        }
+    }
+
+    // -- 3g. User filters (seed exempt) ----------------------------------------
+    let mut filter_dropped_count = 0usize;
+    let mut era_filter_coverage: Option<f64> = None;
+    if !filters.is_noop() {
+        let era_active = filters.year_min.is_some() || filters.year_max.is_some();
+        let year_map: HashMap<i64, i64> = if era_active {
+            let candidate_ids: Vec<i64> = space_tracks
+                .iter()
+                .filter(|t| t.is_in_library && t.track_id != seed_id)
+                .map(|t| t.track_id)
+                .collect();
+            state_guard
+                .db
+                .with_conn(|conn| queries::get_album_years_for_tracks(conn, &candidate_ids))
+                .unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
+        if era_active {
+            let denom = space_tracks
+                .iter()
+                .filter(|t| t.track_id != seed_id)
+                .count();
+            era_filter_coverage = Some(if denom == 0 {
+                0.0
+            } else {
+                year_map.len() as f64 / denom as f64
+            });
+        }
+        let heard: HashSet<i64> = if filters.exclude_heard_session {
+            state_guard
+                .db
+                .with_conn(|conn| queries::get_session_heard_track_ids(conn, session_id.as_deref()))
+                .unwrap_or_default()
+        } else {
+            HashSet::new()
+        };
+        let before = space_tracks.len();
+        space_tracks.retain(|t| {
+            if t.track_id == seed_id {
+                return true;
+            }
+            let cand = ranking::CandidateFeatures {
+                track_id: t.track_id,
+                is_in_library: t.is_in_library,
+                base_score: t.similarity_score,
+                camelot: t.camelot_key.clone(),
+                bpm: t.bpm,
+                energy: t.energy,
+                ..Default::default()
+            };
+            ranking::passes_filters(
+                &filters,
+                &cand,
+                seed_camelot.as_deref(),
+                year_map.get(&t.track_id).copied(),
+                heard.contains(&t.track_id),
+            )
+        });
+        filter_dropped_count = before - space_tracks.len();
+    }
+
     // -- 4. Build typed edges (v1.5) ------------------------------------------
     // Typed to feed the pruner and serialized after pruning. Old callers receive
     // extra fields they can ignore; all existing fields are preserved.
@@ -1623,7 +1756,10 @@ pub(super) async fn get_discovery_space(
         .iter()
         .map(|t| ds::ScoreCandidate {
             track_id: t.track_id,
-            raw_score: t.similarity_score,
+            raw_score: shaped_by_track
+                .get(&t.track_id)
+                .map(|s| s.score)
+                .unwrap_or(t.similarity_score),
             source: ds::normalize_source(&t.source).to_string(),
         })
         .collect();
@@ -1652,10 +1788,13 @@ pub(super) async fn get_discovery_space(
         .iter()
         .map(|t| ds::PruneNode {
             track_id: t.track_id,
-            score: norm_scores
-                .get(&t.track_id)
-                .copied()
-                .unwrap_or_else(|| t.similarity_score.clamp(0.0, 1.0)),
+            score: norm_scores.get(&t.track_id).copied().unwrap_or_else(|| {
+                shaped_by_track
+                    .get(&t.track_id)
+                    .map(|s| s.score)
+                    .unwrap_or(t.similarity_score)
+                    .clamp(0.0, 1.0)
+            }),
             is_seed: t.track_id == seed_id,
             primary_reason: t.primary_reason.clone(),
             in_degree_pctile: t.in_degree_pctile,
@@ -1665,7 +1804,7 @@ pub(super) async fn get_discovery_space(
         prune_nodes,
         prune_edges,
         seed_id,
-        &ds::PruneConfig::default(),
+        &ds::PruneConfig::for_coherence(coherence),
     );
     let surviving_ids: HashSet<i64> = prune_result.node_ids.iter().copied().collect();
 
@@ -1678,10 +1817,13 @@ pub(super) async fn get_discovery_space(
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let norm_score = norm_scores
-                .get(&t.track_id)
-                .copied()
-                .unwrap_or_else(|| t.similarity_score.clamp(0.0, 1.0));
+            let norm_score = norm_scores.get(&t.track_id).copied().unwrap_or_else(|| {
+                shaped_by_track
+                    .get(&t.track_id)
+                    .map(|s| s.score)
+                    .unwrap_or(t.similarity_score)
+                    .clamp(0.0, 1.0)
+            });
             // Library tracks are only truly cold-start if confidence is very low -
             // support_count may be 0 simply because the neighbor table hasn't been
             // calculated yet, which doesn't mean there's no behavioral data.
@@ -1770,10 +1912,14 @@ pub(super) async fn get_discovery_space(
                 "radius": node_radius,
                 "opacity": 0.0,
             });
+            let shaped = shaped_by_track.get(&t.track_id);
             let v15 = json!({
                 "id": format!("track-{}", t.track_id),
                 "score": norm_score,
                 "raw_score": t.similarity_score,
+                "shaped_score": shaped.map(|s| s.score),
+                "why": shaped.map(|s| s.why.clone()).unwrap_or_default(),
+                "why_signals": shaped.map(|s| s.why_signals.clone()).unwrap_or_default(),
                 "confidence": t.confidence,
                 "support_count": t.support_count,
                 "is_cold_start": is_cold_start,
@@ -1857,6 +2003,10 @@ pub(super) async fn get_discovery_space(
         "pruned_edge_count": prune_result.pruned_edge_count,
         "hub_suppressed_count": prune_result.hub_suppressed_count,
         "low_confidence_edge_dropped_count": prune_result.low_confidence_edge_dropped_count,
+        "coherence": coherence,
+        "filter_dropped_count": filter_dropped_count,
+        "era_filter_coverage": era_filter_coverage,
+        "rerank_applied": false,
     });
 
     // -- 11. Background seed-neighbor refresh (DiscoverSpace only) ------------

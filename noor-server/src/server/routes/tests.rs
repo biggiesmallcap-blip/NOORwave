@@ -2876,6 +2876,140 @@ async fn discovery_space_includes_resolved_sidecar_external_neighbors() {
 }
 
 #[tokio::test]
+async fn discovery_space_accepts_coherence_filters_and_reports_why() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (1, 'Seed Artist')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, duration_ms, tidal_id)
+                 VALUES (1, 'Seed Track', 1, 200000, 1001)",
+            [],
+        )?;
+        let model = queries::create_embedding_model(
+            conn,
+            "discovery-fusion-v2:space-coherence",
+            "discovery-fusion-v2",
+            2,
+            "ready",
+            None,
+        )?;
+        queries::activate_embedding_model(conn, model.id)?;
+        let resolved = queries::upsert_external_track_candidate(
+            conn,
+            &queries::ExternalTrackCandidateUpsert {
+                tidal_id: Some(990_002),
+                mbid: None,
+                dedupe_key: "tidal:990002".to_string(),
+                title: "Shaped External".to_string(),
+                artist_name: "Outside".to_string(),
+                genre_tags_json: None,
+                duration_ms: Some(181_000),
+                expires_at: "2099-01-01 00:00:00".to_string(),
+            },
+        )?;
+        queries::replace_external_candidate_neighbors(
+            conn,
+            model.id,
+            1,
+            &[queries::ExternalCandidateNeighborWriteRow {
+                candidate_id: resolved.id,
+                rank: 1,
+                score: 0.9,
+                audio_score: 0.9,
+                metadata_score: 0.0,
+                reason_json: Some(r#"[{"key":"external_audio_proxy"}]"#.to_string()),
+            }],
+        )?;
+        Ok(())
+    })
+    .expect("seed discovery space");
+
+    // Request with the full set of new optional fields. The bpm filter must NOT
+    // drop the external candidate (missing bpm passes range filters).
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/discovery/space")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"seed_track_id":1,"mode":"radio","limit":20,
+                        "coherence":0.9,
+                        "session_id":"contract-session",
+                        "filters":{"bpm_min":100.0,"exclude_heard_session":true}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    let diagnostics = &body["diagnostics"];
+    assert_eq!(diagnostics["coherence"], 0.9);
+    assert_eq!(diagnostics["rerank_applied"], false);
+    assert_eq!(
+        diagnostics["filter_dropped_count"], 0,
+        "missing-signal candidates must pass range filters"
+    );
+
+    let tracks = body["tracks"].as_array().expect("tracks array");
+    let external = tracks
+        .iter()
+        .find(|track| track["track_id"] == 990_002)
+        .expect("external node survives bpm filter without bpm data");
+    assert!(
+        external["why"].is_string() && !external["why"].as_str().unwrap_or("").is_empty(),
+        "non-seed nodes carry a why-related summary"
+    );
+    assert_eq!(external["why_signals"][0], "embedding");
+    assert!(external["shaped_score"].is_number());
+
+    // Seed node is exempt from shaping and filters.
+    let seed = tracks
+        .iter()
+        .find(|track| track["track_id"] == 1)
+        .expect("seed node present");
+    assert_eq!(seed["why"], "");
+
+    // Omitting the new fields entirely still works (backward compatibility).
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(db))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/discovery/space")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"seed_track_id":1,"mode":"radio","limit":20}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["diagnostics"]["coherence"], 0.5);
+}
+
+#[tokio::test]
 async fn discovery_blend_space_includes_pending_external_nodes_and_health() {
     let db = fresh_migrated_db();
     db.with_conn(|conn| {
