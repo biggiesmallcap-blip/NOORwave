@@ -8,6 +8,7 @@ import {
 	type PlaybackSnapshot,
 	type PlaybackState,
 	type QueueItem,
+	type RadioBlend,
 	type StreamDisplayInfo,
 	type TidalPlayable,
 	type Track
@@ -1551,6 +1552,40 @@ export async function startAlbumRadio(albumId: number) {
 	} catch (error) {
 		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('start album radio', error, () => startAlbumRadio(albumId));
+	} finally {
+		finishPlaybackIntent(intentSeq);
+	}
+}
+
+/**
+ * Genre-flavored radio: seed the real radio orchestrator from a representative
+ * track of a genre / mood / heat set. Unlike a static replacePlaybackQueue of
+ * raw genre rows (which can strand on unplayable TIDAL-only tracks and loop the
+ * one playable seed), this builds a continuous, reasoned station and hydrates
+ * the player like Song/Artist radio. `label` is user-facing ("Vibe", "Hottest").
+ */
+export async function startGenreRadio(seedTrackId: number, blend: RadioBlend, label: string) {
+	if (!assertOnline()) return;
+	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
+	const loadingToastId = showToast(`Starting ${label} radio...`, 'info', 8000);
+	try {
+		const queue = await api.startRadioSong({ seed_track_id: seedTrackId, blend, limit: 60 });
+		dismissToast(loadingToastId);
+		if (!isLatestPlaybackIntent(intentSeq)) return;
+		if (!queue.first_playable) {
+			playerError.set({ message: 'No radio tracks found for that seed.' });
+			return;
+		}
+		setRadioReasons(queue.tracks);
+		if (queue.state && queue.queue) {
+			hydratePlayback({ state: queue.state, queue: queue.queue });
+		}
+		showToast(`${label} radio started`, 'success');
+	} catch (error) {
+		dismissToast(loadingToastId);
+		if (!isLatestPlaybackIntent(intentSeq)) return;
+		setError('start radio', error, () => startGenreRadio(seedTrackId, blend, label));
 	} finally {
 		finishPlaybackIntent(intentSeq);
 	}
