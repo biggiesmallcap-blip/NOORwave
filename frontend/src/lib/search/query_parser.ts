@@ -9,6 +9,10 @@ export interface ParsedQuery {
   filters: Record<string, FilterValue>;
 }
 
+// Only keys that buildAudioParams actually maps to a server-side filter.
+// A key listed here but never mapped would be stripped from the free text and
+// silently dropped - the search would run unfiltered, which is exactly the
+// bug this set used to cause with type:/quality:/mood:.
 const SUPPORTED_KEYS = new Set([
   'bpm',
   'key',
@@ -19,10 +23,8 @@ const SUPPORTED_KEYS = new Set([
   'genre',
   'artist',
   'album',
-  'type',
-  'quality',
-  'mood',
-  'vocal'
+  'vocal',
+  'instrumental'
 ]);
 
 export function parseQuery(input: string): ParsedQuery {

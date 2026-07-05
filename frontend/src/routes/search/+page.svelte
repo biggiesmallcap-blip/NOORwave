@@ -3,7 +3,7 @@
   import { goto, beforeNavigate } from '$app/navigation'
   import type { Snapshot } from './$types'
   import { captureScroll, restoreScroll } from '$lib/navigation/scroll'
-  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type SpotifyPlaylistSearchItem, type SearchResults } from '$lib/api/client'
+  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type SpotifyPlaylistSearchItem, type SearchResults } from '$lib/api/client'
   import { cachedApi } from '$lib/cache/api_queries'
   import DiscoverShelves from '$lib/components/search/DiscoverShelves.svelte'
   import { buildTidalTrackMenu, buildTrackMenu, downloadMenuItem } from '$lib/player/track_menu'
@@ -112,7 +112,6 @@
   // D5 - in-memory result cache (last 5 queries, keyed by normalised query string)
   const resultCache = new Map<string, TidalSearchResults>()
   let recent = $state<string[]>(loadRecent())
-  let genreList = $state<Genre[]>([])
 
   // C3 - session-aware ranking
   let recentArtistNames = $state<Set<string>>(new Set())
@@ -162,15 +161,10 @@
       }
     }
 
-    const [genresRes, listensRes, playlistsRes] = await Promise.allSettled([
-      cachedApi.getGenres(),
+    const [listensRes, playlistsRes] = await Promise.allSettled([
       cachedApi.getRecentListens(20),
       cachedApi.getPlaylists(),
     ])
-
-    if (genresRes.status === 'fulfilled') {
-      genreList = genresRes.value.genres
-    }
 
     if (listensRes.status === 'fulfilled') {
       const listens = listensRes.value
@@ -186,7 +180,7 @@
   })
 
   function buildAudioParams(pq: ParsedQuery): AudioSearchParams {
-    return sharedBuildAudioParams(pq, genreList)
+    return sharedBuildAudioParams(pq)
   }
 
   function removeFilter(key: string) {

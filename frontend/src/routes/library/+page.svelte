@@ -418,7 +418,7 @@
 			// through everything that matches (liked-only on the Liked tab).
 			if (shuffle) {
 				try {
-					const params = buildAudioParams(parseQuery(trimmed), genres);
+					const params = buildAudioParams(parseQuery(trimmed));
 					const audio = await api.searchAudio({
 						...params,
 						shuffle: true,
@@ -786,7 +786,7 @@
 			const parsed = parseQuery(trimmed);
 			if (hasAnyFilter(parsed)) {
 				// DSP/filter syntax (bpm:138, key:Am, energy:>0.7, genre:dnb, etc.) - route to audio search.
-				const params = buildAudioParams(parsed, genres);
+				const params = buildAudioParams(parsed);
 				const audio = await api.searchAudio(params);
 				const adaptedTracks: Track[] = audio.tracks.map((r) => ({
 					id: r.id,
@@ -859,7 +859,7 @@
 				// Draw the random pick from the FULL matching set, not just the ~50
 				// rows on screen. Same server-side random sample the Shuffle button
 				// uses, capped at one track.
-				const params = buildAudioParams(parseQuery(trimmed), genres);
+				const params = buildAudioParams(parseQuery(trimmed));
 				const audio = await api.searchAudio({
 					...params,
 					shuffle: true,
