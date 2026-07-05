@@ -169,6 +169,220 @@
 		return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
 	}
 
+	// Push a hex color toward black (amount < 0) or white (amount > 0) and emit
+	// rgba. Used for node rims so they fall off to a darker shade of the node's
+	// own hue instead of muddy navy.
+	function shadeRgba(hex: string, amount: number, alpha: number): string {
+		const normalized = hex.replace('#', '');
+		if (normalized.length !== 6) return `rgba(255, 255, 255, ${alpha})`;
+		let red = Number.parseInt(normalized.slice(0, 2), 16);
+		let green = Number.parseInt(normalized.slice(2, 4), 16);
+		let blue = Number.parseInt(normalized.slice(4, 6), 16);
+		const target = amount < 0 ? 0 : 255;
+		const p = Math.min(1, Math.abs(amount));
+		red = Math.round((target - red) * p + red);
+		green = Math.round((target - green) * p + green);
+		blue = Math.round((target - blue) * p + blue);
+		return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+	}
+
+	// --- Sprite cache --------------------------------------------------------
+	// Building radial gradients per node per frame is what made the canvas both
+	// fuzzy and slow. Node radius + color are stable, so each unique body and
+	// glow is rendered ONCE to an offscreen sprite and blitted with drawImage.
+	const BODY_GLOW_FACTOR = 1.4;
+	const nodeSpriteCache = new Map<string, HTMLCanvasElement>();
+	const glowSpriteCache = new Map<string, HTMLCanvasElement>();
+	const edgeColorCache = new Map<number, string>();
+	let colorScratch: CanvasRenderingContext2D | null = null;
+	let spriteDpr = 0;
+
+	function normalizeColor(color: string): string {
+		// Canvas readback normalizes any CSS color (hsl strings from vibe mode,
+		// hex, named) to #rrggbb, which shadeRgba/hexToRgba can parse.
+		if (color.startsWith('#') && color.length === 7) return color;
+		if (!colorScratch) {
+			colorScratch = document.createElement('canvas').getContext('2d');
+			if (!colorScratch) return '#ffffff';
+		}
+		colorScratch.fillStyle = color;
+		return String(colorScratch.fillStyle);
+	}
+
+	function invalidateSprites() {
+		nodeSpriteCache.clear();
+		glowSpriteCache.clear();
+	}
+
+	function getNodeSprite(color: string, radius: number, jitter: number): HTMLCanvasElement | null {
+		const hex = normalizeColor(color);
+		const key = `${hex}|${Math.round(radius * 2)}|${Math.round(jitter * 20)}`;
+		const cached = nodeSpriteCache.get(key);
+		if (cached) return cached;
+
+		const half = radius * BODY_GLOW_FACTOR;
+		const size = Math.max(4, Math.ceil(half * 2 * spriteDpr));
+		const sprite = document.createElement('canvas');
+		sprite.width = size;
+		sprite.height = size;
+		const sctx = sprite.getContext('2d');
+		if (!sctx) return null;
+		sctx.scale(size / (half * 2), size / (half * 2));
+
+		// Tight ambient glow hugging the body - subtle, not a haze.
+		const glow = sctx.createRadialGradient(half, half, radius * 0.82, half, half, half);
+		glow.addColorStop(0, hexToRgba(hex, 0.22));
+		glow.addColorStop(1, hexToRgba(hex, 0));
+		sctx.fillStyle = glow;
+		sctx.beginPath();
+		sctx.arc(half, half, half, 0, Math.PI * 2);
+		sctx.fill();
+
+		// Crisp solid body, gently lit toward the upper-left. Opaque to the edge
+		// so the disc stays sharp - no feathering, no pearl, no dark rim.
+		const body = sctx.createRadialGradient(
+			half - radius * 0.2,
+			half - radius * 0.24,
+			radius * 0.1,
+			half,
+			half,
+			radius
+		);
+		body.addColorStop(0, shadeRgba(hex, 0.24 + jitter, 1));
+		body.addColorStop(0.62, hex);
+		body.addColorStop(1, shadeRgba(hex, -0.14, 1));
+		sctx.fillStyle = body;
+		sctx.beginPath();
+		sctx.arc(half, half, radius, 0, Math.PI * 2);
+		sctx.fill();
+
+		// Hairline lit rim so the edge reads crisp against the glow.
+		const rimWidth = Math.max(0.75, radius * 0.045);
+		sctx.lineWidth = rimWidth;
+		sctx.strokeStyle = shadeRgba(hex, 0.38, 0.38);
+		sctx.beginPath();
+		sctx.arc(half, half, radius - rimWidth / 2, 0, Math.PI * 2);
+		sctx.stroke();
+
+		nodeSpriteCache.set(key, sprite);
+		return sprite;
+	}
+
+	function getGlowSprite(color: string): HTMLCanvasElement | null {
+		const hex = normalizeColor(color);
+		const cached = glowSpriteCache.get(hex);
+		if (cached) return cached;
+		const size = 64;
+		const sprite = document.createElement('canvas');
+		sprite.width = size;
+		sprite.height = size;
+		const sctx = sprite.getContext('2d');
+		if (!sctx) return null;
+		const gradient = sctx.createRadialGradient(32, 32, 4, 32, 32, 32);
+		gradient.addColorStop(0, hexToRgba(hex, 0.5));
+		gradient.addColorStop(0.5, hexToRgba(hex, 0.14));
+		gradient.addColorStop(1, hexToRgba(hex, 0));
+		sctx.fillStyle = gradient;
+		sctx.fillRect(0, 0, size, size);
+		glowSpriteCache.set(hex, sprite);
+		return sprite;
+	}
+
+	// --- Parallax starfield ---------------------------------------------------
+	// The bg canvas is screen-fixed, so on its own the sky reads as a flat
+	// poster. These two star layers live in (scaled) world space and shift with
+	// the camera at different rates - pan, zoom, or drift and the depth shows.
+	// ~185 stars tiled, trivial per-frame cost.
+	type ParallaxStar = { x: number; y: number; size: number; alpha: number; tint: string; phase: number };
+	const STAR_TILE = 1024;
+
+	function makeStarLayer(
+		count: number,
+		seedStart: number,
+		sizeMin: number,
+		sizeVar: number,
+		alphaMin: number,
+		alphaVar: number
+	): ParallaxStar[] {
+		let seed = seedStart;
+		const rnd = () => {
+			seed = (seed * 1664525 + 1013904223) >>> 0;
+			return seed / 4294967296;
+		};
+		const stars: ParallaxStar[] = [];
+		for (let index = 0; index < count; index += 1) {
+			const warmth = rnd();
+			stars.push({
+				x: rnd() * STAR_TILE,
+				y: rnd() * STAR_TILE,
+				size: sizeMin + rnd() * sizeVar,
+				alpha: alphaMin + rnd() * alphaVar,
+				tint:
+					warmth > 0.82
+						? 'rgb(196, 208, 255)'
+						: warmth < 0.15
+							? 'rgb(255, 224, 196)'
+							: 'rgb(255, 255, 255)',
+				phase: rnd() * Math.PI * 2
+			});
+		}
+		return stars;
+	}
+
+	const starLayerFar = makeStarLayer(130, 7, 0.5, 0.7, 0.3, 0.34);
+	const starLayerNear = makeStarLayer(55, 1234567, 0.9, 1.0, 0.4, 0.4);
+
+	function drawParallaxStars(ctx: CanvasRenderingContext2D) {
+		const now = performance.now();
+		const layers = [
+			{ stars: starLayerFar, factor: 0.16, twinkle: false },
+			{ stars: starLayerNear, factor: 0.38, twinkle: true }
+		];
+		for (const layer of layers) {
+			const offsetX = camera.x * camera.scale * layer.factor;
+			const offsetY = camera.y * camera.scale * layer.factor;
+			for (const star of layer.stars) {
+				let sx = (star.x - offsetX) % STAR_TILE;
+				let sy = (star.y - offsetY) % STAR_TILE;
+				if (sx < 0) sx += STAR_TILE;
+				if (sy < 0) sy += STAR_TILE;
+				const alpha = layer.twinkle
+					? star.alpha * (0.68 + 0.32 * Math.sin(now / 850 + star.phase))
+					: star.alpha;
+				ctx.fillStyle = star.tint;
+				// Tile so the field is endless in every direction.
+				for (let tx = sx - STAR_TILE; tx < width + 4; tx += STAR_TILE) {
+					if (tx < -4) continue;
+					for (let ty = sy - STAR_TILE; ty < height + 4; ty += STAR_TILE) {
+						if (ty < -4) continue;
+						ctx.globalAlpha = alpha;
+						ctx.beginPath();
+						ctx.arc(tx, ty, star.size, 0, Math.PI * 2);
+						ctx.fill();
+					}
+				}
+			}
+		}
+		ctx.globalAlpha = 1;
+	}
+
+	function edgeStrokeColor(edge: GalaxyEdge, source: GalaxyNode, target: GalaxyNode): string {
+		const key = edge.sourceId * 1000000 + edge.targetId;
+		const cached = edgeColorCache.get(key);
+		if (cached) return cached;
+		const a = normalizeColor(source.color).replace('#', '');
+		const b = normalizeColor(target.color).replace('#', '');
+		let mixed = 'rgb(136, 153, 204)';
+		if (a.length === 6 && b.length === 6) {
+			const red = Math.round((Number.parseInt(a.slice(0, 2), 16) + Number.parseInt(b.slice(0, 2), 16)) / 2);
+			const green = Math.round((Number.parseInt(a.slice(2, 4), 16) + Number.parseInt(b.slice(2, 4), 16)) / 2);
+			const blue = Math.round((Number.parseInt(a.slice(4, 6), 16) + Number.parseInt(b.slice(4, 6), 16)) / 2);
+			mixed = `rgb(${red}, ${green}, ${blue})`;
+		}
+		edgeColorCache.set(key, mixed);
+		return mixed;
+	}
+
 	function roundedRectPath(
 		ctx: CanvasRenderingContext2D,
 		x: number,
@@ -465,97 +679,124 @@
 		ctx.fillStyle = fill;
 		ctx.fillRect(0, 0, width, height);
 
-		// Nebula clouds
-		const nebulaA = ctx.createRadialGradient(width * 0.22, height * 0.28, 0, width * 0.22, height * 0.28, width * 0.32);
-		nebulaA.addColorStop(0, 'rgba(88, 144, 255, 0.22)');
-		nebulaA.addColorStop(0.5, 'rgba(124, 128, 255, 0.1)');
+		// Nebula clouds - saturated enough to actually read as a living sky.
+		const nebulaA = ctx.createRadialGradient(width * 0.22, height * 0.28, 0, width * 0.22, height * 0.28, width * 0.34);
+		nebulaA.addColorStop(0, 'rgba(88, 144, 255, 0.3)');
+		nebulaA.addColorStop(0.5, 'rgba(124, 128, 255, 0.14)');
 		nebulaA.addColorStop(1, 'rgba(124, 128, 255, 0)');
 		ctx.fillStyle = nebulaA;
 		ctx.fillRect(0, 0, width, height);
 
-		const nebulaB = ctx.createRadialGradient(width * 0.76, height * 0.18, 0, width * 0.76, height * 0.18, width * 0.26);
-		nebulaB.addColorStop(0, 'rgba(236, 180, 98, 0.14)');
-		nebulaB.addColorStop(0.42, 'rgba(179, 123, 244, 0.11)');
+		const nebulaB = ctx.createRadialGradient(width * 0.76, height * 0.18, 0, width * 0.76, height * 0.18, width * 0.28);
+		nebulaB.addColorStop(0, 'rgba(236, 180, 98, 0.18)');
+		nebulaB.addColorStop(0.42, 'rgba(179, 123, 244, 0.14)');
 		nebulaB.addColorStop(1, 'rgba(247, 37, 133, 0)');
 		ctx.fillStyle = nebulaB;
 		ctx.fillRect(0, 0, width, height);
 
-		const nebulaC = ctx.createRadialGradient(width * 0.72, height * 0.8, 0, width * 0.72, height * 0.8, width * 0.34);
-		nebulaC.addColorStop(0, 'rgba(6, 214, 160, 0.12)');
-		nebulaC.addColorStop(0.46, 'rgba(59, 130, 246, 0.06)');
+		const nebulaC = ctx.createRadialGradient(width * 0.72, height * 0.8, 0, width * 0.72, height * 0.8, width * 0.36);
+		nebulaC.addColorStop(0, 'rgba(6, 214, 160, 0.16)');
+		nebulaC.addColorStop(0.46, 'rgba(59, 130, 246, 0.09)');
 		nebulaC.addColorStop(1, 'rgba(6, 214, 160, 0)');
 		ctx.fillStyle = nebulaC;
 		ctx.fillRect(0, 0, width, height);
 
-		drawNebulaVeins(ctx);
+		const nebulaD = ctx.createRadialGradient(width * 0.12, height * 0.85, 0, width * 0.12, height * 0.85, width * 0.3);
+		nebulaD.addColorStop(0, 'rgba(190, 96, 220, 0.14)');
+		nebulaD.addColorStop(0.5, 'rgba(120, 80, 220, 0.07)');
+		nebulaD.addColorStop(1, 'rgba(120, 80, 220, 0)');
+		ctx.fillStyle = nebulaD;
+		ctx.fillRect(0, 0, width, height);
 
-		// Subtle grid texture
+		// Broad diagonal milky band across the middle - the thing that makes it
+		// read as a galaxy instead of a dark room.
 		ctx.save();
-		ctx.globalAlpha = 0.03;
-		ctx.strokeStyle = '#8888cc';
-		ctx.lineWidth = 0.5;
-		const gridSize = 80 * dpr;
-		for (let gx = 0; gx < width; gx += gridSize) {
-			ctx.beginPath();
-			ctx.moveTo(gx, 0);
-			ctx.lineTo(gx, height);
-			ctx.stroke();
-		}
-		for (let gy = 0; gy < height; gy += gridSize) {
-			ctx.beginPath();
-			ctx.moveTo(0, gy);
-			ctx.lineTo(width, gy);
-			ctx.stroke();
-		}
+		ctx.translate(width * 0.52, height * 0.44);
+		ctx.rotate(-0.34);
+		ctx.scale(1.7, 0.5);
+		const band = ctx.createRadialGradient(0, 0, 0, 0, 0, width * 0.55);
+		band.addColorStop(0, 'rgba(168, 178, 255, 0.11)');
+		band.addColorStop(0.55, 'rgba(130, 140, 230, 0.055)');
+		band.addColorStop(1, 'rgba(130, 140, 230, 0)');
+		ctx.fillStyle = band;
+		ctx.fillRect(-width, -height, width * 2, height * 2);
 		ctx.restore();
 
-		// Stars — more and brighter
+		// Stars: three layers for real depth instead of one flat scatter.
+		// Dust (tiny + crisp + faint) reads as distant; a mid layer sits closer;
+		// a handful of hero stars bloom with a soft halo and diffraction glint.
 		let seed = 42;
 		const random = () => {
 			seed = (seed * 1664525 + 1013904223) >>> 0;
 			return seed / 4294967296;
 		};
 
-		const starCount = isCompactViewport ? 220 : 430;
-		for (let index = 0; index < starCount; index += 1) {
+		const starTint = (warmth: number, alpha: number) =>
+			warmth > 0.82
+				? `rgba(196, 208, 255, ${alpha})`
+				: warmth < 0.15
+					? `rgba(255, 224, 196, ${alpha})`
+					: `rgba(255, 255, 255, ${alpha})`;
+
+		const dustCount = isCompactViewport ? 280 : 520;
+		for (let index = 0; index < dustCount; index += 1) {
 			const x = random() * width;
 			const y = random() * height;
-			const size = 0.35 + random() * 2.45;
-			const alpha = 0.24 + random() * 0.68;
-			// Some stars are slightly warm or cool
-			const tint = random() > 0.85 ? `rgba(200, 210, 255, ${alpha})` :
-			             random() > 0.85 ? `rgba(255, 230, 200, ${alpha})` :
-			             `rgba(255, 255, 255, ${alpha})`;
-			ctx.fillStyle = tint;
+			const size = 0.35 + random() * 0.65;
+			const alpha = 0.2 + random() * 0.34;
+			ctx.fillStyle = starTint(random(), alpha);
 			ctx.beginPath();
 			ctx.arc(x, y, size, 0, Math.PI * 2);
 			ctx.fill();
 		}
-	}
 
-	function drawNebulaVeins(ctx: CanvasRenderingContext2D) {
-		ctx.save();
-		ctx.globalCompositeOperation = 'screen';
-		for (let index = 0; index < 18; index += 1) {
-			const t = index / 17;
-			const startX = width * (-0.08 + t * 1.16);
-			const startY = height * (0.14 + Math.sin(index * 1.7) * 0.08);
-			const endX = width * (0.18 + t * 0.95);
-			const endY = height * (0.92 + Math.cos(index * 1.13) * 0.12);
-			const controlX = width * (0.5 + Math.sin(index * 0.93) * 0.32);
-			const controlY = height * (0.42 + Math.cos(index * 1.27) * 0.25);
-			const gradient = ctx.createLinearGradient(startX, startY, endX, endY);
-			gradient.addColorStop(0, 'rgba(88, 166, 255, 0)');
-			gradient.addColorStop(0.44, index % 2 === 0 ? 'rgba(128, 118, 255, 0.075)' : 'rgba(6, 214, 160, 0.052)');
-			gradient.addColorStop(1, 'rgba(236, 180, 98, 0)');
-			ctx.strokeStyle = gradient;
-			ctx.lineWidth = 0.7 + (index % 4) * 0.18;
+		const midCount = isCompactViewport ? 64 : 120;
+		for (let index = 0; index < midCount; index += 1) {
+			const x = random() * width;
+			const y = random() * height;
+			const size = 0.8 + random() * 0.8;
+			const alpha = 0.38 + random() * 0.36;
+			ctx.fillStyle = starTint(random(), alpha);
 			ctx.beginPath();
-			ctx.moveTo(startX, startY);
-			ctx.quadraticCurveTo(controlX, controlY, endX, endY);
-			ctx.stroke();
+			ctx.arc(x, y, size, 0, Math.PI * 2);
+			ctx.fill();
 		}
-		ctx.restore();
+
+		const heroCount = isCompactViewport ? 12 : 22;
+		for (let index = 0; index < heroCount; index += 1) {
+			const x = random() * width;
+			const y = random() * height;
+			const core = 0.95 + random() * 0.9;
+			const warmth = random();
+			const bloom = ctx.createRadialGradient(x, y, 0, x, y, core * 5);
+			bloom.addColorStop(0, starTint(warmth, 0.32));
+			bloom.addColorStop(0.4, starTint(warmth, 0.08));
+			bloom.addColorStop(1, 'rgba(255, 255, 255, 0)');
+			ctx.fillStyle = bloom;
+			ctx.beginPath();
+			ctx.arc(x, y, core * 5, 0, Math.PI * 2);
+			ctx.fill();
+
+			ctx.fillStyle = starTint(warmth, 0.8);
+			ctx.beginPath();
+			ctx.arc(x, y, core, 0, Math.PI * 2);
+			ctx.fill();
+
+			if (random() > 0.74) {
+				ctx.save();
+				ctx.globalAlpha = 0.3;
+				ctx.strokeStyle = starTint(warmth, 0.65);
+				ctx.lineWidth = 0.55;
+				const spike = core * 4;
+				ctx.beginPath();
+				ctx.moveTo(x - spike, y);
+				ctx.lineTo(x + spike, y);
+				ctx.moveTo(x, y - spike);
+				ctx.lineTo(x, y + spike);
+				ctx.stroke();
+				ctx.restore();
+			}
+		}
 	}
 
 	function drawConnectionsLayer() {
@@ -620,23 +861,17 @@
 			const curveSign = ((edge.sourceId + edge.targetId) & 1) === 0 ? 1 : -1;
 			const controlX = (sourceScreen.x + targetScreen.x) * 0.5 + normalX * curve * curveSign;
 			const controlY = (sourceScreen.y + targetScreen.y) * 0.5 + normalY * curve * curveSign;
-			const gradient = ctx.createLinearGradient(sourceScreen.x, sourceScreen.y, targetScreen.x, targetScreen.y);
-			gradient.addColorStop(0, hexToRgba(source.color, clamp(0.38 + edge.weight * 0.4, 0.35, 0.92)));
-			gradient.addColorStop(1, hexToRgba(target.color, clamp(0.28 + edge.weight * 0.36, 0.28, 0.84)));
-
-			ctx.save();
+			// Solid blended stroke from a per-edge cache. Per-redraw linear
+			// gradients + shadowBlur were the main reason pan/zoom lagged.
 			ctx.beginPath();
 			ctx.globalAlpha = opacity;
 			ctx.lineWidth = lineWidth;
-			ctx.strokeStyle = gradient;
-			ctx.shadowBlur = edge.type === 'parent-child' ? 10 * edge.weight * (0.4 + activity * 0.8) : 0;
-			ctx.shadowColor = source.glowColor;
-			ctx.setLineDash([]);
+			ctx.strokeStyle = edgeStrokeColor(edge, source, target);
 			ctx.moveTo(sourceScreen.x, sourceScreen.y);
 			ctx.quadraticCurveTo(controlX, controlY, targetScreen.x, targetScreen.y);
 			ctx.stroke();
-			ctx.restore();
 		}
+		ctx.globalAlpha = 1;
 
 		pendingConnectionRedraw = false;
 	}
@@ -709,52 +944,10 @@
 			Math.max(width, height) * 0.68
 		);
 		vignette.addColorStop(0, 'rgba(0, 0, 0, 0)');
-		vignette.addColorStop(1, 'rgba(4, 6, 12, 0.46)');
+		vignette.addColorStop(1, 'rgba(4, 6, 12, 0.28)');
 		ctx.save();
 		ctx.fillStyle = vignette;
 		ctx.fillRect(0, 0, width, height);
-		ctx.restore();
-	}
-
-	function nodeFillGradient(
-		ctx: CanvasRenderingContext2D,
-		node: GalaxyNode,
-		screen: { x: number; y: number },
-		radius: number,
-		baseColor: string
-	): CanvasGradient {
-		const gradient = ctx.createRadialGradient(
-			screen.x - radius * 0.34,
-			screen.y - radius * 0.42,
-			radius * 0.08,
-			screen.x,
-			screen.y,
-			radius * 1.12
-		);
-		gradient.addColorStop(0, 'rgba(255, 255, 255, 0.42)');
-		gradient.addColorStop(0.22, baseColor);
-		gradient.addColorStop(0.72, hexToRgba(node.color, 0.82));
-		gradient.addColorStop(1, 'rgba(3, 5, 12, 0.86)');
-		return gradient;
-	}
-
-	function drawNodeTexture(ctx: CanvasRenderingContext2D, node: GalaxyNode, screen: { x: number; y: number }, radius: number, activity: number) {
-		if (radius < 8) return;
-		ctx.save();
-		ctx.globalAlpha = clamp(activity * (node.depth === 0 ? 0.22 : 0.14), 0.08, 0.24);
-		ctx.lineWidth = 1;
-		ctx.strokeStyle = 'rgba(255, 255, 255, 0.72)';
-		const ringCount = node.depth === 0 ? 3 : 2;
-		for (let index = 1; index <= ringCount; index += 1) {
-			ctx.beginPath();
-			ctx.arc(screen.x, screen.y, radius * (index / (ringCount + 1)), 0, Math.PI * 2);
-			ctx.stroke();
-		}
-		ctx.globalAlpha = clamp(activity * 0.12, 0.05, 0.16);
-		ctx.beginPath();
-		ctx.moveTo(screen.x - radius * 0.62, screen.y + radius * 0.16);
-		ctx.quadraticCurveTo(screen.x, screen.y - radius * 0.5, screen.x + radius * 0.66, screen.y - radius * 0.02);
-		ctx.stroke();
 		ctx.restore();
 	}
 
@@ -843,55 +1036,51 @@
 	function drawNodesAndLabels(ctx: CanvasRenderingContext2D) {
 		const visibleNodes = nodes.filter(nodeIsVisible);
 
-		// Pass 1: glow halos (tight, outer only — no save/restore)
-		for (const node of visibleNodes) {
-			const screen = worldToScreen(node.x, node.y);
-			const radius = node.radius;
-			const activity = nodeActivity(node);
-			if (activity < 0.16) continue;
+		// Pass 1: mode-emphasis glows, blitted from cached sprites. Map mode
+		// skips this pass entirely - the body sprite carries its own tight glow,
+		// and a second per-node halo is exactly the haze that made things fuzzy.
+		if (viewMode !== 'map') {
+			for (const node of visibleNodes) {
+				const screen = worldToScreen(node.x, node.y);
+				const radius = node.radius;
+				const activity = nodeActivity(node);
+				if (activity < 0.16) continue;
 
-			// Vibe mode: use energy color for glow when DSP is available.
-			// Unanalyzed nodes get NO halo so the data-coverage gap is honest.
-			if (viewMode === 'vibe') {
-				const eColor = energyColor(node.avgEnergy);
-				if (eColor) {
+				// Vibe mode: energy-colored glow when DSP is available.
+				// Unanalyzed nodes get NO halo so the data-coverage gap is honest.
+				if (viewMode === 'vibe') {
+					const eColor = energyColor(node.avgEnergy);
+					if (!eColor) continue;
 					const glowR = danceGlowRadius(node.avgDanceability, radius);
-					const gradient = ctx.createRadialGradient(screen.x, screen.y, radius * 0.5, screen.x, screen.y, glowR);
-					gradient.addColorStop(0, eColor.replace('50%)', '60%)').replace('hsl', 'hsla').replace(')', ', 0.42)'));
-					gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
-					ctx.fillStyle = gradient;
-					ctx.beginPath();
-					ctx.arc(screen.x, screen.y, glowR, 0, Math.PI * 2);
-					ctx.fill();
+					const sprite = getGlowSprite(eColor);
+					if (!sprite) continue;
+					ctx.globalAlpha = clamp(0.55 * activity, 0.12, 0.6);
+					ctx.drawImage(sprite, screen.x - glowR, screen.y - glowR, glowR * 2, glowR * 2);
+					continue;
 				}
-				continue;
-			}
 
-			// Heat mode: cold nodes get tiny halos, hot nodes blaze.
-			// Rediscover mode: candidates blaze, others fade.
-			// Map mode: even baseline halo for every node.
-			let heatExtra = 0;
-			let haloAlphaScale = 1;
-			if (viewMode === 'heat') {
-				heatExtra = node.heatNorm * radius * 0.85;
-				haloAlphaScale = 0.35 + node.heatNorm * 1.4;
-			} else if (viewMode === 'rediscover') {
-				if (isRediscoverCandidate(node)) {
-					heatExtra = radius * 0.7;
-					haloAlphaScale = 1.6;
-				} else {
-					haloAlphaScale = 0.25;
+				// Heat mode: cold nodes get tiny halos, hot nodes blaze.
+				// Rediscover mode: candidates blaze, others fade.
+				let heatExtra = 0;
+				let haloAlphaScale = 1;
+				if (viewMode === 'heat') {
+					heatExtra = node.heatNorm * radius * 0.85;
+					haloAlphaScale = 0.35 + node.heatNorm * 1.4;
+				} else if (viewMode === 'rediscover') {
+					if (isRediscoverCandidate(node)) {
+						heatExtra = radius * 0.7;
+						haloAlphaScale = 1.6;
+					} else {
+						haloAlphaScale = 0.25;
+					}
 				}
+				const haloRadius = radius + 2 + radius * 0.4 + heatExtra;
+				const sprite = getGlowSprite(node.color);
+				if (!sprite) continue;
+				ctx.globalAlpha = clamp(0.4 * activity * haloAlphaScale, 0, 0.85);
+				ctx.drawImage(sprite, screen.x - haloRadius, screen.y - haloRadius, haloRadius * 2, haloRadius * 2);
 			}
-			const haloExtend = 2 + radius * 0.4 + heatExtra;
-			const haloRadius = radius + haloExtend;
-			const gradient = ctx.createRadialGradient(screen.x, screen.y, radius * 0.5, screen.x, screen.y, haloRadius);
-			gradient.addColorStop(0, hexToRgba(node.color, 0.25 * activity * haloAlphaScale));
-			gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
-			ctx.fillStyle = gradient;
-			ctx.beginPath();
-			ctx.arc(screen.x, screen.y, haloRadius, 0, Math.PI * 2);
-			ctx.fill();
+			ctx.globalAlpha = 1;
 		}
 
 		// Pass 2: solid sharp cores (no blur)
@@ -931,11 +1120,12 @@
 			} else {
 				ctx.globalAlpha = activity;
 			}
-			ctx.fillStyle = nodeFillGradient(ctx, node, screen, radius, baseColor);
-			ctx.beginPath();
-			ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
-			ctx.fill();
-			drawNodeTexture(ctx, node, screen, radius, activity);
+			const jitter = ((node.id * 37) % 20) / 100; // 0 .. 0.19, stable per node
+			const sprite = getNodeSprite(baseColor, node.radius, jitter);
+			if (sprite) {
+				const half = radius * BODY_GLOW_FACTOR;
+				ctx.drawImage(sprite, screen.x - half, screen.y - half, half * 2, half * 2);
+			}
 		}
 		ctx.globalAlpha = 1;
 
@@ -1038,7 +1228,12 @@
 		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 		ctx.clearRect(0, 0, width, height);
 		ctx.drawImage(bgCanvas, 0, 0, width, height);
-		drawFamilyFields(ctx);
+		drawParallaxStars(ctx);
+		// Family haze fields only in heat mode, where the glow IS the data.
+		// Everywhere else they wash out the starfield and blur the nodes.
+		if (viewMode === 'heat') {
+			drawFamilyFields(ctx);
+		}
 
 		if (pendingConnectionRedraw) {
 			drawConnectionsLayer();
@@ -1198,6 +1393,10 @@
 		height = Math.max(1, Math.floor(rect.height));
 		// Cap DPR to 2x to prevent excessive pixel counts on hi-res monitors
 		dpr = Math.min(window.devicePixelRatio || 1, 2);
+		if (dpr !== spriteDpr) {
+			spriteDpr = dpr;
+			invalidateSprites();
+		}
 
 		const nextWidth = Math.max(1, Math.floor(width * dpr));
 		const nextHeight = Math.max(1, Math.floor(height * dpr));
@@ -1215,6 +1414,7 @@
 		const signature = nodes.map((node) => node.id).join(':');
 		if (signature !== lastLayoutSignature) {
 			lastLayoutSignature = signature;
+			edgeColorCache.clear();
 			particles = buildParticles(edges);
 			if (width > 0 && height > 0 && nodes.length > 0) {
 				resetGalaxyView(true);

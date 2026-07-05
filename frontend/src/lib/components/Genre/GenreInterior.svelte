@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { api, type Track, type GenreHeat } from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
 	import { playTrackNow, setPlayerAutomixEnabled, setPlayerShuffleMode } from '$lib/stores/player';
@@ -53,6 +54,29 @@
 	let actionError = $state<string | null>(null);
 	let loadSeq = 0;
 
+	// Full track list with in-panel search. The old hard cap of 40 rows hid the
+	// rest of the genre with a dead "+N more" hint; now everything is reachable:
+	// filter narrows, "Show more" pages the DOM in chunks.
+	const TRACK_PAGE = 100;
+	let trackQuery = $state('');
+	let visibleCount = $state(TRACK_PAGE);
+	let filteredTracks = $derived.by(() => {
+		const query = trackQuery.trim().toLowerCase();
+		if (!query) return tracks;
+		return tracks.filter(
+			(track) =>
+				track.title.toLowerCase().includes(query) ||
+				(track.artist_name ?? '').toLowerCase().includes(query)
+		);
+	});
+	let shownTracks = $derived(filteredTracks.slice(0, visibleCount));
+
+	$effect(() => {
+		// New search -> restart paging from the top.
+		void trackQuery;
+		visibleCount = TRACK_PAGE;
+	});
+
 	// Artist micro-galaxy data
 	let artistClusters = $state<ArtistCluster[]>([]);
 	let canvasEl = $state<HTMLCanvasElement | null>(null);
@@ -87,51 +111,57 @@
 		const topArtists = sorted.slice(0, 20);
 		const maxCount = topArtists[0]?.[1].count ?? 1;
 
-		// Place artists in a mini force-directed layout
-		const nodes = topArtists.map(([name, info], i) => ({
-			name,
-			artistId: info.artistId,
-			count: info.count,
-			x: Math.cos((Math.PI * 2 * i) / topArtists.length) * 80,
-			y: Math.sin((Math.PI * 2 * i) / topArtists.length) * 80,
-			vx: 0,
-			vy: 0,
-			radius: 4 + Math.sqrt(info.count / maxCount) * 12
-		}));
+		// Phyllotaxis (golden-angle spiral) in NORMALIZED [-1, 1] coords, scaled
+		// to the real canvas at draw time. The old repulsion-only sim had no
+		// gravity or bounds, so nodes drifted off-canvas and labels collided.
+		// Biggest artist sits at the center, the rest spiral outward - always
+		// on screen, deterministic, zero ticks.
+		const GOLDEN_ANGLE = 2.399963229728653;
+		const lastIndex = Math.max(1, topArtists.length - 1);
+		artistClusters = topArtists.map(([name, info], index) => {
+			const distance = Math.sqrt(index / lastIndex);
+			const angle = index * GOLDEN_ANGLE;
+			return {
+				name,
+				artistId: info.artistId,
+				count: info.count,
+				x: Math.cos(angle) * distance,
+				y: Math.sin(angle) * distance,
+				radius: 5 + Math.sqrt(info.count / maxCount) * 13
+			};
+		});
+	}
 
-		// Mini simulation
-		for (let tick = 0; tick < 80; tick++) {
-			for (let i = 0; i < nodes.length; i++) {
-				for (let j = i + 1; j < nodes.length; j++) {
-					const a = nodes[i];
-					const b = nodes[j];
-					const dx = b.x - a.x;
-					const dy = b.y - a.y;
-					const distSq = Math.max(dx * dx + dy * dy, 16);
-					const dist = Math.sqrt(distSq);
-					const force = 60 / distSq;
-					a.vx -= (dx / dist) * force;
-					a.vy -= (dy / dist) * force;
-					b.vx += (dx / dist) * force;
-					b.vy += (dy / dist) * force;
-				}
-			}
-			for (const n of nodes) {
-				n.vx *= 0.82;
-				n.vy *= 0.82;
-				n.x += n.vx;
-				n.y += n.vy;
-			}
+	function orbitSpans(): { cx: number; cy: number; spanX: number; spanY: number } {
+		return {
+			cx: width / 2,
+			cy: height / 2,
+			spanX: Math.max(40, width / 2 - 70),
+			spanY: Math.max(24, height / 2 - 30)
+		};
+	}
+
+	function orbitArtistAt(px: number, py: number): ArtistCluster | null {
+		const { cx, cy, spanX, spanY } = orbitSpans();
+		for (const artist of artistClusters) {
+			const x = cx + artist.x * spanX;
+			const y = cy + artist.y * spanY;
+			if (Math.hypot(px - x, py - y) <= artist.radius + 5) return artist;
 		}
+		return null;
+	}
 
-		artistClusters = nodes.map((n) => ({
-			name: n.name,
-			artistId: n.artistId,
-			count: n.count,
-			x: n.x,
-			y: n.y,
-			radius: n.radius
-		}));
+	function handleOrbitClick(event: MouseEvent) {
+		const artist = orbitArtistAt(event.offsetX, event.offsetY);
+		if (artist?.artistId != null) {
+			void goto(`/artists/${artist.artistId}`);
+		}
+	}
+
+	function handleOrbitContextMenu(event: MouseEvent) {
+		const artist = orbitArtistAt(event.offsetX, event.offsetY);
+		if (!artist) return;
+		handleArtistContextMenu(event, artist);
 	}
 
 	function drawArtistGalaxy() {
@@ -142,9 +172,7 @@
 		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 		ctx.clearRect(0, 0, width, height);
 
-		const cx = width / 2;
-		const cy = height / 2;
-		const scale = Math.min(width / 260, height / 180, 1.2);
+		const { cx, cy, spanX, spanY } = orbitSpans();
 
 		// Background stars
 		ctx.save();
@@ -161,45 +189,51 @@
 		ctx.restore();
 
 		// Center glow
-		const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, 80 * scale);
+		const glowRadius = Math.min(spanX, spanY) * 1.1;
+		const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowRadius);
 		gradient.addColorStop(0, hexToRgba(node?.color ?? '#7c80ff', 0.15));
 		gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
 		ctx.fillStyle = gradient;
 		ctx.beginPath();
-		ctx.arc(cx, cy, 80 * scale, 0, Math.PI * 2);
+		ctx.arc(cx, cy, glowRadius, 0, Math.PI * 2);
 		ctx.fill();
 
-		// Artist nodes
-		for (const artist of artistClusters) {
-			const x = cx + artist.x * scale;
-			const y = cy + artist.y * scale;
-			const r = artist.radius * scale;
+		// Artist nodes - spiral layout is pre-fit to the canvas, labels alternate
+		// above/below so neighbors don't stack into each other.
+		const maxCount = artistClusters[0]?.count ?? 1;
+		ctx.textAlign = 'center';
+		ctx.font = '9.5px "Avenir Next", "Segoe UI", sans-serif';
+		artistClusters.forEach((artist, index) => {
+			const x = cx + artist.x * spanX;
+			const y = cy + artist.y * spanY;
+			const r = artist.radius;
 
-			ctx.save();
-			const glow = ctx.createRadialGradient(x, y, 0, x, y, r * 2);
-			glow.addColorStop(0, hexToRgba(node?.color ?? '#7c80ff', 0.3));
+			const glow = ctx.createRadialGradient(x, y, 0, x, y, r * 1.8);
+			glow.addColorStop(0, hexToRgba(node?.color ?? '#7c80ff', 0.28));
 			glow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+			ctx.globalAlpha = 1;
 			ctx.fillStyle = glow;
 			ctx.beginPath();
-			ctx.arc(x, y, r * 2, 0, Math.PI * 2);
+			ctx.arc(x, y, r * 1.8, 0, Math.PI * 2);
 			ctx.fill();
 
 			ctx.beginPath();
 			ctx.arc(x, y, r, 0, Math.PI * 2);
-			ctx.fillStyle = hexToRgba(node?.color ?? '#7c80ff', 0.6 + (artist.count / (artistClusters[0]?.count ?? 1)) * 0.3);
-			ctx.shadowBlur = 10;
-			ctx.shadowColor = node?.glowColor ?? 'rgba(124, 128, 255, 0.34)';
+			ctx.fillStyle = hexToRgba(node?.color ?? '#7c80ff', 0.55 + (artist.count / maxCount) * 0.4);
 			ctx.fill();
 
 			// Label
-			ctx.globalAlpha = 0.8;
+			ctx.globalAlpha = 0.85;
 			ctx.fillStyle = '#e0e3ff';
-			ctx.font = `${Math.max(9, 11 * scale)}px "Avenir Next", sans-serif`;
-			ctx.textAlign = 'center';
-			ctx.textBaseline = 'top';
-			ctx.fillText(artist.name, x, y + r + 4);
-			ctx.restore();
-		}
+			if (index % 2 === 0) {
+				ctx.textBaseline = 'top';
+				ctx.fillText(artist.name, x, y + r + 3);
+			} else {
+				ctx.textBaseline = 'bottom';
+				ctx.fillText(artist.name, x, y - r - 3);
+			}
+		});
+		ctx.globalAlpha = 1;
 	}
 
 	function hexToRgba(hex: string, alpha: number): string {
@@ -220,6 +254,8 @@
 		actionError = null;
 		tracks = [];
 		artistClusters = [];
+		trackQuery = '';
+		visibleCount = TRACK_PAGE;
 		try {
 			const response = await cachedApi.getGenreTracks(targetNode.id, true);
 			if (seq !== loadSeq) return;
@@ -233,25 +269,24 @@
 		}
 	}
 
+	// A genre like Electronic resolves to ~7.5k tracks; shoving all of them into
+	// the playback queue is pointless (nobody scrolls a 7k queue) and heavy.
+	// Cap the window - automix extends past it anyway.
+	const MAX_QUEUE_TRACKS = 300;
+
 	async function handlePlayTrack(track: Track) {
 		if (!node) return;
 		try {
-			await api.replacePlaybackQueue(tracks.map(t => t.id));
+			// Queue a bounded window starting at the clicked track, from whatever
+			// the user is looking at (filtered on search, else the whole genre).
+			const startIndex = Math.max(0, filteredTracks.findIndex((t) => t.id === track.id));
+			const windowIds = filteredTracks
+				.slice(startIndex, startIndex + MAX_QUEUE_TRACKS)
+				.map((t) => t.id);
+			await api.replacePlaybackQueue(windowIds);
 			await setPlayerShuffleMode('genre');
 			await setPlayerAutomixEnabled(true);
 			await playTrackNow(track.id);
-		} catch (reason) {
-			actionError = reason instanceof Error ? reason.message : String(reason);
-		}
-	}
-
-	async function handleMix() {
-		if (!node || tracks.length === 0) return;
-		try {
-			await api.replacePlaybackQueue(tracks.map(t => t.id));
-			const shuffled = await setPlayerShuffleMode('genre');
-			await setPlayerAutomixEnabled(true);
-			await playTrackNow(shuffled?.queue[0]?.track.id ?? tracks[0].id);
 		} catch (reason) {
 			actionError = reason instanceof Error ? reason.message : String(reason);
 		}
@@ -275,7 +310,9 @@
 		const rect = entry.contentRect;
 		width = rect.width;
 		height = rect.height;
-		dpr = window.devicePixelRatio ?? 1;
+		// Cap DPR like the main galaxy - uncapped 3-4x displays quadruple the
+		// pixel work for a 180px decorative canvas.
+		dpr = Math.min(window.devicePixelRatio ?? 1, 2);
 		if (canvasEl) {
 			canvasEl.width = rect.width * dpr;
 			canvasEl.height = rect.height * dpr;
@@ -367,7 +404,11 @@
 
 		<div class="artist-galaxy-wrap glass-panel">
 			<div class="galaxy-canvas-container">
-				<canvas bind:this={canvasEl}></canvas>
+				<canvas
+					bind:this={canvasEl}
+					onclick={handleOrbitClick}
+					oncontextmenu={handleOrbitContextMenu}
+				></canvas>
 				{#if loading}
 					<div class="galaxy-loading">
 						<span>Mapping artists...</span>
@@ -403,10 +444,19 @@
 
 		<div class="track-list glass-panel">
 			<div class="track-list-header">
-				<h3>Tracks</h3>
-				{#if tracks.length > 0}
-					<button class="mix-btn" onclick={() => void handleMix()}>▶ Mix this genre</button>
-				{/if}
+				<h3>Tracks {#if !loading && tracks.length > 0}<span class="track-count">{filteredTracks.length.toLocaleString()}</span>{/if}</h3>
+				<div class="track-tools">
+					{#if tracks.length > 0}
+						<input
+							class="track-search"
+							type="search"
+							placeholder="Search tracks"
+							aria-label="Search tracks in this genre"
+							bind:value={trackQuery}
+						/>
+						<button class="mix-btn" onclick={() => onPlayMix()}>▶ Mix this genre</button>
+					{/if}
+				</div>
 			</div>
 
 			{#if loading}
@@ -415,7 +465,7 @@
 				<div class="track-error">{error}</div>
 			{:else}
 				<div class="tracks">
-					{#each tracks.slice(0, 40) as track (track.id)}
+					{#each shownTracks as track (track.id)}
 						<div
 							class="track-row"
 							role="button"
@@ -437,8 +487,12 @@
 							<button class="play-btn" onclick={() => void handlePlayTrack(track)}>▶</button>
 						</div>
 					{/each}
-					{#if tracks.length > 40}
-						<p class="more-hint">+ {tracks.length - 40} more tracks</p>
+					{#if filteredTracks.length > shownTracks.length}
+						<button class="more-btn" onclick={() => (visibleCount += 2 * TRACK_PAGE)}>
+							Show more ({(filteredTracks.length - shownTracks.length).toLocaleString()} left)
+						</button>
+					{:else if filteredTracks.length === 0 && trackQuery.trim()}
+						<p class="more-hint">No tracks match "{trackQuery.trim()}"</p>
 					{/if}
 				</div>
 			{/if}
@@ -670,6 +724,7 @@
 	.galaxy-canvas-container canvas {
 		width: 100%;
 		height: 100%;
+		cursor: pointer;
 	}
 
 	.galaxy-loading {
@@ -716,6 +771,53 @@
 	.track-list-header h3 {
 		font-size: var(--font-size-sm);
 		font-family: var(--font-display);
+	}
+
+	.track-count {
+		margin-left: 6px;
+		color: var(--signal-text);
+		font-size: var(--font-size-2xs);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.track-tools {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+
+	.track-search {
+		height: 30px;
+		width: 180px;
+		padding: 0 10px;
+		border-radius: 999px;
+		border: 1px solid color-mix(in srgb, var(--instrument-border) 40%, transparent);
+		background: color-mix(in srgb, var(--instrument-surface) 55%, transparent);
+		color: var(--text-primary);
+		font-size: var(--font-size-xs);
+	}
+
+	.track-search:focus {
+		outline: none;
+		border-color: color-mix(in srgb, var(--accent-line) 80%, transparent);
+	}
+
+	.more-btn {
+		margin-top: 4px;
+		padding: 8px 14px;
+		border-radius: 999px;
+		border: 1px solid color-mix(in srgb, var(--instrument-border) 40%, transparent);
+		background: color-mix(in srgb, var(--instrument-surface) 55%, transparent);
+		color: var(--signal-text);
+		font-size: var(--font-size-xs);
+		cursor: pointer;
+		align-self: center;
+	}
+
+	.more-btn:hover {
+		background: color-mix(in srgb, var(--accent-soft) 50%, transparent);
+		color: var(--text-primary);
 	}
 
 	.mix-btn {

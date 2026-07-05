@@ -498,6 +498,24 @@ installed build (commands in .scratch/perf-audit/baseline-2026-07-04.md) before 
 the glass look. Only act if the playing-state compositor cost is still material.
 Spawned by: perf audit 2026-07-04
 
+## Genre galaxy mode actions: deferred pieces (2026-07-05)
+- Vibe playback currently queues the selected genre and leans on automix for mood
+  continuity. Track-level energy/BPM ordering and filtering (true "play only this
+  vibe") needs track-level DSP fields exposed on the genre tracks endpoint.
+- "Save as playlist" in heat mode snapshots the hottest rotation via
+  createPlaylistFromQueue. A live smart playlist (rules persisted server-side so
+  the playlist tracks heat over time) is the intended end state.
+- Rediscover/heat mixes cap at 12/8 genres x 60 tracks for queue-build latency;
+  revisit if users want exhaustive mixes.
+Spawned by: genre galaxy overhaul 2026-07-05
+
+## Genre track fetch is unbounded (2026-07-05)
+- Capped the visible/queued surfaces: panel previews 50 rows, interior DOM pages
+  at 100, playback queue windows at 300. But cachedApi.getGenreTracks(id, true)
+  still fetches the ENTIRE subtree (~7.5k Track objects for Electronic) into
+  memory on select/interior-open. Add a server-side limit/pagination param to the
+  genre tracks endpoint so big genres don't pull thousands of rows per open.
+Spawned by: genre galaxy overhaul 2026-07-05
 ### discovery: track_similarity co-occurrence as a v2 ranking signal
 
 The discovery_ranking blend deliberately excludes the track_similarity table

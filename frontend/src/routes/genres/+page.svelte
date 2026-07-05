@@ -4,13 +4,14 @@
 	import { api, type Genre, type GenreHeat, type GenreCohort, type GenreEvolutionPoint, type GenreAudioMetrics, type Track } from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
 	import { wsMessages } from '$lib/api/ws';
-	import { playTrackNow, setPlayerAutomixEnabled, setPlayerShuffleMode } from '$lib/stores/player';
+	import { playTracksInContext, startGenreRadio } from '$lib/stores/player';
+	import type { RadioBlend } from '$lib/api/client';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import GenreGalaxy from '$lib/components/Genre/GenreGalaxy.svelte';
 	import GenrePanel from '$lib/components/Genre/GenrePanel.svelte';
 	import GenreInterior from '$lib/components/Genre/GenreInterior.svelte';
 	import { buildGalaxyData } from '$lib/components/Genre/galaxyBuilder';
-	import type { GalaxyViewMode } from '$lib/components/Genre/galaxy.types';
+	import type { GalaxyViewMode, GalaxyNode } from '$lib/components/Genre/galaxy.types';
 
 	let taxonomy = $state<Genre[]>([]);
 	let heat = $state<GenreHeat[]>([]);
@@ -350,6 +351,7 @@
 		selectedId = id;
 		interiorOpen = false;
 		actionError = null;
+		actionNotice = null;
 		if (id === null) {
 			focusNodeId = null;
 		}
@@ -425,19 +427,46 @@
 		);
 	}
 
+	// The core of the galaxy: play YOUR LOCAL tracks for a genre, shuffled. A
+	// bounded random sample keeps the queue sane on huge genres; shuffle mode
+	// keeps it fresh each launch. This is local library playback - not radio.
+	const MAX_GENRE_QUEUE = 300;
+
+	function sampleGenreQueue(tracks: Track[]): number[] {
+		return shuffled(tracks.filter((track) => track.id > 0).map((track) => track.id)).slice(
+			0,
+			MAX_GENRE_QUEUE
+		);
+	}
+
+	// "Start mix" / the per-node Mix pill: shuffle this genre's local tracks.
 	async function handleMix(id: number) {
 		actionError = null;
 		try {
-			const tracks = await getOrLoadPanelTracks(id);
-			if (tracks.length === 0) {
-				actionError = 'This genre does not currently resolve to any tracks.';
+			const ids = sampleGenreQueue(await getOrLoadPanelTracks(id));
+			if (ids.length === 0) {
+				actionError = 'This genre does not currently resolve to any playable tracks.';
 				return;
 			}
+			await playTracksInContext(ids, undefined, { shuffle: true });
+		} catch (reason) {
+			actionError = reason instanceof Error ? reason.message : String(reason);
+		}
+	}
 
-			await api.replacePlaybackQueue(tracks.map((track) => track.id));
-			const shuffled = await setPlayerShuffleMode('genre');
-			await setPlayerAutomixEnabled(true);
-			await playTrackNow(shuffled?.queue[0]?.track.id ?? tracks[0].id);
+	// Optional, opt-in: a continuous radio STATION seeded from this genre. Pulls
+	// in related / Last.fm tracks, so it's kept separate from Start mix (which is
+	// strictly your local library).
+	async function handleRadio(id: number) {
+		actionError = null;
+		try {
+			const seed = pickSeedTrackId(await getOrLoadPanelTracks(id));
+			if (seed == null) {
+				actionError = 'This genre does not currently resolve to any playable tracks.';
+				return;
+			}
+			const label = galaxyData.nodes.find((node) => node.id === id)?.name ?? 'Genre';
+			await startGenreRadio(seed, 'mixed', label);
 		} catch (reason) {
 			actionError = reason instanceof Error ? reason.message : String(reason);
 		}
@@ -448,20 +477,160 @@
 		if (selectedSeedIds.length === 0) return;
 		try {
 			const lists = await Promise.all(
-				selectedSeedIds.map(async (id) => (await getOrLoadPanelTracks(id)).slice(0, 60))
+				selectedSeedIds.map(async (id) => (await getOrLoadPanelTracks(id)).slice(0, 120))
 			);
-			const mergedTracks = interleaveTrackLists(lists);
-			if (mergedTracks.length === 0) {
+			const ids = sampleGenreQueue(interleaveTrackLists(lists));
+			if (ids.length === 0) {
 				actionError = 'The current seed blend does not resolve to any tracks.';
 				return;
 			}
-
-			await api.replacePlaybackQueue(mergedTracks.map((track) => track.id));
-			const shuffled = await setPlayerShuffleMode('genre');
-			await setPlayerAutomixEnabled(true);
-			await playTrackNow(shuffled?.queue[0]?.track.id ?? mergedTracks[0].id);
+			await playTracksInContext(ids, undefined, { shuffle: true });
 		} catch (reason) {
 			actionError = reason instanceof Error ? reason.message : String(reason);
+		}
+	}
+
+	// --- Mode actions: heat / vibe / rediscover become playable -------------
+	let modeActionBusy = $state(false);
+	let actionNotice = $state<string | null>(null);
+	let noticeTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function showNotice(message: string) {
+		actionNotice = message;
+		if (noticeTimer) clearTimeout(noticeTimer);
+		noticeTimer = setTimeout(() => (actionNotice = null), 6000);
+	}
+
+	let rediscoverCandidates = $derived(
+		galaxyData.nodes.filter((node) => node.trackCount > 0 && node.listenCount === 0)
+	);
+	let hottestNodes = $derived(
+		galaxyData.nodes
+			.filter((node) => node.listenCount > 0 && node.trackCount > 0)
+			.sort((left, right) => right.listenCount - left.listenCount)
+	);
+
+	function subtreeCandidateIds(rootId: number): number[] {
+		const byId = new Map(galaxyData.nodes.map((node) => [node.id, node]));
+		const ids: number[] = [];
+		for (const candidate of rediscoverCandidates) {
+			let cursor = byId.get(candidate.id);
+			while (cursor) {
+				if (cursor.id === rootId) {
+					ids.push(candidate.id);
+					break;
+				}
+				cursor = cursor.parentId === null ? undefined : byId.get(cursor.parentId);
+			}
+		}
+		return ids;
+	}
+
+	function randomItem<T>(items: T[]): T | undefined {
+		if (items.length === 0) return undefined;
+		return items[Math.floor(Math.random() * items.length)];
+	}
+
+	function shuffled<T>(items: T[]): T[] {
+		const copy = items.slice();
+		for (let i = copy.length - 1; i > 0; i -= 1) {
+			const j = Math.floor(Math.random() * (i + 1));
+			[copy[i], copy[j]] = [copy[j], copy[i]];
+		}
+		return copy;
+	}
+
+	// Pick a random library track to seed the optional Radio station from.
+	function pickSeedTrackId(tracks: Track[]): number | null {
+		return randomItem(tracks.filter((track) => track.id > 0))?.id ?? null;
+	}
+
+	// Gather local tracks across several genres, sampled and shuffled into a
+	// bounded queue. Shared by the heat/rediscover mode actions.
+	async function playGenrePool(nodes: GalaxyNode[], emptyMessage: string) {
+		const lists = await Promise.all(
+			nodes.map(async (node) => (await cachedApi.getGenreTracks(node.id, false)).tracks)
+		);
+		const ids = sampleGenreQueue(lists.flat());
+		if (ids.length === 0) {
+			actionError = emptyMessage;
+			return;
+		}
+		await playTracksInContext(ids, undefined, { shuffle: true });
+	}
+
+	// Rediscover: shuffle your LOCAL tracks from unplayed genres (trackCount > 0,
+	// zero listens - the same rule the canvas highlights). Your forgotten music,
+	// not a radio of lookalikes.
+	async function playRediscover() {
+		actionError = null;
+		const scopeIds =
+			selectedId !== null ? subtreeCandidateIds(selectedId) : rediscoverCandidates.map((node) => node.id);
+		if (scopeIds.length === 0) {
+			actionError =
+				selectedId !== null
+					? 'No unplayed genres inside this selection.'
+					: 'No rediscover candidates right now.';
+			return;
+		}
+		modeActionBusy = true;
+		try {
+			const byId = new Map(galaxyData.nodes.map((node) => [node.id, node]));
+			const ranked = scopeIds
+				.map((id) => byId.get(id))
+				.filter((node): node is GalaxyNode => node !== undefined)
+				.sort((left, right) => right.trackCount - left.trackCount)
+				.slice(0, 12);
+			await playGenrePool(shuffled(ranked).slice(0, 6), 'Rediscover candidates resolved to no playable tracks.');
+		} catch (reason) {
+			actionError = reason instanceof Error ? reason.message : String(reason);
+		} finally {
+			modeActionBusy = false;
+		}
+	}
+
+	// Heat: shuffle your LOCAL tracks from your most-played genres.
+	async function playHottest() {
+		actionError = null;
+		if (hottestNodes.length === 0) {
+			actionError = 'No listening heat yet - play something first.';
+			return;
+		}
+		modeActionBusy = true;
+		try {
+			await playGenrePool(shuffled(hottestNodes.slice(0, 8)).slice(0, 6), 'Your hottest genres resolved to no playable tracks.');
+		} catch (reason) {
+			actionError = reason instanceof Error ? reason.message : String(reason);
+		} finally {
+			modeActionBusy = false;
+		}
+	}
+
+	// Heat -> playlist: snapshot a static rotation of your hottest genres into a
+	// real playlist via the queue (createPlaylistFromQueue). A playlist IS a
+	// fixed artifact, so this stays a concrete list (unlike the radio actions).
+	// Live smart-rule persistence is a follow-up.
+	async function saveHeatPlaylist() {
+		actionError = null;
+		modeActionBusy = true;
+		try {
+			const top = hottestNodes.slice(0, 8);
+			const lists = await Promise.all(
+				top.map(async (node) => (await cachedApi.getGenreTracks(node.id, false)).tracks.slice(0, 60))
+			);
+			const merged = interleaveTrackLists(lists);
+			if (merged.length === 0) {
+				actionError = 'No listening heat yet - nothing to save.';
+				return;
+			}
+			await api.replacePlaybackQueue(merged.map((track) => track.id));
+			const name = `Hot rotation ${new Date().toISOString().slice(0, 10)}`;
+			await api.createPlaylistFromQueue(name, true);
+			showNotice(`Saved "${name}" (${merged.length} tracks). Queue now holds the same mix.`);
+		} catch (reason) {
+			actionError = reason instanceof Error ? reason.message : String(reason);
+		} finally {
+			modeActionBusy = false;
 		}
 	}
 
@@ -500,6 +669,7 @@
 			wsUnsubscribe?.();
 			if (galaxyRefreshTimer) clearTimeout(galaxyRefreshTimer);
 			if (galaxyDailyRefreshTimer) clearInterval(galaxyDailyRefreshTimer);
+			if (noticeTimer) clearTimeout(noticeTimer);
 		};
 	});
 </script>
@@ -582,8 +752,45 @@
 				{/each}
 			</div>
 
+			{#if viewMode === 'heat' || viewMode === 'rediscover'}
+				<div class="mode-actions glass-panel" aria-label="Mode actions">
+					{#if viewMode === 'rediscover'}
+						<button
+							class="btn btn-primary"
+							disabled={modeActionBusy || rediscoverCandidates.length === 0}
+							onclick={() => void playRediscover()}
+						>
+							{modeActionBusy
+								? 'Building mix...'
+								: selectedId !== null
+									? 'Play rediscover in selection'
+									: `Play rediscover (${rediscoverCandidates.length} genres)`}
+						</button>
+					{:else if viewMode === 'heat'}
+						<button
+							class="btn btn-primary"
+							disabled={modeActionBusy || hottestNodes.length === 0}
+							onclick={() => void playHottest()}
+						>
+							{modeActionBusy ? 'Building mix...' : 'Play hottest'}
+						</button>
+						<button
+							class="btn btn-glass"
+							disabled={modeActionBusy || hottestNodes.length === 0}
+							onclick={() => void saveHeatPlaylist()}
+						>
+							Save as playlist
+						</button>
+					{/if}
+				</div>
+			{/if}
+
 			{#if actionError}
 				<div class="error-toast glass-panel" role="status" aria-live="polite">{actionError}</div>
+			{/if}
+
+			{#if actionNotice}
+				<div class="notice-toast glass-panel" role="status" aria-live="polite">{actionNotice}</div>
 			{/if}
 
 			<div class="control-dock glass-panel">
@@ -653,6 +860,7 @@
 				open={selectedNode !== null && !interiorOpen}
 				onClose={() => handleSelect(null)}
 				onMix={() => selectedNode && void handleMix(selectedNode.id)}
+				onRadio={() => selectedNode && void handleRadio(selectedNode.id)}
 				onToggleSeed={() => selectedNode && toggleSeed(selectedNode.id)}
 				onOpenInterior={() => { if (selectedNode) interiorOpen = true; }}
 				onSelectNearby={(id) => { handleSelect(id); void focusNode(id); }}
@@ -713,11 +921,46 @@
 
 	.hud,
 	.mode-switcher,
+	.mode-actions,
 	.control-dock,
 	.seed-builder,
-	.error-toast {
+	.error-toast,
+	.notice-toast {
 		position: absolute;
 		z-index: 6;
+	}
+
+	.mode-actions {
+		/* Bottom-center, above the control dock: the genre panel opens on the
+		   right and was burying the action right after the user armed it. */
+		left: 50%;
+		bottom: 78px;
+		transform: translateX(-50%);
+		padding: 8px;
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	/* Seed builder shares that slot; lift it when a mode action bar is up. */
+	.galaxy-stage:has(.mode-actions) .seed-builder {
+		bottom: 150px;
+	}
+
+	.mode-actions .btn:disabled {
+		opacity: 0.45;
+		cursor: not-allowed;
+	}
+
+	.notice-toast {
+		top: 74px;
+		left: 20px;
+		padding: 10px 12px;
+		max-width: min(340px, calc(100% - 40px));
+		color: var(--text-primary);
+		background: color-mix(in srgb, var(--accent-soft) 30%, var(--panel-bg));
+		border-color: color-mix(in srgb, var(--accent-line) 55%, transparent);
+		font-size: var(--font-size-xs);
 	}
 
 	.hud {
@@ -956,6 +1199,14 @@
 			bottom: 120px;
 		}
 
+		.mode-actions {
+			left: 50%;
+			right: auto;
+			top: auto;
+			transform: translateX(-50%);
+			bottom: 82px;
+		}
+
 		.control-dock,
 		.seed-builder {
 			left: 16px;
@@ -996,9 +1247,11 @@
 
 		.hud,
 		.mode-switcher,
+		.mode-actions,
 		.control-dock,
 		.seed-builder,
-		.error-toast {
+		.error-toast,
+		.notice-toast {
 			position: relative;
 			inset: auto;
 			left: auto;
@@ -1007,6 +1260,11 @@
 			bottom: auto;
 			transform: none;
 			width: 100%;
+		}
+
+		.mode-actions {
+			order: 3;
+			flex-wrap: wrap;
 		}
 
 		.hud {

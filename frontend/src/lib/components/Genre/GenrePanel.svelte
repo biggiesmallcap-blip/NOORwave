@@ -20,6 +20,7 @@
 		open = false,
 		onClose = () => {},
 		onMix = () => {},
+		onRadio = () => {},
 		onToggleSeed = () => {},
 		onOpenInterior = () => {},
 		onSelectNearby = () => {}
@@ -34,6 +35,7 @@
 		open?: boolean;
 		onClose?: () => void;
 		onMix?: () => void;
+		onRadio?: () => void;
 		onToggleSeed?: () => void;
 		onOpenInterior?: () => void;
 		onSelectNearby?: (id: number) => void;
@@ -60,6 +62,12 @@
 
 	let listenedTime = $derived(listenHeat?.total_listened_ms ?? node?.totalListenedMs ?? 0);
 	let showTracks = $state(false);
+
+	// The panel is a quick peek, not the browse surface - render only the first
+	// slice. Genres resolve to thousands of tracks and dumping every row into the
+	// DOM here froze the panel. Full searchable list lives in the interior.
+	const PANEL_TRACK_CAP = 50;
+	let shownPanelTracks = $derived(tracks.slice(0, PANEL_TRACK_CAP));
 
 	// Top-3 artists derived from the panel's track sample.
 	let topArtists = $derived.by(() => {
@@ -89,27 +97,37 @@
 	);
 </script>
 
-<div class:open class="genre-panel glass-panel">
+<div class:open class="genre-panel glass-panel" style={node ? `--genre-accent: ${node.color}` : ''}>
 	{#if node}
 		<div class="panel-headline">
 			<div class="panel-copy identity">
-				<div class="family-row">
-					<span class="family-dot" style={`--dot-color: ${node.color}`}></span>
-					<span class="family-name">{node.familyName} system</span>
-				</div>
+				<span class="family-row">
+					<span class="family-dot"></span>
+					<span class="family-name">{node.familyName}</span>
+				</span>
 				<h2>{node.name}</h2>
-				<p class="panel-subtitle">{node.trackCount.toLocaleString()} tracks{listenedTime > 0 ? ` · ${formatDuration(listenedTime)}` : ''}</p>
+				<p class="panel-subtitle">
+					<span>{node.trackCount.toLocaleString()} tracks</span>
+					{#if listenedTime > 0}<span class="sep">·</span><span>{formatDuration(listenedTime)} played</span>{/if}
+				</p>
 			</div>
 			<button class="close-btn" onclick={onClose} aria-label="Close genre panel">×</button>
 		</div>
 
 		<div class="panel-actions">
-			<div class="panel-action-row">
-				<button class="btn btn-primary" onclick={onMix}>▶ Start mix</button>
-				<button class={`btn btn-glass ${isSeed ? 'is-seed' : ''}`} onclick={onToggleSeed}>
+			<button class="mix-hero" onclick={onMix}>
+				<span class="mix-hero-icon">▶</span>
+				<span class="mix-hero-copy">
+					<strong>Start mix</strong>
+					<small>Shuffle your {node.trackCount.toLocaleString()} local tracks</small>
+				</span>
+			</button>
+			<div class="secondary-actions">
+				<button class="ghost-btn" onclick={onRadio} title="Continuous station with related tracks">Radio</button>
+				<button class={`ghost-btn ${isSeed ? 'is-seed' : ''}`} onclick={onToggleSeed}>
 					{isSeed ? 'Seed locked' : 'Lock as seed'}
 				</button>
-				<button class="btn btn-glass" onclick={onOpenInterior}>Open interior</button>
+				<button class="ghost-btn" onclick={onOpenInterior}>Open interior</button>
 			</div>
 		</div>
 
@@ -173,7 +191,7 @@
 
 		<div class="track-section">
 			<button class="tracks-toggle" onclick={() => (showTracks = !showTracks)}>
-				{showTracks ? '▲ Hide tracks' : `See all ${node.trackCount.toLocaleString()} tracks ▼`}
+				{showTracks ? '▲ Hide tracks' : `Preview tracks (${node.trackCount.toLocaleString()}) ▼`}
 			</button>
 			{#if showTracks}
 				{#if loading}
@@ -184,7 +202,7 @@
 					<EmptyState title="No tracks in this branch" copy="This node does not currently resolve to any playable tracks." />
 				{:else}
 					<div class="track-list">
-						{#each tracks as track (track.id)}
+						{#each shownPanelTracks as track (track.id)}
 							<div
 								class="track-row"
 								role="button"
@@ -214,6 +232,11 @@
 							</div>
 						{/each}
 					</div>
+					{#if tracks.length > PANEL_TRACK_CAP}
+						<button class="browse-all" onclick={onOpenInterior}>
+							Open interior to browse &amp; search all {tracks.length.toLocaleString()} tracks
+						</button>
+					{/if}
 				{/if}
 			{/if}
 		</div>
@@ -238,12 +261,15 @@
 			transform 280ms cubic-bezier(0.22, 1, 0.36, 1),
 			opacity var(--motion-base);
 		z-index: 6;
+		/* Panel themes to the selected genre via --genre-accent: a soft top-right
+		   bloom of the genre's own color over the neutral instrument surface. */
 		background:
-			linear-gradient(180deg, color-mix(in srgb, var(--instrument-surface-strong) 90%, transparent), color-mix(in srgb, var(--instrument-surface) 84%, transparent)),
+			radial-gradient(135% 80% at 100% -10%, color-mix(in srgb, var(--genre-accent, transparent) 22%, transparent), transparent 55%),
+			linear-gradient(180deg, color-mix(in srgb, var(--instrument-surface-strong) 92%, transparent), color-mix(in srgb, var(--instrument-surface) 86%, transparent)),
 			var(--panel-bg);
-		border-color: color-mix(in srgb, var(--instrument-border) 74%, transparent);
+		border-color: color-mix(in srgb, var(--genre-accent, var(--instrument-border)) 40%, var(--instrument-border));
 		box-shadow:
-			0 18px 46px rgba(0, 0, 0, 0.5),
+			0 22px 54px rgba(0, 0, 0, 0.52),
 			inset 0 1px 0 color-mix(in srgb, var(--instrument-edge) 62%, transparent);
 	}
 
@@ -284,21 +310,34 @@
 		color: var(--signal-text);
 	}
 
+	.panel-subtitle {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		font-variant-numeric: tabular-nums;
+	}
+
+	.panel-subtitle .sep {
+		opacity: 0.5;
+	}
+
 	.family-row {
 		display: inline-flex;
 		align-items: center;
-		gap: 8px;
-		font-size: var(--font-size-sm);
+		gap: 7px;
+		font-size: var(--font-size-2xs);
 		text-transform: uppercase;
-		letter-spacing: 0.08em;
+		letter-spacing: 0.12em;
+		font-weight: var(--font-weight-semibold);
+		color: color-mix(in srgb, var(--genre-accent, var(--signal-text)) 72%, var(--text-primary));
 	}
 
 	.family-dot {
-		width: 10px;
-		height: 10px;
+		width: 9px;
+		height: 9px;
 		border-radius: 50%;
-		background: var(--dot-color);
-		box-shadow: 0 0 0 6px color-mix(in srgb, var(--dot-color) 18%, transparent);
+		background: var(--genre-accent, var(--signal-text));
+		box-shadow: 0 0 12px color-mix(in srgb, var(--genre-accent, transparent) 80%, transparent);
 	}
 
 	.close-btn {
@@ -324,6 +363,102 @@
 		gap: 8px;
 	}
 
+	/* Start mix is the panel's hero: full-width, themed to the genre, with the
+	   secondary actions demoted to a quiet ghost row below it. */
+	.mix-hero {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		width: 100%;
+		padding: 11px 14px;
+		border-radius: var(--radius);
+		text-align: left;
+		cursor: pointer;
+		color: var(--text-primary);
+		border: 1px solid color-mix(in srgb, var(--genre-accent, var(--accent-line)) 62%, transparent);
+		background:
+			linear-gradient(135deg, color-mix(in srgb, var(--genre-accent, var(--accent)) 34%, transparent), color-mix(in srgb, var(--genre-accent, var(--accent)) 12%, transparent)),
+			color-mix(in srgb, var(--instrument-surface-strong) 74%, transparent);
+		box-shadow: 0 10px 26px color-mix(in srgb, var(--genre-accent, transparent) 24%, transparent);
+		transition:
+			transform var(--motion-fast),
+			box-shadow var(--motion-fast),
+			border-color var(--motion-fast);
+	}
+
+	.mix-hero:hover {
+		transform: translateY(-1px);
+		border-color: color-mix(in srgb, var(--genre-accent, var(--accent-line)) 92%, transparent);
+		box-shadow: 0 14px 34px color-mix(in srgb, var(--genre-accent, transparent) 40%, transparent);
+	}
+
+	.mix-hero-icon {
+		flex-shrink: 0;
+		width: 40px;
+		height: 40px;
+		border-radius: 999px;
+		display: grid;
+		place-items: center;
+		font-size: var(--font-size-sm);
+		color: #06070d;
+		background: color-mix(in srgb, var(--genre-accent, var(--accent)) 82%, #ffffff 12%);
+		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
+	}
+
+	.mix-hero-copy {
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+		min-width: 0;
+	}
+
+	.mix-hero-copy strong {
+		font-size: var(--font-size-md);
+		font-weight: var(--font-weight-bold);
+	}
+
+	.mix-hero-copy small {
+		font-size: var(--font-size-2xs);
+		color: var(--signal-text);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.secondary-actions {
+		display: flex;
+		gap: 8px;
+	}
+
+	.ghost-btn {
+		flex: 1;
+		padding: 8px 12px;
+		border-radius: var(--radius);
+		border: 1px solid color-mix(in srgb, var(--instrument-border) 55%, transparent);
+		background: color-mix(in srgb, var(--instrument-surface) 70%, transparent);
+		color: var(--signal-text);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-medium);
+		cursor: pointer;
+		transition:
+			background var(--motion-fast),
+			border-color var(--motion-fast),
+			color var(--motion-fast);
+	}
+
+	.ghost-btn:hover {
+		color: var(--text-primary);
+		background: color-mix(in srgb, var(--instrument-surface-strong) 84%, transparent);
+		border-color: color-mix(in srgb, var(--instrument-border) 84%, transparent);
+	}
+
+	.ghost-btn.is-seed {
+		color: var(--text-primary);
+		border-color: color-mix(in srgb, var(--genre-accent, var(--accent-line)) 82%, transparent);
+		background: color-mix(in srgb, var(--genre-accent, var(--accent-soft)) 24%, var(--instrument-surface));
+		box-shadow: 0 0 16px color-mix(in srgb, var(--genre-accent, transparent) 34%, transparent);
+	}
+
 	.tracks-toggle {
 		width: 100%;
 		background: color-mix(in srgb, var(--instrument-surface) 84%, transparent);
@@ -344,15 +479,21 @@
 		border-color: color-mix(in srgb, var(--instrument-border) 86%, transparent);
 	}
 
-	.panel-action-row {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 8px;
+	.browse-all {
+		width: 100%;
+		padding: 9px 12px;
+		border-radius: var(--radius);
+		border: 1px dashed color-mix(in srgb, var(--instrument-border) 60%, transparent);
+		background: transparent;
+		color: var(--signal-text);
+		font-size: var(--font-size-xs);
+		cursor: pointer;
+		transition: color var(--motion-fast), border-color var(--motion-fast);
 	}
 
-	.panel-action-row :global(.btn.is-seed) {
-		border-color: color-mix(in srgb, var(--accent-line) 90%, transparent);
-		box-shadow: 0 0 18px color-mix(in srgb, var(--accent-glow) 45%, transparent);
+	.browse-all:hover {
+		color: var(--text-primary);
+		border-color: color-mix(in srgb, var(--genre-accent, var(--accent-line)) 70%, transparent);
 	}
 
 	.nearby-chip {
