@@ -10,6 +10,45 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### fix: cap score_genre_tags confidence at 1.0 and backfill existing rows
+
+789 track_genres rows (2%) carry confidence > 1.0 (max 2.27) because
+score_genre_tags sums per-source scores without a final min(1.0) cap. Every
+consumer using a confidence floor (galaxy filter, and now the audio search
+genre rowset) is miscalibrated on those rows. Cap at write time in the scorer,
+then one-shot normalize existing rows (UPDATE track_genres SET confidence =
+MIN(confidence, 1.0)). Already documented in docs/genre-data-quality-2026-05-07.md.
+- Spawned by: search audit, genre:rock fix session.
+
+### fix: cross-family genre tag contamination (psytrance tagged Psychedelic Rock)
+
+Last.fm tags like "Psychedelic Rock" (~0.29 confidence) sit on psytrance acts
+(1200 Micrograms, Infected Mushroom, Khruangbin). The confidence-floor rowset
+now keeps them out of search, but the tags remain in track_genres and leak via
+the rescue branch when they are a track's strongest tag. Needs contradiction
+logic (incompatible-family suppression) in the enrichment scorer. Context in
+docs/genre-data-quality-2026-05-07.md.
+- Spawned by: search audit, genre:rock fix session.
+
+### feat: order genre-filtered search results by matched-tag confidence
+
+Filtered audio search ranks by is_favorite/play_count only; a barely-rock
+favorite outranks a definitive rock deep cut. Consider ORDER BY
+MAX(matched tag confidence) DESC before the favorite/play-count tiebreak when
+genre_ids is non-empty. Needs a join against the curated rowset in the ORDER
+BY, so measure query cost on the 36k-track library first.
+- Spawned by: search audit, genre:rock fix session.
+
+### perf: evaluate album/artist fallback rowset for search genre matching
+
+Search genre matching now uses filter_subquery(ConfidenceMinWithRescue(0.5)),
+which covers tagged tracks. filter_subquery_with_fallback would additionally
+rescue fully untagged tracks from album/artist siblings (14k favorited tracks
+have zero genres per docs/genre-data-quality-2026-05-07.md), but its
+needs_fallback CTE scans the whole tracks table - measure interactive-search
+latency on the real library before enabling.
+- Spawned by: search audit, genre:rock fix session.
+
 ### verify: NSIS www-wipe actually cleans stale chunks on a real update
 
 `noor-app/nsis-hooks.nsh` now `RMDir /r "$INSTDIR\www"` in the preinstall hook so

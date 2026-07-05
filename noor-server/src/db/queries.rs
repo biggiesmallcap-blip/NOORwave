@@ -10065,8 +10065,9 @@ mod tests {
         )
         .expect("tracks");
 
-        let results = search_with_audio_filters(&conn, "the strokes", &AudioFilters::default(), 50)
-            .expect("library search");
+        let results =
+            search_with_audio_filters(&conn, "the strokes", &AudioFilters::default(), 50, 0)
+                .expect("library search");
 
         let ids: Vec<i64> = results.iter().map(|r| r.id).collect();
         assert_eq!(
@@ -10096,7 +10097,7 @@ mod tests {
         )
         .expect("track");
 
-        let results = search_with_audio_filters(&conn, "blonde", &AudioFilters::default(), 50)
+        let results = search_with_audio_filters(&conn, "blonde", &AudioFilters::default(), 50, 0)
             .expect("search");
         let titles: Vec<&str> = results.iter().map(|r| r.title.as_str()).collect();
         assert!(
@@ -10137,7 +10138,7 @@ mod tests {
             ..Default::default()
         };
 
-        let results = search_with_audio_filters(&conn, "miles", &filters, 50).expect("search");
+        let results = search_with_audio_filters(&conn, "miles", &filters, 50, 0).expect("search");
         let ids: Vec<i64> = results.iter().map(|r| r.id).collect();
         assert_eq!(
             ids,
@@ -10179,7 +10180,7 @@ mod tests {
             ..Default::default()
         };
 
-        let results = search_with_audio_filters(&conn, "", &filters, 50).expect("search");
+        let results = search_with_audio_filters(&conn, "", &filters, 50, 0).expect("search");
         let ids: Vec<i64> = results.iter().map(|r| r.id).collect();
         assert_eq!(ids, vec![4001]);
     }
@@ -10343,7 +10344,7 @@ mod tests {
         }
 
         let results =
-            search_with_audio_filters(&conn, "", &AudioFilters::default(), 3).expect("search");
+            search_with_audio_filters(&conn, "", &AudioFilters::default(), 3, 0).expect("search");
         assert_eq!(results.len(), 3, "expected limit=3 to cap results");
     }
 
@@ -10371,7 +10372,7 @@ mod tests {
 
         // Old ordering (play_count DESC, last_played_at DESC) → B leads.
         // New ordering (is_favorite DESC, ...) → A leads.
-        let results = search_with_audio_filters(&conn, "miles", &AudioFilters::default(), 50)
+        let results = search_with_audio_filters(&conn, "miles", &AudioFilters::default(), 50, 0)
             .expect("search");
         let ids: Vec<i64> = results.iter().map(|r| r.id).collect();
         assert_eq!(
@@ -10403,7 +10404,8 @@ mod tests {
             ..Default::default()
         };
 
-        let results = search_with_audio_filters(&conn, "anything", &filters, 50).expect("search");
+        let results =
+            search_with_audio_filters(&conn, "anything", &filters, 50, 0).expect("search");
         assert!(results.is_empty());
     }
 
@@ -10432,7 +10434,7 @@ mod tests {
         // Query "AC/DC live?" → strips to "AC DC live" → tokens AC, DC, live must
         // all appear in some indexed column. Album "AC/DC Live" tokenizes to
         // ["ac", "dc", "live"] (unicode61 splits on /), satisfying all three.
-        let r1 = search_with_audio_filters(&conn, "AC/DC live?", &AudioFilters::default(), 50)
+        let r1 = search_with_audio_filters(&conn, "AC/DC live?", &AudioFilters::default(), 50, 0)
             .expect("'AC/DC live?' must not error");
         assert!(
             r1.iter().any(|r| r.id == 8001),
@@ -10442,7 +10444,7 @@ mod tests {
 
         // Query "love - remix" → "love remix" → tokens must both appear in same
         // column. Track 8002's title "Love Remix" satisfies that.
-        let r2 = search_with_audio_filters(&conn, "love - remix", &AudioFilters::default(), 50)
+        let r2 = search_with_audio_filters(&conn, "love - remix", &AudioFilters::default(), 50, 0)
             .expect("'love - remix' must not error");
         assert!(
             r2.iter().any(|r| r.id == 8002),
@@ -10520,12 +10522,322 @@ mod tests {
             ..Default::default()
         };
 
-        let results = search_with_audio_filters(&conn, "miles", &filters, 2).expect("search");
+        let results = search_with_audio_filters(&conn, "miles", &filters, 2, 0).expect("search");
         assert_eq!(
             results.len(),
             2,
             "limit=2 with both FTS bind and audio-filter binds; off-by-one would return 0 or 3"
         );
+    }
+
+    #[test]
+    fn audio_search_offset_pages_and_count_reports_full_set() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        conn.execute("INSERT INTO artists (id, name) VALUES (9201, 'Pager')", [])
+            .expect("artist");
+        for i in 0..5i64 {
+            let id = 9201 + i;
+            conn.execute(
+                &format!(
+                    "INSERT INTO tracks (
+                        id, title, artist_id, duration_ms, tidal_id, best_quality, best_source,
+                        fidelity_score, is_favorite, source, play_count
+                     ) VALUES ({id}, 'P{i}', 9201, 200000, {id}, 'LOSSLESS', 'tidal', 5, 0, 'tidal', {pc})",
+                    pc = 100 - i
+                ),
+                [],
+            )
+            .expect("track");
+        }
+
+        let filters = AudioFilters::default();
+        let total = count_audio_filter_matches(&conn, "", &filters).expect("count");
+        assert_eq!(total, 5);
+
+        let page1 = search_with_audio_filters(&conn, "", &filters, 2, 0).expect("page1");
+        let page2 = search_with_audio_filters(&conn, "", &filters, 2, 2).expect("page2");
+        let page3 = search_with_audio_filters(&conn, "", &filters, 2, 4).expect("page3");
+        let ids: Vec<i64> = page1
+            .iter()
+            .chain(page2.iter())
+            .chain(page3.iter())
+            .map(|r| r.id)
+            .collect();
+        // play_count DESC ranking: 9201 (100) .. 9205 (96); pages must not
+        // overlap or skip.
+        assert_eq!(ids, vec![9201, 9202, 9203, 9204, 9205]);
+    }
+
+    #[test]
+    fn resolve_genre_tokens_matches_slug_and_name_case_insensitive() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute_batch(
+            "INSERT INTO genres (id, name, slug, parent_id) VALUES
+                (1, 'Rock', 'rock', NULL),
+                (2, 'Hip Hop', 'hip-hop', NULL);",
+        )
+        .expect("genres");
+
+        let tokens = vec![
+            "Rock".to_string(),
+            "hip-hop".to_string(),
+            "HIP HOP".to_string(),
+            "polka".to_string(),
+        ];
+        let (ids, unmatched) = resolve_genre_tokens(&conn, &tokens).expect("resolve");
+        assert_eq!(ids, vec![1, 2, 2]);
+        assert_eq!(unmatched, vec!["polka".to_string()]);
+    }
+
+    #[test]
+    fn expand_genre_descendants_walks_full_subtree() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute_batch(
+            "INSERT INTO genres (id, name, slug, parent_id) VALUES
+                (1, 'Rock', 'rock', NULL),
+                (2, 'Alternative Rock', 'alternative-rock', 1),
+                (3, 'Indie Rock', 'indie-rock', 2),
+                (4, 'Jazz', 'jazz', NULL);",
+        )
+        .expect("genres");
+
+        let mut expanded = expand_genre_descendants(&conn, &[1]).expect("expand");
+        expanded.sort_unstable();
+        assert_eq!(expanded, vec![1, 2, 3], "grandchildren must be included");
+
+        // Unknown ids drop out instead of leaking into the SQL filter.
+        assert!(
+            expand_genre_descendants(&conn, &[999])
+                .expect("expand")
+                .is_empty()
+        );
+        assert!(
+            expand_genre_descendants(&conn, &[])
+                .expect("expand")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn genre_filter_uses_curated_rowset_not_raw_tags() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        conn.execute_batch(
+            "INSERT INTO genres (id, name, slug, parent_id) VALUES
+                (1, 'Rock', 'rock', NULL),
+                (2, 'Indie Rock', 'indie-rock', 1),
+                (3, 'Psytrance', 'psytrance', NULL);
+             INSERT INTO artists (id, name) VALUES (9301, 'G');",
+        )
+        .expect("seed");
+        for i in 0..4i64 {
+            let id = 9301 + i;
+            conn.execute(
+                &format!(
+                    "INSERT INTO tracks (
+                        id, title, artist_id, duration_ms, tidal_id, best_quality, best_source,
+                        fidelity_score, is_favorite, source, play_count
+                     ) VALUES ({id}, 'G{i}', 9301, 200000, {id}, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0)"
+                ),
+                [],
+            )
+            .expect("track");
+        }
+        conn.execute_batch(
+            "INSERT INTO track_genres (track_id, genre_id, source, confidence) VALUES
+                (9301, 1, 'musicbrainz', 0.8),  -- solid rock tag: matches
+                (9302, 2, 'musicbrainz', 0.8),  -- indie rock (descendant): matches
+                (9303, 1, 'lastfm', 0.3),        -- weak-only tag: rescued, matches
+                (9304, 3, 'musicbrainz', 0.9),  -- psytrance track...
+                (9304, 1, 'lastfm', 0.29);       -- ...with junk rock tag: must NOT match",
+        )
+        .expect("tags");
+
+        // Route-equivalent flow: resolve token, expand descendants, filter.
+        let (ids, unmatched) = resolve_genre_tokens(&conn, &["rock".to_string()]).expect("resolve");
+        assert!(unmatched.is_empty());
+        let expanded = expand_genre_descendants(&conn, &ids).expect("expand");
+
+        let filters = AudioFilters {
+            genre_ids: expanded,
+            ..Default::default()
+        };
+        let mut result_ids: Vec<i64> = search_with_audio_filters(&conn, "", &filters, 50, 0)
+            .expect("search")
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        result_ids.sort_unstable();
+        assert_eq!(
+            result_ids,
+            vec![9301, 9302, 9303],
+            "curated rowset must admit strong + descendant + rescued tags and drop junk"
+        );
+
+        let total = count_audio_filter_matches(&conn, "", &filters).expect("count");
+        assert_eq!(total, 3, "count must apply the same genre rowset");
+    }
+
+    #[test]
+    fn genre_filter_ranks_strongest_match_over_favorite() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        conn.execute_batch(
+            "INSERT INTO genres (id, name, slug, parent_id) VALUES (1, 'Rock', 'rock', NULL);
+             INSERT INTO artists (id, name) VALUES (9601, 'R');",
+        )
+        .expect("seed");
+        // Deep cut: definitive rock tag (0.9), never played, not a favorite.
+        // Crossover hit: weak rock tag (0.55), favorited with heavy plays.
+        conn.execute_batch(
+            "INSERT INTO tracks
+                (id, title, artist_id, duration_ms, tidal_id, best_quality, best_source,
+                 fidelity_score, is_favorite, source, play_count)
+             VALUES
+                (9601, 'Deep Cut', 9601, 200000, 9601, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0),
+                (9602, 'Crossover Hit', 9601, 200000, 9602, 'LOSSLESS', 'tidal', 5, 1, 'tidal', 999);
+             INSERT INTO track_genres (track_id, genre_id, source, confidence) VALUES
+                (9601, 1, 'musicbrainz', 0.9),
+                (9602, 1, 'lastfm', 0.55);",
+        )
+        .expect("tags");
+
+        let filters = AudioFilters {
+            genre_ids: vec![1],
+            ..Default::default()
+        };
+        let ids: Vec<i64> = search_with_audio_filters(&conn, "", &filters, 50, 0)
+            .expect("search")
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![9601, 9602],
+            "strongest genre match must rank first even against a heavy favorite"
+        );
+
+        // Without a genre filter, the favorite/play ranking still wins.
+        let ids_plain: Vec<i64> =
+            search_with_audio_filters(&conn, "", &AudioFilters::default(), 50, 0)
+                .expect("search")
+                .iter()
+                .map(|r| r.id)
+                .collect();
+        assert_eq!(ids_plain, vec![9602, 9601]);
+    }
+
+    #[test]
+    fn normalize_key_signature_canonicalizes_user_input() {
+        assert_eq!(normalize_key_signature("Am"), "Am");
+        assert_eq!(normalize_key_signature("am"), "Am");
+        assert_eq!(normalize_key_signature("A"), "Amaj");
+        assert_eq!(normalize_key_signature("a major"), "Amaj");
+        assert_eq!(normalize_key_signature("Bb"), "A#maj");
+        assert_eq!(normalize_key_signature("bbm"), "A#m");
+        assert_eq!(normalize_key_signature("f# minor"), "F#m");
+        assert_eq!(normalize_key_signature("Cb"), "Bmaj");
+        // Unrecognized input passes through for the NOCASE match to try.
+        assert_eq!(normalize_key_signature("8A"), "8A");
+        assert_eq!(normalize_key_signature("Axyz"), "Axyz");
+    }
+
+    #[test]
+    fn key_filter_matches_case_insensitively_with_enharmonics() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        conn.execute("INSERT INTO artists (id, name) VALUES (9401, 'K')", [])
+            .expect("artist");
+        conn.execute(
+            "INSERT INTO tracks (
+                id, title, artist_id, duration_ms, tidal_id, best_quality, best_source,
+                fidelity_score, is_favorite, source, play_count
+             ) VALUES
+                (9401, 'MinorTrack', 9401, 200000, 9401, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0),
+                (9402, 'SharpTrack', 9401, 200000, 9402, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0)",
+            [],
+        )
+        .expect("tracks");
+        conn.execute(
+            "INSERT INTO audio_dsp_features (track_id, key_signature, camelot_key) VALUES
+                (9401, 'Am', '8A'), (9402, 'A#maj', '6B')",
+            [],
+        )
+        .expect("dsp");
+
+        let by_key = |key: &str| -> Vec<i64> {
+            let filters = AudioFilters {
+                key_signature: Some(key.to_string()),
+                ..Default::default()
+            };
+            search_with_audio_filters(&conn, "", &filters, 50, 0)
+                .expect("search")
+                .iter()
+                .map(|r| r.id)
+                .collect()
+        };
+        assert_eq!(by_key("am"), vec![9401], "lowercase minor");
+        assert_eq!(by_key("Bb"), vec![9402], "flat spelling of A#maj");
+
+        let filters = AudioFilters {
+            camelot_key: Some("8a".to_string()),
+            ..Default::default()
+        };
+        let ids: Vec<i64> = search_with_audio_filters(&conn, "", &filters, 50, 0)
+            .expect("search")
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(ids, vec![9401], "camelot NOCASE");
+    }
+
+    #[test]
+    fn artist_and_album_contains_filters_match_substrings() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        conn.execute_batch(
+            "INSERT INTO artists (id, name) VALUES (9501, 'Radiohead'), (9502, 'Portishead');
+             INSERT INTO albums (id, title, artist_id, source) VALUES
+                (9501, 'OK Computer', 9501, 'tidal'),
+                (9502, 'Dummy', 9502, 'tidal');
+             INSERT INTO tracks
+                (id, title, artist_id, album_id, duration_ms, tidal_id, best_quality, best_source,
+                 fidelity_score, is_favorite, source, play_count)
+             VALUES
+                (9501, 'Airbag', 9501, 9501, 200000, 9501, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0),
+                (9502, 'Roads', 9502, 9502, 200000, 9502, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0);",
+        )
+        .expect("seed");
+
+        let filters = AudioFilters {
+            artist_contains: Some("RADIO".to_string()),
+            ..Default::default()
+        };
+        let ids: Vec<i64> = search_with_audio_filters(&conn, "", &filters, 50, 0)
+            .expect("search")
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(ids, vec![9501]);
+
+        let filters = AudioFilters {
+            album_contains: Some("dummy".to_string()),
+            ..Default::default()
+        };
+        let ids: Vec<i64> = search_with_audio_filters(&conn, "", &filters, 50, 0)
+            .expect("search")
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(ids, vec![9502]);
     }
 
     /// End-to-end Path A read API: cascade joins through `genre_paths` and
@@ -10780,10 +11092,12 @@ pub struct AudioFilters {
     pub camelot_key: Option<String>,   // exact match
     pub year_min: Option<i64>,
     pub year_max: Option<i64>,
-    pub genre_ids: Vec<i64>,           // track must belong to at least one
-    pub track_type: Option<String>,    // placeholder, always "track"
-    pub is_instrumental: Option<bool>, // true → vocal:false filter
-    pub liked_only: bool,              // restrict to user-liked tracks (Liked tab)
+    pub genre_ids: Vec<i64>,             // track must belong to at least one
+    pub track_type: Option<String>,      // placeholder, always "track"
+    pub is_instrumental: Option<bool>,   // true → vocal:false filter
+    pub liked_only: bool,                // restrict to user-liked tracks (Liked tab)
+    pub artist_contains: Option<String>, // substring match on artist name
+    pub album_contains: Option<String>,  // substring match on album title
 }
 
 #[derive(Debug, Serialize)]
@@ -10945,6 +11259,135 @@ fn track_fts_candidate_subquery() -> &'static str {
      SELECT t3.id FROM tracks t3 JOIN albums_fts  ON albums_fts.rowid  = t3.album_id  WHERE albums_fts  MATCH ?1"
 }
 
+/// Canonicalize a user-typed key filter into the analyzer's vocabulary
+/// (sharps only, "Am" for minor / "Amaj" for major — see
+/// services/audio_analysis/key.rs). "Bb" -> "A#maj", "bbm" -> "A#m",
+/// "f# minor" -> "F#m", bare "A" -> "Amaj". Unrecognized input is returned
+/// trimmed so the NOCASE equality match still gets a shot at it.
+fn normalize_key_signature(input: &str) -> String {
+    let trimmed = input.trim();
+    let mut chars = trimmed.chars();
+    let Some(first) = chars.next() else {
+        return trimmed.to_string();
+    };
+    let letter = first.to_ascii_uppercase();
+    if !('A'..='G').contains(&letter) {
+        return trimmed.to_string();
+    }
+    let rest: String = chars.collect();
+    let (accidental, suffix) = match rest.chars().next() {
+        Some('#') => ("#", &rest[1..]),
+        Some('b') | Some('B') => ("b", &rest[1..]),
+        _ => ("", rest.as_str()),
+    };
+    let note = match (letter, accidental) {
+        (l, "") => l.to_string(),
+        (l, "#") => match l {
+            'E' => "F".to_string(),
+            'B' => "C".to_string(),
+            l => format!("{l}#"),
+        },
+        (l, "b") => match l {
+            'C' => "B".to_string(),
+            'F' => "E".to_string(),
+            'D' => "C#".to_string(),
+            'E' => "D#".to_string(),
+            'G' => "F#".to_string(),
+            'A' => "G#".to_string(),
+            'B' => "A#".to_string(),
+            l => l.to_string(),
+        },
+        (l, _) => l.to_string(),
+    };
+    match suffix.trim().to_ascii_lowercase().as_str() {
+        "" | "maj" | "major" => format!("{note}maj"),
+        "m" | "min" | "minor" => format!("{note}m"),
+        _ => trimmed.to_string(),
+    }
+}
+
+/// Resolve user-typed genre tokens (from `genre:` filters) to genre ids.
+/// Matches slug or name, case-insensitively; hyphens in the token also match
+/// spaces in the name ("hip-hop" -> "Hip Hop"). Returns (matched ids,
+/// unmatched tokens) so the route can surface unknown genres instead of
+/// silently searching unfiltered.
+pub fn resolve_genre_tokens(
+    conn: &Connection,
+    tokens: &[String],
+) -> Result<(Vec<i64>, Vec<String>)> {
+    let mut ids = Vec::new();
+    let mut unmatched = Vec::new();
+    let mut stmt = conn.prepare(
+        "SELECT id FROM genres \
+         WHERE slug = ?1 OR LOWER(name) = ?1 OR LOWER(name) = REPLACE(?1, '-', ' ')",
+    )?;
+    for token in tokens {
+        let normalized = token.trim().to_lowercase();
+        if normalized.is_empty() {
+            continue;
+        }
+        let found: Option<i64> = stmt
+            .query_row(params![normalized], |row| row.get(0))
+            .optional()?;
+        match found {
+            Some(id) => ids.push(id),
+            None => unmatched.push(token.clone()),
+        }
+    }
+    Ok((ids, unmatched))
+}
+
+/// Expand genre ids to the full descendant subtree (children, grandchildren,
+/// ...) via the parent_id closure. Ids not present in `genres` drop out.
+pub fn expand_genre_descendants(conn: &Connection, ids: &[i64]) -> Result<Vec<i64>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    // i64 ids — safe to inline.
+    let id_list: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+    let sql = format!(
+        "WITH RECURSIVE closure(id) AS (\
+            SELECT id FROM genres WHERE id IN ({ids}) \
+            UNION \
+            SELECT g.id FROM genres g JOIN closure c ON g.parent_id = c.id\
+         ) SELECT id FROM closure",
+        ids = id_list.join(", ")
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let expanded = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<i64>, _>>()?;
+    Ok(expanded)
+}
+
+/// Genre filtering + ranking, expressed as an INNER JOIN so one pass over the
+/// curated rowset both decides membership and yields the match confidence.
+/// Returns the JOIN clause to splice in after the base table's LEFT JOINs, or
+/// "" when no genre filter is active. Exposes column `gm.genre_match_conf`.
+///
+/// Uses the same rowset the genre galaxy uses (confidence floor + weakest-tag
+/// rescue) instead of raw track_genres, so low-confidence junk tags (e.g.
+/// "Psychedelic Rock" @ 0.29 on psytrance tracks) neither match nor rank.
+/// confidence is clamped to 1.0 for ranking so the handful of miscalibrated
+/// >1.0 rows (docs/genre-data-quality-2026-05-07.md) can't outrank a clean
+/// 1.0 tag.
+fn genre_match_join_sql(filters: &AudioFilters) -> String {
+    if filters.genre_ids.is_empty() {
+        return String::new();
+    }
+    // i64 ids — safe to inline.
+    let id_list: Vec<String> = filters.genre_ids.iter().map(|id| id.to_string()).collect();
+    let rowset = crate::genre::filter::filter_subquery(
+        crate::genre::filter::GalaxyFilterRule::default_rule(),
+    );
+    format!(
+        " JOIN (SELECT track_id, MAX(MIN(confidence, 1.0)) AS genre_match_conf \
+         FROM ({rowset}) WHERE genre_id IN ({}) GROUP BY track_id) gm \
+         ON gm.track_id = t.id",
+        id_list.join(", ")
+    )
+}
+
 /// SQL fragment + bind params produced by `build_audio_filter_sql`. `next_idx`
 /// is the first free `?N` slot — caller binds `LIMIT ?{next_idx}`.
 struct AudioFilterSql {
@@ -10993,13 +11436,15 @@ fn build_audio_filter_sql(filters: &AudioFilters, start_idx: usize) -> AudioFilt
         idx += 1;
     }
     if let Some(ref v) = filters.key_signature {
-        sql.push_str(&format!(" AND d.key_signature = ?{idx}"));
-        params.push(Box::new(v.clone()));
+        // NOCASE + canonicalization so "key:am", "key:A", "key:Bb" all hit the
+        // analyzer's "Am"/"Amaj"/"A#maj" vocabulary instead of matching nothing.
+        sql.push_str(&format!(" AND d.key_signature = ?{idx} COLLATE NOCASE"));
+        params.push(Box::new(normalize_key_signature(v)));
         idx += 1;
     }
     if let Some(ref v) = filters.camelot_key {
-        sql.push_str(&format!(" AND d.camelot_key = ?{idx}"));
-        params.push(Box::new(v.clone()));
+        sql.push_str(&format!(" AND d.camelot_key = ?{idx} COLLATE NOCASE"));
+        params.push(Box::new(v.trim().to_string()));
         idx += 1;
     }
     if let Some(v) = filters.year_min {
@@ -11012,17 +11457,23 @@ fn build_audio_filter_sql(filters: &AudioFilters, start_idx: usize) -> AudioFilt
         params.push(Box::new(v));
         idx += 1;
     }
-    if !filters.genre_ids.is_empty() {
-        // i64 ids — safe to inline.
-        let id_list: Vec<String> = filters.genre_ids.iter().map(|id| id.to_string()).collect();
-        sql.push_str(&format!(
-            " AND t.id IN (SELECT track_id FROM track_genres WHERE genre_id IN ({}))",
-            id_list.join(", ")
-        ));
-    }
+    // NOTE: genre filtering is NOT a WHERE clause. It is expressed as an INNER
+    // JOIN (see genre_match_join_sql) so the same curated rowset that decides
+    // membership also yields the matched confidence used to rank strongest
+    // matches first. Callers splice that JOIN into the FROM before this WHERE.
     if let Some(instrumental) = filters.is_instrumental {
         sql.push_str(&format!(" AND d.is_instrumental = ?{idx}"));
         params.push(Box::new(if instrumental { 1i64 } else { 0i64 }));
+        idx += 1;
+    }
+    if let Some(ref v) = filters.artist_contains {
+        sql.push_str(&format!(" AND LOWER(COALESCE(a.name, '')) LIKE ?{idx}"));
+        params.push(Box::new(format!("%{}%", v.trim().to_lowercase())));
+        idx += 1;
+    }
+    if let Some(ref v) = filters.album_contains {
+        sql.push_str(&format!(" AND LOWER(COALESCE(al.title, '')) LIKE ?{idx}"));
+        params.push(Box::new(format!("%{}%", v.trim().to_lowercase())));
         idx += 1;
     }
     if filters.liked_only {
@@ -11038,13 +11489,89 @@ fn build_audio_filter_sql(filters: &AudioFilters, start_idx: usize) -> AudioFilt
     }
 }
 
+/// Deterministic display ranking. `offset` pages past the 50-row display cap
+/// ("Show more"); pass 0 for the first page.
 pub fn search_with_audio_filters(
     conn: &Connection,
     free_text: &str,
     filters: &AudioFilters,
     limit: usize,
+    offset: usize,
 ) -> Result<Vec<AudioSearchResult>> {
-    search_with_audio_filters_ordered(conn, free_text, filters, limit, false)
+    search_with_audio_filters_ordered(conn, free_text, filters, limit, offset, false)
+}
+
+/// Total number of tracks matching the query + filters, independent of the
+/// display LIMIT, so the UI can say "top 50 of N" instead of looking capped.
+pub fn count_audio_filter_matches(
+    conn: &Connection,
+    free_text: &str,
+    filters: &AudioFilters,
+) -> Result<i64> {
+    match count_audio_filter_matches_inner(conn, free_text, filters, true) {
+        Ok(count) => Ok(count),
+        Err(err) => {
+            tracing::warn!(?err, query = %free_text, "FTS count failed; falling back to LIKE");
+            count_audio_filter_matches_inner(conn, free_text, filters, false)
+        }
+    }
+}
+
+fn count_audio_filter_matches_inner(
+    conn: &Connection,
+    free_text: &str,
+    filters: &AudioFilters,
+    use_fts: bool,
+) -> Result<i64> {
+    if filters.track_type.as_deref().is_some_and(|t| t != "track") {
+        return Ok(0);
+    }
+
+    let normalized = free_text.trim().to_ascii_lowercase();
+
+    let mut sql = String::from(
+        "SELECT COUNT(*) \
+         FROM tracks t \
+         LEFT JOIN audio_dsp_features d ON d.track_id = t.id \
+         LEFT JOIN artists a ON a.id = t.artist_id \
+         LEFT JOIN albums al ON al.id = t.album_id",
+    );
+    sql.push_str(&genre_match_join_sql(filters));
+    sql.push_str(" WHERE 1=1");
+
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    let mut start_idx: usize = 1;
+
+    if !normalized.is_empty() {
+        if use_fts {
+            sql.push_str(&format!(
+                " AND t.id IN ({sub})",
+                sub = track_fts_candidate_subquery()
+            ));
+            params.push(Box::new(to_fts_query(&normalized)));
+        } else {
+            let pattern = format!("%{normalized}%");
+            sql.push_str(&format!(
+                " AND (LOWER(t.title) LIKE ?{0} \
+                   OR LOWER(COALESCE(a.name, '')) LIKE ?{0} \
+                   OR LOWER(COALESCE(al.title, '')) LIKE ?{0})",
+                start_idx
+            ));
+            params.push(Box::new(pattern));
+        }
+        start_idx += 1;
+    }
+
+    let filter_sql = build_audio_filter_sql(filters, start_idx);
+    sql.push_str(&filter_sql.sql);
+    params.extend(filter_sql.params);
+
+    let mut stmt = conn.prepare(&sql)?;
+    let count: i64 = stmt
+        .query_row(params_from_iter(params.iter().map(|p| p.as_ref())), |row| {
+            row.get(0)
+        })?;
+    Ok(count)
 }
 
 /// Same matching as `search_with_audio_filters`, but returns a true random
@@ -11058,7 +11585,7 @@ pub fn search_with_audio_filters_shuffled(
     filters: &AudioFilters,
     limit: usize,
 ) -> Result<Vec<AudioSearchResult>> {
-    search_with_audio_filters_ordered(conn, free_text, filters, limit, true)
+    search_with_audio_filters_ordered(conn, free_text, filters, limit, 0, true)
 }
 
 fn search_with_audio_filters_ordered(
@@ -11066,13 +11593,16 @@ fn search_with_audio_filters_ordered(
     free_text: &str,
     filters: &AudioFilters,
     limit: usize,
+    offset: usize,
     shuffle: bool,
 ) -> Result<Vec<AudioSearchResult>> {
-    match search_with_audio_filters_fts(conn, free_text, filters, limit, shuffle) {
+    match search_with_audio_filters_fts(conn, free_text, filters, limit, offset, shuffle) {
         Ok(results) => Ok(results),
         Err(err) => {
             tracing::warn!(?err, query = %free_text, "FTS library search failed; falling back to LIKE");
-            search_with_audio_filters_like_fallback(conn, free_text, filters, limit, shuffle)
+            search_with_audio_filters_like_fallback(
+                conn, free_text, filters, limit, offset, shuffle,
+            )
         }
     }
 }
@@ -11082,6 +11612,7 @@ fn search_with_audio_filters_fts(
     free_text: &str,
     filters: &AudioFilters,
     limit: usize,
+    offset: usize,
     shuffle: bool,
 ) -> Result<Vec<AudioSearchResult>> {
     if filters.track_type.as_deref().is_some_and(|t| t != "track") {
@@ -11098,9 +11629,10 @@ fn search_with_audio_filters_fts(
          FROM tracks t \
          LEFT JOIN audio_dsp_features d ON d.track_id = t.id \
          LEFT JOIN artists a ON a.id = t.artist_id \
-         LEFT JOIN albums al ON al.id = t.album_id \
-         WHERE 1=1",
+         LEFT JOIN albums al ON al.id = t.album_id",
     );
+    sql.push_str(&genre_match_join_sql(filters));
+    sql.push_str(" WHERE 1=1");
 
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     let mut start_idx: usize = 1;
@@ -11121,11 +11653,20 @@ fn search_with_audio_filters_fts(
 
     let order = if shuffle {
         "RANDOM()"
-    } else {
+    } else if filters.genre_ids.is_empty() {
         "t.is_favorite DESC, t.play_count DESC, t.fidelity_score DESC, t.title ASC"
+    } else {
+        // Strongest genre match first (a definitive-rock track outranks a
+        // barely-tagged favorite), then the usual favorite/play ranking.
+        "gm.genre_match_conf DESC, t.is_favorite DESC, t.play_count DESC, \
+         t.fidelity_score DESC, t.title ASC"
     };
-    sql.push_str(&format!(" ORDER BY {order} LIMIT ?{limit_idx}"));
+    sql.push_str(&format!(
+        " ORDER BY {order} LIMIT ?{limit_idx} OFFSET ?{offset_idx}",
+        offset_idx = limit_idx + 1
+    ));
     params.push(Box::new(limit as i64));
+    params.push(Box::new(offset as i64));
 
     let mut stmt = conn.prepare(&sql)?;
     let results = stmt
@@ -11162,6 +11703,7 @@ fn search_with_audio_filters_like_fallback(
     free_text: &str,
     filters: &AudioFilters,
     limit: usize,
+    offset: usize,
     shuffle: bool,
 ) -> Result<Vec<AudioSearchResult>> {
     let normalized = free_text.trim().to_ascii_lowercase();
@@ -11181,9 +11723,10 @@ fn search_with_audio_filters_like_fallback(
          FROM tracks t \
          LEFT JOIN audio_dsp_features d ON d.track_id = t.id \
          LEFT JOIN artists a ON a.id = t.artist_id \
-         LEFT JOIN albums al ON al.id = t.album_id \
-         WHERE 1=1",
+         LEFT JOIN albums al ON al.id = t.album_id",
     );
+    sql.push_str(&genre_match_join_sql(filters));
+    sql.push_str(" WHERE 1=1");
 
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     let mut start_idx: usize = 1;
@@ -11207,11 +11750,17 @@ fn search_with_audio_filters_like_fallback(
 
     let order = if shuffle {
         "RANDOM()"
-    } else {
+    } else if filters.genre_ids.is_empty() {
         "t.play_count DESC, t.last_played_at DESC"
+    } else {
+        "gm.genre_match_conf DESC, t.play_count DESC, t.last_played_at DESC"
     };
-    sql.push_str(&format!(" ORDER BY {order} LIMIT ?{limit_idx}"));
+    sql.push_str(&format!(
+        " ORDER BY {order} LIMIT ?{limit_idx} OFFSET ?{offset_idx}",
+        offset_idx = limit_idx + 1
+    ));
     params.push(Box::new(limit as i64));
+    params.push(Box::new(offset as i64));
 
     let mut stmt = conn.prepare(&sql)?;
     let results = stmt

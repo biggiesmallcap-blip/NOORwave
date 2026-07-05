@@ -165,9 +165,17 @@ pub(super) struct AudioSearchRequest {
     year_min: Option<i64>,
     year_max: Option<i64>,
     genre_ids: Option<Vec<i64>>,
+    // Raw user genre tokens ("rock", "hip-hop"); resolved server-side against
+    // genres.slug/name and expanded to all descendants. Preferred over
+    // genre_ids, which the client can only build from a possibly stale or
+    // partially flattened tree.
+    genre_slugs: Option<Vec<String>>,
+    artist_contains: Option<String>,
+    album_contains: Option<String>,
     track_type: Option<String>,
     is_instrumental: Option<bool>,
     limit: Option<usize>,
+    offset: Option<usize>,
     // When set, return a true random sample of the full matching set (for the
     // library Shuffle button) instead of the deterministic display ranking.
     shuffle: Option<bool>,
@@ -179,22 +187,6 @@ pub(super) async fn search_audio(
     State(state): State<SharedState>,
     Json(body): Json<AudioSearchRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    let filters = queries::AudioFilters {
-        bpm_min: body.bpm_min,
-        bpm_max: body.bpm_max,
-        energy_min: body.energy_min,
-        energy_max: body.energy_max,
-        danceability_min: body.danceability_min,
-        danceability_max: body.danceability_max,
-        key_signature: body.key_signature,
-        camelot_key: body.camelot_key,
-        year_min: body.year_min,
-        year_max: body.year_max,
-        genre_ids: body.genre_ids.unwrap_or_default(),
-        track_type: body.track_type,
-        is_instrumental: body.is_instrumental,
-        liked_only: body.liked_only.unwrap_or(false),
-    };
     let free_text = body.free_text.unwrap_or_default();
     let shuffle = body.shuffle.unwrap_or(false);
     let limit = if shuffle {
@@ -210,17 +202,60 @@ pub(super) async fn search_audio(
             AUDIO_SEARCH_LIMIT_MAX,
         )
     };
+    let offset = body.offset.unwrap_or(0);
+    let genre_tokens = body.genre_slugs.unwrap_or_default();
+    let explicit_genre_ids = body.genre_ids.unwrap_or_default();
+    let genre_filter_requested = !genre_tokens.is_empty() || !explicit_genre_ids.is_empty();
 
     let state = state.read().await;
     state
         .db
         .with_conn(|conn| {
+            let (mut genre_ids, unmatched_genres) =
+                queries::resolve_genre_tokens(conn, &genre_tokens)?;
+            genre_ids.extend(&explicit_genre_ids);
+            let genre_ids = queries::expand_genre_descendants(conn, &genre_ids)?;
+
+            // A requested genre filter that resolves to nothing must yield
+            // zero results, not silently fall back to an unfiltered search.
+            if genre_filter_requested && genre_ids.is_empty() {
+                return Ok(Json(json!({
+                    "tracks": [],
+                    "total": 0,
+                    "unmatched_genres": unmatched_genres,
+                })));
+            }
+
+            let filters = queries::AudioFilters {
+                bpm_min: body.bpm_min,
+                bpm_max: body.bpm_max,
+                energy_min: body.energy_min,
+                energy_max: body.energy_max,
+                danceability_min: body.danceability_min,
+                danceability_max: body.danceability_max,
+                key_signature: body.key_signature.clone(),
+                camelot_key: body.camelot_key.clone(),
+                year_min: body.year_min,
+                year_max: body.year_max,
+                genre_ids,
+                track_type: body.track_type.clone(),
+                is_instrumental: body.is_instrumental,
+                liked_only: body.liked_only.unwrap_or(false),
+                artist_contains: body.artist_contains.clone(),
+                album_contains: body.album_contains.clone(),
+            };
+
+            let total = queries::count_audio_filter_matches(conn, &free_text, &filters)?;
             let tracks = if shuffle {
                 queries::search_with_audio_filters_shuffled(conn, &free_text, &filters, limit)?
             } else {
-                queries::search_with_audio_filters(conn, &free_text, &filters, limit)?
+                queries::search_with_audio_filters(conn, &free_text, &filters, limit, offset)?
             };
-            Ok(Json(json!({ "tracks": tracks })))
+            Ok(Json(json!({
+                "tracks": tracks,
+                "total": total,
+                "unmatched_genres": unmatched_genres,
+            })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }

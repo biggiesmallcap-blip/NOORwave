@@ -2073,13 +2073,28 @@ export interface AudioSearchParams {
 	year_min?: number | null;
 	year_max?: number | null;
 	genre_ids?: number[];
+	// Raw user genre tokens ("rock", "hip-hop"); the server resolves them
+	// against slug/name case-insensitively and expands to all descendants.
+	genre_slugs?: string[];
+	artist_contains?: string | null;
+	album_contains?: string | null;
 	is_instrumental?: boolean | null;
 	limit?: number;
+	// Page past the 50-row display cap ("Show more"). Ignored for shuffle.
+	offset?: number;
 	// Ask the server for a true random sample of the full matching set (library
 	// Shuffle) instead of the deterministic display ranking.
 	shuffle?: boolean;
 	// Restrict matches to user-liked tracks (the Liked tab).
 	liked_only?: boolean;
+}
+
+export interface AudioSearchResponse {
+	tracks: AudioSearchResult[];
+	// Full matching-set size, independent of the display LIMIT.
+	total: number;
+	// genre_slugs tokens that resolved to no known genre.
+	unmatched_genres: string[];
 }
 
 export interface AudioFeaturesStats {
@@ -3081,7 +3096,7 @@ export const api = {
 		for (const [k, v] of Object.entries(params)) {
 			if (v !== null && v !== undefined) body[k] = v;
 		}
-		return fetchApi<{ tracks: AudioSearchResult[] }>('/api/search/audio', undefined, {
+		return fetchApi<AudioSearchResponse>('/api/search/audio', undefined, {
 			signal,
 			method: 'POST',
 			body: JSON.stringify(body),
