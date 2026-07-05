@@ -497,3 +497,72 @@ when idle and defaults to 30fps, the residual cost may be negligible: re-measure
 installed build (commands in .scratch/perf-audit/baseline-2026-07-04.md) before trading away
 the glass look. Only act if the playing-state compositor cost is still material.
 Spawned by: perf audit 2026-07-04
+
+### discovery: track_similarity co-occurrence as a v2 ranking signal
+
+The discovery_ranking blend deliberately excludes the track_similarity table
+(co-listen/co-album/co-artist): it is computed on demand and usually stale, so
+ranking on it would quietly prefer whatever was fresh at the last manual run.
+If it gets a freshness guarantee (background recompute or staleness stamp the
+ranker can check), add it as an m_cooccurrence multiplier next to m_genre in
+services/discovery_ranking.rs::shape_score.
+Spawned by: seed-branch discovery overhaul 2026-07-05
+
+### discovery: populate TasteVector.energy_pref / bpm_pref and use in m_taste
+
+smart/taste_vector.rs still carries the Phase 3 placeholder fields
+energy_pref/bpm_pref (allow(dead_code)). build_session_taste in
+discovery_ranking.rs could derive them from liked tracks' DSP rows and the
+taste multiplier could then nudge candidates toward the session's energy/tempo
+preference. Remove the placeholders' allow attributes when done.
+Spawned by: seed-branch discovery overhaul 2026-07-05
+
+### discovery: era filter lies on compilations; consider original-year backfill
+
+The era filter uses albums.year (the only year data we have). Compilations and
+reissues carry the compilation's year, not the recording's. The response
+reports era_filter_coverage so the UI can flag sparse data, but a per-track
+original_year enrichment (MusicBrainz has it) would make the filter honest.
+Spawned by: seed-branch discovery overhaul 2026-07-05
+
+### perf: DiscoverSpace edge draw is O(E) per frame with no culling
+
+discover_space_renderer.ts redraws every edge each frame on the 2D canvas;
+with 200+ edges this is the render hot spot. Add viewport culling or render
+edges to an offscreen layer that only invalidates when the camera or node
+positions change. Independent of the ranking overhaul.
+Spawned by: seed-branch discovery overhaul 2026-07-05
+
+### discovery: fast first paint for cold Last.fm cache
+
+/api/discovery/space still awaits the Last.fm similar call inside the request
+when the 6h cache is cold (only cold seeds; warm path is all-local SQLite).
+Sketch: peek lastfm_similar_cache, on miss call orchestrate_song with lastfm
+None for an instant library/engine-only map, warm the cache in a spawned task,
+then emit DiscoverySpaceRefreshed so the existing WS reload merges the Last.fm
+slice. Gate behind a fast_first_paint request flag and measure before
+defaulting on; the visible re-flow on reload is the cost.
+Spawned by: seed-branch discovery overhaul 2026-07-05 (phase 9 deferred)
+
+### discovery: adaptive coherence default from like/skip history
+
+The coherence slider defaults to 0.5. Once enough discovery_feedback rows
+exist per session/user, a small heuristic could pick the starting point (heavy
+skippers of external picks -> more familiar; heavy likers -> more adventurous).
+Spawned by: seed-branch discovery overhaul 2026-07-05
+
+### a11y: canvas-level keyboard traversal in DiscoverSpace
+
+The ranked list panel is the keyboard/screen-reader answer for discovery
+results, but the canvas itself still has no role, focus ring, or arrow-key
+node traversal. If canvas a11y is ever wanted, add roving focus over nodes
+with an aria-live region describing the focused track.
+Spawned by: seed-branch discovery overhaul 2026-07-05
+
+### perf: dj_queue_ranker loads facts per candidate (N+1)
+
+playback/dj_queue_ranker.rs::rank_generated_candidates calls load_facts per
+candidate (dsp features + dj profile + correction, ~4 queries x 12 candidates
+per automix batch). Batch-load all three tables by media ref before scoring.
+Playback path, deliberately left out of the discovery overhaul.
+Spawned by: seed-branch discovery overhaul 2026-07-05 (audit finding)
