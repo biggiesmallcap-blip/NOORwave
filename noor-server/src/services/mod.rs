@@ -5,6 +5,7 @@ pub mod charts;
 pub mod crypto;
 pub mod discovery;
 pub mod discovery_blend;
+pub mod discovery_ranking;
 pub mod discovery_space;
 pub mod discovery_trainer;
 pub mod download;
