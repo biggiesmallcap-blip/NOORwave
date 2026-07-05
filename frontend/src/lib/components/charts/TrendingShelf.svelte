@@ -35,6 +35,7 @@
 	import { getCached, putCached } from '$lib/stores/trending-cache';
 	import ChartMural, { type ChartMuralItem } from '$lib/components/charts/ChartMural.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import { composeTidalArtQuery, peekTidalArt } from '$lib/actions/lazy-tidal-art';
 
 	interface Props {
 		limit?: number;
@@ -147,6 +148,10 @@
 			entry.local_track?.artwork_url,
 			entry.tidal_playable?.artwork_url,
 			entry.image_url,
+			// Previously-resolved artwork from the persistent cache, so the shelf
+			// paints a full collage on first launch instead of empty tiles and
+			// swaps to fresh art as live lookups land.
+			peekTidalArt(composeTidalArtQuery(entryArtist(entry), entryTitle(entry))),
 		);
 	}
 

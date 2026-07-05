@@ -55,6 +55,36 @@ function isFresh(entry: CacheEntry, now = Date.now()): boolean {
 	return now - entry.lastSeen <= ttlFor(entry);
 }
 
+/**
+ * Build the same search query the action resolves against, so callers can look
+ * artwork up in the shared cache without duplicating the join rules. Returns
+ * null when there's nothing searchable (no artist).
+ */
+export function composeTidalArtQuery(
+	artist: string | null | undefined,
+	title?: string | null,
+): string | null {
+	if (!artist) return null;
+	const a = artist.trim();
+	if (!a) return null;
+	const t = title?.trim() ?? '';
+	return t ? `${a} ${t}` : a;
+}
+
+/**
+ * Synchronous peek into the persistent artwork cache. Returns a resolved cover
+ * URL only for a *fresh hit* (cached misses, stale entries, and absent queries
+ * all return null). Lets a shelf paint previously-seen artwork on the very
+ * first frame instead of flashing a fallback tile until the on-scroll
+ * IntersectionObserver lookup fires. Read-only: does not touch the LRU.
+ */
+export function peekTidalArt(query: string | null | undefined): string | null {
+	if (!query) return null;
+	const entry = cache.get(query);
+	if (entry && isFresh(entry)) return entry.url;
+	return null;
+}
+
 function hydrateFromStorage(): void {
 	if (typeof localStorage === 'undefined') return;
 	const raw = localStorage.getItem(STORAGE_KEY);
@@ -167,12 +197,7 @@ export function lazyTidalArt(node: Element, initial: LazyTidalArtParams) {
 	let aborted = false;
 
 	function buildQuery(): string | null {
-		const { artist, title } = current.query;
-		if (!artist) return null;
-		const a = artist.trim();
-		if (!a) return null;
-		const t = title?.trim() ?? '';
-		return t ? `${a} ${t}` : a;
+		return composeTidalArtQuery(current.query.artist, current.query.title);
 	}
 
 	async function fetchOnce() {

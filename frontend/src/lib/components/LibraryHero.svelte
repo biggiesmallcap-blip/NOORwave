@@ -164,8 +164,8 @@
     </div>
 
     {#if artists.length > 1}
-      <button class="hero-nav hero-nav--prev" onclick={() => jump(-1)} aria-label="Previous artist">‹</button>
-      <button class="hero-nav hero-nav--next" onclick={() => jump(1)} aria-label="Next artist">›</button>
+      <button class="hero-nav hero-nav--prev" onclick={() => jump(-1)} aria-label="Previous artist">&lsaquo;</button>
+      <button class="hero-nav hero-nav--next" onclick={() => jump(1)} aria-label="Next artist">&rsaquo;</button>
       {#if artists.length <= 8}
         <div class="hero-dots" aria-hidden="true">
           {#each artists as _, i}
@@ -397,6 +397,10 @@
     align-items: center;
     margin-top: 4px;
     pointer-events: auto;
+    /* Shrink the hit area to just the buttons. As a stretched flex child this row
+       spans the full meta width, and pointer-events:auto made that empty band
+       swallow clicks meant for the artist tiles behind it (dead spots). */
+    align-self: flex-start;
   }
 
   .hero-play {
@@ -409,30 +413,34 @@
     font-weight: var(--font-weight-semibold);
   }
 
+  /* Matches the home/trending mural nav (.chart-nav): dark side-by-side circles
+     anchored bottom-right, faintly visible by default and brightening on hover. */
   .hero-nav {
     position: absolute;
-    top: 50%;
-    transform: translateY(-50%);
-    z-index: 3;
-    width: 36px;
-    height: 36px;
+    bottom: var(--space-4);
+    z-index: var(--z-raised);
+    display: grid;
+    place-items: center;
+    width: clamp(32px, 3vw, 40px);
+    aspect-ratio: 1 / 1;
+    border: 1px solid var(--panel-border);
     border-radius: 50%;
     background: rgba(0,0,0,0.5);
-    border: 1px solid rgba(255,255,255,0.15);
-    color: rgba(255,255,255,0.85);
+    color: var(--text-primary);
+    cursor: pointer;
     font-size: var(--font-size-xl);
     line-height: 1;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    opacity: 0;
-    transition: opacity 200ms ease, background 200ms ease;
+    opacity: 0.78;
+    transition: opacity var(--motion-fast), background var(--motion-fast);
   }
-  .library-hero-card:hover .hero-nav { opacity: 1; }
+  .library-hero-card:hover .hero-nav,
+  .hero-nav:focus-visible {
+    opacity: 1;
+    outline: none;
+  }
   .hero-nav:hover { background: rgba(0,0,0,0.75); }
-  .hero-nav--prev { left: 12px; }
-  .hero-nav--next { right: 12px; }
+  .hero-nav--prev { right: calc(var(--space-3) + clamp(32px, 3vw, 40px) + var(--space-2)); }
+  .hero-nav--next { right: var(--space-3); }
 
   .hero-dots {
     position: absolute;

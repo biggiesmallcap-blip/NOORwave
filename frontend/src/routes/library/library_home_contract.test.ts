@@ -79,12 +79,21 @@ describe('library home hero contract', () => {
 		expect(libraryPage).toContain('async function playHomeMuralTrack(item: HomeMuralItem, panel: HomeMuralPanel)');
 		expect(libraryPage).toContain('await api.replacePlaybackQueue(trackIds, undefined, undefined, get(shuffleMode))');
 		expect(libraryPage).toContain('await playTrackNow(item.track.id)');
-		expect(libraryPage).toContain('onclick={() => openHomeMuralItem(item, panel)}');
+		// Mural tiles activate on double-click / Enter (parity with the library
+		// track rows and the home-recs murals), not a single stray click.
+		expect(libraryPage).toContain('ondblclick={() => openHomeMuralItem(item, panel)}');
+		expect(libraryPage).toContain("onkeydown={(event) => { if (event.key === 'Enter') openHomeMuralItem(item, panel); }}");
 		expect(libraryPage).toContain('oncontextmenu={(event) => openHomeMuralItemContextMenu(event, item)}');
 		expect(libraryPage).toContain('void openAlbumDetail(found ?? albumFromHomeCard(card))');
+		// Tiles resolve missing artwork lazily and paint previously-cached art on
+		// first launch via the shared peek, so panels are never left artwork-less.
+		expect(libraryPage).toContain("import { lazyTidalArt, composeTidalArtQuery, peekTidalArt } from '$lib/actions/lazy-tidal-art'");
+		expect(libraryPage).toContain('function muralItemArtwork(item: HomeMuralItem): string | null');
+		expect(libraryPage).toContain('peekTidalArt(composeTidalArtQuery(query.artist, query.title))');
+		expect(libraryPage).toContain('onResolve: (url) => (lazyArt[muralItemKey(item)] = url)');
 		expect(libraryPage).toContain('<ArtworkImage');
 		expect(libraryPage).toContain('className="home-mural-art"');
-		expect(libraryPage).toContain('src={item.artwork_url}');
+		expect(libraryPage).toContain('src={muralArt}');
 		expect(libraryPage).toContain('size={320}');
 		expect(libraryPage).toContain('fallbackText={fallbackLetters(item.title)}');
 		expect(libraryPage).toContain('decorative={true}');
