@@ -2,6 +2,7 @@ use crate::SharedState;
 use crate::db::queries;
 use crate::metadata::lastfm::LastFmClient;
 use crate::services::discovery::{DiscoveryCandidateSeed, DiscoveryProvider};
+use crate::services::discovery_ranking::FeedbackAction;
 use crate::services::learning as discovery_learning;
 use crate::services::tidal::client::TidalClient;
 use crate::smart::discovery as discovery_engine;
@@ -851,6 +852,11 @@ pub(super) async fn record_discovery_feedback(
     State(state): State<SharedState>,
     Json(payload): Json<DiscoveryFeedbackRequest>,
 ) -> Result<Json<Value>, StatusCode> {
+    // Allowlist the action so the rerank taste builder never has to guess what
+    // a stored row means.
+    if FeedbackAction::parse(&payload.action).is_none() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let context_json = payload.context.as_ref().map(Value::to_string);
     let state = state.read().await;
     state

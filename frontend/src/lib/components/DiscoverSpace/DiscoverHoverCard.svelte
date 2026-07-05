@@ -60,7 +60,11 @@
 
 		<div class="card-reason">
 			<span class="reason-badge">{REASON_LABELS[node.primaryReason]}</span>
-			<span class="reason-copy">{REASON_EXPLANATIONS[node.primaryReason]}</span>
+			{#if node.why}
+				<span class="reason-why">{node.why}</span>
+			{:else}
+				<span class="reason-copy">{REASON_EXPLANATIONS[node.primaryReason]}</span>
+			{/if}
 		</div>
 
 		<div class="card-meta">
@@ -131,6 +135,7 @@
 		letter-spacing: 0.06em;
 	}
 	.reason-copy { font-size: var(--font-size-xs); color: rgba(255, 255, 255, 0.4); line-height: var(--line-height-normal); }
+	.reason-why { font-size: var(--font-size-xs); color: rgba(200, 202, 255, 0.9); line-height: var(--line-height-normal); }
 
 	.card-meta {
 		display: flex;
