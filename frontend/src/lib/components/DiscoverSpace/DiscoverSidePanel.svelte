@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { lockSeed, setRadioRoute, discoverSpaceStore } from './discover_space_store';
+	import { lockSeed, branchHere, setRadioRoute, discoverSpaceStore } from './discover_space_store';
 	import { REASON_LABELS, REASON_EXPLANATIONS, SOURCE_LABELS, SIDE_PANEL_ACTIONS, ERROR_TOASTS, LENS_LABELS, LENS_DESCRIPTIONS } from './discover_space_story';
 	import type { DiscoverTrackNode, DiscoverReason } from './discover_space_types';
 	import { api, getApiBase, authFetch, type TidalPlayable } from '$lib/api/client';
@@ -175,6 +175,11 @@
 		lockSeed(node.trackId);
 	}
 
+	function handleBranchHere() {
+		if (!node) return;
+		branchHere(node);
+	}
+
 	function handleAddToPlaylist() {
 		if (!node) return;
 		onAddToPlaylist?.(node);
@@ -190,11 +195,21 @@
 		isHiding = true;
 		try {
 			const apiBase = getApiBase();
-			await authFetch(`${apiBase}/api/discovery/feedback`, {
+			const s = $discoverSpaceStore;
+			// The feedback contract requires seed + candidate + surface; the old
+			// { track_id } body was rejected with 422 and hides never recorded.
+			const response = await authFetch(`${apiBase}/api/discovery/feedback`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ track_id: node.trackId, action: 'dismiss' }),
+				body: JSON.stringify({
+					seed_track_id: s.activeSeedId ?? 0,
+					candidate_track_id: node.trackId,
+					action: 'dismiss',
+					surface: 'discover_space',
+					session_id: s.sessionId || undefined,
+				}),
 			});
+			if (!response.ok) throw new Error(`Feedback failed: ${response.status}`);
 		} catch {
 			showToast(ERROR_TOASTS.hideFailed, 'error');
 		} finally {
@@ -319,6 +334,14 @@
 				aria-label="Start radio from {node.title}"
 			>
 				{#if resolvingAction === 'radio'}<span class="button-spinner" aria-hidden="true"></span> Resolving...{:else if isStartingRadio}Starting...{:else}{SIDE_PANEL_ACTIONS.startRadioHere}{/if}
+			</button>
+			<button
+				class="action-btn"
+				onclick={handleBranchHere}
+				disabled={node.trackId === $discoverSpaceStore.activeSeedId}
+				aria-label="Branch into {node.title}"
+			>
+				{SIDE_PANEL_ACTIONS.branchHere}
 			</button>
 			<button class="action-btn" onclick={handleLockAsAnchor} aria-label="Lock {node.title} as seed anchor">
 				{$discoverSpaceStore.lockedSeedId === node.trackId ? '🔒 Locked' : SIDE_PANEL_ACTIONS.lockAsAnchor}

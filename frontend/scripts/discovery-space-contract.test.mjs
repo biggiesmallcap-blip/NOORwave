@@ -105,6 +105,57 @@ describe('discovery space controls contract', () => {
 		expect(panel).toContain('node.why');
 	});
 
+	test('branching keeps a persisted walk-back path', () => {
+		const store = readFileSync(STORE, 'utf8');
+		expect(store).toContain('export function branchHere');
+		expect(store).toContain('export function walkBack');
+		expect(store).toContain("'discoverspace.branch.v1'");
+		// Hydration restores the tree position via the locked seed.
+		const hydrate = store.slice(
+			store.indexOf('export function hydrateDiscoverControls'),
+			store.indexOf('function reloadActiveSpace')
+		);
+		expect(hydrate).toContain('branchPath');
+		expect(hydrate).toContain('lockedSeedId');
+
+		const page = readFileSync(PAGE, 'utf8');
+		expect(page).toContain('<DiscoverBreadcrumb');
+		const panel = readFileSync(
+			'src/lib/components/DiscoverSpace/DiscoverSidePanel.svelte',
+			'utf8'
+		);
+		expect(panel).toContain('branchHere');
+	});
+
+	test('declutter: no window coupling, no dead prop, one blend fetch trigger', () => {
+		const canvas = readFileSync(
+			'src/lib/components/DiscoverSpace/DiscoverSpace.svelte',
+			'utf8'
+		);
+		expect(canvas).not.toContain('__discoverSpaceHyperspaceSearch');
+		expect(canvas).not.toContain('onNewNodes');
+		// Recenter effect fires on node-set changes only.
+		expect(canvas).toContain('lastNodeSetKey');
+
+		const page = readFileSync(PAGE, 'utf8');
+		expect(page).not.toContain('__discoverSpaceHyperspaceSearch');
+		expect(page).toContain('bind:this={spaceCanvas}');
+		expect(page).not.toContain('DiscoverLegend');
+
+		const store = readFileSync(STORE, 'utf8');
+		// The store owns the blend fetch; page handlers must not double-trigger.
+		const addBlendBody = store.slice(
+			store.indexOf('export function addBlendSeed'),
+			store.indexOf('export function removeBlendSeed')
+		);
+		expect(addBlendBody).toContain('loadBlendSpace');
+		const pageAddHandler = page.slice(
+			page.indexOf('function handleAddToBlend'),
+			page.indexOf('function handleRemoveBlendSeed')
+		);
+		expect(pageAddHandler).not.toContain('loadBlendSpace');
+	});
+
 	test('filter bar exposes every backend filter and warns about key-only semantics', () => {
 		const bar = readFileSync(FILTER_BAR, 'utf8');
 		for (const field of [

@@ -5,6 +5,7 @@
 		likeNode,
 		skipNode,
 		queueSpaceTracks,
+		branchHere,
 	} from './discover_space_store';
 	import type { DiscoverTrackNode } from './discover_space_types';
 
@@ -142,6 +143,17 @@
 						</div>
 					</div>
 					<div class="row-actions">
+						<button
+							class="mini-btn"
+							title="Branch here"
+							aria-label="Branch into {node.title}"
+							onclick={(e) => {
+								e.stopPropagation();
+								branchHere(node);
+							}}
+						>
+							⑂
+						</button>
 						<button
 							class="mini-btn"
 							title="Add to queue"

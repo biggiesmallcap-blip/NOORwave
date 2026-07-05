@@ -27,7 +27,6 @@
 		isLocked: boolean;
 		onHoverNode?: (node: DiscoverTrackNode | null, x: number, y: number) => void;
 		onSelectNode?: (node: DiscoverTrackNode | null) => void;
-		onNewNodes?: (nodes: DiscoverTrackNode[]) => void;
 	}
 	let {
 		currentTrackId,
@@ -115,10 +114,34 @@
 	let fpsFrames: number[] = [];
 	let fps = $state(60);
 
-	// ── Hyperspace search API (exposed to parent via window) ──────────────────
+	// ── Hyperspace search API (parent calls this via bind:this) ───────────────
 	export function hyperspaceSearch(query: string): Promise<void> {
 		return runHyperspaceSearch(query);
 	}
+
+	// Re-center when a genuinely new node set arrives (seed change, blend,
+	// filters), but not when scores merge in place: rerank keeps the same node
+	// ids, so the sorted id key is stable and the camera stays put.
+	let lastNodeSetKey = '';
+	$effect(() => {
+		const nodes = $discoverSpaceStore.nodes;
+		const key = nodes
+			.map((n) => n.id)
+			.sort()
+			.join('|');
+		if (key === lastNodeSetKey) return;
+		const isFirstSet = lastNodeSetKey === '';
+		lastNodeSetKey = key;
+		if (nodes.length === 0 || isWarping) return;
+		const cx = nodes.reduce((sum, n) => sum + n.x, 0) / nodes.length;
+		const cy = nodes.reduce((sum, n) => sum + n.y, 0) / nodes.length;
+		if (isFirstSet || prefersReducedMotion) {
+			camera.x = cx;
+			camera.y = cy;
+		} else {
+			animateCamera({ x: cx, y: cy, zoom: 0.7 }, 400);
+		}
+	});
 
 	async function runHyperspaceSearch(query: string): Promise<void> {
 		if (isWarping) return;
@@ -429,9 +452,6 @@
 		}
 		watchDpr();
 
-		// Expose hyperspace search to page via window (same pattern as existing /discover)
-		(window as any).__discoverSpaceHyperspaceSearch = runHyperspaceSearch;
-
 		loop();
 	});
 
@@ -441,7 +461,6 @@
 		cancelAnimationFrame(auxRafId);
 		resizeObserver?.disconnect();
 		dprCleanup?.();
-		delete (window as any).__discoverSpaceHyperspaceSearch;
 	});
 </script>
 

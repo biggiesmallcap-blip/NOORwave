@@ -138,6 +138,7 @@ describe('loadSpace', () => {
 			filters: {},
 			sessionId: '',
 			feedbackBusy: false,
+			branchPath: [],
 		});
 	});
 

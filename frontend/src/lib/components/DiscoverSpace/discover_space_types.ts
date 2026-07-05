@@ -247,6 +247,13 @@ export interface ApiDiscoveryResponse {
 	};
 }
 
+/// One hop in the branch history: the seed the user was on before branching.
+export interface BranchStep {
+	seedTrackId: number;
+	title: string;
+	artist: string;
+}
+
 /// User-set discovery filters, mirroring the backend SpaceFilters request
 /// shape. All fields optional; an all-default object sends no constraints.
 export interface DiscoverFilters {

@@ -17,6 +17,7 @@ import type {
 	DiscoverBlendSeed,
 	DiscoverBlendHealth,
 	DiscoverFilters,
+	BranchStep,
 } from './discover_space_types';
 import { isFilterNoop } from './discover_space_types';
 
@@ -51,6 +52,7 @@ interface DiscoverSpaceState {
 	filters: DiscoverFilters;
 	sessionId: string;
 	feedbackBusy: boolean;
+	branchPath: BranchStep[];
 }
 
 export const discoverSpaceStore = writable<DiscoverSpaceState>({
@@ -75,6 +77,7 @@ export const discoverSpaceStore = writable<DiscoverSpaceState>({
 	filters: {},
 	sessionId: '',
 	feedbackBusy: false,
+	branchPath: [],
 });
 
 // -- Control persistence (sessionStorage) -------------------------------------
@@ -83,6 +86,15 @@ export const discoverSpaceStore = writable<DiscoverSpaceState>({
 
 const CONTROLS_STORAGE_KEY = 'discoverspace.controls.v1';
 const SESSION_STORAGE_KEY = 'discoverspace.session.v1';
+const BRANCH_STORAGE_KEY = 'discoverspace.branch.v1';
+
+function persistBranch(branchPath: BranchStep[], lockedSeedId: number | null): void {
+	try {
+		sessionStorage.setItem(BRANCH_STORAGE_KEY, JSON.stringify({ branchPath, lockedSeedId }));
+	} catch {
+		// Storage unavailable - the tree just resets next visit.
+	}
+}
 
 function persistControls(coherence: number, filters: DiscoverFilters): void {
 	try {
@@ -96,6 +108,8 @@ export function hydrateDiscoverControls(): void {
 	let coherence = 0.5;
 	let filters: DiscoverFilters = {};
 	let sessionId = '';
+	let branchPath: BranchStep[] = [];
+	let lockedSeedId: number | null = null;
 	try {
 		const rawControls = sessionStorage.getItem(CONTROLS_STORAGE_KEY);
 		if (rawControls) {
@@ -106,6 +120,12 @@ export function hydrateDiscoverControls(): void {
 			if (parsed.filters && typeof parsed.filters === 'object') filters = parsed.filters;
 		}
 		sessionId = sessionStorage.getItem(SESSION_STORAGE_KEY) ?? '';
+		const rawBranch = sessionStorage.getItem(BRANCH_STORAGE_KEY);
+		if (rawBranch) {
+			const parsed = JSON.parse(rawBranch);
+			if (Array.isArray(parsed.branchPath)) branchPath = parsed.branchPath;
+			if (typeof parsed.lockedSeedId === 'number') lockedSeedId = parsed.lockedSeedId;
+		}
 	} catch {
 		// Fall through to defaults.
 	}
@@ -120,7 +140,16 @@ export function hydrateDiscoverControls(): void {
 			// Non-persistent session id still works for this page lifetime.
 		}
 	}
-	discoverSpaceStore.update((s) => ({ ...s, coherence, filters, sessionId }));
+	discoverSpaceStore.update((s) => ({
+		...s,
+		coherence,
+		filters,
+		sessionId,
+		branchPath,
+		// Restoring the lock restores the tree position: the page's seed effect
+		// sees the locked id and loads that space.
+		lockedSeedId: lockedSeedId ?? s.lockedSeedId,
+	}));
 }
 
 /// Reload whichever space is active (blend when 2+ seeds, seed space
@@ -210,12 +239,18 @@ function blendSeedFromNode(node: DiscoverTrackNode): DiscoverBlendSeed {
 	};
 }
 
+// addBlendSeed / removeBlendSeed are the SOLE triggers of the blend fetch;
+// callers must not also invoke loadBlendSpace or the request fires twice.
+
 export function addBlendSeed(node: DiscoverTrackNode): void {
 	discoverSpaceStore.update((s) => ({
 		...s,
 		blendSeeds: normalizeBlendSeeds([...s.blendSeeds, blendSeedFromNode(node)]),
 		blendError: null,
 	}));
+	if (get(discoverSpaceStore).blendSeeds.length >= 2) {
+		loadBlendSpace(get(currentTrack)?.id ?? null);
+	}
 }
 
 export function removeBlendSeed(identity: string): void {
@@ -231,6 +266,9 @@ export function removeBlendSeed(identity: string): void {
 			blendHealth: nextSeeds.length < 2 ? null : s.blendHealth,
 		};
 	});
+	if (get(discoverSpaceStore).blendSeeds.length >= 2) {
+		loadBlendSpace(get(currentTrack)?.id ?? null);
+	}
 }
 
 export function clearBlend(): void {
@@ -501,6 +539,53 @@ export function lockSeed(trackId: number): void {
 
 export function unlockSeed(): void {
 	discoverSpaceStore.update((s) => ({ ...s, lockedSeedId: null }));
+}
+
+// -- Branching -------------------------------------------------------------
+// Branching is lock-plus-history: the node becomes the locked seed (the
+// page's seed effect reloads the space) and the seed we were on joins the
+// breadcrumb path so the user can walk back up the tree.
+
+/// Make `node` the new seed, remembering where we branched from.
+export function branchHere(node: DiscoverTrackNode): void {
+	discoverSpaceStore.update((s) => {
+		let branchPath = s.branchPath;
+		const fromId = s.activeSeedId;
+		if (fromId !== null && fromId !== node.trackId) {
+			const from = s.nodes.find((n) => n.trackId === fromId);
+			const step: BranchStep = {
+				seedTrackId: fromId,
+				title: from?.title ?? `Track ${fromId}`,
+				artist: from?.artist ?? '',
+			};
+			// Re-branching to a seed already in the path truncates instead of
+			// looping (walking A > B > A keeps the tree a path, not a cycle).
+			const existing = branchPath.findIndex((b) => b.seedTrackId === node.trackId);
+			branchPath =
+				existing >= 0 ? branchPath.slice(0, existing) : [...branchPath, step];
+		}
+		persistBranch(branchPath, node.trackId);
+		return { ...s, branchPath, lockedSeedId: node.trackId };
+	});
+}
+
+/// Walk back to a breadcrumb step, dropping everything after it.
+export function walkBack(index: number): void {
+	discoverSpaceStore.update((s) => {
+		const step = s.branchPath[index];
+		if (!step) return s;
+		const branchPath = s.branchPath.slice(0, index);
+		persistBranch(branchPath, step.seedTrackId);
+		return { ...s, branchPath, lockedSeedId: step.seedTrackId };
+	});
+}
+
+/// Drop the whole branch history (keeps the current seed).
+export function clearBranchPath(): void {
+	discoverSpaceStore.update((s) => {
+		persistBranch([], s.lockedSeedId);
+		return { ...s, branchPath: [] };
+	});
 }
 
 export function setLens(lens: DiscoverLens): void {
