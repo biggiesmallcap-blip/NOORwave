@@ -55,7 +55,7 @@
 	import ArtistCarousel from '$lib/components/ArtistCarousel.svelte';
 	import AlbumCarousel from '$lib/components/AlbumCarousel.svelte';
 	import AlbumDetailPopup from '$lib/components/AlbumDetailPopup.svelte';
-	import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
+	import { lazyTidalArt, composeTidalArtQuery, peekTidalArt } from '$lib/actions/lazy-tidal-art';
 	import { portal } from '$lib/actions/portal';
 	import { openContextMenu, openMenuAtElement, type MenuItem } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
@@ -1462,6 +1462,31 @@
 		return label.split(/\s+/).map(part => part[0]?.toUpperCase() ?? '').join('').slice(0, 2) || '?';
 	}
 
+	// Domain-prefixed key so a track and an album with the same numeric id never
+	// collide in the lazyArt map (mirrors the track/album row keys).
+	function muralItemKey(item: HomeMuralItem): string {
+		return `${item.kind}-${item.id}`;
+	}
+
+	// Search terms the lazy Tidal-art lookup resolves against, shared by the
+	// mural's lazy action and the synchronous cache peek so both hit the same key.
+	function muralItemLazyQuery(item: HomeMuralItem): { artist: string | null; title: string } {
+		if (item.kind === 'album') {
+			return { artist: item.album?.artist_name ?? null, title: item.album?.title ?? item.title };
+		}
+		return { artist: item.track?.artist_name ?? null, title: item.title };
+	}
+
+	// Artwork with the same "always loaded" chain as the home-recs murals: baked
+	// art -> already-resolved lazy art -> previously-cached art (peek). The peek
+	// paints a full collage on first launch; live lookups swap in fresh art.
+	function muralItemArtwork(item: HomeMuralItem): string | null {
+		const resolved = item.artwork_url ?? lazyArt[muralItemKey(item)];
+		if (resolved) return resolved;
+		const query = muralItemLazyQuery(item);
+		return peekTidalArt(composeTidalArtQuery(query.artist, query.title));
+	}
+
 	function artistImageSources(
 		photoUrl: string | null | undefined,
 		lazyUrl: string | null | undefined,
@@ -2128,18 +2153,25 @@
 						<article class="home-mural-panel" aria-label={panel.label}>
 							<div class="home-mural-bg">
 								{#each panel.items as item (`${panel.id}-${item.kind}-${item.id}`)}
+									{@const muralArt = muralItemArtwork(item)}
 									<button
 										class="home-mural-tile"
 										class:home-mural-tile--album={item.kind === 'album'}
 										type="button"
-										onclick={() => openHomeMuralItem(item, panel)}
+										ondblclick={() => openHomeMuralItem(item, panel)}
+										onkeydown={(event) => { if (event.key === 'Enter') openHomeMuralItem(item, panel); }}
 										oncontextmenu={(event) => openHomeMuralItemContextMenu(event, item)}
 										aria-label={`${item.kind === 'track' ? 'Play' : 'Open'} ${item.title}`}
 										title={`${item.title}${item.subtitle ? ` - ${item.subtitle}` : ''}`}
+										use:lazyTidalArt={{
+											enabled: muralArt === null,
+											query: muralItemLazyQuery(item),
+											onResolve: (url) => (lazyArt[muralItemKey(item)] = url),
+										}}
 									>
 										<ArtworkImage
 											className="home-mural-art"
-											src={item.artwork_url}
+											src={muralArt}
 											size={320}
 											fallbackText={fallbackLetters(item.title)}
 											decorative={true}

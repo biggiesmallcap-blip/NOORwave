@@ -30,6 +30,7 @@
 	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
+	import { composeTidalArtQuery, peekTidalArt } from '$lib/actions/lazy-tidal-art';
 
 	type State = 'hidden' | 'loading' | 'ready' | 'empty' | 'error';
 
@@ -156,8 +157,25 @@
 		return `${shelfKey(shelf)}:${index}:${item.artist_name ?? ''}:${item.title}`;
 	}
 
+	// Search terms the lazy Tidal-art lookup resolves against (artists search by
+	// name only; tracks by "artist title"). Shared by the mural's lazy action and
+	// the synchronous cache peek so both hit the exact same cache key.
+	function itemLazyQuery(item: ProviderRecommendationItem): { artist: string | null; title: string } {
+		const isArtist = itemEntity(item) === 'artist';
+		return {
+			artist: isArtist ? item.title : (item.artist_name ?? null),
+			title: isArtist ? '' : item.title,
+		};
+	}
+
 	function itemArtwork(shelf: ProviderRecommendationShelf, item: ProviderRecommendationItem, index: number): string | null {
-		return lazyArtwork[itemKey(shelf, item, index)] ?? item.artwork_url ?? null;
+		const resolved = lazyArtwork[itemKey(shelf, item, index)] ?? item.artwork_url;
+		if (resolved) return resolved;
+		// Fall back to previously-resolved artwork from the persistent cache so the
+		// panel paints a full collage on first launch instead of empty tiles, then
+		// swaps to fresh art as the live lookups land.
+		const query = itemLazyQuery(item);
+		return peekTidalArt(composeTidalArtQuery(query.artist, query.title));
 	}
 
 	function itemFallbackText(item: ProviderRecommendationItem): string {
@@ -188,10 +206,7 @@
 				tileTitle: `${index + 1}. ${item.title} - ${item.artist_name ?? 'Unknown artist'}`,
 				lazy: {
 					enabled: itemArtwork(shelf, item, index) === null,
-					query: {
-						artist: itemEntity(item) === 'artist' ? item.title : item.artist_name,
-						title: itemEntity(item) === 'artist' ? '' : item.title,
-					},
+					query: itemLazyQuery(item),
 					onResolve: (url: string) => {
 						lazyArtwork = { ...lazyArtwork, [key]: url };
 					},
