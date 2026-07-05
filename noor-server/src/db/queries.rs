@@ -10684,6 +10684,56 @@ mod tests {
     }
 
     #[test]
+    fn genre_filter_ranks_strongest_match_over_favorite() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        conn.execute_batch(
+            "INSERT INTO genres (id, name, slug, parent_id) VALUES (1, 'Rock', 'rock', NULL);
+             INSERT INTO artists (id, name) VALUES (9601, 'R');",
+        )
+        .expect("seed");
+        // Deep cut: definitive rock tag (0.9), never played, not a favorite.
+        // Crossover hit: weak rock tag (0.55), favorited with heavy plays.
+        conn.execute_batch(
+            "INSERT INTO tracks
+                (id, title, artist_id, duration_ms, tidal_id, best_quality, best_source,
+                 fidelity_score, is_favorite, source, play_count)
+             VALUES
+                (9601, 'Deep Cut', 9601, 200000, 9601, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0),
+                (9602, 'Crossover Hit', 9601, 200000, 9602, 'LOSSLESS', 'tidal', 5, 1, 'tidal', 999);
+             INSERT INTO track_genres (track_id, genre_id, source, confidence) VALUES
+                (9601, 1, 'musicbrainz', 0.9),
+                (9602, 1, 'lastfm', 0.55);",
+        )
+        .expect("tags");
+
+        let filters = AudioFilters {
+            genre_ids: vec![1],
+            ..Default::default()
+        };
+        let ids: Vec<i64> = search_with_audio_filters(&conn, "", &filters, 50, 0)
+            .expect("search")
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![9601, 9602],
+            "strongest genre match must rank first even against a heavy favorite"
+        );
+
+        // Without a genre filter, the favorite/play ranking still wins.
+        let ids_plain: Vec<i64> =
+            search_with_audio_filters(&conn, "", &AudioFilters::default(), 50, 0)
+                .expect("search")
+                .iter()
+                .map(|r| r.id)
+                .collect();
+        assert_eq!(ids_plain, vec![9602, 9601]);
+    }
+
+    #[test]
     fn normalize_key_signature_canonicalizes_user_input() {
         assert_eq!(normalize_key_signature("Am"), "Am");
         assert_eq!(normalize_key_signature("am"), "Am");
@@ -11310,6 +11360,34 @@ pub fn expand_genre_descendants(conn: &Connection, ids: &[i64]) -> Result<Vec<i6
     Ok(expanded)
 }
 
+/// Genre filtering + ranking, expressed as an INNER JOIN so one pass over the
+/// curated rowset both decides membership and yields the match confidence.
+/// Returns the JOIN clause to splice in after the base table's LEFT JOINs, or
+/// "" when no genre filter is active. Exposes column `gm.genre_match_conf`.
+///
+/// Uses the same rowset the genre galaxy uses (confidence floor + weakest-tag
+/// rescue) instead of raw track_genres, so low-confidence junk tags (e.g.
+/// "Psychedelic Rock" @ 0.29 on psytrance tracks) neither match nor rank.
+/// confidence is clamped to 1.0 for ranking so the handful of miscalibrated
+/// >1.0 rows (docs/genre-data-quality-2026-05-07.md) can't outrank a clean
+/// 1.0 tag.
+fn genre_match_join_sql(filters: &AudioFilters) -> String {
+    if filters.genre_ids.is_empty() {
+        return String::new();
+    }
+    // i64 ids — safe to inline.
+    let id_list: Vec<String> = filters.genre_ids.iter().map(|id| id.to_string()).collect();
+    let rowset = crate::genre::filter::filter_subquery(
+        crate::genre::filter::GalaxyFilterRule::default_rule(),
+    );
+    format!(
+        " JOIN (SELECT track_id, MAX(MIN(confidence, 1.0)) AS genre_match_conf \
+         FROM ({rowset}) WHERE genre_id IN ({}) GROUP BY track_id) gm \
+         ON gm.track_id = t.id",
+        id_list.join(", ")
+    )
+}
+
 /// SQL fragment + bind params produced by `build_audio_filter_sql`. `next_idx`
 /// is the first free `?N` slot — caller binds `LIMIT ?{next_idx}`.
 struct AudioFilterSql {
@@ -11379,20 +11457,10 @@ fn build_audio_filter_sql(filters: &AudioFilters, start_idx: usize) -> AudioFilt
         params.push(Box::new(v));
         idx += 1;
     }
-    if !filters.genre_ids.is_empty() {
-        // i64 ids — safe to inline. Match against the same curated rowset the
-        // genre galaxy uses (confidence floor + weakest-tag rescue) instead of
-        // raw track_genres, so low-confidence junk tags (e.g. "Psychedelic
-        // Rock" @ 0.29 on psytrance tracks) don't leak into genre searches.
-        let id_list: Vec<String> = filters.genre_ids.iter().map(|id| id.to_string()).collect();
-        let rowset = crate::genre::filter::filter_subquery(
-            crate::genre::filter::GalaxyFilterRule::default_rule(),
-        );
-        sql.push_str(&format!(
-            " AND t.id IN (SELECT track_id FROM ({rowset}) WHERE genre_id IN ({}))",
-            id_list.join(", ")
-        ));
-    }
+    // NOTE: genre filtering is NOT a WHERE clause. It is expressed as an INNER
+    // JOIN (see genre_match_join_sql) so the same curated rowset that decides
+    // membership also yields the matched confidence used to rank strongest
+    // matches first. Callers splice that JOIN into the FROM before this WHERE.
     if let Some(instrumental) = filters.is_instrumental {
         sql.push_str(&format!(" AND d.is_instrumental = ?{idx}"));
         params.push(Box::new(if instrumental { 1i64 } else { 0i64 }));
@@ -11466,9 +11534,10 @@ fn count_audio_filter_matches_inner(
          FROM tracks t \
          LEFT JOIN audio_dsp_features d ON d.track_id = t.id \
          LEFT JOIN artists a ON a.id = t.artist_id \
-         LEFT JOIN albums al ON al.id = t.album_id \
-         WHERE 1=1",
+         LEFT JOIN albums al ON al.id = t.album_id",
     );
+    sql.push_str(&genre_match_join_sql(filters));
+    sql.push_str(" WHERE 1=1");
 
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     let mut start_idx: usize = 1;
@@ -11560,9 +11629,10 @@ fn search_with_audio_filters_fts(
          FROM tracks t \
          LEFT JOIN audio_dsp_features d ON d.track_id = t.id \
          LEFT JOIN artists a ON a.id = t.artist_id \
-         LEFT JOIN albums al ON al.id = t.album_id \
-         WHERE 1=1",
+         LEFT JOIN albums al ON al.id = t.album_id",
     );
+    sql.push_str(&genre_match_join_sql(filters));
+    sql.push_str(" WHERE 1=1");
 
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     let mut start_idx: usize = 1;
@@ -11583,8 +11653,13 @@ fn search_with_audio_filters_fts(
 
     let order = if shuffle {
         "RANDOM()"
-    } else {
+    } else if filters.genre_ids.is_empty() {
         "t.is_favorite DESC, t.play_count DESC, t.fidelity_score DESC, t.title ASC"
+    } else {
+        // Strongest genre match first (a definitive-rock track outranks a
+        // barely-tagged favorite), then the usual favorite/play ranking.
+        "gm.genre_match_conf DESC, t.is_favorite DESC, t.play_count DESC, \
+         t.fidelity_score DESC, t.title ASC"
     };
     sql.push_str(&format!(
         " ORDER BY {order} LIMIT ?{limit_idx} OFFSET ?{offset_idx}",
@@ -11648,9 +11723,10 @@ fn search_with_audio_filters_like_fallback(
          FROM tracks t \
          LEFT JOIN audio_dsp_features d ON d.track_id = t.id \
          LEFT JOIN artists a ON a.id = t.artist_id \
-         LEFT JOIN albums al ON al.id = t.album_id \
-         WHERE 1=1",
+         LEFT JOIN albums al ON al.id = t.album_id",
     );
+    sql.push_str(&genre_match_join_sql(filters));
+    sql.push_str(" WHERE 1=1");
 
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     let mut start_idx: usize = 1;
@@ -11674,8 +11750,10 @@ fn search_with_audio_filters_like_fallback(
 
     let order = if shuffle {
         "RANDOM()"
-    } else {
+    } else if filters.genre_ids.is_empty() {
         "t.play_count DESC, t.last_played_at DESC"
+    } else {
+        "gm.genre_match_conf DESC, t.play_count DESC, t.last_played_at DESC"
     };
     sql.push_str(&format!(
         " ORDER BY {order} LIMIT ?{limit_idx} OFFSET ?{offset_idx}",
