@@ -637,3 +637,15 @@ Last.fm similar (~2.6s) because the cache stores the smaller per-band limit.
 Optimizing orchestrate_song is shared with the radio endpoints, so it is a
 deliberate non-goal of the discovery overhaul; profile it separately.
 Spawned by: seed-branch discovery overhaul 2026-07-05 (phase 9 measurement)
+
+### robustness: recover_tidal_client single-flight is optimistic-only
+
+routes.rs::recover_tidal_client dedupes a 401 refresh storm with an optimistic
+re-read of state.tidal_tokens (if the access token already changed, reuse it).
+It has no in-flight guard, so N pending resolvers that 401 in the same instant
+can each call recover_tidal_session -> refresh_token; TIDAL rotates the refresh
+token on use, so the losers can fail with invalid_grant and fall back to lazy
+resolution. Pre-existing; the tidal-repair/resolver-401 change only added
+callers. Fix by serializing refresh through a tokio::Mutex (or a shared
+in-flight future) keyed on the used access token.
+Spawned by: tidal metadata self-heal + resolver 401 recovery 2026-07-06
