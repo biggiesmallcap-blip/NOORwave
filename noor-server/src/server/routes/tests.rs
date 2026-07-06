@@ -7848,17 +7848,24 @@ async fn tidal_discover_module_items_rejects_unsafe_ids_before_session_lookup() 
 #[tokio::test]
 async fn tidal_discover_module_items_valid_id_still_requires_session() {
     let app = build_test_app().await;
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/tidal/discover-modules/module_1/items")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // Both a short slug and a real TIDAL module id (a ~150-char base64-encoded
+    // JSON token) must pass validation and fall through to the session check.
+    // The base64 case is the regression guard for the "View all" 400s: the
+    // first validator capped ids at 96 chars and `[A-Za-z0-9_-]`, rejecting
+    // every real id before the handler ever ran.
+    for uri in [
+        "/api/tidal/discover-modules/module_1/items",
+        "/api/tidal/discover-modules/eyJwIjoiZjdiYzc5MTctNmJjZC00NDZjLThlMjYtNjE1MzMyNzYzMzdkIiwicFYiOjcsIm0iOiI1ZWI0MzcyYi0xZjk5LTQxZDMtYjc1OC0zNjJkOTI1NGI1ZjkiLCJtViI6MSwibUgiOiI5MzgyNWQyMCJ9/items",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE, "uri: {uri}");
+    }
 }
 
 // Note: an integration test for the recover_tidal_session path on a 401 upstream

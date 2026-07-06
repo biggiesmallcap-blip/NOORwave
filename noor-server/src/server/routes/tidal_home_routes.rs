@@ -23,7 +23,10 @@ const MOOD_THUMBNAIL_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 const TIDAL_HOME_MODULES_PAGE_PATH: &str = "pages/home";
 const TIDAL_MODULE_ITEMS_DEFAULT_LIMIT: u32 = 50;
 const TIDAL_MODULE_ITEMS_MAX_LIMIT: u32 = 200;
-const TIDAL_MODULE_ID_MAX_LEN: usize = 96;
+// Real TIDAL `pages/*` module ids are base64-encoded JSON tokens (~150+ chars),
+// not the short slugs the first cut of this validator assumed. Keep a generous
+// upper bound so the value stays bounded without rejecting legitimate ids.
+const TIDAL_MODULE_ID_MAX_LEN: usize = 512;
 const TIDAL_MIX_ID_MAX_LEN: usize = 96;
 const TIDAL_PAGE_ID_MAX_LEN: usize = 96;
 const ROUTE_TIMING_INFO_THRESHOLD_MS: u128 = 500;
@@ -609,13 +612,19 @@ fn normalize_tidal_mix_id(id: &str) -> Result<&str, StatusCode> {
 }
 
 fn normalize_tidal_module_id(id: &str) -> Result<&str, StatusCode> {
+    // The id is an opaque lookup key only (matched against cached module ids;
+    // the outbound fetch uses the separately-validated `dataApiPath`), so it
+    // never needs to be URL/path safe. Real TIDAL ids are standard base64 JSON
+    // tokens, so allow the base64 alphabet (`+`/`/`/`=` padding) plus URL-safe
+    // `-`/`_`, while still rejecting surrounding whitespace, control chars, and
+    // query/fragment separators.
     let trimmed = id.trim();
     if trimmed.len() != id.len()
         || trimmed.is_empty()
         || trimmed.len() > TIDAL_MODULE_ID_MAX_LEN
         || !trimmed
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '/' | '='))
     {
         return Err(StatusCode::BAD_REQUEST);
     }
