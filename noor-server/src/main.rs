@@ -178,6 +178,10 @@ pub struct AppState {
     /// MusicBrainz enrichment running flag — gates auto-enrich + manual-trigger
     /// handler against double-runs.
     pub musicbrainz_enrich_running: Arc<AtomicBool>,
+    /// TIDAL metadata self-heal running flag - gates the background repair pass
+    /// (`services::tidal::repair`) that backfills tracks persisted with a zero
+    /// duration / missing album against double-runs.
+    pub tidal_repair_running: Arc<AtomicBool>,
     /// Last.fm enrichment progress.
     pub lastfm_enrich_running: Arc<AtomicBool>,
     pub lastfm_enrich_cancel: Arc<AtomicBool>,
@@ -813,6 +817,7 @@ async fn main() -> Result<()> {
         audio_analysis_cancel: analysis_cancel,
         audio_analysis_running: Arc::new(AtomicBool::new(false)),
         musicbrainz_enrich_running: Arc::new(AtomicBool::new(false)),
+        tidal_repair_running: Arc::new(AtomicBool::new(false)),
         lastfm_enrich_running: Arc::new(AtomicBool::new(false)),
         lastfm_enrich_cancel: Arc::new(AtomicBool::new(false)),
         lastfm_enrich_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -949,6 +954,7 @@ async fn main() -> Result<()> {
                 match event_rx.recv().await {
                     Ok(AppEvent::LibrarySynced) => {
                         services::auto_enrich::run_if_idle(listener_state.clone()).await;
+                        services::tidal::repair::run_if_idle(listener_state.clone()).await;
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -966,12 +972,14 @@ async fn main() -> Result<()> {
             // the boot-time TIDAL sync gets a head start.
             tokio::time::sleep(std::time::Duration::from_secs(90)).await;
             services::auto_enrich::run_if_idle(loop_state.clone()).await;
+            services::tidal::repair::run_if_idle(loop_state.clone()).await;
 
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs(86_400));
             ticker.tick().await; // consume the immediate first tick
             loop {
                 ticker.tick().await;
                 services::auto_enrich::run_if_idle(loop_state.clone()).await;
+                services::tidal::repair::run_if_idle(loop_state.clone()).await;
             }
         });
     }

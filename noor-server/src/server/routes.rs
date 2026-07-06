@@ -2535,7 +2535,7 @@ pub(super) async fn spawn_pending_resolvers_for_queue_items(
             let state_bg = state.clone();
             tokio::spawn(async move {
                 let _permit = sem.acquire_owned().await.ok();
-                if resolve_pending_row(db_bg, tok, item_id, tx, http).await {
+                if resolve_pending_row(state_bg.clone(), db_bg, tok, item_id, tx, http).await {
                     refresh_dj_after_queue_change(state_bg, context).await;
                 }
             });
@@ -2826,7 +2826,7 @@ async fn radio_start(
                 let state_bg = state.clone();
                 tokio::spawn(async move {
                     let _permit = sem.acquire_owned().await.ok();
-                    if resolve_pending_row(db_bg, tok, item_id, tx, http).await {
+                    if resolve_pending_row(state_bg.clone(), db_bg, tok, item_id, tx, http).await {
                         refresh_dj_after_queue_change(state_bg, "radio_start_pending_resolved")
                             .await;
                     }
@@ -5593,6 +5593,7 @@ fn promote_pending_row_emit(
 /// does **not** update `playback_state.current_track_id`. The playing row
 /// may not be the one being resolved.
 async fn resolve_pending_row(
+    state: SharedState,
     db: crate::db::Database,
     tokens: crate::services::tidal::auth::TidalTokens,
     queue_item_id: i64,
@@ -5636,6 +5637,37 @@ async fn resolve_pending_row(
     .await
     {
         Ok(r) => r,
+        Err(e) if error_looks_like_auth(&e) => {
+            // The TIDAL access token expired. A whole radio queue's worth of
+            // resolvers can 401 in the same second, so refresh through the
+            // single-flight helper (it dedupes the stampede and hands back a
+            // token another resolver may have already refreshed) and retry once
+            // with the fresh client. Without this the queue hangs on
+            // "Resolving on TIDAL..." until playback happens to refresh the
+            // session on some other code path.
+            match recover_tidal_client(&state, &tokens).await {
+                Ok(fresh_client) => match find_pending_tidal_match(
+                    &fresh_client,
+                    &pending_artist,
+                    &pending_title,
+                    tidal_id_hint,
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e2) => {
+                        tracing::warn!(queue_item_id, error = %e2, "background resolver: Tidal resolve failed after token refresh");
+                        release(&db, queue_item_id);
+                        return false;
+                    }
+                },
+                Err(re) => {
+                    tracing::warn!(queue_item_id, error = %re, "background resolver: TIDAL session refresh failed");
+                    release(&db, queue_item_id);
+                    return false;
+                }
+            }
+        }
         Err(e) => {
             tracing::warn!(queue_item_id, error = %e, "background resolver: Tidal resolve failed");
             release(&db, queue_item_id);
@@ -5790,6 +5822,38 @@ async fn resolve_pending_current_queue_item(
             .await
         {
             Ok(r) => r,
+            Err(error) if error_looks_like_auth(&error) => {
+                // Expired-token recovery, same shape as resolve_pending_row:
+                // this is the row the user is actively waiting on, so it must
+                // not fail on a stale session the single-flight helper can
+                // refresh in one round trip.
+                let retried = match recover_tidal_client(state, &tokens).await {
+                    Ok(fresh_client) => {
+                        find_pending_tidal_match(
+                            &fresh_client,
+                            &pending_artist,
+                            &pending_title,
+                            tidal_id_hint,
+                        )
+                        .await
+                    }
+                    Err(refresh_error) => Err(refresh_error),
+                };
+                match retried {
+                    Ok(r) => r,
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "noor.playback.resolve",
+                            event = "pending_current_resolve_api_failed",
+                            queue_item_id,
+                            error = %error,
+                            "TIDAL lookup failed for current pending queue row after token refresh"
+                        );
+                        release_lock(&db, queue_item_id);
+                        return None;
+                    }
+                }
+            }
             Err(error) => {
                 tracing::warn!(
                     target: "noor.playback.resolve",
@@ -7247,7 +7311,16 @@ async fn spawn_pending_queue_resolver(state: &SharedState, queue_item_id: i64) {
     };
     let state = state.clone();
     tokio::spawn(async move {
-        if resolve_pending_row(db, tokens, queue_item_id, event_tx, tidal_http_client).await {
+        if resolve_pending_row(
+            state.clone(),
+            db,
+            tokens,
+            queue_item_id,
+            event_tx,
+            tidal_http_client,
+        )
+        .await
+        {
             refresh_dj_after_queue_change(state, "pending_queue_resolved").await;
         }
     });
@@ -9687,7 +9760,11 @@ async fn start_ephemeral_tidal_playback(
     // entirely. Either gap would leave the now-playing card blank. Look up the
     // TIDAL track once and fill whichever fields are missing from its album.
     let mut track = track;
-    if track.artwork_url.is_none() || track.album_title.is_none() {
+    if track.artwork_url.is_none()
+        || track.album_title.is_none()
+        || track.album_tidal_id.is_none()
+        || track.duration_ms.unwrap_or(0) == 0
+    {
         let lookup_client = TidalClient::with_http(
             tidal_http_client.clone(),
             tokens.access_token.clone(),
@@ -9703,6 +9780,16 @@ async fn start_ephemeral_tidal_playback(
             }
             if track.album_title.is_none() {
                 track.album_title = t.album.as_ref().map(|a| a.title.clone());
+            }
+            if track.album_tidal_id.is_none() {
+                track.album_tidal_id = t.album.as_ref().map(|a| a.id);
+            }
+            // A zero/absent duration disables seeking and the smooth position
+            // ticker on the client (0 is falsy), so the transport shows `-:--`
+            // and only crawls forward on coarse server polls. Fill it from the
+            // authoritative TIDAL record so the launched track is whole.
+            if track.duration_ms.unwrap_or(0) == 0 && t.duration > 0 {
+                track.duration_ms = Some(t.duration * 1000);
             }
         }
     }

@@ -373,6 +373,91 @@ fn backfill_album_artwork(
     Ok(())
 }
 
+/// Self-healing backfill for a TIDAL-backed track row that was persisted
+/// without a real duration (and usually without an album link) - see
+/// [`crate::services::tidal::repair`]. Given a freshly fetched [`TidalTrack`],
+/// fill only the missing pieces: never clobber a duration or album that is
+/// already present.
+///
+/// Returns `Ok(true)` only when a previously-missing value was actually
+/// filled. That precise signal is load-bearing: a bare `UPDATE ... WHERE id`
+/// reports one row "changed" even when every value is identical, which would
+/// let the repair sweep re-fetch an unfixable row forever. Reporting `false`
+/// on a no-op keeps the sweep self-terminating.
+pub fn repair_track_metadata_tx(
+    conn: &rusqlite::Connection,
+    local_id: i64,
+    t: &crate::services::tidal::client::TidalTrack,
+) -> Result<bool> {
+    use crate::services::tidal::client::TidalClient;
+
+    let tx = conn.unchecked_transaction()?;
+
+    let (cur_duration, cur_album_id, artist_id): (Option<i64>, Option<i64>, i64) = tx.query_row(
+        "SELECT duration_ms, album_id, artist_id FROM tracks WHERE id = ?1",
+        params![local_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+
+    // TIDAL durations are whole seconds; 0/negative means "unknown", which is
+    // no better than what we already have, so treat it as nothing to write.
+    let new_duration_ms: Option<i64> = if t.duration > 0 {
+        Some(t.duration * 1000)
+    } else {
+        None
+    };
+    let fills_duration = new_duration_ms.is_some() && cur_duration.unwrap_or(0) == 0;
+
+    // Only touch the album when the row has none yet. Reuse the metadata-path
+    // upsert so we share/create the album row keyed on its TIDAL id and attach
+    // artwork the same way a full import would.
+    let new_album_id: Option<i64> = if cur_album_id.is_none() {
+        if let Some(album) = t.album.as_ref() {
+            let artwork_url = TidalClient::get_artwork_url(&album.cover, 640);
+            Some(upsert_album_from_metadata_tx(
+                &tx,
+                Some(album.id),
+                Some(album.title.as_str()),
+                artist_id,
+                artwork_url.as_deref(),
+            )?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let fills_album = new_album_id.is_some();
+
+    if !fills_duration && !fills_album {
+        return Ok(false);
+    }
+
+    tx.execute(
+        "UPDATE tracks SET
+            duration_ms  = COALESCE(?2, duration_ms),
+            album_id     = COALESCE(?3, album_id),
+            track_number = COALESCE(track_number, ?4),
+            isrc         = COALESCE(isrc, ?5),
+            updated_at   = datetime('now')
+         WHERE id = ?1",
+        params![
+            local_id,
+            if fills_duration {
+                new_duration_ms
+            } else {
+                None
+            },
+            new_album_id,
+            t.track_number,
+            t.isrc,
+        ],
+    )?;
+
+    tx.commit()?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,6 +494,9 @@ mod tests {
                      fidelity_score INTEGER DEFAULT 0,
                      is_favorite INTEGER DEFAULT 0,
                      is_library INTEGER NOT NULL DEFAULT 0,
+                     track_number INTEGER,
+                     isrc TEXT,
+                     updated_at TEXT,
                      source    TEXT NOT NULL DEFAULT 'tidal_stream'
                  );",
             )
@@ -447,6 +535,117 @@ mod tests {
             "both calls must return the same local_id — the UNIQUE constraint and \
              SELECT-before-INSERT guarantee this for sequential calls; concurrent \
              calls are safe via SQLite single-writer + UNIQUE constraint backstop"
+        );
+    }
+
+    /// Build a `TidalTrack` from JSON (they derive Deserialize but not Default),
+    /// so tests don't have to spell out every nested field.
+    fn tidal_track_json(
+        id: i64,
+        duration_secs: i64,
+        album: Option<(i64, &str)>,
+    ) -> crate::services::tidal::client::TidalTrack {
+        let mut v = serde_json::json!({
+            "id": id,
+            "title": "Repaired",
+            "duration": duration_secs,
+            "trackNumber": 4,
+            "isrc": "GB1234500042",
+            "artist": { "id": 1, "name": "SOTA" },
+        });
+        if let Some((album_id, title)) = album {
+            v["album"] = serde_json::json!({
+                "id": album_id, "title": title, "cover": "aa-bb-cc-dd",
+            });
+        }
+        serde_json::from_value(v).expect("valid TidalTrack json")
+    }
+
+    #[tokio::test]
+    async fn repair_fills_zero_duration_and_links_album() {
+        let db = setup_db();
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'SOTA')", [])?;
+            conn.execute(
+                "INSERT INTO tracks (id, tidal_id, title, artist_id, album_id, duration_ms, source)
+                 VALUES (500, 266425080, 'Realise', 1, NULL, 0, 'tidal_stream')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let track = tidal_track_json(266425080, 196, Some((6196, "Realise")));
+        let changed = db
+            .with_conn(|conn| Ok(repair_track_metadata_tx(conn, 500, &track)?))
+            .unwrap();
+        assert!(
+            changed,
+            "a zero-duration row with a fetchable album must repair"
+        );
+
+        let (dur, album_id, has_album_row, trk, isrc): (
+            i64,
+            Option<i64>,
+            bool,
+            Option<i32>,
+            Option<String>,
+        ) = db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT duration_ms, album_id,
+                            EXISTS(SELECT 1 FROM albums WHERE tidal_id = 6196),
+                            track_number, isrc
+                     FROM tracks WHERE id = 500",
+                    [],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get::<_, i64>(2)? == 1,
+                            r.get(3)?,
+                            r.get(4)?,
+                        ))
+                    },
+                )?)
+            })
+            .unwrap();
+        assert_eq!(dur, 196_000, "TIDAL seconds converted to ms");
+        assert!(album_id.is_some(), "album linked onto the track");
+        assert!(has_album_row, "album row upserted by tidal_id");
+        assert_eq!(trk, Some(4), "missing track_number backfilled");
+        assert_eq!(
+            isrc.as_deref(),
+            Some("GB1234500042"),
+            "missing isrc backfilled"
+        );
+    }
+
+    #[tokio::test]
+    async fn repair_is_noop_when_tidal_cannot_improve_the_row() {
+        // The self-terminating guard: when TIDAL has no real duration and no
+        // album, the writer must report `false`. A bare UPDATE would report one
+        // row "changed" even on an identical write, which would make the repair
+        // sweep re-fetch this id on every trigger forever.
+        let db = setup_db();
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'SOTA')", [])?;
+            conn.execute(
+                "INSERT INTO tracks (id, tidal_id, title, artist_id, album_id, duration_ms, source)
+                 VALUES (501, 999, 'Ghost', 1, NULL, 0, 'tidal_stream')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let track = tidal_track_json(999, 0, None);
+        let changed = db
+            .with_conn(|conn| Ok(repair_track_metadata_tx(conn, 501, &track)?))
+            .unwrap();
+        assert!(
+            !changed,
+            "no duration and no album => no-op, not a false positive"
         );
     }
 

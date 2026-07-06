@@ -2923,6 +2923,7 @@ mod tests {
             musicbrainz_enrich_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                 false,
             )),
+            tidal_repair_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tidal_sync_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tidal_sync_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             lastfm_enrich_total: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
