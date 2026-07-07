@@ -153,6 +153,10 @@ pub struct AppState {
     pub live_listen_session: Option<playback::player::LiveListenSession>,
     pub external_playback_track: Option<db::models::Track>,
     pub ephemeral_tidal_track: Option<db::models::Track>,
+    /// What actually played, in order, for previous-track navigation. The
+    /// queue cannot serve as history (shuffle/automix/mix rows); see
+    /// `playback::history`. In-memory only: resets on restart.
+    pub play_history: playback::history::PlayHistory,
     /// Cancellation flag for in-flight TIDAL device code login polling.
     pub tidal_login_cancel: Arc<AtomicBool>,
     /// Reentrancy guard — true while a TIDAL library sync is running. Manual
@@ -805,6 +809,7 @@ async fn main() -> Result<()> {
         live_listen_session: None,
         external_playback_track: None,
         ephemeral_tidal_track: None,
+        play_history: playback::history::PlayHistory::default(),
         tidal_login_cancel: Arc::new(AtomicBool::new(false)),
         tidal_sync_running: Arc::new(AtomicBool::new(false)),
         tidal_sync_cancel: Arc::new(AtomicBool::new(false)),

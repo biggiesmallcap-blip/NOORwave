@@ -1666,13 +1666,52 @@ pub fn start_queue_from_beginning(
     next_track(conn, recently_cleared)
 }
 
-pub fn previous_track(conn: &Connection) -> Result<PlaybackSnapshot> {
-    let (current_track_id, current_queue_item_id, position_ms): (Option<i64>, Option<i64>, i64) =
-        conn.query_row(
-            "SELECT current_track_id, current_queue_item_id, position_ms FROM playback_state WHERE id = 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
+/// Elapsed playback below which "previous" navigates back; at or above it,
+/// "previous" restarts the current track. Shared by the player logic and the
+/// route-level restart short-circuit so the two can never disagree.
+pub const PREVIOUS_RESTART_THRESHOLD_MS: i64 = 3_000;
+
+/// A play-history target for `previous_track`: the queue row that actually
+/// played before the current one. `track_id` is `None` for rows that were
+/// pending when they played. Validated against the live queue before use;
+/// a stale anchor (row removed, row re-resolved to a different track) falls
+/// back to queue-order stepping.
+#[derive(Debug, Clone, Copy)]
+pub struct HistoryAnchor {
+    pub queue_item_id: i64,
+    pub track_id: Option<i64>,
+}
+
+pub struct PreviousTrackOutcome {
+    pub snapshot: PlaybackSnapshot,
+    /// True when the decision was "restart what is already playing" (elapsed
+    /// past the threshold, or already at the head of the queue with no
+    /// history). The route turns this into a runtime seek-to-0 when the
+    /// track is audibly active instead of a full stream re-resolve + switch.
+    pub restart_in_place: bool,
+}
+
+/// Move to the previous track.
+///
+/// `live_position_ms` is the AUDIBLE playhead read from the runtime by the
+/// caller. The DB's own `position_ms` is not consulted: nothing persists the
+/// live playhead into it during playback, so it reads 0 mid-track (that
+/// stale read is what kept the restart branch from ever firing).
+///
+/// `history_anchor` is the most recent play-history entry that still
+/// resolves against the queue, if the caller has one; it wins over
+/// queue-order stepping so "previous" follows what actually played across
+/// shuffle, manual jumps, and automix insertions.
+pub fn previous_track(
+    conn: &Connection,
+    live_position_ms: i64,
+    history_anchor: Option<&HistoryAnchor>,
+) -> Result<PreviousTrackOutcome> {
+    let (current_track_id, current_queue_item_id): (Option<i64>, Option<i64>) = conn.query_row(
+        "SELECT current_track_id, current_queue_item_id FROM playback_state WHERE id = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
 
     let queue_items = queue::load_queue(conn)?;
     if queue_items.is_empty() {
@@ -1683,13 +1722,54 @@ pub fn previous_track(conn: &Connection) -> Result<PlaybackSnapshot> {
              WHERE id = 1",
             [],
         )?;
-        return load_snapshot(conn);
+        return Ok(PreviousTrackOutcome {
+            snapshot: load_snapshot(conn)?,
+            restart_in_place: false,
+        });
     }
 
-    // Restart in place when more than 3s into the track.
-    if (current_track_id.is_some() || current_queue_item_id.is_some()) && position_ms >= 3_000 {
+    // Restart in place when past the threshold.
+    if (current_track_id.is_some() || current_queue_item_id.is_some())
+        && live_position_ms >= PREVIOUS_RESTART_THRESHOLD_MS
+    {
         conn.execute("UPDATE playback_state SET position_ms = 0 WHERE id = 1", [])?;
-        return load_snapshot(conn);
+        return Ok(PreviousTrackOutcome {
+            snapshot: load_snapshot(conn)?,
+            restart_in_place: true,
+        });
+    }
+
+    let anchor_to = |item: &QueueItem| -> Result<PlaybackSnapshot> {
+        let new_track_id: Option<i64> = if item.track.id != 0 {
+            Some(item.track.id)
+        } else {
+            None
+        };
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = ?1, current_queue_item_id = ?2,
+                 position_ms = 0, is_playing = 1
+             WHERE id = 1",
+            params![new_track_id, item.id],
+        )?;
+        load_snapshot(conn)
+    };
+
+    // Play history wins over queue-order stepping when its row still
+    // resolves. Re-validated here even though the route pre-checks, so a
+    // queue edit between the two reads cannot anchor onto the wrong row.
+    if let Some(anchor) = history_anchor
+        && let Some(item) = queue_items
+            .iter()
+            .find(|item| item.id == anchor.queue_item_id)
+    {
+        let item_track_id = (item.track.id != 0).then_some(item.track.id);
+        if item_track_id == anchor.track_id {
+            return Ok(PreviousTrackOutcome {
+                snapshot: anchor_to(item)?,
+                restart_in_place: false,
+            });
+        }
     }
 
     let current_index =
@@ -1699,43 +1779,28 @@ pub fn previous_track(conn: &Connection) -> Result<PlaybackSnapshot> {
         .and_then(|idx| idx.checked_sub(1))
         .and_then(|idx| queue_items.get(idx))
     {
-        let new_track_id: Option<i64> = if previous_item.track.id != 0 {
-            Some(previous_item.track.id)
-        } else {
-            None
-        };
-        conn.execute(
-            "UPDATE playback_state
-             SET current_track_id = ?1, current_queue_item_id = ?2,
-                 position_ms = 0, is_playing = 1
-             WHERE id = 1",
-            params![new_track_id, previous_item.id],
-        )?;
-        return load_snapshot(conn);
+        return Ok(PreviousTrackOutcome {
+            snapshot: anchor_to(previous_item)?,
+            restart_in_place: false,
+        });
     }
 
     // Nothing was playing - jump to the first item rather than doing nothing.
     if current_index.is_none()
         && let Some(first_item) = queue_items.first()
     {
-        let new_track_id: Option<i64> = if first_item.track.id != 0 {
-            Some(first_item.track.id)
-        } else {
-            None
-        };
-        conn.execute(
-            "UPDATE playback_state
-                 SET current_track_id = ?1, current_queue_item_id = ?2,
-                     position_ms = 0, is_playing = 1
-                 WHERE id = 1",
-            params![new_track_id, first_item.id],
-        )?;
-        return load_snapshot(conn);
+        return Ok(PreviousTrackOutcome {
+            snapshot: anchor_to(first_item)?,
+            restart_in_place: false,
+        });
     }
 
-    // Already at the start of the queue - just restart position.
+    // Already at the start of the queue with no history - restart current.
     conn.execute("UPDATE playback_state SET position_ms = 0 WHERE id = 1", [])?;
-    load_snapshot(conn)
+    Ok(PreviousTrackOutcome {
+        snapshot: load_snapshot(conn)?,
+        restart_in_place: true,
+    })
 }
 
 pub fn current_track_id(conn: &Connection) -> Result<Option<i64>> {
@@ -3666,16 +3731,17 @@ mod tests {
         let tracks = load_tracks(&conn, &[1, 2, 3]);
         queue::replace_queue(&conn, &tracks, "test").unwrap();
         conn.execute(
-            "UPDATE playback_state SET current_track_id = 2, position_ms = 2500, is_playing = 1 WHERE id = 1",
+            "UPDATE playback_state SET current_track_id = 2, position_ms = 0, is_playing = 1 WHERE id = 1",
             [],
         )
         .unwrap();
 
-        let snapshot = previous_track(&conn).unwrap();
+        let outcome = previous_track(&conn, 2_500, None).unwrap();
 
-        assert_eq!(snapshot.state.current_track.unwrap().id, 1);
-        assert_eq!(snapshot.state.position_ms, 0);
-        assert!(snapshot.state.is_playing);
+        assert!(!outcome.restart_in_place);
+        assert_eq!(outcome.snapshot.state.current_track.unwrap().id, 1);
+        assert_eq!(outcome.snapshot.state.position_ms, 0);
+        assert!(outcome.snapshot.state.is_playing);
     }
 
     #[test]
@@ -3683,16 +3749,20 @@ mod tests {
         let conn = conn();
         let tracks = load_tracks(&conn, &[1, 2, 3]);
         queue::replace_queue(&conn, &tracks, "test").unwrap();
+        // DB position_ms stays 0 during playback (nothing persists the live
+        // playhead); the threshold must key on the caller-provided live
+        // position, never this column.
         conn.execute(
-            "UPDATE playback_state SET current_track_id = 2, position_ms = 3000, is_playing = 1 WHERE id = 1",
+            "UPDATE playback_state SET current_track_id = 2, position_ms = 0, is_playing = 1 WHERE id = 1",
             [],
         )
         .unwrap();
 
-        let snapshot = previous_track(&conn).unwrap();
+        let outcome = previous_track(&conn, PREVIOUS_RESTART_THRESHOLD_MS, None).unwrap();
 
-        assert_eq!(snapshot.state.current_track.unwrap().id, 2);
-        assert_eq!(snapshot.state.position_ms, 0);
+        assert!(outcome.restart_in_place);
+        assert_eq!(outcome.snapshot.state.current_track.unwrap().id, 2);
+        assert_eq!(outcome.snapshot.state.position_ms, 0);
     }
 
     #[test]
@@ -3701,15 +3771,95 @@ mod tests {
         let tracks = load_tracks(&conn, &[1, 2, 3]);
         queue::replace_queue(&conn, &tracks, "test").unwrap();
         conn.execute(
-            "UPDATE playback_state SET current_track_id = 1, position_ms = 1000, is_playing = 1 WHERE id = 1",
+            "UPDATE playback_state SET current_track_id = 1, position_ms = 0, is_playing = 1 WHERE id = 1",
             [],
         )
         .unwrap();
 
-        let snapshot = previous_track(&conn).unwrap();
+        let outcome = previous_track(&conn, 1_000, None).unwrap();
 
-        assert_eq!(snapshot.state.current_track.unwrap().id, 1);
-        assert_eq!(snapshot.state.position_ms, 0);
+        assert!(outcome.restart_in_place);
+        assert_eq!(outcome.snapshot.state.current_track.unwrap().id, 1);
+        assert_eq!(outcome.snapshot.state.position_ms, 0);
+    }
+
+    #[test]
+    fn previous_track_prefers_valid_history_anchor() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 3]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        // Simulate a shuffled/jumped session: current is the FIRST row, but
+        // history says the third row actually played before it. Queue-order
+        // stepping would restart-in-place; history must win.
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1, current_queue_item_id = ?1, position_ms = 0, is_playing = 1
+             WHERE id = 1",
+            params![queue_items[0].id],
+        )
+        .unwrap();
+
+        let anchor = HistoryAnchor {
+            queue_item_id: queue_items[2].id,
+            track_id: Some(queue_items[2].track.id),
+        };
+        let outcome = previous_track(&conn, 500, Some(&anchor)).unwrap();
+
+        assert!(!outcome.restart_in_place);
+        assert_eq!(outcome.snapshot.state.current_track.unwrap().id, 3);
+        assert_eq!(
+            outcome.snapshot.state.current_queue_item_id,
+            Some(queue_items[2].id)
+        );
+    }
+
+    #[test]
+    fn previous_track_falls_back_when_history_anchor_row_is_gone() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 3]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 2, current_queue_item_id = ?1, position_ms = 0, is_playing = 1
+             WHERE id = 1",
+            params![queue_items[1].id],
+        )
+        .unwrap();
+
+        let anchor = HistoryAnchor {
+            queue_item_id: 999_999,
+            track_id: Some(3),
+        };
+        let outcome = previous_track(&conn, 500, Some(&anchor)).unwrap();
+
+        // Stale anchor: fall back to queue-order stepping (row above).
+        assert!(!outcome.restart_in_place);
+        assert_eq!(outcome.snapshot.state.current_track.unwrap().id, 1);
+    }
+
+    #[test]
+    fn previous_track_rejects_history_anchor_with_changed_track() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 3]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 2, current_queue_item_id = ?1, position_ms = 0, is_playing = 1
+             WHERE id = 1",
+            params![queue_items[1].id],
+        )
+        .unwrap();
+
+        // Anchor row exists but now holds a different track (re-resolved /
+        // edited): must not navigate onto the wrong track.
+        let anchor = HistoryAnchor {
+            queue_item_id: queue_items[2].id,
+            track_id: Some(999),
+        };
+        let outcome = previous_track(&conn, 500, Some(&anchor)).unwrap();
+
+        assert!(!outcome.restart_in_place);
+        assert_eq!(outcome.snapshot.state.current_track.unwrap().id, 1);
     }
 
     #[test]
@@ -3719,20 +3869,20 @@ mod tests {
         let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
         conn.execute(
             "UPDATE playback_state
-             SET current_track_id = 2, current_queue_item_id = ?1, position_ms = 1000, is_playing = 1
+             SET current_track_id = 2, current_queue_item_id = ?1, position_ms = 0, is_playing = 1
              WHERE id = 1",
             params![queue_items[0].id],
         )
         .unwrap();
 
-        let snapshot = previous_track(&conn).unwrap();
+        let outcome = previous_track(&conn, 1_000, None).unwrap();
 
-        assert_eq!(snapshot.state.current_track.unwrap().id, 1);
+        assert_eq!(outcome.snapshot.state.current_track.unwrap().id, 1);
         assert_eq!(
-            snapshot.state.current_queue_item_id,
+            outcome.snapshot.state.current_queue_item_id,
             Some(queue_items[0].id)
         );
-        assert_eq!(snapshot.state.position_ms, 0);
+        assert_eq!(outcome.snapshot.state.position_ms, 0);
     }
 
     #[test]
@@ -3749,20 +3899,20 @@ mod tests {
         let pending_qid = conn.last_insert_rowid();
         conn.execute(
             "UPDATE playback_state
-             SET current_track_id = NULL, current_queue_item_id = ?1, position_ms = 1000, is_playing = 1
+             SET current_track_id = NULL, current_queue_item_id = ?1, position_ms = 0, is_playing = 1
              WHERE id = 1",
             params![pending_qid],
         )
         .unwrap();
 
-        let snapshot = previous_track(&conn).unwrap();
+        let outcome = previous_track(&conn, 1_000, None).unwrap();
 
-        assert_eq!(snapshot.state.current_track.unwrap().id, 1);
+        assert_eq!(outcome.snapshot.state.current_track.unwrap().id, 1);
         assert_eq!(
-            snapshot.state.current_queue_item_id,
+            outcome.snapshot.state.current_queue_item_id,
             Some(queue_items[0].id)
         );
-        assert_eq!(snapshot.state.position_ms, 0);
+        assert_eq!(outcome.snapshot.state.position_ms, 0);
     }
 
     #[test]
@@ -3771,11 +3921,12 @@ mod tests {
         let tracks = load_tracks(&conn, &[1, 2, 3]);
         queue::replace_queue(&conn, &tracks, "test").unwrap();
 
-        let snapshot = previous_track(&conn).unwrap();
+        let outcome = previous_track(&conn, 0, None).unwrap();
 
-        assert_eq!(snapshot.state.current_track.unwrap().id, 1);
-        assert_eq!(snapshot.state.position_ms, 0);
-        assert!(snapshot.state.is_playing);
+        assert!(!outcome.restart_in_place);
+        assert_eq!(outcome.snapshot.state.current_track.unwrap().id, 1);
+        assert_eq!(outcome.snapshot.state.position_ms, 0);
+        assert!(outcome.snapshot.state.is_playing);
     }
 
     #[test]
@@ -3787,12 +3938,13 @@ mod tests {
         )
         .unwrap();
 
-        let snapshot = previous_track(&conn).unwrap();
+        let outcome = previous_track(&conn, 5_000, None).unwrap();
 
-        assert!(snapshot.state.current_track.is_none());
-        assert_eq!(snapshot.state.position_ms, 0);
-        assert!(!snapshot.state.is_playing);
-        assert!(snapshot.queue.is_empty());
+        assert!(!outcome.restart_in_place);
+        assert!(outcome.snapshot.state.current_track.is_none());
+        assert_eq!(outcome.snapshot.state.position_ms, 0);
+        assert!(!outcome.snapshot.state.is_playing);
+        assert!(outcome.snapshot.queue.is_empty());
     }
 
     #[test]

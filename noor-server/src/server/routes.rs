@@ -1,6 +1,7 @@
 use crate::db::queries;
 use crate::metadata::discogs::DiscogsClient;
 use crate::metadata::lastfm::LastFmClient;
+use crate::playback::history::PlayHistoryEntry;
 use crate::playback::{automix, pending, player, queue, runtime as playback_runtime};
 use crate::services::discovery::{
     DiscoveryCandidateSeed, DiscoveryProvider, TidalDiscoveryProvider,
@@ -5984,8 +5985,13 @@ async fn next_persisted_playback_snapshot(
 async fn previous_persisted_playback_snapshot(
     state: &SharedState,
 ) -> anyhow::Result<player::PlaybackSnapshot> {
+    // Pending-skip stepping: always step back one row (live position 0,
+    // no history target). The restart-vs-back decision was already made by
+    // the previous_track route before the stepping loop started.
     let state_guard = state.read().await;
-    state_guard.db.with_conn(player::previous_track)
+    state_guard
+        .db
+        .with_conn(|conn| Ok(player::previous_track(conn, 0, None)?.snapshot))
 }
 
 #[derive(Clone, Copy)]
@@ -6001,6 +6007,72 @@ impl PendingAdvanceDirection {
             Self::Previous => "previous",
         }
     }
+}
+
+/// Playback anchor captured before a mutation so failure paths can roll it
+/// back. Without the rollback, a previous/next whose stream resolve fails
+/// leaves the DB pointing at a track the runtime never switched to, and the
+/// next press steps from the wrong place.
+#[derive(Clone, Copy)]
+struct SavedPlaybackAnchor {
+    current_track_id: Option<i64>,
+    current_queue_item_id: Option<i64>,
+    position_ms: i64,
+    is_playing: bool,
+}
+
+async fn save_playback_anchor(state: &SharedState) -> anyhow::Result<SavedPlaybackAnchor> {
+    let state_guard = state.read().await;
+    state_guard.db.with_conn(|conn| {
+        Ok(conn.query_row(
+            "SELECT current_track_id, current_queue_item_id, position_ms, is_playing
+             FROM playback_state WHERE id = 1",
+            [],
+            |row| {
+                Ok(SavedPlaybackAnchor {
+                    current_track_id: row.get(0)?,
+                    current_queue_item_id: row.get(1)?,
+                    position_ms: row.get(2)?,
+                    is_playing: row.get(3)?,
+                })
+            },
+        )?)
+    })
+}
+
+async fn restore_playback_anchor(
+    state: &SharedState,
+    saved: SavedPlaybackAnchor,
+) -> anyhow::Result<player::PlaybackSnapshot> {
+    let state_guard = state.read().await;
+    let snapshot = state_guard.db.with_conn(move |conn| {
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = ?1, current_queue_item_id = ?2,
+                 position_ms = ?3, is_playing = ?4
+             WHERE id = 1",
+            params![
+                saved.current_track_id,
+                saved.current_queue_item_id,
+                saved.position_ms,
+                saved.is_playing
+            ],
+        )?;
+        player::load_snapshot(conn)
+    })?;
+    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+    Ok(snapshot)
+}
+
+/// What to do when pending rows keep failing to resolve during an advance.
+#[derive(Clone, Copy)]
+enum PendingGiveUp {
+    /// Forward advance: stop playback (the queue ahead is unplayable).
+    StopPlayback,
+    /// Backward navigation: put the anchor back where it was. Pressing
+    /// "previous" must never kill the session; the current track keeps
+    /// playing.
+    RestoreAnchor(SavedPlaybackAnchor),
 }
 
 async fn step_persisted_playback_snapshot(
@@ -6118,6 +6190,7 @@ async fn resolve_or_skip_pending_current(
         generation,
         context,
         PendingAdvanceDirection::Next,
+        PendingGiveUp::StopPlayback,
     )
     .await
 }
@@ -6127,6 +6200,7 @@ async fn resolve_or_skip_pending_current_previous(
     snapshot: player::PlaybackSnapshot,
     generation: u64,
     context: &'static str,
+    saved_anchor: SavedPlaybackAnchor,
 ) -> anyhow::Result<player::PlaybackSnapshot> {
     resolve_or_skip_pending_current_in_direction(
         state,
@@ -6134,6 +6208,7 @@ async fn resolve_or_skip_pending_current_previous(
         generation,
         context,
         PendingAdvanceDirection::Previous,
+        PendingGiveUp::RestoreAnchor(saved_anchor),
     )
     .await
 }
@@ -6144,6 +6219,7 @@ async fn resolve_or_skip_pending_current_in_direction(
     generation: u64,
     context: &'static str,
     direction: PendingAdvanceDirection,
+    give_up: PendingGiveUp,
 ) -> anyhow::Result<player::PlaybackSnapshot> {
     let mut skipped = 0usize;
     let mut busy_waits = 0usize;
@@ -6217,7 +6293,20 @@ async fn resolve_or_skip_pending_current_in_direction(
         );
 
         if skipped > PLAYBACK_ADVANCE_PENDING_SKIP_LIMIT {
-            return stop_persisted_playback_after_advance_failure(state, context).await;
+            return match give_up {
+                PendingGiveUp::StopPlayback => {
+                    stop_persisted_playback_after_advance_failure(state, context).await
+                }
+                PendingGiveUp::RestoreAnchor(saved) => {
+                    tracing::warn!(
+                        target: "noor.playback.advance",
+                        event = "previous_restored_after_pending_skip_limit",
+                        context,
+                        "restoring playback anchor after pending rows failed to resolve on previous"
+                    );
+                    restore_playback_anchor(state, saved).await
+                }
+            };
         }
 
         snapshot = step_persisted_playback_snapshot(state, direction).await?;
@@ -6524,24 +6613,28 @@ async fn next_track(
     })))
 }
 
-/// During a live TIDAL mix, "previous" restarts the current track from the top
-/// instead of running the persistent-queue previous logic. A mix is forward-only:
-/// played rows are deleted, so there is no earlier row to return to, and the DB
-/// anchor is NULL. Without this guard, `player::previous_track`'s "nothing playing
-/// -> jump to first item" fallback re-anchors onto the next mix row and marks it
-/// playing while the runtime keeps playing the ephemeral track, corrupting state
-/// ("previous loads them back in"). Returns `Some(response)` when handled.
-async fn restart_ephemeral_current_if_needed(
-    state: &SharedState,
-) -> Result<Option<Json<Value>>, (StatusCode, Json<Value>)> {
-    let has_ephemeral = {
-        let state_guard = state.read().await;
-        state_guard.ephemeral_tidal_track.is_some()
-    };
-    if !has_ephemeral {
-        return Ok(None);
-    }
+/// Audible playhead in ms straight from the runtime, or None when no
+/// runtime/device info exists (nothing is playing or the runtime is gone).
+/// The DB's `playback_state.position_ms` must never be used for playhead
+/// decisions: nothing persists the live position into it during playback,
+/// so it reads 0 mid-track.
+async fn current_live_position_ms(state: &SharedState) -> Option<i64> {
+    let state_guard = state.read().await;
+    let pair = state_guard
+        .playback_runtime
+        .as_ref()
+        .zip(state_guard.playback_runtime_info.as_ref());
+    pair.map(|(rt, info)| rt.handle.get_position_ms(info.sample_rate, info.channels))
+}
 
+/// Restart whatever is audibly playing from the top via a segment-aware
+/// runtime seek: no stream re-resolve, no engine cold start. Works for
+/// persisted-queue and ephemeral TIDAL-mix playback alike, and preserves
+/// pause state. While paused the audio callback does not consume the seek
+/// until resume, so the reported position may hold its old value until then.
+async fn restart_current_in_place(
+    state: &SharedState,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let handle = {
         let state_guard = state.read().await;
         state_guard
@@ -6566,33 +6659,154 @@ async fn restart_ephemeral_current_if_needed(
         let state_guard = state.read().await;
         let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
     }
-    Ok(Some(Json(json!({
+    Ok(Json(json!({
         "state": snapshot.state,
         "queue": snapshot.queue
-    }))))
+    })))
+}
+
+/// Undo a failed previous-track navigation: put the popped history entry
+/// back (so retrying targets the same track), disarm the history push
+/// suppression, and roll the DB anchor back to what is still audible -
+/// unless a newer user action already owns the playback state.
+async fn restore_after_previous_failure(
+    state: &SharedState,
+    saved: SavedPlaybackAnchor,
+    popped: Option<PlayHistoryEntry>,
+    generation: u64,
+) {
+    {
+        let mut state_guard = state.write().await;
+        state_guard.play_history.clear_suppression();
+        if let Some(entry) = popped {
+            state_guard.play_history.restore_popped(entry);
+        }
+    }
+    if playback_generation_is_current(state, generation).await
+        && let Err(error) = restore_playback_anchor(state, saved).await
+    {
+        tracing::warn!(
+            target: "noor.playback.advance",
+            event = "previous_anchor_restore_failed",
+            error = %error,
+            "failed to roll back playback anchor after previous-track failure"
+        );
+    }
 }
 
 async fn previous_track(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if let Some(response) = restart_ephemeral_current_if_needed(&state).await? {
-        return Ok(response);
+    // Past the threshold: "previous" means restart the playing track.
+    let live_position_ms = current_live_position_ms(&state).await;
+    if live_position_ms.unwrap_or(0) >= player::PREVIOUS_RESTART_THRESHOLD_MS {
+        return restart_current_in_place(&state).await;
+    }
+
+    // A live TIDAL mix is forward-only in the queue (played rows are
+    // deleted), so queue-order stepping has nothing to step back to and
+    // would corrupt the NULL mix anchor onto the next mix row. Play history
+    // is the only way back; without it, restart in place.
+    let ephemeral_active = {
+        let state_guard = state.read().await;
+        state_guard.ephemeral_tidal_track.is_some()
+    };
+    if ephemeral_active {
+        return restart_current_in_place(&state).await;
     }
 
     let playback_generation = bump_playback_generation(&state).await;
     let previous_track_id = current_playback_track_id(&state).await;
-    let mut snapshot = {
-        let state = state.read().await;
-        state.db.with_conn(player::previous_track).map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "status": "playback_state_update_failed",
-                    "message": "Failed to move to the previous track.",
-                })),
-            )
-        })?
+    let saved_anchor = save_playback_anchor(&state).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "playback_state_update_failed",
+                "message": "Failed to move to the previous track.",
+            })),
+        )
+    })?;
+
+    // Walk play history for the most recent entry that still resolves
+    // against the live queue, so "previous" follows what actually played
+    // across shuffle, manual jumps, and automix insertions. Entries whose
+    // rows are gone are consumed: retrying them can never succeed.
+    const PREVIOUS_HISTORY_POP_LIMIT: usize = 12;
+    let mut history_anchor: Option<player::HistoryAnchor> = None;
+    let mut popped_entry: Option<PlayHistoryEntry> = None;
+    for _ in 0..PREVIOUS_HISTORY_POP_LIMIT {
+        let entry = {
+            let mut state_guard = state.write().await;
+            state_guard.play_history.pop_previous()
+        };
+        match entry {
+            None => break,
+            Some(PlayHistoryEntry::Ephemeral(_)) => {
+                // A mix track played before this queue session; its queue row
+                // is gone by design. Step past it to the persisted history.
+                continue;
+            }
+            Some(PlayHistoryEntry::Persisted {
+                queue_item_id,
+                track_id,
+            }) => {
+                let row_matches = {
+                    let state_guard = state.read().await;
+                    state_guard
+                        .db
+                        .with_conn(move |conn| {
+                            Ok(conn
+                                .query_row(
+                                    "SELECT track_id FROM queue WHERE id = ?1",
+                                    params![queue_item_id],
+                                    |row| row.get::<_, Option<i64>>(0),
+                                )
+                                .optional()?)
+                        })
+                        .ok()
+                        .flatten()
+                        == Some(Some(track_id))
+                };
+                if row_matches {
+                    history_anchor = Some(player::HistoryAnchor {
+                        queue_item_id,
+                        track_id: Some(track_id),
+                    });
+                    popped_entry = Some(PlayHistoryEntry::Persisted {
+                        queue_item_id,
+                        track_id,
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    let outcome = {
+        let anchor = history_anchor;
+        let live = live_position_ms.unwrap_or(0);
+        let state_guard = state.read().await;
+        state_guard
+            .db
+            .with_conn(move |conn| player::previous_track(conn, live, anchor.as_ref()))
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "status": "playback_state_update_failed",
+                        "message": "Failed to move to the previous track.",
+                    })),
+                )
+            })?
     };
+
+    if outcome.restart_in_place && live_position_ms.is_some() {
+        // Head of the queue with no history while audio is live: restart via
+        // seek. With no runtime (stopped), fall through to the switch path so
+        // pressing previous still starts audio, as before.
+        return restart_current_in_place(&state).await;
+    }
+    let mut snapshot = outcome.snapshot;
 
     set_external_playback_track(&state, None).await;
     snapshot = resolve_or_skip_pending_current_previous(
@@ -6600,6 +6814,7 @@ async fn previous_track(
         snapshot,
         playback_generation,
         "manual_previous_track",
+        saved_anchor,
     )
     .await
     .map_err(|error| {
@@ -6635,40 +6850,63 @@ async fn previous_track(
 
     if let Some(track) = play_track {
         let user_quality = current_user_audio_quality(&state).await;
-        let stream_request = player::build_tidal_stream_request(track, user_quality.clone()).ok_or_else(|| {
-            (
+        let Some(stream_request) = player::build_tidal_stream_request(track, user_quality.clone())
+        else {
+            restore_after_previous_failure(&state, saved_anchor, popped_entry, playback_generation)
+                .await;
+            return Err((
                 StatusCode::NOT_IMPLEMENTED,
                 Json(json!({
                     "status": "local_playback_not_supported",
                     "message": "Local-library playback is not wired into the host audio runtime yet.",
                     "track_id": track.id,
                 })),
-            )
-        })?;
-        let stream_info = resolve_tidal_playback_stream(&state, track, &stream_request)
-            .await
-            .map_err(|error| {
-                tidal_playback_error_response(
+            ));
+        };
+        let stream_info = match resolve_tidal_playback_stream(&state, track, &stream_request).await
+        {
+            Ok(info) => info,
+            Err(error) => {
+                // The anchor moved but the audio did not: roll back so state
+                // and audio agree instead of leaving the DB pointing at a
+                // track the runtime never switched to.
+                restore_after_previous_failure(
+                    &state,
+                    saved_anchor,
+                    popped_entry,
+                    playback_generation,
+                )
+                .await;
+                return Err(tidal_playback_error_response(
                     track.id,
                     error,
                     "TIDAL stream could not be resolved while moving to the previous track.",
-                )
-            })?;
+                ));
+            }
+        };
         if !playback_generation_is_current(&state, playback_generation).await {
             return current_playback_snapshot_json(&state).await;
         }
-        let runtime_handle = ensure_playback_runtime_for_track(&state, track)
-            .await
-            .map_err(|_| {
-                (
+        let runtime_handle = match ensure_playback_runtime_for_track(&state, track).await {
+            Ok(handle) => handle,
+            Err(_) => {
+                restore_after_previous_failure(
+                    &state,
+                    saved_anchor,
+                    popped_entry,
+                    playback_generation,
+                )
+                .await;
+                return Err((
                     StatusCode::BAD_GATEWAY,
                     Json(json!({
                         "status": "playback_runtime_unavailable",
                         "message": "Playback runtime was not available for moving to the previous track.",
                         "track_id": track.id,
                     })),
-                )
-            })?;
+                ));
+            }
+        };
         let job = player::build_playback_preparation(
             track,
             Some(&stream_info),
@@ -6676,18 +6914,29 @@ async fn previous_track(
             user_quality,
         )
         .with_generation(playback_generation);
-        runtime_handle.switch_to(job).map_err(|error| {
+        {
+            // Back-navigation: the incoming Started event must not push the
+            // track being navigated away from onto play history, or two prev
+            // presses would ping-pong between the same two tracks.
+            let mut state_guard = state.write().await;
+            state_guard
+                .play_history
+                .suppress_push_for_generation(playback_generation);
+        }
+        if let Err(error) = runtime_handle.switch_to(job) {
+            restore_after_previous_failure(&state, saved_anchor, popped_entry, playback_generation)
+                .await;
             let message = format!("Failed to switch host audio playback: {error}");
             report_playback_failure(&state, &message);
-            (
+            return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
                     "status": "playback_runtime_failed",
                     "message": message,
                     "track_id": track.id,
                 })),
-            )
-        })?;
+            ));
+        }
         {
             let mut state_guard = state.write().await;
             state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
@@ -10380,6 +10629,42 @@ fn spawn_playback_runtime_listener(
                     }
                     if let Some(pending) = state_guard.pending_stream_display.take() {
                         state_guard.current_stream_display = Some(pending);
+                    }
+                    // Feed play history. Persisted plays anchor to their queue
+                    // row; a mismatched or NULL anchor (ephemeral mix starts,
+                    // or a race with a concurrent queue action) records
+                    // nothing - a missing entry beats a wrong one. Ephemeral
+                    // plays are recorded by the ephemeral starters instead.
+                    let history_row = state_guard
+                        .db
+                        .with_conn(|conn| {
+                            Ok(conn
+                                .query_row(
+                                    "SELECT current_track_id, current_queue_item_id
+                                     FROM playback_state WHERE id = 1",
+                                    [],
+                                    |row| {
+                                        Ok((
+                                            row.get::<_, Option<i64>>(0)?,
+                                            row.get::<_, Option<i64>>(1)?,
+                                        ))
+                                    },
+                                )
+                                .ok()
+                                .and_then(|(track, queue_item)| track.zip(queue_item)))
+                        })
+                        .ok()
+                        .flatten();
+                    if let Some((anchored_track_id, queue_item_id)) = history_row
+                        && anchored_track_id == track_id
+                    {
+                        state_guard.play_history.note_started(
+                            PlayHistoryEntry::Persisted {
+                                queue_item_id,
+                                track_id: anchored_track_id,
+                            },
+                            generation,
+                        );
                     }
                     drop(state_guard);
                     let state_guard = state.read().await;

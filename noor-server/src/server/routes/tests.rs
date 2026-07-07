@@ -984,6 +984,7 @@ fn fresh_test_state(db: Database) -> crate::AppState {
         live_listen_session: None,
         external_playback_track: None,
         ephemeral_tidal_track: None,
+        play_history: crate::playback::history::PlayHistory::default(),
         tidal_login_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         rss_aggregator: Arc::new(crate::services::rss_feeds::FeedAggregator::new(
             reqwest::Client::new(),
@@ -4339,6 +4340,9 @@ async fn manual_previous_skips_unresolved_pending_rows_to_prior_library_track() 
 
     let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
     let playback_generation = bump_playback_generation(&state).await;
+    let saved_anchor = save_playback_anchor(&state)
+        .await
+        .expect("saved playback anchor");
     let snapshot = previous_persisted_playback_snapshot(&state)
         .await
         .expect("initial previous snapshot");
@@ -4350,6 +4354,7 @@ async fn manual_previous_skips_unresolved_pending_rows_to_prior_library_track() 
         snapshot,
         playback_generation,
         "manual_previous_track",
+        saved_anchor,
     )
     .await
     .expect("previous pending skip");
@@ -4363,7 +4368,7 @@ async fn manual_previous_skips_unresolved_pending_rows_to_prior_library_track() 
 }
 
 #[tokio::test]
-async fn manual_previous_stops_when_pending_rows_cannot_move_back() {
+async fn manual_previous_restores_anchor_when_pending_rows_cannot_move_back() {
     let db = fresh_migrated_db();
     let current_qid = db
         .with_conn(|conn| {
@@ -4392,6 +4397,9 @@ async fn manual_previous_stops_when_pending_rows_cannot_move_back() {
 
     let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
     let playback_generation = bump_playback_generation(&state).await;
+    let saved_anchor = save_playback_anchor(&state)
+        .await
+        .expect("saved playback anchor");
     let snapshot = previous_persisted_playback_snapshot(&state)
         .await
         .expect("initial previous snapshot");
@@ -4403,13 +4411,17 @@ async fn manual_previous_stops_when_pending_rows_cannot_move_back() {
         snapshot,
         playback_generation,
         "manual_previous_track",
+        saved_anchor,
     )
     .await
-    .expect("previous pending stop");
+    .expect("previous pending restore");
 
+    // Pressing previous must never stop the session: when nothing behind the
+    // current row is playable, the anchor rolls back to where it was and the
+    // current track keeps playing.
     assert!(snapshot.state.current_track.is_none());
-    assert_eq!(snapshot.state.current_queue_item_id, None);
-    assert!(!snapshot.state.is_playing);
+    assert_eq!(snapshot.state.current_queue_item_id, Some(current_qid));
+    assert!(snapshot.state.is_playing);
 }
 
 #[tokio::test]
