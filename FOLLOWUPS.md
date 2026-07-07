@@ -10,6 +10,26 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### deps: finish Dependabot #144 - symphonia 0.6 + rubato 3.0 (audio path)
+
+Deferred from the cargo-group bump (commit 79f8c1f6, which landed the mechanical
+majors). Both are full API rewrites on the playback hot path with no security or
+urgency driver, so held back to de-risk. Verified migration mappings already
+exist; the work is scoped, just risky, and needs a real-audio playback smoke
+test (decode + resample correctness) that CI cannot prove.
+- symphonia 0.5 -> 0.6: SampleBuffer removed (use GenericAudioBufferRef +
+  copy_to_vec_interleaved); DecoderOptions -> codecs::audio::AudioDecoderOptions;
+  Decoder -> AudioDecoder; get_codecs().make() -> make_audio_decoder();
+  track.codec_params is now Option<CodecParameters>, needs .audio()?;
+  probe.format() -> probe.probe() returns Box<dyn FormatReader>; Hint moved to
+  formats::probe. Touches noor-server playback/decode/mod.rs and
+  services/audio_analysis/scanner.rs, plus the noor-mix symphonia dev-dep.
+- rubato 0.16 -> 3.0: SincFixedIn -> Async::new_sinc(.., FixedAsync::Input);
+  pulls in new audioadapter / audioadapter_buffers crates; process() input is now
+  an Adapter and output is InterleavedOwned. Touches playback/decode/resample.rs
+  and the noor-mix rubato dep.
+- Spawned by: Dependabot #144 triage, deps/cargo-major-bumps branch.
+
 ### fix: cap score_genre_tags confidence at 1.0 and backfill existing rows
 
 789 track_genres rows (2%) carry confidence > 1.0 (max 2.27) because
