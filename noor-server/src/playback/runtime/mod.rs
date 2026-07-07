@@ -1769,6 +1769,20 @@ fn run_runtime_loop(
         let command = match command_rx.recv_timeout(STALL_WATCHDOG_TICK) {
             Ok(command) => command,
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Emit any warns the audio callback latched (underrun,
+                // rejected in-callback seek) - the callback itself must not
+                // touch tracing.
+                for engine in [
+                    state.engine.as_ref(),
+                    state.next_engine.as_ref(),
+                    state.fading_out_engine.as_ref(),
+                    state.drop_preview_engine.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    engine.shared.drain_deferred_rt_logs();
+                }
                 // Idle tick: nothing to dispatch. Check whether the audible deck
                 // has frozen on a hung TIDAL segment and, if so, force the queue
                 // forward (the audio callback can't, because a starved-but-not-

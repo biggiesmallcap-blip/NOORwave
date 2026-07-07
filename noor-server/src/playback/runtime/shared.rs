@@ -88,9 +88,14 @@ fn write_output_buffer<T>(
     //   * drain_into is O(data.len()) and data.len() == one CPAL callback
     //     buffer (~256-1024 samples), bounded copy.
     //   * Rare events inside this guard (started/finished/near-end/crossfade
-    //     event sends, underrun and seek-reject warn calls) each fire at
-    //     most once per buffer-instance per event class, so allocation
-    //     amortizes to zero across the steady-state callback rate.
+    //     event sends) each fire at most once per buffer-instance per event
+    //     class, so allocation amortizes to zero across the steady-state
+    //     callback rate. Underrun and seek-reject WARNS never log here: they
+    //     latch deferred_* atomics drained by the runtime loop's watchdog
+    //     tick, because tracing does I/O and an underrun fires exactly when
+    //     the system is already struggling. The two debug! lines below are
+    //     level-gated (an atomic interest check when disabled) and accepted
+    //     for dev diagnostics.
     //   * The off-thread growth telemetry (Task 13) is a load + conditional
     //     CAS, no allocation.
     // A future refactor that adds IO, an unbounded loop, or a per-callback
@@ -119,10 +124,13 @@ fn write_output_buffer<T>(
         // read_pos honest if it slips through.
         let offset = shared.position_offset_samples.load(Ordering::Relaxed);
         if seek_target < offset {
-            warn!(
-                "Playback seek target is below engine offset: track_id={}, generation={}, target_samples={}, offset_samples={}",
-                shared.track_id, shared.generation, seek_target, offset
-            );
+            // RT-safe deferred warn: latched here, logged from the runtime
+            // loop's watchdog tick (tracing does I/O; never from this thread).
+            shared
+                .deferred_seek_target
+                .store(seek_target, Ordering::Relaxed);
+            shared.deferred_seek_offset.store(offset, Ordering::Relaxed);
+            shared.deferred_seek_warn_kind.store(1, Ordering::Release);
         } else {
             let local_target = (seek_target - offset) as usize;
             if guard.seek_to(local_target) {
@@ -130,14 +138,14 @@ fn write_output_buffer<T>(
                     .position_samples
                     .store(seek_target, Ordering::Relaxed);
             } else {
-                warn!(
-                    "Playback seek target is not decoded yet: track_id={}, generation={}, target_samples={}, offset_samples={}, buffered_samples={}",
-                    shared.track_id,
-                    shared.generation,
-                    seek_target,
-                    offset,
-                    offset + guard.samples.len() as u64
-                );
+                shared
+                    .deferred_seek_target
+                    .store(seek_target, Ordering::Relaxed);
+                shared.deferred_seek_offset.store(offset, Ordering::Relaxed);
+                shared
+                    .deferred_seek_buffered
+                    .store(offset + guard.samples.len() as u64, Ordering::Relaxed);
+                shared.deferred_seek_warn_kind.store(2, Ordering::Release);
             }
         }
     }
@@ -212,17 +220,20 @@ fn write_output_buffer<T>(
 
     if guard.started && !guard.finished && written < data.len() && !guard.starved_notified {
         guard.starved_notified = true;
-        warn!(
-            "Playback buffer underrun: track_id={}, generation={}, requested={}, written={}, zero_filled={}, buffered_remaining={}, total_buffered={}, read_pos={}",
-            shared.track_id,
-            shared.generation,
-            data.len(),
-            written,
-            data.len().saturating_sub(written),
-            guard.samples.len().saturating_sub(guard.read_pos),
-            guard.samples.len(),
-            guard.read_pos
+        // RT-safe deferred warn: an underrun means the system is already
+        // struggling - the worst moment to do tracing I/O from the audio
+        // thread. Latch and let the runtime loop's watchdog tick log it.
+        shared
+            .deferred_underrun_requested
+            .store(data.len() as u64, Ordering::Relaxed);
+        shared
+            .deferred_underrun_written
+            .store(written as u64, Ordering::Relaxed);
+        shared.deferred_underrun_unread.store(
+            guard.samples.len().saturating_sub(guard.read_pos) as u64,
+            Ordering::Relaxed,
         );
+        shared.deferred_underrun_warn.store(true, Ordering::Release);
     }
 
     if guard.started && !guard.started_notified {
@@ -322,6 +333,20 @@ pub(crate) struct PlaybackSharedState {
     /// buffer crosses BUFFER_GROWTH_WARN_THRESHOLD_SAMPLES; the decoder
     /// thread observes this and emits the warn (off the real-time thread).
     pub(crate) growth_warned: AtomicBool,
+    /// Deferred RT diagnostics, same pattern as `growth_warned`: the audio
+    /// callback latches a flag plus payload atomics and the runtime loop's
+    /// watchdog tick emits the log lines off the real-time thread. Payloads
+    /// are Relaxed stores sequenced before the Release store on the flag.
+    pub(crate) deferred_underrun_warn: AtomicBool,
+    pub(crate) deferred_underrun_requested: AtomicU64,
+    pub(crate) deferred_underrun_written: AtomicU64,
+    pub(crate) deferred_underrun_unread: AtomicU64,
+    /// 0 = none, 1 = seek target below engine offset, 2 = seek target not
+    /// decoded yet.
+    pub(crate) deferred_seek_warn_kind: AtomicU32,
+    pub(crate) deferred_seek_target: AtomicU64,
+    pub(crate) deferred_seek_offset: AtomicU64,
+    pub(crate) deferred_seek_buffered: AtomicU64,
     pub(crate) buffer: Mutex<PlaybackBuffer>,
     pub(crate) command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
     pub(crate) volume_ctl: Arc<AtomicU32>,
@@ -395,6 +420,14 @@ impl PlaybackSharedState {
             paused: AtomicBool::new(false),
             stopped: Arc::new(AtomicBool::new(false)),
             growth_warned: AtomicBool::new(false),
+            deferred_underrun_warn: AtomicBool::new(false),
+            deferred_underrun_requested: AtomicU64::new(0),
+            deferred_underrun_written: AtomicU64::new(0),
+            deferred_underrun_unread: AtomicU64::new(0),
+            deferred_seek_warn_kind: AtomicU32::new(0),
+            deferred_seek_target: AtomicU64::new(0),
+            deferred_seek_offset: AtomicU64::new(0),
+            deferred_seek_buffered: AtomicU64::new(0),
             buffer: Mutex::new(PlaybackBuffer::new(prebuffer_samples)),
             command_tx,
             volume_ctl,
@@ -415,6 +448,40 @@ impl PlaybackSharedState {
             device_sample_rate,
             device_channels,
             target_sample_rate: AtomicU32::new(device_sample_rate),
+        }
+    }
+
+    /// Emit any diagnostics the audio callback latched (underrun, rejected
+    /// in-callback seek). Called from the runtime loop's watchdog tick -
+    /// never from the real-time thread, which only does the latching.
+    pub(crate) fn drain_deferred_rt_logs(&self) {
+        if self.deferred_underrun_warn.swap(false, Ordering::AcqRel) {
+            warn!(
+                "Playback buffer underrun: track_id={}, generation={}, requested={}, written={}, buffered_remaining={}",
+                self.track_id,
+                self.generation,
+                self.deferred_underrun_requested.load(Ordering::Relaxed),
+                self.deferred_underrun_written.load(Ordering::Relaxed),
+                self.deferred_underrun_unread.load(Ordering::Relaxed),
+            );
+        }
+        match self.deferred_seek_warn_kind.swap(0, Ordering::AcqRel) {
+            1 => warn!(
+                "Playback seek target is below engine offset: track_id={}, generation={}, target_samples={}, offset_samples={}",
+                self.track_id,
+                self.generation,
+                self.deferred_seek_target.load(Ordering::Relaxed),
+                self.deferred_seek_offset.load(Ordering::Relaxed),
+            ),
+            2 => warn!(
+                "Playback seek target is not decoded yet: track_id={}, generation={}, target_samples={}, offset_samples={}, buffered_samples={}",
+                self.track_id,
+                self.generation,
+                self.deferred_seek_target.load(Ordering::Relaxed),
+                self.deferred_seek_offset.load(Ordering::Relaxed),
+                self.deferred_seek_buffered.load(Ordering::Relaxed),
+            ),
+            _ => {}
         }
     }
 
@@ -886,6 +953,64 @@ mod tests {
             out,
             [1.0, 1.0, 1.0, 1.0],
             "armed but pre-fire-window active deck must play full-volume"
+        );
+    }
+
+    /// Pin the equal-power contract of the legacy (two-stream) crossfade: at
+    /// every block in the window the outgoing and incoming gains satisfy
+    /// in^2 + out^2 == 1, so the summed amplitude of two full-scale streams
+    /// never exceeds sqrt(2) (~+3 dB into the OS mixer) and there is no
+    /// mid-fade loudness dip. Guards against swapping the sine curves for
+    /// linear ramps (dip) or mismatched curves (clipping past sqrt(2)).
+    #[test]
+    fn crossfade_gains_are_equal_power_across_the_window() {
+        const XFADE: u64 = 4_800;
+        const BLOCK: usize = 480;
+
+        // Outgoing deck: fade-out branch (fadein_start stays u64::MAX);
+        // total == XFADE so the whole buffer plays inside the fade window.
+        let outgoing = test_shared_state();
+        outgoing.total_samples.store(XFADE, Ordering::Relaxed);
+        outgoing.crossfade_samples.store(XFADE, Ordering::Relaxed);
+        {
+            let mut buffer = outgoing.buffer.lock().expect("buffer");
+            buffer.samples = vec![1.0; XFADE as usize];
+        }
+
+        // Incoming deck: fade-in branch from position 0.
+        let incoming = test_shared_state();
+        incoming.crossfade_samples.store(XFADE, Ordering::Relaxed);
+        incoming.fadein_start_samples.store(0, Ordering::Relaxed);
+        {
+            let mut buffer = incoming.buffer.lock().expect("buffer");
+            buffer.samples = vec![1.0; XFADE as usize];
+        }
+
+        let (command_tx, _command_rx) = mpsc::channel();
+        let (event_tx, _event_rx) = tokio::sync::broadcast::channel(64);
+
+        let mut max_sum = 0.0_f32;
+        for _ in 0..(XFADE as usize / BLOCK) {
+            let mut out_block = [0.0_f32; BLOCK];
+            let mut in_block = [0.0_f32; BLOCK];
+            write_output_f32(&mut out_block, &outgoing, &command_tx, &event_tx);
+            write_output_f32(&mut in_block, &incoming, &command_tx, &event_tx);
+            for (out_sample, in_sample) in out_block.iter().zip(in_block.iter()) {
+                let power = out_sample * out_sample + in_sample * in_sample;
+                assert!(
+                    (power - 1.0).abs() < 0.05,
+                    "equal-power broken: out={out_sample} in={in_sample} power={power}"
+                );
+                max_sum = max_sum.max(out_sample + in_sample);
+            }
+        }
+        assert!(
+            max_sum <= std::f32::consts::SQRT_2 + 0.01,
+            "crossfade sum exceeded sqrt(2): {max_sum}"
+        );
+        assert!(
+            max_sum > 1.2,
+            "mid-window sum should approach sqrt(2); got {max_sum} - did the curves change?"
         );
     }
 
