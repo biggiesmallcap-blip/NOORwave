@@ -541,6 +541,44 @@ const EPHEMERAL_TIDAL_ROW_FILTER: &str = "track_id IS NULL
        AND source IN ('tidal_mix','tidal_album','tidal_playlist')
        AND tidal_id_hint IS NOT NULL";
 
+/// Re-insert an ephemeral TIDAL row at the FRONT of the live mix block so
+/// [`pop_next_ephemeral_tidal_track`] plays it next. Used by previous-track
+/// back-navigation: the row of the currently playing mix track was deleted
+/// when it started, and going back must not lose it from the continuation.
+/// With no mix rows left, appends at the queue end (the natural resume
+/// point). `fallback_source` is only used when no existing mix row supplies
+/// a source; it must be one of [`EPHEMERAL_TIDAL_SOURCES`].
+pub fn reinsert_ephemeral_front(
+    conn: &Connection,
+    insert: &EphemeralTidalInsert<'_>,
+    fallback_source: &str,
+) -> Result<()> {
+    let front: Option<(i32, String)> = conn
+        .query_row(
+            &format!(
+                "SELECT position, source FROM queue WHERE {EPHEMERAL_TIDAL_ROW_FILTER}
+                 ORDER BY position ASC, id ASC LIMIT 1"
+            ),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    match front {
+        Some((front_position, source)) => {
+            insert_ephemeral_tidal_tracks_after(
+                conn,
+                std::slice::from_ref(insert),
+                front_position - 1,
+                &source,
+            )?;
+        }
+        None => {
+            append_ephemeral_tidal_tracks(conn, std::slice::from_ref(insert), fallback_source)?;
+        }
+    }
+    Ok(())
+}
+
 /// Read all upcoming ephemeral TIDAL rows in play order without removing them.
 /// Used to pre-warm DJ transition profiles for the rest of the mix.
 pub fn peek_ephemeral_tidal_tracks(

@@ -6706,18 +6706,114 @@ async fn previous_track(
     // A live TIDAL mix is forward-only in the queue (played rows are
     // deleted), so queue-order stepping has nothing to step back to and
     // would corrupt the NULL mix anchor onto the next mix row. Play history
-    // is the only way back; without it, restart in place.
+    // is the only way back there.
     let ephemeral_active = {
         let state_guard = state.read().await;
         state_guard.ephemeral_tidal_track.is_some()
     };
     if ephemeral_active {
-        return restart_current_in_place(&state).await;
+        return previous_during_mix(&state).await;
     }
 
-    let playback_generation = bump_playback_generation(&state).await;
-    let previous_track_id = current_playback_track_id(&state).await;
-    let saved_anchor = save_playback_anchor(&state).await.map_err(|_| {
+    previous_via_persisted_queue(&state, live_position_ms).await
+}
+
+/// Preserve the currently playing mix track when navigating away from it:
+/// its queue row was deleted when it started, so re-insert it at the front
+/// of the mix continuation. "Next" - or a failed back-navigation replay
+/// falling through the continuation starter - then returns to it instead of
+/// losing it from the mix.
+async fn reinsert_current_ephemeral_at_mix_front(state: &SharedState) {
+    let (current, db) = {
+        let state_guard = state.read().await;
+        (
+            state_guard.ephemeral_tidal_track.clone(),
+            state_guard.db.clone(),
+        )
+    };
+    let Some(current) = current else { return };
+    let Some(pending) = pending_from_ephemeral_synthetic(&current) else {
+        return;
+    };
+    let result = db.with_conn(move |conn| {
+        let insert = queue::EphemeralTidalInsert {
+            tidal_id: pending.tidal_track_id,
+            title: &pending.title,
+            artist: pending.artist_name.as_deref(),
+            album_title: pending.album_title.as_deref(),
+            artwork_url: pending.artwork_url.as_deref(),
+            duration_ms: pending.duration_ms,
+            artist_tidal_id: pending.artist_tidal_id,
+            album_tidal_id: pending.album_tidal_id,
+        };
+        queue::reinsert_ephemeral_front(conn, &insert, "tidal_mix")
+    });
+    if let Err(error) = result {
+        tracing::warn!(
+            ?error,
+            "failed to re-insert the current mix track before back-navigation"
+        );
+    }
+}
+
+/// Previous during a live TIDAL mix. Mix rows are deleted as they play, so
+/// play history is the only way back. Without a usable entry this restarts
+/// in place, which was the only mix behavior before history existed.
+async fn previous_during_mix(
+    state: &SharedState,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let entry = {
+        let mut state_guard = state.write().await;
+        state_guard.play_history.pop_previous()
+    };
+    match entry {
+        Some(PlayHistoryEntry::Ephemeral(pending)) => {
+            reinsert_current_ephemeral_at_mix_front(state).await;
+            {
+                let mut state_guard = state.write().await;
+                state_guard.play_history.suppress_next_push();
+            }
+            // On failure the continuation starter walks forward through the
+            // remaining mix rows, the first of which is the re-inserted
+            // current track - so total failure degrades to a restart.
+            let started = start_ephemeral_continuation_with_retry(state, pending).await;
+            if !started {
+                let mut state_guard = state.write().await;
+                state_guard.play_history.clear_suppression();
+            }
+            let snapshot = build_live_playback_snapshot_json(state).await?;
+            {
+                let state_guard = state.read().await;
+                let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
+            }
+            Ok(Json(json!({
+                "state": snapshot.state,
+                "queue": snapshot.queue
+            })))
+        }
+        Some(entry @ PlayHistoryEntry::Persisted { .. }) => {
+            // Crossing the mix boundary backwards into the persisted queue.
+            // Keep the current mix track in the continuation, hand the entry
+            // back (the persisted path pops history itself), and run the
+            // normal previous flow, which also clears the mix markers.
+            reinsert_current_ephemeral_at_mix_front(state).await;
+            {
+                let mut state_guard = state.write().await;
+                state_guard.play_history.restore_popped(entry);
+            }
+            previous_via_persisted_queue(state, Some(0)).await
+        }
+        None => restart_current_in_place(state).await,
+    }
+}
+
+async fn previous_via_persisted_queue(
+    state: &SharedState,
+    live_position_ms: Option<i64>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let playback_generation = bump_playback_generation(state).await;
+    let previous_track_id = current_playback_track_id(state).await;
+    let saved_anchor = save_playback_anchor(state).await.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
@@ -6804,13 +6900,13 @@ async fn previous_track(
         // Head of the queue with no history while audio is live: restart via
         // seek. With no runtime (stopped), fall through to the switch path so
         // pressing previous still starts audio, as before.
-        return restart_current_in_place(&state).await;
+        return restart_current_in_place(state).await;
     }
     let mut snapshot = outcome.snapshot;
 
-    set_external_playback_track(&state, None).await;
+    set_external_playback_track(state, None).await;
     snapshot = resolve_or_skip_pending_current_previous(
-        &state,
+        state,
         snapshot,
         playback_generation,
         "manual_previous_track",
@@ -6833,14 +6929,14 @@ async fn previous_track(
         )
     })?;
 
-    if !playback_generation_is_current(&state, playback_generation).await {
-        return current_playback_snapshot_json(&state).await;
+    if !playback_generation_is_current(state, playback_generation).await {
+        return current_playback_snapshot_json(state).await;
     }
 
-    record_transition_if_changed(&state, previous_track_id, &snapshot, "user", false).await;
+    record_transition_if_changed(state, previous_track_id, &snapshot, "user", false).await;
 
     sync_session_after_snapshot(
-        &state,
+        state,
         &snapshot,
         Some(player::ListenSessionEndReason::Replaced),
     )
@@ -6849,10 +6945,10 @@ async fn previous_track(
     let play_track = snapshot.state.current_track.as_ref();
 
     if let Some(track) = play_track {
-        let user_quality = current_user_audio_quality(&state).await;
+        let user_quality = current_user_audio_quality(state).await;
         let Some(stream_request) = player::build_tidal_stream_request(track, user_quality.clone())
         else {
-            restore_after_previous_failure(&state, saved_anchor, popped_entry, playback_generation)
+            restore_after_previous_failure(state, saved_anchor, popped_entry, playback_generation)
                 .await;
             return Err((
                 StatusCode::NOT_IMPLEMENTED,
@@ -6863,15 +6959,14 @@ async fn previous_track(
                 })),
             ));
         };
-        let stream_info = match resolve_tidal_playback_stream(&state, track, &stream_request).await
-        {
+        let stream_info = match resolve_tidal_playback_stream(state, track, &stream_request).await {
             Ok(info) => info,
             Err(error) => {
                 // The anchor moved but the audio did not: roll back so state
                 // and audio agree instead of leaving the DB pointing at a
                 // track the runtime never switched to.
                 restore_after_previous_failure(
-                    &state,
+                    state,
                     saved_anchor,
                     popped_entry,
                     playback_generation,
@@ -6884,14 +6979,14 @@ async fn previous_track(
                 ));
             }
         };
-        if !playback_generation_is_current(&state, playback_generation).await {
-            return current_playback_snapshot_json(&state).await;
+        if !playback_generation_is_current(state, playback_generation).await {
+            return current_playback_snapshot_json(state).await;
         }
-        let runtime_handle = match ensure_playback_runtime_for_track(&state, track).await {
+        let runtime_handle = match ensure_playback_runtime_for_track(state, track).await {
             Ok(handle) => handle,
             Err(_) => {
                 restore_after_previous_failure(
-                    &state,
+                    state,
                     saved_anchor,
                     popped_entry,
                     playback_generation,
@@ -6910,7 +7005,7 @@ async fn previous_track(
         let job = player::build_playback_preparation(
             track,
             Some(&stream_info),
-            effective_crossfade_ms(&state, snapshot.state.crossfade_ms).await,
+            effective_crossfade_ms(state, snapshot.state.crossfade_ms).await,
             user_quality,
         )
         .with_generation(playback_generation);
@@ -6924,10 +7019,10 @@ async fn previous_track(
                 .suppress_push_for_generation(playback_generation);
         }
         if let Err(error) = runtime_handle.switch_to(job) {
-            restore_after_previous_failure(&state, saved_anchor, popped_entry, playback_generation)
+            restore_after_previous_failure(state, saved_anchor, popped_entry, playback_generation)
                 .await;
             let message = format!("Failed to switch host audio playback: {error}");
-            report_playback_failure(&state, &message);
+            report_playback_failure(state, &message);
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
@@ -6957,7 +7052,7 @@ async fn previous_track(
     }
     let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
 
-    let snapshot = overlay_snapshot_with_external_track(&state, snapshot).await;
+    let snapshot = overlay_snapshot_with_external_track(state, snapshot).await;
     Ok(Json(json!({
         "state": snapshot.state,
         "queue": snapshot.queue
@@ -9933,6 +10028,26 @@ fn build_ephemeral_tidal_stream_request(
     tidal_stream::StreamRequest::new(tidal_track_id, requested_tidal_quality(user_quality, None))
 }
 
+/// Inverse of [`build_ephemeral_synthetic_track`]: rebuild the pending
+/// payload from a live synthetic now-playing track so play history can
+/// replay it after its queue row is gone. None for tracks without a TIDAL
+/// id (nothing to stream ephemerally).
+fn pending_from_ephemeral_synthetic(
+    track: &crate::db::models::Track,
+) -> Option<crate::PendingEphemeralTidalTrack> {
+    let tidal_track_id = track.tidal_id?;
+    Some(crate::PendingEphemeralTidalTrack {
+        tidal_track_id,
+        title: track.title.clone(),
+        artist_name: track.artist_name.clone(),
+        album_title: track.album_title.clone(),
+        artwork_url: track.artwork_url.clone(),
+        duration_ms: track.duration_ms,
+        artist_tidal_id: track.artist_tidal_id,
+        album_tidal_id: track.album_tidal_id,
+    })
+}
+
 fn build_ephemeral_synthetic_track(
     track: &crate::PendingEphemeralTidalTrack,
     stream_info: &tidal_stream::StreamInfo,
@@ -10160,6 +10275,16 @@ async fn start_ephemeral_tidal_playback(
             Json(json!({ "error": message })),
         )
     })?;
+    {
+        // Feed play history with the full pending payload: the queue row is
+        // deleted as a mix track plays, so this is the only durable record
+        // that lets previous-track replay it.
+        let mut state_guard = state.write().await;
+        state_guard.play_history.note_started(
+            PlayHistoryEntry::Ephemeral(track.clone()),
+            playback_generation,
+        );
+    }
     if dj_engine_enabled {
         let lookahead = {
             let state_guard = state.read().await;
@@ -11471,6 +11596,13 @@ async fn try_adopt_prepared_ephemeral_tidal_next(
         if let Some(info) = state_guard.playback_runtime_info.as_mut() {
             info.active_track_id = Some(prepared.synthetic_track.id);
             info.last_error = None;
+        }
+        // Feed play history so previous-track can replay this mix track
+        // after its queue row (just popped above) is gone.
+        if let Some(pending_entry) = pending_from_ephemeral_synthetic(&prepared.synthetic_track) {
+            state_guard
+                .play_history
+                .note_started(PlayHistoryEntry::Ephemeral(pending_entry), generation);
         }
         let _ = state_guard.event_tx.send(AppEvent::TrackChanged {
             track_id: prepared.synthetic_track.id,
