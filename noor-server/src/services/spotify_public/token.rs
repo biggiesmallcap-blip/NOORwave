@@ -6,7 +6,7 @@
 //! `accessTokenExpirationTimestampMs`.
 
 use anyhow::{Context, Result};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use reqwest::{
     Client, StatusCode,
     header::{DATE, HeaderMap},

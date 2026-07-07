@@ -1957,7 +1957,7 @@ fn matches_preferred_genres(genres: &[String], taste: &TasteVector, seed: &SeedC
 }
 
 fn weighted_session_shuffle(entries: &[ScoredTrack]) -> Vec<Track> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     weighted_session_shuffle_with_rng(entries, &mut rng)
 }
 
@@ -1970,7 +1970,7 @@ fn weighted_session_shuffle_with_rng<R: rand::Rng + ?Sized>(
         .iter()
         .map(|entry| {
             let weight = profile.weight_for(&entry.track) * entry.score.max(0.05);
-            let uniform = rng.gen_range(f64::EPSILON..1.0);
+            let uniform = rng.random_range(f64::EPSILON..1.0);
             let key = -uniform.ln() / weight;
             (key, entry.track.clone())
         })
