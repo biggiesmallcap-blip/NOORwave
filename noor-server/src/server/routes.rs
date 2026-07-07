@@ -1505,13 +1505,13 @@ async fn get_radio_tracks(
     let temperature = creativity * 0.5; // 0.0 = deterministic, 0.5 = max noise
 
     use rand::Rng;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     let mut scored: Vec<_> = similar
         .into_iter()
         .map(|track| {
             // Add noise proportional to creativity
-            let noise = rng.gen_range(0.0..=temperature);
+            let noise = rng.random_range(0.0..=temperature);
             let adjusted_score = track.similarity_score * (1.0 - temperature) + noise;
             (track, adjusted_score)
         })

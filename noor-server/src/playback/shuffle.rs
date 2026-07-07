@@ -2,7 +2,7 @@ use crate::db::models::Track;
 use chrono::Utc;
 use rand::rngs::{OsRng, StdRng};
 use rand::seq::SliceRandom;
-use rand::{Rng, RngCore, SeedableRng};
+use rand::{Rng, SeedableRng, TryRngCore};
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 
@@ -12,7 +12,8 @@ const POSITIVE_I64_MASK: u64 = i64::MAX as u64;
 
 pub fn generate_shuffle_seed() -> i64 {
     loop {
-        let seed = OsRng.next_u64() & POSITIVE_I64_MASK;
+        // rand 0.9: OsRng is fallible (TryRngCore), no longer RngCore.
+        let seed = OsRng.try_next_u64().expect("OS RNG unavailable") & POSITIVE_I64_MASK;
         if seed > 0 {
             return seed as i64;
         }
@@ -117,7 +118,7 @@ struct Bucket {
 }
 
 pub fn true_shuffle(tracks: &[Track]) -> Vec<Track> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     true_shuffle_with_rng(tracks, &mut rng)
 }
 
@@ -137,7 +138,7 @@ pub fn weighted_shuffle_with_rng<R: Rng + ?Sized>(
         .cloned()
         .map(|track| {
             let weight = profile.weight_for(&track);
-            let uniform = rng.gen_range(f64::EPSILON..1.0);
+            let uniform = rng.random_range(f64::EPSILON..1.0);
             let key = -uniform.ln() / weight;
             (key, track)
         })
@@ -156,7 +157,7 @@ pub fn artist_spread_shuffle_with_rng<R: Rng + ?Sized>(
 }
 
 pub fn genre_shuffle(tracks: &[Track], track_genres: &HashMap<i64, Vec<String>>) -> Vec<Track> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     genre_shuffle_with_rng(tracks, track_genres, &mut rng)
 }
 
@@ -179,7 +180,7 @@ pub fn genre_shuffle_with_rng<R: Rng + ?Sized>(
 
 fn fisher_yates_shuffle<R: Rng + ?Sized>(tracks: &mut [Track], rng: &mut R) {
     for index in (1..tracks.len()).rev() {
-        let swap_index = rng.gen_range(0..=index);
+        let swap_index = rng.random_range(0..=index);
         tracks.swap(index, swap_index);
     }
 }
@@ -291,7 +292,7 @@ fn pick_bucket_index<R: Rng + ?Sized>(
         return fallback;
     }
 
-    let mut threshold = rng.gen_range(0..total_weight);
+    let mut threshold = rng.random_range(0..total_weight);
     for (index, weight) in &eligible {
         if threshold < *weight {
             return Some(*index);

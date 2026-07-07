@@ -512,7 +512,7 @@ pub fn set_onboarding_complete(conn: &Connection) -> Result<()> {
 fn generate_readable_token() -> String {
     use rand::RngCore;
     let mut bytes = [0u8; 4];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     let n = u32::from_le_bytes(bytes) % 1_000_000;
     format!("{:06}", n)
 }
@@ -1850,7 +1850,8 @@ pub fn get_genre_summary(conn: &Connection, genre_id: i64) -> Result<Option<Genr
             parent_id: row.get(3)?,
             direct_track_count: row.get(4)?,
             total_track_count: row.get(5)?,
-            child_count: row.get(6)?,
+            // rusqlite 0.40 dropped `FromSql for usize`; read as i64 and cast.
+            child_count: row.get::<_, i64>(6)? as usize,
         }))
     } else {
         Ok(None)
