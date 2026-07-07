@@ -99,7 +99,10 @@ impl Planner {
         if bold_filter_candidate {
             return TransitionTemplate::FilterSweep;
         }
-        TransitionTemplate::FilterSweep
+        // Reaching here means the pair cannot be beatmatched (delta above the
+        // 3% nudge band) and the intent is not a phrase-aware bold sweep; a
+        // full blend of two un-synced decks must degrade to a safe crossfade.
+        TransitionTemplate::SafeCrossfade
     }
 
     pub fn plan(outgoing: &DjProfile, incoming: &DjProfile, policy: &Policy) -> TransitionProgram {
@@ -127,9 +130,15 @@ fn build_program(
     let channels = 2;
     let bpm = outgoing.bpm.or(incoming.bpm).unwrap_or(120.0).max(1.0);
     let bar_samples = ((60.0 / bpm) * 4.0 * sample_rate as f32) as u64;
-    let duration_samples = duration_samples(template, policy, bar_samples);
+    let duration_samples = duration_samples(template, policy, bar_samples, sample_rate);
     let swap_start = duration_samples / 2;
     let fade_start = swap_start;
+    let nudge_rate = if matches!(template, TransitionTemplate::SlamCut) {
+        None
+    } else {
+        small_tempo_nudge_rate(outgoing, incoming)
+            .filter(|rate| (rate - 1.0).abs() > PLAYBACK_RATE_EPSILON)
+    };
     let mut program = TransitionProgram {
         tier: tier_for_template(template),
         template: template_name(template).to_string(),
@@ -151,7 +160,12 @@ fn build_program(
         },
     };
     program.deck_b_start_frame = if matches!(template, TransitionTemplate::DropTease16) {
-        incoming_drop_tease_start_frame(incoming, swap_start, sample_rate)
+        incoming_drop_tease_start_frame(
+            incoming,
+            swap_start,
+            sample_rate,
+            nudge_rate.unwrap_or(1.0),
+        )
     } else {
         incoming_sync_start_frame(incoming, sample_rate)
     };
@@ -180,10 +194,7 @@ fn build_program(
             .extend(filter_sweep_eq_wash(duration_samples));
     }
 
-    if !matches!(template, TransitionTemplate::SlamCut)
-        && let Some(rate) = small_tempo_nudge_rate(outgoing, incoming)
-        && (rate - 1.0).abs() > PLAYBACK_RATE_EPSILON
-    {
+    if let Some(rate) = nudge_rate {
         program.automation.push(AutomationEvent {
             param: Param::PlaybackRate(DeckId::B),
             start_sample: 0,
@@ -237,7 +248,16 @@ fn drop_tease_candidate_ready(outgoing: &DjProfile, incoming: &DjProfile, policy
     let Some(outgoing_bpm) = outgoing.bpm else {
         return false;
     };
-    let min_drop_lead_frames = bar_samples_for_bpm(outgoing_bpm, PLANNER_SAMPLE_RATE) * 8;
+    // The tease backs deck B off by 8 bars of CONSUMED frames; when the nudge
+    // plays deck B faster than 1.0 the drop needs proportionally more lead.
+    let min_drop_lead_frames = deck_frames_consumed(
+        bar_samples_for_bpm(outgoing_bpm, PLANNER_SAMPLE_RATE) * 8,
+        if (rate - 1.0).abs() > PLAYBACK_RATE_EPSILON {
+            rate
+        } else {
+            1.0
+        },
+    );
     first_valid_drop_frame(incoming, PLANNER_SAMPLE_RATE)
         .is_some_and(|drop_frame| drop_frame >= min_drop_lead_frames)
 }
@@ -261,10 +281,24 @@ fn incoming_drop_tease_start_frame(
     incoming: &DjProfile,
     drop_alignment_sample: u64,
     sample_rate: u32,
+    playback_rate: f32,
 ) -> u64 {
+    // Deck B consumes `playback_rate` source frames per output frame, so the
+    // drop lands on the overlay midpoint only if the start frame backs off by
+    // the CONSUMED frame count, not the output frame count.
+    let consumed = deck_frames_consumed(drop_alignment_sample, playback_rate);
     first_valid_drop_frame(incoming, sample_rate)
-        .map(|drop_frame| drop_frame.saturating_sub(drop_alignment_sample))
+        .map(|drop_frame| drop_frame.saturating_sub(consumed))
         .unwrap_or_else(|| incoming_sync_start_frame(incoming, sample_rate))
+}
+
+fn deck_frames_consumed(output_frames: u64, playback_rate: f32) -> u64 {
+    let rate = if playback_rate.is_finite() && playback_rate > 0.0 {
+        f64::from(playback_rate)
+    } else {
+        1.0
+    };
+    ((output_frames as f64) * rate).round() as u64
 }
 
 fn first_valid_drop_frame(incoming: &DjProfile, sample_rate: u32) -> Option<u64> {
@@ -501,8 +535,9 @@ pub fn drop_preview_16_program(
     let swap_start = duration_samples / 2;
     let drop_frame = first_valid_preview_drop_frame(incoming, sample_rate)?;
     let rate = drop_preview_autosync_rate(outgoing, incoming)?;
+    let rate_active = (rate - 1.0).abs() > PLAYBACK_RATE_EPSILON;
     let mut automation = drop_preview_overlay_automation(duration_samples);
-    if (rate - 1.0).abs() > PLAYBACK_RATE_EPSILON {
+    if rate_active {
         automation.push(AutomationEvent {
             param: Param::PlaybackRate(DeckId::B),
             start_sample: 0,
@@ -512,6 +547,7 @@ pub fn drop_preview_16_program(
             curve: Curve::Linear,
         });
     }
+    let swap_consumed = deck_frames_consumed(swap_start, if rate_active { rate } else { 1.0 });
     Some(TransitionProgram {
         tier: Tier::FullBlend,
         template: "DropPreview16".to_string(),
@@ -519,7 +555,7 @@ pub fn drop_preview_16_program(
         sample_rate,
         channels,
         deck_a_start_frame: 0,
-        deck_b_start_frame: drop_frame.saturating_sub(swap_start),
+        deck_b_start_frame: drop_frame.saturating_sub(swap_consumed),
         sync_start: 0,
         intro_start: 0,
         swap_start,
@@ -542,7 +578,12 @@ fn drop_preview_autosync_rate(outgoing: &DjProfile, incoming: &DjProfile) -> Opt
         .then_some(rate)
 }
 
-fn duration_samples(template: TransitionTemplate, policy: &Policy, bar_samples: u64) -> u64 {
+fn duration_samples(
+    template: TransitionTemplate,
+    policy: &Policy,
+    bar_samples: u64,
+    sample_rate: u32,
+) -> u64 {
     match template {
         TransitionTemplate::BassSwap32 => bar_samples * 32,
         TransitionTemplate::BassSwap16 => bar_samples * 16,
@@ -551,7 +592,7 @@ fn duration_samples(template: TransitionTemplate, policy: &Policy, bar_samples: 
         TransitionTemplate::DropTease16 => bar_samples * 16,
         TransitionTemplate::SlamCut => bar_samples.max(1),
         TransitionTemplate::SafeCrossfade => {
-            u64::from(policy.default_crossfade_ms) * 48_000 / 1_000
+            u64::from(policy.default_crossfade_ms) * u64::from(sample_rate.max(1)) / 1_000
         }
     }
     .max(1)
@@ -581,6 +622,10 @@ fn template_name(template: TransitionTemplate) -> &'static str {
 }
 
 fn deck_gain_automation(duration_samples: u64) -> Vec<AutomationEvent> {
+    // A follows cos(t*pi/2) (EqualPowerOut on a 1->0 event) while B follows
+    // sin(t*pi/2) (EqualPowerIn on a 0->1 event): A^2 + B^2 == 1 across the
+    // whole fade. Pairing both sides on EqualPowerIn dips the summed energy
+    // by ~2.3 dB at the midpoint.
     vec![
         AutomationEvent {
             param: Param::DeckGain(DeckId::A),
@@ -588,7 +633,7 @@ fn deck_gain_automation(duration_samples: u64) -> Vec<AutomationEvent> {
             end_sample: duration_samples,
             from: 1.0,
             to: 0.0,
-            curve: Curve::EqualPowerIn,
+            curve: Curve::EqualPowerOut,
         },
         AutomationEvent {
             param: Param::DeckGain(DeckId::B),
@@ -636,7 +681,7 @@ fn drop_tease_overlay_automation(duration_samples: u64) -> Vec<AutomationEvent> 
             end_sample,
             from: 1.0,
             to: 0.0,
-            curve: Curve::EqualPowerIn,
+            curve: Curve::EqualPowerOut,
         },
     ]
 }
@@ -676,7 +721,7 @@ fn drop_preview_overlay_automation(duration_samples: u64) -> Vec<AutomationEvent
             end_sample,
             from: DROP_PREVIEW_GAIN,
             to: 0.0,
-            curve: Curve::EqualPowerIn,
+            curve: Curve::EqualPowerOut,
         },
     ]
 }
@@ -1104,6 +1149,82 @@ mod tests {
             ),
             TransitionTemplate::LongHarmonicBlend
         );
+    }
+
+    #[test]
+    fn choose_template_balanced_unsyncable_tempo_uses_safe_crossfade() {
+        // 5% delta: too far for the 3% nudge, too close for a slam cut. A
+        // full blend would run un-beatmatched, so balanced intent must land
+        // on the safe crossfade, not a filter sweep.
+        assert_eq!(
+            Planner::choose_template(
+                &profile(Some(120.0), Some("8A"), 4),
+                &profile(Some(126.0), Some("8A"), 4),
+                &Policy::default()
+            ),
+            TransitionTemplate::SafeCrossfade
+        );
+    }
+
+    #[test]
+    fn choose_template_bold_unsyncable_tempo_keeps_filter_sweep() {
+        let policy = Policy {
+            mix_intent: MixIntent::Bold,
+            ..Policy::default()
+        };
+        assert_eq!(
+            Planner::choose_template(
+                &profile(Some(120.0), Some("8A"), 4),
+                &profile(Some(126.0), Some("8A"), 4),
+                &policy
+            ),
+            TransitionTemplate::FilterSweep
+        );
+    }
+
+    #[test]
+    fn deck_gain_automation_is_an_equal_power_pair() {
+        let policy = Policy {
+            safety_template_override: Some(TransitionTemplate::SafeCrossfade),
+            ..Policy::default()
+        };
+        let program = Planner::plan(
+            &profile(Some(120.0), Some("8A"), 4),
+            &profile(Some(120.0), Some("8A"), 4),
+            &policy,
+        );
+
+        let fade_out = program
+            .automation
+            .iter()
+            .find(|event| event.param == Param::DeckGain(DeckId::A))
+            .expect("deck A fade");
+        let fade_in = program
+            .automation
+            .iter()
+            .find(|event| event.param == Param::DeckGain(DeckId::B))
+            .expect("deck B fade");
+        assert_eq!(fade_out.curve, Curve::EqualPowerOut);
+        assert_eq!(fade_in.curve, Curve::EqualPowerIn);
+
+        for step in [1_u64, 2, 3] {
+            let sample = program.resolve_at * step / 4;
+            let gain_a = crate::automation::param_value_at(
+                &program.automation,
+                Param::DeckGain(DeckId::A),
+                sample,
+            );
+            let gain_b = crate::automation::param_value_at(
+                &program.automation,
+                Param::DeckGain(DeckId::B),
+                sample,
+            );
+            let energy = gain_a * gain_a + gain_b * gain_b;
+            assert!(
+                (energy - 1.0).abs() < 1e-4,
+                "energy at {step}/4 was {energy}"
+            );
+        }
     }
 
     #[test]
@@ -1689,7 +1810,13 @@ mod tests {
             Some("profile_drop_candidate")
         );
         assert_eq!(program.swap_start, 768_000);
-        assert_eq!(program.deck_b_start_frame, 768_000);
+        // Deck B plays at the 120/121 nudge rate, so by the swap point it has
+        // consumed swap_start * rate source frames; the start frame must back
+        // off by exactly that amount for the drop to land on the midpoint.
+        let rate = f64::from(120.0_f32 / 121.0_f32);
+        let consumed = (768_000.0_f64 * rate).round() as u64;
+        assert_eq!(program.deck_b_start_frame + consumed, 32 * 48_000);
+        assert!(program.deck_b_start_frame > 768_000);
     }
 
     #[test]
@@ -1707,6 +1834,23 @@ mod tests {
 
         assert_eq!(program.template, "DropTease16");
         assert_eq!(program.drop_source.as_deref(), Some("manual_drop_cue"));
+        let rate = f64::from(120.0_f32 / 121.0_f32);
+        let consumed = (768_000.0_f64 * rate).round() as u64;
+        assert_eq!(program.deck_b_start_frame + consumed, 32 * 48_000);
+    }
+
+    #[test]
+    fn drop_tease_alignment_is_exact_without_tempo_nudge() {
+        let policy = Policy {
+            safety_template_override: Some(TransitionTemplate::DropTease16),
+            ..Policy::default()
+        };
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
+        let mut incoming = profile(Some(120.0), Some("8A"), 4);
+        incoming.drop_seconds = vec![32.0];
+
+        let program = Planner::plan(&outgoing, &incoming, &policy);
+
         assert_eq!(program.deck_b_start_frame, 768_000);
     }
 
@@ -1835,6 +1979,20 @@ mod tests {
 
         assert!((rate.from - 120.0 / 122.0).abs() < 0.0001);
         assert_eq!(rate.from, rate.to);
+    }
+
+    #[test]
+    fn drop_preview_alignment_accounts_for_playback_rate() {
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
+        let mut incoming = profile(Some(122.0), Some("8A"), 4);
+        incoming.drop_seconds = vec![32.0];
+
+        let program =
+            drop_preview_16_program(48_000, 2, 16_000, &outgoing, &incoming).expect("drop preview");
+
+        let rate = f64::from(120.0_f32 / 122.0_f32);
+        let consumed = (384_000.0_f64 * rate).round() as u64;
+        assert_eq!(program.deck_b_start_frame + consumed, 32 * 48_000);
     }
 
     #[test]

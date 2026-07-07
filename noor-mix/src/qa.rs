@@ -200,7 +200,7 @@ mod tests {
                     end_sample: duration_samples,
                     from: 1.0,
                     to: 0.0,
-                    curve: Curve::EqualPowerIn,
+                    curve: Curve::EqualPowerOut,
                 },
                 AutomationEvent {
                     param: Param::DeckGain(DeckId::B),
@@ -237,6 +237,21 @@ mod tests {
         assert!(report.passed(), "{report:?}");
         assert!(report.peak <= 1.0);
         assert!(report.deterministic);
+    }
+
+    #[test]
+    fn bass_swap_qa_render_exercises_low_handoff_and_passes() {
+        let sample_rate = 48_000;
+        let program = crate::planner::bass_swap_16_program(sample_rate, 1, 2_000);
+        let frames = program.resolve_at as usize + sample_rate as usize;
+        let report = render_transition_qa(
+            &program,
+            &sine(80.0, frames, sample_rate),
+            &sine(110.0, frames, sample_rate),
+        )
+        .expect("qa render");
+
+        assert!(report.passed(), "{report:?}");
     }
 
     #[test]

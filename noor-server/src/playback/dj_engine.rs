@@ -89,12 +89,25 @@ impl DjEngine {
             if safety.force_safe_crossfade {
                 policy.safety_template_override = Some(TransitionTemplate::SafeCrossfade);
             }
-            let mut program = Planner::plan(&outgoing, &incoming, &policy);
-            program.sample_rate = sample_rate.max(1);
+            // The planner emits frame positions at its fixed planning rate;
+            // rescale so every frame field is denominated in the rate the
+            // renderer decks actually use instead of just relabeling it.
+            let mut program =
+                Planner::plan(&outgoing, &incoming, &policy).rescaled_to(sample_rate.max(1));
             program.channels = channels.max(1);
-            if program.validate().is_err() {
+            if let Err(error) = noor_mix::planner::safety::validate_audio_safety(
+                &program,
+                &noor_mix::planner::safety::AudioSafetyPolicy::default(),
+            ) {
+                let reason = match error {
+                    noor_mix::program::ProgramError::PlaybackRateOutOfRange
+                    | noor_mix::program::ProgramError::LowBandOverlapExceeded => {
+                        "audio_safety_rejected"
+                    }
+                    _ => "program_invalid",
+                };
                 let program = safe_crossfade_program(sample_rate, channels, policy);
-                return Ok(Some(plan_from_program(program, Some("program_invalid"))));
+                return Ok(Some(plan_from_program(program, Some(reason))));
             }
             Ok(Some(plan_from_program(program, safety.fallback_reason)))
         })
@@ -244,8 +257,7 @@ pub(crate) fn safe_crossfade_program(
 ) -> TransitionProgram {
     policy.safety_template_override = Some(TransitionTemplate::SafeCrossfade);
     let profile = fallback_profile();
-    let mut program = Planner::plan(&profile, &profile, &policy);
-    program.sample_rate = sample_rate.max(1);
+    let mut program = Planner::plan(&profile, &profile, &policy).rescaled_to(sample_rate.max(1));
     program.channels = channels.max(1);
     program
 }
@@ -335,10 +347,46 @@ fn apply_correction(profile: &mut DjProfile, correction: Option<&AudioDjProfileC
     {
         profile.bpm = profile.bpm.map(|bpm| bpm * multiplier as f32);
     }
+    // Downbeat nudge: relabel which beats open a bar by shifting the downbeat
+    // grid a whole number of (corrected-bpm) beats. Downbeats shifted before
+    // track start are dropped; on missing tempo data the nudge is a no-op.
+    if let Some(offset_beats) = correction.downbeat_offset_beats
+        && offset_beats != 0
+        && let Some(beat_seconds) = beat_interval_seconds(profile)
+    {
+        let shift = offset_beats as f32 * beat_seconds;
+        profile.downbeat_seconds = profile
+            .downbeat_seconds
+            .iter()
+            .map(|seconds| seconds + shift)
+            .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+            .collect();
+    }
+    // Phrase nudge: shift phrase boundaries by whole bars, dropping any that
+    // move before bar zero.
+    if let Some(offset_bars) = correction.phrase_offset_bars
+        && offset_bars != 0
+    {
+        profile.phrase_bar_indices = profile
+            .phrase_bar_indices
+            .iter()
+            .filter_map(|&bar| {
+                let shifted = i64::from(bar) + offset_bars;
+                u32::try_from(shifted).ok()
+            })
+            .collect();
+    }
     let manual_drop_seconds = decode_f32_blob(&correction.manual_drop_blob).unwrap_or_default();
     if !manual_drop_seconds.is_empty() {
         profile.manual_drop_seconds = manual_drop_seconds;
     }
+}
+
+fn beat_interval_seconds(profile: &DjProfile) -> Option<f32> {
+    if let Some(bpm) = profile.bpm.filter(|bpm| bpm.is_finite() && *bpm > 0.0) {
+        return Some(60.0 / bpm);
+    }
+    median_beat_interval(&profile.beat_grid_seconds)
 }
 
 fn profile_from_row(conn: &Connection, row: &AudioDjProfileRow) -> Result<DjProfile> {
@@ -420,14 +468,32 @@ fn average_energy_contour(blob: &[u8]) -> Option<f32> {
     (count > 0).then_some(sum / count as f32)
 }
 
+// Tempo from the beat grid via the MEDIAN inter-beat interval. The previous
+// mean (span / count) let a single undetected beat or a silence gap stretch
+// the average and skew the whole estimate; the median tolerates sparse and
+// irregular grids as long as most intervals are genuine.
 fn estimate_bpm(beats: &[f32]) -> Option<f32> {
-    let first = *beats.first()?;
-    let last = *beats.last()?;
-    let intervals = beats.len().saturating_sub(1);
-    if intervals == 0 || last <= first {
+    let median = median_beat_interval(beats)?;
+    Some(60.0 / median)
+}
+
+fn median_beat_interval(beats: &[f32]) -> Option<f32> {
+    let mut intervals = beats
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .filter(|delta| delta.is_finite() && *delta > 0.0)
+        .collect::<Vec<_>>();
+    if intervals.is_empty() {
         return None;
     }
-    Some(60.0 / ((last - first) / intervals as f32))
+    intervals.sort_by(f32::total_cmp);
+    let middle = intervals.len() / 2;
+    let median = if intervals.len() % 2 == 0 {
+        (intervals[middle - 1] + intervals[middle]) / 2.0
+    } else {
+        intervals[middle]
+    };
+    (median.is_finite() && median > 0.0).then_some(median)
 }
 
 #[cfg(test)]
@@ -602,6 +668,33 @@ mod tests {
             Ok(())
         })
         .expect("phrase-deep profiles");
+    }
+
+    fn seed_offset_correction(
+        db: &Database,
+        key: AudioDjProfileKey,
+        downbeat_offset_beats: Option<i64>,
+        phrase_offset_bars: Option<i64>,
+    ) {
+        db.with_conn(|conn| {
+            queries::upsert_audio_dj_profile_correction(
+                conn,
+                &AudioDjProfileCorrectionRow {
+                    media_ref_kind: key.media_ref_kind,
+                    media_ref_id: key.media_ref_id,
+                    bpm_multiplier: None,
+                    downbeat_offset_beats,
+                    phrase_offset_bars,
+                    safe_crossfade_only: false,
+                    transition_speed_bias: None,
+                    manual_drop_blob: Vec::new(),
+                    notes: None,
+                    created_at: "now".to_string(),
+                    updated_at: "now".to_string(),
+                },
+            )
+        })
+        .expect("seed offset correction");
     }
 
     fn seed_manual_drop_correction(db: &Database, key: AudioDjProfileKey, drop_seconds: &[f32]) {
@@ -808,7 +901,10 @@ mod tests {
     }
 
     #[test]
-    fn compatible_profiles_can_plan_filter_sweep() {
+    fn balanced_unsyncable_tempo_delta_plans_safe_crossfade() {
+        // 5% tempo delta cannot be beatmatched inside the 3% nudge band, so
+        // balanced intent must not full-blend two un-synced decks; only bold
+        // intent may pick the FilterSweep here (covered above).
         let db = db();
         enable(&db);
         seed_profile(&db, "library_track", 1, 0.9);
@@ -840,7 +936,7 @@ mod tests {
         )
         .expect("program");
 
-        assert_eq!(program.template, "FilterSweep");
+        assert_eq!(program.template, "SafeCrossfade");
     }
 
     #[test]
@@ -1086,6 +1182,119 @@ mod tests {
             })
             .expect("count");
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn estimate_bpm_uses_median_interval_across_grid_gaps() {
+        // 120 BPM grid with one undetected beat; the old span/count mean
+        // would report ~103 BPM.
+        let beats = [0.0, 0.5, 1.0, 2.0, 2.5, 3.0, 3.5];
+        let bpm = estimate_bpm(&beats).expect("bpm");
+        assert!((bpm - 120.0).abs() < 0.01, "estimated {bpm}");
+    }
+
+    #[test]
+    fn estimate_bpm_tolerates_local_jitter() {
+        let beats = [0.0, 0.49, 1.0, 1.51, 2.0, 2.5];
+        let bpm = estimate_bpm(&beats).expect("bpm");
+        assert!((bpm - 120.0).abs() < 0.5, "estimated {bpm}");
+    }
+
+    #[test]
+    fn estimate_bpm_rejects_degenerate_grids() {
+        assert!(estimate_bpm(&[]).is_none());
+        assert!(estimate_bpm(&[1.0]).is_none());
+        assert!(estimate_bpm(&[2.0, 2.0]).is_none());
+        assert!(estimate_bpm(&[5.0, 1.0]).is_none());
+        assert!(estimate_bpm(&[0.0, f32::NAN]).is_none());
+    }
+
+    #[test]
+    fn downbeat_offset_correction_shifts_incoming_sync_start() {
+        let db = db();
+        enable(&db);
+        seed_profile(&db, "library_track", 1, 0.9);
+        seed_profile(&db, "library_track", 2, 0.9);
+        // Seeded grid is 120 BPM (0.5s beats); +2 beats moves the first
+        // usable downbeat from 0.0s to 1.0s.
+        seed_offset_correction(&db, key("library_track", "2"), Some(2), None);
+
+        let program = plan(
+            &db,
+            ref_for("library_track", 1),
+            ref_for("library_track", 2),
+        )
+        .expect("program");
+
+        assert_eq!(program.deck_b_start_frame, 48_000);
+    }
+
+    #[test]
+    fn negative_downbeat_offset_drops_pre_roll_downbeats() {
+        let db = db();
+        enable(&db);
+        seed_profile(&db, "library_track", 1, 0.9);
+        seed_profile(&db, "library_track", 2, 0.9);
+        // Seeded downbeats are every 2.0s from 0.0; -1 beat shifts them to
+        // -0.5, 1.5, 3.5, ... and the negative one must be dropped.
+        seed_offset_correction(&db, key("library_track", "2"), Some(-1), None);
+
+        let program = plan(
+            &db,
+            ref_for("library_track", 1),
+            ref_for("library_track", 2),
+        )
+        .expect("program");
+
+        assert_eq!(program.deck_b_start_frame, 72_000);
+    }
+
+    #[test]
+    fn phrase_offset_correction_changes_phrase_depth_gates() {
+        let db = db();
+        enable(&db);
+        seed_profile(&db, "library_track", 1, 0.9);
+        seed_profile(&db, "library_track", 2, 0.9);
+        // Seeded phrase boundaries are [0, 8]; -2 bars leaves only [6], so
+        // the pair no longer qualifies for a bass swap.
+        seed_offset_correction(&db, key("library_track", "2"), None, Some(-2));
+
+        let program = plan(
+            &db,
+            ref_for("library_track", 1),
+            ref_for("library_track", 2),
+        )
+        .expect("program");
+
+        assert_eq!(program.template, "LongHarmonicBlend");
+    }
+
+    #[test]
+    fn planned_program_is_rescaled_to_requested_sample_rate() {
+        let db = db();
+        enable(&db);
+        seed_profile(&db, "library_track", 1, 0.9);
+        seed_profile(&db, "library_track", 2, 0.9);
+        seed_offset_correction(&db, key("library_track", "2"), Some(2), None);
+
+        let plan = DjEngine::new(db.clone())
+            .plan_transition_details(
+                &ref_for("library_track", 1),
+                &ref_for("library_track", 2),
+                44_100,
+                2,
+            )
+            .expect("plan result")
+            .expect("plan");
+
+        let program = plan.program;
+        assert_eq!(program.template, "BassSwap16");
+        assert_eq!(program.sample_rate, 44_100);
+        // 1.0s downbeat at 44.1 kHz, not the 48 kHz planning-rate frame.
+        assert_eq!(program.deck_b_start_frame, 44_100);
+        // 16 bars at 120 BPM = 32s at either rate.
+        assert_eq!(program.resolve_at, 1_411_200);
+        program.validate().expect("valid at device rate");
     }
 
     #[test]
