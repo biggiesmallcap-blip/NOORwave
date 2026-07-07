@@ -142,7 +142,9 @@ pub fn ingest_spotify_daily_csv(
 fn content_sha256(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
-    format!("{:x}", hasher.finalize())
+    // sha2 0.11's finalize() returns a hybrid_array::Array which no longer
+    // implements LowerHex; hex-encode via the shared helper instead.
+    crate::services::cache_util::hex_encode(hasher.finalize())
 }
 
 fn normalize_header(value: &str) -> String {

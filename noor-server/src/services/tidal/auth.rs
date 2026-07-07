@@ -255,7 +255,7 @@ fn tidal_pkce_client_secret() -> Result<String> {
 
 fn random_url_safe(bytes_len: usize) -> String {
     let mut bytes = vec![0_u8; bytes_len];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 

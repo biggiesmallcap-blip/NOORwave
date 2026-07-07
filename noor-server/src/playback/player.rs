@@ -762,13 +762,18 @@ fn extrapolated_grid_ms(grid_seconds: &[f32], duration_ms: i64) -> Option<Vec<i6
         return (!grid.is_empty()).then_some(grid);
     }
 
-    let interval_ms = grid
+    // Extrapolate past the last detected marker using the MEDIAN spacing; the
+    // previous minimum let one noisy near-duplicate pair flood the tail with
+    // arbitrarily dense fake markers, so the "synced" overlap could start
+    // anywhere instead of on a real beat.
+    let deltas = grid
         .windows(2)
         .filter_map(|pair| {
             let delta = pair[1].saturating_sub(pair[0]);
             (delta > 0).then_some(delta)
         })
-        .min()?;
+        .collect::<Vec<_>>();
+    let interval_ms = median_delta(&deltas).filter(|delta| *delta > 0)?;
     let mut next = grid.last().copied()?.saturating_add(interval_ms);
     while next < duration_ms {
         grid.push(next);
@@ -3011,7 +3016,10 @@ mod tests {
         #[test]
         fn v1_planner_logs_and_prepares_filter_sweep_when_renderable() {
             let db = db_with_pair();
+            // An unsyncable 5% delta only stays a FilterSweep under bold
+            // intent; balanced intent now degrades to SafeCrossfade.
             db.with_conn(|conn| {
+                queries::set_dj_global_policy(conn, "bold", "neutral")?;
                 queries::upsert_audio_dj_profile_correction(
                     conn,
                     &AudioDjProfileCorrectionRow {
@@ -4038,6 +4046,24 @@ mod tests {
         .expect("overlap");
 
         assert_eq!(overlap_ms, 24_000);
+    }
+
+    #[test]
+    fn synced_overlap_extrapolation_ignores_near_duplicate_grid_noise() {
+        // A 10 ms near-duplicate pair must not become the extrapolation
+        // interval; the median keeps the projected grid on the real 2 s bar
+        // spacing. With a min-interval flood every 10 ms this would return
+        // exactly 8_000 from a fake marker instead of 9_000 from a real one.
+        let overlap_ms = synced_overlap_from_grid_ms(
+            181_000,
+            &[0.0, 2.0, 2.01, 4.0, 6.0, 8.0],
+            8_000,
+            Some(8_000 * 48),
+            48_000,
+        )
+        .expect("overlap");
+
+        assert_eq!(overlap_ms, 9_000);
     }
 
     #[test]

@@ -19,11 +19,10 @@
 //! token reads/writes to `MasterKey::encrypt`/`decrypt` and rename the column.
 
 use aes_gcm::{
-    AeadCore, Aes256Gcm, Key, Nonce,
-    aead::{Aead, KeyInit, OsRng},
+    Aes256Gcm, Key, Nonce,
+    aead::{Aead, Generate, KeyInit},
 };
 use anyhow::{Context, Result, anyhow};
-use rand::RngCore;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -62,18 +61,18 @@ impl MasterKey {
             }
             bytes
         } else {
-            let mut buf = vec![0u8; 32];
-            OsRng.fill_bytes(&mut buf);
-            write_secret_file(&path, &buf)?;
+            let key = Key::<Aes256Gcm>::generate();
+            write_secret_file(&path, key.as_slice())?;
             tracing::info!(
                 "Generated new master key at {} (owner-only on Unix)",
                 path.display()
             );
-            buf
+            key.to_vec()
         };
-        let key = Key::<Aes256Gcm>::from_slice(&bytes);
+        let key = Key::<Aes256Gcm>::try_from(bytes.as_slice())
+            .map_err(|_| anyhow!("master key must be exactly 32 bytes"))?;
         Ok(Self {
-            cipher: Arc::new(Aes256Gcm::new(key)),
+            cipher: Arc::new(Aes256Gcm::new(&key)),
         })
     }
 
@@ -83,17 +82,15 @@ impl MasterKey {
     /// stalls a test past libtest's 60s warning threshold.
     #[cfg(test)]
     pub fn ephemeral() -> Self {
-        let mut buf = [0u8; 32];
-        OsRng.fill_bytes(&mut buf);
-        let key = Key::<Aes256Gcm>::from_slice(&buf);
+        let key = Key::<Aes256Gcm>::generate();
         Self {
-            cipher: Arc::new(Aes256Gcm::new(key)),
+            cipher: Arc::new(Aes256Gcm::new(&key)),
         }
     }
 
     /// Encrypt arbitrary bytes. Output layout: `nonce(12) || ciphertext+tag`.
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let nonce = Nonce::generate();
         let ct = self
             .cipher
             .encrypt(&nonce, plaintext)
@@ -110,9 +107,9 @@ impl MasterKey {
             return Err(anyhow!("ciphertext too short"));
         }
         let (nonce_bytes, ct) = blob.split_at(NONCE_LEN);
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let nonce = Nonce::try_from(nonce_bytes).map_err(|_| anyhow!("invalid nonce length"))?;
         self.cipher
-            .decrypt(nonce, ct)
+            .decrypt(&nonce, ct)
             .map_err(|e| anyhow!("AES-GCM decrypt failed: {e}"))
     }
 }

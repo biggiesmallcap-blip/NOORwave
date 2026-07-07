@@ -1136,7 +1136,20 @@ fn build_prepared_dj_mixer_for_engine(
     if !handoff_mixer_program(&transition.program) && !overlay_mixer_program(&transition.program) {
         return Err(DjRuntimeRendererReason::ProgramNotMixerRenderable);
     }
-    let mut program = transition.program.clone();
+    // Deck buffers are decoded at the device rate; a program planned at any
+    // other rate must have its frame fields rescaled or every marker (and
+    // deck B's sync start) lands off by the rate ratio.
+    let mut program = transition
+        .program
+        .clone()
+        .rescaled_to(state.device_sample_rate.max(1));
+    if let Err(error) = noor_mix::planner::safety::validate_audio_safety(
+        &program,
+        &noor_mix::planner::safety::AudioSafetyPolicy::default(),
+    ) {
+        warn!("Prepared DJ transition program failed audio safety: {error:?}");
+        return Err(DjRuntimeRendererReason::MixerRejected);
+    }
     let deck_b_consumed_frames = deck_b_consumed_frames(&program)
         .ok_or(DjRuntimeRendererReason::ProgramNotMixerRenderable)?;
     let late_tolerance_frames = dj_renderer_late_tolerance_frames(state.device_sample_rate);
@@ -4344,6 +4357,42 @@ mod tests {
         prepared.mixer.render_block(&mut out, 0);
 
         assert!(out.iter().all(|sample| (*sample - 0.7).abs() < 1e-6));
+    }
+
+    #[test]
+    fn runtime_rescales_program_frames_to_device_rate() {
+        let mut state = test_runtime_loop_state();
+        start_dj_lookahead_in_state(
+            &mut state,
+            Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+            Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+            Some(11),
+            Some(12),
+            20,
+            48_000,
+        );
+
+        let active = test_engine_with_shared(1, 20);
+        finish_engine_buffer(&active, &[0.1, 0.1, 0.2, 0.2, 0.3, 0.3, 0.3, 0.3]);
+
+        // Program planned at half the device rate: every frame field must be
+        // doubled before it can index the 48 kHz deck buffers.
+        let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+        transition.program.sample_rate = 24_000;
+        transition.program.deck_b_start_frame = 1;
+
+        let mut next = test_engine_with_shared(2, 21);
+        next.job = PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition);
+        finish_engine_buffer(&next, &[0.0, 0.0, 0.4, 0.4, 0.5, 0.5]);
+
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+
+        assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
+        let prepared = state.prepared_dj_mixer.as_ref().expect("prepared mixer");
+        assert_eq!(prepared.program.sample_rate, 48_000);
+        assert_eq!(prepared.program.deck_b_start_frame, 2);
+        assert_eq!(prepared.program.resolve_at, 4);
     }
 
     #[test]
