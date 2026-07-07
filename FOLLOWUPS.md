@@ -10,6 +10,57 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### dj: wire vocal_clash_score into template choice
+
+noor-mix scoring.rs::vocal_clash_score (max product of per-bar vocal presence)
+is implemented and tested but nothing calls it; choose_template never considers
+vocal overlap, so two vocal-heavy tracks can get a 32-bar bass swap over both
+choruses. Needs a design decision (threshold, which templates it demotes, and
+whether it keys off vocal_presence or vocal_density) before wiring in - not a
+mechanical fix.
+- Spawned by: DJ-mode hardening session (transitions/sync/blending).
+
+### dj: enforce the lookahead analysis deadline (deadline_samples is decorative)
+
+RuntimeDjLookahead.deadline_samples is stored and asserted in one test but
+never compared against playback position; DjLookaheadFailureReason::
+AnalysisDeadlineMissed is #[allow(dead_code)]. Today the crossfade-window
+signal plus boundary fallback cover late plans, so nothing breaks, but the
+"analysis_late" guardrail shown in SafetyGuardrailPanel can never fire from
+the runtime. Either enforce the deadline (flip lookahead to a safe-crossfade
+plan when position passes deadline_samples with no prepared program) or drop
+the field.
+- Spawned by: DJ-mode hardening session (transitions/sync/blending).
+
+### dj: DeckBuffer holds the last frame forever past end-of-buffer
+
+deck.rs advance() clamps position to the final frame, so a deck that runs out
+mid-transition sustains its last sample value (a DC ledge) instead of going
+silent. Gain automation always fades to zero by resolve_at so it is inaudible
+today (and QA's dc_offset check bounds the gross case), but emitting silence
+past the end would be strictly safer if a template ever ends non-faded. Also
+note tick_into playback rate stays per-block in render.rs - fine while every
+producer emits constant-rate events (deck_b_consumed_frames rejects ramps),
+but a future ramped-rate feature must move rate evaluation per-frame too.
+- Spawned by: DJ-mode hardening session (transitions/sync/blending).
+
+### dj: SafetyLimiter is a hard clipper, not a limiter
+
+limiter.rs clamps samples at +/-0.98 with no attack/release envelope, so a hot
+blend distorts rather than ducks. QA's peak/click checks keep planned programs
+under the ceiling, so this only matters for pathological content; a one-pole
+release gain-computer would be the upgrade. Do not widen the 0.98 ceiling.
+- Spawned by: DJ-mode hardening session (transitions/sync/blending).
+
+### dj: v1 renderer template durations are fixed ms, not bar-aligned
+
+v1_renderable_program rebuilds planner programs at fixed render lengths
+(BassSwap16 24s, FilterSweep 18s, ...) regardless of BPM, so the swap/fade
+midpoints only land on bar boundaries near 120 BPM even though the overlap
+window itself starts on a downbeat. Deliberate v1 simplification; revisit when
+the renderer can honor planner bar-derived durations end to end.
+- Spawned by: DJ-mode hardening session (transitions/sync/blending).
+
 ### deps: finish Dependabot #144 - symphonia 0.6 + rubato 3.0 (audio path)
 
 Deferred from the cargo-group bump (commit 79f8c1f6, which landed the mechanical

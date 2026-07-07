@@ -1,7 +1,7 @@
-use crate::automation::interpolate;
+use crate::automation::param_value_at;
 use crate::eq::{BandGains, IsolatorEq};
 use crate::limiter::SafetyLimiter;
-use crate::program::{AutomationEvent, DeckId, LoopRegion, Param, TransitionProgram};
+use crate::program::{DeckId, LoopRegion, Param, TransitionProgram};
 
 pub struct Mixer {
     program: TransitionProgram,
@@ -45,41 +45,53 @@ impl Mixer {
         assert!(out.len() <= self.scratch_a.len());
         assert!(out.len() <= self.scratch_b.len());
 
-        let scratch_a = &mut self.scratch_a[..out.len()];
-        let scratch_b = &mut self.scratch_b[..out.len()];
+        let Self {
+            program,
+            deck_a,
+            deck_b,
+            scratch_a,
+            scratch_b,
+            eq_a,
+            eq_b,
+            limiter,
+        } = self;
+        let scratch_a = &mut scratch_a[..out.len()];
+        let scratch_b = &mut scratch_b[..out.len()];
         scratch_a.fill(0.0);
         scratch_b.fill(0.0);
 
-        let rate_a = param_at(&self.program, Param::PlaybackRate(DeckId::A), master_sample);
-        let rate_b = param_at(&self.program, Param::PlaybackRate(DeckId::B), master_sample);
-        self.deck_a.tick_into(scratch_a, rate_a);
-        self.deck_b.tick_into(scratch_b, rate_b);
-        self.eq_a.process_in_place(
-            scratch_a,
-            deck_band_gains(&self.program, DeckId::A, master_sample),
-        );
-        self.eq_b.process_in_place(
-            scratch_b,
-            deck_band_gains(&self.program, DeckId::B, master_sample),
-        );
+        // Playback-rate events are constant-valued (validated upstream), so a
+        // per-block lookup cannot differ from a per-frame one.
+        let rate_a = param_at(program, Param::PlaybackRate(DeckId::A), master_sample);
+        let rate_b = param_at(program, Param::PlaybackRate(DeckId::B), master_sample);
+        deck_a.tick_into(scratch_a, rate_a);
+        deck_b.tick_into(scratch_b, rate_b);
 
-        let channels = usize::from(self.program.channels);
+        // Gain and EQ automation are evaluated per frame so the rendered audio
+        // is independent of how callers slice the render into blocks.
+        let channels = usize::from(program.channels);
         for (frame_index, (frame_out, (frame_a, frame_b))) in out
             .chunks_mut(channels)
-            .zip(scratch_a.chunks(channels).zip(scratch_b.chunks(channels)))
+            .zip(
+                scratch_a
+                    .chunks_mut(channels)
+                    .zip(scratch_b.chunks_mut(channels)),
+            )
             .enumerate()
         {
             let sample = master_sample + frame_index as u64;
-            let gain_a = param_at(&self.program, Param::DeckGain(DeckId::A), sample);
-            let gain_b = param_at(&self.program, Param::DeckGain(DeckId::B), sample);
+            eq_a.process_in_place(frame_a, deck_band_gains(program, DeckId::A, sample));
+            eq_b.process_in_place(frame_b, deck_band_gains(program, DeckId::B, sample));
+            let gain_a = param_at(program, Param::DeckGain(DeckId::A), sample);
+            let gain_b = param_at(program, Param::DeckGain(DeckId::B), sample);
             for (sample_out, (sample_a, sample_b)) in
-                frame_out.iter_mut().zip(frame_a.iter().zip(frame_b))
+                frame_out.iter_mut().zip(frame_a.iter().zip(frame_b.iter()))
             {
                 *sample_out = sample_a * gain_a + sample_b * gain_b;
             }
         }
 
-        self.limiter.process_in_place(out);
+        limiter.process_in_place(out);
     }
 
     #[cfg(test)]
@@ -118,42 +130,14 @@ fn deck_band_gains(program: &TransitionProgram, deck: DeckId, sample: u64) -> Ba
 }
 
 fn param_at(program: &TransitionProgram, param: Param, sample: u64) -> f32 {
-    program
-        .automation
-        .iter()
-        .filter(|event| event.param == param)
-        .fold(default_param(param), |value, event| {
-            event_value_at(event, sample).unwrap_or(value)
-        })
-}
-
-fn default_param(param: Param) -> f32 {
-    match param {
-        Param::DeckGain(_)
-        | Param::LowGain(_)
-        | Param::MidGain(_)
-        | Param::HighGain(_)
-        | Param::PlaybackRate(_) => 1.0,
-    }
-}
-
-fn event_value_at(event: &AutomationEvent, sample: u64) -> Option<f32> {
-    if sample < event.start_sample {
-        return None;
-    }
-    if sample >= event.end_sample {
-        return Some(event.to);
-    }
-    let span = (event.end_sample - event.start_sample) as f32;
-    let t = (sample - event.start_sample) as f32 / span;
-    Some(interpolate(event.from, event.to, event.curve, t))
+    param_value_at(&program.automation, param, sample)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::deck::DeckBuffer;
-    use crate::program::{Curve, Tier};
+    use crate::program::{AutomationEvent, Curve, Tier};
 
     fn valid_program() -> TransitionProgram {
         TransitionProgram {
@@ -343,6 +327,78 @@ mod tests {
         let input_tail = rms(&source[sample_rate as usize * 2..]);
         let output_tail = rms(&out[sample_rate as usize * 2..]);
         assert!(output_tail / input_tail < 0.05);
+    }
+
+    #[test]
+    fn render_is_independent_of_block_segmentation() {
+        let sample_rate = 48_000;
+        let frames = 4_800_usize;
+        let mut program = valid_program();
+        program.sample_rate = sample_rate;
+        program.resolve_at = frames as u64;
+        program.swap_start = frames as u64 / 2;
+        program.fade_start = program.swap_start;
+        // Ramped EQ + deck gains: the automation shapes that used to be
+        // quantized to block boundaries.
+        program.automation = vec![
+            AutomationEvent {
+                param: Param::DeckGain(DeckId::A),
+                start_sample: 0,
+                end_sample: frames as u64,
+                from: 1.0,
+                to: 0.0,
+                curve: Curve::EqualPowerOut,
+            },
+            AutomationEvent {
+                param: Param::DeckGain(DeckId::B),
+                start_sample: 0,
+                end_sample: frames as u64,
+                from: 0.0,
+                to: 1.0,
+                curve: Curve::EqualPowerIn,
+            },
+            AutomationEvent {
+                param: Param::LowGain(DeckId::A),
+                start_sample: 0,
+                end_sample: frames as u64,
+                from: 1.0,
+                to: 0.05,
+                curve: Curve::Cosine,
+            },
+            AutomationEvent {
+                param: Param::LowGain(DeckId::B),
+                start_sample: frames as u64 / 2,
+                end_sample: frames as u64,
+                from: 0.0,
+                to: 1.0,
+                curve: Curve::Cosine,
+            },
+        ];
+        let deck_a = sine(80.0, frames, sample_rate);
+        let deck_b = sine(220.0, frames, sample_rate);
+
+        let render = |block_frames: usize| {
+            let mut mixer = Mixer::new(
+                program.clone(),
+                DeckBuffer::new(deck_a.clone(), 1),
+                DeckBuffer::new(deck_b.clone(), 1),
+                frames,
+            )
+            .expect("mixer");
+            let mut out = vec![0.0; frames];
+            let mut master = 0_u64;
+            for block in out.chunks_mut(block_frames) {
+                mixer.render_block(block, master);
+                master += block.len() as u64;
+            }
+            out
+        };
+
+        let whole = render(frames);
+        let small_blocks = render(128);
+        let odd_blocks = render(313);
+        assert_eq!(whole, small_blocks);
+        assert_eq!(whole, odd_blocks);
     }
 
     #[test]
