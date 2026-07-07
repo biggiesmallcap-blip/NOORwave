@@ -1,3 +1,18 @@
+//! Persistent playback queue.
+//!
+//! Track-id sentinels used across the queue and playback layers (the queue
+//! row is the source of truth; `QueueItem.track.id` is derived):
+//!   - id > 0: a real library track (tracks table primary key).
+//!   - id == 0: a PENDING row (`track_id IS NULL` + `pending_at`), i.e. an
+//!     unresolved Last.fm/radio candidate. The 0 comes from the COALESCE in
+//!     `load_queue`; `playback_state.current_track_id` is written as NULL
+//!     for these (the FK would reject 0).
+//!   - id < 0: an EPHEMERAL TIDAL row (`track_id IS NULL` + `tidal_id_hint`,
+//!     source in [`EPHEMERAL_TIDAL_SOURCES`]), synthesized as `-tidal_id`.
+//!     These stream by TIDAL id, are never imported, and their rows are
+//!     deleted as they play (mixes are forward-only; play history is what
+//!     lets previous-track go back to them).
+
 use crate::db::models::{QueueItem, Track};
 use crate::playback::shuffle::{
     WeightedShuffleProfile, artist_spread_shuffle_with_rng, genre_shuffle_with_rng, seeded_rng,

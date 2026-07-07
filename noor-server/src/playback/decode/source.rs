@@ -14,6 +14,13 @@ pub(crate) const DASH_INITIAL_MEDIA_SEGMENTS: usize = 2;
 pub(crate) const DASH_BACKGROUND_FETCH_WINDOW: usize = 4;
 pub(crate) const DASH_SEGMENT_TIMEOUT_SECS: u64 = 12;
 const STREAM_PIPE_RECV_POLL_MS: u64 = 100;
+/// One-shot warn threshold for the pipe's in-memory backing store. The pipe
+/// keeps the whole compressed stream (it never trims consumed bytes, which is
+/// what makes backward seeks work), so a track is bounded by its own file
+/// size - but two live engines during a crossfade double that, and a hi-res
+/// FLAC can reach a few hundred MB. Pure observability, mirroring the PCM
+/// buffer's growth warn.
+const STREAM_PIPE_GROWTH_WARN_BYTES: usize = 256 * 1024 * 1024;
 
 pub(crate) struct StreamPipe {
     data: Vec<u8>,
@@ -26,6 +33,7 @@ pub(crate) struct StreamPipe {
     /// stopped/skipped track does not leave the decoder thread wedged on
     /// rx.recv() until the producer drops chunk_tx.
     stop_flag: Arc<AtomicBool>,
+    growth_warned: bool,
 }
 
 impl StreamPipe {
@@ -52,6 +60,20 @@ impl StreamPipe {
             known_length,
             dynamic_length,
             stop_flag,
+            growth_warned: false,
+        }
+    }
+
+    /// Runs on the decoder thread (never the audio callback), so logging
+    /// directly is fine here.
+    fn warn_growth_once(&mut self) {
+        if !self.growth_warned && self.data.len() >= STREAM_PIPE_GROWTH_WARN_BYTES {
+            self.growth_warned = true;
+            tracing::warn!(
+                buffered_bytes = self.data.len(),
+                "StreamPipe backing store grew past {} MB",
+                STREAM_PIPE_GROWTH_WARN_BYTES / (1024 * 1024)
+            );
         }
     }
 
@@ -83,6 +105,7 @@ impl StreamPipe {
                 }
             }
         }
+        self.warn_growth_once();
     }
 
     fn recv_chunk(&mut self) {
@@ -97,6 +120,7 @@ impl StreamPipe {
         } else {
             self.eof = true;
         }
+        self.warn_growth_once();
     }
 }
 

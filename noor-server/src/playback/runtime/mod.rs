@@ -3362,8 +3362,9 @@ fn ensure_exclusive_sink_started(
 /// crossfade boundary. `is_ready()` only guarantees the ~500ms start threshold,
 /// far short of a multi-second fade. Promoting a deck that holds less than the
 /// fade window forces it to out-decode the fade in real time; on a slow TIDAL
-/// connection it can't, starves mid-fade, and playback freezes (there is no
-/// stall watchdog, and the queue has already advanced at promotion time). Wait
+/// connection it can't and starves mid-fade after the queue has already
+/// advanced at promotion time (the StallTracker watchdog eventually
+/// force-skips, but only after ACTIVE_STALL_RECOVERY_SECS of silence). Wait
 /// for the whole fade window plus a small margin -- or a fully decoded deck --
 /// before promoting. If the deck isn't there yet the caller skips the early
 /// fade; the boundary path hard-cuts when the track actually ends, which is a
