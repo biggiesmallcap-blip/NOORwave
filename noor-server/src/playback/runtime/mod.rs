@@ -1782,6 +1782,20 @@ fn run_runtime_loop(
         let command = match command_rx.recv_timeout(STALL_WATCHDOG_TICK) {
             Ok(command) => command,
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Emit any warns the audio callback latched (underrun,
+                // rejected in-callback seek) - the callback itself must not
+                // touch tracing.
+                for engine in [
+                    state.engine.as_ref(),
+                    state.next_engine.as_ref(),
+                    state.fading_out_engine.as_ref(),
+                    state.drop_preview_engine.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    engine.shared.drain_deferred_rt_logs();
+                }
                 // Idle tick: nothing to dispatch. Check whether the audible deck
                 // has frozen on a hung TIDAL segment and, if so, force the queue
                 // forward (the audio callback can't, because a starved-but-not-
@@ -3361,8 +3375,9 @@ fn ensure_exclusive_sink_started(
 /// crossfade boundary. `is_ready()` only guarantees the ~500ms start threshold,
 /// far short of a multi-second fade. Promoting a deck that holds less than the
 /// fade window forces it to out-decode the fade in real time; on a slow TIDAL
-/// connection it can't, starves mid-fade, and playback freezes (there is no
-/// stall watchdog, and the queue has already advanced at promotion time). Wait
+/// connection it can't and starves mid-fade after the queue has already
+/// advanced at promotion time (the StallTracker watchdog eventually
+/// force-skips, but only after ACTIVE_STALL_RECOVERY_SECS of silence). Wait
 /// for the whole fade window plus a small margin -- or a fully decoded deck --
 /// before promoting. If the deck isn't there yet the caller skips the early
 /// fade; the boundary path hard-cuts when the track actually ends, which is a

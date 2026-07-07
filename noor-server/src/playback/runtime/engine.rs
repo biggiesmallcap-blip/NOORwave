@@ -250,16 +250,37 @@ impl PlaybackEngine {
         let decoder_thread = thread::Builder::new()
             .name(format!("noor-playback-decoder-{track_id}"))
             .spawn(move || {
-                if let Err(err) = decode_and_buffer_job(
-                    decoder_config,
-                    decoder_job,
-                    decoder_shared_for_decode,
-                    output_sample_rate,
-                    device_channels,
-                ) {
-                    let _ = decoder_shared
-                        .signal_terminal(PlaybackTerminalReason::Error(err.to_string()));
-                    error!("Playback decode failed for track {track_id}: {err:?}");
+                // catch_unwind so a decoder panic still emits TrackTerminal.
+                // Without it the thread dies silently, no advance fires, and
+                // playback wedges until the stall watchdog force-skips ~15s
+                // later.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    decode_and_buffer_job(
+                        decoder_config,
+                        decoder_job,
+                        decoder_shared_for_decode,
+                        output_sample_rate,
+                        device_channels,
+                    )
+                }));
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        let _ = decoder_shared
+                            .signal_terminal(PlaybackTerminalReason::Error(err.to_string()));
+                        error!("Playback decode failed for track {track_id}: {err:?}");
+                    }
+                    Err(panic) => {
+                        let message = panic
+                            .downcast_ref::<&str>()
+                            .map(|s| (*s).to_string())
+                            .or_else(|| panic.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "decoder thread panicked".to_string());
+                        let _ = decoder_shared.signal_terminal(PlaybackTerminalReason::Error(
+                            format!("decoder panic: {message}"),
+                        ));
+                        error!("Playback decoder panicked for track {track_id}: {message}");
+                    }
                 }
             })
             .context("failed to spawn playback decoder thread")?;

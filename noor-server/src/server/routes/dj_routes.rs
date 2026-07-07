@@ -2907,6 +2907,7 @@ mod tests {
             live_listen_session: None,
             external_playback_track: None,
             ephemeral_tidal_track: None,
+            play_history: crate::playback::history::PlayHistory::default(),
             tidal_login_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             rss_aggregator: std::sync::Arc::new(crate::services::rss_feeds::FeedAggregator::new(
                 reqwest::Client::new(),

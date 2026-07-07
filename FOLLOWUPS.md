@@ -10,6 +10,21 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### perf: replace the playback PCM Vec+Mutex with a real ring buffer
+
+The audio callback and the decoder thread share
+PlaybackSharedState.buffer (Mutex<PlaybackBuffer> over an unbounded
+Vec<f32>): the decoder holds the lock while appending each resampled
+packet and compacting, which is a priority-inversion risk on the render
+thread, and the Vec grows ~10s-45s of PCM per engine (x2 during a
+crossfade). The code comment at runtime/shared.rs (BUFFER_GROWTH_WARN
+threshold) already calls the ring-buffer rewrite the real fix; growth
+telemetry exists on both the PCM buffer and the compressed StreamPipe.
+A lock-free SPSC ring (e.g. rtrb) sized ~60s would remove the lock from
+the callback entirely. Behavior-preserving but touches every drain/seek/
+compact path, so it needs its own focused pass with the shared.rs tests
+extended first.
+- Spawned by: runtime player code review (previous-track fix session).
 ### dj: wire vocal_clash_score into template choice
 
 noor-mix scoring.rs::vocal_clash_score (max product of per-bar vocal presence)

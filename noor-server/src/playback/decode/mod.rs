@@ -816,20 +816,22 @@ pub(crate) fn decode_and_buffer_job(
                         None => true,
                     };
                     if needs_rebuild {
-                        match StreamResampler::new(
-                            decoded_sample_rate,
-                            live_target_rate,
-                            device_channels as usize,
-                        ) {
-                            Ok(r) => resampler = Some(r),
-                            Err(e) => {
-                                warn!(
-                                    "Resampler init failed ({decoded_sample_rate} -> {live_target_rate} Hz, {} ch): {e}; passing through unresampled (pitch will be wrong)",
-                                    device_channels
-                                );
-                                resampler = None;
-                            }
-                        }
+                        // Fail the track instead of passing through
+                        // unresampled: wrong-pitch playback with only a log
+                        // line is worse than a visible track error, and the
+                        // terminal-error path advances the queue anyway.
+                        resampler = Some(
+                            StreamResampler::new(
+                                decoded_sample_rate,
+                                live_target_rate,
+                                device_channels as usize,
+                            )
+                            .with_context(|| {
+                                format!(
+                                    "resampler init failed ({decoded_sample_rate} -> {live_target_rate} Hz, {device_channels} ch)"
+                                )
+                            })?,
+                        );
                     }
                     match resampler.as_mut() {
                         Some(r) => r.process(&channelized),

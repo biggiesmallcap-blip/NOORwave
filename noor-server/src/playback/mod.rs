@@ -4,6 +4,7 @@ pub mod dj_engine;
 pub mod dj_lookahead;
 pub mod dj_queue_ranker;
 pub mod gapless;
+pub mod history;
 pub mod output;
 pub mod pending;
 pub mod player;

@@ -1,3 +1,18 @@
+//! Persistent playback queue.
+//!
+//! Track-id sentinels used across the queue and playback layers (the queue
+//! row is the source of truth; `QueueItem.track.id` is derived):
+//!   - id > 0: a real library track (tracks table primary key).
+//!   - id == 0: a PENDING row (`track_id IS NULL` + `pending_at`), i.e. an
+//!     unresolved Last.fm/radio candidate. The 0 comes from the COALESCE in
+//!     `load_queue`; `playback_state.current_track_id` is written as NULL
+//!     for these (the FK would reject 0).
+//!   - id < 0: an EPHEMERAL TIDAL row (`track_id IS NULL` + `tidal_id_hint`,
+//!     source in [`EPHEMERAL_TIDAL_SOURCES`]), synthesized as `-tidal_id`.
+//!     These stream by TIDAL id, are never imported, and their rows are
+//!     deleted as they play (mixes are forward-only; play history is what
+//!     lets previous-track go back to them).
+
 use crate::db::models::{QueueItem, Track};
 use crate::playback::shuffle::{
     WeightedShuffleProfile, artist_spread_shuffle_with_rng, genre_shuffle_with_rng, seeded_rng,
@@ -540,6 +555,44 @@ fn ephemeral_pending_from_row(
 const EPHEMERAL_TIDAL_ROW_FILTER: &str = "track_id IS NULL
        AND source IN ('tidal_mix','tidal_album','tidal_playlist')
        AND tidal_id_hint IS NOT NULL";
+
+/// Re-insert an ephemeral TIDAL row at the FRONT of the live mix block so
+/// [`pop_next_ephemeral_tidal_track`] plays it next. Used by previous-track
+/// back-navigation: the row of the currently playing mix track was deleted
+/// when it started, and going back must not lose it from the continuation.
+/// With no mix rows left, appends at the queue end (the natural resume
+/// point). `fallback_source` is only used when no existing mix row supplies
+/// a source; it must be one of [`EPHEMERAL_TIDAL_SOURCES`].
+pub fn reinsert_ephemeral_front(
+    conn: &Connection,
+    insert: &EphemeralTidalInsert<'_>,
+    fallback_source: &str,
+) -> Result<()> {
+    let front: Option<(i32, String)> = conn
+        .query_row(
+            &format!(
+                "SELECT position, source FROM queue WHERE {EPHEMERAL_TIDAL_ROW_FILTER}
+                 ORDER BY position ASC, id ASC LIMIT 1"
+            ),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    match front {
+        Some((front_position, source)) => {
+            insert_ephemeral_tidal_tracks_after(
+                conn,
+                std::slice::from_ref(insert),
+                front_position - 1,
+                &source,
+            )?;
+        }
+        None => {
+            append_ephemeral_tidal_tracks(conn, std::slice::from_ref(insert), fallback_source)?;
+        }
+    }
+    Ok(())
+}
 
 /// Read all upcoming ephemeral TIDAL rows in play order without removing them.
 /// Used to pre-warm DJ transition profiles for the rest of the mix.
