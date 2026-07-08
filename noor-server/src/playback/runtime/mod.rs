@@ -632,9 +632,14 @@ struct PlaybackRuntimeLoopState {
 }
 
 struct PreparedDjMixer {
-    mixer: noor_mix::Mixer,
     program: noor_mix::TransitionProgram,
-    max_block_samples: usize,
+    /// The full transition mix, rendered at build (prepare/decode-complete)
+    /// time rather than at fire time. Rendering 8-28s of dual-deck audio
+    /// takes long enough that doing it inside the fire handler used to let
+    /// deck A advance past the snapshot the render was built from, so the
+    /// handoff audibly repeated ~100-300ms of the outgoing track. At install
+    /// the buffer is joined by skipping however far deck A actually moved.
+    rendered: Vec<f32>,
     current_track_id: i64,
     next_track_id: i64,
 }
@@ -711,6 +716,9 @@ enum DjRuntimeRendererReason {
     TransitionPlanMissingAtFire,
     SyncWindowNotSignaled,
     ManualSeekSuppressed,
+    /// The live deck A playhead is already past the midpoint of the rendered
+    /// transition, so joining it would play only the tail of the blend.
+    HandoffSeamTooLate,
 }
 
 impl DjRuntimeRendererReason {
@@ -733,6 +741,7 @@ impl DjRuntimeRendererReason {
             Self::TransitionPlanMissingAtFire => "transition_plan_missing_at_fire",
             Self::SyncWindowNotSignaled => "sync_window_not_signaled",
             Self::ManualSeekSuppressed => "manual_seek_suppressed",
+            Self::HandoffSeamTooLate => "handoff_seam_too_late",
         }
     }
 }
@@ -1150,6 +1159,16 @@ fn build_prepared_dj_mixer_for_engine(
         warn!("Prepared DJ transition program failed audio safety: {error:?}");
         return Err(DjRuntimeRendererReason::MixerRejected);
     }
+    // deck_a_start_frame == 0 means "wherever deck A is when this build
+    // runs", which is only correct for a build inside the fire handler. A
+    // beat-anchored plan is built ahead of time, so pin deck A to the
+    // planned fire position instead; the install-time skip then reconciles
+    // the (small) distance the live deck actually travelled past it.
+    if program.deck_a_start_frame == 0 {
+        if let Some(anchor_frame) = anchored_deck_a_frame(state, transition, active) {
+            program.deck_a_start_frame = anchor_frame;
+        }
+    }
     let deck_b_consumed_frames = deck_b_consumed_frames(&program)
         .ok_or(DjRuntimeRendererReason::ProgramNotMixerRenderable)?;
     let late_tolerance_frames = dj_renderer_late_tolerance_frames(state.device_sample_rate);
@@ -1170,7 +1189,7 @@ fn build_prepared_dj_mixer_for_engine(
     )?;
     program.deck_a_start_frame = active_snapshot.start_frame;
     program.deck_b_start_frame = next_snapshot.start_frame;
-    let mixer = match noor_mix::Mixer::new(
+    let mut mixer = match noor_mix::Mixer::new(
         program.clone(),
         active_snapshot.deck,
         next_snapshot.deck,
@@ -1182,13 +1201,40 @@ fn build_prepared_dj_mixer_for_engine(
             return Err(DjRuntimeRendererReason::MixerRejected);
         }
     };
-    Ok(PreparedDjMixer {
-        mixer,
-        program,
+    let rendered = render_mixer_to_buffer(
+        &mut mixer,
+        program.resolve_at,
+        usize::from(state.device_channels.max(1)),
         max_block_samples,
+    )
+    .ok_or(DjRuntimeRendererReason::RenderBufferFailed)?;
+    Ok(PreparedDjMixer {
+        program,
+        rendered,
         current_track_id: active.track_id,
         next_track_id: incoming.track_id,
     })
+}
+
+/// Buffer-local deck A frame for a beat-anchored transition: the anchor is
+/// absolute track time on the decoded-audio timeline, the deck buffer may
+/// start mid-track after a segment seek.
+fn anchored_deck_a_frame(
+    state: &PlaybackRuntimeLoopState,
+    transition: &PreparedTransitionProgram,
+    active: &PlaybackEngine,
+) -> Option<u64> {
+    let anchor_ms = transition.anchor_start_ms.filter(|ms| *ms > 0)?;
+    let anchor_frame_abs =
+        (anchor_ms as u64).saturating_mul(u64::from(state.device_sample_rate.max(1))) / 1000;
+    let channels = u64::from(state.device_channels.max(1));
+    let offset_frames = active
+        .shared
+        .position_offset_samples
+        .load(Ordering::Relaxed)
+        / channels;
+    let local = anchor_frame_abs.checked_sub(offset_frames)?;
+    (local > 0).then_some(local)
 }
 
 fn handoff_mixer_program(program: &noor_mix::TransitionProgram) -> bool {
@@ -1208,24 +1254,25 @@ fn overlay_mixer_program(program: &noor_mix::TransitionProgram) -> bool {
         && deck_b_consumed_frames(program).is_some()
 }
 
-fn render_prepared_mixer_to_buffer(
-    prepared: &mut PreparedDjMixer,
+fn render_mixer_to_buffer(
+    mixer: &mut noor_mix::Mixer,
+    resolve_at: u64,
     channels: usize,
+    max_block_samples: usize,
 ) -> Option<Vec<f32>> {
-    let render_frames = prepared.program.resolve_at as usize;
+    let render_frames = resolve_at as usize;
     let render_samples = render_frames.checked_mul(channels)?;
     if render_samples == 0 {
         return None;
     }
-    let block_samples = prepared
-        .max_block_samples
+    let block_samples = max_block_samples
         .max(channels)
-        .saturating_sub(prepared.max_block_samples.max(channels) % channels)
+        .saturating_sub(max_block_samples.max(channels) % channels)
         .max(channels);
     let mut rendered = vec![0.0; render_samples];
     let mut master_frame = 0_u64;
     for block in rendered.chunks_mut(block_samples) {
-        prepared.mixer.render_block(block, master_frame);
+        mixer.render_block(block, master_frame);
         master_frame = master_frame.saturating_add((block.len() / channels) as u64);
     }
     Some(rendered)
@@ -1280,13 +1327,47 @@ fn install_prepared_handoff_mixer_buffer(
         return Err(DjRuntimeRendererReason::NextTrackChanged);
     }
 
-    let mut prepared = state
+    // How far has the live deck A playhead moved past the frame the render
+    // starts at? The rendered buffer must be joined at that offset or the
+    // handoff replays (or drops) exactly that stretch of the outgoing track.
+    let channels = usize::from(state.device_channels.max(1));
+    let live_deck_a_frame = {
+        let active = state
+            .engine
+            .as_ref()
+            .ok_or(DjRuntimeRendererReason::ActiveTrackChanged)?;
+        let guard = active
+            .shared
+            .buffer
+            .lock()
+            .map_err(|_| DjRuntimeRendererReason::BufferLockFailed)?;
+        (guard.read_pos / channels) as u64
+    };
+    let deck_a_start_frame = prepared.program.deck_a_start_frame;
+    let resolve_at = prepared.program.resolve_at;
+    let skip_frames = live_deck_a_frame.saturating_sub(deck_a_start_frame);
+    // Joining past the halfway point means most of the transition already
+    // "happened" while we weren't playing it; a plain fallback sounds better
+    // than the tail of a blend.
+    if skip_frames.saturating_mul(2) > resolve_at {
+        return Err(DjRuntimeRendererReason::HandoffSeamTooLate);
+    }
+
+    let prepared = state
         .prepared_dj_mixer
         .take()
         .ok_or(DjRuntimeRendererReason::PreparedMixerMissing)?;
-    let channels = usize::from(state.device_channels.max(1));
-    let mut rendered = render_prepared_mixer_to_buffer(&mut prepared, channels)
-        .ok_or(DjRuntimeRendererReason::RenderBufferFailed)?;
+    let mut rendered = prepared.rendered;
+    if rendered.is_empty() {
+        return Err(DjRuntimeRendererReason::RenderBufferFailed);
+    }
+    let skip_samples = (skip_frames as usize).saturating_mul(channels);
+    bake_seam_fade_in(
+        &mut rendered,
+        skip_samples,
+        channels,
+        state.device_sample_rate,
+    );
 
     let next = state
         .next_engine
@@ -1309,7 +1390,7 @@ fn install_prepared_handoff_mixer_buffer(
     let remainder = guard.samples[remainder_start..].to_vec();
     rendered.extend_from_slice(&remainder);
     guard.samples = rendered;
-    guard.read_pos = 0;
+    guard.read_pos = skip_samples.min(guard.samples.len());
     guard.started = false;
     guard.started_notified = false;
     guard.starved_notified = false;
@@ -1328,6 +1409,16 @@ fn install_prepared_handoff_mixer_buffer(
     next.shared
         .total_samples
         .store(total_samples, Ordering::Relaxed);
+    // Keep position = offset + read_pos consistent with the skipped join so
+    // this track's own future near-end / fire math is not shifted by the
+    // seam offset.
+    next.shared.position_samples.store(
+        next.shared
+            .position_offset_samples
+            .load(Ordering::Relaxed)
+            .saturating_add(guard.read_pos as u64),
+        Ordering::Relaxed,
+    );
     next.shared.publish_buffered_samples(guard.samples.len());
     next.shared.crossfade_samples.store(0, Ordering::Relaxed);
     next.shared
@@ -1337,6 +1428,33 @@ fn install_prepared_handoff_mixer_buffer(
         .fadein_start_samples
         .store(u64::MAX, Ordering::Relaxed);
     Ok(())
+}
+
+/// Ramp the first DJ_HANDOFF_FADE_MS of the joined transition audio from
+/// silence, per frame so channels stay matched. Pairs with the outgoing
+/// engine's dj_fadeout so the stream swap is two short equal-power ramps
+/// instead of a hard cut into a hard start. Capped at a quarter of the
+/// remaining transition so degenerate (test-sized) programs pass through
+/// untouched.
+fn bake_seam_fade_in(rendered: &mut [f32], start_sample: usize, channels: usize, rate: u32) {
+    let channels = channels.max(1);
+    let remaining_frames = rendered.len().saturating_sub(start_sample) / channels;
+    let fade_frames = ((u64::from(shared::DJ_HANDOFF_FADE_MS) * u64::from(rate.max(1)) / 1000)
+        as usize)
+        .min(remaining_frames / 4);
+    if fade_frames == 0 {
+        return;
+    }
+    for (index, sample) in rendered
+        .iter_mut()
+        .skip(start_sample)
+        .take(fade_frames * channels)
+        .enumerate()
+    {
+        let frame = index / channels;
+        let t = frame as f32 / fade_frames as f32;
+        *sample *= (t * std::f32::consts::FRAC_PI_2).sin();
+    }
 }
 
 fn install_prepared_overlay_mixer_buffer(
@@ -1366,13 +1484,14 @@ fn install_prepared_overlay_mixer_buffer(
         return Err(DjRuntimeRendererReason::NextTrackChanged);
     }
 
-    let mut prepared = state
+    let prepared = state
         .prepared_dj_mixer
         .take()
         .ok_or(DjRuntimeRendererReason::PreparedMixerMissing)?;
-    let channels = usize::from(state.device_channels.max(1));
-    let rendered = render_prepared_mixer_to_buffer(&mut prepared, channels)
-        .ok_or(DjRuntimeRendererReason::RenderBufferFailed)?;
+    let rendered = prepared.rendered;
+    if rendered.is_empty() {
+        return Err(DjRuntimeRendererReason::RenderBufferFailed);
+    }
     let next = state
         .next_engine
         .as_ref()
@@ -1429,13 +1548,14 @@ fn install_prepared_drop_preview_mixer_buffer(
         return Err(DjRuntimeRendererReason::NextTrackChanged);
     }
 
-    let mut prepared = state
+    let prepared = state
         .prepared_drop_preview_mixer
         .take()
         .ok_or(DjRuntimeRendererReason::PreparedMixerMissing)?;
-    let channels = usize::from(state.device_channels.max(1));
-    let rendered = render_prepared_mixer_to_buffer(&mut prepared, channels)
-        .ok_or(DjRuntimeRendererReason::RenderBufferFailed)?;
+    let rendered = prepared.rendered;
+    if rendered.is_empty() {
+        return Err(DjRuntimeRendererReason::RenderBufferFailed);
+    }
     let preview = state
         .drop_preview_engine
         .as_ref()
@@ -1466,6 +1586,17 @@ fn install_prepared_drop_preview_mixer_buffer(
         .fadein_start_samples
         .store(u64::MAX, Ordering::Relaxed);
     Ok(())
+}
+
+/// True when the already-prepared (and pre-rendered) DJ mixer is for exactly
+/// the active/next engine pair currently in state.
+fn prepared_dj_mixer_matches_pair(state: &PlaybackRuntimeLoopState) -> bool {
+    let Some(prepared) = state.prepared_dj_mixer.as_ref() else {
+        return false;
+    };
+    let active_id = state.engine.as_ref().map(|engine| engine.track_id);
+    let next_id = state.next_engine.as_ref().map(|engine| engine.track_id);
+    active_id == Some(prepared.current_track_id) && next_id == Some(prepared.next_track_id)
 }
 
 fn prepare_dj_mixer_for_pair(
@@ -1638,6 +1769,23 @@ fn arm_active_transition_window(
         .shared
         .crossfade_samples
         .store(samples, Ordering::Relaxed);
+    // Beat-anchored plans fire at an absolute decoded-audio position; the
+    // from-end countdown stays as the fallback for plans without a grid.
+    // Always (re)store so a re-arm with a gridless plan clears a stale
+    // anchor from an earlier plan on the same engine.
+    let anchor_trigger_samples = transition
+        .anchor_start_ms
+        .filter(|anchor_ms| *anchor_ms >= 0)
+        .map(|anchor_ms| {
+            (anchor_ms as u64)
+                .saturating_mul(state.device_sample_rate as u64)
+                .saturating_mul(state.device_channels.max(1) as u64)
+                / 1000
+        });
+    engine.shared.dj_fire_trigger_samples.store(
+        anchor_trigger_samples.unwrap_or(u64::MAX),
+        Ordering::Relaxed,
+    );
     engine
         .shared
         .crossfade_start_signaled
@@ -1648,6 +1796,7 @@ fn arm_active_transition_window(
         overlap_ms = job.gapless.overlap_ms,
         fire_ahead_ms = transition.fire_ahead_ms,
         overlap_samples = samples,
+        anchor_start_ms = transition.anchor_start_ms,
         "DJ transition window armed"
     );
     true
@@ -2225,10 +2374,17 @@ fn run_runtime_loop(
                                 state.device_sample_rate,
                                 state.device_channels,
                             );
-                            let _ = prepare_dj_mixer_for_pair(
-                                &mut state,
-                                dj_mixer_max_block_samples(&output_config),
-                            );
+                            // The transition is pre-rendered at prepare /
+                            // decode-complete time; rebuilding here would put
+                            // an 8-28s render on the fire path and let deck A
+                            // drift past the snapshot while it runs. Only
+                            // rebuild if nothing usable was prepared.
+                            if !prepared_dj_mixer_matches_pair(&state) {
+                                let _ = prepare_dj_mixer_for_pair(
+                                    &mut state,
+                                    dj_mixer_max_block_samples(&output_config),
+                                );
+                            }
                             if prepared_overlay_program(&state) {
                                 let device_sample_rate = state.device_sample_rate;
                                 let device_channels = state.device_channels;
@@ -2355,10 +2511,12 @@ fn run_runtime_loop(
                         } else {
                             DjRuntimeRendererReason::None
                         };
-                        let _ = prepare_dj_mixer_for_pair(
-                            &mut state,
-                            dj_mixer_max_block_samples(&output_config),
-                        );
+                        if !prepared_dj_mixer_matches_pair(&state) {
+                            let _ = prepare_dj_mixer_for_pair(
+                                &mut state,
+                                dj_mixer_max_block_samples(&output_config),
+                            );
+                        }
                         if crossfade_started
                             && !active_engine_suppresses_crossfade_after_seek(&state)
                         {
@@ -3451,7 +3609,7 @@ fn promote_next_to_active(
     if let Some(mut prior) = state.fading_out_engine.take() {
         prior.stop();
     }
-    if let Some(mut outgoing) = outgoing {
+    if let Some(outgoing) = outgoing {
         let outgoing_id = outgoing.track_id;
         let outgoing_generation = outgoing.generation;
         let actual_start_ms = actual_start_ms_override.unwrap_or_else(|| {
@@ -3462,10 +3620,16 @@ fn promote_next_to_active(
             )
         });
         if runtime_renderer.rendered {
-            outgoing.stop();
-        } else {
-            state.fading_out_engine = Some(outgoing);
+            // The installed mix carries this track's own continuation, so the
+            // live copy must leave over the short seam ramp, not a hard cut.
+            // It then drains silently to its natural end and TrackTerminal
+            // reaps it from the fading slot, same as the legacy path.
+            outgoing.shared.dj_fadeout_start_samples.store(
+                outgoing.shared.position_samples.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
         }
+        state.fading_out_engine = Some(outgoing);
         if let Some(transition_event_id) = transition_event_id {
             info!(
                 transition_event_id,
@@ -4127,6 +4291,7 @@ mod tests {
                 queue_generation,
                 current_queue_item_id,
                 next_queue_item_id,
+                anchor_start_ms: None,
             }
         }
 
@@ -4207,13 +4372,13 @@ mod tests {
         state.next_engine = Some(next);
 
         assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
-        let prepared = state.prepared_dj_mixer.as_mut().expect("prepared mixer");
+        let prepared = state.prepared_dj_mixer.as_ref().expect("prepared mixer");
         assert_eq!(prepared.current_track_id, 1);
         assert_eq!(prepared.next_track_id, 2);
 
-        let mut out = [0.0; 4];
-        prepared.mixer.render_block(&mut out, 0);
-        assert!(out.iter().any(|sample| *sample != 0.0));
+        // The transition audio is rendered at build time now, not at fire.
+        assert!(!prepared.rendered.is_empty());
+        assert!(prepared.rendered.iter().any(|sample| *sample != 0.0));
     }
 
     #[test]
@@ -4351,12 +4516,13 @@ mod tests {
         state.next_engine = Some(next);
 
         assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
-        let prepared = state.prepared_dj_mixer.as_mut().expect("prepared mixer");
-        let mut out = [0.0; 2];
+        let prepared = state.prepared_dj_mixer.as_ref().expect("prepared mixer");
 
-        prepared.mixer.render_block(&mut out, 0);
-
-        assert!(out.iter().all(|sample| (*sample - 0.7).abs() < 1e-6));
+        assert!(
+            prepared.rendered[..2]
+                .iter()
+                .all(|sample| (*sample - 0.7_f32).abs() < 1e-6)
+        );
     }
 
     #[test]
@@ -4890,7 +5056,7 @@ mod tests {
     }
 
     #[test]
-    fn mixer_promotion_stops_outgoing_without_legacy_fade() {
+    fn mixer_promotion_seam_fades_outgoing_instead_of_hard_stop() {
         let mut state = test_runtime_loop_state();
         start_dj_lookahead_in_state(
             &mut state,
@@ -4937,8 +5103,19 @@ mod tests {
             DjRuntimeRendererOutcome::rendered_handoff(),
         );
 
-        assert!(outgoing_stopped.load(Ordering::SeqCst));
-        assert!(state.fading_out_engine.is_none());
+        // The rendered mix carries the outgoing track's continuation, so the
+        // live copy must ramp out over the seam window (then drain to its
+        // natural end in the fading slot), never hard-cut mid-waveform.
+        assert!(!outgoing_stopped.load(Ordering::SeqCst));
+        let fading = state.fading_out_engine.as_ref().expect("fading engine");
+        assert_eq!(fading.track_id, 1);
+        assert_eq!(
+            fading
+                .shared
+                .dj_fadeout_start_samples
+                .load(Ordering::Relaxed),
+            96_000
+        );
         assert_eq!(state.engine.as_ref().map(|engine| engine.track_id), Some(2));
         match event_rx.try_recv().expect("timing event") {
             PlaybackRuntimeEvent::DjTransitionPromoted {
@@ -5067,6 +5244,172 @@ mod tests {
         assert_eq!(
             active.shared.crossfade_samples.load(Ordering::Relaxed),
             118_176
+        );
+    }
+
+    #[test]
+    fn beat_anchored_plan_arms_absolute_fire_trigger() {
+        let mut state = test_runtime_loop_state();
+        state.device_sample_rate = 48_000;
+        state.device_channels = 2;
+        state.engine = Some(test_engine_with_shared(1, 20));
+
+        let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+        // Grid downbeat at 3:00.000 on the decoded-audio timeline.
+        transition.anchor_start_ms = Some(180_000);
+        let mut job = PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition);
+        job.gapless = GaplessPlan {
+            enabled: true,
+            overlap_ms: 1_000,
+            prebuffer_ms: 500,
+            requires_stream_metadata: false,
+        };
+
+        assert!(arm_active_transition_window(&mut state, &job));
+        let active = state.engine.as_ref().expect("active engine");
+        // 180s * 48_000 * 2ch interleaved samples.
+        assert_eq!(
+            active
+                .shared
+                .dj_fire_trigger_samples
+                .load(Ordering::Relaxed),
+            17_280_000
+        );
+        // The from-end window is still armed as the fade envelope + fallback.
+        assert_eq!(
+            active.shared.crossfade_samples.load(Ordering::Relaxed),
+            96_000
+        );
+    }
+
+    #[test]
+    fn gridless_plan_rearm_clears_stale_fire_trigger() {
+        let mut state = test_runtime_loop_state();
+        state.device_sample_rate = 48_000;
+        state.device_channels = 2;
+        let active = test_engine_with_shared(1, 20);
+        active
+            .shared
+            .dj_fire_trigger_samples
+            .store(123_456, Ordering::Relaxed);
+        state.engine = Some(active);
+
+        let mut job = PreparedPlaybackJob::test_fixture(2, 21)
+            .with_prepared_transition(test_prepared_transition_program(20, Some(11), Some(12)));
+        job.gapless = GaplessPlan {
+            enabled: true,
+            overlap_ms: 1_000,
+            prebuffer_ms: 500,
+            requires_stream_metadata: false,
+        };
+
+        assert!(arm_active_transition_window(&mut state, &job));
+        let active = state.engine.as_ref().expect("active engine");
+        assert_eq!(
+            active
+                .shared
+                .dj_fire_trigger_samples
+                .load(Ordering::Relaxed),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn handoff_install_skips_to_live_deck_a_position() {
+        let mut state = test_runtime_loop_state();
+        start_dj_lookahead_in_state(
+            &mut state,
+            Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+            Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+            Some(11),
+            Some(12),
+            20,
+            48_000,
+        );
+
+        let active = test_engine_with_shared(1, 20);
+        finish_engine_buffer(&active, &[0.1, 0.1, 0.2, 0.2, 0.3, 0.3]);
+
+        let mut next = test_engine_with_shared(2, 21);
+        next.job = PreparedPlaybackJob::test_fixture(2, 21)
+            .with_prepared_transition(test_prepared_transition_program(20, Some(11), Some(12)));
+        finish_engine_buffer(&next, &[0.0, 0.0, 0.4, 0.4, 0.5, 0.5, 0.6, 0.6]);
+
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+
+        // Pre-render with deck A at frame 0 (read_pos 0), like a build at
+        // prepare time.
+        assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
+
+        // By the time the fire is handled, the live playhead has moved one
+        // frame past the position the render starts at.
+        state
+            .engine
+            .as_ref()
+            .expect("active engine")
+            .shared
+            .buffer
+            .lock()
+            .expect("active buffer")
+            .read_pos = 2;
+
+        assert!(install_prepared_handoff_mixer_buffer(&mut state).is_ok());
+
+        let next = state.next_engine.as_ref().expect("next engine");
+        let buffer = next.shared.buffer.lock().expect("buffer lock");
+        // Rendered mix is [0.1, 0.1, 0.6, 0.6] (frame 0: A only pre-sync,
+        // frame 1: A frame 1 + B frame 1); joining one frame in plays the
+        // transition from frame 1 so deck A stays continuous with the live
+        // stream.
+        assert_eq!(buffer.read_pos, 2);
+        // position = offset + read_pos so this track's own future near-end /
+        // fire math is not shifted by the seam offset.
+        assert_eq!(next.shared.position_samples.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn handoff_install_rejects_join_past_transition_midpoint() {
+        let mut state = test_runtime_loop_state();
+        start_dj_lookahead_in_state(
+            &mut state,
+            Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+            Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+            Some(11),
+            Some(12),
+            20,
+            48_000,
+        );
+
+        let active = test_engine_with_shared(1, 20);
+        finish_engine_buffer(&active, &[0.1, 0.1, 0.2, 0.2, 0.3, 0.3]);
+
+        let mut next = test_engine_with_shared(2, 21);
+        next.job = PreparedPlaybackJob::test_fixture(2, 21)
+            .with_prepared_transition(test_prepared_transition_program(20, Some(11), Some(12)));
+        finish_engine_buffer(&next, &[0.0, 0.0, 0.4, 0.4, 0.5, 0.5, 0.6, 0.6]);
+
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+
+        assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
+
+        // Playhead ran 2 of the 2 rendered frames past the render start: only
+        // the tail of the blend is left, which sounds worse than the plain
+        // fallback overlap.
+        state
+            .engine
+            .as_ref()
+            .expect("active engine")
+            .shared
+            .buffer
+            .lock()
+            .expect("active buffer")
+            .read_pos = 4;
+
+        assert_eq!(
+            install_prepared_handoff_mixer_buffer(&mut state),
+            Err(DjRuntimeRendererReason::HandoffSeamTooLate)
         );
     }
 
@@ -6401,6 +6744,7 @@ mod tests {
             queue_generation,
             current_queue_item_id,
             next_queue_item_id,
+            anchor_start_ms: None,
         }
     }
 

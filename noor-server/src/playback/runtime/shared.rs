@@ -8,6 +8,12 @@ use tracing::{debug, warn};
 
 const GAPLESS_PREFILL_PAD_MS: usize = 250;
 const NEAR_END_THRESHOLD_MS: i64 = 30_000;
+/// Length of the seam ramps around a rendered DJ handoff: the outgoing live
+/// stream fades out over this window while the installed transition buffer
+/// carries a matching baked fade-in. Long enough to kill the cut click,
+/// short enough that the momentary doubling of the outgoing track's audio
+/// (live copy + its rendered continuation) reads as a single transient.
+pub(crate) const DJ_HANDOFF_FADE_MS: u32 = 15;
 /// Sample count at which an active PlaybackBuffer emits a one-shot warning.
 /// 50_000_000 f32 samples is ~200 MB of allocation - well past the size at
 /// which the unbounded-buffer issue meaningfully impacts memory. This is
@@ -62,6 +68,21 @@ pub(crate) fn write_output_u16(
         let normalized = sample.clamp(-1.0, 1.0) * 0.5 + 0.5;
         (normalized * u16::MAX as f32) as u16
     })
+}
+
+/// Equal-power ramp from 1.0 at `start` to 0.0 at `start + len`, held at 0
+/// afterwards. Positions are absolute-track interleaved samples; applying the
+/// same gain to every sample of a frame keeps channels matched.
+fn dj_handoff_fadeout_gain(pos: u64, start: u64, len: u64) -> f32 {
+    if pos <= start {
+        return 1.0;
+    }
+    let elapsed = pos - start;
+    if len == 0 || elapsed >= len {
+        return 0.0;
+    }
+    let t = elapsed as f32 / len as f32;
+    (t * std::f32::consts::FRAC_PI_2).cos()
 }
 
 fn write_output_buffer<T>(
@@ -192,7 +213,26 @@ fn write_output_buffer<T>(
     };
 
     let written = if guard.started {
-        guard.drain_into(data, &|s: f32| convert(s * volume * fade_gain))
+        let dj_fadeout_start = shared.dj_fadeout_start_samples.load(Ordering::Relaxed);
+        if dj_fadeout_start != u64::MAX {
+            // Rendered-handoff seam: the pre-rendered mix continues this
+            // track's audio on the incoming engine, so this live copy must
+            // leave over a short ramp, not a hard cut. Per-sample envelope;
+            // the cos() only runs for DJ_HANDOFF_FADE_MS worth of samples
+            // once per transition, then the branch degenerates to gain 0.
+            let fade_len = u64::from(DJ_HANDOFF_FADE_MS)
+                * u64::from(shared.device_sample_rate)
+                * u64::from(shared.device_channels.max(1))
+                / 1000;
+            let mut cursor = shared.position_samples.load(Ordering::Relaxed);
+            guard.drain_into(data, &mut |s: f32| {
+                let seam_gain = dj_handoff_fadeout_gain(cursor, dj_fadeout_start, fade_len);
+                cursor += 1;
+                convert(s * volume * fade_gain * seam_gain)
+            })
+        } else {
+            guard.drain_into(data, &mut |s: f32| convert(s * volume * fade_gain))
+        }
     } else {
         data.fill_with(|| convert(0.0));
         0
@@ -284,19 +324,26 @@ fn write_output_buffer<T>(
     if !shared.crossfade_start_signaled.load(Ordering::Relaxed) {
         let xfade = shared.crossfade_samples.load(Ordering::Relaxed);
         if xfade > 0 {
-            let total = shared.total_samples.load(Ordering::Relaxed);
-            if total > 0 {
-                let pos = shared.position_samples.load(Ordering::Relaxed);
-                if total.saturating_sub(pos) <= xfade {
-                    shared
-                        .crossfade_start_signaled
-                        .store(true, Ordering::Relaxed);
-                    let _ = command_tx.send(PlaybackRuntimeCommand::CrossfadeStart {
-                        track_id: shared.track_id,
-                        generation: shared.generation,
-                        trigger_position_samples: pos,
-                    });
-                }
+            let pos = shared.position_samples.load(Ordering::Relaxed);
+            let trigger = shared.dj_fire_trigger_samples.load(Ordering::Relaxed);
+            let fire = if trigger != u64::MAX {
+                // Beat-anchored DJ fire: the trigger is an absolute position
+                // on the decoded-audio timeline, immune to the metadata /
+                // decoded duration mismatch of the total-based countdown.
+                pos >= trigger
+            } else {
+                let total = shared.total_samples.load(Ordering::Relaxed);
+                total > 0 && total.saturating_sub(pos) <= xfade
+            };
+            if fire {
+                shared
+                    .crossfade_start_signaled
+                    .store(true, Ordering::Relaxed);
+                let _ = command_tx.send(PlaybackRuntimeCommand::CrossfadeStart {
+                    track_id: shared.track_id,
+                    generation: shared.generation,
+                    trigger_position_samples: pos,
+                });
             }
         }
     }
@@ -377,6 +424,18 @@ pub(crate) struct PlaybackSharedState {
     pub(crate) near_end_signaled: AtomicBool,
     pub(crate) crossfade_samples: AtomicU64,
     pub(crate) crossfade_start_signaled: AtomicBool,
+    /// Absolute-track interleaved sample position at which the DJ transition
+    /// should fire (`u64::MAX` = disarmed). When armed, the callback fires at
+    /// `pos >= trigger` instead of counting back from `total_samples`; the
+    /// beat-grid anchor lives on the decoded-audio timeline, while
+    /// total-based countdown inherits the (metadata - decoded) duration error
+    /// of up to ~500ms, which is most of a beat at club tempos.
+    pub(crate) dj_fire_trigger_samples: AtomicU64,
+    /// Absolute-track interleaved sample position where a short equal-power
+    /// fade-out begins (`u64::MAX` = disarmed). Armed on the outgoing engine
+    /// when a rendered DJ handoff is installed so the live stream ramps to
+    /// silence over DJ_HANDOFF_FADE_MS instead of hard-cutting mid-waveform.
+    pub(crate) dj_fadeout_start_samples: AtomicU64,
     pub(crate) suppress_crossfade_after_seek: AtomicBool,
     pub(crate) drop_preview_trigger_samples: AtomicU64,
     pub(crate) drop_preview_start_signaled: AtomicBool,
@@ -440,6 +499,8 @@ impl PlaybackSharedState {
             near_end_signaled: AtomicBool::new(false),
             crossfade_samples: AtomicU64::new(crossfade_samples),
             crossfade_start_signaled: AtomicBool::new(false),
+            dj_fire_trigger_samples: AtomicU64::new(u64::MAX),
+            dj_fadeout_start_samples: AtomicU64::new(u64::MAX),
             suppress_crossfade_after_seek: AtomicBool::new(false),
             drop_preview_trigger_samples: AtomicU64::new(u64::MAX),
             drop_preview_start_signaled: AtomicBool::new(false),
@@ -623,7 +684,7 @@ impl PlaybackBuffer {
         self.finished || (self.samples.len() - self.read_pos) >= self.start_threshold_samples
     }
 
-    fn drain_into<T>(&mut self, data: &mut [T], convert: &impl Fn(f32) -> T) -> usize {
+    fn drain_into<T>(&mut self, data: &mut [T], convert: &mut impl FnMut(f32) -> T) -> usize {
         let remaining = self.samples.len().saturating_sub(self.read_pos);
         let available = remaining.min(data.len());
         for (dst, &sample) in data
@@ -1092,6 +1153,91 @@ mod tests {
             }
             other => panic!("expected CrossfadeStart, got {other:?}"),
         }
+    }
+
+    /// A beat-anchored transition must hold its fire until the absolute
+    /// trigger position even when the metadata-derived end-window countdown
+    /// has already been crossed. Same setup as
+    /// crossfade_start_command_captures_callback_position (which fires), plus
+    /// an anchor slightly ahead of the playhead.
+    #[test]
+    fn anchored_trigger_overrides_end_window_countdown() {
+        let shared = test_shared_state();
+        shared.total_samples.store(10_000, Ordering::Relaxed);
+        shared.position_samples.store(9_600, Ordering::Relaxed);
+        shared.crossfade_samples.store(500, Ordering::Relaxed);
+        shared
+            .dj_fire_trigger_samples
+            .store(9_800, Ordering::Relaxed);
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer lock");
+            buffer.samples.extend_from_slice(&[0.5, 0.5, 0.5, 0.5]);
+        }
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut out = [0.0_f32; 4];
+        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+
+        assert!(
+            !shared.crossfade_start_signaled.load(Ordering::Relaxed),
+            "inside the end window but before the anchor: must not fire"
+        );
+        assert!(command_rx.try_recv().is_err());
+
+        // Reaching the anchor fires on the next callback.
+        shared.position_samples.store(9_800, Ordering::Relaxed);
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer lock");
+            buffer.samples.extend_from_slice(&[0.5, 0.5, 0.5, 0.5]);
+        }
+        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+        match command_rx.try_recv().expect("crossfade command") {
+            PlaybackRuntimeCommand::CrossfadeStart { .. } => {}
+            other => panic!("expected CrossfadeStart, got {other:?}"),
+        }
+    }
+
+    /// The seam fade-out ramps the live copy of the outgoing track to
+    /// silence per-sample once a rendered handoff is installed.
+    #[test]
+    fn dj_fadeout_ramps_live_output_to_silence() {
+        let shared = test_shared_state();
+        shared.total_samples.store(10_000_000, Ordering::Relaxed);
+        shared.crossfade_samples.store(500, Ordering::Relaxed);
+        // Already signaled: the fire happened, the handoff is installed.
+        shared
+            .crossfade_start_signaled
+            .store(true, Ordering::Relaxed);
+        shared.dj_fadeout_start_samples.store(0, Ordering::Relaxed);
+        // 15ms at 48k/2ch = 1440 interleaved samples; start half-way in.
+        shared.position_samples.store(720, Ordering::Relaxed);
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer lock");
+            buffer.samples.extend_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+        }
+
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut out = [0.0_f32; 4];
+        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+
+        let expected = (720.0_f32 / 1440.0 * std::f32::consts::FRAC_PI_2).cos();
+        assert!(
+            (out[0] - expected).abs() < 1e-3,
+            "expected ~{expected} mid-fade, got {}",
+            out[0]
+        );
+        assert!(out[3] < out[0], "gain must keep falling within the block");
+
+        // Past the fade window the live copy is fully silent.
+        shared.position_samples.store(2_000, Ordering::Relaxed);
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer lock");
+            buffer.samples.extend_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+        }
+        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+        assert_eq!(out, [0.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]

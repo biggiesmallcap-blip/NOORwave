@@ -236,6 +236,7 @@ async fn schedule_drop_preview_for_pair(
             queue_generation: lookahead.queue_generation,
             current_queue_item_id: lookahead.current_queue_item_id,
             next_queue_item_id: lookahead.next_queue_item_id,
+            anchor_start_ms: None,
         });
     job.gapless = crate::playback::gapless::GaplessPlan::disabled();
 
