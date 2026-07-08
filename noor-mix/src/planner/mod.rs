@@ -49,18 +49,37 @@ impl Planner {
             return TransitionTemplate::SlamCut;
         }
 
-        let Some(camelot_distance) = outgoing
+        // camelot_distance is None when either track has no analyzed key (a
+        // third of TIDAL-streamed tracks lack one); Some(d) with d in {0,1,7}
+        // is a harmonic fit (identical key, adjacent Camelot hour, or relative
+        // major/minor).
+        let camelot_distance = outgoing
             .camelot_key
             .as_deref()
             .zip(incoming.camelot_key.as_deref())
-            .and_then(|(a, b)| scoring::camelot_distance(a, b))
-        else {
-            return TransitionTemplate::SafeCrossfade;
-        };
-        let harmonic_fit = matches!(camelot_distance, 0 | 1 | 7);
+            .and_then(|(a, b)| scoring::camelot_distance(a, b));
+        let harmonic_fit = camelot_distance.is_some_and(|d| matches!(d, 0 | 1 | 7));
         if !harmonic_fit {
+            // Unknown or clashing key: a harmonic blend or a drop tease would
+            // put two roots in the sub-bass at once, so those stay off. A bass
+            // swap hands the low band over one deck at a time (only one root in
+            // the sub at any instant), which is exactly how a key clash - or an
+            // unknown key - is mixed in practice. Allow it when the decks are
+            // beatmatched and both carry phrase depth to place the swap on a
+            // boundary; bold intent keeps its filter sweep; everything else
+            // degrades to a safe crossfade.
             if bold_filter_candidate {
                 return TransitionTemplate::FilterSweep;
+            }
+            let beatmatched = bpm_delta <= 3.0;
+            let phrase_depth =
+                outgoing.phrase_bar_indices.len() >= 2 && incoming.phrase_bar_indices.len() >= 2;
+            if beatmatched && phrase_depth && !matches!(policy.mix_intent, MixIntent::Safe) {
+                if outgoing.phrase_bar_indices.len() >= 4 && incoming.phrase_bar_indices.len() >= 4
+                {
+                    return TransitionTemplate::BassSwap32;
+                }
+                return TransitionTemplate::BassSwap16;
             }
             return TransitionTemplate::SafeCrossfade;
         }
@@ -82,7 +101,7 @@ impl Planner {
             return TransitionTemplate::DropTease16;
         }
         if matches!(policy.transition_speed_bias, TransitionSpeedBias::Slower)
-            && matches!(camelot_distance, 0 | 1 | 7)
+            && harmonic_fit
             && bpm_delta <= 3.0
         {
             return TransitionTemplate::LongHarmonicBlend;
@@ -1123,11 +1142,28 @@ mod tests {
     }
 
     #[test]
-    fn choose_template_missing_camelot_is_safe_crossfade() {
+    fn choose_template_missing_camelot_uses_bass_swap_when_beatmatched() {
+        // A track with no analyzed key still gets a real blend: a bass swap
+        // isolates the low band, so an unknown key is safe when tempo is
+        // matched and both sides have phrase depth.
         assert_eq!(
             Planner::choose_template(
                 &profile(Some(120.0), None, 32),
                 &profile(Some(120.0), Some("8A"), 32),
+                &Policy::default()
+            ),
+            TransitionTemplate::BassSwap32
+        );
+    }
+
+    #[test]
+    fn choose_template_missing_camelot_without_phrase_depth_is_safe_crossfade() {
+        // No phrase depth means there is no boundary to place the swap on, so
+        // an unknown key still degrades to a safe crossfade.
+        assert_eq!(
+            Planner::choose_template(
+                &profile(Some(120.0), None, 1),
+                &profile(Some(120.0), Some("8A"), 1),
                 &Policy::default()
             ),
             TransitionTemplate::SafeCrossfade
@@ -1347,15 +1383,35 @@ mod tests {
     }
 
     #[test]
-    fn choose_template_rejects_distant_same_mode_camelot_for_balanced_intent() {
+    fn choose_template_clashing_camelot_uses_bass_swap_for_balanced_intent() {
+        // 8A vs 3A is a genuine harmonic clash (distance 5). A harmonic blend
+        // would fight, but a bass swap keeps one root in the sub at a time, so
+        // a beatmatched, phrase-deep pair gets a bass swap rather than a plain
+        // crossfade.
         assert_eq!(
             Planner::choose_template(
                 &profile(Some(120.0), Some("8A"), 4),
                 &profile(Some(121.0), Some("3A"), 4),
                 &Policy::default()
             ),
-            TransitionTemplate::SafeCrossfade
+            TransitionTemplate::BassSwap32
         );
+    }
+
+    #[test]
+    fn choose_template_clashing_camelot_never_uses_harmonic_blend() {
+        // A clashing key must not reach LongHarmonicBlend even under a Slower
+        // bias (that template overlaps both low bands); it stays a bass swap.
+        let policy = Policy {
+            transition_speed_bias: TransitionSpeedBias::Slower,
+            ..Policy::default()
+        };
+        let chosen = Planner::choose_template(
+            &profile(Some(120.0), Some("8A"), 4),
+            &profile(Some(120.0), Some("3A"), 4),
+            &policy,
+        );
+        assert_eq!(chosen, TransitionTemplate::BassSwap32);
     }
 
     #[test]

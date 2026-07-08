@@ -2958,7 +2958,7 @@ mod tests {
         }
 
         #[test]
-        fn dj_transition_logging_limits_rejected_alternatives_to_three() {
+        fn dj_transition_logging_stores_no_fabricated_rejected_alternatives() {
             let db = db_with_pair();
             let transition = plan(&db);
             let rejected: String = db
@@ -2973,10 +2973,9 @@ mod tests {
                 .expect("rejected");
             let parsed: Vec<Value> = serde_json::from_str(&rejected).expect("json");
 
-            assert!(parsed.len() <= 3);
-            assert!(parsed.iter().all(|item| item.get("template").is_some()));
-            assert!(parsed.iter().all(|item| item.get("score").is_some()));
-            assert!(parsed.iter().all(|item| item.get("reason").is_some()));
+            // The planner is a decision tree, not a scorer, so it logs an empty
+            // list rather than a fabricated per-alternative ranking.
+            assert!(parsed.is_empty());
         }
 
         #[test]

@@ -10,6 +10,37 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### dj: recover missing Camelot keys (quiet-intro window + hard confidence gate)
+
+34% of DSP-analyzed tracks (547/1601 on the dev library) have no camelot_key.
+Root cause (verified): passive analysis reads a fixed first-30s window at
+offset 0 (playback/decode/mod.rs:~734 tap; services/audio_analysis/mod.rs:129
+hardcodes offset_ms=0), which for electronic tracks is often a quiet/atonal
+intro. detect_key (services/audio_analysis/key.rs:101) then discards the flat
+PCP with `best_corr < 0.6 || margin < 0.05`, so the key is empty while every
+other feature computes. The keyless row still saves as v-current, and
+already_analyzed (mod.rs:108-114) locks the track out, so it never retries.
+Fix (three parts): (1) analyze a mid-track/loudest window - reuse the preview
+scanner's intro-skip (scanner.rs:216-231, PREVIEW_OFFSET_SEC) on the passive
+path; (2) treat a v-current row with an empty camelot_key as re-analyzable so
+the 547 self-heal on next play; (3) bump CURRENT_ANALYSIS_VERSION (or the
+per-field re-analyze) so the improvement propagates. Bass-swap-on-unknown-key
+(shipped) makes this non-blocking for transitions, so it is no longer urgent.
+- Spawned by: DJ key-detection + analyzer diagnosis session.
+
+### dj: fast-fail on TIDAL ad segments instead of timing out
+
+Some TIDAL streams resolve to ad-CDN segments (sp-ad-cf.audio.tidal.com) that
+always time out after 12s; nothing inspects segment hosts for ads
+(tidal/stream.rs::parse_dash_segment_template + fill_dash_template pass the
+host verbatim; decode/source.rs::is_retryable_dash_fetch_error treats the
+timeout as transient). The profile-rebuild backoff/give-up (shipped) now stops
+the infinite retry loop, but each doomed attempt still burns ~12-72s and two
+auto-rebuild slots. Add an ad-host check where the host is already parsed
+(dash_segment_debug_label, source.rs:~288) and return a distinct
+non-retryable error so ad streams skip straight to decode_failed.
+- Spawned by: DJ key-detection + analyzer diagnosis session.
+
 ### perf: replace the playback PCM Vec+Mutex with a real ring buffer
 
 The audio callback and the decoder thread share
