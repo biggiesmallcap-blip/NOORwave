@@ -236,10 +236,6 @@
     ];
   }
 
-  function primaryArtistSpotifyId(d: SpotifyTrackDetail): string | null {
-    return d.artists.find((a) => a.id !== null)?.id ?? null;
-  }
-
   function buildRowMenu(t: SpotifyPlaylistTrack): MenuItem[] {
     const track = asTidalPlayableFromRow(t);
     const disabled = track === null;
@@ -297,7 +293,6 @@
   {:else if detail}
     {@const headerTrack = asTidalPlayableFromDetail(detail)}
     {@const playable = headerTrack !== null}
-    {@const artistSpotifyId = primaryArtistSpotifyId(detail)}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <header class="header" oncontextmenu={handleHeaderContextMenu}>
       {#if detail.thumbnail}
@@ -310,11 +305,9 @@
         <h1 class="title">{detail.title ?? '-'}</h1>
         <div class="stats">
           {#if detail.primaryArtist}
-            {#if artistSpotifyId}
-              <a href={`/spotify-artist/${artistSpotifyId}`}>{detail.primaryArtist}</a>
-            {:else}
-              <span>{detail.primaryArtist}</span>
-            {/if}
+            <!-- Artist pages are TIDAL + local library only; the spotify-artist
+                 route was an unreachable dead layer and has been removed. -->
+            <span>{detail.primaryArtist}</span>
           {/if}
           {#if detail.album}
             {#if detail.albumId}

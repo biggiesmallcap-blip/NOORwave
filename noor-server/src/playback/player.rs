@@ -84,6 +84,11 @@ pub struct PreparedPlaybackJob {
     // from `start_from_offset_ms`. A fresh play has both = 0.
     pub start_from_segment_index: usize,
     pub start_from_offset_ms: u64,
+    // Transport intent carried WITH the job: when true, the engine this job
+    // spawns (or promotes) must come up silent. Set from the authoritative DB
+    // is_playing at dispatch time so an auto-advance racing a user's pause
+    // can no longer cold-start an audible engine while the UI says paused.
+    pub start_paused: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +173,7 @@ impl PreparedPlaybackJob {
             prepared_transition: None,
             start_from_segment_index: 0,
             start_from_offset_ms: 0,
+            start_paused: false,
         }
     }
 }
@@ -254,11 +260,22 @@ impl PreparedPlaybackJob {
             prepared_transition: None,
             start_from_segment_index: 0,
             start_from_offset_ms: 0,
+            start_paused: false,
         }
     }
 
     pub fn with_generation(mut self, generation: u64) -> Self {
         self.generation = generation;
+        self
+    }
+
+    /// Carry the user's transport intent with the job. `true` means the
+    /// engine spawned or promoted for this job comes up silent (paused).
+    /// Dispatch sites derive this from the authoritative `is_playing` right
+    /// before sending, so an advance racing a user pause starts muted
+    /// instead of blasting audio under a paused UI.
+    pub fn with_start_paused(mut self, start_paused: bool) -> Self {
+        self.start_paused = start_paused;
         self
     }
 

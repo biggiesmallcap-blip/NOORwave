@@ -1,13 +1,11 @@
 <script lang="ts">
 	import {
-		api,
 		type Track,
 		type TidalDiscographyAlbum,
 		type TidalDiscographyTrack,
 		type TidalArtistVideo,
 		type TidalSimilarArtist,
 		type TidalArtistBio,
-		type SpotifyArtistStats,
 		type TidalPlayable
 	} from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
@@ -38,23 +36,34 @@
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { buildTidalTrackMenu } from '$lib/player/track_menu';
+	import { buildVideoMenu } from '$lib/player/video_menu';
 	import { canPlayTrack } from '$lib/player/playable';
 	import {
 		tidalArtworkFallbackSizes,
 		upscaleTidalArtwork,
 		type TidalArtworkSize,
 	} from '$lib/utils/artwork';
-	import { formatCompactCount } from '$lib/utils/format';
 	import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';
 	import { cleanArtistBio } from './artist_bio';
 	import { artistCurrentTrackMatchesArtist } from './artist_playback';
+	import {
+		buildPopularTrackItems,
+		categorizeTidalAlbum,
+		popularTrackItemKey,
+		sortTidalAlbumsByReleaseDate,
+		type DiscoCategory,
+		type PopularTrackItem,
+	} from './artist_discography';
 
 	// One artist view, two data sources. A library artist is keyed by local id
-	// (rich local affordances: favorites, play counts, library albums, Spotify
-	// stats). A non-library artist found via search is keyed by its TIDAL id and
+	// (rich local affordances: favorites, play counts, library albums). A
+	// non-library artist found via search is keyed by its TIDAL id and
 	// sourced entirely from the TIDAL profile endpoint. The local code path is
 	// unchanged from when this lived in `/artists/[id]/+page.svelte`; the TIDAL
 	// path is additive and guarded behind `source.kind === 'tidal'`.
+	// Artist pages fetch from TIDAL and the local library ONLY - no Spotify
+	// proxy calls in this flow (they ride flaky anonymous proxies and were
+	// erroring in production logs while adding nothing the page needs).
 	type ArtistSource =
 		| { kind: 'local'; artistId: number }
 		| { kind: 'tidal'; tidalArtistId: number };
@@ -103,18 +112,12 @@
 	let tidalBio = $state<TidalArtistBio | null>(null);
 	let tidalLoading = $state(false);
 	let tidalAvailable = $state(false);
+	// TIDAL sub-fetches that failed or timed out server-side. Non-empty means
+	// the shelves below are PARTIAL, and the page says so instead of passing
+	// empty rails off as "this artist has no videos".
+	let tidalSectionsFailed = $state<string[]>([]);
 	let failedArtworkUrls = $state<Record<string, boolean>>({});
 	let tidalLoadSeq = 0;
-
-	let spotifyStats = $state<SpotifyArtistStats | null>(null);
-	let spotifyLoadSeq = 0;
-	let playcountByIsrc = $derived.by(() => {
-		const map = new Map<string, number>();
-		for (const t of spotifyStats?.tracks ?? []) {
-			if (t.playcount != null) map.set(t.isrc, t.playcount);
-		}
-		return map;
-	});
 
 	// Active TIDAL artist id used for "is this artist currently playing" checks
 	// and to stamp ephemeral TIDAL playables. In library mode it comes from the
@@ -166,6 +169,7 @@
 			tidalSimilarArtists = res.similar_artists ?? [];
 			tidalBio = res.bio ?? null;
 			tidalAvailable = res.available;
+			tidalSectionsFailed = res.sections_failed ?? [];
 			// View-time portrait fallback, populated alongside the rest
 			// of the discography so a missing local `photo_url` still
 			// renders a proper hero portrait instead of the initials disc.
@@ -181,14 +185,16 @@
 	// TIDAL mode: the profile endpoint returns the same rich shape as the
 	// library discography route (categorized albums, top tracks, videos,
 	// similar artists, bio, picture) keyed straight off the TIDAL id, so the
-	// same markup below renders without a local artist row.
+	// same markup below renders without a local artist row. Served through
+	// cachedApi: in-flight dedupe plus stale-while-revalidate, so revisiting
+	// an artist renders instantly instead of refetching the whole profile.
 	async function loadTidalProfile(tidalId: number) {
 		const seq = ++tidalLoadSeq;
 		tidalLoading = true;
 		loading = true;
 		error = null;
 		try {
-			const res = await api.getTidalArtistProfile(tidalId);
+			const res = await cachedApi.getTidalArtistProfile(tidalId);
 			if (seq !== tidalLoadSeq) return;
 			tidalProfileName = res.artist_name ?? null;
 			tidalAlbums = res.albums ?? [];
@@ -197,6 +203,7 @@
 			tidalSimilarArtists = res.similar_artists ?? [];
 			tidalBio = res.bio ?? null;
 			tidalAvailable = res.available ?? true;
+			tidalSectionsFailed = res.sections_failed ?? [];
 			if (res.picture_url) tidalPictureUrl = res.picture_url;
 			// TIDAL-mode artists have no local-track fallback, so an
 			// all-fetches-failed response (`available: false`) means TIDAL is
@@ -216,18 +223,6 @@
 		}
 	}
 
-	async function loadSpotifyStats(id: number) {
-		const seq = ++spotifyLoadSeq;
-		try {
-			const stats = await cachedApi.getArtistSpotifyStats(id);
-			if (seq === spotifyLoadSeq) spotifyStats = stats;
-		} catch (err) {
-			if (seq !== spotifyLoadSeq) return;
-			console.error('Failed to load Spotify stats', err);
-			spotifyStats = null;
-		}
-	}
-
 	$effect(() => {
 		artist = null;
 		tracks = [];
@@ -239,7 +234,7 @@
 		tidalSimilarArtists = [];
 		tidalBio = null;
 		tidalAvailable = false;
-		spotifyStats = null;
+		tidalSectionsFailed = [];
 		failedArtworkUrls = {};
 		bioExpanded = false;
 		if (source.kind === 'local') {
@@ -247,7 +242,6 @@
 			loading = true;
 			void load(id);
 			void loadDiscography(id);
-			void loadSpotifyStats(id);
 		} else {
 			void loadTidalProfile(source.tidalArtistId);
 		}
@@ -340,17 +334,12 @@
 				: bioText.slice(0, BIO_TRUNCATE).trimEnd() + '…'
 	);
 
-	type PopularTrackItem =
-		| { kind: 'local'; track: Track }
-		| { kind: 'tidal'; track: TidalDiscographyTrack };
-
 	function localPopularityScore(track: Track): number {
-		const spotifyPlaycount = track.isrc ? playcountByIsrc.get(track.isrc) : undefined;
-		return spotifyPlaycount ?? track.play_count ?? 0;
+		return track.play_count ?? 0;
 	}
 
 	function popularItemKey(item: PopularTrackItem): string {
-		return item.kind === 'local' ? `local-${item.track.id}` : `tidal-${item.track.tidal_id}`;
+		return popularTrackItemKey(item);
 	}
 
 	// A Top-tracks row as a TIDAL playable. Owned rows carry a tidal_id (the
@@ -407,42 +396,11 @@
 		);
 	}
 
-	// "Top tracks" follows TIDAL's popularity-ranked top-tracks order when
-	// available, replacing TIDAL rows with local rows where the user owns them.
-	// Local-only leftovers are appended by known playcount as a fallback.
-	let popularItems = $derived.by<PopularTrackItem[]>(() => {
-		const byTidalId = new Map<number, Track>();
-		for (const track of tracks) {
-			if (track.tidal_id != null && track.tidal_id > 0) byTidalId.set(track.tidal_id, track);
-		}
-
-		const seenLocalIds = new Set<number>();
-		const seenTidalIds = new Set<number>();
-		const ordered: PopularTrackItem[] = [];
-
-		for (const tidalTrack of tidalTopTracks) {
-			if (seenTidalIds.has(tidalTrack.tidal_id)) continue;
-			seenTidalIds.add(tidalTrack.tidal_id);
-			const localTrack = byTidalId.get(tidalTrack.tidal_id);
-			if (localTrack) {
-				seenLocalIds.add(localTrack.id);
-				ordered.push({ kind: 'local', track: localTrack });
-			} else {
-				ordered.push({ kind: 'tidal', track: tidalTrack });
-			}
-		}
-
-		const localRemainder = tracks
-			.filter((track) => !seenLocalIds.has(track.id))
-			.sort((a, b) => localPopularityScore(b) - localPopularityScore(a));
-
-		if (ordered.length === 0) {
-			return localRemainder.map((track) => ({ kind: 'local', track }));
-		}
-
-		ordered.push(...localRemainder.map((track) => ({ kind: 'local' as const, track })));
-		return ordered;
-	});
+	// "Top tracks" ordering lives in the shared artist_discography helper so
+	// this page and the see-all section page can never drift apart again.
+	let popularItems = $derived.by<PopularTrackItem[]>(() =>
+		buildPopularTrackItems(tracks, tidalTopTracks, localPopularityScore)
+	);
 	let popularMaxPlays = $derived(
 		Math.max(1, ...popularItems.map((item) => item.kind === 'local' ? localPopularityScore(item.track) : 0))
 	);
@@ -468,43 +426,11 @@
 		return Number.isFinite(y) ? y : null;
 	}
 
-	type DiscoCategory = 'album' | 'ep_single' | 'compilation' | 'live';
-	function categorize(a: TidalDiscographyAlbum): DiscoCategory {
-		// The TIDAL editorial filter is more authoritative than the per-album
-		// release_type body field; a compilation tagged release_type:"ALBUM"
-		// used to land in the Albums shelf and the Compilations shelf stayed
-		// empty even though the data was fetched.
-		switch (a.source_filter) {
-			case 'COMPILATIONS':
-				return 'compilation';
-			case 'LIVE':
-				return 'live';
-			case 'EPSANDSINGLES':
-				return 'ep_single';
-			case 'ALBUMS':
-				return 'album';
-		}
-		const type = (a.release_type ?? '').toUpperCase();
-		if (type === 'COMPILATION') return 'compilation';
-		if (type === 'LIVE') return 'live';
-		if (type === 'SINGLE' || type === 'EP') return 'ep_single';
-		if (type === 'ALBUM') return 'album';
-		return (a.number_of_tracks ?? 0) >= 3 ? 'album' : 'ep_single';
-	}
-
-	function sortByDate(list: TidalDiscographyAlbum[]): TidalDiscographyAlbum[] {
-		// Compare full ISO date strings (YYYY-MM-DD sorts lexicographically)
-		// not just the year. A Dec 2024 release should sit above a Jan 2024
-		// one. Missing dates sort to the bottom.
-		return [...list].sort((a, b) => {
-			const ad = a.release_date ?? '';
-			const bd = b.release_date ?? '';
-			if (ad === bd) return 0;
-			if (!ad) return 1;
-			if (!bd) return -1;
-			return bd.localeCompare(ad);
-		});
-	}
+	// Release bucketing + ordering are shared with the see-all section pages
+	// via artist_discography.ts (they used to drift: LIVE releases were
+	// bucketed differently between this page and the section page).
+	const categorize = categorizeTidalAlbum;
+	const sortByDate = sortTidalAlbumsByReleaseDate;
 
 	let tidalFullAlbums = $derived(sortByDate(tidalAlbums.filter((a) => categorize(a) === 'album')));
 	let tidalSinglesEPs = $derived(sortByDate(tidalAlbums.filter((a) => categorize(a) === 'ep_single')));
@@ -878,36 +804,8 @@
 							{/if}
 							{#if artist?.album_count}
 								{artist.album_count.toLocaleString()} {artist.album_count === 1 ? 'album' : 'albums'}
-								{#if spotifyStats?.monthly_listeners != null}<span class="dot">·</span>{/if}
-							{/if}
-							{#if spotifyStats?.monthly_listeners != null}
-								<span class="hero-listeners">{formatCompactCount(spotifyStats.monthly_listeners)} monthly listeners</span>
 							{/if}
 						</p>
-					{/if}
-					{#if spotifyStats && (spotifyStats.followers != null || spotifyStats.world_rank != null)}
-						<p class="hero-pills">
-							{#if spotifyStats.followers != null}
-								<span class="hero-pill" title="Spotify followers">
-									{formatCompactCount(spotifyStats.followers)} followers
-								</span>
-							{/if}
-							{#if spotifyStats.world_rank != null}
-								<span class="hero-pill" title="Spotify world rank">
-									#{spotifyStats.world_rank.toLocaleString()} worldwide
-								</span>
-							{/if}
-						</p>
-					{/if}
-					{#if spotifyStats?.top_cities && spotifyStats.top_cities.length > 0}
-						<ul class="hero-top-cities">
-							{#each spotifyStats.top_cities.slice(0, 3) as city (city.city + city.country)}
-								<li class="hero-top-city">
-									<span class="city-name">{city.city}{city.country ? `, ${city.country}` : ''}</span>
-									<span class="city-listeners">{formatCompactCount(city.listeners)}</span>
-								</li>
-							{/each}
-						</ul>
 					{/if}
 					{#if h.library_track_count > 0}
 						<p class="hero-library-substat">
@@ -983,6 +881,12 @@
 			/>
 		</div>
 
+		{#if tidalAvailable && tidalSectionsFailed.length > 0}
+			<p class="status subtle partial-note" role="status">
+				TIDAL was slow; some sections are partial. They will fill in on the next visit.
+			</p>
+		{/if}
+
 		{#if hasAnyPopular}
 			<section class="section">
 				<h2 class="section-title">Top tracks</h2>
@@ -990,7 +894,6 @@
 					{#each filteredPopularItems as item, idx (popularItemKey(item))}
 						{#if item.kind === 'local'}
 							{@const track = item.track}
-						{@const streamCount = track.isrc ? playcountByIsrc.get(track.isrc) : undefined}
 						<div class="popular-row-wrap">
 							<div
 								class="pop-bar"
@@ -1004,7 +907,6 @@
 								isPlaying={$isPlaying}
 								showArtist={false}
 								showPlayCount={true}
-								worldPlayCount={streamCount ?? null}
 								onRowClick={() => void onTopTrackPlay(item)}
 								menuOptions={{ hideArtistActions: true }}
 							/>
@@ -1128,6 +1030,11 @@
 			<a
 				class="grid-card video-card-rail"
 				href={`/videos?videoId=${video.tidal_id}`}
+				oncontextmenu={(e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					openContextMenu(e, buildVideoMenu(video), video.title);
+				}}
 			>
 				<div class="grid-art-wrap video-art-wrap">
 					{#if videoArt}
@@ -2081,61 +1988,6 @@
 		background: rgba(255, 255, 255, 0.11);
 		border-color: rgba(255, 255, 255, 0.16);
 		color: var(--text-primary, #fff);
-	}
-
-	.hero-listeners {
-		color: var(--text-secondary, rgba(255, 255, 255, 0.7));
-		font-variant-numeric: tabular-nums;
-	}
-
-	.hero-pills {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 6px;
-		margin: 6px 0 0;
-		padding: 0;
-	}
-
-	.hero-pill {
-		display: inline-flex;
-		align-items: center;
-		padding: 2px 10px;
-		font-size: var(--font-size-xs);
-		line-height: var(--line-height-snug);
-		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.06);
-		color: var(--text-secondary, rgba(255, 255, 255, 0.75));
-		font-variant-numeric: tabular-nums;
-	}
-
-	.hero-top-cities {
-		list-style: none;
-		margin: 8px 0 0;
-		padding: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-		max-width: 260px;
-	}
-
-	.hero-top-city {
-		display: flex;
-		justify-content: space-between;
-		align-items: baseline;
-		gap: 8px;
-		font-size: var(--font-size-xs);
-		color: var(--text-secondary, rgba(255, 255, 255, 0.7));
-	}
-
-	.hero-top-city .city-name {
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.hero-top-city .city-listeners {
-		font-variant-numeric: tabular-nums;
-		opacity: 0.8;
 	}
 
 </style>

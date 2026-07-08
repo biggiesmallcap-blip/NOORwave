@@ -777,3 +777,45 @@ resolution. Pre-existing; the tidal-repair/resolver-401 change only added
 callers. Fix by serializing refresh through a tokio::Mutex (or a shared
 in-flight future) keyed on the used access token.
 Spawned by: tidal metadata self-heal + resolver 401 recovery 2026-07-06
+
+### cleanup: spotify-album / spotify-track routes are an unreachable cluster
+
+The spotify-artist route was removed (artist flow is TIDAL + local only) and
+its two siblings, /spotify-album/[id] and /spotify-track/[id], now have zero
+inbound links anywhere in the frontend (search, charts, palette, and moods all
+route to /spotify-playlist only, and the playlist page never links into the
+track/album/artist cluster). Their artist links were downgraded to plain text.
+Remove both routes plus spotify_save_contract.test.ts, or re-link them, once
+the cross-platform (SoundCloud/YouTube) direction firms up. client.ts
+getSpotifyArtist/getSpotifyArtistRelated/getSpotifyArtistTopTracks and
+cachedApi.getArtistSpotifyStats are also uncalled now; prune with them.
+Spawned by: artist page + playback hardening 2026-07-09
+
+### robustness: album pages still lack the artist-flow fetch budget
+
+catalog_routes.rs artist fan-out now runs behind bounded_artist_fetch (hard
+per-group deadline incl. request-limiter queue wait, one bounded retry, TTL
+payload cache + single-flight). get_album_tracks / get_tidal_album_tracks
+still call client.get_all_album_tracks unbounded (up to 20 pages x 30s
+sequential worst case through the same 4-permit limiter). Apply the same
+bounded-fetch + cache pattern to the album routes.
+Spawned by: artist page + playback hardening 2026-07-09
+
+### consolidation: remote artist pages could adopt ArtistDetail
+
+/remote/artists/[id] and /remote/tidal/artists/[id] now share the cache layer
+and load-guard patterns with the desktop pages, but still carry their own
+hero/rail markup. Full adoption of the shared ArtistDetail view was deferred:
+the remote shell (RemotePageShell, iOS PWA tap constraints) differs enough
+that a merge needs its own pass with on-device testing.
+Spawned by: artist page + playback hardening 2026-07-09
+
+### observability: spotify_public enrichment churns while its breaker is open
+
+Live logs (2026-07-08 ~15:07 UTC) show periodic spotify_public isrc searches
+failing with HTTP 400 then "circuit open" warnings every few minutes with no
+user action; some background enrichment keeps queueing seeds while the
+breaker is open. Find the caller (likely album/artist playcount enrichment or
+auto_enrich) and gate new fan-outs on breaker state so idle sessions stop
+burning proxy quota and log noise.
+Spawned by: artist page + playback hardening 2026-07-09
