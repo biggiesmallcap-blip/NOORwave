@@ -9,11 +9,14 @@ pub mod queue_prescanner;
 pub mod scanner;
 pub mod tempo;
 
-// v10: passive analysis now skips the track intro before running key
-// detection (see PASSIVE_INTRO_SKIP_SEC). Bumping the version re-runs analysis
-// once on every existing row so tracks whose key came back empty from a quiet
-// intro window are re-analysed against the track body and self-heal.
-pub const CURRENT_ANALYSIS_VERSION: &str = "v10";
+// v11: energy is now a perceptual map of integrated LUFS (-30 -> 0.0,
+// -6 -> 1.0) instead of RMS/0.7, which pinned ~97% of a real library below
+// 0.5 and crushed the Sonic Field chart into the left third of its axis.
+// Bumping the version re-runs analysis once on every existing row (playback
+// actor, queue prescanner, and the Settings preview scan all key off it) so
+// stored energy values migrate to the new scale in the background.
+// v10: passive analysis skipped the track intro before key detection.
+pub const CURRENT_ANALYSIS_VERSION: &str = "v11";
 
 /// Server-config key controlling whether the playback-driven actor analyses
 /// audio at all. Defaults to enabled. Stored in the `server_config` k/v table

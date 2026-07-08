@@ -777,3 +777,21 @@ resolution. Pre-existing; the tidal-repair/resolver-401 change only added
 callers. Fix by serializing refresh through a tokio::Mutex (or a shared
 in-flight future) keyed on the used access token.
 Spawned by: tidal metadata self-heal + resolver 401 recovery 2026-07-06
+
+### dj: DjProfile.energy contour-mean fallback is on a different scale
+
+playback/dj_engine.rs:353 falls back to average_energy_contour (mean of the
+per-phrase contour, which is peak-normalized PER TRACK) when the stored energy
+scalar is absent. That mean is track-relative; the stored scalar is now an
+absolute LUFS map (analysis v11), so the two scales diverge more than they did
+under RMS/0.7. Either map the fallback through the same loudness scale or drop
+it and treat missing energy as unknown.
+Spawned by: Sonic Field energy rescale 2026-07-09
+
+### analysis: richer energy metric (loudness + spectral flux / onset density)
+
+Energy (v11) is purely a loudness map. A Spotify-style energy would blend
+spectral flux, onset density, and centroid so busy-but-quiet tracks outrank
+sparse loud ones. Needs another CURRENT_ANALYSIS_VERSION bump and a fresh
+blast-radius pass over the [0,1] consumers; batch with the next DSP change.
+Spawned by: Sonic Field energy rescale 2026-07-09

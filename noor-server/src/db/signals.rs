@@ -846,6 +846,10 @@ fn get_top_artists_windowed(
     window_listened_ms: i64,
 ) -> Result<Vec<AnalyticsTopArtist>> {
     let previous_ranks = previous_artist_ranks(conn, days)?;
+    // Ranked by listened time because that is the metric the analytics card
+    // displays; raw listen counts include instant skip-starts and produced
+    // orderings that contradicted the times shown next to them.
+    // `previous_artist_ranks` must sort by the same key.
     let mut stmt = conn.prepare(
         "SELECT a.id, a.name,
                 COUNT(lh.id) AS listens,
@@ -857,7 +861,7 @@ fn get_top_artists_windowed(
          JOIN artists a ON t.artist_id = a.id
          WHERE lh.started_at >= datetime('now', printf('-%d days', ?1))
          GROUP BY a.id, a.name
-         ORDER BY listens DESC, total_listened_ms DESC, a.name ASC
+         ORDER BY total_listened_ms DESC, listens DESC, a.name ASC
          LIMIT ?2",
     )?;
     let mut rows = stmt
@@ -947,8 +951,8 @@ fn previous_artist_ranks(conn: &Connection, days: i64) -> Result<HashMap<i64, i6
             SELECT
                 a.id AS artist_id,
                 ROW_NUMBER() OVER (
-                    ORDER BY COUNT(lh.id) DESC,
-                             COALESCE(SUM(lh.duration_listened_ms), 0) DESC,
+                    ORDER BY COALESCE(SUM(lh.duration_listened_ms), 0) DESC,
+                             COUNT(lh.id) DESC,
                              a.name ASC
                 ) AS rank
             FROM listen_history lh
@@ -1580,6 +1584,45 @@ mod tests {
         assert_eq!(popular_artist.share_of_window_listened_ms, Some(0.9));
         assert_eq!(popular_artist.previous_rank, Some(2));
         assert_eq!(popular_artist.rank_delta, Some(1));
+    }
+
+    /// Top artists rank by listened time (the metric the card displays), not
+    /// by raw listen-event count; previous-window ranks use the same key so
+    /// rank deltas compare like-for-like.
+    #[test]
+    fn analytics_signals_top_artists_rank_by_listened_time() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        seed_analytics_track(&conn, 11, 10, "Short Loops", "Sprinter");
+        seed_analytics_track(&conn, 21, 20, "Long Cut", "Marathoner");
+
+        // Current window: Sprinter has more listen events, Marathoner more time.
+        seed_analytics_listen(&conn, 1, 11, "-1 days", 40_000, false, Some("s-a"));
+        seed_analytics_listen(&conn, 2, 11, "-1 days", 40_000, false, Some("s-a"));
+        seed_analytics_listen(&conn, 3, 11, "-1 days", 40_000, false, Some("s-a"));
+        seed_analytics_listen(&conn, 4, 21, "-1 days", 600_000, true, Some("s-a"));
+        // Previous window: flipped, Sprinter had more time.
+        seed_analytics_listen(&conn, 5, 11, "-4 days", 60_000, true, Some("p-a"));
+        seed_analytics_listen(&conn, 6, 11, "-4 days", 60_000, true, Some("p-a"));
+        seed_analytics_listen(&conn, 7, 21, "-4 days", 50_000, true, Some("p-a"));
+
+        let s = Signals::compute(&conn, 3).expect("signals");
+        let names: Vec<&str> = s
+            .top_artists
+            .iter()
+            .map(|artist| artist.artist_name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Marathoner", "Sprinter"]);
+
+        let marathoner = &s.top_artists[0];
+        assert_eq!(marathoner.listens, 1);
+        assert_eq!(marathoner.total_listened_ms, 600_000);
+        assert_eq!(marathoner.previous_rank, Some(2));
+        assert_eq!(marathoner.rank_delta, Some(1));
+
+        let sprinter = &s.top_artists[1];
+        assert_eq!(sprinter.previous_rank, Some(1));
+        assert_eq!(sprinter.rank_delta, Some(-1));
     }
 
     #[test]

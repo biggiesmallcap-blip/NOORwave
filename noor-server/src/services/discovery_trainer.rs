@@ -14,10 +14,14 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
+// v4: the stored DSP `energy` was rescaled from RMS/0.7 to a LUFS map
+// (analysis v11), which shifts nearly every track's energy_{N} bucket token.
+// The bump invalidates v3 caches so refreshes recompute against re-analysed
+// rows instead of keeping old-scale buckets baked into stored vectors.
 // v3: audio-proxy tokens are IDF-weighted (compute_token_idf), so common tokens
 // like broad genres no longer dominate the projection. The bump invalidates v2
 // caches so incremental refreshes recompute rather than mixing weighting schemes.
-pub const AUDIO_PROXY_FEATURE_VERSION: &str = "metadata-audio-proxy-v3";
+pub const AUDIO_PROXY_FEATURE_VERSION: &str = "metadata-audio-proxy-v4";
 
 // ── Progress update struct ────────────────────────────────────────────────────
 

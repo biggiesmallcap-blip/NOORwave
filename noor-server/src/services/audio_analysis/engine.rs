@@ -32,11 +32,11 @@ pub fn analyze_clip(
     // 2. Key detection
     let (key_signature, camelot_key) = detect_key(samples, sample_rate);
 
-    // 3. Energy
-    let energy = Some(features::compute_energy(samples));
-
-    // 4. LUFS
+    // 3. LUFS (computed before energy: the energy map is derived from it)
     let loudness_lufs = features::compute_lufs(samples, sample_rate);
+
+    // 4. Energy: perceptual map of LUFS, RMS-dB fallback for sub-second clips
+    let energy = Some(features::compute_energy(samples, loudness_lufs));
 
     // 5-6, 8. One STFT pass feeds spectral_centroid + instrumental + danceability.
     let stft = features::compute_stft_features(samples, sample_rate);
@@ -139,7 +139,15 @@ pub fn analyze_and_save(
 }
 
 fn is_empty_analysis(f: &AudioDspFeatures) -> bool {
-    f.bpm.is_none() && f.key_signature.is_none() && f.energy.map(|e| e < 0.001).unwrap_or(true)
+    // LUFS must be None too: a real-but-very-quiet track (below the -30 LUFS
+    // energy floor) legitimately maps energy to 0.0, while true silence
+    // (e.g. a DRM-encrypted clip decoding to zeros) gates every LUFS block
+    // and yields None. Without this check quiet ambient tracks with no
+    // detectable bpm/key would be misread as silence and never persisted.
+    f.bpm.is_none()
+        && f.key_signature.is_none()
+        && f.loudness_lufs.is_none()
+        && f.energy.map(|e| e < 0.001).unwrap_or(true)
 }
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
@@ -154,4 +162,68 @@ fn detect_key(samples: &[f32], sample_rate: u32) -> (Option<String>, Option<Stri
     key::detect_key(samples, sample_rate)
         .map(|(sig, camelot)| (Some(sig), Some(camelot)))
         .unwrap_or((None, None))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn features(
+        bpm: Option<f64>,
+        key_signature: Option<&str>,
+        loudness_lufs: Option<f64>,
+        energy: Option<f64>,
+    ) -> AudioDspFeatures {
+        AudioDspFeatures {
+            track_id: 1,
+            bpm,
+            key_signature: key_signature.map(str::to_string),
+            camelot_key: None,
+            loudness_lufs,
+            energy,
+            danceability: None,
+            beat_strength: None,
+            spectral_centroid: None,
+            stereo_width: Some(0.5),
+            is_instrumental: false,
+            analysis_source: "test".to_string(),
+            analysis_offset_ms: 0,
+            samples_analyzed: Some(0),
+            analyzed_at: "2026-01-01T00:00:00Z".to_string(),
+            analysis_version: super::super::CURRENT_ANALYSIS_VERSION.to_string(),
+        }
+    }
+
+    #[test]
+    fn quiet_real_track_with_zero_energy_is_not_empty() {
+        // Below the -30 LUFS energy floor the map legitimately produces 0.0;
+        // a measured LUFS proves there was real audio, so the row must save.
+        let f = features(None, None, Some(-38.0), Some(0.0));
+        assert!(!is_empty_analysis(&f));
+    }
+
+    #[test]
+    fn drm_silence_is_empty() {
+        // All-zero decode: no bpm, no key, no LUFS (every block gated), 0.0
+        // energy from the RMS fallback.
+        let f = features(None, None, None, Some(0.0));
+        assert!(is_empty_analysis(&f));
+    }
+
+    #[test]
+    fn analysis_with_any_signal_is_not_empty() {
+        assert!(!is_empty_analysis(&features(
+            Some(120.0),
+            None,
+            None,
+            Some(0.0)
+        )));
+        assert!(!is_empty_analysis(&features(
+            None,
+            Some("Am"),
+            None,
+            Some(0.0)
+        )));
+        assert!(!is_empty_analysis(&features(None, None, None, Some(0.4))));
+    }
 }
