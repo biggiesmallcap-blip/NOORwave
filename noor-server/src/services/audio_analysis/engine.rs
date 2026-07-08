@@ -226,4 +226,30 @@ mod tests {
         )));
         assert!(!is_empty_analysis(&features(None, None, None, Some(0.4))));
     }
+
+    #[test]
+    fn analyze_clip_threads_lufs_into_energy() {
+        // Guards the step-3/step-4 wiring: energy must be the map of the SAME
+        // LUFS value stored on the row. If the orchestration regressed to
+        // passing None, the RMS fallback would still produce a plausible
+        // number and every per-function test would keep passing.
+        let sr = 44_100u32;
+        let samples: Vec<f32> = (0..(sr * 3) as usize)
+            .map(|n| {
+                (0.5 * (2.0 * std::f64::consts::PI * 1000.0 * n as f64 / sr as f64).sin()) as f32
+            })
+            .collect();
+        let f = analyze_clip(&samples, sr, "test", 1, 0);
+        let lufs = f.loudness_lufs.expect("3 s clip must produce LUFS");
+        let energy = f.energy.expect("energy is always Some");
+        assert!(
+            (energy - features::compute_energy(&[], Some(lufs))).abs() < 1e-9,
+            "energy must be mapped from the stored LUFS, got {energy} for {lufs} LUFS"
+        );
+        assert!(
+            energy > 0.5,
+            "a -9 dBFS tone should land in the upper half, got {energy}"
+        );
+        assert_eq!(f.analysis_version, super::super::CURRENT_ANALYSIS_VERSION);
+    }
 }
