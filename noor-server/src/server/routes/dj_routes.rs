@@ -1135,7 +1135,12 @@ fn next_dj_profile_analysis_quality(
     attempt_index: usize,
     error: &anyhow::Error,
 ) -> Option<&'static str> {
-    if !profile_rebuild_error_is_asset_not_ready(&error.to_string()) {
+    // Fall back to the next quality tier when a different tier might dodge the
+    // failure: TIDAL asset-not-ready, or a DASH segment / prebuffer failure
+    // such as the LOW/AAC tier routing to an unreachable ad CDN. Previously
+    // only asset-not-ready fell back, so a LOW-tier CDN timeout gave up without
+    // ever trying the LOSSLESS stream that resolves fine.
+    if !profile_rebuild_error_is_retryable(&error.to_string()) {
         return None;
     }
     DJ_PROFILE_ANALYSIS_TIDAL_QUALITIES
@@ -3354,6 +3359,32 @@ mod tests {
             Some("LOSSLESS")
         );
         assert_eq!(next_dj_profile_analysis_quality(1, &error), None);
+    }
+
+    #[test]
+    fn dj_profile_rebuild_tries_lossless_after_low_quality_cdn_failure() {
+        // The LOW/AAC tier can route to an unreachable ad CDN whose segments
+        // only time out. That failure must now drop to LOSSLESS instead of
+        // giving up (previously only asset-not-ready fell back).
+        let ad_host = anyhow::Error::msg(
+            "DASH stream prebuffer failed: DASH segment 0 skipped: TIDAL ad-tier CDN host (sp-ad-cf.audio.tidal.com/0.mp4)",
+        );
+        assert_eq!(
+            next_dj_profile_analysis_quality(0, &ad_host),
+            Some("LOSSLESS")
+        );
+
+        let timeout = anyhow::Error::msg(
+            "DASH stream prebuffer failed: DASH segment 3 timed out after 12s (sp-ad-cf.audio.tidal.com/3.mp4)",
+        );
+        assert_eq!(
+            next_dj_profile_analysis_quality(0, &timeout),
+            Some("LOSSLESS")
+        );
+
+        // A non-retryable failure (e.g. track genuinely gone) still gives up.
+        let permanent = anyhow::Error::msg("track 404 not found");
+        assert_eq!(next_dj_profile_analysis_quality(0, &permanent), None);
     }
 
     #[test]
