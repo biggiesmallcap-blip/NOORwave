@@ -161,7 +161,12 @@ fn plan_from_program(
     fallback_reason: Option<&'static str>,
 ) -> DjTransitionPlan {
     DjTransitionPlan {
-        rejected_alternatives: rejected_alternatives_for(&program.template),
+        // No rejected-alternatives list: the planner is a short-circuiting
+        // decision tree, not a scorer, so there is no honest per-alternative
+        // ranking to report. The old fabricated list (a fixed top-3 with
+        // invented scores) only misled the cockpit into implying a contest
+        // that never happened.
+        rejected_alternatives: Vec::new(),
         program,
         planner_version: DJ_PLANNER_VERSION,
         fallback_reason,
@@ -173,59 +178,6 @@ fn missing_profile_reason(from_missing: bool) -> &'static str {
         "current_profile_missing"
     } else {
         "next_profile_missing"
-    }
-}
-
-fn rejected_alternatives_for(selected_template: &str) -> Vec<RejectedTransitionAlternative> {
-    const ORDERED: [(&str, f32); 6] = [
-        ("BassSwap32", 0.94),
-        ("BassSwap16", 0.88),
-        ("LongHarmonicBlend", 0.82),
-        ("FilterSweep", 0.76),
-        ("SlamCut", 0.70),
-        ("SafeCrossfade", 0.64),
-    ];
-
-    ORDERED
-        .into_iter()
-        .filter(|(template, _)| *template != selected_template)
-        .take(3)
-        .map(|(template, score)| RejectedTransitionAlternative {
-            template,
-            score,
-            reason: rejected_alternative_reason(selected_template, template),
-        })
-        .collect()
-}
-
-fn rejected_alternative_reason(
-    selected_template: &str,
-    alternative_template: &str,
-) -> &'static str {
-    match selected_template {
-        "DropTease16" => "drop_tease_selected_for_bold_drop_setup",
-        "FilterSweep" => match alternative_template {
-            "BassSwap32" | "BassSwap16" => "bold_intent_preferred_filter_sweep",
-            "LongHarmonicBlend" => "bold_intent_preferred_energy_transition",
-            _ => "lower_ranked_than_filter_sweep",
-        },
-        "BassSwap32" => match alternative_template {
-            "BassSwap16" => "bassswap32_selected_for_longer_phrase_handoff",
-            "LongHarmonicBlend" => "bass_swap_selected_over_harmonic_blend",
-            _ => "lower_ranked_than_bassswap32",
-        },
-        "BassSwap16" => match alternative_template {
-            "BassSwap32" => "insufficient_phrase_depth_for_bassswap32",
-            "LongHarmonicBlend" => "bass_swap_selected_over_harmonic_blend",
-            _ => "lower_ranked_than_bassswap16",
-        },
-        "LongHarmonicBlend" => match alternative_template {
-            "BassSwap32" | "BassSwap16" => "harmonic_fit_preferred_over_bass_swap",
-            _ => "lower_ranked_than_harmonic_blend",
-        },
-        "SlamCut" => "large_tempo_delta_preferred_slam_cut",
-        "SafeCrossfade" => "safety_fallback_selected",
-        _ => "not_selected",
     }
 }
 
@@ -850,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn bold_policy_rejected_alternatives_explain_filter_sweep_choice() {
+    fn bold_policy_picks_filter_sweep_without_fabricated_alternatives() {
         let db = db();
         enable(&db);
         db.with_conn(|conn| queries::set_dj_global_policy(conn, "bold", "neutral"))
@@ -889,15 +841,9 @@ mod tests {
             .expect("plan");
 
         assert_eq!(plan.program.template, "FilterSweep");
-        assert_eq!(plan.rejected_alternatives[0].template, "BassSwap32");
-        assert_eq!(
-            plan.rejected_alternatives[0].reason,
-            "bold_intent_preferred_filter_sweep"
-        );
-        assert_eq!(
-            plan.rejected_alternatives[2].reason,
-            "bold_intent_preferred_energy_transition"
-        );
+        // The planner is a short-circuiting decision tree, not a scorer, so it
+        // reports no fabricated per-alternative ranking.
+        assert!(plan.rejected_alternatives.is_empty());
     }
 
     #[test]
@@ -940,7 +886,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_dsp_camelot_uses_safe_crossfade_not_fake_harmonic_match() {
+    fn missing_dsp_camelot_uses_bass_swap_not_fake_harmonic_match() {
         let db = db();
         enable(&db);
         seed_profile(&db, "library_track", 1, 0.9);
@@ -961,11 +907,14 @@ mod tests {
         )
         .expect("program");
 
-        assert_eq!(program.template, "SafeCrossfade");
+        // An unknown key must not fabricate a harmonic match (no
+        // LongHarmonicBlend/DropTease), but a bass swap is valid without a key
+        // when the decks are beatmatched with phrase depth.
+        assert_eq!(program.template, "BassSwap16");
     }
 
     #[test]
-    fn distant_camelot_keys_use_safe_crossfade() {
+    fn distant_camelot_keys_use_bass_swap() {
         let db = db();
         enable(&db);
         seed_profile(&db, "library_track", 1, 0.9);
@@ -984,7 +933,10 @@ mod tests {
         )
         .expect("program");
 
-        assert_eq!(program.template, "SafeCrossfade");
+        // A genuine key clash (8A vs 3A) still gets a real blend: the bass swap
+        // isolates the low band, so it tolerates the clash rather than dropping
+        // to a plain crossfade.
+        assert_eq!(program.template, "BassSwap16");
     }
 
     #[test]

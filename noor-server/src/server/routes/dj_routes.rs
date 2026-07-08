@@ -36,6 +36,14 @@ const DJ_PROFILE_CONFIDENCE_FLOOR: f64 = 0.65;
 const SAFE_SUGGESTION_BAD_COUNT: i64 = 3;
 const DJ_PROFILE_AUTO_REBUILD_RETRY_SECS: u64 = 300;
 const DJ_PROFILE_TRANSIENT_RETRY_SECS: u64 = 25;
+// After this many consecutive transient decode failures, a profile rebuild
+// stops retrying and rests as decode_failed instead of hammering the source
+// forever (e.g. a TIDAL stream that only ever resolves to ad segments). The
+// DJ engine then falls back - bass swap on an unknown key - rather than
+// waiting on a profile that will never arrive. The failure entry's TTL still
+// lets a chronically-failing track try again fresh much later.
+const DJ_PROFILE_MAX_TRANSIENT_ATTEMPTS: u32 = 4;
+const DJ_PROFILE_MAX_RETRY_BACKOFF_SECS: u64 = 15 * 60;
 const DJ_TIMING_HISTORY_LIMIT: i64 = 5;
 const DJ_READY_PAIR_TRANSITION_WINDOW_MS: i64 = 30_000;
 const DJ_TIMING_SANITY_MAX_DELTA_MS: i64 = 30_000;
@@ -372,6 +380,9 @@ struct DjProfileRebuildFailure {
     retry_reason: Option<String>,
     next_retry_at: Option<Instant>,
     recorded_at: Instant,
+    /// Consecutive transient-failure count for this media ref, carried across
+    /// automatic retries so the backoff grows and the loop eventually gives up.
+    attempts: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -933,7 +944,13 @@ async fn queue_tidal_profile_rebuild(
     };
     match mark_dj_profile_rebuild_inflight(&inflight, &inflight_key, retry_after)? {
         ProfileRebuildInflightDecision::Start => {
-            clear_dj_profile_rebuild_failure(&inflight_key);
+            // Only a user-forced rebuild resets the failure history. An
+            // automatic re-accept must preserve the attempt counter, or the
+            // backoff/give-up logic can never converge and the rebuild loops
+            // forever on a permanently-failing stream.
+            if force {
+                clear_dj_profile_rebuild_failure(&inflight_key);
+            }
             tracing::info!(
                 media_ref_kind = %media_ref.profile_key().media_ref_kind,
                 media_ref_id = %media_ref.profile_key().media_ref_id,
@@ -1044,18 +1061,17 @@ async fn queue_tidal_profile_rebuild(
         } else if let Some(error) = last_error {
             let status = profile_rebuild_failure_status(&error);
             let message = profile_rebuild_error_message(&error, status);
-            finish_dj_profile_rebuild_failure(
+            // The returned delay is the backoff for the next attempt, or None
+            // once the attempt cap flips the failure to terminal decode_failed
+            // - in which case we do NOT schedule another retry, ending the loop.
+            let retry_delay = finish_dj_profile_rebuild_failure(
                 &inflight_for_decode,
                 &inflight_key_for_decode,
                 status,
                 message.clone(),
             );
-            if status == "retrying" {
-                schedule_dj_profile_retry(
-                    &retry_runtime,
-                    retry_state,
-                    Duration::from_secs(DJ_PROFILE_TRANSIENT_RETRY_SECS),
-                );
+            if let Some(delay) = retry_delay {
+                schedule_dj_profile_retry(&retry_runtime, retry_state, delay);
             }
             tracing::warn!(tidal_id, error = %message, "DJ profile rebuild decode failed");
         }
@@ -1253,14 +1269,28 @@ fn clear_dj_profile_inflight(
     }
 }
 
+/// Records the failure and releases the inflight slot. Returns the backoff
+/// delay to schedule the next retry, or `None` once the attempt cap is hit
+/// (terminal decode_failed - do not schedule another retry).
 fn finish_dj_profile_rebuild_failure(
     inflight: &Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
     key: &str,
     status: &str,
     message: String,
-) {
-    record_dj_profile_rebuild_failure(key, status, message);
+) -> Option<Duration> {
+    let retry_delay = record_dj_profile_rebuild_failure(key, status, message);
     clear_dj_profile_inflight(inflight, key);
+    retry_delay
+}
+
+/// Exponential backoff for transient profile-rebuild retries: 25s, 50s, 100s,
+/// 200s, ... doubling per attempt, capped at DJ_PROFILE_MAX_RETRY_BACKOFF_SECS.
+fn profile_rebuild_backoff(attempts: u32) -> Duration {
+    let shift = attempts.saturating_sub(1).min(6);
+    let secs = DJ_PROFILE_TRANSIENT_RETRY_SECS
+        .saturating_mul(1u64 << shift)
+        .min(DJ_PROFILE_MAX_RETRY_BACKOFF_SECS);
+    Duration::from_secs(secs)
 }
 
 fn schedule_dj_profile_retry(
@@ -1283,23 +1313,41 @@ fn profile_rebuild_failures() -> &'static Mutex<HashMap<String, DjProfileRebuild
     DJ_PROFILE_REBUILD_FAILURES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn record_dj_profile_rebuild_failure(key: &str, status: &str, message: String) {
-    if let Ok(mut guard) = profile_rebuild_failures().lock() {
-        let retry_reason = profile_rebuild_retry_reason(status, &message);
-        let next_retry_at = retry_reason
-            .as_ref()
-            .map(|_| Instant::now() + Duration::from_secs(DJ_PROFILE_TRANSIENT_RETRY_SECS));
-        guard.insert(
-            key.to_string(),
-            DjProfileRebuildFailure {
-                status: status.to_string(),
-                message,
-                retry_reason,
-                next_retry_at,
-                recorded_at: Instant::now(),
-            },
-        );
+fn record_dj_profile_rebuild_failure(key: &str, status: &str, message: String) -> Option<Duration> {
+    let mut guard = profile_rebuild_failures().lock().ok()?;
+    // Carry the attempt count across automatic retries (the accept path no
+    // longer clears it) so a chronically-failing stream backs off and finally
+    // gives up instead of re-decoding every 25s forever.
+    let attempts = guard
+        .get(key)
+        .map(|failure| failure.attempts)
+        .unwrap_or(0)
+        .saturating_add(1);
+    let mut retry_reason = profile_rebuild_retry_reason(status, &message);
+    let mut status = status.to_string();
+    if retry_reason.is_some() && attempts >= DJ_PROFILE_MAX_TRANSIENT_ATTEMPTS {
+        // Give up: treat a chronically-failing rebuild as a hard decode
+        // failure. deck_needs_profile_rebuild stops re-queuing decode_failed
+        // decks, so the loop ends and the DJ engine can fall back.
+        retry_reason = None;
+        status = "decode_failed".to_string();
     }
+    let retry_delay = retry_reason
+        .as_ref()
+        .map(|_| profile_rebuild_backoff(attempts));
+    let next_retry_at = retry_delay.map(|delay| Instant::now() + delay);
+    guard.insert(
+        key.to_string(),
+        DjProfileRebuildFailure {
+            status,
+            message,
+            retry_reason,
+            next_retry_at,
+            recorded_at: Instant::now(),
+            attempts,
+        },
+    );
+    retry_delay
 }
 
 fn clear_dj_profile_rebuild_failure(key: &str) {
@@ -4712,6 +4760,52 @@ mod tests {
 
         assert_eq!(first, ProfileRebuildInflightDecision::Start);
         assert_eq!(second, ProfileRebuildInflightDecision::Start);
+        clear_dj_profile_rebuild_failure(key);
+    }
+
+    #[test]
+    fn profile_rebuild_backoff_grows_and_caps() {
+        assert_eq!(profile_rebuild_backoff(1), Duration::from_secs(25));
+        assert_eq!(profile_rebuild_backoff(2), Duration::from_secs(50));
+        assert_eq!(profile_rebuild_backoff(3), Duration::from_secs(100));
+        assert_eq!(profile_rebuild_backoff(4), Duration::from_secs(200));
+        assert_eq!(
+            profile_rebuild_backoff(50),
+            Duration::from_secs(DJ_PROFILE_MAX_RETRY_BACKOFF_SECS)
+        );
+    }
+
+    #[test]
+    fn retrying_profile_gives_up_after_attempt_cap() {
+        // A permanently-failing stream (e.g. one that only resolves to ad
+        // segments) must back off and finally stop, not loop forever.
+        let key = "tidal_track:988877665";
+        clear_dj_profile_rebuild_failure(key);
+
+        let mut last_delay = Duration::ZERO;
+        for _ in 1..DJ_PROFILE_MAX_TRANSIENT_ATTEMPTS {
+            let delay = record_dj_profile_rebuild_failure(
+                key,
+                "retrying",
+                "DASH stream prebuffer failed. Retrying analysis.".to_string(),
+            )
+            .expect("still retrying before the cap");
+            assert!(delay >= last_delay, "backoff must not shrink");
+            last_delay = delay;
+        }
+
+        // The capped attempt gives up: no retry is scheduled and the failure is
+        // terminal, so deck_needs_profile_rebuild stops re-queuing it.
+        let final_delay = record_dj_profile_rebuild_failure(
+            key,
+            "retrying",
+            "DASH stream prebuffer failed. Retrying analysis.".to_string(),
+        );
+        assert!(final_delay.is_none(), "loop must stop at the attempt cap");
+        let failure = recent_dj_profile_rebuild_failure(key).expect("failure recorded");
+        assert_eq!(failure.status, "decode_failed");
+        assert!(failure.retry_reason.is_none());
+
         clear_dj_profile_rebuild_failure(key);
     }
 

@@ -10,6 +10,19 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### dj: fast-fail on TIDAL ad segments instead of timing out
+
+Some TIDAL streams resolve to ad-CDN segments (sp-ad-cf.audio.tidal.com) that
+always time out after 12s; nothing inspects segment hosts for ads
+(tidal/stream.rs::parse_dash_segment_template + fill_dash_template pass the
+host verbatim; decode/source.rs::is_retryable_dash_fetch_error treats the
+timeout as transient). The profile-rebuild backoff/give-up (shipped) now stops
+the infinite retry loop, but each doomed attempt still burns ~12-72s and two
+auto-rebuild slots. Add an ad-host check where the host is already parsed
+(dash_segment_debug_label, source.rs:~288) and return a distinct
+non-retryable error so ad streams skip straight to decode_failed.
+- Spawned by: DJ key-detection + analyzer diagnosis session.
+
 ### perf: replace the playback PCM Vec+Mutex with a real ring buffer
 
 The audio callback and the decoder thread share

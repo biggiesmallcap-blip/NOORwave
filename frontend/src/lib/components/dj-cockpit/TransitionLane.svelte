@@ -353,34 +353,6 @@
 		return `${rendered ?? planned} fired from the planner result for this pair.`;
 	}
 
-	function formatRejectedAlternative(
-		alternative: DjStatusResponse['rejected_alternatives'][number],
-	) {
-		return `${alternative.template} - ${formatRejectedReason(alternative.reason)}`;
-	}
-
-	function formatRejectedReason(reason: string) {
-		const labels: Record<string, string> = {
-			bass_swap_selected_over_harmonic_blend: 'Planner selected bass swap over harmonic blend',
-			bassswap32_selected_for_longer_phrase_handoff:
-				'Planner selected BassSwap32 over the shorter bass swap',
-			bold_intent_preferred_energy_transition:
-				'Bold mode selected a higher energy transition',
-			bold_intent_preferred_filter_sweep: 'Bold mode selected FilterSweep',
-			drop_tease_selected_for_bold_drop_setup: 'Bold mode selected DropTease',
-			harmonic_fit_preferred_over_bass_swap:
-				'Planner selected harmonic blend over bass swap',
-			insufficient_phrase_depth_for_bassswap32: 'Not enough phrase depth for BassSwap32',
-			large_tempo_delta_preferred_slam_cut: 'Planner selected SlamCut for the tempo gap',
-			lower_ranked_than_bassswap16: 'Lower ranked than BassSwap16',
-			lower_ranked_than_bassswap32: 'Lower ranked than BassSwap32',
-			lower_ranked_than_filter_sweep: 'Lower ranked than FilterSweep',
-			lower_ranked_than_harmonic_blend: 'Lower ranked than LongHarmonicBlend',
-			not_selected: 'Not selected by planner ranking',
-			safety_fallback_selected: 'Safety fallback won',
-		};
-		return labels[reason] ?? reason;
-	}
 </script>
 
 <section class="transition-lane" aria-labelledby="dj-transition-heading">
@@ -650,14 +622,6 @@
 					<dd>{status?.profile_confidence_floor ?? 0}</dd>
 				</div>
 			</dl>
-			{#if status?.rejected_alternatives?.length}
-				<p class="debug-heading">Rejected alternatives</p>
-				<ul class="rejected-alternatives" aria-label="Rejected DJ transition alternatives">
-					{#each status.rejected_alternatives as alternative}
-						<li>{formatRejectedAlternative(alternative)}</li>
-					{/each}
-				</ul>
-			{/if}
 		</div>
 	{/if}
 </section>
@@ -893,7 +857,6 @@
 
 	.timing-history,
 	.timing-history li,
-	.rejected-alternatives,
 	.empty-history {
 		margin: 0;
 	}
@@ -1026,15 +989,6 @@
 	.empty-history {
 		color: var(--text-tertiary);
 		font-size: var(--font-size-xs);
-	}
-
-	.rejected-alternatives {
-		display: grid;
-		gap: var(--space-1);
-		padding-left: var(--space-4);
-		color: var(--text-secondary);
-		font-size: var(--font-size-xs);
-		line-height: var(--line-height-snug);
 	}
 
 	.timing-summary {

@@ -149,11 +149,6 @@ describe('dj cockpit page contract', () => {
 		expect(transitionLane).toContain('Planning reason');
 		expect(transitionLane).toContain('Readiness block');
 		expect(transitionLane).toContain('Decision');
-		expect(transitionLane).toContain('Rejected alternatives');
-		expect(transitionLane).toContain('formatRejectedAlternative');
-		expect(transitionLane).toContain('formatRejectedReason');
-		expect(transitionLane).toContain('Bold mode selected FilterSweep');
-		expect(transitionLane).not.toContain('alternative.score');
 		expect(transitionLane).toContain('Avg delta');
 		expect(transitionLane).toContain('Avg abs');
 		expect(transitionLane).toContain('Missed');
@@ -207,6 +202,15 @@ describe('dj cockpit page contract', () => {
 		expect(transitionLane).toContain('rail-missed');
 		expect(transitionLane).toContain('handoff_seam_too_late');
 		expect(transitionLane).toContain('Joined too late');
+	});
+
+	test('dj_page_drops_fabricated_rejected_alternatives_panel', () => {
+		// The "rejected alternatives" list was a hardcoded top-3 with invented
+		// scores, not a real per-track evaluation. It must not be rendered.
+		expect(transitionLane).not.toContain('Rejected alternatives');
+		expect(transitionLane).not.toContain('rejected_alternatives');
+		expect(transitionLane).not.toContain('formatRejectedAlternative');
+		expect(transitionLane).not.toContain('Safety fallback won');
 	});
 
 	test('dj_page_hero_shows_sync_mode_and_fallback_state', () => {
