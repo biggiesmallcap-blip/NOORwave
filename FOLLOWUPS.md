@@ -25,6 +25,35 @@ the callback entirely. Behavior-preserving but touches every drain/seek/
 compact path, so it needs its own focused pass with the shared.rs tests
 extended first.
 - Spawned by: runtime player code review (previous-track fix session).
+### dj: segment fire_ahead_ms calibration by timing source
+
+fire_ahead_ms_from_deltas pools all recent fired deltas. Beat-anchored fires
+(downbeat_sync/beat_sync, absolute trigger) now land within ~1 callback block
+while gridless fallback fires still carry the metadata-duration error, so the
+shared median under-corrects the fallback path and slightly over-corrects the
+anchored one. Split the calibration window by timing_source once enough
+anchored rows exist.
+- Spawned by: DJ transition seam/anchor fix session.
+
+### dj: overlay path (DropTease/DropPreview) has no seam-skip reconciliation
+
+install_prepared_overlay_mixer_buffer and the drop-preview install still start
+their rendered buffer at frame 0 at fire time. Overlays play on top of the
+live deck (no deck A discontinuity), but their internal beat alignment
+inherits the mpsc + install latency the handoff path now compensates via the
+install-time skip. Port the live-position skip if overlay flams become
+audible.
+- Spawned by: DJ transition seam/anchor fix session.
+
+### dj: residual one-block skew at the handoff seam
+
+The install-time skip measures deck A's read_pos when the buffer is spliced;
+the incoming stream then starts on its next callback, so up to one output
+block (~5-20ms) of skew remains. Inaudible as a flam and masked by the seam
+ramps, but if it ever matters, estimate the callback block size and bias the
+skip by it.
+- Spawned by: DJ transition seam/anchor fix session.
+
 ### dj: wire vocal_clash_score into template choice
 
 noor-mix scoring.rs::vocal_clash_score (max product of per-bar vocal presence)

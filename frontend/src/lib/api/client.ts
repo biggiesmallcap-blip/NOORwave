@@ -1160,6 +1160,7 @@ export type DjRuntimeRendererReason =
 	| 'transition_plan_missing_at_fire'
 	| 'sync_window_not_signaled'
 	| 'manual_seek_suppressed'
+	| 'handoff_seam_too_late'
 	| string;
 
 export type DjStatusResponse = {

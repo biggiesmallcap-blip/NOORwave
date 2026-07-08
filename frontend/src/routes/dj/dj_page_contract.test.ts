@@ -194,6 +194,30 @@ describe('dj cockpit page contract', () => {
 		expect(transitionLane).toContain('Planning status');
 	});
 
+	test('dj_page_timing_history_is_first_class_and_reports_played_audio', () => {
+		// The history list lives outside the debug drawer and every row says
+		// what the runtime actually played, not just what the planner picked.
+		expect(transitionLane).toContain('playedOutcome');
+		expect(transitionLane).toContain('playedIsFallback');
+		expect(transitionLane).toContain('Fallback crossfade (planned ');
+		expect(transitionLane).toContain('Clean cut at boundary (planned ');
+		expect(transitionLane).toContain('Rendered ${planned}');
+		expect(transitionLane).toContain('qualityRail');
+		expect(transitionLane).toContain('rail-tight');
+		expect(transitionLane).toContain('rail-missed');
+		expect(transitionLane).toContain('handoff_seam_too_late');
+		expect(transitionLane).toContain('Joined too late');
+	});
+
+	test('dj_page_hero_shows_sync_mode_and_fallback_state', () => {
+		expect(transitionLane).toContain('formatSyncBadge');
+		expect(transitionLane).toContain('Beat-locked (downbeat)');
+		expect(transitionLane).toContain('Beat-locked (grid)');
+		expect(transitionLane).toContain('Track-end timing');
+		expect(transitionLane).toContain('Fallback audio');
+		expect(transitionLane).toContain('hero-chip');
+	});
+
 	test('dj_page_does_not_show_non_renderable_templates_as_main_label', () => {
 		expect(transitionLane).toContain('DJ overlap armed');
 		expect(transitionLane).toContain('renderer_template');

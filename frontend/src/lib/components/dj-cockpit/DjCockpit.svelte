@@ -239,6 +239,16 @@
 		align-items: end;
 		justify-content: space-between;
 		gap: var(--space-4);
+		padding: var(--space-4);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md);
+		background:
+			radial-gradient(
+				130% 120% at 100% 0%,
+				color-mix(in srgb, var(--accent-soft) 46%, transparent),
+				transparent 60%
+			),
+			color-mix(in srgb, var(--bg-elevated) 90%, transparent);
 	}
 
 	.eyebrow,

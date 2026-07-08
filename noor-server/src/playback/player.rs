@@ -94,6 +94,13 @@ pub struct PreparedTransitionProgram {
     pub queue_generation: u64,
     pub current_queue_item_id: Option<i64>,
     pub next_queue_item_id: Option<i64>,
+    /// Absolute outgoing-track position (ms) of the grid marker the plan is
+    /// beat-aligned to, when the overlap came from downbeat/beat sync. The
+    /// runtime fires at this position directly (pos >= anchor) instead of
+    /// counting back from the track end, because the track's metadata
+    /// duration and its decoded length disagree by up to ~500ms and the
+    /// analysis grid lives on the decoded-audio timeline.
+    pub anchor_start_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -361,6 +368,7 @@ pub fn attach_dj_transition_plan_for_pair_with_current_duration(
         } else {
             let existing_event_id = existing.id;
             let existing_program = existing.program.clone();
+            let existing_anchor = existing.anchor_start_ms();
             let fire_ahead_ms = engine.db().with_conn(dj_transition_fire_ahead_ms)?;
             job = job.with_prepared_transition(PreparedTransitionProgram {
                 program: existing_program,
@@ -369,6 +377,7 @@ pub fn attach_dj_transition_plan_for_pair_with_current_duration(
                 queue_generation: pair.queue_generation,
                 current_queue_item_id: pair.current_queue_item_id,
                 next_queue_item_id: Some(next_queue_item_id),
+                anchor_start_ms: existing_anchor,
             });
             return Ok(job);
         }
@@ -414,6 +423,7 @@ pub fn attach_dj_transition_plan_for_pair_with_current_duration(
             queue_generation: pair.queue_generation,
             current_queue_item_id: pair.current_queue_item_id,
             next_queue_item_id: Some(next_queue_item_id),
+            anchor_start_ms: timing_plan.anchor_start_ms,
         });
     }
     Ok(job)
@@ -424,6 +434,20 @@ struct ArmedDjTransitionEvent {
     id: i64,
     program: noor_mix::TransitionProgram,
     fallback_reason: Option<String>,
+    planned_start_ms: Option<i64>,
+    timing_source: Option<String>,
+}
+
+impl ArmedDjTransitionEvent {
+    /// The planned start doubles as the decoded-audio-time fire anchor, but
+    /// only when it was derived from an analysis grid; a fallback overlap's
+    /// planned start is metadata arithmetic and must not be fired against.
+    fn anchor_start_ms(&self) -> Option<i64> {
+        match self.timing_source.as_deref() {
+            Some("downbeat_sync") | Some("beat_sync") => self.planned_start_ms,
+            _ => None,
+        }
+    }
 }
 
 fn latest_armed_dj_transition_event_for_pair(
@@ -435,7 +459,7 @@ fn latest_armed_dj_transition_event_for_pair(
     let next_key = next.profile_key();
     let row = conn
         .query_row(
-            "SELECT id, program_json, fallback_reason
+            "SELECT id, program_json, fallback_reason, planned_start_ms, timing_source
          FROM dj_transition_events
          WHERE from_media_ref_kind = ?1
            AND from_media_ref_id = ?2
@@ -457,11 +481,13 @@ fn latest_armed_dj_transition_event_for_pair(
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             },
         )
         .optional()?;
-    let Some((id, program_json, fallback_reason)) = row else {
+    let Some((id, program_json, fallback_reason, planned_start_ms, timing_source)) = row else {
         return Ok(None);
     };
     let program = serde_json::from_str(&program_json)?;
@@ -469,6 +495,8 @@ fn latest_armed_dj_transition_event_for_pair(
         id,
         program,
         fallback_reason,
+        planned_start_ms,
+        timing_source,
     }))
 }
 
@@ -589,6 +617,7 @@ fn median_delta(deltas: &[i64]) -> Option<i64> {
 struct DjTransitionTimingPlan {
     gapless: GaplessPlan,
     planned_start_ms: Option<i64>,
+    anchor_start_ms: Option<i64>,
     timing_source: &'static str,
 }
 
@@ -618,12 +647,14 @@ fn dj_gapless_plan_for_pair(
 ) -> DjTransitionTimingPlan {
     let mut plan = dj_gapless_plan_from_program(program);
     let mut timing_source = "fallback_overlap";
+    let mut grid_synced = false;
     let mut duration_ms = current_duration_ms;
     if let Ok(Some(synced)) = engine.db().with_conn(|conn| {
         synced_dj_overlap_ms(conn, current, current_duration_ms, program, plan.overlap_ms)
     }) {
         plan.overlap_ms = synced.overlap_ms;
         timing_source = synced.timing_source;
+        grid_synced = true;
     }
     if duration_ms.is_none() {
         duration_ms = engine
@@ -632,10 +663,16 @@ fn dj_gapless_plan_for_pair(
             .ok()
             .flatten();
     }
+    let planned_start_ms =
+        duration_ms.map(|duration| duration.saturating_sub(i64::from(plan.overlap_ms)).max(0));
     DjTransitionTimingPlan {
         gapless: plan,
-        planned_start_ms: duration_ms
-            .map(|duration| duration.saturating_sub(i64::from(plan.overlap_ms)).max(0)),
+        planned_start_ms,
+        // duration - overlap cancels back to the grid marker the sync pass
+        // picked, so this is an exact decoded-audio-time anchor. A plain
+        // fallback overlap has no grid behind it and must keep firing from
+        // the track end.
+        anchor_start_ms: if grid_synced { planned_start_ms } else { None },
         timing_source,
     }
 }
@@ -3243,7 +3280,10 @@ mod tests {
             let bass_swap_32 =
                 noor_mix::planner::bass_swap_32_program(48_000, 2, DJ_BASS_SWAP_32_RENDER_MS);
 
-            assert_eq!(dj_gapless_plan_from_program(&safe).overlap_ms, 12_000);
+            // SafeCrossfade dropped from 12s to 6s: two full-spectrum tracks
+            // fighting for 12 seconds read as mud next to the beat-matched
+            // FullBlend renders, which keep their longer windows.
+            assert_eq!(dj_gapless_plan_from_program(&safe).overlap_ms, 6_000);
             assert_eq!(dj_gapless_plan_from_program(&filter).overlap_ms, 18_000);
             assert_eq!(dj_gapless_plan_from_program(&bass_swap).overlap_ms, 24_000);
             assert_eq!(
@@ -4064,6 +4104,43 @@ mod tests {
         .expect("overlap");
 
         assert_eq!(overlap_ms, 9_000);
+    }
+
+    #[test]
+    fn armed_event_anchor_requires_grid_timing_source() {
+        let event = |timing_source: Option<&str>| ArmedDjTransitionEvent {
+            id: 1,
+            program: noor_mix::TransitionProgram {
+                tier: noor_mix::program::Tier::SafeCrossfade,
+                template: "SafeCrossfade".to_string(),
+                drop_source: None,
+                sample_rate: 48_000,
+                channels: 2,
+                deck_a_start_frame: 0,
+                deck_b_start_frame: 0,
+                sync_start: 0,
+                intro_start: 0,
+                swap_start: 1,
+                fade_start: 1,
+                resolve_at: 2,
+                loops: vec![],
+                automation: vec![],
+            },
+            fallback_reason: None,
+            planned_start_ms: Some(200_000),
+            timing_source: timing_source.map(str::to_string),
+        };
+
+        // Grid-derived plans fire against the planned start directly.
+        assert_eq!(
+            event(Some("downbeat_sync")).anchor_start_ms(),
+            Some(200_000)
+        );
+        assert_eq!(event(Some("beat_sync")).anchor_start_ms(), Some(200_000));
+        // A fallback overlap's planned start is metadata arithmetic; firing
+        // against it would reintroduce the duration-mismatch error.
+        assert_eq!(event(Some("fallback_overlap")).anchor_start_ms(), None);
+        assert_eq!(event(None).anchor_start_ms(), None);
     }
 
     #[test]

@@ -115,6 +115,10 @@
 					? `Skipped: ${formatDropPreviewReason(dropPreview.reason)}.`
 					: 'Skipped.',
 	);
+	let syncBadge = $derived(formatSyncBadge(status?.timing_source));
+	let heroTemplate = $derived(
+		status?.renderer_template ?? status?.planned_template ?? status?.selected_program ?? null,
+	);
 
 	function formatTimingMs(value: number | null | undefined) {
 		return typeof value === 'number' ? `${value} ms` : 'pending';
@@ -129,6 +133,19 @@
 
 	function formatTempoRatio(value: number | null | undefined) {
 		return typeof value === 'number' ? `${value.toFixed(3)}x` : 'none';
+	}
+
+	function formatSyncBadge(source: string | null | undefined) {
+		switch (source) {
+			case 'downbeat_sync':
+				return 'Beat-locked (downbeat)';
+			case 'beat_sync':
+				return 'Beat-locked (grid)';
+			case 'fallback_overlap':
+				return 'Track-end timing';
+			default:
+				return null;
+		}
 	}
 
 	function formatDropSource(value: string | null | undefined) {
@@ -178,6 +195,8 @@
 				return 'Plan missing';
 			case 'sync_window_not_signaled':
 				return 'Sync missed';
+			case 'handoff_seam_too_late':
+				return 'Joined too late';
 			case 'prepared_mixer_missing':
 				return 'Prepared mixer missing';
 			case 'lookahead_pair_mismatch':
@@ -275,6 +294,37 @@
 		return `${status} - ${formatTimingDirection(event.timing_direction)} - ${event.timing_quality}`;
 	}
 
+	// What the listener actually heard, not just what the planner picked. A
+	// FilterSweep row whose runtime fell back to the legacy overlap never
+	// played a filter sweep; labelling it honestly is the whole point.
+	function playedOutcome(event: DjStatusResponse['recent_timing_events'][number]) {
+		const planned = event.renderer_template ?? event.planned_template;
+		switch (event.runtime_renderer_status) {
+			case 'rendered_handoff':
+				return `Rendered ${planned}`;
+			case 'rendered_overlay':
+				return `Rendered ${planned} overlay`;
+			case 'legacy_overlap':
+				return `Fallback crossfade (planned ${planned})`;
+			case 'boundary_fallback':
+				return `Clean cut at boundary (planned ${planned})`;
+			default:
+				return planned;
+		}
+	}
+
+	function playedIsFallback(event: DjStatusResponse['recent_timing_events'][number]) {
+		return (
+			event.runtime_renderer_status === 'legacy_overlap' ||
+			event.runtime_renderer_status === 'boundary_fallback'
+		);
+	}
+
+	function qualityRail(event: DjStatusResponse['recent_timing_events'][number]) {
+		if (event.timing_status === 'missed') return 'missed';
+		return event.timing_quality;
+	}
+
 	function formatDecisionSummary() {
 		const planned = status?.planned_template ?? status?.selected_program;
 		const rendered = status?.renderer_template;
@@ -338,6 +388,19 @@
 		<div>
 			<p class="eyebrow">Transition lane</p>
 			<h2 id="dj-transition-heading">{laneTitle}</h2>
+			<div class="hero-chips">
+				{#if heroTemplate}
+					<span class="hero-chip hero-chip-template">{heroTemplate}</span>
+				{/if}
+				{#if syncBadge}
+					<span class="hero-chip" class:hero-chip-locked={syncBadge.startsWith('Beat-locked')}>
+						{syncBadge}
+					</span>
+				{/if}
+				{#if status?.runtime_renderer_status === 'legacy_overlap' || status?.runtime_renderer_status === 'boundary_fallback'}
+					<span class="hero-chip hero-chip-fallback">Fallback audio</span>
+				{/if}
+			</div>
 		</div>
 		<span class="event-id">{transitionId ? `Event ${transitionId}` : 'No event armed'}</span>
 	</header>
@@ -361,6 +424,88 @@
 		<button type="button" disabled={!transitionId} onclick={() => onFeedback('bad')}>Bad</button>
 		<button type="button" disabled={!transitionId} onclick={() => onFeedback('too_safe')}>Too safe</button>
 		<button type="button" disabled={!transitionId} onclick={() => onFeedback('too_bold')}>Too bold</button>
+	</div>
+
+	<div class="history-block">
+		<p class="section-heading">Recent timing (last 5)</p>
+		{#if timingSummary && timingSummary.event_count > 0}
+			<div class="timing-summary" aria-label="Recent DJ timing summary">
+				<div>
+					<span>Avg delta</span>
+					<strong>{formatTimingDelta(timingSummary.average_delta_ms)}</strong>
+				</div>
+				<div>
+					<span>Avg abs</span>
+					<strong>{formatTimingMs(timingSummary.average_abs_delta_ms)}</strong>
+				</div>
+				<div>
+					<span>Late</span>
+					<strong>{timingSummary.late_count}</strong>
+				</div>
+				<div>
+					<span>Missed</span>
+					<strong>{timingSummary.missed_count}</strong>
+				</div>
+				<div>
+					<span>Tight</span>
+					<strong>{timingSummary.tight_count}</strong>
+				</div>
+				<div>
+					<span>Bad</span>
+					<strong>{timingSummary.bad_count}</strong>
+				</div>
+			</div>
+		{/if}
+		{#if recentTimingHistory.length > 0}
+			<ul class="timing-history" aria-label="Recent DJ transition timing">
+				{#each recentTimingHistory as event}
+					<li class={`rail-${qualityRail(event)}`}>
+						<div class="timing-history-title">
+							<span>{formatTimingPair(event)}</span>
+							<span class="timing-state-pill">{formatTimingState(event)}</span>
+						</div>
+						<p class="played-line" class:played-fallback={playedIsFallback(event)}>
+							{playedOutcome(event)}
+						</p>
+						<dl class="timing-history-details">
+							<div>
+								<dt>Template</dt>
+								<dd>{event.renderer_template ?? event.planned_template}</dd>
+							</div>
+							<div>
+								<dt>Source</dt>
+								<dd>{event.timing_source ?? 'none'}</dd>
+							</div>
+							<div>
+								<dt>Planned fire</dt>
+								<dd>{formatTimingMs(event.planned_start_ms)}</dd>
+							</div>
+							<div>
+								<dt>Actual fire</dt>
+								<dd>{formatActualTiming(event)}</dd>
+							</div>
+							<div>
+								<dt>Fire delta</dt>
+								<dd>{formatEventDelta(event)}</dd>
+							</div>
+							<div class="timing-history-cause">
+								<dt>Cause</dt>
+								<dd>
+									<span
+										class="cause-pill"
+										class:cause-pill-alert={hasRuntimeCause(event.runtime_renderer_reason)}
+									>
+										{runtimeReasonLabel(event.runtime_renderer_reason)}
+									</span>
+								</dd>
+							</div>
+						</dl>
+					</li>
+				{/each}
+			</ul>
+		{:else}
+			<p class="empty-history">No completed DJ transitions yet.</p>
+		{/if}
 	</div>
 
 	<button class="debug-toggle" type="button" aria-expanded={debugOpen} onclick={onToggleDebug}>
@@ -513,82 +658,6 @@
 					{/each}
 				</ul>
 			{/if}
-			<p class="debug-heading">Recent timing (last 5)</p>
-			{#if timingSummary && timingSummary.event_count > 0}
-				<div class="timing-summary" aria-label="Recent DJ timing summary">
-					<div>
-						<span>Avg delta</span>
-						<strong>{formatTimingDelta(timingSummary.average_delta_ms)}</strong>
-					</div>
-					<div>
-						<span>Avg abs</span>
-						<strong>{formatTimingMs(timingSummary.average_abs_delta_ms)}</strong>
-					</div>
-					<div>
-						<span>Late</span>
-						<strong>{timingSummary.late_count}</strong>
-					</div>
-					<div>
-						<span>Missed</span>
-						<strong>{timingSummary.missed_count}</strong>
-					</div>
-					<div>
-						<span>Tight</span>
-						<strong>{timingSummary.tight_count}</strong>
-					</div>
-					<div>
-						<span>Bad</span>
-						<strong>{timingSummary.bad_count}</strong>
-					</div>
-				</div>
-			{/if}
-			{#if recentTimingHistory.length > 0}
-				<ul class="timing-history" aria-label="Recent DJ transition timing">
-					{#each recentTimingHistory as event}
-						<li>
-							<div class="timing-history-title">
-								<span>{formatTimingPair(event)}</span>
-								<span class="timing-state-pill">{formatTimingState(event)}</span>
-							</div>
-							<dl class="timing-history-details">
-								<div>
-									<dt>Template</dt>
-									<dd>{event.renderer_template ?? event.planned_template}</dd>
-								</div>
-								<div>
-									<dt>Source</dt>
-									<dd>{event.timing_source ?? 'none'}</dd>
-								</div>
-								<div>
-									<dt>Planned fire</dt>
-									<dd>{formatTimingMs(event.planned_start_ms)}</dd>
-								</div>
-								<div>
-									<dt>Actual fire</dt>
-									<dd>{formatActualTiming(event)}</dd>
-								</div>
-								<div>
-									<dt>Fire delta</dt>
-									<dd>{formatEventDelta(event)}</dd>
-								</div>
-								<div class="timing-history-cause">
-									<dt>Cause</dt>
-									<dd>
-										<span
-											class="cause-pill"
-											class:cause-pill-alert={hasRuntimeCause(event.runtime_renderer_reason)}
-										>
-											{runtimeReasonLabel(event.runtime_renderer_reason)}
-										</span>
-									</dd>
-								</div>
-							</dl>
-						</li>
-					{/each}
-				</ul>
-			{:else}
-				<p class="empty-history">No completed DJ transitions yet.</p>
-			{/if}
 		</div>
 	{/if}
 </section>
@@ -600,7 +669,13 @@
 		padding: var(--space-4);
 		border: 1px solid var(--border-muted);
 		border-radius: var(--radius-md);
-		background: color-mix(in srgb, var(--bg-raised) 90%, transparent);
+		background:
+			radial-gradient(
+				120% 90% at 0% 0%,
+				color-mix(in srgb, var(--accent-soft) 40%, transparent),
+				transparent 55%
+			),
+			color-mix(in srgb, var(--bg-raised) 92%, transparent);
 	}
 
 	header {
@@ -630,6 +705,44 @@
 		margin-top: var(--space-1);
 		font-size: var(--font-size-2xl);
 		line-height: var(--line-height-tight);
+	}
+
+	.hero-chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--space-1);
+		margin-top: var(--space-2);
+	}
+
+	.hero-chip {
+		display: inline-flex;
+		align-items: center;
+		padding: 0.2rem var(--space-2);
+		border: 1px solid var(--border-subtle);
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--bg-surface) 78%, transparent);
+		color: var(--text-secondary);
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-semibold);
+		line-height: var(--line-height-tight);
+	}
+
+	.hero-chip-template {
+		border-color: color-mix(in srgb, var(--accent) 44%, var(--border-subtle));
+		background: color-mix(in srgb, var(--accent) 12%, transparent);
+		color: var(--accent-strong);
+	}
+
+	.hero-chip-locked {
+		border-color: color-mix(in srgb, var(--state-success) 44%, var(--border-subtle));
+		background: color-mix(in srgb, var(--state-success) 10%, transparent);
+		color: var(--text-primary);
+	}
+
+	.hero-chip-fallback {
+		border-color: color-mix(in srgb, var(--state-warning) 52%, var(--border-subtle));
+		background: color-mix(in srgb, var(--state-warning) 12%, transparent);
+		color: var(--text-primary);
 	}
 
 	.event-id {
@@ -725,6 +838,21 @@
 		opacity: 0.55;
 	}
 
+	.history-block {
+		display: grid;
+		gap: var(--space-2);
+	}
+
+	.section-heading,
+	.debug-heading {
+		color: var(--text-secondary);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
+		line-height: var(--line-height-tight);
+		text-transform: uppercase;
+		margin: 0;
+	}
+
 	.debug-toggle {
 		justify-self: start;
 		padding: 0 var(--space-3);
@@ -737,14 +865,6 @@
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-sm);
 		background: color-mix(in srgb, var(--bg-surface) 78%, transparent);
-	}
-
-	.debug-heading {
-		color: var(--text-secondary);
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-bold);
-		line-height: var(--line-height-tight);
-		text-transform: uppercase;
 	}
 
 	dl {
@@ -788,17 +908,30 @@
 	.timing-history li {
 		display: grid;
 		gap: var(--space-1);
-		padding: var(--space-1) var(--space-2);
+		padding: var(--space-2) var(--space-3);
 		border: 1px solid var(--border-subtle);
+		border-left-width: 3px;
 		border-radius: var(--radius-sm);
 		background: color-mix(in srgb, var(--bg-surface) 66%, transparent);
 		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
 	}
 
-	.timing-history li:nth-child(even) {
-		border-color: color-mix(in srgb, var(--accent-line) 24%, var(--border-subtle));
-		background: color-mix(in srgb, var(--bg-elevated) 70%, var(--accent-soft) 30%);
+	.timing-history li.rail-tight {
+		border-left-color: color-mix(in srgb, var(--state-success) 80%, transparent);
+	}
+
+	.timing-history li.rail-usable {
+		border-left-color: color-mix(in srgb, var(--state-warning) 70%, transparent);
+	}
+
+	.timing-history li.rail-loose,
+	.timing-history li.rail-bad {
+		border-left-color: color-mix(in srgb, var(--state-error) 76%, transparent);
+	}
+
+	.timing-history li.rail-missed {
+		border-left-color: color-mix(in srgb, var(--text-tertiary) 60%, transparent);
 	}
 
 	.timing-history-title {
@@ -825,6 +958,16 @@
 		font-size: var(--font-size-2xs);
 		line-height: var(--line-height-tight);
 		text-transform: uppercase;
+	}
+
+	.played-line {
+		color: var(--text-secondary);
+		font-size: var(--font-size-2xs);
+		line-height: var(--line-height-tight);
+	}
+
+	.played-fallback {
+		color: var(--state-warning);
 	}
 
 	.cause-pill {

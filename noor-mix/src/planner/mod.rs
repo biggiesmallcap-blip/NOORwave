@@ -173,6 +173,12 @@ fn build_program(
         program.drop_source = Some(drop_source_for_profile(incoming).to_string());
     }
 
+    if matches!(template, TransitionTemplate::SafeCrossfade) {
+        program
+            .automation
+            .extend(safe_crossfade_low_duck(duration_samples));
+    }
+
     if matches!(
         template,
         TransitionTemplate::BassSwap16 | TransitionTemplate::BassSwap32
@@ -642,6 +648,35 @@ fn deck_gain_automation(duration_samples: u64) -> Vec<AutomationEvent> {
             from: 0.0,
             to: 1.0,
             curve: Curve::EqualPowerIn,
+        },
+    ]
+}
+
+/// Keep the incoming track's low band out of the first half of a safe
+/// crossfade so two unrelated basslines never fight during the overlap, then
+/// hand the lows over as the outgoing deck gain is already mostly gone. The
+/// deck gains stay the equal-power pair; this only shapes tone. The leading
+/// hold event is required because parameters default to unity before their
+/// first event.
+fn safe_crossfade_low_duck(duration_samples: u64) -> Vec<AutomationEvent> {
+    let end_sample = duration_samples.max(2);
+    let hold_end = (end_sample / 2).max(1);
+    vec![
+        AutomationEvent {
+            param: Param::LowGain(DeckId::B),
+            start_sample: 0,
+            end_sample: hold_end,
+            from: 0.0,
+            to: 0.0,
+            curve: Curve::Linear,
+        },
+        AutomationEvent {
+            param: Param::LowGain(DeckId::B),
+            start_sample: hold_end,
+            end_sample,
+            from: 0.0,
+            to: 1.0,
+            curve: Curve::Cosine,
         },
     ]
 }
@@ -1225,6 +1260,90 @@ mod tests {
                 "energy at {step}/4 was {energy}"
             );
         }
+    }
+
+    #[test]
+    fn safe_crossfade_ducks_incoming_low_band_until_swap() {
+        let policy = Policy {
+            safety_template_override: Some(TransitionTemplate::SafeCrossfade),
+            ..Policy::default()
+        };
+        let program = Planner::plan(
+            &profile(Some(120.0), Some("8A"), 4),
+            &profile(Some(120.0), Some("8A"), 4),
+            &policy,
+        );
+        assert_eq!(program.template, "SafeCrossfade");
+        program.validate().expect("safe crossfade with low duck");
+
+        let low_at = |sample: u64| {
+            crate::automation::param_value_at(
+                &program.automation,
+                Param::LowGain(DeckId::B),
+                sample,
+            )
+        };
+        // Held out for the whole first half, fully back by the resolve.
+        assert_eq!(low_at(0), 0.0);
+        assert_eq!(low_at(program.resolve_at / 4), 0.0);
+        let mid = low_at(program.resolve_at * 3 / 4);
+        assert!(
+            mid > 0.0 && mid < 1.0,
+            "low band should be handing over in the second half, was {mid}"
+        );
+        assert!((low_at(program.resolve_at) - 1.0).abs() < 1e-6);
+        // The outgoing deck keeps its lows; only the incoming side is shaped.
+        assert!(
+            !program
+                .automation
+                .iter()
+                .any(|event| event.param == Param::LowGain(DeckId::A))
+        );
+    }
+
+    #[test]
+    fn safe_crossfade_qa_render_passes_with_low_duck() {
+        fn sine(freq: f32, frames: usize, sample_rate: u32) -> Vec<f32> {
+            (0..frames)
+                .map(|i| {
+                    (2.0 * std::f32::consts::PI * freq * i as f32 / sample_rate as f32).sin() * 0.35
+                })
+                .collect()
+        }
+        let policy = Policy {
+            safety_template_override: Some(TransitionTemplate::SafeCrossfade),
+            ..Policy::default()
+        };
+        let mut program = Planner::plan(
+            &profile(Some(120.0), Some("8A"), 4),
+            &profile(Some(120.0), Some("8A"), 4),
+            &policy,
+        );
+        program.channels = 1;
+        let frames = program.resolve_at as usize + program.sample_rate as usize;
+        let report = crate::qa::render_transition_qa(
+            &program,
+            &sine(80.0, frames, program.sample_rate),
+            &sine(110.0, frames, program.sample_rate),
+        )
+        .expect("qa render");
+        assert!(report.passed(), "{report:?}");
+    }
+
+    #[test]
+    fn safe_crossfade_duration_follows_policy_default() {
+        let policy = Policy {
+            safety_template_override: Some(TransitionTemplate::SafeCrossfade),
+            ..Policy::default()
+        };
+        let program = Planner::plan(
+            &profile(Some(120.0), Some("8A"), 4),
+            &profile(Some(120.0), Some("8A"), 4),
+            &policy,
+        );
+        // 6s at the 48k planning rate; 12s read as mud over a full-spectrum
+        // overlap.
+        assert_eq!(program.resolve_at, 288_000);
     }
 
     #[test]
