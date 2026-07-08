@@ -731,14 +731,18 @@ pub(crate) fn decode_and_buffer_job(
                 let mut sb = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
                 sb.copy_interleaved_ref(decoded);
 
-                // ── Passive analysis tap: capture first 30 seconds as mono ──────────────
+                // Passive analysis tap: capture the first 45s as mono.
+                // 45s = a 15s intro skip (PASSIVE_INTRO_SKIP_SEC, dropped in the
+                // analysis actor) plus the 30s analysis window. Tracks that end
+                // before 45s are flushed with whatever was captured after the
+                // decode loop, so nothing is left unanalysed.
                 if !analysis_sent {
                     extend_mono_from_interleaved(
                         &mut analysis_buf,
                         sb.samples(),
                         decoded_channels as usize,
                     );
-                    if analysis_buf.len() >= decoded_sample_rate as usize * 30 {
+                    if analysis_buf.len() >= decoded_sample_rate as usize * 45 {
                         if let Some(tx) = &config.analysis_tx {
                             let _ = tx.send((
                                 shared.track_id,
@@ -900,6 +904,19 @@ pub(crate) fn decode_and_buffer_job(
                     decoded_sample_rate,
                     shared.generation,
                 );
+            }
+
+            // Flush the passive analysis tap for tracks that ended before the
+            // 45s capture threshold, so short tracks still get analysed (from
+            // the start, since there is not enough audio to skip an intro).
+            if !analysis_sent && !analysis_buf.is_empty() {
+                if let Some(tx) = &config.analysis_tx {
+                    let _ = tx.send((
+                        shared.track_id,
+                        std::mem::take(&mut analysis_buf),
+                        decoded_sample_rate,
+                    ));
+                }
             }
 
             // Apply fade-in / fade-out ramps and mark the stream complete.

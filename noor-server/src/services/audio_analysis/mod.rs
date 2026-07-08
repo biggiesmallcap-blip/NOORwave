@@ -9,7 +9,11 @@ pub mod queue_prescanner;
 pub mod scanner;
 pub mod tempo;
 
-pub const CURRENT_ANALYSIS_VERSION: &str = "v9";
+// v10: passive analysis now skips the track intro before running key
+// detection (see PASSIVE_INTRO_SKIP_SEC). Bumping the version re-runs analysis
+// once on every existing row so tracks whose key came back empty from a quiet
+// intro window are re-analysed against the track body and self-heal.
+pub const CURRENT_ANALYSIS_VERSION: &str = "v10";
 
 /// Server-config key controlling whether the playback-driven actor analyses
 /// audio at all. Defaults to enabled. Stored in the `server_config` k/v table
@@ -17,6 +21,13 @@ pub const CURRENT_ANALYSIS_VERSION: &str = "v9";
 /// (consuming samples to drain the channel) but does not call analyse_and_save.
 pub const PASSIVE_DSP_ENABLED_KEY: &str = "passive_dsp_enabled";
 const PASSIVE_ANALYSIS_MAX_SAMPLE_RATE: u32 = 48_000;
+/// Seconds of intro dropped before the passive analysis window. An electronic
+/// track's first ~15s is frequently a quiet/atonal open (pads, filtered
+/// sweeps, single-instrument builds) whose flat pitch-class profile fails key
+/// detection even though the body of the track has a clear key. Mirrors the
+/// preview scanner's PREVIEW_OFFSET_SEC, tuned longer for club intros. Only
+/// applied when the full analysis window still remains after the skip.
+const PASSIVE_INTRO_SKIP_SEC: u32 = 15;
 
 use crate::AppEvent;
 use rusqlite::Connection;
@@ -114,7 +125,7 @@ pub fn spawn_actor(
                 })
                 .unwrap_or(false);
 
-            let Some((samples, sample_rate)) = prepare_passive_analysis_job(
+            let Some((samples, sample_rate, offset_ms)) = prepare_passive_analysis_job(
                 samples,
                 sample_rate,
                 config.max_seconds,
@@ -126,7 +137,14 @@ pub fn spawn_actor(
             // CPU-heavy DSP must run off the tokio worker (Issue A).
             let db_clone = db.clone();
             let result = tokio::task::spawn_blocking(move || {
-                engine::analyze_and_save(&db_clone, &samples, sample_rate, "passive", track_id, 0)
+                engine::analyze_and_save(
+                    &db_clone,
+                    &samples,
+                    sample_rate,
+                    "passive",
+                    track_id,
+                    offset_ms,
+                )
             })
             .await
             .ok()
@@ -157,18 +175,29 @@ fn prepare_passive_analysis_job(
     mut sample_rate: u32,
     max_seconds: u32,
     already_analyzed: bool,
-) -> Option<(Vec<f32>, u32)> {
+) -> Option<(Vec<f32>, u32, i64)> {
     if already_analyzed {
         return None;
     }
 
-    let max_samples = (sample_rate * max_seconds) as usize;
-    if samples.len() > max_samples {
-        samples.truncate(max_samples);
+    let window_samples = (sample_rate as usize).saturating_mul(max_seconds as usize);
+    let skip_samples = (sample_rate as usize).saturating_mul(PASSIVE_INTRO_SKIP_SEC as usize);
+    // Skip the intro only when the whole analysis window still remains after
+    // it; short tracks (or an early-flushed decode) keep the from-start window
+    // so they are never left unanalysed.
+    let offset_ms = if samples.len() >= skip_samples.saturating_add(window_samples) {
+        samples.drain(..skip_samples);
+        i64::from(PASSIVE_INTRO_SKIP_SEC) * 1000
+    } else {
+        0
+    };
+
+    if samples.len() > window_samples {
+        samples.truncate(window_samples);
     }
     (samples, sample_rate) = prepare_passive_analysis_samples(samples, sample_rate);
 
-    Some((samples, sample_rate))
+    Some((samples, sample_rate, offset_ms))
 }
 
 fn prepare_passive_analysis_samples(samples: Vec<f32>, sample_rate: u32) -> (Vec<f32>, u32) {
@@ -273,6 +302,37 @@ mod tests {
         let planned = prepare_passive_analysis_job(input, u32::MAX, 30, true);
 
         assert!(planned.is_none());
+    }
+
+    #[test]
+    fn passive_analysis_plan_skips_intro_when_enough_audio() {
+        // 60s at 10 Hz = 600 samples; a 15s intro skip (150) plus a 30s window
+        // (300) fits, so the window starts at the 15s mark.
+        let input: Vec<f32> = (0..600).map(|i| i as f32).collect();
+
+        let (samples, sample_rate, offset_ms) =
+            prepare_passive_analysis_job(input, 10, 30, false).expect("planned");
+
+        assert_eq!(sample_rate, 10);
+        assert_eq!(offset_ms, 15_000);
+        assert_eq!(samples.len(), 300);
+        assert_eq!(samples[0], 150.0);
+        assert_eq!(samples[299], 449.0);
+    }
+
+    #[test]
+    fn passive_analysis_plan_keeps_start_when_too_short_to_skip() {
+        // 30s at 10 Hz = 300 samples: not enough to drop a 15s intro and still
+        // keep a 30s window, so analyse from the start rather than skip.
+        let input: Vec<f32> = (0..300).map(|i| i as f32).collect();
+
+        let (samples, sample_rate, offset_ms) =
+            prepare_passive_analysis_job(input, 10, 30, false).expect("planned");
+
+        assert_eq!(sample_rate, 10);
+        assert_eq!(offset_ms, 0);
+        assert_eq!(samples.len(), 300);
+        assert_eq!(samples[0], 0.0);
     }
 
     #[test]

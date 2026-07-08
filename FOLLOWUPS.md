@@ -10,24 +10,6 @@ back to the PR or commit that flagged it.
 
 ## Open
 
-### dj: recover missing Camelot keys (quiet-intro window + hard confidence gate)
-
-34% of DSP-analyzed tracks (547/1601 on the dev library) have no camelot_key.
-Root cause (verified): passive analysis reads a fixed first-30s window at
-offset 0 (playback/decode/mod.rs:~734 tap; services/audio_analysis/mod.rs:129
-hardcodes offset_ms=0), which for electronic tracks is often a quiet/atonal
-intro. detect_key (services/audio_analysis/key.rs:101) then discards the flat
-PCP with `best_corr < 0.6 || margin < 0.05`, so the key is empty while every
-other feature computes. The keyless row still saves as v-current, and
-already_analyzed (mod.rs:108-114) locks the track out, so it never retries.
-Fix (three parts): (1) analyze a mid-track/loudest window - reuse the preview
-scanner's intro-skip (scanner.rs:216-231, PREVIEW_OFFSET_SEC) on the passive
-path; (2) treat a v-current row with an empty camelot_key as re-analyzable so
-the 547 self-heal on next play; (3) bump CURRENT_ANALYSIS_VERSION (or the
-per-field re-analyze) so the improvement propagates. Bass-swap-on-unknown-key
-(shipped) makes this non-blocking for transitions, so it is no longer urgent.
-- Spawned by: DJ key-detection + analyzer diagnosis session.
-
 ### dj: fast-fail on TIDAL ad segments instead of timing out
 
 Some TIDAL streams resolve to ad-CDN segments (sp-ad-cf.audio.tidal.com) that
