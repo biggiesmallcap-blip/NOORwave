@@ -76,6 +76,34 @@ struct StallTracker {
     watching: Option<(i64, u64)>,
     last_position: u64,
     last_progress_at: std::time::Instant,
+    /// True between a stall detection and the next progress/rearm. Gates the
+    /// `Stalled` / `StallRecovered` event pair to one emission per episode.
+    stall_flagged: bool,
+}
+
+/// One engine's watchdog-relevant state, read once per tick. Decouples the
+/// stall decision from `PlaybackRuntimeLoopState` so it is unit-testable.
+#[derive(Debug, Clone, Copy)]
+struct EngineProbe {
+    id: (i64, u64),
+    position: u64,
+    paused: bool,
+    started: bool,
+    finished: bool,
+}
+
+/// What one watchdog tick decided.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct StallPollOutcome {
+    /// Engine starved past `ACTIVE_STALL_RECOVERY_SECS`: force the queue
+    /// forward. Re-fires every threshold interval while the stall persists.
+    force_advance: Option<(i64, u64)>,
+    /// First tick of a stall episode: pause the listen session (track_id).
+    just_stalled: Option<i64>,
+    /// First progress after a stall episode on the SAME engine: resume the
+    /// listen session (track_id). Engine changes do not emit this - the
+    /// track-change flow flushes the session instead.
+    just_recovered: Option<i64>,
 }
 
 impl StallTracker {
@@ -84,6 +112,7 @@ impl StallTracker {
             watching: None,
             last_position: 0,
             last_progress_at: std::time::Instant::now(),
+            stall_flagged: false,
         }
     }
 
@@ -94,40 +123,58 @@ impl StallTracker {
         self.watching = Some(id);
         self.last_position = position;
         self.last_progress_at = std::time::Instant::now();
+        self.stall_flagged = false;
     }
 
-    /// Called on each idle watchdog tick. Returns the `(track_id, generation)`
-    /// of the active engine if it has been starved past
-    /// `ACTIVE_STALL_RECOVERY_SECS` and the queue should be force-advanced.
-    fn poll(&mut self, state: &PlaybackRuntimeLoopState) -> Option<(i64, u64)> {
-        let engine = state.engine.as_ref()?;
-        let id = (engine.track_id, engine.generation);
-        let position = engine.shared.position_samples.load(Ordering::Relaxed);
-
-        // Paused playback legitimately makes no progress.
-        if engine.shared.paused.load(Ordering::SeqCst) {
-            self.rearm(id, position);
-            return None;
-        }
-        // A finished engine emits its own terminal via the audio callback. A
-        // not-yet-started engine is still doing its initial prebuffer -- on a
-        // slow connection the first ~500ms can legitimately take many seconds to
-        // arrive, and the playhead sits at the baseline offset the whole time.
-        // Neither is a stall; only a deck that WAS playing and then froze is.
+    /// Called on each idle watchdog tick.
+    fn poll(&mut self, state: &PlaybackRuntimeLoopState) -> StallPollOutcome {
+        let Some(engine) = state.engine.as_ref() else {
+            self.watching = None;
+            self.stall_flagged = false;
+            return StallPollOutcome::default();
+        };
         let (started, finished) = engine
             .shared
             .buffer
             .lock()
             .map(|guard| (guard.started, guard.finished))
             .unwrap_or((false, false));
-        if finished || !started {
-            self.rearm(id, position);
-            return None;
+        self.observe(EngineProbe {
+            id: (engine.track_id, engine.generation),
+            position: engine.shared.position_samples.load(Ordering::Relaxed),
+            paused: engine.shared.paused.load(Ordering::SeqCst),
+            started,
+            finished,
+        })
+    }
+
+    /// Pure decision core over one engine probe.
+    fn observe(&mut self, probe: EngineProbe) -> StallPollOutcome {
+        let mut outcome = StallPollOutcome::default();
+
+        // Paused playback legitimately makes no progress.
+        if probe.paused {
+            self.rearm(probe.id, probe.position);
+            return outcome;
+        }
+        // A finished engine emits its own terminal via the audio callback. A
+        // not-yet-started engine is still doing its initial prebuffer -- on a
+        // slow connection the first ~500ms can legitimately take many seconds to
+        // arrive, and the playhead sits at the baseline offset the whole time.
+        // Neither is a stall; only a deck that WAS playing and then froze is.
+        if probe.finished || !probe.started {
+            self.rearm(probe.id, probe.position);
+            return outcome;
         }
         // New track, or audible progress since the last tick -> not stalled.
-        if self.watching != Some(id) || position != self.last_position {
-            self.rearm(id, position);
-            return None;
+        // Progress on the engine we flagged ends the stall episode: tell the
+        // listener to resume the listen session it paused.
+        if self.watching != Some(probe.id) || probe.position != self.last_position {
+            if self.stall_flagged && self.watching == Some(probe.id) {
+                outcome.just_recovered = Some(probe.id.0);
+            }
+            self.rearm(probe.id, probe.position);
+            return outcome;
         }
         // Same track, no progress since the last tick: over budget?
         if self.last_progress_at.elapsed()
@@ -136,9 +183,13 @@ impl StallTracker {
             // Reset the clock so we don't re-fire every tick while the synthetic
             // terminal is in flight and the queue advances.
             self.last_progress_at = std::time::Instant::now();
-            return Some(id);
+            if !self.stall_flagged {
+                self.stall_flagged = true;
+                outcome.just_stalled = Some(probe.id.0);
+            }
+            outcome.force_advance = Some(probe.id);
         }
-        None
+        outcome
     }
 }
 
@@ -1984,7 +2035,14 @@ fn run_runtime_loop(
                 // has frozen on a hung TIDAL segment and, if so, force the queue
                 // forward (the audio callback can't, because a starved-but-not-
                 // finished engine emits no command).
-                if let Some((track_id, generation)) = stall_tracker.poll(&state) {
+                let stall = stall_tracker.poll(&state);
+                if let Some(track_id) = stall.just_stalled {
+                    let _ = event_tx.send(PlaybackRuntimeEvent::Stalled { track_id });
+                }
+                if let Some(track_id) = stall.just_recovered {
+                    let _ = event_tx.send(PlaybackRuntimeEvent::StallRecovered { track_id });
+                }
+                if let Some((track_id, generation)) = stall.force_advance {
                     warn!(
                         "Playback stalled: no audio on track {} for {}s; forcing queue advance",
                         track_id, ACTIVE_STALL_RECOVERY_SECS
@@ -6666,7 +6724,7 @@ mod tests {
 
         let mut tracker = StallTracker::new();
         // First poll arms the tracker against the active engine; not a stall yet.
-        assert_eq!(tracker.poll(&state), None);
+        assert_eq!(tracker.poll(&state), StallPollOutcome::default());
 
         // Simulate the stall clock having run past the budget with the playhead
         // frozen at the same position (decoder starved on a hung segment).
@@ -6675,11 +6733,67 @@ mod tests {
                 ACTIVE_STALL_RECOVERY_SECS + 1,
             ))
             .expect("instant underflow");
+        let stalled = tracker.poll(&state);
         assert_eq!(
-            tracker.poll(&state),
+            stalled.force_advance,
             Some((7, 3)),
             "a frozen, unfinished, playing engine past the budget must force advance"
         );
+        assert_eq!(
+            stalled.just_stalled,
+            Some(7),
+            "the first budget crossing starts a stall episode for the listener"
+        );
+    }
+
+    #[test]
+    fn stall_tracker_emits_stalled_once_and_recovered_on_progress() {
+        let mut state = test_runtime_loop_state();
+        let engine = test_engine_with_shared(7, 3);
+        engine
+            .shared
+            .position_samples
+            .store(48_000, Ordering::Relaxed);
+        engine.shared.buffer.lock().unwrap().started = true;
+        state.engine = Some(engine);
+
+        let mut tracker = StallTracker::new();
+        assert_eq!(tracker.poll(&state), StallPollOutcome::default());
+
+        let stale = || {
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(
+                    ACTIVE_STALL_RECOVERY_SECS + 1,
+                ))
+                .expect("instant underflow")
+        };
+
+        // Budget elapses frozen: one Stalled emission plus the force advance.
+        tracker.last_progress_at = stale();
+        let stalled = tracker.poll(&state);
+        assert_eq!(stalled.just_stalled, Some(7));
+        assert_eq!(stalled.force_advance, Some((7, 3)));
+
+        // Still frozen a budget later: the advance re-fires (retry), the
+        // Stalled emission does not repeat (one pause per episode).
+        tracker.last_progress_at = stale();
+        let still = tracker.poll(&state);
+        assert!(still.just_stalled.is_none());
+        assert_eq!(still.force_advance, Some((7, 3)));
+
+        // The hung segment finally arrives: progress on the same engine emits
+        // StallRecovered exactly once, then everything is quiet again.
+        state
+            .engine
+            .as_ref()
+            .unwrap()
+            .shared
+            .position_samples
+            .store(96_000, Ordering::Relaxed);
+        let recovered = tracker.poll(&state);
+        assert_eq!(recovered.just_recovered, Some(7));
+        assert!(recovered.force_advance.is_none());
+        assert_eq!(tracker.poll(&state), StallPollOutcome::default());
     }
 
     #[test]
@@ -6694,7 +6808,7 @@ mod tests {
         state.engine = Some(engine);
 
         let mut tracker = StallTracker::new();
-        assert_eq!(tracker.poll(&state), None);
+        assert_eq!(tracker.poll(&state), StallPollOutcome::default());
         tracker.last_progress_at = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(
                 ACTIVE_STALL_RECOVERY_SECS + 1,
@@ -6702,7 +6816,7 @@ mod tests {
             .expect("instant underflow");
         assert_eq!(
             tracker.poll(&state),
-            None,
+            StallPollOutcome::default(),
             "a deck still doing initial buffering must not be force-skipped"
         );
     }
@@ -6719,7 +6833,7 @@ mod tests {
         state.engine = Some(engine);
 
         let mut tracker = StallTracker::new();
-        assert_eq!(tracker.poll(&state), None);
+        assert_eq!(tracker.poll(&state), StallPollOutcome::default());
 
         let stale = || {
             std::time::Instant::now()
@@ -6729,7 +6843,8 @@ mod tests {
                 .expect("instant underflow")
         };
 
-        // Audible progress since the last tick resets the stall timer.
+        // Audible progress since the last tick resets the stall timer. No
+        // stall episode was flagged, so no StallRecovered fires either.
         tracker.last_progress_at = stale();
         state
             .engine
@@ -6738,7 +6853,11 @@ mod tests {
             .shared
             .position_samples
             .store(96_000, Ordering::Relaxed);
-        assert_eq!(tracker.poll(&state), None, "progress is not a stall");
+        assert_eq!(
+            tracker.poll(&state),
+            StallPollOutcome::default(),
+            "progress is not a stall"
+        );
 
         // Paused playback legitimately makes no progress.
         tracker.last_progress_at = stale();
@@ -6749,7 +6868,11 @@ mod tests {
             .shared
             .paused
             .store(true, Ordering::SeqCst);
-        assert_eq!(tracker.poll(&state), None, "paused is not a stall");
+        assert_eq!(
+            tracker.poll(&state),
+            StallPollOutcome::default(),
+            "paused is not a stall"
+        );
         state
             .engine
             .as_ref()
@@ -6769,7 +6892,11 @@ mod tests {
             .lock()
             .unwrap()
             .mark_finished();
-        assert_eq!(tracker.poll(&state), None, "finished is not a stall");
+        assert_eq!(
+            tracker.poll(&state),
+            StallPollOutcome::default(),
+            "finished is not a stall"
+        );
     }
 
     fn test_runtime_loop_state() -> PlaybackRuntimeLoopState {

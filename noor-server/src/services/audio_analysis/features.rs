@@ -1,7 +1,7 @@
 /// Audio feature extraction: energy, LUFS, spectral centroid, instrumental detection.
 ///
 /// Functions:
-/// - `compute_energy`: RMS normalised to [0,1]
+/// - `compute_energy`: perceptual energy in [0,1], mapped from LUFS (RMS-dB fallback)
 /// - `compute_lufs`: ITU-R BS.1770-4 gated loudness measurement
 /// - `compute_stft_features`: spectral centroid and energy-band features
 /// - `detect_instrumental_from`: vocal energy ratio heuristic
@@ -11,14 +11,47 @@ use std::f64::consts::PI;
 
 // ─── Energy ──────────────────────────────────────────────────────────────────
 
-/// Compute normalised energy (RMS / 0.7, clamped to [0,1]).
-pub fn compute_energy(samples: &[f32]) -> f64 {
+/// Loudness endpoints (dB) of the energy map: -30 dB -> 0.0, -6 dB -> 1.0.
+///
+/// Tuned against a real library's LUFS distribution (p5 -26.6, median -16.1,
+/// p95 -10.6): -30 pins only genuinely quiet ambient tails at 0.0 and -6 sits
+/// at the loudness-war ceiling, so mapped energy centres near 0.5 and spans
+/// the whole axis. The previous RMS/0.7 scale treated a full-scale sine as
+/// 1.0, which real mastered music never reaches (it compressed ~97% of a
+/// library below 0.5).
+const ENERGY_DB_FLOOR: f64 = -30.0;
+const ENERGY_DB_CEIL: f64 = -6.0;
+
+/// Map a loudness measurement in dB (LUFS or RMS dBFS) onto [0,1].
+///
+/// Public because the DJ profile loader reuses the exact same map to derive a
+/// fallback energy from the profile's `lufs_loud_body` when no DSP row exists,
+/// keeping every energy value in the app on one absolute scale.
+pub fn energy_from_db(db: f64) -> f64 {
+    ((db - ENERGY_DB_FLOOR) / (ENERGY_DB_CEIL - ENERGY_DB_FLOOR)).clamp(0.0, 1.0)
+}
+
+/// Compute normalised perceptual energy in [0,1].
+///
+/// Preferred path: linear map of the track's integrated LUFS (pass in the
+/// value already produced by `compute_lufs`; it is not recomputed here).
+/// Fallback when LUFS is unavailable (clips shorter than ~1 s): the same map
+/// applied to the RMS level in dBFS, which tracks LUFS within a couple of dB
+/// for normal programme material, so short clips stay on the same scale.
+/// Total: always returns a value; silence -> 0.0.
+pub fn compute_energy(samples: &[f32], lufs: Option<f64>) -> f64 {
+    if let Some(lufs) = lufs {
+        return energy_from_db(lufs);
+    }
     if samples.is_empty() {
         return 0.0;
     }
     let sum_sq: f64 = samples.iter().map(|s| (*s as f64).powi(2)).sum::<f64>();
     let rms = (sum_sq / samples.len() as f64).sqrt();
-    (rms / 0.7).clamp(0.0, 1.0)
+    if rms <= 0.0 {
+        return 0.0;
+    }
+    energy_from_db(20.0 * rms.log10())
 }
 
 // ─── LUFS (ITU-R BS.1770-4) ─────────────────────────────────────────────────
@@ -372,23 +405,89 @@ mod tests {
 
     #[test]
     fn test_energy_silence() {
+        // Silence has no LUFS (every block gated) and zero RMS, so the
+        // fallback path must return exactly 0.0.
         let samples = vec![0.0f32; 44100];
-        assert!((compute_energy(&samples) - 0.0).abs() < 1e-6);
+        assert!((compute_energy(&samples, None) - 0.0).abs() < 1e-6);
     }
 
     #[test]
     fn test_energy_full_scale() {
+        // Full-scale signal without a LUFS value exercises the RMS fallback:
+        // 0 dBFS sits above the -6 dB ceiling and clamps to 1.0.
         let samples = vec![1.0f32; 44100];
-        let energy = compute_energy(&samples);
-        assert!((energy - 1.0).abs() < 1e-6); // 1.0 / 0.7 > 1.0, clamped
+        let energy = compute_energy(&samples, None);
+        assert!((energy - 1.0).abs() < 1e-6);
     }
 
     #[test]
-    fn test_energy_mid_scale() {
-        // RMS of 0.7 should give energy ~1.0
-        let samples = vec![0.7f32; 44100];
-        let energy = compute_energy(&samples);
-        assert!((energy - 1.0).abs() < 0.01);
+    fn test_energy_map_anchors() {
+        // Replaces test_energy_mid_scale, which asserted the old RMS/0.7
+        // ceiling (RMS 0.7 == energy 1.0). Energy is now anchored in
+        // loudness: -6 LUFS -> 1.0, -30 LUFS -> 0.0, midpoint -18 -> 0.5.
+        assert!((compute_energy(&[], Some(-6.0)) - 1.0).abs() < 1e-9);
+        assert!((compute_energy(&[], Some(-30.0)) - 0.0).abs() < 1e-9);
+        assert!((compute_energy(&[], Some(-18.0)) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_energy_clamps_beyond_endpoints() {
+        assert!((compute_energy(&[], Some(-3.0)) - 1.0).abs() < 1e-9);
+        assert!((compute_energy(&[], Some(-45.0)) - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_energy_monotonic_in_lufs() {
+        // Louder LUFS never yields lower energy.
+        let mut prev = -1.0f64;
+        let mut db = -50.0f64;
+        while db <= 0.0 {
+            let energy = compute_energy(&[], Some(db));
+            assert!(
+                energy >= prev,
+                "energy must not decrease: {db} LUFS gave {energy} < {prev}"
+            );
+            prev = energy;
+            db += 1.0;
+        }
+    }
+
+    #[test]
+    fn test_energy_loud_sine_maps_high_quiet_sine_maps_low() {
+        // End to end through compute_lufs: a mastered-loud tone lands in the
+        // upper part of the scale, a whisper-level tone in the lower part.
+        let sr = 48_000u32;
+        let make = |amp: f64| -> Vec<f32> {
+            (0..(sr * 2) as usize)
+                .map(|n| (amp * (2.0 * PI * 1000.0 * n as f64 / sr as f64).sin()) as f32)
+                .collect()
+        };
+        let loud = make(0.5); // ~ -9 dBFS
+        let quiet = make(0.02); // ~ -37 dBFS
+        let loud_energy = compute_energy(&loud, compute_lufs(&loud, sr));
+        let quiet_energy = compute_energy(&quiet, compute_lufs(&quiet, sr));
+        assert!(
+            loud_energy > 0.7,
+            "loud sine should map high, got {loud_energy}"
+        );
+        assert!(
+            quiet_energy < 0.3,
+            "quiet sine should map low, got {quiet_energy}"
+        );
+        assert!(loud_energy > quiet_energy);
+    }
+
+    #[test]
+    fn test_energy_short_clip_rms_fallback_stays_in_range() {
+        // 0.25 s clip: too short for LUFS (documented fallback), non-silent,
+        // so the RMS path must land inside (0, 1].
+        let sr = 44_100u32;
+        let samples: Vec<f32> = (0..(sr / 4) as usize)
+            .map(|n| (0.3 * (2.0 * PI * 220.0 * n as f64 / sr as f64).sin()) as f32)
+            .collect();
+        assert!(compute_lufs(&samples, sr).is_none());
+        let energy = compute_energy(&samples, None);
+        assert!(energy > 0.0 && energy <= 1.0, "got {energy}");
     }
 
     #[test]

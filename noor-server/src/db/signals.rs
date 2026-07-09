@@ -26,6 +26,29 @@ const COHORT_DEEP_LIFETIME_LISTENS: i64 = 5;
 const MONTH_ROW_CAP: usize = 24;
 const RIDGELINE_DAY_CAP: i64 = 365;
 
+/// SQL fragment: a listen row's duration, capped at the track's length when
+/// the length is known (NULL or 0 duration_ms falls back to the raw value).
+///
+/// The listen-session timer accrues wall-clock time while the player is
+/// nominally playing, so stalled streams recorded runaway rows (observed:
+/// 2795 s "listened" on a 334 s track). The writer now clamps new rows
+/// (player::clamp_listened_ms); this expression self-heals the historical
+/// rows already in users' DBs everywhere this page sums listened time.
+fn capped_listened_ms(listen_alias: &str, track_alias: &str) -> String {
+    format!(
+        "MIN({l}.duration_listened_ms, COALESCE(NULLIF({t}.duration_ms, 0), {l}.duration_listened_ms))",
+        l = listen_alias,
+        t = track_alias
+    )
+}
+
+/// SQL fragment: keep only listens the user chose to play. Radio and automix
+/// pick tracks by themselves, so counting them in the taste-ranked cards made
+/// "Top Artists" reflect the radio's choices (12 consecutive radio plays of
+/// one artist outranked everything the user actually picked). NULL / legacy /
+/// unknown sources stay included - their provenance is unknowable.
+const CHOSEN_LISTENS_ONLY: &str = "COALESCE(lh.source, '') NOT IN ('radio', 'automix')";
+
 /// Granularity selection - locked fallback rule.
 ///
 ///   1..=7   -> Day (always)
@@ -214,10 +237,10 @@ fn build_signals_window(
 }
 
 fn get_analytics_totals(conn: &Connection, days: i64) -> Result<AnalyticsTotals> {
-    conn.query_row(
+    let sql = format!(
         "SELECT
             COUNT(lh.id),
-            COALESCE(SUM(lh.duration_listened_ms), 0),
+            COALESCE(SUM({capped}), 0),
             COUNT(DISTINCT lh.track_id),
             COUNT(lh.id) FILTER (
                 WHERE EXISTS (
@@ -225,17 +248,18 @@ fn get_analytics_totals(conn: &Connection, days: i64) -> Result<AnalyticsTotals>
                 )
             )
          FROM listen_history lh
+         LEFT JOIN tracks t ON t.id = lh.track_id
          WHERE lh.started_at >= datetime('now', printf('-%d days', ?1))",
-        params![days],
-        |row| {
-            Ok(AnalyticsTotals {
-                listens: row.get(0)?,
-                listened_ms: row.get(1)?,
-                distinct_tracks: row.get(2)?,
-                tagged_listens: row.get(3)?,
-            })
-        },
-    )
+        capped = capped_listened_ms("lh", "t")
+    );
+    conn.query_row(&sql, params![days], |row| {
+        Ok(AnalyticsTotals {
+            listens: row.get(0)?,
+            listened_ms: row.get(1)?,
+            distinct_tracks: row.get(2)?,
+            tagged_listens: row.get(3)?,
+        })
+    })
     .map_err(Into::into)
 }
 
@@ -245,20 +269,35 @@ fn get_signals_kpis(conn: &Connection, days: i64) -> Result<SignalsKpis> {
     let cur_offset = days;
     let prev_offset = days * 2;
 
-    let (cur_listens, cur_completed, cur_ms, prev_listens, prev_completed, prev_ms): (
-        i64, i64, i64, i64, i64, i64,
-    ) = conn.query_row(
+    let window_sql = format!(
         "SELECT
-            COUNT(*) FILTER (WHERE started_at >= datetime('now', printf('-%d days', ?1))),
-            COUNT(*) FILTER (WHERE started_at >= datetime('now', printf('-%d days', ?1)) AND completed = 1),
-            COALESCE(SUM(duration_listened_ms) FILTER (WHERE started_at >= datetime('now', printf('-%d days', ?1))), 0),
-            COUNT(*) FILTER (WHERE started_at >= datetime('now', printf('-%d days', ?2)) AND started_at < datetime('now', printf('-%d days', ?1))),
-            COUNT(*) FILTER (WHERE started_at >= datetime('now', printf('-%d days', ?2)) AND started_at < datetime('now', printf('-%d days', ?1)) AND completed = 1),
-            COALESCE(SUM(duration_listened_ms) FILTER (WHERE started_at >= datetime('now', printf('-%d days', ?2)) AND started_at < datetime('now', printf('-%d days', ?1))), 0)
-         FROM listen_history",
-        params![cur_offset, prev_offset],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
-    )?;
+            COUNT(*) FILTER (WHERE lh.started_at >= datetime('now', printf('-%d days', ?1))),
+            COUNT(*) FILTER (WHERE lh.started_at >= datetime('now', printf('-%d days', ?1)) AND lh.completed = 1),
+            COALESCE(SUM({capped}) FILTER (WHERE lh.started_at >= datetime('now', printf('-%d days', ?1))), 0),
+            COUNT(*) FILTER (WHERE lh.started_at >= datetime('now', printf('-%d days', ?2)) AND lh.started_at < datetime('now', printf('-%d days', ?1))),
+            COUNT(*) FILTER (WHERE lh.started_at >= datetime('now', printf('-%d days', ?2)) AND lh.started_at < datetime('now', printf('-%d days', ?1)) AND lh.completed = 1),
+            COALESCE(SUM({capped}) FILTER (WHERE lh.started_at >= datetime('now', printf('-%d days', ?2)) AND lh.started_at < datetime('now', printf('-%d days', ?1))), 0)
+         FROM listen_history lh
+         LEFT JOIN tracks t ON t.id = lh.track_id",
+        capped = capped_listened_ms("lh", "t")
+    );
+    let (cur_listens, cur_completed, cur_ms, prev_listens, prev_completed, prev_ms): (
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = conn.query_row(&window_sql, params![cur_offset, prev_offset], |row| {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+        ))
+    })?;
 
     // Sessions (post-MIGRATION_023 only - session_id IS NULL on older history).
     let (cur_sessions, prev_sessions): (i64, i64) = conn.query_row(
@@ -281,7 +320,7 @@ fn get_signals_kpis(conn: &Connection, days: i64) -> Result<SignalsKpis> {
     )?;
 
     // Daily series for the MiniSilhouette curves.
-    let mut daily_stmt = conn.prepare(
+    let daily_sql = format!(
         "WITH RECURSIVE axis(d) AS (
             SELECT DATE(datetime('now', 'localtime', printf('-%d days', ?1 - 1)))
             UNION ALL
@@ -289,14 +328,15 @@ fn get_signals_kpis(conn: &Connection, days: i64) -> Result<SignalsKpis> {
          ),
          agg AS (
             SELECT
-                DATE(started_at, 'localtime') AS day,
+                DATE(lh.started_at, 'localtime') AS day,
                 COUNT(*) AS listens,
-                COALESCE(SUM(duration_listened_ms), 0) AS listened_ms,
-                COALESCE(SUM(CASE WHEN completed = 1 THEN 1 ELSE 0 END), 0) AS completed,
-                COUNT(DISTINCT CASE WHEN session_id IS NOT NULL THEN session_id END) AS sessions
-            FROM listen_history
-            WHERE started_at >= datetime('now', printf('-%d days', ?1))
-            GROUP BY DATE(started_at, 'localtime')
+                COALESCE(SUM({capped}), 0) AS listened_ms,
+                COALESCE(SUM(CASE WHEN lh.completed = 1 THEN 1 ELSE 0 END), 0) AS completed,
+                COUNT(DISTINCT CASE WHEN lh.session_id IS NOT NULL THEN lh.session_id END) AS sessions
+            FROM listen_history lh
+            LEFT JOIN tracks t ON t.id = lh.track_id
+            WHERE lh.started_at >= datetime('now', printf('-%d days', ?1))
+            GROUP BY DATE(lh.started_at, 'localtime')
          )
          SELECT
             axis.d,
@@ -307,7 +347,9 @@ fn get_signals_kpis(conn: &Connection, days: i64) -> Result<SignalsKpis> {
          FROM axis
          LEFT JOIN agg ON agg.day = axis.d
          ORDER BY axis.d ASC",
-    )?;
+        capped = capped_listened_ms("lh", "t")
+    );
+    let mut daily_stmt = conn.prepare(&daily_sql)?;
     let daily: Vec<DailyKpi> = daily_stmt
         .query_map(params![cur_offset], |row| {
             Ok(DailyKpi {
@@ -424,18 +466,21 @@ fn get_signals_hero_stats(conn: &Connection, days: i64) -> Result<HeroStats> {
 
     // Single-day mode (days <= 1) populates the two extra spine stats.
     let (longest_session_ms, distinct_tracks) = if days <= 1 {
+        let longest_sql = format!(
+            "SELECT MAX(session_total) FROM (
+                 SELECT lh.session_id, SUM({capped}) AS session_total
+                 FROM listen_history lh
+                 LEFT JOIN tracks t ON t.id = lh.track_id
+                 WHERE lh.started_at >= datetime('now', printf('-%d days', ?1))
+                   AND lh.session_id IS NOT NULL
+                 GROUP BY lh.session_id
+             )",
+            capped = capped_listened_ms("lh", "t")
+        );
         let longest: Option<i64> = conn
-            .query_row(
-                "SELECT MAX(session_total) FROM (
-                     SELECT session_id, SUM(duration_listened_ms) AS session_total
-                     FROM listen_history
-                     WHERE started_at >= datetime('now', printf('-%d days', ?1))
-                       AND session_id IS NOT NULL
-                     GROUP BY session_id
-                 )",
-                params![days],
-                |row| row.get::<_, Option<i64>>(0),
-            )
+            .query_row(&longest_sql, params![days], |row| {
+                row.get::<_, Option<i64>>(0)
+            })
             .optional()?
             .flatten();
         let distinct: Option<i64> = conn
@@ -795,20 +840,23 @@ fn get_top_tracks_windowed(
     window_listened_ms: i64,
 ) -> Result<Vec<AnalyticsTopTrack>> {
     let previous_ranks = previous_track_ranks(conn, days)?;
-    let mut stmt = conn.prepare(
+    let sql = format!(
         "SELECT t.id, t.title, a.name, al.title, al.artwork_url,
                 COUNT(lh.id) AS listens,
                 COALESCE(SUM(CASE WHEN lh.completed = 1 THEN 1 ELSE 0 END), 0) AS completed_listens,
-                COALESCE(SUM(lh.duration_listened_ms), 0) AS total_listened_ms
+                COALESCE(SUM({capped}), 0) AS total_listened_ms
          FROM listen_history lh
          JOIN tracks t ON lh.track_id = t.id
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
          WHERE lh.started_at >= datetime('now', printf('-%d days', ?1))
+           AND {CHOSEN_LISTENS_ONLY}
          GROUP BY t.id, t.title, a.name, al.title, al.artwork_url
          ORDER BY listens DESC, total_listened_ms DESC, t.title ASC
          LIMIT ?2",
-    )?;
+        capped = capped_listened_ms("lh", "t")
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt
         .query_map(params![days, limit], |row| {
             Ok(AnalyticsTopTrack {
@@ -846,20 +894,27 @@ fn get_top_artists_windowed(
     window_listened_ms: i64,
 ) -> Result<Vec<AnalyticsTopArtist>> {
     let previous_ranks = previous_artist_ranks(conn, days)?;
-    let mut stmt = conn.prepare(
+    // Ranked by listened time because that is the metric the analytics card
+    // displays; raw listen counts include instant skip-starts and produced
+    // orderings that contradicted the times shown next to them.
+    // `previous_artist_ranks` must sort by the same key.
+    let sql = format!(
         "SELECT a.id, a.name,
                 COUNT(lh.id) AS listens,
                 COALESCE(SUM(CASE WHEN lh.completed = 1 THEN 1 ELSE 0 END), 0) AS completed_listens,
                 COUNT(DISTINCT t.id) AS unique_tracks,
-                COALESCE(SUM(lh.duration_listened_ms), 0) AS total_listened_ms
+                COALESCE(SUM({capped}), 0) AS total_listened_ms
          FROM listen_history lh
          JOIN tracks t ON lh.track_id = t.id
          JOIN artists a ON t.artist_id = a.id
          WHERE lh.started_at >= datetime('now', printf('-%d days', ?1))
+           AND {CHOSEN_LISTENS_ONLY}
          GROUP BY a.id, a.name
-         ORDER BY listens DESC, total_listened_ms DESC, a.name ASC
+         ORDER BY total_listened_ms DESC, listens DESC, a.name ASC
          LIMIT ?2",
-    )?;
+        capped = capped_listened_ms("lh", "t")
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt
         .query_map(params![days, limit], |row| {
             Ok(AnalyticsTopArtist {
@@ -917,22 +972,25 @@ fn get_top_genres_windowed(
 }
 
 fn previous_track_ranks(conn: &Connection, days: i64) -> Result<HashMap<i64, i64>> {
-    let mut stmt = conn.prepare(
+    let sql = format!(
         "SELECT track_id, rank FROM (
             SELECT
                 t.id AS track_id,
                 ROW_NUMBER() OVER (
                     ORDER BY COUNT(lh.id) DESC,
-                             COALESCE(SUM(lh.duration_listened_ms), 0) DESC,
+                             COALESCE(SUM({capped}), 0) DESC,
                              t.title ASC
                 ) AS rank
             FROM listen_history lh
             JOIN tracks t ON lh.track_id = t.id
             WHERE lh.started_at >= datetime('now', printf('-%d days', ?1 * 2))
               AND lh.started_at < datetime('now', printf('-%d days', ?1))
+              AND {CHOSEN_LISTENS_ONLY}
             GROUP BY t.id, t.title
         )",
-    )?;
+        capped = capped_listened_ms("lh", "t")
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map(params![days], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
@@ -942,13 +1000,13 @@ fn previous_track_ranks(conn: &Connection, days: i64) -> Result<HashMap<i64, i64
 }
 
 fn previous_artist_ranks(conn: &Connection, days: i64) -> Result<HashMap<i64, i64>> {
-    let mut stmt = conn.prepare(
+    let sql = format!(
         "SELECT artist_id, rank FROM (
             SELECT
                 a.id AS artist_id,
                 ROW_NUMBER() OVER (
-                    ORDER BY COUNT(lh.id) DESC,
-                             COALESCE(SUM(lh.duration_listened_ms), 0) DESC,
+                    ORDER BY COALESCE(SUM({capped}), 0) DESC,
+                             COUNT(lh.id) DESC,
                              a.name ASC
                 ) AS rank
             FROM listen_history lh
@@ -956,9 +1014,12 @@ fn previous_artist_ranks(conn: &Connection, days: i64) -> Result<HashMap<i64, i6
             JOIN artists a ON t.artist_id = a.id
             WHERE lh.started_at >= datetime('now', printf('-%d days', ?1 * 2))
               AND lh.started_at < datetime('now', printf('-%d days', ?1))
+              AND {CHOSEN_LISTENS_ONLY}
             GROUP BY a.id, a.name
         )",
-    )?;
+        capped = capped_listened_ms("lh", "t")
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map(params![days], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
@@ -971,7 +1032,7 @@ fn previous_artist_ranks(conn: &Connection, days: i64) -> Result<HashMap<i64, i6
 
 fn get_signals_cohorts(conn: &Connection, days: i64) -> Result<Vec<Cohort>> {
     // Per-track first_at + lifetime_listens via the new idx_listen_history_track_started index.
-    let sql = "
+    let sql = format!("
         WITH first_listens AS (
             SELECT track_id,
                    MIN(started_at) AS first_at,
@@ -986,7 +1047,7 @@ fn get_signals_cohorts(conn: &Connection, days: i64) -> Result<Vec<Cohort>> {
         ),
         joined AS (
             SELECT
-                w.id, w.track_id, w.duration_listened_ms, w.completed, w.session_id,
+                w.id, w.track_id, {capped} AS duration_listened_ms, w.completed, w.session_id,
                 fl.first_at, fl.lifetime_listens,
                 t.artist_id,
                 CASE
@@ -1009,8 +1070,8 @@ fn get_signals_cohorts(conn: &Connection, days: i64) -> Result<Vec<Cohort>> {
             COUNT(DISTINCT CASE WHEN first_at >= datetime('now', printf('-%d days', ?1)) THEN artist_id END) AS new_artists
         FROM joined
         GROUP BY cohort_key
-    ";
-    let mut stmt = conn.prepare(sql)?;
+    ", capped = capped_listened_ms("w", "t"));
+    let mut stmt = conn.prepare(&sql)?;
     let rows: HashMap<String, (i64, i64, i64, i64, i64, i64)> = stmt
         .query_map(
             params![days, COHORT_DEEP_DAYS, COHORT_DEEP_LIFETIME_LISTENS],
@@ -1430,17 +1491,41 @@ mod tests {
         completed: bool,
         session_id: Option<&str>,
     ) {
+        seed_analytics_listen_src(
+            conn,
+            id,
+            track_id,
+            date_modifier,
+            duration_ms,
+            completed,
+            session_id,
+            None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seed_analytics_listen_src(
+        conn: &Connection,
+        id: i64,
+        track_id: i64,
+        date_modifier: &str,
+        duration_ms: i64,
+        completed: bool,
+        session_id: Option<&str>,
+        source: Option<&str>,
+    ) {
         conn.execute(
             "INSERT INTO listen_history
-                (id, track_id, started_at, duration_listened_ms, completed, session_id)
-             VALUES (?1, ?2, datetime('now', ?3), ?4, ?5, ?6)",
+                (id, track_id, started_at, duration_listened_ms, completed, session_id, source)
+             VALUES (?1, ?2, datetime('now', ?3), ?4, ?5, ?6, ?7)",
             params![
                 id,
                 track_id,
                 date_modifier,
                 duration_ms,
                 completed as i32,
-                session_id
+                session_id,
+                source
             ],
         )
         .expect("seed listen");
@@ -1542,17 +1627,19 @@ mod tests {
         )
         .expect("seed track genre");
 
+        // Durations stay below the seeded 180 s track length so the stall cap
+        // does not engage; this test targets the share denominators.
         seed_analytics_listen(&conn, 1, 1, "-2 days", 100_000, true, Some("s-a"));
-        seed_analytics_listen(&conn, 2, 2, "-1 days", 300_000, true, Some("s-b"));
-        seed_analytics_listen(&conn, 3, 2, "-1 days", 300_000, true, Some("s-b"));
-        seed_analytics_listen(&conn, 4, 2, "-0 days", 300_000, false, Some("s-c"));
+        seed_analytics_listen(&conn, 2, 2, "-1 days", 100_000, true, Some("s-b"));
+        seed_analytics_listen(&conn, 3, 2, "-1 days", 100_000, true, Some("s-b"));
+        seed_analytics_listen(&conn, 4, 2, "-0 days", 100_000, false, Some("s-c"));
         seed_analytics_listen(&conn, 5, 1, "-4 days", 100_000, true, Some("p-a"));
         seed_analytics_listen(&conn, 6, 1, "-4 days", 100_000, true, Some("p-b"));
         seed_analytics_listen(&conn, 7, 2, "-4 days", 100_000, true, Some("p-c"));
 
         let s = Signals::compute(&conn, 3).expect("signals");
         assert_eq!(s.totals.listens, 4);
-        assert_eq!(s.totals.listened_ms, 1_000_000);
+        assert_eq!(s.totals.listened_ms, 400_000);
         assert_eq!(s.totals.distinct_tracks, 2);
         assert_eq!(s.totals.tagged_listens, 1);
 
@@ -1567,7 +1654,7 @@ mod tests {
             .find(|track| track.track_id == 2)
             .expect("popular track");
         assert_eq!(popular_track.completion_rate, Some(2.0 / 3.0));
-        assert_eq!(popular_track.share_of_window_listened_ms, Some(0.9));
+        assert_eq!(popular_track.share_of_window_listened_ms, Some(0.75));
         assert_eq!(popular_track.previous_rank, Some(2));
         assert_eq!(popular_track.rank_delta, Some(1));
 
@@ -1577,9 +1664,155 @@ mod tests {
             .find(|artist| artist.artist_id == 2)
             .expect("popular artist");
         assert_eq!(popular_artist.completion_rate, Some(2.0 / 3.0));
-        assert_eq!(popular_artist.share_of_window_listened_ms, Some(0.9));
+        assert_eq!(popular_artist.share_of_window_listened_ms, Some(0.75));
         assert_eq!(popular_artist.previous_rank, Some(2));
         assert_eq!(popular_artist.rank_delta, Some(1));
+    }
+
+    /// Top artists rank by listened time (the metric the card displays), not
+    /// by raw listen-event count; previous-window ranks use the same key so
+    /// rank deltas compare like-for-like.
+    #[test]
+    fn analytics_signals_top_artists_rank_by_listened_time() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        seed_analytics_track(&conn, 11, 10, "Short Loops", "Sprinter");
+        seed_analytics_track(&conn, 21, 20, "Long Cut", "Marathoner");
+
+        // Current window: Sprinter has more listen events, Marathoner more
+        // time. Durations stay below the 180 s track length so the stall cap
+        // does not engage; this test targets the ordering.
+        seed_analytics_listen(&conn, 1, 11, "-1 days", 40_000, false, Some("s-a"));
+        seed_analytics_listen(&conn, 2, 11, "-1 days", 40_000, false, Some("s-a"));
+        seed_analytics_listen(&conn, 3, 11, "-1 days", 40_000, false, Some("s-a"));
+        seed_analytics_listen(&conn, 4, 21, "-1 days", 160_000, true, Some("s-a"));
+        // Previous window: flipped, Sprinter had more time.
+        seed_analytics_listen(&conn, 5, 11, "-4 days", 60_000, true, Some("p-a"));
+        seed_analytics_listen(&conn, 6, 11, "-4 days", 60_000, true, Some("p-a"));
+        seed_analytics_listen(&conn, 7, 21, "-4 days", 50_000, true, Some("p-a"));
+
+        let s = Signals::compute(&conn, 3).expect("signals");
+        let names: Vec<&str> = s
+            .top_artists
+            .iter()
+            .map(|artist| artist.artist_name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Marathoner", "Sprinter"]);
+
+        let marathoner = &s.top_artists[0];
+        assert_eq!(marathoner.listens, 1);
+        assert_eq!(marathoner.total_listened_ms, 160_000);
+        assert_eq!(marathoner.previous_rank, Some(2));
+        assert_eq!(marathoner.rank_delta, Some(1));
+
+        let sprinter = &s.top_artists[1];
+        assert_eq!(sprinter.previous_rank, Some(1));
+        assert_eq!(sprinter.rank_delta, Some(-1));
+    }
+
+    /// Radio and automix pick tracks by themselves, so they are excluded from
+    /// the taste-ranked cards; the KPI tiles keep counting every source.
+    /// NULL-source legacy rows stay in the cards (provenance unknowable).
+    #[test]
+    fn analytics_signals_rank_cards_exclude_machine_picked_sources() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        seed_analytics_track(&conn, 1, 1, "Chosen Cut", "Chosen Artist");
+        seed_analytics_track(&conn, 2, 2, "Radio Filler", "Radio Artist");
+        seed_analytics_track(&conn, 3, 3, "Automix Filler", "Automix Artist");
+        seed_analytics_track(&conn, 4, 4, "Legacy Row", "Legacy Artist");
+
+        seed_analytics_listen_src(
+            &conn,
+            1,
+            1,
+            "-1 days",
+            60_000,
+            true,
+            Some("s"),
+            Some("manual"),
+        );
+        // Radio outweighs the chosen listen 3x - it must still not rank.
+        seed_analytics_listen_src(
+            &conn,
+            2,
+            2,
+            "-1 days",
+            90_000,
+            true,
+            Some("s"),
+            Some("radio"),
+        );
+        seed_analytics_listen_src(
+            &conn,
+            3,
+            2,
+            "-1 days",
+            90_000,
+            true,
+            Some("s"),
+            Some("radio"),
+        );
+        seed_analytics_listen_src(
+            &conn,
+            4,
+            3,
+            "-1 days",
+            90_000,
+            true,
+            Some("s"),
+            Some("automix"),
+        );
+        seed_analytics_listen_src(&conn, 5, 4, "-1 days", 30_000, true, Some("s"), None);
+
+        let s = Signals::compute(&conn, 3).expect("signals");
+
+        let artist_names: Vec<&str> = s
+            .top_artists
+            .iter()
+            .map(|artist| artist.artist_name.as_str())
+            .collect();
+        assert_eq!(artist_names, vec!["Chosen Artist", "Legacy Artist"]);
+        let track_titles: Vec<&str> = s
+            .top_tracks
+            .iter()
+            .map(|track| track.title.as_str())
+            .collect();
+        assert_eq!(track_titles, vec!["Chosen Cut", "Legacy Row"]);
+
+        // Tiles and totals still count all sources.
+        assert_eq!(s.totals.listens, 5);
+        assert_eq!(s.totals.listened_ms, 360_000);
+        assert_eq!(s.kpis.listened_ms.current, 360_000);
+    }
+
+    /// A stalled player can record far more listened time than the track is
+    /// long (observed: 2795 s on a 334 s track). Every listened-time surface
+    /// on the page caps such rows at the track duration.
+    #[test]
+    fn analytics_signals_cap_runaway_listen_durations_at_track_length() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        // seed_analytics_track sets duration_ms = 180_000.
+        seed_analytics_track(&conn, 1, 1, "Stalled", "Stall Artist");
+        seed_analytics_listen(&conn, 1, 1, "-1 days", 2_795_000, true, Some("s-a"));
+        seed_analytics_listen(&conn, 2, 1, "-1 days", 60_000, true, Some("s-a"));
+
+        let s = Signals::compute(&conn, 3).expect("signals");
+        assert_eq!(s.totals.listened_ms, 240_000);
+        assert_eq!(s.kpis.listened_ms.current, 240_000);
+
+        let track = s.top_tracks.first().expect("track row");
+        assert_eq!(track.total_listened_ms, 240_000);
+        let artist = s.top_artists.first().expect("artist row");
+        assert_eq!(artist.total_listened_ms, 240_000);
+
+        let new_cohort = s
+            .cohorts
+            .iter()
+            .find(|cohort| cohort.key == "new_this_month")
+            .expect("new cohort");
+        assert_eq!(new_cohort.listened_ms, 240_000);
     }
 
     #[test]

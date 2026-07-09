@@ -181,6 +181,21 @@ pub enum PlaybackRuntimeEvent {
         track_id: i64,
         generation: u64,
     },
+    /// The audibly-active engine stopped making position progress while
+    /// nominally playing (hung stream). Emitted once per stall episode so the
+    /// listener can pause the active listen session - the session timer is
+    /// wall-clock based and would otherwise keep counting silence as
+    /// listening. Playback recovery itself is the stall watchdog's
+    /// force-advance, not this event.
+    Stalled {
+        track_id: i64,
+    },
+    /// Position progress resumed on the same engine after a `Stalled`
+    /// emission (e.g. the hung segment finally arrived). The listener resumes
+    /// the paused listen session.
+    StallRecovered {
+        track_id: i64,
+    },
     TrackError {
         track_id: i64,
         generation: u64,

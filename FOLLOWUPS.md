@@ -765,6 +765,13 @@ callers. Fix by serializing refresh through a tokio::Mutex (or a shared
 in-flight future) keyed on the used access token.
 Spawned by: tidal metadata self-heal + resolver 401 recovery 2026-07-06
 
+### analysis: richer energy metric (loudness + spectral flux / onset density)
+
+Energy (v11) is purely a loudness map. A Spotify-style energy would blend
+spectral flux, onset density, and centroid so busy-but-quiet tracks outrank
+sparse loud ones. Needs another CURRENT_ANALYSIS_VERSION bump and a fresh
+blast-radius pass over the [0,1] consumers; batch with the next DSP change.
+Spawned by: Sonic Field energy rescale 2026-07-09
 ### cleanup: spotify-album / spotify-track routes are an unreachable cluster
 
 The spotify-artist route was removed (artist flow is TIDAL + local only) and
