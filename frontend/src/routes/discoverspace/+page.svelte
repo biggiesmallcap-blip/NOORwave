@@ -24,6 +24,7 @@
 	import DiscoverLensControl from '$lib/components/DiscoverSpace/DiscoverLensControl.svelte';
 	import DiscoverTrainingStrip from '$lib/components/DiscoverSpace/DiscoverTrainingStrip.svelte';
 	import DiscoverHelp from '$lib/components/DiscoverSpace/DiscoverHelp.svelte';
+	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import type { DiscoverTrackNode, RadioMode } from '$lib/components/DiscoverSpace/discover_space_types';
 	import { PAGE_TITLE, PAGE_SUBTITLE, SEARCH_PLACEHOLDER, EMPTY_STATE } from '$lib/components/DiscoverSpace/discover_space_story';
 
@@ -201,12 +202,13 @@
 			<h1>{PAGE_SUBTITLE}</h1>
 		</div>
 		<form class="search-form" onsubmit={handleSearch}>
-			<input
-				class="search-input"
-				type="text"
-				placeholder={SEARCH_PLACEHOLDER}
+			<SearchField
 				bind:value={searchQuery}
+				variant="page"
+				size="sm"
+				fill
 				disabled={isSearching}
+				placeholder={SEARCH_PLACEHOLDER}
 			/>
 			<button class="search-btn" type="submit" disabled={isSearching || !searchQuery.trim()}>
 				{isSearching ? '⟳' : '⤑'}
@@ -422,31 +424,17 @@
 		flex: 1;
 		max-width: 480px;
 	}
-	.search-input {
-		flex: 1;
-		padding: 8px 14px;
-		border-radius: 10px;
-		border: 1px solid rgba(255,255,255,0.1);
-		background: rgba(255,255,255,0.05);
-		color: rgba(255,255,255,0.9);
-		font-size: var(--font-size-sm);
-		outline: none;
-		transition: border-color 0.15s;
-	}
-	.search-input::placeholder { color: rgba(255,255,255,0.3); }
-	.search-input:focus { border-color: rgba(124,128,255,0.5); background: rgba(124,128,255,0.07); }
-	.search-input:disabled { opacity: 0.5; }
 	.search-btn {
 		padding: 8px 14px;
-		border-radius: 10px;
-		border: none;
-		background: rgba(124,128,255,0.2);
-		color: rgba(255,255,255,0.85);
+		border-radius: var(--radius-md);
+		border: 1px solid var(--accent-line);
+		background: var(--accent-soft);
+		color: var(--text-primary);
 		cursor: pointer;
 		font-size: var(--font-size-md);
-		transition: background 0.15s;
+		transition: background var(--motion-fast), border-color var(--motion-fast);
 	}
-	.search-btn:hover:not(:disabled) { background: rgba(124,128,255,0.35); }
+	.search-btn:hover:not(:disabled) { background: var(--accent-line); border-color: var(--accent); }
 	.search-btn:disabled { opacity: 0.4; cursor: default; }
 
 	.seed-pill {

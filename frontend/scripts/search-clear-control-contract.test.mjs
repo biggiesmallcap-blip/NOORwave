@@ -8,8 +8,10 @@ function read(relativePath) {
 	return readFileSync(resolve(root, relativePath), 'utf8');
 }
 
+const SEARCH_FIELD = 'src/lib/search/ui/SearchField.svelte';
+
 describe('search clear controls', () => {
-	test('Library, global Search, and Videos all use native search inputs', () => {
+	test('Library, global Search, and Videos all use the shared SearchField', () => {
 		const pages = [
 			'src/routes/library/+page.svelte',
 			'src/routes/search/+page.svelte',
@@ -18,8 +20,13 @@ describe('search clear controls', () => {
 
 		for (const page of pages) {
 			const source = read(page);
-			expect(source, page).toMatch(/type="search"/);
+			expect(source, page).toContain('<SearchField');
 		}
+
+		// SearchField renders a native type="search" input for its page variant,
+		// which is what supplies the accent-themed cancel button below.
+		const field = read(SEARCH_FIELD);
+		expect(field).toContain("variant === 'modal' ? 'text' : 'search'");
 	});
 
 	test('native search cancel buttons are themed from the active palette accent', () => {
@@ -32,36 +39,24 @@ describe('search clear controls', () => {
 		expect(css).toMatch(/mask:/);
 	});
 
-	test('top search pills share the same route-level geometry and palette styling', () => {
-		const pages = [
-			{
-				path: 'src/routes/library/+page.svelte',
-				inputSelector: '.library-search-input',
-				headerSelector: '.library-search-shell'
-			},
-			{
-				path: 'src/routes/search/+page.svelte',
-				inputSelector: '.search-input',
-				headerSelector: '.search-header'
-			},
-			{
-				path: 'src/routes/videos/+page.svelte',
-				inputSelector: '.search-input',
-				headerSelector: '.search-header'
-			}
-		];
+	test('the shared search field owns the standardized page-input geometry', () => {
+		// The 720px pill recipe now lives once, in SearchField, instead of being
+		// copy-pasted per route.
+		const field = read(SEARCH_FIELD);
+		const pageBlock = field.match(/\.sf--page \.sf-shell\s*\{([\s\S]*?)\n\s*\}/)?.[1] ?? '';
 
-		for (const page of pages) {
-			const source = read(page.path);
-			const inputBlock = source.match(new RegExp(`${page.inputSelector.replace('.', '\\.')}\\s*\\{([\\s\\S]*?)\\n\\s*\\}`))?.[1] ?? '';
-			const headerBlock = source.match(new RegExp(`${page.headerSelector.replace('.', '\\.')}\\s*\\{([\\s\\S]*?)\\n\\s*\\}`))?.[1] ?? '';
+		expect(field.match(/\.sf--page\s*\{([\s\S]*?)\n\s*\}/)?.[1] ?? '').toContain('max-width: 720px');
+		expect(pageBlock).toContain('background: var(--panel-bg)');
+		expect(pageBlock).toContain('border: 1px solid var(--border-subtle)');
+		expect(pageBlock).toContain('padding: 14px 22px');
 
-			expect(inputBlock, page.path).toContain('max-width: 720px');
-			expect(inputBlock, page.path).toContain('background: var(--panel-bg)');
-			expect(inputBlock, page.path).toContain('border: 1px solid var(--border-subtle)');
-			expect(inputBlock, page.path).toContain('padding: 14px 22px');
-			expect(headerBlock, page.path).toContain('width: 100%');
-			expect(headerBlock, page.path).toContain('margin: 0 auto var(--space-5)');
+		// Every top-of-page search adopts it at the page variant.
+		for (const path of [
+			'src/routes/library/+page.svelte',
+			'src/routes/search/+page.svelte',
+			'src/routes/videos/+page.svelte'
+		]) {
+			expect(read(path), path).toContain('variant="page"');
 		}
 	});
 

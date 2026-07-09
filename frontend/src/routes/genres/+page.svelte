@@ -10,6 +10,7 @@
 	import GenreGalaxy from '$lib/components/Genre/GenreGalaxy.svelte';
 	import GenrePanel from '$lib/components/Genre/GenrePanel.svelte';
 	import GenreInterior from '$lib/components/Genre/GenreInterior.svelte';
+	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import { buildGalaxyData } from '$lib/components/Genre/galaxyBuilder';
 	import type { GalaxyViewMode, GalaxyNode } from '$lib/components/Genre/galaxy.types';
 
@@ -795,11 +796,13 @@
 
 			<div class="control-dock glass-panel">
 				<form class="search-shell" onsubmit={(event) => void handleSearchSubmit(event)}>
-					<input
-						type="search"
+					<SearchField
 						bind:value={searchQuery}
+						variant="page"
+						size="sm"
+						fill
 						placeholder="Search genres"
-						aria-label="Search mapped genres"
+						ariaLabel="Search mapped genres"
 					/>
 				</form>
 
@@ -1110,10 +1113,6 @@
 	.search-shell {
 		flex: 1 1 220px;
 		min-width: 180px;
-	}
-
-	.search-shell input {
-		height: 40px;
 	}
 
 	.seed-builder {

@@ -4,6 +4,7 @@
 	import TrackRow from '$lib/components/TrackRow.svelte';
 	import TidalTrackRow from '$lib/components/TidalTrackRow.svelte';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
@@ -193,11 +194,12 @@
 		</header>
 
 		<div class="filter-bar">
-			<input
-				class="filter-input"
-				type="search"
-				placeholder={`Search ${SECTION_LABELS[section].toLowerCase()}...`}
+			<SearchField
 				bind:value={query}
+				variant="page"
+				size="sm"
+				fill
+				placeholder={`Search ${SECTION_LABELS[section].toLowerCase()}...`}
 			/>
 		</div>
 
@@ -316,22 +318,7 @@
 
 	.filter-bar {
 		margin-bottom: var(--space-4);
-	}
-
-	.filter-input {
-		width: min(420px, 100%);
-		padding: var(--space-2) var(--space-3);
-		border: 1px solid var(--input-border);
-		border-radius: 999px;
-		background: var(--input-bg);
-		color: var(--text-primary);
-		font-size: var(--font-size-sm);
-		outline: none;
-	}
-
-	.filter-input:focus {
-		border-color: var(--accent);
-		background: var(--input-focus);
+		max-width: min(420px, 100%);
 	}
 
 	.track-list {

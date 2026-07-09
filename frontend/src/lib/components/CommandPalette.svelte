@@ -27,7 +27,8 @@
 	import { parseQuery } from '$lib/search/query_parser';
 	import { hasAnyFilter } from '$lib/search/audio_params';
 	import { contextMenu, openMenuAtElement, type MenuItem } from '$lib/stores/context_menu';
-	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import SearchResultRow from '$lib/search/ui/SearchResultRow.svelte';
+	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import { tidalSearchTrackToPlayable } from '$lib/utils/track';
 
 	let inputEl = $state<HTMLInputElement | null>(null);
@@ -295,19 +296,6 @@
 		openMenuAtElement(anchor, menu, title);
 	}
 
-	function handleMoreClick(event: MouseEvent, index: number) {
-		event.stopPropagation();
-		openRowMenuAt(event.currentTarget as HTMLElement, index);
-	}
-
-	function handleMoreKeydown(event: KeyboardEvent, index: number) {
-		if (event.key === 'Enter' || event.key === ' ') {
-			event.preventDefault();
-			event.stopPropagation();
-			openRowMenuAt(event.currentTarget as HTMLElement, index);
-		}
-	}
-
 	async function executeSlashCommand() {
 		const { command, arg } = parseSlashInput(query);
 		if (!command) return;
@@ -382,20 +370,21 @@
 		aria-label="Command palette"
 		transition:fly={{ y: -12, duration: 180, easing: quintOut }}
 	>
-		<div class="palette-input-wrap">
-			<span class="palette-icon">{isSlashMode ? '/' : '⌘'}</span>
-			<input
-				bind:this={inputEl}
-				bind:value={query}
-				oninput={onInput}
-				onkeydown={onKeydown}
-				class="palette-input"
-				placeholder={isSlashMode ? 'Type a command…' : 'Search or type / for commands'}
-				autocomplete="off"
-				spellcheck={false}
-			/>
-			{#if loading}<span class="palette-spinner">⟳</span>{/if}
-		</div>
+		<SearchField
+			bind:value={query}
+			bind:inputEl
+			variant="modal"
+			placeholder={isSlashMode ? 'Type a command…' : 'Search or type / for commands'}
+			oninput={onInput}
+			onkeydown={onKeydown}
+		>
+			{#snippet leading()}
+				<span class="palette-icon">{isSlashMode ? '/' : '⌘'}</span>
+			{/snippet}
+			{#snippet trailing()}
+				{#if loading}<span class="palette-spinner">⟳</span>{/if}
+			{/snippet}
+		</SearchField>
 
 		{#if isSlashMode && slashMatches.length > 0}
 			<ul class="palette-list">
@@ -415,140 +404,77 @@
 			</ul>
 		{:else if hasFilterSyntax}
 			<ul class="palette-list">
-				<li class="palette-row-wrap palette-row-wrap--active">
-					<button class="palette-row" onclick={openFilteredSearch}>
-						<div class="row-art row-art--fallback">⌕</div>
-						<div class="row-meta">
-							<span class="row-title">Search library with filters</span>
-							<span class="row-sub">{query.trim()}</span>
-						</div>
-						<span class="row-kind">Enter</span>
-					</button>
-				</li>
+				<SearchResultRow
+					fallbackText={(query.trim().slice(0, 2) || '::').toUpperCase()}
+					title="Search library with filters"
+					subtitle={query.trim()}
+					kind="Enter"
+					active
+					onActivate={openFilteredSearch}
+				/>
 			</ul>
 		{:else if !isSlashMode && (tracks.length > 0 || albums.length > 0 || artists.length > 0 || spotifyPlaylists.length > 0)}
 			<ul class="palette-list">
 				{#each artists as artist, i (artist.tidal_id)}
 					{@const idx = i}
-					<li class="palette-row-wrap" class:palette-row-wrap--active={cursor === idx} bind:this={rowEls[idx]}>
-						<button
-							class="palette-row"
-							onclick={() => selectArtist(artist)}
-						>
-							{#if artist.artwork_url}
-								<ArtworkImage
-									className="row-art row-art--circle"
-									src={artist.artwork_url}
-									alt={artist.name}
-									size={320}
-									fallbackText={artist.name.slice(0, 2).toUpperCase()}
-								/>
-							{:else}
-								<div class="row-art row-art--circle row-art--fallback">♪</div>
-							{/if}
-							<span class="row-title">{artist.name}</span>
-							<span class="row-kind">Artist</span>
-							{#if artist.in_library}<span class="row-lib">✓</span>{/if}
-						</button>
-						<button
-							class="row-more"
-							aria-label="Open actions"
-							tabindex={-1}
-							onclick={(e) => handleMoreClick(e, idx)}
-							onkeydown={(e) => handleMoreKeydown(e, idx)}
-						>⋯</button>
-					</li>
+					<SearchResultRow
+						bind:el={rowEls[idx]}
+						art={artist.artwork_url}
+						artShape="circle"
+						fallbackText={artist.name.slice(0, 2).toUpperCase()}
+						title={artist.name}
+						kind="Artist"
+						inLibrary={artist.in_library}
+						active={cursor === idx}
+						onActivate={() => selectArtist(artist)}
+						menuItems={() => buildArtistRowMenu(artist)}
+						menuTitle={artist.name}
+					/>
 				{/each}
 				{#each albums as album, i (album.tidal_id)}
 					{@const idx = artists.length + i}
-					<li class="palette-row-wrap" class:palette-row-wrap--active={cursor === idx} bind:this={rowEls[idx]}>
-						<button
-							class="palette-row"
-							onclick={() => selectAlbum(album)}
-						>
-							{#if album.artwork_url}
-								<ArtworkImage
-									className="row-art"
-									src={album.artwork_url}
-									alt={album.title}
-									size={320}
-									fallbackText={album.title.slice(0, 2).toUpperCase()}
-								/>
-							{:else}
-								<div class="row-art row-art--fallback">♫</div>
-							{/if}
-							<span class="row-title">{album.title}</span>
-							<span class="row-kind">Album</span>
-							{#if album.in_library}<span class="row-lib">✓</span>{/if}
-						</button>
-						<button
-							class="row-more"
-							aria-label="Open actions"
-							tabindex={-1}
-							onclick={(e) => handleMoreClick(e, idx)}
-							onkeydown={(e) => handleMoreKeydown(e, idx)}
-						>⋯</button>
-					</li>
+					<SearchResultRow
+						bind:el={rowEls[idx]}
+						art={album.artwork_url}
+						fallbackText={album.title.slice(0, 2).toUpperCase()}
+						title={album.title}
+						kind="Album"
+						inLibrary={album.in_library}
+						active={cursor === idx}
+						onActivate={() => selectAlbum(album)}
+						menuItems={() => buildAlbumRowMenu(album)}
+						menuTitle={album.title}
+					/>
 				{/each}
 				{#each tracks as track, i (track.tidal_id)}
 					{@const idx = artists.length + albums.length + i}
-					<li class="palette-row-wrap" class:palette-row-wrap--active={cursor === idx} bind:this={rowEls[idx]}>
-						<button
-							class="palette-row"
-							onclick={() => void selectTrack(track)}
-						>
-							{#if track.artwork_url}
-								<ArtworkImage
-									className="row-art"
-									src={track.artwork_url}
-									alt={track.title}
-									size={320}
-									fallbackText={track.title.slice(0, 2).toUpperCase()}
-								/>
-							{:else}
-								<div class="row-art row-art--fallback">♫</div>
-							{/if}
-							<div class="row-meta">
-								<span class="row-title">{track.title}</span>
-								{#if track.artist_name}<span class="row-sub">{track.artist_name}</span>{/if}
-							</div>
-							<span class="row-kind">Track</span>
-							{#if track.in_library}<span class="row-lib">✓</span>{/if}
-						</button>
-						<button
-							class="row-more"
-							aria-label="Open actions"
-							tabindex={-1}
-							onclick={(e) => handleMoreClick(e, idx)}
-							onkeydown={(e) => handleMoreKeydown(e, idx)}
-						>⋯</button>
-					</li>
+					<SearchResultRow
+						bind:el={rowEls[idx]}
+						art={track.artwork_url}
+						fallbackText={track.title.slice(0, 2).toUpperCase()}
+						title={track.title}
+						subtitle={track.artist_name}
+						kind="Track"
+						inLibrary={track.in_library}
+						active={cursor === idx}
+						onActivate={() => void selectTrack(track)}
+						menuItems={() => buildTrackRowMenu(track)}
+						menuTitle={track.title}
+					/>
 				{/each}
 				{#each spotifyPlaylists as playlist, i (playlist.spotifyId)}
 					{@const idx = artists.length + albums.length + tracks.length + i}
-					<li class="palette-row-wrap" class:palette-row-wrap--active={cursor === idx} bind:this={rowEls[idx]}>
-						<button
-							class="palette-row"
-							onclick={() => selectSpotifyPlaylist(playlist)}
-						>
-							{#if playlist.thumbnail}
-								<ArtworkImage
-									className="row-art"
-									src={playlist.thumbnail}
-									alt={playlist.title ?? 'Spotify playlist'}
-									size={320}
-									fallbackText={(playlist.title ?? 'SP').slice(0, 2).toUpperCase()}
-								/>
-							{:else}
-								<div class="row-art row-art--fallback">♫</div>
-							{/if}
-							<div class="row-meta">
-								<span class="row-title">{playlist.title ?? 'Untitled playlist'}</span>
-								{#if playlist.owner}<span class="row-sub">{playlist.owner}{playlist.totalTracks ? ` · ${playlist.totalTracks} tracks` : ''}</span>{/if}
-							</div>
-							<span class="row-kind row-kind--spotify">Spotify</span>
-						</button>
-					</li>
+					<SearchResultRow
+						bind:el={rowEls[idx]}
+						art={playlist.thumbnail}
+						fallbackText={(playlist.title ?? 'SP').slice(0, 2).toUpperCase()}
+						title={playlist.title ?? 'Untitled playlist'}
+						subtitle={playlist.owner ? `${playlist.owner}${playlist.totalTracks ? ` · ${playlist.totalTracks} tracks` : ''}` : null}
+						kind="Spotify"
+						kindTone="spotify"
+						active={cursor === idx}
+						onActivate={() => selectSpotifyPlaylist(playlist)}
+					/>
 				{/each}
 			</ul>
 		{:else if query.trim() && !loading && !isSlashMode}
@@ -581,13 +507,6 @@
 		z-index: calc(var(--z-toast) + 1);
 		overflow: hidden;
 	}
-	.palette-input-wrap {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		padding: 14px 18px;
-		border-bottom: 1px solid var(--border-subtle);
-	}
 	.palette-icon {
 		color: var(--text-muted);
 		font-size: var(--font-size-md);
@@ -595,16 +514,6 @@
 		width: 16px;
 		text-align: center;
 	}
-	.palette-input {
-		flex: 1;
-		background: none;
-		border: none;
-		outline: none;
-		font-size: var(--font-size-md);
-		color: var(--text-primary);
-		font-family: inherit;
-	}
-	.palette-input::placeholder { color: var(--text-muted); }
 	.palette-spinner {
 		color: var(--text-muted);
 		font-size: var(--font-size-sm);
@@ -618,13 +527,6 @@
 		max-height: 400px;
 		overflow-y: auto;
 	}
-	.palette-row-wrap {
-		display: flex;
-		align-items: stretch;
-		position: relative;
-	}
-	.palette-row-wrap:hover,
-	.palette-row-wrap--active,
 	.palette-row:hover,
 	.palette-row--active {
 		background: var(--bg-hover);
@@ -644,50 +546,6 @@
 		cursor: pointer;
 		text-align: left;
 	}
-	.row-more {
-		flex-shrink: 0;
-		width: 32px;
-		display: grid;
-		place-items: center;
-		background: none;
-		border: none;
-		color: var(--text-secondary, var(--text-muted));
-		font-size: var(--font-size-md);
-		cursor: pointer;
-		opacity: 0;
-		padding: 0 14px 0 4px;
-		transition: opacity 120ms ease, color 120ms ease;
-	}
-	.palette-row-wrap:hover .row-more,
-	.palette-row-wrap--active .row-more,
-	.row-more:hover,
-	.row-more:focus-visible {
-		opacity: 1;
-	}
-	.row-more:hover {
-		color: var(--text-primary);
-	}
-	.row-art {
-		width: 32px; height: 32px;
-		border-radius: 4px;
-		background: var(--bg-raised);
-		background-size: cover;
-		background-position: center;
-		flex-shrink: 0;
-	}
-	.row-art--circle { border-radius: 50%; }
-	.row-art--fallback {
-		display: grid;
-		place-items: center;
-		font-size: var(--font-size-sm);
-		color: var(--text-muted);
-	}
-	.row-meta { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-	.row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
-	.row-sub { font-size: var(--font-size-xs); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.row-kind { font-size: var(--font-size-2xs); color: var(--text-muted); margin-left: auto; flex-shrink: 0; }
-	.row-kind--spotify { color: var(--service-spotify); font-weight: var(--font-weight-semibold); }
-	.row-lib { font-size: var(--font-size-2xs); color: var(--accent); flex-shrink: 0; }
 	.cmd-prefix { font-weight: var(--font-weight-semibold); color: var(--accent); font-family: var(--font-mono); flex-shrink: 0; }
 	.cmd-args { font-size: var(--font-size-xs); color: var(--text-muted); font-family: var(--font-mono); flex-shrink: 0; }
 	.cmd-desc { color: var(--text-secondary); margin-left: auto; font-size: var(--font-size-xs); }

@@ -144,7 +144,7 @@ describe('artist page layout contracts', () => {
 		expect(source).toContain('href={`${discographyBase}/discography/compilations`}');
 		expect(discographySource).toContain("type Section = 'tracks' | 'albums' | 'singles' | 'compilations';");
 		expect(discographySource).toContain('cachedApi.getArtistDiscography(id)');
-		expect(discographySource).toContain('type="search"');
+		expect(discographySource).toContain('<SearchField');
 		expect(discographySource).toContain('<TrackRow');
 		expect(discographySource).toContain('<TidalTrackRow');
 		expect(discographySource).toContain('openContextMenu(event, albumMenu(album), album.title);');
