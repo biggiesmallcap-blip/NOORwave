@@ -4634,7 +4634,7 @@
 	.album-title {
 		font-weight: var(--font-weight-semibold);
 		font-size: var(--font-size-sm);
-		line-height: 1.3;
+		line-height: var(--line-height-snug);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
