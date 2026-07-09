@@ -29,6 +29,7 @@
 		togglePlayback
 	} from '$lib/stores/player';
 	import TrackRow from '$lib/components/TrackRow.svelte';
+	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import MediaRail from '$lib/components/ui/MediaRail.svelte';
@@ -975,11 +976,12 @@
 		</p>
 
 		<div class="filter-bar">
-			<input
-				class="filter-input"
-				type="text"
-				placeholder="Filter tracks and albums…"
+			<SearchField
 				bind:value={filterQuery}
+				variant="page"
+				size="sm"
+				fill
+				placeholder="Filter tracks and albums…"
 			/>
 		</div>
 
@@ -1737,20 +1739,8 @@
 
 	.filter-bar {
 		padding: 8px 32px 0;
+		max-width: calc(260px + 64px);
 	}
-
-	.filter-input {
-		background: var(--input-bg);
-		border: 1px solid var(--input-border);
-		border-radius: 20px;
-		padding: 7px 16px;
-		font-size: var(--font-size-sm);
-		color: var(--text-primary);
-		outline: none;
-		width: 260px;
-		transition: border-color 0.15s;
-	}
-	.filter-input:focus { border-color: var(--accent); background: var(--input-focus); }
 
 	.actions-bar {
 		display: flex;

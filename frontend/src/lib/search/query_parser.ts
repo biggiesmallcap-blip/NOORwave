@@ -13,7 +13,7 @@ export interface ParsedQuery {
 // A key listed here but never mapped would be stripped from the free text and
 // silently dropped - the search would run unfiltered, which is exactly the
 // bug this set used to cause with type:/quality:/mood:.
-const SUPPORTED_KEYS = new Set([
+export const SUPPORTED_KEYS = new Set([
   'bpm',
   'key',
   'camelot',
@@ -135,4 +135,15 @@ export function filtersToChips(
 
     return { key, display };
   });
+}
+
+// Remove every token for a given filter key from a raw query string, matching
+// key:value as well as the comparison forms key>/</>=/<=. Pure - returns the
+// rebuilt query; callers re-run the search. Extracted from the search page's
+// removeFilter so the shared SearchField chip-remove behaves identically.
+export function stripFilter(input: string, key: string): string {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`^${escaped}(:|>=|<=|>|<)`);
+  const tokens = input.trim().split(/\s+/).filter(t => t.length > 0);
+  return tokens.filter(t => !pattern.test(t)).join(' ');
 }

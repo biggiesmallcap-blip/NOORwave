@@ -22,6 +22,7 @@
 		startPlaylistRadio,
 	} from '$lib/stores/player';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
+	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
@@ -1175,15 +1176,18 @@
 
 	<section class="playlist-control-band glass">
 		<div class="playlist-search-wrap">
-			<input
-				class="playlist-search-input"
-				type="search"
-				placeholder="Search playlists, descriptions, or smart rules"
+			<SearchField
 				bind:value={playlistQuery}
-			/>
-			{#if playlistQuery.trim()}
-				<button class="clear-search" onclick={() => (playlistQuery = '')}>Clear</button>
-			{/if}
+				variant="page"
+				fill
+				placeholder="Search playlists, descriptions, or smart rules"
+			>
+				{#snippet trailing()}
+					{#if playlistQuery.trim()}
+						<button class="clear-search" onclick={() => (playlistQuery = '')}>Clear</button>
+					{/if}
+				{/snippet}
+			</SearchField>
 		</div>
 
 		<div class="playlist-toolbar">
@@ -1731,32 +1735,15 @@
 		width: 100%;
 	}
 
-	.playlist-search-input {
-		width: 100%;
-		background: var(--bg-raised);
-		border: 1px solid var(--border-strong);
-		border-radius: 20px;
-		padding: 12px 76px 12px 18px;
-		color: var(--text-primary);
-	}
-
-	.playlist-search-input:focus {
-		border-color: var(--accent);
-		background: var(--bg-elevated);
-		box-shadow: 0 0 0 3px var(--accent-soft);
-	}
-
 	.clear-search {
-		position: absolute;
-		right: 10px;
-		top: 50%;
-		transform: translateY(-50%);
+		flex-shrink: 0;
 		padding: 4px 10px;
 		border-radius: 999px;
 		background: var(--bg-surface);
 		border: 1px solid var(--border-subtle);
 		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
+		cursor: pointer;
 	}
 
 	.clear-search:hover {
