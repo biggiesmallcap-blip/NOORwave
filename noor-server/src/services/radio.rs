@@ -440,22 +440,27 @@ pub async fn orchestrate_song(
     // Final selection: either the constraint-based diversity re-ranker (when
     // the flag is on) or the legacy weighted-interleave path. Both consume
     // the same `combined` candidate list; only the slot-fill logic differs.
+    // Both rank into a wider interim list so the hard artist cap below has
+    // spare candidates to substitute when it rejects a slot.
+    let interim_limit = limit.saturating_mul(2).max(limit.saturating_add(8));
     let mut rerank_counters = RerankCounters::default();
-    let ordered = if flags.diversity_rerank_enabled {
+    let ranked = if flags.diversity_rerank_enabled {
         let primary_genres = primary_genres_for_candidates(db, &combined);
         diversity_rerank(
             combined,
             &profile_for_penalties,
             blend,
-            limit,
+            interim_limit,
             &primary_genres,
             &taste.recent_track_ids,
             flags.source_quota_bonus_enabled,
             &mut rerank_counters,
         )
     } else {
-        blend_interleave(combined, blend, limit)
+        blend_interleave(combined, blend, interim_limit)
     };
+    let recent_artists = recent_played_artist_names(db, ARTIST_HISTORY_MEMORY);
+    let ordered = enforce_artist_diversity(ranked, &recent_artists, limit);
 
     tracing::info!(
         seed_track_id,
@@ -1780,6 +1785,111 @@ fn diversity_rerank(
     queue
 }
 
+// --- Hard same-artist diversity cap ------------------------------------------
+//
+// The soft same-artist penalty above lives behind the staged-rollout
+// `radio_diversity_rerank_enabled` flag (default off), and even when enabled
+// its relaxation ladder drops the artist dimension entirely when the pool is
+// one-artist heavy. Real-world result: an unattended radio session played 12
+// consecutive tracks by one artist. This pass is the guarantee the penalties
+// cannot give: it runs after BOTH selection paths, remembers what recently
+// PLAYED (not just the queue being built, so refills cannot restart a
+// marathon), and hard-rejects picks that would form one. It only yields when
+// the remaining pool offers no alternative at all - better repetition than
+// silence.
+
+/// Max consecutive same-artist slots, counting recently played history.
+const ARTIST_RUN_CAP: usize = 2;
+/// Sliding window size for the occurrence cap.
+const ARTIST_WINDOW: usize = 10;
+/// Max slots one artist may take within any ARTIST_WINDOW consecutive slots.
+const ARTIST_WINDOW_CAP: usize = 2;
+/// Recently played artists seeding the cap history (window minus the slot
+/// being decided).
+const ARTIST_HISTORY_MEMORY: usize = ARTIST_WINDOW - 1;
+/// Only listens this recent count as "just played" - yesterday's tracks
+/// should not constrain today's first radio queue.
+const ARTIST_HISTORY_MAX_AGE_HOURS: i64 = 2;
+
+/// Case-folded artist identity for the cap. None for blank/unknown artists,
+/// which never form runs (an unattributable candidate cannot be a marathon).
+fn artist_key(name: &str) -> Option<String> {
+    let key = name.trim().to_ascii_lowercase();
+    (!key.is_empty()).then_some(key)
+}
+
+fn artist_allowed(candidate_artist: &str, history: &[String]) -> bool {
+    let Some(key) = artist_key(candidate_artist) else {
+        return true;
+    };
+    let run = history.iter().rev().take_while(|h| **h == key).count();
+    if run >= ARTIST_RUN_CAP {
+        return false;
+    }
+    let window_start = history.len().saturating_sub(ARTIST_WINDOW - 1);
+    let in_window = history[window_start..]
+        .iter()
+        .filter(|h| **h == key)
+        .count();
+    in_window < ARTIST_WINDOW_CAP
+}
+
+/// Greedy stable pass over the ranked list: keep rank order, but skip any
+/// candidate whose artist would exceed the run or window cap given what came
+/// before it (recently played prefix + picks so far). Skipped candidates stay
+/// eligible for later slots once the window moves past their artist.
+fn enforce_artist_diversity(
+    ranked: Vec<RadioCandidate>,
+    recent_artists: &[String],
+    limit: usize,
+) -> Vec<RadioCandidate> {
+    let mut history: Vec<String> = recent_artists
+        .iter()
+        .map(|name| artist_key(name).unwrap_or_default())
+        .collect();
+    let mut pending = ranked;
+    let mut out: Vec<RadioCandidate> = Vec::with_capacity(limit.min(pending.len()));
+    while out.len() < limit && !pending.is_empty() {
+        let pick = pending
+            .iter()
+            .position(|cand| artist_allowed(&cand.artist_name, &history))
+            // Degenerate pool: every remaining candidate violates the cap
+            // (e.g. a one-artist library). Take the best-ranked anyway rather
+            // than starve the radio.
+            .unwrap_or(0);
+        let cand = pending.remove(pick);
+        history.push(artist_key(&cand.artist_name).unwrap_or_default());
+        out.push(cand);
+    }
+    out
+}
+
+/// Most recent artists from listen history (chronological, oldest first),
+/// bounded by ARTIST_HISTORY_MAX_AGE_HOURS so stale sessions do not leak in.
+fn recent_played_artist_names(db: &Database, limit: usize) -> Vec<String> {
+    let rows: Vec<String> = db
+        .with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT COALESCE(ar.name, '')
+                 FROM listen_history lh
+                 JOIN tracks t ON t.id = lh.track_id
+                 LEFT JOIN artists ar ON ar.id = t.artist_id
+                 WHERE lh.started_at >= datetime('now', printf('-%d hours', ?1))
+                 ORDER BY lh.started_at DESC
+                 LIMIT ?2",
+            )?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![ARTIST_HISTORY_MAX_AGE_HOURS, limit as i64],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .unwrap_or_default();
+    rows.into_iter().rev().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2091,6 +2201,92 @@ mod tests {
             queue[1].artist_name, "B",
             "second slot should not be same artist"
         );
+    }
+
+    #[test]
+    fn artist_cap_breaks_single_artist_marathon() {
+        // Six top-ranked tracks by one artist plus lower-ranked alternatives:
+        // the cap must interleave instead of letting the marathon through.
+        let ranked = vec![
+            make_cand_full(RadioSource::Library, 1, "Celine", "t1", None, 0.99),
+            make_cand_full(RadioSource::Library, 2, "Celine", "t2", None, 0.98),
+            make_cand_full(RadioSource::Library, 3, "Celine", "t3", None, 0.97),
+            make_cand_full(RadioSource::Library, 4, "Celine", "t4", None, 0.96),
+            make_cand_full(RadioSource::Library, 5, "Celine", "t5", None, 0.95),
+            make_cand_full(RadioSource::Library, 6, "Celine", "t6", None, 0.94),
+            make_cand_full(RadioSource::Library, 7, "Other A", "t7", None, 0.50),
+            make_cand_full(RadioSource::Library, 8, "Other B", "t8", None, 0.40),
+        ];
+        let out = enforce_artist_diversity(ranked, &[], 6);
+        assert_eq!(out.len(), 6);
+        // Run cap: never more than two Celine slots in a row.
+        let mut run = 0usize;
+        let mut max_run = 0usize;
+        for cand in &out {
+            if cand.artist_name == "Celine" {
+                run += 1;
+                max_run = max_run.max(run);
+            } else {
+                run = 0;
+            }
+        }
+        assert!(
+            max_run <= 2,
+            "consecutive run {max_run} exceeds cap: {out:?}"
+        );
+        // Window cap: at most two Celine slots in this (sub-window) queue plus
+        // the degenerate tail once alternatives run out.
+        let celine = out.iter().filter(|c| c.artist_name == "Celine").count();
+        assert!(
+            celine <= 4,
+            "expected window cap to bound Celine, got {celine}"
+        );
+        // Rank order preserved among allowed picks: the two alternatives fill
+        // the slots the cap denies to Celine.
+        assert_eq!(out[2].artist_name, "Other A");
+        assert_eq!(out[3].artist_name, "Other B");
+    }
+
+    #[test]
+    fn artist_cap_counts_recently_played_history() {
+        // Two plays of the artist just happened: the first slot of the next
+        // refill must not extend the run even though the artist ranks first.
+        let ranked = vec![
+            make_cand_full(RadioSource::Library, 1, "Celine", "t1", None, 0.99),
+            make_cand_full(RadioSource::Library, 2, "Other", "t2", None, 0.10),
+        ];
+        let recent = vec!["Celine".to_string(), "Celine".to_string()];
+        let out = enforce_artist_diversity(ranked, &recent, 2);
+        assert_eq!(out[0].artist_name, "Other");
+        assert_eq!(out[1].artist_name, "Celine");
+    }
+
+    #[test]
+    fn artist_cap_degrades_to_repetition_when_pool_is_single_artist() {
+        // A one-artist pool must still fill the queue (better repetition than
+        // silence) - the cap only bites when alternatives exist.
+        let ranked = vec![
+            make_cand_full(RadioSource::Library, 1, "Solo", "t1", None, 0.9),
+            make_cand_full(RadioSource::Library, 2, "Solo", "t2", None, 0.8),
+            make_cand_full(RadioSource::Library, 3, "Solo", "t3", None, 0.7),
+            make_cand_full(RadioSource::Library, 4, "Solo", "t4", None, 0.6),
+        ];
+        let out = enforce_artist_diversity(ranked, &[], 4);
+        assert_eq!(out.len(), 4);
+        assert_eq!(out[0].title, "t1");
+    }
+
+    #[test]
+    fn artist_cap_ignores_blank_artists() {
+        // Unattributable candidates can never form a run and never get blocked.
+        let ranked = vec![
+            make_cand_full(RadioSource::Lastfm, 0, "", "t1", None, 0.9),
+            make_cand_full(RadioSource::Lastfm, 0, "", "t2", None, 0.8),
+            make_cand_full(RadioSource::Lastfm, 0, "", "t3", None, 0.7),
+        ];
+        let out = enforce_artist_diversity(ranked, &[], 3);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].title, "t1");
     }
 
     #[test]

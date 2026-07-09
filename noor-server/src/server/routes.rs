@@ -10809,6 +10809,29 @@ fn spawn_playback_runtime_listener(
                 Ok(playback_runtime::PlaybackRuntimeEvent::Paused { .. })
                 | Ok(playback_runtime::PlaybackRuntimeEvent::Resumed { .. })
                 | Ok(playback_runtime::PlaybackRuntimeEvent::Preparing { .. }) => {}
+                Ok(playback_runtime::PlaybackRuntimeEvent::Stalled { track_id }) => {
+                    // The audible engine froze (hung stream). Stop listen-time
+                    // accrual now: the session timer is wall-clock based and
+                    // would otherwise keep counting silence as listening
+                    // (observed: 2795 s recorded on a 334 s track). Playback
+                    // recovery itself is the watchdog's force-advance.
+                    let mut state_guard = state.write().await;
+                    let now = chrono::Utc::now();
+                    if let Some(session) = state_guard.active_listen_session.as_mut()
+                        && session.track_id == track_id
+                    {
+                        session.pause(now);
+                    }
+                }
+                Ok(playback_runtime::PlaybackRuntimeEvent::StallRecovered { track_id }) => {
+                    let mut state_guard = state.write().await;
+                    let now = chrono::Utc::now();
+                    if let Some(session) = state_guard.active_listen_session.as_mut()
+                        && session.track_id == track_id
+                    {
+                        session.resume(now);
+                    }
+                }
                 Ok(playback_runtime::PlaybackRuntimeEvent::DropPreviewStarted {
                     track_id,
                     generation,

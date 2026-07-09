@@ -23,7 +23,11 @@ const ENERGY_DB_FLOOR: f64 = -30.0;
 const ENERGY_DB_CEIL: f64 = -6.0;
 
 /// Map a loudness measurement in dB (LUFS or RMS dBFS) onto [0,1].
-fn energy_from_db(db: f64) -> f64 {
+///
+/// Public because the DJ profile loader reuses the exact same map to derive a
+/// fallback energy from the profile's `lufs_loud_body` when no DSP row exists,
+/// keeping every energy value in the app on one absolute scale.
+pub fn energy_from_db(db: f64) -> f64 {
     ((db - ENERGY_DB_FLOOR) / (ENERGY_DB_CEIL - ENERGY_DB_FLOOR)).clamp(0.0, 1.0)
 }
 

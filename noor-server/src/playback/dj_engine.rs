@@ -350,11 +350,20 @@ fn profile_from_row(conn: &Connection, row: &AudioDjProfileRow) -> Result<DjProf
     let safe_transition_windows =
         decode_f32_blob(&row.safe_transition_windows_blob).unwrap_or_default();
     let dsp = dsp_features_for_profile(conn, row)?;
+    // Fallback energy comes from the profile's own loud-body LUFS through the
+    // same absolute map as the stored DSP scalar (analysis v11). The old
+    // fallback averaged the peak-normalized energy contour, which is a
+    // per-track-RELATIVE number and sat on a different scale than the scalar
+    // it stood in for. Loud-body LUFS reads a few dB hotter than integrated
+    // LUFS, so this fallback leans slightly high - fine for a stand-in.
     let energy = dsp
         .as_ref()
         .and_then(|features| features.energy)
-        .map(|value| value as f32)
-        .or_else(|| average_energy_contour(&row.energy_contour_blob));
+        .or_else(|| {
+            row.lufs_loud_body
+                .map(crate::services::audio_analysis::features::energy_from_db)
+        })
+        .map(|value| value as f32);
     Ok(DjProfile {
         bpm: estimate_bpm(&beat_grid_seconds),
         camelot_key: dsp.and_then(|features| features.camelot_key),
@@ -407,17 +416,6 @@ fn dsp_features_for_profile(
     track_id
         .map(|track_id| queries::get_audio_dsp_features(conn, track_id))
         .unwrap_or(Ok(None))
-}
-
-fn average_energy_contour(blob: &[u8]) -> Option<f32> {
-    let contour = decode_f32_blob(blob)?;
-    let mut sum = 0.0_f32;
-    let mut count = 0_u32;
-    for value in contour.into_iter().filter(|value| value.is_finite()) {
-        sum += value.clamp(0.0, 1.0);
-        count += 1;
-    }
-    (count > 0).then_some(sum / count as f32)
 }
 
 // Tempo from the beat grid via the MEDIAN inter-beat interval. The previous
@@ -492,6 +490,54 @@ mod tests {
             .expect("enable");
     }
 
+    fn fixture_profile_row(kind: &str, id: i64, confidence: f64) -> AudioDjProfileRow {
+        AudioDjProfileRow {
+            media_ref_kind: kind.to_string(),
+            media_ref_id: id.to_string(),
+            track_id: (kind == "library_track").then_some(id),
+            queue_item_id: (kind == "queue_item").then_some(id),
+            tidal_id: (kind == "tidal_track").then_some(id),
+            profile_version: DJ_PROFILE_VERSION.to_string(),
+            beat_grid_blob: encode_f32_blob(&(0..64).map(|i| i as f32 * 0.5).collect::<Vec<_>>()),
+            downbeats_blob: encode_f32_blob(&(0..16).map(|i| i as f32 * 2.0).collect::<Vec<_>>()),
+            phrase_boundaries_blob: encode_u32_blob(&[0, 8]),
+            mix_in_blob: encode_f32_blob(&[0.0]),
+            mix_out_blob: encode_f32_blob(&[90.0]),
+            intro_end_seconds: Some(16.0),
+            outro_start_seconds: Some(120.0),
+            breakdown_blob: encode_f32_blob(&[]),
+            drop_blob: encode_f32_blob(&[]),
+            safe_transition_windows_blob: encode_f32_blob(&[0.0, 8.0, 1.0]),
+            energy_contour_blob: encode_f32_blob(&[]),
+            vocal_presence_blob: encode_f32_blob(&[0.0; 16]),
+            vocal_density_blob: encode_f32_blob(&[0.0; 16]),
+            waveform_peaks_blob: encode_f32_blob(&[0.0, 0.5, 1.0, 0.5]),
+            lufs_loud_body: Some(-12.0),
+            true_peak_dbtp: Some(-1.0),
+            beat_confidence: Some(0.9),
+            profile_confidence: confidence,
+            analysis_scope_ms: 90_000,
+            is_temporary: kind == "queue_item",
+            source: "test".to_string(),
+            computed_at: "now".to_string(),
+        }
+    }
+
+    #[test]
+    fn profile_energy_falls_back_to_loud_body_lufs_on_the_shared_scale() {
+        // A queue-item profile has no track/tidal link, so no DSP scalar
+        // exists; energy must come from lufs_loud_body through the same
+        // -30..-6 map as analysis v11 (-12 LUFS -> 0.75), not from the
+        // per-track-relative contour mean the old fallback used.
+        let db = db();
+        let row = fixture_profile_row("queue_item", 7, 0.9);
+        let profile = db
+            .with_conn(|conn| profile_from_row(conn, &row))
+            .expect("profile");
+        let energy = profile.energy.expect("fallback energy");
+        assert!((energy - 0.75).abs() < 1e-6, "got {energy}");
+    }
+
     fn seed_profile(db: &Database, kind: &str, id: i64, confidence: f64) {
         db.with_conn(|conn| {
             if kind == "library_track" {
@@ -524,36 +570,7 @@ mod tests {
                     rusqlite::params![id],
                 )?;
             }
-            let row = AudioDjProfileRow {
-                media_ref_kind: kind.to_string(),
-                media_ref_id: id.to_string(),
-                track_id: (kind == "library_track").then_some(id),
-                queue_item_id: (kind == "queue_item").then_some(id),
-                tidal_id: (kind == "tidal_track").then_some(id),
-                profile_version: DJ_PROFILE_VERSION.to_string(),
-                beat_grid_blob: encode_f32_blob(&(0..64).map(|i| i as f32 * 0.5).collect::<Vec<_>>()),
-                downbeats_blob: encode_f32_blob(&(0..16).map(|i| i as f32 * 2.0).collect::<Vec<_>>()),
-                phrase_boundaries_blob: encode_u32_blob(&[0, 8]),
-                mix_in_blob: encode_f32_blob(&[0.0]),
-                mix_out_blob: encode_f32_blob(&[90.0]),
-                intro_end_seconds: Some(16.0),
-                outro_start_seconds: Some(120.0),
-                breakdown_blob: encode_f32_blob(&[]),
-                drop_blob: encode_f32_blob(&[]),
-                safe_transition_windows_blob: encode_f32_blob(&[0.0, 8.0, 1.0]),
-                energy_contour_blob: encode_f32_blob(&[]),
-                vocal_presence_blob: encode_f32_blob(&[0.0; 16]),
-                vocal_density_blob: encode_f32_blob(&[0.0; 16]),
-                waveform_peaks_blob: encode_f32_blob(&[0.0, 0.5, 1.0, 0.5]),
-                lufs_loud_body: Some(-12.0),
-                true_peak_dbtp: Some(-1.0),
-                beat_confidence: Some(0.9),
-                profile_confidence: confidence,
-                analysis_scope_ms: 90_000,
-                is_temporary: kind == "queue_item",
-                source: "test".to_string(),
-                computed_at: "now".to_string(),
-            };
+            let row = fixture_profile_row(kind, id, confidence);
             queries::upsert_audio_dj_profile(conn, &row)
         })
         .expect("seed profile");
