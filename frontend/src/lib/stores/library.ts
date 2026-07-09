@@ -19,13 +19,31 @@ const VIEW_MODE_KEY = 'library.viewMode';
 function createViewMode() {
 	let initial: 'grid' | 'list' = 'grid';
 	if (typeof localStorage !== 'undefined') {
-		const saved = localStorage.getItem(VIEW_MODE_KEY);
-		if (saved === 'list' || saved === 'grid') initial = saved;
+		try {
+			const saved = localStorage.getItem(VIEW_MODE_KEY);
+			if (saved === 'list' || saved === 'grid') initial = saved;
+		} catch {
+			// Storage read blocked (private mode / disabled); use the default.
+		}
 	}
 	const store = writable<'grid' | 'list'>(initial);
-	if (typeof localStorage !== 'undefined') {
-		store.subscribe((value) => localStorage.setItem(VIEW_MODE_KEY, value));
-	}
+	// subscribe() fires synchronously with `initial` at import time. Skip that
+	// first emission and wrap the write: a full or blocked localStorage must
+	// never throw here, or the exception escapes module init and takes the whole
+	// app down (QuotaExceededError -> bare SvelteKit 500 on boot).
+	let firstEmission = true;
+	store.subscribe((value) => {
+		if (firstEmission) {
+			firstEmission = false;
+			return;
+		}
+		if (typeof localStorage === 'undefined') return;
+		try {
+			localStorage.setItem(VIEW_MODE_KEY, value);
+		} catch {
+			// Quota exceeded or storage blocked; keep the choice in memory only.
+		}
+	});
 	return store;
 }
 export const viewMode = createViewMode();
