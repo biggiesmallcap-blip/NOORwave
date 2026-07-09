@@ -1107,13 +1107,13 @@
 							class="art-play-overlay"
 							onclick={(e) => { e.preventDefault(); e.stopPropagation(); void playTidalAlbum(album.tidal_id) }}
 							aria-label="Play {album.title}"
-						>▶</button>
+						><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M5 3l8 5-8 5V3z" fill="currentColor" /></svg></button>
 					{:else if album.local_id != null}
 						<button
 							class="art-play-overlay"
 							onclick={(e) => onAlbumCardPlay({ id: album.local_id }, e)}
 							aria-label="Play {album.title}"
-						>▶</button>
+						><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M5 3l8 5-8 5V3z" fill="currentColor" /></svg></button>
 					{/if}
 				</div>
 				<p class="grid-title">{album.title}</p>
@@ -1140,7 +1140,7 @@
 					{:else}
 						<div class="grid-art placeholder">▶</div>
 					{/if}
-					<div class="art-play-overlay video-play-overlay" aria-hidden="true">▶</div>
+					<div class="art-play-overlay video-play-overlay" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M5 3l8 5-8 5V3z" fill="currentColor" /></svg></div>
 					<span class="badge-new">VIDEO</span>
 				</div>
 				<p class="grid-title">{video.title}</p>
@@ -1296,8 +1296,8 @@
 									{/if}
 									{#if album.id != null}
 										<PlayOverlay
-											position="center"
-											size="md"
+											position="corner"
+											size="sm"
 											label="Play {album.title}"
 											onclick={(e) => onAlbumCardPlay({ id: album.id }, e)}
 										/>
@@ -1345,8 +1345,8 @@
 									{/if}
 									{#if album.id != null}
 										<PlayOverlay
-											position="center"
-											size="md"
+											position="corner"
+											size="sm"
 											label="Play {album.title}"
 											onclick={(e) => onAlbumCardPlay({ id: album.id }, e)}
 										/>
@@ -1861,35 +1861,76 @@
 	   uniform regardless of title length; the rail container (MediaRail)
 	   handles the horizontal scroll. */
 	.grid-card {
-		flex: 0 0 200px;
-		min-width: 200px;
-		max-width: 200px;
+		flex: 0 0 176px;
+		min-width: 176px;
+		max-width: 176px;
 		scroll-snap-align: start;
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
-		padding: 14px;
-		border-radius: 10px;
+		padding: 0;
+		border-radius: var(--radius-md);
 		text-decoration: none;
 		color: inherit;
-		transition: background var(--motion-fast);
+		transition: transform var(--motion-base);
 	}
 
-	.grid-card:hover { background: var(--bg-hover); }
+	.grid-card:hover { transform: translateY(-4px); }
 
 	.grid-art-wrap {
 		position: relative;
 		width: 100%;
 		aspect-ratio: 1/1;
-		border-radius: 6px;
+		border-radius: var(--radius-md);
 		overflow: hidden;
-		box-shadow: 0 10px 24px -12px rgba(0, 0, 0, 0.6);
-		background: var(--bg-surface);
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+		background: var(--bg-raised);
 		margin-bottom: 6px;
+		transition: box-shadow var(--motion-base);
+	}
+
+	.grid-card:hover .grid-art-wrap {
+		box-shadow: 0 12px 26px -6px rgba(0, 0, 0, 0.5);
 	}
 
 	.grid-art-wrap:hover :global(.play-overlay),
 	.grid-card:focus-within :global(.play-overlay) {
+		opacity: 1;
+		transform: translateY(0);
+	}
+
+	/* Circular accent play button in the artwork's bottom-right, revealed on
+	   hover (matches the library/search album cards). Previously .art-play-overlay
+	   had no styling, so these buttons rendered as bare glyphs. */
+	.art-play-overlay {
+		position: absolute;
+		right: 8px;
+		bottom: 8px;
+		display: grid;
+		place-items: center;
+		width: 40px;
+		height: 40px;
+		border: 0;
+		border-radius: 50%;
+		background: var(--accent);
+		color: #fff;
+		box-shadow: 0 6px 16px -4px rgba(0, 0, 0, 0.55);
+		opacity: 0;
+		transform: translateY(6px);
+		transition: opacity var(--motion-base), transform var(--motion-base), filter var(--motion-fast);
+		cursor: pointer;
+		z-index: 2;
+	}
+
+	.art-play-overlay svg { margin-left: 1px; }
+
+	.art-play-overlay:hover {
+		transform: translateY(0) scale(1.06);
+		filter: brightness(1.08);
+	}
+
+	.grid-art-wrap:hover .art-play-overlay,
+	.grid-card:focus-within .art-play-overlay {
 		opacity: 1;
 		transform: translateY(0);
 	}
@@ -1935,6 +1976,7 @@
 
 	.grid-title {
 		margin: 6px 0 0;
+		font-size: var(--font-size-sm);
 		font-weight: var(--font-weight-semibold);
 		white-space: nowrap;
 		overflow: hidden;

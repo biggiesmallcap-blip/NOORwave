@@ -510,6 +510,10 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/history", get(catalog_routes::get_history))
         .route("/api/albums", get(catalog_routes::get_albums))
         .route(
+            "/api/albums/decades",
+            get(catalog_routes::get_album_decades),
+        )
+        .route(
             "/api/albums/{id}/tracks",
             get(catalog_routes::get_album_tracks),
         )

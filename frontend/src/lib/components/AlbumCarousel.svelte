@@ -68,10 +68,11 @@
             className="album-carousel-art"
             src={resolved}
             size={320}
+            tint={true}
             fallbackText={album.title.slice(0, 2).toUpperCase()}
             decorative={true}
           />
-          <PlayOverlay position="center" size="md" />
+          <PlayOverlay position="corner" size="sm" />
         </div>
         <span class="album-title">{album.title}</span>
         {#if album.artist_name}
@@ -140,6 +141,11 @@
     padding: 0;
     color: inherit;
     text-align: left;
+    transition: transform var(--motion-base);
+  }
+
+  .album-card:hover {
+    transform: translateY(-4px);
   }
 
   .album-card:focus-visible {
@@ -152,8 +158,14 @@
     position: relative;
     width: var(--album-card-w);
     aspect-ratio: 1 / 1;
-    border-radius: var(--radius-xs);
+    border-radius: var(--radius-md);
     overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+    transition: box-shadow var(--motion-base);
+  }
+
+  .album-card:hover .art-wrap {
+    box-shadow: 0 12px 26px -6px rgba(0, 0, 0, 0.5);
   }
 
   .art-wrap :global(.album-carousel-art) {
@@ -164,10 +176,7 @@
 
   .art-wrap :global(.album-carousel-art:not(.fallback)) {
     object-fit: cover;
-    transition: transform 0.15s;
   }
-
-  .album-card:hover :global(.album-carousel-art:not(.fallback)) { transform: scale(1.04); }
 
   .art-wrap :global(.album-carousel-art.fallback) {
     display: grid;

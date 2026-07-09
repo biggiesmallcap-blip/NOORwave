@@ -104,7 +104,9 @@ export const cacheKeys = {
 		limit = 50,
 		offset = 0,
 		favoriteOnly = true,
-	) => ['api', 'getAlbums', { favoriteOnly, limit, offset, sortBy, sortDir }] as const,
+		decade: number | null = null,
+	) => ['api', 'getAlbums', { decade, favoriteOnly, limit, offset, sortBy, sortDir }] as const,
+	albumDecades: (favoriteOnly = true) => ['api', 'getAlbumDecades', { favoriteOnly }] as const,
 	artists: (sortBy = 'name', sortDir = 'asc', limit = 50, offset = 0) =>
 		['api', 'getArtists', { limit, offset, sortBy, sortDir }] as const,
 	artist: (id: number) => ['api', 'getArtist', { id }] as const,
@@ -206,12 +208,26 @@ export const cachedApi = {
 			options,
 		);
 	},
-	getAlbums(sortBy = 'title', sortDir = 'asc', limit = 50, offset = 0, favoriteOnly = true) {
+	getAlbums(
+		sortBy = 'title',
+		sortDir = 'asc',
+		limit = 50,
+		offset = 0,
+		favoriteOnly = true,
+		decade: number | null = null,
+	) {
 		const options = offset === 0 ? mediumOptions : shortOptions;
 		return fetchCached<{ albums: Album[]; total: number }>(
-			cacheKeys.albums(sortBy, sortDir, limit, offset, favoriteOnly),
-			() => api.getAlbums(sortBy, sortDir, limit, offset, favoriteOnly),
+			cacheKeys.albums(sortBy, sortDir, limit, offset, favoriteOnly, decade),
+			() => api.getAlbums(sortBy, sortDir, limit, offset, favoriteOnly, decade),
 			options,
+		);
+	},
+	getAlbumDecades(favoriteOnly = true) {
+		return fetchCached<{ decades: number[] }>(
+			cacheKeys.albumDecades(favoriteOnly),
+			() => api.getAlbumDecades(favoriteOnly),
+			longOptions,
 		);
 	},
 	getArtists(sortBy = 'name', sortDir = 'asc', limit = 50, offset = 0) {

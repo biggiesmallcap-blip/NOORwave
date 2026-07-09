@@ -766,6 +766,7 @@ pub fn get_albums(
     limit: i64,
     offset: i64,
     favorite_only: bool,
+    decade: Option<i64>,
 ) -> Result<Vec<Album>> {
     let order_col = match sort_by {
         "title" => "al.title",
@@ -775,11 +776,7 @@ pub fn get_albums(
     };
     let dir = if sort_dir == "asc" { "ASC" } else { "DESC" };
 
-    let fav_filter = if favorite_only {
-        " WHERE al.is_favorite = 1"
-    } else {
-        ""
-    };
+    let where_clause = album_filter_clause("al", favorite_only, decade);
 
     let sql = format!(
         "SELECT al.id, al.tidal_id, al.ytmusic_id, al.title, al.artist_id,
@@ -787,7 +784,7 @@ pub fn get_albums(
                 al.release_type, al.label, al.track_count, al.is_favorite, al.source
          FROM albums al
          LEFT JOIN artists a ON al.artist_id = a.id
-         {fav_filter}
+         {where_clause}
          ORDER BY {order_col} {dir}
          LIMIT ?1 OFFSET ?2"
     );
@@ -816,17 +813,67 @@ pub fn get_albums(
     Ok(albums)
 }
 
-pub fn get_album_count(conn: &Connection, favorite_only: bool) -> Result<i64> {
-    let filter = if favorite_only {
-        " WHERE is_favorite = 1"
-    } else {
-        ""
-    };
+pub fn get_album_count(conn: &Connection, favorite_only: bool, decade: Option<i64>) -> Result<i64> {
+    // Count uses the bare `albums` table (no alias), so build the clause without one.
+    let filter = album_filter_clause("", favorite_only, decade);
     Ok(
         conn.query_row(&format!("SELECT COUNT(*) FROM albums{filter}"), [], |row| {
             row.get(0)
         })?,
     )
+}
+
+/// Build a ` WHERE ...` clause for album list/count queries from the optional
+/// favorite and decade filters. `prefix` is the table alias (e.g. "al") or ""
+/// for an unaliased table. A decade of 1990 matches years [1990, 2000).
+/// Returns an empty string when no filter applies. Values are integers/booleans,
+/// so inlining them is injection-safe and matches the surrounding style.
+fn album_filter_clause(prefix: &str, favorite_only: bool, decade: Option<i64>) -> String {
+    let col = |name: &str| {
+        if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}.{name}")
+        }
+    };
+    let mut conditions: Vec<String> = Vec::new();
+    if favorite_only {
+        conditions.push(format!("{} = 1", col("is_favorite")));
+    }
+    if let Some(d) = decade {
+        conditions.push(format!(
+            "{year} >= {d} AND {year} < {}",
+            d + 10,
+            year = col("year")
+        ));
+    }
+    if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    }
+}
+
+/// Distinct decades (1950, 1960, ...) present in the album library, ascending.
+/// Powers the library's decade-filter chips independently of what has been paged
+/// into the client, so selecting a decade resolves to a complete server-side set.
+pub fn get_album_decades(conn: &Connection, favorite_only: bool) -> Result<Vec<i64>> {
+    let fav_filter = if favorite_only {
+        " AND al.is_favorite = 1"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT DISTINCT (al.year / 10) * 10 AS decade
+         FROM albums al
+         WHERE al.year IS NOT NULL{fav_filter}
+         ORDER BY decade ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let decades = stmt
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(decades)
 }
 
 pub fn get_album_tracks(conn: &Connection, album_id: i64) -> Result<Vec<Track>> {

@@ -15,6 +15,9 @@
 		loading?: 'eager' | 'lazy';
 		decoding?: 'async' | 'sync' | 'auto';
 		fetchPriority?: 'high' | 'low' | 'auto';
+		// When true, a missing-artwork fallback gets a stable per-name colour
+		// instead of a flat grey box, so empty tiles read as intentional.
+		tint?: boolean;
 	};
 
 	let {
@@ -27,7 +30,18 @@
 		loading = 'lazy',
 		decoding = 'async',
 		fetchPriority = 'auto',
+		tint = false,
 	}: Props = $props();
+
+	// Deterministic hue from the label so the same album/artist always gets the
+	// same colour across sessions and surfaces.
+	function stableTone(name: string): string {
+		let hash = 0;
+		for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;
+		const hue = Math.abs(hash) % 360;
+		return `hsl(${hue}, 42%, 30%)`;
+	}
+	const tintColor = $derived(tint ? stableTone(alt || fallbackText) : null);
 
 	let failedAttempts = $state(0);
 	let lastSrcKey = $state('');
@@ -79,11 +93,13 @@
 {:else}
 	<div
 		class={`${className} fallback`}
+		class:tinted={tintColor != null}
 		role={decorative ? undefined : 'img'}
 		aria-label={decorative ? undefined : alt}
 		aria-hidden={decorative ? 'true' : undefined}
+		style={tintColor ? `background:${tintColor}` : undefined}
 	>
-		<span>{fallbackText}</span>
+		<span style={tintColor ? 'color: rgba(255,255,255,0.92)' : undefined}>{fallbackText}</span>
 	</div>
 {/if}
 

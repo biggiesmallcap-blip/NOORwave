@@ -35,7 +35,7 @@
 	} from '$lib/stores/library';
 	import { formatTrackDuration, formatDateShort, getQualityClass } from '$lib/utils/format';
 	import { api, type Album, type Artist, type AudioSearchResult, type Genre, type Playlist, type Track } from '$lib/api/client';
-	import { cachedApi } from '$lib/cache/api_queries';
+	import { cachedApi, invalidateLibraryCaches } from '$lib/cache/api_queries';
 	import {
 		currentTrack,
 		isPlaying,
@@ -130,7 +130,12 @@
 	let batchMessage = $state<string | null>(null);
 	let batchError = $state<string | null>(null);
 	let batchBusy = $state<'playlist' | 'genre' | 'delete' | null>(null);
-	let pendingUndoTrackIds = $state<number[]>([]);
+	// Removed items held for a real Undo: batchDelete removes TIDAL favorites, and
+	// Undo re-adds them via setTrackFavorite/setAlbumFavorite (both tracks and
+	// albums), then reloads. Cleared when the undo window lapses.
+	let pendingUndo = $state<{ tracks: Track[]; albums: Album[] }>({ tracks: [], albums: [] });
+	let undoBusy = $state(false);
+	const UNDO_WINDOW_MS = 8000;
 	let albumActionBusyId = $state<number | null>(null);
 	let activeTrackMenuId = $state<number | null>(null);
 	let searchBusy = $state(false);
@@ -203,8 +208,24 @@
 		});
 	}
 
-	// Decade filter for albums tab
+	// Decade filter for albums tab. `decadeChips` is fetched server-side so the
+	// chips (and the selection) cover the whole library, not just the album pages
+	// already loaded on the client. Selecting a decade re-queries the server for a
+	// complete set instead of narrowing the loaded page.
 	let activeDecade = $state<number | null>(null);
+	let decadeChips = $state<number[]>([]);
+
+	// Album ordering lives in its own state, separate from the track-list sort
+	// ($sortBy/$sortDir), because albums sort on different columns (title/artist/
+	// year) than tracks and the two tabs must not clobber each other's choice.
+	type AlbumSortField = 'title' | 'artist' | 'year';
+	let albumSortField = $state<AlbumSortField>('title');
+	let albumSortDir = $state<'asc' | 'desc'>('asc');
+	const ALBUM_SORT_LABELS: Record<AlbumSortField, string> = {
+		title: 'Title',
+		artist: 'Artist',
+		year: 'Year',
+	};
 
 	// Track detail panel
 	let expandedTrackId = $state<number | null>(null);
@@ -252,10 +273,11 @@
 		// still hold every page the user scrolled through; reloading page 1 here
 		// would discard that depth and strand the snapshot's scroll restore at the
 		// bottom of the first page. A fresh visit starts empty and loads normally.
-		if (get(albums).length === 0) void loadAlbums();
+		if (get(albums).length === 0) void loadAlbums(albumSortField, albumSortDir);
 		if (get(tracks).length === 0) void loadTracks();
 		void loadBatchMeta();
 		void loadRecentTracks();
+		void loadDecadeChips();
 		const unsubscribeWs = wsMessages.subscribe((messages) => {
 			const latest = messages.at(-1);
 			if (!latest) return;
@@ -289,6 +311,45 @@
 		}
 	}
 
+	async function loadDecadeChips() {
+		try {
+			const { decades } = await cachedApi.getAlbumDecades();
+			decadeChips = Array.isArray(decades) ? decades : [];
+		} catch (error) {
+			// Older server builds lack /api/albums/decades; fall back to decades
+			// derived from the albums already loaded (see decadeOptions).
+			decadeChips = [];
+		}
+	}
+
+	// Selecting a decade re-queries the server for the complete set (server-side
+	// filter), rather than narrowing only the album page already loaded. Clicking
+	// the active decade again clears the filter.
+	function selectDecade(decade: number | null) {
+		const next = decade != null && activeDecade === decade ? null : decade;
+		if (next === activeDecade) return;
+		activeDecade = next;
+		clearSelection();
+		if (!$searchQuery.trim()) {
+			void loadAlbums(albumSortField, albumSortDir, PAGE_SIZE, 0, next);
+		}
+	}
+
+	// Change album ordering. Re-picking the active field flips direction;
+	// switching field resets to a sensible default (newest-first for Year).
+	function setAlbumSort(field: AlbumSortField) {
+		if (albumSortField === field) {
+			albumSortDir = albumSortDir === 'asc' ? 'desc' : 'asc';
+		} else {
+			albumSortField = field;
+			albumSortDir = field === 'year' ? 'desc' : 'asc';
+		}
+		clearSelection();
+		if (!$searchQuery.trim()) {
+			void loadAlbums(albumSortField, albumSortDir, PAGE_SIZE, 0, activeDecade);
+		}
+	}
+
 	async function loadBatchMeta() {
 		try {
 			const [playlistData, genreData] = await Promise.all([
@@ -312,12 +373,12 @@
 			sortDir.set('asc');
 		}
 		if ($searchQuery.trim()) return;
+		// Albums have their own ordering control (setAlbumSort); handleSort only
+		// drives the track/liked list column headers.
 		if (activeTab === 'tracks') {
 			loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, false);
 		} else if (activeTab === 'liked') {
 			loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, true);
-		} else if (activeTab === 'albums') {
-			loadAlbums($sortBy, $sortDir);
 		}
 		clearSelection();
 	}
@@ -333,7 +394,7 @@
 			// so always refetch from offset 0 when entering either - never reuse stale rows.
 			if (tab === 'tracks') loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, false);
 			if (tab === 'liked') loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, true);
-			if (tab === 'albums') loadAlbums();
+			if (tab === 'albums') loadAlbums(albumSortField, albumSortDir, PAGE_SIZE, 0, activeDecade);
 		}
 		if (tab === 'artists' && artists.length === 0) void loadArtists();
 		clearSelection();
@@ -621,20 +682,38 @@
 		void openAlbumDetail(album);
 	}
 
-	async function removeAlbumFromLibrary(albumId: number) {
-		albums.update((list) => list.filter((a) => a.id !== albumId));
+	async function removeAlbumFromLibrary(album: Album) {
+		// Optimistically drop it, then remove the TIDAL favorite. Keep the full
+		// object so Undo can re-favorite and restore it. Same path as the batch
+		// delete below, so single and multi removal behave identically.
+		if (undoTimer) clearTimeout(undoTimer);
+		albums.update((list) => list.filter((a) => a.id !== album.id));
 		searchResults = {
 			tracks: searchResults.tracks,
-			albums: searchResults.albums.filter((a) => a.id !== albumId),
+			albums: searchResults.albums.filter((a) => a.id !== album.id),
 			artists: searchResults.artists,
 		};
+		batchError = null;
 		try {
-			await api.batchDelete([], [albumId]);
-			batchMessage = `Removed album from your library.`;
+			await api.batchDelete([], [album.id]);
+			invalidateLibraryCaches();
+			startUndoWindow({ tracks: [], albums: [album] }, `Removed "${album.title}" from your library.`);
 		} catch (error) {
+			// Roll the optimistic removal back in place.
+			albums.update((list) => (list.some((a) => a.id === album.id) ? list : [album, ...list]));
 			batchError = `Failed to remove album: ${error}`;
-			void loadAlbums();
 		}
+	}
+
+	// Arm the Undo banner for a set of just-removed items and schedule it to lapse.
+	function startUndoWindow(removed: { tracks: Track[]; albums: Album[] }, message: string) {
+		if (undoTimer) clearTimeout(undoTimer);
+		pendingUndo = removed;
+		batchMessage = message;
+		undoTimer = setTimeout(() => {
+			pendingUndo = { tracks: [], albums: [] };
+			batchMessage = null;
+		}, UNDO_WINDOW_MS);
 	}
 
 	function handleTrackRowKeydown(trackId: number, event: KeyboardEvent) {
@@ -718,41 +797,70 @@
 		batchMessage = null;
 		if (undoTimer) clearTimeout(undoTimer);
 
-		const deletedTrackIds = [...$selectedTrackIds];
-		pendingUndoTrackIds = deletedTrackIds;
-		tracks.update((list) => list.filter((track) => !deletedTrackIds.includes(track.id)));
-		albums.update((list) => list.filter((album) => !$selectedAlbumIds.has(album.id)));
+		// Snapshot the full objects (not just ids) so Undo can re-favorite and
+		// re-insert them. Selection is always made from on-screen rows/tiles.
+		const removedTracks = visibleTracks.filter((t) => $selectedTrackIds.has(t.id));
+		const removedAlbums = visibleAlbums.filter((a) => $selectedAlbumIds.has(a.id));
+		const removedTrackIds = new Set(removedTracks.map((t) => t.id));
+		const removedAlbumIds = new Set(removedAlbums.map((a) => a.id));
+
+		tracks.update((list) => list.filter((track) => !removedTrackIds.has(track.id)));
+		albums.update((list) => list.filter((album) => !removedAlbumIds.has(album.id)));
 		searchResults = {
-			tracks: searchResults.tracks.filter((track) => !deletedTrackIds.includes(track.id)),
-			albums: searchResults.albums.filter((album) => !$selectedAlbumIds.has(album.id)),
+			tracks: searchResults.tracks.filter((track) => !removedTrackIds.has(track.id)),
+			albums: searchResults.albums.filter((album) => !removedAlbumIds.has(album.id)),
 			artists: searchResults.artists
 		};
 
 		try {
-			const result = await api.batchDelete(deletedTrackIds, [...$selectedAlbumIds]);
-			batchMessage = `Removed ${result.removed_tracks} track favorites and ${result.removed_albums} album favorites from TIDAL.`;
+			const result = await api.batchDelete([...removedTrackIds], [...removedAlbumIds]);
+			invalidateLibraryCaches();
 			clearSelection();
-			undoTimer = setTimeout(() => {
-				pendingUndoTrackIds = [];
-				void loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, activeTab === 'liked');
-				void loadAlbums();
-			}, 6000);
+			const parts: string[] = [];
+			if (result.removed_tracks) parts.push(`${result.removed_tracks} track${result.removed_tracks === 1 ? '' : 's'}`);
+			if (result.removed_albums) parts.push(`${result.removed_albums} album${result.removed_albums === 1 ? '' : 's'}`);
+			startUndoWindow(
+				{ tracks: removedTracks, albums: removedAlbums },
+				`Removed ${parts.join(' and ') || 'selection'} from your library.`,
+			);
 		} catch (error) {
+			// Restore the optimistic removals from the server on failure.
 			batchError = `Failed to delete selection: ${error}`;
-			pendingUndoTrackIds = [];
+			invalidateLibraryCaches();
 			void loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, activeTab === 'liked');
-			void loadAlbums();
+			void loadAlbums(albumSortField, albumSortDir, PAGE_SIZE, 0, activeDecade);
 		} finally {
 			batchBusy = null;
 		}
 	}
 
-	function undoDelete() {
+	// A real Undo: re-add the TIDAL favorites that batchDelete removed, then
+	// reload the affected view(s). No more "run sync to restore" hand-waving.
+	async function undoDelete() {
+		if (undoBusy) return;
 		if (undoTimer) clearTimeout(undoTimer);
-		pendingUndoTrackIds = [];
-		batchMessage = 'Delete view reverted locally. Run sync to restore remote favorites if needed.';
-		void loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, activeTab === 'liked');
-		void loadAlbums();
+		const { tracks: undoTracks, albums: undoAlbums } = pendingUndo;
+		if (undoTracks.length === 0 && undoAlbums.length === 0) return;
+		pendingUndo = { tracks: [], albums: [] };
+		undoBusy = true;
+		batchError = null;
+		batchMessage = 'Restoring…';
+		try {
+			await Promise.all([
+				...undoTracks.map((t) => api.setTrackFavorite(t.id, true)),
+				...undoAlbums.map((a) => api.setAlbumFavorite(a.id, true)),
+			]);
+			invalidateLibraryCaches();
+			if (undoTracks.length) await loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, activeTab === 'liked');
+			if (undoAlbums.length) await loadAlbums(albumSortField, albumSortDir, PAGE_SIZE, 0, activeDecade);
+			const count = undoTracks.length + undoAlbums.length;
+			batchMessage = `Restored ${count} item${count === 1 ? '' : 's'} to your library.`;
+		} catch (error) {
+			batchError = `Undo failed: ${error}. Run a sync to restore favorites.`;
+			batchMessage = null;
+		} finally {
+			undoBusy = false;
+		}
 	}
 
 	function closeMenus() {
@@ -893,7 +1001,7 @@
 			return;
 		}
 		if ($albums.length >= $totalAlbums) return;
-		await loadAlbums($sortBy, $sortDir, PAGE_SIZE, $albums.length);
+		await loadAlbums(albumSortField, albumSortDir, PAGE_SIZE, $albums.length, activeDecade);
 	}
 
 	async function playRandomLibrary() {
@@ -998,14 +1106,19 @@
 		}
 		return [...seen].sort((a, b) => a - b);
 	});
+	// Prefer the server-side decade list (covers the whole library); fall back to
+	// decades derived from the loaded albums when the endpoint is unavailable.
+	let decadeOptions = $derived(decadeChips.length > 0 ? decadeChips : decadeBuckets);
 	let visibleAlbums = $derived.by(() => {
 		let base = $searchQuery.trim() ? searchResults.albums : $albums;
-		if ($searchQuery.trim() && $sortBy && $sortBy !== 'relevance') {
-			const dir = $sortDir === 'desc' ? -1 : 1;
+		// In search mode the server doesn't re-sort results, so apply the album
+		// ordering client-side to the matches. (Browse mode is sorted server-side.)
+		if ($searchQuery.trim()) {
+			const dir = albumSortDir === 'desc' ? -1 : 1;
 			base = [...base].sort((a, b) => {
 				let av: string | number | null | undefined;
 				let bv: string | number | null | undefined;
-				switch ($sortBy) {
+				switch (albumSortField) {
 					case 'title':  av = a.title?.toLowerCase();      bv = b.title?.toLowerCase();      break;
 					case 'artist': av = a.artist_name?.toLowerCase(); bv = b.artist_name?.toLowerCase(); break;
 					case 'year':   av = a.year;                      bv = b.year;                       break;
@@ -1769,6 +1882,8 @@
 		sortDir: 'asc' | 'desc'
 		viewMode: 'grid' | 'list'
 		activeDecade: number | null
+		albumSortField: AlbumSortField
+		albumSortDir: 'asc' | 'desc'
 		scrollY: number
 		// How many rows were loaded via infinite scroll, so a back-nav can
 		// re-page to the same depth before restoring scroll. Tracks/albums live
@@ -1789,6 +1904,8 @@
 			sortDir: get(sortDir),
 			viewMode: get(viewMode),
 			activeDecade,
+			albumSortField,
+			albumSortDir,
 			scrollY: captureScroll(),
 			loadedCount: currentLoadedCount()
 		}),
@@ -1801,6 +1918,8 @@
 			if (typeof saved.sortBy === 'string') sortBy.set(saved.sortBy)
 			if (saved.sortDir === 'asc' || saved.sortDir === 'desc') sortDir.set(saved.sortDir)
 			if (saved.viewMode === 'grid' || saved.viewMode === 'list') viewMode.set(saved.viewMode)
+			if (saved.albumSortField === 'title' || saved.albumSortField === 'artist' || saved.albumSortField === 'year') albumSortField = saved.albumSortField
+			if (saved.albumSortDir === 'asc' || saved.albumSortDir === 'desc') albumSortDir = saved.albumSortDir
 			activeDecade = saved.activeDecade
 			if (typeof saved.scrollY === 'number') pendingRestoreScroll = saved.scrollY
 			// Artists live in component-local state (not a store), and onMount only
@@ -1897,6 +2016,20 @@
 					</div>
 				{/if}
 				{#if activeTab === 'albums'}
+					<div class="album-sort" role="group" aria-label="Sort albums">
+						<span class="album-sort-label">Sort</span>
+						{#each (['title', 'artist', 'year'] as const) as field (field)}
+							<button
+								class="album-sort-btn"
+								class:active={albumSortField === field}
+								onclick={() => setAlbumSort(field)}
+								aria-pressed={albumSortField === field}
+								title="Sort by {ALBUM_SORT_LABELS[field]}{albumSortField === field ? (albumSortDir === 'asc' ? ' (ascending)' : ' (descending)') : ''}"
+							>
+								{ALBUM_SORT_LABELS[field]}{#if albumSortField === field}<span class="album-sort-arrow">{albumSortDir === 'asc' ? '↑' : '↓'}</span>{/if}
+							</button>
+						{/each}
+					</div>
 					<div class="view-toggle" role="group" aria-label="Album view layout">
 						<button
 							class="view-toggle-btn"
@@ -1995,8 +2128,10 @@
 	{#if batchMessage}
 		<div class="batch-feedback success glass">
 			<span>{batchMessage}</span>
-			{#if pendingUndoTrackIds.length > 0}
-				<button class="btn btn-glass" onclick={undoDelete}>Undo</button>
+			{#if pendingUndo.tracks.length > 0 || pendingUndo.albums.length > 0}
+				<button class="btn btn-glass" disabled={undoBusy} onclick={undoDelete}>
+					{undoBusy ? 'Restoring…' : 'Undo'}
+				</button>
 			{/if}
 		</div>
 	{/if}
@@ -2093,26 +2228,16 @@
 										src={albumArt}
 										alt={album.title}
 										size={320}
+										tint={true}
 										fallbackText={album.title.slice(0, 2).toUpperCase()}
 									/>
-									<div class="album-art-overlay">
-										<button
-											class="art-play-btn"
-											aria-label="Play {album.title}"
-											onclick={(event) => void playAlbum(album.id, event)}
-										>
-											<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
-												<polygon points="5,3 13,8 5,13" fill="currentColor" />
-											</svg>
-										</button>
-										<button
-											class="art-info-btn"
-											aria-label="View {album.title} details"
-											onclick={(event) => { event.stopPropagation(); void openAlbumDetail(album); }}
-										>
-											i
-										</button>
-									</div>
+									<button
+										class="art-play-btn"
+										aria-label="Play {album.title}"
+										onclick={(event) => void playAlbum(album.id, event)}
+									>
+										<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M5 3l8 5-8 5V3z" fill="currentColor" /></svg>
+									</button>
 								</div>
 								<div class="album-meta">
 									<span class="album-title">{album.title}</span>
@@ -2348,15 +2473,29 @@
 		</div>
 
 	{:else if activeTab === 'albums'}
-		{#if decadeBuckets.length > 1}
+		{#if decadeOptions.length > 1}
 			<div class="decade-strip">
-				<button class="decade-chip" class:active={activeDecade === null} onclick={() => activeDecade = null}>All</button>
-				{#each decadeBuckets as decade}
+				<button class="decade-chip" class:active={activeDecade === null} onclick={() => selectDecade(null)}>All</button>
+				{#each decadeOptions as decade (decade)}
 					<button
 						class="decade-chip"
 						class:active={activeDecade === decade}
-						onclick={() => activeDecade = activeDecade === decade ? null : decade}
+						onclick={() => selectDecade(decade)}
 					>{decade}s</button>
+				{/each}
+			</div>
+		{/if}
+		<!-- Skeleton grid while the first page loads, so we never flash an empty state -->
+		{#if $isLoading && visibleAlbums.length === 0 && !isSearchMode}
+			<div class="album-grid" aria-hidden="true">
+				{#each Array(18) as _, i (i)}
+					<div class="album-card album-skeleton">
+						<div class="album-art skeleton-shimmer"></div>
+						<div class="album-meta">
+							<span class="skeleton-shimmer skeleton-text" style="width: 78%"></span>
+							<span class="skeleton-shimmer skeleton-text" style="width: 52%"></span>
+						</div>
+					</div>
 				{/each}
 			</div>
 		{/if}
@@ -2396,24 +2535,16 @@
 							src={albumArt}
 							alt={album.title}
 							size={320}
+							tint={true}
 							fallbackText={album.title.slice(0, 2).toUpperCase()}
 						/>
-						<div class="album-art-overlay">
-							<button
-								class="art-play-btn"
-								aria-label="Play {album.title}"
-								onclick={(event) => void playAlbum(album.id, event)}
-							>
-								▶
-							</button>
-							<button
-								class="art-info-btn"
-								aria-label="View {album.title} details"
-								onclick={(event) => { event.stopPropagation(); void openAlbumDetail(album); }}
-							>
-								ℹ
-							</button>
-						</div>
+						<button
+							class="art-play-btn"
+							aria-label="Play {album.title}"
+							onclick={(event) => void playAlbum(album.id, event)}
+						>
+							<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M5 3l8 5-8 5V3z" fill="currentColor" /></svg>
+						</button>
 					</div>
 					<div class="album-meta">
 						<span class="album-title">{album.title}</span>
@@ -2435,7 +2566,7 @@
 									includeSelect: true,
 									includeRemove: true,
 									onSelect: () => updateAlbumSelection(album.id, false, false),
-									onRemove: () => void removeAlbumFromLibrary(album.id),
+									onRemove: () => void removeAlbumFromLibrary(album),
 									addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
 										const { tracks: t } = await cachedApi.getAlbumTracks(album.id);
 										return t.map(tr => tr.id);
@@ -2450,7 +2581,7 @@
 			{/each}
 		</div>
 
-		{#if visibleAlbums.length === 0}
+		{#if visibleAlbums.length === 0 && !$isLoading}
 			<EmptyState title={isSearchMode ? 'No albums match this search' : 'No albums yet'} copy={isSearchMode ? 'Try a broader search term or switch to tracks.' : 'Connect TIDAL in Settings and run a sync to populate the library.'} />
 		{:else if !isSearchMode && $albums.length < $totalAlbums}
 			<div class="load-more-row">
@@ -2458,7 +2589,7 @@
 				<button
 					class="btn btn-glass"
 					disabled={$isLoadingMore}
-					onclick={() => loadAlbums($sortBy, $sortDir, PAGE_SIZE, $albums.length)}
+					onclick={() => loadAlbums(albumSortField, albumSortDir, PAGE_SIZE, $albums.length, activeDecade)}
 				>
 					{$isLoadingMore ? 'Loading…' : 'Load More'}
 				</button>
@@ -3338,20 +3469,22 @@
 		flex-wrap: wrap;
 		margin-bottom: 16px;
 	}
+	/* Match the primary tab pills (.filter-pill) so the Albums toolbar reads as
+	   one system - pill radius, subtle border, bg-hover, accent when active. */
 	.decade-chip {
 		padding: 4px 13px;
-		border-radius: var(--radius-md);
+		border-radius: 20px;
 		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
+		font-weight: var(--font-weight-medium);
 		cursor: pointer;
-		border: 1px solid var(--panel-border);
+		border: 1px solid var(--border-subtle);
 		background: transparent;
 		color: var(--text-secondary);
 		font-family: inherit;
-		transition: border-color 0.15s, background 0.15s, color 0.15s;
+		transition: background 0.15s, color 0.15s, border-color 0.15s;
 	}
 	.decade-chip:hover {
-		border-color: var(--accent-line);
+		background: var(--bg-hover);
 		color: var(--text-primary);
 	}
 	.decade-chip.active {
@@ -3641,6 +3774,57 @@
 		color: #fff;
 	}
 
+	.album-sort {
+		display: inline-flex;
+		align-items: center;
+		gap: 2px;
+		padding: 2px;
+		border-radius: 8px;
+		background: rgba(255, 255, 255, 0.04);
+		border: 1px solid var(--border-subtle);
+	}
+
+	.album-sort-label {
+		font-size: var(--font-size-2xs);
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--text-tertiary);
+		padding: 0 6px 0 8px;
+	}
+
+	.album-sort-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 3px;
+		height: 28px;
+		padding: 0 10px;
+		border: 0;
+		border-radius: 6px;
+		background: transparent;
+		color: var(--text-tertiary);
+		font-family: inherit;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-medium);
+		cursor: pointer;
+		transition: background 140ms ease, color 140ms ease;
+	}
+
+	.album-sort-btn:hover {
+		color: var(--text-primary);
+		background: rgba(255, 255, 255, 0.06);
+	}
+
+	.album-sort-btn.active {
+		background: var(--accent-soft);
+		color: var(--text-primary);
+	}
+
+	.album-sort-arrow {
+		font-size: var(--font-size-2xs);
+		color: var(--accent);
+		line-height: 1;
+	}
+
 	.view-toggle {
 		display: inline-flex;
 		gap: 2px;
@@ -3671,8 +3855,8 @@
 	}
 
 	.view-toggle-btn.active {
-		background: rgba(124, 128, 255, 0.22);
-		color: var(--text-primary);
+		background: var(--accent-soft);
+		color: var(--accent);
 	}
 
 	/* ─── Batch Bar ─────────────────────── */
@@ -4161,73 +4345,139 @@
 
 	.album-grid {
 		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
-		gap: var(--gap);
+		grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));
+		gap: clamp(14px, 1.4vw, 22px) clamp(12px, 1vw, 18px);
 		align-items: start;
 	}
 
 	@media (min-width: 1600px) {
 		.album-grid {
-			grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+			grid-template-columns: repeat(auto-fill, minmax(172px, 1fr));
 		}
+	}
+
+	/* ─── Album Skeletons (first-load shimmer) ─────────────────────── */
+
+	.album-skeleton {
+		pointer-events: none;
+	}
+
+	.album-skeleton .album-art {
+		box-shadow: none;
+	}
+
+	.skeleton-shimmer {
+		background: linear-gradient(
+			90deg,
+			var(--bg-surface) 0%,
+			var(--bg-hover) 50%,
+			var(--bg-surface) 100%
+		);
+		background-size: 200% 100%;
+		animation: album-skeleton-shimmer 1.4s ease-in-out infinite;
+	}
+
+	.skeleton-text {
+		display: block;
+		height: 11px;
+		border-radius: 999px;
+		margin-top: 7px;
+	}
+
+	@keyframes album-skeleton-shimmer {
+		0% { background-position: 200% 0; }
+		100% { background-position: -200% 0; }
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.skeleton-shimmer { animation: none; }
 	}
 
 	/* ─── Album List Mode ────────────────── */
 
+	/* Clean, borderless rows with per-row rounded hover (Search-list style) -
+	   no container chrome, no hairline separators. */
 	.album-grid.album-list {
 		display: flex;
 		flex-direction: column;
-		gap: 0;
-		border-radius: var(--radius-md);
-		overflow: hidden;
-		border: 1px solid rgba(255, 255, 255, 0.05);
-		background: rgba(255, 255, 255, 0.015);
+		gap: 2px;
 	}
 
 	.album-grid.album-list .album-card {
 		display: grid;
-		grid-template-columns: 40px 1fr auto;
+		grid-template-columns: 44px minmax(0, 1fr) auto;
 		gap: 12px;
 		align-items: center;
-		padding: 6px 12px;
-		border-radius: 0;
-		background: transparent;
+		padding: 6px 10px;
 		border: 0;
-		border-top: 1px solid rgba(255, 255, 255, 0.04);
+		border-radius: var(--radius-sm);
+		background: transparent;
 		box-shadow: none;
-	}
-
-	.album-grid.album-list .album-card:first-child {
-		border-top: 0;
+		transition: background var(--motion-fast);
 	}
 
 	.album-grid.album-list .album-card:hover {
 		transform: none;
 		box-shadow: none;
-		background: rgba(255, 255, 255, 0.04);
-		border-color: rgba(255, 255, 255, 0.04);
+		background: var(--bg-hover);
 	}
 
-	.album-grid.album-list .album-card:hover .album-art {
-		filter: none;
+	.album-grid.album-list .album-card.selected {
+		outline: none;
+		outline-offset: 0;
+		background: var(--accent-soft);
+		box-shadow: inset 2px 0 0 var(--accent);
 	}
 
 	.album-grid.album-list .album-art {
-		width: 40px;
-		height: 40px;
+		position: relative;
+		width: 44px;
+		height: 44px;
 		aspect-ratio: unset;
 		margin-bottom: 0;
-		border-radius: 4px;
+		border-radius: var(--radius-sm);
 		flex-shrink: 0;
+		box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+	}
+
+	/* Dim only the artwork on hover so the centered play icon stays crisp. */
+	.album-grid.album-list .album-card:hover .album-art :global(.album-art-img) {
+		filter: brightness(0.55);
+		transition: filter var(--motion-fast);
+	}
+
+	/* Small centered play affordance over the thumbnail on row hover. */
+	.album-grid.album-list .art-play-btn {
+		display: grid;
+		position: absolute;
+		inset: 0;
+		margin: auto;
+		right: auto;
+		bottom: auto;
+		width: 26px;
+		height: 26px;
+		background: transparent;
 		box-shadow: none;
+		transform: none;
+		opacity: 0;
 	}
 
-	.album-grid.album-list .album-art::after {
-		display: none;
+	.album-grid.album-list .art-play-btn svg {
+		width: 13px;
+		height: 13px;
+		margin-left: 0;
+		filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.65));
 	}
 
-	.album-grid.album-list .album-art-overlay {
-		display: none;
+	.album-grid.album-list .album-card:hover .art-play-btn,
+	.album-grid.album-list .album-card:focus-within .art-play-btn {
+		opacity: 1;
+		transform: none;
+	}
+
+	.album-grid.album-list .art-play-btn:hover {
+		transform: scale(1.14);
+		filter: none;
 	}
 
 	.album-grid.album-list .album-meta {
@@ -4236,41 +4486,59 @@
 	}
 
 	.album-grid.album-list .album-chips {
+		display: flex;
 		margin-top: 3px;
 	}
 
+	/* Actions stay hidden until row hover, matching the grid tiles. */
 	.album-grid.album-list .album-actions {
-		margin-top: 0;
+		position: static;
+		opacity: 0;
+		margin: 0;
 		padding: 0;
+		transition: opacity var(--motion-fast);
+	}
+
+	.album-grid.album-list .album-card:hover .album-actions,
+	.album-grid.album-list .album-card:focus-within .album-actions {
+		opacity: 1;
+	}
+
+	/* In a row the menu button is a light ghost icon, not a dark artwork overlay. */
+	.album-grid.album-list .menu-trigger {
+		width: 30px;
+		height: 30px;
+		border-radius: 50%;
+		background: transparent;
+		border: 1px solid transparent;
+		color: var(--text-secondary);
+	}
+
+	.album-grid.album-list .menu-trigger:hover {
+		background: rgba(255, 255, 255, 0.1);
+		border-color: var(--panel-border);
+		color: var(--text-primary);
 	}
 
 	.album-card {
 		position: relative;
-		padding: var(--gap-sm);
-		border-radius: var(--radius-lg);
-		background:
-			linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)),
-			var(--bg-surface);
-		border: 1px solid var(--panel-border);
-		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+		padding: 0;
+		border: 0;
+		background: transparent;
+		box-shadow: none;
+		border-radius: var(--radius-md);
 		cursor: pointer;
-		transition:
-			transform 260ms cubic-bezier(0.22, 1, 0.36, 1),
-			box-shadow 220ms ease,
-			border-color 220ms ease;
+		transition: transform var(--motion-base);
 	}
 
 	.album-card:hover {
-		transform: translateY(-5px) scale(1.015);
-		border-color: rgba(255, 255, 255, 0.16);
-		box-shadow:
-			0 20px 40px rgba(0, 0, 0, 0.32),
-			0 0 20px var(--accent-glow);
+		transform: translateY(-4px);
 	}
 
 	.album-card.selected {
 		outline: 2px solid var(--accent);
-		outline-offset: 2px;
+		outline-offset: 4px;
+		border-radius: var(--radius-md);
 	}
 
 	.album-card:focus-visible,
@@ -4283,24 +4551,16 @@
 	.album-art {
 		position: relative;
 		aspect-ratio: 1;
-		border-radius: calc(var(--radius-lg) - 6px);
+		border-radius: var(--radius-md);
 		overflow: hidden;
 		margin-bottom: 10px;
-		background: var(--bg-surface);
-		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
-		transition: filter 220ms ease;
-	}
-
-	.album-art::after {
-		content: '';
-		position: absolute;
-		inset: 0;
-		background: linear-gradient(180deg, transparent 50%, rgba(0, 0, 0, 0.2));
-		pointer-events: none;
+		background: var(--bg-raised);
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+		transition: filter var(--motion-base), box-shadow var(--motion-base);
 	}
 
 	.album-card:hover .album-art {
-		filter: saturate(1.06) brightness(1.03);
+		box-shadow: 0 12px 26px -6px rgba(0, 0, 0, 0.5);
 	}
 
 	.album-art :global(.album-art-img) {
@@ -4326,54 +4586,39 @@
 		font-weight: var(--font-weight-semibold);
 	}
 
-	.album-art-overlay {
+	/* Single corner play button, revealed on hover (search-page style). */
+	.art-play-btn {
 		position: absolute;
-		inset: 0;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		gap: 12px;
-		background: rgba(0, 0, 0, 0);
-		transition: background 200ms ease;
-		pointer-events: none;
-	}
-
-	.album-card:hover .album-art-overlay {
-		background: rgba(0, 0, 0, 0.35);
-	}
-
-	.art-play-btn,
-	.art-info-btn {
-		width: 42px;
-		height: 42px;
+		right: 8px;
+		bottom: 8px;
+		width: 40px;
+		height: 40px;
 		border-radius: 50%;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		font-size: var(--font-size-md);
-		background: rgba(0, 0, 0, 0.45);
-		color: white;
+		display: grid;
+		place-items: center;
+		background: var(--accent);
+		color: #fff;
+		border: none;
+		box-shadow: 0 6px 16px -4px rgba(0, 0, 0, 0.55);
 		opacity: 0;
 		transform: translateY(6px);
-		transition: opacity 200ms ease, transform 200ms ease, background 150ms ease;
-		backdrop-filter: blur(4px);
+		transition: opacity var(--motion-base), transform var(--motion-base), filter var(--motion-fast);
 		pointer-events: auto;
 		cursor: pointer;
-		border: none;
+		z-index: 2;
+	}
+
+	.art-play-btn svg {
+		margin-left: 1px;
 	}
 
 	.art-play-btn:hover {
-		background: var(--accent);
-		transform: translateY(0) scale(1.05);
-	}
-
-	.art-info-btn:hover {
-		background: rgba(255, 255, 255, 0.25);
-		transform: translateY(0) scale(1.05);
+		transform: translateY(0) scale(1.06);
+		filter: brightness(1.08);
 	}
 
 	.album-card:hover .art-play-btn,
-	.album-card:hover .art-info-btn {
+	.album-card:focus-within .art-play-btn {
 		opacity: 1;
 		transform: translateY(0);
 	}
@@ -4382,29 +4627,22 @@
 		display: flex;
 		flex-direction: column;
 		gap: 2px;
-		padding: 0 4px 4px;
+		padding: 0 2px;
 		min-width: 0;
-	}
-
-	.album-actions {
-		position: relative;
-		display: flex;
-		justify-content: flex-end;
-		padding: 0 4px 4px;
-		margin-top: 10px;
 	}
 
 	.album-title {
 		font-weight: var(--font-weight-semibold);
-		font-size: var(--font-size-md);
+		font-size: var(--font-size-sm);
+		line-height: 1.3;
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-		transition: color 240ms ease;
+		color: var(--text-primary);
 	}
 
 	.album-artist {
-		font-size: var(--font-size-sm);
+		font-size: var(--font-size-xs);
 		color: var(--text-secondary);
 		white-space: nowrap;
 		overflow: hidden;
@@ -4417,7 +4655,7 @@
 	}
 
 	.album-chips {
-		display: flex;
+		display: none;
 		gap: 4px;
 		flex-wrap: nowrap;
 		margin-top: 4px;
@@ -4436,8 +4674,37 @@
 		font-weight: var(--font-weight-semibold);
 	}
 
-	.album-card:hover .album-title {
-		color: var(--text-primary);
+	/* Actions (⋯) float into the artwork's top-right corner on hover in grid mode. */
+	.album-grid:not(.album-list) .album-actions {
+		position: absolute;
+		top: 6px;
+		right: 6px;
+		z-index: 3;
+		opacity: 0;
+		margin: 0;
+		padding: 0;
+		transition: opacity var(--motion-base);
+	}
+
+	.album-grid:not(.album-list) .album-card:hover .album-actions,
+	.album-grid:not(.album-list) .album-card:focus-within .album-actions {
+		opacity: 1;
+	}
+
+	.album-grid:not(.album-list) .menu-trigger {
+		width: 30px;
+		height: 30px;
+		border-radius: 50%;
+		background: rgba(0, 0, 0, 0.6);
+		border: 1px solid rgba(255, 255, 255, 0.16);
+		color: #fff;
+		backdrop-filter: var(--blur-base);
+		-webkit-backdrop-filter: var(--blur-base);
+	}
+
+	.album-grid:not(.album-list) .menu-trigger:hover {
+		background: rgba(0, 0, 0, 0.78);
+		border-color: rgba(255, 255, 255, 0.28);
 	}
 
 	/* ─── Menus ─────────────────────────── */
@@ -4778,7 +5045,7 @@
 		}
 
 		.album-card {
-			padding: 10px;
+			padding: 0;
 		}
 
 		.album-title,

@@ -925,31 +925,36 @@
 	/* "More by artist" rail card: fixed width so the row stays uniform.
 	   The MediaRail container handles horizontal scroll. */
 	.album-card {
-		flex: 0 0 170px;
-		min-width: 170px;
-		max-width: 170px;
+		flex: 0 0 158px;
+		min-width: 158px;
+		max-width: 158px;
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
-		padding: 14px;
-		border-radius: 10px;
+		padding: 0;
+		border-radius: var(--radius-md);
 		text-decoration: none;
 		color: inherit;
-		transition: background var(--motion-fast);
+		transition: transform var(--motion-base);
 	}
 
 	.album-card:hover {
-		background: var(--bg-hover);
+		transform: translateY(-4px);
 	}
 
 	.album-card-art-wrap {
 		width: 100%;
 		aspect-ratio: 1/1;
-		border-radius: 6px;
+		border-radius: var(--radius-md);
 		overflow: hidden;
-		box-shadow: 0 10px 24px -12px rgba(0, 0, 0, 0.6);
-		background: var(--bg-surface);
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+		background: var(--bg-raised);
 		margin-bottom: 6px;
+		transition: box-shadow var(--motion-base);
+	}
+
+	.album-card:hover .album-card-art-wrap {
+		box-shadow: 0 12px 26px -6px rgba(0, 0, 0, 0.5);
 	}
 
 	.album-card-art {
@@ -968,6 +973,7 @@
 
 	.album-card-title {
 		margin: 6px 0 0;
+		font-size: var(--font-size-sm);
 		font-weight: var(--font-weight-semibold);
 		white-space: nowrap;
 		overflow: hidden;
