@@ -539,31 +539,53 @@ export async function playTrackNow(trackId: number) {
 	}
 }
 
+/**
+ * The action the most recent still-in-flight toggle asked for. Rapid clicks
+ * alternate off THIS - the thing the user just requested - instead of the
+ * `isPlaying` store, which lags while responses and WS snapshots are still
+ * landing. That store lag was the "stale isPlaying flipped my command inside
+ * out" race: mash the button during a slow track transition and pause/resume
+ * commands came out inverted, leaving the button saying paused while audio
+ * kept playing.
+ */
+let pendingToggleAction: 'pause' | 'resume' | null = null;
+
 export async function togglePlayback() {
 	playerError.set(null);
+	// Decide the intended action ONCE, from the freshest signal available:
+	// the previous in-flight toggle if there is one, else the current store.
+	const intended: 'pause' | 'resume' = pendingToggleAction
+		? pendingToggleAction === 'pause'
+			? 'resume'
+			: 'pause'
+		: get(isPlaying)
+			? 'pause'
+			: 'resume';
+	pendingToggleAction = intended;
+	// Instant button feedback; the response snapshot below (and the WS-driven
+	// authoritative state pushes) reconcile to the server's truth.
+	isPlaying.set(intended === 'resume');
 	const intentSeq = beginPlaybackIntent();
 	try {
-		if (get(isPlaying)) {
-			const result = await api.pausePlayback();
-			if (!applyStateIfLatest(result.state, intentSeq)) return;
-		} else {
-			const result = await api.resumePlayback();
-			if (!applyStateIfLatest(result.state, intentSeq)) return;
-		}
+		const result =
+			intended === 'pause' ? await api.pausePlayback() : await api.resumePlayback();
+		if (!applyStateIfLatest(result.state, intentSeq)) return;
 		noteSuccess();
 	} catch (error) {
 		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('toggle playback', error, () => togglePlayback());
 	} finally {
+		if (pendingToggleAction === intended && isLatestPlaybackIntent(intentSeq)) {
+			pendingToggleAction = null;
+		}
 		finishPlaybackIntent(intentSeq);
 	}
 }
 
 /**
  * Explicit pause/resume helpers for callers that have a definite intent (e.g.
- * MediaSession lockscreen / headset buttons, or sleep timer). Using these
- * instead of `togglePlayback` avoids the "stale isPlaying flipped my command
- * inside out" race when the WS hasn't yet delivered the latest state.
+ * MediaSession lockscreen / headset buttons, or sleep timer). These skip the
+ * toggle's alternation logic entirely: the caller already knows the action.
  */
 export async function pausePlayer() {
 	playerError.set(null);
