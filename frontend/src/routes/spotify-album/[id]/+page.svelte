@@ -189,7 +189,6 @@
     detail?.tracks.filter((t) => t.tidal.status === 'resolved' || t.tidal.status === 'low_confidence').length ?? 0,
   );
   const totalCount = $derived(detail?.tracks.length ?? 0);
-  const artistSpotifyId = $derived(detail?.artists.find((a) => a.id !== null)?.id ?? null);
 
   async function playAll() { await playTidalTracksNow(playableTracks(), detail?.title ?? 'Spotify album'); }
   async function shuffleAll() { await shuffleTidalTracksNow(playableTracks(), detail?.title ?? 'Spotify album'); }
@@ -247,11 +246,9 @@
         <h1 class="title">{detail.title ?? '-'}</h1>
         <div class="stats">
           {#if detail.primaryArtist}
-            {#if artistSpotifyId}
-              <a href={`/spotify-artist/${artistSpotifyId}`}>{detail.primaryArtist}</a>
-            {:else}
-              <span>{detail.primaryArtist}</span>
-            {/if}
+            <!-- Artist pages are TIDAL + local library only; the spotify-artist
+                 route was an unreachable dead layer and has been removed. -->
+            <span>{detail.primaryArtist}</span>
           {/if}
           {#if detail.releaseDate}<span>. {detail.releaseDate}</span>{/if}
           <span>. {totalCount} tracks</span>

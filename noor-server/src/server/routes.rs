@@ -1273,7 +1273,8 @@ async fn play_discovery_track(
     let crossfade_ms = current_crossfade_ms(&state).await;
     let job =
         player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms, user_quality)
-            .with_generation(playback_generation);
+            .with_generation(playback_generation)
+            .with_start_paused(!transport_intent_is_playing(&state).await);
     runtime_handle.play(job).map_err(|error| {
         let message = format!("Failed to start host audio playback: {error}");
         report_playback_failure(&state, &message);
@@ -2670,7 +2671,8 @@ pub(super) async fn start_first_radio_queue_item(
             effective_crossfade_ms(state, snapshot.state.crossfade_ms).await,
             user_quality,
         )
-        .with_generation(playback_generation);
+        .with_generation(playback_generation)
+        .with_start_paused(!transport_intent_is_playing(state).await);
         runtime_handle.play(job).map_err(|error| {
             let message = format!("Failed to start host audio playback: {error}");
             report_playback_failure(state, &message);
@@ -4522,9 +4524,13 @@ async fn play_track(
 
     let runtime_handle = ensure_playback_runtime_for_track(&state, &track).await?;
     let crossfade_ms = current_crossfade_ms(&state).await;
+    // Transport intent re-read at dispatch: a pause that landed during the
+    // stream resolve above wins, so the engine comes up silent instead of
+    // playing under a paused UI (last user action wins).
     let job =
         player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms, user_quality)
-            .with_generation(playback_generation);
+            .with_generation(playback_generation)
+            .with_start_paused(!transport_intent_is_playing(&state).await);
     runtime_handle.play(job).map_err(|error| {
         let message = format!("Failed to start host audio playback: {error}");
         report_playback_failure(&state, &message);
@@ -6571,7 +6577,8 @@ async fn next_track(
             effective_crossfade_ms(&state, snapshot.state.crossfade_ms).await,
             user_quality,
         )
-        .with_generation(playback_generation);
+        .with_generation(playback_generation)
+        .with_start_paused(!transport_intent_is_playing(&state).await);
         runtime_handle.switch_to(job).map_err(|error| {
             let message = format!("Failed to switch host audio playback: {error}");
             report_playback_failure(&state, &message);
@@ -7009,7 +7016,8 @@ async fn previous_via_persisted_queue(
             effective_crossfade_ms(state, snapshot.state.crossfade_ms).await,
             user_quality,
         )
-        .with_generation(playback_generation);
+        .with_generation(playback_generation)
+        .with_start_paused(!transport_intent_is_playing(state).await);
         {
             // Back-navigation: the incoming Started event must not push the
             // track being navigated away from onto play history, or two prev
@@ -10250,7 +10258,8 @@ async fn start_ephemeral_tidal_playback(
         crossfade_ms,
         user_quality,
     )
-    .with_generation(playback_generation);
+    .with_generation(playback_generation)
+    .with_start_paused(!transport_intent_is_playing(state).await);
     if dj_engine_enabled
         && let Some(media_ref) =
             crate::playback::dj_lookahead::tidal_media_ref_for_track(&synthetic)
@@ -10806,9 +10815,16 @@ fn spawn_playback_runtime_listener(
                     )
                     .await;
                 }
-                Ok(playback_runtime::PlaybackRuntimeEvent::Paused { .. })
-                | Ok(playback_runtime::PlaybackRuntimeEvent::Resumed { .. })
-                | Ok(playback_runtime::PlaybackRuntimeEvent::Preparing { .. }) => {}
+                Ok(playback_runtime::PlaybackRuntimeEvent::Paused { .. }) => {
+                    // The runtime acknowledged pause (user command or the
+                    // advance-cascade breaker). Reconcile DB/UI to it so the
+                    // pause button always reflects what is actually audible.
+                    reconcile_runtime_transport_state(&state, false).await;
+                }
+                Ok(playback_runtime::PlaybackRuntimeEvent::Resumed { .. }) => {
+                    reconcile_runtime_transport_state(&state, true).await;
+                }
+                Ok(playback_runtime::PlaybackRuntimeEvent::Preparing { .. }) => {}
                 Ok(playback_runtime::PlaybackRuntimeEvent::Stalled { track_id }) => {
                     // The audible engine froze (hung stream). Stop listen-time
                     // accrual now: the session timer is wall-clock based and
@@ -11646,6 +11662,71 @@ async fn try_adopt_prepared_ephemeral_tidal_next(
     Ok(true)
 }
 
+/// Fresh read of the user's transport intent (`playback_state.is_playing`)
+/// taken immediately before dispatching a runtime job. The snapshot a caller
+/// holds can be hundreds of milliseconds old by dispatch time (a TIDAL
+/// stream resolve usually sits in between); a pause that landed inside that
+/// window must produce a SILENT engine, not audio under a paused UI. Fails
+/// open to "playing" so an unrelated DB blip never mutes a healthy advance.
+async fn transport_intent_is_playing(state: &SharedState) -> bool {
+    let guard = state.read().await;
+    guard
+        .db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT is_playing FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(Into::into)
+        })
+        .map(|value| value != 0)
+        .unwrap_or(true)
+}
+
+/// The runtime acknowledged a transport change (its Pause/Resume handler ran,
+/// or the advance-cascade breaker latched pause). Align the DB's `is_playing`
+/// with that acknowledgment and, when it was out of sync, broadcast
+/// `PlaybackStateChanged` so every client re-pulls authoritative state. The
+/// runtime is the source of truth for what is audible; this is the
+/// reconciliation channel that closes the "button says paused, audio still
+/// playing" gap after command interleavings.
+async fn reconcile_runtime_transport_state(state: &SharedState, runtime_playing: bool) {
+    let state_guard = state.read().await;
+    let db_playing = state_guard
+        .db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT is_playing FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(Into::into)
+        })
+        .map(|value: i64| value != 0);
+    let Ok(db_playing) = db_playing else {
+        return;
+    };
+    if db_playing == runtime_playing {
+        return;
+    }
+    let updated = state_guard.db.with_conn(|conn| {
+        conn.execute(
+            "UPDATE playback_state SET is_playing = ?1 WHERE id = 1",
+            rusqlite::params![i64::from(runtime_playing)],
+        )?;
+        Ok(())
+    });
+    if updated.is_ok() {
+        tracing::info!(
+            target: "noor.playback",
+            runtime_playing,
+            "reconciled playback_state.is_playing to the runtime's transport acknowledgment"
+        );
+        let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+    }
+}
+
 async fn switch_runtime_to_snapshot_current(
     state: &SharedState,
     snapshot: &player::PlaybackSnapshot,
@@ -11708,7 +11789,8 @@ async fn switch_runtime_to_snapshot_current(
                 effective_crossfade_ms(state, snapshot.state.crossfade_ms).await,
                 user_quality,
             )
-            .with_generation(generation);
+            .with_generation(generation)
+            .with_start_paused(!transport_intent_is_playing(state).await);
             runtime_handle.switch_to(job).map_err(|error| {
                 tracing::warn!(
                     target: "noor.playback.runtime",
@@ -11815,7 +11897,8 @@ async fn switch_runtime_to_snapshot_current(
                 effective_crossfade_ms(state, snapshot.state.crossfade_ms).await,
                 user_quality,
             )
-            .with_generation(generation);
+            .with_generation(generation)
+            .with_start_paused(!transport_intent_is_playing(state).await);
             runtime_handle.switch_to(job).map_err(|error| {
                 tracing::warn!(
                     target: "noor.playback.runtime",

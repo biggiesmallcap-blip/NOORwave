@@ -29,18 +29,28 @@ describe('remote route load contracts', () => {
 	test('TIDAL artist clears the previous profile while loading a new route', () => {
 		const page = source('tidal/artists/[id]/+page.svelte');
 		expect(page).toContain('profile = null;');
-		expect(page).toContain('api.getTidalArtistProfile(id)');
+		// Served through the cache layer: in-flight dedupe + instant re-visits.
+		expect(page).toContain('cachedApi.getTidalArtistProfile(id)');
 		expect(page).not.toContain('let cancelled = false;');
 	});
 
 	test('local artist discography cannot overwrite a newer artist route', () => {
 		const page = source('artists/[id]/+page.svelte');
-		expect(page).toContain('api.getArtist(id)');
-		expect(page).toContain('api.getArtistTracks(id)');
-		expect(page).toContain('api.getArtistDiscography(id)');
+		expect(page).toContain('cachedApi.getArtist(id)');
+		expect(page).toContain('cachedApi.getArtistTracks(id)');
+		expect(page).toContain('cachedApi.getArtistDiscography(id)');
 		expect(page).toContain('if (!detailLoaded || seq !== loadSeq) return;');
 		expect(page).toContain('if (seq === loadSeq) {');
 		expect(page).toContain('tidalPictureUrl = null;');
+	});
+
+	test('remote artist routes dedupe in-flight loads per artist id', () => {
+		const local = source('artists/[id]/+page.svelte');
+		expect(local).toContain('let requestedArtistId: number | null = null;');
+		expect(local).toContain('if (id === requestedArtistId) return;');
+		const tidal = source('tidal/artists/[id]/+page.svelte');
+		expect(tidal).toContain('let requestedTidalArtistId: number | null = null;');
+		expect(tidal).toContain('if (id === requestedTidalArtistId) return;');
 	});
 
 	test('local remote detail pages clear stale primary data before loading a new route', () => {
@@ -56,7 +66,7 @@ describe('remote route load contracts', () => {
 		const artist = source('artists/[id]/+page.svelte');
 		expect(artist).toContain('artist = null;');
 		expect(artist).toContain('tracks = [];');
-		expect(artist).toContain('api.getArtistTracks(id)');
+		expect(artist).toContain('cachedApi.getArtistTracks(id)');
 	});
 
 	test('remote library ignores stale dashboard and paginated tab responses', () => {

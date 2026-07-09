@@ -1,16 +1,17 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import {
-		api,
 		type TidalArtistProfile,
 		type TidalDiscographyTrack
 	} from '$lib/api/client';
+	import { cachedApi } from '$lib/cache/api_queries';
 	import {
 		playTidalTracksNow,
 		shuffleTidalTracksNow,
 		startTidalSongRadio
 	} from '$lib/stores/player';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import RemoteActionBar from '$lib/components/remote/RemoteActionBar.svelte';
 	import RemoteAlbumTile from '$lib/components/remote/RemoteAlbumTile.svelte';
 	import RemotePageShell from '$lib/components/remote/RemotePageShell.svelte';
@@ -23,6 +24,8 @@
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let loadSeq = 0;
+	// Id-keyed in-flight dedupe (see /remote/artists/[id] for rationale).
+	let requestedTidalArtistId: number | null = null;
 
 	async function load(id: number) {
 		const seq = ++loadSeq;
@@ -30,7 +33,9 @@
 		error = null;
 		profile = null;
 		try {
-			const next = await api.getTidalArtistProfile(id);
+			// cachedApi: in-flight dedupe + stale-while-revalidate, shared with
+			// the desktop TIDAL artist page.
+			const next = await cachedApi.getTidalArtistProfile(id);
 			if (seq !== loadSeq) return;
 			profile = next;
 		} catch (e) {
@@ -43,6 +48,9 @@
 
 	$effect(() => {
 		const id = tidalArtistId;
+		if (!Number.isFinite(id) || id <= 0) return;
+		if (id === requestedTidalArtistId) return;
+		requestedTidalArtistId = id;
 		void load(id);
 	});
 
@@ -79,7 +87,9 @@
 
 <RemotePageShell title={profile?.artist_name ?? ''}>
 	{#if loading}
-		<p class="remote-status" role="status" aria-live="polite">Loading from TIDAL…</p>
+		<div class="remote-status" role="status" aria-live="polite">
+			<Skeleton rows={4} label="Loading artist from TIDAL" />
+		</div>
 	{:else if error}
 		<p class="remote-status remote-status-error">{error}</p>
 	{:else if profile}

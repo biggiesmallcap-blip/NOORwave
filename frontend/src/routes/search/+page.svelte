@@ -13,7 +13,7 @@
   import { openContextMenu, type MenuItem } from '$lib/stores/context_menu'
   import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio, playTrackNow, playTidalPlaylist } from '$lib/stores/player'
   import { formatTrackDuration } from '$lib/utils/format'
-  import { parseQuery, filtersToChips, type ParsedQuery } from '$lib/search/query_parser'
+  import { parseQuery, type ParsedQuery } from '$lib/search/query_parser'
   import { buildAudioParams as sharedBuildAudioParams } from '$lib/search/audio_params'
   import { parseIntent } from '$lib/search/intent'
   import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal'
@@ -21,6 +21,7 @@
   import { initials } from '$lib/utils/text'
   import { canPlayTrack, getPlayableLabel } from '$lib/player/playable'
   import { mergeLocalIntoTidal } from '$lib/search/merge_local'
+  import SearchField from '$lib/search/ui/SearchField.svelte'
   import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte'
   import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte'
 
@@ -209,17 +210,6 @@
     } finally {
       audioLoadingMore = false
     }
-  }
-
-  function removeFilter(key: string) {
-    // Rebuild query string by stripping tokens that start with key: or key>/</>=/<=
-    const tokens = query.trim().split(/\s+/).filter(t => t.length > 0)
-    const filtered = tokens.filter(t => {
-      // match key: or key>/</>=/<= prefix
-      return !t.match(new RegExp(`^${key}(:|>=|<=|>|<)`))
-    })
-    query = filtered.join(' ')
-    onInput()
   }
 
   async function playLibraryTrack(track: AudioSearchResult) {
@@ -1050,58 +1040,9 @@
   // queue/play-next. Arrow keys move a row cursor through the visible tracks.
   let inputEl: HTMLInputElement | null = $state(null)
   let cursor = $state(-1)
-  let inputFocused = $state(false)
-
-  // DSP filter syntax is invisible - surface a tiny set of example chips when
-  // the input is focused but empty so users discover bpm:/key:/energy: filters.
-  const HINT_CHIPS: { token: string; label: string }[] = [
-    { token: 'bpm:128 ', label: 'bpm:128' },
-    { token: 'key:Am ', label: 'key:Am' },
-    { token: 'energy:>0.7 ', label: 'energy:>0.7' },
-  ]
-
-  function insertHintChip(token: string) {
-    query = `${query}${query.endsWith(' ') || query.length === 0 ? '' : ' '}${token}`
-    inputEl?.focus()
-    onInput()
-  }
-
-  // Inline prefix completion: if the trailing token matches a known filter
-  // prefix (e.g. "bp", "ke", "en", "ge"), suggest the full filter key.
-  const FILTER_PREFIXES: Record<string, string> = {
-    bp: 'bpm:',
-    bpm: 'bpm:',
-    ke: 'key:',
-    key: 'key:',
-    en: 'energy:',
-    energy: 'energy:',
-    ge: 'genre:',
-    genre: 'genre:',
-    da: 'danceability:',
-    danceability: 'danceability:',
-  }
-
-  const inlineHint = $derived.by<string | null>(() => {
-    if (!query) return null
-    if (query.endsWith(' ')) return null
-    if (query.includes(':')) {
-      const tail = query.slice(query.lastIndexOf(' ') + 1)
-      if (tail.includes(':')) return null
-    }
-    const tail = query.slice(query.lastIndexOf(' ') + 1).toLowerCase()
-    if (!tail) return null
-    const completion = FILTER_PREFIXES[tail]
-    if (!completion) return null
-    return completion
-  })
-
-  function applyInlineHint() {
-    if (!inlineHint) return
-    const idx = query.lastIndexOf(' ')
-    const head = idx === -1 ? '' : query.slice(0, idx + 1)
-    query = `${head}${inlineHint}`
-    inputEl?.focus()
-  }
+  // The faceted affordances (focus-when-empty facet popover, inline Tab
+  // completion, removable filter chips) now live in the shared SearchField;
+  // this page just wires query + onInput + inputKeydown into it.
 
   // Reset cursor whenever the result set changes shape so we never point past the end.
   $effect(() => {
@@ -1261,41 +1202,17 @@
 
 <div class="search-page">
   <div class="search-header">
-    <input
-      bind:this={inputEl}
-      class="search-input"
-      type="search"
-      placeholder="Search Tidal's full catalogue"
+    <SearchField
       bind:value={query}
+      bind:inputEl
+      variant="page"
+      facets
+      inlineCompletion
+      filterChips
+      placeholder="Search Tidal's full catalogue"
       oninput={onInput}
-      onkeydown={(e) => {
-        if (e.key === 'Tab' && inlineHint && !e.shiftKey) {
-          e.preventDefault()
-          applyInlineHint()
-          return
-        }
-        inputKeydown(e)
-      }}
-      onfocus={() => { inputFocused = true }}
-      onblur={() => { inputFocused = false }}
+      onkeydown={inputKeydown}
     />
-    {#if inputFocused && !query.trim()}
-      <div class="hint-chips" aria-label="Search filter examples">
-        {#each HINT_CHIPS as chip (chip.token)}
-          <button
-            type="button"
-            class="hint-chip"
-            onmousedown={(e) => e.preventDefault()}
-            onclick={() => insertHintChip(chip.token)}
-          >{chip.label}</button>
-        {/each}
-      </div>
-    {/if}
-    {#if inlineHint && query.trim()}
-      <p class="inline-hint">
-        Try <code>{inlineHint}</code> <span class="hint-tab">Tab</span>
-      </p>
-    {/if}
     <p class="kbd-hint">
       <kbd>/</kbd> focus &nbsp;·&nbsp;
       <kbd>↑</kbd><kbd>↓</kbd> move &nbsp;·&nbsp;
@@ -1303,17 +1220,6 @@
       <kbd>Shift</kbd>+<kbd>Enter</kbd> queue &nbsp;·&nbsp;
       <kbd>Ctrl</kbd>+<kbd>Enter</kbd> next
     </p>
-    {#if hasFilters}
-      <div class="filter-chips">
-        {#each filtersToChips(parsedQuery.filters) as chip (chip.key)}
-          <button
-            class="filter-chip"
-            onclick={() => removeFilter(chip.key)}
-            title="Remove filter"
-          >{chip.display} <span class="chip-x">×</span></button>
-        {/each}
-      </div>
-    {/if}
     {#if results && activeQueryText}
       <div class="filter-pills">
         {#each [
@@ -2045,68 +1951,6 @@
     margin: 0 auto var(--space-5);
     padding: 0 4px;
   }
-  .search-input {
-    display: block;
-    width: 100%;
-    max-width: 720px;
-    margin: 0 auto;
-    background: var(--panel-bg);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-lg);
-    padding: 14px 22px;
-    font-size: var(--font-size-md);
-    color: var(--text-primary);
-    outline: none;
-    transition: border-color var(--motion-fast), background var(--motion-fast);
-  }
-  .search-input::placeholder { color: var(--text-tertiary); }
-
-  .hint-chips {
-    margin: 10px auto 0;
-    max-width: 720px;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-  .hint-chip {
-    background: var(--bg-surface, rgba(255, 255, 255, 0.06));
-    border: 1px solid var(--border-subtle);
-    color: var(--text-secondary);
-    border-radius: 999px;
-    padding: 4px 12px;
-    font-size: var(--font-size-xs);
-    font-family: var(--font-mono, ui-monospace, monospace);
-    cursor: pointer;
-    transition: background 0.12s, color 0.12s, border-color 0.12s;
-  }
-  .hint-chip:hover {
-    background: var(--accent-soft);
-    color: var(--accent-strong);
-    border-color: var(--accent-line);
-  }
-  .inline-hint {
-    margin: 8px auto 0;
-    max-width: 720px;
-    font-size: var(--font-size-xs);
-    color: var(--text-tertiary);
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .inline-hint code {
-    font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: var(--font-size-xs);
-    color: var(--accent-strong);
-  }
-  .hint-tab {
-    background: var(--bg-surface, rgba(255, 255, 255, 0.06));
-    border: 1px solid var(--border-subtle);
-    border-radius: 4px;
-    padding: 0 5px;
-    font-size: var(--font-size-2xs);
-    color: var(--text-secondary);
-  }
-
   .kbd-hint {
     margin: 10px auto 0;
     max-width: 720px;
@@ -2117,38 +1961,6 @@
     align-items: center;
     gap: 2px;
   }
-  .filter-chips {
-    margin: 10px 0 0;
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-  }
-  .filter-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    background: var(--bg-elevated);
-    border: 1px solid var(--accent-line);
-    color: var(--text-secondary);
-    border-radius: var(--radius-md);
-    padding: 4px 12px;
-    font-size: var(--font-size-xs);
-    cursor: pointer;
-    font-family: inherit;
-    transition: background 0.15s, border-color 0.15s, color 0.15s;
-  }
-  .filter-chip:hover {
-    background: var(--bg-hover);
-    border-color: var(--accent);
-    color: var(--text-primary);
-  }
-  .chip-x {
-    font-size: var(--font-size-sm);
-    line-height: 1;
-    color: var(--text-tertiary);
-    margin-left: 2px;
-  }
-  .filter-chip:hover .chip-x { color: var(--text-primary); }
   .no-audio-results {
     color: var(--text-muted);
     font-size: var(--font-size-sm);
@@ -2194,11 +2006,6 @@
     color: var(--text-secondary);
     line-height: var(--line-height-normal);
     margin: 0 1px;
-  }
-  .search-input:focus {
-    border-color: var(--accent);
-    background: var(--input-focus);
-    box-shadow: 0 0 0 3px var(--accent-soft);
   }
   .search-hint {
     color: var(--text-muted);

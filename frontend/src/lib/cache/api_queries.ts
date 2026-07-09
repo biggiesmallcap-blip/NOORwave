@@ -110,6 +110,7 @@ export const cacheKeys = {
 	artist: (id: number) => ['api', 'getArtist', { id }] as const,
 	artistTracks: (id: number) => ['api', 'getArtistTracks', { id }] as const,
 	artistDiscography: (id: number) => ['api', 'getArtistDiscography', { id }] as const,
+	tidalArtistProfile: (id: number) => ['api', 'getTidalArtistProfile', { id }] as const,
 	artistSpotifyStats: (id: number) => ['api', 'getArtistSpotifyStats', { id }] as const,
 	albumTracks: (id: number) => ['api', 'getAlbumTracks', { id }] as const,
 	albumSpotifyStats: (id: number) => ['api', 'getAlbumSpotifyStats', { id }] as const,
@@ -240,6 +241,18 @@ export const cachedApi = {
 			cacheKeys.artistDiscography(id),
 			() => api.getArtistDiscography(id),
 			longOptions,
+		);
+	},
+	// TIDAL artist profile (non-library artists). Cached like the library
+	// discography so re-visits render instantly and concurrent loads of the
+	// same artist share one request; medium staleness because in_library /
+	// local_id flags live inside the payload and imports should surface
+	// within minutes even without a library_synced invalidation.
+	getTidalArtistProfile(tidalArtistId: number) {
+		return fetchCached<Awaited<ReturnType<typeof api.getTidalArtistProfile>>>(
+			cacheKeys.tidalArtistProfile(tidalArtistId),
+			() => api.getTidalArtistProfile(tidalArtistId),
+			mediumOptions,
 		);
 	},
 	getArtistSpotifyStats(id: number) {
@@ -571,6 +584,7 @@ export function invalidateLibraryCaches(options: { refetch?: boolean } = {}): vo
 	dataCache.invalidatePrefix(['api', 'getArtists'], options);
 	dataCache.invalidatePrefix(['api', 'getArtistTracks'], options);
 	dataCache.invalidatePrefix(['api', 'getArtistDiscography'], options);
+	dataCache.invalidatePrefix(['api', 'getTidalArtistProfile'], options);
 	dataCache.invalidatePrefix(['api', 'getAlbumTracks'], options);
 	dataCache.invalidatePrefix(['api', 'search'], options);
 }

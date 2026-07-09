@@ -64,6 +64,7 @@
 	import { upscaleTidalArtwork } from '$lib/utils/artwork';
 	import { parseQuery } from '$lib/search/query_parser';
 	import { buildAudioParams, hasAnyFilter } from '$lib/search/audio_params';
+	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import { goto } from '$app/navigation';
 	import { showToast } from '$lib/stores/toast';
 	import { wsMessages } from '$lib/api/ws';
@@ -1858,10 +1859,12 @@
 
 <div class="page-shell library">
 	<div class="library-search-shell">
-		<input
-			class="library-search-input"
+		<SearchField
 			bind:value={$searchQuery}
-			type="search"
+			variant="page"
+			facets
+			inlineCompletion
+			filterChips
 			placeholder={activeTab === 'albums' ? 'Search albums or artists' : 'Search tracks, albums, or artists'}
 		/>
 		<div class="kbd-hint">
@@ -1869,8 +1872,7 @@
 			<kbd>↑↓</kbd> move &nbsp;·&nbsp;
 			<kbd>Enter</kbd> play &nbsp;·&nbsp;
 			<kbd>Shift</kbd>+<kbd>Enter</kbd> queue &nbsp;·&nbsp;
-			<kbd>Ctrl</kbd>+<kbd>Enter</kbd> next &nbsp;·&nbsp;
-			<span class="hint-filters">bpm:138 &nbsp;·&nbsp; key:Am &nbsp;·&nbsp; energy:&gt;0.7 &nbsp;·&nbsp; genre:dnb &nbsp;·&nbsp; instrumental:true</span>
+			<kbd>Ctrl</kbd>+<kbd>Enter</kbd> next
 		</div>
 
 		<div class="filter-pills">
@@ -3435,12 +3437,6 @@
 		background: var(--bg-hover);
 	}
 
-	.hint-filters {
-		opacity: 0.7;
-		font-family: var(--font-mono);
-		letter-spacing: 0.02em;
-	}
-
 	/* ─── New DSP Columns ───────────────────────── */
 
 	.col-bpm, .col-key, .col-energy, .col-dance {
@@ -3529,25 +3525,6 @@
 		max-width: var(--content-width);
 		margin: 0 auto var(--space-5);
 		padding: 0 4px;
-	}
-
-	.library-search-input {
-		width: 100%;
-		max-width: 720px;
-		margin: 0 auto;
-		padding: 14px 22px;
-		border-radius: var(--radius-lg);
-		border: 1px solid var(--border-subtle);
-		background: var(--panel-bg);
-		color: var(--text-primary);
-		font-size: var(--font-size-md);
-		outline: none;
-		transition: border-color var(--motion-fast), background var(--motion-fast);
-	}
-
-	.library-search-input:focus {
-		border-color: var(--accent);
-		background: var(--input-focus);
 	}
 
 	.library-status {

@@ -51,6 +51,20 @@ const STALL_WATCHDOG_TICK: std::time::Duration = std::time::Duration::from_secs(
 /// automatically instead of freezing playback until the user manually skips.
 const ACTIVE_STALL_RECOVERY_SECS: u64 = 15;
 
+/// An outgoing engine that lived at least this long without producing a
+/// single audible sample counts as a silent failure for the advance-cascade
+/// circuit breaker. Rapid manual skips tear down much younger engines and
+/// must not count toward the streak.
+const SILENT_ENGINE_FAILURE_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// After this many consecutive silent engine failures the runtime stops
+/// hot-advancing: it latches pause, surfaces one clear error, and leaves the
+/// queue intact for the user to resume. Without this ceiling a dead TIDAL
+/// CDN made the watchdog + track-error advances burn through the entire
+/// queue 15-25s at a time while pause commands appeared to do nothing --
+/// the state users could only escape by restarting the server.
+const MAX_SILENT_START_STREAK: u32 = 3;
+
 /// Watchdog state for the runtime loop. The loop otherwise only advances when
 /// the audio callback sends a command, and a decoder starved on a hung TIDAL
 /// segment is `started && !finished && written==0`: it emits no command and the
@@ -680,6 +694,18 @@ struct PlaybackRuntimeLoopState {
     prepared_dj_mixer: Option<PreparedDjMixer>,
     prepared_drop_preview_mixer: Option<PreparedDjMixer>,
     last_dj_renderer_failure: Option<DjRuntimeRendererFailure>,
+    /// User transport intent as most recently processed by this loop: `true`
+    /// from a Pause command until a Resume (or an explicitly-unpaused job)
+    /// clears it. Every engine cold start and promotion consults this, so an
+    /// auto-advance, crossfade promotion, or prepared-overlay swap can never
+    /// un-pause audio behind the user's back. This latch is what makes the
+    /// pause button reliable while the queue is advancing through failures.
+    user_paused: bool,
+    /// Consecutive engine teardowns where the outgoing deck lived past
+    /// `SILENT_ENGINE_FAILURE_MIN_AGE` without ever producing audio. Feeds
+    /// the advance-cascade circuit breaker; reset whenever a deck actually
+    /// makes sound.
+    silent_start_streak: u32,
 }
 
 struct PreparedDjMixer {
@@ -1751,7 +1777,10 @@ fn start_prepared_overlay(
     let Some(next) = state.next_engine.as_ref() else {
         return Err(DjRuntimeRendererReason::NextDeckNotDecoded);
     };
-    next.shared.paused.store(false, Ordering::SeqCst);
+    // Honor the user-pause latch: a promotion never un-pauses on its own.
+    next.shared
+        .paused
+        .store(state.user_paused, Ordering::SeqCst);
     if let Some(transition_event_id) = transition_event_id {
         let _ = event_tx.send(PlaybackRuntimeEvent::DjTransitionPromoted {
             transition_event_id,
@@ -1785,7 +1814,11 @@ fn start_prepared_drop_preview_overlay(
     let Some(preview) = state.drop_preview_engine.as_ref() else {
         return Err(DjRuntimeRendererReason::NextDeckNotDecoded);
     };
-    preview.shared.paused.store(false, Ordering::SeqCst);
+    // Honor the user-pause latch: a preview never un-pauses on its own.
+    preview
+        .shared
+        .paused
+        .store(state.user_paused, Ordering::SeqCst);
     let _ = event_tx.send(PlaybackRuntimeEvent::DropPreviewStarted {
         track_id: active_track_id,
         generation: active_generation,
@@ -1964,6 +1997,8 @@ fn run_runtime_loop(
         prepared_dj_mixer: None,
         prepared_drop_preview_mixer: None,
         last_dj_renderer_failure: None,
+        user_paused: false,
+        silent_start_streak: 0,
     };
 
     let _ = event_tx.send(PlaybackRuntimeEvent::Ready {
@@ -2139,6 +2174,11 @@ fn run_runtime_loop(
                                     let mut j = engine.job.clone();
                                     j.start_from_segment_index = n;
                                     j.start_from_offset_ms = new_offset_ms;
+                                    // Preserve the live transport intent, not
+                                    // the intent the ORIGINAL job carried: a
+                                    // seek while paused must restart the
+                                    // segment engine silent, still paused.
+                                    j.start_paused = state.user_paused;
                                     j
                                 };
                                 SeekHandling::SegmentSeek { job: new_job }
@@ -2624,6 +2664,12 @@ fn run_runtime_loop(
                     }
                 }
                 PlaybackRuntimeCommand::Pause => {
+                    // Latch the user's intent FIRST: every engine start and
+                    // promotion from here on comes up silent until Resume (or
+                    // an explicitly-unpaused job) clears the latch. This is
+                    // what stops a queued auto-advance from un-pausing audio
+                    // moments after the user hit pause.
+                    state.user_paused = true;
                     // Pause the active engine AND the fading-out engine (if any), so
                     // pressing pause during a crossfade actually stops all audio. The
                     // pre-decoded next engine is already paused so we don't touch it.
@@ -2685,6 +2731,11 @@ fn run_runtime_loop(
                     }
                 }
                 PlaybackRuntimeCommand::Resume => {
+                    // Clear the user-pause latch and give the advance-cascade
+                    // breaker a fresh start: an explicit resume is the user
+                    // asking to try audio again.
+                    state.user_paused = false;
+                    state.silent_start_streak = 0;
                     // On-demand re-grab: if exclusive mode is on and the active
                     // engine's WASAPI stream self-released after idle, rebuild it
                     // BEFORE unpausing so the decoder doesn't push samples into a
@@ -2798,6 +2849,9 @@ fn run_runtime_loop(
                 }
                 PlaybackRuntimeCommand::Stop => {
                     stop_all_engines(&mut state);
+                    // A stopped session has no transport intent to preserve.
+                    state.user_paused = false;
+                    state.silent_start_streak = 0;
                     #[cfg(target_os = "windows")]
                     state.exclusive_sink.clear();
                     let _ = event_tx.send(PlaybackRuntimeEvent::Stopped);
@@ -3205,6 +3259,18 @@ fn transition_to_job(
         return Ok(());
     }
 
+    // Advance-cascade circuit breaker: see `evaluate_advance_cascade`.
+    let breaker_tripped = evaluate_advance_cascade(state, event_tx);
+
+    // Adopt the dispatching route's transport intent as the loop's latch;
+    // a just-tripped breaker overrides it until an explicit Resume.
+    state.user_paused = job.start_paused || breaker_tripped;
+    // From here down every consumer reads the job, so bake the effective
+    // intent back in - the cold-start path hands the job to the engine and
+    // the engine honors `start_paused` at construction.
+    let mut job = job;
+    job.start_paused = state.user_paused;
+
     stop_current_engine(state);
     // A user-initiated track change (skip / new play) abandons any in-flight
     // crossfade - kill the fading-out engine so it doesn't keep producing audio
@@ -3266,8 +3332,9 @@ fn transition_to_job(
         let pre = state.next_engine.take().unwrap();
         // position_source was already redirected to this engine's counter at
         // promote_next_to_active time, so the handle reads the right value.
-        // Restart the stream (it was paused during pre-decode).
-        pre.shared.paused.store(false, Ordering::SeqCst);
+        // Restart the stream (it was paused during pre-decode) - unless the
+        // user-pause latch is set, in which case it stays silent until Resume.
+        pre.shared.paused.store(state.user_paused, Ordering::SeqCst);
         state.engine = Some(pre);
         #[cfg(target_os = "windows")]
         if state.current_exclusive {
@@ -3377,6 +3444,60 @@ fn switch_is_noop_for_active_job(
     generation: u64,
 ) -> bool {
     !force_restart && active == Some((track_id, generation))
+}
+
+/// Advance-cascade circuit breaker, evaluated as `transition_to_job` is about
+/// to tear down the outgoing deck. If that deck lived past
+/// `SILENT_ENGINE_FAILURE_MIN_AGE` yet never produced a single audible
+/// sample, count it toward the streak; `MAX_SILENT_START_STREAK` in a row
+/// means upstream streaming is down and hot-advancing further would burn
+/// through the whole queue 15-25s at a time (the old restart-the-server
+/// state). Returns `true` when the breaker trips: the caller latches pause so
+/// the incoming engine comes up silent, one clear error event is emitted, and
+/// an explicit Resume retries. A deck that DID make sound resets the streak;
+/// decks torn down young (rapid manual skips) leave it untouched.
+fn evaluate_advance_cascade(
+    state: &mut PlaybackRuntimeLoopState,
+    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+) -> bool {
+    let outgoing_started = state.engine.as_ref().map(|engine| {
+        engine
+            .shared
+            .buffer
+            .lock()
+            .map(|guard| guard.started)
+            .unwrap_or(false)
+    });
+    match outgoing_started {
+        Some(true) => {
+            state.silent_start_streak = 0;
+            false
+        }
+        Some(false)
+            if state
+                .engine
+                .as_ref()
+                .is_some_and(|e| e.created_at.elapsed() >= SILENT_ENGINE_FAILURE_MIN_AGE) =>
+        {
+            state.silent_start_streak = state.silent_start_streak.saturating_add(1);
+            if state.silent_start_streak >= MAX_SILENT_START_STREAK && !state.user_paused {
+                warn!(
+                    "Advance-cascade breaker: {} consecutive decks made no audio; latching pause instead of burning the queue",
+                    state.silent_start_streak
+                );
+                let _ = event_tx.send(PlaybackRuntimeEvent::Error {
+                    message: "Playback paused: several tracks in a row produced no audio (stream source stalled). Press play to retry.".to_string(),
+                });
+                // Paused event so the DB/UI reconcile to a truthful paused
+                // state instead of claiming playback that is not happening.
+                let _ = event_tx.send(PlaybackRuntimeEvent::Paused { track_id: None });
+                state.silent_start_streak = 0;
+                return true;
+            }
+            false
+        }
+        _ => false,
+    }
 }
 
 fn stop_current_engine(state: &mut PlaybackRuntimeLoopState) {
@@ -3641,7 +3762,11 @@ fn promote_next_to_active(
     } else {
         next.shared.fadein_start_samples.store(0, Ordering::Relaxed);
     }
-    next.shared.paused.store(false, Ordering::SeqCst);
+    // Honor the user-pause latch: crossfade promotion must not un-pause a
+    // deck behind the user's back (the paused-button-but-audio-playing bug).
+    next.shared
+        .paused
+        .store(state.user_paused, Ordering::SeqCst);
 
     // Redirect the handle's position + buffered + offset readers to the
     // incoming engine's counters BEFORE sliding it into state.engine so
@@ -3758,7 +3883,10 @@ fn promote_prepared_at_boundary(
     next.shared
         .fadein_start_samples
         .store(u64::MAX, Ordering::Relaxed);
-    next.shared.paused.store(false, Ordering::SeqCst);
+    // Honor the user-pause latch: boundary promotion never un-pauses on its own.
+    next.shared
+        .paused
+        .store(state.user_paused, Ordering::SeqCst);
     *position_source.lock().unwrap() = Arc::clone(&next.shared.position_samples);
     *buffered_source.lock().unwrap() = Arc::clone(&next.shared.buffered_samples);
     *offset_source.lock().unwrap() = Arc::clone(&next.shared.position_offset_samples);
@@ -5194,6 +5322,125 @@ mod tests {
             }
             other => panic!("expected timing event, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn promotion_honors_user_pause_latch() {
+        let mut state = test_runtime_loop_state();
+        start_dj_lookahead_in_state(
+            &mut state,
+            Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+            Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+            Some(11),
+            Some(12),
+            20,
+            48_000,
+        );
+
+        let active = test_engine_with_shared(1, 20);
+        active
+            .shared
+            .position_samples
+            .store(96_000, Ordering::Relaxed);
+        finish_engine_buffer(&active, &[0.1, 0.1, 0.2, 0.2, 0.3, 0.3]);
+
+        let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+        transition.transition_event_id = Some(89);
+        let mut next = test_engine_with_shared(2, 21);
+        next.job = PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition);
+        finish_engine_buffer(&next, &[0.0, 0.0, 0.4, 0.4, 0.5, 0.5, 0.6, 0.6]);
+
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+        assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
+        assert!(install_prepared_handoff_mixer_buffer(&mut state).is_ok());
+
+        // The user paused while the transition was already prepared. The
+        // promoted deck must come up silent - promotions never un-pause.
+        state.user_paused = true;
+
+        let (event_tx, _event_rx) = tokio::sync::broadcast::channel(8);
+        let position_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+        let buffered_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+        let offset_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+
+        promote_next_to_active(
+            &mut state,
+            &event_tx,
+            &position_source,
+            &buffered_source,
+            &offset_source,
+            "fired",
+            None,
+            DjRuntimeRendererOutcome::rendered_handoff(),
+        );
+
+        let promoted = state.engine.as_ref().expect("promoted engine");
+        assert_eq!(promoted.track_id, 2);
+        assert!(
+            promoted.shared.paused.load(Ordering::SeqCst),
+            "promotion must honor the user-pause latch"
+        );
+    }
+
+    #[test]
+    fn advance_cascade_breaker_trips_after_repeated_silent_decks() {
+        let mut state = test_runtime_loop_state();
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+
+        for round in 1..=MAX_SILENT_START_STREAK {
+            let mut engine = test_engine_with_shared(round as i64, u64::from(round));
+            // Backdate construction so the silent deck counts as a failure,
+            // not a rapid manual skip.
+            engine.created_at = std::time::Instant::now() - SILENT_ENGINE_FAILURE_MIN_AGE * 2;
+            state.engine = Some(engine);
+            let tripped = evaluate_advance_cascade(&mut state, &event_tx);
+            if round < MAX_SILENT_START_STREAK {
+                assert!(!tripped, "streak {round} must not trip the breaker yet");
+            } else {
+                assert!(tripped, "breaker must trip at streak {round}");
+            }
+        }
+        assert_eq!(
+            state.silent_start_streak, 0,
+            "streak resets after the breaker fires"
+        );
+        assert!(
+            matches!(event_rx.try_recv(), Ok(PlaybackRuntimeEvent::Error { .. })),
+            "breaker surfaces one clear error"
+        );
+        assert!(
+            matches!(
+                event_rx.try_recv(),
+                Ok(PlaybackRuntimeEvent::Paused { track_id: None })
+            ),
+            "breaker emits Paused so DB/UI reconcile to a truthful state"
+        );
+    }
+
+    #[test]
+    fn advance_cascade_ignores_young_decks_and_resets_on_audio() {
+        let mut state = test_runtime_loop_state();
+        let (event_tx, _event_rx) = tokio::sync::broadcast::channel(8);
+
+        // Young silent deck (a rapid manual skip): streak untouched.
+        state.engine = Some(test_engine_with_shared(1, 1));
+        assert!(!evaluate_advance_cascade(&mut state, &event_tx));
+        assert_eq!(state.silent_start_streak, 0);
+
+        // Old silent deck: counts toward the streak.
+        let mut old_engine = test_engine_with_shared(2, 2);
+        old_engine.created_at = std::time::Instant::now() - SILENT_ENGINE_FAILURE_MIN_AGE * 2;
+        state.engine = Some(old_engine);
+        assert!(!evaluate_advance_cascade(&mut state, &event_tx));
+        assert_eq!(state.silent_start_streak, 1);
+
+        // A deck that actually produced audio resets the streak.
+        let played = test_engine_with_shared(3, 3);
+        played.shared.buffer.lock().expect("buffer lock").started = true;
+        state.engine = Some(played);
+        assert!(!evaluate_advance_cascade(&mut state, &event_tx));
+        assert_eq!(state.silent_start_streak, 0);
     }
 
     #[test]
@@ -6675,6 +6922,8 @@ mod tests {
             prepared_dj_mixer: None,
             prepared_drop_preview_mixer: None,
             last_dj_renderer_failure: None,
+            user_paused: false,
+            silent_start_streak: 0,
         }
     }
 

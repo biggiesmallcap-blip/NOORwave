@@ -3,6 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { api, ApiError, type TidalSearchVideo, type TidalVideoMixItem } from '$lib/api/client';
 	import VideoCard from '$lib/components/video/VideoCard.svelte';
+	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
@@ -527,12 +528,12 @@
 <div class="videos-page">
 	<header class="search-header">
 		<div class="search-tools">
-			<input
-				bind:this={inputEl}
-				class="search-input"
-				type="search"
-				placeholder="Search TIDAL videos"
+			<SearchField
 				bind:value={query}
+				bind:inputEl
+				variant="page"
+				fill
+				placeholder="Search TIDAL videos"
 				oninput={onInput}
 			/>
 			<a class="editorial-link" href="/tidal/videos">TIDAL editorial</a>
@@ -713,31 +714,6 @@
 		justify-content: center;
 		gap: var(--space-3);
 		flex-wrap: wrap;
-	}
-
-	.search-input {
-		display: block;
-		width: 100%;
-		max-width: 720px;
-		margin: 0;
-		flex: 1 1 min(720px, 100%);
-		background: var(--panel-bg);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-lg);
-		padding: 14px 22px;
-		font-size: var(--font-size-md);
-		color: var(--text-primary);
-		outline: none;
-		transition: border-color var(--motion-fast), background var(--motion-fast);
-	}
-
-	.search-input::placeholder {
-		color: var(--text-tertiary);
-	}
-
-	.search-input:focus {
-		border-color: var(--accent);
-		background: var(--input-focus);
 	}
 
 	.editorial-link {

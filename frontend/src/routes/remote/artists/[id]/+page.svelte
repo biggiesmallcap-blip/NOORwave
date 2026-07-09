@@ -1,16 +1,17 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import {
-		api,
 		type TidalDiscographyAlbum,
 		type Track
 	} from '$lib/api/client';
+	import { cachedApi } from '$lib/cache/api_queries';
 	import {
 		playArtist,
 		shuffleArtist,
 		startArtistRadio
 	} from '$lib/stores/player';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import RemoteActionBar from '$lib/components/remote/RemoteActionBar.svelte';
 	import RemoteAlbumTile from '$lib/components/remote/RemoteAlbumTile.svelte';
 	import RemotePageShell from '$lib/components/remote/RemotePageShell.svelte';
@@ -36,6 +37,10 @@
 	let error = $state<string | null>(null);
 	let showAllTracks = $state(false);
 	let loadSeq = 0;
+	// Id-keyed in-flight dedupe: the effect below re-runs on any dependency
+	// invalidation, not only on real param changes; without this a re-run
+	// mid-load restarted the whole fetch chain for the same artist.
+	let requestedArtistId: number | null = null;
 
 	async function load(id: number) {
 		const seq = ++loadSeq;
@@ -47,9 +52,11 @@
 		tidalPictureUrl = null;
 		let detailLoaded = false;
 		try {
+			// cachedApi: in-flight dedupe + stale-while-revalidate, so remote
+			// re-visits render instantly instead of refetching every time.
 			const [artistRes, tracksRes] = await Promise.all([
-				api.getArtist(id),
-				api.getArtistTracks(id)
+				cachedApi.getArtist(id),
+				cachedApi.getArtistTracks(id)
 			]);
 			if (seq !== loadSeq) return;
 			artist = artistRes;
@@ -66,7 +73,7 @@
 		// We also grab the fresh TIDAL `picture_url` which is more reliable than
 		// the locally-cached `photo_url` (see desktop /artists/[id] for context).
 		try {
-			const disco = await api.getArtistDiscography(id);
+			const disco = await cachedApi.getArtistDiscography(id);
 			if (seq !== loadSeq) return;
 			albums = disco.albums ?? [];
 			tidalPictureUrl = disco.picture_url ?? null;
@@ -80,6 +87,9 @@
 
 	$effect(() => {
 		const id = artistId;
+		if (!Number.isFinite(id) || id <= 0) return;
+		if (id === requestedArtistId) return;
+		requestedArtistId = id;
 		void load(id);
 	});
 
@@ -125,7 +135,9 @@
 
 <RemotePageShell title={artist?.name ?? ''}>
 	{#if loading}
-		<p class="remote-status" role="status" aria-live="polite">Loading…</p>
+		<div class="remote-status" role="status" aria-live="polite">
+			<Skeleton rows={4} label="Loading artist" />
+		</div>
 	{:else if error}
 		<p class="remote-status remote-status-error">{error}</p>
 	{:else if artist}

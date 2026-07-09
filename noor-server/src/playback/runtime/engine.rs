@@ -56,6 +56,10 @@ pub(super) struct PlaybackEngine {
     stream: Option<OutputStream>,
     pub(super) decoder_thread: Option<JoinHandle<()>>,
     pub(super) shared: Arc<PlaybackSharedState>,
+    /// When this engine was constructed. The runtime's advance-cascade
+    /// breaker uses the age to tell a deck that failed silently (lived long,
+    /// never produced audio) from one the user simply skipped away from.
+    pub(super) created_at: std::time::Instant,
     /// Snapshot of the `PreparedPlaybackJob` that started this engine. Stored
     /// so the runtime's `SeekTo` handler can compute a segment-restart job
     /// (incrementing `start_from_segment_index` / `start_from_offset_ms`)
@@ -85,6 +89,7 @@ impl PlaybackEngine {
             decoder_thread: None,
             shared,
             job: PreparedPlaybackJob::test_fixture(track_id, generation),
+            created_at: std::time::Instant::now(),
         }
     }
 
@@ -242,6 +247,12 @@ impl PlaybackEngine {
             position_samples,
             position_offset_samples,
         ));
+        // Honor the job's transport intent before any output stream exists:
+        // a job dispatched while the user is paused produces a silent engine
+        // (the output callback checks this flag on its very first fill).
+        if job.start_paused {
+            shared.paused.store(true, Ordering::SeqCst);
+        }
 
         let decoder_shared = Arc::clone(&shared);
         let decoder_shared_for_decode = Arc::clone(&shared);
@@ -292,6 +303,7 @@ impl PlaybackEngine {
             decoder_thread: Some(decoder_thread),
             shared,
             job,
+            created_at: std::time::Instant::now(),
         })
     }
 
@@ -409,6 +421,7 @@ mod tests {
             decoder_thread: Some(decoder_thread),
             shared: Arc::clone(&shared),
             job: PreparedPlaybackJob::test_fixture(1, 1),
+            created_at: std::time::Instant::now(),
         };
 
         // Watchdog: if stop() blocks waiting on the decoder thread, release it

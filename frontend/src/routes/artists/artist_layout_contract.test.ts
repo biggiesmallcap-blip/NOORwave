@@ -8,6 +8,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 // ArtistDetail component now; the route's +page.svelte is a thin wrapper.
 const source = readFileSync(join(here, 'ArtistDetail.svelte'), 'utf8');
 const discographySource = readFileSync(join(here, 'ArtistDiscographySection.svelte'), 'utf8');
+const discographyHelper = readFileSync(join(here, 'artist_discography.ts'), 'utf8');
 
 function cssBlock(selector: string): string {
 	const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -41,8 +42,14 @@ describe('artist page layout contracts', () => {
 		expect(bio).toContain('white-space: pre-line');
 	});
 
-	test('shows Spotify world plays beside local plays only through TrackRow', () => {
-		expect(source).toContain('worldPlayCount={streamCount ?? null}');
+	test('keeps the artist flow sourced from TIDAL and the local library only', () => {
+		// The Spotify proxy layer (anonymous, flaky, was erroring in production
+		// logs) is gated out of artist pages: no stats fetch, no world-plays
+		// column, no stray badge markup.
+		expect(source).not.toContain('SpotifyArtistStats');
+		expect(source).not.toContain('getArtistSpotifyStats');
+		expect(source).not.toContain('loadSpotifyStats');
+		expect(source).not.toContain('worldPlayCount=');
 		expect(source).not.toContain('class="stream-badge"');
 	});
 
@@ -67,12 +74,19 @@ describe('artist page layout contracts', () => {
 		expect(source).toContain('const res = await cachedApi.getArtistDiscography(id);');
 		expect(source).toContain('if (seq !== tidalLoadSeq) return;');
 		expect(source).toContain('if (seq === tidalLoadSeq) tidalLoading = false;');
-		expect(source).toContain('let spotifyLoadSeq = 0;');
-		expect(source).toContain('async function loadSpotifyStats(id: number)');
-		expect(source).toContain('const stats = await cachedApi.getArtistSpotifyStats(id);');
-		expect(source).toContain('if (seq === spotifyLoadSeq) spotifyStats = stats;');
 		expect(source).toContain('void loadDiscography(id);');
-		expect(source).toContain('void loadSpotifyStats(id);');
+	});
+
+	test('serves the TIDAL artist profile through the cache layer', () => {
+		// cachedApi gives in-flight dedupe + stale-while-revalidate; the raw
+		// api call refetched the full nine-call TIDAL fan-out on every visit.
+		expect(source).toContain('await cachedApi.getTidalArtistProfile(tidalId)');
+		expect(source).not.toContain('await api.getTidalArtistProfile(tidalId)');
+	});
+
+	test('gives video rail cards the app-owned context menu', () => {
+		expect(source).toContain("import { buildVideoMenu } from '$lib/player/video_menu';");
+		expect(source).toContain('openContextMenu(e, buildVideoMenu(video), video.title);');
 	});
 
 	test('hero play falls back to TIDAL top tracks when the local artist has no tracks', () => {
@@ -99,13 +113,28 @@ describe('artist page layout contracts', () => {
 	});
 
 	test('orders top tracks through the TIDAL popularity list before local leftovers', () => {
-		expect(source).toContain("type PopularTrackItem =");
-		expect(source).toContain('for (const tidalTrack of tidalTopTracks)');
-		expect(source).toContain('const localTrack = byTidalId.get(tidalTrack.tidal_id);');
-		expect(source).toContain("ordered.push({ kind: 'local', track: localTrack });");
-		expect(source).toContain("ordered.push({ kind: 'tidal', track: tidalTrack });");
-		expect(source).toContain('ordered.push(...localRemainder.map((track) => ({ kind: \'local\' as const, track })))');
+		// The merge lives in the shared artist_discography helper now, so the
+		// artist page and the see-all section pages can never drift apart.
+		expect(discographyHelper).toContain('export type PopularTrackItem =');
+		expect(discographyHelper).toContain('for (const tidalTrack of tidalTopTracks)');
+		expect(discographyHelper).toContain('const localTrack = byTidalId.get(tidalTrack.tidal_id);');
+		expect(discographyHelper).toContain("ordered.push({ kind: 'local', track: localTrack });");
+		expect(discographyHelper).toContain("ordered.push({ kind: 'tidal', track: tidalTrack });");
+		expect(discographyHelper).toContain('ordered.push(...localRemainder.map((track) => ({ kind: \'local\' as const, track })))');
+		expect(source).toContain('buildPopularTrackItems(tracks, tidalTopTracks, localPopularityScore)');
 		expect(source).not.toContain('if (a.is_favorite !== b.is_favorite) return a.is_favorite ? -1 : 1;');
+	});
+
+	test('both artist surfaces bucket releases through the shared helper', () => {
+		// Guard against the old drift: each component carried a private
+		// categorize() copy and LIVE releases were bucketed differently
+		// between the artist page and the see-all section page.
+		expect(source).toContain("from './artist_discography'");
+		expect(discographySource).toContain("from './artist_discography'");
+		expect(source).toContain('categorizeTidalAlbum');
+		expect(discographySource).toContain('discographySectionFor(album) === section');
+		expect(discographySource).not.toContain('function categorize(');
+		expect(discographySource).not.toContain('function releaseSort(');
 	});
 
 	test('links artist shelves to searchable see-all routes', () => {
@@ -115,7 +144,7 @@ describe('artist page layout contracts', () => {
 		expect(source).toContain('href={`${discographyBase}/discography/compilations`}');
 		expect(discographySource).toContain("type Section = 'tracks' | 'albums' | 'singles' | 'compilations';");
 		expect(discographySource).toContain('cachedApi.getArtistDiscography(id)');
-		expect(discographySource).toContain('type="search"');
+		expect(discographySource).toContain('<SearchField');
 		expect(discographySource).toContain('<TrackRow');
 		expect(discographySource).toContain('<TidalTrackRow');
 		expect(discographySource).toContain('openContextMenu(event, albumMenu(album), album.title);');

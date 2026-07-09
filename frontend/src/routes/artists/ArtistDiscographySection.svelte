@@ -1,9 +1,10 @@
 <script lang="ts">
-	import { api, type Track, type TidalDiscographyAlbum, type TidalDiscographyTrack } from '$lib/api/client';
+	import { type Track, type TidalDiscographyAlbum, type TidalDiscographyTrack } from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
 	import TrackRow from '$lib/components/TrackRow.svelte';
 	import TidalTrackRow from '$lib/components/TidalTrackRow.svelte';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
@@ -11,11 +12,15 @@
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { playAlbum, playArtist, playTidalAlbum } from '$lib/stores/player';
 	import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';
+	import {
+		buildPopularTrackItems,
+		discographySectionFor,
+		popularTrackItemKey,
+		sortTidalAlbumsByReleaseDate,
+		type PopularTrackItem,
+	} from './artist_discography';
 
 	type Section = 'tracks' | 'albums' | 'singles' | 'compilations';
-	type PopularTrackItem =
-		| { kind: 'local'; track: Track }
-		| { kind: 'tidal'; track: TidalDiscographyTrack };
 
 	// Same dual-source split as ArtistDetail: a library artist is keyed by local
 	// id (rich local rows), a non-library artist by TIDAL id (sourced from the
@@ -84,7 +89,7 @@
 		loading = true;
 		error = null;
 		try {
-			const res = await api.getTidalArtistProfile(tidalId);
+			const res = await cachedApi.getTidalArtistProfile(tidalId);
 			if (seq !== loadSeq) return;
 			artist = { id: 0, tidal_id: tidalId, name: res.artist_name ?? 'Artist' };
 			tracks = [];
@@ -108,57 +113,18 @@
 		}
 	});
 
-	function categorize(album: TidalDiscographyAlbum): Section {
-		switch (album.source_filter) {
-			case 'COMPILATIONS':
-				return 'compilations';
-			case 'EPSANDSINGLES':
-				return 'singles';
-			case 'ALBUMS':
-			case 'LIVE':
-				return 'albums';
-		}
-		const type = (album.release_type ?? '').toUpperCase();
-		if (type === 'COMPILATION') return 'compilations';
-		if (type === 'SINGLE' || type === 'EP') return 'singles';
-		return 'albums';
-	}
-
-	function releaseSort(a: TidalDiscographyAlbum, b: TidalDiscographyAlbum): number {
-		const ad = a.release_date ?? '';
-		const bd = b.release_date ?? '';
-		if (ad === bd) return a.title.localeCompare(b.title);
-		if (!ad) return 1;
-		if (!bd) return -1;
-		return bd.localeCompare(ad);
-	}
-
-	let popularItems = $derived.by<PopularTrackItem[]>(() => {
-		const localByTidalId = new Map<number, Track>();
-		for (const track of tracks) {
-			if (track.tidal_id != null && track.tidal_id > 0) localByTidalId.set(track.tidal_id, track);
-		}
-		const seenLocalIds = new Set<number>();
-		const items: PopularTrackItem[] = [];
-		for (const tidalTrack of tidalTracks) {
-			const localTrack = localByTidalId.get(tidalTrack.tidal_id);
-			if (localTrack) {
-				seenLocalIds.add(localTrack.id);
-				items.push({ kind: 'local', track: localTrack });
-			} else {
-				items.push({ kind: 'tidal', track: tidalTrack });
-			}
-		}
-		const leftovers = tracks
-			.filter((track) => !seenLocalIds.has(track.id))
-			.sort((a, b) => (b.play_count ?? 0) - (a.play_count ?? 0));
-		if (items.length === 0) return leftovers.map((track) => ({ kind: 'local', track }));
-		items.push(...leftovers.map((track) => ({ kind: 'local' as const, track })));
-		return items;
-	});
+	// Bucketing, ordering, and Top-tracks merging come from the shared
+	// artist_discography helper - the private copies this component used to
+	// carry had drifted from ArtistDetail's (LIVE releases were bucketed
+	// differently between the artist page and this see-all page).
+	let popularItems = $derived.by<PopularTrackItem[]>(() =>
+		buildPopularTrackItems(tracks, tidalTracks)
+	);
 
 	let albumsForSection = $derived(
-		[...tidalAlbums].filter((album) => categorize(album) === section).sort(releaseSort)
+		sortTidalAlbumsByReleaseDate(
+			tidalAlbums.filter((album) => discographySectionFor(album) === section)
+		)
 	);
 
 	function matches(text: string | null | undefined): boolean {
@@ -177,7 +143,7 @@
 	);
 
 	function itemKey(item: PopularTrackItem): string {
-		return item.kind === 'local' ? `local-${item.track.id}` : `tidal-${item.track.tidal_id}`;
+		return popularTrackItemKey(item);
 	}
 
 	function artistTrackPlayable(track: TidalDiscographyTrack) {
@@ -228,11 +194,12 @@
 		</header>
 
 		<div class="filter-bar">
-			<input
-				class="filter-input"
-				type="search"
-				placeholder={`Search ${SECTION_LABELS[section].toLowerCase()}...`}
+			<SearchField
 				bind:value={query}
+				variant="page"
+				size="sm"
+				fill
+				placeholder={`Search ${SECTION_LABELS[section].toLowerCase()}...`}
 			/>
 		</div>
 
@@ -351,22 +318,7 @@
 
 	.filter-bar {
 		margin-bottom: var(--space-4);
-	}
-
-	.filter-input {
-		width: min(420px, 100%);
-		padding: var(--space-2) var(--space-3);
-		border: 1px solid var(--input-border);
-		border-radius: 999px;
-		background: var(--input-bg);
-		color: var(--text-primary);
-		font-size: var(--font-size-sm);
-		outline: none;
-	}
-
-	.filter-input:focus {
-		border-color: var(--accent);
-		background: var(--input-focus);
+		max-width: min(420px, 100%);
 	}
 
 	.track-list {

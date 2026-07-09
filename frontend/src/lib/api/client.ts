@@ -733,6 +733,12 @@ export interface TidalArtistProfile {
 	similar_artists: TidalSimilarArtist[];
 	bio: TidalArtistBio | null;
 	available: boolean;
+	/**
+	 * Names of TIDAL sub-fetches that failed or timed out for this payload
+	 * (e.g. "videos", "similar_artists"). Lets the page say "partial results"
+	 * instead of passing empty shelves off as the artist having no content.
+	 */
+	sections_failed?: string[];
 }
 
 /** Minimal shape accepted by all ephemeral Tidal play functions */
@@ -2297,6 +2303,7 @@ export const api = {
 			picture_url: string | null;
 			available: boolean;
 			reason?: string;
+			sections_failed?: string[];
 		}>(`/api/artists/${id}/discography`);
 	},
 

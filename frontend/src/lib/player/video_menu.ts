@@ -20,7 +20,17 @@ export function videoPageUrl(videoId: number | string): string {
 	return `/videos?videoId=${videoId}`;
 }
 
-export function buildVideoMenu(video: TidalSearchVideo | TidalVideoMixItem): MenuItem[] {
+// Structural parameter: search results, mix items, and artist-page video
+// rails all satisfy this without adapter objects (the artist rail's
+// TidalArtistVideo has no artist_id, so its menu simply omits the
+// go-to-artist entry).
+export type VideoMenuSource = {
+	tidal_id: number;
+	artist_id?: number | null;
+	artist_name?: string | null;
+};
+
+export function buildVideoMenu(video: VideoMenuSource): MenuItem[] {
 	const items: MenuItem[] = [
 		{
 			label: 'Play video',

@@ -19,8 +19,148 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 const CATALOG_LIST_LIMIT_MAX: i64 = 200;
+
+/// Deadline for one of the album-list groups (ALBUMS / EPSANDSINGLES /
+/// COMPILATIONS / LIVE) of the artist fan-out. Each group paginates
+/// sequentially, so it gets a larger budget than a single-call fetch. The
+/// timeout wraps the WHOLE group, including time spent queued on the global
+/// TIDAL request limiter, so a pile-up of slow requests degrades this page
+/// to partial results instead of hanging it.
+const ARTIST_ALBUM_GROUP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Deadline for the single-call fetches of the artist fan-out (top tracks,
+/// videos, similar, bio, profile). Same queue-inclusive semantics as
+/// `ARTIST_ALBUM_GROUP_TIMEOUT`.
+const ARTIST_SINGLE_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Backoff before the one bounded retry a failed artist fetch group gets.
+/// The retry runs inside the group deadline, so worst-case latency is still
+/// the group timeout, never timeout x attempts.
+const ARTIST_FETCH_RETRY_BACKOFF: Duration = Duration::from_millis(400);
+
+/// Serve-from-memory TTL for a fully-available artist payload. Keeps repeat
+/// visits and the back button instant, and stops every page view from
+/// re-issuing nine TIDAL calls through the shared 4-permit request limiter.
+/// Library flags (local_id / in_library) are re-resolved on every cache hit,
+/// so imports show up immediately despite the TTL.
+const ARTIST_PAYLOAD_CACHE_TTL: Duration = Duration::from_secs(120);
+
+/// How stale a cached payload may be and still be served when a live rebuild
+/// comes back completely empty-handed (TIDAL outage / rate-limit lockout):
+/// degrade to slightly-old shelves instead of a blank page.
+const ARTIST_PAYLOAD_STALE_SERVE_MAX: Duration = Duration::from_secs(15 * 60);
+
+/// Hard cap on cached artist payloads; evicts the oldest entry beyond this.
+const ARTIST_PAYLOAD_CACHE_CAP: usize = 48;
+
+struct CachedArtistPayload {
+    built_at: Instant,
+    payload: Value,
+}
+
+fn artist_payload_cache() -> &'static Mutex<HashMap<i64, CachedArtistPayload>> {
+    static CACHE: OnceLock<Mutex<HashMap<i64, CachedArtistPayload>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_artist_payload(tidal_artist_id: i64, max_age: Duration) -> Option<Value> {
+    let cache = artist_payload_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    cache
+        .get(&tidal_artist_id)
+        .filter(|entry| entry.built_at.elapsed() <= max_age)
+        .map(|entry| entry.payload.clone())
+}
+
+fn store_artist_payload(tidal_artist_id: i64, payload: Value) {
+    let mut cache = artist_payload_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if cache.len() >= ARTIST_PAYLOAD_CACHE_CAP && !cache.contains_key(&tidal_artist_id) {
+        if let Some(oldest) = cache
+            .iter()
+            .max_by_key(|(_, entry)| entry.built_at.elapsed())
+            .map(|(id, _)| *id)
+        {
+            cache.remove(&oldest);
+        }
+    }
+    cache.insert(
+        tidal_artist_id,
+        CachedArtistPayload {
+            built_at: Instant::now(),
+            payload,
+        },
+    );
+}
+
+/// Per-artist single-flight lock so concurrent loads of the same artist (a
+/// double-navigation, a WS-driven refresh racing a user click) share one
+/// TIDAL fan-out instead of stacking duplicate nine-call batches behind the
+/// request limiter. Waiters re-check the payload cache after acquiring.
+fn artist_build_lock(tidal_artist_id: i64) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = locks.lock().unwrap_or_else(|p| p.into_inner());
+    // Opportunistic cleanup: drop locks nobody is holding or waiting on once
+    // the map grows past a sane bound, so it can't accumulate forever.
+    if guard.len() > 512 {
+        guard.retain(|_, lock| Arc::strong_count(lock) > 1);
+    }
+    guard
+        .entry(tidal_artist_id)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+/// Run one artist fan-out fetch with a hard deadline and a single bounded
+/// retry. The deadline covers attempt + backoff + retry, so the worst case
+/// for the group is `budget`, never `budget x attempts`. Auth-looking errors
+/// are returned immediately: the batch-level session recovery in
+/// `build_tidal_artist_payload` handles those with a fresh token, and
+/// retrying with the same expired token would just burn the budget.
+async fn bounded_artist_fetch<T, F, Fut>(
+    label: &'static str,
+    budget: Duration,
+    mut attempt: F,
+) -> anyhow::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let bounded = tokio::time::timeout(budget, async {
+        match attempt().await {
+            Ok(value) => Ok(value),
+            Err(error) if error_looks_like_auth(&error) => Err(error),
+            Err(first_error) => {
+                tokio::time::sleep(ARTIST_FETCH_RETRY_BACKOFF).await;
+                attempt().await.map_err(|retry_error| {
+                    tracing::debug!(
+                        label,
+                        first_error = %first_error,
+                        "TIDAL artist fetch retry failed"
+                    );
+                    retry_error
+                })
+            }
+        }
+    })
+    .await;
+    match bounded {
+        Ok(result) => result,
+        Err(_) => Err(anyhow::anyhow!(
+            "TIDAL artist {} fetch timed out after {}s",
+            label,
+            budget.as_secs()
+        )),
+    }
+}
 
 fn require_positive_tidal_album_id(tidal_album_id: i64) -> Result<(), (StatusCode, Json<Value>)> {
     if tidal_album_id <= 0 {
@@ -253,6 +393,90 @@ mod tests {
         assert_eq!(normalize_catalog_sort_dir(Some(" ASC "), "desc"), "asc");
         assert_eq!(normalize_catalog_sort_dir(Some(" desc "), "asc"), "desc");
         assert_eq!(normalize_catalog_sort_dir(Some("sideways"), "asc"), "asc");
+    }
+
+    use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+    #[tokio::test]
+    async fn bounded_artist_fetch_returns_first_success_without_retry() {
+        let calls = AtomicU32::new(0);
+        let result = bounded_artist_fetch("test", Duration::from_secs(5), || {
+            calls.fetch_add(1, AtomicOrdering::SeqCst);
+            async { Ok::<i32, anyhow::Error>(7) }
+        })
+        .await;
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn bounded_artist_fetch_retries_transient_failure_once() {
+        let calls = AtomicU32::new(0);
+        let result = bounded_artist_fetch("test", Duration::from_secs(5), || {
+            let attempt = calls.fetch_add(1, AtomicOrdering::SeqCst);
+            async move {
+                if attempt == 0 {
+                    anyhow::bail!("TIDAL API error 500 Internal Server Error: blip")
+                }
+                Ok(42)
+            }
+        })
+        .await;
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn bounded_artist_fetch_does_not_retry_auth_errors() {
+        let calls = AtomicU32::new(0);
+        let result = bounded_artist_fetch("test", Duration::from_secs(5), || {
+            calls.fetch_add(1, AtomicOrdering::SeqCst);
+            async { Err::<i32, _>(anyhow::anyhow!("TIDAL API error 401 Unauthorized: expired")) }
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            1,
+            "auth errors must go straight to batch-level session recovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_artist_fetch_enforces_deadline() {
+        let result = bounded_artist_fetch("test", Duration::from_millis(200), || async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            Ok::<i32, anyhow::Error>(1)
+        })
+        .await;
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("timed out"), "unexpected error: {message}");
+    }
+
+    #[test]
+    fn artist_payload_cache_stores_hits_and_expires() {
+        // Negative sentinel ids: never collide with real TIDAL artist ids.
+        let id = -991_001;
+        assert!(cached_artist_payload(id, Duration::from_secs(60)).is_none());
+        store_artist_payload(id, json!({ "available": true }));
+        assert_eq!(
+            cached_artist_payload(id, Duration::from_secs(60)).unwrap()["available"],
+            json!(true)
+        );
+        // Zero max-age treats every entry as expired (the stale-serve bound).
+        assert!(cached_artist_payload(id, Duration::ZERO).is_none());
+    }
+
+    #[test]
+    fn artist_payload_cache_evicts_beyond_cap() {
+        let base = -992_000i64;
+        for i in 0..(ARTIST_PAYLOAD_CACHE_CAP as i64 + 8) {
+            store_artist_payload(base - i, json!({ "i": i }));
+        }
+        let cache = artist_payload_cache()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        assert!(cache.len() <= ARTIST_PAYLOAD_CACHE_CAP);
     }
 }
 
@@ -689,21 +913,45 @@ async fn fetch_tidal_artist_batch(client: &TidalClient, tidal_artist_id: i64) ->
     // Each filter is paginated separately; previously we fetched only the first
     // page (50 newest), which clipped any artist with a long catalog (e.g. a
     // 50+ year discography returned only modern compilations).
-    let albums_fut = fetch_all_artist_albums(client, tidal_artist_id, "ALBUMS");
-    let eps_fut = fetch_all_artist_albums(client, tidal_artist_id, "EPSANDSINGLES");
-    let compilations_fut = fetch_all_artist_albums(client, tidal_artist_id, "COMPILATIONS");
-    let live_fut = fetch_all_artist_albums(client, tidal_artist_id, "LIVE");
+    //
+    // Every group runs behind `bounded_artist_fetch`: a hard per-group
+    // deadline (queue wait included) plus one bounded retry. A slow or
+    // hanging TIDAL response can therefore delay this page by at most the
+    // largest group budget before it renders partial results - it can no
+    // longer hang the request indefinitely.
+    let albums_fut = bounded_artist_fetch("albums", ARTIST_ALBUM_GROUP_TIMEOUT, || {
+        fetch_all_artist_albums(client, tidal_artist_id, "ALBUMS")
+    });
+    let eps_fut = bounded_artist_fetch("eps-singles", ARTIST_ALBUM_GROUP_TIMEOUT, || {
+        fetch_all_artist_albums(client, tidal_artist_id, "EPSANDSINGLES")
+    });
+    let compilations_fut = bounded_artist_fetch("compilations", ARTIST_ALBUM_GROUP_TIMEOUT, || {
+        fetch_all_artist_albums(client, tidal_artist_id, "COMPILATIONS")
+    });
+    let live_fut = bounded_artist_fetch("live-albums", ARTIST_ALBUM_GROUP_TIMEOUT, || {
+        fetch_all_artist_albums(client, tidal_artist_id, "LIVE")
+    });
     // Top tracks raised from 10 -> 50 so the merged Top Tracks list on the
     // artist page surfaces a meaningful catalog even when the user has zero
     // library matches; 50 is TIDAL's per-page max.
-    let top_fut = client.get_artist_top_tracks(tidal_artist_id, 50, 0);
-    let videos_fut = client.get_artist_videos(tidal_artist_id, 50, 0);
-    let similar_fut = client.get_artist_similar(tidal_artist_id, 20, 0);
-    let bio_fut = client.get_artist_bio(tidal_artist_id);
+    let top_fut = bounded_artist_fetch("top-tracks", ARTIST_SINGLE_FETCH_TIMEOUT, || {
+        client.get_artist_top_tracks(tidal_artist_id, 50, 0)
+    });
+    let videos_fut = bounded_artist_fetch("videos", ARTIST_SINGLE_FETCH_TIMEOUT, || {
+        client.get_artist_videos(tidal_artist_id, 50, 0)
+    });
+    let similar_fut = bounded_artist_fetch("similar-artists", ARTIST_SINGLE_FETCH_TIMEOUT, || {
+        client.get_artist_similar(tidal_artist_id, 20, 0)
+    });
+    let bio_fut = bounded_artist_fetch("bio", ARTIST_SINGLE_FETCH_TIMEOUT, || {
+        client.get_artist_bio(tidal_artist_id)
+    });
     // Profile fetch in the same parallel batch - gives us the artist's
     // canonical `picture` URL so the page hero can fall back to TIDAL
     // when the local row has no `photo_url`.
-    let profile_fut = client.get_artist(tidal_artist_id);
+    let profile_fut = bounded_artist_fetch("profile", ARTIST_SINGLE_FETCH_TIMEOUT, || {
+        client.get_artist(tidal_artist_id)
+    });
 
     let (albums, eps, comps, live, top, videos, similar, bio, profile) = tokio::join!(
         albums_fut,
@@ -744,6 +992,24 @@ pub(super) async fn build_tidal_artist_payload(
     tidal_artist_id: i64,
     tokens: &TidalTokens,
 ) -> Value {
+    // Warm-cache fast path: a fresh payload skips the nine-call TIDAL
+    // fan-out entirely. Library flags are re-resolved so an import that
+    // happened inside the TTL still renders as in-library.
+    if let Some(mut hit) = cached_artist_payload(tidal_artist_id, ARTIST_PAYLOAD_CACHE_TTL) {
+        refresh_payload_library_flags(state, &mut hit).await;
+        return hit;
+    }
+
+    // Single-flight: concurrent loads of the same artist wait for the first
+    // build instead of stacking duplicate fan-outs behind the TIDAL request
+    // limiter, then take the warm cache the winner just populated.
+    let build_lock = artist_build_lock(tidal_artist_id);
+    let _single_flight = build_lock.lock().await;
+    if let Some(mut hit) = cached_artist_payload(tidal_artist_id, ARTIST_PAYLOAD_CACHE_TTL) {
+        refresh_payload_library_flags(state, &mut hit).await;
+        return hit;
+    }
+
     let mut batch = fetch_tidal_artist_batch(client, tidal_artist_id).await;
 
     // When every fetch failed and the errors smell like auth, the session
@@ -778,6 +1044,33 @@ pub(super) async fn build_tidal_artist_payload(
         bio: bio_res,
         profile: profile_res,
     } = batch;
+
+    // Per-section failure list so the frontend can distinguish "TIDAL says
+    // this artist has no videos" from "the videos fetch timed out". Purely
+    // additive: existing consumers key off `available` alone.
+    let sections_failed: Vec<&'static str> = [
+        ("albums", albums_res.is_err()),
+        ("eps_singles", eps_res.is_err()),
+        ("compilations", comps_res.is_err()),
+        ("live", live_res.is_err()),
+        ("top_tracks", top_res.is_err()),
+        ("videos", videos_res.is_err()),
+        ("similar_artists", similar_res.is_err()),
+        ("bio", bio_res.is_err()),
+        ("profile", profile_res.is_err()),
+    ]
+    .iter()
+    .filter(|(_, failed)| *failed)
+    .map(|(name, _)| *name)
+    .collect();
+    if !sections_failed.is_empty() {
+        tracing::warn!(
+            target: "noor.sync.tidal",
+            tidal_artist_id,
+            failed = ?sections_failed,
+            "TIDAL artist fan-out degraded to partial results"
+        );
+    }
 
     // Picture URL fallback chain. TIDAL's `/artists/{id}` record is the
     // canonical source, but it ships `picture: null` for many artists.
@@ -977,7 +1270,7 @@ pub(super) async fn build_tidal_artist_payload(
             })
         });
 
-    json!({
+    let payload = json!({
         "artist_name": artist_name,
         "albums": albums_payload,
         "top_tracks": top_tracks_payload,
@@ -985,8 +1278,83 @@ pub(super) async fn build_tidal_artist_payload(
         "similar_artists": similar_artists_payload,
         "bio": bio_payload,
         "picture_url": picture_url,
-        "available": available
-    })
+        "available": available,
+        "sections_failed": sections_failed,
+    });
+
+    if available && sections_failed.is_empty() {
+        // Only complete payloads enter the warm cache; caching a partial one
+        // would pin its missing shelves for the whole TTL. A degraded-but-
+        // available payload is served once and rebuilt on the next visit.
+        store_artist_payload(tidal_artist_id, payload.clone());
+    } else if let Some(mut stale) =
+        cached_artist_payload(tidal_artist_id, ARTIST_PAYLOAD_STALE_SERVE_MAX)
+    {
+        // Live rebuild came back with nothing (outage / rate-limit lockout)
+        // but we still hold a recent snapshot: degrade to slightly-old
+        // shelves instead of a blank page.
+        tracing::warn!(
+            target: "noor.sync.tidal",
+            tidal_artist_id,
+            "TIDAL artist fan-out returned nothing; serving cached payload"
+        );
+        refresh_payload_library_flags(state, &mut stale).await;
+        return stale;
+    }
+
+    payload
+}
+
+/// Cached payloads carry `local_id` / `in_library` flags that go stale the
+/// moment the user imports an album or follows an artist. Re-resolve them
+/// from the DB on every cache hit - two indexed lookups, so the hit stays
+/// instant while imports show up immediately.
+async fn refresh_payload_library_flags(state: &SharedState, payload: &mut Value) {
+    fn collect_tidal_ids(payload: &Value, key: &str) -> Vec<i64> {
+        payload
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| item.get("tidal_id").and_then(|v| v.as_i64()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    let album_tidal_ids = collect_tidal_ids(payload, "albums");
+    let similar_tidal_ids = collect_tidal_ids(payload, "similar_artists");
+    if album_tidal_ids.is_empty() && similar_tidal_ids.is_empty() {
+        return;
+    }
+
+    let (album_map, artist_map) = {
+        let s = state.read().await;
+        let album_map =
+            s.db.with_conn(|conn| queries::get_known_album_tidal_ids(conn, &album_tidal_ids))
+                .unwrap_or_default();
+        let artist_map =
+            s.db.with_conn(|conn| queries::get_known_artist_tidal_ids(conn, &similar_tidal_ids))
+                .unwrap_or_default();
+        (album_map, artist_map)
+    };
+
+    fn apply_flags(payload: &mut Value, key: &str, known: &HashMap<i64, i64>) {
+        let Some(items) = payload.get_mut(key).and_then(|v| v.as_array_mut()) else {
+            return;
+        };
+        for item in items {
+            let Some(tidal_id) = item.get("tidal_id").and_then(|v| v.as_i64()) else {
+                continue;
+            };
+            let local_id = known.get(&tidal_id).copied();
+            item["local_id"] = json!(local_id);
+            item["in_library"] = json!(local_id.is_some());
+        }
+    }
+
+    apply_flags(payload, "albums", &album_map);
+    apply_flags(payload, "similar_artists", &artist_map);
 }
 
 pub(super) async fn get_artist_discography(
