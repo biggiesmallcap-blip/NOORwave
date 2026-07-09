@@ -247,6 +247,7 @@
 							<ArtworkImage
 								src={album.artwork_url}
 								size={320}
+								tint={true}
 								fallbackText={album.title.slice(0, 1)}
 								decorative={true}
 							/>
@@ -255,7 +256,7 @@
 								type="button"
 								aria-label="Play {album.title}"
 								onclick={(event) => playAlbumFromCard(album, event)}
-							>Play</button>
+							><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M5 3l8 5-8 5V3z" fill="currentColor" /></svg></button>
 						</div>
 						<p class="album-title">{album.title}</p>
 						<p class="album-sub">
@@ -340,14 +341,25 @@
 		gap: var(--space-2);
 		color: inherit;
 		text-decoration: none;
+		transition: transform var(--motion-base);
+	}
+
+	.album-card:hover {
+		transform: translateY(-4px);
 	}
 
 	.album-art {
 		position: relative;
 		aspect-ratio: 1 / 1;
 		overflow: hidden;
-		border-radius: var(--radius-sm);
-		background: var(--bg-surface);
+		border-radius: var(--radius-md);
+		background: var(--bg-raised);
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+		transition: box-shadow var(--motion-base);
+	}
+
+	.album-card:hover .album-art {
+		box-shadow: 0 12px 26px -6px rgba(0, 0, 0, 0.5);
 	}
 
 	.album-art :global(img),
@@ -357,20 +369,32 @@
 		object-fit: cover;
 	}
 
+	/* Circular accent play button in the artwork's bottom-right, revealed on hover. */
 	.play-overlay {
 		position: absolute;
-		inset: auto var(--space-2) var(--space-2) auto;
+		inset: auto 8px 8px auto;
+		display: grid;
+		place-items: center;
+		width: 40px;
+		height: 40px;
 		border: 0;
-		border-radius: 999px;
-		padding: var(--space-1) var(--space-2);
+		border-radius: 50%;
 		background: var(--accent);
 		color: #fff;
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
+		box-shadow: 0 6px 16px -4px rgba(0, 0, 0, 0.55);
 		opacity: 0;
 		cursor: pointer;
-		transition: opacity var(--motion-fast), transform var(--motion-fast);
-		transform: translateY(4px);
+		transition: opacity var(--motion-base), transform var(--motion-base), filter var(--motion-fast);
+		transform: translateY(6px);
+	}
+
+	.play-overlay svg {
+		margin-left: 1px;
+	}
+
+	.play-overlay:hover {
+		transform: translateY(0) scale(1.06);
+		filter: brightness(1.08);
 	}
 
 	.album-card:hover .play-overlay,

@@ -144,6 +144,7 @@
               src={c.thumbnail}
               alt={c.title}
               size={320}
+              tint={true}
               fallbackText="~"
             />
           </div>
@@ -175,21 +176,21 @@
     flex-direction: column;
     gap: var(--space-2);
     background: none;
-    border: 1px solid transparent;
-    padding: var(--space-2);
+    border: 0;
+    padding: 0;
     border-radius: var(--radius-md);
     text-decoration: none;
     color: inherit;
     cursor: pointer;
-    transition: background var(--motion-base), border-color var(--motion-base);
+    transition: transform var(--motion-base);
     box-sizing: border-box;
   }
-  .card:hover, .card:focus-visible { background: var(--bg-hover); border-color: var(--panel-border); outline: none; }
-  .card:focus-visible { border-color: var(--accent-line); }
-  .art-wrap { position: relative; aspect-ratio: 1 / 1; width: 100%; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-hover); }
-  :global(.mood-art) { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform var(--motion-base); }
-  :global(.mood-art.fallback) { display: flex; align-items: center; justify-content: center; background: var(--bg-hover); }
-  :global(.mood-art.fallback span) { font-size: var(--font-size-4xl); color: var(--text-muted); }
-  .card:hover :global(.mood-art) { transform: scale(1.05); }
+  .card:hover { transform: translateY(-4px); }
+  .card:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+  .art-wrap { position: relative; aspect-ratio: 1 / 1; width: 100%; border-radius: var(--radius-md); overflow: hidden; background: var(--bg-raised); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22); transition: box-shadow var(--motion-base); }
+  .card:hover .art-wrap { box-shadow: 0 12px 26px -6px rgba(0, 0, 0, 0.5); }
+  :global(.mood-art) { width: 100%; height: 100%; object-fit: cover; display: block; }
+  :global(.mood-art.fallback) { display: flex; align-items: center; justify-content: center; }
+  :global(.mood-art.fallback span) { font-size: var(--font-size-4xl); color: rgba(255, 255, 255, 0.92); }
   .card-title { margin: 0; font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: var(--line-height-snug); }
 </style>

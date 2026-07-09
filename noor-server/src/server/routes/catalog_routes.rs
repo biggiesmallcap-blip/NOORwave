@@ -202,6 +202,10 @@ pub(super) struct ListParams {
     // Strict filter: tracks where tracks.is_favorite=1 only. Takes precedence
     // over `favorite_only` when both are set.
     liked_only: Option<bool>,
+    // Albums only: restrict to a single decade (e.g. 1990 => years 1990-1999).
+    // Resolves the library's decade chips server-side so the filter is complete
+    // instead of narrowing only the page already loaded on the client.
+    decade: Option<i64>,
     // DSP filter params
     bpm_min: Option<f64>,
     bpm_max: Option<f64>,
@@ -303,14 +307,41 @@ pub(super) async fn get_albums(
     let limit = clamp_catalog_list_limit(params.limit, 100);
     let offset = clamp_catalog_offset(params.offset);
     let favorite_only = params.favorite_only.unwrap_or(false);
+    // A decade <= 0 is meaningless; treat it as "no decade filter".
+    let decade = params.decade.filter(|d| *d > 0);
 
     state
         .db
         .with_conn(|conn| {
-            let albums =
-                queries::get_albums(conn, &sort_by, &sort_dir, limit, offset, favorite_only)?;
-            let total = queries::get_album_count(conn, favorite_only)?;
+            let albums = queries::get_albums(
+                conn,
+                &sort_by,
+                &sort_dir,
+                limit,
+                offset,
+                favorite_only,
+                decade,
+            )?;
+            let total = queries::get_album_count(conn, favorite_only, decade)?;
             Ok(Json(json!({ "albums": albums, "total": total })))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// GET /api/albums/decades: distinct decades present in the album library,
+/// ascending. Feeds the library's decade-filter chips so a decade can be
+/// selected and resolved server-side against the full library.
+pub(super) async fn get_album_decades(
+    State(state): State<SharedState>,
+    Query(params): Query<ListParams>,
+) -> Result<Json<Value>, StatusCode> {
+    let state = state.read().await;
+    let favorite_only = params.favorite_only.unwrap_or(false);
+    state
+        .db
+        .with_conn(|conn| {
+            let decades = queries::get_album_decades(conn, favorite_only)?;
+            Ok(Json(json!({ "decades": decades })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }

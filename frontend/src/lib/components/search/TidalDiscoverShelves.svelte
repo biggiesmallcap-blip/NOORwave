@@ -210,12 +210,13 @@
 						src={item.artwork_url}
 						alt={item.title}
 						size={320}
+						tint={true}
 						fallbackText={fallbackGlyph(item.kind)}
 						decorative={true}
 					/>
 					<PlayOverlay
-						position="center"
-						size="md"
+						position="corner"
+						size="sm"
 						label={ariaLabelFor(item)}
 					/>
 				</div>
@@ -449,25 +450,23 @@
 		flex-direction: column;
 		gap: var(--space-2);
 		background: none;
-		border: 1px solid transparent;
-		padding: var(--space-2);
+		border: 0;
+		padding: 0;
 		border-radius: var(--radius-md);
 		text-align: left;
 		scroll-snap-align: start;
-		transition: background var(--motion-base), border-color var(--motion-base);
+		transition: transform var(--motion-base);
 		box-sizing: border-box;
 		cursor: pointer;
 		font: inherit;
 		color: inherit;
 	}
-	.card:hover,
-	.card:focus-visible {
-		background: var(--bg-hover);
-		border-color: var(--border-subtle);
-		outline: none;
+	.card:hover {
+		transform: translateY(-4px);
 	}
 	.card:focus-visible {
-		border-color: var(--accent-line);
+		outline: 2px solid var(--accent);
+		outline-offset: 4px;
 	}
 	.card:hover :global(.play-overlay),
 	.card:focus-visible :global(.play-overlay) {
@@ -483,6 +482,17 @@
 		overflow: hidden;
 		background: var(--bg-surface);
 	}
+	/* Album/mixed cards get the clean square-with-shadow artwork; the track-row
+	   variant keeps its own smaller thumbnail styling below. */
+	.card .art-wrap {
+		border-radius: var(--radius-md);
+		background: var(--bg-raised);
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+		transition: box-shadow var(--motion-base);
+	}
+	.card:hover .art-wrap {
+		box-shadow: 0 12px 26px -6px rgba(0, 0, 0, 0.5);
+	}
 	.art-wrap :global(.discover-art) {
 		width: 100%;
 		height: 100%;
@@ -490,9 +500,6 @@
 		object-position: center;
 		display: block;
 		transition: transform var(--motion-base);
-	}
-	.card:hover :global(.discover-art) {
-		transform: scale(1.05);
 	}
 	.art-wrap :global(.discover-art.fallback) {
 		display: flex;

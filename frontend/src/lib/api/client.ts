@@ -2245,12 +2245,30 @@ export const api = {
 		});
 	},
 
-	getAlbums(sortBy = 'title', sortDir = 'asc', limit = 50, offset = 0, favoriteOnly = true) {
-		return fetchApi<{ albums: Album[]; total: number }>('/api/albums', {
+	getAlbums(
+		sortBy = 'title',
+		sortDir = 'asc',
+		limit = 50,
+		offset = 0,
+		favoriteOnly = true,
+		decade: number | null = null,
+	) {
+		const params: Record<string, string> = {
 			sort_by: sortBy,
 			sort_dir: sortDir,
 			limit: String(limit),
 			offset: String(offset),
+			favorite_only: String(favoriteOnly),
+		};
+		if (decade != null) params.decade = String(decade);
+		return fetchApi<{ albums: Album[]; total: number }>('/api/albums', params);
+	},
+
+	// Distinct decades (1950, 1960, ...) present in the album library. Powers the
+	// library's decade-filter chips so a decade resolves server-side against the
+	// full library instead of only the albums already paged into the client.
+	getAlbumDecades(favoriteOnly = true) {
+		return fetchApi<{ decades: number[] }>('/api/albums/decades', {
 			favorite_only: String(favoriteOnly),
 		});
 	},

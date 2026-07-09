@@ -12,7 +12,23 @@ export const isLoadingMore = writable(false);
 
 export const sortBy = writable('date_added');
 export const sortDir = writable<'asc' | 'desc'>('desc');
-export const viewMode = writable<'grid' | 'list'>('grid');
+
+// Album grid/list choice persists across sessions (localStorage), not just per
+// history entry, so the layout the user picked survives a reload/relaunch.
+const VIEW_MODE_KEY = 'library.viewMode';
+function createViewMode() {
+	let initial: 'grid' | 'list' = 'grid';
+	if (typeof localStorage !== 'undefined') {
+		const saved = localStorage.getItem(VIEW_MODE_KEY);
+		if (saved === 'list' || saved === 'grid') initial = saved;
+	}
+	const store = writable<'grid' | 'list'>(initial);
+	if (typeof localStorage !== 'undefined') {
+		store.subscribe((value) => localStorage.setItem(VIEW_MODE_KEY, value));
+	}
+	return store;
+}
+export const viewMode = createViewMode();
 export const searchQuery = writable('');
 
 // Selected tracks for batch operations
@@ -52,11 +68,17 @@ export async function loadTracks(
 	}
 }
 
-export async function loadAlbums(sort = 'title', dir = 'asc', limit = PAGE_SIZE, offset = 0) {
+export async function loadAlbums(
+	sort = 'title',
+	dir = 'asc',
+	limit = PAGE_SIZE,
+	offset = 0,
+	decade: number | null = null,
+) {
 	if (offset === 0) isLoading.set(true);
 	else isLoadingMore.set(true);
 	try {
-		const data = await cachedApi.getAlbums(sort, dir, limit, offset);
+		const data = await cachedApi.getAlbums(sort, dir, limit, offset, true, decade);
 		if (offset === 0) {
 			albums.set(data.albums);
 		} else {

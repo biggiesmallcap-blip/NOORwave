@@ -86,13 +86,15 @@
 					<ArtworkImage
 						className="art"
 						src={station.image_url}
+						alt={station.title}
 						size={320}
+						tint={true}
 						fallbackText="RAD"
 						decorative={true}
 					/>
 					<PlayOverlay
-						position="center"
-						size="md"
+						position="corner"
+						size="sm"
 						label={`Play radio station ${station.title}`}
 					/>
 				</div>
@@ -222,25 +224,23 @@
 		flex-direction: column;
 		gap: 10px;
 		background: none;
-		border: 1px solid transparent;
-		padding: 8px;
-		border-radius: 12px;
+		border: 0;
+		padding: 0;
+		border-radius: var(--radius-md);
 		text-align: left;
 		scroll-snap-align: start;
-		transition: background var(--motion-base), border-color var(--motion-base);
+		transition: transform var(--motion-base);
 		box-sizing: border-box;
 		cursor: pointer;
 		font: inherit;
 		color: inherit;
 	}
-	.mix-card:hover,
-	.mix-card:focus-visible {
-		background: rgba(255, 255, 255, 0.04);
-		border-color: rgba(255, 255, 255, 0.08);
-		outline: none;
+	.mix-card:hover {
+		transform: translateY(-4px);
 	}
 	.mix-card:focus-visible {
-		border-color: var(--accent-line, rgba(125, 200, 175, 0.6));
+		outline: 2px solid var(--accent);
+		outline-offset: 4px;
 	}
 
 	.mix-card:hover :global(.play-overlay),
@@ -253,9 +253,14 @@
 		position: relative;
 		aspect-ratio: 1 / 1;
 		width: 100%;
-		border-radius: 8px;
+		border-radius: var(--radius-md);
 		overflow: hidden;
-		background: rgba(255, 255, 255, 0.04);
+		background: var(--bg-raised);
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+		transition: box-shadow var(--motion-base);
+	}
+	.mix-card:hover .art-wrap {
+		box-shadow: 0 12px 26px -6px rgba(0, 0, 0, 0.5);
 	}
 	.art-wrap :global(.art) {
 		width: 100%;
@@ -264,22 +269,16 @@
 	.art-wrap :global(img.art) {
 		display: block;
 		object-fit: cover;
-		transition: transform var(--motion-base);
-	}
-	.mix-card:hover :global(img.art) {
-		transform: scale(1.05);
 	}
 	.art-wrap :global(.art.fallback) {
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		background: rgba(255, 255, 255, 0.04);
-		color: rgba(255, 255, 255, 0.55);
 	}
 	.art-wrap :global(.art.fallback span) {
 		font-size: var(--font-size-4xl);
 		font-weight: var(--font-weight-semibold);
-		color: rgba(255, 255, 255, 0.55);
+		color: rgba(255, 255, 255, 0.92);
 	}
 
 	.meta {
