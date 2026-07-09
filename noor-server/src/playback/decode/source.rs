@@ -204,6 +204,16 @@ pub(crate) async fn append_stream_bytes(
     segment_index: usize,
 ) -> anyhow::Result<Vec<u8>> {
     let segment_label = dash_segment_debug_label(url);
+    if is_tidal_ad_segment_host(url) {
+        // TIDAL's LOW/AAC tier can route segments to its ad CDN
+        // (sp-ad-cf.audio.tidal.com). Those signed URLs are unreachable from
+        // many networks and only ever time out, so bail immediately instead of
+        // eating a 12s timeout per segment; the caller then falls back to a
+        // reachable quality tier (e.g. LOSSLESS) that resolves normally.
+        anyhow::bail!(
+            "DASH segment {segment_index} skipped: TIDAL ad-tier CDN host ({segment_label})"
+        );
+    }
     // A single flaky TIDAL CDN segment (timeout or transient fetch/chunk error)
     // used to abort the whole DJ profile rebuild / prebuffer. Retry once with a
     // short backoff before giving up so one hiccup doesn't kill the transition.
@@ -285,6 +295,22 @@ pub(crate) fn build_tidal_cdn_client() -> reqwest::Client {
         .unwrap_or_else(|_| reqwest::Client::new())
 }
 
+/// TIDAL serves its ad / low-tier CDN from `sp-ad-cf.audio.tidal.com`. Those
+/// signed segment URLs are frequently unreachable and only time out, so this
+/// host is treated as a fast non-fatal miss and the caller falls back to a
+/// reachable quality tier. Matches the ad-CDN subdomain (`-ad-cf.`) without
+/// catching the normal `*.audio.tidal.com` playback hosts.
+fn is_tidal_ad_segment_host(url: &str) -> bool {
+    let host = url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(url)
+        .split(['/', '?'])
+        .next()
+        .unwrap_or("");
+    host.contains("-ad-cf.")
+}
+
 pub(crate) fn dash_segment_debug_label(url: &str) -> String {
     let (base, query) = url.split_once('?').unwrap_or((url, ""));
     let path = base.split_once("://").map(|(_, rest)| rest).unwrap_or(base);
@@ -320,6 +346,20 @@ mod tests {
 
     fn never_stopped() -> Arc<AtomicBool> {
         Arc::new(AtomicBool::new(false))
+    }
+
+    #[test]
+    fn ad_cdn_host_is_detected_without_catching_normal_hosts() {
+        assert!(is_tidal_ad_segment_host(
+            "https://sp-ad-cf.audio.tidal.com/mediatracks/abc/0.mp4?Policy=x&Signature=y"
+        ));
+        // Normal playback CDN hosts must not be treated as ad segments.
+        assert!(!is_tidal_ad_segment_host(
+            "https://sp-pr-cf.audio.tidal.com/mediatracks/abc/0.mp4?Policy=x"
+        ));
+        assert!(!is_tidal_ad_segment_host(
+            "https://d1234567890.cloudfront.net/mediatracks/abc/0.mp4"
+        ));
     }
 
     #[test]
