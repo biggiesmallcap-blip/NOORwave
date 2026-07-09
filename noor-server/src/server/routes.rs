@@ -13093,6 +13093,7 @@ pub(crate) fn flush_active_listen_session_locked(
         let track = queue::get_track_by_id(conn, track_id)?.ok_or_else(|| {
             anyhow::anyhow!("track {} missing when flushing listen session", track_id)
         })?;
+        let listened_ms = player::clamp_listened_ms(listened_ms, track.duration_ms);
         let completed = player::is_completed_listen(&track, listened_ms);
         queries::record_listen_history(
             conn,

@@ -795,3 +795,24 @@ spectral flux, onset density, and centroid so busy-but-quiet tracks outrank
 sparse loud ones. Needs another CURRENT_ANALYSIS_VERSION bump and a fresh
 blast-radius pass over the [0,1] consumers; batch with the next DSP change.
 Spawned by: Sonic Field energy rescale 2026-07-09
+
+### playback: listen timer should be position-based, not wall-clock
+
+ActiveListenSession (player.rs:1128) accrues wall-clock time whenever the
+player is nominally playing, so stalled streams and stuck end-of-queue states
+recorded runaway listens (2795 s on a 334 s track in the live DB). Shipped
+mitigation: player::clamp_listened_ms caps new rows at track length and the
+analytics queries cap historical rows the same way. The clamp costs repeat-one
+loops their extra loop time; the proper fix is accounting driven by actual
+playback-position advancement (or a pause() call when position stops moving),
+which lives in the playback runtime hot path and needs its own careful pass.
+Spawned by: listen accounting fixes 2026-07-09
+
+### radio: same-artist marathon needs a diversity cap
+
+On 2026-06-10 the radio played 12 consecutive Celine Dion tracks to
+completion (~52 min, one session). Whatever artist-diversity rule the radio
+candidate funnel has did not hold in that mode. Check orchestrate_song /
+radio post-scoring for a same-artist run cap (e.g. max 2 consecutive, decay
+per artist within a session).
+Spawned by: listen accounting fixes 2026-07-09

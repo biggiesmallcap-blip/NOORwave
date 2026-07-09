@@ -1953,6 +1953,21 @@ pub fn is_completed_listen(track: &Track, listened_ms: i64) -> bool {
         .unwrap_or(listened_ms >= 240_000)
 }
 
+/// Cap a flushed listen-session duration at the track's length when known.
+///
+/// The session timer accrues wall-clock time while the player is nominally
+/// playing, so a stalled stream or a player stuck at end-of-queue can record
+/// arbitrarily long listens (observed: 2795 s on a 334 s track). Capping at
+/// the track length bounds the damage. Trade-off: a repeat-one loop flushes
+/// as a single session and loses its extra loop time; position-based
+/// accounting is the proper fix (see FOLLOWUPS).
+pub fn clamp_listened_ms(listened_ms: i64, track_duration_ms: Option<i64>) -> i64 {
+    match track_duration_ms {
+        Some(duration_ms) if duration_ms > 0 => listened_ms.min(duration_ms),
+        _ => listened_ms,
+    }
+}
+
 pub(super) fn playback_anchor_index(
     queue_items: &[QueueItem],
     current_track_id: Option<i64>,
@@ -2087,6 +2102,21 @@ mod tests {
         automix_score, automix_scored_reason, build_automix_extension_with_reasons,
         evaluate_automix_for_seed,
     };
+
+    #[test]
+    fn clamp_listened_ms_caps_runaway_sessions_at_track_length() {
+        // Wall-clock accrual during a stalled stream must not outlive the
+        // track (observed: 2795 s recorded on a 334 s track).
+        assert_eq!(clamp_listened_ms(2_795_000, Some(334_000)), 334_000);
+        assert_eq!(clamp_listened_ms(200_000, Some(334_000)), 200_000);
+    }
+
+    #[test]
+    fn clamp_listened_ms_passes_through_unknown_durations() {
+        assert_eq!(clamp_listened_ms(2_795_000, None), 2_795_000);
+        assert_eq!(clamp_listened_ms(2_795_000, Some(0)), 2_795_000);
+        assert_eq!(clamp_listened_ms(2_795_000, Some(-1)), 2_795_000);
+    }
 
     fn conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
