@@ -400,6 +400,16 @@ pub struct PlayMixedQueueRequest {
     items: Vec<MixedQueueItemRequest>,
     #[serde(default)]
     shuffle: bool,
+    /// Full shuffle-mode parity ('true' | 'weighted' | 'genre'); `shuffle`
+    /// stays as a boolean alias for 'true'.
+    #[serde(default)]
+    shuffle_mode: Option<String>,
+}
+
+/// Body of POST /api/playback/queue/play-item - jump to a queue row by id.
+#[derive(Debug, Deserialize)]
+pub struct PlayQueueItemRequest {
+    queue_item_id: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -933,6 +943,7 @@ pub fn api_routes(state: SharedState) -> Router {
         )
         .route("/api/playback/queue/add", post(add_queue_track))
         .route("/api/playback/queue/mixed", post(play_mixed_queue))
+        .route("/api/playback/queue/play-item", post(play_queue_item))
         .route("/api/playback/queue/remove", post(remove_queue_track))
         .route("/api/playback/queue/move", post(move_queue_track))
         .route("/api/playback/queue/clear", post(clear_queue_route))
@@ -2598,7 +2609,7 @@ pub(super) async fn start_first_radio_queue_item(
     clear_ephemeral_playback_markers(state, true).await;
 
     let previous_track_id = current_playback_track_id(state).await;
-    let mut snapshot = {
+    let snapshot = {
         let state_guard = state.read().await;
         state_guard
             .db
@@ -2614,28 +2625,47 @@ pub(super) async fn start_first_radio_queue_item(
             })?
     };
 
-    snapshot = resolve_or_skip_pending_current(
+    start_current_queue_item_playback(
         state,
         snapshot,
         playback_generation,
+        previous_track_id,
         "start_first_radio_queue_item",
+        "radio",
     )
     .await
-    .map_err(|error| {
-        tracing::error!(
-            target: "noor.playback.advance",
-            event = "radio_start_pending_advance_failed",
-            error = %error,
-            "failed to resolve or skip first radio queue item"
-        );
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "status": "playback_state_update_failed",
-                "message": "Failed to start the radio queue.",
-            })),
-        )
-    })?;
+}
+
+/// Shared "make the anchored queue row audible" tail: resolve (or skip) a
+/// pending current row, resolve the TIDAL stream, switch the runtime to it,
+/// sync the listen session, and emit events. Callers position the anchor
+/// first (start-of-queue, or an explicit row via play_queue_item_anchor).
+async fn start_current_queue_item_playback(
+    state: &SharedState,
+    mut snapshot: player::PlaybackSnapshot,
+    playback_generation: u64,
+    previous_track_id: Option<i64>,
+    context: &'static str,
+    transition_source: &'static str,
+) -> Result<player::PlaybackSnapshot, (StatusCode, Json<Value>)> {
+    snapshot = resolve_or_skip_pending_current(state, snapshot, playback_generation, context)
+        .await
+        .map_err(|error| {
+            tracing::error!(
+                target: "noor.playback.advance",
+                event = "queue_start_pending_advance_failed",
+                context,
+                error = %error,
+                "failed to resolve or skip the current queue item"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "playback_state_update_failed",
+                    "message": "Failed to start the queue.",
+                })),
+            )
+        })?;
 
     let play_track = snapshot.state.current_track.clone();
 
@@ -2742,7 +2772,8 @@ pub(super) async fn start_first_radio_queue_item(
         let _ = runtime_handle.stop();
     }
 
-    record_transition_if_changed(state, previous_track_id, &snapshot, "radio", true).await;
+    record_transition_if_changed(state, previous_track_id, &snapshot, transition_source, true)
+        .await;
 
     let state_guard = state.read().await;
     if let Some(track_id) = play_track
@@ -2759,6 +2790,58 @@ pub(super) async fn start_first_radio_queue_item(
     drop(state_guard);
 
     Ok(overlay_snapshot_with_external_track(state, snapshot).await)
+}
+
+/// POST /api/playback/queue/play-item - jump playback to a specific queue row
+/// (library or pending) and start it. The unified click handler for queue
+/// rows: pending rows resolve (import + promote) on the way in, and unlike
+/// play-by-track-id this cannot land on the wrong row when the same track
+/// appears twice in the queue.
+async fn play_queue_item(
+    State(state): State<SharedState>,
+    Json(payload): Json<PlayQueueItemRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let playback_generation = bump_playback_generation(&state).await;
+    // In-queue jump: clear any live external overlay but keep queue rows.
+    clear_ephemeral_playback_markers(&state, false).await;
+
+    let previous_track_id = current_playback_track_id(&state).await;
+    let snapshot = {
+        let state_guard = state.read().await;
+        state_guard
+            .db
+            .with_conn(|conn| player::play_queue_item_anchor(conn, payload.queue_item_id))
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "status": "playback_state_update_failed",
+                        "message": "Failed to jump to that queue item.",
+                    })),
+                )
+            })?
+    };
+    let Some(snapshot) = snapshot else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "queue item not found" })),
+        ));
+    };
+
+    let snapshot = start_current_queue_item_playback(
+        &state,
+        snapshot,
+        playback_generation,
+        previous_track_id,
+        "play_queue_item",
+        "queue",
+    )
+    .await?;
+    refresh_dj_after_queue_change(state, "play_queue_item").await;
+    Ok(Json(json!({
+        "state": snapshot.state,
+        "queue": snapshot.queue,
+    })))
 }
 
 async fn radio_start(
@@ -8180,29 +8263,41 @@ async fn play_mixed_queue(
         ));
     }
     let queued_count = candidates.len();
-    let shuffle = payload.shuffle;
+    // `shuffle_mode` carries full parity ('true' | 'weighted' | 'genre');
+    // the boolean `shuffle` stays as an alias for 'true'.
+    let shuffle_mode = payload
+        .shuffle_mode
+        .as_deref()
+        .map(queue::ShuffleMode::parse)
+        .unwrap_or(if payload.shuffle {
+            queue::ShuffleMode::True
+        } else {
+            queue::ShuffleMode::Off
+        });
 
     let db = {
         let state_guard = state.read().await;
         state_guard.db.clone()
     };
-    let build = db
+    let (build, shuffle_debug) = db
         .with_conn(move |conn| {
             let build = crate::server::radio_pipeline::replace_queue_with_ordered_candidates(
                 conn,
                 &candidates,
             )?;
-            if shuffle {
+            let mut shuffle_debug = None;
+            if shuffle_mode != queue::ShuffleMode::Off {
                 let seed = crate::playback::shuffle::generate_shuffle_seed();
-                crate::playback::queue::apply_shuffle_with_seed(
+                let result = crate::playback::queue::apply_shuffle_with_seed(
                     conn,
-                    queue::ShuffleMode::True,
+                    shuffle_mode,
                     None,
                     seed,
                     "play_mixed_queue",
                 )?;
+                shuffle_debug = result.debug;
             }
-            Ok(build)
+            Ok((build, shuffle_debug))
         })
         .map_err(|e| {
             tracing::error!("play_mixed_queue: queue build failed: {e}");
@@ -8230,6 +8325,7 @@ async fn play_mixed_queue(
     Ok(Json(json!({
         "queued_count": queued_count,
         "pending_count": pending_count,
+        "shuffle_debug": shuffle_debug,
         "state": snapshot.state,
         "queue": snapshot.queue,
     })))

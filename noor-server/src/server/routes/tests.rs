@@ -2679,6 +2679,29 @@ async fn replace_playback_queue_accepts_one_shot_shuffle_mode() {
     assert_eq!(body["shuffle_debug"]["scope"], "queue_replace");
 }
 
+#[tokio::test]
+async fn play_queue_item_unknown_row_returns_not_found() {
+    let db = fresh_migrated_db();
+    seed_basic_tracks(&db);
+
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/playback/queue/play-item")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"queue_item_id":424242}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
 #[test]
 fn tidal_play_mix_shuffle_returns_debug_and_preserves_tracks() {
     let mut tracks = vec![
@@ -8021,6 +8044,7 @@ async fn all_api_routes_are_registered() {
         ("GET", "/api/playback/queue"),
         ("POST", "/api/playback/queue/add"),
         ("POST", "/api/playback/queue/mixed"),
+        ("POST", "/api/playback/queue/play-item"),
         ("POST", "/api/playback/queue/remove"),
         ("POST", "/api/playback/queue/move"),
         ("POST", "/api/playback/queue/clear"),

@@ -1265,6 +1265,38 @@ pub fn replace_queue_with_reasons(
     Ok(queue)
 }
 
+/// Jump the playback anchor to a specific queue row (library or pending).
+///
+/// Returns `None` when the queue item does not exist. `current_track_id` is
+/// NULL for a pending row; the route layer resolves it (import + promote) and
+/// switches the audio runtime. Anchoring by queue-item id - not track id -
+/// means duplicate tracks in the queue always highlight the clicked row.
+pub fn play_queue_item_anchor(
+    conn: &Connection,
+    queue_item_id: i64,
+) -> Result<Option<PlaybackSnapshot>> {
+    let row: Option<(i64, Option<i64>)> = conn
+        .query_row(
+            "SELECT id, track_id FROM queue WHERE id = ?1",
+            params![queue_item_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((queue_id, track_id)) = row else {
+        return Ok(None);
+    };
+    conn.execute(
+        "UPDATE playback_state
+         SET current_track_id = ?1,
+             current_queue_item_id = ?2,
+             position_ms = 0,
+             is_playing = 1
+         WHERE id = 1",
+        params![track_id, queue_id],
+    )?;
+    Ok(Some(load_snapshot(conn)?))
+}
+
 pub fn play_track_now(conn: &Connection, track_id: i64) -> Result<PlaybackSnapshot> {
     let track = queue::get_track_by_id(conn, track_id)?
         .ok_or_else(|| anyhow!("track {track_id} not found"))?;
@@ -4589,6 +4621,50 @@ mod tests {
         let expected_qid = q.iter().find(|i| i.track.id == 1).unwrap().id;
         assert_eq!(state.current_queue_item_id, Some(expected_qid));
         assert!(state.is_playing);
+    }
+
+    #[test]
+    fn play_queue_item_anchor_jumps_to_the_exact_row() {
+        let conn = conn();
+        // Two rows share track 1; anchoring by queue-item id must pick the
+        // exact clicked row, which play-by-track-id cannot do.
+        let tracks = load_tracks(&conn, &[1, 1, 2]);
+        let items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        let second_row_of_track1 = items.iter().filter(|i| i.track.id == 1).nth(1).unwrap().id;
+
+        let snap = play_queue_item_anchor(&conn, second_row_of_track1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snap.state.current_queue_item_id, Some(second_row_of_track1));
+        assert_eq!(snap.state.current_track.as_ref().map(|t| t.id), Some(1));
+        assert!(snap.state.is_playing);
+    }
+
+    #[test]
+    fn play_queue_item_anchor_pending_row_sets_null_track() {
+        let conn = conn();
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source, pending_artist, pending_title,
+                                pending_at, tidal_id_hint)
+             VALUES (NULL, 0, 'radio_pending', 'Artist', 'Title', datetime('now'), 555)",
+            [],
+        )
+        .unwrap();
+        let qid: i64 = conn
+            .query_row("SELECT id FROM queue", [], |r| r.get(0))
+            .unwrap();
+
+        let snap = play_queue_item_anchor(&conn, qid).unwrap().unwrap();
+        // Pending row: anchored by queue item with a NULL track, exactly the
+        // shape resolve_or_skip_pending_current expects to pick up.
+        assert_eq!(snap.state.current_queue_item_id, Some(qid));
+        assert!(snap.state.current_track.is_none());
+    }
+
+    #[test]
+    fn play_queue_item_anchor_missing_row_returns_none() {
+        let conn = conn();
+        assert!(play_queue_item_anchor(&conn, 12345).unwrap().is_none());
     }
 
     #[test]
