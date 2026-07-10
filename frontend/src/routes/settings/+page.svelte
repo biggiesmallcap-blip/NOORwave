@@ -31,6 +31,8 @@
 		loadTidalStatus as refreshTidalStatus,
 		loadSyncInfo,
 		setAutoSyncDaily,
+		setSyncEnrichment,
+		recleanLibrary,
 		cancelTidalSync,
 		startTidalSync
 	} from '$lib/stores/tidal';
@@ -656,6 +658,42 @@
 	async function toggleAutoSync() {
 		const current = $syncInfo?.auto_sync_daily ?? false;
 		await setAutoSyncDaily(!current);
+	}
+
+	async function toggleSyncEnrichment() {
+		const current = $syncInfo?.enrich_from_favorite_albums ?? true;
+		await setSyncEnrichment(!current);
+	}
+
+	let recleanRunning = $state(false);
+	let recleanSummary = $state('');
+
+	async function handleReclean() {
+		if (recleanRunning) return;
+		const confirmed = confirm(
+			'Reclean library from likes?\n\n' +
+				'Non-liked tracks from favorited albums move to the hidden discovery pool ' +
+				'(they keep feeding radio and recommendations), and exact duplicate copies ' +
+				'are merged. Liked songs are never removed.'
+		);
+		if (!confirmed) return;
+		recleanRunning = true;
+		recleanSummary = '';
+		const summary = await recleanLibrary();
+		recleanRunning = false;
+		if (!summary) {
+			recleanSummary = 'Reclean failed or is already running - try again in a moment.';
+			return;
+		}
+		const merged =
+			summary.merged_groups > 0
+				? `, merged ${summary.merged_groups} duplicate ${summary.merged_groups === 1 ? 'group' : 'groups'} (${summary.removed_tracks} copies removed)`
+				: ', no duplicates merged';
+		const review =
+			summary.skipped_groups > 0
+				? `; ${summary.skipped_groups} version ${summary.skipped_groups === 1 ? 'group' : 'groups'} left for review on the Duplicates page`
+				: '';
+		recleanSummary = `Moved ${summary.demoted.toLocaleString()} album tracks to the discovery pool${merged}${review}.`;
 	}
 
 	async function syncLibrary(mode: 'auto' | 'full' = 'auto') {
@@ -2465,6 +2503,17 @@
 								/>
 							</strong>
 						</div>
+						<div class="info-row">
+							<span title="Imports the rest of your favorited albums as hidden tracks that sharpen radio and recommendations. They never show in your library or Genre Galaxy - only tracks you like do.">
+								Learn from favorite albums
+							</span>
+							<strong>
+								<Toggle
+									checked={$syncInfo?.enrich_from_favorite_albums ?? true}
+									onchange={() => void toggleSyncEnrichment()}
+								/>
+							</strong>
+						</div>
 					</div>
 					<div class="action-row">
 						<button class="btn btn-primary" onclick={() => void syncLibrary()} disabled={$syncStatus === 'syncing'}>
@@ -2484,8 +2533,19 @@
 						{#if $syncStatus === 'syncing'}
 							<button class="btn btn-glass" onclick={handleCancelSync}>Cancel</button>
 						{/if}
+						<button
+							class="btn btn-glass"
+							onclick={() => void handleReclean()}
+							disabled={recleanRunning || $syncStatus === 'syncing'}
+							title="Move non-liked album tracks to the hidden discovery pool and merge exact duplicate copies. Liked songs are never removed."
+						>
+							{recleanRunning ? 'Recleaning…' : 'Reclean library'}
+						</button>
 						<button class="btn btn-glass" onclick={disconnectTidal}>Disconnect</button>
 					</div>
+					{#if recleanSummary}
+						<p class="reclean-summary">{recleanSummary}</p>
+					{/if}
 				{/if}
 			</section>
 
@@ -5204,6 +5264,11 @@
 		color: var(--state-error);
 		font-weight: var(--font-weight-medium);
 		word-break: break-word;
+	}
+	.reclean-summary {
+		margin: 8px 0 0;
+		font-size: var(--font-size-sm);
+		color: rgba(255, 255, 255, 0.6);
 	}
 
 

@@ -813,3 +813,14 @@ breaker is open. Find the caller (likely album/artist playcount enrichment or
 auto_enrich) and gate new fan-outs on breaker state so idle sessions stop
 burning proxy quota and log noise.
 Spawned by: artist page + playback hardening 2026-07-09
+
+### sync dedupe: fold TIDAL's discrete version field into matching
+
+TidalTrack discards the API's separate "version" field (e.g. "2011 Remaster",
+"Extended Mix") into the serde flatten extra map; import dedupe and the
+duplicate classifier only see version markers that TIDAL folded into the
+title string. A remix whose title carries no marker word reads as the base
+recording. Read extra["version"] in the TIDAL client and append it to the
+title (or thread it through decide_import) so marker detection stops
+depending on title formatting.
+Spawned by: sync rework (bookmark albums, hidden enrichment, auto-dedupe) 2026-07-10

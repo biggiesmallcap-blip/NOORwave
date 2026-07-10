@@ -777,7 +777,7 @@ fn insert_tidal_track_uses_favorite_created_as_date_added() {
     db.with_conn(|conn| {
         let track = test_tidal_track(2001, "Newest favorite");
 
-        insert_tidal_track(conn, &track, true, Some("2026-05-01T12:34:56.000Z"))?;
+        insert_tidal_track(conn, &track, true, true, Some("2026-05-01T12:34:56.000Z"))?;
 
         let date_added: String = conn.query_row(
             "SELECT date_added FROM tracks WHERE tidal_id = 2001",
@@ -805,26 +805,43 @@ fn insert_tidal_track_marks_library_and_self_heals_on_conflict() {
             [],
         )?;
 
-        // A genuine TIDAL sync touches the same tidal_id: must promote to library.
+        // A curated sync write touches the same tidal_id: must promote to library.
         let track = test_tidal_track(3001, "Pre-import");
-        insert_tidal_track(conn, &track, false, None)?;
+        insert_tidal_track(conn, &track, false, true, None)?;
 
         let is_library: i64 = conn.query_row(
             "SELECT is_library FROM tracks WHERE tidal_id = 3001",
             [],
             |row| row.get(0),
         )?;
-        assert_eq!(is_library, 1, "genuine sync must promote a transient row to library");
+        assert_eq!(is_library, 1, "curated sync must promote a transient row to library");
 
-        // A fresh genuine insert is library from the start.
-        let fresh = test_tidal_track(3002, "Fresh sync");
-        insert_tidal_track(conn, &fresh, false, None)?;
-        let fresh_lib: i64 = conn.query_row(
+        // A fresh background (enrichment) insert stays out of the library...
+        let fill = test_tidal_track(3002, "Album fill");
+        insert_tidal_track(conn, &fill, false, false, None)?;
+        let fill_lib: i64 = conn.query_row(
             "SELECT is_library FROM tracks WHERE tidal_id = 3002",
             [],
             |row| row.get(0),
         )?;
-        assert_eq!(fresh_lib, 1, "insert_tidal_track writes is_library = 1");
+        assert_eq!(fill_lib, 0, "background enrichment insert stays is_library = 0");
+
+        // ...until a curated write (a like) ratchets it up, never back down.
+        insert_tidal_track(conn, &fill, true, true, None)?;
+        let (liked, promoted): (i64, i64) = conn.query_row(
+            "SELECT is_favorite, is_library FROM tracks WHERE tidal_id = 3002",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!((liked, promoted), (1, 1), "like promotes background row");
+
+        insert_tidal_track(conn, &fill, false, false, None)?;
+        let after_refill: i64 = conn.query_row(
+            "SELECT is_library FROM tracks WHERE tidal_id = 3002",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(after_refill, 1, "background re-touch never demotes a library row");
         Ok(())
     })
     .expect("library marking holds");

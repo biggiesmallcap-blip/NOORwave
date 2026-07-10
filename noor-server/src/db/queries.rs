@@ -1158,6 +1158,22 @@ fn artist_library_track_predicate() -> &'static str {
     ARTIST_LIBRARY_TRACK_WHERE
 }
 
+/// Wrap a galaxy `track_genres` fragment so only curated-library tracks (the
+/// exact predicate the Library grid uses, via `ARTIST_LIBRARY_TRACK_WHERE`)
+/// contribute to Genre Galaxy aggregation. Hidden enrichment fill
+/// (is_library = 0) keeps feeding radio/discovery through the unwrapped
+/// fragments; the galaxy shows the user's curated taste only. Output shape
+/// matches `filter_subquery`: `(track_id, genre_id, source, confidence)`.
+fn galaxy_library_gate(inner: &str) -> String {
+    format!(
+        "SELECT tg.track_id, tg.genre_id, tg.source, tg.confidence
+         FROM ({inner}) tg
+         JOIN tracks t ON t.id = tg.track_id
+         LEFT JOIN albums al ON t.album_id = al.id
+         WHERE {ARTIST_LIBRARY_TRACK_WHERE}"
+    )
+}
+
 pub fn get_artists(
     conn: &Connection,
     sort_by: &str,
@@ -1776,7 +1792,7 @@ pub fn get_genres_filtered(
     conn: &Connection,
     filter: crate::genre::filter::GalaxyFilterRule,
 ) -> Result<Vec<Genre>> {
-    let sub = crate::genre::filter::filter_subquery(filter);
+    let sub = galaxy_library_gate(&crate::genre::filter::filter_subquery(filter));
     let sql = format!(
         "SELECT g.id, g.name, g.slug, g.parent_id, COUNT(tg.track_id) AS track_count
          FROM genres g
@@ -1804,7 +1820,7 @@ pub fn get_genre_heat_filtered(
     days: i64,
     filter: crate::genre::filter::GalaxyFilterRule,
 ) -> Result<Vec<GenreHeat>> {
-    let sub = crate::genre::filter::filter_subquery(filter);
+    let sub = galaxy_library_gate(&crate::genre::filter::filter_subquery(filter));
     let sql = format!(
         "WITH RECURSIVE closure(ancestor_id, genre_id) AS (
             SELECT id, id
@@ -1950,10 +1966,13 @@ pub fn get_tracks_by_genre_filtered(
 
     let sub = crate::genre::filter::filter_subquery(filter);
     let projection = track_projection("a");
+    let lib_where = ARTIST_LIBRARY_TRACK_WHERE;
     // The Spotify-dominance EXISTS check still queries raw `track_genres` —
     // it's a "did Spotify ever tag this track at all" predicate, independent
     // of the confidence filter that decides which clusters the track is
-    // visible in. The MAIN membership join uses the filtered rowset.
+    // visible in. The MAIN membership join uses the filtered rowset. Both
+    // branches also gate on the Library predicate so hidden enrichment fill
+    // (is_library = 0) never surfaces in galaxy track lists.
     let sql = if include_descendants {
         format!(
             "WITH RECURSIVE selected_genres(id) AS (
@@ -1969,7 +1988,8 @@ pub fn get_tracks_by_genre_filtered(
              JOIN tracks t ON tg.track_id = t.id
              LEFT JOIN artists a ON t.artist_id = a.id
              LEFT JOIN albums al ON t.album_id = al.id
-             WHERE (
+             WHERE {lib_where}
+               AND (
                  NOT EXISTS (
                      SELECT 1 FROM track_genres tg_sp
                      WHERE tg_sp.track_id = t.id AND tg_sp.source = 'spotify'
@@ -1996,6 +2016,7 @@ pub fn get_tracks_by_genre_filtered(
              LEFT JOIN artists a ON t.artist_id = a.id
              LEFT JOIN albums al ON t.album_id = al.id
              WHERE tg.genre_id = ?1
+               AND {lib_where}
                AND (
                    NOT EXISTS (
                        SELECT 1 FROM track_genres tg_sp
@@ -2503,6 +2524,9 @@ pub struct SyncInfo {
     pub service: String,
     pub last_sync_at: String,
     pub auto_sync_daily: bool,
+    /// Import the rest of favorited albums as hidden discovery fill
+    /// (is_library=0) after each sync. Default on.
+    pub enrich_from_favorite_albums: bool,
     pub last_sync_track_count: i64,
     pub last_sync_album_count: i64,
     pub last_full_sync_at: Option<String>,
@@ -2516,7 +2540,8 @@ pub fn get_sync_info(conn: &Connection, service: &str) -> Result<Option<SyncInfo
     let mut stmt = conn.prepare(
         "SELECT service, last_sync_at, auto_sync_daily, last_sync_track_count, last_sync_album_count,
                 last_full_sync_at, last_sync_kind,
-                tidal_favorite_artist_cursor, tidal_favorite_album_cursor, tidal_favorite_track_cursor
+                tidal_favorite_artist_cursor, tidal_favorite_album_cursor, tidal_favorite_track_cursor,
+                enrich_from_favorite_albums
          FROM sync_metadata WHERE service = ?1",
     )?;
     let result = stmt
@@ -2525,6 +2550,7 @@ pub fn get_sync_info(conn: &Connection, service: &str) -> Result<Option<SyncInfo
                 service: row.get(0)?,
                 last_sync_at: row.get(1)?,
                 auto_sync_daily: row.get::<_, i64>(2)? != 0,
+                enrich_from_favorite_albums: row.get::<_, i64>(10)? != 0,
                 last_sync_track_count: row.get(3)?,
                 last_sync_album_count: row.get(4)?,
                 last_full_sync_at: row.get(5)?,
@@ -2593,6 +2619,18 @@ pub fn update_sync_timestamp_with_metadata(
 pub fn set_auto_sync_daily(conn: &Connection, service: &str, enabled: bool) -> Result<()> {
     conn.execute(
         "UPDATE sync_metadata SET auto_sync_daily = ?1 WHERE service = ?2",
+        rusqlite::params![if enabled { 1 } else { 0 }, service],
+    )?;
+    Ok(())
+}
+
+pub fn set_enrich_from_favorite_albums(
+    conn: &Connection,
+    service: &str,
+    enabled: bool,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE sync_metadata SET enrich_from_favorite_albums = ?1 WHERE service = ?2",
         rusqlite::params![if enabled { 1 } else { 0 }, service],
     )?;
     Ok(())
@@ -2732,7 +2770,7 @@ pub fn get_genre_co_occurrence_filtered(
     min_count: i64,
     filter: crate::genre::filter::GalaxyFilterRule,
 ) -> Result<Vec<GenreCoOccurrence>> {
-    let sub = crate::genre::filter::filter_subquery(filter);
+    let sub = galaxy_library_gate(&crate::genre::filter::filter_subquery(filter));
     // Same query as before but built against the filtered rowset. The
     // subquery is inlined twice rather than CTE'd because SQLite doesn't
     // share materialization between CTE references reliably.
@@ -2804,11 +2842,12 @@ pub fn get_genre_cohorts_filtered(
     with_fallback: bool,
 ) -> Result<Vec<GenreCohort>> {
     let _ = days; // bound via ?1 below
-    let sub = if with_fallback {
+    let inner = if with_fallback {
         crate::genre::filter::filter_subquery_with_fallback(filter)
     } else {
         crate::genre::filter::filter_subquery(filter)
     };
+    let sub = galaxy_library_gate(&inner);
     // We bucket listens into 4 time-of-day slots + weekend/weekday
     // Slot 0: 0-6 (Night), Slot 1: 6-12 (Morning), Slot 2: 12-18 (Afternoon), Slot 3: 18-24 (Evening)
     // Then find genres that dominate each slot.
@@ -9851,9 +9890,11 @@ mod tests {
         )
         .unwrap();
         // Three tracks in the favorited album; only "Neon Blue" has tracks.is_favorite = 1.
-        // All three are is_library = 1: this is a genuine TIDAL favorited-album
-        // sync (insert_tidal_track marks every synced track as library), so the
-        // two un-liked siblings must still count as library tracks.
+        // All three are is_library = 1 - the pre-rework sync shape (album
+        // hydration used to mark every synced track as library; new syncs
+        // write album fill as is_library = 0 background instead). The
+        // predicate itself is unchanged, so these legacy rows still count as
+        // library tracks until the user runs Reclean.
         conn.execute(
             "INSERT INTO tracks (id, title, artist_id, album_id, duration_ms, tidal_id,
                                   best_quality, best_source, fidelity_score, is_favorite, source, is_library)
@@ -9962,6 +10003,80 @@ mod tests {
             after, 4,
             "explicit like promotes a transient track to library"
         );
+    }
+
+    // Genre Galaxy gate: hidden enrichment fill (is_library = 0) must not
+    // inflate galaxy counts or track lists - the galaxy mirrors the curated
+    // Library predicate exactly (ARTIST_LIBRARY_TRACK_WHERE).
+    #[test]
+    fn galaxy_queries_hide_background_enrichment_fill() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        seed_album_with_one_liked_track(&conn);
+
+        // Background enrichment fill on the favorited album: in the DB for
+        // discovery, invisible in Library and Galaxy.
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, album_id, duration_ms, tidal_id,
+                                  best_quality, best_source, fidelity_score, is_favorite, source, is_library)
+             VALUES (4, 'Hidden Fill', 1, 1, 210000, 106, 'LOSSLESS', 'tidal', 10, 0, 'tidal', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO genres (id, name, slug, parent_id) VALUES (1, 'Country', 'country', NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO track_genres (track_id, genre_id, source, confidence) VALUES
+                (1, 1, 'musicbrainz', 0.9),
+                (2, 1, 'musicbrainz', 0.9),
+                (4, 1, 'musicbrainz', 0.9)",
+            [],
+        )
+        .unwrap();
+
+        let genres = get_genres_filtered(&conn, crate::genre::filter::GalaxyFilterRule::All)
+            .expect("galaxy genres");
+        let country = genres
+            .iter()
+            .find(|g| g.name == "Country")
+            .expect("country node");
+        assert_eq!(
+            country.track_count,
+            Some(2),
+            "galaxy counts must cover library tracks only, not hidden fill"
+        );
+
+        let tracks = get_tracks_by_genre_filtered(
+            &conn,
+            1,
+            false,
+            crate::genre::filter::GalaxyFilterRule::All,
+        )
+        .expect("genre tracks");
+        let titles: Vec<&str> = tracks.iter().map(|t| t.title.as_str()).collect();
+        assert!(
+            !titles.contains(&"Hidden Fill"),
+            "hidden fill must not surface in galaxy track lists, got {titles:?}"
+        );
+        assert_eq!(tracks.len(), 2, "the two library tracks remain");
+
+        // Liking the hidden row promotes it into the galaxy - the gate is the
+        // Library predicate, not a source check.
+        conn.execute(
+            "UPDATE tracks SET is_favorite = 1, is_library = 1 WHERE id = 4",
+            [],
+        )
+        .unwrap();
+        let genres = get_genres_filtered(&conn, crate::genre::filter::GalaxyFilterRule::All)
+            .expect("galaxy genres after like");
+        let country = genres
+            .iter()
+            .find(|g| g.name == "Country")
+            .expect("country node");
+        assert_eq!(country.track_count, Some(3));
     }
 
     #[test]
