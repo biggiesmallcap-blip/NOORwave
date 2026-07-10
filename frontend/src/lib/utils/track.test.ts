@@ -7,6 +7,10 @@ import type {
 	Track,
 } from '$lib/api/client';
 import {
+	albumEntryStartIndex,
+	albumEntryToMixedQueueItem,
+	currentTrackMatchesTracks,
+	mergeAlbumTracks,
 	queueItemToTidalPlayable,
 	tidalDiscographyTrackToPlayable,
 	tidalHomeItemToPlayable,
@@ -187,5 +191,126 @@ describe('tidalDiscographyTrackToPlayable', () => {
 			tidal_id: 808,
 			artist_tidal_id: 1001,
 		});
+	});
+});
+
+describe('album track merging', () => {
+	function albumTrack(overrides: Partial<Track>): Track {
+		return { ...baseTrack, source: 'tidal_stream', ...overrides };
+	}
+	function discoTrack(overrides: Partial<TidalDiscographyTrack>): TidalDiscographyTrack {
+		return {
+			tidal_id: 0,
+			title: '',
+			duration_ms: 180000,
+			artwork_url: null,
+			album_title: 'Album',
+			...overrides,
+		};
+	}
+	function titles(entries: ReturnType<typeof mergeAlbumTracks>): string[] {
+		return entries.map((e) => (e.kind === 'local' ? e.local.title : e.tidal.title));
+	}
+
+	test('merges owned + TIDAL-only rows into one list ordered 1..N by track number', () => {
+		// The regression: owned tracks (2, 5, 9) are scattered through the album,
+		// so concatenating owned-then-TIDAL would play them out of order. The
+		// merge must interleave by track_number so the queue runs the real album.
+		const owned = [
+			albumTrack({ id: 22, tidal_id: 8002, title: 'T2', track_number: 2, disc_number: 1 }),
+			albumTrack({ id: 25, tidal_id: 8005, title: 'T5', track_number: 5, disc_number: 1 }),
+			albumTrack({ id: 29, tidal_id: 8009, title: 'T9', track_number: 9, disc_number: 1 }),
+		];
+		const tidalOnly = [1, 3, 4, 6, 7, 8].map((n) =>
+			discoTrack({ tidal_id: 8000 + n, title: `T${n}`, track_number: n, disc_number: 1 }),
+		);
+
+		const merged = mergeAlbumTracks(owned, tidalOnly);
+		expect(titles(merged)).toEqual(['T1', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'T8', 'T9']);
+		expect(merged[1]).toMatchObject({ kind: 'local' });
+		expect(merged[2]).toMatchObject({ kind: 'tidal' });
+	});
+
+	test('orders across discs before track number', () => {
+		const owned = [albumTrack({ id: 1, tidal_id: 1, title: 'D2T1', track_number: 1, disc_number: 2 })];
+		const tidalOnly = [
+			discoTrack({ tidal_id: 2, title: 'D1T2', track_number: 2, disc_number: 1 }),
+			discoTrack({ tidal_id: 3, title: 'D1T1', track_number: 1, disc_number: 1 }),
+		];
+		expect(titles(mergeAlbumTracks(owned, tidalOnly))).toEqual(['D1T1', 'D1T2', 'D2T1']);
+	});
+
+	test('keeps owned rows that have no tidal id (local-only rips play from the library)', () => {
+		const owned = [
+			albumTrack({ id: 5, tidal_id: null, title: 'LocalOnly', track_number: 1, disc_number: 1 }),
+			albumTrack({ id: 6, tidal_id: 6006, title: 'Owned', track_number: 2, disc_number: 1 }),
+		];
+		const tidalOnly = [discoTrack({ tidal_id: 3003, title: 'Streamed', track_number: 3, disc_number: 1 })];
+		expect(titles(mergeAlbumTracks(owned, tidalOnly))).toEqual(['LocalOnly', 'Owned', 'Streamed']);
+	});
+
+	test('albumEntryStartIndex matches local ids first, then tidal ids, else 0', () => {
+		const entries = mergeAlbumTracks(
+			[
+				albumTrack({ id: 22, tidal_id: 8002, title: 'T2', track_number: 2, disc_number: 1 }),
+				albumTrack({ id: 25, tidal_id: null, title: 'T5', track_number: 5, disc_number: 1 }),
+			],
+			[1, 3, 4].map((n) =>
+				discoTrack({ tidal_id: 8000 + n, title: `T${n}`, track_number: n, disc_number: 1 }),
+			),
+		);
+		// Order: T1 T2 T3 T4 T5
+		expect(albumEntryStartIndex(entries, 22)).toBe(1); // owned row by local id
+		expect(albumEntryStartIndex(entries, 25)).toBe(4); // owned local-only rip by local id
+		expect(albumEntryStartIndex(entries, 8003)).toBe(2); // TIDAL-only row by tidal id
+		expect(albumEntryStartIndex(entries, 99999)).toBe(0); // unknown id -> top
+		expect(albumEntryStartIndex(entries, undefined)).toBe(0);
+	});
+
+	test('albumEntryToMixedQueueItem sends local ids for owned rows and tidal ids otherwise', () => {
+		const localEntry = mergeAlbumTracks(
+			[albumTrack({ id: 42, tidal_id: 777, title: 'Owned', track_number: 1, disc_number: 1 })],
+			[],
+		)[0];
+		expect(albumEntryToMixedQueueItem(localEntry)).toEqual({
+			track_id: 42,
+			artist: 'Overlay Artist',
+			title: 'Owned',
+		});
+
+		const tidalEntry = mergeAlbumTracks(
+			[],
+			[discoTrack({ tidal_id: 8001, title: 'Streamed', artist_name: 'Stream Artist' })],
+		)[0];
+		expect(albumEntryToMixedQueueItem(tidalEntry)).toEqual({
+			tidal_id: 8001,
+			artist: 'Stream Artist',
+			title: 'Streamed',
+		});
+	});
+});
+
+describe('currentTrackMatchesTracks', () => {
+	const local = { ...baseTrack, id: 7, tidal_id: null, source: 'local' };
+	const tidalRow: TidalDiscographyTrack = {
+		tidal_id: 909,
+		title: 'Streamed',
+		duration_ms: 180000,
+		artwork_url: null,
+		album_title: 'Album',
+	};
+
+	test('matches owned rows by local id', () => {
+		expect(currentTrackMatchesTracks({ ...baseTrack, id: 7 }, [local], [])).toBe(true);
+	});
+
+	test('matches streamed rows by tidal id even with a synthetic negative id', () => {
+		const streaming = { ...baseTrack, id: -909, tidal_id: 909 };
+		expect(currentTrackMatchesTracks(streaming, [local], [tidalRow])).toBe(true);
+	});
+
+	test('rejects unrelated tracks and null', () => {
+		expect(currentTrackMatchesTracks({ ...baseTrack, id: 1, tidal_id: 1 }, [local], [tidalRow])).toBe(false);
+		expect(currentTrackMatchesTracks(null, [local], [tidalRow])).toBe(false);
 	});
 });

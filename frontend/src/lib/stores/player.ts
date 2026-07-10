@@ -10,6 +10,7 @@ import {
 	type QueueItem,
 	type RadioBlend,
 	type StreamDisplayInfo,
+	type TidalDiscographyTrack,
 	type TidalPlayable,
 	type Track
 } from '$lib/api/client';
@@ -17,7 +18,12 @@ import { setExclusiveEngaged, setExclusiveReleased } from '$lib/stores/exclusive
 import { showToast, dismissToast } from '$lib/stores/toast';
 import { announceQueue, announceResolved } from '$lib/stores/queue_announcer';
 import { offerUndo } from '$lib/stores/queue_undo';
-import { queueItemToTidalPlayable } from '$lib/utils/track';
+import {
+	albumEntryStartIndex,
+	albumEntryToMixedQueueItem,
+	mergeAlbumTracks,
+	queueItemToTidalPlayable,
+} from '$lib/utils/track';
 import { currentQueueAnchorItem } from '$lib/player/queue_active';
 import { wsConnected } from '$lib/api/ws';
 import { updateLibraryTrackFavorite } from '$lib/stores/library';
@@ -1347,13 +1353,56 @@ export function selectOptimisticNextItem<T extends { id: number; track: { id: nu
 	return currentIdx >= 0 && currentIdx + 1 < queue.length ? queue[currentIdx + 1] : null;
 }
 
-export async function playAlbum(albumId: number, startTrackId?: number) {
+/**
+ * The album-tracks payload a page already holds. Passing it into
+ * playAlbum/shuffleAlbum skips the refetch (which, for partial albums, is a
+ * live TIDAL round trip on the server) and guarantees the queue matches the
+ * listing the user is looking at.
+ */
+export interface AlbumTracksData {
+	tracks: Track[];
+	tidal_tracks?: TidalDiscographyTrack[] | null;
+	album_tidal_id?: number | null;
+}
+
+export async function playAlbum(
+	albumId: number,
+	startTrackId?: number,
+	preloaded?: AlbumTracksData,
+) {
 	if (!assertOnline()) return;
 	playerError.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
-		const { tracks } = await api.getAlbumTracks(albumId);
+		const data = preloaded ?? (await api.getAlbumTracks(albumId));
 		if (!isLatestPlaybackIntent(intentSeq)) return;
+		const tracks = data.tracks;
+		const tidalOnly = data.tidal_tracks ?? [];
+
+		// Partial album: some tracks live only on TIDAL (not imported). Queue the
+		// WHOLE album in (disc, track) order through the mixed pending-queue
+		// pipeline: owned rows play from the library (bit-perfect local path,
+		// including local-only rips with no TIDAL id) and TIDAL-only rows resolve
+		// lazily at play time - skipped, not fatal, when TIDAL is unavailable.
+		// Queueing only the owned subset left a short queue that automix padded
+		// with unrelated "similar" tracks, so the album appeared to play a
+		// random set of songs instead of the album.
+		if (tidalOnly.length > 0) {
+			clearRadioReasons();
+			const entries = mergeAlbumTracks(tracks, tidalOnly);
+			const ordered = entries.slice(albumEntryStartIndex(entries, startTrackId));
+			const shuffle = startTrackId == null && get(shuffleMode) !== 'off';
+			const result = await api.playMixedQueue(ordered.map(albumEntryToMixedQueueItem), shuffle);
+			if (!isLatestPlaybackIntent(intentSeq)) return;
+			hydratePlaybackIfLatest({ state: result.state, queue: result.queue }, intentSeq);
+			noteSuccess();
+			const streamed = ordered.filter((e) => e.kind === 'tidal').length;
+			showToast(`Playing album (${ordered.length} tracks, ${streamed} streamed)`, 'success');
+			return;
+		}
+
+		// Fully-owned or local-only album: the owned rows already are the whole
+		// album, so keep the plain local queue path.
 		if (tracks.length === 0) {
 			playerError.set({ message: 'Album has no tracks.' });
 			return;
@@ -1364,19 +1413,36 @@ export async function playAlbum(albumId: number, startTrackId?: number) {
 		});
 	} catch (error) {
 		if (!isLatestPlaybackIntent(intentSeq)) return;
-		setError('play that album', error, () => playAlbum(albumId, startTrackId));
+		setError('play that album', error, () => playAlbum(albumId, startTrackId, preloaded));
 	} finally {
 		finishPlaybackIntent(intentSeq);
 	}
 }
 
-export async function shuffleAlbum(albumId: number) {
+export async function shuffleAlbum(albumId: number, preloaded?: AlbumTracksData) {
 	if (!assertOnline()) return;
 	playerError.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
-		const { tracks } = await api.getAlbumTracks(albumId);
+		const data = preloaded ?? (await api.getAlbumTracks(albumId));
 		if (!isLatestPlaybackIntent(intentSeq)) return;
+		const tracks = data.tracks;
+		const tidalOnly = data.tidal_tracks ?? [];
+
+		// Partial album: shuffle the WHOLE album (owned + TIDAL-only rows), the
+		// same mixed-queue path as playAlbum. Shuffling only the owned subset
+		// left a short queue that automix padded with unrelated tracks.
+		if (tidalOnly.length > 0) {
+			clearRadioReasons();
+			const entries = mergeAlbumTracks(tracks, tidalOnly);
+			const result = await api.playMixedQueue(entries.map(albumEntryToMixedQueueItem), true);
+			if (!isLatestPlaybackIntent(intentSeq)) return;
+			hydratePlaybackIfLatest({ state: result.state, queue: result.queue }, intentSeq);
+			noteSuccess();
+			showToast(`Shuffling album (${entries.length} tracks)`, 'success');
+			return;
+		}
+
 		if (tracks.length === 0) {
 			playerError.set({ message: 'Album has no tracks.' });
 			return;
@@ -1384,7 +1450,7 @@ export async function shuffleAlbum(albumId: number) {
 		await loadQueueAndPlay(tracks.map((t) => t.id), { shuffleMode: 'true', intentSeq });
 	} catch (error) {
 		if (!isLatestPlaybackIntent(intentSeq)) return;
-		setError('shuffle that album', error, () => shuffleAlbum(albumId));
+		setError('shuffle that album', error, () => shuffleAlbum(albumId, preloaded));
 	} finally {
 		finishPlaybackIntent(intentSeq);
 	}

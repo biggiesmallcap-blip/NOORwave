@@ -69,6 +69,67 @@ pub fn build_radio_queue_from_candidates_with_seed(
     })
 }
 
+/// One row of an explicitly-ordered mixed queue: a library track (plays from
+/// the local library) or an unresolved external track (pending row, resolved
+/// lazily by tidal id / artist+title at play time).
+pub struct OrderedQueueCandidate {
+    pub track_id: Option<i64>,
+    pub tidal_id: Option<i64>,
+    pub artist: String,
+    pub title: String,
+}
+
+/// Replace the queue with an explicitly-ordered mixed list. Unlike the radio
+/// builders above, candidates are NOT re-ranked: the caller's order IS the
+/// queue order (e.g. album track order). Library rows insert as source 'user'
+/// (matching replace_queue_with_tracks); unresolved rows reuse 'radio_pending'
+/// so the existing pending resolve/skip machinery applies unchanged - if TIDAL
+/// is unavailable a pending row is skipped instead of stalling the queue.
+pub fn replace_queue_with_ordered_candidates(
+    conn: &rusqlite::Connection,
+    candidates: &[OrderedQueueCandidate],
+) -> rusqlite::Result<RadioQueueBuild> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM queue", [])?;
+
+    let mut pending_item_ids = Vec::new();
+    for (pos, c) in candidates.iter().enumerate() {
+        let pos = pos as i32;
+        match c.track_id.filter(|id| *id > 0) {
+            Some(track_id) => {
+                tx.execute(
+                    "INSERT INTO queue (track_id, position, source, reason) VALUES (?1, ?2, 'user', NULL)",
+                    rusqlite::params![track_id, pos],
+                )?;
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO queue (track_id, position, source, reason,
+                                        pending_artist, pending_title, pending_at, tidal_id_hint)
+                     VALUES (NULL, ?1, 'radio_pending', NULL, ?2, ?3, datetime('now'), ?4)",
+                    rusqlite::params![pos, c.artist, c.title, c.tidal_id],
+                )?;
+                pending_item_ids.push(tx.last_insert_rowid());
+            }
+        }
+    }
+
+    tx.commit()?;
+
+    let first_item: Option<(i64, Option<i64>)> = conn
+        .query_row(
+            "SELECT id, track_id FROM queue ORDER BY position ASC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+
+    Ok(RadioQueueBuild {
+        first_item,
+        pending_item_ids,
+    })
+}
+
 pub fn append_radio_queue_from_candidates(
     conn: &rusqlite::Connection,
     candidates: Vec<RadioCandidate>,

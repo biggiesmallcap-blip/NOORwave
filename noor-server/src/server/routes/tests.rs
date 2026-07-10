@@ -8020,6 +8020,7 @@ async fn all_api_routes_are_registered() {
         ("POST", "/api/playback/automix"),
         ("GET", "/api/playback/queue"),
         ("POST", "/api/playback/queue/add"),
+        ("POST", "/api/playback/queue/mixed"),
         ("POST", "/api/playback/queue/remove"),
         ("POST", "/api/playback/queue/move"),
         ("POST", "/api/playback/queue/clear"),

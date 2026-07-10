@@ -999,6 +999,19 @@ export interface QueueItem {
 	is_pending?: boolean;
 }
 
+/**
+ * One row of an ordered mixed queue (POST /api/playback/queue/mixed).
+ * `track_id` set: a library track that plays through the local pipeline.
+ * Otherwise: an unresolved external track, resolved lazily by tidal id /
+ * artist+title as a pending queue row.
+ */
+export interface MixedQueueItem {
+	track_id?: number | null;
+	tidal_id?: number | null;
+	artist?: string | null;
+	title?: string | null;
+}
+
 /** A last.fm-sourced radio candidate that has no library track yet. */
 export interface PendingCandidateInfo {
 	artist: string;
@@ -3367,6 +3380,23 @@ export const api = {
 			{
 				method: 'POST',
 				body: JSON.stringify(body),
+				timeoutMs: BULK_QUEUE_API_TIMEOUT_MS,
+			}
+		);
+	},
+
+	/**
+	 * Replace the queue with an ordered mix of library + external tracks and
+	 * start playing from the first row. Library rows play locally; external
+	 * rows resolve lazily (and are skipped if TIDAL is unavailable).
+	 */
+	playMixedQueue(items: MixedQueueItem[], shuffle = false) {
+		return fetchApi<{ queued_count: number; pending_count: number; state: PlaybackState; queue: QueueItem[] }>(
+			'/api/playback/queue/mixed',
+			undefined,
+			{
+				method: 'POST',
+				body: JSON.stringify({ items, shuffle }),
 				timeoutMs: BULK_QUEUE_API_TIMEOUT_MS,
 			}
 		);

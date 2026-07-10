@@ -390,6 +390,30 @@ pub struct PendingCandidateRequest {
     pub reason: Option<String>,
 }
 
+/// Body of POST /api/playback/queue/mixed - replace the queue with an
+/// explicitly-ordered mix of library tracks and unresolved external tracks,
+/// then start playback from the first row. Built for "play the full album"
+/// on partially-owned albums: owned rows play from the library, the rest
+/// become pending rows that resolve (or skip) lazily.
+#[derive(Debug, Deserialize)]
+pub struct PlayMixedQueueRequest {
+    items: Vec<MixedQueueItemRequest>,
+    #[serde(default)]
+    shuffle: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MixedQueueItemRequest {
+    #[serde(default)]
+    track_id: Option<i64>,
+    #[serde(default)]
+    tidal_id: Option<i64>,
+    #[serde(default)]
+    artist: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct QueueRemoveRequest {
     queue_item_id: i64,
@@ -896,6 +920,7 @@ pub fn api_routes(state: SharedState) -> Router {
             get(get_playback_queue).post(replace_playback_queue),
         )
         .route("/api/playback/queue/add", post(add_queue_track))
+        .route("/api/playback/queue/mixed", post(play_mixed_queue))
         .route("/api/playback/queue/remove", post(remove_queue_track))
         .route("/api/playback/queue/move", post(move_queue_track))
         .route("/api/playback/queue/clear", post(clear_queue_route))
@@ -8099,6 +8124,95 @@ async fn replace_playback_queue(
     };
     refresh_dj_after_queue_change(state, "replace_playback_queue").await;
     Ok(response)
+}
+
+/// POST /api/playback/queue/mixed - replace the queue with an ordered mix of
+/// library and unresolved external tracks, then start playing from the top.
+/// Library rows play through the normal local pipeline (bit-perfect for owned
+/// files); external rows are pending rows resolved by the same machinery as
+/// radio, so a dead TIDAL session skips them instead of failing the play.
+async fn play_mixed_queue(
+    State(state): State<SharedState>,
+    Json(payload): Json<PlayMixedQueueRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use crate::server::radio_pipeline::OrderedQueueCandidate;
+
+    let candidates: Vec<OrderedQueueCandidate> = payload
+        .items
+        .iter()
+        .filter(|item| {
+            item.track_id.is_some_and(|id| id > 0)
+                || item.tidal_id.is_some_and(|id| id > 0)
+                || (item.artist.as_deref().is_some_and(|s| !s.trim().is_empty())
+                    && item.title.as_deref().is_some_and(|s| !s.trim().is_empty()))
+        })
+        .map(|item| OrderedQueueCandidate {
+            track_id: item.track_id.filter(|id| *id > 0),
+            tidal_id: item.tidal_id.filter(|id| *id > 0),
+            artist: item.artist.clone().unwrap_or_default(),
+            title: item.title.clone().unwrap_or_default(),
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "no queueable tracks in request" })),
+        ));
+    }
+    let queued_count = candidates.len();
+    let shuffle = payload.shuffle;
+
+    let db = {
+        let state_guard = state.read().await;
+        state_guard.db.clone()
+    };
+    let build = db
+        .with_conn(move |conn| {
+            let build = crate::server::radio_pipeline::replace_queue_with_ordered_candidates(
+                conn,
+                &candidates,
+            )?;
+            if shuffle {
+                let seed = crate::playback::shuffle::generate_shuffle_seed();
+                crate::playback::queue::apply_shuffle_with_seed(
+                    conn,
+                    queue::ShuffleMode::True,
+                    None,
+                    seed,
+                    "play_mixed_queue",
+                )?;
+            }
+            Ok(build)
+        })
+        .map_err(|e| {
+            tracing::error!("play_mixed_queue: queue build failed: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to build queue" })),
+            )
+        })?;
+
+    let pending_count = build.pending_item_ids.len();
+    spawn_pending_resolvers_for_queue_items(
+        &state,
+        &db,
+        build.pending_item_ids,
+        "play_mixed_queue",
+    )
+    .await;
+    {
+        let s = state.read().await;
+        let _ = s.event_tx.send(AppEvent::QueueUpdated);
+    }
+
+    let snapshot = start_first_radio_queue_item(&state).await?;
+    refresh_dj_after_queue_change(state, "play_mixed_queue").await;
+    Ok(Json(json!({
+        "queued_count": queued_count,
+        "pending_count": pending_count,
+        "state": snapshot.state,
+        "queue": snapshot.queue,
+    })))
 }
 
 async fn remove_queue_track(

@@ -5,8 +5,6 @@
 	import { cachedApi, invalidateLibraryCaches } from '$lib/cache/api_queries';
 	import {
 		playAlbum,
-		playTidalAlbum,
-		playTidalTrackNow,
 		shuffleAlbum,
 		startAlbumRadio,
 		toggleTrackFavorite,
@@ -14,7 +12,8 @@
 		saveTidalAlbumToLibrary,
 		currentTrack,
 		isPlaying,
-		togglePlayback
+		togglePlayback,
+		type AlbumTracksData
 	} from '$lib/stores/player';
 	import { canPlayTrack } from '$lib/player/playable';
 	import TrackRow from '$lib/components/TrackRow.svelte';
@@ -35,6 +34,7 @@
 	} from '$lib/utils/artwork';
 	import { formatTotalDuration } from '$lib/utils/format';
 	import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';
+	import { currentTrackMatchesTracks, mergeAlbumTracks } from '$lib/utils/track';
 
 	let albumId = $derived(Number(page.params.id));
 
@@ -198,30 +198,36 @@
 		return Array.from(map.values()).sort((a, b) => b.count - a.count).slice(0, 8);
 	});
 
+	// The full album in (disc, track) order: owned rows interleaved with
+	// TIDAL-only rows, exactly the order playAlbum queues. Rendering this list
+	// (instead of owned-then-TIDAL blocks) keeps "click a song to start the
+	// album from there" visually truthful for scattered ownership.
+	let displayEntries = $derived(mergeAlbumTracks(tracks, tidalOnlyTracks));
+
+	// Hand playAlbum/shuffleAlbum the listing already on screen so playing
+	// doesn't refetch (a live TIDAL round trip for partial albums) and the
+	// queue always matches what the user sees.
+	function albumData(): AlbumTracksData {
+		return { tracks, tidal_tracks: tidalOnlyTracks, album_tidal_id: albumTidalId };
+	}
+
 	function onRowClick(track: Track) {
-		void playAlbum(albumId, track.id);
+		void playAlbum(albumId, track.id, albumData());
 	}
 
 	function onHeroPlay() {
-		const current = $currentTrack;
-		if (current && tracks.some((t) => t.id === current.id)) {
+		if (currentTrackMatchesTracks($currentTrack, tracks, tidalOnlyTracks)) {
 			void togglePlayback();
 			return;
 		}
-		// Per "show everything" philosophy: if the album exists on TIDAL, play
-		// the FULL TIDAL album so partial-library users still hear the whole
-		// thing. Local-only albums (no tidal_id) keep the old behavior so
-		// WASAPI exclusive bit-perfect output isn't routed through streaming
-		// when there's no need.
-		if (albumTidalId != null && tidalOnlyTracks.length > 0) {
-			void playTidalAlbum(albumTidalId);
-		} else {
-			void playAlbum(albumId);
-		}
+		// playAlbum queues the FULL album (owned rows + TIDAL-only rows) in track
+		// order, so partial-library users hear the whole thing 1..N. Owned rows
+		// play from the library; TIDAL-only rows stream.
+		void playAlbum(albumId, undefined, albumData());
 	}
 
 	let isAlbumPlaying = $derived(
-		$isPlaying && tracks.some((t) => t.id === $currentTrack?.id)
+		$isPlaying && currentTrackMatchesTracks($currentTrack, tracks, tidalOnlyTracks)
 	);
 
 	let radioPending = $state(false);
@@ -368,7 +374,7 @@
 				{/if}
 			</button>
 
-			<button class="ghost-btn" aria-label="Shuffle" onclick={() => void shuffleAlbum(albumId)}>
+			<button class="ghost-btn" aria-label="Shuffle" onclick={() => void shuffleAlbum(albumId, albumData())}>
 				<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M16 3h5v5M4 20l17-17M21 16v5h-5M4 4l5 5m6 6l6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
 			</button>
 
@@ -436,56 +442,59 @@
 				<span class="col-duration"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2" fill="none"/><path d="M12 7v5l3 2" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg></span>
 			</div>
 			<ol class="track-list">
-				{#each tracks as track, idx (track.id)}
-					<TrackRow
-						{track}
-						variant="indexed"
-						index={idx}
-						isCurrent={$currentTrack?.id === track.id}
-						isPlaying={$isPlaying}
-						showAlbum={false}
-						showPlayCount={true}
-						worldPlayCount={track.isrc ? playcountByIsrc.get(track.isrc) : null}
-						onRowClick={() => onRowClick(track)}
-						menuOptions={{ hideAlbumActions: true }}
-					/>
-				{/each}
-				{#each tidalOnlyTracks as track, idx (`tidal-${track.tidal_id}`)}
-					{@const playable = tidalDiscographyTrackToPlayable(track)}
-					{@const ok = canPlayTrack(playable)}
-					<!-- TIDAL-only album track. Same row height as the library
-					     rows above so the listing scans as one continuous list. -->
-					<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
-					<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-					<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-					<li
-						class="tidal-album-row"
-						class:disabled={!ok}
-						role="button"
-						tabindex={ok ? 0 : -1}
-						aria-disabled={!ok}
-						onclick={() => ok && void playTidalTrackNow(playable)}
-						oncontextmenu={(e) => {
-							e.preventDefault();
-							e.stopPropagation();
-							openContextMenu(e, buildTidalTrackMenu(playable), track.title);
-						}}
-						onkeydown={(e) =>
-							(e.key === 'Enter' || e.key === ' ')
-							&& (e.preventDefault(), ok && void playTidalTrackNow(playable))}
-					>
-						<span class="tidal-row-num">{tracks.length + idx + 1}</span>
-						<span class="tidal-row-title">{track.title}</span>
-						<span class="tidal-row-plays" aria-hidden="true">-</span>
-						<span class="tidal-row-pill" aria-label="From TIDAL">TIDAL</span>
-						<span class="tidal-row-duration">
-							{#if track.duration_ms}
-								{Math.floor(track.duration_ms / 1000 / 60)}:{String(
-									Math.round((track.duration_ms / 1000) % 60),
-								).padStart(2, '0')}
-							{/if}
-						</span>
-					</li>
+				{#each displayEntries as entry, idx (entry.kind === 'local' ? entry.local.id : `tidal-${entry.tidal.tidal_id}`)}
+					{#if entry.kind === 'local'}
+						{@const track = entry.local}
+						<TrackRow
+							{track}
+							variant="indexed"
+							index={idx}
+							isCurrent={$currentTrack?.id === track.id}
+							isPlaying={$isPlaying}
+							showAlbum={false}
+							showPlayCount={true}
+							worldPlayCount={track.isrc ? playcountByIsrc.get(track.isrc) : null}
+							onRowClick={() => onRowClick(track)}
+							menuOptions={{ hideAlbumActions: true }}
+						/>
+					{:else}
+						{@const track = entry.tidal}
+						{@const playable = tidalDiscographyTrackToPlayable(track)}
+						{@const ok = canPlayTrack(playable)}
+						<!-- TIDAL-only album track. Same row height as the library
+						     rows so the listing scans as one continuous list. -->
+						<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+						<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+						<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+						<li
+							class="tidal-album-row"
+							class:disabled={!ok}
+							role="button"
+							tabindex={ok ? 0 : -1}
+							aria-disabled={!ok}
+							onclick={() => ok && void playAlbum(albumId, track.tidal_id, albumData())}
+							oncontextmenu={(e) => {
+								e.preventDefault();
+								e.stopPropagation();
+								openContextMenu(e, buildTidalTrackMenu(playable), track.title);
+							}}
+							onkeydown={(e) =>
+								(e.key === 'Enter' || e.key === ' ')
+								&& (e.preventDefault(), ok && void playAlbum(albumId, track.tidal_id, albumData()))}
+						>
+							<span class="tidal-row-num">{track.track_number ?? idx + 1}</span>
+							<span class="tidal-row-title">{track.title}</span>
+							<span class="tidal-row-plays" aria-hidden="true">-</span>
+							<span class="tidal-row-pill" aria-label="From TIDAL">TIDAL</span>
+							<span class="tidal-row-duration">
+								{#if track.duration_ms}
+									{Math.floor(track.duration_ms / 1000 / 60)}:{String(
+										Math.round((track.duration_ms / 1000) % 60),
+									).padStart(2, '0')}
+								{/if}
+							</span>
+						</li>
+					{/if}
 				{/each}
 			</ol>
 		</section>
@@ -540,8 +549,11 @@
 								{/if}
 							</div>
 							<p class="album-card-title">{album.title}</p>
+							<!-- The rail only knows the artist's OWNED rows, so the number is
+							     library coverage, not the album's real track count. Label it
+							     honestly instead of claiming a 10-track album has "3 tracks". -->
 							<p class="album-card-sub">
-								{album.count} {album.count === 1 ? 'track' : 'tracks'}
+								{album.count} in library
 							</p>
 						</a>
 					{/snippet}

@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { api, type Track } from '$lib/api/client';
+	import { api, type TidalDiscographyTrack, type Track } from '$lib/api/client';
 	import {
 		playAlbum,
 		shuffleAlbum,
@@ -17,6 +17,7 @@
 	let albumId = $derived(Number(page.params.id));
 
 	let tracks = $state<Track[]>([]);
+	let tidalOnlyTracks = $state<TidalDiscographyTrack[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let loadSeq = 0;
@@ -26,10 +27,12 @@
 		loading = true;
 		error = null;
 		tracks = [];
+		tidalOnlyTracks = [];
 		try {
 			const res = await api.getAlbumTracks(id);
 			if (seq !== loadSeq) return;
 			tracks = res.tracks;
+			tidalOnlyTracks = res.tidal_tracks ?? [];
 		} catch (err) {
 			if (seq !== loadSeq) return;
 			error = `Couldn't load album: ${err}`;
@@ -46,13 +49,17 @@
 	let header = $derived.by(() => {
 		const first = tracks[0];
 		if (!first) return null;
-		const totalMs = tracks.reduce((sum, t) => sum + (t.duration_ms ?? 0), 0);
+		// Count and duration cover the FULL album (owned + TIDAL-only rows), not
+		// just library coverage - a 10-track album must not claim "3 tracks".
+		const totalMs =
+			tracks.reduce((sum, t) => sum + (t.duration_ms ?? 0), 0) +
+			tidalOnlyTracks.reduce((sum, t) => sum + (t.duration_ms ?? 0), 0);
 		return {
 			title: first.album_title ?? 'Album',
 			artist_name: first.artist_name ?? 'Unknown artist',
 			artist_id: first.artist_id ?? null,
 			artwork_url: first.artwork_url,
-			track_count: tracks.length,
+			track_count: tracks.length + tidalOnlyTracks.length,
 			total_ms: totalMs
 		};
 	});
