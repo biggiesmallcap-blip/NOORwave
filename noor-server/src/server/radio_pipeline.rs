@@ -71,12 +71,19 @@ pub fn build_radio_queue_from_candidates_with_seed(
 
 /// One row of an explicitly-ordered mixed queue: a library track (plays from
 /// the local library) or an unresolved external track (pending row, resolved
-/// lazily by tidal id / artist+title at play time).
+/// lazily by tidal id / artist+title at play time). The display metadata is
+/// stored on the pending row so the queue renders artwork/album/duration
+/// immediately, before the resolver imports a library track.
 pub struct OrderedQueueCandidate {
     pub track_id: Option<i64>,
     pub tidal_id: Option<i64>,
     pub artist: String,
     pub title: String,
+    pub album_title: Option<String>,
+    pub artwork_url: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub artist_tidal_id: Option<i64>,
+    pub album_tidal_id: Option<i64>,
 }
 
 /// Replace the queue with an explicitly-ordered mixed list. Unlike the radio
@@ -105,9 +112,23 @@ pub fn replace_queue_with_ordered_candidates(
             None => {
                 tx.execute(
                     "INSERT INTO queue (track_id, position, source, reason,
-                                        pending_artist, pending_title, pending_at, tidal_id_hint)
-                     VALUES (NULL, ?1, 'radio_pending', NULL, ?2, ?3, datetime('now'), ?4)",
-                    rusqlite::params![pos, c.artist, c.title, c.tidal_id],
+                                        pending_artist, pending_title, pending_at, tidal_id_hint,
+                                        ephemeral_album_title, ephemeral_artwork_url,
+                                        ephemeral_duration_ms, ephemeral_artist_tidal_id,
+                                        ephemeral_album_tidal_id)
+                     VALUES (NULL, ?1, 'radio_pending', NULL, ?2, ?3, datetime('now'), ?4,
+                             ?5, ?6, ?7, ?8, ?9)",
+                    rusqlite::params![
+                        pos,
+                        c.artist,
+                        c.title,
+                        c.tidal_id,
+                        c.album_title,
+                        c.artwork_url,
+                        c.duration_ms,
+                        c.artist_tidal_id,
+                        c.album_tidal_id
+                    ],
                 )?;
                 pending_item_ids.push(tx.last_insert_rowid());
             }

@@ -125,9 +125,12 @@ pub fn load_queue(conn: &Connection) -> Result<Vec<QueueItem>> {
 
     let items = stmt
         .query_map([], |row| {
+            let is_pending: bool = row.get(26)?;
             let is_ephemeral: bool = row.get(27)?;
             let track = if is_ephemeral {
                 ephemeral_track_from_row(row)?
+            } else if is_pending {
+                pending_track_from_row(row)?
             } else {
                 track_from_row_with_offset(row, 4)?
             };
@@ -137,7 +140,7 @@ pub fn load_queue(conn: &Connection) -> Result<Vec<QueueItem>> {
                 source: row.get(2)?,
                 reason: row.get(3)?,
                 track,
-                is_pending: row.get(26)?,
+                is_pending,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -260,6 +263,7 @@ fn insert_pending_tracks_at_position(
 /// row insert (when `local_track_id` is known) or a pending row insert
 /// otherwise. `tidal_id_hint` is preserved on pending rows so the background
 /// resolver can fetch by ID instead of searching by artist+title.
+#[derive(Default)]
 pub struct ExternalTrackInsert<'a> {
     pub artist: &'a str,
     pub title: &'a str,
@@ -267,6 +271,14 @@ pub struct ExternalTrackInsert<'a> {
     pub reason: Option<&'a str>,
     pub tidal_id_hint: Option<i64>,
     pub local_track_id: Option<i64>,
+    /// Display metadata persisted on pending rows so the queue renders
+    /// artwork/album/duration immediately, before the resolver imports a
+    /// library track. Ignored for library-row inserts.
+    pub album_title: Option<&'a str>,
+    pub artwork_url: Option<&'a str>,
+    pub duration_ms: Option<i64>,
+    pub artist_tidal_id: Option<i64>,
+    pub album_tidal_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -407,8 +419,11 @@ fn insert_at_position(
     } else {
         conn.execute(
             "INSERT INTO queue (track_id, position, source, reason,
-                                pending_artist, pending_title, pending_at, tidal_id_hint)
-             VALUES (NULL, ?1, ?2, ?3, ?4, ?5, datetime('now'), ?6)",
+                                pending_artist, pending_title, pending_at, tidal_id_hint,
+                                ephemeral_album_title, ephemeral_artwork_url,
+                                ephemeral_duration_ms, ephemeral_artist_tidal_id,
+                                ephemeral_album_tidal_id)
+             VALUES (NULL, ?1, ?2, ?3, ?4, ?5, datetime('now'), ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 position,
                 insert.source,
@@ -416,6 +431,11 @@ fn insert_at_position(
                 insert.artist,
                 insert.title,
                 insert.tidal_id_hint,
+                insert.album_title,
+                insert.artwork_url,
+                insert.duration_ms,
+                insert.artist_tidal_id,
+                insert.album_tidal_id,
             ],
         )?;
         Ok(InsertResult::Pending {
@@ -1097,6 +1117,47 @@ fn ephemeral_track_from_row(row: &Row<'_>) -> rusqlite::Result<Track> {
     })
 }
 
+/// Hydrate a display `Track` for a pending queue row.
+///
+/// Pending rows resolve by importing a library track, but until that happens
+/// the queue should still render artwork/album/duration and expose the TIDAL
+/// id for menus/favorites. Metadata comes from the row's pending_* /
+/// ephemeral_* columns; `id`/`is_favorite` come from the `lt` library-match
+/// join when the hinted TIDAL id already lives in the library, else id is 0
+/// (never negative - synthetic negative ids belong to the retired overlay).
+/// Column indices match the `load_queue` SELECT.
+fn pending_track_from_row(row: &Row<'_>) -> rusqlite::Result<Track> {
+    let tidal_id: Option<i64> = row.get(28)?;
+    let local_id: Option<i64> = row.get(32)?;
+    let library_favorite: Option<bool> = row.get(33)?;
+    Ok(Track {
+        id: local_id.unwrap_or(0),
+        title: row.get(5)?, // COALESCE(t.title, q.pending_title, '')
+        artist_id: 0,
+        artist_name: row.get(7)?, // COALESCE(a.name, q.pending_artist)
+        album_id: None,
+        album_title: row.get(29)?,
+        disc_number: None,
+        track_number: None,
+        duration_ms: row.get(31)?,
+        isrc: None,
+        tidal_id,
+        artist_tidal_id: row.get(34)?,
+        album_tidal_id: row.get(35)?,
+        ytmusic_id: None,
+        soundcloud_id: None,
+        best_quality: tidal_id.map(|_| "LOSSLESS".to_string()),
+        best_source: tidal_id.map(|_| "tidal".to_string()),
+        fidelity_score: 0,
+        is_favorite: library_favorite.unwrap_or(false),
+        play_count: 0,
+        last_played_at: None,
+        date_added: None,
+        source: "tidal_stream".to_string(),
+        artwork_url: row.get(30)?,
+    })
+}
+
 /// Remove stale pending rows and clear orphaned resolver locks.
 ///
 /// Two sweeps:
@@ -1243,6 +1304,7 @@ mod tests {
             reason: None,
             tidal_id_hint: Some(999),
             local_track_id: None,
+            ..Default::default()
         };
         let front = front_position(&conn).unwrap().unwrap();
         insert_external_track_after(&conn, &insert, front - 1).unwrap();
@@ -1414,6 +1476,7 @@ mod tests {
                 reason: None,
                 tidal_id_hint: Some(123),
                 local_track_id: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1437,6 +1500,69 @@ mod tests {
     }
 
     #[test]
+    fn pending_rows_serialize_display_metadata_and_tidal_id() {
+        let conn = conn();
+        let result = append_external_track(
+            &conn,
+            &ExternalTrackInsert {
+                artist: "Aphex Twin",
+                title: "Xtal",
+                source: "user_queue",
+                tidal_id_hint: Some(123),
+                album_title: Some("Selected Ambient Works"),
+                artwork_url: Some("https://img/xtal.jpg"),
+                duration_ms: Some(294_000),
+                artist_tidal_id: Some(9001),
+                album_tidal_id: Some(9002),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(matches!(result, InsertResult::Pending { .. }));
+
+        let rows = load_queue(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].is_pending);
+        let track = &rows[0].track;
+        // Rich display metadata straight from the queue row, pre-resolution.
+        assert_eq!(track.id, 0, "no library match -> id 0, never negative");
+        assert_eq!(track.tidal_id, Some(123));
+        assert_eq!(track.album_title.as_deref(), Some("Selected Ambient Works"));
+        assert_eq!(track.artwork_url.as_deref(), Some("https://img/xtal.jpg"));
+        assert_eq!(track.duration_ms, Some(294_000));
+        assert_eq!(track.artist_tidal_id, Some(9001));
+        assert_eq!(track.album_tidal_id, Some(9002));
+    }
+
+    #[test]
+    fn pending_row_with_library_match_serializes_local_id_and_favorite() {
+        let conn = conn();
+        conn.execute("UPDATE tracks SET is_favorite = 1 WHERE id = 3", [])
+            .unwrap();
+        append_external_track(
+            &conn,
+            &ExternalTrackInsert {
+                artist: "A",
+                title: "Track 3 again",
+                source: "user_queue",
+                // Seeded track 3 has tidal_id 3, so the lt join matches.
+                tidal_id_hint: Some(3),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let rows = load_queue(&conn).unwrap();
+        assert!(
+            rows[0].is_pending,
+            "still pending until the resolver promotes it"
+        );
+        let track = &rows[0].track;
+        assert_eq!(track.id, 3, "library match surfaces the local id");
+        assert!(track.is_favorite);
+    }
+
+    #[test]
     fn append_external_track_library_creates_normal_row() {
         let conn = conn();
         let result = append_external_track(
@@ -1448,6 +1574,7 @@ mod tests {
                 reason: Some("seeded"),
                 tidal_id_hint: None,
                 local_track_id: Some(1),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1478,6 +1605,7 @@ mod tests {
                 reason: None,
                 tidal_id_hint: None,
                 local_track_id: Some(1),
+                ..Default::default()
             },
             ExternalTrackInsert {
                 artist: "Aphex Twin",
@@ -1486,6 +1614,7 @@ mod tests {
                 reason: Some("external"),
                 tidal_id_hint: Some(123),
                 local_track_id: None,
+                ..Default::default()
             },
             ExternalTrackInsert {
                 artist: "ignored",
@@ -1494,6 +1623,7 @@ mod tests {
                 reason: None,
                 tidal_id_hint: None,
                 local_track_id: Some(2),
+                ..Default::default()
             },
         ];
 
@@ -1600,6 +1730,7 @@ mod tests {
                 reason: None,
                 tidal_id_hint: None,
                 local_track_id: Some(4),
+                ..Default::default()
             },
             0,
         )
@@ -1635,6 +1766,7 @@ mod tests {
                 reason: None,
                 tidal_id_hint: Some(101),
                 local_track_id: None,
+                ..Default::default()
             },
             ExternalTrackInsert {
                 artist: "B",
@@ -1643,6 +1775,7 @@ mod tests {
                 reason: None,
                 tidal_id_hint: Some(102),
                 local_track_id: None,
+                ..Default::default()
             },
         ];
 

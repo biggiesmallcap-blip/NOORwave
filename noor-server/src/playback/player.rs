@@ -4454,7 +4454,7 @@ mod tests {
                 source: "automix-new",
                 reason: Some("external similarity"),
                 tidal_id_hint: Some(99001),
-                local_track_id: None,
+                ..Default::default()
             },
         )
         .unwrap();

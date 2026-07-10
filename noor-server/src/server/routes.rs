@@ -412,6 +412,18 @@ pub struct MixedQueueItemRequest {
     artist: Option<String>,
     #[serde(default)]
     title: Option<String>,
+    // Display metadata persisted on the pending row so the queue renders
+    // artwork/album/duration before the resolver imports a library track.
+    #[serde(default)]
+    album_title: Option<String>,
+    #[serde(default)]
+    artwork_url: Option<String>,
+    #[serde(default)]
+    duration_ms: Option<i64>,
+    #[serde(default)]
+    artist_tidal_id: Option<i64>,
+    #[serde(default)]
+    album_tidal_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -7292,25 +7304,28 @@ fn queue_external_insert<'a>(
             artist: payload.artist.as_deref().unwrap_or(""),
             title: payload.title.as_deref().unwrap_or(""),
             source,
-            reason: None,
-            tidal_id_hint: None,
             local_track_id: Some(positive(payload.track_id, "track_id")?),
+            ..Default::default()
         }),
+        // TIDAL rows keep their display metadata so the pending queue row
+        // renders artwork/album/duration immediately, before resolution.
         QueueExternalKind::Tidal => Ok(queue::ExternalTrackInsert {
             artist: non_empty(&payload.artist, "artist")?,
             title: non_empty(&payload.title, "title")?,
             source,
-            reason: None,
             tidal_id_hint: Some(positive(payload.tidal_id, "tidal_id")?),
-            local_track_id: None,
+            album_title: payload.album_title.as_deref(),
+            artwork_url: payload.artwork_url.as_deref(),
+            duration_ms: payload.duration_ms.filter(|ms| *ms > 0),
+            artist_tidal_id: payload.artist_tidal_id.filter(|id| *id > 0),
+            album_tidal_id: payload.album_tidal_id.filter(|id| *id > 0),
+            ..Default::default()
         }),
         QueueExternalKind::External => Ok(queue::ExternalTrackInsert {
             artist: non_empty(&payload.artist, "artist")?,
             title: non_empty(&payload.title, "title")?,
             source,
-            reason: None,
-            tidal_id_hint: None,
-            local_track_id: None,
+            ..Default::default()
         }),
     }
 }
@@ -8151,6 +8166,11 @@ async fn play_mixed_queue(
             tidal_id: item.tidal_id.filter(|id| *id > 0),
             artist: item.artist.clone().unwrap_or_default(),
             title: item.title.clone().unwrap_or_default(),
+            album_title: item.album_title.clone(),
+            artwork_url: item.artwork_url.clone(),
+            duration_ms: item.duration_ms.filter(|ms| *ms > 0),
+            artist_tidal_id: item.artist_tidal_id.filter(|id| *id > 0),
+            album_tidal_id: item.album_tidal_id.filter(|id| *id > 0),
         })
         .collect();
     if candidates.is_empty() {
