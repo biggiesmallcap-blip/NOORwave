@@ -15,6 +15,7 @@ export interface SyncInfo {
 	service: string;
 	last_sync_at: string;
 	auto_sync_daily: boolean;
+	enrich_from_favorite_albums: boolean;
 	last_sync_track_count: number;
 	last_sync_album_count: number;
 	last_full_sync_at?: string | null;
@@ -24,6 +25,14 @@ export interface SyncInfo {
 	tidal_favorite_track_cursor?: string | null;
 }
 export const syncInfo = writable<SyncInfo | null>(null);
+
+export interface RecleanSummary {
+	demoted: number;
+	duplicate_groups_found: number;
+	merged_groups: number;
+	removed_tracks: number;
+	skipped_groups: number;
+}
 
 export type TidalSyncMode = 'auto' | 'full';
 
@@ -68,6 +77,31 @@ export async function setAutoSyncDaily(enabled: boolean) {
 			loadSyncInfo(); // Refresh
 		}
 	} catch {}
+}
+
+export async function setSyncEnrichment(enabled: boolean) {
+	try {
+		const resp = await authFetch(`${getApiBase()}/api/sync/enrichment`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ service: 'tidal', enabled })
+		});
+		if (resp.ok) {
+			loadSyncInfo(); // Refresh
+		}
+	} catch {}
+}
+
+// Demote pre-rework album fill to hidden background rows and auto-merge
+// same-recording duplicates. Returns the summary, or null on failure/conflict.
+export async function recleanLibrary(): Promise<RecleanSummary | null> {
+	try {
+		const resp = await authFetch(`${getApiBase()}/api/tidal/reclean`, { method: 'POST' });
+		if (!resp.ok) return null;
+		return (await resp.json()) as RecleanSummary;
+	} catch {
+		return null;
+	}
 }
 
 export async function cancelTidalSync() {

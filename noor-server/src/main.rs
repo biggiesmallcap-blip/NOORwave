@@ -928,6 +928,10 @@ async fn main() -> Result<()> {
                     Ok(AppEvent::LibrarySynced) => {
                         services::auto_enrich::run_if_idle(listener_state.clone()).await;
                         services::tidal::repair::run_if_idle(listener_state.clone()).await;
+                        // Auto-dedupe: merges same-recording duplicates after
+                        // every sync/import. Emits LibrarySynced only when it
+                        // changed rows, so the retrigger converges.
+                        services::library_dedupe::run_if_idle(listener_state.clone()).await;
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -946,6 +950,7 @@ async fn main() -> Result<()> {
             tokio::time::sleep(std::time::Duration::from_secs(90)).await;
             services::auto_enrich::run_if_idle(loop_state.clone()).await;
             services::tidal::repair::run_if_idle(loop_state.clone()).await;
+            services::library_dedupe::run_if_idle(loop_state.clone()).await;
 
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs(86_400));
             ticker.tick().await; // consume the immediate first tick
@@ -953,6 +958,7 @@ async fn main() -> Result<()> {
                 ticker.tick().await;
                 services::auto_enrich::run_if_idle(loop_state.clone()).await;
                 services::tidal::repair::run_if_idle(loop_state.clone()).await;
+                services::library_dedupe::run_if_idle(loop_state.clone()).await;
             }
         });
     }

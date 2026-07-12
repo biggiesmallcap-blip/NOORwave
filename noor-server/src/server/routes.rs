@@ -1079,6 +1079,14 @@ pub fn api_routes(state: SharedState) -> Router {
         )
         .route("/api/sync/info", get(tidal_sync_routes::get_sync_info))
         .route("/api/sync/auto", post(tidal_sync_routes::set_auto_sync))
+        .route(
+            "/api/sync/enrichment",
+            post(tidal_sync_routes::set_sync_enrichment),
+        )
+        .route(
+            "/api/tidal/reclean",
+            post(tidal_sync_routes::tidal_reclean_library),
+        )
         // Status
         .route("/api/status", get(status))
         // Home page discovery endpoints
@@ -11560,6 +11568,7 @@ pub(super) fn insert_tidal_track(
     conn: &rusqlite::Connection,
     track: &crate::services::tidal::client::TidalTrack,
     is_favorite: bool,
+    is_library: bool,
     favorite_created: Option<&str>,
 ) -> anyhow::Result<Option<i64>> {
     // Ensure artist exists first (tracks.artist_id is NOT NULL)
@@ -11581,13 +11590,15 @@ pub(super) fn insert_tidal_track(
     let album_tidal_id = track.album.as_ref().map(|a| a.id);
 
     conn.execute(
-        // Every caller is a genuine TIDAL library sync (favorite tracks,
-        // favorited-album tracks, playlist tracks), so is_library=1. The
-        // ON CONFLICT MAX self-heals: a row first seen as a transient import
-        // (is_library=0) is promoted to library when a real sync touches it,
-        // and is never demoted. See MIGRATION_052.
+        // Curated write paths (liked tracks, playlist tracks) pass
+        // is_library=1; discovery-enrichment fill from favorited albums
+        // passes is_library=0 so it stays out of the Library grid and Genre
+        // Galaxy while still feeding radio/similarity. The ON CONFLICT MAX
+        // self-heals: a row first seen as background is promoted to library
+        // when a curated write touches it, and is never demoted. See
+        // MIGRATION_052.
         "INSERT INTO tracks (tidal_id, title, artist_id, album_id, disc_number, track_number, duration_ms, isrc, best_quality, best_source, fidelity_score, is_favorite, source, date_added, is_library)
-         VALUES (?1, ?2, (SELECT id FROM artists WHERE tidal_id=?3), (SELECT id FROM albums WHERE tidal_id=?4), ?5, ?6, ?7, ?8, ?9, 'tidal', ?10, ?11, 'tidal', COALESCE(?12, datetime('now')), 1)
+         VALUES (?1, ?2, (SELECT id FROM artists WHERE tidal_id=?3), (SELECT id FROM albums WHERE tidal_id=?4), ?5, ?6, ?7, ?8, ?9, 'tidal', ?10, ?11, 'tidal', COALESCE(?12, datetime('now')), ?13)
          ON CONFLICT(tidal_id) DO UPDATE SET
             title=excluded.title, best_quality=excluded.best_quality,
             fidelity_score=MAX(tracks.fidelity_score, excluded.fidelity_score),
@@ -11602,6 +11613,7 @@ pub(super) fn insert_tidal_track(
             track.volume_number.unwrap_or(1), track.track_number,
             track.duration * 1000, track.isrc,
             quality, fidelity, is_favorite as i32, favorite_created,
+            is_library as i32,
         ],
     )?;
 

@@ -1,3 +1,4 @@
+use crate::library::duplicates as dup;
 use crate::services::tidal::{auth as tidal_auth, client::TidalClient};
 use crate::{AppEvent, SharedState};
 use axum::{
@@ -13,7 +14,14 @@ use std::collections::HashSet;
 pub struct SyncStats {
     pub artists: usize,
     pub albums: usize,
+    /// Curated library tracks written (liked + playlist). Background
+    /// enrichment fill is counted separately so "tracks synced" keeps meaning
+    /// library tracks.
     pub tracks: usize,
+    /// Same-recording copies skipped by import dedupe.
+    pub duplicates_skipped: usize,
+    /// Hidden album-fill rows written by the discovery-enrichment pass.
+    pub background_tracks: usize,
     pub playlists: usize,
     pub sync_kind: String,
     pub favorite_artist_cursor: Option<String>,
@@ -119,6 +127,72 @@ pub(super) async fn set_auto_sync(
             ))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Toggle the discovery-enrichment pass (hidden album-fill import).
+pub(super) async fn set_sync_enrichment(
+    State(state): State<SharedState>,
+    Json(payload): Json<AutoSyncRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    let service = normalize_sync_service(payload.service.as_deref())?;
+    let state = state.read().await;
+    state
+        .db
+        .with_conn(|conn| {
+            crate::db::queries::set_enrich_from_favorite_albums(conn, service, payload.enabled)
+                .map_err(|e| anyhow::anyhow!("set sync enrichment failed: {e}"))?;
+            Ok(Json(json!({
+                "service": service,
+                "enrich_from_favorite_albums": payload.enabled,
+            })))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Reclean the library: demote album-fill that predates the bookmark-only
+/// sync to hidden background rows, then run the auto-dedupe pass. Explicitly
+/// user-triggered - a shipped install never silently hides library rows.
+pub(super) async fn tidal_reclean_library(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let demoted = {
+        let s = state.read().await;
+        s.db.with_conn(|conn| {
+            // Likes, local files, and playlist members stay visible; only
+            // un-liked TIDAL fill inside favorited albums goes background.
+            Ok(conn.execute(
+                "UPDATE tracks SET is_library = 0
+                 WHERE is_favorite = 0
+                   AND source = 'tidal'
+                   AND album_id IN (SELECT id FROM albums WHERE is_favorite = 1)
+                   AND id NOT IN (SELECT track_id FROM playlist_tracks)",
+                [],
+            )?)
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+
+    let summary = crate::services::library_dedupe::run_dedupe_pass(&state)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let Some(summary) = summary else {
+        // A background pass is mid-flight; the demotion above still applied.
+        return Err(StatusCode::CONFLICT);
+    };
+
+    // The demotion alone changes the library even when nothing merged.
+    {
+        let s = state.read().await;
+        let _ = s.event_tx.send(AppEvent::LibrarySynced);
+    }
+
+    Ok(Json(json!({
+        "demoted": demoted,
+        "duplicate_groups_found": summary.groups_found,
+        "merged_groups": summary.merged_groups,
+        "removed_tracks": summary.removed_tracks,
+        "skipped_groups": summary.skipped_groups,
+    })))
 }
 
 /// Public function to trigger auto-sync from server startup.
@@ -371,7 +445,6 @@ async fn do_tidal_sync(
     requested_mode: SyncModeRequest,
 ) -> anyhow::Result<SyncStats> {
     use crate::services::tidal::client::TidalClient as TC;
-    use futures::stream::{self, StreamExt};
     use std::sync::atomic::Ordering;
 
     let check_cancel = || -> anyhow::Result<()> {
@@ -541,70 +614,19 @@ async fn do_tidal_sync(
             favorite_album_ids.insert(fav.item.id);
         }
 
-        // Hydrate album tracks with bounded concurrency so the UI keeps moving
-        // instead of stalling on one giant page-wide batch.
-        let album_ids: Vec<i64> = page_items.iter().map(|f| f.item.id).collect();
+        // Albums are bookmarks only: the row above keeps the shelf and
+        // metadata intact, but the album's tracks are NOT pulled into the
+        // library any more. The discovery-enrichment pass (after the sync,
+        // when enabled) imports them as hidden is_library=0 rows instead.
         let album_total = resp
             .total_number_of_items
             .unwrap_or((offset + resp.items.len() as i32) as i64)
             .max(1) as f32;
-        let mut albums_hydrated_in_page = 0usize;
-
-        for album_chunk in album_ids.chunks(10) {
-            check_cancel()?;
-            // Bound each per-album fetch so a single hung Tidal request can't
-            // stall the chunk for ~30s (reqwest default). One retry on error
-            // or timeout handles transient network blips; a second timeout
-            // surfaces as an Err that the loop below quietly skips.
-            let album_fetch_timeout = std::time::Duration::from_secs(15);
-            let mut fetches = stream::iter(album_chunk.iter().copied())
-                .map(|album_id| async move {
-                    let first = tokio::time::timeout(
-                        album_fetch_timeout,
-                        client.get_all_album_tracks(album_id),
-                    )
-                    .await;
-                    match first {
-                        Ok(Ok(resp)) => Ok(resp),
-                        _ => match tokio::time::timeout(
-                            album_fetch_timeout,
-                            client.get_all_album_tracks(album_id),
-                        )
-                        .await
-                        {
-                            Ok(result) => result,
-                            Err(_) => Err(anyhow::anyhow!(
-                                "get_album_tracks timed out twice for album {album_id}"
-                            )),
-                        },
-                    }
-                })
-                .buffer_unordered(10);
-
-            while let Some(result) = fetches.next().await {
-                if let Ok(tracks) = result {
-                    let s = state.read().await;
-                    s.db.with_conn(|conn| {
-                        let tx = conn.unchecked_transaction()?;
-                        for track in &tracks {
-                            super::insert_tidal_track(&tx, track, false, None)?;
-                            stats.tracks += 1;
-                        }
-                        tx.commit()?;
-                        Ok(())
-                    })?;
-                }
-
-                albums_hydrated_in_page += 1;
-                let processed_albums = offset as usize + albums_hydrated_in_page;
-                // Albums phase: 0.05 to 0.5. Artists phase ate 0.0 to 0.05.
-                let progress_fraction =
-                    (0.05 + (processed_albums as f32 / album_total) * 0.45).clamp(0.05, 0.5);
-                send_tidal_sync_progress(state, progress_fraction).await;
-            }
-        }
 
         offset += resp.items.len() as i32;
+        // Albums phase: 0.05 to 0.10. Artists phase ate 0.0 to 0.05.
+        let album_progress = (0.05 + (offset as f32 / album_total) * 0.05).clamp(0.05, 0.10);
+        send_tidal_sync_progress(state, album_progress).await;
         if matches!(sync_mode, SyncMode::Incremental) && page_plan.hit_cursor {
             break;
         }
@@ -645,6 +667,8 @@ async fn do_tidal_sync(
         let page_items = &resp.items[..page_plan.process_count];
         {
             let s = state.read().await;
+            let mut page_inserted = 0usize;
+            let mut page_skipped = 0usize;
             s.db.with_conn(|conn| {
                 let tx = conn.unchecked_transaction()?;
                 for fav in page_items {
@@ -664,20 +688,61 @@ async fn do_tidal_sync(
                             rusqlite::params![album_ref.id, album_ref.title, track.artist.id, artwork],
                         )?;
                     }
-                    super::insert_tidal_track(&tx, track, true, fav.created.as_deref())?;
-                    stats.tracks += 1;
+                    // Same-recording dedupe: a copy of this liked track may
+                    // already exist under another tidal_id (single vs album
+                    // release, enrichment fill). Transfer the like to that
+                    // row instead of inserting a visible duplicate.
+                    let incoming = dup::IncomingTrack {
+                        tidal_id: track.id,
+                        title: &track.title,
+                        artist_name: &track.artist.name,
+                        isrc: track.isrc.as_deref(),
+                        duration_ms: track.duration * 1000,
+                    };
+                    let candidates = dup::fetch_import_candidates(
+                        &tx,
+                        track.id,
+                        track.artist.id,
+                        track.isrc.as_deref(),
+                        incoming.duration_ms,
+                    )?;
+                    match dup::decide_import(&incoming, &candidates) {
+                        dup::ImportDecision::Insert => {
+                            super::insert_tidal_track(&tx, track, true, true, fav.created.as_deref())?;
+                            page_inserted += 1;
+                        }
+                        dup::ImportDecision::SkipDuplicate {
+                            existing_track_id,
+                            existing_tidal_id,
+                        } => {
+                            tx.execute(
+                                "UPDATE tracks SET is_favorite = 1, is_library = 1 WHERE id = ?1",
+                                rusqlite::params![existing_track_id],
+                            )?;
+                            // Keep the transferred like stable across the
+                            // Full-mode reconciliation, which resets and
+                            // re-sets is_favorite by tidal_id.
+                            if let Some(existing_tidal_id) = existing_tidal_id {
+                                favorite_track_ids.insert(existing_tidal_id);
+                            }
+                            page_skipped += 1;
+                        }
+                    }
                 }
                 tx.commit()?;
                 Ok(())
             })?;
+            stats.tracks += page_inserted;
+            stats.duplicates_skipped += page_skipped;
         }
         offset += resp.items.len() as i32;
         let processed_tracks = offset as f32;
+        // Liked tracks phase: 0.10 to 0.45.
         let track_progress = resp
             .total_number_of_items
-            .map(|t| 0.5 + (processed_tracks / t.max(1) as f32) * 0.4)
-            .unwrap_or(0.85)
-            .clamp(0.5, 0.9);
+            .map(|t| 0.10 + (processed_tracks / t.max(1) as f32) * 0.35)
+            .unwrap_or(0.40)
+            .clamp(0.10, 0.45);
         send_tidal_sync_progress(state, track_progress).await;
         if matches!(sync_mode, SyncMode::Incremental) && page_plan.hit_cursor {
             break;
@@ -795,7 +860,10 @@ async fn do_tidal_sync(
                     }
                     // insert_tidal_track already resolves the local row id, so
                     // reuse it instead of issuing a second lookup per track.
-                    let track_id = super::insert_tidal_track(&tx, track, false, None)?;
+                    // Playlist members are curated (is_library=1) and are NOT
+                    // deduped: playlist_tracks needs a concrete row per
+                    // position, and tidal_id conflicts already upsert.
+                    let track_id = super::insert_tidal_track(&tx, track, false, true, None)?;
                     if let Some(tid) = track_id {
                         tx.execute(
                             "INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
@@ -809,9 +877,10 @@ async fn do_tidal_sync(
             })?;
             }
             stats.playlists += 1;
+            // Playlists phase: 0.45 to 0.55; enrichment takes 0.55 to 0.99.
             let playlist_progress =
-                0.9 + (((playlist_index + 1) as f32 / total_playlists as f32) * 0.1);
-            send_tidal_sync_progress(state, playlist_progress.clamp(0.9, 0.99)).await;
+                0.45 + (((playlist_index + 1) as f32 / total_playlists as f32) * 0.10);
+            send_tidal_sync_progress(state, playlist_progress.clamp(0.45, 0.55)).await;
         }
     }
     tracing::info!("Synced {} playlists", stats.playlists);
@@ -835,7 +904,162 @@ async fn do_tidal_sync(
         })?;
     }
 
+    // Discovery enrichment: import the rest of each favorited album's tracks
+    // as hidden background rows for radio/similarity. Best-effort: a failure
+    // (or cancel) here must not fail the completed sync - unfinished albums
+    // keep enrich_completed_at NULL and are picked up next run.
+    let enrich_enabled = sync_info
+        .as_ref()
+        .map(|info| info.enrich_from_favorite_albums)
+        .unwrap_or(true);
+    if enrich_enabled {
+        if let Err(e) = run_favorite_album_enrichment(client, state, cancel, &mut stats).await {
+            tracing::warn!("Discovery enrichment stopped early: {e}");
+        }
+    }
+    send_tidal_sync_progress(state, 0.99).await;
+
     Ok(stats)
+}
+
+/// Import the rest of each favorited album's tracks as hidden discovery fill
+/// (is_library = 0): invisible in the Library grid and Genre Galaxy, but
+/// feeding radio, similarity, and DiscoverSpace. DB-driven so it also covers
+/// albums favorited before this feature existed, albums synced while the
+/// toggle was off, and interrupted runs. Same-recording copies are skipped
+/// via decide_import; variants (remix/live/...) are kept.
+async fn run_favorite_album_enrichment(
+    client: &TidalClient,
+    state: &SharedState,
+    cancel: &std::sync::atomic::AtomicBool,
+    stats: &mut SyncStats,
+) -> anyhow::Result<()> {
+    use futures::stream::{self, StreamExt};
+    use std::sync::atomic::Ordering;
+
+    let check_cancel = || -> anyhow::Result<()> {
+        if cancel.load(Ordering::SeqCst) {
+            anyhow::bail!("TIDAL sync cancelled");
+        }
+        Ok(())
+    };
+
+    let album_ids: Vec<i64> = {
+        let s = state.read().await;
+        s.db.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT tidal_id FROM albums
+                 WHERE is_favorite = 1
+                   AND tidal_id IS NOT NULL
+                   AND enrich_completed_at IS NULL
+                 ORDER BY id DESC",
+            )?;
+            let ids = stmt
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<i64>>>()?;
+            Ok(ids)
+        })?
+    };
+    if album_ids.is_empty() {
+        return Ok(());
+    }
+
+    tracing::info!(
+        "Enriching {} favorited albums with hidden discovery fill...",
+        album_ids.len()
+    );
+    let total = album_ids.len().max(1) as f32;
+    let mut processed = 0usize;
+
+    for album_chunk in album_ids.chunks(10) {
+        check_cancel()?;
+        // Bound each per-album fetch so a single hung TIDAL request can't
+        // stall the chunk; one retry handles transient blips (same pattern
+        // the old in-sync hydration used).
+        let album_fetch_timeout = std::time::Duration::from_secs(15);
+        let mut fetches = stream::iter(album_chunk.iter().copied())
+            .map(|album_id| async move {
+                let first = tokio::time::timeout(
+                    album_fetch_timeout,
+                    client.get_all_album_tracks(album_id),
+                )
+                .await;
+                let result = match first {
+                    Ok(Ok(resp)) => Ok(resp),
+                    _ => match tokio::time::timeout(
+                        album_fetch_timeout,
+                        client.get_all_album_tracks(album_id),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => Err(anyhow::anyhow!(
+                            "get_album_tracks timed out twice for album {album_id}"
+                        )),
+                    },
+                };
+                (album_id, result)
+            })
+            .buffer_unordered(10);
+
+        while let Some((album_id, result)) = fetches.next().await {
+            if let Ok(tracks) = result {
+                let s = state.read().await;
+                let mut inserted = 0usize;
+                let mut skipped = 0usize;
+                s.db.with_conn(|conn| {
+                    let tx = conn.unchecked_transaction()?;
+                    for track in &tracks {
+                        let incoming = dup::IncomingTrack {
+                            tidal_id: track.id,
+                            title: &track.title,
+                            artist_name: &track.artist.name,
+                            isrc: track.isrc.as_deref(),
+                            duration_ms: track.duration * 1000,
+                        };
+                        let candidates = dup::fetch_import_candidates(
+                            &tx,
+                            track.id,
+                            track.artist.id,
+                            track.isrc.as_deref(),
+                            incoming.duration_ms,
+                        )?;
+                        match dup::decide_import(&incoming, &candidates) {
+                            dup::ImportDecision::Insert => {
+                                super::insert_tidal_track(&tx, track, false, false, None)?;
+                                inserted += 1;
+                            }
+                            dup::ImportDecision::SkipDuplicate { .. } => {
+                                skipped += 1;
+                            }
+                        }
+                    }
+                    // Mark done inside the same tx: a crash re-runs the whole
+                    // album (idempotent upserts), never half-marks it.
+                    tx.execute(
+                        "UPDATE albums SET enrich_completed_at = datetime('now') WHERE tidal_id = ?1",
+                        rusqlite::params![album_id],
+                    )?;
+                    tx.commit()?;
+                    Ok(())
+                })?;
+                stats.background_tracks += inserted;
+                stats.duplicates_skipped += skipped;
+            }
+
+            processed += 1;
+            // Enrichment phase: 0.55 to 0.99.
+            let progress = (0.55 + (processed as f32 / total) * 0.44).clamp(0.55, 0.99);
+            send_tidal_sync_progress(state, progress).await;
+        }
+    }
+
+    tracing::info!(
+        "Enrichment complete: {} hidden tracks added, {} duplicate copies skipped",
+        stats.background_tracks,
+        stats.duplicates_skipped
+    );
+    Ok(())
 }
 
 async fn send_tidal_sync_progress(state: &SharedState, progress: f32) {
@@ -1160,6 +1384,7 @@ mod tests {
             service: "tidal".to_string(),
             last_sync_at: "2026-05-10 00:00:00".to_string(),
             auto_sync_daily: false,
+            enrich_from_favorite_albums: true,
             last_sync_track_count: 0,
             last_sync_album_count: 0,
             last_full_sync_at: last_full_sync_at.map(str::to_string),

@@ -406,6 +406,216 @@ fn rows_match(left: &MatchRow, right: &MatchRow, via_isrc: bool) -> bool {
     }
 }
 
+// ── Import-time dedupe ───────────────────────────────────────────────────────
+
+/// An incoming TIDAL track about to be inserted by sync or enrichment.
+pub struct IncomingTrack<'a> {
+    pub tidal_id: i64,
+    pub title: &'a str,
+    pub artist_name: &'a str,
+    pub isrc: Option<&'a str>,
+    pub duration_ms: i64,
+}
+
+/// An existing tracks row that could be the same recording as an incoming one.
+pub struct ExistingCandidate {
+    pub track_id: i64,
+    pub tidal_id: Option<i64>,
+    pub title: String,
+    pub artist_name: String,
+    pub isrc: Option<String>,
+    pub duration_ms: i64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ImportDecision {
+    /// No same-recording match: run the normal `ON CONFLICT(tidal_id)` upsert.
+    Insert,
+    /// The same recording already exists under a DIFFERENT tidal_id. The
+    /// caller decides the side effect (liked sync transfers the like; album
+    /// enrichment just skips).
+    SkipDuplicate {
+        existing_track_id: i64,
+        existing_tidal_id: Option<i64>,
+    },
+}
+
+fn normalize_isrc(isrc: &str) -> Option<String> {
+    let trimmed = isrc.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_ascii_uppercase())
+    }
+}
+
+/// Sorted alt-version fingerprint ("remix"/"live"/"acoustic"/... tokens and
+/// phrases) for a title. Two titles are only the same recording when these
+/// agree - that is what keeps distinct versions alive while single/album/
+/// deluxe/compilation copies collapse. Master markers (remaster/extended/...)
+/// are deliberately NOT part of the fingerprint: a remaster is the same
+/// recording, and an extended cut is separated by the duration gate instead.
+fn alt_fingerprint(row: &MatchRow) -> Vec<&'static str> {
+    let mut v = row.alt_markers.clone();
+    v.sort_unstable();
+    v
+}
+
+/// Decide whether an incoming track is a new recording or a copy of an
+/// existing row. Pure function over pre-fetched candidates; both sync phases
+/// and album enrichment share it. Only literal same-recording copies are ever
+/// skipped - there is deliberately no "skip variant" outcome.
+pub fn decide_import(incoming: &IncomingTrack, candidates: &[ExistingCandidate]) -> ImportDecision {
+    // Rule 0: same tidal_id = same row, not a duplicate. The normal upsert
+    // must run so re-syncs keep refreshing title/quality/fidelity/date_added.
+    if candidates
+        .iter()
+        .any(|c| c.tidal_id == Some(incoming.tidal_id))
+    {
+        return ImportDecision::Insert;
+    }
+
+    let inc_isrc = incoming.isrc.and_then(normalize_isrc);
+    let inc_row = build_match_row(
+        0,
+        incoming.title,
+        incoming.artist_name,
+        Some(incoming.duration_ms),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        String::new(),
+        0,
+        false,
+    );
+    let inc_alt = alt_fingerprint(&inc_row);
+
+    for cand in candidates {
+        // ISRC path: same registered recording. The duration guard defends
+        // against the known ISRC-reuse-with-different-length upstream bug.
+        let cand_isrc = cand.isrc.as_deref().and_then(normalize_isrc);
+        if let (Some(a), Some(b)) = (inc_isrc.as_deref(), cand_isrc.as_deref())
+            && a == b
+            && durations_compatible(incoming.duration_ms, cand.duration_ms, 15_000, 8)
+        {
+            return ImportDecision::SkipDuplicate {
+                existing_track_id: cand.track_id,
+                existing_tidal_id: cand.tidal_id,
+            };
+        }
+
+        // Title path: fuzzy same-recording match, gated on matching variant
+        // fingerprints so "Song" never swallows "Song (Live)".
+        let cand_row = build_match_row(
+            cand.track_id,
+            &cand.title,
+            &cand.artist_name,
+            Some(cand.duration_ms),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            String::new(),
+            0,
+            false,
+        );
+        if alt_fingerprint(&cand_row) == inc_alt && rows_match(&inc_row, &cand_row, false) {
+            return ImportDecision::SkipDuplicate {
+                existing_track_id: cand.track_id,
+                existing_tidal_id: cand.tidal_id,
+            };
+        }
+    }
+
+    ImportDecision::Insert
+}
+
+const IMPORT_CANDIDATE_SELECT: &str =
+    "SELECT t.id, t.tidal_id, t.title, COALESCE(a.name, ''), t.isrc, COALESCE(t.duration_ms, 0)
+     FROM tracks t
+     LEFT JOIN artists a ON t.artist_id = a.id";
+
+fn collect_import_candidates(
+    conn: &Connection,
+    sql: &str,
+    params: &[&dyn rusqlite::ToSql],
+    seen: &mut std::collections::HashSet<i64>,
+    out: &mut Vec<ExistingCandidate>,
+) -> Result<()> {
+    let mut stmt = conn.prepare_cached(sql)?;
+    let rows = stmt.query_map(params, |row| {
+        Ok(ExistingCandidate {
+            track_id: row.get(0)?,
+            tidal_id: row.get(1)?,
+            title: row.get(2)?,
+            artist_name: row.get(3)?,
+            isrc: row.get(4)?,
+            duration_ms: row.get(5)?,
+        })
+    })?;
+    for row in rows {
+        let candidate = row?;
+        if seen.insert(candidate.track_id) {
+            out.push(candidate);
+        }
+    }
+    Ok(())
+}
+
+/// Fetch the existing rows that could be the same recording as an incoming
+/// TIDAL track: its own tidal_id row (so [`decide_import`]'s rule 0 sees
+/// re-syncs), same-ISRC rows (cross-artist, for compilations), and
+/// same-artist rows inside the widest duration tolerance decide_import uses.
+pub fn fetch_import_candidates(
+    conn: &Connection,
+    tidal_id: i64,
+    artist_tidal_id: i64,
+    isrc: Option<&str>,
+    duration_ms: i64,
+) -> Result<Vec<ExistingCandidate>> {
+    let mut out: Vec<ExistingCandidate> = Vec::new();
+    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+
+    collect_import_candidates(
+        conn,
+        &format!("{IMPORT_CANDIDATE_SELECT} WHERE t.tidal_id = ?1"),
+        &[&tidal_id],
+        &mut seen,
+        &mut out,
+    )?;
+
+    if let Some(isrc) = isrc.map(str::trim).filter(|s| !s.is_empty()) {
+        collect_import_candidates(
+            conn,
+            &format!("{IMPORT_CANDIDATE_SELECT} WHERE t.isrc = ?1 AND t.isrc != ''"),
+            &[&isrc],
+            &mut seen,
+            &mut out,
+        )?;
+    }
+
+    collect_import_candidates(
+        conn,
+        &format!(
+            "{IMPORT_CANDIDATE_SELECT}
+             WHERE t.artist_id = (SELECT id FROM artists WHERE tidal_id = ?1)
+               AND ABS(COALESCE(t.duration_ms, 0) - ?2) <= 15000"
+        ),
+        &[&artist_tidal_id, &duration_ms],
+        &mut seen,
+        &mut out,
+    )?;
+
+    Ok(out)
+}
+
 // ── Classifier ────────────────────────────────────────────────────────────────
 
 /// Maps a `best_quality` string to a coarse fidelity tier.
@@ -1068,6 +1278,276 @@ pub fn resolve_group(
     })
 }
 
+// ── Auto-merge ───────────────────────────────────────────────────────────────
+
+pub struct MergeOutcome {
+    pub removed_track_ids: Vec<i64>,
+    /// TIDAL ids of removed rows that were favorited. The caller should push
+    /// the like to the kept row on TIDAL and unfavorite these, otherwise the
+    /// next Full sync's reconciliation wipes the transferred like.
+    pub favorited_loser_tidal_ids: Vec<i64>,
+    pub kept_tidal_id: Option<i64>,
+    pub reconcile: ReconcileOutcome,
+}
+
+/// Merge a duplicate group into `preferred_track_id`, preserving history.
+/// Unlike [`resolve_group`] (manual UI path, deletes references outright),
+/// this REPOINTS listen_history and playlist memberships to the kept row,
+/// folds flags/play counts, and moves DSP/embedding rows the kept row lacks,
+/// before deleting the losers. Safe for automatic use.
+pub fn merge_group(
+    conn: &Connection,
+    group_id: i64,
+    preferred_track_id: i64,
+) -> Result<MergeOutcome> {
+    let mut stmt = conn.prepare(
+        "SELECT dm.track_id, t.tidal_id, t.is_favorite, t.is_library, t.play_count
+         FROM duplicate_members dm
+         JOIN tracks t ON dm.track_id = t.id
+         WHERE dm.group_id = ?1 AND dm.track_id != ?2",
+    )?;
+    let losers: Vec<(i64, Option<i64>, i32, i32, i64)> = stmt
+        .query_map(params![group_id, preferred_track_id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    let removed_track_ids: Vec<i64> = losers.iter().map(|l| l.0).collect();
+    let favorited_loser_tidal_ids: Vec<i64> = losers
+        .iter()
+        .filter(|l| l.2 != 0)
+        .filter_map(|l| l.1)
+        .collect();
+
+    // Fold flags and plays into the kept row: a merge can move a like, never
+    // lose one.
+    let fav_fold = losers.iter().any(|l| l.2 != 0) as i32;
+    let lib_fold = losers.iter().any(|l| l.3 != 0) as i32;
+    let plays_fold: i64 = losers.iter().map(|l| l.4).sum();
+    conn.execute(
+        "UPDATE tracks SET
+            is_favorite = MAX(is_favorite, ?1),
+            is_library = MAX(is_library, ?2),
+            play_count = play_count + ?3
+         WHERE id = ?4",
+        params![fav_fold, lib_fold, plays_fold, preferred_track_id],
+    )?;
+    // Zero the folded counters on the losers so an interrupted merge that
+    // re-runs after the next scan cannot double-count plays.
+    for &(loser_id, _, _, _, _) in &losers {
+        conn.execute(
+            "UPDATE tracks SET play_count = 0 WHERE id = ?1",
+            params![loser_id],
+        )?;
+    }
+
+    for &(loser_id, _, _, _, _) in &losers {
+        // Listen history feeds taste vectors, heat, and stats: repoint, never
+        // delete.
+        conn.execute(
+            "UPDATE listen_history SET track_id = ?1 WHERE track_id = ?2",
+            params![preferred_track_id, loser_id],
+        )?;
+        // Playlist memberships follow the kept row. PK is
+        // (playlist_id, position) so this cannot conflict...
+        conn.execute(
+            "UPDATE playlist_tracks SET track_id = ?1 WHERE track_id = ?2",
+            params![preferred_track_id, loser_id],
+        )?;
+        // Move analysis rows the kept row lacks; leftovers are cleaned below.
+        conn.execute(
+            "UPDATE OR IGNORE audio_dsp_features SET track_id = ?1 WHERE track_id = ?2",
+            params![preferred_track_id, loser_id],
+        )?;
+        conn.execute(
+            "UPDATE OR IGNORE track_embeddings SET track_id = ?1 WHERE track_id = ?2",
+            params![preferred_track_id, loser_id],
+        )?;
+    }
+
+    // ...but a playlist that contained several copies now lists the kept
+    // track more than once: drop the later positions.
+    conn.execute(
+        "DELETE FROM playlist_tracks WHERE rowid IN (
+            SELECT later.rowid
+            FROM playlist_tracks later
+            JOIN playlist_tracks earlier
+              ON earlier.playlist_id = later.playlist_id
+             AND earlier.track_id = later.track_id
+             AND earlier.position < later.position
+            WHERE later.track_id = ?1
+         )",
+        params![preferred_track_id],
+    )?;
+
+    let reconcile =
+        crate::playback::player::reconcile_after_track_delete(conn, &removed_track_ids)?;
+
+    // Explicit cleanup of remaining loser references. The shipped DB would
+    // cascade most of these on the tracks delete, but being explicit keeps
+    // behavior identical when foreign_keys is off (tests, older DBs).
+    for &track_id in &removed_track_ids {
+        conn.execute(
+            "DELETE FROM audio_dsp_features WHERE track_id = ?1",
+            params![track_id],
+        )?;
+        conn.execute(
+            "DELETE FROM track_embeddings WHERE track_id = ?1",
+            params![track_id],
+        )?;
+        conn.execute(
+            "DELETE FROM track_neighbors WHERE track_id = ?1 OR neighbor_track_id = ?1",
+            params![track_id],
+        )?;
+        conn.execute(
+            "DELETE FROM track_similarity WHERE track_a = ?1 OR track_b = ?1",
+            params![track_id],
+        )?;
+        conn.execute(
+            "DELETE FROM shuffle_state WHERE track_id = ?1",
+            params![track_id],
+        )?;
+        conn.execute(
+            "DELETE FROM track_genres WHERE track_id = ?1",
+            params![track_id],
+        )?;
+        conn.execute(
+            "DELETE FROM duplicate_members WHERE track_id = ?1",
+            params![track_id],
+        )?;
+        conn.execute("DELETE FROM tracks WHERE id = ?1", params![track_id])?;
+    }
+
+    conn.execute(
+        "UPDATE duplicate_members SET is_preferred = 1
+         WHERE group_id = ?1 AND track_id = ?2",
+        params![group_id, preferred_track_id],
+    )?;
+    conn.execute(
+        "UPDATE duplicate_groups SET status = 'resolved' WHERE id = ?1",
+        params![group_id],
+    )?;
+
+    let kept_tidal_id: Option<i64> = conn
+        .query_row(
+            "SELECT tidal_id FROM tracks WHERE id = ?1",
+            params![preferred_track_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(None);
+
+    Ok(MergeOutcome {
+        removed_track_ids,
+        favorited_loser_tidal_ids,
+        kept_tidal_id,
+        reconcile,
+    })
+}
+
+/// Deterministic keep-rule for automatic merges: liked first, then library
+/// membership, then the copy on a favorited album (so a favorited album's
+/// detail page keeps its row), then fidelity, plays, lowest id. Re-runs are
+/// idempotent because the ordering is total.
+fn pick_preferred(conn: &Connection, group_id: i64) -> Result<Option<i64>> {
+    let preferred = conn
+        .query_row(
+            "SELECT t.id
+             FROM duplicate_members dm
+             JOIN tracks t ON dm.track_id = t.id
+             LEFT JOIN albums al ON t.album_id = al.id
+             WHERE dm.group_id = ?1
+             ORDER BY t.is_favorite DESC,
+                      t.is_library DESC,
+                      COALESCE(al.is_favorite, 0) DESC,
+                      t.fidelity_score DESC,
+                      t.play_count DESC,
+                      t.id ASC
+             LIMIT 1",
+            params![group_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(Some)
+        .unwrap_or(None);
+    Ok(preferred)
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct AutoMergeStats {
+    pub merged_groups: usize,
+    pub removed_tracks: usize,
+    /// Groups left for the Duplicates UI (alt_version, local files).
+    pub skipped_groups: usize,
+    /// (kept tidal_id, favorited loser tidal_ids) pairs the caller must
+    /// reconcile on TIDAL.
+    #[serde(skip)]
+    pub favorite_transfers: Vec<(i64, Vec<i64>)>,
+    pub queue_changed: bool,
+    pub current_changed: bool,
+}
+
+/// Auto-merge every pending same-recording group. Variants (`alt_version`)
+/// and groups touching local files are never auto-merged; liked rows always
+/// survive as the kept row per [`pick_preferred`].
+pub fn auto_merge_pending(conn: &Connection) -> Result<AutoMergeStats> {
+    let group_ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare("SELECT id FROM duplicate_groups WHERE status = 'pending' ORDER BY id ASC")?;
+        stmt.query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?
+    };
+
+    let mut stats = AutoMergeStats::default();
+    for gid in group_ids {
+        let (members, classify_rows) = load_members_with_classify_rows(conn, gid)?;
+        if members.len() < 2 {
+            continue;
+        }
+        let row_refs: Vec<&MatchRow> = classify_rows.iter().collect();
+        let (relationship, _) = classify(&row_refs);
+        let touches_local_file = classify_rows
+            .iter()
+            .any(|r| r.file_path.as_deref().is_some_and(|p| !p.is_empty()));
+        let same_recording = matches!(
+            relationship.as_str(),
+            "exact_duplicate" | "quality_variant" | "cross_album_reissue" | "remaster"
+        );
+        if !same_recording || touches_local_file {
+            stats.skipped_groups += 1;
+            continue;
+        }
+
+        let Some(preferred) = pick_preferred(conn, gid)? else {
+            continue;
+        };
+
+        // Not wrapped in a transaction: reconcile_after_track_delete opens
+        // its own, and SQLite cannot nest. Same non-atomic shape as
+        // resolve_group; a crash mid-merge is repaired by the next scan.
+        let outcome = merge_group(conn, gid, preferred)?;
+
+        stats.merged_groups += 1;
+        stats.removed_tracks += outcome.removed_track_ids.len();
+        stats.queue_changed |= outcome.reconcile.queue_changed;
+        stats.current_changed |= outcome.reconcile.current_changed;
+        if !outcome.favorited_loser_tidal_ids.is_empty()
+            && let Some(kept) = outcome.kept_tidal_id
+        {
+            stats
+                .favorite_transfers
+                .push((kept, outcome.favorited_loser_tidal_ids));
+        }
+    }
+
+    Ok(stats)
+}
+
 /// Mark group as dismissed without deleting anything.
 pub fn dismiss_group(conn: &Connection, group_id: i64) -> Result<()> {
     conn.execute(
@@ -1094,7 +1574,8 @@ mod tests {
                 id INTEGER PRIMARY KEY,
                 title TEXT NOT NULL,
                 year INTEGER,
-                artwork_url TEXT
+                artwork_url TEXT,
+                is_favorite INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE tracks (
@@ -1119,7 +1600,34 @@ mod tests {
                 source TEXT NOT NULL DEFAULT 'tidal',
                 sample_rate INTEGER,
                 bit_depth INTEGER,
-                file_path TEXT
+                file_path TEXT,
+                is_library INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE audio_dsp_features (
+                track_id INTEGER PRIMARY KEY,
+                bpm REAL
+            );
+
+            CREATE TABLE track_embeddings (
+                track_id INTEGER NOT NULL,
+                model_id INTEGER NOT NULL,
+                vector_blob BLOB,
+                PRIMARY KEY (track_id, model_id)
+            );
+
+            CREATE TABLE track_neighbors (
+                track_id INTEGER NOT NULL,
+                neighbor_track_id INTEGER NOT NULL,
+                model_id INTEGER NOT NULL,
+                rank INTEGER NOT NULL DEFAULT 0,
+                score REAL NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE track_similarity (
+                track_a INTEGER NOT NULL,
+                track_b INTEGER NOT NULL,
+                similarity_score REAL NOT NULL DEFAULT 0
             );
 
             CREATE TABLE duplicate_groups (
@@ -1620,5 +2128,414 @@ mod tests {
                 .iter()
                 .any(|d| d.kind == "sample_rate")
         );
+    }
+
+    // ── decide_import ────────────────────────────────────────────────────────
+
+    fn incoming<'a>(
+        tidal_id: i64,
+        title: &'a str,
+        isrc: Option<&'a str>,
+        duration_ms: i64,
+    ) -> IncomingTrack<'a> {
+        IncomingTrack {
+            tidal_id,
+            title,
+            artist_name: "Test Artist",
+            isrc,
+            duration_ms,
+        }
+    }
+
+    fn candidate(
+        track_id: i64,
+        tidal_id: Option<i64>,
+        title: &str,
+        isrc: Option<&str>,
+        duration_ms: i64,
+    ) -> ExistingCandidate {
+        ExistingCandidate {
+            track_id,
+            tidal_id,
+            title: title.to_string(),
+            artist_name: "Test Artist".to_string(),
+            isrc: isrc.map(str::to_string),
+            duration_ms,
+        }
+    }
+
+    #[test]
+    fn decide_import_same_tidal_id_is_a_resync_not_a_duplicate() {
+        // Rule 0: the upsert must run so re-syncs keep refreshing metadata.
+        let inc = incoming(42, "Song", Some("ISRC1"), 200_000);
+        let cands = vec![candidate(1, Some(42), "Song", Some("ISRC1"), 200_000)];
+        assert_eq!(decide_import(&inc, &cands), ImportDecision::Insert);
+    }
+
+    #[test]
+    fn decide_import_exact_isrc_dup_skips() {
+        let inc = incoming(42, "Song", Some("isrc1 "), 200_000);
+        let cands = vec![candidate(7, Some(99), "Song", Some("ISRC1"), 201_000)];
+        assert_eq!(
+            decide_import(&inc, &cands),
+            ImportDecision::SkipDuplicate {
+                existing_track_id: 7,
+                existing_tidal_id: Some(99),
+            }
+        );
+    }
+
+    #[test]
+    fn decide_import_isrc_with_large_duration_gap_inserts() {
+        // Known upstream bug: one ISRC reused across different-length cuts.
+        let inc = incoming(42, "My Barn My Rules", Some("DEU672200178"), 127_000);
+        let cands = vec![candidate(
+            7,
+            Some(99),
+            "My Barn My Rules",
+            Some("DEU672200178"),
+            266_000,
+        )];
+        assert_eq!(decide_import(&inc, &cands), ImportDecision::Insert);
+    }
+
+    #[test]
+    fn decide_import_single_vs_album_same_title_skips() {
+        // Same recording released on a single and an album: no ISRC on the
+        // incoming copy, title+artist+duration collapse it.
+        let inc = incoming(42, "Song", None, 200_000);
+        let cands = vec![candidate(7, Some(99), "Song", None, 200_500)];
+        assert_eq!(
+            decide_import(&inc, &cands),
+            ImportDecision::SkipDuplicate {
+                existing_track_id: 7,
+                existing_tidal_id: Some(99),
+            }
+        );
+    }
+
+    #[test]
+    fn decide_import_keeps_live_variant() {
+        // Variants are never duplicates: differing alt fingerprints.
+        let inc = incoming(42, "Song (Live)", None, 200_000);
+        let cands = vec![candidate(7, Some(99), "Song", None, 200_000)];
+        assert_eq!(decide_import(&inc, &cands), ImportDecision::Insert);
+
+        // And the mirror: incoming base, only the live cut exists.
+        let inc = incoming(43, "Song", None, 200_000);
+        let cands = vec![candidate(8, Some(98), "Song (Live)", None, 200_000)];
+        assert_eq!(decide_import(&inc, &cands), ImportDecision::Insert);
+    }
+
+    #[test]
+    fn decide_import_keeps_remix_variant() {
+        let inc = incoming(42, "Song (Remix)", None, 200_000);
+        let cands = vec![candidate(7, Some(99), "Song", None, 200_000)];
+        assert_eq!(decide_import(&inc, &cands), ImportDecision::Insert);
+    }
+
+    #[test]
+    fn decide_import_collapses_remaster_of_same_recording() {
+        // Master markers are not part of the variant fingerprint: a remaster
+        // with matching duration is the same recording.
+        let inc = incoming(42, "Song (2011 Remaster)", None, 200_000);
+        let cands = vec![candidate(7, Some(99), "Song", None, 200_500)];
+        assert_eq!(
+            decide_import(&inc, &cands),
+            ImportDecision::SkipDuplicate {
+                existing_track_id: 7,
+                existing_tidal_id: Some(99),
+            }
+        );
+    }
+
+    #[test]
+    fn decide_import_extended_cut_survives_via_duration() {
+        // "Extended" is a master token, so the duration gate is what keeps a
+        // genuinely longer cut alive.
+        let inc = incoming(42, "Song (Extended Mix)", None, 260_000);
+        let cands = vec![candidate(7, Some(99), "Song", None, 200_000)];
+        assert_eq!(decide_import(&inc, &cands), ImportDecision::Insert);
+    }
+
+    #[test]
+    fn decide_import_no_candidates_inserts() {
+        let inc = incoming(42, "Song", Some("ISRC1"), 200_000);
+        assert_eq!(decide_import(&inc, &[]), ImportDecision::Insert);
+    }
+
+    // ── merge_group / auto_merge_pending ────────────────────────────────────
+
+    fn seed_pending_group(conn: &Connection, track_ids: &[i64]) -> i64 {
+        conn.execute(
+            "INSERT INTO duplicate_groups (status) VALUES ('pending')",
+            [],
+        )
+        .expect("insert group");
+        let gid = conn.last_insert_rowid();
+        for &tid in track_ids {
+            conn.execute(
+                "INSERT INTO duplicate_members (group_id, track_id, is_preferred) VALUES (?1, ?2, 0)",
+                params![gid, tid],
+            )
+            .expect("insert member");
+        }
+        gid
+    }
+
+    #[test]
+    fn merge_group_repoints_history_and_transfers_like() {
+        let conn = test_conn();
+        insert_track(&conn, 1, "Song", 200_000, Some("ISRC1"));
+        insert_track(&conn, 2, "Song", 200_500, Some("ISRC1"));
+        // Loser 2 carries the like, plays, history, playlist membership, DSP.
+        conn.execute(
+            "UPDATE tracks SET is_favorite = 1, play_count = 5 WHERE id = 2",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO listen_history (track_id, started_at) VALUES (2, '2026-01-01')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (1, 2, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO audio_dsp_features (track_id, bpm) VALUES (2, 128.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE tracks SET tidal_id = 900 WHERE id = 1", [])
+            .unwrap();
+        conn.execute("UPDATE tracks SET tidal_id = 901 WHERE id = 2", [])
+            .unwrap();
+
+        let gid = seed_pending_group(&conn, &[1, 2]);
+        let outcome = merge_group(&conn, gid, 1).expect("merge");
+
+        assert_eq!(outcome.removed_track_ids, vec![2]);
+        assert_eq!(outcome.favorited_loser_tidal_ids, vec![901]);
+        assert_eq!(outcome.kept_tidal_id, Some(900));
+
+        // Like, plays, history, playlist, DSP all moved to the kept row.
+        let (fav, plays): (i32, i64) = conn
+            .query_row(
+                "SELECT is_favorite, play_count FROM tracks WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(fav, 1);
+        assert_eq!(plays, 5);
+        let history_target: i64 = conn
+            .query_row("SELECT track_id FROM listen_history", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(history_target, 1);
+        let playlist_target: i64 = conn
+            .query_row("SELECT track_id FROM playlist_tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(playlist_target, 1);
+        let dsp_target: i64 = conn
+            .query_row("SELECT track_id FROM audio_dsp_features", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(dsp_target, 1);
+
+        // Loser row gone, group resolved.
+        let loser_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tracks WHERE id = 2", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(loser_count, 0);
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM duplicate_groups WHERE id = ?1",
+                [gid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "resolved");
+    }
+
+    #[test]
+    fn merge_group_dedupes_playlist_holding_both_copies() {
+        let conn = test_conn();
+        insert_track(&conn, 1, "Song", 200_000, Some("ISRC1"));
+        insert_track(&conn, 2, "Song", 200_500, Some("ISRC1"));
+        conn.execute(
+            "INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (1, 1, 0), (1, 2, 1)",
+            [],
+        )
+        .unwrap();
+
+        let gid = seed_pending_group(&conn, &[1, 2]);
+        merge_group(&conn, gid, 1).expect("merge");
+
+        // One membership survives, pointing at the kept row.
+        let rows: Vec<(i64, i64)> = {
+            let mut stmt = conn
+                .prepare("SELECT track_id, position FROM playlist_tracks ORDER BY position")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert_eq!(rows, vec![(1, 0)]);
+    }
+
+    #[test]
+    fn auto_merge_keeps_liked_row_and_skips_alt_versions() {
+        let conn = test_conn();
+        // Group A: exact ISRC dup; the LIKED row must be the survivor even
+        // with lower fidelity.
+        insert_track_full(
+            &conn,
+            1,
+            "Song",
+            200_000,
+            Some("ISRC1"),
+            None,
+            None,
+            None,
+            None,
+            100,
+        );
+        insert_track_full(
+            &conn,
+            2,
+            "Song",
+            200_400,
+            Some("ISRC1"),
+            None,
+            None,
+            None,
+            None,
+            900,
+        );
+        conn.execute("UPDATE tracks SET is_favorite = 1 WHERE id = 1", [])
+            .unwrap();
+        // Group B: alt_version (remix) - must survive untouched.
+        insert_track(&conn, 3, "Wavelength", 210_000, None);
+        insert_track(&conn, 4, "Wavelength (Remix)", 210_200, None);
+
+        scan(&conn).expect("scan");
+        let stats = auto_merge_pending(&conn).expect("auto merge");
+
+        assert_eq!(stats.merged_groups, 1);
+        assert_eq!(stats.removed_tracks, 1);
+        assert_eq!(stats.skipped_groups, 1);
+
+        // Liked low-fidelity row survived; high-fidelity loser removed.
+        let survivor: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tracks WHERE id = 1 AND is_favorite = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(survivor, 1);
+        let loser: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tracks WHERE id = 2", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(loser, 0);
+        // Both remix-group rows still present.
+        let variants: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tracks WHERE id IN (3, 4)", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(variants, 2);
+
+        // Idempotent: nothing left to merge on a second pass.
+        scan(&conn).expect("rescan");
+        let stats2 = auto_merge_pending(&conn).expect("second pass");
+        assert_eq!(stats2.merged_groups, 0);
+        assert_eq!(stats2.removed_tracks, 0);
+    }
+
+    #[test]
+    fn auto_merge_never_touches_local_files() {
+        let conn = test_conn();
+        insert_track_full(
+            &conn,
+            1,
+            "Origin",
+            240_000,
+            Some("SR0001"),
+            None,
+            Some("LOSSLESS"),
+            None,
+            Some("/music/origin.flac"),
+            150,
+        );
+        insert_track_full(
+            &conn,
+            2,
+            "Origin",
+            240_200,
+            Some("SR0001"),
+            None,
+            Some("HI_RES_LOSSLESS"),
+            None,
+            None,
+            900,
+        );
+
+        scan(&conn).expect("scan");
+        let stats = auto_merge_pending(&conn).expect("auto merge");
+
+        assert_eq!(stats.merged_groups, 0);
+        assert_eq!(stats.skipped_groups, 1);
+        let both: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(both, 2);
+    }
+
+    #[test]
+    fn auto_merge_all_liked_group_keeps_recording_liked() {
+        let conn = test_conn();
+        insert_track_full(
+            &conn,
+            1,
+            "Song",
+            200_000,
+            Some("ISRC1"),
+            None,
+            None,
+            None,
+            None,
+            700,
+        );
+        insert_track_full(
+            &conn,
+            2,
+            "Song",
+            200_400,
+            Some("ISRC1"),
+            None,
+            None,
+            None,
+            None,
+            900,
+        );
+        conn.execute("UPDATE tracks SET is_favorite = 1 WHERE id IN (1, 2)", [])
+            .unwrap();
+
+        scan(&conn).expect("scan");
+        let stats = auto_merge_pending(&conn).expect("auto merge");
+
+        assert_eq!(stats.merged_groups, 1);
+        // Higher fidelity liked row won; the recording is still liked.
+        let (kept, fav): (i64, i32) = conn
+            .query_row("SELECT id, is_favorite FROM tracks", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(kept, 2);
+        assert_eq!(fav, 1);
     }
 }

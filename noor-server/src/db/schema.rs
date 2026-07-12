@@ -55,6 +55,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_051,
     MIGRATION_052,
     MIGRATION_053,
+    MIGRATION_054,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1522,6 +1523,20 @@ ALTER TABLE queue ADD COLUMN ephemeral_artist_tidal_id INTEGER;
 ALTER TABLE queue ADD COLUMN ephemeral_album_tidal_id INTEGER;
 "#;
 
+// Sync rework: favorited albums become bookmarks and their tracks arrive as
+// hidden discovery fill (is_library=0) via the enrichment pass, gated by
+// sync_metadata.enrich_from_favorite_albums (default on). The two indexes
+// back the per-track import-dedupe candidate lookups
+// (library::duplicates::fetch_import_candidates); artist_id had no dedicated
+// index before. Deliberately additive only - demoting existing album-fill is
+// the user-triggered Reclean action, never a silent migration.
+const MIGRATION_054: &str = r#"
+ALTER TABLE sync_metadata ADD COLUMN enrich_from_favorite_albums INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE albums ADD COLUMN enrich_completed_at TEXT;
+CREATE INDEX IF NOT EXISTS idx_tracks_isrc ON tracks(isrc);
+CREATE INDEX IF NOT EXISTS idx_tracks_artist_id ON tracks(artist_id);
+"#;
+
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     // Create migrations table if not exists
     conn.execute_batch(
@@ -1642,6 +1657,57 @@ mod tests {
             [],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn migration_054_adds_enrichment_toggle_and_dedupe_indexes() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        apply_migrations_up_to(&conn, MIGRATIONS.len()).unwrap();
+
+        // The seeded tidal row (migration 006) got the new column backfilled
+        // with the default: enrichment on.
+        let enabled: i64 = conn
+            .query_row(
+                "SELECT enrich_from_favorite_albums FROM sync_metadata WHERE service = 'tidal'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(enabled, 1, "enrichment defaults on");
+
+        // albums.enrich_completed_at exists and defaults NULL (never enriched).
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (1, 'A')
+             ",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO albums (id, title, artist_id, source) VALUES (1, 'Al', 1, 'tidal')",
+            [],
+        )
+        .unwrap();
+        let enriched_at: Option<String> = conn
+            .query_row(
+                "SELECT enrich_completed_at FROM albums WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(enriched_at, None);
+
+        // Import-dedupe candidate indexes exist.
+        for idx in ["idx_tracks_isrc", "idx_tracks_artist_id"] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                    [idx],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "expected index {idx} to exist");
+        }
     }
 
     #[test]
