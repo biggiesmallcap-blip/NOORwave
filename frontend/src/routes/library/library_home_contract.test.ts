@@ -77,8 +77,8 @@ describe('library home hero contract', () => {
 		expect(libraryPage).toContain('homePanelCandidateCache.suggestionTracks = candidates');
 		expect(libraryPage).toContain('homePanelRefreshBucket()');
 		expect(libraryPage).toContain('async function playHomeMuralTrack(item: HomeMuralItem, panel: HomeMuralPanel)');
-		expect(libraryPage).toContain('await api.replacePlaybackQueue(trackIds, undefined, undefined, get(shuffleMode))');
-		expect(libraryPage).toContain('await playTrackNow(item.track.id)');
+		expect(libraryPage).toContain('api.replacePlaybackQueue(trackIds.map((track_id) => ({ track_id })), {');
+		expect(libraryPage).toContain('await api.playQueueItem(selected.id);');
 		// Mural tiles activate on double-click / Enter (parity with the library
 		// track rows and the home-recs murals), not a single stray click.
 		expect(libraryPage).toContain('ondblclick={() => openHomeMuralItem(item, panel)}');

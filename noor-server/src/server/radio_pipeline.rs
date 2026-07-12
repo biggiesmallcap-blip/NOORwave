@@ -84,12 +84,13 @@ pub struct OrderedQueueCandidate {
     pub duration_ms: Option<i64>,
     pub artist_tidal_id: Option<i64>,
     pub album_tidal_id: Option<i64>,
+    pub reason: Option<String>,
 }
 
 /// Replace the queue with an explicitly-ordered mixed list. Unlike the radio
 /// builders above, candidates are NOT re-ranked: the caller's order IS the
 /// queue order (e.g. album track order). Library rows insert as source 'user'
-/// (matching replace_queue_with_tracks); unresolved rows reuse 'radio_pending'
+/// (matching the canonical ordered queue builder); unresolved rows reuse 'radio_pending'
 /// so the existing pending resolve/skip machinery applies unchanged - if TIDAL
 /// is unavailable a pending row is skipped instead of stalling the queue.
 pub fn replace_queue_with_ordered_candidates(
@@ -105,8 +106,8 @@ pub fn replace_queue_with_ordered_candidates(
         match c.track_id.filter(|id| *id > 0) {
             Some(track_id) => {
                 tx.execute(
-                    "INSERT INTO queue (track_id, position, source, reason) VALUES (?1, ?2, 'user', NULL)",
-                    rusqlite::params![track_id, pos],
+                    "INSERT INTO queue (track_id, position, source, reason) VALUES (?1, ?2, 'user', ?3)",
+                    rusqlite::params![track_id, pos, c.reason],
                 )?;
             }
             None => {
@@ -116,10 +117,11 @@ pub fn replace_queue_with_ordered_candidates(
                                         ephemeral_album_title, ephemeral_artwork_url,
                                         ephemeral_duration_ms, ephemeral_artist_tidal_id,
                                         ephemeral_album_tidal_id)
-                     VALUES (NULL, ?1, 'radio_pending', NULL, ?2, ?3, datetime('now'), ?4,
-                             ?5, ?6, ?7, ?8, ?9)",
+                     VALUES (NULL, ?1, 'radio_pending', ?2, ?3, ?4, datetime('now'), ?5,
+                             ?6, ?7, ?8, ?9, ?10)",
                     rusqlite::params![
                         pos,
+                        c.reason,
                         c.artist,
                         c.title,
                         c.tidal_id,

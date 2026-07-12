@@ -14,6 +14,7 @@ import {
 	queueItemToTidalPlayable,
 	tidalDiscographyTrackToPlayable,
 	tidalHomeItemToPlayable,
+	tidalPlayableToMixedQueueItem,
 	tidalSearchTrackToPlayable,
 	trackToTidalPlayable,
 } from './track';
@@ -39,16 +40,16 @@ const baseTrack: Track = {
 	play_count: 0,
 	last_played_at: null,
 	date_added: null,
-	source: 'tidal_ephemeral',
+	source: 'tidal_stream',
 	artwork_url: null,
 };
 
 describe('trackToTidalPlayable', () => {
 	test('keeps normal positive library tracks on the library path', () => {
-		expect(trackToTidalPlayable({ ...baseTrack, source: 'tidal_stream' })).toBeNull();
+		expect(trackToTidalPlayable({ ...baseTrack, source: 'tidal' })).toBeNull();
 	});
 
-	test('keeps enriched TIDAL ephemeral tracks on the TIDAL path', () => {
+	test('keeps transient TIDAL tracks on the TIDAL path', () => {
 		expect(trackToTidalPlayable(baseTrack)).toEqual({
 			tidal_id: 777,
 			title: 'Overlay Track',
@@ -286,6 +287,52 @@ describe('album track merging', () => {
 			tidal_id: 8001,
 			artist: 'Stream Artist',
 			title: 'Streamed',
+			album_title: 'Album',
+			artwork_url: null,
+			duration_ms: 180000,
+			artist_tidal_id: null,
+			album_tidal_id: null,
+		});
+	});
+});
+
+describe('tidalPlayableToMixedQueueItem', () => {
+	test('library-known playables ride as library tracks', () => {
+		expect(
+			tidalPlayableToMixedQueueItem({
+				tidal_id: 909,
+				title: 'Known',
+				artist_name: 'Artist',
+				album_title: null,
+				artwork_url: null,
+				duration_ms: 180000,
+				local_id: 55,
+				is_in_library: true,
+			}),
+		).toEqual({ track_id: 55, artist: 'Artist', title: 'Known' });
+	});
+
+	test('unknown playables become metadata-rich pending items', () => {
+		expect(
+			tidalPlayableToMixedQueueItem({
+				tidal_id: 909,
+				title: 'Streamed',
+				artist_name: null,
+				album_title: 'An Album',
+				artwork_url: 'https://img/streamed.jpg',
+				duration_ms: 200000,
+				artist_tidal_id: 11,
+				album_tidal_id: 22,
+			}),
+		).toEqual({
+			tidal_id: 909,
+			artist: 'Unknown Artist',
+			title: 'Streamed',
+			album_title: 'An Album',
+			artwork_url: 'https://img/streamed.jpg',
+			duration_ms: 200000,
+			artist_tidal_id: 11,
+			album_tidal_id: 22,
 		});
 	});
 });
@@ -304,7 +351,7 @@ describe('currentTrackMatchesTracks', () => {
 		expect(currentTrackMatchesTracks({ ...baseTrack, id: 7 }, [local], [])).toBe(true);
 	});
 
-	test('matches streamed rows by tidal id even with a synthetic negative id', () => {
+	test('matches streamed rows by tidal id with a persisted queue identity', () => {
 		const streaming = { ...baseTrack, id: -909, tidal_id: 909 };
 		expect(currentTrackMatchesTracks(streaming, [local], [tidalRow])).toBe(true);
 	});

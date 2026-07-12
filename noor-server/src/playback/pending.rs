@@ -39,10 +39,7 @@ use crate::db::{models::AudioDjProfileKey, queries};
 /// `Ok(true)` if this caller won the claim, `Ok(false)` if another resolver
 /// already holds it (or the row has been resolved/deleted).
 pub fn try_claim(conn: &Connection, queue_item_id: i64) -> Result<bool> {
-    // `pending_at IS NOT NULL` keeps ephemeral TIDAL rows (mix/album/playlist,
-    // which carry no pending_at) out of the resolver: they stream directly and
-    // must never be imported. Callers already filter on pending_at, but this is
-    // the lock-acquisition choke point so the guard lives here too.
+    // `pending_at IS NOT NULL` distinguishes unresolved queue rows from already-resolved rows.
     let updated = conn.execute(
         "UPDATE queue SET resolving_at = datetime('now')
          WHERE id = ?1

@@ -3,8 +3,7 @@
 	import {
 		clearQueue,
 		moveQueueTrackNext,
-		playTidalTrackNow,
-		playTrackNow,
+		playQueueItemNow,
 		refreshPlaybackState,
 		removeTrackFromQueue,
 		restoreQueueItems
@@ -117,12 +116,7 @@
 
 	async function onPlayRow(item: QueueItem) {
 		hapticTap();
-		const tidal = queueItemToTidalPlayable(item);
-		if (tidal != null && item.id < 0) {
-			await playTidalTrackNow(tidal);
-		} else {
-			await playTrackNow(item.track.id);
-		}
+		await playQueueItemNow(item.id);
 	}
 
 	async function onMoveNext(item: QueueItem, event: Event) {

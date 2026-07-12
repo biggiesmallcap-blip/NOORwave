@@ -25,6 +25,7 @@
 		playerError,
 		refreshPlaybackState,
 		playTrackNow,
+		playQueueItemNow,
 		togglePlayback,
 		playPreviousTrack,
 		playNextTrack,
@@ -646,16 +647,7 @@
 	}
 
 	async function handleQueueTrackPlay(item: QueueItemType) {
-		// Ephemeral TIDAL rows (mix/album/playlist) stream via the ephemeral
-		// path, which jumps to the clicked track and trims the rows before it.
-		// Library rows jump to their queue position. Detection is by the track
-		// (tidal_ephemeral source), not the queue id, which is now positive.
-		const tidal = queueItemTidalPlayable(item);
-		if (tidal) {
-			await playTidalTrackNow(tidal);
-		} else {
-			await playTrackNow(item.track.id);
-		}
+		await playQueueItemNow(item.id);
 		nowPlayingOpen = false;
 	}
 
@@ -736,27 +728,13 @@
 	type QueueItemType = (typeof $playbackQueue)[number];
 
 	/**
-	 * Pick the right context-menu builder for a `Track`. Ephemeral
-	 * Tidal tracks (negative `id`, set by `play_tidal_ephemeral` on
-	 * the backend) need the Tidal-aware builder so "Song radio" goes
-	 * to `/api/discovery/radio` with `seed_tidal_id` rather than the
-	 * library-only `/api/radio/song` which doesn't know how to look
-	 * up negative ids and 500s.
+	 * Pick the shared context-menu builder. Pending and transient TIDAL rows
+	 * retain their provider id, so provider-specific actions stay available.
 	 */
 	function pickMenuBuilder(track: Track, options?: { queueItemId?: number; isPending?: boolean }) {
 		const tidal = trackToTidalPlayable(track);
 		if (tidal) {
-			if (options?.queueItemId !== undefined) {
-				// Ephemeral Tidal tracks should never end up in the
-				// persisted queue table — `play_tidal_ephemeral`
-				// overlays them via AppState rather than writing
-				// rows. Surface the assumption violation rather than
-				// silently strip queue-row-specific menu options.
-				console.warn(
-					`pickMenuBuilder: ephemeral Tidal track in persisted queue (queueItemId=${options.queueItemId}, tidal_id=${track.tidal_id})`
-				);
-			}
-			return buildTidalTrackMenu(tidal);
+			return buildTidalTrackMenu(tidal, options?.queueItemId === undefined ? undefined : { inQueue: true, queueItemId: options.queueItemId });
 		}
 		return buildTrackMenu(track, options);
 	}
@@ -765,9 +743,7 @@
 		return queueItemToTidalPlayable(item);
 	}
 
-	// Ephemeral TIDAL rows are now real, mutable queue rows, so their ⋯/right-click
-	// menu gets the queue-aware actions (Move next, Remove from queue) keyed on the
-	// real queue id.
+	// TIDAL-backed queue rows use their stable queue item id for mutations.
 	function queueRowMenuItems(item: QueueItemType) {
 		const tidal = queueItemTidalPlayable(item);
 		return tidal

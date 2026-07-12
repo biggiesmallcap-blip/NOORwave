@@ -1220,51 +1220,6 @@ pub fn enqueue_track(conn: &Connection, track_id: i64, source: &str) -> Result<V
     queue::append_tracks(conn, &[track], source)
 }
 
-pub fn replace_queue_with_tracks(
-    conn: &Connection,
-    track_ids: &[i64],
-    source: &str,
-) -> Result<Vec<QueueItem>> {
-    let mut tracks = Vec::new();
-    for track_id in track_ids {
-        if let Some(track) = queue::get_track_by_id(conn, *track_id)? {
-            tracks.push(track);
-        }
-    }
-    let queue = queue::replace_queue(conn, &tracks, source)?;
-    conn.execute(
-        "UPDATE playback_state SET current_queue_item_id = NULL WHERE id = 1",
-        [],
-    )?;
-    Ok(queue)
-}
-
-/// Replace the queue with tracks plus optional per-row reasons.
-///
-/// `reasons` is index-aligned with `track_ids`. Missing or shorter
-/// reasons lists default to `None` for the absent indices. Tracks that
-/// fail to load are skipped (consistent with `replace_queue_with_tracks`).
-pub fn replace_queue_with_reasons(
-    conn: &Connection,
-    track_ids: &[i64],
-    reasons: &[Option<String>],
-    source: &str,
-) -> Result<Vec<QueueItem>> {
-    let mut paired: Vec<(Track, Option<String>)> = Vec::with_capacity(track_ids.len());
-    for (idx, track_id) in track_ids.iter().enumerate() {
-        if let Some(track) = queue::get_track_by_id(conn, *track_id)? {
-            let reason = reasons.get(idx).cloned().unwrap_or(None);
-            paired.push((track, reason));
-        }
-    }
-    let queue = queue::replace_queue_with_reasons(conn, &paired, source)?;
-    conn.execute(
-        "UPDATE playback_state SET current_queue_item_id = NULL WHERE id = 1",
-        [],
-    )?;
-    Ok(queue)
-}
-
 /// Jump the playback anchor to a specific queue row (library or pending).
 ///
 /// Returns `None` when the queue item does not exist. `current_track_id` is

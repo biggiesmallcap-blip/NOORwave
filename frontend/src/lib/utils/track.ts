@@ -9,25 +9,17 @@ import type {
 } from '$lib/api/client';
 
 /**
- * Convert an ephemeral `Track` (a now-playing or queue row) into a
- * `TidalPlayable` for `buildTidalTrackMenu` / `startTidalSongRadio`.
+ * Convert a TIDAL-backed pending or transient queue track into a
+ * `TidalPlayable` for provider-specific actions.
  *
- * Returns `null` for tracks that are NOT ephemeral Tidal entries.
- * Real `tidal_stream` library rows stay on the library path; enriched
- * `tidal_ephemeral` rows keep the Tidal path even after they gain a local id.
- * Callers fall back to `buildTrackMenu` when this returns null.
- *
- * Detection: `play_tidal_ephemeral` on the backend constructs a
- * synthetic `Track { id: -tidal_track_id, source: 'tidal_ephemeral', ... }`.
- * Store-side enrichment can later replace the id with a local id, so source is
- * also part of the signal.
+ * `tidal_stream` identifies a transient imported row. Pending rows use id 0
+ * and retain their TIDAL id until the resolver promotes the queue row.
  */
 export function trackToTidalPlayable(track: Track): TidalPlayable | null {
 	if (track.tidal_id == null) return null;
-	if (track.id >= 0 && track.source !== 'tidal_ephemeral') return null;
+	if (track.id > 0 && track.source !== 'tidal_stream') return null;
 	return trackWithTidalIdToPlayable(track);
 }
-
 function trackWithTidalIdToPlayable(track: Track): TidalPlayable | null {
 	if (track.tidal_id == null || track.tidal_id <= 0) return null;
 	const localId = track.id > 0 ? track.id : null;
@@ -47,10 +39,7 @@ function trackWithTidalIdToPlayable(track: Track): TidalPlayable | null {
 }
 
 export function queueItemToTidalPlayable(item: QueueItem): TidalPlayable | null {
-	const direct = trackToTidalPlayable(item.track);
-	if (direct) return direct;
-	if (item.id >= 0 || item.source !== 'tidal_mix') return null;
-	return trackWithTidalIdToPlayable(item.track);
+	return trackToTidalPlayable(item.track);
 }
 
 /**
@@ -145,7 +134,7 @@ export function albumEntryStartIndex(
 	return byTidal >= 0 ? byTidal : 0;
 }
 
-/** Map an album entry to a POST /api/playback/queue/mixed request row. */
+/** Map an album entry to a canonical POST /api/playback/queue request row. */
 export function albumEntryToMixedQueueItem(entry: AlbumTrackEntry): MixedQueueItem {
 	if (entry.kind === 'local') {
 		return {
@@ -158,6 +147,42 @@ export function albumEntryToMixedQueueItem(entry: AlbumTrackEntry): MixedQueueIt
 		tidal_id: entry.tidal.tidal_id,
 		artist: entry.tidal.artist_name ?? null,
 		title: entry.tidal.title,
+		album_title: entry.tidal.album_title ?? null,
+		artwork_url: entry.tidal.artwork_url ?? null,
+		duration_ms: entry.tidal.duration_ms ?? null,
+		artist_tidal_id: entry.tidal.artist_tidal_id ?? null,
+		album_tidal_id: entry.tidal.album_tidal_id ?? null,
+	};
+}
+
+export function libraryTrackToMixedQueueItem(trackId: number, reason?: string | null): MixedQueueItem {
+	return { track_id: trackId, reason: reason ?? null };
+}
+
+/**
+ * Map a TIDAL playable to a canonical POST /api/playback/queue request row.
+ * A playable with a known library row rides as that library track (the
+ * standard queue pipeline, plays counted on the library row); everything
+ * else becomes a pending row with full display metadata.
+ */
+export function tidalPlayableToMixedQueueItem(track: TidalPlayable): MixedQueueItem {
+	const localId = track.local_id ?? track.track_id ?? null;
+	if (localId != null && localId > 0) {
+		return {
+			track_id: localId,
+			artist: track.artist_name,
+			title: track.title,
+		};
+	}
+	return {
+		tidal_id: track.tidal_id,
+		artist: track.artist_name ?? 'Unknown Artist',
+		title: track.title,
+		album_title: track.album_title ?? null,
+		artwork_url: track.artwork_url ?? null,
+		duration_ms: track.duration_ms ?? null,
+		artist_tidal_id: track.artist_tidal_id ?? null,
+		album_tidal_id: track.album_tidal_id ?? null,
 	};
 }
 

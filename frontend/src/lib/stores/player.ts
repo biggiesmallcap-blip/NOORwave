@@ -21,8 +21,10 @@ import { offerUndo } from '$lib/stores/queue_undo';
 import {
 	albumEntryStartIndex,
 	albumEntryToMixedQueueItem,
+	libraryTrackToMixedQueueItem,
 	mergeAlbumTracks,
 	queueItemToTidalPlayable,
+	tidalPlayableToMixedQueueItem,
 } from '$lib/utils/track';
 import { currentQueueAnchorItem } from '$lib/player/queue_active';
 import { wsConnected } from '$lib/api/ws';
@@ -43,7 +45,7 @@ export const currentStreamDisplay = writable<StreamDisplayInfo | null>(null);
 export const playbackRuntimeInfo = writable<PlaybackRuntimeInfo | null>(null);
 
 // TIDAL tracks only carry artist/album tidal ids in this in-memory cache; the
-// backend's ephemeral-track snapshot omits them. Persisting it to localStorage
+// backend queue snapshots may omit them before a pending row resolves. Persisting it to localStorage
 // keeps the now-playing artist/album links alive across the Tauri WebView2
 // reload (and any navigation), which would otherwise wipe the Map and strip the
 // links off whatever is playing. Stale entries are harmless: they're keyed by
@@ -122,7 +124,7 @@ function enrichTidalTrack(track: Track | null): Track | null {
 	if (!cached) return track;
 	const localId = localTidalTrackId({ tidal_id: track.tidal_id, ...cached });
 	const isLocalTrack = track.id > 0;
-	const effectiveId = track.id < 0 ? (localId ?? track.id) : track.id;
+	const effectiveId = localId ?? track.id;
 	const favoriteOverride = tidalFavoriteOverrideById.get(track.tidal_id);
 	const isFavorite =
 		favoriteOverride && favoriteOverride.localId === effectiveId
@@ -544,6 +546,19 @@ export async function playTrackNow(trackId: number) {
 		finishPlaybackIntent(intentSeq);
 	}
 }
+export async function playQueueItemNow(queueItemId: number) {
+	playerError.set(null);
+	const intentSeq = beginPlaybackIntent();
+	try {
+		const snapshot = await api.playQueueItem(queueItemId);
+		hydratePlaybackIfLatest(snapshot, intentSeq);
+	} catch (error) {
+		if (!isLatestPlaybackIntent(intentSeq)) return;
+		setError('play that queue item', error, () => playQueueItemNow(queueItemId));
+	} finally {
+		finishPlaybackIntent(intentSeq);
+	}
+}
 
 /**
  * The action the most recent still-in-flight toggle asked for. Rapid clicks
@@ -916,10 +931,7 @@ export async function moveQueueTrackNext(queueItemId: number) {
 	const targetIndex = queue.findIndex((item) => item.id === queueItemId);
 	if (targetIndex === -1) return;
 
-	// Use the item-id based move endpoint, not replacePlaybackQueue(track_ids).
-	// The latter drops queue rows whose track_id is negative (ephemeral TIDAL
-	// rows that haven't been imported into the library yet), silently corrupting
-	// a mixed library + TIDAL queue when the user picks "Play next".
+	// Use the stable item-id move endpoint so duplicate and pending rows remain intact.
 	//
 	// Anchor on the canonical queue-item anchor (queue-item-id first, track-id
 	// fallback), the same helper the active-row highlight and upcomingQueue use.
@@ -1006,8 +1018,7 @@ export async function clearQueue(): Promise<QueueItem[]> {
  * order, dispatching by row type so a mixed library + TIDAL + pending queue
  * is restored correctly:
  *  - Library rows (`track.id > 0`) re-add via `api.addQueueTrack`.
- *  - Ephemeral TIDAL rows (negative id, has a `TidalPlayable`) re-add via
- *    `api.queueAppend(tidalQueueRequest(...))`.
+ *  - TIDAL-backed pending rows re-add via `api.queueAppend(tidalQueueRequest(...))`.
  *  - Pending rows (`track.id === 0`, never resolved) are skipped because the
  *    library has no `track_id` to re-append; the pending producer would have
  *    to be re-run, which is out of scope here.
@@ -1109,36 +1120,6 @@ export function setTrackFavoriteStatus(trackId: number, favorite: boolean, track
 
 // Cheap action: stays optimistic — no `assertOnline` gate.
 export async function toggleTrackFavorite(trackId: number, currentIsFavorite?: boolean) {
-	// Ephemeral Tidal tracks have a negative id (= -tidal_id) and no local DB row yet.
-	// Import them first so we have a real id to favorite.
-	if (trackId < 0) {
-		const ephemeral = get(currentTrack);
-		if (!ephemeral || !ephemeral.tidal_id) return;
-		const wasFavorite = currentIsFavorite ?? ephemeral.is_favorite ?? false;
-		try {
-			const { local_id, artist_id, album_id } = await api.importTidalTrackForRadio({
-				tidal_id: ephemeral.tidal_id,
-				title: ephemeral.title ?? 'Unknown',
-				artist_name: ephemeral.artist_name,
-				artist_tidal_id: ephemeral.artist_tidal_id ?? null,
-				album_title: ephemeral.album_title,
-				album_tidal_id: ephemeral.album_tidal_id ?? null,
-				artwork_url: ephemeral.artwork_url,
-				duration_ms: ephemeral.duration_ms,
-			});
-			currentTrack.update((t) => (t && t.id === trackId ? { ...t, id: local_id, artist_id, album_id } : t));
-			playbackQueue.update((q) =>
-				q.map((item) =>
-					item.track.id === trackId ? { ...item, track: { ...item.track, id: local_id, artist_id, album_id } } : item
-				)
-			);
-			return toggleTrackFavorite(local_id, wasFavorite);
-		} catch (error) {
-			setError('like that track', error);
-			throw error;
-		}
-	}
-
 	const current = get(currentTrack);
 	const queued = get(playbackQueue).find((item) => item.track.id === trackId)?.track ?? null;
 	const playerTrack = current?.id === trackId ? current : queued;
@@ -1230,16 +1211,23 @@ async function loadQueueAndPlay(
 	const ownsIntent = options?.intentSeq == null;
 	if (!options?.preserveRadioReasons) clearRadioReasons();
 	try {
-		const replaced = await api.replacePlaybackQueue(
-			trackIds,
-			options?.reasons,
-			options?.pendingCandidates,
-			options?.shuffleMode
-		);
+		const items = [
+			...trackIds.map((trackId, index) =>
+				libraryTrackToMixedQueueItem(trackId, options?.reasons?.[index])
+			),
+			...(options?.pendingCandidates ?? []).map((candidate) => ({
+				artist: candidate.artist,
+				title: candidate.title,
+				duration_ms: candidate.duration_ms ?? null,
+				reason: candidate.reason ?? null,
+			})),
+		];
+		const replaced = await api.replacePlaybackQueue(items, {
+			shuffleMode: options?.shuffleMode,
+			startPlayback: true,
+		});
 		if (!isLatestPlaybackIntent(intentSeq)) return;
-		const firstTrackId = replaced.queue[0]?.track.id ?? trackIds[0];
-		const snapshot = await api.playTrack(firstTrackId);
-		hydratePlaybackIfLatest(snapshot, intentSeq);
+		hydratePlaybackIfLatest({ state: replaced.state, queue: replaced.queue }, intentSeq);
 	} catch (error) {
 		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('start playback', error, () => loadQueueAndPlay(trackIds, options));
@@ -1252,8 +1240,7 @@ async function loadQueueAndPlay(
 // end of the list, dropping the tracks before it. This is what "click a row"
 // means in TIDAL/Spotify: the rows AFTER the one you clicked are what play next,
 // not the rows above it. Without the slice, clicking row 15 of a list would
-// replay rows 1-14 right after it. Non-positive ids (ephemeral / unresolved
-// rows) are dropped so the queue only carries real library tracks. When no start
+// replay rows 1-14 right after it. This helper receives library ids only;`r`n// TIDAL-only rows use canonical mixed queue inputs. When no start
 // track is given (a bare "Play all") the whole list is returned in order. Pure +
 // exported so the slice contract is unit tested without a live server.
 export function sliceContextTrackIds(trackIds: number[], startTrackId?: number): number[] {
@@ -1391,8 +1378,10 @@ export async function playAlbum(
 			clearRadioReasons();
 			const entries = mergeAlbumTracks(tracks, tidalOnly);
 			const ordered = entries.slice(albumEntryStartIndex(entries, startTrackId));
-			const shuffle = startTrackId == null && get(shuffleMode) !== 'off';
-			const result = await api.playMixedQueue(ordered.map(albumEntryToMixedQueueItem), shuffle);
+			const result = await api.replacePlaybackQueue(
+				ordered.map(albumEntryToMixedQueueItem),
+				{ shuffleMode: startTrackId == null ? get(shuffleMode) : undefined, startPlayback: true }
+			);
 			if (!isLatestPlaybackIntent(intentSeq)) return;
 			hydratePlaybackIfLatest({ state: result.state, queue: result.queue }, intentSeq);
 			noteSuccess();
@@ -1435,7 +1424,10 @@ export async function shuffleAlbum(albumId: number, preloaded?: AlbumTracksData)
 		if (tidalOnly.length > 0) {
 			clearRadioReasons();
 			const entries = mergeAlbumTracks(tracks, tidalOnly);
-			const result = await api.playMixedQueue(entries.map(albumEntryToMixedQueueItem), true);
+			const result = await api.replacePlaybackQueue(entries.map(albumEntryToMixedQueueItem), {
+				shuffleMode: 'true',
+				startPlayback: true,
+			});
 			if (!isLatestPlaybackIntent(intentSeq)) return;
 			hydratePlaybackIfLatest({ state: result.state, queue: result.queue }, intentSeq);
 			noteSuccess();
@@ -1626,7 +1618,7 @@ export async function playTidalPlaylist(tidalUuid: string) {
 			playerError.set({ message: 'No playable tracks in this playlist.' });
 			return;
 		}
-		await startTidalEphemeralQueue(tracks, { shuffleMode: get(shuffleMode), intentSeq });
+		await startTidalQueue(tracks, { shuffleMode: get(shuffleMode), intentSeq });
 		if (!isLatestPlaybackIntent(intentSeq)) return;
 		showToast(`Playing playlist (${tracks.length} tracks queued)`, 'success');
 	} catch (error) {
@@ -1741,38 +1733,17 @@ export async function playTrackNext(trackId: number) {
 }
 
 export async function playTidalTrackNow(track: TidalPlayable): Promise<void> {
+	if (!assertOnline()) return;
 	playerError.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
 		rememberTidalPlayable(track);
-		await api.playTidalTrack(track);
-		if (!isLatestPlaybackIntent(intentSeq)) return;
-		resetOptimisticPlaybackProgress();
-		setCurrentTrack({
-			id: localTidalTrackId(track) ?? -track.tidal_id,
-			title: track.title,
-			artist_id: -1, // no library artist for ephemeral tracks
-			artist_name: track.artist_name,
-			artist_tidal_id: track.artist_tidal_id ?? null,
-			album_id: null,
-			album_title: track.album_title,
-			album_tidal_id: track.album_tidal_id ?? null,
-			disc_number: null,
-			track_number: null,
-			duration_ms: track.duration_ms,
-			isrc: null,
-			tidal_id: track.tidal_id,
-			best_quality: 'LOSSLESS', // placeholder — ephemeral tracks don't report fidelity
-			best_source: 'tidal',
-			fidelity_score: 0,
-			is_favorite: track.is_favorite ?? false,
-			play_count: 0,
-			last_played_at: null,
-			date_added: null,
-			source: 'tidal_ephemeral',
-			artwork_url: track.artwork_url,
+		setOptimisticTidalTrack(track);
+		const result = await api.replacePlaybackQueue([tidalPlayableToMixedQueueItem(track)], {
+			startPlayback: true,
 		});
-		isPlaying.set(true);
+		if (!isLatestPlaybackIntent(intentSeq)) return;
+		hydratePlaybackIfLatest({ state: result.state, queue: result.queue }, intentSeq);
 		noteSuccess();
 		showToast(`Playing ${trackLabel(track)}`, 'success');
 	} catch (error) {
@@ -1823,7 +1794,7 @@ function setOptimisticTidalTrack(track: TidalPlayable) {
 		play_count: 0,
 		last_played_at: null,
 		date_added: null,
-		source: 'tidal_ephemeral',
+		source: 'tidal_stream',
 		artwork_url: track.artwork_url,
 	});
 	isPlaying.set(true);
@@ -1860,6 +1831,7 @@ export async function playTidalTracksNow(
 	}
 	rememberTidalPlayables(playable);
 	playerError.set(null);
+	clearRadioReasons();
 	const intentSeq = beginPlaybackIntent();
 	try {
 		const requestShuffleMode =
@@ -1868,7 +1840,12 @@ export async function playTidalTracksNow(
 		if (!oneShotShuffleMode && isLatestPlaybackIntent(intentSeq)) {
 			setOptimisticTidalTrack(playable[0]);
 		}
-		const result = await api.playTidalMix(playable, oneShotShuffleMode);
+		// Unified queue: library-known rows ride as library tracks, the rest as
+		// metadata-rich pending rows resolved by the import pipeline.
+		const result = await api.replacePlaybackQueue(
+			playable.map(tidalPlayableToMixedQueueItem),
+			{ shuffleMode: oneShotShuffleMode, startPlayback: true }
+		);
 		if (!isLatestPlaybackIntent(intentSeq)) return;
 		hydratePlaybackIfLatest({ state: result.state, queue: result.queue }, intentSeq);
 		noteSuccess();
@@ -1943,7 +1920,7 @@ export async function playTidalAlbum(tidalAlbumId: number): Promise<void> {
 			showToast('Album has no tracks', 'error');
 			return;
 		}
-		await startTidalEphemeralQueue(tracks, { shuffleMode: get(shuffleMode), intentSeq });
+		await startTidalQueue(tracks, { shuffleMode: get(shuffleMode), intentSeq });
 		if (!isLatestPlaybackIntent(intentSeq)) return;
 		showToast(`Playing album (${tracks.length} tracks queued)`, 'success');
 	} catch (error) {
@@ -1955,7 +1932,7 @@ export async function playTidalAlbum(tidalAlbumId: number): Promise<void> {
 	}
 }
 
-async function startTidalEphemeralQueue(
+async function startTidalQueue(
 	tracks: ReadonlyArray<{
 		tidal_id: number;
 		title: string;
@@ -1973,6 +1950,7 @@ async function startTidalEphemeralQueue(
 	options?: { shuffleMode?: PlaybackState['shuffle_mode']; intentSeq?: number }
 ): Promise<void> {
 	rememberTidalPlayables(tracks);
+	clearRadioReasons();
 	const intentSeq = options?.intentSeq ?? beginPlaybackIntent();
 	const ownsIntent = options?.intentSeq == null;
 	const requestShuffleMode = options?.shuffleMode;
@@ -1995,7 +1973,12 @@ async function startTidalEphemeralQueue(
 	try {
 		if (!isLatestPlaybackIntent(intentSeq)) return;
 		if (!oneShotShuffleMode) setOptimisticTidalTrack(playable[0]);
-		const result = await api.playTidalMix(playable, oneShotShuffleMode);
+		// Unified queue: library-known rows ride as library tracks, the rest as
+		// metadata-rich pending rows resolved by the import pipeline.
+		const result = await api.replacePlaybackQueue(
+			playable.map(tidalPlayableToMixedQueueItem),
+			{ shuffleMode: oneShotShuffleMode, startPlayback: true }
+		);
 		if (!isLatestPlaybackIntent(intentSeq)) return;
 		hydratePlaybackIfLatest({ state: result.state, queue: result.queue }, intentSeq);
 		noteSuccess();
@@ -2015,7 +1998,7 @@ export async function playTidalMix(mixId: string): Promise<void> {
 			showToast('Mix has no tracks', 'error');
 			return;
 		}
-		await startTidalEphemeralQueue(tracks, { intentSeq });
+		await startTidalQueue(tracks, { intentSeq });
 		if (!isLatestPlaybackIntent(intentSeq)) return;
 		showToast(`Playing mix (${tracks.length} tracks queued)`, 'success');
 	} catch (error) {

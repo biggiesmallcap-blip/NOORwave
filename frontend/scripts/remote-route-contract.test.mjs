@@ -51,7 +51,7 @@ describe('remote route contract', () => {
 	test('queue component supports play and remove actions', () => {
 		const queuePath = resolve(root, 'src/lib/components/remote/RemoteQueue.svelte');
 		const queue = read(queuePath);
-		expect(queue).toContain('playTrackNow');
+		expect(queue).toContain('playQueueItemNow');
 		expect(queue).toContain('removeTrackFromQueue');
 		// The row's play-button aria-label is a ternary that swaps between
 		// "Now playing" and "Play queued track" depending on whether the row
