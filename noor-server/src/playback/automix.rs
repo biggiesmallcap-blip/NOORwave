@@ -393,7 +393,7 @@ fn append_automix_external_candidates(
                 source: "automix-new",
                 reason: Some(&reason),
                 tidal_id_hint: row.tidal_id,
-                local_track_id: None,
+                ..Default::default()
             },
         )?;
         appended += 1;

@@ -999,6 +999,26 @@ export interface QueueItem {
 	is_pending?: boolean;
 }
 
+/**
+ * One row of an ordered mixed queue (POST /api/playback/queue).
+ * `track_id` set: a library track that plays through the local pipeline.
+ * Otherwise: an unresolved external track, resolved lazily by tidal id /
+ * artist+title as a pending queue row. The display metadata is persisted on
+ * the pending row so the queue renders richly before resolution.
+ */
+export interface MixedQueueItem {
+	track_id?: number | null;
+	tidal_id?: number | null;
+	artist?: string | null;
+	title?: string | null;
+	album_title?: string | null;
+	artwork_url?: string | null;
+	duration_ms?: number | null;
+	artist_tidal_id?: number | null;
+	album_tidal_id?: number | null;
+	reason?: string | null;
+}
+
 /** A last.fm-sourced radio candidate that has no library track yet. */
 export interface PendingCandidateInfo {
 	artist: string;
@@ -1050,14 +1070,6 @@ export interface ShuffleDebug {
 	scope: string;
 	locked_count: number;
 	candidate_count: number;
-}
-
-export interface TidalMixPlaybackResponse {
-	ok: boolean;
-	state: PlaybackState;
-	queue: QueueItem[];
-	first_tidal_id?: number;
-	shuffle_debug?: ShuffleDebug | null;
 }
 
 export interface PlaybackRuntimeInfo {
@@ -3352,22 +3364,42 @@ export const api = {
 	},
 
 	replacePlaybackQueue(
-		trackIds: number[],
-		reasons?: (string | null)[],
-		pendingCandidates?: PendingCandidateInfo[],
-		shuffleMode?: PlaybackState['shuffle_mode'],
+		items: MixedQueueItem[],
+		options?: { shuffleMode?: PlaybackState['shuffle_mode']; startPlayback?: boolean }
 	) {
-		const body: Record<string, unknown> = { track_ids: trackIds };
-		if (reasons) body.reasons = reasons;
-		if (pendingCandidates?.length) body.pending_candidates = pendingCandidates;
-		if (shuffleMode && shuffleMode !== 'off') body.shuffle_mode = shuffleMode;
-		return fetchApi<{ queue: QueueItem[]; shuffle_debug?: ShuffleDebug | null }>(
+		const body: Record<string, unknown> = { items };
+		if (options?.shuffleMode && options.shuffleMode !== 'off') {
+			body.shuffle_mode = options.shuffleMode;
+		}
+		if (options?.startPlayback) body.start_playback = true;
+		return fetchApi<{
+			queued_count: number;
+			pending_count: number;
+			shuffle_debug?: ShuffleDebug | null;
+			state: PlaybackState;
+			queue: QueueItem[];
+		}>(
 			'/api/playback/queue',
 			undefined,
 			{
 				method: 'POST',
 				body: JSON.stringify(body),
 				timeoutMs: BULK_QUEUE_API_TIMEOUT_MS,
+			}
+		);
+	},
+
+	/**
+	 * Jump playback to a specific queue row (library or pending) and start it.
+	 * Anchoring by queue-item id keeps duplicate tracks unambiguous.
+	 */
+	playQueueItem(queueItemId: number) {
+		return fetchApi<{ state: PlaybackState; queue: QueueItem[] }>(
+			'/api/playback/queue/play-item',
+			undefined,
+			{
+				method: 'POST',
+				body: JSON.stringify({ queue_item_id: queueItemId }),
 			}
 		);
 	},
@@ -3550,28 +3582,6 @@ export const api = {
 		);
 	},
 
-	// Play the first track of a mix immediately and queue the rest as
-	// pending ephemeral tracks (server auto-advances on track-end).
-	playTidalMix(tracks: TidalPlayable[], shuffleMode?: PlaybackState['shuffle_mode']) {
-		const body: Record<string, unknown> = {
-			tracks: tracks.map((t) => ({
-				tidal_track_id: t.tidal_id,
-				title: t.title,
-				artist_name: t.artist_name ?? null,
-				artist_tidal_id: t.artist_tidal_id ?? null,
-				album_title: t.album_title ?? null,
-				album_tidal_id: t.album_tidal_id ?? null,
-				artwork_url: t.artwork_url ?? null,
-				duration_ms: t.duration_ms ?? null,
-			})),
-		};
-		if (shuffleMode && shuffleMode !== 'off') body.shuffle_mode = shuffleMode;
-		return fetchApi<TidalMixPlaybackResponse>('/api/tidal/play-mix', undefined, {
-			method: 'POST',
-			body: JSON.stringify(body),
-			timeoutMs: BULK_QUEUE_API_TIMEOUT_MS,
-		});
-	},
 
 	// ─── Last.fm scrobble auth (server-side web-auth flow) ────────────────
 	getLastfmStatus() {
@@ -3739,21 +3749,6 @@ export const api = {
 		);
 	},
 
-	playTidalTrack(track: TidalPlayable): Promise<void> {
-		return fetchApi<void>('/api/tidal/play', undefined, {
-			method: 'POST',
-			body: JSON.stringify({
-				tidal_track_id: track.tidal_id,
-				title: track.title,
-				artist_name: track.artist_name,
-				album_title: track.album_title,
-				artwork_url: track.artwork_url,
-				duration_ms: track.duration_ms,
-				artist_tidal_id: track.artist_tidal_id ?? null,
-				album_tidal_id: track.album_tidal_id ?? null,
-			}),
-		});
-	},
 
 	getTidalArtistProfile(tidalArtistId: number): Promise<TidalArtistProfile> {
 		return fetchApi<TidalArtistProfile>(`/api/tidal/artists/${tidalArtistId}`);

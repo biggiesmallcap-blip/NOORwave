@@ -2,17 +2,13 @@
 //!
 //! Records what actually played, in play order, independent of the queue.
 //! The queue cannot serve as history: shuffle reorders it, automix appends to
-//! it, manual jumps skip across it, and ephemeral TIDAL mix rows are deleted
-//! as they play. Persisted plays are remembered as (queue row id, track id)
-//! pairs and re-validated against the live queue at pop time; ephemeral mix
-//! plays keep the full pending payload so they can be replayed after their
-//! queue row is gone.
+//! it, and manual jumps skip across it. Persisted plays are remembered as
+//! (queue row id, track id) pairs and re-validated against the live queue at
+//! pop time.
 //!
 //! Lives in `AppState` behind the SharedState RwLock (no interior locking).
 //! In-memory only by design: on server restart the stack is empty and
 //! previous-track falls back to queue-order stepping.
-
-use crate::PendingEphemeralTidalTrack;
 
 /// Upper bound on remembered plays. At ~4 minutes a track this is well over
 /// half a day of continuous listening; older entries are dropped from the
@@ -25,16 +21,10 @@ pub enum PlayHistoryEntry {
     /// reordered, or re-resolved; consumers must re-validate against the
     /// live queue before navigating to it.
     Persisted { queue_item_id: i64, track_id: i64 },
-    /// An ephemeral TIDAL mix/album/playlist track played. Its queue row was
-    /// deleted when it started, so the pending payload is kept whole to allow
-    /// replaying it through the ephemeral pipeline.
-    Ephemeral(PendingEphemeralTidalTrack),
 }
 
 impl PlayHistoryEntry {
-    /// Whether two entries denote the same playback item (not payload
-    /// equality: an ephemeral entry re-enriched with artwork later still
-    /// matches its earlier self).
+    /// Whether two entries denote the same playback item.
     fn same_playback(&self, other: &PlayHistoryEntry) -> bool {
         match (self, other) {
             (
@@ -45,10 +35,6 @@ impl PlayHistoryEntry {
                     queue_item_id: b, ..
                 },
             ) => a == b,
-            (PlayHistoryEntry::Ephemeral(a), PlayHistoryEntry::Ephemeral(b)) => {
-                a.tidal_track_id == b.tidal_track_id
-            }
-            _ => false,
         }
     }
 }
@@ -64,10 +50,6 @@ enum PushSuppression {
     /// generation (persisted prev: the generation is known before the
     /// switch is dispatched).
     Generation(u64),
-    /// Suppress the next note regardless of generation (ephemeral prev: the
-    /// ephemeral starter bumps the generation internally, so the caller
-    /// cannot key on it).
-    NextStart,
 }
 
 #[derive(Debug, Default)]
@@ -84,12 +66,6 @@ impl PlayHistory {
         self.suppression = Some(PushSuppression::Generation(generation));
     }
 
-    /// Arm suppression for an ephemeral back-navigation (generation unknown
-    /// to the caller).
-    pub fn suppress_next_push(&mut self) {
-        self.suppression = Some(PushSuppression::NextStart);
-    }
-
     /// Disarm suppression after a failed back-navigation so the next real
     /// track start is recorded normally.
     pub fn clear_suppression(&mut self) {
@@ -103,7 +79,6 @@ impl PlayHistory {
     /// same item).
     pub fn note_started(&mut self, entry: PlayHistoryEntry, generation: u64) {
         let suppressed = match self.suppression {
-            Some(PushSuppression::NextStart) => true,
             Some(PushSuppression::Generation(g)) => g == generation,
             None => false,
         };
@@ -170,23 +145,9 @@ mod tests {
         }
     }
 
-    fn ephemeral(tidal_track_id: i64) -> PlayHistoryEntry {
-        PlayHistoryEntry::Ephemeral(PendingEphemeralTidalTrack {
-            tidal_track_id,
-            title: format!("mix track {tidal_track_id}"),
-            artist_name: None,
-            album_title: None,
-            artwork_url: None,
-            duration_ms: None,
-            artist_tidal_id: None,
-            album_tidal_id: None,
-        })
-    }
-
     fn queue_item_id_of(entry: &PlayHistoryEntry) -> i64 {
         match entry {
             PlayHistoryEntry::Persisted { queue_item_id, .. } => *queue_item_id,
-            PlayHistoryEntry::Ephemeral(pending) => pending.tidal_track_id,
         }
     }
 
@@ -237,24 +198,6 @@ mod tests {
 
         let back = history.pop_previous().expect("A pushed despite marker");
         assert_eq!(queue_item_id_of(&back), 10);
-    }
-
-    #[test]
-    fn next_start_suppression_swallows_exactly_one_push() {
-        let mut history = PlayHistory::default();
-        history.note_started(ephemeral(100), 1);
-        history.note_started(ephemeral(101), 2);
-        history.suppress_next_push();
-        history.note_started(ephemeral(100), 3); // back-nav, 101 not pushed
-        history.note_started(ephemeral(102), 4); // forward again, 100 pushed
-
-        // 100 was audible twice on this walk (first play, then the back-nav
-        // visit before moving forward to 102), so it appears twice.
-        let back = history.pop_previous().expect("100 expected");
-        assert_eq!(queue_item_id_of(&back), 100);
-        let back = history.pop_previous().expect("first 100 play expected");
-        assert_eq!(queue_item_id_of(&back), 100);
-        assert!(history.pop_previous().is_none());
     }
 
     #[test]

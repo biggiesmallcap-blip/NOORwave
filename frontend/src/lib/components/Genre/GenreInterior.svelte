@@ -283,10 +283,13 @@
 			const windowIds = filteredTracks
 				.slice(startIndex, startIndex + MAX_QUEUE_TRACKS)
 				.map((t) => t.id);
-			await api.replacePlaybackQueue(windowIds);
+			const replaced = await api.replacePlaybackQueue(
+				windowIds.map((track_id) => ({ track_id }))
+			);
 			await setPlayerShuffleMode('genre');
 			await setPlayerAutomixEnabled(true);
-			await playTrackNow(track.id);
+			const selected = replaced.queue.find((queueItem) => queueItem.track.id === track.id);
+			if (selected) await api.playQueueItem(selected.id);
 		} catch (reason) {
 			actionError = reason instanceof Error ? reason.message : String(reason);
 		}

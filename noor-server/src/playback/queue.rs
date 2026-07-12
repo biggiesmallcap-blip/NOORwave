@@ -1,17 +1,8 @@
 //! Persistent playback queue.
 //!
-//! Track-id sentinels used across the queue and playback layers (the queue
-//! row is the source of truth; `QueueItem.track.id` is derived):
-//!   - id > 0: a real library track (tracks table primary key).
-//!   - id == 0: a PENDING row (`track_id IS NULL` + `pending_at`), i.e. an
-//!     unresolved Last.fm/radio candidate. The 0 comes from the COALESCE in
-//!     `load_queue`; `playback_state.current_track_id` is written as NULL
-//!     for these (the FK would reject 0).
-//!   - id < 0: an EPHEMERAL TIDAL row (`track_id IS NULL` + `tidal_id_hint`,
-//!     source in [`EPHEMERAL_TIDAL_SOURCES`]), synthesized as `-tidal_id`.
-//!     These stream by TIDAL id, are never imported, and their rows are
-//!     deleted as they play (mixes are forward-only; play history is what
-//!     lets previous-track go back to them).
+//! Queue rows use either a resolved positive track id or the pending display id 0.
+//! Pending rows are resolved before audio starts; their stable queue row remains
+//! the playback cursor throughout the transition.
 
 use crate::db::models::{QueueItem, Track};
 use crate::playback::shuffle::{
@@ -73,13 +64,6 @@ pub fn load_queue(conn: &Connection) -> Result<Vec<QueueItem>> {
         // COALESCE fills non-nullable Track fields from pending_* columns so the
         // row mapper doesn't need to know whether a row is pending or resolved.
         // Columns 0-3: queue metadata; 4-25: Track fields; 26: is_pending flag.
-        // Ephemeral TIDAL rows (mix/album/playlist) are real rows with
-        // track_id NULL whose source is in EPHEMERAL_TIDAL_SOURCES. They are NOT
-        // pending (they stream directly), so is_pending excludes them and a
-        // separate is_ephemeral flag tells the mapper to hydrate the synthetic
-        // playable track from the ephemeral_* columns + tidal_id_hint instead of
-        // the tracks join. The `lt` join recovers a local id + favourite state
-        // when the TIDAL id already lives in the library.
         "SELECT q.id, q.position, q.source, q.reason,
                 COALESCE(t.id, 0),
                 COALESCE(t.title, q.pending_title, ''),
@@ -103,10 +87,7 @@ pub fn load_queue(conn: &Connection) -> Result<Vec<QueueItem>> {
                 t.date_added,
                 COALESCE(t.source, 'tidal_stream'),
                 al.artwork_url,
-                (q.track_id IS NULL
-                    AND q.source NOT IN ('tidal_mix','tidal_album','tidal_playlist')) AS is_pending,
-                (q.track_id IS NULL
-                    AND q.source IN ('tidal_mix','tidal_album','tidal_playlist')) AS is_ephemeral,
+                q.track_id IS NULL AS is_pending,
                 q.tidal_id_hint,
                 q.ephemeral_album_title,
                 q.ephemeral_artwork_url,
@@ -125,9 +106,9 @@ pub fn load_queue(conn: &Connection) -> Result<Vec<QueueItem>> {
 
     let items = stmt
         .query_map([], |row| {
-            let is_ephemeral: bool = row.get(27)?;
-            let track = if is_ephemeral {
-                ephemeral_track_from_row(row)?
+            let is_pending: bool = row.get(26)?;
+            let track = if is_pending {
+                pending_track_from_row(row)?
             } else {
                 track_from_row_with_offset(row, 4)?
             };
@@ -137,7 +118,7 @@ pub fn load_queue(conn: &Connection) -> Result<Vec<QueueItem>> {
                 source: row.get(2)?,
                 reason: row.get(3)?,
                 track,
-                is_pending: row.get(26)?,
+                is_pending,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -204,62 +185,13 @@ fn insert_tracks_with_reasons_at_position(
     Ok(())
 }
 
-/// A last.fm similar-track candidate that has not yet been resolved to a local Tidal track.
-pub struct PendingCandidate {
-    pub artist: String,
-    pub title: String,
-    pub reason: Option<String>,
-}
-
-/// Append non-library (pending) queue rows for last.fm candidates.
-///
-/// These rows have `track_id = NULL` and `pending_at` set. The background
-/// resolver claims each row via `resolving_at`, performs a Tidal search, and
-/// writes `track_id`, `resolved_at`, and `tidal_match_score` atomically.
-/// At play time, if a row is still unresolved, the async caller performs a
-/// lazy fallback search before calling `next_track()` again.
-pub fn append_pending_tracks(
-    conn: &Connection,
-    candidates: &[PendingCandidate],
-) -> Result<Vec<QueueItem>> {
-    if candidates.is_empty() {
-        return load_queue(conn);
-    }
-
-    let start_pos: i32 = conn.query_row(
-        "SELECT COALESCE(MAX(position), -1) + 1 FROM queue",
-        [],
-        |row| row.get(0),
-    )?;
-
-    let tx = conn.unchecked_transaction()?;
-    insert_pending_tracks_at_position(&tx, candidates, start_pos)?;
-    let queue = load_queue(&tx)?;
-    tx.commit()?;
-    Ok(queue)
-}
-
-fn insert_pending_tracks_at_position(
-    conn: &Connection,
-    candidates: &[PendingCandidate],
-    start_pos: i32,
-) -> Result<()> {
-    for (idx, c) in candidates.iter().enumerate() {
-        conn.execute(
-            "INSERT INTO queue (track_id, position, source, reason, pending_artist, pending_title, pending_at)
-             VALUES (NULL, ?1, 'radio_pending', ?2, ?3, ?4, datetime('now'))",
-            params![start_pos + idx as i32, c.reason, c.artist, c.title],
-        )?;
-    }
-    Ok(())
-}
-
 /// Description of a single track to insert into the queue from an external
 /// source (search row, Last.fm radio candidate, Discover Space row). The two
 /// "external" insert helpers below take this struct and dispatch to a library
 /// row insert (when `local_track_id` is known) or a pending row insert
 /// otherwise. `tidal_id_hint` is preserved on pending rows so the background
 /// resolver can fetch by ID instead of searching by artist+title.
+#[derive(Default)]
 pub struct ExternalTrackInsert<'a> {
     pub artist: &'a str,
     pub title: &'a str,
@@ -267,6 +199,14 @@ pub struct ExternalTrackInsert<'a> {
     pub reason: Option<&'a str>,
     pub tidal_id_hint: Option<i64>,
     pub local_track_id: Option<i64>,
+    /// Display metadata persisted on pending rows so the queue renders
+    /// artwork/album/duration immediately, before the resolver imports a
+    /// library track. Ignored for library-row inserts.
+    pub album_title: Option<&'a str>,
+    pub artwork_url: Option<&'a str>,
+    pub duration_ms: Option<i64>,
+    pub artist_tidal_id: Option<i64>,
+    pub album_tidal_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,10 +260,8 @@ pub fn append_external_tracks(
     Ok(results)
 }
 
-/// The lowest `position` currently in the queue, or `None` when the queue is
-/// empty. Used by "Play next" during ephemeral-mix playback: the live track has
-/// no queue row and the DB anchor is NULL, so "after current" has to mean "at
-/// the front of the remaining continuation".
+/// The lowest `position` currently in the queue, or `None` when the queue is empty.
+#[cfg(test)]
 pub fn front_position(conn: &Connection) -> Result<Option<i32>> {
     Ok(
         conn.query_row("SELECT MIN(position) FROM queue", [], |row| {
@@ -407,8 +345,11 @@ fn insert_at_position(
     } else {
         conn.execute(
             "INSERT INTO queue (track_id, position, source, reason,
-                                pending_artist, pending_title, pending_at, tidal_id_hint)
-             VALUES (NULL, ?1, ?2, ?3, ?4, ?5, datetime('now'), ?6)",
+                                pending_artist, pending_title, pending_at, tidal_id_hint,
+                                ephemeral_album_title, ephemeral_artwork_url,
+                                ephemeral_duration_ms, ephemeral_artist_tidal_id,
+                                ephemeral_album_tidal_id)
+             VALUES (NULL, ?1, ?2, ?3, ?4, ?5, datetime('now'), ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 position,
                 insert.source,
@@ -416,6 +357,11 @@ fn insert_at_position(
                 insert.artist,
                 insert.title,
                 insert.tidal_id_hint,
+                insert.album_title,
+                insert.artwork_url,
+                insert.duration_ms,
+                insert.artist_tidal_id,
+                insert.album_tidal_id,
             ],
         )?;
         Ok(InsertResult::Pending {
@@ -424,285 +370,7 @@ fn insert_at_position(
     }
 }
 
-/// Queue `source` labels whose rows are ephemeral TIDAL collection tracks:
-/// real, mutable queue rows that stream directly via `tidal_id` and are never
-/// imported into the library. Distinct from Last.fm pending rows. Kept in sync
-/// with the `IN (...)` literals in `load_queue` and the resolver/GC guards.
-pub const EPHEMERAL_TIDAL_SOURCES: [&str; 3] = ["tidal_mix", "tidal_album", "tidal_playlist"];
-
-/// Source label for a user-injected TIDAL row folded into an active mix
-/// continuation ("Play next" / "Add to queue" during a mix). Reusing the mix
-/// ephemeral source is deliberate: the advance/peek/pop, GC, and stop/trim paths
-/// all key on [`EPHEMERAL_TIDAL_SOURCES`], so the injected row is consumed and
-/// cleaned up identically to a real mix row. The queue UI keys on
-/// `is_pending`/`is_ephemeral`, not this label, so the generic provenance is
-/// invisible. Without this, a `user_play_next` row is skipped by every ephemeral
-/// consumer and lingers unplayed in the queue.
-pub const EPHEMERAL_USER_TIDAL_SOURCE: &str = "tidal_mix";
-
-/// A TIDAL track to enqueue as an ephemeral (never-imported) queue row.
-pub struct EphemeralTidalInsert<'a> {
-    pub tidal_id: i64,
-    pub title: &'a str,
-    pub artist: Option<&'a str>,
-    pub album_title: Option<&'a str>,
-    pub artwork_url: Option<&'a str>,
-    pub duration_ms: Option<i64>,
-    // TIDAL artist/album ids so the row keeps clickable artist/album identity.
-    pub artist_tidal_id: Option<i64>,
-    pub album_tidal_id: Option<i64>,
-}
-
-/// Append ephemeral TIDAL rows at the end of the queue with one position lookup.
-/// `source` must be one of [`EPHEMERAL_TIDAL_SOURCES`].
-pub fn append_ephemeral_tidal_tracks(
-    conn: &Connection,
-    inserts: &[EphemeralTidalInsert<'_>],
-    source: &str,
-) -> Result<Vec<QueueItem>> {
-    if inserts.is_empty() {
-        return load_queue(conn);
-    }
-    let start_position: i32 = conn.query_row(
-        "SELECT COALESCE(MAX(position), -1) + 1 FROM queue",
-        [],
-        |row| row.get(0),
-    )?;
-    let tx = conn.unchecked_transaction()?;
-    for (idx, insert) in inserts.iter().enumerate() {
-        insert_ephemeral_at_position(&tx, insert, source, start_position + idx as i32)?;
-    }
-    let queue = load_queue(&tx)?;
-    tx.commit()?;
-    Ok(queue)
-}
-
-/// Insert ephemeral TIDAL rows immediately after `after_position`, shifting any
-/// existing rows at or past the target by the batch length. Mirrors
-/// [`insert_external_tracks_after`] but produces ephemeral (stream-by-tidal_id,
-/// never-resolved) rows. Used to drop a "Play next" TIDAL pick at the front of a
-/// live mix continuation so [`pop_next_ephemeral_tidal_track`] plays it next.
-pub fn insert_ephemeral_tidal_tracks_after(
-    conn: &Connection,
-    inserts: &[EphemeralTidalInsert<'_>],
-    after_position: i32,
-    source: &str,
-) -> Result<Vec<QueueItem>> {
-    if inserts.is_empty() {
-        return load_queue(conn);
-    }
-    let target = after_position + 1;
-    let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "UPDATE queue SET position = position + ?1 WHERE position >= ?2",
-        params![inserts.len() as i32, target],
-    )?;
-    for (idx, insert) in inserts.iter().enumerate() {
-        insert_ephemeral_at_position(&tx, insert, source, target + idx as i32)?;
-    }
-    let queue = load_queue(&tx)?;
-    tx.commit()?;
-    Ok(queue)
-}
-
-fn insert_ephemeral_at_position(
-    conn: &Connection,
-    insert: &EphemeralTidalInsert<'_>,
-    source: &str,
-    position: i32,
-) -> Result<()> {
-    // track_id NULL + no pending_at: these rows are never resolved or GC-swept.
-    conn.execute(
-        "INSERT INTO queue (track_id, position, source,
-                            pending_artist, pending_title, tidal_id_hint,
-                            ephemeral_album_title, ephemeral_artwork_url, ephemeral_duration_ms,
-                            ephemeral_artist_tidal_id, ephemeral_album_tidal_id)
-         VALUES (NULL, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        params![
-            position,
-            source,
-            insert.artist,
-            insert.title,
-            insert.tidal_id,
-            insert.album_title,
-            insert.artwork_url,
-            insert.duration_ms,
-            insert.artist_tidal_id,
-            insert.album_tidal_id,
-        ],
-    )?;
-    Ok(())
-}
-
-fn ephemeral_pending_from_row(
-    row: &Row<'_>,
-    id_offset: usize,
-) -> rusqlite::Result<crate::PendingEphemeralTidalTrack> {
-    Ok(crate::PendingEphemeralTidalTrack {
-        tidal_track_id: row.get(id_offset)?,
-        title: row
-            .get::<_, Option<String>>(id_offset + 1)?
-            .unwrap_or_default(),
-        artist_name: row.get(id_offset + 2)?,
-        album_title: row.get(id_offset + 3)?,
-        artwork_url: row.get(id_offset + 4)?,
-        duration_ms: row.get(id_offset + 5)?,
-        artist_tidal_id: row.get(id_offset + 6)?,
-        album_tidal_id: row.get(id_offset + 7)?,
-    })
-}
-
-const EPHEMERAL_TIDAL_ROW_FILTER: &str = "track_id IS NULL
-       AND source IN ('tidal_mix','tidal_album','tidal_playlist')
-       AND tidal_id_hint IS NOT NULL";
-
-/// Re-insert an ephemeral TIDAL row at the FRONT of the live mix block so
-/// [`pop_next_ephemeral_tidal_track`] plays it next. Used by previous-track
-/// back-navigation: the row of the currently playing mix track was deleted
-/// when it started, and going back must not lose it from the continuation.
-/// With no mix rows left, appends at the queue end (the natural resume
-/// point). `fallback_source` is only used when no existing mix row supplies
-/// a source; it must be one of [`EPHEMERAL_TIDAL_SOURCES`].
-pub fn reinsert_ephemeral_front(
-    conn: &Connection,
-    insert: &EphemeralTidalInsert<'_>,
-    fallback_source: &str,
-) -> Result<()> {
-    let front: Option<(i32, String)> = conn
-        .query_row(
-            &format!(
-                "SELECT position, source FROM queue WHERE {EPHEMERAL_TIDAL_ROW_FILTER}
-                 ORDER BY position ASC, id ASC LIMIT 1"
-            ),
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    match front {
-        Some((front_position, source)) => {
-            insert_ephemeral_tidal_tracks_after(
-                conn,
-                std::slice::from_ref(insert),
-                front_position - 1,
-                &source,
-            )?;
-        }
-        None => {
-            append_ephemeral_tidal_tracks(conn, std::slice::from_ref(insert), fallback_source)?;
-        }
-    }
-    Ok(())
-}
-
-/// Read all upcoming ephemeral TIDAL rows in play order without removing them.
-/// Used to pre-warm DJ transition profiles for the rest of the mix.
-pub fn peek_ephemeral_tidal_tracks(
-    conn: &Connection,
-) -> Result<Vec<crate::PendingEphemeralTidalTrack>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT tidal_id_hint, pending_title, pending_artist,
-                ephemeral_album_title, ephemeral_artwork_url, ephemeral_duration_ms,
-                        ephemeral_artist_tidal_id, ephemeral_album_tidal_id
-         FROM queue WHERE {EPHEMERAL_TIDAL_ROW_FILTER}
-         ORDER BY position ASC, id ASC"
-    ))?;
-    let rows = stmt
-        .query_map([], |row| ephemeral_pending_from_row(row, 0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
-/// Read-and-delete the next upcoming ephemeral TIDAL row (lowest position).
-/// Mirrors the `VecDeque::pop_front` the old in-memory mix queue used.
-pub fn pop_next_ephemeral_tidal_track(
-    conn: &Connection,
-) -> Result<Option<crate::PendingEphemeralTidalTrack>> {
-    let tx = conn.unchecked_transaction()?;
-    let row: Option<(i64, crate::PendingEphemeralTidalTrack)> = tx
-        .query_row(
-            &format!(
-                "SELECT id, tidal_id_hint, pending_title, pending_artist,
-                        ephemeral_album_title, ephemeral_artwork_url, ephemeral_duration_ms,
-                        ephemeral_artist_tidal_id, ephemeral_album_tidal_id
-                 FROM queue WHERE {EPHEMERAL_TIDAL_ROW_FILTER}
-                 ORDER BY position ASC, id ASC LIMIT 1"
-            ),
-            [],
-            |row| Ok((row.get(0)?, ephemeral_pending_from_row(row, 1)?)),
-        )
-        .optional()?;
-    let Some((queue_id, track)) = row else {
-        return Ok(None);
-    };
-    tx.execute("DELETE FROM queue WHERE id = ?1", params![queue_id])?;
-    tx.commit()?;
-    Ok(Some(track))
-}
-
-/// Find an upcoming ephemeral TIDAL row by its TIDAL id. Used to rebuild a
-/// synthetic track for DJ profile lookups when a mix track is still queued.
-pub fn find_ephemeral_tidal_track_by_tidal_id(
-    conn: &Connection,
-    tidal_id: i64,
-) -> Result<Option<crate::PendingEphemeralTidalTrack>> {
-    Ok(conn
-        .query_row(
-            &format!(
-                "SELECT tidal_id_hint, pending_title, pending_artist,
-                        ephemeral_album_title, ephemeral_artwork_url, ephemeral_duration_ms,
-                        ephemeral_artist_tidal_id, ephemeral_album_tidal_id
-                 FROM queue WHERE {EPHEMERAL_TIDAL_ROW_FILTER} AND tidal_id_hint = ?1
-                 ORDER BY position ASC, id ASC LIMIT 1"
-            ),
-            params![tidal_id],
-            |row| ephemeral_pending_from_row(row, 0),
-        )
-        .optional()?)
-}
-
-/// Delete every ephemeral TIDAL row. Used on stop and when the user starts a
-/// track outside the current mix.
-pub fn delete_all_ephemeral_tidal_rows(conn: &Connection) -> Result<usize> {
-    Ok(conn.execute(
-        "DELETE FROM queue
-         WHERE track_id IS NULL
-           AND source IN ('tidal_mix','tidal_album','tidal_playlist')",
-        [],
-    )?)
-}
-
-/// "Jump to" trim: delete every ephemeral row up to and including the one whose
-/// TIDAL id matches `tidal_id` (which the caller is about to start playing).
-/// Returns true if that row was present; when absent (the user picked something
-/// outside the mix) the caller clears all ephemeral rows instead.
-pub fn trim_ephemeral_tidal_rows_through_tidal_id(
-    conn: &Connection,
-    tidal_id: i64,
-) -> Result<bool> {
-    let pos: Option<i32> = conn
-        .query_row(
-            &format!(
-                "SELECT position FROM queue
-                 WHERE {EPHEMERAL_TIDAL_ROW_FILTER} AND tidal_id_hint = ?1
-                 ORDER BY position ASC, id ASC LIMIT 1"
-            ),
-            params![tidal_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(pos) = pos else {
-        return Ok(false);
-    };
-    conn.execute(
-        "DELETE FROM queue
-         WHERE track_id IS NULL
-           AND source IN ('tidal_mix','tidal_album','tidal_playlist')
-           AND position <= ?1",
-        params![pos],
-    )?;
-    Ok(true)
-}
-
+#[cfg(test)]
 pub fn replace_queue(conn: &Connection, tracks: &[Track], source: &str) -> Result<Vec<QueueItem>> {
     let with_reasons: Vec<(Track, Option<String>)> =
         tracks.iter().cloned().map(|track| (track, None)).collect();
@@ -710,6 +378,7 @@ pub fn replace_queue(conn: &Connection, tracks: &[Track], source: &str) -> Resul
 }
 
 /// Wipe the queue and replace with tracks plus per-row reasons.
+#[cfg(test)]
 pub fn replace_queue_with_reasons(
     conn: &Connection,
     tracks: &[(Track, Option<String>)],
@@ -1058,42 +727,44 @@ fn track_from_row_with_offset(row: &Row<'_>, offset: usize) -> rusqlite::Result<
     })
 }
 
-/// Hydrate a synthetic playable `Track` for an ephemeral TIDAL queue row.
+/// Hydrate a display `Track` for a pending queue row.
 ///
-/// Mirrors the shape the old in-memory overlay built: negative `id` derived from
-/// the TIDAL id (or the local id when the track already lives in the library),
-/// `source = tidal_ephemeral`, metadata pulled from the queue row's pending_* /
-/// ephemeral_* columns. Column indices match the extended `load_queue` SELECT.
-fn ephemeral_track_from_row(row: &Row<'_>) -> rusqlite::Result<Track> {
-    let tidal_id: i64 = row.get(28)?;
-    let local_id: Option<i64> = row.get(32)?;
-    let library_favorite: Option<bool> = row.get(33)?;
+/// Pending rows resolve by importing a library track, but until that happens
+/// the queue should still render artwork/album/duration and expose the TIDAL
+/// id for menus/favorites. Metadata comes from the row's pending_* /
+/// stored display metadata columns; `id`/`is_favorite` come from the `lt` library-match
+/// join when the hinted TIDAL id already lives in the library, else id is 0
+/// and remains 0 until a matching local row exists.
+/// Column indices match the `load_queue` SELECT.
+fn pending_track_from_row(row: &Row<'_>) -> rusqlite::Result<Track> {
+    let tidal_id: Option<i64> = row.get(27)?;
+    let local_id: Option<i64> = row.get(31)?;
+    let library_favorite: Option<bool> = row.get(32)?;
     Ok(Track {
-        id: local_id.unwrap_or(-tidal_id),
+        id: local_id.unwrap_or(0),
         title: row.get(5)?, // COALESCE(t.title, q.pending_title, '')
         artist_id: 0,
         artist_name: row.get(7)?, // COALESCE(a.name, q.pending_artist)
         album_id: None,
-        album_title: row.get(29)?,
+        album_title: row.get(28)?,
         disc_number: None,
         track_number: None,
-        duration_ms: row.get(31)?,
+        duration_ms: row.get(30)?,
         isrc: None,
-        tidal_id: Some(tidal_id),
-        // TIDAL artist/album identity so Up Next rows link like now-playing does.
-        artist_tidal_id: row.get(34)?,
-        album_tidal_id: row.get(35)?,
+        tidal_id,
+        artist_tidal_id: row.get(33)?,
+        album_tidal_id: row.get(34)?,
         ytmusic_id: None,
         soundcloud_id: None,
-        best_quality: Some("LOSSLESS".to_string()),
-        best_source: Some("tidal".to_string()),
+        best_quality: tidal_id.map(|_| "LOSSLESS".to_string()),
+        best_source: tidal_id.map(|_| "tidal".to_string()),
         fidelity_score: 0,
         is_favorite: library_favorite.unwrap_or(false),
         play_count: 0,
         last_played_at: None,
         date_added: None,
-        source: "tidal_ephemeral".to_string(),
-        artwork_url: row.get(30)?,
+        source: "tidal_stream".to_string(),
+        artwork_url: row.get(29)?,
     })
 }
 
@@ -1223,7 +894,7 @@ mod tests {
     #[test]
     fn front_position_and_play_next_front_insert_during_mix() {
         let conn = conn();
-        // Simulate a TIDAL mix continuation: ephemeral rows, no library/anchor.
+        // Simulate metadata-rich pending TIDAL rows with no library match.
         for (pos, tidal) in [(0, 101_i64), (1, 102), (2, 103)] {
             conn.execute(
                 "INSERT INTO queue (track_id, position, source, tidal_id_hint)
@@ -1243,6 +914,7 @@ mod tests {
             reason: None,
             tidal_id_hint: Some(999),
             local_track_id: None,
+            ..Default::default()
         };
         let front = front_position(&conn).unwrap().unwrap();
         insert_external_track_after(&conn, &insert, front - 1).unwrap();
@@ -1414,6 +1086,7 @@ mod tests {
                 reason: None,
                 tidal_id_hint: Some(123),
                 local_track_id: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1437,6 +1110,69 @@ mod tests {
     }
 
     #[test]
+    fn pending_rows_serialize_display_metadata_and_tidal_id() {
+        let conn = conn();
+        let result = append_external_track(
+            &conn,
+            &ExternalTrackInsert {
+                artist: "Aphex Twin",
+                title: "Xtal",
+                source: "user_queue",
+                tidal_id_hint: Some(123),
+                album_title: Some("Selected Ambient Works"),
+                artwork_url: Some("https://img/xtal.jpg"),
+                duration_ms: Some(294_000),
+                artist_tidal_id: Some(9001),
+                album_tidal_id: Some(9002),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(matches!(result, InsertResult::Pending { .. }));
+
+        let rows = load_queue(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].is_pending);
+        let track = &rows[0].track;
+        // Rich display metadata straight from the queue row, pre-resolution.
+        assert_eq!(track.id, 0, "no library match -> id 0, never negative");
+        assert_eq!(track.tidal_id, Some(123));
+        assert_eq!(track.album_title.as_deref(), Some("Selected Ambient Works"));
+        assert_eq!(track.artwork_url.as_deref(), Some("https://img/xtal.jpg"));
+        assert_eq!(track.duration_ms, Some(294_000));
+        assert_eq!(track.artist_tidal_id, Some(9001));
+        assert_eq!(track.album_tidal_id, Some(9002));
+    }
+
+    #[test]
+    fn pending_row_with_library_match_serializes_local_id_and_favorite() {
+        let conn = conn();
+        conn.execute("UPDATE tracks SET is_favorite = 1 WHERE id = 3", [])
+            .unwrap();
+        append_external_track(
+            &conn,
+            &ExternalTrackInsert {
+                artist: "A",
+                title: "Track 3 again",
+                source: "user_queue",
+                // Seeded track 3 has tidal_id 3, so the lt join matches.
+                tidal_id_hint: Some(3),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let rows = load_queue(&conn).unwrap();
+        assert!(
+            rows[0].is_pending,
+            "still pending until the resolver promotes it"
+        );
+        let track = &rows[0].track;
+        assert_eq!(track.id, 3, "library match surfaces the local id");
+        assert!(track.is_favorite);
+    }
+
+    #[test]
     fn append_external_track_library_creates_normal_row() {
         let conn = conn();
         let result = append_external_track(
@@ -1448,6 +1184,7 @@ mod tests {
                 reason: Some("seeded"),
                 tidal_id_hint: None,
                 local_track_id: Some(1),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1478,6 +1215,7 @@ mod tests {
                 reason: None,
                 tidal_id_hint: None,
                 local_track_id: Some(1),
+                ..Default::default()
             },
             ExternalTrackInsert {
                 artist: "Aphex Twin",
@@ -1486,6 +1224,7 @@ mod tests {
                 reason: Some("external"),
                 tidal_id_hint: Some(123),
                 local_track_id: None,
+                ..Default::default()
             },
             ExternalTrackInsert {
                 artist: "ignored",
@@ -1494,6 +1233,7 @@ mod tests {
                 reason: None,
                 tidal_id_hint: None,
                 local_track_id: Some(2),
+                ..Default::default()
             },
         ];
 
@@ -1600,6 +1340,7 @@ mod tests {
                 reason: None,
                 tidal_id_hint: None,
                 local_track_id: Some(4),
+                ..Default::default()
             },
             0,
         )
@@ -1635,6 +1376,7 @@ mod tests {
                 reason: None,
                 tidal_id_hint: Some(101),
                 local_track_id: None,
+                ..Default::default()
             },
             ExternalTrackInsert {
                 artist: "B",
@@ -1643,6 +1385,7 @@ mod tests {
                 reason: None,
                 tidal_id_hint: Some(102),
                 local_track_id: None,
+                ..Default::default()
             },
         ];
 
@@ -1978,227 +1721,5 @@ mod tests {
             )
             .unwrap();
         assert!(resolving_at.is_some());
-    }
-
-    fn ephemeral(tidal_id: i64, title: &str) -> EphemeralTidalInsert<'_> {
-        EphemeralTidalInsert {
-            tidal_id,
-            title,
-            artist: Some("Artist"),
-            album_title: Some("Album"),
-            artwork_url: Some("https://resources.tidal.com/x.jpg"),
-            duration_ms: Some(180_000),
-            // Deterministic, distinct per row so carry-through is assertable.
-            artist_tidal_id: Some(tidal_id + 700_000),
-            album_tidal_id: Some(tidal_id + 800_000),
-        }
-    }
-
-    #[test]
-    fn ephemeral_rows_load_as_playable_not_pending() {
-        let conn = conn();
-        append_ephemeral_tidal_tracks(
-            &conn,
-            &[ephemeral(501, "First"), ephemeral(502, "Second")],
-            "tidal_mix",
-        )
-        .unwrap();
-
-        let items = load_queue(&conn).unwrap();
-        assert_eq!(items.len(), 2);
-        for item in &items {
-            assert!(!item.is_pending, "ephemeral rows are directly playable");
-            assert_eq!(item.source, "tidal_mix");
-            assert_eq!(item.track.source, "tidal_ephemeral");
-            assert_eq!(item.track.album_title.as_deref(), Some("Album"));
-        }
-        // Synthetic negative track id derived from the TIDAL id, tidal_id set.
-        assert_eq!(items[0].track.id, -501);
-        assert_eq!(items[0].track.tidal_id, Some(501));
-        assert_eq!(items[0].track.title, "First");
-        // TIDAL artist/album identity carries onto the synthetic Track so
-        // now-playing + Up Next can build clickable artist/album links.
-        assert_eq!(items[0].track.artist_tidal_id, Some(501 + 700_000));
-        assert_eq!(items[0].track.album_tidal_id, Some(501 + 800_000));
-    }
-
-    #[test]
-    fn ephemeral_pop_carries_tidal_identity() {
-        // The identity must survive the pop → PendingEphemeralTidalTrack →
-        // synthetic-track path the mix advance uses, or a server-driven track
-        // change would lose its links.
-        let conn = conn();
-        append_ephemeral_tidal_tracks(&conn, &[ephemeral(701, "A")], "tidal_mix").unwrap();
-        let popped = pop_next_ephemeral_tidal_track(&conn).unwrap().unwrap();
-        assert_eq!(popped.tidal_track_id, 701);
-        assert_eq!(popped.artist_tidal_id, Some(701 + 700_000));
-        assert_eq!(popped.album_tidal_id, Some(701 + 800_000));
-    }
-
-    #[test]
-    fn ephemeral_row_in_library_uses_local_id_and_favorite() {
-        let conn = conn();
-        // Track 1 already lives in the library with tidal_id 501.
-        conn.execute(
-            "UPDATE tracks SET tidal_id = 501, is_favorite = 1 WHERE id = 1",
-            [],
-        )
-        .unwrap();
-        append_ephemeral_tidal_tracks(&conn, &[ephemeral(501, "First")], "tidal_album").unwrap();
-
-        let items = load_queue(&conn).unwrap();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].track.id, 1, "library local id recovered");
-        assert!(items[0].track.is_favorite);
-        assert!(!items[0].is_pending);
-    }
-
-    #[test]
-    fn pop_next_ephemeral_consumes_in_order() {
-        let conn = conn();
-        append_ephemeral_tidal_tracks(
-            &conn,
-            &[
-                ephemeral(601, "A"),
-                ephemeral(602, "B"),
-                ephemeral(603, "C"),
-            ],
-            "tidal_mix",
-        )
-        .unwrap();
-
-        let first = pop_next_ephemeral_tidal_track(&conn).unwrap().unwrap();
-        assert_eq!(first.tidal_track_id, 601);
-        let remaining = load_queue(&conn).unwrap();
-        assert_eq!(remaining.len(), 2, "pop consumes exactly one row");
-        assert_eq!(
-            remaining[0].track.tidal_id,
-            Some(602),
-            "the next ephemeral row is now at the front"
-        );
-    }
-
-    #[test]
-    fn play_next_ephemeral_insert_is_popped_before_the_mix() {
-        let conn = conn();
-        // A live mix continuation: ephemeral rows the advance pipeline owns.
-        append_ephemeral_tidal_tracks(
-            &conn,
-            &[
-                ephemeral(601, "A"),
-                ephemeral(602, "B"),
-                ephemeral(603, "C"),
-            ],
-            "tidal_mix",
-        )
-        .unwrap();
-
-        // "Play next" during a mix folds the pick in at front_position - 1, so it
-        // lands at the very front of the remaining continuation.
-        let front = front_position(&conn).unwrap().unwrap();
-        insert_ephemeral_tidal_tracks_after(
-            &conn,
-            &[ephemeral(999, "Play Next Pick")],
-            front - 1,
-            EPHEMERAL_USER_TIDAL_SOURCE,
-        )
-        .unwrap();
-
-        // It is a real, directly-playable ephemeral row (not a pending spinner)
-        // sitting ahead of the original mix.
-        let items = load_queue(&conn).unwrap();
-        assert_eq!(items.len(), 4);
-        assert!(!items[0].is_pending, "folded pick streams directly");
-        assert_eq!(items[0].track.tidal_id, Some(999));
-
-        // The mix-advance consumer pops it FIRST, then resumes the original order.
-        // This is the regression: a user_play_next row would be skipped here and
-        // never play.
-        assert_eq!(
-            pop_next_ephemeral_tidal_track(&conn)
-                .unwrap()
-                .unwrap()
-                .tidal_track_id,
-            999,
-            "the play-next pick plays before the rest of the mix"
-        );
-        assert_eq!(
-            pop_next_ephemeral_tidal_track(&conn)
-                .unwrap()
-                .unwrap()
-                .tidal_track_id,
-            601
-        );
-    }
-
-    #[test]
-    fn add_to_queue_ephemeral_append_plays_after_the_mix() {
-        let conn = conn();
-        append_ephemeral_tidal_tracks(
-            &conn,
-            &[ephemeral(601, "A"), ephemeral(602, "B")],
-            "tidal_mix",
-        )
-        .unwrap();
-        // "Add to queue" during a mix appends onto the tail of the continuation.
-        append_ephemeral_tidal_tracks(
-            &conn,
-            &[ephemeral(999, "Tail Pick")],
-            EPHEMERAL_USER_TIDAL_SOURCE,
-        )
-        .unwrap();
-
-        let ids: Vec<i64> = load_queue(&conn)
-            .unwrap()
-            .iter()
-            .map(|item| item.track.tidal_id.unwrap())
-            .collect();
-        assert_eq!(ids, vec![601, 602, 999], "appended pick trails the mix");
-    }
-
-    #[test]
-    fn trim_through_tidal_id_drops_rows_up_to_target() {
-        let conn = conn();
-        append_ephemeral_tidal_tracks(
-            &conn,
-            &[
-                ephemeral(701, "A"),
-                ephemeral(702, "B"),
-                ephemeral(703, "C"),
-            ],
-            "tidal_mix",
-        )
-        .unwrap();
-
-        let found = trim_ephemeral_tidal_rows_through_tidal_id(&conn, 702).unwrap();
-        assert!(found);
-        let remaining: Vec<i64> = peek_ephemeral_tidal_tracks(&conn)
-            .unwrap()
-            .into_iter()
-            .map(|t| t.tidal_track_id)
-            .collect();
-        assert_eq!(remaining, vec![703], "rows up to and including 702 removed");
-
-        // A tidal id outside the mix reports not-found and leaves rows intact.
-        assert!(!trim_ephemeral_tidal_rows_through_tidal_id(&conn, 999).unwrap());
-        assert_eq!(peek_ephemeral_tidal_tracks(&conn).unwrap().len(), 1);
-    }
-
-    #[test]
-    fn delete_all_ephemeral_leaves_library_rows() {
-        let conn = conn();
-        // A real library queue row plus ephemeral rows.
-        conn.execute(
-            "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
-            [],
-        )
-        .unwrap();
-        append_ephemeral_tidal_tracks(&conn, &[ephemeral(801, "A")], "tidal_mix").unwrap();
-
-        let removed = delete_all_ephemeral_tidal_rows(&conn).unwrap();
-        assert_eq!(removed, 1);
-        let items = load_queue(&conn).unwrap();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].track.id, 1, "library row survives");
     }
 }

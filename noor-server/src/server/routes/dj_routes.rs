@@ -457,7 +457,7 @@ async fn get_status(
 ) -> Result<Json<DjStatusResponse>, StatusCode> {
     let response = {
         let state = state.read().await;
-        let ephemeral_labels = super::active_ephemeral_tidal_mix_dj_labels(&state);
+        let ephemeral_labels: Vec<(AudioDjProfileKey, (String, Option<String>))> = Vec::new();
         let active_track_id = state
             .playback_runtime_info
             .as_ref()
@@ -623,7 +623,7 @@ pub(super) async fn queue_missing_dj_profiles_for_current_pair(
 ) -> Result<usize, StatusCode> {
     let missing_profile_refs = {
         let state_guard = state.read().await;
-        let ephemeral_labels = super::active_ephemeral_tidal_mix_dj_labels(&state_guard);
+        let ephemeral_labels: Vec<(AudioDjProfileKey, (String, Option<String>))> = Vec::new();
         state_guard
             .db
             .with_conn(|conn| {
@@ -826,10 +826,8 @@ async fn rebuild_profile(
                     media_ref_kind: payload.media_ref_kind.clone(),
                     media_ref_id: payload.media_ref_id.clone(),
                 };
-                let pair = match super::active_ephemeral_tidal_mix_dj_pair(&state, conn) {
-                    Some(pair) => pair,
-                    None => crate::playback::dj_lookahead::load_dj_lookahead_pair(conn)?,
-                };
+                let pair = crate::playback::dj_lookahead::load_dj_lookahead_pair(conn)?;
+
                 let media_ref = pair
                     .current
                     .as_ref()
@@ -1453,50 +1451,40 @@ async fn rebuild_track_for_tidal_ref(
     state: &SharedState,
     tidal_id: i64,
 ) -> crate::db::models::Track {
-    let state_guard = state.read().await;
-    if let Some(track) = state_guard
-        .ephemeral_tidal_track
-        .as_ref()
-        .filter(|track| track.tidal_id == Some(tidal_id))
-    {
-        return track.clone();
-    }
-    if let Some(prepared) = state_guard
-        .prepared_ephemeral_tidal_next
-        .as_ref()
-        .filter(|prepared| prepared.tidal_track_id == tidal_id)
-    {
-        return prepared.synthetic_track.clone();
-    }
-    if let Some(pending) = state_guard
-        .db
-        .with_conn(|conn| {
-            crate::playback::queue::find_ephemeral_tidal_track_by_tidal_id(conn, tidal_id)
-        })
+    let db = {
+        let state_guard = state.read().await;
+        state_guard.db.clone()
+    };
+    db.with_conn(|conn| library_track_for_tidal_id(conn, tidal_id))
         .ok()
         .flatten()
-    {
-        return synthetic_rebuild_track(&pending);
-    }
-    state_guard
-        .db
-        .with_conn(|conn| library_track_for_tidal_id(conn, tidal_id))
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| {
-            synthetic_rebuild_track(&crate::PendingEphemeralTidalTrack {
-                tidal_track_id: tidal_id,
-                title: format!("TIDAL {tidal_id}"),
-                artist_name: None,
-                album_title: None,
-                artwork_url: None,
-                duration_ms: None,
-                artist_tidal_id: None,
-                album_tidal_id: None,
-            })
+        .unwrap_or_else(|| crate::db::models::Track {
+            id: 0,
+            title: format!("TIDAL {tidal_id}"),
+            artist_id: 0,
+            artist_name: None,
+            album_id: None,
+            album_title: None,
+            disc_number: None,
+            track_number: None,
+            duration_ms: None,
+            isrc: None,
+            tidal_id: Some(tidal_id),
+            artist_tidal_id: None,
+            album_tidal_id: None,
+            ytmusic_id: None,
+            soundcloud_id: None,
+            best_quality: None,
+            best_source: Some("tidal".to_string()),
+            fidelity_score: 0,
+            is_favorite: false,
+            play_count: 0,
+            last_played_at: None,
+            date_added: None,
+            source: "tidal_stream".to_string(),
+            artwork_url: None,
         })
 }
-
 fn library_track_for_tidal_id(
     conn: &rusqlite::Connection,
     tidal_id: i64,
@@ -1545,35 +1533,6 @@ fn library_track_for_tidal_id(
     )
     .optional()
     .map_err(Into::into)
-}
-
-fn synthetic_rebuild_track(track: &crate::PendingEphemeralTidalTrack) -> crate::db::models::Track {
-    crate::db::models::Track {
-        id: -track.tidal_track_id,
-        title: track.title.clone(),
-        artist_id: 0,
-        artist_name: track.artist_name.clone(),
-        album_id: None,
-        album_title: track.album_title.clone(),
-        disc_number: None,
-        track_number: None,
-        duration_ms: track.duration_ms,
-        isrc: None,
-        tidal_id: Some(track.tidal_track_id),
-        artist_tidal_id: track.artist_tidal_id,
-        album_tidal_id: track.album_tidal_id,
-        ytmusic_id: None,
-        soundcloud_id: None,
-        best_quality: None,
-        best_source: Some("tidal".to_string()),
-        fidelity_score: 0,
-        is_favorite: false,
-        play_count: 0,
-        last_played_at: None,
-        date_added: None,
-        source: "tidal_ephemeral".to_string(),
-        artwork_url: track.artwork_url.clone(),
-    }
 }
 
 async fn get_mix_intent(
@@ -2958,8 +2917,6 @@ mod tests {
             last_drop_preview: None,
             active_listen_session: None,
             live_listen_session: None,
-            external_playback_track: None,
-            ephemeral_tidal_track: None,
             play_history: crate::playback::history::PlayHistory::default(),
             tidal_login_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             rss_aggregator: std::sync::Arc::new(crate::services::rss_feeds::FeedAggregator::new(
@@ -2994,7 +2951,6 @@ mod tests {
             )),
             embedding_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             master_key: crate::services::crypto::MasterKey::ephemeral(),
-            prepared_ephemeral_tidal_next: None,
             lastfm_api_secret: None,
             server_token: String::new(),
             audio_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),

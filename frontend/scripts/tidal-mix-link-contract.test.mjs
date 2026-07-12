@@ -14,8 +14,8 @@ describe('TIDAL mix link contracts', () => {
 		const player = readFileSync('src/lib/stores/player.ts', 'utf8');
 		const trackUtils = readFileSync('src/lib/utils/track.ts', 'utf8');
 
-		expect(client).toContain('artist_tidal_id: t.artist_tidal_id ?? null');
-		expect(client).toContain('album_tidal_id: t.album_tidal_id ?? null');
+		expect(trackUtils).toContain('artist_tidal_id: track.artist_tidal_id ?? null');
+		expect(trackUtils).toContain('album_tidal_id: track.album_tidal_id ?? null');
 		expect(player).toContain('rememberTidalPlayables(playable)');
 		expect(player).toContain('album_tidal_id: track.album_tidal_id ?? null');
 		expect(trackUtils).toContain('album_tidal_id: track.album_tidal_id ?? null');

@@ -42,32 +42,6 @@ pub struct StreamDisplayInfo {
     pub bit_depth: Option<i32>,
 }
 
-/// One slot in the pending ephemeral TIDAL queue (e.g. rest of a TIDAL mix
-/// after the first track started). Just metadata — stream URL is resolved
-/// lazily when this slot is promoted to the active track, since TIDAL stream
-/// URLs expire after ~30 min and a long mix could outlive an upfront resolve.
-#[derive(Debug, Clone)]
-pub struct PendingEphemeralTidalTrack {
-    pub tidal_track_id: i64,
-    pub title: String,
-    pub artist_name: Option<String>,
-    pub album_title: Option<String>,
-    pub artwork_url: Option<String>,
-    pub duration_ms: Option<i64>,
-    // TIDAL identity carried through so the synthetic now-playing track and the
-    // Up Next rows can link to the artist/album pages.
-    pub artist_tidal_id: Option<i64>,
-    pub album_tidal_id: Option<i64>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PreparedEphemeralTidalNext {
-    pub tidal_track_id: i64,
-    pub synthetic_track: db::models::Track,
-    pub stream_display: StreamDisplayInfo,
-    pub generation: u64,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NextPrebufferKey {
     pub current_track_id: i64,
@@ -151,8 +125,6 @@ pub struct AppState {
     pub last_drop_preview: Option<DropPreviewRuntimeState>,
     pub active_listen_session: Option<playback::player::ActiveListenSession>,
     pub live_listen_session: Option<playback::player::LiveListenSession>,
-    pub external_playback_track: Option<db::models::Track>,
-    pub ephemeral_tidal_track: Option<db::models::Track>,
     /// What actually played, in order, for previous-track navigation. The
     /// queue cannot serve as history (shuffle/automix/mix rows); see
     /// `playback::history`. In-memory only: resets on restart.
@@ -216,7 +188,6 @@ pub struct AppState {
     /// Symmetric key used to encrypt service secrets (currently only the
     /// Last.fm scrobble session_key — see `services/crypto.rs`).
     pub master_key: services::crypto::MasterKey,
-    pub prepared_ephemeral_tidal_next: Option<PreparedEphemeralTidalNext>,
     /// Last.fm app shared secret, loaded once from `LASTFM_API_SECRET` env at
     /// boot. `None` disables every scrobble auth + scrobble call (endpoints
     /// return HTTP 501). Never serialized into responses, never logged.
@@ -807,8 +778,6 @@ async fn main() -> Result<()> {
         last_drop_preview: None,
         active_listen_session: None,
         live_listen_session: None,
-        external_playback_track: None,
-        ephemeral_tidal_track: None,
         play_history: playback::history::PlayHistory::default(),
         tidal_login_cancel: Arc::new(AtomicBool::new(false)),
         tidal_sync_running: Arc::new(AtomicBool::new(false)),
@@ -835,7 +804,6 @@ async fn main() -> Result<()> {
         refreshed_seeds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         embedding_cache: Arc::new(std::sync::Mutex::new(None)),
         master_key,
-        prepared_ephemeral_tidal_next: None,
         lastfm_api_secret,
         server_token,
         audio_active: Arc::new(AtomicBool::new(false)),

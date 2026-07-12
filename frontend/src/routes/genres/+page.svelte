@@ -624,7 +624,7 @@
 				actionError = 'No listening heat yet - nothing to save.';
 				return;
 			}
-			await api.replacePlaybackQueue(merged.map((track) => track.id));
+			await api.replacePlaybackQueue(merged.map((track) => ({ track_id: track.id })));
 			const name = `Hot rotation ${new Date().toISOString().slice(0, 10)}`;
 			await api.createPlaylistFromQueue(name, true);
 			showNotice(`Saved "${name}" (${merged.length} tracks). Queue now holds the same mix.`);

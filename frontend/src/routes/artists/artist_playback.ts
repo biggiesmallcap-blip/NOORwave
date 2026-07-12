@@ -1,4 +1,5 @@
 import type { TidalDiscographyTrack, Track } from '$lib/api/client';
+import { currentTrackMatchesTracks } from '$lib/utils/track';
 
 export function artistCurrentTrackMatchesArtist(
 	current: Track | null,
@@ -7,10 +8,8 @@ export function artistCurrentTrackMatchesArtist(
 	tidalTopTracks: readonly TidalDiscographyTrack[]
 ): boolean {
 	if (!current) return false;
-	if (localTracks.some((track) => track.id === current.id)) return true;
 	if (artistTidalId != null && current.artist_tidal_id === artistTidalId) return true;
-	if (current.tidal_id != null && tidalTopTracks.some((track) => track.tidal_id === current.tidal_id)) {
-		return true;
-	}
-	return false;
+	// List membership (local id or tidal id) is the shared contract also used
+	// by the album page; only the artist-id shortcut above is artist-specific.
+	return currentTrackMatchesTracks(current, localTracks, tidalTopTracks);
 }

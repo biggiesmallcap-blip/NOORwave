@@ -536,13 +536,10 @@
 			if (trackIds.length === 0) {
 				throw new Error('No synced tracks found for this album yet.');
 			}
-			const replaced = await api.replacePlaybackQueue(
-				trackIds,
-				undefined,
-				undefined,
-				get(shuffleMode)
-			);
-			await playTrackNow(replaced.queue[0]?.track.id ?? trackIds[0]);
+			await api.replacePlaybackQueue(trackIds.map((track_id) => ({ track_id })), {
+				shuffleMode: get(shuffleMode),
+				startPlayback: true,
+			});
 			batchMessage = `Playing album from track 1 of ${trackIds.length}.`;
 		} catch (error) {
 			batchError = `Failed to play album: ${error}`;
@@ -1687,9 +1684,13 @@
 
 		try {
 			if (trackIds.length > 0) {
-				await api.replacePlaybackQueue(trackIds, undefined, undefined, get(shuffleMode));
+				const replaced = await api.replacePlaybackQueue(
+					trackIds.map((track_id) => ({ track_id })),
+					{ shuffleMode: get(shuffleMode) }
+				);
+				const selected = replaced.queue.find((queueItem) => queueItem.track.id === item.track!.id);
+				if (selected) await api.playQueueItem(selected.id);
 			}
-			await playTrackNow(item.track.id);
 		} catch (error) {
 			console.error('Failed to play home panel track:', error);
 			await playTrackNow(item.track.id);

@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { Album, Track } from '$lib/api/client';
-	import { currentTrack, isPlaying, playTracksInContext, playAlbum, shuffleAlbum } from '$lib/stores/player';
+	import { currentTrack, isPlaying, playAlbum, shuffleAlbum } from '$lib/stores/player';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
@@ -93,10 +93,12 @@
 		}
 	}
 
-	// Clicking a track plays the album in context (this track and the ones after
-	// it), matching every other list surface, rather than playing one orphan track.
+	// Clicking a track plays the album from that track, matching the album page.
+	// playAlbum (not playTracksInContext over the popup's owned rows) so a
+	// partially-owned album queues its TIDAL-only remainder too instead of a
+	// short owned-only queue that automix pads with unrelated tracks.
 	function playFromHere(track: Track) {
-		void playTracksInContext(tracks.map((t) => t.id), track.id);
+		void playAlbum(album.id, track.id);
 	}
 
 	function trackMenu(track: Track) {
@@ -184,7 +186,9 @@
 					<div class="popup-meta-row">
 						{#if album.year}<span class="popup-chip">{album.year}</span>{/if}
 						{#if album.release_type}<span class="popup-chip">{album.release_type}</span>{/if}
-						{#if album.track_count}<span class="popup-chip">{album.track_count} {album.track_count === 1 ? 'track' : 'tracks'}</span>{/if}
+						<!-- track_count counts OWNED rows only, so label it as library
+						     coverage rather than claiming it's the album's track count. -->
+						{#if album.track_count}<span class="popup-chip">{album.track_count} in library</span>{/if}
 						<span class="popup-chip">{album.source}</span>
 					</div>
 					<div class="popup-actions">
