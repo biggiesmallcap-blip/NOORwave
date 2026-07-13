@@ -652,8 +652,9 @@
 	}
 
 	function handleQueueTrackKeydown(item: QueueItemType, event: KeyboardEvent) {
-		const isPending = item.is_pending === true;
-		if (!isPending && (event.key === 'Enter' || event.key === ' ')) {
+		if (event.key === 'Enter' || event.key === ' ') {
+			// Pending rows are playable too: play-item resolves (imports) the row
+			// on the way in before starting it.
 			event.preventDefault();
 			void handleQueueTrackPlay(item);
 			return;
@@ -1641,10 +1642,9 @@
 							<div
 								class="queue-row-hit"
 								role="button"
-								tabindex={isPending ? -1 : 0}
-								aria-label={isPending ? `Pending: ${item.track.title}` : `Play ${item.track.title}`}
-								aria-disabled={isPending}
-								onclick={isPending ? undefined : () => void handleQueueTrackPlay(item)}
+								tabindex={0}
+								aria-label={isPending ? `Play ${item.track.title} (resolving)` : `Play ${item.track.title}`}
+								onclick={() => void handleQueueTrackPlay(item)}
 								onkeydown={(event) => handleQueueTrackKeydown(item, event)}
 							></div>
 							<span class="queue-grip" aria-hidden="true" title="Drag to reorder">⋮⋮</span>
@@ -1956,10 +1956,8 @@
 							<button
 								class="queue-row-hit"
 								type="button"
-								aria-label={isPending ? `Pending: ${item.track.title}` : `Play ${item.track.title}`}
-								aria-disabled={isPending}
-								disabled={isPending}
-								onclick={isPending ? undefined : () => void handleQueueTrackPlay(item)}
+								aria-label={isPending ? `Play ${item.track.title} (resolving)` : `Play ${item.track.title}`}
+								onclick={() => void handleQueueTrackPlay(item)}
 								onkeydown={(event) => handleQueueTrackKeydown(item, event)}
 							></button>
 							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
@@ -2840,10 +2838,6 @@
 		background: transparent;
 		border-radius: inherit;
 		cursor: pointer;
-	}
-
-	.queue-row-hit[aria-disabled='true'] {
-		cursor: default;
 	}
 
 	.queue-row-hit:focus-visible {

@@ -1120,6 +1120,11 @@ export function setTrackFavoriteStatus(trackId: number, favorite: boolean, track
 
 // Cheap action: stays optimistic — no `assertOnline` gate.
 export async function toggleTrackFavorite(trackId: number, currentIsFavorite?: boolean) {
+	// A non-positive id means an unresolved track (the sub-second optimistic
+	// window before a clicked TIDAL track's server snapshot hydrates into a real
+	// library row). There is nothing to favorite yet, so no-op instead of hitting
+	// the API with an invalid id; the heart works once the row settles.
+	if (trackId <= 0) return;
 	const current = get(currentTrack);
 	const queued = get(playbackQueue).find((item) => item.track.id === trackId)?.track ?? null;
 	const playerTrack = current?.id === trackId ? current : queued;
@@ -1774,7 +1779,11 @@ function setOptimisticTidalTrack(track: TidalPlayable) {
 	rememberTidalPlayable(track);
 	resetOptimisticPlaybackProgress();
 	setCurrentTrack({
-		id: localTidalTrackId(track) ?? -track.tidal_id,
+		// Optimistic placeholder shown until the server snapshot hydrates. A
+		// library-known track uses its real id; an unresolved one uses 0 (the
+		// same "no library row yet" sentinel pending rows serialize with) rather
+		// than a synthetic negative id - the ephemeral negative-id scheme is gone.
+		id: localTidalTrackId(track) ?? 0,
 		title: track.title,
 		artist_id: -1,
 		artist_name: track.artist_name,

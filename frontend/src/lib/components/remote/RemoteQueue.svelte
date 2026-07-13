@@ -55,7 +55,9 @@
 	});
 
 	function canPlay(item: QueueItem): boolean {
-		return item.is_pending !== true && (item.track.id > 0 || queueItemToTidalPlayable(item) != null);
+		// Pending rows resolve (import) on click through the play-item route, so
+		// they play too; the id/tidal check only gates already-resolved rows.
+		return item.is_pending === true || item.track.id > 0 || queueItemToTidalPlayable(item) != null;
 	}
 
 	function isCurrent(item: QueueItem): boolean {

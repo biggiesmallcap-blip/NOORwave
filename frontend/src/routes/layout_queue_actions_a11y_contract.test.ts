@@ -11,7 +11,9 @@ describe('queue row accessibility contracts', () => {
 	test('the whole row is one labelled play target, with a single labelled overflow action', () => {
 		// Play is a full-bleed hit button (sidebar + now-playing blocks).
 		expect(source.match(/class="queue-row-hit"/g)?.length).toBe(2);
-		expect(source).toContain('aria-label={isPending ? `Pending: ${item.track.title}` : `Play ${item.track.title}`}');
+		expect(source).toContain(
+			'aria-label={isPending ? `Play ${item.track.title} (resolving)` : `Play ${item.track.title}`}'
+		);
 		// Actions collapse to one always-present, labelled overflow button.
 		expect(source.match(/class="queue-overflow"/g)?.length).toBe(2);
 		expect(source).toContain("aria-label=\"More actions\"");
@@ -21,8 +23,11 @@ describe('queue row accessibility contracts', () => {
 		expect(source).not.toContain('inert={!actionsAccessible}');
 	});
 
-	test('pending rows disable play; duration is no longer hidden on hover', () => {
-		expect(source).toContain('disabled={isPending}');
+	test('pending rows are playable (play-item resolves them); duration is not hidden on hover', () => {
+		// Pending rows used to be play-disabled; the play-item route now resolves
+		// (imports) them on click, so the play target is never disabled.
+		expect(source).not.toContain('disabled={isPending}');
+		expect(source).not.toContain('onclick={isPending ? undefined');
 		// Duration stays visible at all times now (no opacity dance).
 		expect(normalizedSource).not.toContain('.queue-row:hover .queue-time {');
 		expect(normalizedSource).not.toContain('.queue-actions {');
