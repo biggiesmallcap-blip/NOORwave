@@ -45,6 +45,7 @@
 		addTrackToQueue,
 		playTrackNext,
 		shuffleMode,
+		playAlbum as playAlbumNow,
 		playArtist as playArtistNow,
 		shuffleArtist as shuffleArtistNow
 	} from '$lib/stores/player';
@@ -532,15 +533,17 @@
 		batchMessage = null;
 		try {
 			const data = await cachedApi.getAlbumTracks(albumId);
-			const trackIds = data.tracks.map((track) => track.id);
-			if (trackIds.length === 0) {
+			const total = data.tracks.length + (data.tidal_tracks?.length ?? 0);
+			if (total === 0) {
 				throw new Error('No synced tracks found for this album yet.');
 			}
-			await api.replacePlaybackQueue(trackIds.map((track_id) => ({ track_id })), {
-				shuffleMode: get(shuffleMode),
-				startPlayback: true,
-			});
-			batchMessage = `Playing album from track 1 of ${trackIds.length}.`;
+			// Route through the store so a partially-owned album queues the WHOLE
+			// album (owned + TIDAL-only rows) in track order, not just the synced
+			// subset - queueing only the owned rows left a short queue that automix
+			// padded with unrelated tracks. Pass the data we already fetched so the
+			// store skips a second (live-TIDAL) round trip.
+			await playAlbumNow(albumId, undefined, data);
+			batchMessage = `Playing album (${total} track${total === 1 ? '' : 's'}).`;
 		} catch (error) {
 			batchError = `Failed to play album: ${error}`;
 		} finally {

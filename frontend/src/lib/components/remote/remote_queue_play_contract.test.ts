@@ -8,7 +8,10 @@ describe('remote queue playback contract', () => {
 	test('remote queue can play TIDAL queue rows as well as local rows', () => {
 		expect(source).toContain('playQueueItemNow,');
 		expect(source).toContain("import { queueItemToTidalPlayable } from '$lib/utils/track';");
-		expect(source).toContain('item.track.id > 0 || queueItemToTidalPlayable(item) != null');
+		// Pending rows play too (play-item resolves them on the way in).
+		expect(source).toContain(
+			'item.is_pending === true || item.track.id > 0 || queueItemToTidalPlayable(item) != null'
+		);
 		expect(source).toContain('await playQueueItemNow(item.id);');
 		expect(source).not.toContain('item.id < 0');
 		expect(source).toContain('items: buildTidalTrackMenu(tidal, { inQueue: true, remoteRoutes: true })');

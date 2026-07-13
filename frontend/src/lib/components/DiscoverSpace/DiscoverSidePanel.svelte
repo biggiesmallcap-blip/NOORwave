@@ -92,7 +92,11 @@
 				return;
 			}
 			if (playable.kind === 'library') {
-				await api.playTrack(playable.track_id);
+				// Route through the store (optimistic now-playing, intent-seq race
+				// guard, error toast + retry, snapshot hydration) instead of a raw
+				// api.playTrack that leaves the UI to catch up on its own.
+				const { playTrackNow } = await import('$lib/stores/player');
+				await playTrackNow(playable.track_id);
 				return;
 			}
 			const tidal = resolvedTidalTrack(playable);

@@ -52,6 +52,8 @@ describe('shell player bar extraction', () => {
 
 		expect(layout).toContain('class="queue-row"');
 		expect(layout).toContain('oncontextmenu={(event) => openQueueRowMenu(item, event)}');
-		expect(layout).toContain('onclick={isPending ? undefined : () => void handleQueueTrackPlay(item)}');
+		// Every queue row (including pending) plays via play-item, which resolves
+		// pending rows on the way in.
+		expect(layout).toContain('onclick={() => void handleQueueTrackPlay(item)}');
 	});
 });
