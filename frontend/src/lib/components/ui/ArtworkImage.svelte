@@ -18,6 +18,10 @@
 		// When true, a missing-artwork fallback gets a stable per-name colour
 		// instead of a flat grey box, so empty tiles read as intentional.
 		tint?: boolean;
+		// When true, the cover starts transparent and fades in on its own load
+		// event, so grids/murals resolve smoothly instead of hard-popping in as
+		// each remote image decodes.
+		fadeIn?: boolean;
 	};
 
 	let {
@@ -31,6 +35,7 @@
 		decoding = 'async',
 		fetchPriority = 'auto',
 		tint = false,
+		fadeIn = false,
 	}: Props = $props();
 
 	// Deterministic hue from the label so the same album/artist always gets the
@@ -44,6 +49,7 @@
 	const tintColor = $derived(tint ? stableTone(alt || fallbackText) : null);
 
 	let failedAttempts = $state(0);
+	let loaded = $state(false);
 	let lastSrcKey = $state('');
 	let lastSize = $state<TidalArtworkSize>();
 	const sources = $derived(normalizeSources(src));
@@ -63,11 +69,22 @@
 			: null
 	);
 
+	let imgEl = $state<HTMLImageElement>();
+
 	$effect(() => {
 		if (srcKey === lastSrcKey && size === lastSize) return;
 		lastSrcKey = srcKey;
 		lastSize = size;
 		failedAttempts = 0;
+		loaded = false;
+	});
+
+	// Safety net for the fade-in: a cache-served image can already be `complete`
+	// before `onload` wires up, which would otherwise leave the tile stuck at
+	// opacity 0. Re-checks whenever the resolved source changes.
+	$effect(() => {
+		void resolvedSrc;
+		if (imgEl && imgEl.complete && imgEl.naturalWidth > 0) loaded = true;
 	});
 
 	function normalizeSources(value: string | string[] | null | undefined): string[] {
@@ -80,12 +97,16 @@
 
 {#if resolvedSrc}
 	<img
-		class={className}
+		bind:this={imgEl}
+		class={`${className}${fadeIn ? ' art-fade-in' : ''}${fadeIn && loaded ? ' art-loaded' : ''}`}
 		src={resolvedSrc}
 		alt={decorative ? '' : alt}
 		loading={loading}
 		decoding={decoding}
 		fetchpriority={fetchPriority}
+		onload={() => {
+			loaded = true;
+		}}
 		onerror={() => {
 			failedAttempts += 1;
 		}}
@@ -104,6 +125,25 @@
 {/if}
 
 <style>
+	/* Opt-in fade (fadeIn prop): cover starts transparent and eases to full
+	   opacity on its own load event, so grids/murals resolve as one smooth
+	   reveal instead of tiles hard-popping in. Reduced-motion users skip it. */
+	.art-fade-in {
+		opacity: 0;
+		transition: opacity 260ms ease-out;
+	}
+
+	.art-fade-in.art-loaded {
+		opacity: 1;
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.art-fade-in {
+			opacity: 1;
+			transition: none;
+		}
+	}
+
 	.top-art {
 		width: 168px;
 		height: 168px;

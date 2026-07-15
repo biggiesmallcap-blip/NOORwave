@@ -1999,6 +1999,16 @@ export interface HomeRecommendationsResponse {
 	shelves: ProviderRecommendationShelf[];
 }
 
+/**
+ * Ranked, cross-artist, library-resolved picks for the Library home
+ * "Suggested tracks / albums" murals. Server orders them; the client renders
+ * in that order. `tracks` may come back shorter than requested (thin library /
+ * cold learning model), so callers top up from a local fallback.
+ */
+export interface HomeSuggestionsResponse {
+	tracks: Track[];
+}
+
 export interface LastfmAuthStartResponse {
 	status: 'awaiting' | 'error';
 	auth_url?: string;
@@ -3520,6 +3530,17 @@ export const api = {
 
 	getHomeRecommendations() {
 		return fetchApi<HomeRecommendationsResponse>('/api/home/recommendations');
+	},
+
+	// Cross-artist, library-resolved suggestions for the Library home murals.
+	// Seeds are the user's most recent listens; the server blends embedding
+	// neighbours + Last.fm similar and ranks with a per-artist cap. Empty seeds
+	// return an empty list (the client then keeps its local same-artist fill).
+	getHomeSuggestions(seedTrackIds: number[], limit?: number) {
+		return fetchApi<HomeSuggestionsResponse>('/api/home/suggestions', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ seed_track_ids: seedTrackIds, limit }),
+		});
 	},
 
 	// ─── TIDAL: Your Mixes ────────────────────────────────────────────────

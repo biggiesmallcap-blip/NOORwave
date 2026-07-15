@@ -1096,6 +1096,10 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/home/recommendations",
             get(home_routes::get_home_recommendations),
         )
+        .route(
+            "/api/home/suggestions",
+            post(home_routes::get_home_suggestions),
+        )
         .route("/api/home/articles", get(home_routes::get_home_articles))
         .route("/api/home/news", get(home_routes::get_home_news))
         // TIDAL "Your Mixes" - drives the home Your Mixes shelf above Trending.

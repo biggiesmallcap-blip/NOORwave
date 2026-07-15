@@ -22,6 +22,7 @@ import {
 	type HomeArticlesResponse,
 	type HomeNewsResponse,
 	type HomeRecommendationsResponse,
+	type HomeSuggestionsResponse,
 	type LastfmStatus,
 	type ListenBrainzStatus,
 	type MusicBrainzStatus,
@@ -134,6 +135,7 @@ export const cacheKeys = {
 	homeArticles: () => ['api', 'getHomeArticles'] as const,
 	homeNews: () => ['api', 'getHomeNews'] as const,
 	homeRecommendations: () => ['api', 'getHomeRecommendations'] as const,
+	homeSuggestions: (seedKey: string) => ['api', 'getHomeSuggestions', { seedKey }] as const,
 	tidalMixes: () => ['api', 'getTidalMixes'] as const,
 	tidalRadioStations: () => ['api', 'getTidalRadioStations'] as const,
 	tidalHomeModules: () => ['api', 'getTidalHomeModules'] as const,
@@ -420,6 +422,17 @@ export const cachedApi = {
 			cacheKeys.homeRecommendations(),
 			() => api.getHomeRecommendations(),
 			staticOptions,
+		);
+	},
+	// In-memory only (no persist): suggestion payloads vary per seed set and
+	// carry full Track rows, so persisting every rotation would bloat the
+	// localStorage query cache (the boot-crash quota risk).
+	getHomeSuggestions(seedTrackIds: number[], limit?: number) {
+		const seedKey = [...seedTrackIds].sort((a, b) => a - b).join('-');
+		return fetchCached<HomeSuggestionsResponse>(
+			cacheKeys.homeSuggestions(seedKey),
+			() => api.getHomeSuggestions(seedTrackIds, limit),
+			{ staleMs: 30 * MINUTE, returnStale: true },
 		);
 	},
 	getTidalMixes() {
