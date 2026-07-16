@@ -45,9 +45,10 @@ const STALL_WATCHDOG_TICK: std::time::Duration = std::time::Duration::from_secs(
 
 /// How long the audibly-active engine may make zero position progress -- while
 /// playing (not paused) and not finished -- before the watchdog force-advances
-/// the queue. Sized comfortably past one DASH segment timeout+retry cycle
-/// (`DASH_SEGMENT_TIMEOUT_SECS` = 12s) so a transiently-slow segment that still
-/// arrives is not pre-empted, but a doomed TIDAL CDN stall recovers
+/// the queue. Sized comfortably past one healthy DASH segment timeout+retry
+/// cycle (`cdn_health::HEALTHY_SEGMENT_TIMEOUT` = 12s) so a transiently-slow
+/// segment that still arrives is not pre-empted, but a doomed TIDAL CDN stall
+/// recovers
 /// automatically instead of freezing playback until the user manually skips.
 const ACTIVE_STALL_RECOVERY_SECS: u64 = 15;
 

@@ -23,10 +23,10 @@ pub const INTER_TRACK_DELAY: std::time::Duration = std::time::Duration::from_mil
 pub const BATCH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
 /// Hard ceiling on the per-track preview download + decode chain. If TIDAL
 /// stalls a segment indefinitely (observed for some catalog rows), the actor
-/// gets stuck. Segment fetches use a shorter guard so one slow media segment
+/// gets stuck. Individual segment fetches are bounded by the per-host timeout
+/// in `cdn_health` (short for a degraded / dead edge) so one slow media segment
 /// does not consume the full per-track budget.
 pub const PREFETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-const SEGMENT_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 const MIN_PARTIAL_BYTES: usize = 32 * 1024;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DASH_MEDIA_SEGMENTS: usize = 12;
@@ -298,23 +298,51 @@ pub fn pick_next_unanalyzed(
 use crate::AppEvent;
 use crate::SharedState;
 use crate::db::queries;
+use crate::playback::decode::cdn_health;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant as StdInstant};
 
+/// Fetch one preview segment, sharing the runtime's dead-edge failover: a URL on
+/// the black-holed `sp-ad-cf` edge is first retried on the healthy `sp-pr-cf`
+/// sibling, and degraded hosts get a short timeout instead of hanging. Keeping
+/// the prescanner on the same breaker as playback stops it from independently
+/// piling hung requests onto a dead host.
 async fn fetch_prescan_segment(
     http_client: &reqwest::Client,
     seg_url: &str,
 ) -> std::result::Result<Vec<u8>, String> {
-    let resp = tokio::time::timeout(SEGMENT_FETCH_TIMEOUT, http_client.get(seg_url).send())
+    let candidates = cdn_health::build_candidates(seg_url);
+    let mut last_err = "no fetch candidates".to_string();
+    for candidate in &candidates {
+        match fetch_prescan_segment_once(http_client, &candidate.url, candidate.timeout).await {
+            Ok(bytes) => {
+                cdn_health::record_success(candidate);
+                return Ok(bytes);
+            }
+            Err(err) => {
+                cdn_health::record_failure(candidate);
+                last_err = err;
+            }
+        }
+    }
+    Err(last_err)
+}
+
+async fn fetch_prescan_segment_once(
+    http_client: &reqwest::Client,
+    seg_url: &str,
+    timeout: Duration,
+) -> std::result::Result<Vec<u8>, String> {
+    let resp = tokio::time::timeout(timeout, http_client.get(seg_url).send())
         .await
         .map_err(|_| "timeout".to_string())?
         .map_err(|error| reqwest_error_summary(&error))?
         .error_for_status()
         .map_err(|error| reqwest_error_summary(&error))?;
 
-    tokio::time::timeout(SEGMENT_FETCH_TIMEOUT, resp.bytes())
+    tokio::time::timeout(timeout, resp.bytes())
         .await
         .map_err(|_| "timeout".to_string())?
         .map(|bytes| bytes.to_vec())

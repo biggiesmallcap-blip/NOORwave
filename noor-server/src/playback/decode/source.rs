@@ -1,5 +1,6 @@
 //! Decode source helpers.
 
+use super::cdn_health;
 use anyhow::Context;
 use futures::StreamExt as _;
 use std::io::{Read, Seek, SeekFrom};
@@ -12,7 +13,6 @@ pub(crate) const DASH_INITIAL_MEDIA_SEGMENTS: usize = 2;
 /// Four-wide lookahead kept 192 kHz shared output fed in live testing while
 /// bounding extra CDN pressure and whole-segment memory.
 pub(crate) const DASH_BACKGROUND_FETCH_WINDOW: usize = 4;
-pub(crate) const DASH_SEGMENT_TIMEOUT_SECS: u64 = 12;
 const STREAM_PIPE_RECV_POLL_MS: u64 = 100;
 /// One-shot warn threshold for the pipe's in-memory backing store. The pipe
 /// keeps the whole compressed stream (it never trims consumed bytes, which is
@@ -195,7 +195,7 @@ impl symphonia::core::io::MediaSource for StreamPipe {
     }
 }
 
-pub(crate) const DASH_SEGMENT_MAX_ATTEMPTS: u32 = 2;
+/// Backoff between retry attempts of a single fetch candidate.
 pub(crate) const DASH_SEGMENT_RETRY_BACKOFF_MS: u64 = 250;
 
 pub(crate) async fn append_stream_bytes(
@@ -203,73 +203,104 @@ pub(crate) async fn append_stream_bytes(
     url: &str,
     segment_index: usize,
 ) -> anyhow::Result<Vec<u8>> {
-    let segment_label = dash_segment_debug_label(url);
-    // We used to fast-bail on the `sp-ad-cf.audio.tidal.com` host here, assuming
-    // it was an unreachable ad / low-tier CDN. TIDAL now routes the first media
-    // segment (segment 0) of ordinary paid LOSSLESS/HI_RES streams through that
-    // same CloudFront edge; it is reachable and serves the real signed audio
-    // exactly like `sp-pr-cf`. Skipping segment 0 aborted the whole prebuffer
-    // and broke playback of every TIDAL track. Fetch it like any other segment;
-    // a host that really is unreachable still fails via the timeout below.
-    // A single flaky TIDAL CDN segment (timeout or transient fetch/chunk error)
-    // used to abort the whole DJ profile rebuild / prebuffer. Retry once with a
-    // short backoff before giving up so one hiccup doesn't kill the transition.
+    // TIDAL sometimes points a track's segments at the `sp-ad-cf` ad-tier edge,
+    // which is a black hole on some networks: every request hangs the full
+    // timeout, then fails - stalling playback and letting background consumers
+    // (DJ rebuild, prescanner) pile hung requests onto the same dead host. The
+    // per-host breaker in `cdn_health` turns the manifest URL into an ordered
+    // candidate list: for an `sp-ad-cf` URL it tries the healthy `sp-pr-cf`
+    // sibling edge first (same signed path) and the dead edge last on a short
+    // leash; degraded hosts get a short timeout; healthy hosts keep the full
+    // timeout plus a single retry so one transient flap doesn't kill a segment.
+    let candidates = cdn_health::build_candidates(url);
     let mut last_err: Option<anyhow::Error> = None;
-    for attempt in 1..=DASH_SEGMENT_MAX_ATTEMPTS {
-        let attempt_result: anyhow::Result<Vec<u8>> = tokio::time::timeout(
-            Duration::from_secs(DASH_SEGMENT_TIMEOUT_SECS),
-            async {
-                let response = http
-                    .get(url)
-                    .send()
-                    .await
-                    .with_context(|| {
-                        format!("DASH segment {segment_index} request failed ({segment_label})")
-                    })?
-                    .error_for_status()
-                    .with_context(|| {
-                        format!("DASH segment {segment_index} returned error status ({segment_label})")
-                    })?;
-                let content_length = response.content_length().unwrap_or(0) as usize;
-                let mut stream = response.bytes_stream();
-                let mut out = Vec::with_capacity(content_length);
-                while let Some(chunk) = stream.next().await {
-                    let bytes = chunk.with_context(|| {
-                        format!("DASH segment {segment_index} chunk error ({segment_label})")
-                    })?;
-                    out.extend_from_slice(&bytes);
-                }
-                anyhow::Ok(out)
-            },
-        )
-        .await
-        .map_err(|elapsed| {
-            anyhow::Error::new(elapsed).context(format!(
-                "DASH segment {segment_index} timed out after {DASH_SEGMENT_TIMEOUT_SECS}s ({segment_label})"
-            ))
-        })
-        .and_then(|inner| inner);
 
-        match attempt_result {
-            Ok(bytes) => return Ok(bytes),
-            Err(err) => {
-                if attempt < DASH_SEGMENT_MAX_ATTEMPTS {
+    for candidate in &candidates {
+        let segment_label = dash_segment_debug_label(&candidate.url);
+        let timeout_secs = candidate.timeout.as_secs();
+        for attempt in 1..=candidate.max_attempts {
+            match fetch_segment_once(
+                http,
+                &candidate.url,
+                segment_index,
+                candidate.timeout,
+                &segment_label,
+            )
+            .await
+            {
+                Ok(bytes) => {
+                    cdn_health::record_success(candidate);
+                    return Ok(bytes);
+                }
+                Err(err) => {
+                    cdn_health::record_failure(candidate);
+                    let will_retry = attempt < candidate.max_attempts;
                     tracing::warn!(
                         segment_index,
                         segment_label = %segment_label,
+                        host = %candidate.host,
                         attempt,
-                        max_attempts = DASH_SEGMENT_MAX_ATTEMPTS,
-                        backoff_ms = DASH_SEGMENT_RETRY_BACKOFF_MS,
+                        max_attempts = candidate.max_attempts,
+                        timeout_secs,
+                        dead_edge_swap = candidate.is_dead_edge_swap,
+                        will_retry,
                         error = %format!("{err:#}"),
-                        "DASH segment fetch failed, retrying"
+                        "DASH segment fetch failed"
                     );
-                    tokio::time::sleep(Duration::from_millis(DASH_SEGMENT_RETRY_BACKOFF_MS)).await;
+                    last_err = Some(err);
+                    if will_retry {
+                        tokio::time::sleep(Duration::from_millis(DASH_SEGMENT_RETRY_BACKOFF_MS))
+                            .await;
+                    }
                 }
-                last_err = Some(err);
             }
         }
     }
-    Err(last_err.expect("retry loop must produce a final error"))
+
+    Err(last_err
+        .unwrap_or_else(|| anyhow::anyhow!("DASH segment {segment_index} had no fetch candidates")))
+}
+
+/// One timed fetch of a single segment URL: GET, check status, drain the body.
+/// Wrapped in `tokio::time::timeout` so a black-holed host can't hang forever.
+async fn fetch_segment_once(
+    http: &reqwest::Client,
+    url: &str,
+    segment_index: usize,
+    timeout: Duration,
+    segment_label: &str,
+) -> anyhow::Result<Vec<u8>> {
+    tokio::time::timeout(timeout, async {
+        let response = http
+            .get(url)
+            .send()
+            .await
+            .with_context(|| {
+                format!("DASH segment {segment_index} request failed ({segment_label})")
+            })?
+            .error_for_status()
+            .with_context(|| {
+                format!("DASH segment {segment_index} returned error status ({segment_label})")
+            })?;
+        let content_length = response.content_length().unwrap_or(0) as usize;
+        let mut stream = response.bytes_stream();
+        let mut out = Vec::with_capacity(content_length);
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk.with_context(|| {
+                format!("DASH segment {segment_index} chunk error ({segment_label})")
+            })?;
+            out.extend_from_slice(&bytes);
+        }
+        anyhow::Ok(out)
+    })
+    .await
+    .map_err(|elapsed| {
+        anyhow::Error::new(elapsed).context(format!(
+            "DASH segment {segment_index} timed out after {}s ({segment_label})",
+            timeout.as_secs()
+        ))
+    })
+    .and_then(|inner| inner)
 }
 
 pub(crate) fn dash_initial_media_count(total_segments: usize) -> usize {
