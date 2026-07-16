@@ -242,7 +242,7 @@ Known constraints:
 Tags drive releases. Before tagging `vX.Y.Z`:
 
 1. Bump only `noor-server/Cargo.toml`, `noor-app/Cargo.toml`, `noor-app/tauri.conf.json`, and the matching `noor-app` / `noor-server` entries in `Cargo.lock`.
-2. Do not run bare `cargo update`.
+2. Do not run bare `cargo update`, and never run `cargo generate-lockfile`. Both re-resolve transitive deps and can pull a pinned crate's dependency into an incompatible range (v0.9.39: `generate-lockfile` upgraded `tauri-runtime` to 2.11.3 under the pinned `tauri =2.10.3`, breaking CI with a `Send`/`Send+Sync` mismatch). Sync the lock with `cargo update -p noor-server --offline && cargo update -p noor-app --offline`, or hand-edit the two version fields. Confirm `git diff Cargo.lock` is exactly those two lines before committing.
 3. Keep both Windows artifacts: portable zip and NSIS setup exe.
 4. Keep `installMode: "currentUser"` in the NSIS config.
 5. Keep the Windows SmartScreen and Smart App Control note in release copy.
@@ -250,6 +250,8 @@ Tags drive releases. Before tagging `vX.Y.Z`:
 7. After CI publishes, prepend the human "What's new" section with `gh release edit vX.Y.Z --notes-file <combined.md>`.
 
 Installed Windows release-ready means a signed local `cargo tauri build --bundles nsis` has been tested, the `.sig` exists, and mutable data still lives under `%LOCALAPPDATA%\NOORwave`.
+
+If CI fails after the tag is already pushed: fix on `master`, then force-move the tag to the fix commit (`git tag -f vX.Y.Z <sha> && git push origin -f vX.Y.Z`) so the release rebuilds from the corrected commit. Only safe while the failed build produced no shipped artifacts.
 
 ## Contributing
 
