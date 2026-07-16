@@ -181,8 +181,16 @@
 		<div class="cell-meta">
 			<p class="title">{track.title}</p>
 			{#if showArtist && track.artist_name}
-				<!-- svelte-ignore a11y_no_static_element_interactions -->
-				<span class="sub" oncontextmenu={openArtistContextMenu}>{track.artist_name}</span>
+				{#if track.artist_id != null && track.artist_id > 0}
+					<a
+						class="sub link"
+						href="/artists/{track.artist_id}"
+						onclick={(e) => e.stopPropagation()}
+						oncontextmenu={openArtistContextMenu}
+					>{track.artist_name}</a>
+				{:else}
+					<span class="sub">{track.artist_name}</span>
+				{/if}
 			{/if}
 		</div>
 		{#if showPlayCount}
@@ -361,13 +369,29 @@
 			<p class="title">{track.title}</p>
 			<p class="sub">
 				{#if showArtist && track.artist_name}
-					<!-- svelte-ignore a11y_no_static_element_interactions -->
-					<span class="sub-link" oncontextmenu={openArtistContextMenu}>{track.artist_name}</span>
+					{#if track.artist_id != null && track.artist_id > 0}
+						<a
+							class="sub-link"
+							href="/artists/{track.artist_id}"
+							onclick={(e) => e.stopPropagation()}
+							oncontextmenu={openArtistContextMenu}
+						>{track.artist_name}</a>
+					{:else}
+						<span class="sub-link-static">{track.artist_name}</span>
+					{/if}
 				{/if}
 				{#if showArtist && track.artist_name && showAlbum && track.album_title} - {/if}
 				{#if showAlbum && track.album_title}
-					<!-- svelte-ignore a11y_no_static_element_interactions -->
-					<span class="sub-link" oncontextmenu={openAlbumContextMenu}>{track.album_title}</span>
+					{#if track.album_id != null && track.album_id > 0}
+						<a
+							class="sub-link"
+							href="/albums/{track.album_id}"
+							onclick={(e) => e.stopPropagation()}
+							oncontextmenu={openAlbumContextMenu}
+						>{track.album_title}</a>
+					{:else}
+						<span class="sub-link-static">{track.album_title}</span>
+					{/if}
 				{/if}
 			</p>
 		</div>
@@ -425,8 +449,16 @@
 		<div class="cell-meta">
 			<p class="title">{track.title}</p>
 			{#if showArtist && track.artist_name}
-				<!-- svelte-ignore a11y_no_static_element_interactions -->
-				<span class="sub" oncontextmenu={openArtistContextMenu}>{track.artist_name}</span>
+				{#if track.artist_id != null && track.artist_id > 0}
+					<a
+						class="sub link"
+						href="/artists/{track.artist_id}"
+						onclick={(e) => e.stopPropagation()}
+						oncontextmenu={openArtistContextMenu}
+					>{track.artist_name}</a>
+				{:else}
+					<span class="sub">{track.artist_name}</span>
+				{/if}
 			{/if}
 		</div>
 		<span class="cell-duration">{formatTrackDuration(track.duration_ms)}</span>

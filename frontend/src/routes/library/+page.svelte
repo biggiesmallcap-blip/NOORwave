@@ -114,6 +114,45 @@
 		}), album.title);
 	}
 
+	// Track-row artist/album cells are links; right-clicking one opens the
+	// shared artist/album menu (not the track menu the row otherwise shows).
+	function handleRowArtistContextMenu(e: MouseEvent, track: Track) {
+		e.preventDefault();
+		e.stopPropagation();
+		if (track.artist_id == null) return;
+		openContextMenu(e, buildArtistMenu({
+			id: track.artist_id,
+			tidal_id: track.artist_tidal_id ?? null,
+			name: track.artist_name ?? '',
+			in_library: true,
+		}, {
+			isLocal: true,
+			addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
+				const { tracks: t } = await cachedApi.getArtistTracks(track.artist_id!);
+				return t.map(tr => tr.id);
+			}),
+		}), track.artist_name ?? '');
+	}
+
+	function handleRowAlbumContextMenu(e: MouseEvent, track: Track) {
+		e.preventDefault();
+		e.stopPropagation();
+		if (track.album_id == null) return;
+		openContextMenu(e, buildAlbumMenu({
+			id: track.album_id,
+			title: track.album_title ?? '',
+			artist_id: track.artist_id ?? null,
+			artist_name: track.artist_name ?? null,
+			in_library: true,
+		}, {
+			isLocal: true,
+			addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
+				const { tracks: t } = await cachedApi.getAlbumTracks(track.album_id!);
+				return t.map(tr => tr.id);
+			}),
+		}), track.album_title ?? '');
+	}
+
 	const PAGE_SIZE = 100;
 	// Depth of the random sample Shuffle pulls from a filtered view. Matches the
 	// whole-library Shuffle queue depth; automix extends past it.
@@ -2809,8 +2848,30 @@
 							<span class="bpm-inline">{Math.round(track.bpm)}</span>
 						{/if}
 					</span>
-					<span class="col-artist">{track.artist_name ?? 'Unknown'}</span>
-					<span class="col-album">{track.album_title ?? ''}</span>
+					<span class="col-artist">
+						{#if track.artist_name && track.artist_id != null}
+							<a
+								href={`/artists/${track.artist_id}`}
+								class="subtitle-link"
+								onclick={(e) => e.stopPropagation()}
+								oncontextmenu={(e) => handleRowArtistContextMenu(e, track)}
+							>{track.artist_name}</a>
+						{:else}
+							{track.artist_name ?? 'Unknown'}
+						{/if}
+					</span>
+					<span class="col-album">
+						{#if track.album_title && track.album_id != null}
+							<a
+								href={`/albums/${track.album_id}`}
+								class="subtitle-link"
+								onclick={(e) => e.stopPropagation()}
+								oncontextmenu={(e) => handleRowAlbumContextMenu(e, track)}
+							>{track.album_title}</a>
+						{:else}
+							{track.album_title ?? ''}
+						{/if}
+					</span>
 					{#if showQualityColumn}
 						<span class="col-quality">
 							{#if track.best_quality}
@@ -4887,6 +4948,18 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+	}
+
+	.col-artist .subtitle-link,
+	.col-album .subtitle-link {
+		color: inherit;
+		text-decoration: none;
+	}
+
+	.col-artist .subtitle-link:hover,
+	.col-album .subtitle-link:hover {
+		color: var(--text-primary);
+		text-decoration: underline;
 	}
 
 	.col-quality {
