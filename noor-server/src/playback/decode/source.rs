@@ -202,16 +202,17 @@ pub(crate) async fn append_stream_bytes(
     http: &reqwest::Client,
     url: &str,
     segment_index: usize,
+    track_id: i64,
 ) -> anyhow::Result<Vec<u8>> {
     // TIDAL sometimes points a track's segments at the `sp-ad-cf` ad-tier edge,
-    // which is a black hole on some networks: every request hangs the full
-    // timeout, then fails - stalling playback and letting background consumers
-    // (DJ rebuild, prescanner) pile hung requests onto the same dead host. The
-    // per-host breaker in `cdn_health` turns the manifest URL into an ordered
-    // candidate list: for an `sp-ad-cf` URL it tries the healthy `sp-pr-cf`
-    // sibling edge first (same signed path) and the dead edge last on a short
-    // leash; degraded hosts get a short timeout; healthy hosts keep the full
-    // timeout plus a single retry so one transient flap doesn't kill a segment.
+    // which is unreliable on some networks: it serves real audio for some
+    // tracks and black-holes others until the request times out, stalling
+    // playback and letting background consumers (DJ rebuild, prescanner) pile
+    // hung requests onto it. The per-host breaker in `cdn_health` picks the
+    // timeout and retry budget: a known-flaky or degraded host gets one shot on
+    // a short leash, a healthy host keeps the full timeout plus a single retry
+    // so one transient flap doesn't kill a segment. `track_id` is logged so a
+    // failing segment can be tied back to the track and quality that chose it.
     let candidates = cdn_health::build_candidates(url);
     let mut last_err: Option<anyhow::Error> = None;
 
@@ -236,13 +237,13 @@ pub(crate) async fn append_stream_bytes(
                     cdn_health::record_failure(candidate);
                     let will_retry = attempt < candidate.max_attempts;
                     tracing::warn!(
+                        track_id,
                         segment_index,
                         segment_label = %segment_label,
                         host = %candidate.host,
                         attempt,
                         max_attempts = candidate.max_attempts,
                         timeout_secs,
-                        dead_edge_swap = candidate.is_dead_edge_swap,
                         will_retry,
                         error = %format!("{err:#}"),
                         "DASH segment fetch failed"
