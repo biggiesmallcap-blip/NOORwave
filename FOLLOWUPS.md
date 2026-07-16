@@ -824,3 +824,29 @@ recording. Read extra["version"] in the TIDAL client and append it to the
 title (or thread it through decide_import) so marker detection stops
 depending on title formatting.
 Spawned by: sync rework (bookmark albums, hidden enrichment, auto-dedupe) 2026-07-10
+
+### playback UI: a "Loading" transport state distinct from "Paused"
+
+The now-playing status pill now refuses to claim "Playing" for a track the
+runtime has not confirmed audible, but it cannot yet distinguish "the user
+paused" from "the track you asked for is still buffering". On a hard play
+that hangs, the header shows the correct track and reads "Playing" until the
+CDN fast-fail trips (~4s), because is_playing is already audio-gated
+server-side and the raw transport intent is not exposed to the frontend.
+Deliberately deferred: resetting audio_active on hard play would fix it but
+costs a "Paused" flash on every successful play. The real fix is to surface
+the raw play intent (or an explicit buffering flag) in the playback snapshot
+so the frontend can render Loading vs Paused honestly.
+Spawned by: player desync + dead TIDAL CDN edge 2026-07-16
+
+### verify: does the sp-ad-cf -> sp-pr-cf host rewrite serve valid audio?
+
+cdn_health rewrites segment URLs off the black-holed sp-ad-cf edge onto the
+sp-pr-cf sibling, assuming the CloudFront signature validates across both
+host CNAMEs. Unverified against live TIDAL. The swap self-disables after 8
+failed probes with no success, so the downside is bounded (fast-fail instead
+of a cure), but confirm on the live server: grep the log for
+dead_edge_swap=true and check whether affected tracks actually play. If the
+signature turns out to be host-bound, pivot to re-resolving the manifest for
+a fresh non-ad-edge URL instead.
+Spawned by: player desync + dead TIDAL CDN edge 2026-07-16
