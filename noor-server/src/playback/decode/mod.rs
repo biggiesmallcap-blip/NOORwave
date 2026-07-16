@@ -443,7 +443,10 @@ pub(crate) fn decode_and_buffer_job(
                         &prebuffer_stop,
                         |url, segment_index| {
                             let http = config.http_client.clone();
-                            async move { append_stream_bytes(&http, &url, segment_index).await }
+                            let track_id = shared.track_id;
+                            async move {
+                                append_stream_bytes(&http, &url, segment_index, track_id).await
+                            }
                         },
                     ))
                     .context("DASH stream prebuffer failed")?;
@@ -543,9 +546,13 @@ pub(crate) fn decode_and_buffer_job(
                                         let http = fetch_http.clone();
                                         async move {
                                             let started = Instant::now();
-                                            let bytes =
-                                                append_stream_bytes(&http, &seg_url, segment_index)
-                                                    .await?;
+                                            let bytes = append_stream_bytes(
+                                                &http,
+                                                &seg_url,
+                                                segment_index,
+                                                download_track_id,
+                                            )
+                                            .await?;
                                             tracing::info!(
                                                 target: "noor.dash",
                                                 event = "dash_segment_fetched",

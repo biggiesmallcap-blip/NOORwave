@@ -839,14 +839,38 @@ the raw play intent (or an explicit buffering flag) in the playback snapshot
 so the frontend can render Loading vs Paused honestly.
 Spawned by: player desync + dead TIDAL CDN edge 2026-07-16
 
-### verify: does the sp-ad-cf -> sp-pr-cf host rewrite serve valid audio?
+### playback: get tracks off the sp-ad-cf edge (host rewrite is ruled out)
 
-cdn_health rewrites segment URLs off the black-holed sp-ad-cf edge onto the
-sp-pr-cf sibling, assuming the CloudFront signature validates across both
-host CNAMEs. Unverified against live TIDAL. The swap self-disables after 8
-failed probes with no success, so the downside is bounded (fast-fail instead
-of a cure), but confirm on the live server: grep the log for
-dead_edge_swap=true and check whether affected tracks actually play. If the
-signature turns out to be host-bound, pivot to re-resolving the manifest for
-a fresh non-ad-edge URL instead.
-Spawned by: player desync + dead TIDAL CDN edge 2026-07-16
+ANSWERED, negatively: the sp-ad-cf -> sp-pr-cf host rewrite does NOT work.
+Live v0.9.40 logs show every dead_edge_swap=true attempt returning an error
+status (403), not a timeout: CloudFront signatures are bound to the host they
+were issued for. The rewrite has been removed; the per-host breaker (short
+timeout on a flaky/degraded host) stays.
+
+Also corrected: sp-ad-cf is NOT a permanent black hole. It served track 38904's
+prebuffer fine immediately after a swap 403'd. It is intermittent, and the
+LOW/AAC tier routes there far more often than LOSSLESS (see faa90d2c).
+
+Remaining lead for tracks that still will not play: the only ways off a bad
+edge are re-resolving the manifest (does TIDAL hand out a different edge on a
+second playbackinfo call for the same track+quality? unmeasured) or asking for
+a different quality tier (proven to work for DJ analysis in faa90d2c, and now
+for the prescanner). Playback itself has no such fallback: if the LOSSLESS
+manifest points at sp-ad-cf and that fetch hangs, the track just fails. Before
+building either, use the new track_id on the DASH segment-failure warn to
+measure how often a failing segment's track/quality actually lands there --
+the previous fix was built on a guess and cost a release.
+Spawned by: player desync + dead TIDAL CDN edge 2026-07-16; corrected 2026-07-17
+
+### playback: the runtime loop has no command-latency instrumentation
+
+"Pause unresponsive" was investigated with no way to tell whether the
+single-threaded runtime loop was blocked (a queued Pause sits unprocessed while
+audio continues) or the frontend sent the wrong command. It turned out to be the
+frontend toggle latch, but only after ruling the loop out by inference (no
+stalls, no underruns, DJ engine idle) rather than measurement. Add a cheap
+timestamp on command enqueue vs dispatch in run_runtime_loop and warn past a
+threshold, so a blocked loop is provable instead of hypothesised. The loop does
+have genuine multi-second hazards (cpal/WASAPI stream builds, and the 8-28s DJ
+mixer render when a prepared program does not match the pair).
+Spawned by: transport latch + CDN correction 2026-07-17

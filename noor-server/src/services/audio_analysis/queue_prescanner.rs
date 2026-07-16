@@ -220,17 +220,37 @@ fn next_prescan_quality_after_error(
     PRESCAN_TIDAL_QUALITIES.get(attempt_index + 1).copied()
 }
 
+/// Why a prescan stream could not be obtained at any quality tier.
+enum PrescanStreamFailure {
+    /// TIDAL refused to resolve the stream.
+    Resolve(crate::services::tidal::stream::StreamResolveError),
+    /// A tier resolved, but its init segment could not be fetched.
+    InitSegment {
+        reason: PrescanFailureReason,
+        summary: String,
+    },
+}
+
+/// Resolve a prescan stream and prove the tier is actually usable by pulling
+/// its init segment, walking the quality ladder on either kind of failure.
+///
+/// A tier can resolve perfectly well and still be unusable: TIDAL routes the
+/// LOW/AAC tier's segments to its ad CDN, which black-holes on some networks.
+/// The ladder used to run only on *resolve* errors, so that case never fell
+/// back - the resolve said OK, the init segment then ate a timeout, and the
+/// track was abandoned without ever trying LOSSLESS (the failure reason is
+/// literally named `resolve_ok_segment_timeout`). Fetching the init segment
+/// inside the ladder makes a dead-CDN tier fall through like any other failure.
 async fn resolve_prescan_stream(
     http_client: &reqwest::Client,
     access_token: &str,
     track_id: i64,
     tidal_id: i64,
-) -> std::result::Result<
-    crate::services::tidal::stream::StreamInfo,
-    crate::services::tidal::stream::StreamResolveError,
-> {
+) -> std::result::Result<(crate::services::tidal::stream::StreamInfo, Vec<u8>), PrescanStreamFailure>
+{
+    let last_index = PRESCAN_TIDAL_QUALITIES.len().saturating_sub(1);
     for (attempt_index, quality) in PRESCAN_TIDAL_QUALITIES.iter().enumerate() {
-        match crate::services::tidal::stream::get_stream_url(
+        let stream_info = match crate::services::tidal::stream::get_stream_url(
             http_client,
             access_token,
             tidal_id,
@@ -238,7 +258,7 @@ async fn resolve_prescan_stream(
         )
         .await
         {
-            Ok(stream_info) => return Ok(stream_info),
+            Ok(stream_info) => stream_info,
             Err(error) => {
                 if let Some(next_quality) = next_prescan_quality_after_error(attempt_index, &error)
                 {
@@ -252,7 +272,28 @@ async fn resolve_prescan_stream(
                     );
                     continue;
                 }
-                return Err(error);
+                return Err(PrescanStreamFailure::Resolve(error));
+            }
+        };
+
+        match fetch_prescan_segment(http_client, &stream_info.url).await {
+            Ok(init_segment) => return Ok((stream_info, init_segment)),
+            Err(summary) => {
+                let reason = segment_fetch_failure_reason(&summary);
+                if let Some(next_quality) = PRESCAN_TIDAL_QUALITIES.get(attempt_index + 1) {
+                    tracing::info!(
+                        track_id,
+                        tidal_id,
+                        quality,
+                        next_quality,
+                        reason = reason.as_str(),
+                        error = %summary,
+                        "prescanner: quality resolved but its CDN segments failed, trying fallback"
+                    );
+                    continue;
+                }
+                debug_assert_eq!(attempt_index, last_index);
+                return Err(PrescanStreamFailure::InitSegment { reason, summary });
             }
         }
     }
@@ -419,7 +460,10 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
 
     tracing::info!(track_id, tidal_id, "prescanner: starting analysis");
 
-    let stream_info = match resolve_prescan_stream(
+    // Resolves AND proves the tier's segments are fetchable, walking the
+    // quality ladder if a tier's CDN edge is dead. Returns the init segment it
+    // pulled so we don't fetch it twice.
+    let (stream_info, init_segment) = match resolve_prescan_stream(
         &http_client,
         &tokens.access_token,
         track_id,
@@ -427,8 +471,8 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
     )
     .await
     {
-        Ok(stream_info) => stream_info,
-        Err(error) => {
+        Ok(resolved) => resolved,
+        Err(PrescanStreamFailure::Resolve(error)) => {
             if let Some((class, reason)) = classify_stream_resolve_for_prescan(&error) {
                 cache_prescan_failure(track_id, class, reason);
                 tracing::info!(
@@ -442,6 +486,13 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
             }
             return Err(anyhow::anyhow!("resolve stream url: {}", error));
         }
+        Err(PrescanStreamFailure::InitSegment { reason, summary }) => {
+            cache_prescan_failure(track_id, PrescanFailureClass::TransientFailure, reason);
+            return Err(anyhow::anyhow!(
+                "{}: init segment: {summary}",
+                reason.as_str()
+            ));
+        }
     };
 
     // Keep the init segment plus enough media segments for a preview window.
@@ -449,17 +500,7 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
     // lookahead batch.
     let mut buf: Vec<u8> = Vec::with_capacity(512 * 1024);
     let media_segments = prescan_dash_media_segments(stream_info.segment_urls.len());
-    match fetch_prescan_segment(&http_client, &stream_info.url).await {
-        Ok(segment) => buf.extend_from_slice(&segment[..segment.len().min(MAX_BYTES)]),
-        Err(error_summary) => {
-            let reason = segment_fetch_failure_reason(&error_summary);
-            cache_prescan_failure(track_id, PrescanFailureClass::TransientFailure, reason);
-            return Err(anyhow::anyhow!(
-                "{}: init segment: {error_summary}",
-                reason.as_str()
-            ));
-        }
-    }
+    buf.extend_from_slice(&init_segment[..init_segment.len().min(MAX_BYTES)]);
     let mut last_segment_error: Option<(PrescanFailureReason, String)> = None;
     let mut media_segments_fetched = 0usize;
     for (segment_index, seg_url) in stream_info

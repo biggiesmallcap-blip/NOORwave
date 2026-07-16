@@ -605,17 +605,36 @@ export async function playQueueItemNow(queueItemId: number) {
  */
 let pendingToggleAction: 'pause' | 'resume' | null = null;
 
+export type ToggleAction = 'pause' | 'resume';
+
+/** The action a toggle press should send: alternate off the in-flight toggle's
+ * intent when there is one, otherwise read the live store. */
+export function nextToggleAction(
+	pendingToggle: ToggleAction | null,
+	isPlayingNow: boolean
+): ToggleAction {
+	if (pendingToggle) return pendingToggle === 'pause' ? 'resume' : 'pause';
+	return isPlayingNow ? 'pause' : 'resume';
+}
+
+/** Whether a finishing toggle still owns the latch and should release it.
+ * Ownership is decided purely by whether a NEWER TOGGLE has replaced the
+ * intent - deliberately NOT by playback-intent sequence. Any other intent (a
+ * skip / next / play) bumps that sequence, and gating on it stranded the latch
+ * forever, which decoupled the button from `isPlaying` and made the transport
+ * feel dead right after a track change. */
+export function toggleLatchShouldRelease(
+	pendingToggle: ToggleAction | null,
+	intended: ToggleAction
+): boolean {
+	return pendingToggle === intended;
+}
+
 export async function togglePlayback() {
 	playerError.set(null);
 	// Decide the intended action ONCE, from the freshest signal available:
 	// the previous in-flight toggle if there is one, else the current store.
-	const intended: 'pause' | 'resume' = pendingToggleAction
-		? pendingToggleAction === 'pause'
-			? 'resume'
-			: 'pause'
-		: get(isPlaying)
-			? 'pause'
-			: 'resume';
+	const intended: ToggleAction = nextToggleAction(pendingToggleAction, get(isPlaying));
 	pendingToggleAction = intended;
 	// Instant button feedback; the response snapshot below (and the WS-driven
 	// authoritative state pushes) reconcile to the server's truth.
@@ -630,7 +649,7 @@ export async function togglePlayback() {
 		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('toggle playback', error, () => togglePlayback());
 	} finally {
-		if (pendingToggleAction === intended && isLatestPlaybackIntent(intentSeq)) {
+		if (toggleLatchShouldRelease(pendingToggleAction, intended)) {
 			pendingToggleAction = null;
 		}
 		finishPlaybackIntent(intentSeq);
