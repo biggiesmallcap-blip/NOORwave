@@ -20,18 +20,25 @@ export type LazyTidalArtParams = {
 	rootMargin?: string;
 };
 
-const MAX_INFLIGHT = 3;
+const MAX_INFLIGHT = 4;
 let inflight = 0;
 const queue: Array<() => void> = [];
 const pending = new Map<string, Promise<string | null>>();
 
-// Circuit breaker: if /api/tidal/search returns the same error several times
-// in a row (typically "TIDAL not connected" → 400), stop firing further
-// searches for the rest of the session. Avoids burning through 25+ requests
-// every time the trending shelf renders while Tidal is offline.
+// Circuit breaker: if /api/tidal/search returns the same error several times in
+// a row (typically "TIDAL not connected" → 400), pause further searches for a
+// short cooldown rather than the rest of the session. A permanent latch meant a
+// single transient Tidal blip early in a session blanked every artwork tile
+// until a full reload; the cooldown lets tiles recover on their own once Tidal
+// comes back. Avoids burning through 25+ requests every render while offline.
 const CIRCUIT_OPEN_AFTER = 3;
+const CIRCUIT_COOLDOWN_MS = 60 * 1000;
 let consecutiveFailures = 0;
-let circuitOpen = false;
+let circuitOpenUntil = 0;
+
+function isCircuitOpen(): boolean {
+	return Date.now() < circuitOpenUntil;
+}
 
 // ── Persistent cache ─────────────────────────────────────────────────────────
 // Stash resolved (and "no-result") artwork lookups in localStorage keyed by
@@ -145,7 +152,7 @@ function recordResult(query: string, url: string | null): void {
 }
 
 async function lookupArtwork(query: string): Promise<string | null> {
-	if (circuitOpen) return null;
+	if (isCircuitOpen()) return null;
 	const cached = cache.get(query);
 	if (cached !== undefined) {
 		if (isFresh(cached)) {
@@ -161,7 +168,7 @@ async function lookupArtwork(query: string): Promise<string | null> {
 
 	const work = (async () => {
 		await acquireSlot();
-		if (circuitOpen) {
+		if (isCircuitOpen()) {
 			releaseSlot();
 			return null;
 		}
@@ -174,10 +181,11 @@ async function lookupArtwork(query: string): Promise<string | null> {
 		} catch {
 			consecutiveFailures++;
 			if (consecutiveFailures >= CIRCUIT_OPEN_AFTER) {
-				circuitOpen = true;
+				circuitOpenUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
+				consecutiveFailures = 0;
 				console.warn(
-					`[lazyTidalArt] circuit breaker tripped after ${consecutiveFailures} failures — ` +
-						'no further Tidal artwork lookups this session. Reconnect Tidal in Settings.',
+					`[lazyTidalArt] circuit breaker tripped — pausing Tidal artwork lookups for ` +
+						`${CIRCUIT_COOLDOWN_MS / 1000}s. Reconnect Tidal in Settings if this persists.`,
 				);
 			}
 			recordResult(query, null);

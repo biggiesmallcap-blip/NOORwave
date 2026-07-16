@@ -68,22 +68,32 @@ describe('library home hero contract', () => {
 		expect(libraryPage).toContain('randomPanelTracks.map(trackToMuralItem)');
 		expect(libraryPage).toContain('randomPanelAlbums.map(albumToMuralItem)');
 		expect(libraryPage).toContain('let suggestionCandidateTracks = $state<Track[]>(homePanelCandidateCache.suggestionTracks)');
+		expect(libraryPage).toContain('let suggestionServerTracks = $state<Track[]>(homePanelCandidateCache.suggestionServerTracks)');
 		expect(libraryPage).toContain('async function loadSuggestionCandidates(seedTracks: Track[], requestKey: string)');
+		// Server-ranked cross-artist suggestions are the primary source...
+		expect(libraryPage).toContain('.getHomeSuggestions(seedIds, 50)');
+		expect(libraryPage).toContain('function combinedSuggestionTracks(): Track[]');
+		expect(libraryPage).toContain('function capPerArtist(tracks: Track[], max: number): Track[]');
+		expect(libraryPage).toContain('const SUGGESTION_ARTIST_CAP = 2');
+		// ...with the same-artist expansion kept as fallback + tail-fill.
+		expect(libraryPage).toContain('async function sameArtistExpansion(seedTracks: Track[]): Promise<Track[]>');
+		expect(libraryPage).toContain('function sameArtistScoredTracks(seeds: Track[]): Track[]');
 		expect(libraryPage).toContain('cachedApi.getArtistTracks(id)');
 		expect(libraryPage).toContain('cachedApi.getAlbumTracks(id)');
-		expect(libraryPage).toContain('const scored = suggestionCandidateTracks');
 		expect(libraryPage).toContain('homePanelCandidateCache.randomTracks = tracksForPanel');
 		expect(libraryPage).toContain('homePanelCandidateCache.randomAlbums = albumsForPanel');
-		expect(libraryPage).toContain('homePanelCandidateCache.suggestionTracks = candidates');
+		expect(libraryPage).toContain('homePanelCandidateCache.suggestionServerTracks = serverTracks');
+		expect(libraryPage).toContain('homePanelCandidateCache.suggestionTracks = expansion');
 		expect(libraryPage).toContain('homePanelRefreshBucket()');
 		expect(libraryPage).toContain('async function playHomeMuralTrack(item: HomeMuralItem, panel: HomeMuralPanel)');
 		expect(libraryPage).toContain('const replaced = await api.replacePlaybackQueue(');
 		expect(libraryPage).toContain('trackIds.map((track_id) => ({ track_id })),');
 		expect(libraryPage).toContain('await api.playQueueItem(selected.id);');
-		// Mural tiles activate on double-click / Enter (parity with the library
-		// track rows and the home-recs murals), not a single stray click.
-		expect(libraryPage).toContain('ondblclick={() => openHomeMuralItem(item, panel)}');
-		expect(libraryPage).toContain("onkeydown={(event) => { if (event.key === 'Enter') openHomeMuralItem(item, panel); }}");
+		// Mural tiles activate on a single click; as native <button>s they also
+		// fire on Enter/Space, so no separate keydown handler is needed (a second
+		// one would double-activate on Enter).
+		expect(libraryPage).toContain('onclick={() => openHomeMuralItem(item, panel)}');
+		expect(libraryPage).not.toContain("onkeydown={(event) => { if (event.key === 'Enter') openHomeMuralItem(item, panel); }}");
 		expect(libraryPage).toContain('oncontextmenu={(event) => openHomeMuralItemContextMenu(event, item)}');
 		expect(libraryPage).toContain('void openAlbumDetail(found ?? albumFromHomeCard(card))');
 		// Tiles resolve missing artwork lazily and paint previously-cached art on
