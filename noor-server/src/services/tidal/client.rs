@@ -1011,11 +1011,17 @@ impl TidalClient {
     /// (no wrapper/type field), so we dispatch on the module's `kind`. For
     /// `MIXED_TYPES_LIST` we sniff the item shape — `uuid` => playlist,
     /// `cover` => album, otherwise track.
+    ///
+    /// `VIDEO_LIST` modules (the `pages/videos` editorial page) get a real
+    /// `video` kind: the old fallthrough parsed them as pseudo-tracks, which
+    /// happened to work (video ids survive) but dropped the video artwork
+    /// and forced the frontend to guess the media type from page context.
     fn parse_home_item(item: &serde_json::Value, module_kind: &str) -> Option<TidalHomeItem> {
         let resolved_kind = match module_kind {
             "TRACK_LIST" => "track",
             "ALBUM_LIST" => "album",
             "PLAYLIST_LIST" => "playlist",
+            "VIDEO_LIST" => "video",
             _ => {
                 let obj = item.as_object()?;
                 if obj.contains_key("uuid") {
@@ -1070,6 +1076,21 @@ impl TidalClient {
                 })
             }
             "playlist" => Self::parse_home_playlist(item),
+            "video" => {
+                let v = Self::parse_search_video(item.clone())?;
+                Some(TidalHomeItem {
+                    kind: "video".into(),
+                    id: v.id.to_string(),
+                    title: v.title,
+                    artist_name: v.artist_name,
+                    artwork_url: v.artwork_url,
+                    duration: v.duration,
+                    artist_id: v.artist_id,
+                    album_id: v.album_id,
+                    album_title: None,
+                    creator_name: None,
+                })
+            }
             _ => None,
         }
     }
@@ -1628,9 +1649,9 @@ pub struct TidalMix {
 /// e.g. `duration` is only set for tracks, `creator_name` only for playlists.
 #[derive(Debug, Clone, Serialize)]
 pub struct TidalHomeItem {
-    /// `"track" | "album" | "playlist"` — the only kinds we surface today.
+    /// `"track" | "album" | "playlist" | "video"` — the kinds we surface today.
     pub kind: String,
-    /// Stringified for tracks/albums (numeric id), uuid for playlists.
+    /// Stringified for tracks/albums/videos (numeric id), uuid for playlists.
     pub id: String,
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]

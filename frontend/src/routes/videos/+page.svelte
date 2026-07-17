@@ -1,7 +1,17 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
+	import { fade } from 'svelte/transition';
 	import { goto } from '$app/navigation';
-	import { api, ApiError, type TidalSearchVideo, type TidalVideoMixItem } from '$lib/api/client';
+	import {
+		api,
+		ApiError,
+		type TidalHomeItem,
+		type TidalHomeModule,
+		type TidalSearchVideo,
+		type TidalVideoMixItem,
+		type VideoDiscoverSet,
+	} from '$lib/api/client';
+	import ChartMural, { type ChartMuralItem } from '$lib/components/charts/ChartMural.svelte';
 	import VideoCard from '$lib/components/video/VideoCard.svelte';
 	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
@@ -29,6 +39,12 @@
 	const SESSION_SNAPSHOT_KEY = 'noor_video_session_snapshot';
 	const RECENT_MAX = 8;
 	const HINTS = ['music video', 'live session', 'official video', 'visualizer'];
+	// Mural rotation cadence, matching the home/charts shelves.
+	const MURAL_ROTATE_MS = 8000;
+	// While the server assembles today's set (building: true, no snapshot yet),
+	// re-fetch a few times so the mural appears without a manual reload.
+	const BUILD_POLL_MS = 6000;
+	const BUILD_POLL_MAX = 3;
 
 	interface VideoPageSnapshot {
 		selectedVideo: TidalSearchVideo | TidalVideoMixItem | null;
@@ -120,6 +136,136 @@
 
 	let heroTitle = $derived(selectedVideo?.title ?? 'TIDAL video');
 	let heroArtist = $derived(selectedVideo?.artist_name ?? null);
+
+	// --- Editorial browse state ---
+	// The resting state of the page: a daily-picks mural plus TIDAL's own
+	// editorial video shelf. It fades under search focus (stays mounted, so
+	// clearing the field restores the same set at the same tile) and yields
+	// the page entirely to the player hero while a video session is active.
+	let discoverSets = $state<VideoDiscoverSet[]>([]);
+	let editorialModule = $state<TidalHomeModule | null>(null);
+	let loadingBrowse = $state(true);
+	let muralIndex = $state(0);
+	let muralPaused = $state(false);
+	let browsePollTimer: ReturnType<typeof setTimeout> | null = null;
+	let browsePolls = 0;
+
+	let dailySet = $derived(discoverSets.find((s) => s.slug === 'daily-picks') ?? null);
+	// On pages/videos both real 'video' items and legacy pseudo-'track' items
+	// are music videos (the whole page is video content on TIDAL's side).
+	let editorialVideos = $derived(
+		(editorialModule?.items ?? []).filter((i) => i.kind === 'video' || i.kind === 'track')
+	);
+	let videoSessionActive = $derived(Boolean(selectedVideo || streamUrl || loadingStream));
+	let searchFocused = $derived(query.trim().length > 0);
+	let hasBrowseContent = $derived(Boolean(dailySet) || editorialVideos.length > 0);
+	let showEditorialLayer = $derived(!videoSessionActive && (hasBrowseContent || loadingBrowse));
+
+	let muralItems = $derived<ChartMuralItem[]>(
+		(dailySet?.items ?? []).map((v, i) => ({
+			id: String(v.tidal_id),
+			title: v.title,
+			subtitle: v.artist_name ?? '',
+			artwork: v.artwork_url,
+			fallbackText: 'VID',
+			tileLabel: `Select ${v.title}`,
+			tileTitle: `${i + 1}. ${v.title}${v.artist_name ? ` - ${v.artist_name}` : ''}`,
+		}))
+	);
+	async function loadBrowse() {
+		try {
+			const [discover, page] = await Promise.allSettled([
+				api.getVideosDiscover(),
+				api.getTidalPage('videos'),
+			]);
+			if (discover.status === 'fulfilled') {
+				discoverSets = discover.value.sets ?? [];
+				if (discover.value.building && discoverSets.length === 0 && browsePolls < BUILD_POLL_MAX) {
+					browsePolls += 1;
+					browsePollTimer = setTimeout(() => void loadBrowse(), BUILD_POLL_MS);
+				}
+			}
+			if (page.status === 'fulfilled' && !editorialModule) {
+				const modules = page.value.modules ?? [];
+				editorialModule =
+					modules.find(
+						(m) => m.items.filter((i) => i.kind === 'video' || i.kind === 'track').length >= 4
+					) ?? null;
+			}
+		} finally {
+			loadingBrowse = false;
+		}
+	}
+
+	function jumpMural(delta: number) {
+		const count = dailySet?.items.length ?? 0;
+		if (count === 0) return;
+		muralIndex = (muralIndex + delta + count) % count;
+	}
+
+	async function playFromSet(set: VideoDiscoverSet, index: number) {
+		const video = set.items[index];
+		if (!video) return;
+		if (!assertOnline()) {
+			showToast('Server is reconnecting.', 'error', 3200);
+			return;
+		}
+		const ok = await playVideo(video, {
+			queue: set.items,
+			source: 'mix',
+			sourceLabel: set.title,
+			autoplay: true,
+		});
+		if (!ok) showToast($videoSession.error ?? 'This video could not be loaded.', 'error', 3200);
+	}
+
+	function editorialItemToVideo(item: TidalHomeItem): TidalSearchVideo {
+		return {
+			tidal_id: Number(item.id),
+			title: item.title,
+			duration_ms: item.duration != null ? item.duration * 1000 : null,
+			artist_id: item.artist_id ?? null,
+			artist_name: item.artist_name ?? null,
+			album_tidal_id: item.album_id ?? null,
+			artwork_url: item.artwork_url ?? null,
+			quality: null,
+			explicit: null,
+			type: 'Music Video',
+		};
+	}
+
+	let editorialQueue = $derived(editorialVideos.map(editorialItemToVideo));
+
+	async function playEditorialVideo(video: TidalSearchVideo) {
+		if (!assertOnline()) {
+			showToast('Server is reconnecting.', 'error', 3200);
+			return;
+		}
+		const ok = await playVideo(video, {
+			queue: editorialQueue,
+			source: 'mix',
+			sourceLabel: editorialModule?.title || "TIDAL's picks",
+			autoplay: $videoSession.autoplay,
+		});
+		if (!ok) showToast($videoSession.error ?? 'This video could not be loaded.', 'error', 3200);
+	}
+
+	// Keep the mural index valid when a new snapshot lands.
+	$effect(() => {
+		const count = dailySet?.items.length ?? 0;
+		if (muralIndex >= count) muralIndex = 0;
+	});
+
+	// Shelf-owned rotation, paused on hover and whenever the layer is not the
+	// page's active surface (search focus or video session).
+	$effect(() => {
+		const count = dailySet?.items.length ?? 0;
+		if (count <= 1) return;
+		const timer = setInterval(() => {
+			if (!muralPaused && !searchFocused && !videoSessionActive) jumpMural(1);
+		}, MURAL_ROTATE_MS);
+		return () => clearInterval(timer);
+	});
 	let hasVideoChoices = $derived(videos.length > 0 || mixItems.length > 0 || playlistItems.length > 0);
 	let showChooseVideoPrompt = $derived(
 		!selectedVideo &&
@@ -437,6 +583,7 @@
 
 	onMount(() => {
 		void audioSettings.load();
+		void loadBrowse();
 		const params = new URLSearchParams(window.location.search);
 		const hasExplicitParams =
 			params.has('q') || params.has('videoId') || params.has('mixId') || params.has('playlistId');
@@ -520,6 +667,7 @@
 
 	onDestroy(() => {
 		if (debounceTimer) clearTimeout(debounceTimer);
+		if (browsePollTimer) clearTimeout(browsePollTimer);
 		searchAbort?.abort();
 		mixLoadSeq += 1;
 	});
@@ -538,7 +686,75 @@
 			/>
 			<a class="editorial-link" href="/tidal/videos">TIDAL editorial</a>
 		</div>
+		{#if searchFocused && recent.length > 0}
+			<div class="recent-inline">
+				<span class="eyebrow">Recent</span>
+				<div class="chips">
+					{#each recent as item (item)}
+						<button type="button" class="hint-chip" onclick={() => pickSearch(item)}>{item}</button>
+					{/each}
+				</div>
+				<button type="button" class="text-btn" onclick={clearRecent}>Clear</button>
+			</div>
+		{/if}
 	</header>
+
+	{#if showEditorialLayer}
+		<div
+			class="editorial-layer"
+			class:receded={searchFocused}
+			aria-hidden={searchFocused}
+			transition:fade={{ duration: 250 }}
+		>
+			<div class="editorial-inner" inert={searchFocused}>
+				{#if dailySet}
+					<ChartMural
+						items={muralItems}
+						currentIndex={muralIndex}
+						ariaLabel="Daily video picks"
+						kindLabel="Daily picks"
+						title={dailySet.title}
+						subtitle={dailySet.blurb}
+						metric={`${dailySet.items.length} videos`}
+						actionLabel="Play"
+						onSelect={(index) => (muralIndex = index)}
+						onJump={jumpMural}
+						onPlay={() => dailySet && playFromSet(dailySet, muralIndex)}
+						onItemActivate={(index) => dailySet && playFromSet(dailySet, index)}
+						onPauseChange={(paused) => (muralPaused = paused)}
+					/>
+				{:else if loadingBrowse}
+					<ChartMural
+						loading
+						loadingLabel="Assembling today's picks"
+						ariaLabel="Daily video picks"
+						kindLabel="Daily picks"
+						title="Today's picks"
+						subtitle=""
+					/>
+				{/if}
+				{#if editorialVideos.length > 0}
+					<section class="results-section">
+						<div class="section-heading section-heading--split">
+							<div class="section-heading">
+								<p class="eyebrow">From TIDAL's desk</p>
+								<h2>{editorialModule?.title || 'Editorial picks'}</h2>
+							</div>
+							<a class="text-btn" href="/tidal/videos">More from TIDAL</a>
+						</div>
+						<div class="video-grid">
+							{#each editorialQueue.slice(0, 8) as video (video.tidal_id)}
+								<VideoCard
+									{video}
+									onSelect={(item) => !('id' in item) && void playEditorialVideo(item)}
+								/>
+							{/each}
+						</div>
+					</section>
+				{/if}
+			</div>
+		</div>
+	{/if}
 
 	{#if showVideoHero}
 	<section class="hero glass-panel" class:hero--prompt={showChooseVideoPrompt}>
@@ -600,7 +816,10 @@
 	</section>
 	{/if}
 
-	{#if !query.trim() && videos.length === 0 && mixItems.length === 0}
+	<!-- Legacy landing chips: only when there is no editorial content to show
+	     (no TIDAL session / empty library), so the degraded page stays exactly
+	     the search-first page it was. -->
+	{#if !query.trim() && videos.length === 0 && mixItems.length === 0 && !hasBrowseContent && !loadingBrowse}
 		<section class="landing-row">
 			{#if recent.length > 0}
 				<div class="rail-block">
@@ -735,6 +954,49 @@
 		border-color: var(--accent-line);
 		color: var(--text-primary);
 		outline: none;
+	}
+
+	/* The editorial browse layer fades and collapses under search focus but
+	   stays mounted, so leaving focus restores the same set at the same tile.
+	   The height collapse rides grid-template-rows (1fr -> 0fr), which
+	   animates smoothly without measuring content. */
+	.editorial-layer {
+		display: grid;
+		grid-template-rows: 1fr;
+		opacity: 1;
+		transform: translateY(0);
+		transition:
+			grid-template-rows var(--motion-slow, 300ms) ease,
+			opacity 250ms ease,
+			transform 250ms ease;
+	}
+
+	.editorial-layer.receded {
+		grid-template-rows: 0fr;
+		opacity: 0;
+		transform: translateY(-6px);
+		pointer-events: none;
+	}
+
+	.editorial-inner {
+		overflow: hidden;
+		min-height: 0;
+		display: grid;
+		gap: 28px;
+	}
+
+	.recent-inline {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: var(--space-3);
+		flex-wrap: wrap;
+		margin-top: var(--space-3);
+	}
+
+	.section-heading--split {
+		justify-content: space-between;
+		width: 100%;
 	}
 
 	.hero {
