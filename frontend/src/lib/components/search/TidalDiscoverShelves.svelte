@@ -22,9 +22,18 @@
 	} = $props();
 
 	function handleItemClick(item: TidalHomeItem) {
-		// On the editorial video page every item is a music video (kind 'track')
-		// or a video playlist (kind 'playlist'). Route both to the video player
-		// instead of the audio engine, which is what played the song instead.
+		// A real video item always routes to the video player, whatever page
+		// hosted it. (VIDEO_LIST modules now parse as kind 'video'; older
+		// payload shapes may still surface videos as pseudo-tracks, handled
+		// by the mediaKind branch below.)
+		if (item.kind === 'video') {
+			void goto(`/videos?videoId=${encodeURIComponent(item.id)}`);
+			return;
+		}
+		// On the editorial video page every remaining item is a music video
+		// (kind 'track') or a video playlist (kind 'playlist'). Route both to
+		// the video player instead of the audio engine, which is what played
+		// the song instead.
 		if (mediaKind === 'video') {
 			if (item.kind === 'track') {
 				void goto(`/videos?videoId=${encodeURIComponent(item.id)}`);
@@ -96,6 +105,14 @@
 			openContextMenu(
 				event,
 				[{ label, icon: '▶', onSelect: () => handleItemClick(item) }],
+				item.title
+			);
+			return;
+		}
+		if (item.kind === 'video') {
+			openContextMenu(
+				event,
+				[{ label: 'Play video', icon: '▶', onSelect: () => handleItemClick(item) }],
 				item.title
 			);
 			return;

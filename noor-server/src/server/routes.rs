@@ -48,6 +48,7 @@ mod search_routes;
 mod sportify_routes;
 mod tidal_home_routes;
 mod tidal_sync_routes;
+mod video_discovery_routes;
 pub use tidal_sync_routes::trigger_auto_sync;
 
 type TidalPlaylistTracksCache = Arc<Mutex<HashMap<String, (Instant, Vec<TidalTrack>)>>>;
@@ -972,6 +973,12 @@ pub fn api_routes(state: SharedState) -> Router {
         .route(
             "/api/tidal/video-playlists/{uuid}/items",
             get(tidal_video_playlist_items),
+        )
+        // Editorial video sets for the /videos browse state. Stale-while-
+        // revalidate over persisted daily snapshots; never blocks on TIDAL.
+        .route(
+            "/api/videos/discover",
+            get(video_discovery_routes::get_videos_discover),
         )
         .route("/api/tidal/playlists/search", get(tidal_playlist_search))
         .route(

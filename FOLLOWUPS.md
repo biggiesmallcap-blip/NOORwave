@@ -10,6 +10,19 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### videos: editorial discovery phases 2-3
+
+Phase 1 (daily-picks mural + folded TIDAL editorial shelf on /videos) shipped.
+Deferred by the brief's phased plan (see the planning doc in the PR):
+- "One step out" weekly adjacency set via get_artist_similar, one hop only.
+- video_history table written from VideoDock play/ended events; feeds
+  exclude-recently-watched in the set builder.
+- Rotating fourth slot: genre-led set (TasteVector genre_affinity) and
+  forgotten-favorites set (high historical plays, no recent listens).
+- Parse releaseDate in parse_search_video (raw payload carries it) to unlock
+  an era set; check the video `type` field values for a live-takes cut.
+- Spawned by: videos editorial discovery session (this branch).
+
 ### perf: replace the playback PCM Vec+Mutex with a real ring buffer
 
 The audio callback and the decoder thread share

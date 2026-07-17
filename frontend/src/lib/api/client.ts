@@ -304,6 +304,25 @@ export type TidalVideoMixItem = TidalSearchVideo & {
 	mix_id?: string | number | null;
 };
 
+/** One editorial video set from /api/videos/discover. Items are shaped like
+ *  TidalSearchVideo so they feed playVideo() queues directly; `why` is the
+ *  optional per-pick reason from the server's shaping layer. */
+export interface VideoDiscoverSet {
+	slug: string;
+	bucket_key: string;
+	title: string;
+	blurb: string;
+	items: (TidalSearchVideo & { why?: string })[];
+	/** True when this snapshot is from an older bucket while today's builds. */
+	stale?: boolean;
+}
+
+export interface VideoDiscoverResponse {
+	sets: VideoDiscoverSet[];
+	/** True when a background build for the current bucket is in flight. */
+	building: boolean;
+}
+
 /**
  * Compact Spotify-playlist search result. Powers the Spotify section of
  * /search and Ctrl+K. Click navigates to the ephemeral /spotify-playlist/{id}
@@ -1900,7 +1919,7 @@ export interface TidalRadioStationsResponse {
 /** One item inside a TIDAL home discover module. Per-kind fields are optional -
  *  the frontend dispatches on `kind` to pick the right shelf renderer. */
 export interface TidalHomeItem {
-	kind: 'track' | 'album' | 'playlist';
+	kind: 'track' | 'album' | 'playlist' | 'video';
 	id: string;
 	title: string;
 	artist_name?: string | null;
@@ -3768,6 +3787,13 @@ export const api = {
 		return fetchApi<{ items: TidalSearchVideo[] }>(
 			`/api/tidal/video-playlists/${encodeURIComponent(uuid)}/items`
 		);
+	},
+
+	/** Editorial video sets for the /videos browse state. Stale-while-
+	 *  revalidate server-side: an empty `sets` with `building: true` means
+	 *  today's snapshot is being assembled and a re-fetch will pick it up. */
+	getVideosDiscover(): Promise<VideoDiscoverResponse> {
+		return fetchApi<VideoDiscoverResponse>('/api/videos/discover');
 	},
 
 

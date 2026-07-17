@@ -56,6 +56,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_052,
     MIGRATION_053,
     MIGRATION_054,
+    MIGRATION_055,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1535,6 +1536,25 @@ ALTER TABLE sync_metadata ADD COLUMN enrich_from_favorite_albums INTEGER NOT NUL
 ALTER TABLE albums ADD COLUMN enrich_completed_at TEXT;
 CREATE INDEX IF NOT EXISTS idx_tracks_isrc ON tracks(isrc);
 CREATE INDEX IF NOT EXISTS idx_tracks_artist_id ON tracks(artist_id);
+"#;
+
+// Editorial video sets for the /videos browse state. A row is one built
+// snapshot of one set (slug) for one rotation bucket (bucket_key, e.g.
+// "2026-07-17" for daily or "2026-W29" for weekly). Items are stored as an
+// opaque JSON array: sets are ephemeral editorial output, fetched whole and
+// never joined, so normalized rows would buy nothing.
+const MIGRATION_055: &str = r#"
+CREATE TABLE IF NOT EXISTS video_sets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug TEXT NOT NULL,
+    bucket_key TEXT NOT NULL,
+    title TEXT NOT NULL,
+    blurb TEXT NOT NULL,
+    built_at TEXT NOT NULL DEFAULT (datetime('now')),
+    items_json TEXT NOT NULL,
+    UNIQUE(slug, bucket_key)
+);
+CREATE INDEX IF NOT EXISTS idx_video_sets_slug_built ON video_sets(slug, built_at);
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
