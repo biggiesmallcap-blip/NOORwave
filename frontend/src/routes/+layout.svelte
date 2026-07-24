@@ -24,9 +24,6 @@
 		playerReady,
 		playerError,
 		refreshPlaybackState,
-		refreshPlaybackRuntime,
-		shownTrackIsAudible,
-		nowPlayingStatusLabel,
 		playTrackNow,
 		playQueueItemNow,
 		togglePlayback,
@@ -1102,45 +1099,9 @@
 		return 'Video session';
 	}
 
-	// True when the runtime confirms the *shown* track is the one actually
-	// producing audio - or when it has no opinion (no runtime info yet, or
-	// `active_track_id` unset between tracks / on cold start), in which case we
-	// can't contradict the shown track. When the runtime says a DIFFERENT track
-	// is audible (e.g. a Switch whose new track failed to start, so the previous
-	// engine is still playing underneath), this is false and we must not claim
-	// the shown track is "Playing" - that was the "shows a different song
-	// playing" desync.
-	let nowPlayingAudible = $derived(
-		shownTrackIsAudible($playbackRuntimeInfo?.active_track_id, $currentTrack?.id)
-	);
-
 	let playerState = $derived(
-		nowPlayingStatusLabel({
-			hasTrack: Boolean($currentTrack),
-			isPlaying: $isPlaying,
-			audible: nowPlayingAudible,
-			playerReady: $playerReady
-		})
+		$currentTrack ? ($isPlaying ? 'Playing' : 'Paused') : $playerReady ? 'Ready' : 'Connecting'
 	);
-
-	// One-shot reconcile: when the runtime reports a NEW audible track that
-	// disagrees with the shown one, pull authoritative state + runtime once so
-	// the header snaps to the truth instead of lingering on a stale optimistic
-	// pick. Keyed on the audible id so it fires once per mismatch, never in a
-	// loop (a persistent server-side disagreement won't re-trigger).
-	let lastReconciledActiveId: number | null = null;
-	$effect(() => {
-		const activeId = $playbackRuntimeInfo?.active_track_id ?? null;
-		const shownId = $currentTrack?.id ?? null;
-		if (activeId == null || shownId == null) return;
-		if (activeId !== shownId && activeId !== lastReconciledActiveId) {
-			lastReconciledActiveId = activeId;
-			void refreshPlaybackState();
-			void refreshPlaybackRuntime();
-		} else if (activeId === shownId) {
-			lastReconciledActiveId = null;
-		}
-	});
 	let streamDetailLabel = $derived(formatPlayerStreamDetail({
 		stream: $currentStreamDisplay,
 		runtime: $playbackRuntimeInfo,

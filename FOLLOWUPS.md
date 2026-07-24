@@ -838,19 +838,28 @@ title (or thread it through decide_import) so marker detection stops
 depending on title formatting.
 Spawned by: sync rework (bookmark albums, hidden enrichment, auto-dedupe) 2026-07-10
 
-### playback UI: a "Loading" transport state distinct from "Paused"
+### playback: the now-playing "audible track" overlay was tried and REVERTED
 
-The now-playing status pill now refuses to claim "Playing" for a track the
-runtime has not confirmed audible, but it cannot yet distinguish "the user
-paused" from "the track you asked for is still buffering". On a hard play
-that hangs, the header shows the correct track and reads "Playing" until the
-CDN fast-fail trips (~4s), because is_playing is already audio-gated
-server-side and the raw transport intent is not exposed to the frontend.
-Deliberately deferred: resetting audio_active on hard play would fix it but
-costs a "Paused" flash on every successful play. The real fix is to surface
-the raw play intent (or an explicit buffering flag) in the playback snapshot
-so the frontend can render Loading vs Paused honestly.
-Spawned by: player desync + dead TIDAL CDN edge 2026-07-16
+Do not re-add the /state overlay that swapped current_track for the runtime's
+active_track_id (nor the frontend "Loading" honesty gate / one-shot reconcile
+that went with it). It was built to stop the header claiming "Playing" for a
+track that isn't audible, but it caused a worse bug: on a normal skip the
+outgoing track is still audible during the crossfade, so the overlay rewrote
+/state back to the OLD track mid-skip. The header flashed next -> current ->
+next on every skip (user report v0.9.42), because next_track blocks ~2-5s on
+stream resolve and a background poll lands in that window. Reverted in full;
+now-playing is back to the persisted current_track + a plain is_playing pill.
+
+The genuinely-good part was kept: handle_runtime_track_error clears the stale
+current_stream_display so a failed track doesn't leave a ghost source line.
+
+If the "shows a different song" case ever needs solving again, do NOT reconcile
+against the crossfade's still-audible outgoing track - that window is normal.
+The real signal for a genuinely-wrong header is a track that FAILED (TrackError
+already fires), not a track mid-transition. Distinguish those before touching
+the header title, and never let a poll during the resolve window overwrite the
+optimistic pick with the outgoing track.
+Spawned by: player desync overlay revert 2026-07-17
 
 ### playback: get tracks off the sp-ad-cf edge (host rewrite is ruled out)
 

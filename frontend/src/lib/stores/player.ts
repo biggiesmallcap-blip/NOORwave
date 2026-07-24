@@ -182,40 +182,6 @@ export function countResolvedTransitions(previous: QueueItem[], next: QueueItem[
 	return resolved;
 }
 
-// ─── Now-playing truthfulness ────────────────────────────────────────────────
-// The header shows the intended/optimistic `currentTrack`, but that is not
-// always the track actually producing audio: a Switch whose new track fails to
-// start leaves the previous engine audible underneath, so the header would
-// claim "Playing" for a song you can't hear. The runtime's `active_track_id`
-// (set when audio truly starts) is the authoritative "what is audible" signal.
-
-/** Whether the shown track is the one the runtime confirms is producing audio.
- * A `null`/`undefined` `activeTrackId` means the runtime has no opinion yet (no
- * info, between tracks, cold start), so we don't contradict the shown track. */
-export function shownTrackIsAudible(
-	activeTrackId: number | null | undefined,
-	shownTrackId: number | null | undefined
-): boolean {
-	if (activeTrackId == null || shownTrackId == null) return true;
-	return activeTrackId === shownTrackId;
-}
-
-export type NowPlayingStatus = 'Playing' | 'Loading…' | 'Paused' | 'Ready' | 'Connecting';
-
-/** The now-playing status pill. Only says "Playing" when audio is actually
- * flowing for the shown track; a mismatch (different track audible, or the
- * shown one not yet started) reads "Loading…" instead of a false "Playing". */
-export function nowPlayingStatusLabel(args: {
-	hasTrack: boolean;
-	isPlaying: boolean;
-	audible: boolean;
-	playerReady: boolean;
-}): NowPlayingStatus {
-	if (!args.hasTrack) return args.playerReady ? 'Ready' : 'Connecting';
-	if (!args.isPlaying) return 'Paused';
-	return args.audible ? 'Playing' : 'Loading…';
-}
-
 // ─── Error model ──────────────────────────────────────────────────────────────
 // `playerError` holds a friendly message + optional retry callback. The layout
 // renders a toast with auto-dismiss; the store stays inert so we can replace

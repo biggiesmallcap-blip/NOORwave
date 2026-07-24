@@ -2712,14 +2712,6 @@ async fn start_current_queue_item_playback(
                 bit_depth: stream_info.bit_depth,
             });
             state_guard.pending_stream_display = None;
-            // This hard play just stopped the previous engine, so its confirmed
-            // "audible track" is no longer valid until the NEW track's `Started`
-            // fires. Clear it so the now-playing overlay isn't handed the
-            // stopped previous track's id (which would show a different, silent
-            // song as "playing"); the intended track is shown while it loads.
-            if let Some(info) = state_guard.playback_runtime_info.as_mut() {
-                info.active_track_id = None;
-            }
         }
     } else if let Some(runtime_handle) = current_playback_runtime(state).await {
         let _ = runtime_handle.stop();
@@ -4143,28 +4135,6 @@ async fn set_album_favorite(
 
 // -- MusicBrainz enrichment -------------------------------------------------
 
-/// The track id to SHOW as now-playing when the runtime's actually-audible
-/// track diverges from the persisted "current" one. Returns `Some(active_id)`
-/// only when audio is genuinely flowing (`audio_active`) for a resolvable
-/// (`> 0`, i.e. a real library id, not a synthetic pending id) track that isn't
-/// already the persisted current. This is what makes the header follow the
-/// track you can actually hear during a crossfade whose incoming deck hasn't
-/// started yet. On a hard play the route resets `active_track_id` to `None`
-/// (the previous engine is stopped), so this correctly returns `None` there and
-/// the intended track is shown while it loads.
-fn audible_now_playing_id(
-    audio_active: bool,
-    active_track_id: Option<i64>,
-    persisted_current_id: Option<i64>,
-) -> Option<i64> {
-    let active = active_track_id?;
-    if audio_active && active > 0 && Some(active) != persisted_current_id {
-        Some(active)
-    } else {
-        None
-    }
-}
-
 /// Build a `PlaybackSnapshot` whose `state.position_ms`, `state.buffered_ms`,
 /// and `state.is_playing` reflect the live audio runtime (not just the DB
 /// snapshot). Used by `GET /api/playback/state` and the route-side seek ack
@@ -4175,7 +4145,7 @@ fn audible_now_playing_id(
 async fn build_live_playback_snapshot(
     state: &SharedState,
 ) -> Result<player::PlaybackSnapshot, StatusCode> {
-    let (live_position_ms, live_buffered_ms, live_buffered_start_ms, audio_active, active_track_id) = {
+    let (live_position_ms, live_buffered_ms, live_buffered_start_ms, audio_active) = {
         let state_guard = state.read().await;
         let pair = state_guard
             .playback_runtime
@@ -4192,11 +4162,7 @@ async fn build_live_playback_snapshot(
         let active = state_guard
             .audio_active
             .load(std::sync::atomic::Ordering::Relaxed);
-        let active_track_id = state_guard
-            .playback_runtime_info
-            .as_ref()
-            .and_then(|info| info.active_track_id);
-        (live_pos, live_buf, live_buf_start, active, active_track_id)
+        (live_pos, live_buf, live_buf_start, active)
     };
 
     let snapshot = {
@@ -4208,31 +4174,6 @@ async fn build_live_playback_snapshot(
     };
     let mut snapshot =
         overlay_snapshot_with_external_track_and_position(state, snapshot, live_position_ms).await;
-
-    // Now-playing truthfulness: when the runtime confirms audio is flowing for a
-    // DIFFERENT track than the persisted "current" - e.g. a crossfade whose
-    // incoming deck hasn't started, so the outgoing track is still what you hear
-    // - show the track actually producing sound instead of the intended one.
-    // This is a read-only correction of the returned snapshot; it never mutates
-    // persisted state, and `current_queue_item_id` is left on the intended row
-    // so the queue cue still points where playback is headed.
-    if let Some(audible_id) = audible_now_playing_id(
-        audio_active,
-        active_track_id,
-        snapshot.state.current_track.as_ref().map(|track| track.id),
-    ) {
-        let audible = {
-            let state_guard = state.read().await;
-            state_guard
-                .db
-                .with_conn(|conn| queue::get_track_by_id(conn, audible_id))
-                .ok()
-                .flatten()
-        };
-        if let Some(track) = audible {
-            snapshot.state.current_track = Some(track);
-        }
-    }
 
     if let Some(buf) = live_buffered_ms {
         snapshot.state.buffered_ms = buf;
@@ -4536,14 +4477,6 @@ async fn play_track(
             bit_depth: stream_info.bit_depth,
         });
         state_guard.pending_stream_display = None;
-        // This hard play just stopped the previous engine, so its confirmed
-        // "audible track" is no longer valid until the NEW track's `Started`
-        // fires. Clear it so the now-playing overlay isn't handed the stopped
-        // previous track's id (which would show a different, silent song as
-        // "playing"); the intended track is shown while it loads.
-        if let Some(info) = state_guard.playback_runtime_info.as_mut() {
-            info.active_track_id = None;
-        }
     }
 
     record_transition_if_changed(&state, previous_track_id, &snapshot, "user", false).await;
@@ -4620,46 +4553,6 @@ impl TidalPlaybackError {
     /// (region lock, takedown) is not.
     fn is_asset_not_ready(&self) -> bool {
         matches!(self, TidalPlaybackError::StreamResolve(err) if err.is_asset_not_ready())
-    }
-}
-
-#[cfg(test)]
-mod now_playing_overlay_tests {
-    use super::audible_now_playing_id;
-
-    #[test]
-    fn overlays_the_audible_track_when_it_differs_from_the_persisted_current() {
-        // Crossfade / failed-switch: audio is flowing for track 7 while the
-        // persisted "current" already advanced to 42. Show what's audible.
-        assert_eq!(audible_now_playing_id(true, Some(7), Some(42)), Some(7));
-    }
-
-    #[test]
-    fn no_overlay_when_the_audible_track_is_already_the_persisted_current() {
-        assert_eq!(audible_now_playing_id(true, Some(42), Some(42)), None);
-    }
-
-    #[test]
-    fn no_overlay_when_no_audio_is_flowing() {
-        // A hard play resets active_track_id to None, but even a stale id must
-        // not overlay while audio_active is false (nothing is audible).
-        assert_eq!(audible_now_playing_id(false, Some(7), Some(42)), None);
-        assert_eq!(audible_now_playing_id(false, None, Some(42)), None);
-    }
-
-    #[test]
-    fn no_overlay_for_unresolved_pending_ids() {
-        // Synthetic negative ids for unresolved pending rows won't resolve in
-        // the DB, so never overlay with them.
-        assert_eq!(
-            audible_now_playing_id(true, Some(-128691633), Some(42)),
-            None
-        );
-    }
-
-    #[test]
-    fn no_overlay_when_runtime_has_no_active_track() {
-        assert_eq!(audible_now_playing_id(true, None, Some(42)), None);
     }
 }
 
