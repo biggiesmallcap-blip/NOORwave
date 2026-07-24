@@ -162,6 +162,10 @@ pub struct SetPlan {
     pub queries: Vec<String>,
     pub profile_genres: Vec<String>,
     pub anchor_genres: HashMap<i64, Vec<String>>,
+    /// Position among same-archetype shelves in this pass. Offsets the copy
+    /// choice so the three genre shelves, which sit one under another, cannot
+    /// draw the same sentence skeleton and read like a mail merge.
+    pub variant: usize,
 }
 
 impl SetPlan {
@@ -568,7 +572,8 @@ pub fn plan_missing_sets(conn: &Connection, today: chrono::NaiveDate) -> Result<
                          bucket: &str,
                          archetype: Archetype,
                          pool: &[AnchorArtist],
-                         take: usize|
+                         take: usize,
+                         variant: usize|
      -> Result<()> {
         if pool.is_empty() || load_set(conn, &slug, bucket)?.is_some() {
             return Ok(());
@@ -585,6 +590,7 @@ pub fn plan_missing_sets(conn: &Connection, today: chrono::NaiveDate) -> Result<
             queries: Vec::new(),
             profile_genres: profile_genres.clone(),
             anchor_genres,
+            variant,
         });
         Ok(())
     };
@@ -596,9 +602,10 @@ pub fn plan_missing_sets(conn: &Connection, today: chrono::NaiveDate) -> Result<
         Archetype::DailyPicks,
         &pool,
         ANCHORS_PER_BUILD,
+        0,
     )?;
 
-    for genre in profile_genres.iter().take(GENRE_SET_COUNT) {
+    for (index, genre) in profile_genres.iter().take(GENRE_SET_COUNT).enumerate() {
         let genre_pool = load_genre_anchor_pool(conn, genre)?;
         push_anchored(
             &mut plans,
@@ -607,6 +614,7 @@ pub fn plan_missing_sets(conn: &Connection, today: chrono::NaiveDate) -> Result<
             Archetype::Genre(genre.clone()),
             &genre_pool,
             ANCHORS_PER_BUILD,
+            index,
         )?;
     }
 
@@ -618,6 +626,7 @@ pub fn plan_missing_sets(conn: &Connection, today: chrono::NaiveDate) -> Result<
         Archetype::AlbumLove,
         &album_pool,
         ANCHORS_PER_BUILD,
+        0,
     )?;
 
     push_anchored(
@@ -627,6 +636,7 @@ pub fn plan_missing_sets(conn: &Connection, today: chrono::NaiveDate) -> Result<
         Archetype::OneStepOut,
         &pool,
         SIMILAR_SEED_ANCHORS,
+        0,
     )?;
 
     if !profile_genres.is_empty() && load_set(conn, DJ_SETS_SLUG, &weekly)?.is_none() {
@@ -638,6 +648,7 @@ pub fn plan_missing_sets(conn: &Connection, today: chrono::NaiveDate) -> Result<
             queries: long_form_queries(&profile_genres),
             profile_genres: profile_genres.clone(),
             anchor_genres: HashMap::new(),
+            variant: 0,
         });
     }
 
@@ -934,9 +945,13 @@ pub fn assemble_set(
         .map(|(a, _)| a)
         .find(|a| a.name == lead_name)
         .cloned();
+    // Rotate the phrase banks by bucket, then step by the shelf's position.
+    // A per-shelf random draw plus an offset still collided (two genre shelves
+    // drew "Deep in {genre}" in the same week); consecutive slots cannot.
+    let rotation = (build_seed("copy", &plan.bucket_key) as usize).wrapping_add(plan.variant);
     let (title, blurb) = write_copy(
         &plan.archetype,
-        &mut rng,
+        rotation,
         items.len(),
         &featured,
         &vias,
@@ -968,18 +983,29 @@ fn count_word(n: usize) -> &'static str {
     }
 }
 
+/// Same word for use inside a sentence. `count_word` is capitalised for
+/// sentence openers, and dropping it mid-clause read as a typo
+/// ("...never played, Twelve videos to judge them by").
+fn count_word_lower(n: usize) -> String {
+    count_word(n).to_lowercase()
+}
+
 /// Templated title + blurb. Every fact slotted in comes from the DB (artist
 /// names, counts, genre names); the phrase bank supplies the voice. Seeded by
 /// the build RNG so a bucket's copy is as stable as its picks.
 fn write_copy(
     archetype: &Archetype,
-    rng: &mut StdRng,
+    rotation: usize,
     item_count: usize,
     featured: &[String],
     vias: &[String],
     top_anchor: Option<&AnchorArtist>,
 ) -> (String, String) {
     let n = count_word(item_count);
+    // Deterministic slot: the bucket rotates the bank week to week, and the
+    // shelf's position within the pass steps one further, so stacked shelves
+    // of the same archetype always land on different phrasing.
+    let pick = |len: usize| rotation % len;
     match archetype {
         Archetype::DailyPicks => {
             const TITLES: &[&str] = &[
@@ -989,7 +1015,7 @@ fn write_copy(
                 "Your library, on camera",
                 "Today's picks",
             ];
-            let title = TITLES[rng.random_range(0..TITLES.len())].to_string();
+            let title = TITLES[pick(TITLES.len())].to_string();
             let opener = format!("{n} videos from artists you already trust.");
             let closer = match (top_anchor, featured) {
                 (Some(anchor), _) if anchor.listens >= 10 => {
@@ -1003,7 +1029,7 @@ fn write_copy(
                             anchor.name, anchor.listens
                         ),
                     ];
-                    closers[rng.random_range(0..closers.len())].clone()
+                    closers[pick(closers.len())].clone()
                 }
                 (_, [first, second, ..]) => {
                     format!("{first}, {second}, and friends. No searching required.")
@@ -1015,50 +1041,108 @@ fn write_copy(
         }
         Archetype::Genre(genre) => {
             let titles = [
+                format!("Deep in {genre}"),
+                format!("The {genre} end of the library"),
                 format!("{genre}, on camera"),
-                format!("The {genre} shelf"),
-                format!("{genre}, watched"),
+                format!("Where your {genre} lives"),
+                format!("{genre}, in full"),
             ];
-            let title = titles[rng.random_range(0..titles.len())].clone();
+            let title = titles[pick(titles.len())].clone();
+            // Several shapes rather than one fill-in-the-blank sentence: three
+            // genre shelves stack on the page, and a shared skeleton made them
+            // read as one paragraph repeated with the nouns swapped.
             let blurb = match featured {
-                [first, second, ..] => format!(
-                    "{n} videos from the {genre} corner of your library. {first}, {second}, and the rest of that room."
-                ),
-                [only] => format!("{n} {genre} videos, mostly {only}."),
+                [first, second, ..] => {
+                    let shapes = [
+                        format!(
+                            "{first} and {second} lead a run through the {genre} you keep coming back to."
+                        ),
+                        format!(
+                            "The {genre} you actually play, on screen - starting with {first}, then {second}."
+                        ),
+                        format!(
+                            "{n} videos deep in {genre}. {first}, {second}, and the company they keep."
+                        ),
+                        format!(
+                            "Everything {genre} in your library that made a video. {first} first."
+                        ),
+                    ];
+                    shapes[pick(shapes.len())].clone()
+                }
+                [only] => {
+                    format!("Your {genre} listening runs through {only}. Here they are on camera.")
+                }
                 _ => format!("{n} videos from your {genre} listening."),
             };
             (title, blurb)
         }
         Archetype::AlbumLove => {
-            const TITLES: &[&str] = &["Albums you kept", "The saved shelf", "Whole-album artists"];
-            let title = TITLES[rng.random_range(0..TITLES.len())].to_string();
+            const TITLES: &[&str] = &[
+                "Albums you kept",
+                "The records you saved",
+                "Whole-album artists",
+                "Kept in full",
+            ];
+            let title = TITLES[pick(TITLES.len())].to_string();
             let blurb = match featured {
-                [first, second, ..] => format!(
-                    "{n} videos from artists whose albums you saved outright - {first}, {second}, and company. Saving the whole record says more than a play count."
-                ),
-                [only] => format!("{n} videos from {only}, whose albums you saved outright."),
+                [first, second, ..] => {
+                    let shapes = [
+                        format!(
+                            "You saved whole records by {first} and {second}. That is a bigger vote than a play count - here is what they filmed."
+                        ),
+                        format!(
+                            "From the albums sitting in your library in full: {first}, {second}, and company."
+                        ),
+                        format!(
+                            "{n} videos by artists you committed to a whole album at a time. {first} opens."
+                        ),
+                    ];
+                    shapes[pick(shapes.len())].clone()
+                }
+                [only] => format!("You kept {only}'s album in full. This is them on camera."),
                 _ => format!("{n} videos from the artists behind your saved albums."),
             };
             (title, blurb)
         }
         Archetype::OneStepOut => {
-            const TITLES: &[&str] = &["One step out", "New to you", "Just outside"];
-            let title = TITLES[rng.random_range(0..TITLES.len())].to_string();
+            const TITLES: &[&str] = &[
+                "One step out",
+                "Not yours yet",
+                "Just outside",
+                "The next ring",
+            ];
+            let title = TITLES[pick(TITLES.len())].to_string();
             let artist_count = featured.len();
             let blurb = match vias {
-                [first, second, ..] => format!(
-                    "{n} videos from {artist_count} artists you don't have yet, reached through {first} and {second}. One of them will stick."
-                ),
+                [first, second, ..] => {
+                    let shapes = [
+                        format!(
+                            "{artist_count} artists you don't own, reached through {first} and {second}. One of them will stick."
+                        ),
+                        format!(
+                            "Follow {first} and {second} one step outward and you land here. Nothing on this shelf is in your library."
+                        ),
+                        format!(
+                            "The company {first} keeps: {artist_count} artists you have never played, {} videos to judge them by.",
+                            count_word_lower(item_count)
+                        ),
+                    ];
+                    shapes[pick(shapes.len())].clone()
+                }
                 [only] => format!(
-                    "{n} videos from artists you don't have yet. Fans of {only} usually end up here."
+                    "Fans of {only} usually end up here. None of these {artist_count} artists are in your library yet."
                 ),
                 _ => format!("{n} videos from artists just outside your library."),
             };
             (title, blurb)
         }
         Archetype::DjSets => {
-            const TITLES: &[&str] = &["The long players", "Sets and sessions", "Put it on"];
-            let title = TITLES[rng.random_range(0..TITLES.len())].to_string();
+            const TITLES: &[&str] = &[
+                "The long players",
+                "Sets and sessions",
+                "Put it on and leave it",
+            ];
+            let title = TITLES[pick(TITLES.len())].to_string();
             let blurb = match featured {
                 [first, ..] => format!(
                     "{n} long-form sets and sessions, fifteen minutes and up. Starting with {first}. Built for leaving on."
@@ -1099,6 +1183,7 @@ mod tests {
             queries: Vec::new(),
             profile_genres: Vec::new(),
             anchor_genres: HashMap::new(),
+            variant: 0,
         }
     }
 
@@ -1288,6 +1373,101 @@ mod tests {
             "one query supplied {from_series} of {} items",
             set.items.len()
         );
+    }
+
+    #[test]
+    fn stacked_genre_shelves_never_share_a_sentence() {
+        // Three genre shelves render one under another. Before the variant
+        // offset they drew from the same skeleton and read as one paragraph
+        // with the nouns swapped, which is exactly what "generic" means here.
+        let genres = ["Hip-Hop", "Rock", "Pop"];
+        let mut titles = Vec::new();
+        let mut blurbs = Vec::new();
+        for (index, genre) in genres.iter().enumerate() {
+            let anchor_a = anchor(1, "First Artist", 40);
+            let groups = vec![(
+                anchor_a.clone(),
+                (0..8)
+                    .map(|i| {
+                        candidate(
+                            (index as i64 + 1) * 100 + i,
+                            &format!("V{i}"),
+                            &format!("Artist {index}-{i}"),
+                            240,
+                        )
+                    })
+                    .collect(),
+            )];
+            let mut p = plan(Archetype::Genre((*genre).to_string()), vec![anchor_a]);
+            p.slug = genre_slug(genre);
+            p.bucket_key = "2026-W30".into();
+            p.variant = index;
+            let set = assemble_set(&p, &groups).unwrap();
+            titles.push(set.title);
+            blurbs.push(set.blurb);
+        }
+
+        // Strip the genre name so we compare sentence shape, not nouns.
+        let shape = |text: &str, genre: &str| text.replace(genre, "{}");
+        let shapes: Vec<String> = blurbs
+            .iter()
+            .zip(genres.iter())
+            .map(|(b, g)| shape(b, g))
+            .collect();
+        assert_ne!(shapes[0], shapes[1], "shelves 1 and 2 share a skeleton");
+        assert_ne!(shapes[1], shapes[2], "shelves 2 and 3 share a skeleton");
+        assert_ne!(shapes[0], shapes[2], "shelves 1 and 3 share a skeleton");
+
+        let title_shapes: Vec<String> = titles
+            .iter()
+            .zip(genres.iter())
+            .map(|(t, g)| shape(t, g))
+            .collect();
+        // Consecutive rotation slots, so all three must differ - an earlier
+        // "random draw plus offset" left two shelves both titled "Deep in {}".
+        assert_ne!(title_shapes[0], title_shapes[1]);
+        assert_ne!(title_shapes[1], title_shapes[2]);
+        assert_ne!(title_shapes[0], title_shapes[2]);
+    }
+
+    #[test]
+    fn count_words_are_never_capitalised_mid_sentence() {
+        // Every blurb bank gets exercised across a few rotations; a capital
+        // count word after a comma reads as a typo.
+        let a = anchor(1, "Seed Artist", 40);
+        let mut vias_anchor = a.clone();
+        vias_anchor.via = Some("Seed Artist".into());
+        let groups = vec![(
+            vias_anchor,
+            (0..10)
+                .map(|i| candidate(700 + i, &format!("V{i}"), &format!("Artist {i}"), 240))
+                .collect(),
+        )];
+        let archetypes = [
+            Archetype::DailyPicks,
+            Archetype::Genre("Ambient".into()),
+            Archetype::AlbumLove,
+            Archetype::OneStepOut,
+            Archetype::DjSets,
+        ];
+        for archetype in archetypes {
+            for variant in 0..5 {
+                let mut p = plan(archetype.clone(), vec![a.clone()]);
+                p.variant = variant;
+                p.bucket_key = format!("2026-W{}", 20 + variant);
+                let set = assemble_set(&p, &groups).unwrap();
+                for word in [
+                    "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten", "Eleven", "Twelve",
+                ] {
+                    assert!(
+                        !set.blurb.contains(&format!(", {word}")),
+                        "capitalised count mid-sentence in {:?}: {}",
+                        archetype,
+                        set.blurb
+                    );
+                }
+            }
+        }
     }
 
     #[test]

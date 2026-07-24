@@ -741,6 +741,7 @@
 <div class="videos-page">
 	<header class="search-header">
 		<div class="search-tools">
+			<span class="tools-spacer" aria-hidden="true"></span>
 			<SearchField
 				bind:value={query}
 				bind:inputEl
@@ -749,13 +750,21 @@
 				placeholder="Search TIDAL videos"
 				oninput={onInput}
 			/>
-			{#if browseMode && videoSessionActive}
-				<button type="button" class="editorial-link editorial-link--accent" onclick={backToPlayer}>
-					Back to the player
-				</button>
-			{:else}
-				<a class="editorial-link" href="/tidal/videos">TIDAL editorial</a>
-			{/if}
+			<!-- One contextual slot, always in the same place: where you are and
+			     how you get back. Falls back to the TIDAL entry point when there
+			     is nothing to go back to. -->
+			<div class="tools-action">
+				{#if browseMode && videoSessionActive}
+					<button type="button" class="header-action header-action--live" onclick={backToPlayer}>
+						<span class="live-dot" aria-hidden="true"></span>
+						<span class="header-action-label">Back to the player</span>
+					</button>
+				{:else if videoSessionActive && hasBrowseContent}
+					<button type="button" class="header-action" onclick={backToPicks}>Back to picks</button>
+				{:else}
+					<a class="header-action" href="/tidal/videos">TIDAL editorial</a>
+				{/if}
+			</div>
 		</div>
 		{#if searchFocused && recent.length > 0}
 			<div class="recent-inline">
@@ -835,7 +844,7 @@
 	{/if}
 
 	{#if showVideoHero}
-	<section class="hero glass-panel" class:hero--prompt={showChooseVideoPrompt}>
+	<section class="hero" class:hero--prompt={showChooseVideoPrompt}>
 		<div class="player-shell">
 			<!-- Placeholder the persistent dock positions its live player over while
 			     on /videos. The actual <video> lives in VideoDock so it survives
@@ -853,7 +862,7 @@
 		</div>
 		{#if !showChooseVideoPrompt}
 		<div class="hero-meta">
-			<p class="eyebrow">Videos</p>
+			<p class="eyebrow">Now playing</p>
 			<h1>{heroTitle}</h1>
 			{#if selectedVideo}
 				<div class="meta-line">
@@ -881,20 +890,13 @@
 					{#if selectedVideo.duration_ms}
 						<span>{formatTrackDuration(selectedVideo.duration_ms)}</span>
 					{/if}
-					{#if streamExpiresAt}
-						<span>Stream ready</span>
+					{#if $videoSession.sourceLabel}
+						<span class="meta-source">from {$videoSession.sourceLabel}</span>
 					{/if}
 				</div>
 			{/if}
 			{#if error}
 				<p class="inline-error">{error}</p>
-			{/if}
-			{#if hasBrowseContent && videoSessionActive}
-				<!-- The way back out of the player without stopping it: the dock
-				     drops to its mini corner and the shelves return. -->
-				<div class="hero-actions">
-					<button type="button" class="ghost-btn" onclick={backToPicks}>Back to picks</button>
-				</div>
 			{/if}
 		</div>
 		{/if}
@@ -1012,15 +1014,26 @@
 		padding: 0 4px;
 	}
 
+	/* Three columns so the field stays optically centered no matter how wide
+	   the contextual action gets - the label changes with playback state and a
+	   flex row would shunt the field sideways on every change. */
 	.search-tools {
-		display: flex;
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) minmax(0, 560px) minmax(0, 1fr);
 		align-items: center;
-		justify-content: center;
 		gap: var(--space-3);
-		flex-wrap: wrap;
 	}
 
-	.editorial-link {
+	.tools-action {
+		display: flex;
+		justify-content: flex-end;
+		min-width: 0;
+	}
+
+	.header-action {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-2);
 		flex: 0 0 auto;
 		padding: var(--space-2) var(--space-3);
 		border-radius: 999px;
@@ -1030,15 +1043,52 @@
 		font-size: var(--font-size-sm);
 		font-weight: var(--font-weight-semibold);
 		text-decoration: none;
-		transition: background var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
+		white-space: nowrap;
+		transition:
+			background var(--motion-fast),
+			border-color var(--motion-fast),
+			color var(--motion-fast);
 	}
 
-	.editorial-link:hover,
-	.editorial-link:focus-visible {
+	.header-action:hover,
+	.header-action:focus-visible {
 		background: var(--accent-soft);
 		border-color: var(--accent-line);
 		color: var(--text-primary);
 		outline: none;
+	}
+
+	/* Browsing with a video still running: the accent plus a live dot say the
+	   session is alive somewhere off-screen, so the button reads as "return to
+	   it" rather than "start something". */
+	.header-action--live {
+		background: var(--accent-soft);
+		border-color: var(--accent-line);
+		color: var(--accent-strong);
+	}
+
+	.live-dot {
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+		background: var(--accent-strong);
+		animation: live-pulse 2s ease-in-out infinite;
+	}
+
+	@keyframes live-pulse {
+		0%,
+		100% {
+			opacity: 1;
+		}
+		50% {
+			opacity: 0.35;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.live-dot {
+			animation: none;
+		}
 	}
 
 	/* The editorial browse layer fades and collapses under search focus but
@@ -1070,38 +1120,6 @@
 		gap: 28px;
 	}
 
-	.editorial-link--accent {
-		background: var(--accent-soft);
-		border-color: var(--accent-line);
-		color: var(--accent-strong);
-	}
-
-	.hero-actions {
-		display: flex;
-		gap: var(--space-2);
-		margin-top: var(--space-2);
-	}
-
-	.ghost-btn {
-		padding: var(--space-2) var(--space-4);
-		border-radius: 999px;
-		border: 1px solid var(--panel-border);
-		background: var(--bg-hover);
-		color: var(--text-primary);
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-bold);
-		transition:
-			background var(--motion-fast),
-			border-color var(--motion-fast);
-	}
-
-	.ghost-btn:hover,
-	.ghost-btn:focus-visible {
-		background: var(--accent-soft);
-		border-color: var(--accent-line);
-		outline: none;
-	}
-
 	.recent-inline {
 		display: flex;
 		align-items: center;
@@ -1116,11 +1134,13 @@
 		width: 100%;
 	}
 
+	/* Borderless, like the search surface: the video is the object on the page,
+	   so a panel frame around it is one box too many. */
 	.hero {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) minmax(260px, 340px);
-		gap: 20px;
-		padding: 16px;
+		gap: 24px;
+		padding: 0;
 	}
 
 	.hero--prompt {
@@ -1204,6 +1224,14 @@
 	.hero-meta h1 {
 		margin: 0;
 		font-size: var(--font-size-2xl);
+		line-height: var(--line-height-tight);
+		/* Long official-video titles ran to four lines and pushed the metadata
+		   out of the video's optical block. */
+		display: -webkit-box;
+		-webkit-line-clamp: 3;
+		line-clamp: 3;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
 	}
 
 	.meta-line {
@@ -1213,6 +1241,13 @@
 		align-items: center;
 		color: var(--text-tertiary);
 		font-size: var(--font-size-sm);
+	}
+
+	/* Which shelf this came from - the one piece of provenance worth showing,
+	   replacing the old "Stream ready" line, which described our plumbing
+	   rather than anything the listener chose. */
+	.meta-source {
+		color: var(--text-secondary);
 	}
 
 	.meta-link,
@@ -1258,10 +1293,12 @@
 		justify-content: flex-start;
 	}
 
+	/* Matches VideoSetShelf's heading so a results section and a shelf read as
+	   the same kind of thing rather than two competing scales. */
 	.section-heading h2 {
 		margin: 0;
-		color: var(--text-secondary);
-		font-size: var(--font-size-md);
+		color: var(--text-primary);
+		font-size: var(--font-size-lg);
 	}
 
 	.chips {
@@ -1311,13 +1348,24 @@
 		}
 	}
 
+	@media (max-width: 860px) {
+		/* The action drops under the field rather than squeezing it. */
+		.search-tools {
+			grid-template-columns: 1fr;
+		}
+
+		.tools-spacer {
+			display: none;
+		}
+
+		.tools-action {
+			justify-content: center;
+		}
+	}
+
 	@media (max-width: 620px) {
 		.videos-page {
 			gap: 20px;
-		}
-
-		.hero {
-			padding: 10px;
 		}
 
 		.video-grid {
