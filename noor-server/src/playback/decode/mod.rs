@@ -33,6 +33,10 @@ const DJ_ANALYSIS_MAX_SECONDS: usize = 90;
 const DJ_ANALYSIS_DASH_PREFETCH_MEDIA_SEGMENTS: usize = 3;
 const DJ_ANALYSIS_DASH_PREFETCH_ATTEMPTS: usize = 3;
 const DJ_ANALYSIS_DASH_PREFETCH_RETRY_BACKOFF_MS: u64 = 150;
+/// How many startup prebuffer parts (init + media prefix) are fetched at once.
+/// The set is small and fixed (at most init + 3), so this just needs to cover
+/// it; the background downloader has its own separate window.
+const PREBUFFER_FETCH_CONCURRENCY: usize = 4;
 const PLAYBACK_DASH_PREFETCH_ATTEMPTS: usize = 2;
 const PLAYBACK_DASH_PREFETCH_RETRY_BACKOFF_MS: u64 = 100;
 const PLAYBACK_DASH_BACKGROUND_FETCH_ATTEMPTS: usize = 3;
@@ -68,15 +72,29 @@ fn dash_prebuffer_media_count(total_segments: usize, dj_analysis_only: bool) -> 
     }
 }
 
+/// Fetch the startup prefix (init segment plus the first few media segments)
+/// and concatenate it in manifest order.
+///
+/// Parts are fetched CONCURRENTLY. This path used to await the init segment,
+/// then each media segment in turn - three serial round-trips before any audio
+/// could start, so one slow segment added to the others instead of overlapping
+/// with them. Measured on the live server over 4414 prebuffers: p50 1015ms,
+/// p90 2734ms, with 5.6% of track starts over 5s. Concurrency turns that sum
+/// into roughly the max of the parts.
+///
+/// Ordering and failure semantics are unchanged: bytes are assembled strictly
+/// in manifest order, and a failed media segment still truncates the prefix
+/// there (never splicing a later segment across the gap), so the decoder only
+/// ever sees a contiguous stream.
 async fn fetch_dash_prebuffer<F, Fut>(
     init_url: &str,
     media_urls: &[String],
     dj_analysis_only: bool,
     stop: &std::sync::atomic::AtomicBool,
-    mut fetch: F,
+    fetch: F,
 ) -> Result<DashPrebuffer>
 where
-    F: FnMut(String, usize) -> Fut,
+    F: Fn(String, usize) -> Fut + Clone,
     Fut: Future<Output = Result<Vec<u8>>>,
 {
     let media_count = dash_prebuffer_media_count(media_urls.len(), dj_analysis_only);
@@ -98,8 +116,32 @@ where
         });
     }
 
-    let mut bytes =
-        fetch_dash_prebuffer_part(init_url.to_string(), 0, dj_analysis_only, &mut fetch).await?;
+    // Index 0 is the init segment; the media prefix follows at 1..=media_count.
+    let mut parts: Vec<(String, usize)> = Vec::with_capacity(media_count + 1);
+    parts.push((init_url.to_string(), 0));
+    for (idx, segment_url) in media_urls.iter().take(media_count).enumerate() {
+        parts.push((segment_url.clone(), idx + 1));
+    }
+
+    let results: Vec<Result<Vec<u8>>> =
+        futures::stream::iter(
+            parts.into_iter().map(|(url, segment_index)| {
+                let fetch = fetch.clone();
+                async move {
+                    fetch_dash_prebuffer_part(url, segment_index, dj_analysis_only, fetch).await
+                }
+            }),
+        )
+        .buffered(PREBUFFER_FETCH_CONCURRENCY)
+        .collect()
+        .await;
+
+    let mut results = results.into_iter();
+    // The init segment carries the fMP4 header; nothing decodes without it.
+    let mut bytes = results
+        .next()
+        .unwrap_or_else(|| Err(anyhow!("DASH prebuffer produced no init segment")))?;
+
     if stop.load(Ordering::Relaxed) {
         return Ok(DashPrebuffer {
             bytes,
@@ -110,19 +152,8 @@ where
     }
 
     let mut fetched_media_segments = 0usize;
-    for (idx, segment_url) in media_urls.iter().take(media_count).enumerate() {
-        if stop.load(Ordering::Relaxed) {
-            return Ok(DashPrebuffer {
-                bytes,
-                fetched_media_segments,
-                stopped: true,
-                ended_after_prefix_failure: false,
-            });
-        }
-
-        match fetch_dash_prebuffer_part(segment_url.clone(), idx + 1, dj_analysis_only, &mut fetch)
-            .await
-        {
+    for result in results {
+        match result {
             Ok(segment) => {
                 bytes.extend(segment);
                 fetched_media_segments += 1;
@@ -151,10 +182,10 @@ async fn fetch_dash_prebuffer_part<F, Fut>(
     url: String,
     segment_index: usize,
     dj_analysis_only: bool,
-    fetch: &mut F,
+    fetch: F,
 ) -> Result<Vec<u8>>
 where
-    F: FnMut(String, usize) -> Fut,
+    F: Fn(String, usize) -> Fut,
     Fut: Future<Output = Result<Vec<u8>>>,
 {
     let (attempts, retry_backoff_ms) = if dj_analysis_only {
@@ -377,10 +408,27 @@ pub(crate) fn decode_and_buffer_job(
                 return Ok(());
             }
 
-            let stream_info = rt.block_on(config.resolve_stream(request.clone()))?;
+            // Reuse the stream the dispatching route already resolved when it is
+            // still fresh. Every play/switch/prepare route resolves before
+            // building the job, so re-resolving here was a second
+            // `playbackinfo` round-trip per track start - measured at p50 254ms
+            // / p99 3.7s on the live server - and doubled playback's share of
+            // the 4-permit TIDAL request limiter it shares with the prescanner
+            // and DJ analysis. Stale (or absent) means resolve as before.
+            let reused_stream = job
+                .resolved_stream
+                .as_ref()
+                .filter(|resolved| resolved.is_fresh())
+                .map(|resolved| resolved.info.clone());
+            let reused_resolve = reused_stream.is_some();
+            let stream_info = match reused_stream {
+                Some(info) => info,
+                None => rt.block_on(config.resolve_stream(request.clone()))?,
+            };
             debug!(
-                "TIDAL runtime stream resolved: track_id={}, quality={}, codec={}, sample_rate={:?}, bit_depth={:?}, dash_segments={}, start_from_segment={}, start_from_offset_ms={}",
+                "TIDAL runtime stream resolved: track_id={}, reused_route_resolve={}, quality={}, codec={}, sample_rate={:?}, bit_depth={:?}, dash_segments={}, start_from_segment={}, start_from_offset_ms={}",
                 shared.track_id,
+                reused_resolve,
                 stream_info.audio_quality,
                 stream_info.codec,
                 stream_info.sample_rate,
@@ -1038,7 +1086,7 @@ mod tests {
     use crate::playback::gapless::GaplessPlan;
     use crate::playback::player::{PlaybackSourceRequest, PreparedPlaybackJob};
     use anyhow::Context as _;
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
 
@@ -1112,9 +1160,17 @@ mod tests {
         Ok(Vec::new())
     }
 
+    /// Script fetch outcomes PER SEGMENT INDEX (0 = init, 1.. = media prefix),
+    /// each entry being that segment's successive attempt results.
+    ///
+    /// Keyed by index rather than one shared FIFO because prebuffer parts are
+    /// fetched concurrently now: a single queue would hand results to whichever
+    /// attempt happened to poll first, which a retry backoff makes
+    /// nondeterministic. Per-index scripting pins the semantics regardless of
+    /// interleaving.
     fn run_dash_prebuffer_test(
         dj_analysis_only: bool,
-        outcomes: Vec<Result<Vec<u8>>>,
+        outcomes: Vec<(usize, Vec<Result<Vec<u8>>>)>,
     ) -> Result<DashPrebuffer> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1125,31 +1181,53 @@ mod tests {
             .into_iter()
             .map(String::from)
             .collect::<Vec<_>>();
-        let mut outcomes = VecDeque::from(outcomes);
+        let scripted: Arc<Mutex<HashMap<usize, VecDeque<Result<Vec<u8>>>>>> = Arc::new(Mutex::new(
+            outcomes
+                .into_iter()
+                .map(|(index, attempts)| (index, VecDeque::from(attempts)))
+                .collect(),
+        ));
         rt.block_on(fetch_dash_prebuffer(
             "init",
             &segments,
             dj_analysis_only,
             &stop,
-            move |_url, _segment_index| {
-                let outcome = outcomes
-                    .pop_front()
-                    .unwrap_or_else(|| Err(anyhow!("unexpected fetch")));
-                async move { outcome }
+            move |_url, segment_index| {
+                let scripted = Arc::clone(&scripted);
+                async move {
+                    let outcome = scripted
+                        .lock()
+                        .expect("scripted outcomes")
+                        .get_mut(&segment_index)
+                        .and_then(|attempts| attempts.pop_front());
+                    outcome.unwrap_or_else(|| {
+                        Err(anyhow!("unexpected fetch for segment {segment_index}"))
+                    })
+                }
             },
         ))
     }
 
     #[test]
     fn analysis_only_dash_accepts_contiguous_media_prefix() {
+        // Media segment 2 fails every attempt. Segment 3 is scripted to SUCCEED
+        // and must still be discarded: splicing it in would hand the decoder a
+        // gap. Concurrency means it really is fetched, so this pins the
+        // ordered-assembly rule rather than relying on it never being tried.
         let prebuffer = run_dash_prebuffer_test(
             true,
             vec![
-                Ok(vec![0]),
-                Ok(vec![1]),
-                Err(anyhow!("segment 2 failed")),
-                Err(anyhow!("segment 2 failed")),
-                Err(anyhow!("segment 2 failed")),
+                (0, vec![Ok(vec![0])]),
+                (1, vec![Ok(vec![1])]),
+                (
+                    2,
+                    vec![
+                        Err(anyhow!("segment 2 failed")),
+                        Err(anyhow!("segment 2 failed")),
+                        Err(anyhow!("segment 2 failed")),
+                    ],
+                ),
+                (3, vec![Ok(vec![3])]),
             ],
         )
         .expect("analysis prefix");
@@ -1164,12 +1242,17 @@ mod tests {
         let prebuffer = run_dash_prebuffer_test(
             true,
             vec![
-                Ok(vec![0]),
-                Ok(vec![1]),
-                Err(anyhow!("segment 2 failed")),
-                Err(anyhow!("segment 2 failed")),
-                Err(anyhow!("segment 2 failed")),
-                Ok(vec![3]),
+                (0, vec![Ok(vec![0])]),
+                (1, vec![Ok(vec![1])]),
+                (
+                    2,
+                    vec![
+                        Err(anyhow!("segment 2 failed")),
+                        Err(anyhow!("segment 2 failed")),
+                        Err(anyhow!("segment 2 failed")),
+                    ],
+                ),
+                (3, vec![Ok(vec![3])]),
             ],
         )
         .expect("analysis prefix");
@@ -1183,11 +1266,10 @@ mod tests {
         let prebuffer = run_dash_prebuffer_test(
             true,
             vec![
-                Ok(vec![0]),
-                Err(anyhow!("segment 1 failed")),
-                Ok(vec![1]),
-                Ok(vec![2]),
-                Ok(vec![3]),
+                (0, vec![Ok(vec![0])]),
+                (1, vec![Err(anyhow!("segment 1 failed")), Ok(vec![1])]),
+                (2, vec![Ok(vec![2])]),
+                (3, vec![Ok(vec![3])]),
             ],
         )
         .expect("analysis retry");
@@ -1202,10 +1284,15 @@ mod tests {
         let error = run_dash_prebuffer_test(
             true,
             vec![
-                Ok(vec![0]),
-                Err(anyhow!("segment 1 failed once")),
-                Err(anyhow!("segment 1 failed twice")),
-                Err(anyhow!("segment 1 failed finally")),
+                (0, vec![Ok(vec![0])]),
+                (
+                    1,
+                    vec![
+                        Err(anyhow!("segment 1 failed once")),
+                        Err(anyhow!("segment 1 failed twice")),
+                        Err(anyhow!("segment 1 failed finally")),
+                    ],
+                ),
             ],
         )
         .expect_err("first media failure should fail analysis prebuffer");
@@ -1213,15 +1300,59 @@ mod tests {
         assert!(error.to_string().contains("segment 1 failed finally"));
     }
 
+    /// The point of the change: parts overlap instead of adding up. Serial
+    /// fetching of init + 2 media segments at 120ms each would take >=360ms;
+    /// concurrent completes in roughly one segment's time.
+    #[test]
+    fn prebuffer_parts_are_fetched_concurrently_not_serially() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let stop = AtomicBool::new(false);
+        let segments = ["s1", "s2"]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>();
+
+        let started = std::time::Instant::now();
+        let prebuffer = rt
+            .block_on(fetch_dash_prebuffer(
+                "init",
+                &segments,
+                false,
+                &stop,
+                |_url, segment_index| async move {
+                    tokio::time::sleep(Duration::from_millis(120)).await;
+                    Ok(vec![segment_index as u8])
+                },
+            ))
+            .expect("concurrent prebuffer");
+        let elapsed = started.elapsed();
+
+        // init + both media segments, still assembled in manifest order.
+        assert_eq!(prebuffer.bytes, vec![0, 1, 2]);
+        assert_eq!(prebuffer.fetched_media_segments, 2);
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "prebuffer parts were fetched serially: {elapsed:?}"
+        );
+    }
+
     #[test]
     fn playback_dash_prebuffer_remains_fail_fast() {
         let error = run_dash_prebuffer_test(
             false,
             vec![
-                Ok(vec![0]),
-                Ok(vec![1]),
-                Err(anyhow!("segment 2 failed once")),
-                Err(anyhow!("segment 2 failed finally")),
+                (0, vec![Ok(vec![0])]),
+                (1, vec![Ok(vec![1])]),
+                (
+                    2,
+                    vec![
+                        Err(anyhow!("segment 2 failed once")),
+                        Err(anyhow!("segment 2 failed finally")),
+                    ],
+                ),
             ],
         )
         .expect_err("playback prebuffer should fail on second media segment");
@@ -1234,10 +1365,9 @@ mod tests {
         let prebuffer = run_dash_prebuffer_test(
             false,
             vec![
-                Ok(vec![0]),
-                Err(anyhow!("segment 1 failed once")),
-                Ok(vec![1]),
-                Ok(vec![2]),
+                (0, vec![Ok(vec![0])]),
+                (1, vec![Err(anyhow!("segment 1 failed once")), Ok(vec![1])]),
+                (2, vec![Ok(vec![2])]),
             ],
         )
         .expect("playback retry");

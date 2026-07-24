@@ -69,6 +69,37 @@ impl PlaybackSourceKind {
     }
 }
 
+/// A stream the dispatching route already resolved, handed to the decoder so it
+/// does not pay for a second TIDAL `playbackinfo` round-trip.
+///
+/// Every play/switch/prepare route resolves the stream before building the job,
+/// and the decoder used to resolve it again from the bare request - two calls
+/// per track start, both through the 4-permit TIDAL request limiter. Measured on
+/// the live server across 4436 same-track pairs: the redundant resolve cost
+/// p50 254ms, p90 508ms, p99 3.7s, every single track start.
+///
+/// Reuse is gated on freshness because TIDAL's signed manifest URLs are
+/// time-limited: past `STREAM_INFO_REUSE_MAX_AGE` the decoder resolves again
+/// rather than risk a stale URL. In practice the decoder starts within
+/// milliseconds of the route resolving, so the fresh path is the normal one.
+#[derive(Debug, Clone)]
+pub struct ResolvedStream {
+    pub info: StreamInfo,
+    pub resolved_at: std::time::Instant,
+}
+
+/// How long a route-resolved stream stays reusable by the decoder. Comfortably
+/// longer than the dispatch hop (sub-millisecond to seconds) and far shorter
+/// than a TIDAL signed-URL lifetime, so a job that somehow sits around falls
+/// back to a fresh resolve instead of failing on an expired URL.
+pub const STREAM_INFO_REUSE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+
+impl ResolvedStream {
+    pub fn is_fresh(&self) -> bool {
+        self.resolved_at.elapsed() < STREAM_INFO_REUSE_MAX_AGE
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PreparedPlaybackJob {
     pub track: Track,
@@ -76,6 +107,9 @@ pub struct PreparedPlaybackJob {
     pub gapless: GaplessPlan,
     pub generation: u64,
     pub output_sample_rate: Option<u32>,
+    /// Stream the dispatching route already resolved. `None` for jobs built
+    /// without one (local library, tests); the decoder then resolves itself.
+    pub resolved_stream: Option<ResolvedStream>,
     pub dj_media_ref: Option<DjMediaRef>,
     pub prepared_transition: Option<PreparedTransitionProgram>,
     // Segment-aware seek (option C): for DASH-segmented sources, these tell the
@@ -169,6 +203,7 @@ impl PreparedPlaybackJob {
             gapless: GaplessPlan::disabled(),
             generation,
             output_sample_rate: None,
+            resolved_stream: None,
             dj_media_ref: None,
             prepared_transition: None,
             start_from_segment_index: 0,
@@ -256,6 +291,7 @@ impl PreparedPlaybackJob {
             gapless,
             generation: 0,
             output_sample_rate: None,
+            resolved_stream: None,
             dj_media_ref: None,
             prepared_transition: None,
             start_from_segment_index: 0,
@@ -1927,8 +1963,17 @@ pub fn build_playback_preparation(
 
     let output_sample_rate = stream_info.and_then(StreamInfo::sample_rate_hz);
 
+    // Carry the caller's already-resolved stream so the decoder can skip its own
+    // `playbackinfo` round-trip. Stamped now; the decoder only reuses it while
+    // fresh (see `ResolvedStream`).
+    let resolved_stream = stream_info.map(|info| ResolvedStream {
+        info: info.clone(),
+        resolved_at: std::time::Instant::now(),
+    });
+
     let mut job = PreparedPlaybackJob {
         output_sample_rate,
+        resolved_stream,
         ..PreparedPlaybackJob::new(track.clone(), source, gapless)
     };
     if let Some(media_ref) = crate::playback::dj_lookahead::tidal_media_ref_for_track(track) {
