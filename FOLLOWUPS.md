@@ -10,18 +10,23 @@ back to the PR or commit that flagged it.
 
 ## Open
 
-### videos: editorial discovery phases 2-3
+### videos: remaining editorial discovery ideas
 
-Phase 1 (daily-picks mural + folded TIDAL editorial shelf on /videos) shipped.
-Deferred by the brief's phased plan (see the planning doc in the PR):
-- "One step out" weekly adjacency set via get_artist_similar, one hop only.
+Shipped so far: daily-picks mural, genre shelves, album-love, one-step-out
+adjacency, long-form sets, folded TIDAL editorial, browse-while-playing.
+Still open:
 - video_history table written from VideoDock play/ended events; feeds
-  exclude-recently-watched in the set builder.
-- Rotating fourth slot: genre-led set (TasteVector genre_affinity) and
-  forgotten-favorites set (high historical plays, no recent listens).
-- Parse releaseDate in parse_search_video (raw payload carries it) to unlock
-  an era set; check the video `type` field values for a live-takes cut.
-- Spawned by: videos editorial discovery session (this branch).
+  exclude-recently-watched in the set builder and, later, video rows into
+  TasteVector artist affinity.
+- Forgotten-favorites shelf (high historical plays, no recent listens) - the
+  one archetype the listen history supports that nothing else surfaces.
+- Parse releaseDate in parse_search_video (the raw payload carries it) to
+  unlock an era shelf.
+- Per-shelf feedback (not interested / more like this) feeding the session
+  TasteVector, following the discovery_feedback pattern but video-keyed.
+- Long-form shelf leans on a duration heuristic plus fixed search phrases. If
+  TIDAL ever exposes a real format field, key off that instead.
+- Spawned by: videos editorial discovery sessions.
 
 ### perf: replace the playback PCM Vec+Mutex with a real ring buffer
 

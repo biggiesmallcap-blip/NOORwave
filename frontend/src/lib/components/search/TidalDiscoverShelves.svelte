@@ -15,13 +15,18 @@
 	import { downloadTidalPlaylist } from '$lib/stores/downloads';
 	import { tidalHomeItemToPlayable } from '$lib/utils/track';
 
-	let { modules, onViewAll, mediaKind = 'audio' }: {
+	let { modules, onViewAll, mediaKind = 'audio', onItemSelect }: {
 		modules: TidalHomeModule[];
 		onViewAll?: (mod: TidalHomeModule) => void;
 		mediaKind?: 'audio' | 'video';
+		/** Return true to claim the click. The /videos route uses this because
+		 *  the default video handling navigates to /videos, which is a no-op
+		 *  when you are already there. */
+		onItemSelect?: (item: TidalHomeItem) => boolean;
 	} = $props();
 
 	function handleItemClick(item: TidalHomeItem) {
+		if (onItemSelect?.(item)) return;
 		// A real video item always routes to the video player, whatever page
 		// hosted it. (VIDEO_LIST modules now parse as kind 'video'; older
 		// payload shapes may still surface videos as pseudo-tracks, handled

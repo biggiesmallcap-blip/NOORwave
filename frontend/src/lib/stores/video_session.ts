@@ -129,6 +129,9 @@ export async function playVideo(
 	opts: { preloaded?: PreloadedVideoStream | null } = {}
 ): Promise<boolean> {
 	const seq = ++streamSeq;
+	// Picking something new always means "show it": browsing the shelves with
+	// a video docked ends the moment you choose the next one.
+	videoBrowseMode.set(false);
 	update({
 		current: item,
 		queue: ctx.queue,
@@ -197,6 +200,7 @@ export async function advanceVideo(opts: { preloaded?: PreloadedVideoStream | nu
 export function clearVideoSession() {
 	streamSeq += 1;
 	session.set({ ...initialState, autoplay: loadAutoplayPreference() });
+	videoBrowseMode.set(false);
 }
 
 // ─── Cross-component requests (dispatched from layout, served by the dock) ───
@@ -205,6 +209,16 @@ export function clearVideoSession() {
  *  element's rect each frame so the live player appears docked into the hero
  *  while actually being a fixed element that never unmounts on navigation. */
 export const videoStageAnchor = writable<HTMLElement | null>(null);
+
+/** True while the listener has stepped back to the picks with a video still
+ *  playing. The route hides its stage anchor, so the dock falls to its mini
+ *  corner player and the editorial shelves take the page back. Playback is
+ *  untouched either way - this only decides who owns the hero slot. */
+export const videoBrowseMode = writable(false);
+
+export function setVideoBrowseMode(browsing: boolean) {
+	videoBrowseMode.set(browsing);
+}
 
 export const videoJumpRequest = writable<{ videoId: number; nonce: number } | null>(null);
 export const videoAutoplayToggleRequest = writable(0);

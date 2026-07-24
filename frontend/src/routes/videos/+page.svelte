@@ -12,7 +12,9 @@
 		type VideoDiscoverSet,
 	} from '$lib/api/client';
 	import ChartMural, { type ChartMuralItem } from '$lib/components/charts/ChartMural.svelte';
+	import TidalDiscoverShelves from '$lib/components/search/TidalDiscoverShelves.svelte';
 	import VideoCard from '$lib/components/video/VideoCard.svelte';
+	import VideoSetShelf from '$lib/components/video/VideoSetShelf.svelte';
 	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
@@ -28,6 +30,8 @@
 		videoJumpRequest,
 		videoSession,
 		videoStageAnchor,
+		videoBrowseMode,
+		setVideoBrowseMode,
 		playVideo,
 		clearVideoSession,
 		type VideoSessionItem,
@@ -44,7 +48,10 @@
 	// While the server assembles today's set (building: true, no snapshot yet),
 	// re-fetch a few times so the mural appears without a manual reload.
 	const BUILD_POLL_MS = 6000;
-	const BUILD_POLL_MAX = 3;
+	const BUILD_POLL_MAX = 6;
+	// TIDAL's videos page ships several modules; a couple is plenty next to the
+	// library-derived shelves.
+	const EDITORIAL_MODULE_MAX = 3;
 
 	interface VideoPageSnapshot {
 		selectedVideo: TidalSearchVideo | TidalVideoMixItem | null;
@@ -143,23 +150,29 @@
 	// clearing the field restores the same set at the same tile) and yields
 	// the page entirely to the player hero while a video session is active.
 	let discoverSets = $state<VideoDiscoverSet[]>([]);
-	let editorialModule = $state<TidalHomeModule | null>(null);
+	let editorialModules = $state<TidalHomeModule[]>([]);
 	let loadingBrowse = $state(true);
 	let muralIndex = $state(0);
 	let muralPaused = $state(false);
 	let browsePollTimer: ReturnType<typeof setTimeout> | null = null;
 	let browsePolls = 0;
 
+	// The daily set headlines the page as the mural; every other built set is
+	// its own rail below it.
 	let dailySet = $derived(discoverSets.find((s) => s.slug === 'daily-picks') ?? null);
-	// On pages/videos both real 'video' items and legacy pseudo-'track' items
-	// are music videos (the whole page is video content on TIDAL's side).
-	let editorialVideos = $derived(
-		(editorialModule?.items ?? []).filter((i) => i.kind === 'video' || i.kind === 'track')
+	let shelfSets = $derived(
+		discoverSets.filter((s) => s.slug !== 'daily-picks' && s.items.length > 0)
 	);
 	let videoSessionActive = $derived(Boolean(selectedVideo || streamUrl || loadingStream));
+	// Browse mode: a video is playing but the listener stepped back to the
+	// picks, so the dock goes mini and the shelves own the page again.
+	let browseMode = $derived($videoBrowseMode);
+	let playerOwnsStage = $derived(videoSessionActive && !browseMode);
 	let searchFocused = $derived(query.trim().length > 0);
-	let hasBrowseContent = $derived(Boolean(dailySet) || editorialVideos.length > 0);
-	let showEditorialLayer = $derived(!videoSessionActive && (hasBrowseContent || loadingBrowse));
+	let hasBrowseContent = $derived(
+		Boolean(dailySet) || shelfSets.length > 0 || editorialModules.length > 0
+	);
+	let showEditorialLayer = $derived(!playerOwnsStage && (hasBrowseContent || loadingBrowse));
 
 	let muralItems = $derived<ChartMuralItem[]>(
 		(dailySet?.items ?? []).map((v, i) => ({
@@ -180,17 +193,17 @@
 			]);
 			if (discover.status === 'fulfilled') {
 				discoverSets = discover.value.sets ?? [];
-				if (discover.value.building && discoverSets.length === 0 && browsePolls < BUILD_POLL_MAX) {
+				// Sets build one at a time server-side, so keep polling while
+				// more are on the way - the page fills in shelf by shelf.
+				if (discover.value.building && browsePolls < BUILD_POLL_MAX) {
 					browsePolls += 1;
 					browsePollTimer = setTimeout(() => void loadBrowse(), BUILD_POLL_MS);
 				}
 			}
-			if (page.status === 'fulfilled' && !editorialModule) {
-				const modules = page.value.modules ?? [];
-				editorialModule =
-					modules.find(
-						(m) => m.items.filter((i) => i.kind === 'video' || i.kind === 'track').length >= 4
-					) ?? null;
+			if (page.status === 'fulfilled' && editorialModules.length === 0) {
+				editorialModules = (page.value.modules ?? [])
+					.filter((m) => m.items.length >= 4)
+					.slice(0, EDITORIAL_MODULE_MAX);
 			}
 		} finally {
 			loadingBrowse = false;
@@ -206,17 +219,7 @@
 	async function playFromSet(set: VideoDiscoverSet, index: number) {
 		const video = set.items[index];
 		if (!video) return;
-		if (!assertOnline()) {
-			showToast('Server is reconnecting.', 'error', 3200);
-			return;
-		}
-		const ok = await playVideo(video, {
-			queue: set.items,
-			source: 'mix',
-			sourceLabel: set.title,
-			autoplay: true,
-		});
-		if (!ok) showToast($videoSession.error ?? 'This video could not be loaded.', 'error', 3200);
+		await playFromQueue(video, set.items, set.title, true);
 	}
 
 	function editorialItemToVideo(item: TidalHomeItem): TidalSearchVideo {
@@ -234,20 +237,53 @@
 		};
 	}
 
-	let editorialQueue = $derived(editorialVideos.map(editorialItemToVideo));
+	/** Claim clicks inside the TIDAL editorial shelves. Their default handling
+	 *  navigates to /videos, which does nothing when we are already here, so
+	 *  the route plays videos and loads playlists in place instead. */
+	function handleEditorialSelect(item: TidalHomeItem): boolean {
+		if (item.kind === 'video' || item.kind === 'track') {
+			const owner = editorialModules.find((m) => m.items.some((i) => i.id === item.id));
+			const queue = (owner?.items ?? [item])
+				.filter((i) => i.kind === 'video' || i.kind === 'track')
+				.map(editorialItemToVideo);
+			void playFromQueue(editorialItemToVideo(item), queue, owner?.title ?? "TIDAL's picks");
+			return true;
+		}
+		if (item.kind === 'playlist') {
+			setVideoBrowseMode(false);
+			void loadPlaylist(item.id, true);
+			return true;
+		}
+		return false;
+	}
 
-	async function playEditorialVideo(video: TidalSearchVideo) {
+	/** Shared play path for every editorial surface: mural, set shelves, and
+	 *  the TIDAL modules. The whole shelf becomes the autoplay queue. */
+	async function playFromQueue(
+		video: TidalSearchVideo,
+		queue: TidalSearchVideo[],
+		label: string,
+		autoplay = $videoSession.autoplay
+	) {
 		if (!assertOnline()) {
 			showToast('Server is reconnecting.', 'error', 3200);
 			return;
 		}
 		const ok = await playVideo(video, {
-			queue: editorialQueue,
+			queue: queue.length > 0 ? queue : [video],
 			source: 'mix',
-			sourceLabel: editorialModule?.title || "TIDAL's picks",
-			autoplay: $videoSession.autoplay,
+			sourceLabel: label,
+			autoplay,
 		});
 		if (!ok) showToast($videoSession.error ?? 'This video could not be loaded.', 'error', 3200);
+	}
+
+	function backToPicks() {
+		setVideoBrowseMode(true);
+	}
+
+	function backToPlayer() {
+		setVideoBrowseMode(false);
 	}
 
 	// Keep the mural index valid when a new snapshot lands.
@@ -262,7 +298,7 @@
 		const count = dailySet?.items.length ?? 0;
 		if (count <= 1) return;
 		const timer = setInterval(() => {
-			if (!muralPaused && !searchFocused && !videoSessionActive) jumpMural(1);
+			if (!muralPaused && !searchFocused && !playerOwnsStage) jumpMural(1);
 		}, MURAL_ROTATE_MS);
 		return () => clearInterval(timer);
 	});
@@ -274,7 +310,12 @@
 		query.trim().length > 0 &&
 		hasVideoChoices
 	);
-	let showVideoHero = $derived(Boolean(selectedVideo || streamUrl || loadingStream || showChooseVideoPrompt));
+	// In browse mode the stage anchor must not render: its absence is what
+	// tells the dock to fall back to its mini corner player.
+	let showVideoHero = $derived(
+		!browseMode &&
+		Boolean(selectedVideo || streamUrl || loadingStream || showChooseVideoPrompt)
+	);
 
 	function loadRecent(): string[] {
 		if (typeof localStorage === 'undefined') return [];
@@ -684,7 +725,13 @@
 				placeholder="Search TIDAL videos"
 				oninput={onInput}
 			/>
-			<a class="editorial-link" href="/tidal/videos">TIDAL editorial</a>
+			{#if browseMode && videoSessionActive}
+				<button type="button" class="editorial-link editorial-link--accent" onclick={backToPlayer}>
+					Back to the player
+				</button>
+			{:else}
+				<a class="editorial-link" href="/tidal/videos">TIDAL editorial</a>
+			{/if}
 		</div>
 		{#if searchFocused && recent.length > 0}
 			<div class="recent-inline">
@@ -733,23 +780,30 @@
 						subtitle=""
 					/>
 				{/if}
-				{#if editorialVideos.length > 0}
+				{#each shelfSets as set (set.slug)}
+					<VideoSetShelf
+						title={set.title}
+						blurb={set.blurb}
+						items={set.items}
+						onSelect={(_video, index) => playFromSet(set, index)}
+						onPlayAll={() => playFromSet(set, 0)}
+					/>
+				{/each}
+
+				{#if editorialModules.length > 0}
 					<section class="results-section">
 						<div class="section-heading section-heading--split">
 							<div class="section-heading">
 								<p class="eyebrow">From TIDAL's desk</p>
-								<h2>{editorialModule?.title || 'Editorial picks'}</h2>
+								<h2>Editorial picks</h2>
 							</div>
 							<a class="text-btn" href="/tidal/videos">More from TIDAL</a>
 						</div>
-						<div class="video-grid">
-							{#each editorialQueue.slice(0, 8) as video (video.tidal_id)}
-								<VideoCard
-									{video}
-									onSelect={(item) => !('id' in item) && void playEditorialVideo(item)}
-								/>
-							{/each}
-						</div>
+						<TidalDiscoverShelves
+							modules={editorialModules}
+							mediaKind="video"
+							onItemSelect={handleEditorialSelect}
+						/>
 					</section>
 				{/if}
 			</div>
@@ -810,6 +864,13 @@
 			{/if}
 			{#if error}
 				<p class="inline-error">{error}</p>
+			{/if}
+			{#if hasBrowseContent && videoSessionActive}
+				<!-- The way back out of the player without stopping it: the dock
+				     drops to its mini corner and the shelves return. -->
+				<div class="hero-actions">
+					<button type="button" class="ghost-btn" onclick={backToPicks}>Back to picks</button>
+				</div>
 			{/if}
 		</div>
 		{/if}
@@ -983,6 +1044,38 @@
 		min-height: 0;
 		display: grid;
 		gap: 28px;
+	}
+
+	.editorial-link--accent {
+		background: var(--accent-soft);
+		border-color: var(--accent-line);
+		color: var(--accent-strong);
+	}
+
+	.hero-actions {
+		display: flex;
+		gap: var(--space-2);
+		margin-top: var(--space-2);
+	}
+
+	.ghost-btn {
+		padding: var(--space-2) var(--space-4);
+		border-radius: 999px;
+		border: 1px solid var(--panel-border);
+		background: var(--bg-hover);
+		color: var(--text-primary);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
+		transition:
+			background var(--motion-fast),
+			border-color var(--motion-fast);
+	}
+
+	.ghost-btn:hover,
+	.ghost-btn:focus-visible {
+		background: var(--accent-soft);
+		border-color: var(--accent-line);
+		outline: none;
 	}
 
 	.recent-inline {
