@@ -6,6 +6,7 @@ const read = (rel) => readFileSync(resolve(import.meta.dirname, rel), 'utf8');
 const source = read('../src/routes/videos/+page.svelte');
 const dock = read('../src/lib/components/video/VideoDock.svelte');
 const store = read('../src/lib/stores/video_session.ts');
+const shelves = read('../src/lib/components/search/TidalDiscoverShelves.svelte');
 
 describe('Videos editorial browse state', () => {
 	test('hero slot arbitration: the layer yields only while the player owns the stage', () => {
@@ -58,6 +59,43 @@ describe('Videos editorial browse state', () => {
 
 	test('legacy landing chips only appear when there is no editorial content', () => {
 		expect(source).toContain('!hasBrowseContent && !loadingBrowse}');
+	});
+});
+
+describe('Queue rows for shelf and editorial picks', () => {
+	test('the jump lookup searches the live session queue, not just search results', () => {
+		// Shelf and editorial picks only ever live in the session queue, so a
+		// lookup limited to the route's local arrays left every queue row dead
+		// for those sources.
+		expect(source).toContain('function findVideoInCurrentContext');
+		const body = source.slice(
+			source.indexOf('function findVideoInCurrentContext'),
+			source.indexOf('function toggleVideoAutoplay')
+		);
+		expect(body).toContain('...$videoSession.queue');
+	});
+
+	test('jumping inside a shelf keeps that shelf as the queue', () => {
+		// Otherwise the fallthrough swaps the shelf for the (usually empty)
+		// search results and autoplay dies.
+		const body = source.slice(
+			source.indexOf('function buildPlayContext'),
+			source.indexOf('async function selectVideo')
+		);
+		expect(body).toContain('session.queue.some((item) => item.tidal_id === video.tidal_id)');
+		expect(body).toContain('queue: session.queue');
+		expect(body).toContain('sourceLabel: session.sourceLabel');
+	});
+});
+
+describe('Video modules never fall through to the audio detail page', () => {
+	test('View all is hidden for video modules unless the host handles it', () => {
+		// /search/discover/[id] plays every item via playTidalTrackNow, so
+		// following it from a video module plays the song, not the video.
+		expect(shelves).toContain(
+			"let showViewAll = $derived(mediaKind !== 'video' || Boolean(onViewAll))"
+		);
+		expect(shelves).toContain('{#if showViewAll}');
 	});
 });
 

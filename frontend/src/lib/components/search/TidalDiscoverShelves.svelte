@@ -166,6 +166,12 @@
 		void goto(`/search/discover/${encodeURIComponent(mod.id)}`);
 	}
 
+	// The module-detail page is audio-only: it plays every item through
+	// playTidalTrackNow, so following it from a video module plays the song
+	// instead of the video. Until a video-capable detail page exists, video
+	// modules only show View all when the host page supplies its own handler.
+	let showViewAll = $derived(mediaKind !== 'video' || Boolean(onViewAll));
+
 	function isTrackList(mod: TidalHomeModule): boolean {
 		return mod.kind === 'TRACK_LIST'
 			|| (mod.items.length > 0 && mod.items.every((i) => i.kind === 'track'));
@@ -271,9 +277,11 @@
 						<p class="eyebrow">TIDAL</p>
 						<h2>{mod.title}</h2>
 					</div>
-					<button type="button" class="view-all-link" onclick={() => viewAll(mod)}>
-						View all -&gt;
-					</button>
+					{#if showViewAll}
+						<button type="button" class="view-all-link" onclick={() => viewAll(mod)}>
+							View all -&gt;
+						</button>
+					{/if}
 				</div>
 				{#if isTrackList(mod)}
 					{@render trackGrid(mod)}

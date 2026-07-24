@@ -464,6 +464,20 @@
 				autoplay: $videoSession.autoplay,
 			};
 		}
+		// Anything the search results don't own but the live session does came
+		// from a shelf or an editorial module. Keep that queue and its label:
+		// falling through to the search results would swap a twelve-video shelf
+		// for an empty array, killing autoplay and emptying the queue panel.
+		const inResults = videos.some((item) => item.tidal_id === video.tidal_id);
+		const session = $videoSession;
+		if (!inResults && session.queue.some((item) => item.tidal_id === video.tidal_id)) {
+			return {
+				queue: session.queue,
+				source: session.source === 'none' ? ('mix' as VideoSessionSource) : session.source,
+				sourceLabel: session.sourceLabel,
+				autoplay: session.autoplay,
+			};
+		}
 		return {
 			queue: videos,
 			source: (lastQuery ? 'search' : 'direct') as VideoSessionSource,
@@ -565,7 +579,17 @@
 	}
 
 	function findVideoInCurrentContext(videoId: number): VideoSessionItem | null {
-		return [...mixItems, ...playlistItems, ...videos].find((item) => item.tidal_id === videoId) ?? null;
+		// The live session queue is authoritative for whatever is playing, and
+		// it is the only place shelf and editorial picks ever land - they never
+		// populate the route's local arrays. Searching just those left every
+		// queue row dead for those sources. Local arrays still come first:
+		// their items carry the richer context (mix_id, playlist membership)
+		// that buildPlayContext keys off.
+		return (
+			[...mixItems, ...playlistItems, ...videos, ...$videoSession.queue].find(
+				(item) => item.tidal_id === videoId
+			) ?? null
+		);
 	}
 
 	function toggleVideoAutoplay() {
