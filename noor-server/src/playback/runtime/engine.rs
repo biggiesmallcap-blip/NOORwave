@@ -308,11 +308,17 @@ impl PlaybackEngine {
     }
 
     pub(super) fn pause(&self) -> Result<()> {
-        self.shared.paused.store(true, Ordering::SeqCst);
+        // Ramped exit: the callback drains ~TRANSPORT_FADE_MS more audio on its
+        // way to silence, then disarms itself. `paused` still flips
+        // synchronously inside begin_fade_out, so snapshots, promotions and the
+        // swap guard read the intent immediately and nothing downstream has to
+        // wait on the audio thread to observe the pause.
+        self.shared.begin_fade_out();
         Ok(())
     }
 
     pub(super) fn resume(&self) -> Result<()> {
+        self.shared.disarm_pause_fade();
         self.shared.paused.store(false, Ordering::SeqCst);
         Ok(())
     }

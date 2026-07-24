@@ -14,6 +14,21 @@ const NEAR_END_THRESHOLD_MS: i64 = 30_000;
 /// short enough that the momentary doubling of the outgoing track's audio
 /// (live copy + its rendered continuation) reads as a single transient.
 pub(crate) const DJ_HANDOFF_FADE_MS: u32 = 15;
+/// Window over which an applied volume change slews to its new value. The
+/// callback samples `volume_ctl` once per buffer, so an un-ramped change lands
+/// as a step discontinuity at the buffer seam - one click per step, and a
+/// slider drag emits a stream of them. This is a slew *rate*: a full 0.0<->1.0
+/// move takes the whole window, a small nudge resolves proportionally sooner.
+/// Long enough to put the step well below audibility, short enough that the
+/// control still tracks the user's hand.
+pub(crate) const VOLUME_RAMP_MS: u32 = 20;
+/// Envelope length for a user pause / resume. Same reasoning as the volume
+/// ramp - cutting the transport mid-waveform steps the output straight to
+/// silence and clicks - but shorter, because the fade-out plays real audio on
+/// its way down and that audio is not replayed on resume. 10ms is under the
+/// threshold where a listener reads the pause as sluggish, and short enough
+/// that the un-replayed tail stays imperceptible.
+pub(crate) const TRANSPORT_FADE_MS: u32 = 10;
 /// Sample count at which an active PlaybackBuffer emits a one-shot warning.
 /// 50_000_000 f32 samples is ~200 MB of allocation - well past the size at
 /// which the unbounded-buffer issue meaningfully impacts memory. This is
@@ -85,6 +100,41 @@ fn dj_handoff_fadeout_gain(pos: u64, start: u64, len: u64) -> f32 {
     (t * std::f32::consts::FRAC_PI_2).cos()
 }
 
+/// Per-frame gain delta that walks a full-scale (0<->1) move across
+/// `window_ms`. Frames, not interleaved samples: the ramps advance once per
+/// frame so both channels of a frame share a gain (same invariant
+/// `dj_handoff_fadeout_gain` keeps).
+fn ramp_step_for_ms(window_ms: u32, sample_rate: u32) -> f32 {
+    let ramp_frames = u64::from(window_ms) * u64::from(sample_rate) / 1_000;
+    if ramp_frames == 0 {
+        // Degenerate rate (unreported device): jump rather than stall at the
+        // old gain forever.
+        1.0
+    } else {
+        1.0 / ramp_frames as f32
+    }
+}
+
+fn volume_ramp_step(sample_rate: u32) -> f32 {
+    ramp_step_for_ms(VOLUME_RAMP_MS, sample_rate)
+}
+
+fn transport_ramp_step(sample_rate: u32) -> f32 {
+    ramp_step_for_ms(TRANSPORT_FADE_MS, sample_rate)
+}
+
+/// One frame of slew from `current` toward `target`, never overshooting.
+#[inline]
+fn step_gain(current: f32, target: f32, step: f32) -> f32 {
+    if current < target {
+        (current + step).min(target)
+    } else if current > target {
+        (current - step).max(target)
+    } else {
+        current
+    }
+}
+
 fn write_output_buffer<T>(
     data: &mut [T],
     shared: &Arc<PlaybackSharedState>,
@@ -97,12 +147,38 @@ fn write_output_buffer<T>(
         return;
     }
 
-    if shared.paused.load(Ordering::SeqCst) {
+    // `paused` is a general-purpose mute gate, not a "the user pressed pause"
+    // signal: pre-decoded next decks, DJ promotions and the stream-swap guard
+    // all drive it for their own reasons, and those all want today's hard,
+    // instant mute (a deck that isn't audible yet has no click to avoid, and a
+    // promotion must hand over at full gain or it would notch the crossfade
+    // envelope that is already shaping the transition). So only an armed fade -
+    // which `PlaybackEngine::pause` sets and nothing else does - earns the
+    // ramped exit; every other paused path falls straight through to silence.
+    let paused = shared.paused.load(Ordering::SeqCst);
+    let fading_out = shared.pause_fade_armed.load(Ordering::Relaxed);
+    if paused && !fading_out {
         data.fill_with(|| convert(0.0));
         return;
     }
 
-    let volume = f32::from_bits(shared.volume_ctl.load(Ordering::Relaxed));
+    // Where the user wants the gain, and where the output actually is right
+    // now. `volume` resumes from the last frame the previous callback emitted,
+    // so the ramp is continuous across buffer seams instead of restarting (and
+    // re-stepping) at every callback.
+    let target_volume = f32::from_bits(shared.volume_ctl.load(Ordering::Relaxed));
+    let mut volume = f32::from_bits(shared.volume_smoothed.load(Ordering::Relaxed));
+    let volume_step = volume_ramp_step(shared.device_sample_rate);
+    let device_channels = shared.device_channels.max(1) as usize;
+
+    // Transport envelope, orthogonal to the user's volume: 0 while paused, 1
+    // while playing, slewed between. A resume needs no arming - the gain is
+    // wherever the fade-out left it and simply walks back up to 1, which makes
+    // a resume mid-fade (fast pause/play tap) join the ramp already in flight
+    // rather than restart it.
+    let transport_target = if fading_out { 0.0 } else { 1.0 };
+    let mut transport = f32::from_bits(shared.transport_gain.load(Ordering::Relaxed));
+    let transport_step = transport_ramp_step(shared.device_sample_rate);
 
     // Real-time safety contract for this critical section:
     //   * No IO, no syscalls, no allocations on the hot path.
@@ -225,18 +301,51 @@ fn write_output_buffer<T>(
                 * u64::from(shared.device_channels.max(1))
                 / 1000;
             let mut cursor = shared.position_samples.load(Ordering::Relaxed);
+            let mut chan = 0usize;
             guard.drain_into(data, &mut |s: f32| {
                 let seam_gain = dj_handoff_fadeout_gain(cursor, dj_fadeout_start, fade_len);
                 cursor += 1;
-                convert(s * volume * fade_gain * seam_gain)
+                if chan == 0 {
+                    volume = step_gain(volume, target_volume, volume_step);
+                    transport = step_gain(transport, transport_target, transport_step);
+                }
+                chan = (chan + 1) % device_channels;
+                convert(s * volume * transport * fade_gain * seam_gain)
             })
         } else {
-            guard.drain_into(data, &mut |s: f32| convert(s * volume * fade_gain))
+            let mut chan = 0usize;
+            guard.drain_into(data, &mut |s: f32| {
+                if chan == 0 {
+                    volume = step_gain(volume, target_volume, volume_step);
+                    transport = step_gain(transport, transport_target, transport_step);
+                }
+                chan = (chan + 1) % device_channels;
+                convert(s * volume * transport * fade_gain)
+            })
         }
     } else {
         data.fill_with(|| convert(0.0));
         0
     };
+
+    // Publish where the ramps landed so the next callback picks up mid-slew.
+    // The audio thread is the only writer; Relaxed matches volume_ctl's read.
+    shared
+        .volume_smoothed
+        .store(volume.to_bits(), Ordering::Relaxed);
+
+    if fading_out && (transport <= 0.0 || written == 0) {
+        // The fade reached silence (or the deck produced nothing to fade -
+        // never started, or starved mid-ramp, in which case there is no
+        // waveform left to click). Snap to zero and disarm: `paused` is
+        // already latched, so from here the gate above short-circuits to
+        // silence without taking the buffer lock every callback.
+        transport = 0.0;
+        shared.pause_fade_armed.store(false, Ordering::Relaxed);
+    }
+    shared
+        .transport_gain
+        .store(transport.to_bits(), Ordering::Relaxed);
 
     if written == data.len() {
         guard.starved_notified = false;
@@ -397,6 +506,24 @@ pub(crate) struct PlaybackSharedState {
     pub(crate) buffer: Mutex<PlaybackBuffer>,
     pub(crate) command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
     pub(crate) volume_ctl: Arc<AtomicU32>,
+    /// f32 bits of the gain actually applied to the last frame emitted, as
+    /// opposed to `volume_ctl`'s target. Owned by the audio callback (sole
+    /// writer) and carried across callbacks so a volume change slews over
+    /// VOLUME_RAMP_MS rather than stepping at the buffer seam. Seeded to the
+    /// current target so a fresh engine starts at gain, not at silence.
+    pub(crate) volume_smoothed: AtomicU32,
+    /// f32 bits of the pause/resume envelope: 0 while paused, 1 while playing.
+    /// Audio-thread-owned, like `volume_smoothed`. Rests at 1.0 rather than
+    /// tracking `paused`, so the mechanical mute paths (pre-decode, promotion,
+    /// swap guard) that flip `paused` without arming a fade come up at full
+    /// gain exactly as they do today - only a fade armed by
+    /// `PlaybackEngine::pause` ever drives this to 0.
+    pub(crate) transport_gain: AtomicU32,
+    /// Set by `PlaybackEngine::pause` to request a ramped exit, cleared by the
+    /// callback once the ramp reaches silence (and by `resume`). While set, the
+    /// callback keeps draining a `paused` deck so the fade has audio to work
+    /// with; `paused` itself still flips synchronously for every other reader.
+    pub(crate) pause_fade_armed: AtomicBool,
     pub(crate) position_samples: Arc<AtomicU64>,
     pub(crate) seek_target_samples: AtomicU64,
     pub(crate) total_samples: AtomicU64,
@@ -472,6 +599,7 @@ impl PlaybackSharedState {
         } else {
             0
         };
+        let volume_smoothed = AtomicU32::new(volume_ctl.load(Ordering::Relaxed));
         Self {
             track_id,
             generation,
@@ -490,6 +618,9 @@ impl PlaybackSharedState {
             buffer: Mutex::new(PlaybackBuffer::new(prebuffer_samples)),
             command_tx,
             volume_ctl,
+            volume_smoothed,
+            transport_gain: AtomicU32::new(1.0f32.to_bits()),
+            pause_fade_armed: AtomicBool::new(false),
             position_samples,
             seek_target_samples: AtomicU64::new(u64::MAX),
             total_samples: AtomicU64::new(estimated_total_samples.unwrap_or(0)),
@@ -548,6 +679,39 @@ impl PlaybackSharedState {
 
     pub(crate) fn suppress_started_event(&self) {
         self.started_event_enabled.store(false, Ordering::Relaxed);
+    }
+
+    /// Latch a pause and, when this deck is actually making sound, ask the
+    /// callback to ramp it out over TRANSPORT_FADE_MS instead of cutting
+    /// mid-waveform. Returns whether a fade is now in flight, so a caller that
+    /// is about to tear the deck down knows whether there is anything to wait
+    /// for.
+    ///
+    /// Arms BEFORE latching `paused`: the callback only keeps draining a paused
+    /// deck while the fade is armed, so arming second would race a callback
+    /// into the hard-silence gate and clip the ramp.
+    ///
+    /// Reserved for user-initiated transport and teardown - see the gate in
+    /// `write_output_buffer` for why the mechanical mute paths must not use it.
+    pub(crate) fn begin_fade_out(&self) -> bool {
+        // A fade only has work to do on an audible deck. Gain alone cannot tell
+        // us that: a paused deck's transport gain rests at 1.0 behind the gate,
+        // and a stopped one has had its buffer reset out from under it.
+        let audible = !self.stopped.load(Ordering::SeqCst)
+            && !self.paused.load(Ordering::SeqCst)
+            && f32::from_bits(self.transport_gain.load(Ordering::Relaxed)) > 0.0;
+        if audible {
+            self.pause_fade_armed.store(true, Ordering::Relaxed);
+        }
+        self.paused.store(true, Ordering::SeqCst);
+        audible
+    }
+
+    /// Drop any in-flight fade-out. The transport gain keeps whatever value the
+    /// ramp reached, so the callback walks it back up to 1.0 from there - a
+    /// resume during the fade rejoins the ramp rather than jumping.
+    pub(crate) fn disarm_pause_fade(&self) {
+        self.pause_fade_armed.store(false, Ordering::Relaxed);
     }
 
     pub(crate) fn clear_drop_preview_trigger(&self) {
@@ -791,6 +955,336 @@ mod tests {
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
         ))
+    }
+
+    /// Drives one callback over an all-1.0 input, so every output sample is
+    /// literally the gain that was applied to it.
+    fn drain_gain(shared: &Arc<PlaybackSharedState>, frames: usize) -> Vec<f32> {
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, _event_rx) = tokio::sync::broadcast::channel(8);
+        let mut output = vec![0.0f32; frames * 2];
+        write_output_f32(&mut output, shared, &command_tx, &event_tx);
+        output
+    }
+
+    fn frame_gains(output: &[f32]) -> Vec<f32> {
+        output.chunks_exact(2).map(|frame| frame[0]).collect()
+    }
+
+    fn max_frame_delta(gains: &[f32]) -> f32 {
+        gains
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0f32, f32::max)
+    }
+
+    #[test]
+    fn fresh_state_seeds_smoothed_volume_at_target() {
+        let shared = test_shared_state();
+        assert_eq!(
+            f32::from_bits(shared.volume_smoothed.load(Ordering::Relaxed)),
+            1.0,
+            "a fresh engine must start at the live volume; seeding at 0 would \
+             fade every track in over the ramp window"
+        );
+    }
+
+    #[test]
+    fn untouched_volume_applies_exact_flat_gain() {
+        let shared = test_shared_state();
+        shared.volume_ctl.store(0.5f32.to_bits(), Ordering::Relaxed);
+        shared
+            .volume_smoothed
+            .store(0.5f32.to_bits(), Ordering::Relaxed);
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer");
+            buffer.samples = vec![1.0; 16];
+        }
+
+        let output = drain_gain(&shared, 8);
+
+        assert!(
+            output.iter().all(|&s| s == 0.5),
+            "with the control untouched the ramp must be a no-op and the gain \
+             exact, bit-for-bit: {output:?}"
+        );
+    }
+
+    #[test]
+    fn volume_change_ramps_instead_of_stepping() {
+        let shared = test_shared_state();
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer");
+            buffer.samples = vec![1.0; 1024];
+        }
+        // Slam the control to silence mid-stream: the mute case, and the
+        // harshest step the old flat-multiply produced.
+        shared.volume_ctl.store(0.0f32.to_bits(), Ordering::Relaxed);
+
+        let output = drain_gain(&shared, 512);
+        let gains = frame_gains(&output);
+        let step = volume_ramp_step(48_000);
+
+        assert!(
+            gains[0] >= 1.0 - step * 2.0,
+            "the ramp must depart from the previously applied gain, not jump \
+             to the new target: first frame was {}",
+            gains[0]
+        );
+        assert!(
+            *gains.last().expect("frames") > 0.0,
+            "512 frames is shorter than the 20ms ramp, so the gain must still \
+             be in flight, not already collapsed to silence"
+        );
+        for frame in output.chunks_exact(2) {
+            assert_eq!(
+                frame[0], frame[1],
+                "both channels of a frame must share one gain"
+            );
+        }
+        let delta = max_frame_delta(&gains);
+        assert!(
+            delta <= step + 1e-6,
+            "no frame-to-frame gain jump may exceed the ramp step {step}; got \
+             {delta} - that discontinuity is the audible click"
+        );
+    }
+
+    #[test]
+    fn ramp_stays_continuous_across_the_callback_seam() {
+        let shared = test_shared_state();
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer");
+            buffer.samples = vec![1.0; 2048];
+        }
+        shared.volume_ctl.store(0.0f32.to_bits(), Ordering::Relaxed);
+
+        let first = frame_gains(&drain_gain(&shared, 256));
+        let second = frame_gains(&drain_gain(&shared, 256));
+        let step = volume_ramp_step(48_000);
+
+        // The buffer boundary is precisely where the old once-per-callback
+        // load dropped its step, so the seam gets its own assertion.
+        let seam = (*first.last().expect("frames") - second[0]).abs();
+        assert!(
+            seam <= step + 1e-6,
+            "gain must carry across callbacks; seam jumped by {seam} (max {step})"
+        );
+        assert!(
+            max_frame_delta(&second) <= step + 1e-6,
+            "the ramp must keep slewing smoothly into the next buffer"
+        );
+        assert!(
+            second.last().copied().expect("frames") < first[0],
+            "the ramp must still be progressing toward the new target"
+        );
+    }
+
+    /// What `PlaybackEngine::pause` does.
+    fn user_pause(shared: &Arc<PlaybackSharedState>) {
+        assert!(
+            shared.begin_fade_out(),
+            "an audible deck must report a fade in flight, so teardown knows to wait for it"
+        );
+    }
+
+    fn user_resume(shared: &Arc<PlaybackSharedState>) {
+        shared.disarm_pause_fade();
+        shared.paused.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn begin_fade_out_reports_nothing_to_fade_on_a_silent_deck() {
+        // Teardown batches every deck it owns, so `begin_fade_out` is what
+        // decides which of them are worth waiting for. A paused deck (pre-decode,
+        // drop preview) rests at transport gain 1.0 behind the gate, so gain
+        // alone would wrongly call it audible - and arming it would make it
+        // drain, eating the head of a track that was never heard.
+        let paused_deck = test_shared_state();
+        paused_deck.paused.store(true, Ordering::SeqCst);
+        assert!(
+            !paused_deck.begin_fade_out(),
+            "a paused deck has nothing to fade"
+        );
+        assert!(
+            !paused_deck.pause_fade_armed.load(Ordering::Relaxed),
+            "a paused deck must not arm a fade, or the callback would drain it"
+        );
+        assert!(
+            paused_deck.paused.load(Ordering::SeqCst),
+            "the pause latch must hold regardless"
+        );
+
+        let stopped_deck = test_shared_state();
+        stopped_deck.stopped.store(true, Ordering::SeqCst);
+        assert!(
+            !stopped_deck.begin_fade_out(),
+            "a stopped deck has had its buffer reset; there is nothing left to fade"
+        );
+
+        let audible_deck = test_shared_state();
+        assert!(
+            audible_deck.begin_fade_out(),
+            "a playing deck must report a fade in flight so teardown waits for it"
+        );
+        assert!(audible_deck.pause_fade_armed.load(Ordering::Relaxed));
+        assert!(
+            audible_deck.paused.load(Ordering::SeqCst),
+            "begin_fade_out must latch the pause synchronously for other readers"
+        );
+    }
+
+    #[test]
+    fn pause_fade_ramps_out_instead_of_cutting() {
+        let shared = test_shared_state();
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer");
+            buffer.samples = vec![1.0; 4096];
+        }
+        user_pause(&shared);
+
+        // 128 frames sits inside the 10ms (480-frame) fade at 48k.
+        let gains = frame_gains(&drain_gain(&shared, 128));
+        let step = transport_ramp_step(48_000);
+
+        assert!(
+            gains[0] >= 1.0 - step * 2.0,
+            "the fade must leave from full gain rather than cutting: {}",
+            gains[0]
+        );
+        assert!(
+            *gains.last().expect("frames") > 0.0,
+            "still inside the fade window; gain must not have hit silence yet"
+        );
+        assert!(
+            *gains.last().expect("frames") < gains[0],
+            "the fade must actually be heading down"
+        );
+        assert!(
+            max_frame_delta(&gains) <= step + 1e-6,
+            "pause must not step the gain - that discontinuity is the click"
+        );
+    }
+
+    #[test]
+    fn pause_fade_completes_then_disarms_to_hard_silence() {
+        let shared = test_shared_state();
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer");
+            buffer.samples = vec![1.0; 8192];
+        }
+        user_pause(&shared);
+
+        // 512 frames overshoots the 480-frame fade, so the ramp lands on zero.
+        let gains = frame_gains(&drain_gain(&shared, 512));
+        assert_eq!(
+            *gains.last().expect("frames"),
+            0.0,
+            "the fade must reach true silence, not a residual floor"
+        );
+        assert!(
+            !shared.pause_fade_armed.load(Ordering::Relaxed),
+            "the callback must disarm itself once silent, so a settled pause \
+             stops taking the buffer lock every callback"
+        );
+
+        let settled_at = shared.position_samples.load(Ordering::Relaxed);
+        let output = drain_gain(&shared, 128);
+        assert!(
+            output.iter().all(|&s| s == 0.0),
+            "a settled pause must be silent"
+        );
+        assert_eq!(
+            shared.position_samples.load(Ordering::Relaxed),
+            settled_at,
+            "a settled pause must stop consuming audio"
+        );
+    }
+
+    #[test]
+    fn mechanical_pause_never_drains() {
+        // Pre-decoded next decks, the swap guard and start_paused all flip
+        // `paused` without arming a fade. They must not consume a sample: a
+        // pre-decoded deck that drains here eats the head of the next track.
+        let shared = test_shared_state();
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer");
+            buffer.samples = vec![1.0; 512];
+        }
+        shared.paused.store(true, Ordering::SeqCst);
+
+        let output = drain_gain(&shared, 128);
+
+        assert!(
+            output.iter().all(|&s| s == 0.0),
+            "a mechanically muted deck must be silent"
+        );
+        assert_eq!(
+            shared.position_samples.load(Ordering::Relaxed),
+            0,
+            "a mechanically muted deck must not advance position"
+        );
+        assert_eq!(
+            shared.buffer.lock().expect("buffer").read_pos,
+            0,
+            "a mechanically muted deck must leave its buffer untouched"
+        );
+    }
+
+    #[test]
+    fn unpause_without_fade_comes_up_at_full_gain() {
+        // Promotions hard-clear `paused` (honoring the user_paused latch) and
+        // must hand over at full gain: the crossfade envelope already shapes
+        // the transition, and a second fade-in layered on top would notch it.
+        let shared = test_shared_state();
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer");
+            buffer.samples = vec![1.0; 64];
+        }
+        shared.paused.store(true, Ordering::SeqCst);
+        shared.paused.store(false, Ordering::SeqCst);
+
+        let output = drain_gain(&shared, 16);
+
+        assert!(
+            output.iter().all(|&s| s == 1.0),
+            "a promotion must come up at exact full gain with no ramp: {output:?}"
+        );
+    }
+
+    #[test]
+    fn resume_mid_fade_rejoins_the_ramp() {
+        let shared = test_shared_state();
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer");
+            buffer.samples = vec![1.0; 4096];
+        }
+        user_pause(&shared);
+        let down = frame_gains(&drain_gain(&shared, 128));
+        let caught_mid_fade = *down.last().expect("frames");
+        assert!(
+            caught_mid_fade > 0.0 && caught_mid_fade < 1.0,
+            "precondition: the fade should still be in flight, got {caught_mid_fade}"
+        );
+
+        // The fast pause/play tap.
+        user_resume(&shared);
+        let up = frame_gains(&drain_gain(&shared, 128));
+        let step = transport_ramp_step(48_000);
+
+        assert!(
+            (up[0] - caught_mid_fade).abs() <= step + 1e-6,
+            "resume must pick up where the fade left off ({caught_mid_fade}), got {}",
+            up[0]
+        );
+        assert!(
+            max_frame_delta(&up) <= step + 1e-6,
+            "resume must not step the gain either"
+        );
+        assert!(
+            *up.last().expect("frames") > caught_mid_fade,
+            "resume must be heading back up toward full gain"
+        );
     }
 
     #[test]

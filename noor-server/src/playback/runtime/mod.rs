@@ -35,6 +35,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 const DJ_MIXER_DEFAULT_MAX_BLOCK_FRAMES: usize = 8192;
@@ -3272,13 +3273,20 @@ fn transition_to_job(
     let mut job = job;
     job.start_paused = state.user_paused;
 
-    stop_current_engine(state);
-    // A user-initiated track change (skip / new play) abandons any in-flight
-    // crossfade - kill the fading-out engine so it doesn't keep producing audio
-    // underneath the new track.
-    if let Some(mut prior) = state.fading_out_engine.take() {
-        prior.stop();
-    }
+    // Retire the outgoing deck with a ramp rather than a cut: stopping an
+    // audible engine resets its buffer mid-waveform and steps the output
+    // straight to silence, which is the pop heard on skip.
+    //
+    // A user-initiated track change (skip / new play) also abandons any
+    // in-flight crossfade - the fading-out engine has to go too, or it keeps
+    // producing audio underneath the new track. Both retire in one batch so
+    // they share a single fade window instead of serializing.
+    state.prepared_dj_mixer = None;
+    state.prepared_drop_preview_mixer = None;
+    let mut retiring: Vec<PlaybackEngine> = Vec::new();
+    retiring.extend(state.engine.take());
+    retiring.extend(state.fading_out_engine.take());
+    fade_out_and_stop(retiring);
 
     // Reset position counter to the new engine's offset baseline (option C:
     // a segment-restart job seeds from `start_from_offset_ms` so the handle's
@@ -3501,25 +3509,70 @@ fn evaluate_advance_cascade(
     }
 }
 
-fn stop_current_engine(state: &mut PlaybackRuntimeLoopState) {
-    state.prepared_dj_mixer = None;
-    state.prepared_drop_preview_mixer = None;
-    if let Some(mut engine) = state.engine.take() {
+/// Ceiling on how long a teardown will wait for retiring decks to finish their
+/// fade. The ramp itself is TRANSPORT_FADE_MS; the rest is slack for a couple of
+/// callback periods. A deck whose callback has stopped running (device gone,
+/// stream never started) will never finish its ramp, so the wait must be capped
+/// rather than driven by the audio thread.
+const FADE_OUT_WAIT_TIMEOUT: Duration = Duration::from_millis(40);
+const FADE_OUT_POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+/// Ramp every audible deck in `engines` down to silence, then stop them all.
+///
+/// `PlaybackEngine::stop` resets the buffer out from under the callback, so a
+/// deck that is still making sound gets truncated mid-waveform - a step to zero,
+/// which is the pop heard on skip and stop. Fading first costs one short,
+/// bounded block of the command loop (which is a `recv_timeout` loop, not a
+/// real-time one, so a few ms of added skip latency is inaudible).
+///
+/// The wait is synchronous on purpose. Parking retiring decks for a later
+/// reaping tick would keep the outgoing engine's stream alive past this point,
+/// and in WASAPI exclusive mode it still owns the device - the incoming engine
+/// could not grab it. Finishing the fade here keeps teardown ordered.
+///
+/// Decks that are not audible (paused pre-decode, drop preview, already stopped)
+/// report nothing to fade and are stopped immediately, so the common paths pay
+/// no wait at all.
+fn fade_out_and_stop(mut engines: Vec<PlaybackEngine>) {
+    let mut any_fading = false;
+    for engine in engines.iter() {
+        // Not `any()` - every deck must be armed, and `any()` short-circuits.
+        any_fading |= engine.shared.begin_fade_out();
+    }
+
+    if any_fading {
+        let deadline = Instant::now() + FADE_OUT_WAIT_TIMEOUT;
+        while Instant::now() < deadline
+            && engines
+                .iter()
+                .any(|engine| engine.shared.pause_fade_armed.load(Ordering::Relaxed))
+        {
+            std::thread::sleep(FADE_OUT_POLL_INTERVAL);
+        }
+    }
+
+    for engine in engines.iter_mut() {
         engine.stop();
     }
 }
 
+fn stop_current_engine(state: &mut PlaybackRuntimeLoopState) {
+    state.prepared_dj_mixer = None;
+    state.prepared_drop_preview_mixer = None;
+    fade_out_and_stop(state.engine.take().into_iter().collect());
+}
+
 fn stop_all_engines(state: &mut PlaybackRuntimeLoopState) {
-    stop_current_engine(state);
-    if let Some(mut engine) = state.next_engine.take() {
-        engine.stop();
-    }
-    if let Some(mut engine) = state.fading_out_engine.take() {
-        engine.stop();
-    }
-    if let Some(mut engine) = state.drop_preview_engine.take() {
-        engine.stop();
-    }
+    state.prepared_dj_mixer = None;
+    state.prepared_drop_preview_mixer = None;
+    // Retire as one batch so the audible decks share a single fade window
+    // instead of serializing one after another.
+    let mut retiring: Vec<PlaybackEngine> = Vec::new();
+    retiring.extend(state.engine.take());
+    retiring.extend(state.next_engine.take());
+    retiring.extend(state.fading_out_engine.take());
+    retiring.extend(state.drop_preview_engine.take());
+    fade_out_and_stop(retiring);
 }
 
 fn report_runtime_command_error(
