@@ -15,13 +15,18 @@
 	import { downloadTidalPlaylist } from '$lib/stores/downloads';
 	import { tidalHomeItemToPlayable } from '$lib/utils/track';
 
-	let { modules, onViewAll, mediaKind = 'audio' }: {
+	let { modules, onViewAll, mediaKind = 'audio', onItemSelect }: {
 		modules: TidalHomeModule[];
 		onViewAll?: (mod: TidalHomeModule) => void;
 		mediaKind?: 'audio' | 'video';
+		/** Return true to claim the click. The /videos route uses this because
+		 *  the default video handling navigates to /videos, which is a no-op
+		 *  when you are already there. */
+		onItemSelect?: (item: TidalHomeItem) => boolean;
 	} = $props();
 
 	function handleItemClick(item: TidalHomeItem) {
+		if (onItemSelect?.(item)) return;
 		// A real video item always routes to the video player, whatever page
 		// hosted it. (VIDEO_LIST modules now parse as kind 'video'; older
 		// payload shapes may still surface videos as pseudo-tracks, handled
@@ -161,6 +166,12 @@
 		void goto(`/search/discover/${encodeURIComponent(mod.id)}`);
 	}
 
+	// The module-detail page is audio-only: it plays every item through
+	// playTidalTrackNow, so following it from a video module plays the song
+	// instead of the video. Until a video-capable detail page exists, video
+	// modules only show View all when the host page supplies its own handler.
+	let showViewAll = $derived(mediaKind !== 'video' || Boolean(onViewAll));
+
 	function isTrackList(mod: TidalHomeModule): boolean {
 		return mod.kind === 'TRACK_LIST'
 			|| (mod.items.length > 0 && mod.items.every((i) => i.kind === 'track'));
@@ -266,9 +277,11 @@
 						<p class="eyebrow">TIDAL</p>
 						<h2>{mod.title}</h2>
 					</div>
-					<button type="button" class="view-all-link" onclick={() => viewAll(mod)}>
-						View all -&gt;
-					</button>
+					{#if showViewAll}
+						<button type="button" class="view-all-link" onclick={() => viewAll(mod)}>
+							View all -&gt;
+						</button>
+					{/if}
 				</div>
 				{#if isTrackList(mod)}
 					{@render trackGrid(mod)}

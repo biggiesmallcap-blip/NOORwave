@@ -10,6 +10,8 @@
 		advanceVideo,
 		clearVideoSession,
 		refreshVideoStream,
+		setVideoBrowseMode,
+		videoBrowseMode,
 		videoSession,
 		videoSessionUpcoming,
 		videoStageAnchor,
@@ -19,10 +21,12 @@
 	// The dock renders a single VideoPlayer that never unmounts while a session
 	// is active, so audio keeps playing across route changes. On /videos it is
 	// positioned over the route's placeholder (full); elsewhere it docks into
-	// the corner as a small moving thumbnail (mini).
+	// the corner as a small moving thumbnail (mini). Browse mode is the third
+	// case: still on /videos, but the listener stepped back to the picks, so
+	// the route withdraws its stage and the player takes the corner instead.
 	let onVideosRoute = $derived(page.url.pathname.startsWith('/videos'));
 	let active = $derived($videoSession.active && Boolean($videoSession.streamUrl));
-	let mode = $derived(onVideosRoute ? 'full' : 'mini');
+	let mode = $derived(onVideosRoute && !$videoBrowseMode ? 'full' : 'mini');
 
 	let qualityMode = $derived($audioSettings.settings?.video_quality_mode ?? 'MAX');
 	let upNext = $derived($videoSessionUpcoming[0] ?? null);
@@ -96,7 +100,10 @@
 	}
 
 	function returnToVideos() {
-		void goto('/videos');
+		// Also the way out of browse mode: on /videos this hands the hero slot
+		// back to the player, elsewhere it navigates there first.
+		setVideoBrowseMode(false);
+		if (!onVideosRoute) void goto('/videos');
 	}
 
 	function closeDock() {
@@ -138,7 +145,12 @@
 
 		{#if mode === 'mini'}
 			<div class="mini-chrome">
-				<button type="button" class="mini-btn" title="Back to videos" onclick={returnToVideos}>⤢</button>
+				<button
+					type="button"
+					class="mini-btn"
+					title={onVideosRoute ? 'Back to the player' : 'Back to videos'}
+					onclick={returnToVideos}>⤢</button
+				>
 				<button type="button" class="mini-btn" title="Close video" onclick={closeDock}>✕</button>
 			</div>
 		{/if}
