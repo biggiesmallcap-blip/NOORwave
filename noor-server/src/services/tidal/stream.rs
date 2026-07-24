@@ -68,7 +68,9 @@ fn video_playback_info_url(
     Ok(url.to_string())
 }
 
-#[derive(Debug, Deserialize)]
+// Clone so a route that has just resolved a stream can hand the result to the
+// playback job instead of making the decoder thread resolve it a second time.
+#[derive(Debug, Clone, Deserialize)]
 pub struct StreamInfo {
     pub url: String,
     pub segment_urls: Vec<String>,
