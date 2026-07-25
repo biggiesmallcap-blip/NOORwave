@@ -6,8 +6,8 @@ const source = readFileSync(resolve(import.meta.dirname, '../src/routes/+layout.
 
 describe('layout status copy', () => {
 	test('sidebar connection status uses plain websocket meaning, said once', () => {
-		expect(source).toContain("'Server connected'");
-		expect(source).toContain("'Server offline'");
+		expect(source).toContain("'Connected'");
+		expect(source).toContain("'Offline'");
 		expect(source).not.toContain('Observatory live');
 		expect(source).not.toContain('Realtime stream is locked in');
 		expect(source).not.toContain('Waiting for websocket relay');

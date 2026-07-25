@@ -1297,7 +1297,7 @@
 			<div class="live-status">
 				<div class="live-status-head">
 					<span class:offline={!$wsConnected} class="live-dot" aria-hidden="true"></span>
-					<strong>{$wsConnected ? 'Server connected' : 'Server offline'}</strong>
+					<strong>{$wsConnected ? 'Connected' : 'Offline'}</strong>
 					{#if serverVersion}
 						<span class="live-version" title="Server build">v{serverVersion}</span>
 					{/if}
