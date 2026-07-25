@@ -902,17 +902,6 @@ have genuine multi-second hazards (cpal/WASAPI stream builds, and the 8-28s DJ
 mixer render when a prepared program does not match the pair).
 Spawned by: transport latch + CDN correction 2026-07-17
 
-### videos: era set assumes releaseDate rides in the artist-videos payload
-
-The new era shelf reads each candidate's release year out of the flattened
-`extra["releaseDate"]` on TidalArtistVideo (client.rs comment claims it's there,
-but it was never verified against a live artist-videos response). If TIDAL omits
-it on that endpoint, every candidate parses year=None, no decade clears the
-minimum, and the era set silently never appears. Confirm with one logged live
-`get_artist_videos` call; if absent, the fallback is fetching each video's album
-year via the album ref. Until confirmed, era is a shelf that may just never show.
-Spawned by: videos taste loop + era set 2026-07-25
-
 ### videos: watch history records starts only, no completion or taste feeding
 
 video_history rows are written on play start (enough for recently-watched
