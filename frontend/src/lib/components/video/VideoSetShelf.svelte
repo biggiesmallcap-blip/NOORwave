@@ -105,7 +105,12 @@
 	}
 
 	.set-card {
+		/* flex: 0 0 auto so the card holds its width and the rail scrolls; without
+		   it the card shrinks to fit the (now min-width:0) shelf column and the
+		   whole rail collapses to slivers instead of overflowing. */
+		flex: 0 0 auto;
 		width: clamp(200px, 22vw, 260px);
+		scroll-snap-align: start;
 	}
 
 	@media (max-width: 620px) {

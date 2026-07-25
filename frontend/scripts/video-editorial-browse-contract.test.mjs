@@ -25,9 +25,11 @@ describe('Videos editorial browse state', () => {
 		expect(source).toContain('pointer-events: none');
 	});
 
-	test('daily picks feed the mural and play through the shared video queue', () => {
+	test('daily picks lead as a shelf and play through the shared video queue', () => {
 		expect(source).toContain("discoverSets.find((s) => s.slug === 'daily-picks')");
-		expect(source).toContain('<ChartMural');
+		// Daily picks are a normal clean shelf now, not a mural.
+		expect(source).toContain('eyebrow="Daily picks"');
+		expect(source).not.toContain('<ChartMural');
 		expect(source).toContain('await playVideo(video, {');
 		// Every editorial surface plays through one path, never an inline player.
 		expect(source).toContain('async function playFromQueue');
@@ -39,12 +41,6 @@ describe('Videos editorial browse state', () => {
 		expect(source).toContain('{#each shelfSets as set (set.slug)}');
 		expect(source).toContain('<VideoSetShelf');
 		expect(source).toContain('onPlayAll={() => playFromSet(set, 0)}');
-	});
-
-	test('mural rotation pauses under focus, playback, and hover', () => {
-		expect(source).toContain('MURAL_ROTATE_MS');
-		expect(source).toContain('if (!muralPaused && !searchFocused && !playerOwnsStage) jumpMural(1);');
-		expect(source).toContain('onPauseChange={(paused) => (muralPaused = paused)}');
 	});
 
 	test('TIDAL editorial modules render through the shared shelves with claimed clicks', () => {

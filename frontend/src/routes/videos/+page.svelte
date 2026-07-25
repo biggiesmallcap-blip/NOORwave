@@ -11,7 +11,6 @@
 		type TidalVideoMixItem,
 		type VideoDiscoverSet,
 	} from '$lib/api/client';
-	import ChartMural, { type ChartMuralItem } from '$lib/components/charts/ChartMural.svelte';
 	import TidalDiscoverShelves from '$lib/components/search/TidalDiscoverShelves.svelte';
 	import VideoCard from '$lib/components/video/VideoCard.svelte';
 	import VideoSetShelf from '$lib/components/video/VideoSetShelf.svelte';
@@ -43,10 +42,8 @@
 	const SESSION_SNAPSHOT_KEY = 'noor_video_session_snapshot';
 	const RECENT_MAX = 8;
 	const HINTS = ['music video', 'live session', 'official video', 'visualizer'];
-	// Mural rotation cadence, matching the home/charts shelves.
-	const MURAL_ROTATE_MS = 8000;
 	// While the server assembles today's set (building: true, no snapshot yet),
-	// re-fetch a few times so the mural appears without a manual reload.
+	// re-fetch a few times so the picks appear without a manual reload.
 	const BUILD_POLL_MS = 6000;
 	const BUILD_POLL_MAX = 6;
 	// TIDAL's videos page ships several modules; a couple is plenty next to the
@@ -149,20 +146,18 @@
 	let heroArtist = $derived(selectedVideo?.artist_name ?? null);
 
 	// --- Editorial browse state ---
-	// The resting state of the page: a daily-picks mural plus TIDAL's own
+	// The resting state of the page: a daily-picks shelf plus TIDAL's own
 	// editorial video shelf. It fades under search focus (stays mounted, so
 	// clearing the field restores the same set at the same tile) and yields
 	// the page entirely to the player hero while a video session is active.
 	let discoverSets = $state<VideoDiscoverSet[]>([]);
 	let editorialModules = $state<TidalHomeModule[]>([]);
 	let loadingBrowse = $state(true);
-	let muralIndex = $state(0);
-	let muralPaused = $state(false);
 	let browsePollTimer: ReturnType<typeof setTimeout> | null = null;
 	let browsePolls = 0;
 
-	// The daily set headlines the page as the mural; every other built set is
-	// its own rail below it.
+	// The daily set leads as the first rail; every other built set is its own
+	// rail below it.
 	let dailySet = $derived(discoverSets.find((s) => s.slug === 'daily-picks') ?? null);
 	let shelfSets = $derived(
 		discoverSets.filter((s) => s.slug !== 'daily-picks' && s.items.length > 0)
@@ -178,17 +173,6 @@
 	);
 	let showEditorialLayer = $derived(!playerOwnsStage && (hasBrowseContent || loadingBrowse));
 
-	let muralItems = $derived<ChartMuralItem[]>(
-		(dailySet?.items ?? []).map((v, i) => ({
-			id: String(v.tidal_id),
-			title: v.title,
-			subtitle: v.artist_name ?? '',
-			artwork: v.artwork_url,
-			fallbackText: 'VID',
-			tileLabel: `Select ${v.title}`,
-			tileTitle: `${i + 1}. ${v.title}${v.artist_name ? ` - ${v.artist_name}` : ''}`,
-		}))
-	);
 	async function loadBrowse() {
 		try {
 			const [discover, page] = await Promise.allSettled([
@@ -212,12 +196,6 @@
 		} finally {
 			loadingBrowse = false;
 		}
-	}
-
-	function jumpMural(delta: number) {
-		const count = dailySet?.items.length ?? 0;
-		if (count === 0) return;
-		muralIndex = (muralIndex + delta + count) % count;
 	}
 
 	async function playFromSet(set: VideoDiscoverSet, index: number) {
@@ -261,7 +239,7 @@
 		return false;
 	}
 
-	/** Shared play path for every editorial surface: mural, set shelves, and
+	/** Shared play path for every editorial surface: daily picks, set shelves, and
 	 *  the TIDAL modules. The whole shelf becomes the autoplay queue. */
 	async function playFromQueue(
 		video: TidalSearchVideo,
@@ -290,22 +268,6 @@
 		setVideoBrowseMode(false);
 	}
 
-	// Keep the mural index valid when a new snapshot lands.
-	$effect(() => {
-		const count = dailySet?.items.length ?? 0;
-		if (muralIndex >= count) muralIndex = 0;
-	});
-
-	// Shelf-owned rotation, paused on hover and whenever the layer is not the
-	// page's active surface (search focus or video session).
-	$effect(() => {
-		const count = dailySet?.items.length ?? 0;
-		if (count <= 1) return;
-		const timer = setInterval(() => {
-			if (!muralPaused && !searchFocused && !playerOwnsStage) jumpMural(1);
-		}, MURAL_ROTATE_MS);
-		return () => clearInterval(timer);
-	});
 	let hasVideoChoices = $derived(videos.length > 0 || mixItems.length > 0 || playlistItems.length > 0);
 	let showChooseVideoPrompt = $derived(
 		!selectedVideo &&
@@ -792,30 +754,16 @@
 		>
 			<div class="editorial-inner" inert={searchFocused}>
 				{#if dailySet}
-					<ChartMural
-						items={muralItems}
-						currentIndex={muralIndex}
-						ariaLabel="Daily video picks"
-						kindLabel="Daily picks"
+					<VideoSetShelf
+						eyebrow="Daily picks"
 						title={dailySet.title}
-						subtitle={dailySet.blurb}
-						metric={`${dailySet.items.length} videos`}
-						actionLabel="Play"
-						onSelect={(index) => (muralIndex = index)}
-						onJump={jumpMural}
-						onPlay={() => dailySet && playFromSet(dailySet, muralIndex)}
-						onItemActivate={(index) => dailySet && playFromSet(dailySet, index)}
-						onPauseChange={(paused) => (muralPaused = paused)}
+						blurb={dailySet.blurb}
+						items={dailySet.items}
+						onSelect={(_video, index) => dailySet && playFromSet(dailySet, index)}
+						onPlayAll={() => dailySet && playFromSet(dailySet, 0)}
 					/>
 				{:else if loadingBrowse}
-					<ChartMural
-						loading
-						loadingLabel="Assembling today's picks"
-						ariaLabel="Daily video picks"
-						kindLabel="Daily picks"
-						title="Today's picks"
-						subtitle=""
-					/>
+					<p class="picks-loading">Assembling today's picks...</p>
 				{/if}
 				{#each shelfSets as set (set.slug)}
 					<VideoSetShelf
@@ -1130,6 +1078,13 @@
 		   shelf's rail scrolls inside it instead of stretching the page. */
 		grid-template-columns: minmax(0, 1fr);
 		gap: 28px;
+	}
+
+	.picks-loading {
+		margin: 0;
+		padding: 4px 2px;
+		color: var(--text-secondary);
+		font-size: var(--font-size-sm);
 	}
 
 	.recent-inline {
