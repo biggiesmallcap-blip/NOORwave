@@ -48,10 +48,10 @@
 		shuffleMode: string;
 		repeatMode: string;
 		favoritePending?: boolean;
-		/** Optional. When omitted, the inline favorite button is hidden — the
-		 * desktop now-playing surface mounts a separate favorite overlay on
-		 * the artwork, so the transport bar stays uncluttered. QuietMode
-		 * still uses the inline button. */
+		/** Optional. When omitted, the inline favorite button is hidden. Both
+		 * the desktop panel and QuietMode pass it: the heart used to float over
+		 * the desktop artwork, which collided with everything else once the
+		 * queue expanded, so it lives here now. */
 		onToggleFavorite?: () => void;
 		onCycleShuffle: () => void;
 		onPrev: () => void;
@@ -150,14 +150,6 @@
 		justify-self: start;
 	}
 
-	.transport-group + .transport-group::before {
-		content: '';
-		width: 1px;
-		height: 24px;
-		margin-right: 4px;
-		background: color-mix(in srgb, var(--instrument-border) 54%, transparent);
-	}
-
 	.transport-group-playback {
 		gap: 8px;
 	}
@@ -215,10 +207,6 @@
 
 		.transport-group {
 			gap: 6px;
-		}
-
-		.transport-group + .transport-group::before {
-			display: none;
 		}
 	}
 </style>

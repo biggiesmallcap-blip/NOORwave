@@ -22,6 +22,47 @@ describe('shell player bar extraction', () => {
 		expect(layout).not.toContain('.player-error');
 	});
 
+	test('keeps the artwork free of floating chips', () => {
+		// Four chips over a 267px square became four overlapping chips over a
+		// 64px strip the moment the queue expanded. Favorite lives in the
+		// transport now, download in the overflow menu, quality in the badge
+		// row; only the hover-revealed quiet-mode button stays.
+		const playerBar = readFileSync('src/lib/shell/PlayerBar.svelte', 'utf8');
+
+		expect(playerBar).not.toContain('np-art-fav');
+		expect(playerBar).not.toContain('np-art-dl');
+		expect(playerBar).not.toContain('np-quality');
+		expect(playerBar).not.toContain('np-resolution');
+		expect(playerBar).toContain('np-fullscreen-btn');
+		expect(playerBar).toContain('onToggleFavorite={onToggleFavorite}');
+	});
+
+	test('moves the session controls out of the queue header and drops the legend', () => {
+		const layout = readFileSync('src/routes/+layout.svelte', 'utf8');
+
+		// Source legend now lives on the automix page.
+		expect(layout).not.toContain('queue-legend');
+		expect(layout).not.toContain('SOURCE_LEGEND');
+		// Automix / discover-new / shortcut help sit in the sidebar pill; save,
+		// clear and expand stay with the list they act on.
+		const footerStart = layout.indexOf('class="sidebar-footer"');
+		const footerEnd = layout.indexOf('</aside>', footerStart);
+		const footer = layout.slice(footerStart, footerEnd);
+		for (const cls of ['queue-automix-btn', 'queue-discover-btn', 'queue-help-btn']) {
+			expect(footer, cls).toContain(cls);
+		}
+		expect(footer).not.toContain('queue-clear-btn');
+	});
+
+	test('source labels come from the shared humanizing map', () => {
+		const layout = readFileSync('src/routes/+layout.svelte', 'utf8');
+
+		expect(layout).toContain("from '$lib/player/queue_source'");
+		// The local copies leaked raw slugs like `radio_pending` into the panel.
+		expect(layout).not.toContain('function formatQueueSource');
+		expect(layout).not.toContain('function queueSourceSlug');
+	});
+
 	test('measures title overflow for the now-playing marquee', () => {
 		const metadata = readFileSync('src/lib/components/now-playing/NowPlayingMetadata.svelte', 'utf8');
 

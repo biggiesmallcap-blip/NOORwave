@@ -35,6 +35,7 @@
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import QueueSourceLegend from '$lib/components/QueueSourceLegend.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildTrackMenu, type MenuTrack } from '$lib/player/track_menu';
 	import {
@@ -430,6 +431,11 @@
 			</div>
 			<StateBadge label={`${queueUpcoming.slice(0, INDICATOR_WINDOW).length} visible`} tone="default" compact={true} />
 		</div>
+
+		<!-- The player panel used to carry this legend as permanent chrome. It
+		     belongs here, next to the forecast that explains where queue rows
+		     come from in the first place. -->
+		<QueueSourceLegend />
 
 		{#if queueUpcoming.length === 0}
 			<EmptyState title="Queue is empty" copy={$automixEnabled ? 'Automix will fill it as tracks finish.' : 'Enable automix or add tracks manually.'} />

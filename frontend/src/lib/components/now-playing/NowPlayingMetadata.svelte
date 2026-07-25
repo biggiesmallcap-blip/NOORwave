@@ -19,20 +19,28 @@
 
 	let {
 		track,
-		eyebrow = 'Now Playing',
+		eyebrow = null,
 		nowPlayingAttribution = null,
 		stream = null,
 		streamDetail = '',
+		qualityLabel = '',
+		qualityClass = '',
 		playerState,
 		isScrubbing,
 		showStateBadge = true,
 		stateBadgeCompact = true,
 	}: {
 		track: Track | null;
-		eyebrow?: string;
+		/** Off by default: the desktop panel is self-evidently the now-playing
+		 * surface, so only callers that need a label (quiet mode) pass one. */
+		eyebrow?: string | null;
 		nowPlayingAttribution?: string | null;
 		stream?: Stream;
 		streamDetail?: string;
+		/** Single quality statement for the surface (e.g. "Lossless"). The
+		 * artwork carries no badges of its own. */
+		qualityLabel?: string;
+		qualityClass?: string;
 		playerState: string;
 		isScrubbing: boolean;
 		showStateBadge?: boolean;
@@ -83,7 +91,9 @@
 
 <div class="np-info">
 	<div class="np-copy">
-		<p class="np-eyebrow">{eyebrow}</p>
+		{#if eyebrow}
+			<p class="np-eyebrow">{eyebrow}</p>
+		{/if}
 		{#if track && titleRef && titleHref}
 			<a
 				class="np-title np-title-link"
@@ -149,6 +159,9 @@
 	{#if showStateBadge}
 		<div class="badge-row">
 			<StateBadge label={isScrubbing ? 'Scrubbing' : playerState} tone={track ? 'active' : 'muted'} compact={stateBadgeCompact} />
+			{#if qualityLabel}
+				<span class={`quality-badge np-quality-chip ${qualityClass}`}>{qualityLabel}</span>
+			{/if}
 			{#if streamDetail}
 				<span class="stream-micro">{streamDetail}</span>
 			{/if}
@@ -236,8 +249,11 @@
 
 	.badge-row :global(.state-badge) {
 		flex: 0 0 auto;
-		min-width: 7rem;
 		justify-content: flex-start;
+	}
+
+	.np-quality-chip {
+		flex: 0 0 auto;
 	}
 
 	.stream-micro {
