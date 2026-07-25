@@ -3777,6 +3777,20 @@ export const api = {
 		);
 	},
 
+	/** Record that a video started playing, so the editorial builder can hold it
+	 *  out of the next few rotations. Fire-and-forget; failures are ignorable. */
+	recordVideoHistory(body: {
+		tidal_video_id: number;
+		title?: string | null;
+		artist_tidal_id?: number | null;
+		artist_name?: string | null;
+	}): Promise<{ ok: boolean }> {
+		return fetchApi<{ ok: boolean }>('/api/videos/history', undefined, {
+			method: 'POST',
+			body: JSON.stringify(body),
+		});
+	},
+
 	getTidalVideoMixItems(mixId: string | number): Promise<{ items: TidalVideoMixItem[] }> {
 		return fetchApi<{ items: TidalVideoMixItem[] }>(
 			`/api/tidal/video-mixes/${encodeURIComponent(String(mixId))}/items`

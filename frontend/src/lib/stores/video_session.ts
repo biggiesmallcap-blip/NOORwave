@@ -120,6 +120,20 @@ function sourceFor(item: VideoSessionItem, ctx: VideoPlayContext): VideoSessionS
 	return 'direct';
 }
 
+/** Log a started video so the editorial builder can hold it out of the next few
+ *  rotations. Fire-and-forget: a dropped write only costs a repeat pick. */
+function recordWatch(item: VideoSessionItem) {
+	const artistId = 'artist_id' in item ? item.artist_id : null;
+	void api
+		.recordVideoHistory({
+			tidal_video_id: item.tidal_id,
+			title: item.title ?? null,
+			artist_tidal_id: artistId ?? null,
+			artist_name: item.artist_name ?? null,
+		})
+		.catch(() => {});
+}
+
 /** Start (or switch to) a video: set it current, fetch its HLS stream, and let
  *  the persistent dock render it. Returns false if the request was superseded
  *  or the stream failed. */
@@ -128,6 +142,28 @@ export async function playVideo(
 	ctx: VideoPlayContext,
 	opts: { preloaded?: PreloadedVideoStream | null } = {}
 ): Promise<boolean> {
+	// Re-selecting the video that is already playing (returning to /videos with
+	// its ?videoId= still in the URL, a stale jump request, clicking its own
+	// queue row) must not refetch the stream and restart it from 0:00. Refresh
+	// the browse context and show it, but leave playback untouched.
+	const state = get(session);
+	if (
+		state.active &&
+		state.current?.tidal_id === item.tidal_id &&
+		Boolean(state.streamUrl) &&
+		!state.error &&
+		!opts.preloaded
+	) {
+		videoBrowseMode.set(false);
+		update({
+			queue: ctx.queue,
+			source: sourceFor(item, ctx),
+			sourceLabel: ctx.sourceLabel,
+			autoplay: ctx.autoplay ?? state.autoplay,
+		});
+		return true;
+	}
+
 	const seq = ++streamSeq;
 	// Picking something new always means "show it": browsing the shelves with
 	// a video docked ends the moment you choose the next one.
@@ -156,6 +192,7 @@ export async function playVideo(
 		}
 		if (seq !== streamSeq) return false;
 		update({ streamUrl: url, streamExpiresAt: expiresAt, loading: false, error: null });
+		recordWatch(item);
 		return true;
 	} catch (err) {
 		if (seq !== streamSeq) return false;

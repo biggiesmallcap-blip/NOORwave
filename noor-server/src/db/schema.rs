@@ -57,6 +57,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_053,
     MIGRATION_054,
     MIGRATION_055,
+    MIGRATION_056,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1555,6 +1556,26 @@ CREATE TABLE IF NOT EXISTS video_sets (
     UNIQUE(slug, bucket_key)
 );
 CREATE INDEX IF NOT EXISTS idx_video_sets_slug_built ON video_sets(slug, built_at);
+"#;
+
+// Watch history for editorial videos. Separate from listen_history on purpose:
+// that table is track_id-FK and every reader assumes track semantics, whereas
+// videos are TIDAL-id-only and never imported. The builder reads this to drop
+// recently-watched picks so the shelves move on instead of re-serving what you
+// just watched. completed/duration are recorded for a later taste loop.
+const MIGRATION_056: &str = r#"
+CREATE TABLE IF NOT EXISTS video_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tidal_video_id INTEGER NOT NULL,
+    title TEXT,
+    artist_tidal_id INTEGER,
+    artist_name TEXT,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    duration_watched_ms INTEGER,
+    completed INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_video_history_started ON video_history(started_at);
+CREATE INDEX IF NOT EXISTS idx_video_history_video ON video_history(tidal_video_id);
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

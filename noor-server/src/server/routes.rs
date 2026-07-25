@@ -980,6 +980,10 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/videos/discover",
             get(video_discovery_routes::get_videos_discover),
         )
+        .route(
+            "/api/videos/history",
+            post(video_discovery_routes::post_videos_history),
+        )
         .route("/api/tidal/playlists/search", get(tidal_playlist_search))
         .route(
             "/api/tidal/playlists/{uuid}/tracks",

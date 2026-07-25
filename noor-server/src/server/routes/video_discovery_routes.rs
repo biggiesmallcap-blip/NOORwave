@@ -14,10 +14,11 @@
 use crate::SharedState;
 use crate::services::tidal::client::TidalClient;
 use crate::services::video_sets::{
-    self, ALBUM_LOVE_SLUG, Archetype, DAILY_PICKS_SLUG, DJ_SETS_SLUG, GENRE_SLUG_PREFIX,
-    ONE_STEP_OUT_SLUG, SetPlan, VideoSet,
+    self, ALBUM_LOVE_SLUG, Archetype, DAILY_PICKS_SLUG, DJ_SETS_SLUG, ERA_SLUG, GENRE_SLUG_PREFIX,
+    ONE_STEP_OUT_SLUG, RECENTLY_WATCHED_DAYS, SetPlan, VideoSet,
 };
 use axum::{extract::State, response::Json};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -71,9 +72,10 @@ fn display_order(slug: &str) -> u8 {
         DAILY_PICKS_SLUG => 0,
         ALBUM_LOVE_SLUG => 2,
         ONE_STEP_OUT_SLUG => 3,
-        DJ_SETS_SLUG => 4,
+        ERA_SLUG => 4,
+        DJ_SETS_SLUG => 5,
         s if s.starts_with(GENRE_SLUG_PREFIX) => 1,
-        _ => 5,
+        _ => 6,
     }
 }
 
@@ -136,13 +138,15 @@ async fn build_missing_sets(
     // library takes long enough that holding the shared connection would stall
     // every other request. WAL lets this reader run beside them.
     let plan_db = db.clone();
-    let (plans, known_artists) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-        let conn = plan_db.open_isolated()?;
-        let plans = video_sets::plan_missing_sets(&conn, today)?;
-        let known = video_sets::known_artist_tidal_ids(&conn)?;
-        Ok((plans, known))
-    })
-    .await??;
+    let (plans, known_artists, recently_watched) =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let conn = plan_db.open_isolated()?;
+            let plans = video_sets::plan_missing_sets(&conn, today)?;
+            let known = video_sets::known_artist_tidal_ids(&conn)?;
+            let recent = video_sets::recently_watched_video_ids(&conn, RECENTLY_WATCHED_DAYS)?;
+            Ok((plans, known, recent))
+        })
+        .await??;
     if plans.is_empty() {
         db.with_conn(|conn| video_sets::mark_pass_complete(conn, today))?;
         return Ok(0);
@@ -157,7 +161,8 @@ async fn build_missing_sets(
     let mut built = 0usize;
     for plan in plans {
         let groups = fetch_for_plan(&client, &plan, &known_artists).await;
-        let Some(set) = video_sets::assemble_set(&plan, &groups) else {
+        let Some(set) = video_sets::assemble_set_excluding(&plan, &groups, &recently_watched)
+        else {
             tracing::debug!(
                 "video set build: {} produced too few items, skipping",
                 plan.slug
@@ -196,4 +201,47 @@ async fn fetch_for_plan(
         }
         _ => video_sets::fetch_anchor_videos(client, plan.anchors.clone()).await,
     }
+}
+
+/// A video the dock started playing. Recorded so the set builder can hold it out
+/// of the next few rotations (see `recently_watched_video_ids`).
+#[derive(Deserialize)]
+pub(super) struct RecordVideoPlay {
+    pub tidal_video_id: i64,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub artist_tidal_id: Option<i64>,
+    #[serde(default)]
+    pub artist_name: Option<String>,
+}
+
+/// `POST /api/videos/history`. Fire-and-forget from the player; a failed write
+/// only costs a repeat pick, so it never surfaces an error to the client.
+pub(super) async fn post_videos_history(
+    State(state): State<SharedState>,
+    Json(body): Json<RecordVideoPlay>,
+) -> Json<Value> {
+    let s = state.read().await;
+    let result = s.db.with_conn(|conn| -> anyhow::Result<()> {
+        conn.execute(
+            "INSERT INTO video_history (tidal_video_id, title, artist_tidal_id, artist_name) \
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                body.tidal_video_id,
+                body.title,
+                body.artist_tidal_id,
+                body.artist_name,
+            ],
+        )?;
+        Ok(())
+    });
+    if let Err(e) = result {
+        tracing::warn!(
+            target = "noor.videos",
+            event = "history_write_failed",
+            "video history write failed: {e}"
+        );
+    }
+    Json(json!({ "ok": true }))
 }

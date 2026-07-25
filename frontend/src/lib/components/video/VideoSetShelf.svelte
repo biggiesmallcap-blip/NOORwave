@@ -49,6 +49,11 @@
 <style>
 	.set-shelf {
 		display: grid;
+		/* min-width: 0 so this shelf can shrink to its grid column; without it
+		   the rail's cards set a min-content floor and the shelf (and page)
+		   overflow instead of the rail scrolling. */
+		grid-template-columns: minmax(0, 1fr);
+		min-width: 0;
 		gap: 10px;
 	}
 
