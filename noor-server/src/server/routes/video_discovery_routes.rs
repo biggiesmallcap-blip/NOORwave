@@ -12,6 +12,7 @@
 //! shelf by shelf across a few client polls rather than all at once at the end.
 
 use crate::SharedState;
+use crate::services::library_videos;
 use crate::services::tidal::client::TidalClient;
 use crate::services::video_sets::{
     self, ALBUM_LOVE_SLUG, Archetype, DAILY_PICKS_SLUG, DJ_SETS_SLUG, ERA_SLUG, GENRE_SLUG_PREFIX,
@@ -244,4 +245,74 @@ pub(super) async fn post_videos_history(
         );
     }
     Json(json!({ "ok": true }))
+}
+
+// ── Liked videos ─────────────────────────────────────────────────────────────
+//
+// The library surface, as opposed to the editorial one above: a wall built from
+// videos found for songs the user already favorited. Reads are pure SQL over
+// what the background pass in `services::library_videos` has resolved so far,
+// so this never touches TIDAL and never blocks.
+
+/// `GET /api/videos/liked`. The wall plus how far the background resolve has
+/// got, so a first run on an existing library reads as filling in rather than
+/// as broken.
+pub(super) async fn get_videos_liked(State(state): State<SharedState>) -> Json<Value> {
+    let s = state.read().await;
+    let wall =
+        s.db.with_conn(library_videos::load_wall)
+            .unwrap_or_default();
+    let progress =
+        s.db.with_conn(library_videos::scan_progress)
+            .unwrap_or(library_videos::ScanProgress {
+                scanned_artists: 0,
+                total_artists: 0,
+            });
+    let running = s
+        .library_video_scan_running
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let connected = s.tidal_tokens.is_some();
+
+    Json(json!({
+        "videos": wall,
+        "scanned_artists": progress.scanned_artists,
+        "total_artists": progress.total_artists,
+        "running": running,
+        "tidal_connected": connected,
+    }))
+}
+
+/// `POST /api/videos/liked/refresh`. The manual affordance for the impatient;
+/// the automatic path is the `LibrarySynced` listener and the daily sweep.
+/// `run_if_idle` is a cheap no-op when a pass is already going or nothing is
+/// due, so this is safe to hammer.
+pub(super) async fn post_videos_liked_refresh(State(state): State<SharedState>) -> Json<Value> {
+    library_videos::run_if_idle(state.clone()).await;
+    let s = state.read().await;
+    Json(json!({
+        "running": s
+            .library_video_scan_running
+            .load(std::sync::atomic::Ordering::SeqCst),
+    }))
+}
+
+/// The pair to hide. Matching is loose on purpose, so the wrong video lands on
+/// a song often enough to need a correction.
+#[derive(Deserialize)]
+pub(super) struct HideLikedVideo {
+    pub track_id: i64,
+    pub tidal_video_id: i64,
+}
+
+/// `POST /api/videos/liked/hide`. Flips one card to suppressed, which also
+/// stops the 90-day re-check from bringing it back.
+pub(super) async fn post_videos_liked_hide(
+    State(state): State<SharedState>,
+    Json(body): Json<HideLikedVideo>,
+) -> Json<Value> {
+    let s = state.read().await;
+    let hidden =
+        s.db.with_conn(|conn| library_videos::suppress(conn, body.track_id, body.tidal_video_id))
+            .unwrap_or(false);
+    Json(json!({ "ok": hidden }))
 }

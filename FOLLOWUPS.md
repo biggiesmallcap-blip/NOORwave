@@ -912,3 +912,17 @@ TasteVector (discovery_ranking::build_session_taste) so watching tunes the sets.
 This is the Phase-3 taste-feedback piece (like/not-interested on editorial
 videos) the plan left deferred.
 Spawned by: videos taste loop + era set 2026-07-25
+
+### db: migration ids are positional, so concurrent branches silently skip one
+
+run_migrations counts applied rows (SELECT COUNT(*) FROM _migrations) and treats
+a migration's index in the MIGRATIONS slice as its id. Two branches that each
+append a migration therefore both claim the same id, and whichever merges second
+lands at an index the other branch's DB has already counted past - so it is
+skipped with no error and its tables never get created. This bit the liked-videos
+work directly: 056 (video_history) and the liked-video tables were written in
+parallel sessions and had to be manually sequenced. Track applied ids as a set
+(and give each migration a stable name or id independent of slice position) so
+merge order stops mattering. Needs care: existing DBs only have the count, so the
+first run has to backfill ids 1..N before switching to set semantics.
+Spawned by: liked videos library 2026-07-25

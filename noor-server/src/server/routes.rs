@@ -984,6 +984,20 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/videos/history",
             post(video_discovery_routes::post_videos_history),
         )
+        // The liked-videos library wall. Pure reads over what the background
+        // resolve has found; the TIDAL fan-out is never on a request path.
+        .route(
+            "/api/videos/liked",
+            get(video_discovery_routes::get_videos_liked),
+        )
+        .route(
+            "/api/videos/liked/refresh",
+            post(video_discovery_routes::post_videos_liked_refresh),
+        )
+        .route(
+            "/api/videos/liked/hide",
+            post(video_discovery_routes::post_videos_liked_hide),
+        )
         .route("/api/tidal/playlists/search", get(tidal_playlist_search))
         .route(
             "/api/tidal/playlists/{uuid}/tracks",

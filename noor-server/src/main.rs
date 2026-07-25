@@ -158,6 +158,10 @@ pub struct AppState {
     /// (`services::tidal::repair`) that backfills tracks persisted with a zero
     /// duration / missing album against double-runs.
     pub tidal_repair_running: Arc<AtomicBool>,
+    /// Liked-videos resolve running flag - gates the background pass
+    /// (`services::library_videos`) that looks up videos for favorited songs
+    /// against double-runs.
+    pub library_video_scan_running: Arc<AtomicBool>,
     /// Last.fm enrichment progress.
     pub lastfm_enrich_running: Arc<AtomicBool>,
     pub lastfm_enrich_cancel: Arc<AtomicBool>,
@@ -792,6 +796,7 @@ async fn main() -> Result<()> {
         audio_analysis_running: Arc::new(AtomicBool::new(false)),
         musicbrainz_enrich_running: Arc::new(AtomicBool::new(false)),
         tidal_repair_running: Arc::new(AtomicBool::new(false)),
+        library_video_scan_running: Arc::new(AtomicBool::new(false)),
         lastfm_enrich_running: Arc::new(AtomicBool::new(false)),
         lastfm_enrich_cancel: Arc::new(AtomicBool::new(false)),
         lastfm_enrich_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -932,6 +937,9 @@ async fn main() -> Result<()> {
                         // every sync/import. Emits LibrarySynced only when it
                         // changed rows, so the retrigger converges.
                         services::library_dedupe::run_if_idle(listener_state.clone()).await;
+                        // Liked-videos resolve: a sync only marks the work as
+                        // due, the TIDAL fan-out happens here.
+                        services::library_videos::run_if_idle(listener_state.clone()).await;
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -951,6 +959,7 @@ async fn main() -> Result<()> {
             services::auto_enrich::run_if_idle(loop_state.clone()).await;
             services::tidal::repair::run_if_idle(loop_state.clone()).await;
             services::library_dedupe::run_if_idle(loop_state.clone()).await;
+            services::library_videos::run_if_idle(loop_state.clone()).await;
 
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs(86_400));
             ticker.tick().await; // consume the immediate first tick
@@ -959,6 +968,7 @@ async fn main() -> Result<()> {
                 services::auto_enrich::run_if_idle(loop_state.clone()).await;
                 services::tidal::repair::run_if_idle(loop_state.clone()).await;
                 services::library_dedupe::run_if_idle(loop_state.clone()).await;
+                services::library_videos::run_if_idle(loop_state.clone()).await;
             }
         });
     }

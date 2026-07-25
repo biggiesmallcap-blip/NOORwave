@@ -12,6 +12,7 @@ pub mod download;
 pub mod lastfm;
 pub mod learning;
 pub mod library_dedupe;
+pub mod library_videos;
 pub mod listen_history_backfill;
 pub mod listenbrainz;
 pub mod musicbrainz;

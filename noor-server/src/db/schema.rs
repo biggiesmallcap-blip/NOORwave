@@ -58,6 +58,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_054,
     MIGRATION_055,
     MIGRATION_056,
+    MIGRATION_057,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1578,6 +1579,45 @@ CREATE INDEX IF NOT EXISTS idx_video_history_started ON video_history(started_at
 CREATE INDEX IF NOT EXISTS idx_video_history_video ON video_history(tidal_video_id);
 "#;
 
+// The liked-videos library surface: videos found for songs the user already
+// favorited. Two tables because the scan unit and the result unit differ.
+//
+// `library_video_scans` is the work ledger, keyed by artist rather than track:
+// one `/artists/{id}/videos` call returns an artist's whole video catalog, so
+// it resolves every liked song by that artist at once and gives a definitive
+// "no video" for artists with none. That makes a per-track negative cache
+// unnecessary - "this liked track has no video" is implied by "its artist was
+// scanned and nothing matched".
+//
+// `library_videos` holds only hits, one row per (liked track, video). The key
+// is a pair rather than track_id alone because live takes, covers and
+// alternates are all kept on purpose: a richer wall beats a deduped one.
+// video_title/duration/image_id are denormalized off TIDAL so the grid can draw
+// a card without a live call per thumbnail. `suppressed` is the "wrong match /
+// hide this" correction, and the rescan upsert must never reset it or the
+// 90-day re-check would resurrect every hidden card.
+const MIGRATION_057: &str = r#"
+CREATE TABLE IF NOT EXISTS library_video_scans (
+    artist_id   INTEGER PRIMARY KEY REFERENCES artists(id) ON DELETE CASCADE,
+    scanned_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    video_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS library_videos (
+    track_id         INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    tidal_video_id   INTEGER NOT NULL,
+    video_title      TEXT    NOT NULL,
+    duration_seconds INTEGER,
+    image_id         TEXT,
+    match_score      REAL    NOT NULL,
+    suppressed       INTEGER NOT NULL DEFAULT 0,
+    created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (track_id, tidal_video_id)
+);
+CREATE INDEX IF NOT EXISTS idx_library_videos_visible
+    ON library_videos(suppressed, track_id);
+"#;
+
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     // Create migrations table if not exists
     conn.execute_batch(
@@ -1847,5 +1887,79 @@ mod tests {
             )
             .unwrap();
         assert_eq!(exists, 1);
+    }
+
+    #[test]
+    fn migration_057_adds_liked_video_tables() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+
+        apply_migrations_up_to(&conn, MIGRATIONS.len()).unwrap();
+
+        conn.execute_batch(
+            "INSERT INTO artists (id, name) VALUES (1, 'Anchor');
+             INSERT INTO tracks (id, title, artist_id, is_favorite)
+             VALUES (10, 'Song', 1, 1);",
+        )
+        .unwrap();
+
+        // A liked track can carry several videos: live takes, covers and
+        // alternates each get their own card.
+        conn.execute_batch(
+            "INSERT INTO library_videos (track_id, tidal_video_id, video_title, match_score)
+             VALUES (10, 900, 'Song', 1.0), (10, 901, 'Song (Live)', 0.93);",
+        )
+        .unwrap();
+        let kept: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM library_videos WHERE track_id = 10",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 2, "duplicates per track are kept on purpose");
+
+        // The same video cannot be attached to the same track twice.
+        let dupe = conn.execute(
+            "INSERT INTO library_videos (track_id, tidal_video_id, video_title, match_score)
+             VALUES (10, 900, 'Song', 1.0)",
+            [],
+        );
+        assert!(dupe.is_err(), "(track_id, tidal_video_id) is the key");
+
+        // suppressed defaults to visible.
+        let suppressed: i64 = conn
+            .query_row(
+                "SELECT suppressed FROM library_videos WHERE tidal_video_id = 900",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(suppressed, 0);
+
+        // Hits follow the track out.
+        conn.execute("DELETE FROM tracks WHERE id = 10", [])
+            .unwrap();
+        let orphans: i64 = conn
+            .query_row("SELECT COUNT(*) FROM library_videos", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(orphans, 0, "hits cascade with the track");
+
+        // The scan ledger is keyed by artist, and follows the artist out.
+        conn.execute("INSERT INTO artists (id, name) VALUES (2, 'Gone')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO library_video_scans (artist_id, video_count) VALUES (2, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM artists WHERE id = 2", [])
+            .unwrap();
+        let scans: i64 = conn
+            .query_row("SELECT COUNT(*) FROM library_video_scans", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(scans, 0, "scan rows cascade with the artist");
     }
 }

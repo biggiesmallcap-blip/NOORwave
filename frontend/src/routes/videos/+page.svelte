@@ -728,6 +728,10 @@
 				{:else if videoSessionActive && hasBrowseContent}
 					<button type="button" class="header-action" onclick={backToPicks}>Back to picks</button>
 				{:else}
+					<!-- Two entry points only in the idle state, where the slot
+					     has no "back to" duty: outward to TIDAL's editorial, and
+					     inward to the videos among your own likes. -->
+					<a class="header-action" href="/videos/liked">Liked videos</a>
 					<a class="header-action" href="/tidal/videos">TIDAL editorial</a>
 				{/if}
 			</div>
@@ -983,6 +987,7 @@
 	.tools-action {
 		display: flex;
 		justify-content: flex-end;
+		gap: var(--space-2);
 		min-width: 0;
 	}
 
