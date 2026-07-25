@@ -36,7 +36,7 @@
 
 <button
 	type="button"
-	class="video-card glass-tile"
+	class="video-card"
 	onclick={select}
 	oncontextmenu={menu}
 	aria-label={isVideoMix(video) ? `Open ${title}` : `Play ${title}`}
@@ -70,27 +70,45 @@
 </button>
 
 <style>
+	/* Clean, borderless card matching the Library "Recently added" rail
+	   (AlbumCarousel): just artwork + text, a soft shadow on the art, and a
+	   hover lift. No glass-tile border/background - keeps the shelves light. */
 	.video-card {
 		width: 100%;
-		display: grid;
-		gap: 10px;
-		padding: 10px;
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		background: none;
+		border: none;
+		padding: 0;
+		color: inherit;
 		text-align: left;
-		transition: transform var(--motion-base), border-color var(--motion-base), background var(--motion-base);
+		cursor: pointer;
+		transition: transform var(--motion-base);
 	}
 
 	.video-card:hover {
-		transform: translateY(-3px);
-		border-color: var(--border-strong);
-		background: var(--bg-hover);
+		transform: translateY(-4px);
+	}
+
+	.video-card:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: 4px;
+		border-radius: var(--radius-xs);
 	}
 
 	.poster-wrap {
 		position: relative;
 		aspect-ratio: 16 / 9;
-		border-radius: 7px;
+		border-radius: var(--radius-md);
 		overflow: hidden;
 		background: var(--bg-raised);
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+		transition: box-shadow var(--motion-base);
+	}
+
+	.video-card:hover .poster-wrap {
+		box-shadow: 0 12px 26px -6px rgba(0, 0, 0, 0.5);
 	}
 
 	.poster-wrap :global(.poster) {
@@ -134,7 +152,8 @@
 	}
 
 	.meta {
-		display: grid;
+		display: flex;
+		flex-direction: column;
 		gap: 2px;
 		min-width: 0;
 	}
@@ -153,7 +172,7 @@
 	}
 
 	.subtitle {
-		color: var(--text-tertiary);
+		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
 	}
 </style>
