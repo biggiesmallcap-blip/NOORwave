@@ -129,9 +129,13 @@
 	let loadMoreSeq = 0;
 	let mixLoadSeq = 0;
 	let playlistLoadSeq = 0;
-	let handledJumpNonce = 0;
-	let handledAutoplayToggleNonce = 0;
-	let handledClearNonce = 0;
+	// Seed from the current request nonces, not 0: these stores outlive the
+	// route, so a request consumed before this instance mounted (a queue-row
+	// jump, then navigating away and back) must not re-fire and restart the
+	// already-playing video. Only nonces that change after mount are new.
+	let handledJumpNonce = $videoJumpRequest?.nonce ?? 0;
+	let handledAutoplayToggleNonce = $videoAutoplayToggleRequest;
+	let handledClearNonce = $videoClearRequest;
 
 	// The playing video lives in the persistent dock + store; the route reads it
 	// for hero meta and card highlighting, and writes picks via playVideo().
@@ -1003,6 +1007,10 @@
 		width: min(100%, var(--content-width));
 		margin: 0 auto;
 		display: grid;
+		/* minmax(0, 1fr) not the default auto: an auto track sizes to its
+		   widest child's min-content, so a shelf rail of 12 cards would blow the
+		   column (and the page) past the container instead of scrolling. */
+		grid-template-columns: minmax(0, 1fr);
 		gap: 28px;
 		padding-bottom: max(44px, var(--safe-bottom));
 	}
@@ -1098,6 +1106,7 @@
 	.editorial-layer {
 		display: grid;
 		grid-template-rows: 1fr;
+		min-width: 0;
 		opacity: 1;
 		transform: translateY(0);
 		transition:
@@ -1117,6 +1126,9 @@
 		overflow: hidden;
 		min-height: 0;
 		display: grid;
+		/* Same reason as .videos-page: pin the column to the container so each
+		   shelf's rail scrolls inside it instead of stretching the page. */
+		grid-template-columns: minmax(0, 1fr);
 		gap: 28px;
 	}
 

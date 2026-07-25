@@ -128,6 +128,28 @@ export async function playVideo(
 	ctx: VideoPlayContext,
 	opts: { preloaded?: PreloadedVideoStream | null } = {}
 ): Promise<boolean> {
+	// Re-selecting the video that is already playing (returning to /videos with
+	// its ?videoId= still in the URL, a stale jump request, clicking its own
+	// queue row) must not refetch the stream and restart it from 0:00. Refresh
+	// the browse context and show it, but leave playback untouched.
+	const state = get(session);
+	if (
+		state.active &&
+		state.current?.tidal_id === item.tidal_id &&
+		Boolean(state.streamUrl) &&
+		!state.error &&
+		!opts.preloaded
+	) {
+		videoBrowseMode.set(false);
+		update({
+			queue: ctx.queue,
+			source: sourceFor(item, ctx),
+			sourceLabel: ctx.sourceLabel,
+			autoplay: ctx.autoplay ?? state.autoplay,
+		});
+		return true;
+	}
+
 	const seq = ++streamSeq;
 	// Picking something new always means "show it": browsing the shelves with
 	// a video docked ends the moment you choose the next one.
