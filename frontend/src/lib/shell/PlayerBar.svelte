@@ -3,14 +3,12 @@
 	import NowPlayingProgress from '$lib/components/now-playing/NowPlayingProgress.svelte';
 	import NowPlayingTransport from '$lib/components/now-playing/NowPlayingTransport.svelte';
 	import type { StreamDisplayInfo, Track } from '$lib/api/client';
-	import { formatResolutionShort } from '$lib/player/stream_display';
 	import {
 		tidalArtworkFallbackSizes,
 		upscaleTidalArtwork,
 		type TidalArtworkSize,
 	} from '$lib/utils/artwork';
 	import { getQualityClass } from '$lib/utils/format';
-	import { downloadTrack, downloadTidalTrack, defaultDownloadFormat } from '$lib/stores/downloads';
 
 	type PlayerBarError = {
 		message: string;
@@ -88,23 +86,6 @@
 	} = $props();
 
 	let failedArtworkUrls = $state<Record<string, boolean>>({});
-	let downloadPending = $state(false);
-
-	async function handleDownloadCurrent() {
-		if (!track || downloadPending) return;
-		downloadPending = true;
-		try {
-			// An ephemeral TIDAL track has no library row, so its id is negative; route
-			// through the import-then-download path instead of a doomed lookup by id.
-			if (track.id > 0) {
-				await downloadTrack(track.id, $defaultDownloadFormat);
-			} else {
-				await downloadTidalTrack(track, $defaultDownloadFormat);
-			}
-		} finally {
-			downloadPending = false;
-		}
-	}
 
 	let nowPlayingArtwork = $derived(artworkCandidate(track?.artwork_url, 640));
 
@@ -124,6 +105,13 @@
 		if (!renderedUrl) return;
 		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
 	}
+
+	// One quality statement for the whole panel. The live stream wins over the
+	// track's catalogue tier; the exact bit-depth / kHz rides along in
+	// streamDetail, so the artwork carries no badges of its own.
+	let qualityTier = $derived(streamDisplay?.audio_quality ?? track?.best_quality ?? null);
+	let qualityLabel = $derived(formatQuality(qualityTier));
+	let qualityClass = $derived(qualityTier ? getQualityClass(qualityTier) : '');
 
 	function formatQuality(q: string | null) {
 		if (!q) return '';
@@ -179,21 +167,6 @@
 			{/if}
 		{/key}
 
-		{#if streamDisplay}
-			<span class={`quality-badge np-quality ${getQualityClass(streamDisplay.audio_quality)}`}>
-				{formatQuality(streamDisplay.audio_quality)}
-			</span>
-			{#if formatResolutionShort(streamDisplay)}
-				<span class="quality-badge np-resolution" title="Actual playback resolution (bit-depth / kHz)">
-					{formatResolutionShort(streamDisplay)}
-				</span>
-			{/if}
-		{:else if track?.best_quality}
-			<span class={`quality-badge np-quality ${getQualityClass(track.best_quality)}`}>
-				{formatQuality(track.best_quality)}
-			</span>
-		{/if}
-
 		{#if track}
 			<button
 				class="np-fullscreen-btn"
@@ -201,23 +174,6 @@
 				title="Quiet mode"
 				onclick={onEnterQuietMode}
 			>⛶</button>
-			<button
-				class="np-art-fav"
-				class:active={track?.is_favorite}
-				aria-label={track?.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
-				title={track?.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
-				aria-pressed={track?.is_favorite}
-				disabled={favoritePending}
-				onclick={onToggleFavorite}
-			>{track?.is_favorite ? '♥' : '♡'}</button>
-			<button
-				class="np-art-dl"
-				class:pending={downloadPending}
-				aria-label="Download this track"
-				title={`Download (${$defaultDownloadFormat.toUpperCase()})`}
-				disabled={downloadPending}
-				onclick={handleDownloadCurrent}
-			>⤓</button>
 		{/if}
 	</div>
 
@@ -225,6 +181,8 @@
 		track={track}
 		nowPlayingAttribution={nowPlayingAttribution}
 		streamDetail={streamDetail}
+		qualityLabel={qualityLabel}
+		qualityClass={qualityClass}
 		playerState={playerState}
 		isScrubbing={isScrubbing}
 	/>
@@ -243,6 +201,8 @@
 		isPlaying={isPlaying}
 		shuffleMode={shuffleMode}
 		repeatMode={repeatMode}
+		favoritePending={favoritePending}
+		onToggleFavorite={onToggleFavorite}
 		onCycleShuffle={onCycleShuffle}
 		onPrev={onPrev}
 		onPlayPause={onPlayPause}
@@ -259,9 +219,25 @@
 			aria-label={volume === 0 ? 'Unmute' : 'Mute'}
 			aria-pressed={volume === 0}
 			onclick={onToggleMute}
-		>{volume === 0 ? '🔇' : '🔊'}</button>
-		<label class="volume-control" onwheel={handleVolumeWheel}>
-			<span>Vol</span>
+		>
+			<svg width="15" height="15" viewBox="0 0 15 15" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+				<path
+					d="M7.28 1.06a.5.5 0 0 1 .72.45v12a.5.5 0 0 1-.81.39L3.33 10.8H1.5a.5.5 0 0 1-.5-.5v-5.6a.5.5 0 0 1 .5-.5h1.83L7.19 1.1a.5.5 0 0 1 .09-.05z"
+					fill="currentColor"
+				/>
+				{#if volume === 0}
+					<path d="M10.3 5.3l3.4 3.4M13.7 5.3l-3.4 3.4" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" />
+				{:else}
+					<path
+						d="M10.4 5.1a3.2 3.2 0 0 1 0 4.8M12.3 3.4a5.6 5.6 0 0 1 0 8.2"
+						stroke="currentColor"
+						stroke-width="1.1"
+						stroke-linecap="round"
+					/>
+				{/if}
+			</svg>
+		</button>
+		<label class="volume-control" onwheel={handleVolumeWheel} title={`Volume ${displayVolume}%`}>
 			<input
 				type="range"
 				min="0"
@@ -271,8 +247,8 @@
 				oninput={handleVolumeInput}
 				onchange={handleVolumeChange}
 				aria-label="Volume"
+				aria-valuetext={`${displayVolume}%`}
 			/>
-			<span class="volume-pct">{displayVolume}%</span>
 		</label>
 	</div>
 
@@ -339,98 +315,6 @@
 		background: rgba(0, 0, 0, 0.65);
 	}
 
-	.np-art-fav {
-		position: absolute;
-		bottom: 10px;
-		right: 10px;
-		width: 36px;
-		height: 36px;
-		border-radius: 50%;
-		display: grid;
-		place-items: center;
-		font-size: var(--font-size-lg);
-		line-height: 1;
-		color: rgba(255, 255, 255, 0.92);
-		background: rgba(0, 0, 0, 0.45);
-		border: 1px solid rgba(255, 255, 255, 0.18);
-		backdrop-filter: var(--blur-base);
-		-webkit-backdrop-filter: var(--blur-base);
-		cursor: pointer;
-		transition:
-			transform 160ms ease,
-			background 160ms ease,
-			color 160ms ease,
-			border-color 160ms ease,
-			box-shadow 160ms ease;
-	}
-
-	.np-art-fav:hover {
-		background: rgba(0, 0, 0, 0.65);
-		transform: translateY(-1px);
-	}
-
-	.np-art-fav:active {
-		transform: scale(0.92);
-	}
-
-	.np-art-fav:disabled {
-		opacity: 0.55;
-		cursor: not-allowed;
-	}
-
-	.np-art-fav.active {
-		color: #ff4d6d;
-		background: color-mix(in srgb, #ff4d6d 24%, rgba(0, 0, 0, 0.55));
-		border-color: color-mix(in srgb, #ff4d6d 60%, transparent);
-		box-shadow: 0 0 14px color-mix(in srgb, #ff4d6d 40%, transparent);
-	}
-
-	.np-art-dl {
-		position: absolute;
-		bottom: 10px;
-		left: 10px;
-		width: 36px;
-		height: 36px;
-		border-radius: 50%;
-		display: grid;
-		place-items: center;
-		font-size: var(--font-size-lg);
-		line-height: 1;
-		color: rgba(255, 255, 255, 0.92);
-		background: rgba(0, 0, 0, 0.45);
-		border: 1px solid rgba(255, 255, 255, 0.18);
-		backdrop-filter: var(--blur-base);
-		-webkit-backdrop-filter: var(--blur-base);
-		cursor: pointer;
-		transition:
-			transform 160ms ease,
-			background 160ms ease,
-			color 160ms ease;
-	}
-
-	.np-art-dl:hover {
-		background: rgba(0, 0, 0, 0.65);
-		transform: translateY(-1px);
-	}
-
-	.np-art-dl:active {
-		transform: scale(0.92);
-	}
-
-	.np-art-dl:disabled {
-		opacity: 0.55;
-		cursor: progress;
-	}
-
-	.np-art-dl.pending {
-		animation: np-dl-pulse 900ms ease-in-out infinite;
-	}
-
-	@keyframes np-dl-pulse {
-		0%, 100% { opacity: 0.55; }
-		50% { opacity: 0.9; }
-	}
-
 	.np-artwork {
 		width: 100%;
 		height: 100%;
@@ -451,51 +335,34 @@
 		font-size: var(--font-size-2xl);
 	}
 
-	.np-quality {
-		position: absolute;
-		top: 10px;
-		right: 10px;
-	}
-
-	.np-resolution {
-		position: absolute;
-		top: 36px;
-		right: 10px;
-		font-variant-numeric: tabular-nums;
-		font-size: var(--font-size-2xs);
-		letter-spacing: 0.04em;
-		opacity: 0.85;
-	}
-
+	/* Volume wears no chrome: a bare icon plus a hairline track, so it reads as
+	   the same family as the progress bar instead of a second pill competing
+	   with the transport. The percentage lives in the tooltip and
+	   aria-valuetext rather than a permanent readout. */
 	.np-controls {
 		display: flex;
 		align-items: center;
-		gap: 12px;
+		gap: 10px;
 	}
 
 	.np-mute-btn {
-		width: 32px;
-		height: 32px;
-		border-radius: 50%;
+		width: 20px;
+		height: 20px;
 		display: grid;
 		place-items: center;
-		background: color-mix(in srgb, var(--instrument-surface) 82%, transparent);
-		border: 1px solid color-mix(in srgb, var(--instrument-border) 58%, transparent);
-		color: var(--text-primary);
-		font-size: var(--font-size-sm);
+		background: transparent;
+		border: 0;
+		color: var(--text-secondary);
 		flex-shrink: 0;
 		cursor: pointer;
-		transition: background var(--motion-fast), border-color var(--motion-fast);
+		transition: color var(--motion-fast);
 	}
 
 	.np-mute-btn:hover {
-		background: color-mix(in srgb, var(--instrument-surface-strong) 92%, transparent);
-		border-color: color-mix(in srgb, var(--instrument-border) 82%, transparent);
+		color: var(--text-primary);
 	}
 
 	.np-mute-btn[aria-pressed='true'] {
-		background: var(--accent-soft);
-		border-color: var(--accent-line);
 		color: var(--accent-strong);
 	}
 
@@ -503,25 +370,7 @@
 		flex: 1;
 		display: flex;
 		align-items: center;
-		gap: 10px;
-		padding: 10px 12px;
-		border-radius: 999px;
-		border: 1px solid color-mix(in srgb, var(--instrument-border) 58%, transparent);
-		background: color-mix(in srgb, var(--instrument-surface) 82%, transparent);
-	}
-
-	.volume-control span {
-		color: var(--text-secondary);
-		font-size: var(--font-size-xs);
-	}
-
-	.volume-pct {
-		color: var(--text-tertiary);
-		font-size: var(--font-size-xs);
-		font-variant-numeric: tabular-nums;
-		min-width: 3ch;
-		text-align: right;
-		flex-shrink: 0;
+		min-width: 0;
 	}
 
 	.volume-control input {
@@ -605,13 +454,17 @@
 		padding-block: 6px;
 	}
 
-	.np-top.queue-expanded :global(.np-copy .np-eyebrow) {
+	.np-top.queue-expanded :global(.np-copy .np-album),
+	.np-top.queue-expanded :global(.np-copy .np-source),
+	.np-top.queue-expanded :global(.badge-row) {
 		display: none;
 	}
 
-	.np-top.queue-expanded :global(.np-copy .np-album),
-	.np-top.queue-expanded :global(.np-copy .np-source),
-	.np-top.queue-expanded :global(.np-copy .np-stream-detail) {
+	/* The artwork is a 64px strip once the queue is expanded - anything
+	   floating over it collides with everything else, so the quiet-mode
+	   button steps aside (it stays on the collapsed artwork and in the
+	   right-click menu). */
+	.np-top.queue-expanded .np-fullscreen-btn {
 		display: none;
 	}
 
@@ -625,11 +478,10 @@
 		font-size: var(--font-size-xs);
 	}
 
-	.np-top.queue-expanded :global(.np-progress) {
-		max-height: 0;
-		opacity: 0;
-		overflow: hidden;
-		pointer-events: none;
+	/* Keep the scrubber alive with the queue expanded - only the time labels
+	   go, so position stays visible and seekable. */
+	.np-top.queue-expanded :global(.np-times) {
+		display: none;
 	}
 
 	.np-top.queue-expanded :global(.transport) {
@@ -640,9 +492,5 @@
 	.np-top.queue-expanded :global(.tp-play) {
 		width: 30px;
 		height: 30px;
-	}
-
-	.np-top.queue-expanded .np-quality {
-		display: none;
 	}
 </style>

@@ -76,6 +76,11 @@
 		currentQueueAnchorPosition,
 		isQueueItemActive,
 	} from '$lib/player/queue_active';
+	import {
+		SILENT_SOURCE_LABELS,
+		formatQueueSource,
+		queueSourceSlug,
+	} from '$lib/player/queue_source';
 	import { formatPlayerStreamDetail, formatResolutionShort } from '$lib/player/stream_display';
 	import { queueItemToTidalPlayable, trackToTidalPlayable } from '$lib/utils/track';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
@@ -263,6 +268,20 @@
 		true: 'True random'
 	};
 
+	// Ambient session state for the sidebar pill: the modes that are actually
+	// on, in one line, instead of a paragraph each.
+	let serverVersion = $state('');
+	let sessionModeLine = $derived(
+		[
+			// Keep the mode named, not just its value: a bare "Genre mix" in the
+			// sidebar reads as a notification rather than current state.
+			$shuffleMode !== 'off' ? `Shuffle: ${shuffleStatusLabels[$shuffleMode]}` : null,
+			$automixEnabled ? 'Automix on' : null,
+		]
+			.filter(Boolean)
+			.join(' - '),
+	);
+
 	const shuffleIcons: Record<string, string> = {
 		off: '⇄',
 		genre: '◈',
@@ -342,6 +361,14 @@
 		// before falling back to the PIN modal — keeps local launches silent
 		// even if the stored token is stale (e.g. server regenerated).
 		window.addEventListener('noor:unauthorized', handleUnauthorized);
+
+		// Build string for the sidebar pill. Cosmetic, so a failure is silent.
+		void api
+			.getStatus()
+			.then((status) => {
+				serverVersion = status.version ?? '';
+			})
+			.catch(() => {});
 
 		const storedTheme = localStorage.getItem('noor-theme');
 		if (storedTheme === 'light' || storedTheme === 'dark') {
@@ -704,28 +731,6 @@
 		return q.replaceAll('_', ' ');
 	}
 
-	function formatQueueSource(source: string): string {
-		const normalized = source.trim().toLowerCase();
-		if (normalized.includes('automix')) return 'Automix';
-		if (normalized.includes('genre')) return 'Genre';
-		if (normalized.includes('discover')) return 'Discover';
-		if (normalized.includes('playlist')) return 'Playlist';
-		if (normalized.includes('library')) return 'Library';
-		if (normalized.includes('manual') || normalized.includes('queue')) return 'Manual';
-		return source || 'Queued';
-	}
-
-	// Source slug drives the `.source-*` CSS class that paints the 4px dot on
-	// queue artwork. Keep in sync with formatQueueSource above. The one
-	// exception: `automix-new` (the only hyphenated source label in the repo)
-	// keeps its own slug so the dot can wear a ring distinguishing
-	// discover-injected rows from plain automix.
-	function queueSourceSlug(source: string): string {
-		const normalized = source.trim().toLowerCase();
-		if (normalized === 'automix-new') return 'automix-new';
-		return formatQueueSource(source).toLowerCase();
-	}
-
 	type QueueItemType = (typeof $playbackQueue)[number];
 
 	/**
@@ -912,8 +917,8 @@
 		const item = currentQueueAnchorItem($playbackQueue, $currentTrack, $currentQueueItemId);
 		if (!item) return null;
 		const friendly = formatQueueSource(item.source);
-		// "Manual" / generic queue isn't worth surfacing.
-		if (friendly === 'Manual' || friendly === 'Queued') return null;
+		// Hand-queued / generic rows aren't worth surfacing.
+		if (SILENT_SOURCE_LABELS.has(friendly)) return null;
 		return friendly;
 	}
 	let nowPlayingAttribution = $derived(attributionFor($currentTrack));
@@ -1051,18 +1056,6 @@
 	const QUEUE_INITIAL_CAP = 40;
 	const QUEUE_LOAD_MORE_STEP = 40;
 	let queueVisibleCount = $state(QUEUE_INITIAL_CAP);
-	let legendOpen = $state(false);
-
-	type LegendEntry = { slug: string; label: string };
-	const SOURCE_LEGEND: LegendEntry[] = [
-		{ slug: 'library', label: 'Library' },
-		{ slug: 'playlist', label: 'Playlist' },
-		{ slug: 'genre', label: 'Genre' },
-		{ slug: 'automix', label: 'Automix' },
-		{ slug: 'automix-new', label: 'Discover automix' },
-		{ slug: 'discover', label: 'Discover' },
-		{ slug: 'manual', label: 'Manual' },
-	];
 
 	$effect(() => {
 		// Reset the cap when the queue gets smaller than what we are currently
@@ -1298,21 +1291,61 @@
 		<SidebarNav pathname={page.url.pathname} />
 
 		<div class="sidebar-footer">
+			<!-- One pill for the session's ambient state: connection, build, the
+			     modes that are on, and the always-on toggles that used to crowd
+			     the queue header on the far side of the screen. -->
 			<div class="live-status">
-				<span class:offline={!$wsConnected} class="live-dot"></span>
-				<div class="live-copy">
-					<strong>{$wsConnected ? 'Server connected' : 'Server offline'}</strong>
-					<span>{$wsConnected ? 'Realtime updates active' : 'Waiting for realtime updates'}</span>
+				<div class="live-status-head">
+					<span class:offline={!$wsConnected} class="live-dot" aria-hidden="true"></span>
+					<strong>{$wsConnected ? 'Connected' : 'Offline'}</strong>
+					{#if serverVersion}
+						<span class="live-version" title="Server build">v{serverVersion}</span>
+					{/if}
+				</div>
+
+				{#if sessionModeLine}
+					<p class="live-modes">{sessionModeLine}</p>
+				{/if}
+
+				<div class="live-actions" role="group" aria-label="Session controls">
+					<button
+						class="queue-icon-btn queue-automix-btn"
+						class:active={$automixEnabled}
+						title={$automixEnabled ? 'Automix on' : 'Automix off'}
+						aria-label={$automixEnabled ? 'Disable automix' : 'Enable automix'}
+						aria-pressed={$automixEnabled}
+						onclick={() => void togglePlayerAutomix()}
+					>
+						<svg width="13" height="13" viewBox="0 0 15 15" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+							<path
+								d="M7.5 1.6A5.1 5.1 0 0 0 2.4 6.7v1.2h-.2a1 1 0 0 0-1 1v2.1a1 1 0 0 0 1 1h1.5a.6.6 0 0 0 .6-.6V6.7a3.2 3.2 0 0 1 6.4 0v4.7a.6.6 0 0 0 .6.6h1.5a1 1 0 0 0 1-1V8.9a1 1 0 0 0-1-1h-.2V6.7A5.1 5.1 0 0 0 7.5 1.6z"
+								fill="currentColor"
+							/>
+						</svg>
+					</button>
+					<button
+						class="queue-icon-btn queue-discover-btn"
+						class:active={$automixDiscoverNew}
+						title={$automixDiscoverNew ? 'Include New: on - pulling in tracks outside your library' : 'Include New: off - tap to find new music during automix'}
+						aria-label={$automixDiscoverNew ? 'Disable discover new' : 'Enable discover new'}
+						aria-pressed={$automixDiscoverNew}
+						onclick={() => void setPlayerDiscoverNew(!$automixDiscoverNew)}
+					>
+						<svg width="12" height="12" viewBox="0 0 15 15" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+							<path d="M7.5 1a6.5 6.5 0 1 0 0 13A6.5 6.5 0 0 0 7.5 1zm0 1a5.5 5.5 0 1 1 0 11A5.5 5.5 0 0 1 7.5 2zM7 4.5V7H4.5a.5.5 0 0 0 0 1H7v2.5a.5.5 0 0 0 1 0V8h2.5a.5.5 0 0 0 0-1H8V4.5a.5.5 0 0 0-1 0z" fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"/>
+						</svg>
+					</button>
+					<button
+						class="queue-icon-btn queue-help-btn"
+						type="button"
+						title="Keyboard shortcuts"
+						aria-label="Keyboard shortcuts"
+						aria-haspopup="dialog"
+						aria-expanded={shortcutHelpOpen}
+						onclick={openShortcutHelp}
+					>?</button>
 				</div>
 			</div>
-
-			{#if $shuffleMode !== 'off'}
-				<p class="status-line">Shuffle mode: {shuffleStatusLabels[$shuffleMode]}</p>
-			{/if}
-
-			{#if $automixEnabled}
-				<p class="status-line">Automix extending the session</p>
-			{/if}
 
 			<button class="theme-toggle btn btn-glass" onclick={toggleTheme}>
 				{theme === 'dark' ? 'Switch to light' : 'Switch to dark'}
@@ -1464,46 +1497,13 @@
 				>
 					{#if upcomingQueue.length > 0}
 						<span class="queue-count-num">{upcomingQueue.length}</span>
-						<span class="queue-count-unit">
-							{upcomingQueue.length === 1 ? 'track' : 'tracks'} · {queueTotalLabel}
-						</span>
+						<span class="queue-count-unit">{queueTotalLabel}</span>
 					{:else}
 						<span class="queue-eyebrow">Up next</span>
 						<span class="queue-count-unit">empty</span>
 					{/if}
 				</button>
 				<div class="queue-header-actions">
-					<div class="queue-action-group discovery-radio-controls" role="group" aria-label="Discovery and radio controls">
-					<button
-						class="queue-icon-btn queue-automix-btn"
-						class:active={$automixEnabled}
-						title={$automixEnabled ? 'Automix on' : 'Automix off'}
-						aria-label={$automixEnabled ? 'Disable automix' : 'Enable automix'}
-						onclick={() => void togglePlayerAutomix()}
-					>🎧</button>
-					<button
-						class="queue-icon-btn queue-discover-btn"
-						class:active={$automixDiscoverNew}
-						title={$automixDiscoverNew ? 'Include New: on — pulling in tracks outside your library' : 'Include New: off — tap to find new music during automix'}
-						aria-label={$automixDiscoverNew ? 'Disable discover new' : 'Enable discover new'}
-						aria-pressed={$automixDiscoverNew}
-						onclick={() => void setPlayerDiscoverNew(!$automixDiscoverNew)}
-					>
-						<svg width="12" height="12" viewBox="0 0 15 15" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-							<path d="M7.5 1a6.5 6.5 0 1 0 0 13A6.5 6.5 0 0 0 7.5 1zm0 1a5.5 5.5 0 1 1 0 11A5.5 5.5 0 0 1 7.5 2zM7 4.5V7H4.5a.5.5 0 0 0 0 1H7v2.5a.5.5 0 0 0 1 0V8h2.5a.5.5 0 0 0 0-1H8V4.5a.5.5 0 0 0-1 0z" fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"/>
-						</svg>
-					</button>
-					</div>
-					<div class="queue-action-group queue-tools-controls" role="group" aria-label="Queue tools">
-					<button
-						class="queue-icon-btn queue-help-btn"
-						type="button"
-						title="Keyboard shortcuts"
-						aria-label="Keyboard shortcuts"
-						aria-haspopup="dialog"
-						aria-expanded={shortcutHelpOpen}
-						onclick={openShortcutHelp}
-					>?</button>
 					<button
 						class="queue-icon-btn queue-save-btn"
 						type="button"
@@ -1512,8 +1512,6 @@
 						onclick={openSaveQueue}
 						disabled={upcomingQueue.length === 0 && !$currentTrack}
 					>★</button>
-					</div>
-					<div class="queue-action-group cleanup-controls" role="group" aria-label="Cleanup controls">
 					<button
 						class="queue-icon-btn queue-clear-btn"
 						type="button"
@@ -1522,8 +1520,6 @@
 						onclick={() => void handleClearQueue()}
 						disabled={upcomingQueue.length === 0}
 					>⌫</button>
-					</div>
-					<div class="queue-action-group queue-display-controls" role="group" aria-label="Queue display controls">
 					<button
 						class="queue-icon-btn queue-expand-btn"
 						type="button"
@@ -1532,31 +1528,7 @@
 						aria-expanded={queueExpanded}
 						onclick={toggleQueueExpanded}
 					>▲</button>
-					</div>
 				</div>
-			</div>
-
-			<div class="queue-legend-row">
-				<button
-					class="queue-legend-toggle"
-					type="button"
-					aria-expanded={legendOpen}
-					aria-controls="queue-source-legend"
-					onclick={() => { legendOpen = !legendOpen; }}
-				>
-					Source legend
-					<span aria-hidden="true">{legendOpen ? '▴' : '▾'}</span>
-				</button>
-				{#if legendOpen}
-					<ul class="queue-legend" id="queue-source-legend">
-						{#each SOURCE_LEGEND as entry}
-							<li>
-								<span class="queue-source-dot source-{entry.slug}" aria-hidden="true"></span>
-								<span>{entry.label}</span>
-							</li>
-						{/each}
-					</ul>
-				{/if}
 			</div>
 
 			{#if !currentRowVisible && $currentTrack && upcomingQueue.length > 0}
@@ -1930,7 +1902,14 @@
 					aria-label={$automixEnabled ? 'Disable automix' : 'Enable automix'}
 					onclick={() => void togglePlayerAutomix()}
 				>
-					<span>🎧</span>
+					<span aria-hidden="true">
+						<svg width="13" height="13" viewBox="0 0 15 15" fill="none" xmlns="http://www.w3.org/2000/svg">
+							<path
+								d="M7.5 1.6A5.1 5.1 0 0 0 2.4 6.7v1.2h-.2a1 1 0 0 0-1 1v2.1a1 1 0 0 0 1 1h1.5a.6.6 0 0 0 .6-.6V6.7a3.2 3.2 0 0 1 6.4 0v4.7a.6.6 0 0 0 .6.6h1.5a1 1 0 0 0 1-1V8.9a1 1 0 0 0-1-1h-.2V6.7A5.1 5.1 0 0 0 7.5 1.6z"
+								fill="currentColor"
+							/>
+						</svg>
+					</span>
 					<span>{$automixEnabled ? 'Automix on' : 'Automix'}</span>
 				</button>
 			</div>
@@ -2137,8 +2116,10 @@
 		-webkit-backdrop-filter: blur(var(--wallpaper-blur, 10px)) saturate(1.12);
 	}
 
+	/* The workspace scrim has to actually hide the shader: at 0.44 the moire
+	   read straight through card artwork and shelf titles. */
 	.app-shell.has-wallpaper .workspace {
-		background: rgba(9, 9, 14, 0.44);
+		background: rgba(9, 9, 14, 0.62);
 		backdrop-filter: blur(var(--wallpaper-blur, 10px)) saturate(1.1);
 		-webkit-backdrop-filter: blur(var(--wallpaper-blur, 10px)) saturate(1.1);
 	}
@@ -2150,7 +2131,7 @@
 	}
 
 	:global([data-theme="light"]) .app-shell.has-wallpaper .workspace {
-		background: rgba(248, 250, 252, 0.82);
+		background: rgba(248, 250, 252, 0.9);
 	}
 
 	:global([data-theme="light"]) .app-shell.has-wallpaper .now-playing-panel {
@@ -2432,47 +2413,62 @@
 
 	.live-status {
 		display: flex;
-		align-items: center;
-		gap: 10px;
-		padding: 12px;
+		flex-direction: column;
+		gap: 8px;
+		padding: 8px 10px;
 		border-radius: var(--radius);
 		background: color-mix(in srgb, var(--instrument-surface) 80%, transparent);
 		border: 1px solid color-mix(in srgb, var(--instrument-border) 52%, transparent);
 	}
 
+	.live-status-head {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		min-width: 0;
+	}
+
+	.live-status-head strong {
+		font-size: var(--font-size-xs);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.live-version {
+		margin-left: auto;
+		flex-shrink: 0;
+		color: var(--text-tertiary);
+		font-size: var(--font-size-2xs);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.live-modes {
+		color: var(--signal-text);
+		font-size: var(--font-size-2xs);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.live-actions {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+
 	.live-dot {
-		width: 9px;
-		height: 9px;
+		width: 8px;
+		height: 8px;
 		border-radius: 50%;
 		background: var(--state-success);
-		box-shadow: 0 0 0 6px color-mix(in srgb, var(--state-success) 18%, transparent);
+		box-shadow: 0 0 0 4px color-mix(in srgb, var(--state-success) 18%, transparent);
 		flex-shrink: 0;
 	}
 
 	.live-dot.offline {
 		background: var(--text-muted);
 		box-shadow: none;
-	}
-
-	.live-copy {
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-		min-width: 0;
-	}
-
-	.live-copy strong {
-		font-size: var(--font-size-sm);
-	}
-
-	.live-copy span,
-	.status-line {
-		color: var(--signal-text);
-		font-size: var(--font-size-xs);
-	}
-
-	.status-line {
-		padding: 0 2px;
 	}
 
 	.theme-toggle {
@@ -2616,8 +2612,8 @@
 	.queue-banner {
 		flex: 1 1 auto;
 		display: flex;
-		align-items: baseline;
-		gap: 4px;
+		align-items: center;
+		gap: 8px;
 		padding: 4px 6px;
 		margin: -4px -6px;
 		background: transparent;
@@ -2637,9 +2633,18 @@
 		border-color: var(--border-subtle);
 	}
 
+	/* The count is a circled number: the word "tracks" used to eat the row and
+	   push the duration into an ellipsis. */
 	.queue-count-num {
 		flex: 0 0 auto;
-		font-size: var(--font-size-md);
+		display: grid;
+		place-items: center;
+		min-width: 26px;
+		height: 26px;
+		padding: 0 6px;
+		border-radius: 999px;
+		border: 1px solid var(--border-strong);
+		font-size: var(--font-size-xs);
 		font-weight: var(--font-weight-semibold);
 		color: var(--text-primary);
 		font-variant-numeric: tabular-nums;
@@ -2662,21 +2667,6 @@
 		align-items: center;
 		gap: 8px;
 		flex-shrink: 0;
-	}
-
-	.queue-action-group {
-		position: relative;
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-	}
-
-	.queue-action-group + .queue-action-group::before {
-		content: '';
-		width: 1px;
-		height: 22px;
-		margin-right: 2px;
-		background: var(--border-subtle, rgba(255, 255, 255, 0.08));
 	}
 
 	.queue-automix-btn.active {
@@ -2964,34 +2954,9 @@
 		color: var(--text-tertiary);
 	}
 
-	/* 4px dot in the bottom-right of the artwork encodes where the track came
-	   from. Replaces the old .queue-origin chip that ate horizontal space in
-	   the artist row. Tooltip on .queue-art-wrap names the source. */
-	.queue-source-dot {
-		position: absolute;
-		right: -2px;
-		bottom: -2px;
-		width: 8px;
-		height: 8px;
-		border-radius: 999px;
-		border: 2px solid var(--instrument-surface, #14162a);
-		background: var(--text-tertiary, rgba(255, 255, 255, 0.5));
-	}
-
-	.queue-source-dot.source-automix { background: var(--accent-strong, #6366f1); }
-	.queue-source-dot.source-automix-new {
-		/* Discover-injected automix rows get the automix indigo plus a ring
-		   so users can spot which queue picks came from a TIDAL search vs the
-		   library-only automix path. */
-		background: var(--accent-strong, #6366f1);
-		box-shadow: 0 0 0 2px color-mix(in srgb, #a855f7 70%, transparent);
-	}
-	.queue-source-dot.source-discover { background: #a855f7; }
-	.queue-source-dot.source-genre { background: #22d3ee; }
-	.queue-source-dot.source-playlist { background: #f59e0b; }
-	.queue-source-dot.source-library { background: #10b981; }
-	.queue-source-dot.source-manual,
-	.queue-source-dot.source-queued { background: var(--text-tertiary, rgba(255, 255, 255, 0.45)); }
+	/* The dot in the bottom-right of queue artwork encodes where the track came
+	   from; its colours live in app.css so the legend on the automix page can
+	   reuse them. Tooltip on .queue-art-wrap names the source. */
 
 	.queue-meta {
 		min-width: 0;
@@ -3134,61 +3099,6 @@
 		font-family: var(--font-mono, monospace);
 		font-size: var(--font-size-2xs);
 		font-weight: var(--font-weight-bold);
-	}
-
-	.queue-legend-row {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-		margin-bottom: 6px;
-	}
-
-	.queue-legend-toggle {
-		align-self: flex-start;
-		display: inline-flex;
-		align-items: center;
-		gap: 4px;
-		padding: 4px 8px;
-		border-radius: 999px;
-		border: 1px solid transparent;
-		background: transparent;
-		color: var(--text-tertiary);
-		font-size: var(--font-size-2xs);
-		text-transform: uppercase;
-		letter-spacing: 0.08em;
-		cursor: pointer;
-	}
-
-	.queue-legend-toggle:hover {
-		color: var(--text-secondary);
-		border-color: var(--border-subtle);
-	}
-
-	.queue-legend {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 10px 14px;
-		margin: 0;
-		padding: 8px 10px;
-		list-style: none;
-		border-radius: var(--radius-sm);
-		background: color-mix(in srgb, var(--instrument-surface) 70%, transparent);
-		border: 1px solid var(--border-subtle);
-	}
-
-	.queue-legend li {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		font-size: var(--font-size-xs);
-		color: var(--text-secondary);
-	}
-
-	.queue-legend .queue-source-dot {
-		position: static;
-		width: 8px;
-		height: 8px;
-		border-width: 0;
 	}
 
 	.queue-load-more {
