@@ -901,3 +901,25 @@ threshold, so a blocked loop is provable instead of hypothesised. The loop does
 have genuine multi-second hazards (cpal/WASAPI stream builds, and the 8-28s DJ
 mixer render when a prepared program does not match the pair).
 Spawned by: transport latch + CDN correction 2026-07-17
+
+### videos: era set assumes releaseDate rides in the artist-videos payload
+
+The new era shelf reads each candidate's release year out of the flattened
+`extra["releaseDate"]` on TidalArtistVideo (client.rs comment claims it's there,
+but it was never verified against a live artist-videos response). If TIDAL omits
+it on that endpoint, every candidate parses year=None, no decade clears the
+minimum, and the era set silently never appears. Confirm with one logged live
+`get_artist_videos` call; if absent, the fallback is fetching each video's album
+year via the album ref. Until confirmed, era is a shelf that may just never show.
+Spawned by: videos taste loop + era set 2026-07-25
+
+### videos: watch history records starts only, no completion or taste feeding
+
+video_history rows are written on play start (enough for recently-watched
+exclusion) with completed=0 and duration_watched_ms=NULL always. The columns
+exist for a later loop: stamp completion + watched duration from the dock's
+ended/replace handlers, then feed completed video artists into the session
+TasteVector (discovery_ranking::build_session_taste) so watching tunes the sets.
+This is the Phase-3 taste-feedback piece (like/not-interested on editorial
+videos) the plan left deferred.
+Spawned by: videos taste loop + era set 2026-07-25

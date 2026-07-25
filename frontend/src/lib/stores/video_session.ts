@@ -120,6 +120,20 @@ function sourceFor(item: VideoSessionItem, ctx: VideoPlayContext): VideoSessionS
 	return 'direct';
 }
 
+/** Log a started video so the editorial builder can hold it out of the next few
+ *  rotations. Fire-and-forget: a dropped write only costs a repeat pick. */
+function recordWatch(item: VideoSessionItem) {
+	const artistId = 'artist_id' in item ? item.artist_id : null;
+	void api
+		.recordVideoHistory({
+			tidal_video_id: item.tidal_id,
+			title: item.title ?? null,
+			artist_tidal_id: artistId ?? null,
+			artist_name: item.artist_name ?? null,
+		})
+		.catch(() => {});
+}
+
 /** Start (or switch to) a video: set it current, fetch its HLS stream, and let
  *  the persistent dock render it. Returns false if the request was superseded
  *  or the stream failed. */
@@ -178,6 +192,7 @@ export async function playVideo(
 		}
 		if (seq !== streamSeq) return false;
 		update({ streamUrl: url, streamExpiresAt: expiresAt, loading: false, error: null });
+		recordWatch(item);
 		return true;
 	} catch (err) {
 		if (seq !== streamSeq) return false;

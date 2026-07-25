@@ -17,6 +17,7 @@
 //! | AlbumLove    | artists behind favorited albums            | weekly |
 //! | OneStepOut   | TIDAL "fans also like", library removed    | weekly |
 //! | DjSets       | video search, long-form only (no anchors)  | weekly |
+//! | Era          | top library artists, one shared decade     | weekly |
 //!
 //! Scoring is the shared `discovery_ranking::shape_score`: the seed is the
 //! listener's genre profile, the candidate carries its anchor's genre set, and
@@ -41,7 +42,13 @@ pub const DAILY_PICKS_SLUG: &str = "daily-picks";
 pub const ALBUM_LOVE_SLUG: &str = "album-love";
 pub const ONE_STEP_OUT_SLUG: &str = "one-step-out";
 pub const DJ_SETS_SLUG: &str = "dj-sets";
+pub const ERA_SLUG: &str = "era";
 pub const GENRE_SLUG_PREFIX: &str = "genre:";
+
+/// How far back a watch counts as "recent" and is held out of new builds. A set
+/// turns over daily or weekly, so two weeks stops a video reappearing across a
+/// couple of rotations without permanently retiring it.
+pub const RECENTLY_WATCHED_DAYS: i64 = 14;
 
 /// How many top-listened artists form the daily sampling pool. Wide enough
 /// that the draw feels different day to day, narrow enough to stay "artists
@@ -146,6 +153,10 @@ pub enum Archetype {
     AlbumLove,
     OneStepOut,
     DjSets,
+    /// Videos from library artists that all landed in one decade. The decade is
+    /// not known until the videos are fetched, so unlike every other archetype
+    /// it is chosen inside `assemble_set` from what actually came back.
+    Era,
 }
 
 /// A set the route should build: everything DB-derived is already resolved, so
@@ -184,6 +195,17 @@ pub struct VideoCandidate {
     pub artist_name: Option<String>,
     pub album_tidal_id: Option<i64>,
     pub artwork_url: Option<String>,
+    /// Four-digit year off the raw `releaseDate`. Not a typed field on either
+    /// TIDAL video shape, so it rides in `extra`; absent for the era set means
+    /// the video is simply not a candidate, never a crash.
+    pub release_year: Option<i32>,
+}
+
+/// Pull a four-digit year out of TIDAL's flattened extras. The field is
+/// `releaseDate` as an ISO date (`"1998-10-05"`); we only need the year.
+fn extra_release_year(extra: &HashMap<String, serde_json::Value>) -> Option<i32> {
+    let raw = extra.get("releaseDate")?.as_str()?;
+    raw.get(0..4)?.parse::<i32>().ok().filter(|y| *y >= 1900)
 }
 
 impl From<&TidalArtistVideo> for VideoCandidate {
@@ -196,6 +218,7 @@ impl From<&TidalArtistVideo> for VideoCandidate {
             artist_name: v.artist.as_ref().map(|a| a.name.clone()),
             album_tidal_id: v.album.as_ref().map(|al| al.id),
             artwork_url: TidalClient::get_artwork_url(&v.image_id, 640),
+            release_year: extra_release_year(&v.extra),
         }
     }
 }
@@ -210,6 +233,7 @@ impl From<&TidalSearchVideo> for VideoCandidate {
             artist_name: v.artist_name.clone(),
             album_tidal_id: v.album_id,
             artwork_url: v.artwork_url.clone(),
+            release_year: extra_release_year(&v.extra),
         }
     }
 }
@@ -489,6 +513,20 @@ pub fn known_artist_tidal_ids(conn: &Connection) -> Result<HashSet<i64>> {
     Ok(rows.into_iter().collect())
 }
 
+/// TIDAL video ids watched within the last `days`, held out of new builds so a
+/// set moves on rather than re-serving what was just watched.
+pub fn recently_watched_video_ids(conn: &Connection, days: i64) -> Result<HashSet<i64>> {
+    let cutoff = format!("-{days} days");
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT tidal_video_id FROM video_history \
+         WHERE started_at >= datetime('now', ?1)",
+    )?;
+    let rows = stmt
+        .query_map(params![cutoff], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows.into_iter().collect())
+}
+
 // --- Sampling ---
 
 /// Weighted sample without replacement, weight = listens. Deterministic for a
@@ -652,6 +690,19 @@ pub fn plan_missing_sets(conn: &Connection, today: chrono::NaiveDate) -> Result<
         });
     }
 
+    // Era is anchored like DailyPicks (top library artists) but keeps only the
+    // videos that share the richest decade among what came back. It self-skips
+    // when TIDAL omits release dates: no years, no decade, no set.
+    push_anchored(
+        &mut plans,
+        ERA_SLUG.to_string(),
+        &weekly,
+        Archetype::Era,
+        &pool,
+        ANCHORS_PER_BUILD,
+        0,
+    )?;
+
     Ok(plans)
 }
 
@@ -771,11 +822,46 @@ pub async fn fetch_long_form(
 
 // --- Assembly ---
 
-/// Score, cap, and dress a set from its fetched candidates. Pure over its
-/// inputs (no DB, no network), so curation rules stay unit-testable.
+/// Exclusion-free assembly. Production always holds out recently-watched videos
+/// via `assemble_set_excluding`; this shim keeps the curation tests, which don't
+/// care about watch history, readable.
+#[cfg(test)]
 pub fn assemble_set(
     plan: &SetPlan,
     groups: &[(AnchorArtist, Vec<VideoCandidate>)],
+) -> Option<VideoSet> {
+    assemble_set_excluding(plan, groups, &HashSet::new())
+}
+
+/// Pick the decade that the most fetched videos share (ties break to the more
+/// recent). Returns `None` when no decade clears the minimum shelf size, which
+/// is also what happens when TIDAL sent no release dates at all.
+fn pick_era_decade(groups: &[(AnchorArtist, Vec<VideoCandidate>)]) -> Option<i32> {
+    let mut counts: HashMap<i32, usize> = HashMap::new();
+    let mut seen: HashSet<i64> = HashSet::new();
+    for (_, videos) in groups {
+        for v in videos {
+            if let Some(year) = v.release_year
+                && seen.insert(v.tidal_id)
+            {
+                *counts.entry((year / 10) * 10).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .filter(|(_, count)| *count >= MIN_SET_SIZE)
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)))
+        .map(|(decade, _)| decade)
+}
+
+/// `assemble_set` with a hold-out set of TIDAL video ids to skip (recently
+/// watched). Seed videos, if this grows any, would be exempt; these sets have
+/// none, so the exclusion is unconditional.
+pub fn assemble_set_excluding(
+    plan: &SetPlan,
+    groups: &[(AnchorArtist, Vec<VideoCandidate>)],
+    exclude: &HashSet<i64>,
 ) -> Option<VideoSet> {
     let seed_value = plan.seed();
     let mut rng = StdRng::seed_from_u64(seed_value.wrapping_add(1));
@@ -783,6 +869,16 @@ pub fn assemble_set(
     let seed_features = SeedFeatures {
         genre_set: weighted_genre_set(&plan.profile_genres),
         ..Default::default()
+    };
+    // Era chooses its decade from what came back; every other archetype leaves
+    // this None and keeps all candidates.
+    let era_decade = if plan.archetype == Archetype::Era {
+        match pick_era_decade(groups) {
+            Some(decade) => Some(decade),
+            None => return None,
+        }
+    } else {
+        None
     };
     let max_weight = groups
         .iter()
@@ -810,6 +906,15 @@ pub fn assemble_set(
         for video in videos {
             if !seen.insert(video.tidal_id) {
                 continue;
+            }
+            if exclude.contains(&video.tidal_id) {
+                continue;
+            }
+            if let Some(decade) = era_decade {
+                match video.release_year {
+                    Some(year) if year >= decade && year < decade + 10 => {}
+                    _ => continue,
+                }
             }
             let artist_name = video
                 .artist_name
@@ -956,6 +1061,7 @@ pub fn assemble_set(
         &featured,
         &vias,
         top_anchor.as_ref(),
+        era_decade,
     );
     Some(VideoSet {
         slug: plan.slug.clone(),
@@ -1000,6 +1106,7 @@ fn write_copy(
     featured: &[String],
     vias: &[String],
     top_anchor: Option<&AnchorArtist>,
+    era_decade: Option<i32>,
 ) -> (String, String) {
     let n = count_word(item_count);
     // Deterministic slot: the bucket rotates the bank week to week, and the
@@ -1151,6 +1258,29 @@ fn write_copy(
             };
             (title, blurb)
         }
+        Archetype::Era => {
+            // Decade is always present here: the era set only assembles once a
+            // decade is chosen, so the fallback is defensive, not expected.
+            let decade = era_decade.unwrap_or(0);
+            let titles = [
+                format!("The {decade}s on camera"),
+                format!("Straight out of the {decade}s"),
+                format!("{decade}s, apparently"),
+            ];
+            let title = titles[pick(titles.len())].clone();
+            let blurb = match featured {
+                [first, second, ..] => format!(
+                    "{n} videos your library keeps from the {decade}s. {first}, {second}, and the rest of that stretch."
+                ),
+                [only] => {
+                    format!(
+                        "{n} videos from the {decade}s, {only} leading. The years your library keeps circling back to."
+                    )
+                }
+                _ => format!("{n} videos your library keeps from the {decade}s."),
+            };
+            (title, blurb)
+        }
     }
 }
 
@@ -1171,6 +1301,14 @@ mod tests {
             artist_name: Some(artist.to_string()),
             album_tidal_id: None,
             artwork_url: None,
+            release_year: None,
+        }
+    }
+
+    fn candidate_year(id: i64, artist: &str, year: i32) -> VideoCandidate {
+        VideoCandidate {
+            release_year: Some(year),
+            ..candidate(id, &format!("Video {id}"), artist, 200)
         }
     }
 
@@ -1257,6 +1395,85 @@ mod tests {
             ],
         )];
         assert!(assemble_set(&plan(Archetype::DailyPicks, vec![a1]), &groups).is_none());
+    }
+
+    #[test]
+    fn excluded_video_ids_never_appear() {
+        let a1 = anchor(1, "Tycho", 50);
+        let a2 = anchor(2, "Bonobo", 30);
+        let groups = vec![
+            (
+                a1.clone(),
+                (0..6)
+                    .map(|i| candidate(100 + i, &format!("T{i}"), "Tycho", 240))
+                    .collect(),
+            ),
+            (
+                a2.clone(),
+                (0..6)
+                    .map(|i| candidate(200 + i, &format!("B{i}"), "Bonobo", 240))
+                    .collect(),
+            ),
+        ];
+        let p = plan(Archetype::DailyPicks, vec![a1, a2]);
+        let exclude: HashSet<i64> = [100, 101, 200].into_iter().collect();
+        let set = assemble_set_excluding(&p, &groups, &exclude).unwrap();
+        for item in &set.items {
+            assert!(
+                !exclude.contains(&item.tidal_id),
+                "held-out video {} leaked into the set",
+                item.tidal_id
+            );
+        }
+    }
+
+    #[test]
+    fn era_set_keeps_one_decade_and_names_it() {
+        // One video each from five artists in the 2000s, plus two 1990s
+        // stragglers: the richer decade wins and the 90s picks are dropped.
+        // Distinct artists so the per-artist cap isn't what does the pruning.
+        let anchors: Vec<AnchorArtist> = (1..=6)
+            .map(|i| anchor(i, &format!("A{i}"), 60 - i))
+            .collect();
+        let mut groups: Vec<(AnchorArtist, Vec<VideoCandidate>)> = (1..=5)
+            .map(|i| {
+                (
+                    anchors[(i - 1) as usize].clone(),
+                    vec![candidate_year(100 + i, &format!("A{i}"), 2000 + i as i32)],
+                )
+            })
+            .collect();
+        groups.push((
+            anchors[5].clone(),
+            vec![
+                candidate_year(200, "A6", 1994),
+                candidate_year(201, "A6", 1996),
+            ],
+        ));
+        let set = assemble_set(&plan(Archetype::Era, anchors), &groups).unwrap();
+        assert!(
+            !set.items
+                .iter()
+                .any(|i| i.tidal_id == 200 || i.tidal_id == 201)
+        );
+        assert!(set.items.iter().all(|i| (101..=105).contains(&i.tidal_id)));
+        assert!(
+            set.title.contains("2000"),
+            "era title should name the decade: {}",
+            set.title
+        );
+    }
+
+    #[test]
+    fn era_set_absent_without_release_years() {
+        let a1 = anchor(1, "Tycho", 50);
+        let groups = vec![(
+            a1.clone(),
+            (0..8)
+                .map(|i| candidate(100 + i, &format!("T{i}"), "Tycho", 240))
+                .collect(),
+        )];
+        assert!(assemble_set(&plan(Archetype::Era, vec![a1]), &groups).is_none());
     }
 
     #[test]
