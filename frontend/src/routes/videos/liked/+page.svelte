@@ -1,6 +1,11 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { api, type LikedVideo, type TidalSearchVideo } from '$lib/api/client';
+	import {
+		api,
+		type LikedVideo,
+		type LikedVideoVersion,
+		type TidalSearchVideo,
+	} from '$lib/api/client';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
@@ -32,23 +37,26 @@
 
 	let pollTimer: ReturnType<typeof setTimeout> | null = null;
 
-	/** A card keys on the pair, not the track: one liked song can carry several
-	 *  videos (live takes, covers, alternates) and each is its own card. */
-	function cardKey(video: LikedVideo): string {
-		return `${video.track_id}:${video.tidal_video_id}`;
+	/** Which card's version list is open. One at a time. */
+	let openVersions = $state<string | null>(null);
+
+	/** The video that represents a song on the wall: the best match, longest cut
+	 *  among equals. Server-sorted, so this is just the head. */
+	function face(video: LikedVideo): LikedVideoVersion {
+		return video.versions[0];
 	}
 
-	/** Lift a row into the shape the video queue already speaks, so Play all and
-	 *  Shuffle need no new playback code. */
-	function toQueueItem(video: LikedVideo): TidalSearchVideo {
+	/** Lift a version into the shape the video queue already speaks, so Play all
+	 *  and Shuffle need no new playback code. */
+	function toQueueItem(video: LikedVideo, version: LikedVideoVersion): TidalSearchVideo {
 		return {
-			tidal_id: video.tidal_video_id,
-			title: video.video_title,
-			duration_ms: video.duration_ms,
+			tidal_id: version.tidal_video_id,
+			title: version.video_title,
+			duration_ms: version.duration_ms,
 			artist_id: video.artist_id,
 			artist_name: video.artist_name,
 			album_tidal_id: null,
-			artwork_url: video.artwork_url,
+			artwork_url: version.artwork_url,
 			quality: null,
 			explicit: null,
 			type: 'video',
@@ -101,26 +109,38 @@
 		}
 	}
 
-	async function hide(video: LikedVideo) {
-		const key = cardKey(video);
+	/** Drop one version. The card survives while it has others left, so hiding a
+	 *  bad alternate does not cost you the song. */
+	async function hide(video: LikedVideo, version: LikedVideoVersion) {
 		const previous = videos;
-		// Optimistic: the card is gone the moment you say it is wrong.
-		videos = videos.filter((v) => cardKey(v) !== key);
+		// Optimistic: the version is gone the moment you say it is wrong.
+		videos = videos
+			.map((v) =>
+				v.song_key === video.song_key
+					? {
+							...v,
+							versions: v.versions.filter(
+								(ver) => ver.tidal_video_id !== version.tidal_video_id
+							),
+						}
+					: v
+			)
+			.filter((v) => v.versions.length > 0);
 		try {
-			await api.hideLikedVideo(video.track_id, video.tidal_video_id);
-			showToast(`Hidden "${video.video_title}".`);
+			await api.hideLikedVideo(video.track_ids, version.tidal_video_id);
+			showToast(`Hidden "${version.video_title}".`);
 		} catch {
 			videos = previous;
 			showToast('Could not hide that one.');
 		}
 	}
 
-	function menu(event: MouseEvent, video: LikedVideo) {
+	function menu(event: MouseEvent, video: LikedVideo, version: LikedVideoVersion) {
 		event.preventDefault();
 		event.stopPropagation();
 		const items = [
 			...buildVideoMenu({
-				tidal_id: video.tidal_video_id,
+				tidal_id: version.tidal_video_id,
 				artist_id: video.artist_id,
 				artist_name: video.artist_name,
 			}),
@@ -128,10 +148,10 @@
 			{
 				label: 'Wrong match - hide this',
 				icon: '⊘',
-				onSelect: () => void hide(video),
+				onSelect: () => void hide(video, version),
 			},
 		];
-		openContextMenu(event, items, video.video_title);
+		openContextMenu(event, items, version.video_title);
 	}
 
 	// --- Filtering and sorting ---
@@ -152,9 +172,9 @@
 		if (needle) {
 			rows = rows.filter(
 				(v) =>
-					v.video_title.toLowerCase().includes(needle) ||
 					v.track_title.toLowerCase().includes(needle) ||
-					(v.artist_name ?? '').toLowerCase().includes(needle)
+					(v.artist_name ?? '').toLowerCase().includes(needle) ||
+					v.versions.some((ver) => ver.video_title.toLowerCase().includes(needle))
 			);
 		}
 		if (activeGenre) rows = rows.filter((v) => v.genre === activeGenre);
@@ -167,7 +187,7 @@
 		if (sort === 'title') {
 			sorted.sort(
 				(a, b) =>
-					a.video_title.localeCompare(b.video_title) ||
+					a.track_title.localeCompare(b.track_title) ||
 					(a.artist_name ?? '').localeCompare(b.artist_name ?? '')
 			);
 		} else {
@@ -191,16 +211,33 @@
 		await playVideo(queue[index], { queue, source: 'search', sourceLabel });
 	}
 
+	/** One video per song, not every version: queueing six cuts of the same song
+	 *  back to back is nobody's idea of playing the wall. Pick a specific
+	 *  version from the card's version list instead. */
+	function wallQueue(): TidalSearchVideo[] {
+		return filtered.map((v) => toQueueItem(v, face(v)));
+	}
+
 	async function playFrom(index: number) {
-		await start(filtered.map(toQueueItem), index);
+		await start(wallQueue(), index);
 	}
 
 	async function playAll() {
 		await playFrom(0);
 	}
 
+	/** Play one specific version, with the rest of the wall queued behind it. */
+	async function playVersion(video: LikedVideo, version: LikedVideoVersion) {
+		const queue = wallQueue();
+		const index = filtered.findIndex((v) => v.song_key === video.song_key);
+		const item = toQueueItem(video, version);
+		if (index >= 0) queue[index] = item;
+		openVersions = null;
+		await start(queue, Math.max(index, 0));
+	}
+
 	async function shuffle() {
-		const queue = filtered.map(toQueueItem);
+		const queue = wallQueue();
 		for (let i = queue.length - 1; i > 0; i--) {
 			const j = Math.floor(Math.random() * (i + 1));
 			[queue[i], queue[j]] = [queue[j], queue[i]];
@@ -345,32 +382,72 @@
 		<EmptyState title="Nothing matches those filters" copy="Try clearing the search or pills." />
 	{:else}
 		<div class="video-grid">
-			{#each filtered as video, index (cardKey(video))}
-				<button
-					type="button"
-					class="video-card"
-					onclick={() => void playFrom(index)}
-					oncontextmenu={(event) => menu(event, video)}
-					aria-label={`Play ${video.video_title}`}
-				>
-					<div class="poster-wrap">
-						<ArtworkImage
-							className="poster"
-							src={video.artwork_url}
-							size={320}
-							fallbackText="VID"
-							decorative={true}
-						/>
-						<PlayOverlay position="corner" size="sm" label={`Play ${video.video_title}`} />
-						{#if video.duration_ms}
-							<span class="duration">{formatTrackDuration(video.duration_ms)}</span>
-						{/if}
-					</div>
-					<div class="meta">
-						<span class="title" title={video.video_title}>{video.video_title}</span>
-						<span class="subtitle">{video.artist_name ?? 'TIDAL video'}</span>
-					</div>
-				</button>
+			{#each filtered as video, index (video.song_key)}
+				<div class="card-slot">
+					<button
+						type="button"
+						class="video-card"
+						onclick={() => void playFrom(index)}
+						oncontextmenu={(event) => menu(event, video, face(video))}
+						aria-label={`Play ${video.track_title}`}
+					>
+						<div class="poster-wrap">
+							<ArtworkImage
+								className="poster"
+								src={face(video).artwork_url}
+								size={320}
+								fallbackText="VID"
+								decorative={true}
+							/>
+							<PlayOverlay position="corner" size="sm" label={`Play ${video.track_title}`} />
+							{#if face(video).duration_ms}
+								<span class="duration">{formatTrackDuration(face(video).duration_ms!)}</span>
+							{/if}
+						</div>
+						<div class="meta">
+							<span class="title" title={video.track_title}>{video.track_title}</span>
+							<span class="subtitle">{video.artist_name ?? 'TIDAL video'}</span>
+						</div>
+					</button>
+
+					<!-- The escape hatch for songs with more than one video. The card
+					     click still plays, so the count is its own control rather
+					     than a change of what tapping the artwork does. -->
+					{#if video.versions.length > 1}
+						<button
+							type="button"
+							class="versions-chip"
+							aria-expanded={openVersions === video.song_key}
+							onclick={() =>
+								(openVersions = openVersions === video.song_key ? null : video.song_key)}
+						>
+							{video.versions.length} versions
+						</button>
+					{/if}
+
+					{#if openVersions === video.song_key}
+						<div class="versions-popout">
+							<p class="versions-heading">{video.track_title}</p>
+							{#each video.versions as version (version.tidal_video_id)}
+								<button
+									type="button"
+									class="version-row"
+									onclick={() => void playVersion(video, version)}
+									oncontextmenu={(event) => menu(event, video, version)}
+								>
+									<span class="version-title" title={version.video_title}
+										>{version.video_title}</span
+									>
+									{#if version.duration_ms}
+										<span class="version-duration"
+											>{formatTrackDuration(version.duration_ms)}</span
+										>
+									{/if}
+								</button>
+							{/each}
+						</div>
+					{/if}
+				</div>
 			{/each}
 		</div>
 	{/if}
@@ -515,6 +592,90 @@
 		display: grid;
 		grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
 		gap: 14px;
+	}
+
+	.card-slot {
+		position: relative;
+		min-width: 0;
+	}
+
+	.versions-chip {
+		position: absolute;
+		left: 6px;
+		top: 6px;
+		padding: 2px 8px;
+		border-radius: 20px;
+		border: 1px solid rgba(255, 255, 255, 0.18);
+		background: rgba(0, 0, 0, 0.72);
+		color: #fff;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-medium);
+		cursor: pointer;
+		white-space: nowrap;
+	}
+
+	.versions-chip:hover {
+		border-color: var(--accent);
+	}
+
+	.versions-popout {
+		position: absolute;
+		left: 0;
+		right: 0;
+		top: 100%;
+		z-index: 5;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		margin-top: 4px;
+		padding: 6px;
+		border-radius: var(--radius-sm);
+		border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+		background: var(--bg-elevated, #16161c);
+		box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+	}
+
+	.versions-heading {
+		margin: 0 0 2px;
+		padding: 0 6px;
+		font-size: var(--font-size-xs);
+		color: var(--text-tertiary);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.version-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-2);
+		padding: 6px 8px;
+		border: none;
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--text-secondary);
+		font-size: var(--font-size-sm);
+		text-align: left;
+		cursor: pointer;
+		min-width: 0;
+	}
+
+	.version-row:hover {
+		background: var(--bg-hover);
+		color: var(--text-primary);
+	}
+
+	.version-title {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.version-duration {
+		flex: 0 0 auto;
+		color: var(--text-tertiary);
+		font-variant-numeric: tabular-nums;
 	}
 
 	.card-skeleton {

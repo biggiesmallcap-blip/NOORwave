@@ -9,11 +9,30 @@ independently.
 ## What it is
 
 The mirror of the /library **Albums** grid, but for videos. Every liked song that
-has an official video becomes cards on a wall. Live takes, covers and alternates
-all count and each gets its own card - a richer wall beats a deduped one. Most
+has an official video becomes a card, carrying every video found for it. Live
+takes, covers and alternates all count - a richer wall beats a deduped one. Most
 liked songs have no video, so this is a real but partial subset of the library,
 and that's the honest framing: "the videos among your likes", not a mirror of
 every like.
+
+**A card is a song, not a liked row and not a video.** That fell out of the first
+live run: at 185 artists scanned, 23% of cards shared a title with a sibling.
+Two different causes, and only one of them was noise.
+
+- *Genuinely different videos of one song* (five "Back To Black" at 4:07 / 4:00 /
+  4:01 / 2:45 / 4:13 - official cut, alternate edits, a teaser). Real, and the
+  reason the surface exists. They stay, as `versions` under one card, best match
+  first, with a "5 versions" chip that opens the list. The card click still
+  plays, so the count is its own control rather than a change of what tapping
+  the artwork does.
+- *The same video twice* - 304 songs in the library are favorited twice under
+  the same artist and title, and both rows matched the same video, drawing two
+  identical cards. Pure noise. The grouping key is therefore the song (artist +
+  base title), and `versions` is deduped on `tidal_video_id`.
+
+Play all and Shuffle queue one video per song, not every version: six cuts of the
+same song back to back is nobody's idea of playing the wall. A specific version
+is picked from the popout.
 
 Measured on the dev library (2026-07-25): 4,276 liked tracks across 2,350
 distinct artists, 2,346 of which (99.8%) already carry `artists.tidal_id`.
@@ -155,8 +174,11 @@ every hidden card. Cheap, and the honest counterpart to keeping matching loose.
   running }` progress.
 - `POST /api/videos/liked/refresh` - kick `run_if_idle`, returns whether a pass
   started.
-- `POST /api/videos/liked/hide` `{ track_id, tidal_video_id }` - set
-  `suppressed = 1`.
+- `POST /api/videos/liked/hide` `{ track_ids, tidal_video_id }` - set
+  `suppressed = 1` for that video across every liked row the card speaks for.
+  Scoped to the card's tracks rather than the video outright, so a video that is
+  a wrong match for one song and a right one for another only disappears from
+  the song you corrected.
 
 ## Tests
 
@@ -172,4 +194,5 @@ every hidden card. Cheap, and the honest counterpart to keeping matching loose.
 Video-own release-year parsing (using album year instead); watch history for
 these (shares nothing with the editorial `video_history`); a `search_videos`
 fallback for artists without a `tidal_id`; per-song caps on how many videos one
-liked track may contribute.
+liked song may contribute (grouping made the cap unnecessary - versions cost one
+chip, not one tile each).

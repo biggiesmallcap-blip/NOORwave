@@ -100,6 +100,22 @@ pub struct TidalArtist {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
+/// A nested object we can live without: decode it if it fits, otherwise treat
+/// it as absent rather than failing the record that contains it.
+///
+/// TIDAL signals "no album" on a video as `"album": {}`, not `null`. Plain
+/// `Option<TidalAlbumRef>` reads that as Some and then fails on the missing
+/// `id`, taking the whole video - and, before `get_artist_videos` decoded items
+/// individually, the whole page - with it.
+fn lenient_nested<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
+}
+
 /// Subset of TIDAL's `/artists/{id}/videos` item shape we render in the rail.
 /// Other fields (audioQuality, explicit, releaseDate, etc.) are flattened
 /// into `extra` so deserialization stays forwards-compatible.
@@ -111,7 +127,11 @@ pub struct TidalArtistVideo {
     pub duration: i64,
     #[serde(rename = "imageId")]
     pub image_id: Option<String>,
+    #[serde(default, deserialize_with = "lenient_nested")]
     pub artist: Option<TidalArtist>,
+    /// A video with no album arrives as `{}`; see [`lenient_nested`]. The video
+    /// itself is perfectly good, so it must not be lost over a missing album.
+    #[serde(default, deserialize_with = "lenient_nested")]
     pub album: Option<TidalAlbumRef>,
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
@@ -510,6 +530,14 @@ impl TidalClient {
 
     /// Music videos for an artist. TIDAL returns the same video shape as
     /// `/videos/{id}` here — we deserialize the subset we render in the rail.
+    ///
+    /// Items are decoded one at a time rather than as `Vec<TidalArtistVideo>`,
+    /// because a page is otherwise all-or-nothing: a single item TIDAL returns
+    /// in an unexpected shape (a nested `artist` or `album` with a null id, say)
+    /// fails the whole request and the artist looks like it has no videos at
+    /// all. That stayed hidden while the only caller asked for 10 items; the
+    /// liked-videos scan asks for 50 and hit it on most artists. A skipped item
+    /// is logged with its payload so the shape can be added deliberately.
     pub async fn get_artist_videos(
         &self,
         artist_id: i64,
@@ -520,7 +548,48 @@ impl TidalClient {
             "{}/artists/{}/videos?countryCode={}&limit={}&offset={}",
             TIDAL_API_URL, artist_id, self.country_code, limit, offset
         );
-        self.get_json(&url).await
+        let payload: serde_json::Value = self.get_json(&url).await?;
+        Ok(Self::parse_artist_videos_page(artist_id, &payload))
+    }
+
+    /// Split out from the request so the lenient decoding is directly testable.
+    fn parse_artist_videos_page(
+        artist_id: i64,
+        payload: &serde_json::Value,
+    ) -> TidalPaginatedResponse<TidalArtistVideo> {
+        let items = payload
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        match serde_json::from_value::<TidalArtistVideo>(item.clone()) {
+                            Ok(video) => Some(video),
+                            Err(e) => {
+                                tracing::debug!(
+                                    target: "noor.tidal",
+                                    artist_id,
+                                    error = %e,
+                                    item = %item,
+                                    "skipping unparseable artist video"
+                                );
+                                None
+                            }
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        TidalPaginatedResponse {
+            items,
+            total_number_of_items: payload
+                .get("totalNumberOfItems")
+                .and_then(serde_json::Value::as_i64),
+            limit: payload.get("limit").and_then(serde_json::Value::as_i64),
+            offset: payload.get("offset").and_then(serde_json::Value::as_i64),
+        }
     }
 
     /// Long-form biography text. TIDAL returns `text` (with [wimpLink] markup)
@@ -2103,5 +2172,67 @@ mod tests {
                 "path should be rejected: {path:?}",
             );
         }
+    }
+
+    /// The exact shape that emptied the liked-videos wall: TIDAL sends
+    /// `"album": {}` for a video with no album, and the strict decode failed
+    /// the whole page for any artist owning one.
+    #[test]
+    fn artist_video_survives_an_empty_album_object() {
+        let payload = serde_json::json!({
+            "limit": 50,
+            "offset": 0,
+            "totalNumberOfItems": 2,
+            "items": [
+                {
+                    "id": 516273787,
+                    "title": "Sunday Again",
+                    "duration": 223,
+                    "imageId": "cd4063e6-b908-4479-acd1-9d2429c06e14",
+                    "artist": {"id": 3970137, "name": "2 Chainz", "picture": null, "type": "MAIN"},
+                    "album": {}
+                },
+                {
+                    "id": 516273788,
+                    "title": "With An Album",
+                    "duration": 180,
+                    "imageId": null,
+                    "artist": null,
+                    "album": {"id": 42, "title": "The Album", "cover": null}
+                }
+            ]
+        });
+
+        let page = TidalClient::parse_artist_videos_page(3970137, &payload);
+
+        assert_eq!(
+            page.items.len(),
+            2,
+            "an absent album must not drop the video"
+        );
+        assert_eq!(page.items[0].title, "Sunday Again");
+        assert!(page.items[0].album.is_none(), "{{}} reads as no album");
+        assert_eq!(
+            page.items[0].artist.as_ref().map(|a| a.name.as_str()),
+            Some("2 Chainz")
+        );
+        assert_eq!(page.items[1].album.as_ref().map(|a| a.id), Some(42));
+        assert_eq!(page.total_number_of_items, Some(2));
+    }
+
+    /// Defence in depth: one genuinely broken item must not cost the page.
+    #[test]
+    fn one_unparseable_item_does_not_empty_the_page() {
+        let payload = serde_json::json!({
+            "items": [
+                {"id": 1, "title": "Fine", "duration": 100},
+                {"title": "No id at all", "duration": 100}
+            ]
+        });
+
+        let page = TidalClient::parse_artist_videos_page(1, &payload);
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, 1);
     }
 }

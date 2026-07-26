@@ -34,6 +34,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, params};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use strsim::jaro_winkler;
@@ -103,24 +104,54 @@ pub struct VideoMatch {
     pub match_score: f64,
 }
 
-/// One card on the wall. Shaped so the client can lift it straight into a
-/// `TidalSearchVideo` for the video queue: same `tidal_id` / `duration_ms` /
-/// `artwork_url` fields, so Play all and Shuffle need no new playback code.
+/// One version of a song: a single video. Shaped so the client can lift it
+/// straight into a `TidalSearchVideo` for the video queue: same `tidal_id` /
+/// `duration_ms` / `artwork_url` fields, so Play all and Shuffle need no new
+/// playback code.
 #[derive(Debug, Clone, Serialize)]
 pub struct LikedVideoRow {
     pub track_id: i64,
     pub tidal_video_id: i64,
     pub video_title: String,
-    pub track_title: String,
-    pub artist_name: Option<String>,
-    pub artist_id: Option<i64>,
     pub duration_ms: Option<i64>,
     /// Built at 640x640 like every other artwork URL the backend emits; the
     /// grid downsizes through `upscaleTidalArtwork`.
     pub artwork_url: Option<String>,
+    pub match_score: f64,
+}
+
+/// One card on the wall: a song, with every video found for it.
+///
+/// The card is a *song*, not a liked row and not a video, because neither of
+/// those is what a person is looking at. Two things collapse into it:
+///
+/// - Duplicate likes. 304 songs in the dev library are favorited twice under
+///   the same artist and title (same song off two albums or two sources).
+///   Keyed on `track_id` those would draw two visibly identical cards, so the
+///   key is the song - artist plus the song's base title.
+/// - Repeat videos. The same `tidal_video_id` reached through both of those
+///   liked rows is one video, not two, so `versions` is deduped on it.
+///
+/// What does *not* collapse is genuinely different videos of one song - the
+/// official cut, an alternate edit, live takes. Those are the point of the
+/// surface, so they all survive as `versions`, best match first, and the card
+/// shows the count.
+#[derive(Debug, Clone, Serialize)]
+pub struct LikedVideoGroup {
+    /// Stable per song, for client-side keying.
+    pub song_key: String,
+    pub track_title: String,
+    pub artist_name: Option<String>,
+    pub artist_id: Option<i64>,
     pub album_year: Option<i64>,
     pub genre: Option<String>,
     pub liked_at: Option<String>,
+    /// Every liked row this card speaks for - one when the song was liked once,
+    /// more when it was liked twice. Hiding a version has to suppress it for
+    /// all of them or the duplicate row would resurrect the card.
+    pub track_ids: Vec<i64>,
+    /// Best match first. Never empty.
+    pub versions: Vec<LikedVideoRow>,
 }
 
 /// How far along the background pass is, for the view's progress line.
@@ -294,9 +325,14 @@ pub fn store_artist_scan(conn: &Connection, artist_id: i64, matches: &[VideoMatc
     Ok(())
 }
 
-/// The wall. Ordered most recently liked first: a surface you revisit wants the
-/// new arrivals at the top, and the client re-sorts A-Z on demand.
-pub fn load_wall(conn: &Connection) -> Result<Vec<LikedVideoRow>> {
+/// The wall, one card per song. Ordered most recently liked first: a surface
+/// you revisit wants the new arrivals at the top, and the client re-sorts A-Z
+/// on demand.
+///
+/// Grouping happens here rather than in the client so there is one definition
+/// of "same song" and it can be tested directly. See [`LikedVideoGroup`] for
+/// what collapses and what deliberately does not.
+pub fn load_wall(conn: &Connection) -> Result<Vec<LikedVideoGroup>> {
     let mut stmt = conn.prepare(
         "SELECT lv.track_id,
                 lv.tidal_video_id,
@@ -308,7 +344,8 @@ pub fn load_wall(conn: &Connection) -> Result<Vec<LikedVideoRow>> {
                 lv.image_id,
                 al.year,
                 g.name,
-                t.date_added
+                t.date_added,
+                lv.match_score
            FROM library_videos lv
            JOIN tracks t              ON t.id = lv.track_id AND t.is_favorite = 1
            LEFT JOIN artists ar       ON ar.id = t.artist_id
@@ -318,36 +355,124 @@ pub fn load_wall(conn: &Connection) -> Result<Vec<LikedVideoRow>> {
           WHERE lv.suppressed = 0
           ORDER BY t.date_added DESC, t.title ASC, lv.tidal_video_id ASC",
     )?;
-    let rows = stmt
+
+    struct Flat {
+        row: LikedVideoRow,
+        track_title: String,
+        artist_name: Option<String>,
+        artist_id: Option<i64>,
+        album_year: Option<i64>,
+        genre: Option<String>,
+        liked_at: Option<String>,
+    }
+
+    let flat = stmt
         .query_map([], |row| {
             let duration_seconds: Option<i64> = row.get(6)?;
             let image_id: Option<String> = row.get(7)?;
-            Ok(LikedVideoRow {
-                track_id: row.get(0)?,
-                tidal_video_id: row.get(1)?,
-                video_title: row.get(2)?,
+            Ok(Flat {
+                row: LikedVideoRow {
+                    track_id: row.get(0)?,
+                    tidal_video_id: row.get(1)?,
+                    video_title: row.get(2)?,
+                    duration_ms: duration_seconds.map(|s| s * 1000),
+                    artwork_url: TidalClient::get_artwork_url(&image_id, 640),
+                    match_score: row.get(11)?,
+                },
                 track_title: row.get(3)?,
                 artist_name: row.get(4)?,
                 artist_id: row.get(5)?,
-                duration_ms: duration_seconds.map(|s| s * 1000),
-                artwork_url: TidalClient::get_artwork_url(&image_id, 640),
                 album_year: row.get(8)?,
                 genre: row.get(9)?,
                 liked_at: row.get(10)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows)
+
+    // Insertion order is the query's order, which is already the display order,
+    // so the first row of a group also decides where the card sits.
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, LikedVideoGroup> = HashMap::new();
+
+    for item in flat {
+        let key = song_key(item.artist_id, &item.track_title);
+        let group = groups.entry(key.clone()).or_insert_with(|| {
+            order.push(key.clone());
+            LikedVideoGroup {
+                song_key: key,
+                track_title: item.track_title,
+                artist_name: item.artist_name,
+                artist_id: item.artist_id,
+                album_year: item.album_year,
+                genre: item.genre,
+                liked_at: item.liked_at,
+                track_ids: Vec::new(),
+                versions: Vec::new(),
+            }
+        });
+
+        if !group.track_ids.contains(&item.row.track_id) {
+            group.track_ids.push(item.row.track_id);
+        }
+        // One video is one version however many liked rows reached it.
+        if !group
+            .versions
+            .iter()
+            .any(|v| v.tidal_video_id == item.row.tidal_video_id)
+        {
+            group.versions.push(item.row);
+        }
+    }
+
+    let mut wall: Vec<LikedVideoGroup> = order
+        .into_iter()
+        .filter_map(|key| groups.remove(&key))
+        .collect();
+
+    for group in &mut wall {
+        // Best match leads, and among equals the longest cut: a 2:45 teaser
+        // should not become the face of a song whose real video runs 4:07.
+        group.versions.sort_by(|a, b| {
+            b.match_score
+                .total_cmp(&a.match_score)
+                .then(b.duration_ms.unwrap_or(0).cmp(&a.duration_ms.unwrap_or(0)))
+                .then(a.tidal_video_id.cmp(&b.tidal_video_id))
+        });
+    }
+    Ok(wall)
 }
 
-/// "Wrong match / hide this". Returns false when the pair is not on the wall,
-/// so the route can answer 404 rather than pretending.
-pub fn suppress(conn: &Connection, track_id: i64, tidal_video_id: i64) -> Result<bool> {
-    let changed = conn.execute(
-        "UPDATE library_videos SET suppressed = 1
-          WHERE track_id = ?1 AND tidal_video_id = ?2",
-        params![track_id, tidal_video_id],
-    )?;
+/// Identity of a song for grouping: the artist plus the song's base title, so
+/// the same song liked twice off different albums lands on one card. Falls back
+/// to the raw title when `base_title` strips everything (a title that is all
+/// variant markers), which keeps such rows separate rather than merging them
+/// all into one empty-keyed card.
+fn song_key(artist_id: Option<i64>, track_title: &str) -> String {
+    let base = base_title(track_title);
+    let title = if base.is_empty() {
+        track_title.to_lowercase()
+    } else {
+        base
+    };
+    format!("{}::{}", artist_id.unwrap_or(-1), title)
+}
+
+/// "Wrong match / hide this". Suppresses one video across every liked row the
+/// card speaks for: with duplicate likes collapsed into a single card, hiding
+/// on one row while its twin stays visible would just redraw the card.
+///
+/// Scoped to the passed tracks rather than to the video outright, so a video
+/// that is a wrong match for one song and a right one for another only
+/// disappears from the song you corrected.
+pub fn suppress(conn: &Connection, track_ids: &[i64], tidal_video_id: i64) -> Result<bool> {
+    let mut changed = 0usize;
+    for track_id in track_ids {
+        changed += conn.execute(
+            "UPDATE library_videos SET suppressed = 1
+              WHERE track_id = ?1 AND tidal_video_id = ?2",
+            params![track_id, tidal_video_id],
+        )?;
+    }
     Ok(changed > 0)
 }
 
@@ -628,7 +753,7 @@ mod tests {
         );
         store_artist_scan(&conn, 1, &matches).unwrap();
 
-        assert!(suppress(&conn, 10, 900).unwrap());
+        assert!(suppress(&conn, &[10], 900).unwrap());
         assert!(load_wall(&conn).unwrap().is_empty());
 
         // The 90-day re-check writes the same hit again.
@@ -657,13 +782,17 @@ mod tests {
         let wall = load_wall(&conn).unwrap();
         assert_eq!(wall.len(), 1);
         let card = &wall[0];
-        assert_eq!(card.video_title, "Song (Live)");
         assert_eq!(card.track_title, "Song");
         assert_eq!(card.artist_name.as_deref(), Some("Anchor"));
         assert_eq!(card.album_year, Some(1999));
-        assert_eq!(card.duration_ms, Some(210_000), "seconds become ms here");
+        assert_eq!(card.track_ids, vec![10]);
+
+        assert_eq!(card.versions.len(), 1);
+        let version = &card.versions[0];
+        assert_eq!(version.video_title, "Song (Live)");
+        assert_eq!(version.duration_ms, Some(210_000), "seconds become ms here");
         assert_eq!(
-            card.artwork_url.as_deref(),
+            version.artwork_url.as_deref(),
             Some("https://resources.tidal.com/images/img/900/640x640.jpg"),
             "the backend always emits 640; the grid downsizes"
         );
@@ -672,7 +801,101 @@ mod tests {
     #[test]
     fn suppressing_something_absent_reports_it() {
         let conn = setup();
-        assert!(!suppress(&conn, 10, 12345).unwrap());
+        assert!(!suppress(&conn, &[10], 12345).unwrap());
+    }
+
+    #[test]
+    fn every_version_of_a_song_shares_one_card() {
+        // The Amy Winehouse case: five real TIDAL records for one liked song,
+        // several carrying the identical title, distinguishable only by runtime.
+        let conn = setup();
+        let tracks = liked_tracks_for_artist(&conn, 1).unwrap();
+        let mut official = video(900, "Song");
+        official.duration = 247;
+        let mut teaser = video(901, "Song");
+        teaser.duration = 165;
+        let live = video(902, "Song (Live at Wembley)");
+        let matches = match_videos(&tracks, &[teaser, official, live]);
+        store_artist_scan(&conn, 1, &matches).unwrap();
+
+        let wall = load_wall(&conn).unwrap();
+        assert_eq!(wall.len(), 1, "one song is one card, however many videos");
+        assert_eq!(wall[0].versions.len(), 3, "and no version is thrown away");
+        assert_eq!(
+            wall[0].versions[0].tidal_video_id, 900,
+            "the full-length cut leads, not the 2:45 teaser"
+        );
+    }
+
+    #[test]
+    fn a_song_liked_twice_draws_one_card_not_two() {
+        // 304 songs in the dev library are favorited twice under the same
+        // artist and title. Keyed on track_id those drew two identical cards.
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, is_favorite, date_added)
+             VALUES (11, 'Song', 1, 1, '2024-07-22T03:55:48.611+0000')",
+            [],
+        )
+        .unwrap();
+        let tracks = liked_tracks_for_artist(&conn, 1).unwrap();
+        assert_eq!(tracks.len(), 2, "both liked rows are real");
+
+        let matches = match_videos(&tracks, &[video(900, "Song")]);
+        assert_eq!(matches.len(), 2, "the video matches both rows");
+        store_artist_scan(&conn, 1, &matches).unwrap();
+
+        let wall = load_wall(&conn).unwrap();
+        assert_eq!(wall.len(), 1, "one song, one card");
+        assert_eq!(
+            wall[0].versions.len(),
+            1,
+            "one video is one version however many liked rows reached it"
+        );
+        assert_eq!(wall[0].track_ids.len(), 2, "the card speaks for both rows");
+    }
+
+    #[test]
+    fn hiding_a_version_covers_every_liked_row_behind_the_card() {
+        // Suppressing only the row you happened to click would leave its twin
+        // visible, and the card would simply redraw.
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, is_favorite, date_added)
+             VALUES (11, 'Song', 1, 1, '2024-07-22T03:55:48.611+0000')",
+            [],
+        )
+        .unwrap();
+        let tracks = liked_tracks_for_artist(&conn, 1).unwrap();
+        let matches = match_videos(&tracks, &[video(900, "Song")]);
+        store_artist_scan(&conn, 1, &matches).unwrap();
+
+        let card = load_wall(&conn).unwrap().remove(0);
+        assert!(suppress(&conn, &card.track_ids, 900).unwrap());
+
+        assert!(
+            load_wall(&conn).unwrap().is_empty(),
+            "the card is gone, not redrawn from its duplicate row"
+        );
+    }
+
+    #[test]
+    fn different_songs_by_one_artist_stay_separate() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, is_favorite, date_added)
+             VALUES (11, 'Something Else Entirely', 1, 1, '2024-07-22T03:55:48.611+0000')",
+            [],
+        )
+        .unwrap();
+        let tracks = liked_tracks_for_artist(&conn, 1).unwrap();
+        let matches = match_videos(
+            &tracks,
+            &[video(900, "Song"), video(901, "Something Else Entirely")],
+        );
+        store_artist_scan(&conn, 1, &matches).unwrap();
+
+        assert_eq!(load_wall(&conn).unwrap().len(), 2);
     }
 
     #[test]

@@ -323,23 +323,34 @@ export interface VideoDiscoverResponse {
 	building: boolean;
 }
 
-/** One card on the liked-videos wall: a video found for a song you already
- *  liked. `tidal_video_id` / `duration_ms` / `artwork_url` mirror
- *  TidalSearchVideo so a row lifts straight into a playVideo() queue. A liked
- *  song can appear more than once - live takes, covers and alternates are kept
- *  on purpose - so cards are keyed on the (track_id, tidal_video_id) pair. */
-export interface LikedVideo {
+/** One video of a liked song. `tidal_video_id` / `duration_ms` / `artwork_url`
+ *  mirror TidalSearchVideo so a version lifts straight into a playVideo()
+ *  queue. */
+export interface LikedVideoVersion {
 	track_id: number;
 	tidal_video_id: number;
 	video_title: string;
+	duration_ms: number | null;
+	artwork_url: string | null;
+	match_score: number;
+}
+
+/** One card on the liked-videos wall: a song, with every video found for it.
+ *  A song favorited twice collapses to one card, and one video reached through
+ *  both of those likes is one version - but genuinely different videos (the
+ *  official cut, alternate edits, live takes) all survive in `versions`, best
+ *  match first. */
+export interface LikedVideo {
+	song_key: string;
 	track_title: string;
 	artist_name: string | null;
 	artist_id: number | null;
-	duration_ms: number | null;
-	artwork_url: string | null;
 	album_year: number | null;
 	genre: string | null;
 	liked_at: string | null;
+	/** Every liked row behind this card; hiding a version needs all of them. */
+	track_ids: number[];
+	versions: LikedVideoVersion[];
 }
 
 export interface LikedVideosResponse {
@@ -3855,11 +3866,14 @@ export const api = {
 
 	/** "Wrong match / hide this" - matching is loose on purpose, so a card
 	 *  occasionally lands on the wrong song. Also stops the periodic re-check
-	 *  from bringing it back. */
-	hideLikedVideo(trackId: number, tidalVideoId: number): Promise<{ ok: boolean }> {
+	 *  from bringing it back.
+	 *
+	 *  Takes the card's whole set of liked rows: a song favorited twice draws one
+	 *  card, and suppressing half of it would just redraw from the other half. */
+	hideLikedVideo(trackIds: number[], tidalVideoId: number): Promise<{ ok: boolean }> {
 		return fetchApi<{ ok: boolean }>('/api/videos/liked/hide', undefined, {
 			method: 'POST',
-			body: JSON.stringify({ track_id: trackId, tidal_video_id: tidalVideoId }),
+			body: JSON.stringify({ track_ids: trackIds, tidal_video_id: tidalVideoId }),
 		});
 	},
 

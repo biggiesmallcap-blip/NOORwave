@@ -296,15 +296,19 @@ pub(super) async fn post_videos_liked_refresh(State(state): State<SharedState>) 
     }))
 }
 
-/// The pair to hide. Matching is loose on purpose, so the wrong video lands on
-/// a song often enough to need a correction.
+/// The version to hide. Matching is loose on purpose, so the wrong video lands
+/// on a song often enough to need a correction.
+///
+/// `track_ids` is the card's whole set of liked rows, not one row: a song
+/// favorited twice draws a single card, and suppressing only half of it would
+/// just redraw from the other half.
 #[derive(Deserialize)]
 pub(super) struct HideLikedVideo {
-    pub track_id: i64,
+    pub track_ids: Vec<i64>,
     pub tidal_video_id: i64,
 }
 
-/// `POST /api/videos/liked/hide`. Flips one card to suppressed, which also
+/// `POST /api/videos/liked/hide`. Flips one version to suppressed, which also
 /// stops the 90-day re-check from bringing it back.
 pub(super) async fn post_videos_liked_hide(
     State(state): State<SharedState>,
@@ -312,7 +316,7 @@ pub(super) async fn post_videos_liked_hide(
 ) -> Json<Value> {
     let s = state.read().await;
     let hidden =
-        s.db.with_conn(|conn| library_videos::suppress(conn, body.track_id, body.tidal_video_id))
+        s.db.with_conn(|conn| library_videos::suppress(conn, &body.track_ids, body.tidal_video_id))
             .unwrap_or(false);
     Json(json!({ "ok": hidden }))
 }

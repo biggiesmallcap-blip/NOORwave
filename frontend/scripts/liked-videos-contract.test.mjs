@@ -19,15 +19,35 @@ describe('liked videos contract', () => {
 		expect(client).toContain("fetchApi<LikedVideosResponse>('/api/videos/liked')");
 		expect(client).toContain("'/api/videos/liked/refresh'");
 		expect(client).toContain("'/api/videos/liked/hide'");
-		expect(client).toContain('track_id: trackId, tidal_video_id: tidalVideoId');
+		// The card's whole set of liked rows: a song favorited twice draws one
+		// card, and suppressing half of it would just redraw from the other half.
+		expect(client).toContain('track_ids: trackIds, tidal_video_id: tidalVideoId');
 	});
 
-	test('cards key on the (track, video) pair so duplicates survive', () => {
-		// Live takes, covers and alternates are kept on purpose. Keying on
-		// track_id alone would collapse them back into one card.
+	test('a card is a song, and its versions hang off it', () => {
+		// Grouping is the server's call (one definition of "same song"), so the
+		// page keys on song_key and never re-derives identity.
 		const page = readFileSync(PAGE, 'utf8');
-		expect(page).toContain('`${video.track_id}:${video.tidal_video_id}`');
-		expect(page).toContain('{#each filtered as video, index (cardKey(video))}');
+		expect(page).toContain('{#each filtered as video, index (video.song_key)}');
+		expect(page).toContain('function face(video: LikedVideo): LikedVideoVersion');
+		expect(page).toContain('return video.versions[0];');
+	});
+
+	test('the versions chip is its own control, so tapping the card still plays', () => {
+		const page = readFileSync(PAGE, 'utf8');
+		expect(page).toContain('{#if video.versions.length > 1}');
+		expect(page).toContain('{video.versions.length} versions');
+		expect(page).toContain('onclick={() => void playFrom(index)}');
+		// One popout open at a time.
+		expect(page).toContain('openVersions = openVersions === video.song_key ? null : video.song_key');
+	});
+
+	test('play all queues one video per song, not every version', () => {
+		// Six cuts of the same song back to back is nobody's idea of playing the
+		// wall; a specific version is picked from the popout instead.
+		const page = readFileSync(PAGE, 'utf8');
+		expect(page).toContain('return filtered.map((v) => toQueueItem(v, face(v)));');
+		expect(page).toContain('async function playVersion(');
 	});
 
 	test('play all, shuffle and card clicks all go through playVideo with a queue', () => {
@@ -37,7 +57,6 @@ describe('liked videos contract', () => {
 		expect(page).toContain("await playVideo(queue[index], { queue, source: 'search', sourceLabel })");
 		expect(page).toContain('async function playAll()');
 		expect(page).toContain('async function shuffle()');
-		expect(page).toContain('onclick={() => void playFrom(index)}');
 	});
 
 	test('the ticked genre names the queue, which is what "play genre" means here', () => {
@@ -62,18 +81,21 @@ describe('liked videos contract', () => {
 		expect(page).toContain('fallbackText="VID"');
 	});
 
-	test('every card wires the shared context menu plus the wrong-match action', () => {
+	test('cards and version rows both wire the menu plus the wrong-match action', () => {
 		const page = readFileSync(PAGE, 'utf8');
 		expect(page).toContain("import { buildVideoMenu } from '$lib/player/video_menu'");
-		expect(page).toContain('oncontextmenu={(event) => menu(event, video)}');
+		expect(page).toContain('oncontextmenu={(event) => menu(event, video, face(video))}');
+		expect(page).toContain('oncontextmenu={(event) => menu(event, video, version)}');
 		expect(page).toContain("label: 'Wrong match - hide this'");
-		expect(page).toContain('api.hideLikedVideo(video.track_id, video.tidal_video_id)');
+		expect(page).toContain('api.hideLikedVideo(video.track_ids, version.tidal_video_id)');
 	});
 
-	test('hiding is optimistic and rolls back when the write fails', () => {
+	test('hiding drops one version, and the card survives on its others', () => {
 		const page = readFileSync(PAGE, 'utf8');
 		expect(page).toContain('const previous = videos;');
-		expect(page).toContain('videos = videos.filter((v) => cardKey(v) !== key);');
+		expect(page).toContain('ver.tidal_video_id !== version.tidal_video_id');
+		// Only a song with nothing left leaves the wall.
+		expect(page).toContain('.filter((v) => v.versions.length > 0)');
 		expect(page).toContain('videos = previous;');
 	});
 
