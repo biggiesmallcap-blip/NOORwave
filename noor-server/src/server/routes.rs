@@ -42,6 +42,7 @@ mod duplicates_routes;
 mod enrichment_routes;
 mod genre_routes;
 pub(crate) mod home_routes;
+pub(crate) mod home_suggestions;
 mod library_batch_routes;
 mod playlist_routes;
 mod search_routes;
@@ -1109,7 +1110,7 @@ pub fn api_routes(state: SharedState) -> Router {
         )
         .route(
             "/api/home/suggestions",
-            post(home_routes::get_home_suggestions),
+            post(home_suggestions::get_home_suggestions),
         )
         .route("/api/home/articles", get(home_routes::get_home_articles))
         .route("/api/home/news", get(home_routes::get_home_news))
