@@ -46,12 +46,11 @@
 		return video.versions[0];
 	}
 
-	/** "1999 - 1080p". Whatever of the two TIDAL gave us, or nothing. Most of the
-	 *  time a version's title already says what it is ("Live at Austin City
-	 *  Limits, 2012"); this is for the cases where four videos are all just
-	 *  called "Jamming". */
+	/** The release year, when TIDAL gave us one. Most of the time a version's
+	 *  title already says what it is ("Live at Austin City Limits, 2012"); this
+	 *  is for the cases where four videos are all just called "Jamming". */
 	function versionMeta(version: LikedVideoVersion): string {
-		return [version.release_year, version.quality].filter(Boolean).join(' - ');
+		return version.release_year ? String(version.release_year) : '';
 	}
 
 	/** Lift a version into the shape the video queue already speaks, so Play all
@@ -431,8 +430,9 @@
 								>
 									<span class="version-main">
 										<span class="version-title">{version.video_title}</span>
-										<!-- Year and resolution do the work when the titles are
-										     all the same word, which is often. -->
+										<!-- The year does the work when the titles are all the
+										     same word, which is often. -->
+
 										{#if versionMeta(version)}
 											<span class="version-meta">{versionMeta(version)}</span>
 										{/if}
@@ -510,8 +510,9 @@
 	.header-action {
 		display: inline-flex;
 		align-items: center;
-		padding: 6px 14px;
-		border-radius: 20px;
+		height: var(--control-h, 30px);
+		padding: 0 14px;
+		border-radius: 999px;
 		border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
 		background: transparent;
 		color: var(--text-secondary);
@@ -556,10 +557,15 @@
 		max-width: 320px;
 	}
 
+	/* Height, radius and padding come from the shared toolbar-control shape
+	   (--control-h, app.css) so this row sits level with the pill rows on
+	   /search and /library rather than being half a step taller. The fallback
+	   keeps it honest until that token lands. */
 	.tool-select {
 		flex: 0 0 auto;
-		padding: 7px 10px;
-		border-radius: var(--radius-sm);
+		height: var(--control-h, 30px);
+		padding: 0 10px;
+		border-radius: 999px;
 		border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
 		background: rgba(255, 255, 255, 0.05);
 		color: var(--text-secondary);
@@ -580,8 +586,12 @@
 	}
 
 	.tool-btn {
-		padding: 7px 16px;
-		border-radius: var(--radius-sm);
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		height: var(--control-h, 30px);
+		padding: 0 14px;
+		border-radius: 999px;
 		border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
 		background: transparent;
 		color: var(--text-secondary);

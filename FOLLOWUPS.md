@@ -926,3 +926,27 @@ parallel sessions and had to be manually sequenced. Track applied ids as a set
 merge order stops mattering. Needs care: existing DBs only have the count, so the
 first run has to backfill ids 1..N before switching to set semantics.
 Spawned by: liked videos library 2026-07-25
+
+### db: one shared connection + a boot-time thundering herd starves requests
+
+Database::with_conn hands every caller the same Mutex<Connection>, so every HTTP
+request and every background sweep serialises on one lock. At boot that is at its
+worst: the LibrarySynced listener and the 90s catch-up loop fire auto_enrich,
+tidal::repair, library_dedupe and library_videos within seconds of each other,
+all competing with whatever the UI is asking for. Measured during a liked-videos
+scan: a genre snapshot query at 1171ms and /api/videos/liked starved past a 20s
+client timeout, on a machine doing nothing else. This is a plausible cause of the
+laggy first minute after launch and of "functions not working yet" right after
+boot, well beyond the one surface where it was noticed.
+
+Two halves to it. Reads that run long (anything touching the track_primary_genre
+view, which is recomputed per read over all of track_genres) should not hold the
+shared connection at all - db.open_isolated() + WAL already exists for exactly
+this and services/video_sets.rs and services/library_videos.rs use it, so the
+pattern is proven, just not applied consistently. And the boot triggers should be
+staggered rather than all landing at once; today the only spacing is the 60s/90s
+initial sleeps, which do not separate the tasks from each other.
+
+Worth measuring before designing: log lock wait time in with_conn under a debug
+flag, so "the DB lock" stops being a hypothesis.
+Spawned by: liked videos library 2026-07-26

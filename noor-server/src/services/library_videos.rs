@@ -103,12 +103,11 @@ pub struct VideoMatch {
     pub image_id: Option<String>,
     pub match_score: f64,
     pub release_year: Option<i64>,
-    pub quality: Option<String>,
 }
 
 /// Year out of TIDAL's `releaseDate` ("2007-04-27T00:00:00.000+0000"). Only the
-/// year is kept: a filter pill and a version label are all it feeds, and the
-/// full timestamp carries an offset SQLite cannot parse anyway.
+/// year is kept: a version label is all it feeds, and the full timestamp carries
+/// an offset SQLite cannot parse anyway.
 fn release_year_of(video: &TidalArtistVideo) -> Option<i64> {
     video
         .extra
@@ -116,21 +115,6 @@ fn release_year_of(video: &TidalArtistVideo) -> Option<i64> {
         .and_then(serde_json::Value::as_str)
         .and_then(|date| date.get(..4))
         .and_then(|year| year.parse().ok())
-}
-
-/// "MP4_1080P" -> "1080p". TIDAL's container prefix says nothing a listener
-/// cares about; the resolution does, and it is the other thing that separates
-/// two uploads of the same video.
-fn quality_of(video: &TidalArtistVideo) -> Option<String> {
-    let raw = video
-        .extra
-        .get("quality")
-        .and_then(serde_json::Value::as_str)?;
-    let resolution = raw.rsplit('_').next().unwrap_or(raw);
-    if resolution.is_empty() {
-        return None;
-    }
-    Some(resolution.to_lowercase())
 }
 
 /// One version of a song: a single video. Shaped so the client can lift it
@@ -147,10 +131,9 @@ pub struct LikedVideoRow {
     /// grid downsizes through `upscaleTidalArtwork`.
     pub artwork_url: Option<String>,
     pub match_score: f64,
-    /// What separates two versions when their titles do not. Both come free
-    /// with the artist-videos payload; neither is guaranteed.
+    /// What separates two versions when their titles do not. Comes free with the
+    /// artist-videos payload; not guaranteed to be there.
     pub release_year: Option<i64>,
-    pub quality: Option<String>,
 }
 
 /// One card on the wall: a song, with every video found for it.
@@ -305,7 +288,6 @@ pub fn match_videos(tracks: &[LikedTrack], videos: &[TidalArtistVideo]) -> Vec<V
                 image_id: video.image_id.clone(),
                 match_score: score,
                 release_year: release_year_of(video),
-                quality: quality_of(video),
             });
         }
     }
@@ -330,15 +312,14 @@ pub fn store_artist_scan(conn: &Connection, artist_id: i64, matches: &[VideoMatc
         let mut stmt = tx.prepare(
             "INSERT INTO library_videos
                  (track_id, tidal_video_id, video_title, duration_seconds, image_id,
-                  match_score, release_year, quality)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                  match_score, release_year)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(track_id, tidal_video_id) DO UPDATE SET
                  video_title      = excluded.video_title,
                  duration_seconds = excluded.duration_seconds,
                  image_id         = excluded.image_id,
                  match_score      = excluded.match_score,
-                 release_year     = excluded.release_year,
-                 quality          = excluded.quality",
+                 release_year     = excluded.release_year",
         )?;
         for m in matches {
             stmt.execute(params![
@@ -349,7 +330,6 @@ pub fn store_artist_scan(conn: &Connection, artist_id: i64, matches: &[VideoMatc
                 m.image_id,
                 m.match_score,
                 m.release_year,
-                m.quality,
             ])?;
         }
         tx.execute(
@@ -386,8 +366,7 @@ pub fn load_wall(conn: &Connection) -> Result<Vec<LikedVideoGroup>> {
                 g.name,
                 t.date_added,
                 lv.match_score,
-                lv.release_year,
-                lv.quality
+                lv.release_year
            FROM library_videos lv
            JOIN tracks t              ON t.id = lv.track_id AND t.is_favorite = 1
            LEFT JOIN artists ar       ON ar.id = t.artist_id
@@ -421,7 +400,6 @@ pub fn load_wall(conn: &Connection) -> Result<Vec<LikedVideoGroup>> {
                     artwork_url: TidalClient::get_artwork_url(&image_id, 640),
                     match_score: row.get(11)?,
                     release_year: row.get(12)?,
-                    quality: row.get(13)?,
                 },
                 track_title: row.get(3)?,
                 artist_name: row.get(4)?,
@@ -565,10 +543,9 @@ pub async fn run_if_idle(state: SharedState) {
         return;
     }
 
-    let batch: Vec<ScanTarget> = targets.into_iter().take(SCAN_BATCH_CAP).collect();
     info!(
         target: "noor.library_videos",
-        artists = batch.len(),
+        artists = targets.len(),
         "resolving videos for liked artists"
     );
     running.store(true, Ordering::SeqCst);
@@ -580,50 +557,97 @@ pub async fn run_if_idle(state: SharedState) {
             tokens.country_code.clone(),
         );
 
+        // Its own connection, not the shared pooled one. A first index is
+        // thousands of artists over half an hour; taking the shared connection
+        // for every one of those reads and writes puts this pass in the way of
+        // every request the app serves, including the wall's own 6s poll, which
+        // is how a background job ends up timing out the page it feeds. WAL
+        // lets this run beside them.
+        let scan_conn = match db.open_isolated() {
+            Ok(conn) => Some(conn),
+            Err(e) => {
+                debug!(
+                    target: "noor.library_videos",
+                    error = %e,
+                    "no isolated connection (in-memory db?), falling back to the shared one"
+                );
+                None
+            }
+        };
+        macro_rules! with_scan_conn {
+            ($f:expr) => {
+                match scan_conn.as_ref() {
+                    Some(conn) => $f(conn),
+                    None => db.with_conn(|conn| $f(conn)),
+                }
+            };
+        }
+
         let mut scanned = 0usize;
         let mut hits = 0usize;
-        for target in batch {
-            let tracks = match db.with_conn(|conn| liked_tracks_for_artist(conn, target.artist_id))
-            {
-                Ok(tracks) if !tracks.is_empty() => tracks,
-                // The artist lost its likes between selection and now, or the
-                // read failed. Either way there is nothing to match against;
-                // leave it unscanned rather than banking an empty answer.
-                _ => continue,
-            };
-
-            let videos = match client
-                .get_artist_videos(target.tidal_artist_id, VIDEOS_PER_ARTIST, 0)
-                .await
-            {
-                Ok(page) => page.items,
+        // Keep going until the work is drained. Stopping after one batch and
+        // waiting for the next trigger meant a first index of 2,346 artists
+        // needed a dozen daily ticks - about a fortnight - to finish.
+        'passes: loop {
+            let batch: Vec<ScanTarget> = match with_scan_conn!(artists_needing_scan) {
+                Ok(targets) => targets.into_iter().take(SCAN_BATCH_CAP).collect(),
                 Err(e) => {
-                    // Do not stamp the ledger on failure: an unstamped artist is
-                    // simply picked up again next pass.
-                    debug!(
+                    warn!(target: "noor.library_videos", error = %e, "could not select work");
+                    break 'passes;
+                }
+            };
+            if batch.is_empty() {
+                break 'passes;
+            }
+
+            for target in batch {
+                let tracks =
+                    match with_scan_conn!(|conn| liked_tracks_for_artist(conn, target.artist_id)) {
+                        Ok(tracks) if !tracks.is_empty() => tracks,
+                        // The artist lost its likes between selection and now, or
+                        // the read failed. Either way there is nothing to match
+                        // against; leave it unscanned rather than banking an
+                        // empty answer.
+                        _ => continue,
+                    };
+
+                let videos = match client
+                    .get_artist_videos(target.tidal_artist_id, VIDEOS_PER_ARTIST, 0)
+                    .await
+                {
+                    Ok(page) => page.items,
+                    Err(e) => {
+                        // Do not stamp the ledger on failure: an unstamped artist
+                        // is simply picked up again next pass. Which means it
+                        // would also be picked up by the loop above forever, so
+                        // a run of failures (an expired session, TIDAL down) has
+                        // to end the pass rather than spin on it.
+                        debug!(
+                            target: "noor.library_videos",
+                            artist_id = target.artist_id,
+                            error = %e,
+                            "artist videos fetch failed, leaving unscanned"
+                        );
+                        break 'passes;
+                    }
+                };
+
+                let matches = match_videos(&tracks, &videos);
+                hits += matches.len();
+                if let Err(e) =
+                    with_scan_conn!(|conn| store_artist_scan(conn, target.artist_id, &matches))
+                {
+                    warn!(
                         target: "noor.library_videos",
                         artist_id = target.artist_id,
                         error = %e,
-                        "artist videos fetch failed, leaving unscanned"
+                        "could not store scan"
                     );
-                    continue;
+                    break 'passes;
                 }
-            };
-
-            let matches = match_videos(&tracks, &videos);
-            hits += matches.len();
-            if let Err(e) = db.with_conn(|conn| store_artist_scan(conn, target.artist_id, &matches))
-            {
-                warn!(
-                    target: "noor.library_videos",
-                    artist_id = target.artist_id,
-                    error = %e,
-                    "could not store scan"
-                );
-                continue;
+                scanned += 1;
+                tokio::time::sleep(SCAN_CALL_SPACING).await;
             }
-            scanned += 1;
-            tokio::time::sleep(SCAN_CALL_SPACING).await;
         }
 
         running.store(false, Ordering::SeqCst);
@@ -654,16 +678,10 @@ mod tests {
 
     /// A video carrying the metadata TIDAL actually sends alongside the fields
     /// we name explicitly.
-    fn video_with_meta(
-        id: i64,
-        title: &str,
-        release_date: &str,
-        quality: &str,
-    ) -> TidalArtistVideo {
+    fn video_with_meta(id: i64, title: &str, release_date: &str) -> TidalArtistVideo {
         let mut v = video(id, title);
         v.extra
             .insert("releaseDate".into(), serde_json::json!(release_date));
-        v.extra.insert("quality".into(), serde_json::json!(quality));
         v
     }
 
@@ -711,36 +729,32 @@ mod tests {
     #[test]
     fn versions_carry_what_tells_them_apart() {
         // Four Bob Marley videos all titled "Jamming" are separated by nothing
-        // on the card but runtime. Year and resolution come free with the
-        // payload we already fetch.
+        // on the card but runtime. The year comes free with the payload we
+        // already fetch.
         let tracks = vec![liked(10, "Jamming")];
         let videos = vec![
-            video_with_meta(900, "Jamming", "1999-04-27T00:00:00.000+0000", "MP4_1080P"),
-            video_with_meta(901, "Jamming", "2012-11-01T00:00:00.000+0000", "MP4_480P"),
+            video_with_meta(900, "Jamming", "1999-04-27T00:00:00.000+0000"),
+            video_with_meta(901, "Jamming", "2012-11-01T00:00:00.000+0000"),
         ];
 
         let matches = match_videos(&tracks, &videos);
 
         assert_eq!(matches[0].release_year, Some(1999));
-        assert_eq!(matches[0].quality.as_deref(), Some("1080p"));
         assert_eq!(matches[1].release_year, Some(2012));
-        assert_eq!(matches[1].quality.as_deref(), Some("480p"));
     }
 
     #[test]
-    fn missing_or_odd_metadata_is_simply_absent() {
+    fn a_missing_or_unparseable_release_date_is_simply_absent() {
         let tracks = vec![liked(10, "Song")];
-        // No releaseDate/quality at all, and a quality string with no prefix.
         let mut odd = video(901, "Song");
         odd.extra
-            .insert("quality".into(), serde_json::json!("720P"));
+            .insert("releaseDate".into(), serde_json::json!("not a date"));
         let videos = vec![video(900, "Song"), odd];
 
         let matches = match_videos(&tracks, &videos);
 
-        assert_eq!(matches[0].release_year, None);
-        assert_eq!(matches[0].quality, None);
-        assert_eq!(matches[1].quality.as_deref(), Some("720p"));
+        assert_eq!(matches[0].release_year, None, "no releaseDate at all");
+        assert_eq!(matches[1].release_year, None, "unparseable releaseDate");
     }
 
     #[test]

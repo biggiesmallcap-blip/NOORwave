@@ -26,7 +26,7 @@ describe('liked videos contract', () => {
 		// being fetched.
 		const page = readFileSync(PAGE, 'utf8');
 		expect(page).toContain('function versionMeta(version: LikedVideoVersion): string');
-		expect(page).toContain("[version.release_year, version.quality].filter(Boolean).join(' - ')");
+		expect(page).toContain("version.release_year ? String(version.release_year) : ''");
 		expect(page).toContain('{versionMeta(version)}');
 	});
 
