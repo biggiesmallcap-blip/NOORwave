@@ -48,6 +48,12 @@ const HOME_SUGGESTIONS_ALBUM_OVERFETCH: usize = 4;
 // one computes behind it. Also the prune horizon, since a payload past its 6h
 // freshness window is exactly what this path hands back.
 const HOME_SUGGESTIONS_STALE_MAX_AGE_SECS: i64 = 7 * 24 * 60 * 60;
+// Payload-shape version, embedded in every cache key. Bump it whenever the
+// response shape changes so older payloads can never be served: the
+// stale-while-revalidate path reads by prefix, not by exact key, and a v1
+// payload (tracks only, no albums) handed to a v2 client renders an empty
+// albums mural.
+const HOME_SUGGESTIONS_CACHE_VERSION: &str = "v2";
 
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct HomeSuggestionsRequest {
@@ -500,6 +506,12 @@ pub(crate) fn blend_suggestion_seeds(recent: &[i64], long_term: &[i64], salt: us
     out
 }
 
+/// Shared prefix for every cache key of the current payload shape. The stale
+/// path matches on this so it can never resurrect an older shape.
+fn home_suggestions_cache_key_prefix() -> String {
+    format!("home_suggest:{HOME_SUGGESTIONS_CACHE_VERSION}:")
+}
+
 fn home_suggestions_cache_key(seed_ids: &[i64], limit: usize) -> String {
     let mut sorted = seed_ids.to_vec();
     sorted.sort_unstable();
@@ -508,7 +520,7 @@ fn home_suggestions_cache_key(seed_ids: &[i64], limit: usize) -> String {
         .map(|id| id.to_string())
         .collect::<Vec<_>>()
         .join("-");
-    format!("home_suggest:v2:{limit}:{joined}")
+    format!("{}{limit}:{joined}", home_suggestions_cache_key_prefix())
 }
 
 fn read_home_suggestions_cache(db: &crate::db::Database, cache_key: &str) -> Option<Value> {
@@ -540,13 +552,19 @@ fn read_recent_home_suggestions_cache(
     max_age_secs: i64,
 ) -> Option<Value> {
     let floor = unix_now_secs() - max_age_secs.max(0);
+    // Scoped to the current payload version. Matching on provider alone would
+    // resurrect payloads written by an older build whose shape the client can no
+    // longer render.
+    let prefix = format!("{}%", home_suggestions_cache_key_prefix());
     db.with_conn(|conn| {
         conn.query_row(
             "SELECT payload_json FROM provider_recommendation_cache
-                  WHERE provider = 'home_suggestions' AND fetched_at >= ?1
+                  WHERE provider = 'home_suggestions'
+                    AND cache_key LIKE ?1
+                    AND fetched_at >= ?2
                   ORDER BY fetched_at DESC
                   LIMIT 1",
-            params![floor],
+            params![prefix, floor],
             |row| row.get::<_, String>(0),
         )
         .optional()
@@ -1036,6 +1054,29 @@ mod tests {
         // The stale path ignores expiry and takes the most recently written.
         let stale = read_recent_home_suggestions_cache(&db, 7 * 24 * 60 * 60)
             .expect("a stale payload is available");
+        assert_eq!(stale["tracks"][0], "new");
+    }
+
+    #[test]
+    fn stale_read_never_resurrects_an_older_payload_shape() {
+        // Regression: the stale path originally matched on provider alone, so a
+        // v1 payload (tracks only, no albums) was served to a v2 client and the
+        // albums mural rendered empty. Caught end-to-end against a real library.
+        let db = fresh_migrated_db();
+        write_home_suggestions_cache(&db, "home_suggest:v1:50:1-2-3", &json!({"tracks":["old"]}));
+
+        assert!(
+            read_recent_home_suggestions_cache(&db, 7 * 24 * 60 * 60).is_none(),
+            "a payload from an older cache version must not be served"
+        );
+
+        write_home_suggestions_cache(
+            &db,
+            &home_suggestions_cache_key(&[4, 5, 6], 50),
+            &json!({"tracks":["new"],"albums":[]}),
+        );
+        let stale = read_recent_home_suggestions_cache(&db, 7 * 24 * 60 * 60)
+            .expect("current-version payload is served");
         assert_eq!(stale["tracks"][0], "new");
     }
 
