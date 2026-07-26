@@ -39,6 +39,11 @@ const HOME_SUGGESTIONS_RECENCY_EXCLUSION_DAYS: i64 = 30;
 const HOME_SUGGESTIONS_TOP_ARTIST_POOL: i64 = 20;
 // Album mural asks for more than it shows so client-side dedup has slack.
 const HOME_SUGGESTIONS_ALBUM_LIMIT: usize = 24;
+// Albums one artist may contribute before the rest of the panel gets a turn.
+// A prolific favourite otherwise fills the mural with their own back catalogue.
+const HOME_SUGGESTIONS_MAX_ALBUMS_PER_ARTIST: usize = 2;
+// Multiplier on the SQL LIMIT so the per-artist cap has spare candidates.
+const HOME_SUGGESTIONS_ALBUM_OVERFETCH: usize = 4;
 
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct HomeSuggestionsRequest {
@@ -237,6 +242,12 @@ fn candidate_play_stats(
 /// Albums with no similarity edges to the seeds at all still qualify (they sort
 /// last, by album id) - an unopened record by a favourite artist is a
 /// legitimate suggestion even when the graph has nothing to say about it.
+///
+/// A per-artist cap is applied after ranking. Without it a prolific favourite
+/// buries everything else: on a real library the raw top 24 came back with 9
+/// Bob Marley records and 4 Howard Shore soundtracks, which is a discography
+/// listing rather than a discovery panel. The query over-fetches so the cap has
+/// material to fall through to.
 fn unexplored_albums_for_artists(
     conn: &rusqlite::Connection,
     artist_ids: &[i64],
@@ -289,7 +300,9 @@ fn unexplored_albums_for_artists(
         bound.extend_from_slice(seed_track_ids);
         bound.extend_from_slice(seed_track_ids);
     }
-    bound.push(limit as i64);
+    // Over-fetch so the per-artist cap below has lower-ranked albums by other
+    // artists to fall through to instead of just shortening the list.
+    bound.push((limit * HOME_SUGGESTIONS_ALBUM_OVERFETCH) as i64);
 
     let rows = stmt
         .query_map(rusqlite::params_from_iter(bound.iter()), |row| {
@@ -302,7 +315,53 @@ fn unexplored_albums_for_artists(
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows)
+
+    Ok(cap_albums_per_artist(
+        rows,
+        limit,
+        HOME_SUGGESTIONS_MAX_ALBUMS_PER_ARTIST,
+    ))
+}
+
+/// Greedy per-artist cap over ranked albums, with a second pass that tops the
+/// list back up from what the cap skipped. The cap shapes the head of the panel
+/// for variety without ever returning fewer albums than it could have. A missing
+/// artist id is never capped, mirroring the track-side rules. No DB access ->
+/// unit-testable.
+pub(crate) fn cap_albums_per_artist(
+    albums: Vec<SuggestedAlbum>,
+    limit: usize,
+    max_per_artist: usize,
+) -> Vec<SuggestedAlbum> {
+    let mut per_artist: HashMap<i64, usize> = HashMap::new();
+    let mut chosen: Vec<SuggestedAlbum> = Vec::new();
+    let mut skipped: Vec<SuggestedAlbum> = Vec::new();
+
+    for album in albums {
+        if chosen.len() >= limit {
+            break;
+        }
+        if max_per_artist > 0 {
+            if let Some(artist_id) = album.artist_id {
+                let count = per_artist.entry(artist_id).or_insert(0);
+                if *count >= max_per_artist {
+                    skipped.push(album);
+                    continue;
+                }
+                *count += 1;
+            }
+        }
+        chosen.push(album);
+    }
+
+    for album in skipped {
+        if chosen.len() >= limit {
+            break;
+        }
+        chosen.push(album);
+    }
+
+    chosen
 }
 
 /// Track and album ids the user has played inside the recency window. Both are
@@ -823,6 +882,50 @@ mod tests {
             !excl.album_ids.contains(&11),
             "album of the old play is not excluded"
         );
+    }
+
+    fn album(id: i64, artist_id: Option<i64>) -> SuggestedAlbum {
+        SuggestedAlbum {
+            id,
+            title: format!("Album {id}"),
+            artist_id,
+            artist_name: artist_id.map(|a| format!("Artist {a}")),
+            artwork_url: None,
+        }
+    }
+
+    #[test]
+    fn album_cap_keeps_a_prolific_favourite_from_owning_the_panel() {
+        // Verified against the real library: the raw ranking put 9 Bob Marley
+        // records in the top 24. The cap must let other artists through first.
+        let ranked = vec![
+            album(1, Some(10)),
+            album(2, Some(10)),
+            album(3, Some(10)),
+            album(4, Some(10)),
+            album(5, Some(20)),
+            album(6, Some(30)),
+        ];
+        let capped = cap_albums_per_artist(ranked, 4, 2);
+        let ids: Vec<i64> = capped.iter().map(|a| a.id).collect();
+        assert_eq!(ids, vec![1, 2, 5, 6]);
+    }
+
+    #[test]
+    fn album_cap_backfills_rather_than_returning_a_short_list() {
+        // Only one artist has unopened albums. Shortening the panel would be
+        // worse than showing more of the one artist available.
+        let ranked = (1..=5).map(|id| album(id, Some(10))).collect();
+        let capped = cap_albums_per_artist(ranked, 4, 2);
+        let ids: Vec<i64> = capped.iter().map(|a| a.id).collect();
+        assert_eq!(ids, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn album_cap_never_caps_a_missing_artist() {
+        let ranked = (1..=3).map(|id| album(id, None)).collect();
+        let capped = cap_albums_per_artist(ranked, 3, 2);
+        assert_eq!(capped.len(), 3);
     }
 
     #[test]
