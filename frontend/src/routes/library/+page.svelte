@@ -342,14 +342,9 @@
 			const data = await cachedApi.getHistory(RECENT_TRACK_LIMIT, 0);
 			recentTracks = data.tracks.slice(0, RECENT_TRACK_LIMIT);
 			homePanelCandidateCache.recentTracks = recentTracks;
-			if (recentTracks.length === 0) {
-				suggestionTracks = [];
-				suggestionAlbums = [];
-				suggestionCandidateRequestKey = '';
-				homePanelCandidateCache.suggestionTracks = [];
-				homePanelCandidateCache.suggestionAlbums = [];
-				homePanelCandidateCache.suggestionRequestKey = '';
-			}
+			// Suggestions are no longer derived from recentTracks, so there is
+			// nothing to invalidate here. With no listen history the server
+			// returns empty lists and the murals hide themselves.
 		} catch (error) {
 			console.error('Failed to load recent tracks:', error);
 		}
@@ -1555,22 +1550,12 @@
 		return result;
 	}
 
-	function uniquePositiveIds(ids: Array<number | null | undefined>, limit: number): number[] {
-		const seen = new Set<number>();
-		const result: number[] = [];
-		for (const id of ids) {
-			if (id == null || id <= 0 || seen.has(id)) continue;
-			seen.add(id);
-			result.push(id);
-			if (result.length >= limit) break;
-		}
-		return result;
-	}
-
-	async function loadSuggestionCandidates(seedTracks: Track[], requestKey: string) {
-		const seedIds = uniquePositiveIds(seedTracks.map(track => track.id), HOME_MURAL_ITEM_LIMIT);
+	// No seeds are sent: the server picks its own blend of recent plays and
+	// long-term top artists, which keeps this request independent of how far the
+	// library store has loaded and keeps the server cache key stable across a boot.
+	async function loadSuggestionCandidates(requestKey: string) {
 		const result = await cachedApi
-			.getHomeSuggestions(seedIds, 50)
+			.getHomeSuggestions([], 50)
 			.catch(error => {
 				console.error('Failed to load home suggestions:', error);
 				return { tracks: [] as Track[], albums: [] as HomeAlbumCard[] };
@@ -1582,23 +1567,6 @@
 			homePanelCandidateCache.suggestionAlbums = suggestionAlbums;
 			homePanelCandidateCache.suggestionRequestKey = requestKey;
 		}
-	}
-
-	function listenHistorySeeds(): Track[] {
-		const seen = new Set<number>();
-		const seeds: Track[] = [];
-		const playedTracks = [...$tracks]
-			.filter(track => track.last_played_at)
-			.sort((a, b) => (b.last_played_at ?? '').localeCompare(a.last_played_at ?? ''));
-
-		for (const track of [...recentTracks, ...playedTracks]) {
-			if (seen.has(track.id)) continue;
-			seen.add(track.id);
-			seeds.push(track);
-			if (seeds.length >= HOME_MURAL_ITEM_LIMIT) break;
-		}
-
-		return seeds;
 	}
 
 	function albumFromHomeCard(card: HomeAlbumCard): Album {
@@ -1748,20 +1716,22 @@
 		});
 	});
 
+	// Fires once per refresh bucket, immediately on mount. Deliberately does NOT
+	// depend on any client-derived seed list: the old one read the whole $tracks
+	// store, so the request key churned as the library paged in during boot,
+	// refiring this with a different seed set each time. Every distinct seed set
+	// is a separate server cache key, so boot paid the ~1s cold path repeatedly
+	// and only after the library had loaded. The server derives its own seeds
+	// from listen_history now, so this starts in parallel with everything else.
 	$effect(() => {
-		const seeds = listenHistorySeeds();
-		const seedKey = seeds.map(track => `${track.id}:${track.last_played_at ?? ''}`).join('|');
-		const requestKey = seedKey ? `${homePanelRefreshBucket()}:${seedKey}` : '';
-		if (!requestKey) {
-			return;
-		}
+		const requestKey = String(homePanelRefreshBucket());
 		if (suggestionCandidateRequestKey === requestKey) return;
 		suggestionCandidateRequestKey = requestKey;
 
 		// Keep the last-good candidates on failure instead of zeroing (which made
-		// the whole panel vanish). loadSuggestionCandidates already degrades each
-		// source to [] internally, so this only fires on unexpected throws.
-		void loadSuggestionCandidates(seeds, requestKey).catch((error) => {
+		// the whole panel vanish). loadSuggestionCandidates already degrades to []
+		// internally, so this only fires on unexpected throws.
+		void loadSuggestionCandidates(requestKey).catch((error) => {
 			console.error('Failed to load suggestion candidates:', error);
 		});
 	});

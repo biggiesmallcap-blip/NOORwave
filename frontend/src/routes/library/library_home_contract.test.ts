@@ -69,8 +69,14 @@ describe('library home hero contract', () => {
 		expect(libraryPage).toContain('randomPanelAlbums.map(albumToMuralItem)');
 		expect(libraryPage).toContain('let suggestionTracks = $state<Track[]>(homePanelCandidateCache.suggestionTracks)');
 		expect(libraryPage).toContain('let suggestionAlbums = $state<HomeAlbumCard[]>(homePanelCandidateCache.suggestionAlbums)');
-		expect(libraryPage).toContain('async function loadSuggestionCandidates(seedTracks: Track[], requestKey: string)');
-		expect(libraryPage).toContain('.getHomeSuggestions(seedIds, 50)');
+		// Seedless by design: deriving seeds client-side made the request key churn
+		// as the library store paged in during boot, refiring the fetch with a new
+		// seed set (and so a new server cache key) each time. The server seeds
+		// itself, so this fires once on mount in parallel with the library load.
+		expect(libraryPage).toContain('async function loadSuggestionCandidates(requestKey: string)');
+		expect(libraryPage).toContain('.getHomeSuggestions([], 50)');
+		expect(libraryPage).toContain('const requestKey = String(homePanelRefreshBucket())');
+		expect(libraryPage).not.toContain('listenHistorySeeds()');
 		expect(libraryPage).toContain('function capPerArtist(tracks: Track[], max: number): Track[]');
 		expect(libraryPage).toContain('const SUGGESTION_ARTIST_CAP = 2');
 		// Both murals render the server lists directly. The old same-artist
