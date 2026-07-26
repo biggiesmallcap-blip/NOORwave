@@ -287,6 +287,9 @@
 		</p>
 	{/if}
 
+	<!-- One row: find, narrow, order, play. Genre and year are selects rather
+	     than pill rails because they are unbounded - 35 genres and 40 years as
+	     chips buried the wall under five rows of chrome. -->
 	{#if !loading && videos.length > 0}
 		<div class="tools">
 			<SearchField
@@ -294,67 +297,47 @@
 				placeholder="Search your liked videos"
 				ariaLabel="Search your liked videos"
 				variant="page"
+				size="sm"
 				fill
 				suppressSuggestions
 			/>
+
+			{#if genres.length > 0}
+				<select class="tool-select" bind:value={activeGenre} aria-label="Filter by genre">
+					<option value={null}>All genres</option>
+					{#each genres as genre (genre)}
+						<option value={genre}>{genre}</option>
+					{/each}
+				</select>
+			{/if}
+
+			{#if years.length > 0}
+				<select class="tool-select" bind:value={activeYear} aria-label="Filter by year">
+					<option value={null}>All years</option>
+					{#each years as year (year)}
+						<option value={year}>{year}</option>
+					{/each}
+				</select>
+			{/if}
+
+			<select class="tool-select" bind:value={sort} aria-label="Sort">
+				<option value="recent">Recently liked</option>
+				<option value="title">A-Z</option>
+			</select>
+
 			<div class="tool-actions">
-				<button class="filter-pill filter-pill--accent" onclick={() => void playAll()}>
-					Play all
-				</button>
-				<button class="filter-pill filter-pill--ghost" onclick={() => void shuffle()}>
-					Shuffle
-				</button>
-				<button
-					class="filter-pill"
-					class:active={sort === 'recent'}
-					onclick={() => (sort = 'recent')}
-				>
-					Recently liked
-				</button>
-				<button
-					class="filter-pill"
-					class:active={sort === 'title'}
-					onclick={() => (sort = 'title')}
-				>
-					A-Z
-				</button>
+				<button class="tool-btn tool-btn--accent" onclick={() => void playAll()}>Play all</button>
+				<button class="tool-btn" onclick={() => void shuffle()}>Shuffle</button>
 			</div>
 		</div>
 
-		{#if genres.length > 0}
-			<div class="filter-pills">
-				<button
-					class="filter-pill"
-					class:active={activeGenre === null}
-					onclick={() => (activeGenre = null)}>All genres</button
-				>
-				{#each genres as genre (genre)}
-					<button
-						class="filter-pill"
-						class:active={activeGenre === genre}
-						onclick={() => (activeGenre = activeGenre === genre ? null : genre)}
-						>{genre}</button
-					>
-				{/each}
-			</div>
-		{/if}
-
-		{#if years.length > 0}
-			<div class="filter-pills">
-				<button
-					class="filter-pill"
-					class:active={activeYear === null}
-					onclick={() => (activeYear = null)}>All years</button
-				>
-				{#each years as year (year)}
-					<button
-						class="filter-pill"
-						class:active={activeYear === year}
-						onclick={() => (activeYear = activeYear === year ? null : year)}
-						>{year}</button
-					>
-				{/each}
-			</div>
+		{#if activeGenre || activeYear !== null}
+			<p class="filter-note">
+				Showing {filtered.length} of {videos.length}
+				<button class="link-btn" onclick={() => { activeGenre = null; activeYear = null; }}>
+					Clear filters
+				</button>
+			</p>
 		{/if}
 	{/if}
 
@@ -540,8 +523,32 @@
 	.tools {
 		display: flex;
 		align-items: center;
-		gap: var(--space-3);
+		gap: var(--space-2);
 		flex-wrap: wrap;
+	}
+
+	/* The field earns a share of the row, not the whole thing: left unbounded it
+	   pushed the selects and the actions onto lines of their own. */
+	.tools :global(.sf) {
+		flex: 1 1 220px;
+		max-width: 320px;
+	}
+
+	.tool-select {
+		flex: 0 0 auto;
+		padding: 7px 10px;
+		border-radius: var(--radius-sm);
+		border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+		background: rgba(255, 255, 255, 0.05);
+		color: var(--text-secondary);
+		font: inherit;
+		font-size: var(--font-size-sm);
+		cursor: pointer;
+		max-width: 145px;
+	}
+
+	.tool-select:hover {
+		color: var(--text-primary);
 	}
 
 	.tool-actions {
@@ -550,15 +557,9 @@
 		flex-wrap: wrap;
 	}
 
-	.filter-pills {
-		display: flex;
-		gap: var(--space-2);
-		flex-wrap: wrap;
-	}
-
-	.filter-pill {
-		padding: 5px 14px;
-		border-radius: 20px;
+	.tool-btn {
+		padding: 7px 16px;
+		border-radius: var(--radius-sm);
 		border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
 		background: transparent;
 		color: var(--text-secondary);
@@ -572,20 +573,43 @@
 			border-color 0.15s;
 	}
 
-	.filter-pill:hover {
+	.tool-btn:hover {
 		background: var(--bg-hover);
 		color: var(--text-primary);
 	}
 
-	.filter-pill.active {
+	/* Accent belongs to the primary action alone, so it never competes with a
+	   selected filter for meaning. */
+	.tool-btn--accent {
 		background: var(--accent);
 		border-color: var(--accent);
 		color: #fff;
 	}
 
-	.filter-pill--accent {
-		border-color: var(--accent);
+	.tool-btn--accent:hover {
+		background: var(--accent);
+		color: #fff;
+	}
+
+	.filter-note {
+		margin: 0;
+		color: var(--text-tertiary);
+		font-size: var(--font-size-sm);
+	}
+
+	.link-btn {
+		margin-left: var(--space-2);
+		padding: 0;
+		border: none;
+		background: none;
 		color: var(--accent);
+		font: inherit;
+		font-size: var(--font-size-sm);
+		cursor: pointer;
+	}
+
+	.link-btn:hover {
+		text-decoration: underline;
 	}
 
 	.video-grid {
