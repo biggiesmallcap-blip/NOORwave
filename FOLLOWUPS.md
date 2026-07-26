@@ -950,3 +950,21 @@ initial sleeps, which do not separate the tasks from each other.
 Worth measuring before designing: log lock wait time in with_conn under a debug
 flag, so "the DB lock" stops being a hypothesis.
 Spawned by: liked videos library 2026-07-26
+
+### videos: the liked wall renders ~700 cards in one pass
+
+After the genre-query fix, what is left of the /videos/liked transition is the
+render itself: ~350ms of blocked main thread building ~700 card slots, which no
+amount of backend work touches. Measured `content-visibility: auto` on
+`.video-card` (not `.card-slot` - paint containment there clips the versions
+popout): the render long task drops from ~200ms to ~70ms, so it works. It was not
+taken because the placeholder height has to be guessed. `contain-intrinsic-size`
+wants a fixed length, but a card's height is poster (column width x 9/16) plus two
+fixed text lines, so the right value moves with the viewport. At 1600px the guess
+was 166px against a real 214px, which leaves the grid holding two row heights at
+once and shifting as you scroll - trading an invisible 130ms for a visible defect.
+
+Either measure one card on mount and publish the height as a custom property on
+the grid (small, and correct at every width), or paginate the wall, which is
+probably the better answer anyway: nobody scrolls 700 cards.
+Spawned by: liked videos library 2026-07-26
