@@ -427,7 +427,7 @@ export const cachedApi = {
 	// In-memory only (no persist): suggestion payloads vary per seed set and
 	// carry full Track rows, so persisting every rotation would bloat the
 	// localStorage query cache (the boot-crash quota risk).
-	getHomeSuggestions(seedTrackIds: number[], limit?: number) {
+	getHomeSuggestions(seedTrackIds: number[] = [], limit?: number) {
 		const seedKey = [...seedTrackIds].sort((a, b) => a - b).join('-');
 		return fetchCached<HomeSuggestionsResponse>(
 			cacheKeys.homeSuggestions(seedKey),

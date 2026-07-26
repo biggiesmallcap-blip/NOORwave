@@ -42,7 +42,9 @@ mod duplicates_routes;
 mod enrichment_routes;
 mod genre_routes;
 pub(crate) mod home_routes;
+pub(crate) mod home_suggestions;
 mod library_batch_routes;
+pub(crate) mod maintenance_routes;
 mod playlist_routes;
 mod search_routes;
 mod sportify_routes;
@@ -1123,7 +1125,7 @@ pub fn api_routes(state: SharedState) -> Router {
         )
         .route(
             "/api/home/suggestions",
-            post(home_routes::get_home_suggestions),
+            post(home_suggestions::get_home_suggestions),
         )
         .route("/api/home/articles", get(home_routes::get_home_articles))
         .route("/api/home/news", get(home_routes::get_home_news))
@@ -1197,6 +1199,15 @@ pub fn api_routes(state: SharedState) -> Router {
         .route(
             "/api/server/token/regenerate",
             post(regenerate_server_token_handler),
+        )
+        // Database size + user-triggered compaction
+        .route(
+            "/api/server/database/stats",
+            get(maintenance_routes::get_database_stats),
+        )
+        .route(
+            "/api/server/database/compact",
+            post(maintenance_routes::compact_database),
         )
         // Server configuration
         .route("/api/server/info", get(get_server_info))

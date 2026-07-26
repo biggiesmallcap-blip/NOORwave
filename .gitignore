@@ -8,6 +8,7 @@ build/
 noor.db
 noor.db-wal
 noor.db-shm
+noor.db-journal
 .noor_secret
 *.exe
 .env

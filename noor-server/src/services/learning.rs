@@ -1972,6 +1972,17 @@ pub async fn start_training(
         queries::finish_training_run(conn, run.id, "completed")
     }));
 
+    // Reclaim the models this retrain superseded. Without this every run left a
+    // full set of per-track neighbours behind forever, which is what grew the
+    // database to multiple GB. Best-effort: a failure here must not fail a
+    // training run that has already succeeded.
+    if should_activate
+        && let Err(e) =
+            crate::services::model_pruner::prune_now(&db, queries::EMBEDDING_MODELS_KEPT).await
+    {
+        tracing::warn!(error = %e, "training: pruning retired models failed");
+    }
+
     Ok(())
 }
 

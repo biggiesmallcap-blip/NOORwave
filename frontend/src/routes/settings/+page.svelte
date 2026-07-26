@@ -13,6 +13,7 @@
 		type AudioQuality,
 		type ExclusiveLatencyMode,
 		type VideoQualityMode,
+		type DatabaseStats,
 		type DiscoveryEngine,
 		type DiscoveryStatus,
 		type DiscoveryTrainingSafetyProfile,
@@ -52,10 +53,12 @@
 	import { searchSettings, type SettingsSearchEntry } from '$lib/components/settings/settingsSearch';
 	import IntegrationsPanel from '$lib/components/settings/IntegrationsPanel.svelte';
 	import {
+		applyTrainingProgress,
 		discoveryLastTrainedAt,
 		shouldContinueDiscoveryCompletionRefresh,
 		shouldRefreshAfterTerminalDiscoveryProgress
 	} from '$lib/components/settings/discovery_status';
+	import { portal } from '$lib/actions/portal';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
 	import { WALLPAPERS, WALLPAPER_GROUPS, type WallpaperOption } from '$lib/components/wallpaper/shaders';
 	import {
@@ -424,7 +427,9 @@
 			nowEpochSeconds = Math.floor(Date.now() / 1000);
 		}, 1000);
 		const discoveryTrainingPoll = setInterval(() => {
-			if (discoveryIsRunning) void loadDiscoveryStatus();
+			// Paused while compacting: the database is held for the duration, so
+			// these would only pile up blocked requests behind the VACUUM.
+			if (discoveryIsRunning && !databaseCompacting) void loadDiscoveryStatus();
 		}, 3000);
 		let discoveryCompletionRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 		let discoveryCompletionRefreshAttempts = 0;
@@ -489,18 +494,7 @@
 			}
 
 			if (latest.type === 'training_progress') {
-				if (discoveryStatus?.latest_run) {
-					discoveryStatus = {
-						...discoveryStatus,
-						latest_run: {
-							...discoveryStatus.latest_run,
-							progress: typeof latest.progress === 'number' ? latest.progress : discoveryStatus.latest_run.progress,
-							stage: typeof latest.stage === 'string' ? latest.stage : discoveryStatus.latest_run.stage,
-							items_done: typeof latest.tracks_done === 'number' ? latest.tracks_done : discoveryStatus.latest_run.items_done,
-							items_total: typeof latest.tracks_total === 'number' ? latest.tracks_total : discoveryStatus.latest_run.items_total,
-						}
-					};
-				}
+				discoveryStatus = applyTrainingProgress(discoveryStatus, latest);
 				if (shouldRefreshAfterTerminalDiscoveryProgress(latest)) scheduleDiscoveryCompletionRefresh();
 			}
 
@@ -556,6 +550,11 @@
 	}
 
 	function markServerOffline() {
+		// Compacting holds the database for minutes, so every other poll blocks or
+		// times out. Without this guard the app would declare the server dead
+		// mid-VACUUM, which is exactly when a user is most likely to force-quit and
+		// leave a half-rewritten file behind.
+		if (databaseCompacting) return;
 		serverStatus = 'offline';
 	}
 
@@ -960,9 +959,13 @@
 		}
 	}
 
+	// Always reads through the uncached client. This is a live status poll driven
+	// by start/stop clicks and the completion watcher; served from the 30s query
+	// cache it reported the PREVIOUS run's terminal status right after a start,
+	// which is what hid the Stop button for the whole run.
 	async function loadDiscoveryStatus() {
 		try {
-			const response = await cachedApi.getDiscoveryStatus();
+			const response = await api.getDiscoveryStatus();
 			discoveryStatus = response.status;
 			discoveryEngine = response.status.selected_engine;
 			discoveryEngineTrainable = response.status.selected_engine_trainable;
@@ -1012,6 +1015,50 @@
 	let discoveryIsRunning = $derived(
 		discoveryStatus?.latest_run?.status === 'running'
 	);
+
+	let databaseStats = $state<DatabaseStats | null>(null);
+	let databaseCompacting = $state(false);
+	let databaseCompactResult = $state('');
+	let databaseCompactError = $state('');
+
+	function formatBytes(bytes: number): string {
+		if (!Number.isFinite(bytes) || bytes <= 0) return '0 MB';
+		const gb = bytes / 1024 ** 3;
+		if (gb >= 1) return `${gb.toFixed(1)} GB`;
+		return `${Math.max(1, Math.round(bytes / 1024 ** 2))} MB`;
+	}
+
+	async function loadDatabaseStats() {
+		try {
+			databaseStats = await api.getDatabaseStats();
+			markServerOnline();
+		} catch (error) {
+			if (isFetchConnectionError(error)) markServerOffline();
+		}
+	}
+
+	async function compactDatabase() {
+		databaseCompacting = true;
+		databaseCompactError = '';
+		databaseCompactResult = '';
+		try {
+			const result = await api.compactDatabase();
+			databaseCompactResult =
+				result.reclaimed_bytes > 0
+					? `Reclaimed ${formatBytes(result.reclaimed_bytes)} (now ${formatBytes(result.after_bytes)}).`
+					: `Nothing to reclaim; the database is already compact (${formatBytes(result.after_bytes)}).`;
+			await loadDatabaseStats();
+		} catch (error) {
+			if (isFetchConnectionError(error)) {
+				markServerOffline();
+				databaseCompactError = SERVER_UNREACHABLE_MESSAGE;
+			} else {
+				databaseCompactError = `Compacting failed: ${error}`;
+			}
+		} finally {
+			databaseCompacting = false;
+		}
+	}
 
 	async function loadRadioSimilarityStatus() {
 		try {
@@ -1573,6 +1620,7 @@
 			void loadPortableSnapshot();
 			void loadRadioSimilarityStatus();
 			void loadLastfmStatus();
+			void loadDatabaseStats();
 			return;
 		}
 		if (activeCategory === 'audio') {
@@ -3404,6 +3452,66 @@
 			{/if}
 
 			{#if activeCategory === 'sources'}
+			<section data-setting-id="database-size" class="glass-panel section-panel">
+				<SectionHeader
+					eyebrow="Cleanup"
+					title="Database size"
+					subtitle="How much disk noor.db is using, and how to get some back."
+				/>
+				{#if databaseStats}
+					<p class="page-copy database-size-headline">
+						<strong>{formatBytes(databaseStats.file_bytes)}</strong>
+						{#if databaseStats.estimated_reclaimable_bytes > 0}
+							<span class="database-size-arrow" aria-hidden="true">-&gt;</span>
+							<strong>~{formatBytes(databaseStats.estimated_after_bytes)}</strong>
+							<span class="database-size-note">after compacting</span>
+						{/if}
+					</p>
+					{#if databaseStats.estimated_reclaimable_bytes > 0}
+						<p class="page-copy">
+							About <strong>{formatBytes(databaseStats.estimated_reclaimable_bytes)}</strong> can be
+							freed{#if databaseStats.retired_neighbor_rows > 0}, mostly
+							{databaseStats.retired_neighbor_rows.toLocaleString()} leftover rows from
+							{databaseStats.retired_models} superseded discovery model{databaseStats.retired_models === 1 ? '' : 's'}{/if}.
+						</p>
+					{:else}
+						<p class="page-copy">Already compact - nothing worth reclaiming.</p>
+					{/if}
+					{#if databaseStats.wal_bytes > 0}
+						<p class="page-copy">
+							Write-ahead log <strong>{formatBytes(databaseStats.wal_bytes)}</strong> (folded back in
+							when you compact).
+						</p>
+					{/if}
+					<p class="page-copy is-warning">
+						Compacting rewrites the entire file. It can take several minutes on a large library,
+						needs about as much free disk as the database currently uses, and the app will be
+						unresponsive while it runs. Everything keeps working without it - the space is reused
+						internally either way.
+					</p>
+				{:else}
+					<p class="page-copy">Reading database size…</p>
+				{/if}
+				{#if databaseCompactResult}
+					<p class="page-copy">{databaseCompactResult}</p>
+				{/if}
+				{#if databaseCompactError}
+					<p class="page-copy is-error" role="alert">{databaseCompactError}</p>
+				{/if}
+				<div class="action-row">
+					<button class="btn btn-glass" onclick={() => void loadDatabaseStats()} disabled={databaseCompacting}>
+						Refresh
+					</button>
+					<button
+						class="btn btn-glass danger"
+						onclick={compactDatabase}
+						disabled={databaseCompacting || !databaseStats}
+					>
+						{databaseCompacting ? 'Compacting…' : 'Compact database'}
+					</button>
+				</div>
+			</section>
+
 			<section data-setting-id="clear-non-library-entries" class="glass-panel section-panel">
 				<SectionHeader
 					eyebrow="Cleanup"
@@ -3521,7 +3629,99 @@
 	</section>
 </div>
 
+{#if databaseCompacting}
+	<!-- Blocking on purpose: the database is being rewritten and quitting midway
+	     is the one thing that can hurt. No close button, no dismiss-on-click. -->
+	<div class="modal-backdrop compact-backdrop" role="presentation" use:portal>
+		<div
+			class="modal-panel glass-panel compact-panel"
+			role="alertdialog"
+			aria-modal="true"
+			aria-live="assertive"
+			aria-label="Compacting database"
+		>
+			<div class="compact-spinner" aria-hidden="true"></div>
+			<h2 class="compact-title">Compacting database</h2>
+			<p class="compact-copy">
+				Rewriting the database file. This can take several minutes on a large library.
+			</p>
+			<p class="compact-copy compact-warn">
+				Please leave NOORwave open until it finishes. The app will not respond while this runs -
+				that is expected, not a crash.
+			</p>
+		</div>
+	</div>
+{/if}
+
 <style>
+	.database-size-headline {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: baseline;
+		gap: 0.5rem;
+		font-size: var(--font-size-lg);
+	}
+
+	.database-size-arrow {
+		opacity: 0.5;
+	}
+
+	.database-size-note {
+		font-size: var(--font-size-sm);
+		opacity: 0.7;
+	}
+
+	.compact-backdrop {
+		display: grid;
+		place-items: center;
+	}
+
+	.compact-panel {
+		max-width: 26rem;
+		padding: 2rem;
+		text-align: center;
+	}
+
+	.compact-title {
+		margin: 0.75rem 0 0.5rem;
+		font-size: var(--font-size-lg);
+		line-height: var(--line-height-tight);
+	}
+
+	.compact-copy {
+		margin: 0 0 0.5rem;
+		opacity: 0.8;
+		font-size: var(--font-size-sm);
+		line-height: var(--line-height-normal);
+	}
+
+	.compact-warn {
+		opacity: 1;
+		font-weight: var(--font-weight-semibold);
+	}
+
+	.compact-spinner {
+		width: 2rem;
+		height: 2rem;
+		margin: 0 auto;
+		border-radius: 50%;
+		border: 2px solid color-mix(in srgb, currentColor 25%, transparent);
+		border-top-color: currentColor;
+		animation: compact-spin 0.9s linear infinite;
+	}
+
+	@keyframes compact-spin {
+		to {
+			transform: rotate(360deg);
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.compact-spinner {
+			animation-duration: 3s;
+		}
+	}
+
 	/* Caption + status helpers — extracted from template inline styles */
 	.setting-caption {
 		font-size: var(--font-size-sm);

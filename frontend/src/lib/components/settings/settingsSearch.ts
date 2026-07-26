@@ -28,6 +28,7 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
 	{ id: 'playback-output', category: 'audio', label: 'Playback output', keywords: 'quality device bit-perfect exclusive wasapi sample rate follow latency crossfade lossless output dac' },
 	{ id: 'portable-snapshot', category: 'sources', label: 'Portable snapshot', keywords: 'export import backup snapshot transfer enrichment' },
 	{ id: 'clear-non-library-entries', category: 'sources', label: 'Clear non-library entries', keywords: 'clear remove non-library cleanup purge' },
+	{ id: 'database-size', category: 'sources', label: 'Database size', keywords: 'database size disk space vacuum compact shrink storage big large noor.db' },
 	{ id: 'downloads', category: 'audio', label: 'Downloads', keywords: 'download folder flac mp3 format quality save disk' },
 	{ id: 'discovery-engine', category: 'audio', label: 'Discovery engine', keywords: 'discovery training learning radio intensity safety engine model' },
 	{ id: 'radio-similarity-index', category: 'audio', label: 'Radio similarity index', keywords: 'radio similarity neighbours index coverage' },

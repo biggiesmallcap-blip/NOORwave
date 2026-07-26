@@ -913,6 +913,28 @@ This is the Phase-3 taste-feedback piece (like/not-interested on editorial
 videos) the plan left deferred.
 Spawned by: videos taste loop + era set 2026-07-25
 
+### test flake: one unidentified failure in the noor-server suite
+
+During the home-suggestions work one full `cargo test -p noor-server` run
+reported 1485 passed / 1 failed and the failing test name was not captured
+before the next run overwrote it. Eight subsequent full runs were clean, so it
+is intermittent and was never reproduced. The suite has timing-sensitive areas
+(the in-memory DB helper exists because temp .db + WAL churn stalls under
+Defender), so a slow-IO flake is plausible. If it resurfaces, capture the name
+from the failure block before rerunning anything.
+Spawned by: home suggestions hidden-gem rewrite 2026-07-26
+
+### db: reason_json duplicates a human label on every neighbour row
+
+track_neighbors.reason_json stores entries like
+{"key":"audio_texture","label":"audio texture","weight":1.0} on every row -
+~218 bytes of TEXT per row, and `label` is derivable from `key`. With millions of
+rows for the active model alone this is the largest remaining chunk of the file
+after the retired-model prune landed. Dropping `label` at write time (and
+deriving it in the reader) would cut the table materially. Not done with the
+prune because it needs a reader/writer change plus a backfill decision for
+existing rows.
+Spawned by: noor.db size investigation 2026-07-26
 ### db: migration ids are positional, so concurrent branches silently skip one
 
 run_migrations counts applied rows (SELECT COUNT(*) FROM _migrations) and treats

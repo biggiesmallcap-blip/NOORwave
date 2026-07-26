@@ -67,23 +67,30 @@ describe('library home hero contract', () => {
 		expect(libraryPage).toContain('let randomPanelAlbums = $state<HomeAlbumCard[]>(homePanelCandidateCache.randomAlbums)');
 		expect(libraryPage).toContain('randomPanelTracks.map(trackToMuralItem)');
 		expect(libraryPage).toContain('randomPanelAlbums.map(albumToMuralItem)');
-		expect(libraryPage).toContain('let suggestionCandidateTracks = $state<Track[]>(homePanelCandidateCache.suggestionTracks)');
-		expect(libraryPage).toContain('let suggestionServerTracks = $state<Track[]>(homePanelCandidateCache.suggestionServerTracks)');
-		expect(libraryPage).toContain('async function loadSuggestionCandidates(seedTracks: Track[], requestKey: string)');
-		// Server-ranked cross-artist suggestions are the primary source...
-		expect(libraryPage).toContain('.getHomeSuggestions(seedIds, 50)');
-		expect(libraryPage).toContain('function combinedSuggestionTracks(): Track[]');
+		expect(libraryPage).toContain('let suggestionTracks = $state<Track[]>(homePanelCandidateCache.suggestionTracks)');
+		expect(libraryPage).toContain('let suggestionAlbums = $state<HomeAlbumCard[]>(homePanelCandidateCache.suggestionAlbums)');
+		// Seedless by design: deriving seeds client-side made the request key churn
+		// as the library store paged in during boot, refiring the fetch with a new
+		// seed set (and so a new server cache key) each time. The server seeds
+		// itself, so this fires once on mount in parallel with the library load.
+		expect(libraryPage).toContain('async function loadSuggestionCandidates(requestKey: string)');
+		expect(libraryPage).toContain('.getHomeSuggestions([], 50)');
+		expect(libraryPage).toContain('const requestKey = String(homePanelRefreshBucket())');
+		expect(libraryPage).not.toContain('listenHistorySeeds()');
 		expect(libraryPage).toContain('function capPerArtist(tracks: Track[], max: number): Track[]');
 		expect(libraryPage).toContain('const SUGGESTION_ARTIST_CAP = 2');
-		// ...with the same-artist expansion kept as fallback + tail-fill.
-		expect(libraryPage).toContain('async function sameArtistExpansion(seedTracks: Track[]): Promise<Track[]>');
-		expect(libraryPage).toContain('function sameArtistScoredTracks(seeds: Track[]): Track[]');
-		expect(libraryPage).toContain('cachedApi.getArtistTracks(id)');
-		expect(libraryPage).toContain('cachedApi.getAlbumTracks(id)');
+		// Both murals render the server lists directly. The old same-artist
+		// expansion tail-filled them with the album that was just played, which
+		// is the bug this panel exists to avoid - it must not come back.
+		expect(libraryPage).toContain('suggestionAlbums.slice(0, HOME_MURAL_ITEM_LIMIT).map(albumToMuralItem)');
+		expect(libraryPage).not.toContain('sameArtistExpansion');
+		expect(libraryPage).not.toContain('sameArtistScoredTracks');
+		expect(libraryPage).not.toContain('combinedSuggestionTracks');
+		expect(libraryPage).not.toContain('listenHistoryTrackScore');
 		expect(libraryPage).toContain('homePanelCandidateCache.randomTracks = tracksForPanel');
 		expect(libraryPage).toContain('homePanelCandidateCache.randomAlbums = albumsForPanel');
-		expect(libraryPage).toContain('homePanelCandidateCache.suggestionServerTracks = serverTracks');
-		expect(libraryPage).toContain('homePanelCandidateCache.suggestionTracks = expansion');
+		expect(libraryPage).toContain('homePanelCandidateCache.suggestionTracks = suggestionTracks');
+		expect(libraryPage).toContain('homePanelCandidateCache.suggestionAlbums = suggestionAlbums');
 		expect(libraryPage).toContain('homePanelRefreshBucket()');
 		expect(libraryPage).toContain('async function playHomeMuralTrack(item: HomeMuralItem, panel: HomeMuralPanel)');
 		expect(libraryPage).toContain('const replaced = await api.replacePlaybackQueue(');

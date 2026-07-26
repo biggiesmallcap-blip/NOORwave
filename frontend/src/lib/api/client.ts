@@ -2,6 +2,11 @@ const NOOR_PORT = String(import.meta.env.NOOR_PORT || '17600');
 const API_BASE = `http://localhost:${NOOR_PORT}`;
 export const DEFAULT_API_TIMEOUT_MS = 20_000;
 export const BULK_QUEUE_API_TIMEOUT_MS = 90_000;
+// VACUUM rewrites the entire database. On a multi-GB library that is minutes,
+// not seconds, and the default timeout would abort the request client-side while
+// the server carried on and finished successfully - reporting a failure for work
+// that actually worked.
+export const COMPACT_DATABASE_TIMEOUT_MS = 30 * 60_000;
 
 type ApiRequestInit = RequestInit & {
 	timeoutMs?: number;
@@ -2062,13 +2067,47 @@ export interface HomeRecommendationsResponse {
 }
 
 /**
- * Ranked, cross-artist, library-resolved picks for the Library home
- * "Suggested tracks / albums" murals. Server orders them; the client renders
- * in that order. `tracks` may come back shorter than requested (thin library /
- * cold learning model), so callers top up from a local fallback.
+ * Hidden-gem picks for the Library home "Suggested tracks / albums" murals.
+ * The server owns seed selection, recency exclusion and ranking; the client
+ * renders both lists in the order given. `albums` is a first-class list, not
+ * something derived from `tracks` - never-opened albums have their own recall
+ * path server-side. Either list may come back short (thin library / cold
+ * learning model); the murals render what they get rather than topping up.
  */
+/**
+ * Database size breakdown for the Settings maintenance panel.
+ *
+ * `reclaimable_bytes` is space already on the freelist that a VACUUM would
+ * return to disk. `retired_neighbor_rows` is what the background pruner has yet
+ * to delete - it becomes reclaimable once it has run. Deleting rows never
+ * shrinks the file on its own (auto_vacuum is NONE).
+ */
+export interface DatabaseStats {
+	file_bytes: number;
+	wal_bytes: number;
+	page_size: number;
+	page_count: number;
+	freelist_pages: number;
+	/** Free pages only. Near zero while the bloat is still live retired rows. */
+	freelist_bytes: number;
+	/** What Compact would free: freelist plus the retired rows it deletes. */
+	estimated_reclaimable_bytes: number;
+	estimated_after_bytes: number;
+	retired_models: number;
+	retired_neighbor_rows: number;
+}
+
+export interface SuggestedAlbum {
+	id: number;
+	title: string;
+	artist_id: number | null;
+	artist_name: string | null;
+	artwork_url: string | null;
+}
+
 export interface HomeSuggestionsResponse {
 	tracks: Track[];
+	albums: SuggestedAlbum[];
 }
 
 export interface LastfmAuthStartResponse {
@@ -3594,11 +3633,10 @@ export const api = {
 		return fetchApi<HomeRecommendationsResponse>('/api/home/recommendations');
 	},
 
-	// Cross-artist, library-resolved suggestions for the Library home murals.
-	// Seeds are the user's most recent listens; the server blends embedding
-	// neighbours + Last.fm similar and ranks with a per-artist cap. Empty seeds
-	// return an empty list (the client then keeps its local same-artist fill).
-	getHomeSuggestions(seedTrackIds: number[], limit?: number) {
+	// Hidden-gem suggestions for the Library home murals. Seeds are advisory:
+	// pass the user's recent listens to prime the "recent" slice, or omit them
+	// and let the server derive everything from listen history.
+	getHomeSuggestions(seedTrackIds: number[] = [], limit?: number) {
 		return fetchApi<HomeSuggestionsResponse>('/api/home/suggestions', undefined, {
 			method: 'POST',
 			body: JSON.stringify({ seed_track_ids: seedTrackIds, limit }),
@@ -3919,6 +3957,25 @@ export const api = {
 
 	getServerToken() {
 		return fetchApi<{ token: string }>('/api/server/token');
+	},
+
+	getDatabaseStats() {
+		return fetchApi<DatabaseStats>('/api/server/database/stats');
+	},
+
+	// Rewrites the whole database file. Slow by nature (minutes on a large
+	// library) and needs roughly the file's size in free space, so it is only
+	// ever called from an explicit user action.
+	compactDatabase() {
+		return fetchApi<{
+			status: string;
+			before_bytes: number;
+			after_bytes: number;
+			reclaimed_bytes: number;
+		}>('/api/server/database/compact', undefined, {
+			method: 'POST',
+			timeoutMs: COMPACT_DATABASE_TIMEOUT_MS,
+		});
 	},
 
 	regenerateServerToken() {

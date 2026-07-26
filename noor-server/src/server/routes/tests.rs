@@ -1,7 +1,6 @@
 use super::catalog_routes::merge_tidal_artist_album_filters;
 use super::home_routes::{
-    HomeSuggestionCandidate, LastFmArtistSeed, LastFmTrackSeed, merge_home_suggestions,
-    merge_lastfm_artist_seeds, merge_lastfm_track_seeds,
+    LastFmArtistSeed, LastFmTrackSeed, merge_lastfm_artist_seeds, merge_lastfm_track_seeds,
 };
 use super::*;
 use crate::db::{Database, schema};
@@ -207,80 +206,6 @@ fn lastfm_artist_seed_merge_uses_track_context_before_top_artists() {
             },
         ]
     );
-}
-
-fn home_cand(track_id: i64, artist: &str, score: f64) -> HomeSuggestionCandidate {
-    HomeSuggestionCandidate {
-        track_id,
-        artist_key: artist.to_string(),
-        score,
-        seed_hits: 1,
-        hub_pct: 0.0,
-    }
-}
-
-#[test]
-fn home_suggestions_rank_by_score_and_respect_limit() {
-    let ranked = merge_home_suggestions(
-        vec![
-            home_cand(1, "a", 0.2),
-            home_cand(2, "b", 0.9),
-            home_cand(3, "c", 0.5),
-        ],
-        2,
-        2,
-    );
-    assert_eq!(ranked, vec![2, 3]);
-}
-
-#[test]
-fn home_suggestions_cap_prevents_one_artist_flooding_the_panel() {
-    // Same artist has the four highest scores; the cap of 2 forces the other
-    // artist's lower-scored track into the panel instead of a third clone.
-    let ranked = merge_home_suggestions(
-        vec![
-            home_cand(1, "hoggy", 0.99),
-            home_cand(2, "hoggy", 0.98),
-            home_cand(3, "hoggy", 0.97),
-            home_cand(4, "other", 0.10),
-        ],
-        3,
-        2,
-    );
-    assert_eq!(ranked, vec![1, 2, 4]);
-}
-
-#[test]
-fn home_suggestions_consensus_and_hub_shape_the_order() {
-    // Base scores are equal; the candidate surfaced by two seeds outranks the
-    // single-seed one, and a heavy graph hub is pushed below both.
-    let consensus = HomeSuggestionCandidate {
-        seed_hits: 2,
-        ..home_cand(1, "a", 0.5)
-    };
-    let single = home_cand(2, "b", 0.5);
-    let hub = HomeSuggestionCandidate {
-        hub_pct: 1.0,
-        ..home_cand(3, "c", 0.5)
-    };
-    let ranked = merge_home_suggestions(vec![single, hub, consensus], 3, 2);
-    assert_eq!(ranked, vec![1, 2, 3]);
-}
-
-#[test]
-fn home_suggestions_empty_artist_key_is_never_capped() {
-    // Missing artist names must not collapse into one synthetic bucket and get
-    // dropped by the cap.
-    let ranked = merge_home_suggestions(
-        vec![
-            home_cand(1, "", 0.9),
-            home_cand(2, "", 0.8),
-            home_cand(3, "", 0.7),
-        ],
-        3,
-        2,
-    );
-    assert_eq!(ranked, vec![1, 2, 3]);
 }
 
 #[test]

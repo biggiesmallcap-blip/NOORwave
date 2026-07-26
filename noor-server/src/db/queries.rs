@@ -4654,6 +4654,169 @@ pub fn activate_embedding_model(conn: &Connection, model_id: i64) -> Result<()> 
     Ok(())
 }
 
+/// Retired models kept alongside the active one, so a bad retrain can be rolled
+/// back by reactivating the previous model without retraining from scratch.
+pub const EMBEDDING_MODELS_KEPT: usize = 1;
+/// Rows deleted per statement when pruning. A single unbounded DELETE over the
+/// retired models is a multi-GB WAL write and minutes of exclusive lock on a
+/// real library (measured: 16M rows, 3.7GB WAL and still going), which is not
+/// something a background repair may do to a running app.
+const NEIGHBOR_PRUNE_BATCH: usize = 20_000;
+
+/// Make sure the prune can seek by model instead of scanning.
+///
+/// `track_neighbors` is keyed (track_id, neighbor_track_id, model_id) and its
+/// secondary indexes lead with the first two, so selecting by model alone scans
+/// the whole table. Measured on an 18.4M-row table that capped the prune at ~4k
+/// rows/sec - about an hour of scanning to clear one library.
+///
+/// This is deliberately NOT left to the schema migration that also creates it.
+/// `run_migrations` decides what to apply by COUNTING rows in `_migrations`, so
+/// on any database whose count already exceeds the new migration's position the
+/// migration is silently treated as applied and never runs - which is the case
+/// on existing installs. Creating it here keeps the prune correct regardless of
+/// migration bookkeeping, and costs one no-op check once the index exists.
+pub fn ensure_track_neighbors_model_index(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_track_neighbors_model ON track_neighbors(model_id);",
+    )?;
+    Ok(())
+}
+
+/// Model ids that are neither active nor within the rollback window.
+pub fn retired_embedding_model_ids(conn: &Connection, keep: usize) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM embedding_models
+         WHERE is_active = 0
+           AND id NOT IN (
+               SELECT id FROM embedding_models
+               WHERE is_active = 0
+               ORDER BY COALESCE(trained_at, created_at) DESC, id DESC
+               LIMIT ?1
+           )
+         ORDER BY id",
+    )?;
+    let ids = stmt
+        .query_map(params![keep as i64], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ids)
+}
+
+/// Delete up to `NEIGHBOR_PRUNE_BATCH` neighbour rows belonging to retired
+/// models. Returns how many rows went; 0 means the neighbour table is clean.
+///
+/// Callers loop until this returns 0, yielding between batches. Training only
+/// ever runs on user request, but nothing has ever deleted the previous model's
+/// rows, so a library that has been retrained a dozen times carries millions of
+/// dead neighbours (the bulk of the database file).
+pub fn prune_retired_model_neighbors_batch(conn: &Connection, keep: usize) -> Result<usize> {
+    let retired = retired_embedding_model_ids(conn, keep)?;
+    if retired.is_empty() {
+        return Ok(0);
+    }
+    let placeholders = vec!["?"; retired.len()].join(",");
+    let sql = format!(
+        "DELETE FROM track_neighbors WHERE rowid IN (
+             SELECT rowid FROM track_neighbors WHERE model_id IN ({placeholders}) LIMIT ?
+         )"
+    );
+    let mut bound: Vec<i64> = retired.clone();
+    bound.push(NEIGHBOR_PRUNE_BATCH as i64);
+    let deleted = conn.execute(&sql, rusqlite::params_from_iter(bound.iter()))?;
+    Ok(deleted)
+}
+
+/// One-shot prune of every retired model, used by the Compact action.
+///
+/// Deleting rows one batch at a time is throttled by index maintenance, not by
+/// finding the rows: each deleted neighbour updates six secondary indexes, which
+/// measured out at ~5k rows/sec even with a model_id index in place - about an
+/// hour to clear a real backlog. This path drops the secondary indexes first,
+/// deletes in one pass, then rebuilds them from the definitions it captured, so
+/// the index work happens once over the surviving rows instead of once per
+/// deleted row.
+///
+/// The whole thing runs in one transaction. SQLite DDL is transactional, so a
+/// crash mid-prune rolls back to a database that still has all of its indexes
+/// rather than a silently unindexed one. VACUUM is deliberately left to the
+/// caller - it cannot run inside a transaction.
+///
+/// Only for the foreground Compact action, which already holds the connection
+/// and warns the user. Background callers want `prune_retired_model_neighbors_batch`.
+pub fn prune_retired_models_bulk(conn: &Connection, keep: usize) -> Result<usize> {
+    let retired = retired_embedding_model_ids(conn, keep)?;
+    if retired.is_empty() {
+        return Ok(0);
+    }
+
+    // Capture the real definitions rather than hardcoding them, so this keeps
+    // working when the schema adds an index. `sql IS NULL` skips the implicit
+    // primary-key index, which must not be dropped.
+    let index_sql: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'index' AND tbl_name = 'track_neighbors' AND sql IS NOT NULL",
+        )?;
+        stmt.query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let index_names: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'index' AND tbl_name = 'track_neighbors' AND sql IS NOT NULL",
+        )?;
+        stmt.query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    let placeholders = vec!["?"; retired.len()].join(",");
+
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let result = (|| -> Result<usize> {
+        for name in &index_names {
+            conn.execute_batch(&format!("DROP INDEX IF EXISTS \"{name}\";"))?;
+        }
+        let deleted = conn.execute(
+            &format!("DELETE FROM track_neighbors WHERE model_id IN ({placeholders})"),
+            rusqlite::params_from_iter(retired.iter()),
+        )?;
+        for sql in &index_sql {
+            conn.execute_batch(&format!("{sql};"))?;
+        }
+        // Cascades to track_embeddings for the same models.
+        conn.execute(
+            &format!("DELETE FROM embedding_models WHERE id IN ({placeholders})"),
+            rusqlite::params_from_iter(retired.iter()),
+        )?;
+        Ok(deleted)
+    })();
+
+    match result {
+        Ok(deleted) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(deleted)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
+/// Drop the retired model rows themselves once their neighbours are gone.
+/// `track_embeddings` and any straggler `track_neighbors` cascade (the
+/// connection runs with `foreign_keys = ON`). Returns models removed.
+pub fn delete_retired_embedding_models(conn: &Connection, keep: usize) -> Result<usize> {
+    let retired = retired_embedding_model_ids(conn, keep)?;
+    if retired.is_empty() {
+        return Ok(0);
+    }
+    let placeholders = vec!["?"; retired.len()].join(",");
+    let sql = format!("DELETE FROM embedding_models WHERE id IN ({placeholders})");
+    let removed = conn.execute(&sql, rusqlite::params_from_iter(retired.iter()))?;
+    Ok(removed)
+}
+
 pub fn create_training_run(
     conn: &Connection,
     model_id: Option<i64>,
