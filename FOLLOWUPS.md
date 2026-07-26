@@ -913,34 +913,29 @@ This is the Phase-3 taste-feedback piece (like/not-interested on editorial
 videos) the plan left deferred.
 Spawned by: videos taste loop + era set 2026-07-25
 
-### home suggestions: end-to-end app verification not yet run
+### test flake: one unidentified failure in the noor-server suite
 
-The hidden-gem rewrite of /api/home/suggestions is covered by 21 unit tests and
-was validated by running the new SQL read-only against the live library (seed
-blend spans Willie Nelson / James Taylor / Moby / Marley / Tame Impala; the
-unexplored-album query returns in 84ms and surfaces records like Mobb Deep's
-The Infamous and Marley's Exodus). What has NOT happened is a rebuild of
-noor-server and a look at the actual Library home murals, because the rebuild
-would have killed the running app. On the next rebuild, confirm: no suggested
-track appears in listen_history within 30 days, no two suggested tracks share an
-album_id, no artist appears more than twice in either mural, and the right-click
-context menus still work on both.
-
-Also unresolved: one full `cargo test -p noor-server` run reported 1485 passed /
-1 failed, and the failing test name was not captured. Five subsequent full runs
-were clean (1486 passed), so it is intermittent and was not reproduced. If it
-resurfaces, capture the name before rerunning.
+During the home-suggestions work one full `cargo test -p noor-server` run
+reported 1485 passed / 1 failed and the failing test name was not captured
+before the next run overwrote it. Eight subsequent full runs were clean, so it
+is intermittent and was never reproduced. The suite has timing-sensitive areas
+(the in-memory DB helper exists because temp .db + WAL churn stalls under
+Defender), so a slow-IO flake is plausible. If it resurfaces, capture the name
+from the failure block before rerunning anything.
 Spawned by: home suggestions hidden-gem rewrite 2026-07-26
 
-### home suggestions: cold path still costs ~1s after any new play
+### db: retired discovery models are never pruned (noor.db growth)
 
-The murals now fetch once on mount, in parallel with the library load, and a
-warm server cache answers in ~2ms. But the server cache key includes the 3 most
-recent plays, so listening to anything invalidates it and the next load pays a
-full 8-seed orchestrate_song fan-out (measured ~0.94s with a warm Last.fm
-similar cache; the older 6-seed comment in the code cites ~8s fully cold).
-Options if this still feels slow: warm the cache in the background off the
-listen_history write path, or coarsen the recent slice so a single play does not
-invalidate the whole key. Not done because it needs a server-side scheduler and
-the current behaviour is already off the boot critical path.
-Spawned by: home suggestions load-time fix 2026-07-26
+track_neighbors holds 18.47M rows on the live library, of which only 2.49M
+belong to the active embedding model; the other ~16M belong to 10 retired
+models. track_embeddings shows the same pattern (420k rows, 38.8k active).
+activate_embedding_model (db/queries.rs) flips is_active but nothing ever
+deletes the previous model's neighbors or vectors, so every training run adds
+~1-2.5M permanent rows. At ~218 bytes of TEXT per neighbor row (reason_json
+carries a human-readable label on every row) this is the bulk of an 8.4GB
+database. Needs: a prune on activation (embedding_models has ON DELETE CASCADE
+to both tables, so deleting retired model rows would cascade), a one-shot
+cleanup for existing installs, and a VACUUM to actually return the space.
+Separately, reason_json's `label` is derivable from `key` and does not need
+storing per row.
+Spawned by: noor.db size investigation 2026-07-26
