@@ -14,7 +14,7 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
-use super::home_routes::{rotate_take, unix_now_secs};
+use super::home_routes::{recommendation_seed_window, rotate_take, unix_now_secs};
 
 // Seed budget. 3 recent plays keep the panel reactive to today's listening;
 // 5 long-term seeds anchor it to the user's actual taste so one genre session
@@ -35,9 +35,16 @@ const HOME_SUGGESTIONS_MAX_PER_ALBUM: usize = 1;
 // Named so it can be tuned without restructuring: 30 days is aggressive for a
 // small library but right for a large, mostly-unplayed one.
 const HOME_SUGGESTIONS_RECENCY_EXCLUSION_DAYS: i64 = 30;
+// How many top artists feed the long-term seed rotation.
+const HOME_SUGGESTIONS_TOP_ARTIST_POOL: i64 = 20;
+// Album mural asks for more than it shows so client-side dedup has slack.
+const HOME_SUGGESTIONS_ALBUM_LIMIT: usize = 24;
 
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct HomeSuggestionsRequest {
+    /// Optional. When supplied these prime the "recent" seed slice; when absent
+    /// the server derives it from `listen_history` itself. Either way the
+    /// long-term slice comes from the user's top artists.
     #[serde(default)]
     seed_track_ids: Vec<i64>,
     limit: Option<usize>,
@@ -147,6 +154,43 @@ pub(crate) struct SuggestedAlbum {
     pub(crate) artist_id: Option<i64>,
     pub(crate) artist_name: Option<String>,
     pub(crate) artwork_url: Option<String>,
+}
+
+/// Distinct artist ids for the given tracks.
+fn track_artist_ids(conn: &rusqlite::Connection, track_ids: &[i64]) -> anyhow::Result<Vec<i64>> {
+    if track_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = vec!["?"; track_ids.len()].join(",");
+    let sql = format!(
+        "SELECT DISTINCT artist_id FROM tracks WHERE id IN ({placeholders}) AND artist_id IS NOT NULL"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let ids = stmt
+        .query_map(rusqlite::params_from_iter(track_ids.iter()), |row| {
+            row.get::<_, i64>(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ids)
+}
+
+/// `track_id -> album_id` for the candidate set.
+fn candidate_album_ids(
+    conn: &rusqlite::Connection,
+    track_ids: &[i64],
+) -> anyhow::Result<HashMap<i64, Option<i64>>> {
+    if track_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders = vec!["?"; track_ids.len()].join(",");
+    let sql = format!("SELECT id, album_id FROM tracks WHERE id IN ({placeholders})");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(track_ids.iter()), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
+        })?
+        .collect::<Result<HashMap<_, _>, _>>()?;
+    Ok(rows)
 }
 
 /// `track_id -> (track_plays, album_plays)` for the candidate set. `album_plays`
@@ -401,7 +445,7 @@ fn home_suggestions_cache_key(seed_ids: &[i64], limit: usize) -> String {
         .map(|id| id.to_string())
         .collect::<Vec<_>>()
         .join("-");
-    format!("home_suggest:v1:{limit}:{joined}")
+    format!("home_suggest:v2:{limit}:{joined}")
 }
 
 async fn read_home_suggestions_cache(state: &SharedState, cache_key: &str) -> Option<Value> {
@@ -451,8 +495,8 @@ async fn write_home_suggestions_cache(state: &SharedState, cache_key: &str, payl
     });
 }
 
-/// POST /api/home/suggestions - ranked, cross-artist, library-resolved picks
-/// for the Library home murals. Body: `{ seed_track_ids, limit? }`.
+/// POST /api/home/suggestions - hidden-gem picks for the Library home murals.
+/// Body: `{ seed_track_ids?, limit? }`. Returns `{ tracks, albums }`.
 pub(crate) async fn get_home_suggestions(
     State(state): State<SharedState>,
     Json(req): Json<HomeSuggestionsRequest>,
@@ -462,18 +506,35 @@ pub(crate) async fn get_home_suggestions(
         .unwrap_or(HOME_SUGGESTIONS_DEFAULT_LIMIT)
         .clamp(1, 60);
 
-    // Unique, positive seeds, capped. Recent-first order is preserved.
-    let mut seen = HashSet::new();
-    let seeds: Vec<i64> = req
+    let (db, lastfm, lastfm_similar_cache) = {
+        let g = state.read().await;
+        let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
+        (g.db.clone(), lastfm, g.lastfm_similar_cache.clone())
+    };
+
+    // Seeds: the client's recent list if it sent one, otherwise our own, blended
+    // with long-term top artists and rotated on the 6h window.
+    let salt = recommendation_seed_window();
+    let client_recent: Vec<i64> = req
         .seed_track_ids
         .iter()
         .copied()
-        .filter(|&id| id > 0 && seen.insert(id))
-        .take(HOME_SUGGESTIONS_SEED_LIMIT)
+        .filter(|&id| id > 0)
         .collect();
+    let seeds = db
+        .with_conn(move |conn| {
+            let recent = if client_recent.is_empty() {
+                recent_seed_pool(conn, HOME_SUGGESTIONS_RECENT_SEEDS as i64 * 4)?
+            } else {
+                client_recent
+            };
+            let long_term = long_term_seed_pool(conn, HOME_SUGGESTIONS_TOP_ARTIST_POOL)?;
+            Ok(blend_suggestion_seeds(&recent, &long_term, salt))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if seeds.is_empty() {
-        return Ok(Json(json!({ "tracks": [] })));
+        return Ok(Json(json!({ "tracks": [], "albums": [] })));
     }
 
     let cache_key = home_suggestions_cache_key(&seeds, limit);
@@ -481,18 +542,17 @@ pub(crate) async fn get_home_suggestions(
         return Ok(Json(cached));
     }
 
-    let (db, lastfm, lastfm_similar_cache) = {
-        let g = state.read().await;
-        let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
-        (g.db.clone(), lastfm, g.lastfm_similar_cache.clone())
-    };
+    let exclusions = db
+        .with_conn(|conn| recent_play_exclusions(conn, HOME_SUGGESTIONS_RECENCY_EXCLUSION_DAYS))
+        .unwrap_or_default();
 
     // Aggregate library-resolved candidates across seeds. Dedup by track id,
     // count how many seeds surfaced each (consensus) and keep the best score.
     // Run the per-seed blends concurrently. Each orchestrate_song makes Last.fm
-    // calls, so a sequential loop over 6 seeds stacked their latency (~8s cold);
-    // join_all overlaps the network waits while the shared DB lock serialises the
-    // query parts. Cached 6h afterwards, so this cost is paid once per seed set.
+    // calls, so a sequential loop over the seeds stacked their latency (~8s
+    // cold); join_all overlaps the network waits while the shared DB lock
+    // serialises the query parts. Cached 6h afterwards, so this cost is paid
+    // once per seed set.
     let queues = futures::future::join_all(seeds.iter().map(|&seed_id| {
         let db = &db;
         let lastfm = &lastfm;
@@ -524,7 +584,10 @@ pub(crate) async fn get_home_suggestions(
             }
         };
         for cand in queue.tracks {
-            if !cand.is_in_library || seeds.contains(&cand.track_id) {
+            if !cand.is_in_library
+                || seeds.contains(&cand.track_id)
+                || exclusions.track_ids.contains(&cand.track_id)
+            {
                 continue;
             }
             let hub_pct = cand.candidate_in_degree_percentile.unwrap_or(0.0);
@@ -549,8 +612,33 @@ pub(crate) async fn get_home_suggestions(
         }
     }
 
+    // Hydrate album ids + play totals, drop anything on a recently played album,
+    // then rank.
+    let candidate_ids: Vec<i64> = agg.keys().copied().collect();
+    let ids_for_stats = candidate_ids.clone();
+    let (album_by_track, play_stats) = db
+        .with_conn(move |conn| {
+            let albums = candidate_album_ids(conn, &ids_for_stats)?;
+            let stats = candidate_play_stats(conn, &ids_for_stats)?;
+            Ok((albums, stats))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut candidates: Vec<HomeSuggestionCandidate> = Vec::new();
+    for (track_id, mut cand) in agg {
+        let album_id = album_by_track.get(&track_id).copied().flatten();
+        if album_id.is_some_and(|id| exclusions.album_ids.contains(&id)) {
+            continue;
+        }
+        let (track_plays, album_plays) = play_stats.get(&track_id).copied().unwrap_or((0, 0));
+        cand.album_id = album_id;
+        cand.track_plays = track_plays;
+        cand.album_plays = album_plays;
+        candidates.push(cand);
+    }
+
     let ranked_ids = merge_home_suggestions(
-        agg.into_values().collect(),
+        candidates,
         limit,
         HOME_SUGGESTIONS_MAX_PER_ARTIST,
         HOME_SUGGESTIONS_MAX_PER_ALBUM,
@@ -569,7 +657,37 @@ pub(crate) async fn get_home_suggestions(
         .filter_map(|id| by_id.remove(id))
         .collect();
 
-    let payload = json!({ "tracks": ordered });
+    // The album mural gets its own recall path: never-opened albums by artists
+    // the user already listens to, ranked by similarity to the seeds. The artist
+    // pool is the seed artists themselves plus the artists that survived track
+    // ranking. Seed artists must be looked up from the DB, not from `by_id` -
+    // seeds are excluded from candidacy, so they were never in that map.
+    let seeds_for_artists = seeds.clone();
+    let seed_artist_ids: Vec<i64> = db
+        .with_conn(move |conn| track_artist_ids(conn, &seeds_for_artists))
+        .unwrap_or_default()
+        .into_iter()
+        .chain(ordered.iter().map(|t| t.artist_id))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let seeds_for_albums = seeds.clone();
+    let excluded_albums = exclusions.album_ids.clone();
+    let albums: Vec<SuggestedAlbum> = db
+        .with_conn(move |conn| {
+            unexplored_albums_for_artists(
+                conn,
+                &seed_artist_ids,
+                &seeds_for_albums,
+                HOME_SUGGESTIONS_ALBUM_LIMIT,
+            )
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| !excluded_albums.contains(&a.id))
+        .collect();
+
+    let payload = json!({ "tracks": ordered, "albums": albums });
     write_home_suggestions_cache(&state, &cache_key, &payload).await;
     Ok(Json(payload))
 }
@@ -705,6 +823,18 @@ mod tests {
             !excl.album_ids.contains(&11),
             "album of the old play is not excluded"
         );
+    }
+
+    #[test]
+    fn cache_key_is_versioned_and_seed_order_independent() {
+        let a = home_suggestions_cache_key(&[3, 1, 2], 50);
+        let b = home_suggestions_cache_key(&[1, 2, 3], 50);
+        assert_eq!(a, b, "seed order must not fragment the cache");
+        assert!(
+            a.starts_with("home_suggest:v2:"),
+            "shape change requires a version bump, got {a}"
+        );
+        assert_ne!(a, home_suggestions_cache_key(&[1, 2, 3], 20));
     }
 
     #[test]
