@@ -1770,12 +1770,13 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 7px;
-		padding: 5px 13px;
+		height: var(--control-h);
+		padding: 0 14px;
 		border-radius: 999px;
 		border: 1px solid var(--border-subtle);
 		background: transparent;
 		color: var(--text-secondary);
-		font-size: var(--font-size-xs);
+		font-size: var(--font-size-sm);
 		transition: background var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
 	}
 
@@ -1805,8 +1806,8 @@
 	}
 
 	.playlist-sort select {
-		height: 34px;
-		padding: 6px 10px;
+		height: var(--control-h);
+		padding: 0 10px;
 		border-radius: 999px;
 	}
 

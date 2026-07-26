@@ -1276,13 +1276,16 @@
 	}
 
 	.hint-chip {
+		display: inline-flex;
+		align-items: center;
+		height: var(--control-h);
 		background: var(--bg-surface);
 		border: 1px solid var(--border-subtle);
 		color: var(--text-secondary);
 		border-radius: 999px;
-		padding: 7px 13px;
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-bold);
+		padding: 0 14px;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-medium);
 	}
 
 	.hint-chip:hover {

@@ -39,11 +39,25 @@ describe('library layout contracts', () => {
 		const row = cssBlock('.filter-pills');
 		expect(row).toContain('max-width: 720px');
 		expect(row).toContain('margin: 0 auto');
-		expect(row).toContain('grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr)');
+		// Tabs on their own row, contextual actions stacked underneath - both
+		// centered, so the tab row never shifts and nothing overflows sideways.
+		expect(row).toContain('flex-direction: column');
+		expect(row).toContain('align-items: center');
 
-		const primary = cssBlock('.filter-pill-group--primary');
-		expect(primary).toContain('grid-column: 2');
-		expect(primary).toContain('justify-content: center');
+		const groups = cssBlock('.filter-pill-group,\n\t.filter-pill-actions');
+		expect(groups).toContain('justify-content: center');
+		expect(groups).toContain('flex-wrap: wrap');
+
+		// Every toolbar control shares one height and the pill radius, sized off
+		// the app-wide token so the other pages' pill rows match.
+		const appCss = readFileSync(join(here, '../../app.css'), 'utf8');
+		expect(appCss).toContain('--control-h: 30px');
+		for (const selector of ['.filter-pill', '.album-sort', '.view-toggle', '.decade-chip']) {
+			const block = cssBlock(selector);
+			expect(block, selector).toContain('height: var(--control-h)');
+			expect(block, selector).toContain('border-radius: 999px');
+		}
+		expect(source).not.toContain('filter-pill--ghost');
 
 		const meta = cssBlock('.library-search-meta');
 		expect(meta).toContain('min-height');

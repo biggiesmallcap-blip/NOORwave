@@ -186,6 +186,12 @@
 	--radius:    var(--radius-md);                                /* legacy alias — prefer --radius-md */
 	--radius-lg: clamp(0.9375rem, 1.2vw + 0.375rem,  1.375rem);   /* 15-22 px */
 
+	/* Height every small toolbar control shares: filter pills, filter chips,
+	   segmented sort/view controls and the selects that sit beside them. Set it
+	   once here so a pill row never ends up half a step taller than the control
+	   next to it. */
+	--control-h: 30px;
+
 	/* Spacing — rem-based clamp(): see the comment above. Min values are ~25%
 	   smaller than the previous fixed values, max values match today's behaviour. */
 	--space-1: clamp(0.1875rem, 0.25vw + 0.0625rem, 0.25rem);  /* 3-4 px  */

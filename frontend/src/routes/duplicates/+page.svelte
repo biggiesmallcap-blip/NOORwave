@@ -452,12 +452,16 @@
 	}
 
 	.filter-chip {
-		padding: var(--space-2) var(--space-3);
+		display: inline-flex;
+		align-items: center;
+		height: var(--control-h);
+		padding: 0 14px;
 		border-radius: 999px;
 		border: 1px solid var(--border-subtle);
-		background: var(--bg-surface);
+		background: transparent;
 		color: var(--text-secondary);
 		font-size: var(--font-size-sm);
+		font-family: inherit;
 		cursor: pointer;
 		transition:
 			background var(--motion-fast),

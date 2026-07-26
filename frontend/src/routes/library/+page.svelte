@@ -165,6 +165,11 @@
 	const ALL_SEARCH_TRACK_PREVIEW_LIMIT = 10;
 
 	let activeTab = $state<'all' | 'tracks' | 'liked' | 'albums' | 'artists'>('all');
+	// Only render the second toolbar row when the tab actually contributes
+	// controls to it, so tabs without any never leave a gap behind.
+	const hasToolbarActions = $derived(
+		activeTab === 'tracks' || activeTab === 'liked' || activeTab === 'albums'
+	);
 	let playlists = $state<Playlist[]>([]);
 	let genres = $state<Genre[]>([]);
 	let selectedPlaylistId = $state('');
@@ -2130,14 +2135,6 @@
 			filterChips
 			placeholder={activeTab === 'albums' ? 'Search albums or artists' : 'Search tracks, albums, or artists'}
 		/>
-		<div class="kbd-hint">
-			<kbd>/</kbd> focus &nbsp;·&nbsp;
-			<kbd>↑↓</kbd> move &nbsp;·&nbsp;
-			<kbd>Enter</kbd> play &nbsp;·&nbsp;
-			<kbd>Shift</kbd>+<kbd>Enter</kbd> queue &nbsp;·&nbsp;
-			<kbd>Ctrl</kbd>+<kbd>Enter</kbd> next
-		</div>
-
 		<div class="filter-pills">
 			<div class="filter-pill-group filter-pill-group--primary">
 				<button class="filter-pill" class:active={activeTab === 'all'}     onclick={() => switchTab('all')}>All</button>
@@ -2145,19 +2142,20 @@
 				<button class="filter-pill" class:active={activeTab === 'liked'}   onclick={() => switchTab('liked')}>Liked</button>
 				<button class="filter-pill" class:active={activeTab === 'albums'}  onclick={() => switchTab('albums')}>Albums</button>
 				<button class="filter-pill" class:active={activeTab === 'artists'} onclick={() => switchTab('artists')}>Artists</button>
-				<button class="filter-pill filter-pill--ghost" onclick={() => void playRandomLibrary()} title="Random play">
-					⤮ Random
+				<button class="filter-pill" onclick={() => void playRandomLibrary()} title="Random play">
+					<span class="pill-glyph" aria-hidden="true">⤮</span>Random
 				</button>
 			</div>
 
+			{#if hasToolbarActions}
 			<div class="filter-pill-actions">
 				{#if activeTab === 'tracks' || activeTab === 'liked'}
 					<div class="play-controls" role="group" aria-label="Play this view">
 						<button class="filter-pill filter-pill--accent" onclick={() => void playTrackView(false)} title="Play this view">
-							▶ Play
+							<span class="pill-glyph" aria-hidden="true">▶</span>Play
 						</button>
-						<button class="filter-pill filter-pill--ghost" onclick={() => void playTrackView(true)} title="Shuffle this view">
-							⤮ Shuffle
+						<button class="filter-pill" onclick={() => void playTrackView(true)} title="Shuffle this view">
+							<span class="pill-glyph" aria-hidden="true">⤮</span>Shuffle
 						</button>
 					</div>
 				{/if}
@@ -2209,6 +2207,7 @@
 					</div>
 				{/if}
 			</div>
+			{/if}
 		</div>
 
 		<div class="library-search-meta">
@@ -2218,14 +2217,14 @@
 				<span class="library-status">{searchSummary}</span>
 				{#if searchTruncated && (activeTab === 'tracks' || activeTab === 'liked' || activeTab === 'all')}
 					<button
-						class="filter-pill filter-pill--ghost"
+						class="filter-pill"
 						disabled={searchLoadingMore}
 						onclick={() => void loadMoreSearchResults()}
 					>
 						{searchLoadingMore ? 'Loading…' : 'Show more'}
 					</button>
 				{/if}
-				<button class="filter-pill filter-pill--ghost" onclick={() => (searchQuery.set(''))}>Clear</button>
+				<button class="filter-pill" onclick={() => (searchQuery.set(''))}>Clear</button>
 			{/if}
 		</div>
 	</div>
@@ -3220,6 +3219,10 @@
 {/if}
 
 <style>
+	/* Every toolbar control here - the filter pills, the album sort segment,
+	   the view toggle and the decade chips - sizes off the app-wide
+	   --control-h token in app.css, so the rows under the search field read as
+	   one system and match the other pages' pill rows. */
 	.library {
 		padding-bottom: 8px;
 	}
@@ -3664,9 +3667,12 @@
 	/* Match the primary tab pills (.filter-pill) so the Albums toolbar reads as
 	   one system - pill radius, subtle border, bg-hover, accent when active. */
 	.decade-chip {
-		padding: 4px 13px;
-		border-radius: 20px;
-		font-size: var(--font-size-xs);
+		display: inline-flex;
+		align-items: center;
+		height: var(--control-h);
+		padding: 0 14px;
+		border-radius: 999px;
+		font-size: var(--font-size-sm);
 		font-weight: var(--font-weight-medium);
 		cursor: pointer;
 		border: 1px solid var(--border-subtle);
@@ -3733,31 +3739,6 @@
 	.toolbar-note {
 		color: var(--text-secondary);
 		font-size: var(--font-size-sm);
-	}
-
-	.kbd-hint {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		gap: 2px;
-		font-size: var(--font-size-xs);
-		color: var(--text-muted, rgba(255,255,255,0.35));
-		padding: 4px 0 0 2px;
-		user-select: none;
-		max-width: 640px;
-		width: 100%;
-		margin: 0 auto;
-	}
-
-	.kbd-hint kbd {
-		display: inline-block;
-		padding: 1px 5px;
-		border: 1px solid var(--border-subtle, rgba(255,255,255,0.15));
-		border-radius: 4px;
-		font-family: inherit;
-		font-size: var(--font-size-2xs);
-		color: var(--text-secondary, rgba(255,255,255,0.5));
-		background: var(--bg-hover);
 	}
 
 	/* ─── New DSP Columns ───────────────────────── */
@@ -3867,11 +3848,14 @@
 		text-align: center;
 	}
 
+	/* Two centered rows: the category tabs never move, and whatever the tab
+	   brings with it (play controls, sort, view layout) sits on its own row
+	   underneath so nothing overflows sideways or drifts off the baseline. */
 	.filter-pills {
-		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-		gap: 6px;
+		display: flex;
+		flex-direction: column;
 		align-items: center;
+		gap: 8px;
 		width: 100%;
 		max-width: 720px;
 		margin: 0 auto;
@@ -3881,22 +3865,10 @@
 	.filter-pill-actions {
 		display: flex;
 		align-items: center;
+		justify-content: center;
 		gap: 6px;
 		flex-wrap: wrap;
-	}
-
-	.filter-pill-group--primary {
-		grid-column: 2;
-		justify-content: center;
-	}
-
-	.filter-pill-actions {
-		grid-column: 3;
-		justify-self: start;
-	}
-
-	.filter-pill--ghost {
-		opacity: 0.75;
+		max-width: 100%;
 	}
 
 	.play-controls {
@@ -3918,16 +3890,27 @@
 	}
 
 	.filter-pill {
-		padding: 5px 14px;
-		border-radius: 20px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 6px;
+		height: var(--control-h);
+		padding: 0 14px;
+		border-radius: 999px;
 		border: 1px solid var(--border-subtle, rgba(255,255,255,0.1));
 		background: transparent;
 		color: var(--text-secondary, rgba(255,255,255,0.6));
+		font-family: inherit;
 		font-size: var(--font-size-sm);
 		font-weight: var(--font-weight-medium);
 		cursor: pointer;
 		transition: background 0.15s, color 0.15s, border-color 0.15s;
 		white-space: nowrap;
+	}
+
+	.pill-glyph {
+		font-size: var(--font-size-xs);
+		line-height: 1;
 	}
 
 	.filter-pill:hover {
@@ -3945,8 +3928,9 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 2px;
-		padding: 2px;
-		border-radius: 8px;
+		height: var(--control-h);
+		padding: 0 2px;
+		border-radius: 999px;
 		background: rgba(255, 255, 255, 0.04);
 		border: 1px solid var(--border-subtle);
 	}
@@ -3956,17 +3940,17 @@
 		text-transform: uppercase;
 		letter-spacing: 0.06em;
 		color: var(--text-tertiary);
-		padding: 0 6px 0 8px;
+		padding: 0 6px 0 10px;
 	}
 
 	.album-sort-btn {
 		display: inline-flex;
 		align-items: center;
 		gap: 3px;
-		height: 28px;
+		height: calc(var(--control-h) - 6px);
 		padding: 0 10px;
 		border: 0;
-		border-radius: 6px;
+		border-radius: 999px;
 		background: transparent;
 		color: var(--text-tertiary);
 		font-family: inherit;
@@ -3994,9 +3978,11 @@
 
 	.view-toggle {
 		display: inline-flex;
+		align-items: center;
 		gap: 2px;
-		padding: 2px;
-		border-radius: 8px;
+		height: var(--control-h);
+		padding: 0 2px;
+		border-radius: 999px;
 		background: rgba(255, 255, 255, 0.04);
 		border: 1px solid var(--border-subtle);
 	}
@@ -4005,11 +3991,11 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		width: 28px;
-		height: 28px;
+		width: calc(var(--control-h) - 6px);
+		height: calc(var(--control-h) - 6px);
 		padding: 0;
 		border: 0;
-		border-radius: 6px;
+		border-radius: 999px;
 		background: transparent;
 		color: var(--text-tertiary);
 		cursor: pointer;
@@ -4390,27 +4376,12 @@
 		}
 
 		.filter-pills,
-		.view-toggle {
-			width: 100%;
-		}
-
-		.filter-pills {
-			grid-template-columns: 1fr;
-		}
-
 		.filter-pill-group--primary,
 		.filter-pill-actions {
-			grid-column: 1;
 			width: 100%;
-			justify-content: center;
 		}
 
 		.filter-pill {
-			flex: 1;
-			text-align: center;
-		}
-
-		.view-toggle :global(.btn) {
 			flex: 1;
 		}
 
