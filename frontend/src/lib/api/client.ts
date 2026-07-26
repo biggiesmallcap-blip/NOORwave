@@ -2,6 +2,11 @@ const NOOR_PORT = String(import.meta.env.NOOR_PORT || '17600');
 const API_BASE = `http://localhost:${NOOR_PORT}`;
 export const DEFAULT_API_TIMEOUT_MS = 20_000;
 export const BULK_QUEUE_API_TIMEOUT_MS = 90_000;
+// VACUUM rewrites the entire database. On a multi-GB library that is minutes,
+// not seconds, and the default timeout would abort the request client-side while
+// the server carried on and finished successfully - reporting a failure for work
+// that actually worked.
+export const COMPACT_DATABASE_TIMEOUT_MS = 30 * 60_000;
 
 type ApiRequestInit = RequestInit & {
 	timeoutMs?: number;
@@ -3893,7 +3898,10 @@ export const api = {
 			before_bytes: number;
 			after_bytes: number;
 			reclaimed_bytes: number;
-		}>('/api/server/database/compact', undefined, { method: 'POST' });
+		}>('/api/server/database/compact', undefined, {
+			method: 'POST',
+			timeoutMs: COMPACT_DATABASE_TIMEOUT_MS,
+		});
 	},
 
 	regenerateServerToken() {

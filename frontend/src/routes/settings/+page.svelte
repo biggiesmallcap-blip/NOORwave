@@ -58,6 +58,7 @@
 		shouldContinueDiscoveryCompletionRefresh,
 		shouldRefreshAfterTerminalDiscoveryProgress
 	} from '$lib/components/settings/discovery_status';
+	import { portal } from '$lib/actions/portal';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
 	import { WALLPAPERS, WALLPAPER_GROUPS, type WallpaperOption } from '$lib/components/wallpaper/shaders';
 	import {
@@ -426,7 +427,9 @@
 			nowEpochSeconds = Math.floor(Date.now() / 1000);
 		}, 1000);
 		const discoveryTrainingPoll = setInterval(() => {
-			if (discoveryIsRunning) void loadDiscoveryStatus();
+			// Paused while compacting: the database is held for the duration, so
+			// these would only pile up blocked requests behind the VACUUM.
+			if (discoveryIsRunning && !databaseCompacting) void loadDiscoveryStatus();
 		}, 3000);
 		let discoveryCompletionRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 		let discoveryCompletionRefreshAttempts = 0;
@@ -547,6 +550,11 @@
 	}
 
 	function markServerOffline() {
+		// Compacting holds the database for minutes, so every other poll blocks or
+		// times out. Without this guard the app would declare the server dead
+		// mid-VACUUM, which is exactly when a user is most likely to force-quit and
+		// leave a half-rewritten file behind.
+		if (databaseCompacting) return;
 		serverStatus = 'offline';
 	}
 
@@ -3615,7 +3623,82 @@
 	</section>
 </div>
 
+{#if databaseCompacting}
+	<!-- Blocking on purpose: the database is being rewritten and quitting midway
+	     is the one thing that can hurt. No close button, no dismiss-on-click. -->
+	<div class="modal-backdrop compact-backdrop" role="presentation" use:portal>
+		<div
+			class="modal-panel glass-panel compact-panel"
+			role="alertdialog"
+			aria-modal="true"
+			aria-live="assertive"
+			aria-label="Compacting database"
+		>
+			<div class="compact-spinner" aria-hidden="true"></div>
+			<h2 class="compact-title">Compacting database</h2>
+			<p class="compact-copy">
+				Rewriting the database file. This can take several minutes on a large library.
+			</p>
+			<p class="compact-copy compact-warn">
+				Please leave NOORwave open until it finishes. The app will not respond while this runs -
+				that is expected, not a crash.
+			</p>
+		</div>
+	</div>
+{/if}
+
 <style>
+	.compact-backdrop {
+		display: grid;
+		place-items: center;
+	}
+
+	.compact-panel {
+		max-width: 26rem;
+		padding: 2rem;
+		text-align: center;
+	}
+
+	.compact-title {
+		margin: 0.75rem 0 0.5rem;
+		font-size: var(--font-size-lg);
+		line-height: var(--line-height-tight);
+	}
+
+	.compact-copy {
+		margin: 0 0 0.5rem;
+		opacity: 0.8;
+		font-size: var(--font-size-sm);
+		line-height: var(--line-height-normal);
+	}
+
+	.compact-warn {
+		opacity: 1;
+		font-weight: var(--font-weight-semibold);
+	}
+
+	.compact-spinner {
+		width: 2rem;
+		height: 2rem;
+		margin: 0 auto;
+		border-radius: 50%;
+		border: 2px solid color-mix(in srgb, currentColor 25%, transparent);
+		border-top-color: currentColor;
+		animation: compact-spin 0.9s linear infinite;
+	}
+
+	@keyframes compact-spin {
+		to {
+			transform: rotate(360deg);
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.compact-spinner {
+			animation-duration: 3s;
+		}
+	}
+
 	/* Caption + status helpers — extracted from template inline styles */
 	.setting-caption {
 		font-size: var(--font-size-sm);
