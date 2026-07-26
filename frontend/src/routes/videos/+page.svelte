@@ -707,7 +707,12 @@
 <div class="videos-page">
 	<header class="search-header">
 		<div class="search-tools">
-			<span class="tools-spacer" aria-hidden="true"></span>
+			<!-- The left column was pure ballast for the centered field. The way
+			     into your own liked videos lives here rather than crowding the
+			     contextual slot opposite, which has one job. -->
+			<div class="tools-lead">
+				<a class="header-action" href="/videos/liked">Liked videos</a>
+			</div>
 			<SearchField
 				bind:value={query}
 				bind:inputEl
@@ -728,10 +733,6 @@
 				{:else if videoSessionActive && hasBrowseContent}
 					<button type="button" class="header-action" onclick={backToPicks}>Back to picks</button>
 				{:else}
-					<!-- Two entry points only in the idle state, where the slot
-					     has no "back to" duty: outward to TIDAL's editorial, and
-					     inward to the videos among your own likes. -->
-					<a class="header-action" href="/videos/liked">Liked videos</a>
 					<a class="header-action" href="/tidal/videos">TIDAL editorial</a>
 				{/if}
 			</div>
@@ -982,6 +983,12 @@
 		grid-template-columns: minmax(0, 1fr) minmax(0, 560px) minmax(0, 1fr);
 		align-items: center;
 		gap: var(--space-3);
+	}
+
+	.tools-lead {
+		display: flex;
+		justify-content: flex-start;
+		min-width: 0;
 	}
 
 	.tools-action {
@@ -1326,8 +1333,8 @@
 			grid-template-columns: 1fr;
 		}
 
-		.tools-spacer {
-			display: none;
+		.tools-lead {
+			justify-content: center;
 		}
 
 		.tools-action {

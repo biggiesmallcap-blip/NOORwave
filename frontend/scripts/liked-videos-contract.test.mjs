@@ -6,12 +6,28 @@ const VIDEOS_PAGE = 'src/routes/videos/+page.svelte';
 const CLIENT = 'src/lib/api/client.ts';
 
 describe('liked videos contract', () => {
-	test('the wall lives on its own route, reachable from /videos', () => {
+	test('the two video pages link to each other from mirrored places', () => {
 		// A separate route rather than a third mode inside /videos: that page is
 		// already a browse / search / player / snapshot-restore state machine.
+		// Each page offers the other from its own leading slot, so getting back
+		// is the same gesture in both directions.
 		const videos = readFileSync(VIDEOS_PAGE, 'utf8');
+		expect(videos).toContain('class="tools-lead"');
 		expect(videos).toContain('href="/videos/liked"');
 		expect(videos).toContain('href="/tidal/videos"');
+
+		const page = readFileSync(PAGE, 'utf8');
+		expect(page).toContain('class="back-link" href="/videos"');
+	});
+
+	test('a version shows what tells it apart from its siblings', () => {
+		// Four videos all titled "Jamming" are separated by nothing on the card
+		// but runtime; year and resolution ride along with the payload already
+		// being fetched.
+		const page = readFileSync(PAGE, 'utf8');
+		expect(page).toContain('function versionMeta(version: LikedVideoVersion): string');
+		expect(page).toContain("[version.release_year, version.quality].filter(Boolean).join(' - ')");
+		expect(page).toContain('{versionMeta(version)}');
 	});
 
 	test('client talks to the three liked-video endpoints', () => {

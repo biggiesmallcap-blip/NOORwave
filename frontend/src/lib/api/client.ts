@@ -333,6 +333,10 @@ export interface LikedVideoVersion {
 	duration_ms: number | null;
 	artwork_url: string | null;
 	match_score: number;
+	/** What separates two versions when their titles do not. Both ride along
+	 *  with the artist-videos payload; neither is guaranteed. */
+	release_year: number | null;
+	quality: string | null;
 }
 
 /** One card on the liked-videos wall: a song, with every video found for it.

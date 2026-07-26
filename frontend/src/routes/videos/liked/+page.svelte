@@ -46,6 +46,14 @@
 		return video.versions[0];
 	}
 
+	/** "1999 - 1080p". Whatever of the two TIDAL gave us, or nothing. Most of the
+	 *  time a version's title already says what it is ("Live at Austin City
+	 *  Limits, 2012"); this is for the cases where four videos are all just
+	 *  called "Jamming". */
+	function versionMeta(version: LikedVideoVersion): string {
+		return [version.release_year, version.quality].filter(Boolean).join(' - ');
+	}
+
 	/** Lift a version into the shape the video queue already speaks, so Play all
 	 *  and Shuffle need no new playback code. */
 	function toQueueItem(video: LikedVideo, version: LikedVideoVersion): TidalSearchVideo {
@@ -260,7 +268,11 @@
 <div class="page">
 	<header class="page-header">
 		<div class="heading">
-			<p class="eyebrow">Your library</p>
+			<!-- The way back, in the place /videos puts the way here. Its own line
+			     above the title so it reads as navigation, not as a label. -->
+			<a class="back-link" href="/videos">
+				<span aria-hidden="true">&lsaquo;</span> Videos
+			</a>
 			<h1>Liked videos</h1>
 			<p class="blurb">
 				The videos among your likes. Most liked songs do not have one, so this is a slice of
@@ -268,7 +280,6 @@
 			</p>
 		</div>
 		<div class="header-actions">
-			<a class="header-action" href="/videos">TIDAL editorial</a>
 			<button
 				type="button"
 				class="header-action"
@@ -418,9 +429,14 @@
 									onclick={() => void playVersion(video, version)}
 									oncontextmenu={(event) => menu(event, video, version)}
 								>
-									<span class="version-title" title={version.video_title}
-										>{version.video_title}</span
-									>
+									<span class="version-main">
+										<span class="version-title">{version.video_title}</span>
+										<!-- Year and resolution do the work when the titles are
+										     all the same word, which is often. -->
+										{#if versionMeta(version)}
+											<span class="version-meta">{versionMeta(version)}</span>
+										{/if}
+									</span>
 									{#if version.duration_ms}
 										<span class="version-duration"
 											>{formatTrackDuration(version.duration_ms)}</span
@@ -459,12 +475,18 @@
 		min-width: 0;
 	}
 
-	.eyebrow {
-		font-size: var(--font-size-xs);
-		text-transform: uppercase;
-		letter-spacing: 0.08em;
+	.back-link {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		align-self: flex-start;
 		color: var(--text-tertiary);
-		margin: 0;
+		font-size: var(--font-size-sm);
+		text-decoration: none;
+	}
+
+	.back-link:hover {
+		color: var(--text-primary);
 	}
 
 	.heading h1 {
@@ -642,21 +664,33 @@
 		border-color: var(--accent);
 	}
 
+	/* Wider than the card it hangs off: a version's title is the only thing that
+	   says what it is ("Live At Grand Central"), so clipping it to card width
+	   defeats the point of the list. */
 	.versions-popout {
 		position: absolute;
 		left: 0;
-		right: 0;
 		top: 100%;
 		z-index: 5;
 		display: flex;
 		flex-direction: column;
 		gap: 2px;
+		min-width: 100%;
+		width: max-content;
+		max-width: min(340px, 80vw);
 		margin-top: 4px;
 		padding: 6px;
 		border-radius: var(--radius-sm);
 		border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
 		background: var(--bg-elevated, #16161c);
 		box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+	}
+
+	/* The last column would otherwise push its popout off the page edge. */
+	.card-slot:nth-child(4n) .versions-popout,
+	.card-slot:last-child .versions-popout {
+		left: auto;
+		right: 0;
 	}
 
 	.versions-heading {
@@ -671,9 +705,9 @@
 
 	.version-row {
 		display: flex;
-		align-items: center;
+		align-items: baseline;
 		justify-content: space-between;
-		gap: var(--space-2);
+		gap: var(--space-3);
 		padding: 6px 8px;
 		border: none;
 		border-radius: var(--radius-sm);
@@ -690,10 +724,23 @@
 		color: var(--text-primary);
 	}
 
+	.version-main {
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+		min-width: 0;
+	}
+
+	/* Wraps rather than ellipsing: two lines of a real title beat one line of
+	   "Coming Around Again (Live At Grand Cen...". */
 	.version-title {
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
+		min-width: 0;
+		overflow-wrap: anywhere;
+	}
+
+	.version-meta {
+		font-size: var(--font-size-xs);
+		color: var(--text-tertiary);
 	}
 
 	.version-duration {

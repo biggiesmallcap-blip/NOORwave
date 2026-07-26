@@ -102,6 +102,35 @@ pub struct VideoMatch {
     pub duration_seconds: Option<i64>,
     pub image_id: Option<String>,
     pub match_score: f64,
+    pub release_year: Option<i64>,
+    pub quality: Option<String>,
+}
+
+/// Year out of TIDAL's `releaseDate` ("2007-04-27T00:00:00.000+0000"). Only the
+/// year is kept: a filter pill and a version label are all it feeds, and the
+/// full timestamp carries an offset SQLite cannot parse anyway.
+fn release_year_of(video: &TidalArtistVideo) -> Option<i64> {
+    video
+        .extra
+        .get("releaseDate")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|date| date.get(..4))
+        .and_then(|year| year.parse().ok())
+}
+
+/// "MP4_1080P" -> "1080p". TIDAL's container prefix says nothing a listener
+/// cares about; the resolution does, and it is the other thing that separates
+/// two uploads of the same video.
+fn quality_of(video: &TidalArtistVideo) -> Option<String> {
+    let raw = video
+        .extra
+        .get("quality")
+        .and_then(serde_json::Value::as_str)?;
+    let resolution = raw.rsplit('_').next().unwrap_or(raw);
+    if resolution.is_empty() {
+        return None;
+    }
+    Some(resolution.to_lowercase())
 }
 
 /// One version of a song: a single video. Shaped so the client can lift it
@@ -118,6 +147,10 @@ pub struct LikedVideoRow {
     /// grid downsizes through `upscaleTidalArtwork`.
     pub artwork_url: Option<String>,
     pub match_score: f64,
+    /// What separates two versions when their titles do not. Both come free
+    /// with the artist-videos payload; neither is guaranteed.
+    pub release_year: Option<i64>,
+    pub quality: Option<String>,
 }
 
 /// One card on the wall: a song, with every video found for it.
@@ -271,6 +304,8 @@ pub fn match_videos(tracks: &[LikedTrack], videos: &[TidalArtistVideo]) -> Vec<V
                 duration_seconds: Some(video.duration),
                 image_id: video.image_id.clone(),
                 match_score: score,
+                release_year: release_year_of(video),
+                quality: quality_of(video),
             });
         }
     }
@@ -294,13 +329,16 @@ pub fn store_artist_scan(conn: &Connection, artist_id: i64, matches: &[VideoMatc
     {
         let mut stmt = tx.prepare(
             "INSERT INTO library_videos
-                 (track_id, tidal_video_id, video_title, duration_seconds, image_id, match_score)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 (track_id, tidal_video_id, video_title, duration_seconds, image_id,
+                  match_score, release_year, quality)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(track_id, tidal_video_id) DO UPDATE SET
                  video_title      = excluded.video_title,
                  duration_seconds = excluded.duration_seconds,
                  image_id         = excluded.image_id,
-                 match_score      = excluded.match_score",
+                 match_score      = excluded.match_score,
+                 release_year     = excluded.release_year,
+                 quality          = excluded.quality",
         )?;
         for m in matches {
             stmt.execute(params![
@@ -310,6 +348,8 @@ pub fn store_artist_scan(conn: &Connection, artist_id: i64, matches: &[VideoMatc
                 m.duration_seconds,
                 m.image_id,
                 m.match_score,
+                m.release_year,
+                m.quality,
             ])?;
         }
         tx.execute(
@@ -345,7 +385,9 @@ pub fn load_wall(conn: &Connection) -> Result<Vec<LikedVideoGroup>> {
                 al.year,
                 g.name,
                 t.date_added,
-                lv.match_score
+                lv.match_score,
+                lv.release_year,
+                lv.quality
            FROM library_videos lv
            JOIN tracks t              ON t.id = lv.track_id AND t.is_favorite = 1
            LEFT JOIN artists ar       ON ar.id = t.artist_id
@@ -378,6 +420,8 @@ pub fn load_wall(conn: &Connection) -> Result<Vec<LikedVideoGroup>> {
                     duration_ms: duration_seconds.map(|s| s * 1000),
                     artwork_url: TidalClient::get_artwork_url(&image_id, 640),
                     match_score: row.get(11)?,
+                    release_year: row.get(12)?,
+                    quality: row.get(13)?,
                 },
                 track_title: row.get(3)?,
                 artist_name: row.get(4)?,
@@ -608,6 +652,21 @@ mod tests {
         }
     }
 
+    /// A video carrying the metadata TIDAL actually sends alongside the fields
+    /// we name explicitly.
+    fn video_with_meta(
+        id: i64,
+        title: &str,
+        release_date: &str,
+        quality: &str,
+    ) -> TidalArtistVideo {
+        let mut v = video(id, title);
+        v.extra
+            .insert("releaseDate".into(), serde_json::json!(release_date));
+        v.extra.insert("quality".into(), serde_json::json!(quality));
+        v
+    }
+
     fn liked(track_id: i64, title: &str) -> LikedTrack {
         LikedTrack {
             track_id,
@@ -647,6 +706,41 @@ mod tests {
         );
         assert_eq!(matches[1].image_id.as_deref(), Some("img-901"));
         assert_eq!(matches[1].duration_seconds, Some(210));
+    }
+
+    #[test]
+    fn versions_carry_what_tells_them_apart() {
+        // Four Bob Marley videos all titled "Jamming" are separated by nothing
+        // on the card but runtime. Year and resolution come free with the
+        // payload we already fetch.
+        let tracks = vec![liked(10, "Jamming")];
+        let videos = vec![
+            video_with_meta(900, "Jamming", "1999-04-27T00:00:00.000+0000", "MP4_1080P"),
+            video_with_meta(901, "Jamming", "2012-11-01T00:00:00.000+0000", "MP4_480P"),
+        ];
+
+        let matches = match_videos(&tracks, &videos);
+
+        assert_eq!(matches[0].release_year, Some(1999));
+        assert_eq!(matches[0].quality.as_deref(), Some("1080p"));
+        assert_eq!(matches[1].release_year, Some(2012));
+        assert_eq!(matches[1].quality.as_deref(), Some("480p"));
+    }
+
+    #[test]
+    fn missing_or_odd_metadata_is_simply_absent() {
+        let tracks = vec![liked(10, "Song")];
+        // No releaseDate/quality at all, and a quality string with no prefix.
+        let mut odd = video(901, "Song");
+        odd.extra
+            .insert("quality".into(), serde_json::json!("720P"));
+        let videos = vec![video(900, "Song"), odd];
+
+        let matches = match_videos(&tracks, &videos);
+
+        assert_eq!(matches[0].release_year, None);
+        assert_eq!(matches[0].quality, None);
+        assert_eq!(matches[1].quality.as_deref(), Some("720p"));
     }
 
     #[test]

@@ -59,6 +59,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_055,
     MIGRATION_056,
     MIGRATION_057,
+    MIGRATION_058,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1616,6 +1617,24 @@ CREATE TABLE IF NOT EXISTS library_videos (
 );
 CREATE INDEX IF NOT EXISTS idx_library_videos_visible
     ON library_videos(suppressed, track_id);
+"#;
+
+// What tells two versions of the same song apart when their titles do not.
+//
+// Plenty of versions describe themselves ("Live at Austin City Limits, 2012"),
+// but plenty do not: four Bob Marley videos all titled "Jamming" differ only by
+// runtime on the card. TIDAL sends `releaseDate` and `quality` with every video
+// and we were flattening both into `extra` and dropping them - no extra request
+// is needed to keep them, only somewhere to put them.
+//
+// Clearing the scan ledger makes the next background pass backfill these for
+// videos already found. The ledger is only a record of what has been asked, so
+// dropping it costs one re-scan and no user data - `library_videos` rows, and
+// with them every wrong-match correction, are left untouched.
+const MIGRATION_058: &str = r#"
+ALTER TABLE library_videos ADD COLUMN release_year INTEGER;
+ALTER TABLE library_videos ADD COLUMN quality TEXT;
+DELETE FROM library_video_scans;
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
