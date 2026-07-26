@@ -715,6 +715,17 @@
 		   and lets go once the card has landed. */
 		animation: card-in 300ms ease-out backwards;
 		animation-delay: calc(var(--card-index, 0) * 22ms);
+		transition: transform var(--motion-base);
+	}
+
+	/* The hover lift belongs to the slot, not the card: the versions chip is
+	   positioned against the slot, so lifting the card alone would leave the
+	   chip behind on the cards that have one. Excluding .open is deliberate -
+	   a transform makes the slot a stacking context, which is the same trap the
+	   entrance animation's fill mode had to avoid, and nudging a card while you
+	   are reading its version list is its own annoyance. */
+	.card-slot:hover:not(.open) {
+		transform: translateY(-4px);
 	}
 
 	/* And the open card outranks its neighbours outright, so the popout is above
@@ -737,6 +748,11 @@
 	@media (prefers-reduced-motion: reduce) {
 		.card-slot {
 			animation: none;
+			transition: none;
+		}
+
+		.card-slot:hover:not(.open) {
+			transform: none;
 		}
 	}
 
@@ -753,10 +769,14 @@
 		font-weight: var(--font-weight-medium);
 		cursor: pointer;
 		white-space: nowrap;
+		transition:
+			border-color var(--motion-fast),
+			background var(--motion-fast);
 	}
 
 	.versions-chip:hover {
 		border-color: var(--accent);
+		background: rgba(0, 0, 0, 0.85);
 	}
 
 	/* Wider than the card it hangs off: a version's title is the only thing that
@@ -812,6 +832,9 @@
 		text-align: left;
 		cursor: pointer;
 		min-width: 0;
+		transition:
+			background var(--motion-fast),
+			color var(--motion-fast);
 	}
 
 	.version-row:hover {
@@ -869,12 +892,26 @@
 		min-width: 0;
 	}
 
+	.video-card:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: 4px;
+		border-radius: var(--radius-xs);
+	}
+
 	.poster-wrap {
 		position: relative;
 		aspect-ratio: 16 / 9;
 		border-radius: var(--radius-sm);
 		overflow: hidden;
 		background: var(--bg-elevated, rgba(255, 255, 255, 0.04));
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+		transition: box-shadow var(--motion-base);
+	}
+
+	/* The shadow deepens with the lift so the card reads as coming forward
+	   rather than just sliding up. Same pair of values as VideoCard. */
+	.card-slot:hover:not(.open) .poster-wrap {
+		box-shadow: 0 12px 26px -6px rgba(0, 0, 0, 0.5);
 	}
 
 	.poster-wrap :global(.poster) {
@@ -883,9 +920,18 @@
 		object-fit: cover;
 	}
 
+	/* PlayOverlay ships hidden and waits for its container to say when: without
+	   this rule the badge was mounted but never once visible on this page. */
+	.video-card:hover :global(.play-overlay),
+	.video-card:focus-visible :global(.play-overlay) {
+		opacity: 1;
+		transform: translateY(0);
+	}
+
+	/* Bottom-left, because the corner-positioned play badge owns bottom-right. */
 	.duration {
 		position: absolute;
-		right: 6px;
+		left: 6px;
 		bottom: 6px;
 		padding: 2px 6px;
 		border-radius: 4px;
