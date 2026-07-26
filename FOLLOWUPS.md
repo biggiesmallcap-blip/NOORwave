@@ -924,18 +924,14 @@ Defender), so a slow-IO flake is plausible. If it resurfaces, capture the name
 from the failure block before rerunning anything.
 Spawned by: home suggestions hidden-gem rewrite 2026-07-26
 
-### db: retired discovery models are never pruned (noor.db growth)
+### db: reason_json duplicates a human label on every neighbour row
 
-track_neighbors holds 18.47M rows on the live library, of which only 2.49M
-belong to the active embedding model; the other ~16M belong to 10 retired
-models. track_embeddings shows the same pattern (420k rows, 38.8k active).
-activate_embedding_model (db/queries.rs) flips is_active but nothing ever
-deletes the previous model's neighbors or vectors, so every training run adds
-~1-2.5M permanent rows. At ~218 bytes of TEXT per neighbor row (reason_json
-carries a human-readable label on every row) this is the bulk of an 8.4GB
-database. Needs: a prune on activation (embedding_models has ON DELETE CASCADE
-to both tables, so deleting retired model rows would cascade), a one-shot
-cleanup for existing installs, and a VACUUM to actually return the space.
-Separately, reason_json's `label` is derivable from `key` and does not need
-storing per row.
+track_neighbors.reason_json stores entries like
+{"key":"audio_texture","label":"audio texture","weight":1.0} on every row -
+~218 bytes of TEXT per row, and `label` is derivable from `key`. With millions of
+rows for the active model alone this is the largest remaining chunk of the file
+after the retired-model prune landed. Dropping `label` at write time (and
+deriving it in the reader) would cut the table materially. Not done with the
+prune because it needs a reader/writer change plus a backfill decision for
+existing rows.
 Spawned by: noor.db size investigation 2026-07-26
