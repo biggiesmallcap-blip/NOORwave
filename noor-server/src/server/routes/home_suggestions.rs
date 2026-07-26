@@ -14,12 +14,17 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
-use super::home_routes::unix_now_secs;
+use super::home_routes::{rotate_take, unix_now_secs};
 
-// Widened so the album panel (one card per distinct album) has enough
-// cross-artist variety to fill without leaning on the same-artist tail: more
-// seeds and more neighbours per seed pull in more distinct artists/albums.
-const HOME_SUGGESTIONS_SEED_LIMIT: usize = 6;
+// Seed budget. 3 recent plays keep the panel reactive to today's listening;
+// 5 long-term seeds anchor it to the user's actual taste so one genre session
+// cannot hijack the whole mural. Both slices are deduped against each other and
+// the long-term slice rotates on the 6h salt so the panel refreshes through the
+// day rather than freezing on the same five favourites.
+const HOME_SUGGESTIONS_RECENT_SEEDS: usize = 3;
+const HOME_SUGGESTIONS_LONG_TERM_SEEDS: usize = 5;
+const HOME_SUGGESTIONS_SEED_LIMIT: usize =
+    HOME_SUGGESTIONS_RECENT_SEEDS + HOME_SUGGESTIONS_LONG_TERM_SEEDS;
 const HOME_SUGGESTIONS_PER_SEED: usize = 24;
 const HOME_SUGGESTIONS_DEFAULT_LIMIT: usize = 50;
 const HOME_SUGGESTIONS_MAX_PER_ARTIST: usize = 2;
@@ -79,6 +84,48 @@ pub(crate) fn merge_home_suggestions(
         }
         out.push(c.track_id);
     }
+    out
+}
+
+/// Blend the recent and long-term seed pools into one ordered seed set.
+/// Recent seeds come first, newest first, and never rotate. Long-term seeds are
+/// rotated by `salt` so successive 6h windows pick different favourites. If
+/// either pool underdelivers, the other backfills up to the total budget, so a
+/// cold-start user still gets whatever seeds exist. No DB access -> unit-testable.
+pub(crate) fn blend_suggestion_seeds(recent: &[i64], long_term: &[i64], salt: usize) -> Vec<i64> {
+    let mut seen = HashSet::new();
+    let mut out: Vec<i64> = Vec::with_capacity(HOME_SUGGESTIONS_SEED_LIMIT);
+
+    for &id in recent.iter().filter(|&&id| id > 0) {
+        if out.len() >= HOME_SUGGESTIONS_RECENT_SEEDS {
+            break;
+        }
+        if seen.insert(id) {
+            out.push(id);
+        }
+    }
+
+    let rotated = rotate_take(long_term, long_term.len(), salt);
+    for id in rotated.iter().copied().filter(|&id| id > 0) {
+        if out.len() >= HOME_SUGGESTIONS_SEED_LIMIT {
+            break;
+        }
+        if seen.insert(id) {
+            out.push(id);
+        }
+    }
+
+    // Backfill from any recent plays beyond the recent quota when the long-term
+    // pool was too thin to reach the budget.
+    for &id in recent.iter().filter(|&&id| id > 0) {
+        if out.len() >= HOME_SUGGESTIONS_SEED_LIMIT {
+            break;
+        }
+        if seen.insert(id) {
+            out.push(id);
+        }
+    }
+
     out
 }
 
@@ -319,6 +366,47 @@ mod tests {
         };
         let ranked = merge_home_suggestions(vec![single, hub, consensus], 3, 2);
         assert_eq!(ranked, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn seed_blend_takes_three_recent_then_five_long_term() {
+        let recent = vec![10, 11, 12, 13, 14, 15];
+        let long_term = vec![20, 21, 22, 23, 24, 25, 26];
+        let seeds = blend_suggestion_seeds(&recent, &long_term, 0);
+        assert_eq!(seeds.len(), 8);
+        assert_eq!(&seeds[..3], &[10, 11, 12], "recent slice, newest first");
+        assert_eq!(&seeds[3..], &[20, 21, 22, 23, 24]);
+    }
+
+    #[test]
+    fn seed_blend_rotates_long_term_with_the_salt() {
+        let recent = vec![10, 11, 12];
+        let long_term = vec![20, 21, 22, 23, 24, 25, 26];
+        let a = blend_suggestion_seeds(&recent, &long_term, 0);
+        let b = blend_suggestion_seeds(&recent, &long_term, 1);
+        assert_eq!(&a[..3], &b[..3], "recent slice does not rotate");
+        assert_ne!(&a[3..], &b[3..], "long-term slice rotates with the salt");
+    }
+
+    #[test]
+    fn seed_blend_dedups_and_backfills_a_short_recent_slice() {
+        // Only one recent play, and it is also a top-artist track. The blend must
+        // not emit it twice, and must top up from the long-term pool so a user
+        // with a thin session still gets a full seed set.
+        let recent = vec![20];
+        let long_term = vec![20, 21, 22, 23, 24, 25, 26, 27];
+        let seeds = blend_suggestion_seeds(&recent, &long_term, 0);
+        assert_eq!(seeds.len(), 8);
+        assert_eq!(seeds[0], 20);
+        let mut sorted = seeds.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 8, "no duplicate seeds");
+    }
+
+    #[test]
+    fn seed_blend_survives_empty_history() {
+        assert!(blend_suggestion_seeds(&[], &[], 0).is_empty());
     }
 
     #[test]
