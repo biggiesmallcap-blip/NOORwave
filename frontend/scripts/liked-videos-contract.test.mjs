@@ -44,7 +44,7 @@ describe('liked videos contract', () => {
 		// Grouping is the server's call (one definition of "same song"), so the
 		// page keys on song_key and never re-derives identity.
 		const page = readFileSync(PAGE, 'utf8');
-		expect(page).toContain('{#each filtered as video, index (video.song_key)}');
+		expect(page).toContain('{#each shown as video, index (video.song_key)}');
 		expect(page).toContain('function face(video: LikedVideo): LikedVideoVersion');
 		expect(page).toContain('return video.versions[0];');
 	});
@@ -141,17 +141,41 @@ describe('liked videos contract', () => {
 		expect(page).toContain('scanPending');
 	});
 
-	test('the wall eases in the way the library suggestion panels do', () => {
-		// The whole wall lands in one payload, so without this ~700 cards snap
-		// into place at once. Same rise, same reduced-motion opt-out.
+	test('only a few screens of cards are mounted, and scrolling adds more', () => {
+		// The whole wall arrives in one payload, but mounting ~700 cards is one
+		// long blocking render and nobody is looking at card 690.
 		const page = readFileSync(PAGE, 'utf8');
-		expect(page).toContain('style={`--card-index: ${index}`}');
-		expect(page).toContain('animation: card-in 300ms ease-out both;');
+		expect(page).toContain('let shown = $derived(filtered.slice(0, visibleCount));');
+		expect(page).toContain('{#each shown as video, index (video.song_key)}');
+		expect(page).toContain('new IntersectionObserver');
+		expect(page).toContain('visibleCount = Math.min(visibleCount + PAGE_SIZE, filtered.length)');
+		expect(page).toContain('bind:this={sentinel}');
+		// Re-observing on each growth is what chains the pages: an observer only
+		// fires on a threshold crossing, so one still in view after a page landed
+		// would never fire again.
+		expect(page).toContain('void visibleCount;');
+	});
+
+	test('the window is only how much is drawn - playback still sees the whole wall', () => {
+		// Play all off a windowed wall must not queue just the mounted page.
+		const page = readFileSync(PAGE, 'utf8');
+		expect(page).toContain('return filtered.map((v) => toQueueItem(v, face(v)));');
+		expect(page).toContain('visibleCount = PAGE_SIZE;');
+	});
+
+	test('the wall eases in the way the library suggestion panels do', () => {
+		const page = readFileSync(PAGE, 'utf8');
 		expect(page).toContain('@keyframes card-in');
 		expect(page).toContain('@media (prefers-reduced-motion: reduce)');
-		// The cap is load-bearing: uncapped, the last card of a 700-card wall
-		// would wait a quarter of a minute for its turn.
-		expect(page).toContain('animation-delay: calc(min(var(--card-index, 0), 23) * 22ms);');
+		// Per-batch index, so a page appended mid-scroll cascades like the first.
+		expect(page).toContain('style={`--card-index: ${index % 24}`}');
+		expect(page).toContain('animation-delay: calc(var(--card-index, 0) * 22ms);');
+		// `backwards`, not `both`. A filled opacity/transform animation keeps a
+		// stacking context alive forever, which trapped the versions popout's
+		// z-index inside its own card and painted it under later cards.
+		expect(page).toContain('animation: card-in 300ms ease-out backwards;');
+		expect(page).toContain('.card-slot.open {');
+		expect(page).toContain('class:open={openVersions === video.song_key}');
 	});
 
 	test('posters fade in rather than hard-popping as each decodes', () => {

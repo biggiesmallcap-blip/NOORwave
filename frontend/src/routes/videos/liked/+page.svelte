@@ -203,6 +203,49 @@
 		return sorted;
 	});
 
+	// Mounting the whole wall at once is what made opening this page lag: ~700
+	// cards is ~8k DOM nodes built in one blocking pass, and nobody is looking
+	// at card 690. Only a few screens are mounted, and the sentinel below the
+	// grid adds another page as it comes into view. Play all, Shuffle and the
+	// filters all still work off `filtered`, so the window is purely how much of
+	// it is drawn.
+	const PAGE_SIZE = 72;
+	let visibleCount = $state(PAGE_SIZE);
+	let sentinel = $state<HTMLDivElement | null>(null);
+
+	let shown = $derived(filtered.slice(0, visibleCount));
+	let hasMore = $derived(visibleCount < filtered.length);
+
+	// A new query is a new wall, so it starts at the top again rather than
+	// keeping however far the last one had been grown.
+	$effect(() => {
+		void query;
+		void activeGenre;
+		void activeYear;
+		void sort;
+		visibleCount = PAGE_SIZE;
+	});
+
+	// Re-observing on every growth is deliberate: an observer only fires when
+	// the sentinel crosses the threshold, so one that is still in view after a
+	// page is added would never fire again. Disconnecting and re-observing
+	// re-runs the initial check, which chains pages until the sentinel is
+	// genuinely below the fold. Same rootMargin as the library's infinite list.
+	$effect(() => {
+		if (!sentinel || !hasMore) return;
+		void visibleCount;
+		const observer = new IntersectionObserver(
+			(entries) => {
+				if (entries.some((entry) => entry.isIntersecting)) {
+					visibleCount = Math.min(visibleCount + PAGE_SIZE, filtered.length);
+				}
+			},
+			{ rootMargin: '600px 0px' }
+		);
+		observer.observe(sentinel);
+		return () => observer.disconnect();
+	});
+
 	let scanPending = $derived(totalArtists > 0 && scannedArtists < totalArtists);
 
 	/** The label follows the ticked genre, so "Play genre" is just Play all with
@@ -370,8 +413,12 @@
 		<EmptyState title="Nothing matches those filters" copy="Try clearing the search or pills." />
 	{:else}
 		<div class="video-grid">
-			{#each filtered as video, index (video.song_key)}
-				<div class="card-slot" style={`--card-index: ${index}`}>
+			{#each shown as video, index (video.song_key)}
+				<div
+					class="card-slot"
+					class:open={openVersions === video.song_key}
+					style={`--card-index: ${index % 24}`}
+				>
 					<button
 						type="button"
 						class="video-card"
@@ -445,6 +492,12 @@
 				</div>
 			{/each}
 		</div>
+
+		<!-- Sits below the grid with 600px of lead, so the next page is mounted
+		     well before you can scroll to the end of this one. -->
+		{#if hasMore}
+			<div class="grid-sentinel" bind:this={sentinel} aria-hidden="true"></div>
+		{/if}
 	{/if}
 </div>
 
@@ -641,16 +694,33 @@
 		gap: 14px;
 	}
 
+	.grid-sentinel {
+		height: 1px;
+	}
+
 	.card-slot {
 		position: relative;
 		min-width: 0;
-		/* The same rise the library's suggestion panels use, so a wall that lands
-		   in one go settles in rather than snapping into place. The stagger is
-		   capped at roughly a screenful of cards - uncapped, card 692 would wait
-		   fifteen seconds for its turn. Everything past the cap arrives together,
-		   which is fine because it is all below the fold anyway. */
-		animation: card-in 300ms ease-out both;
-		animation-delay: calc(min(var(--card-index, 0), 23) * 22ms);
+		/* The same rise the library's suggestion panels use, so a page of cards
+		   settles in rather than snapping into place. The index is per-batch
+		   (`index % 24`), not absolute: a page appended mid-scroll should
+		   cascade like the first one did, and an absolute index would just park
+		   every later card at the same maximum delay.
+
+		   `backwards`, not `both`: an animation of opacity/transform gives its
+		   element a stacking context for as long as it is applied, and `both`
+		   keeps it applied forever. That trapped the versions popout's z-index
+		   inside its own card, so it painted under the cards after it in the
+		   grid. Backwards fill covers the delay - the only part that needs it -
+		   and lets go once the card has landed. */
+		animation: card-in 300ms ease-out backwards;
+		animation-delay: calc(var(--card-index, 0) * 22ms);
+	}
+
+	/* And the open card outranks its neighbours outright, so the popout is above
+	   them whether or not an entrance happens to be mid-flight. */
+	.card-slot.open {
+		z-index: 6;
 	}
 
 	@keyframes card-in {

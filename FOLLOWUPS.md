@@ -951,20 +951,19 @@ Worth measuring before designing: log lock wait time in with_conn under a debug
 flag, so "the DB lock" stops being a hypothesis.
 Spawned by: liked videos library 2026-07-26
 
-### videos: the liked wall renders ~700 cards in one pass
+### videos: other big grids may still render every row at once
 
-After the genre-query fix, what is left of the /videos/liked transition is the
-render itself: ~350ms of blocked main thread building ~700 card slots, which no
-amount of backend work touches. Measured `content-visibility: auto` on
-`.video-card` (not `.card-slot` - paint containment there clips the versions
-popout): the render long task drops from ~200ms to ~70ms, so it works. It was not
-taken because the placeholder height has to be guessed. `contain-intrinsic-size`
-wants a fixed length, but a card's height is poster (column width x 9/16) plus two
-fixed text lines, so the right value moves with the viewport. At 1600px the guess
-was 166px against a real 214px, which leaves the grid holding two row heights at
-once and shifting as you scroll - trading an invisible 130ms for a visible defect.
+Resolved for /videos/liked, which now mounts 72 cards and grows on scroll. Noted
+because the shape is not unique to that page: a route that renders one card per
+row of an unbounded list will block the main thread for as long as the list is
+long, and no amount of backend work touches it. Worth a sweep of the other grid
+surfaces (playlists, artist detail, the tidal browse pages) for the same pattern.
 
-Either measure one card on mount and publish the height as a custom property on
-the grid (small, and correct at every width), or paginate the wall, which is
-probably the better answer anyway: nobody scrolls 700 cards.
+Two things learned there that are worth reusing. An IntersectionObserver sentinel
+has to be re-observed after each growth - it only fires on a threshold crossing,
+so one still in view after a page landed never fires again, and the list silently
+stops. And a CSS entrance animation wants `animation-fill-mode: backwards`, not
+`both`: a filled opacity/transform animation keeps a stacking context alive for
+the life of the element, which is enough to trap a popout's z-index inside its
+own card.
 Spawned by: liked videos library 2026-07-26
