@@ -28,6 +28,9 @@ const HOME_SUGGESTIONS_SEED_LIMIT: usize =
 const HOME_SUGGESTIONS_PER_SEED: usize = 24;
 const HOME_SUGGESTIONS_DEFAULT_LIMIT: usize = 50;
 const HOME_SUGGESTIONS_MAX_PER_ARTIST: usize = 2;
+// One track per album in the tracks mural, so a single unexplored record cannot
+// fill the row. The album mural has its own recall path and is unaffected.
+const HOME_SUGGESTIONS_MAX_PER_ALBUM: usize = 1;
 // How far back a play disqualifies a track (and its album) from being suggested.
 // Named so it can be tuned without restructuring: 30 days is aggressive for a
 // small library but right for a large, mostly-unplayed one.
@@ -44,41 +47,84 @@ pub(crate) struct HomeSuggestionsRequest {
 pub(crate) struct HomeSuggestionCandidate {
     pub(crate) track_id: i64,
     pub(crate) artist_key: String,
+    pub(crate) album_id: Option<i64>,
     pub(crate) score: f64,
     pub(crate) seed_hits: u32,
     pub(crate) hub_pct: f64,
+    /// Lifetime plays of this track.
+    pub(crate) track_plays: i64,
+    /// Lifetime plays summed across every track on this track's album.
+    pub(crate) album_plays: i64,
 }
 
 /// Pure ranking pass over the aggregated library candidates. Sorts by
 /// similarity, boosted when several seeds surface the same candidate
-/// (consensus) and dampened by how "hubby" the candidate is in the similarity
-/// graph, then greedily caps how many tracks any one artist can contribute so a
-/// single prolific neighbour cannot fill the whole panel. Returns track ids in
-/// final display order. No DB access -> unit-testable.
+/// (consensus), dampened by how "hubby" the candidate is in the similarity
+/// graph, and multiplied by two novelty terms that push never-opened albums and
+/// never-played tracks to the top. Then greedily caps how many tracks any one
+/// artist and any one album can contribute. Returns track ids in final display
+/// order. No DB access -> unit-testable.
 pub(crate) fn merge_home_suggestions(
     mut candidates: Vec<HomeSuggestionCandidate>,
     limit: usize,
     max_per_artist: usize,
+    max_per_album: usize,
 ) -> Vec<i64> {
+    // Album novelty dominates track novelty on purpose: an unopened record is a
+    // better discovery unit than a stray unplayed track on a record the user has
+    // already worn through.
+    fn album_novelty(album_plays: i64) -> f64 {
+        match album_plays {
+            0 => 1.60,
+            1..=5 => 1.15,
+            _ => 0.75,
+        }
+    }
+
+    fn track_novelty(track_plays: i64) -> f64 {
+        match track_plays {
+            0 => 1.35,
+            1..=2 => 1.10,
+            _ => 0.85,
+        }
+    }
+
     fn rank_of(c: &HomeSuggestionCandidate) -> f64 {
         let consensus = 1.0 + 0.15 * (c.seed_hits.saturating_sub(1) as f64);
         let hub_damp = 1.0 - 0.40 * c.hub_pct.clamp(0.0, 1.0);
-        c.score.max(0.0) * consensus * hub_damp
+        c.score.max(0.0)
+            * consensus
+            * hub_damp
+            * album_novelty(c.album_plays)
+            * track_novelty(c.track_plays)
     }
+
     candidates.sort_by(|a, b| {
         rank_of(b)
             .partial_cmp(&rank_of(a))
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(a.track_id.cmp(&b.track_id))
     });
+
     let mut per_artist: HashMap<String, usize> = HashMap::new();
+    let mut per_album: HashMap<i64, usize> = HashMap::new();
     let mut out = Vec::new();
     for c in candidates {
         if out.len() >= limit {
             break;
         }
-        // Empty artist key (missing name) is never capped so those candidates
-        // don't all collapse into one synthetic "artist" bucket.
+        // A missing album id is never capped, so those candidates don't all
+        // collapse into one synthetic "album" bucket.
+        if max_per_album > 0 {
+            if let Some(album_id) = c.album_id {
+                let count = per_album.entry(album_id).or_insert(0);
+                if *count >= max_per_album {
+                    continue;
+                }
+                *count += 1;
+            }
+        }
+        // Empty artist key (missing name) is never capped for the same reason.
         if max_per_artist > 0 && !c.artist_key.is_empty() {
             let count = per_artist.entry(c.artist_key).or_insert(0);
             if *count >= max_per_artist {
@@ -369,9 +415,12 @@ pub(crate) async fn get_home_suggestions(
                 .or_insert(HomeSuggestionCandidate {
                     track_id: cand.track_id,
                     artist_key,
+                    album_id: None,
                     score: cand.similarity_score,
                     seed_hits: 1,
                     hub_pct,
+                    track_plays: 0,
+                    album_plays: 0,
                 });
         }
     }
@@ -380,6 +429,7 @@ pub(crate) async fn get_home_suggestions(
         agg.into_values().collect(),
         limit,
         HOME_SUGGESTIONS_MAX_PER_ARTIST,
+        HOME_SUGGESTIONS_MAX_PER_ALBUM,
     );
 
     // Hydrate to full Track rows, then restore rank order (get_tracks_by_ids
@@ -533,14 +583,86 @@ mod tests {
         );
     }
 
+    /// Each candidate lands on its own album by default so the per-album cap
+    /// stays out of the way of tests that are about artist capping or ordering.
     fn home_cand(track_id: i64, artist: &str, score: f64) -> HomeSuggestionCandidate {
         HomeSuggestionCandidate {
             track_id,
             artist_key: artist.to_string(),
+            album_id: Some(track_id),
             score,
             seed_hits: 1,
             hub_pct: 0.0,
+            track_plays: 0,
+            album_plays: 0,
         }
+    }
+
+    #[test]
+    fn unopened_album_outranks_a_worn_one_at_equal_similarity() {
+        let unopened = home_cand(1, "a", 0.5);
+        let worn = HomeSuggestionCandidate {
+            album_plays: 40,
+            ..home_cand(2, "b", 0.5)
+        };
+        let ranked = merge_home_suggestions(vec![worn, unopened], 2, 2, 1);
+        assert_eq!(ranked, vec![1, 2]);
+    }
+
+    #[test]
+    fn never_played_track_outranks_a_familiar_one() {
+        let fresh = HomeSuggestionCandidate {
+            album_plays: 3,
+            ..home_cand(1, "a", 0.5)
+        };
+        let familiar = HomeSuggestionCandidate {
+            album_plays: 3,
+            track_plays: 9,
+            ..home_cand(2, "b", 0.5)
+        };
+        let ranked = merge_home_suggestions(vec![familiar, fresh], 2, 2, 1);
+        assert_eq!(ranked, vec![1, 2]);
+    }
+
+    #[test]
+    fn album_cap_stops_one_record_filling_the_row() {
+        // Three tracks off the same unopened album hold the top scores. With a
+        // cap of 1 per album, only the best survives and the other album's
+        // weaker track takes the second slot.
+        let cands = vec![
+            HomeSuggestionCandidate {
+                album_id: Some(10),
+                ..home_cand(1, "same", 0.99)
+            },
+            HomeSuggestionCandidate {
+                album_id: Some(10),
+                ..home_cand(2, "same", 0.98)
+            },
+            HomeSuggestionCandidate {
+                album_id: Some(10),
+                ..home_cand(3, "same", 0.97)
+            },
+            HomeSuggestionCandidate {
+                album_id: Some(11),
+                ..home_cand(4, "other", 0.10)
+            },
+        ];
+        let ranked = merge_home_suggestions(cands, 3, 2, 1);
+        assert_eq!(ranked, vec![1, 4]);
+    }
+
+    #[test]
+    fn candidates_without_an_album_are_never_album_capped() {
+        // A missing album_id must not collapse every such track into one
+        // synthetic bucket, mirroring the empty-artist-key rule.
+        let cands = (1..=3)
+            .map(|id| HomeSuggestionCandidate {
+                album_id: None,
+                ..home_cand(id, &format!("artist{id}"), 0.5)
+            })
+            .collect();
+        let ranked = merge_home_suggestions(cands, 3, 2, 1);
+        assert_eq!(ranked, vec![1, 2, 3]);
     }
 
     #[test]
@@ -553,6 +675,7 @@ mod tests {
             ],
             2,
             2,
+            1,
         );
         assert_eq!(ranked, vec![2, 3]);
     }
@@ -570,6 +693,7 @@ mod tests {
             ],
             3,
             2,
+            1,
         );
         assert_eq!(ranked, vec![1, 2, 4]);
     }
@@ -587,7 +711,7 @@ mod tests {
             hub_pct: 1.0,
             ..home_cand(3, "c", 0.5)
         };
-        let ranked = merge_home_suggestions(vec![single, hub, consensus], 3, 2);
+        let ranked = merge_home_suggestions(vec![single, hub, consensus], 3, 2, 1);
         assert_eq!(ranked, vec![1, 2, 3]);
     }
 
@@ -644,6 +768,7 @@ mod tests {
             ],
             3,
             2,
+            1,
         );
         assert_eq!(ranked, vec![1, 2, 3]);
     }
