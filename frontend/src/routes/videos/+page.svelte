@@ -770,8 +770,9 @@
 				{:else if loadingBrowse}
 					<p class="picks-loading">Assembling today's picks...</p>
 				{/if}
-				{#each shelfSets as set (set.slug)}
+				{#each shelfSets as set, i (set.slug)}
 					<VideoSetShelf
+						index={dailySet ? i + 1 : i}
 						title={set.title}
 						blurb={set.blurb}
 						items={set.items}

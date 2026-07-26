@@ -79,6 +79,30 @@ const SCAN_CALL_SPACING: Duration = Duration::from_millis(120);
 /// UTC format.
 const DATE_ADDED_NORMALIZED: &str = "replace(substr(t.date_added, 1, 19), 'T', ' ')";
 
+/// One track's primary genre id, correlated to `t.id`.
+///
+/// This is the `track_primary_genre` view's selection rule inlined. Joining the
+/// view instead costs ~230ms of the wall's ~320ms: its `ROW_NUMBER() OVER
+/// (PARTITION BY track_id)` cannot be filtered from the outside, so SQLite
+/// materializes a ranking of all ~65k `track_genres` rows just to answer for the
+/// ~1.1k tracks on the wall. Correlated, it is ~1.1k index seeks and 16ms.
+///
+/// The ordering must stay in step with the view (MIGRATION_033 in
+/// `db::schema`); `load_wall_genre_matches_the_primary_genre_view` fails if it
+/// drifts.
+const PRIMARY_GENRE_FOR_TRACK: &str = "SELECT tg.genre_id
+             FROM track_genres tg
+            WHERE tg.track_id = t.id
+            ORDER BY tg.confidence DESC,
+                     CASE tg.source
+                         WHEN 'musicbrainz' THEN 1
+                         WHEN 'spotify'     THEN 2
+                         WHEN 'lastfm'      THEN 3
+                         ELSE                    9
+                     END,
+                     tg.genre_id
+            LIMIT 1";
+
 /// An artist with liked tracks whose videos need looking up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanTarget {
@@ -353,7 +377,7 @@ pub fn store_artist_scan(conn: &Connection, artist_id: i64, matches: &[VideoMatc
 /// of "same song" and it can be tested directly. See [`LikedVideoGroup`] for
 /// what collapses and what deliberately does not.
 pub fn load_wall(conn: &Connection) -> Result<Vec<LikedVideoGroup>> {
-    let mut stmt = conn.prepare(
+    let sql = format!(
         "SELECT lv.track_id,
                 lv.tidal_video_id,
                 lv.video_title,
@@ -371,11 +395,11 @@ pub fn load_wall(conn: &Connection) -> Result<Vec<LikedVideoGroup>> {
            JOIN tracks t              ON t.id = lv.track_id AND t.is_favorite = 1
            LEFT JOIN artists ar       ON ar.id = t.artist_id
            LEFT JOIN albums al        ON al.id = t.album_id
-           LEFT JOIN track_primary_genre pg ON pg.track_id = t.id
-           LEFT JOIN genres g         ON g.id = pg.primary_genre_id
+           LEFT JOIN genres g         ON g.id = ({PRIMARY_GENRE_FOR_TRACK})
           WHERE lv.suppressed = 0
-          ORDER BY t.date_added DESC, t.title ASC, lv.tidal_video_id ASC",
-    )?;
+          ORDER BY t.date_added DESC, t.title ASC, lv.tidal_video_id ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
 
     struct Flat {
         row: LikedVideoRow,
@@ -904,6 +928,48 @@ mod tests {
             Some("https://resources.tidal.com/images/img/900/640x640.jpg"),
             "the backend always emits 640; the grid downsizes"
         );
+    }
+
+    /// The wall inlines `track_primary_genre`'s selection rule rather than
+    /// joining the view, because the view's window function forces SQLite to
+    /// rank every row in `track_genres` for a wall of ~1k tracks. This asserts
+    /// the two still agree, so the copy cannot quietly drift from the original.
+    #[test]
+    fn load_wall_genre_matches_the_primary_genre_view() {
+        let conn = setup();
+        conn.execute_batch(
+            "INSERT INTO genres (id, name, slug) VALUES
+                 (1, 'Soul', 'soul'), (2, 'Jazz', 'jazz'), (3, 'Pop', 'pop');
+             -- Confidence leads, then source rank, then genre id. Every row here
+             -- would win under some other ordering, so a reshuffle shows up.
+             INSERT INTO track_genres (track_id, genre_id, source, confidence) VALUES
+                 (10, 3, 'musicbrainz', 0.4),
+                 (10, 2, 'lastfm',      0.9),
+                 (10, 1, 'spotify',     0.9);",
+        )
+        .unwrap();
+        let matches = match_videos(
+            &liked_tracks_for_artist(&conn, 1).unwrap(),
+            &[video(900, "Song")],
+        );
+        store_artist_scan(&conn, 1, &matches).unwrap();
+
+        let via_view: Option<String> = conn
+            .query_row(
+                "SELECT g.name FROM track_primary_genre pg
+                   JOIN genres g ON g.id = pg.primary_genre_id
+                  WHERE pg.track_id = 10",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(
+            via_view.as_deref(),
+            Some("Soul"),
+            "spotify outranks lastfm at equal confidence"
+        );
+        assert_eq!(load_wall(&conn).unwrap()[0].genre, via_view);
     }
 
     #[test]

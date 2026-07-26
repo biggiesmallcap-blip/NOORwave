@@ -140,4 +140,22 @@ describe('liked videos contract', () => {
 		expect(page).toContain('Connect TIDAL to find videos');
 		expect(page).toContain('scanPending');
 	});
+
+	test('the wall eases in the way the library suggestion panels do', () => {
+		// The whole wall lands in one payload, so without this ~700 cards snap
+		// into place at once. Same rise, same reduced-motion opt-out.
+		const page = readFileSync(PAGE, 'utf8');
+		expect(page).toContain('style={`--card-index: ${index}`}');
+		expect(page).toContain('animation: card-in 300ms ease-out both;');
+		expect(page).toContain('@keyframes card-in');
+		expect(page).toContain('@media (prefers-reduced-motion: reduce)');
+		// The cap is load-bearing: uncapped, the last card of a 700-card wall
+		// would wait a quarter of a minute for its turn.
+		expect(page).toContain('animation-delay: calc(min(var(--card-index, 0), 23) * 22ms);');
+	});
+
+	test('posters fade in rather than hard-popping as each decodes', () => {
+		const page = readFileSync(PAGE, 'utf8');
+		expect(page).toContain('fadeIn={true}');
+	});
 });

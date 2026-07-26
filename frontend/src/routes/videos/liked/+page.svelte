@@ -371,7 +371,7 @@
 	{:else}
 		<div class="video-grid">
 			{#each filtered as video, index (video.song_key)}
-				<div class="card-slot">
+				<div class="card-slot" style={`--card-index: ${index}`}>
 					<button
 						type="button"
 						class="video-card"
@@ -386,6 +386,7 @@
 								size={320}
 								fallbackText="VID"
 								decorative={true}
+								fadeIn={true}
 							/>
 							<PlayOverlay position="corner" size="sm" label={`Play ${video.track_title}`} />
 							{#if face(video).duration_ms}
@@ -643,6 +644,30 @@
 	.card-slot {
 		position: relative;
 		min-width: 0;
+		/* The same rise the library's suggestion panels use, so a wall that lands
+		   in one go settles in rather than snapping into place. The stagger is
+		   capped at roughly a screenful of cards - uncapped, card 692 would wait
+		   fifteen seconds for its turn. Everything past the cap arrives together,
+		   which is fine because it is all below the fold anyway. */
+		animation: card-in 300ms ease-out both;
+		animation-delay: calc(min(var(--card-index, 0), 23) * 22ms);
+	}
+
+	@keyframes card-in {
+		from {
+			opacity: 0;
+			transform: translateY(8px);
+		}
+		to {
+			opacity: 1;
+			transform: none;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.card-slot {
+			animation: none;
+		}
 	}
 
 	.versions-chip {
