@@ -3459,24 +3459,30 @@
 					subtitle="How much disk noor.db is using, and how to get some back."
 				/>
 				{#if databaseStats}
-					<p class="page-copy">
-						Database file <strong>{formatBytes(databaseStats.file_bytes)}</strong>{#if databaseStats.wal_bytes > 0}, write-ahead log <strong>{formatBytes(databaseStats.wal_bytes)}</strong>{/if}.
-					</p>
-					{#if databaseStats.retired_neighbor_rows > 0}
-						<p class="page-copy">
-							<strong>{databaseStats.retired_neighbor_rows.toLocaleString()}</strong> rows from
-							{databaseStats.retired_models} superseded discovery model{databaseStats.retired_models === 1 ? '' : 's'}
-							are still being cleared in the background. Compacting is worth more once that finishes.
-						</p>
-					{/if}
-					<p class="page-copy">
-						{#if databaseStats.reclaimable_bytes > 0}
-							About <strong>{formatBytes(databaseStats.reclaimable_bytes)}</strong> can be returned to
-							disk right now.
-						{:else}
-							Nothing to reclaim at the moment.
+					<p class="page-copy database-size-headline">
+						<strong>{formatBytes(databaseStats.file_bytes)}</strong>
+						{#if databaseStats.estimated_reclaimable_bytes > 0}
+							<span class="database-size-arrow" aria-hidden="true">-&gt;</span>
+							<strong>~{formatBytes(databaseStats.estimated_after_bytes)}</strong>
+							<span class="database-size-note">after compacting</span>
 						{/if}
 					</p>
+					{#if databaseStats.estimated_reclaimable_bytes > 0}
+						<p class="page-copy">
+							About <strong>{formatBytes(databaseStats.estimated_reclaimable_bytes)}</strong> can be
+							freed{#if databaseStats.retired_neighbor_rows > 0}, mostly
+							{databaseStats.retired_neighbor_rows.toLocaleString()} leftover rows from
+							{databaseStats.retired_models} superseded discovery model{databaseStats.retired_models === 1 ? '' : 's'}{/if}.
+						</p>
+					{:else}
+						<p class="page-copy">Already compact - nothing worth reclaiming.</p>
+					{/if}
+					{#if databaseStats.wal_bytes > 0}
+						<p class="page-copy">
+							Write-ahead log <strong>{formatBytes(databaseStats.wal_bytes)}</strong> (folded back in
+							when you compact).
+						</p>
+					{/if}
 					<p class="page-copy is-warning">
 						Compacting rewrites the entire file. It can take several minutes on a large library,
 						needs about as much free disk as the database currently uses, and the app will be
@@ -3648,6 +3654,23 @@
 {/if}
 
 <style>
+	.database-size-headline {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: baseline;
+		gap: 0.5rem;
+		font-size: var(--font-size-lg);
+	}
+
+	.database-size-arrow {
+		opacity: 0.5;
+	}
+
+	.database-size-note {
+		font-size: var(--font-size-sm);
+		opacity: 0.7;
+	}
+
 	.compact-backdrop {
 		display: grid;
 		place-items: center;

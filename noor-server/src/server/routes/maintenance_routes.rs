@@ -12,6 +12,16 @@ use crate::db::queries;
 use axum::{extract::State, http::StatusCode, response::Json};
 use serde_json::{Value, json};
 
+/// Disk cost of one `track_neighbors` row including its share of the six
+/// secondary indexes. Measured, not guessed: compacting a real library freed
+/// 6,340,902,912 bytes while pruning 14,677,464 rows, which is ~432 bytes each.
+///
+/// This exists because the freelist alone is a bad answer to "how much can I get
+/// back". Retired rows are live rows until they are deleted, so a database
+/// carrying 14.9M of them reports ~0 reclaimable and looks healthy right up
+/// until it does not.
+const BYTES_PER_NEIGHBOR_ROW: i64 = 432;
+
 /// Bytes on disk for the database and its sidecar files. The WAL is included
 /// because a large delete can leave a multi-GB WAL that only checkpointing
 /// clears, and users see that in the folder too.
@@ -68,15 +78,24 @@ pub(super) async fn get_database_stats(
     let (page_size, page_count, freelist, retired_models, retired_rows) = stats;
     let (file_bytes, wal_bytes) = database_file_bytes(&db_path);
 
+    // What Compact would actually free: pages already on the freelist, plus the
+    // retired rows it deletes on the way through.
+    let freelist_bytes = freelist * page_size;
+    let estimated_reclaimable = freelist_bytes + retired_rows * BYTES_PER_NEIGHBOR_ROW;
+    let estimated_after = (file_bytes as i64 - estimated_reclaimable).max(0);
+
     Ok(Json(json!({
         "file_bytes": file_bytes,
         "wal_bytes": wal_bytes,
         "page_size": page_size,
         "page_count": page_count,
         "freelist_pages": freelist,
-        // Space already reclaimable by VACUUM right now.
-        "reclaimable_bytes": freelist * page_size,
-        // Still to be pruned by the background repair; not yet on the freelist.
+        // Free pages only. Near zero on a database whose bloat is retired rows,
+        // which is why it must not be shown as the headline number.
+        "freelist_bytes": freelist_bytes,
+        // Headline: freelist + what the prune inside Compact would remove.
+        "estimated_reclaimable_bytes": estimated_reclaimable,
+        "estimated_after_bytes": estimated_after,
         "retired_models": retired_models,
         "retired_neighbor_rows": retired_rows,
     })))

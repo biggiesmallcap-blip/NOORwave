@@ -2045,7 +2045,11 @@ export interface DatabaseStats {
 	page_size: number;
 	page_count: number;
 	freelist_pages: number;
-	reclaimable_bytes: number;
+	/** Free pages only. Near zero while the bloat is still live retired rows. */
+	freelist_bytes: number;
+	/** What Compact would free: freelist plus the retired rows it deletes. */
+	estimated_reclaimable_bytes: number;
+	estimated_after_bytes: number;
 	retired_models: number;
 	retired_neighbor_rows: number;
 }
