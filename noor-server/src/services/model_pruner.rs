@@ -29,6 +29,15 @@ const BATCH_PAUSE: Duration = Duration::from_millis(150);
 /// Safety stop so a bug can never spin forever. At 20k rows per batch this
 /// covers ~40M neighbour rows, well past anything observed.
 const MAX_BATCHES: usize = 2_000;
+/// Batches the startup repair will do before leaving the rest alone.
+///
+/// Row-by-row deletion is bound by index maintenance (~5k rows/sec measured), so
+/// clearing a large historical backlog this way takes about an hour. That is the
+/// wrong tool: Compact clears the same backlog in a couple of minutes by dropping
+/// the indexes first. The startup pass therefore only nibbles - enough to keep an
+/// ordinary install tidy over a few launches, while a big backlog waits for the
+/// user to press Compact (the Settings panel reports how much is pending).
+const STARTUP_MAX_BATCHES: usize = 25;
 
 /// Outcome of a prune pass.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -40,9 +49,23 @@ pub struct PruneOutcome {
 /// Drive the batched prune to completion. Yields between batches. Safe to call
 /// when there is nothing to do: it costs one indexed lookup and returns zeroes.
 pub async fn prune_now(db: &Database, keep: usize) -> anyhow::Result<PruneOutcome> {
+    prune_bounded(db, keep, MAX_BATCHES).await
+}
+
+/// `prune_now` with an explicit batch ceiling. Stopping early is not a failure:
+/// whatever is left is simply pruned by a later pass or by Compact.
+pub async fn prune_bounded(
+    db: &Database,
+    keep: usize,
+    max_batches: usize,
+) -> anyhow::Result<PruneOutcome> {
     let mut outcome = PruneOutcome::default();
 
-    for _ in 0..MAX_BATCHES {
+    // Without an index on model_id every batch rescans the whole table, which
+    // put the measured throughput at ~4k rows/sec. Build it once up front.
+    db.with_conn(queries::ensure_track_neighbors_model_index)?;
+
+    for _ in 0..max_batches {
         let deleted =
             db.with_conn(|conn| queries::prune_retired_model_neighbors_batch(conn, keep))?;
         if deleted == 0 {
@@ -52,8 +75,25 @@ pub async fn prune_now(db: &Database, keep: usize) -> anyhow::Result<PruneOutcom
         tokio::time::sleep(BATCH_PAUSE).await;
     }
 
-    outcome.models_deleted =
-        db.with_conn(|conn| queries::delete_retired_embedding_models(conn, keep))?;
+    // Only retire the model rows once their neighbours are actually gone;
+    // otherwise a bounded pass would cascade-delete millions of rows in one
+    // statement, which is the cost this batching exists to avoid.
+    let neighbours_remaining: i64 = db.with_conn(|conn| {
+        let retired = queries::retired_embedding_model_ids(conn, keep)?;
+        if retired.is_empty() {
+            return Ok(0);
+        }
+        let placeholders = vec!["?"; retired.len()].join(",");
+        Ok(conn.query_row(
+            &format!("SELECT COUNT(*) FROM track_neighbors WHERE model_id IN ({placeholders})"),
+            rusqlite::params_from_iter(retired.iter()),
+            |r| r.get::<_, i64>(0),
+        )?)
+    })?;
+    if neighbours_remaining == 0 {
+        outcome.models_deleted =
+            db.with_conn(|conn| queries::delete_retired_embedding_models(conn, keep))?;
+    }
 
     if outcome.neighbors_deleted > 0 || outcome.models_deleted > 0 {
         tracing::info!(
@@ -70,7 +110,7 @@ pub async fn prune_now(db: &Database, keep: usize) -> anyhow::Result<PruneOutcom
 /// with nothing to clean pay a single indexed lookup.
 pub fn spawn_startup_repair(db: Database) {
     tokio::spawn(async move {
-        match prune_now(&db, queries::EMBEDDING_MODELS_KEPT).await {
+        match prune_bounded(&db, queries::EMBEDDING_MODELS_KEPT, STARTUP_MAX_BATCHES).await {
             Ok(outcome) if outcome.neighbors_deleted > 0 => {
                 tracing::info!(
                     neighbors = outcome.neighbors_deleted,
@@ -192,6 +232,44 @@ mod tests {
 
         let second = prune_now(&db, 1).await.expect("second prune");
         assert_eq!(second, PruneOutcome::default(), "idempotent");
+    }
+
+    #[test]
+    fn bulk_prune_clears_everything_and_puts_the_indexes_back() {
+        let db = db_with_models();
+
+        let before: Vec<String> = db
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT name FROM sqlite_master WHERE type='index'
+                       AND tbl_name='track_neighbors' AND sql IS NOT NULL ORDER BY name",
+                )?;
+                Ok(stmt
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?)
+            })
+            .expect("index names");
+        assert!(!before.is_empty(), "fixture should have secondary indexes");
+
+        let deleted = db
+            .with_conn(|conn| queries::prune_retired_models_bulk(conn, 1))
+            .expect("bulk prune");
+        assert!(deleted > 0);
+
+        let after: Vec<String> = db
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT name FROM sqlite_master WHERE type='index'
+                       AND tbl_name='track_neighbors' AND sql IS NOT NULL ORDER BY name",
+                )?;
+                Ok(stmt
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?)
+            })
+            .expect("index names");
+        assert_eq!(before, after, "indexes are rebuilt after the bulk delete");
+        assert_eq!(model_ids(&db), vec![2, 3], "active + one rollback kept");
+        assert_eq!(neighbor_models(&db), vec![2, 3]);
     }
 
     #[tokio::test]

@@ -108,28 +108,40 @@ pub(super) async fn compact_database(
 
     let result = tokio::task::spawn_blocking(move || {
         db.with_conn(|conn| {
+            // Clear retired models here rather than waiting for the background
+            // trickle. Deleting them row-by-row is index-bound and takes about an
+            // hour on a real backlog; the bulk path drops the secondary indexes,
+            // deletes in one pass and rebuilds them, which is the difference
+            // between "click Compact and wait a few minutes" and "leave the app
+            // running for an hour first". This is also the only place that may
+            // do it: the user has been told the app will not respond.
+            queries::ensure_track_neighbors_model_index(conn)?;
+            let pruned = queries::prune_retired_models_bulk(conn, queries::EMBEDDING_MODELS_KEPT)?;
+
             // Fold the WAL back in first, otherwise VACUUM copies pages that are
             // about to be checkpointed anyway.
             let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
             conn.execute_batch("VACUUM;")?;
-            Ok(())
+            Ok(pruned)
         })
     })
     .await;
 
     match result {
-        Ok(Ok(())) => {
+        Ok(Ok(pruned)) => {
             let (after, _) = database_file_bytes(&db_path);
             tracing::info!(
                 before_bytes = before,
                 after_bytes = after,
-                "compact_database: VACUUM complete"
+                pruned_rows = pruned,
+                "compact_database: prune + VACUUM complete"
             );
             Ok(Json(json!({
                 "status": "ok",
                 "before_bytes": before,
                 "after_bytes": after,
                 "reclaimed_bytes": before.saturating_sub(after),
+                "pruned_rows": pruned,
             })))
         }
         Ok(Err(e)) => {

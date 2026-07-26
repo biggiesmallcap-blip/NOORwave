@@ -58,6 +58,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_054,
     MIGRATION_055,
     MIGRATION_056,
+    MIGRATION_057,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1576,6 +1577,19 @@ CREATE TABLE IF NOT EXISTS video_history (
 );
 CREATE INDEX IF NOT EXISTS idx_video_history_started ON video_history(started_at);
 CREATE INDEX IF NOT EXISTS idx_video_history_video ON video_history(tidal_video_id);
+"#;
+
+// track_neighbors had no index with model_id as its leading column: the primary
+// key is (track_id, neighbor_track_id, model_id) and the two secondary indexes
+// lead with track_id and neighbor_track_id. Anything selecting by model alone
+// therefore scanned the whole table.
+//
+// That is exactly what pruning retired models does, and it made the cleanup
+// unusable: measured on an 18.4M-row table it managed ~4k rows/sec, about an
+// hour to clear 14.7M dead rows, because every 20k-row batch re-scanned the
+// table. With this index each batch is a seek.
+const MIGRATION_057: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_track_neighbors_model ON track_neighbors(model_id);
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
