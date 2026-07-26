@@ -912,3 +912,22 @@ TasteVector (discovery_ranking::build_session_taste) so watching tunes the sets.
 This is the Phase-3 taste-feedback piece (like/not-interested on editorial
 videos) the plan left deferred.
 Spawned by: videos taste loop + era set 2026-07-25
+
+### home suggestions: end-to-end app verification not yet run
+
+The hidden-gem rewrite of /api/home/suggestions is covered by 21 unit tests and
+was validated by running the new SQL read-only against the live library (seed
+blend spans Willie Nelson / James Taylor / Moby / Marley / Tame Impala; the
+unexplored-album query returns in 84ms and surfaces records like Mobb Deep's
+The Infamous and Marley's Exodus). What has NOT happened is a rebuild of
+noor-server and a look at the actual Library home murals, because the rebuild
+would have killed the running app. On the next rebuild, confirm: no suggested
+track appears in listen_history within 30 days, no two suggested tracks share an
+album_id, no artist appears more than twice in either mural, and the right-click
+context menus still work on both.
+
+Also unresolved: one full `cargo test -p noor-server` run reported 1485 passed /
+1 failed, and the failing test name was not captured. Five subsequent full runs
+were clean (1486 passed), so it is intermittent and was not reproduced. If it
+resurfaces, capture the name before rerunning.
+Spawned by: home suggestions hidden-gem rewrite 2026-07-26
