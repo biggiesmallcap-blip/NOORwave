@@ -265,83 +265,78 @@
 </svelte:head>
 
 <div class="page">
-	<header class="page-header">
-		<div class="heading">
-			<!-- The way back, in the place /videos puts the way here. Its own line
-			     above the title so it reads as navigation, not as a label. -->
-			<a class="back-link" href="/videos">
-				<span aria-hidden="true">&lsaquo;</span> Videos
-			</a>
-			<h1>Liked videos</h1>
-			<p class="blurb">
-				The videos among your likes. Most liked songs do not have one, so this is a slice of
-				the library rather than a mirror of it.
-			</p>
-		</div>
-		<div class="header-actions">
-			<button
-				type="button"
-				class="header-action"
-				onclick={() => void refresh()}
-				disabled={refreshing || !tidalConnected}
-			>
-				{refreshing ? 'Refreshing...' : 'Refresh'}
-			</button>
-		</div>
-	</header>
-
-	{#if !loading && !error && scanPending}
-		<p class="scan-note">
-			Looking for videos across your liked artists - {scannedArtists} of {totalArtists} done.
-			Cards appear as they are found.
-		</p>
-	{/if}
-
-	<!-- One row: find, narrow, order, play. Genre and year are selects rather
-	     than pill rails because they are unbounded - 35 genres and 40 years as
-	     chips buried the wall under five rows of chrome. -->
-	{#if !loading && videos.length > 0}
-		<div class="tools">
+	<!-- The same header every search surface in the app uses: field centred in a
+	     three-column grid so the flanking slots cannot shunt it sideways, with
+	     the controls directly beneath it. /videos and /library are the same
+	     shape; a page-title block above the field was what made this one read
+	     as a different app. -->
+	<header class="search-header">
+		<div class="search-tools">
+			<div class="tools-lead">
+				<a class="back-link" href="/videos">
+					<span aria-hidden="true">&lsaquo;</span> Videos
+				</a>
+			</div>
 			<SearchField
 				bind:value={query}
 				placeholder="Search your liked videos"
 				ariaLabel="Search your liked videos"
 				variant="page"
-				size="sm"
-				fill
 				suppressSuggestions
 			/>
-
-			{#if genres.length > 0}
-				<select class="tool-select" bind:value={activeGenre} aria-label="Filter by genre">
-					<option value={null}>All genres</option>
-					{#each genres as genre (genre)}
-						<option value={genre}>{genre}</option>
-					{/each}
-				</select>
-			{/if}
-
-			{#if years.length > 0}
-				<select class="tool-select" bind:value={activeYear} aria-label="Filter by year">
-					<option value={null}>All years</option>
-					{#each years as year (year)}
-						<option value={year}>{year}</option>
-					{/each}
-				</select>
-			{/if}
-
-			<select class="tool-select" bind:value={sort} aria-label="Sort">
-				<option value="recent">Recently liked</option>
-				<option value="title">A-Z</option>
-			</select>
-
-			<div class="tool-actions">
-				<button class="tool-btn tool-btn--accent" onclick={() => void playAll()}>Play all</button>
-				<button class="tool-btn" onclick={() => void shuffle()}>Shuffle</button>
+			<div class="tools-action">
+				<button
+					type="button"
+					class="header-action"
+					onclick={() => void refresh()}
+					disabled={refreshing || !tidalConnected}
+				>
+					{refreshing ? 'Refreshing...' : 'Refresh'}
+				</button>
 			</div>
 		</div>
 
-		{#if activeGenre || activeYear !== null}
+		<!-- Narrow, order, play. Genre and year are selects rather than pill
+		     rails because they are unbounded - 35 genres and 40 years as chips
+		     buried the wall under five rows of chrome. -->
+		{#if !loading && videos.length > 0}
+			<div class="tools">
+				{#if genres.length > 0}
+					<select class="tool-select" bind:value={activeGenre} aria-label="Filter by genre">
+						<option value={null}>All genres</option>
+						{#each genres as genre (genre)}
+							<option value={genre}>{genre}</option>
+						{/each}
+					</select>
+				{/if}
+
+				{#if years.length > 0}
+					<select class="tool-select" bind:value={activeYear} aria-label="Filter by year">
+						<option value={null}>All years</option>
+						{#each years as year (year)}
+							<option value={year}>{year}</option>
+						{/each}
+					</select>
+				{/if}
+
+				<select class="tool-select" bind:value={sort} aria-label="Sort">
+					<option value="recent">Recently liked</option>
+					<option value="title">A-Z</option>
+				</select>
+
+				<button class="tool-btn tool-btn--accent" onclick={() => void playAll()}>Play all</button>
+				<button class="tool-btn" onclick={() => void shuffle()}>Shuffle</button>
+			</div>
+		{/if}
+
+		{#if !loading && !error && scanPending}
+			<p class="scan-note">
+				Looking for videos across your liked artists - {scannedArtists} of {totalArtists} done.
+				Cards appear as they are found.
+			</p>
+		{/if}
+
+		{#if !loading && (activeGenre || activeYear !== null)}
 			<p class="filter-note">
 				Showing {filtered.length} of {videos.length}
 				<button class="link-btn" onclick={() => { activeGenre = null; activeYear = null; }}>
@@ -349,7 +344,7 @@
 				</button>
 			</p>
 		{/if}
-	{/if}
+	</header>
 
 	{#if loading}
 		<div class="video-grid">
@@ -460,18 +455,36 @@
 		padding: var(--space-5) var(--space-5) var(--space-8);
 	}
 
-	.page-header {
-		display: flex;
-		align-items: flex-start;
-		justify-content: space-between;
-		gap: var(--space-4);
-		flex-wrap: wrap;
-	}
-
-	.heading {
+	/* Lifted verbatim from /videos so the two pages cannot drift apart again. */
+	.search-header {
 		display: flex;
 		flex-direction: column;
-		gap: 4px;
+		gap: 10px;
+		width: 100%;
+		max-width: var(--content-width);
+		margin: 0 auto var(--space-2);
+		padding: 0 4px;
+	}
+
+	/* Three columns so the field stays optically centred no matter how wide the
+	   flanking slots get. */
+	.search-tools {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) minmax(0, 560px) minmax(0, 1fr);
+		align-items: center;
+		gap: var(--space-3);
+	}
+
+	.tools-lead {
+		display: flex;
+		justify-content: flex-start;
+		min-width: 0;
+	}
+
+	.tools-action {
+		display: flex;
+		justify-content: flex-end;
+		gap: var(--space-2);
 		min-width: 0;
 	}
 
@@ -487,24 +500,6 @@
 
 	.back-link:hover {
 		color: var(--text-primary);
-	}
-
-	.heading h1 {
-		margin: 0;
-		font-size: var(--font-size-2xl);
-	}
-
-	.blurb {
-		margin: 0;
-		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
-		max-width: 56ch;
-	}
-
-	.header-actions {
-		display: flex;
-		gap: var(--space-2);
-		flex-wrap: wrap;
 	}
 
 	.header-action {
@@ -539,22 +534,22 @@
 
 	.scan-note {
 		margin: 0;
+		text-align: center;
 		color: var(--text-tertiary);
 		font-size: var(--font-size-sm);
 	}
 
+	/* Controls sit under the field and centred on it, the way /library puts its
+	   pills, rather than strung out across the full page width. */
 	.tools {
 		display: flex;
 		align-items: center;
+		justify-content: center;
 		gap: var(--space-2);
 		flex-wrap: wrap;
-	}
-
-	/* The field earns a share of the row, not the whole thing: left unbounded it
-	   pushed the selects and the actions onto lines of their own. */
-	.tools :global(.sf) {
-		flex: 1 1 220px;
-		max-width: 320px;
+		width: 100%;
+		max-width: 720px;
+		margin: 0 auto;
 	}
 
 	/* Height, radius and padding come from the shared toolbar-control shape
@@ -577,12 +572,6 @@
 
 	.tool-select:hover {
 		color: var(--text-primary);
-	}
-
-	.tool-actions {
-		display: flex;
-		gap: var(--space-2);
-		flex-wrap: wrap;
 	}
 
 	.tool-btn {
@@ -625,6 +614,7 @@
 
 	.filter-note {
 		margin: 0;
+		text-align: center;
 		color: var(--text-tertiary);
 		font-size: var(--font-size-sm);
 	}
