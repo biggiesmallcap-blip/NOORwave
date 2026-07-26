@@ -16,7 +16,7 @@
 		randomAlbums: [] as CachedHomeAlbumCard[],
 		randomRequestKey: '',
 		suggestionTracks: [] as CachedTrack[],
-		suggestionServerTracks: [] as CachedTrack[],
+		suggestionAlbums: [] as CachedHomeAlbumCard[],
 		suggestionRequestKey: '',
 	};
 </script>
@@ -343,11 +343,11 @@
 			recentTracks = data.tracks.slice(0, RECENT_TRACK_LIMIT);
 			homePanelCandidateCache.recentTracks = recentTracks;
 			if (recentTracks.length === 0) {
-				suggestionCandidateTracks = [];
-				suggestionServerTracks = [];
+				suggestionTracks = [];
+				suggestionAlbums = [];
 				suggestionCandidateRequestKey = '';
 				homePanelCandidateCache.suggestionTracks = [];
-				homePanelCandidateCache.suggestionServerTracks = [];
+				homePanelCandidateCache.suggestionAlbums = [];
 				homePanelCandidateCache.suggestionRequestKey = '';
 			}
 		} catch (error) {
@@ -1374,12 +1374,13 @@
 	let randomPanelTracks = $state<Track[]>(homePanelCandidateCache.randomTracks);
 	let randomPanelAlbums = $state<HomeAlbumCard[]>(homePanelCandidateCache.randomAlbums);
 	let randomPanelRequestKey = $state(homePanelCandidateCache.randomRequestKey);
-	// Same-artist / same-album expansion of the seeds. Kept only as a fallback
-	// (offline / server error) and as tail-fill when the server returns fewer
-	// than a full panel; the server list is the primary, cross-artist source.
-	let suggestionCandidateTracks = $state<Track[]>(homePanelCandidateCache.suggestionTracks);
-	// Server-ranked, cross-artist, library-resolved picks from /api/home/suggestions.
-	let suggestionServerTracks = $state<Track[]>(homePanelCandidateCache.suggestionServerTracks);
+	// Server-ranked hidden-gem picks. The server owns seed selection, recency
+	// exclusion and ranking; there is deliberately no client-side fallback. An
+	// empty discovery panel is a correct outcome - a panel full of what was just
+	// played is not, and that is exactly what the old same-artist tail-fill
+	// produced.
+	let suggestionTracks = $state<Track[]>(homePanelCandidateCache.suggestionTracks);
+	let suggestionAlbums = $state<HomeAlbumCard[]>(homePanelCandidateCache.suggestionAlbums);
 	let suggestionCandidateRequestKey = $state(homePanelCandidateCache.suggestionRequestKey);
 
 	// Max tracks (and albums) one artist may contribute to a suggestion panel, so
@@ -1407,91 +1408,15 @@
 		return out;
 	}
 
-	// The current same-artist expansion, scored/sorted exactly as before. Used
-	// only when there is no server list (offline) and for tail-fill.
-	function sameArtistScoredTracks(seeds: Track[]): Track[] {
-		const seedTrackIds = new Set(seeds.map(track => track.id));
-		const seedArtistIds = new Set(seeds.map(track => track.artist_id).filter((id): id is number => id != null));
-		const seedAlbumIds = new Set(seeds.map(track => track.album_id).filter((id): id is number => id != null));
-		return suggestionCandidateTracks
-			.map(track => ({ track, score: listenHistoryTrackScore(track, seedTrackIds, seedArtistIds, seedAlbumIds) }))
-			.filter(({ score }) => score > 0)
-			.sort((a, b) => b.score - a.score || stableRank(a.track.id, dailySalt(11)) - stableRank(b.track.id, dailySalt(11)))
-			.map(({ track }) => track);
-	}
-
-	// Ordered candidate pool: server-ranked cross-artist picks first, then the
-	// same-artist expansion as tail-fill (deduped, seeds removed). Falls back to
-	// the same-artist pool entirely when the server list is empty.
-	function combinedSuggestionTracks(): Track[] {
-		const seeds = listenHistorySeeds();
-		const seedTrackIds = new Set(seeds.map(track => track.id));
-		const server = suggestionServerTracks.filter(track => !seedTrackIds.has(track.id));
-		const fallback = sameArtistScoredTracks(seeds);
-		if (server.length === 0) return fallback;
-		const seen = new Set(server.map(track => track.id));
-		const tail = fallback.filter(track => !seen.has(track.id));
-		return [...server, ...tail];
-	}
-
 	let suggestedTrackItems = $derived.by<HomeMuralItem[]>(() =>
-		capPerArtist(combinedSuggestionTracks(), SUGGESTION_ARTIST_CAP)
+		capPerArtist(suggestionTracks, SUGGESTION_ARTIST_CAP)
 			.slice(0, HOME_MURAL_ITEM_LIMIT)
 			.map(trackToMuralItem)
 	);
 
-	let suggestedAlbumItems = $derived.by<HomeMuralItem[]>(() => {
-		const seeds = listenHistorySeeds();
-		const seedAlbumIds = new Set(seeds.map(track => track.album_id).filter((id): id is number => id != null));
-		const seedArtistIds = new Set(seeds.map(track => track.artist_id).filter((id): id is number => id != null));
-
-		// One album card per distinct non-seed album, in candidate order (server
-		// ranking first, same-artist tail after). Albums by artists you did NOT
-		// seed come first so the panel is genuine cross-artist discovery; albums by
-		// the seed artists themselves only fill in if the cross-artist pool is thin.
-		const seenAlbums = new Set<number>();
-		const crossArtist: { card: HomeAlbumCard; artistKey: number | string }[] = [];
-		const seedArtist: { card: HomeAlbumCard; artistKey: number | string }[] = [];
-		for (const track of combinedSuggestionTracks()) {
-			if (!track.album_id || seedAlbumIds.has(track.album_id) || seenAlbums.has(track.album_id)) continue;
-			seenAlbums.add(track.album_id);
-			const entry = { card: homeAlbumCardFromTrack(track), artistKey: suggestionArtistKey(track) };
-			const isSeedArtist = track.artist_id != null && seedArtistIds.has(track.artist_id);
-			(isSeedArtist ? seedArtist : crossArtist).push(entry);
-		}
-		const chosen: HomeAlbumCard[] = [];
-		const chosenIds = new Set<number>();
-
-		// Drain a bucket in two passes: artist-diverse first (cap per artist) so
-		// the panel leads with variety, then top up from whatever the cap skipped.
-		// Cross-artist is fully exhausted before seed-artist albums are touched, so
-		// the discography of a seed artist only ever fills a genuine shortfall.
-		const drain = (bucket: { card: HomeAlbumCard; artistKey: number | string }[]) => {
-			const perArtist = new Map<number | string, number>();
-			for (const { card, artistKey } of bucket) {
-				if (chosen.length >= HOME_MURAL_ITEM_LIMIT) return;
-				if (chosenIds.has(card.id)) continue;
-				if (artistKey !== '') {
-					const count = perArtist.get(artistKey) ?? 0;
-					if (count >= SUGGESTION_ARTIST_CAP) continue;
-					perArtist.set(artistKey, count + 1);
-				}
-				chosen.push(card);
-				chosenIds.add(card.id);
-			}
-			for (const { card } of bucket) {
-				if (chosen.length >= HOME_MURAL_ITEM_LIMIT) return;
-				if (chosenIds.has(card.id)) continue;
-				chosen.push(card);
-				chosenIds.add(card.id);
-			}
-		};
-
-		drain(crossArtist);
-		drain(seedArtist);
-
-		return chosen.map(albumToMuralItem);
-	});
+	let suggestedAlbumItems = $derived.by<HomeMuralItem[]>(() =>
+		suggestionAlbums.slice(0, HOME_MURAL_ITEM_LIMIT).map(albumToMuralItem)
+	);
 
 	let randomTrackItems = $derived.by<HomeMuralItem[]>(() =>
 		randomPanelTracks.map(trackToMuralItem)
@@ -1642,45 +1567,19 @@
 		return result;
 	}
 
-	// Same-artist / same-album expansion of the seeds. This is the legacy
-	// candidate source, now demoted to fallback + tail-fill behind the server list.
-	async function sameArtistExpansion(seedTracks: Track[]): Promise<Track[]> {
-		const seedArtistIds = uniquePositiveIds(seedTracks.map(track => track.artist_id), 8);
-		const seedAlbumIds = uniquePositiveIds(seedTracks.map(track => track.album_id), 8);
-		const artistResults = await Promise.allSettled(seedArtistIds.map(id => cachedApi.getArtistTracks(id)));
-		const albumResults = await Promise.allSettled(seedAlbumIds.map(id => cachedApi.getAlbumTracks(id)));
-		const artistTracks = artistResults.flatMap(result =>
-			result.status === 'fulfilled' ? result.value.tracks : []
-		);
-		const albumTracks = albumResults.flatMap(result =>
-			result.status === 'fulfilled' ? result.value.tracks : []
-		);
-		return uniqueById([...seedTracks, ...albumTracks, ...artistTracks]);
-	}
-
 	async function loadSuggestionCandidates(seedTracks: Track[], requestKey: string) {
 		const seedIds = uniquePositiveIds(seedTracks.map(track => track.id), HOME_MURAL_ITEM_LIMIT);
-		// Server-ranked cross-artist picks are the primary source; the same-artist
-		// expansion runs in parallel as fallback + tail-fill. Both degrade to []
-		// on failure so a hiccup never blanks the panels.
-		const [serverTracks, expansion] = await Promise.all([
-			cachedApi
-				.getHomeSuggestions(seedIds, 50)
-				.then(res => res.tracks ?? [])
-				.catch(error => {
-					console.error('Failed to load home suggestions:', error);
-					return [] as Track[];
-				}),
-			sameArtistExpansion(seedTracks).catch(error => {
-				console.error('Failed to load same-artist expansion:', error);
-				return [] as Track[];
-			}),
-		]);
+		const result = await cachedApi
+			.getHomeSuggestions(seedIds, 50)
+			.catch(error => {
+				console.error('Failed to load home suggestions:', error);
+				return { tracks: [] as Track[], albums: [] as HomeAlbumCard[] };
+			});
 		if (suggestionCandidateRequestKey === requestKey) {
-			suggestionServerTracks = serverTracks;
-			suggestionCandidateTracks = expansion;
-			homePanelCandidateCache.suggestionServerTracks = serverTracks;
-			homePanelCandidateCache.suggestionTracks = expansion;
+			suggestionTracks = result.tracks ?? [];
+			suggestionAlbums = result.albums ?? [];
+			homePanelCandidateCache.suggestionTracks = suggestionTracks;
+			homePanelCandidateCache.suggestionAlbums = suggestionAlbums;
 			homePanelCandidateCache.suggestionRequestKey = requestKey;
 		}
 	}
@@ -1700,34 +1599,6 @@
 		}
 
 		return seeds;
-	}
-
-	function listenHistoryTrackScore(
-		track: Track,
-		seedTrackIds: Set<number>,
-		seedArtistIds: Set<number>,
-		seedAlbumIds: Set<number>,
-	): number {
-		if (seedTrackIds.has(track.id)) return 0;
-		let score = 0;
-		if (seedArtistIds.has(track.artist_id)) score += 8;
-		if (track.album_id && seedAlbumIds.has(track.album_id)) score += 3;
-		if (track.is_favorite) score += 1.2;
-		if ((track.play_count ?? 0) === 0) score += 1.4;
-		else score += Math.min(track.play_count ?? 0, 12) * 0.12;
-		if (track.fidelity_score > 0) score += Math.min(track.fidelity_score, 100) / 100;
-		if (track.last_played_at) score -= 0.8;
-		return score;
-	}
-
-	function homeAlbumCardFromTrack(track: Track): HomeAlbumCard {
-		return {
-			id: track.album_id ?? 0,
-			title: track.album_title ?? 'Unknown Album',
-			artist_id: track.artist_id ?? null,
-			artist_name: track.artist_name,
-			artwork_url: track.artwork_url,
-		};
 	}
 
 	function albumFromHomeCard(card: HomeAlbumCard): Album {
