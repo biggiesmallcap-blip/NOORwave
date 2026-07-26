@@ -87,7 +87,7 @@ const REMASTER_YEAR_DRIFT: i32 = 5;
 // ── Normalisation helpers ─────────────────────────────────────────────────────
 
 /// Lowercase, strip non-alphanumeric (keep spaces), collapse whitespace.
-fn normalize(s: &str) -> String {
+pub(crate) fn normalize(s: &str) -> String {
     let lower = s.to_lowercase();
     let filtered: String = lower
         .chars()
@@ -188,8 +188,9 @@ fn canonicalize_title(title: &str) -> String {
 
 /// Strips ignorable AND variant-marker segments. Used as the bucketing key so
 /// "Song" and "Song (Remix)" land in the same bucket and the classifier can
-/// then label the relationship.
-fn base_title(title: &str) -> String {
+/// then label the relationship. The liked-videos matcher reuses it for the same
+/// reason in reverse: "Song (Live)" is exactly the video it wants for "Song".
+pub(crate) fn base_title(title: &str) -> String {
     let predicate = |seg: &str| is_ignorable_title_segment(seg) || segment_carries_variant(seg);
 
     let mut output = strip_bracketed_segments(title.trim(), predicate);

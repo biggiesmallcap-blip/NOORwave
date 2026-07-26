@@ -53,6 +53,7 @@
 			size={320}
 			fallbackText="VID"
 			decorative={true}
+			fadeIn={true}
 		/>
 		<PlayOverlay
 			position="corner"

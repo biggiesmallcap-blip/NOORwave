@@ -38,7 +38,7 @@ describe('Videos editorial browse state', () => {
 
 	test('every other built set renders as its own shelf', () => {
 		expect(source).toContain("discoverSets.filter((s) => s.slug !== 'daily-picks'");
-		expect(source).toContain('{#each shelfSets as set (set.slug)}');
+		expect(source).toContain('{#each shelfSets as set, i (set.slug)}');
 		expect(source).toContain('<VideoSetShelf');
 		expect(source).toContain('onPlayAll={() => playFromSet(set, 0)}');
 	});
@@ -55,6 +55,23 @@ describe('Videos editorial browse state', () => {
 
 	test('legacy landing chips only appear when there is no editorial content', () => {
 		expect(source).toContain('!hasBrowseContent && !loadingBrowse}');
+	});
+
+	test('shelves ease themselves in, staggered by their place in the stack', () => {
+		// Sets are built one at a time and land across several polls, so each
+		// shelf owns its entrance. The index only spaces out a batch that shows
+		// up together; daily picks holds slot 0 whenever it is present.
+		const shelf = read('../src/lib/components/video/VideoSetShelf.svelte');
+		expect(shelf).toContain('animation: shelf-in 340ms ease-out both;');
+		expect(shelf).toContain('animation-delay: calc(var(--shelf-index, 0) * 70ms);');
+		expect(shelf).toContain('@keyframes shelf-in');
+		expect(shelf).toContain('@media (prefers-reduced-motion: reduce)');
+		expect(source).toContain('index={dailySet ? i + 1 : i}');
+	});
+
+	test('shelf posters fade in instead of popping as each decodes', () => {
+		const card = read('../src/lib/components/video/VideoCard.svelte');
+		expect(card).toContain('fadeIn={true}');
 	});
 });
 
@@ -131,7 +148,9 @@ describe('Browse while playing', () => {
 	test('the dock docks to the corner in browse mode and stays mounted', () => {
 		expect(dock).toContain("let mode = $derived(onVideosRoute && !$videoBrowseMode ? 'full' : 'mini')");
 		expect(dock).toContain('setVideoBrowseMode(false)');
-		expect(dock).toContain("page.url.pathname.startsWith('/videos')");
+		// Exact match: full mode positions the player over a stage anchor, and
+		// /videos is the only route that publishes one.
+		expect(dock).toContain("page.url.pathname === '/videos'");
 		expect(dock).toContain('getBoundingClientRect()');
 	});
 

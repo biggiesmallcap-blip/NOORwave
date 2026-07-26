@@ -12,6 +12,9 @@
 		items,
 		eyebrow = null,
 		playLabel = 'Play all',
+		// Position in the stack, used only to stagger the entrance so a batch of
+		// shelves arriving in one poll cascades instead of appearing as a slab.
+		index = 0,
 		onSelect,
 		onPlayAll,
 	}: {
@@ -20,12 +23,13 @@
 		items: TidalSearchVideo[];
 		eyebrow?: string | null;
 		playLabel?: string;
+		index?: number;
 		onSelect: (video: TidalSearchVideo, index: number) => void;
 		onPlayAll?: () => void;
 	} = $props();
 </script>
 
-<section class="set-shelf">
+<section class="set-shelf" style={`--shelf-index: ${index}`}>
 	<header class="set-head">
 		<div class="set-titles">
 			{#if eyebrow}<p class="eyebrow">{eyebrow}</p>{/if}
@@ -55,6 +59,29 @@
 		grid-template-columns: minmax(0, 1fr);
 		min-width: 0;
 		gap: 10px;
+		/* Shelves are built one at a time and land across several polls, so each
+		   one eases itself in on mount. `--shelf-index` (set by the route) lets a
+		   batch that arrives together cascade rather than appear as one block;
+		   the same rise the library's suggestion panels use. */
+		animation: shelf-in 340ms ease-out both;
+		animation-delay: calc(var(--shelf-index, 0) * 70ms);
+	}
+
+	@keyframes shelf-in {
+		from {
+			opacity: 0;
+			transform: translateY(10px);
+		}
+		to {
+			opacity: 1;
+			transform: none;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.set-shelf {
+			animation: none;
+		}
 	}
 
 	.set-head {
