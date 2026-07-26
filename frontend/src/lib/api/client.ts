@@ -2019,13 +2019,24 @@ export interface HomeRecommendationsResponse {
 }
 
 /**
- * Ranked, cross-artist, library-resolved picks for the Library home
- * "Suggested tracks / albums" murals. Server orders them; the client renders
- * in that order. `tracks` may come back shorter than requested (thin library /
- * cold learning model), so callers top up from a local fallback.
+ * Hidden-gem picks for the Library home "Suggested tracks / albums" murals.
+ * The server owns seed selection, recency exclusion and ranking; the client
+ * renders both lists in the order given. `albums` is a first-class list, not
+ * something derived from `tracks` - never-opened albums have their own recall
+ * path server-side. Either list may come back short (thin library / cold
+ * learning model); the murals render what they get rather than topping up.
  */
+export interface SuggestedAlbum {
+	id: number;
+	title: string;
+	artist_id: number | null;
+	artist_name: string | null;
+	artwork_url: string | null;
+}
+
 export interface HomeSuggestionsResponse {
 	tracks: Track[];
+	albums: SuggestedAlbum[];
 }
 
 export interface LastfmAuthStartResponse {
@@ -3551,11 +3562,10 @@ export const api = {
 		return fetchApi<HomeRecommendationsResponse>('/api/home/recommendations');
 	},
 
-	// Cross-artist, library-resolved suggestions for the Library home murals.
-	// Seeds are the user's most recent listens; the server blends embedding
-	// neighbours + Last.fm similar and ranks with a per-artist cap. Empty seeds
-	// return an empty list (the client then keeps its local same-artist fill).
-	getHomeSuggestions(seedTrackIds: number[], limit?: number) {
+	// Hidden-gem suggestions for the Library home murals. Seeds are advisory:
+	// pass the user's recent listens to prime the "recent" slice, or omit them
+	// and let the server derive everything from listen history.
+	getHomeSuggestions(seedTrackIds: number[] = [], limit?: number) {
 		return fetchApi<HomeSuggestionsResponse>('/api/home/suggestions', undefined, {
 			method: 'POST',
 			body: JSON.stringify({ seed_track_ids: seedTrackIds, limit }),
