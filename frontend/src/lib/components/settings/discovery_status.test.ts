@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { DiscoveryStatus } from '$lib/api/client';
 import {
+	applyTrainingProgress,
 	discoveryLastTrainedAt,
 	shouldContinueDiscoveryCompletionRefresh,
 	shouldRefreshAfterTerminalDiscoveryProgress
@@ -162,5 +163,54 @@ describe('discovery status display', () => {
 		expect(shouldContinueDiscoveryCompletionRefresh(running, 12, 12)).toBe(false);
 		expect(shouldContinueDiscoveryCompletionRefresh(completed, 1, 12)).toBe(false);
 		expect(shouldContinueDiscoveryCompletionRefresh(null, 1, 12)).toBe(false);
+	});
+});
+
+describe('training progress merge', () => {
+	const terminalRun = {
+		id: 30,
+		model_id: 30,
+		stage: 'evaluate',
+		status: 'completed',
+		progress: 1,
+		items_total: 100,
+		items_done: 100,
+		started_at: '2026-07-26 09:00:00',
+		finished_at: '2026-07-26 09:10:00',
+		error_text: null
+	};
+
+	it('marks the run running so the Stop button appears', () => {
+		// Regression: the status read right after starting a run came from a 30s
+		// cache still holding the previous run's terminal status, and the progress
+		// merge never rewrote `status`. The bar advanced with no Stop button.
+		const merged = applyTrainingProgress(discoveryStatus({ latest_run: terminalRun }), {
+			progress: 0.2,
+			stage: 'behavioral',
+			tracks_done: 20,
+			tracks_total: 100
+		});
+
+		expect(merged?.latest_run?.status).toBe('running');
+		expect(merged?.latest_run?.progress).toBe(0.2);
+		expect(merged?.latest_run?.stage).toBe('behavioral');
+		expect(merged?.latest_run?.items_done).toBe(20);
+	});
+
+	it('keeps existing fields when the event omits them', () => {
+		const merged = applyTrainingProgress(
+			discoveryStatus({ latest_run: { ...terminalRun, progress: 0.4, stage: 'audio' } }),
+			{}
+		);
+
+		expect(merged?.latest_run?.progress).toBe(0.4);
+		expect(merged?.latest_run?.stage).toBe('audio');
+		expect(merged?.latest_run?.status).toBe('running');
+	});
+
+	it('is a no-op when there is no run to merge into', () => {
+		expect(applyTrainingProgress(discoveryStatus({ latest_run: null }), { progress: 0.5 })
+			?.latest_run).toBeNull();
+		expect(applyTrainingProgress(null, { progress: 0.5 })).toBeNull();
 	});
 });

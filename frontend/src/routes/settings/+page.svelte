@@ -52,6 +52,7 @@
 	import { searchSettings, type SettingsSearchEntry } from '$lib/components/settings/settingsSearch';
 	import IntegrationsPanel from '$lib/components/settings/IntegrationsPanel.svelte';
 	import {
+		applyTrainingProgress,
 		discoveryLastTrainedAt,
 		shouldContinueDiscoveryCompletionRefresh,
 		shouldRefreshAfterTerminalDiscoveryProgress
@@ -489,18 +490,7 @@
 			}
 
 			if (latest.type === 'training_progress') {
-				if (discoveryStatus?.latest_run) {
-					discoveryStatus = {
-						...discoveryStatus,
-						latest_run: {
-							...discoveryStatus.latest_run,
-							progress: typeof latest.progress === 'number' ? latest.progress : discoveryStatus.latest_run.progress,
-							stage: typeof latest.stage === 'string' ? latest.stage : discoveryStatus.latest_run.stage,
-							items_done: typeof latest.tracks_done === 'number' ? latest.tracks_done : discoveryStatus.latest_run.items_done,
-							items_total: typeof latest.tracks_total === 'number' ? latest.tracks_total : discoveryStatus.latest_run.items_total,
-						}
-					};
-				}
+				discoveryStatus = applyTrainingProgress(discoveryStatus, latest);
 				if (shouldRefreshAfterTerminalDiscoveryProgress(latest)) scheduleDiscoveryCompletionRefresh();
 			}
 
@@ -960,9 +950,13 @@
 		}
 	}
 
+	// Always reads through the uncached client. This is a live status poll driven
+	// by start/stop clicks and the completion watcher; served from the 30s query
+	// cache it reported the PREVIOUS run's terminal status right after a start,
+	// which is what hid the Stop button for the whole run.
 	async function loadDiscoveryStatus() {
 		try {
-			const response = await cachedApi.getDiscoveryStatus();
+			const response = await api.getDiscoveryStatus();
 			discoveryStatus = response.status;
 			discoveryEngine = response.status.selected_engine;
 			discoveryEngineTrainable = response.status.selected_engine_trainable;
