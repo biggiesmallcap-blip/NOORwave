@@ -931,3 +931,16 @@ Also unresolved: one full `cargo test -p noor-server` run reported 1485 passed /
 were clean (1486 passed), so it is intermittent and was not reproduced. If it
 resurfaces, capture the name before rerunning.
 Spawned by: home suggestions hidden-gem rewrite 2026-07-26
+
+### home suggestions: cold path still costs ~1s after any new play
+
+The murals now fetch once on mount, in parallel with the library load, and a
+warm server cache answers in ~2ms. But the server cache key includes the 3 most
+recent plays, so listening to anything invalidates it and the next load pays a
+full 8-seed orchestrate_song fan-out (measured ~0.94s with a warm Last.fm
+similar cache; the older 6-seed comment in the code cites ~8s fully cold).
+Options if this still feels slow: warm the cache in the background off the
+listen_history write path, or coarsen the recent slice so a single play does not
+invalidate the whole key. Not done because it needs a server-side scheduler and
+the current behaviour is already off the boot critical path.
+Spawned by: home suggestions load-time fix 2026-07-26
