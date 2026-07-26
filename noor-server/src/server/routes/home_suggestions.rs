@@ -28,6 +28,10 @@ const HOME_SUGGESTIONS_SEED_LIMIT: usize =
 const HOME_SUGGESTIONS_PER_SEED: usize = 24;
 const HOME_SUGGESTIONS_DEFAULT_LIMIT: usize = 50;
 const HOME_SUGGESTIONS_MAX_PER_ARTIST: usize = 2;
+// How far back a play disqualifies a track (and its album) from being suggested.
+// Named so it can be tuned without restructuring: 30 days is aggressive for a
+// small library but right for a large, mostly-unplayed one.
+const HOME_SUGGESTIONS_RECENCY_EXCLUSION_DAYS: i64 = 30;
 
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct HomeSuggestionsRequest {
@@ -85,6 +89,47 @@ pub(crate) fn merge_home_suggestions(
         out.push(c.track_id);
     }
     out
+}
+
+/// Track and album ids the user has played inside the recency window. Both are
+/// excluded from candidacy: the track because they just heard it, the album
+/// because "more from the record you just played" is the exact failure this
+/// endpoint exists to avoid.
+#[derive(Debug, Default)]
+pub(crate) struct RecentPlayExclusions {
+    pub(crate) track_ids: HashSet<i64>,
+    pub(crate) album_ids: HashSet<i64>,
+}
+
+fn recent_play_exclusions(
+    conn: &rusqlite::Connection,
+    days: i64,
+) -> anyhow::Result<RecentPlayExclusions> {
+    let cutoff = format!("-{} days", days.max(0));
+
+    let mut track_stmt = conn.prepare(
+        "SELECT DISTINCT lh.track_id
+         FROM listen_history lh
+         WHERE lh.started_at >= datetime('now', ?1)",
+    )?;
+    let track_ids: HashSet<i64> = track_stmt
+        .query_map(params![cutoff], |row| row.get::<_, i64>(0))?
+        .collect::<Result<HashSet<_>, _>>()?;
+
+    let mut album_stmt = conn.prepare(
+        "SELECT DISTINCT t.album_id
+         FROM listen_history lh
+         JOIN tracks t ON t.id = lh.track_id
+         WHERE lh.started_at >= datetime('now', ?1) AND t.album_id IS NOT NULL",
+    )?;
+    let album_ids: HashSet<i64> = album_stmt
+        .query_map(params![cutoff], |row| row.get::<_, i64>(0))?
+        .collect::<Result<HashSet<_>, _>>()?;
+
+    Ok(RecentPlayExclusions {
+        track_ids,
+        album_ids,
+    })
 }
 
 /// One representative track per top-listened artist, most-listened artist first.
@@ -441,6 +486,51 @@ mod tests {
             .with_conn(|conn| recent_seed_pool(conn, 10))
             .expect("pool");
         assert_eq!(pool, vec![101, 100]);
+    }
+
+    #[test]
+    fn recent_play_exclusions_cover_tracks_and_their_albums() {
+        let db = fresh_migrated_db();
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;
+            conn.execute(
+                "INSERT INTO albums (id, title, artist_id) VALUES (10, 'Fresh', 1), (11, 'Stale', 1)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, album_id, file_path) VALUES
+                    (100, 'Played Recently', 1, 10, '/1'),
+                    (101, 'Sibling On Same Album', 1, 10, '/2'),
+                    (102, 'Played Long Ago', 1, 11, '/3')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO listen_history (track_id, started_at) VALUES
+                    (100, datetime('now', '-5 days')),
+                    (102, datetime('now', '-60 days'))",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("seed fixture");
+
+        let excl = db
+            .with_conn(|conn| recent_play_exclusions(conn, 30))
+            .expect("exclusions");
+
+        assert!(excl.track_ids.contains(&100), "5-day-old play is excluded");
+        assert!(
+            !excl.track_ids.contains(&102),
+            "60-day-old play is outside the window"
+        );
+        assert!(
+            excl.album_ids.contains(&10),
+            "album of the recent play is excluded"
+        );
+        assert!(
+            !excl.album_ids.contains(&11),
+            "album of the old play is not excluded"
+        );
     }
 
     fn home_cand(track_id: i64, artist: &str, score: f64) -> HomeSuggestionCandidate {
