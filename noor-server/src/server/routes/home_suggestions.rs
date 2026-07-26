@@ -44,6 +44,10 @@ const HOME_SUGGESTIONS_ALBUM_LIMIT: usize = 24;
 const HOME_SUGGESTIONS_MAX_ALBUMS_PER_ARTIST: usize = 2;
 // Multiplier on the SQL LIMIT so the per-artist cap has spare candidates.
 const HOME_SUGGESTIONS_ALBUM_OVERFETCH: usize = 4;
+// How old a cached payload may be and still be served instantly while a fresh
+// one computes behind it. Also the prune horizon, since a payload past its 6h
+// freshness window is exactly what this path hands back.
+const HOME_SUGGESTIONS_STALE_MAX_AGE_SECS: i64 = 7 * 24 * 60 * 60;
 
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct HomeSuggestionsRequest {
@@ -507,11 +511,10 @@ fn home_suggestions_cache_key(seed_ids: &[i64], limit: usize) -> String {
     format!("home_suggest:v2:{limit}:{joined}")
 }
 
-async fn read_home_suggestions_cache(state: &SharedState, cache_key: &str) -> Option<Value> {
+fn read_home_suggestions_cache(db: &crate::db::Database, cache_key: &str) -> Option<Value> {
     let now = unix_now_secs();
     let key = cache_key.to_string();
-    let s = state.read().await;
-    s.db.with_conn(|conn| {
+    db.with_conn(|conn| {
         conn.query_row(
             "SELECT payload_json FROM provider_recommendation_cache
                   WHERE provider = 'home_suggestions' AND cache_key = ?1 AND expires_at > ?2",
@@ -526,20 +529,50 @@ async fn read_home_suggestions_cache(state: &SharedState, cache_key: &str) -> Op
     .and_then(|raw| serde_json::from_str(&raw).ok())
 }
 
-async fn write_home_suggestions_cache(state: &SharedState, cache_key: &str, payload: &Value) {
+/// The most recently computed payload under ANY seed set, ignoring expiry but
+/// bounded by `max_age_secs`. Backs the stale-while-revalidate path: the exact
+/// seed set changes every time the user plays something (the recent slice moves),
+/// so an exact-key miss is the common case on a boot after listening. Serving the
+/// last good payload instantly and refreshing behind it keeps the murals off the
+/// critical path instead of paying the fan-out in the foreground.
+fn read_recent_home_suggestions_cache(
+    db: &crate::db::Database,
+    max_age_secs: i64,
+) -> Option<Value> {
+    let floor = unix_now_secs() - max_age_secs.max(0);
+    db.with_conn(|conn| {
+        conn.query_row(
+            "SELECT payload_json FROM provider_recommendation_cache
+                  WHERE provider = 'home_suggestions' AND fetched_at >= ?1
+                  ORDER BY fetched_at DESC
+                  LIMIT 1",
+            params![floor],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    })
+    .ok()
+    .flatten()
+    .and_then(|raw| serde_json::from_str(&raw).ok())
+}
+
+fn write_home_suggestions_cache(db: &crate::db::Database, cache_key: &str, payload: &Value) {
     let now = unix_now_secs();
     let expires = now + 6 * 60 * 60;
     let Ok(serialized) = serde_json::to_string(payload) else {
         return;
     };
     let key = cache_key.to_string();
-    let s = state.read().await;
-    let _ = s.db.with_conn(|conn| {
-        // Prune expired rows so the per-seed-set keys don't accumulate unbounded.
+    let _ = db.with_conn(|conn| {
+        // Prune old rows so the per-seed-set keys don't accumulate unbounded.
+        // Prunes by age, not by expiry: an expired row is still the payload the
+        // stale-while-revalidate path serves for instant first paint, so it has
+        // to outlive its own freshness window.
         let _ = conn.execute(
             "DELETE FROM provider_recommendation_cache
-                  WHERE provider = 'home_suggestions' AND expires_at < ?1",
-            params![now],
+                  WHERE provider = 'home_suggestions' AND fetched_at < ?1",
+            params![now - HOME_SUGGESTIONS_STALE_MAX_AGE_SECS],
         );
         conn.execute(
             "INSERT INTO provider_recommendation_cache (provider, cache_key, payload_json, fetched_at, expires_at)
@@ -556,6 +589,13 @@ async fn write_home_suggestions_cache(state: &SharedState, cache_key: &str, payl
 
 /// POST /api/home/suggestions - hidden-gem picks for the Library home murals.
 /// Body: `{ seed_track_ids?, limit? }`. Returns `{ tracks, albums }`.
+///
+/// Stale-while-revalidate. The seed set embeds the user's 3 most recent plays,
+/// so listening to anything moves the cache key and an exact hit is the
+/// exception, not the rule, on a boot after a listening session. Rather than pay
+/// the multi-second fan-out in the foreground every time, an exact miss serves
+/// the last good payload immediately and recomputes behind it. Only a user who
+/// has never loaded the murals waits.
 pub(crate) async fn get_home_suggestions(
     State(state): State<SharedState>,
     Json(req): Json<HomeSuggestionsRequest>,
@@ -565,10 +605,9 @@ pub(crate) async fn get_home_suggestions(
         .unwrap_or(HOME_SUGGESTIONS_DEFAULT_LIMIT)
         .clamp(1, 60);
 
-    let (db, lastfm, lastfm_similar_cache) = {
+    let db = {
         let g = state.read().await;
-        let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
-        (g.db.clone(), lastfm, g.lastfm_similar_cache.clone())
+        g.db.clone()
     };
 
     // Seeds: the client's recent list if it sent one, otherwise our own, blended
@@ -597,9 +636,56 @@ pub(crate) async fn get_home_suggestions(
     }
 
     let cache_key = home_suggestions_cache_key(&seeds, limit);
-    if let Some(cached) = read_home_suggestions_cache(&state, &cache_key).await {
+    if let Some(cached) = read_home_suggestions_cache(&db, &cache_key) {
         return Ok(Json(cached));
     }
+
+    // Exact miss. If anything recent is on disk, hand it back now and refresh in
+    // the background. Duplicate spawns are possible if two loads race, but the
+    // client fetches once per mount per refresh bucket and the write is
+    // idempotent, so the cost is a wasted recompute rather than a wrong answer.
+    if let Some(stale) =
+        read_recent_home_suggestions_cache(&db, HOME_SUGGESTIONS_STALE_MAX_AGE_SECS)
+    {
+        let bg_state = state.clone();
+        tokio::spawn(async move {
+            match compute_home_suggestions(&bg_state, &seeds, limit).await {
+                Ok(payload) => {
+                    let bg_db = {
+                        let g = bg_state.read().await;
+                        g.db.clone()
+                    };
+                    write_home_suggestions_cache(&bg_db, &cache_key, &payload);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "home_suggestions: background refresh failed");
+                }
+            }
+        });
+        return Ok(Json(stale));
+    }
+
+    // Nothing cached at all (first ever load): compute in the foreground.
+    let payload = compute_home_suggestions(&state, &seeds, limit)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    write_home_suggestions_cache(&db, &cache_key, &payload);
+    Ok(Json(payload))
+}
+
+/// The actual fan-out + ranking. Split out of the handler so the
+/// stale-while-revalidate path can run it in a background task.
+async fn compute_home_suggestions(
+    state: &SharedState,
+    seeds: &[i64],
+    limit: usize,
+) -> anyhow::Result<Value> {
+    let (db, lastfm, lastfm_similar_cache) = {
+        let g = state.read().await;
+        let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
+        (g.db.clone(), lastfm, g.lastfm_similar_cache.clone())
+    };
+    let seeds = seeds.to_vec();
 
     let exclusions = db
         .with_conn(|conn| recent_play_exclusions(conn, HOME_SUGGESTIONS_RECENCY_EXCLUSION_DAYS))
@@ -675,13 +761,11 @@ pub(crate) async fn get_home_suggestions(
     // then rank.
     let candidate_ids: Vec<i64> = agg.keys().copied().collect();
     let ids_for_stats = candidate_ids.clone();
-    let (album_by_track, play_stats) = db
-        .with_conn(move |conn| {
-            let albums = candidate_album_ids(conn, &ids_for_stats)?;
-            let stats = candidate_play_stats(conn, &ids_for_stats)?;
-            Ok((albums, stats))
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (album_by_track, play_stats) = db.with_conn(move |conn| {
+        let albums = candidate_album_ids(conn, &ids_for_stats)?;
+        let stats = candidate_play_stats(conn, &ids_for_stats)?;
+        Ok((albums, stats))
+    })?;
 
     let mut candidates: Vec<HomeSuggestionCandidate> = Vec::new();
     for (track_id, mut cand) in agg {
@@ -706,9 +790,8 @@ pub(crate) async fn get_home_suggestions(
     // Hydrate to full Track rows, then restore rank order (get_tracks_by_ids
     // returns rows in arbitrary order).
     let ids_for_query = ranked_ids.clone();
-    let tracks = db
-        .with_conn(move |conn| crate::playback::queue::get_tracks_by_ids(conn, &ids_for_query))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let tracks =
+        db.with_conn(move |conn| crate::playback::queue::get_tracks_by_ids(conn, &ids_for_query))?;
     let mut by_id: HashMap<i64, crate::db::models::Track> =
         tracks.into_iter().map(|t| (t.id, t)).collect();
     let ordered: Vec<crate::db::models::Track> = ranked_ids
@@ -746,9 +829,7 @@ pub(crate) async fn get_home_suggestions(
         .filter(|a| !excluded_albums.contains(&a.id))
         .collect();
 
-    let payload = json!({ "tracks": ordered, "albums": albums });
-    write_home_suggestions_cache(&state, &cache_key, &payload).await;
-    Ok(Json(payload))
+    Ok(json!({ "tracks": ordered, "albums": albums }))
 }
 
 #[cfg(test)]
@@ -926,6 +1007,56 @@ mod tests {
         let ranked = (1..=3).map(|id| album(id, None)).collect();
         let capped = cap_albums_per_artist(ranked, 3, 2);
         assert_eq!(capped.len(), 3);
+    }
+
+    #[test]
+    fn stale_read_returns_newest_payload_under_any_seed_set() {
+        let db = fresh_migrated_db();
+        // Two payloads under different seed sets. The newer one is already past
+        // its freshness window, which is exactly the case the stale path exists
+        // for: the user played something, so no exact key will ever hit.
+        write_home_suggestions_cache(&db, "home_suggest:v2:50:1-2-3", &json!({"tracks":["old"]}));
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        write_home_suggestions_cache(&db, "home_suggest:v2:50:4-5-6", &json!({"tracks":["new"]}));
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE provider_recommendation_cache SET expires_at = 1
+                     WHERE provider = 'home_suggestions'",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("expire rows");
+
+        // An exact hit must still respect expiry.
+        assert!(
+            read_home_suggestions_cache(&db, "home_suggest:v2:50:4-5-6").is_none(),
+            "expired rows are not fresh hits"
+        );
+        // The stale path ignores expiry and takes the most recently written.
+        let stale = read_recent_home_suggestions_cache(&db, 7 * 24 * 60 * 60)
+            .expect("a stale payload is available");
+        assert_eq!(stale["tracks"][0], "new");
+    }
+
+    #[test]
+    fn stale_read_ignores_payloads_older_than_the_window() {
+        let db = fresh_migrated_db();
+        write_home_suggestions_cache(&db, "home_suggest:v2:50:1", &json!({"tracks":["ancient"]}));
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE provider_recommendation_cache SET fetched_at = 1
+                     WHERE provider = 'home_suggestions'",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("age rows");
+
+        assert!(
+            read_recent_home_suggestions_cache(&db, 7 * 24 * 60 * 60).is_none(),
+            "a payload older than the window is not served"
+        );
     }
 
     #[test]
