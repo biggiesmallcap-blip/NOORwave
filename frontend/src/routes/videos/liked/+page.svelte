@@ -755,10 +755,17 @@
 		align-items: center;
 	}
 
+	/* width:100% is load-bearing. A button shrink-to-fits its content, so a long
+	   nowrap title made the card wider than its grid cell, the poster stretched
+	   to that width, and aspect-ratio scaled its height to match - a handful of
+	   cards rendering oversized and spilling over their neighbours. Pinning the
+	   card to the cell is what lets the title ellipse instead of pushing. */
 	.video-card {
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-2);
+		width: 100%;
+		max-width: 100%;
 		padding: 0;
 		border: none;
 		background: transparent;
@@ -797,6 +804,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 2px;
+		width: 100%;
 		min-width: 0;
 	}
 

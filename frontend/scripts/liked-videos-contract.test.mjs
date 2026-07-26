@@ -89,6 +89,17 @@ describe('liked videos contract', () => {
 		expect(page).toContain('videos.map((v) => v.genre)');
 	});
 
+	test('a card is pinned to its grid cell, so a long title cannot resize it', () => {
+		// A button shrink-to-fits its content: with a nowrap title and no width,
+		// a long title made the card wider than its cell, the poster stretched to
+		// match and aspect-ratio scaled its height, so the tile spilled over its
+		// neighbours. Measured 56 of 692 cards before the pin.
+		const page = readFileSync(PAGE, 'utf8');
+		const card = page.slice(page.indexOf('.video-card {'), page.indexOf('.poster-wrap {'));
+		expect(card).toContain('width: 100%;');
+		expect(card).toContain('min-width: 0;');
+	});
+
 	test('artwork goes through the shared component at a legal TIDAL size', () => {
 		const page = readFileSync(PAGE, 'utf8');
 		expect(page).toContain('<ArtworkImage');
