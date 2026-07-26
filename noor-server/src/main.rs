@@ -822,6 +822,12 @@ async fn main() -> Result<()> {
     services::scrobbling::spawn_drain(state.clone());
     info!("Scrobble outbox drain spawned");
 
+    // One-shot repair for databases written before retrains pruned themselves.
+    // Self-terminating and silent; installs with nothing to clean pay one
+    // indexed lookup. Frees pages for reuse - Settings > Compact database is
+    // what actually returns them to disk.
+    services::model_pruner::spawn_startup_repair(state.read().await.db.clone());
+
     // Check for auto-sync daily services and trigger sync if needed
     {
         let state_read = state.read().await;

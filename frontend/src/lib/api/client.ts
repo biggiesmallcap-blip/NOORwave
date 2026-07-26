@@ -2026,6 +2026,25 @@ export interface HomeRecommendationsResponse {
  * path server-side. Either list may come back short (thin library / cold
  * learning model); the murals render what they get rather than topping up.
  */
+/**
+ * Database size breakdown for the Settings maintenance panel.
+ *
+ * `reclaimable_bytes` is space already on the freelist that a VACUUM would
+ * return to disk. `retired_neighbor_rows` is what the background pruner has yet
+ * to delete - it becomes reclaimable once it has run. Deleting rows never
+ * shrinks the file on its own (auto_vacuum is NONE).
+ */
+export interface DatabaseStats {
+	file_bytes: number;
+	wal_bytes: number;
+	page_size: number;
+	page_count: number;
+	freelist_pages: number;
+	reclaimable_bytes: number;
+	retired_models: number;
+	retired_neighbor_rows: number;
+}
+
 export interface SuggestedAlbum {
 	id: number;
 	title: string;
@@ -3859,6 +3878,22 @@ export const api = {
 
 	getServerToken() {
 		return fetchApi<{ token: string }>('/api/server/token');
+	},
+
+	getDatabaseStats() {
+		return fetchApi<DatabaseStats>('/api/server/database/stats');
+	},
+
+	// Rewrites the whole database file. Slow by nature (minutes on a large
+	// library) and needs roughly the file's size in free space, so it is only
+	// ever called from an explicit user action.
+	compactDatabase() {
+		return fetchApi<{
+			status: string;
+			before_bytes: number;
+			after_bytes: number;
+			reclaimed_bytes: number;
+		}>('/api/server/database/compact', undefined, { method: 'POST' });
 	},
 
 	regenerateServerToken() {

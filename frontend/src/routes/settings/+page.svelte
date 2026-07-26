@@ -13,6 +13,7 @@
 		type AudioQuality,
 		type ExclusiveLatencyMode,
 		type VideoQualityMode,
+		type DatabaseStats,
 		type DiscoveryEngine,
 		type DiscoveryStatus,
 		type DiscoveryTrainingSafetyProfile,
@@ -1007,6 +1008,50 @@
 		discoveryStatus?.latest_run?.status === 'running'
 	);
 
+	let databaseStats = $state<DatabaseStats | null>(null);
+	let databaseCompacting = $state(false);
+	let databaseCompactResult = $state('');
+	let databaseCompactError = $state('');
+
+	function formatBytes(bytes: number): string {
+		if (!Number.isFinite(bytes) || bytes <= 0) return '0 MB';
+		const gb = bytes / 1024 ** 3;
+		if (gb >= 1) return `${gb.toFixed(1)} GB`;
+		return `${Math.max(1, Math.round(bytes / 1024 ** 2))} MB`;
+	}
+
+	async function loadDatabaseStats() {
+		try {
+			databaseStats = await api.getDatabaseStats();
+			markServerOnline();
+		} catch (error) {
+			if (isFetchConnectionError(error)) markServerOffline();
+		}
+	}
+
+	async function compactDatabase() {
+		databaseCompacting = true;
+		databaseCompactError = '';
+		databaseCompactResult = '';
+		try {
+			const result = await api.compactDatabase();
+			databaseCompactResult =
+				result.reclaimed_bytes > 0
+					? `Reclaimed ${formatBytes(result.reclaimed_bytes)} (now ${formatBytes(result.after_bytes)}).`
+					: `Nothing to reclaim; the database is already compact (${formatBytes(result.after_bytes)}).`;
+			await loadDatabaseStats();
+		} catch (error) {
+			if (isFetchConnectionError(error)) {
+				markServerOffline();
+				databaseCompactError = SERVER_UNREACHABLE_MESSAGE;
+			} else {
+				databaseCompactError = `Compacting failed: ${error}`;
+			}
+		} finally {
+			databaseCompacting = false;
+		}
+	}
+
 	async function loadRadioSimilarityStatus() {
 		try {
 			const status = await cachedApi.getRadioSimilarityStatus();
@@ -1567,6 +1612,7 @@
 			void loadPortableSnapshot();
 			void loadRadioSimilarityStatus();
 			void loadLastfmStatus();
+			void loadDatabaseStats();
 			return;
 		}
 		if (activeCategory === 'audio') {
@@ -3398,6 +3444,60 @@
 			{/if}
 
 			{#if activeCategory === 'sources'}
+			<section data-setting-id="database-size" class="glass-panel section-panel">
+				<SectionHeader
+					eyebrow="Cleanup"
+					title="Database size"
+					subtitle="How much disk noor.db is using, and how to get some back."
+				/>
+				{#if databaseStats}
+					<p class="page-copy">
+						Database file <strong>{formatBytes(databaseStats.file_bytes)}</strong>{#if databaseStats.wal_bytes > 0}, write-ahead log <strong>{formatBytes(databaseStats.wal_bytes)}</strong>{/if}.
+					</p>
+					{#if databaseStats.retired_neighbor_rows > 0}
+						<p class="page-copy">
+							<strong>{databaseStats.retired_neighbor_rows.toLocaleString()}</strong> rows from
+							{databaseStats.retired_models} superseded discovery model{databaseStats.retired_models === 1 ? '' : 's'}
+							are still being cleared in the background. Compacting is worth more once that finishes.
+						</p>
+					{/if}
+					<p class="page-copy">
+						{#if databaseStats.reclaimable_bytes > 0}
+							About <strong>{formatBytes(databaseStats.reclaimable_bytes)}</strong> can be returned to
+							disk right now.
+						{:else}
+							Nothing to reclaim at the moment.
+						{/if}
+					</p>
+					<p class="page-copy is-warning">
+						Compacting rewrites the entire file. It can take several minutes on a large library,
+						needs about as much free disk as the database currently uses, and the app will be
+						unresponsive while it runs. Everything keeps working without it - the space is reused
+						internally either way.
+					</p>
+				{:else}
+					<p class="page-copy">Reading database size…</p>
+				{/if}
+				{#if databaseCompactResult}
+					<p class="page-copy">{databaseCompactResult}</p>
+				{/if}
+				{#if databaseCompactError}
+					<p class="page-copy is-error" role="alert">{databaseCompactError}</p>
+				{/if}
+				<div class="action-row">
+					<button class="btn btn-glass" onclick={() => void loadDatabaseStats()} disabled={databaseCompacting}>
+						Refresh
+					</button>
+					<button
+						class="btn btn-glass danger"
+						onclick={compactDatabase}
+						disabled={databaseCompacting || !databaseStats}
+					>
+						{databaseCompacting ? 'Compacting…' : 'Compact database'}
+					</button>
+				</div>
+			</section>
+
 			<section data-setting-id="clear-non-library-entries" class="glass-panel section-panel">
 				<SectionHeader
 					eyebrow="Cleanup"

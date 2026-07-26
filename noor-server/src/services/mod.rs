@@ -14,6 +14,7 @@ pub mod learning;
 pub mod library_dedupe;
 pub mod listen_history_backfill;
 pub mod listenbrainz;
+pub mod model_pruner;
 pub mod musicbrainz;
 pub mod neighbor_refresh;
 pub mod radio;
