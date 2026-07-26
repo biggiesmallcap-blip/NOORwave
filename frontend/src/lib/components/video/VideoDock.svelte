@@ -24,7 +24,13 @@
 	// the corner as a small moving thumbnail (mini). Browse mode is the third
 	// case: still on /videos, but the listener stepped back to the picks, so
 	// the route withdraws its stage and the player takes the corner instead.
-	let onVideosRoute = $derived(page.url.pathname.startsWith('/videos'));
+	//
+	// Exact match, not a prefix: full mode is only meaningful where a stage
+	// exists to be positioned over, and /videos is the only route that publishes
+	// one. A prefix let /videos/liked claim full mode with no anchor to track,
+	// so the player rendered unpositioned across that page's grid instead of
+	// docking to the corner.
+	let onVideosRoute = $derived(page.url.pathname === '/videos');
 	let active = $derived($videoSession.active && Boolean($videoSession.streamUrl));
 	let mode = $derived(onVideosRoute && !$videoBrowseMode ? 'full' : 'mini');
 

@@ -945,6 +945,7 @@ fn fresh_test_state(db: Database) -> crate::AppState {
         lastfm_enrich_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         musicbrainz_enrich_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         tidal_repair_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        library_video_scan_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         tidal_sync_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         tidal_sync_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         lastfm_enrich_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),

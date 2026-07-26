@@ -935,3 +935,57 @@ deriving it in the reader) would cut the table materially. Not done with the
 prune because it needs a reader/writer change plus a backfill decision for
 existing rows.
 Spawned by: noor.db size investigation 2026-07-26
+### db: migration ids are positional, so concurrent branches silently skip one
+
+run_migrations counts applied rows (SELECT COUNT(*) FROM _migrations) and treats
+a migration's index in the MIGRATIONS slice as its id. Two branches that each
+append a migration therefore both claim the same id, and whichever merges second
+lands at an index the other branch's DB has already counted past - so it is
+skipped with no error and its tables never get created. This bit the liked-videos
+work directly: 056 (video_history) and the liked-video tables were written in
+parallel sessions and had to be manually sequenced. Track applied ids as a set
+(and give each migration a stable name or id independent of slice position) so
+merge order stops mattering. Needs care: existing DBs only have the count, so the
+first run has to backfill ids 1..N before switching to set semantics.
+Spawned by: liked videos library 2026-07-25
+
+### db: one shared connection + a boot-time thundering herd starves requests
+
+Database::with_conn hands every caller the same Mutex<Connection>, so every HTTP
+request and every background sweep serialises on one lock. At boot that is at its
+worst: the LibrarySynced listener and the 90s catch-up loop fire auto_enrich,
+tidal::repair, library_dedupe and library_videos within seconds of each other,
+all competing with whatever the UI is asking for. Measured during a liked-videos
+scan: a genre snapshot query at 1171ms and /api/videos/liked starved past a 20s
+client timeout, on a machine doing nothing else. This is a plausible cause of the
+laggy first minute after launch and of "functions not working yet" right after
+boot, well beyond the one surface where it was noticed.
+
+Two halves to it. Reads that run long (anything touching the track_primary_genre
+view, which is recomputed per read over all of track_genres) should not hold the
+shared connection at all - db.open_isolated() + WAL already exists for exactly
+this and services/video_sets.rs and services/library_videos.rs use it, so the
+pattern is proven, just not applied consistently. And the boot triggers should be
+staggered rather than all landing at once; today the only spacing is the 60s/90s
+initial sleeps, which do not separate the tasks from each other.
+
+Worth measuring before designing: log lock wait time in with_conn under a debug
+flag, so "the DB lock" stops being a hypothesis.
+Spawned by: liked videos library 2026-07-26
+
+### videos: other big grids may still render every row at once
+
+Resolved for /videos/liked, which now mounts 72 cards and grows on scroll. Noted
+because the shape is not unique to that page: a route that renders one card per
+row of an unbounded list will block the main thread for as long as the list is
+long, and no amount of backend work touches it. Worth a sweep of the other grid
+surfaces (playlists, artist detail, the tidal browse pages) for the same pattern.
+
+Two things learned there that are worth reusing. An IntersectionObserver sentinel
+has to be re-observed after each growth - it only fires on a threshold crossing,
+so one still in view after a page landed never fires again, and the list silently
+stops. And a CSS entrance animation wants `animation-fill-mode: backwards`, not
+`both`: a filled opacity/transform animation keeps a stacking context alive for
+the life of the element, which is enough to trap a popout's z-index inside its
+own card.
+Spawned by: liked videos library 2026-07-26

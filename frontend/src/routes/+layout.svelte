@@ -2154,6 +2154,10 @@
 
 	.workspace {
 		overflow-y: auto;
+		/* Reserve the scrollbar gutter permanently. Without it, switching to a
+		   view that overflows steals ~5px of width and every centered element
+		   (the search field, the filter pills) jumps sideways. */
+		scrollbar-gutter: stable;
 		padding: 28px 30px 48px;
 		min-width: 0;
 		-webkit-overflow-scrolling: touch;

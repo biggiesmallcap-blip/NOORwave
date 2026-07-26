@@ -707,7 +707,12 @@
 <div class="videos-page">
 	<header class="search-header">
 		<div class="search-tools">
-			<span class="tools-spacer" aria-hidden="true"></span>
+			<!-- The left column was pure ballast for the centered field. The way
+			     into your own liked videos lives here rather than crowding the
+			     contextual slot opposite, which has one job. -->
+			<div class="tools-lead">
+				<a class="header-action" href="/videos/liked">Liked videos</a>
+			</div>
 			<SearchField
 				bind:value={query}
 				bind:inputEl
@@ -765,8 +770,9 @@
 				{:else if loadingBrowse}
 					<p class="picks-loading">Assembling today's picks...</p>
 				{/if}
-				{#each shelfSets as set (set.slug)}
+				{#each shelfSets as set, i (set.slug)}
 					<VideoSetShelf
+						index={dailySet ? i + 1 : i}
 						title={set.title}
 						blurb={set.blurb}
 						items={set.items}
@@ -980,9 +986,16 @@
 		gap: var(--space-3);
 	}
 
+	.tools-lead {
+		display: flex;
+		justify-content: flex-start;
+		min-width: 0;
+	}
+
 	.tools-action {
 		display: flex;
 		justify-content: flex-end;
+		gap: var(--space-2);
 		min-width: 0;
 	}
 
@@ -1276,13 +1289,16 @@
 	}
 
 	.hint-chip {
+		display: inline-flex;
+		align-items: center;
+		height: var(--control-h);
 		background: var(--bg-surface);
 		border: 1px solid var(--border-subtle);
 		color: var(--text-secondary);
 		border-radius: 999px;
-		padding: 7px 13px;
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-bold);
+		padding: 0 14px;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-medium);
 	}
 
 	.hint-chip:hover {
@@ -1321,8 +1337,8 @@
 			grid-template-columns: 1fr;
 		}
 
-		.tools-spacer {
-			display: none;
+		.tools-lead {
+			justify-content: center;
 		}
 
 		.tools-action {
