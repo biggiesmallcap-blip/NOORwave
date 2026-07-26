@@ -1213,13 +1213,6 @@
       oninput={onInput}
       onkeydown={inputKeydown}
     />
-    <p class="kbd-hint">
-      <kbd>/</kbd> focus &nbsp;·&nbsp;
-      <kbd>↑</kbd><kbd>↓</kbd> move &nbsp;·&nbsp;
-      <kbd>Enter</kbd> play &nbsp;·&nbsp;
-      <kbd>Shift</kbd>+<kbd>Enter</kbd> queue &nbsp;·&nbsp;
-      <kbd>Ctrl</kbd>+<kbd>Enter</kbd> next
-    </p>
     {#if results && activeQueryText}
       <div class="filter-pills">
         {#each [
@@ -1951,16 +1944,6 @@
     margin: 0 auto var(--space-5);
     padding: 0 4px;
   }
-  .kbd-hint {
-    margin: 10px auto 0;
-    max-width: 720px;
-    font-size: var(--font-size-xs);
-    color: var(--text-tertiary);
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 2px;
-  }
   .no-audio-results {
     color: var(--text-muted);
     font-size: var(--font-size-sm);
@@ -1975,14 +1958,20 @@
     justify-content: center;
   }
   .filter-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: var(--control-h);
     background: transparent;
     border: 1px solid var(--border-subtle);
     color: var(--text-secondary);
-    border-radius: var(--radius-md);
-    padding: 5px 14px;
-    font-size: var(--font-size-xs);
+    border-radius: 999px;
+    padding: 0 14px;
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-medium);
     cursor: pointer;
     font-family: inherit;
+    white-space: nowrap;
     transition: background 0.15s, border-color 0.15s, color 0.15s;
   }
   .filter-pill:hover {
@@ -1994,18 +1983,6 @@
     border-color: var(--accent);
     color: #fff;
     font-weight: var(--font-weight-semibold);
-  }
-  .kbd-hint kbd {
-    display: inline-block;
-    padding: 1px 5px;
-    background: var(--bg-raised);
-    border: 1px solid var(--border-subtle);
-    border-radius: 4px;
-    font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: var(--font-size-2xs);
-    color: var(--text-secondary);
-    line-height: var(--line-height-normal);
-    margin: 0 1px;
   }
   .search-hint {
     color: var(--text-muted);
@@ -2038,11 +2015,14 @@
     gap: 8px;
   }
   .recent-chip {
+    display: inline-flex;
+    align-items: center;
+    height: var(--control-h);
     background: var(--bg-raised);
     border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-md);
-    padding: 6px 14px;
-    font-size: var(--font-size-xs);
+    border-radius: 999px;
+    padding: 0 14px;
+    font-size: var(--font-size-sm);
     color: var(--text-secondary);
     cursor: pointer;
     font-family: inherit;

@@ -47,6 +47,18 @@
 			]
 		},
 		{
+			id: 'search',
+			title: 'Search and lists',
+			shortcuts: [
+				{ keys: ['/'], action: 'Focus the search field' },
+				{ keys: ['Up'], action: 'Move up through the results' },
+				{ keys: ['Down'], action: 'Move down through the results' },
+				{ keys: ['Enter'], action: 'Play the highlighted result' },
+				{ keys: ['Shift', 'Enter'], action: 'Queue the highlighted result' },
+				{ keys: ['Ctrl', 'Enter'], action: 'Play the highlighted result next' }
+			]
+		},
+		{
 			id: 'queue-focus',
 			title: 'Queue Focus',
 			shortcuts: [

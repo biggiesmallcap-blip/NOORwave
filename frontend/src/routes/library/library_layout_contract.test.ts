@@ -48,8 +48,10 @@ describe('library layout contracts', () => {
 		expect(groups).toContain('justify-content: center');
 		expect(groups).toContain('flex-wrap: wrap');
 
-		// Every toolbar control shares one height and the pill radius.
-		expect(cssBlock('.library')).toContain('--control-h');
+		// Every toolbar control shares one height and the pill radius, sized off
+		// the app-wide token so the other pages' pill rows match.
+		const appCss = readFileSync(join(here, '../../app.css'), 'utf8');
+		expect(appCss).toContain('--control-h: 30px');
 		for (const selector of ['.filter-pill', '.album-sort', '.view-toggle', '.decade-chip']) {
 			const block = cssBlock(selector);
 			expect(block, selector).toContain('height: var(--control-h)');

@@ -2135,14 +2135,6 @@
 			filterChips
 			placeholder={activeTab === 'albums' ? 'Search albums or artists' : 'Search tracks, albums, or artists'}
 		/>
-		<div class="kbd-hint">
-			<kbd>/</kbd> focus &nbsp;·&nbsp;
-			<kbd>↑↓</kbd> move &nbsp;·&nbsp;
-			<kbd>Enter</kbd> play &nbsp;·&nbsp;
-			<kbd>Shift</kbd>+<kbd>Enter</kbd> queue &nbsp;·&nbsp;
-			<kbd>Ctrl</kbd>+<kbd>Enter</kbd> next
-		</div>
-
 		<div class="filter-pills">
 			<div class="filter-pill-group filter-pill-group--primary">
 				<button class="filter-pill" class:active={activeTab === 'all'}     onclick={() => switchTab('all')}>All</button>
@@ -3227,12 +3219,12 @@
 {/if}
 
 <style>
+	/* Every toolbar control here - the filter pills, the album sort segment,
+	   the view toggle and the decade chips - sizes off the app-wide
+	   --control-h token in app.css, so the rows under the search field read as
+	   one system and match the other pages' pill rows. */
 	.library {
 		padding-bottom: 8px;
-		/* One shared height for every toolbar control - the filter pills, the
-		   album sort segment, the view toggle and the decade chips - so the
-		   rows under the search field read as a single system. */
-		--control-h: 30px;
 	}
 
 	/* ─── All / Home view ───────────────── */
@@ -3747,31 +3739,6 @@
 	.toolbar-note {
 		color: var(--text-secondary);
 		font-size: var(--font-size-sm);
-	}
-
-	.kbd-hint {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		gap: 2px;
-		font-size: var(--font-size-xs);
-		color: var(--text-muted, rgba(255,255,255,0.35));
-		padding: 4px 0 0 2px;
-		user-select: none;
-		max-width: 640px;
-		width: 100%;
-		margin: 0 auto;
-	}
-
-	.kbd-hint kbd {
-		display: inline-block;
-		padding: 1px 5px;
-		border: 1px solid var(--border-subtle, rgba(255,255,255,0.15));
-		border-radius: 4px;
-		font-family: inherit;
-		font-size: var(--font-size-2xs);
-		color: var(--text-secondary, rgba(255,255,255,0.5));
-		background: var(--bg-hover);
 	}
 
 	/* ─── New DSP Columns ───────────────────────── */
