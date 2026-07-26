@@ -137,6 +137,130 @@ pub(crate) fn merge_home_suggestions(
     out
 }
 
+/// An album card for the "Suggested albums" mural. Carries exactly the fields
+/// the frontend card needs, so the client no longer reconstructs albums from
+/// whichever loose tracks happened to survive track ranking.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct SuggestedAlbum {
+    pub(crate) id: i64,
+    pub(crate) title: String,
+    pub(crate) artist_id: Option<i64>,
+    pub(crate) artist_name: Option<String>,
+    pub(crate) artwork_url: Option<String>,
+}
+
+/// `track_id -> (track_plays, album_plays)` for the candidate set. `album_plays`
+/// is the lifetime play total across every track on that track's album, and is
+/// 0 for tracks with no album. One query for the whole set; the ranking function
+/// stays pure.
+fn candidate_play_stats(
+    conn: &rusqlite::Connection,
+    track_ids: &[i64],
+) -> anyhow::Result<HashMap<i64, (i64, i64)>> {
+    if track_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders = vec!["?"; track_ids.len()].join(",");
+    let sql = format!(
+        "SELECT t.id,
+                COALESCE(t.play_count, 0),
+                COALESCE((
+                    SELECT SUM(COALESCE(sib.play_count, 0))
+                    FROM tracks sib
+                    WHERE sib.album_id = t.album_id
+                ), 0)
+         FROM tracks t
+         WHERE t.id IN ({placeholders})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(track_ids.iter()), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                (row.get::<_, i64>(1)?, row.get::<_, i64>(2)?),
+            ))
+        })?
+        .collect::<Result<HashMap<_, _>, _>>()?;
+    Ok(rows)
+}
+
+/// Albums by `artist_ids` where not one track has ever been played, ranked by
+/// how strongly their tracks connect to `seed_track_ids` in the precomputed
+/// `track_similarity` graph. This is the album mural's own recall path: the
+/// user has thousands of never-opened albums, and reconstructing album cards
+/// from track-level ranking surfaced almost none of them.
+///
+/// Albums with no similarity edges to the seeds at all still qualify (they sort
+/// last, by album id) - an unopened record by a favourite artist is a
+/// legitimate suggestion even when the graph has nothing to say about it.
+fn unexplored_albums_for_artists(
+    conn: &rusqlite::Connection,
+    artist_ids: &[i64],
+    seed_track_ids: &[i64],
+    limit: usize,
+) -> anyhow::Result<Vec<SuggestedAlbum>> {
+    if artist_ids.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+    let artist_ph = vec!["?"; artist_ids.len()].join(",");
+    // An empty seed list would make `IN ()` invalid, so fall back to an id that
+    // never matches; every album then scores 0 and sorts by id.
+    let seed_ph = if seed_track_ids.is_empty() {
+        "-1".to_string()
+    } else {
+        vec!["?"; seed_track_ids.len()].join(",")
+    };
+
+    let sql = format!(
+        "WITH zero_play_album AS (
+             SELECT t.album_id AS album_id
+             FROM tracks t
+             WHERE t.album_id IS NOT NULL AND t.artist_id IN ({artist_ph})
+             GROUP BY t.album_id
+             HAVING SUM(COALESCE(t.play_count, 0)) = 0
+         ),
+         scored AS (
+             SELECT zpa.album_id AS album_id,
+                    COALESCE(SUM(ts.similarity_score), 0.0) AS sim_total
+             FROM zero_play_album zpa
+             JOIN tracks t2 ON t2.album_id = zpa.album_id
+             LEFT JOIN track_similarity ts
+                 ON (ts.track_a = t2.id AND ts.track_b IN ({seed_ph}))
+                 OR (ts.track_b = t2.id AND ts.track_a IN ({seed_ph}))
+             GROUP BY zpa.album_id
+         )
+         SELECT al.id, al.title, al.artist_id, ar.name, al.artwork_url
+         FROM scored s
+         JOIN albums al ON al.id = s.album_id
+         LEFT JOIN artists ar ON ar.id = al.artist_id
+         ORDER BY s.sim_total DESC, al.id ASC
+         LIMIT ?"
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let mut bound: Vec<i64> = Vec::new();
+    bound.extend_from_slice(artist_ids);
+    if !seed_track_ids.is_empty() {
+        // The seed list appears twice in the LEFT JOIN predicate.
+        bound.extend_from_slice(seed_track_ids);
+        bound.extend_from_slice(seed_track_ids);
+    }
+    bound.push(limit as i64);
+
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(bound.iter()), |row| {
+            Ok(SuggestedAlbum {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                artist_id: row.get(2)?,
+                artist_name: row.get(3)?,
+                artwork_url: row.get(4)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 /// Track and album ids the user has played inside the recency window. Both are
 /// excluded from candidacy: the track because they just heard it, the album
 /// because "more from the record you just played" is the exact failure this
@@ -581,6 +705,89 @@ mod tests {
             !excl.album_ids.contains(&11),
             "album of the old play is not excluded"
         );
+    }
+
+    #[test]
+    fn play_stats_report_track_and_album_totals() {
+        let db = fresh_migrated_db();
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;
+            conn.execute(
+                "INSERT INTO albums (id, title, artist_id) VALUES (10, 'Worn', 1), (11, 'Sealed', 1)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, album_id, file_path, play_count) VALUES
+                    (100, 'Hit', 1, 10, '/1', 7),
+                    (101, 'Deep Cut', 1, 10, '/2', 0),
+                    (102, 'Untouched', 1, 11, '/3', 0),
+                    (103, 'Loose', 1, NULL, '/4', 2)",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("seed fixture");
+
+        let stats = db
+            .with_conn(|conn| candidate_play_stats(conn, &[100, 101, 102, 103]))
+            .expect("stats");
+
+        assert_eq!(stats.get(&100), Some(&(7, 7)), "track plays, album plays");
+        assert_eq!(
+            stats.get(&101),
+            Some(&(0, 7)),
+            "unplayed track on a worn album still carries the album total"
+        );
+        assert_eq!(stats.get(&102), Some(&(0, 0)));
+        assert_eq!(
+            stats.get(&103),
+            Some(&(2, 0)),
+            "album total is zero when the track has no album"
+        );
+    }
+
+    #[test]
+    fn unexplored_albums_prefer_strong_similarity_and_skip_played_records() {
+        let db = fresh_migrated_db();
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Loved')", [])?;
+            conn.execute(
+                "INSERT INTO albums (id, title, artist_id, artwork_url) VALUES
+                    (10, 'Seed Home', 1, NULL),
+                    (11, 'Close Neighbour', 1, 'art11'),
+                    (12, 'Distant Neighbour', 1, 'art12')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, album_id, file_path, play_count) VALUES
+                    (100, 'Seed', 1, 10, '/s', 5),
+                    (110, 'Close', 1, 11, '/c', 0),
+                    (120, 'Distant', 1, 12, '/d', 0)",
+                [],
+            )?;
+            // track_similarity enforces track_a < track_b.
+            conn.execute(
+                "INSERT INTO track_similarity (track_a, track_b, similarity_score) VALUES
+                    (100, 110, 0.9),
+                    (100, 120, 0.2)",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("seed fixture");
+
+        let albums = db
+            .with_conn(|conn| unexplored_albums_for_artists(conn, &[1], &[100], 10))
+            .expect("albums");
+
+        let ids: Vec<i64> = albums.iter().map(|a| a.id).collect();
+        assert_eq!(
+            ids,
+            vec![11, 12],
+            "zero-play albums only, strongest similarity first"
+        );
+        assert_eq!(albums[0].artwork_url.as_deref(), Some("art11"));
+        assert_eq!(albums[0].artist_name.as_deref(), Some("Loved"));
     }
 
     /// Each candidate lands on its own album by default so the per-album cap
