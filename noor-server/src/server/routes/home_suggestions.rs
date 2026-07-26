@@ -87,6 +87,55 @@ pub(crate) fn merge_home_suggestions(
     out
 }
 
+/// One representative track per top-listened artist, most-listened artist first.
+/// The representative is that artist's most-recently-added track, which biases
+/// toward material the user has had least opportunity to wear out.
+fn long_term_seed_pool(conn: &rusqlite::Connection, artist_limit: i64) -> anyhow::Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "WITH top_artist AS (
+             SELECT t.artist_id AS artist_id, COUNT(lh.id) AS listens
+             FROM listen_history lh
+             JOIN tracks t ON t.id = lh.track_id
+             WHERE t.artist_id IS NOT NULL
+             GROUP BY t.artist_id
+             ORDER BY listens DESC
+             LIMIT ?1
+         )
+         SELECT (
+             SELECT t2.id FROM tracks t2
+             WHERE t2.artist_id = ta.artist_id
+             ORDER BY t2.id DESC
+             LIMIT 1
+         ) AS track_id
+         FROM top_artist ta
+         ORDER BY ta.listens DESC",
+    )?;
+    let ids = stmt
+        .query_map(params![artist_limit.max(1)], |row| {
+            row.get::<_, Option<i64>>(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    Ok(ids)
+}
+
+/// Distinct most-recently-played track ids, newest first.
+fn recent_seed_pool(conn: &rusqlite::Connection, limit: i64) -> anyhow::Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT lh.track_id
+         FROM listen_history lh
+         GROUP BY lh.track_id
+         ORDER BY MAX(lh.started_at) DESC
+         LIMIT ?1",
+    )?;
+    let ids = stmt
+        .query_map(params![limit.max(1)], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ids)
+}
+
 /// Blend the recent and long-term seed pools into one ordered seed set.
 /// Recent seeds come first, newest first, and never rotate. Long-term seeds are
 /// rotated by `salt` so successive 6h windows pick different favourites. If
@@ -309,6 +358,90 @@ pub(crate) async fn get_home_suggestions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{Database, schema};
+
+    /// A fresh, fully-migrated in-memory database. Mirrors the helper in
+    /// `routes/tests.rs`: in-memory keeps the suite off the filesystem, where a
+    /// temp `.db` + WAL per test churns enough I/O to stall on Defender scans.
+    fn fresh_migrated_db() -> Database {
+        let db = Database::open_in_memory().expect("db opened");
+        db.run_migrations().expect("migrations");
+        db.with_conn(|conn| schema::run_migrations(conn))
+            .expect("schema migrations");
+        db
+    }
+
+    #[test]
+    fn long_term_seed_pool_takes_one_track_per_top_artist() {
+        let db = fresh_migrated_db();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (1, 'Favourite'), (2, 'Occasional')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO albums (id, title, artist_id) VALUES (10, 'A', 1), (11, 'B', 2)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, album_id, file_path) VALUES
+                    (100, 'Fav One', 1, 10, '/a1'),
+                    (101, 'Fav Two', 1, 10, '/a2'),
+                    (102, 'Occ One', 2, 11, '/b1')",
+                [],
+            )?;
+            // Favourite has three listens, Occasional one.
+            conn.execute(
+                "INSERT INTO listen_history (track_id, started_at) VALUES
+                    (100, '2026-01-01T00:00:00Z'),
+                    (101, '2026-01-02T00:00:00Z'),
+                    (100, '2026-01-03T00:00:00Z'),
+                    (102, '2026-01-04T00:00:00Z')",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("seed fixture");
+
+        let pool = db
+            .with_conn(|conn| long_term_seed_pool(conn, 20))
+            .expect("pool");
+
+        // One track per artist, most-listened artist first.
+        assert_eq!(pool.len(), 2);
+        assert!(
+            pool[0] == 100 || pool[0] == 101,
+            "first seed is a Favourite track, got {}",
+            pool[0]
+        );
+        assert_eq!(pool[1], 102);
+    }
+
+    #[test]
+    fn recent_seed_pool_returns_newest_plays_first() {
+        let db = fresh_migrated_db();
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, file_path) VALUES
+                    (100, 'One', 1, '/1'), (101, 'Two', 1, '/2')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO listen_history (track_id, started_at) VALUES
+                    (100, '2026-01-01T00:00:00Z'),
+                    (101, '2026-06-01T00:00:00Z')",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("seed fixture");
+
+        let pool = db
+            .with_conn(|conn| recent_seed_pool(conn, 10))
+            .expect("pool");
+        assert_eq!(pool, vec![101, 100]);
+    }
 
     fn home_cand(track_id: i64, artist: &str, score: f64) -> HomeSuggestionCandidate {
         HomeSuggestionCandidate {
