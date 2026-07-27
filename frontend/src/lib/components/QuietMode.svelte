@@ -31,7 +31,6 @@
 	import NowPlayingProgress from '$lib/components/now-playing/NowPlayingProgress.svelte';
 	import NowPlayingTransport from '$lib/components/now-playing/NowPlayingTransport.svelte';
 	import {
-		normalizeTidalArtworkSize,
 		tidalArtworkFallbackSizes,
 		upscaleTidalArtwork,
 		type TidalArtworkSize,
@@ -46,16 +45,16 @@
 		$currentTrack ? ($isPlaying ? 'Playing' : 'Paused') : $playerReady ? 'Ready' : 'Connecting'
 	);
 
-	// Opening quiet mode must paint on the first frame. The player bar has already
-	// fetched and decoded the 640 cover, so that is the size we render immediately;
-	// a larger copy is only swapped in once it has fully decoded off-screen. Asking
-	// for 1280 up front cost a cold ~450 KB fetch of a *progressive* JPEG, which the
+	// Quiet mode still ends up on the full 1280 cover - it just no longer waits on it
+	// to show anything. The player bar has already fetched and decoded the 640, so
+	// that paints on the first frame while the 1280 loads behind it. Rendering the
+	// 1280 directly cost a cold ~450 KB fetch of a *progressive* JPEG, which the
 	// browser paints one refinement scan at a time - the artwork visibly arriving in
 	// stages, plus a third stage when the blurred backdrop finally appeared.
 	const QUIET_ART_BASE_SIZE = 640;
+	const QUIET_ART_FULL_SIZE = 1280;
 
-	let artWrapWidth = $state(0);
-	let upgradedArt = $state<{ source: string; url: string; size: number } | null>(null);
+	let upgradedArt = $state<{ source: string; url: string } | null>(null);
 	let upgradeFailedUrls = $state<Record<string, boolean>>({});
 	let artReadyFor = $state<string | null>(null);
 
@@ -98,37 +97,33 @@
 	}
 
 	// `load` only means the bytes arrived; decode() is what guarantees the bitmap is
-	// ready to paint, so the fade can never run ahead of the pixels.
+	// ready to paint, so the fade can never run ahead of the pixels. It is raced
+	// against a deadline because decode() does not settle at all while the page is
+	// not compositing (backgrounded or occluded window) - a stalled decode must
+	// never be able to leave the cover permanently invisible.
+	const ART_DECODE_DEADLINE_MS = 200;
+
 	function markArtworkReady(img: HTMLImageElement) {
 		const source = $currentTrack?.artwork_url ?? null;
-		void (async () => {
-			try {
-				await img.decode();
-			} catch {
-				// A decode failure surfaces through onerror; fall through and reveal
-				// anyway rather than leaving the cover invisible.
-			}
+		const decoded = img.decode().catch(() => undefined);
+		const deadline = new Promise((resolve) => setTimeout(resolve, ART_DECODE_DEADLINE_MS));
+		void Promise.race([decoded, deadline]).then(() => {
 			if (source === ($currentTrack?.artwork_url ?? null)) artReadyFor = source;
-		})();
+		});
 	}
 
-	// Upgrade to a sharper cover sized to the pixels actually on screen, and only
-	// hand it to the DOM once decoded so the swap costs a single atomic frame. On a
-	// 1x display the 640 base is already exact, so nothing extra is fetched at all.
+	// Always pull the full-resolution cover, and hand it to the DOM only once it has
+	// decoded off-screen so the swap costs a single atomic frame. Nothing about the
+	// reveal waits on it: the 640 is already on screen while this runs.
 	$effect(() => {
 		const source = $currentTrack?.artwork_url ?? null;
-		const width = artWrapWidth;
-		if (!browser || !$quietModeOpen || !source || width <= 0) return;
+		if (!browser || !$quietModeOpen || !source) return;
 
-		const dpr = window.devicePixelRatio || 1;
-		const target = normalizeTidalArtworkSize(Math.min(1280, Math.round(width * dpr)));
-		if (target <= QUIET_ART_BASE_SIZE) return;
-
-		const url = upscaleTidalArtwork(source, target);
+		const url = upscaleTidalArtwork(source, QUIET_ART_FULL_SIZE);
 		if (!url || url === quietArtworkBase) return;
 
 		const alreadyUpgraded = untrack(() => upgradedArt);
-		if (alreadyUpgraded?.source === source && alreadyUpgraded.size >= target) return;
+		if (alreadyUpgraded?.source === source && alreadyUpgraded.url === url) return;
 		if (untrack(() => upgradeFailedUrls)[url]) return;
 
 		let cancelled = false;
@@ -137,7 +132,7 @@
 		void (async () => {
 			try {
 				await preload.decode();
-				if (!cancelled) upgradedArt = { source, url, size: target };
+				if (!cancelled) upgradedArt = { source, url };
 			} catch {
 				if (!cancelled) upgradeFailedUrls = { ...untrack(() => upgradeFailedUrls), [url]: true };
 			}
@@ -285,7 +280,7 @@
 		>✕</button>
 
 		{#if $currentTrack}
-			<div class="quiet-art-wrap" bind:clientWidth={artWrapWidth}>
+			<div class="quiet-art-wrap">
 				{#if quietAlbumHref}
 					<a
 						class="quiet-art-link"

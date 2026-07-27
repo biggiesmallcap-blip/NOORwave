@@ -27,21 +27,29 @@ describe('quiet mode layout contracts', () => {
 	});
 
 	test('opens on the artwork the player bar already decoded', () => {
-		// A cold 1280 fetch on open made the cover arrive in progressive-JPEG stages.
+		// Rendering the 1280 directly made the cover arrive in progressive-JPEG stages.
 		expect(source).not.toContain('artworkCandidate($currentTrack?.artwork_url, 1280)');
 		expect(source).toContain('src={quietArtworkBase}');
+	});
 
-		// Sharper copy is decoded off-screen first, so the swap is one atomic frame.
+	test('still ends up on the full-resolution cover, decoded off-screen first', () => {
+		expect(source).toContain('const QUIET_ART_FULL_SIZE = 1280;');
+		expect(source).toContain('const url = upscaleTidalArtwork(source, QUIET_ART_FULL_SIZE);');
 		expect(source).toContain('await preload.decode();');
-		expect(source).toContain('upgradedArt = { source, url, size: target }');
-		expect(source).toContain('if (target <= QUIET_ART_BASE_SIZE) return;');
+		expect(source).toContain('upgradedArt = { source, url };');
+		// No resolution rationing: the full cover loads regardless of DPR or box size.
+		expect(source).not.toContain('devicePixelRatio');
 	});
 
 	test('reveals artwork on decode rather than on mount', () => {
 		expect(source).not.toContain('animation: quiet-art-fade');
 		expect(source).not.toContain('@keyframes quiet-art-fade');
 		expect(source).toContain('onload={(e) => markArtworkReady(e.currentTarget as HTMLImageElement)}');
-		expect(source).toContain('await img.decode();');
+		// decode() never settles while the page is not compositing, so the reveal is
+		// raced against a deadline rather than blocked on it.
+		expect(source).toContain('const decoded = img.decode().catch(() => undefined);');
+		expect(source).toContain('Promise.race([decoded, deadline])');
+		expect(source).toContain('const ART_DECODE_DEADLINE_MS = 200;');
 		expect(source).toContain('class:is-ready={artReady}');
 
 		const art = cssBlock('.quiet-art-img');
