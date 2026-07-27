@@ -18,9 +18,39 @@ function cssBlock(selector: string): string {
 describe('quiet mode layout contracts', () => {
 	test('routes current-track artwork through TIDAL fallback sizes', () => {
 		expect(source).toContain('tidalArtworkFallbackSizes');
-		expect(source).toContain('let quietArtwork = $derived(artworkCandidate($currentTrack?.artwork_url, 1280));');
+		expect(source).toContain(
+			'let quietArtworkBase = $derived(\n\t\tartworkCandidate($currentTrack?.artwork_url, QUIET_ART_BASE_SIZE)\n\t);'
+		);
+		expect(source).toContain('const QUIET_ART_BASE_SIZE = 640;');
 		expect(source).toContain('onerror={() => markArtworkFailed(quietArtwork)}');
 		expect(source).not.toContain('src={$currentTrack.artwork_url}');
+	});
+
+	test('opens on the artwork the player bar already decoded', () => {
+		// A cold 1280 fetch on open made the cover arrive in progressive-JPEG stages.
+		expect(source).not.toContain('artworkCandidate($currentTrack?.artwork_url, 1280)');
+		expect(source).toContain('src={quietArtworkBase}');
+
+		// Sharper copy is decoded off-screen first, so the swap is one atomic frame.
+		expect(source).toContain('await preload.decode();');
+		expect(source).toContain('upgradedArt = { source, url, size: target }');
+		expect(source).toContain('if (target <= QUIET_ART_BASE_SIZE) return;');
+	});
+
+	test('reveals artwork on decode rather than on mount', () => {
+		expect(source).not.toContain('animation: quiet-art-fade');
+		expect(source).not.toContain('@keyframes quiet-art-fade');
+		expect(source).toContain('onload={(e) => markArtworkReady(e.currentTarget as HTMLImageElement)}');
+		expect(source).toContain('await img.decode();');
+		expect(source).toContain('class:is-ready={artReady}');
+
+		const art = cssBlock('.quiet-art-img');
+		expect(art).toContain('opacity: 0');
+		expect(art).toContain('transition: opacity');
+
+		const backdropArt = cssBlock('.quiet-backdrop-art');
+		expect(backdropArt).toContain('opacity: 0');
+		expect(cssBlock('.quiet-backdrop-art.is-ready')).toContain('opacity: 0.35');
 	});
 
 	test('artwork scales fluidly so 1080p is not locked to the max cover size', () => {

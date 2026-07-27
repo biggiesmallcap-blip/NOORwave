@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { fade, scale } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
 	import { browser } from '$app/environment';
@@ -30,6 +31,7 @@
 	import NowPlayingProgress from '$lib/components/now-playing/NowPlayingProgress.svelte';
 	import NowPlayingTransport from '$lib/components/now-playing/NowPlayingTransport.svelte';
 	import {
+		normalizeTidalArtworkSize,
 		tidalArtworkFallbackSizes,
 		upscaleTidalArtwork,
 		type TidalArtworkSize,
@@ -43,7 +45,31 @@
 	const playerState = $derived(
 		$currentTrack ? ($isPlaying ? 'Playing' : 'Paused') : $playerReady ? 'Ready' : 'Connecting'
 	);
-	let quietArtwork = $derived(artworkCandidate($currentTrack?.artwork_url, 1280));
+
+	// Opening quiet mode must paint on the first frame. The player bar has already
+	// fetched and decoded the 640 cover, so that is the size we render immediately;
+	// a larger copy is only swapped in once it has fully decoded off-screen. Asking
+	// for 1280 up front cost a cold ~450 KB fetch of a *progressive* JPEG, which the
+	// browser paints one refinement scan at a time - the artwork visibly arriving in
+	// stages, plus a third stage when the blurred backdrop finally appeared.
+	const QUIET_ART_BASE_SIZE = 640;
+
+	let artWrapWidth = $state(0);
+	let upgradedArt = $state<{ source: string; url: string; size: number } | null>(null);
+	let upgradeFailedUrls = $state<Record<string, boolean>>({});
+	let artReadyFor = $state<string | null>(null);
+
+	let quietArtworkBase = $derived(
+		artworkCandidate($currentTrack?.artwork_url, QUIET_ART_BASE_SIZE)
+	);
+	let quietArtwork = $derived(
+		upgradedArt && upgradedArt.source === $currentTrack?.artwork_url
+			? upgradedArt.url
+			: quietArtworkBase
+	);
+	// The reveal is gated on the bitmap, not on mount: the old fade ran on an empty
+	// box and finished long before any pixels arrived.
+	let artReady = $derived(!!artReadyFor && artReadyFor === $currentTrack?.artwork_url);
 	let quietAlbumHref = $derived.by(() => {
 		const track = $currentTrack;
 		if (!track) return null;
@@ -66,8 +92,61 @@
 
 	function markArtworkFailed(renderedUrl: string | null | undefined) {
 		if (!renderedUrl) return;
+		if (upgradedArt?.url === renderedUrl) upgradedArt = null;
+		upgradeFailedUrls = { ...upgradeFailedUrls, [renderedUrl]: true };
 		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
 	}
+
+	// `load` only means the bytes arrived; decode() is what guarantees the bitmap is
+	// ready to paint, so the fade can never run ahead of the pixels.
+	function markArtworkReady(img: HTMLImageElement) {
+		const source = $currentTrack?.artwork_url ?? null;
+		void (async () => {
+			try {
+				await img.decode();
+			} catch {
+				// A decode failure surfaces through onerror; fall through and reveal
+				// anyway rather than leaving the cover invisible.
+			}
+			if (source === ($currentTrack?.artwork_url ?? null)) artReadyFor = source;
+		})();
+	}
+
+	// Upgrade to a sharper cover sized to the pixels actually on screen, and only
+	// hand it to the DOM once decoded so the swap costs a single atomic frame. On a
+	// 1x display the 640 base is already exact, so nothing extra is fetched at all.
+	$effect(() => {
+		const source = $currentTrack?.artwork_url ?? null;
+		const width = artWrapWidth;
+		if (!browser || !$quietModeOpen || !source || width <= 0) return;
+
+		const dpr = window.devicePixelRatio || 1;
+		const target = normalizeTidalArtworkSize(Math.min(1280, Math.round(width * dpr)));
+		if (target <= QUIET_ART_BASE_SIZE) return;
+
+		const url = upscaleTidalArtwork(source, target);
+		if (!url || url === quietArtworkBase) return;
+
+		const alreadyUpgraded = untrack(() => upgradedArt);
+		if (alreadyUpgraded?.source === source && alreadyUpgraded.size >= target) return;
+		if (untrack(() => upgradeFailedUrls)[url]) return;
+
+		let cancelled = false;
+		const preload = new Image();
+		preload.src = url;
+		void (async () => {
+			try {
+				await preload.decode();
+				if (!cancelled) upgradedArt = { source, url, size: target };
+			} catch {
+				if (!cancelled) upgradeFailedUrls = { ...untrack(() => upgradeFailedUrls), [url]: true };
+			}
+		})();
+
+		return () => {
+			cancelled = true;
+		};
+	});
 
 	// Esc handler — defers to context menu and palette if either is open.
 	function onWindowKeydown(e: KeyboardEvent) {
@@ -150,18 +229,40 @@
 
 <svelte:window onkeydown={onWindowKeydown} />
 
+{#snippet quietArtImage()}
+	{#key $currentTrack?.artwork_url}
+		{#if quietArtwork}
+			<img
+				class="quiet-art quiet-art-img"
+				class:is-ready={artReady}
+				src={quietArtwork}
+				alt=""
+				decoding="async"
+				onload={(e) => markArtworkReady(e.currentTarget as HTMLImageElement)}
+				onerror={() => markArtworkFailed(quietArtwork)}
+			/>
+		{:else}
+			<div class="quiet-art quiet-art-placeholder">♫</div>
+		{/if}
+	{/key}
+{/snippet}
+
 {#if $quietModeOpen}
 	<div
 		class="quiet-backdrop"
 		aria-hidden="true"
-		transition:fade={{ duration: 200 }}
+		transition:fade={{ duration: 220, easing: quintOut }}
 	>
-		{#if quietArtwork}
+		{#if quietArtworkBase}
+			<!-- Blurred to 60px, so it reuses the warm base cover; a second high-res
+			     fetch bought no detail and landed as its own late visual stage. -->
 			<img
 				class="quiet-backdrop-art"
-				src={quietArtwork}
+				class:is-ready={artReady}
+				src={quietArtworkBase}
 				alt=""
-				onerror={() => markArtworkFailed(quietArtwork)}
+				decoding="async"
+				onerror={() => markArtworkFailed(quietArtworkBase)}
 			/>
 		{/if}
 	</div>
@@ -184,7 +285,7 @@
 		>✕</button>
 
 		{#if $currentTrack}
-			<div class="quiet-art-wrap">
+			<div class="quiet-art-wrap" bind:clientWidth={artWrapWidth}>
 				{#if quietAlbumHref}
 					<a
 						class="quiet-art-link"
@@ -192,32 +293,10 @@
 						aria-label="Open {$currentTrack.album_title ?? $currentTrack.title}"
 						oncontextmenu={openQuietAlbumContextMenu}
 					>
-				{#key $currentTrack.artwork_url}
-					{#if quietArtwork}
-						<img
-							class="quiet-art"
-							src={quietArtwork}
-							alt=""
-							onerror={() => markArtworkFailed(quietArtwork)}
-						/>
-					{:else}
-						<div class="quiet-art quiet-art-placeholder">♫</div>
-					{/if}
-				{/key}
+						{@render quietArtImage()}
 					</a>
 				{:else}
-					{#key $currentTrack.artwork_url}
-						{#if quietArtwork}
-							<img
-								class="quiet-art"
-								src={quietArtwork}
-								alt=""
-								onerror={() => markArtworkFailed(quietArtwork)}
-							/>
-						{:else}
-							<div class="quiet-art quiet-art-placeholder">♫</div>
-						{/if}
-					{/key}
+					{@render quietArtImage()}
 				{/if}
 			</div>
 
@@ -286,10 +365,15 @@
 		width: 120%;
 		height: 120%;
 		object-fit: cover;
-		opacity: 0.35;
+		opacity: 0;
 		filter: blur(60px) saturate(160%);
 		transform: scale(1.1);
 		pointer-events: none;
+		transition: opacity 320ms ease;
+	}
+
+	.quiet-backdrop-art.is-ready {
+		opacity: 0.35;
 	}
 
 	.quiet-panel {
@@ -352,7 +436,17 @@
 		height: 100%;
 		object-fit: cover;
 		display: block;
-		animation: quiet-art-fade 360ms ease both;
+	}
+
+	/* Held back until the bitmap is decoded, so a progressive JPEG never shows its
+	   intermediate scans and the fade always runs over real pixels. */
+	.quiet-art-img {
+		opacity: 0;
+		transition: opacity 260ms ease;
+	}
+
+	.quiet-art-img.is-ready {
+		opacity: 1;
 	}
 
 	.quiet-art-link {
@@ -361,11 +455,6 @@
 		height: 100%;
 		color: inherit;
 		text-decoration: none;
-	}
-
-	@keyframes quiet-art-fade {
-		from { opacity: 0; transform: scale(1.04); }
-		to   { opacity: 1; transform: scale(1); }
 	}
 
 	.quiet-art-placeholder {
