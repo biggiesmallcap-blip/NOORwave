@@ -2110,6 +2110,14 @@ export interface HomeSuggestionsResponse {
 	albums: SuggestedAlbum[];
 }
 
+/// Library shuffle picks for the "Random tracks" / "Random albums" murals. The
+/// server samples both in one request and keys the sample to a five-minute
+/// bucket, so repeated calls inside the window return the same picks.
+export interface HomeShufflePicksResponse {
+	tracks: Track[];
+	albums: Album[];
+}
+
 export interface LastfmAuthStartResponse {
 	status: 'awaiting' | 'error';
 	auth_url?: string;
@@ -3641,6 +3649,14 @@ export const api = {
 			method: 'POST',
 			body: JSON.stringify({ seed_track_ids: seedTrackIds, limit }),
 		});
+	},
+
+	// Library shuffle picks for the Random tracks / Random albums murals. One
+	// request for both panels: the client used to derive random offsets from the
+	// library totals and issue a single-row request per pick, which could not
+	// start until the library store had paged in.
+	getHomeShufflePicks(limit = 12) {
+		return fetchApi<HomeShufflePicksResponse>('/api/home/shuffle-picks', { limit: String(limit) });
 	},
 
 	// ─── TIDAL: Your Mixes ────────────────────────────────────────────────

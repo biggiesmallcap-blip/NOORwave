@@ -3,9 +3,9 @@
 // Powers the Library home "Suggested tracks / albums" murals. The old client
 // path expanded the seeds into "more tracks by the same artists / same albums",
 // which produced clone-of-what-you-just-played suggestions. This endpoint runs
-// the real radio blend (embedding neighbours + Last.fm similar + same-artist
-// fallback) per seed, keeps only library-resolved candidates so the murals can
-// still play tracks and open albums, then ranks with a per-artist cap and hub
+// the real radio blend per seed - the library-only sources, embedding
+// neighbours and the precomputed similarity graph, since only library-resolved
+// candidates can be shown here - then ranks with a per-artist cap and hub
 // suppression so no single artist floods a panel. Cached 6h per seed set.
 
 use crate::SharedState;
@@ -25,7 +25,12 @@ const HOME_SUGGESTIONS_RECENT_SEEDS: usize = 3;
 const HOME_SUGGESTIONS_LONG_TERM_SEEDS: usize = 5;
 const HOME_SUGGESTIONS_SEED_LIMIT: usize =
     HOME_SUGGESTIONS_RECENT_SEEDS + HOME_SUGGESTIONS_LONG_TERM_SEEDS;
-const HOME_SUGGESTIONS_PER_SEED: usize = 24;
+// Candidates pulled per seed. Only library-resolved candidates can be shown
+// here, and the blend spends its budget by source weight, so this has to be
+// generous: at 24 with the Last.fm source still attached, a real library gave
+// back ~8 usable tracks for a panel that shows 12. Costs one bigger neighbour
+// query per seed and no network at all (see `compute_home_suggestions`).
+const HOME_SUGGESTIONS_PER_SEED: usize = 60;
 const HOME_SUGGESTIONS_DEFAULT_LIMIT: usize = 50;
 const HOME_SUGGESTIONS_MAX_PER_ARTIST: usize = 2;
 // One track per album in the tracks mural, so a single unexplored record cannot
@@ -52,8 +57,10 @@ const HOME_SUGGESTIONS_STALE_MAX_AGE_SECS: i64 = 7 * 24 * 60 * 60;
 // response shape changes so older payloads can never be served: the
 // stale-while-revalidate path reads by prefix, not by exact key, and a v1
 // payload (tracks only, no albums) handed to a v2 client renders an empty
-// albums mural.
-const HOME_SUGGESTIONS_CACHE_VERSION: &str = "v2";
+// albums mural. Bump it for a materially different payload too: v3 widened the
+// candidate funnel, and without a bump the stale path would keep serving the
+// old short track list for up to a week.
+const HOME_SUGGESTIONS_CACHE_VERSION: &str = "v3";
 
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct HomeSuggestionsRequest {
@@ -84,8 +91,15 @@ pub(crate) struct HomeSuggestionCandidate {
 /// (consensus), dampened by how "hubby" the candidate is in the similarity
 /// graph, and multiplied by two novelty terms that push never-opened albums and
 /// never-played tracks to the top. Then greedily caps how many tracks any one
-/// artist and any one album can contribute. Returns track ids in final display
-/// order. No DB access -> unit-testable.
+/// artist and any one album can contribute, and tops the list back up from what
+/// the caps skipped. Returns track ids in final display order. No DB access ->
+/// unit-testable.
+///
+/// The top-up matters: the caps are there to shape the *head* of the panel for
+/// variety, not to shorten it. Library recall for a seed is same-artist-heavy,
+/// so a strict cap returned 8 tracks for a mural that shows 12 - and the caller
+/// has no way to tell "the library had nothing else" apart from "the cap ate
+/// it". Same two-pass shape as [`cap_albums_per_artist`].
 pub(crate) fn merge_home_suggestions(
     mut candidates: Vec<HomeSuggestionCandidate>,
     limit: usize,
@@ -131,30 +145,40 @@ pub(crate) fn merge_home_suggestions(
     let mut per_artist: HashMap<String, usize> = HashMap::new();
     let mut per_album: HashMap<i64, usize> = HashMap::new();
     let mut out = Vec::new();
+    let mut skipped = Vec::new();
     for c in candidates {
         if out.len() >= limit {
             break;
         }
         // A missing album id is never capped, so those candidates don't all
         // collapse into one synthetic "album" bucket.
-        if max_per_album > 0 {
-            if let Some(album_id) = c.album_id {
-                let count = per_album.entry(album_id).or_insert(0);
-                if *count >= max_per_album {
-                    continue;
-                }
-                *count += 1;
-            }
-        }
+        let album_capped = max_per_album > 0
+            && c.album_id
+                .is_some_and(|id| per_album.get(&id).copied().unwrap_or(0) >= max_per_album);
         // Empty artist key (missing name) is never capped for the same reason.
-        if max_per_artist > 0 && !c.artist_key.is_empty() {
-            let count = per_artist.entry(c.artist_key).or_insert(0);
-            if *count >= max_per_artist {
-                continue;
-            }
-            *count += 1;
+        let artist_capped = max_per_artist > 0
+            && !c.artist_key.is_empty()
+            && per_artist.get(&c.artist_key).copied().unwrap_or(0) >= max_per_artist;
+        if album_capped || artist_capped {
+            skipped.push(c.track_id);
+            continue;
+        }
+        if let Some(album_id) = c.album_id {
+            *per_album.entry(album_id).or_insert(0) += 1;
+        }
+        if !c.artist_key.is_empty() {
+            *per_artist.entry(c.artist_key).or_insert(0) += 1;
         }
         out.push(c.track_id);
+    }
+
+    // Top up in rank order from what the caps skipped, so the caps shape the
+    // head of the panel without ever returning fewer tracks than exist.
+    for track_id in skipped {
+        if out.len() >= limit {
+            break;
+        }
+        out.push(track_id);
     }
     out
 }
@@ -698,10 +722,9 @@ async fn compute_home_suggestions(
     seeds: &[i64],
     limit: usize,
 ) -> anyhow::Result<Value> {
-    let (db, lastfm, lastfm_similar_cache) = {
+    let db = {
         let g = state.read().await;
-        let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
-        (g.db.clone(), lastfm, g.lastfm_similar_cache.clone())
+        g.db.clone()
     };
     let seeds = seeds.to_vec();
 
@@ -711,21 +734,22 @@ async fn compute_home_suggestions(
 
     // Aggregate library-resolved candidates across seeds. Dedup by track id,
     // count how many seeds surfaced each (consensus) and keep the best score.
-    // Run the per-seed blends concurrently. Each orchestrate_song makes Last.fm
-    // calls, so a sequential loop over the seeds stacked their latency (~8s
-    // cold); join_all overlaps the network waits while the shared DB lock
-    // serialises the query parts. Cached 6h afterwards, so this cost is paid
-    // once per seed set.
+    //
+    // The Last.fm source is deliberately switched off (`None`). Its candidates
+    // are always `is_in_library: false` with `track_id: 0` - they are external
+    // matches the radio queue resolves lazily at play time - so this endpoint,
+    // which keeps only library-resolved rows, discarded every one of them while
+    // they still consumed most of the per-seed budget (20 of 24 slots on a real
+    // library). Dropping them is not a recall loss, and it takes the whole
+    // fan-out off the network, which is what made the cold path multi-second.
     let queues = futures::future::join_all(seeds.iter().map(|&seed_id| {
         let db = &db;
-        let lastfm = &lastfm;
-        let cache = &lastfm_similar_cache;
         let seeds_ref = &seeds;
         async move {
             crate::services::radio::orchestrate_song(
                 db,
-                lastfm.as_ref(),
-                Some(cache),
+                None,
+                None,
                 seed_id,
                 crate::services::radio::RadioBlend::Mixed,
                 HOME_SUGGESTIONS_PER_SEED,
@@ -1033,9 +1057,17 @@ mod tests {
         // Two payloads under different seed sets. The newer one is already past
         // its freshness window, which is exactly the case the stale path exists
         // for: the user played something, so no exact key will ever hit.
-        write_home_suggestions_cache(&db, "home_suggest:v2:50:1-2-3", &json!({"tracks":["old"]}));
+        write_home_suggestions_cache(
+            &db,
+            &home_suggestions_cache_key(&[1, 2, 3], 50),
+            &json!({"tracks":["old"]}),
+        );
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        write_home_suggestions_cache(&db, "home_suggest:v2:50:4-5-6", &json!({"tracks":["new"]}));
+        write_home_suggestions_cache(
+            &db,
+            &home_suggestions_cache_key(&[4, 5, 6], 50),
+            &json!({"tracks":["new"]}),
+        );
         db.with_conn(|conn| {
             conn.execute(
                 "UPDATE provider_recommendation_cache SET expires_at = 1
@@ -1048,7 +1080,7 @@ mod tests {
 
         // An exact hit must still respect expiry.
         assert!(
-            read_home_suggestions_cache(&db, "home_suggest:v2:50:4-5-6").is_none(),
+            read_home_suggestions_cache(&db, &home_suggestions_cache_key(&[4, 5, 6], 50)).is_none(),
             "expired rows are not fresh hits"
         );
         // The stale path ignores expiry and takes the most recently written.
@@ -1083,7 +1115,11 @@ mod tests {
     #[test]
     fn stale_read_ignores_payloads_older_than_the_window() {
         let db = fresh_migrated_db();
-        write_home_suggestions_cache(&db, "home_suggest:v2:50:1", &json!({"tracks":["ancient"]}));
+        write_home_suggestions_cache(
+            &db,
+            &home_suggestions_cache_key(&[1], 50),
+            &json!({"tracks":["ancient"]}),
+        );
         db.with_conn(|conn| {
             conn.execute(
                 "UPDATE provider_recommendation_cache SET fetched_at = 1
@@ -1106,7 +1142,7 @@ mod tests {
         let b = home_suggestions_cache_key(&[1, 2, 3], 50);
         assert_eq!(a, b, "seed order must not fragment the cache");
         assert!(
-            a.starts_with("home_suggest:v2:"),
+            a.starts_with(&home_suggestions_cache_key_prefix()),
             "shape change requires a version bump, got {a}"
         );
         assert_ne!(a, home_suggestions_cache_key(&[1, 2, 3], 20));
@@ -1239,8 +1275,10 @@ mod tests {
     #[test]
     fn album_cap_stops_one_record_filling_the_row() {
         // Three tracks off the same unopened album hold the top scores. With a
-        // cap of 1 per album, only the best survives and the other album's
-        // weaker track takes the second slot.
+        // cap of 1 per album the best one leads and the other album's weaker
+        // track takes the second slot, so the head of the panel is not one
+        // record. The remaining slot is then topped up from what the cap
+        // skipped rather than left short.
         let cands = vec![
             HomeSuggestionCandidate {
                 album_id: Some(10),
@@ -1260,7 +1298,23 @@ mod tests {
             },
         ];
         let ranked = merge_home_suggestions(cands, 3, 2, 1);
-        assert_eq!(ranked, vec![1, 4]);
+        assert_eq!(ranked, vec![1, 4, 2]);
+    }
+
+    #[test]
+    fn caps_top_up_instead_of_returning_a_short_panel() {
+        // Everything is by one artist on one album: the caps have nothing to
+        // fall through to, so a strict cap would hand back a single track for a
+        // panel that shows four. The caps shape the head; they must not shorten
+        // the list below what the library actually offered.
+        let cands = (1..=6)
+            .map(|id| HomeSuggestionCandidate {
+                album_id: Some(10),
+                ..home_cand(id, "solo", 1.0 - id as f64 * 0.01)
+            })
+            .collect();
+        let ranked = merge_home_suggestions(cands, 4, 2, 1);
+        assert_eq!(ranked, vec![1, 2, 3, 4]);
     }
 
     #[test]

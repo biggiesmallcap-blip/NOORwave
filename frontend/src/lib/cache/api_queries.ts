@@ -22,6 +22,7 @@ import {
 	type HomeArticlesResponse,
 	type HomeNewsResponse,
 	type HomeRecommendationsResponse,
+	type HomeShufflePicksResponse,
 	type HomeSuggestionsResponse,
 	type LastfmStatus,
 	type ListenBrainzStatus,
@@ -136,6 +137,7 @@ export const cacheKeys = {
 	homeNews: () => ['api', 'getHomeNews'] as const,
 	homeRecommendations: () => ['api', 'getHomeRecommendations'] as const,
 	homeSuggestions: (seedKey: string) => ['api', 'getHomeSuggestions', { seedKey }] as const,
+	homeShufflePicks: (limit: number) => ['api', 'getHomeShufflePicks', { limit }] as const,
 	tidalMixes: () => ['api', 'getTidalMixes'] as const,
 	tidalRadioStations: () => ['api', 'getTidalRadioStations'] as const,
 	tidalHomeModules: () => ['api', 'getTidalHomeModules'] as const,
@@ -433,6 +435,17 @@ export const cachedApi = {
 			cacheKeys.homeSuggestions(seedKey),
 			() => api.getHomeSuggestions(seedTrackIds, limit),
 			{ staleMs: 30 * MINUTE, returnStale: true },
+		);
+	},
+	// Stale-first like the suggestion murals: the last sample paints immediately
+	// on mount and a fresh one swaps in behind it, so the Random panels never
+	// start empty. The server holds each sample for five minutes, so refetching
+	// inside that window repaints the same picks rather than reshuffling.
+	getHomeShufflePicks(limit = 12) {
+		return fetchCached<HomeShufflePicksResponse>(
+			cacheKeys.homeShufflePicks(limit),
+			() => api.getHomeShufflePicks(limit),
+			{ staleMs: 5 * MINUTE, returnStale: true },
 		);
 	},
 	getTidalMixes() {
