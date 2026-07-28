@@ -12,6 +12,7 @@
 	import HomeRecommendationsShelf from '$lib/components/home/HomeRecommendationsShelf.svelte';
 	import HomeMoodsRail from '$lib/components/home/HomeMoodsRail.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import MediaRail from '$lib/components/ui/MediaRail.svelte';
 
 	// Home page data
 	let articles = $state<RSSFeedItem[]>([]);
@@ -93,6 +94,25 @@
 	<title>NOOR — Home</title>
 </svelte:head>
 
+{#snippet articleCard(article: RSSFeedItem)}
+	<a class="article-card glass-tile" href={article.link} target="_blank" rel="noopener">
+		<div class="article-content">
+			<h3 class="article-title">{article.title}</h3>
+			{#if article.description}
+				<p class="article-desc">{article.description}</p>
+			{/if}
+			<div class="article-footer">
+				<span class="article-source" style="color: {getSourceColor(article.source)}">
+					{article.source}
+				</span>
+				{#if article.published_at}
+					<span class="article-date">{formatDate(article.published_at)}</span>
+				{/if}
+			</div>
+		</div>
+	</a>
+{/snippet}
+
 <!-- No page-level `animate-in` here. It fires once on mount, before any shelf
      has data, so everything that resolves later still pops in behind it. Each
      section eases itself in instead, staggered by its place in the stack -
@@ -158,26 +178,14 @@
 			</div>
 
 			{#if articles.length > 0}
-				<div class="horizontal-scroll">
-					{#each articles.slice(0, 10) as article (article.link)}
-						<a class="article-card glass-tile" href={article.link} target="_blank" rel="noopener">
-							<div class="article-content">
-								<h3 class="article-title">{article.title}</h3>
-								{#if article.description}
-									<p class="article-desc">{article.description}</p>
-								{/if}
-								<div class="article-footer">
-									<span class="article-source" style="color: {getSourceColor(article.source)}">
-										{article.source}
-									</span>
-									{#if article.published_at}
-										<span class="article-date">{formatDate(article.published_at)}</span>
-									{/if}
-								</div>
-							</div>
-						</a>
-					{/each}
-				</div>
+				<MediaRail
+					items={articles.slice(0, 10)}
+					card={articleCard}
+					getKey={(a) => a.link}
+					fluid
+					density="wide"
+					stagger
+				/>
 			{:else}
 				<EmptyState title="No articles this week" copy="Check back later for fresh music content." />
 			{/if}
@@ -261,41 +269,18 @@
 		font-style: italic;
 	}
 
-	/* Horizontal scroll */
-	.horizontal-scroll {
-		display: flex;
-		gap: 16px;
-		overflow-x: auto;
-		padding-bottom: 8px;
-		scroll-snap-type: x mandatory;
-
-		&::-webkit-scrollbar {
-			height: 6px;
-		}
-
-		&::-webkit-scrollbar-track {
-			background: var(--bg-surface);
-			border-radius: 3px;
-		}
-
-		&::-webkit-scrollbar-thumb {
-			background: var(--border-subtle);
-			border-radius: 3px;
-		}
-
-		&::-webkit-scrollbar-thumb:hover {
-			background: var(--text-muted);
-		}
-	}
-
-	/* Article cards */
+	/* Article cards. Rail behaviour (scrolling, mask, fluid width) lives in
+	   MediaRail; the card only describes itself. */
 	.article-card {
-		flex: 0 0 320px;
+		display: block;
+		width: 100%;
+		min-width: 0;
+		height: 100%;
+		box-sizing: border-box;
 		padding: 18px;
 		text-decoration: none;
 		color: inherit;
-		transition: transform 0.2s ease, box-shadow 0.2s ease;
-		scroll-snap-align: start;
+		transition: transform var(--motion-base), box-shadow var(--motion-base);
 
 		&:hover {
 			transform: translateY(-4px);
@@ -362,7 +347,7 @@
 		padding: 18px;
 		text-decoration: none;
 		color: inherit;
-		transition: transform 0.2s ease, box-shadow 0.2s ease;
+		transition: transform var(--motion-base), box-shadow var(--motion-base);
 
 		&:hover {
 			transform: translateY(-4px);
@@ -477,10 +462,6 @@
 	@media (max-width: 640px) {
 		.news-grid {
 			grid-template-columns: 1fr;
-		}
-
-		.article-card {
-			flex: 0 0 260px;
 		}
 	}
 </style>

@@ -5,8 +5,8 @@
 	import { cachedApi } from '$lib/cache/api_queries';
 	import { playTidalMix } from '$lib/stores/player';
 	import { tidalStatus } from '$lib/stores/tidal';
-	import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import MediaRail from '$lib/components/ui/MediaRail.svelte';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 
 	type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
@@ -102,58 +102,66 @@
 
 </script>
 
+{#snippet mixCard(mix: TidalMix)}
+	<button
+		type="button"
+		class="mix-card"
+		title={mix.sub_title ?? mix.title}
+		aria-label={`${isMixVideo(mix) ? 'Play video mix' : 'Play mix'} ${mix.title}`}
+		onclick={() => playMix(mix)}
+	>
+		<div class="art-wrap">
+			<ArtworkImage
+				className="art"
+				src={mix.image_url}
+				alt={mix.title}
+				size={320}
+				tint={true}
+				fallbackText="MIX"
+				decorative={true}
+			/>
+			<PlayOverlay
+				position="corner"
+				size="sm"
+				label={`${isMixVideo(mix) ? 'Play video mix' : 'Play mix'} ${mix.title}`}
+			/>
+			{#if isMixVideo(mix)}
+				<span class="video-badge">Video</span>
+			{/if}
+		</div>
+		<div class="meta">
+			<h3 class="title">{mix.title}</h3>
+			{#if mix.sub_title}
+				<p class="artist">{mix.sub_title}</p>
+			{/if}
+		</div>
+	</button>
+{/snippet}
+
 {#snippet mixRail(items: TidalMix[])}
-	<div class="mix-rail" use:wheelToHorizontal>
-		{#each items as mix (mix.id)}
-			<button
-				type="button"
-				class="mix-card"
-				title={mix.sub_title ?? mix.title}
-				aria-label={`${isMixVideo(mix) ? 'Play video mix' : 'Play mix'} ${mix.title}`}
-				onclick={() => playMix(mix)}
-			>
-				<div class="art-wrap">
-					<ArtworkImage
-						className="art"
-						src={mix.image_url}
-						alt={mix.title}
-						size={320}
-						tint={true}
-						fallbackText="MIX"
-						decorative={true}
-					/>
-					<PlayOverlay
-						position="corner"
-						size="sm"
-						label={`${isMixVideo(mix) ? 'Play video mix' : 'Play mix'} ${mix.title}`}
-					/>
-					{#if isMixVideo(mix)}
-						<span class="video-badge">Video</span>
-					{/if}
-				</div>
-				<div class="meta">
-					<h3 class="title">{mix.title}</h3>
-					{#if mix.sub_title}
-						<p class="artist">{mix.sub_title}</p>
-					{/if}
-				</div>
-			</button>
-		{/each}
+	<MediaRail {items} card={mixCard} getKey={(m) => m.id} gap={14} fluid stagger />
+{/snippet}
+
+{#snippet skeletonCard()}
+	<div class="mix-card skeleton">
+		<div class="art-wrap"><div class="art skeleton-art"></div></div>
+		<div class="meta">
+			<div class="skeleton-line skeleton-line-title"></div>
+			<div class="skeleton-line skeleton-line-sub"></div>
+		</div>
 	</div>
 {/snippet}
 
 {#snippet skeletonRail()}
-	<div class="mix-rail" use:wheelToHorizontal>
-		{#each [0, 1, 2, 3, 4, 5] as i (i)}
-			<div class="mix-card skeleton">
-				<div class="art-wrap"><div class="art skeleton-art"></div></div>
-				<div class="meta">
-					<div class="skeleton-line skeleton-line-title"></div>
-					<div class="skeleton-line skeleton-line-sub"></div>
-				</div>
-			</div>
-		{/each}
-	</div>
+	<!-- Enough placeholders to fill the widest `--cols` step, so the skeleton
+	     occupies the same run of the rail the real cards will. -->
+	<MediaRail
+		items={[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]}
+		card={skeletonCard}
+		getKey={(i) => i}
+		gap={14}
+		fluid
+	/>
 {/snippet}
 
 <section class="discovery-section rise-in-shelf" data-section="your-mixes" style={`--rise-index: ${index}`}>
@@ -231,50 +239,17 @@
 		font-style: italic;
 	}
 
-	/* Horizontal rail */
-	.mix-rail {
-		display: flex;
-		gap: 14px;
-		overflow-x: auto;
-		padding-bottom: 8px;
-		scroll-snap-type: x mandatory;
-		mask-image: linear-gradient(
-			to right,
-			transparent 0,
-			black 16px,
-			black calc(100% - 32px),
-			transparent 100%
-		);
-		-webkit-mask-image: linear-gradient(
-			to right,
-			transparent 0,
-			black 16px,
-			black calc(100% - 32px),
-			transparent 100%
-		);
-	}
-	.mix-rail::-webkit-scrollbar { height: 6px; }
-	.mix-rail::-webkit-scrollbar-track {
-		background: var(--bg-surface);
-		border-radius: 3px;
-	}
-	.mix-rail::-webkit-scrollbar-thumb {
-		background: var(--border-subtle);
-		border-radius: 3px;
-	}
-	.mix-rail::-webkit-scrollbar-thumb:hover {
-		background: var(--text-muted);
-	}
+	/* The rail itself is MediaRail (scrolling, mask, scrollbar, and the fluid
+	   card sizing). This card only describes itself.
 
-	/* Card — transparent, borderless, hover-lift via background only.
-	   Width is locked with explicit min/max because flex-basis alone is
-	   negotiable when one item has a large intrinsic image (the Daily
-	   Discovery artwork was ballooning the first card before this). */
+	   `min-width: 0` is load-bearing: it was previously held down by an
+	   explicit 180px min/max because a flex item's automatic minimum size is
+	   its content, and the Daily Discovery artwork's intrinsic width was
+	   ballooning the first card past its basis. Zeroing the minimum lets the
+	   rail's computed basis win instead of pinning every card to one width. */
 	.mix-card {
-		flex: 0 0 180px;
-		width: 180px;
-		min-width: 180px;
-		max-width: 180px;
+		width: 100%;
+		min-width: 0;
 		display: flex;
 		flex-direction: column;
 		gap: 10px;
@@ -283,7 +258,6 @@
 		padding: 0;
 		border-radius: var(--radius-md);
 		text-align: left;
-		scroll-snap-align: start;
 		transition: transform var(--motion-base);
 		box-sizing: border-box;
 		cursor: pointer;
