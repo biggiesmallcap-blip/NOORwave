@@ -58,9 +58,16 @@ describe('library home hero contract', () => {
 		expect(libraryPage).toContain('Listen history suggestions');
 		expect(libraryPage).toContain('Random tracks');
 		expect(libraryPage).toContain('Random albums');
-		expect(libraryPage).toContain('stableRandomOffsets');
-		expect(libraryPage).toContain("cachedApi.getTracks('date_added', 'desc', 1, offset, true, false)");
-		expect(libraryPage).toContain("cachedApi.getAlbums('title', 'asc', 1, offset, true)");
+		// Both random murals come from one server call fired on mount. The old
+		// path derived offsets from the library totals and issued a single-row
+		// request per pick, so it could not start until the library store had
+		// paged in - the panels visibly popped in after everything else.
+		expect(libraryPage).toContain('async function loadRandomPanelCandidates(requestKey: string)');
+		expect(libraryPage).toContain('.getHomeShufflePicks(HOME_MURAL_ITEM_LIMIT)');
+		expect(libraryPage).not.toContain('stableRandomOffsets');
+		expect(libraryPage).not.toContain('function dailySalt');
+		expect(libraryPage).not.toContain("cachedApi.getTracks('date_added', 'desc', 1, offset, true, false)");
+		expect(libraryPage).not.toContain("cachedApi.getAlbums('title', 'asc', 1, offset, true)");
 		expect(libraryPage).toContain('const HOME_PANEL_CACHE_REFRESH_MS = 5 * 60 * 1000');
 		expect(libraryPage).toContain('const homePanelCandidateCache = {');
 		expect(libraryPage).toContain('let randomPanelTracks = $state<Track[]>(homePanelCandidateCache.randomTracks)');
@@ -77,7 +84,10 @@ describe('library home hero contract', () => {
 		expect(libraryPage).toContain('.getHomeSuggestions([], 50)');
 		expect(libraryPage).toContain('const requestKey = String(homePanelRefreshBucket())');
 		expect(libraryPage).not.toContain('listenHistorySeeds()');
-		expect(libraryPage).toContain('function capPerArtist(tracks: Track[], max: number): Track[]');
+		// The artist cap shapes the head of the mural; it must top up from what
+		// it skipped rather than hand back a short panel (5 of 12 picks).
+		expect(libraryPage).toContain('function capPerArtist(tracks: Track[], max: number, limit: number): Track[]');
+		expect(libraryPage).toContain('capPerArtist(suggestionTracks, SUGGESTION_ARTIST_CAP, HOME_MURAL_ITEM_LIMIT)');
 		expect(libraryPage).toContain('const SUGGESTION_ARTIST_CAP = 2');
 		// Both murals render the server lists directly. The old same-artist
 		// expansion tail-filled them with the album that was just played, which

@@ -989,3 +989,23 @@ stops. And a CSS entrance animation wants `animation-fill-mode: backwards`, not
 the life of the element, which is enough to trap a popout's z-index inside its
 own card.
 Spawned by: liked videos library 2026-07-26
+
+### home murals: verify the widened suggestion funnel against a real library
+
+The suggestion track mural returned 8 picks for a panel that shows 12, measured
+against the live library: `POST /api/home/suggestions {"limit":50}` came back
+with 8 tracks over 5 artists. The candidate funnel in the server log explains it
+- per seed `lfm_count=20` of a 24-slot budget, and every Last.fm candidate is
+`is_in_library: false`, so this endpoint discarded ~80% of what it paid for.
+
+Fixed by dropping the Last.fm source from that call site, raising the per-seed
+budget to 60, and making both the artist and album caps top up from what they
+skipped instead of returning a short list. Not yet verified against real data:
+the rebuild would have interrupted playback, so the numbers above are pre-fix
+only. Worth re-running that same curl after the next build and confirming the
+track count reaches the limit - and that the cold path (no cache row at all) is
+now sub-second, since the fan-out no longer touches the network.
+
+Same session added `GET /api/home/shuffle-picks` for the Random tracks / Random
+albums murals, also unverified in the app for the same reason.
+Spawned by: random tracks pop-in 2026-07-27

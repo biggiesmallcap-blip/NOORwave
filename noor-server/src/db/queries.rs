@@ -813,6 +813,91 @@ pub fn get_albums(
     Ok(albums)
 }
 
+/// Ordering key for a deterministic pseudo-random sample.
+///
+/// `salt` selects which sample you get: the same salt always yields the same
+/// rows, so a caller that buckets time (the library home shuffle murals rotate
+/// every five minutes) keeps a stable panel across remounts instead of
+/// reshuffling on every navigation. `ORDER BY RANDOM()` cannot do that - its
+/// output is unseedable - and the old client-side workaround was one paginated
+/// request per pick.
+fn shuffled_order_clause(column: &str) -> String {
+    format!("(({column} + ?1) * 2654435761) % 1000003")
+}
+
+/// Deterministic pseudo-random sample of library tracks. See
+/// [`shuffled_order_clause`] for what `salt` means.
+pub fn get_shuffled_tracks(
+    conn: &Connection,
+    salt: i64,
+    limit: i64,
+    favorite_only: bool,
+) -> Result<Vec<Track>> {
+    let projection = track_projection("a_artists");
+    let order_clause = shuffled_order_clause("t.id");
+    let where_clause = match favorite_predicate(favorite_only, false) {
+        Some(pred) => format!(" WHERE {pred}"),
+        None => String::new(),
+    };
+    let sql = format!(
+        "SELECT {projection}
+         FROM tracks t
+         LEFT JOIN artists a_artists ON t.artist_id = a_artists.id
+         LEFT JOIN albums al ON t.album_id = al.id
+         {where_clause}
+         ORDER BY {order_clause}
+         LIMIT ?2"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let tracks = stmt
+        .query_map(params![salt, limit], track_from_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(tracks)
+}
+
+/// Deterministic pseudo-random sample of library albums. Same `salt` contract as
+/// [`get_shuffled_tracks`], so both murals rotate on the same bucket.
+pub fn get_shuffled_albums(
+    conn: &Connection,
+    salt: i64,
+    limit: i64,
+    favorite_only: bool,
+) -> Result<Vec<Album>> {
+    let where_clause = album_filter_clause("al", favorite_only, None);
+    let order_clause = shuffled_order_clause("al.id");
+    let sql = format!(
+        "SELECT al.id, al.tidal_id, al.ytmusic_id, al.title, al.artist_id,
+                a.name as artist_name, al.year, al.artwork_url,
+                al.release_type, al.label, al.track_count, al.is_favorite, al.source
+         FROM albums al
+         LEFT JOIN artists a ON al.artist_id = a.id
+         {where_clause}
+         ORDER BY {order_clause}
+         LIMIT ?2"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let albums = stmt
+        .query_map(params![salt, limit], |row| {
+            Ok(Album {
+                id: row.get(0)?,
+                tidal_id: row.get(1)?,
+                ytmusic_id: row.get(2)?,
+                title: row.get(3)?,
+                artist_id: row.get(4)?,
+                artist_name: row.get(5)?,
+                year: row.get(6)?,
+                artwork_url: row.get(7)?,
+                release_type: row.get(8)?,
+                label: row.get(9)?,
+                track_count: row.get(10)?,
+                is_favorite: row.get::<_, i32>(11)? != 0,
+                source: row.get(12)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(albums)
+}
+
 pub fn get_album_count(conn: &Connection, favorite_only: bool, decade: Option<i64>) -> Result<i64> {
     // Count uses the bare `albums` table (no alias), so build the clause without one.
     let filter = album_filter_clause("", favorite_only, decade);
@@ -7683,6 +7768,93 @@ mod tests {
         )
         .optional()
         .expect("query server_config")
+    }
+
+    /// A library with `count` favourite tracks on one favourite album, plus one
+    /// non-favourite track and one non-favourite album that the shuffle sample
+    /// must never reach for.
+    fn shuffle_fixture(count: i64) -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("artist");
+        conn.execute(
+            "INSERT INTO albums (id, title, artist_id, is_favorite) VALUES (1, 'Album', 1, 1)",
+            [],
+        )
+        .expect("album");
+        conn.execute(
+            "INSERT INTO albums (id, title, artist_id, is_favorite) VALUES (2, 'Stranger', 1, 0)",
+            [],
+        )
+        .expect("other album");
+        for id in 1..=count {
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, album_id, is_favorite, is_library)
+                 VALUES (?1, 'Track', 1, 1, 1, 1)",
+                params![id],
+            )
+            .expect("track");
+        }
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, album_id, is_favorite, is_library)
+             VALUES (9001, 'Outsider', 1, 2, 0, 0)",
+            [],
+        )
+        .expect("non-favourite track");
+        conn
+    }
+
+    #[test]
+    fn shuffled_sample_is_stable_for_one_salt_and_moves_with_the_next() {
+        // The home murals repaint on every remount; a sample that reshuffled per
+        // request would churn the panel under the user. Same salt must mean the
+        // same picks, and the next time bucket must actually move them.
+        let conn = shuffle_fixture(60);
+
+        let first = get_shuffled_tracks(&conn, 100, 12, true).expect("sample");
+        let again = get_shuffled_tracks(&conn, 100, 12, true).expect("sample");
+        assert_eq!(first.len(), 12, "the sample fills the requested limit");
+        assert_eq!(
+            first.iter().map(|t| t.id).collect::<Vec<_>>(),
+            again.iter().map(|t| t.id).collect::<Vec<_>>(),
+            "the same salt must return the same picks"
+        );
+
+        let next = get_shuffled_tracks(&conn, 101, 12, true).expect("sample");
+        assert_ne!(
+            first.iter().map(|t| t.id).collect::<Vec<_>>(),
+            next.iter().map(|t| t.id).collect::<Vec<_>>(),
+            "the next bucket must reshuffle"
+        );
+    }
+
+    #[test]
+    fn shuffled_sample_respects_the_favourite_filter() {
+        let conn = shuffle_fixture(4);
+
+        let favourites = get_shuffled_tracks(&conn, 7, 50, true).expect("sample");
+        assert_eq!(favourites.len(), 4);
+        assert!(
+            favourites.iter().all(|t| t.id != 9001),
+            "a non-favourite track must not reach the library murals"
+        );
+        assert_eq!(
+            get_shuffled_tracks(&conn, 7, 50, false)
+                .expect("sample")
+                .len(),
+            5,
+            "without the filter every track is eligible"
+        );
+
+        let albums = get_shuffled_albums(&conn, 7, 50, true).expect("albums");
+        assert_eq!(albums.iter().map(|a| a.id).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(
+            get_shuffled_albums(&conn, 7, 50, false)
+                .expect("albums")
+                .len(),
+            2
+        );
     }
 
     #[test]

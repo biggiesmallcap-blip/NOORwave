@@ -1391,26 +1391,39 @@
 		return track.artist_id ?? track.artist_name ?? '';
 	}
 
-	// Greedy per-artist cap. An empty key (missing artist) is never capped so
-	// those tracks don't all collapse into one synthetic bucket.
-	function capPerArtist(tracks: Track[], max: number): Track[] {
+	// Greedy per-artist cap, then a top-up pass from what the cap skipped. An
+	// empty key (missing artist) is never capped so those tracks don't all
+	// collapse into one synthetic bucket. The top-up matters because the cap is
+	// meant to shape the head of the mural, not shorten it: dropping capped
+	// tracks outright left the panel showing 5 of 12 whenever the server's list
+	// leaned on a few artists. Mirrors the server-side cap in
+	// noor-server/src/server/routes/home_suggestions.rs.
+	function capPerArtist(tracks: Track[], max: number, limit: number): Track[] {
 		const perArtist = new Map<number | string, number>();
 		const out: Track[] = [];
+		const skipped: Track[] = [];
 		for (const track of tracks) {
+			if (out.length >= limit) break;
 			const key = suggestionArtistKey(track);
 			if (max > 0 && key !== '') {
 				const count = perArtist.get(key) ?? 0;
-				if (count >= max) continue;
+				if (count >= max) {
+					skipped.push(track);
+					continue;
+				}
 				perArtist.set(key, count + 1);
 			}
+			out.push(track);
+		}
+		for (const track of skipped) {
+			if (out.length >= limit) break;
 			out.push(track);
 		}
 		return out;
 	}
 
 	let suggestedTrackItems = $derived.by<HomeMuralItem[]>(() =>
-		capPerArtist(suggestionTracks, SUGGESTION_ARTIST_CAP)
-			.slice(0, HOME_MURAL_ITEM_LIMIT)
+		capPerArtist(suggestionTracks, SUGGESTION_ARTIST_CAP, HOME_MURAL_ITEM_LIMIT)
 			.map(trackToMuralItem)
 	);
 
@@ -1466,82 +1479,38 @@
 	let lazyArt = $state<Record<string, string>>({});
 	let artistLazyArt = $state<Record<number, string>>({});
 
-	function dailySalt(offset: number): number {
-		const now = new Date();
-		return now.getFullYear() * 10000 + (now.getMonth() + 1) * 100 + now.getDate() + offset;
-	}
-
 	function homePanelRefreshBucket(): number {
 		return Math.floor(Date.now() / HOME_PANEL_CACHE_REFRESH_MS);
 	}
 
-	function stableRank(id: number, salt: number): number {
-		let value = Math.imul(id ^ salt, 0x45d9f3b);
-		value = Math.imul(value ^ (value >>> 16), 0x45d9f3b);
-		return (value ^ (value >>> 16)) >>> 0;
-	}
-
-	function stableRandomOffsets(total: number, saltOffset: number, limit: number, refreshBucket: number): number[] {
-		const count = Math.min(Math.max(total, 0), limit);
-		if (count === 0) return [];
-
-		const salt = dailySalt(saltOffset) ^ total ^ refreshBucket;
-		const offsets: number[] = [];
-		const used = new Set<number>();
-		let attempt = 0;
-
-		while (offsets.length < count && attempt < count * 16 + 64) {
-			const offset = stableRank(attempt + 1, salt) % total;
-			if (!used.has(offset)) {
-				used.add(offset);
-				offsets.push(offset);
-			}
-			attempt++;
-		}
-
-		for (let offset = 0; offsets.length < count && offset < total; offset++) {
-			if (!used.has(offset)) offsets.push(offset);
-		}
-
-		return offsets;
-	}
-
-	async function loadRandomPanelCandidates(trackTotal: number, albumTotal: number, requestKey: string, refreshBucket: number) {
-		const [tracksForPanel, albumsForPanel] = await Promise.all([
-			loadRandomPanelTracks(trackTotal, refreshBucket),
-			loadRandomPanelAlbums(albumTotal, refreshBucket),
-		]);
-		if (randomPanelRequestKey === requestKey) {
-			randomPanelTracks = tracksForPanel;
-			randomPanelAlbums = albumsForPanel;
-			homePanelCandidateCache.randomTracks = tracksForPanel;
-			homePanelCandidateCache.randomAlbums = albumsForPanel;
-			homePanelCandidateCache.randomRequestKey = requestKey;
-		}
-	}
-
-	async function loadRandomPanelTracks(trackTotal: number, refreshBucket: number): Promise<Track[]> {
-		if (trackTotal <= 0) return [];
-		const offsets = stableRandomOffsets(trackTotal, 31, HOME_MURAL_ITEM_LIMIT, refreshBucket);
-		const responses = await Promise.all(
-			offsets.map(offset => cachedApi.getTracks('date_added', 'desc', 1, offset, true, false))
-		);
-		return uniqueById(responses.flatMap(response => response.tracks));
-	}
-
-	async function loadRandomPanelAlbums(albumTotal: number, refreshBucket: number): Promise<HomeAlbumCard[]> {
-		if (albumTotal <= 0) return [];
-		const offsets = stableRandomOffsets(albumTotal, 41, HOME_MURAL_ITEM_LIMIT, refreshBucket);
-		const responses = await Promise.all(
-			offsets.map(offset => cachedApi.getAlbums('title', 'asc', 1, offset, true))
-		);
-		return uniqueById(responses.flatMap(response => response.albums).map(album => ({
+	// Both random murals come from one server call. The old path derived random
+	// offsets from $totalTracks / $totalAlbums and issued a single-row paginated
+	// request per pick, so it could not start until the library store had loaded
+	// its first page and then paid 24 round trips - which is why these panels
+	// popped in well after the rest of the home view. The server owns the sample
+	// now (keyed to a five-minute bucket so it stays put across remounts), and
+	// this fires on mount alongside the suggestion murals.
+	async function loadRandomPanelCandidates(requestKey: string) {
+		const result = await cachedApi
+			.getHomeShufflePicks(HOME_MURAL_ITEM_LIMIT)
+			.catch(error => {
+				console.error('Failed to load library shuffle picks:', error);
+				return { tracks: [] as Track[], albums: [] as Album[] };
+			});
+		if (randomPanelRequestKey !== requestKey) return;
+		const tracksForPanel = uniqueById(result.tracks ?? []);
+		const albumsForPanel = uniqueById(result.albums ?? []).map(album => ({
 			id: album.id,
 			title: album.title,
 			artist_id: album.artist_id ?? null,
 			artist_name: album.artist_name,
 			artwork_url: album.artwork_url,
-		})));
+		}));
+		randomPanelTracks = tracksForPanel;
+		randomPanelAlbums = albumsForPanel;
+		homePanelCandidateCache.randomTracks = tracksForPanel;
+		homePanelCandidateCache.randomAlbums = albumsForPanel;
+		homePanelCandidateCache.randomRequestKey = requestKey;
 	}
 
 	function uniqueById<T extends { id: number }>(items: T[]): T[] {
@@ -1706,17 +1675,16 @@
 		}
 	}
 
+	// Fires once per refresh bucket, immediately on mount - deliberately NOT
+	// keyed off $totalTracks / $totalAlbums. Those stay 0 until the library
+	// store's first page lands, which is what delayed these panels behind
+	// everything else on the page.
 	$effect(() => {
-		const trackTotal = $totalTracks;
-		const albumTotal = $totalAlbums;
-		if (trackTotal <= 0 && albumTotal <= 0) return;
-
-		const refreshBucket = homePanelRefreshBucket();
-		const requestKey = `${dailySalt(0)}:${refreshBucket}:${trackTotal}:${albumTotal}`;
+		const requestKey = String(homePanelRefreshBucket());
 		if (randomPanelRequestKey === requestKey) return;
 		randomPanelRequestKey = requestKey;
 
-		void loadRandomPanelCandidates(trackTotal, albumTotal, requestKey, refreshBucket).catch((error) => {
+		void loadRandomPanelCandidates(requestKey).catch((error) => {
 			console.error('Failed to load random library panels:', error);
 		});
 	});

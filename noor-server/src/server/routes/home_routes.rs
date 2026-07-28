@@ -123,6 +123,52 @@ pub(super) async fn get_home_picks(
     Ok(Json(payload))
 }
 
+/// How long one shuffle-pick sample stays put. Matches the client's panel
+/// refresh bucket, so a remount inside the window repaints the same murals
+/// instead of reshuffling under the user.
+const HOME_SHUFFLE_BUCKET_SECS: i64 = 5 * 60;
+const HOME_SHUFFLE_DEFAULT_LIMIT: i64 = 12;
+
+#[derive(Debug, serde::Deserialize)]
+pub(super) struct HomeShuffleQuery {
+    limit: Option<i64>,
+}
+
+/// GET /api/home/shuffle-picks - the "Random tracks" / "Random albums" murals.
+///
+/// One request, two queries, no dependency on how far the client's library
+/// store has paged in. The client used to derive random offsets from the track
+/// and album totals and then issue one single-row paginated request per pick
+/// (24 round trips), which could not start until the library store had loaded
+/// its first page - so the murals always popped in late. The sample is keyed to
+/// a five-minute bucket so it is stable across remounts.
+pub(super) async fn get_home_shuffle_picks(
+    State(state): State<SharedState>,
+    axum::extract::Query(query): axum::extract::Query<HomeShuffleQuery>,
+) -> Result<Json<Value>, StatusCode> {
+    let limit = query
+        .limit
+        .unwrap_or(HOME_SHUFFLE_DEFAULT_LIMIT)
+        .clamp(1, 50);
+    let salt = unix_now_secs() / HOME_SHUFFLE_BUCKET_SECS;
+
+    let db = {
+        let s = state.read().await;
+        s.db.clone()
+    };
+    let (tracks, albums) = db
+        .with_conn(move |conn| {
+            let tracks = queries::get_shuffled_tracks(conn, salt, limit, true)?;
+            // Offset the album salt so the two murals don't rotate in lockstep
+            // on the same underlying id ordering.
+            let albums = queries::get_shuffled_albums(conn, salt + 7, limit, true)?;
+            Ok((tracks, albums))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(json!({ "tracks": tracks, "albums": albums })))
+}
+
 pub(super) async fn get_home_recommendations(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
