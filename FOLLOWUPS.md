@@ -10,6 +10,25 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### motion: migrate the three pre-existing rise animations onto the shared class
+
+`app.css` now carries `.rise-in-shelf` and `.rise-in-card`, and Home uses them.
+Three older copies of the same animation predate the extraction and still
+hand-roll it with drifted values: `videos/liked/+page.svelte` (`card-in`,
+300ms/8px/22ms/backwards), `video/VideoSetShelf.svelte` (`shelf-in`,
+340ms/10px/70ms/both) and `library/+page.svelte` (`home-mural-panel-in`,
+360ms/10px/70ms/both).
+
+They were left alone because `liked-videos-contract.test.mjs` and
+`video-editorial-browse-contract.test.mjs` assert the exact declarations inside
+those files, and rewriting the tests was out of scope for the home layout work.
+Migrating means updating those assertions to check the shared class is applied
+plus the `--rise-index` wiring, rather than the keyframe text. The `backwards`
+fill and the per-batch modulo cap must survive the move - both are load-bearing
+and the reasons are recorded in the `app.css` comment.
+
+Spawned by: the Part 8 motion extraction in the home layout work.
+
 ### videos: remaining editorial discovery ideas
 
 Shipped so far: daily-picks mural, genre shelves, album-love, one-step-out

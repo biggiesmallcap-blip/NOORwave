@@ -93,7 +93,11 @@
 	<title>NOOR — Home</title>
 </svelte:head>
 
-<div class="page-shell home-page animate-in">
+<!-- No page-level `animate-in` here. It fires once on mount, before any shelf
+     has data, so everything that resolves later still pops in behind it. Each
+     section eases itself in instead, staggered by its place in the stack -
+     the same move Library made when it dropped its page-level translate. -->
+<div class="page-shell home-page">
 	{#if error}
 		<EmptyState title="NOOR is offline" copy={error}>
 			{#snippet actions()}
@@ -122,22 +126,27 @@
 		</nav>
 
 
+		<!-- `index` is the section's slot in the stack. It only spaces out the
+		     entrance animation; nothing else reads it. YourMixesShelf owns two
+		     sections (music + video), so the next index skips a slot, and
+		     HomeRecommendationsShelf renders one section per provider shelf. -->
+
 		<!-- Your Mixes (TIDAL) — replaces the prime above-Trending slot. -->
-		<YourMixesShelf />
+		<YourMixesShelf index={0} />
 
 		<!-- Personal Radio Stations (TIDAL) -->
-		<PersonalRadioShelf />
+		<PersonalRadioShelf index={2} />
 
 		<!-- Provider recommendations load independently from profile integrations. -->
-		<HomeRecommendationsShelf />
+		<HomeRecommendationsShelf index={3} />
 
 		<!-- Moods preview rail. Pulls the first chunk of categories from
 		     /api/tidal/moods and links each tile to /moods/[slug]. Full
 		     listing lives at /moods. -->
-		<HomeMoodsRail />
+		<HomeMoodsRail index={6} />
 
 		<!-- Weekly Articles Section -->
-		<section class="discovery-section">
+		<section class="discovery-section rise-in-shelf" style="--rise-index: 7">
 			<div class="section-header">
 				<div class="section-title-group">
 					<p class="eyebrow">AllMusic</p>
@@ -175,7 +184,7 @@
 		</section>
 
 		<!-- Industry News Section -->
-		<section class="discovery-section">
+		<section class="discovery-section rise-in-shelf" style="--rise-index: 8">
 			<div class="section-header">
 				<div class="section-title-group">
 					<p class="eyebrow">Industry</p>

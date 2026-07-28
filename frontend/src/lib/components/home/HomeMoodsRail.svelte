@@ -12,6 +12,9 @@
 		putCachedMoodCategories,
 	} from '$lib/stores/tidal-moods-cache';
 
+	// Position in the home stack; stagger only. See YourMixesShelf.
+	let { index = 0 }: { index?: number } = $props();
+
 	const PREVIEW_LIMIT = 8;
 	const LOAD_ARM_DELAY_MS = 0;
 	const FALLBACK_LOAD_DELAY_MS = 3000;
@@ -144,7 +147,7 @@
 </script>
 
 {#if categories.length > 0 || loading}
-	<section bind:this={sectionEl} class="moods-rail" data-section="moods">
+	<section bind:this={sectionEl} class="moods-rail rise-in-shelf" data-section="moods" style={`--rise-index: ${index}`}>
 		<div class="header">
 			<div class="title-group">
 				<p class="eyebrow">TIDAL</p>

@@ -34,6 +34,11 @@
 
 	type State = 'hidden' | 'loading' | 'ready' | 'empty' | 'error';
 
+	// Position in the home stack; stagger only. See YourMixesShelf. Each shelf
+	// this component renders steps one slot further down so a batch that lands
+	// together cascades rather than appearing as a block.
+	let { index = 0 }: { index?: number } = $props();
+
 	const ROTATE_MS = 5500;
 	const PANEL_LIMIT = 20;
 
@@ -374,7 +379,7 @@
 {#if viewState === 'hidden'}
 	<!-- Hidden until a profile integration is connected. -->
 {:else if viewState === 'loading'}
-	<section class="profile-recommendations" data-section="provider-recommendations">
+	<section class="profile-recommendations rise-in-shelf" data-section="provider-recommendations" style={`--rise-index: ${index}`}>
 		<SectionHeader
 			eyebrow="Connected profiles"
 			title="Recommendations"
@@ -394,12 +399,16 @@
 	</section>
 {:else if viewState === 'ready'}
 	<div class="profile-recommendations-list">
-		{#each visibleShelves as shelf (shelfKey(shelf))}
+		{#each visibleShelves as shelf, shelfPosition (shelfKey(shelf))}
 			{@const currentItem = currentItemFor(shelf)}
 			{@const currentIndex = currentIndexFor(shelf)}
 			{@const key = shelfKey(shelf)}
 			{#if currentItem}
-				<section class="profile-recommendations" data-section={`provider-recommendations-${shelf.provider}-${shelf.entity_type ?? 'track'}`}>
+				<section
+					class="profile-recommendations rise-in-shelf"
+					data-section={`provider-recommendations-${shelf.provider}-${shelf.entity_type ?? 'track'}`}
+					style={`--rise-index: ${index + shelfPosition}`}
+				>
 					<SectionHeader
 						eyebrow="Connected profiles"
 						title={shelf.title}

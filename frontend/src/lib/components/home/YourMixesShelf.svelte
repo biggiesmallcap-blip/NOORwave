@@ -11,6 +11,11 @@
 
 	type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
 
+	// Position in the home stack, used only to stagger the entrance so shelves
+	// that resolve together cascade instead of landing as one slab. This shelf
+	// owns two sections, so the video rail sits one slot further down.
+	let { index = 0 }: { index?: number } = $props();
+
 	// Reactive, persisted query: hydrates the localStorage snapshot synchronously at
 	// init so the shelf paints last-known mixes with no skeleton, then revalidates in
 	// the background. Replaces the old in-memory-only cache that was wiped on restart.
@@ -151,7 +156,7 @@
 	</div>
 {/snippet}
 
-<section class="discovery-section" data-section="your-mixes">
+<section class="discovery-section rise-in-shelf" data-section="your-mixes" style={`--rise-index: ${index}`}>
 	<div class="section-header">
 		<div class="section-title-group">
 			<p class="eyebrow">TIDAL</p>
@@ -182,7 +187,7 @@
 </section>
 
 {#if viewState === 'ready' && videoMixes.length > 0}
-	<section class="discovery-section" data-section="your-video-mixes">
+	<section class="discovery-section rise-in-shelf" data-section="your-video-mixes" style={`--rise-index: ${index + 1}`}>
 		<div class="section-header">
 			<div class="section-title-group">
 				<p class="eyebrow">TIDAL</p>

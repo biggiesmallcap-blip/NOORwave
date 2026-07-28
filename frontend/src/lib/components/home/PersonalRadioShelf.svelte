@@ -10,6 +10,9 @@
 
 	type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
 
+	// Position in the home stack; stagger only. See YourMixesShelf.
+	let { index = 0 }: { index?: number } = $props();
+
 	// Reactive, persisted query: hydrates the localStorage snapshot synchronously at
 	// init so the shelf paints last-known stations with no skeleton, then revalidates
 	// in the background. Replaces the in-memory-only cache wiped on every restart.
@@ -123,7 +126,7 @@
 	</div>
 {/snippet}
 
-<section class="discovery-section" data-section="personal-radio">
+<section class="discovery-section rise-in-shelf" data-section="personal-radio" style={`--rise-index: ${index}`}>
 	<div class="section-header">
 		<div class="section-title-group">
 			<p class="eyebrow">TIDAL</p>

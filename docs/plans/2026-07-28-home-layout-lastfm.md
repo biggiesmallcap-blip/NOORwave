@@ -523,7 +523,7 @@ the exploration.
 completes the part. `git log --oneline -10` plus this checklist is the entire
 handoff.
 
-- [ ] Part 8 - motion extraction (`app.css`, thread `--rise-index`)
+- [x] Part 8 - motion extraction (`app.css`, thread `--rise-index`)
 - [ ] Part 1 - rail primitive (fluid, container-query)
 - [ ] Part 2 - section vocabulary and spacing
 - [ ] Part 7 - recommendations restructure (1 mural + 2 rails)
@@ -605,20 +605,38 @@ working subset on the branch with a WIP message describing exactly what is half
 done, and add a line to `FOLLOWUPS.md`. Never leave the tree dirty across a
 session boundary; a fresh session cannot tell intentional from abandoned.
 
-### Collision warning
+### Collision warning: PR #220
 
-Worktree `E:/NOORwave/.claude/worktrees/music-data-skew-issue-6c33a4` holds
-branch `fix/home-mural-timing-and-fill` at commit `193d6e03`, unmerged into
-master. It already modifies
-`noor-server/src/server/routes/home_routes.rs`,
-`noor-server/src/server/routes/home_suggestions.rs`,
-`noor-server/src/db/queries.rs`, `noor-server/src/server/routes.rs`,
-`frontend/src/lib/api/client.ts` and `frontend/src/lib/cache/api_queries.ts`.
+PR #220 (`fix/home-mural-timing-and-fill`, worktree
+`music-data-skew-issue-6c33a4`) is open against master and modifies
+`home_routes.rs`, `home_suggestions.rs`, `queries.rs`, `routes.rs`,
+`client.ts`, `api_queries.ts`, `library/+page.svelte` and `FOLLOWUPS.md`.
 
-Parts 5 and 6 edit `home_routes.rs` and `queries.rs` directly. Land that branch
-first, or rebase onto it before starting Part 5. Also note the standing hazard
-with concurrent worktrees: stage only this plan's files, and re-check `git
-status` fresh at the start of every session rather than trusting a snapshot.
+Checked against this plan. The overlap is **line drift, not semantic conflict**:
+
+- **Batch A: no overlap.** #220 touches `routes/library/+page.svelte`; Batch A
+  touches `routes/+page.svelte`, `app.css` and the home shelf components.
+  Different files. `FOLLOWUPS.md` is shared but #220 appends at the end of the
+  file while this work inserts at the top of `## Open`, so it merges cleanly.
+- **Batch C: line drift only.** #220's `home_routes.rs` change is one additive
+  hunk after `get_home_picks` adding a `get_home_shuffle_picks` handler and two
+  constants. It touches none of `resolve_recommendation_*`, `fetch_lastfm_*`,
+  `load_or_fetch_recommendation_shelf` or the `LASTFM_HOME_*` limits that Parts
+  5 and 6 rewrite. But it inserts roughly 46 lines near the top of the file, so
+  **every `home_routes.rs` line number quoted in Parts 5 and 6 shifts by about
+  +46 once #220 lands.** `queries.rs` gains ~172 lines and `routes.rs` ~4, with
+  the same effect.
+
+So: no need to land or rebase onto #220 before starting. Just re-grep for the
+function name rather than trusting a quoted line number in Parts 5 and 6 if
+#220 has merged by then. That is the standing rule for this plan anyway.
+
+Note also the general hazard with concurrent worktrees on this repo: stage only
+this plan's files, and re-check `git status` fresh at the start of every session
+rather than trusting a snapshot.
+
+This committed copy is the source of truth; the scratch copy under
+`~/.claude/plans/` is not maintained.
 
 Current branch is `claude/home-layout-lastfm-fixes-ec0c33`. Rename it before any
 push, per the repo rule against `claude/` in branch names.
