@@ -13,6 +13,7 @@
 	import HomeMoodsRail from '$lib/components/home/HomeMoodsRail.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import MediaRail from '$lib/components/ui/MediaRail.svelte';
+	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
 
 	// Home page data
 	let articles = $state<RSSFeedItem[]>([]);
@@ -167,15 +168,13 @@
 
 		<!-- Weekly Articles Section -->
 		<section class="discovery-section rise-in-shelf" style="--rise-index: 7">
-			<div class="section-header">
-				<div class="section-title-group">
-					<p class="eyebrow">AllMusic</p>
-					<h2>Weekly articles</h2>
-				</div>
-				{#if sectionsLoading.articles}
-					<span class="loading-indicator">Loading...</span>
-				{/if}
-			</div>
+			<SectionHeader eyebrow="AllMusic" title="Weekly articles" variant="charts" level={2}>
+				{#snippet actions()}
+					{#if sectionsLoading.articles}
+						<span class="loading-indicator">Loading...</span>
+					{/if}
+				{/snippet}
+			</SectionHeader>
 
 			{#if articles.length > 0}
 				<MediaRail
@@ -193,15 +192,13 @@
 
 		<!-- Industry News Section -->
 		<section class="discovery-section rise-in-shelf" style="--rise-index: 8">
-			<div class="section-header">
-				<div class="section-title-group">
-					<p class="eyebrow">Industry</p>
-					<h2>Latest news</h2>
-				</div>
-				{#if sectionsLoading.news}
-					<span class="loading-indicator">Loading...</span>
-				{/if}
-			</div>
+			<SectionHeader eyebrow="Industry" title="Latest news" variant="charts" level={2}>
+				{#snippet actions()}
+					{#if sectionsLoading.news}
+						<span class="loading-indicator">Loading...</span>
+					{/if}
+				{/snippet}
+			</SectionHeader>
 
 			{#if news.length > 0}
 				<div class="news-grid">
@@ -237,30 +234,13 @@
 		padding-bottom: 40px;
 	}
 
-	/* Discovery sections */
+	/* Discovery sections. Two spacing values on this page and no others:
+	   --space-5 between sections (from .page-shell) and --space-3 between a
+	   section's header and its content. */
 	.discovery-section {
 		display: flex;
 		flex-direction: column;
-		gap: 16px;
-	}
-
-	.section-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 16px;
-	}
-
-	.section-title-group {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-	}
-
-	.section-title-group h2 {
-		font-size: var(--font-size-lg);
-		font-weight: var(--font-weight-bold);
-		margin: 0;
+		gap: var(--space-3);
 	}
 
 	.loading-indicator {
@@ -340,7 +320,7 @@
 	.news-grid {
 		display: grid;
 		grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-		gap: 16px;
+		gap: var(--gap);
 	}
 
 	.news-card {
@@ -411,9 +391,6 @@
 	/* Responsive */
 	@media (max-width: 1180px) {
 		.home-page { gap: var(--space-4); }
-
-		.discovery-section { gap: 12px; }
-		.section-title-group h2 { font-size: var(--font-size-md); }
 
 		.news-grid {
 			grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));

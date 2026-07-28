@@ -7,6 +7,7 @@
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import MediaRail from '$lib/components/ui/MediaRail.svelte';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
+	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
 
 	type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
 
@@ -133,15 +134,13 @@
 {/snippet}
 
 <section class="discovery-section rise-in-shelf" data-section="personal-radio" style={`--rise-index: ${index}`}>
-	<div class="section-header">
-		<div class="section-title-group">
-			<p class="eyebrow">TIDAL</p>
-			<h2>Personal Radio</h2>
-		</div>
-		{#if viewState === 'loading' || refreshing}
-			<span class="loading-indicator">Loading…</span>
-		{/if}
-	</div>
+	<SectionHeader eyebrow="TIDAL" title="Personal Radio" variant="charts" level={2}>
+		{#snippet actions()}
+			{#if viewState === 'loading' || refreshing}
+				<span class="loading-indicator">Loading…</span>
+			{/if}
+		{/snippet}
+	</SectionHeader>
 
 	{#if viewState === 'loading'}
 		{@render skeletonRail()}
@@ -166,23 +165,7 @@
 	.discovery-section {
 		display: flex;
 		flex-direction: column;
-		gap: 16px;
-	}
-	.section-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 16px;
-	}
-	.section-title-group {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-	}
-	.section-title-group h2 {
-		font-size: var(--font-size-lg);
-		font-weight: var(--font-weight-bold);
-		margin: 0;
+		gap: var(--space-3);
 	}
 	.loading-indicator {
 		font-size: var(--font-size-xs);

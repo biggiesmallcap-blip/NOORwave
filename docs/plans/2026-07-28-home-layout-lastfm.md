@@ -525,7 +525,7 @@ handoff.
 
 - [x] Part 8 - motion extraction (`app.css`, thread `--rise-index`)
 - [x] Part 1 - rail primitive (fluid, container-query)
-- [ ] Part 2 - section vocabulary and spacing
+- [x] Part 2 - section vocabulary and spacing
 - [ ] Part 7 - recommendations restructure (1 mural + 2 rails)
 - [ ] Part 5 - Last.fm correctness (Rust)
 - [ ] Part 6 - Last.fm performance (Rust + frontend resolver)

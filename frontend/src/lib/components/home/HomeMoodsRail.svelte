@@ -3,6 +3,7 @@
 	import { api, type TidalMoodCategory } from '$lib/api/client';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import MediaRail from '$lib/components/ui/MediaRail.svelte';
+	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { goto } from '$app/navigation';
 	import {
@@ -175,13 +176,13 @@
 
 {#if categories.length > 0 || loading}
 	<section bind:this={sectionEl} class="moods-rail rise-in-shelf" data-section="moods" style={`--rise-index: ${index}`}>
-		<div class="header">
-			<div class="title-group">
-				<p class="eyebrow">TIDAL</p>
-				<h2>Moods &amp; Activities</h2>
-			</div>
-			<a class="view-all" href="/moods">View all -&gt;</a>
-		</div>
+		<SectionHeader
+			eyebrow="TIDAL"
+			title="Moods & Activities"
+			variant="charts"
+			level={2}
+			href="/moods"
+		/>
 		{#if categories.length > 0}
 			<MediaRail
 				items={categories}
@@ -207,13 +208,7 @@
 {/if}
 
 <style>
-	.moods-rail { display: flex; flex-direction: column; gap: var(--gap); }
-	.header { display: flex; align-items: center; justify-content: space-between; gap: var(--gap); }
-	.title-group { display: flex; flex-direction: column; gap: var(--space-1); }
-	.title-group h2 { font-size: var(--font-size-lg); font-weight: var(--font-weight-bold); margin: 0; }
-	.eyebrow { font-size: var(--font-size-xs); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-secondary); margin: 0; font-weight: var(--font-weight-bold); }
-	.view-all { font-size: var(--font-size-xs); font-weight: var(--font-weight-semibold); color: var(--text-secondary); text-decoration: none; transition: color var(--motion-fast); }
-	.view-all:hover, .view-all:focus-visible { color: var(--text-primary); outline: none; }
+	.moods-rail { display: flex; flex-direction: column; gap: var(--space-3); }
 	/* Rail behaviour lives in MediaRail; this card only describes itself. */
 	.card {
 		width: 100%;
