@@ -759,12 +759,16 @@ input[type='checkbox'] { accent-color: var(--accent); }
    FOLLOWUPS.md for the back-migration. */
 .rise-in-shelf {
 	animation: rise-in-shelf 340ms ease-out both;
-	animation-delay: calc(var(--rise-index, 0) * 70ms);
+	/* Capped, because the delay is dead time where the element is invisible.
+	   Home stacks sixteen sections; uncapped, the last one would sit blank for
+	   over a second. The cap keeps the cascade legible near the top of the page
+	   and lets everything below it arrive together. */
+	animation-delay: calc(min(var(--rise-index, 0), 8) * 70ms);
 }
 
 .rise-in-card {
 	animation: rise-in-card 300ms ease-out backwards;
-	animation-delay: calc(var(--rise-index, 0) * 22ms);
+	animation-delay: calc(min(var(--rise-index, 0), 11) * 22ms);
 }
 
 @keyframes rise-in-shelf {

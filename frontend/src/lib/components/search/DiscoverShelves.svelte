@@ -12,6 +12,14 @@
 
 	type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
 
+	// `index` staggers the entrance when this sits in a stack of shelves.
+	// `quiet` suppresses the loading/empty/disconnected/error lines: on Home
+	// this is one section among many, and a status sentence wedged between two
+	// working shelves reads as breakage rather than information. The /search
+	// caller leaves it off, where the shelves are the whole view and an
+	// explanation is the useful thing to show.
+	let { index = 0, quiet = false }: { index?: number; quiet?: boolean } = $props();
+
 	const cachedOnMount = getCachedHomeModules();
 	let modules = $state<TidalHomeModule[]>(cachedOnMount ?? []);
 	let viewState = $state<State>(
@@ -54,10 +62,12 @@
 	}
 </script>
 
-{#if viewState === 'loading'}
+{#if viewState === 'ready'}
+	<TidalDiscoverShelves {modules} startIndex={index} />
+{:else if quiet}
+	<!-- Nothing to show and nothing worth saying about it here. -->
+{:else if viewState === 'loading'}
 	<p class="muted-line">Loading discover...</p>
-{:else if viewState === 'ready'}
-	<TidalDiscoverShelves {modules} />
 {:else if viewState === 'empty'}
 	<p class="muted-line">
 		TIDAL returned no editorial modules right now.

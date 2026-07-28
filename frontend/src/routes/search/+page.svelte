@@ -3,9 +3,10 @@
   import { goto, beforeNavigate } from '$app/navigation'
   import type { Snapshot } from './$types'
   import { captureScroll, restoreScroll } from '$lib/navigation/scroll'
-  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type SpotifyPlaylistSearchItem, type SearchResults } from '$lib/api/client'
+  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type SpotifyPlaylistSearchItem, type SearchResults, type ListenHistoryEntry } from '$lib/api/client'
   import { cachedApi } from '$lib/cache/api_queries'
-  import DiscoverShelves from '$lib/components/search/DiscoverShelves.svelte'
+  import MediaRail from '$lib/components/ui/MediaRail.svelte'
+  import { FACETS } from '$lib/search/facets'
   import { buildTidalTrackMenu, buildTrackMenu, downloadMenuItem } from '$lib/player/track_menu'
   import { buildAlbumMenu } from '$lib/player/album_menu'
   import { buildArtistMenu } from '$lib/player/artist_menu'
@@ -124,6 +125,24 @@
   // C3 - session-aware ranking
   let recentArtistNames = $state<Set<string>>(new Set())
 
+  // Idle-state rails. Both are built from responses the page already fetches
+  // on mount, so the empty view costs no additional requests.
+  let recentListens = $state<ListenHistoryEntry[]>([])
+
+  // Listen history is per-play, so the same track appears many times. Keep the
+  // most recent row per track and cap it to a rail's worth.
+  function dedupeByTrack(entries: ListenHistoryEntry[]): ListenHistoryEntry[] {
+    const seen = new Set<number>()
+    const out: ListenHistoryEntry[] = []
+    for (const entry of entries) {
+      if (seen.has(entry.track_id)) continue
+      seen.add(entry.track_id)
+      out.push(entry)
+      if (out.length >= 12) break
+    }
+    return out
+  }
+
   // C4 - discovery injectables
   let vibeTrack = $state<VibeTrack[] | null>(null)
   let underratedTracks = $state<BasicTrack[] | null>(null)
@@ -180,6 +199,10 @@
         .map(e => e.artist_name)
         .filter((n): n is string => typeof n === 'string' && n.length > 0)
       recentArtistNames = new Set(names)
+      // Same response, no extra request: this call was already being made for
+      // session-aware ranking and only its artist names were kept. The entries
+      // also carry title and artwork, which is the "Jump back in" rail.
+      recentListens = dedupeByTrack(listens.listens)
     }
 
     if (playlistsRes.status === 'fulfilled') {
@@ -284,6 +307,14 @@
 
   function isCurrentSearch(q: string, generation: number, signal: AbortSignal) {
     return !signal.aborted && searchGeneration === generation && query.trim() === q
+  }
+
+  // The facet tiles are the only place the query language is advertised. The
+  // popover and Tab-completion only help once you already know a filter exists.
+  function applyFacetExample(example: string) {
+    query = example
+    inputEl?.focus()
+    onInput()
   }
 
   function onInput() {
@@ -1200,6 +1231,52 @@
 
 </script>
 
+{#snippet listenCard(entry: ListenHistoryEntry)}
+  <button
+    type="button"
+    class="idle-card"
+    title={`${entry.track_title}${entry.artist_name ? ` - ${entry.artist_name}` : ''}`}
+    onclick={() => void playTrackNow(entry.track_id)}
+    oncontextmenu={(e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      openContextMenu(e, buildTrackMenu({
+        id: entry.track_id,
+        title: entry.track_title,
+        artist_id: null,
+        artist_name: entry.artist_name,
+        album_id: null,
+        album_title: entry.album_title,
+      }), entry.track_title)
+    }}
+  >
+    <div class="idle-art">
+      <ArtworkImage
+        className="idle-art-img"
+        src={entry.artwork_url}
+        alt={entry.track_title}
+        size={320}
+        tint={true}
+        fadeIn={true}
+        fallbackText={(entry.track_title.trim()[0] ?? 'N').toUpperCase()}
+      />
+      <PlayOverlay position="corner" size="sm" />
+    </div>
+    <p class="idle-title">{entry.track_title}</p>
+    {#if entry.artist_name}<p class="idle-sub">{entry.artist_name}</p>{/if}
+  </button>
+{/snippet}
+
+{#snippet playlistCard(playlist: Playlist)}
+  <a class="idle-card" href={`/playlists/${playlist.id}`} title={playlist.name}>
+    <div class="idle-art idle-art-playlist">
+      <span class="idle-playlist-glyph" aria-hidden="true">{playlist.is_smart ? '✦' : '☰'}</span>
+    </div>
+    <p class="idle-title">{playlist.name}</p>
+    <p class="idle-sub">{playlist.track_count} {playlist.track_count === 1 ? 'track' : 'tracks'}</p>
+  </a>
+{/snippet}
+
 <div class="search-page">
   <div class="search-header">
     <SearchField
@@ -1248,13 +1325,43 @@
       </section>
     {/if}
 
-    <section class="results-section discover-shelves-section">
-      <DiscoverShelves />
-    </section>
-
-    {#if recent.length === 0}
-      <p class="search-hint">Start typing to search Tidal's full catalogue</p>
+    {#if recentListens.length > 0}
+      <section class="results-section">
+        <h3 class="section-label">Jump back in</h3>
+        <MediaRail
+          items={recentListens}
+          card={listenCard}
+          getKey={(entry) => entry.track_id}
+          fluid
+          stagger
+        />
+      </section>
     {/if}
+
+    {#if localPlaylists.length > 0}
+      <section class="results-section">
+        <h3 class="section-label">Your playlists</h3>
+        <MediaRail
+          items={localPlaylists.slice(0, 12)}
+          card={playlistCard}
+          getKey={(p) => p.id}
+          fluid
+          stagger
+        />
+      </section>
+    {/if}
+
+    <section class="results-section">
+      <h3 class="section-label">Try a filter</h3>
+      <div class="facet-grid">
+        {#each FACETS as facet (facet.key)}
+          <button type="button" class="facet-tile" onclick={() => applyFacetExample(facet.example)}>
+            <span class="facet-example">{facet.example}</span>
+            <span class="facet-desc">{facet.description}</span>
+          </button>
+        {/each}
+      </div>
+    </section>
   {:else if loading && !results && audioResults === null}
     <p class="search-hint">Searching…</p>
   {:else if error && !results && providerSearchDone}
@@ -2151,6 +2258,123 @@
   }
   .load-more-btn:hover:not(:disabled) { color: var(--text-primary); border-color: var(--accent); }
   .load-more-btn:disabled { opacity: 0.6; cursor: default; }
+  /* ── Idle state ────────────────────────────────────────────────────────
+     /search used to fill its empty view with the TIDAL discover shelves, the
+     same content Home now carries, which left the app with two browse
+     surfaces. This view is about the user's own material and about how to
+     search. Both rails are built from responses this page already makes on
+     mount, so the idle state issues no requests of its own. */
+  .idle-card {
+    width: 100%;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    background: none;
+    border: 0;
+    padding: 0;
+    text-align: left;
+    text-decoration: none;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    box-sizing: border-box;
+    transition: transform var(--motion-base);
+  }
+  .idle-card:hover { transform: translateY(-4px); }
+  .idle-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+
+  .idle-art {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    background: var(--bg-raised);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+    transition: box-shadow var(--motion-base);
+  }
+  .idle-card:hover .idle-art { box-shadow: 0 12px 26px -6px rgba(0, 0, 0, 0.5); }
+  .idle-card:hover :global(.play-overlay) { opacity: 1; transform: translateY(0); }
+
+  .idle-card :global(.idle-art-img) {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .idle-card :global(.idle-art-img.fallback) {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .idle-card :global(.idle-art-img.fallback span) {
+    font-size: var(--font-size-3xl);
+    color: rgba(255, 255, 255, 0.92);
+  }
+
+  .idle-art-playlist {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: color-mix(in srgb, var(--accent) 14%, var(--bg-raised));
+  }
+  .idle-playlist-glyph {
+    font-size: var(--font-size-3xl);
+    color: var(--accent-line);
+  }
+
+  .idle-title, .idle-sub {
+    margin: 0;
+    width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: var(--line-height-snug);
+  }
+  .idle-title {
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-semibold);
+    color: var(--text-primary);
+  }
+  .idle-sub {
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+  }
+
+  .facet-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: var(--gap-sm);
+  }
+  .facet-tile {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    align-items: flex-start;
+    padding: var(--space-3);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-subtle);
+    background: var(--bg-elevated);
+    cursor: pointer;
+    text-align: left;
+    transition: border-color var(--motion-fast), background var(--motion-fast);
+  }
+  .facet-tile:hover, .facet-tile:focus-visible {
+    border-color: var(--accent-line);
+    background: var(--bg-hover);
+    outline: none;
+  }
+  .facet-example {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-sm);
+    color: var(--accent-line);
+  }
+  .facet-desc {
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+  }
+
   /* Artists */
   .artists-row {
     display: flex;

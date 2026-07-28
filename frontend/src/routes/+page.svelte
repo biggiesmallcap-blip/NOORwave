@@ -1,7 +1,9 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { goto } from '$app/navigation';
 	import type { Unsubscriber } from 'svelte/store';
 	import type { Snapshot } from './$types';
+	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import { captureScroll, restoreScroll } from '$lib/navigation/scroll';
 	import {
 		type RSSFeedItem,
@@ -11,6 +13,8 @@
 	import PersonalRadioShelf from '$lib/components/home/PersonalRadioShelf.svelte';
 	import HomeRecommendationsShelf from '$lib/components/home/HomeRecommendationsShelf.svelte';
 	import HomeMoodsRail from '$lib/components/home/HomeMoodsRail.svelte';
+	import HomeEditorialPreview from '$lib/components/home/HomeEditorialPreview.svelte';
+	import DiscoverShelves from '$lib/components/search/DiscoverShelves.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import MediaRail from '$lib/components/ui/MediaRail.svelte';
 	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
@@ -18,6 +22,15 @@
 	// Home page data
 	let articles = $state<RSSFeedItem[]>([]);
 	let news = $state<RSSFeedItem[]>([]);
+	let homeQuery = $state('');
+
+	function homeSearchKeydown(event: KeyboardEvent) {
+		if (event.key !== 'Enter') return;
+		const q = homeQuery.trim();
+		if (!q) return;
+		event.preventDefault();
+		void goto(`/search?q=${encodeURIComponent(q)}`);
+	}
 
 	// Loading states
 	let error = $state<string | null>(null);
@@ -147,10 +160,29 @@
 		</nav>
 
 
+		<!-- Home is the browse surface, so the search box lives here too, but the
+		     searching itself stays on /search rather than being duplicated: that
+		     route already owns the debounce, the provider fan-out, the filter
+		     pills and the result ranking, and it already seeds itself from ?q=
+		     on mount. This is a handoff, not a second implementation. -->
+		<div class="home-search">
+			<SearchField
+				bind:value={homeQuery}
+				variant="page"
+				placeholder="Search Tidal's full catalogue"
+				ariaLabel="Search"
+				onkeydown={homeSearchKeydown}
+			/>
+		</div>
+
 		<!-- `index` is the section's slot in the stack. It only spaces out the
 		     entrance animation; nothing else reads it. YourMixesShelf owns two
 		     sections (music + video), so the next index skips a slot, and
-		     HomeRecommendationsShelf renders one section per provider shelf. -->
+		     HomeRecommendationsShelf renders one section per provider shelf.
+
+		     Order alternates heavy and light so no two murals or two grids sit
+		     next to each other, which is what made the old page read as a stack
+		     of slabs. -->
 
 		<!-- Your Mixes (TIDAL) — replaces the prime above-Trending slot. -->
 		<YourMixesShelf index={0} />
@@ -161,13 +193,34 @@
 		<!-- Provider recommendations load independently from profile integrations. -->
 		<HomeRecommendationsShelf index={3} />
 
+		<!-- TIDAL's own editorial home modules (The Hits, New Tracks, New
+		     Albums, Spotlighted Uploads, From our editors). These used to render
+		     only in the /search empty state, which meant the app had two browse
+		     surfaces and Home was the thinner one. -->
+		<!-- Slots 6-10 are reserved: this renders one section per TIDAL module
+		     and there are usually five, so later sections start at 11. The
+		     indices only drive the entrance stagger, but two sections sharing a
+		     slot land together and break the cascade. -->
+		<DiscoverShelves index={6} quiet />
+
 		<!-- Moods preview rail. Pulls the first chunk of categories from
 		     /api/tidal/moods and links each tile to /moods/[slug]. Full
 		     listing lives at /moods. -->
-		<HomeMoodsRail index={6} />
+		<HomeMoodsRail index={11} />
+
+		<!-- Previews of two editorial routes that already existed but had
+		     nothing linking to them. Each hides itself when TIDAL returns no
+		     modules for the page, which new-releases currently does. -->
+		<HomeEditorialPreview
+			pagePath="new-releases"
+			title="New releases"
+			href="/new-releases"
+			index={12}
+		/>
+		<HomeEditorialPreview pagePath="hires" title="Hi-Res picks" href="/hires" index={13} />
 
 		<!-- Weekly Articles Section -->
-		<section class="discovery-section rise-in-shelf" style="--rise-index: 7">
+		<section class="discovery-section rise-in-shelf" style="--rise-index: 14">
 			<SectionHeader eyebrow="AllMusic" title="Weekly articles" variant="charts" level={2}>
 				{#snippet actions()}
 					{#if sectionsLoading.articles}
@@ -191,7 +244,7 @@
 		</section>
 
 		<!-- Industry News Section -->
-		<section class="discovery-section rise-in-shelf" style="--rise-index: 8">
+		<section class="discovery-section rise-in-shelf" style="--rise-index: 15">
 			<SectionHeader eyebrow="Industry" title="Latest news" variant="charts" level={2}>
 				{#snippet actions()}
 					{#if sectionsLoading.news}
@@ -232,6 +285,10 @@
 	.home-page {
 		gap: var(--space-5);
 		padding-bottom: 40px;
+	}
+
+	.home-search {
+		width: min(100%, 720px);
 	}
 
 	/* Discovery sections. Two spacing values on this page and no others:

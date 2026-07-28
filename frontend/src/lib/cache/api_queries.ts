@@ -141,6 +141,7 @@ export const cacheKeys = {
 	tidalMixes: () => ['api', 'getTidalMixes'] as const,
 	tidalRadioStations: () => ['api', 'getTidalRadioStations'] as const,
 	tidalHomeModules: () => ['api', 'getTidalHomeModules'] as const,
+	tidalPage: (path: string) => ['api', 'getTidalPage', { path }] as const,
 	tidalMoods: () => ['api', 'getTidalMoods'] as const,
 	settings: {
 		musicBrainzStatus: () => ['api', 'getMusicBrainzStatus'] as const,
@@ -462,6 +463,13 @@ export const cachedApi = {
 		return fetchCached<TidalHomeModulesResponse>(
 			cacheKeys.tidalHomeModules(),
 			() => api.getTidalHomeModules(),
+			longOptions,
+		);
+	},
+	getTidalPage(path: string) {
+		return fetchCached<TidalHomeModulesResponse>(
+			cacheKeys.tidalPage(path),
+			() => api.getTidalPage(path),
 			longOptions,
 		);
 	},

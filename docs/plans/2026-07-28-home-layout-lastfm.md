@@ -529,8 +529,8 @@ handoff.
 - [x] Part 7 - recommendations restructure (1 mural + 2 rails)
 - [ ] Part 5 - Last.fm correctness (Rust)
 - [ ] Part 6 - Last.fm performance (Rust + frontend resolver)
-- [ ] Part 3 - TIDAL fill
-- [ ] Part 4 - Home search bar, /search idle state
+- [x] Part 3 - TIDAL fill
+- [x] Part 4 - Home search bar, /search idle state
 
 **Batch by surface, not by part.** Parts that share a surface should share a
 session; the context is already loaded and splitting them wastes a warm-up.

@@ -8,6 +8,7 @@
 	import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
@@ -15,10 +16,17 @@
 	import { downloadTidalPlaylist } from '$lib/stores/downloads';
 	import { tidalHomeItemToPlayable } from '$lib/utils/track';
 
-	let { modules, onViewAll, mediaKind = 'audio', onItemSelect }: {
+	let { modules, onViewAll, mediaKind = 'audio', startIndex = 0, nested = false, onItemSelect }: {
 		modules: TidalHomeModule[];
 		onViewAll?: (mod: TidalHomeModule) => void;
 		mediaKind?: 'audio' | 'video';
+		/** Slot this group starts at in the host page's entrance cascade, so a
+		 *  stack of shelves keeps counting up instead of restarting at zero. */
+		startIndex?: number;
+		/** Rendered underneath a group header that already says "TIDAL". Drops
+		 *  the per-module eyebrow and demotes the heading so the two levels do
+		 *  not repeat themselves. */
+		nested?: boolean;
 		/** Return true to claim the click. The /videos route uses this because
 		 *  the default video handling navigates to /videos, which is a no-op
 		 *  when you are already there. */
@@ -270,19 +278,29 @@
 
 {#if modules.length > 0}
 	<div class="discover-stack">
-		{#each modules as mod (mod.id || mod.title)}
-			<section class="discover-section" data-section={mod.id || mod.title}>
-				<div class="section-header">
-					<div class="section-title-group">
-						<p class="eyebrow">TIDAL</p>
-						<h2>{mod.title}</h2>
-					</div>
-					{#if showViewAll}
-						<button type="button" class="view-all-link" onclick={() => viewAll(mod)}>
-							View all -&gt;
-						</button>
-					{/if}
-				</div>
+		{#each modules as mod, modIndex (mod.id || mod.title)}
+			<!-- When nested, the enclosing section already runs the entrance;
+			     animating again here would stage the same content twice. -->
+			<section
+				class="discover-section"
+				class:rise-in-shelf={!nested}
+				data-section={mod.id || mod.title}
+				style={nested ? undefined : `--rise-index: ${startIndex + modIndex}`}
+			>
+				<SectionHeader
+					eyebrow={nested ? '' : 'TIDAL'}
+					title={mod.title}
+					variant="charts"
+					level={nested ? 3 : 2}
+				>
+					{#snippet actions()}
+						{#if showViewAll}
+							<button type="button" class="view-all-link" onclick={() => viewAll(mod)}>
+								View all -&gt;
+							</button>
+						{/if}
+					{/snippet}
+				</SectionHeader>
 				{#if isTrackList(mod)}
 					{@render trackGrid(mod)}
 				{:else}
@@ -302,23 +320,7 @@
 	.discover-section {
 		display: flex;
 		flex-direction: column;
-		gap: var(--gap);
-	}
-	.section-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--gap);
-	}
-	.section-title-group {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-1);
-	}
-	.section-title-group h2 {
-		font-size: var(--font-size-lg);
-		font-weight: var(--font-weight-bold);
-		margin: 0;
+		gap: var(--space-3);
 	}
 
 	.view-all-link {
