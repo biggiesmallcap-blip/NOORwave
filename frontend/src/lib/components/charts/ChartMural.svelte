@@ -1,6 +1,6 @@
 <script lang="ts">
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
-	import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
+	import { lazyTidalArt, type LazyTidalArtKind } from '$lib/actions/lazy-tidal-art';
 
 	export type ChartMuralAccent = 'accent' | 'lastfm';
 
@@ -14,6 +14,7 @@
 		tileTitle: string;
 		lazy?: {
 			enabled: boolean;
+			kind?: LazyTidalArtKind;
 			query: {
 				artist: string | null;
 				title: string;
@@ -114,6 +115,7 @@
 					title={item.tileTitle}
 					use:lazyTidalArt={{
 						enabled: item.lazy?.enabled ?? false,
+						kind: item.lazy?.kind,
 						query: item.lazy?.query ?? { artist: null, title: item.title },
 						onResolve: item.lazy?.onResolve ?? (() => {}),
 					}}
@@ -123,6 +125,7 @@
 						size={320}
 						className="chart-mural-art"
 						fallbackText={item.fallbackText}
+						fadeIn
 						decorative
 					/>
 				</button>
@@ -247,6 +250,16 @@
 
 	.chart-mural-bg.layout-count-16 {
 		grid-template-columns: repeat(8, minmax(0, 1fr));
+		grid-template-rows: repeat(2, minmax(0, 1fr));
+	}
+
+	/* 17-20 items. This matches the base grid, and until now the class had no
+	   rule at all and worked only because it fell through to that base. Since
+	   the recommendation panels ship exactly 20 items, that fall-through was the
+	   common path, not an edge case - stating it means a future change to the
+	   base grid cannot silently reshape it. */
+	.chart-mural-bg.layout-count-20 {
+		grid-template-columns: repeat(10, minmax(0, 1fr));
 		grid-template-rows: repeat(2, minmax(0, 1fr));
 	}
 
@@ -392,9 +405,15 @@
 		font-weight: var(--font-weight-bold);
 		line-height: var(--line-height-tight);
 		letter-spacing: 0;
+		/* Two lines, not one. At --font-size-4xl a single nowrap line clipped
+		   most real track titles mid-word ("Live and Learn [Extend..."), and the
+		   mural has the vertical room for a second. */
 		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
+		display: -webkit-box;
+		line-clamp: 2;
+		-webkit-line-clamp: 2;
+		-webkit-box-orient: vertical;
+		overflow-wrap: anywhere;
 	}
 
 	.chart-mural-sub {

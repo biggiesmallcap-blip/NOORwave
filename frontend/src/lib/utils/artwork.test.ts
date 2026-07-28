@@ -1,6 +1,42 @@
 import { describe, expect, test } from 'vitest';
 
-import { firstArtworkUrl, tidalArtworkFallbackSizes, upscaleTidalArtwork } from './artwork';
+import {
+	firstArtworkUrl,
+	tidalArtworkFallbackSizes,
+	upscaleTidalArtwork,
+	usableArtwork,
+} from './artwork';
+
+describe('usableArtwork', () => {
+	const placeholder =
+		'https://lastfm.freetls.fastly.net/i/u/300x300/2a96cbd8b46e442fc41c2b86b821562f.png';
+
+	test('treats the Last.fm placeholder star as absent so fallbacks still run', () => {
+		// This URL is non-null and loads fine, which is exactly the problem: a
+		// plain null check accepts it, the tile shows a grey star forever, and
+		// the TIDAL lookup that would have found real art never fires.
+		expect(usableArtwork(placeholder)).toBeNull();
+		expect(usableArtwork(placeholder, 'https://img.example/real.jpg')).toBe(
+			'https://img.example/real.jpg',
+		);
+	});
+
+	test('skips null, undefined and blank candidates in order', () => {
+		expect(usableArtwork(null, undefined, '   ', 'https://img.example/cover.jpg')).toBe(
+			'https://img.example/cover.jpg',
+		);
+	});
+
+	test('trims the value it returns', () => {
+		expect(usableArtwork('  https://img.example/cover.jpg  ')).toBe(
+			'https://img.example/cover.jpg',
+		);
+	});
+
+	test('returns null when every candidate is unusable', () => {
+		expect(usableArtwork(null, '', placeholder)).toBeNull();
+	});
+});
 
 describe('firstArtworkUrl', () => {
 	test('uses the first non-empty artwork value across ordered sources', () => {

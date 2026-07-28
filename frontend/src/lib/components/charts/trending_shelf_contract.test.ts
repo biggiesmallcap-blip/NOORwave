@@ -73,7 +73,12 @@ describe('trending shelf contract', () => {
 		expect(source).toContain('playChartTidalTrack');
 		expect(source).toContain('isEntryUnresolved');
 		expect(source).toContain('Resolve on TIDAL');
-		expect(source).toContain('LASTFM_PLACEHOLDER_HASH');
+		// The Last.fm placeholder guard used to be a private copy in this file.
+		// It now lives in $lib/utils/artwork so the home recommendation shelves
+		// get it too; what matters here is that this shelf still routes its
+		// artwork through it. The hash itself is covered by that module's tests.
+		expect(source).toContain("from '$lib/utils/artwork'");
+		expect(source).toContain('usableArtwork(');
 		expect(source).toContain('needsLazyArtwork');
 		expect(source).toContain('buildTrackMenu');
 		expect(source).toContain('buildTidalTrackMenu');

@@ -30,7 +30,15 @@
 	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
-	import { composeTidalArtQuery, peekTidalArt } from '$lib/actions/lazy-tidal-art';
+	import {
+		composeTidalArtQuery,
+		lazyTidalArt,
+		peekTidalArt,
+		type LazyTidalArtKind,
+	} from '$lib/actions/lazy-tidal-art';
+	import { usableArtwork } from '$lib/utils/artwork';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import MediaRail from '$lib/components/ui/MediaRail.svelte';
 
 	type State = 'hidden' | 'loading' | 'ready' | 'empty' | 'error';
 
@@ -136,6 +144,10 @@
 		return (shelf.entity_type ?? 'track') === 'track';
 	}
 
+	function isArtistShelf(shelf: ProviderRecommendationShelf): boolean {
+		return shelf.entity_type === 'artist';
+	}
+
 	function shelfItems(shelf: ProviderRecommendationShelf): ProviderRecommendationItem[] {
 		return shelf.items.slice(0, PANEL_LIMIT);
 	}
@@ -173,14 +185,23 @@
 		};
 	}
 
+	function itemKind(item: ProviderRecommendationItem): LazyTidalArtKind {
+		const entity = itemEntity(item);
+		return entity === 'artist' || entity === 'album' ? entity : 'track';
+	}
+
 	function itemArtwork(shelf: ProviderRecommendationShelf, item: ProviderRecommendationItem, index: number): string | null {
-		const resolved = lazyArtwork[itemKey(shelf, item, index)] ?? item.artwork_url;
+		// usableArtwork, not `??`: Last.fm hands back a real URL for a grey star
+		// placeholder when it has no art. Treating that as present left the tile
+		// showing the star forever and suppressed the TIDAL lookup that would
+		// have found the actual cover.
+		const resolved = usableArtwork(lazyArtwork[itemKey(shelf, item, index)], item.artwork_url);
 		if (resolved) return resolved;
 		// Fall back to previously-resolved artwork from the persistent cache so the
 		// panel paints a full collage on first launch instead of empty tiles, then
 		// swaps to fresh art as the live lookups land.
 		const query = itemLazyQuery(item);
-		return peekTidalArt(composeTidalArtQuery(query.artist, query.title));
+		return peekTidalArt(composeTidalArtQuery(query.artist, query.title), itemKind(item));
 	}
 
 	function itemFallbackText(item: ProviderRecommendationItem): string {
@@ -211,6 +232,7 @@
 				tileTitle: `${index + 1}. ${item.title} - ${item.artist_name ?? 'Unknown artist'}`,
 				lazy: {
 					enabled: itemArtwork(shelf, item, index) === null,
+					kind: itemKind(item),
 					query: itemLazyQuery(item),
 					onResolve: (url: string) => {
 						lazyArtwork = { ...lazyArtwork, [key]: url };
@@ -218,6 +240,32 @@
 				},
 			};
 		});
+	}
+
+	// Artists and albums render as rails rather than murals, and MediaRail's card
+	// snippet only receives the item. Precomputing a view model here keeps the
+	// snippet free of the per-shelf lookups (artwork, key, lazy query) it would
+	// otherwise need the shelf in scope to do.
+	type RailEntry = {
+		key: string;
+		item: ProviderRecommendationItem;
+		artwork: string | null;
+		fallbackText: string;
+		lazyQuery: { artist: string | null; title: string };
+	};
+
+	function shelfRailItems(shelf: ProviderRecommendationShelf): RailEntry[] {
+		return shelfItems(shelf).map((item, index) => ({
+			key: itemKey(shelf, item, index),
+			item,
+			artwork: itemArtwork(shelf, item, index),
+			fallbackText: itemFallbackText(item),
+			lazyQuery: itemLazyQuery(item),
+		}));
+	}
+
+	function resolveRailArtwork(key: string, url: string) {
+		lazyArtwork = { ...lazyArtwork, [key]: url };
 	}
 
 	function itemToTidalPlayable(item: ProviderRecommendationItem): TidalPlayable {
@@ -376,6 +424,69 @@
 	}
 </script>
 
+{#snippet artistCard(entry: RailEntry)}
+	<button
+		type="button"
+		class="rec-card rec-card-artist"
+		title={entry.item.title}
+		aria-label={`Open ${entry.item.title}`}
+		onclick={() => void openRecommendationItem(entry.item)}
+		oncontextmenu={(event) => openItemMenu(event, entry.item)}
+		use:lazyTidalArt={{
+			enabled: entry.artwork === null,
+			kind: 'artist',
+			query: entry.lazyQuery,
+			onResolve: (url) => resolveRailArtwork(entry.key, url),
+		}}
+	>
+		<div class="rec-avatar-wrap">
+			<ArtworkImage
+				className="rec-avatar"
+				src={entry.artwork}
+				alt={entry.item.title}
+				size={320}
+				tint={true}
+				fadeIn={true}
+				fallbackText={entry.fallbackText}
+			/>
+		</div>
+		<p class="rec-title">{entry.item.title}</p>
+	</button>
+{/snippet}
+
+{#snippet albumCard(entry: RailEntry)}
+	<button
+		type="button"
+		class="rec-card"
+		title={`${entry.item.title}${entry.item.artist_name ? ` - ${entry.item.artist_name}` : ''}`}
+		aria-label={`Open ${entry.item.title}`}
+		onclick={() => void openRecommendationItem(entry.item)}
+		oncontextmenu={(event) => openItemMenu(event, entry.item)}
+		use:lazyTidalArt={{
+			enabled: entry.artwork === null,
+			kind: 'album',
+			query: entry.lazyQuery,
+			onResolve: (url) => resolveRailArtwork(entry.key, url),
+		}}
+	>
+		<div class="rec-art-wrap">
+			<ArtworkImage
+				className="rec-art"
+				src={entry.artwork}
+				alt={entry.item.title}
+				size={320}
+				tint={true}
+				fadeIn={true}
+				fallbackText={entry.fallbackText}
+			/>
+		</div>
+		<p class="rec-title">{entry.item.title}</p>
+		{#if entry.item.artist_name}
+			<p class="rec-subtitle">{entry.item.artist_name}</p>
+		{/if}
+	</button>
+{/snippet}
+
 {#if viewState === 'hidden'}
 	<!-- Hidden until a profile integration is connected. -->
 {:else if viewState === 'loading'}
@@ -429,28 +540,39 @@
 							{/if}
 						{/snippet}
 					</SectionHeader>
-					<ChartMural
-						items={shelfMuralItems(shelf)}
-						currentIndex={currentIndex}
-						ariaLabel={`${shelf.title} carousel`}
-						kindLabel={shelf.provider === 'lastfm' ? `Last.fm ${shelf.entity_type ?? 'track'}s` : 'Connected profile'}
-						title={currentItem.title}
-						subtitle={itemSubtitle(currentItem, currentIndex)}
-						metric={itemMetric(shelf, currentItem, currentIndex)}
-						actionLabel={resolvingItems[itemKey(shelf, currentItem, currentIndex)] ? 'Resolving...' : actionLabel(currentItem)}
-						actionDisabled={Boolean(resolvingItems[itemKey(shelf, currentItem, currentIndex)])}
-						accent={shelf.provider === 'lastfm' ? 'lastfm' : 'accent'}
-						onSelect={(index) => selectItem(shelf, index)}
-						onJump={(delta) => jumpItem(shelf, delta)}
-						onPlay={() => playItem(shelf, currentItem, currentIndex)}
-						onItemActivate={(index) => activateItem(shelf, index)}
-						onCardContext={(event) => openItemMenu(event, currentItem)}
-						onItemContext={(event, index) => {
-							const item = shelfItems(shelf)[index];
-							if (item) openItemMenu(event, item);
-						}}
-						onPauseChange={(paused) => pausedShelves = { ...pausedShelves, [key]: paused }}
-					/>
+					{#if isTrackShelf(shelf)}
+						<ChartMural
+							items={shelfMuralItems(shelf)}
+							currentIndex={currentIndex}
+							ariaLabel={`${shelf.title} carousel`}
+							kindLabel={shelf.provider === 'lastfm' ? `Last.fm ${shelf.entity_type ?? 'track'}s` : 'Connected profile'}
+							title={currentItem.title}
+							subtitle={itemSubtitle(currentItem, currentIndex)}
+							metric={itemMetric(shelf, currentItem, currentIndex)}
+							actionLabel={resolvingItems[itemKey(shelf, currentItem, currentIndex)] ? 'Resolving...' : actionLabel(currentItem)}
+							actionDisabled={Boolean(resolvingItems[itemKey(shelf, currentItem, currentIndex)])}
+							accent={shelf.provider === 'lastfm' ? 'lastfm' : 'accent'}
+							onSelect={(index) => selectItem(shelf, index)}
+							onJump={(delta) => jumpItem(shelf, delta)}
+							onPlay={() => playItem(shelf, currentItem, currentIndex)}
+							onItemActivate={(index) => activateItem(shelf, index)}
+							onCardContext={(event) => openItemMenu(event, currentItem)}
+							onItemContext={(event, index) => {
+								const item = shelfItems(shelf)[index];
+								if (item) openItemMenu(event, item);
+							}}
+							onPauseChange={(paused) => pausedShelves = { ...pausedShelves, [key]: paused }}
+						/>
+					{:else}
+						<MediaRail
+							items={shelfRailItems(shelf)}
+							card={isArtistShelf(shelf) ? artistCard : albumCard}
+							getKey={(entry) => entry.key}
+							ariaLabel={shelf.title}
+							fluid
+							stagger
+						/>
+					{/if}
 				</section>
 			{/if}
 		{/each}
@@ -494,5 +616,107 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-5);
+	}
+
+	/* Artists and albums used to each get their own full-width mural. Three
+	   near-identical mosaics stacked was most of the visual weight of the page,
+	   and a square mural tile is the wrong shape for an artist anyway. Tracks
+	   keep the mural; these two become rails, matching how /search presents the
+	   same two kinds. */
+	.rec-card {
+		width: 100%;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-2);
+		background: none;
+		border: 0;
+		padding: 0;
+		text-align: left;
+		color: inherit;
+		font: inherit;
+		cursor: pointer;
+		box-sizing: border-box;
+		transition: transform var(--motion-base);
+	}
+
+	.rec-card:hover {
+		transform: translateY(-4px);
+	}
+
+	.rec-card:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: 4px;
+	}
+
+	.rec-card-artist {
+		align-items: center;
+		text-align: center;
+	}
+
+	.rec-art-wrap,
+	.rec-avatar-wrap {
+		position: relative;
+		width: 100%;
+		aspect-ratio: 1 / 1;
+		overflow: hidden;
+		background: var(--bg-raised);
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+		transition: box-shadow var(--motion-base);
+	}
+
+	.rec-art-wrap {
+		border-radius: var(--radius-md);
+	}
+
+	.rec-avatar-wrap {
+		border-radius: 50%;
+	}
+
+	.rec-card:hover .rec-art-wrap,
+	.rec-card:hover .rec-avatar-wrap {
+		box-shadow: 0 12px 26px -6px rgba(0, 0, 0, 0.5);
+	}
+
+	.rec-card :global(.rec-art),
+	.rec-card :global(.rec-avatar) {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+		display: block;
+	}
+
+	.rec-card :global(.rec-art.fallback),
+	.rec-card :global(.rec-avatar.fallback) {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.rec-card :global(.rec-art.fallback span),
+	.rec-card :global(.rec-avatar.fallback span) {
+		font-size: var(--font-size-3xl);
+		color: rgba(255, 255, 255, 0.92);
+	}
+
+	.rec-title,
+	.rec-subtitle {
+		margin: 0;
+		width: 100%;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		line-height: var(--line-height-snug);
+	}
+
+	.rec-title {
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+		color: var(--text-primary);
+	}
+
+	.rec-subtitle {
+		font-size: var(--font-size-xs);
+		color: var(--text-muted);
 	}
 </style>
