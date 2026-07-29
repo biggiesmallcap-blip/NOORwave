@@ -348,12 +348,18 @@
       // session-aware ranking and only its artist names were kept. The entries
       // also carry title and artwork, which is the "Jump back in" rail.
       recentListens = dedupeByTrack(listens.listens)
+    } else {
+      // A dropped rail is invisible: the section is behind an `{#if length}`,
+      // so a failure looks exactly like "you have no history". Say so.
+      console.warn('[search] recent listens failed; "Jump back in" hidden', listensRes.reason)
     }
 
     if (playlistsRes.status === 'fulfilled') {
       localPlaylists = playlistsRes.value.playlists
       playlistRotation = nextPlaylistRotation(localPlaylists.length)
       seedPlaylistMosaicsFromCache()
+    } else {
+      console.warn('[search] playlists failed; "Your playlists" hidden', playlistsRes.reason)
     }
   })
 
