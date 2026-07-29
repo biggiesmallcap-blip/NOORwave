@@ -9,17 +9,12 @@
 	} from '$lib/api/client';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
-	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
-	import { playChartTidalTrack } from '$lib/player/play_trending';
-	import { playRecommendationAlbum, playRecommendationArtist } from '$lib/player/play_recommendations';
-	import { playTrackNow } from '$lib/stores/player';
 	import { recommendationEntity } from '$lib/components/home/recommendation_navigation';
 	import {
 		matchesRecommendationShelfSlug,
 		openRecommendationItem,
 		recommendationItemMenu,
-		recommendationItemToTidalPlayable,
 	} from '$lib/components/home/recommendation_menu';
 
 	// The full set behind a Home shelf, as a grid.
@@ -35,7 +30,6 @@
 	let shelf = $state<ProviderRecommendationShelf | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
-	let resolving = $state<Record<string, boolean>>({});
 
 	onMount(() => {
 		void load();
@@ -86,25 +80,9 @@
 		return (item.title.trim()[0] ?? 'N').toUpperCase();
 	}
 
-	// Same dispatch the shelf uses: tracks play, artists and albums open.
-	async function activate(item: ProviderRecommendationItem) {
-		const kind = recommendationEntity(item);
-		const key = item.title;
-		if (resolving[key]) return;
-		resolving = { ...resolving, [key]: true };
-		try {
-			if (kind === 'artist') {
-				await playRecommendationArtist(item);
-			} else if (kind === 'album') {
-				await playRecommendationAlbum(item);
-			} else if (item.local_track_id) {
-				await playTrackNow(item.local_track_id);
-			} else {
-				await playChartTidalTrack(recommendationItemToTidalPlayable(item));
-			}
-		} finally {
-			resolving = { ...resolving, [key]: false };
-		}
+	/** Matches the rail card's tooltip: "Album - Artist", or just the name. */
+	function itemTitle(item: ProviderRecommendationItem): string {
+		return item.artist_name && !isArtist ? `${item.title} - ${item.artist_name}` : item.title;
 	}
 
 	function openMenu(event: MouseEvent, item: ProviderRecommendationItem) {
@@ -140,13 +118,17 @@
 	{:else}
 		<div class="rec-grid" class:artists={isArtist}>
 			{#each shelf.items as item, index (itemKey(item, index))}
+				<!-- Same contract as the Home rail card: opens the entity, and playing
+				     lives in the right-click menu. No play overlay, because artist and
+				     album cards do not carry one anywhere else in the app. -->
 				<button
 					type="button"
 					class="rec-tile rise-in-card"
+					class:artist={isArtist}
 					style={`--rise-index: ${index % 12}`}
-					title={item.title}
-					aria-label={item.title}
-					onclick={() => void activate(item)}
+					title={itemTitle(item)}
+					aria-label={`Open ${item.title}`}
+					onclick={() => void openRecommendationItem(item)}
 					oncontextmenu={(e) => openMenu(e, item)}
 				>
 					<span class="rec-tile-art" class:round={isArtist}>
@@ -155,18 +137,14 @@
 							src={item.artwork_url}
 							alt={item.title}
 							size={320}
+							tint={true}
 							fadeIn={true}
 							fallbackText={fallbackText(item)}
-							decorative={true}
 						/>
-						<PlayOverlay position="corner" size="sm" />
 					</span>
 					<span class="rec-tile-title">{item.title}</span>
 					{#if !isArtist && item.artist_name}
 						<span class="rec-tile-sub">{item.artist_name}</span>
-					{/if}
-					{#if isArtist}
-						<span class="rec-tile-sub">Artist</span>
 					{/if}
 				</button>
 			{/each}
@@ -225,17 +203,39 @@
 		grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
 	}
 
+	/* Card treatment lifted from `.rec-card` in HomeRecommendationsShelf so the
+	   same entity looks and behaves identically in the rail and in this grid:
+	   the whole card rises 4px, the artwork shadow deepens, and artists centre
+	   their label under a circular avatar. */
 	.rec-tile {
+		width: 100%;
+		min-width: 0;
 		display: flex;
 		flex-direction: column;
-		gap: 6px;
+		gap: var(--space-2);
 		background: none;
-		border: none;
+		border: 0;
 		padding: 0;
 		text-align: left;
 		color: inherit;
+		font: inherit;
 		cursor: pointer;
-		min-width: 0;
+		box-sizing: border-box;
+		transition: transform var(--motion-base);
+	}
+
+	.rec-tile:hover {
+		transform: translateY(-4px);
+	}
+
+	.rec-tile:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: 4px;
+	}
+
+	.rec-tile.artist {
+		align-items: center;
+		text-align: center;
 	}
 
 	.rec-tile-art {
@@ -245,11 +245,14 @@
 		border-radius: var(--radius-md);
 		overflow: hidden;
 		background: var(--bg-raised);
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
 		transition: box-shadow var(--motion-base);
 	}
 	.rec-tile-art.round { border-radius: 50%; }
-	.rec-tile:hover .rec-tile-art { box-shadow: 0 12px 26px -6px rgba(0, 0, 0, 0.5); }
-	.rec-tile:hover :global(.play-overlay) { opacity: 1; transform: translateY(0); }
+
+	.rec-tile:hover .rec-tile-art {
+		box-shadow: 0 12px 26px -6px rgba(0, 0, 0, 0.5);
+	}
 
 	.rec-tile :global(.rec-tile-img),
 	.rec-tile :global(img.rec-tile-img) {
@@ -259,7 +262,19 @@
 		display: block;
 	}
 
+	.rec-tile :global(.rec-tile-img.fallback) {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.rec-tile :global(.rec-tile-img.fallback span) {
+		font-size: var(--font-size-3xl);
+		color: rgba(255, 255, 255, 0.92);
+	}
+
 	.rec-tile-title, .rec-tile-sub {
+		margin: 0;
 		width: 100%;
 		white-space: nowrap;
 		overflow: hidden;

@@ -95,6 +95,30 @@ describe('home recommendations shelf contract', () => {
 		expect(source).toContain('/recommendations/${recommendationShelfSlug(shelf)}');
 	});
 
+	test('the View all grid presents cards exactly as the rail does', () => {
+		const grid = readFileSync(
+			join(here, '../../../routes/recommendations/[shelf]/+page.svelte'),
+			'utf8',
+		);
+		// Opens the entity; playing is a menu action. An artist card carries no
+		// play affordance anywhere in the app, so it must not grow one here.
+		expect(grid).toContain('onclick={() => void openRecommendationItem(item)}');
+		expect(grid).toContain('aria-label={`Open ${item.title}`}');
+		expect(grid).not.toContain('PlayOverlay');
+		// Same hover as `.rec-card`: the card lifts, the artwork shadow deepens.
+		expect(grid).toContain('transform: translateY(-4px)');
+		expect(grid).toContain('box-shadow: 0 12px 26px -6px rgba(0, 0, 0, 0.5)');
+		expect(grid).toContain('box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22)');
+		// Artists: circular avatar, centred label.
+		expect(grid).toContain('border-radius: 50%');
+		expect(grid).toContain('.rec-tile.artist');
+		// Shared page chrome rather than a bespoke hero.
+		expect(grid).toContain('PageHeader');
+		expect(grid).toContain('variant="editorial"');
+		expect(grid).toContain('muted-line');
+		expect(grid).not.toContain('class="hero"');
+	});
+
 	test('the shelf and its View all page share one menu builder', () => {
 		// Two surfaces rendering the same cards must open the same menu, per the
 		// rule that every asset reference carries the shared context menu.
