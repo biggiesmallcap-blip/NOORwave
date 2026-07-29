@@ -289,6 +289,7 @@
 
 	.home-search {
 		width: min(100%, 720px);
+		margin-inline: auto;
 	}
 
 	/* Discovery sections. Two spacing values on this page and no others:

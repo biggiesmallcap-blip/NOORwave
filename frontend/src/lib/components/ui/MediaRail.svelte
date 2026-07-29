@@ -136,6 +136,17 @@
 	.media-rail.fluid {
 		--cols: 3;
 		--peek: 0.35;
+		/* A rail with fewer items than fit (Video Mixes has six against eight
+		   columns on a wide window) used to bunch against the left and leave a
+		   third of the row empty, which read as a truncated shelf rather than a
+		   short one. Centring closes that.
+
+		   `safe` is doing real work: plain `center` on a scroll container puts
+		   overflowing content half off the start edge, where it cannot be
+		   scrolled back to. With `safe`, an overflowing rail falls back to
+		   flex-start and behaves exactly as before, so this only ever applies
+		   to rails that do not fill their width. */
+		justify-content: safe center;
 	}
 
 	.media-rail.fluid > :global(*) {
