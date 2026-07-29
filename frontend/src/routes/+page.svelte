@@ -91,14 +91,18 @@
 
 	function getSourceColor(source: string): string {
 		const colors: Record<string, string> = {
-			'AllMusic': 'var(--accent)',
 			'Billboard': '#ff6b6b',
 			'NME': '#4ecdc4',
 			'SPIN': '#ffe66d',
 			'Pitchfork': '#95e1d3',
 			'Rolling Stone': '#f38181',
 			'Consequence': '#aa96da',
-			'The Guardian Music': '#48bfe3'
+			'The Guardian Music': '#48bfe3',
+			// Article sources. AllMusic was here until its feed started
+			// answering 403 to everything and was replaced.
+			'The Quietus': 'var(--accent)',
+			'Pitchfork Features': '#95e1d3',
+			'Aquarium Drunkard': '#c9ada7'
 		};
 		return colors[source] || 'var(--text-muted)';
 	}
@@ -221,7 +225,7 @@
 
 		<!-- Weekly Articles Section -->
 		<section class="discovery-section rise-in-shelf" style="--rise-index: 14">
-			<SectionHeader eyebrow="AllMusic" title="Weekly articles" variant="charts" level={2}>
+			<SectionHeader eyebrow="Features" title="Weekly articles" variant="charts" level={2}>
 				{#snippet actions()}
 					{#if sectionsLoading.articles}
 						<span class="loading-indicator">Loading...</span>

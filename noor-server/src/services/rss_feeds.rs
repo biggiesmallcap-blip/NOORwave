@@ -47,12 +47,40 @@ struct FeedSource {
     category: &'static str,
 }
 
-/// AllMusic RSS feeds
-const ALLMUSIC_FEEDS: [FeedSource; 1] = [FeedSource {
-    url: "https://www.allmusic.com/rss/all",
-    name: "AllMusic",
-    category: "mixed",
-}];
+/// Long-form music writing, for the "Weekly articles" shelf.
+///
+/// This was a single AllMusic feed, which now answers 403 to everything -
+/// every path, every User-Agent, so it is an edge block rather than
+/// something a header can talk its way past, and the shelf had been empty
+/// for as long as that has been true. These four replace it. All were
+/// checked for a 200 and a non-empty item list before being added, and none
+/// duplicate `NEWS_FEEDS` (which already carries Bandcamp Daily, Stereogum
+/// and Pitchfork's news feed - this uses Pitchfork's separate features
+/// feed, which does not overlap).
+///
+/// URLs are the post-redirect destinations, so a fetch costs one hop.
+/// Keep these music-only; see the note below the list.
+const ARTICLE_FEEDS: &[FeedSource] = &[
+    FeedSource {
+        url: "https://thequietus.com/feed/",
+        name: "The Quietus",
+        category: "article",
+    },
+    FeedSource {
+        url: "https://pitchfork.com/feed/feed-features/rss",
+        name: "Pitchfork Features",
+        category: "article",
+    },
+    FeedSource {
+        url: "https://aquariumdrunkard.com/feed/",
+        name: "Aquarium Drunkard",
+        category: "article",
+    },
+];
+// Louder (loudersound.com/feeds.xml) was a candidate and was rejected: it is
+// Future's site-wide feed, so a third of it is film and TV ("Every Spider-Man
+// movie ranked"). The three above yield 73 items past the filter and the
+// shelf shows 15, so there is no need to buy volume with relevance.
 
 /// Music news RSS feeds
 const NEWS_FEEDS: &[FeedSource] = &[
@@ -513,20 +541,23 @@ impl FeedAggregator {
         all_items
     }
 
-    /// Get articles (AllMusic weekly articles)
+    /// Get long-form music writing for the "Weekly articles" shelf.
     pub async fn get_articles(&self) -> Vec<FeedItem> {
-        let cache_key = "allmusic_all";
+        // Key changed with the sources; the old one would have served a day of
+        // cached emptiness from the feed that is now gone.
+        let cache_key = "music_articles_v2";
         let all_items = self
-            .get_cached_or_fetch(cache_key, ALLMUSIC_FEEDS.to_vec())
+            .get_cached_or_fetch(cache_key, ARTICLE_FEEDS.to_vec())
             .await;
 
-        // Filter for article-like content (longer titles, non-album items)
+        // The old filter existed to strip AllMusic's "Artist - Album" review
+        // stubs out of a mixed feed. These sources publish articles only, and
+        // the rule actively hurt them: it dropped anything with a hyphen
+        // between spaces, which is ordinary punctuation in a headline. Keep
+        // only the guard against a stub-length title.
         all_items
             .into_iter()
-            .filter(|item| {
-                // Articles typically have longer titles and don't look like "Artist - Album"
-                item.title.len() > 20 && !item.title.contains(" - ")
-            })
+            .filter(|item| item.title.len() > 20)
             .take(15)
             .collect()
     }
