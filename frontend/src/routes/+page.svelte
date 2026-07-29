@@ -260,21 +260,37 @@
 			{#if news.length > 0}
 				<div class="news-grid">
 					{#each news.slice(0, 15) as item (item.link)}
-						<a class="news-card glass-tile" href={item.link} target="_blank" rel="noopener">
-							<div class="news-content">
+						<a class="news-card" href={item.link} target="_blank" rel="noopener">
+							{#if item.image_url}
+								<!-- Roughly half the feed carries an image, so the thumbnail is
+								     optional by design and the card has to read without it. A
+								     dead URL hides its own slot rather than leaving a gap. -->
+								<span class="news-thumb">
+									<img
+										src={item.image_url}
+										alt=""
+										loading="lazy"
+										onerror={(e) => {
+											const el = e.currentTarget as HTMLImageElement;
+											el.closest('.news-thumb')?.remove();
+										}}
+									/>
+								</span>
+							{/if}
+							<span class="news-content">
 								<h3 class="news-title">{item.title}</h3>
 								{#if item.description}
 									<p class="news-desc">{item.description}</p>
 								{/if}
-								<div class="news-footer">
+								<span class="news-footer">
 									<span class="news-source" style="color: {getSourceColor(item.source)}">
 										{item.source}
 									</span>
 									{#if item.published_at}
 										<span class="news-date">{formatDate(item.published_at)}</span>
 									{/if}
-								</div>
-							</div>
+								</span>
+							</span>
 						</a>
 					{/each}
 				</div>
@@ -385,22 +401,49 @@
 		gap: var(--gap);
 	}
 
+	/* Opaque, not glass. These cards sat on `.glass-tile`, which is a 3.8%
+	   white wash, and the animated wallpaper read straight through fifteen of
+	   them at once - the cards had no edges of their own and the body text was
+	   competing with a moving Voronoi pattern. `--bg-elevated` is a real
+	   opaque token in both themes, so the card becomes a surface and the text
+	   sits on a flat ground. */
 	.news-card {
-		padding: 18px;
+		display: flex;
+		gap: 12px;
+		padding: 12px;
+		border-radius: var(--radius-md);
+		background: var(--bg-elevated);
+		border: 1px solid var(--panel-border);
 		text-decoration: none;
 		color: inherit;
-		transition: transform var(--motion-base), box-shadow var(--motion-base);
+		transition: transform var(--motion-base), border-color var(--motion-base);
 
 		&:hover {
-			transform: translateY(-4px);
-			box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+			transform: translateY(-2px);
+			border-color: var(--accent-line);
 		}
+	}
+
+	.news-thumb {
+		flex: 0 0 76px;
+		height: 76px;
+		border-radius: var(--radius-sm);
+		overflow: hidden;
+		background: var(--bg-raised);
+	}
+	.news-thumb img {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+		display: block;
 	}
 
 	.news-content {
 		display: flex;
 		flex-direction: column;
-		gap: 8px;
+		gap: 4px;
+		min-width: 0;
+		flex: 1;
 	}
 
 	.news-title {
@@ -414,13 +457,17 @@
 		overflow: hidden;
 	}
 
+	/* --text-muted is 24% white: legible on a flat plate, not over a moving
+	   wallpaper. Now that the card is opaque the body copy can sit at the
+	   secondary step and actually be read. Two lines rather than three keeps
+	   the card close to the thumbnail's height. */
 	.news-desc {
 		font-size: var(--font-size-sm);
-		color: var(--text-muted);
+		color: var(--text-secondary);
 		margin: 0;
 		display: -webkit-box;
-		line-clamp: 3;
-		-webkit-line-clamp: 3;
+		line-clamp: 2;
+		-webkit-line-clamp: 2;
 		-webkit-box-orient: vertical;
 		overflow: hidden;
 	}
@@ -430,7 +477,8 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 8px;
-		margin-top: 8px;
+		margin-top: auto;
+		padding-top: 6px;
 	}
 
 	.news-source {

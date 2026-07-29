@@ -480,7 +480,11 @@ impl FeedAggregator {
     }
 
     fn truncate_desc(s: &str, max: usize) -> String {
-        let stripped = html_cleaner::clean_html(s);
+        // Strip before truncating, not after. The WordPress tail is the last
+        // thing in the description, so at 280 characters it was usually cut
+        // mid-boilerplate and shipped as "... The post BTS refuse to submit to
+        // Grammys i" - the truncation hid the very marker needed to spot it.
+        let stripped = html_cleaner::strip_feed_boilerplate(&html_cleaner::clean_html(s));
         if stripped.len() <= max {
             return stripped;
         }
@@ -488,7 +492,9 @@ impl FeedAggregator {
         while end > 0 && !stripped.is_char_boundary(end) {
             end -= 1;
         }
-        format!("{}…", &stripped[..end])
+        // \u{2026} is a horizontal ellipsis; written escaped to keep the source
+        // ASCII-only.
+        format!("{}\u{2026}", &stripped[..end])
     }
 
     /// Fetch all feeds for a category (articles or news)
@@ -564,9 +570,11 @@ impl FeedAggregator {
 
     /// Get music news (aggregated from multiple sources)
     pub async fn get_news(&self) -> Vec<FeedItem> {
-        let cache_key = "music_news";
-        self.get_cached_or_fetch(cache_key, NEWS_FEEDS.to_vec())
-            .await
+        let cache_key = "music_news_v2";
+        let items = self
+            .get_cached_or_fetch(cache_key, NEWS_FEEDS.to_vec())
+            .await;
+        dedupe_same_story(items)
     }
 
     async fn get_cached_or_fetch(
@@ -602,7 +610,6 @@ impl FeedAggregator {
     }
 }
 
-// We need html_cleaner - let's use a simple approach instead
 mod html_cleaner {
     /// Strip HTML tags from a string (very basic implementation)
     pub fn clean_html(html: &str) -> String {
@@ -619,21 +626,171 @@ mod html_cleaner {
         }
 
         // Collapse whitespace
-        let mut cleaned = result.split_whitespace().collect::<Vec<_>>().join(" ");
-
-        // Decode common HTML entities
-        cleaned = cleaned
-            .replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
-            .replace("&apos;", "'")
-            .replace("&#x27;", "'")
-            .replace("&nbsp;", " ");
-
-        cleaned
+        let cleaned = result.split_whitespace().collect::<Vec<_>>().join(" ");
+        decode_entities(&cleaned)
     }
+
+    /// Decode HTML character references.
+    ///
+    /// This used to be a chain of `.replace()` calls over a fixed list of
+    /// named entities, which had two faults. It decoded no numeric
+    /// references at all, so headlines shipped as
+    /// `&#8216;Moulin Rouge&#8217; actor says...` - the music press writes in
+    /// curly quotes, dashes and ellipses, and WordPress emits every one of
+    /// them numerically. And running the replacements in sequence decoded its
+    /// own output: `&amp;#39;`, which is a literal, escaped entity, became
+    /// `&#39;` on the first pass and then an apostrophe on a later one.
+    ///
+    /// A single left-to-right pass fixes both: each reference is consumed
+    /// once, and anything unrecognised is copied through untouched.
+    fn decode_entities(input: &str) -> String {
+        let mut out = String::with_capacity(input.len());
+        let mut rest = input;
+
+        while let Some(amp) = rest.find('&') {
+            out.push_str(&rest[..amp]);
+            let tail = &rest[amp..];
+            // A character reference is short. Capping the search stops a bare
+            // ampersand in prose ("Simon & Garfunkel") from scanning to the
+            // end of the document looking for a semicolon that is not a
+            // terminator.
+            let semi = tail
+                .char_indices()
+                .take(12)
+                .find(|(_, c)| *c == ';')
+                .map(|(i, _)| i);
+
+            match semi {
+                Some(i) => {
+                    match decode_reference(&tail[1..i]) {
+                        Some(ch) => out.push(ch),
+                        // Not a reference we know; keep the original text.
+                        None => out.push_str(&tail[..=i]),
+                    }
+                    rest = &tail[i + 1..];
+                }
+                None => {
+                    out.push('&');
+                    rest = &tail[1..];
+                }
+            }
+        }
+
+        out.push_str(rest);
+        out
+    }
+
+    /// Resolve the inside of a `&...;` reference, or None if unrecognised.
+    ///
+    /// Non-ASCII results are written as escapes to keep this file ASCII-only.
+    fn decode_reference(body: &str) -> Option<char> {
+        if let Some(digits) = body.strip_prefix('#') {
+            let code = match digits.strip_prefix(['x', 'X']) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                None => digits.parse::<u32>().ok()?,
+            };
+            return char::from_u32(code);
+        }
+
+        Some(match body {
+            "amp" => '&',
+            "lt" => '<',
+            "gt" => '>',
+            "quot" => '"',
+            "apos" => '\'',
+            "nbsp" => ' ',
+            "hellip" => '\u{2026}',
+            "mdash" => '\u{2014}',
+            "ndash" => '\u{2013}',
+            "lsquo" => '\u{2018}',
+            "rsquo" => '\u{2019}',
+            "ldquo" => '\u{201C}',
+            "rdquo" => '\u{201D}',
+            _ => return None,
+        })
+    }
+
+    /// Remove the syndication footer WordPress appends to every excerpt.
+    ///
+    /// NME, Billboard, Consequence and Stereogum all run WordPress, which ends
+    /// each description with "The post <headline> appeared first on <Site>."
+    /// That is roughly a third of the visible text on a news card and it says
+    /// nothing the card is not already showing: the headline is the title and
+    /// the site is the source badge.
+    ///
+    /// Only cuts at a "The post " that is genuinely the footer - one whose
+    /// remainder mentions appearing first on somewhere. A description that
+    /// merely opens with those words is left alone.
+    pub fn strip_feed_boilerplate(text: &str) -> String {
+        let mut best: Option<usize> = None;
+        for (idx, _) in text.match_indices("The post ") {
+            if text[idx..].contains("appeared first on") {
+                best = Some(idx);
+                break;
+            }
+        }
+        match best {
+            Some(idx) => text[..idx]
+                .trim_end()
+                .trim_end_matches(['-', ','])
+                .to_string(),
+            None => text.to_string(),
+        }
+    }
+}
+
+/// Words too common to identify what a headline is about.
+const HEADLINE_STOPWORDS: &[&str] = &[
+    "the", "a", "an", "and", "of", "in", "on", "at", "to", "for", "with", "his", "her", "its",
+    "new", "is", "was", "as", "by", "from", "says", "said",
+];
+
+/// Significant words of a headline, lowercased and stripped of punctuation.
+fn headline_tokens(title: &str) -> Vec<String> {
+    title
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase())
+        .filter(|w| w.len() > 2 && !HEADLINE_STOPWORDS.contains(&w.as_str()))
+        .collect()
+}
+
+/// Collapse the same story reported by several outlets down to one card.
+///
+/// Seven feeds cover one music press, so a single event arrives seven times.
+/// One death produced five cards in a row - "Glen Hansard Killed in Motorcycle
+/// Crash", "Glen Hansard Dead At 56", "Glen Hansard dies following motorcycle
+/// crash in Dublin" and two more - which is most of a shelf spent saying one
+/// thing.
+///
+/// Word overlap does not group those: they agree on the name and almost
+/// nothing else, so any threshold loose enough to catch them also merges
+/// unrelated stories. What they do share is the subject, and in a headline the
+/// subject leads. So the key is the first two significant words, and the first
+/// item to claim a key keeps it - feeds arrive newest-first, so that is the
+/// freshest telling.
+///
+/// The deliberate cost: two genuinely different stories about one artist,
+/// close together, collapse to one. On a fifteen-card shelf that is the better
+/// trade, and the alternative is what the screenshot showed.
+fn dedupe_same_story(items: Vec<FeedItem>) -> Vec<FeedItem> {
+    let mut seen: HashMap<String, ()> = HashMap::new();
+    let mut out = Vec::with_capacity(items.len());
+
+    for item in items {
+        let tokens = headline_tokens(&item.title);
+        if tokens.len() < 2 {
+            // Nothing to key on; never drop it.
+            out.push(item);
+            continue;
+        }
+        let key = format!("{} {}", tokens[0], tokens[1]);
+        if seen.insert(key, ()).is_none() {
+            out.push(item);
+        }
+    }
+
+    out
 }
 
 fn capture_raw(re: &regex::Regex, haystack: &str) -> Option<String> {
@@ -655,6 +812,130 @@ mod tests {
             name: "Example",
             category: "news",
         }
+    }
+
+    fn news(title: &str, source: &str) -> FeedItem {
+        FeedItem {
+            title: title.to_string(),
+            link: format!("https://example.test/{}", title.len()),
+            description: String::new(),
+            author: None,
+            published_at: None,
+            image_url: None,
+            source: source.to_string(),
+            category: "news".to_string(),
+        }
+    }
+
+    #[test]
+    fn numeric_entities_decode() {
+        // Straight from the shelf: WordPress writes curly quotes numerically,
+        // and these rendered raw on the card.
+        assert_eq!(
+            html_cleaner::clean_html("&#8216;Moulin Rouge&#8217; actor"),
+            "\u{2018}Moulin Rouge\u{2019} actor"
+        );
+        assert_eq!(
+            html_cleaner::clean_html("defends ejecting &#8220;old drunk man&#8221;"),
+            "defends ejecting \u{201C}old drunk man\u{201D}"
+        );
+        assert_eq!(html_cleaner::clean_html("caf&#xe9; set"), "caf\u{e9} set");
+        assert_eq!(
+            html_cleaner::clean_html("Sigur R&oacute;s"),
+            "Sigur R&oacute;s",
+            "an unknown named entity is left exactly as it came in"
+        );
+    }
+
+    #[test]
+    fn entities_are_decoded_once() {
+        // The old chained `.replace()` decoded its own output, turning an
+        // escaped, literal entity into the character it names.
+        assert_eq!(html_cleaner::clean_html("A &amp;#39; B"), "A &#39; B");
+        assert_eq!(
+            html_cleaner::clean_html("Simon &amp; Garfunkel"),
+            "Simon & Garfunkel"
+        );
+    }
+
+    #[test]
+    fn a_bare_ampersand_is_not_scanned_to_the_end_of_the_text() {
+        let long = format!("Simon & {}", "Garfunkel ".repeat(40));
+        let cleaned = html_cleaner::clean_html(&long);
+        assert!(cleaned.starts_with("Simon & Garfunkel"));
+    }
+
+    #[test]
+    fn wordpress_syndication_footer_is_removed() {
+        let desc = "The Recording Academy confirmed the category. \
+                    The post BTS refuse to submit to Grammys appeared first on NME.";
+        assert_eq!(
+            html_cleaner::strip_feed_boilerplate(desc),
+            "The Recording Academy confirmed the category."
+        );
+    }
+
+    #[test]
+    fn a_description_that_merely_starts_with_the_post_is_kept() {
+        let desc = "The post office refused to deliver the master tapes.";
+        assert_eq!(html_cleaner::strip_feed_boilerplate(desc), desc);
+    }
+
+    #[test]
+    fn the_footer_is_stripped_before_truncation_not_after() {
+        // At 280 chars the footer was cut mid-phrase, which removed the
+        // "appeared first on" marker and left the fragment on the card.
+        let desc = format!(
+            "{} The post Some Headline Here appeared first on NME.",
+            "word ".repeat(50)
+        );
+        let out = FeedAggregator::truncate_desc(&desc, 280);
+        assert!(!out.contains("The post"), "got: {out}");
+    }
+
+    #[test]
+    fn one_story_from_five_outlets_becomes_one_card() {
+        let items = vec![
+            news("Glen Hansard Killed in Motorcycle Crash", "Consequence"),
+            news("Glen Hansard Dead At 56", "Stereogum"),
+            news(
+                "Glen Hansard, Oscar-winning Irish singer-songwriter, dies aged 56",
+                "The Guardian Music",
+            ),
+            news(
+                "Glen Hansard dies following motorcycle crash in Dublin",
+                "NME",
+            ),
+            news(
+                "Glen Hansard, Oscar-Winning 'Once' Musician, Dead at 56",
+                "Rolling Stone",
+            ),
+        ];
+
+        let out = dedupe_same_story(items);
+        assert_eq!(out.len(), 1);
+        // First in wins, and feeds arrive newest-first.
+        assert_eq!(out[0].source, "Consequence");
+    }
+
+    #[test]
+    fn unrelated_stories_survive_deduping() {
+        let items = vec![
+            news("BTS refuse to submit to Grammys in response", "NME"),
+            news(
+                "Noah Kahan Latest Musician to Slam White House",
+                "Billboard",
+            ),
+            news("Boy George says he used AI to create his new single", "NME"),
+            news("Spiritbox's Courtney LaPlante defends ejecting fan", "NME"),
+        ];
+        assert_eq!(dedupe_same_story(items).len(), 4);
+    }
+
+    #[test]
+    fn a_headline_too_short_to_key_on_is_never_dropped() {
+        let items = vec![news("Grammys 2027", "NME"), news("Reading", "NME")];
+        assert_eq!(dedupe_same_story(items).len(), 2);
     }
 
     #[test]
