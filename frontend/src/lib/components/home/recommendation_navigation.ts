@@ -70,12 +70,12 @@ export function findArtistMatch(
 	artists: TidalSearchArtist[],
 ): TidalSearchArtist | null {
 	if (artists.length === 0) return null;
-	const wanted = normalizeCatalogName(item.title);
-	const exact = artists.find((artist) => normalizeCatalogName(artist.name) === wanted);
+	const wanted = catalogMatchKey(item.title);
+	const exact = artists.find((artist) => catalogMatchKey(artist.name) === wanted);
 	if (exact) return exact;
 	// Tolerate the punctuation/suffix drift between Last.fm and TIDAL spellings
 	// (e.g. "MF DOOM" vs "MF DOOM (Daniel Dumile)").
-	const partial = artists.find((artist) => namesOverlap(normalizeCatalogName(artist.name), wanted));
+	const partial = artists.find((artist) => namesOverlap(normalizeCatalogName(artist.name), normalizeCatalogName(item.title)));
 	if (partial) return partial;
 	// Previously this fell through to `artists[0]`, on the reasoning that the
 	// search was keyed on the artist name so the top hit is probably right.
@@ -92,12 +92,12 @@ export function findAlbumMatch(
 	albums: TidalSearchAlbum[],
 ): TidalSearchAlbum | null {
 	if (albums.length === 0) return null;
-	const wantedTitle = normalizeCatalogName(item.title);
-	const wantedArtist = normalizeCatalogName(item.artist_name);
+	const wantedTitle = catalogMatchKey(item.title);
+	const wantedArtist = catalogMatchKey(item.artist_name);
 	const artistOk = (album: TidalSearchAlbum) =>
-		!wantedArtist || normalizeCatalogName(album.artist_name) === wantedArtist;
+		!wantedArtist || catalogMatchKey(album.artist_name) === wantedArtist;
 
-	const exact = albums.find((album) => artistOk(album) && normalizeCatalogName(album.title) === wantedTitle);
+	const exact = albums.find((album) => artistOk(album) && catalogMatchKey(album.title) === wantedTitle);
 	if (exact) return exact;
 
 	// A wrong album is worse than no album, so only accept a fuzzy hit by the same
@@ -130,6 +130,27 @@ function namesOverlap(a: string, b: string): boolean {
 	const [shorter, longer] =
 		aTokens.length <= bTokens.length ? [aTokens, bTokens] : [bTokens, aTokens];
 	return shorter.every((token, index) => longer[index] === token);
+}
+
+/**
+ * Comparison key for deciding whether two catalogue names are the same name.
+ *
+ * `normalizeCatalogName` keeps only ASCII alphanumerics, so a name written
+ * entirely in another script - Cyrillic, CJK, or pure symbols - folds to the
+ * empty string, and every such name then compares equal to every other one.
+ * That is how a recommendation for one non-Latin artist could resolve to an
+ * unrelated non-Latin artist. When the fold comes back empty, compare the raw
+ * name instead: those names still match themselves, and stop matching each
+ * other.
+ *
+ * Kept separate from `normalizeCatalogName`, which is pinned character for
+ * character to its Rust port. The server closes the same hole from the other
+ * side, by refusing an empty fold in the SQL (see `ARTIST_BY_NAME_SQL`).
+ */
+function catalogMatchKey(value: string | null | undefined): string {
+	const folded = normalizeCatalogName(value);
+	if (folded) return folded;
+	return (value ?? '').toLowerCase().trim().replace(/\s+/g, ' ');
 }
 
 /**

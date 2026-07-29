@@ -999,9 +999,9 @@ async fn resolve_recommendation_item(
                    LEFT JOIN artists a ON a.id = t.artist_id
                    LEFT JOIN albums al ON al.id = t.album_id
                   WHERE (LOWER(t.title) = LOWER(?1)
-                         OR (t.title_normalized IS NOT NULL AND t.title_normalized = ?3))
+                         OR (?3 <> '' AND t.title_normalized IS NOT NULL AND t.title_normalized = ?3))
                     AND (LOWER(COALESCE(a.name, '')) = LOWER(?2)
-                         OR (a.name_normalized IS NOT NULL AND a.name_normalized = ?4))
+                         OR (?4 <> '' AND a.name_normalized IS NOT NULL AND a.name_normalized = ?4))
                   ORDER BY LOWER(t.title) = LOWER(?1) DESC,
                            t.is_favorite DESC, t.play_count DESC
                   LIMIT 1",
@@ -1042,10 +1042,18 @@ async fn resolve_recommendation_item(
 /// displace a real one.
 ///
 /// Held as a const so the test exercises the query the route actually runs.
+///
+/// The `?2 <> ''` guard is load-bearing. The fold keeps only ASCII
+/// alphanumerics, so a name written entirely in another script - Cyrillic,
+/// CJK, or pure symbols - folds to the empty string. Without the guard every
+/// such row matches every other one, and a recommendation for a Cyrillic
+/// artist resolves to an unrelated CJK artist that happens to fold the same
+/// way. The exact `LOWER(name)` branch still matches those names correctly,
+/// so refusing the empty fold costs nothing and only removes the collision.
 const ARTIST_BY_NAME_SQL: &str = "SELECT id, tidal_id, name, photo_url
                    FROM artists
                   WHERE LOWER(name) = LOWER(?1)
-                     OR (name_normalized IS NOT NULL AND name_normalized = ?2)
+                     OR (?2 <> '' AND name_normalized IS NOT NULL AND name_normalized = ?2)
                   ORDER BY LOWER(name) = LOWER(?1) DESC, tidal_id IS NULL, id ASC
                   LIMIT 1";
 
@@ -1159,9 +1167,9 @@ async fn resolve_recommendation_album_item(
                    FROM albums al
                    LEFT JOIN artists a ON a.id = al.artist_id
                   WHERE (LOWER(al.title) = LOWER(?1)
-                         OR (al.title_normalized IS NOT NULL AND al.title_normalized = ?3))
+                         OR (?3 <> '' AND al.title_normalized IS NOT NULL AND al.title_normalized = ?3))
                     AND (LOWER(COALESCE(a.name, '')) = LOWER(?2)
-                         OR (a.name_normalized IS NOT NULL AND a.name_normalized = ?4))
+                         OR (?4 <> '' AND a.name_normalized IS NOT NULL AND a.name_normalized = ?4))
                   ORDER BY LOWER(al.title) = LOWER(?1) DESC, al.tidal_id IS NULL, al.id ASC
                   LIMIT 1",
                 params![title, artist, normalized_title, normalized_artist],
@@ -1324,6 +1332,28 @@ mod tests {
         );
         // And the exact spelling still works.
         assert_eq!(lookup(&conn, "Sigur Rós").as_deref(), Some("Sigur Rós"));
+    }
+
+    #[test]
+    fn non_latin_names_do_not_collide_on_the_empty_fold() {
+        let conn = seeded_conn();
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (4, '鄧麗君'), (5, 'Грибы')",
+            [],
+        )
+        .unwrap();
+        crate::db::catalog_name::run_backfill_to_completion(&conn, 8).unwrap();
+
+        // The fold keeps ASCII alphanumerics only, so both of these store ''.
+        assert_eq!(normalize_catalog_name("鄧麗君"), "");
+        assert_eq!(normalize_catalog_name("Грибы"), "");
+
+        // Which is why the folded branch has to stay out of it. Each name
+        // still resolves to itself through the exact branch, and neither
+        // resolves to the other.
+        assert_eq!(lookup(&conn, "鄧麗君").as_deref(), Some("鄧麗君"));
+        assert_eq!(lookup(&conn, "Грибы").as_deref(), Some("Грибы"));
+        assert_eq!(lookup(&conn, "Вектор А"), None);
     }
 
     #[test]

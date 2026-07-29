@@ -2,7 +2,19 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
-import { normalizeCatalogName } from './recommendation_navigation';
+import { findAlbumMatch, findArtistMatch, normalizeCatalogName } from './recommendation_navigation';
+import type {
+	ProviderRecommendationItem,
+	TidalSearchAlbum,
+	TidalSearchArtist,
+} from '$lib/api/client';
+
+const artist = (name: string, id: number): TidalSearchArtist =>
+	({ name, tidal_id: id }) as unknown as TidalSearchArtist;
+const album = (title: string, artist_name: string, id: number): TidalSearchAlbum =>
+	({ title, artist_name, tidal_id: id }) as unknown as TidalSearchAlbum;
+const rec = (title: string, artist_name = ''): ProviderRecommendationItem =>
+	({ title, artist_name }) as unknown as ProviderRecommendationItem;
 
 const here = dirname(fileURLToPath(import.meta.url));
 const rustModule = join(
@@ -89,6 +101,14 @@ describe('normalizeCatalogName', () => {
 		}
 	});
 
+	test('folds every non-ASCII-alphanumeric name to the same empty string', () => {
+		// Not a defect in the fold itself - it is ASCII-only by design, and the
+		// Rust port agrees. It is why the matchers below cannot compare on the
+		// fold alone, and why the server refuses an empty fold in SQL.
+		expect(normalizeCatalogName('Грибы')).toBe('');
+		expect(normalizeCatalogName('鄧麗君')).toBe('');
+	});
+
 	test('the Rust port pins the same inputs', () => {
 		const rust = readFileSync(rustModule, 'utf8');
 		const table = rust.slice(
@@ -100,5 +120,36 @@ describe('normalizeCatalogName', () => {
 			if (input === '') continue; // the empty case is not greppable
 			expect(table, `Rust parity table is missing ${JSON.stringify(input)}`).toContain(input);
 		}
+	});
+});
+
+describe('non-Latin names do not collide on the empty fold', () => {
+	// Both names fold to '', so comparing on the fold alone made every
+	// non-Latin name equal to every other one and the matcher opened whichever
+	// happened to come back first.
+	test('findArtistMatch refuses an unrelated non-Latin artist', () => {
+		expect(
+			findArtistMatch(rec('Грибы'), [artist('鄧麗君', 1), artist('Вектор А', 2)]),
+		).toBeNull();
+	});
+
+	test('findArtistMatch still matches a non-Latin artist against itself', () => {
+		const wanted = artist('Грибы', 3);
+		expect(findArtistMatch(rec('Грибы'), [artist('鄧麗君', 1), wanted])).toBe(wanted);
+	});
+
+	test('findAlbumMatch does not treat a non-Latin artist as "artist unknown"', () => {
+		// The empty fold used to make `!wantedArtist` true, which skipped the
+		// artist check entirely and let any album through on title alone.
+		expect(
+			findAlbumMatch(rec('黑膠', 'Грибы'), [album('黑膠', '鄧麗君', 1)]),
+		).toBeNull();
+	});
+
+	test('findAlbumMatch still matches a non-Latin album by the same artist', () => {
+		const wanted = album('黑膠', 'Грибы', 2);
+		expect(findAlbumMatch(rec('黑膠', 'Грибы'), [album('黑膠', '鄧麗君', 1), wanted])).toBe(
+			wanted,
+		);
 	});
 });
