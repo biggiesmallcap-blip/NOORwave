@@ -191,7 +191,14 @@ pub(super) async fn get_home_recommendations(
 // an existing install would keep serving v6 payloads - built by the old
 // exact-match resolver, complete with grey stars and unplayable rows - for the
 // full six hours before anything improved.
-const RECOMMENDATION_HOME_CACHE_KEY: &str = "home:v7";
+// v8: the artist and album caps went from 20 to 50. A cached v7 payload only
+// holds twenty, so without a bump the bigger rails would not appear until the
+// six-hour lease expired.
+const RECOMMENDATION_HOME_CACHE_KEY: &str = "home:v8";
+
+/// Cap for the track shelf, which is still rendered as the mural. Twenty is not
+/// arbitrary here: `layout-count-20` in ChartMural.svelte is a 10x2 grid, so a
+/// twenty-first item would add a row and reshape the mosaic.
 const LASTFM_HOME_RECOMMENDATION_LIMIT: usize = 20;
 const LASTFM_HOME_SEED_LIMIT: usize = 12;
 const LASTFM_HOME_PROFILE_SOURCE_LIMIT: usize = 30;
@@ -199,8 +206,26 @@ const LASTFM_HOME_RECENT_SEED_TARGET: usize = 8;
 const LASTFM_HOME_LOVED_SEED_TARGET: usize = 8;
 const LASTFM_HOME_TOP_SEED_TARGET: usize = 6;
 const LASTFM_HOME_SIMILAR_LIMIT: usize = 20;
-const LASTFM_HOME_ARTIST_LIMIT: usize = 20;
-const LASTFM_HOME_ALBUM_LIMIT: usize = 20;
+
+/// Output caps for the two rail shelves.
+///
+/// These were 20 because all three shelves used to render as a ChartMural, and
+/// that mosaic is a fixed 10x2 grid - twenty cells, no more. Artists and albums
+/// are rails now, and a rail just scrolls, so the old ceiling was measuring the
+/// wrong thing.
+///
+/// Raising them costs no extra upstream calls. The fan-out already generates
+/// far more than it keeps: artists is 12 seeds x `LASTFM_HOME_SIMILAR_LIMIT`
+/// (up to 240), albums is 12 seeds x `LASTFM_HOME_ALBUM_SIMILAR_ARTIST_LIMIT` x
+/// `LASTFM_HOME_ALBUMS_PER_ARTIST_LIMIT` (up to 480). Everything past the cap
+/// was fetched, deduped, and then thrown away. The added cost is server-side
+/// artwork resolution for the extra items, which is buffered and shares the
+/// 6h TIDAL search cache.
+///
+/// The track shelf stays at `LASTFM_HOME_RECOMMENDATION_LIMIT` because it is
+/// still the mural.
+const LASTFM_HOME_ARTIST_LIMIT: usize = 50;
+const LASTFM_HOME_ALBUM_LIMIT: usize = 50;
 const LASTFM_HOME_ALBUM_SIMILAR_ARTIST_LIMIT: usize = 8;
 
 /// Concurrent Last.fm calls during the home fan-out. Their documented ceiling
@@ -466,8 +491,11 @@ async fn resolve_missing_artwork(state: &SharedState, items: &mut [Value]) {
 const ARTWORK_SEARCH_LIMIT: i32 = 12;
 
 /// A shelf this short means the fan-out was cut off, not that the user has a
-/// small taste profile: each of the three shelves is capped at 20 and a healthy
-/// fetch fills them.
+/// small taste profile: a healthy fetch fills every shelf to its cap.
+///
+/// Deliberately an absolute count rather than a fraction of the cap, so raising
+/// the artist and album caps cannot turn a perfectly good shelf into one that
+/// keeps re-fetching on a ten-minute lease.
 const RECOMMENDATION_HEALTHY_FLOOR: usize = 12;
 
 /// How long a short result is allowed to stick around. Long enough to absorb a

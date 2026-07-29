@@ -1,6 +1,5 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { goto } from '$app/navigation';
 	import {
 		ApiError,
 		api,
@@ -15,21 +14,20 @@
 	import {
 		recommendationActionLabel,
 		recommendationEntity,
-		recommendationHrefFromSearch,
-		recommendationKnownHref,
-		recommendationSearchHref,
-		recommendationSearchQuery,
 	} from '$lib/components/home/recommendation_navigation';
+	import {
+		openRecommendationItem,
+		recommendationItemMenu,
+		recommendationItemToTidalPlayable,
+		recommendationShelfSlug,
+	} from '$lib/components/home/recommendation_menu';
 	import { playChartTidalTrack, playChartTidalTracks } from '$lib/player/play_trending';
 	import {
 		playRecommendationAlbum,
 		playRecommendationArtist,
 	} from '$lib/player/play_recommendations';
 	import { playTrackNow } from '$lib/stores/player';
-	import { openContextMenu, type MenuItem } from '$lib/stores/context_menu';
-	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
-	import { buildAlbumMenu } from '$lib/player/album_menu';
-	import { buildArtistMenu } from '$lib/player/artist_menu';
+	import { openContextMenu } from '$lib/stores/context_menu';
 	import {
 		composeTidalArtQuery,
 		lazyTidalArt,
@@ -161,8 +159,22 @@
 		return shelf.entity_type === 'artist';
 	}
 
+	/**
+	 * What this shelf shows in place, which is a soft cap, not the whole set.
+	 *
+	 * For the track shelf twenty is hard: the mural is a fixed 10x2 grid
+	 * (`layout-count-20` in ChartMural.svelte), and a twenty-first tile would add
+	 * a row and reshape the mosaic. For the rails it is a judgement - the server
+	 * now returns fifty, and a rail you have to drag through fifty times is not a
+	 * way to see fifty things. The rest lives behind "View all".
+	 */
 	function shelfItems(shelf: ProviderRecommendationShelf): ProviderRecommendationItem[] {
 		return shelf.items.slice(0, PANEL_LIMIT);
+	}
+
+	/** True when the shelf is holding back items the rail is not showing. */
+	function hasMoreThanShelf(shelf: ProviderRecommendationShelf): boolean {
+		return shelf.items.length > PANEL_LIMIT;
 	}
 
 	function currentIndexFor(shelf: ProviderRecommendationShelf): number {
@@ -303,20 +315,9 @@
 		lazyArtwork = { ...lazyArtwork, [key]: url };
 	}
 
-	function itemToTidalPlayable(item: ProviderRecommendationItem): TidalPlayable {
-		return {
-			tidal_id: item.tidal_id ?? 0,
-			title: item.title,
-			artist_name: item.artist_name,
-			album_title: item.album_title,
-			artwork_url: item.artwork_url,
-			duration_ms: null,
-			artist_tidal_id: null,
-			track_id: item.local_track_id ?? undefined,
-			local_id: item.local_track_id,
-			is_in_library: Boolean(item.local_track_id),
-		};
-	}
+	// Re-exported from the shared module so the "View all" page and this shelf
+	// cannot drift apart.
+	const itemToTidalPlayable = recommendationItemToTidalPlayable;
 
 	function selectItem(shelf: ProviderRecommendationShelf, index: number) {
 		currentIndexes = { ...currentIndexes, [shelfKey(shelf)]: index };
@@ -363,57 +364,6 @@
 		if (item) void playItem(shelf, item, index);
 	}
 
-	// One right-click menu per entity, reusing the shared builders the rest of the
-	// app uses. Unresolved Last.fm albums/artists (no ids yet) get a resolve-then-act
-	// menu so "Add to queue"-style actions still work before a TIDAL match exists.
-	function recommendationItemMenu(item: ProviderRecommendationItem): MenuItem[] {
-		const entity = itemEntity(item);
-		if (entity === 'track') {
-			if (item.local_track_id) {
-				return buildTrackMenu({
-					id: item.local_track_id,
-					title: item.title,
-					artist_id: item.local_artist_id ?? null,
-					artist_name: item.artist_name,
-					album_id: item.local_album_id ?? null,
-					album_title: item.album_title,
-				});
-			}
-			return buildTidalTrackMenu(itemToTidalPlayable(item));
-		}
-		if (entity === 'album') {
-			if (item.local_album_id || item.tidal_album_id) {
-				return buildAlbumMenu({
-					id: item.local_album_id ?? null,
-					tidal_id: item.tidal_album_id ?? null,
-					title: item.title,
-					artist_id: item.local_artist_id ?? null,
-					artist_name: item.artist_name,
-					in_library: Boolean(item.local_album_id),
-				});
-			}
-			return [
-				{ label: 'Play album', icon: '▶', onSelect: () => void playRecommendationAlbum(item) },
-				{ separator: true, label: '' },
-				{ label: 'Open album page', icon: '↗', onSelect: () => void openRecommendationItem(item) },
-			];
-		}
-		// artist
-		if (item.local_artist_id) {
-			return buildArtistMenu({
-				id: item.local_artist_id,
-				tidal_id: item.tidal_artist_id ?? null,
-				name: item.title,
-				in_library: true,
-			});
-		}
-		return [
-			{ label: 'Play top tracks', icon: '▶', onSelect: () => void playRecommendationArtist(item) },
-			{ separator: true, label: '' },
-			{ label: 'Open artist', icon: '↗', onSelect: () => void openRecommendationItem(item) },
-		];
-	}
-
 	function openItemMenu(event: MouseEvent, item: ProviderRecommendationItem) {
 		event.preventDefault();
 		event.stopPropagation();
@@ -430,21 +380,6 @@
 		} finally {
 			playingAllShelves = { ...playingAllShelves, [key]: false };
 		}
-	}
-
-	async function openRecommendationItem(item: ProviderRecommendationItem) {
-		const entity = itemEntity(item);
-		if (entity !== 'artist' && entity !== 'album') return;
-		const knownHref = recommendationKnownHref(item);
-		if (knownHref) return goto(knownHref);
-		try {
-			const results = await api.searchTidal(recommendationSearchQuery(item), 5);
-			const resolvedHref = recommendationHrefFromSearch(item, results);
-			if (resolvedHref) return goto(resolvedHref);
-		} catch {
-			// Search route fallback keeps the user moving when TIDAL lookup fails.
-		}
-		return goto(recommendationSearchHref(item));
 	}
 
 	function actionLabel(item: ProviderRecommendationItem): string {
@@ -573,6 +508,13 @@
 									{playingAllShelves[key] ? 'Resolving...' : 'Play all'}
 								</button>
 							{/if}
+							<!-- Only when there is genuinely more than the rail shows, so the
+							     link can never lead to the same cards again. -->
+							{#if hasMoreThanShelf(shelf)}
+								<a class="rec-view-all" href={`/recommendations/${recommendationShelfSlug(shelf)}`}>
+									View all {shelf.items.length} &#8594;
+								</a>
+							{/if}
 						{/snippet}
 					</SectionHeader>
 					{#if isTrackShelf(shelf)}
@@ -646,6 +588,15 @@
 		flex-direction: column;
 		gap: var(--space-3);
 	}
+
+	.rec-view-all {
+		font-size: var(--font-size-sm);
+		color: var(--text-secondary);
+		text-decoration: none;
+		white-space: nowrap;
+		transition: color var(--motion-base);
+	}
+	.rec-view-all:hover { color: var(--text-primary); }
 
 	.profile-recommendations-list {
 		display: flex;

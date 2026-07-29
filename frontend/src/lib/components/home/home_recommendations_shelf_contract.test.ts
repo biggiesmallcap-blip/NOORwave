@@ -12,6 +12,7 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(here, 'HomeRecommendationsShelf.svelte'), 'utf8');
+const recommendationMenu = readFileSync(join(here, 'recommendation_menu.ts'), 'utf8');
 const homePage = readFileSync(join(here, '../../../routes/+page.svelte'), 'utf8');
 const client = readFileSync(join(here, '../../api/client.ts'), 'utf8');
 const playTrending = readFileSync(join(here, '../../player/play_trending.ts'), 'utf8');
@@ -77,12 +78,31 @@ describe('home recommendations shelf contract', () => {
 		// The payload is cached for six hours, so shipping new resolution logic
 		// without a bump leaves existing installs on the old output until it
 		// expires - which is exactly what this assertion is here to catch.
-		expect(homeRoutes).toContain('RECOMMENDATION_HOME_CACHE_KEY: &str = "home:v7"');
+		expect(homeRoutes).toContain('RECOMMENDATION_HOME_CACHE_KEY: &str = "home:v8"');
+		// The track shelf stays at 20 because the mural is a fixed 10x2 grid;
+		// see `layout-count-20` in ChartMural.svelte.
 		expect(homeRoutes).toContain('LASTFM_HOME_RECOMMENDATION_LIMIT: usize = 20');
+		// The rails are not bound by the mural, so they carry the deeper set that
+		// the fan-out was already generating and discarding.
+		expect(homeRoutes).toContain('LASTFM_HOME_ARTIST_LIMIT: usize = 50');
+		expect(homeRoutes).toContain('LASTFM_HOME_ALBUM_LIMIT: usize = 50');
+	});
+
+	test('the shelf soft-caps in place and sends the rest to a grid page', () => {
+		expect(source).toContain('PANEL_LIMIT = 20');
+		expect(source).toContain('function hasMoreThanShelf');
+		expect(source).toContain('shelf.items.length > PANEL_LIMIT');
+		expect(source).toContain('/recommendations/${recommendationShelfSlug(shelf)}');
+	});
+
+	test('the shelf and its View all page share one menu builder', () => {
+		// Two surfaces rendering the same cards must open the same menu, per the
+		// rule that every asset reference carries the shared context menu.
+		expect(source).toContain("from '$lib/components/home/recommendation_menu'");
+		expect(source).toContain('recommendationItemMenu');
+		expect(source).not.toContain('function recommendationItemMenu');
 		expect(homeRoutes).toContain('LASTFM_HOME_SEED_LIMIT: usize = 12');
 		expect(homeRoutes).toContain('LASTFM_HOME_SIMILAR_LIMIT: usize = 20');
-		expect(homeRoutes).toContain('LASTFM_HOME_ARTIST_LIMIT: usize = 20');
-		expect(homeRoutes).toContain('LASTFM_HOME_ALBUM_LIMIT: usize = 20');
 	});
 
 	test('varies Last.fm seed reasons beyond stable top artists', () => {
@@ -245,10 +265,12 @@ describe('home recommendations shelf contract', () => {
 		expect(source).toContain('onCardContext');
 		expect(source).toContain('openContextMenu');
 		expect(source).toContain('recommendationItemMenu');
-		expect(source).toContain('buildTrackMenu');
-		expect(source).toContain('buildTidalTrackMenu');
-		expect(source).toContain('buildAlbumMenu');
-		expect(source).toContain('buildArtistMenu');
+		// The builders moved into recommendation_menu.ts when the View all page
+		// started sharing them, so assert them where they now live.
+		expect(recommendationMenu).toContain('buildTrackMenu');
+		expect(recommendationMenu).toContain('buildTidalTrackMenu');
+		expect(recommendationMenu).toContain('buildAlbumMenu');
+		expect(recommendationMenu).toContain('buildArtistMenu');
 		// The shared mural exposes the double-click hook the shelf relies on.
 		const mural = readFileSync(join(here, '../charts/ChartMural.svelte'), 'utf8');
 		expect(mural).toContain('onItemActivate');
@@ -272,7 +294,7 @@ describe('home recommendations shelf contract', () => {
 		expect(source).toContain('playTrackNow');
 		expect(source).toContain('item.local_track_id');
 		expect(source).toContain('playChartTidalTrack');
-		expect(source).toContain('tidal_id: item.tidal_id ?? 0');
+		expect(recommendationMenu).toContain('tidal_id: item.tidal_id ?? 0');
 		expect(recommendationActionLabel(rec({ entity_type: 'track' }))).toBe('Resolve on TIDAL');
 	});
 
