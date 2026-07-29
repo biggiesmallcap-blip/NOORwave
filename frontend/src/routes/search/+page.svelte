@@ -1458,11 +1458,15 @@
 
 <div class="search-page">
   <div class="search-header">
+    <!-- No `facets`: the focus popover listed all ten filters over the top of
+         the page, which on this route means it covered the live results the
+         field had just produced. The two quieter routes to the same knowledge
+         remain - inline Tab-completion while typing, and the "Try a filter"
+         section in the idle state, neither of which occludes anything. -->
     <SearchField
       bind:value={query}
       bind:inputEl
       variant="page"
-      facets
       inlineCompletion
       filterChips
       placeholder="Search Tidal's full catalogue"
