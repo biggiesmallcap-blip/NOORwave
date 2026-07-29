@@ -527,8 +527,8 @@ handoff.
 - [x] Part 1 - rail primitive (fluid, container-query)
 - [x] Part 2 - section vocabulary and spacing
 - [x] Part 7 - recommendations restructure (1 mural + 2 rails)
-- [ ] Part 5 - Last.fm correctness (Rust)
-- [ ] Part 6 - Last.fm performance (Rust + frontend resolver)
+- [x] Part 5 - Last.fm correctness (Rust)
+- [x] Part 6 - Last.fm performance (Rust + frontend resolver)
 - [x] Part 3 - TIDAL fill
 - [x] Part 4 - Home search bar, /search idle state
 

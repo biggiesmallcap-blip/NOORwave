@@ -272,14 +272,198 @@ async fn load_or_fetch_recommendation_shelf(
     if let Some(cached) = read_recommendation_cache(&state, provider).await {
         return Ok(cached);
     }
-    let items = match provider {
+    let mut items = match provider {
         "lastfm" => fetch_lastfm_home_recommendations(&state).await?,
         "listenbrainz" => fetch_listenbrainz_home_recommendations(&state).await?,
         _ => Vec::new(),
     };
+    // Before the cache write, so the artwork is stored with the shelf rather
+    // than re-resolved on every cache hit.
+    resolve_missing_artwork(&state, &mut items).await;
     write_recommendation_cache(&state, provider, &items).await;
     Ok(items)
 }
+
+/// Concurrent TIDAL searches while filling in missing artwork. Most of these
+/// are cache hits, so this only really bounds the cold path.
+const ARTWORK_RESOLVE_CONCURRENCY: usize = 6;
+
+/// Search query for an item that has no artwork yet: artists are looked up by
+/// name, everything else by artist plus title. Matches how the client composes
+/// the same query, so the two share cache rows.
+fn artwork_query(item: &Value) -> Option<String> {
+    let entity = item
+        .get("entity_type")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let title = item
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if entity == "artist" {
+        return (!title.is_empty()).then(|| title.to_string());
+    }
+    let artist = item
+        .get("artist_name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if artist.is_empty() {
+        return None;
+    }
+    Some(if title.is_empty() {
+        artist.to_string()
+    } else {
+        format!("{artist} {title}")
+    })
+}
+
+/// Pick the artwork a search result offers for this kind of item. An artist
+/// wants the artist photo, which the catalogue carries directly; anything else
+/// wants a cover.
+fn artwork_from_catalog(
+    entity: &str,
+    catalog: &crate::services::tidal::client::TidalSearchCatalog,
+) -> Option<String> {
+    if entity == "artist" {
+        if let Some(url) = catalog
+            .artists
+            .first()
+            .and_then(|a| a.artwork_url.clone().or_else(|| a.picture.clone()))
+        {
+            return Some(url);
+        }
+    }
+    catalog
+        .tracks
+        .first()
+        .and_then(|t| t.artwork_url.clone())
+        .or_else(|| catalog.albums.first().and_then(|a| a.artwork_url.clone()))
+}
+
+/// Fill in artwork for items the local library could not supply.
+///
+/// Without this the client did it: one `/api/tidal/search` per artwork-less
+/// tile, sixty of them on a full Home, funnelled through a four-wide in-flight
+/// cap - fifteen serial waves of round trips, which is precisely the staggered
+/// fill-in users see. Doing it here means the payload arrives complete, and
+/// since both this endpoint and the TIDAL search cache hold results for six
+/// hours, a warm cache makes it nearly free. The client keeps its lazy lookup
+/// as a fallback for whatever is still missing.
+///
+/// Best-effort throughout: TIDAL not connected, a failed search or a query we
+/// cannot build all leave the item exactly as it was.
+async fn resolve_missing_artwork(state: &SharedState, items: &mut [Value]) {
+    let (tokens, tidal_http, db) = {
+        let s = state.read().await;
+        (
+            s.tidal_tokens.clone(),
+            s.tidal_http_client.clone(),
+            s.db.clone(),
+        )
+    };
+    let Some(tokens) = tokens else {
+        return;
+    };
+
+    let pending: Vec<(usize, String, String)> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.get("artwork_url").is_none_or(Value::is_null))
+        .filter_map(|(index, item)| {
+            let entity = item
+                .get("entity_type")
+                .and_then(Value::as_str)
+                .unwrap_or("track")
+                .to_string();
+            artwork_query(item).map(|query| (index, entity, query))
+        })
+        .collect();
+
+    if pending.is_empty() {
+        return;
+    }
+
+    let client = crate::services::tidal::client::TidalClient::with_http(
+        tidal_http,
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
+    let cache_cfg = crate::services::tidal::cache::TidalSearchCacheConfig::default();
+
+    let resolved: Vec<(usize, Option<String>)> = futures::stream::iter(pending)
+        .map(|(index, entity, query)| {
+            let client = client.clone();
+            let db = db.clone();
+            async move {
+                // Shared with /api/tidal/search, so anything the client has
+                // already looked up costs nothing here.
+                let cached = db
+                    .with_conn(|conn| {
+                        crate::services::tidal::cache::get_search(
+                            conn,
+                            &cache_cfg,
+                            &query,
+                            ARTWORK_SEARCH_LIMIT,
+                            0,
+                        )
+                    })
+                    .ok()
+                    .flatten();
+
+                let catalog = match cached {
+                    Some(hit) => Some(hit),
+                    None => match client.search_catalog(&query, ARTWORK_SEARCH_LIMIT, 0).await {
+                        Ok(fetched) => {
+                            let to_cache = fetched.clone();
+                            let q = query.clone();
+                            let _ = db.with_conn(move |conn| {
+                                crate::services::tidal::cache::put_search(
+                                    conn,
+                                    &q,
+                                    ARTWORK_SEARCH_LIMIT,
+                                    0,
+                                    &to_cache,
+                                )
+                            });
+                            Some(fetched)
+                        }
+                        Err(e) => {
+                            tracing::debug!(target: "noor.home_artwork", query, error = %e, "artwork search failed");
+                            None
+                        }
+                    },
+                };
+
+                (
+                    index,
+                    catalog.and_then(|catalog| artwork_from_catalog(&entity, &catalog)),
+                )
+            }
+        })
+        .buffer_unordered(ARTWORK_RESOLVE_CONCURRENCY)
+        .collect()
+        .await;
+
+    let mut filled = 0usize;
+    for (index, url) in resolved {
+        if let Some(url) = url
+            && let Some(slot) = items.get_mut(index)
+            && let Some(obj) = slot.as_object_mut()
+        {
+            obj.insert("artwork_url".to_string(), Value::String(url));
+            filled += 1;
+        }
+    }
+    if filled > 0 {
+        tracing::debug!(target: "noor.home_artwork", filled, "resolved missing recommendation artwork");
+    }
+}
+
+/// Matches the canonical search bucket, so these lookups share cache rows with
+/// every other search of the same name.
+const ARTWORK_SEARCH_LIMIT: i32 = 12;
 
 /// A shelf this short means the fan-out was cut off, not that the user has a
 /// small taste profile: each of the three shelves is capped at 20 and a healthy
@@ -1154,6 +1338,77 @@ mod tests {
 
         assert_eq!(lookup(&conn, "Motorhead").as_deref(), Some("Motorhead"));
         assert_eq!(lookup(&conn, "Motörhead").as_deref(), Some("Motörhead"));
+    }
+
+    #[test]
+    fn artwork_queries_match_how_the_client_composes_them() {
+        // Same shape as the client's composeTidalArtQuery, so a lookup here and
+        // a lookup there land on the same cache row rather than each paying for
+        // its own upstream search.
+        let artist =
+            json!({ "entity_type": "artist", "title": "Lenzman", "artist_name": "Lenzman" });
+        assert_eq!(artwork_query(&artist).as_deref(), Some("Lenzman"));
+
+        let track =
+            json!({ "entity_type": "track", "title": "The Trot", "artist_name": "Calibre" });
+        assert_eq!(artwork_query(&track).as_deref(), Some("Calibre The Trot"));
+
+        let album =
+            json!({ "entity_type": "album", "title": "Shelflife", "artist_name": "Calibre" });
+        assert_eq!(artwork_query(&album).as_deref(), Some("Calibre Shelflife"));
+
+        // Nothing searchable: a track with no artist would match anything.
+        let anonymous = json!({ "entity_type": "track", "title": "Untitled", "artist_name": null });
+        assert_eq!(artwork_query(&anonymous), None);
+        let empty_artist = json!({ "entity_type": "artist", "title": "  " });
+        assert_eq!(artwork_query(&empty_artist), None);
+    }
+
+    #[test]
+    fn artists_take_the_artist_photo_and_everything_else_takes_a_cover() {
+        use crate::services::tidal::client::{
+            TidalSearchAlbum, TidalSearchArtist, TidalSearchCatalog, TidalSearchTrack,
+        };
+
+        let mut catalog = TidalSearchCatalog::default();
+        catalog.artists.push(TidalSearchArtist {
+            id: 1,
+            name: "Lenzman".into(),
+            picture: Some("pic".into()),
+            artwork_url: Some("https://img/artist.jpg".into()),
+            extra: Default::default(),
+        });
+        catalog.tracks.push(TidalSearchTrack {
+            artwork_url: Some("https://img/cover.jpg".into()),
+            ..Default::default()
+        });
+
+        // An artist gets the photo, not the cover of one of their tracks -
+        // reading tracks[0] for an artist is what put album art on artist
+        // tiles in the first place.
+        assert_eq!(
+            artwork_from_catalog("artist", &catalog).as_deref(),
+            Some("https://img/artist.jpg")
+        );
+        assert_eq!(
+            artwork_from_catalog("track", &catalog).as_deref(),
+            Some("https://img/cover.jpg")
+        );
+
+        // No artist hit: fall back to a cover rather than showing nothing.
+        let mut coverless = TidalSearchCatalog::default();
+        coverless.albums.push(TidalSearchAlbum {
+            artwork_url: Some("https://img/album.jpg".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            artwork_from_catalog("artist", &coverless).as_deref(),
+            Some("https://img/album.jpg")
+        );
+        assert_eq!(
+            artwork_from_catalog("track", &TidalSearchCatalog::default()),
+            None
+        );
     }
 
     #[test]
