@@ -103,10 +103,23 @@
 		const seq = ++loadSeq;
 		errorMsg = '';
 		try {
-			const [lastfm, listenbrainz] = await Promise.allSettled([
+			// The recommendations request goes out alongside the status checks
+			// rather than behind them. Gating it on the gate meant a two-stage
+			// waterfall on every mount even though both statuses are already in
+			// the persisted query cache, and the recommendations call is by far
+			// the slow one. If the gate turns out to be closed the response is
+			// simply discarded; the request is cached either way, so the only
+			// cost is a call we would have made moments later anyway.
+			const statuses = Promise.allSettled([
 				cachedApi.getLastfmStatus(),
 				cachedApi.getListenBrainzStatus()
 			]);
+			const recommendations = cachedApi.getHomeRecommendations();
+			// Nothing else awaits this promise on the gate-closed path, and an
+			// unhandled rejection would surface as a console error.
+			recommendations.catch(() => {});
+
+			const [lastfm, listenbrainz] = await statuses;
 			if (seq !== loadSeq) return;
 			const lastfmCanRecommend = lastfm.status === 'fulfilled' && Boolean(lastfm.value.recommendations);
 			const listenbrainzCanRecommend = listenbrainz.status === 'fulfilled' && Boolean(listenbrainz.value.recommendations);
@@ -116,7 +129,7 @@
 			}
 
 			viewState = 'loading';
-			const response = await cachedApi.getHomeRecommendations();
+			const response = await recommendations;
 			if (seq !== loadSeq) return;
 			shelves = response.shelves ?? [];
 			currentIndexes = {};
@@ -218,6 +231,28 @@
 		const position = `${index + 1} of ${count}`;
 		return item.reason ? `${position} - ${item.reason}` : position;
 	}
+
+	// Built once per shelf and reused until the data or the resolved artwork
+	// actually changes. The rotation timer ticks every 5.5s and only moves
+	// currentIndexes; rebuilding twenty mural items (and re-running twenty
+	// lazy-art action updates) on each tick churned exactly while the artwork
+	// was still landing. Deriving off shelves + lazyArtwork makes that
+	// independence explicit rather than incidental.
+	const muralItemsByShelf = $derived.by(() => {
+		const map: Record<string, ChartMuralItem[]> = {};
+		for (const shelf of visibleShelves) {
+			if (isTrackShelf(shelf)) map[shelfKey(shelf)] = shelfMuralItems(shelf);
+		}
+		return map;
+	});
+
+	const railItemsByShelf = $derived.by(() => {
+		const map: Record<string, RailEntry[]> = {};
+		for (const shelf of visibleShelves) {
+			if (!isTrackShelf(shelf)) map[shelfKey(shelf)] = shelfRailItems(shelf);
+		}
+		return map;
+	});
 
 	function shelfMuralItems(shelf: ProviderRecommendationShelf): ChartMuralItem[] {
 		return shelfItems(shelf).map((item, index) => {
@@ -542,7 +577,7 @@
 					</SectionHeader>
 					{#if isTrackShelf(shelf)}
 						<ChartMural
-							items={shelfMuralItems(shelf)}
+							items={muralItemsByShelf[key] ?? []}
 							currentIndex={currentIndex}
 							ariaLabel={`${shelf.title} carousel`}
 							kindLabel={shelf.provider === 'lastfm' ? `Last.fm ${shelf.entity_type ?? 'track'}s` : 'Connected profile'}
@@ -565,7 +600,7 @@
 						/>
 					{:else}
 						<MediaRail
-							items={shelfRailItems(shelf)}
+							items={railItemsByShelf[key] ?? []}
 							card={isArtistShelf(shelf) ? artistCard : albumCard}
 							getKey={(entry) => entry.key}
 							ariaLabel={shelf.title}

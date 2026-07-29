@@ -74,11 +74,17 @@ export function findArtistMatch(
 	const exact = artists.find((artist) => normalizeCatalogName(artist.name) === wanted);
 	if (exact) return exact;
 	// Tolerate the punctuation/suffix drift between Last.fm and TIDAL spellings
-	// (e.g. "MF DOOM" vs "MF DOOM (Daniel Dumile)"). The search was already keyed
-	// on the artist name, so the first result is overwhelmingly the right artist;
-	// prefer a contains-match but fall back to it rather than dumping to search.
+	// (e.g. "MF DOOM" vs "MF DOOM (Daniel Dumile)").
 	const partial = artists.find((artist) => namesOverlap(normalizeCatalogName(artist.name), wanted));
-	return partial ?? artists[0];
+	if (partial) return partial;
+	// Previously this fell through to `artists[0]`, on the reasoning that the
+	// search was keyed on the artist name so the top hit is probably right.
+	// When it is wrong it is silently wrong: the user clicks one artist and
+	// lands on another, with nothing to indicate a guess was made. A sole
+	// result is a safe bet; anything else goes to the search page, where the
+	// user picks. findAlbumMatch has always refused to guess for the same
+	// reason - a wrong album is worse than no album.
+	return artists.length === 1 ? artists[0] : null;
 }
 
 export function findAlbumMatch(
@@ -105,11 +111,25 @@ export function findAlbumMatch(
 	return null;
 }
 
-// True when one normalised name contains the other - cheap stand-in for fuzzy
-// matching that catches edition suffixes and parenthetical qualifiers.
+/**
+ * True when one normalised name extends the other at a word boundary - the
+ * cheap stand-in for fuzzy matching that catches edition suffixes and
+ * parenthetical qualifiers ("untrue" vs "untrue deluxe edition", "mf doom" vs
+ * "mf doom daniel dumile").
+ *
+ * Compares whole tokens rather than raw substrings. Plain containment made
+ * every short name match a longer one that merely spelled it: "nova" hit
+ * "casanova" and "novastar", and since the caller took the first overlap it
+ * found, that silently opened the wrong artist.
+ */
 function namesOverlap(a: string, b: string): boolean {
 	if (!a || !b) return false;
-	return a === b || a.includes(b) || b.includes(a);
+	if (a === b) return true;
+	const aTokens = a.split(' ');
+	const bTokens = b.split(' ');
+	const [shorter, longer] =
+		aTokens.length <= bTokens.length ? [aTokens, bTokens] : [bTokens, aTokens];
+	return shorter.every((token, index) => longer[index] === token);
 }
 
 /**

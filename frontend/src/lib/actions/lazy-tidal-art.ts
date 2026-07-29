@@ -1,4 +1,4 @@
-import { api } from '$lib/api/client';
+import { api, type TidalSearchResults } from '$lib/api/client';
 import { usableArtwork } from '$lib/utils/artwork';
 
 /**
@@ -227,6 +227,47 @@ async function lookupArtwork(query: string, kind: LazyTidalArtKind): Promise<str
 	})();
 	pending.set(key, work);
 	return work;
+}
+
+/**
+ * Run a TIDAL search through the same in-flight cap and circuit breaker the
+ * artwork lookups use, for callers that need the whole result rather than a
+ * cover URL.
+ *
+ * Artwork is not the only thing shelves resolve by name - the chart shelves
+ * resolve a playable track the same way - and those paths were issuing their
+ * own uncapped `Promise.all` fan-outs straight at `api.searchTidal`, with no
+ * breaker. That is what the cap exists to prevent: enough parallel searches and
+ * TIDAL starts rejecting them, which is the "Bad Request" flood this module was
+ * written for. Sharing the gate means one page cannot bypass another's limit.
+ *
+ * Returns null when the breaker is open, so callers fail soft rather than
+ * hammering a service that is already refusing them.
+ */
+export async function gatedTidalSearch(
+	query: string,
+	limit: number,
+): Promise<TidalSearchResults | null> {
+	if (isCircuitOpen()) return null;
+	await acquireSlot();
+	if (isCircuitOpen()) {
+		releaseSlot();
+		return null;
+	}
+	try {
+		const result = await api.searchTidal(query, limit);
+		consecutiveFailures = 0;
+		return result;
+	} catch (e) {
+		consecutiveFailures++;
+		if (consecutiveFailures >= CIRCUIT_OPEN_AFTER) {
+			circuitOpenUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
+			consecutiveFailures = 0;
+		}
+		throw e;
+	} finally {
+		releaseSlot();
+	}
 }
 
 export function lazyTidalArt(node: Element, initial: LazyTidalArtParams) {

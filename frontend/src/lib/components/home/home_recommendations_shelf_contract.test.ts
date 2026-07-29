@@ -149,6 +149,53 @@ describe('home recommendations shelf contract', () => {
 		expect(recommendationHrefFromSearch(unresolvedAlbum, emptySearchResults)).toBeNull();
 	});
 
+	test('an artist search that does not clearly match goes to search, not to a guess', () => {
+		const item = rec({ entity_type: 'artist', title: 'Nova', artist_name: 'Nova' });
+		const artist = (tidal_id: number, name: string) => ({
+			tidal_id,
+			name,
+			artwork_url: null,
+			local_id: null,
+			in_library: false,
+		});
+
+		// Names that merely spell "nova" are not matches: overlap compares whole
+		// tokens, so neither "Novastar" nor "Casanova" qualifies. With no
+		// candidate left this used to return artists[0], so clicking "Nova"
+		// opened whatever TIDAL ranked first with no sign a guess was made.
+		expect(
+			recommendationHrefFromSearch(item, {
+				...emptySearchResults,
+				artists: [artist(1, 'Novastar'), artist(3, 'Casanova')],
+			}),
+		).toBeNull();
+
+		// A trailing qualifier is still a match - that is what overlap is for.
+		expect(
+			recommendationHrefFromSearch(item, {
+				...emptySearchResults,
+				artists: [artist(1, 'Novastar'), artist(4, 'Nova (UK)')],
+			}),
+		).toBe('/tidal/artists/4');
+
+		// A single result is a safe bet: the search was keyed on the name and
+		// nothing else came back to confuse it.
+		expect(
+			recommendationHrefFromSearch(item, {
+				...emptySearchResults,
+				artists: [artist(9, 'NOVA (Official)')],
+			}),
+		).toBe('/tidal/artists/9');
+
+		// An exact fold still wins outright, whatever else is in the list.
+		expect(
+			recommendationHrefFromSearch(item, {
+				...emptySearchResults,
+				artists: [artist(1, 'Novastar'), artist(2, 'nova'), artist(3, 'Casanova')],
+			}),
+		).toBe('/tidal/artists/2');
+	});
+
 	test('resolves albums/artists past exact-match drift instead of dumping to search', () => {
 		// Edition suffix drift: Last.fm "Demon Days" vs TIDAL "Demon Days (Deluxe)".
 		const album = rec({ entity_type: 'album', title: 'Demon Days', artist_name: 'Gorillaz' });
