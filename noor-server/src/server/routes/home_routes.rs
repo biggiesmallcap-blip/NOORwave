@@ -1,4 +1,5 @@
 use crate::SharedState;
+use crate::db::catalog_name::normalize_catalog_name;
 use crate::db::queries;
 use crate::metadata::lastfm::{
     LastFmChartAlbum, LastFmChartArtist, LastFmChartTrack, LastFmClient,
@@ -673,6 +674,8 @@ async fn resolve_recommendation_item(
     score: Option<f64>,
     reason: &str,
 ) -> Option<Value> {
+    let normalized_title = normalize_catalog_name(title);
+    let normalized_artist = normalize_catalog_name(artist);
     let s = state.read().await;
     s.db
         .with_conn(|conn| {
@@ -718,11 +721,14 @@ async fn resolve_recommendation_item(
                    FROM tracks t
                    LEFT JOIN artists a ON a.id = t.artist_id
                    LEFT JOIN albums al ON al.id = t.album_id
-                  WHERE LOWER(t.title) = LOWER(?1)
-                    AND LOWER(COALESCE(a.name, '')) = LOWER(?2)
-                  ORDER BY t.is_favorite DESC, t.play_count DESC
+                  WHERE (LOWER(t.title) = LOWER(?1)
+                         OR (t.title_normalized IS NOT NULL AND t.title_normalized = ?3))
+                    AND (LOWER(COALESCE(a.name, '')) = LOWER(?2)
+                         OR (a.name_normalized IS NOT NULL AND a.name_normalized = ?4))
+                  ORDER BY LOWER(t.title) = LOWER(?1) DESC,
+                           t.is_favorite DESC, t.play_count DESC
                   LIMIT 1",
-                params![title, artist],
+                params![title, artist, normalized_title, normalized_artist],
                 |row| {
                     Ok(json!({
                         "provider": provider,
@@ -747,6 +753,25 @@ async fn resolve_recommendation_item(
         .flatten()
 }
 
+/// Match a provider's artist spelling against a local row: exact name first,
+/// then the folded name.
+///
+/// Providers disagree on accents, ampersands and punctuation, so the old
+/// exact-only match left "Sigur Ros", "Beyonce" and "Tyler, The Creator"
+/// unresolved and therefore unplayable. `name_normalized` is NULL until the
+/// backfill reaches the row, and the folded comparison simply does not fire
+/// while it is, so this degrades to the previous behaviour rather than
+/// misbehaving. Exact hits still sort first, so a folded near-miss can never
+/// displace a real one.
+///
+/// Held as a const so the test exercises the query the route actually runs.
+const ARTIST_BY_NAME_SQL: &str = "SELECT id, tidal_id, name, photo_url
+                   FROM artists
+                  WHERE LOWER(name) = LOWER(?1)
+                     OR (name_normalized IS NOT NULL AND name_normalized = ?2)
+                  ORDER BY LOWER(name) = LOWER(?1) DESC, tidal_id IS NULL, id ASC
+                  LIMIT 1";
+
 async fn resolve_recommendation_artist_item(
     state: &SharedState,
     provider: &str,
@@ -756,16 +781,13 @@ async fn resolve_recommendation_artist_item(
     reason: &str,
     image_url: Option<&str>,
 ) -> Value {
+    let normalized = normalize_catalog_name(artist);
     let s = state.read().await;
     s.db
         .with_conn(|conn| {
             conn.query_row(
-                "SELECT id, tidal_id, name, photo_url
-                   FROM artists
-                  WHERE LOWER(name) = LOWER(?1)
-                  ORDER BY tidal_id IS NULL, id ASC
-                  LIMIT 1",
-                params![artist],
+                ARTIST_BY_NAME_SQL,
+                params![artist, normalized],
                 |row| {
                     Ok(json!({
                         "provider": provider,
@@ -820,18 +842,25 @@ async fn resolve_recommendation_album_item(
     reason: &str,
     image_url: Option<&str>,
 ) -> Value {
+    let normalized_title = normalize_catalog_name(title);
+    let normalized_artist = normalize_catalog_name(artist);
     let s = state.read().await;
     s.db
         .with_conn(|conn| {
+            // Title and artist each match on either spelling. Both halves still
+            // have to agree, so a folded match cannot pull in another artist's
+            // album of the same name.
             conn.query_row(
                 "SELECT al.id, al.tidal_id, al.title, a.id, a.tidal_id, a.name, al.artwork_url
                    FROM albums al
                    LEFT JOIN artists a ON a.id = al.artist_id
-                  WHERE LOWER(al.title) = LOWER(?1)
-                    AND LOWER(COALESCE(a.name, '')) = LOWER(?2)
-                  ORDER BY al.tidal_id IS NULL, al.id ASC
+                  WHERE (LOWER(al.title) = LOWER(?1)
+                         OR (al.title_normalized IS NOT NULL AND al.title_normalized = ?3))
+                    AND (LOWER(COALESCE(a.name, '')) = LOWER(?2)
+                         OR (a.name_normalized IS NOT NULL AND a.name_normalized = ?4))
+                  ORDER BY LOWER(al.title) = LOWER(?1) DESC, al.tidal_id IS NULL, al.id ASC
                   LIMIT 1",
-                params![title, artist],
+                params![title, artist, normalized_title, normalized_artist],
                 |row| {
                     Ok(json!({
                         "provider": provider,
@@ -936,4 +965,82 @@ pub(super) async fn get_home_news(
         "sources": ["billboard", "nme", "spin", "pitchfork", "rolling_stone", "consequence", "the_guardian"],
         "source": "aggregated_rss"
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn seeded_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        crate::db::schema::run_migrations(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES
+                (1, 'Sigur Rós'),
+                (2, 'Beyoncé'),
+                (3, 'Simon & Garfunkel')",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn lookup(conn: &Connection, spelling: &str) -> Option<String> {
+        conn.query_row(
+            ARTIST_BY_NAME_SQL,
+            params![spelling, normalize_catalog_name(spelling)],
+            |row| row.get::<_, String>(2),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    #[test]
+    fn provider_spellings_miss_before_the_fold_and_match_after() {
+        let conn = seeded_conn();
+
+        // Migration 060 leaves the folded column NULL, so until the backfill
+        // runs the resolver behaves exactly as it did before any of this: the
+        // exact spelling matches and the provider's does not.
+        assert_eq!(lookup(&conn, "Sigur Rós").as_deref(), Some("Sigur Rós"));
+        assert_eq!(lookup(&conn, "Sigur Ros"), None);
+        assert_eq!(lookup(&conn, "Beyonce"), None);
+        assert_eq!(lookup(&conn, "Simon and Garfunkel"), None);
+
+        crate::db::catalog_name::run_backfill_to_completion(&conn, 8).unwrap();
+
+        // These are the exact spellings Last.fm hands back.
+        assert_eq!(lookup(&conn, "Sigur Ros").as_deref(), Some("Sigur Rós"));
+        assert_eq!(lookup(&conn, "Beyonce").as_deref(), Some("Beyoncé"));
+        assert_eq!(
+            lookup(&conn, "Simon and Garfunkel").as_deref(),
+            Some("Simon & Garfunkel")
+        );
+        // And the exact spelling still works.
+        assert_eq!(lookup(&conn, "Sigur Rós").as_deref(), Some("Sigur Rós"));
+    }
+
+    #[test]
+    fn an_exact_hit_outranks_a_folded_one() {
+        let conn = seeded_conn();
+        // Two rows that fold to the same value; only one matches exactly.
+        conn.execute("INSERT INTO artists (id, name) VALUES (4, 'Motorhead')", [])
+            .unwrap();
+        conn.execute("INSERT INTO artists (id, name) VALUES (5, 'Motörhead')", [])
+            .unwrap();
+        crate::db::catalog_name::run_backfill_to_completion(&conn, 8).unwrap();
+
+        assert_eq!(lookup(&conn, "Motorhead").as_deref(), Some("Motorhead"));
+        assert_eq!(lookup(&conn, "Motörhead").as_deref(), Some("Motörhead"));
+    }
+
+    #[test]
+    fn folding_does_not_match_unrelated_artists() {
+        let conn = seeded_conn();
+        crate::db::catalog_name::run_backfill_to_completion(&conn, 8).unwrap();
+        assert_eq!(lookup(&conn, "Sigur"), None);
+        assert_eq!(lookup(&conn, "Beyonce Knowles"), None);
+    }
 }

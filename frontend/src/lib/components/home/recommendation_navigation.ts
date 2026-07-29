@@ -112,7 +112,16 @@ function namesOverlap(a: string, b: string): boolean {
 	return a === b || a.includes(b) || b.includes(a);
 }
 
-function normalizeCatalogName(value: string | null | undefined): string {
+/**
+ * Fold a catalogue name to its comparable form.
+ *
+ * Ported to Rust as `db::catalog_name::normalize_catalog_name`. The two must
+ * agree: this copy picks a search result at click time, the Rust one matches a
+ * local row at resolve time, and a divergence means a name resolves on one side
+ * but not the other. The shared case table lives in
+ * `catalog_name_parity.test.ts` and in that module's `NORMALIZE_PARITY_CASES`.
+ */
+export function normalizeCatalogName(value: string | null | undefined): string {
 	return (value ?? '')
 		.normalize('NFKD')
 		.replace(/[\u0300-\u036f]/g, '')

@@ -946,6 +946,9 @@ async fn main() -> Result<()> {
                         // Liked-videos resolve: a sync only marks the work as
                         // due, the TIDAL fan-out happens here.
                         services::library_videos::run_if_idle(listener_state.clone()).await;
+                        // Fold the catalogue names a sync just introduced, so
+                        // provider spellings match them on the next lookup.
+                        services::catalog_name_backfill::run_if_idle(listener_state.clone()).await;
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -966,6 +969,9 @@ async fn main() -> Result<()> {
             services::tidal::repair::run_if_idle(loop_state.clone()).await;
             services::library_dedupe::run_if_idle(loop_state.clone()).await;
             services::library_videos::run_if_idle(loop_state.clone()).await;
+            // First fold after an upgrade: migration 060 adds the columns
+            // empty, so this is the pass that fills an existing library in.
+            services::catalog_name_backfill::run_if_idle(loop_state.clone()).await;
 
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs(86_400));
             ticker.tick().await; // consume the immediate first tick
@@ -975,6 +981,7 @@ async fn main() -> Result<()> {
                 services::tidal::repair::run_if_idle(loop_state.clone()).await;
                 services::library_dedupe::run_if_idle(loop_state.clone()).await;
                 services::library_videos::run_if_idle(loop_state.clone()).await;
+                services::catalog_name_backfill::run_if_idle(loop_state.clone()).await;
             }
         });
     }
