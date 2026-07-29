@@ -38,11 +38,35 @@ describe('Home owns browse, /search owns searching', () => {
 		expect(search).toContain('recentListens = dedupeByTrack(listens.listens)');
 		expect(search).toContain('Jump back in');
 		expect(search).toContain('Your playlists');
-		expect(search).toContain('localPlaylists.slice(0, 12)');
+		expect(search).toContain('localPlaylists.slice(0, 24)');
 		// The query language is otherwise undiscoverable: the facet popover and
 		// Tab-completion only help once you know a filter exists.
 		expect(search).toContain('Try a filter');
 		expect(search).toContain('applyFacetExample');
+	});
+
+	test('the playlist rail stacks two rows and plays on click', () => {
+		expect(search).toContain('rows={2}');
+		expect(search).toContain('onclick={() => void playLocalPlaylist(playlist)}');
+		// There is no /playlists/[id] route - the old href was a dead link.
+		expect(search).not.toContain('/playlists/${playlist.id}');
+		// Opening the list stays reachable, per the rule that every asset
+		// reference carries the shared context menu.
+		expect(search).toContain('localPlaylistMenuItems(playlist)');
+	});
+
+	test('playlist covers reuse the shared mosaic cache, not a second one', () => {
+		expect(search).toContain("from '$lib/stores/playlist_artwork_cache'");
+		expect(search).toContain('getCachedMosaic');
+		expect(search).toContain('setCachedMosaic');
+		expect(search).toContain('nameToGradient');
+		// Cached covers paint on mount; the observer is only for the misses,
+		// and it cannot be relied on alone since a non-compositing tab never
+		// delivers its callbacks.
+		expect(search).toContain('seedPlaylistMosaicsFromCache()');
+		// A failed fetch must release its claim or that card stays blank for
+		// the rest of the session.
+		expect(search).toContain('fetchedMosaicIds.delete(id)');
 	});
 
 	test('Home hands search off rather than reimplementing it', () => {

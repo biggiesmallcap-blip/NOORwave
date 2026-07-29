@@ -18,6 +18,7 @@
 		padding = '4px 2px 12px',
 		fluid = false,
 		density = 'tile',
+		rows = 1,
 		stagger = false,
 		ariaLabel = undefined,
 	}: {
@@ -32,6 +33,10 @@
 		/** Which fluid ladder to use. `tile` suits square artwork; `wide` is for
 		 *  text cards, which need roughly twice the width to stay readable. */
 		density?: 'tile' | 'wide';
+		/** Stack the cards into this many rows, filling top-to-bottom then
+		 *  scrolling sideways. Card width is unchanged, so a two-row rail shows
+		 *  twice the items in the same horizontal space. */
+		rows?: number;
 		/** Cascade the cards in on mount via the shared `.rise-in-card`. */
 		stagger?: boolean;
 		ariaLabel?: string;
@@ -49,9 +54,10 @@
 			class="media-rail"
 			class:fluid
 			class:wide={fluid && density === 'wide'}
+			class:stacked={rows > 1}
 			role={ariaLabel ? 'group' : undefined}
 			aria-label={ariaLabel}
-			style="--rail-gap: {gap}px; --rail-padding: {padding};"
+			style="--rail-gap: {gap}px; --rail-padding: {padding}; --rail-rows: {rows};"
 			use:wheelToHorizontal
 		>
 			{#each items as item, idx (getKey(item, idx))}
@@ -179,6 +185,25 @@
 	}
 	@container (min-width: 2000px) {
 		.media-rail.fluid.wide { --cols: 5; }
+	}
+
+	/* ── Stacked rows ──────────────────────────────────────────────────────
+	   Flex cannot do this: wrapping needs a bounded height, and this box
+	   scrolls sideways. Grid can, by flowing down the column first and adding
+	   columns as needed. The card width still comes from the fluid formula, so
+	   a stacked rail lines its columns up with every other rail on the page -
+	   it just shows `rows` times as many items in the same strip. */
+	.media-rail.stacked {
+		display: grid;
+		grid-auto-flow: column;
+		grid-template-rows: repeat(var(--rail-rows, 2), auto);
+		align-items: start;
+	}
+	.media-rail.stacked.fluid {
+		grid-auto-columns: calc(
+			(100% - (var(--cols) + var(--peek) - 1) * var(--rail-gap)) /
+				(var(--cols) + var(--peek))
+		);
 	}
 
 	/* The stagger wrapper must not become the layout box in fluid mode — the
