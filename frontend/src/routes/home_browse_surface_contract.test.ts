@@ -38,7 +38,7 @@ describe('Home owns browse, /search owns searching', () => {
 		expect(search).toContain('recentListens = dedupeByTrack(listens.listens)');
 		expect(search).toContain('Jump back in');
 		expect(search).toContain('Your playlists');
-		expect(search).toContain('localPlaylists.slice(0, 24)');
+		expect(search).toContain('visiblePlaylistWindow');
 		// The query language is otherwise undiscoverable: the facet popover and
 		// Tab-completion only help once you know a filter exists.
 		expect(search).toContain('Try a filter');
@@ -53,6 +53,20 @@ describe('Home owns browse, /search owns searching', () => {
 		// Opening the list stays reachable, per the rule that every asset
 		// reference carries the shared context menu.
 		expect(search).toContain('localPlaylistMenuItems(playlist)');
+	});
+
+	test('the playlist window rotates per visit rather than reshuffling', () => {
+		expect(search).toContain('PLAYLIST_ROTATION_KEY');
+		expect(search).toContain('const PLAYLIST_WINDOW = 24');
+		// Rotation, not randomisation: the order has to hold still while the
+		// user is looking at it.
+		expect(search).not.toContain('Math.random()');
+		// The advance wraps, so the tail of the library is reachable.
+		expect(search).toContain('(start + PLAYLIST_WINDOW) % total');
+		expect(search).toContain('localPlaylists[(start + i) % total]');
+		// Persisting the offset must never be able to take the page down; a
+		// full localStorage throwing here would brick the route.
+		expect(search).toMatch(/localStorage\.setItem\(PLAYLIST_ROTATION_KEY[\s\S]{0,120}\} catch \{/);
 	});
 
 	test('playlist covers reuse the shared mosaic cache, not a second one', () => {

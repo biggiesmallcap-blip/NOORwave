@@ -151,6 +151,50 @@
 
   let localPlaylists = $state<Playlist[]>([])
 
+  // ── Rotating playlist window ────────────────────────────────────────────
+  // A-Z plus a cap showed the same two dozen playlists forever and left the
+  // rest unreachable. This advances the starting point by one window per
+  // visit and wraps, so the whole library comes round over a few visits.
+  //
+  // Deliberately a rotation and not a reshuffle: the order has to stay put
+  // for as long as you are looking at it, or you lose any sense of where a
+  // card was. `updated_at` was the other candidate and is unusable here -
+  // every playlist carries the same bulk-sync timestamp, so sorting by it
+  // just yields reverse A-Z.
+  const PLAYLIST_WINDOW = 24
+  const PLAYLIST_ROTATION_KEY = 'noor.search.playlistRotation.v1'
+  let playlistRotation = $state(0)
+
+  /** Reads this visit's starting offset and parks the next one. */
+  function nextPlaylistRotation(total: number): number {
+    if (typeof localStorage === 'undefined' || total <= 0) return 0
+    let start = 0
+    try {
+      const stored = Number(localStorage.getItem(PLAYLIST_ROTATION_KEY))
+      if (Number.isFinite(stored) && stored >= 0) start = stored % total
+    } catch {
+      // Storage disabled - always start from the top.
+    }
+    try {
+      localStorage.setItem(PLAYLIST_ROTATION_KEY, String((start + PLAYLIST_WINDOW) % total))
+    } catch {
+      // Quota or disabled storage. The window simply does not advance; it must
+      // never take the page down with it.
+    }
+    return start
+  }
+
+  const visiblePlaylistWindow = $derived.by(() => {
+    const total = localPlaylists.length
+    if (total === 0) return []
+    if (total <= PLAYLIST_WINDOW) return localPlaylists
+    const start = playlistRotation % total
+    return Array.from(
+      { length: PLAYLIST_WINDOW },
+      (_, i) => localPlaylists[(start + i) % total],
+    )
+  })
+
   // Cover mosaics for the idle "Your playlists" rail, keyed by playlist id.
   // A playlist has no artwork of its own - the cover is assembled from the
   // first few tracks - so this reuses the same store and the same lazy,
@@ -308,6 +352,7 @@
 
     if (playlistsRes.status === 'fulfilled') {
       localPlaylists = playlistsRes.value.playlists
+      playlistRotation = nextPlaylistRotation(localPlaylists.length)
       seedPlaylistMosaicsFromCache()
     }
   })
@@ -1472,7 +1517,7 @@
         <!-- Two rows: playlists are the densest thing on this page and a single
              row of twelve wasted the vertical space the covers now justify. -->
         <MediaRail
-          items={localPlaylists.slice(0, 24)}
+          items={visiblePlaylistWindow}
           card={playlistCard}
           getKey={(p) => p.id}
           fluid
