@@ -5,6 +5,7 @@ use crate::metadata::lastfm::{
     LastFmChartAlbum, LastFmChartArtist, LastFmChartTrack, LastFmClient,
 };
 use axum::{extract::State, http::StatusCode, response::Json};
+use futures::StreamExt;
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -196,6 +197,12 @@ const LASTFM_HOME_SIMILAR_LIMIT: usize = 20;
 const LASTFM_HOME_ARTIST_LIMIT: usize = 20;
 const LASTFM_HOME_ALBUM_LIMIT: usize = 20;
 const LASTFM_HOME_ALBUM_SIMILAR_ARTIST_LIMIT: usize = 8;
+
+/// Concurrent Last.fm calls during the home fan-out. Their documented ceiling
+/// is around five requests a second per key, and these bursts are short, so
+/// this stays deliberately modest: the win is removing the serial stall, not
+/// saturating the API.
+const LASTFM_FANOUT_CONCURRENCY: usize = 6;
 const LASTFM_HOME_ALBUMS_PER_ARTIST_LIMIT: usize = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -269,6 +276,34 @@ async fn load_or_fetch_recommendation_shelf(
     Ok(items)
 }
 
+/// A shelf this short means the fan-out was cut off, not that the user has a
+/// small taste profile: each of the three shelves is capped at 20 and a healthy
+/// fetch fills them.
+const RECOMMENDATION_HEALTHY_FLOOR: usize = 12;
+
+/// How long a short result is allowed to stick around. Long enough to absorb a
+/// burst of remounts, short enough that the next visit retries rather than
+/// living with it for six hours.
+const RECOMMENDATION_SHORT_TTL_SECS: i64 = 10 * 60;
+
+/// Full cache lifetime for a shelf that came back healthy.
+const RECOMMENDATION_FULL_TTL_SECS: i64 = 6 * 60 * 60;
+
+/// Pick the TTL for a freshly-fetched payload.
+///
+/// Every upstream Last.fm call in the fan-out is `.unwrap_or_default()`, so a
+/// rate-limited or slow window does not fail - it silently returns fewer items.
+/// Writing that at the full six-hour TTL pinned a half-empty Home until the
+/// cache expired, which is the "only a few tracks" symptom. Short results now
+/// get a short lease so the next visit tries again.
+fn recommendation_cache_ttl(items: &[Value]) -> i64 {
+    if items.len() >= RECOMMENDATION_HEALTHY_FLOOR {
+        RECOMMENDATION_FULL_TTL_SECS
+    } else {
+        RECOMMENDATION_SHORT_TTL_SECS
+    }
+}
+
 async fn read_recommendation_cache(state: &SharedState, provider: &str) -> Option<Vec<Value>> {
     let now = unix_now_secs();
     let s = state.read().await;
@@ -289,7 +324,7 @@ async fn read_recommendation_cache(state: &SharedState, provider: &str) -> Optio
 
 async fn write_recommendation_cache(state: &SharedState, provider: &str, items: &[Value]) {
     let now = unix_now_secs();
-    let expires = now + 6 * 60 * 60;
+    let expires = now + recommendation_cache_ttl(items);
     let Ok(payload) = serde_json::to_string(items) else {
         return;
     };
@@ -482,18 +517,29 @@ async fn fetch_lastfm_track_recommendations(
     client: &LastFmClient,
     seeds: &[LastFmTrackSeed],
 ) -> anyhow::Result<Vec<Value>> {
+    // Fetch every seed's similar list up front, then walk the results in seed
+    // order. `buffered`, not `buffer_unordered`: dedup is first-come and the
+    // shelf stops at a limit, so out-of-order completion would make the
+    // contents depend on network timing.
+    let seed_keys: Vec<(String, String)> = seeds
+        .iter()
+        .map(|seed| (seed.artist.clone(), seed.title.clone()))
+        .collect();
+    let similar_by_seed: Vec<Vec<_>> = futures::stream::iter(seed_keys)
+        .map(|(artist, title)| async move {
+            client
+                .track_get_similar_with_artist_fallback(&artist, &title, LASTFM_HOME_SIMILAR_LIMIT)
+                .await
+                .unwrap_or_default()
+        })
+        .buffered(LASTFM_FANOUT_CONCURRENCY)
+        .collect()
+        .await;
+
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    for seed in seeds {
-        for similar in client
-            .track_get_similar_with_artist_fallback(
-                &seed.artist,
-                &seed.title,
-                LASTFM_HOME_SIMILAR_LIMIT,
-            )
-            .await
-            .unwrap_or_default()
-        {
+    for (seed, similars) in seeds.iter().zip(similar_by_seed) {
+        for similar in similars {
             let key = crate::services::radio::normalize_for_dedup(&similar.artist, &similar.title);
             if key.is_empty() || !seen.insert(key) {
                 continue;
@@ -533,14 +579,22 @@ async fn fetch_lastfm_artist_recommendations(
     client: &LastFmClient,
     seeds: &[LastFmArtistSeed],
 ) -> anyhow::Result<Vec<Value>> {
+    let seed_names: Vec<String> = seeds.iter().map(|seed| seed.name.clone()).collect();
+    let similar_by_seed: Vec<Vec<_>> = futures::stream::iter(seed_names)
+        .map(|name| async move {
+            client
+                .artist_get_similar(&name, LASTFM_HOME_SIMILAR_LIMIT)
+                .await
+                .unwrap_or_default()
+        })
+        .buffered(LASTFM_FANOUT_CONCURRENCY)
+        .collect()
+        .await;
+
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    for seed in seeds {
-        for artist in client
-            .artist_get_similar(&seed.name, LASTFM_HOME_SIMILAR_LIMIT)
-            .await
-            .unwrap_or_default()
-        {
+    for (seed, similars) in seeds.iter().zip(similar_by_seed) {
+        for artist in similars {
             let key = artist.name.trim().to_ascii_lowercase();
             if key.is_empty() || !seen.insert(key) {
                 continue;
@@ -570,19 +624,53 @@ async fn fetch_lastfm_album_recommendations(
     client: &LastFmClient,
     seeds: &[LastFmArtistSeed],
 ) -> anyhow::Result<Vec<Value>> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    for seed in seeds {
-        let similar_artists = client
-            .artist_get_similar(&seed.name, LASTFM_HOME_ALBUM_SIMILAR_ARTIST_LIMIT)
-            .await
-            .unwrap_or_default();
-        for artist in similar_artists {
-            for album in client
-                .artist_top_albums(&artist.name, LASTFM_HOME_ALBUMS_PER_ARTIST_LIMIT)
+    // The worst of the three: one similar-artists call per seed, then one
+    // top-albums call per similar artist, all in series - up to 12 x (1 + 8)
+    // round trips at an 8s timeout each. Both levels now run buffered, so the
+    // shelf is bounded by the slowest few calls rather than their sum.
+    let seed_names: Vec<String> = seeds.iter().map(|seed| seed.name.clone()).collect();
+    let similar_by_seed: Vec<Vec<_>> = futures::stream::iter(seed_names)
+        .map(|name| async move {
+            client
+                .artist_get_similar(&name, LASTFM_HOME_ALBUM_SIMILAR_ARTIST_LIMIT)
                 .await
                 .unwrap_or_default()
-            {
+        })
+        .buffered(LASTFM_FANOUT_CONCURRENCY)
+        .collect()
+        .await;
+
+    // Flatten to (seed index, artist) so the album fetches are one wide pass
+    // instead of a nested one, then regroup in the original order.
+    let pairs: Vec<(usize, LastFmChartArtist)> = similar_by_seed
+        .into_iter()
+        .enumerate()
+        .flat_map(|(seed_index, artists)| {
+            artists.into_iter().map(move |artist| (seed_index, artist))
+        })
+        .collect();
+
+    let pair_names: Vec<String> = pairs
+        .iter()
+        .map(|(_, artist)| artist.name.clone())
+        .collect();
+    let albums_by_pair: Vec<Vec<_>> = futures::stream::iter(pair_names)
+        .map(|name| async move {
+            client
+                .artist_top_albums(&name, LASTFM_HOME_ALBUMS_PER_ARTIST_LIMIT)
+                .await
+                .unwrap_or_default()
+        })
+        .buffered(LASTFM_FANOUT_CONCURRENCY)
+        .collect()
+        .await;
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for ((seed_index, artist), albums) in pairs.into_iter().zip(albums_by_pair) {
+        let seed = &seeds[seed_index];
+        {
+            for album in albums {
                 let key = crate::services::radio::normalize_for_dedup(&album.artist, &album.title);
                 if key.is_empty() || !seen.insert(key) {
                     continue;
@@ -783,7 +871,8 @@ async fn resolve_recommendation_artist_item(
 ) -> Value {
     let normalized = normalize_catalog_name(artist);
     let s = state.read().await;
-    s.db
+    let resolved = s
+        .db
         .with_conn(|conn| {
             conn.query_row(
                 ARTIST_BY_NAME_SQL,
@@ -811,25 +900,51 @@ async fn resolve_recommendation_artist_item(
             .map_err(Into::into)
         })
         .ok()
-        .flatten()
-        .unwrap_or_else(|| {
-            json!({
-                "provider": provider,
-                "entity_type": "artist",
-                "local_artist_id": null,
-                "tidal_artist_id": null,
-                "local_track_id": null,
-                "tidal_id": null,
-                "title": artist,
-                "artist_name": artist,
-                "album_title": null,
-                "artwork_url": image_url,
-                "mbid": mbid,
-                "score": score,
-                "reason": reason,
-                "playable": false,
-            })
+        .flatten();
+
+    // A matched artist with a TIDAL id but no stored photo is the common shape
+    // for rows imported through the radio path, and an artist rail full of
+    // letter tiles is exactly what that produces. The backfill is idempotent
+    // and already exists; it just was never called from here. Fire and forget
+    // so this request does not wait on TIDAL - the photo lands for next time.
+    if let Some(item) = resolved.as_ref()
+        && item.get("artwork_url").is_some_and(Value::is_null)
+        && let Some(local_artist_id) = item.get("local_artist_id").and_then(Value::as_i64)
+        && let Some(tidal_artist_id) = item.get("tidal_artist_id").and_then(Value::as_i64)
+        && let Some(tokens) = s.tidal_tokens.clone()
+    {
+        let http = s.tidal_http_client.clone();
+        let db = s.db.clone();
+        tokio::spawn(async move {
+            crate::services::tidal::artist_photo::ensure_photo_url(
+                http,
+                tokens,
+                db,
+                local_artist_id,
+                tidal_artist_id,
+            )
+            .await;
+        });
+    }
+
+    resolved.unwrap_or_else(|| {
+        json!({
+            "provider": provider,
+            "entity_type": "artist",
+            "local_artist_id": null,
+            "tidal_artist_id": null,
+            "local_track_id": null,
+            "tidal_id": null,
+            "title": artist,
+            "artist_name": artist,
+            "album_title": null,
+            "artwork_url": image_url,
+            "mbid": mbid,
+            "score": score,
+            "reason": reason,
+            "playable": false,
         })
+    })
 }
 
 async fn resolve_recommendation_album_item(
@@ -1034,6 +1149,37 @@ mod tests {
 
         assert_eq!(lookup(&conn, "Motorhead").as_deref(), Some("Motorhead"));
         assert_eq!(lookup(&conn, "Motörhead").as_deref(), Some("Motörhead"));
+    }
+
+    #[test]
+    fn a_short_shelf_gets_a_short_cache_lease() {
+        // Every upstream call in the fan-out is unwrap_or_default, so a
+        // rate-limited window returns fewer items rather than an error. Writing
+        // that at the full six-hour TTL pinned a half-empty Home until it
+        // expired, which is what "only a few tracks" looked like.
+        let short: Vec<Value> = (0..4).map(|i| json!({ "i": i })).collect();
+        assert_eq!(
+            recommendation_cache_ttl(&short),
+            RECOMMENDATION_SHORT_TTL_SECS
+        );
+        assert_eq!(recommendation_cache_ttl(&[]), RECOMMENDATION_SHORT_TTL_SECS);
+
+        let healthy: Vec<Value> = (0..LASTFM_HOME_RECOMMENDATION_LIMIT)
+            .map(|i| json!({ "i": i }))
+            .collect();
+        assert_eq!(
+            recommendation_cache_ttl(&healthy),
+            RECOMMENDATION_FULL_TTL_SECS
+        );
+
+        // Exactly at the floor counts as healthy.
+        let floor: Vec<Value> = (0..RECOMMENDATION_HEALTHY_FLOOR)
+            .map(|i| json!({ "i": i }))
+            .collect();
+        assert_eq!(
+            recommendation_cache_ttl(&floor),
+            RECOMMENDATION_FULL_TTL_SECS
+        );
     }
 
     #[test]
