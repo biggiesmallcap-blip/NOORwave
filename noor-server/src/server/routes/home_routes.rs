@@ -186,7 +186,12 @@ pub(super) async fn get_home_recommendations(
     })))
 }
 
-const RECOMMENDATION_HOME_CACHE_KEY: &str = "home:v6";
+// v7: folded-name resolution, the Last.fm placeholder filter and the artist
+// photo backfill all change what a resolved item looks like. Without a bump,
+// an existing install would keep serving v6 payloads - built by the old
+// exact-match resolver, complete with grey stars and unplayable rows - for the
+// full six hours before anything improved.
+const RECOMMENDATION_HOME_CACHE_KEY: &str = "home:v7";
 const LASTFM_HOME_RECOMMENDATION_LIMIT: usize = 20;
 const LASTFM_HOME_SEED_LIMIT: usize = 12;
 const LASTFM_HOME_PROFILE_SOURCE_LIMIT: usize = 30;

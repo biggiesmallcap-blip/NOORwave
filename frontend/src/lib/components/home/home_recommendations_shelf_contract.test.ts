@@ -73,7 +73,11 @@ describe('home recommendations shelf contract', () => {
 		expect(serverRoutes).toContain('home_routes::get_home_recommendations');
 		expect(homeRoutes).toContain('track_get_similar_with_artist_fallback');
 		expect(homeRoutes).toContain('recommendation_placeholder_item');
-		expect(homeRoutes).toContain('RECOMMENDATION_HOME_CACHE_KEY: &str = "home:v6"');
+		// Pinned so a change to the resolved item shape has to bump the key.
+		// The payload is cached for six hours, so shipping new resolution logic
+		// without a bump leaves existing installs on the old output until it
+		// expires - which is exactly what this assertion is here to catch.
+		expect(homeRoutes).toContain('RECOMMENDATION_HOME_CACHE_KEY: &str = "home:v7"');
 		expect(homeRoutes).toContain('LASTFM_HOME_RECOMMENDATION_LIMIT: usize = 20');
 		expect(homeRoutes).toContain('LASTFM_HOME_SEED_LIMIT: usize = 12');
 		expect(homeRoutes).toContain('LASTFM_HOME_SIMILAR_LIMIT: usize = 20');
