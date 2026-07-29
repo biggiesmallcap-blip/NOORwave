@@ -63,7 +63,9 @@
 </script>
 
 {#if viewState === 'ready'}
-	<TidalDiscoverShelves {modules} startIndex={index} />
+	<!-- The only caller fetching /api/tidal/home-modules, so the only one whose
+	     module ids the detail route can resolve. -->
+	<TidalDiscoverShelves {modules} startIndex={index} homeModules />
 {:else if quiet}
 	<!-- Nothing to show and nothing worth saying about it here. -->
 {:else if viewState === 'loading'}

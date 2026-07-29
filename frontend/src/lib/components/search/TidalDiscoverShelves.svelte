@@ -16,9 +16,13 @@
 	import { downloadTidalPlaylist } from '$lib/stores/downloads';
 	import { tidalHomeItemToPlayable } from '$lib/utils/track';
 
-	let { modules, onViewAll, mediaKind = 'audio', startIndex = 0, nested = false, onItemSelect }: {
+	let { modules, onViewAll, mediaKind = 'audio', startIndex = 0, nested = false, homeModules = false, onItemSelect }: {
 		modules: TidalHomeModule[];
 		onViewAll?: (mod: TidalHomeModule) => void;
+		/** These modules came from /api/tidal/home-modules, so their ids can be
+		 *  resolved by the module-detail route. Defaults to false because only
+		 *  one caller can promise that; see `showViewAll`. */
+		homeModules?: boolean;
 		mediaKind?: 'audio' | 'video';
 		/** Slot this group starts at in the host page's entrance cascade, so a
 		 *  stack of shelves keeps counting up instead of restarting at zero. */
@@ -178,7 +182,36 @@
 	// playTidalTrackNow, so following it from a video module plays the song
 	// instead of the video. Until a video-capable detail page exists, video
 	// modules only show View all when the host page supplies its own handler.
-	let showViewAll = $derived(mediaKind !== 'video' || Boolean(onViewAll));
+	//
+	// `homeModules` is the second gate, and it is why these buttons were dead.
+	// /search/discover/[id] resolves an id through
+	// GET /api/tidal/discover-modules/{id}/items, and that handler looks the id
+	// up in the home-modules cache and 404s otherwise
+	// (tidal_home_routes.rs: load_tidal_home_modules_cached, then
+	// `modules.into_iter().find(...)`). Every module rendered from an editorial
+	// page - /hires, /new-releases, /explore, and the Hi-Res preview on Home -
+	// comes from /api/tidal/page/{section} instead, so its id is never in that
+	// cache and the link could only ever land on "That discover shelf doesn't
+	// exist anymore".
+	//
+	// Those surfaces lose nothing: the rail already scrolls the full module, and
+	// each editorial section carries a "See all" to the page that is the
+	// complete set. So the per-module button is shown only where it resolves.
+	let showViewAll = $derived(
+		(mediaKind !== 'video' || Boolean(onViewAll)) && (homeModules || Boolean(onViewAll)),
+	);
+
+	/// Third gate, per module: is there anything behind the link?
+	///
+	/// `more_path` is upstream's `pagedList.dataApiPath`. The detail handler
+	/// only fetches when it is set, and otherwise returns `module.items` - the
+	/// very list the rail is already showing. So on a module without it, "View
+	/// all" reloads the same cards onto a page of their own. The carousel is
+	/// already the whole set; scrolling it is the better answer.
+	function canViewAll(mod: TidalHomeModule): boolean {
+		if (onViewAll) return true; // the host page decides what it means
+		return showViewAll && Boolean(mod.more_path);
+	}
 
 	function isTrackList(mod: TidalHomeModule): boolean {
 		return mod.kind === 'TRACK_LIST'
@@ -294,7 +327,7 @@
 					level={nested ? 3 : 2}
 				>
 					{#snippet actions()}
-						{#if showViewAll}
+						{#if canViewAll(mod)}
 							<button type="button" class="view-all-link" onclick={() => viewAll(mod)}>
 								View all -&gt;
 							</button>

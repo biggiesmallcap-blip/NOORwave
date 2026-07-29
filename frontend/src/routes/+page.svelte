@@ -261,6 +261,12 @@
 				<div class="news-grid">
 					{#each news.slice(0, 15) as item (item.link)}
 						<a class="news-card" href={item.link} target="_blank" rel="noopener">
+							<!-- Thumbnail and text share a row; the footer is a sibling of that
+							     row, not a child of the text column. Inside the column it
+							     inherited the thumbnail's indent, so the source badge sat at one
+							     of two different left edges depending on whether that card
+							     happened to have an image, and the grid read as misaligned. -->
+							<span class="news-body">
 							{#if item.image_url}
 								<!-- Roughly half the feed carries an image, so the thumbnail is
 								     optional by design and the card has to read without it. A
@@ -282,14 +288,15 @@
 								{#if item.description}
 									<p class="news-desc">{item.description}</p>
 								{/if}
-								<span class="news-footer">
-									<span class="news-source" style="color: {getSourceColor(item.source)}">
-										{item.source}
-									</span>
-									{#if item.published_at}
-										<span class="news-date">{formatDate(item.published_at)}</span>
-									{/if}
+							</span>
+							</span>
+							<span class="news-footer">
+								<span class="news-source" style="color: {getSourceColor(item.source)}">
+									{item.source}
 								</span>
+								{#if item.published_at}
+									<span class="news-date">{formatDate(item.published_at)}</span>
+								{/if}
 							</span>
 						</a>
 					{/each}
@@ -409,7 +416,8 @@
 	   sits on a flat ground. */
 	.news-card {
 		display: flex;
-		gap: 12px;
+		flex-direction: column;
+		gap: 8px;
 		padding: 12px;
 		border-radius: var(--radius-md);
 		background: var(--bg-elevated);
@@ -422,6 +430,15 @@
 			transform: translateY(-2px);
 			border-color: var(--accent-line);
 		}
+	}
+
+	/* Thumbnail beside the text; the footer sits below both so every source
+	   badge starts at the card's own padding. */
+	.news-body {
+		display: flex;
+		gap: 12px;
+		flex: 1;
+		min-width: 0;
 	}
 
 	.news-thumb {
@@ -478,7 +495,6 @@
 		justify-content: space-between;
 		gap: 8px;
 		margin-top: auto;
-		padding-top: 6px;
 	}
 
 	.news-source {
