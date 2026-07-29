@@ -131,4 +131,32 @@ mod tests {
         assert!(get_search(&conn, &cfg, "abc", 20, 0).unwrap().is_some());
         assert!(get_search(&conn, &cfg, "abc", 20, 20).unwrap().is_none());
     }
+
+    #[test]
+    fn search_cache_still_separates_genuinely_different_limits() {
+        // The route collapses small requests onto one canonical fetch size
+        // before it gets here (see TIDAL_SEARCH_CACHE_BUCKET), because the app
+        // searches the same names at 1, 5, 6 and 12 and each was producing its
+        // own row and its own upstream call. This layer stays honest about
+        // what it was given: two genuinely different sizes are different keys.
+        let conn = open_test_db();
+        let cfg = TidalSearchCacheConfig::default();
+        let payload = TidalSearchCatalog::default();
+        put_search(&conn, "abc", 12, 0, &payload).unwrap();
+        assert!(get_search(&conn, &cfg, "abc", 12, 0).unwrap().is_some());
+        assert!(get_search(&conn, &cfg, "abc", 50, 0).unwrap().is_none());
+    }
+
+    #[test]
+    fn search_cache_key_ignores_case_and_surrounding_space() {
+        let conn = open_test_db();
+        let cfg = TidalSearchCacheConfig::default();
+        let payload = TidalSearchCatalog::default();
+        put_search(&conn, "Sigur Ros", 12, 0, &payload).unwrap();
+        assert!(
+            get_search(&conn, &cfg, "  sigur ros  ", 12, 0)
+                .unwrap()
+                .is_some()
+        );
+    }
 }
