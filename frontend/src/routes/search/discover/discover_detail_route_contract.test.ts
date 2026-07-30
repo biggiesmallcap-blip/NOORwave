@@ -76,4 +76,18 @@ describe('TIDAL discover detail route contract', () => {
 		expect(source).toContain('event.stopPropagation();');
 		expect(source).not.toContain('$:');
 	});
+
+	test('album tiles in the View all grid open the shared detail popup', () => {
+		// This grid is its own route, not the rail component, so it needs the same
+		// wiring rather than inheriting it. A tile here must behave like the tile
+		// on the shelf the user clicked View all from.
+		expect(source).toContain('albumPopupItem = item;');
+		expect(source).not.toContain('void goto(`/tidal/albums/${item.album_id}`)');
+		expect(source).toContain('{#key albumPopupItem}');
+		expect(source).toContain('<AlbumPopup');
+		expect(source).toContain('tidalAlbumId={albumPopupItem.album_id}');
+		// Passed so the artist name inside the popup is a working link; a
+		// TIDAL-only album has no local artist id to derive one from.
+		expect(source).toContain('artistTidalId={albumPopupItem.artist_id}');
+	});
 });

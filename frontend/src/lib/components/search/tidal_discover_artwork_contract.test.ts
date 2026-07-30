@@ -52,4 +52,37 @@ describe('TIDAL discover artwork rendering contract', () => {
 		expect(source).toContain('openContextMenu(event, buildArtistMenu({');
 		expect(source).toContain('openContextMenu(event, buildAlbumMenu({');
 	});
+
+	it('opens every album tile in the shared detail popup, on every surface', () => {
+		const source = readSource('lib/components/search/TidalDiscoverShelves.svelte');
+		const popup = readSource('lib/components/album/AlbumPopup.svelte');
+		const detailPopup = readSource('lib/components/AlbumDetailPopup.svelte');
+
+		// One component renders the cards for the discover rails, the editorial
+		// "View all" pages, /moods and the discover detail route, so wiring the
+		// popup here covers all of them. It replaces a navigation to
+		// /tidal/albums/{id}, which is a lot of ceremony for a browse surface.
+		expect(source).toContain('albumPopupItem = item;');
+		expect(source).not.toContain('void goto(`/tidal/albums/${item.album_id}`)');
+		expect(source).toContain('{#key albumPopupItem}');
+		expect(source).toContain('<AlbumPopup');
+		expect(source).toContain('tidalAlbumId={albumPopupItem.album_id}');
+		expect(source).toContain('artistTidalId={albumPopupItem.artist_id}');
+
+		// The same popup Library and the recommendation rails open, loading through
+		// the same module rather than a per-surface copy.
+		expect(popup).toContain("from '$lib/album/album_detail'");
+		expect(popup).toContain('loadAlbumDetail(');
+
+		// The artist name inside the popup is a link. A TIDAL-only album has no
+		// local artist id, so the href has to be passed in.
+		expect(detailPopup).toContain('artistHref');
+		expect(detailPopup).toContain('popup-artist-link');
+		expect(detailPopup).toContain('function openArtistPage()');
+		// Close first, then navigate: a popup left mounted over the page it opened
+		// swallows the next click through its window-level outside-click handler.
+		expect(detailPopup).toContain('requestClose();');
+		expect(detailPopup).toContain('void goto(href);');
+		expect(popup).toContain('/tidal/artists/${artistTidalId}');
+	});
 });

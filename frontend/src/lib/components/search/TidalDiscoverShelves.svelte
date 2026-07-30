@@ -9,6 +9,7 @@
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
+	import AlbumPopup from '$lib/components/album/AlbumPopup.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
@@ -36,6 +37,9 @@
 		 *  when you are already there. */
 		onItemSelect?: (item: TidalHomeItem) => boolean;
 	} = $props();
+
+	/** The album tile whose detail popup is open, if any. */
+	let albumPopupItem = $state<TidalHomeItem | null>(null);
 
 	function handleItemClick(item: TidalHomeItem) {
 		if (onItemSelect?.(item)) return;
@@ -66,7 +70,12 @@
 			return;
 		}
 		if (item.kind === 'album' && item.album_id != null) {
-			void goto(`/tidal/albums/${item.album_id}`);
+			// The mini detail popup, the same as a Library album card. Opening
+			// /tidal/albums/{id} is still a click away, from the right-click menu or
+			// the artist link inside the popup - but a tracklist is what you want
+			// from an album tile, and a full page navigation to get it is a lot of
+			// ceremony for a browse surface.
+			albumPopupItem = item;
 			return;
 		}
 		if (item.kind === 'playlist') {
@@ -342,6 +351,23 @@
 			</section>
 		{/each}
 	</div>
+{/if}
+
+{#if albumPopupItem}
+	<!-- Keyed so picking a different album mounts a fresh popup rather than
+	     asking the existing one to swap albums mid-load. -->
+	{#key albumPopupItem}
+		<AlbumPopup
+			tidalAlbumId={albumPopupItem.album_id}
+			artistTidalId={albumPopupItem.artist_id}
+			hints={{
+				title: albumPopupItem.title,
+				artistName: albumPopupItem.artist_name,
+				artworkUrl: albumPopupItem.artwork_url,
+			}}
+			onClose={() => (albumPopupItem = null)}
+		/>
+	{/key}
 {/if}
 
 <style>

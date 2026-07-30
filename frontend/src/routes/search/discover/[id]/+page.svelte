@@ -12,6 +12,7 @@
 	import { formatTrackDuration } from '$lib/utils/format';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import AlbumPopup from '$lib/components/album/AlbumPopup.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
@@ -25,6 +26,8 @@
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let loadSeq = 0;
+	/** The album tile whose detail popup is open, if any. */
+	let albumPopupItem = $state<TidalHomeItem | null>(null);
 
 	$effect(() => {
 		const id = moduleId;
@@ -66,7 +69,10 @@
 			return;
 		}
 		if (item.kind === 'album' && item.album_id != null) {
-			void goto(`/tidal/albums/${item.album_id}`);
+			// Same as the rail this page came from: the mini detail popup, not a
+			// navigation. The album page is still one click away, from the
+			// right-click menu or the artist link inside the popup.
+			albumPopupItem = item;
 			return;
 		}
 		if (item.kind === 'playlist') {
@@ -240,6 +246,23 @@
 		</div>
 	{/if}
 </div>
+
+{#if albumPopupItem}
+	<!-- Keyed so picking a different album mounts a fresh popup rather than
+	     asking the existing one to swap albums mid-load. -->
+	{#key albumPopupItem}
+		<AlbumPopup
+			tidalAlbumId={albumPopupItem.album_id}
+			artistTidalId={albumPopupItem.artist_id}
+			hints={{
+				title: albumPopupItem.title,
+				artistName: albumPopupItem.artist_name,
+				artworkUrl: albumPopupItem.artwork_url,
+			}}
+			onClose={() => (albumPopupItem = null)}
+		/>
+	{/key}
+{/if}
 
 <style>
 	/* `.page-shell` (app.css) already provides the column flex layout,

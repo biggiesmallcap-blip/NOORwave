@@ -357,7 +357,8 @@ describe('home recommendations shelf contract', () => {
 
 	test('recommended albums open the shared Library popup on both surfaces', () => {
 		const popup = readFileSync(join(here, 'RecommendationAlbumPopup.svelte'), 'utf8');
-		const detail = readFileSync(join(here, 'recommendation_album_detail.ts'), 'utf8');
+		const detail = readFileSync(join(here, '../../album/album_detail.ts'), 'utf8');
+		const sharedPopup = readFileSync(join(here, '../album/AlbumPopup.svelte'), 'utf8');
 		const grid = readFileSync(join(here, '../../../routes/recommendations/[shelf]/+page.svelte'), 'utf8');
 		const albumPopup = readFileSync(join(here, '../AlbumDetailPopup.svelte'), 'utf8');
 
@@ -371,10 +372,16 @@ describe('home recommendations shelf contract', () => {
 		// One popup instance is about one album: it loads on mount and the parents
 		// key it, so picking another album mounts a fresh one instead of asking a
 		// half-loaded popup to swap albums.
+		expect(sharedPopup).toContain('onMount(');
+		expect(sharedPopup).not.toContain('$effect(');
 		expect(popup).toContain('onMount(');
-		expect(popup).not.toContain('$effect(');
 		expect(source).toContain('{#key albumPopupItem}');
 		expect(grid).toContain('{#key albumPopupItem}');
+
+		// A recommendation carries names, not ids, so this resolves and then hands
+		// off to the one popup every other album card in the app opens.
+		expect(popup).toContain('resolveRecommendationAlbum');
+		expect(popup).toContain('AlbumPopup');
 
 		// A recommended album is usually not owned, so the popup takes explicit
 		// play handlers and an isLocal flag instead of assuming a local album id.

@@ -12,8 +12,9 @@
 		type TidalArtworkSize,
 	} from '$lib/utils/artwork';
 	import { portal } from '$lib/actions/portal';
+	import { goto } from '$app/navigation';
 
-	let { album, tracks, loading, onClose, isLocal = true, onPlay, onShuffle, onPlayFrom }: {
+	let { album, tracks, loading, onClose, isLocal = true, onPlay, onShuffle, onPlayFrom, artistHref = null }: {
 		album: Album;
 		tracks: Track[];
 		loading: boolean;
@@ -34,6 +35,12 @@
 		onShuffle?: () => void;
 		/** Play the album starting from this track. */
 		onPlayFrom?: (track: Track) => void;
+		/**
+		 * Where the artist name goes. Only needed when the artist is not a library
+		 * row: a TIDAL-only album has no `artist_id`, so the local href cannot be
+		 * derived and the caller passes `/tidal/artists/{id}` instead.
+		 */
+		artistHref?: string | null;
 	} = $props();
 	let failedArtworkUrls = $state<Record<string, boolean>>({});
 	let popupArtwork = $derived(artworkCandidate(album.artwork_url, 640));
@@ -138,6 +145,24 @@
 		openContextMenu(event, buildAlbumMenu(album, { isLocal }), album.title);
 	}
 
+	// The artist is a link, not just a right-click target. Library albums derive
+	// it from the row; anything else has to be told, because a TIDAL-only album
+	// carries no local artist id.
+	let resolvedArtistHref = $derived(
+		artistHref ?? (isLocal && album.artist_id ? `/artists/${album.artist_id}` : null),
+	);
+
+	// Close first, then navigate. Going straight to goto() leaves the popup
+	// mounted over the page it just opened, and its outside-click handler is on
+	// the window, so the next click anywhere would dismiss instead of doing what
+	// it looked like it would do.
+	function openArtistPage() {
+		if (!resolvedArtistHref) return;
+		const href = resolvedArtistHref;
+		requestClose();
+		void goto(href);
+	}
+
 	function openAlbumArtistContextMenu(event: MouseEvent) {
 		if (!album.artist_name) return;
 		event.preventDefault();
@@ -205,11 +230,21 @@
 				{/if}
 				<div class="popup-info">
 					<h2>{album.title}</h2>
-					<!-- svelte-ignore a11y_no_static_element_interactions -->
-					<p
-						class="popup-artist"
-						oncontextmenu={openAlbumArtistContextMenu}
-					>{album.artist_name ?? 'Unknown Artist'}</p>
+					{#if resolvedArtistHref}
+						<button
+							type="button"
+							class="popup-artist popup-artist-link"
+							title={`Open ${album.artist_name ?? 'artist'}`}
+							oncontextmenu={openAlbumArtistContextMenu}
+							onclick={openArtistPage}
+						>{album.artist_name ?? 'Unknown Artist'}</button>
+					{:else}
+						<!-- svelte-ignore a11y_no_static_element_interactions -->
+						<p
+							class="popup-artist"
+							oncontextmenu={openAlbumArtistContextMenu}
+						>{album.artist_name ?? 'Unknown Artist'}</p>
+					{/if}
 					<div class="popup-meta-row">
 						{#if album.year}<span class="popup-chip">{album.year}</span>{/if}
 						{#if album.release_type}<span class="popup-chip">{album.release_type}</span>{/if}
@@ -464,6 +499,23 @@
 		font-weight: var(--font-weight-medium);
 		cursor: context-menu;
 		width: fit-content;
+	}
+
+	/* Underline on hover only, the same restraint as artist names in a track row:
+	   the name is a link, but it should not compete with the album title. */
+	.popup-artist-link {
+		background: none;
+		border: 0;
+		padding: 0;
+		font: inherit;
+		text-align: left;
+		cursor: pointer;
+	}
+
+	.popup-artist-link:hover,
+	.popup-artist-link:focus-visible {
+		color: var(--text-primary);
+		text-decoration: underline;
 	}
 
 	.popup-meta-row {
