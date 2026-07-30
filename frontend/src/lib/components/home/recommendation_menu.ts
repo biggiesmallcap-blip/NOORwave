@@ -48,6 +48,30 @@ export function recommendationItemToTidalPlayable(
 }
 
 /**
+ * True when this album card is really a single: TIDAL has the track but no album.
+ *
+ * The server sets `is_single` after failing to match an album and succeeding on
+ * the track, so the client does not have to search to find out. There is no
+ * tracklist to open, so the card seeds song radio from the track instead - which
+ * is the closest thing to "listen to this" a single supports.
+ */
+export function isRecommendationSingle(item: ProviderRecommendationItem): boolean {
+	return (
+		recommendationEntity(item) === 'album' &&
+		Boolean(item.is_single) &&
+		Boolean(item.tidal_id) &&
+		!item.local_album_id &&
+		!item.tidal_album_id
+	);
+}
+
+/** Start song radio from the single behind an album card. */
+export async function playRecommendationSingle(item: ProviderRecommendationItem): Promise<void> {
+	const { startTidalSongRadio } = await import('$lib/stores/player');
+	await startTidalSongRadio(recommendationItemToTidalPlayable(item));
+}
+
+/**
  * Open an artist or album card.
  *
  * Prefers ids we already hold, then a TIDAL lookup, and finally the search page
@@ -100,6 +124,10 @@ export function recommendationItemMenu(item: ProviderRecommendationItem): MenuIt
 				artist_name: item.artist_name,
 				in_library: Boolean(item.local_album_id),
 			});
+		}
+		if (isRecommendationSingle(item)) {
+			// A single has no album menu to build: the track is the whole thing.
+			return buildTidalTrackMenu(recommendationItemToTidalPlayable(item));
 		}
 		return [
 			{ label: 'Play album', icon: '▶', onSelect: () => void playRecommendationAlbum(item) },

@@ -84,6 +84,35 @@ const BACKFILL_TARGETS: &[(&str, &str, &str)] = &[
     ("tracks", "title", "title_normalized"),
 ];
 
+/// True when one folded name extends the other at a word boundary.
+///
+/// The cheap stand-in for fuzzy matching, and the twin of `namesOverlap` in
+/// `frontend/src/lib/components/home/recommendation_navigation.ts`. It catches
+/// edition suffixes and parenthetical qualifiers ("untrue" vs "untrue deluxe
+/// edition") without accepting a name that merely spells another one: whole
+/// tokens are compared in order, so "nova" does not match "casanova".
+///
+/// Both sides must already be folded through `normalize_catalog_name`.
+pub fn names_overlap(a: &str, b: &str) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a == b {
+        return true;
+    }
+    let a_tokens: Vec<&str> = a.split(' ').collect();
+    let b_tokens: Vec<&str> = b.split(' ').collect();
+    let (shorter, longer) = if a_tokens.len() <= b_tokens.len() {
+        (&a_tokens, &b_tokens)
+    } else {
+        (&b_tokens, &a_tokens)
+    };
+    shorter
+        .iter()
+        .enumerate()
+        .all(|(index, token)| longer.get(index) == Some(token))
+}
+
 /// Fold one batch of unfolded rows. Returns how many were written.
 ///
 /// This exists because the fold is NFKD-based and SQLite cannot compute it, so
@@ -233,6 +262,23 @@ mod tests {
             normalize_catalog_name("Air"),
             normalize_catalog_name("Airs")
         );
+    }
+
+    // Mirrors the cases the TS `namesOverlap` is asserted against, including the
+    // one that made it token-based: plain containment let "nova" match
+    // "casanova", which silently opened the wrong entity.
+    #[test]
+    fn overlap_extends_at_word_boundaries_only() {
+        assert!(names_overlap("untrue", "untrue deluxe edition"));
+        assert!(names_overlap("untrue deluxe edition", "untrue"));
+        assert!(names_overlap("mf doom", "mf doom daniel dumile"));
+        assert!(names_overlap("hurt so good", "hurt so good"));
+
+        assert!(!names_overlap("nova", "casanova"));
+        assert!(!names_overlap("uptown top ranking", "hurt so good"));
+        assert!(!names_overlap("deluxe untrue", "untrue"));
+        assert!(!names_overlap("", "untrue"));
+        assert!(!names_overlap("untrue", ""));
     }
 
     #[test]

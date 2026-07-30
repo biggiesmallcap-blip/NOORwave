@@ -16,7 +16,9 @@
 		recommendationEntity,
 	} from '$lib/components/home/recommendation_navigation';
 	import {
+		isRecommendationSingle,
 		openRecommendationItem,
+		playRecommendationSingle,
 		recommendationItemMenu,
 		recommendationItemToTidalPlayable,
 		recommendationShelfSlug,
@@ -432,13 +434,23 @@
 	<!-- Matches the Library album card (AlbumCarousel): a corner play badge on
 	     hover, and a click that opens the album's mini detail popup rather than
 	     navigating away. Artists deliberately differ - they have no play badge
-	     anywhere in the app. -->
+	     anywhere in the app.
+
+	     A single has no tracklist to open, so it says so on the card and seeds
+	     song radio instead. Last.fm's top-albums feed mixes singles in with
+	     albums and does not distinguish them; the server marks the ones TIDAL
+	     only carries as a track. -->
 	<button
 		type="button"
 		class="rec-card"
 		title={`${entry.item.title}${entry.item.artist_name ? ` - ${entry.item.artist_name}` : ''}`}
-		aria-label={`Open ${entry.item.title}`}
-		onclick={() => (albumPopupItem = entry.item)}
+		aria-label={isRecommendationSingle(entry.item)
+			? `Start radio from ${entry.item.title}`
+			: `Open ${entry.item.title}`}
+		onclick={() =>
+			isRecommendationSingle(entry.item)
+				? void playRecommendationSingle(entry.item)
+				: (albumPopupItem = entry.item)}
 		oncontextmenu={(event) => openItemMenu(event, entry.item)}
 		use:lazyTidalArt={{
 			enabled: entry.artwork === null,
@@ -458,6 +470,9 @@
 				fallbackText={entry.fallbackText}
 			/>
 			<PlayOverlay position="corner" size="sm" />
+			{#if isRecommendationSingle(entry.item)}
+				<span class="rec-badge">Single</span>
+			{/if}
 		</div>
 		<p class="rec-title">{entry.item.title}</p>
 		{#if entry.item.artist_name}
@@ -674,6 +689,23 @@
 
 	.rec-avatar-wrap {
 		border-radius: 50%;
+	}
+
+	/* Same pill as the video badge in YourMixesShelf, top-left so it never sits
+	   under the corner play badge. Says the card is a single, so a click that
+	   starts radio instead of opening a tracklist is not a surprise. */
+	.rec-badge {
+		position: absolute;
+		left: 8px;
+		top: 8px;
+		padding: 3px 7px;
+		border-radius: 999px;
+		background: rgba(0, 0, 0, 0.62);
+		color: #fff;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-bold);
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
 	}
 
 	.rec-card:hover .rec-art-wrap,

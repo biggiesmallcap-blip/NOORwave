@@ -78,7 +78,7 @@ describe('home recommendations shelf contract', () => {
 		// The payload is cached for six hours, so shipping new resolution logic
 		// without a bump leaves existing installs on the old output until it
 		// expires - which is exactly what this assertion is here to catch.
-		expect(homeRoutes).toContain('RECOMMENDATION_HOME_CACHE_KEY: &str = "home:v8"');
+		expect(homeRoutes).toContain('RECOMMENDATION_HOME_CACHE_KEY: &str = "home:v9"');
 		// The track shelf stays at 20 because the mural is a fixed 10x2 grid;
 		// see `layout-count-20` in ChartMural.svelte.
 		expect(homeRoutes).toContain('LASTFM_HOME_RECOMMENDATION_LIMIT: usize = 20');
@@ -103,10 +103,9 @@ describe('home recommendations shelf contract', () => {
 		// Albums open the mini detail popup and carry the corner play badge, the
 		// same as a Library album card. Artists carry neither, because no artist
 		// card in the app has a play affordance; clicking one opens the artist.
-		expect(grid).toContain(
-			'onclick={() => (isAlbum ? (albumPopupItem = item) : void openRecommendationItem(item))}',
-		);
-		expect(grid).toContain('aria-label={`Open ${item.title}`}');
+		expect(grid).toContain('(albumPopupItem = item)');
+		expect(grid).toContain('void openRecommendationItem(item)');
+		expect(grid).toContain('`Open ${item.title}`');
 		expect(grid).toContain('{#if isAlbum}');
 		expect(grid).toContain('<PlayOverlay position="corner" size="sm" />');
 		// Same hover as `.rec-card`: the card lifts, the artwork shadow deepens.
@@ -377,6 +376,39 @@ describe('home recommendations shelf contract', () => {
 		// /search for it threw the user off Home for a click that promised a popup.
 		expect(popup).toContain("showToast(`Couldn't find \"${target.title}\" on Tidal`, 'error')");
 		expect(popup).not.toContain('openRecommendationItem');
+	});
+
+	test('album cards that cannot open never reach the client', () => {
+		// Last.fm recommends singles, regional pressings and anthologies TIDAL has
+		// no album for. Those cards cannot open, play or queue, so the endpoint
+		// resolves the album id server-side and drops the ones with nothing behind
+		// them, rather than shipping tiles that fail on click.
+		expect(homeRoutes).toContain('fn album_id_from_catalog');
+		expect(homeRoutes).toContain('fn drop_unresolvable_albums');
+		expect(homeRoutes).toContain('drop_unresolvable_albums(&mut items);');
+		expect(homeRoutes).toContain('|| needs_album_id(item)');
+		// Same refusal-to-guess rules as the client matcher, sharing the folding
+		// and word-boundary overlap helpers.
+		expect(homeRoutes).toContain('names_overlap');
+
+		// Last.fm does not distinguish a single from an album, so the ones TIDAL
+		// only carries as a track keep their card, say "Single" on it, and seed
+		// song radio - there is no tracklist to open.
+		expect(homeRoutes).toContain('fn single_id_from_catalog');
+		expect(homeRoutes).toContain('"is_single".to_string()');
+		expect(homeRoutes).toContain('fn album_item_is_dead');
+		const menu = readFileSync(join(here, 'recommendation_menu.ts'), 'utf8');
+		expect(menu).toContain('export function isRecommendationSingle');
+		expect(menu).toContain('startTidalSongRadio');
+		const grid = readFileSync(
+			join(here, '../../../routes/recommendations/[shelf]/+page.svelte'),
+			'utf8',
+		);
+		for (const surface of [source, grid]) {
+			expect(surface).toContain('isRecommendationSingle');
+			expect(surface).toContain('playRecommendationSingle');
+			expect(surface).toContain('>Single</span>');
+		}
 	});
 
 	test('resolves albums against enough TIDAL results to find them', () => {

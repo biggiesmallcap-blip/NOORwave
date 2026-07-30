@@ -1,5 +1,5 @@
 use crate::SharedState;
-use crate::db::catalog_name::normalize_catalog_name;
+use crate::db::catalog_name::{names_overlap, normalize_catalog_name};
 use crate::db::queries;
 use crate::metadata::lastfm::{
     LastFmChartAlbum, LastFmChartArtist, LastFmChartTrack, LastFmClient,
@@ -194,7 +194,9 @@ pub(super) async fn get_home_recommendations(
 // v8: the artist and album caps went from 20 to 50. A cached v7 payload only
 // holds twenty, so without a bump the bigger rails would not appear until the
 // six-hour lease expired.
-const RECOMMENDATION_HOME_CACHE_KEY: &str = "home:v8";
+// v9: album items now carry a resolved tidal_album_id and the ones with no
+// album behind them are dropped. A v8 payload still holds those dead tiles.
+const RECOMMENDATION_HOME_CACHE_KEY: &str = "home:v9";
 
 /// Cap for the track shelf, which is still rendered as the mural. Twenty is not
 /// arbitrary here: `layout-count-20` in ChartMural.svelte is a 10x2 grid, so a
@@ -302,9 +304,10 @@ async fn load_or_fetch_recommendation_shelf(
         "listenbrainz" => fetch_listenbrainz_home_recommendations(&state).await?,
         _ => Vec::new(),
     };
-    // Before the cache write, so the artwork is stored with the shelf rather
-    // than re-resolved on every cache hit.
+    // Before the cache write, so the artwork and the album ids are stored with
+    // the shelf rather than re-resolved on every cache hit.
     resolve_missing_artwork(&state, &mut items).await;
+    drop_unresolvable_albums(&mut items);
     write_recommendation_cache(&state, provider, &items).await;
     Ok(items)
 }
@@ -344,6 +347,99 @@ fn artwork_query(item: &Value) -> Option<String> {
     })
 }
 
+/// The TIDAL album a recommended album item refers to, or None.
+///
+/// A wrong album is worse than no album, so this refuses to guess: the artist
+/// has to fold equal, and the title has to fold equal or overlap at a word
+/// boundary (which is what lets "Hurt So Good (Bonus Track Edition)" find "Hurt
+/// So Good"). Same rules as `findAlbumMatch` in
+/// `frontend/src/lib/components/home/recommendation_navigation.ts`, and the same
+/// reason: Last.fm recommends singles, regional pressings and anthologies that
+/// TIDAL does not carry as albums, and a sole album by the right artist is not
+/// evidence that it is the album asked for.
+fn album_id_from_catalog(
+    item: &Value,
+    catalog: &crate::services::tidal::client::TidalSearchCatalog,
+) -> Option<i64> {
+    let wanted_title = normalize_catalog_name(item.get("title").and_then(Value::as_str)?);
+    let wanted_artist = normalize_catalog_name(
+        item.get("artist_name")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    );
+    if wanted_title.is_empty() || wanted_artist.is_empty() {
+        return None;
+    }
+
+    let same_artist = catalog.albums.iter().filter(|album| {
+        normalize_catalog_name(album.artist_name.as_deref().unwrap_or("")) == wanted_artist
+    });
+    let mut same_artist: Vec<_> = same_artist.collect();
+    if same_artist.is_empty() {
+        return None;
+    }
+    if let Some(exact) = same_artist
+        .iter()
+        .find(|album| normalize_catalog_name(&album.title) == wanted_title)
+    {
+        return Some(exact.id);
+    }
+    // Prefer the shortest overlapping title, so an anthology whose name happens
+    // to start with the album name does not win over the album itself.
+    same_artist.sort_by_key(|album| album.title.len());
+    same_artist
+        .iter()
+        .find(|album| names_overlap(&normalize_catalog_name(&album.title), &wanted_title))
+        .map(|album| album.id)
+}
+
+/// The TIDAL track behind an "album" that is really a single.
+///
+/// Last.fm's top-albums feed does not distinguish an album from a single, so a
+/// famous 7" like Alton Ellis's "Cry Tough" arrives as an album that TIDAL has
+/// no album for - but does have the track for. Rather than dropping it, the item
+/// keeps its place and the card seeds song radio from that track, which is the
+/// closest thing to "listen to this" that a single supports.
+///
+/// Same refusal to guess as `album_id_from_catalog`: artist has to fold equal,
+/// title has to fold equal or overlap at a word boundary.
+fn single_id_from_catalog(
+    item: &Value,
+    catalog: &crate::services::tidal::client::TidalSearchCatalog,
+) -> Option<i64> {
+    let wanted_title = normalize_catalog_name(item.get("title").and_then(Value::as_str)?);
+    let wanted_artist = normalize_catalog_name(
+        item.get("artist_name")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    );
+    if wanted_title.is_empty() || wanted_artist.is_empty() {
+        return None;
+    }
+
+    let mut same_artist: Vec<_> = catalog
+        .tracks
+        .iter()
+        .filter(|track| {
+            normalize_catalog_name(track.artist_name.as_deref().unwrap_or("")) == wanted_artist
+        })
+        .collect();
+    if same_artist.is_empty() {
+        return None;
+    }
+    if let Some(exact) = same_artist
+        .iter()
+        .find(|track| normalize_catalog_name(&track.title) == wanted_title)
+    {
+        return Some(exact.id);
+    }
+    same_artist.sort_by_key(|track| track.title.len());
+    same_artist
+        .iter()
+        .find(|track| names_overlap(&normalize_catalog_name(&track.title), &wanted_title))
+        .map(|track| track.id)
+}
+
 /// Pick the artwork a search result offers for this kind of item. An artist
 /// wants the artist photo, which the catalogue carries directly; anything else
 /// wants a cover.
@@ -367,7 +463,8 @@ fn artwork_from_catalog(
         .or_else(|| catalog.albums.first().and_then(|a| a.artwork_url.clone()))
 }
 
-/// Fill in artwork for items the local library could not supply.
+/// Fill in artwork, and the TIDAL album id, for items the local library could
+/// not supply.
 ///
 /// Without this the client did it: one `/api/tidal/search` per artwork-less
 /// tile, sixty of them on a full Home, funnelled through a four-wide in-flight
@@ -376,6 +473,13 @@ fn artwork_from_catalog(
 /// since both this endpoint and the TIDAL search cache hold results for six
 /// hours, a warm cache makes it nearly free. The client keeps its lazy lookup
 /// as a fallback for whatever is still missing.
+///
+/// Album items are searched even when Last.fm gave them a cover, because the
+/// id is what decides whether the card can do anything at all. Measured over a
+/// full album shelf, 20 of 50 items had no TIDAL album behind them: Last.fm
+/// recommends singles and regional anthologies freely. Resolving here is what
+/// lets `drop_unresolvable_albums` take those out before they reach the rail,
+/// and it means a card that is shown opens instantly, with no click-time search.
 ///
 /// Best-effort throughout: TIDAL not connected, a failed search or a query we
 /// cannot build all leave the item exactly as it was.
@@ -392,17 +496,23 @@ async fn resolve_missing_artwork(state: &SharedState, items: &mut [Value]) {
         return;
     };
 
-    let pending: Vec<(usize, String, String)> = items
+    // `album` carries a copy of the item only when its TIDAL album id still has
+    // to be matched out of the search response, so the buffered futures do not
+    // hold a borrow on `items`.
+    let pending: Vec<(usize, String, String, Option<Value>)> = items
         .iter()
         .enumerate()
-        .filter(|(_, item)| item.get("artwork_url").is_none_or(Value::is_null))
+        .filter(|(_, item)| {
+            item.get("artwork_url").is_none_or(Value::is_null) || needs_album_id(item)
+        })
         .filter_map(|(index, item)| {
             let entity = item
                 .get("entity_type")
                 .and_then(Value::as_str)
                 .unwrap_or("track")
                 .to_string();
-            artwork_query(item).map(|query| (index, entity, query))
+            let album = needs_album_id(item).then(|| item.clone());
+            artwork_query(item).map(|query| (index, entity, query, album))
         })
         .collect();
 
@@ -417,8 +527,8 @@ async fn resolve_missing_artwork(state: &SharedState, items: &mut [Value]) {
     );
     let cache_cfg = crate::services::tidal::cache::TidalSearchCacheConfig::default();
 
-    let resolved: Vec<(usize, Option<String>)> = futures::stream::iter(pending)
-        .map(|(index, entity, query)| {
+    let resolved: Vec<(usize, Option<String>, Option<AlbumLink>)> = futures::stream::iter(pending)
+        .map(|(index, entity, query, album)| {
             let client = client.clone();
             let db = db.clone();
             async move {
@@ -461,10 +571,17 @@ async fn resolve_missing_artwork(state: &SharedState, items: &mut [Value]) {
                     },
                 };
 
-                (
-                    index,
-                    catalog.and_then(|catalog| artwork_from_catalog(&entity, &catalog)),
-                )
+                let Some(catalog) = catalog else {
+                    return (index, None, None);
+                };
+                let link = album.and_then(|item| {
+                    // Album first, single only as the fallback: an album that
+                    // exists is always the better answer for an album card.
+                    album_id_from_catalog(&item, &catalog)
+                        .map(AlbumLink::Album)
+                        .or_else(|| single_id_from_catalog(&item, &catalog).map(AlbumLink::Single))
+                });
+                (index, artwork_from_catalog(&entity, &catalog), link)
             }
         })
         .buffer_unordered(ARTWORK_RESOLVE_CONCURRENCY)
@@ -472,17 +589,85 @@ async fn resolve_missing_artwork(state: &SharedState, items: &mut [Value]) {
         .await;
 
     let mut filled = 0usize;
-    for (index, url) in resolved {
+    let mut albums = 0usize;
+    let mut singles = 0usize;
+    for (index, url, link) in resolved {
+        let Some(slot) = items.get_mut(index) else {
+            continue;
+        };
+        let Some(obj) = slot.as_object_mut() else {
+            continue;
+        };
         if let Some(url) = url
-            && let Some(slot) = items.get_mut(index)
-            && let Some(obj) = slot.as_object_mut()
+            && obj.get("artwork_url").is_none_or(Value::is_null)
         {
             obj.insert("artwork_url".to_string(), Value::String(url));
             filled += 1;
         }
+        match link {
+            Some(AlbumLink::Album(id)) => {
+                obj.insert("tidal_album_id".to_string(), Value::from(id));
+                // Playable now means something for this item: there is an album
+                // behind it whose tracklist can be opened and queued.
+                obj.insert("playable".to_string(), Value::Bool(true));
+                albums += 1;
+            }
+            Some(AlbumLink::Single(id)) => {
+                obj.insert("tidal_id".to_string(), Value::from(id));
+                obj.insert("is_single".to_string(), Value::Bool(true));
+                obj.insert("playable".to_string(), Value::Bool(true));
+                singles += 1;
+            }
+            None => {}
+        }
     }
-    if filled > 0 {
-        tracing::debug!(target: "noor.home_artwork", filled, "resolved missing recommendation artwork");
+    if filled > 0 || albums > 0 || singles > 0 {
+        tracing::debug!(target: "noor.home_artwork", filled, albums, singles, "resolved recommendation artwork and album links");
+    }
+}
+
+/// What a recommended "album" turned out to be on TIDAL.
+enum AlbumLink {
+    Album(i64),
+    /// Last.fm recommended a single. There is no album to open, but the track
+    /// exists, so the card can seed song radio from it.
+    Single(i64),
+}
+
+/// True when this is an album item with no album behind it yet.
+///
+/// Both ids are checked: a library album needs nothing, and an item that already
+/// carries a TIDAL id (because the library row had one) is done too.
+fn needs_album_id(item: &Value) -> bool {
+    item.get("entity_type").and_then(Value::as_str) == Some("album")
+        && item.get("local_album_id").is_none_or(Value::is_null)
+        && item.get("tidal_album_id").is_none_or(Value::is_null)
+}
+
+/// True when an album card would do nothing at all if clicked: no album to open
+/// and no single to seed radio from.
+fn album_item_is_dead(item: &Value) -> bool {
+    needs_album_id(item) && item.get("tidal_id").is_none_or(Value::is_null)
+}
+
+/// Drop album items that resolved to nothing at all.
+///
+/// Last.fm's top-albums-per-artist feed is full of singles, regional pressings
+/// and anthologies that TIDAL does not carry, and a card for one of those cannot
+/// open, play or queue: it is a dead tile that looks exactly like a live one.
+/// Measured over a full shelf: 30 of 50 resolved to an album, 5 more to the
+/// single behind the title, and 15 - all of them compilations and anthologies -
+/// to nothing. The shelf caps are 50 against a fan-out that generates several
+/// hundred candidates, so what is left is still a full-looking rail.
+///
+/// Only albums. A track item has its own resolution path and an artist item is
+/// browsable by name, so neither is dead in the same way.
+fn drop_unresolvable_albums(items: &mut Vec<Value>) {
+    let before = items.len();
+    items.retain(|item| !album_item_is_dead(item));
+    let dropped = before - items.len();
+    if dropped > 0 {
+        tracing::debug!(target: "noor.home_artwork", dropped, "dropped album recommendations with no TIDAL album");
     }
 }
 
@@ -1466,6 +1651,110 @@ mod tests {
         assert_eq!(
             artwork_from_catalog("track", &TidalSearchCatalog::default()),
             None
+        );
+    }
+
+    #[test]
+    fn album_ids_come_only_from_an_album_that_is_actually_the_one_asked_for() {
+        use crate::services::tidal::client::{TidalSearchAlbum, TidalSearchCatalog};
+
+        let album = |id: i64, title: &str, artist: &str| TidalSearchAlbum {
+            id,
+            title: title.into(),
+            artist_name: Some(artist.into()),
+            ..Default::default()
+        };
+        let item = |title: &str, artist: &str| json!({ "entity_type": "album", "title": title, "artist_name": artist });
+
+        let mut catalog = TidalSearchCatalog::default();
+        catalog
+            .albums
+            .push(album(1, "Hurt So Good", "Althea & Donna"));
+        catalog.albums.push(album(2, "Untrue", "Burial"));
+
+        // Exact fold, and the edition suffix Last.fm often carries.
+        assert_eq!(
+            album_id_from_catalog(&item("Hurt So Good", "Althea and Donna"), &catalog),
+            Some(1)
+        );
+        assert_eq!(
+            album_id_from_catalog(&item("Untrue (Deluxe Edition)", "Burial"), &catalog),
+            Some(2)
+        );
+
+        // The single Last.fm recommended, which TIDAL has no album for. The old
+        // client-side rule took the artist's only album here, so two different
+        // titles both opened "Hurt So Good".
+        assert_eq!(
+            album_id_from_catalog(&item("Uptown Top Ranking", "Althea & Donna"), &catalog),
+            None
+        );
+        // Right title, wrong artist.
+        assert_eq!(
+            album_id_from_catalog(&item("Untrue", "Althea & Donna"), &catalog),
+            None
+        );
+        // A name that folds to nothing (non-Latin) must not match everything.
+        assert_eq!(
+            album_id_from_catalog(&item("黑膠", "鄧麗君"), &catalog),
+            None
+        );
+    }
+
+    #[test]
+    fn album_recommendations_with_no_tidal_album_never_reach_the_shelf() {
+        let mut items = vec![
+            json!({ "entity_type": "album", "title": "Owned", "local_album_id": 7, "tidal_album_id": null }),
+            json!({ "entity_type": "album", "title": "Resolved", "local_album_id": null, "tidal_album_id": 42 }),
+            json!({ "entity_type": "album", "title": "Dead", "local_album_id": null, "tidal_album_id": null }),
+            // Not albums: a track resolves through its own path and an artist is
+            // browsable by name, so neither is dead the way a dead album is.
+            json!({ "entity_type": "track", "title": "Track", "local_track_id": null }),
+            json!({ "entity_type": "artist", "title": "Artist", "local_artist_id": null }),
+        ];
+        drop_unresolvable_albums(&mut items);
+        let titles: Vec<&str> = items
+            .iter()
+            .map(|i| i.get("title").and_then(Value::as_str).unwrap())
+            .collect();
+        assert_eq!(titles, vec!["Owned", "Resolved", "Track", "Artist"]);
+    }
+
+    #[test]
+    fn a_single_keeps_its_card_and_a_compilation_does_not() {
+        use crate::services::tidal::client::{TidalSearchCatalog, TidalSearchTrack};
+
+        let mut catalog = TidalSearchCatalog::default();
+        catalog.tracks.push(TidalSearchTrack {
+            id: 909,
+            title: "Cry Tough".into(),
+            artist_name: Some("Alton Ellis".into()),
+            ..Default::default()
+        });
+
+        let single =
+            json!({ "entity_type": "album", "title": "Cry Tough", "artist_name": "Alton Ellis" });
+        assert_eq!(single_id_from_catalog(&single, &catalog), Some(909));
+
+        // A compilation TIDAL has neither the album nor a matching track for.
+        let compilation = json!({
+            "entity_type": "album",
+            "title": "Treasure Isle Collection Vol. 1",
+            "artist_name": "Alton Ellis",
+        });
+        assert_eq!(single_id_from_catalog(&compilation, &catalog), None);
+
+        // The single survives the drop because its card can still seed radio;
+        // the compilation cannot do anything at all, so it goes.
+        let mut items = vec![
+            json!({ "entity_type": "album", "title": "Cry Tough", "tidal_id": 909, "is_single": true }),
+            json!({ "entity_type": "album", "title": "Treasure Isle Collection Vol. 1" }),
+        ];
+        drop_unresolvable_albums(&mut items);
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].get("title").and_then(Value::as_str),
+            Some("Cry Tough")
         );
     }
 

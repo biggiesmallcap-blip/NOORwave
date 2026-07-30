@@ -14,8 +14,10 @@
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { recommendationEntity } from '$lib/components/home/recommendation_navigation';
 	import {
+		isRecommendationSingle,
 		matchesRecommendationShelfSlug,
 		openRecommendationItem,
+		playRecommendationSingle,
 		recommendationItemMenu,
 	} from '$lib/components/home/recommendation_menu';
 
@@ -124,15 +126,23 @@
 			{#each shelf.items as item, index (itemKey(item, index))}
 				<!-- Same contract as the Home rail card. Albums carry the Library play
 				     badge and open the mini detail popup; artists carry neither, because
-				     no artist card in the app does. -->
+				     no artist card in the app does. A single has no tracklist, so it is
+				     labelled and seeds song radio instead. -->
 				<button
 					type="button"
 					class="rec-tile rise-in-card"
 					class:artist={isArtist}
 					style={`--rise-index: ${index % 12}`}
 					title={itemTitle(item)}
-					aria-label={`Open ${item.title}`}
-					onclick={() => (isAlbum ? (albumPopupItem = item) : void openRecommendationItem(item))}
+					aria-label={isRecommendationSingle(item)
+						? `Start radio from ${item.title}`
+						: `Open ${item.title}`}
+					onclick={() =>
+						isRecommendationSingle(item)
+							? void playRecommendationSingle(item)
+							: isAlbum
+								? (albumPopupItem = item)
+								: void openRecommendationItem(item)}
 					oncontextmenu={(e) => openMenu(e, item)}
 				>
 					<span class="rec-tile-art" class:round={isArtist}>
@@ -147,6 +157,9 @@
 						/>
 						{#if isAlbum}
 							<PlayOverlay position="corner" size="sm" />
+						{/if}
+						{#if isRecommendationSingle(item)}
+							<span class="rec-tile-badge">Single</span>
 						{/if}
 					</span>
 					<span class="rec-tile-title">{item.title}</span>
@@ -264,6 +277,22 @@
 		transition: box-shadow var(--motion-base);
 	}
 	.rec-tile-art.round { border-radius: 50%; }
+
+	/* Same pill as `.rec-badge` in the rail, top-left so it clears the corner
+	   play badge. */
+	.rec-tile-badge {
+		position: absolute;
+		left: 8px;
+		top: 8px;
+		padding: 3px 7px;
+		border-radius: 999px;
+		background: rgba(0, 0, 0, 0.62);
+		color: #fff;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-bold);
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+	}
 
 	.rec-tile:hover .rec-tile-art {
 		box-shadow: 0 12px 26px -6px rgba(0, 0, 0, 0.5);

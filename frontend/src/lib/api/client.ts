@@ -2051,6 +2051,13 @@ export interface ProviderRecommendationItem {
 	score?: number | null;
 	reason: string;
 	playable: boolean;
+	/**
+	 * Set on an album item that TIDAL only has as a single. Last.fm's top-albums
+	 * feed does not distinguish the two, so a famous 7" arrives as an album with
+	 * no album behind it. `tidal_id` carries the track, and the card seeds song
+	 * radio from it instead of opening a tracklist that does not exist.
+	 */
+	is_single?: boolean;
 }
 
 export interface ProviderRecommendationShelf {
