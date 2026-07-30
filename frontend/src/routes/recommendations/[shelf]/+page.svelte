@@ -9,6 +9,8 @@
 	} from '$lib/api/client';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
+	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
+	import RecommendationAlbumPopup from '$lib/components/home/RecommendationAlbumPopup.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { recommendationEntity } from '$lib/components/home/recommendation_navigation';
 	import {
@@ -30,6 +32,7 @@
 	let shelf = $state<ProviderRecommendationShelf | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	let albumPopupItem = $state<ProviderRecommendationItem | null>(null);
 
 	onMount(() => {
 		void load();
@@ -55,6 +58,7 @@
 
 	const entity = $derived(shelf ? recommendationEntity(shelf.items[0] ?? ({} as never)) : 'track');
 	const isArtist = $derived(entity === 'artist');
+	const isAlbum = $derived(entity === 'album');
 
 	// Mirrors the shelf's own subtitles so the page reads as the same thing,
 	// with the count appended since that is what this view adds.
@@ -118,9 +122,9 @@
 	{:else}
 		<div class="rec-grid" class:artists={isArtist}>
 			{#each shelf.items as item, index (itemKey(item, index))}
-				<!-- Same contract as the Home rail card: opens the entity, and playing
-				     lives in the right-click menu. No play overlay, because artist and
-				     album cards do not carry one anywhere else in the app. -->
+				<!-- Same contract as the Home rail card. Albums carry the Library play
+				     badge and open the mini detail popup; artists carry neither, because
+				     no artist card in the app does. -->
 				<button
 					type="button"
 					class="rec-tile rise-in-card"
@@ -128,7 +132,7 @@
 					style={`--rise-index: ${index % 12}`}
 					title={itemTitle(item)}
 					aria-label={`Open ${item.title}`}
-					onclick={() => void openRecommendationItem(item)}
+					onclick={() => (isAlbum ? (albumPopupItem = item) : void openRecommendationItem(item))}
 					oncontextmenu={(e) => openMenu(e, item)}
 				>
 					<span class="rec-tile-art" class:round={isArtist}>
@@ -141,6 +145,9 @@
 							fadeIn={true}
 							fallbackText={fallbackText(item)}
 						/>
+						{#if isAlbum}
+							<PlayOverlay position="corner" size="sm" />
+						{/if}
 					</span>
 					<span class="rec-tile-title">{item.title}</span>
 					{#if !isArtist && item.artist_name}
@@ -151,6 +158,14 @@
 		</div>
 	{/if}
 </div>
+
+{#if albumPopupItem}
+	<!-- Keyed so picking a different album mounts a fresh popup rather than
+	     asking the existing one to swap albums mid-load. -->
+	{#key albumPopupItem}
+		<RecommendationAlbumPopup item={albumPopupItem} onClose={() => (albumPopupItem = null)} />
+	{/key}
+{/if}
 
 <style>
 	/* Same shell, padding and rhythm as TidalEditorialPage. */

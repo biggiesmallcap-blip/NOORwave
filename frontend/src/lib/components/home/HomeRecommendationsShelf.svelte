@@ -36,7 +36,9 @@
 	} from '$lib/actions/lazy-tidal-art';
 	import { usableArtwork } from '$lib/utils/artwork';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 	import MediaRail from '$lib/components/ui/MediaRail.svelte';
+	import RecommendationAlbumPopup from '$lib/components/home/RecommendationAlbumPopup.svelte';
 
 	type State = 'hidden' | 'loading' | 'ready' | 'empty' | 'error';
 
@@ -71,6 +73,8 @@
 	let resolvingItems = $state<Record<string, boolean>>({});
 	let lazyArtwork = $state<Record<string, string>>({});
 	let loadSeq = 0;
+	/** The recommended album whose detail popup is open, if any. */
+	let albumPopupItem = $state<ProviderRecommendationItem | null>(null);
 
 	let visibleShelves = $derived(shelves.filter((shelf) => shelf.items.length > 0));
 
@@ -425,12 +429,16 @@
 {/snippet}
 
 {#snippet albumCard(entry: RailEntry)}
+	<!-- Matches the Library album card (AlbumCarousel): a corner play badge on
+	     hover, and a click that opens the album's mini detail popup rather than
+	     navigating away. Artists deliberately differ - they have no play badge
+	     anywhere in the app. -->
 	<button
 		type="button"
 		class="rec-card"
 		title={`${entry.item.title}${entry.item.artist_name ? ` - ${entry.item.artist_name}` : ''}`}
 		aria-label={`Open ${entry.item.title}`}
-		onclick={() => void openRecommendationItem(entry.item)}
+		onclick={() => (albumPopupItem = entry.item)}
 		oncontextmenu={(event) => openItemMenu(event, entry.item)}
 		use:lazyTidalArt={{
 			enabled: entry.artwork === null,
@@ -449,6 +457,7 @@
 				fadeIn={true}
 				fallbackText={entry.fallbackText}
 			/>
+			<PlayOverlay position="corner" size="sm" />
 		</div>
 		<p class="rec-title">{entry.item.title}</p>
 		{#if entry.item.artist_name}
@@ -580,6 +589,14 @@
 			{/snippet}
 		</EmptyState>
 	</section>
+{/if}
+
+{#if albumPopupItem}
+	<!-- Keyed so picking a different album mounts a fresh popup rather than
+	     asking the existing one to swap albums mid-load. -->
+	{#key albumPopupItem}
+		<RecommendationAlbumPopup item={albumPopupItem} onClose={() => (albumPopupItem = null)} />
+	{/key}
 {/if}
 
 <style>

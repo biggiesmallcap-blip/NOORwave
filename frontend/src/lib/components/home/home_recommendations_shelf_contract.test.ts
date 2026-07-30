@@ -100,11 +100,15 @@ describe('home recommendations shelf contract', () => {
 			join(here, '../../../routes/recommendations/[shelf]/+page.svelte'),
 			'utf8',
 		);
-		// Opens the entity; playing is a menu action. An artist card carries no
-		// play affordance anywhere in the app, so it must not grow one here.
-		expect(grid).toContain('onclick={() => void openRecommendationItem(item)}');
+		// Albums open the mini detail popup and carry the corner play badge, the
+		// same as a Library album card. Artists carry neither, because no artist
+		// card in the app has a play affordance; clicking one opens the artist.
+		expect(grid).toContain(
+			'onclick={() => (isAlbum ? (albumPopupItem = item) : void openRecommendationItem(item))}',
+		);
 		expect(grid).toContain('aria-label={`Open ${item.title}`}');
-		expect(grid).not.toContain('PlayOverlay');
+		expect(grid).toContain('{#if isAlbum}');
+		expect(grid).toContain('<PlayOverlay position="corner" size="sm" />');
 		// Same hover as `.rec-card`: the card lifts, the artwork shadow deepens.
 		expect(grid).toContain('transform: translateY(-4px)');
 		expect(grid).toContain('box-shadow: 0 12px 26px -6px rgba(0, 0, 0, 0.5)');
@@ -333,5 +337,40 @@ describe('home recommendations shelf contract', () => {
 		expect(playTrending).toContain('api.searchTidal(q, 1)');
 		expect(playTrending).toContain('track.stream_ready !== false');
 		expect(playTrending).toContain('playTidalTracksNow(playable, label)');
+	});
+
+	test('recommended albums open the shared Library popup on both surfaces', () => {
+		const popup = readFileSync(join(here, 'RecommendationAlbumPopup.svelte'), 'utf8');
+		const detail = readFileSync(join(here, 'recommendation_album_detail.ts'), 'utf8');
+		const grid = readFileSync(join(here, '../../../routes/recommendations/[shelf]/+page.svelte'), 'utf8');
+		const albumPopup = readFileSync(join(here, '../AlbumDetailPopup.svelte'), 'utf8');
+
+		// The rail card and the View all tile both open the popup rather than
+		// navigating, so a recommended album behaves like a Library album.
+		expect(source).toContain('albumPopupItem = entry.item');
+		expect(source).toContain('RecommendationAlbumPopup');
+		expect(grid).toContain('albumPopupItem = item');
+		expect(grid).toContain('RecommendationAlbumPopup');
+
+		// One popup instance is about one album: it loads on mount and the parents
+		// key it, so picking another album mounts a fresh one instead of asking a
+		// half-loaded popup to swap albums.
+		expect(popup).toContain('onMount(');
+		expect(popup).not.toContain('$effect(');
+		expect(source).toContain('{#key albumPopupItem}');
+		expect(grid).toContain('{#key albumPopupItem}');
+
+		// A recommended album is usually not owned, so the popup takes explicit
+		// play handlers and an isLocal flag instead of assuming a local album id.
+		expect(albumPopup).toContain('isLocal = true');
+		expect(albumPopup).toContain('onPlay?:');
+		expect(albumPopup).toContain('onShuffle?:');
+		expect(albumPopup).toContain('onPlayFrom?:');
+
+		// The endpoint sends track_id 0 for an unowned track, so `??` gave every
+		// row the same key and the popup threw each_key_duplicate and rendered
+		// nothing. Keep the truthiness check.
+		expect(detail).toContain('track.track_id ? track.track_id : -track.tidal_id');
+		expect(detail).not.toContain('track.track_id ??');
 	});
 });

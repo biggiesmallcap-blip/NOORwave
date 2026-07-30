@@ -13,11 +13,27 @@
 	} from '$lib/utils/artwork';
 	import { portal } from '$lib/actions/portal';
 
-	let { album, tracks, loading, onClose }: {
+	let { album, tracks, loading, onClose, isLocal = true, onPlay, onShuffle, onPlayFrom }: {
 		album: Album;
 		tracks: Track[];
 		loading: boolean;
 		onClose: () => void;
+		/**
+		 * False when this album is not in the library, so `album.id` is not a
+		 * real local id. Library always owns its albums and leaves this alone.
+		 *
+		 * Recommendations do not: a Last.fm album is usually TIDAL-only, and every
+		 * default action here is keyed on a local id - `playAlbum(album.id)`,
+		 * `shuffleAlbum(album.id)`, and the menu builders' `isLocal: true`. Passing
+		 * false swaps the "N in library" chip out and requires the caller to supply
+		 * the play handlers, rather than silently calling playAlbum with an id that
+		 * does not exist.
+		 */
+		isLocal?: boolean;
+		onPlay?: () => void;
+		onShuffle?: () => void;
+		/** Play the album starting from this track. */
+		onPlayFrom?: (track: Track) => void;
 	} = $props();
 	let failedArtworkUrls = $state<Record<string, boolean>>({});
 	let popupArtwork = $derived(artworkCandidate(album.artwork_url, 640));
@@ -98,7 +114,18 @@
 	// partially-owned album queues its TIDAL-only remainder too instead of a
 	// short owned-only queue that automix pads with unrelated tracks.
 	function playFromHere(track: Track) {
+		if (onPlayFrom) return onPlayFrom(track);
 		void playAlbum(album.id, track.id);
+	}
+
+	function playWholeAlbum() {
+		if (onPlay) return onPlay();
+		void playAlbum(album.id);
+	}
+
+	function shuffleWholeAlbum() {
+		if (onShuffle) return onShuffle();
+		void shuffleAlbum(album.id);
 	}
 
 	function trackMenu(track: Track) {
@@ -108,7 +135,7 @@
 	function openAlbumContextMenu(event: MouseEvent) {
 		event.preventDefault();
 		event.stopPropagation();
-		openContextMenu(event, buildAlbumMenu(album, { isLocal: true }), album.title);
+		openContextMenu(event, buildAlbumMenu(album, { isLocal }), album.title);
 	}
 
 	function openAlbumArtistContextMenu(event: MouseEvent) {
@@ -117,7 +144,7 @@
 		event.stopPropagation();
 		openContextMenu(
 			event,
-			buildArtistMenu({ id: album.artist_id, name: album.artist_name, in_library: true }, { isLocal: true }),
+			buildArtistMenu({ id: album.artist_id, name: album.artist_name, in_library: isLocal }, { isLocal }),
 			album.artist_name
 		);
 	}
@@ -188,15 +215,19 @@
 						{#if album.release_type}<span class="popup-chip">{album.release_type}</span>{/if}
 						<!-- track_count counts OWNED rows only, so label it as library
 						     coverage rather than claiming it's the album's track count. -->
-						{#if album.track_count}<span class="popup-chip">{album.track_count} in library</span>{/if}
+						{#if album.track_count}
+							<span class="popup-chip">
+								{album.track_count} {isLocal ? 'in library' : 'tracks'}
+							</span>
+						{/if}
 						<span class="popup-chip">{album.source}</span>
 					</div>
 					<div class="popup-actions">
-						<button class="popup-cta popup-cta--primary" onclick={() => void playAlbum(album.id)}>
+						<button class="popup-cta popup-cta--primary" onclick={playWholeAlbum}>
 							<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor" /></svg>
 							Play
 						</button>
-						<button class="popup-cta popup-cta--ghost" onclick={() => void shuffleAlbum(album.id)}>
+						<button class="popup-cta popup-cta--ghost" onclick={shuffleWholeAlbum}>
 							<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 								<path d="M16 3h5v5" /><path d="M4 20 21 3" /><path d="M21 16v5h-5" /><path d="m15 15 6 6" /><path d="M4 4l5 5" />
 							</svg>
