@@ -1019,12 +1019,15 @@ with 8 tracks over 5 artists. The candidate funnel in the server log explains it
 
 Fixed by dropping the Last.fm source from that call site, raising the per-seed
 budget to 60, and making both the artist and album caps top up from what they
-skipped instead of returning a short list. Not yet verified against real data:
-the rebuild would have interrupted playback, so the numbers above are pre-fix
-only. Worth re-running that same curl after the next build and confirming the
-track count reaches the limit - and that the cold path (no cache row at all) is
-now sub-second, since the fan-out no longer touches the network.
+skipped instead of returning a short list.
 
-Same session added `GET /api/home/shuffle-picks` for the Random tracks / Random
-albums murals, also unverified in the app for the same reason.
-Spawned by: random tracks pop-in 2026-07-27
+Mostly verified 2026-07-30 against the live library, after the rebuild that
+session needed anyway. `POST /api/home/suggestions {}` now returns 50 tracks and
+24 albums, so the track count reaches its limit - the 8-of-12 symptom above is
+gone. `GET /api/home/shuffle-picks?limit=20` returns 20 tracks and 20 albums and
+the Random murals render from it.
+
+Still open: the cold path. Both measurements were cache hits (6ms), so the claim
+that a no-cache-row request is now sub-second is untested. It needs the cache row
+deleted out of the DB first, which is why it was skipped.
+Spawned by: random tracks pop-in 2026-07-27; partly verified 2026-07-30
