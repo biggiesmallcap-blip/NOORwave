@@ -1055,3 +1055,48 @@ Do it as a read-only audit first that lists divergences per element; the fixes
 are individually trivial but touch a lot of files, so they want their own commit
 per element rather than one sweep.
 Spawned by: home layout and Last.fm run 2026-07-30
+
+### playback: a failed DASH download is delivered to the decoder as clean EOF
+
+Found while diagnosing the end-of-track stall (2026-07-30), not fixed there
+because it is a separate failure mode with its own blast radius.
+
+`decode/mod.rs` ends the download thread with `chunk_tx.send(None)` under a
+"signal EOF regardless" comment, on both the success and the error path. On the
+receiving side `StreamPipe::poll_for_chunk` maps `Ok(None)` and a disconnected
+sender to `ChunkPoll::Eof`, which symphonia sees as a clean end of stream. So a
+download that died partway (dead CDN edge, expired URL, 4xx on a mid-track
+segment) is indistinguishable from a track that genuinely ended: the decoder
+runs `mark_finished()`, stores a `total_samples` short of the real duration, and
+playback treats the truncated tail as the end of the song.
+
+Symptom to look for: tracks that end early but "correctly" - no error toast, no
+`TrackError`, the queue advances normally, and the only tell is the played
+duration being shorter than the track's own `duration_ms`.
+
+Fix shape: the download thread already knows whether it is on the error path
+(it logs `TIDAL stream download error` there). Carry that distinction into the
+pipe - a failure terminator distinct from EOF - and have the decoder raise
+`signal_terminal(Error)` instead of `mark_finished()` so the existing
+track-error advance and retry path runs. Worth checking whether the truncation
+should be tolerated when the missing tail is under a segment or two, since the
+last segment failing is common with the `sp-ad-cf` edge.
+
+### playback: the watchdog's `paused` exemption has the same shape as the old `finished` one
+
+Also from the 2026-07-30 stall diagnosis. Speculative - not observed, unlike the
+`finished` hole which was.
+
+`StallTracker::observe` exempts a paused engine, which is correct for a user
+pause. But `paused` is documented in `runtime/shared.rs` as "a general-purpose
+mute gate, not a 'the user pressed pause' signal": pre-decoded next decks, DJ
+promotions and the stream-swap guard all drive it. If any of those leaves the
+audible engine paused without a user pause behind it, the engine is exempt from
+the watchdog forever and the same freeze-until-Next state results.
+
+The runtime already tracks `state.user_paused` separately, so the exemption
+could key off intent rather than the mute gate: exempt when `user_paused`, and
+treat "muted but nobody asked for a pause, for 15s, with no progress" as a
+stall. Wants care - a false positive here force-advances during a legitimate
+pause, which is worse than the bug.
+Spawned by: end-of-track playback stall investigation 2026-07-30

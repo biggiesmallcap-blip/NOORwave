@@ -10502,7 +10502,19 @@ async fn handle_runtime_finished(
 ) -> anyhow::Result<()> {
     {
         let state_guard = state.read().await;
-        if current_playback_generation(&state_guard) != generation {
+        let current_generation = current_playback_generation(&state_guard);
+        if current_generation != generation {
+            // Not necessarily a fault (a user skip legitimately bumps the
+            // generation mid-flight), but it abandons an end-of-track advance,
+            // and doing that silently is what made the freeze undiagnosable.
+            tracing::warn!(
+                target: "noor.playback.advance",
+                event = "runtime_finished_stale_generation",
+                finished_track_id,
+                generation,
+                current_generation,
+                "end-of-track advance dropped: playback generation moved on; queue left unchanged"
+            );
             return Ok(());
         }
     }
@@ -10524,6 +10536,15 @@ async fn handle_runtime_finished(
             let current_track_id = player::current_track_id(conn)?;
             let current_state = player::load_state(conn)?;
             if current_track_id != Some(finished_track_id) || !current_state.is_playing {
+                tracing::warn!(
+                    target: "noor.playback.advance",
+                    event = "runtime_finished_state_mismatch",
+                    finished_track_id,
+                    generation,
+                    db_current_track_id = ?current_track_id,
+                    db_is_playing = current_state.is_playing,
+                    "end-of-track advance dropped: persisted state no longer matches the finished track; queue left unchanged"
+                );
                 return Ok(None);
             }
             Ok(Some(player::next_track(conn, cleared)?))
@@ -10554,6 +10575,13 @@ async fn handle_runtime_finished(
     let snapshot =
         resolve_or_skip_pending_current(&state, snapshot, generation, "runtime_finished").await?;
     if !playback_generation_is_current(&state, generation).await {
+        tracing::warn!(
+            target: "noor.playback.advance",
+            event = "runtime_finished_stale_after_resolve",
+            finished_track_id,
+            generation,
+            "end-of-track advance dropped after pending resolve: generation moved on"
+        );
         return Ok(());
     }
     let end_reason = if snapshot.state.current_track.is_some() {

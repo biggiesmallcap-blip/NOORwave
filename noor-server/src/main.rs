@@ -541,10 +541,17 @@ mod tests {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
+    // `noor_server=info` alone only matches events whose target is the crate
+    // path. Every `target: "noor.*"` / "playback" / "tidal::*" diagnostic in
+    // this codebase carries a custom dotted target instead, and EnvFilter
+    // matches targets by prefix, so none of them matched any directive and all
+    // of them were dropped. That silently blanked the entire structured
+    // playback-advance trail (`noor.playback.advance`) in production logs: the
+    // one subsystem with no visibility was the one instrumented for it.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "noor_server=info".into()),
+                .unwrap_or_else(|_| "noor_server=info,noor=info,playback=info,tidal=info".into()),
         )
         .init();
 
