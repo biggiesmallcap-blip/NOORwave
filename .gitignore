@@ -83,6 +83,11 @@ noor-app/moods.json
 frontend/static/svg_old/
 noor-app/icons_old/
 
+# Raw 1920x1080 README captures. Regenerated in seconds by
+# scripts/capture-screenshots.mjs, and ~9MB per refresh if tracked. Only the
+# polished docs/assets/shots/*.webp the README actually renders are committed.
+docs/assets/screenshot-*.png
+
 # repowise API keys (local)
 .repowise/
 .repowise/.env
