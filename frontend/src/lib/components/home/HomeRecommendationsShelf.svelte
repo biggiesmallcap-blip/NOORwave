@@ -29,6 +29,7 @@
 		playRecommendationArtist,
 	} from '$lib/player/play_recommendations';
 	import { playTrackNow } from '$lib/stores/player';
+	import { rotatingWindow, rotationForPeriod } from '$lib/utils/rotation';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import {
 		composeTidalArtQuery,
@@ -51,6 +52,27 @@
 
 	const ROTATE_MS = 5500;
 	const PANEL_LIMIT = 20;
+
+	/**
+	 * How often the rail shows a different slice of the shelf.
+	 *
+	 * The server caches a shelf for six hours because rebuilding one costs about
+	 * a hundred Last.fm calls plus up to fifty TIDAL searches, and the input to
+	 * it - top, loved and recent tracks - barely moves in an afternoon. Cutting
+	 * that lease would double the upstream cost to re-derive almost the same
+	 * list.
+	 *
+	 * The cheaper knob is which twenty of the fifty are on screen. Every one of
+	 * those fifty is already fetched and already in the payload, so rotating the
+	 * window costs nothing and gives three or four visibly different rails out of
+	 * one fetch. Two hours divides the six-hour lease without repeating inside a
+	 * single sitting.
+	 *
+	 * Computed once, on init, not in a `$derived`: the window must not move while
+	 * the user is dragging through the rail.
+	 */
+	const VIEW_ROTATION_MS = 2 * 60 * 60 * 1000;
+	const viewRotation = rotationForPeriod(VIEW_ROTATION_MS);
 
 	// Seed from cache so the shelf paints instantly on launch. The provider gate is
 	// preserved: only seed 'ready' if the cached Last.fm/ListenBrainz status says a
@@ -173,9 +195,13 @@
 	 * a row and reshape the mosaic. For the rails it is a judgement - the server
 	 * now returns fifty, and a rail you have to drag through fifty times is not a
 	 * way to see fifty things. The rest lives behind "View all".
+	 *
+	 * Which twenty rotates every `VIEW_ROTATION_MS`, so the thirty items the rail
+	 * is not showing are not simply never seen. The window wraps, so it is always
+	 * exactly twenty long even when fifty does not divide by twenty.
 	 */
 	function shelfItems(shelf: ProviderRecommendationShelf): ProviderRecommendationItem[] {
-		return shelf.items.slice(0, PANEL_LIMIT);
+		return rotatingWindow(shelf.items, PANEL_LIMIT, viewRotation * PANEL_LIMIT);
 	}
 
 	/** True when the shelf is holding back items the rail is not showing. */

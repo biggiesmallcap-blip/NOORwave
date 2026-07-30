@@ -63,7 +63,10 @@ describe('Home owns browse, /search owns searching', () => {
 		expect(search).not.toContain('Math.random()');
 		// The advance wraps, so the tail of the library is reachable.
 		expect(search).toContain('(start + PLAYLIST_WINDOW) % total');
-		expect(search).toContain('localPlaylists[(start + i) % total]');
+		// The windowing itself is shared with the Home recommendation rails, which
+		// rotate the same way over a longer list. Only the offset differs.
+		expect(search).toContain('rotatingWindow(localPlaylists, PLAYLIST_WINDOW, playlistRotation)');
+		expect(search).not.toContain('localPlaylists[(start + i) % total]');
 		// Persisting the offset must never be able to take the page down; a
 		// full localStorage throwing here would brick the route.
 		expect(search).toMatch(/localStorage\.setItem\(PLAYLIST_ROTATION_KEY[\s\S]{0,120}\} catch \{/);

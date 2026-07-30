@@ -20,6 +20,7 @@
   import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal'
   import { tidalSearchTrackToPlayable } from '$lib/utils/track'
   import { initials } from '$lib/utils/text'
+  import { rotatingWindow } from '$lib/utils/rotation'
   import { canPlayTrack, getPlayableLabel } from '$lib/player/playable'
   import { mergeLocalIntoTidal } from '$lib/search/merge_local'
   import { getCachedMosaic, setCachedMosaic, nameToGradient } from '$lib/stores/playlist_artwork_cache'
@@ -184,16 +185,13 @@
     return start
   }
 
-  const visiblePlaylistWindow = $derived.by(() => {
-    const total = localPlaylists.length
-    if (total === 0) return []
-    if (total <= PLAYLIST_WINDOW) return localPlaylists
-    const start = playlistRotation % total
-    return Array.from(
-      { length: PLAYLIST_WINDOW },
-      (_, i) => localPlaylists[(start + i) % total],
-    )
-  })
+  // Same wrapping window the Home recommendation rails use, so the two surfaces
+  // cannot drift. Only the offset differs: this one advances per visit and is
+  // stored, because a playlist list changes when you make a playlist, while the
+  // recommendation rails derive theirs from the clock.
+  const visiblePlaylistWindow = $derived(
+    rotatingWindow(localPlaylists, PLAYLIST_WINDOW, playlistRotation),
+  )
 
   // Cover mosaics for the idle "Your playlists" rail, keyed by playlist id.
   // A playlist has no artwork of its own - the cover is assembled from the

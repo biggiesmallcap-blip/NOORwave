@@ -95,6 +95,23 @@ describe('home recommendations shelf contract', () => {
 		expect(source).toContain('/recommendations/${recommendationShelfSlug(shelf)}');
 	});
 
+	test('the visible window rotates over the cached shelf instead of re-fetching it', () => {
+		// Rebuilding a shelf costs about a hundred Last.fm calls plus up to fifty
+		// TIDAL searches, so the six-hour lease stays. The cheap knob is which
+		// twenty of the fifty are on screen - those fifty are already in the
+		// payload, so rotating the window costs no requests at all.
+		expect(source).toContain('rotatingWindow(shelf.items, PANEL_LIMIT, viewRotation * PANEL_LIMIT)');
+		expect(source).toContain('VIEW_ROTATION_MS = 2 * 60 * 60 * 1000');
+		// Read once on init. Recomputed inside a `$derived` it would move the
+		// window under a user who is mid-scroll.
+		expect(source).toContain('const viewRotation = rotationForPeriod(VIEW_ROTATION_MS);');
+		expect(source).not.toContain('shelf.items.slice(0, PANEL_LIMIT)');
+		// Clock-derived, not random: the rail must hold still while being read.
+		expect(source).not.toContain('Math.random()');
+		// The server lease is what this is sized against, so keep them together.
+		expect(homeRoutes).toContain('RECOMMENDATION_FULL_TTL_SECS: i64 = 6 * 60 * 60');
+	});
+
 	test('the View all grid presents cards exactly as the rail does', () => {
 		const grid = readFileSync(
 			join(here, '../../../routes/recommendations/[shelf]/+page.svelte'),
