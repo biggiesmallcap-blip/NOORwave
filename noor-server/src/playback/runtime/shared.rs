@@ -397,7 +397,6 @@ fn write_output_buffer<T>(
     }
 
     if guard.started && written == 0 && guard.finished && !guard.finished_notified {
-        guard.finished_notified = true;
         debug!(
             "Playback runtime finished: track_id={}, generation={}, position_samples={}, total_samples={}",
             shared.track_id,
@@ -405,11 +404,21 @@ fn write_output_buffer<T>(
             shared.position_samples.load(Ordering::Relaxed),
             shared.total_samples.load(Ordering::Relaxed)
         );
-        let _ = command_tx.send(PlaybackRuntimeCommand::TrackTerminal {
-            track_id: shared.track_id,
-            generation: shared.generation,
-            outcome: PlaybackTerminalReason::Finished,
-        });
+        // Latch only once the terminal is actually handed to the runtime.
+        // Latching first and discarding the send result made this the single
+        // unacknowledged point of failure for the whole end-of-track advance:
+        // a dropped terminal was never re-issued, so playback froze on the last
+        // sample of the track with the queue intact. A dropped terminal past
+        // this point (unmatched engine slot, or a guard in the queue-advance
+        // handler) is now caught by the stall watchdog instead.
+        let sent = command_tx
+            .send(PlaybackRuntimeCommand::TrackTerminal {
+                track_id: shared.track_id,
+                generation: shared.generation,
+                outcome: PlaybackTerminalReason::Finished,
+            })
+            .is_ok();
+        guard.finished_notified = sent;
     }
 
     if !shared.near_end_signaled.load(Ordering::Relaxed) {

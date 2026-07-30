@@ -45,12 +45,14 @@ const DJ_MIXER_DEFAULT_MAX_BLOCK_FRAMES: usize = 8192;
 const STALL_WATCHDOG_TICK: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How long the audibly-active engine may make zero position progress -- while
-/// playing (not paused) and not finished -- before the watchdog force-advances
-/// the queue. Sized comfortably past one healthy DASH segment timeout+retry
-/// cycle (`cdn_health::HEALTHY_SEGMENT_TIMEOUT` = 12s) so a transiently-slow
-/// segment that still arrives is not pre-empted, but a doomed TIDAL CDN stall
-/// recovers
+/// playing and not paused -- before the watchdog force-advances the queue.
+/// Sized comfortably past one healthy DASH segment timeout+retry cycle
+/// (`cdn_health::HEALTHY_SEGMENT_TIMEOUT` = 12s) so a transiently-slow segment
+/// that still arrives is not pre-empted, but a doomed TIDAL CDN stall recovers
 /// automatically instead of freezing playback until the user manually skips.
+/// The same budget covers a lost end-of-track terminal: 15s is far longer than
+/// the sub-buffer gap between the buffer draining and a healthy terminal being
+/// processed, so a working advance is never pre-empted by the watchdog.
 const ACTIVE_STALL_RECOVERY_SECS: u64 = 15;
 
 /// An outgoing engine that lived at least this long without producing a
@@ -68,12 +70,20 @@ const SILENT_ENGINE_FAILURE_MIN_AGE: std::time::Duration = std::time::Duration::
 const MAX_SILENT_START_STREAK: u32 = 3;
 
 /// Watchdog state for the runtime loop. The loop otherwise only advances when
-/// the audio callback sends a command, and a decoder starved on a hung TIDAL
-/// segment is `started && !finished && written==0`: it emits no command and the
-/// playhead freezes. Nothing then recovers it until the segment finally errors
-/// out (tens of seconds later) or the user clicks Next. This tracker notices an
-/// active engine making no progress and asks the loop to force the queue
-/// forward. See the crossfade-stall diagnosis.
+/// the audio callback sends a command, and the callback goes quiet in two
+/// distinct ways, both of which froze playback until the user clicked Next:
+///
+///   * Starved mid-track: a decoder hung on a TIDAL segment is
+///     `started && !finished && written==0`. It emits no command and the
+///     playhead freezes until the segment finally errors out, if it ever does.
+///   * Lost end-of-track terminal: the engine is `finished` with a fully
+///     drained buffer, so the callback's one-shot `TrackTerminal` was already
+///     latched and sent. If it was then dropped downstream (no matching engine
+///     slot, or a guard in the queue-advance handler), nothing re-issues it.
+///
+/// This tracker notices an active engine making no progress in either shape and
+/// asks the loop to force the queue forward.
+
 struct StallTracker {
     watching: Option<(i64, u64)>,
     last_position: u64,
@@ -92,6 +102,21 @@ struct EngineProbe {
     paused: bool,
     started: bool,
     finished: bool,
+    /// No unread samples left in the buffer. Combined with `finished` this is
+    /// end-of-track: there is no more audio coming and none left to play.
+    drained: bool,
+}
+
+/// Which failure shape triggered a force-advance. Only meaningful when
+/// `StallPollOutcome::force_advance` is set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StallKind {
+    /// Decode had not finished and the engine ran dry: a hung stream mid-track.
+    Starved,
+    /// Decode finished and the buffer fully drained, but the queue never moved.
+    /// The audio callback's one-shot terminal was lost somewhere between
+    /// `finished_notified` being latched and the queue advance running.
+    LostTerminal,
 }
 
 /// What one watchdog tick decided.
@@ -106,6 +131,9 @@ struct StallPollOutcome {
     /// listen session (track_id). Engine changes do not emit this - the
     /// track-change flow flushes the session instead.
     just_recovered: Option<i64>,
+    /// Set alongside `force_advance` to distinguish a mid-track starve from a
+    /// lost end-of-track terminal, so the two log distinguishably.
+    kind: Option<StallKind>,
 }
 
 impl StallTracker {
@@ -135,18 +163,25 @@ impl StallTracker {
             self.stall_flagged = false;
             return StallPollOutcome::default();
         };
-        let (started, finished) = engine
+        let (started, finished, drained) = engine
             .shared
             .buffer
             .lock()
-            .map(|guard| (guard.started, guard.finished))
-            .unwrap_or((false, false));
+            .map(|guard| {
+                (
+                    guard.started,
+                    guard.finished,
+                    guard.samples.len() <= guard.read_pos,
+                )
+            })
+            .unwrap_or((false, false, false));
         self.observe(EngineProbe {
             id: (engine.track_id, engine.generation),
             position: engine.shared.position_samples.load(Ordering::Relaxed),
             paused: engine.shared.paused.load(Ordering::SeqCst),
             started,
             finished,
+            drained,
         })
     }
 
@@ -159,12 +194,23 @@ impl StallTracker {
             self.rearm(probe.id, probe.position);
             return outcome;
         }
-        // A finished engine emits its own terminal via the audio callback. A
-        // not-yet-started engine is still doing its initial prebuffer -- on a
+        // A not-yet-started engine is still doing its initial prebuffer -- on a
         // slow connection the first ~500ms can legitimately take many seconds to
         // arrive, and the playhead sits at the baseline offset the whole time.
-        // Neither is a stall; only a deck that WAS playing and then froze is.
-        if probe.finished || !probe.started {
+        // That is not a stall; only a deck that WAS playing and then froze is.
+        //
+        // `finished` used to be exempted here too, on the reasoning that such an
+        // engine "emits its own terminal via the audio callback". That terminal
+        // is one-shot (`finished_notified` is latched before the send and never
+        // re-armed), so when it was lost the exemption meant nothing recovered
+        // the queue and playback froze at the end of the track until the user
+        // hit Next. Worse, the decoder marks `finished` as soon as decode
+        // completes -- with DASH lookahead that is minutes before playback
+        // reaches the end -- so the exemption disarmed the watchdog across the
+        // whole back half of every track. Finished engines are now watched like
+        // any other; a finished engine that is still playing out its buffer
+        // keeps moving its position and rearms below on its own.
+        if !probe.started {
             self.rearm(probe.id, probe.position);
             return outcome;
         }
@@ -190,6 +236,11 @@ impl StallTracker {
                 outcome.just_stalled = Some(probe.id.0);
             }
             outcome.force_advance = Some(probe.id);
+            outcome.kind = Some(if probe.finished && probe.drained {
+                StallKind::LostTerminal
+            } else {
+                StallKind::Starved
+            });
         }
         outcome
     }
@@ -2045,10 +2096,25 @@ fn run_runtime_loop(
                     let _ = event_tx.send(PlaybackRuntimeEvent::StallRecovered { track_id });
                 }
                 if let Some((track_id, generation)) = stall.force_advance {
-                    warn!(
-                        "Playback stalled: no audio on track {} for {}s; forcing queue advance",
-                        track_id, ACTIVE_STALL_RECOVERY_SECS
-                    );
+                    match stall.kind {
+                        Some(StallKind::LostTerminal) => warn!(
+                            target: "noor.playback.advance",
+                            event = "watchdog_lost_terminal",
+                            track_id,
+                            generation,
+                            stalled_secs = ACTIVE_STALL_RECOVERY_SECS,
+                            "track finished and drained but the queue never advanced; \
+                             end-of-track terminal was lost. Forcing queue advance"
+                        ),
+                        _ => warn!(
+                            target: "noor.playback.advance",
+                            event = "watchdog_starved",
+                            track_id,
+                            generation,
+                            stalled_secs = ACTIVE_STALL_RECOVERY_SECS,
+                            "no audio progress on track; forcing queue advance"
+                        ),
+                    }
                     // Reuse the natural end-of-track advance (Finished): promotes a
                     // ready prepared deck if there is one, otherwise cold-starts
                     // the next queue track. A silent skip, not an error toast.
@@ -2957,9 +3023,23 @@ fn run_runtime_loop(
                             }
                         }
                         None => {
-                            debug!(
-                                "Playback terminal ignored for unknown engine: track_id={}, generation={}, outcome={:?}",
-                                track_id, generation, outcome
+                            // The terminal is one-shot (`finished_notified` is
+                            // latched before the send), so a terminal that
+                            // matches no live slot is an advance that will
+                            // never be re-issued from the audio callback. The
+                            // stall watchdog is the backstop; surface it at
+                            // warn so the drop is visible when it happens.
+                            warn!(
+                                target: "noor.playback.advance",
+                                event = "terminal_unmatched_engine",
+                                track_id,
+                                generation,
+                                outcome = ?outcome,
+                                active = ?active,
+                                next = ?next,
+                                fading = ?fading,
+                                drop_preview = ?drop_preview,
+                                "playback terminal matched no live engine slot; advance dropped"
                             );
                         }
                     }
@@ -6876,7 +6956,7 @@ mod tests {
     }
 
     #[test]
-    fn stall_tracker_ignores_progress_paused_and_finished_engines() {
+    fn stall_tracker_ignores_progress_and_paused_engines() {
         let mut state = test_runtime_loop_state();
         let engine = test_engine_with_shared(7, 3);
         engine
@@ -6934,22 +7014,116 @@ mod tests {
             .shared
             .paused
             .store(false, Ordering::SeqCst);
+    }
 
-        // A finished engine emits its own terminal; the watchdog leaves it alone.
-        tracker.last_progress_at = stale();
+    /// A finished engine that still has buffered audio left is mid-playout,
+    /// not stalled: the callback is draining it and the position moves.
+    #[test]
+    fn stall_tracker_ignores_finished_engine_still_draining() {
+        let mut state = test_runtime_loop_state();
+        let engine = test_engine_with_shared(7, 3);
+        {
+            let mut guard = engine.shared.buffer.lock().unwrap();
+            guard.started = true;
+            guard.samples = vec![0.0; 4_800];
+            guard.read_pos = 0;
+            guard.mark_finished();
+        }
+        engine
+            .shared
+            .position_samples
+            .store(48_000, Ordering::Relaxed);
+        state.engine = Some(engine);
+
+        let mut tracker = StallTracker::new();
+        assert_eq!(tracker.poll(&state), StallPollOutcome::default());
+
+        // Playout advanced the position: still healthy even though finished.
+        tracker.last_progress_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(
+                ACTIVE_STALL_RECOVERY_SECS + 1,
+            ))
+            .expect("instant underflow");
         state
             .engine
             .as_ref()
             .unwrap()
             .shared
-            .buffer
-            .lock()
-            .unwrap()
-            .mark_finished();
+            .position_samples
+            .store(96_000, Ordering::Relaxed);
         assert_eq!(
             tracker.poll(&state),
             StallPollOutcome::default(),
-            "finished is not a stall"
+            "a finished engine still playing out its buffer is not stalled"
+        );
+    }
+
+    /// The end-of-track regression this watchdog change exists for: decode
+    /// finished, the buffer fully drained, the position is pinned at the end
+    /// and nothing is advancing. That is the audio callback's one-shot
+    /// terminal having been lost, and the watchdog is the only thing left that
+    /// can recover it.
+    #[test]
+    fn stall_tracker_force_advances_finished_drained_engine() {
+        let mut state = test_runtime_loop_state();
+        let engine = test_engine_with_shared(7, 3);
+        {
+            let mut guard = engine.shared.buffer.lock().unwrap();
+            guard.started = true;
+            guard.samples = vec![0.0; 4_800];
+            guard.read_pos = 4_800; // fully drained
+            guard.mark_finished();
+            guard.finished_notified = true; // terminal already consumed and lost
+        }
+        engine
+            .shared
+            .position_samples
+            .store(48_000, Ordering::Relaxed);
+        state.engine = Some(engine);
+
+        let mut tracker = StallTracker::new();
+        assert_eq!(tracker.poll(&state), StallPollOutcome::default());
+
+        tracker.last_progress_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(
+                ACTIVE_STALL_RECOVERY_SECS + 1,
+            ))
+            .expect("instant underflow");
+        let outcome = tracker.poll(&state);
+        assert_eq!(
+            outcome.force_advance,
+            Some((7, 3)),
+            "a drained finished engine making no progress must force the queue forward"
+        );
+        assert_eq!(outcome.kind, Some(StallKind::LostTerminal));
+    }
+
+    /// A paused engine at the end of its buffer is the user having pressed
+    /// pause on the last moments of a track. Never force-advance that.
+    #[test]
+    fn stall_tracker_ignores_paused_finished_drained_engine() {
+        let mut state = test_runtime_loop_state();
+        let engine = test_engine_with_shared(7, 3);
+        {
+            let mut guard = engine.shared.buffer.lock().unwrap();
+            guard.started = true;
+            guard.read_pos = 0;
+            guard.mark_finished();
+        }
+        engine.shared.paused.store(true, Ordering::SeqCst);
+        state.engine = Some(engine);
+
+        let mut tracker = StallTracker::new();
+        assert_eq!(tracker.poll(&state), StallPollOutcome::default());
+        tracker.last_progress_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(
+                ACTIVE_STALL_RECOVERY_SECS + 1,
+            ))
+            .expect("instant underflow");
+        assert_eq!(
+            tracker.poll(&state),
+            StallPollOutcome::default(),
+            "paused wins over drained"
         );
     }
 
