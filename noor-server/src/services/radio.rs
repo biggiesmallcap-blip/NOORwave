@@ -276,12 +276,17 @@ pub async fn orchestrate_song(
     };
 
     // ── Last.fm source ────────────────────────────────────────────────────────
-    if lastfm.is_none() {
-        tracing::info!(
-            seed_track_id,
-            "orchestrate_song: no Last.fm client (no API key configured)"
-        );
-    } else if seed_meta.artist_name.is_none() {
+    //
+    // A `None` client is not logged here. It used to be, at INFO, as "no API key
+    // configured" - which this function has no way of knowing. `None` is just as
+    // often a caller switching the source off on purpose: `home_suggestions`
+    // does exactly that for every seed it fans out, so a single Home load wrote
+    // eight INFO lines blaming a key that was configured and working. A
+    // diagnostic that states a cause it did not check is worse than no
+    // diagnostic. What actually happened is already on the funnel line below as
+    // `lfm_count`, and whether a key exists is what `/api/lastfm/status`
+    // answers.
+    if lastfm.is_some() && seed_meta.artist_name.is_none() {
         tracing::info!(
             seed_track_id,
             "orchestrate_song: seed has no artist_name; Last.fm source skipped"
