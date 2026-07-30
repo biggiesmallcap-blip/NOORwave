@@ -1031,3 +1031,27 @@ Still open: the cold path. Both measurements were cache hits (6ms), so the claim
 that a no-cache-row request is now sub-second is untested. It needs the cache row
 deleted out of the DB first, which is why it was skipped.
 Spawned by: random tracks pop-in 2026-07-27; partly verified 2026-07-30
+
+### css: audit shared chrome across routes before adding more of it
+
+Home and its new detail routes were brought onto one vocabulary this session
+(one SectionHeader, one rail primitive, two spacing values, one rise-in variant
+pair, one album popup). The rest of the app has not had that pass, and the
+divergence is only obvious once two surfaces sit next to each other.
+
+Worth auditing, per element rather than per route, and standardising on whatever
+the Search page already does since that is the design reference:
+
+- page headers: `PageHeader` variants vs hand-rolled heroes vs bare `<h1>`
+- back buttons: `< Back` / `<- Back` / `goBack(fallback)` vs a plain `goto`, and
+  the two different glyphs currently in use
+- links: which asset references are `<a href>` vs `<button onclick>`, which get
+  hover underlines, and which are missing the shared context menu
+- spacing: raw px literals still in place where `--space-*` belongs
+- "View all" affordances: label, arrow glyph, and whether the target route
+  actually resolves (several editorial ones 404 by design of the upstream id)
+
+Do it as a read-only audit first that lists divergences per element; the fixes
+are individually trivial but touch a lot of files, so they want their own commit
+per element rather than one sweep.
+Spawned by: home layout and Last.fm run 2026-07-30
