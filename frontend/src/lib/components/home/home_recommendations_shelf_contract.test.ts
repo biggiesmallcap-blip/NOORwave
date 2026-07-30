@@ -372,5 +372,21 @@ describe('home recommendations shelf contract', () => {
 		// nothing. Keep the truthiness check.
 		expect(detail).toContain('track.track_id ? track.track_id : -track.tidal_id');
 		expect(detail).not.toContain('track.track_id ??');
+
+		// An album that is genuinely not on TIDAL says so in place. Navigating to
+		// /search for it threw the user off Home for a click that promised a popup.
+		expect(popup).toContain("showToast(`Couldn't find \"${target.title}\" on Tidal`, 'error')");
+		expect(popup).not.toContain('openRecommendationItem');
+	});
+
+	test('resolves albums against enough TIDAL results to find them', () => {
+		const helpers = readFileSync(join(here, '../../player/play_recommendations.ts'), 'utf8');
+		// The top 5 album hits are the artist's most-played, not the one asked for,
+		// so most shelf items missed. 12 is ARTWORK_SEARCH_LIMIT server-side, so
+		// both ends share a tidal_search_cache row, and 12 resolves the same items
+		// as 20 across the whole shelf.
+		expect(helpers).toContain('api.searchTidal(recommendationSearchQuery(item), 12)');
+		expect(homeRoutes).toContain('ARTWORK_SEARCH_LIMIT: i32 = 12');
+		expect(helpers).not.toContain('api.searchTidal(recommendationSearchQuery(item), 5)');
 	});
 });

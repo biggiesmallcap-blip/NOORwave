@@ -152,4 +152,22 @@ describe('non-Latin names do not collide on the empty fold', () => {
 			wanted,
 		);
 	});
+
+	// A sole album by the wanted artist used to be accepted without looking at
+	// the title at all, which opened TIDAL's one Althea & Donna album under two
+	// different Last.fm titles.
+	test('findAlbumMatch refuses the only album by the artist when the title is unrelated', () => {
+		expect(
+			findAlbumMatch(rec('Uptown Top Ranking', 'Althea & Donna'), [
+				album('Hurt So Good', 'Althea & Donna', 1),
+			]),
+		).toBeNull();
+	});
+
+	test('findAlbumMatch still accepts an edition suffix on the same album', () => {
+		const wanted = album('Hurt So Good', 'Althea & Donna', 1);
+		expect(
+			findAlbumMatch(rec('Hurt So Good (Bonus Track Edition)', 'Althea & Donna'), [wanted]),
+		).toBe(wanted);
+	});
 });

@@ -101,14 +101,20 @@ export function findAlbumMatch(
 	if (exact) return exact;
 
 	// A wrong album is worse than no album, so only accept a fuzzy hit by the same
-	// artist (handles deluxe/remaster/edition suffixes). If the artist is known and
-	// only one of their albums came back, take it; otherwise require title overlap.
+	// artist (handles deluxe/remaster/edition suffixes) and require the titles to
+	// actually overlap.
+	//
+	// There used to be an escape hatch here: if the artist was known and only one
+	// of their albums came back, take it. The title never entered into it, so
+	// "Uptown Top Ranking" and "Trojan Reggae Sisters Collection" both opened
+	// "Hurt So Good" - the one Althea & Donna album TIDAL returned. An album that
+	// is genuinely not on TIDAL has to resolve to nothing so the caller can say
+	// so, rather than showing a different record under the title that was clicked.
 	const sameArtist = albums.filter(artistOk);
 	if (sameArtist.length === 0) return null;
-	const overlap = sameArtist.find((album) => namesOverlap(normalizeCatalogName(album.title), wantedTitle));
-	if (overlap) return overlap;
-	if (wantedArtist && sameArtist.length === 1) return sameArtist[0];
-	return null;
+	return (
+		sameArtist.find((album) => namesOverlap(normalizeCatalogName(album.title), wantedTitle)) ?? null
+	);
 }
 
 /**

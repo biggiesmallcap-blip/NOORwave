@@ -3,13 +3,13 @@
 	import type { ProviderRecommendationItem } from '$lib/api/client';
 	import AlbumDetailPopup from '$lib/components/AlbumDetailPopup.svelte';
 	import { playTidalAlbum, playAlbum, shuffleAlbum } from '$lib/stores/player';
+	import { showToast } from '$lib/stores/toast';
 	import { playTidalTrackNow } from '$lib/stores/player';
 	import { tidalSearchTrackToPlayable } from '$lib/utils/track';
 	import {
 		loadRecommendationAlbumDetail,
 		type RecommendationAlbumDetail,
 	} from './recommendation_album_detail';
-	import { openRecommendationItem } from './recommendation_menu';
 
 	// The Library album popup, driven by a recommendation.
 	//
@@ -40,11 +40,17 @@
 	async function start(target: ProviderRecommendationItem) {
 		const result = await loadRecommendationAlbumDetail(target);
 		if (!result) {
-			// Nothing to show a tracklist for. Rather than a dead popup, fall back
-			// to the behaviour the card had before: open the album page.
+			// Some Last.fm albums are not on TIDAL at all (old singles, regional
+			// pressings), so there is no tracklist to show. This used to navigate to
+			// /search for the title, which threw the user off Home for a click that
+			// promised a popup. A toast says the same thing and leaves them where
+			// they were; the context menu still offers "Search for this".
+			//
+			// showToast rather than playerError: the player error slot lives inside
+			// PlayerBar, so nothing would have been shown at all with an idle player.
 			failed = true;
 			loading = false;
-			void openRecommendationItem(target);
+			showToast(`Couldn't find "${target.title}" on Tidal`, 'error');
 			onClose();
 			return;
 		}
