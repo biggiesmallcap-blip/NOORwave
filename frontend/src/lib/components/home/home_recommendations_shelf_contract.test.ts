@@ -13,6 +13,7 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(here, 'HomeRecommendationsShelf.svelte'), 'utf8');
 const recommendationMenu = readFileSync(join(here, 'recommendation_menu.ts'), 'utf8');
+const recommendationNavigation = readFileSync(join(here, 'recommendation_navigation.ts'), 'utf8');
 const homePage = readFileSync(join(here, '../../../routes/+page.svelte'), 'utf8');
 const client = readFileSync(join(here, '../../api/client.ts'), 'utf8');
 const playTrending = readFileSync(join(here, '../../player/play_trending.ts'), 'utf8');
@@ -78,7 +79,7 @@ describe('home recommendations shelf contract', () => {
 		// The payload is cached for six hours, so shipping new resolution logic
 		// without a bump leaves existing installs on the old output until it
 		// expires - which is exactly what this assertion is here to catch.
-		expect(homeRoutes).toContain('RECOMMENDATION_HOME_CACHE_KEY: &str = "home:v9"');
+		expect(homeRoutes).toContain('RECOMMENDATION_HOME_CACHE_KEY: &str = "home:v10"');
 		// The track shelf stays at 20 because the mural is a fixed 10x2 grid;
 		// see `layout-count-20` in ChartMural.svelte.
 		expect(homeRoutes).toContain('LASTFM_HOME_RECOMMENDATION_LIMIT: usize = 20');
@@ -173,8 +174,10 @@ describe('home recommendations shelf contract', () => {
 		expect(source).toContain('itemMetric');
 		expect(source).toContain('${index + 1} of ${count}');
 		expect(source).toContain('openRecommendationItem');
-		expect(source).toContain('local_artist_id');
-		expect(source).toContain('local_album_id');
+		// Card identity lives in the shared helper so the rail and the View all
+		// grid key the same card the same way.
+		expect(recommendationNavigation).toContain('local_artist_id');
+		expect(recommendationNavigation).toContain('local_album_id');
 	});
 
 	test('resolves unresolved artist and album recommendations before falling back to search', () => {

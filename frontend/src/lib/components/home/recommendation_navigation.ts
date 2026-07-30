@@ -9,6 +9,47 @@ export function recommendationEntity(item: ProviderRecommendationItem): string {
 	return item.entity_type ?? 'track';
 }
 
+/**
+ * Keyed-`{#each}` identity for one recommendation card.
+ *
+ * The position is part of every key, not just the no-id fallback, because
+ * provider items are NOT unique by resolved id. Last.fm returned the same album
+ * twice under two spellings that differ only by Unicode normalisation (combining
+ * diaeresis vs precomposed letter), the server's title dedupe kept both, and
+ * both then resolved to TIDAL album 167919206. Two cards with one key makes
+ * Svelte throw `each_key_duplicate` mid-render, and that throw does not stay
+ * local: the shelf never leaves its loading branch, and a client-side
+ * navigation back to Home paints no page at all until a hard reload. The server
+ * drops these at the source now; this keeps any that still get through from
+ * being a blank Home.
+ *
+ * The resolved id stays in the key so DOM nodes are reused across a refetch that
+ * returns the same items in the same order, and so a key is still readable.
+ */
+export function recommendationItemKey(
+	shelfKey: string,
+	item: ProviderRecommendationItem,
+	index: number,
+): string {
+	return `${recommendationItemIdentity(shelfKey, item)}:${index}`;
+}
+
+function recommendationItemIdentity(
+	shelfKey: string,
+	item: ProviderRecommendationItem,
+): string {
+	const entity = recommendationEntity(item);
+	const localId = item.local_track_id;
+	if (entity === 'track' && typeof localId === 'number' && localId > 0) return `track:local:${localId}`;
+	const tidalId = item.tidal_id;
+	if (entity === 'track' && typeof tidalId === 'number' && tidalId > 0) return `track:tidal:${tidalId}`;
+	if (entity === 'artist' && item.local_artist_id) return `artist:local:${item.local_artist_id}`;
+	if (entity === 'artist' && item.tidal_artist_id) return `artist:tidal:${item.tidal_artist_id}`;
+	if (entity === 'album' && item.local_album_id) return `album:local:${item.local_album_id}`;
+	if (entity === 'album' && item.tidal_album_id) return `album:tidal:${item.tidal_album_id}`;
+	return `${shelfKey}:${item.artist_name ?? ''}:${item.title}`;
+}
+
 export function recommendationKnownHref(item: ProviderRecommendationItem): string | null {
 	const entity = recommendationEntity(item);
 	if (entity === 'artist') {

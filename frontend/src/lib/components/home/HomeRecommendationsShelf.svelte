@@ -14,6 +14,7 @@
 	import {
 		recommendationActionLabel,
 		recommendationEntity,
+		recommendationItemKey,
 	} from '$lib/components/home/recommendation_navigation';
 	import {
 		isRecommendationSingle,
@@ -218,17 +219,11 @@
 		return items[currentIndexFor(shelf)] ?? items[0] ?? null;
 	}
 
+	// Shared with the "View all" grid so a card cannot be keyed one way in the rail
+	// and another way on its own page. See recommendationItemKey for why the
+	// position is part of the key even when the item resolved to a real id.
 	function itemKey(shelf: ProviderRecommendationShelf, item: ProviderRecommendationItem, index: number): string {
-		const entity = itemEntity(item);
-		const localId = item.local_track_id;
-		if (entity === 'track' && typeof localId === 'number' && localId > 0) return `track:local:${localId}`;
-		const tidalId = item.tidal_id;
-		if (entity === 'track' && typeof tidalId === 'number' && tidalId > 0) return `track:tidal:${tidalId}`;
-		if (entity === 'artist' && item.local_artist_id) return `artist:local:${item.local_artist_id}`;
-		if (entity === 'artist' && item.tidal_artist_id) return `artist:tidal:${item.tidal_artist_id}`;
-		if (entity === 'album' && item.local_album_id) return `album:local:${item.local_album_id}`;
-		if (entity === 'album' && item.tidal_album_id) return `album:tidal:${item.tidal_album_id}`;
-		return `${shelfKey(shelf)}:${index}:${item.artist_name ?? ''}:${item.title}`;
+		return recommendationItemKey(shelfKey(shelf), item, index);
 	}
 
 	// Search terms the lazy Tidal-art lookup resolves against (artists search by

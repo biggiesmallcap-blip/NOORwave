@@ -196,7 +196,10 @@ pub(super) async fn get_home_recommendations(
 // six-hour lease expired.
 // v9: album items now carry a resolved tidal_album_id and the ones with no
 // album behind them are dropped. A v8 payload still holds those dead tiles.
-const RECOMMENDATION_HOME_CACHE_KEY: &str = "home:v9";
+// v10: two album items that resolved to the same record are collapsed. A v9
+// payload can hold that duplicate pair, and on an installed build it would keep
+// blanking Home for the rest of the six-hour lease.
+const RECOMMENDATION_HOME_CACHE_KEY: &str = "home:v10";
 
 /// Cap for the track shelf, which is still rendered as the mural. Twenty is not
 /// arbitrary here: `layout-count-20` in ChartMural.svelte is a 10x2 grid, so a
@@ -308,6 +311,7 @@ async fn load_or_fetch_recommendation_shelf(
     // the shelf rather than re-resolved on every cache hit.
     resolve_missing_artwork(&state, &mut items).await;
     drop_unresolvable_albums(&mut items);
+    drop_duplicate_albums(&mut items);
     write_recommendation_cache(&state, provider, &items).await;
     Ok(items)
 }
@@ -669,6 +673,60 @@ fn drop_unresolvable_albums(items: &mut Vec<Value>) {
     if dropped > 0 {
         tracing::debug!(target: "noor.home_artwork", dropped, "dropped album recommendations with no TIDAL album");
     }
+}
+
+/// Collapse album items that resolved to the same record.
+///
+/// The upstream dedupe runs on artist plus title, before resolution, so two
+/// spellings of one title survive it: Last.fm returned "Dunyala" twice for one
+/// artist with the diaeresis decomposed in one copy and precomposed in the
+/// other, which are different strings and the same album. Resolution then gave
+/// both the same `tidal_album_id`, and the shelf shipped one record as two
+/// cards.
+///
+/// That is worth fixing on its own - a rail that shows the same album twice is
+/// wrong - but it also took Home down. The client keys its cards on the resolved
+/// id, and a duplicate key makes Svelte throw mid-render, which leaves the shelf
+/// stuck on its loading state and blanks the page on any client-side navigation
+/// back to it. The client no longer keys on the id alone; this stops the
+/// duplicate reaching it in the first place.
+///
+/// Runs after resolution and after the dead-album drop, so the ids being
+/// compared are the final ones. Items with nothing to compare (no resolved id)
+/// are left alone rather than folded together.
+fn drop_duplicate_albums(items: &mut Vec<Value>) {
+    let before = items.len();
+    let mut seen: HashSet<String> = HashSet::new();
+    items.retain(|item| {
+        let Some(key) = resolved_album_key(item) else {
+            return true;
+        };
+        seen.insert(key)
+    });
+    let dropped = before - items.len();
+    if dropped > 0 {
+        tracing::debug!(target: "noor.home_artwork", dropped, "dropped album recommendations that resolved to an album already on the shelf");
+    }
+}
+
+/// Identity of the record an album card actually points at, or `None` when it
+/// points at nothing comparable yet.
+///
+/// A library album and a TIDAL album are separate namespaces, and a card that
+/// resolved to a single is identified by that track, not by an album.
+fn resolved_album_key(item: &Value) -> Option<String> {
+    if item.get("entity_type").and_then(Value::as_str) != Some("album") {
+        return None;
+    }
+    if let Some(id) = item.get("local_album_id").and_then(Value::as_i64) {
+        return Some(format!("local:{id}"));
+    }
+    if let Some(id) = item.get("tidal_album_id").and_then(Value::as_i64) {
+        return Some(format!("tidal:{id}"));
+    }
+    item.get("tidal_id")
+        .and_then(Value::as_i64)
+        .map(|id| format!("single:{id}"))
 }
 
 /// Matches the canonical search bucket, so these lookups share cache rows with
@@ -1718,6 +1776,44 @@ mod tests {
             .map(|i| i.get("title").and_then(Value::as_str).unwrap())
             .collect();
         assert_eq!(titles, vec!["Owned", "Resolved", "Track", "Artist"]);
+    }
+
+    #[test]
+    fn one_record_reaching_the_shelf_twice_becomes_one_card() {
+        // The payload that blanked Home: the same album under a decomposed and a
+        // precomposed spelling of the same title. Both survive the pre-resolution
+        // title dedupe and both resolve to TIDAL album 167919206.
+        let mut items = vec![
+            json!({ "entity_type": "album", "title": "Du\u{0308}nyala", "artist_name": "Aykut Bilir", "tidal_album_id": 167919206 }),
+            json!({ "entity_type": "album", "title": "D\u{00fc}nyala", "artist_name": "Aykut Bilir", "tidal_album_id": 167919206 }),
+            // A different album by the same artist stays.
+            json!({ "entity_type": "album", "title": "Other", "artist_name": "Aykut Bilir", "tidal_album_id": 42 }),
+            // Library and TIDAL ids are separate namespaces, so these are two
+            // records even though the numbers match.
+            json!({ "entity_type": "album", "title": "Owned", "local_album_id": 42 }),
+            // Singles are identified by their track, not by an album.
+            json!({ "entity_type": "album", "title": "Single", "tidal_id": 909, "is_single": true }),
+            json!({ "entity_type": "album", "title": "Same single", "tidal_id": 909, "is_single": true }),
+            // Not albums: keyed by their own path, never folded here.
+            json!({ "entity_type": "track", "title": "Track", "tidal_id": 909 }),
+            json!({ "entity_type": "artist", "title": "Artist" }),
+        ];
+        drop_duplicate_albums(&mut items);
+        let titles: Vec<&str> = items
+            .iter()
+            .map(|i| i.get("title").and_then(Value::as_str).unwrap())
+            .collect();
+        assert_eq!(
+            titles,
+            vec![
+                "Du\u{0308}nyala",
+                "Other",
+                "Owned",
+                "Single",
+                "Track",
+                "Artist"
+            ]
+        );
     }
 
     #[test]

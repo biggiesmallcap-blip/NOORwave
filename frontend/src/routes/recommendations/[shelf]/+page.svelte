@@ -12,7 +12,10 @@
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 	import RecommendationAlbumPopup from '$lib/components/home/RecommendationAlbumPopup.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
-	import { recommendationEntity } from '$lib/components/home/recommendation_navigation';
+	import {
+		recommendationEntity,
+		recommendationItemKey,
+	} from '$lib/components/home/recommendation_navigation';
 	import {
 		isRecommendationSingle,
 		matchesRecommendationShelfSlug,
@@ -78,8 +81,10 @@
 		return `${count}.`;
 	}
 
+	// Same helper the Home rail keys its cards with, so a card cannot be one node
+	// here and a different one there.
 	function itemKey(item: ProviderRecommendationItem, index: number): string {
-		return `${item.tidal_id ?? item.local_track_id ?? item.mbid ?? item.title}:${index}`;
+		return recommendationItemKey(slug, item, index);
 	}
 
 	function fallbackText(item: ProviderRecommendationItem): string {
