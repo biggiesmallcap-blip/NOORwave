@@ -2292,15 +2292,16 @@
 					onShuffle={shuffleArtist}
 					onArtistClick={handleHomeArtistClick}
 					onContextMenu={handleHomeArtistContextMenu}
+					riseIndex={0}
 				/>
 			{:else if $isLoading}
 				<div class="home-loading">Loading your library…</div>
 			{/if}
 
 			{#if homeMuralPanels.length > 0}
-				<section class="home-mural-grid" aria-label="Library suggestion panels">
+				<section class="home-mural-grid rise-in-shelf" style="--rise-index: 1" aria-label="Library suggestion panels">
 					{#each homeMuralPanels as panel, i (panel.id)}
-						<article class="home-mural-panel" aria-label={panel.label} style={`--mural-index: ${i}`}>
+						<article class="home-mural-panel rise-in-card" aria-label={panel.label} style={`--rise-index: ${i}`}>
 							<div class="home-mural-bg">
 								{#each panel.items as item (`${panel.id}-${item.kind}-${item.id}`)}
 									{@const muralArt = muralItemArtwork(item)}
@@ -2342,7 +2343,7 @@
 			{/if}
 
 			{#if recentArtists.length > 0}
-				<section class="home-section">
+				<section class="home-section rise-in-shelf" style="--rise-index: 2">
 					<h3 class="section-label">Recently Played Artists</h3>
 					<ArtistCarousel
 						artists={recentArtists}
@@ -2353,7 +2354,7 @@
 			{/if}
 
 			{#if recentAlbums.length > 0}
-				<section class="home-section">
+				<section class="home-section rise-in-shelf" style="--rise-index: 3">
 					<h3 class="section-label">Recently Added</h3>
 					<AlbumCarousel
 						albums={recentAlbums}
@@ -2366,7 +2367,7 @@
 			{/if}
 
 			{#if recentTracks.length > 0}
-				<section class="home-section">
+				<section class="home-section rise-in-shelf" style="--rise-index: 4">
 					<div class="section-header-row">
 						<h3 class="section-label">Recent Tracks</h3>
 						<button class="view-all-link" onclick={() => void goto('/history')}>View all →</button>
@@ -3074,6 +3075,11 @@
 		gap: var(--space-4);
 	}
 
+	/* Entrance motion comes from the shared `rise-in-card` in app.css, applied
+	   in the markup. This used to carry a fourth private copy of the rise
+	   keyframes, with its own `--mural-index` and a `both` fill - `both` keeps
+	   the animation applied forever, which gives the panel a permanent stacking
+	   context and traps a popout's z-index inside it. */
 	.home-mural-panel {
 		position: relative;
 		min-height: clamp(140px, 15vw, 210px);
@@ -3081,27 +3087,6 @@
 		overflow: hidden;
 		border: 1px solid var(--border-subtle);
 		background: var(--panel-bg);
-		/* Ease each panel in (lightly staggered) once its data arrives, so the
-		   grid settles in gracefully instead of the panels snapping into place. */
-		animation: home-mural-panel-in 360ms ease-out both;
-		animation-delay: calc(var(--mural-index, 0) * 70ms);
-	}
-
-	@keyframes home-mural-panel-in {
-		from {
-			opacity: 0;
-			transform: translateY(10px);
-		}
-		to {
-			opacity: 1;
-			transform: none;
-		}
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		.home-mural-panel {
-			animation: none;
-		}
 	}
 
 	.home-mural-bg {

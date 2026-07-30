@@ -14,12 +14,14 @@
     kind: 'top' | 'forgotten_favorite';
   }
 
-  let { artists, onPlayAll, onShuffle, onArtistClick, onContextMenu }: {
+  let { artists, onPlayAll, onShuffle, onArtistClick, onContextMenu, riseIndex = 0 }: {
     artists: Artist[];
     onPlayAll: (artistId: number) => void;
     onShuffle: (artistId: number) => void;
     onArtistClick?: (artistId: number) => void;
     onContextMenu?: (e: MouseEvent, id: number) => void;
+    /** Slot in the host page's entrance cascade. See `rise-in-shelf` in app.css. */
+    riseIndex?: number;
   } = $props();
 
   const ROTATE_MS = 8000;
@@ -109,7 +111,8 @@
 
 {#if current}
   <div
-    class="library-hero-card"
+    class="library-hero-card rise-in-shelf"
+    style={`--rise-index: ${riseIndex}`}
     class:has-image={heroHasImage}
     onmouseenter={() => paused = true}
     onmouseleave={() => paused = false}
