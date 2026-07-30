@@ -8201,6 +8201,12 @@ fn normalize_tidal_search_query(query: &str) -> Option<&str> {
     }
 }
 
+/// Canonical fetch size for TIDAL search, so callers asking for fewer results
+/// share one cache row and one upstream call. Sized to the largest limit the
+/// app actually requests (the remote's 12); a bigger request bypasses it and
+/// caches on its own size.
+const TIDAL_SEARCH_CACHE_BUCKET: i32 = 12;
+
 fn normalize_tidal_search_limit(limit: Option<i32>) -> i32 {
     limit
         .unwrap_or(TIDAL_SEARCH_DEFAULT_LIMIT)
@@ -8307,6 +8313,13 @@ async fn tidal_search(
 
     let limit = normalize_tidal_search_limit(params.limit);
     let offset = params.offset.unwrap_or(0).max(0);
+    // Fetch and cache at one canonical size, then trim to what the caller
+    // asked for. The cache key includes the limit, and the app searches the
+    // same names at 1 (artwork), 5 (navigate/play), 6 (command palette) and 12
+    // (remote), so one artist produced four cache rows and four upstream
+    // searches for what is the same query. Requests inside the bucket now
+    // share a row; anything larger keeps its own.
+    let fetch_limit = limit.max(TIDAL_SEARCH_CACHE_BUCKET);
     // Snapshot what we need from state in one lock acquisition.
     let (db, http_client, tidal_http_client) = {
         let s = state.read().await;
@@ -8322,7 +8335,7 @@ async fn tidal_search(
     // Cache check - best-effort. A read failure must NOT block the upstream call.
     let cached = db
         .with_conn(|conn| {
-            crate::services::tidal::cache::get_search(conn, &cache_cfg, query, limit, offset)
+            crate::services::tidal::cache::get_search(conn, &cache_cfg, query, fetch_limit, offset)
         })
         .ok()
         .flatten();
@@ -8336,10 +8349,11 @@ async fn tidal_search(
     let results = if let Some(hit) = cached {
         hit
     } else {
-        let fetched = match search_tidal_catalog_with_timeout(&client, query, limit, offset).await {
-            Ok(r) => r,
-            Err(e) if error_looks_like_auth(&e) => {
-                let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+        let fetched =
+            match search_tidal_catalog_with_timeout(&client, query, fetch_limit, offset).await {
+                Ok(r) => r,
+                Err(e) if error_looks_like_auth(&e) => {
+                    let refreshed = recover_tidal_session(&state, &http_client, &tokens)
                     .await
                     .map_err(|re| {
                         (
@@ -8349,31 +8363,31 @@ async fn tidal_search(
                             ),
                         )
                     })?;
-                let retry_client = TidalClient::with_http(
-                    tidal_http_client,
-                    refreshed.access_token.clone(),
-                    refreshed.country_code.clone(),
-                );
-                search_tidal_catalog_with_timeout(&retry_client, query, limit, offset)
-                    .await
-                    .map_err(|e2| {
-                        (
-                            StatusCode::BAD_GATEWAY,
-                            Json(json!({ "error": e2.to_string() })),
-                        )
-                    })?
-            }
-            Err(e) => {
-                return Err((
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": e.to_string() })),
-                ));
-            }
-        };
+                    let retry_client = TidalClient::with_http(
+                        tidal_http_client,
+                        refreshed.access_token.clone(),
+                        refreshed.country_code.clone(),
+                    );
+                    search_tidal_catalog_with_timeout(&retry_client, query, fetch_limit, offset)
+                        .await
+                        .map_err(|e2| {
+                            (
+                                StatusCode::BAD_GATEWAY,
+                                Json(json!({ "error": e2.to_string() })),
+                            )
+                        })?
+                }
+                Err(e) => {
+                    return Err((
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": e.to_string() })),
+                    ));
+                }
+            };
         // Best-effort cache write - log and continue on failure.
         let to_cache = fetched.clone();
         let q_owned = query.to_string();
-        let lim_for_write = limit;
+        let lim_for_write = fetch_limit;
         let off_for_write = offset;
         if let Err(e) = db.with_conn(move |conn| {
             crate::services::tidal::cache::put_search(
@@ -8387,6 +8401,17 @@ async fn tidal_search(
             tracing::warn!("tidal_search_cache write failed: {}", e);
         }
         fetched
+    };
+
+    // Trim the canonical fetch down to what this caller asked for.
+    let results = {
+        let mut results = results;
+        let want = limit.max(0) as usize;
+        results.tracks.truncate(want);
+        results.albums.truncate(want);
+        results.artists.truncate(want);
+        results.videos.truncate(want);
+        results
     };
 
     // Batch-lookup which Tidal IDs are in the local library so the frontend can

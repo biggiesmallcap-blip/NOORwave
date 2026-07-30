@@ -8,6 +8,8 @@
 	import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
+	import AlbumPopup from '$lib/components/album/AlbumPopup.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
@@ -15,15 +17,29 @@
 	import { downloadTidalPlaylist } from '$lib/stores/downloads';
 	import { tidalHomeItemToPlayable } from '$lib/utils/track';
 
-	let { modules, onViewAll, mediaKind = 'audio', onItemSelect }: {
+	let { modules, onViewAll, mediaKind = 'audio', startIndex = 0, nested = false, homeModules = false, onItemSelect }: {
 		modules: TidalHomeModule[];
 		onViewAll?: (mod: TidalHomeModule) => void;
+		/** These modules came from /api/tidal/home-modules, so their ids can be
+		 *  resolved by the module-detail route. Defaults to false because only
+		 *  one caller can promise that; see `showViewAll`. */
+		homeModules?: boolean;
 		mediaKind?: 'audio' | 'video';
+		/** Slot this group starts at in the host page's entrance cascade, so a
+		 *  stack of shelves keeps counting up instead of restarting at zero. */
+		startIndex?: number;
+		/** Rendered underneath a group header that already says "TIDAL". Drops
+		 *  the per-module eyebrow and demotes the heading so the two levels do
+		 *  not repeat themselves. */
+		nested?: boolean;
 		/** Return true to claim the click. The /videos route uses this because
 		 *  the default video handling navigates to /videos, which is a no-op
 		 *  when you are already there. */
 		onItemSelect?: (item: TidalHomeItem) => boolean;
 	} = $props();
+
+	/** The album tile whose detail popup is open, if any. */
+	let albumPopupItem = $state<TidalHomeItem | null>(null);
 
 	function handleItemClick(item: TidalHomeItem) {
 		if (onItemSelect?.(item)) return;
@@ -54,7 +70,12 @@
 			return;
 		}
 		if (item.kind === 'album' && item.album_id != null) {
-			void goto(`/tidal/albums/${item.album_id}`);
+			// The mini detail popup, the same as a Library album card. Opening
+			// /tidal/albums/{id} is still a click away, from the right-click menu or
+			// the artist link inside the popup - but a tracklist is what you want
+			// from an album tile, and a full page navigation to get it is a lot of
+			// ceremony for a browse surface.
+			albumPopupItem = item;
 			return;
 		}
 		if (item.kind === 'playlist') {
@@ -170,7 +191,36 @@
 	// playTidalTrackNow, so following it from a video module plays the song
 	// instead of the video. Until a video-capable detail page exists, video
 	// modules only show View all when the host page supplies its own handler.
-	let showViewAll = $derived(mediaKind !== 'video' || Boolean(onViewAll));
+	//
+	// `homeModules` is the second gate, and it is why these buttons were dead.
+	// /search/discover/[id] resolves an id through
+	// GET /api/tidal/discover-modules/{id}/items, and that handler looks the id
+	// up in the home-modules cache and 404s otherwise
+	// (tidal_home_routes.rs: load_tidal_home_modules_cached, then
+	// `modules.into_iter().find(...)`). Every module rendered from an editorial
+	// page - /hires, /new-releases, /explore, and the Hi-Res preview on Home -
+	// comes from /api/tidal/page/{section} instead, so its id is never in that
+	// cache and the link could only ever land on "That discover shelf doesn't
+	// exist anymore".
+	//
+	// Those surfaces lose nothing: the rail already scrolls the full module, and
+	// each editorial section carries a "See all" to the page that is the
+	// complete set. So the per-module button is shown only where it resolves.
+	let showViewAll = $derived(
+		(mediaKind !== 'video' || Boolean(onViewAll)) && (homeModules || Boolean(onViewAll)),
+	);
+
+	/// Third gate, per module: is there anything behind the link?
+	///
+	/// `more_path` is upstream's `pagedList.dataApiPath`. The detail handler
+	/// only fetches when it is set, and otherwise returns `module.items` - the
+	/// very list the rail is already showing. So on a module without it, "View
+	/// all" reloads the same cards onto a page of their own. The carousel is
+	/// already the whole set; scrolling it is the better answer.
+	function canViewAll(mod: TidalHomeModule): boolean {
+		if (onViewAll) return true; // the host page decides what it means
+		return showViewAll && Boolean(mod.more_path);
+	}
 
 	function isTrackList(mod: TidalHomeModule): boolean {
 		return mod.kind === 'TRACK_LIST'
@@ -270,19 +320,29 @@
 
 {#if modules.length > 0}
 	<div class="discover-stack">
-		{#each modules as mod (mod.id || mod.title)}
-			<section class="discover-section" data-section={mod.id || mod.title}>
-				<div class="section-header">
-					<div class="section-title-group">
-						<p class="eyebrow">TIDAL</p>
-						<h2>{mod.title}</h2>
-					</div>
-					{#if showViewAll}
-						<button type="button" class="view-all-link" onclick={() => viewAll(mod)}>
-							View all -&gt;
-						</button>
-					{/if}
-				</div>
+		{#each modules as mod, modIndex (mod.id || mod.title)}
+			<!-- When nested, the enclosing section already runs the entrance;
+			     animating again here would stage the same content twice. -->
+			<section
+				class="discover-section"
+				class:rise-in-shelf={!nested}
+				data-section={mod.id || mod.title}
+				style={nested ? undefined : `--rise-index: ${startIndex + modIndex}`}
+			>
+				<SectionHeader
+					eyebrow={nested ? '' : 'TIDAL'}
+					title={mod.title}
+					variant="charts"
+					level={nested ? 3 : 2}
+				>
+					{#snippet actions()}
+						{#if canViewAll(mod)}
+							<button type="button" class="view-all-link" onclick={() => viewAll(mod)}>
+								View all -&gt;
+							</button>
+						{/if}
+					{/snippet}
+				</SectionHeader>
 				{#if isTrackList(mod)}
 					{@render trackGrid(mod)}
 				{:else}
@@ -291,6 +351,23 @@
 			</section>
 		{/each}
 	</div>
+{/if}
+
+{#if albumPopupItem}
+	<!-- Keyed so picking a different album mounts a fresh popup rather than
+	     asking the existing one to swap albums mid-load. -->
+	{#key albumPopupItem}
+		<AlbumPopup
+			tidalAlbumId={albumPopupItem.album_id}
+			artistTidalId={albumPopupItem.artist_id}
+			hints={{
+				title: albumPopupItem.title,
+				artistName: albumPopupItem.artist_name,
+				artworkUrl: albumPopupItem.artwork_url,
+			}}
+			onClose={() => (albumPopupItem = null)}
+		/>
+	{/key}
 {/if}
 
 <style>
@@ -302,23 +379,7 @@
 	.discover-section {
 		display: flex;
 		flex-direction: column;
-		gap: var(--gap);
-	}
-	.section-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--gap);
-	}
-	.section-title-group {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-1);
-	}
-	.section-title-group h2 {
-		font-size: var(--font-size-lg);
-		font-weight: var(--font-weight-bold);
-		margin: 0;
+		gap: var(--space-3);
 	}
 
 	.view-all-link {

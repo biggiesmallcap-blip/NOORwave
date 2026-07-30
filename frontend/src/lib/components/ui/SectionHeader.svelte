@@ -7,6 +7,8 @@
 		eyebrow = '',
 		variant = 'default',
 		level = 3,
+		href = '',
+		linkLabel = 'View all',
 		actions
 	}: {
 		title: string;
@@ -14,6 +16,10 @@
 		eyebrow?: string;
 		variant?: 'default' | 'charts';
 		level?: 2 | 3;
+		/** Route this section is a preview of. Renders a trailing link, which is
+		 *  how a home shelf points at its own full page. */
+		href?: string;
+		linkLabel?: string;
 		actions?: Snippet;
 	} = $props();
 </script>
@@ -33,9 +39,14 @@
 		{/if}
 	</div>
 
-	{#if actions}
+	{#if actions || href}
 		<div class="actions">
-			{@render actions()}
+			{#if actions}
+				{@render actions()}
+			{/if}
+			{#if href}
+				<a class="section-link" {href}>{linkLabel} -&gt;</a>
+			{/if}
 		</div>
 	{/if}
 </div>
@@ -79,12 +90,13 @@
 		gap: var(--space-1);
 	}
 
+	/* The charts variant used to re-style the eyebrow (zero tracking,
+	   --text-muted). Between that, the global `.eyebrow` and one component's
+	   local override, the same word rendered three different ways in a single
+	   scroll on Home. The eyebrow is now identical in both variants; charts
+	   only adjusts the metrics it needs for its tighter header. */
 	.section-header.charts .eyebrow {
 		margin: 0;
-		color: var(--text-muted);
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-		letter-spacing: 0;
 		line-height: 1;
 	}
 
@@ -106,7 +118,24 @@
 	.actions {
 		display: flex;
 		flex-wrap: wrap;
+		align-items: center;
 		gap: var(--space-2);
+		flex-shrink: 0;
+	}
+
+	.section-link {
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
+		color: var(--text-secondary);
+		text-decoration: none;
+		white-space: nowrap;
+		transition: color var(--motion-fast);
+	}
+
+	.section-link:hover,
+	.section-link:focus-visible {
+		color: var(--text-primary);
+		outline: none;
 	}
 
 	@media (max-width: 860px) {

@@ -16,6 +16,7 @@
 	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
 	import ChartMural, { type ChartMuralItem } from '$lib/components/charts/ChartMural.svelte';
 	import { tidalSearchTrackToPlayable } from '$lib/utils/track';
+	import { gatedTidalSearch } from '$lib/actions/lazy-tidal-art';
 
 	const REGIONS = [
 		{ code: 'global', label: 'Global' },
@@ -252,9 +253,13 @@
 		resolvingEntries = { ...resolvingEntries, [entryId]: true };
 		try {
 			const query = [artist, title].filter(Boolean).join(' ');
-			const results = await api.searchTidal(query, 1);
+			// Shared gate, not a bare searchTidal: this shelf resolves its whole
+			// visible page at once, and an uncapped fan-out here would blow past
+			// the in-flight limit every other surface respects and trip TIDAL's
+			// rejections for all of them.
+			const results = await gatedTidalSearch(query, 1);
 			if (destroyed) return null;
-			const hit = results.tracks[0] ?? null;
+			const hit = results?.tracks[0] ?? null;
 			resolvedTracks = { ...resolvedTracks, [entryId]: hit };
 			return hit;
 		} catch (e) {

@@ -69,7 +69,12 @@ describe('daily chart shelf contract', () => {
 	});
 
 	test('resolves visible chart entries against TIDAL for artwork and playback', () => {
-		expect(source).toContain('api.searchTidal(query, 1)');
+		// Through the shared gate, not a bare api.searchTidal. This shelf
+		// resolves its whole visible page in one Promise.all, so an ungated
+		// fan-out here ignored the in-flight cap every other surface respects
+		// and could trip TIDAL's rejections for all of them.
+		expect(source).toContain('gatedTidalSearch(query, 1)');
+		expect(source).toContain("from '$lib/actions/lazy-tidal-art'");
 		expect(source).toContain('resolvedTracks');
 		expect(source).toContain('playTidalTrackNow');
 		expect(source).toContain('TIDAL ready');

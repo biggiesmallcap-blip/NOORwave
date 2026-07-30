@@ -70,15 +70,21 @@ export function findArtistMatch(
 	artists: TidalSearchArtist[],
 ): TidalSearchArtist | null {
 	if (artists.length === 0) return null;
-	const wanted = normalizeCatalogName(item.title);
-	const exact = artists.find((artist) => normalizeCatalogName(artist.name) === wanted);
+	const wanted = catalogMatchKey(item.title);
+	const exact = artists.find((artist) => catalogMatchKey(artist.name) === wanted);
 	if (exact) return exact;
 	// Tolerate the punctuation/suffix drift between Last.fm and TIDAL spellings
-	// (e.g. "MF DOOM" vs "MF DOOM (Daniel Dumile)"). The search was already keyed
-	// on the artist name, so the first result is overwhelmingly the right artist;
-	// prefer a contains-match but fall back to it rather than dumping to search.
-	const partial = artists.find((artist) => namesOverlap(normalizeCatalogName(artist.name), wanted));
-	return partial ?? artists[0];
+	// (e.g. "MF DOOM" vs "MF DOOM (Daniel Dumile)").
+	const partial = artists.find((artist) => namesOverlap(normalizeCatalogName(artist.name), normalizeCatalogName(item.title)));
+	if (partial) return partial;
+	// Previously this fell through to `artists[0]`, on the reasoning that the
+	// search was keyed on the artist name so the top hit is probably right.
+	// When it is wrong it is silently wrong: the user clicks one artist and
+	// lands on another, with nothing to indicate a guess was made. A sole
+	// result is a safe bet; anything else goes to the search page, where the
+	// user picks. findAlbumMatch has always refused to guess for the same
+	// reason - a wrong album is worse than no album.
+	return artists.length === 1 ? artists[0] : null;
 }
 
 export function findAlbumMatch(
@@ -86,33 +92,83 @@ export function findAlbumMatch(
 	albums: TidalSearchAlbum[],
 ): TidalSearchAlbum | null {
 	if (albums.length === 0) return null;
-	const wantedTitle = normalizeCatalogName(item.title);
-	const wantedArtist = normalizeCatalogName(item.artist_name);
+	const wantedTitle = catalogMatchKey(item.title);
+	const wantedArtist = catalogMatchKey(item.artist_name);
 	const artistOk = (album: TidalSearchAlbum) =>
-		!wantedArtist || normalizeCatalogName(album.artist_name) === wantedArtist;
+		!wantedArtist || catalogMatchKey(album.artist_name) === wantedArtist;
 
-	const exact = albums.find((album) => artistOk(album) && normalizeCatalogName(album.title) === wantedTitle);
+	const exact = albums.find((album) => artistOk(album) && catalogMatchKey(album.title) === wantedTitle);
 	if (exact) return exact;
 
 	// A wrong album is worse than no album, so only accept a fuzzy hit by the same
-	// artist (handles deluxe/remaster/edition suffixes). If the artist is known and
-	// only one of their albums came back, take it; otherwise require title overlap.
+	// artist (handles deluxe/remaster/edition suffixes) and require the titles to
+	// actually overlap.
+	//
+	// There used to be an escape hatch here: if the artist was known and only one
+	// of their albums came back, take it. The title never entered into it, so
+	// "Uptown Top Ranking" and "Trojan Reggae Sisters Collection" both opened
+	// "Hurt So Good" - the one Althea & Donna album TIDAL returned. An album that
+	// is genuinely not on TIDAL has to resolve to nothing so the caller can say
+	// so, rather than showing a different record under the title that was clicked.
 	const sameArtist = albums.filter(artistOk);
 	if (sameArtist.length === 0) return null;
-	const overlap = sameArtist.find((album) => namesOverlap(normalizeCatalogName(album.title), wantedTitle));
-	if (overlap) return overlap;
-	if (wantedArtist && sameArtist.length === 1) return sameArtist[0];
-	return null;
+	return (
+		sameArtist.find((album) => namesOverlap(normalizeCatalogName(album.title), wantedTitle)) ?? null
+	);
 }
 
-// True when one normalised name contains the other - cheap stand-in for fuzzy
-// matching that catches edition suffixes and parenthetical qualifiers.
+/**
+ * True when one normalised name extends the other at a word boundary - the
+ * cheap stand-in for fuzzy matching that catches edition suffixes and
+ * parenthetical qualifiers ("untrue" vs "untrue deluxe edition", "mf doom" vs
+ * "mf doom daniel dumile").
+ *
+ * Compares whole tokens rather than raw substrings. Plain containment made
+ * every short name match a longer one that merely spelled it: "nova" hit
+ * "casanova" and "novastar", and since the caller took the first overlap it
+ * found, that silently opened the wrong artist.
+ */
 function namesOverlap(a: string, b: string): boolean {
 	if (!a || !b) return false;
-	return a === b || a.includes(b) || b.includes(a);
+	if (a === b) return true;
+	const aTokens = a.split(' ');
+	const bTokens = b.split(' ');
+	const [shorter, longer] =
+		aTokens.length <= bTokens.length ? [aTokens, bTokens] : [bTokens, aTokens];
+	return shorter.every((token, index) => longer[index] === token);
 }
 
-function normalizeCatalogName(value: string | null | undefined): string {
+/**
+ * Comparison key for deciding whether two catalogue names are the same name.
+ *
+ * `normalizeCatalogName` keeps only ASCII alphanumerics, so a name written
+ * entirely in another script - Cyrillic, CJK, or pure symbols - folds to the
+ * empty string, and every such name then compares equal to every other one.
+ * That is how a recommendation for one non-Latin artist could resolve to an
+ * unrelated non-Latin artist. When the fold comes back empty, compare the raw
+ * name instead: those names still match themselves, and stop matching each
+ * other.
+ *
+ * Kept separate from `normalizeCatalogName`, which is pinned character for
+ * character to its Rust port. The server closes the same hole from the other
+ * side, by refusing an empty fold in the SQL (see `ARTIST_BY_NAME_SQL`).
+ */
+function catalogMatchKey(value: string | null | undefined): string {
+	const folded = normalizeCatalogName(value);
+	if (folded) return folded;
+	return (value ?? '').toLowerCase().trim().replace(/\s+/g, ' ');
+}
+
+/**
+ * Fold a catalogue name to its comparable form.
+ *
+ * Ported to Rust as `db::catalog_name::normalize_catalog_name`. The two must
+ * agree: this copy picks a search result at click time, the Rust one matches a
+ * local row at resolve time, and a divergence means a name resolves on one side
+ * but not the other. The shared case table lives in
+ * `catalog_name_parity.test.ts` and in that module's `NORMALIZE_PARITY_CASES`.
+ */
+export function normalizeCatalogName(value: string | null | undefined): string {
 	return (value ?? '')
 		.normalize('NFKD')
 		.replace(/[\u0300-\u036f]/g, '')

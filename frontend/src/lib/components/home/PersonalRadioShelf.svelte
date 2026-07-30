@@ -4,11 +4,15 @@
 	import { cachedApi } from '$lib/cache/api_queries';
 	import { playTidalMix } from '$lib/stores/player';
 	import { tidalStatus } from '$lib/stores/tidal';
-	import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import MediaRail from '$lib/components/ui/MediaRail.svelte';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
+	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
 
 	type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
+
+	// Position in the home stack; stagger only. See YourMixesShelf.
+	let { index = 0 }: { index?: number } = $props();
 
 	// Reactive, persisted query: hydrates the localStorage snapshot synchronously at
 	// init so the shelf paints last-known stations with no skeleton, then revalidates
@@ -72,67 +76,71 @@
 	}
 </script>
 
+{#snippet stationCard(station: TidalMix)}
+	<button
+		type="button"
+		class="mix-card"
+		title={station.sub_title ?? station.title}
+		aria-label={`Play radio station ${station.title}`}
+		onclick={() => playTidalMix(station.id)}
+	>
+		<div class="art-wrap">
+			<ArtworkImage
+				className="art"
+				src={station.image_url}
+				alt={station.title}
+				size={320}
+				tint={true}
+				fallbackText="RAD"
+				decorative={true}
+			/>
+			<PlayOverlay
+				position="corner"
+				size="sm"
+				label={`Play radio station ${station.title}`}
+			/>
+		</div>
+		<div class="meta">
+			<h3 class="title">{station.title}</h3>
+			{#if station.sub_title}
+				<p class="artist">{station.sub_title}</p>
+			{/if}
+		</div>
+	</button>
+{/snippet}
+
 {#snippet stationRail(items: TidalMix[])}
-	<div class="mix-rail" use:wheelToHorizontal>
-		{#each items as station (station.id)}
-			<button
-				type="button"
-				class="mix-card"
-				title={station.sub_title ?? station.title}
-				aria-label={`Play radio station ${station.title}`}
-				onclick={() => playTidalMix(station.id)}
-			>
-				<div class="art-wrap">
-					<ArtworkImage
-						className="art"
-						src={station.image_url}
-						alt={station.title}
-						size={320}
-						tint={true}
-						fallbackText="RAD"
-						decorative={true}
-					/>
-					<PlayOverlay
-						position="corner"
-						size="sm"
-						label={`Play radio station ${station.title}`}
-					/>
-				</div>
-				<div class="meta">
-					<h3 class="title">{station.title}</h3>
-					{#if station.sub_title}
-						<p class="artist">{station.sub_title}</p>
-					{/if}
-				</div>
-			</button>
-		{/each}
+	<MediaRail {items} card={stationCard} getKey={(s) => s.id} gap={14} fluid stagger />
+{/snippet}
+
+{#snippet skeletonCard()}
+	<div class="mix-card skeleton">
+		<div class="art-wrap"><div class="art skeleton-art"></div></div>
+		<div class="meta">
+			<div class="skeleton-line skeleton-line-title"></div>
+			<div class="skeleton-line skeleton-line-sub"></div>
+		</div>
 	</div>
 {/snippet}
 
 {#snippet skeletonRail()}
-	<div class="mix-rail" use:wheelToHorizontal>
-		{#each [0, 1, 2, 3, 4, 5] as i (i)}
-			<div class="mix-card skeleton">
-				<div class="art-wrap"><div class="art skeleton-art"></div></div>
-				<div class="meta">
-					<div class="skeleton-line skeleton-line-title"></div>
-					<div class="skeleton-line skeleton-line-sub"></div>
-				</div>
-			</div>
-		{/each}
-	</div>
+	<MediaRail
+		items={[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]}
+		card={skeletonCard}
+		getKey={(i) => i}
+		gap={14}
+		fluid
+	/>
 {/snippet}
 
-<section class="discovery-section" data-section="personal-radio">
-	<div class="section-header">
-		<div class="section-title-group">
-			<p class="eyebrow">TIDAL</p>
-			<h2>Personal Radio</h2>
-		</div>
-		{#if viewState === 'loading' || refreshing}
-			<span class="loading-indicator">Loading…</span>
-		{/if}
-	</div>
+<section class="discovery-section rise-in-shelf" data-section="personal-radio" style={`--rise-index: ${index}`}>
+	<SectionHeader eyebrow="TIDAL" title="Personal Radio" variant="charts" level={2}>
+		{#snippet actions()}
+			{#if viewState === 'loading' || refreshing}
+				<span class="loading-indicator">Loading…</span>
+			{/if}
+		{/snippet}
+	</SectionHeader>
 
 	{#if viewState === 'loading'}
 		{@render skeletonRail()}
@@ -157,23 +165,7 @@
 	.discovery-section {
 		display: flex;
 		flex-direction: column;
-		gap: 16px;
-	}
-	.section-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 16px;
-	}
-	.section-title-group {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-	}
-	.section-title-group h2 {
-		font-size: var(--font-size-lg);
-		font-weight: var(--font-weight-bold);
-		margin: 0;
+		gap: var(--space-3);
 	}
 	.loading-indicator {
 		font-size: var(--font-size-xs);
@@ -181,45 +173,12 @@
 		font-style: italic;
 	}
 
-	.mix-rail {
-		display: flex;
-		gap: 14px;
-		overflow-x: auto;
-		padding-bottom: 8px;
-		scroll-snap-type: x mandatory;
-		mask-image: linear-gradient(
-			to right,
-			transparent 0,
-			black 16px,
-			black calc(100% - 32px),
-			transparent 100%
-		);
-		-webkit-mask-image: linear-gradient(
-			to right,
-			transparent 0,
-			black 16px,
-			black calc(100% - 32px),
-			transparent 100%
-		);
-	}
-	.mix-rail::-webkit-scrollbar { height: 6px; }
-	.mix-rail::-webkit-scrollbar-track {
-		background: var(--bg-surface);
-		border-radius: 3px;
-	}
-	.mix-rail::-webkit-scrollbar-thumb {
-		background: var(--border-subtle);
-		border-radius: 3px;
-	}
-	.mix-rail::-webkit-scrollbar-thumb:hover {
-		background: var(--text-muted);
-	}
-
+	/* Rail behaviour lives in MediaRail; this card only describes itself.
+	   `min-width: 0` replaces the old explicit 180px lock - see the same note
+	   in YourMixesShelf. */
 	.mix-card {
-		flex: 0 0 180px;
-		width: 180px;
-		min-width: 180px;
-		max-width: 180px;
+		width: 100%;
+		min-width: 0;
 		display: flex;
 		flex-direction: column;
 		gap: 10px;
@@ -228,7 +187,6 @@
 		padding: 0;
 		border-radius: var(--radius-md);
 		text-align: left;
-		scroll-snap-align: start;
 		transition: transform var(--motion-base);
 		box-sizing: border-box;
 		cursor: pointer;

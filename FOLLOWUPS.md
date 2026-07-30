@@ -10,6 +10,25 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### motion: migrate the three pre-existing rise animations onto the shared class
+
+`app.css` now carries `.rise-in-shelf` and `.rise-in-card`, and Home uses them.
+Three older copies of the same animation predate the extraction and still
+hand-roll it with drifted values: `videos/liked/+page.svelte` (`card-in`,
+300ms/8px/22ms/backwards), `video/VideoSetShelf.svelte` (`shelf-in`,
+340ms/10px/70ms/both) and `library/+page.svelte` (`home-mural-panel-in`,
+360ms/10px/70ms/both).
+
+They were left alone because `liked-videos-contract.test.mjs` and
+`video-editorial-browse-contract.test.mjs` assert the exact declarations inside
+those files, and rewriting the tests was out of scope for the home layout work.
+Migrating means updating those assertions to check the shared class is applied
+plus the `--rise-index` wiring, rather than the keyframe text. The `backwards`
+fill and the per-batch modulo cap must survive the move - both are load-bearing
+and the reasons are recorded in the `app.css` comment.
+
+Spawned by: the Part 8 motion extraction in the home layout work.
+
 ### videos: remaining editorial discovery ideas
 
 Shipped so far: daily-picks mural, genre shelves, album-love, one-step-out
@@ -1000,12 +1019,39 @@ with 8 tracks over 5 artists. The candidate funnel in the server log explains it
 
 Fixed by dropping the Last.fm source from that call site, raising the per-seed
 budget to 60, and making both the artist and album caps top up from what they
-skipped instead of returning a short list. Not yet verified against real data:
-the rebuild would have interrupted playback, so the numbers above are pre-fix
-only. Worth re-running that same curl after the next build and confirming the
-track count reaches the limit - and that the cold path (no cache row at all) is
-now sub-second, since the fan-out no longer touches the network.
+skipped instead of returning a short list.
 
-Same session added `GET /api/home/shuffle-picks` for the Random tracks / Random
-albums murals, also unverified in the app for the same reason.
-Spawned by: random tracks pop-in 2026-07-27
+Mostly verified 2026-07-30 against the live library, after the rebuild that
+session needed anyway. `POST /api/home/suggestions {}` now returns 50 tracks and
+24 albums, so the track count reaches its limit - the 8-of-12 symptom above is
+gone. `GET /api/home/shuffle-picks?limit=20` returns 20 tracks and 20 albums and
+the Random murals render from it.
+
+Still open: the cold path. Both measurements were cache hits (6ms), so the claim
+that a no-cache-row request is now sub-second is untested. It needs the cache row
+deleted out of the DB first, which is why it was skipped.
+Spawned by: random tracks pop-in 2026-07-27; partly verified 2026-07-30
+
+### css: audit shared chrome across routes before adding more of it
+
+Home and its new detail routes were brought onto one vocabulary this session
+(one SectionHeader, one rail primitive, two spacing values, one rise-in variant
+pair, one album popup). The rest of the app has not had that pass, and the
+divergence is only obvious once two surfaces sit next to each other.
+
+Worth auditing, per element rather than per route, and standardising on whatever
+the Search page already does since that is the design reference:
+
+- page headers: `PageHeader` variants vs hand-rolled heroes vs bare `<h1>`
+- back buttons: `< Back` / `<- Back` / `goBack(fallback)` vs a plain `goto`, and
+  the two different glyphs currently in use
+- links: which asset references are `<a href>` vs `<button onclick>`, which get
+  hover underlines, and which are missing the shared context menu
+- spacing: raw px literals still in place where `--space-*` belongs
+- "View all" affordances: label, arrow glyph, and whether the target route
+  actually resolves (several editorial ones 404 by design of the upstream id)
+
+Do it as a read-only audit first that lists divergences per element; the fixes
+are individually trivial but touch a lot of files, so they want their own commit
+per element rather than one sweep.
+Spawned by: home layout and Last.fm run 2026-07-30

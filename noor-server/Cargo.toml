@@ -49,6 +49,12 @@ sha2 = "0.11"
 # Genre fuzzy matching
 strsim = "0.11"
 
+# Catalogue name folding. Needs to match JS String.normalize('NFKD') exactly:
+# the same normalisation runs client-side in recommendation_navigation.ts at
+# click time and here at resolve time, and if the two disagree a name resolves
+# on one side and not the other. A hand-rolled accent table would drift.
+unicode-normalization = "0.1"
+
 # Audio analysis
 rustfft = "6"
 aubio-rs = { version = "0.2", default-features = false, features = ["builtin", "static"] }

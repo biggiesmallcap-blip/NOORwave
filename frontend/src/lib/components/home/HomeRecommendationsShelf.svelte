@@ -1,6 +1,5 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { goto } from '$app/navigation';
 	import {
 		ApiError,
 		api,
@@ -15,27 +14,65 @@
 	import {
 		recommendationActionLabel,
 		recommendationEntity,
-		recommendationHrefFromSearch,
-		recommendationKnownHref,
-		recommendationSearchHref,
-		recommendationSearchQuery,
 	} from '$lib/components/home/recommendation_navigation';
+	import {
+		isRecommendationSingle,
+		openRecommendationItem,
+		playRecommendationSingle,
+		recommendationItemMenu,
+		recommendationItemToTidalPlayable,
+		recommendationShelfSlug,
+	} from '$lib/components/home/recommendation_menu';
 	import { playChartTidalTrack, playChartTidalTracks } from '$lib/player/play_trending';
 	import {
 		playRecommendationAlbum,
 		playRecommendationArtist,
 	} from '$lib/player/play_recommendations';
 	import { playTrackNow } from '$lib/stores/player';
-	import { openContextMenu, type MenuItem } from '$lib/stores/context_menu';
-	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
-	import { buildAlbumMenu } from '$lib/player/album_menu';
-	import { buildArtistMenu } from '$lib/player/artist_menu';
-	import { composeTidalArtQuery, peekTidalArt } from '$lib/actions/lazy-tidal-art';
+	import { rotatingWindow, rotationForPeriod } from '$lib/utils/rotation';
+	import { openContextMenu } from '$lib/stores/context_menu';
+	import {
+		composeTidalArtQuery,
+		lazyTidalArt,
+		peekTidalArt,
+		type LazyTidalArtKind,
+	} from '$lib/actions/lazy-tidal-art';
+	import { usableArtwork } from '$lib/utils/artwork';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
+	import MediaRail from '$lib/components/ui/MediaRail.svelte';
+	import RecommendationAlbumPopup from '$lib/components/home/RecommendationAlbumPopup.svelte';
 
 	type State = 'hidden' | 'loading' | 'ready' | 'empty' | 'error';
 
+	// Position in the home stack; stagger only. See YourMixesShelf. Each shelf
+	// this component renders steps one slot further down so a batch that lands
+	// together cascades rather than appearing as a block.
+	let { index = 0 }: { index?: number } = $props();
+
 	const ROTATE_MS = 5500;
 	const PANEL_LIMIT = 20;
+
+	/**
+	 * How often the rail shows a different slice of the shelf.
+	 *
+	 * The server caches a shelf for six hours because rebuilding one costs about
+	 * a hundred Last.fm calls plus up to fifty TIDAL searches, and the input to
+	 * it - top, loved and recent tracks - barely moves in an afternoon. Cutting
+	 * that lease would double the upstream cost to re-derive almost the same
+	 * list.
+	 *
+	 * The cheaper knob is which twenty of the fifty are on screen. Every one of
+	 * those fifty is already fetched and already in the payload, so rotating the
+	 * window costs nothing and gives three or four visibly different rails out of
+	 * one fetch. Two hours divides the six-hour lease without repeating inside a
+	 * single sitting.
+	 *
+	 * Computed once, on init, not in a `$derived`: the window must not move while
+	 * the user is dragging through the rail.
+	 */
+	const VIEW_ROTATION_MS = 2 * 60 * 60 * 1000;
+	const viewRotation = rotationForPeriod(VIEW_ROTATION_MS);
 
 	// Seed from cache so the shelf paints instantly on launch. The provider gate is
 	// preserved: only seed 'ready' if the cached Last.fm/ListenBrainz status says a
@@ -60,6 +97,8 @@
 	let resolvingItems = $state<Record<string, boolean>>({});
 	let lazyArtwork = $state<Record<string, string>>({});
 	let loadSeq = 0;
+	/** The recommended album whose detail popup is open, if any. */
+	let albumPopupItem = $state<ProviderRecommendationItem | null>(null);
 
 	let visibleShelves = $derived(shelves.filter((shelf) => shelf.items.length > 0));
 
@@ -90,10 +129,23 @@
 		const seq = ++loadSeq;
 		errorMsg = '';
 		try {
-			const [lastfm, listenbrainz] = await Promise.allSettled([
+			// The recommendations request goes out alongside the status checks
+			// rather than behind them. Gating it on the gate meant a two-stage
+			// waterfall on every mount even though both statuses are already in
+			// the persisted query cache, and the recommendations call is by far
+			// the slow one. If the gate turns out to be closed the response is
+			// simply discarded; the request is cached either way, so the only
+			// cost is a call we would have made moments later anyway.
+			const statuses = Promise.allSettled([
 				cachedApi.getLastfmStatus(),
 				cachedApi.getListenBrainzStatus()
 			]);
+			const recommendations = cachedApi.getHomeRecommendations();
+			// Nothing else awaits this promise on the gate-closed path, and an
+			// unhandled rejection would surface as a console error.
+			recommendations.catch(() => {});
+
+			const [lastfm, listenbrainz] = await statuses;
 			if (seq !== loadSeq) return;
 			const lastfmCanRecommend = lastfm.status === 'fulfilled' && Boolean(lastfm.value.recommendations);
 			const listenbrainzCanRecommend = listenbrainz.status === 'fulfilled' && Boolean(listenbrainz.value.recommendations);
@@ -103,7 +155,7 @@
 			}
 
 			viewState = 'loading';
-			const response = await cachedApi.getHomeRecommendations();
+			const response = await recommendations;
 			if (seq !== loadSeq) return;
 			shelves = response.shelves ?? [];
 			currentIndexes = {};
@@ -131,8 +183,30 @@
 		return (shelf.entity_type ?? 'track') === 'track';
 	}
 
+	function isArtistShelf(shelf: ProviderRecommendationShelf): boolean {
+		return shelf.entity_type === 'artist';
+	}
+
+	/**
+	 * What this shelf shows in place, which is a soft cap, not the whole set.
+	 *
+	 * For the track shelf twenty is hard: the mural is a fixed 10x2 grid
+	 * (`layout-count-20` in ChartMural.svelte), and a twenty-first tile would add
+	 * a row and reshape the mosaic. For the rails it is a judgement - the server
+	 * now returns fifty, and a rail you have to drag through fifty times is not a
+	 * way to see fifty things. The rest lives behind "View all".
+	 *
+	 * Which twenty rotates every `VIEW_ROTATION_MS`, so the thirty items the rail
+	 * is not showing are not simply never seen. The window wraps, so it is always
+	 * exactly twenty long even when fifty does not divide by twenty.
+	 */
 	function shelfItems(shelf: ProviderRecommendationShelf): ProviderRecommendationItem[] {
-		return shelf.items.slice(0, PANEL_LIMIT);
+		return rotatingWindow(shelf.items, PANEL_LIMIT, viewRotation * PANEL_LIMIT);
+	}
+
+	/** True when the shelf is holding back items the rail is not showing. */
+	function hasMoreThanShelf(shelf: ProviderRecommendationShelf): boolean {
+		return shelf.items.length > PANEL_LIMIT;
 	}
 
 	function currentIndexFor(shelf: ProviderRecommendationShelf): number {
@@ -168,14 +242,23 @@
 		};
 	}
 
+	function itemKind(item: ProviderRecommendationItem): LazyTidalArtKind {
+		const entity = itemEntity(item);
+		return entity === 'artist' || entity === 'album' ? entity : 'track';
+	}
+
 	function itemArtwork(shelf: ProviderRecommendationShelf, item: ProviderRecommendationItem, index: number): string | null {
-		const resolved = lazyArtwork[itemKey(shelf, item, index)] ?? item.artwork_url;
+		// usableArtwork, not `??`: Last.fm hands back a real URL for a grey star
+		// placeholder when it has no art. Treating that as present left the tile
+		// showing the star forever and suppressed the TIDAL lookup that would
+		// have found the actual cover.
+		const resolved = usableArtwork(lazyArtwork[itemKey(shelf, item, index)], item.artwork_url);
 		if (resolved) return resolved;
 		// Fall back to previously-resolved artwork from the persistent cache so the
 		// panel paints a full collage on first launch instead of empty tiles, then
 		// swaps to fresh art as the live lookups land.
 		const query = itemLazyQuery(item);
-		return peekTidalArt(composeTidalArtQuery(query.artist, query.title));
+		return peekTidalArt(composeTidalArtQuery(query.artist, query.title), itemKind(item));
 	}
 
 	function itemFallbackText(item: ProviderRecommendationItem): string {
@@ -193,6 +276,28 @@
 		return item.reason ? `${position} - ${item.reason}` : position;
 	}
 
+	// Built once per shelf and reused until the data or the resolved artwork
+	// actually changes. The rotation timer ticks every 5.5s and only moves
+	// currentIndexes; rebuilding twenty mural items (and re-running twenty
+	// lazy-art action updates) on each tick churned exactly while the artwork
+	// was still landing. Deriving off shelves + lazyArtwork makes that
+	// independence explicit rather than incidental.
+	const muralItemsByShelf = $derived.by(() => {
+		const map: Record<string, ChartMuralItem[]> = {};
+		for (const shelf of visibleShelves) {
+			if (isTrackShelf(shelf)) map[shelfKey(shelf)] = shelfMuralItems(shelf);
+		}
+		return map;
+	});
+
+	const railItemsByShelf = $derived.by(() => {
+		const map: Record<string, RailEntry[]> = {};
+		for (const shelf of visibleShelves) {
+			if (!isTrackShelf(shelf)) map[shelfKey(shelf)] = shelfRailItems(shelf);
+		}
+		return map;
+	});
+
 	function shelfMuralItems(shelf: ProviderRecommendationShelf): ChartMuralItem[] {
 		return shelfItems(shelf).map((item, index) => {
 			const key = itemKey(shelf, item, index);
@@ -206,6 +311,7 @@
 				tileTitle: `${index + 1}. ${item.title} - ${item.artist_name ?? 'Unknown artist'}`,
 				lazy: {
 					enabled: itemArtwork(shelf, item, index) === null,
+					kind: itemKind(item),
 					query: itemLazyQuery(item),
 					onResolve: (url: string) => {
 						lazyArtwork = { ...lazyArtwork, [key]: url };
@@ -215,20 +321,35 @@
 		});
 	}
 
-	function itemToTidalPlayable(item: ProviderRecommendationItem): TidalPlayable {
-		return {
-			tidal_id: item.tidal_id ?? 0,
-			title: item.title,
-			artist_name: item.artist_name,
-			album_title: item.album_title,
-			artwork_url: item.artwork_url,
-			duration_ms: null,
-			artist_tidal_id: null,
-			track_id: item.local_track_id ?? undefined,
-			local_id: item.local_track_id,
-			is_in_library: Boolean(item.local_track_id),
-		};
+	// Artists and albums render as rails rather than murals, and MediaRail's card
+	// snippet only receives the item. Precomputing a view model here keeps the
+	// snippet free of the per-shelf lookups (artwork, key, lazy query) it would
+	// otherwise need the shelf in scope to do.
+	type RailEntry = {
+		key: string;
+		item: ProviderRecommendationItem;
+		artwork: string | null;
+		fallbackText: string;
+		lazyQuery: { artist: string | null; title: string };
+	};
+
+	function shelfRailItems(shelf: ProviderRecommendationShelf): RailEntry[] {
+		return shelfItems(shelf).map((item, index) => ({
+			key: itemKey(shelf, item, index),
+			item,
+			artwork: itemArtwork(shelf, item, index),
+			fallbackText: itemFallbackText(item),
+			lazyQuery: itemLazyQuery(item),
+		}));
 	}
+
+	function resolveRailArtwork(key: string, url: string) {
+		lazyArtwork = { ...lazyArtwork, [key]: url };
+	}
+
+	// Re-exported from the shared module so the "View all" page and this shelf
+	// cannot drift apart.
+	const itemToTidalPlayable = recommendationItemToTidalPlayable;
 
 	function selectItem(shelf: ProviderRecommendationShelf, index: number) {
 		currentIndexes = { ...currentIndexes, [shelfKey(shelf)]: index };
@@ -275,57 +396,6 @@
 		if (item) void playItem(shelf, item, index);
 	}
 
-	// One right-click menu per entity, reusing the shared builders the rest of the
-	// app uses. Unresolved Last.fm albums/artists (no ids yet) get a resolve-then-act
-	// menu so "Add to queue"-style actions still work before a TIDAL match exists.
-	function recommendationItemMenu(item: ProviderRecommendationItem): MenuItem[] {
-		const entity = itemEntity(item);
-		if (entity === 'track') {
-			if (item.local_track_id) {
-				return buildTrackMenu({
-					id: item.local_track_id,
-					title: item.title,
-					artist_id: item.local_artist_id ?? null,
-					artist_name: item.artist_name,
-					album_id: item.local_album_id ?? null,
-					album_title: item.album_title,
-				});
-			}
-			return buildTidalTrackMenu(itemToTidalPlayable(item));
-		}
-		if (entity === 'album') {
-			if (item.local_album_id || item.tidal_album_id) {
-				return buildAlbumMenu({
-					id: item.local_album_id ?? null,
-					tidal_id: item.tidal_album_id ?? null,
-					title: item.title,
-					artist_id: item.local_artist_id ?? null,
-					artist_name: item.artist_name,
-					in_library: Boolean(item.local_album_id),
-				});
-			}
-			return [
-				{ label: 'Play album', icon: '▶', onSelect: () => void playRecommendationAlbum(item) },
-				{ separator: true, label: '' },
-				{ label: 'Open album page', icon: '↗', onSelect: () => void openRecommendationItem(item) },
-			];
-		}
-		// artist
-		if (item.local_artist_id) {
-			return buildArtistMenu({
-				id: item.local_artist_id,
-				tidal_id: item.tidal_artist_id ?? null,
-				name: item.title,
-				in_library: true,
-			});
-		}
-		return [
-			{ label: 'Play top tracks', icon: '▶', onSelect: () => void playRecommendationArtist(item) },
-			{ separator: true, label: '' },
-			{ label: 'Open artist', icon: '↗', onSelect: () => void openRecommendationItem(item) },
-		];
-	}
-
 	function openItemMenu(event: MouseEvent, item: ProviderRecommendationItem) {
 		event.preventDefault();
 		event.stopPropagation();
@@ -344,21 +414,6 @@
 		}
 	}
 
-	async function openRecommendationItem(item: ProviderRecommendationItem) {
-		const entity = itemEntity(item);
-		if (entity !== 'artist' && entity !== 'album') return;
-		const knownHref = recommendationKnownHref(item);
-		if (knownHref) return goto(knownHref);
-		try {
-			const results = await api.searchTidal(recommendationSearchQuery(item), 5);
-			const resolvedHref = recommendationHrefFromSearch(item, results);
-			if (resolvedHref) return goto(resolvedHref);
-		} catch {
-			// Search route fallback keeps the user moving when TIDAL lookup fails.
-		}
-		return goto(recommendationSearchHref(item));
-	}
-
 	function actionLabel(item: ProviderRecommendationItem): string {
 		return recommendationActionLabel(item);
 	}
@@ -371,10 +426,91 @@
 	}
 </script>
 
+{#snippet artistCard(entry: RailEntry)}
+	<button
+		type="button"
+		class="rec-card rec-card-artist"
+		title={entry.item.title}
+		aria-label={`Open ${entry.item.title}`}
+		onclick={() => void openRecommendationItem(entry.item)}
+		oncontextmenu={(event) => openItemMenu(event, entry.item)}
+		use:lazyTidalArt={{
+			enabled: entry.artwork === null,
+			kind: 'artist',
+			query: entry.lazyQuery,
+			onResolve: (url) => resolveRailArtwork(entry.key, url),
+		}}
+	>
+		<div class="rec-avatar-wrap">
+			<ArtworkImage
+				className="rec-avatar"
+				src={entry.artwork}
+				alt={entry.item.title}
+				size={320}
+				tint={true}
+				fadeIn={true}
+				fallbackText={entry.fallbackText}
+			/>
+		</div>
+		<p class="rec-title">{entry.item.title}</p>
+	</button>
+{/snippet}
+
+{#snippet albumCard(entry: RailEntry)}
+	<!-- Matches the Library album card (AlbumCarousel): a corner play badge on
+	     hover, and a click that opens the album's mini detail popup rather than
+	     navigating away. Artists deliberately differ - they have no play badge
+	     anywhere in the app.
+
+	     A single has no tracklist to open, so it says so on the card and seeds
+	     song radio instead. Last.fm's top-albums feed mixes singles in with
+	     albums and does not distinguish them; the server marks the ones TIDAL
+	     only carries as a track. -->
+	<button
+		type="button"
+		class="rec-card"
+		title={`${entry.item.title}${entry.item.artist_name ? ` - ${entry.item.artist_name}` : ''}`}
+		aria-label={isRecommendationSingle(entry.item)
+			? `Start radio from ${entry.item.title}`
+			: `Open ${entry.item.title}`}
+		onclick={() =>
+			isRecommendationSingle(entry.item)
+				? void playRecommendationSingle(entry.item)
+				: (albumPopupItem = entry.item)}
+		oncontextmenu={(event) => openItemMenu(event, entry.item)}
+		use:lazyTidalArt={{
+			enabled: entry.artwork === null,
+			kind: 'album',
+			query: entry.lazyQuery,
+			onResolve: (url) => resolveRailArtwork(entry.key, url),
+		}}
+	>
+		<div class="rec-art-wrap">
+			<ArtworkImage
+				className="rec-art"
+				src={entry.artwork}
+				alt={entry.item.title}
+				size={320}
+				tint={true}
+				fadeIn={true}
+				fallbackText={entry.fallbackText}
+			/>
+			<PlayOverlay position="corner" size="sm" />
+			{#if isRecommendationSingle(entry.item)}
+				<span class="rec-badge">Single</span>
+			{/if}
+		</div>
+		<p class="rec-title">{entry.item.title}</p>
+		{#if entry.item.artist_name}
+			<p class="rec-subtitle">{entry.item.artist_name}</p>
+		{/if}
+	</button>
+{/snippet}
+
 {#if viewState === 'hidden'}
 	<!-- Hidden until a profile integration is connected. -->
 {:else if viewState === 'loading'}
-	<section class="profile-recommendations" data-section="provider-recommendations">
+	<section class="profile-recommendations rise-in-shelf" data-section="provider-recommendations" style={`--rise-index: ${index}`}>
 		<SectionHeader
 			eyebrow="Connected profiles"
 			title="Recommendations"
@@ -394,12 +530,16 @@
 	</section>
 {:else if viewState === 'ready'}
 	<div class="profile-recommendations-list">
-		{#each visibleShelves as shelf (shelfKey(shelf))}
+		{#each visibleShelves as shelf, shelfPosition (shelfKey(shelf))}
 			{@const currentItem = currentItemFor(shelf)}
 			{@const currentIndex = currentIndexFor(shelf)}
 			{@const key = shelfKey(shelf)}
 			{#if currentItem}
-				<section class="profile-recommendations" data-section={`provider-recommendations-${shelf.provider}-${shelf.entity_type ?? 'track'}`}>
+				<section
+					class="profile-recommendations rise-in-shelf"
+					data-section={`provider-recommendations-${shelf.provider}-${shelf.entity_type ?? 'track'}`}
+					style={`--rise-index: ${index + shelfPosition}`}
+				>
 					<SectionHeader
 						eyebrow="Connected profiles"
 						title={shelf.title}
@@ -418,30 +558,48 @@
 									{playingAllShelves[key] ? 'Resolving...' : 'Play all'}
 								</button>
 							{/if}
+							<!-- Only when there is genuinely more than the rail shows, so the
+							     link can never lead to the same cards again. -->
+							{#if hasMoreThanShelf(shelf)}
+								<a class="rec-view-all" href={`/recommendations/${recommendationShelfSlug(shelf)}`}>
+									View all {shelf.items.length} &#8594;
+								</a>
+							{/if}
 						{/snippet}
 					</SectionHeader>
-					<ChartMural
-						items={shelfMuralItems(shelf)}
-						currentIndex={currentIndex}
-						ariaLabel={`${shelf.title} carousel`}
-						kindLabel={shelf.provider === 'lastfm' ? `Last.fm ${shelf.entity_type ?? 'track'}s` : 'Connected profile'}
-						title={currentItem.title}
-						subtitle={itemSubtitle(currentItem, currentIndex)}
-						metric={itemMetric(shelf, currentItem, currentIndex)}
-						actionLabel={resolvingItems[itemKey(shelf, currentItem, currentIndex)] ? 'Resolving...' : actionLabel(currentItem)}
-						actionDisabled={Boolean(resolvingItems[itemKey(shelf, currentItem, currentIndex)])}
-						accent={shelf.provider === 'lastfm' ? 'lastfm' : 'accent'}
-						onSelect={(index) => selectItem(shelf, index)}
-						onJump={(delta) => jumpItem(shelf, delta)}
-						onPlay={() => playItem(shelf, currentItem, currentIndex)}
-						onItemActivate={(index) => activateItem(shelf, index)}
-						onCardContext={(event) => openItemMenu(event, currentItem)}
-						onItemContext={(event, index) => {
-							const item = shelfItems(shelf)[index];
-							if (item) openItemMenu(event, item);
-						}}
-						onPauseChange={(paused) => pausedShelves = { ...pausedShelves, [key]: paused }}
-					/>
+					{#if isTrackShelf(shelf)}
+						<ChartMural
+							items={muralItemsByShelf[key] ?? []}
+							currentIndex={currentIndex}
+							ariaLabel={`${shelf.title} carousel`}
+							kindLabel={shelf.provider === 'lastfm' ? `Last.fm ${shelf.entity_type ?? 'track'}s` : 'Connected profile'}
+							title={currentItem.title}
+							subtitle={itemSubtitle(currentItem, currentIndex)}
+							metric={itemMetric(shelf, currentItem, currentIndex)}
+							actionLabel={resolvingItems[itemKey(shelf, currentItem, currentIndex)] ? 'Resolving...' : actionLabel(currentItem)}
+							actionDisabled={Boolean(resolvingItems[itemKey(shelf, currentItem, currentIndex)])}
+							accent={shelf.provider === 'lastfm' ? 'lastfm' : 'accent'}
+							onSelect={(index) => selectItem(shelf, index)}
+							onJump={(delta) => jumpItem(shelf, delta)}
+							onPlay={() => playItem(shelf, currentItem, currentIndex)}
+							onItemActivate={(index) => activateItem(shelf, index)}
+							onCardContext={(event) => openItemMenu(event, currentItem)}
+							onItemContext={(event, index) => {
+								const item = shelfItems(shelf)[index];
+								if (item) openItemMenu(event, item);
+							}}
+							onPauseChange={(paused) => pausedShelves = { ...pausedShelves, [key]: paused }}
+						/>
+					{:else}
+						<MediaRail
+							items={railItemsByShelf[key] ?? []}
+							card={isArtistShelf(shelf) ? artistCard : albumCard}
+							getKey={(entry) => entry.key}
+							ariaLabel={shelf.title}
+							fluid
+							stagger
+						/>
+					{/if}
 				</section>
 			{/if}
 		{/each}
@@ -474,6 +632,14 @@
 	</section>
 {/if}
 
+{#if albumPopupItem}
+	<!-- Keyed so picking a different album mounts a fresh popup rather than
+	     asking the existing one to swap albums mid-load. -->
+	{#key albumPopupItem}
+		<RecommendationAlbumPopup item={albumPopupItem} onClose={() => (albumPopupItem = null)} />
+	{/key}
+{/if}
+
 <style>
 	.profile-recommendations {
 		display: flex;
@@ -481,9 +647,137 @@
 		gap: var(--space-3);
 	}
 
+	.rec-view-all {
+		font-size: var(--font-size-sm);
+		color: var(--text-secondary);
+		text-decoration: none;
+		white-space: nowrap;
+		transition: color var(--motion-base);
+	}
+	.rec-view-all:hover { color: var(--text-primary); }
+
 	.profile-recommendations-list {
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-5);
+	}
+
+	/* Artists and albums used to each get their own full-width mural. Three
+	   near-identical mosaics stacked was most of the visual weight of the page,
+	   and a square mural tile is the wrong shape for an artist anyway. Tracks
+	   keep the mural; these two become rails, matching how /search presents the
+	   same two kinds. */
+	.rec-card {
+		width: 100%;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-2);
+		background: none;
+		border: 0;
+		padding: 0;
+		text-align: left;
+		color: inherit;
+		font: inherit;
+		cursor: pointer;
+		box-sizing: border-box;
+		transition: transform var(--motion-base);
+	}
+
+	.rec-card:hover {
+		transform: translateY(-4px);
+	}
+
+	.rec-card:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: 4px;
+	}
+
+	.rec-card-artist {
+		align-items: center;
+		text-align: center;
+	}
+
+	.rec-art-wrap,
+	.rec-avatar-wrap {
+		position: relative;
+		width: 100%;
+		aspect-ratio: 1 / 1;
+		overflow: hidden;
+		background: var(--bg-raised);
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+		transition: box-shadow var(--motion-base);
+	}
+
+	.rec-art-wrap {
+		border-radius: var(--radius-md);
+	}
+
+	.rec-avatar-wrap {
+		border-radius: 50%;
+	}
+
+	/* Same pill as the video badge in YourMixesShelf, top-left so it never sits
+	   under the corner play badge. Says the card is a single, so a click that
+	   starts radio instead of opening a tracklist is not a surprise. */
+	.rec-badge {
+		position: absolute;
+		left: 8px;
+		top: 8px;
+		padding: 3px 7px;
+		border-radius: 999px;
+		background: rgba(0, 0, 0, 0.62);
+		color: #fff;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-bold);
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+	}
+
+	.rec-card:hover .rec-art-wrap,
+	.rec-card:hover .rec-avatar-wrap {
+		box-shadow: 0 12px 26px -6px rgba(0, 0, 0, 0.5);
+	}
+
+	.rec-card :global(.rec-art),
+	.rec-card :global(.rec-avatar) {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+		display: block;
+	}
+
+	.rec-card :global(.rec-art.fallback),
+	.rec-card :global(.rec-avatar.fallback) {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.rec-card :global(.rec-art.fallback span),
+	.rec-card :global(.rec-avatar.fallback span) {
+		font-size: var(--font-size-3xl);
+		color: rgba(255, 255, 255, 0.92);
+	}
+
+	.rec-title,
+	.rec-subtitle {
+		margin: 0;
+		width: 100%;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		line-height: var(--line-height-snug);
+	}
+
+	.rec-title {
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+		color: var(--text-primary);
+	}
+
+	.rec-subtitle {
+		font-size: var(--font-size-xs);
+		color: var(--text-muted);
 	}
 </style>

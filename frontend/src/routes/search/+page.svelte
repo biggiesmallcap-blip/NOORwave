@@ -3,15 +3,16 @@
   import { goto, beforeNavigate } from '$app/navigation'
   import type { Snapshot } from './$types'
   import { captureScroll, restoreScroll } from '$lib/navigation/scroll'
-  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type SpotifyPlaylistSearchItem, type SearchResults } from '$lib/api/client'
+  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type SpotifyPlaylistSearchItem, type SearchResults, type ListenHistoryEntry } from '$lib/api/client'
   import { cachedApi } from '$lib/cache/api_queries'
-  import DiscoverShelves from '$lib/components/search/DiscoverShelves.svelte'
+  import MediaRail from '$lib/components/ui/MediaRail.svelte'
+  import { FACETS } from '$lib/search/facets'
   import { buildTidalTrackMenu, buildTrackMenu, downloadMenuItem } from '$lib/player/track_menu'
   import { buildAlbumMenu } from '$lib/player/album_menu'
   import { buildArtistMenu } from '$lib/player/artist_menu'
   import { downloadTidalPlaylist } from '$lib/stores/downloads'
   import { openContextMenu, type MenuItem } from '$lib/stores/context_menu'
-  import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio, playTrackNow, playTidalPlaylist } from '$lib/stores/player'
+  import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio, playTrackNow, playTidalPlaylist, playTracksInContext } from '$lib/stores/player'
   import { formatTrackDuration } from '$lib/utils/format'
   import { parseQuery, type ParsedQuery } from '$lib/search/query_parser'
   import { buildAudioParams as sharedBuildAudioParams } from '$lib/search/audio_params'
@@ -19,8 +20,10 @@
   import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal'
   import { tidalSearchTrackToPlayable } from '$lib/utils/track'
   import { initials } from '$lib/utils/text'
+  import { rotatingWindow } from '$lib/utils/rotation'
   import { canPlayTrack, getPlayableLabel } from '$lib/player/playable'
   import { mergeLocalIntoTidal } from '$lib/search/merge_local'
+  import { getCachedMosaic, setCachedMosaic, nameToGradient } from '$lib/stores/playlist_artwork_cache'
   import SearchField from '$lib/search/ui/SearchField.svelte'
   import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte'
   import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte'
@@ -124,12 +127,171 @@
   // C3 - session-aware ranking
   let recentArtistNames = $state<Set<string>>(new Set())
 
+  // Idle-state rails. Both are built from responses the page already fetches
+  // on mount, so the empty view costs no additional requests.
+  let recentListens = $state<ListenHistoryEntry[]>([])
+
+  // Listen history is per-play, so the same track appears many times. Keep the
+  // most recent row per track and cap it to a rail's worth.
+  function dedupeByTrack(entries: ListenHistoryEntry[]): ListenHistoryEntry[] {
+    const seen = new Set<number>()
+    const out: ListenHistoryEntry[] = []
+    for (const entry of entries) {
+      if (seen.has(entry.track_id)) continue
+      seen.add(entry.track_id)
+      out.push(entry)
+      if (out.length >= 12) break
+    }
+    return out
+  }
+
   // C4 - discovery injectables
   let vibeTrack = $state<VibeTrack[] | null>(null)
   let underratedTracks = $state<BasicTrack[] | null>(null)
   let discoveryLoadSeq = 0
 
   let localPlaylists = $state<Playlist[]>([])
+
+  // ── Rotating playlist window ────────────────────────────────────────────
+  // A-Z plus a cap showed the same two dozen playlists forever and left the
+  // rest unreachable. This advances the starting point by one window per
+  // visit and wraps, so the whole library comes round over a few visits.
+  //
+  // Deliberately a rotation and not a reshuffle: the order has to stay put
+  // for as long as you are looking at it, or you lose any sense of where a
+  // card was. `updated_at` was the other candidate and is unusable here -
+  // every playlist carries the same bulk-sync timestamp, so sorting by it
+  // just yields reverse A-Z.
+  const PLAYLIST_WINDOW = 24
+  const PLAYLIST_ROTATION_KEY = 'noor.search.playlistRotation.v1'
+  let playlistRotation = $state(0)
+
+  /** Reads this visit's starting offset and parks the next one. */
+  function nextPlaylistRotation(total: number): number {
+    if (typeof localStorage === 'undefined' || total <= 0) return 0
+    let start = 0
+    try {
+      const stored = Number(localStorage.getItem(PLAYLIST_ROTATION_KEY))
+      if (Number.isFinite(stored) && stored >= 0) start = stored % total
+    } catch {
+      // Storage disabled - always start from the top.
+    }
+    try {
+      localStorage.setItem(PLAYLIST_ROTATION_KEY, String((start + PLAYLIST_WINDOW) % total))
+    } catch {
+      // Quota or disabled storage. The window simply does not advance; it must
+      // never take the page down with it.
+    }
+    return start
+  }
+
+  // Same wrapping window the Home recommendation rails use, so the two surfaces
+  // cannot drift. Only the offset differs: this one advances per visit and is
+  // stored, because a playlist list changes when you make a playlist, while the
+  // recommendation rails derive theirs from the clock.
+  const visiblePlaylistWindow = $derived(
+    rotatingWindow(localPlaylists, PLAYLIST_WINDOW, playlistRotation),
+  )
+
+  // Cover mosaics for the idle "Your playlists" rail, keyed by playlist id.
+  // A playlist has no artwork of its own - the cover is assembled from the
+  // first few tracks - so this reuses the same store and the same lazy,
+  // in-view fetch that /playlists uses rather than growing a second one.
+  // Cached hits paint on the first frame; misses cost one small request per
+  // card the user actually scrolls to, and fall back to a name gradient.
+  let playlistMosaics = $state<Record<number, string[]>>({})
+  const fetchedMosaicIds = new Set<number>()
+  let mosaicObserver: IntersectionObserver | null = null
+
+  /**
+   * Paint every cover we already know about, straight after the playlist list
+   * lands and without waiting for the observer. Two reasons: a cached cover
+   * should be on the first frame rather than one scroll-tick later, and the
+   * observer is not guaranteed to deliver - it needs the page to be
+   * compositing, which a backgrounded or non-rendering tab is not. Costs no
+   * requests; the observer still handles everything not in the cache.
+   */
+  function seedPlaylistMosaicsFromCache(): void {
+    const seeded: Record<number, string[]> = {}
+    for (const playlist of localPlaylists) {
+      if (playlist.track_count <= 0) continue
+      const cached = getCachedMosaic(playlist.id, playlist.track_count)
+      if (cached?.length) seeded[playlist.id] = cached
+    }
+    if (Object.keys(seeded).length) playlistMosaics = { ...playlistMosaics, ...seeded }
+  }
+
+  function ensureMosaicObserver(): IntersectionObserver | null {
+    if (typeof IntersectionObserver === 'undefined') return null
+    if (mosaicObserver) return mosaicObserver
+    mosaicObserver = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue
+          const target = entry.target as HTMLElement
+          const id = Number(target.dataset.playlistId)
+          if (!Number.isFinite(id)) continue
+          // Unobserved only once a cover is actually in hand, so a card whose
+          // first attempt failed gets another go the next time it scrolls into
+          // view. Concurrent attempts are held off by `fetchedMosaicIds`.
+          void hydrateMosaicFor(id).then((ok) => {
+            if (ok) mosaicObserver?.unobserve(target)
+          })
+        }
+      },
+      { rootMargin: '200px 0px', threshold: 0.05 },
+    )
+    return mosaicObserver
+  }
+
+  function registerPlaylistCard(node: HTMLElement, playlistId: number) {
+    node.dataset.playlistId = String(playlistId)
+    const observer = ensureMosaicObserver()
+    observer?.observe(node)
+    return {
+      destroy() {
+        observer?.unobserve(node)
+      },
+    }
+  }
+
+  /** Resolves true once this playlist has a cover (or provably never will). */
+  async function hydrateMosaicFor(id: number): Promise<boolean> {
+    const playlist = localPlaylists.find((p) => p.id === id)
+    if (!playlist || playlist.track_count <= 0) return true
+    if (playlistMosaics[id]?.length) return true
+    const cached = getCachedMosaic(id, playlist.track_count)
+    if (cached) {
+      playlistMosaics = { ...playlistMosaics, [id]: cached }
+      return true
+    }
+    if (fetchedMosaicIds.has(id)) return false
+    fetchedMosaicIds.add(id)
+    try {
+      const { urls } = await cachedApi.getPlaylistCoverSample(id)
+      if (!urls.length) return true
+      setCachedMosaic(id, urls, playlist.track_count)
+      playlistMosaics = { ...playlistMosaics, [id]: urls }
+      return true
+    } catch {
+      // Release the claim so a later pass can retry. These fire during the
+      // first paint, which is exactly when the access token may not be in
+      // place yet, and a one-shot 401 used to blank every cover for the rest
+      // of the session. The gradient stays up in the meantime.
+      fetchedMosaicIds.delete(id)
+      return false
+    }
+  }
+
+  async function playLocalPlaylist(playlist: Playlist) {
+    try {
+      const { tracks } = await cachedApi.getPlaylistTracks(playlist.id)
+      if (!tracks.length) return
+      await playTracksInContext(tracks.map((t) => t.id))
+    } catch {
+      // Nothing to play; the right-click menu still offers the other actions.
+    }
+  }
   let tidalPlaylistResults = $state<TidalSearchPlaylist[]>([])
   let spotifyPlaylistResults = $state<SpotifyPlaylistSearchItem[]>([])
   let artistDiscographyArtwork = $state<Map<number, string[]>>(new Map())
@@ -180,10 +342,22 @@
         .map(e => e.artist_name)
         .filter((n): n is string => typeof n === 'string' && n.length > 0)
       recentArtistNames = new Set(names)
+      // Same response, no extra request: this call was already being made for
+      // session-aware ranking and only its artist names were kept. The entries
+      // also carry title and artwork, which is the "Jump back in" rail.
+      recentListens = dedupeByTrack(listens.listens)
+    } else {
+      // A dropped rail is invisible: the section is behind an `{#if length}`,
+      // so a failure looks exactly like "you have no history". Say so.
+      console.warn('[search] recent listens failed; "Jump back in" hidden', listensRes.reason)
     }
 
     if (playlistsRes.status === 'fulfilled') {
       localPlaylists = playlistsRes.value.playlists
+      playlistRotation = nextPlaylistRotation(localPlaylists.length)
+      seedPlaylistMosaicsFromCache()
+    } else {
+      console.warn('[search] playlists failed; "Your playlists" hidden', playlistsRes.reason)
     }
   })
 
@@ -284,6 +458,14 @@
 
   function isCurrentSearch(q: string, generation: number, signal: AbortSignal) {
     return !signal.aborted && searchGeneration === generation && query.trim() === q
+  }
+
+  // The facet tiles are the only place the query language is advertised. The
+  // popover and Tab-completion only help once you already know a filter exists.
+  function applyFacetExample(example: string) {
+    query = example
+    inputEl?.focus()
+    onInput()
   }
 
   function onInput() {
@@ -1200,13 +1382,89 @@
 
 </script>
 
+{#snippet listenCard(entry: ListenHistoryEntry)}
+  <button
+    type="button"
+    class="idle-card"
+    title={`${entry.track_title}${entry.artist_name ? ` - ${entry.artist_name}` : ''}`}
+    onclick={() => void playTrackNow(entry.track_id)}
+    oncontextmenu={(e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      openContextMenu(e, buildTrackMenu({
+        id: entry.track_id,
+        title: entry.track_title,
+        artist_id: null,
+        artist_name: entry.artist_name,
+        album_id: null,
+        album_title: entry.album_title,
+      }), entry.track_title)
+    }}
+  >
+    <div class="idle-art">
+      <ArtworkImage
+        className="idle-art-img"
+        src={entry.artwork_url}
+        alt={entry.track_title}
+        size={320}
+        tint={true}
+        fadeIn={true}
+        fallbackText={(entry.track_title.trim()[0] ?? 'N').toUpperCase()}
+      />
+      <PlayOverlay position="corner" size="sm" />
+    </div>
+    <p class="idle-title">{entry.track_title}</p>
+    {#if entry.artist_name}<p class="idle-sub">{entry.artist_name}</p>{/if}
+  </button>
+{/snippet}
+
+{#snippet playlistCard(playlist: Playlist)}
+  {@const mosaic = playlistMosaics[playlist.id] ?? []}
+  <!-- Plays on click rather than navigating. There is no per-playlist route to
+       navigate to anyway - /playlists expands the card in place - and from a
+       browse rail the thing you want is the music, not the list. Opening the
+       playlist page stays available on right-click. -->
+  <button
+    type="button"
+    class="idle-card"
+    title={playlist.name}
+    aria-label={`Play ${playlist.name}`}
+    use:registerPlaylistCard={playlist.id}
+    onclick={() => void playLocalPlaylist(playlist)}
+    oncontextmenu={(e) => openSearchContextMenu(e, localPlaylistMenuItems(playlist), playlist.name)}
+  >
+    <div
+      class="idle-art idle-art-playlist"
+      class:has-mosaic={mosaic.length >= 4}
+      style:background={mosaic.length === 0 ? nameToGradient(playlist.name) : undefined}
+    >
+      {#if mosaic.length >= 4}
+        {#each mosaic.slice(0, 4) as url (url)}
+          <ArtworkImage className="idle-mosaic-art" src={url} alt="" size={320} fadeIn={true} />
+        {/each}
+      {:else if mosaic.length > 0}
+        <ArtworkImage className="idle-mosaic-art" src={mosaic[0]} alt="" size={320} fadeIn={true} />
+      {:else}
+        <span class="idle-playlist-glyph" aria-hidden="true">{playlist.is_smart ? '✦' : '☰'}</span>
+      {/if}
+      <PlayOverlay position="corner" size="sm" />
+    </div>
+    <p class="idle-title">{playlist.name}</p>
+    <p class="idle-sub">{playlist.track_count} {playlist.track_count === 1 ? 'track' : 'tracks'}</p>
+  </button>
+{/snippet}
+
 <div class="search-page">
   <div class="search-header">
+    <!-- No `facets`: the focus popover listed all ten filters over the top of
+         the page, which on this route means it covered the live results the
+         field had just produced. The two quieter routes to the same knowledge
+         remain - inline Tab-completion while typing, and the "Try a filter"
+         section in the idle state, neither of which occludes anything. -->
     <SearchField
       bind:value={query}
       bind:inputEl
       variant="page"
-      facets
       inlineCompletion
       filterChips
       placeholder="Search Tidal's full catalogue"
@@ -1248,13 +1506,46 @@
       </section>
     {/if}
 
-    <section class="results-section discover-shelves-section">
-      <DiscoverShelves />
-    </section>
-
-    {#if recent.length === 0}
-      <p class="search-hint">Start typing to search Tidal's full catalogue</p>
+    {#if recentListens.length > 0}
+      <section class="results-section">
+        <h3 class="section-label">Jump back in</h3>
+        <MediaRail
+          items={recentListens}
+          card={listenCard}
+          getKey={(entry) => entry.track_id}
+          fluid
+          stagger
+        />
+      </section>
     {/if}
+
+    {#if localPlaylists.length > 0}
+      <section class="results-section">
+        <h3 class="section-label">Your playlists</h3>
+        <!-- Two rows: playlists are the densest thing on this page and a single
+             row of twelve wasted the vertical space the covers now justify. -->
+        <MediaRail
+          items={visiblePlaylistWindow}
+          card={playlistCard}
+          getKey={(p) => p.id}
+          fluid
+          rows={2}
+          stagger
+        />
+      </section>
+    {/if}
+
+    <section class="results-section">
+      <h3 class="section-label">Try a filter</h3>
+      <div class="facet-grid">
+        {#each FACETS as facet (facet.key)}
+          <button type="button" class="facet-tile" onclick={() => applyFacetExample(facet.example)}>
+            <span class="facet-example">{facet.example}</span>
+            <span class="facet-desc">{facet.description}</span>
+          </button>
+        {/each}
+      </div>
+    </section>
   {:else if loading && !results && audioResults === null}
     <p class="search-hint">Searching…</p>
   {:else if error && !results && providerSearchDone}
@@ -2151,6 +2442,139 @@
   }
   .load-more-btn:hover:not(:disabled) { color: var(--text-primary); border-color: var(--accent); }
   .load-more-btn:disabled { opacity: 0.6; cursor: default; }
+  /* ── Idle state ────────────────────────────────────────────────────────
+     /search used to fill its empty view with the TIDAL discover shelves, the
+     same content Home now carries, which left the app with two browse
+     surfaces. This view is about the user's own material and about how to
+     search. Both rails are built from responses this page already makes on
+     mount, so the idle state issues no requests of its own. */
+  .idle-card {
+    width: 100%;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    background: none;
+    border: 0;
+    padding: 0;
+    text-align: left;
+    text-decoration: none;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    box-sizing: border-box;
+    transition: transform var(--motion-base);
+  }
+  .idle-card:hover { transform: translateY(-4px); }
+  .idle-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+
+  .idle-art {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    background: var(--bg-raised);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+    transition: box-shadow var(--motion-base);
+  }
+  .idle-card:hover .idle-art { box-shadow: 0 12px 26px -6px rgba(0, 0, 0, 0.5); }
+  .idle-card:hover :global(.play-overlay) { opacity: 1; transform: translateY(0); }
+
+  .idle-card :global(.idle-art-img) {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .idle-card :global(.idle-art-img.fallback) {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .idle-card :global(.idle-art-img.fallback span) {
+    font-size: var(--font-size-3xl);
+    color: rgba(255, 255, 255, 0.92);
+  }
+
+  /* Glyph and single-cover both centre; the 4-up mosaic switches to a grid.
+     `background` is set inline to the name gradient only when there is no
+     artwork at all, so a playlist whose covers have not loaded yet still
+     reads as a distinct card rather than a row of identical tiles. */
+  .idle-art-playlist {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .idle-art-playlist.has-mosaic {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 0;
+  }
+  .idle-art-playlist :global(.idle-mosaic-art),
+  .idle-art-playlist :global(img.idle-mosaic-art) {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .idle-playlist-glyph {
+    font-size: var(--font-size-3xl);
+    color: var(--accent-line);
+  }
+
+  .idle-title, .idle-sub {
+    margin: 0;
+    width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: var(--line-height-snug);
+  }
+  .idle-title {
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-semibold);
+    color: var(--text-primary);
+  }
+  .idle-sub {
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+  }
+
+  .facet-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: var(--gap-sm);
+  }
+  .facet-tile {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    align-items: flex-start;
+    padding: var(--space-3);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-subtle);
+    background: var(--bg-elevated);
+    cursor: pointer;
+    text-align: left;
+    transition: border-color var(--motion-fast), background var(--motion-fast);
+  }
+  .facet-tile:hover, .facet-tile:focus-visible {
+    border-color: var(--accent-line);
+    background: var(--bg-hover);
+    outline: none;
+  }
+  .facet-example {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-sm);
+    color: var(--accent-line);
+  }
+  .facet-desc {
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+  }
+
   /* Artists */
   .artists-row {
     display: flex;

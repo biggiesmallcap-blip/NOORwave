@@ -130,8 +130,10 @@ describe('library home hero contract', () => {
 		expect(libraryPage).not.toContain('homePanelArtUrl');
 		expect(libraryPage).not.toContain('markHomePanelArtFailed');
 		expect(libraryPage).not.toContain('failedHomePanelArtUrls');
-		expect(libraryPage).toContain('class="home-mural-grid"');
-		expect(libraryPage).toContain('class="home-mural-panel"');
+		// Both carry an entrance-motion class too; see
+		// scripts/library-route-motion-contract.test.mjs for that half.
+		expect(libraryPage).toContain('class="home-mural-grid rise-in-shelf"');
+		expect(libraryPage).toContain('class="home-mural-panel rise-in-card"');
 		expect(libraryPage).not.toContain('Automix tracks');
 		expect(libraryPage).not.toContain('Automix albums');
 		expect(libraryPage).not.toContain('selected.push(...pickStableRandom($tracks');

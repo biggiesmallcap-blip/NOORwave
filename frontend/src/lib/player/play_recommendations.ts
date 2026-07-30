@@ -29,7 +29,12 @@ export async function resolveRecommendationAlbum(
 	if (item.local_album_id) return { localId: item.local_album_id, tidalId: item.tidal_album_id ?? null };
 	if (item.tidal_album_id) return { localId: null, tidalId: item.tidal_album_id };
 	try {
-		const results = await api.searchTidal(recommendationSearchQuery(item), 5);
+		// 12, not 5: TIDAL ranks album search over the whole catalogue, so
+		// "<artist> <title>" leads with the artist's most-played albums and the one
+		// asked for often sat just outside the top 5. 12 is also the bucket
+		// ARTWORK_SEARCH_LIMIT uses server-side, so this shares that cache row.
+		// Measured over the 50-item album shelf, 12 and 20 resolve the same items.
+		const results = await api.searchTidal(recommendationSearchQuery(item), 12);
 		const match = findAlbumMatch(item, results.albums);
 		if (match) return { localId: match.local_id ?? null, tidalId: match.tidal_id };
 	} catch {
@@ -44,7 +49,9 @@ export async function resolveRecommendationArtist(
 	if (item.local_artist_id) return { localId: item.local_artist_id, tidalId: item.tidal_artist_id ?? null };
 	if (item.tidal_artist_id) return { localId: null, tidalId: item.tidal_artist_id };
 	try {
-		const results = await api.searchTidal(recommendationSearchQuery(item), 5);
+		// Same 12 as the album path and the server-side pass, so all three share
+		// one tidal_search_cache row per query.
+		const results = await api.searchTidal(recommendationSearchQuery(item), 12);
 		const match = findArtistMatch(item, results.artists);
 		if (match) return { localId: match.local_id ?? null, tidalId: match.tidal_id };
 	} catch {

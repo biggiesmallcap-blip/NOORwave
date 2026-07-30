@@ -61,6 +61,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_057,
     MIGRATION_058,
     MIGRATION_059,
+    MIGRATION_060,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1648,6 +1649,21 @@ DELETE FROM library_video_scans;
 // table. With this index each batch is a seek.
 const MIGRATION_059: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_track_neighbors_model ON track_neighbors(model_id);
+"#;
+
+// Folded catalogue names, for matching provider spellings against local rows.
+// Left NULL here on purpose: the fold is NFKD-based and SQLite has no such
+// function, so the values are filled in from Rust by the self-terminating pass
+// in db::catalog_name. Nullable also means a shipped install keeps working
+// while the backfill is still running - the resolvers fall back to the exact
+// match they have always used whenever the column is NULL.
+const MIGRATION_060: &str = r#"
+ALTER TABLE artists ADD COLUMN name_normalized TEXT;
+ALTER TABLE albums ADD COLUMN title_normalized TEXT;
+ALTER TABLE tracks ADD COLUMN title_normalized TEXT;
+CREATE INDEX IF NOT EXISTS idx_artists_name_normalized ON artists(name_normalized);
+CREATE INDEX IF NOT EXISTS idx_albums_title_normalized ON albums(title_normalized);
+CREATE INDEX IF NOT EXISTS idx_tracks_title_normalized ON tracks(title_normalized);
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

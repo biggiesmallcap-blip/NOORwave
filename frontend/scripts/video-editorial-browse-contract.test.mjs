@@ -105,10 +105,17 @@ describe('Video modules never fall through to the audio detail page', () => {
 	test('View all is hidden for video modules unless the host handles it', () => {
 		// /search/discover/[id] plays every item via playTidalTrackNow, so
 		// following it from a video module plays the song, not the video.
-		expect(shelves).toContain(
-			"let showViewAll = $derived(mediaKind !== 'video' || Boolean(onViewAll))"
-		);
-		expect(shelves).toContain('{#if showViewAll}');
+		//
+		// The condition gained a second clause (the module must have come from
+		// home-modules, or the detail route 404s on its id), so assert the video
+		// clause on its own rather than pinning the whole expression.
+		expect(shelves).toContain("mediaKind !== 'video' || Boolean(onViewAll)");
+		expect(shelves).toContain('let showViewAll = $derived(');
+		// The button is now decided per module, since whether there is anything
+		// behind the link depends on that module's `more_path`. `canViewAll`
+		// still folds in `showViewAll`, so the video rule holds.
+		expect(shelves).toContain('{#if canViewAll(mod)}');
+		expect(shelves).toContain('return showViewAll && Boolean(mod.more_path);');
 	});
 });
 

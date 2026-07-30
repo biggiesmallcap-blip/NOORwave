@@ -1,4 +1,5 @@
-import { api } from '$lib/api/client';
+import { api, type TidalSearchResults } from '$lib/api/client';
+import { usableArtwork } from '$lib/utils/artwork';
 
 /**
  * Svelte action: when the host element scrolls into view, search Tidal once
@@ -13,9 +14,18 @@ import { api } from '$lib/api/client';
  * /api/tidal/search calls, which Tidal rejects with 400 — see the network
  * panel "Bad Request" flood that motivated this guard.
  */
+export type LazyTidalArtKind = 'track' | 'artist' | 'album';
+
 export type LazyTidalArtParams = {
 	enabled: boolean;
 	query: { artist: string | null | undefined; title?: string | null };
+	/**
+	 * What the caller is looking for. An artist tile wants the artist's photo,
+	 * which `/api/tidal/search` already returns in `artists[]`; reading
+	 * `tracks[0]` for it (the old unconditional behaviour) put an album cover on
+	 * an artist, or nothing at all when the name matched no tracks.
+	 */
+	kind?: LazyTidalArtKind;
 	onResolve: (url: string) => void;
 	rootMargin?: string;
 };
@@ -85,9 +95,12 @@ export function composeTidalArtQuery(
  * first frame instead of flashing a fallback tile until the on-scroll
  * IntersectionObserver lookup fires. Read-only: does not touch the LRU.
  */
-export function peekTidalArt(query: string | null | undefined): string | null {
+export function peekTidalArt(
+	query: string | null | undefined,
+	kind: LazyTidalArtKind = 'track',
+): string | null {
 	if (!query) return null;
-	const entry = cache.get(query);
+	const entry = cache.get(cacheKeyFor(query, kind));
 	if (entry && isFresh(entry)) return entry.url;
 	return null;
 }
@@ -151,9 +164,20 @@ function recordResult(query: string, url: string | null): void {
 	schedulePersist();
 }
 
-async function lookupArtwork(query: string): Promise<string | null> {
+/**
+ * Cache key. Artists get their own namespace because a bare name is a valid
+ * query for both an artist photo and a track cover, and those must not share a
+ * cached result. Track and album keys are unchanged, so existing entries stay
+ * valid.
+ */
+function cacheKeyFor(query: string, kind: LazyTidalArtKind): string {
+	return kind === 'artist' ? `artist:${query}` : query;
+}
+
+async function lookupArtwork(query: string, kind: LazyTidalArtKind): Promise<string | null> {
 	if (isCircuitOpen()) return null;
-	const cached = cache.get(query);
+	const key = cacheKeyFor(query, kind);
+	const cached = cache.get(key);
 	if (cached !== undefined) {
 		if (isFresh(cached)) {
 			// Touch lastSeen so active entries stay warm in the LRU.
@@ -161,9 +185,9 @@ async function lookupArtwork(query: string): Promise<string | null> {
 			schedulePersist();
 			return cached.url;
 		}
-		cache.delete(query);
+		cache.delete(key);
 	}
-	const inProgress = pending.get(query);
+	const inProgress = pending.get(key);
 	if (inProgress) return inProgress;
 
 	const work = (async () => {
@@ -175,8 +199,14 @@ async function lookupArtwork(query: string): Promise<string | null> {
 		try {
 			const result = await api.searchTidal(query, 1);
 			consecutiveFailures = 0;
-			const url = result.tracks[0]?.artwork_url ?? null;
-			recordResult(query, url);
+			// An artist wants the artist photo the search already returns; fall
+			// back to a cover only when there is no artist hit at all.
+			const url = usableArtwork(
+				kind === 'artist' ? result.artists?.[0]?.artwork_url : null,
+				result.tracks[0]?.artwork_url,
+				result.albums?.[0]?.artwork_url,
+			);
+			recordResult(key, url);
 			return url;
 		} catch {
 			consecutiveFailures++;
@@ -188,15 +218,56 @@ async function lookupArtwork(query: string): Promise<string | null> {
 						`${CIRCUIT_COOLDOWN_MS / 1000}s. Reconnect Tidal in Settings if this persists.`,
 				);
 			}
-			recordResult(query, null);
+			recordResult(key, null);
 			return null;
 		} finally {
-			pending.delete(query);
+			pending.delete(key);
 			releaseSlot();
 		}
 	})();
-	pending.set(query, work);
+	pending.set(key, work);
 	return work;
+}
+
+/**
+ * Run a TIDAL search through the same in-flight cap and circuit breaker the
+ * artwork lookups use, for callers that need the whole result rather than a
+ * cover URL.
+ *
+ * Artwork is not the only thing shelves resolve by name - the chart shelves
+ * resolve a playable track the same way - and those paths were issuing their
+ * own uncapped `Promise.all` fan-outs straight at `api.searchTidal`, with no
+ * breaker. That is what the cap exists to prevent: enough parallel searches and
+ * TIDAL starts rejecting them, which is the "Bad Request" flood this module was
+ * written for. Sharing the gate means one page cannot bypass another's limit.
+ *
+ * Returns null when the breaker is open, so callers fail soft rather than
+ * hammering a service that is already refusing them.
+ */
+export async function gatedTidalSearch(
+	query: string,
+	limit: number,
+): Promise<TidalSearchResults | null> {
+	if (isCircuitOpen()) return null;
+	await acquireSlot();
+	if (isCircuitOpen()) {
+		releaseSlot();
+		return null;
+	}
+	try {
+		const result = await api.searchTidal(query, limit);
+		consecutiveFailures = 0;
+		return result;
+	} catch (e) {
+		consecutiveFailures++;
+		if (consecutiveFailures >= CIRCUIT_OPEN_AFTER) {
+			circuitOpenUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
+			consecutiveFailures = 0;
+		}
+		throw e;
+	} finally {
+		releaseSlot();
+	}
 }
 
 export function lazyTidalArt(node: Element, initial: LazyTidalArtParams) {
@@ -214,7 +285,7 @@ export function lazyTidalArt(node: Element, initial: LazyTidalArtParams) {
 		const q = buildQuery();
 		if (!q) return;
 		attempted = true;
-		const url = await lookupArtwork(q);
+		const url = await lookupArtwork(q, current.kind ?? 'track');
 		if (aborted || !url) return;
 		current.onResolve(url);
 	}

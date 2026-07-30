@@ -36,6 +36,7 @@
 	import ChartMural, { type ChartMuralItem } from '$lib/components/charts/ChartMural.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import { composeTidalArtQuery, peekTidalArt } from '$lib/actions/lazy-tidal-art';
+	import { usableArtwork } from '$lib/utils/artwork';
 
 	interface Props {
 		limit?: number;
@@ -128,18 +129,6 @@
 
 	function entryTarget(entry: ChartEntry): Track | TidalPlayable | null {
 		return entry.local_track ?? entry.tidal_playable ?? null;
-	}
-
-	const LASTFM_PLACEHOLDER_HASH = '2a96cbd8b46e442fc41c2b86b821562f';
-	function usableArtwork(...candidates: (string | null | undefined)[]): string | null {
-		for (const candidate of candidates) {
-			if (!candidate) continue;
-			const trimmed = candidate.trim();
-			if (!trimmed) continue;
-			if (trimmed.includes(LASTFM_PLACEHOLDER_HASH)) continue;
-			return trimmed;
-		}
-		return null;
 	}
 
 	function entryArtwork(entry: ChartEntry, index: number): string | null {

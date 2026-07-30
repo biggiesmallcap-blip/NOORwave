@@ -730,6 +730,64 @@ input[type='checkbox'] { accent-color: var(--accent); }
 	to   { opacity: 1; transform: translateY(0); }
 }
 
+/* ── Entry motion ─────────────────────────────────────────
+   Two variants of one rise, for surfaces whose content arrives after mount
+   and would otherwise snap into place. A page-level `.animate-in` cannot do
+   this job: it fires once, before any data lands, so everything that resolves
+   later still pops. The parent writes `--rise-index` inline and the child
+   derives its delay from it.
+
+   `rise-in-shelf` is for sections, shelves and panels - things that arrive a
+   few at a time, where a 70ms step reads as a cascade.
+
+   `rise-in-card` is for cards inside a rail or grid. Two details are
+   load-bearing, both learned on the liked-videos wall:
+
+   `backwards`, not `both`. An animation of opacity/transform gives its element
+   a stacking context for as long as it is applied, and `both` keeps it applied
+   forever. That trapped a popout's z-index inside its own card so it painted
+   under the cards after it. Backwards fill covers the delay - the only part
+   that needs covering - and lets go once the card has landed.
+
+   Callers cap `--rise-index` with a modulo of roughly a screenful. Uncapped,
+   the last card in a long list waits many seconds for its turn, and a page
+   appended mid-scroll parks every card at the maximum delay instead of
+   cascading like the first one did.
+
+   Existing copies of this pattern in videos/liked, VideoSetShelf and the
+   library mural predate these classes and are pinned by contract tests; see
+   FOLLOWUPS.md for the back-migration. */
+.rise-in-shelf {
+	animation: rise-in-shelf 340ms ease-out both;
+	/* Capped, because the delay is dead time where the element is invisible.
+	   Home stacks sixteen sections; uncapped, the last one would sit blank for
+	   over a second. The cap keeps the cascade legible near the top of the page
+	   and lets everything below it arrive together. */
+	animation-delay: calc(min(var(--rise-index, 0), 8) * 70ms);
+}
+
+.rise-in-card {
+	animation: rise-in-card 300ms ease-out backwards;
+	animation-delay: calc(min(var(--rise-index, 0), 11) * 22ms);
+}
+
+@keyframes rise-in-shelf {
+	from { opacity: 0; transform: translateY(10px); }
+	to   { opacity: 1; transform: none; }
+}
+
+@keyframes rise-in-card {
+	from { opacity: 0; transform: translateY(8px); }
+	to   { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.rise-in-shelf,
+	.rise-in-card {
+		animation: none;
+	}
+}
+
 /* ── Responsive ───────────────────────────────────────── */
 @media (max-width: 1100px) {
 	.page-shell { gap: var(--space-5); }

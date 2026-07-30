@@ -9,6 +9,28 @@ type ArtworkSource = string | null | undefined | ArtworkItem | ArtworkItem[];
 export const TIDAL_ARTWORK_SIZES = [80, 160, 320, 640, 750, 1080, 1280] as const;
 export type TidalArtworkSize = (typeof TIDAL_ARTWORK_SIZES)[number];
 
+// Last.fm serves this exact image for anything it has no artwork for. It is a
+// perfectly valid non-null URL of a grey star, which is worse than null: code
+// that falls back "when artwork is missing" never fires, so the tile shows the
+// star forever and the TIDAL lookup that would have found real art never runs.
+const LASTFM_PLACEHOLDER_HASH = '2a96cbd8b46e442fc41c2b86b821562f';
+
+/**
+ * First candidate that is a real image. Treats the Last.fm placeholder as
+ * absent so callers can keep using "is it null" to decide whether to resolve
+ * artwork from somewhere else.
+ */
+export function usableArtwork(...candidates: (string | null | undefined)[]): string | null {
+	for (const candidate of candidates) {
+		if (!candidate) continue;
+		const trimmed = candidate.trim();
+		if (!trimmed) continue;
+		if (trimmed.includes(LASTFM_PLACEHOLDER_HASH)) continue;
+		return trimmed;
+	}
+	return null;
+}
+
 export function firstArtworkUrl(...sources: ArtworkSource[]): string | null {
 	for (const source of sources) {
 		const url = artworkFromSource(source);

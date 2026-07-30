@@ -1,8 +1,9 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { api, type TidalMoodCategory } from '$lib/api/client';
-	import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import MediaRail from '$lib/components/ui/MediaRail.svelte';
+	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { goto } from '$app/navigation';
 	import {
@@ -11,6 +12,9 @@
 		moodCategoriesNeedThumbnails,
 		putCachedMoodCategories,
 	} from '$lib/stores/tidal-moods-cache';
+
+	// Position in the home stack; stagger only. See YourMixesShelf.
+	let { index = 0 }: { index?: number } = $props();
 
 	const PREVIEW_LIMIT = 8;
 	const LOAD_ARM_DELAY_MS = 0;
@@ -143,45 +147,58 @@
 	}
 </script>
 
-{#if categories.length > 0 || loading}
-	<section bind:this={sectionEl} class="moods-rail" data-section="moods">
-		<div class="header">
-			<div class="title-group">
-				<p class="eyebrow">TIDAL</p>
-				<h2>Moods &amp; Activities</h2>
-			</div>
-			<a class="view-all" href="/moods">View all -&gt;</a>
+{#snippet moodCard(c: TidalMoodCategory)}
+	<a
+		class="card"
+		href={`/moods/${c.slug}`}
+		oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); openContextMenu(e, menu(c.slug, c.title), c.title); }}
+	>
+		<div class="art-wrap">
+			<ArtworkImage
+				className="mood-art"
+				src={c.thumbnail}
+				alt={c.title}
+				size={320}
+				tint={true}
+				fallbackText="~"
+			/>
 		</div>
+		<p class="card-title">{c.title}</p>
+	</a>
+{/snippet}
+
+{#snippet skeletonCard()}
+	<div class="card skeleton">
+		<div class="art-wrap"><div class="art skeleton-art"></div></div>
+		<div class="skeleton-line"></div>
+	</div>
+{/snippet}
+
+{#if categories.length > 0 || loading}
+	<section bind:this={sectionEl} class="moods-rail rise-in-shelf" data-section="moods" style={`--rise-index: ${index}`}>
+		<SectionHeader
+			eyebrow="TIDAL"
+			title="Moods & Activities"
+			variant="charts"
+			level={2}
+			href="/moods"
+		/>
 		{#if categories.length > 0}
-			<div class="rail" use:wheelToHorizontal>
-				{#each categories as c (c.slug)}
-					<a
-						class="card"
-						href={`/moods/${c.slug}`}
-						oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); openContextMenu(e, menu(c.slug, c.title), c.title); }}
-					>
-						<div class="art-wrap">
-							<ArtworkImage
-								className="mood-art"
-								src={c.thumbnail}
-								alt={c.title}
-								size={320}
-								tint={true}
-								fallbackText="~"
-							/>
-						</div>
-						<p class="card-title">{c.title}</p>
-					</a>
-				{/each}
-			</div>
+			<MediaRail
+				items={categories}
+				card={moodCard}
+				getKey={(c) => c.slug}
+				fluid
+				stagger
+			/>
 		{:else}
-			<div class="rail" aria-hidden="true">
-				{#each [0, 1, 2, 3, 4, 5, 6, 7] as i (i)}
-					<div class="card skeleton">
-						<div class="art-wrap"><div class="art skeleton-art"></div></div>
-						<div class="skeleton-line"></div>
-					</div>
-				{/each}
+			<div aria-hidden="true">
+				<MediaRail
+					items={[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]}
+					card={skeletonCard}
+					getKey={(i) => i}
+					fluid
+				/>
 			</div>
 		{/if}
 	</section>
@@ -191,31 +208,11 @@
 {/if}
 
 <style>
-	.moods-rail { display: flex; flex-direction: column; gap: var(--gap); }
-	.header { display: flex; align-items: center; justify-content: space-between; gap: var(--gap); }
-	.title-group { display: flex; flex-direction: column; gap: var(--space-1); }
-	.title-group h2 { font-size: var(--font-size-lg); font-weight: var(--font-weight-bold); margin: 0; }
-	.eyebrow { font-size: var(--font-size-xs); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-secondary); margin: 0; font-weight: var(--font-weight-bold); }
-	.view-all { font-size: var(--font-size-xs); font-weight: var(--font-weight-semibold); color: var(--text-secondary); text-decoration: none; transition: color var(--motion-fast); }
-	.view-all:hover, .view-all:focus-visible { color: var(--text-primary); outline: none; }
-	.rail {
-		display: flex;
-		gap: var(--gap-sm);
-		overflow-x: auto;
-		padding-bottom: var(--space-2);
-		scroll-snap-type: x mandatory;
-		mask-image: linear-gradient(to right, transparent 0, black 16px, black calc(100% - 32px), transparent 100%);
-		-webkit-mask-image: linear-gradient(to right, transparent 0, black 16px, black calc(100% - 32px), transparent 100%);
-	}
-	.rail::-webkit-scrollbar { height: 6px; }
-	.rail::-webkit-scrollbar-track { background: var(--bg-surface); border-radius: var(--radius-xs); }
-	.rail::-webkit-scrollbar-thumb { background: var(--border-subtle); border-radius: var(--radius-xs); }
-	.rail::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+	.moods-rail { display: flex; flex-direction: column; gap: var(--space-3); }
+	/* Rail behaviour lives in MediaRail; this card only describes itself. */
 	.card {
-		flex: 0 0 180px;
-		width: 180px;
-		min-width: 180px;
-		max-width: 180px;
+		width: 100%;
+		min-width: 0;
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-2);
@@ -228,7 +225,6 @@
 		cursor: pointer;
 		transition: transform var(--motion-base);
 		box-sizing: border-box;
-		scroll-snap-align: start;
 	}
 	.card:hover { transform: translateY(-4px); }
 	.card:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }

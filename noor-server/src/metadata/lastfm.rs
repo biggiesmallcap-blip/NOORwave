@@ -447,6 +447,14 @@ impl LastFmClient {
         Ok(out)
     }
 
+    /// Similar artists by name and match score.
+    ///
+    /// `image_url` is deliberately `None` and should stay that way: Last.fm
+    /// stopped serving real artist images years ago and `artist.getSimilar`
+    /// returns only the grey-star placeholder, so parsing it would hand
+    /// downstream code a non-null URL of nothing and suppress the TIDAL artist
+    /// lookup that does find a photo. Artist artwork comes from
+    /// `/api/tidal/search`'s `artists[]`, not from here.
     pub async fn artist_get_similar(
         &self,
         artist: &str,
@@ -1035,6 +1043,18 @@ fn parse_u64_field(entry: &Value, field: &str) -> Option<u64> {
     })
 }
 
+/// Last.fm serves this exact image for anything it has no artwork for. It is a
+/// valid, loadable URL of a grey star, which is worse than returning nothing:
+/// downstream code that falls back "when artwork is missing" sees a non-null
+/// value, keeps it, and the tile shows the star forever while the TIDAL lookup
+/// that would have found real art never runs. Filtered at the parse boundary so
+/// it cannot reach the six-hour recommendation cache in the first place.
+const LASTFM_PLACEHOLDER_HASH: &str = "2a96cbd8b46e442fc41c2b86b821562f";
+
+fn is_lastfm_placeholder(url: &str) -> bool {
+    url.contains(LASTFM_PLACEHOLDER_HASH)
+}
+
 fn largest_image_url(entry: &Value) -> Option<String> {
     entry
         .get("image")
@@ -1048,6 +1068,7 @@ fn largest_image_url(entry: &Value) -> Option<String> {
                     if img_size == Some(size)
                         && let Some(url) = url
                         && !url.trim().is_empty()
+                        && !is_lastfm_placeholder(url)
                     {
                         return Some(url.trim().to_string());
                     }
@@ -1308,5 +1329,48 @@ mod track_get_similar_tests {
         let arr = value_as_array(tracks_value);
         assert_eq!(arr.len(), 2);
         // The actual filter is in track_get_similar - these tests verify the array shape parses.
+    }
+
+    #[test]
+    fn largest_image_url_rejects_the_lastfm_placeholder_star() {
+        // Last.fm returns this for anything it has no art for. It loads fine,
+        // which is the problem: a non-null value convinces callers artwork
+        // exists and stops the TIDAL lookup that would find the real cover.
+        let placeholder = serde_json::json!({
+            "image": [
+                { "size": "large", "#text": "https://lastfm.freetls.fastly.net/i/u/174s/2a96cbd8b46e442fc41c2b86b821562f.png" }
+            ]
+        });
+        assert_eq!(largest_image_url(&placeholder), None);
+    }
+
+    #[test]
+    fn largest_image_url_skips_the_placeholder_but_keeps_a_real_smaller_size() {
+        let mixed = serde_json::json!({
+            "image": [
+                { "size": "small", "#text": "https://img.example/small.png" },
+                { "size": "extralarge", "#text": "https://lastfm.freetls.fastly.net/i/u/300x300/2a96cbd8b46e442fc41c2b86b821562f.png" }
+            ]
+        });
+        // extralarge outranks small, but it is the placeholder, so the real
+        // smaller image wins rather than the shelf going empty.
+        assert_eq!(
+            largest_image_url(&mixed).as_deref(),
+            Some("https://img.example/small.png")
+        );
+    }
+
+    #[test]
+    fn largest_image_url_prefers_the_biggest_real_image() {
+        let sizes = serde_json::json!({
+            "image": [
+                { "size": "small", "#text": "https://img.example/small.png" },
+                { "size": "mega", "#text": "https://img.example/mega.png" }
+            ]
+        });
+        assert_eq!(
+            largest_image_url(&sizes).as_deref(),
+            Some("https://img.example/mega.png")
+        );
     }
 }
