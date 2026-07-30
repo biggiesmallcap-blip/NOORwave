@@ -3520,7 +3520,7 @@ dependencies = [
 
 [[package]]
 name = "noor-app"
-version = "0.11.37"
+version = "0.11.38"
 dependencies = [
  "reqwest",
  "serde",
@@ -3550,7 +3550,7 @@ dependencies = [
 
 [[package]]
 name = "noor-server"
-version = "0.11.37"
+version = "0.11.38"
 dependencies = [
  "aes-gcm",
  "anyhow",
