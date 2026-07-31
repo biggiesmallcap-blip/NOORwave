@@ -62,6 +62,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_058,
     MIGRATION_059,
     MIGRATION_060,
+    MIGRATION_061,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1664,6 +1665,17 @@ ALTER TABLE tracks ADD COLUMN title_normalized TEXT;
 CREATE INDEX IF NOT EXISTS idx_artists_name_normalized ON artists(name_normalized);
 CREATE INDEX IF NOT EXISTS idx_albums_title_normalized ON albums(title_normalized);
 CREATE INDEX IF NOT EXISTS idx_tracks_title_normalized ON tracks(title_normalized);
+"#;
+
+// TIDAL's own `lastUpdated` for a playlist, normalized to SQLite datetime form.
+//
+// Two jobs. It lets an incremental sync decide whether a playlist's tracks
+// actually need re-pulling instead of refetching every page of every playlist,
+// and it gives `playlists.updated_at` an honest value so the "Last updated"
+// sort reflects when the playlist really changed. NULL means "never synced from
+// TIDAL", which every local and smart playlist stays at.
+const MIGRATION_061: &str = r#"
+ALTER TABLE playlists ADD COLUMN tidal_last_updated TEXT;
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

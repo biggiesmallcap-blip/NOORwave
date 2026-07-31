@@ -49,6 +49,26 @@ interface CacheEntry<T> {
 	persistHydrated: boolean;
 	/** Live subscriber count; eviction never drops an entry something renders from. */
 	refs: number;
+	/**
+	 * Set by `invalidateKey`/`invalidatePrefix`, cleared by the next successful
+	 * fetch. Staleness is otherwise derived purely from `lastUpdated`, so
+	 * `refreshStaleFlag` recomputed the `stale: true` that invalidation had just
+	 * written and handed back the cached payload anyway - invalidation was a
+	 * no-op for the whole `staleMs` window. That is why a playlist created from
+	 * the queue stayed invisible until the 5-minute window lapsed, and why
+	 * `invalidateLibraryCaches` after a batch delete appeared to do nothing.
+	 */
+	forceStale: boolean;
+	/**
+	 * Bumped by every invalidation. `fetchEntry` dedupes concurrent callers onto
+	 * one in-flight request, so an invalidation raised *after* that request was
+	 * issued would otherwise be marked satisfied by a response that predates it.
+	 * Comparing the epoch across the await tells us whether the result we got
+	 * back can actually answer the newest invalidation, or whether we have to go
+	 * again. Without this, deleting three playlists in quick succession left the
+	 * last one on screen.
+	 */
+	invalidationEpoch: number;
 }
 
 interface PersistedEntry<T> {
@@ -65,6 +85,9 @@ const PERSIST_PREFIX = 'noor.query.';
 // subscriber or an in-flight fetch are never evicted, and persisted payloads
 // stay in storage and re-hydrate on the next query for that key.
 const DEFAULT_MAX_ENTRIES = 150;
+
+/** Sentinel: a fetch whose result an invalidation already invalidated again. */
+const SUPERSEDED = Symbol('superseded') as never;
 
 function defaultState<T>(): CacheState<T> {
 	return {
@@ -213,6 +236,7 @@ export class QueryCache {
 		const key = stableCacheKey(keyInput);
 		const entry = this.getEntry<T>(key);
 		entry.options = options;
+		entry.forceStale = false;
 		entry.store.set({
 			data,
 			loading: false,
@@ -229,6 +253,8 @@ export class QueryCache {
 		const key = stableCacheKey(keyInput);
 		const entry = this.entries.get(key);
 		if (!entry) return;
+		entry.forceStale = true;
+		entry.invalidationEpoch += 1;
 		entry.store.update((state) => ({ ...state, stale: true }));
 		if (options.refetch && entry.fetcher) {
 			void this.fetchEntry(entry, entry.fetcher, entry.options).catch(() => undefined);
@@ -239,6 +265,8 @@ export class QueryCache {
 		const prefix = stableCacheKey(prefixInput);
 		for (const [key, entry] of this.entries) {
 			if (!keyMatchesPrefix(key, prefix)) continue;
+			entry.forceStale = true;
+			entry.invalidationEpoch += 1;
 			entry.store.update((state) => ({ ...state, stale: true }));
 			if (options.refetch && entry.fetcher) {
 				void this.fetchEntry(entry, entry.fetcher, entry.options).catch(() => undefined);
@@ -249,6 +277,8 @@ export class QueryCache {
 	invalidateWhere(predicate: (key: string) => boolean, options: { refetch?: boolean } = {}): void {
 		for (const [key, entry] of this.entries) {
 			if (!predicate(key)) continue;
+			entry.forceStale = true;
+			entry.invalidationEpoch += 1;
 			entry.store.update((state) => ({ ...state, stale: true }));
 			if (options.refetch && entry.fetcher) {
 				void this.fetchEntry(entry, entry.fetcher, entry.options).catch(() => undefined);
@@ -261,6 +291,7 @@ export class QueryCache {
 		const entry = this.getEntry<T>(key);
 		let nextData: T | undefined;
 		let nextLastUpdated = this.now();
+		entry.forceStale = false;
 		entry.store.update((state) => {
 			nextData = updater(state.data);
 			if (nextData === undefined) return state;
@@ -335,6 +366,8 @@ export class QueryCache {
 			options: {},
 			persistHydrated: false,
 			refs: 0,
+			forceStale: false,
+			invalidationEpoch: 0,
 		};
 		// Refcount subscribers so eviction can tell which entries a mounted
 		// component is actively rendering from.
@@ -373,7 +406,9 @@ export class QueryCache {
 	private refreshStaleFlag<T>(entry: CacheEntry<T>, options: QueryOptions): void {
 		entry.store.update((state) => ({
 			...state,
-			stale: this.isStale(state, options),
+			// An explicit invalidation outranks the age check: the caller knows the
+			// data changed, which `lastUpdated` cannot.
+			stale: entry.forceStale || this.isStale(state, options),
 		}));
 	}
 
@@ -428,7 +463,11 @@ export class QueryCache {
 		options: QueryOptions,
 		force = false,
 	): Promise<T> {
-		if (entry.inflight) return entry.inflight;
+		// Callers joining an in-flight request go through the same supersede check
+		// as the one that issued it. Returning `entry.inflight` raw here handed
+		// joiners the SUPERSEDED sentinel instead of data.
+		if (entry.inflight) return this.awaitSettled(entry, entry.inflight, fetcher, options, force);
+		const epochAtStart = entry.invalidationEpoch;
 		const before = get(entry.store);
 		entry.store.update((state) => ({
 			...state,
@@ -439,6 +478,11 @@ export class QueryCache {
 		entry.inflight = fetcher()
 			.then((data) => {
 				const lastUpdated = this.now();
+				// Only clear the flag if no new invalidation landed while this
+				// request was in flight; otherwise this response is already known
+				// to be out of date and the caller below goes again.
+				const superseded = entry.invalidationEpoch !== epochAtStart;
+				entry.forceStale = superseded;
 				entry.store.set({
 					data,
 					loading: false,
@@ -449,7 +493,7 @@ export class QueryCache {
 					hydrated: true,
 				});
 				this.savePersisted(entry.key, data, lastUpdated, options);
-				return data;
+				return superseded ? SUPERSEDED : data;
 			})
 			.catch((error) => {
 				const normalized = normalizeError(error);
@@ -465,7 +509,24 @@ export class QueryCache {
 			.finally(() => {
 				entry.inflight = undefined;
 			});
-		return entry.inflight;
+		return this.awaitSettled(entry, entry.inflight, fetcher, options, force);
+	}
+
+	/**
+	 * Resolve an in-flight request, retrying when its result was superseded by an
+	 * invalidation raised after it was issued. A superseded response is never
+	 * handed to a caller; each invalidation costs at most one extra round trip.
+	 */
+	private awaitSettled<T>(
+		entry: CacheEntry<T>,
+		inflight: Promise<T>,
+		fetcher: () => Promise<T>,
+		options: QueryOptions,
+		force: boolean,
+	): Promise<T> {
+		return inflight.then((data) =>
+			(data as unknown) === SUPERSEDED ? this.fetchEntry(entry, fetcher, options, force) : data,
+		);
 	}
 }
 

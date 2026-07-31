@@ -229,7 +229,7 @@
 </svelte:head>
 
 <div class="page">
-  <button class="back-link" type="button" onclick={() => goBack('/search')}>&lt; Back</button>
+  <button class="back-link" type="button" onclick={() => goBack('/search')}>Back</button>
   {#if loading}
     <div class="state">Loading album...</div>
   {:else if error}

@@ -408,7 +408,7 @@
 </svelte:head>
 
 <div class="page">
-  <button class="back-link" type="button" onclick={() => goBack(backLink.href)}>&lt; {backLink.label}</button>
+  <button class="back-link" type="button" onclick={() => goBack(backLink.href)}>{backLink.label}</button>
   {#if loading}
     <div class="state">Loading playlist…</div>
   {:else if error}

@@ -28,6 +28,7 @@ import {
 } from '$lib/utils/track';
 import { currentQueueAnchorItem } from '$lib/player/queue_active';
 import { wsConnected } from '$lib/api/ws';
+import { invalidatePlaylistCaches } from '$lib/cache/ws_events';
 import { updateLibraryTrackFavorite } from '$lib/stores/library';
 import { clamp01 } from '$lib/utils/math';
 
@@ -918,11 +919,13 @@ export function computePlayNextPos(
  * spliced out. Dragging downward (source sits above the target) shifts the
  * target up one slot once the source is removed, so subtract one to land ON the
  * target row's slot (the "drops here" top-edge indicator) instead of one below
- * it. Upward drags keep the target's index. Exported for unit testing.
+ * it. Upward drags keep the target's index.
+ *
+ * Lives with the shared `dragReorder` action now that playlists reorder too;
+ * re-exported here so queue callers and `player.move_next.test.ts` keep their
+ * import path.
  */
-export function reorderDropIndex(sourceIndex: number, targetIndex: number): number {
-	return sourceIndex !== -1 && sourceIndex < targetIndex ? targetIndex - 1 : targetIndex;
-}
+export { reorderDropIndex } from '$lib/actions/drag_reorder';
 
 /**
  * Pick the row that `addQueueTrack` just appended. The endpoint appends exactly
@@ -1100,6 +1103,9 @@ export async function saveQueueAsPlaylist(
 			trimmed,
 			options?.includeTidalOnly ?? true
 		);
+		// The /playlists read is cached for 5 minutes and persisted for a day, so
+		// without this the new playlist stays invisible until that expires.
+		invalidatePlaylistCaches();
 		showToast(`Saved "${result.playlist.name}" — ${result.added} tracks`, 'success');
 		playerError.set(null);
 		return result.playlist;

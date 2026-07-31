@@ -3,6 +3,7 @@
 	import type { Unsubscriber } from 'svelte/store';
 	import { api, type Genre, type GenreHeat, type GenreCohort, type GenreEvolutionPoint, type GenreAudioMetrics, type Track } from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
+	import { invalidatePlaylistCaches } from '$lib/cache/ws_events';
 	import { wsMessages } from '$lib/api/ws';
 	import { playTracksInContext, startGenreRadio } from '$lib/stores/player';
 	import type { RadioBlend } from '$lib/api/client';
@@ -627,6 +628,7 @@
 			await api.replacePlaybackQueue(merged.map((track) => ({ track_id: track.id })));
 			const name = `Hot rotation ${new Date().toISOString().slice(0, 10)}`;
 			await api.createPlaylistFromQueue(name, true);
+			invalidatePlaylistCaches();
 			showNotice(`Saved "${name}" (${merged.length} tracks). Queue now holds the same mix.`);
 		} catch (reason) {
 			actionError = reason instanceof Error ? reason.message : String(reason);

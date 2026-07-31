@@ -211,6 +211,10 @@ pub struct TidalPlaylist {
     pub description: Option<String>,
     #[serde(rename = "numberOfTracks")]
     pub number_of_tracks: Option<i32>,
+    /// ISO8601 timestamp of the playlist's last change on TIDAL. Used to skip
+    /// re-pulling tracks for playlists that have not moved since the last sync.
+    #[serde(rename = "lastUpdated")]
+    pub last_updated: Option<String>,
     pub image: Option<String>,
     #[serde(rename = "squareImage")]
     pub square_image: Option<String>,

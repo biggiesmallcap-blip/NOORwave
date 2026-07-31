@@ -112,7 +112,7 @@
      `muted-line` for every non-ready state. A detail page reached from Home
      should be indistinguishable in chrome from /hires or /new-releases. -->
 <div class="page" data-recommendation-shelf={slug}>
-	<button class="back-link" type="button" onclick={() => goBack('/')}>&lt; Back</button>
+	<button class="back-link" type="button" onclick={() => goBack('/')}>Back</button>
 	<PageHeader
 		eyebrow="Connected profiles"
 		title={shelf?.title ?? (loading ? 'Loading...' : 'Recommendations')}

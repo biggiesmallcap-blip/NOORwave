@@ -5435,7 +5435,10 @@ async fn library_batch_add_to_playlist_returns_not_found_before_tidal_auth() {
 }
 
 #[tokio::test]
-async fn library_batch_add_to_playlist_rejects_local_targets_before_tidal_auth() {
+async fn library_batch_add_to_playlist_writes_local_targets_without_tidal_auth() {
+    // This used to assert a 400: the route required `tidal_uuid` and so refused
+    // every playlist NOORwave had created itself, TIDAL session or not. A local
+    // playlist has no remote leg to run, so the local write is the whole job.
     let db = fresh_migrated_db();
     let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
         db.clone(),
@@ -5472,7 +5475,7 @@ async fn library_batch_add_to_playlist_rejects_local_targets_before_tidal_auth()
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::OK);
 
     let added: i64 = db
         .with_conn(|conn| {
@@ -5483,7 +5486,7 @@ async fn library_batch_add_to_playlist_rejects_local_targets_before_tidal_auth()
             )?)
         })
         .expect("count playlist tracks");
-    assert_eq!(added, 0, "invalid local target must not mutate playlist");
+    assert_eq!(added, 1, "the local-only track should have landed");
 }
 
 #[tokio::test]
@@ -5700,6 +5703,423 @@ async fn playlist_routes_reject_non_positive_ids_and_track_ids() {
 
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
     }
+
+    // The CRUD routes added alongside the playlist detail page.
+    for uri in ["/api/playlists/0", "/api/playlists/-7"] {
+        for method in ["PATCH", "DELETE"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"name":"Renamed"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{method} {uri}");
+        }
+    }
+
+    for uri in ["/api/playlists/0/refresh", "/api/playlists/-7/refresh"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+    }
+
+    // Negative positions are rejected before the playlist is even looked up.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/playlists/1/tracks")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"positions":[0,-1]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/playlists/1/tracks/move")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"from":-1,"to":0}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // A blank name is not a rename.
+    for body in [r#"{"name":""}"#, r#"{"name":"   "}"#] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/playlists")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body: {body}");
+    }
+}
+
+/// Seed a playlist holding `track_count` local tracks at positions 0..n-1.
+/// Returns the playlist id. Tracks are titled "Track {i}" so assertions can
+/// identify them by name after a reorder.
+fn seed_local_playlist(db: &Database, name: &str, track_count: i64) -> i64 {
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (1, 'Seed Artist')
+             ON CONFLICT(id) DO NOTHING",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO playlists (name, is_smart, is_synced, track_count) VALUES (?1, 0, 0, ?2)",
+            rusqlite::params![name, track_count],
+        )?;
+        let playlist_id = conn.last_insert_rowid();
+        for index in 0..track_count {
+            conn.execute(
+                "INSERT INTO tracks (title, artist_id, source, is_library)
+                 VALUES (?1, 1, 'local', 1)",
+                rusqlite::params![format!("Track {index}")],
+            )?;
+            let track_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
+                rusqlite::params![playlist_id, track_id, index],
+            )?;
+        }
+        Ok(playlist_id)
+    })
+    .expect("seed playlist")
+}
+
+/// The playlist's track titles, in stored position order.
+fn playlist_titles(db: &Database, playlist_id: i64) -> Vec<String> {
+    db.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT t.title FROM playlist_tracks pt
+             JOIN tracks t ON t.id = pt.track_id
+             WHERE pt.playlist_id = ?1 ORDER BY pt.position ASC",
+        )?;
+        Ok(stmt
+            .query_map(rusqlite::params![playlist_id], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?)
+    })
+    .expect("read playlist titles")
+}
+
+/// The playlist's stored positions, to assert they stay contiguous from zero.
+fn playlist_positions(db: &Database, playlist_id: i64) -> Vec<i64> {
+    db.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT position FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY position ASC",
+        )?;
+        Ok(stmt
+            .query_map(rusqlite::params![playlist_id], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?)
+    })
+    .expect("read playlist positions")
+}
+
+#[tokio::test]
+async fn create_playlist_returns_a_local_row() {
+    let db = fresh_migrated_db();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/playlists")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"  Road trip  ","description":"  "}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    // Name is trimmed; a whitespace-only description becomes NULL, not "  ".
+    assert_eq!(body["playlist"]["name"], "Road trip");
+    assert_eq!(body["playlist"]["description"], Value::Null);
+    assert_eq!(body["playlist"]["is_smart"], false);
+    assert_eq!(body["playlist"]["tidal_uuid"], Value::Null);
+}
+
+#[tokio::test]
+async fn rename_playlist_updates_a_regular_row() {
+    // The old PUT /api/smart/playlists/{id} is gated on is_smart = 1 in SQL, so
+    // a regular playlist could not be renamed at all before this route existed.
+    let db = fresh_migrated_db();
+    let playlist_id = seed_local_playlist(&db, "Before", 2);
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/playlists/{playlist_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"After","description":"Now with words"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let stored: (String, Option<String>) = db
+        .with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT name, description FROM playlists WHERE id = ?1",
+                rusqlite::params![playlist_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(stored.0, "After");
+    assert_eq!(stored.1.as_deref(), Some("Now with words"));
+}
+
+#[tokio::test]
+async fn delete_playlist_removes_the_row_and_its_tracks() {
+    let db = fresh_migrated_db();
+    let playlist_id = seed_local_playlist(&db, "Doomed", 3);
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/playlists/{playlist_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let remaining: i64 = db
+        .with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM playlists WHERE id = ?1",
+                rusqlite::params![playlist_id],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(remaining, 0);
+    // ON DELETE CASCADE takes the membership rows with it.
+    assert!(playlist_titles(&db, playlist_id).is_empty());
+}
+
+#[tokio::test]
+async fn remove_playlist_tracks_closes_position_gaps() {
+    // playlist_tracks has PRIMARY KEY (playlist_id, position), so a removal that
+    // left gaps would make every later "insert at index N" wrong.
+    let db = fresh_migrated_db();
+    let playlist_id = seed_local_playlist(&db, "Trimmed", 5);
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/playlists/{playlist_id}/tracks"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"positions":[1,3]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["removed"], 2);
+
+    assert_eq!(
+        playlist_titles(&db, playlist_id),
+        ["Track 0", "Track 2", "Track 4"]
+    );
+    assert_eq!(playlist_positions(&db, playlist_id), [0, 1, 2]);
+
+    let track_count: i64 = db
+        .with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT track_count FROM playlists WHERE id = ?1",
+                rusqlite::params![playlist_id],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(track_count, 3);
+}
+
+#[tokio::test]
+async fn move_playlist_track_reorders_in_both_directions() {
+    let db = fresh_migrated_db();
+    let playlist_id = seed_local_playlist(&db, "Reordered", 4);
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    // Drag the first row down to index 2. `to` is measured after the row is
+    // lifted out, the same convention the queue's move endpoint uses.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/playlists/{playlist_id}/tracks/move"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"from":0,"to":2}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        playlist_titles(&db, playlist_id),
+        ["Track 1", "Track 2", "Track 0", "Track 3"]
+    );
+
+    // And back up again.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/playlists/{playlist_id}/tracks/move"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"from":2,"to":0}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        playlist_titles(&db, playlist_id),
+        ["Track 0", "Track 1", "Track 2", "Track 3"]
+    );
+    assert_eq!(playlist_positions(&db, playlist_id), [0, 1, 2, 3]);
+}
+
+#[tokio::test]
+async fn move_playlist_track_rejects_an_out_of_range_source() {
+    let db = fresh_migrated_db();
+    let playlist_id = seed_local_playlist(&db, "Short", 2);
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/playlists/{playlist_id}/tracks/move"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"from":9,"to":0}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    // The playlist is untouched.
+    assert_eq!(playlist_titles(&db, playlist_id), ["Track 0", "Track 1"]);
+}
+
+#[tokio::test]
+async fn batch_add_to_playlist_accepts_a_local_playlist() {
+    // Regression: this route used to 400 whenever the target playlist had no
+    // tidal_uuid, which made every NOORwave-created playlist unfillable.
+    let db = fresh_migrated_db();
+    let playlist_id = seed_local_playlist(&db, "Local target", 1);
+    let new_track_id = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO tracks (title, artist_id, source, is_library)
+                 VALUES ('Added later', 1, 'local', 1)",
+                [],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+        .unwrap();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/batch/add-to-playlist")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"playlist_id":{playlist_id},"track_ids":[{new_track_id}]}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["added"], 1);
+    assert_eq!(
+        playlist_titles(&db, playlist_id),
+        ["Track 0", "Added later"]
+    );
 }
 
 #[tokio::test]
@@ -6827,7 +7247,18 @@ async fn all_api_routes_are_registered() {
         ("GET", "/api/genres/audio-metrics"),
         ("GET", "/api/genres/1/tracks"),
         ("GET", "/api/playlists"),
+        ("POST", "/api/playlists"),
+        ("PATCH", "/api/playlists/1"),
+        ("DELETE", "/api/playlists/1"),
         ("GET", "/api/playlists/1/tracks"),
+        // DELETE /api/playlists/{id}/tracks is deliberately absent: this guard
+        // probes a non-GET route with GET, and GET on that same path is
+        // registered and answers a real 404 for a missing playlist, which the
+        // check below cannot tell apart from "not routed". The path is covered
+        // by the GET entry above and the method by
+        // `remove_playlist_tracks_closes_position_gaps`.
+        ("POST", "/api/playlists/1/tracks/move"),
+        ("POST", "/api/playlists/1/refresh"),
         ("PATCH", "/api/playlists/1/favorite"),
         ("GET", "/api/playlists/1/cover-sample"),
         ("POST", "/api/smart/playlists"),

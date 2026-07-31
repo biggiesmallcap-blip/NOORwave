@@ -30,7 +30,15 @@ function invalidateGenreCaches(): void {
 	dataCache.invalidatePrefix(['api', 'getGenreTracks']);
 }
 
-function invalidatePlaylistCaches(): void {
+/**
+ * Drop every cached playlist read.
+ *
+ * Exported because playlist mutations invalidate locally the moment they
+ * succeed, rather than waiting for the `playlists_changed` round trip. The
+ * server event is the backstop that keeps other surfaces (and other windows) in
+ * step; the direct call is what makes the mutating page feel instant.
+ */
+export function invalidatePlaylistCaches(): void {
 	dataCache.invalidatePrefix(['api', 'getPlaylists']);
 	dataCache.invalidatePrefix(['api', 'getPlaylistTracks']);
 	dataCache.invalidatePrefix(['api', 'evaluateSmartPlaylist']);
@@ -52,6 +60,11 @@ export function applyCacheUpdateForWsMessage(message: CacheWsMessage): void {
 	) {
 		debounceRefetch(cacheKeys.playbackState(), 100);
 		debounceRefetch(cacheKeys.playbackRuntime(), 150);
+		return;
+	}
+
+	if (message.type === 'playlists_changed') {
+		invalidatePlaylistCaches();
 		return;
 	}
 

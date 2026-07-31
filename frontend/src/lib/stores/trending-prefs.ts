@@ -1,4 +1,4 @@
-import { writable } from 'svelte/store';
+import { createPersistedStore, oneOf, readPersisted } from './persisted';
 
 /// Trending shelf scope. One unified shelf with these four modes:
 /// - `worldwide`: Last.fm `chart.gettoptracks`
@@ -13,44 +13,18 @@ const COUNTRY_KEY = 'noor.trending.country';
 const GENRE_KEY = 'noor.trending.genre';
 const LEGACY_SOURCE_KEY = 'noor.trending.source'; // pre-merge: 'lastfm' | 'tidal'
 
-function load(key: string, fallback: string): string {
-	if (typeof localStorage === 'undefined') return fallback;
-	try {
-		const v = localStorage.getItem(key);
-		return v && v.trim() ? v : fallback;
-	} catch {
-		return fallback;
-	}
-}
+/** Reject a stored empty string so a blank key falls back to the default. */
+const nonEmpty = (raw: string): string | undefined => (raw.trim() ? raw : undefined);
 
-function persist(key: string, value: string) {
-	if (typeof localStorage === 'undefined') return;
-	try {
-		localStorage.setItem(key, value);
-	} catch {
-		// quota or denied — ignore
-	}
-}
+// One-time migration from the pre-merge `noor.trending.source` key so users who
+// previously picked Tidal don't get reset to Worldwide. This is the *fallback*
+// the store uses when MODE_KEY itself holds nothing valid, so the current key
+// still wins whenever it is set.
+const legacyMode: TrendingMode =
+	readPersisted<string>(LEGACY_SOURCE_KEY, '') === 'tidal' ? 'tidal' : 'worldwide';
 
-function loadInitialMode(): TrendingMode {
-	if (typeof localStorage === 'undefined') return 'worldwide';
-	try {
-		const stored = localStorage.getItem(MODE_KEY);
-		if (stored && (VALID_MODES as string[]).includes(stored)) return stored as TrendingMode;
-		// One-time migration from the pre-merge `noor.trending.source` key so
-		// users who previously picked Tidal don't get reset to Worldwide.
-		const legacy = localStorage.getItem(LEGACY_SOURCE_KEY);
-		if (legacy === 'tidal') return 'tidal';
-	} catch {
-		// fall through
-	}
-	return 'worldwide';
-}
-
-export const selectedTrendingMode = writable<TrendingMode>(loadInitialMode());
-export const selectedCountry = writable<string>(load(COUNTRY_KEY, 'AU'));
-export const selectedGenre = writable<string>(load(GENRE_KEY, 'electronic'));
-
-selectedTrendingMode.subscribe((v) => persist(MODE_KEY, v));
-selectedCountry.subscribe((v) => persist(COUNTRY_KEY, v));
-selectedGenre.subscribe((v) => persist(GENRE_KEY, v));
+export const selectedTrendingMode = createPersistedStore<TrendingMode>(MODE_KEY, legacyMode, {
+	parse: oneOf(VALID_MODES),
+});
+export const selectedCountry = createPersistedStore(COUNTRY_KEY, 'AU', { parse: nonEmpty });
+export const selectedGenre = createPersistedStore(GENRE_KEY, 'electronic', { parse: nonEmpty });

@@ -757,7 +757,15 @@ async fn do_tidal_sync(
     tracing::info!("Synced {} tracks total", stats.tracks);
 
     // ── Sync playlists ───────────────────────────────
-    if matches!(sync_mode, SyncMode::Full) {
+    //
+    // Runs on incremental syncs too. It used to be gated on `SyncMode::Full`,
+    // which meant playlists only refreshed once a week (Auto resolves to
+    // Incremental for FULL_SYNC_INTERVAL_SECS after a full sync), so tracks
+    // added to a playlist in the TIDAL app never showed up here. The index
+    // fetch below is one request per 100 playlists, and `playlist_needs_pull`
+    // keeps the expensive part - a page of tracks per playlist - to the
+    // playlists that actually changed.
+    {
         tracing::info!("Syncing TIDAL playlists...");
         let mut playlist_offset = 0;
         let mut all_playlists: Vec<_> = vec![];
@@ -779,102 +787,67 @@ async fn do_tidal_sync(
         let total_playlists = all_playlists.len().max(1);
         for (playlist_index, playlist) in all_playlists.iter().enumerate() {
             check_cancel()?;
-            // Upsert the playlist row up front so metadata sticks even if the
-            // track-fetch errors out partway. The DELETE+INSERT below for
-            // `playlist_tracks` is wrapped in a single transaction so the playlist
-            // never appears empty mid-sync.
-            {
-                let s = state.read().await;
-                s.db.with_conn(|conn| {
-                    conn.execute(
-                    "INSERT OR REPLACE INTO playlists (tidal_uuid, name, description, track_count)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![
-                        playlist.uuid,
-                        playlist.title,
-                        playlist.description,
-                        playlist.number_of_tracks.unwrap_or(0)
-                    ],
-                )?;
-                    Ok(())
-                })?;
-            }
+            let remote_last_updated = normalize_tidal_timestamp(playlist.last_updated.as_deref());
+            let remote_count = playlist.number_of_tracks.unwrap_or(0);
 
-            let playlist_id: Option<i64> = {
+            // Upsert the playlist row up front so metadata sticks even if the
+            // track-fetch errors out partway.
+            //
+            // This was an INSERT OR REPLACE, which conflicts on `tidal_uuid
+            // UNIQUE` and therefore DELETEd the existing row and inserted a new
+            // one on every full sync: a fresh `id`, `is_favorite` reset to 0,
+            // `created_at` reset, and - because foreign keys are ON - the whole
+            // playlist's `playlist_tracks` cascade-deleted. Smart rules that
+            // reference a playlist id (`not_in_playlist`) silently stopped
+            // matching. ON CONFLICT DO UPDATE touches only the columns TIDAL
+            // owns and leaves the row's identity alone.
+            let (pid, needs_pull) = {
                 let s = state.read().await;
                 s.db.with_conn(|conn| {
-                    Ok(conn
+                    let previous: Option<(i64, Option<String>, i64)> = conn
                         .query_row(
-                            "SELECT id FROM playlists WHERE tidal_uuid=?1",
+                            "SELECT id, tidal_last_updated, track_count FROM playlists WHERE tidal_uuid = ?1",
                             rusqlite::params![playlist.uuid],
-                            |row| row.get(0),
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                         )
-                        .ok())
+                        .ok();
+                    conn.execute(
+                        "INSERT INTO playlists (tidal_uuid, name, description, track_count, tidal_last_updated, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, COALESCE(?5, datetime('now')))
+                         ON CONFLICT(tidal_uuid) DO UPDATE SET
+                           name = excluded.name,
+                           description = excluded.description,
+                           track_count = excluded.track_count,
+                           tidal_last_updated = excluded.tidal_last_updated,
+                           updated_at = COALESCE(excluded.tidal_last_updated, playlists.updated_at)",
+                        rusqlite::params![
+                            playlist.uuid,
+                            playlist.title,
+                            playlist.description,
+                            remote_count,
+                            remote_last_updated,
+                        ],
+                    )?;
+                    let id: i64 = conn.query_row(
+                        "SELECT id FROM playlists WHERE tidal_uuid = ?1",
+                        rusqlite::params![playlist.uuid],
+                        |row| row.get(0),
+                    )?;
+                    let needs_pull = matches!(sync_mode, SyncMode::Full)
+                        || playlist_needs_pull(
+                            previous.as_ref().map(|(_, seen, count)| (seen.as_deref(), *count)),
+                            remote_last_updated.as_deref(),
+                            remote_count as i64,
+                        );
+                    Ok((id, needs_pull))
                 })?
             };
 
-            if let Some(pid) = playlist_id {
-                // Fetch all pages first, then DELETE+INSERT atomically. If the API
-                // errors mid-fetch, the existing playlist contents stay intact.
-                let mut all_tracks: Vec<crate::services::tidal::client::TidalTrack> = Vec::new();
-                let mut track_offset = 0;
-                loop {
-                    check_cancel()?;
-                    let tracks_resp = client
-                        .get_playlist_tracks(&playlist.uuid, 100, track_offset)
-                        .await?;
-                    if tracks_resp.items.is_empty() {
-                        break;
-                    }
-                    let fetched = tracks_resp.items.len() as i32;
-                    all_tracks.extend(tracks_resp.items);
-                    track_offset += fetched;
-                    if tracks_resp
-                        .total_number_of_items
-                        .is_none_or(|t| track_offset as i64 >= t)
-                    {
-                        break;
-                    }
-                }
-
+            if needs_pull {
+                let tracks =
+                    fetch_tidal_playlist_tracks(client, &playlist.uuid, &check_cancel).await?;
                 let s = state.read().await;
-                s.db.with_conn(|conn| {
-                let tx = conn.unchecked_transaction()?;
-                tx.execute(
-                    "DELETE FROM playlist_tracks WHERE playlist_id=?1",
-                    rusqlite::params![pid],
-                )?;
-                let mut position = 0;
-                for track in &all_tracks {
-                    tx.execute(
-                        "INSERT INTO artists (tidal_id, name) VALUES (?1, ?2) ON CONFLICT(tidal_id) DO UPDATE SET name=excluded.name",
-                        rusqlite::params![track.artist.id, track.artist.name],
-                    )?;
-                    if let Some(ref album_ref) = track.album {
-                        let artwork = TC::get_artwork_url(&album_ref.cover, 640);
-                        tx.execute(
-                            "INSERT OR IGNORE INTO albums (tidal_id, title, artist_id, artwork_url, is_favorite, source)
-                             VALUES (?1, ?2, (SELECT id FROM artists WHERE tidal_id=?3), ?4, 0, 'tidal')",
-                            rusqlite::params![album_ref.id, album_ref.title, track.artist.id, artwork],
-                        )?;
-                    }
-                    // insert_tidal_track already resolves the local row id, so
-                    // reuse it instead of issuing a second lookup per track.
-                    // Playlist members are curated (is_library=1) and are NOT
-                    // deduped: playlist_tracks needs a concrete row per
-                    // position, and tidal_id conflicts already upsert.
-                    let track_id = super::insert_tidal_track(&tx, track, false, true, None)?;
-                    if let Some(tid) = track_id {
-                        tx.execute(
-                            "INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
-                            rusqlite::params![pid, tid, position],
-                        )?;
-                        position += 1;
-                    }
-                }
-                tx.commit()?;
-                Ok(())
-            })?;
+                s.db.with_conn(|conn| replace_playlist_tracks(conn, pid, &tracks))?;
             }
             stats.playlists += 1;
             // Playlists phase: 0.45 to 0.55; enrichment takes 0.55 to 0.99.
@@ -882,8 +855,43 @@ async fn do_tidal_sync(
                 0.45 + (((playlist_index + 1) as f32 / total_playlists as f32) * 0.10);
             send_tidal_sync_progress(state, playlist_progress.clamp(0.45, 0.55)).await;
         }
+
+        // Drop local mirrors of playlists the user deleted on TIDAL. Full only:
+        // an incremental run can legitimately see a short list if the index
+        // fetch was truncated, and deleting on that basis is unrecoverable.
+        // Local and smart playlists have a NULL tidal_uuid and are never touched.
+        if matches!(sync_mode, SyncMode::Full) {
+            let remote_uuids: Vec<String> = all_playlists.iter().map(|p| p.uuid.clone()).collect();
+            let s = state.read().await;
+            let removed = s.db.with_conn(|conn| {
+                let local: Vec<(i64, String)> = {
+                    let mut stmt = conn.prepare(
+                        "SELECT id, tidal_uuid FROM playlists WHERE tidal_uuid IS NOT NULL",
+                    )?;
+                    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                        .collect::<Result<_, _>>()?
+                };
+                let keep: std::collections::HashSet<&str> =
+                    remote_uuids.iter().map(String::as_str).collect();
+                let mut removed = 0usize;
+                for (id, uuid) in local {
+                    if !keep.contains(uuid.as_str()) {
+                        conn.execute("DELETE FROM playlists WHERE id = ?1", rusqlite::params![id])?;
+                        removed += 1;
+                    }
+                }
+                Ok(removed)
+            })?;
+            if removed > 0 {
+                tracing::info!("Removed {removed} playlists no longer on TIDAL");
+            }
+        }
     }
     tracing::info!("Synced {} playlists", stats.playlists);
+    {
+        let s = state.read().await;
+        let _ = s.event_tx.send(crate::AppEvent::PlaylistsChanged);
+    }
 
     if sync_mode_reconciles_favorites(sync_mode) {
         let s = state.read().await;
@@ -1367,6 +1375,142 @@ fn sync_mode_reconciles_favorites(sync_mode: SyncMode) -> bool {
     matches!(sync_mode, SyncMode::Full)
 }
 
+/// Page through every track in a TIDAL playlist.
+///
+/// Deliberately collects the whole list before any write happens: if the API
+/// errors or the user cancels part way, the caller never gets to the DELETE and
+/// the existing playlist contents stay intact.
+pub(super) async fn fetch_tidal_playlist_tracks<F>(
+    client: &crate::services::tidal::client::TidalClient,
+    playlist_uuid: &str,
+    check_cancel: &F,
+) -> anyhow::Result<Vec<crate::services::tidal::client::TidalTrack>>
+where
+    F: Fn() -> anyhow::Result<()> + Sync,
+{
+    let mut all_tracks: Vec<crate::services::tidal::client::TidalTrack> = Vec::new();
+    let mut track_offset = 0;
+    loop {
+        check_cancel()?;
+        let tracks_resp = client
+            .get_playlist_tracks(playlist_uuid, 100, track_offset)
+            .await?;
+        if tracks_resp.items.is_empty() {
+            break;
+        }
+        let fetched = tracks_resp.items.len() as i32;
+        all_tracks.extend(tracks_resp.items);
+        track_offset += fetched;
+        if tracks_resp
+            .total_number_of_items
+            .is_none_or(|t| track_offset as i64 >= t)
+        {
+            break;
+        }
+    }
+    Ok(all_tracks)
+}
+
+/// Replace a playlist's contents with `tracks`, in one transaction, importing
+/// any artists/albums/tracks that are not local yet. Returns the number of rows
+/// that actually landed.
+///
+/// Shared by the library sync and the per-playlist refresh route so both write
+/// playlists exactly the same way.
+pub(super) fn replace_playlist_tracks(
+    conn: &rusqlite::Connection,
+    playlist_id: i64,
+    tracks: &[crate::services::tidal::client::TidalTrack],
+) -> anyhow::Result<i64> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM playlist_tracks WHERE playlist_id=?1",
+        rusqlite::params![playlist_id],
+    )?;
+    let mut position = 0i64;
+    for track in tracks {
+        tx.execute(
+            "INSERT INTO artists (tidal_id, name) VALUES (?1, ?2) ON CONFLICT(tidal_id) DO UPDATE SET name=excluded.name",
+            rusqlite::params![track.artist.id, track.artist.name],
+        )?;
+        if let Some(ref album_ref) = track.album {
+            let artwork =
+                crate::services::tidal::client::TidalClient::get_artwork_url(&album_ref.cover, 640);
+            tx.execute(
+                "INSERT OR IGNORE INTO albums (tidal_id, title, artist_id, artwork_url, is_favorite, source)
+                 VALUES (?1, ?2, (SELECT id FROM artists WHERE tidal_id=?3), ?4, 0, 'tidal')",
+                rusqlite::params![album_ref.id, album_ref.title, track.artist.id, artwork],
+            )?;
+        }
+        // insert_tidal_track already resolves the local row id, so reuse it
+        // instead of issuing a second lookup per track. Playlist members are
+        // curated (is_library=1) and are NOT deduped: playlist_tracks needs a
+        // concrete row per position, and tidal_id conflicts already upsert.
+        let track_id = super::insert_tidal_track(&tx, track, false, true, None)?;
+        if let Some(tid) = track_id {
+            tx.execute(
+                "INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
+                rusqlite::params![playlist_id, tid, position],
+            )?;
+            position += 1;
+        }
+    }
+    // TIDAL's numberOfTracks counts rows we may not have been able to resolve
+    // locally, so trust what actually landed. Without this the count on the card
+    // disagrees with the list under it.
+    tx.execute(
+        "UPDATE playlists SET track_count = ?2 WHERE id = ?1",
+        rusqlite::params![playlist_id, position],
+    )?;
+    tx.commit()?;
+    Ok(position)
+}
+
+/// Reduce a TIDAL ISO8601 timestamp to SQLite's `YYYY-MM-DD HH:MM:SS` form.
+///
+/// `playlists.updated_at` is written by `datetime('now')` everywhere else, and
+/// the "Last updated" sort is a plain string comparison. Storing TIDAL's
+/// `2026-07-30T11:22:33.444+0000` alongside those would sort every TIDAL
+/// playlist above every local one, because 'T' > ' '. Anything that does not
+/// look like a timestamp is dropped rather than stored badly.
+fn normalize_tidal_timestamp(raw: Option<&str>) -> Option<String> {
+    let raw = raw?.trim();
+    if raw.len() < 19 {
+        return None;
+    }
+    let (date, rest) = raw.split_at(10);
+    let time = &rest[1..9];
+    let separator_ok = matches!(rest.as_bytes().first(), Some(b'T') | Some(b' '));
+    let shaped = date.as_bytes()[4] == b'-'
+        && date.as_bytes()[7] == b'-'
+        && time.as_bytes()[2] == b':'
+        && time.as_bytes()[5] == b':';
+    if !separator_ok || !shaped {
+        return None;
+    }
+    Some(format!("{date} {time}"))
+}
+
+/// Whether a playlist's tracks need re-fetching from TIDAL.
+///
+/// `previous` is the locally stored `(tidal_last_updated, track_count)`, absent
+/// for a playlist we have never seen. Re-pull whenever TIDAL reports a change,
+/// whenever the counts disagree, and whenever either side's timestamp is
+/// missing - an unknown is not evidence that nothing changed.
+fn playlist_needs_pull(
+    previous: Option<(Option<&str>, i64)>,
+    remote_last_updated: Option<&str>,
+    remote_track_count: i64,
+) -> bool {
+    let Some((local_last_updated, local_track_count)) = previous else {
+        return true;
+    };
+    let (Some(local), Some(remote)) = (local_last_updated, remote_last_updated) else {
+        return true;
+    };
+    local != remote || local_track_count != remote_track_count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1492,6 +1636,80 @@ mod tests {
     fn full_mode_reconciles_favorites_but_incremental_mode_does_not() {
         assert!(sync_mode_reconciles_favorites(SyncMode::Full));
         assert!(!sync_mode_reconciles_favorites(SyncMode::Incremental));
+    }
+
+    #[test]
+    fn tidal_timestamps_normalize_to_sqlite_datetime_form() {
+        // The sort compares `updated_at` as a string, so the separator matters:
+        // 'T' sorts after ' ', which would float every TIDAL playlist to the top.
+        assert_eq!(
+            normalize_tidal_timestamp(Some("2026-07-30T11:22:33.444+0000")).as_deref(),
+            Some("2026-07-30 11:22:33")
+        );
+        assert_eq!(
+            normalize_tidal_timestamp(Some("2026-07-30T11:22:33Z")).as_deref(),
+            Some("2026-07-30 11:22:33")
+        );
+        // Already-normalized input passes through unchanged.
+        assert_eq!(
+            normalize_tidal_timestamp(Some("2026-07-30 11:22:33")).as_deref(),
+            Some("2026-07-30 11:22:33")
+        );
+    }
+
+    #[test]
+    fn malformed_tidal_timestamps_are_dropped_rather_than_stored() {
+        assert_eq!(normalize_tidal_timestamp(None), None);
+        assert_eq!(normalize_tidal_timestamp(Some("")), None);
+        assert_eq!(normalize_tidal_timestamp(Some("2026-07-30")), None);
+        assert_eq!(
+            normalize_tidal_timestamp(Some("not a timestamp at all")),
+            None
+        );
+    }
+
+    #[test]
+    fn unchanged_playlists_skip_the_track_pull() {
+        assert!(!playlist_needs_pull(
+            Some((Some("2026-07-30 11:22:33"), 42)),
+            Some("2026-07-30 11:22:33"),
+            42
+        ));
+    }
+
+    #[test]
+    fn changed_playlists_are_pulled() {
+        // A newer remote timestamp is the normal "user added a track" case.
+        assert!(playlist_needs_pull(
+            Some((Some("2026-07-30 11:22:33"), 42)),
+            Some("2026-07-31 09:00:00"),
+            43
+        ));
+        // Counts disagreeing is enough on its own: TIDAL does not always move
+        // lastUpdated, and a partially-resolved previous pull leaves us short.
+        assert!(playlist_needs_pull(
+            Some((Some("2026-07-30 11:22:33"), 41)),
+            Some("2026-07-30 11:22:33"),
+            42
+        ));
+    }
+
+    #[test]
+    fn unknown_state_always_pulls() {
+        // Never seen before.
+        assert!(playlist_needs_pull(None, Some("2026-07-30 11:22:33"), 42));
+        // Stored without a timestamp (rows that predate migration 061).
+        assert!(playlist_needs_pull(
+            Some((None, 42)),
+            Some("2026-07-30 11:22:33"),
+            42
+        ));
+        // TIDAL did not send one. An unknown is not evidence nothing changed.
+        assert!(playlist_needs_pull(
+            Some((Some("2026-07-30 11:22:33"), 42)),
+            None,
+            42
+        ));
     }
 
     fn favorite_artist(

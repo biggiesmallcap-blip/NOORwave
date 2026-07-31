@@ -37,6 +37,8 @@
 	import { formatTrackDuration, formatDateShort, getQualityClass } from '$lib/utils/format';
 	import { api, type Album, type Artist, type AudioSearchResult, type Genre, type Playlist, type Track } from '$lib/api/client';
 	import { cachedApi, invalidateLibraryCaches } from '$lib/cache/api_queries';
+	import { invalidatePlaylistCaches } from '$lib/cache/ws_events';
+	import { buildAddToPlaylistSubmenu as sharedAddToPlaylistSubmenu } from '$lib/player/playlist_menu';
 	import {
 		currentTrack,
 		isPlaying,
@@ -71,24 +73,10 @@
 	import { showToast } from '$lib/stores/toast';
 	import { wsMessages } from '$lib/api/ws';
 
-	function buildAddToPlaylistSubmenu(
-		getTrackIds: () => Promise<number[]>,
-	): MenuItem[] {
-		return [...playlists]
-			.sort((a, b) => {
-				if (a.is_favorite !== b.is_favorite) return a.is_favorite ? -1 : 1;
-				return a.name.localeCompare(b.name);
-			})
-			.map((playlist) => ({
-				label: playlist.name,
-				icon: playlist.is_favorite ? '♥' : '♩',
-				onSelect: async () => {
-					const trackIds = await getTrackIds();
-					if (!trackIds.length) return;
-					const { added } = await api.addTracksToPlaylist(playlist.id, trackIds);
-					showToast(`Added ${added} track${added !== 1 ? 's' : ''} to ${playlist.name}`, 'success');
-				},
-			}));
+	// Thin wrapper over the shared builder so the many call sites below don't
+	// each have to thread `playlists` through.
+	function buildAddToPlaylistSubmenu(getTrackIds: () => Promise<number[]>): MenuItem[] {
+		return sharedAddToPlaylistSubmenu(playlists, getTrackIds);
 	}
 
 	function handleHomeArtistContextMenu(e: MouseEvent, artistId: number) {
@@ -808,6 +796,7 @@
 		batchMessage = null;
 		try {
 			const result = await api.batchAddToPlaylist(Number(selectedPlaylistId), [...$selectedTrackIds]);
+			invalidatePlaylistCaches();
 			batchMessage = `Added ${result.added} of ${result.resolved_tracks} selected tracks to the playlist.`;
 			clearSelection();
 		} catch (error) {

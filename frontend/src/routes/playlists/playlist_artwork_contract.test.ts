@@ -35,7 +35,34 @@ describe('playlist artwork contracts', () => {
 		expect(page).toContain('function isCurrentPlaylistLoad(seq: number): boolean');
 		expect(page).toContain('return !destroyed && seq === playlistLoadSeq;');
 		expect(page).toContain('if (!isCurrentPlaylistLoad(seq)) return;');
-		expect(page).toContain('if (destroyed) return;');
-		expect(page).toContain('if (!destroyed) loadingById = { ...loadingById, [id]: false };');
+		// ensurePlaylistTracks awaits a fetch and then writes component state, so
+		// both the success and the failure path have to bail after unmount.
+		expect(page).toContain('if (destroyed) return [];');
+	});
+
+	test('rows link to the playlist detail route instead of expanding in place', () => {
+		// The accordion was replaced by /playlists/[id]; leaving its state behind
+		// would mean two sources of truth for a playlist's track list.
+		expect(page).toContain('href={`/playlists/${playlist.id}`}');
+		expect(page).not.toContain('expandedPlaylistIds');
+		expect(page).not.toContain('aria-expanded');
+	});
+
+	test('the list is borderless rather than a stack of glass panels', () => {
+		// STYLING.md: browse lists are flat. Glass is for panels and overlays,
+		// and the drawer below is the only thing on this page that qualifies.
+		expect(page).toContain('class="playlist-row"');
+		expect(page).not.toContain('class="playlist-card glass-panel"');
+		expect(page).toContain('.playlist-row:hover');
+		expect(page).toContain('background: var(--bg-hover);');
+	});
+
+	test('sort and filter persist across sessions and default to last updated', () => {
+		// A SvelteKit snapshot only restores on back/forward, so these lived in
+		// localStorage as well; the guards against a QuotaExceeded boot crash are
+		// inside createPersistedStore.
+		expect(page).toContain("import { createPersistedStore, oneOf } from '$lib/stores/persisted';");
+		expect(page).toContain("createPersistedStore<PlaylistSort>('playlists.sort', 'recent_update'");
+		expect(page).toContain("createPersistedStore<PlaylistFilter>('playlists.filter', 'all'");
 	});
 });
