@@ -4880,8 +4880,19 @@ fn tidal_playback_error_response(
 }
 
 async fn pause_playback(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    let _playback_generation = bump_playback_generation(&state).await;
-
+    // Deliberately does NOT bump the playback generation. The generation
+    // identifies WHICH playback job is current; a transport toggle does not
+    // start one, so bumping here orphaned the engine that is still loaded:
+    // it keeps the generation it was created with, and every generation-guarded
+    // path then rejected its events for the rest of the track. That silently
+    // broke the end-of-track queue advance (the track played to its final
+    // sample and froze), prepare-next/gapless, the Started event that sets
+    // `audio_active`, and track-error recovery, until the user hit Next.
+    //
+    // The race this was reaching for -- an in-flight resolve starting audio
+    // after the user paused -- is already handled by the play/switch paths
+    // through `with_start_paused(!transport_intent_is_playing(..))`, which
+    // reads the `is_playing` intent that `player::pause` writes below.
     if let Some(runtime_handle) = current_playback_runtime(&state).await
         && let Err(error) = runtime_handle.pause()
     {
@@ -4956,8 +4967,9 @@ async fn release_exclusive_playback(
 }
 
 async fn resume_playback(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    let _playback_generation = bump_playback_generation(&state).await;
-
+    // No generation bump, for the same reason as `pause_playback`: resuming
+    // does not start a new playback job, and bumping here left the engine that
+    // is about to keep playing stranded on a stale generation.
     if let Some(runtime_handle) = current_playback_runtime(&state).await
         && let Err(error) = runtime_handle.resume()
     {

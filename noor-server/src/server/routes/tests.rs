@@ -255,7 +255,7 @@ fn stream_error_mapping_marks_manifest_decode_failures_as_bad_gateway() {
 }
 
 #[tokio::test]
-async fn pause_and_resume_playback_invalidate_inflight_generation() {
+async fn pause_and_resume_playback_leave_the_playback_generation_alone() {
     let db = fresh_migrated_db();
     let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
     let app = api_routes(state.clone());
@@ -281,7 +281,14 @@ async fn pause_and_resume_playback_invalidate_inflight_generation() {
         let guard = state.read().await;
         current_playback_generation(&guard)
     };
-    assert!(after_pause > initial);
+    // A transport toggle must not move the generation. Bumping it here left
+    // the still-loaded engine on a stale generation, so its end-of-track
+    // terminal was rejected and the queue never advanced: the track played to
+    // its last sample and froze until the user pressed Next.
+    assert_eq!(
+        after_pause, initial,
+        "pause must not invalidate the loaded engine's generation"
+    );
 
     let resume_response = app
         .oneshot(
@@ -298,7 +305,10 @@ async fn pause_and_resume_playback_invalidate_inflight_generation() {
         let guard = state.read().await;
         current_playback_generation(&guard)
     };
-    assert!(after_resume > after_pause);
+    assert_eq!(
+        after_resume, initial,
+        "resume must not invalidate the loaded engine's generation either"
+    );
 }
 
 #[test]
