@@ -171,11 +171,20 @@ pub(super) async fn get_home_shuffle_picks(
     Ok(Json(json!({ "tracks": tracks, "albums": albums })))
 }
 
+/// Home's provider shelves, served from cache and never blocking on the
+/// upstream fan-out.
+///
+/// This used to build the shelves inline. A cold start needed well over a
+/// hundred Last.fm calls, which took longer than the client's 20s timeout; the
+/// abort dropped the handler future mid-flight, so `write_recommendation_cache`
+/// at the end never ran and every call the request had already made was thrown
+/// away. The retry then started from zero and did the same thing. Now the fetch
+/// runs detached, where a disconnect cannot cancel it, and this only reads.
 pub(super) async fn get_home_recommendations(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
-    let lastfm = load_or_fetch_recommendation_shelf(state.clone(), "lastfm").await;
-    let listenbrainz = load_or_fetch_recommendation_shelf(state.clone(), "listenbrainz").await;
+    let lastfm = serve_recommendation_shelf(&state, "lastfm").await;
+    let listenbrainz = serve_recommendation_shelf(&state, "listenbrainz").await;
     Ok(Json(json!({
         "shelves": [
             recommendation_shelf_json("lastfm", "Last.fm recommended tracks", Some("track"), &lastfm),
@@ -253,32 +262,46 @@ pub(crate) struct LastFmArtistSeed {
     pub(crate) reason: String,
 }
 
+/// What Home should paint for one provider right now.
+pub(crate) struct ShelfSnapshot {
+    pub(crate) items: Vec<Value>,
+    /// A rebuild is running behind this payload. The client keeps showing what
+    /// it has (or its own loading state, if it has nothing) instead of settling
+    /// on "empty", because more items are on the way.
+    pub(crate) building: bool,
+}
+
+/// An empty shelf that is still building is `warming`, not `empty`.
+///
+/// The distinction is load-bearing on a cold start: shelves are published one
+/// at a time, so the artist and album rails are legitimately empty for a few
+/// seconds while the track mural is already painted. Reporting those as `empty`
+/// would make the client render "no recommendations yet" over a build that is
+/// seconds from filling them in.
+pub(crate) fn recommendation_shelf_status(items_len: usize, building: bool) -> &'static str {
+    if items_len > 0 {
+        "ok"
+    } else if building {
+        "warming"
+    } else {
+        "empty"
+    }
+}
+
 fn recommendation_shelf_json(
     provider: &str,
     title: &str,
     entity_type: Option<&str>,
-    result: &anyhow::Result<Vec<Value>>,
+    snapshot: &ShelfSnapshot,
 ) -> Value {
-    match result {
-        Ok(items) => {
-            let filtered = filter_recommendation_items(items, entity_type);
-            json!({
-                "provider": provider,
-                "title": title,
-                "entity_type": entity_type.unwrap_or("track"),
-                "status": if filtered.is_empty() { "empty" } else { "ok" },
-                "items": filtered,
-            })
-        }
-        Err(error) => json!({
-            "provider": provider,
-            "title": title,
-            "entity_type": entity_type.unwrap_or("track"),
-            "status": "error",
-            "message": error.to_string(),
-            "items": [],
-        }),
-    }
+    let filtered = filter_recommendation_items(&snapshot.items, entity_type);
+    json!({
+        "provider": provider,
+        "title": title,
+        "entity_type": entity_type.unwrap_or("track"),
+        "status": recommendation_shelf_status(filtered.len(), snapshot.building),
+        "items": filtered,
+    })
 }
 
 fn filter_recommendation_items(items: &[Value], entity_type: Option<&str>) -> Vec<Value> {
@@ -295,25 +318,136 @@ fn filter_recommendation_items(items: &[Value], entity_type: Option<&str>) -> Ve
         .collect()
 }
 
-async fn load_or_fetch_recommendation_shelf(
-    state: SharedState,
-    provider: &str,
-) -> anyhow::Result<Vec<Value>> {
-    if let Some(cached) = read_recommendation_cache(&state, provider).await {
-        return Ok(cached);
+/// Serve the last known shelf immediately, and rebuild behind it when it is
+/// past its lease.
+///
+/// Stale-while-revalidate, and it is the whole reason a warm boot paints
+/// instantly. The old read discarded an expired payload outright, so an expired
+/// lease and an empty cache looked identical to the client: nothing, for as
+/// long as the rebuild took. Last visit's shelf is a far better first frame
+/// than a blank one, and it is replaced in place the moment the rebuild
+/// publishes.
+async fn serve_recommendation_shelf(state: &SharedState, provider: &str) -> ShelfSnapshot {
+    let cached = read_recommendation_cache(state, provider).await;
+    let fresh = cached.as_ref().is_some_and(|entry| entry.fresh);
+    if !fresh {
+        spawn_recommendation_rebuild(state.clone(), provider);
     }
-    let mut items = match provider {
-        "lastfm" => fetch_lastfm_home_recommendations(&state).await?,
-        "listenbrainz" => fetch_listenbrainz_home_recommendations(&state).await?,
-        _ => Vec::new(),
+    ShelfSnapshot {
+        items: cached.map(|entry| entry.items).unwrap_or_default(),
+        // The lease cannot answer this on its own. A partial publish writes a
+        // short lease, which is perfectly fresh, while the shelves behind it are
+        // still being built - so freshness alone reported the not-yet-built
+        // rails as `empty` and the client rendered them as "nothing to
+        // recommend". The in-flight claim is the only thing that actually knows
+        // a build is still running.
+        building: !fresh || rebuild_running(provider),
+    }
+}
+
+/// Providers with a background rebuild already running.
+///
+/// A rebuild outlives the request that started it, so without this the user's
+/// instinctive response to a slow cold start - force refresh - would launch a
+/// second full fan-out on top of the first, doubling exactly the traffic that
+/// made it slow.
+fn rebuilds_in_flight() -> &'static std::sync::Mutex<HashSet<String>> {
+    static IN_FLIGHT: std::sync::OnceLock<std::sync::Mutex<HashSet<String>>> =
+        std::sync::OnceLock::new();
+    IN_FLIGHT.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
+}
+
+/// Releases the in-flight claim however the rebuild ends, panic included.
+struct RebuildGuard(String);
+
+impl Drop for RebuildGuard {
+    fn drop(&mut self) {
+        if let Ok(mut in_flight) = rebuilds_in_flight().lock() {
+            in_flight.remove(&self.0);
+        }
+    }
+}
+
+fn claim_rebuild(provider: &str) -> Option<RebuildGuard> {
+    let mut in_flight = rebuilds_in_flight().lock().ok()?;
+    in_flight
+        .insert(provider.to_string())
+        .then(|| RebuildGuard(provider.to_string()))
+}
+
+fn rebuild_running(provider: &str) -> bool {
+    rebuilds_in_flight()
+        .lock()
+        .is_ok_and(|in_flight| in_flight.contains(provider))
+}
+
+/// Start a detached rebuild, unless one is already running for this provider.
+///
+/// `tokio::spawn`, deliberately: the task has to survive the request that
+/// started it. Awaiting the fan-out inline is what let a client-side timeout
+/// throw away a hundred-plus completed upstream calls.
+fn spawn_recommendation_rebuild(state: SharedState, provider: &str) {
+    let Some(guard) = claim_rebuild(provider) else {
+        return;
     };
-    // Before the cache write, so the artwork and the album ids are stored with
-    // the shelf rather than re-resolved on every cache hit.
-    resolve_missing_artwork(&state, &mut items).await;
-    drop_unresolvable_albums(&mut items);
-    drop_duplicate_albums(&mut items);
-    write_recommendation_cache(&state, provider, &items).await;
-    Ok(items)
+    let provider = provider.to_string();
+    tokio::spawn(async move {
+        let _guard = guard;
+        if let Err(error) = rebuild_recommendation_shelf(&state, &provider).await {
+            tracing::warn!(
+                target: "noor.home_recommendations",
+                provider,
+                error = %error,
+                "recommendation rebuild failed"
+            );
+            // Settle the client rather than leaving it on a spinner forever.
+            // This only moves the lease, never the payload: a stale shelf that
+            // is still worth painting must survive a failed refresh.
+            touch_recommendation_cache(&state, &provider).await;
+        }
+    });
+}
+
+async fn rebuild_recommendation_shelf(state: &SharedState, provider: &str) -> anyhow::Result<()> {
+    match provider {
+        "lastfm" => rebuild_lastfm_shelf(state).await,
+        "listenbrainz" => {
+            let mut items = fetch_listenbrainz_home_recommendations(state).await?;
+            finalize_recommendation_items(state, &mut items).await;
+            publish_recommendation_shelf(state, provider, &items, true).await;
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Resolve artwork and album links, then drop what resolved to nothing.
+///
+/// Runs before every publish so the cached payload carries its artwork rather
+/// than having each cache hit re-resolve it. Cheap to repeat over a growing
+/// list: the pending filter only picks items that are still missing something,
+/// so a re-run over already-resolved items costs a scan and no calls.
+async fn finalize_recommendation_items(state: &SharedState, items: &mut Vec<Value>) {
+    resolve_missing_artwork(state, items).await;
+    drop_unresolvable_albums(items);
+    drop_duplicate_albums(items);
+}
+
+/// Write a shelf and tell the client it changed.
+async fn publish_recommendation_shelf(
+    state: &SharedState,
+    provider: &str,
+    items: &[Value],
+    complete: bool,
+) {
+    write_recommendation_cache(state, provider, items, complete).await;
+    let s = state.read().await;
+    let _ = s
+        .event_tx
+        .send(crate::AppEvent::HomeRecommendationsUpdated {
+            provider: provider.to_string(),
+            complete,
+        });
 }
 
 /// Concurrent TIDAL searches while filling in missing artwork. Most of these
@@ -756,35 +890,99 @@ const RECOMMENDATION_FULL_TTL_SECS: i64 = 6 * 60 * 60;
 /// Writing that at the full six-hour TTL pinned a half-empty Home until the
 /// cache expired, which is the "only a few tracks" symptom. Short results now
 /// get a short lease so the next visit tries again.
-fn recommendation_cache_ttl(items: &[Value]) -> i64 {
-    if items.len() >= RECOMMENDATION_HEALTHY_FLOOR {
+/// A partial publish never earns the long lease.
+///
+/// The rebuild writes after each shelf so Home fills in progressively, and the
+/// track shelf alone clears `RECOMMENDATION_HEALTHY_FLOOR`. Without the
+/// `complete` gate, a build that died after its first publish would pin a
+/// tracks-only Home for the full six hours.
+fn recommendation_cache_ttl(items: &[Value], complete: bool) -> i64 {
+    if complete && items.len() >= RECOMMENDATION_HEALTHY_FLOOR {
         RECOMMENDATION_FULL_TTL_SECS
     } else {
         RECOMMENDATION_SHORT_TTL_SECS
     }
 }
 
-async fn read_recommendation_cache(state: &SharedState, provider: &str) -> Option<Vec<Value>> {
-    let now = unix_now_secs();
-    let s = state.read().await;
-    s.db.with_conn(|conn| {
-        conn.query_row(
-            "SELECT payload_json FROM provider_recommendation_cache
-                  WHERE provider = ?1 AND cache_key = ?2 AND expires_at > ?3",
-            params![provider, RECOMMENDATION_HOME_CACHE_KEY, now],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(Into::into)
-    })
-    .ok()
-    .flatten()
-    .and_then(|raw| serde_json::from_str(&raw).ok())
+/// How long an expired payload is still worth painting.
+///
+/// This decides only what someone who has not opened the app in a month sees on
+/// their first frame: last month's shelf, or a blank page. Last month's shelf
+/// wins - the rebuild running behind it replaces it within seconds - but a
+/// payload old enough that its TIDAL ids are probably dead is not worth
+/// rendering at all.
+const RECOMMENDATION_STALE_SERVE_SECS: i64 = 30 * 24 * 60 * 60;
+
+pub(crate) struct CachedShelf {
+    pub(crate) items: Vec<Value>,
+    /// Still inside its lease. A stale entry is served all the same, with a
+    /// rebuild kicked off behind it.
+    pub(crate) fresh: bool,
 }
 
-async fn write_recommendation_cache(state: &SharedState, provider: &str, items: &[Value]) {
+async fn read_recommendation_cache(state: &SharedState, provider: &str) -> Option<CachedShelf> {
     let now = unix_now_secs();
-    let expires = now + recommendation_cache_ttl(items);
+    let s = state.read().await;
+    let (raw, expires_at) =
+        s.db.with_conn(|conn| {
+            conn.query_row(
+                "SELECT payload_json, expires_at FROM provider_recommendation_cache
+                      WHERE provider = ?1 AND cache_key = ?2 AND fetched_at > ?3",
+                params![
+                    provider,
+                    RECOMMENDATION_HOME_CACHE_KEY,
+                    now - RECOMMENDATION_STALE_SERVE_SECS
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+        .ok()
+        .flatten()?;
+    Some(CachedShelf {
+        items: serde_json::from_str(&raw).ok()?,
+        fresh: expires_at > now,
+    })
+}
+
+/// Push the lease out without touching the payload.
+///
+/// For a rebuild that failed: whatever is cached is still the best answer we
+/// have, and re-running the fan-out on every page load while Last.fm is down
+/// helps nobody. The short lease means the next visit after that window tries
+/// again.
+/// With nothing cached at all there is no payload to preserve, so an empty one
+/// is written instead. Without it a provider that fails on a genuinely cold
+/// cache would report `warming` on every load forever and the client would spin
+/// against a wall.
+async fn touch_recommendation_cache(state: &SharedState, provider: &str) {
+    let now = unix_now_secs();
+    let expires = now + RECOMMENDATION_SHORT_TTL_SECS;
+    let touched = {
+        let s = state.read().await;
+        s.db.with_conn(|conn| {
+            Ok::<_, anyhow::Error>(conn.execute(
+                "UPDATE provider_recommendation_cache SET expires_at = ?3
+                      WHERE provider = ?1 AND cache_key = ?2",
+                params![provider, RECOMMENDATION_HOME_CACHE_KEY, expires],
+            )?)
+        })
+        .unwrap_or(0)
+    };
+    if touched == 0 {
+        write_recommendation_cache(state, provider, &[], false).await;
+    }
+}
+
+async fn write_recommendation_cache(
+    state: &SharedState,
+    provider: &str,
+    items: &[Value],
+    complete: bool,
+) {
+    let now = unix_now_secs();
+    let expires = now + recommendation_cache_ttl(items, complete);
     let Ok(payload) = serde_json::to_string(items) else {
         return;
     };
@@ -903,51 +1101,54 @@ pub(crate) fn merge_lastfm_artist_seeds(
     out
 }
 
-async fn load_lastfm_track_seeds(client: &LastFmClient, user: &str) -> Vec<LastFmTrackSeed> {
-    let recent = client
-        .user_recent_tracks(user, LASTFM_HOME_PROFILE_SOURCE_LIMIT)
-        .await
-        .unwrap_or_default();
-    let loved = client
-        .user_loved_tracks(user, LASTFM_HOME_PROFILE_SOURCE_LIMIT)
-        .await
-        .unwrap_or_default();
-    let top = client
-        .user_top_tracks(user, LASTFM_HOME_PROFILE_SOURCE_LIMIT)
-        .await
-        .unwrap_or_default();
-    merge_lastfm_track_seeds(
-        recent,
-        loved,
-        top,
-        recommendation_seed_window(),
-        LASTFM_HOME_SEED_LIMIT,
-    )
-}
-
-async fn load_lastfm_artist_seeds(
+/// The five profile calls that seed the whole fan-out.
+///
+/// All five are independent - the artist seeds merge the track seeds, but they
+/// do not need them fetched first - so they go out together. Serially this was
+/// five round trips before the first similar-track call could even start, and
+/// nothing on Home could paint until they were done.
+///
+/// The rotation salt is read once here rather than per merge, so the track and
+/// artist seeds cannot land in different six-hour windows when a build happens
+/// to straddle a boundary.
+async fn load_lastfm_seeds(
     client: &LastFmClient,
     user: &str,
-    track_seeds: &[LastFmTrackSeed],
-) -> Vec<LastFmArtistSeed> {
-    let top_artists = client
-        .user_top_artists(user, LASTFM_HOME_PROFILE_SOURCE_LIMIT)
-        .await
-        .unwrap_or_default();
-    let top_albums = client
-        .user_top_albums(user, LASTFM_HOME_PROFILE_SOURCE_LIMIT)
-        .await
-        .unwrap_or_default();
-    merge_lastfm_artist_seeds(
-        track_seeds,
-        top_artists,
-        top_albums,
-        recommendation_seed_window(),
+) -> (Vec<LastFmTrackSeed>, Vec<LastFmArtistSeed>) {
+    let (recent, loved, top, top_artists, top_albums) = tokio::join!(
+        client.user_recent_tracks(user, LASTFM_HOME_PROFILE_SOURCE_LIMIT),
+        client.user_loved_tracks(user, LASTFM_HOME_PROFILE_SOURCE_LIMIT),
+        client.user_top_tracks(user, LASTFM_HOME_PROFILE_SOURCE_LIMIT),
+        client.user_top_artists(user, LASTFM_HOME_PROFILE_SOURCE_LIMIT),
+        client.user_top_albums(user, LASTFM_HOME_PROFILE_SOURCE_LIMIT),
+    );
+
+    let salt = recommendation_seed_window();
+    let track_seeds = merge_lastfm_track_seeds(
+        recent.unwrap_or_default(),
+        loved.unwrap_or_default(),
+        top.unwrap_or_default(),
+        salt,
         LASTFM_HOME_SEED_LIMIT,
-    )
+    );
+    let artist_seeds = merge_lastfm_artist_seeds(
+        &track_seeds,
+        top_artists.unwrap_or_default(),
+        top_albums.unwrap_or_default(),
+        salt,
+        LASTFM_HOME_SEED_LIMIT,
+    );
+    (track_seeds, artist_seeds)
 }
 
-async fn fetch_lastfm_home_recommendations(state: &SharedState) -> anyhow::Result<Vec<Value>> {
+/// Build the three Last.fm shelves, publishing after each one.
+///
+/// The order is the point. Tracks is the cheapest shelf and it renders as the
+/// mural at the top of Home, so it goes out first and Home has content in it
+/// seconds into a cold start. Artists and albums land behind it, in place,
+/// without the page ever showing a blank. Only the last publish is `complete`,
+/// so a build that dies halfway cannot pin a partial Home for six hours.
+async fn rebuild_lastfm_shelf(state: &SharedState) -> anyhow::Result<()> {
     let (http, db, user) = {
         let s = state.read().await;
         let user = s.db.with_conn(|conn| {
@@ -957,19 +1158,27 @@ async fn fetch_lastfm_home_recommendations(state: &SharedState) -> anyhow::Resul
         })?;
         (s.http_client.clone(), s.db.clone(), user)
     };
-    let Some(user) = user else {
-        return Ok(Vec::new());
+    // Not configured is a finished state, not a failure: publish the empty
+    // shelf so the client stops reporting the provider as still warming.
+    let (Some(user), Some(client)) = (user, LastFmClient::load(http, &db)) else {
+        publish_recommendation_shelf(state, "lastfm", &[], true).await;
+        return Ok(());
     };
-    let Some(client) = LastFmClient::load(http, &db) else {
-        return Ok(Vec::new());
-    };
-    let track_seeds = load_lastfm_track_seeds(&client, &user).await;
-    let artist_seeds = load_lastfm_artist_seeds(&client, &user, &track_seeds).await;
-    let mut out = Vec::new();
-    out.extend(fetch_lastfm_track_recommendations(state, &client, &track_seeds).await?);
-    out.extend(fetch_lastfm_artist_recommendations(state, &client, &artist_seeds).await?);
-    out.extend(fetch_lastfm_album_recommendations(state, &client, &artist_seeds).await?);
-    Ok(out)
+
+    let (track_seeds, artist_seeds) = load_lastfm_seeds(&client, &user).await;
+
+    let mut items = fetch_lastfm_track_recommendations(state, &client, &track_seeds).await?;
+    finalize_recommendation_items(state, &mut items).await;
+    publish_recommendation_shelf(state, "lastfm", &items, false).await;
+
+    items.extend(fetch_lastfm_artist_recommendations(state, &client, &artist_seeds).await?);
+    finalize_recommendation_items(state, &mut items).await;
+    publish_recommendation_shelf(state, "lastfm", &items, false).await;
+
+    items.extend(fetch_lastfm_album_recommendations(state, &client, &artist_seeds).await?);
+    finalize_recommendation_items(state, &mut items).await;
+    publish_recommendation_shelf(state, "lastfm", &items, true).await;
+    Ok(())
 }
 
 async fn fetch_lastfm_track_recommendations(
@@ -977,28 +1186,37 @@ async fn fetch_lastfm_track_recommendations(
     client: &LastFmClient,
     seeds: &[LastFmTrackSeed],
 ) -> anyhow::Result<Vec<Value>> {
-    // Fetch every seed's similar list up front, then walk the results in seed
-    // order. `buffered`, not `buffer_unordered`: dedup is first-come and the
-    // shelf stops at a limit, so out-of-order completion would make the
-    // contents depend on network timing.
+    // `buffered`, not `buffer_unordered`: dedup is first-come and the shelf
+    // stops at a limit, so out-of-order completion would make the contents
+    // depend on network timing.
+    //
+    // Consumed with `while let` rather than collected. `buffered` is lazy, so
+    // walking it and breaking at the cap means the seeds past the cap are never
+    // requested at all - and a single healthy seed returns
+    // `LASTFM_HOME_SIMILAR_LIMIT` similars, which fills this shelf on its own.
+    // That matters most for the seeds that miss: each one of those falls back
+    // to an artist lookup plus a top-tracks call per related artist, serially.
     let seed_keys: Vec<(String, String)> = seeds
         .iter()
         .map(|seed| (seed.artist.clone(), seed.title.clone()))
         .collect();
-    let similar_by_seed: Vec<Vec<_>> = futures::stream::iter(seed_keys)
+    let mut similar_by_seed = futures::stream::iter(seed_keys)
         .map(|(artist, title)| async move {
             client
                 .track_get_similar_with_artist_fallback(&artist, &title, LASTFM_HOME_SIMILAR_LIMIT)
                 .await
                 .unwrap_or_default()
         })
-        .buffered(LASTFM_FANOUT_CONCURRENCY)
-        .collect()
-        .await;
+        .buffered(LASTFM_FANOUT_CONCURRENCY);
 
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    for (seed, similars) in seeds.iter().zip(similar_by_seed) {
+    let mut seed_index = 0usize;
+    while let Some(similars) = similar_by_seed.next().await {
+        let Some(seed) = seeds.get(seed_index) else {
+            break;
+        };
+        seed_index += 1;
         for similar in similars {
             let key = crate::services::radio::normalize_for_dedup(&similar.artist, &similar.title);
             if key.is_empty() || !seen.insert(key) {
@@ -1039,21 +1257,26 @@ async fn fetch_lastfm_artist_recommendations(
     client: &LastFmClient,
     seeds: &[LastFmArtistSeed],
 ) -> anyhow::Result<Vec<Value>> {
+    // Lazy for the same reason as the track shelf: the cap is reached long
+    // before the seeds run out, and the calls past it are never issued.
     let seed_names: Vec<String> = seeds.iter().map(|seed| seed.name.clone()).collect();
-    let similar_by_seed: Vec<Vec<_>> = futures::stream::iter(seed_names)
+    let mut similar_by_seed = futures::stream::iter(seed_names)
         .map(|name| async move {
             client
                 .artist_get_similar(&name, LASTFM_HOME_SIMILAR_LIMIT)
                 .await
                 .unwrap_or_default()
         })
-        .buffered(LASTFM_FANOUT_CONCURRENCY)
-        .collect()
-        .await;
+        .buffered(LASTFM_FANOUT_CONCURRENCY);
 
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    for (seed, similars) in seeds.iter().zip(similar_by_seed) {
+    let mut seed_index = 0usize;
+    while let Some(similars) = similar_by_seed.next().await {
+        let Some(seed) = seeds.get(seed_index) else {
+            break;
+        };
+        seed_index += 1;
         for artist in similars {
             let key = artist.name.trim().to_ascii_lowercase();
             if key.is_empty() || !seen.insert(key) {
@@ -1084,10 +1307,7 @@ async fn fetch_lastfm_album_recommendations(
     client: &LastFmClient,
     seeds: &[LastFmArtistSeed],
 ) -> anyhow::Result<Vec<Value>> {
-    // The worst of the three: one similar-artists call per seed, then one
-    // top-albums call per similar artist, all in series - up to 12 x (1 + 8)
-    // round trips at an 8s timeout each. Both levels now run buffered, so the
-    // shelf is bounded by the slowest few calls rather than their sum.
+    // Round one: similar artists per seed. One call each, and cheap.
     let seed_names: Vec<String> = seeds.iter().map(|seed| seed.name.clone()).collect();
     let similar_by_seed: Vec<Vec<_>> = futures::stream::iter(seed_names)
         .map(|name| async move {
@@ -1101,7 +1321,7 @@ async fn fetch_lastfm_album_recommendations(
         .await;
 
     // Flatten to (seed index, artist) so the album fetches are one wide pass
-    // instead of a nested one, then regroup in the original order.
+    // instead of a nested one, and stay in seed order.
     let pairs: Vec<(usize, LastFmChartArtist)> = similar_by_seed
         .into_iter()
         .enumerate()
@@ -1110,49 +1330,51 @@ async fn fetch_lastfm_album_recommendations(
         })
         .collect();
 
-    let pair_names: Vec<String> = pairs
-        .iter()
-        .map(|(_, artist)| artist.name.clone())
-        .collect();
-    let albums_by_pair: Vec<Vec<_>> = futures::stream::iter(pair_names)
-        .map(|name| async move {
-            client
-                .artist_top_albums(&name, LASTFM_HOME_ALBUMS_PER_ARTIST_LIMIT)
+    // Round two was by far the most expensive thing on Home. It collected top
+    // albums for every one of the (up to) 12 x 8 similar artists before the
+    // loop that keeps 50 albums had even started - roughly 84 calls whose
+    // results were fetched and thrown away, sixteen serial waves deep at this
+    // concurrency. Consuming the stream lazily and returning at the cap means
+    // those calls are never issued: five albums per artist fills 50 in about a
+    // dozen.
+    let mut albums_by_pair = futures::stream::iter(pairs)
+        .map(|(seed_index, artist)| async move {
+            let albums = client
+                .artist_top_albums(&artist.name, LASTFM_HOME_ALBUMS_PER_ARTIST_LIMIT)
                 .await
-                .unwrap_or_default()
+                .unwrap_or_default();
+            (seed_index, artist, albums)
         })
-        .buffered(LASTFM_FANOUT_CONCURRENCY)
-        .collect()
-        .await;
+        .buffered(LASTFM_FANOUT_CONCURRENCY);
 
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    for ((seed_index, artist), albums) in pairs.into_iter().zip(albums_by_pair) {
-        let seed = &seeds[seed_index];
-        {
-            for album in albums {
-                let key = crate::services::radio::normalize_for_dedup(&album.artist, &album.title);
-                if key.is_empty() || !seen.insert(key) {
-                    continue;
-                }
-                out.push(
-                    resolve_recommendation_album_item(
-                        state,
-                        "lastfm",
-                        &album.artist,
-                        &album.title,
-                        album.mbid.as_deref(),
-                        artist
-                            .match_score
-                            .or_else(|| album.playcount.map(|count| count as f64)),
-                        &seed.reason,
-                        album.image_url.as_deref(),
-                    )
-                    .await,
-                );
-                if out.len() >= LASTFM_HOME_ALBUM_LIMIT {
-                    return Ok(out);
-                }
+    while let Some((seed_index, artist, albums)) = albums_by_pair.next().await {
+        let Some(seed) = seeds.get(seed_index) else {
+            continue;
+        };
+        for album in albums {
+            let key = crate::services::radio::normalize_for_dedup(&album.artist, &album.title);
+            if key.is_empty() || !seen.insert(key) {
+                continue;
+            }
+            out.push(
+                resolve_recommendation_album_item(
+                    state,
+                    "lastfm",
+                    &album.artist,
+                    &album.title,
+                    album.mbid.as_deref(),
+                    artist
+                        .match_score
+                        .or_else(|| album.playcount.map(|count| count as f64)),
+                    &seed.reason,
+                    album.image_url.as_deref(),
+                )
+                .await,
+            );
+            if out.len() >= LASTFM_HOME_ALBUM_LIMIT {
+                return Ok(out);
             }
         }
     }
@@ -1862,16 +2084,19 @@ mod tests {
         // expired, which is what "only a few tracks" looked like.
         let short: Vec<Value> = (0..4).map(|i| json!({ "i": i })).collect();
         assert_eq!(
-            recommendation_cache_ttl(&short),
+            recommendation_cache_ttl(&short, true),
             RECOMMENDATION_SHORT_TTL_SECS
         );
-        assert_eq!(recommendation_cache_ttl(&[]), RECOMMENDATION_SHORT_TTL_SECS);
+        assert_eq!(
+            recommendation_cache_ttl(&[], true),
+            RECOMMENDATION_SHORT_TTL_SECS
+        );
 
         let healthy: Vec<Value> = (0..LASTFM_HOME_RECOMMENDATION_LIMIT)
             .map(|i| json!({ "i": i }))
             .collect();
         assert_eq!(
-            recommendation_cache_ttl(&healthy),
+            recommendation_cache_ttl(&healthy, true),
             RECOMMENDATION_FULL_TTL_SECS
         );
 
@@ -1880,8 +2105,69 @@ mod tests {
             .map(|i| json!({ "i": i }))
             .collect();
         assert_eq!(
-            recommendation_cache_ttl(&floor),
+            recommendation_cache_ttl(&floor, true),
             RECOMMENDATION_FULL_TTL_SECS
+        );
+    }
+
+    #[test]
+    fn a_partial_publish_never_earns_the_long_lease() {
+        // The rebuild publishes after each shelf so Home fills in progressively,
+        // and the track shelf alone clears the healthy floor. Without the
+        // completeness gate a build that died after its first publish would pin
+        // a tracks-only Home for six hours.
+        let full_shelf: Vec<Value> = (0..LASTFM_HOME_RECOMMENDATION_LIMIT)
+            .map(|i| json!({ "i": i }))
+            .collect();
+        assert!(full_shelf.len() >= RECOMMENDATION_HEALTHY_FLOOR);
+        assert_eq!(
+            recommendation_cache_ttl(&full_shelf, false),
+            RECOMMENDATION_SHORT_TTL_SECS
+        );
+        assert_eq!(
+            recommendation_cache_ttl(&full_shelf, true),
+            RECOMMENDATION_FULL_TTL_SECS
+        );
+    }
+
+    #[test]
+    fn an_empty_shelf_still_building_is_warming_not_empty() {
+        // Shelves publish one at a time, so the artist and album rails are
+        // legitimately empty for a few seconds while the track mural is already
+        // painted. Reporting those as "empty" would make the client render "no
+        // recommendations yet" over a build seconds from filling them.
+        assert_eq!(recommendation_shelf_status(0, true), "warming");
+        assert_eq!(recommendation_shelf_status(0, false), "empty");
+        // Items always win: a stale shelf being refreshed behind the scenes is
+        // still a shelf worth painting.
+        assert_eq!(recommendation_shelf_status(20, true), "ok");
+        assert_eq!(recommendation_shelf_status(20, false), "ok");
+    }
+
+    #[test]
+    fn only_one_rebuild_per_provider_runs_at_a_time() {
+        // A user's response to a slow cold start is to force refresh. Without
+        // the claim that would launch a second full fan-out on top of the first.
+        let first = claim_rebuild("test-provider").expect("first claim wins");
+        assert!(
+            claim_rebuild("test-provider").is_none(),
+            "a second rebuild for the same provider must not start"
+        );
+        // The claim, not the cache lease, is what says a build is still running.
+        // A partial publish writes a perfectly fresh short lease while the
+        // remaining shelves are still being built, so asking the lease reported
+        // those shelves as empty rather than warming.
+        assert!(rebuild_running("test-provider"));
+        assert!(!rebuild_running("test-never-claimed"));
+        // A different provider is unaffected.
+        let other = claim_rebuild("test-other").expect("other provider is independent");
+        drop(other);
+
+        drop(first);
+        assert!(!rebuild_running("test-provider"));
+        assert!(
+            claim_rebuild("test-provider").is_some(),
+            "the claim must be released when the rebuild ends"
         );
     }
 

@@ -2064,7 +2064,13 @@ export interface ProviderRecommendationShelf {
 	provider: 'lastfm' | 'listenbrainz' | string;
 	entity_type?: 'track' | 'artist' | 'album' | string;
 	title: string;
-	status: 'ok' | 'empty' | 'error' | string;
+	/**
+	 * `warming` means the shelf is empty *right now* but a rebuild is running
+	 * behind it. Shelves publish one at a time, so the artist and album rails
+	 * report this for a few seconds while the track mural is already painted.
+	 * Never render an empty state for it - keep whatever is on screen.
+	 */
+	status: 'ok' | 'empty' | 'error' | 'warming' | string;
 	message?: string;
 	items: ProviderRecommendationItem[];
 }
