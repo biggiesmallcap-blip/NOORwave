@@ -40,13 +40,13 @@
 		toggleTrackFavorite,
 		toggleMute,
 		moveQueueItem,
-		reorderDropIndex,
 		clearQueue as clearQueueAction,
 		restoreQueueItems,
 		saveQueueAsPlaylist,
 		playTidalTrackNow
 	} from '$lib/stores/player';
 	import { get } from 'svelte/store';
+	import { createDragReorder } from '$lib/actions/drag_reorder';
 	import type { QueueItem, TidalPlayable, Track } from '$lib/api/client';
 	import { showToast } from '$lib/stores/toast';
 	import { queueAnnouncement } from '$lib/stores/queue_announcer';
@@ -785,59 +785,20 @@
 	}
 
 	// ─── Queue drag-to-reorder ────────────────────────────────────────────────
-	let dragItemId = $state<number | null>(null);
-	let dragOverItemId = $state<number | null>(null);
-
-	function handleQueueDragStart(event: DragEvent, item: QueueItemType) {
-		if (item.is_pending === true) return;
-		dragItemId = item.id;
-		if (event.dataTransfer) {
-			event.dataTransfer.effectAllowed = 'move';
-			// Required for Firefox to actually start a drag.
-			event.dataTransfer.setData('text/plain', String(item.id));
-			// Drag the whole row as the ghost (not the bare grip glyph) so the
-			// preview reads as "moving this track", aligned under the cursor.
-			const row = event.currentTarget;
-			if (row instanceof HTMLElement && typeof event.dataTransfer.setDragImage === 'function') {
-				const rect = row.getBoundingClientRect();
-				event.dataTransfer.setDragImage(row, event.clientX - rect.left, event.clientY - rect.top);
-			}
-		}
-	}
-
-	function handleQueueDragOver(event: DragEvent, item: QueueItemType) {
-		if (dragItemId === null) return;
-		event.preventDefault();
-		if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
-		dragOverItemId = item.id;
-	}
-
-	function handleQueueDragLeave(item: QueueItemType) {
-		if (dragOverItemId === item.id) dragOverItemId = null;
-	}
-
-	async function handleQueueDrop(event: DragEvent, target: QueueItemType) {
-		event.preventDefault();
-		const sourceId = dragItemId;
-		dragItemId = null;
-		dragOverItemId = null;
-		if (sourceId === null || sourceId === target.id) return;
-		const fullQueue = $playbackQueue;
-		const targetIndex = fullQueue.findIndex((q) => q.id === target.id);
-		if (targetIndex === -1) return;
-		// moveQueueItem (and the server) interpret the index AFTER the dragged row
-		// is spliced out. For a downward drag (source sits above the target),
-		// removing the source shifts the target up one slot, so reorderDropIndex
-		// subtracts one to land ON the target's top edge (the "drops here"
-		// indicator) instead of one row below it. Upward drags keep the index.
-		const sourceIndex = fullQueue.findIndex((q) => q.id === sourceId);
-		await moveQueueItem(sourceId, reorderDropIndex(sourceIndex, targetIndex));
-	}
-
-	function handleQueueDragEnd() {
-		dragItemId = null;
-		dragOverItemId = null;
-	}
+	// The index math and the dragstart/Firefox details live in the shared
+	// `dragReorder` action; playlists reorder through the same code.
+	const queueDrag = createDragReorder({
+		indexOf: (id) => get(playbackQueue).findIndex((q) => q.id === id),
+		length: () => get(playbackQueue).length,
+		canDrag: (id) => get(playbackQueue).find((q) => q.id === id)?.is_pending !== true,
+		onDrop: (id, toIndex) => moveQueueItem(id, toIndex),
+		// The queue keeps its own Alt+Arrow handling in `handleQueueTrackKeydown`:
+		// it also refuses to move a row above the play head, and binds
+		// Alt+Shift+Up to "move next", neither of which the generic action knows
+		// about. Letting both run would move the row twice per keypress.
+		keyboardReorder: false,
+	});
+	const queueDragState = queueDrag.state;
 
 	// ─── Scroll active queue row into view ───────────────────────────────────
 	let lastUserScrollAt = $state(0);
@@ -1591,19 +1552,16 @@
 						<div
 							role="listitem"
 							class:active={isQueueItemActive(item, $currentTrack, $currentQueueItemId, upcomingQueue)}
-							class:dragging={dragItemId === item.id}
-							class:drag-over={dragOverItemId === item.id && dragItemId !== item.id}
+							class:dragging={$queueDragState.draggingId === item.id}
+							class:drag-over={$queueDragState.dragOverId === item.id &&
+								$queueDragState.draggingId !== item.id}
 							class:pending={isPending}
 							class="queue-row"
 							title={isPending ? 'Resolving on TIDAL...' : undefined}
 							data-track-id={item.track.id}
 							draggable={!isPending}
 							oncontextmenu={(event) => openQueueRowMenu(item, event)}
-							ondragstart={(event) => handleQueueDragStart(event, item)}
-							ondragover={(event) => handleQueueDragOver(event, item)}
-							ondragleave={() => handleQueueDragLeave(item)}
-							ondrop={(event) => void handleQueueDrop(event, item)}
-							ondragend={handleQueueDragEnd}
+							use:queueDrag.row={item.id}
 						>
 							<!-- Full-bleed hit target: clicking anywhere on the row that
 							     isn't an interactive child plays/jumps to this track. This is a

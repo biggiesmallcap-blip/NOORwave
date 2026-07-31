@@ -88,7 +88,7 @@
 <svelte:head><title>{title || 'Mood'} . NOOR</title></svelte:head>
 
 <div class="page">
-  <button class="back-link" type="button" onclick={() => goBack('/moods')}>&lt; Back</button>
+  <button class="back-link" type="button" onclick={() => goBack('/moods')}>Back</button>
   <header class="page-header">
     <p class="eyebrow">TIDAL mood</p>
     <h1>{title || '...'}</h1>

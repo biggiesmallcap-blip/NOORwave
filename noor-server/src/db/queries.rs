@@ -1518,6 +1518,176 @@ pub fn toggle_playlist_favorite(conn: &Connection, playlist_id: i64) -> Result<P
     get_playlist(conn, playlist_id)?.ok_or_else(|| anyhow::anyhow!("playlist not found"))
 }
 
+/// Create a regular (non-smart, non-synced) playlist.
+///
+/// `is_synced = 0` because a locally created list has no TIDAL counterpart to
+/// sync against. Three call sites used to inline this INSERT; they all come
+/// through here now so the column defaults stay in one place.
+pub fn create_playlist(
+    conn: &Connection,
+    name: &str,
+    description: Option<&str>,
+) -> Result<Playlist> {
+    conn.execute(
+        "INSERT INTO playlists (name, description, is_smart, is_synced, track_count)
+         VALUES (?1, ?2, 0, 0, 0)",
+        params![name, description],
+    )?;
+    let playlist_id = conn.last_insert_rowid();
+    get_playlist(conn, playlist_id)?
+        .ok_or_else(|| anyhow::anyhow!("playlist not found after insert"))
+}
+
+/// Rename a playlist and/or replace its description. Works on regular, smart,
+/// and TIDAL-mirrored rows alike - unlike `update_smart_playlist`, which is
+/// gated on `is_smart = 1` in SQL and so cannot touch a regular playlist.
+pub fn rename_playlist(
+    conn: &Connection,
+    playlist_id: i64,
+    name: &str,
+    description: Option<&str>,
+) -> Result<Playlist> {
+    let changed = conn.execute(
+        "UPDATE playlists SET name = ?2, description = ?3, updated_at = datetime('now')
+         WHERE id = ?1",
+        params![playlist_id, name, description],
+    )?;
+    if changed == 0 {
+        anyhow::bail!("playlist not found");
+    }
+    get_playlist(conn, playlist_id)?.ok_or_else(|| anyhow::anyhow!("playlist not found"))
+}
+
+/// Delete any playlist. `playlist_tracks` rows go with it via ON DELETE CASCADE.
+pub fn delete_playlist(conn: &Connection, playlist_id: i64) -> Result<()> {
+    let deleted = conn.execute("DELETE FROM playlists WHERE id = ?1", params![playlist_id])?;
+    if deleted == 0 {
+        anyhow::bail!("playlist not found");
+    }
+    Ok(())
+}
+
+/// Recompute `track_count` from `playlist_tracks` and bump `updated_at`.
+///
+/// Every content mutation ends with this. Deliberately NOT called by
+/// `toggle_playlist_favorite`: favouriting is not a content change and should
+/// not reshuffle the "Last updated" sort.
+pub fn touch_playlist(conn: &Connection, playlist_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE playlists SET track_count = (
+            SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id = ?1
+         ),
+         updated_at = datetime('now')
+         WHERE id = ?1",
+        params![playlist_id],
+    )?;
+    Ok(())
+}
+
+/// The playlist's track ids in position order. Positions may have gaps; this
+/// returns the sequence, not the positions.
+fn playlist_track_order(conn: &Connection, playlist_id: i64) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT track_id FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY position ASC",
+    )?;
+    let ids = stmt
+        .query_map(params![playlist_id], |row| row.get(0))?
+        .collect::<Result<Vec<i64>, _>>()?;
+    Ok(ids)
+}
+
+/// Rewrite a playlist's rows to exactly `ordered_track_ids`, at positions
+/// `0..n-1`.
+///
+/// `playlist_tracks` has `PRIMARY KEY (playlist_id, position)`, so the obvious
+/// "shift a range of positions by one" UPDATE can transiently collide with a
+/// row that has not moved yet, and SQLite has no ORDER BY on UPDATE to control
+/// the order rows are visited in. Deleting the whole playlist's rows and
+/// re-inserting in order sidesteps that entirely, and is cheap at the scale a
+/// playlist actually reaches. Callers must already be inside a transaction.
+///
+/// Duplicate track ids are preserved: the schema permits the same track at two
+/// positions, so de-duplicating here would silently drop rows.
+fn rewrite_playlist_positions(
+    conn: &Connection,
+    playlist_id: i64,
+    ordered_track_ids: &[i64],
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
+        params![playlist_id],
+    )?;
+    let mut stmt = conn.prepare(
+        "INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
+    )?;
+    for (index, &track_id) in ordered_track_ids.iter().enumerate() {
+        stmt.execute(params![playlist_id, track_id, index as i64])?;
+    }
+    Ok(())
+}
+
+/// Remove the rows at `positions` and close the resulting gaps.
+///
+/// Takes positions rather than track ids because the schema allows the same
+/// track twice; a track id would be ambiguous about which copy to drop.
+/// Positions that do not exist are ignored. Returns the number removed.
+pub fn remove_playlist_positions(
+    conn: &Connection,
+    playlist_id: i64,
+    positions: &[i64],
+) -> Result<usize> {
+    if positions.is_empty() {
+        return Ok(0);
+    }
+    let tx = conn.unchecked_transaction()?;
+    let doomed: std::collections::HashSet<i64> = positions.iter().copied().collect();
+
+    let rows = {
+        let mut stmt = tx.prepare(
+            "SELECT position, track_id FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY position ASC",
+        )?;
+        stmt.query_map(params![playlist_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .collect::<Result<Vec<(i64, i64)>, _>>()?
+    };
+
+    let kept: Vec<i64> = rows
+        .iter()
+        .filter(|(position, _)| !doomed.contains(position))
+        .map(|(_, track_id)| *track_id)
+        .collect();
+    let removed = rows.len() - kept.len();
+    if removed == 0 {
+        return Ok(0);
+    }
+
+    rewrite_playlist_positions(&tx, playlist_id, &kept)?;
+    touch_playlist(&tx, playlist_id)?;
+    tx.commit()?;
+    Ok(removed)
+}
+
+/// Move the row at `from` to index `to`, where `to` is measured AFTER the moved
+/// row has been lifted out - the same convention the queue's move endpoint and
+/// the frontend's `reorderDropIndex` use. Out-of-range indices are clamped.
+pub fn move_playlist_track(conn: &Connection, playlist_id: i64, from: i64, to: i64) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let mut order = playlist_track_order(&tx, playlist_id)?;
+    let len = order.len() as i64;
+    if from < 0 || from >= len {
+        anyhow::bail!("playlist position out of range");
+    }
+    let track_id = order.remove(from as usize);
+    let target = to.clamp(0, order.len() as i64) as usize;
+    order.insert(target, track_id);
+
+    rewrite_playlist_positions(&tx, playlist_id, &order)?;
+    touch_playlist(&tx, playlist_id)?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Bulk-insert tracks into a playlist, skipping any already present.
 /// Returns the number of tracks actually inserted.
 pub fn add_tracks_to_playlist(
@@ -1566,14 +1736,7 @@ pub fn add_tracks_to_playlist(
 
     // Keep track_count in sync and bump updated_at so "Recently updated"
     // sorts reflect content changes, not just smart-rule edits.
-    conn.execute(
-        "UPDATE playlists SET track_count = (
-            SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id = ?1
-         ),
-         updated_at = datetime('now')
-         WHERE id = ?1",
-        params![playlist_id],
-    )?;
+    touch_playlist(conn, playlist_id)?;
 
     Ok(to_insert.len())
 }

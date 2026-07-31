@@ -52,6 +52,15 @@ export interface BuildTrackMenuOptions {
 	 * so navigation stays inside the mobile shell.
 	 */
 	remoteRoutes?: boolean;
+	/**
+	 * Set when the row is inside a playlist, to offer "Remove from playlist".
+	 * The caller owns the removal because only it knows the row's position, and
+	 * position is what identifies a playlist entry - the same track can appear
+	 * twice.
+	 */
+	onRemoveFromPlaylist?: () => void;
+	/** Submenu of playlists to add this track to. See `playlist_menu.ts`. */
+	addToPlaylistSubmenu?: MenuItem[];
 }
 
 export interface BuildTidalTrackMenuOptions {
@@ -204,12 +213,29 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 
 	items.push(favouriteMenuItem(track.id, track.is_favorite ?? false));
 
+	if (options.addToPlaylistSubmenu && options.addToPlaylistSubmenu.length > 0) {
+		items.push({
+			label: 'Add to playlist',
+			icon: '＋',
+			submenu: options.addToPlaylistSubmenu
+		});
+	}
+
 	if (!options.remoteRoutes) {
 		items.push(downloadMenuItem((format) => void downloadTrack(track.id, format)));
 	}
 
 	if (options.queueItemId != null) {
 		items.push(removeFromQueueMenuItem(options.queueItemId, options.onRemoved));
+	}
+
+	if (options.onRemoveFromPlaylist) {
+		items.push({
+			label: 'Remove from playlist',
+			icon: '×',
+			danger: true,
+			onSelect: options.onRemoveFromPlaylist
+		});
 	}
 
 	return items;

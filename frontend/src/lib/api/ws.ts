@@ -18,6 +18,7 @@ export type WsMessage =
 	| { type: 'playback_changed' }
 	| { type: 'track_changed'; track_id: number }
 	| { type: 'queue_updated' }
+	| { type: 'playlists_changed' }
 	| { type: 'listen_history_updated'; track_id: number }
 	| { type: 'playback_failed'; message: string }
 	| { type: 'track_skipped'; track_id: number; title: string; reason: string }
@@ -84,8 +85,12 @@ export function connectWebSocket() {
 				setAudioSpectrum(data.bands ?? []);
 				return;
 			}
-			wsMessages.update((msgs) => [...msgs.slice(-99), data]);
+			// Invalidate BEFORE publishing to `wsMessages`. Subscribers run
+			// synchronously inside `update()`, and pages react to a message by
+			// re-reading through `cachedApi` - if the cache were still valid at that
+			// point they would read back exactly the data the event says is stale.
 			applyCacheUpdateForWsMessage(data);
+			wsMessages.update((msgs) => [...msgs.slice(-99), data]);
 			if (data?.type === 'queue_updated') {
 				scheduleQueueRefresh();
 			} else if (

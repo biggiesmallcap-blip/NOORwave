@@ -2590,6 +2590,63 @@ export const api = {
 		});
 	},
 
+	/** Create a regular playlist. Local-only: no counterpart is made on TIDAL. */
+	createPlaylist(name: string, description: string | null = null) {
+		return fetchApi<{ playlist: Playlist }>('/api/playlists', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ name, description }),
+		});
+	},
+
+	/**
+	 * Rename a playlist and/or replace its description. For a TIDAL-mirrored
+	 * playlist the server writes to TIDAL first, so a 409 here means the
+	 * playlist changed remotely and the caller should refresh.
+	 */
+	updatePlaylist(id: number, name: string, description: string | null = null) {
+		return fetchApi<{ playlist: Playlist }>(`/api/playlists/${id}`, undefined, {
+			method: 'PATCH',
+			body: JSON.stringify({ name, description }),
+		});
+	},
+
+	/** Delete any playlist. TIDAL-mirrored ones are deleted on TIDAL too. */
+	deletePlaylist(id: number) {
+		return fetchApi<{ deleted: boolean }>(`/api/playlists/${id}`, undefined, {
+			method: 'DELETE',
+		});
+	},
+
+	/**
+	 * Remove tracks by zero-based position, not by track id: a playlist may hold
+	 * the same track twice, so an id would not say which copy to drop.
+	 */
+	removePlaylistTracks(id: number, positions: number[]) {
+		return fetchApi<{ removed: number }>(`/api/playlists/${id}/tracks`, undefined, {
+			method: 'DELETE',
+			body: JSON.stringify({ positions }),
+		});
+	},
+
+	/**
+	 * Move a track within a playlist. `to` is the destination index measured
+	 * after the moved row is lifted out - use `reorderDropIndex` to convert a
+	 * drop target into it.
+	 */
+	movePlaylistTrack(id: number, from: number, to: number) {
+		return fetchApi<{ tracks: Track[] }>(`/api/playlists/${id}/tracks/move`, undefined, {
+			method: 'POST',
+			body: JSON.stringify({ from, to }),
+		});
+	},
+
+	/** Re-pull one TIDAL playlist's tracks now, without waiting for a sync. */
+	refreshPlaylistFromTidal(id: number) {
+		return fetchApi<{ tracks: number }>(`/api/playlists/${id}/refresh`, undefined, {
+			method: 'POST',
+		});
+	},
+
 	getPlaylistCoverSample(id: number, signal?: AbortSignal) {
 		return fetchApi<{ urls: string[] }>(
 			`/api/playlists/${id}/cover-sample`,

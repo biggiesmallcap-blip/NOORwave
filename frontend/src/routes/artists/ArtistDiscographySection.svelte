@@ -176,7 +176,7 @@
 </script>
 
 <div class="discography-page">
-	<button class="back-link" type="button" onclick={() => goBack(artistHref)}>← Back</button>
+	<button class="back-link" type="button" onclick={() => goBack(artistHref)}>Back</button>
 
 	{#if loading}
 		<Skeleton rows={5} label="Loading discography" />

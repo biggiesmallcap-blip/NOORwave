@@ -14,9 +14,14 @@
 		type SampleDataSource,
 	} from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
+	import { invalidatePlaylistCaches } from '$lib/cache/ws_events';
+	import { wsMessages } from '$lib/api/ws';
+	import { get } from 'svelte/store';
+	import { goto } from '$app/navigation';
+	import { createPersistedStore, oneOf } from '$lib/stores/persisted';
+	import { buildPlaylistMenu } from '$lib/player/playlist_menu';
+	import { downloadPlaylist } from '$lib/stores/downloads';
 	import {
-		currentTrack,
-		isPlaying,
 		playTracksInContext,
 		shufflePlaylist,
 		startPlaylistRadio,
@@ -24,9 +29,7 @@
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
-	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
-	import TrackRow from '$lib/components/TrackRow.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import type { MenuItem } from '$lib/stores/context_menu';
 	import {
@@ -70,6 +73,23 @@
 
 	type PlaylistFilter = 'all' | 'favorites' | 'smart' | 'regular';
 	type PlaylistSort = 'default' | 'name' | 'tracks' | 'type' | 'recent_update' | 'recent_create';
+
+	const PLAYLIST_FILTERS = ['all', 'favorites', 'smart', 'regular'] as const;
+	const PLAYLIST_SORTS = [
+		'default',
+		'name',
+		'tracks',
+		'type',
+		'recent_update',
+		'recent_create',
+	] as const;
+
+	const persistedFilter = createPersistedStore<PlaylistFilter>('playlists.filter', 'all', {
+		parse: oneOf(PLAYLIST_FILTERS),
+	});
+	const persistedSort = createPersistedStore<PlaylistSort>('playlists.sort', 'recent_update', {
+		parse: oneOf(PLAYLIST_SORTS),
+	});
 
 	let _draftIdCounter = 0;
 	function newDraftId() {
@@ -182,15 +202,19 @@
 
 	// ─── Page state ───────────────────────────────────────────────────────────
 	let playlists = $state<Playlist[]>([]);
-	let expandedPlaylistIds = $state<Set<number>>(new Set());
 	let playlistTracksById = $state<Record<number, Track[]>>({});
-	let loadingById = $state<Record<number, boolean>>({});
-	let errorById = $state<Record<number, string | null>>({});
 	let isLoading = $state(true);
 	let loadError = $state('');
 	let playlistQuery = $state('');
-	let playlistFilter = $state<PlaylistFilter>('all');
-	let playlistSort = $state<PlaylistSort>('default');
+	// Sort and filter persist across sessions, not just per history entry: a
+	// SvelteKit snapshot only restores on back/forward, so the user's choice
+	// reset every time they arrived here fresh. Defaults to "Recently updated"
+	// because that is the order that answers "what changed?", which is what a
+	// playlist list is usually being opened for.
+	let playlistFilter = $state<PlaylistFilter>(get(persistedFilter));
+	let playlistSort = $state<PlaylistSort>(get(persistedSort));
+	$effect(() => persistedFilter.set(playlistFilter));
+	$effect(() => persistedSort.set(playlistSort));
 	let playlistLoadSeq = 0;
 	let destroyed = false;
 
@@ -206,25 +230,22 @@
 	// of firing the destructive call on the first click.
 	let pendingDeleteId = $state<number | null>(null);
 
-	// Phase 5B - back/forward state via SvelteKit snapshot.
+	// Phase 5B - back/forward state via SvelteKit snapshot. Sort and filter stay
+	// here as well as in localStorage: the snapshot restores what was on screen
+	// for this specific history entry, localStorage is the fresh-load default.
 	export const snapshot: Snapshot<{
-		expandedIds: number[];
 		scrollY: number;
 		query?: string;
 		filter?: PlaylistFilter;
 		sort?: PlaylistSort;
 	}> = {
 		capture: () => ({
-			expandedIds: [...expandedPlaylistIds],
 			scrollY: captureScroll(),
 			query: playlistQuery,
 			filter: playlistFilter,
 			sort: playlistSort,
 		}),
 		restore: (saved) => {
-			if (Array.isArray(saved.expandedIds)) {
-				expandedPlaylistIds = new Set(saved.expandedIds);
-			}
 			if (typeof saved.query === 'string') playlistQuery = saved.query;
 			if (saved.filter) playlistFilter = saved.filter;
 			if (saved.sort) playlistSort = saved.sort;
@@ -317,6 +338,14 @@
 	onMount(() => {
 		mosaicById = { ...mosaicById, ...mapMosaicsFromCache(snapshotCache()) };
 		void loadPlaylists();
+		// A playlist can be created while this page is already open - saving the
+		// queue from the layout's queue panel is the common case. Cache
+		// invalidation alone would not repaint, because loadPlaylists() only runs
+		// on mount, so react to the server event too.
+		const unsubscribeWs = wsMessages.subscribe((messages) => {
+			if (messages.at(-1)?.type === 'playlists_changed') void loadPlaylists();
+		});
+		return unsubscribeWs;
 	});
 
 	onDestroy(() => {
@@ -343,7 +372,11 @@
 	// ─── Data loading ─────────────────────────────────────────────────────────
 	async function loadPlaylists() {
 		const seq = ++playlistLoadSeq;
-		isLoading = true;
+		// Only the first load is allowed to show a loading state. Every later call
+		// is a background refresh driven by a `playlists_changed` event, and
+		// blanking a populated list to "Loading playlists" on each one made a
+		// simple rename flash the whole page away.
+		if (playlists.length === 0) isLoading = true;
 		loadError = '';
 		try {
 			const data = await cachedApi.getPlaylists();
@@ -371,49 +404,31 @@
 		mosaicById = { ...mosaicById, [id]: urls };
 	}
 
-	function isExpanded(id: number) {
-		return expandedPlaylistIds.has(id);
-	}
-
-	async function expandPlaylist(id: number) {
+	/**
+	 * Tracks for a playlist, fetched once and kept for the session.
+	 *
+	 * Only the row's quick actions (play / shuffle / radio) and the cover mosaic
+	 * need these now - browsing a playlist's contents happens on
+	 * `/playlists/[id]`. Smart playlists resolve through the evaluate endpoint
+	 * because their contents are computed, not stored.
+	 */
+	async function ensurePlaylistTracks(id: number): Promise<Track[]> {
+		const cached = playlistTracksById[id];
+		if (cached) return cached;
 		const playlist = playlists.find((p) => p.id === id);
-		const next = new Set(expandedPlaylistIds);
-		const opening = !next.has(id);
-		if (opening) next.add(id);
-		else { next.delete(id); expandedPlaylistIds = next; return; }
-		expandedPlaylistIds = next;
-
-		if (playlistTracksById[id] || loadingById[id]) return;
-		loadingById = { ...loadingById, [id]: true };
-		errorById = { ...errorById, [id]: null };
 		try {
 			const data = playlist?.is_smart
 				? await cachedApi.evaluateSmartPlaylist(id)
 				: await cachedApi.getPlaylistTracks(id);
-			if (destroyed) return;
+			if (destroyed) return [];
 			playlistTracksById = { ...playlistTracksById, [id]: data.tracks };
 			if (playlist) recordMosaic(id, data.tracks, playlist.track_count);
+			return data.tracks;
 		} catch (error) {
-			if (destroyed) return;
-			errorById = { ...errorById, [id]: `Failed to load tracks: ${error}` };
-			playlistTracksById = { ...playlistTracksById, [id]: [] };
-		} finally {
-			if (!destroyed) loadingById = { ...loadingById, [id]: false };
+			if (destroyed) return [];
+			deleteError = `Failed to load tracks: ${error}`;
+			return [];
 		}
-	}
-
-	// Clicking a row plays it in the context of its playlist: the playlist's
-	// tracks become the queue, starting at the clicked track (TIDAL / Spotify
-	// behavior) rather than playing a single orphan track.
-	async function playTrackInPlaylist(tracks: { id: number }[], trackId: number) {
-		await playTracksInContext(tracks.map((t) => t.id), trackId);
-	}
-
-	async function ensurePlaylistTracks(id: number) {
-		if (!playlistTracksById[id] && !loadingById[id]) {
-			await expandPlaylist(id);
-		}
-		return playlistTracksById[id] ?? [];
 	}
 
 	async function playPlaylistQuick(playlist: Playlist, e: MouseEvent) {
@@ -435,13 +450,6 @@
 		await startPlaylistRadio(tracks);
 	}
 
-	function activatePlaylist(playlistId: number, e: KeyboardEvent) {
-		if (e.key !== 'Enter' && e.key !== ' ') return;
-		if (e.target !== e.currentTarget) return;
-		e.preventDefault();
-		void expandPlaylist(playlistId);
-	}
-
 	async function togglePlaylistFavorite(playlist: Playlist, e: MouseEvent) {
 		e.stopPropagation();
 		// Optimistic flip - revert if the server disagrees.
@@ -449,6 +457,7 @@
 		playlists = playlists.map((p) => (p.id === playlist.id ? optimistic : p));
 		try {
 			const updated = await api.togglePlaylistFavorite(playlist.id);
+			invalidatePlaylistCaches();
 			playlists = playlists.map((p) => (p.id === playlist.id ? updated.playlist : p));
 		} catch {
 			playlists = playlists.map((p) => (p.id === playlist.id ? playlist : p));
@@ -477,37 +486,44 @@
 		const point = rect
 			? { clientX: rect.right, clientY: rect.bottom + 4 }
 			: { clientX: event.clientX, clientY: event.clientY };
-		openContextMenu(point, buildPlaylistMenu(playlist), playlist.name);
+		openContextMenu(point, playlistMenuItems(playlist), playlist.name);
 	}
 
-	function buildPlaylistMenu(playlist: Playlist): MenuItem[] {
-		const items: MenuItem[] = [
-			{ label: 'Play', icon: 'P', onSelect: () => void playPlaylistFromMenu(playlist) },
-			{ label: 'Shuffle', icon: 'X', onSelect: () => void shufflePlaylistFromMenu(playlist) },
-			{ label: 'Radio', icon: 'R', onSelect: () => void radioFromMenu(playlist) },
-			{ separator: true, label: '' },
-			{
-				label: playlist.is_favorite ? 'Remove from favourites' : 'Add to favourites',
-				icon: playlist.is_favorite ? 'F' : 'f',
-				onSelect: () => {
-					// Synthesize a fake MouseEvent shape; togglePlaylistFavorite
-					// only uses stopPropagation, which we no-op here.
-					void togglePlaylistFavorite(playlist, { stopPropagation: () => {} } as MouseEvent);
-				},
+	/**
+	 * Built from the shared builder so this menu, the detail page's, and
+	 * search's stay in step. The old inline version offered Delete only for
+	 * smart playlists, because a regular one had no delete route to call.
+	 */
+	function playlistMenuItems(playlist: Playlist): MenuItem[] {
+		return buildPlaylistMenu(playlist, {
+			onPlay: () => void playPlaylistFromMenu(playlist),
+			onShuffle: () => void shufflePlaylistFromMenu(playlist),
+			onRadio: () => void radioFromMenu(playlist),
+			onOpen: () => void goto(`/playlists/${playlist.id}`),
+			onToggleFavorite: () => {
+				// Synthesize a MouseEvent shape; togglePlaylistFavorite only calls
+				// stopPropagation, which we no-op here.
+				void togglePlaylistFavorite(playlist, { stopPropagation: () => {} } as MouseEvent);
 			},
-		];
-		if (playlist.is_smart) {
-			items.push({ separator: true, label: '' });
-			items.push({ label: 'Edit rules', icon: 'E', onSelect: () => openEdit(playlist) });
-			items.push({ label: 'Duplicate', icon: 'D', onSelect: () => void duplicatePlaylist(playlist) });
-			items.push({
-				label: 'Delete',
-				icon: 'x',
-				danger: true,
-				onSelect: () => requestDelete(playlist.id),
-			});
+			onDownload: () => void downloadPlaylist(playlist.id),
+			onRefreshFromTidal: () => void refreshPlaylistFromTidal(playlist),
+			onEditRules: playlist.is_smart ? () => openEdit(playlist) : undefined,
+			onDuplicate: playlist.is_smart ? () => void duplicatePlaylist(playlist) : undefined,
+			onDelete: () => requestDelete(playlist.id),
+		});
+	}
+
+	async function refreshPlaylistFromTidal(playlist: Playlist) {
+		try {
+			await api.refreshPlaylistFromTidal(playlist.id);
+			invalidatePlaylistCaches();
+			// Drop the cached tracks too so the quick actions and mosaic re-read.
+			const { [playlist.id]: _stale, ...rest } = playlistTracksById;
+			playlistTracksById = rest;
+			await loadPlaylists();
+		} catch (error) {
+			deleteError = `Could not refresh from TIDAL: ${error}`;
 		}
-		return items;
 	}
 
 	async function playPlaylistFromMenu(playlist: Playlist) {
@@ -855,6 +871,7 @@
 				const { [editingPlaylistId]: _removed, ...rest } = playlistTracksById;
 				playlistTracksById = rest;
 			}
+			invalidatePlaylistCaches();
 			closeEditor(true);
 		} catch (e) {
 			editorError = String(e);
@@ -876,9 +893,12 @@
 		deletingId = id;
 		deleteError = '';
 		try {
-			await api.deleteSmartPlaylist(id);
+			// The generic route, not deleteSmartPlaylist: this now deletes regular
+			// and TIDAL-mirrored playlists too, and the server pushes the delete
+			// to TIDAL first so the next sync does not bring it back.
+			await api.deletePlaylist(id);
+			invalidatePlaylistCaches();
 			playlists = playlists.filter((p) => p.id !== id);
-			expandedPlaylistIds = new Set([...expandedPlaylistIds].filter((x) => x !== id));
 			pendingDeleteId = null;
 		} catch (e) {
 			deleteError = String(e);
@@ -898,6 +918,7 @@
 				playlist.description ?? null,
 				root
 			);
+			invalidatePlaylistCaches();
 			playlists = [...playlists, result.playlist];
 			indexPlaylistSearch(result.playlist);
 		} catch {
@@ -980,13 +1001,6 @@
 			case 'has_sample_data': return [`Sample data: ${clause.source ?? 'any source'}`];
 			default: return [`Unknown rule: ${clause.type}`];
 		}
-	}
-
-	function playlistSubtitle(playlist: Playlist): string {
-		const desc = playlist.description?.trim();
-		if (desc) return desc;
-		if (!playlist.is_smart) return 'Synced playlist.';
-		return 'Smart playlist';
 	}
 
 	function smartSummaryLines(playlist: Playlist): string[] {
@@ -1237,7 +1251,7 @@
 
 	{#if loadError}
 		<EmptyState title="Playlists could not load" copy={loadError} />
-	{:else if isLoading}
+	{:else if isLoading && playlists.length === 0}
 		<EmptyState title="Loading playlists" copy="Pulling synced and smart playlists." />
 	{:else if playlists.length > 0 && filteredPlaylists.length === 0}
 		<EmptyState title="No playlists match" copy="Try a different search, filter, or sort mode.">
@@ -1246,139 +1260,89 @@
 			{/snippet}
 		</EmptyState>
 	{:else if playlists.length > 0}
-		<div class="playlist-grid">
+		<div class="playlist-list">
 			{#each filteredPlaylists as playlist (playlist.id)}
 				{@const mosaic = mosaicById[playlist.id] ?? []}
-				<section class="playlist-card glass-panel">
-					<div
-						class="playlist-card-top"
-						role="button"
-						tabindex="0"
-						aria-expanded={isExpanded(playlist.id)}
-						aria-controls={`pl-body-${playlist.id}`}
-						onclick={() => void expandPlaylist(playlist.id)}
-						onkeydown={(e) => activatePlaylist(playlist.id, e)}
+				<div class="playlist-row" use:registerCard={playlist.id}>
+					<a
+						class="playlist-hit"
+						href={`/playlists/${playlist.id}`}
 						oncontextmenu={(e) => openPlaylistContextMenu(playlist, e)}
-						use:registerCard={playlist.id}
 					>
 						<div
 							class="playlist-cover"
 							class:has-mosaic={mosaic.length >= 4}
-							class:has-solo={mosaic.length > 0 && mosaic.length < 4}
 							style:background={mosaic.length === 0 ? nameToGradient(playlist.name) : undefined}
 						>
 							{#if mosaic.length >= 4}
 								{#each mosaic.slice(0, 4) as url}
-									<ArtworkImage
-										className="playlist-cover-art"
-										src={url}
-										size={320}
-										fallbackText="PL"
-										decorative={true}
-									/>
+									<ArtworkImage className="playlist-cover-art" src={url} size={320} fallbackText="PL" decorative={true} />
 								{/each}
 							{:else if mosaic.length > 0}
-								<ArtworkImage
-									className="playlist-cover-art"
-									src={mosaic[0]}
-									size={320}
-									fallbackText="PL"
-									decorative={true}
-								/>
+								<ArtworkImage className="playlist-cover-art" src={mosaic[0]} size={320} fallbackText="PL" decorative={true} />
 							{:else}
-								<span>{playlist.name.trim().slice(0, 1).toUpperCase() || 'P'}</span>
+								<span class="playlist-initial">{playlist.name.trim().slice(0, 1).toUpperCase() || 'P'}</span>
 							{/if}
 						</div>
 						<div class="playlist-meta">
-							<div class="playlist-chip-row">
-								<StateBadge label={playlistSourceLabel(playlist)} tone={playlist.is_smart ? 'active' : 'muted'} compact={true} />
+							<h3>{playlist.name}</h3>
+							<p class="playlist-copy">
+								<span>{playlistSourceLabel(playlist)}</span>
+								<span aria-hidden="true">&middot;</span>
+								<span>{playlist.track_count.toLocaleString()} {playlist.track_count === 1 ? 'track' : 'tracks'}</span>
 								{#if playlist.is_smart}
 									{@const summary = smartRuleSummary(playlist)}
 									{#if summary}
-										<span class="rule-chip" title={smartSummaryLines(playlist).join('\n')}>{summary}</span>
+										<span aria-hidden="true">&middot;</span>
+										<span title={smartSummaryLines(playlist).join('\n')}>{summary}</span>
 									{/if}
 								{/if}
-							</div>
-							<h3>{playlist.name}</h3>
-							<p class="playlist-copy">{playlistSubtitle(playlist)}</p>
+							</p>
 						</div>
-					</div>
+					</a>
 
-					<div class="playlist-card-foot">
-						<div class="playlist-count">
-							<strong>{playlist.track_count.toLocaleString()}</strong>
-							<span>tracks</span>
+					{#if pendingDeleteId === playlist.id}
+						<div class="confirm-strip" role="alertdialog" aria-label="Confirm delete">
+							<span class="confirm-copy">Delete "{playlist.name}"?</span>
+							<button class="btn btn-glass btn-sm" onclick={cancelDelete}>Cancel</button>
+							<button
+								class="btn btn-sm danger-solid"
+								disabled={deletingId === playlist.id}
+								onclick={() => void confirmDelete(playlist.id)}
+							>{deletingId === playlist.id ? 'Deleting...' : 'Delete'}</button>
 						</div>
-						{#if pendingDeleteId === playlist.id}
-							<div class="confirm-strip" role="alertdialog" aria-label="Confirm delete">
-								<span class="confirm-copy">Delete "{playlist.name}"?</span>
-								<button class="btn btn-glass btn-sm" onclick={(e) => { e.stopPropagation(); cancelDelete(); }}>Cancel</button>
-								<button
-									class="btn btn-sm danger-solid"
-									disabled={deletingId === playlist.id}
-									onclick={(e) => { e.stopPropagation(); void confirmDelete(playlist.id); }}
-								>{deletingId === playlist.id ? 'Deleting...' : 'Delete'}</button>
-							</div>
-						{:else}
-							<div class="playlist-actions">
-								<button class="btn btn-primary btn-sm" onclick={(e) => void playPlaylistQuick(playlist, e)}>Play</button>
-								<button class="btn btn-glass btn-sm" onclick={(e) => void shufflePlaylistQuick(playlist, e)}>Shuffle</button>
-								<button class="btn btn-glass btn-sm" onclick={(e) => void startPlaylistRadioQuick(playlist, e)}>Radio</button>
-								<button
-									class="icon-btn favorite-btn"
-									class:active={playlist.is_favorite}
-									onclick={(e) => void togglePlaylistFavorite(playlist, e)}
-									aria-label={playlist.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
-									title={playlist.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
-								>
-									<svg width="14" height="14" viewBox="0 0 24 24" fill={playlist.is_favorite ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-										<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
-									</svg>
-								</button>
-								<button
-									class="icon-btn more-btn"
-									onclick={(e) => openPlaylistContextMenu(playlist, e, true)}
-									aria-label="More actions"
-									title="More actions"
-								>
-									<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-										<circle cx="5" cy="12" r="1.6" />
-										<circle cx="12" cy="12" r="1.6" />
-										<circle cx="19" cy="12" r="1.6" />
-									</svg>
-								</button>
-							</div>
-						{/if}
-					</div>
-
-					{#if isExpanded(playlist.id)}
-						<div class="playlist-body" id={`pl-body-${playlist.id}`}>
-							{#if loadingById[playlist.id]}
-								<p class="playlist-copy">Loading tracks...</p>
-							{:else if errorById[playlist.id]}
-								<p class="playlist-copy">{errorById[playlist.id]}</p>
-							{:else if (playlistTracksById[playlist.id]?.length ?? 0) > 0}
-								{@const allTracks = playlistTracksById[playlist.id] ?? []}
-								<ol class="track-list">
-									{#each allTracks as track, i (`${track.id}-${i}`)}
-										<li class="track-row-lazy">
-											<TrackRow
-												{track}
-												variant="art"
-												index={i}
-												isCurrent={$currentTrack?.id === track.id}
-												isPlaying={$isPlaying}
-												onRowClick={() => void playTrackInPlaylist(allTracks, track.id)}
-											/>
-										</li>
-									{/each}
-								</ol>
-							{:else}
-								<p class="playlist-copy">No tracks resolved for this playlist.</p>
-							{/if}
+					{:else}
+						<div class="playlist-actions">
+							<button class="row-btn" onclick={(e) => void playPlaylistQuick(playlist, e)} aria-label="Play {playlist.name}" title="Play">&#9654;</button>
+							<button class="row-btn" onclick={(e) => void shufflePlaylistQuick(playlist, e)} aria-label="Shuffle {playlist.name}" title="Shuffle">&#10728;</button>
+							<button class="row-btn" onclick={(e) => void startPlaylistRadioQuick(playlist, e)} aria-label="Start radio from {playlist.name}" title="Start radio">&#9673;</button>
+							<button
+								class="row-btn favorite-btn"
+								class:active={playlist.is_favorite}
+								onclick={(e) => void togglePlaylistFavorite(playlist, e)}
+								aria-label={playlist.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+								aria-pressed={playlist.is_favorite}
+								title={playlist.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+							>
+								<svg width="14" height="14" viewBox="0 0 24 24" fill={playlist.is_favorite ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+									<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
+								</svg>
+							</button>
+							<button
+								class="row-btn more-btn"
+								onclick={(e) => openPlaylistContextMenu(playlist, e, true)}
+								aria-label="More actions for {playlist.name}"
+								title="More actions"
+							>
+								<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+									<circle cx="5" cy="12" r="1.6" />
+									<circle cx="12" cy="12" r="1.6" />
+									<circle cx="19" cy="12" r="1.6" />
+								</svg>
+							</button>
 						</div>
 					{/if}
-				</section>
+				</div>
 			{/each}
 		</div>
 	{:else}
@@ -1816,101 +1780,99 @@
 		font-size: var(--font-size-sm);
 	}
 
-	.playlist-grid {
+	/* Borderless browse rows, matching /search. The old treatment wrapped each
+	   playlist in .glass-panel (backdrop blur + 1px border + a 40px drop shadow)
+	   around a bordered cover and five bordered pill buttons, which read as five
+	   nested boxes per row. Here the artwork carries the weight, hover fills the
+	   row, and the actions only appear when they are reachable. */
+	.playlist-list {
 		display: flex;
 		flex-direction: column;
-		gap: 10px;
 	}
 
-	.playlist-card {
+	.playlist-row {
 		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto;
-		gap: 14px 18px;
-		padding: 14px 16px;
-		border-radius: 10px;
-	}
-
-	.playlist-card-top {
-		display: grid;
-		grid-template-columns: 50px minmax(0, 1fr) auto;
-		gap: 12px;
 		align-items: center;
-		min-width: 0;
-		cursor: pointer;
-		border-radius: 8px;
-		padding: 4px;
-		margin: -4px;
-		transition: background var(--motion-fast);
+		grid-template-columns: minmax(0, 1fr) auto;
+		gap: var(--space-3);
+		padding: var(--space-2);
+		border-radius: var(--radius-sm);
+		transition: background var(--motion-base);
 	}
 
-	.playlist-card-top:hover,
-	.playlist-card-top:focus-visible {
+	.playlist-row:hover,
+	.playlist-row:focus-within {
 		background: var(--bg-hover);
-		outline: none;
 	}
 
-	.playlist-card-top[aria-expanded="true"] {
-		background: var(--accent-soft);
+	.playlist-hit {
+		display: grid;
+		align-items: center;
+		grid-template-columns: auto minmax(0, 1fr);
+		gap: var(--space-3);
+		min-width: 0;
+		border-radius: var(--radius-sm);
+		color: inherit;
+		text-decoration: none;
+	}
+
+	.playlist-hit:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: 3px;
 	}
 
 	.playlist-cover {
-		width: 50px;
-		height: 50px;
-		border-radius: 7px;
 		display: grid;
+		width: clamp(2.75rem, 4vw, 3.5rem);
+		aspect-ratio: 1 / 1;
 		place-items: center;
 		overflow: hidden;
-		border: 1px solid var(--border-subtle);
-		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
-		flex-shrink: 0;
+		border-radius: var(--radius-sm);
+		background: var(--bg-raised);
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+		transition: box-shadow var(--motion-base);
 	}
 
-	.playlist-cover span {
-		font-size: var(--font-size-md);
-		font-weight: var(--font-weight-bold);
-		color: #fff;
-		text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+	.playlist-row:hover .playlist-cover {
+		box-shadow: 0 8px 18px -4px rgba(0, 0, 0, 0.45);
 	}
 
 	.playlist-cover.has-mosaic {
-		display: grid;
 		grid-template-columns: 1fr 1fr;
 		grid-template-rows: 1fr 1fr;
-		gap: 0;
-		place-items: stretch;
-		background: var(--bg-raised);
 	}
 
 	.playlist-cover :global(.playlist-cover-art) {
 		width: 100%;
 		height: 100%;
-	}
-	.playlist-cover :global(img.playlist-cover-art) {
 		object-fit: cover;
 		display: block;
 	}
+
 	.playlist-cover :global(.playlist-cover-art.fallback) {
 		display: grid;
 		place-items: center;
 		background: var(--bg-raised);
 	}
 
+	.playlist-initial {
+		color: var(--text-secondary);
+		font-size: var(--font-size-md);
+		font-weight: var(--font-weight-semibold);
+		line-height: 1;
+	}
+
 	.playlist-meta {
 		display: flex;
 		flex-direction: column;
-		gap: 5px;
+		gap: 2px;
 		min-width: 0;
-	}
-
-	.playlist-chip-row {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 5px;
 	}
 
 	.playlist-meta h3 {
 		margin: 0;
-		font-size: var(--font-size-md);
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-medium);
 		line-height: var(--line-height-snug);
 		white-space: nowrap;
 		overflow: hidden;
@@ -1918,146 +1880,33 @@
 	}
 
 	.playlist-copy {
-		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
-		line-height: var(--line-height-snug);
-	}
-
-	.icon-btn {
-		min-width: 36px;
-		height: 30px;
-		padding: 0 10px;
-		border-radius: 999px;
-		background: var(--bg-surface);
-		border: 1px solid var(--border-subtle);
-		color: var(--text-secondary);
-		font-size: var(--font-size-md);
-		font-weight: var(--font-weight-bold);
-	}
-
-	.icon-btn:hover,
-	.icon-btn.active {
-		background: var(--accent-soft);
-		border-color: var(--accent-line);
-		color: var(--accent-strong);
-	}
-
-	.playlist-card-foot {
-		align-self: center;
-		display: grid;
-		grid-template-columns: auto minmax(260px, auto);
-		align-items: center;
-		gap: 14px;
-	}
-
-	.playlist-count {
 		display: flex;
-		flex-direction: column;
-		min-width: 58px;
-	}
-
-	.playlist-count strong {
-		font-size: var(--font-size-md);
-		font-variant-numeric: tabular-nums;
-	}
-
-	.playlist-count span {
+		flex-wrap: wrap;
+		gap: 6px;
 		color: var(--text-tertiary);
-		font-size: var(--font-size-2xs);
-		text-transform: uppercase;
-		letter-spacing: 0.07em;
+		font-size: var(--font-size-xs);
+		line-height: var(--line-height-snug);
 	}
 
 	.playlist-actions {
 		display: flex;
-		flex-wrap: wrap;
 		align-items: center;
-		justify-content: flex-end;
-		gap: 6px;
+		gap: 2px;
 	}
 
-	.rule-chip {
-		display: inline-flex;
-		align-items: center;
-		padding: 2px 9px;
-		border-radius: 999px;
-		border: 1px solid var(--border-subtle);
-		background: color-mix(in srgb, currentColor 6%, transparent);
-		color: var(--text-tertiary);
-		font-size: var(--font-size-2xs);
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		font-variant-numeric: tabular-nums;
-		cursor: help;
+	/* .row-btn itself is the global utility in app.css; the row only has to say
+	   when to reveal them. */
+	.playlist-row:hover :global(.row-btn),
+	.playlist-row:focus-within :global(.row-btn) {
+		opacity: 1;
 	}
 
-	.confirm-strip {
-		display: flex;
-		align-items: center;
-		justify-content: flex-end;
-		gap: 8px;
-		flex-wrap: wrap;
+	/* A favourited playlist has to read at a glance without hovering. */
+	.playlist-row :global(.row-btn.favorite-btn.active) {
+		opacity: 1;
+		color: var(--state-favorite);
 	}
 
-	.confirm-copy {
-		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
-	}
-
-	.danger-solid {
-		background: var(--state-error);
-		border: 1px solid var(--state-error);
-		color: #fff;
-	}
-
-	.danger-solid:hover:not(:disabled) {
-		filter: brightness(1.08);
-	}
-
-	.more-btn,
-	.favorite-btn {
-		width: 30px;
-		min-width: 30px;
-		padding: 0;
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-	}
-
-
-	.playlist-actions .btn-sm {
-		min-height: 30px;
-		padding: 5px 10px;
-	}
-
-	.btn-sm {
-		padding: 5px 12px;
-		font-size: var(--font-size-sm);
-	}
-
-	.playlist-body {
-		grid-column: 1 / -1;
-		padding-top: 12px;
-		border-top: 1px solid var(--border-subtle);
-		display: flex;
-		flex-direction: column;
-		gap: 12px;
-	}
-
-	.track-list {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-	}
-
-	/* Browser-native virtualization: rows outside the viewport skip layout
-	   + paint while their intrinsic-size hint reserves scroll space. Cheaper
-	   than a windowed renderer and keeps every row in the DOM for Ctrl+F /
-	   screen-reader traversal. */
-	.track-row-lazy {
-		content-visibility: auto;
-		contain-intrinsic-size: 0 64px;
-	}
 
 	.clause-error {
 		color: var(--state-error);
@@ -2394,53 +2243,25 @@
 
 	.editor-error { font-size: var(--font-size-sm); color: var(--state-error); }
 
-	@media (max-width: 1120px) {
-		.playlist-card {
-			grid-template-columns: 1fr;
-		}
-
-		.playlist-card-foot {
-			display: flex;
-			justify-content: space-between;
-			width: 100%;
-		}
-	}
-
 	@media (max-width: 760px) {
-		.playlist-card {
-			display: flex;
-			flex-direction: column;
-		}
-
 		.playlist-control-band {
 			padding: 12px;
 		}
 
-		.playlist-toolbar,
-		.playlist-card-foot {
+		.playlist-toolbar {
 			display: flex;
 			flex-direction: column;
 			align-items: flex-start;
 		}
 
 		.filter-pills,
-		.playlist-sort,
-		.playlist-actions {
+		.playlist-sort {
 			width: 100%;
 		}
 
 		.filter-pill {
 			flex: 1;
 			justify-content: center;
-		}
-
-		.playlist-card-top {
-			grid-template-columns: 50px minmax(0, 1fr);
-		}
-
-		.favorite-btn {
-			grid-column: 1 / -1;
-			justify-self: flex-start;
 		}
 
 		.editor-drawer {

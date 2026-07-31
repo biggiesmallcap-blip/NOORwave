@@ -239,4 +239,99 @@ describe('QueryCache', () => {
 		expect(capped.getState(['sub', 1])).toBeNull();
 		expect(capped.size).toBe(2);
 	});
+	// Regression: staleness used to be derived purely from `lastUpdated`, so
+	// `refreshStaleFlag` overwrote the `stale: true` that invalidation had just
+	// written and the next read handed back the cached payload. Invalidation was
+	// a no-op for the whole staleMs window. This is why a newly created playlist
+	// stayed invisible on /playlists until the window lapsed, and why the
+	// existing invalidateLibraryCaches() calls appeared to do nothing.
+	test('invalidateKey forces a refetch inside the staleMs window', async () => {
+		const cache = new QueryCache();
+		let calls = 0;
+		const fetcher = async () => ++calls;
+
+		expect(await cache.fetchQuery('k', fetcher, { staleMs: 60_000 })).toBe(1);
+		// Still fresh by age: a second read must not hit the network.
+		expect(await cache.fetchQuery('k', fetcher, { staleMs: 60_000 })).toBe(1);
+		expect(calls).toBe(1);
+
+		cache.invalidateKey('k');
+		expect(await cache.fetchQuery('k', fetcher, { staleMs: 60_000 })).toBe(2);
+		expect(calls).toBe(2);
+	});
+
+	test('invalidatePrefix forces a refetch inside the staleMs window', async () => {
+		const cache = new QueryCache();
+		let calls = 0;
+		await cache.fetchQuery(['api', 'getPlaylists'], async () => ++calls, { staleMs: 60_000 });
+		expect(calls).toBe(1);
+
+		cache.invalidatePrefix(['api', 'getPlaylists']);
+		await cache.fetchQuery(['api', 'getPlaylists'], async () => ++calls, { staleMs: 60_000 });
+		expect(calls).toBe(2);
+	});
+
+	test('a satisfied invalidation does not refetch forever', async () => {
+		const cache = new QueryCache();
+		let calls = 0;
+		const fetcher = async () => ++calls;
+		await cache.fetchQuery('k', fetcher, { staleMs: 60_000 });
+		cache.invalidateKey('k');
+		await cache.fetchQuery('k', fetcher, { staleMs: 60_000 });
+		expect(calls).toBe(2);
+		// The refetch cleared the flag, so the entry is fresh again.
+		await cache.fetchQuery('k', fetcher, { staleMs: 60_000 });
+		expect(calls).toBe(2);
+	});
+
+	test('prime satisfies a pending invalidation', async () => {
+		const cache = new QueryCache();
+		let calls = 0;
+		const fetcher = async () => ++calls;
+		await cache.fetchQuery('k', fetcher, { staleMs: 60_000 });
+		cache.invalidateKey('k');
+		// Writing known-good data is as good as fetching it.
+		cache.prime('k', 99, { staleMs: 60_000 });
+		expect(await cache.fetchQuery('k', fetcher, { staleMs: 60_000 })).toBe(99);
+		expect(calls).toBe(1);
+	});
+	// Regression: three rapid deletes fired three invalidations, but fetchEntry
+	// deduped callers two and three onto the request issued for the first. That
+	// response predated the later deletes, and completing it cleared the flag, so
+	// the last deleted playlist stayed on screen.
+	test('an invalidation raised mid-flight is not satisfied by the older request', async () => {
+		const cache = new QueryCache();
+		const gates = [deferred<number>(), deferred<number>()];
+		let call = 0;
+		const fetcher = () => gates[call++].promise;
+
+		const first = cache.fetchQuery('k', fetcher, { staleMs: 60_000 });
+		// A change lands while the first request is still open.
+		cache.invalidateKey('k');
+		gates[0].resolve(1);
+
+		// The caller must not receive the pre-invalidation value.
+		gates[1].resolve(2);
+		expect(await first).toBe(2);
+		expect(call).toBe(2);
+	});
+	// The burst case: several callers join one in-flight request while further
+	// invalidations land. Every one of them must end up with post-invalidation
+	// data, not the internal supersede sentinel.
+	test('callers joining an in-flight request also retry when it is superseded', async () => {
+		const cache = new QueryCache();
+		const gates = [deferred<number>(), deferred<number>()];
+		let call = 0;
+		const fetcher = () => gates[call++].promise;
+
+		const first = cache.fetchQuery('k', fetcher, { staleMs: 60_000 });
+		const joiner = cache.fetchQuery('k', fetcher, { staleMs: 60_000 });
+		cache.invalidateKey('k');
+		gates[0].resolve(1);
+		gates[1].resolve(2);
+
+		expect(await first).toBe(2);
+		expect(await joiner).toBe(2);
+		expect(call).toBe(2);
+	});
 });

@@ -288,7 +288,7 @@
 </script>
 
 <div class="album-page">
-	<button class="back-link" type="button" onclick={() => goBack('/library')}>← Back</button>
+	<button class="back-link" type="button" onclick={() => goBack('/library')}>Back</button>
 	{#if loading}
 		<div class="status-wrap"><Skeleton rows={4} label="Loading album" /></div>
 	{:else if error}

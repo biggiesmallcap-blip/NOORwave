@@ -1,6 +1,8 @@
 import { writable } from 'svelte/store';
 import { type Track, type Album, type Artist } from '$lib/api/client';
 import { cachedApi } from '$lib/cache/api_queries';
+import { createPersistedStore, oneOf } from './persisted';
+import { createSelection } from './selection';
 
 export const tracks = writable<Track[]>([]);
 export const albums = writable<Album[]>([]);
@@ -15,45 +17,25 @@ export const sortDir = writable<'asc' | 'desc'>('desc');
 
 // Album grid/list choice persists across sessions (localStorage), not just per
 // history entry, so the layout the user picked survives a reload/relaunch.
-const VIEW_MODE_KEY = 'library.viewMode';
-function createViewMode() {
-	let initial: 'grid' | 'list' = 'grid';
-	if (typeof localStorage !== 'undefined') {
-		try {
-			const saved = localStorage.getItem(VIEW_MODE_KEY);
-			if (saved === 'list' || saved === 'grid') initial = saved;
-		} catch {
-			// Storage read blocked (private mode / disabled); use the default.
-		}
-	}
-	const store = writable<'grid' | 'list'>(initial);
-	// subscribe() fires synchronously with `initial` at import time. Skip that
-	// first emission and wrap the write: a full or blocked localStorage must
-	// never throw here, or the exception escapes module init and takes the whole
-	// app down (QuotaExceededError -> bare SvelteKit 500 on boot).
-	let firstEmission = true;
-	store.subscribe((value) => {
-		if (firstEmission) {
-			firstEmission = false;
-			return;
-		}
-		if (typeof localStorage === 'undefined') return;
-		try {
-			localStorage.setItem(VIEW_MODE_KEY, value);
-		} catch {
-			// Quota exceeded or storage blocked; keep the choice in memory only.
-		}
-	});
-	return store;
-}
-export const viewMode = createViewMode();
+// `createPersistedStore` carries the storage guards; see its header for why
+// each one is load-bearing.
+export const viewMode = createPersistedStore<'grid' | 'list'>(
+	'library.viewMode',
+	'grid',
+	{ parse: oneOf(['grid', 'list'] as const) },
+);
 export const searchQuery = writable('');
 
-// Selected tracks for batch operations
-export const selectedTrackIds = writable<Set<number>>(new Set());
-export const selectedAlbumIds = writable<Set<number>>(new Set());
-export const lastSelectedTrackId = writable<number | null>(null);
-export const lastSelectedAlbumId = writable<number | null>(null);
+// Selected tracks and albums for batch operations. Library-scoped instances;
+// other surfaces build their own via `createSelection()` rather than sharing
+// these, so a selection on one page does not appear in library's batch bar.
+const trackSelection = createSelection();
+const albumSelection = createSelection();
+
+export const selectedTrackIds = trackSelection.ids;
+export const selectedAlbumIds = albumSelection.ids;
+export const lastSelectedTrackId = trackSelection.lastId;
+export const lastSelectedAlbumId = albumSelection.lastId;
 
 const PAGE_SIZE = 100;
 let currentTrackListLikedOnly = false;
@@ -130,42 +112,16 @@ export async function loadArtists(sort = 'name', dir = 'asc', limit = PAGE_SIZE,
 }
 
 export function selectTrackIds(ids: number[], additive = false) {
-	selectedTrackIds.update((set) => {
-		const next = new Set(additive ? set : []);
-		for (const id of ids) {
-			if (next.has(id) && additive && ids.length === 1) {
-				next.delete(id);
-			} else {
-				next.add(id);
-			}
-		}
-		return next;
-	});
-
-	lastSelectedTrackId.set(ids.at(-1) ?? null);
+	trackSelection.select(ids, additive);
 }
 
 export function selectAlbumIds(ids: number[], additive = false) {
-	selectedAlbumIds.update((set) => {
-		const next = new Set(additive ? set : []);
-		for (const id of ids) {
-			if (next.has(id) && additive && ids.length === 1) {
-				next.delete(id);
-			} else {
-				next.add(id);
-			}
-		}
-		return next;
-	});
-
-	lastSelectedAlbumId.set(ids.at(-1) ?? null);
+	albumSelection.select(ids, additive);
 }
 
 export function clearSelection() {
-	selectedTrackIds.set(new Set());
-	selectedAlbumIds.set(new Set());
-	lastSelectedTrackId.set(null);
-	lastSelectedAlbumId.set(null);
+	trackSelection.clear();
+	albumSelection.clear();
 }
 
 export function updateLibraryTrackFavorite(trackId: number, isFavorite: boolean, track?: Track) {

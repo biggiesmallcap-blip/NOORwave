@@ -724,7 +724,7 @@
 </script>
 
 <div class="artist-page">
-	<button class="back-link" type="button" onclick={() => goBack(source.kind === 'tidal' ? '/search' : '/library')}>← Back</button>
+	<button class="back-link" type="button" onclick={() => goBack(source.kind === 'tidal' ? '/search' : '/library')}>Back</button>
 	{#if loading}
 		<div class="status-wrap"><Skeleton rows={4} label="Loading artist" /></div>
 	{:else if error}

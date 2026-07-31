@@ -157,7 +157,7 @@
 
 <div class="page-shell discover-detail animate-in">
 	<header class="hero">
-		<button class="back-link" onclick={() => goBack('/search')}>← Back</button>
+		<button class="back-link" onclick={() => goBack('/search')}>Back</button>
 		<p class="eyebrow">TIDAL</p>
 		<h1>{mod?.title ?? (loading ? 'Loading…' : 'Discover')}</h1>
 		{#if mod}

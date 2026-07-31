@@ -262,6 +262,13 @@ pub enum AppEvent {
         message: String,
     },
     QueueUpdated,
+    /// A playlist was created, renamed, deleted, or had its tracks changed.
+    ///
+    /// Distinct from `LibrarySynced`, which clients treat as "everything is
+    /// stale" and which only fires on a sync. A playlist mutation is cheap and
+    /// frequent (save-queue-as-playlist, add-to-playlist, reorder), so it gets
+    /// its own event and invalidates only the playlist caches.
+    PlaylistsChanged,
     ListenHistoryUpdated {
         track_id: i64,
     },

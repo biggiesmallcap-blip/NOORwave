@@ -101,7 +101,7 @@
 <svelte:head><title>{title} . NOOR</title></svelte:head>
 
 <div class="page" data-tidal-editorial-page={pagePath}>
-	<button class="back-link" type="button" onclick={() => goBack(backFallback)}>&lt; Back</button>
+	<button class="back-link" type="button" onclick={() => goBack(backFallback)}>Back</button>
 	<PageHeader {eyebrow} {title} {subtitle} variant="editorial" />
 
 	{#if viewState === 'loading'}

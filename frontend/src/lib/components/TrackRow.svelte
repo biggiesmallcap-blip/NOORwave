@@ -630,6 +630,17 @@
 		max-width: 100%;
 	}
 
+	/*
+	 * Shrink the hit area to the text. `.cell-meta` is a flex column, so this
+	 * link stretches to the full column by default and the whole empty strip to
+	 * the right of a short artist name navigated to that artist - which reads as
+	 * the row misfiring on a casual click. (The `.sub-link` variants sit inline
+	 * inside a <p> and already shrink to content.)
+	 */
+	.sub.link {
+		align-self: flex-start;
+	}
+
 	.sub.link:hover {
 		color: var(--text-primary);
 		text-decoration: underline;

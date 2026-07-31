@@ -1100,3 +1100,69 @@ treat "muted but nobody asked for a pause, for 15s, with no progress" as a
 stall. Wants care - a false positive here force-advances during a legitimate
 pause, which is worse than the bug.
 Spawned by: end-of-track playback stall investigation 2026-07-30
+
+### frontend: back-migrate the open-coded hover-reveal row buttons
+
+`.row-btn` is now a global utility in `app.css`, but only `/playlists` uses it.
+The same "opacity 0, revealed on row hover" idiom is open-coded in 20+ routes
+(`search`, `library`, `albums/[id]`, `artists/*`, `history`, `duplicates`,
+`spotify-*`, `tidal/*`, the remote shell, and more), each with its own sizing
+and hover colours. `.section-label` - the uppercase accent eyebrow - is
+similarly duplicated in `search/+page.svelte` and `library/+page.svelte` and
+was left un-promoted because this change gained no third consumer for it.
+
+Same shape as the `rise-in-*` back-migration already tracked here: do it
+opportunistically per route rather than as one sweep, and delete the local rule
+in the same commit (the Svelte compiler fails CI on the orphan).
+
+### frontend: back-migrate the remaining hand-rolled persisted stores
+
+`createPersistedStore` (`src/lib/stores/persisted.ts`) now owns the
+guarded-localStorage idiom, and `library.ts` / `trending-prefs.ts` /
+`playlists` use it. Still hand-rolled: `palette.ts`, `wallpaper.ts`,
+`uiZoom.ts`, `remote/sleep_timer.ts`, `remote/haptics_settings.ts`,
+`playlist_artwork_cache.ts`, plus the ad-hoc `localStorage` calls in
+`videos/+page.svelte`, `duplicates/+page.svelte`, `search/+page.svelte` and
+`+layout.svelte`.
+
+One of them is an actual latent bug rather than just duplication:
+`uiZoom.ts:20` reads `localStorage` at module init behind a `typeof` guard but
+with no `try/catch`, so storage that is present-but-blocked (enterprise policy,
+some private modes) throws out of module init - the same class of boot crash
+the write-side guard exists to prevent.
+
+### noor-server: deleting a track that sits in a playlist may violate an FK
+
+`library_batch_routes.rs` `batch_delete_items` runs `DELETE FROM tracks WHERE
+id = ?`. `playlist_tracks.track_id` references `tracks(id)` with no `ON DELETE`
+action, and `PRAGMA foreign_keys = ON` is set for every connection
+(`db/mod.rs:17`), so that delete should fail for any track that is a member of
+a playlist. Not observed in the wild - found while reading the schema for the
+playlist CRUD work. Needs a test to confirm, then either a cascade, a
+pre-delete cleanup of `playlist_tracks`, or a deliberate refusal with a clear
+message.
+
+### playlists: creating a playlist on TIDAL from inside NOORwave
+
+`POST /api/playlists` creates a local-only playlist by design, so a list made
+in NOORwave never appears in the TIDAL app and never syncs. Editing an existing
+TIDAL-mirrored playlist does write through (rename, remove, reorder, delete).
+Adding creation would need `POST /v1/users/{id}/playlists` in
+`services/tidal/mutations.rs` plus a UI choice about where a new playlist
+should live.
+
+### frontend: detail-route header layout is still per-route
+
+`.back-link` is now a standardized pill that supplies its own chevron, and
+`/playlists/[id]` has a consolidated hero (blurred artwork banner, cover, title,
+meta line, action row in one block). The other detail routes - `albums/[id]`,
+`artists/[id]`, `tidal/albums/[id]`, `spotify-*`, `moods/[slug]`,
+`recommendations/[shelf]`, `search/discover/[id]` - each still hand-roll their
+own header, and several use `PageHeader`, which puts the title hard left and the
+actions hard right. On a wide monitor that is most of a metre apart, which is
+what made the playlist header read as scattered before the rework.
+
+Worth extracting the playlist hero into a shared `DetailHero.svelte`
+(art + eyebrow + title + meta + actions, optional banner) and migrating the
+routes onto it. Do it opportunistically per route rather than as one sweep, and
+delete the local rules in the same commit - the compiler fails CI on orphans.

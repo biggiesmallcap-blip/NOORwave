@@ -128,7 +128,7 @@
 </script>
 
 <div class="page">
-	<button class="back-link" type="button" onclick={() => goBack('/search')}>← Back</button>
+	<button class="back-link" type="button" onclick={() => goBack('/search')}>Back</button>
 	{#if loading}
 		<p class="status" role="status" aria-live="polite">Loading from TIDAL…</p>
 	{:else if error}

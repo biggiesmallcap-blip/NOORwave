@@ -79,8 +79,15 @@ Use these instead of reimplementing the surface:
 
 - `.glass`, `.glass-panel`, `.glass-tile` - translucent panel surfaces (backdrop-filter + bg + border + shadow). If you find yourself writing `backdrop-filter: blur(...)` plus a translucent gradient + a subtle border, replace with one of these classes.
 - `.btn`, `.btn-primary`, `.btn-glass` - pill buttons. Don't roll your own button visual unless you're building a chip or icon-only variant.
+- `.row-btn` - a borderless icon action inside a browse row, hidden until the row is hovered or focused but always occupying its space so the reveal doesn't reflow. The parent row opts in with `.my-row:hover .row-btn { opacity: 1 }`. Use this instead of a bordered `.btn` row: five bordered pills per row is what made the old playlists list read as boxes-in-boxes.
+- `.back-link` - the back affordance on any detail route. It is a **pill** and it supplies its own `‹` chevron via `::before`, so the caller writes only the word: `<button class="back-link" onclick={() => goBack('/fallback')}>Back</button>`. Do not prepend `&lt;` or `←` - routes used to spell it three different ways and the arrow doubled up. Place it as the first element inside `.page-shell`, above the page's hero.
 - `.quality-badge.hires|.lossless|.lossy` - quality indicator pill.
 - `.rise-in-shelf`, `.rise-in-card` - the canonical entry motion for content that arrives *after* mount. Do not hand-roll another rise animation; see "Entry motion" below.
+
+Actions in [`src/lib/actions/`](src/lib/actions/) are the behavioural equivalent - reach for these rather than re-implementing:
+
+- `use:dragReorder` ([`drag_reorder.ts`](src/lib/actions/drag_reorder.ts)) - HTML5 drag-to-reorder for a list of rows keyed by numeric id, plus Alt+Arrow keyboard reordering. Owns two details that are easy to lose: `dataTransfer.setData('text/plain', ...)` (Firefox will not start a drag without it) and the fact that a row's click target must be a `div role="button"`, because a real `<button>` swallows `dragstart`. Used by the playback queue and the playlist detail page.
+- `use:wheelToHorizontal`, `use:portal`, `use:lazyTidalArt` - see their file headers.
 
 ## Media links and context menus
 
@@ -93,7 +100,9 @@ Track, album, artist, and video references should resolve inside NOORwave whenev
 - TIDAL videos use `/videos?videoId=:id`.
 - TIDAL track titles do not open an external TIDAL page. Link them only when there is a useful in-app destination, such as the local album page.
 
-Use `$lib/player/media_link.ts` for canonical media hrefs and menu delegation when rendering mixed local/TIDAL metadata. Use the shared menu builders (`buildTrackMenu`, `buildTidalTrackMenu`, `buildAlbumMenu`, `buildArtistMenu`, `buildVideoMenu`) instead of inline menu arrays. Queue rows are already in the queue, so queue-context menus must not show duplicate `Add to queue` actions.
+Use `$lib/player/media_link.ts` for canonical media hrefs and menu delegation when rendering mixed local/TIDAL metadata. Use the shared menu builders (`buildTrackMenu`, `buildTidalTrackMenu`, `buildAlbumMenu`, `buildArtistMenu`, `buildVideoMenu`, `buildPlaylistMenu`) instead of inline menu arrays. Queue rows are already in the queue, so queue-context menus must not show duplicate `Add to queue` actions.
+
+`buildPlaylistMenu` ([`playlist_menu.ts`](src/lib/player/playlist_menu.ts)) takes every action as an optional handler, so a read-only surface and the detail page share one builder and simply omit what they can't do. The same module exports `buildAddToPlaylistSubmenu(playlists, getTrackIds)` for the `Add to playlist` submenu; `getTrackIds` is lazy so an album or artist only resolves its tracks once a destination is picked. Menu icons must be real glyphs - `menuIconForDisplay` strips anything that looks like a single-letter placeholder, so `icon: 'P'` renders as no icon at all.
 
 All right-click menus are rendered by `ContextMenu.svelte`; do not create one-off menu animation styles in callers. Menus should enter and exit through the shared context-menu motion:
 
@@ -107,12 +116,31 @@ All right-click menus are rendered by `ContextMenu.svelte`; do not create one-of
 
 When you need a translucent surface, follow this order:
 
+0. **A browse list, result row, or anything you scan down a column of?** -> **not glass**. Flat: no border, no blur, no shadow on the row itself; `border-radius: var(--radius-sm)` and a `var(--bg-hover)` fill on hover, with the artwork tile carrying the visual weight and the actions on `.row-btn`. This step exists because the rest of the tree reads as "card -> glass", and following it gave the playlists list a blurred bordered panel per row, wrapped around a bordered cover and five bordered buttons. `/search` is the reference for how this should look.
 1. **Compact tile or badge?** -> `.glass-tile` (uses `--blur-base`, `--radius-sm`, `--panel-border`).
 2. **Elevated card / panel?** -> `.glass` or `.glass-panel` (uses `--blur-overlay`, `--radius-md` or `--radius-lg`, full glass treatment).
 3. **Modal / context menu / palette?** -> Don't use a class - use `backdrop-filter: var(--blur-modal)` directly with a non-translucent dark background (`rgba(12,12,24,0.96)` or similar) and `var(--radius-md)` corners. The class doesn't fit because modals tint deeper than the canonical glass.
 4. **Page scrim / dimmer behind a modal?** -> Inline `backdrop-filter: blur(2-6px)` with a dim background. These are *not* glass surfaces; they're page-level dimmers and stay raw.
 
 If you reach for a 4th tier (12 px blur? 20 px blur?), pick the closest token. The whole point is three tiers, not three-plus-special-cases.
+
+## Persisted UI preferences
+
+A user's view mode, sort order, or filter should survive a reload and a relaunch. SvelteKit's `Snapshot` does **not** do this: it is per-history-entry `sessionStorage`, so it restores on back/forward and resets every time the page is reached fresh. Use it for scroll position and transient on-screen state; use `localStorage` for anything the user would expect to still be set tomorrow. A page can want both, and the playlists list uses both - the snapshot restores what was on screen for that history entry, localStorage supplies the fresh-load default.
+
+Go through [`createPersistedStore`](src/lib/stores/persisted.ts). Do not hand-roll the idiom - the module exists because a dozen stores each wrote their own version with a different subset of the three guards, and all three are load-bearing:
+
+1. `typeof localStorage === 'undefined'` - absent during SSR and in some embedded webviews.
+2. `try/catch` around **both** the read and the write. A write throws `QuotaExceededError` when storage is full; a read throws when storage is disabled by policy rather than merely missing.
+3. Skip the first `subscribe` emission. `subscribe()` fires synchronously with the initial value at import time, so an unguarded write there escapes module init and takes the whole app down to a bare SvelteKit 500 on boot.
+
+```ts
+export const viewMode = createPersistedStore<'grid' | 'list'>('library.viewMode', 'grid', {
+  parse: oneOf(['grid', 'list'] as const),
+});
+```
+
+`parse` validates what came out of storage; returning `undefined` rejects it and keeps the default, which is how a string-union preference survives a build that changed its allowed values. `createPersistedJsonStore` is the non-string variant. [`library.viewMode.test.ts`](src/lib/stores/library.viewMode.test.ts) is the regression test for the boot crash.
 
 ## Auto-fit grids over fixed-N columns
 

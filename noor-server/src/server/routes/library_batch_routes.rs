@@ -81,71 +81,74 @@ pub(super) async fn batch_add_to_playlist(
     };
 
     let playlist = playlist.ok_or(StatusCode::NOT_FOUND)?;
-    let playlist_uuid = playlist.tidal_uuid.ok_or(StatusCode::BAD_REQUEST)?;
-    let tidal_track_ids: Vec<i64> = track_pairs.iter().map(|(_, tidal_id)| *tidal_id).collect();
-    if tidal_track_ids.is_empty() {
+    if playlist.is_smart {
+        // A smart playlist's contents come from its rules; adding to it directly
+        // is meaningless and would be silently discarded on the next evaluation.
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let (http, tokens) = {
-        let state = state.read().await;
-        let tokens = state.tidal_tokens.clone().ok_or(StatusCode::UNAUTHORIZED)?;
-        (state.http_client.clone(), tokens)
-    };
+    // A locally created playlist has no TIDAL counterpart. It used to be
+    // rejected outright here, which made it impossible to add tracks to any
+    // playlist NOORwave itself had created; now the remote leg is simply
+    // skipped and only the local write runs.
+    //
+    // Which tracks land also differs by path. `get_track_tidal_ids` drops
+    // local-only tracks, which is right for a synced playlist - we can only
+    // mirror what TIDAL accepted - but wrong for a local one, where a local-only
+    // track is exactly what the user is trying to add.
+    let local_ids: Vec<i64> = if let Some(playlist_uuid) = playlist.tidal_uuid.as_deref() {
+        let tidal_track_ids: Vec<i64> = track_pairs.iter().map(|(_, tidal_id)| *tidal_id).collect();
+        if tidal_track_ids.is_empty() {
+            return Err(StatusCode::BAD_REQUEST);
+        }
 
-    tidal_mutations::add_to_playlist(
-        &http,
-        &tokens.access_token,
-        &playlist_uuid,
-        &tidal_track_ids,
-        &tokens.country_code,
-    )
-    .await
-    .map_err(|error| {
-        tracing::error!("Batch add to playlist failed: {error}");
-        StatusCode::BAD_GATEWAY
-    })?;
+        let (http, tokens) = {
+            let state = state.read().await;
+            let tokens = state.tidal_tokens.clone().ok_or(StatusCode::UNAUTHORIZED)?;
+            (state.http_client.clone(), tokens)
+        };
+
+        tidal_mutations::add_to_playlist(
+            &http,
+            &tokens.access_token,
+            playlist_uuid,
+            &tidal_track_ids,
+            &tokens.country_code,
+        )
+        .await
+        .map_err(|error| {
+            tracing::error!("Batch add to playlist failed: {error}");
+            StatusCode::BAD_GATEWAY
+        })?;
+
+        track_pairs.iter().map(|(track_id, _)| *track_id).collect()
+    } else {
+        track_ids.clone()
+    };
 
     let added = {
         let state = state.read().await;
         state
             .db
             .with_conn(|conn| {
-                let mut position: i64 = conn.query_row(
-                    "SELECT COALESCE(MAX(position) + 1, 0) FROM playlist_tracks WHERE playlist_id = ?1",
-                    rusqlite::params![payload.playlist_id],
-                    |row| row.get(0),
-                )?;
-                let mut added = 0;
-                for (track_id, _) in &track_pairs {
-                    added += conn.execute(
-                        "INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
-                         VALUES (?1, ?2, ?3)",
-                        rusqlite::params![payload.playlist_id, track_id, position],
-                    )?;
-                    position += 1;
-                }
-                conn.execute(
-                    "UPDATE playlists
-                     SET track_count = (SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id = ?1),
-                         updated_at = datetime('now')
-                     WHERE id = ?1",
-                    rusqlite::params![payload.playlist_id],
-                )?;
-                Ok(added)
+                // Goes through the shared helper so this path dedupes by track id
+                // and recomputes track_count exactly like every other add. The
+                // inline `INSERT OR IGNORE` this replaced only suppressed
+                // position collisions, so re-adding a track inserted it twice.
+                queries::add_tracks_to_playlist(conn, payload.playlist_id, &local_ids)
             })
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
 
     {
         let state = state.read().await;
-        let _ = state.event_tx.send(AppEvent::LibrarySynced);
+        let _ = state.event_tx.send(AppEvent::PlaylistsChanged);
     }
 
     Ok(Json(json!({
         "playlist_id": payload.playlist_id,
         "requested_tracks": track_ids.len(),
-        "resolved_tracks": track_pairs.len(),
+        "resolved_tracks": local_ids.len(),
         "added": added
     })))
 }

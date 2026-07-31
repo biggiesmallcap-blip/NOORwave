@@ -83,6 +83,7 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
                     AppEvent::SyncProgress { service, progress } => json!({"type": "sync_progress", "service": service, "progress": progress}),
                     AppEvent::SyncFailed { service, message } => json!({"type": "sync_failed", "service": service, "message": message}),
                     AppEvent::QueueUpdated => json!({"type": "queue_updated"}),
+                    AppEvent::PlaylistsChanged => json!({"type": "playlists_changed"}),
                     AppEvent::ListenHistoryUpdated { track_id } => json!({"type": "listen_history_updated", "track_id": track_id}),
                     AppEvent::PlaybackFailed { message } => json!({"type": "playback_failed", "message": message}),
                     AppEvent::TrackSkipped { track_id, title, reason } => json!({"type": "track_skipped", "track_id": track_id, "title": title, "reason": reason}),

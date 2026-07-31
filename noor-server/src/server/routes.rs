@@ -592,11 +592,28 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/genres/{id}/tracks",
             get(genre_routes::get_genre_tracks),
         )
-        .route("/api/playlists", get(playlist_routes::get_playlists))
+        .route(
+            "/api/playlists",
+            get(playlist_routes::get_playlists).post(playlist_routes::create_playlist_route),
+        )
+        .route(
+            "/api/playlists/{id}",
+            patch(playlist_routes::update_playlist_route)
+                .delete(playlist_routes::delete_playlist_route),
+        )
         .route(
             "/api/playlists/{id}/tracks",
             get(playlist_routes::get_playlist_tracks)
-                .post(playlist_routes::add_tracks_to_playlist_route),
+                .post(playlist_routes::add_tracks_to_playlist_route)
+                .delete(playlist_routes::remove_playlist_tracks_route),
+        )
+        .route(
+            "/api/playlists/{id}/tracks/move",
+            post(playlist_routes::move_playlist_track_route),
+        )
+        .route(
+            "/api/playlists/{id}/refresh",
+            post(playlist_routes::refresh_playlist_route),
         )
         .route(
             "/api/playlists/{id}/favorite",
@@ -7832,27 +7849,25 @@ async fn create_playlist_from_queue(
         ));
     }
 
-    db.with_conn(|conn| {
-        conn.execute(
-            "INSERT INTO playlists (name, description, is_smart, is_synced, track_count)
-                 VALUES (?1, NULL, 0, 0, 0)",
-            params![name],
-        )?;
-        let playlist_id = conn.last_insert_rowid();
-        let added = queries::add_tracks_to_playlist(conn, playlist_id, &track_ids)?;
-        let playlist = queries::get_playlist(conn, playlist_id)?
-            .ok_or_else(|| anyhow::anyhow!("playlist not found after insert"))?;
-        Ok(Json(json!({
-            "playlist": playlist,
-            "added": added,
-        })))
-    })
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-    })
+    let response = db
+        .with_conn(|conn| {
+            let playlist = queries::create_playlist(conn, &name, None)?;
+            let added = queries::add_tracks_to_playlist(conn, playlist.id, &track_ids)?;
+            let playlist = queries::get_playlist(conn, playlist.id)?
+                .ok_or_else(|| anyhow::anyhow!("playlist not found after insert"))?;
+            Ok(Json(json!({
+                "playlist": playlist,
+                "added": added,
+            })))
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+    playlist_routes::notify_playlists_changed(&state).await;
+    Ok(response)
 }
 
 async fn status() -> Json<Value> {
