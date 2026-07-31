@@ -19,6 +19,7 @@ const client = readFileSync(join(here, '../../api/client.ts'), 'utf8');
 const playTrending = readFileSync(join(here, '../../player/play_trending.ts'), 'utf8');
 const serverRoutes = readFileSync(join(here, '../../../../../noor-server/src/server/routes.rs'), 'utf8');
 const homeRoutes = readFileSync(join(here, '../../../../../noor-server/src/server/routes/home_routes.rs'), 'utf8');
+const wsEvents = readFileSync(join(here, '../../cache/ws_events.ts'), 'utf8');
 
 const emptySearchResults: TidalSearchResults = { tracks: [], albums: [], artists: [], videos: [] };
 
@@ -46,14 +47,59 @@ describe('home recommendations shelf contract', () => {
 		expect(source).toContain('cachedApi.getListenBrainzStatus()');
 		expect(source).toContain('lastfm.value.recommendations');
 		expect(source).toContain('listenbrainz.value.recommendations');
-		expect(source).toContain('cachedApi.getHomeRecommendations()');
-		expect(source).toContain('let loadSeq = 0;');
-		expect(source).toContain('return () => { loadSeq += 1; };');
-		expect(source).toContain('const seq = ++loadSeq;');
-		expect(source).toContain('if (seq !== loadSeq) return;');
+		// The request is kicked off by creating the query at init, not behind the
+		// status checks, so the gate never adds a waterfall in front of the slow
+		// call. The subscription is then the single writer of shelves/viewState -
+		// a second writer is what used to blank the seeded rails on mount.
+		expect(source).toContain('cachedApi.homeRecommendationsQuery()');
+		expect(source).toContain('recommendationsQuery.subscribe(');
+		expect(source).not.toContain('const seq = ++loadSeq;');
 		expect(source).not.toContain('Boolean(lastfm.value.scrobbling)');
 		expect(source).not.toContain('Boolean(listenbrainz.value.scrobbling)');
 		expect(client).toContain('/api/home/recommendations');
+	});
+
+	test('paints cached shelves on boot instead of a skeleton', () => {
+		// The whole point of seeding from the persisted snapshot. The old load()
+		// set viewState = 'loading' unconditionally right after, which threw the
+		// seeded paint away on every mount and left Home blank for the length of
+		// the request.
+		expect(source).toContain('getSnapshot().data?.shelves');
+		expect(source).toContain("seededCanRecommend && hasItems(seededShelves) ? 'ready' : 'hidden'");
+		// A shelf that is empty because the server is still building it must not
+		// replace one that has content, and must not render an empty state.
+		expect(source).toContain("shelf.status === 'warming'");
+		// Merged shelf by shelf, not wholesale. The server publishes one shelf at a
+		// time, so mid-rebuild the rails it has not reached yet come back empty and
+		// warming - taking that payload whole would blank full rails and refill
+		// them seconds later, which is the flicker this whole change removes.
+		expect(source).toContain('function mergeShelves(');
+		expect(source).toContain('shelves = mergeShelves(shelves, s.data?.shelves ?? []);');
+		expect(source).toContain("if (shelf.items.length > 0 || shelf.status !== 'warming') return shelf;");
+		expect(source).toContain("isWarming(shelves) ? 'loading' : 'empty'");
+		expect(client).toContain("'warming'");
+		// Progressive publishes arrive over the socket; without this the rails
+		// would only fill on the next page load.
+		expect(wsEvents).toContain('home_recommendations_updated');
+		expect(wsEvents).toContain('cacheKeys.homeRecommendations()');
+	});
+
+	test('never blocks the recommendations request on the upstream fan-out', () => {
+		// A cold start needed well over a hundred Last.fm calls. Run inline they
+		// outlasted the client's 20s timeout, and the abort dropped the handler
+		// future before it ever reached the cache write - so every completed call
+		// was discarded and the retry started from zero.
+		expect(homeRoutes).toContain('fn spawn_recommendation_rebuild');
+		expect(homeRoutes).toContain('tokio::spawn');
+		expect(homeRoutes).toContain('fn claim_rebuild');
+		// Stale-while-revalidate: last visit's shelf is a better first frame than
+		// a blank page, so an expired payload is served while the rebuild runs.
+		expect(homeRoutes).toContain('RECOMMENDATION_STALE_SERVE_SECS');
+		expect(homeRoutes).toContain('fn serve_recommendation_shelf');
+		expect(homeRoutes).not.toContain('fn load_or_fetch_recommendation_shelf');
+		// Published per shelf so the mural paints while the rails are still building.
+		expect(homeRoutes).toContain('fn publish_recommendation_shelf');
+		expect(homeRoutes).toContain('HomeRecommendationsUpdated');
 	});
 
 	test('has loading, empty, and error states for provider data', () => {
@@ -151,13 +197,16 @@ describe('home recommendations shelf contract', () => {
 	});
 
 	test('varies Last.fm seed reasons beyond stable top artists', () => {
-		expect(homeRoutes).toContain('load_lastfm_track_seeds');
-		expect(homeRoutes).toContain('load_lastfm_artist_seeds');
+		expect(homeRoutes).toContain('fn load_lastfm_seeds');
 		expect(homeRoutes).toContain('user_recent_tracks');
 		expect(homeRoutes).toContain('Because you played {} recently');
 		expect(homeRoutes).toContain('Because you loved {}');
 		expect(homeRoutes).toContain('Near your top artist {}');
 		expect(homeRoutes).toContain('recommendation_seed_window');
+		// All five profile calls go out together. Serially they were five round
+		// trips before the first similar-track call could even start, and nothing
+		// on Home could paint until they finished.
+		expect(homeRoutes).toContain('tokio::join!');
 	});
 
 	test('splits Last.fm tracks, artists, and albums into separate panels', () => {

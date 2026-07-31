@@ -75,38 +75,123 @@
 	const VIEW_ROTATION_MS = 2 * 60 * 60 * 1000;
 	const viewRotation = rotationForPeriod(VIEW_ROTATION_MS);
 
+	const hasItems = (list: ProviderRecommendationShelf[]) =>
+		list.some((shelf) => shelf.items.length > 0);
+	// A shelf the server is still building. It is empty right now but more is
+	// coming, so it must never be rendered as "nothing to recommend".
+	const isWarming = (list: ProviderRecommendationShelf[]) =>
+		list.some((shelf) => shelf.status === 'warming');
+
+	// Creating the query is what kicks the request off, and it happens at init
+	// rather than behind the status checks: both statuses are already in the
+	// persisted cache on a warm boot and this is the slow call, so gating it
+	// behind them was a waterfall for nothing. If the gate turns out to be shut
+	// the response is simply never painted.
+	const recommendationsQuery = cachedApi.homeRecommendationsQuery();
+
 	// Seed from cache so the shelf paints instantly on launch. The provider gate is
 	// preserved: only seed 'ready' if the cached Last.fm/ListenBrainz status says a
 	// provider can recommend AND we have cached shelves. getSnapshot() (not getState)
-	// hydrates the persisted copy. onMount's load() then revalidates - with
-	// staticOptions those reads return cached instantly and refresh in the background.
+	// hydrates the persisted copy.
 	const seededCanRecommend =
 		Boolean(cachedApi.lastfmStatusQuery().getSnapshot().data?.recommendations) ||
 		Boolean(cachedApi.listenBrainzStatusQuery().getSnapshot().data?.recommendations);
 	const seededShelves = seededCanRecommend
-		? (cachedApi.homeRecommendationsQuery().getSnapshot().data?.shelves ?? [])
+		? (recommendationsQuery.getSnapshot().data?.shelves ?? [])
 		: [];
 
 	let shelves = $state<ProviderRecommendationShelf[]>(seededShelves);
 	let viewState = $state<State>(
-		seededCanRecommend && seededShelves.some((shelf) => shelf.items.length > 0) ? 'ready' : 'hidden'
+		seededCanRecommend && hasItems(seededShelves) ? 'ready' : 'hidden'
 	);
+	/** False until the status checks answer, so nothing paints for a user with no provider. */
+	let gateOpen = $state(seededCanRecommend);
 	let errorMsg = $state('');
 	let currentIndexes = $state<Record<string, number>>({});
 	let pausedShelves = $state<Record<string, boolean>>({});
 	let playingAllShelves = $state<Record<string, boolean>>({});
 	let resolvingItems = $state<Record<string, boolean>>({});
 	let lazyArtwork = $state<Record<string, string>>({});
-	let loadSeq = 0;
 	/** The recommended album whose detail popup is open, if any. */
 	let albumPopupItem = $state<ProviderRecommendationItem | null>(null);
 
 	let visibleShelves = $derived(shelves.filter((shelf) => shelf.items.length > 0));
 
 	onMount(() => {
-		void load();
-		return () => { loadSeq += 1; };
+		void openGate();
+		// The subscription is the sole writer of shelves/viewState. Svelte calls it
+		// immediately with the hydrated state, then on every revalidate - including
+		// the ones the `home_recommendations_updated` WS ping triggers as the
+		// server publishes each shelf. That is what makes a cold start fill in
+		// progressively instead of sitting blank until the whole fan-out is done.
+		return recommendationsQuery.subscribe((s) => {
+			shelves = mergeShelves(shelves, s.data?.shelves ?? []);
+
+			if (s.error && !hasItems(shelves)) {
+				if (s.error instanceof ApiError && s.error.status === 404) {
+					viewState = 'hidden';
+					return;
+				}
+				errorMsg = s.error instanceof Error ? s.error.message : 'Recommendations could not be loaded.';
+				viewState = 'error';
+				return;
+			}
+			errorMsg = '';
+			if (!gateOpen) return;
+			viewState = paintState();
+		});
 	});
+
+	/**
+	 * Merge an incoming payload over what is on screen, shelf by shelf.
+	 *
+	 * The server publishes one shelf at a time, so mid-rebuild the rails it has
+	 * not reached yet come back empty and warming. Taking that payload wholesale
+	 * would blank rails that are currently full and refill them seconds later -
+	 * the exact flicker this change exists to remove. A warming shelf with no
+	 * items therefore never displaces one that has them; anything else, warming
+	 * or not, is the newer truth and wins.
+	 */
+	function mergeShelves(
+		current: ProviderRecommendationShelf[],
+		next: ProviderRecommendationShelf[]
+	): ProviderRecommendationShelf[] {
+		const byKey = new Map(current.map((shelf) => [shelfKey(shelf), shelf]));
+		return next.map((shelf) => {
+			if (shelf.items.length > 0 || shelf.status !== 'warming') return shelf;
+			return byKey.get(shelfKey(shelf)) ?? shelf;
+		});
+	}
+
+	/** What to render given the shelves in hand. */
+	function paintState(): State {
+		if (hasItems(shelves)) return 'ready';
+		return isWarming(shelves) ? 'loading' : 'empty';
+	}
+
+	async function openGate() {
+		const [lastfm, listenbrainz] = await Promise.allSettled([
+			cachedApi.getLastfmStatus(),
+			cachedApi.getListenBrainzStatus()
+		]);
+		gateOpen =
+			(lastfm.status === 'fulfilled' && Boolean(lastfm.value.recommendations)) ||
+			(listenbrainz.status === 'fulfilled' && Boolean(listenbrainz.value.recommendations));
+		if (!gateOpen) {
+			viewState = 'hidden';
+			return;
+		}
+		// The subscription has almost certainly already fired by now, and it
+		// returns early while the gate is shut, so this is what paints the first
+		// frame once it opens.
+		if (viewState !== 'error') viewState = paintState();
+	}
+
+	function retry(): void {
+		errorMsg = '';
+		if (!hasItems(shelves)) viewState = 'loading';
+		void recommendationsQuery.refresh().catch(() => {});
+	}
 
 	$effect(() => {
 		for (const shelf of visibleShelves) {
@@ -125,52 +210,6 @@
 		}, ROTATE_MS);
 		return () => clearInterval(timer);
 	});
-
-	async function load() {
-		const seq = ++loadSeq;
-		errorMsg = '';
-		try {
-			// The recommendations request goes out alongside the status checks
-			// rather than behind them. Gating it on the gate meant a two-stage
-			// waterfall on every mount even though both statuses are already in
-			// the persisted query cache, and the recommendations call is by far
-			// the slow one. If the gate turns out to be closed the response is
-			// simply discarded; the request is cached either way, so the only
-			// cost is a call we would have made moments later anyway.
-			const statuses = Promise.allSettled([
-				cachedApi.getLastfmStatus(),
-				cachedApi.getListenBrainzStatus()
-			]);
-			const recommendations = cachedApi.getHomeRecommendations();
-			// Nothing else awaits this promise on the gate-closed path, and an
-			// unhandled rejection would surface as a console error.
-			recommendations.catch(() => {});
-
-			const [lastfm, listenbrainz] = await statuses;
-			if (seq !== loadSeq) return;
-			const lastfmCanRecommend = lastfm.status === 'fulfilled' && Boolean(lastfm.value.recommendations);
-			const listenbrainzCanRecommend = listenbrainz.status === 'fulfilled' && Boolean(listenbrainz.value.recommendations);
-			if (!lastfmCanRecommend && !listenbrainzCanRecommend) {
-				viewState = 'hidden';
-				return;
-			}
-
-			viewState = 'loading';
-			const response = await recommendations;
-			if (seq !== loadSeq) return;
-			shelves = response.shelves ?? [];
-			currentIndexes = {};
-			viewState = shelves.some((shelf) => shelf.items.length > 0) ? 'ready' : 'empty';
-		} catch (err) {
-			if (seq !== loadSeq) return;
-			if (err instanceof ApiError && err.status === 404) {
-				viewState = 'hidden';
-				return;
-			}
-			viewState = 'error';
-			errorMsg = err instanceof Error ? err.message : 'Recommendations could not be loaded.';
-		}
-	}
 
 	function shelfKey(shelf: ProviderRecommendationShelf): string {
 		return `${shelf.provider}:${shelf.entity_type ?? 'track'}:${shelf.title}`;
@@ -621,7 +660,7 @@
 		/>
 		<EmptyState title="Could not load recommendations" copy={errorMsg}>
 			{#snippet actions()}
-				<button type="button" class="btn btn-glass" onclick={load}>Retry</button>
+				<button type="button" class="btn btn-glass" onclick={retry}>Retry</button>
 			{/snippet}
 		</EmptyState>
 	</section>

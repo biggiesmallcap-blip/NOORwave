@@ -771,6 +771,8 @@ impl LastFmClient {
     }
 
     async fn get_json(&self, params: &[(&str, String)]) -> Result<Value> {
+        lastfm_rate_gate().await;
+
         let mut query = vec![
             ("api_key", self.api_key.clone()),
             ("format", "json".to_string()),
@@ -800,6 +802,44 @@ impl LastFmClient {
             .context("Last.fm response body failed")?;
         decode_lastfm_response_body(status, &body)
     }
+}
+
+/// Minimum spacing between Last.fm calls, process-wide.
+///
+/// Last.fm documents roughly five requests a second per key. Nothing enforced
+/// that. Tag enrichment paced itself with its own 200ms sleep, but the Home
+/// recommendation fan-out ran six wide with no spacing at all, so the two
+/// together burst well past the ceiling on any cold start that overlapped an
+/// enrichment sweep. Every fan-out call site treats a refusal as "no results",
+/// so the visible symptom was never an error - it was half-empty shelves that
+/// then re-fetched on a short lease and did it again.
+const LASTFM_MIN_CALL_SPACING: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// The instant the next Last.fm call is allowed to go out.
+fn lastfm_next_slot() -> &'static tokio::sync::Mutex<tokio::time::Instant> {
+    static NEXT_SLOT: std::sync::OnceLock<tokio::sync::Mutex<tokio::time::Instant>> =
+        std::sync::OnceLock::new();
+    NEXT_SLOT.get_or_init(|| tokio::sync::Mutex::new(tokio::time::Instant::now()))
+}
+
+/// Wait for this call's turn on the shared budget.
+///
+/// Ticket-based rather than a sleeping lock: each caller claims the next free
+/// slot, releases the mutex, and then sleeps to its own slot, so N concurrent
+/// callers spread across N slots instead of all waking at once.
+///
+/// This is a floor, not an addition. A caller already pacing itself at or below
+/// the budget - enrichment's serial loop - finds the next slot already in the
+/// past and waits for nothing, so this changes nothing when it runs alone and
+/// only interleaves it fairly when the fan-out is running too.
+async fn lastfm_rate_gate() {
+    let scheduled = {
+        let mut next = lastfm_next_slot().lock().await;
+        let scheduled = (*next).max(tokio::time::Instant::now());
+        *next = scheduled + LASTFM_MIN_CALL_SPACING;
+        scheduled
+    };
+    tokio::time::sleep_until(scheduled).await;
 }
 
 fn utf8_preview(body: &str, max_bytes: usize) -> &str {

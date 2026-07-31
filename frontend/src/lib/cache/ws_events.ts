@@ -71,6 +71,15 @@ export function applyCacheUpdateForWsMessage(message: CacheWsMessage): void {
 		return;
 	}
 
+	if (message.type === 'home_recommendations_updated') {
+		// The Home fan-out runs detached now, so this is how a shelf that finished
+		// building reaches the page. It fires several times per rebuild (once per
+		// shelf published), hence the generous debounce - the shelves land seconds
+		// apart and there is no value in refetching for each one separately.
+		debounceRefetch(cacheKeys.homeRecommendations(), 500);
+		return;
+	}
+
 	if (message.type === 'musicbrainz_enriched') {
 		debounceRefetch(cacheKeys.settings.musicBrainzStatus(), 250);
 		invalidateGenreCaches();

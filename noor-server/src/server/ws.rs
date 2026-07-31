@@ -120,6 +120,11 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
                         "type": "discovery_space_refreshed",
                         "seed_track_id": seed_track_id,
                     }),
+                    AppEvent::HomeRecommendationsUpdated { provider, complete } => json!({
+                        "type": "home_recommendations_updated",
+                        "provider": provider,
+                        "complete": complete,
+                    }),
                     AppEvent::AudioExclusiveEngaged { device, transport_format } => json!({
                         "type": "audio_exclusive_engaged",
                         "device": device,

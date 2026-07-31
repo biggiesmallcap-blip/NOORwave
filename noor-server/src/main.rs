@@ -239,6 +239,17 @@ pub enum AppEvent {
         pairs: i64,
     },
     MusicBrainzEnriched,
+    /// A provider recommendation shelf finished, or partly finished, rebuilding
+    /// in the background.
+    ///
+    /// The Home fan-out no longer runs on the request that asks for it, so this
+    /// is how the client learns there is something new to paint. It fires more
+    /// than once per rebuild: `complete` is false for the progressive writes
+    /// that land while the remaining shelves are still being built.
+    HomeRecommendationsUpdated {
+        provider: String,
+        complete: bool,
+    },
     TrackChanged {
         track_id: i64,
     },
