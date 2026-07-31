@@ -52,7 +52,17 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          cache-targets: false
+          # Cache compiled deps, not just the registry. Without this every run
+          # recompiled the whole dependency tree (rust-test ~6 min, clippy ~4
+          # min, on every PR and every master push). This was previously off to
+          # protect the 10 GB cache budget, which is no longer scarce: 8.96 GB
+          # of it was unreachable tag-scoped release caches, now reclaimed.
+          cache-targets: true
+          # Save only from master. A cache saved on a PR ref is scoped to that
+          # PR and readable by nothing else -- the same ref-scoping trap that
+          # let the release workflow accumulate 42 dead caches. PRs restore the
+          # master-scoped cache instead of each writing their own.
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Test workspace
         run: cargo test --workspace --locked
@@ -84,7 +94,17 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          cache-targets: false
+          # Cache compiled deps, not just the registry. Without this every run
+          # recompiled the whole dependency tree (rust-test ~6 min, clippy ~4
+          # min, on every PR and every master push). This was previously off to
+          # protect the 10 GB cache budget, which is no longer scarce: 8.96 GB
+          # of it was unreachable tag-scoped release caches, now reclaimed.
+          cache-targets: true
+          # Save only from master. A cache saved on a PR ref is scoped to that
+          # PR and readable by nothing else -- the same ref-scoping trap that
+          # let the release workflow accumulate 42 dead caches. PRs restore the
+          # master-scoped cache instead of each writing their own.
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked

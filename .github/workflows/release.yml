@@ -98,6 +98,13 @@ jobs:
           # is the release bottleneck; the other jobs stay registry-only to keep
           # the repo's 10 GB cache budget from thrashing pr-check's caches.
           cache-targets: true
+          # Restore the cache warm-cache.yml saves on master. Actions caches are
+          # ref-scoped, and this workflow only ever runs on a tag, so a cache
+          # saved here was scoped to that one tag and could never be read again
+          # -- every release rebuilt from scratch and left 751 MB of garbage
+          # behind. Restore from master via the shared key; never save.
+          shared-key: release-windows
+          save-if: false
 
       - name: Sync version from tag
         shell: bash
@@ -247,6 +254,11 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           cache-targets: false
+          # Restore the cache warm-cache.yml saves on master. Actions caches
+          # are ref-scoped and this workflow only runs on a tag, so anything
+          # saved here was readable by that one tag and nothing else.
+          shared-key: release-linux
+          save-if: false
 
       - name: Sync version from tag
         run: |
@@ -321,6 +333,11 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           cache-targets: false
+          # Restore the cache warm-cache.yml saves on master. Actions caches
+          # are ref-scoped and this workflow only runs on a tag, so anything
+          # saved here was readable by that one tag and nothing else.
+          shared-key: release-macos-arm64
+          save-if: false
 
       - name: Sync version from tag
         run: |
@@ -394,7 +411,16 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          cache-targets: false
+          # Targets cached (matching warm-cache.yml's macos-x64 job): once
+          # Windows restores warm, this job at ~13 min becomes the release's
+          # critical path. linux and macos-arm64 stay registry-only so four full
+          # target caches cannot refill the 10 GB budget.
+          cache-targets: true
+          # Restore the cache warm-cache.yml saves on master. Actions caches
+          # are ref-scoped and this workflow only runs on a tag, so anything
+          # saved here was readable by that one tag and nothing else.
+          shared-key: release-macos-x64
+          save-if: false
 
       - name: Sync version from tag
         run: |
