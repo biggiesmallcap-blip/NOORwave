@@ -9,16 +9,16 @@
 		"check": "tsc --noEmit"
 	},
 	"dependencies": {
-		"@remotion/cli": "^4.0.484",
-		"@remotion/renderer": "^4.0.484",
-		"react": "^19.2.7",
-		"react-dom": "^19.2.7",
-		"remotion": "^4.0.484"
+		"@remotion/cli": "^4.0.501",
+		"@remotion/renderer": "^4.0.501",
+		"react": "^19.2.8",
+		"react-dom": "^19.2.8",
+		"remotion": "^4.0.501"
 	},
 	"devDependencies": {
 		"@types/react": "^19.2.17",
 		"@types/react-dom": "^19.2.3",
-		"typescript": "^6.0.3"
+		"typescript": "^7.0.2"
 	},
 	"pnpm": {
 		"overrides": {
