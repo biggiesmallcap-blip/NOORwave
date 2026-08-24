@@ -33,7 +33,7 @@
 		"stylelint-config-standard": "^40.0.0",
 		"svelte": "^5.56.10",
 		"svelte-check": "^4.7.6",
-		"typescript": "^7.0.2",
+		"typescript": "^6.0.3",
 		"vite": "^8.2.2",
 		"vitest": "^4.1.11"
 	},
