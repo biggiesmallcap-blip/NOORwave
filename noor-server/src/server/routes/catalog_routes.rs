@@ -37,6 +37,7 @@ const ARTIST_ALBUM_GROUP_TIMEOUT: Duration = Duration::from_secs(15);
 /// videos, similar, bio, profile). Same queue-inclusive semantics as
 /// `ARTIST_ALBUM_GROUP_TIMEOUT`.
 const ARTIST_SINGLE_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+const ARTIST_CORE_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Backoff before the one bounded retry a failed artist fetch group gets.
 /// The retry runs inside the group deadline, so worst-case latency is still
@@ -49,6 +50,7 @@ const ARTIST_FETCH_RETRY_BACKOFF: Duration = Duration::from_millis(400);
 /// Library flags (local_id / in_library) are re-resolved on every cache hit,
 /// so imports show up immediately despite the TTL.
 const ARTIST_PAYLOAD_CACHE_TTL: Duration = Duration::from_secs(120);
+const ARTIST_PARTIAL_PAYLOAD_CACHE_TTL: Duration = Duration::from_secs(30);
 
 /// How stale a cached payload may be and still be served when a live rebuild
 /// comes back completely empty-handed (TIDAL outage / rate-limit lockout):
@@ -60,7 +62,56 @@ const ARTIST_PAYLOAD_CACHE_CAP: usize = 48;
 
 struct CachedArtistPayload {
     built_at: Instant,
+    fresh_for: Duration,
     payload: Value,
+}
+
+struct CachedArtistCorePayload {
+    built_at: Instant,
+    payload: Value,
+}
+
+fn artist_core_payload_cache() -> &'static Mutex<HashMap<i64, CachedArtistCorePayload>> {
+    static CACHE: OnceLock<Mutex<HashMap<i64, CachedArtistCorePayload>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_artist_core_payload(tidal_artist_id: i64, max_age: Duration) -> Option<Value> {
+    let cache = artist_core_payload_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache
+        .get(&tidal_artist_id)
+        .filter(|entry| entry.built_at.elapsed() <= max_age)
+        .map(|entry| entry.payload.clone())
+}
+
+fn store_artist_core_payload(tidal_artist_id: i64, payload: Value) {
+    let mut cache = artist_core_payload_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache.len() >= ARTIST_PAYLOAD_CACHE_CAP && !cache.contains_key(&tidal_artist_id) {
+        if let Some(oldest) = cache
+            .iter()
+            .max_by_key(|(_, entry)| entry.built_at.elapsed())
+            .map(|(id, _)| *id)
+        {
+            cache.remove(&oldest);
+        }
+    }
+    cache.insert(
+        tidal_artist_id,
+        CachedArtistCorePayload {
+            built_at: Instant::now(),
+            payload,
+        },
+    );
+}
+
+fn artist_core_flights() -> &'static crate::services::tidal::singleflight::KeyedSingleFlight<i64> {
+    static FLIGHTS: OnceLock<crate::services::tidal::singleflight::KeyedSingleFlight<i64>> =
+        OnceLock::new();
+    FLIGHTS.get_or_init(Default::default)
 }
 
 fn artist_payload_cache() -> &'static Mutex<HashMap<i64, CachedArtistPayload>> {
@@ -74,11 +125,19 @@ fn cached_artist_payload(tidal_artist_id: i64, max_age: Duration) -> Option<Valu
         .unwrap_or_else(|p| p.into_inner());
     cache
         .get(&tidal_artist_id)
-        .filter(|entry| entry.built_at.elapsed() <= max_age)
+        .filter(|entry| {
+            let age = entry.built_at.elapsed();
+            let stale_fallback_read = max_age > ARTIST_PAYLOAD_CACHE_TTL;
+            age <= max_age && (stale_fallback_read || age <= entry.fresh_for)
+        })
         .map(|entry| entry.payload.clone())
 }
 
 fn store_artist_payload(tidal_artist_id: i64, payload: Value) {
+    store_artist_payload_for(tidal_artist_id, payload, ARTIST_PAYLOAD_CACHE_TTL);
+}
+
+fn store_artist_payload_for(tidal_artist_id: i64, payload: Value, fresh_for: Duration) {
     let mut cache = artist_payload_cache()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
@@ -95,9 +154,20 @@ fn store_artist_payload(tidal_artist_id: i64, payload: Value) {
         tidal_artist_id,
         CachedArtistPayload {
             built_at: Instant::now(),
+            fresh_for,
             payload,
         },
     );
+}
+
+fn artist_payload_cache_ttl(available: bool, sections_failed: &[&str]) -> Option<Duration> {
+    if !available {
+        None
+    } else if sections_failed.is_empty() {
+        Some(ARTIST_PAYLOAD_CACHE_TTL)
+    } else {
+        Some(ARTIST_PARTIAL_PAYLOAD_CACHE_TTL)
+    }
 }
 
 /// Per-artist single-flight lock so concurrent loads of the same artist (a
@@ -508,6 +578,31 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         assert!(cache.len() <= ARTIST_PAYLOAD_CACHE_CAP);
+    }
+
+    #[test]
+    fn artist_core_cache_is_independent_from_the_rich_payload_cache() {
+        let id = -993_001;
+        store_artist_core_payload(id, json!({ "artist_name": "Core" }));
+
+        assert_eq!(
+            cached_artist_core_payload(id, Duration::from_secs(60)).unwrap()["artist_name"],
+            json!("Core")
+        );
+        assert!(cached_artist_payload(id, Duration::from_secs(60)).is_none());
+    }
+
+    #[test]
+    fn partial_artist_payloads_receive_a_short_cache_window() {
+        assert_eq!(
+            artist_payload_cache_ttl(true, &["bio"]),
+            Some(ARTIST_PARTIAL_PAYLOAD_CACHE_TTL)
+        );
+        assert_eq!(
+            artist_payload_cache_ttl(true, &[]),
+            Some(ARTIST_PAYLOAD_CACHE_TTL)
+        );
+        assert_eq!(artist_payload_cache_ttl(false, &["profile"]), None);
     }
 }
 
@@ -1009,6 +1104,155 @@ async fn fetch_tidal_artist_batch(client: &TidalClient, tidal_artist_id: i64) ->
     }
 }
 
+pub(super) async fn build_tidal_artist_core_payload(
+    state: &SharedState,
+    client: &TidalClient,
+    tidal_artist_id: i64,
+    tokens: &TidalTokens,
+) -> Value {
+    if let Some(hit) = cached_artist_core_payload(tidal_artist_id, ARTIST_PAYLOAD_CACHE_TTL) {
+        return hit;
+    }
+
+    artist_core_flights()
+        .get_or_build(
+            tidal_artist_id,
+            || cached_artist_core_payload(tidal_artist_id, ARTIST_PAYLOAD_CACHE_TTL),
+            || async {
+                let payload = build_uncached_tidal_artist_core_payload(
+                    state,
+                    client,
+                    tidal_artist_id,
+                    tokens,
+                )
+                .await;
+                if payload["available"].as_bool().unwrap_or(false) {
+                    store_artist_core_payload(tidal_artist_id, payload.clone());
+                }
+                Ok::<Value, std::convert::Infallible>(payload)
+            },
+        )
+        .await
+        .unwrap_or_else(|never| match never {})
+}
+
+async fn build_uncached_tidal_artist_core_payload(
+    state: &SharedState,
+    client: &TidalClient,
+    tidal_artist_id: i64,
+    tokens: &TidalTokens,
+) -> Value {
+    async fn fetch_core(
+        client: &TidalClient,
+        tidal_artist_id: i64,
+    ) -> (
+        anyhow::Result<TidalPaginatedResponse<TidalTrack>>,
+        anyhow::Result<TidalArtist>,
+    ) {
+        tokio::join!(
+            bounded_artist_fetch("core-top-tracks", ARTIST_CORE_FETCH_TIMEOUT, || {
+                client.get_artist_top_tracks(tidal_artist_id, 10, 0)
+            }),
+            bounded_artist_fetch("core-profile", ARTIST_CORE_FETCH_TIMEOUT, || {
+                client.get_artist(tidal_artist_id)
+            })
+        )
+    }
+
+    let (mut top_res, mut profile_res) = fetch_core(client, tidal_artist_id).await;
+    let all_failed = top_res.is_err() && profile_res.is_err();
+    let looks_like_auth = top_res.as_ref().err().is_some_and(error_looks_like_auth)
+        && profile_res
+            .as_ref()
+            .err()
+            .is_some_and(error_looks_like_auth);
+    if all_failed && looks_like_auth {
+        if let Ok(retry_client) = recover_tidal_client(state, tokens).await {
+            (top_res, profile_res) = fetch_core(&retry_client, tidal_artist_id).await;
+        }
+    }
+
+    let available = top_res.is_ok() || profile_res.is_ok();
+    let sections_failed: Vec<&str> = [
+        ("top_tracks", top_res.is_err()),
+        ("profile", profile_res.is_err()),
+    ]
+    .into_iter()
+    .filter_map(|(name, failed)| failed.then_some(name))
+    .collect();
+
+    let artist_name = profile_res
+        .as_ref()
+        .ok()
+        .map(|artist| artist.name.clone())
+        .or_else(|| {
+            top_res
+                .as_ref()
+                .ok()
+                .and_then(|tracks| tracks.items.first().map(|track| track.artist.name.clone()))
+        });
+    let picture_id = profile_res
+        .as_ref()
+        .ok()
+        .and_then(|artist| artist.picture.clone())
+        .or_else(|| {
+            top_res.as_ref().ok().and_then(|tracks| {
+                tracks
+                    .items
+                    .iter()
+                    .find_map(|track| track.artist.picture.clone())
+            })
+        });
+    let picture_url = TidalClient::get_artwork_url(&picture_id, 320);
+
+    let top_tracks_payload: Vec<Value> = match top_res {
+        Ok(response) => {
+            let items = response.items;
+            let top_ids: Vec<i64> = items.iter().map(|track| track.id).collect();
+            let library_states = {
+                let app = state.read().await;
+                app.db
+                    .with_conn(|conn| queries::get_tidal_track_library_states(conn, &top_ids))
+                    .unwrap_or_default()
+            };
+            items
+                .into_iter()
+                .map(|track| {
+                    let artwork = track
+                        .album
+                        .as_ref()
+                        .and_then(|album| TidalClient::get_artwork_url(&album.cover, 160));
+                    let local = library_states.get(&track.id).copied();
+                    json!({
+                        "tidal_id": track.id,
+                        "title": track.title,
+                        "duration_ms": track.duration * 1000,
+                        "artwork_url": artwork,
+                        "album_title": track.album.as_ref().map(|album| album.title.clone()),
+                        "album_tidal_id": track.album.as_ref().map(|album| album.id),
+                        "track_number": track.track_number,
+                        "disc_number": track.volume_number,
+                        "artist_name": track.artist.name,
+                        "artist_tidal_id": track.artist.id,
+                        "track_id": local.map(|state| state.local_id).unwrap_or(0),
+                        "is_in_library": local.is_some(),
+                        "is_favorite": local.map(|state| state.is_favorite).unwrap_or(false),
+                    })
+                })
+                .collect()
+        }
+        Err(_) => Vec::new(),
+    };
+
+    json!({
+        "artist_name": artist_name,
+        "picture_url": picture_url,
+        "top_tracks": top_tracks_payload,
+        "available": available,
+        "sections_failed": sections_failed,
+    })
+}
+
 /// Build the rich artist payload (categorized albums, top tracks, videos,
 /// similar artists, bio, picture) straight from a TIDAL artist id. Shared by
 /// the library discography route (which resolves a local id first) and the
@@ -1041,7 +1285,8 @@ pub(super) async fn build_tidal_artist_payload(
         return hit;
     }
 
-    let mut batch = fetch_tidal_artist_batch(client, tidal_artist_id).await;
+    let background_client = client.for_background_work();
+    let mut batch = fetch_tidal_artist_batch(&background_client, tidal_artist_id).await;
 
     // When every fetch failed and the errors smell like auth, the session
     // expired mid-flight. Recover once and refetch with a fresh client - the
@@ -1050,7 +1295,8 @@ pub(super) async fn build_tidal_artist_payload(
     if !batch.any_ok() && batch.looks_like_auth() {
         match recover_tidal_client(state, tokens).await {
             Ok(retry_client) => {
-                batch = fetch_tidal_artist_batch(&retry_client, tidal_artist_id).await;
+                let background_retry_client = retry_client.for_background_work();
+                batch = fetch_tidal_artist_batch(&background_retry_client, tidal_artist_id).await;
             }
             Err(e) => {
                 tracing::warn!(
@@ -1313,11 +1559,12 @@ pub(super) async fn build_tidal_artist_payload(
         "sections_failed": sections_failed,
     });
 
-    if available && sections_failed.is_empty() {
-        // Only complete payloads enter the warm cache; caching a partial one
-        // would pin its missing shelves for the whole TTL. A degraded-but-
-        // available payload is served once and rebuilt on the next visit.
-        store_artist_payload(tidal_artist_id, payload.clone());
+    if let Some(cache_ttl) = artist_payload_cache_ttl(available, &sections_failed) {
+        // Complete payloads use the normal warm window. Partial payloads get a
+        // short window so a routine optional failure (notably bio 404s) does
+        // not immediately repeat the entire fan-out, while missing shelves
+        // still retry soon.
+        store_artist_payload_for(tidal_artist_id, payload.clone(), cache_ttl);
     } else if let Some(mut stale) =
         cached_artist_payload(tidal_artist_id, ARTIST_PAYLOAD_STALE_SERVE_MAX)
     {

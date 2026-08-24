@@ -7,4 +7,5 @@ pub mod import;
 pub mod mutations;
 pub mod play_reporter;
 pub mod repair;
+pub mod singleflight;
 pub mod stream;

@@ -23,7 +23,9 @@
 		startArtistRadio,
 	} from '$lib/stores/player';
 	import { matchCommands, parseSlashInput } from '$lib/search/commands';
+	import { createLatestRequestGate } from '$lib/search/latest_request';
 	import { mergeLocalIntoTidal } from '$lib/search/merge_local';
+	import { PRIMARY_SEARCH_DEBOUNCE_MS, SECONDARY_PROVIDER_DELAY_MS } from '$lib/search/search_timing';
 	import { parseQuery } from '$lib/search/query_parser';
 	import { hasAnyFilter } from '$lib/search/audio_params';
 	import { contextMenu, openMenuAtElement, type MenuItem } from '$lib/stores/context_menu';
@@ -42,6 +44,7 @@
 	let searchGeneration = $state(0);
 	let debounceTimer: ReturnType<typeof setTimeout>;
 	let rowEls: (HTMLElement | null)[] = $state([]);
+	const requestGate = createLatestRequestGate();
 
 	const isSlashMode = $derived(query.startsWith('/'));
 	const slashMatches = $derived(isSlashMode ? matchCommands(query) : []);
@@ -79,17 +82,23 @@
 
 	function close() {
 		clearTimeout(debounceTimer);
+		requestGate.invalidate();
 		searchGeneration += 1;
 		loading = false;
 		commandPaletteOpen.set(false);
 	}
 
-	function isCurrentPaletteSearch(searchQuery: string, generation: number) {
-		return $commandPaletteOpen && searchGeneration === generation && query.trim() === searchQuery && !isSlashMode;
+	function isCurrentPaletteSearch(searchQuery: string, generation: number, requestToken: number) {
+		return requestGate.isCurrent(requestToken)
+			&& $commandPaletteOpen
+			&& searchGeneration === generation
+			&& query.trim() === searchQuery
+			&& !isSlashMode;
 	}
 
 	onDestroy(() => {
 		clearTimeout(debounceTimer);
+		requestGate.invalidate();
 		searchGeneration += 1;
 	});
 
@@ -99,45 +108,53 @@
 		artists = next.artists.slice(0, 3);
 	}
 
-	function runPaletteSearch(searchQuery: string, generation: number) {
+	function runPaletteSearch(
+		searchQuery: string,
+		generation: number,
+		requestToken: number,
+		signal: AbortSignal,
+	) {
 		let visibleResults: TidalSearchResults = emptyTidalResults;
-		const localPromise = api.search(searchQuery, 6);
+		const localPromise = api.search(searchQuery, 6, signal);
 
 		localPromise
 			.then((localResults) => {
-				if (!isCurrentPaletteSearch(searchQuery, generation)) return;
+				if (!isCurrentPaletteSearch(searchQuery, generation, requestToken)) return;
 				visibleResults = mergeLocalIntoTidal(localResults, visibleResults);
 				applyPaletteResults(visibleResults);
 			})
 			.catch(() => undefined);
 
-		api.searchTidal(searchQuery, 6)
+		api.searchTidal(searchQuery, 6, signal)
 			.then((tidalResults) => {
-				if (!isCurrentPaletteSearch(searchQuery, generation)) return;
+				if (!isCurrentPaletteSearch(searchQuery, generation, requestToken)) return;
 				visibleResults = tidalResults;
 				localPromise
 					.then((localResults) => {
-						if (!isCurrentPaletteSearch(searchQuery, generation)) return;
+						if (!isCurrentPaletteSearch(searchQuery, generation, requestToken)) return;
 						visibleResults = mergeLocalIntoTidal(localResults, tidalResults);
 						applyPaletteResults(visibleResults);
 					})
 					.catch(() => {
-						if (!isCurrentPaletteSearch(searchQuery, generation)) return;
+						if (!isCurrentPaletteSearch(searchQuery, generation, requestToken)) return;
 						applyPaletteResults(tidalResults);
 					});
 			})
 			.catch(() => undefined)
 			.finally(() => {
-				if (!isCurrentPaletteSearch(searchQuery, generation)) return;
+				if (!isCurrentPaletteSearch(searchQuery, generation, requestToken)) return;
 				loading = false;
 			});
 
-		api.searchSpotifyPlaylists(searchQuery, 6)
-			.then((playlists) => {
-				if (!isCurrentPaletteSearch(searchQuery, generation)) return;
-				spotifyPlaylists = playlists.slice(0, 4);
-			})
-			.catch(() => undefined);
+		setTimeout(() => {
+			if (!isCurrentPaletteSearch(searchQuery, generation, requestToken)) return;
+			api.searchSpotifyPlaylists(searchQuery, 6, signal)
+				.then((playlists) => {
+					if (!isCurrentPaletteSearch(searchQuery, generation, requestToken)) return;
+					spotifyPlaylists = playlists.slice(0, 4);
+				})
+				.catch(() => undefined);
+		}, SECONDARY_PROVIDER_DELAY_MS);
 	}
 
 	function openFilteredSearch() {
@@ -148,6 +165,7 @@
 
 	function onInput() {
 		clearTimeout(debounceTimer);
+		requestGate.invalidate();
 		searchGeneration += 1;
 		cursor = 0;
 		if (!query.trim() || isSlashMode || hasFilterSyntax) {
@@ -162,9 +180,10 @@
 		const searchQuery = query.trim();
 		const generation = searchGeneration;
 		debounceTimer = setTimeout(() => {
-			if (!isCurrentPaletteSearch(searchQuery, generation)) return;
-			void runPaletteSearch(searchQuery, generation);
-		}, 120);
+			if (!$commandPaletteOpen || searchGeneration !== generation || query.trim() !== searchQuery || isSlashMode) return;
+			const request = requestGate.begin();
+			void runPaletteSearch(searchQuery, generation, request.token, request.signal);
+		}, PRIMARY_SEARCH_DEBOUNCE_MS);
 	}
 
 	async function selectTrack(track: TidalSearchTrack) {

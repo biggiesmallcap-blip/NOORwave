@@ -9,6 +9,7 @@
 		type TidalPlayable
 	} from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
+	import { ARTIST_ENRICHMENT_DELAY_MS } from '$lib/artist/artist_loading';
 	import { letterColor } from '$lib/utils/color';
 	import {
 		playArtist,
@@ -189,11 +190,23 @@
 	// same markup below renders without a local artist row. Served through
 	// cachedApi: in-flight dedupe plus stale-while-revalidate, so revisiting
 	// an artist renders instantly instead of refetching the whole profile.
-	async function loadTidalProfile(tidalId: number) {
-		const seq = ++tidalLoadSeq;
+	async function loadTidalCore(tidalId: number, seq: number) {
+		try {
+			const res = await cachedApi.getTidalArtistCore(tidalId);
+			if (seq !== tidalLoadSeq) return;
+			tidalProfileName = res.artist_name ?? tidalProfileName;
+			tidalTopTracks = res.top_tracks ?? tidalTopTracks;
+			tidalAvailable = tidalAvailable || res.available;
+			if (res.picture_url) tidalPictureUrl = res.picture_url;
+			if (res.available) loading = false;
+		} catch (err) {
+			if (seq !== tidalLoadSeq) return;
+			console.error('Failed to load TIDAL artist core', err);
+		}
+	}
+
+	async function loadTidalProfile(tidalId: number, seq: number) {
 		tidalLoading = true;
-		loading = true;
-		error = null;
 		try {
 			const res = await cachedApi.getTidalArtistProfile(tidalId);
 			if (seq !== tidalLoadSeq) return;
@@ -203,19 +216,19 @@
 			tidalVideos = res.videos ?? [];
 			tidalSimilarArtists = res.similar_artists ?? [];
 			tidalBio = res.bio ?? null;
-			tidalAvailable = res.available ?? true;
+			tidalAvailable = tidalAvailable || (res.available ?? true);
 			tidalSectionsFailed = res.sections_failed ?? [];
 			if (res.picture_url) tidalPictureUrl = res.picture_url;
 			// TIDAL-mode artists have no local-track fallback, so an
 			// all-fetches-failed response (`available: false`) means TIDAL is
 			// unreachable, not that the artist is missing. Surface it as a load
 			// error so the empty state shows instead of a hollow header.
-			if (!tidalAvailable) {
+			if (!tidalAvailable && !tidalProfileName && tidalTopTracks.length === 0) {
 				error = "Couldn't reach TIDAL. Try again.";
 			}
 		} catch (err) {
 			if (seq !== tidalLoadSeq) return;
-			error = String(err);
+			if (!tidalProfileName && tidalTopTracks.length === 0) error = String(err);
 		} finally {
 			if (seq === tidalLoadSeq) {
 				tidalLoading = false;
@@ -244,7 +257,16 @@
 			void load(id);
 			void loadDiscography(id);
 		} else {
-			void loadTidalProfile(source.tidalArtistId);
+			const tidalId = source.tidalArtistId;
+			const seq = ++tidalLoadSeq;
+			loading = true;
+			tidalLoading = true;
+			error = null;
+			void loadTidalCore(tidalId, seq);
+			setTimeout(() => {
+				if (seq !== tidalLoadSeq) return;
+				void loadTidalProfile(tidalId, seq);
+			}, ARTIST_ENRICHMENT_DELAY_MS);
 		}
 	});
 

@@ -15,12 +15,15 @@ describe('TIDAL artist playback contract', () => {
 
 	test('ignores stale TIDAL profile responses', () => {
 		expect(source).toContain('let tidalLoadSeq = 0');
-		expect(source).toContain('async function loadTidalProfile(tidalId: number)');
-		expect(source).toContain('const seq = ++tidalLoadSeq');
+		expect(source).toContain('async function loadTidalCore(tidalId: number, seq: number)');
+		expect(source).toContain('async function loadTidalProfile(tidalId: number, seq: number)');
+		expect(source).toContain('const seq = ++tidalLoadSeq;');
 		// Served through the cache layer: in-flight dedupe + instant re-visits.
+		expect(source).toContain('const res = await cachedApi.getTidalArtistCore(tidalId)');
 		expect(source).toContain('const res = await cachedApi.getTidalArtistProfile(tidalId)');
 		expect(source).toContain('if (seq !== tidalLoadSeq) return');
-		expect(source).toContain('void loadTidalProfile(source.tidalArtistId)');
+		expect(source).toContain('void loadTidalCore(tidalId, seq);');
+		expect(source).toContain('void loadTidalProfile(tidalId, seq);');
 	});
 
 	test('track rows preserve discography metadata with the active artist fallback', () => {

@@ -23,6 +23,7 @@
   import { rotatingWindow } from '$lib/utils/rotation'
   import { canPlayTrack, getPlayableLabel } from '$lib/player/playable'
   import { mergeLocalIntoTidal } from '$lib/search/merge_local'
+  import { PRIMARY_SEARCH_DEBOUNCE_MS, SECONDARY_PROVIDER_DELAY_MS } from '$lib/search/search_timing'
   import { getCachedMosaic, setCachedMosaic, nameToGradient } from '$lib/stores/playlist_artwork_cache'
   import SearchField from '$lib/search/ui/SearchField.svelte'
   import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte'
@@ -36,9 +37,6 @@
   const INITIAL_SEARCH_PAGE_SIZE = 12
   const SECONDARY_SEARCH_PAGE_SIZE = 8
   const LOAD_MORE_PAGE_SIZE = 50
-  const SECONDARY_SPOTIFY_DELAY_MS = 120
-  const ARTIST_ARTWORK_DELAY_MS = 220
-  const ARTIST_ARTWORK_BATCH_SIZE = 4
   const DISCOVERY_PANEL_DELAY_MS = 320
   const PRIMARY_TIDAL_SEARCH_TIMEOUT_MS = 8000
   const SECONDARY_PROVIDER_TIMEOUT_MS = 2500
@@ -113,7 +111,6 @@
   let error = $state<string | null>(null)
   let debounceTimer: ReturnType<typeof setTimeout>
   let secondarySpotifyTimer: (() => void) | null = null
-  let cancelArtistArtworkLoad: (() => void) | null = null
   let cancelDiscoveryPanelLoad: (() => void) | null = null
   // AbortController for in-flight search requests; cancelled on each new input
   // and on route teardown so a slow query doesn't surface a phantom error after
@@ -294,8 +291,6 @@
   }
   let tidalPlaylistResults = $state<TidalSearchPlaylist[]>([])
   let spotifyPlaylistResults = $state<SpotifyPlaylistSearchItem[]>([])
-  let artistDiscographyArtwork = $state<Map<number, string[]>>(new Map())
-  let artistDiscographyArtworkGeneration = 0
 
   type FilterMode = 'all' | 'artists' | 'albums' | 'tracks' | 'library' | 'playlists'
   let filterMode = $state<FilterMode>('all')
@@ -410,11 +405,6 @@
     secondarySpotifyQueued = false
   }
 
-  function clearArtistArtworkLoad() {
-    cancelArtistArtworkLoad?.()
-    cancelArtistArtworkLoad = null
-  }
-
   function clearDiscoveryPanelLoad() {
     cancelDiscoveryPanelLoad?.()
     cancelDiscoveryPanelLoad = null
@@ -433,9 +423,7 @@
   }
 
   function invalidateSearchSideLoads() {
-    clearArtistArtworkLoad()
     clearDiscoveryPanelLoad()
-    artistDiscographyArtworkGeneration += 1
     discoveryLoadSeq += 1
   }
 
@@ -649,7 +637,7 @@
               if (!isCurrentSearch(q, generation, signal)) return
               loadingSpotifyPlaylists = false
             })
-          }, SECONDARY_SPOTIFY_DELAY_MS)
+          }, SECONDARY_PROVIDER_DELAY_MS)
 
           await Promise.allSettled([
             localPromise,
@@ -668,7 +656,7 @@
         if (abortController === controller) abortController = null
         if (!signal.aborted) loading = false
       }
-    }, 120)
+    }, PRIMARY_SEARCH_DEBOUNCE_MS)
   }
 
   function pickRecent(q: string) {
@@ -965,20 +953,6 @@
     return candidates[0].tr
   })
 
-  $effect(() => {
-    clearArtistArtworkLoad()
-    const candidates = sortedArtists.slice(0, ARTIST_ARTWORK_BATCH_SIZE)
-    if (topResult?.kind === 'artist') candidates.unshift(topResult.entry)
-    if (candidates.length === 0) return
-    cancelArtistArtworkLoad = scheduleSearchIdleTask(() => {
-      cancelArtistArtworkLoad = null
-      void loadArtistDiscographyArtwork(candidates)
-    }, ARTIST_ARTWORK_DELAY_MS)
-    return () => {
-      clearArtistArtworkLoad()
-    }
-  })
-
   function topResultHref(top: TopResult): string {
     switch (top.kind) {
       case 'artist':
@@ -1027,19 +1001,13 @@
   }
 
   function artistArtworkSources(artist: TidalSearchArtist): string[] {
-    const localDiscographySources = artist.local_id != null
-      ? (artistDiscographyArtwork.get(artist.local_id) ?? [])
-      : []
-    return [artist.artwork_url, artistFallbackArtwork(artist), ...localDiscographySources]
+    return [artist.artwork_url, artistFallbackArtwork(artist)]
       .filter((url): url is string => typeof url === 'string' && url.length > 0)
       .filter((url, index, list) => list.indexOf(url) === index)
   }
 
   function artistHeroBackgroundSources(artist: TidalSearchArtist): string[] {
-    const localDiscographySources = artist.local_id != null
-      ? (artistDiscographyArtwork.get(artist.local_id) ?? [])
-      : []
-    return [artistFallbackArtwork(artist), ...localDiscographySources, artist.artwork_url]
+    return [artistFallbackArtwork(artist), artist.artwork_url]
       .filter((url): url is string => typeof url === 'string' && url.length > 0)
       .filter((url, index, list) => list.indexOf(url) === index)
   }
@@ -1048,40 +1016,6 @@
     if (top.kind === 'artist') return artistHeroBackgroundSources(top.entry)
     return [top.entry.artwork_url]
       .filter((url): url is string => typeof url === 'string' && url.length > 0)
-  }
-
-  async function loadArtistDiscographyArtwork(artists: TidalSearchArtist[]) {
-    const unique = artists
-      .filter((artist) => artist.local_id != null && !artistDiscographyArtwork.has(artist.local_id))
-      .filter((artist, index, list) => list.findIndex((candidate) => candidate.local_id === artist.local_id) === index)
-      .slice(0, ARTIST_ARTWORK_BATCH_SIZE)
-    if (unique.length === 0) return
-
-    const generation = ++artistDiscographyArtworkGeneration
-    const loaded = await Promise.allSettled(
-      unique.map(async (artist) => {
-        const localId = artist.local_id!
-        const res = await cachedApi.getArtistDiscography(localId)
-        const urls = [
-          res.picture_url,
-          ...res.albums.slice(0, 12).map((album) => album.artwork_url),
-          ...res.top_tracks.slice(0, 8).map((track) => track.artwork_url),
-        ].filter((url): url is string => typeof url === 'string' && url.length > 0)
-        return { localId, urls }
-      }),
-    )
-    if (generation !== artistDiscographyArtworkGeneration) return
-
-    const next = new Map(artistDiscographyArtwork)
-    for (const result of loaded) {
-      if (result.status === 'fulfilled') {
-        next.set(
-          result.value.localId,
-          result.value.urls.filter((url, index, list) => list.indexOf(url) === index),
-        )
-      }
-    }
-    artistDiscographyArtwork = next
   }
 
   function albumMenuItems(album: TidalSearchAlbum): MenuItem[] {

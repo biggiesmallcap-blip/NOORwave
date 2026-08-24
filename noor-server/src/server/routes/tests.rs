@@ -618,6 +618,22 @@ fn tidal_search_limit_is_bounded() {
 }
 
 #[test]
+fn tidal_search_singleflight_key_matches_the_cache_identity() {
+    assert_eq!(
+        tidal_search_flight_key("  Michael Jackson  ", 12, 0),
+        tidal_search_flight_key("michael jackson", 12, 0)
+    );
+    assert_ne!(
+        tidal_search_flight_key("michael jackson", 12, 0),
+        tidal_search_flight_key("michael jackson", 12, 12)
+    );
+    assert_ne!(
+        tidal_search_flight_key("michael jackson", 12, 0),
+        tidal_search_flight_key("michael jackson", 50, 0)
+    );
+}
+
+#[test]
 fn tidal_video_search_query_normalization_short_circuits_blank_input() {
     assert_eq!(normalize_tidal_video_search_query(""), None);
     assert_eq!(normalize_tidal_video_search_query("   "), None);
@@ -7035,6 +7051,34 @@ async fn tidal_artist_profile_positive_id_still_requires_session() {
     assert!(
         error.contains("TIDAL not connected"),
         "expected existing disconnected-session behavior, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn tidal_artist_core_route_is_registered_and_requires_a_session() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/tidal/artists/1/core")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("TIDAL not connected")
     );
 }
 

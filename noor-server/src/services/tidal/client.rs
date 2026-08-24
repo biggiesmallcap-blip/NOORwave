@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, SemaphorePermit, TryAcquireError};
 
 const TIDAL_API_URL: &str = "https://api.tidal.com/v1";
 const TIDAL_ALBUM_TRACKS_PAGE_SIZE: i32 = 100;
@@ -14,21 +14,97 @@ const TIDAL_ALBUM_TRACKS_MAX_PAGES: usize = 20;
 /// snappy UI without bursting; raise if catalog browsing ever feels gated.
 const MAX_INFLIGHT_REQUESTS: usize = 4;
 const REQUEST_LIMITER_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const MAX_BACKGROUND_REQUESTS: usize = 2;
 
-static REQUEST_LIMITER: OnceLock<Semaphore> = OnceLock::new();
-
-fn request_limiter() -> &'static Semaphore {
-    REQUEST_LIMITER.get_or_init(|| Semaphore::new(MAX_INFLIGHT_REQUESTS))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TidalRequestPriority {
+    Interactive,
+    Background,
 }
 
-async fn acquire_request_permit_from(
-    limiter: &Semaphore,
-    wait_timeout: std::time::Duration,
-) -> Result<tokio::sync::SemaphorePermit<'_>> {
-    tokio::time::timeout(wait_timeout, limiter.acquire())
-        .await
-        .context("timed out waiting for the TIDAL request limiter")?
-        .context("TIDAL request limiter closed")
+struct TidalRequestLimiter {
+    total: Semaphore,
+    background: Semaphore,
+}
+
+struct TidalRequestPermits<'a> {
+    _total: SemaphorePermit<'a>,
+    _background: Option<SemaphorePermit<'a>>,
+}
+
+impl TidalRequestLimiter {
+    fn new(total: usize, background: usize) -> Self {
+        Self {
+            total: Semaphore::new(total),
+            background: Semaphore::new(background),
+        }
+    }
+
+    async fn acquire(&self, priority: TidalRequestPriority) -> Result<TidalRequestPermits<'_>> {
+        self.acquire_with_timeout(priority, REQUEST_LIMITER_WAIT_TIMEOUT)
+            .await
+    }
+
+    async fn acquire_with_timeout(
+        &self,
+        priority: TidalRequestPriority,
+        wait_timeout: std::time::Duration,
+    ) -> Result<TidalRequestPermits<'_>> {
+        tokio::time::timeout(wait_timeout, self.acquire_unbounded(priority))
+            .await
+            .context("timed out waiting for the TIDAL request limiter")?
+    }
+
+    async fn acquire_unbounded(
+        &self,
+        priority: TidalRequestPriority,
+    ) -> Result<TidalRequestPermits<'_>> {
+        match priority {
+            TidalRequestPriority::Interactive => {
+                let total = self
+                    .total
+                    .acquire()
+                    .await
+                    .context("TIDAL request limiter closed")?;
+                Ok(TidalRequestPermits {
+                    _total: total,
+                    _background: None,
+                })
+            }
+            TidalRequestPriority::Background => {
+                let background = self
+                    .background
+                    .acquire()
+                    .await
+                    .context("TIDAL background request limiter closed")?;
+                let total = loop {
+                    match self.total.try_acquire() {
+                        Ok(permit) => break permit,
+                        Err(TryAcquireError::NoPermits) => {
+                            // Stay outside the fair total-permit queue so a
+                            // waiting interactive request receives the next
+                            // slot before background fan-out.
+                            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                        }
+                        Err(TryAcquireError::Closed) => {
+                            anyhow::bail!("TIDAL request limiter closed")
+                        }
+                    }
+                };
+                Ok(TidalRequestPermits {
+                    _total: total,
+                    _background: Some(background),
+                })
+            }
+        }
+    }
+}
+
+static REQUEST_LIMITER: OnceLock<TidalRequestLimiter> = OnceLock::new();
+
+fn request_limiter() -> &'static TidalRequestLimiter {
+    REQUEST_LIMITER
+        .get_or_init(|| TidalRequestLimiter::new(MAX_INFLIGHT_REQUESTS, MAX_BACKGROUND_REQUESTS))
 }
 
 #[cfg(test)]
@@ -37,11 +113,18 @@ mod request_limiter_tests {
 
     #[tokio::test]
     async fn request_limiter_wait_is_bounded() {
-        let limiter = Semaphore::new(1);
-        let _held = limiter.acquire().await.unwrap();
-        let error = acquire_request_permit_from(&limiter, std::time::Duration::from_millis(1))
-            .await
-            .expect_err("saturated limiter must time out");
+        let limiter = TidalRequestLimiter::new(1, 1);
+        let _held = limiter.total.acquire().await.unwrap();
+        let result = limiter
+            .acquire_with_timeout(
+                TidalRequestPriority::Interactive,
+                std::time::Duration::from_millis(1),
+            )
+            .await;
+        let error = match result {
+            Ok(_) => panic!("saturated limiter must time out"),
+            Err(error) => error,
+        };
         assert!(error.to_string().contains("timed out"));
     }
 }
@@ -51,6 +134,7 @@ pub struct TidalClient {
     http: reqwest::Client,
     access_token: String,
     country_code: String,
+    request_priority: TidalRequestPriority,
 }
 
 // ─── API Response Types ──────────────────────────────────
@@ -273,7 +357,14 @@ impl TidalClient {
             http,
             access_token,
             country_code,
+            request_priority: TidalRequestPriority::Interactive,
         }
+    }
+
+    pub(crate) fn for_background_work(&self) -> Self {
+        let mut client = self.clone();
+        client.request_priority = TidalRequestPriority::Background;
+        client
     }
 
     /// Convenience constructor that builds a fresh HTTP client. Prefer
@@ -292,8 +383,7 @@ impl TidalClient {
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
         crate::services::tidal::backoff::global().check()?;
 
-        let _permit =
-            acquire_request_permit_from(request_limiter(), REQUEST_LIMITER_WAIT_TIMEOUT).await?;
+        let _permits = request_limiter().acquire(self.request_priority).await?;
 
         tracing::debug!("TIDAL GET {}", url);
         let resp = self
@@ -1821,11 +1911,52 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
     use tracing::{
         Event, Id, Level, Metadata, Subscriber,
         span::{Attributes, Record},
         subscriber::Interest,
     };
+
+    #[tokio::test]
+    async fn interactive_request_wins_the_next_slot_over_queued_background_fanout() {
+        let limiter = Arc::new(TidalRequestLimiter::new(1, 1));
+        let active_background = limiter
+            .acquire(TidalRequestPriority::Background)
+            .await
+            .unwrap();
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let background_limiter = limiter.clone();
+        let background_events = events_tx.clone();
+        let background = tokio::spawn(async move {
+            let _permit = background_limiter
+                .acquire(TidalRequestPriority::Background)
+                .await
+                .unwrap();
+            background_events.send("background").unwrap();
+        });
+        tokio::task::yield_now().await;
+
+        let interactive_limiter = limiter.clone();
+        let interactive = tokio::spawn(async move {
+            let _permit = interactive_limiter
+                .acquire(TidalRequestPriority::Interactive)
+                .await
+                .unwrap();
+            events_tx.send("interactive").unwrap();
+        });
+        tokio::task::yield_now().await;
+
+        drop(active_background);
+
+        let first = tokio::time::timeout(Duration::from_secs(1), events_rx.recv())
+            .await
+            .unwrap();
+        assert_eq!(first, Some("interactive"));
+        interactive.await.unwrap();
+        background.await.unwrap();
+    }
 
     #[derive(Clone, Default)]
     struct RecordingSubscriber {
