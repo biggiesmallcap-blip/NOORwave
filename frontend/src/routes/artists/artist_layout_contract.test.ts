@@ -84,6 +84,19 @@ describe('artist page layout contracts', () => {
 		expect(source).not.toContain('await api.getTidalArtistProfile(tidalId)');
 	});
 
+	test('renders TIDAL artist core data while full shelves continue loading', () => {
+		expect(source).toContain("import { ARTIST_ENRICHMENT_DELAY_MS } from '$lib/artist/artist_loading';");
+		expect(source).toContain('async function loadTidalCore(tidalId: number, seq: number)');
+		expect(source).toContain('await cachedApi.getTidalArtistCore(tidalId)');
+		expect(source).toContain('void loadTidalCore(tidalId, seq);');
+		expect(source).toContain('void loadTidalProfile(tidalId, seq);');
+		expect(source.indexOf('void loadTidalCore(tidalId, seq);')).toBeLessThan(
+			source.indexOf('void loadTidalProfile(tidalId, seq);'),
+		);
+		expect(source).toContain('if (res.available) loading = false;');
+		expect(source).toMatch(/setTimeout\(\(\) => \{[\s\S]*void loadTidalProfile\(tidalId, seq\);[\s\S]*\}, ARTIST_ENRICHMENT_DELAY_MS\);/);
+	});
+
 	test('gives video rail cards the app-owned context menu', () => {
 		expect(source).toContain("import { buildVideoMenu } from '$lib/player/video_menu';");
 		expect(source).toContain('openContextMenu(e, buildVideoMenu(video), video.title);');

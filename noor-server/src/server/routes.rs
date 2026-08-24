@@ -1022,6 +1022,7 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/tidal/playlists/{uuid}/tracks",
             get(tidal_playlist_tracks),
         )
+        .route("/api/tidal/artists/{tidal_id}/core", get(tidal_artist_core))
         .route("/api/tidal/artists/{tidal_id}", get(tidal_artist_profile))
         .route("/api/tidal/logout", post(tidal_logout))
         .route(
@@ -8378,6 +8379,17 @@ fn normalize_tidal_search_limit(limit: Option<i32>) -> i32 {
         .clamp(1, TIDAL_SEARCH_MAX_LIMIT)
 }
 
+fn tidal_search_flight_key(query: &str, fetch_limit: i32, offset: i32) -> String {
+    format!("{}|{}|{}", query.trim().to_lowercase(), fetch_limit, offset)
+}
+
+fn tidal_search_flights() -> &'static crate::services::tidal::singleflight::KeyedSingleFlight<String>
+{
+    static FLIGHTS: OnceLock<crate::services::tidal::singleflight::KeyedSingleFlight<String>> =
+        OnceLock::new();
+    FLIGHTS.get_or_init(Default::default)
+}
+
 fn empty_tidal_search_response() -> Json<Value> {
     Json(json!({
         "tracks": [],
@@ -8514,58 +8526,91 @@ async fn tidal_search(
     let results = if let Some(hit) = cached {
         hit
     } else {
-        let fetched =
-            match search_tidal_catalog_with_timeout(&client, query, fetch_limit, offset).await {
-                Ok(r) => r,
-                Err(e) if error_looks_like_auth(&e) => {
-                    let refreshed = recover_tidal_session(&state, &http_client, &tokens)
-                    .await
-                    .map_err(|re| {
-                        (
-                            StatusCode::BAD_GATEWAY,
-                            Json(
-                                json!({ "error": format!("TIDAL session refresh failed: {}", re) }),
-                            ),
+        tidal_search_flights()
+            .get_or_build(
+                tidal_search_flight_key(query, fetch_limit, offset),
+                || {
+                    db.with_conn(|conn| {
+                        crate::services::tidal::cache::get_search(
+                            conn,
+                            &cache_cfg,
+                            query,
+                            fetch_limit,
+                            offset,
                         )
-                    })?;
-                    let retry_client = TidalClient::with_http(
-                        tidal_http_client,
-                        refreshed.access_token.clone(),
-                        refreshed.country_code.clone(),
-                    );
-                    search_tidal_catalog_with_timeout(&retry_client, query, fetch_limit, offset)
-                        .await
-                        .map_err(|e2| {
-                            (
-                                StatusCode::BAD_GATEWAY,
-                                Json(json!({ "error": e2.to_string() })),
+                    })
+                    .ok()
+                    .flatten()
+                },
+                || async {
+                    let fetched = match search_tidal_catalog_with_timeout(
+                        &client,
+                        query,
+                        fetch_limit,
+                        offset,
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(e) if error_looks_like_auth(&e) => {
+                            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+                                .await
+                                .map_err(|re| {
+                                    (
+                                        StatusCode::BAD_GATEWAY,
+                                        Json(json!({
+                                            "error": format!(
+                                                "TIDAL session refresh failed: {}",
+                                                re
+                                            )
+                                        })),
+                                    )
+                                })?;
+                            let retry_client = TidalClient::with_http(
+                                tidal_http_client,
+                                refreshed.access_token.clone(),
+                                refreshed.country_code.clone(),
+                            );
+                            search_tidal_catalog_with_timeout(
+                                &retry_client,
+                                query,
+                                fetch_limit,
+                                offset,
                             )
-                        })?
-                }
-                Err(e) => {
-                    return Err((
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({ "error": e.to_string() })),
-                    ));
-                }
-            };
-        // Best-effort cache write - log and continue on failure.
-        let to_cache = fetched.clone();
-        let q_owned = query.to_string();
-        let lim_for_write = fetch_limit;
-        let off_for_write = offset;
-        if let Err(e) = db.with_conn(move |conn| {
-            crate::services::tidal::cache::put_search(
-                conn,
-                &q_owned,
-                lim_for_write,
-                off_for_write,
-                &to_cache,
+                            .await
+                            .map_err(|e2| {
+                                (
+                                    StatusCode::BAD_GATEWAY,
+                                    Json(json!({ "error": e2.to_string() })),
+                                )
+                            })?
+                        }
+                        Err(e) => {
+                            return Err((
+                                StatusCode::BAD_GATEWAY,
+                                Json(json!({ "error": e.to_string() })),
+                            ));
+                        }
+                    };
+
+                    // Best-effort cache write - log and continue on failure.
+                    let to_cache = fetched.clone();
+                    let q_owned = query.to_string();
+                    if let Err(e) = db.with_conn(move |conn| {
+                        crate::services::tidal::cache::put_search(
+                            conn,
+                            &q_owned,
+                            fetch_limit,
+                            offset,
+                            &to_cache,
+                        )
+                    }) {
+                        tracing::warn!("tidal_search_cache write failed: {}", e);
+                    }
+                    Ok(fetched)
+                },
             )
-        }) {
-            tracing::warn!("tidal_search_cache write failed: {}", e);
-        }
-        fetched
+            .await?
     };
 
     // Trim the canonical fetch down to what this caller asked for.
@@ -9431,6 +9476,49 @@ async fn tidal_artist_profile(
     // top-tracks-and-albums stub.
     let payload =
         catalog_routes::build_tidal_artist_payload(&state, &client, tidal_artist_id, &tokens).await;
+    Ok(Json(payload))
+}
+
+async fn tidal_artist_core(
+    State(state): State<SharedState>,
+    Path(tidal_artist_id): Path<i64>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if tidal_artist_id <= 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Expected a positive TIDAL artist id" })),
+        ));
+    }
+
+    let (tokens, tidal_http_client) = {
+        let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+        let s = state.read().await;
+        (
+            s.tidal_tokens.clone().or(persisted),
+            s.tidal_http_client.clone(),
+        )
+    };
+
+    let Some(tokens) = tokens else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "TIDAL not connected" })),
+        ));
+    };
+
+    let client = TidalClient::with_http(
+        tidal_http_client,
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
+    let payload =
+        catalog_routes::build_tidal_artist_core_payload(&state, &client, tidal_artist_id, &tokens)
+            .await;
     Ok(Json(payload))
 }
 

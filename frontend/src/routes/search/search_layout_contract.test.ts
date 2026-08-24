@@ -25,6 +25,7 @@ describe('search layout contracts', () => {
 	});
 
 	test('search page renders local results before external providers finish', () => {
+		expect(source).toContain("import { PRIMARY_SEARCH_DEBOUNCE_MS, SECONDARY_PROVIDER_DELAY_MS } from '$lib/search/search_timing'");
 		expect(source).toContain('const INITIAL_SEARCH_PAGE_SIZE = 12');
 		expect(source).toContain('const SECONDARY_SEARCH_PAGE_SIZE = 8');
 		expect(source).toContain('const PRIMARY_TIDAL_SEARCH_TIMEOUT_MS = 8000');
@@ -32,7 +33,7 @@ describe('search layout contracts', () => {
 		expect(source).toContain('const SPOTIFY_PLAYLIST_SEARCH_TIMEOUT_MS = 8000');
 		expect(source).toContain('let searchGeneration = $state(0)');
 		expect(source).toContain('let loadMoreSeq = 0');
-		expect(source).toContain('}, 120)');
+		expect(source).toContain('}, PRIMARY_SEARCH_DEBOUNCE_MS)');
 		expect(source).toContain('loadMoreSeq += 1');
 		expect(source).toContain('loadingMore = false');
 		expect(source).toContain('const localPromise = cachedApi.search(q, INITIAL_SEARCH_PAGE_SIZE, signal)');
@@ -42,6 +43,7 @@ describe('search layout contracts', () => {
 		expect(source).toContain('void tracksPromise.then((tidalResults) => {');
 		expect(source).toContain('secondarySpotifyQueued = true');
 		expect(source).toContain('secondarySpotifyTimer = scheduleSearchIdleTask(() => {');
+		expect(source).toContain('}, SECONDARY_PROVIDER_DELAY_MS)');
 		expect(source).toContain('loadingTidalPlaylists = true');
 		expect(source).toContain('loadingSpotifyPlaylists = true');
 		expect(source).toContain('timeoutMs: SECONDARY_PROVIDER_TIMEOUT_MS');
@@ -147,13 +149,11 @@ describe('search layout contracts', () => {
 		expect(source).toContain("let activeQuery = $state('')");
 		expect(source).toContain('const activeQueryText = $derived(activeQuery.trim())');
 		expect(source).toContain('function clearSecondarySpotifyTimer()');
-		expect(source).toContain('function clearArtistArtworkLoad()');
 		expect(source).toContain('function clearDiscoveryPanelLoad()');
 		expect(source).toContain('function clearVisibleSearchResults()');
 		expect(source).toContain('function invalidateSearchSideLoads()');
 		expect(source).toContain('invalidateSearchSideLoads()');
 		expect(source).toContain('clearSecondarySpotifyTimer()');
-		expect(source).toContain('clearArtistArtworkLoad()');
 		expect(source).toContain('clearDiscoveryPanelLoad()');
 		expect(source).toContain('if (!query.trim()) {');
 		expect(source).toContain("activeQuery = ''");
@@ -162,7 +162,6 @@ describe('search layout contracts', () => {
 		expect(source).toContain("lastQuery = ''");
 		expect(source).toContain('vibeTrack = null');
 		expect(source).toContain('underratedTracks = null');
-		expect(source).toContain('artistDiscographyArtworkGeneration += 1');
 		expect(source).toContain('discoveryLoadSeq += 1');
 	});
 
@@ -205,14 +204,18 @@ describe('search layout contracts', () => {
 		expect(source).toContain('fetchPriority="high"');
 		expect(source).toContain('loading="lazy"');
 		expect(source).toContain('decoding="async"');
-		expect(source).toContain('scheduleSearchIdleTask(() => {');
-		expect(source).toContain('ARTIST_ARTWORK_BATCH_SIZE');
+		expect(source).toContain('artistFallbackArtwork(artist)');
 		expect(source).not.toContain('failedArtistImages');
 		expect(source).not.toContain('topArtistImageFailed');
 		expect(source).not.toContain('function artworkSrc(');
 		expect(source).not.toContain('upscaleTidalArtwork');
 		expect(source).not.toMatch(/<img[^\n]*(artwork_url|photo_url|picture_url|image_url|cover_url|thumbnail_url)/);
 		expect(source).not.toContain('background-image:url');
+	});
+
+	test('search results never fetch a full artist discography just to decorate artwork', () => {
+		expect(source).not.toContain('cachedApi.getArtistDiscography');
+		expect(source).not.toContain('loadArtistDiscographyArtwork');
 	});
 
 	test('search page normalizes TIDAL search tracks before radio actions', () => {

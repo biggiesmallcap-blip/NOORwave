@@ -809,6 +809,14 @@ export interface TidalArtistProfile {
 	sections_failed?: string[];
 }
 
+export interface TidalArtistCore {
+	artist_name: string | null;
+	picture_url: string | null;
+	top_tracks: TidalDiscographyTrack[];
+	available: boolean;
+	sections_failed?: string[];
+}
+
 /** Minimal shape accepted by all ephemeral Tidal play functions */
 export interface TidalPlayable {
 	tidal_id: number;
@@ -4029,6 +4037,10 @@ export const api = {
 
 	getTidalArtistProfile(tidalArtistId: number): Promise<TidalArtistProfile> {
 		return fetchApi<TidalArtistProfile>(`/api/tidal/artists/${tidalArtistId}`);
+	},
+
+	getTidalArtistCore(tidalArtistId: number): Promise<TidalArtistCore> {
+		return fetchApi<TidalArtistCore>(`/api/tidal/artists/${tidalArtistId}/core`);
 	},
 
 	startSongRadioFromTidal(tidalId: number): Promise<RadioResponse> {

@@ -114,6 +114,7 @@ export const cacheKeys = {
 	artist: (id: number) => ['api', 'getArtist', { id }] as const,
 	artistTracks: (id: number) => ['api', 'getArtistTracks', { id }] as const,
 	artistDiscography: (id: number) => ['api', 'getArtistDiscography', { id }] as const,
+	tidalArtistCore: (id: number) => ['api', 'getTidalArtistCore', { id }] as const,
 	tidalArtistProfile: (id: number) => ['api', 'getTidalArtistProfile', { id }] as const,
 	artistSpotifyStats: (id: number) => ['api', 'getArtistSpotifyStats', { id }] as const,
 	albumTracks: (id: number) => ['api', 'getAlbumTracks', { id }] as const,
@@ -274,6 +275,13 @@ export const cachedApi = {
 			cacheKeys.tidalArtistProfile(tidalArtistId),
 			() => api.getTidalArtistProfile(tidalArtistId),
 			mediumOptions,
+		);
+	},
+	getTidalArtistCore(tidalArtistId: number) {
+		return fetchCached<Awaited<ReturnType<typeof api.getTidalArtistCore>>>(
+			cacheKeys.tidalArtistCore(tidalArtistId),
+			() => api.getTidalArtistCore(tidalArtistId),
+			{ ...mediumOptions, returnStale: true },
 		);
 	},
 	getArtistSpotifyStats(id: number) {
