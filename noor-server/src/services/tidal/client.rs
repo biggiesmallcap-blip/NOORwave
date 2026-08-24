@@ -13,11 +13,37 @@ const TIDAL_ALBUM_TRACKS_MAX_PAGES: usize = 20;
 /// and trip TIDAL's per-second rate limit. 4 is empirically enough for
 /// snappy UI without bursting; raise if catalog browsing ever feels gated.
 const MAX_INFLIGHT_REQUESTS: usize = 4;
+const REQUEST_LIMITER_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 static REQUEST_LIMITER: OnceLock<Semaphore> = OnceLock::new();
 
 fn request_limiter() -> &'static Semaphore {
     REQUEST_LIMITER.get_or_init(|| Semaphore::new(MAX_INFLIGHT_REQUESTS))
+}
+
+async fn acquire_request_permit_from(
+    limiter: &Semaphore,
+    wait_timeout: std::time::Duration,
+) -> Result<tokio::sync::SemaphorePermit<'_>> {
+    tokio::time::timeout(wait_timeout, limiter.acquire())
+        .await
+        .context("timed out waiting for the TIDAL request limiter")?
+        .context("TIDAL request limiter closed")
+}
+
+#[cfg(test)]
+mod request_limiter_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn request_limiter_wait_is_bounded() {
+        let limiter = Semaphore::new(1);
+        let _held = limiter.acquire().await.unwrap();
+        let error = acquire_request_permit_from(&limiter, std::time::Duration::from_millis(1))
+            .await
+            .expect_err("saturated limiter must time out");
+        assert!(error.to_string().contains("timed out"));
+    }
 }
 
 #[derive(Clone)]
@@ -266,10 +292,8 @@ impl TidalClient {
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
         crate::services::tidal::backoff::global().check()?;
 
-        let _permit = request_limiter()
-            .acquire()
-            .await
-            .context("TIDAL request limiter closed")?;
+        let _permit =
+            acquire_request_permit_from(request_limiter(), REQUEST_LIMITER_WAIT_TIMEOUT).await?;
 
         tracing::debug!("TIDAL GET {}", url);
         let resp = self

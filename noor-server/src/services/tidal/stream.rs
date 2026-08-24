@@ -210,6 +210,16 @@ impl StreamResolveError {
         matches!(self, Self::StreamRejected { .. })
     }
 
+    pub fn is_track_specific_rejection(&self) -> bool {
+        match self {
+            Self::StreamRejected { message } => {
+                !message.contains("408 Request Timeout")
+                    && !message.contains("429 Too Many Requests")
+            }
+            _ => false,
+        }
+    }
+
     pub fn is_asset_not_ready(&self) -> bool {
         match self {
             Self::StreamRejected { message } => asset_not_ready_body(message),
@@ -663,6 +673,15 @@ pub async fn resolve_stream(
             });
         }
 
+        if status == reqwest::StatusCode::REQUEST_TIMEOUT
+            || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        {
+            return Err(StreamResolveError::UpstreamHttp {
+                status,
+                body: safe_body,
+            });
+        }
+
         if status.is_client_error() {
             return Err(StreamResolveError::StreamRejected {
                 message: format!("TIDAL rejected playback request with {status}: {safe_body}"),
@@ -935,6 +954,15 @@ pub async fn resolve_video_stream(
         if status == reqwest::StatusCode::UNAUTHORIZED || session_expired_body(&raw) {
             return Err(StreamResolveError::SessionExpired {
                 message: format!("TIDAL returned {status}: {safe_body}"),
+            });
+        }
+
+        if status == reqwest::StatusCode::REQUEST_TIMEOUT
+            || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        {
+            return Err(StreamResolveError::UpstreamHttp {
+                status,
+                body: safe_body,
             });
         }
 

@@ -25,7 +25,7 @@ const STREAM_PIPE_GROWTH_WARN_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) struct StreamPipe {
     data: Vec<u8>,
     read_pos: usize,
-    rx: Mutex<std::sync::mpsc::Receiver<Option<Vec<u8>>>>,
+    rx: Mutex<std::sync::mpsc::Receiver<StreamPipeMessage>>,
     eof: bool,
     known_length: Option<u64>,
     dynamic_length: bool,
@@ -36,9 +36,15 @@ pub(crate) struct StreamPipe {
     growth_warned: bool,
 }
 
+pub(crate) enum StreamPipeMessage {
+    Chunk(Vec<u8>),
+    Eof,
+    Error(String),
+}
+
 impl StreamPipe {
     pub(crate) fn new(
-        rx: std::sync::mpsc::Receiver<Option<Vec<u8>>>,
+        rx: std::sync::mpsc::Receiver<StreamPipeMessage>,
         known_length: Option<u64>,
         stop_flag: Arc<AtomicBool>,
     ) -> Self {
@@ -47,7 +53,7 @@ impl StreamPipe {
 
     pub(crate) fn with_initial(
         initial: Vec<u8>,
-        rx: std::sync::mpsc::Receiver<Option<Vec<u8>>>,
+        rx: std::sync::mpsc::Receiver<StreamPipeMessage>,
         known_length: Option<u64>,
         dynamic_length: bool,
         stop_flag: Arc<AtomicBool>,
@@ -81,7 +87,7 @@ impl StreamPipe {
     /// happened. Treats a Disconnected sender as natural EOF and honours the
     /// stop flag in both the pre-poll and post-timeout paths.
     fn poll_for_chunk(
-        rx: &std::sync::mpsc::Receiver<Option<Vec<u8>>>,
+        rx: &std::sync::mpsc::Receiver<StreamPipeMessage>,
         stop_flag: &Arc<AtomicBool>,
     ) -> ChunkPoll {
         loop {
@@ -89,38 +95,49 @@ impl StreamPipe {
                 return ChunkPoll::Stopped;
             }
             match rx.recv_timeout(Duration::from_millis(STREAM_PIPE_RECV_POLL_MS)) {
-                Ok(Some(chunk)) => return ChunkPoll::Chunk(chunk),
-                Ok(None) | Err(RecvTimeoutError::Disconnected) => return ChunkPoll::Eof,
+                Ok(StreamPipeMessage::Chunk(chunk)) => return ChunkPoll::Chunk(chunk),
+                Ok(StreamPipeMessage::Eof) | Err(RecvTimeoutError::Disconnected) => {
+                    return ChunkPoll::Eof;
+                }
+                Ok(StreamPipeMessage::Error(message)) => return ChunkPoll::Error(message),
                 Err(RecvTimeoutError::Timeout) => continue,
             }
         }
     }
 
-    fn fill_to(&mut self, target: usize) {
+    fn fill_to(&mut self, target: usize) -> std::io::Result<()> {
         if let Ok(rx) = self.rx.lock() {
             while !self.eof && self.data.len() < target {
                 match Self::poll_for_chunk(&rx, &self.stop_flag) {
                     ChunkPoll::Chunk(chunk) => self.data.extend_from_slice(&chunk),
                     ChunkPoll::Eof | ChunkPoll::Stopped => self.eof = true,
+                    ChunkPoll::Error(message) => {
+                        return Err(std::io::Error::other(message));
+                    }
                 }
             }
         }
         self.warn_growth_once();
+        Ok(())
     }
 
-    fn recv_chunk(&mut self) {
+    fn recv_chunk(&mut self) -> std::io::Result<()> {
         if self.eof {
-            return;
+            return Ok(());
         }
         if let Ok(rx) = self.rx.lock() {
             match Self::poll_for_chunk(&rx, &self.stop_flag) {
                 ChunkPoll::Chunk(chunk) => self.data.extend_from_slice(&chunk),
                 ChunkPoll::Eof | ChunkPoll::Stopped => self.eof = true,
+                ChunkPoll::Error(message) => {
+                    return Err(std::io::Error::other(message));
+                }
             }
         } else {
             self.eof = true;
         }
         self.warn_growth_once();
+        Ok(())
     }
 }
 
@@ -128,12 +145,13 @@ enum ChunkPoll {
     Chunk(Vec<u8>),
     Eof,
     Stopped,
+    Error(String),
 }
 
 impl Read for StreamPipe {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         while !self.eof && self.read_pos >= self.data.len() {
-            self.recv_chunk();
+            self.recv_chunk()?;
         }
         let available = self.data.len().saturating_sub(self.read_pos);
         if available == 0 {
@@ -152,14 +170,14 @@ impl Seek for StreamPipe {
             SeekFrom::Start(n) => {
                 let t = n as usize;
                 if t > self.data.len() {
-                    self.fill_to(t);
+                    self.fill_to(t)?;
                 }
                 t.min(self.data.len())
             }
             SeekFrom::Current(n) => {
                 let t = (self.read_pos as i64 + n).max(0) as usize;
                 if t > self.data.len() {
-                    self.fill_to(t);
+                    self.fill_to(t)?;
                 }
                 t.min(self.data.len())
             }
@@ -168,7 +186,7 @@ impl Seek for StreamPipe {
                     (self.data.len() as i64 + n).max(0) as usize
                 } else {
                     while !self.eof {
-                        self.recv_chunk();
+                        self.recv_chunk()?;
                     }
                     (self.data.len() as i64 + n).max(0) as usize
                 }
@@ -363,7 +381,7 @@ mod tests {
 
     #[test]
     fn stream_pipe_reports_known_length_before_eof() {
-        let (_tx, rx) = std::sync::mpsc::sync_channel::<Option<Vec<u8>>>(1);
+        let (_tx, rx) = std::sync::mpsc::sync_channel::<StreamPipeMessage>(1);
         let pipe = StreamPipe::new(rx, Some(641_302), never_stopped());
 
         assert_eq!(
@@ -374,7 +392,7 @@ mod tests {
 
     #[test]
     fn stream_pipe_hides_dynamic_length_for_dash_prebuffer() {
-        let (_tx, rx) = std::sync::mpsc::sync_channel::<Option<Vec<u8>>>(1);
+        let (_tx, rx) = std::sync::mpsc::sync_channel::<StreamPipeMessage>(1);
         let pipe = StreamPipe::with_initial(vec![1, 2, 3], rx, None, true, never_stopped());
 
         assert!(!symphonia::core::io::MediaSource::is_seekable(&pipe));
@@ -383,7 +401,7 @@ mod tests {
 
     #[test]
     fn stream_pipe_dynamic_seek_end_uses_buffered_length_without_draining() {
-        let (_tx, rx) = std::sync::mpsc::sync_channel::<Option<Vec<u8>>>(1);
+        let (_tx, rx) = std::sync::mpsc::sync_channel::<StreamPipeMessage>(1);
         let mut pipe = StreamPipe::with_initial(vec![1, 2, 3], rx, None, true, never_stopped());
 
         assert_eq!(pipe.seek(SeekFrom::End(0)).unwrap(), 3);
@@ -392,9 +410,9 @@ mod tests {
 
     #[test]
     fn stream_pipe_reports_dynamic_length_after_eof() {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Option<Vec<u8>>>(2);
-        tx.send(Some(vec![4, 5])).unwrap();
-        tx.send(None).unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<StreamPipeMessage>(2);
+        tx.send(StreamPipeMessage::Chunk(vec![4, 5])).unwrap();
+        tx.send(StreamPipeMessage::Eof).unwrap();
         let mut pipe = StreamPipe::with_initial(vec![1, 2, 3], rx, None, true, never_stopped());
 
         let mut out = Vec::new();
@@ -406,10 +424,24 @@ mod tests {
     }
 
     #[test]
+    fn stream_pipe_surfaces_download_failure_instead_of_clean_eof() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        tx.send(StreamPipeMessage::Error("segment timed out".to_string()))
+            .unwrap();
+        let mut pipe = StreamPipe::new(rx, None, never_stopped());
+
+        let mut buf = [0u8; 16];
+        let error = pipe.read(&mut buf).expect_err("download failure");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(error.to_string().contains("segment timed out"));
+    }
+
+    #[test]
     fn stream_pipe_seek_end_buffers_all_chunks() {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Option<Vec<u8>>>(2);
-        tx.send(Some(vec![1, 2, 3, 4])).unwrap();
-        tx.send(None).unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<StreamPipeMessage>(2);
+        tx.send(StreamPipeMessage::Chunk(vec![1, 2, 3, 4])).unwrap();
+        tx.send(StreamPipeMessage::Eof).unwrap();
         let mut pipe = StreamPipe::new(rx, Some(4), never_stopped());
 
         assert_eq!(pipe.seek(SeekFrom::End(0)).unwrap(), 4);
@@ -418,7 +450,7 @@ mod tests {
 
     #[test]
     fn stream_pipe_read_exits_when_stop_flag_flips_without_eof() {
-        let (tx, rx) = std::sync::mpsc::channel::<Option<Vec<u8>>>();
+        let (tx, rx) = std::sync::mpsc::channel::<StreamPipeMessage>();
         let stop_flag = Arc::new(AtomicBool::new(false));
         let mut pipe = StreamPipe::new(rx, None, Arc::clone(&stop_flag));
 

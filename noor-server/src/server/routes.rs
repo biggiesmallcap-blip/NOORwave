@@ -1399,7 +1399,8 @@ async fn play_discovery_track(
     drop(state_guard);
     Ok(Json(json!({
         "state": snapshot.state,
-        "queue": snapshot.queue
+        "queue": snapshot.queue,
+        "queue_revision": snapshot.queue_revision
     })))
 }
 
@@ -2834,6 +2835,7 @@ async fn play_queue_item(
     Ok(Json(json!({
         "state": snapshot.state,
         "queue": snapshot.queue,
+        "queue_revision": snapshot.queue_revision,
     })))
 }
 
@@ -2971,7 +2973,8 @@ async fn radio_start(
         "first_playable": first_playable,
         "pending_count": pending_count,
         "state": snapshot.state,
-        "queue": snapshot.queue
+        "queue": snapshot.queue,
+        "queue_revision": snapshot.queue_revision
     })))
 }
 
@@ -4257,7 +4260,8 @@ async fn get_playback_state(State(state): State<SharedState>) -> Result<Json<Val
     let snapshot = build_live_playback_snapshot(&state).await?;
     Ok(Json(json!({
         "state": snapshot.state,
-        "queue": snapshot.queue
+        "queue": snapshot.queue,
+        "queue_revision": snapshot.queue_revision
     })))
 }
 
@@ -4304,7 +4308,10 @@ async fn get_playback_queue(State(state): State<SharedState>) -> Result<Json<Val
     };
     // Queue snapshots are always read from persisted queue rows.
     let snapshot = overlay_snapshot_with_external_track(&state, snapshot).await;
-    Ok(Json(json!({ "queue": snapshot.queue })))
+    Ok(Json(json!({
+        "queue": snapshot.queue,
+        "queue_revision": snapshot.queue_revision
+    })))
 }
 
 async fn play_track(
@@ -4571,7 +4578,8 @@ async fn play_track(
 
     Ok(Json(json!({
         "state": snapshot.state,
-        "queue": snapshot.queue
+        "queue": snapshot.queue,
+        "queue_revision": snapshot.queue_revision
     })))
 }
 
@@ -4591,7 +4599,7 @@ impl TidalPlaybackError {
     fn is_track_unplayable(&self) -> bool {
         match self {
             TidalPlaybackError::StreamResolve(err) => {
-                err.is_asset_not_ready() || err.is_stream_rejected()
+                err.is_asset_not_ready() || err.is_track_specific_rejection()
             }
             _ => false,
         }
@@ -4631,6 +4639,19 @@ mod unplayable_classification_tests {
         });
         assert!(err.is_track_unplayable());
         assert!(!err.is_asset_not_ready());
+    }
+
+    #[test]
+    fn rate_limit_and_request_timeout_are_not_track_unplayable() {
+        for message in [
+            "TIDAL rejected playback request with 429 Too Many Requests",
+            "TIDAL rejected playback request with 408 Request Timeout",
+        ] {
+            let err = stream_resolve(StreamResolveError::StreamRejected {
+                message: message.to_string(),
+            });
+            assert!(!err.is_track_unplayable(), "{message}");
+        }
     }
 
     #[test]
@@ -4987,21 +5008,102 @@ async fn resume_playback(State(state): State<SharedState>) -> Result<Json<Value>
     // No generation bump, for the same reason as `pause_playback`: resuming
     // does not start a new playback job, and bumping here left the engine that
     // is about to keep playing stranded on a stale generation.
-    if let Some(runtime_handle) = current_playback_runtime(&state).await
-        && let Err(error) = runtime_handle.resume()
-    {
-        let message = format!("Failed to resume host audio playback: {error}");
-        report_playback_failure(&state, &message);
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
+    let (runtime_handle, runtime_active_track_id, persisted_track_id) = {
+        let state_guard = state.read().await;
+        let runtime_handle = state_guard
+            .playback_runtime
+            .as_ref()
+            .map(|runtime| runtime.handle.clone())
+            .filter(playback_runtime::PlaybackRuntimeHandle::is_healthy);
+        let runtime_active_track_id = state_guard
+            .playback_runtime_info
+            .as_ref()
+            .and_then(|info| info.active_track_id);
+        let persisted_track_id = state_guard
+            .db
+            .with_conn(player::current_track_id)
+            .unwrap_or(None);
+        (runtime_handle, runtime_active_track_id, persisted_track_id)
+    };
+    let runtime_needs_rebuild = if runtime_active_track_id != persisted_track_id {
+        true
+    } else {
+        match runtime_handle {
+            Some(runtime_handle) => match runtime_handle.resume() {
+                Ok(()) => false,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "noor.playback.recovery",
+                        event = "resume_dead_runtime",
+                        error = %error,
+                        "resume found a closed runtime command channel; rebuilding"
+                    );
+                    true
+                }
+            },
+            None => true,
+        }
+    };
 
-    let snapshot = {
+    let mut snapshot = {
         let state = state.read().await;
         state
             .db
             .with_conn(player::resume)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
+
+    if runtime_needs_rebuild {
+        let Some(track) = snapshot.state.current_track.clone() else {
+            snapshot = {
+                let state_guard = state.read().await;
+                state_guard
+                    .db
+                    .with_conn(player::pause)
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            };
+            let state_guard = state.read().await;
+            let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+            let snapshot = overlay_snapshot_with_external_track(&state, snapshot).await;
+            return Ok(Json(json!({ "state": snapshot.state })));
+        };
+
+        if let Err((status, body)) = ensure_playback_runtime_for_track(&state, &track).await {
+            let message = body
+                .0
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Playback runtime could not restart.")
+                .to_string();
+            let state_guard = state.read().await;
+            let _ = state_guard.db.with_conn(player::pause);
+            let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+            drop(state_guard);
+            report_playback_failure(&state, &message);
+            return Err(status);
+        }
+        let generation = {
+            let state_guard = state.read().await;
+            current_playback_generation(&state_guard)
+        };
+        if let Err(error) = switch_runtime_to_snapshot_current(&state, &snapshot, generation).await
+        {
+            let message = format!("Playback runtime could not recover on resume: {error}");
+            let state_guard = state.read().await;
+            let _ = state_guard.db.with_conn(player::pause);
+            let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+            drop(state_guard);
+            report_playback_failure(&state, &message);
+            return Err(StatusCode::BAD_GATEWAY);
+        }
+        tracing::info!(
+            target: "noor.playback.recovery",
+            event = "runtime_rebuilt_on_resume",
+            track_id = track.id,
+            generation,
+            "restored the current queue row in the playback runtime"
+        );
+    }
 
     resume_session_after_snapshot(&state, &snapshot).await;
 
@@ -6489,7 +6591,8 @@ async fn next_track(
 
     Ok(Json(json!({
         "state": snapshot.state,
-        "queue": snapshot.queue
+        "queue": snapshot.queue,
+        "queue_revision": snapshot.queue_revision
     })))
 }
 
@@ -6540,7 +6643,8 @@ async fn restart_current_in_place(
     }
     Ok(Json(json!({
         "state": snapshot.state,
-        "queue": snapshot.queue
+        "queue": snapshot.queue,
+        "queue_revision": snapshot.queue_revision
     })))
 }
 
@@ -6827,7 +6931,8 @@ async fn previous_via_persisted_queue(
     let snapshot = overlay_snapshot_with_external_track(state, snapshot).await;
     Ok(Json(json!({
         "state": snapshot.state,
-        "queue": snapshot.queue
+        "queue": snapshot.queue,
+        "queue_revision": snapshot.queue_revision
     })))
 }
 
@@ -6929,6 +7034,7 @@ async fn set_playback_shuffle(
     Ok(Json(json!({
         "state": snapshot.state,
         "queue": snapshot.queue,
+        "queue_revision": snapshot.queue_revision,
         "shuffle_debug": update.debug
     })))
 }
@@ -6976,9 +7082,11 @@ async fn set_playback_automix(
 
     drop(state_guard);
     let snapshot = overlay_snapshot_with_external_track(&state, snapshot).await;
-    Ok(Json(
-        json!({ "state": snapshot.state, "queue": snapshot.queue }),
-    ))
+    Ok(Json(json!({
+        "state": snapshot.state,
+        "queue": snapshot.queue,
+        "queue_revision": snapshot.queue_revision
+    })))
 }
 
 async fn add_queue_track(
@@ -6995,8 +7103,12 @@ async fn add_queue_track(
             .db
             .with_conn(|conn| {
                 let queue = player::enqueue_track(conn, payload.track_id, "user")?;
+                let queue_revision = player::queue_revision(conn);
                 let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
-                Ok(Json(json!({ "queue": queue })))
+                Ok(Json(json!({
+                    "queue": queue,
+                    "queue_revision": queue_revision
+                })))
             })
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
@@ -7259,7 +7371,7 @@ async fn queue_append(
     let insert = queue_external_insert(&payload, "user_queue")
         .map_err(|message| (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))))?;
 
-    let (queue, inserted) = {
+    let (queue, inserted, queue_revision) = {
         let state_guard = state.read().await;
         state_guard
             .user_cleared_at
@@ -7270,8 +7382,9 @@ async fn queue_append(
             .with_conn(|conn| {
                 let inserted = queue::append_external_track(conn, &insert)?;
                 let queue = queue::load_queue(conn)?;
+                let queue_revision = player::queue_revision(conn);
                 let _ = event_tx.send(AppEvent::QueueUpdated);
-                Ok((queue, Some(inserted)))
+                Ok((queue, Some(inserted), queue_revision))
             })
             .map_err(|_| {
                 (
@@ -7295,7 +7408,10 @@ async fn queue_append(
     }
     refresh_dj_after_queue_change(state, "queue_append").await;
 
-    Ok(Json(json!({ "queue": queue })))
+    Ok(Json(json!({
+        "queue": queue,
+        "queue_revision": queue_revision
+    })))
 }
 
 async fn queue_append_many(
@@ -7309,7 +7425,7 @@ async fn queue_append_many(
         .collect::<Result<_, _>>()
         .map_err(|message| (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))))?;
 
-    let (queue, inserted) = {
+    let (queue, inserted, queue_revision) = {
         let state_guard = state.read().await;
         state_guard
             .user_cleared_at
@@ -7320,8 +7436,9 @@ async fn queue_append_many(
             .with_conn(|conn| {
                 let inserted = queue::append_external_tracks(conn, &inserts)?;
                 let queue = queue::load_queue(conn)?;
+                let queue_revision = player::queue_revision(conn);
                 let _ = event_tx.send(AppEvent::QueueUpdated);
-                Ok((queue, inserted))
+                Ok((queue, inserted, queue_revision))
             })
             .map_err(|_| {
                 (
@@ -7350,7 +7467,10 @@ async fn queue_append_many(
     }
     refresh_dj_after_queue_change(state, "queue_append_many").await;
 
-    Ok(Json(json!({ "queue": queue })))
+    Ok(Json(json!({
+        "queue": queue,
+        "queue_revision": queue_revision
+    })))
 }
 
 /// Insert after the active persisted queue row. With no active row, append.
@@ -7365,7 +7485,7 @@ async fn queue_play_next(
     let insert = queue_external_insert(&payload, "user_play_next")
         .map_err(|message| (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))))?;
 
-    let (queue, inserted) = {
+    let (queue, inserted, queue_revision) = {
         let state_guard = state.read().await;
         state_guard
             .user_cleared_at
@@ -7380,8 +7500,9 @@ async fn queue_play_next(
                     None => queue::append_external_track(conn, &insert)?,
                 };
                 let queue = queue::load_queue(conn)?;
+                let queue_revision = player::queue_revision(conn);
                 let _ = event_tx.send(AppEvent::QueueUpdated);
-                Ok((queue, Some(inserted)))
+                Ok((queue, Some(inserted), queue_revision))
             })
             .map_err(|_| {
                 (
@@ -7405,7 +7526,10 @@ async fn queue_play_next(
     }
     refresh_dj_after_queue_change(state, "queue_play_next").await;
 
-    Ok(Json(json!({ "queue": queue })))
+    Ok(Json(json!({
+        "queue": queue,
+        "queue_revision": queue_revision
+    })))
 }
 
 async fn queue_play_next_many(
@@ -7419,7 +7543,7 @@ async fn queue_play_next_many(
         .collect::<Result<_, _>>()
         .map_err(|message| (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))))?;
 
-    let (queue, inserted) = {
+    let (queue, inserted, queue_revision) = {
         let state_guard = state.read().await;
         state_guard
             .user_cleared_at
@@ -7434,8 +7558,9 @@ async fn queue_play_next_many(
                     None => queue::append_external_tracks(conn, &inserts)?,
                 };
                 let queue = queue::load_queue(conn)?;
+                let queue_revision = player::queue_revision(conn);
                 let _ = event_tx.send(AppEvent::QueueUpdated);
-                Ok((queue, inserted))
+                Ok((queue, inserted, queue_revision))
             })
             .map_err(|_| {
                 (
@@ -7464,7 +7589,10 @@ async fn queue_play_next_many(
     }
     refresh_dj_after_queue_change(state, "queue_play_next_many").await;
 
-    Ok(Json(json!({ "queue": queue })))
+    Ok(Json(json!({
+        "queue": queue,
+        "queue_revision": queue_revision
+    })))
 }
 
 async fn replace_playback_queue(
@@ -7574,6 +7702,7 @@ async fn replace_playback_queue(
         "shuffle_debug": shuffle_debug,
         "state": snapshot.state,
         "queue": snapshot.queue,
+        "queue_revision": snapshot.queue_revision,
     })))
 }
 
@@ -7629,10 +7758,14 @@ async fn remove_queue_track(
     if include_playback_state {
         Ok(Json(json!({
             "queue": snapshot.queue,
-            "playback_state": snapshot.state
+            "playback_state": snapshot.state,
+            "queue_revision": snapshot.queue_revision
         })))
     } else {
-        Ok(Json(json!({ "queue": snapshot.queue })))
+        Ok(Json(json!({
+            "queue": snapshot.queue,
+            "queue_revision": snapshot.queue_revision
+        })))
     }
 }
 
@@ -7663,9 +7796,13 @@ async fn move_queue_track(
                 Ok(match snapshot {
                     Some(snapshot) => Json(json!({
                         "queue": queue,
-                        "playback_state": snapshot.state
+                        "playback_state": snapshot.state,
+                        "queue_revision": snapshot.queue_revision
                     })),
-                    None => Json(json!({ "queue": queue })),
+                    None => Json(json!({
+                        "queue": queue,
+                        "queue_revision": player::queue_revision(conn)
+                    })),
                 })
             })
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -7727,6 +7864,7 @@ async fn clear_queue_route(State(state): State<SharedState>) -> Result<Json<Valu
                 Ok(Json(json!({
                     "queue": snapshot.queue,
                     "playback_state": snapshot.state,
+                    "queue_revision": snapshot.queue_revision,
                 })))
             })
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -9400,6 +9538,7 @@ async fn current_playback_runtime(
         .playback_runtime
         .as_ref()
         .map(|runtime| runtime.handle.clone())
+        .filter(playback_runtime::PlaybackRuntimeHandle::is_healthy)
 }
 
 fn current_playback_generation(state: &crate::AppState) -> u64 {
@@ -9443,6 +9582,7 @@ async fn current_playback_snapshot_json(
     Ok(Json(json!({
         "state": snapshot.state,
         "queue": snapshot.queue,
+        "queue_revision": snapshot.queue_revision,
     })))
 }
 
@@ -9472,7 +9612,7 @@ async fn ensure_playback_runtime_for_track(
     let needs_respawn = state_guard
         .playback_runtime
         .as_ref()
-        .map(|runtime| runtime.access_token != access_token)
+        .map(|runtime| runtime.access_token != access_token || !runtime.handle.is_healthy())
         .unwrap_or(true);
     let mut spawned_handle = None;
 
@@ -9619,6 +9759,10 @@ fn spawn_playback_runtime_listener(
                 Ok(playback_runtime::PlaybackRuntimeEvent::Error { message }) => {
                     handle_runtime_error(state.clone(), &message).await;
                 }
+                Ok(playback_runtime::PlaybackRuntimeEvent::Exited { message }) => {
+                    handle_runtime_exit(&state, &handle, message.as_deref()).await;
+                    break;
+                }
                 Ok(playback_runtime::PlaybackRuntimeEvent::TrackError {
                     track_id,
                     generation,
@@ -9681,6 +9825,35 @@ fn spawn_playback_runtime_listener(
                     generation,
                     ..
                 }) => {
+                    // Read the persisted queue anchor before taking the global
+                    // write lock. A briefly busy SQLite connection must not
+                    // block pause, resume, queue, or runtime-health updates.
+                    let history_row = {
+                        let state_guard = state.read().await;
+                        if current_playback_generation(&state_guard) != generation {
+                            continue;
+                        }
+                        state_guard
+                            .db
+                            .with_conn(|conn| {
+                                Ok(conn
+                                    .query_row(
+                                        "SELECT current_track_id, current_queue_item_id
+                                         FROM playback_state WHERE id = 1",
+                                        [],
+                                        |row| {
+                                            Ok((
+                                                row.get::<_, Option<i64>>(0)?,
+                                                row.get::<_, Option<i64>>(1)?,
+                                            ))
+                                        },
+                                    )
+                                    .ok()
+                                    .and_then(|(track, queue_item)| track.zip(queue_item)))
+                            })
+                            .ok()
+                            .flatten()
+                    };
                     let mut state_guard = state.write().await;
                     if current_playback_generation(&state_guard) != generation {
                         continue;
@@ -9698,26 +9871,6 @@ fn spawn_playback_runtime_listener(
                     }
                     // Record history only when the active persisted queue row matches.
                     // A missing record is safer than attributing a play to another row.
-                    let history_row = state_guard
-                        .db
-                        .with_conn(|conn| {
-                            Ok(conn
-                                .query_row(
-                                    "SELECT current_track_id, current_queue_item_id
-                                     FROM playback_state WHERE id = 1",
-                                    [],
-                                    |row| {
-                                        Ok((
-                                            row.get::<_, Option<i64>>(0)?,
-                                            row.get::<_, Option<i64>>(1)?,
-                                        ))
-                                    },
-                                )
-                                .ok()
-                                .and_then(|(track, queue_item)| track.zip(queue_item)))
-                        })
-                        .ok()
-                        .flatten();
                     if let Some((anchored_track_id, queue_item_id)) = history_row
                         && anchored_track_id == track_id
                     {
@@ -10712,22 +10865,45 @@ async fn handle_runtime_finished_with_retry(
     Ok(())
 }
 
+const RUNTIME_TRACK_RETRY_MARKER: &str = "retrying transient playback failure";
+
+fn runtime_track_error_is_retryable(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("dash stream prebuffer failed")
+        || lower.contains("tidal stream download failed")
+        || lower.contains("timed out")
+        || lower.contains("request timeout")
+        || lower.contains("too many requests")
+        || lower.contains("backoff active")
+        || lower.contains("error sending request")
+}
+
 async fn handle_runtime_track_error(
     state: SharedState,
     failed_track_id: i64,
     generation: u64,
     message: &str,
 ) -> anyhow::Result<()> {
-    {
+    let retryable = runtime_track_error_is_retryable(message);
+    let retry_already_attempted = {
         let mut state_guard = state.write().await;
         if current_playback_generation(&state_guard) != generation {
             return Ok(());
         }
+        let retry_already_attempted = state_guard
+            .playback_runtime_info
+            .as_ref()
+            .and_then(|info| info.last_error.as_deref())
+            == Some(RUNTIME_TRACK_RETRY_MARKER);
         state_guard
             .audio_active
             .store(false, std::sync::atomic::Ordering::Relaxed);
         if let Some(info) = state_guard.playback_runtime_info.as_mut() {
-            info.last_error = Some(message.to_string());
+            info.last_error = Some(if retryable && !retry_already_attempted {
+                RUNTIME_TRACK_RETRY_MARKER.to_string()
+            } else {
+                message.to_string()
+            });
             if info.active_track_id == Some(failed_track_id) {
                 info.active_track_id = None;
             }
@@ -10741,6 +10917,65 @@ async fn handle_runtime_track_error(
         // next successful `Started` repopulates it from the real stream.
         state_guard.pending_stream_display = None;
         state_guard.current_stream_display = None;
+        retry_already_attempted
+    };
+
+    if retryable && !retry_already_attempted {
+        let snapshot = {
+            let state_guard = state.read().await;
+            state_guard.db.with_conn(player::load_snapshot)?
+        };
+        match switch_runtime_to_snapshot_current(&state, &snapshot, generation).await {
+            Ok(()) => {
+                tracing::warn!(
+                    target: "noor.playback.recovery",
+                    event = "runtime_track_retry_dispatched",
+                    failed_track_id,
+                    generation,
+                    error = %message,
+                    "retrying the current queue row after a transient runtime failure"
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "noor.playback.recovery",
+                    event = "runtime_track_retry_failed",
+                    failed_track_id,
+                    generation,
+                    original_error = %message,
+                    retry_error = %error,
+                    "current-row playback recovery failed; pausing without advancing"
+                );
+            }
+        }
+    }
+
+    if retryable {
+        let paused_snapshot = {
+            let state_guard = state.read().await;
+            state_guard.db.with_conn(player::pause)?
+        };
+        sync_session_after_snapshot(
+            &state,
+            &paused_snapshot,
+            Some(player::ListenSessionEndReason::Stopped),
+        )
+        .await;
+        {
+            let state_guard = state.read().await;
+            let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+        }
+        tracing::warn!(
+            target: "noor.playback.recovery",
+            event = "runtime_track_retry_exhausted",
+            failed_track_id,
+            generation,
+            error = %message,
+            "transient playback recovery was exhausted; paused without advancing the queue"
+        );
+        report_playback_failure(&state, message);
+        return Ok(());
     }
 
     tracing::warn!(
@@ -10812,6 +11047,63 @@ async fn handle_runtime_error(state: SharedState, message: &str) {
         .await;
     }
 
+    let state_guard = state.read().await;
+    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+}
+
+async fn handle_runtime_exit(
+    state: &SharedState,
+    exited_handle: &playback_runtime::PlaybackRuntimeHandle,
+    message: Option<&str>,
+) {
+    let removed_current_runtime = {
+        let mut state_guard = state.write().await;
+        let is_current = state_guard
+            .playback_runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.handle.is_same_runtime(exited_handle));
+        if !is_current {
+            false
+        } else {
+            state_guard.playback_runtime = None;
+            state_guard.playback_runtime_info = None;
+            state_guard
+                .audio_active
+                .store(false, std::sync::atomic::Ordering::Release);
+            state_guard.current_stream_display = None;
+            state_guard.pending_stream_display = None;
+            state_guard.next_prebuffer_inflight = None;
+            true
+        }
+    };
+    if !removed_current_runtime {
+        return;
+    }
+
+    let user_message = match message {
+        Some(detail) => format!("Playback runtime stopped and will restart on resume: {detail}"),
+        None => "Playback runtime stopped and will restart on resume.".to_string(),
+    };
+    tracing::error!(
+        target: "noor.playback.recovery",
+        event = "runtime_exited",
+        error = message.unwrap_or("runtime command loop closed"),
+        "discarded dead playback runtime handle"
+    );
+    report_playback_failure(state, &user_message);
+
+    let snapshot = {
+        let state_guard = state.read().await;
+        state_guard.db.with_conn(player::pause).ok()
+    };
+    if let Some(snapshot) = snapshot {
+        sync_session_after_snapshot(
+            state,
+            &snapshot,
+            Some(player::ListenSessionEndReason::Stopped),
+        )
+        .await;
+    }
     let state_guard = state.read().await;
     let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
 }

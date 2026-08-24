@@ -4,8 +4,8 @@ pub mod source;
 
 use self::resample::{StreamResampler, adapt_channels, extend_mono_from_interleaved};
 use self::source::{
-    StreamPipe, append_stream_bytes, build_tidal_cdn_client, dash_background_fetch_window,
-    dash_initial_media_count,
+    StreamPipe, StreamPipeMessage, append_stream_bytes, build_tidal_cdn_client,
+    dash_background_fetch_window, dash_initial_media_count,
 };
 use crate::playback::player::{PlaybackSourceRequest, PreparedPlaybackJob};
 use crate::playback::runtime::PlaybackRuntimeConfig;
@@ -538,7 +538,7 @@ pub(crate) fn decode_and_buffer_job(
             }
 
             let (len_tx, len_rx) = std::sync::mpsc::sync_channel::<Option<u64>>(1);
-            let (chunk_tx, chunk_rx) = std::sync::mpsc::sync_channel::<Option<Vec<u8>>>(32);
+            let (chunk_tx, chunk_rx) = std::sync::mpsc::sync_channel::<StreamPipeMessage>(32);
             let url = stream_info.url.clone();
             let download_track_id = shared.track_id;
             let segment_urls = remaining_segment_urls;
@@ -575,7 +575,10 @@ pub(crate) fn decode_and_buffer_job(
                                         break; // track stopped mid-fetch
                                     }
                                     let bytes = chunk.context("chunk read error")?;
-                                    if chunk_tx.send(Some(bytes.to_vec())).is_err() {
+                                    if chunk_tx
+                                        .send(StreamPipeMessage::Chunk(bytes.to_vec()))
+                                        .is_err()
+                                    {
                                         break; // decoder stopped early (track skipped/stopped)
                                     }
                                 }
@@ -614,7 +617,9 @@ pub(crate) fn decode_and_buffer_job(
                                             Ok(bytes)
                                         }
                                     },
-                                    |bytes| chunk_tx.send(Some(bytes)).is_ok(),
+                                    |bytes| {
+                                        chunk_tx.send(StreamPipeMessage::Chunk(bytes)).is_ok()
+                                    },
                                 )
                                 .await?;
                                 if summary.stopped {
@@ -654,12 +659,15 @@ pub(crate) fn decode_and_buffer_job(
                             Ok(())
                         }
                         .await;
-                        if let Err(err) = result {
+                        let terminal = if let Err(err) = result {
                             warn!("TIDAL stream download error: {err:?}");
                             // Ensure len_rx unblocks if the request failed before sending length.
                             let _ = len_tx.try_send(None);
-                        }
-                        let _ = chunk_tx.send(None); // signal EOF regardless
+                            StreamPipeMessage::Error(format!("TIDAL stream download failed: {err:#}"))
+                        } else {
+                            StreamPipeMessage::Eof
+                        };
+                        let _ = chunk_tx.send(terminal);
                     });
                 })
                 .context("failed to spawn download thread")?;

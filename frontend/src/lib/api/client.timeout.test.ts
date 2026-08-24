@@ -6,6 +6,7 @@ import {
 	authFetch,
 	BULK_QUEUE_API_TIMEOUT_MS,
 	DEFAULT_API_TIMEOUT_MS,
+	TIDAL_CATALOG_API_TIMEOUT_MS,
 } from './client';
 
 function stubHangingFetch() {
@@ -80,6 +81,20 @@ describe('API request timeout policy', () => {
 
 		const assertion = expect(request).rejects.toBeInstanceOf(ApiTimeoutError);
 		await vi.advanceTimersByTimeAsync(BULK_QUEUE_API_TIMEOUT_MS - DEFAULT_API_TIMEOUT_MS);
+		await assertion;
+	});
+
+	test('keeps TIDAL mix loading alive through the bounded upstream timeout', async () => {
+		const { signals } = stubHangingFetch();
+		const request = api.getTidalMixTracks('mix-1');
+
+		await vi.advanceTimersByTimeAsync(DEFAULT_API_TIMEOUT_MS);
+		expect(signals[0]?.aborted).toBe(false);
+
+		const assertion = expect(request).rejects.toMatchObject({
+			timeoutMs: TIDAL_CATALOG_API_TIMEOUT_MS,
+		});
+		await vi.advanceTimersByTimeAsync(TIDAL_CATALOG_API_TIMEOUT_MS - DEFAULT_API_TIMEOUT_MS);
 		await assertion;
 	});
 
