@@ -2,6 +2,7 @@ const NOOR_PORT = String(import.meta.env.NOOR_PORT || '17600');
 const API_BASE = `http://localhost:${NOOR_PORT}`;
 export const DEFAULT_API_TIMEOUT_MS = 20_000;
 export const BULK_QUEUE_API_TIMEOUT_MS = 90_000;
+export const TIDAL_CATALOG_API_TIMEOUT_MS = 40_000;
 // VACUUM rewrites the entire database. On a multi-GB library that is minutes,
 // not seconds, and the default timeout would abort the request client-side while
 // the server carried on and finished successfully - reporting a failure for work
@@ -1128,7 +1129,13 @@ export interface PlaybackState {
 export interface PlaybackSnapshot {
 	state: PlaybackState;
 	queue: QueueItem[];
+	queue_revision?: number;
 	shuffle_debug?: ShuffleDebug | null;
+}
+
+export interface QueueSnapshot {
+	queue: QueueItem[];
+	queue_revision?: number;
 }
 
 export interface ShuffleDebug {
@@ -1908,6 +1915,7 @@ export interface RadioQueue {
 	tracks: RadioCandidate[];
 	state?: PlaybackState;
 	queue?: QueueItem[];
+	queue_revision?: number;
 	first_playable?: {
 		type: 'library' | 'pending';
 		queue_item_id: number;
@@ -3264,6 +3272,7 @@ export const api = {
 	}): Promise<{
 		state: PlaybackState;
 		queue: QueueItem[];
+		queue_revision?: number;
 		first_playable: {
 			type: 'library' | 'pending';
 			queue_item_id: number;
@@ -3509,28 +3518,28 @@ export const api = {
 		use_learning?: boolean,
 		allow_external?: boolean
 	) {
-		return fetchApi<{ state: PlaybackState; queue: QueueItem[] }>('/api/playback/automix', undefined, {
+		return fetchApi<PlaybackSnapshot>('/api/playback/automix', undefined, {
 			method: 'POST',
 			body: JSON.stringify({ enabled, crossfade_ms, discover_new, use_learning, allow_external }),
 		});
 	},
 
 	addQueueTrack(trackId: number) {
-		return fetchApi<{ queue: QueueItem[] }>('/api/playback/queue/add', undefined, {
+		return fetchApi<QueueSnapshot>('/api/playback/queue/add', undefined, {
 			method: 'POST',
 			body: JSON.stringify({ track_id: trackId }),
 		});
 	},
 
 	queuePlayNext(req: QueueExternalRequest) {
-		return fetchApi<{ queue: QueueItem[] }>('/api/queue/play_next', undefined, {
+		return fetchApi<QueueSnapshot>('/api/queue/play_next', undefined, {
 			method: 'POST',
 			body: JSON.stringify(req),
 		});
 	},
 
 	queuePlayNextMany(items: QueueExternalRequest[]) {
-		return fetchApi<{ queue: QueueItem[] }>('/api/queue/play_next_many', undefined, {
+		return fetchApi<QueueSnapshot>('/api/queue/play_next_many', undefined, {
 			method: 'POST',
 			body: JSON.stringify({ items }),
 			timeoutMs: BULK_QUEUE_API_TIMEOUT_MS,
@@ -3538,14 +3547,14 @@ export const api = {
 	},
 
 	queueAppend(req: QueueExternalRequest) {
-		return fetchApi<{ queue: QueueItem[] }>('/api/queue/append', undefined, {
+		return fetchApi<QueueSnapshot>('/api/queue/append', undefined, {
 			method: 'POST',
 			body: JSON.stringify(req),
 		});
 	},
 
 	queueAppendMany(items: QueueExternalRequest[]) {
-		return fetchApi<{ queue: QueueItem[] }>('/api/queue/append_many', undefined, {
+		return fetchApi<QueueSnapshot>('/api/queue/append_many', undefined, {
 			method: 'POST',
 			body: JSON.stringify({ items }),
 			timeoutMs: BULK_QUEUE_API_TIMEOUT_MS,
@@ -3567,6 +3576,7 @@ export const api = {
 			shuffle_debug?: ShuffleDebug | null;
 			state: PlaybackState;
 			queue: QueueItem[];
+			queue_revision?: number;
 		}>(
 			'/api/playback/queue',
 			undefined,
@@ -3583,7 +3593,7 @@ export const api = {
 	 * Anchoring by queue-item id keeps duplicate tracks unambiguous.
 	 */
 	playQueueItem(queueItemId: number) {
-		return fetchApi<{ state: PlaybackState; queue: QueueItem[] }>(
+		return fetchApi<PlaybackSnapshot>(
 			'/api/playback/queue/play-item',
 			undefined,
 			{
@@ -3594,7 +3604,7 @@ export const api = {
 	},
 
 	removeQueueTrack(queueItemId: number) {
-		return fetchApi<{ queue: QueueItem[]; playback_state?: PlaybackState }>(
+		return fetchApi<QueueSnapshot & { playback_state?: PlaybackState }>(
 			'/api/playback/queue/remove',
 			undefined,
 			{
@@ -3605,7 +3615,7 @@ export const api = {
 	},
 
 	moveQueueTrack(itemId: number, newPos: number) {
-		return fetchApi<{ queue: QueueItem[]; playback_state?: PlaybackState }>(
+		return fetchApi<QueueSnapshot & { playback_state?: PlaybackState }>(
 			'/api/playback/queue/move',
 			undefined,
 			{
@@ -3616,7 +3626,7 @@ export const api = {
 	},
 
 	clearQueue() {
-		return fetchApi<{ queue: QueueItem[]; playback_state?: PlaybackState }>('/api/playback/queue/clear', undefined, {
+		return fetchApi<QueueSnapshot & { playback_state?: PlaybackState }>('/api/playback/queue/clear', undefined, {
 			method: 'POST',
 			body: JSON.stringify({}),
 		});
@@ -3733,18 +3743,24 @@ export const api = {
 	// 503 here means TIDAL isn't connected - the YourMixesShelf surfaces a
 	// connect prompt rather than an error toast.
 	getTidalMixes() {
-		return fetchApi<TidalMixesResponse>('/api/tidal/mixes');
+		return fetchApi<TidalMixesResponse>('/api/tidal/mixes', undefined, {
+			timeoutMs: TIDAL_CATALOG_API_TIMEOUT_MS,
+		});
 	},
 
 	// Personal Radio Stations - same 503/connect-prompt contract as getTidalMixes.
 	getTidalRadioStations() {
-		return fetchApi<TidalRadioStationsResponse>('/api/tidal/radio-stations');
+		return fetchApi<TidalRadioStationsResponse>('/api/tidal/radio-stations', undefined, {
+			timeoutMs: TIDAL_CATALOG_API_TIMEOUT_MS,
+		});
 	},
 
 	// Editorial home modules from TIDAL pages/home - drives the search-page
 	// discover surface. 503 when TIDAL is disconnected.
 	getTidalHomeModules() {
-		return fetchApi<TidalHomeModulesResponse>('/api/tidal/home-modules');
+		return fetchApi<TidalHomeModulesResponse>('/api/tidal/home-modules', undefined, {
+			timeoutMs: TIDAL_CATALOG_API_TIMEOUT_MS,
+		});
 	},
 
 	// Generic editorial page fetch - drives /charts, /moods, and (eventually)
@@ -3754,6 +3770,8 @@ export const api = {
 	getTidalPage(path: string) {
 		return fetchApi<TidalHomeModulesResponse>(
 			`/api/tidal/page/${path.split('/').map(encodeURIComponent).join('/')}`,
+			undefined,
+			{ timeoutMs: TIDAL_CATALOG_API_TIMEOUT_MS },
 		);
 	},
 
@@ -3761,7 +3779,9 @@ export const api = {
 	// Workout, Focus, etc). Each entry has a slug that can be fed to
 	// getTidalMoodPage for the drill-down content.
 	getTidalMoods() {
-		return fetchApi<TidalMoodsResponse>('/api/tidal/moods');
+		return fetchApi<TidalMoodsResponse>('/api/tidal/moods', undefined, {
+			timeoutMs: TIDAL_CATALOG_API_TIMEOUT_MS,
+		});
 	},
 
 	// Drill-down for one mood category. Backend proxies to pages/{slug} which
@@ -3785,7 +3805,9 @@ export const api = {
 	// Mix track list - used to queue + play a mix when a card is clicked.
 	getTidalMixTracks(mixId: string) {
 		return fetchApi<{ tracks: TidalDiscographyTrack[] }>(
-			`/api/tidal/mixes/${encodeURIComponent(mixId)}/tracks`
+			`/api/tidal/mixes/${encodeURIComponent(mixId)}/tracks`,
+			undefined,
+			{ timeoutMs: TIDAL_CATALOG_API_TIMEOUT_MS },
 		);
 	},
 

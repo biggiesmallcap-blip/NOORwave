@@ -19,6 +19,8 @@ use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 use crate::db::models::AudioDspFeatures;
@@ -33,6 +35,22 @@ use std::cmp::Ordering;
 pub struct PlaybackSnapshot {
     pub state: PlaybackState,
     pub queue: Vec<QueueItem>,
+    pub queue_revision: u64,
+}
+
+// Queue snapshots can cross on the wire even though SQLite serializes their
+// mutations. Tag each snapshot with a process epoch plus SQLite's monotonic
+// connection change counter so clients can reject an older full-queue response.
+// The epoch keeps revisions increasing when the sidecar self-heals in place.
+static QUEUE_REVISION_EPOCH: LazyLock<u64> = LazyLock::new(|| {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_micros() as u64)
+        .unwrap_or(0)
+});
+
+pub fn queue_revision(conn: &Connection) -> u64 {
+    QUEUE_REVISION_EPOCH.saturating_add(conn.total_changes())
 }
 
 #[derive(Debug, Clone)]
@@ -1194,7 +1212,11 @@ impl ActiveListenSession {
 pub fn load_snapshot(conn: &Connection) -> Result<PlaybackSnapshot> {
     let state = load_state(conn)?;
     let queue = queue::load_queue(conn)?;
-    Ok(PlaybackSnapshot { state, queue })
+    Ok(PlaybackSnapshot {
+        state,
+        queue,
+        queue_revision: queue_revision(conn),
+    })
 }
 
 pub fn load_state(conn: &Connection) -> Result<PlaybackState> {

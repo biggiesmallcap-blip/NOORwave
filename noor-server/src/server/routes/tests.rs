@@ -311,6 +311,145 @@ async fn pause_and_resume_playback_leave_the_playback_generation_alone() {
     );
 }
 
+#[tokio::test]
+async fn runtime_exit_discards_dead_handle_and_pauses_without_changing_queue() {
+    let db = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let queue_item_id = db
+        .with_conn(|conn| {
+            let queue = player::enqueue_track(conn, 1, "test")?;
+            let queue_item_id = queue[0].id;
+            conn.execute(
+                "UPDATE playback_state
+                 SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+                 WHERE id = 1",
+                rusqlite::params![queue_item_id],
+            )?;
+            Ok(queue_item_id)
+        })
+        .unwrap();
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+    let (command_tx, _command_rx) = std::sync::mpsc::channel();
+    let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    {
+        let mut guard = state.write().await;
+        guard.playback_runtime = Some(PlaybackRuntimeState {
+            access_token: "test-token".to_string(),
+            handle: handle.clone(),
+        });
+        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+            device_name: "Test DAC".to_string(),
+            sample_rate: 48_000,
+            channels: 2,
+            active_track_id: Some(1),
+            last_error: None,
+            exclusive_engaged: false,
+            exclusive_transport_format: None,
+        });
+    }
+
+    handle_runtime_exit(&state, &handle, Some("test runtime stopped")).await;
+
+    {
+        let guard = state.read().await;
+        assert!(guard.playback_runtime.is_none());
+        assert!(guard.playback_runtime_info.is_none());
+    }
+    let snapshot = db.with_conn(player::load_snapshot).unwrap();
+    assert!(!snapshot.state.is_playing);
+    assert_eq!(snapshot.state.current_queue_item_id, Some(queue_item_id));
+    assert_eq!(snapshot.queue.len(), 1);
+}
+
+#[tokio::test]
+async fn resume_rebuilds_current_track_when_runtime_has_no_loaded_engine() {
+    let db = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    db.with_conn(|conn| {
+        let queue = player::enqueue_track(conn, 1, "test")?;
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 0
+             WHERE id = 1",
+            rusqlite::params![queue[0].id],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
+    let (command_tx, command_rx) = std::sync::mpsc::channel();
+    let runtime_thread = std::thread::spawn(move || {
+        match command_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("track status command")
+        {
+            playback_runtime::PlaybackRuntimeCommand::TrackStatus {
+                track_id,
+                generation,
+                respond_to,
+            } => {
+                assert_eq!(track_id, 1);
+                assert_eq!(generation, 1);
+                respond_to
+                    .send(playback_runtime::PlaybackTrackStatus::Active)
+                    .unwrap();
+            }
+            other => panic!("expected TrackStatus instead of hollow Resume, got {other:?}"),
+        }
+        match command_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("switch command")
+        {
+            playback_runtime::PlaybackRuntimeCommand::Switch(job) => {
+                assert_eq!(job.track.id, 1);
+                assert_eq!(job.generation, 1);
+                assert!(!job.start_paused);
+            }
+            other => panic!("expected Switch command, got {other:?}"),
+        }
+    });
+    {
+        let mut guard = state.write().await;
+        guard.tidal_tokens = Some(tidal_auth::TidalTokens {
+            access_token: "test-token".to_string(),
+            refresh_token: "refresh-token".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: 3600,
+            user_id: "test-user".to_string(),
+            country_code: "US".to_string(),
+            auth_flow: Some("pkce".to_string()),
+        });
+        guard.playback_runtime = Some(PlaybackRuntimeState {
+            access_token: "test-token".to_string(),
+            handle: playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx),
+        });
+        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+            device_name: "Test DAC".to_string(),
+            sample_rate: 48_000,
+            channels: 2,
+            active_track_id: None,
+            last_error: Some("DASH stream prebuffer failed".to_string()),
+            exclusive_engaged: false,
+            exclusive_transport_format: None,
+        });
+    }
+
+    let response = api_routes(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/playback/resume")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    runtime_thread.join().unwrap();
+}
+
 #[test]
 fn stream_error_mapping_marks_rejected_stream_requests_as_forbidden() {
     let (status, Json(body)) = tidal_playback_error_response(
@@ -3847,6 +3986,93 @@ async fn prepared_runtime_track_error_keeps_current_playback_running() {
     assert_eq!(info.last_error.as_deref(), Some("prebuffer decode failed"));
 }
 
+#[test]
+fn runtime_track_error_retry_policy_only_retries_transient_failures() {
+    for message in [
+        "DASH stream prebuffer failed",
+        "TIDAL stream download failed: segment timed out",
+        "TIDAL playback request was rejected with 429 Too Many Requests",
+    ] {
+        assert!(runtime_track_error_is_retryable(message), "{message}");
+    }
+    assert!(!runtime_track_error_is_retryable(
+        "unsupported codec in playback asset"
+    ));
+}
+
+#[test]
+fn playback_snapshot_queue_revision_increases_after_queue_mutation() {
+    let db = fresh_migrated_db();
+    seed_basic_tracks(&db);
+
+    let before = db.with_conn(player::load_snapshot).unwrap();
+    db.with_conn(|conn| player::enqueue_track(conn, 1, "test"))
+        .unwrap();
+    let after = db.with_conn(player::load_snapshot).unwrap();
+
+    assert!(after.queue_revision > before.queue_revision);
+}
+
+#[tokio::test]
+async fn repeated_transient_runtime_error_pauses_without_advancing_queue() {
+    let db = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let (current_qid, next_qid) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'test')",
+                [],
+            )?;
+            let current_qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 1, 'test')",
+                [],
+            )?;
+            let next_qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                 SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+                 WHERE id = 1",
+                rusqlite::params![current_qid],
+            )?;
+            Ok((current_qid, next_qid))
+        })
+        .unwrap();
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+    {
+        let mut guard = state.write().await;
+        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+            device_name: "Test DAC".to_string(),
+            sample_rate: 48_000,
+            channels: 2,
+            active_track_id: Some(1),
+            last_error: Some(RUNTIME_TRACK_RETRY_MARKER.to_string()),
+            exclusive_engaged: false,
+            exclusive_transport_format: None,
+        });
+    }
+
+    handle_runtime_track_error(state, 1, 1, "DASH stream prebuffer failed")
+        .await
+        .expect("second transient failure should pause");
+
+    let snapshot = db.with_conn(player::load_snapshot).unwrap();
+    assert_eq!(
+        snapshot.state.current_track.as_ref().map(|track| track.id),
+        Some(1)
+    );
+    assert_eq!(snapshot.state.current_queue_item_id, Some(current_qid));
+    assert!(!snapshot.state.is_playing);
+    assert_eq!(
+        snapshot
+            .queue
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        vec![current_qid, next_qid]
+    );
+}
+
 #[tokio::test]
 async fn runtime_track_error_advances_to_next_library_track() {
     let db = fresh_migrated_db();
@@ -4921,6 +5147,7 @@ fn automix_discover_new_fallback_waits_when_sidecar_new_rows_fill_slots() {
             test_queue_item(11, test_track(2, "Sidecar A"), 1, "automix-new"),
             test_queue_item(12, test_track(3, "Sidecar B"), 2, "automix-new"),
         ],
+        queue_revision: 0,
     };
 
     assert!(automix_discover_new_fallback_seed(&snapshot).is_none());
@@ -4956,6 +5183,7 @@ fn automix_discover_new_fallback_ignores_mismatched_queue_anchor() {
             test_queue_item(12, test_track(3, "Sidecar B"), 2, "automix-new"),
             test_queue_item(13, test_track(4, "Stale Anchor"), 3, "manual"),
         ],
+        queue_revision: 0,
     };
 
     assert!(automix_discover_new_fallback_seed(&snapshot).is_none());
@@ -4982,6 +5210,7 @@ fn automix_discover_new_fallback_stays_off_when_disabled() {
             buffered_start_ms: 0,
         },
         queue: vec![test_queue_item(10, current, 0, "manual")],
+        queue_revision: 0,
     };
 
     assert!(automix_discover_new_fallback_seed(&snapshot).is_none());

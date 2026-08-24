@@ -32,7 +32,7 @@ pub(crate) use shared::fill_f32_from_shared;
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -358,6 +358,7 @@ impl PlaybackRuntimeConfig {
 pub struct PlaybackRuntimeHandle {
     command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
     event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+    healthy: Arc<AtomicBool>,
     /// f32 volume (0.0–1.0) stored as its bit-pattern in a u32.
     volume_ctl: Arc<AtomicU32>,
     /// Redirectable position reader. Normally points to the active engine's
@@ -399,6 +400,7 @@ impl PlaybackRuntimeHandle {
         Self {
             command_tx,
             event_tx,
+            healthy: Arc::new(AtomicBool::new(true)),
             volume_ctl: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             position_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
             buffered_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
@@ -465,6 +467,14 @@ impl PlaybackRuntimeHandle {
 
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<PlaybackRuntimeEvent> {
         self.event_tx.subscribe()
+    }
+
+    pub fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn is_same_runtime(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.healthy, &other.healthy)
     }
 
     /// Segment-aware seek. Single entry point for all seek requests; the
@@ -630,9 +640,10 @@ impl PlaybackRuntimeHandle {
     }
 
     fn send(&self, command: PlaybackRuntimeCommand) -> Result<()> {
-        self.command_tx
-            .send(command)
-            .map_err(|_| anyhow!("playback runtime command channel closed"))
+        self.command_tx.send(command).map_err(|_| {
+            self.healthy.store(false, Ordering::Release);
+            anyhow!("playback runtime command channel closed")
+        })
     }
 }
 
@@ -646,6 +657,8 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
     let (event_tx, _) = tokio::sync::broadcast::channel(256);
     let worker_event_tx = event_tx.clone();
     let worker_command_tx = command_tx.clone();
+    let healthy = Arc::new(AtomicBool::new(true));
+    let worker_healthy = Arc::clone(&healthy);
 
     let volume_ctl = Arc::new(AtomicU32::new(1.0f32.to_bits())); // default: full volume
     // `initial_position` is the counter cold-start engines write into.
@@ -675,7 +688,7 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
     thread::Builder::new()
         .name("noor-playback-runtime".into())
         .spawn(move || {
-            if let Err(err) = run_runtime_loop(
+            let exit_message = if let Err(err) = run_runtime_loop(
                 config,
                 command_rx,
                 worker_command_tx,
@@ -690,13 +703,21 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
                     message: err.to_string(),
                 });
                 error!("Playback runtime stopped: {err:?}");
-            }
+                Some(err.to_string())
+            } else {
+                None
+            };
+            worker_healthy.store(false, Ordering::Release);
+            let _ = worker_event_tx.send(PlaybackRuntimeEvent::Exited {
+                message: exit_message,
+            });
         })
         .context("failed to spawn playback runtime thread")?;
 
     Ok(PlaybackRuntimeHandle {
         command_tx,
         event_tx,
+        healthy,
         volume_ctl,
         position_source,
         buffered_source,
@@ -4205,6 +4226,17 @@ mod tests {
     };
 
     #[test]
+    fn closed_runtime_command_channel_marks_handle_unhealthy() {
+        let (command_tx, command_rx) = mpsc::channel();
+        let handle = PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+        assert!(handle.is_healthy());
+
+        drop(command_rx);
+        assert!(handle.pause().is_err());
+        assert!(!handle.is_healthy());
+    }
+
+    #[test]
     fn runtime_stream_resolver_overrides_static_access_token() {
         let resolver: RuntimeStreamResolver = Arc::new(|request| {
             Box::pin(async move {
@@ -6630,6 +6662,7 @@ mod tests {
         let handle = PlaybackRuntimeHandle {
             command_tx,
             event_tx,
+            healthy: Arc::new(AtomicBool::new(true)),
             volume_ctl: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             position_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
             buffered_source: Arc::clone(&buffered_source),
@@ -6670,6 +6703,7 @@ mod tests {
         let handle = PlaybackRuntimeHandle {
             command_tx,
             event_tx,
+            healthy: Arc::new(AtomicBool::new(true)),
             volume_ctl: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             position_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
             buffered_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(48_000)))),
@@ -7429,6 +7463,7 @@ mod tests {
         let handle = PlaybackRuntimeHandle {
             command_tx,
             event_tx,
+            healthy: Arc::new(AtomicBool::new(true)),
             volume_ctl: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             position_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
             buffered_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),

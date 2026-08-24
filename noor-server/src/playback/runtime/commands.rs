@@ -208,6 +208,12 @@ pub enum PlaybackRuntimeEvent {
     Error {
         message: String,
     },
+    /// The runtime command loop exited and this handle can no longer accept
+    /// transport commands. Distinct from recoverable per-track errors so the
+    /// route layer can discard the dead handle and lazily respawn it.
+    Exited {
+        message: Option<String>,
+    },
     /// WASAPI exclusive grab succeeded. Frontend clears any stale "failure"
     /// banner and shows engaged state.
     ExclusiveModeEngaged {

@@ -157,12 +157,23 @@ function setCurrentTrack(track: Track | null) {
 	currentTrack.set(enrichTidalTrack(track));
 }
 
-function setPlaybackQueue(queue: QueueItem[]) {
+let latestQueueRevision: number | null = null;
+
+function setPlaybackQueue(queue: QueueItem[], queueRevision?: number): boolean {
+	if (
+		queueRevision !== undefined &&
+		latestQueueRevision !== null &&
+		queueRevision < latestQueueRevision
+	) {
+		return false;
+	}
+	if (queueRevision !== undefined) latestQueueRevision = queueRevision;
 	const enriched = enrichQueue(queue);
 	const previous = get(playbackQueue);
 	const resolvedDelta = countResolvedTransitions(previous, enriched);
 	playbackQueue.set(enriched);
 	if (resolvedDelta > 0) announceResolved(resolvedDelta);
+	return true;
 }
 
 // Count rows whose persisted queue id existed in `previous` as pending and now
@@ -515,7 +526,7 @@ function resetOptimisticPlaybackProgress() {
 
 export function hydratePlayback(snapshot: PlaybackSnapshot) {
 	applyState(snapshot.state);
-	setPlaybackQueue(snapshot.queue);
+	setPlaybackQueue(snapshot.queue, snapshot.queue_revision);
 	playerReady.set(true);
 	playerError.set(null);
 	noteSuccess();
@@ -599,6 +610,7 @@ export function toggleLatchShouldRelease(
 
 export async function togglePlayback() {
 	playerError.set(null);
+	const previousPlaying = get(isPlaying);
 	// Decide the intended action ONCE, from the freshest signal available:
 	// the previous in-flight toggle if there is one, else the current store.
 	const intended: ToggleAction = nextToggleAction(pendingToggleAction, get(isPlaying));
@@ -614,6 +626,10 @@ export async function togglePlayback() {
 		noteSuccess();
 	} catch (error) {
 		if (!isLatestPlaybackIntent(intentSeq)) return;
+		// The optimistic icon must not remain inverted when the transport
+		// request times out or the runtime rejects it. A later WS/state refresh
+		// can still replace this rollback with authoritative server truth.
+		isPlaying.set(previousPlaying);
 		setError('toggle playback', error, () => togglePlayback());
 	} finally {
 		if (toggleLatchShouldRelease(pendingToggleAction, intended)) {
@@ -828,7 +844,7 @@ export async function setPlayerAutomixEnabled(
 		automixDiscoverNew.set(result.state.automix_discover_new);
 		automixUseLearning.set(result.state.automix_use_learning);
 		automixAllowExternal.set(result.state.automix_allow_external);
-		if (result.queue) setPlaybackQueue(result.queue);
+		if (result.queue) setPlaybackQueue(result.queue, result.queue_revision);
 		noteSuccess();
 	} catch (error) {
 		setError('update automix', error, () =>
@@ -880,7 +896,7 @@ export async function cyclePlayerShuffleMode() {
 export async function addTrackToQueue(trackId: number) {
 	try {
 		const result = await api.addQueueTrack(trackId);
-		setPlaybackQueue(result.queue);
+		setPlaybackQueue(result.queue, result.queue_revision);
 		playerError.set(null);
 		noteSuccess();
 		showToast('Added to queue', 'success');
@@ -966,7 +982,7 @@ export async function moveQueueTrackNext(queueItemId: number) {
 
 	try {
 		const result = await api.moveQueueTrack(queueItemId, newPos);
-		setPlaybackQueue(result.queue);
+		setPlaybackQueue(result.queue, result.queue_revision);
 		if (result.playback_state) applyState(result.playback_state);
 		noteSuccess();
 	} catch (error) {
@@ -978,7 +994,7 @@ export async function removeTrackFromQueue(queueItemId: number) {
 	playerError.set(null);
 	try {
 		const result = await api.removeQueueTrack(queueItemId);
-		setPlaybackQueue(result.queue);
+		setPlaybackQueue(result.queue, result.queue_revision);
 		if (result.playback_state) applyState(result.playback_state);
 		noteSuccess();
 		announceQueue('Removed from queue');
@@ -1002,7 +1018,7 @@ export async function moveQueueItem(itemId: number, newPos: number) {
 
 	try {
 		const result = await api.moveQueueTrack(itemId, target);
-		setPlaybackQueue(result.queue);
+		setPlaybackQueue(result.queue, result.queue_revision);
 		if (result.playback_state) applyState(result.playback_state);
 		playerError.set(null);
 	} catch (error) {
@@ -1016,7 +1032,7 @@ export async function clearQueue(): Promise<QueueItem[]> {
 	const before = get(playbackQueue);
 	try {
 		const result = await api.clearQueue();
-		setPlaybackQueue(result.queue);
+		setPlaybackQueue(result.queue, result.queue_revision);
 		if (result.playback_state) applyState(result.playback_state);
 		playerError.set(null);
 		// Offer undo via toast.
@@ -1074,7 +1090,7 @@ export async function restoreQueueItems(items: QueueItem[]): Promise<RestoreSumm
 			summary.skipped += 1;
 		}
 		const snapshot = await api.getPlaybackState();
-		setPlaybackQueue(snapshot.queue);
+		setPlaybackQueue(snapshot.queue, snapshot.queue_revision);
 		playerError.set(null);
 		if (summary.restored > 0) {
 			announceQueue(
@@ -1257,7 +1273,7 @@ async function loadQueueAndPlay(
 			startPlayback: true,
 		});
 		if (!isLatestPlaybackIntent(intentSeq)) return;
-		hydratePlaybackIfLatest({ state: replaced.state, queue: replaced.queue }, intentSeq);
+		hydratePlaybackIfLatest(replaced, intentSeq);
 	} catch (error) {
 		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('start playback', error, () => loadQueueAndPlay(trackIds, options));
@@ -1413,7 +1429,7 @@ export async function playAlbum(
 				{ shuffleMode: startTrackId == null ? get(shuffleMode) : undefined, startPlayback: true }
 			);
 			if (!isLatestPlaybackIntent(intentSeq)) return;
-			hydratePlaybackIfLatest({ state: result.state, queue: result.queue }, intentSeq);
+			hydratePlaybackIfLatest(result, intentSeq);
 			noteSuccess();
 			const streamed = ordered.filter((e) => e.kind === 'tidal').length;
 			showToast(`Playing album (${ordered.length} tracks, ${streamed} streamed)`, 'success');
@@ -1459,7 +1475,7 @@ export async function shuffleAlbum(albumId: number, preloaded?: AlbumTracksData)
 				startPlayback: true,
 			});
 			if (!isLatestPlaybackIntent(intentSeq)) return;
-			hydratePlaybackIfLatest({ state: result.state, queue: result.queue }, intentSeq);
+			hydratePlaybackIfLatest(result, intentSeq);
 			noteSuccess();
 			showToast(`Shuffling album (${entries.length} tracks)`, 'success');
 			return;
@@ -1565,7 +1581,7 @@ async function startSongRadioFromLibraryTrack(
 ): Promise<boolean> {
 	const result = await api.startRadioStart({ seed_track_id: seedTrackId, limit: 60 });
 	if (!isLatestPlaybackIntent(intentSeq)) return false;
-	hydratePlayback({ state: result.state, queue: result.queue });
+	hydratePlayback(result);
 	return true;
 }
 
@@ -1672,7 +1688,11 @@ export async function startArtistRadio(artistId: number, _seedTrackId?: number) 
 		}
 		setRadioReasons(queue.tracks);
 		if (queue.state && queue.queue) {
-			hydratePlayback({ state: queue.state, queue: queue.queue });
+			hydratePlayback({
+				state: queue.state,
+				queue: queue.queue,
+				queue_revision: queue.queue_revision,
+			});
 		}
 		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
@@ -1696,7 +1716,11 @@ export async function startAlbumRadio(albumId: number) {
 		}
 		setRadioReasons(queue.tracks);
 		if (queue.state && queue.queue) {
-			hydratePlayback({ state: queue.state, queue: queue.queue });
+			hydratePlayback({
+				state: queue.state,
+				queue: queue.queue,
+				queue_revision: queue.queue_revision,
+			});
 		}
 		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
@@ -1729,7 +1753,11 @@ export async function startGenreRadio(seedTrackId: number, blend: RadioBlend, la
 		}
 		setRadioReasons(queue.tracks);
 		if (queue.state && queue.queue) {
-			hydratePlayback({ state: queue.state, queue: queue.queue });
+			hydratePlayback({
+				state: queue.state,
+				queue: queue.queue,
+				queue_revision: queue.queue_revision,
+			});
 		}
 		showToast(`${label} radio started`, 'success');
 	} catch (error) {
@@ -1747,7 +1775,7 @@ export async function playTrackNext(trackId: number) {
 	try {
 		const before = get(playbackQueue);
 		const addResult = await api.addQueueTrack(trackId);
-		setPlaybackQueue(addResult.queue);
+		setPlaybackQueue(addResult.queue, addResult.queue_revision);
 		// Pick the genuinely-new row (id not present before the add), not the first
 		// track-id match: if the track was already queued, a track-id match returns
 		// the pre-existing earlier copy and the freshly appended row is stranded at
@@ -1773,7 +1801,7 @@ export async function playTidalTrackNow(track: TidalPlayable): Promise<void> {
 			startPlayback: true,
 		});
 		if (!isLatestPlaybackIntent(intentSeq)) return;
-		hydratePlaybackIfLatest({ state: result.state, queue: result.queue }, intentSeq);
+		hydratePlaybackIfLatest(result, intentSeq);
 		noteSuccess();
 		showToast(`Playing ${trackLabel(track)}`, 'success');
 	} catch (error) {
@@ -1838,7 +1866,7 @@ export async function playTidalTrackNext(track: TidalPlayable): Promise<void> {
 	playerError.set(null);
 	try {
 		const result = await api.queuePlayNext(tidalQueueRequest(track));
-		setPlaybackQueue(result.queue);
+		setPlaybackQueue(result.queue, result.queue_revision);
 		noteSuccess();
 		showToast(`Queued next: ${trackLabel(track)}`, 'success');
 	} catch (error) {
@@ -1881,7 +1909,7 @@ export async function playTidalTracksNow(
 			{ shuffleMode: oneShotShuffleMode, startPlayback: true }
 		);
 		if (!isLatestPlaybackIntent(intentSeq)) return;
-		hydratePlaybackIfLatest({ state: result.state, queue: result.queue }, intentSeq);
+		hydratePlaybackIfLatest(result, intentSeq);
 		noteSuccess();
 		showToast(`Playing ${label} (${playable.length} tracks)`, 'success');
 	} catch (error) {
@@ -1906,7 +1934,7 @@ export async function playTidalTracksNext(tracks: TidalPlayable[]): Promise<void
 	playerError.set(null);
 	try {
 		const result = await api.queuePlayNextMany(playable.map(tidalQueueRequest));
-		setPlaybackQueue(result.queue);
+		setPlaybackQueue(result.queue, result.queue_revision);
 		noteSuccess();
 		showToast(`Queued next: ${playable.length} tracks`, 'success');
 	} catch (error) {
@@ -1918,7 +1946,7 @@ export async function addTidalTrackToQueue(track: TidalPlayable): Promise<void> 
 	playerError.set(null);
 	try {
 		const result = await api.queueAppend(tidalQueueRequest(track));
-		setPlaybackQueue(result.queue);
+		setPlaybackQueue(result.queue, result.queue_revision);
 		noteSuccess();
 		showToast(`Added to queue: ${trackLabel(track)}`, 'success');
 	} catch (error) {
@@ -1935,7 +1963,7 @@ export async function addTidalTracksToQueue(tracks: TidalPlayable[]): Promise<vo
 	playerError.set(null);
 	try {
 		const result = await api.queueAppendMany(playable.map(tidalQueueRequest));
-		setPlaybackQueue(result.queue);
+		setPlaybackQueue(result.queue, result.queue_revision);
 		noteSuccess();
 		showToast(`Added to queue: ${playable.length} tracks`, 'success');
 	} catch (error) {
@@ -2014,7 +2042,7 @@ async function startTidalQueue(
 			{ shuffleMode: oneShotShuffleMode, startPlayback: true }
 		);
 		if (!isLatestPlaybackIntent(intentSeq)) return;
-		hydratePlaybackIfLatest({ state: result.state, queue: result.queue }, intentSeq);
+		hydratePlaybackIfLatest(result, intentSeq);
 		noteSuccess();
 	} finally {
 		if (ownsIntent) finishPlaybackIntent(intentSeq);

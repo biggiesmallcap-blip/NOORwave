@@ -18,6 +18,8 @@ vi.mock('$lib/api/client', async () => {
 	const removeQueueTrack = vi.fn(async () => ({ queue: [], playback_state: null }));
 	const moveQueueTrack = vi.fn(async () => ({ queue: [], playback_state: null }));
 	const getTrackAudioFeatures = vi.fn(async () => ({ features: null }));
+	const pausePlayback = vi.fn();
+	const resumePlayback = vi.fn();
 	const playTrack = vi.fn();
 	const importTidalTrackForRadio = vi.fn();
 	const getAlbumTracks = vi.fn();
@@ -32,6 +34,8 @@ vi.mock('$lib/api/client', async () => {
 			removeQueueTrack,
 			moveQueueTrack,
 			getTrackAudioFeatures,
+			pausePlayback,
+			resumePlayback,
 			playTrack,
 			importTidalTrackForRadio,
 			getAlbumTracks,
@@ -47,6 +51,7 @@ import { api } from '$lib/api/client';
 import {
 	currentQueueItemId,
 	currentTrack,
+	addTrackToQueue,
 	isPlaying,
 	lastSuccessfulCallAt,
 	playAlbum,
@@ -56,6 +61,7 @@ import {
 	startTidalSongRadio,
 	playTrackNow,
 	playTidalTrackNow,
+	togglePlayback,
 	playbackQueue,
 	playerError,
 	refreshPlaybackState,
@@ -273,6 +279,8 @@ describe('restoreQueueItems', () => {
 		vi.mocked(api.getPlaybackState).mockReset();
 		vi.mocked(api.removeQueueTrack).mockClear();
 		vi.mocked(api.getTrackAudioFeatures).mockReset();
+		vi.mocked(api.pausePlayback).mockReset();
+		vi.mocked(api.resumePlayback).mockReset();
 		vi.mocked(api.playTrack).mockReset();
 		vi.mocked(api.importTidalTrackForRadio).mockReset();
 		vi.mocked(api.getAlbumTracks).mockReset();
@@ -475,6 +483,37 @@ describe('stale playback responses', () => {
 		await refreshAction;
 		expect(get(currentTrack)?.id).toBe(2);
 		expect(get(playerError)).toBeNull();
+	});
+
+	it('does not let an older add response erase a newer queue revision', async () => {
+		const older = deferred<Awaited<ReturnType<typeof api.addQueueTrack>>>();
+		const newer = deferred<Awaited<ReturnType<typeof api.addQueueTrack>>>();
+		const first = libraryRow(10, 1);
+		const second = libraryRow(20, 2);
+		vi.mocked(api.addQueueTrack)
+			.mockReturnValueOnce(older.promise)
+			.mockReturnValueOnce(newer.promise);
+
+		const olderAction = addTrackToQueue(1);
+		const newerAction = addTrackToQueue(2);
+
+		newer.resolve({ queue: [first, second], queue_revision: 12 });
+		await newerAction;
+		expect(get(playbackQueue).map((item) => item.id)).toEqual([10, 20]);
+
+		older.resolve({ queue: [first], queue_revision: 11 });
+		await olderAction;
+		expect(get(playbackQueue).map((item) => item.id)).toEqual([10, 20]);
+	});
+
+	it('restores the transport button when a pause request fails', async () => {
+		isPlaying.set(true);
+		vi.mocked(api.pausePlayback).mockRejectedValueOnce(new Error('server not responding'));
+
+		await togglePlayback();
+
+		expect(get(isPlaying)).toBe(true);
+		expect(get(playerError)?.message).toBeTruthy();
 	});
 
 	it('does not let an older album track fetch start a stale queue replace', async () => {
