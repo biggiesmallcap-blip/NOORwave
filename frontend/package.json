@@ -25,23 +25,23 @@
 		"@sveltejs/adapter-static": "^3.0.10",
 		"@sveltejs/kit": "^2.70.3",
 		"@sveltejs/vite-plugin-svelte": "^7.3.0",
-		"@types/node": "^26.2.0",
-		"@vitest/coverage-v8": "^4.1.11",
-		"playwright": "^1.62.1",
+		"@types/node": "^26.5.0",
+		"@vitest/coverage-v8": "^5.0.0",
+		"playwright": "^1.63.0",
 		"postcss-html": "^2.0.0",
-		"stylelint": "^17.14.1",
+		"stylelint": "^17.15.0",
 		"stylelint-config-standard": "^40.0.0",
-		"svelte": "^5.56.10",
+		"svelte": "^5.57.0",
 		"svelte-check": "^4.7.6",
-		"typescript": "^6.0.3",
+		"typescript": "^7.0.2",
 		"vite": "^8.2.2",
-		"vitest": "^4.1.11"
+		"vitest": "^5.0.0"
 	},
 	"dependencies": {
 		"@tauri-apps/api": "^2.11.0",
 		"@tauri-apps/plugin-dialog": "^2.7.1",
 		"@tauri-apps/plugin-opener": "^2.5.4",
-		"hls.js": "^1.7.1"
+		"hls.js": "^1.7.2"
 	},
 	"pnpm": {
 		"overrides": {
