@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1245,6 +1245,14 @@ pub fn resolve_group(
 
     for &track_id in &removed_track_ids {
         conn.execute(
+            "UPDATE dj_transition_events SET from_track_id = ?1 WHERE from_track_id = ?2",
+            params![preferred_track_id, track_id],
+        )?;
+        conn.execute(
+            "UPDATE dj_transition_events SET to_track_id = ?1 WHERE to_track_id = ?2",
+            params![preferred_track_id, track_id],
+        )?;
+        conn.execute(
             "DELETE FROM listen_history WHERE track_id = ?1",
             params![track_id],
         )?;
@@ -1301,7 +1309,8 @@ pub fn merge_group(
     group_id: i64,
     preferred_track_id: i64,
 ) -> Result<MergeOutcome> {
-    let mut stmt = conn.prepare(
+    let tx = conn.unchecked_transaction()?;
+    let mut stmt = tx.prepare(
         "SELECT dm.track_id, t.tidal_id, t.is_favorite, t.is_library, t.play_count
          FROM duplicate_members dm
          JOIN tracks t ON dm.track_id = t.id
@@ -1327,23 +1336,34 @@ pub fn merge_group(
         .filter_map(|l| l.1)
         .collect();
 
-    // Fold flags and plays into the kept row: a merge can move a like, never
-    // lose one.
+    // Fold flags, plays, and the earliest library date into the kept row: a
+    // merge can move a like, never lose one or make an old recording look as
+    // though it was added on the day a duplicate catalogue copy arrived.
     let fav_fold = losers.iter().any(|l| l.2 != 0) as i32;
     let lib_fold = losers.iter().any(|l| l.3 != 0) as i32;
     let plays_fold: i64 = losers.iter().map(|l| l.4).sum();
-    conn.execute(
+    tx.execute(
         "UPDATE tracks SET
             is_favorite = MAX(is_favorite, ?1),
             is_library = MAX(is_library, ?2),
-            play_count = play_count + ?3
+            play_count = play_count + ?3,
+            date_added = COALESCE(
+                (SELECT t2.date_added
+                 FROM duplicate_members dm2
+                 JOIN tracks t2 ON t2.id = dm2.track_id
+                 WHERE dm2.group_id = ?5 AND t2.date_added IS NOT NULL
+                 ORDER BY substr(t2.date_added, 1, 10) ASC,
+                          substr(t2.date_added, 12, 8) ASC
+                 LIMIT 1),
+                date_added
+            )
          WHERE id = ?4",
-        params![fav_fold, lib_fold, plays_fold, preferred_track_id],
+        params![fav_fold, lib_fold, plays_fold, preferred_track_id, group_id],
     )?;
     // Zero the folded counters on the losers so an interrupted merge that
     // re-runs after the next scan cannot double-count plays.
     for &(loser_id, _, _, _, _) in &losers {
-        conn.execute(
+        tx.execute(
             "UPDATE tracks SET play_count = 0 WHERE id = ?1",
             params![loser_id],
         )?;
@@ -1352,22 +1372,33 @@ pub fn merge_group(
     for &(loser_id, _, _, _, _) in &losers {
         // Listen history feeds taste vectors, heat, and stats: repoint, never
         // delete.
-        conn.execute(
+        tx.execute(
             "UPDATE listen_history SET track_id = ?1 WHERE track_id = ?2",
             params![preferred_track_id, loser_id],
         )?;
         // Playlist memberships follow the kept row. PK is
         // (playlist_id, position) so this cannot conflict...
-        conn.execute(
+        tx.execute(
             "UPDATE playlist_tracks SET track_id = ?1 WHERE track_id = ?2",
             params![preferred_track_id, loser_id],
         )?;
+        // DJ history is durable learning data and uses non-cascading foreign
+        // keys. Repoint both sides before deleting the loser; leaving either
+        // reference behind aborts the whole automatic dedupe pass.
+        tx.execute(
+            "UPDATE dj_transition_events SET from_track_id = ?1 WHERE from_track_id = ?2",
+            params![preferred_track_id, loser_id],
+        )?;
+        tx.execute(
+            "UPDATE dj_transition_events SET to_track_id = ?1 WHERE to_track_id = ?2",
+            params![preferred_track_id, loser_id],
+        )?;
         // Move analysis rows the kept row lacks; leftovers are cleaned below.
-        conn.execute(
+        tx.execute(
             "UPDATE OR IGNORE audio_dsp_features SET track_id = ?1 WHERE track_id = ?2",
             params![preferred_track_id, loser_id],
         )?;
-        conn.execute(
+        tx.execute(
             "UPDATE OR IGNORE track_embeddings SET track_id = ?1 WHERE track_id = ?2",
             params![preferred_track_id, loser_id],
         )?;
@@ -1375,7 +1406,7 @@ pub fn merge_group(
 
     // ...but a playlist that contained several copies now lists the kept
     // track more than once: drop the later positions.
-    conn.execute(
+    tx.execute(
         "DELETE FROM playlist_tracks WHERE rowid IN (
             SELECT later.rowid
             FROM playlist_tracks later
@@ -1388,61 +1419,65 @@ pub fn merge_group(
         params![preferred_track_id],
     )?;
 
-    let reconcile =
-        crate::playback::player::reconcile_after_track_delete(conn, &removed_track_ids)?;
+    let reconcile = crate::playback::player::reconcile_after_track_delete_in_transaction(
+        &tx,
+        &removed_track_ids,
+    )?;
 
     // Explicit cleanup of remaining loser references. The shipped DB would
     // cascade most of these on the tracks delete, but being explicit keeps
     // behavior identical when foreign_keys is off (tests, older DBs).
     for &track_id in &removed_track_ids {
-        conn.execute(
+        tx.execute(
             "DELETE FROM audio_dsp_features WHERE track_id = ?1",
             params![track_id],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM track_embeddings WHERE track_id = ?1",
             params![track_id],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM track_neighbors WHERE track_id = ?1 OR neighbor_track_id = ?1",
             params![track_id],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM track_similarity WHERE track_a = ?1 OR track_b = ?1",
             params![track_id],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM shuffle_state WHERE track_id = ?1",
             params![track_id],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM track_genres WHERE track_id = ?1",
             params![track_id],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM duplicate_members WHERE track_id = ?1",
             params![track_id],
         )?;
-        conn.execute("DELETE FROM tracks WHERE id = ?1", params![track_id])?;
+        tx.execute("DELETE FROM tracks WHERE id = ?1", params![track_id])?;
     }
 
-    conn.execute(
+    tx.execute(
         "UPDATE duplicate_members SET is_preferred = 1
          WHERE group_id = ?1 AND track_id = ?2",
         params![group_id, preferred_track_id],
     )?;
-    conn.execute(
+    tx.execute(
         "UPDATE duplicate_groups SET status = 'resolved' WHERE id = ?1",
         params![group_id],
     )?;
 
-    let kept_tidal_id: Option<i64> = conn
+    let kept_tidal_id: Option<i64> = tx
         .query_row(
             "SELECT tidal_id FROM tracks WHERE id = ?1",
             params![preferred_track_id],
             |row| row.get(0),
         )
         .unwrap_or(None);
+
+    tx.commit()?;
 
     Ok(MergeOutcome {
         removed_track_ids,
@@ -1528,10 +1563,10 @@ pub fn auto_merge_pending(conn: &Connection) -> Result<AutoMergeStats> {
             continue;
         };
 
-        // Not wrapped in a transaction: reconcile_after_track_delete opens
-        // its own, and SQLite cannot nest. Same non-atomic shape as
-        // resolve_group; a crash mid-merge is repaired by the next scan.
-        let outcome = merge_group(conn, gid, preferred)?;
+        // merge_group owns one transaction for reference transfers, queue
+        // reconciliation, loser deletion, and group resolution.
+        let outcome = merge_group(conn, gid, preferred)
+            .with_context(|| format!("auto-merge duplicate group {gid}"))?;
 
         stats.merged_groups += 1;
         stats.removed_tracks += outcome.removed_track_ids.len();
@@ -1698,6 +1733,12 @@ mod tests {
                 automix_discover_new INTEGER NOT NULL DEFAULT 0,
                 automix_use_learning INTEGER NOT NULL DEFAULT 1,
                 automix_allow_external INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE dj_transition_events (
+                id INTEGER PRIMARY KEY,
+                from_track_id INTEGER REFERENCES tracks(id),
+                to_track_id INTEGER REFERENCES tracks(id)
             );
             ",
         )
@@ -2287,11 +2328,18 @@ mod tests {
     #[test]
     fn merge_group_repoints_history_and_transfers_like() {
         let conn = test_conn();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         insert_track(&conn, 1, "Song", 200_000, Some("ISRC1"));
         insert_track(&conn, 2, "Song", 200_500, Some("ISRC1"));
         // Loser 2 carries the like, plays, history, playlist membership, DSP.
         conn.execute(
-            "UPDATE tracks SET is_favorite = 1, play_count = 5 WHERE id = 2",
+            "UPDATE tracks SET is_favorite = 1, play_count = 5,
+                 date_added = '2024-07-22T03:55:51.120+0000' WHERE id = 2",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE tracks SET date_added = '2026-09-18 07:37:31' WHERE id = 1",
             [],
         )
         .unwrap();
@@ -2310,6 +2358,12 @@ mod tests {
             [],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO dj_transition_events (id, from_track_id, to_track_id)
+             VALUES (1, 2, 1), (2, 1, 2)",
+            [],
+        )
+        .unwrap();
         conn.execute("UPDATE tracks SET tidal_id = 900 WHERE id = 1", [])
             .unwrap();
         conn.execute("UPDATE tracks SET tidal_id = 901 WHERE id = 2", [])
@@ -2323,15 +2377,16 @@ mod tests {
         assert_eq!(outcome.kept_tidal_id, Some(900));
 
         // Like, plays, history, playlist, DSP all moved to the kept row.
-        let (fav, plays): (i32, i64) = conn
+        let (fav, plays, date_added): (i32, i64, String) = conn
             .query_row(
-                "SELECT is_favorite, play_count FROM tracks WHERE id = 1",
+                "SELECT is_favorite, play_count, date_added FROM tracks WHERE id = 1",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
         assert_eq!(fav, 1);
         assert_eq!(plays, 5);
+        assert_eq!(date_added, "2024-07-22T03:55:51.120+0000");
         let history_target: i64 = conn
             .query_row("SELECT track_id FROM listen_history", [], |r| r.get(0))
             .unwrap();
@@ -2344,6 +2399,19 @@ mod tests {
             .query_row("SELECT track_id FROM audio_dsp_features", [], |r| r.get(0))
             .unwrap();
         assert_eq!(dsp_target, 1);
+        let dj_targets: Vec<(i64, i64)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT from_track_id, to_track_id
+                     FROM dj_transition_events ORDER BY id",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert_eq!(dj_targets, vec![(1, 1), (1, 1)]);
 
         // Loser row gone, group resolved.
         let loser_count: i64 = conn
@@ -2385,6 +2453,64 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(rows, vec![(1, 0)]);
+    }
+
+    #[test]
+    fn merge_group_rolls_back_every_change_when_loser_delete_fails() {
+        let conn = test_conn();
+        insert_track(&conn, 1, "Song", 200_000, Some("ISRC1"));
+        insert_track(&conn, 2, "Song", 200_500, Some("ISRC1"));
+        conn.execute(
+            "UPDATE tracks SET is_favorite = 1, play_count = 5 WHERE id = 2",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO listen_history (track_id, started_at) VALUES (2, '2026-01-01')",
+            [],
+        )
+        .unwrap();
+        let gid = seed_pending_group(&conn, &[1, 2]);
+        conn.execute_batch(
+            "CREATE TRIGGER force_merge_failure BEFORE DELETE ON tracks
+             WHEN OLD.id = 2 BEGIN SELECT RAISE(ABORT, 'forced merge failure'); END;",
+        )
+        .unwrap();
+
+        let error = match merge_group(&conn, gid, 1) {
+            Ok(_) => panic!("trigger must abort merge"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("forced merge failure"));
+
+        let kept: (i32, i64) = conn
+            .query_row(
+                "SELECT is_favorite, play_count FROM tracks WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(kept, (0, 0));
+        let loser: (i32, i64) = conn
+            .query_row(
+                "SELECT is_favorite, play_count FROM tracks WHERE id = 2",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(loser, (1, 5));
+        let history_target: i64 = conn
+            .query_row("SELECT track_id FROM listen_history", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(history_target, 2);
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM duplicate_groups WHERE id = ?1",
+                [gid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
     }
 
     #[test]

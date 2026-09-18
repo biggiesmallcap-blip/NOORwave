@@ -1375,12 +1375,23 @@ pub fn reconcile_after_track_delete(
     conn: &Connection,
     deleted_track_ids: &[i64],
 ) -> Result<ReconcileOutcome> {
+    let tx = conn.unchecked_transaction()?;
+    let outcome = reconcile_after_track_delete_in_transaction(&tx, deleted_track_ids)?;
+    tx.commit()?;
+    Ok(outcome)
+}
+
+/// Transaction-aware form used by operations that combine queue repair with
+/// other track-reference changes. The caller owns commit/rollback.
+pub(crate) fn reconcile_after_track_delete_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    deleted_track_ids: &[i64],
+) -> Result<ReconcileOutcome> {
     if deleted_track_ids.is_empty() {
         return Ok(ReconcileOutcome::default());
     }
 
     let deleted_set: HashSet<i64> = deleted_track_ids.iter().copied().collect();
-    let tx = conn.unchecked_transaction()?;
 
     // Snapshot the queue before deletion so we can pick the next survivor by
     // position - `current_queue_item_id` would be invalid after deletion.
@@ -1480,7 +1491,6 @@ pub fn reconcile_after_track_delete(
         }
     }
 
-    tx.commit()?;
     Ok(ReconcileOutcome {
         queue_changed,
         current_changed,
