@@ -888,6 +888,81 @@ fn insert_tidal_track_uses_favorite_created_as_date_added() {
 }
 
 #[test]
+fn transferred_favorite_uses_tidal_created_date_and_keeps_earliest() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn| {
+        let track = test_tidal_track(2101, "Canonical favorite");
+        insert_tidal_track(conn, &track, false, false, None)?;
+        let track_id: i64 =
+            conn.query_row("SELECT id FROM tracks WHERE tidal_id = 2101", [], |row| {
+                row.get(0)
+            })?;
+
+        super::tidal_sync_routes::promote_duplicate_favorite(
+            conn,
+            track_id,
+            Some("2025-01-01T00:00:00.000+0000"),
+        )?;
+        super::tidal_sync_routes::promote_duplicate_favorite(
+            conn,
+            track_id,
+            Some("2024-07-22T03:55:51.120+0000"),
+        )?;
+
+        let state: (i64, i64, String) = conn.query_row(
+            "SELECT is_favorite, is_library, date_added FROM tracks WHERE id = ?1",
+            [track_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(state, (1, 1, "2024-07-22T03:55:51.120+0000".to_string()));
+        Ok(())
+    })
+    .expect("favorite transfer preserves provider date");
+}
+
+#[test]
+fn playlist_import_reuses_same_recording_instead_of_creating_today_duplicate() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn| {
+        let mut canonical = test_tidal_track(2201, "Same Recording");
+        canonical.isrc = Some("AU-TEST-0001".to_string());
+        insert_tidal_track(
+            conn,
+            &canonical,
+            true,
+            true,
+            Some("2024-07-22T03:55:51.120+0000"),
+        )?;
+        conn.execute("INSERT INTO playlists (name) VALUES ('Imported')", [])?;
+        let playlist_id = conn.last_insert_rowid();
+
+        let mut playlist_copy = test_tidal_track(2202, "Same Recording");
+        playlist_copy.isrc = canonical.isrc.clone();
+        super::tidal_sync_routes::replace_playlist_tracks(conn, playlist_id, &[playlist_copy])?;
+
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tracks WHERE isrc = 'AU-TEST-0001'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 1);
+        let playlist_track: (i64, String) = conn.query_row(
+            "SELECT t.tidal_id, t.date_added
+             FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id
+             WHERE pt.playlist_id = ?1",
+            [playlist_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(
+            playlist_track,
+            (2201, "2024-07-22T03:55:51.120+0000".to_string())
+        );
+        Ok(())
+    })
+    .expect("playlist import reuses canonical recording");
+}
+
+#[test]
 fn insert_tidal_track_marks_library_and_self_heals_on_conflict() {
     let db = fresh_migrated_db();
     db.with_conn(|conn| {

@@ -715,9 +715,10 @@ async fn do_tidal_sync(
                             existing_track_id,
                             existing_tidal_id,
                         } => {
-                            tx.execute(
-                                "UPDATE tracks SET is_favorite = 1, is_library = 1 WHERE id = ?1",
-                                rusqlite::params![existing_track_id],
+                            promote_duplicate_favorite(
+                                &tx,
+                                existing_track_id,
+                                fav.created.as_deref(),
                             )?;
                             // Keep the transferred like stable across the
                             // Full-mode reconciliation, which resets and
@@ -1442,11 +1443,40 @@ pub(super) fn replace_playlist_tracks(
                 rusqlite::params![album_ref.id, album_ref.title, track.artist.id, artwork],
             )?;
         }
-        // insert_tidal_track already resolves the local row id, so reuse it
-        // instead of issuing a second lookup per track. Playlist members are
-        // curated (is_library=1) and are NOT deduped: playlist_tracks needs a
-        // concrete row per position, and tidal_id conflicts already upsert.
-        let track_id = super::insert_tidal_track(&tx, track, false, true, None)?;
+        // A playlist can refer to a different TIDAL catalogue copy of a
+        // recording that is already in the library (single vs album release,
+        // compilation, and so on). Reuse that canonical local row instead of
+        // creating a second visible track with today's import timestamp.
+        // playlist_tracks is keyed by position, so repeated occurrences can
+        // safely point at the same canonical track.
+        let incoming = dup::IncomingTrack {
+            tidal_id: track.id,
+            title: &track.title,
+            artist_name: &track.artist.name,
+            isrc: track.isrc.as_deref(),
+            duration_ms: track.duration * 1000,
+        };
+        let candidates = dup::fetch_import_candidates(
+            &tx,
+            track.id,
+            track.artist.id,
+            track.isrc.as_deref(),
+            incoming.duration_ms,
+        )?;
+        let track_id = match dup::decide_import(&incoming, &candidates) {
+            dup::ImportDecision::Insert => {
+                super::insert_tidal_track(&tx, track, false, true, None)?
+            }
+            dup::ImportDecision::SkipDuplicate {
+                existing_track_id, ..
+            } => {
+                tx.execute(
+                    "UPDATE tracks SET is_library = 1 WHERE id = ?1",
+                    rusqlite::params![existing_track_id],
+                )?;
+                Some(existing_track_id)
+            }
+        };
         if let Some(tid) = track_id {
             tx.execute(
                 "INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
@@ -1464,6 +1494,32 @@ pub(super) fn replace_playlist_tracks(
     )?;
     tx.commit()?;
     Ok(position)
+}
+
+/// Transfer a TIDAL favorite onto the canonical local copy of the recording.
+/// Its provider timestamp still describes when the user added the favorite,
+/// even when the provider id itself is discarded as a duplicate.
+pub(super) fn promote_duplicate_favorite(
+    conn: &rusqlite::Connection,
+    track_id: i64,
+    favorite_created: Option<&str>,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE tracks SET
+           date_added = CASE
+             WHEN ?2 IS NULL THEN date_added
+             WHEN is_favorite = 0 OR date_added IS NULL THEN ?2
+             WHEN substr(?2, 1, 10) < substr(date_added, 1, 10) THEN ?2
+             WHEN substr(?2, 1, 10) = substr(date_added, 1, 10)
+              AND substr(?2, 12, 8) < substr(date_added, 12, 8) THEN ?2
+             ELSE date_added
+           END,
+           is_favorite = 1,
+           is_library = 1
+         WHERE id = ?1",
+        rusqlite::params![track_id, favorite_created],
+    )?;
+    Ok(())
 }
 
 /// Reduce a TIDAL ISO8601 timestamp to SQLite's `YYYY-MM-DD HH:MM:SS` form.
