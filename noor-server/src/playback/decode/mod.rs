@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::{FormatOptions, FormatReader, Packet};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
@@ -382,6 +382,20 @@ fn apply_playback_decode_backpressure(
         thread::sleep(Duration::from_millis(PLAYBACK_DECODE_BACKPRESSURE_SLEEP_MS));
     }
     Ok(())
+}
+
+fn next_packet_or_eof(
+    format: &mut dyn FormatReader,
+) -> symphonia::core::errors::Result<Option<Packet>> {
+    match format.next_packet() {
+        Ok(packet) => Ok(Some(packet)),
+        Err(SymphoniaError::IoError(error))
+            if error.kind() == std::io::ErrorKind::UnexpectedEof =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn decode_and_buffer_job(
@@ -770,12 +784,12 @@ pub(crate) fn decode_and_buffer_job(
                     return Ok(()); // track was stopped/skipped. Exit cleanly.
                 }
 
-                let packet = match format.next_packet() {
-                    Ok(p) => p,
-                    Err(SymphoniaError::IoError(err)) => {
+                let packet = match next_packet_or_eof(format.as_mut()) {
+                    Ok(Some(packet)) => packet,
+                    Ok(None) => {
                         debug!(
-                            "Playback decoder EOF: track_id={}, packets={}, samples={}, error={}",
-                            shared.track_id, decoded_packets, decoded_samples, err
+                            "Playback decoder EOF: track_id={}, packets={}, samples={}",
+                            shared.track_id, decoded_packets, decoded_samples
                         );
                         break;
                     }
@@ -1166,6 +1180,90 @@ mod tests {
             .await
             .context("test retryable timeout")?;
         Ok(Vec::new())
+    }
+
+    fn pcm_wav_format_with_terminal(
+        declared_data_len: u32,
+        supplied_data_len: usize,
+        terminal: StreamPipeMessage,
+    ) -> Box<dyn FormatReader> {
+        let mut wav = Vec::with_capacity(44 + supplied_data_len);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36u32 + declared_data_len).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&44_100u32.to_le_bytes());
+        wav.extend_from_slice(&(44_100u32 * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&declared_data_len.to_le_bytes());
+        wav.resize(44 + supplied_data_len, 0);
+
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        tx.send(terminal).expect("queue stream terminal");
+        let pipe = StreamPipe::with_initial(wav, rx, None, true, Arc::new(AtomicBool::new(false)));
+        let mss = MediaSourceStream::new(Box::new(pipe), Default::default());
+        let mut hint = Hint::new();
+        hint.with_extension("wav");
+        symphonia::default::get_probe()
+            .format(
+                &hint,
+                mss,
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )
+            .expect("valid WAV prefix should probe")
+            .format
+    }
+
+    #[test]
+    fn decoder_surfaces_stream_transport_error_instead_of_clean_eof() {
+        // Valid PCM WAV declaring more audio than the pipe provides. The large
+        // prefix lets probing and several real packets succeed before the
+        // transport error reaches Symphonia.
+        let mut format = pcm_wav_format_with_terminal(
+            256_000,
+            128_000,
+            StreamPipeMessage::Error("segment timed out".to_string()),
+        );
+
+        let error = loop {
+            match next_packet_or_eof(format.as_mut()) {
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("transport failure was misclassified as clean EOF"),
+                Err(error) => break error,
+            }
+        };
+
+        match error {
+            SymphoniaError::IoError(error) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::Other);
+                assert!(error.to_string().contains("segment timed out"));
+            }
+            other => panic!("expected propagated transport I/O error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decoder_treats_natural_stream_end_as_clean_eof() {
+        let mut format = pcm_wav_format_with_terminal(128_000, 128_000, StreamPipeMessage::Eof);
+        let mut packet_count = 0usize;
+
+        loop {
+            match next_packet_or_eof(format.as_mut()) {
+                Ok(Some(_)) => packet_count += 1,
+                Ok(None) => break,
+                Err(error) => panic!("natural stream end returned an error: {error}"),
+            }
+        }
+
+        assert!(
+            packet_count > 0,
+            "fixture should decode at least one packet"
+        );
     }
 
     /// Script fetch outcomes PER SEGMENT INDEX (0 = init, 1.. = media prefix),
