@@ -1097,13 +1097,12 @@ async fn run_tidal_sync_with_reauth(
                 "TIDAL sync hit an auth error; trying refresh-token recovery"
             );
 
-            let (http, tidal_http_client) = {
-                let s = state.read().await;
-                (s.http_client.clone(), s.tidal_http_client.clone())
-            };
-
-            let refreshed = match super::recover_tidal_session(state, &http, &tokens).await {
-                Ok(tokens) => tokens,
+            let (retry_client, refreshed) = match super::recover_tidal_client_with_tokens(
+                state, &tokens,
+            )
+            .await
+            {
+                Ok(recovered) => recovered,
                 Err(recover_err) => {
                     // Do NOT clear the session. A transient network error during refresh
                     // should not permanently log the user out.
@@ -1122,11 +1121,6 @@ async fn run_tidal_sync_with_reauth(
                     ));
                 }
             };
-            let retry_client = TidalClient::with_http(
-                tidal_http_client,
-                refreshed.access_token.clone(),
-                refreshed.country_code.clone(),
-            );
             tracing::info!(
                 target: "noor.sync.tidal",
                 event = "sync_recovered",
@@ -1236,12 +1230,8 @@ async fn ensure_tidal_session(
                 error = %err,
                 "TIDAL session looks stale before sync"
             );
-            let http = {
-                let s = state.read().await;
-                s.http_client.clone()
-            };
-            match super::recover_tidal_session(state, &http, tokens).await {
-                Ok(tokens) => Ok((tokens, TidalSyncSessionState::Recovered)),
+            match super::recover_tidal_client_with_tokens(state, tokens).await {
+                Ok((_, tokens)) => Ok((tokens, TidalSyncSessionState::Recovered)),
                 Err(recover_err) => {
                     // Do NOT clear. A transient refresh failure should not log the user out.
                     tracing::error!(

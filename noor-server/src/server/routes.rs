@@ -9584,6 +9584,18 @@ pub(super) async fn recover_tidal_client(
     state: &SharedState,
     used_tokens: &tidal_auth::TidalTokens,
 ) -> anyhow::Result<TidalClient> {
+    let (client, _) = recover_tidal_client_with_tokens(state, used_tokens).await?;
+    Ok(client)
+}
+
+/// Recover a TIDAL client and return the exact tokens used to construct it.
+/// Callers that need the refreshed user or country metadata (for example sync
+/// and mutations) should use this instead of re-reading shared state after the
+/// single-flight permit has been released.
+pub(super) async fn recover_tidal_client_with_tokens(
+    state: &SharedState,
+    used_tokens: &tidal_auth::TidalTokens,
+) -> anyhow::Result<(TidalClient, tidal_auth::TidalTokens)> {
     let TidalClientRecovery {
         _permit,
         current_tokens,
@@ -9594,19 +9606,21 @@ pub(super) async fn recover_tidal_client(
     if let Some(current) = current_tokens
         && current.access_token != used_tokens.access_token
     {
-        return Ok(TidalClient::with_http(
+        let client = TidalClient::with_http(
             tidal_http_client,
             current.access_token.clone(),
             current.country_code.clone(),
-        ));
+        );
+        return Ok((client, current));
     }
 
     let refreshed = recover_tidal_session(state, &http_client, used_tokens).await?;
-    Ok(TidalClient::with_http(
+    let client = TidalClient::with_http(
         tidal_http_client,
         refreshed.access_token.clone(),
         refreshed.country_code.clone(),
-    ))
+    );
+    Ok((client, refreshed))
 }
 
 struct TidalClientRecovery {

@@ -1,5 +1,5 @@
 use crate::library::duplicates as dup;
-use crate::services::tidal::mutations as tidal_mutations;
+use crate::services::tidal::client::TidalClient;
 use crate::{AppEvent, SharedState};
 use axum::{
     extract::{Path, Query, State},
@@ -84,10 +84,10 @@ pub(super) async fn resolve_duplicate_group(
     require_positive_id(payload.preferred_track_id)?;
 
     // Get TIDAL tokens for unfavorite calls.
-    let (tokens, http) = {
+    let (tokens, tidal_http_client) = {
         let s = state.read().await;
         let tokens = s.tidal_tokens.clone();
-        (tokens, s.http_client.clone())
+        (tokens, s.tidal_http_client.clone())
     };
 
     let result = {
@@ -110,34 +110,29 @@ pub(super) async fn resolve_duplicate_group(
 
     // Best-effort unfavorite on TIDAL with session refresh retry.
     if let Some(t) = tokens.clone() {
+        let mut client = TidalClient::with_http(
+            tidal_http_client,
+            t.access_token.clone(),
+            t.country_code.clone(),
+        );
+        let mut user_id = t.user_id.clone();
         for tidal_id in &result.tidal_ids_to_unfavorite {
-            if let Err(e) = tidal_mutations::remove_favorite_track(
-                &http,
-                &t.access_token,
-                &t.user_id,
-                *tidal_id,
-                &t.country_code,
-            )
-            .await
-            {
+            if let Err(e) = client.remove_favorite_track(&user_id, *tidal_id).await {
                 // If it looks like a session expiry, try to refresh and retry once.
-                if (e.to_string().contains("401")
-                    || e.to_string().to_lowercase().contains("unauthorized"))
-                    && let Ok(refreshed) = super::recover_tidal_session(&state, &http, &t).await
+                if super::error_looks_like_auth(&e)
+                    && let Ok((retry_client, refreshed)) =
+                        super::recover_tidal_client_with_tokens(&state, &t).await
                 {
-                    if let Err(e2) = tidal_mutations::remove_favorite_track(
-                        &http,
-                        &refreshed.access_token,
-                        &refreshed.user_id,
-                        *tidal_id,
-                        &refreshed.country_code,
-                    )
-                    .await
+                    if let Err(e2) = retry_client
+                        .remove_favorite_track(&refreshed.user_id, *tidal_id)
+                        .await
                     {
                         error!(
                             "Failed to unfavorite TIDAL track {tidal_id} after session refresh: {e2}"
                         );
                     }
+                    client = retry_client;
+                    user_id = refreshed.user_id;
                     continue;
                 }
                 warn!("Failed to unfavorite TIDAL track {tidal_id}: {e}");

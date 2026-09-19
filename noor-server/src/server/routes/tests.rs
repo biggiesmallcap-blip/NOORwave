@@ -889,6 +889,16 @@ async fn tidal_client_recovery_waiters_recheck_tokens_after_the_refresh_permit()
         Some(fresh_tokens.access_token.as_str()),
         "the waiter must observe the token persisted by the first recovery"
     );
+    drop(second);
+
+    let (_, recovered_tokens) = recover_tidal_client_with_tokens(&state, &test_tidal_tokens(None))
+        .await
+        .expect("changed in-memory token should be reused without a network refresh");
+    assert_eq!(
+        recovered_tokens.access_token, fresh_tokens.access_token,
+        "client and token metadata must come from the same recovered session"
+    );
+    assert_eq!(recovered_tokens.refresh_token, fresh_tokens.refresh_token);
 }
 
 fn test_tidal_track(id: i64, title: &str) -> crate::services::tidal::client::TidalTrack {

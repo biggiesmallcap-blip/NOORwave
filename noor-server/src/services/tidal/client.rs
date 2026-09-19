@@ -379,6 +379,20 @@ impl TidalClient {
         format!("Bearer {}", self.access_token)
     }
 
+    /// Remove a favorite using this client's authenticated transport. Keeping
+    /// the credentials inside `TidalClient` lets recovery callers retry a
+    /// mutation without unpacking or rebuilding the refreshed session.
+    pub async fn remove_favorite_track(&self, user_id: &str, track_id: i64) -> Result<()> {
+        super::mutations::remove_favorite_track(
+            &self.http,
+            &self.access_token,
+            user_id,
+            track_id,
+            &self.country_code,
+        )
+        .await
+    }
+
     /// Make an authenticated GET request and deserialize the response.
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
         crate::services::tidal::backoff::global().check()?;

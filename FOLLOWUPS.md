@@ -306,13 +306,6 @@ album batch download, FLAC/MP3, configurable folder, tagging, retry/cancel.
   retry arm. Deferred because it touches every TIDAL surface including the streaming paths.
 - Spawned by: artist-page TIDAL auth-recovery hardening.
 
-### Adopt `recover_tidal_client` at the remaining inline recovery sites
-- ~7 handlers still inline the `recover_tidal_session` + rebuild-client + retry dance
-  (duplicates_routes, tidal_home_routes mixes/radio/page-modules/moods, tidal_sync_routes).
-  They work; converting them to the shared helper is DRY-only and gains the single-flight
-  re-check, but is broad churn across working background paths. Adopt opportunistically.
-- Spawned by: artist-page TIDAL auth-recovery hardening.
-
 ### Cross-platform playlist providers: SoundCloud + YouTube
 - Now that the Spotify (Sportify) search/resolve path is hardened (mirror failover, no
   empty-cache poisoning, breaker on the anonymous GraphQL), extend the same pattern to other
