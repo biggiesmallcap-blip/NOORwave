@@ -2728,24 +2728,8 @@
     color: var(--text-muted);
     white-space: nowrap;
   }
-  .row-btn {
-    background: none;
-    border: none;
-    color: var(--text-tertiary);
-    cursor: pointer;
-    font-size: var(--font-size-sm);
-    padding: 4px;
-    border-radius: 4px;
-    opacity: 0;
-    transition: opacity 0.1s, color 0.1s;
-  }
-  .track-row:hover .row-btn { opacity: 1; }
-  .row-btn:hover { color: var(--text-primary); }
-  .row-btn:disabled {
-    cursor: not-allowed;
-    opacity: 0.45;
-  }
-  .row-btn:disabled:hover { color: var(--text-tertiary); }
+  .track-row:hover .row-btn,
+  .track-row:focus-within .row-btn { opacity: 1; }
   .discovery-section { opacity: 0.9; }
   .discovery-section .section-label { color: var(--text-muted); }
   .top-result-card.has-hero-bg {
@@ -2924,7 +2908,8 @@
     gap: 2px;
   }
   .search-track-row .col-actions .row-btn { opacity: 0; }
-  .search-track-row:hover .col-actions .row-btn { opacity: 1; }
+  .search-track-row:hover .col-actions .row-btn,
+  .search-track-row:focus-within .col-actions .row-btn { opacity: 1; }
 
   .infinite-sentinel {
     min-height: 60px;

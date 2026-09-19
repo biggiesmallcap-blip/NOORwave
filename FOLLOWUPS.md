@@ -143,16 +143,6 @@ test (decode + resample correctness) that CI cannot prove.
   and the noor-mix rubato dep.
 - Spawned by: Dependabot #144 triage, deps/cargo-major-bumps branch.
 
-### fix: cap score_genre_tags confidence at 1.0 and backfill existing rows
-
-789 track_genres rows (2%) carry confidence > 1.0 (max 2.27) because
-score_genre_tags sums per-source scores without a final min(1.0) cap. Every
-consumer using a confidence floor (galaxy filter, and now the audio search
-genre rowset) is miscalibrated on those rows. Cap at write time in the scorer,
-then one-shot normalize existing rows (UPDATE track_genres SET confidence =
-MIN(confidence, 1.0)). Already documented in docs/genre-data-quality-2026-05-07.md.
-- Spawned by: search audit, genre:rock fix session.
-
 ### fix: cross-family genre tag contamination (psytrance tagged Psychedelic Rock)
 
 Last.fm tags like "Psychedelic Rock" (~0.29 confidence) sit on psytrance acts
@@ -751,18 +741,6 @@ Optimizing orchestrate_song is shared with the radio endpoints, so it is a
 deliberate non-goal of the discovery overhaul; profile it separately.
 Spawned by: seed-branch discovery overhaul 2026-07-05 (phase 9 measurement)
 
-### robustness: recover_tidal_client single-flight is optimistic-only
-
-routes.rs::recover_tidal_client dedupes a 401 refresh storm with an optimistic
-re-read of state.tidal_tokens (if the access token already changed, reuse it).
-It has no in-flight guard, so N pending resolvers that 401 in the same instant
-can each call recover_tidal_session -> refresh_token; TIDAL rotates the refresh
-token on use, so the losers can fail with invalid_grant and fall back to lazy
-resolution. Pre-existing; the tidal-repair/resolver-401 change only added
-callers. Fix by serializing refresh through a tokio::Mutex (or a shared
-in-flight future) keyed on the used access token.
-Spawned by: tidal metadata self-heal + resolver 401 recovery 2026-07-06
-
 ### analysis: richer energy metric (loudness + spectral flux / onset density)
 
 Energy (v11) is purely a loudness map. A Spotify-style energy would blend
@@ -993,11 +971,12 @@ that a no-cache-row request is now sub-second is untested. It needs the cache ro
 deleted out of the DB first, which is why it was skipped.
 Spawned by: random tracks pop-in 2026-07-27; partly verified 2026-07-30
 
-### css: migrate route spacing literals onto the shared tokens
+### css: continue spacing-token migration on untouched routes
 
 The shared-chrome audit is complete: page headers, back buttons, asset links,
-context menus and View-all affordances now have a consistent contract. The mood
-index/detail pair was the first spacing migration.
+context menus and View-all affordances now have a consistent contract. Mood and
+the album, artist, playlist, TIDAL album, and Spotify detail routes use the
+shared spacing scale for their main layout rhythm.
 
 The remaining route styles still contain hundreds of raw `padding`, `margin`
 and `gap` pixel values. Some are legitimate micro-spacing, so do this
@@ -1005,7 +984,7 @@ opportunistically per route: replace layout rhythm with `--space-*`, preserve
 intrinsic icon and hairline dimensions, and visually check each touched route.
 A global replacement would erase deliberate 1-2px alignment adjustments.
 Spawned by: home layout and Last.fm run 2026-07-30; narrowed by polish audit
-2026-09-19.
+2026-09-19. Detail-route pass completed 2026-09-19.
 
 ### playback: the watchdog's `paused` exemption has the same shape as the old `finished` one
 
@@ -1026,20 +1005,6 @@ stall. Wants care - a false positive here force-advances during a legitimate
 pause, which is worse than the bug.
 Spawned by: end-of-track playback stall investigation 2026-07-30
 
-### frontend: back-migrate the open-coded hover-reveal row buttons
-
-`.row-btn` is now a global utility in `app.css`, but only `/playlists` uses it.
-The same "opacity 0, revealed on row hover" idiom is open-coded in 20+ routes
-(`search`, `library`, `albums/[id]`, `artists/*`, `history`, `duplicates`,
-`spotify-*`, `tidal/*`, the remote shell, and more), each with its own sizing
-and hover colours. `.section-label` - the uppercase accent eyebrow - is
-similarly duplicated in `search/+page.svelte` and `library/+page.svelte` and
-was left un-promoted because this change gained no third consumer for it.
-
-Same shape as the `rise-in-*` back-migration already tracked here: do it
-opportunistically per route rather than as one sweep, and delete the local rule
-in the same commit (the Svelte compiler fails CI on the orphan).
-
 ### frontend: back-migrate the remaining hand-rolled persisted stores
 
 `createPersistedStore` (`src/lib/stores/persisted.ts`) now owns the
@@ -1050,20 +1015,6 @@ guarded-localStorage idiom, and `library.ts` / `trending-prefs.ts` /
 `videos/+page.svelte`, `duplicates/+page.svelte`, `search/+page.svelte` and
 `+layout.svelte`.
 
-### noor-server: define deletion policy for history and playback references
-
-Playlist membership now explicitly refuses the whole batch before any TIDAL
-mutation. Local deletes are transactional and failures return an error instead
-of reporting success. Regression tests cover both protections.
-
-Other restrictive references remain: listen history, shuffle state, duplicate
-membership, DJ transition events, queued/current tracks, and tracks in a deleted
-album. Decide whether removing a favourite should retain the catalog row or
-refuse deletion before contacting TIDAL. Do not silently purge listening history
-to make a foreign key pass. Today a failure rolls back the local deletes, but
-remote unfavourites may already have completed.
-Spawned by: polish pass, playlist-delete regression test, 2026-09-19.
-
 ### playlists: creating a playlist on TIDAL from inside NOORwave
 
 `POST /api/playlists` creates a local-only playlist by design, so a list made
@@ -1072,19 +1023,3 @@ TIDAL-mirrored playlist does write through (rename, remove, reorder, delete).
 Adding creation would need `POST /v1/users/{id}/playlists` in
 `services/tidal/mutations.rs` plus a UI choice about where a new playlist
 should live.
-
-### frontend: detail-route header layout is still per-route
-
-`.back-link` is now a standardized pill that supplies its own chevron, and
-`/playlists/[id]` has a consolidated hero (blurred artwork banner, cover, title,
-meta line, action row in one block). The other detail routes - `albums/[id]`,
-`artists/[id]`, `tidal/albums/[id]`, `spotify-*`, `moods/[slug]`,
-`recommendations/[shelf]`, `search/discover/[id]` - each still hand-roll their
-own header, and several use `PageHeader`, which puts the title hard left and the
-actions hard right. On a wide monitor that is most of a metre apart, which is
-what made the playlist header read as scattered before the rework.
-
-Worth extracting the playlist hero into a shared `DetailHero.svelte`
-(art + eyebrow + title + meta + actions, optional banner) and migrating the
-routes onto it. Do it opportunistically per route rather than as one sweep, and
-delete the local rules in the same commit - the compiler fails CI on orphans.

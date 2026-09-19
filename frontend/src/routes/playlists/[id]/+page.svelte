@@ -23,6 +23,7 @@
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import DetailHero from '$lib/components/ui/DetailHero.svelte';
 	import SelectionBar from '$lib/components/ui/SelectionBar.svelte';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildPlaylistMenu, buildAddToPlaylistSubmenu } from '$lib/player/playlist_menu';
@@ -30,7 +31,6 @@
 	import { captureScroll, restoreScroll } from '$lib/navigation/scroll';
 	import { pickArtworkUrls, nameToGradient } from '$lib/stores/playlist_artwork_cache';
 	import { formatTotalDuration } from '$lib/utils/format';
-	import { upscaleTidalArtwork } from '$lib/utils/artwork';
 
 	let playlistId = $derived(Number(page.params.id));
 
@@ -74,11 +74,6 @@
 		formatTotalDuration(tracks.reduce((sum, track) => sum + (track.duration_ms ?? 0), 0)),
 	);
 	let sourceLabel = $derived(isSmart ? 'Smart' : isTidal ? 'TIDAL' : 'Local');
-
-	// Blurred backdrop for the hero. A decorative CSS background, so the URL is
-	// normalized through upscaleTidalArtwork first per the artwork rules; the
-	// heavy blur is why 1280 is not overkill here.
-	let bannerUrl = $derived(mosaic.length > 0 ? upscaleTidalArtwork(mosaic[0], 1280) : null);
 
 	onMount(() => {
 		void load();
@@ -302,33 +297,33 @@
 	{:else if loading && !playlist}
 		<Skeleton rows={6} label="Loading playlist" />
 	{:else if playlist}
-		<!-- One hero block. Title, source, counts, artwork and every action used to
-		     be scattered between a PageHeader (title far left, actions far right on a
-		     wide screen), a separate artwork row, a floating Rename, and a note. -->
-		<header class="detail-hero" role="group" aria-label="Playlist header" oncontextmenu={openHeaderContextMenu}>
-			{#if bannerUrl}
-				<div class="detail-banner" style:background-image={`url("${bannerUrl}")`} aria-hidden="true"></div>
-			{/if}
-			<div class="detail-hero-inner">
+		<DetailHero
+			eyebrow="Playlist"
+			title={playlistName}
+			backdrop={mosaic}
+			fallbackText={playlistName.slice(0, 1)}
+			variant="immersive"
+			label="Playlist header"
+			oncontextmenu={openHeaderContextMenu}
+		>
+			{#snippet cover()}
 				<div
-					class="detail-cover"
+					class="playlist-cover"
 					class:has-mosaic={mosaic.length >= 4}
 					style:background={mosaic.length === 0 ? nameToGradient(playlistName) : undefined}
 				>
 					{#if mosaic.length >= 4}
 						{#each mosaic.slice(0, 4) as url (url)}
-							<ArtworkImage src={url} size={320} className="detail-cover-art" decorative />
+							<ArtworkImage src={url} size={320} className="playlist-cover-art" decorative />
 						{/each}
 					{:else if mosaic.length > 0}
-						<ArtworkImage src={mosaic[0]} size={640} className="detail-cover-art" decorative />
+						<ArtworkImage src={mosaic[0]} size={640} className="playlist-cover-art" decorative />
 					{:else}
-						<span class="detail-initial" aria-hidden="true">{playlistName.slice(0, 1)}</span>
+						<span class="playlist-initial" aria-hidden="true">{playlistName.slice(0, 1)}</span>
 					{/if}
 				</div>
-
-				<div class="detail-headings">
-					<p class="eyebrow">Playlist</p>
-
+			{/snippet}
+			{#snippet titleContent()}
 					{#if renaming}
 						<form
 							class="rename-form"
@@ -352,21 +347,20 @@
 							</button>
 						</form>
 					{:else}
-						<h1 class="detail-title">{playlistName}</h1>
+						<h1>{playlistName}</h1>
 					{/if}
-
-					<p class="detail-meta">
+			{/snippet}
+			{#snippet meta()}
 						<StateBadge label={sourceLabel} tone={isSmart ? 'active' : 'muted'} compact />
 						<span>{tracks.length} {tracks.length === 1 ? 'track' : 'tracks'}</span>
 						{#if totalDuration}
 							<span aria-hidden="true">&middot;</span><span>{totalDuration}</span>
 						{/if}
 						{#if playlistDescription}
-							<span aria-hidden="true">&middot;</span><span class="detail-desc">{playlistDescription}</span>
+							<span aria-hidden="true">&middot;</span><span class="playlist-desc">{playlistDescription}</span>
 						{/if}
-					</p>
-
-					<div class="detail-actions">
+			{/snippet}
+			{#snippet actions()}
 						<button class="btn btn-primary" disabled={!tracks.length} onclick={() => void playAll()}>
 							Play
 						</button>
@@ -397,10 +391,8 @@
 						<button class="icon-btn" aria-label="More actions" title="More actions" onclick={openHeaderMenu}>
 							&#8943;
 						</button>
-					</div>
-				</div>
-			</div>
-		</header>
+			{/snippet}
+		</DetailHero>
 
 		{#if pendingDelete}
 			<div class="confirm-strip glass">
@@ -466,124 +458,43 @@
 		margin: 0 auto;
 	}
 
-	/* ─── Hero ────────────────────────────────────────────────────────────── */
-
-	.detail-hero {
-		position: relative;
-		isolation: isolate;
-		margin-bottom: var(--space-4);
-		padding: var(--space-5) var(--space-4);
-		overflow: hidden;
-		border-radius: var(--radius-lg);
-	}
-
-	/* Decorative only: blurred hard enough that the source image reads as colour,
-	   with a gradient wash so the text keeps its contrast whatever the artwork is. */
-	.detail-banner {
-		position: absolute;
-		inset: 0;
-		z-index: -1;
-		background-position: center;
-		background-size: cover;
-		filter: blur(40px) saturate(1.25);
-		transform: scale(1.25);
-		opacity: 0.5;
-	}
-
-	.detail-banner::after {
-		content: '';
-		position: absolute;
-		inset: 0;
-		background: linear-gradient(
-			to right,
-			var(--bg-base) 0%,
-			color-mix(in srgb, var(--bg-base) 72%, transparent) 55%,
-			color-mix(in srgb, var(--bg-base) 92%, transparent) 100%
-		);
-	}
-
-	.detail-hero-inner {
-		display: flex;
-		align-items: flex-end;
-		gap: var(--space-4);
-	}
-
-	.detail-cover {
+	.playlist-cover {
 		display: grid;
-		flex: none;
-		width: clamp(7rem, 14vw, 11rem);
-		aspect-ratio: 1 / 1;
+		width: 100%;
+		height: 100%;
 		place-items: center;
 		overflow: hidden;
-		border-radius: var(--radius-md);
-		background: var(--bg-raised);
-		box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
 	}
 
-	.detail-cover.has-mosaic {
+	.playlist-cover.has-mosaic {
 		grid-template-columns: 1fr 1fr;
 		grid-template-rows: 1fr 1fr;
 	}
 
-	.detail-cover :global(.detail-cover-art) {
+	.playlist-cover :global(.playlist-cover-art) {
 		width: 100%;
 		height: 100%;
 		object-fit: cover;
 		display: block;
 	}
 
-	.detail-initial {
+	.playlist-initial {
 		color: var(--text-primary);
 		font-size: var(--font-size-3xl);
 		font-weight: var(--font-weight-semibold);
 		line-height: 1;
 	}
 
-	.detail-headings {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-2);
-		min-width: 0;
-	}
-
 	/* The title and the rename field occupy the same slot, so they share a height
 	   and a left edge - otherwise opening rename nudged the whole hero. */
-	.detail-title,
 	.rename-form {
 		display: flex;
 		align-items: center;
 		min-height: 3rem;
 	}
 
-	.detail-title {
-		margin: 0;
-		font-family: var(--font-display);
-		font-size: var(--font-size-3xl);
-		font-weight: var(--font-weight-semibold);
-		line-height: var(--line-height-tight);
-		overflow-wrap: anywhere;
-	}
-
-	.detail-meta {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		gap: 6px;
-		margin: 0;
-		color: var(--text-secondary);
-		font-size: var(--font-size-xs);
-	}
-
-	.detail-desc {
+	.playlist-desc {
 		color: var(--text-tertiary);
-	}
-
-	.detail-actions {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		gap: var(--space-2);
-		margin-top: var(--space-1);
 	}
 
 	/* Rename happens in place of the title, so the field inherits its scale.
@@ -721,20 +632,6 @@
 	}
 
 	@media (max-width: 760px) {
-		.detail-hero {
-			padding: var(--space-4) var(--space-3);
-		}
-
-		/* Side by side leaves the title about 200px on a phone. Stack instead. */
-		.detail-hero-inner {
-			flex-direction: column;
-			align-items: flex-start;
-		}
-
-		.detail-title {
-			font-size: var(--font-size-2xl);
-		}
-
 		/* No room for field + Save + Cancel on one line at phone widths; nowrap
 		   ran Cancel past the edge where the hero's overflow clipped it. Give the
 		   field its own line and let the buttons share the next one. */

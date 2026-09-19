@@ -10,6 +10,7 @@ use crate::playback::player;
 use crate::services::tidal::mutations as tidal_mutations;
 use crate::{AppEvent, SharedState};
 use axum::{extract::State, http::StatusCode, response::Json};
+use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::warn;
@@ -55,6 +56,35 @@ fn require_positive_batch_id(id: i64) -> Result<(), StatusCode> {
         return Err(StatusCode::BAD_REQUEST);
     }
     Ok(())
+}
+
+/// References that represent durable listening/playback state keep a track's
+/// catalog row alive when it is removed from the Library. The row is hidden
+/// instead of deleting history, queue state, duplicate review, or DJ learning
+/// data merely to satisfy a foreign key. Playlist membership is deliberately
+/// handled separately: it is user-curated structure and refuses the batch.
+fn track_requires_catalog_retention(conn: &Connection, track_id: i64) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM playback_state WHERE current_track_id = ?1
+             UNION ALL SELECT 1 FROM queue WHERE track_id = ?1
+             UNION ALL SELECT 1 FROM shuffle_state WHERE track_id = ?1
+             UNION ALL SELECT 1 FROM listen_history WHERE track_id = ?1
+             UNION ALL SELECT 1 FROM duplicate_members WHERE track_id = ?1
+             UNION ALL SELECT 1 FROM dj_transition_events
+               WHERE from_track_id = ?1 OR to_track_id = ?1
+         )",
+        [track_id],
+        |row| row.get(0),
+    )
+}
+
+fn album_requires_catalog_retention(conn: &Connection, album_id: i64) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tracks WHERE album_id = ?1)",
+        [album_id],
+        |row| row.get(0),
+    )
 }
 
 pub(super) async fn batch_add_to_playlist(
@@ -252,22 +282,43 @@ pub(super) async fn batch_delete_items(
         let s = state.read().await;
         s.db.clone()
     };
-    let deleted_track_ids = track_ids.clone();
     let outcome = match db.with_conn(|conn| {
         // A later constraint failure must not leave earlier local deletions
         // committed. Reconciliation owns its own transaction below.
         let tx = conn.unchecked_transaction()?;
+        let mut deleted_track_ids = Vec::new();
         for local_id in &track_ids {
-            tx.execute(
+            if track_requires_catalog_retention(&tx, *local_id)? {
+                // Removing a favorite must not erase durable history or live
+                // playback state. is_library=0 removes the retained catalog row
+                // from Library surfaces while keeping those references valid.
+                tx.execute(
+                    "UPDATE tracks SET is_favorite = 0, is_library = 0 WHERE id = ?1",
+                    rusqlite::params![local_id],
+                )?;
+            } else if tx.execute(
                 "DELETE FROM tracks WHERE id = ?1",
                 rusqlite::params![local_id],
-            )?;
+            )? > 0
+            {
+                deleted_track_ids.push(*local_id);
+            }
         }
         for local_id in &album_ids {
-            tx.execute(
-                "DELETE FROM albums WHERE id = ?1",
-                rusqlite::params![local_id],
-            )?;
+            if album_requires_catalog_retention(&tx, *local_id)? {
+                // Tracks may outlive their Library membership because they are
+                // queued, played, or retained for learning. Keep their album
+                // identity but remove the album bookmark.
+                tx.execute(
+                    "UPDATE albums SET is_favorite = 0 WHERE id = ?1",
+                    rusqlite::params![local_id],
+                )?;
+            } else {
+                tx.execute(
+                    "DELETE FROM albums WHERE id = ?1",
+                    rusqlite::params![local_id],
+                )?;
+            }
         }
         tx.commit()?;
         let outcome = player::reconcile_after_track_delete(conn, &deleted_track_ids)?;

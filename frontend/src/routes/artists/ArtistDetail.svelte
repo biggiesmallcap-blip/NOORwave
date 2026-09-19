@@ -32,6 +32,7 @@
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import MediaRail from '$lib/components/ui/MediaRail.svelte';
+	import DetailHero from '$lib/components/ui/DetailHero.svelte';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 	import { goBack } from '$lib/navigation/back';
 	import { openContextMenu } from '$lib/stores/context_menu';
@@ -318,7 +319,6 @@
 	);
 	let heroPortraitSrc = $derived(artworkCandidate(heroPortraitUrl, 640));
 	let heroBackdropSrc = $derived(artworkCandidate(heroBackdropUrl, 1280));
-	let heroHasPhoto = $derived(heroPortraitSrc != null);
 
 	function artworkCandidate(
 		rawUrl: string | null | undefined,
@@ -764,19 +764,15 @@
 	{:else}
 		{@const h = header()!}
 
-		<header class="hero" class:hero-with-photo={heroHasPhoto}>
-			{#if heroBackdropSrc}
-				<img
-					class="hero-backdrop"
-					src={heroBackdropSrc}
-					alt=""
-					onerror={() => markArtworkFailed(heroBackdropSrc)}
-				/>
-			{/if}
-			<div class="hero-veil"></div>
-
-			<div class="hero-body">
-				<div class="hero-portrait-wrap">
+		<DetailHero
+			eyebrow="Artist"
+			title={h.name}
+			backdrop={heroBackdropSrc}
+			fallbackText={artistInitials(h.name)}
+			variant="immersive"
+			shape="round"
+		>
+			{#snippet cover()}
 					{#if heroPortraitSrc}
 						<img
 							class="hero-portrait"
@@ -805,22 +801,13 @@
 							<span class="hero-portrait-initials display-face">{artistInitials(h.name)}</span>
 						</div>
 					{/if}
-				</div>
-
-				<div class="hero-info">
-					<p class="eyebrow">
-						<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M12 2l2.9 6.5 7.1.6-5.4 4.7 1.6 7-6.2-3.7L5.8 21l1.6-7L2 9.1l7.1-.6L12 2z" fill="currentColor"/></svg>
-						Artist
-					</p>
-					<h1 class="hero-title display-face">{h.name}</h1>
+			{/snippet}
+			{#snippet meta()}
 					{#if source.kind === 'tidal'}
-						<p class="hero-sub">
 							{tidalTopTracks.length} top {tidalTopTracks.length === 1 ? 'track' : 'tracks'}
 							<span class="dot">·</span>
 							{tidalAlbums.length} {tidalAlbums.length === 1 ? 'release' : 'releases'}
-						</p>
 					{:else}
-						<p class="hero-sub">
 							{#if artist?.track_count}
 								{artist.track_count.toLocaleString()} {artist.track_count === 1 ? 'song' : 'songs'}
 								<span class="dot">·</span>
@@ -828,8 +815,9 @@
 							{#if artist?.album_count}
 								{artist.album_count.toLocaleString()} {artist.album_count === 1 ? 'album' : 'albums'}
 							{/if}
-						</p>
 					{/if}
+			{/snippet}
+			{#snippet details()}
 					{#if h.library_track_count > 0}
 						<p class="hero-library-substat">
 							{h.library_track_count.toLocaleString()} {h.library_track_count === 1 ? 'song' : 'songs'} in your library
@@ -852,11 +840,8 @@
 							<p class="hero-bio-source">via TIDAL · {bioSource}</p>
 						{/if}
 					{/if}
-				</div>
-			</div>
-		</header>
-
-		<div class="actions-bar">
+			{/snippet}
+			{#snippet actions()}
 			<button
 				class="play-fab"
 				class:pending={heroPlayPending}
@@ -888,7 +873,8 @@
 					<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="currentColor"/><path d="M8.5 8.5a5 5 0 000 7M15.5 8.5a5 5 0 010 7M5.5 5.5a9 9 0 000 13M18.5 5.5a9 9 0 010 13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
 				{/if}
 			</button>
-		</div>
+			{/snippet}
+		</DetailHero>
 
 		<p class="actions-microcopy">
 			<strong>Shuffle</strong> plays this artist's tracks in random order.
@@ -980,7 +966,7 @@
 								{/if}
 							</span>
 							<button
-								class="tidal-row-heart"
+								class="row-btn heart"
 								class:on={track.is_favorite}
 								aria-label={track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
 								title={track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
@@ -1347,13 +1333,13 @@
 	}
 
 	.status {
-		padding: 48px 28px;
+		padding: var(--space-7) var(--space-6);
 		text-align: center;
 		color: var(--text-secondary);
 	}
 
 	.status-wrap {
-		padding: 32px;
+		padding: var(--space-6);
 	}
 
 	.empty-action {
@@ -1386,55 +1372,9 @@
 		to { transform: rotate(360deg); }
 	}
 
-	.hero {
-		position: relative;
-		padding: var(--space-6) var(--space-5) var(--space-4);
-		display: flex;
-		min-height: 300px;
-		overflow: hidden;
-		isolation: isolate;
-		align-items: flex-start;
-		border-radius: var(--radius-lg);
-		border: 1px solid var(--border-subtle);
-	}
-
-	.hero-backdrop {
-		position: absolute;
-		inset: -80px;
-		width: calc(100% + 160px);
-		height: calc(100% + 160px);
-		object-fit: cover;
-		object-position: center;
-		filter: blur(80px) saturate(1.8);
-		transform: scale(1.3);
-		z-index: -2;
-		opacity: 0.85;
-	}
-
-	.hero-veil {
-		position: absolute;
-		inset: 0;
-		background:
-			linear-gradient(180deg, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0.48) 70%, var(--bg-base) 100%);
-		z-index: -1;
-	}
-
-	.hero-body {
-		display: flex;
-		flex-direction: row;
-		align-items: flex-start;
-		gap: var(--space-5);
-		width: 100%;
-		max-width: var(--content-width);
-	}
-
-	.hero-portrait-wrap {
-		flex-shrink: 0;
-		align-self: flex-start;
-	}
-
 	.hero-portrait {
-		width: clamp(140px, 16vw, 220px);
+		width: 100%;
+		height: 100%;
 		aspect-ratio: 1 / 1;
 		border-radius: 50%;
 		object-fit: cover;
@@ -1483,24 +1423,7 @@
 		line-height: 1;
 	}
 
-	.hero-info {
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
-		flex: 1;
-		min-width: 0;
-	}
-
 	@media (max-width: 720px) {
-		.hero-body {
-			flex-direction: column;
-			align-items: flex-start;
-			gap: 16px;
-		}
-		.hero-portrait {
-			width: 140px;
-			height: 140px;
-		}
 		.hero-portrait-initials {
 			font-size: var(--font-size-4xl);
 		}
@@ -1640,47 +1563,14 @@
 		color: var(--text-tertiary);
 	}
 
-	.eyebrow {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		font-size: var(--font-size-xs);
-		color: var(--text-primary);
-		margin: 0;
-		font-weight: var(--font-weight-semibold);
-	}
-
-	.hero-title {
-		font-family: var(--font-display);
-		font-size: var(--font-size-4xl);
-		line-height: var(--line-height-tight);
-		letter-spacing: -0.03em;
-		margin: 0;
-		color: var(--text-primary);
-		word-wrap: break-word;
-	}
-
-	.hero-sub {
-		color: var(--text-secondary);
-		margin: 4px 0 0;
-		font-size: var(--font-size-sm);
-	}
-
 	.filter-bar {
-		padding: 8px 32px 0;
+		padding: var(--space-2) var(--space-6) 0;
 		max-width: calc(260px + 64px);
-	}
-
-	.actions-bar {
-		display: flex;
-		align-items: center;
-		gap: 14px;
-		padding: 18px 32px 8px;
 	}
 
 	.actions-microcopy {
 		margin: 0;
-		padding: 0 32px 8px;
+		padding: 0 var(--space-6) var(--space-2);
 		color: var(--text-tertiary);
 		font-size: var(--font-size-xs);
 		line-height: var(--line-height-normal);
@@ -1730,10 +1620,10 @@
 	}
 
 	.section {
-		padding: 24px 32px 0;
+		padding: var(--space-5) var(--space-6) 0;
 		display: flex;
 		flex-direction: column;
-		gap: 16px;
+		gap: var(--space-4);
 	}
 
 	.section-title {
@@ -1747,7 +1637,7 @@
 	.shelf-head {
 		display: flex;
 		align-items: baseline;
-		gap: 10px;
+		gap: var(--gap-sm);
 	}
 
 	.shelf-count {
@@ -1875,7 +1765,7 @@
 
 	.status.subtle {
 		color: var(--text-tertiary);
-		padding: 20px 32px;
+		padding: var(--space-4) var(--space-6);
 		font-size: var(--font-size-sm);
 	}
 
@@ -1912,10 +1802,7 @@
 	}
 
 	@media (max-width: 720px) {
-		.hero { padding: 36px 20px 24px; min-height: 240px; }
-		.hero-title { font-size: var(--font-size-3xl); }
-		.actions-bar { padding: 12px 20px; }
-		.section { padding: 20px 20px 0; }
+		.section { padding: var(--space-4) var(--space-4) 0; }
 	}
 
 	.popular-row-wrap {
@@ -1946,31 +1833,17 @@
 		display: grid;
 		grid-template-columns: 32px 40px 1fr auto auto;
 		align-items: center;
-		gap: 12px;
-		padding: 6px 12px;
+		gap: var(--space-3);
+		padding: var(--space-2) var(--space-3);
 		border-radius: var(--radius-sm, 8px);
 		cursor: pointer;
 		transition: background 120ms ease;
 		min-height: 52px;
 	}
-	.tidal-row-heart {
-		all: unset;
-		width: 30px;
-		height: 30px;
-		display: grid;
-		place-items: center;
-		border-radius: 999px;
-		cursor: pointer;
-		color: var(--text-secondary);
-		font-size: var(--font-size-md);
-		opacity: 0;
-		transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
-	}
-	.tidal-popular-row:hover .tidal-row-heart,
-	.tidal-row-heart:focus-visible,
-	.tidal-row-heart.on { opacity: 1; }
-	.tidal-row-heart:hover { background: var(--bg-hover); color: var(--text-primary); }
-	.tidal-row-heart.on { color: var(--accent); }
+	.tidal-popular-row:hover .row-btn,
+	.tidal-popular-row:focus-within .row-btn,
+	.tidal-popular-row .row-btn.on { opacity: 1; }
+	.tidal-popular-row .row-btn.on { color: var(--accent); }
 	.tidal-popular-row:hover { background: rgba(255, 255, 255, 0.04); }
 	.tidal-popular-row.disabled { cursor: not-allowed; opacity: 0.55; }
 	.tidal-row-num {

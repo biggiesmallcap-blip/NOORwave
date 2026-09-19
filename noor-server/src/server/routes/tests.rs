@@ -846,6 +846,51 @@ fn test_tidal_tokens(auth_flow: Option<&str>) -> tidal_auth::TidalTokens {
     }
 }
 
+#[tokio::test]
+async fn tidal_client_recovery_waiters_recheck_tokens_after_the_refresh_permit() {
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        fresh_migrated_db(),
+    )));
+    let stale_tokens = test_tidal_tokens(Some("pkce"));
+    state.write().await.tidal_tokens = Some(stale_tokens.clone());
+
+    let first = begin_tidal_client_recovery(&state).await;
+    assert_eq!(
+        first
+            .current_tokens
+            .as_ref()
+            .map(|tokens| tokens.access_token.as_str()),
+        Some(stale_tokens.access_token.as_str())
+    );
+
+    let waiting_state = state.clone();
+    let waiter = tokio::spawn(async move { begin_tidal_client_recovery(&waiting_state).await });
+    tokio::task::yield_now().await;
+    assert!(
+        !waiter.is_finished(),
+        "second recovery must wait for the permit"
+    );
+
+    let mut fresh_tokens = stale_tokens;
+    fresh_tokens.access_token = "fresh-access-secret".to_string();
+    fresh_tokens.refresh_token = "rotated-refresh-secret".to_string();
+    state.write().await.tidal_tokens = Some(fresh_tokens.clone());
+    drop(first);
+
+    let second = tokio::time::timeout(Duration::from_secs(1), waiter)
+        .await
+        .expect("waiting recovery should resume after the permit is released")
+        .expect("waiting recovery task should complete");
+    assert_eq!(
+        second
+            .current_tokens
+            .as_ref()
+            .map(|tokens| tokens.access_token.as_str()),
+        Some(fresh_tokens.access_token.as_str()),
+        "the waiter must observe the token persisted by the first recovery"
+    );
+}
+
 fn test_tidal_track(id: i64, title: &str) -> crate::services::tidal::client::TidalTrack {
     crate::services::tidal::client::TidalTrack {
         id,
@@ -1155,6 +1200,7 @@ fn fresh_test_state(db: Database) -> crate::AppState {
         http_client: reqwest::Client::new(),
         tidal_http_client: reqwest::Client::new(),
         tidal_tokens: None,
+        tidal_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         tidal_mixes_cache: Arc::new(std::sync::Mutex::new(None)),
         tidal_radio_stations_cache: Arc::new(std::sync::Mutex::new(None)),
         home_picks_cache: Arc::new(std::sync::Mutex::new(None)),
@@ -5985,7 +6031,7 @@ async fn library_batch_delete_refuses_playlist_members_before_mutating_any_items
 }
 
 #[tokio::test]
-async fn library_batch_delete_rolls_back_local_batch_on_other_constraint_failure() {
+async fn library_batch_delete_retains_hidden_catalog_rows_for_durable_references() {
     let db = fresh_migrated_db();
     let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
     let mut events = state.read().await.event_tx.subscribe();
@@ -5993,8 +6039,24 @@ async fn library_batch_delete_rolls_back_local_batch_on_other_constraint_failure
     db.with_conn(|conn| {
         conn.execute_batch(
             "INSERT INTO artists (id, name) VALUES (1, 'Artist');
-             INSERT INTO tracks (id, title, artist_id) VALUES (1, 'First', 1), (2, 'Second', 1);
-             INSERT INTO listen_history (track_id, started_at) VALUES (2, datetime('now'));",
+             INSERT INTO albums (id, title, artist_id, is_favorite) VALUES (1, 'Album', 1, 1);
+             INSERT INTO tracks
+                (id, title, artist_id, album_id, is_favorite, is_library)
+             VALUES
+                (1, 'Unreferenced', 1, NULL, 1, 1),
+                (2, 'Retained', 1, 1, 1, 1);
+             INSERT INTO queue (id, track_id, position, source) VALUES (1, 2, 0, 'test');
+             UPDATE playback_state
+                SET current_track_id = 2, current_queue_item_id = 1
+              WHERE id = 1;
+             INSERT INTO shuffle_state (track_id) VALUES (2);
+             INSERT INTO listen_history (track_id, started_at)
+                VALUES (2, datetime('now'));
+             INSERT INTO duplicate_groups (id) VALUES (1);
+             INSERT INTO duplicate_members (group_id, track_id) VALUES (1, 2);
+             INSERT INTO dj_transition_events
+                (from_track_id, to_track_id, template, program_json, planner_version)
+             VALUES (2, 2, 'test', '{}', 'test');",
         )?;
         Ok(())
     })
@@ -6005,27 +6067,113 @@ async fn library_batch_delete_rolls_back_local_batch_on_other_constraint_failure
                 .method("POST")
                 .uri("/api/library/batch/delete")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"track_ids":[1,2]}"#))
+                .body(Body::from(r#"{"track_ids":[1,2],"album_ids":[1]}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::OK);
     db.with_conn(|conn| {
         assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| row
+            conn.query_row("SELECT COUNT(*) FROM tracks WHERE id = 1", [], |row| row
                 .get::<_, i64>(0))?,
-            2
+            0,
+            "an unreferenced row should still be physically deleted"
         );
         assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM listen_history", [], |row| row
-                .get::<_, i64>(0))?,
-            1
+            conn.query_row(
+                "SELECT is_favorite + is_library FROM tracks WHERE id = 2",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            0,
+            "the referenced track should remain as a hidden, unfavorited catalog row"
+        );
+        assert_eq!(
+            conn.query_row("SELECT is_favorite FROM albums WHERE id = 1", [], |row| {
+                row.get::<_, i64>(0)
+            })?,
+            0,
+            "an album needed by a retained track should remain without its favorite flag"
+        );
+        for table in [
+            "queue",
+            "shuffle_state",
+            "listen_history",
+            "duplicate_members",
+            "dj_transition_events",
+        ] {
+            let count: i64 =
+                conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })?;
+            assert_eq!(count, 1, "{table} reference should be preserved");
+        }
+        let current_track_id: Option<i64> = conn.query_row(
+            "SELECT current_track_id FROM playback_state WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(current_track_id, Some(2));
+        Ok(())
+    })
+    .unwrap();
+    assert!(matches!(events.try_recv(), Ok(AppEvent::LibrarySynced)));
+    assert!(
+        events.try_recv().is_err(),
+        "queue and playback did not change"
+    );
+}
+
+#[tokio::test]
+async fn library_batch_delete_retains_album_catalog_row_while_tracks_still_use_it() {
+    let db = fresh_migrated_db();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    db.with_conn(|conn| {
+        conn.execute_batch(
+            "INSERT INTO artists (id, name) VALUES (1, 'Artist');
+             INSERT INTO albums (id, title, artist_id, is_favorite)
+                VALUES (1, 'Album', 1, 1);
+             INSERT INTO tracks (id, title, artist_id, album_id, is_library)
+                VALUES (1, 'Track', 1, 1, 1);",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/batch/delete")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"album_ids":[1]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    db.with_conn(|conn| {
+        let album_favorite: i64 =
+            conn.query_row("SELECT is_favorite FROM albums WHERE id = 1", [], |row| {
+                row.get(0)
+            })?;
+        assert_eq!(album_favorite, 0);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM tracks WHERE album_id = 1",
+                [],
+                |row| { row.get::<_, i64>(0) },
+            )?,
+            1,
+            "removing the album bookmark must not delete its catalog tracks"
         );
         Ok(())
     })
     .unwrap();
-    assert!(events.try_recv().is_err());
 }
 
 #[tokio::test]

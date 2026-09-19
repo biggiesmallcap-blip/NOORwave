@@ -146,8 +146,11 @@ pub fn score_genre_tags(inputs: &[TagInput], min_score: f64) -> GenreScoreResult
     let adjusted = suppress_parents(&raw, catalog);
     let mut ranked: Vec<ScoredGenre> = adjusted
         .into_iter()
-        .filter(|(_, score)| *score >= min_score)
-        .map(|(canonical, score)| ScoredGenre { canonical, score })
+        .map(|(canonical, score)| ScoredGenre {
+            canonical,
+            score: score.min(1.0),
+        })
+        .filter(|genre| genre.score >= min_score)
         .collect();
     ranked.sort_by(|left, right| {
         right
@@ -290,6 +293,37 @@ mod tests {
             0.0,
         );
         assert_eq!(result.genres[0].canonical, "Reggae");
+    }
+
+    #[test]
+    fn accumulated_scores_are_capped_at_one() {
+        let result = score_genre_tags(
+            &[
+                input(
+                    "ambient",
+                    TagSource::LastFmTrack,
+                    TagLevel::Recording,
+                    Some(100),
+                ),
+                input(
+                    "ambient",
+                    TagSource::LastFmAlbum,
+                    TagLevel::Release,
+                    Some(100),
+                ),
+                input(
+                    "ambient",
+                    TagSource::LastFmArtist,
+                    TagLevel::Artist,
+                    Some(100),
+                ),
+            ],
+            0.0,
+        );
+
+        assert_eq!(result.genres.len(), 1);
+        assert_eq!(result.genres[0].canonical, "Ambient");
+        assert_eq!(result.genres[0].score, 1.0);
     }
 
     #[test]

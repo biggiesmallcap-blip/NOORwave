@@ -66,6 +66,10 @@ pub struct AppState {
     /// per-call TLS pool setup. Token + country_code are stitched in per-call.
     pub tidal_http_client: reqwest::Client,
     pub tidal_tokens: Option<services::tidal::auth::TidalTokens>,
+    /// Serializes refresh-token exchange. TIDAL may rotate refresh tokens, so
+    /// concurrent 401 recoveries must wait for the first exchange and then
+    /// reuse its result instead of submitting the same refresh token twice.
+    pub tidal_refresh_lock: Arc<tokio::sync::Mutex<()>>,
     /// 6h TTL cache for the home Your Mixes shelf. TIDAL builds these on a
     /// daily cadence, so re-fetching on every Home remount was wasted work
     /// (and a visible skeleton flash). Cleared on app restart.
@@ -789,6 +793,7 @@ async fn main() -> Result<()> {
         http_client,
         tidal_http_client: services::tidal::client::TidalClient::build_http_client(),
         tidal_tokens,
+        tidal_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         tidal_mixes_cache: Arc::new(std::sync::Mutex::new(None)),
         tidal_radio_stations_cache: Arc::new(std::sync::Mutex::new(None)),
         home_picks_cache: Arc::new(std::sync::Mutex::new(None)),

@@ -2897,6 +2897,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             tidal_http_client: reqwest::Client::new(),
             tidal_tokens: None,
+            tidal_refresh_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             tidal_mixes_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             tidal_radio_stations_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             home_picks_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),

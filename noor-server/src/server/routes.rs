@@ -9576,21 +9576,20 @@ pub(super) async fn recover_tidal_session(
 ///
 /// Single-flight re-check: TIDAL can rotate the refresh token on use, so a
 /// burst of requests that all 401 at once must not each fire their own refresh
-/// (the losers would hit `invalid_grant`). Before refreshing we re-read the
-/// in-memory tokens; if the access token already changed, another request just
-/// refreshed and we reuse that fresh token instead of calling TIDAL again.
+/// (the losers would hit `invalid_grant`). Recovery is serialized by an
+/// app-scoped mutex. After acquiring it, each caller re-reads the in-memory
+/// tokens; if the access token changed while it waited, it reuses that fresh
+/// token instead of calling TIDAL again.
 pub(super) async fn recover_tidal_client(
     state: &SharedState,
     used_tokens: &tidal_auth::TidalTokens,
 ) -> anyhow::Result<TidalClient> {
-    let (current_tokens, http_client, tidal_http_client) = {
-        let s = state.read().await;
-        (
-            s.tidal_tokens.clone(),
-            s.http_client.clone(),
-            s.tidal_http_client.clone(),
-        )
-    };
+    let TidalClientRecovery {
+        _permit,
+        current_tokens,
+        http_client,
+        tidal_http_client,
+    } = begin_tidal_client_recovery(state).await;
 
     if let Some(current) = current_tokens
         && current.access_token != used_tokens.access_token
@@ -9608,6 +9607,27 @@ pub(super) async fn recover_tidal_client(
         refreshed.access_token.clone(),
         refreshed.country_code.clone(),
     ))
+}
+
+struct TidalClientRecovery {
+    _permit: tokio::sync::OwnedMutexGuard<()>,
+    current_tokens: Option<tidal_auth::TidalTokens>,
+    http_client: reqwest::Client,
+    tidal_http_client: reqwest::Client,
+}
+
+/// Acquire the refresh permit before reading tokens. Keeping these operations
+/// together is what makes the post-wait token check reliable.
+async fn begin_tidal_client_recovery(state: &SharedState) -> TidalClientRecovery {
+    let refresh_lock = state.read().await.tidal_refresh_lock.clone();
+    let permit = refresh_lock.lock_owned().await;
+    let s = state.read().await;
+    TidalClientRecovery {
+        _permit: permit,
+        current_tokens: s.tidal_tokens.clone(),
+        http_client: s.http_client.clone(),
+        tidal_http_client: s.tidal_http_client.clone(),
+    }
 }
 
 pub(super) fn error_looks_like_auth(err: &anyhow::Error) -> bool {

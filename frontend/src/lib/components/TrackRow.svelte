@@ -700,38 +700,11 @@
 		opacity: 0;
 		transition: opacity var(--motion-fast);
 	}
+	.cell-actions .row-btn { opacity: 1; }
 
 	.track-row:hover .cell-actions,
 	.track-row:focus-within .cell-actions,
 	.track-row.active .cell-actions { opacity: 1; }
-
-	.row-btn {
-		all: unset;
-		width: 30px;
-		height: 30px;
-		display: grid;
-		place-items: center;
-		border-radius: 999px;
-		cursor: pointer;
-		color: var(--text-secondary);
-		font-size: var(--font-size-md);
-		transition: background var(--motion-fast), color var(--motion-fast);
-	}
-
-	.row-btn:hover {
-		background: var(--bg-hover);
-		color: var(--text-primary);
-	}
-
-	.row-btn:disabled {
-		cursor: default;
-		opacity: 0.45;
-	}
-
-	.row-btn:disabled:hover {
-		background: transparent;
-		color: var(--text-secondary);
-	}
 
 	.row-btn.heart.on { color: var(--accent); }
 </style>

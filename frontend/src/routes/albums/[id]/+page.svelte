@@ -20,6 +20,7 @@
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import MediaRail from '$lib/components/ui/MediaRail.svelte';
+	import DetailHero from '$lib/components/ui/DetailHero.svelte';
 	import { goBack } from '$lib/navigation/back';
 	import { captureScroll, restoreScroll } from '$lib/navigation/scroll';
 	import { openContextMenu } from '$lib/stores/context_menu';
@@ -155,8 +156,6 @@
 			total_ms: totalMsLocal + totalMsTidal,
 		};
 	});
-	let heroArtworkSrc = $derived(artworkCandidate(header()?.artwork_url, 640));
-	let heroBackdropSrc = $derived(artworkCandidate(header()?.artwork_url, 1280));
 
 	function artworkCandidate(
 		rawUrl: string | null | undefined,
@@ -306,34 +305,15 @@
 	{:else}
 		{@const h = header()!}
 
-		<header class="hero">
-			{#if heroBackdropSrc}
-				<img
-					class="hero-backdrop"
-					src={heroBackdropSrc}
-					alt=""
-					onerror={() => markArtworkFailed(heroBackdropSrc)}
-				/>
-			{/if}
-			<div class="hero-veil"></div>
-
-			<div class="hero-body">
-				<div class="hero-art-wrap">
-					{#if heroArtworkSrc}
-						<img
-							class="hero-art"
-							src={heroArtworkSrc}
-							alt=""
-							onerror={() => markArtworkFailed(heroArtworkSrc)}
-						/>
-					{:else}
-						<div class="hero-art placeholder">♫</div>
-					{/if}
-				</div>
-				<div class="hero-info">
-					<p class="eyebrow">Album</p>
-					<h1 class="hero-title display-face">{h.title}</h1>
-					<p class="hero-sub">
+		<DetailHero
+			eyebrow="Album"
+			title={h.title}
+			artwork={h.artwork_url}
+			backdrop={h.artwork_url}
+			fallbackText={h.title.slice(0, 1)}
+			variant="immersive"
+		>
+			{#snippet meta()}
 						{#if h.artist_id != null}
 							<a
 								href="/artists/{h.artist_id}"
@@ -351,17 +331,15 @@
 						<span>{h.total_track_count} {h.total_track_count === 1 ? 'song' : 'songs'}</span>
 						<span class="dot">·</span>
 						<span class="hero-duration">{formatTotalDuration(h.total_ms)}</span>
-					</p>
+			{/snippet}
+			{#snippet details()}
 					{#if h.library_track_count > 0 && h.library_track_count < h.total_track_count}
 						<p class="hero-library-substat">
 							{h.library_track_count} in your library
 						</p>
 					{/if}
-				</div>
-			</div>
-		</header>
-
-		<div class="actions-bar">
+			{/snippet}
+			{#snippet actions()}
 			<button
 				class="play-fab"
 				aria-label={isAlbumPlaying ? 'Pause' : 'Play album'}
@@ -427,7 +405,8 @@
 			<span class="actions-spacer"></span>
 
 			<span class="actions-hint">Click a song to start the album from there</span>
-		</div>
+			{/snippet}
+		</DetailHero>
 
 		<p class="actions-microcopy">
 			<strong>Shuffle</strong> plays this album in random order.
@@ -565,7 +544,7 @@
 
 <style>
 	.album-page {
-		padding: 0 0 80px;
+		padding: 0 0 calc(var(--space-7) * 2);
 		display: flex;
 		flex-direction: column;
 	}
@@ -576,7 +555,7 @@
 	}
 
 	.status-wrap {
-		padding: 32px;
+		padding: var(--space-6);
 	}
 
 	.empty-action {
@@ -609,106 +588,6 @@
 		to { transform: rotate(360deg); }
 	}
 
-	.hero {
-		position: relative;
-		padding: var(--space-5) var(--space-5) var(--space-4);
-		display: flex;
-		min-height: 300px;
-		overflow: hidden;
-		isolation: isolate;
-		border-radius: var(--radius-lg);
-		border: 1px solid var(--border-subtle);
-	}
-
-	.hero-backdrop {
-		position: absolute;
-		inset: -60px;
-		width: calc(100% + 120px);
-		height: calc(100% + 120px);
-		object-fit: cover;
-		object-position: center;
-		filter: blur(72px) saturate(1.08) brightness(0.72);
-		transform: scale(1.16);
-		z-index: -2;
-		opacity: 0.32;
-	}
-
-	.hero-veil {
-		position: absolute;
-		inset: 0;
-		background:
-			linear-gradient(180deg, rgba(11, 11, 15, 0.62) 0%, rgba(11, 11, 15, 0.78) 68%, var(--bg-base) 100%);
-		z-index: -1;
-	}
-
-	.hero-body {
-		display: grid;
-		grid-template-columns: clamp(160px, 16vw, 240px) 1fr;
-		gap: var(--space-5);
-		align-items: end;
-		width: 100%;
-		max-width: var(--content-width);
-	}
-
-	.hero-art-wrap {
-		width: clamp(160px, 16vw, 240px);
-		aspect-ratio: 1 / 1;
-		border-radius: var(--radius-md);
-		overflow: hidden;
-		box-shadow: 0 28px 70px -14px rgba(0, 0, 0, 0.7);
-		background: var(--bg-surface);
-	}
-
-	.hero-art {
-		width: 100%;
-		height: 100%;
-		object-fit: cover;
-		display: block;
-	}
-
-	.hero-art.placeholder {
-		display: grid;
-		place-items: center;
-		font-size: var(--font-size-4xl);
-		color: var(--text-tertiary);
-	}
-
-	.hero-info {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-2);
-		min-width: 0;
-	}
-
-	.eyebrow {
-		font-size: var(--font-size-xs);
-		text-transform: uppercase;
-		letter-spacing: 0.14em;
-		color: var(--text-primary);
-		margin: 0;
-		font-weight: var(--font-weight-semibold);
-	}
-
-	.hero-title {
-		font-family: var(--font-display);
-		font-size: var(--font-size-4xl);
-		line-height: var(--line-height-tight);
-		letter-spacing: -0.02em;
-		margin: 0;
-		color: var(--text-primary);
-		word-wrap: break-word;
-	}
-
-	.hero-sub {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		flex-wrap: wrap;
-		color: var(--text-secondary);
-		margin: 4px 0 0;
-		font-size: var(--font-size-sm);
-	}
-
 	.hero-link {
 		color: var(--text-primary);
 		font-weight: var(--font-weight-bold);
@@ -717,13 +596,6 @@
 	.hero-link:hover { text-decoration: underline; }
 	.dot { opacity: 0.5; }
 	.hero-duration { color: var(--text-tertiary); }
-
-	.actions-bar {
-		display: flex;
-		align-items: center;
-		gap: 14px;
-		padding: 18px 32px 4px;
-	}
 
 	.play-fab {
 		all: unset;
@@ -794,7 +666,7 @@
 
 	.actions-microcopy {
 		margin: 0;
-		padding: 0 32px 8px;
+		padding: 0 var(--space-6) var(--space-2);
 		color: var(--text-tertiary);
 		font-size: var(--font-size-xs);
 		line-height: var(--line-height-normal);
@@ -806,7 +678,7 @@
 	}
 
 	.track-table {
-		padding: 8px 32px 0;
+		padding: var(--space-2) var(--space-6) 0;
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
@@ -816,8 +688,8 @@
 		display: grid;
 		grid-template-columns: 40px 1fr 132px auto 64px;
 		align-items: center;
-		gap: 14px;
-		padding: 6px 16px 10px;
+		gap: var(--gap);
+		padding: var(--space-2) var(--space-4) var(--space-3);
 		border-bottom: 1px solid var(--border-subtle);
 		color: var(--text-tertiary);
 		font-size: var(--font-size-xs);
@@ -845,8 +717,8 @@
 		display: grid;
 		grid-template-columns: 40px 1fr 132px auto 64px;
 		align-items: center;
-		gap: 14px;
-		padding: 8px 16px;
+		gap: var(--gap);
+		padding: var(--space-2) var(--space-4);
 		cursor: pointer;
 		transition: background 120ms ease;
 		min-height: 44px;
@@ -896,24 +768,24 @@
 	}
 
 	.footnote {
-		padding: 22px 32px 4px;
+		padding: var(--space-5) var(--space-6) var(--space-1);
 		color: var(--text-tertiary);
 		font-size: var(--font-size-xs);
 		margin: 0;
 	}
 
 	.more-section {
-		padding: 28px 32px 0;
+		padding: var(--space-6) var(--space-6) 0;
 		display: flex;
 		flex-direction: column;
-		gap: 14px;
+		gap: var(--gap);
 	}
 
 	.more-head {
 		display: flex;
 		align-items: baseline;
 		justify-content: space-between;
-		gap: 12px;
+		gap: var(--space-3);
 	}
 
 	.more-title {
@@ -1002,14 +874,9 @@
 	}
 
 	@media (max-width: 720px) {
-		.hero { padding: 24px 20px 20px; min-height: auto; }
-		.hero-body { grid-template-columns: 1fr; gap: 18px; }
-		.hero-art-wrap { width: 180px; height: 180px; }
-		.hero-title { font-size: var(--font-size-2xl); }
-		.actions-bar { padding: 12px 20px; }
-		.track-table { padding: 8px 12px 0; }
+		.track-table { padding: var(--space-2) var(--space-3) 0; }
 		.track-header { grid-template-columns: 36px 1fr auto 56px; }
 		.col-plays { display: none; }
-		.more-section { padding: 24px 20px 0; }
+		.more-section { padding: var(--space-5) var(--space-4) 0; }
 	}
 </style>

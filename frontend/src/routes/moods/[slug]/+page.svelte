@@ -4,7 +4,7 @@
   import { ApiError, api, type TidalHomeModule } from '$lib/api/client';
   import { tidalStatus } from '$lib/stores/tidal';
   import TidalDiscoverShelves from '$lib/components/search/TidalDiscoverShelves.svelte';
-  import PageHeader from '$lib/components/ui/PageHeader.svelte';
+  import DetailHero from '$lib/components/ui/DetailHero.svelte';
   import SpotifyMoodRail from '$lib/components/moods/SpotifyMoodRail.svelte';
   import { SPOTIFY_MOODS_BY_SLUG } from '$lib/components/moods/spotify-moods-data';
   import { getCachedMoodPage, putCachedMoodPage } from '$lib/stores/tidal-moods-cache';
@@ -90,7 +90,7 @@
 
 <div class="page">
   <button class="back-link" type="button" onclick={() => goBack('/moods')}>Back</button>
-  <PageHeader eyebrow="TIDAL mood" title={title || '...'} variant="editorial" />
+  <DetailHero eyebrow="TIDAL mood" title={title || '...'} variant="text" />
 
   {#if spotifyCategory}
     <section class="spotify-block">

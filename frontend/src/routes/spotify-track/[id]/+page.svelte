@@ -20,6 +20,7 @@
     startTidalSongRadio,
   } from '$lib/stores/player';
   import { tidalStatus } from '$lib/stores/tidal';
+  import DetailHero from '$lib/components/ui/DetailHero.svelte';
 
   const spotifyId = $derived($page.params.id ?? '');
 
@@ -291,35 +292,35 @@
   {:else if error}
     <div class="state error">Couldn't load this track: {error}</div>
   {:else if detail}
+    {@const heroDetail = detail as SpotifyTrackDetail}
     {@const headerTrack = asTidalPlayableFromDetail(detail)}
     {@const playable = headerTrack !== null}
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <header class="header" oncontextmenu={handleHeaderContextMenu}>
-      {#if detail.thumbnail}
-        <div class="cover" style="background-image:url('{detail.thumbnail}')"></div>
-      {:else}
-        <div class="cover fallback">M</div>
-      {/if}
-      <div class="meta">
-        <span class="kicker">Spotify track . ephemeral</span>
-        <h1 class="title">{detail.title ?? '-'}</h1>
-        <div class="stats">
-          {#if detail.primaryArtist}
+    <DetailHero
+      eyebrow="Spotify track · ephemeral"
+      title={heroDetail.title ?? '-'}
+      artwork={heroDetail.thumbnail}
+      backdrop={heroDetail.thumbnail}
+      fallbackText="M"
+      variant="immersive"
+      oncontextmenu={handleHeaderContextMenu}
+    >
+      {#snippet meta()}
+          {#if heroDetail.primaryArtist}
             <!-- Artist pages are TIDAL + local library only; the spotify-artist
                  route was an unreachable dead layer and has been removed. -->
-            <span>{detail.primaryArtist}</span>
+            <span>{heroDetail.primaryArtist}</span>
           {/if}
-          {#if detail.album}
-            {#if detail.albumId}
-              <a href={`/spotify-album/${detail.albumId}`}>. {detail.album}</a>
+          {#if heroDetail.album}
+            {#if heroDetail.albumId}
+              <a href={`/spotify-album/${heroDetail.albumId}`}>. {heroDetail.album}</a>
             {:else}
-              <span>. {detail.album}</span>
+              <span>. {heroDetail.album}</span>
             {/if}
           {/if}
-          {#if detail.durationMs}<span>. {formatTrackDuration(detail.durationMs)}</span>{/if}
-          {#if detail.playcount !== null}<span>. {formatNumber(detail.playcount)} plays</span>{/if}
-        </div>
-        <div class="actions">
+          {#if heroDetail.durationMs}<span>. {formatTrackDuration(heroDetail.durationMs)}</span>{/if}
+          {#if heroDetail.playcount !== null}<span>. {formatNumber(heroDetail.playcount)} plays</span>{/if}
+      {/snippet}
+      {#snippet actions()}
           <button class="btn-primary" disabled={!playable} onclick={() => headerTrack && playTidalTrackNow(headerTrack)}>Play</button>
           <button class="btn-secondary" disabled={!playable} onclick={() => headerTrack && playTidalTrackNext(headerTrack)}>Play next</button>
           <button class="btn-secondary" disabled={!playable} onclick={() => headerTrack && addTidalTrackToQueue(headerTrack)}>Add to queue</button>
@@ -328,15 +329,16 @@
             {saving ? 'Saving...' : 'Save to library'}
           </button>
           {#if pendingIds.length > 0}<span class="resolving-badge">Resolving {pendingIds.length} more...</span>{/if}
-        </div>
+      {/snippet}
+      {#snippet details()}
         {#if saveResult}
           <p class="toast success">{saveResult}</p>
         {/if}
         {#if saveErr}
           <p class="toast error">Save failed: {saveErr}</p>
         {/if}
-      </div>
-    </header>
+      {/snippet}
+    </DetailHero>
 
     {#if related}
       {#each [
@@ -381,7 +383,7 @@
                   </div>
                   <span class="dur">{formatTrackDuration(t.durationMs)}</span>
                   <button
-                    class="row-btn"
+                    class="row-btn row-btn-text"
                     title="More actions"
                     aria-label="More actions"
                     onclick={(e) => { e.stopPropagation(); openMenuAtElement(e.currentTarget as HTMLElement, buildRowMenu(t), t.title ?? 'Spotify track'); }}
@@ -397,18 +399,10 @@
 </div>
 
 <style>
-  .page { max-width: var(--content-width); margin: 0 auto; padding: 32px 28px 96px; display: flex; flex-direction: column; gap: 32px; }
+  .page { max-width: var(--content-width); margin: 0 auto; padding: var(--space-6) var(--space-6) calc(var(--space-7) * 2); display: flex; flex-direction: column; gap: var(--space-6); }
   .page > .back-link { align-self: flex-start; margin-bottom: var(--space-3); }
-  .state { padding: 80px 0; text-align: center; color: var(--text-muted); }
+  .state { padding: calc(var(--space-7) * 2) 0; text-align: center; color: var(--text-muted); }
   .state.error { color: #ef4444; }
-  .header { display: grid; grid-template-columns: 220px 1fr; gap: 28px; align-items: end; }
-  .cover { width: 220px; height: 220px; border-radius: var(--radius-md); background-size: cover; background-position: center; box-shadow: 0 18px 36px -16px rgba(0,0,0,.6); }
-  .cover.fallback { display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, var(--service-spotify), #1aa34a); color: #fff; font-size: var(--font-size-4xl); }
-  .meta { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-  .kicker { font-size: var(--font-size-xs); letter-spacing: 0.08em; text-transform: uppercase; color: var(--service-spotify); font-weight: var(--font-weight-bold); }
-  .title { margin: 0; font-size: var(--font-size-3xl); font-weight: 800; color: var(--text-primary); }
-  .stats { display: flex; flex-wrap: wrap; gap: 6px; color: var(--text-muted); font-size: var(--font-size-xs); }
-  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
   .btn-primary, .btn-secondary { background: var(--accent); color: var(--bg-base); border: none; padding: 9px 14px; border-radius: 999px; font-weight: var(--font-weight-bold); cursor: pointer; font-size: var(--font-size-sm); }
   .btn-secondary { background: var(--border-subtle); color: var(--text-primary); border: 1px solid var(--panel-border); }
   .btn-primary:disabled, .btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -416,9 +410,9 @@
   .toast { margin: var(--space-2) 0 0; font-size: var(--font-size-xs); padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); width: fit-content; }
   .toast.success { background: rgba(125, 200, 175, 0.12); color: var(--accent); }
   .toast.error { background: rgba(239, 68, 68, 0.12); color: var(--state-error); }
-  .shelf h2 { font-size: var(--font-size-lg); font-weight: var(--font-weight-bold); margin: 0 0 12px; }
+  .shelf h2 { font-size: var(--font-size-lg); font-weight: var(--font-weight-bold); margin: 0 0 var(--space-3); }
   .tracks { list-style: none; margin: 0; padding: 0; }
-  .row { display: grid; grid-template-columns: 36px 44px minmax(0,1fr) auto auto; gap: 14px; align-items: center; padding: 8px 12px; border-radius: 8px; cursor: pointer; }
+  .row { display: grid; grid-template-columns: 36px 44px minmax(0,1fr) auto auto; gap: var(--gap); align-items: center; padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); cursor: pointer; }
   .row:hover { background: rgba(255,255,255,.04); }
   .row.disabled { cursor: default; opacity: 0.55; }
   .rank { color: var(--text-muted); text-align: center; font-variant-numeric: tabular-nums; }
@@ -428,14 +422,11 @@
   .row-title { color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: var(--font-size-sm); font-weight: var(--font-weight-medium); }
   .row-artist { color: var(--text-secondary); font-size: var(--font-size-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .dur { color: var(--text-muted); font-size: var(--font-size-xs); font-variant-numeric: tabular-nums; min-width: 36px; text-align: right; }
-  .row-btn { border: none; min-width: 30px; height: 30px; padding: 0 8px; border-radius: 999px; background: rgba(255,255,255,.06); color: var(--text-secondary); cursor: pointer; font-size: var(--font-size-xs); font-weight: var(--font-weight-bold); }
-  .row-btn:hover { background: rgba(255,255,255,.12); color: var(--text-primary); }
+  .row:hover .row-btn,
+  .row:focus-within .row-btn { opacity: 1; }
   @media (max-width: 760px) {
-    .page { padding: 24px 16px 88px; gap: 24px; }
-    .header { grid-template-columns: 96px 1fr; gap: 16px; align-items: start; }
-    .cover { width: 96px; height: 96px; border-radius: 10px; }
-    .title { font-size: var(--font-size-xl); }
-    .row { grid-template-columns: 28px 40px minmax(0,1fr) auto; gap: 10px; }
+    .page { padding: var(--space-5) var(--space-4) calc(var(--space-7) * 2); gap: var(--space-5); }
+    .row { grid-template-columns: 28px 40px minmax(0,1fr) auto; gap: var(--gap-sm); }
     .dur { display: none; }
   }
 </style>

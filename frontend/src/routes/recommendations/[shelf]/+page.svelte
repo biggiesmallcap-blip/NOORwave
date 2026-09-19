@@ -8,7 +8,7 @@
 		type ProviderRecommendationShelf,
 	} from '$lib/api/client';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
-	import PageHeader from '$lib/components/ui/PageHeader.svelte';
+	import DetailHero from '$lib/components/ui/DetailHero.svelte';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 	import RecommendationAlbumPopup from '$lib/components/home/RecommendationAlbumPopup.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
@@ -113,12 +113,13 @@
      should be indistinguishable in chrome from /hires or /new-releases. -->
 <div class="page" data-recommendation-shelf={slug}>
 	<button class="back-link" type="button" onclick={() => goBack('/')}>Back</button>
-	<PageHeader
+	<DetailHero
 		eyebrow="Connected profiles"
 		title={shelf?.title ?? (loading ? 'Loading...' : 'Recommendations')}
-		subtitle={shelf ? subtitleFor(shelf) : ''}
-		variant="editorial"
-	/>
+		variant="text"
+	>
+		{#snippet meta()}{shelf ? subtitleFor(shelf) : ''}{/snippet}
+	</DetailHero>
 
 	{#if loading}
 		<p class="muted-line">Loading recommendations...</p>

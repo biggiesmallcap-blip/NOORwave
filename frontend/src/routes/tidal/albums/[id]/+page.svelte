@@ -10,14 +10,10 @@
 	} from '$lib/stores/player';
 	import { goBack } from '$lib/navigation/back';
 	import TidalTrackRow from '$lib/components/TidalTrackRow.svelte';
+	import DetailHero from '$lib/components/ui/DetailHero.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
-	import {
-		firstArtworkUrl,
-		tidalArtworkFallbackSizes,
-		upscaleTidalArtwork,
-		type TidalArtworkSize,
-	} from '$lib/utils/artwork';
+	import { firstArtworkUrl } from '$lib/utils/artwork';
 	import { formatTotalDuration } from '$lib/utils/format';
 	import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';
 
@@ -26,14 +22,12 @@
 	let tracks = $state<TidalDiscographyTrack[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
-	let failedArtworkUrls = $state<Record<string, boolean>>({});
 	let loadSeq = 0;
 
 	async function load(id: number) {
 		const seq = ++loadSeq;
 		loading = true;
 		error = null;
-		failedArtworkUrls = {};
 		try {
 			const res = await api.getTidalAlbumTracks(id);
 			if (seq !== loadSeq) return;
@@ -64,25 +58,6 @@
 			total_ms: totalMs
 		};
 	});
-	let heroArtworkSrc = $derived(artworkCandidate(header()?.artwork_url, 640));
-	let heroBackdropSrc = $derived(artworkCandidate(header()?.artwork_url, 1280));
-
-	function artworkCandidate(
-		rawUrl: string | null | undefined,
-		size: TidalArtworkSize,
-	): string | null {
-		if (!rawUrl) return null;
-		for (const candidateSize of tidalArtworkFallbackSizes(rawUrl, size)) {
-			const candidate = upscaleTidalArtwork(rawUrl, candidateSize);
-			if (candidate && !failedArtworkUrls[candidate]) return candidate;
-		}
-		return null;
-	}
-
-	function markArtworkFailed(renderedUrl: string | null | undefined) {
-		if (!renderedUrl) return;
-		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
-	}
 
 	async function playLoadedAlbum(startIndex = 0) {
 		await playTidalTracksNow(
@@ -138,33 +113,15 @@
 	{:else}
 		{@const h = header()!}
 
-		<header class="hero">
-			{#if heroBackdropSrc}
-				<img
-					class="hero-backdrop"
-					src={heroBackdropSrc}
-					alt=""
-					onerror={() => markArtworkFailed(heroBackdropSrc)}
-				/>
-			{/if}
-			<div class="hero-veil"></div>
-			<div class="hero-body">
-				<div class="hero-art-wrap">
-					{#if heroArtworkSrc}
-						<img
-							class="hero-art"
-							src={heroArtworkSrc}
-							alt=""
-							onerror={() => markArtworkFailed(heroArtworkSrc)}
-						/>
-					{:else}
-						<div class="hero-art placeholder">♫</div>
-					{/if}
-				</div>
-				<div class="hero-info">
-					<p class="eyebrow">Album · TIDAL preview</p>
-					<h1 class="hero-title display-face">{h.title}</h1>
-					<p class="hero-sub">
+		<DetailHero
+			eyebrow="Album · TIDAL preview"
+			title={h.title}
+			artwork={h.artwork_url}
+			backdrop={h.artwork_url}
+			fallbackText={h.title.slice(0, 1)}
+			variant="immersive"
+		>
+			{#snippet meta()}
 						{#if h.artist_tidal_id != null}
 							<a
 								class="hero-link"
@@ -185,18 +142,16 @@
 						<span>{h.track_count} songs</span>
 						<span class="dot">·</span>
 						<span>{formatTotalDuration(h.total_ms)}</span>
-					</p>
-					<div class="hero-actions">
+			{/snippet}
+			{#snippet actions()}
 						<button class="play-all-btn" onclick={() => void playLoadedAlbum()}>▶ Play All</button>
 						<button class="action-btn" onclick={() => void shuffleLoadedAlbum()}>⤮ Shuffle</button>
 						<button class="action-btn" disabled={radioPending} onclick={() => void radioFromAlbum()}>◉ Radio</button>
 						<button class="save-btn" disabled={savePending} onclick={() => void saveToLibrary()}>
 							{savePending ? 'Saving…' : '＋ Save to library'}
 						</button>
-					</div>
-				</div>
-			</div>
-		</header>
+			{/snippet}
+		</DetailHero>
 
 		<section class="track-table">
 			<div class="track-header">
@@ -233,119 +188,14 @@
 	}
 
 	.status {
-		padding: 48px 28px;
+		padding: var(--space-7) var(--space-6);
 		text-align: center;
 		color: var(--text-secondary);
 	}
 	.status.error { color: var(--state-error); }
 
-	.hero {
-		position: relative;
-		padding: var(--space-5) var(--space-5) var(--space-4);
-		display: flex;
-		min-height: 300px;
-		overflow: hidden;
-		isolation: isolate;
-		border-radius: var(--radius-lg);
-		border: 1px solid var(--border-subtle);
-	}
-
-	.hero-backdrop {
-		position: absolute;
-		inset: -60px;
-		width: calc(100% + 120px);
-		height: calc(100% + 120px);
-		object-fit: cover;
-		object-position: center;
-		filter: blur(60px) saturate(1.6);
-		transform: scale(1.2);
-		z-index: -2;
-		opacity: 0.7;
-	}
-
-	.hero-veil {
-		position: absolute;
-		inset: 0;
-		background: linear-gradient(180deg, rgba(0,0,0,0.08) 0%, rgba(0,0,0,0.42) 68%, var(--bg-base) 100%);
-		z-index: -1;
-	}
-
-	.hero-body {
-		display: grid;
-		grid-template-columns: clamp(160px, 16vw, 240px) 1fr;
-		gap: var(--space-5);
-		align-items: end;
-		width: 100%;
-		max-width: var(--content-width);
-	}
-
-	.hero-art-wrap {
-		width: clamp(160px, 16vw, 240px);
-		aspect-ratio: 1 / 1;
-		border-radius: var(--radius-md);
-		overflow: hidden;
-		box-shadow: 0 28px 70px -14px rgba(0, 0, 0, 0.7);
-		background: var(--bg-surface);
-	}
-
-	.hero-art {
-		width: 100%;
-		height: 100%;
-		object-fit: cover;
-		display: block;
-	}
-	.hero-art.placeholder {
-		display: grid;
-		place-items: center;
-		font-size: var(--font-size-4xl);
-		color: var(--text-tertiary);
-	}
-
-	.hero-info {
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
-		min-width: 0;
-	}
-
-	.eyebrow {
-		font-size: var(--font-size-xs);
-		text-transform: uppercase;
-		letter-spacing: 0.14em;
-		color: var(--text-primary);
-		margin: 0;
-		font-weight: var(--font-weight-semibold);
-	}
-
-	.hero-title {
-		font-family: var(--font-display);
-		font-size: var(--font-size-4xl);
-		line-height: var(--line-height-tight);
-		letter-spacing: -0.02em;
-		margin: 0;
-		color: var(--text-primary);
-	}
-
-	.hero-sub {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		flex-wrap: wrap;
-		color: var(--text-secondary);
-		margin: 4px 0 0;
-		font-size: var(--font-size-sm);
-	}
-
 	.hero-link { color: var(--text-primary); font-weight: var(--font-weight-bold); }
 	.dot { opacity: 0.5; }
-
-	.hero-actions {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		margin-top: 10px;
-		flex-wrap: wrap;
-	}
 
 	.play-all-btn {
 		background: var(--accent);
@@ -389,7 +239,7 @@
 	.save-btn:disabled { cursor: progress; opacity: 0.85; }
 
 	.track-table {
-		padding: 24px 32px 0;
+		padding: var(--space-5) var(--space-6) 0;
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
@@ -399,8 +249,8 @@
 		display: grid;
 		grid-template-columns: 40px 1fr 64px auto;
 		align-items: center;
-		gap: 14px;
-		padding: 6px 16px 10px;
+		gap: var(--gap);
+		padding: var(--space-2) var(--space-4) var(--space-3);
 		border-bottom: 1px solid var(--border-subtle);
 		color: var(--text-tertiary);
 		font-size: var(--font-size-xs);

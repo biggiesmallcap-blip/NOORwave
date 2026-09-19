@@ -63,6 +63,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_059,
     MIGRATION_060,
     MIGRATION_061,
+    MIGRATION_062,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1678,6 +1679,16 @@ const MIGRATION_061: &str = r#"
 ALTER TABLE playlists ADD COLUMN tidal_last_updated TEXT;
 "#;
 
+// Genre scores combine evidence from several source/level pairs. Before the
+// scorer bounded the accumulated value, repeated evidence for one canonical
+// genre could leave confidence above the documented [0, 1] range. The WHERE
+// clause keeps this backfill small, and the assignment is safe to repeat.
+const MIGRATION_062: &str = r#"
+UPDATE track_genres
+SET confidence = 1.0
+WHERE confidence > 1.0;
+"#;
+
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     // Create migrations table if not exists
     conn.execute_batch(
@@ -2021,5 +2032,50 @@ mod tests {
             })
             .unwrap();
         assert_eq!(scans, 0, "scan rows cascade with the artist");
+    }
+
+    #[test]
+    fn migration_062_caps_genre_confidence_idempotently() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+
+        apply_migrations_up_to(&conn, 61).unwrap();
+        conn.execute_batch(
+            "INSERT INTO artists (id, name) VALUES (62001, 'Migration 062 Artist');
+             INSERT INTO tracks (id, title, artist_id)
+             VALUES (62001, 'Migration 062 Track', 62001);
+             INSERT INTO genres (id, name, slug) VALUES
+                (62001, 'Migration 062 Hot', 'migration-062-hot'),
+                (62002, 'Migration 062 Stable', 'migration-062-stable');
+             INSERT INTO track_genres (track_id, genre_id, source, confidence) VALUES
+                (62001, 62001, 'musicbrainz', 2.27),
+                (62001, 62002, 'lastfm', 0.73);",
+        )
+        .unwrap();
+
+        apply_migrations_up_to(&conn, MIGRATIONS.len()).unwrap();
+
+        let confidences = || {
+            let over_limit: f64 = conn
+                .query_row(
+                    "SELECT confidence FROM track_genres WHERE genre_id = 62001",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let already_valid: f64 = conn
+                .query_row(
+                    "SELECT confidence FROM track_genres WHERE genre_id = 62002",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            (over_limit, already_valid)
+        };
+
+        assert_eq!(confidences(), (1.0, 0.73));
+
+        conn.execute_batch(MIGRATION_062).unwrap();
+        assert_eq!(confidences(), (1.0, 0.73));
     }
 }

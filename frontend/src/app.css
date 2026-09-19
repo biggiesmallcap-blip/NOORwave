@@ -671,6 +671,24 @@ h4 {
 	outline-offset: 2px;
 }
 
+/* Text-labelled row actions (for example provider-resolution rows) keep the
+ * same interaction treatment while allowing the label to set the width. */
+.row-btn.row-btn-text {
+	width: auto;
+	min-width: 30px;
+	padding-inline: var(--space-2);
+	font-weight: var(--font-weight-bold);
+}
+
+.row-btn:disabled {
+	cursor: not-allowed;
+}
+
+.row-btn:disabled:hover {
+	background: transparent;
+	color: var(--text-secondary);
+}
+
 /* Nothing to hover on touch, so the actions are always visible there. */
 @media (hover: none) {
 	.row-btn {

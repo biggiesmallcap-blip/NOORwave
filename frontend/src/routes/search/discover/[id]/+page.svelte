@@ -11,6 +11,7 @@
 	import { playTidalTrackNow, playTidalPlaylist } from '$lib/stores/player';
 	import { formatTrackDuration } from '$lib/utils/format';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
+	import DetailHero from '$lib/components/ui/DetailHero.svelte';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import AlbumPopup from '$lib/components/album/AlbumPopup.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
@@ -156,14 +157,12 @@
 </svelte:head>
 
 <div class="page-shell discover-detail animate-in">
-	<header class="hero">
-		<button class="back-link" type="button" onclick={() => goBack('/search')}>Back</button>
-		<p class="eyebrow">TIDAL</p>
-		<h1>{mod?.title ?? (loading ? 'Loading…' : 'Discover')}</h1>
-		{#if mod}
-			<p class="subtle">{mod.items.length} item{mod.items.length === 1 ? '' : 's'}</p>
-		{/if}
-	</header>
+	<button class="back-link" type="button" onclick={() => goBack('/search')}>Back</button>
+	<DetailHero eyebrow="TIDAL" title={mod?.title ?? (loading ? 'Loading…' : 'Discover')} variant="text">
+		{#snippet meta()}
+			{#if mod}{mod.items.length} item{mod.items.length === 1 ? '' : 's'}{/if}
+		{/snippet}
+	</DetailHero>
 
 	{#if loading}
 		<p class="status">Loading from TIDAL…</p>
@@ -273,39 +272,11 @@
 		gap: var(--space-5);
 	}
 
-	.hero {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-2);
-		padding-top: var(--space-3);
-	}
-
 	/* `.back-link` itself is defined globally in app.css. Only the
 	   per-context layout (sticking to the start of the flex hero) lives
 	   here so the global utility stays purely visual. */
 	.back-link {
 		align-self: flex-start;
-	}
-
-	.eyebrow {
-		margin: 0;
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-bold);
-		letter-spacing: 0.08em;
-		color: var(--accent);
-	}
-
-	.hero h1 {
-		margin: 0;
-		font-size: var(--font-size-3xl);
-		font-weight: var(--font-weight-bold);
-		line-height: var(--line-height-tight);
-	}
-
-	.subtle {
-		margin: 0;
-		font-size: var(--font-size-sm);
-		color: var(--text-secondary);
 	}
 
 	.status {
