@@ -1,5 +1,6 @@
-import { writable, get } from 'svelte/store';
+import { get } from 'svelte/store';
 import { setWebviewZoom } from '$lib/tauri/webview_zoom';
+import { createPersistedStore } from './persisted';
 
 const STORAGE_KEY = 'noor-ui-zoom';
 export const MIN = 0.5;
@@ -17,15 +18,9 @@ function clamp(value: number): number {
 	return Math.round(value * 100) / 100;
 }
 
-function readInitial(): number {
-	if (typeof localStorage === 'undefined') return DEFAULT;
-	const raw = localStorage.getItem(STORAGE_KEY);
-	if (raw == null) return DEFAULT;
-	const parsed = parseFloat(raw);
-	return Number.isFinite(parsed) ? clamp(parsed) : DEFAULT;
-}
-
-export const uiZoom = writable<number>(readInitial());
+export const uiZoom = createPersistedStore<number>(STORAGE_KEY, DEFAULT, {
+	parse: (raw) => clamp(parseFloat(raw)),
+});
 
 export async function applyZoom(factor: number): Promise<void> {
 	const value = clamp(factor);
@@ -35,9 +30,6 @@ export async function applyZoom(factor: number): Promise<void> {
 export function setZoom(factor: number): void {
 	const value = clamp(factor);
 	uiZoom.set(value);
-	if (typeof localStorage !== 'undefined') {
-		localStorage.setItem(STORAGE_KEY, String(value));
-	}
 	void applyZoom(value);
 }
 

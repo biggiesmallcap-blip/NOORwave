@@ -86,7 +86,7 @@
 	// already guarded by a `source.kind === 'local'` branch).
 	let artistId = $derived(source.kind === 'local' ? source.artistId : 0);
 
-	// Base path for the "See all" discography routes. Both the library and the
+	// Base path for the "View all" discography routes. Both the library and the
 	// TIDAL artist route have their own discography section pages backed by the
 	// same shared view, so the shelves link out in either mode.
 	let discographyBase = $derived(
@@ -993,7 +993,7 @@
 				</ol>
 				{#if totalPopularCandidates > 10}
 					<a class="show-all-btn" href={`${discographyBase}/discography/tracks`}>
-						See all {totalPopularCandidates}
+						View all {totalPopularCandidates} →
 					</a>
 				{/if}
 			</section>
@@ -1126,7 +1126,7 @@
 					<div class="shelf-head">
 						<h2 class="section-title">Albums</h2>
 						<span class="shelf-count">{filteredTidalFullAlbums.length}</span>
-						<a class="shelf-link" href={`${discographyBase}/discography/albums`}>See all</a>
+						<a class="shelf-link" href={`${discographyBase}/discography/albums`}>View all →</a>
 					</div>
 					<MediaRail
 						items={filteredTidalFullAlbums}
@@ -1144,7 +1144,7 @@
 					<div class="shelf-head">
 						<h2 class="section-title">Singles and EPs</h2>
 						<span class="shelf-count">{filteredTidalSinglesEPs.length}</span>
-						<a class="shelf-link" href={`${discographyBase}/discography/singles`}>See all</a>
+						<a class="shelf-link" href={`${discographyBase}/discography/singles`}>View all →</a>
 					</div>
 					<MediaRail
 						items={filteredTidalSinglesEPs}
@@ -1162,7 +1162,7 @@
 					<div class="shelf-head">
 						<h2 class="section-title">Compilations</h2>
 						<span class="shelf-count">{filteredTidalCompilations.length}</span>
-						<a class="shelf-link" href={`${discographyBase}/discography/compilations`}>See all</a>
+						<a class="shelf-link" href={`${discographyBase}/discography/compilations`}>View all →</a>
 					</div>
 					<MediaRail
 						items={filteredTidalCompilations}

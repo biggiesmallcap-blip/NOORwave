@@ -204,7 +204,7 @@
 	// exist anymore".
 	//
 	// Those surfaces lose nothing: the rail already scrolls the full module, and
-	// each editorial section carries a "See all" to the page that is the
+	// each editorial section carries a "View all" to the page that is the
 	// complete set. So the per-module button is shown only where it resolves.
 	let showViewAll = $derived(
 		(mediaKind !== 'video' || Boolean(onViewAll)) && (homeModules || Boolean(onViewAll)),
@@ -338,7 +338,7 @@
 					{#snippet actions()}
 						{#if canViewAll(mod)}
 							<button type="button" class="view-all-link" onclick={() => viewAll(mod)}>
-								View all -&gt;
+								View all →
 							</button>
 						{/if}
 					{/snippet}

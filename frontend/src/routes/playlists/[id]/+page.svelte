@@ -291,7 +291,7 @@
 </svelte:head>
 
 <div class="page-shell playlist-detail animate-in">
-	<button class="back-link" onclick={() => goBack('/playlists')}>Back</button>
+	<button class="back-link" type="button" onclick={() => goBack('/playlists')}>Back</button>
 
 	{#if error}
 		<EmptyState title="Playlist unavailable" copy={error}>

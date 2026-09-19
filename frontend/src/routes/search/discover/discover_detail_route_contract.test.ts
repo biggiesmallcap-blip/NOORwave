@@ -48,7 +48,7 @@ describe('View all is only offered where this route can resolve the id', () => {
 
 	test('editorial surfaces still offer a working way to see everything', () => {
 		// The section header links to the full route, which does exist.
-		expect(editorialPreview).toContain('linkLabel="See all"');
+		expect(editorialPreview).toContain('<SectionHeader {eyebrow} {title} variant="charts" level={2} {href} />');
 		expect(editorialPreview).toContain('{href}');
 	});
 });

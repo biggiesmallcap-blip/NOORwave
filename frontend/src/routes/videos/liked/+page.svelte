@@ -316,9 +316,7 @@
 	<header class="search-header">
 		<div class="search-tools">
 			<div class="tools-lead">
-				<a class="back-link" href="/videos">
-					<span aria-hidden="true">&lsaquo;</span> Videos
-				</a>
+				<a class="back-link" href="/videos">Videos</a>
 			</div>
 			<SearchField
 				bind:value={query}
@@ -415,9 +413,9 @@
 		<div class="video-grid">
 			{#each shown as video, index (video.song_key)}
 				<div
-					class="card-slot"
+					class="card-slot rise-in-card"
 					class:open={openVersions === video.song_key}
-					style={`--card-index: ${index % 24}`}
+					style={`--rise-index: ${index % 24}`}
 				>
 					<button
 						type="button"
@@ -543,17 +541,7 @@
 	}
 
 	.back-link {
-		display: inline-flex;
-		align-items: center;
-		gap: 4px;
 		align-self: flex-start;
-		color: var(--text-tertiary);
-		font-size: var(--font-size-sm);
-		text-decoration: none;
-	}
-
-	.back-link:hover {
-		color: var(--text-primary);
 	}
 
 	.header-action {
@@ -701,20 +689,6 @@
 	.card-slot {
 		position: relative;
 		min-width: 0;
-		/* The same rise the library's suggestion panels use, so a page of cards
-		   settles in rather than snapping into place. The index is per-batch
-		   (`index % 24`), not absolute: a page appended mid-scroll should
-		   cascade like the first one did, and an absolute index would just park
-		   every later card at the same maximum delay.
-
-		   `backwards`, not `both`: an animation of opacity/transform gives its
-		   element a stacking context for as long as it is applied, and `both`
-		   keeps it applied forever. That trapped the versions popout's z-index
-		   inside its own card, so it painted under the cards after it in the
-		   grid. Backwards fill covers the delay - the only part that needs it -
-		   and lets go once the card has landed. */
-		animation: card-in 300ms ease-out backwards;
-		animation-delay: calc(var(--card-index, 0) * 22ms);
 		transition: transform var(--motion-base);
 	}
 
@@ -734,20 +708,8 @@
 		z-index: 6;
 	}
 
-	@keyframes card-in {
-		from {
-			opacity: 0;
-			transform: translateY(8px);
-		}
-		to {
-			opacity: 1;
-			transform: none;
-		}
-	}
-
 	@media (prefers-reduced-motion: reduce) {
 		.card-slot {
-			animation: none;
 			transition: none;
 		}
 

@@ -54,7 +54,7 @@
 		data-section={`editorial-${pagePath}`}
 		style={`--rise-index: ${index}`}
 	>
-		<SectionHeader {eyebrow} {title} variant="charts" level={2} {href} linkLabel="See all" />
+		<SectionHeader {eyebrow} {title} variant="charts" level={2} {href} />
 		<TidalDiscoverShelves {modules} nested />
 	</section>
 {/if}

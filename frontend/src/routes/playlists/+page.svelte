@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { portal } from '$lib/actions/portal';
 	import { onDestroy, onMount } from 'svelte';
 	import type { Snapshot } from './$types';
 	import { captureScroll, restoreScroll } from '$lib/navigation/scroll';
@@ -1355,11 +1356,13 @@
 	<button
 		type="button"
 		class="drawer-backdrop"
+		use:portal
 		aria-label="Close editor"
 		onclick={() => closeEditor()}
 	></button>
 	<div
 		class="editor-drawer glass-panel"
+		use:portal
 		role="dialog"
 		aria-modal="true"
 		aria-labelledby="editor-title"

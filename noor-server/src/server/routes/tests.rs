@@ -5919,6 +5919,116 @@ async fn library_batch_delete_tidal_backed_track_without_session_keeps_local_row
 }
 
 #[tokio::test]
+async fn library_batch_delete_refuses_playlist_members_before_mutating_any_items() {
+    // Run both local-only and TIDAL-backed variants. No TIDAL session is
+    // installed: CONFLICT rather than UNAUTHORIZED proves the guard runs first.
+    for tidal_id in [None, Some(880077_i64)] {
+        let db = fresh_migrated_db();
+        let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+        let mut events = state.read().await.event_tx.subscribe();
+        let app = api_routes(state);
+        db.with_conn(|conn| {
+            conn.execute_batch(
+                "INSERT INTO artists (id, name) VALUES (1, 'Artist');
+                 INSERT INTO tracks (id, title, artist_id) VALUES
+                    (1, 'Unreferenced', 1), (2, 'In playlist', 1);
+                 INSERT INTO albums (id, title, artist_id) VALUES (1, 'Album', 1);
+                 INSERT INTO playlists (id, name, track_count) VALUES (1, 'Keep me', 1);
+                 INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (1, 2, 0);",
+            )?;
+            conn.execute("UPDATE tracks SET tidal_id = ?1 WHERE id = 2", [tidal_id])?;
+            Ok(())
+        })
+        .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/library/batch/delete")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"track_ids":[1,2],"album_ids":[1]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(body["message"].as_str().unwrap().contains("playlists"));
+        assert_eq!(
+            body["message"],
+            "Remove the selected tracks from their playlists before deleting them. Nothing was deleted."
+        );
+        db.with_conn(|conn| {
+            for (sql, expected) in [
+                ("SELECT COUNT(*) FROM tracks", 2_i64),
+                ("SELECT COUNT(*) FROM albums", 1),
+                ("SELECT COUNT(*) FROM playlist_tracks", 1),
+                ("SELECT track_count FROM playlists WHERE id = 1", 1),
+            ] {
+                assert_eq!(
+                    conn.query_row(sql, [], |row| row.get::<_, i64>(0))?,
+                    expected
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            events.try_recv().is_err(),
+            "a refused delete must not announce success"
+        );
+    }
+}
+
+#[tokio::test]
+async fn library_batch_delete_rolls_back_local_batch_on_other_constraint_failure() {
+    let db = fresh_migrated_db();
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+    let mut events = state.read().await.event_tx.subscribe();
+    let app = api_routes(state);
+    db.with_conn(|conn| {
+        conn.execute_batch(
+            "INSERT INTO artists (id, name) VALUES (1, 'Artist');
+             INSERT INTO tracks (id, title, artist_id) VALUES (1, 'First', 1), (2, 'Second', 1);
+             INSERT INTO listen_history (track_id, started_at) VALUES (2, datetime('now'));",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/batch/delete")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"track_ids":[1,2]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    db.with_conn(|conn| {
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| row
+                .get::<_, i64>(0))?,
+            2
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM listen_history", [], |row| row
+                .get::<_, i64>(0))?,
+            1
+        );
+        Ok(())
+    })
+    .unwrap();
+    assert!(events.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn playlist_routes_reject_non_positive_ids_and_track_ids() {
     let app = build_test_app().await;
     let smart_body =

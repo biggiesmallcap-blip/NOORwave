@@ -45,7 +45,7 @@
 				{@render actions()}
 			{/if}
 			{#if href}
-				<a class="section-link" {href}>{linkLabel} -&gt;</a>
+				<a class="section-link" {href}>{linkLabel} →</a>
 			{/if}
 		</div>
 	{/if}

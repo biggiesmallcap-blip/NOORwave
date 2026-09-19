@@ -4,6 +4,7 @@
   import { ApiError, api, type TidalHomeModule } from '$lib/api/client';
   import { tidalStatus } from '$lib/stores/tidal';
   import TidalDiscoverShelves from '$lib/components/search/TidalDiscoverShelves.svelte';
+  import PageHeader from '$lib/components/ui/PageHeader.svelte';
   import SpotifyMoodRail from '$lib/components/moods/SpotifyMoodRail.svelte';
   import { SPOTIFY_MOODS_BY_SLUG } from '$lib/components/moods/spotify-moods-data';
   import { getCachedMoodPage, putCachedMoodPage } from '$lib/stores/tidal-moods-cache';
@@ -89,10 +90,7 @@
 
 <div class="page">
   <button class="back-link" type="button" onclick={() => goBack('/moods')}>Back</button>
-  <header class="page-header">
-    <p class="eyebrow">TIDAL mood</p>
-    <h1>{title || '...'}</h1>
-  </header>
+  <PageHeader eyebrow="TIDAL mood" title={title || '...'} variant="editorial" />
 
   {#if spotifyCategory}
     <section class="spotify-block">
@@ -115,12 +113,8 @@
 </div>
 
 <style>
-  .page { max-width: var(--content-width); margin: 0 auto; padding: 32px 28px 96px; display: flex; flex-direction: column; gap: 24px; }
-  .back-link { align-self: flex-start; font-size: var(--font-size-sm); color: var(--text-secondary); text-decoration: none; }
-  .back-link:hover { color: var(--text-primary); text-decoration: underline; }
-  .page-header { display: flex; flex-direction: column; gap: 4px; }
-  .eyebrow { font-size: var(--font-size-xs); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-secondary); margin: 0; }
-  .page-header h1 { margin: 0; font-size: var(--font-size-3xl); font-weight: 800; }
+  .page { max-width: var(--content-width); margin: 0 auto; padding: var(--space-6) var(--space-6) calc(var(--space-7) * 2); display: flex; flex-direction: column; gap: var(--space-5); }
+  .back-link { align-self: flex-start; }
   .muted-line { margin: 0; font-size: var(--font-size-sm); color: var(--text-secondary); }
   .inline-link { background: none; border: none; padding: 0; font: inherit; color: var(--accent-line); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; margin-left: var(--space-1); }
   .spotify-block { display: flex; flex-direction: column; gap: var(--space-2); }

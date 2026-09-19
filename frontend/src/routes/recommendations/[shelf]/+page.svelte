@@ -198,16 +198,7 @@
 
 	.back-link {
 		align-self: flex-start;
-		background: none;
-		border: none;
-		padding: 0;
-		font: inherit;
-		font-size: var(--font-size-sm);
-		color: var(--text-secondary);
-		cursor: pointer;
 	}
-	.back-link:hover,
-	.back-link:focus-visible { color: var(--text-primary); }
 
 	.muted-line {
 		margin: 0;

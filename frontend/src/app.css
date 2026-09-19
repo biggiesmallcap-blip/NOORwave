@@ -840,9 +840,8 @@ input[type='checkbox'] { accent-color: var(--accent); }
    appended mid-scroll parks every card at the maximum delay instead of
    cascading like the first one did.
 
-   Existing copies of this pattern in videos/liked, VideoSetShelf and the
-   library mural predate these classes and are pinned by contract tests; see
-   FOLLOWUPS.md for the back-migration. */
+   Callers keep route-specific layout and hover transitions; this class owns
+   only the entrance animation. */
 .rise-in-shelf {
 	animation: rise-in-shelf 340ms ease-out both;
 	/* Capped, because the delay is dead time where the element is invisible.

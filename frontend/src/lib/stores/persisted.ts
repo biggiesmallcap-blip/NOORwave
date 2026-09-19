@@ -41,9 +41,10 @@ export function readPersisted<T>(
 	fallback: T,
 	parse?: (raw: string) => T | undefined,
 ): T {
-	if (typeof localStorage === 'undefined') return fallback;
 	let raw: string | null = null;
 	try {
+		// Accessing the storage property itself can throw on a blocked origin.
+		if (typeof localStorage === 'undefined') return fallback;
 		raw = localStorage.getItem(key);
 	} catch {
 		// Storage blocked (private mode, enterprise policy); use the default.
@@ -55,8 +56,8 @@ export function readPersisted<T>(
 }
 
 export function writePersisted(key: string, value: string): void {
-	if (typeof localStorage === 'undefined') return;
 	try {
+		if (typeof localStorage === 'undefined') return;
 		localStorage.setItem(key, value);
 	} catch {
 		// Quota exceeded or storage blocked; keep the choice in memory only.
