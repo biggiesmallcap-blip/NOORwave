@@ -180,8 +180,8 @@ describe('home recommendations shelf contract', () => {
 		expect(grid).toContain('border-radius: 50%');
 		expect(grid).toContain('.rec-tile.artist');
 		// Shared page chrome rather than a bespoke hero.
-		expect(grid).toContain('PageHeader');
-		expect(grid).toContain('variant="editorial"');
+		expect(grid).toContain('DetailHero');
+		expect(grid).toContain('variant="text"');
 		expect(grid).toContain('muted-line');
 		expect(grid).not.toContain('class="hero"');
 	});

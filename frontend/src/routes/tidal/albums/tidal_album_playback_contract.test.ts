@@ -9,7 +9,6 @@ describe('TIDAL album playback contract', () => {
 		expect(source).toContain('let loadSeq = 0;');
 		expect(source).toContain('async function load(id: number)');
 		expect(source).toContain('const seq = ++loadSeq;');
-		expect(source).toContain('failedArtworkUrls = {};');
 		expect(source).toContain('const res = await api.getTidalAlbumTracks(id);');
 		expect(source).toContain('if (seq !== loadSeq) return;');
 		expect(source).toContain('if (seq === loadSeq) loading = false;');

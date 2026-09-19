@@ -5,10 +5,11 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(here, '[id]', '+page.svelte'), 'utf8');
+const detailHeroSource = readFileSync(join(here, '../../lib/components/ui/DetailHero.svelte'), 'utf8');
 
-function cssBlock(selector: string): string {
+function cssBlockFrom(input: string, selector: string): string {
 	const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-	const match = source.match(new RegExp(`${escaped}\\s*\\{(?<body>[^}]*)\\}`));
+	const match = input.match(new RegExp(`${escaped}\\s*\\{(?<body>[^}]*)\\}`));
 	if (!match?.groups?.body) {
 		throw new Error(`Missing CSS block for ${selector}`);
 	}
@@ -17,17 +18,13 @@ function cssBlock(selector: string): string {
 
 describe('album page layout contracts', () => {
 	test('keeps the artwork backdrop subtle behind album and artist metadata', () => {
-		const backdrop = cssBlock('.hero-backdrop');
-		expect(backdrop).toContain('saturate(1.08)');
-		expect(backdrop).toContain('brightness(0.72)');
+		const backdrop = cssBlockFrom(detailHeroSource, '.backdrop');
 		expect(backdrop).toContain('opacity: 0.32');
-		expect(backdrop).not.toContain('saturate(1.6)');
-		expect(backdrop).not.toContain('opacity: 0.7');
 
-		const veil = cssBlock('.hero-veil');
-		expect(veil).toContain('rgba(11, 11, 15, 0.62)');
-		expect(veil).toContain('rgba(11, 11, 15, 0.78)');
-		expect(veil).not.toContain('rgba(0,0,0,0.08)');
+		const backdropArt = cssBlockFrom(detailHeroSource, '.backdrop :global(.backdrop-art)');
+		expect(backdropArt).toContain('saturate(1.08)');
+		expect(backdropArt).toContain('brightness(0.72)');
+		expect(backdropArt).not.toContain('saturate(1.6)');
 	});
 
 	test('loads album Spotify stats and passes album track world plays to TrackRow', () => {
@@ -64,12 +61,14 @@ describe('album page layout contracts', () => {
 
 	test('routes album artwork through TIDAL fallback sizes', () => {
 		expect(source).toContain('tidalArtworkFallbackSizes');
-		expect(source).toContain('let heroArtworkSrc = $derived(artworkCandidate(header()?.artwork_url, 640));');
-		expect(source).toContain('let heroBackdropSrc = $derived(artworkCandidate(header()?.artwork_url, 1280));');
+		expect(source).toContain('<DetailHero');
+		expect(source).toContain('artwork={h.artwork_url}');
+		expect(source).toContain('backdrop={h.artwork_url}');
 		expect(source).toContain('const albumArt = artworkCandidate(album.artwork_url, 320)');
-		expect(source).toContain('onerror={() => markArtworkFailed(heroArtworkSrc)}');
+		expect(detailHeroSource).toContain('size={640}');
+		expect(detailHeroSource).toContain('size={1280}');
 		expect(source).not.toContain('style="background-image: url({h.artwork_url});"');
-		expect(source).not.toContain('src={h.artwork_url}');
+		expect(source).not.toContain('<img src={h.artwork_url}');
 		expect(source).not.toContain('src={album.artwork_url}');
 	});
 

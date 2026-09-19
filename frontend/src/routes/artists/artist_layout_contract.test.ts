@@ -7,6 +7,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 // The artist view markup, styles, and load logic live in the shared
 // ArtistDetail component now; the route's +page.svelte is a thin wrapper.
 const source = readFileSync(join(here, 'ArtistDetail.svelte'), 'utf8');
+const detailHeroSource = readFileSync(join(here, '../../lib/components/ui/DetailHero.svelte'), 'utf8');
 const discographySource = readFileSync(join(here, 'ArtistDiscographySection.svelte'), 'utf8');
 const discographyHelper = readFileSync(join(here, 'artist_discography.ts'), 'utf8');
 
@@ -21,14 +22,12 @@ function cssBlock(selector: string): string {
 
 describe('artist page layout contracts', () => {
 	test('keeps the artist portrait top-aligned as the biography expands', () => {
-		const hero = cssBlock('.hero');
-		expect(hero).toContain('align-items: flex-start');
-
-		const body = cssBlock('.hero-body');
-		expect(body).toContain('align-items: flex-start');
-
-		const portraitWrap = cssBlock('.hero-portrait-wrap');
-		expect(portraitWrap).toContain('align-self: flex-start');
+		expect(source).toContain('<DetailHero');
+		expect(source).toContain('align="start"');
+		expect(detailHeroSource).toContain("align?: 'start' | 'end';");
+		expect(detailHeroSource).toContain("class:top-aligned={align === 'start'}");
+		expect(detailHeroSource).toMatch(/\.top-aligned \.inner\s*\{[^}]*align-items: flex-start/);
+		expect(detailHeroSource).toMatch(/\.top-aligned \.cover\s*\{[^}]*align-self: flex-start/);
 	});
 
 	test('keeps expanded biography readable without pushing the page too far down', () => {

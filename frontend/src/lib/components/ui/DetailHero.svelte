@@ -10,6 +10,7 @@
 		fallbackText = 'NOOR',
 		variant = 'standard',
 		shape = 'square',
+		align = 'end',
 		label,
 		oncontextmenu,
 		cover,
@@ -25,6 +26,7 @@
 		fallbackText?: string;
 		variant?: 'standard' | 'immersive' | 'text';
 		shape?: 'square' | 'round';
+		align?: 'start' | 'end';
 		label?: string;
 		oncontextmenu?: (event: MouseEvent) => void;
 		cover?: Snippet;
@@ -42,6 +44,7 @@
 	class:immersive={variant === 'immersive'}
 	class:text-only={variant === 'text'}
 	class:round={shape === 'round'}
+	class:top-aligned={align === 'start'}
 	role="group"
 	aria-label={label ?? `${title} header`}
 	oncontextmenu={oncontextmenu}
@@ -128,7 +131,7 @@
 		position: absolute;
 		inset: -4rem;
 		z-index: -2;
-		opacity: 0.55;
+		opacity: 0.32;
 	}
 
 	.backdrop::after {
@@ -148,7 +151,7 @@
 		width: 100%;
 		height: 100%;
 		object-fit: cover;
-		filter: blur(64px) saturate(1.35);
+		filter: blur(64px) saturate(1.08) brightness(0.72);
 		transform: scale(1.16);
 	}
 
@@ -160,6 +163,10 @@
 	}
 
 	.text-only .inner {
+		align-items: flex-start;
+	}
+
+	.top-aligned .inner {
 		align-items: flex-start;
 	}
 
@@ -181,6 +188,10 @@
 
 	.round .cover {
 		border-radius: 50%;
+	}
+
+	.top-aligned .cover {
+		align-self: flex-start;
 	}
 
 	.cover :global(.cover-art),

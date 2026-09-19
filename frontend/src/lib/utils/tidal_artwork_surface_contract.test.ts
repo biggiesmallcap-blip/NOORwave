@@ -19,6 +19,8 @@ const tidalArtistRoute = source('routes/tidal/artists/[id]/+page.svelte');
 const tidalAlbumRoute = source('routes/tidal/albums/[id]/+page.svelte');
 const duplicatesRoute = source('routes/duplicates/+page.svelte');
 const genreInterior = source('lib/components/Genre/GenreInterior.svelte');
+const detailHero = source('lib/components/ui/DetailHero.svelte');
+const artworkImage = source('lib/components/ui/ArtworkImage.svelte');
 
 describe('TIDAL artwork surface contracts', () => {
 	test('player and app shell artwork uses allowed sizes with error fallback', () => {
@@ -52,12 +54,18 @@ describe('TIDAL artwork surface contracts', () => {
 		expect(tidalArtistRoute).toContain("source={{ kind: 'tidal', tidalArtistId }}");
 		expect(tidalArtistRoute).not.toContain('src={heroPortrait}');
 
-		expect(tidalAlbumRoute).toContain('tidalArtworkFallbackSizes');
-		expect(tidalAlbumRoute).toContain('let heroArtworkSrc = $derived(artworkCandidate(header()?.artwork_url, 640));');
-		expect(tidalAlbumRoute).toContain('let heroBackdropSrc = $derived(artworkCandidate(header()?.artwork_url, 1280));');
-		expect(tidalAlbumRoute).toContain('onerror={() => markArtworkFailed(heroArtworkSrc)}');
+		expect(tidalAlbumRoute).toContain("import DetailHero from '$lib/components/ui/DetailHero.svelte'");
+		expect(tidalAlbumRoute).toContain('artwork={h.artwork_url}');
+		expect(tidalAlbumRoute).toContain('backdrop={h.artwork_url}');
+		expect(detailHero).toContain("import ArtworkImage from './ArtworkImage.svelte'");
+		expect(detailHero).toContain('size={640}');
+		expect(detailHero).toContain('size={1280}');
+		expect(artworkImage).toContain('tidalArtworkFallbackSizes(source, size)');
+		expect(artworkImage).toContain('failedAttempts += 1;');
+		expect(artworkImage).toContain('if (srcKey === lastSrcKey && size === lastSize) return;');
+		expect(artworkImage).toContain('failedAttempts = 0;');
 		expect(tidalAlbumRoute).not.toContain('style="background-image: url({h.artwork_url});"');
-		expect(tidalAlbumRoute).not.toContain('src={h.artwork_url}');
+		expect(tidalAlbumRoute).not.toContain('<img src={h.artwork_url}');
 	});
 
 	test('duplicate and genre track thumbnails use ArtworkImage fallbacks', () => {

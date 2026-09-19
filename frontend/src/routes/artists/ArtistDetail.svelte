@@ -771,6 +771,7 @@
 			fallbackText={artistInitials(h.name)}
 			variant="immersive"
 			shape="round"
+			align="start"
 		>
 			{#snippet cover()}
 					{#if heroPortraitSrc}
