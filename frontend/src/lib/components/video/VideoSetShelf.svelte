@@ -29,7 +29,7 @@
 	} = $props();
 </script>
 
-<section class="set-shelf" style={`--shelf-index: ${index}`}>
+<section class="set-shelf rise-in-shelf" style={`--rise-index: ${index}`}>
 	<header class="set-head">
 		<div class="set-titles">
 			{#if eyebrow}<p class="eyebrow">{eyebrow}</p>{/if}
@@ -59,29 +59,6 @@
 		grid-template-columns: minmax(0, 1fr);
 		min-width: 0;
 		gap: 10px;
-		/* Shelves are built one at a time and land across several polls, so each
-		   one eases itself in on mount. `--shelf-index` (set by the route) lets a
-		   batch that arrives together cascade rather than appear as one block;
-		   the same rise the library's suggestion panels use. */
-		animation: shelf-in 340ms ease-out both;
-		animation-delay: calc(var(--shelf-index, 0) * 70ms);
-	}
-
-	@keyframes shelf-in {
-		from {
-			opacity: 0;
-			transform: translateY(10px);
-		}
-		to {
-			opacity: 1;
-			transform: none;
-		}
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		.set-shelf {
-			animation: none;
-		}
 	}
 
 	.set-head {

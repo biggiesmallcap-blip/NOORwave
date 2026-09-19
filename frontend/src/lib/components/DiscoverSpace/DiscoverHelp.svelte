@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { portal } from '$lib/actions/portal';
 	let open = $state(false);
 
 	function close() { open = false; }
@@ -21,10 +22,11 @@
 {#if open}
 	<div
 		class="help-backdrop"
+		use:portal
 		onclick={close}
 		role="presentation"
 	></div>
-	<div class="help-panel" role="dialog" aria-label="Sound Space help">
+	<div class="help-panel" use:portal role="dialog" aria-label="Sound Space help">
 		<div class="panel-head">
 			<div class="panel-title">
 				<span class="panel-eyebrow">Sound Space</span>

@@ -2,6 +2,7 @@
   import { onMount, untrack } from 'svelte';
   import { ApiError, api, type TidalMoodCategory } from '$lib/api/client';
   import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+  import PageHeader from '$lib/components/ui/PageHeader.svelte';
   import { tidalStatus } from '$lib/stores/tidal';
   import { openContextMenu } from '$lib/stores/context_menu';
   import { goto } from '$app/navigation';
@@ -122,11 +123,12 @@
 <svelte:head><title>Moods . NOOR</title></svelte:head>
 
 <div class="page">
-  <header class="page-header">
-    <p class="eyebrow">TIDAL</p>
-    <h1>Moods &amp; Activities</h1>
-    <p class="sub">Editorial categories from TIDAL. Click a tile to explore.</p>
-  </header>
+  <PageHeader
+    eyebrow="TIDAL"
+    title="Moods & Activities"
+    subtitle="Editorial categories from TIDAL. Click a tile to explore."
+    variant="editorial"
+  />
 
   {#if viewState === 'loading'}
     <p class="muted-line">Loading moods...</p>
@@ -162,11 +164,7 @@
 </div>
 
 <style>
-  .page { max-width: var(--content-width); margin: 0 auto; padding: 32px 28px 96px; display: flex; flex-direction: column; gap: 24px; }
-  .page-header { display: flex; flex-direction: column; gap: 4px; }
-  .eyebrow { font-size: var(--font-size-xs); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-secondary); margin: 0; }
-  .page-header h1 { margin: 0; font-size: var(--font-size-3xl); font-weight: 800; }
-  .page-header .sub { margin: 0; font-size: var(--font-size-sm); color: var(--text-secondary); }
+  .page { max-width: var(--content-width); margin: 0 auto; padding: var(--space-6) var(--space-6) calc(var(--space-7) * 2); display: flex; flex-direction: column; gap: var(--space-5); }
   .muted-line { margin: 0; font-size: var(--font-size-sm); color: var(--text-secondary); }
   .inline-link { background: none; border: none; padding: 0; font: inherit; color: var(--accent-line); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; margin-left: var(--space-1); }
 

@@ -4,6 +4,7 @@ import { describe, expect, test } from 'vitest';
 const PAGE = 'src/routes/videos/liked/+page.svelte';
 const VIDEOS_PAGE = 'src/routes/videos/+page.svelte';
 const CLIENT = 'src/lib/api/client.ts';
+const APP_CSS = 'src/app.css';
 
 describe('liked videos contract', () => {
 	test('the two video pages link to each other from mirrored places', () => {
@@ -165,15 +166,18 @@ describe('liked videos contract', () => {
 
 	test('the wall eases in the way the library suggestion panels do', () => {
 		const page = readFileSync(PAGE, 'utf8');
-		expect(page).toContain('@keyframes card-in');
-		expect(page).toContain('@media (prefers-reduced-motion: reduce)');
+		const appCss = readFileSync(APP_CSS, 'utf8');
+		expect(page).toContain('class="card-slot rise-in-card"');
+		expect(page).not.toContain('@keyframes card-in');
+		expect(appCss).toContain('@keyframes rise-in-card');
+		expect(appCss).toContain('@media (prefers-reduced-motion: reduce)');
 		// Per-batch index, so a page appended mid-scroll cascades like the first.
-		expect(page).toContain('style={`--card-index: ${index % 24}`}');
-		expect(page).toContain('animation-delay: calc(var(--card-index, 0) * 22ms);');
+		expect(page).toContain('style={`--rise-index: ${index % 24}`}');
+		expect(appCss).toContain('animation-delay: calc(min(var(--rise-index, 0), 11) * 22ms);');
 		// `backwards`, not `both`. A filled opacity/transform animation keeps a
 		// stacking context alive forever, which trapped the versions popout's
 		// z-index inside its own card and painted it under later cards.
-		expect(page).toContain('animation: card-in 300ms ease-out backwards;');
+		expect(appCss).toContain('animation: rise-in-card 300ms ease-out backwards;');
 		expect(page).toContain('.card-slot.open {');
 		expect(page).toContain('class:open={openVersions === video.song_key}');
 	});

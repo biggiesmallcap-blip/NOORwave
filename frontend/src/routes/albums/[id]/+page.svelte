@@ -514,7 +514,7 @@
 								e.stopPropagation();
 								openContextMenu(e, buildArtistMenu({ id: h.artist_id, name: h.artist_name }, { isLocal: true }), h.artist_name);
 							}}
-						>Show all</a>
+						>View all →</a>
 					{/if}
 				</div>
 				<MediaRail items={otherAlbums} getKey={(a) => a.id ?? a.title}>

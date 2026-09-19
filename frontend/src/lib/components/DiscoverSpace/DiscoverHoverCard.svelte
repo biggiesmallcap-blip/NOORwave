@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { portal } from '$lib/actions/portal';
 	import { REASON_LABELS, REASON_EXPLANATIONS, SOURCE_LABELS } from './discover_space_story';
 	import type { DiscoverTrackNode } from './discover_space_types';
 
@@ -34,6 +35,7 @@
 	<div
 		bind:this={cardEl}
 		class="hover-card"
+		use:portal
 		style={style}
 		role="tooltip"
 		aria-label="{node.title} details"

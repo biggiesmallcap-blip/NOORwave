@@ -382,7 +382,7 @@
   }
 
   async function playLibraryTrack(track: AudioSearchResult) {
-    await playTrackNow(track.id)
+    await playTracksInContext((audioResults ?? [track]).map((result) => result.id), track.id)
   }
 
   function resetProviderLoading() {

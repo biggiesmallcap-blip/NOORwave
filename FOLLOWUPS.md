@@ -10,25 +10,6 @@ back to the PR or commit that flagged it.
 
 ## Open
 
-### motion: migrate the three pre-existing rise animations onto the shared class
-
-`app.css` now carries `.rise-in-shelf` and `.rise-in-card`, and Home uses them.
-Three older copies of the same animation predate the extraction and still
-hand-roll it with drifted values: `videos/liked/+page.svelte` (`card-in`,
-300ms/8px/22ms/backwards), `video/VideoSetShelf.svelte` (`shelf-in`,
-340ms/10px/70ms/both) and `library/+page.svelte` (`home-mural-panel-in`,
-360ms/10px/70ms/both).
-
-They were left alone because `liked-videos-contract.test.mjs` and
-`video-editorial-browse-contract.test.mjs` assert the exact declarations inside
-those files, and rewriting the tests was out of scope for the home layout work.
-Migrating means updating those assertions to check the shared class is applied
-plus the `--rise-index` wiring, rather than the keyframe text. The `backwards`
-fill and the per-batch modulo cap must survive the move - both are load-bearing
-and the reasons are recorded in the `app.css` comment.
-
-Spawned by: the Part 8 motion extraction in the home layout work.
-
 ### videos: remaining editorial discovery ideas
 
 Shipped so far: daily-picks mural, genre shelves, album-love, one-step-out
@@ -440,31 +421,11 @@ Remaining to fully standardize:
 - `genres/+page.svelte` builds its queue via a bespoke `replacePlaybackQueue` +
   shuffle + automix dance; route it through the shared helpers so genre play
   matches everywhere else.
-- `search/+page.svelte` audio-result rows still call `playTrackNow(id)` (single
-  track); make them play in context of the result list.
 - The library Tracks list uses a bespoke inline `.track-row`; the rest of the app
   uses the shared `TrackRow.svelte`. Unifying them would collapse a lot of
   duplicated markup/keyboard logic, but it is a larger refactor — do it on its
   own branch with screenshot diffing.
 - Spawned by: commit on branch `fix/tidal-mix-real-queue-rows` (play standardization pass)
-
-### fix: portal all remaining fixed-position modals out of .workspace
-
-Root cause found while fixing the album detail popup: `.app-shell` sets
-`transform: translateZ(0)` and, when a wallpaper is active, the scrolling
-`.workspace` gets a `backdrop-filter`. Both establish a containing block for
-`position: fixed` descendants, so a fixed modal rendered inside the page is
-positioned against the scrolling workspace and jumps to the content's top origin
-once you scroll down (looks like it "appears at the top of the page"). Added a
-`portal` action ($lib/actions/portal.ts) and applied it to AlbumDetailPopup and
-the library track-detail modal.
-
-Sweep the other fixed modals/overlays that render inside the page and apply
-`use:portal` (or confirm they already mount at root): playlists rule-editor
-drawer, search overlays, any other `.modal-backdrop`/popup. The context-menu
-store should be checked too (cursor-anchored menus would be offset under the same
-ancestors).
-- Spawned by: commit on branch `fix/tidal-mix-real-queue-rows` (popup portal fix)
 
 ### feat: make the automix live scorer respect genre confidence
 
@@ -1032,29 +993,19 @@ that a no-cache-row request is now sub-second is untested. It needs the cache ro
 deleted out of the DB first, which is why it was skipped.
 Spawned by: random tracks pop-in 2026-07-27; partly verified 2026-07-30
 
-### css: audit shared chrome across routes before adding more of it
+### css: migrate route spacing literals onto the shared tokens
 
-Home and its new detail routes were brought onto one vocabulary this session
-(one SectionHeader, one rail primitive, two spacing values, one rise-in variant
-pair, one album popup). The rest of the app has not had that pass, and the
-divergence is only obvious once two surfaces sit next to each other.
+The shared-chrome audit is complete: page headers, back buttons, asset links,
+context menus and View-all affordances now have a consistent contract. The mood
+index/detail pair was the first spacing migration.
 
-Worth auditing, per element rather than per route, and standardising on whatever
-the Search page already does since that is the design reference:
-
-- page headers: `PageHeader` variants vs hand-rolled heroes vs bare `<h1>`
-- back buttons: `< Back` / `<- Back` / `goBack(fallback)` vs a plain `goto`, and
-  the two different glyphs currently in use
-- links: which asset references are `<a href>` vs `<button onclick>`, which get
-  hover underlines, and which are missing the shared context menu
-- spacing: raw px literals still in place where `--space-*` belongs
-- "View all" affordances: label, arrow glyph, and whether the target route
-  actually resolves (several editorial ones 404 by design of the upstream id)
-
-Do it as a read-only audit first that lists divergences per element; the fixes
-are individually trivial but touch a lot of files, so they want their own commit
-per element rather than one sweep.
-Spawned by: home layout and Last.fm run 2026-07-30
+The remaining route styles still contain hundreds of raw `padding`, `margin`
+and `gap` pixel values. Some are legitimate micro-spacing, so do this
+opportunistically per route: replace layout rhythm with `--space-*`, preserve
+intrinsic icon and hairline dimensions, and visually check each touched route.
+A global replacement would erase deliberate 1-2px alignment adjustments.
+Spawned by: home layout and Last.fm run 2026-07-30; narrowed by polish audit
+2026-09-19.
 
 ### playback: a failed DASH download is delivered to the decoder as clean EOF
 
@@ -1119,28 +1070,25 @@ in the same commit (the Svelte compiler fails CI on the orphan).
 
 `createPersistedStore` (`src/lib/stores/persisted.ts`) now owns the
 guarded-localStorage idiom, and `library.ts` / `trending-prefs.ts` /
-`playlists` use it. Still hand-rolled: `palette.ts`, `wallpaper.ts`,
-`uiZoom.ts`, `remote/sleep_timer.ts`, `remote/haptics_settings.ts`,
+`playlists` / `uiZoom.ts` use it. Still hand-rolled: `palette.ts`, `wallpaper.ts`,
+`remote/sleep_timer.ts`, `remote/haptics_settings.ts`,
 `playlist_artwork_cache.ts`, plus the ad-hoc `localStorage` calls in
 `videos/+page.svelte`, `duplicates/+page.svelte`, `search/+page.svelte` and
 `+layout.svelte`.
 
-One of them is an actual latent bug rather than just duplication:
-`uiZoom.ts:20` reads `localStorage` at module init behind a `typeof` guard but
-with no `try/catch`, so storage that is present-but-blocked (enterprise policy,
-some private modes) throws out of module init - the same class of boot crash
-the write-side guard exists to prevent.
+### noor-server: define deletion policy for history and playback references
 
-### noor-server: deleting a track that sits in a playlist may violate an FK
+Playlist membership now explicitly refuses the whole batch before any TIDAL
+mutation. Local deletes are transactional and failures return an error instead
+of reporting success. Regression tests cover both protections.
 
-`library_batch_routes.rs` `batch_delete_items` runs `DELETE FROM tracks WHERE
-id = ?`. `playlist_tracks.track_id` references `tracks(id)` with no `ON DELETE`
-action, and `PRAGMA foreign_keys = ON` is set for every connection
-(`db/mod.rs:17`), so that delete should fail for any track that is a member of
-a playlist. Not observed in the wild - found while reading the schema for the
-playlist CRUD work. Needs a test to confirm, then either a cascade, a
-pre-delete cleanup of `playlist_tracks`, or a deliberate refusal with a clear
-message.
+Other restrictive references remain: listen history, shuffle state, duplicate
+membership, DJ transition events, queued/current tracks, and tracks in a deleted
+album. Decide whether removing a favourite should retain the catalog row or
+refuse deletion before contacting TIDAL. Do not silently purge listening history
+to make a foreign key pass. Today a failure rolls back the local deletes, but
+remote unfavourites may already have completed.
+Spawned by: polish pass, playlist-delete regression test, 2026-09-19.
 
 ### playlists: creating a playlist on TIDAL from inside NOORwave
 

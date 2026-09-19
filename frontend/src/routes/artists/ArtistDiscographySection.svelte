@@ -279,15 +279,7 @@
 	}
 
 	.back-link {
-		display: inline-flex;
 		margin-bottom: var(--space-4);
-		color: var(--text-secondary);
-		text-decoration: none;
-		font-size: var(--font-size-sm);
-	}
-
-	.back-link:hover {
-		color: var(--text-primary);
 	}
 
 	.page-head {

@@ -156,25 +156,46 @@ pub(super) async fn batch_add_to_playlist(
 pub(super) async fn batch_delete_items(
     State(state): State<SharedState>,
     Json(payload): Json<BatchDeleteRequest>,
-) -> Result<Json<Value>, StatusCode> {
+) -> Result<(StatusCode, Json<Value>), StatusCode> {
     let track_ids = dedupe_positive_ids(payload.track_ids.as_deref().unwrap_or(&[]));
     let album_ids = dedupe_positive_ids(payload.album_ids.as_deref().unwrap_or(&[]));
     if track_ids.is_empty() && album_ids.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let (track_pairs, album_pairs) = {
+    let (track_pairs, album_pairs, has_playlist_members) = {
         let state = state.read().await;
         state
             .db
             .with_conn(|conn| {
+                let mut membership = conn
+                    .prepare("SELECT EXISTS(SELECT 1 FROM playlist_tracks WHERE track_id = ?1)")?;
+                let mut has_playlist_members = false;
+                for track_id in &track_ids {
+                    if membership.query_row([track_id], |row| row.get::<_, bool>(0))? {
+                        has_playlist_members = true;
+                        break;
+                    }
+                }
                 Ok((
                     queries::get_track_tidal_ids(conn, &track_ids)?,
                     queries::get_album_tidal_ids(conn, &album_ids)?,
+                    has_playlist_members,
                 ))
             })
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
+
+    // Removing a library favourite must not silently edit a playlist. Refuse
+    // the whole selection before contacting TIDAL, including mixed batches.
+    if has_playlist_members {
+        return Ok((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "message": "Remove the selected tracks from their playlists before deleting them. Nothing was deleted."
+            })),
+        ));
+    }
 
     let remote_track_ids: Vec<i64> = track_pairs.iter().map(|(_, tidal_id)| *tidal_id).collect();
     let remote_album_ids: Vec<i64> = album_pairs.iter().map(|(_, tidal_id)| *tidal_id).collect();
@@ -233,25 +254,34 @@ pub(super) async fn batch_delete_items(
     };
     let deleted_track_ids = track_ids.clone();
     let outcome = match db.with_conn(|conn| {
+        // A later constraint failure must not leave earlier local deletions
+        // committed. Reconciliation owns its own transaction below.
+        let tx = conn.unchecked_transaction()?;
         for local_id in &track_ids {
-            conn.execute(
+            tx.execute(
                 "DELETE FROM tracks WHERE id = ?1",
                 rusqlite::params![local_id],
             )?;
         }
         for local_id in &album_ids {
-            conn.execute(
+            tx.execute(
                 "DELETE FROM albums WHERE id = ?1",
                 rusqlite::params![local_id],
             )?;
         }
+        tx.commit()?;
         let outcome = player::reconcile_after_track_delete(conn, &deleted_track_ids)?;
         Ok::<player::ReconcileOutcome, anyhow::Error>(outcome)
     }) {
         Ok(o) => o,
         Err(e) => {
             warn!("Batch delete: local DB cleanup failed: {e}");
-            player::ReconcileOutcome::default()
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "message": "Local deletion failed. Refresh your library before retrying."
+                })),
+            ));
         }
     };
 
@@ -266,14 +296,17 @@ pub(super) async fn batch_delete_items(
         }
     }
 
-    Ok(Json(json!({
-        "requested_tracks": track_ids.len(),
-        "requested_albums": album_ids.len(),
-        "removed_tracks": removed_tracks,
-        "removed_albums": removed_albums,
-        "resolved_tracks": track_pairs.len(),
-        "resolved_albums": album_pairs.len()
-    })))
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "requested_tracks": track_ids.len(),
+            "requested_albums": album_ids.len(),
+            "removed_tracks": removed_tracks,
+            "removed_albums": removed_albums,
+            "resolved_tracks": track_pairs.len(),
+            "resolved_albums": album_pairs.len()
+        })),
+    ))
 }
 
 pub(super) async fn batch_set_genre(

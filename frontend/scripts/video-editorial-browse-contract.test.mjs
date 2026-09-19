@@ -7,6 +7,7 @@ const source = read('../src/routes/videos/+page.svelte');
 const dock = read('../src/lib/components/video/VideoDock.svelte');
 const store = read('../src/lib/stores/video_session.ts');
 const shelves = read('../src/lib/components/search/TidalDiscoverShelves.svelte');
+const appCss = read('../src/app.css');
 
 describe('Videos editorial browse state', () => {
 	test('hero slot arbitration: the layer yields only while the player owns the stage', () => {
@@ -62,10 +63,12 @@ describe('Videos editorial browse state', () => {
 		// shelf owns its entrance. The index only spaces out a batch that shows
 		// up together; daily picks holds slot 0 whenever it is present.
 		const shelf = read('../src/lib/components/video/VideoSetShelf.svelte');
-		expect(shelf).toContain('animation: shelf-in 340ms ease-out both;');
-		expect(shelf).toContain('animation-delay: calc(var(--shelf-index, 0) * 70ms);');
-		expect(shelf).toContain('@keyframes shelf-in');
-		expect(shelf).toContain('@media (prefers-reduced-motion: reduce)');
+		expect(shelf).toContain('class="set-shelf rise-in-shelf"');
+		expect(shelf).toContain('style={`--rise-index: ${index}`}');
+		expect(shelf).not.toContain('@keyframes shelf-in');
+		expect(appCss).toContain('animation: rise-in-shelf 340ms ease-out both;');
+		expect(appCss).toContain('animation-delay: calc(min(var(--rise-index, 0), 8) * 70ms);');
+		expect(appCss).toContain('@media (prefers-reduced-motion: reduce)');
 		expect(source).toContain('index={dailySet ? i + 1 : i}');
 	});
 
