@@ -143,16 +143,6 @@ test (decode + resample correctness) that CI cannot prove.
   and the noor-mix rubato dep.
 - Spawned by: Dependabot #144 triage, deps/cargo-major-bumps branch.
 
-### fix: cross-family genre tag contamination (psytrance tagged Psychedelic Rock)
-
-Last.fm tags like "Psychedelic Rock" (~0.29 confidence) sit on psytrance acts
-(1200 Micrograms, Infected Mushroom, Khruangbin). The confidence-floor rowset
-now keeps them out of search, but the tags remain in track_genres and leak via
-the rescue branch when they are a track's strongest tag. Needs contradiction
-logic (incompatible-family suppression) in the enrichment scorer. Context in
-docs/genre-data-quality-2026-05-07.md.
-- Spawned by: search audit, genre:rock fix session.
-
 ### feat: order genre-filtered search results by matched-tag confidence
 
 Filtered audio search ranks by is_favorite/play_count only; a barely-rock
@@ -409,19 +399,6 @@ Remaining to fully standardize:
   duplicated markup/keyboard logic, but it is a larger refactor — do it on its
   own branch with screenshot diffing.
 - Spawned by: commit on branch `fix/tidal-mix-real-queue-rows` (play standardization pass)
-
-### feat: make the automix live scorer respect genre confidence
-
-The genre-bleed root-cause fix (genre/scorer.rs count-saturation + similarity
-weighting by track_genres.confidence) only reaches `compute_track_similarity`.
-The separate automix live scorer (commit decbebd1: `playback/automix.rs`,
-`smart/taste_vector.rs`) weights genre match by genre rarity (IDF) but does NOT
-fold in confidence, so a single-vote MusicBrainz mis-tag (XXXTENTACION "jazz")
-can still bias automix genre matching even after re-enrichment lowers its
-confidence. Audit that path and weight its genre contribution by
-`track_genres.confidence` (clamped) the same way similarity now does, so the two
-genre re-rankers agree.
-- Spawned by: data-layer genre-confidence fix on branch `fix/tidal-mix-real-queue-rows`
 
 ### chore: persist raw MusicBrainz tag count so confidence is backfillable without re-querying
 
@@ -997,16 +974,6 @@ treat "muted but nobody asked for a pause, for 15s, with no progress" as a
 stall. Wants care - a false positive here force-advances during a legitimate
 pause, which is worse than the bug.
 Spawned by: end-of-track playback stall investigation 2026-07-30
-
-### frontend: back-migrate the remaining hand-rolled persisted stores
-
-`createPersistedStore` (`src/lib/stores/persisted.ts`) now owns the
-guarded-localStorage idiom, and `library.ts` / `trending-prefs.ts` /
-`playlists` / `uiZoom.ts` use it. Still hand-rolled: `palette.ts`, `wallpaper.ts`,
-`remote/sleep_timer.ts`, `remote/haptics_settings.ts`,
-`playlist_artwork_cache.ts`, plus the ad-hoc `localStorage` calls in
-`videos/+page.svelte`, `duplicates/+page.svelte`, `search/+page.svelte` and
-`+layout.svelte`.
 
 ### playlists: creating a playlist on TIDAL from inside NOORwave
 

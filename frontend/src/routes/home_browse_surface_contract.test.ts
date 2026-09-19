@@ -67,9 +67,10 @@ describe('Home owns browse, /search owns searching', () => {
 		// rotate the same way over a longer list. Only the offset differs.
 		expect(search).toContain('rotatingWindow(localPlaylists, PLAYLIST_WINDOW, playlistRotation)');
 		expect(search).not.toContain('localPlaylists[(start + i) % total]');
-		// Persisting the offset must never be able to take the page down; a
-		// full localStorage throwing here would brick the route.
-		expect(search).toMatch(/localStorage\.setItem\(PLAYLIST_ROTATION_KEY[\s\S]{0,120}\} catch \{/);
+		// Persistence goes through the shared guarded helper, so blocked or full
+		// storage cannot take the route down.
+		expect(search).toContain("from '$lib/stores/persisted'");
+		expect(search).toContain('writePersisted(PLAYLIST_ROTATION_KEY');
 	});
 
 	test('playlist covers reuse the shared mosaic cache, not a second one', () => {

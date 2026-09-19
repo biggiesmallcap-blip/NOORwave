@@ -585,6 +585,19 @@ pub(crate) fn build_automix_extension_with_reasons(
     // the move into TasteVector below doesn't force an extra clone.
     let (taste, mut seed) = from_session_profile(&session_profile);
     seed.genre_rarity = seed_genre_rarity(conn, &seed.genres);
+    if let Some(genres) =
+        queue::get_track_genre_evidence(conn, std::slice::from_ref(current_track))?
+            .get(&current_track.id)
+    {
+        for genre in genres {
+            let key = normalize_genre_key(&genre.path);
+            let confidence = genre.confidence.clamp(0.0, 1.0);
+            seed.genre_confidence
+                .entry(key)
+                .and_modify(|existing| *existing = existing.max(confidence))
+                .or_insert(confidence);
+        }
+    }
     excluded_track_ids.sort_unstable();
     excluded_track_ids.dedup();
 
@@ -680,7 +693,7 @@ pub(crate) fn build_automix_extension_with_reasons(
         }
     }
 
-    let candidate_genres = queue::get_track_genres(conn, &candidates)?;
+    let candidate_genres = queue::get_track_genre_evidence(conn, &candidates)?;
 
     // Artist-level hub-ness for the candidate pool. The scored fallback draws
     // candidates from track_similarity, where an over-connected artist appears in
@@ -736,7 +749,7 @@ pub(crate) fn build_automix_extension_with_reasons(
                 .get(&track.id)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            let mut score = automix_score(
+            let mut score = automix_score_with_genre_confidence(
                 &track,
                 genres,
                 &taste,
@@ -1183,7 +1196,7 @@ fn build_metadata_fallback(
 fn order_automix_candidates(
     mode: ShuffleMode,
     candidates: Vec<Track>,
-    candidate_genres: &HashMap<i64, Vec<String>>,
+    candidate_genres: &HashMap<i64, Vec<queue::TrackGenreEvidence>>,
     taste: &TasteVector,
     seed: &SeedContext,
     needed: usize,
@@ -1195,7 +1208,7 @@ fn order_automix_candidates(
     let mut scored = candidates
         .into_iter()
         .map(|track| {
-            let mut score = automix_score(
+            let mut score = automix_score_with_genre_confidence(
                 &track,
                 candidate_genres
                     .get(&track.id)
@@ -1257,6 +1270,15 @@ fn order_automix_candidates(
             }
         }
         ShuffleMode::Genre => {
+            let genre_paths = candidate_genres
+                .iter()
+                .map(|(&track_id, genres)| {
+                    (
+                        track_id,
+                        genres.iter().map(|genre| genre.path.clone()).collect(),
+                    )
+                })
+                .collect::<HashMap<i64, Vec<String>>>();
             let mut preferred = Vec::new();
             let mut fallback = Vec::new();
 
@@ -1279,13 +1301,13 @@ fn order_automix_candidates(
                 let mut preferred_rng = seeded_rng(seed, mode.as_str(), "automix_preferred");
                 let mut fallback_rng = seeded_rng(seed, mode.as_str(), "automix_fallback");
                 (
-                    genre_shuffle_with_rng(&preferred, candidate_genres, &mut preferred_rng),
-                    genre_shuffle_with_rng(&fallback, candidate_genres, &mut fallback_rng),
+                    genre_shuffle_with_rng(&preferred, &genre_paths, &mut preferred_rng),
+                    genre_shuffle_with_rng(&fallback, &genre_paths, &mut fallback_rng),
                 )
             } else {
                 (
-                    genre_shuffle(&preferred, candidate_genres),
-                    genre_shuffle(&fallback, candidate_genres),
+                    genre_shuffle(&preferred, &genre_paths),
+                    genre_shuffle(&fallback, &genre_paths),
                 )
             };
             let total = preferred_shuffled.len() + fallback_shuffled.len();
@@ -1582,6 +1604,45 @@ mod tests {
     }
 
     #[test]
+    fn scorer_caps_shared_genre_signal_at_both_tracks_confidence() {
+        use crate::playback::queue::TrackGenreEvidence;
+        use crate::smart::taste_vector::{AffinitySignal, SeedContext, TasteVector};
+
+        let mut taste = TasteVector::default();
+        let track = track_with_album(2, None);
+        let strong_genre = [TrackGenreEvidence {
+            path: "Genres > Electronic > House".to_string(),
+            confidence: 1.0,
+        }];
+        let weak_genre = [TrackGenreEvidence {
+            path: "Genres > Electronic > House".to_string(),
+            confidence: 0.1,
+        }];
+        let mut seed = SeedContext::default();
+        seed.genres
+            .insert("genres > electronic > house".to_string());
+        taste.genre_affinity.insert(
+            "genres > electronic > house".to_string(),
+            AffinitySignal { pos: 2.2, neg: 0.0 },
+        );
+
+        let strong =
+            automix_score_with_genre_confidence(&track, &strong_genre, &taste, &seed, None, None)
+                .value;
+        let weak_candidate =
+            automix_score_with_genre_confidence(&track, &weak_genre, &taste, &seed, None, None)
+                .value;
+        assert!(strong > weak_candidate);
+
+        seed.genre_confidence
+            .insert("genres > electronic > house".to_string(), 0.1);
+        let weak_seed =
+            automix_score_with_genre_confidence(&track, &strong_genre, &taste, &seed, None, None)
+                .value;
+        assert!((weak_seed - weak_candidate).abs() < 1e-9);
+    }
+
+    #[test]
     fn hub_multiplier_is_flat_below_threshold_and_ramps_above() {
         assert_eq!(hub_multiplier(0.0), 1.0);
         assert_eq!(hub_multiplier(AUTOMIX_HUB_THRESHOLD), 1.0);
@@ -1810,6 +1871,31 @@ pub(crate) fn automix_score(
     seed_features: Option<&AudioDspFeatures>,
     candidate_features: Option<&AudioDspFeatures>,
 ) -> AutomixScore {
+    let genres = genres
+        .iter()
+        .map(|path| queue::TrackGenreEvidence {
+            path: path.clone(),
+            confidence: 1.0,
+        })
+        .collect::<Vec<_>>();
+    automix_score_with_genre_confidence(
+        track,
+        &genres,
+        taste,
+        seed,
+        seed_features,
+        candidate_features,
+    )
+}
+
+fn automix_score_with_genre_confidence(
+    track: &Track,
+    genres: &[queue::TrackGenreEvidence],
+    taste: &TasteVector,
+    seed: &SeedContext,
+    seed_features: Option<&AudioDspFeatures>,
+    candidate_features: Option<&AudioDspFeatures>,
+) -> AutomixScore {
     let mut score = 1.0;
     let mut signals = Vec::new();
 
@@ -1866,21 +1952,38 @@ pub(crate) fn automix_score(
 
     let mut shares_seed_genre = false;
     let mut genre_affinity_net = 0.0;
-    let normalized_genres = genres.iter().map(|genre| normalize_genre_key(genre));
-    for genre in normalized_genres {
+    let normalized_genres = genres.iter().map(|genre| {
+        (
+            normalize_genre_key(&genre.path),
+            genre.confidence.clamp(0.0, 1.0),
+        )
+    });
+    for (genre, candidate_confidence) in normalized_genres {
+        let seed_confidence = seed
+            .genre_confidence
+            .get(&genre)
+            .copied()
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+        let match_confidence = candidate_confidence.min(seed_confidence);
         if seed.genres.contains(&genre) {
             // Weight the seed-genre match by rarity when automix supplied it: a
             // niche shared genre is a stronger signal than a library-wide one.
             // 0.5 (the absent-data default) maps to a 1.0 multiplier, so callers
             // without rarity data and existing tests keep the original flat +1.8.
             let rarity = seed.genre_rarity.get(&genre).copied().unwrap_or(0.5);
-            score += 1.8 * (0.7 + 0.6 * rarity);
-            shares_seed_genre = true;
+            score += 1.8 * (0.7 + 0.6 * rarity) * match_confidence;
+            shares_seed_genre |= match_confidence > 0.0;
         }
         if let Some(affinity) = taste.genre_affinity.get(&genre) {
-            score += affinity.pos * 0.4;
-            score -= affinity.neg * 0.5;
-            genre_affinity_net += affinity.pos * 0.4 - affinity.neg * 0.5;
+            let net = affinity.pos * 0.4 - affinity.neg * 0.5;
+            let affinity_confidence = if seed.genres.contains(&genre) {
+                match_confidence
+            } else {
+                candidate_confidence
+            };
+            score += net * affinity_confidence;
+            genre_affinity_net += net * affinity_confidence;
         }
     }
     if shares_seed_genre {
@@ -1943,17 +2046,27 @@ pub(crate) fn parse_days_since_last_played(timestamp: &str) -> f64 {
     elapsed.num_seconds().max(0) as f64 / 86_400.0
 }
 
-fn matches_preferred_genres(genres: &[String], taste: &TasteVector, seed: &SeedContext) -> bool {
-    genres
-        .iter()
-        .map(|genre| normalize_genre_key(genre))
-        .any(|genre| {
-            seed.genres.contains(&genre)
-                || taste
+fn matches_preferred_genres(
+    genres: &[queue::TrackGenreEvidence],
+    taste: &TasteVector,
+    seed: &SeedContext,
+) -> bool {
+    genres.iter().any(|genre| {
+        let key = normalize_genre_key(&genre.path);
+        let candidate_confidence = genre.confidence.clamp(0.0, 1.0);
+        let seed_confidence = seed
+            .genre_confidence
+            .get(&key)
+            .copied()
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+        (seed.genres.contains(&key) && candidate_confidence.min(seed_confidence) >= 0.5)
+            || (candidate_confidence >= 0.5
+                && taste
                     .genre_affinity
-                    .get(&genre)
-                    .is_some_and(|affinity| affinity.pos > 0.0)
-        })
+                    .get(&key)
+                    .is_some_and(|affinity| affinity.pos > 0.0))
+    })
 }
 
 fn weighted_session_shuffle(entries: &[ScoredTrack]) -> Vec<Track> {

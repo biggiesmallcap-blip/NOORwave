@@ -23,6 +23,7 @@
 	import { formatTrackDuration } from '$lib/utils/format';
 	import { showToast } from '$lib/stores/toast';
 	import { audioSettings } from '$lib/stores/audio_settings';
+	import { readPersistedJson, removePersisted, writePersisted } from '$lib/stores/persisted';
 	import {
 		videoClearRequest,
 		videoAutoplayToggleRequest,
@@ -284,25 +285,23 @@
 	);
 
 	function loadRecent(): string[] {
-		if (typeof localStorage === 'undefined') return [];
-		try {
-			const parsed = JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]');
-			return Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string').slice(0, RECENT_MAX) : [];
-		} catch {
-			return [];
-		}
+		const stored = readPersistedJson<unknown>(RECENT_KEY, []);
+		if (!Array.isArray(stored)) return [];
+		return stored
+			.filter((item): item is string => typeof item === 'string')
+			.slice(0, RECENT_MAX);
 	}
 
 	function pushRecent(value: string) {
 		const trimmed = value.trim();
-		if (!trimmed || typeof localStorage === 'undefined') return;
+		if (!trimmed) return;
 		recent = [trimmed, ...recent.filter((item) => item.toLowerCase() !== trimmed.toLowerCase())].slice(0, RECENT_MAX);
-		localStorage.setItem(RECENT_KEY, JSON.stringify(recent));
+		writePersisted(RECENT_KEY, JSON.stringify(recent));
 	}
 
 	function clearRecent() {
 		recent = [];
-		if (typeof localStorage !== 'undefined') localStorage.removeItem(RECENT_KEY);
+		removePersisted(RECENT_KEY);
 	}
 
 	function clearVideoPageSession() {

@@ -8,7 +8,9 @@ use tracing::{info, warn};
 
 use crate::SharedState;
 use crate::genre::mappings::GenreCatalog;
-use crate::genre::scorer::{MIN_SCORE_FLOOR, TagInput, TagLevel, TagSource, score_genre_tags};
+use crate::genre::scorer::{
+    MIN_SCORE_FLOOR, TagInput, TagLevel, TagSource, score_genre_tags_with_evidence,
+};
 use crate::metadata::lastfm::LastFmClient;
 use crate::services::lastfm::tag_filter::is_artist_name_tag;
 use crate::tags::context::{TagContext, classify_tag_context};
@@ -403,7 +405,23 @@ where
             }
 
             let (genre_inputs, context_rows) = route_tags(&routed_input, catalog);
-            let result = score_genre_tags(&genre_inputs, MIN_SCORE_FLOOR);
+            let corroborating_genres = {
+                let mut stmt = conn.prepare(
+                    "SELECT g.name, COALESCE(tg.confidence, 1.0)
+                     FROM track_genres tg
+                     JOIN genres g ON g.id = tg.genre_id
+                     WHERE tg.track_id = ?1 AND tg.source != 'lastfm'",
+                )?;
+                stmt.query_map(rusqlite::params![track_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let result = score_genre_tags_with_evidence(
+                &genre_inputs,
+                MIN_SCORE_FLOOR,
+                &corroborating_genres,
+            );
             let has_replacement_rows = !result.genres.is_empty() || !context_rows.is_empty();
 
             if should_replace_existing(mode, transient_failure, has_replacement_rows) {

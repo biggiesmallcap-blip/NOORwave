@@ -2,6 +2,8 @@
 // served from the browser's HTTP cache; this module just remembers which 4
 // URLs to render so the cover paints instantly on every reload.
 
+import { readPersistedJson, writePersisted } from './persisted';
+
 const STORAGE_KEY = 'noor:playlist-mosaic:v1';
 
 export type CachedMosaic = {
@@ -12,26 +14,25 @@ export type CachedMosaic = {
 let cache: Record<number, CachedMosaic> = {};
 let hydrated = false;
 
+function isMosaicCache(value: unknown): value is Record<number, CachedMosaic> {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+	return Object.values(value).every((entry) => {
+		if (!entry || typeof entry !== 'object') return false;
+		const candidate = entry as Partial<CachedMosaic>;
+		return Array.isArray(candidate.urls)
+			&& candidate.urls.every((url) => typeof url === 'string')
+			&& typeof candidate.track_count === 'number';
+	});
+}
+
 function hydrate(): void {
-	if (hydrated || typeof localStorage === 'undefined') return;
+	if (hydrated) return;
 	hydrated = true;
-	try {
-		const raw = localStorage.getItem(STORAGE_KEY);
-		if (!raw) return;
-		const parsed = JSON.parse(raw);
-		if (parsed && typeof parsed === 'object') cache = parsed;
-	} catch {
-		cache = {};
-	}
+	cache = readPersistedJson(STORAGE_KEY, {}, isMosaicCache);
 }
 
 function persist(): void {
-	if (typeof localStorage === 'undefined') return;
-	try {
-		localStorage.setItem(STORAGE_KEY, JSON.stringify(cache));
-	} catch {
-		// Quota / disabled storage — ignore.
-	}
+	writePersisted(STORAGE_KEY, JSON.stringify(cache));
 }
 
 export function getCachedMosaic(id: number, expectedCount: number): string[] | null {

@@ -64,6 +64,31 @@ export function writePersisted(key: string, value: string): void {
 	}
 }
 
+export function removePersisted(key: string): void {
+	try {
+		if (typeof localStorage === 'undefined') return;
+		localStorage.removeItem(key);
+	} catch {
+		// Storage blocked; there is no persisted value we can safely remove.
+	}
+}
+
+export function readPersistedJson<T>(
+	key: string,
+	fallback: T,
+	validate?: (value: unknown) => value is T,
+): T {
+	return readPersisted<T>(key, fallback, (raw) => {
+		try {
+			const value: unknown = JSON.parse(raw);
+			if (validate && !validate(value)) return undefined;
+			return value as T;
+		} catch {
+			return undefined;
+		}
+	});
+}
+
 export function createPersistedStore<T>(
 	key: string,
 	initial: T,

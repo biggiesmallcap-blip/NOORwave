@@ -1,4 +1,5 @@
-import { writable, get } from 'svelte/store';
+import { get } from 'svelte/store';
+import { createPersistedStore } from '$lib/stores/persisted';
 
 /**
  * Whether the remote should fire `navigator.vibrate` cues on swipe-commit,
@@ -9,18 +10,9 @@ import { writable, get } from 'svelte/store';
  */
 const STORAGE_KEY = 'noor.remote.haptics';
 
-function readInitial(): boolean {
-	if (typeof localStorage === 'undefined') return true;
-	const raw = localStorage.getItem(STORAGE_KEY);
-	if (raw === null) return true;
-	return raw !== 'off';
-}
-
-export const hapticsEnabled = writable<boolean>(readInitial());
-
-hapticsEnabled.subscribe((on) => {
-	if (typeof localStorage === 'undefined') return;
-	localStorage.setItem(STORAGE_KEY, on ? 'on' : 'off');
+export const hapticsEnabled = createPersistedStore<boolean>(STORAGE_KEY, true, {
+	parse: (raw) => raw !== 'off',
+	serialize: (on) => (on ? 'on' : 'off'),
 });
 
 export function hapticsAreEnabled(): boolean {

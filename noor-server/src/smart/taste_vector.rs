@@ -103,6 +103,9 @@ pub struct SeedContext {
     pub source: Option<String>,
     /// Genre keys, lowercased via the same normaliser the scoring path uses.
     pub genres: HashSet<String>,
+    /// Confidence of each seed genre, clamped by scoring consumers. Empty means
+    /// the caller has no confidence data and preserves the historical full weight.
+    pub genre_confidence: HashMap<String, f64>,
     /// Rarity (IDF, normalised to [0, 1]) for each seed genre key, so the scorer
     /// can reward agreement on a niche genre more than on a library-wide one.
     /// Empty means "no rarity data" - consumers must fall back to flat weighting.

@@ -9,6 +9,7 @@
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { buildTrackMenu } from '$lib/player/track_menu';
 	import { openContextMenu } from '$lib/stores/context_menu';
+	import { readPersistedJson, writePersisted } from '$lib/stores/persisted';
 
 	interface DuplicateTrack {
 		id: number;
@@ -76,27 +77,17 @@
 	let activeRelationships = $state<Set<Relationship>>(new Set(RELATIONSHIPS));
 
 	onMount(() => {
-		try {
-			const raw = localStorage.getItem(FILTER_STORAGE_KEY);
-			if (raw) {
-				const parsed = JSON.parse(raw) as string[];
-				const valid = parsed.filter((r): r is Relationship =>
-					RELATIONSHIPS.includes(r as Relationship)
-				);
-				if (valid.length > 0) activeRelationships = new Set(valid);
-			}
-		} catch {
-			// ignore — bad JSON or no storage; keep defaults.
-		}
+		const stored = readPersistedJson<unknown>(FILTER_STORAGE_KEY, []);
+		const parsed = Array.isArray(stored) ? stored : [];
+		const valid = parsed.filter((r): r is Relationship =>
+			typeof r === 'string' && RELATIONSHIPS.includes(r as Relationship)
+		);
+		if (valid.length > 0) activeRelationships = new Set(valid);
 		void loadGroups();
 	});
 
 	function persistFilter() {
-		try {
-			localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify([...activeRelationships]));
-		} catch {
-			// no-op
-		}
+		writePersisted(FILTER_STORAGE_KEY, JSON.stringify([...activeRelationships]));
 	}
 
 	function toggleRelationship(rel: Relationship) {

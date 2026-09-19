@@ -68,6 +68,7 @@
 	import { openQuietMode } from '$lib/stores/quiet_mode';
 	import { commandPaletteOpen } from '$lib/stores/command_palette';
 	import { exclusiveStatus } from '$lib/stores/exclusive_status';
+	import { oneOf, readPersisted, writePersisted } from '$lib/stores/persisted';
 	import { contextMenu, openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
@@ -370,12 +371,12 @@
 			})
 			.catch(() => {});
 
-		const storedTheme = localStorage.getItem('noor-theme');
-		if (storedTheme === 'light' || storedTheme === 'dark') {
-			theme = storedTheme;
-		}
-		pkceReloginDismissedForever =
-			localStorage.getItem(TIDAL_PKCE_RELOGIN_DISMISSED_KEY) === '1';
+		theme = readPersisted('noor-theme', theme, oneOf(['light', 'dark'] as const));
+		pkceReloginDismissedForever = readPersisted(
+			TIDAL_PKCE_RELOGIN_DISMISSED_KEY,
+			false,
+			(raw) => raw === '1',
+		);
 
 		applyTheme(theme);
 
@@ -598,7 +599,7 @@
 	function dismissPkceReloginForever() {
 		pkceReloginDismissedForever = true;
 		pkceReloginDismissedThisSession = true;
-		localStorage.setItem(TIDAL_PKCE_RELOGIN_DISMISSED_KEY, '1');
+		writePersisted(TIDAL_PKCE_RELOGIN_DISMISSED_KEY, '1');
 	}
 
 	async function reconnectTidalWithPkce() {
@@ -633,7 +634,7 @@
 	function applyTheme(t: 'dark' | 'light') {
 		theme = t;
 		document.documentElement.setAttribute('data-theme', t);
-		localStorage.setItem('noor-theme', t);
+		writePersisted('noor-theme', t);
 	}
 
 	function applyPalette(id: import('$lib/components/wallpaper/palettes').PaletteId) {
@@ -1034,17 +1035,14 @@
 	const QUEUE_EXPANDED_KEY = 'noor.queueExpanded';
 
 	function loadQueueExpanded(): boolean {
-		if (typeof localStorage === 'undefined') return false;
-		return localStorage.getItem(QUEUE_EXPANDED_KEY) === '1';
+		return readPersisted(QUEUE_EXPANDED_KEY, false, (raw) => raw === '1');
 	}
 
 	let queueExpanded = $state(loadQueueExpanded());
 
 	function toggleQueueExpanded() {
 		queueExpanded = !queueExpanded;
-		if (typeof localStorage !== 'undefined') {
-			localStorage.setItem(QUEUE_EXPANDED_KEY, queueExpanded ? '1' : '0');
-		}
+		writePersisted(QUEUE_EXPANDED_KEY, queueExpanded ? '1' : '0');
 	}
 	function formatVideoSourceLabel(source: string, label: string | null): string {
 		if (source === 'mix') return label ?? 'Video mix';

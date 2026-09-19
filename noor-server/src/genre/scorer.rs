@@ -115,7 +115,63 @@ fn suppress_parents(scores: &HashMap<String, f64>, catalog: &GenreCatalog) -> Ha
     result
 }
 
+/// Last.fm commonly expands "psy" into "psychedelic rock" even when stronger
+/// recording-level evidence places a track in the electronic trance family.
+/// Keep legitimate crossover tags: suppression only applies when the rock tag
+/// is weak, a trance-family tag is strong, and the latter is at least twice as
+/// well supported.
+fn suppress_cross_family_contradictions(
+    scores: &HashMap<String, f64>,
+    corroborating_genres: &[(String, f64)],
+    catalog: &GenreCatalog,
+) -> HashMap<String, f64> {
+    const CONTAMINATED_GENRE: &str = "Psychedelic Rock";
+    const WEAK_MAX: f64 = 0.35;
+    const DOMINANT_MIN: f64 = 0.6;
+
+    let Some(&contaminated_score) = scores.get(CONTAMINATED_GENRE) else {
+        return scores.clone();
+    };
+    if contaminated_score > WEAK_MAX {
+        return scores.clone();
+    }
+
+    let has_dominant_trance = scores
+        .iter()
+        .map(|(genre, &score)| (genre.as_str(), score))
+        .chain(
+            corroborating_genres
+                .iter()
+                .map(|(genre, score)| (genre.as_str(), *score)),
+        )
+        .any(|(genre, score)| {
+            score >= DOMINANT_MIN
+                && score >= contaminated_score * 2.0
+                && catalog
+                    .path_for(genre)
+                    .is_some_and(|path| path.iter().any(|part| part == "Trance"))
+        });
+    if !has_dominant_trance {
+        return scores.clone();
+    }
+
+    let mut result = scores.clone();
+    result.remove(CONTAMINATED_GENRE);
+    result
+}
+
 pub fn score_genre_tags(inputs: &[TagInput], min_score: f64) -> GenreScoreResult {
+    score_genre_tags_with_evidence(inputs, min_score, &[])
+}
+
+/// Score one source's tags while using already persisted genres from other
+/// sources only to reject known contradictions. Corroborating genres are never
+/// returned, so callers cannot accidentally relabel their source on writeback.
+pub fn score_genre_tags_with_evidence(
+    inputs: &[TagInput],
+    min_score: f64,
+    corroborating_genres: &[(String, f64)],
+) -> GenreScoreResult {
     let catalog = crate::genre::builder::embedded_builder().catalog();
     let mut max_by_source: HashMap<(TagSource, TagLevel), u32> = HashMap::new();
     for input in inputs {
@@ -143,7 +199,8 @@ pub fn score_genre_tags(inputs: &[TagInput], min_score: f64) -> GenreScoreResult
                 * confidence_from_count(input.count, max_count);
     }
 
-    let adjusted = suppress_parents(&raw, catalog);
+    let adjusted = suppress_cross_family_contradictions(&raw, corroborating_genres, catalog);
+    let adjusted = suppress_parents(&adjusted, catalog);
     let mut ranked: Vec<ScoredGenre> = adjusted
         .into_iter()
         .map(|(canonical, score)| ScoredGenre {
@@ -293,6 +350,65 @@ mod tests {
             0.0,
         );
         assert_eq!(result.genres[0].canonical, "Reggae");
+    }
+
+    #[test]
+    fn strong_trance_evidence_suppresses_weak_psychedelic_rock_contamination() {
+        let result = score_genre_tags_with_evidence(
+            &[input(
+                "psychedelic rock",
+                TagSource::LastFmTrack,
+                TagLevel::Recording,
+                Some(2),
+            )],
+            0.0,
+            &[("Psytrance".to_string(), 0.75)],
+        );
+        assert!(
+            result
+                .genres
+                .iter()
+                .all(|genre| genre.canonical != "Psychedelic Rock")
+        );
+    }
+
+    #[test]
+    fn well_supported_psychedelic_rock_is_not_suppressed() {
+        let result = score_genre_tags_with_evidence(
+            &[input(
+                "psychedelic rock",
+                TagSource::LastFmTrack,
+                TagLevel::Recording,
+                Some(15),
+            )],
+            0.0,
+            &[("Psytrance".to_string(), 0.75)],
+        );
+        assert!(
+            result
+                .genres
+                .iter()
+                .any(|genre| genre.canonical == "Psychedelic Rock")
+        );
+    }
+
+    #[test]
+    fn weak_psychedelic_rock_without_trance_evidence_is_not_suppressed() {
+        let result = score_genre_tags(
+            &[input(
+                "psychedelic rock",
+                TagSource::LastFmTrack,
+                TagLevel::Recording,
+                Some(2),
+            )],
+            0.0,
+        );
+        assert!(
+            result
+                .genres
+                .iter()
+                .any(|genre| genre.canonical == "Psychedelic Rock")
+        );
     }
 
     #[test]

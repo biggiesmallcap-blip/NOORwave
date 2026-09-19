@@ -1,5 +1,6 @@
 import { writable, get } from 'svelte/store';
 import { pausePlayer } from '$lib/stores/player';
+import { readPersistedJson, removePersisted, writePersisted } from '$lib/stores/persisted';
 
 /**
  * Frontend sleep timer. The proper place for this would be the server (so it
@@ -34,33 +35,20 @@ const STALE_GRACE_MS = 120_000;
 const initial: SleepTimerState = { fireAt: null, minutes: null };
 
 function readPersisted(): SleepTimerState {
-	if (typeof localStorage === 'undefined') return initial;
-	try {
-		const raw = localStorage.getItem(STORAGE_KEY);
-		if (!raw) return initial;
-		const parsed = JSON.parse(raw) as Partial<SleepTimerState>;
-		const fireAt = typeof parsed.fireAt === 'number' ? parsed.fireAt : null;
-		const minutes = typeof parsed.minutes === 'number' ? parsed.minutes : null;
-		if (fireAt === null) return initial;
-		// Already overdue at startup — don't reschedule, the next user-visible
-		// tick will handle it via flushIfOverdue.
-		return { fireAt, minutes };
-	} catch {
-		return initial;
-	}
+	const value = readPersistedJson<unknown>(STORAGE_KEY, {});
+	if (!value || typeof value !== 'object') return initial;
+	const parsed = value as Partial<SleepTimerState>;
+	const fireAt = typeof parsed.fireAt === 'number' ? parsed.fireAt : null;
+	const minutes = typeof parsed.minutes === 'number' ? parsed.minutes : null;
+	if (fireAt === null) return initial;
+	// Already overdue at startup — don't reschedule, the next user-visible
+	// tick will handle it via flushIfOverdue.
+	return { fireAt, minutes };
 }
 
 function persist(state: SleepTimerState) {
-	if (typeof localStorage === 'undefined') return;
-	try {
-		if (state.fireAt === null) {
-			localStorage.removeItem(STORAGE_KEY);
-		} else {
-			localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-		}
-	} catch {
-		// Quota / privacy mode — countdown still works in memory.
-	}
+	if (state.fireAt === null) removePersisted(STORAGE_KEY);
+	else writePersisted(STORAGE_KEY, JSON.stringify(state));
 }
 
 export const sleepTimer = writable<SleepTimerState>(readPersisted());

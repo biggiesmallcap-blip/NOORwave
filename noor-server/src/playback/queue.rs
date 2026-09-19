@@ -555,7 +555,28 @@ fn reorder_queue_item_ids_with_seed(
     Ok(reordered.into_iter().map(|track| track.id).collect())
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackGenreEvidence {
+    pub path: String,
+    pub confidence: f64,
+}
+
 pub fn get_track_genres(conn: &Connection, tracks: &[Track]) -> Result<HashMap<i64, Vec<String>>> {
+    Ok(get_track_genre_evidence(conn, tracks)?
+        .into_iter()
+        .map(|(track_id, genres)| {
+            (
+                track_id,
+                genres.into_iter().map(|genre| genre.path).collect(),
+            )
+        })
+        .collect())
+}
+
+pub fn get_track_genre_evidence(
+    conn: &Connection,
+    tracks: &[Track],
+) -> Result<HashMap<i64, Vec<TrackGenreEvidence>>> {
     let track_ids = tracks.iter().map(|track| track.id).collect::<Vec<_>>();
     if track_ids.is_empty() {
         return Ok(HashMap::new());
@@ -589,7 +610,7 @@ pub fn get_track_genres(conn: &Connection, tracks: &[Track]) -> Result<HashMap<i
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT track_id, genre_id FROM track_genres WHERE track_id IN ({})",
+            "SELECT track_id, genre_id, COALESCE(confidence, 1.0) FROM track_genres WHERE track_id IN ({})",
             placeholders
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -598,11 +619,15 @@ pub fn get_track_genres(conn: &Connection, tracks: &[Track]) -> Result<HashMap<i
         while let Some(row) = rows.next()? {
             let track_id: i64 = row.get(0)?;
             let genre_id: i64 = row.get(1)?;
+            let confidence: f64 = row.get(2)?;
             if let Some(path) = genre_paths.get(&genre_id) {
                 by_track
                     .entry(track_id)
                     .or_insert_with(Vec::new)
-                    .push(path.clone());
+                    .push(TrackGenreEvidence {
+                        path: path.clone(),
+                        confidence,
+                    });
             }
         }
     }
@@ -1056,6 +1081,12 @@ mod tests {
         }
 
         let genres = get_track_genres(&conn, &tracks).unwrap();
+        conn.execute(
+            "UPDATE track_genres SET confidence = 0.25 WHERE track_id = 1",
+            [],
+        )
+        .unwrap();
+        let evidence = get_track_genre_evidence(&conn, &tracks).unwrap();
 
         assert_eq!(genres.len(), 1_050);
         assert_eq!(
@@ -1072,6 +1103,8 @@ mod tests {
                 .map(String::as_str),
             Some("Electronic")
         );
+        assert_eq!(evidence[&1][0].path, "Electronic");
+        assert!((evidence[&1][0].confidence - 0.25).abs() < f64::EPSILON);
     }
 
     #[test]

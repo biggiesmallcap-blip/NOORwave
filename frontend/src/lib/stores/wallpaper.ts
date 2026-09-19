@@ -1,5 +1,6 @@
 import { writable } from 'svelte/store';
 import type { WallpaperId } from '$lib/components/wallpaper/shaders';
+import { createPersistedStore, oneOf } from './persisted';
 
 const STORAGE_KEY = 'noor-wallpaper';
 const FPS_STORAGE_KEY = 'noor-wallpaper-fps';
@@ -56,98 +57,72 @@ export const VALID: WallpaperId[] = ['none', 'aurora', 'chrome', 'grid', 'nebula
 // keeps the wallpaper the user saw on first launch.
 const DEFAULT: WallpaperId = 'standing-wave';
 
-function readInitial(): WallpaperId {
-	if (typeof localStorage === 'undefined') return DEFAULT;
-	const raw = localStorage.getItem(STORAGE_KEY);
-	return (VALID as string[]).includes(raw ?? '') ? (raw as WallpaperId) : DEFAULT;
-}
-
 function clampSetting(value: number, min: number, max: number): number {
 	return Math.min(max, Math.max(min, Math.round(value)));
 }
 
-function readNumberSetting(key: string, fallback: number, min: number, max: number): number {
-	if (typeof localStorage === 'undefined') return fallback;
-	// A missing key must fall back to the default. Number(null) is 0 (finite!),
-	// which used to clamp every unset slider to its minimum: fps 24 instead of
-	// the default, and reactivity 0, so fresh installs never reacted to music.
-	const raw = localStorage.getItem(key);
-	if (raw === null || raw.trim() === '') return fallback;
-	const num = Number(raw);
-	return Number.isFinite(num) ? clampSetting(num, min, max) : fallback;
+function numberParser(min: number, max: number): (raw: string) => number | undefined {
+	return (raw) => {
+		if (raw.trim() === '') return undefined;
+		const num = Number(raw);
+		return Number.isFinite(num) ? clampSetting(num, min, max) : undefined;
+	};
 }
 
-function readBoolSetting(key: string, fallback: boolean): boolean {
-	if (typeof localStorage === 'undefined') return fallback;
-	const raw = localStorage.getItem(key);
-	if (raw === null) return fallback;
-	return raw === '1' || raw === 'true';
-}
+const numberOptions = (min: number, max: number) => ({
+	parse: numberParser(min, max),
+	serialize: String,
+});
 
-function readEnumSetting<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
-	if (typeof localStorage === 'undefined') return fallback;
-	const raw = localStorage.getItem(key);
-	return (allowed as readonly string[]).includes(raw ?? '') ? (raw as T) : fallback;
-}
-
-function writeStringSetting(key: string, value: string) {
-	if (typeof localStorage !== 'undefined') {
-		localStorage.setItem(key, value);
-	}
-}
-
-function writeNumberSetting(key: string, value: number) {
-	if (typeof localStorage !== 'undefined') {
-		localStorage.setItem(key, String(value));
-	}
-}
-
-export const wallpaper = writable<WallpaperId>(readInitial());
-export const wallpaperFps = writable<number>(
-	readNumberSetting(FPS_STORAGE_KEY, WALLPAPER_FPS_DEFAULT, WALLPAPER_FPS_MIN, WALLPAPER_FPS_MAX)
+export const wallpaper = createPersistedStore<WallpaperId>(STORAGE_KEY, DEFAULT, {
+	parse: oneOf(VALID),
+});
+export const wallpaperFps = createPersistedStore(
+	FPS_STORAGE_KEY,
+	WALLPAPER_FPS_DEFAULT,
+	numberOptions(WALLPAPER_FPS_MIN, WALLPAPER_FPS_MAX),
 );
-export const wallpaperBlur = writable<number>(
-	readNumberSetting(BLUR_STORAGE_KEY, WALLPAPER_BLUR_DEFAULT, WALLPAPER_BLUR_MIN, WALLPAPER_BLUR_MAX)
+export const wallpaperBlur = createPersistedStore(
+	BLUR_STORAGE_KEY,
+	WALLPAPER_BLUR_DEFAULT,
+	numberOptions(WALLPAPER_BLUR_MIN, WALLPAPER_BLUR_MAX),
 );
 // Whether the playing track drives the beat-reactive shaders at all.
-export const wallpaperReactive = writable<boolean>(readBoolSetting(REACTIVE_STORAGE_KEY, true));
+export const wallpaperReactive = createPersistedStore(REACTIVE_STORAGE_KEY, true, {
+	parse: (raw) => raw === '1' || raw === 'true',
+	serialize: (on) => (on ? '1' : '0'),
+});
 // Strength of that reaction, as a percentage (see WALLPAPER_REACTIVITY_*).
-export const wallpaperReactivity = writable<number>(
-	readNumberSetting(
-		REACTIVITY_STORAGE_KEY,
-		WALLPAPER_REACTIVITY_DEFAULT,
-		WALLPAPER_REACTIVITY_MIN,
-		WALLPAPER_REACTIVITY_MAX
-	)
+export const wallpaperReactivity = createPersistedStore(
+	REACTIVITY_STORAGE_KEY,
+	WALLPAPER_REACTIVITY_DEFAULT,
+	numberOptions(WALLPAPER_REACTIVITY_MIN, WALLPAPER_REACTIVITY_MAX),
 );
 // Beat envelope shape (snappy..floaty), as a percentage.
-export const wallpaperBeatSmoothing = writable<number>(
-	readNumberSetting(
-		SMOOTHING_STORAGE_KEY,
-		WALLPAPER_SMOOTHING_DEFAULT,
-		WALLPAPER_SMOOTHING_MIN,
-		WALLPAPER_SMOOTHING_MAX
-	)
+export const wallpaperBeatSmoothing = createPersistedStore(
+	SMOOTHING_STORAGE_KEY,
+	WALLPAPER_SMOOTHING_DEFAULT,
+	numberOptions(WALLPAPER_SMOOTHING_MIN, WALLPAPER_SMOOTHING_MAX),
 );
 // 'auto' follows the OS prefers-reduced-motion; 'on'/'off' force it. When active,
 // the renderer clamps beat/energy amplitude to a calm cap (accessibility + battery).
-export const wallpaperReduceMotion = writable<WallpaperReduceMotion>(
-	readEnumSetting<WallpaperReduceMotion>(REDUCE_MOTION_STORAGE_KEY, ['auto', 'on', 'off'], 'auto')
-);
+export const wallpaperReduceMotion = createPersistedStore<WallpaperReduceMotion>(REDUCE_MOTION_STORAGE_KEY, 'auto', {
+	parse: oneOf(['auto', 'on', 'off'] as const),
+});
 // Where the reactive shaders get their colours: the fixed palette, or colours
 // pulled from the playing track's cover art (falls back to palette on failure).
-export const wallpaperColorSource = writable<WallpaperColorSource>(
-	readEnumSetting<WallpaperColorSource>(COLOR_SOURCE_STORAGE_KEY, ['palette', 'art'], 'palette')
-);
+export const wallpaperColorSource = createPersistedStore<WallpaperColorSource>(COLOR_SOURCE_STORAGE_KEY, 'palette', {
+	parse: oneOf(['palette', 'art'] as const),
+});
 // Render scale: 'standard' caps device-pixel-ratio at 1; 'high' allows 2 for a
 // crisper (but heavier) background on capable GPUs.
-export const wallpaperQuality = writable<WallpaperQuality>(
-	readEnumSetting<WallpaperQuality>(QUALITY_STORAGE_KEY, ['standard', 'high'], 'standard')
-);
+export const wallpaperQuality = createPersistedStore<WallpaperQuality>(QUALITY_STORAGE_KEY, 'standard', {
+	parse: oneOf(['standard', 'high'] as const),
+});
 // What the reactive shaders do when nothing is playing.
-export const wallpaperIdle = writable<WallpaperIdle>(
-	readEnumSetting<WallpaperIdle>(IDLE_STORAGE_KEY, ['drift', 'frozen', 'demo'], 'drift')
-);
+export const wallpaperIdle = createPersistedStore<WallpaperIdle>(IDLE_STORAGE_KEY, 'drift', {
+	parse: oneOf(['drift', 'frozen', 'demo'] as const),
+});
 
 // Effective reduce-motion state: resolves 'auto' against the live media query so
 // the renderer can just read a boolean. Updated on setting change and on OS change.
@@ -176,58 +151,44 @@ if (typeof document !== 'undefined') {
 
 export function setWallpaper(id: WallpaperId) {
 	wallpaper.set(id);
-	if (typeof localStorage !== 'undefined') {
-		localStorage.setItem(STORAGE_KEY, id);
-	}
 }
 
 export function setWallpaperFps(value: number) {
 	const next = clampSetting(value, WALLPAPER_FPS_MIN, WALLPAPER_FPS_MAX);
 	wallpaperFps.set(next);
-	writeNumberSetting(FPS_STORAGE_KEY, next);
 }
 
 export function setWallpaperBlur(value: number) {
 	const next = clampSetting(value, WALLPAPER_BLUR_MIN, WALLPAPER_BLUR_MAX);
 	wallpaperBlur.set(next);
-	writeNumberSetting(BLUR_STORAGE_KEY, next);
 }
 
 export function setWallpaperReactive(on: boolean) {
 	wallpaperReactive.set(on);
-	if (typeof localStorage !== 'undefined') {
-		localStorage.setItem(REACTIVE_STORAGE_KEY, on ? '1' : '0');
-	}
 }
 
 export function setWallpaperReactivity(value: number) {
 	const next = clampSetting(value, WALLPAPER_REACTIVITY_MIN, WALLPAPER_REACTIVITY_MAX);
 	wallpaperReactivity.set(next);
-	writeNumberSetting(REACTIVITY_STORAGE_KEY, next);
 }
 
 export function setWallpaperBeatSmoothing(value: number) {
 	const next = clampSetting(value, WALLPAPER_SMOOTHING_MIN, WALLPAPER_SMOOTHING_MAX);
 	wallpaperBeatSmoothing.set(next);
-	writeNumberSetting(SMOOTHING_STORAGE_KEY, next);
 }
 
 export function setWallpaperReduceMotion(value: WallpaperReduceMotion) {
 	wallpaperReduceMotion.set(value);
-	writeStringSetting(REDUCE_MOTION_STORAGE_KEY, value);
 }
 
 export function setWallpaperColorSource(value: WallpaperColorSource) {
 	wallpaperColorSource.set(value);
-	writeStringSetting(COLOR_SOURCE_STORAGE_KEY, value);
 }
 
 export function setWallpaperQuality(value: WallpaperQuality) {
 	wallpaperQuality.set(value);
-	writeStringSetting(QUALITY_STORAGE_KEY, value);
 }
 
 export function setWallpaperIdle(value: WallpaperIdle) {
 	wallpaperIdle.set(value);
-	writeStringSetting(IDLE_STORAGE_KEY, value);
 }

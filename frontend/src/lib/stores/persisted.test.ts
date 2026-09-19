@@ -1,6 +1,13 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { get } from 'svelte/store';
-import { createPersistedStore, createPersistedJsonStore, oneOf, readPersisted } from './persisted';
+import {
+	createPersistedStore,
+	createPersistedJsonStore,
+	oneOf,
+	readPersisted,
+	readPersistedJson,
+	removePersisted,
+} from './persisted';
 
 // `library.viewMode.test.ts` covers the boot-crash regression against a real
 // consumer. These cover the helper's own contract: a full or blocked storage
@@ -107,5 +114,26 @@ describe('readPersisted', () => {
 	it('returns the fallback for a missing key', () => {
 		stubStorage();
 		expect(readPersisted('nope', 'fallback')).toBe('fallback');
+	});
+
+	it('validates JSON reads and safely removes keys', () => {
+		const backing = stubStorage();
+		backing.set('valid', '["one"]');
+		backing.set('invalid', '{');
+		const strings = (value: unknown): value is string[] =>
+			Array.isArray(value) && value.every((item) => typeof item === 'string');
+		expect(readPersistedJson('valid', [], strings)).toEqual(['one']);
+		expect(readPersistedJson('invalid', [], strings)).toEqual([]);
+		removePersisted('valid');
+		expect(backing.has('valid')).toBe(false);
+	});
+
+	it('survives a storage that throws on remove', () => {
+		stubStorage({
+			removeItem: () => {
+				throw new DOMException('access denied', 'SecurityError');
+			},
+		});
+		expect(() => removePersisted('k')).not.toThrow();
 	});
 });

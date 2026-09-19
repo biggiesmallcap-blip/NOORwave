@@ -25,6 +25,7 @@
   import { mergeLocalIntoTidal } from '$lib/search/merge_local'
   import { PRIMARY_SEARCH_DEBOUNCE_MS, SECONDARY_PROVIDER_DELAY_MS } from '$lib/search/search_timing'
   import { getCachedMosaic, setCachedMosaic, nameToGradient } from '$lib/stores/playlist_artwork_cache'
+  import { readPersisted, readPersistedJson, removePersisted, writePersisted } from '$lib/stores/persisted'
   import SearchField from '$lib/search/ui/SearchField.svelte'
   import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte'
   import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte'
@@ -52,27 +53,23 @@
   const EMPTY_TIDAL_RESULTS: TidalSearchResults = { tracks: [], albums: [], artists: [], videos: [] }
 
   function loadRecent(): string[] {
-    if (typeof localStorage === 'undefined') return []
-    try {
-      const raw = localStorage.getItem(RECENT_KEY)
-      if (!raw) return []
-      const parsed = JSON.parse(raw)
-      return Array.isArray(parsed) ? parsed.filter((v) => typeof v === 'string').slice(0, RECENT_MAX) : []
-    } catch {
-      return []
-    }
+    const stored = readPersistedJson<unknown>(RECENT_KEY, [])
+    if (!Array.isArray(stored)) return []
+    return stored
+      .filter((value): value is string => typeof value === 'string')
+      .slice(0, RECENT_MAX)
   }
 
   function pushRecent(q: string) {
-    if (!q.trim() || typeof localStorage === 'undefined') return
+    if (!q.trim()) return
     const next = [q, ...recent.filter((r) => r.toLowerCase() !== q.toLowerCase())].slice(0, RECENT_MAX)
     recent = next
-    localStorage.setItem(RECENT_KEY, JSON.stringify(next))
+    writePersisted(RECENT_KEY, JSON.stringify(next))
   }
 
   function clearRecent() {
     recent = []
-    if (typeof localStorage !== 'undefined') localStorage.removeItem(RECENT_KEY)
+    removePersisted(RECENT_KEY)
   }
 
   let query = $state('')
@@ -165,20 +162,12 @@
 
   /** Reads this visit's starting offset and parks the next one. */
   function nextPlaylistRotation(total: number): number {
-    if (typeof localStorage === 'undefined' || total <= 0) return 0
-    let start = 0
-    try {
-      const stored = Number(localStorage.getItem(PLAYLIST_ROTATION_KEY))
-      if (Number.isFinite(stored) && stored >= 0) start = stored % total
-    } catch {
-      // Storage disabled - always start from the top.
-    }
-    try {
-      localStorage.setItem(PLAYLIST_ROTATION_KEY, String((start + PLAYLIST_WINDOW) % total))
-    } catch {
-      // Quota or disabled storage. The window simply does not advance; it must
-      // never take the page down with it.
-    }
+    if (total <= 0) return 0
+    const start = readPersisted(PLAYLIST_ROTATION_KEY, 0, (raw) => {
+      const stored = Number(raw)
+      return Number.isFinite(stored) && stored >= 0 ? stored % total : undefined
+    })
+    writePersisted(PLAYLIST_ROTATION_KEY, String((start + PLAYLIST_WINDOW) % total))
     return start
   }
 
