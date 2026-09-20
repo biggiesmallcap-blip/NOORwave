@@ -3,6 +3,7 @@
   import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
   import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
   import { initials } from '$lib/utils/text';
+  import RailNavigation from '$lib/components/ui/RailNavigation.svelte';
 
   interface ArtistCard {
     id: number;
@@ -18,6 +19,7 @@
   } = $props();
 
   let lazyArt = $state<Record<number, string>>({});
+  let rail: HTMLElement | null = $state(null);
 
   function artistImageSources(...sources: Array<string | null | undefined>): string[] {
     return sources.filter((source): source is string => typeof source === 'string' && source.trim().length > 0);
@@ -26,7 +28,7 @@
 
 {#if artists.length > 0}
   <div class="artist-carousel">
-  <div class="artists-row" use:wheelToHorizontal>
+  <div bind:this={rail} class="artists-row" use:wheelToHorizontal role="group" aria-roledescription="carousel" aria-label="Artists">
     {#each artists as artist (artist.id)}
       <button
         class="artist-card"
@@ -52,6 +54,7 @@
       </button>
     {/each}
   </div>
+  <RailNavigation {rail} label="Artists" />
   </div>
 {/if}
 
@@ -60,8 +63,17 @@
     /* Outer wrapper is the container; inner row stays as the overflow-x rail.
        See AlbumCarousel for the rationale. */
     container-type: inline-size;
+    position: relative;
     --artist-card-w:   clamp(76px, 7.5vw, 104px);
     --artist-avatar-w: clamp(64px, 6.4vw, 92px);
+  }
+
+  .artists-row {
+    display: flex;
+    gap: 16px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding: 4px 2px 12px;
     mask-image: linear-gradient(
       to right,
       transparent 0,
@@ -78,13 +90,7 @@
     );
   }
 
-  .artists-row {
-    display: flex;
-    gap: 16px;
-    overflow-x: auto;
-    scrollbar-width: none;
-    padding: 4px 2px 12px;
-  }
+  .artists-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   .artists-row::-webkit-scrollbar { display: none; }
 

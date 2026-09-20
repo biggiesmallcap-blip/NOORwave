@@ -18,6 +18,7 @@ export interface SettingsSearchEntry {
 export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
 	{ id: 'colour-scheme', category: 'appearance', label: 'Colour scheme', keywords: 'palette color colour accent theme swatch' },
 	{ id: 'interface-size', category: 'appearance', label: 'Interface size', keywords: 'zoom ui scale text size bigger smaller' },
+	{ id: 'horizontal-shelves', category: 'appearance', label: 'Horizontal shelves', keywords: 'scroll scrolling mouse wheel trackpad carousel rail navigation sideways' },
 	{ id: 'background', category: 'appearance', label: 'Background', keywords: 'wallpaper shader blur fps animation' },
 	{ id: 'access-pin', category: 'account', label: 'Access PIN', keywords: 'token pin password remote pair device regenerate' },
 	{ id: 'app-updates', category: 'account', label: 'App updates', keywords: 'version update install mode upgrade release check' },

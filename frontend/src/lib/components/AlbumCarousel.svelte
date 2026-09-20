@@ -3,6 +3,7 @@
   import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
   import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
   import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+  import RailNavigation from '$lib/components/ui/RailNavigation.svelte';
 
   interface AlbumCard {
     id: number;
@@ -21,6 +22,7 @@
   } = $props();
 
   let lazyArt = $state<Record<number, string>>({});
+  let rail: HTMLElement | null = $state(null);
 
   function handleAlbumKeydown(event: KeyboardEvent, albumId: number) {
     if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -46,7 +48,7 @@
 
 {#if albums.length > 0}
   <div class="album-carousel">
-  <div class="albums-row" use:wheelToHorizontal>
+  <div bind:this={rail} class="albums-row" use:wheelToHorizontal role="group" aria-roledescription="carousel" aria-label="Albums">
     {#each albums as album (album.id)}
       {@const resolved = album.artwork_url ?? lazyArt[album.id] ?? null}
       <div
@@ -87,6 +89,7 @@
       </div>
     {/each}
   </div>
+  <RailNavigation {rail} label="Albums" />
   </div>
 {/if}
 
@@ -96,7 +99,16 @@
        isn't itself the container (which has subtle browser quirks). Card
        width adapts to this wrapper's inline-size via the @container rule. */
     container-type: inline-size;
+    position: relative;
     --album-card-w: clamp(112px, 11vw, 156px);
+  }
+
+  .albums-row {
+    display: flex;
+    gap: 16px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding: 4px 2px 12px;
     /* Edge fade hints at horizontally-scrollable content. mask-image works
        on Chrome/Safari/Firefox; -webkit- prefix kept for older WebKit. */
     mask-image: linear-gradient(
@@ -115,13 +127,7 @@
     );
   }
 
-  .albums-row {
-    display: flex;
-    gap: 16px;
-    overflow-x: auto;
-    scrollbar-width: none;
-    padding: 4px 2px 12px;
-  }
+  .albums-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   .albums-row::-webkit-scrollbar { display: none; }
 

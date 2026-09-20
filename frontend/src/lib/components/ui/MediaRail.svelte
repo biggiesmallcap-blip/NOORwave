@@ -1,5 +1,6 @@
 <script lang="ts" generics="T">
 	import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
+	import RailNavigation from './RailNavigation.svelte';
 	import type { Snippet } from 'svelte';
 
 	// Generic horizontal rail with wheel-to-horizontal scrolling + slim
@@ -46,17 +47,21 @@
 	// waits seconds for its turn; capped, a rail that is scrolled or refilled
 	// cascades the same way the first screen did.
 	const STAGGER_CAP = 12;
+	let rail: HTMLElement | null = $state(null);
+	let accessibleLabel = $derived(ariaLabel ?? 'Scrollable shelf');
 </script>
 
 {#if items.length > 0}
 	<div class="media-rail-viewport">
 		<div
+			bind:this={rail}
 			class="media-rail"
 			class:fluid
 			class:wide={fluid && density === 'wide'}
 			class:stacked={rows > 1}
-			role={ariaLabel ? 'group' : undefined}
-			aria-label={ariaLabel}
+			role="group"
+			aria-roledescription="carousel"
+			aria-label={accessibleLabel}
 			style="--rail-gap: {gap}px; --rail-padding: {padding}; --rail-rows: {rows};"
 			use:wheelToHorizontal
 		>
@@ -70,6 +75,7 @@
 				{/if}
 			{/each}
 		</div>
+		<RailNavigation {rail} label={accessibleLabel} />
 	</div>
 {/if}
 
@@ -80,6 +86,12 @@
 	.media-rail-viewport {
 		container-type: inline-size;
 		min-width: 0;
+		position: relative;
+	}
+
+	.media-rail:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: 2px;
 	}
 
 	.media-rail {

@@ -8,10 +8,12 @@
     type SpotifyChartMeta,
   } from '$lib/stores/spotify-chart-meta-cache';
   import type { SpotifyMoodCategory } from './spotify-moods-data';
+  import RailNavigation from '$lib/components/ui/RailNavigation.svelte';
 
   let { category }: { category: SpotifyMoodCategory } = $props();
 
   let meta = $state<Record<string, SpotifyChartMeta>>({});
+  let rail: HTMLElement | null = $state(null);
 
   $effect(() => {
     const ids = category.playlists.map((playlist) => playlist.id);
@@ -32,8 +34,9 @@
 
 <section class="rail-section">
   <h3 class="rail-heading">{category.label}</h3>
-  <div class="rail" use:wheelToHorizontal>
-    {#each category.playlists as p (p.id)}
+  <div class="rail-frame">
+    <div bind:this={rail} class="rail" use:wheelToHorizontal role="group" aria-roledescription="carousel" aria-label={category.label}>
+      {#each category.playlists as p (p.id)}
       {@const m = meta[p.id]}
       <a
         class="card"
@@ -54,22 +57,26 @@
           <span class="source">Spotify</span>
         </div>
       </a>
-    {/each}
+      {/each}
+    </div>
+    <RailNavigation {rail} label={category.label} />
   </div>
 </section>
 
 <style>
   .rail-section { display: flex; flex-direction: column; gap: var(--space-2); }
   .rail-heading { margin: 0; font-size: var(--font-size-md); font-weight: var(--font-weight-bold); color: var(--text-primary); }
+  .rail-frame { position: relative; min-width: 0; }
   .rail {
     display: flex;
     gap: var(--gap-sm);
     overflow-x: auto;
     padding-bottom: var(--space-2);
-    scroll-snap-type: x mandatory;
+    scroll-snap-type: x proximity;
     mask-image: linear-gradient(to right, transparent 0, black 16px, black calc(100% - 32px), transparent 100%);
     -webkit-mask-image: linear-gradient(to right, transparent 0, black 16px, black calc(100% - 32px), transparent 100%);
   }
+  .rail:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .rail::-webkit-scrollbar { height: 6px; }
   .rail::-webkit-scrollbar-track { background: var(--bg-surface); border-radius: var(--radius-xs); }
   .rail::-webkit-scrollbar-thumb { background: var(--border-subtle); border-radius: var(--radius-xs); }

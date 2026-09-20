@@ -62,6 +62,11 @@
 		background: var(--accent);
 	}
 
+	.toggle-switch input:focus-visible + .toggle-slider {
+		outline: 2px solid var(--accent);
+		outline-offset: 3px;
+	}
+
 	.toggle-switch input:checked + .toggle-slider::before {
 		transform: translateX(20px);
 	}
