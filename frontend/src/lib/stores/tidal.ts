@@ -36,25 +36,68 @@ export interface RecleanSummary {
 
 export type TidalSyncMode = 'auto' | 'full';
 
-export async function loadTidalStatus() {
+const TOKEN_EXPIRED_RETRY_DELAYS_MS = [1500, 5000, 15000];
+let tokenExpiredRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let tokenExpiredRetryAttempt = 0;
+let tidalStatusRequest: Promise<void> | null = null;
+
+function clearTokenExpiredRetry() {
+	if (tokenExpiredRetryTimer) clearTimeout(tokenExpiredRetryTimer);
+	tokenExpiredRetryTimer = null;
+	tokenExpiredRetryAttempt = 0;
+}
+
+function scheduleTokenExpiredRetry() {
+	if (tokenExpiredRetryTimer) return;
+	const delay = TOKEN_EXPIRED_RETRY_DELAYS_MS[tokenExpiredRetryAttempt];
+	if (delay == null) return;
+	tokenExpiredRetryAttempt += 1;
+	tokenExpiredRetryTimer = setTimeout(() => {
+		tokenExpiredRetryTimer = null;
+		void loadTidalStatus();
+	}, delay);
+}
+
+function isTransientStatusFailure(status: number): boolean {
+	return status === 408 || status === 429 || status >= 500;
+}
+
+async function refreshTidalStatus() {
 	try {
 		const resp = await authFetch(`${getApiBase()}/api/tidal/status`);
-		if (!resp.ok) return;
+		if (!resp.ok) {
+			if (isTransientStatusFailure(resp.status)) scheduleTokenExpiredRetry();
+			else clearTokenExpiredRetry();
+			return;
+		}
 		const data = await resp.json();
 		if (data.connected) {
+			clearTokenExpiredRetry();
 			tidalUserId.set(data.user_id);
 			tidalAuthFlow.set(data.auth_flow ?? null);
 			tidalPkceClientCredentialSource.set(data.pkce_client_credential_source ?? null);
 			tidalLegacyClientCredentialSource.set(data.legacy_client_credential_source ?? null);
 			tidalStatus.set('connected');
 		} else {
+			if (data.reason === 'token_expired') scheduleTokenExpiredRetry();
+			else clearTokenExpiredRetry();
 			tidalUserId.set('');
 			tidalAuthFlow.set(null);
 			tidalPkceClientCredentialSource.set(null);
 			tidalLegacyClientCredentialSource.set(null);
 			tidalStatus.set('disconnected');
 		}
-	} catch {}
+	} catch {
+		scheduleTokenExpiredRetry();
+	}
+}
+
+export function loadTidalStatus(): Promise<void> {
+	if (tidalStatusRequest) return tidalStatusRequest;
+	tidalStatusRequest = refreshTidalStatus().finally(() => {
+		tidalStatusRequest = null;
+	});
+	return tidalStatusRequest;
 }
 
 export async function loadSyncInfo() {
