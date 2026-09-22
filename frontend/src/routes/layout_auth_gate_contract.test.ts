@@ -20,4 +20,18 @@ describe('layout auth gate contract', () => {
 		expect(remoteShell).toBeGreaterThan(onboardingGate);
 		expect(appShell).toBeGreaterThan(remoteShell);
 	});
+
+	test('an installed iPhone PWA can redeem a temporary pairing code without the master PIN', () => {
+		expect(source).toContain('temporary 6-digit code');
+		expect(source).toContain("connectMethod === 'pairing'");
+		expect(source).toContain('await remoteApi.redeem(t)');
+		expect(source).toContain('storePairedSession(paired)');
+		expect(source).toContain('Use master PIN instead');
+	});
+
+	test('revalidates a paired device before deleting its credential after a rejected request', () => {
+		const handler = source.slice(source.indexOf('function handleUnauthorized()'), source.indexOf('// Liquid-glass crossfade'));
+		expect(handler).toContain('void bootstrapAuthentication()');
+		expect(handler).not.toContain('clearRemoteSession()');
+	});
 });

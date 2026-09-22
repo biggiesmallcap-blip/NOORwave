@@ -2891,6 +2891,8 @@ mod tests {
             crate::services::spotify_public::SpotifyPublicClient::new(db.clone())
                 .expect("SpotifyPublicClient::new must succeed in tests"),
         );
+        let remote = crate::server::remote::RemoteService::new(db.clone(), String::new())
+            .expect("remote service");
         std::sync::Arc::new(tokio::sync::RwLock::new(crate::AppState {
             db,
             event_tx,
@@ -2957,6 +2959,7 @@ mod tests {
             master_key: crate::services::crypto::MasterKey::ephemeral(),
             lastfm_api_secret: None,
             server_token: String::new(),
+            remote,
             audio_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_cleared_at: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
             #[cfg(feature = "spotify-public")]

@@ -1,28 +1,64 @@
+use crate::server::remote::Principal;
 use crate::{AppEvent, SharedState};
 use axum::{
-    Router,
+    Extension, Router,
     extract::{
         State, WebSocketUpgrade,
-        ws::{Message, WebSocket},
+        ws::{CloseFrame, Message, WebSocket},
     },
     response::Response,
     routing::get,
 };
 use serde_json::json;
+use tokio::sync::watch;
 use tracing::info;
 
-pub fn ws_routes(state: SharedState) -> Router {
+pub fn ws_routes(state: SharedState, shutdown: watch::Receiver<bool>) -> Router {
     Router::new()
         .route("/ws", get(ws_handler))
         .with_state(state)
+        .layer(Extension(shutdown))
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<SharedState>) -> Response {
-    ws.on_upgrade(|socket| handle_socket(socket, state))
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<SharedState>,
+    Extension(principal): Extension<Principal>,
+    Extension(shutdown): Extension<watch::Receiver<bool>>,
+) -> Response {
+    ws.on_upgrade(|socket| handle_socket(socket, state, principal, shutdown))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: SharedState) {
+async fn handle_socket(
+    mut socket: WebSocket,
+    state: SharedState,
+    principal: Principal,
+    mut shutdown: watch::Receiver<bool>,
+) {
     info!("WebSocket client connected");
+
+    let remote = state.read().await.remote.clone();
+    let Some((mut global_revocation, mut device_revocation)) =
+        remote.subscribe_if_current(&principal).await
+    else {
+        let _ = socket
+            .send(Message::Close(Some(CloseFrame {
+                code: 4001,
+                reason: "Authentication required".into(),
+            })))
+            .await;
+        return;
+    };
+
+    if *shutdown.borrow() {
+        let _ = socket
+            .send(Message::Close(Some(CloseFrame {
+                code: 1001,
+                reason: "Server shutting down".into(),
+            })))
+            .await;
+        return;
+    }
 
     // Subscribe to the event bus
     let mut rx = {
@@ -53,6 +89,39 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
     // Forward events to the client
     loop {
         tokio::select! {
+            biased;
+            _ = global_revocation.recv() => {
+                let _ = socket.send(Message::Close(Some(CloseFrame {
+                    code: 4001,
+                    reason: "Authentication required".into(),
+                }))).await;
+                break;
+            }
+            _ = async {
+                match device_revocation.as_mut() {
+                    Some(receiver) => { let _ = receiver.recv().await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                let _ = socket.send(Message::Close(Some(CloseFrame {
+                    code: 4001,
+                    reason: "Authentication required".into(),
+                }))).await;
+                break;
+            }
+            _ = async {
+                while !*shutdown.borrow() {
+                    if shutdown.changed().await.is_err() {
+                        std::future::pending::<()>().await;
+                    }
+                }
+            } => {
+                let _ = socket.send(Message::Close(Some(CloseFrame {
+                    code: 1001,
+                    reason: "Server shutting down".into(),
+                }))).await;
+                break;
+            }
             // Real-time audio spectrum frames
             _ = spectrum_ticker.tick() => {
                 if let Some(bands) = crate::playback::spectrum::global().poll(&mut last_spectrum_seq) {

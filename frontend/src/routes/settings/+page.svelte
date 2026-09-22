@@ -7,8 +7,6 @@
 		api,
 		getApiBase,
 		authFetch,
-		getStoredToken,
-		setStoredToken,
 		type AudioDevice,
 		type AudioQuality,
 		type ExclusiveLatencyMode,
@@ -52,6 +50,7 @@
 	import Toggle from '$lib/components/ui/Toggle.svelte';
 	import { searchSettings, type SettingsSearchEntry } from '$lib/components/settings/settingsSearch';
 	import IntegrationsPanel from '$lib/components/settings/IntegrationsPanel.svelte';
+	import PhoneRemotePanel from '$lib/components/settings/PhoneRemotePanel.svelte';
 	import {
 		applyTrainingProgress,
 		discoveryLastTrainedAt,
@@ -187,35 +186,6 @@
 	// while a run is in progress without needing extra status fetches.
 	let nowEpochSeconds = $state(Math.floor(Date.now() / 1000));
 
-	// Access token — initialised in onMount (localStorage unavailable during SSR)
-	let serverToken = $state('');
-	let tokenVisible = $state(false);
-	let tokenCopied = $state(false);
-	let tokenRegenerating = $state(false);
-	let tokenRegenError = $state('');
-
-	async function handleRegenerateToken() {
-		if (!confirm('Regenerating the PIN will disconnect all other devices until they re-enter the new PIN. Continue?')) return;
-		tokenRegenerating = true;
-		tokenRegenError = '';
-		try {
-			const { token } = await api.regenerateServerToken();
-			serverToken = token;
-			dataCache.clear();
-			setStoredToken(token);
-		} catch {
-			tokenRegenError = 'Failed to regenerate token.';
-		} finally {
-			tokenRegenerating = false;
-		}
-	}
-
-	function copyToken() {
-		navigator.clipboard.writeText(serverToken).then(() => {
-			tokenCopied = true;
-			setTimeout(() => (tokenCopied = false), 2000);
-		});
-	}
 
 	async function refreshGalaxy() {
 		galaxyRefreshLabel = 'Refreshing genre data…';
@@ -523,7 +493,6 @@
 		const cancelBackgroundSettingsLoad = scheduleSettingsBackgroundLoad();
 		void loadDesktopAppInfo();
 		void setupDesktopUpdateListeners(tauriUnlisteners);
-		serverToken = getStoredToken() ?? '';
 		return () => {
 			if (mbPollTimer) clearInterval(mbPollTimer);
 			clearDiscoveryCompletionRefresh();
@@ -1956,6 +1925,9 @@
 		class:split-even={activeCategory === 'sources' || activeCategory === 'account'}
 	>
 		<div class="settings-main">
+			{#if activeCategory === 'account'}
+			<PhoneRemotePanel />
+			{/if}
 			{#if activeCategory === 'appearance'}
 			<section data-setting-id="colour-scheme" class="glass-panel section-panel palette-section" class:palette-section-open={paletteMenuOpen}>
 				<SectionHeader eyebrow="Palette" title="Colour scheme" subtitle="UI accent, wallpaper, and no-wallpaper colours." />
@@ -3332,28 +3304,6 @@
 		<div class="settings-side">
 
 			{#if activeCategory === 'account'}
-			<section data-setting-id="access-pin" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Access" title="Access PIN" subtitle="Use this PIN on another device." />
-				<div class="token-row">
-					<code class="token-value">{tokenVisible ? serverToken : '•'.repeat(serverToken.length || 6)}</code>
-					<button class="btn btn-glass btn-sm" onclick={() => (tokenVisible = !tokenVisible)}>
-						{tokenVisible ? 'Hide' : 'Show'}
-					</button>
-					<button class="btn btn-glass btn-sm" onclick={copyToken}>
-						{tokenCopied ? 'Copied!' : 'Copy'}
-					</button>
-				</div>
-				<div class="action-row">
-					<button class="btn btn-glass" disabled={tokenRegenerating} onclick={() => void handleRegenerateToken()}>
-						{tokenRegenerating ? 'Regenerating…' : 'Regenerate PIN'}
-					</button>
-					{#if tokenRegenError}<span class="field-error">{tokenRegenError}</span>{/if}
-				</div>
-				<p class="page-copy setting-caption">
-					Regenerating disconnects all other devices — they'll need to re-enter the new PIN.
-				</p>
-			</section>
-
 			<section data-setting-id="app-updates" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Desktop" title="App updates" subtitle="Version, install mode, and update checks." />
 				<div class="inner-metrics">
@@ -5530,27 +5480,6 @@
 
 	.setting-row input {
 		width: 80px;
-	}
-
-	.token-row {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		flex-wrap: wrap;
-	}
-
-	.token-value {
-		flex: 1;
-		min-width: 0;
-		padding: 8px 12px;
-		border-radius: var(--radius-sm);
-		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid var(--panel-border);
-		font-family: var(--font-mono);
-		font-size: var(--font-size-xs);
-		color: var(--text-secondary);
-		word-break: break-all;
-		white-space: pre-wrap;
 	}
 
 	.field-error {

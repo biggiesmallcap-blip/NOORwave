@@ -58,6 +58,9 @@
 		type TidalArtworkSize,
 	} from '$lib/utils/artwork';
 	import { api, getStoredToken, setStoredToken, clearStoredToken } from '$lib/api/client';
+	import { getApiBase } from '$lib/api/client';
+	import { remoteApi, RemoteRequestError } from '$lib/api/remote';
+	import { bootstrapRemoteConnection, BoundedRetry, clearRemoteSession, manualPinResponseError, storePairedSession } from '$lib/remote/connection';
 	import ContextMenu from '$lib/components/ContextMenu.svelte';
 	import Toast from '$lib/components/Toast.svelte';
 	import CommandPalette from '$lib/components/CommandPalette.svelte';
@@ -133,8 +136,12 @@
 	let isRemoteRoute = $derived(page.url.pathname.startsWith('/remote'));
 	let showConnect = $state(false);
 	let connectTokenInput = $state('');
+	let connectMethod = $state<'pairing' | 'pin'>('pairing');
 	let connectError = $state('');
 	let connectBusy = $state(false);
+	let networkUnavailable = $state(false);
+	const bootstrapRetries = new BoundedRetry(3);
+	let bootstrapRunning = false;
 	let pinInputEl = $state<HTMLInputElement | null>(null);
 	let pkceReloginDismissedThisSession = $state(false);
 	let pkceReloginDismissedForever = $state(false);
@@ -153,6 +160,50 @@
 		clearStoredToken();
 		dataCache.clear();
 	}
+
+	async function bootstrapAuthentication(): Promise<void> {
+		if (bootstrapRunning) return;
+		bootstrapRunning = true;
+		connectBusy = true;
+		try {
+			const result = await bootstrapRemoteConnection({
+				url: new URL(window.location.href),
+				replaceUrl: (clean) => window.history.replaceState(window.history.state, '', clean),
+				identity: (signal) => remoteApi.identity(signal),
+				redeem: (ticket, signal) => remoteApi.redeem(ticket, undefined, signal),
+				probe: (token, signal) => fetch(`${getApiBase()}/api/status`, { signal, headers: { authorization: `Bearer ${token}` } }),
+			});
+			networkUnavailable = result.phase === 'network-unavailable';
+			if (result.phase === 'connected') {
+				bootstrapRetries.reset();
+				showConnect = false;
+				if (!result.remembered && result.source === 'paired') {
+					showToast('Connected for this browser session. Private storage prevented remembering this phone.', 'success', 8000);
+				}
+				onConnected();
+				return;
+			}
+			if (result.phase === 'pairing-error' || result.phase === 'network-unavailable') connectError = result.message;
+			else if (result.reason === 'identity-mismatch') connectError = 'This address now belongs to a different NOORwave server. Scan its QR or enter its PIN.';
+			else if (result.reason === 'credential-rejected') connectError = 'This phone connection was revoked. Scan a new QR or enter the PIN.';
+			if (result.phase === 'needs-auth') await tryAutoSetup();
+			else {
+				showConnect = true;
+				setTimeout(focusPin, 50);
+			}
+		} finally {
+			connectBusy = false;
+			bootstrapRunning = false;
+		}
+	}
+
+	function retryBootstrapConnection(): void {
+		if (!bootstrapRetries.tryBegin()) {
+			connectError = 'Retry limit reached. Check that NOORwave is running and both devices use the same Wi-Fi, then reload this page.';
+			return;
+		}
+		void bootstrapAuthentication();
+	}
 	// Remove this migration notice after 2026-05-25. Keep PKCE auth and encrypted token migration.
 	let showPkceReloginNotice = $derived(
 		authReady &&
@@ -169,11 +220,10 @@
 
 	function handlePinInput(event: Event) {
 		const el = event.target as HTMLInputElement;
-		const digits = el.value.replace(/\D/g, '').slice(0, 6);
-		connectTokenInput = digits;
-		el.value = digits;
+		const code = el.value.replace(/\D/g, '').slice(0, 6);
+		connectTokenInput = code;
+		el.value = code;
 		connectError = '';
-		if (digits.length === 6) void submitConnect();
 	}
 
 	function focusPin() {
@@ -183,27 +233,36 @@
 	async function submitConnect() {
 		connectError = '';
 		const t = connectTokenInput.trim();
-		if (!t) { connectError = 'Enter your 6-digit PIN.'; return; }
+		const valid = /^\d{6}$/.test(t);
+		if (!valid) { connectError = 'Enter all 6 digits.'; return; }
 		connectBusy = true;
 		try {
-			setSessionToken(t);
-			const ok = await api.ping();
-			if (!ok) { clearSessionToken(); connectError = 'Could not reach the server. Check the URL / network.'; return; }
-			const resp = await fetch(`${(await import('$lib/api/client')).getApiBase()}/api/status`, {
+			if (connectMethod === 'pairing') {
+				const paired = await remoteApi.redeem(t);
+				const remembered = storePairedSession(paired);
+				showConnect = false;
+				if (!remembered) showToast('Connected for this session, but this phone could not save the connection.', 'success', 8000);
+				onConnected();
+				return;
+			}
+			const resp = await fetch(`${getApiBase()}/api/status`, {
 				headers: { authorization: `Bearer ${t}` }
 			});
-			if (resp.status === 401) {
-				clearSessionToken();
-				connectError = 'PIN rejected — double-check the 6 digits.';
-				connectTokenInput = '';
+			const responseError = manualPinResponseError(resp.status);
+			if (responseError) {
+				connectError = responseError;
+				if (resp.status === 401 || resp.status === 403) connectTokenInput = '';
 				setTimeout(focusPin, 0);
 				return;
 			}
+			setSessionToken(t);
 			showConnect = false;
 			onConnected();
-		} catch {
+		} catch (error) {
 			clearSessionToken();
-			connectError = 'Connection failed. Is the server running?';
+			if (error instanceof RemoteRequestError && error.detail.error === 'PAIRING_INVALID') connectError = 'Temporary code expired or was already used. Create a new one on the computer.';
+			else if (error instanceof RemoteRequestError && error.status === 429) connectError = 'Too many attempts. Wait a moment and create a new code.';
+			else connectError = 'Connection failed. Is the server running?';
 		} finally {
 			connectBusy = false;
 		}
@@ -316,12 +375,16 @@
 	};
 
 	function handleUnauthorized() {
-		clearSessionToken();
+		// A single route or WebSocket can reject independently. Keep the device
+		// credential until bootstrap verifies it against /api/status; that path
+		// clears genuinely revoked credentials, while a transient 401 no longer
+		// strands an already-paired iPhone at the PIN screen.
+		dataCache.clear();
 		authReady = false;
 		onboardingChecked = false;
 		cancelStartupPrewarm?.();
 		cancelStartupPrewarm = null;
-		void tryAutoSetup();
+		void bootstrapAuthentication();
 	}
 
 	// Liquid-glass crossfade — scoped to the onboarding → home handoff only.
@@ -343,33 +406,15 @@
 
 	onMount(() => {
 		const tauriUpdateUnlisteners: Array<() => void> = [];
-		// Show connect screen if no token is stored
-		if (!getStoredToken()) {
-			void tryAutoSetup();
-		} else {
-			authReady = true;
-			if (hasLocalOnboardingComplete(onboardingScope())) onboardingChecked = true;
-			connectWebSocket();
-			void refreshPlaybackState();
-			void checkOnboarding();
-			void loadDownloadSettings();
-			void refreshDownloadStatus();
-			startStartupPrewarm();
-		}
+		// Pair fragments and public identity are processed before setup or any
+		// authenticated request. The bootstrap function is deliberately exclusive.
+		void bootstrapAuthentication();
 
 		// Listen for 401 responses from any API call. On loopback the backend
 		// will hand us a fresh token via /api/setup/token, so retry auto-setup
 		// before falling back to the PIN modal — keeps local launches silent
 		// even if the stored token is stale (e.g. server regenerated).
 		window.addEventListener('noor:unauthorized', handleUnauthorized);
-
-		// Build string for the sidebar pill. Cosmetic, so a failure is silent.
-		void api
-			.getStatus()
-			.then((status) => {
-				serverVersion = status.version ?? '';
-			})
-			.catch(() => {});
 
 		theme = readPersisted('noor-theme', theme, oneOf(['light', 'dark'] as const));
 		pkceReloginDismissedForever = readPersisted(
@@ -583,6 +628,7 @@
 		connectWebSocket();
 		void refreshPlaybackState();
 		void loadTidalStatus();
+		void api.getStatus().then((status) => { serverVersion = status.version ?? ''; }).catch(() => {});
 		void checkOnboarding();
 		startStartupPrewarm();
 	}
@@ -1132,12 +1178,14 @@
 				</span>
 				<span class="connect-brand-name">NOOR</span>
 			</div>
-			<h2 class="connect-title">Enter PIN</h2>
+			<h2 class="connect-title">Connect to NOORwave</h2>
 			<p class="connect-copy">
-				Check the NOOR terminal or Settings on your main device for the 6-digit access PIN.
+				{connectMethod === 'pairing'
+					? 'Enter the temporary 6-digit code shown beside the QR.'
+					: 'Enter the master recovery PIN from the computer settings.'}
 			</p>
 
-			<button type="button" class="pin-pad" onclick={focusPin} aria-label="PIN input">
+			<button type="button" class="pin-pad" onclick={focusPin} aria-label="Pairing code or PIN input">
 				{#each [0,1,2,3,4,5] as i}
 					<span
 						class="pin-digit"
@@ -1158,13 +1206,20 @@
 				autocomplete="one-time-code"
 				value={connectTokenInput}
 				oninput={handlePinInput}
-				onkeydown={(e) => e.key === 'Enter' && connectTokenInput.length === 6 && void submitConnect()}
+				onkeydown={(e) => e.key === 'Enter' && void submitConnect()}
 				disabled={connectBusy}
-				aria-label="6-digit PIN"
+				aria-label={connectMethod === 'pairing' ? '6-digit temporary pairing code' : '6-digit master recovery PIN'}
 			/>
+			<button class="btn btn-primary" type="button" disabled={connectBusy || !/^\d{6}$/.test(connectTokenInput)} onclick={() => void submitConnect()}>Connect</button>
+			<button class="btn btn-glass" type="button" disabled={connectBusy} onclick={() => { connectMethod = connectMethod === 'pairing' ? 'pin' : 'pairing'; connectTokenInput = ''; connectError = ''; setTimeout(focusPin, 0); }}>
+				{connectMethod === 'pairing' ? 'Use master PIN instead' : 'Use temporary code instead'}
+			</button>
 
 			{#if connectError}
-				<p class="connect-error">{connectError}</p>
+				<p class="connect-error" role="alert" aria-live="assertive">{connectError}</p>
+			{/if}
+			{#if networkUnavailable}
+				<button class="btn btn-primary" type="button" disabled={connectBusy} onclick={retryBootstrapConnection}>Retry connection</button>
 			{/if}
 			{#if connectBusy}
 				<p class="connect-copy">Connecting…</p>

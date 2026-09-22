@@ -458,15 +458,6 @@ fn is_valid_pin(s: &str) -> bool {
     s.len() == 6 && s.chars().all(|c| c.is_ascii_digit())
 }
 
-pub fn regenerate_server_token(conn: &Connection) -> Result<String> {
-    let token = generate_readable_token();
-    conn.execute(
-        "INSERT OR REPLACE INTO server_config (key, value) VALUES ('server_token', ?1)",
-        params![token],
-    )?;
-    Ok(token)
-}
-
 /// First-run onboarding flag. When the row is missing, treat an existing
 /// `service_auth` TIDAL row as implicit completion and persist the flag —
 /// this keeps users upgrading from earlier versions out of the onboarding

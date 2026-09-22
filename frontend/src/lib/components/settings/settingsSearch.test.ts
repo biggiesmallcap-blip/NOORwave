@@ -26,4 +26,8 @@ describe('searchSettings', () => {
 		const ids = SETTINGS_SEARCH_INDEX.map((e) => e.id);
 		expect(new Set(ids).size).toBe(ids.length);
 	});
+
+	it.each(['phone', 'remote', 'QR', 'network', 'pair', 'PIN'])('keeps the Phone Remote aliases searchable: %s', (query) => {
+		expect(searchSettings(query).map((entry) => entry.id)).toContain('phone-remote');
+	});
 });

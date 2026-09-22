@@ -42,8 +42,7 @@ pub fn get_minimize_to_tray() -> bool {
 }
 
 #[tauri::command]
-pub fn set_minimize_to_tray(value: bool) {
-    let mut cfg = crate::config::load();
-    cfg.minimize_to_tray = value;
-    crate::config::save(&cfg);
+pub fn set_minimize_to_tray(value: bool) -> Result<(), String> {
+    crate::config::update(|config| config.minimize_to_tray = value)
+        .map_err(|error| error.to_string())
 }

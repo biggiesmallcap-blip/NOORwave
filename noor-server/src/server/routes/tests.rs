@@ -1197,13 +1197,15 @@ async fn genre_heat_route_defaults_to_ninety_days() {
 
 /// Build a fresh `AppState` backed by `db`. Single source of truth for test
 /// initializers - when `crate::AppState` gains a field, add it here once.
-fn fresh_test_state(db: Database) -> crate::AppState {
+pub(in crate::server) fn fresh_test_state(db: Database) -> crate::AppState {
     let (event_tx, _) = tokio::sync::broadcast::channel(16);
     #[cfg(feature = "spotify-public")]
     let spotify_public = Arc::new(
         crate::services::spotify_public::SpotifyPublicClient::new(db.clone())
             .expect("SpotifyPublicClient::new must succeed in tests"),
     );
+    let remote = crate::server::remote::RemoteService::new(db.clone(), String::new())
+        .expect("remote service");
     crate::AppState {
         db,
         event_tx,
@@ -1256,6 +1258,7 @@ fn fresh_test_state(db: Database) -> crate::AppState {
         master_key: crate::services::crypto::MasterKey::ephemeral(),
         lastfm_api_secret: None,
         server_token: String::new(),
+        remote,
         audio_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         user_cleared_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         #[cfg(feature = "spotify-public")]
@@ -1278,7 +1281,7 @@ async fn build_test_app() -> Router {
 /// the filesystem: a temp `.db` + WAL per test (1000+ cases) churns enough I/O
 /// that Windows Defender scanning can stall a normally-instant test past
 /// libtest's 60s warning.
-fn fresh_migrated_db() -> Database {
+pub(in crate::server) fn fresh_migrated_db() -> Database {
     let db = Database::open_in_memory().expect("db opened");
     db.run_migrations().expect("migrations");
     db.with_conn(|conn| schema::run_migrations(conn))
@@ -5406,7 +5409,8 @@ async fn put_host_mode_persists() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Reading info should now reflect host_mode = true
+    // Saving the standalone preference does not rebind the already-running
+    // listener. Info reports both facts and requires an external restart.
     let resp2 = app
         .oneshot(
             Request::builder()
@@ -5427,8 +5431,10 @@ async fn put_host_mode_persists() {
         body["bind_address"]
             .as_str()
             .unwrap()
-            .starts_with("0.0.0.0")
+            .starts_with("127.0.0.1")
     );
+    assert_eq!(body["effective_host_mode"], false);
+    assert_eq!(body["restart_required"], true);
 }
 
 /// Reproducer for the Phase 2b hotfix: `/api/radio/song` must

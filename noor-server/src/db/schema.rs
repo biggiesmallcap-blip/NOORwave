@@ -64,6 +64,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_060,
     MIGRATION_061,
     MIGRATION_062,
+    MIGRATION_063,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1689,6 +1690,21 @@ SET confidence = 1.0
 WHERE confidence > 1.0;
 "#;
 
+// Individually revocable phone-remote credentials. Only the SHA-256 digest of
+// the complete versioned token is persisted; the raw credential is returned
+// once by the pairing exchange and remains browser-side.
+const MIGRATION_063: &str = r#"
+CREATE TABLE IF NOT EXISTS remote_devices (
+    id           TEXT PRIMARY KEY NOT NULL,
+    name         TEXT NOT NULL,
+    token_hash   BLOB NOT NULL CHECK(length(token_hash) = 32),
+    paired_at    TEXT NOT NULL,
+    last_seen_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_devices_token_hash
+    ON remote_devices(token_hash);
+"#;
+
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     // Create migrations table if not exists
     conn.execute_batch(
@@ -2077,5 +2093,57 @@ mod tests {
 
         conn.execute_batch(MIGRATION_062).unwrap();
         assert_eq!(confidences(), (1.0, 0.73));
+    }
+
+    #[test]
+    fn migration_063_is_reentrant_and_preserves_existing_data() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        apply_migrations_up_to(&conn, 62).unwrap();
+        conn.execute_batch(
+            "INSERT INTO server_config (key, value) VALUES ('server_token', '123456');
+             INSERT INTO service_auth (service, user_id) VALUES ('tidal', 'existing-user');",
+        )
+        .unwrap();
+
+        // Simulate interruption after DDL committed but before migration 063's
+        // completion row was recorded.
+        conn.execute_batch(MIGRATION_063).unwrap();
+        apply_migrations_up_to(&conn, MIGRATIONS.len()).unwrap();
+        apply_migrations_up_to(&conn, MIGRATIONS.len()).unwrap();
+
+        let migration_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM _migrations WHERE id = 63",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let token: String = conn
+            .query_row(
+                "SELECT value FROM server_config WHERE key = 'server_token'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let user_id: String = conn
+            .query_row(
+                "SELECT user_id FROM service_auth WHERE service = 'tidal'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let hash_is_unique: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_index_list('remote_devices') WHERE name = 'idx_remote_devices_token_hash' AND \"unique\" = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(migration_rows, 1);
+        assert_eq!(token, "123456");
+        assert_eq!(user_id, "existing-user");
+        assert_eq!(hash_is_unique, 1);
     }
 }

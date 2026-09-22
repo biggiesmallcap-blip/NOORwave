@@ -10,6 +10,7 @@ import { handleDownloadProgress, handleDownloadItemDone, handleDownloadComplete 
 import { showToast } from '$lib/stores/toast';
 import { setAudioSpectrum } from '$lib/stores/audioSpectrum';
 import { applyCacheUpdateForWsMessage } from '$lib/cache/ws_events';
+import { ReconnectScheduler } from '$lib/remote/connection';
 
 export const wsConnected = writable(false);
 
@@ -44,6 +45,8 @@ export const wsMessages = writable<WsMessage[]>([]);
 
 let socket: WebSocket | null = null;
 let queueRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let reconnectAllowed = true;
+const reconnectScheduler = new ReconnectScheduler(() => connectWebSocket());
 
 function scheduleQueueRefresh() {
 	if (queueRefreshTimer) clearTimeout(queueRefreshTimer);
@@ -66,6 +69,7 @@ function getWebSocketUrl(): string {
 }
 
 export function connectWebSocket() {
+	reconnectAllowed = true;
 	// Skip if a socket is already up OR currently connecting — avoids creating
 	// a second socket while the first is mid-handshake.
 	if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) return;
@@ -73,6 +77,7 @@ export function connectWebSocket() {
 	socket = new WebSocket(getWebSocketUrl());
 
 	socket.onopen = () => {
+		reconnectScheduler.succeeded();
 		wsConnected.set(true);
 	};
 
@@ -174,13 +179,33 @@ export function connectWebSocket() {
 		} catch {}
 	};
 
-	socket.onclose = () => {
+	socket.onclose = (event) => {
 		wsConnected.set(false);
-		// Reconnect after 3s
-		setTimeout(connectWebSocket, 3000);
+		socket = null;
+		if (event.code === 4001) {
+			reconnectAllowed = false;
+			reconnectScheduler.clear();
+			// Let the auth bootstrap probe the saved credential before deleting it.
+			// This distinguishes true revocation from a route/socket-specific reject.
+			if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('noor:unauthorized'));
+			return;
+		}
+		if (reconnectAllowed) reconnectScheduler.next();
 	};
 
 	socket.onerror = () => {
 		socket?.close();
 	};
+}
+
+export function disconnectWebSocket(): void {
+	reconnectAllowed = false;
+	reconnectScheduler.clear();
+	queueRefreshTimer && clearTimeout(queueRefreshTimer);
+	queueRefreshTimer = null;
+	const current = socket;
+	socket = null;
+	if (current) current.onclose = null;
+	current?.close(1000, 'Session ended');
+	wsConnected.set(false);
 }

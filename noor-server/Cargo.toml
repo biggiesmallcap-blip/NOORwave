@@ -87,6 +87,8 @@ metaflac = "0.2.8"
 mp3lame-encoder = "0.2.4"
 dirs = "6.0.0"
 mp4ameta = "0.13.0"
+mdns-sd = "=0.21.4"
+netdev = { version = "=0.46.3", default-features = false }
 
 # Real WASAPI exclusive-mode output (Windows only). cpal does not expose
 # ShareMode::Exclusive, so we drive IAudioClient directly via this crate to
@@ -106,3 +108,4 @@ aubio-rs = { version = "0.2", default-features = false, features = ["builtin", "
 
 [dev-dependencies]
 claxon = "0.4.3"
+tokio-tungstenite = "0.29"

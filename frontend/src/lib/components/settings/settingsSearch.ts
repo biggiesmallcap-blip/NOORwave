@@ -19,7 +19,7 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
 	{ id: 'colour-scheme', category: 'appearance', label: 'Colour scheme', keywords: 'palette color colour accent theme swatch' },
 	{ id: 'interface-size', category: 'appearance', label: 'Interface size', keywords: 'zoom ui scale text size bigger smaller' },
 	{ id: 'background', category: 'appearance', label: 'Background', keywords: 'wallpaper shader blur fps animation' },
-	{ id: 'access-pin', category: 'account', label: 'Access PIN', keywords: 'token pin password remote pair device regenerate' },
+	{ id: 'phone-remote', category: 'account', label: 'Phone Remote', keywords: 'phone remote qr network pair pairing device wifi local address access token pin password regenerate reset start sign in autostart tray' },
 	{ id: 'app-updates', category: 'account', label: 'App updates', keywords: 'version update install mode upgrade release check' },
 	{ id: 'closing-the-window', category: 'account', label: 'Closing the window', keywords: 'tray minimize close quit exit window behaviour' },
 	{ id: 'connect-tidal', category: 'sources', label: 'Connect TIDAL', keywords: 'tidal login auth sync library auto-sync streaming' },

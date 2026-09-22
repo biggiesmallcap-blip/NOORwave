@@ -202,6 +202,9 @@ pub struct AppState {
     pub lastfm_api_secret: Option<String>,
     /// Shared bearer token for network auth
     pub server_token: String,
+    /// Phone-remote identity, paired credentials, tickets, limiter and actual
+    /// listener facts. Kept outside the broad AppState lock internally.
+    pub remote: server::remote::RemoteService,
     /// `true` only while the CPAL callback is actively draining samples (set by the
     /// `Started` runtime event, cleared on `Stopped` / `Finished` / startup).
     /// Lets `get_playback_state` return `is_playing: false` during the buffering phase
@@ -383,36 +386,101 @@ fn parse_usize_env(var: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-fn resolve_bind_addr(db: &db::Database) -> String {
+struct ResolvedBind {
+    addr: String,
+    control: server::remote::HostControl,
+    configured_host_mode: bool,
+}
+
+fn configured_host_mode(db: &db::Database) -> bool {
+    db.with_conn(|conn| {
+        let v: Option<String> = conn
+            .query_row(
+                "SELECT value FROM server_config WHERE key = 'server.host_mode'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(v.map(|s| s == "true").unwrap_or(false))
+    })
+    .unwrap_or(false)
+}
+
+fn resolve_bind_addr(db: &db::Database) -> ResolvedBind {
+    let configured = configured_host_mode(db);
+    let noor_addr = std::env::var("NOOR_ADDR").ok();
+    let managed = std::env::var("NOOR_MANAGED_HOST_MODE").ok();
+    let cli_host = std::env::args().any(|argument| argument == "--host");
+    resolve_bind_inputs(
+        configured,
+        noor_addr.as_deref(),
+        managed.as_deref(),
+        cli_host,
+        server::noor_port(),
+    )
+}
+
+fn resolve_bind_inputs(
+    configured: bool,
+    noor_addr: Option<&str>,
+    managed: Option<&str>,
+    cli_host: bool,
+    port: u16,
+) -> ResolvedBind {
     // NOOR_ADDR env var always wins (power-user override)
-    if let Ok(addr) = std::env::var("NOOR_ADDR")
-        && !addr.trim().is_empty()
-    {
-        return addr;
+    if let Some(addr) = noor_addr.filter(|addr| !addr.trim().is_empty()) {
+        return ResolvedBind {
+            addr: addr.to_owned(),
+            control: server::remote::HostControl::Environment,
+            configured_host_mode: configured,
+        };
     }
-    let port = server::noor_port();
+    if let Some(enabled) = managed.and_then(|value| value.trim().parse::<bool>().ok()) {
+        return ResolvedBind {
+            addr: if enabled {
+                format!("0.0.0.0:{port}")
+            } else {
+                format!("127.0.0.1:{port}")
+            },
+            control: server::remote::HostControl::Desktop,
+            configured_host_mode: enabled,
+        };
+    }
     // --host flag forces 0.0.0.0
-    if std::env::args().any(|a| a == "--host") {
-        return format!("0.0.0.0:{port}");
+    if cli_host {
+        return ResolvedBind {
+            addr: format!("0.0.0.0:{port}"),
+            control: server::remote::HostControl::CommandLine,
+            configured_host_mode: configured,
+        };
     }
-    // DB preference (set by Tauri tray toggle or headless users)
-    let host_mode = db
-        .with_conn(|conn| {
-            let v: Option<String> = conn
-                .query_row(
-                    "SELECT value FROM server_config WHERE key = 'server.host_mode'",
-                    [],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            Ok(v.map(|s| s == "true").unwrap_or(false))
-        })
-        .unwrap_or(false);
-    if host_mode {
-        format!("0.0.0.0:{port}")
-    } else {
-        format!("127.0.0.1:{port}")
+    ResolvedBind {
+        addr: if configured {
+            format!("0.0.0.0:{port}")
+        } else {
+            format!("127.0.0.1:{port}")
+        },
+        control: server::remote::HostControl::Standalone,
+        configured_host_mode: configured,
     }
+}
+
+fn mirror_managed_host_mode(db: &db::Database, resolved: &ResolvedBind) -> Result<()> {
+    if resolved.control != server::remote::HostControl::Desktop {
+        return Ok(());
+    }
+    db.with_conn(|connection| {
+        connection.execute(
+            "INSERT INTO server_config (key, value) VALUES ('server.host_mode', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [if resolved.configured_host_mode {
+                "true"
+            } else {
+                "false"
+            }],
+        )?;
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -427,6 +495,63 @@ mod tests {
         let args_no_flag = ["noor-server".to_string()];
         let has_host = args_no_flag.iter().any(|a| a == "--host");
         assert!(!has_host);
+    }
+
+    #[test]
+    fn managed_host_preference_is_mirrored_but_external_control_is_not() {
+        let db = crate::db::Database::open_in_memory().expect("open db");
+        db.run_migrations().expect("migrations");
+        let managed = super::ResolvedBind {
+            addr: "0.0.0.0:17600".to_owned(),
+            control: crate::server::remote::HostControl::Desktop,
+            configured_host_mode: true,
+        };
+        super::mirror_managed_host_mode(&db, &managed).expect("mirror managed preference");
+        assert!(super::configured_host_mode(&db));
+
+        let external = super::ResolvedBind {
+            addr: "127.0.0.1:17600".to_owned(),
+            control: crate::server::remote::HostControl::Environment,
+            configured_host_mode: false,
+        };
+        super::mirror_managed_host_mode(&db, &external).expect("external control does not write");
+        assert!(super::configured_host_mode(&db));
+    }
+
+    #[test]
+    fn managed_host_mirror_failure_is_reported() {
+        let db = crate::db::Database::open_in_memory().expect("open db");
+        db.run_migrations().expect("migrations");
+        db.with_conn(|connection| {
+            connection.execute("DROP TABLE server_config", [])?;
+            Ok(())
+        })
+        .expect("drop config table");
+        let managed = super::ResolvedBind {
+            addr: "127.0.0.1:17600".to_owned(),
+            control: crate::server::remote::HostControl::Desktop,
+            configured_host_mode: false,
+        };
+        assert!(super::mirror_managed_host_mode(&db, &managed).is_err());
+    }
+
+    #[test]
+    fn bind_precedence_keeps_noor_addr_authoritative_over_managed_mode() {
+        let external =
+            super::resolve_bind_inputs(false, Some("127.0.0.1:19000"), Some("true"), true, 17600);
+        assert_eq!(external.addr, "127.0.0.1:19000");
+        assert_eq!(
+            external.control,
+            crate::server::remote::HostControl::Environment
+        );
+
+        let managed_false = super::resolve_bind_inputs(true, None, Some("false"), true, 17600);
+        assert_eq!(managed_false.addr, "127.0.0.1:17600");
+        assert_eq!(
+            managed_false.control,
+            crate::server::remote::HostControl::Desktop
+        );
+        assert!(!managed_false.configured_host_mode);
     }
 
     // Characterization test for the boot-time wipe at main.rs:383-399. This
@@ -589,6 +714,11 @@ async fn main() -> Result<()> {
     // Initialize database
     let db = db::Database::open(&db_path)?;
     db.run_migrations()?;
+    // Desktop-managed launches make the JSON preference authoritative. Mirror
+    // it before readiness so the HTTP status and future standalone launches
+    // agree; persistence failure aborts startup instead of reporting success.
+    let resolved_bind = resolve_bind_addr(&db);
+    mirror_managed_host_mode(&db, &resolved_bind)?;
     let genre_count = db.with_conn(genre::taxonomy::ensure_taxonomy_loaded)?;
     db.seed_genres_from_taxonomy()?;
     // The audio runtime is ephemeral — it never survives a process restart. Clear the
@@ -753,13 +883,8 @@ async fn main() -> Result<()> {
 
     // Generate or load the server access token
     let server_token = db.with_conn(db::queries::ensure_server_token)?;
-    info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    info!("  NOOR access token: {}", server_token);
-    info!("  Copy this into the app on any new device.");
-    info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-
-    // Resolve bind address before db is moved into AppState
-    let addr = resolve_bind_addr(&db);
+    let remote = server::remote::RemoteService::new(db.clone(), server_token.clone())?;
+    info!("NOOR remote authentication initialized");
 
     // Shared client for Last.fm / MusicBrainz / Discogs / RSS / session
     // recovery. reqwest has no default timeout, so an unresponsive upstream
@@ -841,6 +966,7 @@ async fn main() -> Result<()> {
         master_key,
         lastfm_api_secret,
         server_token,
+        remote,
         audio_active: Arc::new(AtomicBool::new(false)),
         user_cleared_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         #[cfg(feature = "spotify-public")]
@@ -1113,7 +1239,7 @@ async fn main() -> Result<()> {
     }
 
     // Start HTTP + WebSocket server
-    info!("Starting server on http://{}", addr);
+    info!("Starting server on http://{}", resolved_bind.addr);
     // Boot-time cache warming: ~10s after start, hit our own home endpoints over
     // loopback so their in-process caches (TIDAL mixes/radio, picks, Last.fm
     // recommendations) are warm before the first real client request. This is the
@@ -1152,14 +1278,25 @@ async fn main() -> Result<()> {
             let s = state.read().await;
             (s.http_client.clone(), s.server_token.clone())
         };
-        let warm_port = addr.rsplit(':').next().unwrap_or("17600").to_string();
+        let warm_port = resolved_bind
+            .addr
+            .rsplit(':')
+            .next()
+            .unwrap_or("17600")
+            .to_string();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             warm_home_caches(warm_http, warm_port, warm_token).await;
         });
     }
 
-    server::start(state, &addr).await?;
+    server::start(
+        state,
+        &resolved_bind.addr,
+        resolved_bind.control,
+        resolved_bind.configured_host_mode,
+    )
+    .await?;
 
     Ok(())
 }

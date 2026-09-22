@@ -43,18 +43,45 @@ export function getApiBase(): string {
 // ─── Token management ────────────────────────────────────────────────────────
 
 const TOKEN_KEY = 'noor_api_token';
+let memoryToken: string | null = null;
 
 export function getStoredToken(): string | null {
-	if (typeof localStorage === 'undefined') return null;
-	return localStorage.getItem(TOKEN_KEY);
+	if (typeof localStorage === 'undefined') return memoryToken;
+	try {
+		return localStorage.getItem(TOKEN_KEY) ?? memoryToken;
+	} catch {
+		return memoryToken;
+	}
 }
 
-export function setStoredToken(token: string): void {
-	localStorage.setItem(TOKEN_KEY, token);
+export function setStoredToken(token: string): boolean {
+	memoryToken = token;
+	if (typeof localStorage === 'undefined') return false;
+	try {
+		localStorage.setItem(TOKEN_KEY, token);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+export function setMemoryToken(token: string): void {
+	memoryToken = token;
+}
+
+export function clearPersistedToken(): void {
+	if (typeof localStorage === 'undefined') return;
+	try { localStorage.removeItem(TOKEN_KEY); } catch { /* memory fallback remains */ }
 }
 
 export function clearStoredToken(): void {
-	localStorage.removeItem(TOKEN_KEY);
+	memoryToken = null;
+	if (typeof localStorage === 'undefined') return;
+	try {
+		localStorage.removeItem(TOKEN_KEY);
+	} catch {
+		// A blocked storage API must not prevent the in-memory session clearing.
+	}
 }
 
 function requestTimeout(

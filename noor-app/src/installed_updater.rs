@@ -34,16 +34,24 @@ pub async fn install_now(handle: &AppHandle) -> Result<(), Box<dyn std::error::E
     };
 
     let bytes = update.download(|_chunk, _total| {}, || {}).await?;
-    let state = handle.try_state::<std::sync::Arc<crate::sidecar::SidecarState>>();
+    let lifecycle = handle.try_state::<std::sync::Arc<crate::remote_lifecycle::RemoteLifecycle>>();
 
-    if let Some(state) = state.as_ref() {
-        crate::sidecar::kill_server(state.inner());
+    if let Some(lifecycle) = lifecycle.as_ref() {
+        crate::sidecar::kill_server(lifecycle.sidecar());
     }
 
     if let Err(err) = update.install(bytes) {
-        if let Some(state) = state.as_ref() {
-            crate::sidecar::spawn_server(state.inner());
-            let _ = crate::sidecar::wait_for_ready(state.inner());
+        if let Some(lifecycle) = lifecycle.as_ref() {
+            let state = lifecycle.sidecar();
+            let expected = *state.host_mode.lock().unwrap();
+            let result = crate::sidecar::spawn_server(state).and_then(|_| {
+                crate::sidecar::wait_for_remote_ready(
+                    state,
+                    expected,
+                    std::time::Instant::now() + std::time::Duration::from_secs(15),
+                )
+            });
+            lifecycle.record_initial_result(&result);
         }
         return Err(Box::new(err));
     }

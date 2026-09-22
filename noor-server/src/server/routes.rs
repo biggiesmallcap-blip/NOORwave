@@ -18,8 +18,8 @@ use anyhow::Context;
 use axum::{
     Router,
     extract::{Path, Query, State},
-    http::StatusCode,
-    response::Json,
+    http::{StatusCode, header},
+    response::{IntoResponse, Json, Response},
     routing::{get, patch, post, put},
 };
 use rusqlite::{OptionalExtension, params};
@@ -1237,52 +1237,41 @@ pub fn api_routes(state: SharedState) -> Router {
         .with_state(state)
 }
 
-async fn get_server_token_handler(State(state): State<SharedState>) -> Json<Value> {
-    let s = state.read().await;
-    Json(json!({ "token": s.server_token }))
+async fn get_server_token_handler(State(state): State<SharedState>) -> impl IntoResponse {
+    let remote = state.read().await.remote.clone();
+    let token = remote.shared_pin().await;
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(json!({ "token": token })),
+    )
 }
 
 async fn regenerate_server_token_handler(
     State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    let new_token = {
-        let s = state.read().await;
-        s.db.with_conn(crate::db::queries::regenerate_server_token)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    };
+) -> Result<impl IntoResponse, StatusCode> {
+    let remote = state.read().await.remote.clone();
+    let (new_token, _revoked_devices) = crate::server::remote::reset_all(&remote)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     {
         let mut s = state.write().await;
         s.server_token = new_token.clone();
     }
-    Ok(Json(json!({ "token": new_token })))
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(json!({ "token": new_token })),
+    ))
 }
 
 async fn get_server_info(State(state): State<SharedState>) -> Json<Value> {
-    let host_mode = state
-        .read()
-        .await
-        .db
-        .with_conn(|conn| {
-            let v: Option<String> = conn
-                .query_row(
-                    "SELECT value FROM server_config WHERE key = 'server.host_mode'",
-                    [],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            Ok(v.map(|s| s == "true").unwrap_or(false))
-        })
-        .unwrap_or(false);
-
-    let port = crate::server::noor_port();
-    let bind_address = if host_mode {
-        format!("0.0.0.0:{port}")
-    } else {
-        format!("127.0.0.1:{port}")
-    };
+    let remote = state.read().await.remote.clone();
+    let runtime = remote.runtime_snapshot().await;
     Json(json!({
-        "host_mode": host_mode,
-        "bind_address": bind_address,
+        "host_mode": runtime.configured_host_mode,
+        "bind_address": runtime.bind_address.to_string(),
+        "effective_host_mode": runtime.effective_host_mode,
+        "restart_required": runtime.configured_host_mode != runtime.effective_host_mode,
+        "control": runtime.control,
         "version": env!("CARGO_PKG_VERSION"),
     }))
 }
@@ -1290,13 +1279,37 @@ async fn get_server_info(State(state): State<SharedState>) -> Json<Value> {
 async fn put_server_host_mode(
     State(state): State<SharedState>,
     Json(body): Json<serde_json::Value>,
-) -> Result<Json<Value>, StatusCode> {
+) -> Response {
     let host_mode = body
         .get("host_mode")
         .and_then(|v| v.as_bool())
-        .ok_or(StatusCode::BAD_REQUEST)?;
+        .ok_or(StatusCode::BAD_REQUEST);
+    let Ok(host_mode) = host_mode else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
 
-    state
+    let remote = state.read().await.remote.clone();
+    let before = remote.runtime_snapshot().await;
+    match before.control {
+        crate::server::remote::HostControl::Desktop => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error": "DESKTOP_MANAGED", "message": "Host mode is managed by the desktop application."})),
+            )
+                .into_response();
+        }
+        crate::server::remote::HostControl::Environment
+        | crate::server::remote::HostControl::CommandLine => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error": "EXTERNAL_BIND_OVERRIDE", "message": "Host mode is controlled by the server launch configuration."})),
+            )
+                .into_response();
+        }
+        crate::server::remote::HostControl::Standalone => {}
+    }
+
+    if state
         .read()
         .await
         .db
@@ -1307,17 +1320,18 @@ async fn put_server_host_mode(
             )?;
             Ok(())
         })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let port = crate::server::noor_port();
-    let bind_address = if host_mode {
-        format!("0.0.0.0:{port}")
-    } else {
-        format!("127.0.0.1:{port}")
-    };
-    Ok(Json(
-        json!({ "host_mode": host_mode, "bind_address": bind_address }),
-    ))
+        .is_err()
+    {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    remote.set_configured_host_mode(host_mode).await;
+    Json(json!({
+        "host_mode": host_mode,
+        "bind_address": before.bind_address.to_string(),
+        "effective_host_mode": before.effective_host_mode,
+        "restart_required": host_mode != before.effective_host_mode,
+    }))
+    .into_response()
 }
 
 async fn play_discovery_track(
@@ -12322,4 +12336,4 @@ async fn scrobbling_backfill(State(state): State<SharedState>) -> Result<Json<Va
 // -- Spotify Config & Enrichment ----------------------------------------------
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
