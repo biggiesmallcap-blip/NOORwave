@@ -1,3 +1,9 @@
+export type DesktopUpdateInfo = {
+	version: string;
+	notes: string | null;
+	action: 'install' | 'download';
+};
+
 export type DesktopUpdateState = {
 	appVersion: string;
 	installModeLabel: string;

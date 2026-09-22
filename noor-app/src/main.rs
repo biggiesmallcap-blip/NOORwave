@@ -52,6 +52,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::check_for_updates_now,
             commands::get_update_state,
+            commands::install_pending_update,
             commands::get_install_mode,
             commands::get_minimize_to_tray,
             commands::set_minimize_to_tray,
@@ -140,6 +141,7 @@ fn main() {
                     tray::notify_update(
                         &update_handle,
                         info.version,
+                        info.notes,
                         tray::UpdateAction::OpenUrl(info.url),
                     );
                 }

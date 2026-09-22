@@ -12,6 +12,14 @@ use tauri::{
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateDetails {
+    pub version: String,
+    pub notes: Option<String>,
+    pub action: &'static str,
+}
+
 // Multi-resolution ICOs (16/24/32/48/256). Tauri's image decoder picks the
 // largest frame, so the OS scales DOWN to whatever the system tray asks for —
 // avoiding the upscaling blur that 32-px PNG sources caused.
@@ -34,7 +42,7 @@ pub struct TrayMenuItems {
     pub network_item: CheckMenuItem<Wry>,
     pub restart_item: MenuItem<Wry>,
     pub exit_item: MenuItem<Wry>,
-    pub pending: Mutex<Option<(String, UpdateAction)>>,
+    pub pending: Mutex<Option<(UpdateDetails, UpdateAction)>>,
 }
 
 #[derive(Clone)]
@@ -128,7 +136,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .on_menu_event({
             let handle = app.handle().clone();
             let lifecycle = lifecycle.clone();
-            move |app_handle, event| match event.id().as_ref() {
+            move |_app_handle, event| match event.id().as_ref() {
                 "show" => {
                     if let Some(win) = handle.get_webview_window("main") {
                         let _ = win.show();
@@ -136,30 +144,11 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 "update" => {
-                    let action = app_handle
-                        .state::<TrayMenuItems>()
-                        .pending
-                        .lock()
-                        .unwrap()
-                        .clone();
-                    match action {
-                        Some((_, UpdateAction::OpenUrl(url))) => {
-                            let _ = tauri_plugin_opener::open_url(url, None::<&str>);
-                        }
-                        Some((_, UpdateAction::Install)) => {
-                            let handle = app_handle.clone();
-                            tauri::async_runtime::spawn(async move {
-                                if let Err(err) =
-                                    crate::installed_updater::install_now(&handle).await
-                                {
-                                    let message = err.to_string();
-                                    eprintln!("update install failed: {message}");
-                                    let _ = handle.emit("update-error", &message);
-                                }
-                            });
-                        }
-                        None => {}
+                    if let Some(win) = handle.get_webview_window("main") {
+                        let _ = win.show();
+                        let _ = win.set_focus();
                     }
+                    let _ = handle.emit("open-update-details", ());
                 }
                 "network" => {
                     let desired = !lifecycle.snapshot().configured_host_mode;
@@ -279,15 +268,26 @@ fn network_checked_from_transition(
 
 // Called from a background thread when a newer release is found.
 // Rebuilds the tray menu with an update item at the top and updates the tooltip.
-pub fn notify_update(handle: &tauri::AppHandle, version: String, action: UpdateAction) {
+pub fn notify_update(
+    handle: &tauri::AppHandle,
+    version: String,
+    notes: Option<String>,
+    action: UpdateAction,
+) {
     let items = handle.state::<TrayMenuItems>();
-    *items.pending.lock().unwrap() = Some((version.clone(), action.clone()));
-
-    let verb = match action {
+    let action_name = match action {
         UpdateAction::OpenUrl(_) => "download",
         UpdateAction::Install => "install",
     };
-    let label = format!("v{version} available - click to {verb}");
+    let details = UpdateDetails {
+        version: version.clone(),
+        notes,
+        action: action_name,
+    };
+    *items.pending.lock().unwrap() = Some((details.clone(), action.clone()));
+    let _ = handle.emit("update-available", &details);
+
+    let label = format!("v{version} available - view patch info");
     let Ok(update_item) = MenuItemBuilder::with_id("update", &label).build(handle) else {
         return;
     };
