@@ -29,6 +29,7 @@
   import SearchField from '$lib/search/ui/SearchField.svelte'
   import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte'
   import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte'
+  import RailNavigation from '$lib/components/ui/RailNavigation.svelte'
 
   const RECENT_KEY = 'noor_recent_searches'
   const RECENT_MAX = 8
@@ -73,6 +74,9 @@
   }
 
   let query = $state('')
+  let artistRail: HTMLElement | null = $state(null)
+  let albumRail: HTMLElement | null = $state(null)
+  let playlistRail: HTMLElement | null = $state(null)
   let activeQuery = $state('')
   let results = $state<TidalSearchResults | null>(null)
   let audioResults = $state<AudioSearchResult[] | null>(null)
@@ -1631,10 +1635,15 @@
     {#if visibleArtists.length > 0}
       <section class="results-section">
         <h3 class="section-label">Artists</h3>
+        <div class="result-rail-frame">
         <div
+          bind:this={artistRail}
           class="artists-row"
           class:section-grid-artists={filterMode === 'artists'}
           use:wheelToHorizontal
+          role="group"
+          aria-roledescription="carousel"
+          aria-label="Artist results"
         >
           {#each visibleArtists as artist (artist.tidal_id)}
             <a
@@ -1663,16 +1672,23 @@
             </a>
           {/each}
         </div>
+        <RailNavigation rail={artistRail} label="Artist results" />
+        </div>
       </section>
     {/if}
 
     {#if visibleAlbums.length > 0}
       <section class="results-section">
         <h3 class="section-label">Albums</h3>
+        <div class="result-rail-frame">
         <div
+          bind:this={albumRail}
           class="albums-row"
           class:section-grid-albums={filterMode === 'albums'}
           use:wheelToHorizontal
+          role="group"
+          aria-roledescription="carousel"
+          aria-label="Album results"
         >
           {#each visibleAlbums as album (album.tidal_id)}
             <a
@@ -1716,16 +1732,23 @@
             </a>
           {/each}
         </div>
+        <RailNavigation rail={albumRail} label="Album results" />
+        </div>
       </section>
     {/if}
 
     {#if showPlaylists && (playlistRailPending || visiblePlaylists.length > 0)}
       <section class="results-section">
         <h3 class="section-label">Playlists</h3>
+        <div class="result-rail-frame">
         <div
+          bind:this={playlistRail}
           class="albums-row"
           class:section-grid-albums={filterMode === 'playlists'}
           use:wheelToHorizontal
+          role="group"
+          aria-roledescription="carousel"
+          aria-label="Playlist results"
         >
           {#if playlistRailPending && visiblePlaylists.length === 0}
             {#each Array(4) as _, i (i)}
@@ -1823,6 +1846,8 @@
             {/if}
           {/each}
 
+        </div>
+        <RailNavigation rail={playlistRail} label="Playlist results" />
         </div>
       </section>
     {/if}
@@ -2496,6 +2521,17 @@
   .facet-desc {
     font-size: var(--font-size-xs);
     color: var(--text-muted);
+  }
+
+  /* Horizontal result shelves */
+  .result-rail-frame {
+    position: relative;
+    min-width: 0;
+  }
+  .artists-row:focus-visible,
+  .albums-row:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 
   /* Artists */

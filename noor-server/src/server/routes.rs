@@ -8214,12 +8214,8 @@ async fn tidal_status(State(state): State<SharedState>) -> Json<Value> {
                 false
             });
         if expired && !tokens.refresh_token.trim().is_empty() {
-            let http_client = {
-                let s = state.read().await;
-                s.http_client.clone()
-            };
-            match recover_tidal_session(&state, &http_client, &tokens).await {
-                Ok(refreshed) => {
+            match recover_tidal_client_with_tokens(&state, &tokens).await {
+                Ok((_, refreshed)) => {
                     tokens = refreshed;
                     expired = false;
                 }

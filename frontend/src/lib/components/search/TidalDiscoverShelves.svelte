@@ -10,6 +10,7 @@
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
 	import AlbumPopup from '$lib/components/album/AlbumPopup.svelte';
+	import RailNavigation from '$lib/components/ui/RailNavigation.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
@@ -40,6 +41,7 @@
 
 	/** The album tile whose detail popup is open, if any. */
 	let albumPopupItem = $state<TidalHomeItem | null>(null);
+	let railElements = $state<Record<string, HTMLElement>>({});
 
 	function handleItemClick(item: TidalHomeItem) {
 		if (onItemSelect?.(item)) return;
@@ -270,7 +272,15 @@
 {/snippet}
 
 {#snippet cardRail(mod: TidalHomeModule)}
-	<div class="rail" use:wheelToHorizontal>
+	<div class="rail-frame">
+	<div
+		bind:this={railElements[mod.id || mod.title]}
+		class="rail"
+		use:wheelToHorizontal
+		role="group"
+		aria-roledescription="carousel"
+		aria-label={mod.title}
+	>
 		{#each mod.items as item (`${mod.id}-${item.id}`)}
 			<div
 				class="card"
@@ -315,6 +325,8 @@
 				</div>
 			</div>
 		{/each}
+	</div>
+	<RailNavigation rail={railElements[mod.id || mod.title] ?? null} label={mod.title} />
 	</div>
 {/snippet}
 
@@ -504,7 +516,7 @@
 		gap: var(--gap-sm);
 		overflow-x: auto;
 		padding-bottom: var(--space-2);
-		scroll-snap-type: x mandatory;
+		scroll-snap-type: x proximity;
 		mask-image: linear-gradient(
 			to right,
 			transparent 0,
@@ -519,6 +531,14 @@
 			black calc(100% - 32px),
 			transparent 100%
 		);
+	}
+	.rail-frame {
+		position: relative;
+		min-width: 0;
+	}
+	.rail:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: 2px;
 	}
 	.rail::-webkit-scrollbar { height: 6px; }
 	.rail::-webkit-scrollbar-track {

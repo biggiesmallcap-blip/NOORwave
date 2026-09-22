@@ -432,11 +432,31 @@
 		void applyZoom(get(uiZoom));
 		void setupDesktopUpdateToasts(tauriUpdateUnlisteners);
 
+		let tidalWakeRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+		const refreshTidalAfterWake = () => {
+			if (!getStoredToken()) return;
+			if (tidalWakeRefreshTimer) clearTimeout(tidalWakeRefreshTimer);
+			tidalWakeRefreshTimer = setTimeout(() => {
+				tidalWakeRefreshTimer = null;
+				void loadTidalStatus();
+			}, 100);
+		};
+		const refreshTidalWhenVisible = () => {
+			if (document.visibilityState === 'visible') refreshTidalAfterWake();
+		};
+
 		window.addEventListener('keydown', handleGlobalKeydown);
 		window.addEventListener('wheel', handleGlobalWheel, { passive: false });
+		window.addEventListener('focus', refreshTidalAfterWake);
+		window.addEventListener('online', refreshTidalAfterWake);
+		document.addEventListener('visibilitychange', refreshTidalWhenVisible);
 		return () => {
 			window.removeEventListener('keydown', handleGlobalKeydown);
 			window.removeEventListener('wheel', handleGlobalWheel);
+			window.removeEventListener('focus', refreshTidalAfterWake);
+			window.removeEventListener('online', refreshTidalAfterWake);
+			document.removeEventListener('visibilitychange', refreshTidalWhenVisible);
+			if (tidalWakeRefreshTimer) clearTimeout(tidalWakeRefreshTimer);
 			cancelStartupPrewarm?.();
 			for (const unlisten of tauriUpdateUnlisteners) unlisten();
 			unsubPalette();

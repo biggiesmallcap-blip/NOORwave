@@ -100,6 +100,7 @@
 	import { upscaleTidalArtwork } from '$lib/utils/artwork';
 	import { palette, setPalette } from '$lib/stores/palette';
 	import { uiZoom, setZoom, zoomIn, zoomOut, resetZoom, MIN as ZOOM_MIN, MAX as ZOOM_MAX, WHEEL_STEP as ZOOM_STEP } from '$lib/stores/uiZoom';
+	import { horizontalShelfWheel } from '$lib/stores/shelf_scrolling';
 	import { audioSettings } from '$lib/stores/audio_settings';
 	import { exclusiveStatus } from '$lib/stores/exclusive_status';
 	import {
@@ -2040,6 +2041,35 @@
 						onclick={resetZoom}
 						disabled={Math.abs($uiZoom - 1) < 1e-6}
 					>Reset</button>
+				</div>
+			</section>
+
+			<section data-setting-id="horizontal-shelves" class="glass-panel section-panel">
+				<SectionHeader
+					eyebrow="Navigation"
+					title="Horizontal shelves"
+					subtitle="Choose how mouse and trackpad gestures behave over album, artist, and playlist shelves."
+				/>
+				<div class="info-list">
+					<div class="info-row">
+						<div>
+							<span>Use vertical wheel to browse shelves</span>
+							<p class="info-row-hint">
+								{#if $horizontalShelfWheel}
+									After a short hover, a fresh vertical wheel gesture moves the shelf sideways. Page gestures and shelf boundaries remain unlocked.
+								{:else}
+									Native mode: vertical gestures scroll the page; horizontal gestures scroll shelves. Recommended for trackpads.
+								{/if}
+							</p>
+						</div>
+						<strong>
+							<Toggle
+								checked={$horizontalShelfWheel}
+								label="Use vertical wheel to browse horizontal shelves"
+								onchange={(event) => horizontalShelfWheel.set(event.currentTarget.checked)}
+							/>
+						</strong>
+					</div>
 				</div>
 			</section>
 
