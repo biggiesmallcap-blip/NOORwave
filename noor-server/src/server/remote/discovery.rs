@@ -552,7 +552,7 @@ mod tests {
                 recommended: true,
             }])
             .await;
-        announce_confirmed(&remote, "noorwave.local.", 43123).await;
+        announce_confirmed(&remote, "noor.local.", 43123).await;
         let response = super::super::create_ticket_handler(
             State(remote.clone()),
             Ok(Json(super::super::CreatePairingRequest {
@@ -562,24 +562,21 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::CREATED);
 
-        hostname_changed(&remote, "noorwave.local.", "noorwave-2.local.", 43123)
+        hostname_changed(&remote, "noor.local.", "noor-2.local.", 43123)
             .await
             .unwrap();
-        assert_eq!(remote.hostname().await, "noorwave-2.local.");
+        assert_eq!(remote.hostname().await, "noor-2.local.");
         assert!(remote.0.ticket.lock().await.is_none());
         let runtime = remote.0.runtime.read().await;
         assert_eq!(
             runtime.discovery_state,
             super::super::DiscoveryState::Starting
         );
-        assert_eq!(
-            runtime.discovery_hostname.as_deref(),
-            Some("noorwave-2.local")
-        );
+        assert_eq!(runtime.discovery_hostname.as_deref(), Some("noor-2.local"));
         assert!(runtime.friendly_url.is_none());
         drop(runtime);
 
-        announce_confirmed(&remote, "noorwave-2.local.", 43123).await;
+        announce_confirmed(&remote, "noor-2.local.", 43123).await;
         let runtime = remote.0.runtime.read().await;
         assert_eq!(
             runtime.discovery_state,
@@ -587,7 +584,7 @@ mod tests {
         );
         assert_eq!(
             runtime.friendly_url.as_deref(),
-            Some("http://noorwave-2.local:43123/remote")
+            Some("http://noor-2.local:43123/remote")
         );
     }
 
