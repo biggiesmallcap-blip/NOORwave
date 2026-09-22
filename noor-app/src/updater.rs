@@ -1,6 +1,7 @@
 pub struct UpdateInfo {
     pub version: String,
     pub url: String,
+    pub notes: Option<String>,
 }
 
 pub fn check() -> Option<UpdateInfo> {
@@ -22,11 +23,17 @@ pub fn check() -> Option<UpdateInfo> {
     let tag = body["tag_name"].as_str()?;
     let latest = tag.trim_start_matches('v');
     let url = body["html_url"].as_str()?.to_owned();
+    let notes = body["body"]
+        .as_str()
+        .map(str::trim)
+        .filter(|notes| !notes.is_empty())
+        .map(str::to_owned);
 
     if is_newer(latest, current) {
         Some(UpdateInfo {
             version: latest.to_owned(),
             url,
+            notes,
         })
     } else {
         None

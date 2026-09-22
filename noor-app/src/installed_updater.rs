@@ -10,12 +10,18 @@ pub fn background_check(handle: &AppHandle) {
         match updater.check().await {
             Ok(Some(update)) => {
                 let version = update.version.clone();
+                let notes = update
+                    .body
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|notes| !notes.is_empty())
+                    .map(str::to_owned);
                 crate::tray::notify_update(
                     handle,
                     version.clone(),
+                    notes,
                     crate::tray::UpdateAction::Install,
                 );
-                let _ = handle.emit("update-available", &version);
             }
             Ok(None) => {}
             Err(err) => {

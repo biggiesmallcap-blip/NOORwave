@@ -122,7 +122,8 @@
 	import {
 		browserUpdateState,
 		loadingDesktopUpdateState,
-		unavailableDesktopUpdateState
+		unavailableDesktopUpdateState,
+		type DesktopUpdateInfo
 	} from '$lib/desktop/update_state';
 
 	const SERVER_UNREACHABLE_MESSAGE =
@@ -305,9 +306,9 @@
 			]);
 			appVersion = await getVersion();
 			installModeLabel = await invoke<string>('get_install_mode');
-			const pending = await invoke<string | null>('get_update_state');
-			updateAvailableVersion = pending;
-			updateStatus = pending ? `v${pending} available` : 'Up to date';
+			const pending = await invoke<DesktopUpdateInfo | null>('get_update_state');
+			updateAvailableVersion = pending?.version ?? null;
+			updateStatus = pending ? `v${pending.version} available` : 'Up to date';
 			minimizeToTray = await invoke<boolean>('get_minimize_to_tray');
 		} catch (err) {
 			const unavailableState = unavailableDesktopUpdateState(appVersion, err);
@@ -334,9 +335,9 @@
 		if (!isTauri()) return;
 		try {
 			const { listen } = await import('@tauri-apps/api/event');
-			const unlistenAvailable = await listen<string>('update-available', (event) => {
-				updateAvailableVersion = event.payload;
-				updateStatus = `v${event.payload} available`;
+			const unlistenAvailable = await listen<DesktopUpdateInfo>('update-available', (event) => {
+				updateAvailableVersion = event.payload.version;
+				updateStatus = `v${event.payload.version} available`;
 				updateError = '';
 			});
 			if (componentUnmounted) {
@@ -369,15 +370,21 @@
 		updateChecking = true;
 		try {
 			const { invoke } = await import('@tauri-apps/api/core');
-			const version = await invoke<string | null>('check_for_updates_now');
-			updateAvailableVersion = version;
-			updateStatus = version ? `v${version} available` : 'Up to date';
+			const update = await invoke<DesktopUpdateInfo | null>('check_for_updates_now');
+			updateAvailableVersion = update?.version ?? null;
+			updateStatus = update ? `v${update.version} available` : 'Up to date';
 		} catch (err) {
 			updateError = err instanceof Error ? err.message : String(err);
 			updateStatus = 'Update check failed';
 		} finally {
 			updateChecking = false;
 		}
+	}
+
+	async function openPatchInfoFromSettings() {
+		if (!desktopAppAvailable || !updateAvailableVersion) return;
+		const { emit } = await import('@tauri-apps/api/event');
+		await emit('open-update-details');
 	}
 
 	let downloadFolder = $state('');
@@ -3392,9 +3399,18 @@
 					<MetricPair label="Updates" value={updateStatus} copy={updateAvailableVersion ? 'Ready from the tray menu or this panel.' : 'Manual checks use the active release channel.'} />
 				</div>
 				<div class="action-row">
+					{#if updateAvailableVersion}
+						<button
+							type="button"
+							class="btn btn-primary"
+							onclick={() => void openPatchInfoFromSettings()}
+						>
+							Patch info
+						</button>
+					{/if}
 					<button
 						type="button"
-						class="btn btn-primary"
+						class={updateAvailableVersion ? 'btn btn-glass' : 'btn btn-primary'}
 						onclick={() => void checkForUpdatesNow()}
 						disabled={!desktopAppAvailable || updateChecking}
 					>
