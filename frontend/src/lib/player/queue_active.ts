@@ -49,3 +49,13 @@ export function isQueueItemActive(
 ): boolean {
 	return item.id === currentQueueAnchorItem(queue, currentTrack, currentQueueItemId)?.id;
 }
+
+export function isQueueItemPlayed(
+	item: QueueItem,
+	currentTrack: Track | null | undefined,
+	currentQueueItemId: number | null | undefined,
+	queue: QueueItem[],
+): boolean {
+	const anchorPosition = currentQueueAnchorPosition(queue, currentTrack, currentQueueItemId);
+	return anchorPosition != null && item.position < anchorPosition;
+}

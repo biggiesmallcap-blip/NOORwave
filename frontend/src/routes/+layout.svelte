@@ -79,6 +79,7 @@
 		currentQueueAnchorItem,
 		currentQueueAnchorPosition,
 		isQueueItemActive,
+		isQueueItemPlayed,
 	} from '$lib/player/queue_active';
 	import {
 		SILENT_SOURCE_LABELS,
@@ -789,6 +790,15 @@
 		await moveQueueItem(item.id, newIdx);
 	}
 
+	function queueItemIsPlayed(item: QueueItemType): boolean {
+		return isQueueItemPlayed(item, $currentTrack, $currentQueueItemId, $playbackQueue);
+	}
+
+	function queueItemCanReorder(item: QueueItemType): boolean {
+		return !item.is_pending && !queueItemIsPlayed(item) &&
+			!isQueueItemActive(item, $currentTrack, $currentQueueItemId, $playbackQueue);
+	}
+
 	function formatQuality(q: string | null) {
 		if (!q) return '';
 		if (q === 'HI_RES_LOSSLESS') return 'HiRes Lossless';
@@ -857,7 +867,15 @@
 	const queueDrag = createDragReorder({
 		indexOf: (id) => get(playbackQueue).findIndex((q) => q.id === id),
 		length: () => get(playbackQueue).length,
-		canDrag: (id) => get(playbackQueue).find((q) => q.id === id)?.is_pending !== true,
+		canDrag: (id) => {
+			const queue = get(playbackQueue);
+			const item = queue.find((q) => q.id === id);
+			if (!item || item.is_pending) return false;
+			const track = get(currentTrack);
+			const queueItemId = get(currentQueueItemId);
+			return !isQueueItemPlayed(item, track, queueItemId, queue) &&
+				!isQueueItemActive(item, track, queueItemId, queue);
+		},
 		onDrop: (id, toIndex) => moveQueueItem(id, toIndex),
 		// The queue keeps its own Alt+Arrow handling in `handleQueueTrackKeydown`:
 		// it also refuses to move a row above the play head, and binds
@@ -873,12 +891,12 @@
 	let currentRowVisible = $state(true);
 
 	function refreshCurrentRowVisibility() {
-		const id = $currentTrack?.id;
+		const id = $currentQueueItemId;
 		if (!id || !queueListEl) {
 			currentRowVisible = true;
 			return;
 		}
-		const row = queueListEl.querySelector(`[data-track-id="${id}"]`);
+		const row = queueListEl.querySelector(`[data-queue-item-id="${id}"]`);
 		if (!row) {
 			currentRowVisible = true;
 			return;
@@ -894,9 +912,9 @@
 	}
 
 	function jumpToCurrentRow() {
-		const id = $currentTrack?.id;
+		const id = $currentQueueItemId;
 		if (!id || !queueListEl) return;
-		const row = queueListEl.querySelector(`[data-track-id="${id}"]`);
+		const row = queueListEl.querySelector(`[data-queue-item-id="${id}"]`);
 		if (!row) return;
 		(row as HTMLElement).scrollIntoView({
 			block: 'center',
@@ -913,12 +931,12 @@
 	}
 
 	$effect(() => {
-		const id = $currentTrack?.id;
+		const id = $currentQueueItemId;
 		if (!id || !queueListEl) {
 			currentRowVisible = true;
 			return;
 		}
-		const row = queueListEl.querySelector(`[data-track-id="${id}"]`);
+		const row = queueListEl.querySelector(`[data-queue-item-id="${id}"]`);
 		if (!row) {
 			currentRowVisible = true;
 			return;
@@ -987,7 +1005,7 @@
 	}
 
 	async function handleClearQueue() {
-		if (upcomingQueue.length === 0) return;
+		if (clearableQueueCount === 0) return;
 		await clearQueueAction();
 		// The store offers an undo: the queue-section renders an Undo chip
 		// bound to `pendingUndo`. Z is the power-user shortcut to fire the
@@ -1058,6 +1076,23 @@
 		return $playbackQueue.filter((item) => item.position > currentPosition);
 	});
 
+	// Keep recent rows from this same queue above the playhead. Queue rows are
+	// non-destructive, so this is playback history without a second data source.
+	// Bound the back-scroll window so a long-running radio session stays cheap.
+	const QUEUE_PLAYED_HISTORY_CAP = 40;
+	let sessionQueue = $derived.by(() => {
+		const anchor = currentQueueAnchorItem($playbackQueue, $currentTrack, $currentQueueItemId);
+		if (!anchor) return $playbackQueue;
+		const anchorIndex = $playbackQueue.findIndex((item) => item.id === anchor.id);
+		return $playbackQueue.slice(Math.max(0, anchorIndex - QUEUE_PLAYED_HISTORY_CAP));
+	});
+	let clearableQueueCount = $derived.by(() => {
+		const anchor = currentQueueAnchorItem($playbackQueue, $currentTrack, $currentQueueItemId);
+		return anchor
+			? $playbackQueue.filter((item) => item.id !== anchor.id).length
+			: $playbackQueue.length;
+	});
+
 	let queueCountLabel = $derived(
 		upcomingQueue.length === 1 ? '1 track queued' : `${upcomingQueue.length} tracks queued`
 	);
@@ -1081,7 +1116,7 @@
 	// cap exists so a 500-row library/radio session doesn't paint thousands
 	// of DOM nodes at boot; users grow it with a "Load more" button so the
 	// rest of the queue isn't silently truncated.
-	const QUEUE_INITIAL_CAP = 40;
+	const QUEUE_INITIAL_CAP = 80;
 	const QUEUE_LOAD_MORE_STEP = 40;
 	let queueVisibleCount = $state(QUEUE_INITIAL_CAP);
 
@@ -1089,13 +1124,13 @@
 		// Reset the cap when the queue gets smaller than what we are currently
 		// showing (clear, big remove, snapshot shrink). Without this the
 		// "Load more" button would linger at a count larger than the queue.
-		if (upcomingQueue.length < queueVisibleCount) {
-			queueVisibleCount = Math.max(QUEUE_INITIAL_CAP, Math.min(queueVisibleCount, upcomingQueue.length || QUEUE_INITIAL_CAP));
+		if (sessionQueue.length < queueVisibleCount) {
+			queueVisibleCount = Math.max(QUEUE_INITIAL_CAP, Math.min(queueVisibleCount, sessionQueue.length || QUEUE_INITIAL_CAP));
 		}
 	});
 
 	function loadMoreQueue() {
-		queueVisibleCount = Math.min(upcomingQueue.length, queueVisibleCount + QUEUE_LOAD_MORE_STEP);
+		queueVisibleCount = Math.min(sessionQueue.length, queueVisibleCount + QUEUE_LOAD_MORE_STEP);
 	}
 
 	const QUEUE_EXPANDED_KEY = 'noor.queueExpanded';
@@ -1549,10 +1584,10 @@
 					<button
 						class="queue-icon-btn queue-clear-btn"
 						type="button"
-						title="Clear all upcoming tracks"
+						title="Clear played and upcoming tracks"
 						aria-label="Clear queue"
 						onclick={() => void handleClearQueue()}
-						disabled={upcomingQueue.length === 0}
+						disabled={clearableQueueCount === 0}
 					>⌫</button>
 					<button
 						class="queue-icon-btn queue-expand-btn"
@@ -1565,7 +1600,7 @@
 				</div>
 			</div>
 
-			{#if !currentRowVisible && $currentTrack && upcomingQueue.length > 0}
+			{#if !currentRowVisible && $currentQueueItemId && sessionQueue.length > 0}
 				<button
 					class="queue-jump-chip"
 					type="button"
@@ -1617,22 +1652,24 @@
 				</form>
 			{/if}
 
-			{#if upcomingQueue.length > 0}
+			{#if sessionQueue.length > 0}
 				<div class="queue-list" id="queue-list" role="list" bind:this={queueListEl} onscroll={handleQueueScroll}>
-					{#each upcomingQueue.slice(0, queueVisibleCount) as item (item.id)}
+					{#each sessionQueue.slice(0, queueVisibleCount) as item (item.id)}
 						{@const aid = item.track.artist_id}
 						{@const isPending = item.is_pending === true}
+						{@const isPlayed = queueItemIsPlayed(item)}
 						<div
 							role="listitem"
-							class:active={isQueueItemActive(item, $currentTrack, $currentQueueItemId, upcomingQueue)}
+							class:active={isQueueItemActive(item, $currentTrack, $currentQueueItemId, $playbackQueue)}
+							class:played={isPlayed}
 							class:dragging={$queueDragState.draggingId === item.id}
 							class:drag-over={$queueDragState.dragOverId === item.id &&
 								$queueDragState.draggingId !== item.id}
 							class:pending={isPending}
 							class="queue-row"
 							title={isPending ? 'Resolving on TIDAL...' : undefined}
-							data-track-id={item.track.id}
-							draggable={!isPending}
+							data-queue-item-id={item.id}
+							draggable={queueItemCanReorder(item)}
 							oncontextmenu={(event) => openQueueRowMenu(item, event)}
 							use:queueDrag.row={item.id}
 						>
@@ -1692,6 +1729,7 @@
 							</div>
 
 							<div class="queue-side">
+								{#if isPlayed}<span class="queue-played-label">Played</span>{/if}
 								<span class="queue-time">{formatTrackDuration(item.track.duration_ms)}</span>
 								{#if !isPending}
 									<button
@@ -1712,10 +1750,10 @@
 				</div>
 			{/if}
 
-			{#if upcomingQueue.length > queueVisibleCount}
+			{#if sessionQueue.length > queueVisibleCount}
 				<button class="queue-load-more" type="button" onclick={loadMoreQueue}>
-					Load {Math.min(QUEUE_LOAD_MORE_STEP, upcomingQueue.length - queueVisibleCount)} more
-					<span class="queue-load-more-rest">({upcomingQueue.length - queueVisibleCount} waiting)</span>
+					Load {Math.min(QUEUE_LOAD_MORE_STEP, sessionQueue.length - queueVisibleCount)} more
+					<span class="queue-load-more-rest">({sessionQueue.length - queueVisibleCount} waiting)</span>
 				</button>
 			{/if}
 		</section>
@@ -1950,15 +1988,17 @@
 				<span class="mobile-np-queue-count">{queueCountLabel}</span>
 			</div>
 
-			{#if upcomingQueue.length > 0}
+			{#if sessionQueue.length > 0}
 				<div class="mobile-np-queue-list" role="list">
-					{#each upcomingQueue.slice(0, queueVisibleCount) as item (item.id)}
+					{#each sessionQueue.slice(0, queueVisibleCount) as item (item.id)}
 						{@const aid = item.track.artist_id}
 						{@const isPending = item.is_pending === true}
+						{@const isPlayed = queueItemIsPlayed(item)}
 						<div
 							role="listitem"
 							class="queue-row"
-							class:active={isQueueItemActive(item, $currentTrack, $currentQueueItemId, upcomingQueue)}
+							class:active={isQueueItemActive(item, $currentTrack, $currentQueueItemId, $playbackQueue)}
+							class:played={isPlayed}
 							class:pending={isPending}
 							title={isPending ? 'Resolving on TIDAL...' : undefined}
 							oncontextmenu={(event) => openQueueRowMenu(item, event)}
@@ -2009,6 +2049,7 @@
 								{/if}
 							</div>
 							<div class="queue-side">
+								{#if isPlayed}<span class="queue-played-label">Played</span>{/if}
 								<span class="queue-time">{formatTrackDuration(item.track.duration_ms)}</span>
 								<button
 									class="queue-overflow"
@@ -2027,10 +2068,10 @@
 				</div>
 			{/if}
 
-			{#if upcomingQueue.length > queueVisibleCount}
+			{#if sessionQueue.length > queueVisibleCount}
 				<button class="queue-load-more" type="button" onclick={loadMoreQueue}>
-					Load {Math.min(QUEUE_LOAD_MORE_STEP, upcomingQueue.length - queueVisibleCount)} more
-					<span class="queue-load-more-rest">({upcomingQueue.length - queueVisibleCount} waiting)</span>
+					Load {Math.min(QUEUE_LOAD_MORE_STEP, sessionQueue.length - queueVisibleCount)} more
+					<span class="queue-load-more-rest">({sessionQueue.length - queueVisibleCount} waiting)</span>
 				</button>
 			{/if}
 		</div>
@@ -2901,6 +2942,20 @@
 		color: var(--accent-strong);
 	}
 
+	.queue-row.played {
+		opacity: 0.56;
+		background: color-mix(in srgb, var(--instrument-surface) 48%, transparent);
+	}
+
+	.queue-row.played:hover,
+	.queue-row.played:focus-within {
+		opacity: 0.78;
+	}
+
+	.queue-row.played .queue-grip {
+		visibility: hidden;
+	}
+
 	.queue-row.dragging {
 		opacity: 0.4;
 		cursor: grabbing;
@@ -3057,6 +3112,14 @@
 	.queue-empty span {
 		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
+	}
+
+	.queue-played-label {
+		color: var(--text-tertiary);
+		font-size: var(--font-size-xs);
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		pointer-events: none;
 	}
 
 	.queue-side {

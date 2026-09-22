@@ -21,8 +21,9 @@ stream starts; unresolved or failed rows are skipped through the same advance
 path.
 
 There is no in-memory queue overlay. TIDAL mixes, albums, playlists, search,
-and discovery results produce normal queue rows with source metadata. The queue
-is still cleared at server start, so this change does not make sessions durable.
+and discovery results produce normal queue rows with source metadata. Queue rows
+and the current-row cursor survive server restarts; startup pauses playback and
+resets the position so the runtime can be rebuilt safely on the next Play.
 
 ## API and rollout
 
