@@ -44,7 +44,29 @@
 	let canPair = $derived(status?.state === 'running' && status.remote_assets_available && addresses.length > 0);
 	let exposure = $derived(status ? exposurePresentation(status) : null);
 	let selectedUrl = $derived(addresses.find((item) => item.id === selectedAddress)?.url ?? '');
+	let selectedOption = $derived(addresses.find((item) => item.id === selectedAddress) ?? null);
+	let connectionLabel = $derived(
+		selectedOption?.friendly ? 'Recommended local address'
+			: selectedOption?.recommended ? 'Recommended Wi-Fi address'
+			: 'Alternate connection address'
+	);
 	let needsLocalRecovery = $derived(nativeState?.phase === 'failed' && nativeState.configured_host_mode === false);
+
+	function discoveryMessage(nextStatus: RemoteStatus): string {
+		const hostname = nextStatus.discovery.hostname ?? 'your local address';
+		if (nextStatus.discovery.state === 'advertised') return `${hostname} is ready to use.`;
+		if (nextStatus.discovery.state === 'starting') return `Preparing ${hostname}. Your Wi-Fi address works in the meantime.`;
+		if (nextStatus.effective_host_mode) return `${hostname} is unavailable on this network. Use the Wi-Fi address below.`;
+		return 'Enable phone remote to create a connection address.';
+	}
+
+	function troubleshootingSummary(nextStatus: RemoteStatus): string {
+		const hostname = nextStatus.discovery.hostname ?? 'noor.local';
+		if (nextStatus.discovery.state === 'advertised') return `NOORwave is listening and ${hostname} is ready to use.`;
+		if (nextStatus.discovery.state === 'starting') return `NOORwave is listening. ${hostname} is still being prepared, so use the Wi-Fi address above for now.`;
+		if (nextStatus.effective_host_mode) return `NOORwave is listening, but ${hostname} is not available on this network. Use the Wi-Fi address above.`;
+		return 'Phone remote is not currently available on your network.';
+	}
 
 	function applyNativeState(next: DesktopRemoteState): void {
 		nativeState = next;
@@ -247,8 +269,7 @@
 	{:else if status}
 		<div class="status-line">
 			<span class:online={exposure?.online} aria-hidden="true"></span>
-			<strong>{exposure?.label}</strong>
-			<small>{status.bind_address}</small>
+			<div><strong>{exposure?.label}</strong><small>{discoveryMessage(status)}</small></div>
 		</div>
 
 		<div class="setting-row">
@@ -267,11 +288,14 @@
 		{#if status.restart_required}<p class="remote-alert">The standalone server preference is saved. Restart the server process to apply it.</p>{/if}
 
 		<div class="pairing-block">
-			<div><strong>Pair a phone</strong><p>The QR and temporary code expire after two minutes and work once. Neither contains your permanent PIN.</p></div>
-			<label for="remote-address">Connection address</label>
-			<select id="remote-address" value={selectedAddress} onchange={(event) => void selectAddress(event)} disabled={busy || !canPair}>
-				{#each addresses as address (address.id)}<option value={address.id}>{address.label} — {address.url}</option>{/each}
-			</select>
+			<div class="pairing-intro"><span class="step-label">Step 1</span><div><strong>Pair your phone</strong><p>Use the address below, then scan a QR. The QR and temporary code expire after two minutes and work once; no permanent PIN is shared.</p></div></div>
+			{#if selectedOption}
+				<div class="connection-card">
+					<div class="connection-card-heading"><span>{connectionLabel}</span>{#if selectedOption.friendly}<span class="local-badge">Local discovery</span>{/if}</div>
+					<input bind:this={urlFallback} id="remote-url-fallback" class="url-fallback" type="text" readonly value={selectedUrl} aria-label={connectionLabel} onclick={(event) => event.currentTarget.select()} />
+					<div class="connection-actions"><button class="btn btn-glass" type="button" onclick={() => void copyText(selectedUrl, urlFallback)}>{copied ? 'Copied address' : 'Copy address'}</button><span>{selectedOption.friendly ? 'Best for bookmarks and returning later.' : 'Use this while local discovery is unavailable.'}</span></div>
+				</div>
+			{/if}
 			{#if ticket && qrDataUrl}
 				<div class="qr-wrap">
 					<div class="qr-header">
@@ -291,10 +315,15 @@
 			{:else}
 				<button class="btn btn-primary touch" type="button" disabled={busy || !canPair} onclick={() => void createQr()}>Show pairing QR</button>
 			{/if}
-			{#if addresses.length}
-				<label for="remote-url-fallback">Connection URL</label>
-				<input bind:this={urlFallback} id="remote-url-fallback" class="url-fallback" type="text" readonly value={selectedUrl} onclick={(event) => event.currentTarget.select()} />
-				<button class="text-action" type="button" onclick={() => void copyText(selectedUrl, urlFallback)}>{copied ? 'Copied address' : 'Copy selected address'}</button>
+			{#if addresses.length > 1}
+				<details class="address-options">
+					<summary>Use a different connection address</summary>
+					<p>Choose a VPN or virtual address only when the phone is connected to that same network.</p>
+					<label for="remote-address">Connection address</label>
+					<select id="remote-address" value={selectedAddress} onchange={(event) => void selectAddress(event)} disabled={busy || !canPair}>
+						{#each addresses as address (address.id)}<option value={address.id}>{address.label} — {address.url}</option>{/each}
+					</select>
+				</details>
 			{/if}
 		</div>
 
@@ -315,9 +344,9 @@
 
 		<details class="diagnostics">
 			<summary>Troubleshooting and diagnostics</summary>
-			<p>Local checks: listener {status.state}; discovery {status.discovery.state}; remote assets {status.remote_assets_available ? 'ready' : 'missing'}. Phone reachability is unverified.</p>
-			<ul><li>Keep both devices on the same trusted Wi-Fi network.</li><li>Allow NOORwave on a private network in Windows Firewall if prompted.</li><li>Guest Wi-Fi/client isolation and VPNs may block local devices.</li><li>If .local does not open, choose the direct Wi-Fi IP address above and refresh the QR.</li></ul>
-			{#each status.diagnostics as diagnostic}<p><strong>{diagnostic.code}</strong>: {diagnostic.message}</p>{/each}
+			<p class="diagnostic-summary">{troubleshootingSummary(status)}</p>
+			<ul class="troubleshooting-list"><li>Keep both devices on the same trusted Wi-Fi network.</li><li>Allow NOORwave on a private network in Windows Firewall if prompted.</li><li>Guest Wi-Fi/client isolation and VPNs may block local devices.</li><li>If <code>{status.discovery.hostname ?? 'noor.local'}</code> does not open, use the Wi-Fi address above and refresh the QR.</li></ul>
+			{#each status.diagnostics as diagnostic}<p class="diagnostic-note">{diagnostic.message}</p>{/each}
 		</details>
 	{/if}
 </section>
@@ -326,15 +355,24 @@
 	.phone-remote-panel { display: flex; flex-direction: column; gap: 18px; padding: 24px; }
 	.remote-alert { padding: 10px 12px; border-radius: 8px; background: var(--accent-soft); margin: 0; }
 	.remote-alert.error { color: var(--state-error); border: 1px solid color-mix(in srgb, var(--state-error) 40%, transparent); }
-	.status-line { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
-	.status-line > span { width: 10px; height: 10px; border-radius: 50%; background: var(--text-tertiary); }
-	.status-line > span.online { background: var(--state-success); }
-	.status-line small { color: var(--text-tertiary); margin-left: auto; }
+	.status-line { display: flex; align-items: flex-start; gap: 10px; padding: 4px 0 16px; border-bottom: 1px solid var(--border-subtle); }
+	.status-line > span { width: 10px; height: 10px; margin-top: 6px; border-radius: 50%; background: var(--text-tertiary); box-shadow: 0 0 0 4px color-mix(in srgb, var(--text-tertiary) 12%, transparent); }
+	.status-line > span.online { background: var(--state-success); box-shadow: 0 0 0 4px color-mix(in srgb, var(--state-success) 14%, transparent); }
+	.status-line strong, .status-line small { display: block; }
+	.status-line small { color: var(--text-secondary); margin-top: 3px; }
 	.setting-row, .device-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 14px 0; border-top: 1px solid var(--border-subtle); }
 	.setting-row p, .pairing-block p, .manual p, .devices p, .diagnostics p { color: var(--text-secondary); margin: 4px 0 0; line-height: var(--line-height-normal); }
-	.pairing-block, .devices { display: flex; flex-direction: column; gap: 12px; padding-top: 14px; border-top: 1px solid var(--border-subtle); }
+	.pairing-block, .devices { display: flex; flex-direction: column; gap: 12px; padding-top: 18px; border-top: 1px solid var(--border-subtle); }
+	.pairing-intro { display: flex; align-items: flex-start; gap: 10px; }
+	.pairing-intro p { max-width: 680px; }
+	.step-label { flex: 0 0 auto; padding: 4px 7px; border: 1px solid var(--accent-line); border-radius: 999px; background: var(--accent-soft); color: var(--accent-strong); font-size: var(--font-size-xs); font-weight: var(--font-weight-bold); letter-spacing: .05em; text-transform: uppercase; }
+	.connection-card { display: grid; gap: 10px; padding: 15px; border: 1px solid color-mix(in srgb, var(--accent-line) 68%, var(--border-subtle)); border-radius: var(--radius-md); background: linear-gradient(130deg, color-mix(in srgb, var(--accent-soft) 55%, transparent), transparent 62%), var(--bg-surface); }
+	.connection-card-heading, .connection-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+	.connection-card-heading > span:first-child { color: var(--text-secondary); font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); }
+	.local-badge { padding: 3px 7px; border-radius: 999px; background: color-mix(in srgb, var(--state-success) 15%, transparent); color: var(--state-success); font-size: var(--font-size-xs); font-weight: var(--font-weight-semibold); }
+	.connection-actions > span { color: var(--text-tertiary); font-size: var(--font-size-sm); }
 	select { width: 100%; min-height: 44px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--bg-surface); color: var(--text-primary); padding: 8px 10px; }
-	.url-fallback { width: 100%; min-height: 44px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--bg-surface); color: var(--text-primary); padding: 8px 10px; font-family: var(--font-mono, monospace); }
+	.url-fallback { width: 100%; min-height: 44px; border: 1px solid var(--border-subtle); border-radius: 8px; background: color-mix(in srgb, var(--bg-base) 58%, var(--bg-surface)); color: var(--text-primary); padding: 8px 10px; font-family: var(--font-mono, monospace); }
 	.recovery-block { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; border: 1px solid color-mix(in srgb, var(--state-error) 35%, transparent); border-radius: 8px; }
 	.qr-wrap {
 		display: grid;
@@ -361,9 +399,14 @@
 	.pairing-url { justify-self: center; padding: 6px 9px; border-radius: var(--radius-xs); background: var(--bg-surface); color: var(--text-tertiary); text-align: center; }
 	.qr-wrap > .actions { justify-content: center; }
 	.actions, .pin-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-	.touch, .text-action, summary, .device-row button { min-height: 44px; }
-	.text-action { border: 0; background: none; color: var(--accent-strong); text-align: left; cursor: pointer; }
-	.manual, .diagnostics { padding-top: 14px; border-top: 1px solid var(--border-subtle); }
+	.touch, summary, .device-row button { min-height: 44px; }
+	.manual, .diagnostics, .address-options { padding-top: 14px; border-top: 1px solid var(--border-subtle); }
+	.address-options { display: grid; gap: 10px; }
+	.address-options p { margin: 0; color: var(--text-secondary); }
+	.diagnostic-summary { color: var(--text-primary) !important; }
+	.troubleshooting-list { display: grid; gap: 6px; margin: 12px 0 0; padding-left: 20px; color: var(--text-secondary); }
+	.troubleshooting-list code { color: var(--accent-strong); font-family: var(--font-mono, monospace); }
+	.diagnostic-note { margin-top: 12px !important; padding: 9px 11px; border-left: 2px solid var(--accent-line); background: color-mix(in srgb, var(--accent-soft) 34%, transparent); }
 	summary { display: flex; align-items: center; cursor: pointer; font-weight: var(--font-weight-bold); }
 	.pin-row { margin: 12px 0; }
 	.pin-row code { font-size: var(--font-size-xl); letter-spacing: .18em; }
@@ -373,7 +416,8 @@
 		.setting-row, .device-row { align-items: flex-start; }
 		.device-row { flex-direction: column; }
 		.actions, .actions .btn, .pin-row .btn { min-height: 44px; }
-		.status-line small { width: 100%; margin-left: 19px; }
+		.connection-actions { align-items: flex-start; }
+		.connection-actions > span { width: 100%; }
 		.qr-wrap { padding: 14px; }
 		.qr-stage { padding: 14px; }
 	}

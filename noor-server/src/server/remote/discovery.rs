@@ -114,6 +114,10 @@ fn network_snapshot(
         .iter()
         .map(|address| address.id.clone())
         .collect();
+    // `netdev` exposes Windows adapter IDs as stable GUIDs, while mdns-sd's
+    // underlying Windows interface enumeration selects by FriendlyName (for
+    // example, "Ethernet"). Using `id` here silently enabled no interface on
+    // Windows, leaving discovery permanently in its starting state.
     let mut interface_names: Vec<_> = eligible
         .iter()
         .filter(|interface| {
@@ -122,7 +126,7 @@ fn network_snapshot(
                 .iter()
                 .any(|ip| offered_ids.contains(&format!("{}:{ip}", interface.id)))
         })
-        .map(|interface| interface.id.clone())
+        .map(|interface| interface.label.clone())
         .collect();
     interface_names.sort();
     interface_names.dedup();
@@ -591,7 +595,7 @@ mod tests {
     fn direct_addresses_include_explicit_fallbacks_but_mdns_uses_physical_multicast_lan_only() {
         let interfaces = vec![
             network::InterfaceSnapshot {
-                id: "wifi".into(),
+                id: "{windows-adapter-guid}".into(),
                 label: "Wi-Fi".into(),
                 kind: network::InterfaceKind::Physical,
                 active: true,
@@ -627,7 +631,7 @@ mod tests {
             registration.addresses,
             vec!["192.168.1.24".parse::<Ipv4Addr>().unwrap()]
         );
-        assert_eq!(registration.interface_names, vec!["wifi"]);
+        assert_eq!(registration.interface_names, vec!["Wi-Fi"]);
     }
 
     #[tokio::test]

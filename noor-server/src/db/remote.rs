@@ -5,6 +5,8 @@ use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
 pub const MAX_REMOTE_DEVICES: i64 = 32;
+const DEFAULT_HOSTNAME: &str = "noor.local.";
+const LEGACY_DEFAULT_HOSTNAME: &str = "noorwave.local.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteConfig {
@@ -62,15 +64,24 @@ pub fn initialize(db: &Database) -> Result<RemoteConfig> {
             )
             .optional()?;
         let hostname = match existing_hostname {
+            // `noorwave.local.` was this feature's pre-release default. Move
+            // only that exact generated value to the product hostname; retain
+            // a collision-resolved or otherwise user-specific hostname.
+            Some(value) if value == LEGACY_DEFAULT_HOSTNAME => {
+                tx.execute(
+                    "UPDATE server_config SET value = ?1 WHERE key = 'remote.hostname'",
+                    [DEFAULT_HOSTNAME],
+                )?;
+                DEFAULT_HOSTNAME.to_string()
+            }
             Some(value) if valid_hostname(&value) => value,
             Some(_) => bail!("invalid persisted remote.hostname"),
             None => {
-                let value = "noorwave.local.".to_string();
                 tx.execute(
                     "INSERT INTO server_config (key, value) VALUES ('remote.hostname', ?1)",
-                    [&value],
+                    [DEFAULT_HOSTNAME],
                 )?;
-                value
+                DEFAULT_HOSTNAME.to_string()
             }
         };
         tx.commit()?;
@@ -244,7 +255,7 @@ mod tests {
         let first = initialize(&db).unwrap();
         let second = initialize(&db).unwrap();
         assert_eq!(first, second);
-        assert_eq!(first.hostname, "noorwave.local.");
+        assert_eq!(first.hostname, "noor.local.");
         Uuid::parse_str(&first.server_id).unwrap();
 
         let digest = [7_u8; 32];
@@ -281,6 +292,24 @@ mod tests {
         assert_eq!(initialize(&db).unwrap().hostname, "noorwave-2.local.");
 
         assert!(persist_hostname(&db, "NOORwave.local.").is_err());
+        assert_eq!(initialize(&db).unwrap().hostname, "noorwave-2.local.");
+    }
+
+    #[test]
+    fn legacy_generated_hostname_is_migrated_but_a_conflict_name_is_preserved() {
+        let db = db();
+        initialize(&db).unwrap();
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE server_config SET value = ?1 WHERE key = 'remote.hostname'",
+                [LEGACY_DEFAULT_HOSTNAME],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(initialize(&db).unwrap().hostname, DEFAULT_HOSTNAME);
+
+        persist_hostname(&db, "noorwave-2.local.").unwrap();
         assert_eq!(initialize(&db).unwrap().hostname, "noorwave-2.local.");
     }
 }

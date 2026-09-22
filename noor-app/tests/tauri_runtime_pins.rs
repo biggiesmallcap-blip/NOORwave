@@ -69,7 +69,7 @@ fn native_capability_remains_scoped_to_the_exact_loopback_origin() {
         parsed["remote"]["urls"],
         serde_json::json!(["http://127.0.0.1:17600/**"])
     );
-    assert!(!capability.contains("noorwave.local"));
+    assert!(!capability.contains("noor.local"));
     assert!(!capability.contains("0.0.0.0"));
     assert!(!capability.contains("http://*/"));
 }

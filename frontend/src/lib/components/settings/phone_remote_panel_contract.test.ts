@@ -16,10 +16,18 @@ describe('Phone Remote panel accessibility contract', () => {
 		expect(source).toContain('@media (max-width: 560px)');
 		expect(source).toContain('min-height: 44px');
 		expect(source).toContain('alt="Pair this phone with NOORwave"');
-		expect(source).toContain('Copy selected address');
+		expect(source).toContain('Copy address');
 		expect(source).toContain('readonly');
-		expect(source).toContain('Connection URL');
 		expect(source).toContain('target?.select()');
+	});
+
+	it('shows a user-facing address and keeps raw listener details in diagnostics', () => {
+		expect(source).toContain('Recommended local address');
+		expect(source).toContain('Use a different connection address');
+		expect(source).not.toContain('<small>{status.bind_address}</small>');
+		expect(source).toContain('troubleshootingSummary(status)');
+		expect(source).toContain("status.discovery.hostname ?? 'noor.local'");
+		expect(source).not.toContain('DISCOVERY_STARTING');
 	});
 
 	it('serializes QR controls while creation is in flight', () => {

@@ -28,7 +28,7 @@ Approval of this specification accepts the following concrete choices together. 
 | D-2: Changing LAN mode | Retain a controlled server restart in this delivery. The enable/disable action explicitly says that playback stops and the current queue clears. | A live listener manager could avoid this, but changes listener ownership, shutdown, and audio lifecycle and requires its own specification. |
 | D-3: Trust and compatibility | Retain local HTTP and legacy PIN authentication. New QR devices are individually revocable; people who know the shared PIN can still reconnect until it is regenerated. | TLS provisioning or removing legacy PIN access is a materially larger/breaking change. |
 | D-4: Credential authority | LAN-authenticated phones get existing music/library/operator capabilities, whether paired by QR or connected through the fallback PIN, but no LAN principal may administer server exposure or credentials. All connection administration requires loopback, trusted origin, and the current shared PIN. | A comprehensive route-by-route least-privilege role system is deferred; this release does not describe a paired phone as a read-only or playback-only guest. |
-| D-5: Hostname and fallback | Prefer the responder-confirmed `noorwave.local`, persist collision renames, and offer a separate direct-IP QR. Start with normal IPv4 LAN hosting. | No OS computer rename, hosts-file edit, custom URL scheme, port 80, or automatic IPv6 listener redesign. |
+| D-5: Hostname and fallback | Prefer the responder-confirmed `noor.local`, persist collision renames, and offer a separate direct-IP QR. Start with normal IPv4 LAN hosting. | No OS computer rename, hosts-file edit, custom URL scheme, port 80, or automatic IPv6 listener redesign. |
 | D-6: Reset semantics | Rename the action **Reset all remote access**. It regenerates the fallback PIN, revokes all paired devices, invalidates tickets, and closes authenticated sockets after confirming the number of affected devices. | A button still labelled only "Regenerate PIN" would understate the broader consequence; rotating only the legacy PIN would contradict the present disconnect-all promise. |
 | D-7: Launch behavior | The Phone Remote panel exposes **Make phone remote available whenever NOORwave is running**. Once enabled, every later NOORwave launch starts the sidecar in LAN mode and advertises it without another restart or tray action. | This does not launch NOORwave with the operating system and does not create a separate background service. |
 | D-8: Start at sign-in | Installed Windows builds expose **Start NOORwave in the tray when I sign in**. The OS starts the ordinary per-user desktop process with an autostart marker; NOORwave creates the tray and managed sidecar but does not show/focus the main window. | A Windows service/pre-login boot process is rejected because it would split lifecycle ownership and run outside the interactive user/audio session. Portable builds show why this control is unavailable. |
@@ -62,7 +62,7 @@ D-2 and D-3 are the principal product tradeoffs. D-3, D-4, and D-6 are authentic
 - FR-5: Before a host-mode restart, the UI MUST disclose whether playback is active and the exact current queue count, and MUST offer **Cancel** and an explicit enable/disable-and-restart action; the restart MUST never begin merely by opening Settings or changing an unrelated preference.
 - FR-6: Standalone hosting and externally forced bind modes MUST report their actual state and control source; unsupported UI changes MUST return a specific error rather than a false success.
 - FR-7: A LAN-running server with a usable address and packaged remote assets MUST advertise `_noorwave._tcp.local.` with its actual port, `/remote` path, protocol version, and persistent server ID.
-- FR-8: The responder MUST start with the persisted hostname or `noorwave.local.`, detect conflicts, persist the effective renamed hostname, and expose only a confirmed advertised friendly URL as usable.
+- FR-8: The responder MUST start with the persisted hostname or `noor.local.`, detect conflicts, persist the effective renamed hostname, and expose only a confirmed advertised friendly URL as usable.
 - FR-9: Address selection MUST use active interfaces reachable by the actual listener, exclude loopback/unspecified/multicast/link-local addresses from phone URLs, rank physical LAN interfaces ahead of VPN/virtual interfaces, and permit explicit selection of other usable addresses.
 - FR-10: Disabling hosting or shutting down MUST withdraw discovery and invalidate outstanding tickets; interface changes MUST refresh advertised addresses and invalidate QR links tied to removed addresses or renamed hostnames.
 - FR-11: The desktop MUST generate a QR locally from a short-lived, one-use pairing URL; the QR MUST NOT contain the permanent PIN or a long-lived device credential.
@@ -165,9 +165,9 @@ Then it resolves `_noorwave._tcp.local.` to the confirmed hostname, actual addre
 
 ### AC-10: Collision and restart stability (FR-8, FR-25)
 
-Given another responder owns `noorwave.local`,
+Given another responder owns `noor.local`,
 When NOORwave completes conflict resolution and is subsequently restarted,
-Then status and fresh QR use the conflict-free persisted name, such as `noorwave-2.local`, and no stale friendly name is described as ready.
+Then status and fresh QR use the conflict-free persisted name, such as `noor-2.local`, and no stale friendly name is described as ready.
 
 ### AC-11: Interface selection and unsupported IPv6 (FR-9, FR-22)
 
@@ -600,7 +600,7 @@ The shared Rust implementation behind Settings and the tray:
 6. Refresh the loopback setup PIN, require `/api/server/remote` to confirm the requested effective state, update the tray, and resolve the operation. Reopen/reload the settings anchor once if needed; a renderer reload never owns or repeats the transition.
 7. Failed enable restores the prior disabled config and attempts one local-only recovery. Failed disable after saving the disabled state does not re-enable LAN: leave the owned server stopped if local-only recovery fails. Bound overall work by the 15-second deadline, using the remaining budget for recovery.
 
-The same loopback hostname/port that Tauri uses for readiness remains its webview origin. Add/adjust capabilities for that resolved loopback origin only; never grant native invocation to `noorwave.local`, arbitrary LAN addresses, or a wildcard web origin. If runtime capabilities cannot express the actual overridden port with the pinned Tauri version, retain default-port IPC and make nondefault-port controls explicitly unavailable pending a scoped implementation decision; do not silently expand the permission boundary.
+The same loopback hostname/port that Tauri uses for readiness remains its webview origin. Add/adjust capabilities for that resolved loopback origin only; never grant native invocation to `noor.local`, arbitrary LAN addresses, or a wildcard web origin. If runtime capabilities cannot express the actual overridden port with the pinned Tauri version, retain default-port IPC and make nondefault-port controls explicitly unavailable pending a scoped implementation decision; do not silently expand the permission boundary.
 
 ### WebSocket session lifecycle
 
@@ -629,7 +629,7 @@ Unique index on `token_hash`; primary-key lookup for rename/revoke. Limit to 32 
 | `server_token` | Existing TEXT | Existing six-digit PIN retained; never replaced with a device token |
 | `server.host_mode` | Existing TEXT boolean | Standalone preference; mirror of authoritative desktop JSON in managed mode |
 | `remote.server_id` | TEXT | Persistent UUID v4, generated once, not a credential |
-| `remote.hostname` | TEXT | Lowercase effective DNS hostname ending `.local.`, initially `noorwave.local.`; DNS label constraints apply |
+| `remote.hostname` | TEXT | Lowercase effective DNS hostname ending `.local.`, initially `noor.local.`; DNS label constraints apply |
 
 Do not add separate port or IP preferences. Actual port remains the existing environment/default resolution. Selected IP is a current UI choice, not durable configuration that would outlive DHCP. Persisting a collision name favors stable bookmarks; no automatic attempt to reclaim a shorter name later.
 
