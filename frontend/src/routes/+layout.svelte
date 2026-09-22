@@ -4108,7 +4108,7 @@
 		margin: 0;
 		color: var(--text-secondary);
 		font-size: var(--font-size-sm);
-		line-height: 1.55;
+		line-height: var(--line-height-normal);
 		white-space: pre-wrap;
 		overflow-wrap: anywhere;
 	}
