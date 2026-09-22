@@ -554,14 +554,11 @@ mod tests {
         assert!(!managed_false.configured_host_mode);
     }
 
-    // Characterization test for the boot-time wipe at main.rs:383-399. This
-    // re-runs the exact SQL the boot path runs so a future refactor (e.g. extracting
-    // it to a `reset_ephemeral_session` function) can be checked against the
-    // current behavior. CLAUDE.md flags this wipe as load-bearing: queue and
-    // current_track_id MUST be cleared, but user prefs (volume, shuffle, repeat,
-    // automix flags) MUST survive.
+    // Characterization test for restart reconciliation. The audio runtime is
+    // ephemeral, but the queue and its playhead are durable session state: on
+    // restart they remain available and resume rebuilds the runtime on demand.
     #[test]
-    fn boot_wipe_clears_queue_resets_playback_state_and_marks_orphan_runs_failed() {
+    fn boot_reconcile_preserves_queue_and_playhead_and_marks_orphan_runs_failed() {
         let db = crate::db::Database::open_in_memory().expect("open in-memory db");
         db.run_migrations().expect("migrations");
 
@@ -582,7 +579,9 @@ mod tests {
             )?;
             conn.execute(
                 "UPDATE playback_state
-                 SET is_playing = 1, current_track_id = 1, position_ms = 12345,
+                 SET is_playing = 1, current_track_id = 1,
+                     current_queue_item_id = (SELECT id FROM queue LIMIT 1),
+                     position_ms = 12345,
                      volume = 0.73, shuffle_mode = 'weighted', repeat_mode = 'one',
                      automix_enabled = 1
                  WHERE id = 1",
@@ -597,13 +596,12 @@ mod tests {
         })
         .expect("seed");
 
-        // Run the boot-wipe SQL verbatim from main.rs:383-399.
+        // Run the boot reconciliation SQL verbatim from the startup path.
         db.with_conn(|conn| {
             conn.execute(
-                "UPDATE playback_state SET is_playing = 0, current_track_id = NULL, current_queue_item_id = NULL, position_ms = 0 WHERE id = 1",
+                "UPDATE playback_state SET is_playing = 0, position_ms = 0 WHERE id = 1",
                 [],
             )?;
-            conn.execute("DELETE FROM queue", [])?;
             conn.execute(
                 "UPDATE training_runs
                  SET status = 'failed',
@@ -620,7 +618,7 @@ mod tests {
         db.with_conn(|conn| {
             let queue_count: i64 =
                 conn.query_row("SELECT COUNT(*) FROM queue", [], |r| r.get(0))?;
-            assert_eq!(queue_count, 0, "queue must be empty after boot wipe");
+            assert_eq!(queue_count, 1, "queue must survive a restart");
 
             let (
                 is_playing,
@@ -649,15 +647,12 @@ mod tests {
                     ))
                 },
             )?;
-            // Cleared:
+            // Runtime-only state is reset while the durable playhead survives.
             assert_eq!(is_playing, 0, "is_playing must reset to 0");
+            assert_eq!(current_track_id, Some(1), "current track must survive");
             assert!(
-                current_track_id.is_none(),
-                "current_track_id must reset to NULL"
-            );
-            assert!(
-                current_queue_item_id.is_none(),
-                "current_queue_item_id must reset to NULL"
+                current_queue_item_id.is_some(),
+                "queue playhead must survive"
             );
             assert_eq!(position_ms, 0, "position_ms must reset to 0");
             // Preserved (CLAUDE.md guarantee):
@@ -721,16 +716,15 @@ async fn main() -> Result<()> {
     mirror_managed_host_mode(&db, &resolved_bind)?;
     let genre_count = db.with_conn(genre::taxonomy::ensure_taxonomy_loaded)?;
     db.seed_genres_from_taxonomy()?;
-    // The audio runtime is ephemeral — it never survives a process restart. Clear the
-    // whole transient session (current track, position, queue) so the player boots fresh
-    // instead of showing a stale track that "Play" can't actually resume. User prefs
-    // (volume, shuffle/repeat/automix modes) stay put.
+    // The audio runtime is ephemeral, but the queue is durable session state.
+    // Boot paused at the beginning of the current row; the resume route rebuilds
+    // the runtime on demand. Queue rows and the playhead therefore survive quit /
+    // reopen, as do the user's playback preferences.
     db.with_conn(|conn| {
         conn.execute(
-            "UPDATE playback_state SET is_playing = 0, current_track_id = NULL, current_queue_item_id = NULL, position_ms = 0 WHERE id = 1",
+            "UPDATE playback_state SET is_playing = 0, position_ms = 0 WHERE id = 1",
             [],
         )?;
-        conn.execute("DELETE FROM queue", [])?;
         // Discovery training runs in-process; if the previous process died mid-run
         // the row is left at status='running' forever and the UI's Stop button has
         // no live cancel handle to flip. Mark orphans failed so the user can retrain.
@@ -743,7 +737,10 @@ async fn main() -> Result<()> {
             [],
         )?;
         if orphaned > 0 {
-            info!("Reconciled {} orphaned training run(s) on startup", orphaned);
+            info!(
+                "Reconciled {} orphaned training run(s) on startup",
+                orphaned
+            );
         }
         Ok(())
     })?;

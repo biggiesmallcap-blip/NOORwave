@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { QueueItem, Track } from '$lib/api/client';
-import { currentQueueAnchorItem, currentQueueAnchorPosition, isQueueItemActive } from './queue_active';
+import {
+	currentQueueAnchorItem,
+	currentQueueAnchorPosition,
+	isQueueItemActive,
+	isQueueItemPlayed,
+} from './queue_active';
 
 function track(id: number, title: string): Track {
 	return {
@@ -113,5 +118,22 @@ describe('currentQueueAnchorItem', () => {
 		];
 
 		expect(currentQueueAnchorItem(queue, current, 10)?.source).toBe('radio');
+	});
+});
+
+describe('isQueueItemPlayed', () => {
+	it('marks only rows before the anchored queue item as played', () => {
+		const current = track(2, 'Current');
+		const queue = [row(10, track(1, 'Before')), row(11, current), row(12, track(3, 'After'))];
+
+		expect(isQueueItemPlayed(queue[0], current, 11, queue)).toBe(true);
+		expect(isQueueItemPlayed(queue[1], current, 11, queue)).toBe(false);
+		expect(isQueueItemPlayed(queue[2], current, 11, queue)).toBe(false);
+	});
+
+	it('does not invent played rows without a current playhead', () => {
+		const queue = [row(10, track(1, 'First')), row(11, track(2, 'Second'))];
+
+		expect(isQueueItemPlayed(queue[0], null, null, queue)).toBe(false);
 	});
 });
