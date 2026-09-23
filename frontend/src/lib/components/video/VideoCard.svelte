@@ -76,6 +76,7 @@
 	   hover lift. No glass-tile border/background - keeps the shelves light. */
 	.video-card {
 		width: 100%;
+		min-width: 0;
 		display: flex;
 		flex-direction: column;
 		gap: 6px;
@@ -100,6 +101,8 @@
 
 	.poster-wrap {
 		position: relative;
+		width: 100%;
+		min-width: 0;
 		aspect-ratio: 16 / 9;
 		border-radius: var(--radius-md);
 		overflow: hidden;
@@ -113,6 +116,8 @@
 	}
 
 	.poster-wrap :global(.poster) {
+		position: absolute;
+		inset: 0;
 		width: 100%;
 		height: 100%;
 		color: var(--text-tertiary);

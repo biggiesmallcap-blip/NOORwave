@@ -8,9 +8,9 @@
 //!
 //! ## Why the scan unit is the artist
 //!
-//! One `/artists/{id}/videos` call returns an artist's whole video catalog, so
-//! it resolves every liked song by that artist at once and gives a definitive
-//! "no video" for artists with none. On the dev library that is 2,350 calls
+//! One `/artists/{id}/videos` call returns the first 50 videos for an artist,
+//! so it resolves liked songs within that page together and indexes the other
+//! videos for radio. On the dev library that is 2,350 calls
 //! covering 4,276 liked tracks, against 4,276 calls for a per-track video
 //! search - and the artist is matched by TIDAL id rather than by name, so only
 //! the title match is ever fuzzy.
@@ -43,15 +43,15 @@ use tracing::{debug, info, warn};
 use crate::SharedState;
 use crate::library::duplicates::base_title;
 use crate::services::tidal::client::{TidalArtistVideo, TidalClient};
+use crate::services::{video_radio, video_sets};
 
 /// Re-check an artist this long after its last scan, in case TIDAL added a
 /// video since. Long, because a miss is the overwhelmingly common answer and
 /// re-asking is pure cost.
 pub const RESCAN_AFTER_DAYS: i64 = 90;
 
-/// Videos requested per artist. TIDAL caps a page well below this for all but
-/// the largest catalogs, and an artist with more videos than this is not worth
-/// a second round trip on a background pass.
+/// Videos requested per artist. This intentionally stops at the first page;
+/// a larger catalog needs separate, paced pagination to become complete.
 pub const VIDEOS_PER_ARTIST: i32 = 50;
 
 /// Jaro-Winkler floor for accepting a video title against a liked track title,
@@ -108,6 +108,7 @@ const PRIMARY_GENRE_FOR_TRACK: &str = "SELECT tg.genre_id
 pub struct ScanTarget {
     pub artist_id: i64,
     pub tidal_artist_id: i64,
+    pub artist_name: String,
 }
 
 /// A liked song to find videos for.
@@ -204,21 +205,23 @@ pub struct ScanProgress {
 // ── Work selection ───────────────────────────────────────────────────────────
 
 /// Artists that need a video lookup: they have liked tracks, they carry a TIDAL
-/// id, and either they have never been scanned, their scan has aged out, or a
-/// track was liked after the last scan.
+/// id, and either they have never been scanned, their scan has aged out, a
+/// track was liked after the last scan, or their catalog has not been indexed.
 ///
-/// That last clause is load-bearing. Scanning per artist means an artist that
-/// has been seen once would otherwise never be revisited, so a newly liked song
-/// by an artist already on the wall would never resolve.
+/// The new-like clause revisits an artist when a liked song arrives. The
+/// catalog clause backfills existing installs whose liked-song wall was scanned
+/// before radio began saving all videos from each artist response.
 pub fn artists_needing_scan(conn: &Connection) -> Result<Vec<ScanTarget>> {
     let sql = format!(
-        "SELECT a.id, a.tidal_id
+        "SELECT a.id, a.tidal_id, a.name
            FROM artists a
            JOIN tracks t ON t.artist_id = a.id AND t.is_favorite = 1
            LEFT JOIN library_video_scans s ON s.artist_id = a.id
+           LEFT JOIN video_artist_scans vs ON vs.artist_tidal_id = a.tidal_id
           WHERE a.tidal_id IS NOT NULL
           GROUP BY a.id
          HAVING s.scanned_at IS NULL
+             OR vs.scanned_at IS NULL
              OR s.scanned_at < datetime('now', '-{RESCAN_AFTER_DAYS} days')
              OR MAX({DATE_ADDED_NORMALIZED}) > s.scanned_at
           ORDER BY s.scanned_at IS NOT NULL, a.id"
@@ -229,6 +232,7 @@ pub fn artists_needing_scan(conn: &Connection) -> Result<Vec<ScanTarget>> {
             Ok(ScanTarget {
                 artist_id: row.get(0)?,
                 tidal_artist_id: row.get(1)?,
+                artist_name: row.get(2)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -365,6 +369,29 @@ pub fn store_artist_scan(conn: &Connection, artist_id: i64, matches: &[VideoMatc
             params![artist_id, matches.len() as i64],
         )?;
     }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Keep every video returned by the artist lookup, including songs that were
+/// never liked. Radio can then start from this catalog without another call.
+fn cache_artist_catalog(
+    conn: &Connection,
+    target: &ScanTarget,
+    videos: &[TidalArtistVideo],
+) -> Result<()> {
+    let anchor = video_sets::AnchorArtist {
+        tidal_id: target.tidal_artist_id,
+        name: target.artist_name.clone(),
+        listens: 1,
+        via: None,
+    };
+    let candidates = videos
+        .iter()
+        .map(video_sets::VideoCandidate::from)
+        .collect();
+    let tx = conn.unchecked_transaction()?;
+    video_radio::cache_groups_without_prune(&tx, &[(anchor, candidates)])?;
     tx.commit()?;
     Ok(())
 }
@@ -609,6 +636,8 @@ pub async fn run_if_idle(state: SharedState) {
 
         let mut scanned = 0usize;
         let mut hits = 0usize;
+        let mut indexed = 0usize;
+        let mut larger_catalogs = 0usize;
         // Keep going until the work is drained. Stopping after one batch and
         // waiting for the next trigger meant a first index of 2,346 artists
         // needed a dozen daily ticks - about a fortnight - to finish.
@@ -639,7 +668,15 @@ pub async fn run_if_idle(state: SharedState) {
                     .get_artist_videos(target.tidal_artist_id, VIDEOS_PER_ARTIST, 0)
                     .await
                 {
-                    Ok(page) => page.items,
+                    Ok(page) => {
+                        if page
+                            .total_number_of_items
+                            .is_some_and(|total| total > page.items.len() as i64)
+                        {
+                            larger_catalogs += 1;
+                        }
+                        page.items
+                    }
                     Err(e) => {
                         // Do not stamp the ledger on failure: an unstamped artist
                         // is simply picked up again next pass. Which means it
@@ -658,6 +695,17 @@ pub async fn run_if_idle(state: SharedState) {
 
                 let matches = match_videos(&tracks, &videos);
                 hits += matches.len();
+                if let Err(e) = with_scan_conn!(|conn| cache_artist_catalog(conn, &target, &videos))
+                {
+                    warn!(
+                        target: "noor.library_videos",
+                        artist_id = target.artist_id,
+                        error = %e,
+                        "could not cache liked artist's video catalog"
+                    );
+                    break 'passes;
+                }
+                indexed += videos.len();
                 if let Err(e) =
                     with_scan_conn!(|conn| store_artist_scan(conn, target.artist_id, &matches))
                 {
@@ -674,12 +722,17 @@ pub async fn run_if_idle(state: SharedState) {
             }
         }
 
+        if let Err(e) = with_scan_conn!(video_radio::prune_catalog) {
+            warn!(target: "noor.library_videos", error = %e, "could not prune video catalog");
+        }
+
         running.store(false, Ordering::SeqCst);
         info!(
             target: "noor.library_videos",
-            scanned, hits,
+            scanned, hits, indexed, larger_catalogs,
             "liked-video pass complete"
         );
+        video_radio::warm_liked_graph_if_idle(state).await;
     });
 }
 
@@ -799,6 +852,30 @@ mod tests {
     }
 
     #[test]
+    fn liked_artist_scan_indexes_unliked_videos_for_radio() {
+        let conn = setup();
+        let target = artists_needing_scan(&conn).unwrap().remove(0);
+        let videos = vec![video(900, "Song"), video(901, "Other Song")];
+        cache_artist_catalog(&conn, &target, &videos).unwrap();
+        let liked = liked_tracks_for_artist(&conn, target.artist_id).unwrap();
+        store_artist_scan(&conn, target.artist_id, &match_videos(&liked, &videos)).unwrap();
+
+        let catalog_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM video_catalog WHERE artist_tidal_id = 5001",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let liked_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM library_videos", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(catalog_count, 2);
+        assert_eq!(liked_count, 1);
+        assert!(!video_radio::artist_due(&conn, 5001).unwrap());
+    }
+
+    #[test]
     fn unscanned_artist_is_work() {
         let conn = setup();
         let targets = artists_needing_scan(&conn).unwrap();
@@ -807,6 +884,7 @@ mod tests {
             vec![ScanTarget {
                 artist_id: 1,
                 tidal_artist_id: 5001,
+                artist_name: "Anchor".into(),
             }]
         );
     }
@@ -815,6 +893,7 @@ mod tests {
     fn a_scanned_artist_is_not_rescanned_until_something_changes() {
         let conn = setup();
         store_artist_scan(&conn, 1, &[]).unwrap();
+        video_radio::mark_artist_scanned(&conn, 5001).unwrap();
 
         assert!(
             artists_needing_scan(&conn).unwrap().is_empty(),
@@ -846,6 +925,7 @@ mod tests {
         )
         .unwrap();
         store_artist_scan(&conn, 1, &[]).unwrap();
+        video_radio::mark_artist_scanned(&conn, 5001).unwrap();
 
         assert!(
             artists_needing_scan(&conn).unwrap().is_empty(),
@@ -854,9 +934,20 @@ mod tests {
     }
 
     #[test]
+    fn an_existing_liked_wall_scan_is_backfilled_into_the_radio_catalog() {
+        let conn = setup();
+        store_artist_scan(&conn, 1, &[]).unwrap();
+        assert_eq!(artists_needing_scan(&conn).unwrap().len(), 1);
+        let target = artists_needing_scan(&conn).unwrap().remove(0);
+        cache_artist_catalog(&conn, &target, &[]).unwrap();
+        assert!(artists_needing_scan(&conn).unwrap().is_empty());
+    }
+
+    #[test]
     fn a_stale_scan_is_rechecked() {
         let conn = setup();
         store_artist_scan(&conn, 1, &[]).unwrap();
+        video_radio::mark_artist_scanned(&conn, 5001).unwrap();
         conn.execute(
             "UPDATE library_video_scans
                 SET scanned_at = datetime('now', '-91 days') WHERE artist_id = 1",

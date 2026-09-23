@@ -1646,14 +1646,13 @@
 						onclick={() => requestVideoClear()}
 					>⌫</button>
 				</div>
-				{#if $videoSession.queue.length > 0}
+				{#if $videoSessionUpcoming.length > 0}
 					<div class="video-panel-list">
-						{#each $videoSession.queue.slice(0, 60) as video, i (`video-${video.tidal_id}-${i}`)}
+						{#each $videoSessionUpcoming.slice(0, 60) as video, i (`video-${video.tidal_id}-${i}`)}
 							{@const videoArt = artworkCandidate(video.artwork_url, 320)}
 							<button
 								type="button"
 								class="video-panel-row"
-								class:active={$videoSession.current?.tidal_id === video.tidal_id}
 								onclick={() => requestVideoJump(video.tidal_id)}
 							>
 								{#if videoArt}
@@ -1676,8 +1675,8 @@
 					</div>
 				{:else}
 					<div class="queue-empty">
-						<p>No video queue yet.</p>
-						<span>Search or open a video mix to build one.</span>
+						<p>{$videoSession.continuous ? 'Finding more videos…' : 'No videos up next.'}</p>
+						<span>{$videoSession.continuous ? 'More from this artist and related artists will appear here.' : 'Start radio to keep listening.'}</span>
 					</div>
 				{/if}
 			</section>

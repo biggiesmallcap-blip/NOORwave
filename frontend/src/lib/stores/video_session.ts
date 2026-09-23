@@ -14,6 +14,8 @@ export interface VideoSessionState {
 	sourceLabel: string | null;
 	autoplay: boolean;
 	continuous: boolean;
+	radioSeedArtistId: number | null;
+	radioSeedArtistName: string | null;
 	loading: boolean;
 	error: string | null;
 	radioIssue: string | null;
@@ -64,6 +66,8 @@ const initialState: VideoSessionState = {
 	sourceLabel: null,
 	autoplay: loadAutoplayPreference(),
 	continuous: false,
+	radioSeedArtistId: null,
+	radioSeedArtistName: null,
 	loading: false,
 	error: null,
 	radioIssue: null,
@@ -76,6 +80,18 @@ const initialState: VideoSessionState = {
 function findCurrentIndex(queue: VideoSessionItem[], current: VideoSessionItem | null): number {
 	if (!current) return -1;
 	return queue.findIndex((item) => item.tidal_id === current.tidal_id);
+}
+
+function videoSongKey(item: Pick<VideoSessionItem, 'artist_id' | 'artist_name' | 'title'>): string {
+	const artist = item.artist_id != null ? `id:${item.artist_id}` : `name:${item.artist_name?.trim().toLowerCase() ?? ''}`;
+	const title = item.title.split(/[([]/, 1)[0].toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+	return `${artist}:${title || item.title.toLowerCase()}`;
+}
+
+function radioStartQueue(item: VideoSessionItem): VideoSessionItem[] {
+	// Let the seed drive the first refill. An editorial shelf can contain many
+	// unrelated artists and must not become the opening radio queue.
+	return [item];
 }
 
 const session = writable<VideoSessionState>(initialState);
@@ -108,11 +124,13 @@ export const videoSession = {
 		const currentVideoId = state.current.tidal_id;
 		radioGeneration += 1;
 		radioSeenIds = [state.current.tidal_id];
+		radioSeenSongs = [state.current];
 		radioRefill = null;
 		persistAutoplayPreference(true);
-		const queue = state.queue.some((video) => video.tidal_id === state.current?.tidal_id)
-			? state.queue : [state.current, ...state.queue];
-		update({ queue, continuous: true, autoplay: true, radioIssue: null, sourceLabel: `${state.current.artist_name ?? 'Video'} radio` });
+		const queue = radioStartQueue(state.current);
+		update({ queue, continuous: true, autoplay: true, radioIssue: null,
+			radioSeedArtistId: state.current.artist_id ?? null, radioSeedArtistName: state.current.artist_name ?? null,
+			sourceLabel: `${state.current.artist_name ?? 'Video'} radio` });
 		void refillVideoRadio(true).then(async () => {
 			if (!retryEndedVideo) return;
 			const current = get(session);
@@ -125,7 +143,8 @@ export const videoSession = {
 	stopRadio() {
 		radioGeneration += 1;
 		radioRefill = null;
-		update({ continuous: false, radioIssue: null, sourceLabel: 'Video queue' });
+		update({ continuous: false, radioSeedArtistId: null, radioSeedArtistName: null,
+			radioIssue: null, sourceLabel: 'Video queue' });
 	},
 	radioExhausted(expectedVideoId: number) {
 		const state = get(session);
@@ -133,7 +152,8 @@ export const videoSession = {
 		radioGeneration += 1;
 		radioRefill = null;
 		persistAutoplayPreference(false);
-		update({ continuous: false, autoplay: false, playing: false, sourceLabel: 'Video queue',
+		update({ continuous: false, radioSeedArtistId: null, radioSeedArtistName: null,
+			autoplay: false, playing: false, sourceLabel: 'Video queue',
 			radioIssue: 'Radio could not find another video. Start radio to try again.' });
 	},
 	setPlaying(playing: boolean) {
@@ -158,6 +178,7 @@ let streamSeq = 0;
 let radioGeneration = 0;
 let radioRefill: Promise<number> | null = null;
 let radioSeenIds: number[] = [];
+let radioSeenSongs: VideoSessionItem[] = [];
 
 function sourceFor(item: VideoSessionItem, ctx: VideoPlayContext): VideoSessionSource {
 	if (ctx.source !== 'none') return ctx.source;
@@ -195,8 +216,12 @@ export async function playVideo(
 	if (ctx.resetRadio) {
 		radioGeneration += 1;
 		radioSeenIds = [item.tidal_id];
+		radioSeenSongs = [item];
 		radioRefill = null;
 	}
+	const queue = ctx.resetRadio && ctx.continuous ? radioStartQueue(item) : ctx.queue;
+	const radioSeedArtistId = ctx.continuous ? (ctx.resetRadio ? item.artist_id ?? null : state.radioSeedArtistId) : null;
+	const radioSeedArtistName = ctx.continuous ? (ctx.resetRadio ? item.artist_name ?? null : state.radioSeedArtistName) : null;
 	if (
 		state.active &&
 		state.current?.tidal_id === item.tidal_id &&
@@ -206,13 +231,16 @@ export async function playVideo(
 	) {
 		videoBrowseMode.set(false);
 		update({
-			queue: ctx.queue,
+			queue,
 			source: sourceFor(item, ctx),
 			sourceLabel: ctx.sourceLabel,
 			autoplay: ctx.autoplay ?? state.autoplay,
 			continuous: ctx.continuous ?? false,
+			radioSeedArtistId,
+			radioSeedArtistName,
 			radioIssue: null,
 		});
+		if (ctx.resetRadio && ctx.continuous) void refillVideoRadio(true);
 		return true;
 	}
 
@@ -222,11 +250,13 @@ export async function playVideo(
 	videoBrowseMode.set(false);
 	update({
 		current: item,
-		queue: ctx.queue,
+		queue,
 		source: sourceFor(item, ctx),
 		sourceLabel: ctx.sourceLabel,
 		autoplay: ctx.autoplay ?? get(session).autoplay,
 		continuous: ctx.continuous ?? false,
+		radioSeedArtistId,
+		radioSeedArtistName,
 		radioIssue: null,
 		loading: true,
 		error: null,
@@ -246,7 +276,11 @@ export async function playVideo(
 		}
 		if (seq !== streamSeq) return false;
 		update({ streamUrl: url, streamExpiresAt: expiresAt, loading: false, error: null });
-		if (ctx.continuous) radioSeenIds.push(item.tidal_id);
+		if (ctx.continuous) {
+			radioSeenIds.push(item.tidal_id);
+			radioSeenSongs.push(item);
+			radioSeenSongs = radioSeenSongs.slice(-128);
+		}
 		recordWatch(item);
 		if (ctx.continuous) void refillVideoRadio(Boolean(ctx.resetRadio));
 		return true;
@@ -267,21 +301,29 @@ export function refillVideoRadio(force = false): Promise<number> {
 		return Promise.resolve(0);
 	}
 	const generation = radioGeneration;
-	const seed = state.current;
 	const excluded = state.queue.map((v) => v.tidal_id);
 	const recentArtists = state.queue.slice(Math.max(0, state.currentIndex - 8), state.currentIndex + 1)
 		.map((v) => v.artist_id).filter((id): id is number => id != null);
 	const pending = api.getVideoRadioNext({
-		seed_artist_id: seed?.artist_id ?? null,
-		seed_artist_name: seed?.artist_name ?? null,
+		seed_artist_id: state.radioSeedArtistId,
+		seed_artist_name: state.radioSeedArtistName,
 		exclude_video_ids: excluded,
 		recent_video_ids: radioSeenIds.slice(-96),
+		recent_songs: [...state.queue, ...radioSeenSongs].slice(-128).map((video) => ({
+			artist_id: video.artist_id ?? null, artist_name: video.artist_name ?? null, title: video.title,
+		})),
 		recent_artist_ids: recentArtists,
 	}).then(({ items, unfamiliar_video_ids }) => {
 		const current = get(session);
 		if (generation !== radioGeneration || !current.continuous || !current.active) return 0;
 		const existing = new Set(current.queue.map((v) => v.tidal_id));
-		const fresh = items.filter((item) => !existing.has(item.tidal_id));
+		const songs = new Set([...current.queue, ...radioSeenSongs].map(videoSongKey));
+		const fresh = items.filter((item) => {
+			const key = videoSongKey(item);
+			if (existing.has(item.tidal_id) || songs.has(key)) return false;
+			songs.add(key);
+			return true;
+		});
 		if (fresh.length === 0) return 0;
 		if (force && (current.queue.length - current.currentIndex <= 2 || (fresh.length >= 8 && unfamiliar_video_ids.filter((id) => fresh.some((item) => item.tidal_id === id)).length >= 2))) {
 			// The browse shelves are a quick start. Once the server has a real
@@ -295,6 +337,8 @@ export function refillVideoRadio(force = false): Promise<number> {
 		}
 		radioSeenIds.push(...fresh.map((item) => item.tidal_id));
 		radioSeenIds = radioSeenIds.slice(-256);
+		radioSeenSongs.push(...fresh);
+		radioSeenSongs = radioSeenSongs.slice(-128);
 		return fresh.length;
 	}).catch(() => 0);
 	radioRefill = pending;
@@ -380,6 +424,7 @@ export function clearVideoSession() {
 	streamSeq += 1;
 	radioGeneration += 1;
 	radioSeenIds = [];
+	radioSeenSongs = [];
 	radioRefill = null;
 	session.set({ ...initialState, autoplay: loadAutoplayPreference() });
 	videoBrowseMode.set(false);
