@@ -713,18 +713,29 @@
 		relatedVideos = [];
 		relatedLoading = Boolean(item?.artist_id || item?.artist_name);
 		if (!item || (!item.artist_id && !item.artist_name)) return;
-		const timer = setTimeout(() => {
-			void api.getRelatedVideos({
-				seed_artist_id: item.artist_id,
-				seed_artist_name: item.artist_name,
-				exclude_video_ids: [item.tidal_id],
-			}).then(({ items }) => {
-				if (seq === relatedRequest) relatedVideos = items.filter((video) => video.tidal_id !== item.tidal_id);
-			}).catch(() => {}).finally(() => {
+		const controller = new AbortController();
+		let attempts = 0;
+		let timer: ReturnType<typeof setTimeout>;
+		const fetchRelated = async () => {
+			try {
+				const { items, building } = await api.getRelatedVideos({
+					seed_artist_id: item.artist_id,
+					seed_artist_name: item.artist_name,
+					exclude_video_ids: [item.tidal_id],
+				}, controller.signal);
+				if (seq !== relatedRequest) return;
+				relatedVideos = items.filter((video) => video.tidal_id !== item.tidal_id);
+				if (building && ++attempts < 10) {
+					timer = setTimeout(() => void fetchRelated(), 3000);
+				} else {
+					relatedLoading = false;
+				}
+			} catch {
 				if (seq === relatedRequest) relatedLoading = false;
-			});
-		}, 400);
-		return () => { clearTimeout(timer); ++relatedRequest; };
+			}
+		};
+		timer = setTimeout(() => void fetchRelated(), 400);
+		return () => { clearTimeout(timer); controller.abort(); ++relatedRequest; };
 	});
 
 	// Hand the route's hero placeholder to the persistent dock so it can dock

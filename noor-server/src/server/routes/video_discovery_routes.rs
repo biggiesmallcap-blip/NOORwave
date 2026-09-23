@@ -515,9 +515,107 @@ pub(super) async fn post_videos_radio_next(
     Json(video_radio_payload(&items, &familiar))
 }
 
-/// Related videos share radio's single-flight, cached fan-out. The displayed
-/// rows are then restricted to the seed's own artist, linked artists and genre
-/// neighbours; general library anchors never appear in this section.
+/// Related videos read the cached catalog immediately. A separate, bounded
+/// background pass fills missing links without waiting for a radio refill.
+static VIDEO_RELATED_BUILD_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+fn kick_related_build(state: &SharedState, seed_id: i64) -> bool {
+    if VIDEO_RELATED_BUILD_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+        return true;
+    }
+    let state = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = build_related_cache(&state, seed_id).await {
+            tracing::warn!("video related cache build failed: {e}");
+        }
+        VIDEO_RELATED_BUILD_IN_FLIGHT.store(false, Ordering::SeqCst);
+    });
+    true
+}
+
+async fn build_related_cache(state: &SharedState, seed_id: i64) -> anyhow::Result<()> {
+    let (db, tidal_http, tokens) = {
+        let s = state.read().await;
+        (
+            s.db.clone(),
+            s.tidal_http_client.clone(),
+            s.tidal_tokens.clone(),
+        )
+    };
+    let tokens = match tokens {
+        Some(tokens) => Some(tokens),
+        None => super::load_persisted_tidal_tokens(state)
+            .await
+            .ok()
+            .flatten(),
+    };
+    let Some(tokens) = tokens else {
+        return Ok(());
+    };
+    if !db.with_conn(|conn| video_radio::related_due(conn, seed_id))? {
+        return Ok(());
+    }
+    let client = TidalClient::with_http(tidal_http, tokens.access_token, tokens.country_code);
+    // One relationship request and at most two artist catalogs per pass. The
+    // scan ledgers suppress repeated requests for empty or unavailable artists.
+    let similar = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        client.get_artist_similar(seed_id, 10, 0),
+    )
+    .await;
+    let related: Vec<(i64, String, &'static str)> = match similar {
+        Ok(Ok(page)) => page
+            .items
+            .into_iter()
+            .map(|artist| (artist.id, artist.name, "tidal"))
+            .collect(),
+        Ok(Err(e)) => {
+            tracing::debug!("video related artists fetch failed: {e}");
+            Vec::new()
+        }
+        Err(_) => Vec::new(),
+    };
+    db.with_conn(|conn| video_radio::store_related(conn, seed_id, &related))?;
+    let mut pool = db.with_conn(|conn| video_radio::artist_pool(conn, Some(seed_id), &[], &[]))?;
+    pool.sort_by_key(|(_, _, lane)| if *lane == 0 { 2 } else { *lane });
+    let mut fetched = 0;
+    for (id, name, _) in pool.into_iter().filter(|(_, _, lane)| *lane <= 2) {
+        if fetched >= 2 {
+            break;
+        }
+        if !db.with_conn(|conn| video_radio::artist_due(conn, id))? {
+            continue;
+        }
+        db.with_conn(|conn| video_radio::mark_artist_scanned(conn, id))?;
+        fetched += 1;
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            client.get_artist_videos(id, 20, 0),
+        )
+        .await
+        {
+            Ok(Ok(page)) => {
+                let anchor = video_sets::AnchorArtist {
+                    tidal_id: id,
+                    name,
+                    listens: 1,
+                    via: None,
+                };
+                let videos = page
+                    .items
+                    .iter()
+                    .map(video_sets::VideoCandidate::from)
+                    .collect();
+                db.with_conn(|conn| video_radio::cache_groups(conn, &[(anchor, videos)]))?;
+            }
+            Ok(Err(e)) => tracing::debug!("video related artist {id} fetch failed: {e}"),
+            Err(_) => tracing::debug!("video related artist {id} fetch timed out"),
+        }
+    }
+    Ok(())
+}
+
+/// General library anchors never appear in this section.
 #[derive(Deserialize)]
 pub(super) struct RelatedVideosRequest {
     pub seed_artist_id: Option<i64>,
@@ -542,29 +640,23 @@ pub(super) async fn post_videos_related(
             })
     });
     let Some(seed_id) = seed_id else {
-        return Json(json!({ "items": [] }));
+        return Json(json!({ "items": [], "building": false }));
     };
-    let needs_fan_out = db
-        .with_conn(|conn| -> anyhow::Result<bool> {
-            let pool = video_radio::artist_pool(conn, Some(seed_id), &[], &[])?;
-            let related: Vec<_> = pool.into_iter().filter(|(_, _, lane)| *lane <= 2).collect();
-            Ok(video_radio::related_due(conn, seed_id)?
-                || video_radio::load_candidates(conn, &related)?.len() < 6)
-        })
-        .unwrap_or(true);
-    if needs_fan_out {
-        let _ = post_videos_radio_next(
-            State(state.clone()),
-            Json(VideoRadioRequest {
-                seed_artist_id: Some(seed_id),
-                seed_artist_name: body.seed_artist_name,
-                exclude_video_ids: body.exclude_video_ids.clone(),
-                recent_video_ids: Vec::new(),
-                recent_artist_ids: Vec::new(),
-            }),
-        )
-        .await;
-    }
+    let due = db
+        .with_conn(|conn| video_radio::related_due(conn, seed_id))
+        .unwrap_or(false);
+    let building = if due {
+        let connected = { state.read().await.tidal_tokens.is_some() };
+        let connected = connected
+            || super::load_persisted_tidal_tokens(&state)
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+        connected && kick_related_build(&state, seed_id)
+    } else {
+        VIDEO_RELATED_BUILD_IN_FLIGHT.load(Ordering::SeqCst)
+    };
     let s = state.read().await;
     let items =
         s.db.with_conn(|conn| -> anyhow::Result<Vec<video_sets::VideoSetItem>> {
@@ -602,7 +694,7 @@ pub(super) async fn post_videos_related(
             Ok(selected)
         })
         .unwrap_or_default();
-    Json(json!({ "items": items }))
+    Json(json!({ "items": items, "building": building }))
 }
 
 fn record_set_exposure(
@@ -727,7 +819,12 @@ pub(super) async fn get_saved_videos(State(state): State<SharedState>) -> Json<V
                 .prepare("SELECT item_json FROM saved_videos ORDER BY saved_at DESC LIMIT 1000")?;
             let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
             Ok(rows
-                .filter_map(|row| row.ok().and_then(|raw| serde_json::from_str(&raw).ok()))
+                .filter_map(|row| {
+                    row.ok()
+                        .and_then(|raw| serde_json::from_str::<video_sets::VideoSetItem>(&raw).ok())
+                        .filter(valid_saved_video)
+                        .and_then(|video| serde_json::to_value(video).ok())
+                })
                 .collect())
         })
         .unwrap_or_default();
@@ -736,37 +833,49 @@ pub(super) async fn get_saved_videos(State(state): State<SharedState>) -> Json<V
 
 #[derive(Deserialize)]
 pub(super) struct SaveVideoRequest {
-    pub video: Value,
+    pub video: video_sets::VideoSetItem,
     pub saved: bool,
+}
+
+fn valid_saved_video(video: &video_sets::VideoSetItem) -> bool {
+    video.tidal_id > 0
+        && !video.title.trim().is_empty()
+        && video.title.len() <= 500
+        && video.duration_ms.is_none_or(|duration| duration >= 0)
+        && video.artist_id.is_none_or(|id| id > 0)
+        && video.album_tidal_id.is_none_or(|id| id > 0)
+        && video
+            .artist_name
+            .as_ref()
+            .is_none_or(|name| name.len() <= 500)
+        && video
+            .artwork_url
+            .as_ref()
+            .is_none_or(|url| url.len() <= 2048)
+        && !video.kind.trim().is_empty()
+        && video.kind.len() <= 80
+        && video.why.len() <= 500
+        && video
+            .quality
+            .as_ref()
+            .is_none_or(|quality| quality.len() <= 80)
 }
 
 pub(super) async fn post_saved_video(
     State(state): State<SharedState>,
     Json(body): Json<SaveVideoRequest>,
 ) -> Json<Value> {
-    let Some(id) = body
-        .video
-        .get("tidal_id")
-        .and_then(Value::as_i64)
-        .filter(|id| *id > 0)
-    else {
-        return Json(json!({ "ok": false }));
-    };
-    if body
-        .video
-        .get("title")
-        .and_then(Value::as_str)
-        .is_none_or(|title| title.is_empty() || title.len() > 500)
-    {
+    if !valid_saved_video(&body.video) {
         return Json(json!({ "ok": false }));
     }
+    let id = body.video.tidal_id;
     let s = state.read().await;
     let result = s.db.with_conn(|conn| -> anyhow::Result<()> {
         if body.saved {
             conn.execute(
                 "INSERT INTO saved_videos (tidal_video_id, item_json) VALUES (?1, ?2) \
                  ON CONFLICT(tidal_video_id) DO UPDATE SET item_json = excluded.item_json",
-                params![id, body.video.to_string()],
+                params![id, serde_json::to_string(&body.video)?],
             )?;
         } else {
             conn.execute("DELETE FROM saved_videos WHERE tidal_video_id = ?1", [id])?;
@@ -777,6 +886,36 @@ pub(super) async fn post_saved_video(
         tracing::warn!("saved video write failed: {e}");
     }
     Json(json!({ "ok": result.is_ok() }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn related_response_does_not_wait_for_radio_fetch_lock() {
+        let db = crate::server::routes::tests::fresh_migrated_db();
+        let state = Arc::new(tokio::sync::RwLock::new(
+            crate::server::routes::tests::fresh_test_state(db),
+        ));
+        let _radio_guard = VIDEO_RADIO_FETCH_LOCK.lock().await;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            post_videos_related(
+                State(state),
+                Json(RelatedVideosRequest {
+                    seed_artist_id: Some(42),
+                    seed_artist_name: Some("Artist".into()),
+                    exclude_video_ids: Vec::new(),
+                }),
+            ),
+        )
+        .await
+        .expect("related response must use cache without waiting for radio");
+        assert!(response.0["items"].is_array());
+        assert!(response.0["building"].is_boolean());
+    }
 }
 
 /// `POST /api/videos/liked/refresh`. The manual affordance for the impatient;

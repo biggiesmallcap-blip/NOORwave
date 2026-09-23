@@ -16,6 +16,7 @@ export interface VideoSessionState {
 	continuous: boolean;
 	loading: boolean;
 	error: string | null;
+	radioIssue: string | null;
 	/** HLS stream URL for `current`. Lives in the store so the persistent dock
 	 *  can keep playing across route changes without the route owning it. */
 	streamUrl: string | null;
@@ -65,6 +66,7 @@ const initialState: VideoSessionState = {
 	continuous: false,
 	loading: false,
 	error: null,
+	radioIssue: null,
 	streamUrl: null,
 	streamExpiresAt: null,
 	playing: false,
@@ -102,19 +104,37 @@ export const videoSession = {
 	startRadio() {
 		const state = get(session);
 		if (!state.current) return;
+		const retryEndedVideo = Boolean(state.radioIssue);
+		const currentVideoId = state.current.tidal_id;
 		radioGeneration += 1;
 		radioSeenIds = [state.current.tidal_id];
 		radioRefill = null;
 		persistAutoplayPreference(true);
 		const queue = state.queue.some((video) => video.tidal_id === state.current?.tidal_id)
 			? state.queue : [state.current, ...state.queue];
-		update({ queue, continuous: true, autoplay: true, sourceLabel: `${state.current.artist_name ?? 'Video'} radio` });
-		void refillVideoRadio(true);
+		update({ queue, continuous: true, autoplay: true, radioIssue: null, sourceLabel: `${state.current.artist_name ?? 'Video'} radio` });
+		void refillVideoRadio(true).then(async () => {
+			if (!retryEndedVideo) return;
+			const current = get(session);
+			if (!current.continuous || current.current?.tidal_id !== currentVideoId) return;
+			if (!current.queue[current.currentIndex + 1] || !(await advanceVideo())) {
+				videoSession.radioExhausted(currentVideoId);
+			}
+		});
 	},
 	stopRadio() {
 		radioGeneration += 1;
 		radioRefill = null;
-		update({ continuous: false, sourceLabel: 'Video queue' });
+		update({ continuous: false, radioIssue: null, sourceLabel: 'Video queue' });
+	},
+	radioExhausted(expectedVideoId: number) {
+		const state = get(session);
+		if (!state.continuous || state.current?.tidal_id !== expectedVideoId) return;
+		radioGeneration += 1;
+		radioRefill = null;
+		persistAutoplayPreference(false);
+		update({ continuous: false, autoplay: false, playing: false, sourceLabel: 'Video queue',
+			radioIssue: 'Radio could not find another video. Start radio to try again.' });
 	},
 	setPlaying(playing: boolean) {
 		update({ playing });
@@ -191,6 +211,7 @@ export async function playVideo(
 			sourceLabel: ctx.sourceLabel,
 			autoplay: ctx.autoplay ?? state.autoplay,
 			continuous: ctx.continuous ?? false,
+			radioIssue: null,
 		});
 		return true;
 	}
@@ -206,6 +227,7 @@ export async function playVideo(
 		sourceLabel: ctx.sourceLabel,
 		autoplay: ctx.autoplay ?? get(session).autoplay,
 		continuous: ctx.continuous ?? false,
+		radioIssue: null,
 		loading: true,
 		error: null,
 		streamUrl: opts.preloaded?.url ?? null,

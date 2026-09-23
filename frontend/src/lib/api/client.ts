@@ -4052,9 +4052,9 @@ export const api = {
 		seed_artist_id: number | null;
 		seed_artist_name: string | null;
 		exclude_video_ids: number[];
-	}): Promise<{ items: (TidalSearchVideo & { why?: string })[] }> {
-		return fetchApi<{ items: (TidalSearchVideo & { why?: string })[] }>('/api/videos/related', undefined, {
-			method: 'POST', body: JSON.stringify(body),
+	}, signal?: AbortSignal): Promise<{ items: (TidalSearchVideo & { why?: string })[]; building: boolean }> {
+		return fetchApi<{ items: (TidalSearchVideo & { why?: string })[]; building: boolean }>('/api/videos/related', undefined, {
+			method: 'POST', body: JSON.stringify(body), signal,
 		});
 	},
 

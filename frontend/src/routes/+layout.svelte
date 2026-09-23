@@ -1618,7 +1618,7 @@
 						› {$videoSession.autoplay ? 'On' : 'Autoplay'}
 					</button>
 				</div>
-				<p class="video-panel-source">{$videoSession.continuous ? 'Finding related artists and genres as you listen.' : 'Radio adds new videos beyond this queue.'}</p>
+				<p class="video-panel-source" aria-live="polite">{$videoSession.radioIssue ?? ($videoSession.continuous ? ($videoSession.autoplay ? 'Finding related artists and genres as you listen.' : 'Radio paused. Turn on autoplay to resume.') : 'Radio adds new videos beyond this queue.')}</p>
 				{#if $videoSession.error}
 					<p class="video-panel-error">{$videoSession.error}</p>
 				{/if}

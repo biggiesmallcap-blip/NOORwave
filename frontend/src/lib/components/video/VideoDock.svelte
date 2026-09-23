@@ -97,9 +97,12 @@
 	});
 
 	async function handleEnded() {
+		const endedVideoId = $videoSession.current?.tidal_id;
+		const wasRadio = $videoSession.continuous && $videoSession.autoplay;
 		const preloaded = prefetched?.videoId === upNext?.tidal_id ? prefetched : null;
 		const advanced = await advanceVideo({ preloaded });
-		if (!advanced) videoSession.setAutoplay(false);
+		if (!advanced && wasRadio && endedVideoId != null) videoSession.radioExhausted(endedVideoId);
+		else if (!advanced && $videoSession.current?.tidal_id === endedVideoId) videoSession.setAutoplay(false);
 	}
 
 	function handlePlay() {
