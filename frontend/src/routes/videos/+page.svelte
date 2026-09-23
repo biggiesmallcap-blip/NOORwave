@@ -1404,7 +1404,7 @@
 		font-size: var(--font-size-sm);
 		font-weight: var(--font-weight-semibold);
 	}
-	.save-video span { font-size: 1.15em; }
+	.save-video span { font-size: var(--font-size-md); }
 	.save-video.saved { color: var(--accent-strong); border-color: var(--accent-line); background: var(--accent-soft); }
 	.save-video:hover, .save-video:focus-visible { border-color: var(--accent-line); color: var(--accent-strong); }
 	.save-video:disabled { opacity: 0.6; }

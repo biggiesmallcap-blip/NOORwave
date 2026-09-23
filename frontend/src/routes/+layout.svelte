@@ -2475,7 +2475,7 @@
 		gap: 10px;
 	}
 
-	.video-panel-source { margin: -4px 0 0; line-height: 1.4; }
+	.video-panel-source { margin: -4px 0 0; line-height: var(--line-height-normal); }
 
 	.video-panel-chip {
 		border: 1px solid var(--border-subtle);
