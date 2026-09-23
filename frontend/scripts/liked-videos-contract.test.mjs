@@ -137,7 +137,8 @@ describe('liked videos contract', () => {
 
 	test('a logged-out or still-scanning library gets its own empty state', () => {
 		const page = readFileSync(PAGE, 'utf8');
-		expect(page).toContain('{:else if !tidalConnected}');
+		// Saved videos remain available even after the TIDAL session expires.
+		expect(page).toContain('{:else if !tidalConnected && savedVideos.length === 0}');
 		expect(page).toContain('Connect TIDAL to find videos');
 		expect(page).toContain('scanPending');
 	});
