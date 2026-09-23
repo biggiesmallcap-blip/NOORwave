@@ -41,6 +41,12 @@ permissions:
 
 jobs:
   warm:
+    # The release bump lands on master immediately before its tag is pushed.
+    # Warming that SHA cannot help the already-starting tag build, so do not
+    # compile every platform twice. Manual dispatch remains available.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      !startsWith(github.event.head_commit.message, 'chore(release):')
     name: warm (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45

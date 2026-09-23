@@ -32,4 +32,12 @@ describe('GitHub CI configuration', () => {
 		expect(workflow).toContain('Test-Path');
 		expect(workflow).toContain('Expected 4 checksum files');
 	});
+
+	test('warm cache skips release commits but remains manually dispatchable', () => {
+		const workflow = read('.github/workflows/warm-cache.yml');
+
+		expect(workflow).toContain('workflow_dispatch:');
+		expect(workflow).toContain("github.event_name == 'workflow_dispatch'");
+		expect(workflow).toContain("!startsWith(github.event.head_commit.message, 'chore(release):')");
+	});
 });
