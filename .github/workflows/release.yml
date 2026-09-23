@@ -167,6 +167,8 @@ jobs:
 
       - name: Package installer update metadata
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $bundleDir = "target\release\bundle\nsis"
           if (-not (Test-Path -LiteralPath $bundleDir)) {
@@ -194,9 +196,35 @@ jobs:
 
           $signature = (Get-Content $targetSig -Raw).Trim()
           $version = "${env:GITHUB_REF_NAME}".TrimStart('v')
+          $releaseHeaders = @{
+            Accept = "application/vnd.github+json"
+            Authorization = "Bearer ${env:GH_TOKEN}"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+          $releaseUrl = "https://api.github.com/repos/${env:GITHUB_REPOSITORY}/releases/tags/${env:GITHUB_REF_NAME}"
+          $release = Invoke-RestMethod -Uri $releaseUrl -Headers $releaseHeaders
+          $releaseBody = ([string]$release.body).Trim()
+          if ([string]::IsNullOrWhiteSpace($releaseBody)) {
+            throw "GitHub release ${env:GITHUB_REF_NAME} has no release notes"
+          }
+          $curated = [regex]::Match(
+            $releaseBody,
+            '(?s)## What''s new in [^\r\n]+\r?\n(?<notes>.*?)(?=\r?\nDesktop hi-fi player|\r?\n## Downloads)'
+          )
+          $generated = [regex]::Match(
+            $releaseBody,
+            '(?s)## What''s Changed\r?\n(?<notes>.*?)(?=\r?\n\*\*Full Changelog\*\*|\z)'
+          )
+          if ($curated.Success) {
+            $releaseNotes = $curated.Groups['notes'].Value.Trim()
+          } elseif ($generated.Success) {
+            $releaseNotes = $generated.Groups['notes'].Value.Trim()
+          } else {
+            $releaseNotes = $releaseBody
+          }
           $json = @{
             version = $version
-            notes = "${env:GITHUB_REF_NAME}"
+            notes = $releaseNotes
             pub_date = (Get-Date -AsUTC).ToString("o")
             platforms = @{
               "windows-x86_64" = @{

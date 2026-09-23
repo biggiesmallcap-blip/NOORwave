@@ -10,12 +10,7 @@ pub fn background_check(handle: &AppHandle) {
         match updater.check().await {
             Ok(Some(update)) => {
                 let version = update.version.clone();
-                let notes = update
-                    .body
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|notes| !notes.is_empty())
-                    .map(str::to_owned);
+                let notes = crate::updater::resolve_release_notes(&version, update.body.as_deref());
                 crate::tray::notify_update(
                     handle,
                     version.clone(),

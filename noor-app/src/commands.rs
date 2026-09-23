@@ -31,12 +31,13 @@ pub async fn check_for_updates_now(
     let Some(update) = update else {
         return Ok(None);
     };
-    let notes = update
-        .body
-        .as_deref()
-        .map(str::trim)
-        .filter(|notes| !notes.is_empty())
-        .map(str::to_owned);
+    let notes_version = update.version.clone();
+    let manifest_notes = update.body.clone();
+    let notes = tauri::async_runtime::spawn_blocking(move || {
+        crate::updater::resolve_release_notes(&notes_version, manifest_notes.as_deref())
+    })
+    .await
+    .unwrap_or(None);
     let details = crate::tray::UpdateDetails {
         version: update.version.clone(),
         notes: notes.clone(),
