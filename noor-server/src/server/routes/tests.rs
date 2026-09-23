@@ -1294,6 +1294,64 @@ fn app_for_db(db: Database) -> Router {
 }
 
 #[tokio::test]
+async fn saved_videos_reject_malformed_fields_and_skip_legacy_bad_rows() {
+    let db = fresh_migrated_db();
+    let malformed = r#"{"video":{"tidal_id":91,"title":"Live cut","artist_name":{},"type":"video"},"saved":true}"#;
+    let resp = app_for_db(db.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/videos/saved")
+                .header("content-type", "application/json")
+                .body(Body::from(malformed))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO saved_videos (tidal_video_id, item_json) VALUES (91, ?1)",
+            [r#"{"tidal_id":91,"title":"Legacy bad cut","artist_name":{},"type":"video"}"#],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .unwrap();
+    let valid = r#"{"video":{"tidal_id":92,"title":"Good cut","artist_name":"Artist","type":"video"},"saved":true}"#;
+    let resp = app_for_db(db.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/videos/saved")
+                .header("content-type", "application/json")
+                .body(Body::from(valid))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = app_for_db(db)
+        .oneshot(
+            Request::builder()
+                .uri("/api/videos/saved")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(body["items"][0]["tidal_id"], 92);
+    assert_eq!(body["items"][0]["artist_name"], "Artist");
+}
+
+#[tokio::test]
 async fn tracks_route_treats_key_signature_filter_as_data() {
     let db = fresh_migrated_db();
     db.with_conn(|conn| {

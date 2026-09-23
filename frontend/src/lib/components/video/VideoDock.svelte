@@ -8,8 +8,11 @@
 	import { isPlaying } from '$lib/stores/player';
 	import {
 		advanceVideo,
+		nextVideo,
+		previousVideo,
 		clearVideoSession,
 		refreshVideoStream,
+		refillVideoRadio,
 		setVideoBrowseMode,
 		videoBrowseMode,
 		videoSession,
@@ -36,7 +39,8 @@
 
 	let qualityMode = $derived($audioSettings.settings?.video_quality_mode ?? 'MAX');
 	let upNext = $derived($videoSessionUpcoming[0] ?? null);
-	let hasNext = $derived($videoSessionUpcoming.length > 0);
+	let hasNext = $derived($videoSessionUpcoming.length > 0 || ($videoSession.continuous && $videoSession.autoplay));
+	let hasPrevious = $derived($videoSession.currentIndex > 0);
 
 	// ─── Full-mode rect tracking ─────────────────────────────────────────────
 	let rect = $state<{ top: number; left: number; width: number; height: number } | null>(null);
@@ -61,6 +65,9 @@
 	$effect(() => {
 		const next = upNext;
 		const autoplay = $videoSession.autoplay;
+		if ($videoSession.continuous && autoplay && $videoSession.queue.length - $videoSession.currentIndex <= 5) {
+			void refillVideoRadio();
+		}
 		if (!autoplay || !next) {
 			prefetchSeq += 1;
 			prefetched = null;
@@ -90,9 +97,12 @@
 	});
 
 	async function handleEnded() {
+		const endedVideoId = $videoSession.current?.tidal_id;
+		const wasRadio = $videoSession.continuous && $videoSession.autoplay;
 		const preloaded = prefetched?.videoId === upNext?.tidal_id ? prefetched : null;
 		const advanced = await advanceVideo({ preloaded });
-		if (!advanced) videoSession.setAutoplay(false);
+		if (!advanced && wasRadio && endedVideoId != null) videoSession.radioExhausted(endedVideoId);
+		else if (!advanced && $videoSession.current?.tidal_id === endedVideoId) videoSession.setAutoplay(false);
 	}
 
 	function handlePlay() {
@@ -141,9 +151,12 @@
 			variant={mode === 'mini' ? 'mini' : 'full'}
 			autoplayNext={$videoSession.autoplay}
 			hasNext={hasNext}
+			hasPrevious={hasPrevious}
 			upNextTitle={upNext?.title ?? null}
 			upNextArtist={upNext?.artist_name ?? null}
 			onEnded={handleEnded}
+			onPrevious={() => void previousVideo()}
+			onNext={() => void nextVideo()}
 			onToggleAutoplay={toggleAutoplay}
 			onPlay={handlePlay}
 			refreshStream={refreshVideoStream}

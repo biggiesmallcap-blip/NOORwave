@@ -14,10 +14,13 @@
 		qualityMode?: VideoQualityMode;
 		autoplayNext?: boolean;
 		hasNext?: boolean;
+		hasPrevious?: boolean;
 		upNextTitle?: string | null;
 		upNextArtist?: string | null;
 		variant?: 'full' | 'mini';
 		onEnded?: () => void;
+		onPrevious?: () => void;
+		onNext?: () => void;
 		onToggleAutoplay?: () => void;
 		onPlay?: () => void;
 		refreshStream?: () => Promise<string>;
@@ -32,10 +35,13 @@
 		qualityMode = 'MAX',
 		autoplayNext = false,
 		hasNext = false,
+		hasPrevious = false,
 		upNextTitle = null,
 		upNextArtist = null,
 		variant = 'full',
 		onEnded,
+		onPrevious,
+		onNext,
 		onToggleAutoplay,
 		onPlay,
 		refreshStream,
@@ -444,9 +450,11 @@
 	{/if}
 
 	<div class="controls">
+		<button type="button" class="icon-btn transport" onclick={() => onPrevious?.()} disabled={!hasPrevious} aria-label="Previous video" title="Previous video">⏮</button>
 		<button type="button" class="icon-btn primary" onclick={togglePlay} aria-label={playing ? 'Pause' : 'Play'}>
 			{playing ? '⏸' : '▶'}
 		</button>
+		<button type="button" class="icon-btn transport" onclick={() => onNext?.()} disabled={!hasNext} aria-label="Next video" title="Next video">⏭</button>
 		<span class="time">{formatTime(currentTime)}</span>
 		<input
 			class="seek"
@@ -640,7 +648,7 @@
 	.controls {
 		bottom: 0;
 		display: grid;
-		grid-template-columns: 40px auto 1fr auto 40px 88px auto auto 40px;
+		grid-template-columns: 34px 40px 34px auto minmax(40px, 1fr) auto 40px 88px auto auto 40px;
 		align-items: center;
 		gap: 8px;
 		padding: 36px 14px 14px;
@@ -680,6 +688,8 @@
 		background: var(--accent);
 		color: white;
 	}
+
+	.icon-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 
 	.time {
 		font-size: var(--font-size-xs);
@@ -749,7 +759,7 @@
 		}
 
 		.controls {
-			grid-template-columns: 38px auto 1fr auto 38px auto 38px;
+			grid-template-columns: 32px 38px 32px auto minmax(20px, 1fr) auto 38px auto 38px;
 		}
 
 		.volume,

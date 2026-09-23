@@ -98,7 +98,7 @@ describe('artist page layout contracts', () => {
 
 	test('gives video rail cards the app-owned context menu', () => {
 		expect(source).toContain("import { buildVideoMenu } from '$lib/player/video_menu';");
-		expect(source).toContain('openContextMenu(e, buildVideoMenu(video), video.title);');
+		expect(source).toContain('openContextMenu(e, buildVideoMenu({ ...video, artist_id: activeTidalArtistId }), video.title);');
 	});
 
 	test('hero play falls back to TIDAL top tracks when the local artist has no tracks', () => {

@@ -1612,6 +1612,15 @@
 				<div class="video-panel-actions">
 					<button
 						class="video-panel-chip"
+						class:active={$videoSession.continuous}
+						type="button"
+						aria-pressed={$videoSession.continuous}
+						onclick={() => $videoSession.continuous ? videoSession.stopRadio() : videoSession.startRadio()}
+					>
+						{$videoSession.continuous ? 'Stop radio' : 'Start radio'}
+					</button>
+					<button
+						class="video-panel-chip"
 						class:active={$videoSession.autoplay}
 						type="button"
 						aria-pressed={$videoSession.autoplay}
@@ -1619,8 +1628,8 @@
 					>
 						› {$videoSession.autoplay ? 'On' : 'Autoplay'}
 					</button>
-					<span class="video-panel-source">{formatVideoSourceLabel($videoSession.source, $videoSession.sourceLabel)}</span>
 				</div>
+				<p class="video-panel-source" aria-live="polite">{$videoSession.radioIssue ?? ($videoSession.continuous ? ($videoSession.autoplay ? 'Finding related artists and genres as you listen.' : 'Radio paused. Turn on autoplay to resume.') : 'Radio adds new videos beyond this queue.')}</p>
 				{#if $videoSession.error}
 					<p class="video-panel-error">{$videoSession.error}</p>
 				{/if}
@@ -2482,9 +2491,11 @@
 	.video-panel-actions {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
+		flex-wrap: wrap;
 		gap: 10px;
 	}
+
+	.video-panel-source { margin: -4px 0 0; line-height: var(--line-height-normal); }
 
 	.video-panel-chip {
 		border: 1px solid var(--border-subtle);

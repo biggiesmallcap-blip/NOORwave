@@ -34,7 +34,8 @@ describe('video session snapshot behavior', () => {
 		expect(source).toContain('if (fromContext) {');
 		expect(source).toContain('void selectVideo(fromContext, false);');
 		expect(source.indexOf('const fromContext = findVideoInCurrentContext(videoId);')).toBeLessThan(
-			source.indexOf('title: `TIDAL video ${videoId}`')
+			source.indexOf('const directVideo: TidalSearchVideo = {')
 		);
+		expect(source).toContain("title: params.get('title') ?? `TIDAL video ${videoId}`");
 	});
 });

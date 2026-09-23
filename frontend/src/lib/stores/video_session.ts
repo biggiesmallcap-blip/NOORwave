@@ -13,8 +13,10 @@ export interface VideoSessionState {
 	source: VideoSessionSource;
 	sourceLabel: string | null;
 	autoplay: boolean;
+	continuous: boolean;
 	loading: boolean;
 	error: string | null;
+	radioIssue: string | null;
 	/** HLS stream URL for `current`. Lives in the store so the persistent dock
 	 *  can keep playing across route changes without the route owning it. */
 	streamUrl: string | null;
@@ -32,6 +34,8 @@ export interface VideoPlayContext {
 	source: VideoSessionSource;
 	sourceLabel: string | null;
 	autoplay?: boolean;
+	continuous?: boolean;
+	resetRadio?: boolean;
 }
 
 export interface PreloadedVideoStream {
@@ -59,8 +63,10 @@ const initialState: VideoSessionState = {
 	source: 'none',
 	sourceLabel: null,
 	autoplay: loadAutoplayPreference(),
+	continuous: false,
 	loading: false,
 	error: null,
+	radioIssue: null,
 	streamUrl: null,
 	streamExpiresAt: null,
 	playing: false,
@@ -93,6 +99,42 @@ export const videoSession = {
 	setAutoplay(autoplay: boolean) {
 		persistAutoplayPreference(autoplay);
 		update({ autoplay });
+		if (autoplay && get(session).continuous) void refillVideoRadio(true);
+	},
+	startRadio() {
+		const state = get(session);
+		if (!state.current) return;
+		const retryEndedVideo = Boolean(state.radioIssue);
+		const currentVideoId = state.current.tidal_id;
+		radioGeneration += 1;
+		radioSeenIds = [state.current.tidal_id];
+		radioRefill = null;
+		persistAutoplayPreference(true);
+		const queue = state.queue.some((video) => video.tidal_id === state.current?.tidal_id)
+			? state.queue : [state.current, ...state.queue];
+		update({ queue, continuous: true, autoplay: true, radioIssue: null, sourceLabel: `${state.current.artist_name ?? 'Video'} radio` });
+		void refillVideoRadio(true).then(async () => {
+			if (!retryEndedVideo) return;
+			const current = get(session);
+			if (!current.continuous || current.current?.tidal_id !== currentVideoId) return;
+			if (!current.queue[current.currentIndex + 1] || !(await advanceVideo())) {
+				videoSession.radioExhausted(currentVideoId);
+			}
+		});
+	},
+	stopRadio() {
+		radioGeneration += 1;
+		radioRefill = null;
+		update({ continuous: false, radioIssue: null, sourceLabel: 'Video queue' });
+	},
+	radioExhausted(expectedVideoId: number) {
+		const state = get(session);
+		if (!state.continuous || state.current?.tidal_id !== expectedVideoId) return;
+		radioGeneration += 1;
+		radioRefill = null;
+		persistAutoplayPreference(false);
+		update({ continuous: false, autoplay: false, playing: false, sourceLabel: 'Video queue',
+			radioIssue: 'Radio could not find another video. Start radio to try again.' });
 	},
 	setPlaying(playing: boolean) {
 		update({ playing });
@@ -113,6 +155,9 @@ export const videoSessionUpcoming = derived(session, ($session) => {
 // ─── Controller: owns the stream lifecycle so playback survives navigation ───
 
 let streamSeq = 0;
+let radioGeneration = 0;
+let radioRefill: Promise<number> | null = null;
+let radioSeenIds: number[] = [];
 
 function sourceFor(item: VideoSessionItem, ctx: VideoPlayContext): VideoSessionSource {
 	if (ctx.source !== 'none') return ctx.source;
@@ -147,6 +192,11 @@ export async function playVideo(
 	// queue row) must not refetch the stream and restart it from 0:00. Refresh
 	// the browse context and show it, but leave playback untouched.
 	const state = get(session);
+	if (ctx.resetRadio) {
+		radioGeneration += 1;
+		radioSeenIds = [item.tidal_id];
+		radioRefill = null;
+	}
 	if (
 		state.active &&
 		state.current?.tidal_id === item.tidal_id &&
@@ -160,6 +210,8 @@ export async function playVideo(
 			source: sourceFor(item, ctx),
 			sourceLabel: ctx.sourceLabel,
 			autoplay: ctx.autoplay ?? state.autoplay,
+			continuous: ctx.continuous ?? false,
+			radioIssue: null,
 		});
 		return true;
 	}
@@ -174,6 +226,8 @@ export async function playVideo(
 		source: sourceFor(item, ctx),
 		sourceLabel: ctx.sourceLabel,
 		autoplay: ctx.autoplay ?? get(session).autoplay,
+		continuous: ctx.continuous ?? false,
+		radioIssue: null,
 		loading: true,
 		error: null,
 		streamUrl: opts.preloaded?.url ?? null,
@@ -192,7 +246,9 @@ export async function playVideo(
 		}
 		if (seq !== streamSeq) return false;
 		update({ streamUrl: url, streamExpiresAt: expiresAt, loading: false, error: null });
+		if (ctx.continuous) radioSeenIds.push(item.tidal_id);
 		recordWatch(item);
+		if (ctx.continuous) void refillVideoRadio(Boolean(ctx.resetRadio));
 		return true;
 	} catch (err) {
 		if (seq !== streamSeq) return false;
@@ -200,6 +256,50 @@ export async function playVideo(
 		update({ loading: false, error: message });
 		return false;
 	}
+}
+
+/** Keep a short lookahead in the persistent dock's session. A single request
+ * can be shared by the prefetch effect and the end-of-video path. */
+export function refillVideoRadio(force = false): Promise<number> {
+	if (radioRefill) return radioRefill;
+	const state = get(session);
+	if (!state.active || !state.continuous || !state.autoplay || (!force && state.queue.length - state.currentIndex > 5)) {
+		return Promise.resolve(0);
+	}
+	const generation = radioGeneration;
+	const seed = state.current;
+	const excluded = state.queue.map((v) => v.tidal_id);
+	const recentArtists = state.queue.slice(Math.max(0, state.currentIndex - 8), state.currentIndex + 1)
+		.map((v) => v.artist_id).filter((id): id is number => id != null);
+	const pending = api.getVideoRadioNext({
+		seed_artist_id: seed?.artist_id ?? null,
+		seed_artist_name: seed?.artist_name ?? null,
+		exclude_video_ids: excluded,
+		recent_video_ids: radioSeenIds.slice(-96),
+		recent_artist_ids: recentArtists,
+	}).then(({ items, unfamiliar_video_ids }) => {
+		const current = get(session);
+		if (generation !== radioGeneration || !current.continuous || !current.active) return 0;
+		const existing = new Set(current.queue.map((v) => v.tidal_id));
+		const fresh = items.filter((item) => !existing.has(item.tidal_id));
+		if (fresh.length === 0) return 0;
+		if (force && (current.queue.length - current.currentIndex <= 2 || (fresh.length >= 8 && unfamiliar_video_ids.filter((id) => fresh.some((item) => item.tidal_id === id)).length >= 2))) {
+			// The browse shelves are a quick start. Once the server has a real
+			// discovery blend, hand upcoming playback to it immediately.
+			update({ queue: [...current.queue.slice(0, current.currentIndex + 1), ...fresh] });
+		} else if (!force) {
+			const start = Math.max(0, current.currentIndex - 6);
+			update({ queue: [...current.queue.slice(start), ...fresh] });
+		} else {
+			return 0;
+		}
+		radioSeenIds.push(...fresh.map((item) => item.tidal_id));
+		radioSeenIds = radioSeenIds.slice(-256);
+		return fresh.length;
+	}).catch(() => 0);
+	radioRefill = pending;
+	void pending.finally(() => { if (radioRefill === pending) radioRefill = null; });
+	return pending;
 }
 
 /** Re-fetch the current video's stream (expiry / network recovery). */
@@ -222,6 +322,19 @@ export async function advanceVideo(opts: { preloaded?: PreloadedVideoStream | nu
 	if (index < 0) return false;
 	const next = state.queue[index + 1];
 	if (!next) {
+		if (state.continuous) {
+			await refillVideoRadio();
+			const refreshed = get(session);
+			// A click may have replaced radio while its network request was in
+			// flight. Leave the new session and its autoplay preference alone.
+			if (!refreshed.continuous || !refreshed.autoplay || refreshed.current?.tidal_id !== state.current?.tidal_id) return true;
+			const nextIndex = findCurrentIndex(refreshed.queue, refreshed.current);
+			const replenished = refreshed.queue[nextIndex + 1];
+			if (replenished) return playVideo(replenished, {
+				queue: refreshed.queue, source: refreshed.source,
+				sourceLabel: refreshed.sourceLabel, autoplay: true, continuous: true,
+			});
+		}
 		update({ playing: false });
 		return false;
 	}
@@ -230,12 +343,44 @@ export async function advanceVideo(opts: { preloaded?: PreloadedVideoStream | nu
 		source: state.source,
 		sourceLabel: state.sourceLabel,
 		autoplay: true,
+		continuous: state.continuous,
 	}, opts);
+}
+
+/** Return to a video already played in this session. Keeps the queue context. */
+export async function previousVideo(): Promise<boolean> {
+	const state = get(session);
+	const previous = state.queue[state.currentIndex - 1];
+	if (!previous) return false;
+	return playVideo(previous, {
+		queue: state.queue, source: state.source, sourceLabel: state.sourceLabel,
+		autoplay: state.autoplay, continuous: state.continuous,
+	});
+}
+
+/** Skip to the next queued video regardless of the autoplay preference. */
+export async function nextVideo(): Promise<boolean> {
+	const state = get(session);
+	if (!state.active) return false;
+	if (state.continuous && !state.queue[state.currentIndex + 1]) {
+		await refillVideoRadio(true);
+	}
+	const refreshed = get(session);
+	if (refreshed.current?.tidal_id !== state.current?.tidal_id) return false;
+	const next = refreshed.queue[refreshed.currentIndex + 1];
+	if (!next) return false;
+	return playVideo(next, {
+		queue: refreshed.queue, source: refreshed.source, sourceLabel: refreshed.sourceLabel,
+		autoplay: refreshed.autoplay, continuous: refreshed.continuous,
+	});
 }
 
 /** Stop the video session entirely and free the dock. */
 export function clearVideoSession() {
 	streamSeq += 1;
+	radioGeneration += 1;
+	radioSeenIds = [];
+	radioRefill = null;
 	session.set({ ...initialState, autoplay: loadAutoplayPreference() });
 	videoBrowseMode.set(false);
 }

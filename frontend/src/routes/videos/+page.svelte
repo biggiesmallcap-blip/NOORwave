@@ -14,6 +14,7 @@
 	import TidalDiscoverShelves from '$lib/components/search/TidalDiscoverShelves.svelte';
 	import VideoCard from '$lib/components/video/VideoCard.svelte';
 	import VideoSetShelf from '$lib/components/video/VideoSetShelf.svelte';
+	import { buildBrowseMix } from '$lib/video/browse_mix';
 	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
@@ -46,7 +47,7 @@
 	// While the server assembles today's set (building: true, no snapshot yet),
 	// re-fetch a few times so the picks appear without a manual reload.
 	const BUILD_POLL_MS = 6000;
-	const BUILD_POLL_MAX = 6;
+	const BUILD_POLL_MAX = 20;
 	// TIDAL's videos page ships several modules; a couple is plenty next to the
 	// library-derived shelves.
 	const EDITORIAL_MODULE_MAX = 3;
@@ -122,6 +123,12 @@
 	let sentinel = $state<HTMLDivElement | null>(null);
 	let recent = $state<string[]>(loadRecent());
 	let stageAnchor = $state<HTMLDivElement | null>(null);
+	let savedVideoIds = $state<Set<number>>(new Set());
+	let savingVideo = $state(false);
+	let savedVideoChanges = 0;
+	let relatedVideos = $state<(TidalSearchVideo & { why?: string })[]>([]);
+	let relatedLoading = $state(false);
+	let relatedRequest = 0;
 	let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 	let searchAbort: AbortController | null = null;
 	let loadMoreSeq = 0;
@@ -145,6 +152,7 @@
 
 	let heroTitle = $derived(selectedVideo?.title ?? 'TIDAL video');
 	let heroArtist = $derived(selectedVideo?.artist_name ?? null);
+	let videoIsSaved = $derived(selectedVideo ? savedVideoIds.has(selectedVideo.tidal_id) : false);
 
 	// --- Editorial browse state ---
 	// The resting state of the page: a daily-picks shelf plus TIDAL's own
@@ -163,6 +171,7 @@
 	let shelfSets = $derived(
 		discoverSets.filter((s) => s.slug !== 'daily-picks' && s.items.length > 0)
 	);
+	let browseMix = $derived(buildBrowseMix(discoverSets));
 	let videoSessionActive = $derived(Boolean(selectedVideo || streamUrl || loadingStream));
 	// Browse mode: a video is playing but the listener stepped back to the
 	// picks, so the dock goes mini and the shelves own the page again.
@@ -202,7 +211,33 @@
 	async function playFromSet(set: VideoDiscoverSet, index: number) {
 		const video = set.items[index];
 		if (!video) return;
-		await playFromQueue(video, set.items, set.title, true);
+		await playFromQueue(video, set.items, `${set.title} radio`, true, true);
+	}
+
+	async function playBrowseMix() {
+		const first = browseMix[0];
+		if (first) await playFromQueue(first, browseMix, 'Video radio', true, true);
+	}
+
+	async function toggleSavedVideo() {
+		const item = selectedVideo;
+		if (!item || savingVideo) return;
+		savingVideo = true;
+		const saved = !savedVideoIds.has(item.tidal_id);
+		try {
+			const result = await api.setVideoSaved(item, saved);
+			if (!result.ok) throw new Error('Could not save video.');
+			const next = new Set(savedVideoIds);
+			if (saved) next.add(item.tidal_id);
+			else next.delete(item.tidal_id);
+			savedVideoChanges += 1;
+			savedVideoIds = next;
+			showToast(saved ? 'Saved to liked videos.' : 'Removed from liked videos.');
+		} catch (err) {
+			showToast(normalizeError(err, 'Could not update liked videos.'), 'error');
+		} finally {
+			savingVideo = false;
+		}
 	}
 
 	function editorialItemToVideo(item: TidalHomeItem): TidalSearchVideo {
@@ -246,7 +281,8 @@
 		video: TidalSearchVideo,
 		queue: TidalSearchVideo[],
 		label: string,
-		autoplay = $videoSession.autoplay
+		autoplay = $videoSession.autoplay,
+		continuous = false
 	) {
 		if (!assertOnline()) {
 			showToast('Server is reconnecting.', 'error', 3200);
@@ -257,6 +293,8 @@
 			source: 'mix',
 			sourceLabel: label,
 			autoplay,
+			continuous,
+			resetRadio: continuous,
 		});
 		if (!ok) showToast($videoSession.error ?? 'This video could not be loaded.', 'error', 3200);
 	}
@@ -435,12 +473,13 @@
 		// for an empty array, killing autoplay and emptying the queue panel.
 		const inResults = videos.some((item) => item.tidal_id === video.tidal_id);
 		const session = $videoSession;
-		if (!inResults && session.queue.some((item) => item.tidal_id === video.tidal_id)) {
+		if ((session.continuous || !inResults) && session.queue.some((item) => item.tidal_id === video.tidal_id)) {
 			return {
 				queue: session.queue,
 				source: session.source === 'none' ? ('mix' as VideoSessionSource) : session.source,
 				sourceLabel: session.sourceLabel,
 				autoplay: session.autoplay,
+				continuous: session.continuous,
 			};
 		}
 		return {
@@ -568,6 +607,7 @@
 		const mixId = params.get('mixId');
 		const playlistId = params.get('playlistId');
 		const shouldPlayCollection = params.get('play') === '1';
+		const startRadio = params.get('radio') === '1';
 		query = q;
 		if (q) await runSearch(q, false);
 		if (mixId) {
@@ -593,25 +633,32 @@
 		if (Number.isFinite(videoId) && videoId > 0) {
 			const fromContext = findVideoInCurrentContext(videoId);
 			if (fromContext) {
-				void selectVideo(fromContext, false);
+				if (startRadio) void playFromQueue(fromContext, [fromContext], `${fromContext.artist_name ?? 'Video'} radio`, true, true);
+				else void selectVideo(fromContext, false);
 				return;
 			}
-			void selectVideo({
+			const directVideo: TidalSearchVideo = {
 				tidal_id: videoId,
-				title: `TIDAL video ${videoId}`,
+				title: params.get('title') ?? `TIDAL video ${videoId}`,
 				duration_ms: null,
-				artist_id: null,
-				artist_name: null,
+				artist_id: Number(params.get('artistId')) || null,
+				artist_name: params.get('artistName'),
 				album_tidal_id: null,
 				artwork_url: null,
 				quality: null,
 				explicit: null,
 				type: 'video',
-			}, false);
+			};
+			if (startRadio) void playFromQueue(directVideo, [directVideo], `${directVideo.artist_name ?? 'Video'} radio`, true, true);
+			else void selectVideo(directVideo, false);
 		}
 	}
 
 	onMount(() => {
+		const changesAtLoad = savedVideoChanges;
+		void api.getSavedVideos().then(({ items }) => {
+			if (savedVideoChanges === changesAtLoad) savedVideoIds = new Set(items.map((item) => item.tidal_id));
+		}).catch(() => {});
 		void audioSettings.load();
 		void loadBrowse();
 		const params = new URLSearchParams(window.location.search);
@@ -658,6 +705,39 @@
 		return () => observer.disconnect();
 	});
 
+	// Wait for an intentional selection before asking the throttled discovery
+	// endpoint. Responses from a previous video never overwrite the new row.
+	$effect(() => {
+		const item = selectedVideo;
+		const seq = ++relatedRequest;
+		relatedVideos = [];
+		relatedLoading = Boolean(item?.artist_id || item?.artist_name);
+		if (!item || (!item.artist_id && !item.artist_name)) return;
+		const controller = new AbortController();
+		let attempts = 0;
+		let timer: ReturnType<typeof setTimeout>;
+		const fetchRelated = async () => {
+			try {
+				const { items, building } = await api.getRelatedVideos({
+					seed_artist_id: item.artist_id,
+					seed_artist_name: item.artist_name,
+					exclude_video_ids: [item.tidal_id],
+				}, controller.signal);
+				if (seq !== relatedRequest) return;
+				relatedVideos = items.filter((video) => video.tidal_id !== item.tidal_id);
+				if (building && ++attempts < 10) {
+					timer = setTimeout(() => void fetchRelated(), 3000);
+				} else {
+					relatedLoading = false;
+				}
+			} catch {
+				if (seq === relatedRequest) relatedLoading = false;
+			}
+		};
+		timer = setTimeout(() => void fetchRelated(), 400);
+		return () => { clearTimeout(timer); controller.abort(); ++relatedRequest; };
+	});
+
 	// Hand the route's hero placeholder to the persistent dock so it can dock
 	// the live player into it while on /videos.
 	$effect(() => {
@@ -702,6 +782,29 @@
 		mixLoadSeq += 1;
 	});
 </script>
+
+{#snippet relatedSection()}
+	{#if selectedVideo && !browseMode && (relatedLoading || relatedVideos.length > 0)}
+		<section class="results-section related-section" aria-label="Related videos">
+			<div class="section-heading">
+				<p class="eyebrow">Keep exploring</p>
+				<h2>Related to {selectedVideo.artist_name ?? 'this video'}</h2>
+			</div>
+			{#if relatedVideos.length > 0}
+				<div class="video-grid">
+					{#each relatedVideos as video (video.tidal_id)}
+						<div class="related-card">
+							<VideoCard {video} onSelect={(item) => !('id' in item) && void playFromQueue(item, relatedVideos, 'Related video radio', true, true)} />
+							{#if video.why}<span class="related-why">{video.why}</span>{/if}
+						</div>
+					{/each}
+				</div>
+			{:else}
+				<p class="related-loading">Finding a few connected videos…</p>
+			{/if}
+		</section>
+	{/if}
+{/snippet}
 
 <div class="videos-page">
 	<header class="search-header">
@@ -757,6 +860,16 @@
 			transition:fade={{ duration: 250 }}
 		>
 			<div class="editorial-inner" inert={searchFocused}>
+				{#if browseMix.length >= 4}
+					<div class="browse-mix">
+						<div>
+							<p class="eyebrow">Keep watching</p>
+							<h2>Video radio</h2>
+							<p>Starts with your picks, then keeps finding related artists and genres.</p>
+						</div>
+						<button type="button" class="mix-play" onclick={() => void playBrowseMix()}>Start radio</button>
+					</div>
+				{/if}
 				{#if dailySet}
 					<VideoSetShelf
 						eyebrow="Daily picks"
@@ -851,6 +964,15 @@
 						<span class="meta-source">from {$videoSession.sourceLabel}</span>
 					{/if}
 				</div>
+				<button
+					type="button"
+					class="save-video"
+					class:saved={videoIsSaved}
+					aria-pressed={videoIsSaved}
+					aria-label={videoIsSaved ? 'Remove video from likes' : 'Save video to likes'}
+					disabled={savingVideo}
+					onclick={() => void toggleSavedVideo()}
+				><span aria-hidden="true">{videoIsSaved ? '♥' : '♡'}</span> {videoIsSaved ? 'Saved' : 'Save video'}</button>
 			{/if}
 			{#if error}
 				<p class="inline-error">{error}</p>
@@ -859,6 +981,7 @@
 		{/if}
 	</section>
 	{/if}
+	{#if !query.trim()}{@render relatedSection()}{/if}
 
 	<!-- Legacy landing chips: only when there is no editorial content to show
 	     (no TIDAL session / empty library), so the degraded page stays exactly
@@ -913,6 +1036,7 @@
 			</div>
 		</section>
 	{/if}
+	{#if query.trim()}{@render relatedSection()}{/if}
 
 	{#if loadingMix || mixItems.length > 0 || mixError}
 		<section class="results-section">
@@ -1092,6 +1216,47 @@
 		gap: 28px;
 	}
 
+	.browse-mix {
+		display: flex;
+		align-items: end;
+		justify-content: space-between;
+		gap: var(--space-4);
+		padding: 0 2px;
+	}
+
+	.browse-mix h2,
+	.browse-mix p {
+		margin: 0;
+	}
+
+	.browse-mix h2 {
+		font-size: var(--font-size-lg);
+	}
+
+	.browse-mix p:not(.eyebrow) {
+		color: var(--text-secondary);
+		font-size: var(--font-size-sm);
+	}
+
+	.mix-play {
+		flex: 0 0 auto;
+		padding: var(--space-2) var(--space-4);
+		border: 1px solid var(--accent-line);
+		border-radius: 999px;
+		background: var(--accent-soft);
+		color: var(--text-primary);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
+		cursor: pointer;
+	}
+
+	.mix-play:hover,
+	.mix-play:focus-visible {
+		background: var(--bg-hover);
+		outline: 2px solid var(--accent);
+		outline-offset: 2px;
+	}
+
 	.picks-loading {
 		margin: 0;
 		padding: 4px 2px;
@@ -1229,6 +1394,21 @@
 		color: var(--text-secondary);
 	}
 
+	.save-video {
+		align-self: flex-start;
+		border: 1px solid var(--border-subtle);
+		border-radius: 999px;
+		background: var(--bg-hover);
+		color: var(--text-secondary);
+		padding: 8px 13px;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+	}
+	.save-video span { font-size: var(--font-size-md); }
+	.save-video.saved { color: var(--accent-strong); border-color: var(--accent-line); background: var(--accent-soft); }
+	.save-video:hover, .save-video:focus-visible { border-color: var(--accent-line); color: var(--accent-strong); }
+	.save-video:disabled { opacity: 0.6; }
+
 	.meta-link,
 	.text-btn {
 		color: var(--accent-strong);
@@ -1253,6 +1433,10 @@
 		display: grid;
 		gap: 14px;
 	}
+	.related-section { border-top: 1px solid var(--border-subtle); padding-top: 24px; }
+	.related-card { min-width: 0; display: grid; align-content: start; gap: 5px; }
+	.related-why, .related-loading { color: var(--text-tertiary); font-size: var(--font-size-xs); }
+	.related-loading { margin: 0; }
 
 	.rail-block {
 		display: grid;

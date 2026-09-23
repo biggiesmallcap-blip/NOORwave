@@ -65,6 +65,9 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_061,
     MIGRATION_062,
     MIGRATION_063,
+    MIGRATION_064,
+    MIGRATION_065,
+    MIGRATION_066,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1705,6 +1708,59 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_devices_token_hash
     ON remote_devices(token_hash);
 "#;
 
+// Reusable video catalog and bounded relationship lookup ledger for video radio.
+// Shelf snapshots stay editorial; these rows are reusable discovery candidates.
+const MIGRATION_064: &str = r#"
+CREATE TABLE IF NOT EXISTS video_catalog (
+    tidal_video_id INTEGER PRIMARY KEY,
+    artist_tidal_id INTEGER,
+    artist_name TEXT,
+    item_json TEXT NOT NULL,
+    fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_video_catalog_artist ON video_catalog(artist_tidal_id);
+CREATE TABLE IF NOT EXISTS video_artist_scans (
+    artist_tidal_id INTEGER PRIMARY KEY,
+    scanned_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS video_related_artists (
+    seed_tidal_id INTEGER NOT NULL,
+    related_tidal_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    source TEXT NOT NULL,
+    PRIMARY KEY(seed_tidal_id, related_tidal_id)
+);
+CREATE TABLE IF NOT EXISTS video_related_scans (
+    seed_tidal_id INTEGER PRIMARY KEY,
+    scanned_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS video_seed_genres (
+    seed_tidal_id INTEGER NOT NULL,
+    genre_name TEXT NOT NULL,
+    PRIMARY KEY(seed_tidal_id, genre_name)
+);
+"#;
+
+// Extend the initial video radio cache without changing migration 064, which
+// may already have run on an existing library.
+const MIGRATION_065: &str = r#"
+ALTER TABLE video_seed_genres ADD COLUMN rank INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS video_genre_scans (
+    genre_name TEXT PRIMARY KEY,
+    scanned_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"#;
+
+// Explicitly saved video cuts are separate from videos inferred from liked songs.
+const MIGRATION_066: &str = r#"
+CREATE TABLE IF NOT EXISTS saved_videos (
+    tidal_video_id INTEGER PRIMARY KEY,
+    item_json TEXT NOT NULL,
+    saved_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_saved_videos_saved_at ON saved_videos(saved_at DESC);
+"#;
+
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     // Create migrations table if not exists
     conn.execute_batch(
@@ -2145,5 +2201,50 @@ mod tests {
         assert_eq!(token, "123456");
         assert_eq!(user_id, "existing-user");
         assert_eq!(hash_is_unique, 1);
+    }
+
+    #[test]
+    fn migration_065_upgrades_an_existing_video_radio_cache() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migrations_up_to(&conn, 64).unwrap();
+        conn.execute(
+            "INSERT INTO video_seed_genres (seed_tidal_id, genre_name) VALUES (42, 'Electronic')",
+            [],
+        )
+        .unwrap();
+
+        apply_migrations_up_to(&conn, MIGRATIONS.len()).unwrap();
+        let rank: i64 = conn
+            .query_row(
+                "SELECT rank FROM video_seed_genres WHERE seed_tidal_id = 42",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO video_genre_scans (genre_name) VALUES ('Electronic')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(rank, 0);
+    }
+
+    #[test]
+    fn migration_066_adds_exact_saved_video_cuts() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migrations_up_to(&conn, 65).unwrap();
+        apply_migrations_up_to(&conn, MIGRATIONS.len()).unwrap();
+        conn.execute(
+            "INSERT INTO saved_videos (tidal_video_id, item_json) VALUES (91, '{\"tidal_id\":91,\"title\":\"Live cut\"}')",
+            [],
+        ).unwrap();
+        let saved: String = conn
+            .query_row(
+                "SELECT item_json FROM saved_videos WHERE tidal_video_id = 91",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(saved.contains("Live cut"));
     }
 }
