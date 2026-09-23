@@ -1908,7 +1908,6 @@
 							</div>
 
 							<div class="queue-side">
-								{#if isPlayed}<span class="queue-played-label">Played</span>{/if}
 								<span class="queue-time">{formatTrackDuration(item.track.duration_ms)}</span>
 								{#if !isPending}
 									<button
@@ -2228,7 +2227,6 @@
 								{/if}
 							</div>
 							<div class="queue-side">
-								{#if isPlayed}<span class="queue-played-label">Played</span>{/if}
 								<span class="queue-time">{formatTrackDuration(item.track.duration_ms)}</span>
 								<button
 									class="queue-overflow"
@@ -3341,14 +3339,6 @@
 	.queue-empty span {
 		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
-	}
-
-	.queue-played-label {
-		color: var(--text-tertiary);
-		font-size: var(--font-size-xs);
-		text-transform: uppercase;
-		letter-spacing: 0.06em;
-		pointer-events: none;
 	}
 
 	.queue-side {
