@@ -123,6 +123,12 @@
 	let sentinel = $state<HTMLDivElement | null>(null);
 	let recent = $state<string[]>(loadRecent());
 	let stageAnchor = $state<HTMLDivElement | null>(null);
+	let savedVideoIds = $state<Set<number>>(new Set());
+	let savingVideo = $state(false);
+	let savedVideoChanges = 0;
+	let relatedVideos = $state<(TidalSearchVideo & { why?: string })[]>([]);
+	let relatedLoading = $state(false);
+	let relatedRequest = 0;
 	let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 	let searchAbort: AbortController | null = null;
 	let loadMoreSeq = 0;
@@ -146,6 +152,7 @@
 
 	let heroTitle = $derived(selectedVideo?.title ?? 'TIDAL video');
 	let heroArtist = $derived(selectedVideo?.artist_name ?? null);
+	let videoIsSaved = $derived(selectedVideo ? savedVideoIds.has(selectedVideo.tidal_id) : false);
 
 	// --- Editorial browse state ---
 	// The resting state of the page: a daily-picks shelf plus TIDAL's own
@@ -210,6 +217,27 @@
 	async function playBrowseMix() {
 		const first = browseMix[0];
 		if (first) await playFromQueue(first, browseMix, 'Video radio', true, true);
+	}
+
+	async function toggleSavedVideo() {
+		const item = selectedVideo;
+		if (!item || savingVideo) return;
+		savingVideo = true;
+		const saved = !savedVideoIds.has(item.tidal_id);
+		try {
+			const result = await api.setVideoSaved(item, saved);
+			if (!result.ok) throw new Error('Could not save video.');
+			const next = new Set(savedVideoIds);
+			if (saved) next.add(item.tidal_id);
+			else next.delete(item.tidal_id);
+			savedVideoChanges += 1;
+			savedVideoIds = next;
+			showToast(saved ? 'Saved to liked videos.' : 'Removed from liked videos.');
+		} catch (err) {
+			showToast(normalizeError(err, 'Could not update liked videos.'), 'error');
+		} finally {
+			savingVideo = false;
+		}
 	}
 
 	function editorialItemToVideo(item: TidalHomeItem): TidalSearchVideo {
@@ -579,6 +607,7 @@
 		const mixId = params.get('mixId');
 		const playlistId = params.get('playlistId');
 		const shouldPlayCollection = params.get('play') === '1';
+		const startRadio = params.get('radio') === '1';
 		query = q;
 		if (q) await runSearch(q, false);
 		if (mixId) {
@@ -604,25 +633,32 @@
 		if (Number.isFinite(videoId) && videoId > 0) {
 			const fromContext = findVideoInCurrentContext(videoId);
 			if (fromContext) {
-				void selectVideo(fromContext, false);
+				if (startRadio) void playFromQueue(fromContext, [fromContext], `${fromContext.artist_name ?? 'Video'} radio`, true, true);
+				else void selectVideo(fromContext, false);
 				return;
 			}
-			void selectVideo({
+			const directVideo: TidalSearchVideo = {
 				tidal_id: videoId,
-				title: `TIDAL video ${videoId}`,
+				title: params.get('title') ?? `TIDAL video ${videoId}`,
 				duration_ms: null,
-				artist_id: null,
-				artist_name: null,
+				artist_id: Number(params.get('artistId')) || null,
+				artist_name: params.get('artistName'),
 				album_tidal_id: null,
 				artwork_url: null,
 				quality: null,
 				explicit: null,
 				type: 'video',
-			}, false);
+			};
+			if (startRadio) void playFromQueue(directVideo, [directVideo], `${directVideo.artist_name ?? 'Video'} radio`, true, true);
+			else void selectVideo(directVideo, false);
 		}
 	}
 
 	onMount(() => {
+		const changesAtLoad = savedVideoChanges;
+		void api.getSavedVideos().then(({ items }) => {
+			if (savedVideoChanges === changesAtLoad) savedVideoIds = new Set(items.map((item) => item.tidal_id));
+		}).catch(() => {});
 		void audioSettings.load();
 		void loadBrowse();
 		const params = new URLSearchParams(window.location.search);
@@ -669,6 +705,28 @@
 		return () => observer.disconnect();
 	});
 
+	// Wait for an intentional selection before asking the throttled discovery
+	// endpoint. Responses from a previous video never overwrite the new row.
+	$effect(() => {
+		const item = selectedVideo;
+		const seq = ++relatedRequest;
+		relatedVideos = [];
+		relatedLoading = Boolean(item?.artist_id || item?.artist_name);
+		if (!item || (!item.artist_id && !item.artist_name)) return;
+		const timer = setTimeout(() => {
+			void api.getRelatedVideos({
+				seed_artist_id: item.artist_id,
+				seed_artist_name: item.artist_name,
+				exclude_video_ids: [item.tidal_id],
+			}).then(({ items }) => {
+				if (seq === relatedRequest) relatedVideos = items.filter((video) => video.tidal_id !== item.tidal_id);
+			}).catch(() => {}).finally(() => {
+				if (seq === relatedRequest) relatedLoading = false;
+			});
+		}, 400);
+		return () => { clearTimeout(timer); ++relatedRequest; };
+	});
+
 	// Hand the route's hero placeholder to the persistent dock so it can dock
 	// the live player into it while on /videos.
 	$effect(() => {
@@ -713,6 +771,29 @@
 		mixLoadSeq += 1;
 	});
 </script>
+
+{#snippet relatedSection()}
+	{#if selectedVideo && !browseMode && (relatedLoading || relatedVideos.length > 0)}
+		<section class="results-section related-section" aria-label="Related videos">
+			<div class="section-heading">
+				<p class="eyebrow">Keep exploring</p>
+				<h2>Related to {selectedVideo.artist_name ?? 'this video'}</h2>
+			</div>
+			{#if relatedVideos.length > 0}
+				<div class="video-grid">
+					{#each relatedVideos as video (video.tidal_id)}
+						<div class="related-card">
+							<VideoCard {video} onSelect={(item) => !('id' in item) && void playFromQueue(item, relatedVideos, 'Related video radio', true, true)} />
+							{#if video.why}<span class="related-why">{video.why}</span>{/if}
+						</div>
+					{/each}
+				</div>
+			{:else}
+				<p class="related-loading">Finding a few connected videos…</p>
+			{/if}
+		</section>
+	{/if}
+{/snippet}
 
 <div class="videos-page">
 	<header class="search-header">
@@ -872,6 +953,15 @@
 						<span class="meta-source">from {$videoSession.sourceLabel}</span>
 					{/if}
 				</div>
+				<button
+					type="button"
+					class="save-video"
+					class:saved={videoIsSaved}
+					aria-pressed={videoIsSaved}
+					aria-label={videoIsSaved ? 'Remove video from likes' : 'Save video to likes'}
+					disabled={savingVideo}
+					onclick={() => void toggleSavedVideo()}
+				><span aria-hidden="true">{videoIsSaved ? '♥' : '♡'}</span> {videoIsSaved ? 'Saved' : 'Save video'}</button>
 			{/if}
 			{#if error}
 				<p class="inline-error">{error}</p>
@@ -880,6 +970,7 @@
 		{/if}
 	</section>
 	{/if}
+	{#if !query.trim()}{@render relatedSection()}{/if}
 
 	<!-- Legacy landing chips: only when there is no editorial content to show
 	     (no TIDAL session / empty library), so the degraded page stays exactly
@@ -934,6 +1025,7 @@
 			</div>
 		</section>
 	{/if}
+	{#if query.trim()}{@render relatedSection()}{/if}
 
 	{#if loadingMix || mixItems.length > 0 || mixError}
 		<section class="results-section">
@@ -1291,6 +1383,21 @@
 		color: var(--text-secondary);
 	}
 
+	.save-video {
+		align-self: flex-start;
+		border: 1px solid var(--border-subtle);
+		border-radius: 999px;
+		background: var(--bg-hover);
+		color: var(--text-secondary);
+		padding: 8px 13px;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+	}
+	.save-video span { font-size: 1.15em; }
+	.save-video.saved { color: var(--accent-strong); border-color: var(--accent-line); background: var(--accent-soft); }
+	.save-video:hover, .save-video:focus-visible { border-color: var(--accent-line); color: var(--accent-strong); }
+	.save-video:disabled { opacity: 0.6; }
+
 	.meta-link,
 	.text-btn {
 		color: var(--accent-strong);
@@ -1315,6 +1422,10 @@
 		display: grid;
 		gap: 14px;
 	}
+	.related-section { border-top: 1px solid var(--border-subtle); padding-top: 24px; }
+	.related-card { min-width: 0; display: grid; align-content: start; gap: 5px; }
+	.related-why, .related-loading { color: var(--text-tertiary); font-size: var(--font-size-xs); }
+	.related-loading { margin: 0; }
 
 	.rail-block {
 		display: grid;

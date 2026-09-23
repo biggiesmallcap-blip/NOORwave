@@ -1044,7 +1044,7 @@
 				oncontextmenu={(e) => {
 					e.preventDefault();
 					e.stopPropagation();
-					openContextMenu(e, buildVideoMenu(video), video.title);
+					openContextMenu(e, buildVideoMenu({ ...video, artist_id: activeTidalArtistId }), video.title);
 				}}
 			>
 				<div class="grid-art-wrap video-art-wrap">

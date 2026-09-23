@@ -20,6 +20,7 @@ use crate::services::video_sets::{
     ONE_STEP_OUT_SLUG, RECENTLY_WATCHED_DAYS, SetPlan, VideoSet,
 };
 use axum::{extract::State, response::Json};
+use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -316,7 +317,11 @@ pub(super) async fn post_videos_radio_next(
     // Single-flight across all sessions. Wait for any active fill, then
     // re-read the cache so simultaneous listeners do not duplicate API calls.
     // The scan ledger also throttles empty catalogs and empty relationships.
-    if fresh_count < 8 || unfamiliar_count < video_radio::UNFAMILIAR_PER_BATCH {
+    let relationship_due = seed_id.is_some_and(|id| {
+        db.with_conn(|conn| video_radio::related_due(conn, id))
+            .unwrap_or(false)
+    });
+    if fresh_count < 8 || unfamiliar_count < video_radio::UNFAMILIAR_PER_BATCH || relationship_due {
         let _guard = VIDEO_RADIO_FETCH_LOCK.lock().await;
         if let Ok((current_pool, current_items, current_fresh_count, current_unfamiliar_count)) =
             load()
@@ -326,7 +331,13 @@ pub(super) async fn post_videos_radio_next(
             fresh_count = current_fresh_count;
             unfamiliar_count = current_unfamiliar_count;
         }
-        if fresh_count >= 8 && unfamiliar_count >= video_radio::UNFAMILIAR_PER_BATCH {
+        if fresh_count >= 8
+            && unfamiliar_count >= video_radio::UNFAMILIAR_PER_BATCH
+            && !seed_id.is_some_and(|id| {
+                db.with_conn(|conn| video_radio::related_due(conn, id))
+                    .unwrap_or(false)
+            })
+        {
             return Json(video_radio_payload(&items, &familiar));
         }
         let tokens = match tokens {
@@ -504,6 +515,96 @@ pub(super) async fn post_videos_radio_next(
     Json(video_radio_payload(&items, &familiar))
 }
 
+/// Related videos share radio's single-flight, cached fan-out. The displayed
+/// rows are then restricted to the seed's own artist, linked artists and genre
+/// neighbours; general library anchors never appear in this section.
+#[derive(Deserialize)]
+pub(super) struct RelatedVideosRequest {
+    pub seed_artist_id: Option<i64>,
+    pub seed_artist_name: Option<String>,
+    #[serde(default)]
+    pub exclude_video_ids: Vec<i64>,
+}
+
+pub(super) async fn post_videos_related(
+    State(state): State<SharedState>,
+    Json(body): Json<RelatedVideosRequest>,
+) -> Json<Value> {
+    let db = { state.read().await.db.clone() };
+    let seed_id = body.seed_artist_id.filter(|id| *id > 0).or_else(|| {
+        body.seed_artist_name
+            .as_deref()
+            .filter(|name| name.len() <= 120)
+            .and_then(|name| {
+                db.with_conn(|conn| video_radio::local_artist_id(conn, name))
+                    .ok()
+                    .flatten()
+            })
+    });
+    let Some(seed_id) = seed_id else {
+        return Json(json!({ "items": [] }));
+    };
+    let needs_fan_out = db
+        .with_conn(|conn| -> anyhow::Result<bool> {
+            let pool = video_radio::artist_pool(conn, Some(seed_id), &[], &[])?;
+            let related: Vec<_> = pool.into_iter().filter(|(_, _, lane)| *lane <= 2).collect();
+            Ok(video_radio::related_due(conn, seed_id)?
+                || video_radio::load_candidates(conn, &related)?.len() < 6)
+        })
+        .unwrap_or(true);
+    if needs_fan_out {
+        let _ = post_videos_radio_next(
+            State(state.clone()),
+            Json(VideoRadioRequest {
+                seed_artist_id: Some(seed_id),
+                seed_artist_name: body.seed_artist_name,
+                exclude_video_ids: body.exclude_video_ids.clone(),
+                recent_video_ids: Vec::new(),
+                recent_artist_ids: Vec::new(),
+            }),
+        )
+        .await;
+    }
+    let s = state.read().await;
+    let items =
+        s.db.with_conn(|conn| -> anyhow::Result<Vec<video_sets::VideoSetItem>> {
+            let pool = video_radio::artist_pool(conn, Some(seed_id), &[], &[])?;
+            let related: Vec<_> = pool
+                .iter()
+                .filter(|(_, _, lane)| *lane <= 2)
+                .cloned()
+                .collect();
+            let candidates = video_radio::load_candidates(conn, &related)?;
+            let excluded: HashSet<i64> = body.exclude_video_ids.iter().take(64).copied().collect();
+            let watched = video_sets::recently_watched_video_ids(conn, RECENTLY_WATCHED_DAYS)?;
+            let familiar = video_radio::familiar_artist_ids(conn)?;
+            let mut selected = video_radio::select_batch(
+                &candidates,
+                &excluded,
+                &watched,
+                &[seed_id],
+                &familiar,
+                12,
+            );
+            for video in &mut selected {
+                video.why = match video.artist_id.and_then(|id| {
+                    related
+                        .iter()
+                        .find(|(artist, _, _)| *artist == id)
+                        .map(|(_, _, lane)| *lane)
+                }) {
+                    Some(0) => "More from this artist".into(),
+                    Some(1) => "Related artist".into(),
+                    Some(2) => "Shared genre".into(),
+                    _ => String::new(),
+                };
+            }
+            Ok(selected)
+        })
+        .unwrap_or_default();
+    Json(json!({ "items": items }))
+}
+
 fn record_set_exposure(
     set: &VideoSet,
     video_ids: &mut HashSet<i64>,
@@ -614,6 +715,68 @@ pub(super) async fn get_videos_liked(State(state): State<SharedState>) -> Json<V
         "running": running,
         "tidal_connected": connected,
     }))
+}
+
+/// Exact video cuts deliberately saved by the listener. This is a local read;
+/// discovery and artwork are never fetched when opening the saved list.
+pub(super) async fn get_saved_videos(State(state): State<SharedState>) -> Json<Value> {
+    let s = state.read().await;
+    let items =
+        s.db.with_conn(|conn| -> anyhow::Result<Vec<Value>> {
+            let mut stmt = conn
+                .prepare("SELECT item_json FROM saved_videos ORDER BY saved_at DESC LIMIT 1000")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            Ok(rows
+                .filter_map(|row| row.ok().and_then(|raw| serde_json::from_str(&raw).ok()))
+                .collect())
+        })
+        .unwrap_or_default();
+    Json(json!({ "items": items }))
+}
+
+#[derive(Deserialize)]
+pub(super) struct SaveVideoRequest {
+    pub video: Value,
+    pub saved: bool,
+}
+
+pub(super) async fn post_saved_video(
+    State(state): State<SharedState>,
+    Json(body): Json<SaveVideoRequest>,
+) -> Json<Value> {
+    let Some(id) = body
+        .video
+        .get("tidal_id")
+        .and_then(Value::as_i64)
+        .filter(|id| *id > 0)
+    else {
+        return Json(json!({ "ok": false }));
+    };
+    if body
+        .video
+        .get("title")
+        .and_then(Value::as_str)
+        .is_none_or(|title| title.is_empty() || title.len() > 500)
+    {
+        return Json(json!({ "ok": false }));
+    }
+    let s = state.read().await;
+    let result = s.db.with_conn(|conn| -> anyhow::Result<()> {
+        if body.saved {
+            conn.execute(
+                "INSERT INTO saved_videos (tidal_video_id, item_json) VALUES (?1, ?2) \
+                 ON CONFLICT(tidal_video_id) DO UPDATE SET item_json = excluded.item_json",
+                params![id, body.video.to_string()],
+            )?;
+        } else {
+            conn.execute("DELETE FROM saved_videos WHERE tidal_video_id = ?1", [id])?;
+        }
+        Ok(())
+    });
+    if let Err(e) = &result {
+        tracing::warn!("saved video write failed: {e}");
+    }
+    Json(json!({ "ok": result.is_ok() }))
 }
 
 /// `POST /api/videos/liked/refresh`. The manual affordance for the impatient;

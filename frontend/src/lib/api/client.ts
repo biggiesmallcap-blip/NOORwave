@@ -4048,6 +4048,26 @@ export const api = {
 		});
 	},
 
+	getRelatedVideos(body: {
+		seed_artist_id: number | null;
+		seed_artist_name: string | null;
+		exclude_video_ids: number[];
+	}): Promise<{ items: (TidalSearchVideo & { why?: string })[] }> {
+		return fetchApi<{ items: (TidalSearchVideo & { why?: string })[] }>('/api/videos/related', undefined, {
+			method: 'POST', body: JSON.stringify(body),
+		});
+	},
+
+	getSavedVideos(): Promise<{ items: TidalSearchVideo[] }> {
+		return fetchApi<{ items: TidalSearchVideo[] }>('/api/videos/saved');
+	},
+
+	setVideoSaved(video: TidalSearchVideo, saved: boolean): Promise<{ ok: boolean }> {
+		return fetchApi<{ ok: boolean }>('/api/videos/saved', undefined, {
+			method: 'POST', body: JSON.stringify({ video, saved }),
+		});
+	},
+
 	/** The liked-videos wall. Pure reads over what the background resolve has
 	 *  found so far, so this never waits on TIDAL. */
 	getLikedVideos(): Promise<LikedVideosResponse> {

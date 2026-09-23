@@ -1004,6 +1004,10 @@ pub fn api_routes(state: SharedState) -> Router {
             post(video_discovery_routes::post_videos_radio_next),
         )
         .route(
+            "/api/videos/related",
+            post(video_discovery_routes::post_videos_related),
+        )
+        .route(
             "/api/videos/history",
             post(video_discovery_routes::post_videos_history),
         )
@@ -1012,6 +1016,11 @@ pub fn api_routes(state: SharedState) -> Router {
         .route(
             "/api/videos/liked",
             get(video_discovery_routes::get_videos_liked),
+        )
+        .route(
+            "/api/videos/saved",
+            get(video_discovery_routes::get_saved_videos)
+                .post(video_discovery_routes::post_saved_video),
         )
         .route(
             "/api/videos/liked/refresh",

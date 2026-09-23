@@ -8,6 +8,8 @@
 	import { isPlaying } from '$lib/stores/player';
 	import {
 		advanceVideo,
+		nextVideo,
+		previousVideo,
 		clearVideoSession,
 		refreshVideoStream,
 		refillVideoRadio,
@@ -37,7 +39,8 @@
 
 	let qualityMode = $derived($audioSettings.settings?.video_quality_mode ?? 'MAX');
 	let upNext = $derived($videoSessionUpcoming[0] ?? null);
-	let hasNext = $derived($videoSessionUpcoming.length > 0);
+	let hasNext = $derived($videoSessionUpcoming.length > 0 || ($videoSession.continuous && $videoSession.autoplay));
+	let hasPrevious = $derived($videoSession.currentIndex > 0);
 
 	// ─── Full-mode rect tracking ─────────────────────────────────────────────
 	let rect = $state<{ top: number; left: number; width: number; height: number } | null>(null);
@@ -145,9 +148,12 @@
 			variant={mode === 'mini' ? 'mini' : 'full'}
 			autoplayNext={$videoSession.autoplay}
 			hasNext={hasNext}
+			hasPrevious={hasPrevious}
 			upNextTitle={upNext?.title ?? null}
 			upNextArtist={upNext?.artist_name ?? null}
 			onEnded={handleEnded}
+			onPrevious={() => void previousVideo()}
+			onNext={() => void nextVideo()}
 			onToggleAutoplay={toggleAutoplay}
 			onPlay={handlePlay}
 			refreshStream={refreshVideoStream}

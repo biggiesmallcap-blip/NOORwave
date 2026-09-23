@@ -8,6 +8,7 @@
 	} from '$lib/api/client';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
+	import VideoCard from '$lib/components/video/VideoCard.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import SearchField from '$lib/search/ui/SearchField.svelte';
@@ -22,6 +23,7 @@
 	const SCAN_POLL_MS = 6000;
 
 	let videos = $state<LikedVideo[]>([]);
+	let savedVideos = $state<TidalSearchVideo[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let running = $state(false);
@@ -72,8 +74,12 @@
 
 	async function load() {
 		try {
-			const res = await api.getLikedVideos();
+			const [res, saved] = await Promise.all([
+				api.getLikedVideos(),
+				api.getSavedVideos().catch(() => ({ items: savedVideos })),
+			]);
 			videos = res.videos;
+			savedVideos = saved.items;
 			running = res.running;
 			scannedArtists = res.scanned_artists;
 			totalArtists = res.total_artists;
@@ -148,6 +154,7 @@
 		const items = [
 			...buildVideoMenu({
 				tidal_id: version.tidal_video_id,
+				title: version.video_title,
 				artist_id: video.artist_id,
 				artist_name: video.artist_name,
 			}),
@@ -202,6 +209,10 @@
 		}
 		return sorted;
 	});
+	let shownSaved = $derived(savedVideos.filter((video) => {
+		const needle = query.trim().toLowerCase();
+		return !needle || video.title.toLowerCase().includes(needle) || (video.artist_name ?? '').toLowerCase().includes(needle);
+	}));
 
 	// Mounting the whole wall at once is what made opening this page lag: ~700
 	// cards is ~8k DOM nodes built in one blocking pass, and nobody is looking
@@ -395,21 +406,33 @@
 		</div>
 	{:else if error}
 		<EmptyState title="Could not load your liked videos" copy={error} />
-	{:else if !tidalConnected}
+	{:else if !tidalConnected && savedVideos.length === 0}
 		<EmptyState
 			title="Connect TIDAL to find videos"
 			copy="This wall is built from TIDAL videos matched against the songs you have liked."
 		/>
-	{:else if videos.length === 0}
+	{:else if videos.length === 0 && savedVideos.length === 0}
 		<EmptyState
 			title={scanPending ? 'Still looking' : 'No videos among your likes yet'}
 			copy={scanPending
 				? 'The first pass works through your liked artists in the background. Cards appear here as they are found.'
 				: 'Nothing matched yet. Like a few more songs, or press Refresh to check again.'}
 		/>
-	{:else if filtered.length === 0}
+	{:else if filtered.length === 0 && shownSaved.length === 0}
 		<EmptyState title="Nothing matches those filters" copy="Try clearing the search or pills." />
 	{:else}
+		{#if shownSaved.length > 0}
+			<section class="saved-section" aria-label="Saved videos">
+				<div class="saved-heading"><p class="eyebrow">Chosen by you</p><h2>Saved videos</h2></div>
+				<div class="video-grid">
+					{#each shownSaved as video (video.tidal_id)}
+						<VideoCard {video} onSelect={(item) => !('id' in item) && void playVideo(item, { queue: savedVideos, source: 'search', sourceLabel: 'Saved videos' })} />
+					{/each}
+				</div>
+			</section>
+		{/if}
+		{#if filtered.length > 0}
+		<div class="saved-heading"><p class="eyebrow">From liked songs</p><h2>Video matches</h2></div>
 		<div class="video-grid">
 			{#each shown as video, index (video.song_key)}
 				<div
@@ -490,6 +513,7 @@
 				</div>
 			{/each}
 		</div>
+		{/if}
 
 		<!-- Sits below the grid with 600px of lead, so the next page is mounted
 		     well before you can scroll to the end of this one. -->
@@ -506,6 +530,9 @@
 		gap: var(--space-4);
 		padding: var(--space-5) var(--space-5) var(--space-8);
 	}
+	.saved-section { display: grid; gap: var(--space-4); padding-bottom: var(--space-5); border-bottom: 1px solid var(--border-subtle); }
+	.saved-heading { display: grid; gap: 3px; }
+	.saved-heading h2 { margin: 0; font-size: var(--font-size-lg); color: var(--text-primary); }
 
 	/* Lifted verbatim from /videos so the two pages cannot drift apart again. */
 	.search-header {

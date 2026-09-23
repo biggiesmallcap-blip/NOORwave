@@ -97,6 +97,24 @@ export const videoSession = {
 	setAutoplay(autoplay: boolean) {
 		persistAutoplayPreference(autoplay);
 		update({ autoplay });
+		if (autoplay && get(session).continuous) void refillVideoRadio(true);
+	},
+	startRadio() {
+		const state = get(session);
+		if (!state.current) return;
+		radioGeneration += 1;
+		radioSeenIds = [state.current.tidal_id];
+		radioRefill = null;
+		persistAutoplayPreference(true);
+		const queue = state.queue.some((video) => video.tidal_id === state.current?.tidal_id)
+			? state.queue : [state.current, ...state.queue];
+		update({ queue, continuous: true, autoplay: true, sourceLabel: `${state.current.artist_name ?? 'Video'} radio` });
+		void refillVideoRadio(true);
+	},
+	stopRadio() {
+		radioGeneration += 1;
+		radioRefill = null;
+		update({ continuous: false, sourceLabel: 'Video queue' });
 	},
 	setPlaying(playing: boolean) {
 		update({ playing });
@@ -243,7 +261,7 @@ export function refillVideoRadio(force = false): Promise<number> {
 		const existing = new Set(current.queue.map((v) => v.tidal_id));
 		const fresh = items.filter((item) => !existing.has(item.tidal_id));
 		if (fresh.length === 0) return 0;
-		if (force && fresh.length >= 8 && unfamiliar_video_ids.filter((id) => fresh.some((item) => item.tidal_id === id)).length >= 2) {
+		if (force && (current.queue.length - current.currentIndex <= 2 || (fresh.length >= 8 && unfamiliar_video_ids.filter((id) => fresh.some((item) => item.tidal_id === id)).length >= 2))) {
 			// The browse shelves are a quick start. Once the server has a real
 			// discovery blend, hand upcoming playback to it immediately.
 			update({ queue: [...current.queue.slice(0, current.currentIndex + 1), ...fresh] });
@@ -305,6 +323,34 @@ export async function advanceVideo(opts: { preloaded?: PreloadedVideoStream | nu
 		autoplay: true,
 		continuous: state.continuous,
 	}, opts);
+}
+
+/** Return to a video already played in this session. Keeps the queue context. */
+export async function previousVideo(): Promise<boolean> {
+	const state = get(session);
+	const previous = state.queue[state.currentIndex - 1];
+	if (!previous) return false;
+	return playVideo(previous, {
+		queue: state.queue, source: state.source, sourceLabel: state.sourceLabel,
+		autoplay: state.autoplay, continuous: state.continuous,
+	});
+}
+
+/** Skip to the next queued video regardless of the autoplay preference. */
+export async function nextVideo(): Promise<boolean> {
+	const state = get(session);
+	if (!state.active) return false;
+	if (state.continuous && !state.queue[state.currentIndex + 1]) {
+		await refillVideoRadio(true);
+	}
+	const refreshed = get(session);
+	if (refreshed.current?.tidal_id !== state.current?.tidal_id) return false;
+	const next = refreshed.queue[refreshed.currentIndex + 1];
+	if (!next) return false;
+	return playVideo(next, {
+		queue: refreshed.queue, source: refreshed.source, sourceLabel: refreshed.sourceLabel,
+		autoplay: refreshed.autoplay, continuous: refreshed.continuous,
+	});
 }
 
 /** Stop the video session entirely and free the dock. */

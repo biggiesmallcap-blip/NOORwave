@@ -67,6 +67,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_063,
     MIGRATION_064,
     MIGRATION_065,
+    MIGRATION_066,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1750,6 +1751,16 @@ CREATE TABLE IF NOT EXISTS video_genre_scans (
 );
 "#;
 
+// Explicitly saved video cuts are separate from videos inferred from liked songs.
+const MIGRATION_066: &str = r#"
+CREATE TABLE IF NOT EXISTS saved_videos (
+    tidal_video_id INTEGER PRIMARY KEY,
+    item_json TEXT NOT NULL,
+    saved_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_saved_videos_saved_at ON saved_videos(saved_at DESC);
+"#;
+
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     // Create migrations table if not exists
     conn.execute_batch(
@@ -2216,5 +2227,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rank, 0);
+    }
+
+    #[test]
+    fn migration_066_adds_exact_saved_video_cuts() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migrations_up_to(&conn, 65).unwrap();
+        apply_migrations_up_to(&conn, MIGRATIONS.len()).unwrap();
+        conn.execute(
+            "INSERT INTO saved_videos (tidal_video_id, item_json) VALUES (91, '{\"tidal_id\":91,\"title\":\"Live cut\"}')",
+            [],
+        ).unwrap();
+        let saved: String = conn
+            .query_row(
+                "SELECT item_json FROM saved_videos WHERE tidal_video_id = 91",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(saved.contains("Live cut"));
     }
 }
