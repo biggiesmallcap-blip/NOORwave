@@ -25,7 +25,7 @@
   <img src="https://img.shields.io/badge/Svelte-5-ff3e00?style=flat-square&logo=svelte" alt="Svelte 5"/>
   <img src="https://img.shields.io/badge/Tauri-2-ffc131?style=flat-square&logo=tauri" alt="Tauri"/>
   <img src="https://img.shields.io/badge/SQLite-3-003b57?style=flat-square&logo=sqlite" alt="SQLite"/>
-  <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT"/>
+  <img src="https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-5B4B8A?style=flat-square" alt="PolyForm Noncommercial 1.0.0"/>
 </p>
 
 ## Why this exists
@@ -286,4 +286,8 @@ NOORwave uses TIDAL's unofficial API through PKCE OAuth2. It is not affiliated w
 
 ## License
 
-[MIT](LICENSE)
+NOORwave is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE). Personal, educational, research, hobby, and other non-commercial use is free. The license does not limit rights you may have under applicable law, including fair use.
+
+Commercial use, managed hosting, redistribution, and OEM use require a separate commercial license from the copyright holder.
+
+Earlier releases published under MIT remain available under their original terms.
