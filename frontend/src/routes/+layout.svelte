@@ -945,44 +945,59 @@
 	});
 	const queueDragState = queueDrag.state;
 
-	// ─── Scroll active queue row into view ───────────────────────────────────
-	let lastUserScrollAt = $state(0);
+	// ─── Keep the playhead at the top of the queue viewport ─────────────────
+	let lastUserScrollAt = 0;
+	let lastPositionedQueueItemId: number | null = null;
+	let lastPositionedQueueListEl: HTMLElement | null = null;
 	let queueListEl: HTMLElement | null = $state(null);
 	let currentRowVisible = $state(true);
 
+	function activeQueueRow(): HTMLElement | null {
+		const anchor = currentQueueAnchorItem($playbackQueue, $currentTrack, $currentQueueItemId);
+		return anchor && queueListEl
+			? queueListEl.querySelector<HTMLElement>(`[data-queue-item-id="${anchor.id}"]`)
+			: null;
+	}
+
 	function refreshCurrentRowVisibility() {
-		const id = $currentQueueItemId;
-		if (!id || !queueListEl) {
+		if (!queueListEl) {
 			currentRowVisible = true;
 			return;
 		}
-		const row = queueListEl.querySelector(`[data-queue-item-id="${id}"]`);
+		const row = activeQueueRow();
 		if (!row) {
 			currentRowVisible = true;
 			return;
 		}
-		const rect = (row as HTMLElement).getBoundingClientRect();
+		const rect = row.getBoundingClientRect();
 		const containerRect = queueListEl.getBoundingClientRect();
 		currentRowVisible = !(rect.bottom < containerRect.top || rect.top > containerRect.bottom);
 	}
 
 	function handleQueueScroll() {
-		lastUserScrollAt = Date.now();
 		refreshCurrentRowVisibility();
 	}
 
+	function handleQueueUserScroll() {
+		lastUserScrollAt = Date.now();
+	}
+
 	function jumpToCurrentRow() {
-		const id = $currentQueueItemId;
-		if (!id || !queueListEl) return;
-		const row = queueListEl.querySelector(`[data-queue-item-id="${id}"]`);
-		if (!row) return;
-		(row as HTMLElement).scrollIntoView({
-			block: 'center',
-			behavior: prefersReducedMotion() ? 'auto' : 'smooth',
-		});
-		// Re-enable the auto-jump effect so subsequent track changes follow.
+		const row = activeQueueRow();
+		if (!row || !queueListEl) return;
+		positionQueueRowAtTop(row, true);
 		lastUserScrollAt = 0;
 		refreshCurrentRowVisibility();
+	}
+
+	function positionQueueRowAtTop(row: HTMLElement, animate: boolean) {
+		if (!queueListEl) return;
+		const list = queueListEl;
+		const rowTop = row.getBoundingClientRect().top - list.getBoundingClientRect().top;
+		list.scrollTo({
+			top: list.scrollTop + rowTop,
+			behavior: animate && !prefersReducedMotion() ? 'smooth' : 'auto',
+		});
 	}
 
 	function prefersReducedMotion(): boolean {
@@ -991,30 +1006,26 @@
 	}
 
 	$effect(() => {
-		const id = $currentQueueItemId;
-		if (!id || !queueListEl) {
+		const anchor = currentQueueAnchorItem($playbackQueue, $currentTrack, $currentQueueItemId);
+		const visibleCount = queueVisibleCount;
+		if (!anchor || !queueListEl) {
 			currentRowVisible = true;
 			return;
 		}
-		const row = queueListEl.querySelector(`[data-queue-item-id="${id}"]`);
-		if (!row) {
-			currentRowVisible = true;
+		const anchorIndex = sessionQueue.findIndex((item) => item.id === anchor.id);
+		if (anchorIndex >= visibleCount) {
+			queueVisibleCount = anchorIndex + 1;
 			return;
 		}
-		const rect = row.getBoundingClientRect();
-		const containerRect = queueListEl.getBoundingClientRect();
-		const offscreen = rect.bottom < containerRect.top || rect.top > containerRect.bottom;
-		// Bail on the auto-scroll if the user scrolled recently - don't yank
-		// focus from their browse. The jump-to-current chip still shows.
-		if (offscreen && Date.now() - lastUserScrollAt >= 5000) {
-			row.scrollIntoView({
-				block: 'nearest',
-				behavior: prefersReducedMotion() ? 'auto' : 'smooth',
-			});
-			currentRowVisible = true;
-		} else {
-			currentRowVisible = !offscreen;
-		}
+		const row = activeQueueRow();
+		if (!row) return;
+		if (anchor.id === lastPositionedQueueItemId && queueListEl === lastPositionedQueueListEl) return;
+		const animate = lastPositionedQueueListEl === queueListEl && lastPositionedQueueItemId !== null;
+		lastPositionedQueueItemId = anchor.id;
+		lastPositionedQueueListEl = queueListEl;
+		// Keep a deliberate browse in place; the jump chip stays available.
+		if (Date.now() - lastUserScrollAt >= 5000) positionQueueRowAtTop(row, animate);
+		refreshCurrentRowVisibility();
 	});
 
 	// ─── Source attribution for now-playing card ─────────────────────────────
@@ -1750,7 +1761,7 @@
 				</div>
 			</div>
 
-			{#if !currentRowVisible && $currentQueueItemId && sessionQueue.length > 0}
+			{#if !currentRowVisible && $currentTrack && sessionQueue.length > 0}
 				<button
 					class="queue-jump-chip"
 					type="button"
@@ -1803,7 +1814,16 @@
 			{/if}
 
 			{#if sessionQueue.length > 0}
-				<div class="queue-list" id="queue-list" role="list" bind:this={queueListEl} onscroll={handleQueueScroll}>
+				<div
+					class="queue-list"
+					id="queue-list"
+					role="list"
+					bind:this={queueListEl}
+					onscroll={handleQueueScroll}
+					onwheel={handleQueueUserScroll}
+					ontouchstart={handleQueueUserScroll}
+					onpointerdown={(event) => { if (event.target === queueListEl) handleQueueUserScroll(); }}
+				>
 					{#each sessionQueue.slice(0, queueVisibleCount) as item (item.id)}
 						{@const aid = item.track.artist_id}
 						{@const isPending = item.is_pending === true}
@@ -3064,6 +3084,14 @@
 		flex-direction: column;
 		gap: 6px;
 		-webkit-overflow-scrolling: touch;
+	}
+
+	/* Let the last song reach the top too, leaving played rows above the
+	   viewport until someone deliberately scrolls back through them. */
+	.queue-list::after {
+		content: '';
+		flex: 0 0 100%;
+		pointer-events: none;
 	}
 
 	.queue-row {
