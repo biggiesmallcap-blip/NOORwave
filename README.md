@@ -76,7 +76,7 @@ Automix keeps a running runway of tracks ahead of you and tells you why each one
 
 ### The phone in your pocket is the remote
 
-There is a full PWA at `/remote`, served by the same process on the same port. No companion app, no second service, no cloud round trip. Open it on your phone on the same Wi-Fi and you get transport, the live queue, search, artist and album browsing, action sheets, and a sleep timer. Add it to your home screen and it behaves like a native remote. This is the actual reason the backend is a real HTTP server instead of collapsing into Tauri IPC.
+There is a full PWA at `/remote`, served by the same process on the same port. No companion app, no second service, no cloud round trip. **Settings -> Connection -> Phone Remote** owns the whole setup: enable trusted-LAN access, scan a one-use QR code (or enter its temporary six-digit code), and manage each paired phone by name. Local discovery provides a stable `.local` address when the network supports it, with a direct Wi-Fi address as the fallback. Once connected you get transport, the live queue, search, artist and album browsing, action sheets, and a sleep timer. Add it to your home screen and it behaves like a native remote.
 
 ### A library that behaves like a local collection
 
@@ -160,17 +160,21 @@ For the full desktop shell, which launches the server for you and adds the tray,
 cargo run -p noor-app
 ```
 
-On first run the server prints an access PIN in its startup banner. On loopback the UI fetches it automatically, so you never type it on the desktop. You only need it on a phone. It is always readable again in **Settings -> Access PIN**.
+On first run the server prints its master access PIN in the startup banner. On loopback the desktop UI fetches it automatically. Normal phone setup uses the QR flow in **Settings -> Connection -> Phone Remote**; the master PIN remains available there under **Recovery: use the master PIN** for browsers that cannot pair.
 
 ## The Phone Remote, Set Up
 
-1. **Make the server reachable on your LAN.** Desktop app: tray icon -> **Network access**. Standalone server: run with `--host`.
-2. **Find the desktop's LAN IP** (`ipconfig` on Windows), for example `192.168.1.42`.
-3. **On the phone, same Wi-Fi, open** `http://192.168.1.42:17600/remote`.
-4. **Enter the access PIN** from **Settings -> Access PIN**. The phone caches it, so this is once per device.
-5. Optional: "Add to Home Screen" to install it as a standalone PWA.
+In the installed desktop app:
 
-Windows may show a firewall prompt the first time the server binds to the LAN. Allow it on private networks. Regenerating the PIN disconnects every device. There is no QR pairing yet, you type the URL and PIN by hand.
+1. Open **Settings -> Connection -> Phone Remote** and enable **Make phone remote available whenever NOORwave is running**. Use this only on a trusted local network.
+2. Optional: enable **Start NOORwave in the tray when I sign in** so the remote is available without opening the main window first.
+3. Select **Show pairing QR**, then scan it with the phone's camera. If NOORwave is already installed on the phone's home screen, enter the temporary six-digit code instead. The QR and code expire after two minutes and work once.
+4. Open the paired remote and optionally add it to the phone's home screen. The device receives its own persistent credential; the permanent master PIN is not embedded in the QR.
+5. Back on the desktop, use **Paired devices** to rename or revoke individual phones. **Reset all remote access** rotates the master PIN and disconnects every remote session.
+
+If the friendly `.local` address does not open, choose the direct Wi-Fi address under **Use a different connection address**, refresh the QR, and pair that origin separately. Windows may show a firewall prompt the first time LAN access is enabled; allow NOORwave on private networks. Guest Wi-Fi/client isolation and VPNs can prevent local devices from seeing one another.
+
+For a standalone `noor-server`, run with `--host`, open `http://<LAN-IP>:17600/remote`, and use the master PIN. QR generation and paired-device management are deliberately restricted to the local desktop settings surface. Phone Remote is same-LAN only: it does not use a cloud relay, port forwarding, or internet discovery.
 
 ## Configuration
 
@@ -221,7 +225,7 @@ scripts        Build, dev launcher, smoke tests, data utilities
 
 - **Sidecar model.** The Tauri shell spawns `noor-server` as a child process, waits for `GET /api/ping`, then opens the WebView. Shutdown goes through `POST /api/shutdown` before any force kill.
 - **One server, two front doors.** The same process serves the desktop UI and the LAN `/remote` PWA. That is why it stays a real HTTP server.
-- **Auth.** One shared bearer token (the access PIN) gates every protected route: a header for `/api/*`, a query param for `/ws`, because browsers cannot set headers on a WebSocket upgrade.
+- **Auth.** The desktop loopback session is automatic. Phones normally receive individually revocable credentials through a one-use, two-minute pairing ticket; the shared master PIN remains a recovery fallback. Protected HTTP requests use a bearer header and WebSockets use a query credential because browsers cannot set headers on an upgrade.
 - **Storage.** One local SQLite file. No account, no cloud, no sync.
 
 Verify a change:
