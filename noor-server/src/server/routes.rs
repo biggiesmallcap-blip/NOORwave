@@ -1000,6 +1000,10 @@ pub fn api_routes(state: SharedState) -> Router {
             get(video_discovery_routes::get_videos_discover),
         )
         .route(
+            "/api/videos/radio/next",
+            post(video_discovery_routes::post_videos_radio_next),
+        )
+        .route(
             "/api/videos/history",
             post(video_discovery_routes::post_videos_history),
         )

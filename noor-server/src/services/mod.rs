@@ -29,4 +29,5 @@ pub mod spotify;
 #[cfg(feature = "spotify-public")]
 pub mod spotify_public;
 pub mod tidal;
+pub mod video_radio;
 pub mod video_sets;

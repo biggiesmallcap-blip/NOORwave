@@ -10,6 +10,7 @@
 		advanceVideo,
 		clearVideoSession,
 		refreshVideoStream,
+		refillVideoRadio,
 		setVideoBrowseMode,
 		videoBrowseMode,
 		videoSession,
@@ -61,6 +62,9 @@
 	$effect(() => {
 		const next = upNext;
 		const autoplay = $videoSession.autoplay;
+		if ($videoSession.continuous && autoplay && $videoSession.queue.length - $videoSession.currentIndex <= 5) {
+			void refillVideoRadio();
+		}
 		if (!autoplay || !next) {
 			prefetchSeq += 1;
 			prefetched = null;

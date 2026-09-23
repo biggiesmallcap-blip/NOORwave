@@ -4034,6 +4034,20 @@ export const api = {
 		return fetchApi<VideoDiscoverResponse>('/api/videos/discover');
 	},
 
+	/** Fetch the next small video radio batch. Server uses its local catalog first. */
+	getVideoRadioNext(body: {
+		seed_artist_id: number | null;
+		seed_artist_name: string | null;
+		exclude_video_ids: number[];
+		recent_video_ids: number[];
+		recent_artist_ids: number[];
+	}): Promise<{ items: TidalSearchVideo[]; unfamiliar_video_ids: number[] }> {
+		return fetchApi<{ items: TidalSearchVideo[]; unfamiliar_video_ids: number[] }>('/api/videos/radio/next', undefined, {
+			method: 'POST',
+			body: JSON.stringify(body),
+		});
+	},
+
 	/** The liked-videos wall. Pure reads over what the background resolve has
 	 *  found so far, so this never waits on TIDAL. */
 	getLikedVideos(): Promise<LikedVideosResponse> {

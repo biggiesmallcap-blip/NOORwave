@@ -58,11 +58,11 @@ const ANCHOR_POOL_SIZE: i64 = 60;
 const ANCHORS_PER_BUILD: usize = 10;
 /// Anchors seeding the adjacency expansion. Each costs one similar-artists
 /// call plus one artist-videos call per artist kept.
-const SIMILAR_SEED_ANCHORS: usize = 4;
+const SIMILAR_SEED_ANCHORS: usize = 6;
 /// Similar artists kept per seed anchor after library filtering.
-const SIMILAR_PER_ANCHOR: usize = 3;
+const SIMILAR_PER_ANCHOR: usize = 2;
 /// Videos requested per anchor.
-const VIDEOS_PER_ANCHOR: i32 = 10;
+const VIDEOS_PER_ANCHOR: i32 = 20;
 /// At most this many picks from one artist, so nobody owns a shelf.
 const PER_ARTIST_CAP: usize = 2;
 /// At most this many picks from one anchor. On the search-driven shelf an
@@ -186,7 +186,7 @@ impl SetPlan {
 }
 
 /// A candidate video, normalized across the artist-videos and search paths.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoCandidate {
     pub tidal_id: i64,
     pub title: String,
@@ -386,6 +386,7 @@ pub fn load_anchor_pool(conn: &Connection) -> Result<Vec<AnchorArtist>> {
          JOIN tracks t ON lh.track_id = t.id
          JOIN artists a ON t.artist_id = a.id
          WHERE a.tidal_id IS NOT NULL
+           AND COALESCE(lh.source, '') NOT IN ('radio', 'automix')
          GROUP BY a.id, a.name
          ORDER BY listens DESC, a.name ASC
          LIMIT ?1",
@@ -411,6 +412,7 @@ fn load_genre_anchor_pool(conn: &Connection, genre: &str) -> Result<Vec<AnchorAr
          JOIN track_genres tg ON tg.track_id = t.id
          JOIN genres g ON g.id = tg.genre_id
          WHERE a.tidal_id IS NOT NULL AND g.name = ?1
+           AND COALESCE(lh.source, '') NOT IN ('radio', 'automix')
          GROUP BY a.id, a.name
          ORDER BY listens DESC, a.name ASC
          LIMIT ?2",
@@ -493,6 +495,7 @@ fn library_genre_profile(conn: &Connection, limit: i64) -> Result<Vec<String>> {
          FROM listen_history lh
          JOIN track_genres tg ON lh.track_id = tg.track_id
          JOIN genres g ON tg.genre_id = g.id
+         WHERE COALESCE(lh.source, '') NOT IN ('radio', 'automix')
          GROUP BY g.id, g.name
          ORDER BY COUNT(lh.id) DESC
          LIMIT ?1",
@@ -529,17 +532,19 @@ pub fn recently_watched_video_ids(conn: &Connection, days: i64) -> Result<HashSe
 
 // --- Sampling ---
 
-/// Weighted sample without replacement, weight = listens. Deterministic for a
-/// given RNG state.
+/// Weighted sample without replacement. Square-root weighting keeps a strong
+/// taste signal without letting a few heavily played artists own every set.
+/// Deterministic for a given RNG state.
 fn sample_anchors(pool: &[AnchorArtist], rng: &mut StdRng, n: usize) -> Vec<AnchorArtist> {
     let mut remaining: Vec<&AnchorArtist> = pool.iter().collect();
     let mut picked = Vec::new();
     while picked.len() < n && !remaining.is_empty() {
-        let total: f64 = remaining.iter().map(|a| a.listens.max(1) as f64).sum();
+        let weight = |a: &AnchorArtist| (a.listens.max(1) as f64).sqrt();
+        let total: f64 = remaining.iter().map(|a| weight(a)).sum();
         let mut roll = rng.random_range(0.0..total);
         let mut chosen = remaining.len() - 1;
         for (i, a) in remaining.iter().enumerate() {
-            roll -= a.listens.max(1) as f64;
+            roll -= weight(a);
             if roll <= 0.0 {
                 chosen = i;
                 break;
@@ -555,9 +560,26 @@ fn sample_anchors(pool: &[AnchorArtist], rng: &mut StdRng, n: usize) -> Vec<Anch
 /// `server_config` key recording the buckets the last completed build pass
 /// covered.
 const LAST_PASS_KEY: &str = "video_sets_last_pass";
+const CURATION_VERSION: &str = "v2";
 
 fn pass_marker(today: chrono::NaiveDate) -> String {
-    format!("{}|{}", daily_bucket_key(today), weekly_bucket_key(today))
+    format!(
+        "{}|{}|{}",
+        CURATION_VERSION,
+        daily_bucket_key(today),
+        weekly_bucket_key(today)
+    )
+}
+
+fn curation_changed(conn: &Connection) -> Result<bool> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT value FROM server_config WHERE key = ?1",
+            params![LAST_PASS_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(stored.is_none_or(|marker| !marker.starts_with(&format!("{CURATION_VERSION}|"))))
 }
 
 /// Cheap "is a build pass worth running?" check for the request path.
@@ -601,6 +623,7 @@ pub fn mark_pass_complete(conn: &Connection, today: chrono::NaiveDate) -> Result
 pub fn plan_missing_sets(conn: &Connection, today: chrono::NaiveDate) -> Result<Vec<SetPlan>> {
     let daily = daily_bucket_key(today);
     let weekly = weekly_bucket_key(today);
+    let rebuild_current = curation_changed(conn)?;
     let profile_genres = library_genre_profile(conn, 12)?;
     let pool = load_anchor_pool(conn)?;
     let mut plans: Vec<SetPlan> = Vec::new();
@@ -613,7 +636,7 @@ pub fn plan_missing_sets(conn: &Connection, today: chrono::NaiveDate) -> Result<
                          take: usize,
                          variant: usize|
      -> Result<()> {
-        if pool.is_empty() || load_set(conn, &slug, bucket)?.is_some() {
+        if pool.is_empty() || (!rebuild_current && load_set(conn, &slug, bucket)?.is_some()) {
             return Ok(());
         }
         let mut rng = StdRng::seed_from_u64(build_seed(&slug, bucket));
@@ -677,7 +700,9 @@ pub fn plan_missing_sets(conn: &Connection, today: chrono::NaiveDate) -> Result<
         0,
     )?;
 
-    if !profile_genres.is_empty() && load_set(conn, DJ_SETS_SLUG, &weekly)?.is_none() {
+    if !profile_genres.is_empty()
+        && (rebuild_current || load_set(conn, DJ_SETS_SLUG, &weekly)?.is_none())
+    {
         plans.push(SetPlan {
             slug: DJ_SETS_SLUG.to_string(),
             bucket_key: weekly.clone(),
@@ -863,6 +888,19 @@ pub fn assemble_set_excluding(
     groups: &[(AnchorArtist, Vec<VideoCandidate>)],
     exclude: &HashSet<i64>,
 ) -> Option<VideoSet> {
+    assemble_set_with_context(plan, groups, exclude, &HashSet::new(), &HashMap::new())
+}
+
+/// Build a shelf in the context of the other shelves already on the page.
+/// Previously shown videos are held back while there are enough fresh choices;
+/// prior artist exposure lowers rank without making thin catalogs disappear.
+pub fn assemble_set_with_context(
+    plan: &SetPlan,
+    groups: &[(AnchorArtist, Vec<VideoCandidate>)],
+    exclude: &HashSet<i64>,
+    shown_video_ids: &HashSet<i64>,
+    artist_exposure: &HashMap<String, usize>,
+) -> Option<VideoSet> {
     let seed_value = plan.seed();
     let mut rng = StdRng::seed_from_u64(seed_value.wrapping_add(1));
     let params = RankParams::default();
@@ -897,9 +935,18 @@ pub fn assemble_set_excluding(
     let mut scored: Vec<Scored> = Vec::new();
     let mut seen: HashSet<i64> = HashSet::new();
     for (anchor, videos) in groups {
+        // Similar artists are not library rows, so borrow the genre profile
+        // of the familiar artist through which we reached them.
+        let via_seed_id = anchor.via.as_deref().and_then(|name| {
+            plan.anchors
+                .iter()
+                .find(|seed| seed.name.eq_ignore_ascii_case(name))
+                .map(|seed| seed.tidal_id)
+        });
         let genre_set = plan
             .anchor_genres
             .get(&anchor.tidal_id)
+            .or_else(|| via_seed_id.and_then(|id| plan.anchor_genres.get(&id)))
             .map(|names| weighted_genre_set(names))
             .unwrap_or_default();
         let affinity = 0.5 + 0.5 * (anchor.listens.max(1) as f64 / max_weight);
@@ -946,6 +993,8 @@ pub fn assemble_set_excluding(
             // Seeded jitter keeps ordering lively across buckets without
             // outvoting genre alignment.
             let jitter = rng.random_range(0.9..1.1);
+            let artist_key = artist_name.to_lowercase();
+            let exposure = artist_exposure.get(&artist_key).copied().unwrap_or(0);
             scored.push(Scored {
                 item: VideoSetItem {
                     tidal_id: video.tidal_id,
@@ -963,10 +1012,10 @@ pub fn assemble_set_excluding(
                     kind: "Music Video".to_string(),
                     why,
                 },
-                cap_key: artist_name.to_lowercase(),
+                cap_key: artist_key,
                 anchor_key: anchor.tidal_id,
                 via: anchor.via.clone(),
-                score: shaped.score * jitter,
+                score: shaped.score * jitter / (1.0 + 0.45 * exposure as f64),
             });
         }
     }
@@ -987,22 +1036,45 @@ pub fn assemble_set_excluding(
         usize::MAX
     };
 
-    let select = |anchor_cap: usize| {
+    let select = |anchor_cap: usize, allow_shown: bool| {
         let mut per_artist: HashMap<String, usize> = HashMap::new();
         let mut per_anchor: HashMap<i64, usize> = HashMap::new();
         let mut items: Vec<VideoSetItem> = Vec::new();
         let mut featured: Vec<String> = Vec::new();
         let mut vias: Vec<String> = Vec::new();
-        for s in scored.iter() {
-            if per_artist
-                .get(&s.cap_key)
-                .is_some_and(|c| *c >= PER_ARTIST_CAP)
-                || per_anchor
-                    .get(&s.anchor_key)
-                    .is_some_and(|c| *c >= anchor_cap)
-            {
-                continue;
-            }
+        let mut picked: HashSet<i64> = HashSet::new();
+        while items.len() < SET_SIZE {
+            let eligible = |s: &&Scored| {
+                !picked.contains(&s.item.tidal_id)
+                    && (allow_shown || !shown_video_ids.contains(&s.item.tidal_id))
+                    && per_artist.get(&s.cap_key).copied().unwrap_or(0) < PER_ARTIST_CAP
+                    && per_anchor.get(&s.anchor_key).copied().unwrap_or(0) < anchor_cap
+            };
+            let last_artist = items.last().and_then(|item| item.artist_name.as_ref());
+            let available: Vec<&Scored> = scored.iter().filter(eligible).collect();
+            let has_other_artist = available
+                .iter()
+                .any(|s| last_artist.is_none_or(|last| !last.eq_ignore_ascii_case(&s.cap_key)));
+            // Choose from the artist with the most remaining room first. This
+            // avoids saving two clips by one artist for the tail of the queue.
+            let next = available
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| {
+                    !has_other_artist
+                        || last_artist.is_none_or(|last| !last.eq_ignore_ascii_case(&s.cap_key))
+                })
+                .max_by_key(|(index, s)| {
+                    let remaining = available
+                        .iter()
+                        .filter(|other| other.cap_key == s.cap_key)
+                        .count()
+                        .min(PER_ARTIST_CAP - per_artist.get(&s.cap_key).copied().unwrap_or(0));
+                    (remaining, std::cmp::Reverse(*index))
+                })
+                .map(|(_, s)| *s);
+            let Some(s) = next else { break };
+            picked.insert(s.item.tidal_id);
             *per_artist.entry(s.cap_key.clone()).or_insert(0) += 1;
             *per_anchor.entry(s.anchor_key).or_insert(0) += 1;
             if let Some(name) = &s.item.artist_name
@@ -1016,23 +1088,30 @@ pub fn assemble_set_excluding(
                 vias.push(via.clone());
             }
             items.push(s.item.clone());
-            if items.len() >= SET_SIZE {
-                break;
-            }
         }
         (items, featured, vias)
     };
 
-    let (mut items, mut featured, mut vias) = select(anchor_cap);
+    let (mut items, mut featured, mut vias) = select(anchor_cap, false);
     // Variety is preferred, not mandatory: long-form video is thin enough that
     // the cap can starve the shelf entirely, and a slightly repetitive shelf
     // beats no shelf.
     if items.len() < MIN_SET_SIZE && anchor_cap != usize::MAX {
-        let (relaxed, relaxed_featured, relaxed_vias) = select(usize::MAX);
+        let (relaxed, relaxed_featured, relaxed_vias) = select(usize::MAX, false);
         if relaxed.len() > items.len() {
             items = relaxed;
             featured = relaxed_featured;
             vias = relaxed_vias;
+        }
+    }
+    // A very small catalog should still have a shelf. Only reintroduce videos
+    // shown elsewhere when the fresh selection cannot reach the minimum size.
+    if items.len() < MIN_SET_SIZE {
+        let (fallback, fallback_featured, fallback_vias) = select(usize::MAX, true);
+        if fallback.len() > items.len() {
+            items = fallback;
+            featured = fallback_featured;
+            vias = fallback_vias;
         }
     }
     if items.len() < MIN_SET_SIZE {
@@ -1326,6 +1405,29 @@ mod tests {
     }
 
     #[test]
+    fn automatic_radio_listens_do_not_become_browse_anchors() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::schema::run_migrations(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO artists (id, tidal_id, name) VALUES
+                 (1, 101, 'Chosen Artist'), (2, 102, 'Radio Artist');
+             INSERT INTO tracks (id, artist_id, title) VALUES
+                 (1, 1, 'Chosen Song'), (2, 2, 'Radio Song');
+             INSERT INTO listen_history (track_id, started_at, source) VALUES
+                 (1, datetime('now'), NULL), (2, datetime('now'), 'radio');",
+        )
+        .unwrap();
+        let anchors = load_anchor_pool(&conn).unwrap();
+        assert_eq!(
+            anchors
+                .iter()
+                .map(|artist| artist.tidal_id)
+                .collect::<Vec<_>>(),
+            vec![101]
+        );
+    }
+
+    #[test]
     fn same_bucket_samples_identically_new_bucket_differs() {
         let pool: Vec<AnchorArtist> = (1..=30)
             .map(|i| anchor(i, &format!("Artist {i}"), 100 - i))
@@ -1425,6 +1527,54 @@ mod tests {
                 item.tidal_id
             );
         }
+    }
+
+    #[test]
+    fn prior_shelves_yield_fresh_videos_and_spread_artists_through_the_queue() {
+        let groups = vec![
+            (
+                anchor(1, "Elvis", 100),
+                (0..4)
+                    .map(|i| candidate(100 + i, &format!("Elvis {i}"), "Elvis", 240))
+                    .collect(),
+            ),
+            (
+                anchor(2, "Willie", 50),
+                (0..4)
+                    .map(|i| candidate(200 + i, &format!("Willie {i}"), "Willie", 240))
+                    .collect(),
+            ),
+            (
+                anchor(3, "Bob", 40),
+                (0..4)
+                    .map(|i| candidate(300 + i, &format!("Bob {i}"), "Bob", 240))
+                    .collect(),
+            ),
+        ];
+        let previously_shown: HashSet<i64> = [100, 101, 200, 201].into_iter().collect();
+        let artist_exposure = HashMap::from([("elvis".into(), 4)]);
+        let set = assemble_set_with_context(
+            &plan(
+                Archetype::DailyPicks,
+                groups.iter().map(|(a, _)| a.clone()).collect(),
+            ),
+            &groups,
+            &HashSet::new(),
+            &previously_shown,
+            &artist_exposure,
+        )
+        .unwrap();
+        assert!(
+            set.items
+                .iter()
+                .all(|item| !previously_shown.contains(&item.tidal_id))
+        );
+        assert!(
+            set.items
+                .windows(2)
+                .all(|pair| pair[0].artist_name != pair[1].artist_name)
+        );
+        assert_ne!(set.items[0].artist_name.as_deref(), Some("Elvis"));
     }
 
     #[test]
@@ -1867,5 +2017,22 @@ mod tests {
         mark_pass_complete(&conn, tomorrow).unwrap();
         let next_week = tomorrow + chrono::Duration::days(7);
         assert!(needs_build(&conn, next_week).unwrap());
+    }
+
+    #[test]
+    fn curation_version_change_reopens_the_current_bucket() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::schema::run_migrations(&conn).unwrap();
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 7, 17).unwrap();
+        conn.execute(
+            "INSERT INTO server_config (key, value) VALUES (?1, ?2)",
+            params![LAST_PASS_KEY, "2026-07-17|2026-W29"],
+        )
+        .unwrap();
+        assert!(needs_build(&conn, today).unwrap());
+        assert!(curation_changed(&conn).unwrap());
+        mark_pass_complete(&conn, today).unwrap();
+        assert!(!needs_build(&conn, today).unwrap());
+        assert!(!curation_changed(&conn).unwrap());
     }
 }

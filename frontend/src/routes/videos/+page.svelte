@@ -14,6 +14,7 @@
 	import TidalDiscoverShelves from '$lib/components/search/TidalDiscoverShelves.svelte';
 	import VideoCard from '$lib/components/video/VideoCard.svelte';
 	import VideoSetShelf from '$lib/components/video/VideoSetShelf.svelte';
+	import { buildBrowseMix } from '$lib/video/browse_mix';
 	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
@@ -46,7 +47,7 @@
 	// While the server assembles today's set (building: true, no snapshot yet),
 	// re-fetch a few times so the picks appear without a manual reload.
 	const BUILD_POLL_MS = 6000;
-	const BUILD_POLL_MAX = 6;
+	const BUILD_POLL_MAX = 20;
 	// TIDAL's videos page ships several modules; a couple is plenty next to the
 	// library-derived shelves.
 	const EDITORIAL_MODULE_MAX = 3;
@@ -163,6 +164,7 @@
 	let shelfSets = $derived(
 		discoverSets.filter((s) => s.slug !== 'daily-picks' && s.items.length > 0)
 	);
+	let browseMix = $derived(buildBrowseMix(discoverSets));
 	let videoSessionActive = $derived(Boolean(selectedVideo || streamUrl || loadingStream));
 	// Browse mode: a video is playing but the listener stepped back to the
 	// picks, so the dock goes mini and the shelves own the page again.
@@ -202,7 +204,12 @@
 	async function playFromSet(set: VideoDiscoverSet, index: number) {
 		const video = set.items[index];
 		if (!video) return;
-		await playFromQueue(video, set.items, set.title, true);
+		await playFromQueue(video, set.items, `${set.title} radio`, true, true);
+	}
+
+	async function playBrowseMix() {
+		const first = browseMix[0];
+		if (first) await playFromQueue(first, browseMix, 'Video radio', true, true);
 	}
 
 	function editorialItemToVideo(item: TidalHomeItem): TidalSearchVideo {
@@ -246,7 +253,8 @@
 		video: TidalSearchVideo,
 		queue: TidalSearchVideo[],
 		label: string,
-		autoplay = $videoSession.autoplay
+		autoplay = $videoSession.autoplay,
+		continuous = false
 	) {
 		if (!assertOnline()) {
 			showToast('Server is reconnecting.', 'error', 3200);
@@ -257,6 +265,8 @@
 			source: 'mix',
 			sourceLabel: label,
 			autoplay,
+			continuous,
+			resetRadio: continuous,
 		});
 		if (!ok) showToast($videoSession.error ?? 'This video could not be loaded.', 'error', 3200);
 	}
@@ -435,12 +445,13 @@
 		// for an empty array, killing autoplay and emptying the queue panel.
 		const inResults = videos.some((item) => item.tidal_id === video.tidal_id);
 		const session = $videoSession;
-		if (!inResults && session.queue.some((item) => item.tidal_id === video.tidal_id)) {
+		if ((session.continuous || !inResults) && session.queue.some((item) => item.tidal_id === video.tidal_id)) {
 			return {
 				queue: session.queue,
 				source: session.source === 'none' ? ('mix' as VideoSessionSource) : session.source,
 				sourceLabel: session.sourceLabel,
 				autoplay: session.autoplay,
+				continuous: session.continuous,
 			};
 		}
 		return {
@@ -757,6 +768,16 @@
 			transition:fade={{ duration: 250 }}
 		>
 			<div class="editorial-inner" inert={searchFocused}>
+				{#if browseMix.length >= 4}
+					<div class="browse-mix">
+						<div>
+							<p class="eyebrow">Keep watching</p>
+							<h2>Video radio</h2>
+							<p>Starts with your picks, then keeps finding related artists and genres.</p>
+						</div>
+						<button type="button" class="mix-play" onclick={() => void playBrowseMix()}>Start radio</button>
+					</div>
+				{/if}
 				{#if dailySet}
 					<VideoSetShelf
 						eyebrow="Daily picks"
@@ -1090,6 +1111,47 @@
 		   shelf's rail scrolls inside it instead of stretching the page. */
 		grid-template-columns: minmax(0, 1fr);
 		gap: 28px;
+	}
+
+	.browse-mix {
+		display: flex;
+		align-items: end;
+		justify-content: space-between;
+		gap: var(--space-4);
+		padding: 0 2px;
+	}
+
+	.browse-mix h2,
+	.browse-mix p {
+		margin: 0;
+	}
+
+	.browse-mix h2 {
+		font-size: var(--font-size-lg);
+	}
+
+	.browse-mix p:not(.eyebrow) {
+		color: var(--text-secondary);
+		font-size: var(--font-size-sm);
+	}
+
+	.mix-play {
+		flex: 0 0 auto;
+		padding: var(--space-2) var(--space-4);
+		border: 1px solid var(--accent-line);
+		border-radius: 999px;
+		background: var(--accent-soft);
+		color: var(--text-primary);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
+		cursor: pointer;
+	}
+
+	.mix-play:hover,
+	.mix-play:focus-visible {
+		background: var(--bg-hover);
+		outline: 2px solid var(--accent);
+		outline-offset: 2px;
 	}
 
 	.picks-loading {
