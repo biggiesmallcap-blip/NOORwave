@@ -1139,6 +1139,20 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Give the liked-video scanner first use of the TIDAL session. Once it is
+    // idle, warm four liked artists' direct video neighborhoods every ten
+    // minutes; active radio still has half the relationship-scan budget.
+    {
+        let warm_state = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+            loop {
+                services::video_radio::warm_liked_graph_if_idle(warm_state.clone()).await;
+                tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+            }
+        });
+    }
+
     // Radio similarity index auto-rebuild.
     //
     // `track_similarity` feeds radio's Engine recall lane but has no trigger of

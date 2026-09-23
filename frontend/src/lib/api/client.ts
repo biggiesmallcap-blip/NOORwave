@@ -4040,6 +4040,7 @@ export const api = {
 		seed_artist_name: string | null;
 		exclude_video_ids: number[];
 		recent_video_ids: number[];
+		recent_songs: { artist_id: number | null; artist_name: string | null; title: string }[];
 		recent_artist_ids: number[];
 	}): Promise<{ items: TidalSearchVideo[]; unfamiliar_video_ids: number[] }> {
 		return fetchApi<{ items: TidalSearchVideo[]; unfamiliar_video_ids: number[] }>('/api/videos/radio/next', undefined, {

@@ -210,7 +210,16 @@ pub(super) struct VideoRadioRequest {
     #[serde(default)]
     pub recent_video_ids: Vec<i64>,
     #[serde(default)]
+    pub recent_songs: Vec<RecentVideoSong>,
+    #[serde(default)]
     pub recent_artist_ids: Vec<i64>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct RecentVideoSong {
+    pub artist_id: Option<i64>,
+    pub artist_name: Option<String>,
+    pub title: String,
 }
 
 static VIDEO_RADIO_FETCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -259,6 +268,15 @@ pub(super) async fn post_videos_radio_next(
         .take(128)
         .filter(|id| *id > 0)
         .collect();
+    let recent_song_keys: HashSet<String> = body
+        .recent_songs
+        .iter()
+        .take(128)
+        .filter(|song| song.title.len() <= 500)
+        .map(|song| {
+            video_radio::video_song_key(song.artist_id, song.artist_name.as_deref(), &song.title)
+        })
+        .collect();
     let recent_artists: Vec<i64> = body.recent_artist_ids.into_iter().take(24).collect();
     let (familiar, anchors) = match db.with_conn(|conn| -> anyhow::Result<_> {
         Ok((
@@ -274,26 +292,33 @@ pub(super) async fn post_videos_radio_next(
     };
     let load = || -> anyhow::Result<_> {
         db.with_conn(|conn| {
-            let pool = video_radio::artist_pool(conn, seed_id, &recent_artists, &anchors)?;
+            let pool = video_radio::artist_pool(
+                conn,
+                seed_id,
+                if seed_id.is_some() {
+                    &[]
+                } else {
+                    &recent_artists
+                },
+                if seed_id.is_some() { &[] } else { &anchors },
+            )?;
             let candidates = video_radio::load_candidates(conn, &pool)?;
             let watched = video_sets::recently_watched_video_ids(conn, RECENTLY_WATCHED_DAYS)?;
             let strict_exclude = excluded.union(&recent_seen).copied().collect();
-            let fresh = video_radio::select_batch(
-                &candidates,
-                &strict_exclude,
-                &watched,
-                &recent_artists,
-                &familiar,
-                12,
-            );
-            let items = if fresh.len() >= 4 {
-                fresh.clone()
+            let items = if seed_id.is_some() {
+                video_radio::select_seeded_batch(
+                    &candidates,
+                    &strict_exclude,
+                    &recent_song_keys,
+                    &watched,
+                    &recent_artists,
+                    12,
+                )
             } else {
-                let soft_watched = watched.union(&recent_seen).copied().collect();
                 video_radio::select_batch(
                     &candidates,
-                    &excluded,
-                    &soft_watched,
+                    &strict_exclude,
+                    &watched,
                     &recent_artists,
                     &familiar,
                     12,
@@ -303,7 +328,8 @@ pub(super) async fn post_videos_radio_next(
                 .iter()
                 .filter(|item| item.artist_id.is_some_and(|id| !familiar.contains(&id)))
                 .count();
-            Ok::<_, anyhow::Error>((pool, items, fresh.len(), unfamiliar_count))
+            let fresh_count = items.len();
+            Ok::<_, anyhow::Error>((pool, items, fresh_count, unfamiliar_count))
         })
     };
     let (mut pool, mut items, mut fresh_count, mut unfamiliar_count) = match load() {
@@ -352,88 +378,40 @@ pub(super) async fn post_videos_radio_next(
                 TidalClient::with_http(tidal_http, tokens.access_token, tokens.country_code);
             if let Some(id) = seed_id {
                 let due = db
-                    .with_conn(|conn| video_radio::related_due(conn, id))
+                    .with_conn(|conn| video_radio::reserve_related_scan(conn, id))
                     .unwrap_or(false);
                 if due {
-                    let mut related: Vec<(i64, String, &'static str)> = Vec::new();
-                    if let Some(name) = body
-                        .seed_artist_name
-                        .as_deref()
-                        .filter(|s| !s.trim().is_empty() && s.len() <= 120)
-                        && let Some(lastfm) = crate::metadata::lastfm::LastFmClient::load(http, &db)
-                    {
-                        if let Ok(similar) = lastfm.artist_get_similar(name, 8).await {
-                            let mut resolved_external = 0;
-                            for artist in similar {
-                                if let Ok(Some(local_id)) = db.with_conn(|conn| {
-                                    video_radio::local_artist_id(conn, &artist.name)
-                                }) {
-                                    related.push((local_id, artist.name, "lastfm"));
-                                } else if resolved_external < 2 {
-                                    // Last.fm provides names, while TIDAL videos
-                                    // need artist IDs. Resolve only two exact
-                                    // names per weekly relationship refresh.
-                                    resolved_external += 1;
-                                    if let Ok(found) =
-                                        client.search_catalog_core(&artist.name, 3, 0).await
-                                        && let Some(matched) =
-                                            found.artists.into_iter().find(|item| {
-                                                item.name.eq_ignore_ascii_case(&artist.name)
-                                            })
-                                    {
-                                        related.push((matched.id, matched.name, "lastfm"));
-                                    }
-                                }
-                            }
-                        }
-                        if let Ok(tags) = lastfm.artist_top_tags(name).await {
-                            let genres: Vec<String> =
-                                tags.into_iter().take(5).map(|(name, _)| name).collect();
-                            if let Err(e) = db
-                                .with_conn(|conn| video_radio::store_seed_genres(conn, id, &genres))
-                            {
-                                tracing::debug!("video radio genre cache failed: {e}");
-                            }
-                        }
-                    }
-                    if let Ok(similar) = client.get_artist_similar(id, 10, 0).await {
-                        related.extend(
-                            similar
-                                .items
-                                .into_iter()
-                                .map(|artist| (artist.id, artist.name, "tidal")),
-                        );
-                    }
-                    if let Err(e) =
-                        db.with_conn(|conn| video_radio::store_related(conn, id, &related))
+                    if let Err(e) = video_radio::refresh_video_relations(
+                        &db,
+                        http,
+                        &client,
+                        id,
+                        body.seed_artist_name.as_deref(),
+                    )
+                    .await
                     {
                         tracing::warn!("video radio relationship cache failed: {e}");
                     }
                     if let Ok(next) = db.with_conn(|conn| {
-                        video_radio::artist_pool(conn, seed_id, &recent_artists, &anchors)
+                        video_radio::artist_pool(
+                            conn,
+                            seed_id,
+                            if seed_id.is_some() {
+                                &[]
+                            } else {
+                                &recent_artists
+                            },
+                            if seed_id.is_some() { &[] } else { &anchors },
+                        )
                     }) {
                         pool = next;
                     }
                 }
             }
-            // Fetch related unfamiliar artists first, even when familiar cache
-            // entries could already fill the batch. The two-call ceiling keeps
-            // this lane deliberate and cheap.
+            // Fetch the seed first, then related artists. The two-call ceiling
+            // keeps each refill deliberate and cheap.
             let mut fetch_pool = pool.clone();
-            fetch_pool.sort_by_key(|(id, _, lane)| {
-                (
-                    if !familiar.contains(id) && *lane <= 2 {
-                        0
-                    } else if *lane == 0 {
-                        1
-                    } else if !familiar.contains(id) {
-                        2
-                    } else {
-                        3
-                    },
-                    *lane,
-                )
-            });
+            fetch_pool.sort_by_key(|(id, _, lane)| (*lane, !familiar.contains(id)));
             let mut fetched = 0;
             for (id, name, _) in &fetch_pool {
                 if fetched >= 2 {
@@ -441,17 +419,16 @@ pub(super) async fn post_videos_radio_next(
                 }
                 if *id <= 0
                     || db
-                        .with_conn(|conn| video_radio::artist_due(conn, *id))
+                        .with_conn(|conn| video_radio::reserve_artist_scan(conn, *id))
                         .unwrap_or(false)
                         == false
                 {
                     continue;
                 }
-                // Mark even empty or failed scans: an unavailable artist should
-                // not be requested again on every song boundary.
-                let _ = db.with_conn(|conn| video_radio::mark_artist_scanned(conn, *id));
+                // Even empty or failed scans are reserved so an unavailable
+                // artist is not requested at every song boundary.
                 fetched += 1;
-                match client.get_artist_videos(*id, 20, 0).await {
+                match client.get_artist_videos(*id, 50, 0).await {
                     Ok(page) => {
                         let anchor = video_sets::AnchorArtist {
                             tidal_id: *id,
@@ -477,10 +454,9 @@ pub(super) async fn post_videos_radio_next(
                 items = refreshed;
                 unfamiliar_count = unfamiliar;
             }
-            // A genre search is a separate exploration lane. It can surface
-            // artists outside both the library and the similar-artist graph.
-            // The genre ledger permits one search per genre per 14 days and
-            // one search globally per 30 minutes.
+            // A genre search can uncover more videos by already verified
+            // neighbors. The genre ledger permits one search per genre per
+            // 14 days and one search globally per 30 minutes.
             if unfamiliar_count < video_radio::UNFAMILIAR_PER_BATCH
                 && let Some(id) = seed_id
                 && let Ok(Some(genre)) = db.with_conn(|conn| video_radio::seed_genre(conn, id))
@@ -491,18 +467,28 @@ pub(super) async fn post_videos_radio_next(
                 let _ = db.with_conn(|conn| video_radio::mark_genre_scanned(conn, &genre));
                 let query = format!("{genre} music video");
                 if let Ok(found) = client.search_videos(&query, 20, 0).await {
-                    let videos: Vec<video_sets::VideoCandidate> =
-                        found.iter().map(video_sets::VideoCandidate::from).collect();
+                    // A broad search query is not proof that every returned
+                    // artist shares this genre. Only index videos from the
+                    // seed and artists already linked by local or provider data.
+                    let allowed: HashSet<i64> = pool
+                        .iter()
+                        .filter(|(_, _, lane)| *lane <= 2)
+                        .map(|(artist_id, _, _)| *artist_id)
+                        .collect();
+                    let videos: Vec<video_sets::VideoCandidate> = found
+                        .iter()
+                        .map(video_sets::VideoCandidate::from)
+                        .filter(|video| video.artist_id.is_some_and(|id| allowed.contains(&id)))
+                        .collect();
                     let anchor = video_sets::AnchorArtist {
                         tidal_id: -1,
                         name: query,
                         listens: 1,
                         via: None,
                     };
-                    if let Err(e) = db.with_conn(|conn| {
-                        video_radio::cache_groups(conn, &[(anchor, videos.clone())])?;
-                        video_radio::store_genre_artists(conn, id, &videos)
-                    }) {
+                    if let Err(e) =
+                        db.with_conn(|conn| video_radio::cache_groups(conn, &[(anchor, videos)]))
+                    {
                         tracing::warn!("video radio genre catalog write failed: {e}");
                     }
                     if let Ok((_, refreshed, _, _)) = load() {
@@ -519,13 +505,13 @@ pub(super) async fn post_videos_radio_next(
 /// background pass fills missing links without waiting for a radio refill.
 static VIDEO_RELATED_BUILD_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
-fn kick_related_build(state: &SharedState, seed_id: i64) -> bool {
+fn kick_related_build(state: &SharedState, seed_id: i64, seed_name: Option<String>) -> bool {
     if VIDEO_RELATED_BUILD_IN_FLIGHT.swap(true, Ordering::SeqCst) {
         return true;
     }
     let state = state.clone();
     tokio::spawn(async move {
-        if let Err(e) = build_related_cache(&state, seed_id).await {
+        if let Err(e) = build_related_cache(&state, seed_id, seed_name.as_deref()).await {
             tracing::warn!("video related cache build failed: {e}");
         }
         VIDEO_RELATED_BUILD_IN_FLIGHT.store(false, Ordering::SeqCst);
@@ -533,11 +519,16 @@ fn kick_related_build(state: &SharedState, seed_id: i64) -> bool {
     true
 }
 
-async fn build_related_cache(state: &SharedState, seed_id: i64) -> anyhow::Result<()> {
-    let (db, tidal_http, tokens) = {
+async fn build_related_cache(
+    state: &SharedState,
+    seed_id: i64,
+    seed_name: Option<&str>,
+) -> anyhow::Result<()> {
+    let (db, http, tidal_http, tokens) = {
         let s = state.read().await;
         (
             s.db.clone(),
+            s.http_client.clone(),
             s.tidal_http_client.clone(),
             s.tidal_tokens.clone(),
         )
@@ -552,30 +543,11 @@ async fn build_related_cache(state: &SharedState, seed_id: i64) -> anyhow::Resul
     let Some(tokens) = tokens else {
         return Ok(());
     };
-    if !db.with_conn(|conn| video_radio::related_due(conn, seed_id))? {
+    if !db.with_conn(|conn| video_radio::reserve_related_scan(conn, seed_id))? {
         return Ok(());
     }
     let client = TidalClient::with_http(tidal_http, tokens.access_token, tokens.country_code);
-    // One relationship request and at most two artist catalogs per pass. The
-    // scan ledgers suppress repeated requests for empty or unavailable artists.
-    let similar = tokio::time::timeout(
-        std::time::Duration::from_secs(8),
-        client.get_artist_similar(seed_id, 10, 0),
-    )
-    .await;
-    let related: Vec<(i64, String, &'static str)> = match similar {
-        Ok(Ok(page)) => page
-            .items
-            .into_iter()
-            .map(|artist| (artist.id, artist.name, "tidal"))
-            .collect(),
-        Ok(Err(e)) => {
-            tracing::debug!("video related artists fetch failed: {e}");
-            Vec::new()
-        }
-        Err(_) => Vec::new(),
-    };
-    db.with_conn(|conn| video_radio::store_related(conn, seed_id, &related))?;
+    video_radio::refresh_video_relations(&db, http, &client, seed_id, seed_name).await?;
     let mut pool = db.with_conn(|conn| video_radio::artist_pool(conn, Some(seed_id), &[], &[]))?;
     pool.sort_by_key(|(_, _, lane)| if *lane == 0 { 2 } else { *lane });
     let mut fetched = 0;
@@ -583,14 +555,13 @@ async fn build_related_cache(state: &SharedState, seed_id: i64) -> anyhow::Resul
         if fetched >= 2 {
             break;
         }
-        if !db.with_conn(|conn| video_radio::artist_due(conn, id))? {
+        if !db.with_conn(|conn| video_radio::reserve_artist_scan(conn, id))? {
             continue;
         }
-        db.with_conn(|conn| video_radio::mark_artist_scanned(conn, id))?;
         fetched += 1;
         match tokio::time::timeout(
             std::time::Duration::from_secs(8),
-            client.get_artist_videos(id, 20, 0),
+            client.get_artist_videos(id, 50, 0),
         )
         .await
         {
@@ -653,9 +624,10 @@ pub(super) async fn post_videos_related(
                 .ok()
                 .flatten()
                 .is_some();
-        connected && kick_related_build(&state, seed_id)
+        connected && kick_related_build(&state, seed_id, body.seed_artist_name.clone())
     } else {
         VIDEO_RELATED_BUILD_IN_FLIGHT.load(Ordering::SeqCst)
+            || VIDEO_RADIO_FETCH_LOCK.try_lock().is_err()
     };
     let s = state.read().await;
     let items =
@@ -669,13 +641,12 @@ pub(super) async fn post_videos_related(
             let candidates = video_radio::load_candidates(conn, &related)?;
             let excluded: HashSet<i64> = body.exclude_video_ids.iter().take(64).copied().collect();
             let watched = video_sets::recently_watched_video_ids(conn, RECENTLY_WATCHED_DAYS)?;
-            let familiar = video_radio::familiar_artist_ids(conn)?;
-            let mut selected = video_radio::select_batch(
+            let mut selected = video_radio::select_seeded_batch(
                 &candidates,
                 &excluded,
+                &HashSet::new(),
                 &watched,
                 &[seed_id],
-                &familiar,
                 12,
             );
             for video in &mut selected {
