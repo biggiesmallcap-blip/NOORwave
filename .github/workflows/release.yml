@@ -27,7 +27,7 @@ jobs:
       contents: write
     steps:
       - name: Create GitHub release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           generate_release_notes: true
           body: |
@@ -123,7 +123,7 @@ jobs:
           EOF
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10
 
@@ -229,7 +229,7 @@ jobs:
           path: dist/windows.sha256
 
       - name: Upload artifact
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: |
             dist/NOORwave-${{ github.ref_name }}-windows-x64.zip
@@ -282,7 +282,7 @@ jobs:
           perl -i -pe "s/\"version\": \"[^\"]+\"/\"version\": \"$VERSION\"/" noor-app/tauri.conf.json
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10
 
@@ -323,7 +323,7 @@ jobs:
           path: dist/linux-x64.sha256
 
       - name: Upload artifact
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: dist/NOORwave-${{ github.ref_name }}-linux-x64.tar.gz
 
@@ -361,7 +361,7 @@ jobs:
           perl -i -pe "s/\"version\": \"[^\"]+\"/\"version\": \"$VERSION\"/" noor-app/tauri.conf.json
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10
 
@@ -402,7 +402,7 @@ jobs:
           path: dist/macos-arm64.sha256
 
       - name: Upload artifact
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: dist/NOORwave-${{ github.ref_name }}-macos-arm64.tar.gz
 
@@ -444,7 +444,7 @@ jobs:
           perl -i -pe "s/\"version\": \"[^\"]+\"/\"version\": \"$VERSION\"/" noor-app/tauri.conf.json
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10
 
@@ -485,7 +485,7 @@ jobs:
           path: dist/macos-x64.sha256
 
       - name: Upload artifact
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: dist/NOORwave-${{ github.ref_name }}-macos-x64.tar.gz
 
@@ -526,6 +526,6 @@ jobs:
         run: cat *.sha256 | sort > sha256sums.txt
 
       - name: Upload sha256sums.txt to release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: sha256sums.txt
