@@ -1639,7 +1639,7 @@
 	{#if videoChromeActive}
 		<aside class="now-playing-panel video-queue-panel" class:queue-drawer-open={videoQueueDrawerOpen} aria-label="Video queue">
 			<div class="video-panel-top">
-				<div class="video-panel-heading"><p class="eyebrow">Video session</p><PlayerLayoutSelect effective={effectivePlayerLayout} compact={effectivePlayerLayout === 'bottom'} /></div>
+				<div class="video-panel-heading"><p class="eyebrow">Video session</p><PlayerLayoutSelect effective={effectivePlayerLayout} /></div>
 				<div class="video-panel-art-wrap">
 					{#if currentVideoArtwork}
 						<img
@@ -2463,13 +2463,21 @@
 		grid-area: sidebar;
 		display: flex;
 		flex-direction: column;
+		min-height: 0;
 		padding: 20px 14px;
 		border-right: 1px solid var(--border-subtle);
 		background:
 			linear-gradient(180deg, color-mix(in srgb, var(--instrument-surface) 85%, transparent), color-mix(in srgb, var(--instrument-surface-strong) 72%, transparent)),
 			var(--sidebar-bg);
-		overflow-y: auto;
+		overflow: hidden;
 		-webkit-overflow-scrolling: touch;
+	}
+
+	.sidebar :global(.nav) {
+		flex: 1 1 auto;
+		min-height: 0;
+		overflow-y: auto;
+		overscroll-behavior: contain;
 	}
 
 	.workspace {
@@ -2840,6 +2848,7 @@
 		padding: 18px 6px 0;
 		display: flex;
 		flex-direction: column;
+		flex: none;
 		gap: 12px;
 	}
 
@@ -3648,7 +3657,7 @@
 		}
 	}
 
-	@media (max-width: 1119px) and (min-width: 680px) {
+	@media (max-width: 1239px) and (min-width: 680px) {
 		.app-shell[data-player-layout] {
 			grid-template-areas: 'sidebar workspace' 'player player';
 			grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
@@ -3657,26 +3666,45 @@
 	}
 
 	@media (max-width: 839px) and (min-width: 680px) {
-		.app-shell { --sidebar-width: var(--rail-width); }
-		.sidebar { padding: 16px 8px; }
-		.brand { padding: 2px 0 14px; }
-		.brand-splash { display: none !important; }
-		.brand-icon { display: block; width: 32px; height: 32px; object-fit: contain; }
-		.sidebar-footer,
-		.sidebar :global(.nav-zone-label),
-		.sidebar :global(.nav-label) { display: none; }
-		.sidebar :global(.nav-item) { justify-content: center; padding: 10px 4px; }
-		.sidebar :global(.nav-icon) { width: auto; }
 		.workspace { padding: calc(20px + var(--safe-top)) calc(16px + var(--safe-right)) calc(36px + var(--safe-bottom)) calc(16px + var(--safe-left)); }
 	}
 
-	@media (max-height: 620px) and (min-width: 1120px) {
+	/* Keep every labeled destination and the status row visible when a bottom
+	   player or a shorter monitor reduces the sidebar's vertical space. */
+	@media (max-height: 1100px) and (min-width: 680px) {
+		.sidebar { padding: 12px 10px; }
+		.brand { padding: 0 4px 7px; }
+		.brand-splash { max-width: 120px; }
+		.sidebar :global(.nav) { gap: 8px; }
+		.sidebar :global(.nav-zone) { gap: 0; }
+		.sidebar :global(.nav-zone-label) { padding-bottom: 2px; }
+		.sidebar :global(.nav-item) { padding-block: 6px; }
+		.sidebar-footer { padding: 7px 0 0; gap: 0; }
+		.live-status { flex-direction: row; align-items: center; justify-content: space-between; gap: 4px; padding: 5px 6px; }
+		.live-status-head { gap: 5px; }
+		.live-version,
+		.live-modes,
+		.theme-toggle { display: none; }
+		.live-actions { gap: 2px; }
+	}
+
+	@media (max-height: 760px) and (min-width: 680px) {
+		.sidebar { padding-block: 6px; }
+		.brand { padding-bottom: 3px; }
+		.brand-splash { max-width: 90px; }
+		.sidebar :global(.nav) { gap: 4px; }
+		.sidebar :global(.nav-zone-label) { display: none; }
+		.sidebar :global(.nav-item) { padding-block: 4px; line-height: 1.25; }
+		.sidebar-footer { padding-top: 4px; }
+	}
+
+	@media (max-height: 620px) and (min-width: 1240px) {
 		.now-playing-panel :global(.np-top:not(.horizontal)) { gap: 10px; }
 		.now-playing-panel :global(.np-top:not(.horizontal) .np-artwork-wrap) { width: min(100%, 22dvh, 160px); }
 		.queue-section { padding: 10px 14px; margin-top: 10px; }
 	}
 
-	/* ── Mobile layout (below the compact desktop rail) ──── */
+	/* ── Mobile layout when a labeled sidebar no longer fits ──── */
 	@media (max-width: 679px) {
 		/* Show mobile chrome */
 		.mobile-top-bar { display: flex; }

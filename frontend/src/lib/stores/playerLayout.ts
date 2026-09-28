@@ -10,6 +10,6 @@ export const playerPlacement = createPersistedStore<PlayerPlacement>('noor-playe
 /** Widths are CSS pixels after browser or webview zoom. */
 export function resolvePlayerLayout(preferred: PlayerPlacement, width: number): EffectivePlayerLayout {
 	if (width < 680) return 'mobile';
-	if (width < 1120) return 'bottom';
+	if (width < 1240) return 'bottom';
 	return preferred;
 }

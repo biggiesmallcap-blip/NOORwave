@@ -165,7 +165,7 @@
 <div class="np-top" class:queue-expanded={queueExpanded && layout !== 'bottom'} class:horizontal={layout === 'bottom'}>
 	<div class="player-head">
 		<span class="player-head-label">Now playing</span>
-		<PlayerLayoutSelect effective={layout} compact={layout === 'bottom'} />
+		<PlayerLayoutSelect effective={layout} />
 	</div>
 	<div class="np-artwork-wrap">
 		{#key track?.artwork_url}
@@ -277,8 +277,10 @@
 		aria-controls="queue-list"
 		onclick={onToggleQueue}
 	>
-		<span aria-hidden="true">☷</span>
-		<span class="queue-trigger-count">{queueCount}</span>
+		<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+			<path d="M3 5h2m3 0h9M3 10h2m3 0h9M3 15h2m3 0h9" />
+		</svg>
+		{#if queueCount > 0}<span class="queue-trigger-count">{queueCount}</span>{/if}
 	</button>
 
 	{#if playerError}
@@ -307,8 +309,8 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 8px;
-		min-height: 40px;
-		padding-right: 50px;
+		min-height: 32px;
+		padding-right: 40px;
 	}
 
 	.player-head-label {
@@ -327,21 +329,21 @@
 		align-items: center;
 		justify-content: center;
 		gap: 3px;
-		min-width: 40px;
-		height: 40px;
-		padding: 0 5px;
-		border: 1px solid var(--border-subtle);
+		width: 32px;
+		height: 32px;
+		padding: 0;
+		border: 1px solid transparent;
 		border-radius: var(--radius-sm);
-		background: var(--bg-surface);
-		color: var(--text-secondary);
+		background: transparent;
+		color: var(--text-tertiary);
 		cursor: pointer;
 	}
 
 	.player-queue-trigger:hover,
 	.player-queue-trigger[aria-expanded='true'] {
-		color: var(--accent-strong);
-		background: var(--accent-soft);
-		border-color: var(--accent-line);
+		color: var(--text-primary);
+		background: var(--bg-hover);
+		border-color: var(--border-subtle);
 	}
 
 	.player-queue-trigger:focus-visible {
@@ -349,8 +351,28 @@
 		outline-offset: 2px;
 	}
 
+	.player-queue-trigger svg {
+		width: 17px;
+		height: 17px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.5;
+		stroke-linecap: round;
+	}
+
 	.queue-trigger-count {
-		font-size: var(--font-size-2xs);
+		position: absolute;
+		top: -5px;
+		right: -5px;
+		display: grid;
+		place-items: center;
+		min-width: 15px;
+		height: 15px;
+		padding-inline: 2px;
+		border-radius: 999px;
+		background: var(--bg-surface-strong);
+		color: var(--text-secondary);
+		font-size: 10px;
 		font-variant-numeric: tabular-nums;
 	}
 
@@ -601,7 +623,7 @@
 	   carrying a tall side-panel stack into the bottom row. */
 	.np-top.horizontal {
 		display: grid;
-		grid-template-columns: 64px minmax(135px, 1fr) auto minmax(80px, 120px) 44px 44px;
+		grid-template-columns: 64px minmax(0, 1fr) auto minmax(0, 1fr) 32px 32px;
 		grid-template-areas:
 			'art info transport controls queue head'
 			'art progress progress progress progress progress';
@@ -627,13 +649,19 @@
 	.horizontal :global(.np-info) { grid-area: info; }
 	.horizontal :global(.np-progress) { grid-area: progress; }
 	.horizontal :global(.transport) { grid-area: transport; }
-	.horizontal .np-controls { grid-area: controls; }
+	.horizontal .np-controls {
+		grid-area: controls;
+		justify-self: end;
+		width: min(100%, 160px);
+	}
 
 	.horizontal .player-queue-trigger {
-		position: static;
+		position: relative;
+		top: auto;
+		right: auto;
 		grid-area: queue;
-		width: 44px;
-		height: 40px;
+		width: 32px;
+		height: 32px;
 	}
 
 	.horizontal :global(.np-title) { font-size: var(--font-size-md); }
@@ -651,12 +679,12 @@
 
 	@media (max-width: 900px) {
 		.np-top.horizontal {
-			grid-template-columns: 56px minmax(100px, 1fr) auto minmax(100px, 110px) 40px 40px;
+			grid-template-columns: 56px minmax(0, 1fr) auto minmax(0, 1fr) 32px 32px;
 			column-gap: 8px;
 			padding-inline: 12px;
 		}
 
 		.horizontal .np-artwork-wrap { width: 56px; }
-		.horizontal .player-queue-trigger { width: 40px; }
+		.horizontal .player-queue-trigger { width: 32px; }
 	}
 </style>

@@ -181,7 +181,6 @@
 :root {
 	--sidebar-width: clamp(216px, 12vw, 248px);
 	--panel-width: clamp(296px, 17vw, 352px);
-	--rail-width: 72px;
 	--safe-top: env(safe-area-inset-top, 0px);
 	--safe-right: env(safe-area-inset-right, 0px);
 	--safe-bottom: env(safe-area-inset-bottom, 0px);

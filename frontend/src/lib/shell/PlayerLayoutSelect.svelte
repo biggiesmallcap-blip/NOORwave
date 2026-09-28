@@ -1,20 +1,26 @@
 <script lang="ts">
 	import { playerPlacement, type EffectivePlayerLayout, type PlayerPlacement } from '$lib/stores/playerLayout';
 
-	let { effective, compact = false } = $props<{
-		effective: EffectivePlayerLayout;
-		compact?: boolean;
-	}>();
+	let { effective } = $props<{ effective: EffectivePlayerLayout }>();
 
 	let fallback = $derived(effective !== 'mobile' && effective !== $playerPlacement);
+	let positionLabel = $derived(effective === 'bottom' ? 'bottom' : effective === 'left' ? 'left' : 'right');
 </script>
 
-<label class="player-layout-select" class:compact title={fallback ? 'Using the bottom player until this window is wider' : 'Player position'}>
+<label
+	class="player-layout-select"
+	title={fallback ? `Player at the bottom until this window is wider. Preferred position: ${$playerPlacement}.` : `Player position: ${positionLabel}`}
+>
 	<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
-		<rect x="2" y="3" width="16" height="14" rx="2" />
-		<path d="M6 3v14M14 3v14" />
+		<rect x="2.5" y="3" width="15" height="14" rx="2" />
+		{#if effective === 'bottom'}
+			<path d="M2.5 12h15" />
+		{:else if effective === 'left'}
+			<path d="M8 3v14" />
+		{:else}
+			<path d="M12 3v14" />
+		{/if}
 	</svg>
-	<span>Layout</span>
 	<select
 		aria-label="Player position"
 		value={$playerPlacement}
@@ -24,31 +30,29 @@
 		<option value="left">Player left</option>
 		<option value="bottom">Player bottom</option>
 	</select>
-	{#if fallback}<span class="fallback-dot" aria-label="Temporarily using bottom layout"></span>{/if}
+	{#if fallback}<span class="fallback-dot" aria-hidden="true"></span>{/if}
 </label>
 
 <style>
 	.player-layout-select {
 		position: relative;
-		display: inline-flex;
-		align-items: center;
-		gap: 5px;
-		min-height: 40px;
-		padding: 0 10px;
-		border: 1px solid var(--border-subtle);
+		display: inline-grid;
+		place-items: center;
+		flex: none;
+		width: 32px;
+		height: 32px;
+		border: 1px solid transparent;
 		border-radius: var(--radius-sm);
-		background: var(--bg-surface);
-		color: var(--text-secondary);
-		font-size: var(--font-size-xs);
-		white-space: nowrap;
+		background: transparent;
+		color: var(--text-tertiary);
 		cursor: pointer;
 	}
 
 	.player-layout-select:hover,
 	.player-layout-select:focus-within {
 		color: var(--text-primary);
-		border-color: var(--accent-line);
-		background: var(--accent-soft);
+		border-color: var(--border-subtle);
+		background: var(--bg-hover);
 	}
 
 	.player-layout-select:focus-within {
@@ -57,11 +61,11 @@
 	}
 
 	svg {
-		width: 16px;
-		height: 16px;
+		width: 17px;
+		height: 17px;
 		fill: none;
 		stroke: currentColor;
-		stroke-width: 1.5;
+		stroke-width: 1.4;
 	}
 
 	select {
@@ -74,17 +78,13 @@
 	}
 
 	.fallback-dot {
-		width: 5px;
-		height: 5px;
+		position: absolute;
+		right: 2px;
+		bottom: 2px;
+		width: 4px;
+		height: 4px;
 		border-radius: 50%;
 		background: var(--accent);
+		pointer-events: none;
 	}
-
-	.compact {
-		min-width: 40px;
-		padding: 0 8px;
-		justify-content: center;
-	}
-
-	.compact > span:not(.fallback-dot) { display: none; }
 </style>

@@ -1763,7 +1763,7 @@
 	}
 
 	const settingsCategories: { id: SettingsCategory; label: string; icon: string; hint: string }[] = [
-		{ id: 'appearance', label: 'Appearance', icon: '◐', hint: 'Theme + wallpaper' },
+		{ id: 'appearance', label: 'Appearance', icon: '◐', hint: 'Theme + player layout' },
 		{ id: 'sources', label: 'Sources', icon: '⟐', hint: 'Services + data' },
 		{ id: 'audio', label: 'Audio', icon: '♪', hint: 'Output + analysis' },
 		{ id: 'account', label: 'Account', icon: '⚙', hint: 'PIN + updates' },
@@ -1939,6 +1939,27 @@
 			<PhoneRemotePanel />
 			{/if}
 			{#if activeCategory === 'appearance'}
+			<section data-setting-id="player-position" class="glass-panel section-panel">
+				<SectionHeader eyebrow="Player" title="Player position" subtitle="Choose its preferred place. Narrow windows use the bottom player until there is room beside your music." />
+				<div class="player-position-options" role="group" aria-label="Preferred player position">
+					{#each [
+						{ id: 'right', icon: '▣', label: 'Right side' },
+						{ id: 'left', icon: '◧', label: 'Left side' },
+						{ id: 'bottom', icon: '▤', label: 'Bottom' }
+					] as option (option.id)}
+						<button
+							type="button"
+							class="player-position-option"
+							class:active={$playerPlacement === option.id}
+							aria-pressed={$playerPlacement === option.id}
+							onclick={() => playerPlacement.set(option.id as PlayerPlacement)}
+						>
+							<span aria-hidden="true">{option.icon}</span>
+							<strong>{option.label}</strong>
+						</button>
+					{/each}
+				</div>
+			</section>
 			<section data-setting-id="surface-mode" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Appearance" title="Surface mode" subtitle="Choose the listening deck's light, dark, or system appearance independently of its accent and wallpaper." />
 				<div class="player-position-options" role="group" aria-label="Surface mode">
@@ -2029,28 +2050,6 @@
 							<span class="palette-swatch" style={`background: ${rgbCss(c)}`}></span>
 						{/each}
 					</div>
-				</div>
-			</section>
-
-			<section data-setting-id="player-position" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Player" title="Player position" subtitle="Place the player beside your music or across the bottom. Narrow windows use a compact layout automatically." />
-				<div class="player-position-options" role="group" aria-label="Preferred player position">
-					{#each [
-						{ id: 'right', icon: '▣', label: 'Right side' },
-						{ id: 'left', icon: '◧', label: 'Left side' },
-						{ id: 'bottom', icon: '▤', label: 'Bottom' }
-					] as option (option.id)}
-						<button
-							type="button"
-							class="player-position-option"
-							class:active={$playerPlacement === option.id}
-							aria-pressed={$playerPlacement === option.id}
-							onclick={() => playerPlacement.set(option.id as PlayerPlacement)}
-						>
-							<span aria-hidden="true">{option.icon}</span>
-							<strong>{option.label}</strong>
-						</button>
-					{/each}
 				</div>
 			</section>
 
