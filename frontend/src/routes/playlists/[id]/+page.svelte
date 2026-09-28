@@ -631,7 +631,7 @@
 		opacity: 0.8;
 	}
 
-	@media (max-width: 760px) {
+	@container workspace (max-width: 760px) {
 		/* No room for field + Save + Cancel on one line at phone widths; nowrap
 		   ran Cancel past the edge where the hero's overflow clipped it. Give the
 		   field its own line and let the buttons share the next one. */

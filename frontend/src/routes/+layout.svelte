@@ -66,12 +66,13 @@
 	import CommandPalette from '$lib/components/CommandPalette.svelte';
 	import ShortcutHelp from '$lib/components/ShortcutHelp.svelte';
 	import PlayerBar from '$lib/shell/PlayerBar.svelte';
+	import PlayerLayoutSelect from '$lib/shell/PlayerLayoutSelect.svelte';
 	import SidebarNav from '$lib/shell/SidebarNav.svelte';
 	import QuietMode from '$lib/components/QuietMode.svelte';
 	import { openQuietMode } from '$lib/stores/quiet_mode';
 	import { commandPaletteOpen } from '$lib/stores/command_palette';
 	import { exclusiveStatus } from '$lib/stores/exclusive_status';
-	import { oneOf, readPersisted, writePersisted } from '$lib/stores/persisted';
+	import { readPersisted, writePersisted } from '$lib/stores/persisted';
 	import { contextMenu, openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
@@ -93,6 +94,8 @@
 	import { wallpaper, wallpaperFps, wallpaperQuality } from '$lib/stores/wallpaper';
 	import { palette } from '$lib/stores/palette';
 	import { uiZoom, zoomIn, zoomOut, resetZoom, nudgeZoom, applyZoom } from '$lib/stores/uiZoom';
+	import { playerPlacement, resolvePlayerLayout } from '$lib/stores/playerLayout';
+	import { surfaceMode, resolveSurfaceMode } from '$lib/stores/surfaceMode';
 	import { isTauri } from '$lib/util/external';
 	import type { DesktopUpdateInfo } from '$lib/desktop/update_state';
 	import { tidalAuthFlow, tidalStatus, loadTidalStatus } from '$lib/stores/tidal';
@@ -274,6 +277,31 @@
 	let scrubPosition = $state(0);
 	let theme = $state<'dark' | 'light'>('dark');
 	let displayVolume = $state(Math.round($volume * 100));
+	let viewportWidth = $state(1280);
+	let effectivePlayerLayout = $derived(resolvePlayerLayout($playerPlacement, viewportWidth));
+	let queueDrawerOpen = $state(false);
+	let videoQueueDrawerOpen = $state(false);
+
+	onMount(() => {
+		const measureViewport = () => { viewportWidth = window.innerWidth; };
+		measureViewport();
+		window.addEventListener('resize', measureViewport);
+		return () => window.removeEventListener('resize', measureViewport);
+	});
+
+	onMount(() => {
+		const systemTheme = window.matchMedia('(prefers-color-scheme: light)');
+		const updateTheme = () => {
+			theme = resolveSurfaceMode(get(surfaceMode), systemTheme.matches);
+			document.documentElement.setAttribute('data-theme', theme);
+		};
+		const unsubscribe = surfaceMode.subscribe(updateTheme);
+		systemTheme.addEventListener('change', updateTheme);
+		return () => {
+			unsubscribe();
+			systemTheme.removeEventListener('change', updateTheme);
+		};
+	});
 
 	// Auto-dismiss the error toast after 6s. Cancel on next change so a new
 	// error doesn't inherit the previous timer.
@@ -476,14 +504,11 @@
 		// even if the stored token is stale (e.g. server regenerated).
 		window.addEventListener('noor:unauthorized', handleUnauthorized);
 
-		theme = readPersisted('noor-theme', theme, oneOf(['light', 'dark'] as const));
 		pkceReloginDismissedForever = readPersisted(
 			TIDAL_PKCE_RELOGIN_DISMISSED_KEY,
 			false,
 			(raw) => raw === '1',
 		);
-
-		applyTheme(theme);
 
 		const unsubPalette = palette.subscribe((id) => applyPalette(id));
 
@@ -557,6 +582,18 @@
 	}
 
 	function handleGlobalKeydown(event: KeyboardEvent) {
+		if (videoQueueDrawerOpen && event.key === 'Escape') {
+			event.preventDefault();
+			videoQueueDrawerOpen = false;
+			document.getElementById('video-queue-trigger')?.focus();
+			return;
+		}
+		if (queueDrawerOpen && event.key === 'Escape') {
+			event.preventDefault();
+			queueDrawerOpen = false;
+			document.getElementById('player-queue-trigger')?.focus();
+			return;
+		}
 		if (shortcutHelpOpen) {
 			if (event.key === 'Escape') {
 				event.preventDefault();
@@ -604,7 +641,7 @@
 
 		if (event.key === 'q' || event.key === 'Q') {
 			event.preventDefault();
-			toggleQueueExpanded();
+			togglePlayerQueue();
 			return;
 		}
 
@@ -759,9 +796,7 @@
 	}
 
 	function applyTheme(t: 'dark' | 'light') {
-		theme = t;
-		document.documentElement.setAttribute('data-theme', t);
-		writePersisted('noor-theme', t);
+		surfaceMode.set(t);
 	}
 
 	function applyPalette(id: import('$lib/components/wallpaper/palettes').PaletteId) {
@@ -1216,6 +1251,17 @@
 		queueExpanded = !queueExpanded;
 		writePersisted(QUEUE_EXPANDED_KEY, queueExpanded ? '1' : '0');
 	}
+	function togglePlayerQueue() {
+		if (effectivePlayerLayout === 'bottom') queueDrawerOpen = !queueDrawerOpen;
+		else toggleQueueExpanded();
+	}
+	let playerQueueOpen = $derived(effectivePlayerLayout === 'bottom' ? queueDrawerOpen : queueExpanded);
+	$effect(() => {
+		if (effectivePlayerLayout !== 'bottom') {
+			queueDrawerOpen = false;
+			videoQueueDrawerOpen = false;
+		}
+	});
 	function formatVideoSourceLabel(source: string, label: string | null): string {
 		if (source === 'mix') return label ?? 'Video mix';
 		if (source === 'search') return label ? `Search: ${label}` : 'Video search';
@@ -1482,7 +1528,7 @@
 		{@render children()}
 	</div>
 {:else}
-<div class="app-shell" class:mobile-player-active={mobilePlayerVisible} class:has-wallpaper={$wallpaper !== 'none'}>
+<div class="app-shell" class:mobile-player-active={mobilePlayerVisible} class:has-wallpaper={$wallpaper !== 'none'} data-player-layout={effectivePlayerLayout}>
 	<header class="mobile-top-bar">
 		<a href="/" class="mobile-brand" aria-label="NOOR home">
 			<span class="mobile-brand-mark">
@@ -1499,6 +1545,7 @@
 		<a href="/" class="brand" aria-label="NOORwave home">
 			<img class="brand-splash brand-splash-on-dark" src="/noor-logo-centered-transparent.svg" alt="NOORwave" />
 			<img class="brand-splash brand-splash-on-light" src="/noor-logo-centered-transparent-dark.svg" alt="NOORwave" />
+			<img class="brand-icon" src="/noor-icon-transparent.svg" alt="" aria-hidden="true" />
 		</a>
 
 		<SidebarNav pathname={page.url.pathname} />
@@ -1590,9 +1637,9 @@
 	<VideoDock />
 
 	{#if videoChromeActive}
-		<aside class="now-playing-panel video-queue-panel" aria-label="Video queue">
+		<aside class="now-playing-panel video-queue-panel" class:queue-drawer-open={videoQueueDrawerOpen} aria-label="Video queue">
 			<div class="video-panel-top">
-				<p class="eyebrow">Video session</p>
+				<div class="video-panel-heading"><p class="eyebrow">Video session</p><PlayerLayoutSelect effective={effectivePlayerLayout} compact={effectivePlayerLayout === 'bottom'} /></div>
 				<div class="video-panel-art-wrap">
 					{#if currentVideoArtwork}
 						<img
@@ -1609,6 +1656,7 @@
 					<strong>{$videoSession.current?.title ?? 'Video queue'}</strong>
 					<span>{$videoSession.current?.artist_name ?? formatVideoSourceLabel($videoSession.source, $videoSession.sourceLabel)}</span>
 				</div>
+				<button id="video-queue-trigger" class="video-queue-trigger" type="button" aria-label="Video queue, {$videoSessionUpcoming.length} up next" aria-expanded={videoQueueDrawerOpen} onclick={() => { videoQueueDrawerOpen = !videoQueueDrawerOpen; }}>Queue {$videoSessionUpcoming.length}</button>
 				<div class="video-panel-actions">
 					<button
 						class="video-panel-chip"
@@ -1634,6 +1682,9 @@
 					<p class="video-panel-error">{$videoSession.error}</p>
 				{/if}
 			</div>
+			{#if effectivePlayerLayout === 'bottom' && videoQueueDrawerOpen}
+				<button class="queue-drawer-backdrop" type="button" tabindex="-1" aria-label="Close video queue" onclick={() => { videoQueueDrawerOpen = false; }}></button>
+			{/if}
 
 			<section class="video-panel-queue">
 				<div class="video-panel-queue-head">
@@ -1685,9 +1736,14 @@
 	<aside
 		class="now-playing-panel"
 		class:queue-expanded={queueExpanded}
+		class:queue-drawer-open={queueDrawerOpen}
 		oncontextmenu={openNowPlayingContextMenu}
 	>
 		<PlayerBar
+			layout={effectivePlayerLayout}
+			queueCount={upcomingQueue.length}
+			queueOpen={playerQueueOpen}
+			onToggleQueue={togglePlayerQueue}
 			track={$currentTrack}
 			streamDisplay={$currentStreamDisplay}
 			nowPlayingAttribution={nowPlayingAttribution}
@@ -1721,17 +1777,20 @@
 			onRetryPlayerError={async (retry) => { await retry(); }}
 			onDismissPlayerError={() => playerError.set(null)}
 		/>
+		{#if effectivePlayerLayout === 'bottom' && queueDrawerOpen}
+			<button class="queue-drawer-backdrop" type="button" tabindex="-1" aria-label="Close queue" onclick={() => { queueDrawerOpen = false; }}></button>
+		{/if}
 
-		<section class="queue-section">
+		<section class="queue-section" aria-label="Playback queue">
 			<div class="queue-sr-status" role="status" aria-live="polite" aria-atomic="true">{$queueAnnouncement}</div>
 			<div class="queue-header">
 				<button
 					class="queue-banner"
 					type="button"
-					onclick={toggleQueueExpanded}
-					aria-expanded={queueExpanded}
+					onclick={togglePlayerQueue}
+					aria-expanded={playerQueueOpen}
 					aria-controls="queue-list"
-					title={queueExpanded ? 'Collapse queue' : 'Expand queue'}
+					title={playerQueueOpen ? 'Collapse queue' : 'Expand queue'}
 				>
 					{#if upcomingQueue.length > 0}
 						<span class="queue-count-num">{upcomingQueue.length}</span>
@@ -1761,10 +1820,10 @@
 					<button
 						class="queue-icon-btn queue-expand-btn"
 						type="button"
-						title={queueExpanded ? 'Collapse queue' : 'Expand queue'}
-						aria-label={queueExpanded ? 'Collapse queue' : 'Expand queue'}
-						aria-expanded={queueExpanded}
-						onclick={toggleQueueExpanded}
+						title={playerQueueOpen ? 'Collapse queue' : 'Expand queue'}
+						aria-label={playerQueueOpen ? 'Collapse queue' : 'Expand queue'}
+						aria-expanded={playerQueueOpen}
+						onclick={togglePlayerQueue}
 					>▲</button>
 				</div>
 			</div>
@@ -2341,6 +2400,7 @@
 		width: 100%;
 		min-width: 0;
 		display: grid;
+		grid-template-areas: 'sidebar workspace player';
 		grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--panel-width);
 		overflow: hidden;
 		/* Force own compositor layer; works around a wry/WKWebView hit-testing
@@ -2352,6 +2412,17 @@
 			radial-gradient(circle at 90% 10%, var(--atlas-haze-b), transparent 28%),
 			radial-gradient(circle at 76% 86%, var(--atlas-haze-c), transparent 30%),
 			var(--atlas-bg);
+	}
+
+	.app-shell[data-player-layout='left'] {
+		grid-template-areas: 'sidebar player workspace';
+		grid-template-columns: var(--sidebar-width) var(--panel-width) minmax(0, 1fr);
+	}
+
+	.app-shell[data-player-layout='bottom'] {
+		grid-template-areas: 'sidebar workspace' 'player player';
+		grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+		grid-template-rows: minmax(0, 1fr) auto;
 	}
 
 	.app-shell.has-wallpaper {
@@ -2389,6 +2460,7 @@
 	}
 
 	.sidebar {
+		grid-area: sidebar;
 		display: flex;
 		flex-direction: column;
 		padding: 20px 14px;
@@ -2401,24 +2473,129 @@
 	}
 
 	.workspace {
+		grid-area: workspace;
+		container: workspace / inline-size;
 		overflow-y: auto;
 		/* Reserve the scrollbar gutter permanently. Without it, switching to a
 		   view that overflows steals ~5px of width and every centered element
 		   (the search field, the filter pills) jumps sideways. */
 		scrollbar-gutter: stable;
-		padding: 28px 30px 48px;
+		padding: calc(28px + var(--safe-top)) calc(30px + var(--safe-right)) calc(48px + var(--safe-bottom)) calc(30px + var(--safe-left));
 		min-width: 0;
+		min-height: 0;
 		-webkit-overflow-scrolling: touch;
 	}
 
 	.now-playing-panel {
+		grid-area: player;
+		position: relative;
 		display: flex;
 		flex-direction: column;
 		border-left: 1px solid var(--border-subtle);
-		background:
-			linear-gradient(180deg, color-mix(in srgb, var(--instrument-surface) 70%, transparent), color-mix(in srgb, var(--instrument-surface-strong) 84%, transparent)),
-			var(--right-panel-bg);
+		background: radial-gradient(circle at 50% 8%, var(--accent-soft), transparent 55%), var(--player-surface);
 		overflow: hidden;
+	}
+
+	.app-shell[data-player-layout='left'] .now-playing-panel {
+		border-left: 0;
+		border-right: 1px solid var(--border-subtle);
+	}
+
+	.app-shell[data-player-layout='bottom'] .now-playing-panel {
+		border-left: 0;
+		border-top: 1px solid var(--border-subtle);
+		box-shadow: 0 -8px 28px var(--player-art-shadow);
+		overflow: visible;
+	}
+
+	.app-shell[data-player-layout='bottom'] .queue-section { display: none; }
+
+	.app-shell[data-player-layout='bottom'] .now-playing-panel.queue-drawer-open .queue-section {
+		position: absolute;
+		z-index: calc(var(--z-overlay) + 1);
+		right: 16px;
+		bottom: calc(100% + 8px);
+		display: flex;
+		width: min(420px, calc(100vw - 32px));
+		max-height: min(60dvh, 520px);
+		margin: 0;
+		border: 1px solid var(--border-strong);
+		border-radius: var(--radius-lg);
+		background: var(--bg-surface-strong);
+		box-shadow: var(--panel-shadow);
+	}
+
+	.queue-drawer-backdrop {
+		position: absolute;
+		z-index: var(--z-overlay);
+		bottom: 100%;
+		left: 0;
+		width: 100%;
+		height: 100dvh;
+		border: 0;
+		background: rgba(0, 0, 0, 0.22);
+	}
+
+	.video-panel-heading {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+	}
+
+	.video-queue-trigger {
+		min-height: 40px;
+		padding: 0 12px;
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+		background: var(--bg-surface);
+		color: var(--text-secondary);
+		font: inherit;
+		cursor: pointer;
+	}
+
+	.video-queue-trigger:hover,
+	.video-queue-trigger[aria-expanded='true'] {
+		border-color: var(--accent-line);
+		color: var(--accent-strong);
+		background: var(--accent-soft);
+	}
+
+	.app-shell:not([data-player-layout='bottom']) .video-queue-trigger { display: none; }
+
+	.app-shell[data-player-layout='bottom'] .video-queue-panel { padding: 12px 16px; }
+	.app-shell[data-player-layout='bottom'] .video-panel-top {
+		display: grid;
+		grid-template-columns: 96px minmax(120px, 1fr) auto auto 40px;
+		grid-template-areas: 'art copy actions queue heading' 'art source source source source';
+		align-items: center;
+		column-gap: 12px;
+		row-gap: 4px;
+	}
+	.app-shell[data-player-layout='bottom'] .video-panel-heading { grid-area: heading; }
+	.app-shell[data-player-layout='bottom'] .video-panel-heading .eyebrow { display: none; }
+	.app-shell[data-player-layout='bottom'] .video-panel-art-wrap { grid-area: art; width: 96px; }
+	.app-shell[data-player-layout='bottom'] .video-panel-copy { grid-area: copy; }
+	.app-shell[data-player-layout='bottom'] .video-panel-actions { grid-area: actions; }
+	.app-shell[data-player-layout='bottom'] .video-queue-trigger { grid-area: queue; }
+	.app-shell[data-player-layout='bottom'] .video-panel-source { grid-area: source; }
+	.app-shell[data-player-layout='bottom'] .video-panel-error { grid-column: 2 / -1; }
+	.app-shell[data-player-layout='bottom'] .video-panel-queue { display: none; }
+	.app-shell[data-player-layout='bottom'] .video-queue-panel.queue-drawer-open .video-panel-queue {
+		position: absolute;
+		z-index: calc(var(--z-overlay) + 1);
+		right: 16px;
+		bottom: calc(100% + 8px);
+		display: flex;
+		flex-direction: column;
+		width: min(420px, calc(100vw - 32px));
+		max-height: min(60dvh, 520px);
+		padding: 16px;
+		border: 1px solid var(--border-strong);
+		border-radius: var(--radius-lg);
+		background: var(--bg-surface-strong);
+		box-shadow: var(--panel-shadow);
+		overflow-y: auto;
 	}
 
 	/* ── Mobile-only elements: hidden at desktop ─────────── */
@@ -2656,6 +2833,7 @@
 	.brand-splash-on-light { display: none; }
 	:global([data-theme='light']) .brand-splash-on-light { display: block; }
 	:global([data-theme='light']) .brand-splash-on-dark { display: none; }
+	.brand-icon { display: none; }
 
 	.sidebar-footer {
 		margin-top: auto;
@@ -2771,12 +2949,14 @@
 
 	.queue-section {
 		flex: 1;
+		min-height: 0;
 		display: flex;
 		flex-direction: column;
 		overflow: hidden;
 		border-top: 1px solid var(--border-subtle);
 		margin-top: 16px;
 		padding: 16px;
+		background: var(--player-queue-surface);
 	}
 
 	.queue-sr-status {
@@ -3107,7 +3287,7 @@
 		display: flex;
 		align-items: center;
 		gap: 10px;
-		padding: 10px;
+		padding: 6px 8px;
 		border: 1px solid color-mix(in srgb, var(--instrument-border) 46%, transparent);
 		border-radius: var(--radius-sm);
 		background: color-mix(in srgb, var(--instrument-surface) 78%, transparent);
@@ -3166,6 +3346,22 @@
 
 	.queue-row.active .queue-title {
 		color: var(--accent-strong);
+	}
+
+	.queue-row.active {
+		border-color: var(--accent-line);
+		background: var(--accent-soft);
+	}
+
+	.queue-row.active::before {
+		content: '';
+		position: absolute;
+		left: 0;
+		top: 10px;
+		bottom: 10px;
+		width: 2px;
+		border-radius: 2px;
+		background: var(--accent);
 	}
 
 	.queue-row.played {
@@ -3375,6 +3571,10 @@
 		opacity: 1;
 	}
 
+	@media (hover: none) {
+		.queue-overflow { opacity: 1; }
+	}
+
 	.queue-overflow:hover {
 		background: color-mix(in srgb, var(--instrument-surface-strong) 92%, transparent);
 		border-color: color-mix(in srgb, var(--instrument-border) 70%, transparent);
@@ -3443,17 +3643,41 @@
 	}
 
 	@media (max-width: 1320px) {
-		.app-shell {
-			grid-template-columns: var(--sidebar-width) minmax(0, 1fr) minmax(280px, 32vw);
-		}
-
 		.workspace {
-			padding: 24px 24px 40px;
+			padding: calc(24px + var(--safe-top)) calc(24px + var(--safe-right)) calc(40px + var(--safe-bottom)) calc(24px + var(--safe-left));
 		}
 	}
 
-	/* ── Mobile layout (≤ 1180px) ────────────────────────── */
-	@media (max-width: 1180px) {
+	@media (max-width: 1119px) and (min-width: 680px) {
+		.app-shell[data-player-layout] {
+			grid-template-areas: 'sidebar workspace' 'player player';
+			grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+			grid-template-rows: minmax(0, 1fr) auto;
+		}
+	}
+
+	@media (max-width: 839px) and (min-width: 680px) {
+		.app-shell { --sidebar-width: var(--rail-width); }
+		.sidebar { padding: 16px 8px; }
+		.brand { padding: 2px 0 14px; }
+		.brand-splash { display: none !important; }
+		.brand-icon { display: block; width: 32px; height: 32px; object-fit: contain; }
+		.sidebar-footer,
+		.sidebar :global(.nav-zone-label),
+		.sidebar :global(.nav-label) { display: none; }
+		.sidebar :global(.nav-item) { justify-content: center; padding: 10px 4px; }
+		.sidebar :global(.nav-icon) { width: auto; }
+		.workspace { padding: calc(20px + var(--safe-top)) calc(16px + var(--safe-right)) calc(36px + var(--safe-bottom)) calc(16px + var(--safe-left)); }
+	}
+
+	@media (max-height: 620px) and (min-width: 1120px) {
+		.now-playing-panel :global(.np-top:not(.horizontal)) { gap: 10px; }
+		.now-playing-panel :global(.np-top:not(.horizontal) .np-artwork-wrap) { width: min(100%, 22dvh, 160px); }
+		.queue-section { padding: 10px 14px; margin-top: 10px; }
+	}
+
+	/* ── Mobile layout (below the compact desktop rail) ──── */
+	@media (max-width: 679px) {
 		/* Show mobile chrome */
 		.mobile-top-bar { display: flex; }
 		.mobile-tab-bar { display: flex; }
@@ -3462,9 +3686,12 @@
 		.app-shell {
 			height: auto;
 			min-height: 100dvh;
+			grid-template-areas: none;
 			grid-template-columns: 1fr;
+			grid-template-rows: auto;
 			background: transparent;
 		}
+		.workspace { grid-area: auto; }
 
 		/* Sidebar hidden — nav lives in bottom tab bar */
 		.sidebar { display: none; }
@@ -3475,6 +3702,7 @@
 		/* Workspace: clears fixed bottom chrome */
 		.workspace {
 			padding: 16px 16px 0;
+			padding-inline: calc(16px + var(--safe-left)) calc(16px + var(--safe-right));
 			padding-bottom: calc(var(--mob-bottom-chrome) + var(--safe-bottom) + 16px);
 			overflow: visible;
 			min-width: 0;

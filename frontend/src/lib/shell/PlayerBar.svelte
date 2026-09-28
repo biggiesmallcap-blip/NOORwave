@@ -2,6 +2,8 @@
 	import NowPlayingMetadata from '$lib/components/now-playing/NowPlayingMetadata.svelte';
 	import NowPlayingProgress from '$lib/components/now-playing/NowPlayingProgress.svelte';
 	import NowPlayingTransport from '$lib/components/now-playing/NowPlayingTransport.svelte';
+	import PlayerLayoutSelect from './PlayerLayoutSelect.svelte';
+	import type { EffectivePlayerLayout } from '$lib/stores/playerLayout';
 	import type { StreamDisplayInfo, Track } from '$lib/api/client';
 	import {
 		tidalArtworkFallbackSizes,
@@ -34,6 +36,10 @@
 		playerError,
 		favoritePending,
 		queueExpanded,
+		layout,
+		queueCount,
+		queueOpen,
+		onToggleQueue,
 		onEnterQuietMode,
 		onToggleFavorite,
 		onSeek,
@@ -67,6 +73,10 @@
 		playerError: PlayerBarError | null;
 		favoritePending: boolean;
 		queueExpanded: boolean;
+		layout: EffectivePlayerLayout;
+		queueCount: number;
+		queueOpen: boolean;
+		onToggleQueue: () => void;
 		onEnterQuietMode: () => void;
 		onToggleFavorite: () => void;
 		onSeek: (positionMs: number) => void;
@@ -152,7 +162,11 @@
 	}
 </script>
 
-<div class="np-top" class:queue-expanded={queueExpanded}>
+<div class="np-top" class:queue-expanded={queueExpanded && layout !== 'bottom'} class:horizontal={layout === 'bottom'}>
+	<div class="player-head">
+		<span class="player-head-label">Now playing</span>
+		<PlayerLayoutSelect effective={layout} compact={layout === 'bottom'} />
+	</div>
 	<div class="np-artwork-wrap">
 		{#key track?.artwork_url}
 			{#if nowPlayingArtwork}
@@ -197,6 +211,7 @@
 	/>
 
 	<NowPlayingTransport
+		layout={layout === 'bottom' ? 'bottom' : 'side'}
 		track={track}
 		isPlaying={isPlaying}
 		shuffleMode={shuffleMode}
@@ -209,6 +224,7 @@
 		onNext={onNext}
 		onCycleRepeat={onCycleRepeat}
 		onOpenMore={onOpenMore}
+		onEnterQuietMode={onEnterQuietMode}
 	/>
 
 	<div class="np-controls">
@@ -252,6 +268,19 @@
 		</label>
 	</div>
 
+	<button
+		id="player-queue-trigger"
+		class="player-queue-trigger"
+		type="button"
+		aria-label={`${queueOpen ? 'Close' : 'Open'} queue${queueCount > 0 ? `, ${queueCount} up next` : ''}`}
+		aria-expanded={queueOpen}
+		aria-controls="queue-list"
+		onclick={onToggleQueue}
+	>
+		<span aria-hidden="true">☷</span>
+		<span class="queue-trigger-count">{queueCount}</span>
+	</button>
+
 	{#if playerError}
 		<div class="player-error" role="alert">
 			<span class="player-error-msg">{playerError.message}</span>
@@ -265,6 +294,7 @@
 
 <style>
 	.np-top {
+		position: relative;
 		padding: 16px 16px 0;
 		display: flex;
 		flex-direction: column;
@@ -272,15 +302,70 @@
 		flex-shrink: 0;
 	}
 
+	.player-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		min-height: 40px;
+		padding-right: 50px;
+	}
+
+	.player-head-label {
+		color: var(--text-tertiary);
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-bold);
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+	}
+
+	.player-queue-trigger {
+		position: absolute;
+		top: 16px;
+		right: 16px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 3px;
+		min-width: 40px;
+		height: 40px;
+		padding: 0 5px;
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+		background: var(--bg-surface);
+		color: var(--text-secondary);
+		cursor: pointer;
+	}
+
+	.player-queue-trigger:hover,
+	.player-queue-trigger[aria-expanded='true'] {
+		color: var(--accent-strong);
+		background: var(--accent-soft);
+		border-color: var(--accent-line);
+	}
+
+	.player-queue-trigger:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: 2px;
+	}
+
+	.queue-trigger-count {
+		font-size: var(--font-size-2xs);
+		font-variant-numeric: tabular-nums;
+	}
+
 	.np-artwork-wrap {
 		position: relative;
+		width: min(100%, 28dvh, 320px);
 		aspect-ratio: 1;
+		align-self: center;
 		border-radius: 22px;
 		overflow: hidden;
 		background:
 			linear-gradient(135deg, var(--bg-hover), transparent),
 			var(--bg-surface);
 		border: 1px solid var(--border-subtle);
+		box-shadow: 0 14px 36px var(--player-art-shadow), inset 0 0 0 1px var(--player-art-rim);
 		flex-shrink: 0;
 	}
 
@@ -346,8 +431,8 @@
 	}
 
 	.np-mute-btn {
-		width: 20px;
-		height: 20px;
+		width: 40px;
+		height: 40px;
 		display: grid;
 		place-items: center;
 		background: transparent;
@@ -431,6 +516,7 @@
 	}
 
 	@media (prefers-reduced-motion: reduce) {
+		.np-artwork { animation: none; }
 		.np-artwork-wrap,
 		.np-top :global(.np-progress),
 		.np-top :global(.np-info),
@@ -440,8 +526,31 @@
 	}
 
 	.np-top.queue-expanded .np-artwork-wrap {
+		width: 64px;
+		height: 64px;
 		max-height: 64px;
 		overflow: hidden;
+	}
+
+	.np-top.queue-expanded {
+		display: grid;
+		grid-template-columns: 64px minmax(0, 1fr);
+		column-gap: 12px;
+		row-gap: 10px;
+		align-items: center;
+	}
+
+	.np-top.queue-expanded .player-head,
+	.np-top.queue-expanded :global(.np-progress),
+	.np-top.queue-expanded :global(.transport),
+	.np-top.queue-expanded .np-controls,
+	.np-top.queue-expanded .player-error {
+		grid-column: 1 / -1;
+	}
+
+	.np-top.queue-expanded :global(.np-info) {
+		grid-column: 2;
+		grid-row: 2;
 	}
 
 	.np-top.queue-expanded .np-artwork {
@@ -488,9 +597,66 @@
 		gap: 6px;
 	}
 
-	.np-top.queue-expanded :global(.tp-btn),
-	.np-top.queue-expanded :global(.tp-play) {
-		width: 30px;
-		height: 30px;
+	/* The horizontal player composes the same live controls for width instead of
+	   carrying a tall side-panel stack into the bottom row. */
+	.np-top.horizontal {
+		display: grid;
+		grid-template-columns: 64px minmax(135px, 1fr) auto minmax(80px, 120px) 44px 44px;
+		grid-template-areas:
+			'art info transport controls queue head'
+			'art progress progress progress progress progress';
+		align-items: center;
+		column-gap: 12px;
+		row-gap: 8px;
+		padding: 12px 16px;
+	}
+
+	.horizontal .player-head {
+		grid-area: head;
+		padding: 0;
+	}
+
+	.horizontal .player-head-label { display: none; }
+
+	.horizontal .np-artwork-wrap {
+		grid-area: art;
+		width: 64px;
+		border-radius: var(--radius-md);
+	}
+
+	.horizontal :global(.np-info) { grid-area: info; }
+	.horizontal :global(.np-progress) { grid-area: progress; }
+	.horizontal :global(.transport) { grid-area: transport; }
+	.horizontal .np-controls { grid-area: controls; }
+
+	.horizontal .player-queue-trigger {
+		position: static;
+		grid-area: queue;
+		width: 44px;
+		height: 40px;
+	}
+
+	.horizontal :global(.np-title) { font-size: var(--font-size-md); }
+	.horizontal :global(.np-artist) { font-size: var(--font-size-xs); }
+	.horizontal :global(.np-info) { gap: 3px; }
+	.horizontal :global(.np-copy) { gap: 2px; }
+	.horizontal :global(.badge-row) { display: flex; }
+	.horizontal :global(.badge-row .state-badge) { font-size: var(--font-size-2xs); }
+	.horizontal :global(.np-album),
+	.horizontal :global(.np-source),
+	.horizontal :global(.np-quality-chip),
+	.horizontal :global(.stream-micro) { display: none; }
+
+	.horizontal .player-error { grid-column: 1 / -1; }
+
+	@media (max-width: 900px) {
+		.np-top.horizontal {
+			grid-template-columns: 56px minmax(100px, 1fr) auto minmax(100px, 110px) 40px 40px;
+			column-gap: 8px;
+			padding-inline: 12px;
+		}
+
+		.horizontal .np-artwork-wrap { width: 56px; }
+		.horizontal .player-queue-trigger { width: 40px; }
 	}
 </style>

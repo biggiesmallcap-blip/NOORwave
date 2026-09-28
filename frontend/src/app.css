@@ -74,6 +74,11 @@
 
 	--right-panel-bg:   rgba(255, 255, 255, 0.02);
 	--right-panel-sep:  rgba(255, 255, 255, 0.06);
+	--player-surface: rgba(15, 17, 26, 0.92);
+	--player-queue-surface: rgba(10, 12, 20, 0.90);
+	--player-art-shadow: rgba(0, 0, 0, 0.28);
+	--player-art-rim: rgba(255, 255, 255, 0.12);
+	--player-progress-track: rgba(255, 255, 255, 0.14);
 	--sidebar-bg:       transparent;
 
 	/* Genre Atlas semantic tokens */
@@ -151,6 +156,11 @@
 
 	--right-panel-bg:   rgba(255, 255, 255, 0.64);
 	--right-panel-sep:  rgba(22, 29, 43, 0.13);
+	--player-surface: rgba(255, 255, 255, 0.96);
+	--player-queue-surface: rgba(248, 250, 252, 0.97);
+	--player-art-shadow: rgba(22, 29, 43, 0.16);
+	--player-art-rim: rgba(255, 255, 255, 0.7);
+	--player-progress-track: rgba(22, 29, 43, 0.23);
 	--sidebar-bg:       transparent;
 
 	/* Genre Atlas semantic tokens */
@@ -169,8 +179,9 @@
 
 /* ── Structural tokens (theme-independent) ────────────── */
 :root {
-	--sidebar-width: 228px;
-	--panel-width:   300px;
+	--sidebar-width: clamp(216px, 12vw, 248px);
+	--panel-width: clamp(296px, 17vw, 352px);
+	--rail-width: 72px;
 	--safe-top: env(safe-area-inset-top, 0px);
 	--safe-right: env(safe-area-inset-right, 0px);
 	--safe-bottom: env(safe-area-inset-bottom, 0px);
@@ -897,7 +908,7 @@ input[type='checkbox'] { accent-color: var(--accent); }
 	.panel-grid { grid-template-columns: 1fr; }
 }
 
-@media (max-width: 1180px) {
+@media (max-width: 679px) {
 	body {
 		overflow-x: hidden;
 		overflow-y: auto;

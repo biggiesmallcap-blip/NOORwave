@@ -2936,6 +2936,40 @@
   .search-track-row:hover .col-actions .row-btn,
   .search-track-row:focus-within .col-actions .row-btn { opacity: 1; }
 
+  @container workspace (max-width: 1100px) {
+    .search-track-header,
+    .search-track-row {
+      grid-template-columns: 44px minmax(0, 2fr) minmax(0, 1.3fr) minmax(0, 1.2fr) 64px 132px;
+    }
+    .search-track-table .col-quality { display: none; }
+  }
+
+  @container workspace (max-width: 850px) {
+    .search-track-header,
+    .search-track-row {
+      grid-template-columns: 40px minmax(0, 2fr) minmax(0, 1.2fr) 60px 132px;
+      gap: 8px;
+    }
+    .search-track-table .col-album { display: none; }
+  }
+
+  @container workspace (max-width: 650px) {
+    .search-track-header,
+    .search-track-row {
+      grid-template-columns: 36px minmax(0, 1.8fr) minmax(0, 1fr) 54px 80px;
+      gap: 6px;
+      padding-inline: 6px;
+    }
+    .search-track-row .col-actions .row-btn:nth-child(2) { display: none; }
+    .search-track-row .col-actions .row-btn { opacity: 1; }
+  }
+
+  @container workspace (max-width: 440px) {
+    .search-track-header,
+    .search-track-row { grid-template-columns: 32px minmax(0, 1.6fr) minmax(0, 1fr) 72px; }
+    .search-track-table .col-duration { display: none; }
+  }
+
   .infinite-sentinel {
     min-height: 60px;
     display: flex;

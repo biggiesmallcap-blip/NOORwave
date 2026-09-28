@@ -30,6 +30,7 @@
 	};
 
 	let {
+		layout = 'side',
 		track,
 		isPlaying,
 		shuffleMode,
@@ -41,8 +42,10 @@
 		onPlayPause,
 		onNext,
 		onCycleRepeat,
-		onOpenMore
+		onOpenMore,
+		onEnterQuietMode
 	}: {
+		layout?: 'side' | 'bottom';
 		track: Track | null;
 		isPlaying: boolean;
 		shuffleMode: string;
@@ -59,9 +62,12 @@
 		onNext: () => void;
 		onCycleRepeat: () => void;
 		onOpenMore: (anchor: HTMLElement) => void;
+		onEnterQuietMode?: () => void;
 	} = $props();
 
 	let playPauseLabel = $derived(isPlaying ? 'Pause' : 'Play');
+	let bottomActionsOpen = $state(false);
+	let bottomActionsToggle = $state<HTMLButtonElement | null>(null);
 
 	function handleMoreClick(e: MouseEvent) {
 		e.stopPropagation();
@@ -73,7 +79,20 @@
 	}
 </script>
 
-<div class="transport" aria-label="Playback controls">
+<svelte:window
+	onkeydown={(event) => {
+		if (event.key === 'Escape' && bottomActionsOpen) {
+			bottomActionsOpen = false;
+			bottomActionsToggle?.focus();
+		}
+	}}
+	onclick={(event) => {
+		if (bottomActionsOpen && !(event.target as Element).closest('.bottom-actions-toggle, .bottom-actions-menu')) bottomActionsOpen = false;
+	}}
+/>
+
+<div class="transport" class:bottom={layout === 'bottom'} aria-label="Playback controls">
+	{#if layout === 'side'}
 	<div class="transport-group transport-group-secondary" role="group" aria-label="Track and shuffle controls">
 		{#if onToggleFavorite}
 			<button
@@ -98,6 +117,7 @@
 			{SHUFFLE_ICONS[shuffleMode]}
 		</button>
 	</div>
+	{/if}
 
 	<div class="transport-group transport-group-playback" role="group" aria-label="Previous, play, and next">
 		<button class="tp-btn" onclick={onPrev} aria-label="Previous" title="Previous track">⏮</button>
@@ -107,6 +127,7 @@
 		<button class="tp-btn" onclick={onNext} aria-label="Next" title="Next track">⏭</button>
 	</div>
 
+	{#if layout === 'side'}
 	<div class="transport-group transport-group-secondary" role="group" aria-label="Repeat and overflow controls">
 		<button
 			class:active={repeatMode !== 'off'}
@@ -125,15 +146,86 @@
 			disabled={!track}
 		>⋯</button>
 	</div>
+	{:else}
+		<button
+			class="tp-btn bottom-actions-toggle"
+			bind:this={bottomActionsToggle}
+			type="button"
+			aria-label="More playback controls"
+			aria-haspopup="menu"
+			aria-expanded={bottomActionsOpen}
+			onclick={() => { bottomActionsOpen = !bottomActionsOpen; }}
+		>⋯</button>
+		{#if bottomActionsOpen}
+			<div class="bottom-actions-menu" role="menu" aria-label="More playback controls">
+				<button role="menuitem" disabled={!track || favoritePending} onclick={() => { onToggleFavorite?.(); bottomActionsOpen = false; }}>{track?.is_favorite ? 'Remove favorite' : 'Add favorite'}</button>
+				<button role="menuitem" disabled={!track} onclick={() => { onCycleShuffle(); bottomActionsOpen = false; }}>{SHUFFLE_LABELS[shuffleMode]}</button>
+				<button role="menuitem" disabled={!track} onclick={() => { onCycleRepeat(); bottomActionsOpen = false; }}>{REPEAT_LABELS[repeatMode]}</button>
+				{#if onEnterQuietMode}<button role="menuitem" disabled={!track} onclick={() => { onEnterQuietMode?.(); bottomActionsOpen = false; }}>Quiet mode</button>{/if}
+				<button role="menuitem" disabled={!track} onclick={(event) => { onOpenMore(bottomActionsToggle ?? (event.currentTarget as HTMLElement)); bottomActionsOpen = false; }}>Track actions</button>
+			</div>
+		{/if}
+	{/if}
 </div>
 
 <style>
 	.transport {
 		display: grid;
-		grid-template-columns: 1fr auto 1fr;
+		grid-template-columns: 1fr 1fr;
 		align-items: center;
-		column-gap: 10px;
+		column-gap: 8px;
+		row-gap: 8px;
 	}
+
+	.transport:not(.bottom) .transport-group-playback {
+		grid-column: 1 / -1;
+		grid-row: 1;
+		justify-content: center;
+	}
+
+	.transport:not(.bottom) .transport-group-secondary { grid-row: 2; }
+
+	.transport.bottom {
+		display: flex;
+		gap: 8px;
+		justify-content: center;
+	}
+
+	.bottom-actions-toggle {
+		width: 40px;
+		height: 40px;
+	}
+
+	.bottom-actions-menu {
+		position: absolute;
+		z-index: var(--z-overlay);
+		bottom: calc(100% + 8px);
+		right: 0;
+		width: 184px;
+		display: flex;
+		flex-direction: column;
+		padding: 6px;
+		border: 1px solid var(--border-strong);
+		border-radius: var(--radius-md);
+		background: var(--bg-surface-strong);
+		box-shadow: var(--panel-shadow);
+	}
+
+	.bottom-actions-menu button {
+		min-height: 38px;
+		padding: 8px 10px;
+		border: 0;
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--text-primary);
+		text-align: left;
+		font: inherit;
+		cursor: pointer;
+	}
+
+	.bottom-actions-menu button:hover,
+	.bottom-actions-menu button:focus-visible { background: var(--accent-soft); }
+	.bottom-actions-menu button:disabled { opacity: 0.45; cursor: default; }
 
 	.transport-group {
 		position: relative;
@@ -143,11 +235,11 @@
 	}
 
 	.transport > .transport-group-secondary:first-child {
-		justify-self: end;
+		justify-self: start;
 	}
 
 	.transport > .transport-group-secondary:last-child {
-		justify-self: start;
+		justify-self: end;
 	}
 
 	.transport-group-playback {
@@ -156,8 +248,8 @@
 
 	.tp-btn,
 	.tp-play {
-		width: 32px;
-		height: 32px;
+		width: 40px;
+		height: 40px;
 		border-radius: 50%;
 		display: grid;
 		place-items: center;
@@ -195,8 +287,8 @@
 	.tp-play {
 		background: var(--accent);
 		color: #fff;
-		width: 38px;
-		height: 38px;
+		width: 44px;
+		height: 44px;
 		box-shadow: 0 10px 26px var(--accent-glow);
 	}
 

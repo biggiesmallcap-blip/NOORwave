@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { tick } from 'svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import type { Track } from '$lib/api/client';
 	import { openContextMenu } from '$lib/stores/context_menu';
@@ -53,40 +52,6 @@
 	const artistHref = $derived(mediaHref(artistRef));
 	const albumRef = $derived(track ? albumRefFromTrack(track) : null);
 	const albumHref = $derived(mediaHref(albumRef));
-	let titleShellEl = $state<HTMLElement | null>(null);
-	let titleTextEl = $state<HTMLElement | null>(null);
-	let titleOverflowing = $state(false);
-
-	function updateTitleMarquee() {
-		if (!titleShellEl || !titleTextEl) {
-			titleOverflowing = false;
-			return;
-		}
-		const overflow = Math.max(0, titleTextEl.scrollWidth - titleShellEl.clientWidth);
-		titleOverflowing = overflow > 1;
-		titleShellEl.style.setProperty('--np-title-marquee-distance', `${Math.ceil(overflow)}px`);
-		titleShellEl.style.setProperty(
-			'--np-title-marquee-duration',
-			`${Math.min(18, Math.max(7, overflow / 24 + 4)).toFixed(2)}s`,
-		);
-	}
-
-	$effect(() => {
-		track?.title;
-		titleHref;
-		void tick().then(updateTitleMarquee);
-	});
-
-	$effect(() => {
-		const shell = titleShellEl;
-		const text = titleTextEl;
-		if (!shell || !text || typeof ResizeObserver === 'undefined') return;
-		const observer = new ResizeObserver(updateTitleMarquee);
-		observer.observe(shell);
-		observer.observe(text);
-		updateTitleMarquee();
-		return () => observer.disconnect();
-	});
 </script>
 
 <div class="np-info">
@@ -97,8 +62,6 @@
 		{#if track && titleRef && titleHref}
 			<a
 				class="np-title np-title-link"
-				class:marquee-ready={titleOverflowing}
-				bind:this={titleShellEl}
 				href={titleHref}
 				title={track.title}
 				oncontextmenu={(e) => {
@@ -107,16 +70,14 @@
 					openContextMenu(e, buildMediaMenu(titleRef), titleRef.label);
 				}}
 			>
-				<span class="np-title-text" bind:this={titleTextEl}>{track.title}</span>
+				<span class="np-title-text">{track.title}</span>
 			</a>
 		{:else}
 			<h2
 				class="np-title"
-				class:marquee-ready={titleOverflowing}
-				bind:this={titleShellEl}
 				title={track?.title ?? 'Nothing queued'}
 			>
-				<span class="np-title-text" bind:this={titleTextEl}>{track?.title ?? 'Nothing queued'}</span>
+				<span class="np-title-text">{track?.title ?? 'Nothing queued'}</span>
 			</h2>
 		{/if}
 		{#if artistRef && artistHref}
@@ -215,18 +176,6 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		vertical-align: bottom;
-	}
-
-	.np-title.marquee-ready:hover .np-title-text {
-		max-width: none;
-		text-overflow: clip;
-		animation: np-title-marquee var(--np-title-marquee-duration, 9s) ease-in-out infinite;
-	}
-
-	@keyframes np-title-marquee {
-		0%, 15% { transform: translateX(0); }
-		50%, 60% { transform: translateX(calc(-1 * var(--np-title-marquee-distance, 0px))); }
-		95%, 100% { transform: translateX(0); }
 	}
 
 	.np-artist {

@@ -18,6 +18,7 @@
 			{#each zone.items as item}
 				<a
 					href={item.path}
+					aria-label={item.label}
 					class="nav-item"
 					class:special={item.id === 'genres'}
 					class:active={isNavItemActive(item.path)}
