@@ -623,7 +623,7 @@
 	   carrying a tall side-panel stack into the bottom row. */
 	.np-top.horizontal {
 		display: grid;
-		grid-template-columns: 64px minmax(0, 1fr) auto minmax(0, 1fr) 32px 32px;
+		grid-template-columns: 76px minmax(0, 1fr) auto minmax(0, 1fr) 32px 32px;
 		grid-template-areas:
 			'art info transport controls queue head'
 			'art progress progress progress progress progress';
@@ -679,12 +679,16 @@
 
 	@media (max-width: 900px) {
 		.np-top.horizontal {
-			grid-template-columns: 56px minmax(0, 1fr) auto minmax(0, 1fr) 32px 32px;
+			grid-template-columns: 72px minmax(0, 1fr) auto minmax(0, 1fr) 32px 32px;
 			column-gap: 8px;
 			padding-inline: 12px;
 		}
 
 		.horizontal .np-artwork-wrap { width: 56px; }
 		.horizontal .player-queue-trigger { width: 32px; }
+	}
+
+	@media (max-width: 760px) {
+		.horizontal .np-controls { width: min(100%, 120px); }
 	}
 </style>

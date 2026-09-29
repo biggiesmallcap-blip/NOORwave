@@ -151,7 +151,7 @@
 	}
 
 	.np-progress-track:hover::after,
-	.np-progress-track:focus-within::after {
+	.np-progress-track:has(.np-progress-input:focus-visible)::after {
 		opacity: 1;
 	}
 
@@ -167,7 +167,7 @@
 		cursor: pointer;
 	}
 
-	.np-progress-track:focus-within {
+	.np-progress-track:has(.np-progress-input:focus-visible) {
 		outline: 2px solid var(--accent);
 		outline-offset: 5px;
 	}

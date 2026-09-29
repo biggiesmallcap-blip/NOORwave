@@ -186,21 +186,28 @@
 	.transport:not(.bottom) .transport-group-secondary { grid-row: 2; }
 
 	.transport.bottom {
+		position: relative;
 		display: flex;
 		gap: 8px;
 		justify-content: center;
 	}
 
 	.bottom-actions-toggle {
+		position: absolute;
+		left: calc(100% + 10px);
+		top: 50%;
+		transform: translateY(-50%);
 		width: 40px;
 		height: 40px;
 	}
+
+	.bottom-actions-toggle:hover { transform: translateY(-50%); }
 
 	.bottom-actions-menu {
 		position: absolute;
 		z-index: var(--z-overlay);
 		bottom: calc(100% + 8px);
-		right: 0;
+		left: calc(100% + 10px);
 		width: 184px;
 		display: flex;
 		flex-direction: column;
