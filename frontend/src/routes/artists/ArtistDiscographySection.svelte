@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { type Track, type TidalDiscographyAlbum, type TidalDiscographyTrack } from '$lib/api/client';
+	import { api, type Track, type TidalDiscographyAlbum, type TidalDiscographyTrack } from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
 	import TrackRow from '$lib/components/TrackRow.svelte';
 	import TidalTrackRow from '$lib/components/TidalTrackRow.svelte';
@@ -19,6 +19,12 @@
 		sortTidalAlbumsByReleaseDate,
 		type PopularTrackItem,
 	} from './artist_discography';
+	import {
+		continueReleaseSection,
+		previewReleaseState,
+		releaseSectionComplete,
+		type ReleaseLoadState,
+	} from './artist_release_loading';
 
 	type Section = 'tracks' | 'albums' | 'singles' | 'compilations';
 
@@ -44,6 +50,8 @@
 	let tracks = $state<Track[]>([]);
 	let tidalTracks = $state<TidalDiscographyTrack[]>([]);
 	let tidalAlbums = $state<TidalDiscographyAlbum[]>([]);
+	let releaseState = $state<ReleaseLoadState | null>(null);
+	let loadingMore = $state(false);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let query = $state('');
@@ -56,57 +64,34 @@
 		source.kind === 'tidal' ? `/tidal/artists/${source.tidalArtistId}` : `/artists/${artistId}`
 	);
 
-	function needsMoreReleases(profile: {
-		release_filters_has_more?: Record<string, boolean>;
-		sections_failed?: string[];
-	}): boolean {
-		if (section === 'tracks') return false;
-		const filters = section === 'albums'
-			? [['ALBUMS', 'albums'], ['LIVE', 'live']]
-			: section === 'singles'
-				? [['EPSANDSINGLES', 'eps_singles']]
-				: [['COMPILATIONS', 'compilations']];
-		return filters.some(([filter, failed]) =>
-			profile.sections_failed?.includes(failed)
-			|| profile.release_filters_has_more?.[filter] !== false
-		);
+	function startReleaseContinuation(seq: number, tidalId: number, initial: ReleaseLoadState) {
+		if (releaseSectionComplete(initial)) return;
+		loadingMore = true;
+		void continueReleaseSection(
+			initial,
+			(filter, offset) => api.getTidalArtistReleasePage(tidalId, filter, offset),
+			(next) => {
+				if (seq !== loadSeq) return;
+				releaseState = next;
+				tidalAlbums = next.albums;
+			},
+			() => seq === loadSeq,
+		).finally(() => {
+			if (seq === loadSeq) loadingMore = false;
+		});
 	}
 
-	// The first release page paints the see-all view. The full catalog arrives
-	// behind it, and successful filters are merged so a slow filter cannot erase
-	// releases that were already visible.
-	async function fillDiscography(
-		seq: number,
-		fetchFull: () => Promise<{
-			albums: TidalDiscographyAlbum[];
-			top_tracks: TidalDiscographyTrack[];
-			available: boolean;
-			artist_name?: string | null;
-		}>,
-	) {
-		try {
-			const full = await fetchFull();
-			if (seq !== loadSeq || !full.available) return;
-			const seen = new Set(full.albums.map((album) => album.tidal_id));
-			tidalAlbums = [
-				...full.albums,
-				...tidalAlbums.filter((album) => !seen.has(album.tidal_id)),
-			];
-			if (full.top_tracks.length > 0) tidalTracks = full.top_tracks;
-			if (source.kind === 'tidal') {
-				artist = { id: 0, tidal_id: source.tidalArtistId, name: full.artist_name ?? artist?.name ?? 'Artist' };
-				error = null;
-			}
-		} catch (e) {
-			// Keep the first batch visible if the deeper catalog cannot be fetched.
-			console.error('Failed to finish artist discography', e);
-		}
+	function retryReleases() {
+		if (loadingMore || !releaseState || activeTidalArtistId == null) return;
+		startReleaseContinuation(loadSeq, activeTidalArtistId, releaseState);
 	}
 
 	async function loadLocal(id: number) {
 		const seq = ++loadSeq;
 		loading = true;
 		error = null;
+		releaseState = null;
+		loadingMore = false;
 		try {
 			const [artistRes, tracksRes, discographyRes] = await Promise.allSettled([
 				cachedApi.getArtist(id),
@@ -126,10 +111,13 @@
 			if (artistRes.status !== 'fulfilled' && tracksRes.status !== 'fulfilled') {
 				error = `Failed to load artist: ${tracksRes.reason}`;
 			}
-			if (artist?.tidal_id != null && (
-				discographyRes.status !== 'fulfilled' || needsMoreReleases(discographyRes.value)
-			)) {
-				void fillDiscography(seq, () => cachedApi.getArtistDiscography(id));
+			if (artist?.tidal_id != null && section !== 'tracks') {
+				releaseState = previewReleaseState(
+					section,
+					tidalAlbums,
+					discographyRes.status === 'fulfilled' ? discographyRes.value.release_filter_status : undefined,
+				);
+				startReleaseContinuation(seq, artist.tidal_id, releaseState);
 			}
 		} finally {
 			if (seq === loadSeq) loading = false;
@@ -140,6 +128,8 @@
 		const seq = ++loadSeq;
 		loading = true;
 		error = null;
+		releaseState = null;
+		loadingMore = false;
 		try {
 			const res = await cachedApi.getTidalArtistPreview(tidalId);
 			if (seq !== loadSeq) return;
@@ -147,13 +137,20 @@
 			tracks = [];
 			tidalTracks = res.top_tracks ?? [];
 			tidalAlbums = res.albums ?? [];
-			if (needsMoreReleases(res)) void fillDiscography(seq, () => cachedApi.getTidalArtistProfile(tidalId));
+			if (section !== 'tracks') {
+				releaseState = previewReleaseState(section, tidalAlbums, res.release_filter_status);
+				startReleaseContinuation(seq, tidalId, releaseState);
+			}
 		} catch (e) {
 			if (seq !== loadSeq) return;
-			error = String(e);
+			error = section === 'tracks' ? String(e) : null;
 			tidalTracks = [];
 			tidalAlbums = [];
-			if (section !== 'tracks') void fillDiscography(seq, () => cachedApi.getTidalArtistProfile(tidalId));
+			if (section !== 'tracks') {
+				artist = { id: 0, tidal_id: tidalId, name: artist?.name ?? 'Artist' };
+				releaseState = previewReleaseState(section, []);
+				startReleaseContinuation(seq, tidalId, releaseState);
+			}
 		} finally {
 			if (seq === loadSeq) loading = false;
 		}
@@ -195,6 +192,7 @@
 	let visibleAlbums = $derived(
 		albumsForSection.filter((album) => matches(album.title) || matches(album.artist_name))
 	);
+	let releasesIncomplete = $derived(releaseState !== null && !releaseSectionComplete(releaseState));
 
 	function itemKey(item: PopularTrackItem): string {
 		return popularTrackItemKey(item);
@@ -245,6 +243,14 @@
 			<p class="eyebrow">{artist?.name ?? 'Artist'}</p>
 			<h1>{SECTION_LABELS[section]}</h1>
 			<p>{section === 'tracks' ? visibleTracks.length : visibleAlbums.length} results</p>
+			{#if releasesIncomplete}
+				<p class="release-progress" role="status">
+					{loadingMore ? 'Loading more releases…' : 'Some releases are still missing.'}
+					{#if !loadingMore}
+						<button type="button" onclick={retryReleases}>Retry</button>
+					{/if}
+				</p>
+			{/if}
 		</header>
 
 		<div class="filter-bar">
@@ -320,7 +326,7 @@
 				{/each}
 			</div>
 		{:else}
-			<p class="empty-copy">No releases match this search.</p>
+			<p class="empty-copy">{releasesIncomplete ? 'Releases have not finished loading.' : 'No releases match this search.'}</p>
 		{/if}
 	{/if}
 </div>
@@ -361,6 +367,11 @@
 		margin: 0;
 		color: var(--text-secondary);
 		font-size: var(--font-size-sm);
+	}
+	.release-progress button {
+		margin-left: var(--space-2);
+		color: var(--accent);
+		text-decoration: underline;
 	}
 
 	.filter-bar {

@@ -1037,6 +1037,10 @@ pub fn api_routes(state: SharedState) -> Router {
         )
         .route("/api/tidal/artists/{tidal_id}/core", get(tidal_artist_core))
         .route("/api/tidal/artists/{tidal_id}", get(tidal_artist_profile))
+        .route(
+            "/api/tidal/artists/{tidal_id}/releases",
+            get(catalog_routes::get_tidal_artist_release_page),
+        )
         .route("/api/tidal/logout", post(tidal_logout))
         .route(
             "/api/library/tidal-stream/purge",

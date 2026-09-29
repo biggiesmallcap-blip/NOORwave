@@ -35,6 +35,7 @@ import {
 	type TidalMixesResponse,
 	type TidalMoodsResponse,
 	type TidalRadioStationsResponse,
+	type TidalArtistProfile,
 	type Track,
 	type AudioDevice,
 } from '$lib/api/client';
@@ -81,6 +82,18 @@ function scopedPersist(maxAgeMs: number): NonNullable<QueryOptions['persist']> {
 const volatileOptions: QueryOptions = { staleMs: 5 * SECOND };
 const shortOptions: QueryOptions = { staleMs: 30 * SECOND };
 const mediumOptions: QueryOptions = { staleMs: 5 * MINUTE, persist: scopedPersist(DAY) };
+export function artistPreviewStaleMs(data: unknown): number {
+	const profile = (data ?? {}) as Partial<TidalArtistProfile>;
+	if (!profile.available) return 5 * SECOND;
+	if (profile.sections_failed?.length || Object.values(profile.release_filter_status ?? {}).some((status) => status.failed)) {
+		return 30 * SECOND;
+	}
+	return 5 * MINUTE;
+}
+const artistPreviewOptions: QueryOptions = {
+	...mediumOptions,
+	staleMsForData: artistPreviewStaleMs,
+};
 const longOptions: QueryOptions = { staleMs: 30 * MINUTE, persist: scopedPersist(7 * DAY) };
 const moodsOptions: QueryOptions = { ...longOptions, returnStale: true };
 // Read-mostly surfaces that should paint last-known content instantly on open and
@@ -271,7 +284,7 @@ export const cachedApi = {
 		return fetchCached<Awaited<ReturnType<typeof api.getArtistDiscography>>>(
 			cacheKeys.artistDiscographyPreview(id),
 			() => api.getArtistDiscography(id, true),
-			mediumOptions,
+			artistPreviewOptions,
 		);
 	},
 	// TIDAL artist profile (non-library artists). Cached like the library
@@ -290,7 +303,7 @@ export const cachedApi = {
 		return fetchCached<Awaited<ReturnType<typeof api.getTidalArtistProfile>>>(
 			cacheKeys.tidalArtistPreview(tidalArtistId),
 			() => api.getTidalArtistProfile(tidalArtistId, true),
-			mediumOptions,
+			artistPreviewOptions,
 		);
 	},
 	getTidalArtistCore(tidalArtistId: number) {

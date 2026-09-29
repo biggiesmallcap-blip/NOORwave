@@ -834,7 +834,18 @@ export interface TidalArtistProfile {
 	 * retry a release filter without treating an empty result as complete.
 	 */
 	sections_failed?: string[];
-	release_filters_has_more?: Record<string, boolean>;
+	release_filter_status?: ArtistReleaseFilterStatuses;
+}
+
+export type ArtistReleaseFilter = 'ALBUMS' | 'EPSANDSINGLES' | 'COMPILATIONS' | 'LIVE';
+export interface ArtistReleaseFilterStatus {
+	failed: boolean;
+	has_more: boolean | null;
+}
+export type ArtistReleaseFilterStatuses = Record<ArtistReleaseFilter, ArtistReleaseFilterStatus>;
+export interface TidalArtistReleasePage {
+	albums: TidalDiscographyAlbum[];
+	status: ArtistReleaseFilterStatus;
 }
 
 export interface TidalArtistCore {
@@ -2510,7 +2521,7 @@ export const api = {
 			available: boolean;
 			reason?: string;
 			sections_failed?: string[];
-			release_filters_has_more?: Record<string, boolean>;
+			release_filter_status?: ArtistReleaseFilterStatuses;
 		}>(`/api/artists/${id}/discography${preview ? '?preview=true' : ''}`);
 	},
 
@@ -4101,6 +4112,10 @@ export const api = {
 
 	getTidalArtistProfile(tidalArtistId: number, preview = false): Promise<TidalArtistProfile> {
 		return fetchApi<TidalArtistProfile>(`/api/tidal/artists/${tidalArtistId}${preview ? '?preview=true' : ''}`);
+	},
+
+	getTidalArtistReleasePage(tidalArtistId: number, filter: ArtistReleaseFilter, offset: number): Promise<TidalArtistReleasePage> {
+		return fetchApi<TidalArtistReleasePage>(`/api/tidal/artists/${tidalArtistId}/releases?filter=${filter}&offset=${offset}`);
 	},
 
 	getTidalArtistCore(tidalArtistId: number): Promise<TidalArtistCore> {

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
 	cacheKeys,
+	artistPreviewStaleMs,
 	cachedApi,
 	ensureCacheScope,
 	invalidateHomeCaches,
@@ -10,6 +11,15 @@ import {
 import { dataCache } from './query';
 
 describe('cached API helpers', () => {
+	test('refreshes partial artist previews on the server partial window', () => {
+		expect(artistPreviewStaleMs({ available: true, sections_failed: ['bio'] })).toBe(30_000);
+		expect(artistPreviewStaleMs({
+			available: true,
+			release_filter_status: { EPSANDSINGLES: { failed: true, has_more: null } },
+		})).toBe(30_000);
+		expect(artistPreviewStaleMs({ available: false })).toBe(5_000);
+		expect(artistPreviewStaleMs({ available: true, sections_failed: [] })).toBe(300_000);
+	});
 	beforeEach(() => {
 		dataCache.clear();
 	});

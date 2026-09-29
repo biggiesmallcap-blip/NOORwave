@@ -7490,6 +7490,45 @@ async fn tidal_artist_core_route_is_registered_and_requires_a_session() {
 }
 
 #[tokio::test]
+async fn tidal_artist_release_page_only_accepts_known_filters_and_page_offsets() {
+    let app = build_test_app().await;
+    for (uri, expected) in [
+        (
+            "/api/tidal/artists/1/releases?filter=UNKNOWN&offset=50",
+            "Unknown artist release filter",
+        ),
+        (
+            "/api/tidal/artists/1/releases?filter=EPSANDSINGLES&offset=51",
+            "nonnegative page offset",
+        ),
+        (
+            "/api/tidal/artists/1/releases?filter=EPSANDSINGLES&offset=50",
+            "TIDAL not connected",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(expected),
+            "uri: {uri}, body: {body}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn tidal_album_routes_reject_non_positive_ids_before_session_lookup() {
     let app = build_test_app().await;
 

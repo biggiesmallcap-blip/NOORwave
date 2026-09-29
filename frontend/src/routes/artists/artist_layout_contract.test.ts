@@ -155,7 +155,9 @@ describe('artist page layout contracts', () => {
 		expect(source).toContain('href={`${discographyBase}/discography/singles`}');
 		expect(source).toContain('href={`${discographyBase}/discography/compilations`}');
 		expect(discographySource).toContain("type Section = 'tracks' | 'albums' | 'singles' | 'compilations';");
-		expect(discographySource).toContain('cachedApi.getArtistDiscography(id)');
+		expect(discographySource).toContain('cachedApi.getArtistDiscographyPreview(id)');
+		expect(discographySource).toContain('api.getTidalArtistReleasePage(tidalId, filter, offset)');
+		expect(discographySource).not.toContain('cachedApi.getArtistDiscography(id)');
 		expect(discographySource).toContain('<SearchField');
 		expect(discographySource).toContain('<TrackRow');
 		expect(discographySource).toContain('<TidalTrackRow');

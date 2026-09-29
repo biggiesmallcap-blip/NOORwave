@@ -6,7 +6,8 @@
 		type TidalArtistVideo,
 		type TidalSimilarArtist,
 		type TidalArtistBio,
-		type TidalPlayable
+		type TidalPlayable,
+		type ArtistReleaseFilterStatuses,
 	} from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
 	import { ARTIST_ENRICHMENT_DELAY_MS } from '$lib/artist/artist_loading';
@@ -57,6 +58,7 @@
 		type DiscoCategory,
 		type PopularTrackItem,
 	} from './artist_discography';
+	import { failedPreviewReleaseLinks } from './artist_release_loading';
 
 	// One artist view, two data sources. A library artist is keyed by local id
 	// (rich local affordances: favorites, play counts, library albums). A
@@ -115,6 +117,8 @@
 	let tidalBio = $state<TidalArtistBio | null>(null);
 	let tidalLoading = $state(false);
 	let tidalAvailable = $state(false);
+	let tidalReleaseStatus = $state<ArtistReleaseFilterStatuses | undefined>(undefined);
+	let retryReleaseLinks = $derived(failedPreviewReleaseLinks(tidalReleaseStatus));
 	let failedArtworkUrls = $state<Record<string, boolean>>({});
 	let tidalLoadSeq = 0;
 
@@ -168,6 +172,7 @@
 			tidalSimilarArtists = res.similar_artists ?? [];
 			tidalBio = res.bio ?? null;
 			tidalAvailable = res.available;
+			tidalReleaseStatus = res.release_filter_status;
 			// View-time portrait fallback, populated alongside the rest
 			// of the discography so a missing local `photo_url` still
 			// renders a proper hero portrait instead of the initials disc.
@@ -213,6 +218,7 @@
 			tidalSimilarArtists = res.similar_artists ?? [];
 			tidalBio = res.bio ?? null;
 			tidalAvailable = tidalAvailable || (res.available ?? true);
+			tidalReleaseStatus = res.release_filter_status;
 			if (res.picture_url) tidalPictureUrl = res.picture_url;
 			// TIDAL-mode artists have no local-track fallback, so an
 			// all-fetches-failed response (`available: false`) means TIDAL is
@@ -243,6 +249,7 @@
 		tidalSimilarArtists = [];
 		tidalBio = null;
 		tidalAvailable = false;
+		tidalReleaseStatus = undefined;
 		failedArtworkUrls = {};
 		bioExpanded = false;
 		if (source.kind === 'local') {
@@ -1272,6 +1279,14 @@
 			{/if}
 		{/if}
 
+		{#if activeTidalArtistId != null && !tidalLoading && retryReleaseLinks.length > 0}
+			<nav class="retry-release-links" aria-label="Release sections available to retry">
+				{#each retryReleaseLinks as link (link.section)}
+					<a href={`${discographyBase}${link.path}`}>{link.label}</a>
+				{/each}
+			</nav>
+		{/if}
+
 		<!-- Videos are independent of the album shelves: an artist can have videos
 		     while the album fetch came back empty, and vice versa. Gating them on
 		     the album presence used to hide them whenever TIDAL returned no
@@ -1903,6 +1918,19 @@
 		background: rgba(255, 255, 255, 0.11);
 		border-color: rgba(255, 255, 255, 0.16);
 		color: var(--text-primary, #fff);
+	}
+	.retry-release-links {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--space-3);
+		margin: var(--space-3) 0;
+		font-size: var(--font-size-sm);
+	}
+	.retry-release-links a {
+		color: var(--text-secondary);
+	}
+	.retry-release-links a:hover {
+		color: var(--accent);
 	}
 
 </style>

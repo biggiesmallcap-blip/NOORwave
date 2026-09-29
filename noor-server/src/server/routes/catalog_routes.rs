@@ -31,6 +31,22 @@ pub(super) struct ArtistProfileQuery {
     pub(super) preview: bool,
 }
 
+#[derive(Deserialize)]
+pub(super) struct ArtistReleasePageQuery {
+    filter: String,
+    offset: i32,
+}
+
+fn artist_release_filter(filter: &str) -> Option<&'static str> {
+    match filter {
+        "ALBUMS" => Some("ALBUMS"),
+        "EPSANDSINGLES" => Some("EPSANDSINGLES"),
+        "COMPILATIONS" => Some("COMPILATIONS"),
+        "LIVE" => Some("LIVE"),
+        _ => None,
+    }
+}
+
 /// Deadline for one of the album-list groups (ALBUMS / EPSANDSINGLES /
 /// COMPILATIONS / LIVE) of the artist fan-out. Each group paginates
 /// sequentially, so it gets a larger budget than a single-call fetch. The
@@ -609,6 +625,23 @@ mod tests {
     }
 
     #[test]
+    fn failed_release_filter_has_unknown_continuation_status() {
+        let failed: anyhow::Result<ArtistAlbumPages> = Err(anyhow::anyhow!("timeout"));
+        assert_eq!(
+            artist_release_status(&failed),
+            json!({ "failed": true, "has_more": null })
+        );
+        let complete = Ok(ArtistAlbumPages {
+            items: Vec::new(),
+            has_more: false,
+        });
+        assert_eq!(
+            artist_release_status(&complete),
+            json!({ "failed": false, "has_more": false })
+        );
+    }
+
+    #[test]
     fn artist_payload_cache_evicts_beyond_cap() {
         let base = -992_000i64;
         for i in 0..(ARTIST_PAYLOAD_CACHE_CAP as i64 + 8) {
@@ -971,6 +1004,44 @@ struct ArtistAlbumPages {
 
 fn artist_album_page_is_last(page_len: i32, total: Option<i64>, collected: usize) -> bool {
     page_len < 50 || total.is_some_and(|count| collected as i64 >= count)
+}
+
+fn artist_release_status(result: &anyhow::Result<ArtistAlbumPages>) -> Value {
+    match result {
+        Ok(pages) => json!({ "failed": false, "has_more": pages.has_more }),
+        Err(_) => json!({ "failed": true, "has_more": null }),
+    }
+}
+
+async fn artist_albums_payload(
+    state: &SharedState,
+    all_albums: Vec<(TidalAlbum, &'static str)>,
+) -> Vec<Value> {
+    let tidal_album_ids: Vec<i64> = all_albums.iter().map(|(album, _)| album.id).collect();
+    let known_map = {
+        let s = state.read().await;
+        s.db.with_conn(|conn| queries::get_known_album_tidal_ids(conn, &tidal_album_ids))
+            .unwrap_or_default()
+    };
+    all_albums
+        .into_iter()
+        .map(|(album, source_filter)| {
+            let artwork = TidalClient::get_artwork_url(&album.cover, 320);
+            let local_id = known_map.get(&album.id).copied();
+            json!({
+                "tidal_id": album.id,
+                "local_id": local_id,
+                "title": album.title,
+                "artwork_url": artwork,
+                "release_date": album.release_date,
+                "release_type": album.release_type,
+                "source_filter": source_filter,
+                "number_of_tracks": album.number_of_tracks,
+                "artist_name": album.artist.name,
+                "in_library": local_id.is_some()
+            })
+        })
+        .collect()
 }
 
 /// Fetches up to `max_pages` from one TIDAL release filter. The overview asks
@@ -1467,11 +1538,11 @@ async fn build_tidal_artist_payload_with_depth(
     // filter it came from so the frontend can bucket it correctly - TIDAL's
     // per-album `release_type` body field is unreliable and was the original
     // reason Singles / Compilations sections were silently empty.
-    let release_filters_has_more = json!({
-        "ALBUMS": albums_res.as_ref().ok().is_some_and(|pages| pages.has_more),
-        "EPSANDSINGLES": eps_res.as_ref().ok().is_some_and(|pages| pages.has_more),
-        "COMPILATIONS": comps_res.as_ref().ok().is_some_and(|pages| pages.has_more),
-        "LIVE": live_res.as_ref().ok().is_some_and(|pages| pages.has_more),
+    let release_filter_status = json!({
+        "ALBUMS": artist_release_status(&albums_res),
+        "EPSANDSINGLES": artist_release_status(&eps_res),
+        "COMPILATIONS": artist_release_status(&comps_res),
+        "LIVE": artist_release_status(&live_res),
     });
     let all_albums = merge_tidal_artist_album_filters([
         (albums_res.unwrap_or_default().items, "ALBUMS"),
@@ -1480,33 +1551,7 @@ async fn build_tidal_artist_payload_with_depth(
         (live_res.unwrap_or_default().items, "LIVE"),
     ]);
 
-    let tidal_album_ids: Vec<i64> = all_albums.iter().map(|(a, _)| a.id).collect();
-    let known_map = {
-        let s = state.read().await;
-        s.db.with_conn(|conn| queries::get_known_album_tidal_ids(conn, &tidal_album_ids))
-            .unwrap_or_default()
-    };
-
-    let albums_payload: Vec<Value> = all_albums
-        .into_iter()
-        .map(|(a, source_filter)| {
-            let artwork =
-                crate::services::tidal::client::TidalClient::get_artwork_url(&a.cover, 320);
-            let local_id = known_map.get(&a.id).copied();
-            json!({
-                "tidal_id": a.id,
-                "local_id": local_id,
-                "title": a.title,
-                "artwork_url": artwork,
-                "release_date": a.release_date,
-                "release_type": a.release_type,
-                "source_filter": source_filter,
-                "number_of_tracks": a.number_of_tracks,
-                "artist_name": a.artist.name,
-                "in_library": local_id.is_some()
-            })
-        })
-        .collect();
+    let albums_payload = artist_albums_payload(state, all_albums).await;
 
     let top_tracks_payload: Vec<Value> = match top_res {
         Ok(r) => {
@@ -1635,7 +1680,7 @@ async fn build_tidal_artist_payload_with_depth(
         "picture_url": picture_url,
         "available": available,
         "sections_failed": sections_failed,
-        "release_filters_has_more": release_filters_has_more,
+        "release_filter_status": release_filter_status,
     });
 
     tracing::info!(
@@ -1824,6 +1869,100 @@ pub(super) async fn get_artist_discography(
     }
 
     Ok(Json(payload))
+}
+
+/// One release-filter page for a see-all view. A failure has an explicit
+/// unknown continuation state so the client can keep its earlier pages and retry.
+pub(super) async fn get_tidal_artist_release_page(
+    State(state): State<SharedState>,
+    Path(tidal_artist_id): Path<i64>,
+    Query(query): Query<ArtistReleasePageQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if tidal_artist_id <= 0 || query.offset < 0 || query.offset % 50 != 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Expected a positive artist id and a nonnegative page offset" })),
+        ));
+    }
+    let Some(filter) = artist_release_filter(&query.filter) else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Unknown artist release filter" })),
+        ));
+    };
+    let (tokens, tidal_http_client) = {
+        let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+        let s = state.read().await;
+        (
+            s.tidal_tokens.clone().or(persisted),
+            s.tidal_http_client.clone(),
+        )
+    };
+    let Some(tokens) = tokens else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "TIDAL not connected" })),
+        ));
+    };
+    let client = TidalClient::with_http(
+        tidal_http_client,
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    )
+    .for_background_work();
+    let mut page = bounded_artist_fetch("release-page", ARTIST_ALBUM_GROUP_TIMEOUT, || {
+        client.get_artist_albums(tidal_artist_id, 50, query.offset, Some(filter))
+    })
+    .await;
+    if page.as_ref().err().is_some_and(error_looks_like_auth) {
+        if let Ok(recovered) = recover_tidal_client(&state, &tokens).await {
+            let recovered = recovered.for_background_work();
+            page = bounded_artist_fetch("release-page", ARTIST_ALBUM_GROUP_TIMEOUT, || {
+                recovered.get_artist_albums(tidal_artist_id, 50, query.offset, Some(filter))
+            })
+            .await;
+        }
+    }
+    match page {
+        Ok(page) => {
+            let collected = query.offset as usize + page.items.len();
+            let has_more = !artist_album_page_is_last(
+                page.items.len() as i32,
+                page.total_number_of_items,
+                collected,
+            );
+            let albums = artist_albums_payload(
+                &state,
+                page.items
+                    .into_iter()
+                    .map(|album| (album, filter))
+                    .collect(),
+            )
+            .await;
+            Ok(Json(json!({
+                "albums": albums,
+                "status": { "failed": false, "has_more": has_more },
+            })))
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "noor.sync.tidal",
+                tidal_artist_id,
+                filter,
+                offset = query.offset,
+                "TIDAL release continuation failed: {error}"
+            );
+            Ok(Json(json!({
+                "albums": [],
+                "status": { "failed": true, "has_more": null },
+            })))
+        }
+    }
 }
 
 pub(super) async fn get_artist_spotify_stats(
