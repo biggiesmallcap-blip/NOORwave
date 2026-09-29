@@ -5,6 +5,7 @@
 	import PlayerLayoutSelect from './PlayerLayoutSelect.svelte';
 	import type { EffectivePlayerLayout } from '$lib/stores/playerLayout';
 	import { playerArtworkStyle } from '$lib/stores/playerArtwork';
+	import { bottomQualityDisplay, sideQualityDisplay } from '$lib/stores/playerInformation';
 	import type { StreamDisplayInfo, Track } from '$lib/api/client';
 	import {
 		tidalArtworkFallbackSizes,
@@ -123,6 +124,7 @@
 	let qualityTier = $derived(streamDisplay?.audio_quality ?? track?.best_quality ?? null);
 	let qualityLabel = $derived(formatQuality(qualityTier));
 	let qualityClass = $derived(qualityTier ? getQualityClass(qualityTier) : '');
+	let qualityDisplay = $derived(layout === 'bottom' ? $bottomQualityDisplay : $sideQualityDisplay);
 
 	function formatQuality(q: string | null) {
 		if (!q) return '';
@@ -198,8 +200,12 @@
 		streamDetail={streamDetail}
 		qualityLabel={qualityLabel}
 		qualityClass={qualityClass}
+		qualityDisplay={qualityDisplay}
 		playerState={playerState}
 		isScrubbing={isScrubbing}
+		showFavorite={layout === 'bottom'}
+		favoritePending={favoritePending}
+		onToggleFavorite={onToggleFavorite}
 	/>
 
 	<NowPlayingProgress
@@ -679,9 +685,10 @@
 	.horizontal :global(.badge-row) { display: flex; }
 	.horizontal :global(.badge-row .state-badge) { font-size: var(--font-size-2xs); }
 	.horizontal :global(.np-album),
-	.horizontal :global(.np-source),
-	.horizontal :global(.np-quality-chip),
-	.horizontal :global(.stream-micro) { display: none; }
+	.horizontal :global(.np-source) { display: none; }
+	.horizontal :global(.np-quality-chip) { font-size: var(--font-size-2xs); }
+	.horizontal :global(.badge-row) { flex-wrap: wrap; column-gap: 6px; row-gap: 3px; }
+	.horizontal :global(.stream-micro) { max-width: 100%; }
 
 	.horizontal .player-error { grid-column: 1 / -1; }
 

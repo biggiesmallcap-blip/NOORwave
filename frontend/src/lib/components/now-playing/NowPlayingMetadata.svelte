@@ -1,6 +1,7 @@
 <script lang="ts">
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import type { Track } from '$lib/api/client';
+	import type { QualityDisplay } from '$lib/stores/playerInformation';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import {
 		albumRefFromTrack,
@@ -24,10 +25,14 @@
 		streamDetail = '',
 		qualityLabel = '',
 		qualityClass = '',
+		qualityDisplay = 'details',
 		playerState,
 		isScrubbing,
 		showStateBadge = true,
 		stateBadgeCompact = true,
+		showFavorite = false,
+		favoritePending = false,
+		onToggleFavorite,
 	}: {
 		track: Track | null;
 		/** Off by default: the desktop panel is self-evidently the now-playing
@@ -40,10 +45,14 @@
 		 * artwork carries no badges of its own. */
 		qualityLabel?: string;
 		qualityClass?: string;
+		qualityDisplay?: QualityDisplay;
 		playerState: string;
 		isScrubbing: boolean;
 		showStateBadge?: boolean;
 		stateBadgeCompact?: boolean;
+		showFavorite?: boolean;
+		favoritePending?: boolean;
+		onToggleFavorite?: () => void;
 	} = $props();
 
 	const titleRef = $derived(track ? trackRefFromTrack(track) : null);
@@ -54,7 +63,7 @@
 	const albumHref = $derived(mediaHref(albumRef));
 </script>
 
-<div class="np-info">
+<div class="np-info" class:has-favorite={showFavorite}>
 	<div class="np-copy">
 		{#if eyebrow}
 			<p class="np-eyebrow">{eyebrow}</p>
@@ -116,15 +125,32 @@
 			<p class="np-source">{nowPlayingAttribution}</p>
 		{/if}
 	</div>
+	{#if showFavorite && onToggleFavorite}
+		<button
+			class="np-favorite"
+			class:active={track?.is_favorite}
+			type="button"
+			title={track?.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
+			aria-label={track?.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
+			aria-pressed={track?.is_favorite ?? false}
+			disabled={!track || favoritePending}
+			onclick={onToggleFavorite}
+		>{track?.is_favorite ? '♥' : '♡'}</button>
+	{/if}
 
 	{#if showStateBadge}
 		<div class="badge-row">
 			<StateBadge label={isScrubbing ? 'Scrubbing' : playerState} tone={track ? 'active' : 'muted'} compact={stateBadgeCompact} />
-			{#if qualityLabel}
+			{#if qualityLabel && (qualityDisplay === 'icon' || qualityDisplay === 'both')}
+				<span class={`quality-badge quality-icon ${qualityClass}`} role="img" aria-label={`${qualityLabel}${streamDetail ? `, ${streamDetail}` : ''}`} title={`${qualityLabel}${streamDetail ? ` · ${streamDetail}` : ''}`}>
+					<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M1.5 8h2.2l1.4-3.6 2.5 7.2 2-5.4 1.4 1.8h3.5" /></svg>
+				</span>
+			{/if}
+			{#if qualityLabel && (qualityDisplay === 'details' || qualityDisplay === 'both')}
 				<span class={`quality-badge np-quality-chip ${qualityClass}`}>{qualityLabel}</span>
 			{/if}
-			{#if streamDetail}
-				<span class="stream-micro">{streamDetail}</span>
+			{#if streamDetail && (qualityDisplay === 'details' || qualityDisplay === 'both')}
+				<span class="stream-micro" title={streamDetail}>{streamDetail}</span>
 			{/if}
 		</div>
 	{/if}
@@ -137,6 +163,32 @@
 		gap: 6px;
 		min-width: 0;
 	}
+
+	.np-info.has-favorite {
+		position: relative;
+		padding-right: 34px;
+	}
+
+	.np-favorite {
+		position: absolute;
+		top: 0;
+		right: 0;
+		display: grid;
+		place-items: center;
+		width: 28px;
+		height: 28px;
+		padding: 0;
+		border: 1px solid var(--border-subtle);
+		border-radius: 50%;
+		background: var(--bg-surface);
+		color: var(--text-secondary);
+		font-size: var(--font-size-md);
+		cursor: pointer;
+	}
+
+	.np-favorite:hover,
+	.np-favorite.active { color: var(--accent-strong); border-color: var(--accent-line); }
+	.np-favorite:disabled { opacity: 0.45; cursor: default; }
 
 	.np-copy {
 		display: flex;
@@ -168,6 +220,7 @@
 		font-family: var(--font-display);
 		line-height: var(--line-height-tight);
 		letter-spacing: -0.02em;
+		width: fit-content;
 	}
 
 	.np-title-text {
@@ -203,6 +256,24 @@
 
 	.np-quality-chip {
 		flex: 0 0 auto;
+	}
+
+	.quality-icon {
+		flex: 0 0 auto;
+		justify-content: center;
+		width: 22px;
+		height: 22px;
+		padding: 0;
+	}
+
+	.quality-icon svg {
+		width: 14px;
+		height: 14px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.5;
+		stroke-linecap: round;
+		stroke-linejoin: round;
 	}
 
 	.stream-micro {

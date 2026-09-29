@@ -102,6 +102,7 @@
 	import { uiZoom, setZoom, zoomIn, zoomOut, resetZoom, MIN as ZOOM_MIN, MAX as ZOOM_MAX, WHEEL_STEP as ZOOM_STEP } from '$lib/stores/uiZoom';
 	import { playerPlacement, type PlayerPlacement } from '$lib/stores/playerLayout';
 	import { playerArtworkStyle, type PlayerArtworkStyle } from '$lib/stores/playerArtwork';
+	import { bottomQualityDisplay, sideQualityDisplay, type QualityDisplay } from '$lib/stores/playerInformation';
 	import { surfaceMode, type SurfaceMode } from '$lib/stores/surfaceMode';
 	import { horizontalShelfWheel } from '$lib/stores/shelf_scrolling';
 	import { audioSettings } from '$lib/stores/audio_settings';
@@ -130,6 +131,12 @@
 
 	const SERVER_UNREACHABLE_MESSAGE =
 		'NOOR cannot reach the local server, so it cannot verify your current TIDAL session.';
+	const QUALITY_DISPLAY_OPTIONS: { id: QualityDisplay; label: string }[] = [
+		{ id: 'off', label: 'Hidden' },
+		{ id: 'icon', label: 'Icon' },
+		{ id: 'details', label: 'Full data' },
+		{ id: 'both', label: 'Both' }
+	];
 	const APP_VERSION = String(import.meta.env.NOOR_APP_VERSION ?? '0.0.0');
 	const DISCOVERY_COMPLETION_REFRESH_DELAY_MS = 1000;
 	const DISCOVERY_COMPLETION_REFRESH_MAX_ATTEMPTS = 12;
@@ -1972,6 +1979,25 @@
 							<span aria-hidden="true">{option.icon}</span><strong>{option.label}</strong>
 						</button>
 					{/each}
+				</div>
+			</section>
+			<section data-setting-id="player-information" class="glass-panel section-panel">
+				<SectionHeader eyebrow="Player" title="Streaming quality" subtitle="Choose how much quality information appears. Sample rate and bit depth show when the stream reports them." />
+				<div class="quality-setting-row">
+					<strong>Side panel</strong>
+					<div class="quality-mode-options" role="group" aria-label="Side panel streaming quality">
+						{#each QUALITY_DISPLAY_OPTIONS as option (option.id)}
+							<button type="button" class:active={$sideQualityDisplay === option.id} aria-pressed={$sideQualityDisplay === option.id} onclick={() => sideQualityDisplay.set(option.id)}>{option.label}</button>
+						{/each}
+					</div>
+				</div>
+				<div class="quality-setting-row">
+					<strong>Bottom player</strong>
+					<div class="quality-mode-options" role="group" aria-label="Bottom player streaming quality">
+						{#each QUALITY_DISPLAY_OPTIONS as option (option.id)}
+							<button type="button" class:active={$bottomQualityDisplay === option.id} aria-pressed={$bottomQualityDisplay === option.id} onclick={() => bottomQualityDisplay.set(option.id)}>{option.label}</button>
+						{/each}
+					</div>
 				</div>
 			</section>
 			<section data-setting-id="surface-mode" class="glass-panel section-panel">
@@ -4593,6 +4619,42 @@
 	}
 
 	.player-position-options.artwork-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+	.quality-setting-row {
+		display: grid;
+		grid-template-columns: 130px minmax(0, 1fr);
+		align-items: center;
+		gap: 12px;
+		margin-top: 10px;
+	}
+
+	.quality-setting-row strong { font-size: var(--font-size-sm); }
+
+	.quality-mode-options {
+		display: grid;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		gap: 6px;
+	}
+
+	.quality-mode-options button {
+		min-height: 34px;
+		padding: 6px 8px;
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+		background: var(--bg-surface);
+		color: var(--text-secondary);
+		font: inherit;
+		font-size: var(--font-size-xs);
+		cursor: pointer;
+	}
+
+	.quality-mode-options button:hover,
+	.quality-mode-options button.active { border-color: var(--accent-line); background: var(--accent-soft); color: var(--text-primary); }
+	.quality-mode-options button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+	@media (max-width: 920px) {
+		.quality-setting-row { grid-template-columns: 1fr; gap: 6px; }
+	}
 
 	.player-position-option {
 		display: flex;

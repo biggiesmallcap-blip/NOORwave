@@ -2525,15 +2525,6 @@
 		overflow: visible;
 	}
 
-	/* The player's controls stay at full size. Desktop browsing and navigation
-	   use the former 90% density as their 100% baseline; CSS zoom keeps each grid
-	   item's hit box inside its assigned track while giving its contents more
-	   logical room. The mobile shell retains its own sizing. */
-	@media (min-width: 680px) {
-		.sidebar,
-		.workspace { zoom: 0.9; }
-	}
-
 	.app-shell[data-player-layout='bottom'] .queue-section { display: none; }
 
 	.app-shell[data-player-layout='bottom'] .now-playing-panel.queue-drawer-open .queue-section {
@@ -3688,9 +3679,32 @@
 		.workspace { padding: calc(20px + var(--safe-top)) calc(16px + var(--safe-right)) calc(36px + var(--safe-bottom)) calc(16px + var(--safe-left)); }
 	}
 
+	/* Give the full-size bottom-layout navigation its last few pixels without
+	   reducing the menu rows or logo. */
+	@media (min-height: 1200px) and (min-width: 680px) {
+		.app-shell[data-player-layout='bottom'] .sidebar-footer { padding-top: 10px; }
+	}
+
+	/* The bottom player reduces sidebar height on mid-height desktops. Keep the
+	   full navigation labels, but reclaim only the space those windows need. */
+	@media (min-height: 951px) and (max-height: 1199px) and (min-width: 680px) {
+		.app-shell[data-player-layout='bottom'] .sidebar { padding: 12px 10px; }
+		.app-shell[data-player-layout='bottom'] .brand { padding: 0 4px 7px; }
+		.app-shell[data-player-layout='bottom'] .brand-splash { max-width: 120px; }
+		.app-shell[data-player-layout='bottom'] .sidebar :global(.nav) { gap: 8px; }
+		.app-shell[data-player-layout='bottom'] .sidebar :global(.nav-zone) { gap: 0; }
+		.app-shell[data-player-layout='bottom'] .sidebar :global(.nav-zone-label) { padding-bottom: 2px; }
+		.app-shell[data-player-layout='bottom'] .sidebar :global(.nav-item) { padding-block: 6px; }
+		.app-shell[data-player-layout='bottom'] .sidebar-footer { padding: 7px 0 0; gap: 0; }
+		.app-shell[data-player-layout='bottom'] .live-status { gap: 5px; padding: 6px 8px; }
+		.app-shell[data-player-layout='bottom'] .live-status-head { gap: 5px; }
+		.app-shell[data-player-layout='bottom'] .live-actions { gap: 2px; }
+		.app-shell[data-player-layout='bottom'] .theme-toggle { min-height: 32px; padding-block: 5px; margin-top: 6px; }
+	}
+
 	/* Keep every labeled destination and the status row visible when a bottom
 	   player or a shorter monitor reduces the sidebar's vertical space. */
-	@media (max-height: 1100px) and (min-width: 680px) {
+	@media (max-height: 950px) and (min-width: 680px) {
 		.sidebar { padding: 12px 10px; }
 		.brand { padding: 0 4px 7px; }
 		.brand-splash { max-width: 120px; }
