@@ -101,6 +101,7 @@
 	import { palette, setPalette } from '$lib/stores/palette';
 	import { uiZoom, setZoom, zoomIn, zoomOut, resetZoom, MIN as ZOOM_MIN, MAX as ZOOM_MAX, WHEEL_STEP as ZOOM_STEP } from '$lib/stores/uiZoom';
 	import { playerPlacement, type PlayerPlacement } from '$lib/stores/playerLayout';
+	import { playerArtworkStyle, type PlayerArtworkStyle } from '$lib/stores/playerArtwork';
 	import { surfaceMode, type SurfaceMode } from '$lib/stores/surfaceMode';
 	import { horizontalShelfWheel } from '$lib/stores/shelf_scrolling';
 	import { audioSettings } from '$lib/stores/audio_settings';
@@ -1956,6 +1957,19 @@
 						>
 							<span aria-hidden="true">{option.icon}</span>
 							<strong>{option.label}</strong>
+						</button>
+					{/each}
+				</div>
+			</section>
+			<section data-setting-id="player-artwork" class="glass-panel section-panel">
+				<SectionHeader eyebrow="Player" title="Artwork" subtitle="Choose how album art appears in the side player. The bottom player keeps a larger square cover." />
+				<div class="player-position-options artwork-options" role="group" aria-label="Side player artwork style">
+					{#each [
+						{ id: 'square', icon: '□', label: 'Square cover' },
+						{ id: 'banner', icon: '▭', label: 'Wide banner' }
+					] as option (option.id)}
+						<button type="button" class="player-position-option" class:active={$playerArtworkStyle === option.id} aria-pressed={$playerArtworkStyle === option.id} onclick={() => playerArtworkStyle.set(option.id as PlayerArtworkStyle)}>
+							<span aria-hidden="true">{option.icon}</span><strong>{option.label}</strong>
 						</button>
 					{/each}
 				</div>
@@ -4577,6 +4591,8 @@
 		grid-template-columns: repeat(3, minmax(0, 1fr));
 		gap: 10px;
 	}
+
+	.player-position-options.artwork-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
 	.player-position-option {
 		display: flex;

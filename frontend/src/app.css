@@ -237,8 +237,8 @@
 	--z-toast:   2000;  /* toasts, command palette, top-of-stack panels      */
 	--z-tooltip: 3000;  /* tooltips (must overlap modals)                    */
 
-	--font-body:    'Manrope', 'Avenir Next', 'Segoe UI', 'Helvetica Neue', system-ui, sans-serif;
-	--font-display: 'Newsreader', 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', Georgia, serif;
+	--font-body:    'Inter', 'Segoe UI', 'Helvetica Neue', system-ui, sans-serif;
+	--font-display: Georgia, 'Iowan Old Style', 'Palatino Linotype', serif;
 	--font-mono:    'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
 
 	/* Typography scale — rem-based clamp(): every step interpolates with viewport

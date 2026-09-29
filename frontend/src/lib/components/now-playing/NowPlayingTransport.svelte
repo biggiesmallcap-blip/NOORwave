@@ -201,7 +201,7 @@
 		height: 40px;
 	}
 
-	.bottom-actions-toggle:hover { transform: translateY(-50%); }
+	.tp-btn.bottom-actions-toggle:hover { transform: translateY(-50%); }
 
 	.bottom-actions-menu {
 		position: absolute;

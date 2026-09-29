@@ -4,6 +4,7 @@
 	import NowPlayingTransport from '$lib/components/now-playing/NowPlayingTransport.svelte';
 	import PlayerLayoutSelect from './PlayerLayoutSelect.svelte';
 	import type { EffectivePlayerLayout } from '$lib/stores/playerLayout';
+	import { playerArtworkStyle } from '$lib/stores/playerArtwork';
 	import type { StreamDisplayInfo, Track } from '$lib/api/client';
 	import {
 		tidalArtworkFallbackSizes,
@@ -162,7 +163,7 @@
 	}
 </script>
 
-<div class="np-top" class:queue-expanded={queueExpanded && layout !== 'bottom'} class:horizontal={layout === 'bottom'}>
+<div class="np-top" class:queue-expanded={queueExpanded && layout !== 'bottom'} class:horizontal={layout === 'bottom'} class:banner-artwork={$playerArtworkStyle === 'banner' && layout !== 'bottom'}>
 	<div class="player-head">
 		<span class="player-head-label">Now playing</span>
 		<PlayerLayoutSelect effective={layout} />
@@ -378,7 +379,7 @@
 
 	.np-artwork-wrap {
 		position: relative;
-		width: min(100%, 28dvh, 320px);
+		width: min(100%, 38dvh, 320px);
 		aspect-ratio: 1;
 		align-self: center;
 		border-radius: 22px;
@@ -391,10 +392,16 @@
 		flex-shrink: 0;
 	}
 
+	.np-top.banner-artwork .np-artwork-wrap {
+		width: 100%;
+		aspect-ratio: 16 / 9;
+		max-height: min(24dvh, 220px);
+	}
+
 	.np-fullscreen-btn {
 		position: absolute;
-		top: 10px;
-		left: 10px;
+		top: 50%;
+		left: 50%;
 		width: 30px;
 		height: 30px;
 		border-radius: 8px;
@@ -407,7 +414,7 @@
 		backdrop-filter: var(--blur-base);
 		-webkit-backdrop-filter: var(--blur-base);
 		opacity: 0;
-		transform: translateY(-4px);
+		transform: translate(-50%, -50%) scale(0.94);
 		transition: opacity 160ms ease, transform 160ms ease, background 160ms ease;
 		cursor: pointer;
 	}
@@ -415,7 +422,7 @@
 	.np-artwork-wrap:hover .np-fullscreen-btn,
 	.np-fullscreen-btn:focus-visible {
 		opacity: 1;
-		transform: translateY(0);
+		transform: translate(-50%, -50%) scale(1);
 	}
 
 	.np-fullscreen-btn:hover {
@@ -551,6 +558,7 @@
 		width: 64px;
 		height: 64px;
 		max-height: 64px;
+		aspect-ratio: 1;
 		overflow: hidden;
 	}
 
@@ -623,12 +631,12 @@
 	   carrying a tall side-panel stack into the bottom row. */
 	.np-top.horizontal {
 		display: grid;
-		grid-template-columns: 76px minmax(0, 1fr) auto minmax(0, 1fr) 32px 32px;
+		grid-template-columns: 80px minmax(0, 1fr) auto minmax(0, 1fr) 32px 32px;
 		grid-template-areas:
 			'art info transport controls queue head'
 			'art progress progress progress progress progress';
 		align-items: center;
-		column-gap: 12px;
+		column-gap: 16px;
 		row-gap: 8px;
 		padding: 12px 16px;
 	}
@@ -642,7 +650,7 @@
 
 	.horizontal .np-artwork-wrap {
 		grid-area: art;
-		width: 64px;
+		width: 80px;
 		border-radius: var(--radius-md);
 	}
 
@@ -684,7 +692,7 @@
 			padding-inline: 12px;
 		}
 
-		.horizontal .np-artwork-wrap { width: 56px; }
+		.horizontal .np-artwork-wrap { width: 72px; }
 		.horizontal .player-queue-trigger { width: 32px; }
 	}
 
