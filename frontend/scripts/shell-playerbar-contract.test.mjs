@@ -22,18 +22,19 @@ describe('shell player bar extraction', () => {
 		expect(layout).not.toContain('.player-error');
 	});
 
-	test('keeps the artwork free of floating chips', () => {
-		// Four chips over a 267px square became four overlapping chips over a
-		// 64px strip the moment the queue expanded. Favorite lives in the
-		// transport now, download in the overflow menu, quality in the badge
-		// row; only the hover-revealed quiet-mode button stays.
+	test('keeps artwork overlays limited to quiet mode and the bottom favorite', () => {
 		const playerBar = readFileSync('src/lib/shell/PlayerBar.svelte', 'utf8');
+		const artwork = playerBar.slice(
+			playerBar.indexOf('<div class="np-artwork-wrap">'),
+			playerBar.indexOf('<NowPlayingMetadata')
+		);
 
-		expect(playerBar).not.toContain('np-art-fav');
-		expect(playerBar).not.toContain('np-art-dl');
-		expect(playerBar).not.toContain('np-quality');
-		expect(playerBar).not.toContain('np-resolution');
-		expect(playerBar).toContain('np-fullscreen-btn');
+		expect(artwork).not.toContain('np-art-dl');
+		expect(artwork).not.toContain('np-quality');
+		expect(artwork).not.toContain('np-resolution');
+		expect(artwork).toContain('np-artwork-quiet-cue');
+		expect(artwork).toContain("layout === 'bottom'");
+		expect(artwork).toContain('np-artwork-favorite');
 		expect(playerBar).toContain('onToggleFavorite={onToggleFavorite}');
 	});
 
@@ -63,16 +64,13 @@ describe('shell player bar extraction', () => {
 		expect(layout).not.toContain('function queueSourceSlug');
 	});
 
-	test('measures title overflow for the now-playing marquee', () => {
+	test('truncates long titles with a full-title tooltip and bounded link', () => {
 		const metadata = readFileSync('src/lib/components/now-playing/NowPlayingMetadata.svelte', 'utf8');
 
-		expect(metadata).toContain('bind:this={titleShellEl}');
-		expect(metadata).toContain('bind:this={titleTextEl}');
-		expect(metadata).toContain('scrollWidth - titleShellEl.clientWidth');
-		expect(metadata).toContain('--np-title-marquee-distance');
-		expect(metadata).toContain('class:marquee-ready={titleOverflowing}');
-		expect(metadata).toContain('.np-title.marquee-ready:hover .np-title-text');
-		expect(metadata).not.toContain('100% - 220px');
+		expect(metadata).toContain('title={track.title}');
+		expect(metadata).toContain('width: fit-content;');
+		expect(metadata).toContain('text-overflow: ellipsis;');
+		expect(metadata).not.toContain('marquee-ready');
 	});
 
 	test('lets the volume control handle mouse wheel adjustments', () => {

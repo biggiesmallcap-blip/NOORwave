@@ -3726,7 +3726,7 @@
 		.brand-splash { max-width: 90px; }
 		.sidebar :global(.nav) { gap: 4px; }
 		.sidebar :global(.nav-zone-label) { display: none; }
-		.sidebar :global(.nav-item) { padding-block: 4px; line-height: 1.25; }
+		.sidebar :global(.nav-item) { padding-block: 4px; line-height: var(--line-height-snug); }
 		.sidebar-footer { padding-top: 4px; }
 	}
 

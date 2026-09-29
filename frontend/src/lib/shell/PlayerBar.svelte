@@ -390,7 +390,7 @@
 		border-radius: 999px;
 		background: var(--bg-surface-strong);
 		color: var(--text-secondary);
-		font-size: 10px;
+		font-size: var(--font-size-2xs);
 		font-variant-numeric: tabular-nums;
 	}
 

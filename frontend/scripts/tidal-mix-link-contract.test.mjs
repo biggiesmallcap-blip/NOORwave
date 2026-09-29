@@ -53,7 +53,8 @@ describe('TIDAL mix link contracts', () => {
 		expect(quietMode).toContain('quietAlbumHref');
 		expect(quietMode).toContain('class="quiet-art-link"');
 		expect(metadata).toContain('trackRefFromTrack');
-		expect(metadata).toContain('mediaHref(titleRef)');
+		expect(metadata).toContain('const titleHref = $derived(albumHref)');
+		expect(metadata).toContain('href={titleHref}');
 		expect(metadata).toContain('class="np-title np-title-link"');
 		expect(metadata).not.toContain('tidal.com/browse/track');
 		expect(metadata).toContain('albumRefFromTrack');
