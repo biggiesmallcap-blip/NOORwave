@@ -30,9 +30,6 @@
 		isScrubbing,
 		showStateBadge = true,
 		stateBadgeCompact = true,
-		showFavorite = false,
-		favoritePending = false,
-		onToggleFavorite,
 	}: {
 		track: Track | null;
 		/** Off by default: the desktop panel is self-evidently the now-playing
@@ -50,9 +47,6 @@
 		isScrubbing: boolean;
 		showStateBadge?: boolean;
 		stateBadgeCompact?: boolean;
-		showFavorite?: boolean;
-		favoritePending?: boolean;
-		onToggleFavorite?: () => void;
 	} = $props();
 
 	const titleRef = $derived(track ? trackRefFromTrack(track) : null);
@@ -68,38 +62,24 @@
 		{#if eyebrow}
 			<p class="np-eyebrow">{eyebrow}</p>
 		{/if}
-		<div class="np-title-row">
-			{#if track && titleRef && titleHref}
-				<a
-					class="np-title np-title-link"
-					href={titleHref}
-					title={track.title}
-					oncontextmenu={(e) => {
-						e.preventDefault();
-						e.stopPropagation();
-						openContextMenu(e, buildMediaMenu(titleRef), titleRef.label);
-					}}
-				>
-					<span class="np-title-text">{track.title}</span>
-				</a>
-			{:else}
-				<h2 class="np-title" title={track?.title ?? 'Nothing queued'}>
-					<span class="np-title-text">{track?.title ?? 'Nothing queued'}</span>
-				</h2>
-			{/if}
-			{#if showFavorite && onToggleFavorite}
-				<button
-					class="np-favorite"
-					class:active={track?.is_favorite}
-					type="button"
-					title={track?.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
-					aria-label={track?.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
-					aria-pressed={track?.is_favorite ?? false}
-					disabled={!track || favoritePending}
-					onclick={onToggleFavorite}
-				>{track?.is_favorite ? '♥' : '♡'}</button>
-			{/if}
-		</div>
+		{#if track && titleRef && titleHref}
+			<a
+				class="np-title np-title-link"
+				href={titleHref}
+				title={track.title}
+				oncontextmenu={(e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					openContextMenu(e, buildMediaMenu(titleRef), titleRef.label);
+				}}
+			>
+				<span class="np-title-text">{track.title}</span>
+			</a>
+		{:else}
+			<h2 class="np-title" title={track?.title ?? 'Nothing queued'}>
+				<span class="np-title-text">{track?.title ?? 'Nothing queued'}</span>
+			</h2>
+		{/if}
 		{#if artistRef && artistHref}
 			<a
 				class="np-artist np-link"
@@ -162,32 +142,6 @@
 		min-width: 0;
 	}
 
-	.np-title-row {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		min-width: 0;
-	}
-
-	.np-favorite {
-		display: grid;
-		place-items: center;
-		flex: 0 0 28px;
-		width: 28px;
-		height: 28px;
-		padding: 0;
-		border: 1px solid var(--border-subtle);
-		border-radius: 50%;
-		background: var(--bg-surface);
-		color: var(--text-secondary);
-		font-size: var(--font-size-md);
-		cursor: pointer;
-	}
-
-	.np-favorite:hover,
-	.np-favorite.active { color: var(--accent-strong); border-color: var(--accent-line); }
-	.np-favorite:disabled { opacity: 0.45; cursor: default; }
-
 	.np-copy {
 		display: flex;
 		flex-direction: column;
@@ -214,8 +168,6 @@
 	}
 
 	.np-title {
-		flex: 0 1 auto;
-		min-width: 0;
 		font-size: var(--font-size-xl);
 		font-family: var(--font-display);
 		line-height: var(--line-height-tight);

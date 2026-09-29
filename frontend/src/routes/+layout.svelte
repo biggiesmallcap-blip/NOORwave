@@ -3688,7 +3688,7 @@
 
 	/* The bottom player reduces sidebar height on mid-height desktops. Keep the
 	   full navigation labels, but reclaim only the space those windows need. */
-	@media (min-height: 951px) and (max-height: 1199px) and (min-width: 680px) {
+	@media (min-height: 1000px) and (max-height: 1199px) and (min-width: 680px) {
 		.app-shell[data-player-layout='bottom'] .sidebar { padding: 12px 10px; }
 		.app-shell[data-player-layout='bottom'] .brand { padding: 0 4px 7px; }
 		.app-shell[data-player-layout='bottom'] .brand-splash { max-width: 120px; }
@@ -3705,7 +3705,7 @@
 
 	/* Keep every labeled destination and the status row visible when a bottom
 	   player or a shorter monitor reduces the sidebar's vertical space. */
-	@media (max-height: 950px) and (min-width: 680px) {
+	@media (max-height: 999px) and (min-width: 680px) {
 		.sidebar { padding: 12px 10px; }
 		.brand { padding: 0 4px 7px; }
 		.brand-splash { max-width: 120px; }

@@ -4,6 +4,12 @@
 	let { pathname } = $props<{
 		pathname: string;
 	}>();
+	const MAX_LINK_STEP_REM = 4;
+	const ZONE_HEADING_ALLOWANCE_REM = 2;
+
+	function zoneMaxHeight(linkCount: number): string {
+		return `${linkCount * MAX_LINK_STEP_REM + ZONE_HEADING_ALLOWANCE_REM}rem`;
+	}
 
 	function isNavItemActive(path: string) {
 		if (path === '/') return pathname === '/';
@@ -13,7 +19,7 @@
 
 <nav class="nav" aria-label="Primary">
 	{#each NAVIGATION_ZONES as zone}
-		<div class="nav-zone">
+		<div class="nav-zone" style:--zone-grow={zone.items.length} style:--zone-max={zoneMaxHeight(zone.items.length)}>
 			<p class="nav-zone-label">{zone.label}</p>
 			{#each zone.items as item}
 				<a
@@ -45,13 +51,10 @@
 		flex-direction: column;
 		gap: 4px;
 		justify-content: space-between;
+		/* Grow with available height, stopping around one comfortable row per link. */
+		flex-grow: var(--zone-grow);
+		max-height: var(--zone-max);
 	}
-
-	/* Share spare height between links instead of leaving it all below Settings.
-	   The weights follow the current link counts in each navigation zone. */
-	.nav-zone:nth-child(1) { flex-grow: 9; }
-	.nav-zone:nth-child(2) { flex-grow: 4; }
-	.nav-zone:nth-child(3) { flex-grow: 1; }
 
 	.nav-zone-label {
 		padding: 0 10px 5px;

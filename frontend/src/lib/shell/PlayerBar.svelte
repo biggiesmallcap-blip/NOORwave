@@ -171,26 +171,40 @@
 		<PlayerLayoutSelect effective={layout} />
 	</div>
 	<div class="np-artwork-wrap">
-		{#key track?.artwork_url}
-			{#if nowPlayingArtwork}
-				<img
-					class="np-artwork"
-					src={nowPlayingArtwork}
-					alt=""
-					onerror={() => markArtworkFailed(nowPlayingArtwork)}
-				/>
-			{:else}
-				<div class="np-artwork placeholder">♫</div>
-			{/if}
-		{/key}
-
 		{#if track}
 			<button
-				class="np-fullscreen-btn"
+				class="np-artwork-open"
+				type="button"
 				aria-label="Enter quiet mode"
-				title="Quiet mode"
+				title="Enter quiet mode"
 				onclick={onEnterQuietMode}
-			>⛶</button>
+			><span class="np-artwork-quiet-cue" aria-hidden="true"><svg viewBox="0 0 20 20" focusable="false"><path d="M7 3H3v4m10-4h4v4M3 13v4h4m10-4v4h-4" /></svg></span></button>
+		{/if}
+		<div class="np-artwork-visual">
+			{#key track?.artwork_url}
+				{#if nowPlayingArtwork}
+					<img
+						class="np-artwork"
+						src={nowPlayingArtwork}
+						alt=""
+						onerror={() => markArtworkFailed(nowPlayingArtwork)}
+					/>
+				{:else}
+					<div class="np-artwork placeholder">♫</div>
+				{/if}
+			{/key}
+		</div>
+		{#if track && layout === 'bottom'}
+			<button
+				class="np-artwork-favorite"
+				class:active={track.is_favorite}
+				type="button"
+				title={track.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
+				aria-label={track.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
+				aria-pressed={track.is_favorite}
+				disabled={favoritePending}
+				onclick={onToggleFavorite}
+			>{track.is_favorite ? '♥' : '♡'}</button>
 		{/if}
 	</div>
 
@@ -203,9 +217,6 @@
 		qualityDisplay={qualityDisplay}
 		playerState={playerState}
 		isScrubbing={isScrubbing}
-		showFavorite={layout === 'bottom'}
-		favoritePending={favoritePending}
-		onToggleFavorite={onToggleFavorite}
 	/>
 
 	<NowPlayingProgress
@@ -404,35 +415,100 @@
 		max-height: min(24dvh, 220px);
 	}
 
-	.np-fullscreen-btn {
+	.np-artwork-visual {
+		width: 100%;
+		height: 100%;
+		transition: transform var(--motion-base);
+	}
+
+	.np-artwork-open {
 		position: absolute;
-		top: 50%;
-		left: 50%;
-		width: 30px;
-		height: 30px;
-		border-radius: 8px;
-		display: grid;
-		place-items: center;
-		font-size: var(--font-size-sm);
+		inset: 0;
+		z-index: 1;
+		display: flex;
+		align-items: flex-end;
+		justify-content: flex-end;
+		padding: 8px;
+		border: 0;
+		border-radius: inherit;
+		background: transparent;
 		color: #fff;
-		background: rgba(0, 0, 0, 0.45);
-		border: 1px solid rgba(255, 255, 255, 0.18);
-		backdrop-filter: var(--blur-base);
-		-webkit-backdrop-filter: var(--blur-base);
-		opacity: 0;
-		transform: translate(-50%, -50%) scale(0.94);
-		transition: opacity 160ms ease, transform 160ms ease, background 160ms ease;
 		cursor: pointer;
 	}
 
-	.np-artwork-wrap:hover .np-fullscreen-btn,
-	.np-fullscreen-btn:focus-visible {
-		opacity: 1;
-		transform: translate(-50%, -50%) scale(1);
+	.np-artwork-open:hover + .np-artwork-visual,
+	.np-artwork-open:focus-visible + .np-artwork-visual {
+		transform: scale(1.025);
 	}
 
-	.np-fullscreen-btn:hover {
-		background: rgba(0, 0, 0, 0.65);
+	.np-artwork-open:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: -3px;
+	}
+
+	.np-artwork-quiet-cue {
+		display: grid;
+		place-items: center;
+		width: 24px;
+		height: 24px;
+		border-radius: 6px;
+		color: #fff;
+		background: rgba(0, 0, 0, 0.5);
+		opacity: 0;
+		transition: opacity var(--motion-base);
+	}
+
+	.np-artwork-quiet-cue svg {
+		width: 14px;
+		height: 14px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.5;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+
+	.np-artwork-open:hover .np-artwork-quiet-cue,
+	.np-artwork-open:focus-visible .np-artwork-quiet-cue {
+		opacity: 1;
+	}
+
+	.horizontal .np-artwork-open {
+		align-items: flex-start;
+		justify-content: flex-start;
+		padding: 5px;
+	}
+
+	.horizontal .np-artwork-quiet-cue {
+		width: 20px;
+		height: 20px;
+	}
+
+	.np-artwork-favorite {
+		position: absolute;
+		right: 5px;
+		bottom: 5px;
+		z-index: 2;
+		display: grid;
+		place-items: center;
+		width: 30px;
+		height: 30px;
+		padding: 0;
+		border: 1px solid rgba(255, 255, 255, 0.3);
+		border-radius: 50%;
+		background: rgba(9, 9, 14, 0.72);
+		color: #fff;
+		font-size: var(--font-size-md);
+		cursor: pointer;
+	}
+
+	.np-artwork-favorite:hover,
+	.np-artwork-favorite.active { color: var(--accent-strong); border-color: var(--accent-line); }
+	.np-artwork-favorite:disabled { opacity: 0.55; cursor: default; }
+	.np-artwork-favorite:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+	@media (hover: none) {
+		.np-artwork-quiet-cue { opacity: 0.65; }
 	}
 
 	.np-artwork {
@@ -552,6 +628,10 @@
 
 	@media (prefers-reduced-motion: reduce) {
 		.np-artwork { animation: none; }
+		.np-artwork-visual,
+		.np-artwork-quiet-cue { transition: none; }
+		.np-artwork-open:hover + .np-artwork-visual,
+		.np-artwork-open:focus-visible + .np-artwork-visual { transform: none; }
 		.np-artwork-wrap,
 		.np-top :global(.np-progress),
 		.np-top :global(.np-info),
@@ -602,14 +682,6 @@
 	.np-top.queue-expanded :global(.np-copy .np-album),
 	.np-top.queue-expanded :global(.np-copy .np-source),
 	.np-top.queue-expanded :global(.badge-row) {
-		display: none;
-	}
-
-	/* The artwork is a 64px strip once the queue is expanded - anything
-	   floating over it collides with everything else, so the quiet-mode
-	   button steps aside (it stays on the collapsed artwork and in the
-	   right-click menu). */
-	.np-top.queue-expanded .np-fullscreen-btn {
 		display: none;
 	}
 
