@@ -2425,6 +2425,13 @@
 		grid-template-rows: minmax(0, 1fr) auto;
 	}
 
+	/* Keep fixed and raised controls inside the workspace's own layer. Without
+	   this, a high-z row action can sit above the bottom player and take clicks. */
+	.app-shell[data-player-layout='bottom'] .workspace {
+		position: relative;
+		z-index: 0;
+	}
+
 	.app-shell.has-wallpaper {
 		background: transparent;
 	}
@@ -2510,10 +2517,21 @@
 	}
 
 	.app-shell[data-player-layout='bottom'] .now-playing-panel {
+		z-index: var(--z-raised);
+		isolation: isolate;
 		border-left: 0;
 		border-top: 1px solid var(--border-subtle);
 		box-shadow: 0 -8px 28px var(--player-art-shadow);
 		overflow: visible;
+	}
+
+	/* The player's controls stay at full size. Desktop browsing and navigation
+	   use the former 90% density as their 100% baseline; CSS zoom keeps each grid
+	   item's hit box inside its assigned track while giving its contents more
+	   logical room. The mobile shell retains its own sizing. */
+	@media (min-width: 680px) {
+		.sidebar,
+		.workspace { zoom: 0.9; }
 	}
 
 	.app-shell[data-player-layout='bottom'] .queue-section { display: none; }
