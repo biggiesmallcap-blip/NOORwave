@@ -4194,6 +4194,82 @@ async fn prepared_runtime_track_error_keeps_current_playback_running() {
     assert_eq!(info.last_error.as_deref(), Some("prebuffer decode failed"));
 }
 
+#[tokio::test]
+async fn runtime_ready_after_device_swap_keeps_audible_track_active() {
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        fresh_migrated_db(),
+    )));
+    let (command_tx, _command_rx) = std::sync::mpsc::channel();
+    let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    {
+        let mut guard = state.write().await;
+        guard.playback_runtime = Some(PlaybackRuntimeState {
+            access_token: "test-token".to_string(),
+            handle: handle.clone(),
+        });
+        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+            device_name: "Old DAC".to_string(),
+            sample_rate: 44_100,
+            channels: 2,
+            active_track_id: Some(1),
+            last_error: None,
+            exclusive_engaged: true,
+            exclusive_transport_format: Some("24-bit".to_string()),
+        });
+        guard
+            .audio_active
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    assert!(apply_runtime_ready(&state, &handle, "New DAC".to_string(), 48_000, 2).await);
+    let guard = state.read().await;
+    assert!(
+        guard
+            .audio_active
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+    let info = guard.playback_runtime_info.as_ref().unwrap();
+    assert_eq!(info.active_track_id, Some(1));
+    assert_eq!(info.device_name, "New DAC");
+    assert_eq!(info.sample_rate, 48_000);
+    assert!(info.exclusive_engaged);
+}
+
+#[tokio::test]
+async fn runtime_ready_without_active_track_clears_audible_flag() {
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        fresh_migrated_db(),
+    )));
+    let (command_tx, _command_rx) = std::sync::mpsc::channel();
+    let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    {
+        let mut guard = state.write().await;
+        guard.playback_runtime = Some(PlaybackRuntimeState {
+            access_token: "test-token".to_string(),
+            handle: handle.clone(),
+        });
+        guard
+            .audio_active
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    assert!(apply_runtime_ready(&state, &handle, "Test DAC".to_string(), 48_000, 2).await);
+    let guard = state.read().await;
+    assert!(
+        !guard
+            .audio_active
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+    assert_eq!(
+        guard
+            .playback_runtime_info
+            .as_ref()
+            .unwrap()
+            .active_track_id,
+        None
+    );
+}
+
 #[test]
 fn runtime_track_error_retry_policy_only_retries_transient_failures() {
     for message in [

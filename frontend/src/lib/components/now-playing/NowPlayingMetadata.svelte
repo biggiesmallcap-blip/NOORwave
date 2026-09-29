@@ -50,11 +50,11 @@
 	} = $props();
 
 	const titleRef = $derived(track ? trackRefFromTrack(track) : null);
-	const titleHref = $derived(mediaHref(titleRef));
 	const artistRef = $derived(track ? artistRefFromTrack(track) : null);
 	const artistHref = $derived(mediaHref(artistRef));
 	const albumRef = $derived(track ? albumRefFromTrack(track) : null);
 	const albumHref = $derived(mediaHref(albumRef));
+	const titleHref = $derived(albumHref);
 </script>
 
 <div class="np-info">
@@ -80,45 +80,52 @@
 				<span class="np-title-text">{track?.title ?? 'Nothing queued'}</span>
 			</h2>
 		{/if}
-		{#if artistRef && artistHref}
-			<a
-				class="np-artist np-link"
-				href={artistHref}
-				oncontextmenu={(e) => {
-					e.preventDefault();
-					e.stopPropagation();
-					openContextMenu(e, buildMediaMenu(artistRef), artistRef.label);
-				}}
-			>
-				{artistRef.label}
-			</a>
-		{:else if track?.artist_name}
-			<p class="np-artist">{track.artist_name}</p>
-		{:else if !track}
-			<p class="np-artist">Choose a track to begin playback.</p>
-		{/if}
-		{#if albumRef && albumHref}
-			<a
-				class="np-album np-link"
-				href={albumHref}
-				oncontextmenu={(e) => {
-					e.preventDefault();
-					e.stopPropagation();
-					openContextMenu(e, buildMediaMenu(albumRef), albumRef.label);
-				}}
-			>
-				{albumRef.label}
-			</a>
-		{:else if track?.album_title}
-			<p class="np-album">{track.album_title}</p>
-		{/if}
+		<div class="np-byline">
+			{#if artistRef && artistHref}
+				<a
+					class="np-artist np-link"
+					href={artistHref}
+					oncontextmenu={(e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						openContextMenu(e, buildMediaMenu(artistRef), artistRef.label);
+					}}
+				>
+					{artistRef.label}
+				</a>
+			{:else if track?.artist_name}
+				<p class="np-artist">{track.artist_name}</p>
+			{:else if !track}
+				<p class="np-artist">Choose a track to begin playback.</p>
+			{/if}
+			{#if track?.album_title}
+				<span class="np-byline-separator" aria-hidden="true">·</span>
+				{#if albumRef && albumHref}
+					<a
+						class="np-album np-link"
+						href={albumHref}
+						oncontextmenu={(e) => {
+							e.preventDefault();
+							e.stopPropagation();
+							openContextMenu(e, buildMediaMenu(albumRef), albumRef.label);
+						}}
+					>
+						{albumRef.label}
+					</a>
+				{:else}
+					<p class="np-album">{track.album_title}</p>
+				{/if}
+			{/if}
+		</div>
 		{#if nowPlayingAttribution}
 			<p class="np-source">{nowPlayingAttribution}</p>
 		{/if}
 	</div>
-	{#if showStateBadge}
+	{#if showStateBadge && (playerState !== 'Playing' || isScrubbing || (qualityDisplay !== 'off' && (qualityLabel || streamDetail)))}
 		<div class="badge-row">
-			<StateBadge label={isScrubbing ? 'Scrubbing' : playerState} tone={track ? 'active' : 'muted'} compact={stateBadgeCompact} />
+			{#if playerState !== 'Playing' || isScrubbing}
+				<StateBadge label={isScrubbing ? 'Scrubbing' : playerState} tone={track ? 'active' : 'muted'} compact={stateBadgeCompact} />
+			{/if}
 			{#if qualityLabel && (qualityDisplay === 'icon' || qualityDisplay === 'both')}
 				<span class={`quality-badge quality-icon ${qualityClass}`} role="img" aria-label={`${qualityLabel}${streamDetail ? `, ${streamDetail}` : ''}`} title={`${qualityLabel}${streamDetail ? ` · ${streamDetail}` : ''}`}>
 					<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M1.5 8h2.2l1.4-3.6 2.5 7.2 2-5.4 1.4 1.8h3.5" /></svg>
@@ -165,7 +172,18 @@
 		text-overflow: ellipsis;
 		display: block;
 		max-width: 100%;
+		width: fit-content;
 	}
+
+	.np-byline {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 6px;
+		min-width: 0;
+	}
+
+	.np-byline-separator { display: none; }
 
 	.np-title {
 		font-size: var(--font-size-xl);

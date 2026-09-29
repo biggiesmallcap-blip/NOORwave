@@ -695,6 +695,8 @@
 		font-size: var(--font-size-xs);
 	}
 
+	.np-top.queue-expanded :global(.np-byline) { gap: 3px; }
+
 	/* Keep the scrubber alive with the queue expanded - only the time labels
 	   go, so position stays visible and seekable. */
 	.np-top.queue-expanded :global(.np-times) {
@@ -754,9 +756,17 @@
 	.horizontal :global(.np-artist) { font-size: var(--font-size-xs); }
 	.horizontal :global(.np-info) { gap: 3px; }
 	.horizontal :global(.np-copy) { gap: 2px; }
+	.horizontal :global(.np-byline) {
+		flex-direction: row;
+		align-items: baseline;
+		gap: 6px;
+		min-width: 0;
+	}
+	.horizontal :global(.np-byline .np-artist),
+	.horizontal :global(.np-byline .np-album) { flex: 0 1 auto; min-width: 0; }
+	.horizontal :global(.np-byline-separator) { display: inline; color: var(--text-secondary); }
 	.horizontal :global(.badge-row) { display: flex; }
 	.horizontal :global(.badge-row .state-badge) { font-size: var(--font-size-2xs); }
-	.horizontal :global(.np-album),
 	.horizontal :global(.np-source) { display: none; }
 	.horizontal :global(.np-quality-chip) { font-size: var(--font-size-2xs); }
 	.horizontal :global(.badge-row) { flex-wrap: wrap; column-gap: 6px; row-gap: 3px; }

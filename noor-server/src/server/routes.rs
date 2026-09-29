@@ -9765,6 +9765,12 @@ async fn ensure_playback_runtime_for_track(
         if let Some(runtime) = state_guard.playback_runtime.take() {
             let _ = runtime.handle.shutdown();
         }
+        // A replacement runtime has not started audio yet. In particular, do
+        // not let an old Started/Ready state survive until its first event.
+        state_guard
+            .audio_active
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        state_guard.playback_runtime_info = None;
 
         let dj_engine_enabled = state_guard
             .db
@@ -9837,6 +9843,48 @@ async fn ensure_playback_runtime_for_track(
     Ok(handle)
 }
 
+async fn apply_runtime_ready(
+    state: &SharedState,
+    handle: &playback_runtime::PlaybackRuntimeHandle,
+    device_name: String,
+    sample_rate: u32,
+    channels: u16,
+) -> bool {
+    let mut guard = state.write().await;
+    if !guard
+        .playback_runtime
+        .as_ref()
+        .is_some_and(|runtime| runtime.handle.is_same_runtime(handle))
+    {
+        return false;
+    }
+
+    // Ready is emitted at startup AND after a device/sample-rate swap. A
+    // swapped engine keeps playing, so preserve its active track and flag.
+    let previous = guard.playback_runtime_info.as_ref();
+    let active_track_id = previous.and_then(|info| info.active_track_id);
+    let last_error = previous.and_then(|info| info.last_error.clone());
+    let exclusive_engaged = previous.is_some_and(|info| info.exclusive_engaged);
+    let exclusive_transport_format = previous
+        .filter(|info| info.exclusive_engaged)
+        .and_then(|info| info.exclusive_transport_format.clone());
+    if active_track_id.is_none() {
+        guard
+            .audio_active
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+    guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+        device_name,
+        sample_rate,
+        channels,
+        active_track_id,
+        last_error,
+        exclusive_engaged,
+        exclusive_transport_format,
+    });
+    true
+}
+
 fn spawn_playback_runtime_listener(
     state: SharedState,
     handle: playback_runtime::PlaybackRuntimeHandle,
@@ -9850,12 +9898,21 @@ fn spawn_playback_runtime_listener(
                     track_id,
                     generation,
                 }) => {
-                    // Track is no longer producing audio. Clear the flag before advancing.
-                    state
-                        .write()
-                        .await
+                    // A late terminal from the previous track or runtime must
+                    // not mark a newer, already audible track as paused.
+                    let state_guard = state.read().await;
+                    if current_playback_generation(&state_guard) != generation
+                        || !state_guard
+                            .playback_runtime
+                            .as_ref()
+                            .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                    {
+                        continue;
+                    }
+                    state_guard
                         .audio_active
                         .store(false, std::sync::atomic::Ordering::Relaxed);
+                    drop(state_guard);
                     if let Err(error) =
                         handle_runtime_finished_with_retry(state.clone(), track_id, generation)
                             .await
@@ -9934,36 +9991,11 @@ fn spawn_playback_runtime_listener(
                     sample_rate,
                     channels,
                 }) => {
-                    let mut state_guard = state.write().await;
-                    state_guard
-                        .audio_active
-                        .store(false, std::sync::atomic::Ordering::Relaxed);
-                    let last_error = state_guard
-                        .playback_runtime_info
-                        .as_ref()
-                        .and_then(|info| info.last_error.clone());
-                    let prev_exclusive = state_guard
-                        .playback_runtime_info
-                        .as_ref()
-                        .map(|i| i.exclusive_engaged)
-                        .unwrap_or(false);
-                    let prev_exclusive_transport = if prev_exclusive {
-                        state_guard
-                            .playback_runtime_info
-                            .as_ref()
-                            .and_then(|i| i.exclusive_transport_format.clone())
-                    } else {
-                        None
-                    };
-                    state_guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
-                        device_name,
-                        sample_rate,
-                        channels,
-                        active_track_id: None,
-                        last_error,
-                        exclusive_engaged: prev_exclusive,
-                        exclusive_transport_format: prev_exclusive_transport,
-                    });
+                    if !apply_runtime_ready(&state, &handle, device_name, sample_rate, channels)
+                        .await
+                    {
+                        break;
+                    }
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Started {
                     track_id,
@@ -10042,12 +10074,30 @@ fn spawn_playback_runtime_listener(
                     .await;
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Paused { .. }) => {
+                    let state_guard = state.read().await;
+                    if !state_guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                    {
+                        break;
+                    }
+                    drop(state_guard);
                     // The runtime acknowledged pause (user command or the
                     // advance-cascade breaker). Reconcile DB/UI to it so the
                     // pause button always reflects what is actually audible.
                     reconcile_runtime_transport_state(&state, false).await;
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Resumed { .. }) => {
+                    let state_guard = state.read().await;
+                    if !state_guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                    {
+                        break;
+                    }
+                    drop(state_guard);
                     reconcile_runtime_transport_state(&state, true).await;
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Preparing { .. }) => {}
@@ -10089,6 +10139,13 @@ fn spawn_playback_runtime_listener(
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Stopped) => {
                     let mut state_guard = state.write().await;
+                    if !state_guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                    {
+                        break;
+                    }
                     state_guard
                         .audio_active
                         .store(false, std::sync::atomic::Ordering::Relaxed);
