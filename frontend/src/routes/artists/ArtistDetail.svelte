@@ -115,10 +115,6 @@
 	let tidalBio = $state<TidalArtistBio | null>(null);
 	let tidalLoading = $state(false);
 	let tidalAvailable = $state(false);
-	// TIDAL sub-fetches that failed or timed out server-side. Non-empty means
-	// the shelves below are PARTIAL, and the page says so instead of passing
-	// empty rails off as "this artist has no videos".
-	let tidalSectionsFailed = $state<string[]>([]);
 	let failedArtworkUrls = $state<Record<string, boolean>>({});
 	let tidalLoadSeq = 0;
 
@@ -164,7 +160,7 @@
 		const seq = ++tidalLoadSeq;
 		tidalLoading = true;
 		try {
-			const res = await cachedApi.getArtistDiscography(id);
+			const res = await cachedApi.getArtistDiscographyPreview(id);
 			if (seq !== tidalLoadSeq) return;
 			tidalAlbums = res.albums;
 			tidalTopTracks = res.top_tracks ?? [];
@@ -172,7 +168,6 @@
 			tidalSimilarArtists = res.similar_artists ?? [];
 			tidalBio = res.bio ?? null;
 			tidalAvailable = res.available;
-			tidalSectionsFailed = res.sections_failed ?? [];
 			// View-time portrait fallback, populated alongside the rest
 			// of the discography so a missing local `photo_url` still
 			// renders a proper hero portrait instead of the initials disc.
@@ -196,7 +191,7 @@
 			const res = await cachedApi.getTidalArtistCore(tidalId);
 			if (seq !== tidalLoadSeq) return;
 			tidalProfileName = res.artist_name ?? tidalProfileName;
-			tidalTopTracks = res.top_tracks ?? tidalTopTracks;
+			if (tidalTopTracks.length === 0) tidalTopTracks = res.top_tracks ?? [];
 			tidalAvailable = tidalAvailable || res.available;
 			if (res.picture_url) tidalPictureUrl = res.picture_url;
 			if (res.available) loading = false;
@@ -209,7 +204,7 @@
 	async function loadTidalProfile(tidalId: number, seq: number) {
 		tidalLoading = true;
 		try {
-			const res = await cachedApi.getTidalArtistProfile(tidalId);
+			const res = await cachedApi.getTidalArtistPreview(tidalId);
 			if (seq !== tidalLoadSeq) return;
 			tidalProfileName = res.artist_name ?? null;
 			tidalAlbums = res.albums ?? [];
@@ -218,7 +213,6 @@
 			tidalSimilarArtists = res.similar_artists ?? [];
 			tidalBio = res.bio ?? null;
 			tidalAvailable = tidalAvailable || (res.available ?? true);
-			tidalSectionsFailed = res.sections_failed ?? [];
 			if (res.picture_url) tidalPictureUrl = res.picture_url;
 			// TIDAL-mode artists have no local-track fallback, so an
 			// all-fetches-failed response (`available: false`) means TIDAL is
@@ -249,7 +243,6 @@
 		tidalSimilarArtists = [];
 		tidalBio = null;
 		tidalAvailable = false;
-		tidalSectionsFailed = [];
 		failedArtworkUrls = {};
 		bioExpanded = false;
 		if (source.kind === 'local') {
@@ -504,7 +497,7 @@
 	let heroPlayPending = $state(false);
 	async function ensureTidalTopTracksForPlayback(id: number): Promise<TidalDiscographyTrack[]> {
 		if (tidalTopTracks.length > 0) return tidalTopTracks;
-		const res = await cachedApi.getArtistDiscography(id);
+		const res = await cachedApi.getArtistDiscographyPreview(id);
 		if (artistId === id) {
 			tidalAlbums = res.albums;
 			tidalTopTracks = res.top_tracks ?? [];
@@ -892,12 +885,6 @@
 			/>
 		</div>
 
-		{#if tidalAvailable && tidalSectionsFailed.length > 0}
-			<p class="status subtle partial-note" role="status">
-				TIDAL was slow; some sections are partial. They will fill in on the next visit.
-			</p>
-		{/if}
-
 		{#if hasAnyPopular}
 			<section class="section">
 				<h2 class="section-title">Top tracks</h2>
@@ -1281,7 +1268,7 @@
 			{/if}
 
 			{#if tidalLoading}
-				<p class="status subtle">Loading full discography from TIDAL…</p>
+				<p class="status subtle">Loading releases from TIDAL…</p>
 			{/if}
 		{/if}
 

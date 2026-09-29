@@ -9457,6 +9457,7 @@ fn put_cached_tidal_playlist_tracks(
 async fn tidal_artist_profile(
     State(state): State<SharedState>,
     Path(tidal_artist_id): Path<i64>,
+    Query(query): Query<catalog_routes::ArtistProfileQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     if tidal_artist_id <= 0 {
         return Err((
@@ -9497,8 +9498,17 @@ async fn tidal_artist_profile(
     // what lets a non-library artist page render identically to a library one:
     // bio, similar artists, videos, and categorized releases instead of a bare
     // top-tracks-and-albums stub.
-    let payload =
-        catalog_routes::build_tidal_artist_payload(&state, &client, tidal_artist_id, &tokens).await;
+    let payload = if query.preview {
+        catalog_routes::build_tidal_artist_preview_payload(
+            &state,
+            &client,
+            tidal_artist_id,
+            &tokens,
+        )
+        .await
+    } else {
+        catalog_routes::build_tidal_artist_payload(&state, &client, tidal_artist_id, &tokens).await
+    };
     Ok(Json(payload))
 }
 

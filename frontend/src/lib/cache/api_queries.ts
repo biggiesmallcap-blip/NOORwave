@@ -114,8 +114,10 @@ export const cacheKeys = {
 	artist: (id: number) => ['api', 'getArtist', { id }] as const,
 	artistTracks: (id: number) => ['api', 'getArtistTracks', { id }] as const,
 	artistDiscography: (id: number) => ['api', 'getArtistDiscography', { id }] as const,
+	artistDiscographyPreview: (id: number) => ['api', 'getArtistDiscographyPreview', { id }] as const,
 	tidalArtistCore: (id: number) => ['api', 'getTidalArtistCore', { id }] as const,
 	tidalArtistProfile: (id: number) => ['api', 'getTidalArtistProfile', { id }] as const,
+	tidalArtistPreview: (id: number) => ['api', 'getTidalArtistPreview', { id }] as const,
 	artistSpotifyStats: (id: number) => ['api', 'getArtistSpotifyStats', { id }] as const,
 	albumTracks: (id: number) => ['api', 'getAlbumTracks', { id }] as const,
 	albumSpotifyStats: (id: number) => ['api', 'getAlbumSpotifyStats', { id }] as const,
@@ -265,6 +267,13 @@ export const cachedApi = {
 			longOptions,
 		);
 	},
+	getArtistDiscographyPreview(id: number) {
+		return fetchCached<Awaited<ReturnType<typeof api.getArtistDiscography>>>(
+			cacheKeys.artistDiscographyPreview(id),
+			() => api.getArtistDiscography(id, true),
+			mediumOptions,
+		);
+	},
 	// TIDAL artist profile (non-library artists). Cached like the library
 	// discography so re-visits render instantly and concurrent loads of the
 	// same artist share one request; medium staleness because in_library /
@@ -274,6 +283,13 @@ export const cachedApi = {
 		return fetchCached<Awaited<ReturnType<typeof api.getTidalArtistProfile>>>(
 			cacheKeys.tidalArtistProfile(tidalArtistId),
 			() => api.getTidalArtistProfile(tidalArtistId),
+			mediumOptions,
+		);
+	},
+	getTidalArtistPreview(tidalArtistId: number) {
+		return fetchCached<Awaited<ReturnType<typeof api.getTidalArtistProfile>>>(
+			cacheKeys.tidalArtistPreview(tidalArtistId),
+			() => api.getTidalArtistProfile(tidalArtistId, true),
 			mediumOptions,
 		);
 	},
@@ -642,7 +658,9 @@ export function invalidateLibraryCaches(options: { refetch?: boolean } = {}): vo
 	dataCache.invalidatePrefix(['api', 'getArtists'], options);
 	dataCache.invalidatePrefix(['api', 'getArtistTracks'], options);
 	dataCache.invalidatePrefix(['api', 'getArtistDiscography'], options);
+	dataCache.invalidatePrefix(['api', 'getArtistDiscographyPreview'], options);
 	dataCache.invalidatePrefix(['api', 'getTidalArtistProfile'], options);
+	dataCache.invalidatePrefix(['api', 'getTidalArtistPreview'], options);
 	dataCache.invalidatePrefix(['api', 'getAlbumTracks'], options);
 	dataCache.invalidatePrefix(['api', 'search'], options);
 }

@@ -56,6 +56,53 @@
 		source.kind === 'tidal' ? `/tidal/artists/${source.tidalArtistId}` : `/artists/${artistId}`
 	);
 
+	function needsMoreReleases(profile: {
+		release_filters_has_more?: Record<string, boolean>;
+		sections_failed?: string[];
+	}): boolean {
+		if (section === 'tracks') return false;
+		const filters = section === 'albums'
+			? [['ALBUMS', 'albums'], ['LIVE', 'live']]
+			: section === 'singles'
+				? [['EPSANDSINGLES', 'eps_singles']]
+				: [['COMPILATIONS', 'compilations']];
+		return filters.some(([filter, failed]) =>
+			profile.sections_failed?.includes(failed)
+			|| profile.release_filters_has_more?.[filter] !== false
+		);
+	}
+
+	// The first release page paints the see-all view. The full catalog arrives
+	// behind it, and successful filters are merged so a slow filter cannot erase
+	// releases that were already visible.
+	async function fillDiscography(
+		seq: number,
+		fetchFull: () => Promise<{
+			albums: TidalDiscographyAlbum[];
+			top_tracks: TidalDiscographyTrack[];
+			available: boolean;
+			artist_name?: string | null;
+		}>,
+	) {
+		try {
+			const full = await fetchFull();
+			if (seq !== loadSeq || !full.available) return;
+			const seen = new Set(full.albums.map((album) => album.tidal_id));
+			tidalAlbums = [
+				...full.albums,
+				...tidalAlbums.filter((album) => !seen.has(album.tidal_id)),
+			];
+			if (full.top_tracks.length > 0) tidalTracks = full.top_tracks;
+			if (source.kind === 'tidal') {
+				artist = { id: 0, tidal_id: source.tidalArtistId, name: full.artist_name ?? artist?.name ?? 'Artist' };
+				error = null;
+			}
+		} catch (e) {
+			// Keep the first batch visible if the deeper catalog cannot be fetched.
+			console.error('Failed to finish artist discography', e);
+		}
+	}
+
 	async function loadLocal(id: number) {
 		const seq = ++loadSeq;
 		loading = true;
@@ -64,7 +111,7 @@
 			const [artistRes, tracksRes, discographyRes] = await Promise.allSettled([
 				cachedApi.getArtist(id),
 				cachedApi.getArtistTracks(id),
-				cachedApi.getArtistDiscography(id),
+				cachedApi.getArtistDiscographyPreview(id),
 			]);
 			if (seq !== loadSeq) return;
 			artist = artistRes.status === 'fulfilled' ? artistRes.value : null;
@@ -79,6 +126,11 @@
 			if (artistRes.status !== 'fulfilled' && tracksRes.status !== 'fulfilled') {
 				error = `Failed to load artist: ${tracksRes.reason}`;
 			}
+			if (artist?.tidal_id != null && (
+				discographyRes.status !== 'fulfilled' || needsMoreReleases(discographyRes.value)
+			)) {
+				void fillDiscography(seq, () => cachedApi.getArtistDiscography(id));
+			}
 		} finally {
 			if (seq === loadSeq) loading = false;
 		}
@@ -89,17 +141,19 @@
 		loading = true;
 		error = null;
 		try {
-			const res = await cachedApi.getTidalArtistProfile(tidalId);
+			const res = await cachedApi.getTidalArtistPreview(tidalId);
 			if (seq !== loadSeq) return;
 			artist = { id: 0, tidal_id: tidalId, name: res.artist_name ?? 'Artist' };
 			tracks = [];
 			tidalTracks = res.top_tracks ?? [];
 			tidalAlbums = res.albums ?? [];
+			if (needsMoreReleases(res)) void fillDiscography(seq, () => cachedApi.getTidalArtistProfile(tidalId));
 		} catch (e) {
 			if (seq !== loadSeq) return;
 			error = String(e);
 			tidalTracks = [];
 			tidalAlbums = [];
+			if (section !== 'tracks') void fillDiscography(seq, () => cachedApi.getTidalArtistProfile(tidalId));
 		} finally {
 			if (seq === loadSeq) loading = false;
 		}

@@ -20,7 +20,7 @@ describe('TIDAL artist playback contract', () => {
 		expect(source).toContain('const seq = ++tidalLoadSeq;');
 		// Served through the cache layer: in-flight dedupe + instant re-visits.
 		expect(source).toContain('const res = await cachedApi.getTidalArtistCore(tidalId)');
-		expect(source).toContain('const res = await cachedApi.getTidalArtistProfile(tidalId)');
+		expect(source).toContain('const res = await cachedApi.getTidalArtistPreview(tidalId)');
 		expect(source).toContain('if (seq !== tidalLoadSeq) return');
 		expect(source).toContain('void loadTidalCore(tidalId, seq);');
 		expect(source).toContain('void loadTidalProfile(tidalId, seq);');
