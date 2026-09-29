@@ -44,7 +44,14 @@
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
+		justify-content: space-between;
 	}
+
+	/* Share spare height between links instead of leaving it all below Settings.
+	   The weights follow the current link counts in each navigation zone. */
+	.nav-zone:nth-child(1) { flex-grow: 9; }
+	.nav-zone:nth-child(2) { flex-grow: 4; }
+	.nav-zone:nth-child(3) { flex-grow: 1; }
 
 	.nav-zone-label {
 		padding: 0 10px 5px;

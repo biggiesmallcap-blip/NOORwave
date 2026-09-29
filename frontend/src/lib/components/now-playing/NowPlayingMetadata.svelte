@@ -63,32 +63,43 @@
 	const albumHref = $derived(mediaHref(albumRef));
 </script>
 
-<div class="np-info" class:has-favorite={showFavorite}>
+<div class="np-info">
 	<div class="np-copy">
 		{#if eyebrow}
 			<p class="np-eyebrow">{eyebrow}</p>
 		{/if}
-		{#if track && titleRef && titleHref}
-			<a
-				class="np-title np-title-link"
-				href={titleHref}
-				title={track.title}
-				oncontextmenu={(e) => {
-					e.preventDefault();
-					e.stopPropagation();
-					openContextMenu(e, buildMediaMenu(titleRef), titleRef.label);
-				}}
-			>
-				<span class="np-title-text">{track.title}</span>
-			</a>
-		{:else}
-			<h2
-				class="np-title"
-				title={track?.title ?? 'Nothing queued'}
-			>
-				<span class="np-title-text">{track?.title ?? 'Nothing queued'}</span>
-			</h2>
-		{/if}
+		<div class="np-title-row">
+			{#if track && titleRef && titleHref}
+				<a
+					class="np-title np-title-link"
+					href={titleHref}
+					title={track.title}
+					oncontextmenu={(e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						openContextMenu(e, buildMediaMenu(titleRef), titleRef.label);
+					}}
+				>
+					<span class="np-title-text">{track.title}</span>
+				</a>
+			{:else}
+				<h2 class="np-title" title={track?.title ?? 'Nothing queued'}>
+					<span class="np-title-text">{track?.title ?? 'Nothing queued'}</span>
+				</h2>
+			{/if}
+			{#if showFavorite && onToggleFavorite}
+				<button
+					class="np-favorite"
+					class:active={track?.is_favorite}
+					type="button"
+					title={track?.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
+					aria-label={track?.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
+					aria-pressed={track?.is_favorite ?? false}
+					disabled={!track || favoritePending}
+					onclick={onToggleFavorite}
+				>{track?.is_favorite ? '♥' : '♡'}</button>
+			{/if}
+		</div>
 		{#if artistRef && artistHref}
 			<a
 				class="np-artist np-link"
@@ -125,19 +136,6 @@
 			<p class="np-source">{nowPlayingAttribution}</p>
 		{/if}
 	</div>
-	{#if showFavorite && onToggleFavorite}
-		<button
-			class="np-favorite"
-			class:active={track?.is_favorite}
-			type="button"
-			title={track?.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
-			aria-label={track?.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
-			aria-pressed={track?.is_favorite ?? false}
-			disabled={!track || favoritePending}
-			onclick={onToggleFavorite}
-		>{track?.is_favorite ? '♥' : '♡'}</button>
-	{/if}
-
 	{#if showStateBadge}
 		<div class="badge-row">
 			<StateBadge label={isScrubbing ? 'Scrubbing' : playerState} tone={track ? 'active' : 'muted'} compact={stateBadgeCompact} />
@@ -164,17 +162,17 @@
 		min-width: 0;
 	}
 
-	.np-info.has-favorite {
-		position: relative;
-		padding-right: 34px;
+	.np-title-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		min-width: 0;
 	}
 
 	.np-favorite {
-		position: absolute;
-		top: 0;
-		right: 0;
 		display: grid;
 		place-items: center;
+		flex: 0 0 28px;
 		width: 28px;
 		height: 28px;
 		padding: 0;
@@ -216,6 +214,8 @@
 	}
 
 	.np-title {
+		flex: 0 1 auto;
+		min-width: 0;
 		font-size: var(--font-size-xl);
 		font-family: var(--font-display);
 		line-height: var(--line-height-tight);

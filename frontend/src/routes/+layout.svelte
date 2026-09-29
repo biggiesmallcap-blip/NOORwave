@@ -3682,6 +3682,7 @@
 	/* Give the full-size bottom-layout navigation its last few pixels without
 	   reducing the menu rows or logo. */
 	@media (min-height: 1200px) and (min-width: 680px) {
+		.app-shell[data-player-layout='bottom'] .sidebar :global(.nav) { gap: 10px; padding-top: 0; }
 		.app-shell[data-player-layout='bottom'] .sidebar-footer { padding-top: 10px; }
 	}
 
