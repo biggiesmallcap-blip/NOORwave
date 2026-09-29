@@ -70,3 +70,23 @@ test('starting radio on the already playing video requests a related queue', asy
 	await vi.waitFor(() => expect(get(videoSession).queue.map((item) => item.tidal_id)).toEqual([1, 3]));
 	expect(vi.mocked(api.getVideoRadioNext).mock.calls[0][0].seed_artist_id).toBe(10);
 });
+
+test('radio reports only videos actually added to the queue', async () => {
+	const seed = video(1, 10, 'Green Day', 'American Idiot');
+	const blink = video(2, 20, 'Blink-182', 'Dammit');
+	const blinkAgain = video(3, 20, 'Blink-182', 'All the Small Things');
+	let deliver!: (value: { items: TidalSearchVideo[]; unfamiliar_video_ids: number[] }) => void;
+	vi.mocked(api.getVideoRadioNext).mockImplementationOnce(() => new Promise((resolve) => { deliver = resolve; }));
+
+	await playVideo(seed, {
+		queue: [seed], source: 'direct', sourceLabel: 'Green Day radio',
+		autoplay: true, continuous: true, resetRadio: true,
+	}, { preloaded: { url: 'https://example.test/stream.m3u8', expiresAt: null } });
+	expect(get(videoSession).radioSearching).toBe(true);
+	deliver({ items: [seed, blink, blinkAgain], unfamiliar_video_ids: [2, 3] });
+	await vi.waitFor(() => expect(get(videoSession).radioSearching).toBe(false));
+	expect(get(videoSession).radioHits).toEqual([{ artist: 'Blink-182', count: 2 }]);
+	expect(get(videoSession).radioDiscoveryMessage).toBe('2 new videos added to your queue.');
+	videoSession.stopRadio();
+	expect(get(videoSession).radioHits).toEqual([]);
+});

@@ -376,14 +376,16 @@ pub(super) async fn post_videos_radio_next(
         if let Some(tokens) = tokens {
             let client =
                 TidalClient::with_http(tidal_http, tokens.access_token, tokens.country_code);
+            let mut refreshed_seed_relations = false;
             if let Some(id) = seed_id {
                 let due = db
                     .with_conn(|conn| video_radio::reserve_related_scan(conn, id))
                     .unwrap_or(false);
                 if due {
+                    refreshed_seed_relations = true;
                     if let Err(e) = video_radio::refresh_video_relations(
                         &db,
-                        http,
+                        http.clone(),
                         &client,
                         id,
                         body.seed_artist_name.as_deref(),
@@ -408,14 +410,58 @@ pub(super) async fn post_videos_radio_next(
                     }
                 }
             }
-            // Fetch the seed first, then related artists. The two-call ceiling
-            // keeps each refill deliberate and cheap.
+            // When direct catalogs are thin, inspect one direct neighbor's
+            // relationships. Two neighbors must agree before a second-hop
+            // artist can enter the pool. The shared scan ledger bounds this
+            // work across radio, related rows, and background warming.
+            if !refreshed_seed_relations
+                && (fresh_count < 8 || unfamiliar_count < video_radio::UNFAMILIAR_PER_BATCH)
+                && let Some(id) = seed_id
+                && let Ok(Some((bridge_id, bridge_name))) =
+                    db.with_conn(|conn| video_radio::next_bridge_seed(conn, id))
+                && db
+                    .with_conn(|conn| video_radio::reserve_related_scan(conn, bridge_id))
+                    .unwrap_or(false)
+            {
+                if let Err(e) = video_radio::refresh_video_relations(
+                    &db,
+                    http,
+                    &client,
+                    bridge_id,
+                    Some(&bridge_name),
+                )
+                .await
+                {
+                    tracing::debug!("video radio bridge relationship scan failed: {e}");
+                }
+                if let Ok(next) =
+                    db.with_conn(|conn| video_radio::artist_pool(conn, seed_id, &[], &[]))
+                {
+                    pool = next;
+                }
+            }
+            // Fetch the seed first, then direct and corroborated second-hop
+            // artists. A thin queue gets one extra catalog lookup this pass.
             let mut fetch_pool = pool.clone();
-            fetch_pool.sort_by_key(|(id, _, lane)| (*lane, !familiar.contains(id)));
+            fetch_pool.sort_by_key(|(id, _, lane)| {
+                let priority = match lane {
+                    4 => 1, // one corroborated artist before more direct catalogs
+                    1 => 2,
+                    2 => 3, // shared genre
+                    3 => 4,
+                    _ => 0, // seed artist
+                };
+                (priority, !familiar.contains(id))
+            });
             let mut fetched = 0;
-            for (id, name, _) in &fetch_pool {
-                if fetched >= 2 {
+            let mut fetched_bridges = 0;
+            let fetch_budget = if fresh_count < 8 { 3 } else { 2 };
+            for (id, name, lane) in &fetch_pool {
+                if fetched >= fetch_budget {
                     break;
+                }
+                if *lane == 4 && fetched_bridges >= 1 {
+                    continue;
                 }
                 if *id <= 0
                     || db
@@ -428,6 +474,9 @@ pub(super) async fn post_videos_radio_next(
                 // Even empty or failed scans are reserved so an unavailable
                 // artist is not requested at every song boundary.
                 fetched += 1;
+                if *lane == 4 {
+                    fetched_bridges += 1;
+                }
                 match client.get_artist_videos(*id, 50, 0).await {
                     Ok(page) => {
                         let anchor = video_sets::AnchorArtist {

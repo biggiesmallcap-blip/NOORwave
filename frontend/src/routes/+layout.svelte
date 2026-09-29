@@ -1629,7 +1629,20 @@
 						› {$videoSession.autoplay ? 'On' : 'Autoplay'}
 					</button>
 				</div>
-				<p class="video-panel-source" aria-live="polite">{$videoSession.radioIssue ?? ($videoSession.continuous ? ($videoSession.autoplay ? 'Finding related artists and genres as you listen.' : 'Radio paused. Turn on autoplay to resume.') : 'Radio adds new videos beyond this queue.')}</p>
+				<p class="video-panel-source" aria-live="polite">
+					{$videoSession.radioIssue ?? ($videoSession.continuous
+						? (!$videoSession.autoplay ? 'Radio paused. Turn on autoplay to resume.'
+							: $videoSession.radioSearching ? `Checking ${$videoSession.radioSeedArtistName ?? 'this artist'} and related artists…`
+							: $videoSession.radioDiscoveryMessage ?? 'Radio checks related artists as the queue plays.')
+						: 'Radio adds new videos beyond this queue.')}
+				</p>
+				{#if $videoSession.continuous && $videoSession.radioHits.length > 0}
+					<div class="video-radio-hits" aria-label="Recent radio discoveries">
+						{#each $videoSession.radioHits as hit, index (`${hit.artist}-${index}`)}
+							<div class="video-radio-hit"><strong>+{hit.count}</strong><span>{hit.count === 1 ? 'video' : 'videos'} from {hit.artist}</span></div>
+						{/each}
+					</div>
+				{/if}
 				{#if $videoSession.error}
 					<p class="video-panel-error">{$videoSession.error}</p>
 				{/if}
@@ -2493,6 +2506,23 @@
 	}
 
 	.video-panel-source { margin: -4px 0 0; line-height: var(--line-height-normal); }
+	.video-radio-hits {
+		max-height: 76px;
+		overflow-y: auto;
+		display: grid;
+		gap: 5px;
+		padding: 2px 0;
+	}
+	.video-radio-hit {
+		display: flex;
+		align-items: baseline;
+		gap: 7px;
+		min-width: 0;
+		font-size: var(--font-size-xs);
+		color: var(--text-secondary);
+	}
+	.video-radio-hit strong { color: var(--accent-strong); white-space: nowrap; }
+	.video-radio-hit span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 	.video-panel-chip {
 		border: 1px solid var(--border-subtle);
