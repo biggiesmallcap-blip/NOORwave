@@ -13,9 +13,75 @@ use crate::SharedState;
 use crate::services::tidal::client::TidalClient;
 
 const ARTIST_CACHE_DAYS: i64 = 14;
-const RELATED_CACHE_DAYS: i64 = 7;
 const GENRE_CACHE_DAYS: i64 = 14;
-pub const UNFAMILIAR_PER_BATCH: usize = 4;
+pub const UNFAMILIAR_ARTISTS_FOR_HEALTHY_QUEUE: usize = 3;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceLane {
+    Seed,
+    Direct,
+    Genre,
+    Library,
+    Bridge,
+}
+
+impl SourceLane {
+    fn score(self) -> i32 {
+        match self {
+            Self::Seed => 0,
+            Self::Direct => 2,
+            Self::Genre => 4,
+            Self::Library => 6,
+            Self::Bridge => 8,
+        }
+    }
+    pub fn fetch_priority(self) -> u8 {
+        match self {
+            Self::Seed => 0,
+            Self::Bridge => 1,
+            Self::Direct => 2,
+            Self::Genre => 3,
+            Self::Library => 4,
+        }
+    }
+    pub fn is_close(self) -> bool {
+        matches!(self, Self::Seed | Self::Direct | Self::Genre)
+    }
+    fn seeded_priority(self) -> u8 {
+        match self {
+            Self::Seed => 0,
+            Self::Direct => 1,
+            Self::Genre => 2,
+            Self::Library => 3,
+            Self::Bridge => 4,
+        }
+    }
+}
+
+pub fn unfamiliar_artist_count(
+    items: &[VideoSetItem],
+    familiar: &HashSet<i64>,
+    seed: Option<i64>,
+) -> usize {
+    items
+        .iter()
+        .filter_map(|item| item.artist_id)
+        .filter(|id| Some(*id) != seed && !familiar.contains(id))
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+pub fn queue_needs_discovery(
+    total: usize,
+    unfamiliar_artists: usize,
+    relationship_due: bool,
+    bridge_due: bool,
+) -> bool {
+    total < 8
+        || unfamiliar_artists < UNFAMILIAR_ARTISTS_FOR_HEALTHY_QUEUE
+        || relationship_due
+        || bridge_due
+}
 const WARM_SEEDS_PER_PASS: usize = 4;
 const WARM_PENDING_SEEDS_PER_PASS: usize = 2;
 const WARM_RELATED_ARTISTS_PER_SEED: usize = 2;
@@ -46,7 +112,9 @@ pub fn liked_seeds_needing_warm(conn: &Connection) -> Result<Vec<(i64, String)>>
         "WITH {LIKED_ARTIST_CTES}
          SELECT liked.artist_id, liked.name FROM liked
          LEFT JOIN video_related_scans s ON s.seed_tidal_id = liked.artist_id
+         LEFT JOIN video_related_retries r ON r.seed_tidal_id = liked.artist_id
          WHERE s.scanned_at IS NULL OR s.scanned_at < datetime('now', '-7 days')
+            OR r.retry_at <= datetime('now')
          ORDER BY s.scanned_at IS NOT NULL, liked.affinity DESC, liked.name
          LIMIT 4"
     );
@@ -60,13 +128,14 @@ pub fn liked_seeds_needing_warm(conn: &Connection) -> Result<Vec<(i64, String)>>
 
 fn related_catalog_targets(conn: &Connection, seed_id: i64) -> Result<Vec<(i64, String)>> {
     let mut stmt = conn.prepare(
-        "SELECT r.related_tidal_id, r.name
+        "SELECT r.related_tidal_id, MIN(r.name)
          FROM video_related_artists r
          LEFT JOIN video_artist_scans s ON s.artist_tidal_id = r.related_tidal_id
          WHERE r.seed_tidal_id = ?1 AND r.source IN ('tidal', 'lastfm')
            AND (s.scanned_at IS NULL OR s.scanned_at < datetime('now', '-14 days'))
-         ORDER BY CASE r.source WHEN 'tidal' THEN 0 WHEN 'lastfm' THEN 1 ELSE 2 END,
-                  r.rowid
+         GROUP BY r.related_tidal_id
+         ORDER BY MIN(CASE r.source WHEN 'tidal' THEN 0 WHEN 'lastfm' THEN 1 ELSE 2 END),
+                  MIN(r.rowid)
          LIMIT 2",
     )?;
     Ok(stmt
@@ -193,11 +262,9 @@ pub async fn warm_liked_graph_if_idle(state: SharedState) {
                 .with_conn(|conn| reserve_related_scan(conn, seed_id))
                 .unwrap_or(false)
             {
-                break;
+                continue;
             }
-            if let Err(error) =
-                refresh_video_relations(&db, http.clone(), &client, seed_id, Some(&seed_name)).await
-            {
+            if let Err(error) = refresh_video_relations(&db, http.clone(), &client, seed_id).await {
                 tracing::debug!(target: "noor.video_radio", seed_id, %error, "liked artist relationship warm failed");
                 continue;
             }
@@ -316,21 +383,33 @@ pub fn reserve_artist_scan(conn: &Connection, artist_id: i64) -> Result<bool> {
 }
 
 pub fn related_due(conn: &Connection, artist_id: i64) -> Result<bool> {
-    let age: Option<i64> = conn
-        .query_row(
-            "SELECT CAST(julianday('now') - julianday(scanned_at) AS INTEGER)
-         FROM video_related_scans WHERE seed_tidal_id = ?1",
-            [artist_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if age.is_some_and(|days| days < RELATED_CACHE_DAYS) {
+    let due: bool = conn.query_row(
+        "SELECT NOT EXISTS (
+             SELECT 1 FROM video_related_scans
+             WHERE seed_tidal_id = ?1 AND scanned_at > datetime('now', '-7 days')
+         ) OR EXISTS (
+             SELECT 1 FROM video_related_retries
+             WHERE seed_tidal_id = ?1 AND retry_at <= datetime('now')
+         )",
+        [artist_id],
+        |row| row.get(0),
+    )?;
+    if !due {
+        return Ok(false);
+    }
+    let recent_attempt: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM video_related_attempts
+          WHERE seed_tidal_id = ?1 AND attempted_at > datetime('now', '-1 hour'))",
+        [artist_id],
+        |row| row.get(0),
+    )?;
+    if recent_attempt {
         return Ok(false);
     }
     // Four background seeds can warm in a window while leaving another four
     // relationship scans for interactive artist radios.
     let recent: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM video_related_scans WHERE scanned_at >= datetime('now', '-10 minutes')",
+        "SELECT COUNT(*) FROM video_related_attempts WHERE attempted_at >= datetime('now', '-10 minutes')",
         [], |row| row.get(0),
     )?;
     Ok(recent < 8)
@@ -343,10 +422,37 @@ pub fn reserve_related_scan(conn: &Connection, artist_id: i64) -> Result<bool> {
     if !related_due(conn, artist_id)? {
         return Ok(false);
     }
-    store_related(conn, artist_id, &[])?;
+    conn.execute(
+        "INSERT INTO video_related_attempts (seed_tidal_id) VALUES (?1)
+         ON CONFLICT(seed_tidal_id) DO UPDATE SET attempted_at = datetime('now')",
+        [artist_id],
+    )?;
     Ok(true)
 }
 
+/// A healthy station still checks one direct neighbor once an hour. The
+/// relationship attempt ledger applies its separate per-artist/global limits.
+pub fn bridge_due(conn: &Connection, seed_id: i64) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM video_related_artists
+             WHERE seed_tidal_id = ?1 AND source IN ('tidal', 'lastfm'))
+         AND NOT EXISTS (SELECT 1 FROM video_bridge_scans
+             WHERE seed_tidal_id = ?1 AND scanned_at > datetime('now', '-1 hour'))",
+        [seed_id],
+        |row| row.get::<_, bool>(0),
+    )?)
+}
+
+pub fn mark_bridge_scanned(conn: &Connection, seed_id: i64) -> Result<()> {
+    conn.execute(
+        "INSERT INTO video_bridge_scans (seed_tidal_id) VALUES (?1)
+         ON CONFLICT(seed_tidal_id) DO UPDATE SET scanned_at = datetime('now')",
+        [seed_id],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
 pub fn store_related(
     conn: &Connection,
     seed_id: i64,
@@ -364,8 +470,8 @@ pub fn store_related(
         conn.execute(
             "INSERT INTO video_related_artists (seed_tidal_id, related_tidal_id, name, source)
              VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(seed_tidal_id, related_tidal_id) DO UPDATE SET
-               name = excluded.name, source = excluded.source",
+             ON CONFLICT(seed_tidal_id, related_tidal_id, source) DO UPDATE SET
+               name = excluded.name",
             params![seed_id, id, name, source],
         )?;
     }
@@ -379,13 +485,24 @@ pub async fn refresh_video_relations(
     http: reqwest::Client,
     client: &TidalClient,
     seed_id: i64,
-    seed_name: Option<&str>,
 ) -> Result<()> {
-    let name = seed_name.filter(|name| !name.trim().is_empty() && name.len() <= 120);
-    let lastfm = name.and_then(|_| crate::metadata::lastfm::LastFmClient::load(http, db));
+    // The ID is authoritative. Caller-supplied display text must never drive
+    // Last.fm lookups for a different TIDAL artist.
+    let mut name = db.with_conn(|conn| canonical_artist_name(conn, seed_id))?;
+    if name.is_none() {
+        name = tokio::time::timeout(Duration::from_secs(4), client.get_artist(seed_id))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .map(|artist| artist.name);
+    }
+    let lastfm = name
+        .as_ref()
+        .and_then(|_| crate::metadata::lastfm::LastFmClient::load(http, db));
+    let has_lastfm = lastfm.is_some();
     let lastfm_lookup = async {
-        let (Some(name), Some(lastfm)) = (name, lastfm) else {
-            return (Vec::new(), Vec::new());
+        let (Some(name), Some(lastfm)) = (name.as_deref(), lastfm) else {
+            return (None, None);
         };
         let (similar, tags) = tokio::join!(
             tokio::time::timeout(
@@ -397,15 +514,11 @@ pub async fn refresh_video_relations(
                 lastfm.artist_top_tags(name)
             ),
         );
-        let similar = similar.ok().and_then(Result::ok).unwrap_or_default();
-        let genres = tags
+        let similar = similar.ok().and_then(Result::ok);
+        let genres: Option<Vec<String>> = tags
             .ok()
             .and_then(Result::ok)
-            .unwrap_or_default()
-            .into_iter()
-            .take(5)
-            .map(|(name, _)| name)
-            .collect();
+            .map(|tags| tags.into_iter().take(5).map(|(name, _)| name).collect());
         (similar, genres)
     };
     let (tidal, (similar, genres)) = tokio::join!(
@@ -415,45 +528,179 @@ pub async fn refresh_video_relations(
         ),
         lastfm_lookup,
     );
-    let mut related: Vec<(i64, String, &'static str)> = tidal
-        .ok()
-        .and_then(Result::ok)
-        .map(|page| {
-            page.items
-                .into_iter()
-                .map(|artist| (artist.id, artist.name, "tidal"))
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut resolved_external = 0;
-    for (rank, artist) in similar.into_iter().enumerate() {
-        if rank >= 8 && artist.match_score.unwrap_or_default() < 0.2 {
-            continue;
-        }
-        if let Some(local_id) = db.with_conn(|conn| local_artist_id(conn, &artist.name))? {
-            related.push((local_id, artist.name, "lastfm"));
-        } else if resolved_external < 3 {
-            resolved_external += 1;
-            if let Ok(Ok(found)) = tokio::time::timeout(
-                std::time::Duration::from_secs(4),
+    let tidal_related = tidal.ok().and_then(Result::ok).map(|page| {
+        page.items
+            .into_iter()
+            .map(|artist| (artist.id, artist.name))
+            .collect::<Vec<_>>()
+    });
+    let mut lastfm_related = None;
+    let mut retry_after_hours = None;
+    if let Some(similar) = similar {
+        let mut resolved = Vec::new();
+        let mut successful_searches = 0;
+        let mut attempts = 0;
+        for (rank, artist) in similar.into_iter().enumerate() {
+            if rank >= 8 && artist.match_score.unwrap_or_default() < 0.2 {
+                continue;
+            }
+            let cached = db.with_conn(|conn| known_related_artist_id(conn, &artist.name))?;
+            if let Some(id) = cached {
+                resolved.push((id, artist.name));
+                continue;
+            }
+            if !db.with_conn(|conn| resolution_due(conn, &artist.name))? {
+                retry_after_hours.get_or_insert(24);
+                continue;
+            }
+            if !may_resolve_external(successful_searches, attempts) {
+                retry_after_hours = Some(1);
+                continue;
+            }
+            attempts += 1;
+            let search = tokio::time::timeout(
+                Duration::from_secs(4),
                 client.search_catalog_core(&artist.name, 3, 0),
             )
-            .await
-                && let Some(matched) = found
-                    .artists
-                    .into_iter()
-                    .find(|item| item.name.eq_ignore_ascii_case(&artist.name))
-            {
-                related.push((matched.id, matched.name, "lastfm"));
+            .await;
+            match search {
+                Ok(Ok(found)) => {
+                    if let Some(matched) = found
+                        .artists
+                        .into_iter()
+                        .find(|item| item.name.eq_ignore_ascii_case(&artist.name))
+                    {
+                        successful_searches += 1;
+                        resolved.push((matched.id, matched.name));
+                    } else {
+                        db.with_conn(|conn| mark_resolution_failed(conn, &artist.name))?;
+                        retry_after_hours.get_or_insert(24);
+                    }
+                }
+                _ => retry_after_hours = Some(1),
+            }
+        }
+        lastfm_related = Some(resolved);
+    }
+    let provider_failed = tidal_related.is_none() || (has_lastfm && lastfm_related.is_none());
+    if provider_failed {
+        retry_after_hours = Some(1);
+    }
+    db.with_conn(|conn| {
+        apply_related_refresh(
+            conn,
+            seed_id,
+            tidal_related.as_deref(),
+            lastfm_related.as_deref(),
+            genres.as_deref(),
+            retry_after_hours,
+        )
+    })?;
+    if tidal_related.is_none() && lastfm_related.is_none() {
+        anyhow::bail!("both video relationship providers failed");
+    }
+    Ok(())
+}
+
+fn may_resolve_external(successes: usize, attempts: usize) -> bool {
+    successes < 3 && attempts < 10
+}
+
+fn canonical_artist_name(conn: &Connection, id: i64) -> Result<Option<String>> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(
+            (SELECT name FROM artists WHERE tidal_id = ?1),
+            (SELECT artist_name FROM video_catalog WHERE artist_tidal_id = ?1 AND artist_name <> '' LIMIT 1),
+            (SELECT name FROM video_related_artists WHERE related_tidal_id = ?1 AND source = 'tidal' LIMIT 1))",
+        [id], |row| row.get::<_, Option<String>>(0),
+    )?.filter(|name| !name.trim().is_empty() && name.len() <= 120))
+}
+
+fn known_related_artist_id(conn: &Connection, name: &str) -> Result<Option<i64>> {
+    if let Some(id) = local_artist_id(conn, name)? {
+        return Ok(Some(id));
+    }
+    Ok(conn
+        .query_row(
+            "SELECT related_tidal_id FROM video_related_artists
+         WHERE name = ?1 COLLATE NOCASE AND source IN ('lastfm', 'tidal') LIMIT 1",
+            [name],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+fn resolution_due(conn: &Connection, name: &str) -> Result<bool> {
+    Ok(!conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM video_artist_resolution_failures
+         WHERE name = ?1 AND attempted_at > datetime('now', '-1 day'))",
+        [name],
+        |row| row.get::<_, bool>(0),
+    )?)
+}
+
+fn mark_resolution_failed(conn: &Connection, name: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO video_artist_resolution_failures (name) VALUES (?1)
+        ON CONFLICT(name) DO UPDATE SET attempted_at = datetime('now')",
+        [name],
+    )?;
+    Ok(())
+}
+
+fn apply_related_refresh(
+    conn: &Connection,
+    seed_id: i64,
+    tidal: Option<&[(i64, String)]>,
+    lastfm: Option<&[(i64, String)]>,
+    genres: Option<&[String]>,
+    retry_after_hours: Option<i64>,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for (source, snapshot) in [("tidal", tidal), ("lastfm", lastfm)] {
+        if let Some(snapshot) = snapshot {
+            tx.execute(
+                "DELETE FROM video_related_artists WHERE seed_tidal_id = ?1 AND source = ?2",
+                params![seed_id, source],
+            )?;
+            let mut seen = HashSet::new();
+            for (id, name) in snapshot {
+                if *id <= 0 || *id == seed_id || !seen.insert(*id) {
+                    continue;
+                }
+                tx.execute(
+                    "INSERT INTO video_related_artists
+                     (seed_tidal_id, related_tidal_id, name, source) VALUES (?1, ?2, ?3, ?4)",
+                    params![seed_id, id, name, source],
+                )?;
             }
         }
     }
-    db.with_conn(|conn| {
-        if !genres.is_empty() {
-            store_seed_genres(conn, seed_id, &genres)?;
-        }
-        store_related(conn, seed_id, &related)
-    })
+    if let Some(genres) = genres {
+        store_seed_genres(&tx, seed_id, genres)?;
+    }
+    if tidal.is_some() || lastfm.is_some() {
+        tx.execute(
+            "INSERT INTO video_related_scans (seed_tidal_id) VALUES (?1)
+            ON CONFLICT(seed_tidal_id) DO UPDATE SET scanned_at = datetime('now')",
+            [seed_id],
+        )?;
+    }
+    if let Some(hours) = retry_after_hours {
+        tx.execute(
+            "INSERT INTO video_related_retries (seed_tidal_id, retry_at)
+            VALUES (?1, datetime('now', ?2))
+            ON CONFLICT(seed_tidal_id) DO UPDATE SET retry_at = excluded.retry_at",
+            params![seed_id, format!("+{hours} hours")],
+        )?;
+    } else {
+        tx.execute(
+            "DELETE FROM video_related_retries WHERE seed_tidal_id = ?1",
+            [seed_id],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 pub fn store_seed_genres(conn: &Connection, seed_id: i64, genres: &[String]) -> Result<()> {
@@ -564,7 +811,7 @@ pub fn artist_pool(
     seed_id: Option<i64>,
     recent_seeds: &[i64],
     library_anchors: &[AnchorArtist],
-) -> Result<Vec<(i64, String, u8)>> {
+) -> Result<Vec<(i64, String, SourceLane)>> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     if let Some(id) = seed_id.filter(|id| *id > 0) {
@@ -573,24 +820,21 @@ pub fn artist_pool(
                              (SELECT artist_name FROM video_catalog WHERE artist_tidal_id = ?1 LIMIT 1))",
             [id], |row| row.get(0),
         ).optional()?.flatten();
-        out.push((id, name.unwrap_or_default(), 0));
+        out.push((id, name.unwrap_or_default(), SourceLane::Seed));
         seen.insert(id);
         let mut stmt = conn.prepare(
-            "SELECT related_tidal_id, name, source FROM video_related_artists
-             WHERE seed_tidal_id = ?1 AND source <> 'genre'
-             ORDER BY CASE source WHEN 'lastfm' THEN 0 WHEN 'tidal' THEN 1 ELSE 2 END,
-                      rowid LIMIT 30",
+            "SELECT related_tidal_id, MIN(name) FROM video_related_artists
+             WHERE seed_tidal_id = ?1 AND source IN ('lastfm', 'tidal')
+             GROUP BY related_tidal_id
+             ORDER BY MIN(CASE source WHEN 'lastfm' THEN 0 ELSE 1 END),
+                      MIN(rowid) LIMIT 30",
         )?;
         for row in stmt.query_map([id], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
         })? {
-            let (related_id, name, source) = row?;
+            let (related_id, name) = row?;
             if seen.insert(related_id) {
-                out.push((related_id, name, if source == "genre" { 2 } else { 1 }));
+                out.push((related_id, name, SourceLane::Direct));
             }
         }
         // A second-hop artist only enters the station when two independent
@@ -614,7 +858,7 @@ pub fn artist_pool(
         })? {
             let (bridge_id, name) = row?;
             if seen.insert(bridge_id) {
-                out.push((bridge_id, name, 4));
+                out.push((bridge_id, name, SourceLane::Bridge));
             }
         }
         // One dominant local genre (or the first Last.fm tag that maps to our
@@ -635,7 +879,7 @@ pub fn artist_pool(
             })? {
                 let (genre_id, name) = row?;
                 if seen.insert(genre_id) {
-                    out.push((genre_id, name, 2));
+                    out.push((genre_id, name, SourceLane::Genre));
                 }
             }
         }
@@ -651,19 +895,16 @@ pub fn artist_pool(
             continue;
         }
         let mut stmt = conn.prepare(
-            "SELECT related_tidal_id, name, source FROM video_related_artists
-             WHERE seed_tidal_id = ?1 AND source <> 'genre' ORDER BY related_tidal_id LIMIT 20",
+            "SELECT related_tidal_id, MIN(name) FROM video_related_artists
+             WHERE seed_tidal_id = ?1 AND source IN ('lastfm', 'tidal')
+             GROUP BY related_tidal_id ORDER BY related_tidal_id LIMIT 20",
         )?;
         for row in stmt.query_map([id], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
         })? {
-            let (related_id, name, source) = row?;
+            let (related_id, name) = row?;
             if seen.insert(related_id) {
-                out.push((related_id, name, if source == "genre" { 2 } else { 1 }));
+                out.push((related_id, name, SourceLane::Direct));
             }
         }
         if prior_seeds.len() >= 3 {
@@ -672,7 +913,7 @@ pub fn artist_pool(
     }
     for anchor in library_anchors.iter().take(30) {
         if seen.insert(anchor.tidal_id) {
-            out.push((anchor.tidal_id, anchor.name.clone(), 3));
+            out.push((anchor.tidal_id, anchor.name.clone(), SourceLane::Library));
         }
     }
     Ok(out)
@@ -683,9 +924,10 @@ pub fn artist_pool(
 /// request budget, including background warming and other radio sessions.
 pub fn next_bridge_seed(conn: &Connection, seed_id: i64) -> Result<Option<(i64, String)>> {
     let mut stmt = conn.prepare(
-        "SELECT related_tidal_id, name FROM video_related_artists
+        "SELECT related_tidal_id, MIN(name) FROM video_related_artists
          WHERE seed_tidal_id = ?1 AND source IN ('lastfm', 'tidal')
-         ORDER BY CASE source WHEN 'lastfm' THEN 0 ELSE 1 END, rowid
+         GROUP BY related_tidal_id
+         ORDER BY MIN(CASE source WHEN 'lastfm' THEN 0 ELSE 1 END), MIN(rowid)
          LIMIT 20",
     )?;
     let neighbors = stmt
@@ -703,8 +945,8 @@ pub fn next_bridge_seed(conn: &Connection, seed_id: i64) -> Result<Option<(i64, 
 
 pub fn load_candidates(
     conn: &Connection,
-    artists: &[(i64, String, u8)],
-) -> Result<Vec<(VideoCandidate, u8)>> {
+    artists: &[(i64, String, SourceLane)],
+) -> Result<Vec<(VideoCandidate, SourceLane)>> {
     let ids: Vec<String> = artists.iter().map(|a| a.0.to_string()).collect();
     if ids.is_empty() {
         return Ok(Vec::new());
@@ -715,21 +957,14 @@ pub fn load_candidates(
         .map(|(rank, (id, _, _))| format!("WHEN {id} THEN {rank}"))
         .collect::<Vec<_>>()
         .join(" ");
-    let lane: HashMap<i64, u8> = artists.iter().map(|a| (a.0, a.2)).collect();
+    let lane: HashMap<i64, SourceLane> = artists.iter().map(|a| (a.0, a.2)).collect();
     let lead = artists[0].0;
     let sql = format!(
-        "SELECT artist_tidal_id, item_json FROM (
-             SELECT artist_tidal_id, item_json,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY artist_tidal_id
-                        ORDER BY fetched_at DESC, tidal_video_id DESC
-                    ) AS artist_row
-             FROM video_catalog WHERE artist_tidal_id IN ({})
-         )
-         WHERE artist_row <= 50
+        "SELECT artist_tidal_id, item_json FROM video_catalog
+         WHERE artist_tidal_id IN ({})
          ORDER BY CASE WHEN artist_tidal_id = {lead} THEN 0 ELSE 1 END,
-                  artist_row, CASE artist_tidal_id {priority} ELSE 999 END
-         LIMIT 900",
+                  CASE artist_tidal_id {priority} ELSE 999 END,
+                  fetched_at DESC, tidal_video_id DESC",
         ids.join(","),
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -758,7 +993,7 @@ pub fn load_candidates(
          JOIN tracks t ON t.id = lv.track_id
          JOIN artists a ON a.id = t.artist_id
          WHERE lv.suppressed = 0 AND a.tidal_id IN ({})
-         ORDER BY CASE a.tidal_id {priority} ELSE 999 END, lv.match_score DESC LIMIT 300",
+         ORDER BY CASE a.tidal_id {priority} ELSE 999 END, lv.match_score DESC",
         ids.join(","),
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -791,7 +1026,7 @@ pub fn load_candidates(
                 ),
                 release_year,
             },
-            *lane.get(&artist_id).unwrap_or(&3),
+            *lane.get(&artist_id).unwrap_or(&SourceLane::Library),
         ));
     }
     Ok(out)
@@ -825,7 +1060,7 @@ pub fn video_song_key(artist_id: Option<i64>, artist_name: Option<&str>, title: 
 /// Artist radio stays inside the seed's own videos and its direct graph.
 /// Related artists provide discovery; broad library anchors never fill gaps.
 pub fn select_seeded_batch(
-    candidates: &[(VideoCandidate, u8)],
+    candidates: &[(VideoCandidate, SourceLane)],
     excluded_ids: &HashSet<i64>,
     recent_song_keys: &HashSet<String>,
     watched: &HashSet<i64>,
@@ -835,7 +1070,7 @@ pub fn select_seeded_batch(
     let mut scored: Vec<_> = candidates
         .iter()
         .filter(|(video, lane)| {
-            (*lane <= 2 || *lane == 4) && !excluded_ids.contains(&video.tidal_id)
+            *lane != SourceLane::Library && !excluded_ids.contains(&video.tidal_id)
         })
         .filter_map(|(video, lane)| {
             let key = video_song_key(video.artist_id, video.artist_name.as_deref(), &video.title);
@@ -845,8 +1080,8 @@ pub fn select_seeded_batch(
     scored.sort_by_key(|(video, lane, _)| {
         (
             watched.contains(&video.tidal_id) as u8,
-            *lane,
-            (*lane != 0
+            lane.seeded_priority(),
+            (*lane != SourceLane::Seed
                 && video
                     .artist_id
                     .is_some_and(|id| recent_artists.contains(&id))) as u8,
@@ -860,9 +1095,24 @@ pub fn select_seeded_batch(
     let mut bridge_count = 0;
     while out.len() < limit {
         let lanes = match out.len() % 4 {
-            0 | 2 => [0, 1, 4, 2],
-            1 => [1, 0, 4, 2],
-            _ => [4, 0, 1, 2],
+            0 | 2 => [
+                SourceLane::Seed,
+                SourceLane::Direct,
+                SourceLane::Bridge,
+                SourceLane::Genre,
+            ],
+            1 => [
+                SourceLane::Direct,
+                SourceLane::Seed,
+                SourceLane::Bridge,
+                SourceLane::Genre,
+            ],
+            _ => [
+                SourceLane::Bridge,
+                SourceLane::Seed,
+                SourceLane::Direct,
+                SourceLane::Genre,
+            ],
         };
         let last_artist = out
             .last()
@@ -871,7 +1121,9 @@ pub fn select_seeded_batch(
         let mut chosen = None;
         for allow_watched in [false, true] {
             for lane in lanes {
-                if (lane == 2 && genre_count >= 2) || (lane == 4 && bridge_count >= 4) {
+                if (lane == SourceLane::Genre && genre_count >= 2)
+                    || (lane == SourceLane::Bridge && bridge_count >= 4)
+                {
                     continue;
                 }
                 for avoid_adjacent in [true, false] {
@@ -881,7 +1133,7 @@ pub fn select_seeded_batch(
                             *candidate_lane == lane
                                 && (allow_watched || !watched.contains(&video.tidal_id))
                                 && !used_songs.contains(key.as_str())
-                                && (lane == 0
+                                && (lane == SourceLane::Seed
                                     || artist_counts.get(&artist).copied().unwrap_or(0)
                                         < artist_cap)
                                 && (!avoid_adjacent || Some(artist) != last_artist)
@@ -908,9 +1160,9 @@ pub fn select_seeded_batch(
         used_songs.insert((*key).clone());
         let artist = video.artist_id.unwrap_or(-video.tidal_id);
         *artist_counts.entry(artist).or_default() += 1;
-        if *lane == 2 {
+        if *lane == SourceLane::Genre {
             genre_count += 1;
-        } else if *lane == 4 {
+        } else if *lane == SourceLane::Bridge {
             bridge_count += 1;
         }
         out.push(VideoSetItem {
@@ -925,11 +1177,11 @@ pub fn select_seeded_batch(
             explicit: None,
             kind: "Music Video".into(),
             why: match lane {
-                0 => "More from this artist",
-                1 => "Related artist",
-                2 => "Shared genre",
-                4 => "Recommended by related artists",
-                _ => "Related artist",
+                SourceLane::Seed => "More from this artist",
+                SourceLane::Direct => "Related artist",
+                SourceLane::Genre => "Shared genre",
+                SourceLane::Bridge => "Recommended by related artists",
+                SourceLane::Library => unreachable!("seeded selection excludes library"),
             }
             .into(),
         });
@@ -938,7 +1190,7 @@ pub fn select_seeded_batch(
 }
 
 pub fn select_batch(
-    candidates: &[(VideoCandidate, u8)],
+    candidates: &[(VideoCandidate, SourceLane)],
     excluded: &HashSet<i64>,
     watched: &HashSet<i64>,
     recent_artists: &[i64],
@@ -956,7 +1208,7 @@ pub fn select_batch(
             } else {
                 0
             };
-            (v, *lane as i32 * 2 + watched_penalty + artist_penalty)
+            (v, lane.score() + watched_penalty + artist_penalty)
         })
         .collect();
     scored.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.tidal_id.cmp(&b.0.tidal_id)));
@@ -1059,7 +1311,7 @@ mod tests {
     }
 
     #[test]
-    fn a_warm_related_catalog_cannot_push_the_seed_out_of_the_candidate_limit() {
+    fn all_cached_neighbor_videos_remain_candidates() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::schema::run_migrations(&conn).unwrap();
         let candidate = |id, artist, name: &str| VideoCandidate {
@@ -1101,9 +1353,15 @@ mod tests {
             )],
         )
         .unwrap();
-        let candidates =
-            load_candidates(&conn, &[(10, "Seed".into(), 0), (20, "Neighbor".into(), 1)]).unwrap();
-        assert_eq!(candidates.len(), 51);
+        let candidates = load_candidates(
+            &conn,
+            &[
+                (10, "Seed".into(), SourceLane::Seed),
+                (20, "Neighbor".into(), SourceLane::Direct),
+            ],
+        )
+        .unwrap();
+        assert_eq!(candidates.len(), 602);
         assert!(candidates.iter().any(|(video, _)| video.tidal_id == 1));
     }
 
@@ -1155,7 +1413,10 @@ mod tests {
         .unwrap();
         assert!(genre_due(&conn, "Electronic").unwrap());
         let pool = artist_pool(&conn, Some(42), &[], &[]).unwrap();
-        assert!(pool.iter().any(|(id, _, lane)| *id == 45 && *lane == 2));
+        assert!(
+            pool.iter()
+                .any(|(id, _, lane)| *id == 45 && *lane == SourceLane::Genre)
+        );
         assert!(!pool.iter().any(|(id, _, _)| *id == 46));
         assert!(
             load_candidates(&conn, &pool)
@@ -1184,7 +1445,10 @@ mod tests {
         )
         .unwrap();
         let pool = artist_pool(&conn, Some(10), &[], &[]).unwrap();
-        assert!(pool.iter().any(|(id, _, lane)| *id == 20 && *lane == 2));
+        assert!(
+            pool.iter()
+                .any(|(id, _, lane)| *id == 20 && *lane == SourceLane::Genre)
+        );
         assert!(!pool.iter().any(|(id, _, _)| *id == 30));
     }
 
@@ -1201,10 +1465,10 @@ mod tests {
             release_year: None,
         };
         let pool = vec![
-            (candidate(1, 1), 0),
-            (candidate(2, 1), 0),
-            (candidate(3, 2), 1),
-            (candidate(4, 3), 2),
+            (candidate(1, 1), SourceLane::Seed),
+            (candidate(2, 1), SourceLane::Seed),
+            (candidate(3, 2), SourceLane::Direct),
+            (candidate(4, 3), SourceLane::Genre),
         ];
         let selected = select_batch(
             &pool,
@@ -1235,7 +1499,11 @@ mod tests {
                         artwork_url: None,
                         release_year: None,
                     },
-                    if artist <= 8 { 0 } else { 1 },
+                    if artist <= 8 {
+                        SourceLane::Seed
+                    } else {
+                        SourceLane::Direct
+                    },
                 )
             })
             .collect();
@@ -1281,18 +1549,18 @@ mod tests {
             )
         };
         let candidates = vec![
-            candidate(1, 10, "Basket Case (Live)", 0),
-            candidate(2, 10, "Basket Case [Official Video]", 0),
-            candidate(3, 10, "Holiday", 0),
-            candidate(4, 10, "American Idiot", 0),
-            candidate(5, 10, "Jesus of Suburbia", 0),
-            candidate(6, 20, "Related one", 1),
-            candidate(7, 20, "Related two", 1),
-            candidate(8, 30, "Another neighbor", 1),
-            candidate(9, 40, "Genre neighbor", 2),
-            candidate(12, 60, "Corroborated neighbor", 4),
-            candidate(10, 50, "Unrelated favorite", 3),
-            candidate(11, 51, "Another unrelated favorite", 3),
+            candidate(1, 10, "Basket Case (Live)", SourceLane::Seed),
+            candidate(2, 10, "Basket Case [Official Video]", SourceLane::Seed),
+            candidate(3, 10, "Holiday", SourceLane::Seed),
+            candidate(4, 10, "American Idiot", SourceLane::Seed),
+            candidate(5, 10, "Jesus of Suburbia", SourceLane::Seed),
+            candidate(6, 20, "Related one", SourceLane::Direct),
+            candidate(7, 20, "Related two", SourceLane::Direct),
+            candidate(8, 30, "Another neighbor", SourceLane::Direct),
+            candidate(9, 40, "Genre neighbor", SourceLane::Genre),
+            candidate(12, 60, "Corroborated neighbor", SourceLane::Bridge),
+            candidate(10, 50, "Unrelated favorite", SourceLane::Library),
+            candidate(11, 51, "Another unrelated favorite", SourceLane::Library),
         ];
         let recent_song = video_song_key(Some(10), None, "American Idiot (Visualizer)");
         let selected = select_seeded_batch(
@@ -1340,11 +1608,11 @@ mod tests {
         let candidates = (1..=36)
             .map(|id| {
                 let (artist, lane) = if id <= 12 {
-                    (10, 0)
+                    (10, SourceLane::Seed)
                 } else if id <= 24 {
-                    (20, 1)
+                    (20, SourceLane::Direct)
                 } else {
-                    (30, 4)
+                    (30, SourceLane::Bridge)
                 };
                 (
                     VideoCandidate {
@@ -1387,6 +1655,58 @@ mod tests {
     }
 
     #[test]
+    fn a_related_artist_does_not_dominate_when_other_neighbors_have_videos() {
+        let candidates: Vec<_> = (1..=32)
+            .map(|id| {
+                let (artist, lane) = if id <= 8 {
+                    (10, SourceLane::Seed)
+                } else if id <= 20 {
+                    (20, SourceLane::Direct)
+                } else {
+                    (30, SourceLane::Direct)
+                };
+                (
+                    VideoCandidate {
+                        tidal_id: id,
+                        title: format!("Song {id}"),
+                        duration_s: Some(180),
+                        artist_id: Some(artist),
+                        artist_name: Some(format!("Artist {artist}")),
+                        album_tidal_id: None,
+                        artwork_url: None,
+                        release_year: None,
+                    },
+                    lane,
+                )
+            })
+            .collect();
+        let selected = select_seeded_batch(
+            &candidates,
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &[],
+            12,
+        );
+        assert_eq!(selected.len(), 12);
+        assert!(
+            selected
+                .iter()
+                .filter(|item| item.artist_id == Some(10))
+                .count()
+                >= 5
+        );
+        assert!(
+            selected
+                .iter()
+                .filter(|item| item.artist_id == Some(20))
+                .count()
+                <= 4
+        );
+        assert!(selected.iter().any(|item| item.artist_id == Some(30)));
+    }
+
+    #[test]
     fn relationship_budget_allows_several_manual_artist_starts() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::schema::run_migrations(&conn).unwrap();
@@ -1402,6 +1722,136 @@ mod tests {
         assert!(
             !related_due(&conn, 9).unwrap(),
             "the ninth new seed waits for the budget window"
+        );
+    }
+
+    #[test]
+    fn queue_health_counts_distinct_unfamiliar_artists_and_checks_bridges() {
+        let item = |artist_id| VideoSetItem {
+            tidal_id: artist_id * 10,
+            title: "Video".into(),
+            duration_ms: None,
+            artist_id: Some(artist_id),
+            artist_name: None,
+            album_tidal_id: None,
+            artwork_url: None,
+            quality: None,
+            explicit: None,
+            kind: "Music Video".into(),
+            why: String::new(),
+        };
+        let one_artist = vec![item(20), item(20), item(20), item(20)];
+        assert_eq!(
+            unfamiliar_artist_count(&one_artist, &HashSet::new(), Some(10)),
+            1
+        );
+        assert!(queue_needs_discovery(12, 1, false, false));
+        let three_artists = vec![item(20), item(30), item(40), item(10)];
+        assert_eq!(
+            unfamiliar_artist_count(&three_artists, &HashSet::new(), Some(10)),
+            3
+        );
+        assert!(!queue_needs_discovery(12, 3, false, false));
+        assert!(queue_needs_discovery(12, 3, false, true));
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::schema::run_migrations(&conn).unwrap();
+        assert!(!bridge_due(&conn, 10).unwrap());
+        store_related(&conn, 10, &[(20, "Neighbor".into(), "tidal")]).unwrap();
+        assert!(bridge_due(&conn, 10).unwrap());
+        mark_bridge_scanned(&conn, 10).unwrap();
+        assert!(!bridge_due(&conn, 10).unwrap());
+        conn.execute(
+            "UPDATE video_bridge_scans SET scanned_at = datetime('now', '-2 hours')",
+            [],
+        )
+        .unwrap();
+        assert!(bridge_due(&conn, 10).unwrap());
+    }
+
+    #[test]
+    fn provider_snapshots_replace_only_successful_sources() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::schema::run_migrations(&conn).unwrap();
+        apply_related_refresh(
+            &conn,
+            10,
+            Some(&[(20, "Old TIDAL".into()), (30, "Shared".into())]),
+            Some(&[(30, "Shared".into()), (40, "Old Last.fm".into())]),
+            None,
+            None,
+        )
+        .unwrap();
+        // Last.fm failed; a successful TIDAL response drops only its stale edge.
+        apply_related_refresh(
+            &conn,
+            10,
+            Some(&[(30, "Shared".into())]),
+            None,
+            None,
+            Some(1),
+        )
+        .unwrap();
+        let count = |source: &str| -> i64 {
+            conn.query_row(
+            "SELECT COUNT(*) FROM video_related_artists WHERE seed_tidal_id = 10 AND source = ?1",
+            [source], |row| row.get(0)).unwrap()
+        };
+        assert_eq!(count("tidal"), 1);
+        assert_eq!(count("lastfm"), 2);
+        // A valid empty response removes the old Last.fm links, preserving TIDAL.
+        apply_related_refresh(&conn, 10, None, Some(&[]), None, None).unwrap();
+        assert_eq!(count("tidal"), 1);
+        assert_eq!(count("lastfm"), 0);
+    }
+
+    #[test]
+    fn failed_resolution_retries_before_relationship_ttl() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::schema::run_migrations(&conn).unwrap();
+        mark_resolution_failed(&conn, "Unresolved").unwrap();
+        assert!(!resolution_due(&conn, "Unresolved").unwrap());
+        apply_related_refresh(&conn, 10, Some(&[]), Some(&[]), None, Some(24)).unwrap();
+        assert!(!related_due(&conn, 10).unwrap());
+        conn.execute(
+            "UPDATE video_related_retries SET retry_at = datetime('now', '-1 minute')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE video_related_attempts SET attempted_at = datetime('now', '-2 hours')",
+            [],
+        )
+        .unwrap();
+        assert!(related_due(&conn, 10).unwrap());
+        conn.execute(
+            "UPDATE video_artist_resolution_failures SET attempted_at = datetime('now', '-2 days')",
+            [],
+        )
+        .unwrap();
+        assert!(resolution_due(&conn, "Unresolved").unwrap());
+    }
+
+    #[test]
+    fn failed_exact_matches_do_not_exhaust_success_budget() {
+        assert!(may_resolve_external(0, 3));
+        assert!(may_resolve_external(2, 9));
+        assert!(!may_resolve_external(3, 3));
+        assert!(!may_resolve_external(0, 10));
+    }
+
+    #[test]
+    fn canonical_artist_name_comes_from_id_not_request_text() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::schema::run_migrations(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO artists (tidal_id, name) VALUES (10, 'Green Day')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            canonical_artist_name(&conn, 10).unwrap().as_deref(),
+            Some("Green Day")
         );
     }
 
@@ -1439,7 +1889,11 @@ mod tests {
         );
         store_related(&conn, 30, &[(40, "Agreed artist".into(), "tidal")]).unwrap();
         let expanded = artist_pool(&conn, Some(10), &[], &[]).unwrap();
-        assert!(expanded.iter().any(|(id, _, lane)| *id == 40 && *lane == 4));
+        assert!(
+            expanded
+                .iter()
+                .any(|(id, _, lane)| *id == 40 && *lane == SourceLane::Bridge)
+        );
         assert!(!expanded.iter().any(|(id, _, _)| *id == 50));
     }
 
@@ -1478,12 +1932,19 @@ mod tests {
             ],
         )
         .unwrap();
-        let candidates =
-            load_candidates(&conn, &[(10, "Seed".into(), 0), (20, "Neighbor".into(), 1)]).unwrap();
+        let candidates = load_candidates(
+            &conn,
+            &[
+                (10, "Seed".into(), SourceLane::Seed),
+                (20, "Neighbor".into(), SourceLane::Direct),
+            ],
+        )
+        .unwrap();
+        assert_eq!(candidates.len(), 651);
         assert!(
             candidates
                 .iter()
-                .any(|(video, lane)| video.tidal_id == 999 && *lane == 1)
+                .any(|(video, lane)| video.tidal_id == 999 && *lane == SourceLane::Direct)
         );
     }
 
@@ -1516,6 +1977,23 @@ mod tests {
             liked_seeds_needing_warm(&conn).unwrap(),
             vec![(200, "Other".into())]
         );
+        conn.execute(
+            "INSERT INTO video_related_retries (seed_tidal_id, retry_at)
+            VALUES (100, datetime('now', '-1 minute'))",
+            [],
+        )
+        .unwrap();
+        assert!(
+            liked_seeds_needing_warm(&conn)
+                .unwrap()
+                .iter()
+                .any(|(id, _)| *id == 100)
+        );
+        conn.execute(
+            "DELETE FROM video_related_retries WHERE seed_tidal_id = 100",
+            [],
+        )
+        .unwrap();
         assert_eq!(
             related_catalog_targets(&conn, 100).unwrap(),
             vec![

@@ -68,6 +68,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_064,
     MIGRATION_065,
     MIGRATION_066,
+    MIGRATION_067,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1761,6 +1762,41 @@ CREATE TABLE IF NOT EXISTS saved_videos (
 CREATE INDEX IF NOT EXISTS idx_saved_videos_saved_at ON saved_videos(saved_at DESC);
 "#;
 
+// Keep separate provider snapshots, scan attempts, and short-lived unresolved
+// Last.fm names. An unsuccessful request must not masquerade as a fresh graph.
+const MIGRATION_067: &str = r#"
+BEGIN;
+ALTER TABLE video_related_artists RENAME TO video_related_artists_old;
+CREATE TABLE video_related_artists (
+    seed_tidal_id INTEGER NOT NULL,
+    related_tidal_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    source TEXT NOT NULL,
+    PRIMARY KEY(seed_tidal_id, related_tidal_id, source)
+);
+INSERT INTO video_related_artists SELECT * FROM video_related_artists_old;
+DROP TABLE video_related_artists_old;
+CREATE INDEX idx_video_related_artist_source ON video_related_artists(seed_tidal_id, source);
+CREATE TABLE video_related_attempts (
+    seed_tidal_id INTEGER PRIMARY KEY,
+    attempted_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE video_related_retries (
+    seed_tidal_id INTEGER PRIMARY KEY,
+    retry_at TEXT NOT NULL
+);
+CREATE TABLE video_bridge_scans (
+    seed_tidal_id INTEGER PRIMARY KEY,
+    scanned_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE video_artist_resolution_failures (
+    name TEXT PRIMARY KEY COLLATE NOCASE,
+    attempted_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+INSERT OR IGNORE INTO _migrations (id) VALUES (67);
+COMMIT;
+"#;
+
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     // Create migrations table if not exists
     conn.execute_batch(
@@ -1778,7 +1814,10 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         let migration_id = (i + 1) as i64;
         if migration_id > applied {
             conn.execute_batch(migration)?;
-            conn.execute("INSERT INTO _migrations (id) VALUES (?1)", [migration_id])?;
+            conn.execute(
+                "INSERT OR IGNORE INTO _migrations (id) VALUES (?1)",
+                [migration_id],
+            )?;
             tracing::info!("Applied migration {}", migration_id);
         }
     }
@@ -1804,7 +1843,10 @@ pub(super) fn apply_migrations_up_to(conn: &Connection, n: usize) -> Result<()> 
         let migration_id = (i + 1) as i64;
         if migration_id > applied {
             conn.execute_batch(migration)?;
-            conn.execute("INSERT INTO _migrations (id) VALUES (?1)", [migration_id])?;
+            conn.execute(
+                "INSERT OR IGNORE INTO _migrations (id) VALUES (?1)",
+                [migration_id],
+            )?;
         }
     }
 
@@ -2246,5 +2288,36 @@ mod tests {
             )
             .unwrap();
         assert!(saved.contains("Live cut"));
+    }
+
+    #[test]
+    fn migration_067_preserves_existing_related_artists_and_separates_sources() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migrations_up_to(&conn, 66).unwrap();
+        conn.execute(
+            "INSERT INTO video_related_artists
+            (seed_tidal_id, related_tidal_id, name, source)
+            VALUES (10, 20, 'Neighbor', 'tidal')",
+            [],
+        )
+        .unwrap();
+        apply_migrations_up_to(&conn, MIGRATIONS.len()).unwrap();
+        conn.execute(
+            "INSERT INTO video_related_artists
+            (seed_tidal_id, related_tidal_id, name, source)
+            VALUES (10, 20, 'Neighbor', 'lastfm')",
+            [],
+        )
+        .unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM video_related_artists
+            WHERE seed_tidal_id = 10 AND related_tidal_id = 20",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+        run_migrations(&conn).unwrap();
     }
 }
