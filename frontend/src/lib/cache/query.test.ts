@@ -59,6 +59,26 @@ describe('QueryCache', () => {
 		expect(calls).toBe(1);
 	});
 
+	test('uses a shorter freshness window for partial response data', async () => {
+		const options = {
+			staleMs: 5 * 60_000,
+			staleMsForData: (data: unknown) => (data as { partial: boolean }).partial ? 30_000 : 5 * 60_000,
+		};
+		const fetcher = vi.fn()
+			.mockResolvedValueOnce({ partial: true })
+			.mockResolvedValueOnce({ partial: false });
+		await cache.fetchQuery('partial-artist', fetcher, options);
+		now += 29_000;
+		await cache.fetchQuery('partial-artist', fetcher, options);
+		expect(fetcher).toHaveBeenCalledTimes(1);
+		now += 1_000;
+		await cache.fetchQuery('partial-artist', fetcher, options);
+		expect(fetcher).toHaveBeenCalledTimes(2);
+		now += 30_000;
+		await cache.fetchQuery('partial-artist', fetcher, options);
+		expect(fetcher).toHaveBeenCalledTimes(2);
+	});
+
 	test('returns cached data while stale data refreshes in the background', async () => {
 		await cache.fetchQuery(['api', 'swr'], async () => ({ value: 1 }), { staleMs: 50 });
 		now += 100;

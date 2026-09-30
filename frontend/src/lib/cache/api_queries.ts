@@ -35,6 +35,7 @@ import {
 	type TidalMixesResponse,
 	type TidalMoodsResponse,
 	type TidalRadioStationsResponse,
+	type TidalArtistProfile,
 	type Track,
 	type AudioDevice,
 } from '$lib/api/client';
@@ -81,6 +82,18 @@ function scopedPersist(maxAgeMs: number): NonNullable<QueryOptions['persist']> {
 const volatileOptions: QueryOptions = { staleMs: 5 * SECOND };
 const shortOptions: QueryOptions = { staleMs: 30 * SECOND };
 const mediumOptions: QueryOptions = { staleMs: 5 * MINUTE, persist: scopedPersist(DAY) };
+export function artistPreviewStaleMs(data: unknown): number {
+	const profile = (data ?? {}) as Partial<TidalArtistProfile>;
+	if (!profile.available) return 5 * SECOND;
+	if (profile.sections_failed?.length || Object.values(profile.release_filter_status ?? {}).some((status) => status.failed)) {
+		return 30 * SECOND;
+	}
+	return 5 * MINUTE;
+}
+const artistPreviewOptions: QueryOptions = {
+	...mediumOptions,
+	staleMsForData: artistPreviewStaleMs,
+};
 const longOptions: QueryOptions = { staleMs: 30 * MINUTE, persist: scopedPersist(7 * DAY) };
 const moodsOptions: QueryOptions = { ...longOptions, returnStale: true };
 // Read-mostly surfaces that should paint last-known content instantly on open and
@@ -114,8 +127,10 @@ export const cacheKeys = {
 	artist: (id: number) => ['api', 'getArtist', { id }] as const,
 	artistTracks: (id: number) => ['api', 'getArtistTracks', { id }] as const,
 	artistDiscography: (id: number) => ['api', 'getArtistDiscography', { id }] as const,
+	artistDiscographyPreview: (id: number) => ['api', 'getArtistDiscographyPreview', { id }] as const,
 	tidalArtistCore: (id: number) => ['api', 'getTidalArtistCore', { id }] as const,
 	tidalArtistProfile: (id: number) => ['api', 'getTidalArtistProfile', { id }] as const,
+	tidalArtistPreview: (id: number) => ['api', 'getTidalArtistPreview', { id }] as const,
 	artistSpotifyStats: (id: number) => ['api', 'getArtistSpotifyStats', { id }] as const,
 	albumTracks: (id: number) => ['api', 'getAlbumTracks', { id }] as const,
 	albumSpotifyStats: (id: number) => ['api', 'getAlbumSpotifyStats', { id }] as const,
@@ -265,6 +280,13 @@ export const cachedApi = {
 			longOptions,
 		);
 	},
+	getArtistDiscographyPreview(id: number) {
+		return fetchCached<Awaited<ReturnType<typeof api.getArtistDiscography>>>(
+			cacheKeys.artistDiscographyPreview(id),
+			() => api.getArtistDiscography(id, true),
+			artistPreviewOptions,
+		);
+	},
 	// TIDAL artist profile (non-library artists). Cached like the library
 	// discography so re-visits render instantly and concurrent loads of the
 	// same artist share one request; medium staleness because in_library /
@@ -275,6 +297,13 @@ export const cachedApi = {
 			cacheKeys.tidalArtistProfile(tidalArtistId),
 			() => api.getTidalArtistProfile(tidalArtistId),
 			mediumOptions,
+		);
+	},
+	getTidalArtistPreview(tidalArtistId: number) {
+		return fetchCached<Awaited<ReturnType<typeof api.getTidalArtistProfile>>>(
+			cacheKeys.tidalArtistPreview(tidalArtistId),
+			() => api.getTidalArtistProfile(tidalArtistId, true),
+			artistPreviewOptions,
 		);
 	},
 	getTidalArtistCore(tidalArtistId: number) {
@@ -642,7 +671,9 @@ export function invalidateLibraryCaches(options: { refetch?: boolean } = {}): vo
 	dataCache.invalidatePrefix(['api', 'getArtists'], options);
 	dataCache.invalidatePrefix(['api', 'getArtistTracks'], options);
 	dataCache.invalidatePrefix(['api', 'getArtistDiscography'], options);
+	dataCache.invalidatePrefix(['api', 'getArtistDiscographyPreview'], options);
 	dataCache.invalidatePrefix(['api', 'getTidalArtistProfile'], options);
+	dataCache.invalidatePrefix(['api', 'getTidalArtistPreview'], options);
 	dataCache.invalidatePrefix(['api', 'getAlbumTracks'], options);
 	dataCache.invalidatePrefix(['api', 'search'], options);
 }

@@ -70,7 +70,7 @@ describe('artist page layout contracts', () => {
 		expect(source).toContain('let tidalLoadSeq = 0;');
 		expect(source).toContain('async function loadDiscography(id: number)');
 		expect(source).toContain('const seq = ++tidalLoadSeq;');
-		expect(source).toContain('const res = await cachedApi.getArtistDiscography(id);');
+		expect(source).toContain('const res = await cachedApi.getArtistDiscographyPreview(id);');
 		expect(source).toContain('if (seq !== tidalLoadSeq) return;');
 		expect(source).toContain('if (seq === tidalLoadSeq) tidalLoading = false;');
 		expect(source).toContain('void loadDiscography(id);');
@@ -79,7 +79,7 @@ describe('artist page layout contracts', () => {
 	test('serves the TIDAL artist profile through the cache layer', () => {
 		// cachedApi gives in-flight dedupe + stale-while-revalidate; the raw
 		// api call refetched the full nine-call TIDAL fan-out on every visit.
-		expect(source).toContain('await cachedApi.getTidalArtistProfile(tidalId)');
+		expect(source).toContain('await cachedApi.getTidalArtistPreview(tidalId)');
 		expect(source).not.toContain('await api.getTidalArtistProfile(tidalId)');
 	});
 
@@ -155,7 +155,9 @@ describe('artist page layout contracts', () => {
 		expect(source).toContain('href={`${discographyBase}/discography/singles`}');
 		expect(source).toContain('href={`${discographyBase}/discography/compilations`}');
 		expect(discographySource).toContain("type Section = 'tracks' | 'albums' | 'singles' | 'compilations';");
-		expect(discographySource).toContain('cachedApi.getArtistDiscography(id)');
+		expect(discographySource).toContain('cachedApi.getArtistDiscographyPreview(id)');
+		expect(discographySource).toContain('api.getTidalArtistReleasePage(tidalId, filter, offset)');
+		expect(discographySource).not.toContain('cachedApi.getArtistDiscography(id)');
 		expect(discographySource).toContain('<SearchField');
 		expect(discographySource).toContain('<TrackRow');
 		expect(discographySource).toContain('<TidalTrackRow');

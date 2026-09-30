@@ -27,6 +27,7 @@ export interface PersistOptions {
 
 export interface QueryOptions {
 	staleMs?: number;
+	staleMsForData?: (data: unknown) => number;
 	persist?: PersistOptions;
 	revalidate?: boolean;
 	returnStale?: boolean;
@@ -400,7 +401,10 @@ export class QueryCache {
 
 	private isStale<T>(state: CacheState<T>, options: QueryOptions): boolean {
 		if (state.lastUpdated === null) return true;
-		return this.now() - state.lastUpdated >= (options.staleMs ?? DEFAULT_STALE_MS);
+		const staleMs = state.data === undefined
+			? (options.staleMs ?? DEFAULT_STALE_MS)
+			: (options.staleMsForData?.(state.data) ?? options.staleMs ?? DEFAULT_STALE_MS);
+		return this.now() - state.lastUpdated >= staleMs;
 	}
 
 	private refreshStaleFlag<T>(entry: CacheEntry<T>, options: QueryOptions): void {

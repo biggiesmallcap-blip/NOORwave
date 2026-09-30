@@ -830,10 +830,22 @@ export interface TidalArtistProfile {
 	available: boolean;
 	/**
 	 * Names of TIDAL sub-fetches that failed or timed out for this payload
-	 * (e.g. "videos", "similar_artists"). Lets the page say "partial results"
-	 * instead of passing empty shelves off as the artist having no content.
+	 * (e.g. "videos", "similar_artists"). The see-all view can use this to
+	 * retry a release filter without treating an empty result as complete.
 	 */
 	sections_failed?: string[];
+	release_filter_status?: ArtistReleaseFilterStatuses;
+}
+
+export type ArtistReleaseFilter = 'ALBUMS' | 'EPSANDSINGLES' | 'COMPILATIONS' | 'LIVE';
+export interface ArtistReleaseFilterStatus {
+	failed: boolean;
+	has_more: boolean | null;
+}
+export type ArtistReleaseFilterStatuses = Record<ArtistReleaseFilter, ArtistReleaseFilterStatus>;
+export interface TidalArtistReleasePage {
+	albums: TidalDiscographyAlbum[];
+	status: ArtistReleaseFilterStatus;
 }
 
 export interface TidalArtistCore {
@@ -2498,7 +2510,7 @@ export const api = {
 		return fetchApi<{ tracks: Track[] }>(`/api/artists/${id}/tracks`);
 	},
 
-	getArtistDiscography(id: number) {
+	getArtistDiscography(id: number, preview = false) {
 		return fetchApi<{
 			albums: TidalDiscographyAlbum[];
 			top_tracks: TidalDiscographyTrack[];
@@ -2509,7 +2521,8 @@ export const api = {
 			available: boolean;
 			reason?: string;
 			sections_failed?: string[];
-		}>(`/api/artists/${id}/discography`);
+			release_filter_status?: ArtistReleaseFilterStatuses;
+		}>(`/api/artists/${id}/discography${preview ? '?preview=true' : ''}`);
 	},
 
 	getArtistSpotifyStats(id: number) {
@@ -4097,8 +4110,12 @@ export const api = {
 	},
 
 
-	getTidalArtistProfile(tidalArtistId: number): Promise<TidalArtistProfile> {
-		return fetchApi<TidalArtistProfile>(`/api/tidal/artists/${tidalArtistId}`);
+	getTidalArtistProfile(tidalArtistId: number, preview = false): Promise<TidalArtistProfile> {
+		return fetchApi<TidalArtistProfile>(`/api/tidal/artists/${tidalArtistId}${preview ? '?preview=true' : ''}`);
+	},
+
+	getTidalArtistReleasePage(tidalArtistId: number, filter: ArtistReleaseFilter, offset: number): Promise<TidalArtistReleasePage> {
+		return fetchApi<TidalArtistReleasePage>(`/api/tidal/artists/${tidalArtistId}/releases?filter=${filter}&offset=${offset}`);
 	},
 
 	getTidalArtistCore(tidalArtistId: number): Promise<TidalArtistCore> {

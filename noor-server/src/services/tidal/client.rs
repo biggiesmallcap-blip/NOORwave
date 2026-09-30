@@ -398,6 +398,10 @@ impl TidalClient {
         crate::services::tidal::backoff::global().check()?;
 
         let _permits = request_limiter().acquire(self.request_priority).await?;
+        // A different request can receive 429 while this one waits for a
+        // permit. Check again so queued artist pages do not keep hitting TIDAL
+        // during the Retry-After window.
+        crate::services::tidal::backoff::global().check()?;
 
         tracing::debug!("TIDAL GET {}", url);
         let resp = self
