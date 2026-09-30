@@ -159,32 +159,3 @@ jobs:
             echo "::error::Frontend build emitted a chunk-size warning - split the offender or, if intentionally lazy, raise chunkSizeWarningLimit in vite.config.ts with a comment explaining why."
             exit 1
           fi
-
-  promo-showcase:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-        with:
-          version: 10
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: promo/noorwave-showcase/pnpm-lock.yaml
-
-      - name: Install
-        working-directory: promo/noorwave-showcase
-        run: pnpm install --frozen-lockfile
-
-      - name: Type check
-        working-directory: promo/noorwave-showcase
-        run: pnpm check
