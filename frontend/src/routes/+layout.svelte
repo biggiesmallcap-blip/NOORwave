@@ -281,6 +281,8 @@
 	let effectivePlayerLayout = $derived(resolvePlayerLayout($playerPlacement, viewportWidth));
 	let queueDrawerOpen = $state(false);
 	let videoQueueDrawerOpen = $state(false);
+	let appShellElement = $state<HTMLDivElement | null>(null);
+	let bottomPlayerElement = $state<HTMLElement | null>(null);
 
 	onMount(() => {
 		const measureViewport = () => { viewportWidth = window.innerWidth; };
@@ -1287,6 +1289,25 @@
 	);
 
 	$effect(() => {
+		const shell = appShellElement;
+		const player = bottomPlayerElement;
+		if (!shell) return;
+
+		if (effectivePlayerLayout !== 'bottom' || !player || typeof ResizeObserver === 'undefined') {
+			shell.style.setProperty('--bottom-player-height', '0px');
+			return;
+		}
+
+		const updateBottomPlayerHeight = () => {
+			shell.style.setProperty('--bottom-player-height', `${Math.ceil(player.getBoundingClientRect().height)}px`);
+		};
+		updateBottomPlayerHeight();
+		const observer = new ResizeObserver(updateBottomPlayerHeight);
+		observer.observe(player);
+		return () => observer.disconnect();
+	});
+
+	$effect(() => {
 		if (!isScrubbing) {
 			scrubPosition = $position;
 		}
@@ -1528,7 +1549,7 @@
 		{@render children()}
 	</div>
 {:else}
-<div class="app-shell" class:mobile-player-active={mobilePlayerVisible} class:has-wallpaper={$wallpaper !== 'none'} data-player-layout={effectivePlayerLayout}>
+<div class="app-shell" bind:this={appShellElement} class:mobile-player-active={mobilePlayerVisible} class:has-wallpaper={$wallpaper !== 'none'} data-player-layout={effectivePlayerLayout}>
 	<header class="mobile-top-bar">
 		<a href="/" class="mobile-brand" aria-label="NOOR home">
 			<span class="mobile-brand-mark">
@@ -1637,7 +1658,7 @@
 	<VideoDock />
 
 	{#if videoChromeActive}
-		<aside class="now-playing-panel video-queue-panel" class:queue-drawer-open={videoQueueDrawerOpen} aria-label="Video queue">
+		<aside bind:this={bottomPlayerElement} class="now-playing-panel video-queue-panel" class:queue-drawer-open={videoQueueDrawerOpen} aria-label="Video queue">
 			<div class="video-panel-top">
 				<div class="video-panel-heading"><p class="eyebrow">Video session</p><PlayerLayoutSelect effective={effectivePlayerLayout} /></div>
 				<div class="video-panel-art-wrap">
@@ -1747,6 +1768,7 @@
 		</aside>
 	{:else}
 	<aside
+		bind:this={bottomPlayerElement}
 		class="now-playing-panel"
 		class:queue-expanded={queueExpanded}
 		class:queue-drawer-open={queueDrawerOpen}
@@ -2406,6 +2428,7 @@
 	}
 
 	.app-shell {
+		--bottom-player-height: 0px;
 		position: relative;
 		z-index: 1;
 		height: 100dvh;
@@ -2596,11 +2619,10 @@
 	.app-shell[data-player-layout='bottom'] .video-queue-panel { padding: 12px 16px; }
 	.app-shell[data-player-layout='bottom'] .video-panel-top {
 		display: grid;
-		grid-template-columns: 96px minmax(120px, 1fr) auto auto 40px;
-		grid-template-areas: 'art copy actions queue heading' 'art source source source source';
+		grid-template-columns: 96px minmax(140px, 1fr) minmax(180px, 1.25fr) auto auto 40px;
+		grid-template-areas: 'art copy source actions queue heading';
 		align-items: center;
 		column-gap: 12px;
-		row-gap: 4px;
 	}
 	.app-shell[data-player-layout='bottom'] .video-panel-heading { grid-area: heading; }
 	.app-shell[data-player-layout='bottom'] .video-panel-heading .eyebrow { display: none; }
@@ -2609,13 +2631,21 @@
 	.app-shell[data-player-layout='bottom'] .video-panel-actions { grid-area: actions; }
 	.app-shell[data-player-layout='bottom'] .video-queue-trigger { grid-area: queue; }
 	.app-shell[data-player-layout='bottom'] .video-panel-source { grid-area: source; }
+	.app-shell[data-player-layout='bottom'] .video-panel-source {
+		min-width: 0;
+		margin: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.app-shell[data-player-layout='bottom'] .video-radio-hits { display: none; }
 	.app-shell[data-player-layout='bottom'] .video-panel-error { grid-column: 2 / -1; }
 	.app-shell[data-player-layout='bottom'] .video-panel-queue { display: none; }
 	.app-shell[data-player-layout='bottom'] .video-queue-panel.queue-drawer-open .video-panel-queue {
-		position: absolute;
+		position: fixed;
 		z-index: calc(var(--z-overlay) + 1);
 		right: 16px;
-		bottom: calc(100% + 8px);
+		bottom: calc(var(--bottom-player-height) + var(--space-2));
 		display: flex;
 		flex-direction: column;
 		width: min(420px, calc(100vw - 32px));
@@ -3695,6 +3725,15 @@
 		.workspace {
 			padding: calc(24px + var(--safe-top)) calc(24px + var(--safe-right)) calc(40px + var(--safe-bottom)) calc(24px + var(--safe-left));
 		}
+	}
+
+	@media (max-width: 1050px) and (min-width: 680px) {
+		.app-shell[data-player-layout='bottom'] .video-panel-top {
+			grid-template-columns: 72px minmax(0, 1fr) auto auto 40px;
+			grid-template-areas: 'art copy actions queue heading';
+		}
+		.app-shell[data-player-layout='bottom'] .video-panel-art-wrap { width: 72px; }
+		.app-shell[data-player-layout='bottom'] .video-panel-source { display: none; }
 	}
 
 	@media (max-width: 1239px) and (min-width: 680px) {
