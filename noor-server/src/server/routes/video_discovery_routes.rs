@@ -324,10 +324,7 @@ pub(super) async fn post_videos_radio_next(
                     12,
                 )
             };
-            let unfamiliar_count = items
-                .iter()
-                .filter(|item| item.artist_id.is_some_and(|id| !familiar.contains(&id)))
-                .count();
+            let unfamiliar_count = video_radio::unfamiliar_artist_count(&items, &familiar, seed_id);
             let fresh_count = items.len();
             Ok::<_, anyhow::Error>((pool, items, fresh_count, unfamiliar_count))
         })
@@ -347,7 +344,16 @@ pub(super) async fn post_videos_radio_next(
         db.with_conn(|conn| video_radio::related_due(conn, id))
             .unwrap_or(false)
     });
-    if fresh_count < 8 || unfamiliar_count < video_radio::UNFAMILIAR_PER_BATCH || relationship_due {
+    let bridge_due = seed_id.is_some_and(|id| {
+        db.with_conn(|conn| video_radio::bridge_due(conn, id))
+            .unwrap_or(false)
+    });
+    if video_radio::queue_needs_discovery(
+        fresh_count,
+        unfamiliar_count,
+        relationship_due,
+        bridge_due,
+    ) {
         let _guard = VIDEO_RADIO_FETCH_LOCK.lock().await;
         if let Ok((current_pool, current_items, current_fresh_count, current_unfamiliar_count)) =
             load()
@@ -357,13 +363,18 @@ pub(super) async fn post_videos_radio_next(
             fresh_count = current_fresh_count;
             unfamiliar_count = current_unfamiliar_count;
         }
-        if fresh_count >= 8
-            && unfamiliar_count >= video_radio::UNFAMILIAR_PER_BATCH
-            && !seed_id.is_some_and(|id| {
+        if !video_radio::queue_needs_discovery(
+            fresh_count,
+            unfamiliar_count,
+            seed_id.is_some_and(|id| {
                 db.with_conn(|conn| video_radio::related_due(conn, id))
                     .unwrap_or(false)
-            })
-        {
+            }),
+            seed_id.is_some_and(|id| {
+                db.with_conn(|conn| video_radio::bridge_due(conn, id))
+                    .unwrap_or(false)
+            }),
+        ) {
             return Json(video_radio_payload(&items, &familiar));
         }
         let tokens = match tokens {
@@ -376,19 +387,15 @@ pub(super) async fn post_videos_radio_next(
         if let Some(tokens) = tokens {
             let client =
                 TidalClient::with_http(tidal_http, tokens.access_token, tokens.country_code);
+            let mut refreshed_seed_relations = false;
             if let Some(id) = seed_id {
                 let due = db
                     .with_conn(|conn| video_radio::reserve_related_scan(conn, id))
                     .unwrap_or(false);
                 if due {
-                    if let Err(e) = video_radio::refresh_video_relations(
-                        &db,
-                        http,
-                        &client,
-                        id,
-                        body.seed_artist_name.as_deref(),
-                    )
-                    .await
+                    refreshed_seed_relations = true;
+                    if let Err(e) =
+                        video_radio::refresh_video_relations(&db, http.clone(), &client, id).await
                     {
                         tracing::warn!("video radio relationship cache failed: {e}");
                     }
@@ -408,14 +415,52 @@ pub(super) async fn post_videos_radio_next(
                     }
                 }
             }
-            // Fetch the seed first, then related artists. The two-call ceiling
-            // keeps each refill deliberate and cheap.
+            // Inspect one direct neighbor when discovery is thin or the
+            // hourly bridge check is due. Two neighbors must agree before a
+            // second-hop artist enters the pool. Shared ledgers bound calls.
+            if !refreshed_seed_relations
+                && let Some(id) = seed_id
+                && (fresh_count < 8
+                    || unfamiliar_count < video_radio::UNFAMILIAR_ARTISTS_FOR_HEALTHY_QUEUE
+                    || db
+                        .with_conn(|conn| video_radio::bridge_due(conn, id))
+                        .unwrap_or(false))
+            {
+                let bridge = db
+                    .with_conn(|conn| video_radio::next_bridge_seed(conn, id))
+                    .ok()
+                    .flatten();
+                let _ = db.with_conn(|conn| video_radio::mark_bridge_scanned(conn, id));
+                if let Some((bridge_id, _)) = bridge
+                    && db
+                        .with_conn(|conn| video_radio::reserve_related_scan(conn, bridge_id))
+                        .unwrap_or(false)
+                {
+                    if let Err(e) =
+                        video_radio::refresh_video_relations(&db, http, &client, bridge_id).await
+                    {
+                        tracing::debug!("video radio bridge relationship scan failed: {e}");
+                    }
+                    if let Ok(next) =
+                        db.with_conn(|conn| video_radio::artist_pool(conn, seed_id, &[], &[]))
+                    {
+                        pool = next;
+                    }
+                }
+            }
+            // Fetch the seed first, then direct and corroborated second-hop
+            // artists. A thin queue gets one extra catalog lookup this pass.
             let mut fetch_pool = pool.clone();
-            fetch_pool.sort_by_key(|(id, _, lane)| (*lane, !familiar.contains(id)));
+            fetch_pool.sort_by_key(|(id, _, lane)| (lane.fetch_priority(), !familiar.contains(id)));
             let mut fetched = 0;
-            for (id, name, _) in &fetch_pool {
-                if fetched >= 2 {
+            let mut fetched_bridges = 0;
+            let fetch_budget = if fresh_count < 8 { 3 } else { 2 };
+            for (id, name, lane) in &fetch_pool {
+                if fetched >= fetch_budget {
                     break;
+                }
+                if *lane == video_radio::SourceLane::Bridge && fetched_bridges >= 1 {
+                    continue;
                 }
                 if *id <= 0
                     || db
@@ -428,6 +473,9 @@ pub(super) async fn post_videos_radio_next(
                 // Even empty or failed scans are reserved so an unavailable
                 // artist is not requested at every song boundary.
                 fetched += 1;
+                if *lane == video_radio::SourceLane::Bridge {
+                    fetched_bridges += 1;
+                }
                 match client.get_artist_videos(*id, 50, 0).await {
                     Ok(page) => {
                         let anchor = video_sets::AnchorArtist {
@@ -457,7 +505,7 @@ pub(super) async fn post_videos_radio_next(
             // A genre search can uncover more videos by already verified
             // neighbors. The genre ledger permits one search per genre per
             // 14 days and one search globally per 30 minutes.
-            if unfamiliar_count < video_radio::UNFAMILIAR_PER_BATCH
+            if unfamiliar_count < video_radio::UNFAMILIAR_ARTISTS_FOR_HEALTHY_QUEUE
                 && let Some(id) = seed_id
                 && let Ok(Some(genre)) = db.with_conn(|conn| video_radio::seed_genre(conn, id))
                 && db
@@ -472,7 +520,7 @@ pub(super) async fn post_videos_radio_next(
                     // seed and artists already linked by local or provider data.
                     let allowed: HashSet<i64> = pool
                         .iter()
-                        .filter(|(_, _, lane)| *lane <= 2)
+                        .filter(|(_, _, lane)| lane.is_close())
                         .map(|(artist_id, _, _)| *artist_id)
                         .collect();
                     let videos: Vec<video_sets::VideoCandidate> = found
@@ -505,13 +553,13 @@ pub(super) async fn post_videos_radio_next(
 /// background pass fills missing links without waiting for a radio refill.
 static VIDEO_RELATED_BUILD_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
-fn kick_related_build(state: &SharedState, seed_id: i64, seed_name: Option<String>) -> bool {
+fn kick_related_build(state: &SharedState, seed_id: i64) -> bool {
     if VIDEO_RELATED_BUILD_IN_FLIGHT.swap(true, Ordering::SeqCst) {
         return true;
     }
     let state = state.clone();
     tokio::spawn(async move {
-        if let Err(e) = build_related_cache(&state, seed_id, seed_name.as_deref()).await {
+        if let Err(e) = build_related_cache(&state, seed_id).await {
             tracing::warn!("video related cache build failed: {e}");
         }
         VIDEO_RELATED_BUILD_IN_FLIGHT.store(false, Ordering::SeqCst);
@@ -519,11 +567,7 @@ fn kick_related_build(state: &SharedState, seed_id: i64, seed_name: Option<Strin
     true
 }
 
-async fn build_related_cache(
-    state: &SharedState,
-    seed_id: i64,
-    seed_name: Option<&str>,
-) -> anyhow::Result<()> {
+async fn build_related_cache(state: &SharedState, seed_id: i64) -> anyhow::Result<()> {
     let (db, http, tidal_http, tokens) = {
         let s = state.read().await;
         (
@@ -547,11 +591,17 @@ async fn build_related_cache(
         return Ok(());
     }
     let client = TidalClient::with_http(tidal_http, tokens.access_token, tokens.country_code);
-    video_radio::refresh_video_relations(&db, http, &client, seed_id, seed_name).await?;
+    video_radio::refresh_video_relations(&db, http, &client, seed_id).await?;
     let mut pool = db.with_conn(|conn| video_radio::artist_pool(conn, Some(seed_id), &[], &[]))?;
-    pool.sort_by_key(|(_, _, lane)| if *lane == 0 { 2 } else { *lane });
+    pool.sort_by_key(|(_, _, lane)| {
+        if *lane == video_radio::SourceLane::Seed {
+            2
+        } else {
+            lane.fetch_priority()
+        }
+    });
     let mut fetched = 0;
-    for (id, name, _) in pool.into_iter().filter(|(_, _, lane)| *lane <= 2) {
+    for (id, name, _) in pool.into_iter().filter(|(_, _, lane)| lane.is_close()) {
         if fetched >= 2 {
             break;
         }
@@ -624,7 +674,7 @@ pub(super) async fn post_videos_related(
                 .ok()
                 .flatten()
                 .is_some();
-        connected && kick_related_build(&state, seed_id, body.seed_artist_name.clone())
+        connected && kick_related_build(&state, seed_id)
     } else {
         VIDEO_RELATED_BUILD_IN_FLIGHT.load(Ordering::SeqCst)
             || VIDEO_RADIO_FETCH_LOCK.try_lock().is_err()
@@ -635,7 +685,7 @@ pub(super) async fn post_videos_related(
             let pool = video_radio::artist_pool(conn, Some(seed_id), &[], &[])?;
             let related: Vec<_> = pool
                 .iter()
-                .filter(|(_, _, lane)| *lane <= 2)
+                .filter(|(_, _, lane)| lane.is_close())
                 .cloned()
                 .collect();
             let candidates = video_radio::load_candidates(conn, &related)?;
@@ -656,9 +706,9 @@ pub(super) async fn post_videos_related(
                         .find(|(artist, _, _)| *artist == id)
                         .map(|(_, _, lane)| *lane)
                 }) {
-                    Some(0) => "More from this artist".into(),
-                    Some(1) => "Related artist".into(),
-                    Some(2) => "Shared genre".into(),
+                    Some(video_radio::SourceLane::Seed) => "More from this artist".into(),
+                    Some(video_radio::SourceLane::Direct) => "Related artist".into(),
+                    Some(video_radio::SourceLane::Genre) => "Shared genre".into(),
                     _ => String::new(),
                 };
             }

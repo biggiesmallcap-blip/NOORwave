@@ -4,6 +4,7 @@ import type { TidalSearchVideo, TidalVideoMixItem } from '$lib/api/client';
 
 export type VideoSessionItem = TidalSearchVideo | TidalVideoMixItem;
 export type VideoSessionSource = 'none' | 'direct' | 'search' | 'mix';
+export interface VideoRadioHit { artist: string; count: number }
 
 export interface VideoSessionState {
 	active: boolean;
@@ -19,6 +20,9 @@ export interface VideoSessionState {
 	loading: boolean;
 	error: string | null;
 	radioIssue: string | null;
+	radioSearching: boolean;
+	radioDiscoveryMessage: string | null;
+	radioHits: VideoRadioHit[];
 	/** HLS stream URL for `current`. Lives in the store so the persistent dock
 	 *  can keep playing across route changes without the route owning it. */
 	streamUrl: string | null;
@@ -71,6 +75,9 @@ const initialState: VideoSessionState = {
 	loading: false,
 	error: null,
 	radioIssue: null,
+	radioSearching: false,
+	radioDiscoveryMessage: null,
+	radioHits: [],
 	streamUrl: null,
 	streamExpiresAt: null,
 	playing: false,
@@ -129,6 +136,7 @@ export const videoSession = {
 		persistAutoplayPreference(true);
 		const queue = radioStartQueue(state.current);
 		update({ queue, continuous: true, autoplay: true, radioIssue: null,
+			radioSearching: false, radioDiscoveryMessage: null, radioHits: [],
 			radioSeedArtistId: state.current.artist_id ?? null, radioSeedArtistName: state.current.artist_name ?? null,
 			sourceLabel: `${state.current.artist_name ?? 'Video'} radio` });
 		void refillVideoRadio(true).then(async () => {
@@ -144,7 +152,7 @@ export const videoSession = {
 		radioGeneration += 1;
 		radioRefill = null;
 		update({ continuous: false, radioSeedArtistId: null, radioSeedArtistName: null,
-			radioIssue: null, sourceLabel: 'Video queue' });
+			radioIssue: null, radioSearching: false, radioDiscoveryMessage: null, radioHits: [], sourceLabel: 'Video queue' });
 	},
 	radioExhausted(expectedVideoId: number) {
 		const state = get(session);
@@ -153,7 +161,7 @@ export const videoSession = {
 		radioRefill = null;
 		persistAutoplayPreference(false);
 		update({ continuous: false, radioSeedArtistId: null, radioSeedArtistName: null,
-			autoplay: false, playing: false, sourceLabel: 'Video queue',
+			autoplay: false, playing: false, radioSearching: false, sourceLabel: 'Video queue',
 			radioIssue: 'Radio could not find another video. Start radio to try again.' });
 	},
 	setPlaying(playing: boolean) {
@@ -239,6 +247,7 @@ export async function playVideo(
 			radioSeedArtistId,
 			radioSeedArtistName,
 			radioIssue: null,
+			...(ctx.resetRadio || !ctx.continuous ? { radioSearching: false, radioDiscoveryMessage: null, radioHits: [] } : {}),
 		});
 		if (ctx.resetRadio && ctx.continuous) void refillVideoRadio(true);
 		return true;
@@ -258,6 +267,7 @@ export async function playVideo(
 		radioSeedArtistId,
 		radioSeedArtistName,
 		radioIssue: null,
+		...(ctx.resetRadio || !ctx.continuous ? { radioSearching: false, radioDiscoveryMessage: null, radioHits: [] } : {}),
 		loading: true,
 		error: null,
 		streamUrl: opts.preloaded?.url ?? null,
@@ -301,6 +311,7 @@ export function refillVideoRadio(force = false): Promise<number> {
 		return Promise.resolve(0);
 	}
 	const generation = radioGeneration;
+	update({ radioSearching: true, radioDiscoveryMessage: null });
 	const excluded = state.queue.map((v) => v.tidal_id);
 	const recentArtists = state.queue.slice(Math.max(0, state.currentIndex - 8), state.currentIndex + 1)
 		.map((v) => v.artist_id).filter((id): id is number => id != null);
@@ -324,7 +335,10 @@ export function refillVideoRadio(force = false): Promise<number> {
 			songs.add(key);
 			return true;
 		});
-		if (fresh.length === 0) return 0;
+		if (fresh.length === 0) {
+			update({ radioDiscoveryMessage: 'No new videos in this pass. Checking again as the queue plays.' });
+			return 0;
+		}
 		if (force && (current.queue.length - current.currentIndex <= 2 || (fresh.length >= 8 && unfamiliar_video_ids.filter((id) => fresh.some((item) => item.tidal_id === id)).length >= 2))) {
 			// The browse shelves are a quick start. Once the server has a real
 			// discovery blend, hand upcoming playback to it immediately.
@@ -333,16 +347,35 @@ export function refillVideoRadio(force = false): Promise<number> {
 			const start = Math.max(0, current.currentIndex - 6);
 			update({ queue: [...current.queue.slice(start), ...fresh] });
 		} else {
+			update({ radioDiscoveryMessage: 'Related videos are ready for the next queue refill.' });
 			return 0;
 		}
+		const byArtist = new Map<string, number>();
+		for (const item of fresh) {
+			const artist = item.artist_name?.trim() || 'Unknown artist';
+			byArtist.set(artist, (byArtist.get(artist) ?? 0) + 1);
+		}
+		const hits = [...byArtist].map(([artist, count]) => ({ artist, count }));
+		update({
+			radioHits: [...current.radioHits, ...hits].slice(-4),
+			radioDiscoveryMessage: `${fresh.length} new ${fresh.length === 1 ? 'video' : 'videos'} added to your queue.`,
+		});
 		radioSeenIds.push(...fresh.map((item) => item.tidal_id));
 		radioSeenIds = radioSeenIds.slice(-256);
 		radioSeenSongs.push(...fresh);
 		radioSeenSongs = radioSeenSongs.slice(-128);
 		return fresh.length;
-	}).catch(() => 0);
+	}).catch(() => {
+		if (generation === radioGeneration && get(session).continuous) {
+			update({ radioDiscoveryMessage: 'Could not check for more videos. Radio will retry near the end of the queue.' });
+		}
+		return 0;
+	});
 	radioRefill = pending;
-	void pending.finally(() => { if (radioRefill === pending) radioRefill = null; });
+	void pending.finally(() => {
+		if (radioRefill === pending) radioRefill = null;
+		if (generation === radioGeneration && get(session).continuous) update({ radioSearching: false });
+	});
 	return pending;
 }
 
