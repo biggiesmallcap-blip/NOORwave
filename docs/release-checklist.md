@@ -2,6 +2,18 @@
 
 Tags drive releases. CI is in [.github/workflows/release.yml](../.github/workflows/release.yml).
 
+## Fast path for a release-only version bump
+
+The release commit changes two Cargo manifest versions, the Tauri config version, two `Cargo.lock` package versions, and one curated notes file. The release build normally takes about 10-12 minutes after the tag is pushed. Do the short preparation promptly so the build can start.
+
+1. Confirm the requested tag first. Check `gh auth status` and `gh secret list --app actions` for the two `TAURI_SIGNING_*` names before editing. Secret values must never be printed. Fetch and fast-forward to current `origin/master`; preserve untracked files.
+2. Make the version and notes edits below. Check that `git diff Cargo.lock` contains only the two workspace version lines and run `git diff --check`. For version-only edits, use the existing PR CI instead of repeating a full local Rust suite or reinstalling frontend dependencies. Run additional local tests when product code or packaging behavior changed.
+3. Push the release-preparation PR. A merged PR is not proof of green CI: this repository may merge before checks finish. Wait for the `PR check` run on the **exact master merge commit** to complete successfully.
+4. Update the checkout to that master commit and run `scripts\release-preflight.ps1 -Tag vX.Y.Z`. It checks versions, notes, signing secret presence, authentication, the exact master CI result, and tag availability. Then create and push the tag. Do not spend release time trying to repair a stalled local `pnpm install` when the same locked frontend build passed in CI.
+5. Watch the release workflow. The Windows job must pass NSIS signing and signature packaging; then verify the setup exe, `.sig`, `latest.json`, portable zip, other platform archives, and `sha256sums.txt` on the release. The Tauri updater signature is separate from a Windows CA code-signing certificate, so retain the SmartScreen note.
+
+If local signing credentials are unavailable, GitHub Actions can still produce and verify the signed installer. Report the local installation and mutable-data smoke test as unverified; do not confuse its absence with missing CI signing secrets or delay an explicitly requested tag for a version-only release.
+
 ## Before tagging `vX.Y.Z`
 
 1. Bump only these: `noor-server/Cargo.toml`, `noor-app/Cargo.toml`, `noor-app/tauri.conf.json`, and the matching `noor-app` / `noor-server` entries in `Cargo.lock`.
