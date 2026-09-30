@@ -887,8 +887,13 @@
 <style>
 	.genres-route {
 		position: relative;
-		margin: -28px -30px -48px;
-		min-height: 100vh;
+		margin:
+			calc(-1 * var(--workspace-pad-top))
+			calc(-1 * var(--workspace-pad-right))
+			calc(-1 * var(--workspace-pad-bottom))
+			calc(-1 * var(--workspace-pad-left));
+		height: calc(100% + var(--workspace-pad-top) + var(--workspace-pad-bottom));
+		min-height: 0;
 		overflow: hidden;
 		background:
 			radial-gradient(circle at 16% 12%, var(--atlas-haze-a), transparent 34%),
@@ -899,7 +904,8 @@
 
 	.galaxy-stage {
 		position: relative;
-		min-height: 100vh;
+		height: 100%;
+		min-height: 0;
 		overflow: hidden;
 	}
 
@@ -1179,15 +1185,6 @@
 	}
 
 	@media (max-width: 1180px) {
-		.genres-route {
-			margin: -24px -24px -40px;
-		}
-
-		.galaxy-stage,
-		.genres-route {
-			min-height: calc(100dvh - 40px);
-		}
-
 		.hud {
 			top: 16px;
 			left: 16px;
@@ -1224,12 +1221,14 @@
 
 	@media (max-width: 760px) {
 		.genres-route {
-			margin: -22px -18px -30px;
+			margin: -16px calc(-1 * var(--workspace-pad-right)) -30px calc(-1 * var(--workspace-pad-left));
+			height: auto;
 			overflow: visible;
 			background: linear-gradient(180deg, #0d0e15 0%, #090a11 52%, #07070b 100%);
 		}
 
 		.galaxy-stage {
+			height: auto;
 			min-height: auto;
 			display: flex;
 			flex-direction: column;

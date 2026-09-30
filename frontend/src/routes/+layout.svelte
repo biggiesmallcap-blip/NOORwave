@@ -2490,12 +2490,16 @@
 	.workspace {
 		grid-area: workspace;
 		container: workspace / inline-size;
+		--workspace-pad-top: calc(28px + var(--safe-top));
+		--workspace-pad-right: calc(30px + var(--safe-right));
+		--workspace-pad-bottom: calc(48px + var(--safe-bottom));
+		--workspace-pad-left: calc(30px + var(--safe-left));
 		overflow-y: auto;
 		/* Reserve the scrollbar gutter permanently. Without it, switching to a
 		   view that overflows steals ~5px of width and every centered element
 		   (the search field, the filter pills) jumps sideways. */
 		scrollbar-gutter: stable;
-		padding: calc(28px + var(--safe-top)) calc(30px + var(--safe-right)) calc(48px + var(--safe-bottom)) calc(30px + var(--safe-left));
+		padding: var(--workspace-pad-top) var(--workspace-pad-right) var(--workspace-pad-bottom) var(--workspace-pad-left);
 		min-width: 0;
 		min-height: 0;
 		-webkit-overflow-scrolling: touch;
@@ -3663,7 +3667,10 @@
 
 	@media (max-width: 1320px) {
 		.workspace {
-			padding: calc(24px + var(--safe-top)) calc(24px + var(--safe-right)) calc(40px + var(--safe-bottom)) calc(24px + var(--safe-left));
+			--workspace-pad-top: calc(24px + var(--safe-top));
+			--workspace-pad-right: calc(24px + var(--safe-right));
+			--workspace-pad-bottom: calc(40px + var(--safe-bottom));
+			--workspace-pad-left: calc(24px + var(--safe-left));
 		}
 	}
 
@@ -3676,7 +3683,12 @@
 	}
 
 	@media (max-width: 839px) and (min-width: 680px) {
-		.workspace { padding: calc(20px + var(--safe-top)) calc(16px + var(--safe-right)) calc(36px + var(--safe-bottom)) calc(16px + var(--safe-left)); }
+		.workspace {
+			--workspace-pad-top: calc(20px + var(--safe-top));
+			--workspace-pad-right: calc(16px + var(--safe-right));
+			--workspace-pad-bottom: calc(36px + var(--safe-bottom));
+			--workspace-pad-left: calc(16px + var(--safe-left));
+		}
 	}
 
 	/* Give the full-size bottom-layout navigation its last few pixels without
