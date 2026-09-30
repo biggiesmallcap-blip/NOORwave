@@ -63,6 +63,9 @@ describe('videos route contract', () => {
 		expect(layoutSource).toContain('new ResizeObserver(updateBottomPlayerHeight)');
 		expect(source).toContain('max(var(--bottom-player-height, 0px), 44px, var(--safe-bottom))');
 		expect(layoutSource).toContain('bottom: calc(var(--bottom-player-height) + var(--space-2));');
+		expect(layoutSource).toMatch(
+			/\.app-shell\[data-player-layout='bottom'\] \.video-queue-panel\.queue-drawer-open \{[^}]*z-index: var\(--z-overlay\);/
+		);
 	});
 
 	test('keeps the bottom video player compact and discovery copy contained', () => {
