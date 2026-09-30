@@ -2617,6 +2617,9 @@
 	.app-shell:not([data-player-layout='bottom']) .video-queue-trigger { display: none; }
 
 	.app-shell[data-player-layout='bottom'] .video-queue-panel { padding: 12px 16px; }
+	.app-shell[data-player-layout='bottom'] .video-queue-panel.queue-drawer-open {
+		z-index: var(--z-overlay);
+	}
 	.app-shell[data-player-layout='bottom'] .video-panel-top {
 		display: grid;
 		grid-template-columns: 96px minmax(140px, 1fr) minmax(180px, 1.25fr) auto auto 40px;
