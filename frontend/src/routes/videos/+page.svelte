@@ -1089,7 +1089,7 @@
 		   column (and the page) past the container instead of scrolling. */
 		grid-template-columns: minmax(0, 1fr);
 		gap: 28px;
-		padding-bottom: max(44px, var(--safe-bottom));
+		padding-bottom: max(var(--bottom-player-height, 0px), 44px, var(--safe-bottom));
 	}
 
 	.search-header {

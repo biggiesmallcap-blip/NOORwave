@@ -5,6 +5,7 @@ import { describe, expect, test } from 'vitest';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(here, '+page.svelte'), 'utf8');
+const layoutSource = readFileSync(join(here, '../+layout.svelte'), 'utf8');
 
 describe('videos route contract', () => {
 	test('guards video search pagination against stale query and mix changes', () => {
@@ -53,5 +54,21 @@ describe('videos route contract', () => {
 		expect(source).toContain('bind:this={stageAnchor}');
 		expect(source).toContain('videoStageAnchor.set(stageAnchor)');
 		expect(source).not.toContain('<VideoPlayer');
+	});
+
+	test('reserves the measured bottom player inset for video content and queue', () => {
+		expect(layoutSource).toContain('bind:this={appShellElement}');
+		expect(layoutSource).toContain('bind:this={bottomPlayerElement}');
+		expect(layoutSource).toContain("shell.style.setProperty('--bottom-player-height'");
+		expect(layoutSource).toContain('new ResizeObserver(updateBottomPlayerHeight)');
+		expect(source).toContain('max(var(--bottom-player-height, 0px), 44px, var(--safe-bottom))');
+		expect(layoutSource).toContain('bottom: calc(var(--bottom-player-height) + var(--space-2));');
+	});
+
+	test('keeps the bottom video player compact and discovery copy contained', () => {
+		expect(layoutSource).toContain("grid-template-areas: 'art copy source actions queue heading';");
+		expect(layoutSource).toContain(".app-shell[data-player-layout='bottom'] .video-panel-source");
+		expect(layoutSource).toContain('text-overflow: ellipsis;');
+		expect(layoutSource).toContain(".app-shell[data-player-layout='bottom'] .video-radio-hits { display: none; }");
 	});
 });
