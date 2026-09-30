@@ -100,6 +100,10 @@
 	import { upscaleTidalArtwork } from '$lib/utils/artwork';
 	import { palette, setPalette } from '$lib/stores/palette';
 	import { uiZoom, setZoom, zoomIn, zoomOut, resetZoom, MIN as ZOOM_MIN, MAX as ZOOM_MAX, WHEEL_STEP as ZOOM_STEP } from '$lib/stores/uiZoom';
+	import { playerPlacement, type PlayerPlacement } from '$lib/stores/playerLayout';
+	import { playerArtworkStyle, type PlayerArtworkStyle } from '$lib/stores/playerArtwork';
+	import { bottomQualityDisplay, sideQualityDisplay, type QualityDisplay } from '$lib/stores/playerInformation';
+	import { surfaceMode, type SurfaceMode } from '$lib/stores/surfaceMode';
 	import { horizontalShelfWheel } from '$lib/stores/shelf_scrolling';
 	import { audioSettings } from '$lib/stores/audio_settings';
 	import { exclusiveStatus } from '$lib/stores/exclusive_status';
@@ -127,6 +131,12 @@
 
 	const SERVER_UNREACHABLE_MESSAGE =
 		'NOOR cannot reach the local server, so it cannot verify your current TIDAL session.';
+	const QUALITY_DISPLAY_OPTIONS: { id: QualityDisplay; label: string }[] = [
+		{ id: 'off', label: 'Hidden' },
+		{ id: 'icon', label: 'Icon' },
+		{ id: 'details', label: 'Full data' },
+		{ id: 'both', label: 'Both' }
+	];
 	const APP_VERSION = String(import.meta.env.NOOR_APP_VERSION ?? '0.0.0');
 	const DISCOVERY_COMPLETION_REFRESH_DELAY_MS = 1000;
 	const DISCOVERY_COMPLETION_REFRESH_MAX_ATTEMPTS = 12;
@@ -1761,7 +1771,7 @@
 	}
 
 	const settingsCategories: { id: SettingsCategory; label: string; icon: string; hint: string }[] = [
-		{ id: 'appearance', label: 'Appearance', icon: '◐', hint: 'Theme + wallpaper' },
+		{ id: 'appearance', label: 'Appearance', icon: '◐', hint: 'Theme + player layout' },
 		{ id: 'sources', label: 'Sources', icon: '⟐', hint: 'Services + data' },
 		{ id: 'audio', label: 'Audio', icon: '♪', hint: 'Output + analysis' },
 		{ id: 'account', label: 'Account', icon: '⚙', hint: 'PIN + updates' },
@@ -1937,6 +1947,79 @@
 			<PhoneRemotePanel />
 			{/if}
 			{#if activeCategory === 'appearance'}
+			<section data-setting-id="player-position" class="glass-panel section-panel">
+				<SectionHeader eyebrow="Player" title="Player position" subtitle="Choose its preferred place. Narrow windows use the bottom player until there is room beside your music." />
+				<div class="player-position-options" role="group" aria-label="Preferred player position">
+					{#each [
+						{ id: 'right', icon: '▣', label: 'Right side' },
+						{ id: 'left', icon: '◧', label: 'Left side' },
+						{ id: 'bottom', icon: '▤', label: 'Bottom' }
+					] as option (option.id)}
+						<button
+							type="button"
+							class="player-position-option"
+							class:active={$playerPlacement === option.id}
+							aria-pressed={$playerPlacement === option.id}
+							onclick={() => playerPlacement.set(option.id as PlayerPlacement)}
+						>
+							<span aria-hidden="true">{option.icon}</span>
+							<strong>{option.label}</strong>
+						</button>
+					{/each}
+				</div>
+			</section>
+			<section data-setting-id="player-artwork" class="glass-panel section-panel">
+				<SectionHeader eyebrow="Player" title="Artwork" subtitle="Choose how album art appears in the side player. The bottom player keeps a larger square cover." />
+				<div class="player-position-options artwork-options" role="group" aria-label="Side player artwork style">
+					{#each [
+						{ id: 'square', icon: '□', label: 'Square cover' },
+						{ id: 'banner', icon: '▭', label: 'Wide banner' }
+					] as option (option.id)}
+						<button type="button" class="player-position-option" class:active={$playerArtworkStyle === option.id} aria-pressed={$playerArtworkStyle === option.id} onclick={() => playerArtworkStyle.set(option.id as PlayerArtworkStyle)}>
+							<span aria-hidden="true">{option.icon}</span><strong>{option.label}</strong>
+						</button>
+					{/each}
+				</div>
+			</section>
+			<section data-setting-id="player-information" class="glass-panel section-panel">
+				<SectionHeader eyebrow="Player" title="Streaming quality" subtitle="Choose how much quality information appears. Sample rate and bit depth show when the stream reports them." />
+				<div class="quality-setting-row">
+					<strong>Side panel</strong>
+					<div class="quality-mode-options" role="group" aria-label="Side panel streaming quality">
+						{#each QUALITY_DISPLAY_OPTIONS as option (option.id)}
+							<button type="button" class:active={$sideQualityDisplay === option.id} aria-pressed={$sideQualityDisplay === option.id} onclick={() => sideQualityDisplay.set(option.id)}>{option.label}</button>
+						{/each}
+					</div>
+				</div>
+				<div class="quality-setting-row">
+					<strong>Bottom player</strong>
+					<div class="quality-mode-options" role="group" aria-label="Bottom player streaming quality">
+						{#each QUALITY_DISPLAY_OPTIONS as option (option.id)}
+							<button type="button" class:active={$bottomQualityDisplay === option.id} aria-pressed={$bottomQualityDisplay === option.id} onclick={() => bottomQualityDisplay.set(option.id)}>{option.label}</button>
+						{/each}
+					</div>
+				</div>
+			</section>
+			<section data-setting-id="surface-mode" class="glass-panel section-panel">
+				<SectionHeader eyebrow="Appearance" title="Surface mode" subtitle="Choose the listening deck's light, dark, or system appearance independently of its accent and wallpaper." />
+				<div class="player-position-options" role="group" aria-label="Surface mode">
+					{#each [
+						{ id: 'dark', icon: '◕', label: 'Dark' },
+						{ id: 'light', icon: '◑', label: 'Light' },
+						{ id: 'system', icon: '◐', label: 'System' }
+					] as option (option.id)}
+						<button type="button" class="player-position-option" class:active={$surfaceMode === option.id} aria-pressed={$surfaceMode === option.id} onclick={() => surfaceMode.set(option.id as SurfaceMode)}>
+							<span aria-hidden="true">{option.icon}</span><strong>{option.label}</strong>
+						</button>
+					{/each}
+				</div>
+				<div class="appearance-player-preview" aria-label="Player appearance preview">
+					<span class="preview-cover" aria-hidden="true">♫</span>
+					<span class="preview-copy"><strong>{$currentTrack?.title ?? 'Your music here'}</strong><small>{$currentTrack?.artist_name ?? 'NOORwave'}</small></span>
+					<span class="preview-play" aria-hidden="true">▶</span>
+					<span class="preview-progress" aria-hidden="true"><span></span></span>
+				</div>
+			</section>
 			<section data-setting-id="colour-scheme" class="glass-panel section-panel palette-section" class:palette-section-open={paletteMenuOpen}>
 				<SectionHeader eyebrow="Palette" title="Colour scheme" subtitle="UI accent, wallpaper, and no-wallpaper colours." />
 				<div class="palette-row">
@@ -4528,6 +4611,108 @@
 		gap: 14px;
 		flex-wrap: wrap;
 	}
+
+	.player-position-options {
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		gap: 10px;
+	}
+
+	.player-position-options.artwork-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+	.quality-setting-row {
+		display: grid;
+		grid-template-columns: 130px minmax(0, 1fr);
+		align-items: center;
+		gap: 12px;
+		margin-top: 10px;
+	}
+
+	.quality-setting-row strong { font-size: var(--font-size-sm); }
+
+	.quality-mode-options {
+		display: grid;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		gap: 6px;
+	}
+
+	.quality-mode-options button {
+		min-height: 34px;
+		padding: 6px 8px;
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+		background: var(--bg-surface);
+		color: var(--text-secondary);
+		font: inherit;
+		font-size: var(--font-size-xs);
+		cursor: pointer;
+	}
+
+	.quality-mode-options button:hover,
+	.quality-mode-options button.active { border-color: var(--accent-line); background: var(--accent-soft); color: var(--text-primary); }
+	.quality-mode-options button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+	@media (max-width: 920px) {
+		.quality-setting-row { grid-template-columns: 1fr; gap: 6px; }
+	}
+
+	.player-position-option {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		min-height: 56px;
+		padding: 10px 14px;
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md);
+		background: var(--bg-surface);
+		color: var(--text-secondary);
+		font: inherit;
+		cursor: pointer;
+	}
+
+	.player-position-option span { font-size: var(--font-size-xl); }
+	.player-position-option strong { font-size: var(--font-size-sm); }
+	.player-position-option:hover,
+	.player-position-option:focus-visible,
+	.player-position-option.active {
+		border-color: var(--accent-line);
+		background: var(--accent-soft);
+		color: var(--text-primary);
+	}
+	.player-position-option:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+	.appearance-player-preview {
+		display: grid;
+		grid-template-columns: 44px minmax(0, 1fr) 40px;
+		grid-template-rows: auto 3px;
+		align-items: center;
+		gap: 10px 12px;
+		max-width: 430px;
+		margin-top: 16px;
+		padding: 12px;
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md);
+		background: var(--player-surface);
+		box-shadow: var(--panel-shadow);
+	}
+	.preview-cover {
+		grid-row: 1;
+		display: grid;
+		place-items: center;
+		width: 44px;
+		aspect-ratio: 1;
+		border-radius: var(--radius-sm);
+		background: linear-gradient(135deg, var(--accent-soft), var(--bg-raised));
+		color: var(--accent-strong);
+	}
+	.preview-copy { display: flex; flex-direction: column; min-width: 0; gap: 3px; }
+	.preview-copy strong,
+	.preview-copy small { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+	.preview-copy strong { color: var(--text-primary); font-family: var(--font-display); }
+	.preview-copy small { color: var(--text-secondary); }
+	.preview-play { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: var(--accent); color: #fff; }
+	.preview-progress { grid-column: 1 / -1; grid-row: 2; height: 3px; border-radius: 3px; background: var(--player-progress-track); }
+	.preview-progress span { display: block; width: 38%; height: 100%; border-radius: inherit; background: var(--accent); }
 
 	.palette-picker {
 		position: relative;

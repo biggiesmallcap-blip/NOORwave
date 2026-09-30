@@ -522,7 +522,10 @@
 			grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
 		}
 
-		/* Show quick-nav tiles */
+	}
+
+	/* The quick links belong to the phone shell; compact desktop keeps its nav. */
+	@media (max-width: 679px) {
 		.mobile-quick-nav {
 			display: grid;
 			grid-template-columns: repeat(4, 1fr);

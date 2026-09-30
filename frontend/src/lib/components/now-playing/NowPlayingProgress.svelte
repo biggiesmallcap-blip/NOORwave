@@ -27,6 +27,7 @@
 
 	let isScrubbing = $state(false);
 	let scrubPosition = $state(0);
+	let showRemaining = $state(false);
 
 	$effect(() => {
 		if (!isScrubbing) {
@@ -84,7 +85,13 @@
 
 	<div class="np-times" class:scrubbing={isScrubbing}>
 		<span>{formatTrackDuration(scrubPosition)}</span>
-		<span>{formatTrackDuration(duration)}</span>
+		<button
+			type="button"
+			class="time-toggle"
+			aria-label={showRemaining ? 'Show total duration' : 'Show remaining time'}
+			title={showRemaining ? 'Show total duration' : 'Show remaining time'}
+			onclick={() => { showRemaining = !showRemaining; }}
+		>{showRemaining ? `−${formatTrackDuration(Math.max(0, duration - scrubPosition))}` : formatTrackDuration(duration)}</button>
 	</div>
 </div>
 
@@ -97,9 +104,10 @@
 
 	.np-progress-track {
 		position: relative;
+		margin-block: 9px;
 		height: 3px;
 		border-radius: 99px;
-		background: color-mix(in srgb, var(--instrument-border) 35%, transparent);
+		background: var(--player-progress-track);
 		overflow: visible;
 	}
 
@@ -143,7 +151,7 @@
 	}
 
 	.np-progress-track:hover::after,
-	.np-progress-track:focus-within::after {
+	.np-progress-track:has(.np-progress-input:focus-visible)::after {
 		opacity: 1;
 	}
 
@@ -153,10 +161,15 @@
 
 	.np-progress-input {
 		position: absolute;
-		inset: -8px 0;
+		inset: -12px 0;
 		width: 100%;
 		opacity: 0;
 		cursor: pointer;
+	}
+
+	.np-progress-track:has(.np-progress-input:focus-visible) {
+		outline: 2px solid var(--accent);
+		outline-offset: 5px;
 	}
 
 	.np-times {
@@ -166,6 +179,21 @@
 		font-size: var(--font-size-xs);
 		font-variant-numeric: tabular-nums;
 	}
+
+	.time-toggle {
+		min-width: 46px;
+		padding: 0;
+		border: 0;
+		background: transparent;
+		color: inherit;
+		font: inherit;
+		font-variant-numeric: tabular-nums;
+		text-align: right;
+		cursor: pointer;
+	}
+
+	.time-toggle:hover,
+	.time-toggle:focus-visible { color: var(--text-primary); }
 
 	.np-times.scrubbing span:first-child {
 		color: var(--accent-strong, var(--accent));

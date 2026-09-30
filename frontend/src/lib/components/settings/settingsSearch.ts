@@ -16,7 +16,11 @@ export interface SettingsSearchEntry {
 }
 
 export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
+	{ id: 'surface-mode', category: 'appearance', label: 'Surface mode', keywords: 'theme dark light system automatic appearance' },
 	{ id: 'colour-scheme', category: 'appearance', label: 'Colour scheme', keywords: 'palette color colour accent theme swatch' },
+	{ id: 'player-position', category: 'appearance', label: 'Player position', keywords: 'layout right left bottom horizontal sidebar queue dock' },
+	{ id: 'player-artwork', category: 'appearance', label: 'Player artwork', keywords: 'album art cover square banner image side player customize' },
+	{ id: 'player-information', category: 'appearance', label: 'Streaming quality', keywords: 'player side bottom icon full data details bitrate sample rate lossless hires streaming quality' },
 	{ id: 'interface-size', category: 'appearance', label: 'Interface size', keywords: 'zoom ui scale text size bigger smaller' },
 	{ id: 'horizontal-shelves', category: 'appearance', label: 'Horizontal shelves', keywords: 'scroll scrolling mouse wheel trackpad carousel rail navigation sideways' },
 	{ id: 'background', category: 'appearance', label: 'Background', keywords: 'wallpaper shader blur fps animation' },

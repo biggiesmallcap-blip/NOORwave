@@ -13,10 +13,11 @@ mod sidecar_paths;
 mod startup;
 mod tray;
 mod updater;
+mod window_state;
 
 use sidecar::SidecarState;
 use sidecar_paths::SidecarPaths;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
 fn main() {
@@ -26,6 +27,11 @@ fn main() {
     let sidecar_state = SidecarState::new(cfg.host_mode);
     let lifecycle = remote_lifecycle::RemoteLifecycle::new(sidecar_state.clone(), cfg.host_mode);
     let lifecycle_for_setup = lifecycle.clone();
+    let saved_window_state = window_state::load();
+    let current_window_state = Arc::new(Mutex::new(saved_window_state.unwrap_or_default()));
+    let window_state_for_setup = current_window_state.clone();
+    let window_state_for_events = current_window_state.clone();
+    let window_state_for_exit = current_window_state.clone();
 
     tauri::Builder::default()
         // Must be first: arbitration happens before setup can spawn a sidecar.
@@ -86,7 +92,7 @@ fn main() {
             )
             .title("NOORwave")
             .inner_size(1280.0, 800.0)
-            .min_inner_size(720.0, 500.0)
+            .min_inner_size(480.0, 360.0)
             .resizable(true)
             .decorations(true)
             // Keep creation deterministic and unfocused. A normal launch is
@@ -101,6 +107,11 @@ fn main() {
             // the webview's own dragstart/dragover/drop fire for queue reorder.
             .disable_drag_drop_handler()
             .build()?;
+
+            window_state::restore(&window, saved_window_state);
+            if let Ok(mut state) = window_state_for_setup.lock() {
+                window_state::observe(&window.as_ref().window(), &mut state);
+            }
 
             if startup::take_activation_request() {
                 let _ = window.show();
@@ -149,8 +160,20 @@ fn main() {
 
             Ok(())
         })
-        .on_window_event(|window, event| {
+        .on_window_event(move |window, event| {
+            if matches!(
+                event,
+                tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)
+            ) {
+                if let Ok(mut state) = window_state_for_events.lock() {
+                    window_state::observe(window, &mut state);
+                }
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if let Ok(mut state) = window_state_for_events.lock() {
+                    window_state::observe(window, &mut state);
+                    window_state::save(*state);
+                }
                 // Read the preference fresh each close so a settings change
                 // takes effect without a restart.
                 if config::load().minimize_to_tray {
@@ -169,6 +192,9 @@ fn main() {
         .expect("error while building NOORwave")
         .run(move |_app_handle, event| {
             if matches!(event, tauri::RunEvent::Exit) {
+                if let Ok(state) = window_state_for_exit.lock() {
+                    window_state::save(*state);
+                }
                 sidecar::kill_server(&sidecar_state);
             }
         });

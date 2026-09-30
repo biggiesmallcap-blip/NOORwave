@@ -283,6 +283,15 @@
 	let showKeyColumn = $state(false);
 	let showEnergyColumn = $state(false);
 	let showDanceColumn = $state(false);
+	let trackListWidth = $state(1200);
+	let showAlbumAtWidth = $derived(trackListWidth >= 700);
+	let showQualityAtWidth = $derived(showQualityColumn && trackListWidth >= 1050);
+	let showPlaysAtWidth = $derived(showPlaysColumn && trackListWidth >= 850);
+	let showDatesAtWidth = $derived(showDateColumn && trackListWidth >= 1150);
+	let showBpmAtWidth = $derived(showBpmColumn && trackListWidth >= 1120);
+	let showKeyAtWidth = $derived(showKeyColumn && trackListWidth >= 1120);
+	let showEnergyAtWidth = $derived(showEnergyColumn && trackListWidth >= 1250);
+	let showDanceAtWidth = $derived(showDanceColumn && trackListWidth >= 1250);
 
 	// Reactive grid template - must match the order of cells in .track-header and .track-row.
 	// Cells that get conditionally removed via {#if showXColumn} drop their column track here too,
@@ -290,14 +299,15 @@
 	// All non-fr columns must be explicit px - 'auto' sizes independently per row-grid,
 	// causing header/data drift when badge content differs from header text.
 	let trackGridColumns = $derived.by(() => {
-		const cols: string[] = ['40px', 'minmax(0, 2fr)', 'minmax(0, 1.5fr)', 'minmax(0, 1.5fr)']; // # title artist album
-		if (showQualityColumn) cols.push('88px');
-		if (showPlaysColumn) cols.push('54px');
-		if (showDateColumn) cols.push('88px', '94px'); // date_added + last_played
-		if (showBpmColumn) cols.push('60px');
-		if (showKeyColumn) cols.push('50px');
-		if (showEnergyColumn) cols.push('60px');
-		if (showDanceColumn) cols.push('60px');
+		const cols: string[] = ['40px', 'minmax(0, 2fr)', 'minmax(0, 1.5fr)']; // # title artist
+		if (showAlbumAtWidth) cols.push('minmax(0, 1.5fr)');
+		if (showQualityAtWidth) cols.push('88px');
+		if (showPlaysAtWidth) cols.push('54px');
+		if (showDatesAtWidth) cols.push('88px', '94px'); // date_added + last_played
+		if (showBpmAtWidth) cols.push('60px');
+		if (showKeyAtWidth) cols.push('50px');
+		if (showEnergyAtWidth) cols.push('60px');
+		if (showDanceAtWidth) cols.push('60px');
 		cols.push('68px', '56px'); // duration, actions
 		return cols.join(' ');
 	});
@@ -2600,7 +2610,7 @@
 	{:else if activeTab === 'tracks' || activeTab === 'liked'}
 		<!-- Track List (shared between Tracks and Liked tabs - server filters via likedOnly) -->
 		<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-		<div class="track-list" role="list" onkeydown={handleTrackListKeydown}>
+		<div class="track-list" role="list" bind:clientWidth={trackListWidth} onkeydown={handleTrackListKeydown}>
 			<div class="track-header" style="grid-template-columns: {trackGridColumns}">
 				<span class="col-num">#</span>
 				<button
@@ -2621,7 +2631,7 @@
 				>
 					Artist <span class="sort-arrow">{$sortBy === 'artist' ? ($sortDir === 'asc' ? '↑' : '↓') : '⇅'}</span>
 				</button>
-				<button
+				{#if showAlbumAtWidth}<button
 					type="button"
 					class="header-sort col-album"
 					class:sorted={$sortBy === 'album'}
@@ -2629,11 +2639,11 @@
 					onkeydown={(event) => handleSortKeydown('album', event)}
 				>
 					Album <span class="sort-arrow">{$sortBy === 'album' ? ($sortDir === 'asc' ? '↑' : '↓') : '⇅'}</span>
-				</button>
-				{#if showQualityColumn}
+				</button>{/if}
+				{#if showQualityAtWidth}
 					<span class="col-quality">Quality</span>
 				{/if}
-				{#if showPlaysColumn}
+				{#if showPlaysAtWidth}
 					<button
 						type="button"
 						class="header-sort col-plays"
@@ -2644,7 +2654,7 @@
 						Plays <span class="sort-arrow">{$sortBy === 'play_count' ? ($sortDir === 'asc' ? '↑' : '↓') : '⇅'}</span>
 					</button>
 				{/if}
-				{#if showDateColumn}
+				{#if showDatesAtWidth}
 					<button
 						type="button"
 						class="header-sort col-date"
@@ -2655,7 +2665,7 @@
 						Date Added <span class="sort-arrow">{$sortBy === 'date_added' ? ($sortDir === 'asc' ? '↑' : '↓') : '⇅'}</span>
 					</button>
 				{/if}
-				{#if showDateColumn}
+				{#if showDatesAtWidth}
 					<button
 						type="button"
 						class="header-sort col-date"
@@ -2666,7 +2676,7 @@
 						Last Played <span class="sort-arrow">{$sortBy === 'last_played_at' ? ($sortDir === 'asc' ? '↑' : '↓') : '⇅'}</span>
 					</button>
 				{/if}
-				{#if showBpmColumn}
+				{#if showBpmAtWidth}
 					<button
 						type="button"
 						class="header-sort col-bpm"
@@ -2677,10 +2687,10 @@
 						BPM <span class="sort-arrow">{$sortBy === 'bpm' ? ($sortDir === 'asc' ? '↑' : '↓') : '⇅'}</span>
 					</button>
 				{/if}
-				{#if showKeyColumn}
+				{#if showKeyAtWidth}
 					<span class="col-key">Key</span>
 				{/if}
-				{#if showEnergyColumn}
+				{#if showEnergyAtWidth}
 					<button
 						type="button"
 						class="header-sort col-energy"
@@ -2691,7 +2701,7 @@
 						Energy <span class="sort-arrow">{$sortBy === 'energy' ? ($sortDir === 'asc' ? '↑' : '↓') : '⇅'}</span>
 					</button>
 				{/if}
-				{#if showDanceColumn}
+				{#if showDanceAtWidth}
 					<button
 						type="button"
 						class="header-sort col-dance"
@@ -2715,6 +2725,7 @@
 					class:selected={$selectedTrackIds.has(track.id)}
 					class:playing={$currentTrack?.id === track.id}
 					class:cursor={cursorIndex === i}
+					class:no-album={!showAlbumAtWidth}
 					role="button"
 					tabindex="0"
 					aria-pressed={$selectedTrackIds.has(track.id)}
@@ -2760,7 +2771,7 @@
 							{track.artist_name ?? 'Unknown'}
 						{/if}
 					</span>
-					<span class="col-album">
+					{#if showAlbumAtWidth}<span class="col-album">
 						{#if track.album_title && track.album_id != null}
 							<a
 								href={`/albums/${track.album_id}`}
@@ -2771,8 +2782,8 @@
 						{:else}
 							{track.album_title ?? ''}
 						{/if}
-					</span>
-					{#if showQualityColumn}
+					</span>{/if}
+					{#if showQualityAtWidth}
 						<span class="col-quality">
 							{#if track.best_quality}
 								<span class="quality-badge {getQualityClass(track.best_quality)}">
@@ -2781,12 +2792,12 @@
 							{/if}
 						</span>
 					{/if}
-					{#if showPlaysColumn}
+					{#if showPlaysAtWidth}
 						<span class="col-plays">
 							<span class="plays-count">{track.play_count > 0 ? track.play_count.toLocaleString() : '-'}</span>
 						</span>
 					{/if}
-					{#if showDateColumn}
+					{#if showDatesAtWidth}
 						<span class="col-date">
 							<span class="date-added">{track.date_added ? formatDateShort(track.date_added) : '-'}</span>
 						</span>
@@ -2794,12 +2805,12 @@
 							<span class="last-played">{track.last_played_at ? formatDateShort(track.last_played_at) : '-'}</span>
 						</span>
 					{/if}
-					{#if showBpmColumn}
+					{#if showBpmAtWidth}
 						<span class="col-bpm">
 							<span class="bpm-value">{track.bpm ? Math.round(track.bpm) : '-'}</span>
 						</span>
 					{/if}
-					{#if showKeyColumn}
+					{#if showKeyAtWidth}
 						<span class="col-key">
 							{#if track.camelot_key}
 								<span class="camelot-badge">{track.camelot_key}</span>
@@ -2808,7 +2819,7 @@
 							{/if}
 						</span>
 					{/if}
-					{#if showEnergyColumn}
+					{#if showEnergyAtWidth}
 						<span class="col-energy">
 							{#if track.energy != null}
 								<span class="mini-bar">
@@ -2820,7 +2831,7 @@
 							{/if}
 						</span>
 					{/if}
-					{#if showDanceColumn}
+					{#if showDanceAtWidth}
 						<span class="col-dance">
 							{#if track.danceability != null}
 								<span class="mini-bar">
@@ -5017,7 +5028,7 @@
 		}
 
 		.track-row {
-			grid-template-columns: 28px minmax(0, 1fr) auto;
+			grid-template-columns: 28px minmax(0, 1fr) auto !important;
 			grid-template-areas:
 				"num title actions"
 				". artist duration"
@@ -5026,6 +5037,10 @@
 			padding: 12px;
 			border: 1px solid var(--border-subtle);
 			background: rgba(255, 255, 255, 0.02);
+		}
+
+		.track-row.no-album {
+			grid-template-areas: "num title actions" ". artist duration";
 		}
 
 		.col-num { grid-area: num; text-align: left; }
@@ -5067,6 +5082,11 @@
 		display: grid;
 		grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
 		gap: var(--gap);
+	}
+
+	@container workspace (max-width: 720px) {
+		.track-row .camelot-badge-inline,
+		.track-row .bpm-inline { display: none; }
 	}
 
 	.artist-card {

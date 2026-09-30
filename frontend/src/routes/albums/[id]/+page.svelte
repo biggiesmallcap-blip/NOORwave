@@ -873,7 +873,7 @@
 		text-overflow: ellipsis;
 	}
 
-	@media (max-width: 720px) {
+	@container workspace (max-width: 720px) {
 		.track-table { padding: var(--space-2) var(--space-3) 0; }
 		.track-header { grid-template-columns: 36px 1fr auto 56px; }
 		.col-plays { display: none; }

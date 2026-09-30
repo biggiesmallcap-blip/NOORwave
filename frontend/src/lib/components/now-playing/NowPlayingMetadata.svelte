@@ -1,7 +1,7 @@
 <script lang="ts">
-	import { tick } from 'svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import type { Track } from '$lib/api/client';
+	import type { QualityDisplay } from '$lib/stores/playerInformation';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import {
 		albumRefFromTrack,
@@ -25,6 +25,7 @@
 		streamDetail = '',
 		qualityLabel = '',
 		qualityClass = '',
+		qualityDisplay = 'details',
 		playerState,
 		isScrubbing,
 		showStateBadge = true,
@@ -41,6 +42,7 @@
 		 * artwork carries no badges of its own. */
 		qualityLabel?: string;
 		qualityClass?: string;
+		qualityDisplay?: QualityDisplay;
 		playerState: string;
 		isScrubbing: boolean;
 		showStateBadge?: boolean;
@@ -48,45 +50,11 @@
 	} = $props();
 
 	const titleRef = $derived(track ? trackRefFromTrack(track) : null);
-	const titleHref = $derived(mediaHref(titleRef));
 	const artistRef = $derived(track ? artistRefFromTrack(track) : null);
 	const artistHref = $derived(mediaHref(artistRef));
 	const albumRef = $derived(track ? albumRefFromTrack(track) : null);
 	const albumHref = $derived(mediaHref(albumRef));
-	let titleShellEl = $state<HTMLElement | null>(null);
-	let titleTextEl = $state<HTMLElement | null>(null);
-	let titleOverflowing = $state(false);
-
-	function updateTitleMarquee() {
-		if (!titleShellEl || !titleTextEl) {
-			titleOverflowing = false;
-			return;
-		}
-		const overflow = Math.max(0, titleTextEl.scrollWidth - titleShellEl.clientWidth);
-		titleOverflowing = overflow > 1;
-		titleShellEl.style.setProperty('--np-title-marquee-distance', `${Math.ceil(overflow)}px`);
-		titleShellEl.style.setProperty(
-			'--np-title-marquee-duration',
-			`${Math.min(18, Math.max(7, overflow / 24 + 4)).toFixed(2)}s`,
-		);
-	}
-
-	$effect(() => {
-		track?.title;
-		titleHref;
-		void tick().then(updateTitleMarquee);
-	});
-
-	$effect(() => {
-		const shell = titleShellEl;
-		const text = titleTextEl;
-		if (!shell || !text || typeof ResizeObserver === 'undefined') return;
-		const observer = new ResizeObserver(updateTitleMarquee);
-		observer.observe(shell);
-		observer.observe(text);
-		updateTitleMarquee();
-		return () => observer.disconnect();
-	});
+	const titleHref = $derived(albumHref);
 </script>
 
 <div class="np-info">
@@ -97,8 +65,6 @@
 		{#if track && titleRef && titleHref}
 			<a
 				class="np-title np-title-link"
-				class:marquee-ready={titleOverflowing}
-				bind:this={titleShellEl}
 				href={titleHref}
 				title={track.title}
 				oncontextmenu={(e) => {
@@ -107,63 +73,69 @@
 					openContextMenu(e, buildMediaMenu(titleRef), titleRef.label);
 				}}
 			>
-				<span class="np-title-text" bind:this={titleTextEl}>{track.title}</span>
+				<span class="np-title-text">{track.title}</span>
 			</a>
 		{:else}
-			<h2
-				class="np-title"
-				class:marquee-ready={titleOverflowing}
-				bind:this={titleShellEl}
-				title={track?.title ?? 'Nothing queued'}
-			>
-				<span class="np-title-text" bind:this={titleTextEl}>{track?.title ?? 'Nothing queued'}</span>
+			<h2 class="np-title" title={track?.title ?? 'Nothing queued'}>
+				<span class="np-title-text">{track?.title ?? 'Nothing queued'}</span>
 			</h2>
 		{/if}
-		{#if artistRef && artistHref}
-			<a
-				class="np-artist np-link"
-				href={artistHref}
-				oncontextmenu={(e) => {
-					e.preventDefault();
-					e.stopPropagation();
-					openContextMenu(e, buildMediaMenu(artistRef), artistRef.label);
-				}}
-			>
-				{artistRef.label}
-			</a>
-		{:else if track?.artist_name}
-			<p class="np-artist">{track.artist_name}</p>
-		{:else if !track}
-			<p class="np-artist">Choose a track to begin playback.</p>
-		{/if}
-		{#if albumRef && albumHref}
-			<a
-				class="np-album np-link"
-				href={albumHref}
-				oncontextmenu={(e) => {
-					e.preventDefault();
-					e.stopPropagation();
-					openContextMenu(e, buildMediaMenu(albumRef), albumRef.label);
-				}}
-			>
-				{albumRef.label}
-			</a>
-		{:else if track?.album_title}
-			<p class="np-album">{track.album_title}</p>
-		{/if}
+		<div class="np-byline">
+			{#if artistRef && artistHref}
+				<a
+					class="np-artist np-link"
+					href={artistHref}
+					oncontextmenu={(e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						openContextMenu(e, buildMediaMenu(artistRef), artistRef.label);
+					}}
+				>
+					{artistRef.label}
+				</a>
+			{:else if track?.artist_name}
+				<p class="np-artist">{track.artist_name}</p>
+			{:else if !track}
+				<p class="np-artist">Choose a track to begin playback.</p>
+			{/if}
+			{#if track?.album_title}
+				<span class="np-byline-separator" aria-hidden="true">·</span>
+				{#if albumRef && albumHref}
+					<a
+						class="np-album np-link"
+						href={albumHref}
+						oncontextmenu={(e) => {
+							e.preventDefault();
+							e.stopPropagation();
+							openContextMenu(e, buildMediaMenu(albumRef), albumRef.label);
+						}}
+					>
+						{albumRef.label}
+					</a>
+				{:else}
+					<p class="np-album">{track.album_title}</p>
+				{/if}
+			{/if}
+		</div>
 		{#if nowPlayingAttribution}
 			<p class="np-source">{nowPlayingAttribution}</p>
 		{/if}
 	</div>
-
-	{#if showStateBadge}
+	{#if showStateBadge && (playerState !== 'Playing' || isScrubbing || (qualityDisplay !== 'off' && (qualityLabel || streamDetail)))}
 		<div class="badge-row">
-			<StateBadge label={isScrubbing ? 'Scrubbing' : playerState} tone={track ? 'active' : 'muted'} compact={stateBadgeCompact} />
-			{#if qualityLabel}
+			{#if playerState !== 'Playing' || isScrubbing}
+				<StateBadge label={isScrubbing ? 'Scrubbing' : playerState} tone={track ? 'active' : 'muted'} compact={stateBadgeCompact} />
+			{/if}
+			{#if qualityLabel && (qualityDisplay === 'icon' || qualityDisplay === 'both')}
+				<span class={`quality-badge quality-icon ${qualityClass}`} role="img" aria-label={`${qualityLabel}${streamDetail ? `, ${streamDetail}` : ''}`} title={`${qualityLabel}${streamDetail ? ` · ${streamDetail}` : ''}`}>
+					<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M1.5 8h2.2l1.4-3.6 2.5 7.2 2-5.4 1.4 1.8h3.5" /></svg>
+				</span>
+			{/if}
+			{#if qualityLabel && (qualityDisplay === 'details' || qualityDisplay === 'both')}
 				<span class={`quality-badge np-quality-chip ${qualityClass}`}>{qualityLabel}</span>
 			{/if}
-			{#if streamDetail}
-				<span class="stream-micro">{streamDetail}</span>
+			{#if streamDetail && (qualityDisplay === 'details' || qualityDisplay === 'both')}
+				<span class="stream-micro" title={streamDetail}>{streamDetail}</span>
 			{/if}
 		</div>
 	{/if}
@@ -200,13 +172,25 @@
 		text-overflow: ellipsis;
 		display: block;
 		max-width: 100%;
+		width: fit-content;
 	}
+
+	.np-byline {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 6px;
+		min-width: 0;
+	}
+
+	.np-byline-separator { display: none; }
 
 	.np-title {
 		font-size: var(--font-size-xl);
 		font-family: var(--font-display);
 		line-height: var(--line-height-tight);
 		letter-spacing: -0.02em;
+		width: fit-content;
 	}
 
 	.np-title-text {
@@ -215,18 +199,6 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		vertical-align: bottom;
-	}
-
-	.np-title.marquee-ready:hover .np-title-text {
-		max-width: none;
-		text-overflow: clip;
-		animation: np-title-marquee var(--np-title-marquee-duration, 9s) ease-in-out infinite;
-	}
-
-	@keyframes np-title-marquee {
-		0%, 15% { transform: translateX(0); }
-		50%, 60% { transform: translateX(calc(-1 * var(--np-title-marquee-distance, 0px))); }
-		95%, 100% { transform: translateX(0); }
 	}
 
 	.np-artist {
@@ -254,6 +226,24 @@
 
 	.np-quality-chip {
 		flex: 0 0 auto;
+	}
+
+	.quality-icon {
+		flex: 0 0 auto;
+		justify-content: center;
+		width: 22px;
+		height: 22px;
+		padding: 0;
+	}
+
+	.quality-icon svg {
+		width: 14px;
+		height: 14px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.5;
+		stroke-linecap: round;
+		stroke-linejoin: round;
 	}
 
 	.stream-micro {

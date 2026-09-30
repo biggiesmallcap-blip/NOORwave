@@ -4,6 +4,12 @@
 	let { pathname } = $props<{
 		pathname: string;
 	}>();
+	const MAX_LINK_STEP_REM = 4;
+	const ZONE_HEADING_ALLOWANCE_REM = 2;
+
+	function zoneMaxHeight(linkCount: number): string {
+		return `${linkCount * MAX_LINK_STEP_REM + ZONE_HEADING_ALLOWANCE_REM}rem`;
+	}
 
 	function isNavItemActive(path: string) {
 		if (path === '/') return pathname === '/';
@@ -13,11 +19,12 @@
 
 <nav class="nav" aria-label="Primary">
 	{#each NAVIGATION_ZONES as zone}
-		<div class="nav-zone">
+		<div class="nav-zone" style:--zone-grow={zone.items.length} style:--zone-max={zoneMaxHeight(zone.items.length)}>
 			<p class="nav-zone-label">{zone.label}</p>
 			{#each zone.items as item}
 				<a
 					href={item.path}
+					aria-label={item.label}
 					class="nav-item"
 					class:special={item.id === 'genres'}
 					class:active={isNavItemActive(item.path)}
@@ -43,6 +50,10 @@
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
+		justify-content: space-between;
+		/* Grow with available height, stopping around one comfortable row per link. */
+		flex-grow: var(--zone-grow);
+		max-height: var(--zone-max);
 	}
 
 	.nav-zone-label {
