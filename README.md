@@ -5,13 +5,15 @@
 </p>
 
 <p align="center">
-  <strong>Your TIDAL library, rebuilt into something you actually listen to.</strong>
+  <strong>Your TIDAL library, at local speed. Your music videos, indexed.</strong>
 </p>
 
-NOORwave is a desktop music player for TIDAL, with gapless hi-fi playback and music video indexing that finds live performances, covers, and alternate versions of tracks in your library. Browse your indexed videos by genre and year, alongside music discovery, automix, and phone remote control. Your synced library and listening history stay on your own machine.
+NOORwave is a desktop music player for TIDAL built for **instant local search and fast library browsing**. Your synced library lives in a SQLite database on your own machine, so searching your saved collection runs locally. Your library and listening history stay on your disk; TIDAL supplies the audio.
+
+**Music video indexing** finds live performances, covers, and alternate versions of tracks in your library, bringing them together in a video wall you can browse by genre and year. Gapless hi-fi playback, music discovery, automix, and phone remote control round out the player.
 
 <p align="center">
-  Music video indexing &middot; gapless lossless playback &middot; a galaxy map of your taste &middot; planned DJ transitions &middot; phone remote
+  Instant local search &middot; fast library browsing &middot; music video indexing &middot; gapless lossless playback &middot; Genre Galaxy &middot; planned DJ transitions &middot; phone remote
 </p>
 
 <p align="center">
