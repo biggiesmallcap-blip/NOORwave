@@ -198,7 +198,7 @@
 		color: var(--text-muted, #8b93a7);
 		border-color: rgba(255, 255, 255, 0.08);
 	}
-	.btn-ghost:hover { background: rgba(255, 255, 255, 0.04); color: #e7eaf2; }
+	.btn-ghost:hover { background: var(--bg-hover); color: var(--text-primary); }
 	.redirect-login {
 		display: flex;
 		flex-direction: column;
@@ -226,6 +226,6 @@
 		text-decoration: underline;
 		text-underline-offset: 2px;
 	}
-	.error { color: #ff8a8a; margin: 0; }
-	.success { color: #7fd99c; margin: 0; }
+	.error { color: var(--state-error); margin: 0; }
+	.success { color: var(--state-success); margin: 0; }
 </style>

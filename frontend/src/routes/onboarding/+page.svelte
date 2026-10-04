@@ -349,6 +349,22 @@
 	.btn-primary { background: rgba(255, 255, 255, 0.92); color: #0a0d14; }
 	.btn-primary:hover:not(:disabled) { background: #fff; }
 	.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+	:global([data-palette='clay']) .card {
+		background: var(--material-grain), var(--panel-bg);
+		border-color: var(--panel-border);
+		box-shadow: inset 0 1px 0 var(--instrument-edge), var(--panel-shadow);
+	}
+	:global([data-palette='clay']) .dot { background: var(--border-strong); }
+	:global([data-palette='clay']) .dot.active { background: var(--accent-line); }
+	:global([data-palette='clay']) .dot.current,
+	:global([data-palette='clay']) .dot:not(:disabled):hover { background: var(--accent); }
+	:global([data-palette='clay']) .btn-primary {
+		background: var(--accent);
+		color: var(--text-on-accent);
+	}
+	:global([data-palette='clay']) .btn-primary:hover:not(:disabled) {
+		background: var(--accent-strong);
+	}
 	.link {
 		background: none;
 		border: none;

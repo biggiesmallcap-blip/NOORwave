@@ -269,6 +269,11 @@
 		text-overflow: ellipsis;
 	}
 
+	:global([data-palette="clay"]) .stream-micro,
+	:global([data-palette="clay"]) .np-source {
+		opacity: 1;
+	}
+
 	a.np-link {
 		color: inherit;
 		text-decoration: none;

@@ -107,6 +107,18 @@
 		animation: galaxy-pulse 2.6s ease-in-out infinite;
 	}
 
+	:global([data-palette="clay"]) .nav-item.active {
+		box-shadow: inset 0 1px 2px var(--border-subtle), 0 1px 0 var(--instrument-edge);
+	}
+
+	:global([data-palette="clay"]) .nav-item.active::before {
+		box-shadow: none;
+	}
+
+	:global([data-palette="clay"]) .nav-item.special.active .nav-icon {
+		animation: none;
+	}
+
 	.nav-item.active::before {
 		content: '';
 		position: absolute;

@@ -1358,7 +1358,7 @@
 		font-weight: var(--font-weight-semibold);
 		border: 1px solid var(--accent-line);
 	}
-	.empty-action:hover { background: var(--accent); color: #fff; }
+	.empty-action:hover { background: var(--accent); color: var(--text-on-accent); }
 
 	.btn-spinner {
 		width: 16px;
@@ -1592,7 +1592,7 @@
 		display: grid;
 		place-items: center;
 		background: var(--accent);
-		color: #fff;
+		color: var(--text-on-accent);
 		cursor: pointer;
 		transition: transform var(--motion-fast), background var(--motion-fast);
 		box-shadow: 0 8px 24px -8px var(--accent-glow);
@@ -1725,7 +1725,7 @@
 		border: 0;
 		border-radius: 50%;
 		background: var(--accent);
-		color: #fff;
+		color: var(--text-on-accent);
 		box-shadow: 0 6px 16px -4px rgba(0, 0, 0, 0.55);
 		opacity: 0;
 		transform: translateY(6px);

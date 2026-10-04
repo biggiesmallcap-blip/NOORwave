@@ -4560,8 +4560,8 @@
 		display: grid;
 		place-items: center;
 		border-radius: 7px;
-		background: rgba(255, 255, 255, 0.04);
-		color: rgba(255, 255, 255, 0.82);
+		background: var(--bg-surface);
+		color: var(--text-secondary);
 	}
 
 	.settings-rail-icon svg {
@@ -4710,7 +4710,7 @@
 	.preview-copy small { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 	.preview-copy strong { color: var(--text-primary); font-family: var(--font-display); }
 	.preview-copy small { color: var(--text-secondary); }
-	.preview-play { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: var(--accent); color: #fff; }
+	.preview-play { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: var(--accent); color: var(--text-on-accent); }
 	.preview-progress { grid-column: 1 / -1; grid-row: 2; height: 3px; border-radius: 3px; background: var(--player-progress-track); }
 	.preview-progress span { display: block; width: 38%; height: 100%; border-radius: inherit; background: var(--accent); }
 
@@ -4811,7 +4811,7 @@
 		padding: 6px;
 		border-radius: var(--radius-sm);
 		border: 1px solid var(--border-strong);
-		background: rgba(10, 10, 14, 0.97);
+		background: var(--material-grain), var(--bg-surface-strong);
 		backdrop-filter: var(--blur-modal);
 		-webkit-backdrop-filter: var(--blur-modal);
 		box-shadow: var(--panel-shadow);

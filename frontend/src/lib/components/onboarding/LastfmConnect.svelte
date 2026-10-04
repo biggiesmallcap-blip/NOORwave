@@ -335,9 +335,9 @@
 		color: var(--text-muted, #8b93a7);
 		border-color: rgba(255, 255, 255, 0.08);
 	}
-	.btn-ghost:hover { background: rgba(255, 255, 255, 0.04); color: #e7eaf2; }
-	.error { color: #ff8a8a; margin: 0; }
-	.success { color: #7fd99c; margin: 0; }
+	.btn-ghost:hover { background: var(--bg-hover); color: var(--text-primary); }
+	.error { color: var(--state-error); margin: 0; }
+	.success { color: var(--state-success); margin: 0; }
 	.scrobble-section {
 		margin-top: 8px;
 		padding-top: 14px;

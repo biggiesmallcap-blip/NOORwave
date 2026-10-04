@@ -1760,10 +1760,10 @@
 	.filter-pill.active {
 		background: var(--accent);
 		border-color: var(--accent);
-		color: #fff;
+		color: var(--text-on-accent);
 	}
 
-	.filter-pill.active span { color: rgba(255,255,255,0.78); }
+	.filter-pill.active span { color: color-mix(in srgb, var(--text-on-accent) 78%, transparent); }
 
 	.playlist-sort {
 		display: flex;

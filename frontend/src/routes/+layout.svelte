@@ -111,7 +111,8 @@
 		hasLocalOnboardingComplete,
 		markLocalOnboardingComplete
 	} from '$lib/onboarding/status';
-	import { paletteById, rgbaCss } from '$lib/components/wallpaper/palettes';
+	import { applyPaletteTheme } from '$lib/components/wallpaper/paletteTheme';
+	import PlayPauseIcon from '$lib/components/ui/PlayPauseIcon.svelte';
 	import {
 		MOBILE_MORE_ROUTES,
 		MOBILE_TAB_ROUTES,
@@ -276,7 +277,7 @@
 
 	let isScrubbing = $state(false);
 	let scrubPosition = $state(0);
-	let theme = $state<'dark' | 'light'>('dark');
+	let theme = $state<'dark' | 'light'>('light');
 	let displayVolume = $state(Math.round($volume * 100));
 	let viewportWidth = $state(1280);
 	let effectivePlayerLayout = $derived(resolvePlayerLayout($playerPlacement, viewportWidth));
@@ -297,6 +298,7 @@
 		const updateTheme = () => {
 			theme = resolveSurfaceMode(get(surfaceMode), systemTheme.matches);
 			document.documentElement.setAttribute('data-theme', theme);
+			applyPalette(get(palette));
 		};
 		const unsubscribe = surfaceMode.subscribe(updateTheme);
 		systemTheme.addEventListener('change', updateTheme);
@@ -803,16 +805,7 @@
 	}
 
 	function applyPalette(id: import('$lib/components/wallpaper/palettes').PaletteId) {
-		const p = paletteById(id);
-		const root = document.documentElement.style;
-		root.setProperty('--accent', p.ui.accent);
-		root.setProperty('--accent-strong', p.ui.accentStrong);
-		root.setProperty('--accent-soft', p.ui.accentSoft);
-		root.setProperty('--accent-line', p.ui.accentLine);
-		root.setProperty('--accent-glow', p.ui.accentGlow);
-		root.setProperty('--atlas-haze-a', rgbaCss(p.shader.c2, 0.18));
-		root.setProperty('--atlas-haze-b', rgbaCss(p.shader.c3, 0.13));
-		root.setProperty('--atlas-haze-c', rgbaCss(p.shader.c4, 0.10));
+		applyPaletteTheme(document.documentElement, id, theme);
 	}
 
 	function toggleTheme() {
@@ -2083,7 +2076,7 @@
 						aria-label="Play or pause"
 						onclick={() => void togglePlayback()}
 					>
-						{$isPlaying ? '⏸' : '▶'}
+						<PlayPauseIcon playing={$isPlaying} />
 					</button>
 					<button
 						class="mobile-mini-btn"
@@ -2225,7 +2218,7 @@
 			<div class="mobile-np-transport">
 				<button class="mobile-np-btn" type="button" aria-label="Previous" onclick={() => void playPreviousTrack()}>⏮</button>
 				<button class="mobile-np-btn primary" type="button" aria-label="Play or pause" onclick={() => void togglePlayback()}>
-					{$isPlaying ? '⏸' : '▶'}
+					<PlayPauseIcon playing={$isPlaying} />
 				</button>
 				<button class="mobile-np-btn" type="button" aria-label="Next" onclick={() => void playNextTrack()}>⏭</button>
 			</div>
@@ -2424,7 +2417,7 @@
 		display: flex;
 		flex-direction: column;
 		overflow: hidden;
-		background: var(--surface-0);
+		background: var(--material-grain), var(--surface-0);
 		color: var(--text-primary);
 		/* The remote is a phone-first surface; long-press on track titles,
 		 * artist text, etc. should never trigger iOS text selection — it's
@@ -2460,6 +2453,7 @@
 		   until the window enters native fullscreen. */
 		transform: translateZ(0);
 		background:
+			var(--material-grain),
 			radial-gradient(circle at 8% 6%, var(--atlas-haze-a), transparent 34%),
 			radial-gradient(circle at 90% 10%, var(--atlas-haze-b), transparent 28%),
 			radial-gradient(circle at 76% 86%, var(--atlas-haze-c), transparent 30%),
@@ -2518,6 +2512,18 @@
 			var(--right-panel-bg);
 	}
 
+	:global([data-palette="clay"]) .app-shell.has-wallpaper .sidebar {
+		background: var(--material-grain), var(--sidebar-bg);
+	}
+
+	:global([data-palette="clay"]) .app-shell.has-wallpaper .workspace {
+		background: var(--material-grain), color-mix(in srgb, var(--bg-base) 94%, transparent);
+	}
+
+	:global([data-palette="clay"]) .app-shell.has-wallpaper .now-playing-panel {
+		background: var(--material-grain), var(--player-surface);
+	}
+
 	.sidebar {
 		grid-area: sidebar;
 		display: flex;
@@ -2526,6 +2532,7 @@
 		padding: 20px 14px;
 		border-right: 1px solid var(--border-subtle);
 		background:
+			var(--material-grain),
 			linear-gradient(180deg, color-mix(in srgb, var(--instrument-surface) 85%, transparent), color-mix(in srgb, var(--instrument-surface-strong) 72%, transparent)),
 			var(--sidebar-bg);
 		overflow: hidden;
@@ -2559,7 +2566,7 @@
 		display: flex;
 		flex-direction: column;
 		border-left: 1px solid var(--border-subtle);
-		background: radial-gradient(circle at 50% 8%, var(--accent-soft), transparent 55%), var(--player-surface);
+		background: var(--material-grain), radial-gradient(circle at 50% 8%, var(--accent-soft), transparent 55%), var(--player-surface);
 		overflow: hidden;
 	}
 
@@ -4384,7 +4391,7 @@
 			height: 60px;
 			background: var(--accent);
 			border-color: transparent;
-			color: #fff;
+			color: var(--text-on-accent);
 			font-size: var(--font-size-xl);
 			box-shadow: 0 8px 24px var(--accent-glow);
 		}

@@ -2220,7 +2220,7 @@
   .filter-pill.active {
     background: var(--accent);
     border-color: var(--accent);
-    color: #fff;
+    color: var(--text-on-accent);
     font-weight: var(--font-weight-semibold);
   }
   .search-hint {
@@ -2349,7 +2349,7 @@
     align-self: flex-start;
     margin-top: var(--space-2);
     background: var(--accent);
-    color: #fff;
+    color: var(--text-on-accent);
     border: none;
     border-radius: 999px;
     padding: var(--space-2) var(--space-4);

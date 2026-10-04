@@ -559,7 +559,7 @@
 
 	.popup-cta--primary {
 		background: var(--accent);
-		color: #fff;
+		color: var(--text-on-accent);
 		box-shadow: 0 8px 22px -8px var(--accent-glow);
 	}
 	.popup-cta--primary:hover {

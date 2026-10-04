@@ -26,6 +26,25 @@ If you're tempted to add `padding: 16px` or `border-radius: 12px` directly, ask:
 | Accent | `--accent`, `--accent-soft`, `--accent-line`, `--accent-strong`, `--accent-glow` | Interactive accents (active states, primary buttons, focus rings). Tracks the user's profile palette. **Never** hardcode hex values for accents** - onboarding's `#4a6dd8` was migrated to `var(--accent)` so it follows the theme. |
 | Content | `--content-width` (clamp 1280-2400 px) | Page-shell `max-width` so content scales on wide monitors. |
 
+## Material surfaces
+
+The `clay` colour scheme coordinates parchment, ink, and terracotta across the
+existing surface tokens in both light and dark modes. `data-palette` on the root
+selects the material; `data-theme` still selects the surface mode independently.
+Saved appearance preferences take priority over the fresh-install defaults.
+
+`--material-grain` is a background image, separate from the colour tokens because
+they cannot express texture. It is `none` for other schemes and a small, static,
+repeating local SVG for Clay. Use it as the first background layer on shared
+surfaces. Keep it behind content so artwork, text, pointer input, and focus rings
+remain clear. Do not add an animated grain overlay or copy the reference glyphs.
+
+`--text-on-accent` supplies text and icons on solid accent fills. Normal text
+tokens describe text on page surfaces and cannot also guarantee contrast on an
+accent. Other schemes keep white; Clay uses parchment on terracotta in light
+mode and dark ink on amber in dark mode. Artwork overlays retain their own
+foreground treatment because their background is an image.
+
 ## Motion footgun: never write `var(--motion-X) ease`
 
 The motion tokens are **not bare durations**. Each one bundles the canonical easing:

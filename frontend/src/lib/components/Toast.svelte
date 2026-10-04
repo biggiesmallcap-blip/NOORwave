@@ -88,7 +88,7 @@
 	}
 	.toast-action:hover {
 		background: var(--accent);
-		color: #fff;
+		color: var(--text-on-accent);
 	}
 	.toast--success { border-color: var(--state-success); }
 	.toast--error {
