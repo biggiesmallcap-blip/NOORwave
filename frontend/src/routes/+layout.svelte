@@ -76,6 +76,7 @@
 	import { contextMenu, openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
+	import { buildVideoMenu } from '$lib/player/video_menu';
 	import {
 		currentQueueAnchorItem,
 		currentQueueAnchorPosition,
@@ -116,11 +117,11 @@
 		MOBILE_TAB_ROUTES,
 	} from '$lib/routes/navigation';
 	import {
-		requestVideoClear,
-		requestVideoAutoplayToggle,
-		requestVideoJump,
+		playQueuedVideo,
+		clearVideoSession,
 		videoSession,
 		videoSessionUpcoming,
+		type VideoSessionItem,
 	} from '$lib/stores/video_session';
 	import VideoDock from '$lib/components/video/VideoDock.svelte';
 
@@ -937,6 +938,17 @@
 		openContextMenu(event, queueRowMenuItems(item), item.track.title);
 	}
 
+	function openVideoQueueMenu(video: VideoSessionItem, event: MouseEvent) {
+		openContextMenu(event, buildVideoMenu(video, { inQueue: true }), video.title);
+	}
+
+	function videoQueueKeydown(video: VideoSessionItem, event: KeyboardEvent) {
+		if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return;
+		event.preventDefault();
+		event.stopPropagation();
+		openMenuAtElement(event.currentTarget as HTMLElement, buildVideoMenu(video, { inQueue: true }), video.title);
+	}
+
 	function openQueueRowMenuFromButton(item: QueueItemType, event: MouseEvent) {
 		event.stopPropagation();
 		openMenuAtElement(event.currentTarget as HTMLElement, queueRowMenuItems(item), item.track.title);
@@ -1279,8 +1291,8 @@
 		runtime: $playbackRuntimeInfo,
 		exclusiveEngaged: $exclusiveStatus.engaged,
 	}));
-	let videoRouteActive = $derived(page.url.pathname.startsWith('/videos'));
-	let videoChromeActive = $derived(videoRouteActive && $videoSession.active);
+	let videoRouteActive = $derived(page.url.pathname.startsWith('/videos') || page.url.pathname === '/tidal/videos');
+	let videoChromeActive = $derived(videoRouteActive && ($videoSession.active || $videoSession.queue.length > 0));
 	let mobilePlayerVisible = $derived(Boolean($currentTrack) && !videoChromeActive);
 	let progressWidth = $derived(
 		$currentTrack?.duration_ms && $currentTrack.duration_ms > 0
@@ -1684,6 +1696,7 @@
 						class:active={$videoSession.continuous}
 						type="button"
 						aria-pressed={$videoSession.continuous}
+						disabled={!$videoSession.active}
 						onclick={() => $videoSession.continuous ? videoSession.stopRadio() : videoSession.startRadio()}
 					>
 						{$videoSession.continuous ? 'Stop radio' : 'Start radio'}
@@ -1693,7 +1706,7 @@
 						class:active={$videoSession.autoplay}
 						type="button"
 						aria-pressed={$videoSession.autoplay}
-						onclick={() => requestVideoAutoplayToggle()}
+						onclick={() => videoSession.setAutoplay(!$videoSession.autoplay)}
 					>
 						› {$videoSession.autoplay ? 'On' : 'Autoplay'}
 					</button>
@@ -1728,7 +1741,7 @@
 						class="video-panel-queue-clear"
 						type="button"
 						title="Clear video queue"
-						onclick={() => requestVideoClear()}
+						onclick={() => clearVideoSession()}
 					>⌫</button>
 				</div>
 				{#if $videoSessionUpcoming.length > 0}
@@ -1738,7 +1751,10 @@
 							<button
 								type="button"
 								class="video-panel-row"
-								onclick={() => requestVideoJump(video.tidal_id)}
+								onclick={() => void playQueuedVideo(video.tidal_id)}
+								oncontextmenu={(event) => openVideoQueueMenu(video, event)}
+								onkeydown={(event) => videoQueueKeydown(video, event)}
+								aria-label={`Play ${video.title}`}
 							>
 								{#if videoArt}
 									<img

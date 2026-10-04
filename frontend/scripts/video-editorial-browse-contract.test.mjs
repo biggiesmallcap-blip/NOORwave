@@ -6,6 +6,7 @@ const read = (rel) => readFileSync(resolve(import.meta.dirname, rel), 'utf8');
 const source = read('../src/routes/videos/+page.svelte');
 const dock = read('../src/lib/components/video/VideoDock.svelte');
 const store = read('../src/lib/stores/video_session.ts');
+const navigation = read('../src/lib/components/video/VideoNavigation.svelte');
 const shelves = read('../src/lib/components/search/TidalDiscoverShelves.svelte');
 const appCss = read('../src/app.css');
 
@@ -41,6 +42,15 @@ describe('Videos editorial browse state', () => {
 		expect(source).toContain("discoverSets.filter((s) => s.slug !== 'daily-picks'");
 		expect(source).toContain('{#each shelfSets as set, i (set.slug)}');
 		expect(source).toContain('<VideoSetShelf');
+		expect(source).toContain('onPlayAll={() => playFromSet(set, 0)}');
+	});
+
+	test('shelf playback uses the full row while browse radio uses the library mix', () => {
+		const shelfPlay = source.slice(source.indexOf('async function playFromSet'), source.indexOf('async function playBrowseMix'));
+		expect(shelfPlay).toContain('await playFromQueue(video, set.items, set.title, true);');
+		const browsePlay = source.slice(source.indexOf('async function playBrowseMix'), source.indexOf('async function toggleSavedVideo'));
+		expect(browsePlay).toContain("await playFromQueue(first, browseMix, 'Video radio', true, true, 'library');");
+		expect(source).toContain('onPlayAll={() => dailySet && playFromSet(dailySet, 0)}');
 		expect(source).toContain('onPlayAll={() => playFromSet(set, 0)}');
 	});
 
@@ -123,36 +133,29 @@ describe('Video modules never fall through to the audio detail page', () => {
 });
 
 describe('Browse while playing', () => {
-	test('navigation lives in one header slot, not buried in the hero meta', () => {
-		// All three states share the slot beside the search field, so the
-		// control never moves: TIDAL editorial when idle, Back to picks while
-		// the player has the stage, Back to the player while browsing.
+	test('navigation stays above search and keeps destinations available during playback', () => {
 		const header = source.slice(source.indexOf('<header class="search-header">'), source.indexOf('</header>'));
-		expect(header).toContain('class="tools-action"');
-		expect(header).toContain('>Back to picks</button>');
-		expect(header).toContain('Back to the player');
-		expect(header).toContain('href="/tidal/videos">TIDAL editorial</a>');
+		expect(header).toContain('<VideoNavigation current="videos" canBrowse={hasBrowseContent} />');
+		expect(header.indexOf('<VideoNavigation')).toBeLessThan(header.indexOf('<SearchField'));
+		expect(navigation).toContain("{ id: 'editorial', href: '/tidal/videos', label: 'TIDAL editorial' }");
 		// The hero keeps metadata only.
 		const hero = source.slice(source.indexOf('{#if showVideoHero}'), source.indexOf('<!-- Legacy landing chips'));
 		expect(hero).not.toContain('Back to picks');
 		expect(hero).not.toContain('hero-actions');
-		// Field stays optically centered whatever the action label says.
-		expect(source).toContain('grid-template-columns: minmax(0, 1fr) minmax(0, 560px) minmax(0, 1fr)');
+		expect(source).toContain('width: min(100%, 560px)');
 	});
 
 	test('the route offers a way back to the picks without stopping playback', () => {
-		expect(source).toContain('function backToPicks()');
-		expect(source).toContain('setVideoBrowseMode(true)');
-		expect(source).toContain('>Back to picks</button>');
+		expect(navigation).toContain('setVideoBrowseMode(true)');
+		expect(navigation).toContain('>Back to picks</button>');
 		// Browse mode must withdraw the stage anchor: its absence is the signal
 		// the dock reads to fall back to the mini player.
 		expect(source).toContain('let showVideoHero = $derived(\n\t\t!browseMode &&');
 	});
 
 	test('and a way back to the player that does not restart it', () => {
-		expect(source).toContain('function backToPlayer()');
-		expect(source).toContain('setVideoBrowseMode(false)');
-		expect(source).toContain('Back to the player');
+		expect(navigation).toContain('setVideoBrowseMode(false)');
+		expect(navigation).toContain('Back to the player');
 	});
 
 	test('the dock docks to the corner in browse mode and stays mounted', () => {

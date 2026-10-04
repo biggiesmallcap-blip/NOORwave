@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onDestroy, untrack } from 'svelte';
+	import { onDestroy, untrack, type Snippet } from 'svelte';
 	import { ApiError, api, type TidalHomeModule } from '$lib/api/client';
 	import { tidalStatus } from '$lib/stores/tidal';
 	import { goBack } from '$lib/navigation/back';
@@ -18,6 +18,7 @@
 		errorText?: string;
 		backFallback?: string;
 		mediaKind?: 'audio' | 'video';
+		navigation?: Snippet;
 	};
 
 	let {
@@ -30,6 +31,7 @@
 		errorText = 'Could not load this TIDAL page.',
 		backFallback = '/library',
 		mediaKind = 'audio',
+		navigation,
 	}: Props = $props();
 
 	let modules = $state<TidalHomeModule[]>([]);
@@ -101,7 +103,11 @@
 <svelte:head><title>{title} . NOOR</title></svelte:head>
 
 <div class="page" data-tidal-editorial-page={pagePath}>
-	<button class="back-link" type="button" onclick={() => goBack(backFallback)}>Back</button>
+	{#if navigation}
+		{@render navigation()}
+	{:else}
+		<button class="back-link" type="button" onclick={() => goBack(backFallback)}>Back</button>
+	{/if}
 	<PageHeader {eyebrow} {title} {subtitle} variant="editorial" />
 
 	{#if viewState === 'loading'}
