@@ -17,6 +17,7 @@ describe('pending TIDAL PKCE login', () => {
 	beforeEach(() => {
 		pendingTidalLogin.set(null);
 		tidalStatus.set('disconnected');
+		vi.mocked(openExternal).mockReset();
 		vi.mocked(openExternal).mockResolvedValue({ ok: true, method: 'tauri' });
 	});
 
@@ -29,7 +30,7 @@ describe('pending TIDAL PKCE login', () => {
 	function mockRequests() {
 		const fetch = vi.fn(async (url: string) => {
 			if (url.endsWith('/login')) return response({ verify_url: verifyUrl });
-			if (url.endsWith('/complete')) return response({ user_id: '123' });
+			if (url.endsWith('/complete')) return response({ status: 'authenticated', user_id: '123' });
 			return response({ connected: false });
 		});
 		vi.stubGlobal('fetch', fetch);
@@ -76,7 +77,7 @@ describe('pending TIDAL PKCE login', () => {
 			phase: 'awaiting', verifyUrl, redirectUrl, error: 'Temporary TIDAL failure',
 		});
 		fetch.mockImplementation(async (url) => url.endsWith('/complete')
-			? response({ user_id: '123' })
+			? response({ status: 'authenticated', user_id: '123' })
 			: response({ connected: true, user_id: '123', auth_flow: 'pkce' }));
 		expect(await completeTidalLogin()).toEqual({ user_id: '123' });
 		expect(get(pendingTidalLogin)).toBeNull();
@@ -124,6 +125,44 @@ describe('pending TIDAL PKCE login', () => {
 		expect(get(pendingTidalLogin)).toBeNull();
 		await startTidalLogin();
 		expect(get(pendingTidalLogin)?.phase).toBe('awaiting');
+	});
+
+	test.each([
+		null,
+		{ verify_url: 123 },
+		{ verify_url: 'https://example.com/authorize' },
+		{ verify_url: 'file:///C:/Windows/system32/calc.exe' },
+		{ verify_url: 'https://login.tidal.com.evil.example/authorize' },
+		{ verify_url: 'https://user:password@login.tidal.com/authorize' },
+		{ verify_url: 'https://login.tidal.com/unrelated' },
+	])('rejects malformed or unrelated sign-in responses before opening a browser: %j', async (data) => {
+		const fetch = mockRequests();
+		fetch.mockResolvedValueOnce(new Response(JSON.stringify(data)));
+		await expect(startTidalLogin()).rejects.toThrow('TIDAL sign-in URL');
+		expect(get(pendingTidalLogin)).toBeNull();
+		expect(openExternal).not.toHaveBeenCalled();
+	});
+
+	test.each([null, {}, { status: 'error', error: 'not authenticated' }, { status: 'authenticated', user_id: '' }])(
+		'malformed successful completion responses cannot dismiss the pending form: %j', async (data) => {
+			const fetch = mockRequests();
+			await startTidalLogin();
+			pendingTidalLogin.update((pending) => ({ ...pending!, redirectUrl }));
+			fetch.mockResolvedValueOnce(new Response(JSON.stringify(data)));
+			await expect(completeTidalLogin()).rejects.toThrow('confirm TIDAL authentication');
+			expect(get(pendingTidalLogin)).toMatchObject({ phase: 'awaiting', verifyUrl, redirectUrl });
+			expect(get(tidalStatus)).toBe('disconnected');
+		}
+	);
+
+	test('a non-JSON completion response cannot dismiss the pending form', async () => {
+		const fetch = mockRequests();
+		await startTidalLogin();
+		pendingTidalLogin.update((pending) => ({ ...pending!, redirectUrl }));
+		fetch.mockResolvedValueOnce(new Response('<html>Unexpected page</html>'));
+		await expect(completeTidalLogin()).rejects.toThrow('confirm TIDAL authentication');
+		expect(get(pendingTidalLogin)).toMatchObject({ phase: 'awaiting', verifyUrl, redirectUrl });
+		expect(get(tidalStatus)).toBe('disconnected');
 	});
 
 	test('duplicate start and finish clicks do not send concurrent auth requests', async () => {

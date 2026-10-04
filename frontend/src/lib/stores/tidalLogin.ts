@@ -14,7 +14,23 @@ interface PendingTidalLogin {
 
 // Keep the form for the lifetime of this UI session, including route remounts.
 // Connection-status refreshes cannot tell whether a PKCE login is still pending.
+// Do not persist authorization codes to disk; a full UI reload starts a new form.
 export const pendingTidalLogin = writable<PendingTidalLogin | null>(null);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isValidSignInUrl(value: unknown): value is string {
+	if (typeof value !== 'string') return false;
+	try {
+		const url = new URL(value);
+		return url.origin === 'https://login.tidal.com' && url.pathname === '/authorize' &&
+			url.username === '' && url.password === '';
+	} catch {
+		return false;
+	}
+}
 
 export async function openTidalVerifyUrl() {
 	const pending = get(pendingTidalLogin);
@@ -41,8 +57,10 @@ export async function startTidalLogin() {
 	try {
 		const resp = await authFetch(`${getApiBase()}/api/tidal/login`, { method: 'POST' });
 		if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
-		const data = await resp.json();
-		if (!data.verify_url) throw new Error('Server did not return a TIDAL sign-in URL.');
+		const data: unknown = await resp.json();
+		if (!isRecord(data) || !isValidSignInUrl(data.verify_url)) {
+			throw new Error('Server did not return a valid TIDAL sign-in URL.');
+		}
 		pending.verifyUrl = data.verify_url;
 		pending.phase = 'awaiting';
 		pendingTidalLogin.set(pending);
@@ -53,7 +71,7 @@ export async function startTidalLogin() {
 	}
 }
 
-export async function completeTidalLogin(): Promise<{ user_id?: string } | null> {
+export async function completeTidalLogin(): Promise<{ user_id: string } | null> {
 	const pending = get(pendingTidalLogin);
 	if (!pending || pending.phase !== 'awaiting') return null;
 	pending.error = '';
@@ -70,9 +88,16 @@ export async function completeTidalLogin(): Promise<{ user_id?: string } | null>
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ redirect_url: pending.redirectUrl.trim() }),
 		});
-		const data = await resp.json().catch(() => ({}));
-		if (!resp.ok) throw new Error(data.error ?? `Server returned ${resp.status}`);
-		tidalUserId.set(data.user_id ?? '');
+		const data: unknown = await resp.json().catch(() => null);
+		if (!resp.ok) {
+			throw new Error(isRecord(data) && typeof data.error === 'string'
+				? data.error : `Server returned ${resp.status}`);
+		}
+		if (!isRecord(data) || data.status !== 'authenticated' ||
+			typeof data.user_id !== 'string' || !data.user_id.trim()) {
+			throw new Error('Server did not confirm TIDAL authentication. Try finishing login again.');
+		}
+		tidalUserId.set(data.user_id);
 		tidalStatus.set('connected');
 		pendingTidalLogin.set(null);
 		void loadTidalStatus();
@@ -100,5 +125,7 @@ export async function pasteTidalRedirectUrl() {
 }
 
 export function cancelTidalLogin() {
+	// Cancel this UI attempt without signing out an existing account. The next
+	// login request replaces the backend's in-memory PKCE verifier.
 	if (get(pendingTidalLogin)?.phase === 'awaiting') pendingTidalLogin.set(null);
 }
