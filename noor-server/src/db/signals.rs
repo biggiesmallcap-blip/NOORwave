@@ -1514,10 +1514,12 @@ mod tests {
         session_id: Option<&str>,
         source: Option<&str>,
     ) {
+        // Daily analytics use local calendar dates; convert to UTC after shifting
+        // the local fixture time so a DST boundary cannot move it into another day.
         conn.execute(
             "INSERT INTO listen_history
                 (id, track_id, started_at, duration_listened_ms, completed, session_id, source)
-             VALUES (?1, ?2, datetime('now', ?3), ?4, ?5, ?6, ?7)",
+             VALUES (?1, ?2, datetime('now', 'localtime', ?3, 'utc'), ?4, ?5, ?6, ?7)",
             params![
                 id,
                 track_id,

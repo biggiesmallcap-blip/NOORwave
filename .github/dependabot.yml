@@ -19,6 +19,10 @@ updates:
     groups:
       cargo:
         patterns: ["*"]
+        # Breaking upgrades need their own migration and review.
+        update-types: ["minor", "patch"]
+        # Cargo's 0.x minor releases can also contain breaking changes.
+        exclude-patterns: ["symphonia", "rubato", "rand", "base64", "tokio-tungstenite", "winreg"]
     ignore:
       - dependency-name: cpal
       - dependency-name: wasapi
@@ -36,6 +40,11 @@ updates:
     groups:
       frontend:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
+      # Vitest and its coverage provider must move together, even for majors.
+      vitest-major:
+        patterns: ["vitest", "@vitest/*"]
+        update-types: ["major"]
     ignore:
       - dependency-name: "@tauri-apps/*"
 
@@ -48,3 +57,4 @@ updates:
     groups:
       scripts:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
