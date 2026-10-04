@@ -1,7 +1,8 @@
 <script lang="ts">
-	import { authFetch, getApiBase } from '$lib/api/client';
-	import { openExternal } from '$lib/util/external';
-	import { isValidTidalRedirectUrl, readTidalRedirectFromClipboard } from '$lib/tidal/login';
+	import {
+		pendingTidalLogin, startTidalLogin, completeTidalLogin,
+		openTidalVerifyUrl, pasteTidalRedirectUrl, cancelTidalLogin
+	} from '$lib/stores/tidalLogin';
 
 	let {
 		variant = 'onboarding',
@@ -15,86 +16,38 @@
 		onskip?: () => void;
 	} = $props();
 
-	type Status = 'idle' | 'connecting' | 'awaiting' | 'connected' | 'error';
-
-	let status = $state<Status>('idle');
-	let verifyUrl = $state('');
-	let redirectUrl = $state('');
+	let connected = $state(false);
 	let errorMsg = $state('');
-	let redirectError = $state('');
-	let externalOpenError = $state('');
-
-	async function openVerifyUrl() {
-		externalOpenError = '';
-		if (!verifyUrl) return;
-		const result = await openExternal(verifyUrl);
-		if (!result.ok) {
-			externalOpenError = `Browser did not open: ${result.error}. Copy this TIDAL sign-in link into your browser.`;
-		}
-	}
 
 	async function start() {
-		status = 'connecting';
 		errorMsg = '';
-		redirectError = '';
-		externalOpenError = '';
-		redirectUrl = '';
 		try {
-			const resp = await authFetch(`${getApiBase()}/api/tidal/login`, { method: 'POST' });
-			if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
-			const data = await resp.json();
-			verifyUrl = data.verify_url ?? '';
-			status = 'awaiting';
-
-			await openVerifyUrl();
+			await startTidalLogin();
 		} catch (e) {
-			status = 'error';
 			errorMsg = e instanceof Error ? e.message : String(e);
 		}
 	}
 
 	async function completeLogin() {
 		errorMsg = '';
-		redirectError = '';
-		if (!isValidTidalRedirectUrl(redirectUrl)) {
-			redirectError = 'Paste the final TIDAL redirect URL to finish login.';
-			return;
-		}
 		try {
-			const resp = await authFetch(`${getApiBase()}/api/tidal/login/complete`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ redirect_url: redirectUrl.trim() }),
-			});
-			const data = await resp.json().catch(() => ({}));
-			if (!resp.ok) throw new Error(data.error ?? `Server returned ${resp.status}`);
-			status = 'connected';
-			verifyUrl = '';
-			redirectUrl = '';
-			onconnected?.({ user_id: data.user_id });
-		} catch (e) {
-			status = 'error';
-			errorMsg = e instanceof Error ? e.message : String(e);
+			const info = await completeTidalLogin();
+			if (!info) return;
+			connected = true;
+			onconnected?.(info);
+		} catch {
+			// The shared pending form displays the error and remains available for retry.
 		}
-	}
-
-	async function pasteRedirectUrl() {
-		redirectError = '';
-		const result = await readTidalRedirectFromClipboard();
-		if (result.ok && result.redirectUrl) {
-			redirectUrl = result.redirectUrl;
-			return;
-		}
-		redirectError = result.error ?? 'Clipboard access failed. Paste the URL manually.';
 	}
 
 	function handleSkip() {
+		cancelTidalLogin();
 		onskip?.();
 	}
 </script>
 
 <div class="tidal-connect" class:variant-onboarding={variant === 'onboarding'} class:variant-settings={variant === 'settings'}>
-	{#if status === 'idle' || status === 'error'}
+	{#if !$pendingTidalLogin && !connected}
 		<div class="prompt">
 			{#if variant === 'onboarding'}
 				<h2>Connect TIDAL</h2>
@@ -105,44 +58,47 @@
 			{/if}
 			<div class="actions">
 				<button class="btn btn-primary" onclick={start}>
-					{status === 'error' ? 'Try again' : 'Connect TIDAL'}
+					{errorMsg ? 'Try again' : 'Connect TIDAL'}
 				</button>
 				{#if showSkip}
 					<button class="btn btn-ghost" onclick={handleSkip}>Skip for now</button>
 				{/if}
 			</div>
 		</div>
-	{:else if status === 'connecting'}
+	{:else if $pendingTidalLogin?.phase === 'starting'}
 		<p class="muted">Opening TIDAL sign-in...</p>
-	{:else if status === 'awaiting'}
+	{:else if $pendingTidalLogin}
 		<div class="redirect-login">
-			<p class="muted">A TIDAL sign-in page opened.</p>
-			<p class="muted">After sign-in, copy the address from the final TIDAL page. Paste it here to finish.</p>
-			{#if externalOpenError}
-				<p class="error" role="alert">{externalOpenError}</p>
-				<input class="redirect-input" type="url" readonly value={verifyUrl} aria-label="TIDAL sign-in URL" />
+			<p class="muted">Finish your TIDAL sign-in.</p>
+			<p class="muted">After sign-in, copy the full address from the final TIDAL page, even if it says page not found. Paste it here to finish.</p>
+			{#if $pendingTidalLogin.externalOpenError}
+				<p class="error" role="alert">{$pendingTidalLogin.externalOpenError}</p>
+				<input class="redirect-input" type="url" readonly value={$pendingTidalLogin.verifyUrl} aria-label="TIDAL sign-in URL" />
 			{/if}
 			<input
 				class="redirect-input"
 				type="url"
-				bind:value={redirectUrl}
+				bind:value={$pendingTidalLogin.redirectUrl}
+				disabled={$pendingTidalLogin.phase !== 'awaiting'}
+				aria-label="Final TIDAL redirect URL"
 				placeholder="https://tidal.com/android/login/auth?code=..."
 			/>
-			{#if redirectError}
-				<p class="error" role="alert">{redirectError}</p>
+			{#if $pendingTidalLogin.error}
+				<p class="error" role="alert">{$pendingTidalLogin.error}</p>
 			{/if}
 			<div class="actions">
-				<button class="btn btn-ghost" onclick={pasteRedirectUrl}>Paste from clipboard</button>
-				<button class="btn btn-primary" onclick={completeLogin} disabled={!redirectUrl.trim()}>Finish login</button>
+				<button class="btn btn-ghost" onclick={pasteTidalRedirectUrl} disabled={$pendingTidalLogin.phase !== 'awaiting'}>Paste from clipboard</button>
+				<button class="btn btn-primary" onclick={completeLogin} disabled={$pendingTidalLogin.phase !== 'awaiting' || !$pendingTidalLogin.redirectUrl.trim()}>{$pendingTidalLogin.phase === 'completing' ? 'Finishing login…' : 'Finish login'}</button>
+				<button class="btn btn-ghost" onclick={cancelTidalLogin} disabled={$pendingTidalLogin.phase !== 'awaiting'}>Cancel login</button>
 			</div>
 			<p class="hint">
-				Didn't open? <button type="button" class="hint-link" onclick={() => void openVerifyUrl()}>Open the page manually</button>.
+				Didn't open? <button type="button" class="hint-link" onclick={() => void openTidalVerifyUrl()} disabled={$pendingTidalLogin.phase !== 'awaiting'}>Open the page manually</button>.
 			</p>
 			{#if showSkip}
-				<button class="btn btn-ghost" onclick={handleSkip}>Skip for now</button>
+				<button class="btn btn-ghost" onclick={handleSkip} disabled={$pendingTidalLogin.phase !== 'awaiting'}>Skip for now</button>
 			{/if}
 		</div>
-	{:else if status === 'connected'}
+	{:else if connected}
 		<p class="success">TIDAL connected.</p>
 	{/if}
 </div>
