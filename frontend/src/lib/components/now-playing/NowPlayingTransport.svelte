@@ -2,6 +2,7 @@
 	import { get } from 'svelte/store';
 	import type { Track } from '$lib/api/client';
 	import { contextMenu, closeContextMenu } from '$lib/stores/context_menu';
+	import PlayPauseIcon from '$lib/components/ui/PlayPauseIcon.svelte';
 
 	const SHUFFLE_LABELS: Record<string, string> = {
 		off: 'Shuffle off',
@@ -122,7 +123,7 @@
 	<div class="transport-group transport-group-playback" role="group" aria-label="Previous, play, and next">
 		<button class="tp-btn" onclick={onPrev} aria-label="Previous" title="Previous track">⏮</button>
 		<button class="tp-play" onclick={onPlayPause} aria-label={playPauseLabel} title={playPauseLabel}>
-			{isPlaying ? '⏸' : '▶'}
+			<PlayPauseIcon playing={isPlaying} />
 		</button>
 		<button class="tp-btn" onclick={onNext} aria-label="Next" title="Next track">⏭</button>
 	</div>
@@ -293,10 +294,17 @@
 
 	.tp-play {
 		background: var(--accent);
-		color: #fff;
+		color: var(--text-on-accent);
 		width: 44px;
 		height: 44px;
+		padding: 0;
+		border: 0;
+		line-height: 1;
 		box-shadow: 0 10px 26px var(--accent-glow);
+	}
+
+	:global([data-palette="clay"]) .tp-play {
+		box-shadow: 0 2px 6px var(--accent-glow);
 	}
 
 	@media (max-width: 760px) {

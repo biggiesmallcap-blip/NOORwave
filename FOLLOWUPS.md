@@ -10,6 +10,22 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### tests: stabilize relative-date checks across daylight saving changes
+
+- Source: Clay UI verification on 2026-10-04. Four existing `formatDateShort`
+  tests failed in Australia/Sydney and the complete 930-test suite passed in UTC.
+- Affected: `frontend/src/lib/utils/format.test.ts` and
+  `frontend/src/lib/utils/format.ts`.
+- Why it matters: the tests subtract local calendar days with `Date.setDate`,
+  while the formatter floors elapsed 24-hour periods. A spring DST transition
+  makes a calendar day 23 hours and shifts the expected relative labels.
+- Outside this plan: date semantics and their tests are independent of the
+  parchment theme; neither file changed during the UI work.
+- Next check: freeze the clock around both DST boundaries, decide whether the
+  labels promise calendar days or elapsed periods, and align the tests and
+  formatter with that decision.
+- Spawned by: Clay UI browser and frontend verification.
+
 ### videos: remaining editorial discovery ideas
 
 Shipped so far: daily-picks mural, genre shelves, album-love, one-step-out

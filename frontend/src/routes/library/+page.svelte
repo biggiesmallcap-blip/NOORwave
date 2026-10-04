@@ -3482,7 +3482,7 @@
 	.decade-chip.active {
 		background: var(--accent);
 		border-color: var(--accent);
-		color: #fff;
+		color: var(--text-on-accent);
 	}
 
 	.library-hero-subtitle {
@@ -3674,13 +3674,13 @@
 	.filter-pill--accent {
 		background: var(--accent);
 		border-color: var(--accent);
-		color: #fff;
+		color: var(--text-on-accent);
 	}
 
 	.filter-pill--accent:hover {
 		background: var(--accent);
 		filter: brightness(1.08);
-		color: #fff;
+		color: var(--text-on-accent);
 	}
 
 	.filter-pill {
@@ -3715,7 +3715,7 @@
 	.filter-pill.active {
 		background: var(--accent);
 		border-color: var(--accent);
-		color: #fff;
+		color: var(--text-on-accent);
 	}
 
 	.album-sort {
@@ -4529,7 +4529,7 @@
 		display: grid;
 		place-items: center;
 		background: var(--accent);
-		color: #fff;
+		color: var(--text-on-accent);
 		border: none;
 		box-shadow: 0 6px 16px -4px rgba(0, 0, 0, 0.55);
 		opacity: 0;

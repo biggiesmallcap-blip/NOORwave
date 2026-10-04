@@ -42,6 +42,7 @@
 	--accent-line:   rgba(124, 128, 255, 0.28);
 	--accent-strong: #b0b3ff;
 	--accent-glow:   rgba(124, 128, 255, 0.22);
+	--text-on-accent: #fff;
 
 	--border-subtle: rgba(255, 255, 255, 0.07);
 	--border-muted:  rgba(255, 255, 255, 0.07);
@@ -80,6 +81,7 @@
 	--player-art-rim: rgba(255, 255, 255, 0.12);
 	--player-progress-track: rgba(255, 255, 255, 0.14);
 	--sidebar-bg:       transparent;
+	--material-grain:   none;
 
 	/* Genre Atlas semantic tokens */
 	--atlas-bg: linear-gradient(165deg, #0c0f1b 0%, #090b14 52%, #070910 100%);
@@ -175,6 +177,101 @@
 	--signal-text: rgba(9, 13, 22, 0.70);
 	--family-accent: var(--accent);
 	--heat-intensity: 0.52;
+}
+
+/* Clay carries the material through shared surfaces, including overlays and the
+ * phone remote. Palette accents are applied by the appearance store. */
+[data-palette="clay"] {
+	--text-on-accent: var(--bg-base);
+	--bg-base: #221b16;
+	--bg-elevated: #2b221b;
+	--bg-raised: #392d23;
+	--bg-surface: rgba(239, 210, 169, 0.06);
+	--bg-hover: rgba(239, 210, 169, 0.11);
+	--bg-surface-strong: #30261e;
+	--surface-0: #221b16;
+	--surface-1: rgba(239, 210, 169, 0.07);
+	--surface-2: rgba(239, 210, 169, 0.14);
+	--panel-bg: rgba(54, 42, 32, 0.94);
+	--panel-border: rgba(218, 182, 142, 0.18);
+	--panel-shadow: 0 5px 20px rgba(12, 8, 5, 0.18);
+	--text-primary: #f0e4d1;
+	--text-secondary: #c8b79f;
+	--text-tertiary: #b6a38b;
+	--text-muted: #9d8b76;
+	--border-subtle: rgba(218, 182, 142, 0.14);
+	--border-muted: rgba(218, 182, 142, 0.20);
+	--border-strong: rgba(218, 182, 142, 0.32);
+	--input-bg: rgba(17, 12, 8, 0.22);
+	--input-border: rgba(218, 182, 142, 0.26);
+	--input-focus: rgba(218, 182, 142, 0.09);
+	--scrollbar-thumb: rgba(218, 182, 142, 0.24);
+	--scrollbar-thumb-hover: rgba(218, 182, 142, 0.40);
+	--right-panel-bg: #2b2119;
+	--right-panel-sep: rgba(218, 182, 142, 0.18);
+	--player-surface: #2b2119;
+	--player-queue-surface: #251d17;
+	--player-art-shadow: rgba(12, 8, 5, 0.26);
+	--player-art-rim: rgba(239, 210, 169, 0.16);
+	--player-progress-track: rgba(218, 182, 142, 0.22);
+	--sidebar-bg: #292019;
+	--atlas-bg: linear-gradient(145deg, #2d241c 0%, #241c16 65%, #30251c 100%);
+	--instrument-surface: rgba(54, 42, 32, 0.88);
+	--instrument-surface-strong: rgba(46, 35, 26, 0.96);
+	--instrument-border: rgba(218, 182, 142, 0.18);
+	--instrument-edge: rgba(239, 210, 169, 0.16);
+	--signal-text: #b6a38b;
+	--material-grain: url('/textures/clay-grain.svg');
+}
+
+[data-palette="clay"][data-theme="light"] {
+	--text-on-accent: var(--bg-elevated);
+	--bg-base: #eee5d5;
+	--bg-elevated: #f8f1e5;
+	--bg-raised: #e4d6bf;
+	--bg-surface: rgba(99, 68, 38, 0.06);
+	--bg-hover: rgba(99, 68, 38, 0.10);
+	--bg-surface-strong: #f6eddf;
+	--surface-0: #eee5d5;
+	--surface-1: rgba(99, 68, 38, 0.06);
+	--surface-2: rgba(99, 68, 38, 0.13);
+	--panel-bg: rgba(248, 241, 229, 0.94);
+	--panel-border: rgba(104, 75, 47, 0.19);
+	--panel-shadow: 0 4px 16px rgba(85, 59, 32, 0.07);
+	--text-primary: #34291f;
+	--text-secondary: #65513e;
+	--text-tertiary: #66513b;
+	--text-muted: #69523c;
+	--border-subtle: rgba(104, 75, 47, 0.15);
+	--border-muted: rgba(104, 75, 47, 0.21);
+	--border-strong: rgba(104, 75, 47, 0.34);
+	--state-success: #355738;
+	--state-warning: #704a17;
+	--state-error: #933329;
+	--state-favorite: #943141;
+	--state-favorite-glow: rgba(148, 49, 65, 0.18);
+	--quality-hires: #704a17;
+	--quality-lossless: #355738;
+	--quality-lossy: var(--text-tertiary);
+	--input-bg: rgba(248, 241, 229, 0.88);
+	--input-border: rgba(104, 75, 47, 0.25);
+	--input-focus: #f8f1e5;
+	--scrollbar-thumb: rgba(104, 75, 47, 0.26);
+	--scrollbar-thumb-hover: rgba(104, 75, 47, 0.43);
+	--right-panel-bg: #e8dbc6;
+	--right-panel-sep: rgba(104, 75, 47, 0.17);
+	--player-surface: #e8dbc6;
+	--player-queue-surface: #e2d3bc;
+	--player-art-shadow: rgba(85, 59, 32, 0.17);
+	--player-art-rim: rgba(255, 250, 238, 0.78);
+	--player-progress-track: rgba(104, 75, 47, 0.24);
+	--sidebar-bg: #e7dac4;
+	--atlas-bg: linear-gradient(145deg, #f4eddf 0%, #eee5d5 64%, #e9ddc8 100%);
+	--instrument-surface: rgba(248, 241, 229, 0.86);
+	--instrument-surface-strong: rgba(238, 227, 208, 0.95);
+	--instrument-border: rgba(104, 75, 47, 0.20);
+	--instrument-edge: rgba(255, 251, 240, 0.85);
+	--signal-text: #66513b;
 }
 
 /* ── Structural tokens (theme-independent) ────────────── */
@@ -330,6 +427,10 @@ body {
 		#f5f4f2;
 }
 
+[data-palette="clay"] body {
+	background: var(--material-grain), var(--atlas-bg);
+}
+
 a {
 	color: inherit;
 	text-decoration: none;
@@ -408,6 +509,7 @@ textarea {
 .glass,
 .glass-panel {
 	background:
+		var(--material-grain),
 		linear-gradient(180deg, color-mix(in srgb, var(--instrument-surface) 74%, transparent), color-mix(in srgb, var(--instrument-surface-strong) 88%, transparent)),
 		var(--panel-bg);
 	backdrop-filter: var(--blur-overlay);
@@ -424,7 +526,7 @@ textarea {
 .glass:hover { border-color: var(--border-strong); }
 
 .glass-tile {
-	background: var(--panel-bg);
+	background: var(--material-grain), var(--panel-bg);
 	backdrop-filter: var(--blur-base);
 	-webkit-backdrop-filter: var(--blur-base);
 	border: 1px solid var(--panel-border);
@@ -616,11 +718,15 @@ h4 {
 
 .btn-primary {
 	background: var(--accent);
-	color: #fff;
+	color: var(--text-on-accent);
 	box-shadow: 0 6px 18px var(--accent-glow);
 }
 
 .btn-primary:hover:not(:disabled) { filter: brightness(1.1); }
+
+[data-palette="clay"] .btn-primary {
+	box-shadow: inset 0 1px 0 var(--instrument-edge), 0 3px 8px var(--accent-glow);
+}
 
 .btn-glass {
 	background: var(--bg-surface);
@@ -919,6 +1025,10 @@ input[type='checkbox'] { accent-color: var(--accent); }
 
 	[data-theme="light"] body {
 		background: linear-gradient(180deg, #f7f5f2 0%, #f3f1ee 100%);
+	}
+
+	[data-palette="clay"] body {
+		background: var(--material-grain), var(--atlas-bg);
 	}
 }
 

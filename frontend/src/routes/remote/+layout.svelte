@@ -96,7 +96,7 @@
 		inset: 0;
 		z-index: 0;
 		overflow: hidden;
-		background: var(--surface-0);
+		background: var(--material-grain), var(--surface-0);
 		pointer-events: none;
 	}
 

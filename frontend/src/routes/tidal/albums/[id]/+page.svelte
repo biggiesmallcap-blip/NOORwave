@@ -199,7 +199,7 @@
 
 	.play-all-btn {
 		background: var(--accent);
-		color: #fff;
+		color: var(--text-on-accent);
 		border: none;
 		border-radius: 20px;
 		padding: 8px 22px;
@@ -235,7 +235,7 @@
 		cursor: pointer;
 		transition: background 0.15s, color 0.15s;
 	}
-	.save-btn:hover { background: var(--accent); color: #fff; }
+	.save-btn:hover { background: var(--accent); color: var(--text-on-accent); }
 	.save-btn:disabled { cursor: progress; opacity: 0.85; }
 
 	.track-table {

@@ -571,7 +571,7 @@
 		font-weight: var(--font-weight-semibold);
 		border: 1px solid var(--accent-line);
 	}
-	.empty-action:hover { background: var(--accent); color: #fff; }
+	.empty-action:hover { background: var(--accent); color: var(--text-on-accent); }
 
 	.btn-spinner {
 		width: 16px;
@@ -605,7 +605,7 @@
 		display: grid;
 		place-items: center;
 		background: var(--accent);
-		color: #fff;
+		color: var(--text-on-accent);
 		cursor: pointer;
 		transition: transform var(--motion-fast), background var(--motion-fast), box-shadow var(--motion-fast);
 		box-shadow: 0 8px 24px -8px var(--accent-glow);
@@ -653,7 +653,7 @@
 		cursor: pointer;
 		transition: background var(--motion-fast), color var(--motion-fast);
 	}
-	.save-album-btn:hover { background: var(--accent); color: #fff; }
+	.save-album-btn:hover { background: var(--accent); color: var(--text-on-accent); }
 	.save-album-btn.pending { opacity: 0.85; cursor: progress; }
 	.save-album-btn:disabled { cursor: progress; }
 

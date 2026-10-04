@@ -53,9 +53,8 @@ export const VALID: WallpaperId[] = ['none', 'aurora', 'chrome', 'grid', 'nebula
                                'pattern-melt', 'pattern-speed', 'pattern-vortex',
                                'pattern-shards', 'pattern-vector'];
 
-// Matches the shader forced during the /onboarding route, so a fresh install
-// keeps the wallpaper the user saw on first launch.
-const DEFAULT: WallpaperId = 'standing-wave';
+// Keep the material surface calm until the user chooses an animated wallpaper.
+const DEFAULT: WallpaperId = 'none';
 
 function clampSetting(value: number, min: number, max: number): number {
 	return Math.min(max, Math.max(min, Math.round(value)));

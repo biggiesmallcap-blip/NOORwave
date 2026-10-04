@@ -437,7 +437,7 @@
 		border: 0;
 		border-radius: 50%;
 		background: var(--accent);
-		color: #fff;
+		color: var(--text-on-accent);
 		box-shadow: 0 6px 16px -4px rgba(0, 0, 0, 0.55);
 		opacity: 0;
 		cursor: pointer;

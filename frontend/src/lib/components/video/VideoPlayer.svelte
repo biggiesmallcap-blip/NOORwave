@@ -686,7 +686,7 @@
 
 	.icon-btn.primary {
 		background: var(--accent);
-		color: white;
+		color: var(--text-on-accent);
 	}
 
 	.icon-btn:disabled { opacity: 0.35; cursor: not-allowed; }
@@ -730,7 +730,7 @@
 	.autoplay-pill.enabled {
 		background: var(--accent);
 		border-color: var(--accent);
-		color: white;
+		color: var(--text-on-accent);
 	}
 
 	.autoplay-pill:disabled {

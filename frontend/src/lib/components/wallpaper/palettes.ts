@@ -1,6 +1,6 @@
 // Coordinated colour combos applied to both UI accent vars and wallpaper shader uniforms.
 
-export type PaletteId = 'iris' | 'sunset' | 'verdant' | 'cosmos' | 'mono'
+export type PaletteId = 'clay' | 'iris' | 'sunset' | 'verdant' | 'cosmos' | 'mono'
                       | 'ember' | 'arctic' | 'sakura' | 'abyss' | 'citrus'
                       | 'slate' | 'paper' | 'moss' | 'plum' | 'acid' | 'neon'
                       | 'futuro' | 'constr' | 'obsidian' | 'carbon' | 'blackout'
@@ -22,6 +22,7 @@ export interface Palette {
 		accentLine: string;
 		accentGlow: string;
 	};
+	lightUi?: Palette['ui'];
 
 	// Four colour slots fed to shaders as uniforms u_color1..u_color4.
 	// Aurora uses all four. Nebula uses 1-3. Grid uses 1-2. Chrome and Topo use
@@ -35,6 +36,31 @@ export interface Palette {
 }
 
 export const PALETTES: Palette[] = [
+	{
+		id: 'clay',
+		label: 'Clay',
+		sublabel: 'Parchment / terracotta / ink',
+		ui: {
+			accent: '#d4a57a',
+			accentStrong: '#efc8a4',
+			accentSoft: 'rgba(212, 165, 122, 0.12)',
+			accentLine: 'rgba(212, 165, 122, 0.28)',
+			accentGlow: 'rgba(212, 165, 122, 0.16)'
+		},
+		lightUi: {
+			accent: '#8e482e',
+			accentStrong: '#713921',
+			accentSoft: 'rgba(142, 72, 46, 0.10)',
+			accentLine: 'rgba(142, 72, 46, 0.24)',
+			accentGlow: 'rgba(142, 72, 46, 0.12)'
+		},
+		shader: {
+			c1: [0.95, 0.90, 0.81],
+			c2: [0.71, 0.58, 0.42],
+			c3: [0.58, 0.31, 0.20],
+			c4: [0.27, 0.21, 0.16]
+		}
+	},
 	{
 		id: 'iris',
 		label: 'Iris',
@@ -509,7 +535,7 @@ export const PALETTES: Palette[] = [
 	}
 ];
 
-export const DEFAULT_PALETTE: PaletteId = 'futuro';
+export const DEFAULT_PALETTE: PaletteId = 'clay';
 
 export function paletteById(id: PaletteId): Palette {
 	return PALETTES.find((p) => p.id === id) ?? PALETTES[0];

@@ -673,12 +673,12 @@
 	.tool-btn--accent {
 		background: var(--accent);
 		border-color: var(--accent);
-		color: #fff;
+		color: var(--text-on-accent);
 	}
 
 	.tool-btn--accent:hover {
 		background: var(--accent);
-		color: #fff;
+		color: var(--text-on-accent);
 	}
 
 	.filter-note {
