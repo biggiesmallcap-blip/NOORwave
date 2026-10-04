@@ -4,10 +4,14 @@ Builds the NOORwave portable zip from source.
 .DESCRIPTION
 Run from the workspace root: .\scripts\build-portable.ps1
 Outputs: dist\NOORwave-portable.zip
+
+CI passes -UsePrebuiltFrontend -UsePrebuiltBinaries after compiling the UI and
+both release executables. Package before installer bundling patches the app.
 #>
 
 param(
-    [switch]$UsePrebuiltFrontend
+    [switch]$UsePrebuiltFrontend,
+    [switch]$UsePrebuiltBinaries
 )
 
 Set-StrictMode -Version Latest
@@ -53,15 +57,25 @@ if ($UsePrebuiltFrontend) {
     Write-Host "    frontend built" -ForegroundColor Green
 }
 
-# 2. Build noor-server
-Write-Host "2/4 Building noor-server..." -ForegroundColor Yellow
-Invoke-Native -FilePath cargo -Arguments @("build", "--release", "--locked", "-p", "noor-server")
-Write-Host "    noor-server built" -ForegroundColor Green
+# 2/3. Build the binaries locally, or package the outputs CI already compiled.
+if ($UsePrebuiltBinaries) {
+    foreach ($binary in @("noor-server.exe", "noor-app.exe")) {
+        $binaryPath = Join-Path $Root "target\release\$binary"
+        if (-not (Test-Path -LiteralPath $binaryPath -PathType Leaf)) {
+            throw "-UsePrebuiltBinaries was set, but target\release\$binary does not exist"
+        }
+    }
+    Write-Host "2/4 Using prebuilt noor-server..." -ForegroundColor Green
+    Write-Host "3/4 Using prebuilt noor-app..." -ForegroundColor Green
+} else {
+    Write-Host "2/4 Building noor-server..." -ForegroundColor Yellow
+    Invoke-Native -FilePath cargo -Arguments @("build", "--release", "--locked", "-p", "noor-server")
+    Write-Host "    noor-server built" -ForegroundColor Green
 
-# 3. Build noor-app (Tauri shell)
-Write-Host "3/4 Building noor-app..." -ForegroundColor Yellow
-Invoke-Native -FilePath cargo -Arguments @("build", "--release", "--locked", "-p", "noor-app")
-Write-Host "    noor-app built" -ForegroundColor Green
+    Write-Host "3/4 Building noor-app..." -ForegroundColor Yellow
+    Invoke-Native -FilePath cargo -Arguments @("build", "--release", "--locked", "-p", "noor-app")
+    Write-Host "    noor-app built" -ForegroundColor Green
+}
 
 # 4. Assemble portable folder
 Write-Host "4/4 Assembling portable folder..." -ForegroundColor Yellow

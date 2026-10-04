@@ -46,6 +46,20 @@ If local signing credentials are unavailable, GitHub Actions can still produce a
 7. Keep the Windows SmartScreen / Smart App Control note in the release copy.
 8. Read `release.yml` before changing any release behavior.
 
+## Build cache and Windows packaging
+
+Release builds, PR checks, and cache warmers use the compiler pinned in
+`rust-toolchain.toml`. When changing that pin or Rust dependencies, let a
+Windows cache warmer on `master` complete before tagging; a cache saved after
+the release's restore step cannot speed up that release. Manual dispatch of
+`Warm build cache` remains available for release-only commits.
+
+Windows compiles the server once and the app once through the pinned Tauri CLI
+with `--no-bundle`. The portable ZIP copies those outputs before `tauri bundle`
+creates the NSIS installer and updater signature. Keep that order: the bundler
+patches the application with installer-specific bundle metadata. The Windows
+warmer must use the same Tauri compile command and configuration as the release.
+
 ## After CI publishes
 
 `latest.json` already contains the prepared notes at this point. Do not wait until this step to write or revise the changelog: changes made after tagging are not included in the updater manifest for that release.

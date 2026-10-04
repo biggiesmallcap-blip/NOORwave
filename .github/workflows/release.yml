@@ -88,8 +88,7 @@ jobs:
 
       - name: Setup Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          cargo --version
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -140,9 +139,19 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm run build
 
+      - name: Build server
+        run: cargo build --release --locked -p noor-server
+
+      # Compile the desktop app once with the same configuration the bundler
+      # will use. warm-cache.yml must use this identical command on Windows.
+      - name: Build desktop app
+        working-directory: noor-app
+        run: pnpm dlx --package=@tauri-apps/cli@2.10.1 tauri build --no-bundle --config tauri.installer.conf.json -- --locked
+
+      # Copy the unbundled executable before NSIS patches its bundle type.
       - name: Build portable
         shell: pwsh
-        run: .\scripts\build-portable.ps1 -UsePrebuiltFrontend
+        run: .\scripts\build-portable.ps1 -UsePrebuiltFrontend -UsePrebuiltBinaries
 
       - name: Rename artifact
         shell: pwsh
@@ -157,14 +166,14 @@ jobs:
 
       # Run the Tauri CLI from its prebuilt npm binary instead of
       # `cargo install tauri-cli`, which compiled the CLI from source and cost
-      # ~9 min per release. Same CLI, same version pin; pnpm + Node are already
-      # set up above. The bundle output path the next step reads is unchanged.
+      # ~9 min per release. Bundle the existing executable without compiling
+      # the desktop app a second time. Updater signing still happens here.
       - name: Build NSIS installer
         working-directory: noor-app
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: pnpm dlx --package=@tauri-apps/cli@2.10.1 tauri build --bundles nsis --config tauri.installer.conf.json
+        run: pnpm dlx --package=@tauri-apps/cli@2.10.1 tauri bundle --bundles nsis --config tauri.installer.conf.json
 
       - name: Package installer update metadata
         shell: pwsh
@@ -261,8 +270,7 @@ jobs:
 
       - name: Setup Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          cargo --version
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -340,8 +348,7 @@ jobs:
 
       - name: Setup Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          cargo --version
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -419,8 +426,8 @@ jobs:
 
       - name: Setup Rust
         run: |
-          rustup toolchain install stable --profile minimal --target x86_64-apple-darwin
-          rustup default stable
+          cargo --version
+          rustup target add x86_64-apple-darwin
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2

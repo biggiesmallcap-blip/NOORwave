@@ -33,11 +33,21 @@ describe('GitHub CI configuration', () => {
 		expect(workflow).toContain('Expected 4 checksum files');
 	});
 
-	test('warm cache skips release commits but remains manually dispatchable', () => {
+	test('warm cache skips release merges, preserves active builds, and remains manually dispatchable', () => {
 		const workflow = read('.github/workflows/warm-cache.yml');
 
 		expect(workflow).toContain('workflow_dispatch:');
 		expect(workflow).toContain("github.event_name == 'workflow_dispatch'");
-		expect(workflow).toContain("!startsWith(github.event.head_commit.message, 'chore(release):')");
+		expect(workflow).toContain("!contains(github.event.head_commit.message, 'chore(release):')");
+		expect(workflow).toContain('cancel-in-progress: false');
+	});
+
+	test('release, warming, and PR checks use the repository-pinned Rust compiler', () => {
+		expect(read('rust-toolchain.toml')).toMatch(/channel = "\d+\.\d+\.\d+"/);
+		for (const name of ['release', 'warm-cache', 'pr-check']) {
+			const workflow = read(`.github/workflows/${name}.yml`);
+			expect(workflow).not.toMatch(/rustup (?:toolchain install|default) stable/);
+			expect(workflow).toContain('cargo --version');
+		}
 	});
 });

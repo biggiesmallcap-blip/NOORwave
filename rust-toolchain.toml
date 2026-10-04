@@ -1,0 +1,4 @@
+[toolchain]
+# Keep release builds and cache warmers on the same compiler. Bump deliberately.
+channel = "1.99.0"
+profile = "minimal"
