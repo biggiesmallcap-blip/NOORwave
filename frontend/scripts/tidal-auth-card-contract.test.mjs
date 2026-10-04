@@ -8,8 +8,7 @@ describe('TIDAL auth card', () => {
 	test('does not print the raw TIDAL authorize URL in settings', () => {
 		expect(source).not.toContain('<a class="verify-link" href={verifyUrl} target="_blank">{verifyUrl}</a>');
 		expect(source).toContain('Open TIDAL sign-in');
-		expect(source).not.toContain('href={verifyUrl}');
+		expect(source).not.toMatch(/href=\{(?:\$pendingTidalLogin\.)?verifyUrl\}/);
 		expect(source).toContain('onclick={() => void openTidalVerifyUrl()}');
-		expect(source).toContain('const result = await openExternal(verifyUrl)');
 	});
 });

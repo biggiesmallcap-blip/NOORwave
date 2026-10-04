@@ -118,8 +118,11 @@
 		type Mp3Source
 	} from '$lib/stores/downloads';
 	import { open as openDirectoryDialog } from '@tauri-apps/plugin-dialog';
-	import { isTauri, openExternal } from '$lib/util/external';
-	import { isValidTidalRedirectUrl, readTidalRedirectFromClipboard } from '$lib/tidal/login';
+	import { isTauri } from '$lib/util/external';
+	import {
+		pendingTidalLogin, startTidalLogin, completeTidalLogin as finishTidalLogin,
+		openTidalVerifyUrl, pasteTidalRedirectUrl, cancelTidalLogin
+	} from '$lib/stores/tidalLogin';
 	import { cachedApi } from '$lib/cache/api_queries';
 	import { dataCache } from '$lib/cache/query';
 	import {
@@ -143,10 +146,6 @@
 	type BadgeTone = 'default' | 'active' | 'success' | 'warning' | 'error' | 'muted';
 
 	let serverStatus = $state<'checking' | 'online' | 'offline'>('checking');
-	let verifyUrl = $state('');
-	let tidalRedirectUrl = $state('');
-	let tidalRedirectError = $state('');
-	let tidalExternalOpenError = $state('');
 	let errorMsg = $state('');
 	let playbackRuntime = $state<PlaybackRuntimeInfo | null>(null);
 	let runtimeAvailable = $state(false);
@@ -409,6 +408,7 @@
 	}
 
 	onMount(() => {
+		if ($pendingTidalLogin) activeCategory = 'sources';
 		const tauriUnlisteners: Array<() => void> = [];
 		void refreshDownloadFolder();
 		const tick = setInterval(() => {
@@ -546,21 +546,11 @@
 	}
 
 	async function connectTidal() {
-		tidalStatus.set('connecting');
 		errorMsg = '';
-		tidalRedirectError = '';
-		tidalExternalOpenError = '';
-		tidalRedirectUrl = '';
 		try {
-			const resp = await authFetch(`${getApiBase()}/api/tidal/login`, { method: 'POST' });
+			await startTidalLogin();
 			markServerOnline();
-			if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
-			const data = await resp.json();
-			verifyUrl = data.verify_url ?? '';
-
-			await openTidalVerifyUrl();
 		} catch (e) {
-			tidalStatus.set('disconnected');
 			if (isFetchConnectionError(e)) {
 				markServerOffline();
 				errorMsg = SERVER_UNREACHABLE_MESSAGE;
@@ -571,57 +561,19 @@
 		}
 	}
 
-	async function openTidalVerifyUrl() {
-		tidalExternalOpenError = '';
-		if (!verifyUrl) return;
-		const result = await openExternal(verifyUrl);
-		if (!result.ok) {
-			tidalExternalOpenError = `Browser did not open: ${result.error}. Copy this TIDAL sign-in link into your browser.`;
-		}
-	}
-
 	async function completeTidalLogin() {
 		errorMsg = '';
-		tidalRedirectError = '';
-		tidalExternalOpenError = '';
-		if (!isValidTidalRedirectUrl(tidalRedirectUrl)) {
-			tidalRedirectError = 'Paste the final TIDAL redirect URL to finish login.';
-			return;
-		}
 		try {
-			const resp = await authFetch(`${getApiBase()}/api/tidal/login/complete`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ redirect_url: tidalRedirectUrl.trim() }),
-			});
+			await finishTidalLogin();
 			markServerOnline();
-			const data = await resp.json().catch(() => ({}));
-			if (!resp.ok) throw new Error(data.error ?? `Server returned ${resp.status}`);
-			tidalStatus.set('connected');
-			tidalUserId.set(data.user_id ?? '');
-			void refreshTidalStatus();
-			verifyUrl = '';
-			tidalExternalOpenError = '';
-			tidalRedirectUrl = '';
 		} catch (e) {
 			if (isFetchConnectionError(e)) {
 				markServerOffline();
 				errorMsg = SERVER_UNREACHABLE_MESSAGE;
 			} else {
 				markServerOnline();
-				errorMsg = `Failed to finish TIDAL login: ${e}`;
 			}
 		}
-	}
-
-	async function pasteTidalRedirectUrl() {
-		tidalRedirectError = '';
-		const result = await readTidalRedirectFromClipboard();
-		if (result.ok && result.redirectUrl) {
-			tidalRedirectUrl = result.redirectUrl;
-			return;
-		}
-		tidalRedirectError = result.error ?? 'Clipboard access failed. Paste the URL manually.';
 	}
 
 	function formatSyncDate(isoString: string): string {
@@ -719,15 +671,13 @@
 	}
 
 	async function disconnectTidal() {
-		tidalExternalOpenError = '';
 		try {
 			const resp = await authFetch(`${getApiBase()}/api/tidal/logout`, { method: 'POST' });
 			markServerOnline();
 			if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
 			tidalStatus.set('disconnected');
 			tidalUserId.set('');
-			verifyUrl = '';
-			tidalExternalOpenError = '';
+			cancelTidalLogin();
 			syncStatus.set('idle');
 			syncProgress.set(null);
 		} catch (error) {
@@ -1366,21 +1316,21 @@
 	}
 
 	let tidalBadgeLabel = $derived(
-		serverStatus === 'offline'
-			? 'TIDAL unknown'
-			: $tidalStatus === 'connected'
-				? 'TIDAL connected'
-				: $tidalStatus === 'connecting'
-					? 'Authorizing TIDAL'
+		$pendingTidalLogin
+			? 'Authorizing TIDAL'
+			: serverStatus === 'offline'
+				? 'TIDAL unknown'
+				: $tidalStatus === 'connected'
+					? 'TIDAL connected'
 					: 'TIDAL offline'
 	);
 	let tidalBadgeTone = $derived<BadgeTone>(
-		serverStatus === 'offline'
-			? 'warning'
-			: $tidalStatus === 'connected'
-				? 'success'
-				: $tidalStatus === 'connecting'
-					? 'active'
+		$pendingTidalLogin
+			? 'active'
+			: serverStatus === 'offline'
+				? 'warning'
+				: $tidalStatus === 'connected'
+					? 'success'
 					: 'muted'
 	);
 	let serverBadgeLabel = $derived(
@@ -2549,7 +2499,41 @@
 			<section data-setting-id="connect-tidal" class="glass-panel section-panel">
 				<SectionHeader eyebrow="Streaming" title="Connect TIDAL" subtitle="Auth, sync, and playback metadata." />
 
-				{#if serverStatus === 'offline' && $tidalStatus !== 'connecting'}
+				{#if $pendingTidalLogin}
+					<div class="auth-card glass">
+						<p class="page-copy">{$pendingTidalLogin.phase === 'starting' ? 'Opening TIDAL sign-in…' : 'Finish your TIDAL sign-in.'}</p>
+						<p class="page-copy">After sign-in, copy the full address from the final TIDAL page, even if it says page not found. Paste it here to finish.</p>
+						<div class="action-row">
+							<button type="button" class="btn btn-glass" onclick={() => void openTidalVerifyUrl()} disabled={$pendingTidalLogin.phase !== 'awaiting'}>
+								Open TIDAL sign-in
+							</button>
+						</div>
+						{#if $pendingTidalLogin.externalOpenError}
+							<p class="error" role="alert">{$pendingTidalLogin.externalOpenError}</p>
+							<input class="text-field" type="url" readonly value={$pendingTidalLogin.verifyUrl} aria-label="TIDAL sign-in URL" />
+						{/if}
+						<input
+							class="text-field"
+							type="url"
+							bind:value={$pendingTidalLogin.redirectUrl}
+							disabled={$pendingTidalLogin.phase !== 'awaiting'}
+							aria-label="Final TIDAL redirect URL"
+							placeholder="https://tidal.com/android/login/auth?code=..."
+						/>
+						{#if $pendingTidalLogin.error}
+							<p class="error" role="alert">{$pendingTidalLogin.error}</p>
+						{/if}
+						<div class="action-row">
+							<button class="btn btn-glass" onclick={pasteTidalRedirectUrl} disabled={$pendingTidalLogin.phase !== 'awaiting'}>
+								Paste from clipboard
+							</button>
+							<button class="btn btn-primary" onclick={completeTidalLogin} disabled={$pendingTidalLogin.phase !== 'awaiting' || !$pendingTidalLogin.redirectUrl.trim()}>
+								{$pendingTidalLogin.phase === 'completing' ? 'Finishing login…' : 'Finish login'}
+							</button>
+							<button class="btn btn-glass" onclick={cancelTidalLogin} disabled={$pendingTidalLogin.phase !== 'awaiting'}>Cancel login</button>
+						</div>
+					</div>
+				{:else if serverStatus === 'offline'}
 					<div class="auth-card glass">
 						<p class="page-copy">
 							NOOR cannot reach the backend, so it cannot confirm whether your saved
@@ -2562,37 +2546,6 @@
 				{:else if $tidalStatus === 'disconnected'}
 					<div class="action-row">
 						<button class="btn btn-primary" onclick={connectTidal}>Connect TIDAL</button>
-					</div>
-				{:else if $tidalStatus === 'connecting'}
-					<div class="auth-card glass">
-						<p class="page-copy">A TIDAL sign-in page opened.</p>
-						<p class="page-copy">After sign-in, copy the address from the final TIDAL page. Paste it here to finish.</p>
-						<div class="action-row">
-							<button type="button" class="btn btn-glass" onclick={() => void openTidalVerifyUrl()} disabled={!verifyUrl}>
-								Open TIDAL sign-in
-							</button>
-						</div>
-						{#if tidalExternalOpenError}
-							<p class="error" role="alert">{tidalExternalOpenError}</p>
-							<input class="text-field" type="url" readonly value={verifyUrl} aria-label="TIDAL sign-in URL" />
-						{/if}
-						<input
-							class="text-field"
-							type="url"
-							bind:value={tidalRedirectUrl}
-							placeholder="https://tidal.com/android/login/auth?code=..."
-						/>
-						{#if tidalRedirectError}
-							<p class="error" role="alert">{tidalRedirectError}</p>
-						{/if}
-						<div class="action-row">
-							<button class="btn btn-glass" onclick={pasteTidalRedirectUrl}>
-								Paste from clipboard
-							</button>
-							<button class="btn btn-primary" onclick={completeTidalLogin} disabled={!tidalRedirectUrl.trim()}>
-								Finish login
-							</button>
-						</div>
 					</div>
 				{:else}
 					<div class="info-list">
