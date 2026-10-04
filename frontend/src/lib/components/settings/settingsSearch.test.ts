@@ -14,7 +14,7 @@ describe('searchSettings', () => {
 
 	it('matches synonyms (scrobble -> Last.fm)', () => {
 		const ids = searchSettings('scrobble').map((e) => e.id);
-		expect(ids).toContain('last-fm-tags');
+		expect(ids).toContain('lastfm-service');
 	});
 
 	it('requires every term to match (AND semantics)', () => {

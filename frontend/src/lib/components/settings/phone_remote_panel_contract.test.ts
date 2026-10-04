@@ -37,7 +37,7 @@ describe('Phone Remote panel accessibility contract', () => {
 	});
 
 	it('shows a one-use code for an already-installed iPhone PWA', () => {
-		expect(source).toContain('Already installed on iPhone?');
+		expect(source).toContain('Open the installed NOORwave app');
 		expect(source).toContain('ticket.pairing_code.slice(0, 3)');
 		expect(source).toContain('temporary code expire after two minutes and work once');
 	});

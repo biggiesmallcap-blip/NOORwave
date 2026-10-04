@@ -47,6 +47,7 @@ mod library_batch_routes;
 pub(crate) mod maintenance_routes;
 mod playlist_routes;
 mod search_routes;
+mod setup_discovery_routes;
 mod sportify_routes;
 mod tidal_home_routes;
 mod tidal_sync_routes;
@@ -526,6 +527,10 @@ pub struct AutomixRequest {
 
 pub fn api_routes(state: SharedState) -> Router {
     Router::new()
+        .route(
+            "/api/setup/discovery",
+            get(setup_discovery_routes::get_status).post(setup_discovery_routes::update),
+        )
         // Library endpoints
         .route("/api/tracks", get(catalog_routes::get_tracks))
         .route("/api/tracks/count", get(catalog_routes::get_track_count))

@@ -50,18 +50,18 @@
 	{#if !$pendingTidalLogin && !connected}
 		<div class="prompt">
 			{#if variant === 'onboarding'}
-				<h2>Connect TIDAL</h2>
-				<p>NOORwave plays from your TIDAL library. Sign in once and we'll keep your tracks in sync.</p>
+				<h2 class="onboarding-title">Connect TIDAL</h2>
+				<p class="onboarding-lede">NOORwave plays from your TIDAL library. Sign in once and we'll keep your tracks in sync.</p>
 			{/if}
 			{#if errorMsg}
 				<p class="error" role="alert">{errorMsg}</p>
 			{/if}
-			<div class="actions">
-				<button class="btn btn-primary" onclick={start}>
+			<div class="actions" class:onboarding-actions={variant === 'onboarding'}>
+				<button class="btn btn-primary" class:onboarding-action={variant === 'onboarding'} onclick={start}>
 					{errorMsg ? 'Try again' : 'Connect TIDAL'}
 				</button>
 				{#if showSkip}
-					<button class="btn btn-ghost" onclick={handleSkip}>Skip for now</button>
+					<button class="btn btn-glass" class:onboarding-action={variant === 'onboarding'} onclick={handleSkip}>Skip for now</button>
 				{/if}
 			</div>
 		</div>
@@ -69,6 +69,7 @@
 		<p class="muted">Opening TIDAL sign-in...</p>
 	{:else if $pendingTidalLogin}
 		<div class="redirect-login">
+			{#if variant === 'onboarding'}<h2 class="onboarding-title">Connect TIDAL</h2>{/if}
 			<p class="muted">Finish your TIDAL sign-in.</p>
 			<p class="muted">After sign-in, copy the full address from the final TIDAL page, even if it says page not found. Paste it here to finish.</p>
 			{#if $pendingTidalLogin.externalOpenError}
@@ -86,16 +87,16 @@
 			{#if $pendingTidalLogin.error}
 				<p class="error" role="alert">{$pendingTidalLogin.error}</p>
 			{/if}
-			<div class="actions">
-				<button class="btn btn-ghost" onclick={pasteTidalRedirectUrl} disabled={$pendingTidalLogin.phase !== 'awaiting'}>Paste from clipboard</button>
-				<button class="btn btn-primary" onclick={completeLogin} disabled={$pendingTidalLogin.phase !== 'awaiting' || !$pendingTidalLogin.redirectUrl.trim()}>{$pendingTidalLogin.phase === 'completing' ? 'Finishing login…' : 'Finish login'}</button>
-				<button class="btn btn-ghost" onclick={cancelTidalLogin} disabled={$pendingTidalLogin.phase !== 'awaiting'}>Cancel login</button>
+			<div class="actions" class:onboarding-actions={variant === 'onboarding'}>
+				<button class="btn btn-glass" class:onboarding-action={variant === 'onboarding'} onclick={pasteTidalRedirectUrl} disabled={$pendingTidalLogin.phase !== 'awaiting'}>Paste from clipboard</button>
+				<button class="btn btn-primary" class:onboarding-action={variant === 'onboarding'} onclick={completeLogin} disabled={$pendingTidalLogin.phase !== 'awaiting' || !$pendingTidalLogin.redirectUrl.trim()}>{$pendingTidalLogin.phase === 'completing' ? 'Finishing login…' : 'Finish login'}</button>
+				<button class="btn btn-glass" class:onboarding-action={variant === 'onboarding'} onclick={cancelTidalLogin} disabled={$pendingTidalLogin.phase !== 'awaiting'}>Cancel login</button>
 			</div>
 			<p class="hint">
 				Didn't open? <button type="button" class="hint-link" onclick={() => void openTidalVerifyUrl()} disabled={$pendingTidalLogin.phase !== 'awaiting'}>Open the page manually</button>.
 			</p>
 			{#if showSkip}
-				<button class="btn btn-ghost" onclick={handleSkip} disabled={$pendingTidalLogin.phase !== 'awaiting'}>Skip for now</button>
+				<button class="btn btn-glass" class:onboarding-action={variant === 'onboarding'} onclick={handleSkip} disabled={$pendingTidalLogin.phase !== 'awaiting'}>Skip for now</button>
 			{/if}
 		</div>
 	{:else if connected}
@@ -104,84 +105,35 @@
 </div>
 
 <style>
-	.tidal-connect {
-		display: flex;
-		flex-direction: column;
-		gap: 16px;
-	}
-	.variant-onboarding {
-		text-align: center;
-		align-items: center;
-	}
-	.variant-onboarding h2 {
-		margin: 0 0 4px;
-		font-family: var(--font-display);
-		font-size: var(--font-size-3xl);
-		font-weight: var(--font-weight-medium);
-		letter-spacing: 0;
-		line-height: var(--line-height-tight);
-	}
-	.variant-onboarding p {
-		margin: 0;
-		max-width: 420px;
-		color: var(--text-secondary);
-		line-height: var(--line-height-loose);
-		font-size: var(--font-size-md);
-	}
-	.actions {
-		display: flex;
-		gap: 12px;
-		justify-content: center;
-		flex-wrap: wrap;
-	}
-	.btn {
-		font: inherit;
-		padding: 10px 20px;
-		border-radius: 8px;
-		border: 1px solid transparent;
-		cursor: pointer;
-		font-weight: var(--font-weight-medium);
-		transition: background 120ms, border-color 120ms;
-	}
-	.btn-primary {
-		background: rgba(255, 255, 255, 0.92);
-		color: #0a0d14;
-	}
-	.btn-primary:hover:not(:disabled) { background: #fff; }
-	.btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
-	.btn-ghost {
-		background: transparent;
-		color: var(--text-muted, #8b93a7);
-		border-color: rgba(255, 255, 255, 0.08);
-	}
-	.btn-ghost:hover { background: var(--bg-hover); color: var(--text-primary); }
-	.redirect-login {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 12px;
-		width: min(100%, 520px);
-	}
+	.tidal-connect { display: flex; flex-direction: column; gap: var(--space-4); width: 100%; }
+	.variant-onboarding { text-align: center; align-items: center; }
+	.prompt { display: flex; flex-direction: column; gap: var(--space-4); }
+	.variant-onboarding .prompt { align-items: center; gap: var(--space-5); width: 100%; }
+	.actions { display: flex; gap: var(--space-3); justify-content: center; flex-wrap: wrap; }
+	.redirect-login { display: flex; flex-direction: column; align-items: center; gap: var(--space-4); width: min(100%, 48ch); }
+	.variant-onboarding .redirect-login { gap: var(--space-5); }
 	.redirect-input {
 		width: 100%;
-		padding: 10px 12px;
-		border: 1px solid var(--panel-border);
+		min-height: var(--settings-control-height, 44px);
+		padding: var(--space-2) var(--space-3);
+		border: 1px solid var(--border-muted);
 		border-radius: var(--radius-sm);
-		background: rgba(255, 255, 255, 0.04);
+		background: var(--bg-elevated);
 		color: var(--text-primary);
 		font: inherit;
+		font-size: var(--font-size-sm);
 	}
-	.hint, .muted { color: var(--text-tertiary); margin: 0; font-size: var(--font-size-xs); }
+	.hint, .muted { color: var(--text-secondary); margin: 0; font-size: var(--font-size-sm); line-height: var(--line-height-normal); }
 	.hint-link {
 		background: none;
 		border: none;
 		padding: 0;
 		font: inherit;
-		color: #8aa9ff;
+		color: var(--accent-strong);
 		cursor: pointer;
 		text-decoration: underline;
-		text-underline-offset: 2px;
+		text-underline-offset: 3px;
 	}
-	.error { color: var(--state-error); margin: 0; }
+	.error { color: var(--state-error); margin: 0; font-size: var(--font-size-sm); }
 	.success { color: var(--state-success); margin: 0; }
 </style>

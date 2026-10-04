@@ -69,7 +69,7 @@ fn network_confirmation(
     };
     NetworkConfirmation {
         message: format!(
-            "{action} phone remote and restart NOORwave's server? Playback is {playback} and {} queued track{} will be cleared.",
+            "{action} phone remote and restart NOORwave's server? Playback is {playback} and will stop during the restart. Your {} queued track{} will be kept.",
             impact.queue_count,
             if impact.queue_count == 1 { "" } else { "s" }
         ),
@@ -347,6 +347,8 @@ mod tests {
         );
         assert!(prompt.message.contains("Playback is active"));
         assert!(prompt.message.contains("7 queued tracks"));
+        assert!(prompt.message.contains("will stop during the restart"));
+        assert!(prompt.message.contains("will be kept"));
         assert_eq!(prompt.accept_label, "Enable and restart");
         assert_eq!(prompt.cancel_label, "Cancel");
     }
@@ -361,7 +363,7 @@ mod tests {
             },
         );
         assert!(prompt.message.contains("Playback is not active"));
-        assert!(prompt.message.contains("1 queued track will be cleared"));
+        assert!(prompt.message.contains("1 queued track will be kept"));
         assert_eq!(prompt.accept_label, "Disable and restart");
     }
 }

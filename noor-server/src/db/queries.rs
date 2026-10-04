@@ -489,6 +489,13 @@ pub fn get_onboarding_complete(conn: &Connection) -> Result<bool> {
         return Ok(true);
     }
 
+    // Persist first-run intent before TIDAL connects so a reload cannot mistake
+    // an unfinished setup for a legacy installation with an existing account.
+    conn.execute(
+        "INSERT OR IGNORE INTO server_config(key,value) VALUES('onboarding_complete','0')",
+        [],
+    )?;
+    super::discovery_setup::enroll(conn)?;
     Ok(false)
 }
 
@@ -9155,9 +9162,15 @@ mod tests {
         schema::run_migrations(&conn).expect("migrations");
 
         assert!(!get_onboarding_complete(&conn).expect("read flag"));
+        assert_eq!(read_onboarding_value(&conn).as_deref(), Some("0"));
+        conn.execute(
+            "INSERT INTO service_auth(service,user_id) VALUES('tidal','new-user')",
+            [],
+        )
+        .unwrap();
         assert!(
-            read_onboarding_value(&conn).is_none(),
-            "must not write a row when nothing implies completion"
+            !get_onboarding_complete(&conn).unwrap(),
+            "Connecting TIDAL must not finish a setup in progress"
         );
     }
 

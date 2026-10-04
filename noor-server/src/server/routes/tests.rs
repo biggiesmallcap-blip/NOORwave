@@ -8173,6 +8173,8 @@ async fn all_api_routes_are_registered() {
         ("GET", "/api/lastfm/config"),
         ("DELETE", "/api/lastfm/config"),
         ("GET", "/api/lastfm/status"),
+        ("GET", "/api/setup/discovery"),
+        ("POST", "/api/setup/discovery"),
         ("POST", "/api/listenbrainz/config"),
         ("GET", "/api/listenbrainz/config"),
         ("DELETE", "/api/listenbrainz/config"),

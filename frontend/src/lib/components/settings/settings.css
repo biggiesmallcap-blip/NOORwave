@@ -1,0 +1,96 @@
+/* Shared form patterns, scoped to Settings and guided setup. */
+.settings-scope { --settings-control-height: 40px; --toggle-hit-height: 44px; font-size: var(--font-size-md); color: var(--text-primary); }
+.settings-scope .setting-group,
+.settings-scope .section-panel { border: 1px solid var(--border-subtle); border-radius: var(--radius-md); box-shadow: none; min-width: 0; padding: var(--space-4); }
+.settings-scope .setting-group-title,
+.settings-scope .section-header .title { margin: 0 0 var(--space-2); font-size: var(--font-size-md); font-weight: var(--font-weight-semibold); }
+.settings-scope .setting-row,
+.settings-scope .info-row,
+.settings-scope .quality-setting-row,
+.settings-scope .audio-field,
+.settings-scope .wallpaper-control { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 240px); gap: var(--space-4); align-items: center; min-height: 56px; padding: var(--space-2) 0; border-bottom: 1px solid var(--border-subtle); }
+.settings-scope .setting-row:last-child,
+.settings-scope .info-row:last-child { border-bottom: 0; }
+.settings-scope .setting-control { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2); }
+.settings-scope .setting-label p,
+.settings-scope .info-row-hint { margin: var(--space-1) 0 0; font-size: var(--font-size-sm); color: var(--text-secondary); }
+.settings-scope .info-row > strong { text-align: right; font-weight: var(--font-weight-medium); overflow-wrap: anywhere; }
+.settings-scope .btn,
+.settings-scope select,
+.settings-scope input:not([type="range"], [type="checkbox"]),
+.settings-scope .player-position-option,
+.settings-scope .quality-mode-option,
+.settings-scope .download-format-option { min-height: var(--settings-control-height); border-radius: var(--radius-sm); font-size: var(--font-size-sm); }
+.settings-scope .btn { padding: var(--space-2) var(--space-3); }
+.settings-scope input:not([type="range"], [type="checkbox"]),
+.settings-scope select { max-width: 100%; min-width: 0; width: 100%; padding: var(--space-2) var(--space-3); background: var(--bg-elevated); border: 1px solid var(--border-muted); color: var(--text-primary); font-family: inherit; }
+.settings-scope input[type="range"] { min-height: var(--settings-control-height); min-width: 0; width: 100%; accent-color: var(--accent); }
+.settings-scope .action-row { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-3); }
+.settings-scope .page-copy,
+.settings-scope .setting-caption { font-size: var(--font-size-sm); color: var(--text-secondary); margin: var(--space-2) 0; }
+.settings-scope .is-error,
+.settings-scope .error,
+.settings-scope .field-error { color: var(--state-error); }
+.settings-scope .is-warning { color: var(--state-warning); }
+.settings-scope .danger { color: var(--state-error); }
+.settings-scope details { border-top: 1px solid var(--border-subtle); margin-top: var(--space-2); }
+.settings-scope summary { display: flex; align-items: center; gap: var(--space-2); min-height: 44px; cursor: pointer; font-weight: var(--font-weight-medium); list-style: none; }
+.settings-scope summary::before { content: '›'; color: var(--text-secondary); }
+.settings-scope details[open] > summary::before { transform: rotate(90deg); }
+.settings-scope summary .disclosure-status { margin-left: auto; font-size: var(--font-size-sm); font-weight: normal; color: var(--text-secondary); }
+.settings-scope :is(button, input, select, summary, a):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.settings-scope :is(button, input, select):disabled { opacity: 0.55; cursor: not-allowed; }
+.settings-scope .player-position-options,
+.settings-scope .quality-mode-options,
+.settings-scope .download-format-toggle { display: flex; gap: var(--space-1); flex-wrap: wrap; }
+.settings-scope .player-position-option,
+.settings-scope .quality-mode-option,
+.settings-scope .download-format-option { padding: var(--space-2) var(--space-3); background: var(--bg-elevated); border: 1px solid var(--border-muted); color: var(--text-secondary); cursor: pointer; font-family: inherit; }
+.settings-scope :is(.player-position-option, .quality-mode-option, .download-format-option).active { background: var(--accent-soft); border-color: var(--accent-line); color: var(--text-primary); }
+.settings-scope .setting-status { margin: var(--space-2) 0; color: var(--text-secondary); font-size: var(--font-size-sm); }
+.settings-scope .inline-notice { padding: var(--space-3); background: var(--bg-elevated); border-left: 3px solid var(--accent); border-radius: var(--radius-sm); }
+.settings-scope .inline-notice p { margin: var(--space-1) 0; font-size: var(--font-size-sm); }
+@container settings (max-width: 640px) {
+	.settings-scope :is(.setting-row, .info-row, .quality-setting-row, .audio-field, .wallpaper-control) { grid-template-columns: minmax(0, 1fr); gap: var(--space-2); }
+	.settings-scope .setting-control { justify-content: flex-start; flex-wrap: wrap; }
+	.settings-scope .info-row > strong { text-align: left; }
+}
+@media (pointer: coarse), (max-width: 640px) { .settings-scope { --settings-control-height: 44px; } }
+
+.settings-page.settings-scope { container: settings / inline-size; max-width: 1112px; padding: var(--space-6); margin: 0 auto; gap: 0; }
+.settings-page .settings-command { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); margin-bottom: var(--space-6); }
+.settings-page h1 { margin: 0; font-size: var(--font-size-3xl); font-weight: var(--font-weight-semibold); }
+.settings-page .settings-search { position: relative; width: 300px; max-width: 100%; }
+.settings-page .settings-search-results { position: absolute; inset: 100% 0 auto; z-index: 20; padding: var(--space-1); list-style: none; max-height: 360px; overflow: auto; background: var(--bg-elevated); border: 1px solid var(--border-muted); border-radius: var(--radius-md); }
+.settings-page .settings-search-results button { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); min-height: 44px; padding: var(--space-2); background: transparent; border: none; color: var(--text-primary); text-align: left; cursor: pointer; }
+.settings-page .settings-search-results button.selected { background: var(--accent-soft); }
+.settings-page .settings-search-results small { color: var(--text-secondary); }
+.settings-page .settings-layout { display: grid; grid-template-columns: 176px minmax(0, 800px); gap: var(--space-6); }
+.settings-page .settings-rail { display: flex; flex-direction: column; gap: var(--space-1); }
+.settings-page .settings-rail a { display: flex; align-items: center; min-height: 44px; padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); text-decoration: none; color: var(--text-secondary); }
+.settings-page .settings-rail a.active { background: var(--accent-soft); color: var(--text-primary); font-weight: var(--font-weight-semibold); }
+.settings-page .settings-content { min-width: 0; display: flex; flex-direction: column; gap: var(--space-6); }
+.settings-page .settings-content h2 { font-size: var(--font-size-xl); font-weight: var(--font-weight-semibold); margin: 0; }
+.settings-page .setting-group > section { background: transparent; border: 0; padding: 0; }
+.settings-page .zoom-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); width: 100%; min-width: 0; }
+.settings-page .zoom-row input { flex: 1; width: auto; }
+.settings-page .zoom-row button { flex: 0 0 40px; padding: 0; }
+.settings-page .quality-mode-option { padding-inline: var(--space-1); }
+.settings-page .player-position-option strong { font-weight: var(--font-weight-medium); }
+.settings-page .info-row span { color: var(--text-primary); }
+.settings-page .audio-advanced { border: 0; border-top: 1px solid var(--border-subtle); border-radius: 0; padding: 0; }
+.settings-page .audio-advanced summary { padding: 0; justify-content: flex-start; }
+.settings-page .audio-advanced summary > span { margin-left: 0; }
+.settings-page .audio-select { background: var(--bg-elevated); min-height: var(--settings-control-height); }
+.settings-page .download-folder-row { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.settings-page .path-value { overflow-wrap: anywhere; }
+@container settings (max-width: 760px) {
+	.settings-page .settings-layout { grid-template-columns: minmax(0, 1fr); }
+	.settings-page .settings-rail { flex-direction: row; overflow-x: auto; }
+	.settings-page .settings-rail a { white-space: nowrap; flex-shrink: 0; }
+}
+@container settings (max-width: 480px) {
+	.settings-page .settings-command { align-items: flex-start; flex-direction: column; }
+	.settings-page .settings-search { width: 100%; }
+}
+@media (max-width: 640px) { .settings-page { padding: var(--space-4); } }

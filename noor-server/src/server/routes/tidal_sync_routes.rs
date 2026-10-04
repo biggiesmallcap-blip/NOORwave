@@ -240,6 +240,7 @@ pub async fn trigger_auto_sync(state: &SharedState, service: &str) -> anyhow::Re
         tokens.country_code.clone(),
     );
 
+    let guidance_account = tokens.user_id.to_string();
     // Run sync
     let result =
         run_tidal_sync_with_reauth(&client, state, tokens, &cancel_flag, SyncModeRequest::Auto)
@@ -257,7 +258,13 @@ pub async fn trigger_auto_sync(state: &SharedState, service: &str) -> anyhow::Re
                     stats.favorite_artist_cursor.as_deref(),
                     stats.favorite_album_cursor.as_deref(),
                     stats.favorite_track_cursor.as_deref(),
-                )
+                )?;
+                if let Err(error) =
+                    crate::db::discovery_setup::record_successful_sync(conn, &guidance_account)
+                {
+                    tracing::warn!(%error, "Could not record discovery setup eligibility");
+                }
+                Ok(())
             })?;
 
             // Broadcast completion
@@ -345,6 +352,7 @@ pub(super) async fn tidal_sync_library(
     let http_for_task = tidal_http_client;
     tokio::spawn(async move {
         let _running = task_guard; // released on scope exit
+        let guidance_account = sync_tokens.user_id.to_string();
         tracing::info!(
             target: "noor.sync.tidal",
             event = "background_start",
@@ -386,7 +394,13 @@ pub(super) async fn tidal_sync_library(
                         stats.favorite_artist_cursor.as_deref(),
                         stats.favorite_album_cursor.as_deref(),
                         stats.favorite_track_cursor.as_deref(),
-                    )
+                    )?;
+                    if let Err(error) =
+                        crate::db::discovery_setup::record_successful_sync(conn, &guidance_account)
+                    {
+                        tracing::warn!(%error, "Could not record discovery setup eligibility");
+                    }
+                    Ok(())
                 }) {
                     tracing::warn!("Failed to record sync timestamp: {}", e);
                 }

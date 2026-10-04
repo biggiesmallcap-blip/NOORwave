@@ -23,12 +23,12 @@ afterEach(() => {
 });
 
 describe('appearance preferences', () => {
-	it('starts fresh with clay, light parchment, and a calm background without writing defaults', async () => {
+	it('starts fresh with Futuro, dark surfaces, and Standing Wave without writing defaults', async () => {
 		const values = stubStorage();
 		const stores = await appearance();
-		expect(get(stores.palette)).toBe('clay');
-		expect(get(stores.surfaceMode)).toBe('light');
-		expect(get(stores.wallpaper)).toBe('none');
+		expect(get(stores.palette)).toBe('futuro');
+		expect(get(stores.surfaceMode)).toBe('dark');
+		expect(get(stores.wallpaper)).toBe('standing-wave');
 		expect(values.size).toBe(0);
 	});
 
@@ -67,20 +67,20 @@ describe('appearance preferences', () => {
 			'noor-wallpaper': 'removed-wallpaper',
 		});
 		const stores = await appearance();
-		expect(get(stores.palette)).toBe('clay');
-		expect(get(stores.surfaceMode)).toBe('light');
-		expect(get(stores.wallpaper)).toBe('none');
+		expect(get(stores.palette)).toBe('futuro');
+		expect(get(stores.surfaceMode)).toBe('dark');
+		expect(get(stores.wallpaper)).toBe('standing-wave');
 	});
 
-	it.each(['missing', 'blocked'])('uses the parchment defaults when storage is %s', async (state) => {
+	it.each(['missing', 'blocked'])('uses the original defaults when storage is %s', async (state) => {
 		vi.stubGlobal('localStorage', state === 'missing' ? undefined : {
 			getItem: () => { throw new Error('Storage blocked'); },
 			setItem: () => { throw new Error('Storage blocked'); },
 		});
 		const stores = await appearance();
-		expect(get(stores.palette)).toBe('clay');
-		expect(get(stores.surfaceMode)).toBe('light');
-		expect(get(stores.wallpaper)).toBe('none');
+		expect(get(stores.palette)).toBe('futuro');
+		expect(get(stores.surfaceMode)).toBe('dark');
+		expect(get(stores.wallpaper)).toBe('standing-wave');
 		expect(() => stores.setPalette('iris')).not.toThrow();
 		expect(get(stores.palette)).toBe('iris');
 	});

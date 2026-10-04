@@ -1,0 +1,35 @@
+/* Shared step typography and navigation; the appearance preview keeps its own theme. */
+.onboarding-scope .onboarding-title {
+	margin: 0;
+	font-family: var(--font-display);
+	font-size: var(--font-size-3xl);
+	font-weight: var(--font-weight-medium);
+	line-height: var(--line-height-tight);
+	letter-spacing: -0.02em;
+	text-align: center;
+}
+.onboarding-scope .onboarding-lede {
+	margin: 0;
+	max-width: 48ch;
+	color: var(--text-secondary);
+	font-size: var(--font-size-md);
+	line-height: var(--line-height-loose);
+	text-align: center;
+}
+.onboarding-scope .onboarding-actions {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-wrap: wrap;
+	gap: var(--space-3);
+}
+.onboarding-scope .onboarding-action {
+	min-height: 44px;
+	padding: var(--space-3) var(--space-5);
+	border-radius: var(--radius-sm);
+	font-size: var(--font-size-sm);
+}
+@media (max-width: 480px) {
+	.onboarding-scope .onboarding-actions { width: 100%; }
+	.onboarding-scope .onboarding-action { flex: 1 1 auto; }
+}

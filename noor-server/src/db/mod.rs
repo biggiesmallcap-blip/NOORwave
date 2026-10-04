@@ -1,5 +1,6 @@
 pub mod audio_settings;
 pub mod catalog_name;
+pub mod discovery_setup;
 pub mod models;
 pub mod queries;
 pub mod remote;

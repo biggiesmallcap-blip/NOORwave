@@ -40,7 +40,7 @@ describe('layout status copy', () => {
 	});
 
 	test('settings and tray route updates through the patch info dialog', () => {
-		expect(settingsSource).toContain('Patch info');
+		expect(settingsSource).toContain('View update');
 		expect(settingsSource).toContain("await emit('open-update-details');");
 		expect(traySource).toContain('available - view patch info');
 		expect(traySource).toContain('handle.emit("open-update-details", ())');

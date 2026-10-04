@@ -11,7 +11,6 @@
 	import { isTauri } from '$lib/util/external';
 	import { isPlaying, playbackQueue } from '$lib/stores/player';
 	import { connectWebSocket, disconnectWebSocket } from '$lib/api/ws';
-	import { retainObservedStartupState, startupPresentation, type DesktopStartupState } from '$lib/desktop/startup';
 	import { exposurePresentation, parseDesktopRemoteError, type DesktopRemoteState } from '$lib/desktop/remote';
 
 	let status = $state<RemoteStatus | null>(null);
@@ -24,8 +23,6 @@
 	let message = $state('');
 	let error = $state('');
 	let managementAvailable = $state(true);
-	let startupState = $state<DesktopStartupState | null>(null);
-	let startupBusy = $state(false);
 	let tokenVisible = $state(false);
 	let copied = $state(false);
 	let expiresIn = $state(0);
@@ -40,7 +37,6 @@
 	let urlFallback = $state<HTMLInputElement | null>(null);
 
 	let addresses = $derived(status ? pairingAddressOptions(status) : []);
-	let startup = $derived(startupPresentation(startupState, startupBusy));
 	let canPair = $derived(status?.state === 'running' && status.remote_assets_available && addresses.length > 0);
 	let exposure = $derived(status ? exposurePresentation(status) : null);
 	let selectedUrl = $derived(addresses.find((item) => item.id === selectedAddress)?.url ?? '');
@@ -106,11 +102,6 @@
 		} finally { loading = false; statusLoadRunning = false; }
 	}
 
-	async function loadStartup(): Promise<void> {
-		if (!isTauri()) return;
-		try { startupState = await invoke<DesktopStartupState>('get_startup_state'); }
-		catch (cause) { await reportError(cause, 'Could not read start-at-sign-in state.'); }
-	}
 
 	onMount(() => {
 		let disposed = false;
@@ -118,7 +109,6 @@
 		serverToken = getStoredToken() ?? '';
 		controller = new AbortController();
 		void load(controller.signal);
-		void loadStartup();
 		if (isTauri()) {
 			void invoke<DesktopRemoteState>('get_remote_host_state').then(applyNativeState).catch(() => {});
 			void listen<DesktopRemoteState>('remote-host-state-changed', (event) => applyNativeState(event.payload))
@@ -140,7 +130,7 @@
 		const active = get(isPlaying);
 		const queueCount = get(playbackQueue).length;
 		const action = enabled ? 'Enable' : 'Disable';
-		if (!confirm(`${action} phone remote and restart NOORwave's server? Playback is ${active ? 'active' : 'not active'} and ${queueCount} queued track${queueCount === 1 ? '' : 's'} will be cleared.`)) return;
+		if (!confirm(`${action} phone remote and restart NOORwave's server? Playback is ${active ? 'active' : 'not active'} and will stop during the restart. Your ${queueCount} queued track${queueCount === 1 ? '' : 's'} will be kept.`)) return;
 		busy = true; error = ''; message = 'Restarting the local server…';
 		try {
 			await invoke('set_remote_host_mode', { enabled });
@@ -167,15 +157,6 @@
 		} finally { busy = false; }
 	}
 
-	async function updateStartup(enabled: boolean): Promise<void> {
-		if (!startupState) return;
-		startupBusy = true; error = '';
-		try { startupState = await invoke<DesktopStartupState>('set_start_at_login', { enabled }); }
-		catch (cause) {
-			startupState = retainObservedStartupState(startupState, cause);
-			await reportError(cause, 'Start-at-sign-in could not be changed.');
-		} finally { startupBusy = false; }
-	}
 
 	function updateExpiry(): void {
 		expiresIn = ticket ? Math.max(0, Math.ceil((Date.parse(ticket.expires_at) - Date.now()) / 1000)) : 0;
@@ -258,8 +239,8 @@
 	}
 </script>
 
-<section data-setting-id="phone-remote" class="glass-panel section-panel phone-remote-panel" aria-busy={loading || busy}>
-	<SectionHeader eyebrow="Connection" title="Phone Remote" subtitle="Connect a phone on the same trusted Wi-Fi network." />
+<section data-setting-id="phone-remote" class="glass-tile section-panel phone-remote-panel" aria-busy={loading || busy}>
+	<SectionHeader title="Phone remote" />
 
 	{#if error}<p bind:this={errorElement} class="remote-alert error" role="alert" tabindex="-1">{error}</p>{/if}
 	{#if message}<p class="remote-alert" role="status" aria-live="polite">{message}</p>{/if}
@@ -273,28 +254,33 @@
 		</div>
 
 		<div class="setting-row">
-			<div><strong>Make phone remote available whenever NOORwave is running</strong><p>Changing this restarts the server and clears playback and the current queue.</p></div>
-			<Toggle checked={nativeState?.configured_host_mode ?? status.configured_host_mode} disabled={busy || status.control !== 'desktop' || !isTauri()} label="Make phone remote available whenever NOORwave is running" onchange={(event) => void changeHost(event.currentTarget.checked)} />
+			<div><strong>Allow phone remote</strong><p>Changing this restarts the server and stops playback. Your queue is kept.</p></div>
+			<Toggle checked={nativeState?.configured_host_mode ?? status.configured_host_mode} disabled={busy || status.control !== 'desktop' || !isTauri()} label="Allow phone remote" onchange={(event) => void changeHost(event.currentTarget.checked)} />
 		</div>
 		{#if needsLocalRecovery}
 			<div class="recovery-block"><p>Network access is disabled, but the local server did not come back. Restart it locally; this does not enable LAN access.</p><button class="btn btn-primary" type="button" disabled={busy} onclick={() => void restartLocalOnly()}>Restart local-only server</button></div>
 		{/if}
 
-		<div class="setting-row">
-			<div><strong>Start NOORwave in the tray when I sign in</strong><p>{startup.message}</p></div>
-			<Toggle checked={startup.checked} disabled={startup.disabled} label="Start NOORwave in the tray when I sign in" onchange={(event) => void updateStartup(event.currentTarget.checked)} />
-		</div>
 
 		{#if status.restart_required}<p class="remote-alert">The standalone server preference is saved. Restart the server process to apply it.</p>{/if}
-
 		<div class="pairing-block">
-			<div class="pairing-intro"><span class="step-label">Step 1</span><div><strong>Pair your phone</strong><p>Use the address below, then scan a QR. The QR and temporary code expire after two minutes and work once; no permanent PIN is shared.</p></div></div>
+			<p class="remote-copy">Pair a phone on the same trusted Wi-Fi. The QR and temporary code expire after two minutes and work once.</p>
+			<details class="pairing-help"><summary>Set up the phone app</summary>
+				<ol class="troubleshooting-list">
+					<li>Scan the QR with your phone's camera to open and connect NOORwave.</li>
+					<li>Add NOORwave to your Home Screen, then open the installed app (PWA).</li>
+					<li>On iPhone, the installed app has a separate connection from Safari. Refresh the QR here to get a new one-time code, then enter that code in the installed app.</li>
+					<li>Once paired, the installed app reconnects automatically. A new code is needed if you revoke its access or clear its stored connection.</li>
+				</ol>
+			</details>
 			{#if selectedOption}
+				<details><summary>Connection address</summary>
 				<div class="connection-card">
 					<div class="connection-card-heading"><span>{connectionLabel}</span>{#if selectedOption.friendly}<span class="local-badge">Local discovery</span>{/if}</div>
 					<input bind:this={urlFallback} id="remote-url-fallback" class="url-fallback" type="text" readonly value={selectedUrl} aria-label={connectionLabel} onclick={(event) => event.currentTarget.select()} />
 					<div class="connection-actions"><button class="btn btn-glass" type="button" onclick={() => void copyText(selectedUrl, urlFallback)}>{copied ? 'Copied address' : 'Copy address'}</button><span>{selectedOption.friendly ? 'Best for bookmarks and returning later.' : 'Use this while local discovery is unavailable.'}</span></div>
 				</div>
+				</details>
 			{/if}
 			{#if ticket && qrDataUrl}
 				<div class="qr-wrap">
@@ -306,14 +292,14 @@
 						<div class="qr-code-frame"><img src={qrDataUrl} alt="Pair this phone with NOORwave" width="320" height="320" /></div>
 					</div>
 					<div class="pairing-alternative">
-						<p>Already installed on iPhone? Open the NOORwave app and enter:</p>
+						<p>Open the installed NOORwave app and enter this one-time code. If you already scanned this QR in Safari, refresh it first:</p>
 						<code class="pairing-code">{ticket.pairing_code.slice(0, 3)} {ticket.pairing_code.slice(3)}</code>
 					</div>
 					<code class="pairing-url">{ticket.pairing_url.replace(/#pair=.*/, '#pair=…')}</code>
 					<div class="actions"><button class="btn btn-primary" type="button" disabled={busy} onclick={() => void createQr()}>Refresh QR</button><button class="btn btn-glass" type="button" disabled={busy} onclick={() => void closeQr()}>Cancel</button></div>
 				</div>
 			{:else}
-				<button class="btn btn-primary touch" type="button" disabled={busy || !canPair} onclick={() => void createQr()}>Show pairing QR</button>
+				<button class="btn btn-primary touch" type="button" disabled={busy || !canPair} onclick={() => void createQr()}>Pair phone</button>
 			{/if}
 			{#if addresses.length > 1}
 				<details class="address-options">
@@ -363,9 +349,6 @@
 	.setting-row, .device-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 14px 0; border-top: 1px solid var(--border-subtle); }
 	.setting-row p, .pairing-block p, .manual p, .devices p, .diagnostics p { color: var(--text-secondary); margin: 4px 0 0; line-height: var(--line-height-normal); }
 	.pairing-block, .devices { display: flex; flex-direction: column; gap: 12px; padding-top: 18px; border-top: 1px solid var(--border-subtle); }
-	.pairing-intro { display: flex; align-items: flex-start; gap: 10px; }
-	.pairing-intro p { max-width: 680px; }
-	.step-label { flex: 0 0 auto; padding: 4px 7px; border: 1px solid var(--accent-line); border-radius: 999px; background: var(--accent-soft); color: var(--accent-strong); font-size: var(--font-size-xs); font-weight: var(--font-weight-bold); letter-spacing: .05em; text-transform: uppercase; }
 	.connection-card { display: grid; gap: 10px; padding: 15px; border: 1px solid color-mix(in srgb, var(--accent-line) 68%, var(--border-subtle)); border-radius: var(--radius-md); background: linear-gradient(130deg, color-mix(in srgb, var(--accent-soft) 55%, transparent), transparent 62%), var(--bg-surface); }
 	.connection-card-heading, .connection-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 	.connection-card-heading > span:first-child { color: var(--text-secondary); font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); }
