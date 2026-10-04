@@ -14,9 +14,9 @@ name: Warm build cache
 #   from producing unreachable caches ever again.
 #
 # Keeping it honest:
-#   The compile steps mirror release.yml's build jobs, which all run the same
-#   two cargo invocations (`scripts/build-portable.ps1` does the same on
-#   Windows). That compile is the bulk of what a release pays for. Nothing here
+#   The compile steps mirror release.yml's build jobs, including the Windows
+#   Tauri CLI build and installer configuration. That compile is the bulk of
+#   what a release pays for. Nothing here
 #   uploads, signs, or publishes, so a failure in this workflow cannot break a
 #   release -- the worst case is a cold cache, which is today's behaviour.
 #
@@ -28,13 +28,25 @@ name: Warm build cache
 on:
   push:
     branches: [master]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - "noor-app/**"
+      - "noor-server/**"
+      - "noor-mix/**"
+      - "frontend/**"
+      - "scripts/build-portable.ps1"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/warm-cache.yml"
   workflow_dispatch:
 
-# A newer master push makes an in-flight warm run pointless; the cache it would
-# save is already stale. Cancel rather than queue.
+# Dependency caches remain useful across source changes. Let the active run
+# save its cache; GitHub keeps only the newest pending run in this group.
 concurrency:
   group: warm-cache-${{ github.workflow }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -46,7 +58,7 @@ jobs:
     # compile every platform twice. Manual dispatch remains available.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      !startsWith(github.event.head_commit.message, 'chore(release):')
+      !contains(github.event.head_commit.message, 'chore(release):')
     name: warm (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -95,12 +107,11 @@ jobs:
       - name: Setup Rust
         shell: bash
         run: |
+          # rustup installs the compiler pinned in rust-toolchain.toml.
+          cargo --version
           if [ -n "${{ matrix.target }}" ]; then
-            rustup toolchain install stable --profile minimal --target "${{ matrix.target }}"
-          else
-            rustup toolchain install stable --profile minimal
+            rustup target add "${{ matrix.target }}"
           fi
-          rustup default stable
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -139,5 +150,12 @@ jobs:
             cargo build --release --locked --target "${{ matrix.target }}" -p noor-app
           else
             cargo build --release --locked -p noor-server
-            cargo build --release --locked -p noor-app
+            if [ "${{ matrix.os }}" != "windows-latest" ]; then
+              cargo build --release --locked -p noor-app
+            fi
           fi
+
+      - name: Compile Windows desktop app
+        if: matrix.os == 'windows-latest'
+        working-directory: noor-app
+        run: pnpm dlx --package=@tauri-apps/cli@2.10.1 tauri build --no-bundle --config tauri.installer.conf.json -- --locked
