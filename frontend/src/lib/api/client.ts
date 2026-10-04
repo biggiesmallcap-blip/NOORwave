@@ -2421,6 +2421,15 @@ async function fetchApi<T>(
 }
 
 export const api = {
+    getTidalContentSettings() {
+        return fetchApi<{ hide_ai_generated: boolean }>('/api/tidal/content-settings');
+    },
+    setTidalContentSettings(hide_ai_generated: boolean) {
+        return fetchApi<{ hide_ai_generated: boolean }>('/api/tidal/content-settings', undefined, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ hide_ai_generated }),
+        });
+    },
 	// `favoriteOnly` is legacy: server-side it currently means "library tracks"
 	// (liked tracks ∪ tracks from favorited albums). Use `likedOnly` for a strict
 	// filter on tracks the user has actually liked. likedOnly takes precedence

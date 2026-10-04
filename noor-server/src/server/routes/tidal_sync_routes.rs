@@ -238,7 +238,8 @@ pub async fn trigger_auto_sync(state: &SharedState, service: &str) -> anyhow::Re
         tidal_http_client,
         tokens.access_token.clone(),
         tokens.country_code.clone(),
-    );
+    )
+    .with_metadata_store(state.read().await.db.clone());
 
     let guidance_account = tokens.user_id.to_string();
     // Run sync
@@ -330,7 +331,8 @@ pub(super) async fn tidal_sync_library(
         tidal_http_client.clone(),
         tokens.access_token.clone(),
         tokens.country_code.clone(),
-    );
+    )
+    .with_metadata_store(state.read().await.db.clone());
 
     let (session, session_state) = ensure_tidal_session(&state, &tokens, &client)
         .await
@@ -364,7 +366,8 @@ pub(super) async fn tidal_sync_library(
             http_for_task,
             sync_tokens.access_token.clone(),
             sync_tokens.country_code.clone(),
-        );
+        )
+        .with_metadata_store(state.read().await.db.clone());
         match run_tidal_sync_with_reauth(
             &client,
             &state_clone,

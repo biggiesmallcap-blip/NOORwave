@@ -239,6 +239,7 @@ pub struct AppState {
 pub enum AppEvent {
     PlaybackStateChanged,
     LibrarySynced,
+    TidalContentSettingsChanged,
     /// Emitted when the radio similarity index (`track_similarity`) finishes
     /// rebuilding, manually or via the auto-rebuild listener. Carries the pair
     /// count so the Settings panel can refresh without polling.

@@ -24,6 +24,7 @@ export type WsMessage =
 	| { type: 'playback_failed'; message: string }
 	| { type: 'track_skipped'; track_id: number; title: string; reason: string }
 	| { type: 'library_synced' }
+	| { type: 'tidal_content_settings_changed' }
 	| { type: 'radio_similarity_computed'; pairs: number }
 	| { type: 'musicbrainz_enriched' }
 	| { type: 'sync_progress'; service: string; progress: number }

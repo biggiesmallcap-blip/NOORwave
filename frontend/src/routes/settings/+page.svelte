@@ -58,6 +58,7 @@
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
 	import Toggle from '$lib/components/ui/Toggle.svelte';
 	import { searchSettings, type SettingsSearchEntry } from '$lib/components/settings/settingsSearch';
+	import TidalContentSetting from '$lib/components/settings/TidalContentSetting.svelte';
 	import IntegrationsPanel from '$lib/components/settings/IntegrationsPanel.svelte';
 	import PhoneRemotePanel from '$lib/components/settings/PhoneRemotePanel.svelte';
 	import {
@@ -3047,9 +3048,10 @@
 						<button class="btn btn-primary" onclick={connectTidal}>Connect TIDAL</button>
 					</div>
 				{:else}<div class="info-row"><span>Account</span><strong>{$tidalUserId ?? 'Connected'}</strong></div><div class="action-row"><button class="btn btn-glass" onclick={disconnectTidal}>Disconnect</button><a class="btn btn-glass" href={settingsHref('library', 'library-sync')}>Library sync</a></div>{/if}
-<details data-setting-id="tidal-content-preferences"><summary>Content filters</summary>
-	<p class="setting-status">Manage AI-labeled recordings and explicit content in the TIDAL app. NOORwave cannot currently apply these filters.</p>
-	<div class="action-row"><ExternalLink href="https://support.tidal.com/hc/en-us/articles/48031883413521-AI-Policy">AI content settings</ExternalLink><ExternalLink href="https://support.tidal.com/hc/en-us/articles/9936639051153-Explicit-Content">Explicit content settings</ExternalLink></div>
+<details><summary>More content settings</summary>
+    <TidalContentSetting />
+	<p class="setting-status">Manage explicit content in the TIDAL app.</p>
+	<div class="action-row"><ExternalLink href="https://support.tidal.com/hc/en-us/articles/48031883413521-AI-Policy">About TIDAL’s AI labels</ExternalLink><ExternalLink href="https://support.tidal.com/hc/en-us/articles/9936639051153-Explicit-Content">Explicit content settings</ExternalLink></div>
 </details></section><IntegrationsPanel />
 {:else if activeCategory === 'remote'}
 <PhoneRemotePanel />

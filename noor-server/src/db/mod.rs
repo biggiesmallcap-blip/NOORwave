@@ -6,6 +6,7 @@ pub mod queries;
 pub mod remote;
 pub mod schema;
 pub mod signals;
+pub mod tidal_content;
 
 use anyhow::Result;
 use rusqlite::Connection;

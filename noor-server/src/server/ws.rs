@@ -146,6 +146,7 @@ async fn handle_socket(
                 let msg = match event {
                     AppEvent::PlaybackStateChanged => json!({"type": "playback_changed"}),
                     AppEvent::LibrarySynced => json!({"type": "library_synced"}),
+                    AppEvent::TidalContentSettingsChanged => json!({"type": "tidal_content_settings_changed"}),
                     AppEvent::RadioSimilarityComputed { pairs } => json!({"type": "radio_similarity_computed", "pairs": pairs}),
                     AppEvent::MusicBrainzEnriched => json!({"type": "musicbrainz_enriched"}),
                     AppEvent::TrackChanged { track_id } => json!({"type": "track_changed", "track_id": track_id}),

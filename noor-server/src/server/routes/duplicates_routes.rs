@@ -114,7 +114,8 @@ pub(super) async fn resolve_duplicate_group(
             tidal_http_client,
             t.access_token.clone(),
             t.country_code.clone(),
-        );
+        )
+        .with_metadata_store(state.read().await.db.clone());
         let mut user_id = t.user_id.clone();
         for tidal_id in &result.tidal_ids_to_unfavorite {
             if let Err(e) = client.remove_favorite_track(&user_id, *tidal_id).await {

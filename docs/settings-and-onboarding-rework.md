@@ -36,3 +36,7 @@ LibrarySynced remains a general notification. It triggers reconciliation with du
 - All six categories passed layout checks at 360, 640, 960 and 1440px without page or Settings overflow. Keyboard search opened nested settings; Back restored the prior destination. Appearance drafts survived Back and failed completion/reload, then applied on retry. Phone pairing generated its QR/code. Discovery guidance opened the correct setting without training and did not repeat after reload. Dark and light Clay screenshots were reviewed.
 
 Live provider authorization, physical audio-device changes, OS startup integration and pairing with a physical phone still require a manual desktop smoke test. Automated checks exercise their existing shared contracts and the revised UI; they do not substitute for those external environments.
+
+## TIDAL AI music preference
+
+Services → TIDAL → More content settings now includes **Hide AI-generated tracks**, disabled by default. It uses TIDAL’s explicit boolean AI label across browsing, recommendations and generated queues, and stores the preference and observed labels in the server database. Saved library items and favorites remain available; missing metadata stays visible. Raw upstream pages, library sync and the current queue are preserved. Failed saves roll back, and successful saves refresh music caches. Implementation details and validation are recorded in `settings-followup-audit.md`.

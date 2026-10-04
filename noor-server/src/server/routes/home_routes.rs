@@ -662,7 +662,8 @@ async fn resolve_missing_artwork(state: &SharedState, items: &mut [Value]) {
         tidal_http,
         tokens.access_token.clone(),
         tokens.country_code.clone(),
-    );
+    )
+    .with_metadata_store(state.read().await.db.clone());
     let cache_cfg = crate::services::tidal::cache::TidalSearchCacheConfig::default();
 
     let resolved: Vec<(usize, Option<String>, Option<AlbumLink>)> = futures::stream::iter(pending)

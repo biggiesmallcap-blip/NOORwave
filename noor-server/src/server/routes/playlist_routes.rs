@@ -455,7 +455,8 @@ pub(super) async fn refresh_playlist_route(
         http,
         tokens.access_token.clone(),
         tokens.country_code.clone(),
-    );
+    )
+    .with_metadata_store(state.read().await.db.clone());
     let never_cancelled = || -> anyhow::Result<()> { Ok(()) };
     let tracks =
         super::tidal_sync_routes::fetch_tidal_playlist_tracks(&client, &uuid, &never_cancelled)

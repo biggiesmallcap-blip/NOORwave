@@ -9,6 +9,26 @@ pub struct RadioQueueBuild {
     pub pending_item_ids: Vec<i64>,
 }
 
+fn filter_content_candidates(
+    conn: &rusqlite::Connection,
+    candidates: Vec<RadioCandidate>,
+) -> rusqlite::Result<Vec<RadioCandidate>> {
+    let blocked = crate::db::tidal_content::blocked_ids(conn)?;
+    let mut allowed = Vec::new();
+    for candidate in candidates {
+        if candidate
+            .tidal_track_id
+            .is_some_and(|id| blocked.contains(&id))
+            || (candidate.is_in_library
+                && crate::db::tidal_content::local_is_blocked(conn, candidate.track_id)?)
+        {
+            continue;
+        }
+        allowed.push(candidate);
+    }
+    Ok(allowed)
+}
+
 pub fn build_radio_queue_from_candidates(
     conn: &rusqlite::Connection,
     seed_track_id: i64,
@@ -24,11 +44,22 @@ pub fn build_radio_queue_from_candidates_with_seed(
 ) -> rusqlite::Result<RadioQueueBuild> {
     // Seed track leads the queue, matching the user's explicit radio seed.
     // orchestrate_song already excludes it; this filter is a defensive guard.
+    let had_candidates = !candidates.is_empty() || seed_track_id.is_some();
+    let candidates = filter_content_candidates(conn, candidates)?;
+    let seed_track_id = match seed_track_id {
+        Some(id) if crate::db::tidal_content::local_is_blocked(conn, id)? => None,
+        seed => seed,
+    };
     let candidates = candidates
         .into_iter()
         .filter(|c| seed_track_id != Some(c.track_id))
         .collect::<Vec<_>>();
     let candidates = rank_radio_candidates(conn, seed_track_id, candidates);
+    if had_candidates && seed_track_id.is_none() && candidates.is_empty() {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "All selected tracks are hidden by your AI-generated music filter".into(),
+        ));
+    }
 
     let tx = conn.unchecked_transaction()?;
 
@@ -97,11 +128,30 @@ pub fn replace_queue_with_ordered_candidates(
     conn: &rusqlite::Connection,
     candidates: &[OrderedQueueCandidate],
 ) -> rusqlite::Result<RadioQueueBuild> {
+    let mut allowed = Vec::new();
+    for candidate in candidates {
+        let hidden = match candidate.track_id.filter(|id| *id > 0) {
+            Some(id) => crate::db::tidal_content::local_is_blocked(conn, id)?,
+            None => candidate
+                .tidal_id
+                .map(|id| crate::db::tidal_content::is_blocked(conn, id))
+                .transpose()?
+                .unwrap_or(false),
+        };
+        if !hidden {
+            allowed.push(candidate);
+        }
+    }
+    if !candidates.is_empty() && allowed.is_empty() {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "All selected tracks are hidden by your AI-generated music filter".into(),
+        ));
+    }
     let tx = conn.unchecked_transaction()?;
     tx.execute("DELETE FROM queue", [])?;
 
     let mut pending_item_ids = Vec::new();
-    for (pos, c) in candidates.iter().enumerate() {
+    for (pos, c) in allowed.iter().enumerate() {
         let pos = pos as i32;
         match c.track_id.filter(|id| *id > 0) {
             Some(track_id) => {
@@ -157,6 +207,7 @@ pub fn append_radio_queue_from_candidates(
     conn: &rusqlite::Connection,
     candidates: Vec<RadioCandidate>,
 ) -> rusqlite::Result<RadioQueueBuild> {
+    let candidates = filter_content_candidates(conn, candidates)?;
     let candidates = rank_radio_candidates(conn, append_seed_track_id(conn), candidates);
 
     let tx = conn.unchecked_transaction()?;
@@ -278,10 +329,40 @@ fn rank_radio_candidates(
 mod tests {
     use super::*;
 
+    #[test]
+    fn tidal_ai_all_hidden_radio_keeps_existing_queue() {
+        let conn = conn_with_queue();
+        conn.execute(
+            "INSERT INTO queue(track_id,position,source) VALUES(99,0,'user')",
+            [],
+        )
+        .unwrap();
+        crate::db::tidal_content::observe(
+            &conn,
+            &serde_json::json!({"id":1,"duration":180,"ai":true}),
+        )
+        .unwrap();
+        crate::db::tidal_content::set_enabled(&conn, true).unwrap();
+        let result = build_radio_queue_from_candidates_with_seed(
+            &conn,
+            None,
+            vec![tidal_candidate(1, "Artist", "Hidden")],
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            conn.query_row("SELECT track_id FROM queue", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            99
+        );
+    }
+
     fn conn_with_queue() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
+            CREATE TABLE server_config (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE tidal_track_labels (tidal_id INTEGER PRIMARY KEY, ai INTEGER);
+            CREATE TABLE tracks (id INTEGER PRIMARY KEY, tidal_id INTEGER, is_library INTEGER DEFAULT 0, is_favorite INTEGER DEFAULT 0);
             CREATE TABLE queue (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 track_id INTEGER,

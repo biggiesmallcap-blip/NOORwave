@@ -169,7 +169,8 @@ pub(super) async fn get_tidal_mixes(
         tidal_http_client.clone(),
         tokens.access_token.clone(),
         tokens.country_code.clone(),
-    );
+    )
+    .with_metadata_store(state.read().await.db.clone());
     let mixes = match client.get_my_mixes().await {
         Ok(mixes) => mixes,
         Err(e) if super::error_looks_like_auth(&e) => {
@@ -239,7 +240,8 @@ pub(super) async fn get_tidal_radio_stations(
         tidal_http_client.clone(),
         tokens.access_token.clone(),
         tokens.country_code.clone(),
-    );
+    )
+    .with_metadata_store(state.read().await.db.clone());
     let stations = match client.get_my_radio_stations().await {
         Ok(s) => s,
         Err(e) if super::error_looks_like_auth(&e) => {
@@ -376,7 +378,8 @@ pub(super) async fn get_tidal_discover_module_items(
     let items = if let Some(path) = module.more_path.as_deref() {
         let access_token = tokens.access_token.clone();
         let country_code = tokens.country_code.clone();
-        let live = TidalClient::with_http(tidal_http_client, access_token, country_code);
+        let live = TidalClient::with_http(tidal_http_client, access_token, country_code)
+            .with_metadata_store(state.read().await.db.clone());
         match live
             .get_module_items_via_path(path, &module_kind, limit)
             .await
@@ -476,7 +479,8 @@ pub(super) async fn get_tidal_mix_tracks(
         tidal_http_client,
         tokens.access_token.clone(),
         tokens.country_code.clone(),
-    );
+    )
+    .with_metadata_store(state.read().await.db.clone());
     let items = match client.get_mix_tracks(mix_id).await {
         Ok(items) => items,
         Err(e) if super::error_looks_like_auth(&e) => {
@@ -650,7 +654,8 @@ async fn fetch_page_modules(
         tidal_http_client.clone(),
         tokens.access_token.clone(),
         tokens.country_code.clone(),
-    );
+    )
+    .with_metadata_store(state.read().await.db.clone());
     let cache_key = tidal_page_modules_cache_key(&tokens.country_code, &page_path);
     if let Some(cached) = get_cached_tidal_page_modules(&page_modules_cache, &cache_key) {
         return Ok(Json(
@@ -695,7 +700,8 @@ async fn load_tidal_home_modules_cached(
         tidal_http_client.clone(),
         tokens.access_token.clone(),
         tokens.country_code.clone(),
-    );
+    )
+    .with_metadata_store(state.read().await.db.clone());
     let modules = match client.get_home_modules().await {
         Ok(m) => m,
         Err(e) if super::error_looks_like_auth(&e) => {
@@ -875,7 +881,8 @@ async fn refresh_tidal_moods_cache(
         tidal_http_client.clone(),
         tokens.access_token.clone(),
         tokens.country_code.clone(),
-    );
+    )
+    .with_metadata_store(state.read().await.db.clone());
     let mut active_country_code = tokens.country_code.clone();
     let raw = match active_client.get_page_raw("pages/moods").await {
         Ok(r) => r,

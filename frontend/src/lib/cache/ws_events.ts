@@ -45,8 +45,28 @@ export function invalidatePlaylistCaches(): void {
 	dataCache.invalidatePrefix(['api', 'getPlaylistCoverSample']);
 }
 
+export function invalidateTidalContentCaches(): void {
+	const music = /tidal|search|tracks|albums|artists|home|radio|discovery|charts|playlist/i;
+	// Also discard persisted instant-paint snapshots so a reopened page cannot hydrate old results.
+	if (typeof localStorage !== 'undefined') {
+		try {
+			const stale: string[] = [];
+			for (let i = 0; i < localStorage.length; i++) {
+				const key = localStorage.key(i);
+				if (key?.startsWith('noor.query.') && music.test(key)) stale.push(key);
+			}
+			for (const key of stale) localStorage.removeItem(key);
+		} catch { /* In-memory invalidation still works when storage is unavailable. */ }
+	}
+	dataCache.invalidateWhere(key => music.test(key), { refetch: true });
+}
+
 export function applyCacheUpdateForWsMessage(message: CacheWsMessage): void {
 	if (!message || typeof message.type !== 'string') return;
+	if (message.type === 'tidal_content_settings_changed') {
+		invalidateTidalContentCaches();
+		return;
+	}
 
 	if (message.type === 'queue_updated') {
 		debounceRefetch(cacheKeys.playbackState(), 100);
