@@ -43,7 +43,7 @@ describe('TIDAL editorial page routes', () => {
 		expect(routeSource('genres')).toContain('GenreGalaxy');
 		expect(routeSource('videos')).toContain('VideoCard');
 		expect(routeSource('genres')).toContain('href="/tidal/genres"');
-		expect(routeSource('videos')).toContain('href="/tidal/videos"');
+		expect(routeSource('videos')).toContain('<VideoNavigation current="videos"');
 	});
 
 	test('wires colliding TIDAL editorial pages under the tidal namespace', () => {

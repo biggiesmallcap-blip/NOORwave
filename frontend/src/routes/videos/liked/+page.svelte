@@ -9,6 +9,7 @@
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 	import VideoCard from '$lib/components/video/VideoCard.svelte';
+	import VideoNavigation from '$lib/components/video/VideoNavigation.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import SearchField from '$lib/search/ui/SearchField.svelte';
@@ -152,12 +153,7 @@
 		event.preventDefault();
 		event.stopPropagation();
 		const items = [
-			...buildVideoMenu({
-				tidal_id: version.tidal_video_id,
-				title: version.video_title,
-				artist_id: video.artist_id,
-				artist_name: video.artist_name,
-			}),
+			...buildVideoMenu(toQueueItem(video, version)),
 			{ separator: true, label: '' },
 			{
 				label: 'Wrong match - hide this',
@@ -319,21 +315,15 @@
 </svelte:head>
 
 <div class="page">
-	<!-- The same header every search surface in the app uses: field centred in a
-	     three-column grid so the flanking slots cannot shunt it sideways, with
-	     the controls directly beneath it. /videos and /library are the same
-	     shape; a page-title block above the field was what made this one read
-	     as a different app. -->
 	<header class="search-header">
+		<VideoNavigation current="liked" />
 		<div class="search-tools">
-			<div class="tools-lead">
-				<a class="back-link" href="/videos">Videos</a>
-			</div>
 			<SearchField
 				bind:value={query}
 				placeholder="Search your liked videos"
 				ariaLabel="Search your liked videos"
 				variant="page"
+				fill
 				suppressSuggestions
 			/>
 			<div class="tools-action">
@@ -534,30 +524,23 @@
 	.saved-heading { display: grid; gap: 3px; }
 	.saved-heading h2 { margin: 0; font-size: var(--font-size-lg); color: var(--text-primary); }
 
-	/* Lifted verbatim from /videos so the two pages cannot drift apart again. */
 	.search-header {
 		display: flex;
 		flex-direction: column;
-		gap: 10px;
+		gap: var(--space-4);
 		width: 100%;
 		max-width: var(--content-width);
 		margin: 0 auto var(--space-2);
 		padding: 0 4px;
 	}
 
-	/* Three columns so the field stays optically centred no matter how wide the
-	   flanking slots get. */
 	.search-tools {
 		display: grid;
-		grid-template-columns: minmax(0, 1fr) minmax(0, 560px) minmax(0, 1fr);
+		grid-template-columns: minmax(0, 1fr) auto;
 		align-items: center;
 		gap: var(--space-3);
-	}
-
-	.tools-lead {
-		display: flex;
-		justify-content: flex-start;
-		min-width: 0;
+		width: min(100%, 720px);
+		margin: 0 auto;
 	}
 
 	.tools-action {
@@ -565,10 +548,6 @@
 		justify-content: flex-end;
 		gap: var(--space-2);
 		min-width: 0;
-	}
-
-	.back-link {
-		align-self: flex-start;
 	}
 
 	.header-action {

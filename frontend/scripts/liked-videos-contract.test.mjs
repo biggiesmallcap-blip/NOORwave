@@ -7,18 +7,16 @@ const CLIENT = 'src/lib/api/client.ts';
 const APP_CSS = 'src/app.css';
 
 describe('liked videos contract', () => {
-	test('the two video pages link to each other from mirrored places', () => {
-		// A separate route rather than a third mode inside /videos: that page is
-		// already a browse / search / player / snapshot-restore state machine.
-		// Each page offers the other from its own leading slot, so getting back
-		// is the same gesture in both directions.
+	test('all video pages share navigation with a current-page indicator', () => {
 		const videos = readFileSync(VIDEOS_PAGE, 'utf8');
-		expect(videos).toContain('class="tools-lead"');
-		expect(videos).toContain('href="/videos/liked"');
-		expect(videos).toContain('href="/tidal/videos"');
-
+		expect(videos).toContain('<VideoNavigation current="videos"');
 		const page = readFileSync(PAGE, 'utf8');
-		expect(page).toContain('class="back-link" href="/videos"');
+		expect(page).toContain('<VideoNavigation current="liked" />');
+		const editorial = readFileSync('src/routes/tidal/videos/+page.svelte', 'utf8');
+		expect(editorial).toContain('<VideoNavigation current="editorial" />');
+		const navigation = readFileSync('src/lib/components/video/VideoNavigation.svelte', 'utf8');
+		expect(navigation).toContain('aria-label="Video pages"');
+		expect(navigation).toContain("aria-current={current === destination.id ? 'page' : undefined}");
 	});
 
 	test('a version shows what tells it apart from its siblings', () => {

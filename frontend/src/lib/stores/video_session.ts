@@ -183,6 +183,58 @@ export const videoSessionUpcoming = derived(session, ($session) => {
 	return $session.queue.slice($session.currentIndex + 1);
 });
 
+function queueWithCurrent(state: VideoSessionState): VideoSessionItem[] {
+	// A direct/search selection may not be in its browse results. Give manual
+	// queue actions a current-video anchor so Next and autoplay can advance.
+	return state.current && findCurrentIndex(state.queue, state.current) < 0
+		? [state.current, ...state.queue] : [...state.queue];
+}
+
+/** Append without loading a stream or interrupting the current video. */
+export function addVideoToQueue(item: VideoSessionItem): boolean {
+	const state = get(session);
+	const queue = queueWithCurrent(state);
+	if (queue.some(video => video.tidal_id === item.tidal_id)) return false;
+	update({ queue: [...queue, item], ...(state.source === 'none' ? { source: 'direct', sourceLabel: 'Video queue' } : {}) });
+	return true;
+}
+
+/** Insert or move a video directly after the current video. */
+export function playVideoNext(item: VideoSessionItem): boolean {
+	const state = get(session);
+	if (state.current?.tidal_id === item.tidal_id) return false;
+	const queued = state.queue.find(video => video.tidal_id === item.tidal_id);
+	const queue = queueWithCurrent(state).filter(video => video.tidal_id !== item.tidal_id);
+	queue.splice(findCurrentIndex(queue, state.current) + 1, 0, queued ?? item);
+	update({ queue, ...(state.source === 'none' ? { source: 'direct', sourceLabel: 'Video queue' } : {}) });
+	return true;
+}
+
+/** Remove only upcoming videos; the current stream remains untouched. */
+export function removeVideoFromQueue(videoId: number): boolean {
+	const state = get(session);
+	const index = state.queue.findIndex(video => video.tidal_id === videoId);
+	if (index <= state.currentIndex) return false;
+	const removed = state.queue[index];
+	if (!removed) return false;
+	// An in-flight radio response must not put a deliberately removed cut back.
+	radioSeenIds = [...radioSeenIds, videoId].slice(-256);
+	radioSeenSongs = [...radioSeenSongs, removed].slice(-128);
+	update({ queue: state.queue.filter(video => video.tidal_id !== videoId) });
+	return true;
+}
+
+/** Queue rows use the persistent session even when /videos is not mounted. */
+export async function playQueuedVideo(videoId: number): Promise<boolean> {
+	const state = get(session);
+	const item = state.queue.find(video => video.tidal_id === videoId);
+	if (!item) return false;
+	return playVideo(item, {
+		queue: state.queue, source: state.source, sourceLabel: state.sourceLabel,
+		autoplay: state.autoplay, continuous: state.continuous,
+	});
+}
+
 // ─── Controller: owns the stream lifecycle so playback survives navigation ───
 
 let streamSeq = 0;

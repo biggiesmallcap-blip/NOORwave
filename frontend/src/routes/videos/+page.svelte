@@ -14,6 +14,7 @@
 	import TidalDiscoverShelves from '$lib/components/search/TidalDiscoverShelves.svelte';
 	import VideoCard from '$lib/components/video/VideoCard.svelte';
 	import VideoSetShelf from '$lib/components/video/VideoSetShelf.svelte';
+	import VideoNavigation from '$lib/components/video/VideoNavigation.svelte';
 	import { buildBrowseMix } from '$lib/video/browse_mix';
 	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
@@ -299,14 +300,6 @@
 			radioScope,
 		});
 		if (!ok) showToast($videoSession.error ?? 'This video could not be loaded.', 'error', 3200);
-	}
-
-	function backToPicks() {
-		setVideoBrowseMode(true);
-	}
-
-	function backToPlayer() {
-		setVideoBrowseMode(false);
 	}
 
 	let hasVideoChoices = $derived(videos.length > 0 || mixItems.length > 0 || playlistItems.length > 0);
@@ -810,13 +803,8 @@
 
 <div class="videos-page">
 	<header class="search-header">
+		<VideoNavigation current="videos" canBrowse={hasBrowseContent} />
 		<div class="search-tools">
-			<!-- The left column was pure ballast for the centered field. The way
-			     into your own liked videos lives here rather than crowding the
-			     contextual slot opposite, which has one job. -->
-			<div class="tools-lead">
-				<a class="header-action" href="/videos/liked">Liked videos</a>
-			</div>
 			<SearchField
 				bind:value={query}
 				bind:inputEl
@@ -825,21 +813,6 @@
 				placeholder="Search TIDAL videos"
 				oninput={onInput}
 			/>
-			<!-- One contextual slot, always in the same place: where you are and
-			     how you get back. Falls back to the TIDAL entry point when there
-			     is nothing to go back to. -->
-			<div class="tools-action">
-				{#if browseMode && videoSessionActive}
-					<button type="button" class="header-action header-action--live" onclick={backToPlayer}>
-						<span class="live-dot" aria-hidden="true"></span>
-						<span class="header-action-label">Back to the player</span>
-					</button>
-				{:else if videoSessionActive && hasBrowseContent}
-					<button type="button" class="header-action" onclick={backToPicks}>Back to picks</button>
-				{:else}
-					<a class="header-action" href="/tidal/videos">TIDAL editorial</a>
-				{/if}
-			</div>
 		</div>
 		{#if searchFocused && recent.length > 0}
 			<div class="recent-inline">
@@ -1095,94 +1068,17 @@
 	}
 
 	.search-header {
+		display: grid;
+		gap: var(--space-4);
 		width: 100%;
 		max-width: var(--content-width);
 		margin: 0 auto var(--space-5);
 		padding: 0 4px;
 	}
 
-	/* Three columns so the field stays optically centered no matter how wide
-	   the contextual action gets - the label changes with playback state and a
-	   flex row would shunt the field sideways on every change. */
 	.search-tools {
-		display: grid;
-		grid-template-columns: minmax(0, 1fr) minmax(0, 560px) minmax(0, 1fr);
-		align-items: center;
-		gap: var(--space-3);
-	}
-
-	.tools-lead {
-		display: flex;
-		justify-content: flex-start;
-		min-width: 0;
-	}
-
-	.tools-action {
-		display: flex;
-		justify-content: flex-end;
-		gap: var(--space-2);
-		min-width: 0;
-	}
-
-	.header-action {
-		display: inline-flex;
-		align-items: center;
-		gap: var(--space-2);
-		flex: 0 0 auto;
-		padding: var(--space-2) var(--space-3);
-		border-radius: 999px;
-		border: 1px solid var(--panel-border);
-		background: var(--bg-hover);
-		color: var(--text-primary);
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-semibold);
-		text-decoration: none;
-		white-space: nowrap;
-		transition:
-			background var(--motion-fast),
-			border-color var(--motion-fast),
-			color var(--motion-fast);
-	}
-
-	.header-action:hover,
-	.header-action:focus-visible {
-		background: var(--accent-soft);
-		border-color: var(--accent-line);
-		color: var(--text-primary);
-		outline: none;
-	}
-
-	/* Browsing with a video still running: the accent plus a live dot say the
-	   session is alive somewhere off-screen, so the button reads as "return to
-	   it" rather than "start something". */
-	.header-action--live {
-		background: var(--accent-soft);
-		border-color: var(--accent-line);
-		color: var(--accent-strong);
-	}
-
-	.live-dot {
-		width: 7px;
-		height: 7px;
-		border-radius: 50%;
-		background: var(--accent-strong);
-		animation: live-pulse 2s ease-in-out infinite;
-	}
-
-	@keyframes live-pulse {
-		0%,
-		100% {
-			opacity: 1;
-		}
-		50% {
-			opacity: 0.35;
-		}
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		.live-dot {
-			animation: none;
-		}
+		width: min(100%, 560px);
+		margin: 0 auto;
 	}
 
 	/* The editorial browse layer fades and collapses under search focus but
@@ -1513,21 +1409,6 @@
 	@media (max-width: 860px) {
 		.hero {
 			grid-template-columns: 1fr;
-		}
-	}
-
-	@media (max-width: 860px) {
-		/* The action drops under the field rather than squeezing it. */
-		.search-tools {
-			grid-template-columns: 1fr;
-		}
-
-		.tools-lead {
-			justify-content: center;
-		}
-
-		.tools-action {
-			justify-content: center;
 		}
 	}
 
