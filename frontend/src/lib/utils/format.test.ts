@@ -278,22 +278,20 @@ describe('formatDateShort', () => {
 		sameDayFuture.setHours(sameDayFuture.getHours() + 4);
 		expect(formatDateShort(sameDayFuture.toISOString())).toBe('Today');
 		const yesterday = new Date(now);
-		yesterday.setDate(yesterday.getDate() - 1);
+		yesterday.setTime(now.getTime() - 86400000);
 		expect(formatDateShort(yesterday.toISOString())).toBe('Yesterday');
 	});
 	test('within a week → "Nd ago"', () => {
-		const past = new Date();
-		past.setDate(past.getDate() - 3);
+		// The formatter measures elapsed days; calendar subtraction crosses DST.
+		const past = new Date(Date.now() - 3 * 86400000);
 		expect(formatDateShort(past.toISOString())).toBe('3d ago');
 	});
 	test('within a month → "Nw ago"', () => {
-		const past = new Date();
-		past.setDate(past.getDate() - 14);
+		const past = new Date(Date.now() - 14 * 86400000);
 		expect(formatDateShort(past.toISOString())).toBe('2w ago');
 	});
 	test('within a year → "Nmo ago"', () => {
-		const past = new Date();
-		past.setDate(past.getDate() - 90);
+		const past = new Date(Date.now() - 90 * 86400000);
 		expect(formatDateShort(past.toISOString())).toBe('3mo ago');
 	});
 	test('older than a year → locale date', () => {
