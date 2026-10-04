@@ -211,12 +211,12 @@
 	async function playFromSet(set: VideoDiscoverSet, index: number) {
 		const video = set.items[index];
 		if (!video) return;
-		await playFromQueue(video, set.items, `${set.title} radio`, true, true);
+		await playFromQueue(video, set.items, set.title, true);
 	}
 
 	async function playBrowseMix() {
 		const first = browseMix[0];
-		if (first) await playFromQueue(first, browseMix, 'Video radio', true, true);
+		if (first) await playFromQueue(first, browseMix, 'Video radio', true, true, 'library');
 	}
 
 	async function toggleSavedVideo() {
@@ -282,7 +282,8 @@
 		queue: TidalSearchVideo[],
 		label: string,
 		autoplay = $videoSession.autoplay,
-		continuous = false
+		continuous = false,
+		radioScope: 'artist' | 'library' = 'artist'
 	) {
 		if (!assertOnline()) {
 			showToast('Server is reconnecting.', 'error', 3200);
@@ -295,6 +296,7 @@
 			autoplay,
 			continuous,
 			resetRadio: continuous,
+			radioScope,
 		});
 		if (!ok) showToast($videoSession.error ?? 'This video could not be loaded.', 'error', 3200);
 	}

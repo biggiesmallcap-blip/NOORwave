@@ -44,6 +44,15 @@ describe('Videos editorial browse state', () => {
 		expect(source).toContain('onPlayAll={() => playFromSet(set, 0)}');
 	});
 
+	test('shelf playback uses the full row while browse radio uses the library mix', () => {
+		const shelfPlay = source.slice(source.indexOf('async function playFromSet'), source.indexOf('async function playBrowseMix'));
+		expect(shelfPlay).toContain('await playFromQueue(video, set.items, set.title, true);');
+		const browsePlay = source.slice(source.indexOf('async function playBrowseMix'), source.indexOf('async function toggleSavedVideo'));
+		expect(browsePlay).toContain("await playFromQueue(first, browseMix, 'Video radio', true, true, 'library');");
+		expect(source).toContain('onPlayAll={() => dailySet && playFromSet(dailySet, 0)}');
+		expect(source).toContain('onPlayAll={() => playFromSet(set, 0)}');
+	});
+
 	test('TIDAL editorial modules render through the shared shelves with claimed clicks', () => {
 		expect(source).toContain("api.getTidalPage('videos')");
 		expect(source).toContain("From TIDAL's desk");

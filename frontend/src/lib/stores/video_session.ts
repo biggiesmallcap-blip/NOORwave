@@ -42,6 +42,9 @@ export interface VideoPlayContext {
 	autoplay?: boolean;
 	continuous?: boolean;
 	resetRadio?: boolean;
+	/** Library radio keeps the supplied opening queue and refills from the
+	 * listener's taste and recently played artists instead of one fixed artist. */
+	radioScope?: 'artist' | 'library';
 }
 
 export interface PreloadedVideoStream {
@@ -96,8 +99,8 @@ function videoSongKey(item: Pick<VideoSessionItem, 'artist_id' | 'artist_name' |
 }
 
 function radioStartQueue(item: VideoSessionItem): VideoSessionItem[] {
-	// Let the seed drive the first refill. An editorial shelf can contain many
-	// unrelated artists and must not become the opening radio queue.
+	// Artist radio starts from its seed alone. Library radio keeps its mixed
+	// opening queue instead of using this path.
 	return [item];
 }
 
@@ -227,9 +230,11 @@ export async function playVideo(
 		radioSeenSongs = [item];
 		radioRefill = null;
 	}
-	const queue = ctx.resetRadio && ctx.continuous ? radioStartQueue(item) : ctx.queue;
-	const radioSeedArtistId = ctx.continuous ? (ctx.resetRadio ? item.artist_id ?? null : state.radioSeedArtistId) : null;
-	const radioSeedArtistName = ctx.continuous ? (ctx.resetRadio ? item.artist_name ?? null : state.radioSeedArtistName) : null;
+	const artistRadio = ctx.radioScope !== 'library';
+	const queue = ctx.resetRadio && ctx.continuous && artistRadio ? radioStartQueue(item) : ctx.queue;
+	const seed = artistRadio ? item : null;
+	const radioSeedArtistId = ctx.continuous ? (ctx.resetRadio ? seed?.artist_id ?? null : state.radioSeedArtistId) : null;
+	const radioSeedArtistName = ctx.continuous ? (ctx.resetRadio ? seed?.artist_name ?? null : state.radioSeedArtistName) : null;
 	if (
 		state.active &&
 		state.current?.tidal_id === item.tidal_id &&
@@ -324,7 +329,7 @@ export function refillVideoRadio(force = false): Promise<number> {
 			artist_id: video.artist_id ?? null, artist_name: video.artist_name ?? null, title: video.title,
 		})),
 		recent_artist_ids: recentArtists,
-	}).then(({ items, unfamiliar_video_ids }) => {
+	}).then(({ items }) => {
 		const current = get(session);
 		if (generation !== radioGeneration || !current.continuous || !current.active) return 0;
 		const existing = new Set(current.queue.map((v) => v.tidal_id));
@@ -339,17 +344,10 @@ export function refillVideoRadio(force = false): Promise<number> {
 			update({ radioDiscoveryMessage: 'No new videos in this pass. Checking again as the queue plays.' });
 			return 0;
 		}
-		if (force && (current.queue.length - current.currentIndex <= 2 || (fresh.length >= 8 && unfamiliar_video_ids.filter((id) => fresh.some((item) => item.tidal_id === id)).length >= 2))) {
-			// The browse shelves are a quick start. Once the server has a real
-			// discovery blend, hand upcoming playback to it immediately.
-			update({ queue: [...current.queue.slice(0, current.currentIndex + 1), ...fresh] });
-		} else if (!force) {
-			const start = Math.max(0, current.currentIndex - 6);
-			update({ queue: [...current.queue.slice(start), ...fresh] });
-		} else {
-			update({ radioDiscoveryMessage: 'Related videos are ready for the next queue refill.' });
-			return 0;
-		}
+		// Refills extend the selected queue. Keep every upcoming pick in order,
+		// including the mixed opening queue supplied by library radio.
+		const start = Math.max(0, current.currentIndex - 6);
+		update({ queue: [...current.queue.slice(start), ...fresh] });
 		const byArtist = new Map<string, number>();
 		for (const item of fresh) {
 			const artist = item.artist_name?.trim() || 'Unknown artist';
