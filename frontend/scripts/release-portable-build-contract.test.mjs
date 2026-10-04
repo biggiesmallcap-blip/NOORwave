@@ -6,6 +6,9 @@ import { execFileSync, spawnSync } from 'node:child_process';
 
 const root = resolve(import.meta.dirname, '../..');
 const powershell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
+const errorTestShells = [...new Set([powershell, 'pwsh'])].filter((shell) =>
+	shell === powershell || spawnSync(shell, ['-NoProfile', '-Command', 'exit 0']).status === 0
+);
 const skipPackaging = process.platform !== 'win32' && !process.env.CI &&
 	spawnSync(powershell, ['-NoProfile', '-Command', 'exit 0']).status !== 0;
 
@@ -50,7 +53,7 @@ describe('Windows release portable build', () => {
 // as well as locally on Windows. No Rust compilation or real executable runs.
 // Other local hosts can skip if PowerShell is absent; CI must run these tests.
 describe.skipIf(skipPackaging)('prebuilt Windows portable packaging', () => {
-	function withFixture(run) {
+	function withFixture(run, shell = powershell) {
 		const prefix = join(tmpdir(), 'noor-portable-');
 		const fixture = mkdtempSync(prefix);
 		try {
@@ -68,10 +71,16 @@ describe.skipIf(skipPackaging)('prebuilt Windows portable packaging', () => {
 				writeFileSync(mock, windows ? '@echo off\r\nexit /b 91\r\n' : '#!/bin/sh\nexit 91\n');
 				if (!windows) chmodSync(mock, 0o755);
 			}
-			const env = { ...process.env, PATH: join(fixture, 'bin') + delimiter + process.env.PATH };
-			const packagePortable = () => execFileSync(powershell, [
-				'-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(fixture, 'scripts/build-portable.ps1'),
-				'-UsePrebuiltFrontend', '-UsePrebuiltBinaries'
+			const env = {
+				...process.env,
+				PATH: join(fixture, 'bin') + delimiter + process.env.PATH,
+				NOOR_PORTABLE_SCRIPT: join(fixture, 'scripts/build-portable.ps1')
+			};
+			// Assert the actual exception message, independent of PowerShell's
+			// terminal-width wrapping, ANSI colours, and error-record formatting.
+			const packagePortable = () => execFileSync(shell, [
+				'-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+				'try { & $env:NOOR_PORTABLE_SCRIPT -UsePrebuiltFrontend -UsePrebuiltBinaries } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }'
 			], { env, encoding: 'utf8', timeout: 20000, stdio: 'pipe' });
 			run(fixture, packagePortable);
 		} finally {
@@ -98,8 +107,10 @@ describe.skipIf(skipPackaging)('prebuilt Windows portable packaging', () => {
 		});
 	}, 30000);
 
-	for (const binary of ['noor-app.exe', 'noor-server.exe']) {
-		test(`fails before packaging when ${binary} is missing`, () => {
+	for (const [shell, binary] of errorTestShells.flatMap((shell) =>
+		['noor-app.exe', 'noor-server.exe'].map((binary) => [shell, binary])
+	)) {
+		test(`fails before packaging when ${binary} is missing (${shell})`, () => {
 			withFixture((fixture, packagePortable) => {
 				rmSync(join(fixture, 'target/release', binary));
 				let failure;
@@ -109,9 +120,10 @@ describe.skipIf(skipPackaging)('prebuilt Windows portable packaging', () => {
 					failure = error;
 				}
 				expect(failure).toBeDefined();
+				expect(failure.status).toBe(1);
 				expect(String(failure.stderr)).toContain(`${binary} does not exist`);
 				expect(existsSync(join(fixture, 'dist'))).toBe(false);
-			});
+			}, shell);
 		}, 30000);
 	}
 });
