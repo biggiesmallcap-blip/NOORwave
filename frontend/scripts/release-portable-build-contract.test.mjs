@@ -36,7 +36,7 @@ describe('Windows release portable build', () => {
 
 	test('Windows compiles once, archives the portable binary, then bundles the signed installer', () => {
 		const workflow = read('.github/workflows/release.yml').split('  build-linux:')[0];
-		const compile = 'tauri build --no-bundle --config tauri.installer.conf.json -- --locked';
+		const compile = "tauri build --no-bundle --config tauri.installer.conf.json '--' '--locked'";
 		const portable = '.\\scripts\\build-portable.ps1 -UsePrebuiltFrontend -UsePrebuiltBinaries';
 		const bundle = 'tauri bundle --bundles nsis --config tauri.installer.conf.json';
 

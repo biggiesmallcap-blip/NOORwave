@@ -107,6 +107,8 @@
     },
     "signedInstaller": "not tested",
     "macOSDesktop": "not tested",
-    "linuxDesktop": "not tested"
+    "linuxDesktop": "not tested",
+    "frontendTestFiles": 161,
+    "frontendTestsPassed": 993
   }
 }

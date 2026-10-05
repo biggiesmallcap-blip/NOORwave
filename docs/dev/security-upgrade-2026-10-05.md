@@ -46,6 +46,7 @@ reintroduced.
 ## Validation
 
 - Windows `cargo test --workspace --locked`: **1,851 passed, six ignored**.
+- Frontend Vitest 5.0.3 with coverage: **161 files / 993 tests passed**.
 - `cargo fmt --all -- --check` and the repository's workspace/all-target Clippy
   command pass. Existing server warnings remain.
 - Permission tests exercise Tauri's real command resolution: default and
