@@ -8,10 +8,13 @@ name = "noor-app"
 path = "src/main.rs"
 
 [build-dependencies]
-tauri-build = { version = "=2.5.6", features = [] }
+tauri-build = { version = "=2.7.1", features = [] }
 
 [dependencies]
-tauri = { version = "=2.10.3", features = ["tray-icon", "image-png", "image-ico", "devtools"] }
+tauri = { version = "=2.12.1", features = ["tray-icon", "image-png", "image-ico", "devtools"] }
+# Keep the runtime family aligned; mixed versions previously broke Windows builds.
+tauri-runtime = "=2.12.1"
+tauri-runtime-wry = { version = "=2.12.1", default-features = false }
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-updater = "2"
@@ -27,3 +30,4 @@ winreg = "0.10.1"
 
 [dev-dependencies]
 tempfile = "3"
+tauri = { version = "=2.12.1", features = ["test"] }

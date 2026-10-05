@@ -3,6 +3,7 @@
 mod commands;
 mod config;
 mod installed_updater;
+mod ipc_access;
 mod media_keys;
 mod migration;
 mod paths;
@@ -70,6 +71,7 @@ fn main() {
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
+            ipc_access::install(&handle)?;
             let installed = paths::is_installed_mode();
 
             let state_for_setup = lifecycle_for_setup.sidecar().clone();

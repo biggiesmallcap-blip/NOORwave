@@ -1,10 +1,10 @@
 use std::fs;
 use std::path::Path;
 
-const TAURI_VERSION: &str = "2.10.3";
-const TAURI_BUILD_VERSION: &str = "2.5.6";
-const TAURI_RUNTIME_WRY_VERSION: &str = "2.10.1";
-const WRY_VERSION: &str = "0.54.4";
+const TAURI_VERSION: &str = "2.12.1";
+const TAURI_BUILD_VERSION: &str = "2.7.1";
+const TAURI_RUNTIME_WRY_VERSION: &str = "2.12.1";
+const WRY_VERSION: &str = "0.57.0";
 const AUTOSTART_VERSION: &str = "2.5.1";
 const SINGLE_INSTANCE_VERSION: &str = "2.4.5";
 
@@ -34,6 +34,7 @@ fn tauri_runtime_stays_on_known_good_windows_stack() {
 
     assert_lock_version(&lockfile, "tauri", TAURI_VERSION);
     assert_lock_version(&lockfile, "tauri-build", TAURI_BUILD_VERSION);
+    assert_lock_version(&lockfile, "tauri-runtime", TAURI_RUNTIME_WRY_VERSION);
     assert_lock_version(&lockfile, "tauri-runtime-wry", TAURI_RUNTIME_WRY_VERSION);
     assert_lock_version(&lockfile, "wry", WRY_VERSION);
     assert_lock_version(&lockfile, "tauri-plugin-autostart", AUTOSTART_VERSION);
@@ -62,8 +63,8 @@ fn single_instance_is_registered_before_sidecar_owning_plugins_and_setup() {
 #[test]
 fn native_capability_remains_scoped_to_the_exact_loopback_origin() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let capability =
-        fs::read_to_string(manifest_dir.join("capabilities/default.json")).expect("capability");
+    let capability = fs::read_to_string(manifest_dir.join("runtime-capabilities/main.json"))
+        .expect("capability");
     let parsed: serde_json::Value = serde_json::from_str(&capability).expect("valid capability");
     assert_eq!(
         parsed["remote"]["urls"],
@@ -72,6 +73,7 @@ fn native_capability_remains_scoped_to_the_exact_loopback_origin() {
     assert!(!capability.contains("noor.local"));
     assert!(!capability.contains("0.0.0.0"));
     assert!(!capability.contains("http://*/"));
+    assert_eq!(parsed["local"], false);
 }
 
 fn assert_lock_version(lockfile: &str, package: &str, expected: &str) {

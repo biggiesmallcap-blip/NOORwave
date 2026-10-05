@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-remote-host-mode"
+description = "Enables the set_remote_host_mode command without any pre-configured scope."
+commands.allow = ["set_remote_host_mode"]
+
+[[permission]]
+identifier = "deny-set-remote-host-mode"
+description = "Denies the set_remote_host_mode command without any pre-configured scope."
+commands.deny = ["set_remote_host_mode"]

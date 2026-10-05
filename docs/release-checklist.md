@@ -40,6 +40,16 @@ If local signing credentials are unavailable, GitHub Actions can still produce a
    ```
 
    Or hand-edit the two version fields. Confirm `git diff Cargo.lock` is exactly those two lines before committing.
+
+   Security upgrades deliberately update the framework family together. The
+   current Windows baseline pins Tauri/runtime/runtime-wry 2.12.1, tauri-build
+   2.7.1 and CLI 2.12.1. Keep the runtime pins aligned; do not restore vulnerable
+   Tauri 2.10.3 to work around zoom. The main window's runtime capability grants
+   zoom and app commands only to its configured `127.0.0.1` port, including
+   `NOOR_PORT` / `NOOR_ADDR` overrides. Before changing this stack, run the IPC
+   access tests and `scripts/tauri-zoom-smoke.mjs` against an isolated Windows
+   WebView2 build. Quote `'--' '--locked'` in the Windows pnpm CLI command so
+   PowerShell forwards the separator to Cargo.
 4. Commit the version bump, lockfile change, and `docs/releases/vX.Y.Z.md` together. Let the PR check pass before creating and pushing the tag.
 5. Keep both Windows artifacts: the portable zip and the NSIS setup exe.
 6. Keep `installMode: "currentUser"` in the NSIS config.
