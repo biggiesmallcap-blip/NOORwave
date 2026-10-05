@@ -10,7 +10,7 @@ The release commit changes two Cargo manifest versions, the Tauri config version
 2. Make the version and notes edits below. Check that `git diff Cargo.lock` contains only the two workspace version lines and run `git diff --check`. For version-only edits, use the existing PR CI instead of repeating a full local Rust suite or reinstalling frontend dependencies. Run additional local tests when product code or packaging behavior changed.
 3. Push the release-preparation PR. A merged PR is not proof of green CI: this repository may merge before checks finish. Wait for the `PR check` run on the **exact master merge commit** to complete successfully.
 4. Update the checkout to that master commit and run `scripts\release-preflight.ps1 -Tag vX.Y.Z`. It checks versions, notes, signing secret presence, authentication, the exact master CI result, and tag availability. Then create and push the tag. Do not spend release time trying to repair a stalled local `pnpm install` when the same locked frontend build passed in CI.
-5. Watch the release workflow. The Windows job must pass NSIS signing and signature packaging; then verify the setup exe, `.sig`, `latest.json`, portable zip, other platform archives, and `sha256sums.txt` on the release. The Tauri updater signature is separate from a Windows CA code-signing certificate, so retain the SmartScreen note.
+5. Watch the release workflow, which stages assets in a **draft** release. The Windows job must pass NSIS signing and signature packaging; then verify the setup exe, `.sig`, `latest.json`, portable zip, other platform archives, and `sha256sums.txt`. Verify the installer signature against the public key in `noor-app/tauri.conf.json` before publishing. The Tauri updater signature is separate from a Windows CA code-signing certificate, so retain the SmartScreen note.
 
 If local signing credentials are unavailable, GitHub Actions can still produce and verify the signed installer. Report the local installation and mutable-data smoke test as unverified; do not confuse its absence with missing CI signing secrets or delay an explicitly requested tag for a version-only release.
 
@@ -70,7 +70,7 @@ creates the NSIS installer and updater signature. Keep that order: the bundler
 patches the application with installer-specific bundle metadata. The Windows
 warmer must use the same Tauri compile command and configuration as the release.
 
-## After CI publishes
+## After CI stages the draft
 
 `latest.json` already contains the prepared notes at this point. Do not wait until this step to write or revise the changelog: changes made after tagging are not included in the updater manifest for that release.
 
@@ -88,6 +88,23 @@ Remove-Item -LiteralPath $bodyPath
 ```
 
 Finally, download `latest.json` from the release and confirm its `notes` field contains the same user-facing sections before announcing the release.
+
+Wait for every platform build and the combined checksums job to succeed. After
+artifact verification and the Windows smoke test, publish the prepared draft:
+
+```powershell
+gh release edit $tag --draft=false --latest
+```
+
+Confirm the public latest-release endpoint and updater manifest resolve to the
+new version. Do not publish a partially built or unverified draft.
+
+The NSIS hook forces the normal `%LOCALAPPDATA%\Programs\NOORwave` install path.
+On a workstation with an existing installation, extract the verified setup
+payload into an isolated fixture and test that executable in installed mode
+with isolated application data and WebView2 storage. This checks the shipped
+payload without overwriting the user's installation; report that the installer
+wizard, registry changes and uninstall flow were not exercised.
 
 ## Installed-Windows release-ready means
 
