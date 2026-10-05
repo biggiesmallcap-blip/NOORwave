@@ -214,6 +214,30 @@ where
     Err(last_error.unwrap_or_else(|| anyhow!("DASH prebuffer fetch failed")))
 }
 
+async fn fetch_playback_dash_prebuffer(
+    config: &PlaybackRuntimeConfig,
+    init_url: &str,
+    media_urls: &[String],
+    stop: &AtomicBool,
+    track_id: i64,
+) -> Result<DashPrebuffer> {
+    // Startup needs the established CDN identity too; the generic API client
+    // has different headers and timeout policy. Keep this client local to the
+    // prebuffer runtime: the downloader owns its own runtime/client afterward.
+    let http = build_tidal_cdn_client();
+    fetch_dash_prebuffer(
+        init_url,
+        media_urls,
+        config.dj_analysis_only,
+        stop,
+        move |url, segment_index| {
+            let http = http.clone();
+            async move { append_stream_bytes(&http, &url, segment_index, track_id).await }
+        },
+    )
+    .await
+}
+
 async fn fetch_dash_segment_with_retries<F, Fut>(
     url: String,
     segment_index: usize,
@@ -498,18 +522,12 @@ pub(crate) fn decode_and_buffer_job(
                 let prebuffer_stop = shared.stop_flag();
                 let prebuffer_started = Instant::now();
                 let prebuffer = rt
-                    .block_on(fetch_dash_prebuffer(
+                    .block_on(fetch_playback_dash_prebuffer(
+                        &config,
                         &stream_info.url,
                         &sliced_segment_urls,
-                        config.dj_analysis_only,
                         &prebuffer_stop,
-                        |url, segment_index| {
-                            let http = config.http_client.clone();
-                            let track_id = shared.track_id;
-                            async move {
-                                append_stream_bytes(&http, &url, segment_index, track_id).await
-                            }
-                        },
+                        shared.track_id,
                     ))
                     .context("DASH stream prebuffer failed")?;
                 if prebuffer.ended_after_prefix_failure {
@@ -1174,6 +1192,54 @@ mod tests {
             .await
             .context("test retryable timeout")?;
         Ok(Vec::new())
+    }
+
+    #[tokio::test]
+    async fn startup_prebuffer_uses_the_cdn_client_identity_for_init_and_media() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut bytes = Vec::new();
+                    loop {
+                        let mut chunk = [0; 1024];
+                        let n = socket.read(&mut chunk).await.unwrap();
+                        if n == 0 {
+                            return;
+                        }
+                        bytes.extend_from_slice(&chunk[..n]);
+                        if bytes.windows(4).any(|s| s == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let request = String::from_utf8(bytes).unwrap().to_ascii_lowercase();
+                    let status = if request.contains("user-agent: tidal_android/1039 okhttp/3.14.9")
+                    {
+                        "200 OK"
+                    } else {
+                        "403 Forbidden"
+                    };
+                    socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx").as_bytes()).await.unwrap();
+                });
+            }
+        });
+        let (config, _) = test_config(true);
+        let result = fetch_playback_dash_prebuffer(
+            &config,
+            &format!("{base}/init"),
+            &[format!("{base}/0"), format!("{base}/1")],
+            &AtomicBool::new(false),
+            1,
+        )
+        .await;
+        server.abort();
+        let prebuffer =
+            result.expect("startup must use the same CDN identity as background download");
+        assert_eq!(prebuffer.fetched_media_segments, 2);
+        assert_eq!(prebuffer.bytes, b"xxx");
     }
 
     fn pcm_wav_format_with_terminal(

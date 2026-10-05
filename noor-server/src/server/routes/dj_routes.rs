@@ -52,6 +52,9 @@ const DROP_PREVIEW_FINAL_WINDOW_GUARD_MS: i64 = 45_000;
 #[cfg(test)]
 const DJ_READY_PAIR_PLANNING_RETRY_SECS: u64 = 15;
 const DJ_PROFILE_REBUILD_FAILURE_TTL_SECS: u64 = 300;
+// An exhausted source must not start a fresh burst every five minutes during
+// the same session. Explicit Rebuild still clears this cooldown immediately.
+const DJ_PROFILE_EXHAUSTED_FAILURE_TTL_SECS: u64 = 24 * 60 * 60;
 const DJ_PROFILE_AUTO_REBUILD_MAX_ACTIVE: usize = 2;
 const DJ_PROFILE_ANALYSIS_TIDAL_QUALITIES: [&str; 2] = ["LOW", "LOSSLESS"];
 const MAX_MANUAL_DROP_MARKERS: usize = 16;
@@ -1085,6 +1088,7 @@ async fn queue_tidal_profile_rebuild(
         )
     };
     let config = PlaybackRuntimeConfig::new(http_client, tokens.access_token, None)
+        .with_stream_resolver(super::runtime_stream_resolver(state.clone()))
         .with_dj_analysis(true, Some(dj_analysis_tx))
         .for_dj_analysis_only();
 
@@ -1321,11 +1325,9 @@ fn dj_profile_inflight_key(key: &AudioDjProfileKey) -> String {
 }
 
 fn deck_needs_profile_rebuild(deck: &DjDeckStatus) -> bool {
-    (!deck.profile_ready
-        && (deck.profile_status == "missing"
-            || (deck.profile_status == "retrying"
-                && deck.profile_retry_after_ms.unwrap_or(0) <= 0)))
-        || (deck.profile_ready && deck.waveform_status == "missing")
+    (matches!(deck.profile_status.as_str(), "missing" | "ready")
+        || (deck.profile_status == "retrying" && deck.profile_retry_after_ms.unwrap_or(0) <= 0))
+        && (!deck.profile_ready || deck.waveform_status == "missing")
 }
 
 #[cfg(test)]
@@ -1417,12 +1419,17 @@ fn record_dj_profile_rebuild_failure(key: &str, status: &str, message: String) -
         .saturating_add(1);
     let mut retry_reason = profile_rebuild_retry_reason(status, &message);
     let mut status = status.to_string();
+    let mut message = message;
     if retry_reason.is_some() && attempts >= DJ_PROFILE_MAX_TRANSIENT_ATTEMPTS {
         // Give up: treat a chronically-failing rebuild as a hard decode
         // failure. deck_needs_profile_rebuild stops re-queuing decode_failed
         // decks, so the loop ends and the DJ engine can fall back.
         retry_reason = None;
         status = "decode_failed".to_string();
+        message = format!(
+            "{} Automatic analysis stopped after {attempts} attempts. Rebuild analysis to try again.",
+            message.replace(" Retrying analysis.", "")
+        );
     }
     let retry_delay = retry_reason
         .as_ref()
@@ -1453,7 +1460,11 @@ fn recent_dj_profile_rebuild_failure(key: &str) -> Option<DjProfileRebuildFailur
     match guard.get(key) {
         Some(failure)
             if failure.recorded_at.elapsed()
-                <= Duration::from_secs(DJ_PROFILE_REBUILD_FAILURE_TTL_SECS) =>
+                <= Duration::from_secs(if failure.status == "decode_failed" {
+                    DJ_PROFILE_EXHAUSTED_FAILURE_TTL_SECS
+                } else {
+                    DJ_PROFILE_REBUILD_FAILURE_TTL_SECS
+                }) =>
         {
             Some(failure.clone())
         }
@@ -1899,7 +1910,10 @@ fn deck_status(
     let correction = queries::get_audio_dj_profile_correction(conn, &key)?;
     let rebuild_key = dj_profile_inflight_key(&key);
     let updating_analysis = profile.as_ref().is_some_and(|row| {
-        row.source.starts_with("dj_playback") && !dj_profile_row_is_current(row)
+        // A cached profile still needs its waveform, regardless of provenance.
+        // Do not let that cache clear a running rebuild or its retry budget.
+        decode_f32_blob(&row.waveform_peaks_blob).is_none_or(|peaks| peaks.is_empty())
+            || (row.source.starts_with("dj_playback") && !dj_profile_row_is_current(row))
     });
     let rebuild_failure = if profile.is_some() && !updating_analysis {
         clear_dj_profile_rebuild_failure(&rebuild_key);
@@ -5161,6 +5175,108 @@ mod tests {
                 .is_empty()
         );
         clear_dj_profile_rebuild_failure(&failure_key);
+    }
+
+    #[test]
+    fn exhausted_analysis_does_not_restart_after_five_minutes_of_polling() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::schema::run_migrations(&conn).unwrap();
+        let media_ref = DjMediaRef::TidalTrack {
+            tidal_id: 129999878,
+            track_id: None,
+        };
+        let key = dj_profile_inflight_key(&media_ref.profile_key());
+        clear_dj_profile_rebuild_failure(&key);
+        for _ in 0..DJ_PROFILE_MAX_TRANSIENT_ATTEMPTS {
+            record_dj_profile_rebuild_failure(
+                &key,
+                "retrying",
+                "DASH stream prebuffer failed".into(),
+            );
+        }
+        profile_rebuild_failures()
+            .lock()
+            .unwrap()
+            .get_mut(&key)
+            .unwrap()
+            .recorded_at =
+            Instant::now() - Duration::from_secs(DJ_PROFILE_REBUILD_FAILURE_TTL_SECS + 60);
+        let pair = crate::playback::dj_lookahead::DjLookaheadPair {
+            current: Some(media_ref),
+            next: None,
+            current_queue_item_id: None,
+            next_queue_item_id: None,
+            queue_generation: 0,
+        };
+        let inflight = Arc::new(Mutex::new(HashMap::new()));
+        assert!(
+            missing_dj_profile_refs_for_pair(&conn, pair, &[], &inflight)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            recent_dj_profile_rebuild_failure(&key).unwrap().status,
+            "decode_failed"
+        );
+        clear_dj_profile_rebuild_failure(&key);
+    }
+
+    #[test]
+    fn missing_waveform_respects_analysis_inflight_backoff_and_exhaustion() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::schema::run_migrations(&conn).unwrap();
+        let media_ref = DjMediaRef::TidalTrack {
+            tidal_id: 129999879,
+            track_id: None,
+        };
+        let profile_key = media_ref.profile_key();
+        let key = dj_profile_inflight_key(&profile_key);
+        clear_dj_profile_rebuild_failure(&key);
+        let mut row = test_profile_row(&profile_key, DJ_PROFILE_VERSION);
+        row.source = "dj_playback_measured".into();
+        row.waveform_peaks_blob.clear();
+        queries::upsert_audio_dj_profile(&conn, &row).unwrap();
+        let pair = crate::playback::dj_lookahead::DjLookaheadPair {
+            current: Some(media_ref),
+            next: None,
+            current_queue_item_id: None,
+            next_queue_item_id: None,
+            queue_generation: 0,
+        };
+        let inflight = Arc::new(Mutex::new(HashMap::from([(key.clone(), Instant::now())])));
+        assert!(
+            missing_dj_profile_refs_for_pair(&conn, pair.clone(), &[], &inflight)
+                .unwrap()
+                .is_empty()
+        );
+        inflight.lock().unwrap().clear();
+        record_dj_profile_rebuild_failure(&key, "retrying", "DASH stream prebuffer failed".into());
+        assert!(
+            missing_dj_profile_refs_for_pair(&conn, pair.clone(), &[], &inflight)
+                .unwrap()
+                .is_empty()
+        );
+        for _ in 1..DJ_PROFILE_MAX_TRANSIENT_ATTEMPTS {
+            record_dj_profile_rebuild_failure(
+                &key,
+                "retrying",
+                "DASH stream prebuffer failed".into(),
+            );
+        }
+        assert!(
+            missing_dj_profile_refs_for_pair(&conn, pair.clone(), &[], &inflight)
+                .unwrap()
+                .is_empty()
+        );
+        // Imported profiles without waveforms need the same retry protection.
+        row.source = "manual_import".into();
+        queries::upsert_audio_dj_profile(&conn, &row).unwrap();
+        assert!(
+            missing_dj_profile_refs_for_pair(&conn, pair, &[], &inflight)
+                .unwrap()
+                .is_empty()
+        );
+        clear_dj_profile_rebuild_failure(&key);
     }
 
     #[test]
