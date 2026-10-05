@@ -17,6 +17,16 @@ function read(relativePath) {
 }
 
 describe('Windows release portable build', () => {
+	test('release uploads stay in draft until installer verification and publication', () => {
+		const workflow = read('.github/workflows/release.yml');
+		const releaseSteps = workflow.split(/\n      - name: /).filter(step => step.includes('uses: softprops/action-gh-release@'));
+
+		expect(releaseSteps.length).toBeGreaterThan(0);
+		for (const step of releaseSteps) {
+			expect(step).toMatch(/\n          draft: true\n/);
+		}
+	});
+
 	test('GitHub builds the frontend before packaging and skips the script frontend build', () => {
 		const workflow = read('.github/workflows/release.yml');
 

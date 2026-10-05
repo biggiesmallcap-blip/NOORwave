@@ -1,9 +1,10 @@
 // Run against an isolated Windows desktop build with WebView2 remote debugging.
-// Usage: node scripts/tauri-zoom-smoke.mjs http://127.0.0.1:18766 http://127.0.0.1:17611
+// Usage: node scripts/tauri-zoom-smoke.mjs http://127.0.0.1:18766 http://127.0.0.1:17611 [Portable|Installed]
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 
-const [debugUrl, appUrl] = process.argv.slice(2);
+const [debugUrl, appUrl, installMode = 'Portable'] = process.argv.slice(2);
+assert.ok(['Portable', 'Installed'].includes(installMode), 'Expected Portable or Installed mode.');
 if (!debugUrl || !appUrl) throw new Error('Supply the isolated WebView2 debug URL and app URL.');
 for (const value of [debugUrl, appUrl]) {
   const url = new URL(value);
@@ -37,7 +38,7 @@ try {
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   const invoke = command => page.evaluate(command => window.__TAURI_INTERNALS__.invoke(command), command);
-  assert.equal(await invoke('get_install_mode'), 'Portable');
+  assert.equal(await invoke('get_install_mode'), installMode);
   assert.equal(typeof await invoke('get_minimize_to_tray'), 'boolean');
   assert.equal(typeof await invoke('get_remote_host_state'), 'object');
   assert.equal(typeof await invoke('get_startup_state'), 'object');
@@ -92,7 +93,7 @@ try {
   await page.keyboard.press('Control+0');
   await expectZoom(1);
   assert.deepEqual(zoomErrors, []);
-  console.log(JSON.stringify({ appUrl, baseline, passed: [
+  console.log(JSON.stringify({ appUrl, installMode, baseline, passed: [
     'desktop commands', 'Ctrl+wheel in/out', 'Ctrl+plus/minus/reset',
     'persisted zoom after reload', 'ordinary wheel scrolling', '50–200% bounds',
   ] }));
