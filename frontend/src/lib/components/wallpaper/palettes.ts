@@ -535,7 +535,7 @@ export const PALETTES: Palette[] = [
 	}
 ];
 
-export const DEFAULT_PALETTE: PaletteId = 'clay';
+export const DEFAULT_PALETTE: PaletteId = 'futuro';
 
 export function paletteById(id: PaletteId): Palette {
 	return PALETTES.find((p) => p.id === id) ?? PALETTES[0];

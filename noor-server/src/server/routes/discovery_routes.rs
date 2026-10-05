@@ -587,6 +587,7 @@ pub(super) async fn start_discovery_training(
         };
         let tidal = tokens.map(|tokens| {
             TidalClient::with_http(tidal_http_client, tokens.access_token, tokens.country_code)
+                .with_metadata_store(db.clone())
         });
         let external_refresh_clients =
             discovery_learning::ExternalProviderRefreshClients { lastfm, tidal };

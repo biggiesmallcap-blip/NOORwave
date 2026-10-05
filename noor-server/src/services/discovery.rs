@@ -67,6 +67,7 @@ pub trait DiscoveryProvider: Send + Sync {
 #[derive(Clone)]
 pub struct TidalDiscoveryProvider {
     client: TidalClient,
+    db: crate::db::Database,
     http: reqwest::Client,
     access_token: String,
     user_id: String,
@@ -79,13 +80,16 @@ impl TidalDiscoveryProvider {
         user_id: String,
         country_code: String,
         http: reqwest::Client,
+        db: crate::db::Database,
     ) -> Self {
         Self {
             client: TidalClient::with_http(
                 http.clone(),
                 access_token.clone(),
                 country_code.clone(),
-            ),
+            )
+            .with_metadata_store(db.clone()),
+            db,
             http,
             access_token,
             user_id,
@@ -199,6 +203,10 @@ impl TidalDiscoveryProvider {
             );
         }
 
+        let blocked = self
+            .db
+            .with_conn(|conn| Ok(crate::db::tidal_content::blocked_ids(conn)?))?;
+        tracks.retain(|track| !track.tidal_track_id.is_some_and(|id| blocked.contains(&id)));
         Ok(tracks)
     }
 }

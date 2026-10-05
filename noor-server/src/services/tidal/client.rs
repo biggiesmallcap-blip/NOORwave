@@ -135,6 +135,7 @@ pub struct TidalClient {
     access_token: String,
     country_code: String,
     request_priority: TidalRequestPriority,
+    metadata_store: Option<crate::db::Database>,
 }
 
 // ─── API Response Types ──────────────────────────────────
@@ -358,6 +359,7 @@ impl TidalClient {
             access_token,
             country_code,
             request_priority: TidalRequestPriority::Interactive,
+            metadata_store: None,
         }
     }
 
@@ -365,6 +367,11 @@ impl TidalClient {
         let mut client = self.clone();
         client.request_priority = TidalRequestPriority::Background;
         client
+    }
+
+    pub(crate) fn with_metadata_store(mut self, db: crate::db::Database) -> Self {
+        self.metadata_store = Some(db);
+        self
     }
 
     /// Convenience constructor that builds a fresh HTTP client. Prefer
@@ -428,13 +435,19 @@ impl TidalClient {
                 .nth(200)
                 .map_or(&body[..], |(i, _)| &body[..i])
         );
-        serde_json::from_str(&body).context(format!(
+        let payload: serde_json::Value = serde_json::from_str(&body).context(format!(
             "Failed to parse TIDAL response from {}. Body preview: {}",
             url,
             body.char_indices()
                 .nth(500)
                 .map_or(&body[..], |(i, _)| &body[..i])
-        ))
+        ))?;
+        if let Some(db) = &self.metadata_store
+            && !url.contains("/videos")
+        {
+            db.with_conn(|conn| Ok(crate::db::tidal_content::observe(conn, &payload)?))?;
+        }
+        serde_json::from_value(payload).context("Failed to decode TIDAL catalog response")
     }
 
     fn artwork_url(cover_id: &str, size: i32) -> String {

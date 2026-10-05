@@ -795,7 +795,8 @@ pub(super) async fn get_album_tracks(
         tidal_http_client,
         tokens.access_token.clone(),
         tokens.country_code.clone(),
-    );
+    )
+    .with_metadata_store(state.read().await.db.clone());
 
     // Pre-fix legacy rows that landed with NULL track_number â€” `TidalTrack`
     // shipped without #[serde(rename = "trackNumber")] for a long time, so
@@ -1822,7 +1823,8 @@ pub(super) async fn get_artist_discography(
         tidal_http_client,
         tokens.access_token.clone(),
         tokens.country_code.clone(),
-    );
+    )
+    .with_metadata_store(state.read().await.db.clone());
 
     let payload = if query.preview {
         build_tidal_artist_preview_payload(&state, &client, tidal_artist_id, &tokens).await
@@ -1914,6 +1916,7 @@ pub(super) async fn get_tidal_artist_release_page(
         tokens.access_token.clone(),
         tokens.country_code.clone(),
     )
+    .with_metadata_store(state.read().await.db.clone())
     .for_background_work();
     let mut page = bounded_artist_fetch("release-page", ARTIST_ALBUM_GROUP_TIMEOUT, || {
         client.get_artist_albums(tidal_artist_id, 50, query.offset, Some(filter))
@@ -2115,7 +2118,8 @@ pub(super) async fn get_tidal_album_tracks(
         tidal_http_client,
         tokens.access_token.clone(),
         tokens.country_code.clone(),
-    );
+    )
+    .with_metadata_store(state.read().await.db.clone());
     let items = match client.get_all_album_tracks(tidal_album_id).await {
         Ok(items) => items,
         Err(error) if error_looks_like_auth(&error) => {
@@ -2197,7 +2201,8 @@ pub(super) async fn import_tidal_album(
         tidal_http_client,
         tokens.access_token.clone(),
         tokens.country_code.clone(),
-    );
+    )
+    .with_metadata_store(state.read().await.db.clone());
     let imported = tidal_import::import_album(&db, &client, tidal_album_id)
         .await
         .map_err(|e| {

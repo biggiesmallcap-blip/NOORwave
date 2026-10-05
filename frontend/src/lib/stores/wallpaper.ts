@@ -53,8 +53,8 @@ export const VALID: WallpaperId[] = ['none', 'aurora', 'chrome', 'grid', 'nebula
                                'pattern-melt', 'pattern-speed', 'pattern-vortex',
                                'pattern-shards', 'pattern-vector'];
 
-// Keep the material surface calm until the user chooses an animated wallpaper.
-const DEFAULT: WallpaperId = 'none';
+// Original fresh-install appearance; valid saved choices always take priority.
+const DEFAULT: WallpaperId = 'standing-wave';
 
 function clampSetting(value: number, min: number, max: number): number {
 	return Math.min(max, Math.max(min, Math.round(value)));

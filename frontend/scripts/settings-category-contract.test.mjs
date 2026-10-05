@@ -1,14 +1,16 @@
-import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'vitest';
-
-const source = readFileSync('src/routes/settings/+page.svelte', 'utf8').replace(/\r\n/g, '\n');
-
-describe('settings category contract', () => {
-	test('keeps Discovery engine inside the Audio settings category', () => {
-		expect(source).not.toContain("| 'discovery'");
-		expect(source).not.toContain("id: 'discovery'");
-		expect(source).not.toContain("cat.id === 'discovery'");
-		expect(source).not.toContain("activeCategory === 'discovery'");
-		expect(source).toContain("{#if activeCategory === 'audio'}\n\t\t\t<section data-setting-id=\"discovery-engine\" class=\"glass-panel section-panel\">\n\t\t\t\t<SectionHeader eyebrow=\"Learning\" title=\"Discovery engine\"");
+import { SETTINGS_CATEGORIES, resolveSettingsLocation } from '../src/lib/components/settings/settingsManifest';
+describe('settings category navigation', () => {
+	test('provides six focused categories', () => {
+		expect(SETTINGS_CATEGORIES.map(item => item.id)).toEqual(['appearance', 'playback', 'library', 'services', 'remote', 'app']);
+	});
+	test.each([
+		['?category=audio', 'playback'], ['?category=sources', 'library'], ['?category=account', 'remote'],
+		['#sources-tidal', 'services'], ['#integrations-listening', 'services'],
+		['?category=audio&setting=discovery-engine', 'library'],
+		['?category=app&setting=background-fps', 'appearance'],
+		['?category=unknown#%E0%A4%A', 'appearance'],
+	])('resolves old and current URLs: %s', (query, category) => {
+		expect(resolveSettingsLocation(new URL('http://localhost/settings' + query)).category).toBe(category);
 	});
 });

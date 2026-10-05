@@ -1,6 +1,15 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, tick, untrack } from 'svelte';
 	import { page } from '$app/state';
+	import { goto } from '$app/navigation';
+	import SettingGroup from '$lib/components/settings/SettingGroup.svelte';
+	import SettingRow from '$lib/components/settings/SettingRow.svelte';
+	import AppearanceFields, { type AppearanceValues } from '$lib/components/settings/AppearanceFields.svelte';
+	import StartupSetting from '$lib/components/settings/StartupSetting.svelte';
+	import CloseBehaviorSetting from '$lib/components/settings/CloseBehaviorSetting.svelte';
+	import ExternalLink from '$lib/components/ui/ExternalLink.svelte';
+	import { SETTINGS_CATEGORIES, resolveSettingsLocation, settingsHref, categoryLabel, type SettingsCategoryId } from '$lib/components/settings/settingsManifest';
+	import '$lib/components/settings/settings.css';
 	import type { Unsubscriber } from 'svelte/store';
 	import { showToast } from '$lib/stores/toast';
 	import {
@@ -37,7 +46,7 @@
 	} from '$lib/stores/tidal';
 	import {
 		audioAnalysis,
-		clearAllAnalysis,
+		clearAllAnalysis, audioAnalysisError, passiveDspKnown, passiveDspPending,
 		loadAudioStats,
 		loadPassiveDspState,
 		setPassiveDspEnabled,
@@ -49,6 +58,7 @@
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
 	import Toggle from '$lib/components/ui/Toggle.svelte';
 	import { searchSettings, type SettingsSearchEntry } from '$lib/components/settings/settingsSearch';
+	import TidalContentSetting from '$lib/components/settings/TidalContentSetting.svelte';
 	import IntegrationsPanel from '$lib/components/settings/IntegrationsPanel.svelte';
 	import PhoneRemotePanel from '$lib/components/settings/PhoneRemotePanel.svelte';
 	import {
@@ -137,7 +147,7 @@
 	const QUALITY_DISPLAY_OPTIONS: { id: QualityDisplay; label: string }[] = [
 		{ id: 'off', label: 'Hidden' },
 		{ id: 'icon', label: 'Icon' },
-		{ id: 'details', label: 'Full data' },
+		{ id: 'details', label: 'Details' },
 		{ id: 'both', label: 'Both' }
 	];
 	const APP_VERSION = String(import.meta.env.NOOR_APP_VERSION ?? '0.0.0');
@@ -157,7 +167,6 @@
 	let updateStatus = $state('Available in the desktop app');
 	let updateAvailableVersion = $state<string | null>(null);
 	let updateChecking = $state(false);
-	let minimizeToTray = $state(false);
 	let updateError = $state('');
 
 	let mbStatus = $state<'idle' | 'running' | 'done'>('idle');
@@ -179,8 +188,7 @@
 	let componentUnmounted = false;
 
 	let lastfmConfigured = $state(false);
-	let lastfmApiKey = $state('');
-	let lastfmSaving = $state(false);
+	let lastfmStatusKnown = $state(false);
 	let lastfmError = $state('');
 	let lastfmTotal = $state(0);
 	let lastfmChecked = $state(0);
@@ -288,25 +296,12 @@
 			const pending = await invoke<DesktopUpdateInfo | null>('get_update_state');
 			updateAvailableVersion = pending?.version ?? null;
 			updateStatus = pending ? `v${pending.version} available` : 'Up to date';
-			minimizeToTray = await invoke<boolean>('get_minimize_to_tray');
 		} catch (err) {
 			const unavailableState = unavailableDesktopUpdateState(appVersion, err);
 			installModeLabel = unavailableState.installModeLabel;
 			updateStatus = unavailableState.updateStatus;
 			updateAvailableVersion = unavailableState.updateAvailableVersion;
 			updateError = unavailableState.updateError;
-		}
-	}
-
-	async function setMinimizeToTray(next: boolean) {
-		const prev = minimizeToTray;
-		minimizeToTray = next;
-		try {
-			const { invoke } = await import('@tauri-apps/api/core');
-			await invoke('set_minimize_to_tray', { value: next });
-		} catch {
-			minimizeToTray = prev;
-			showToast('Could not save the close behavior. Try again.', 'error');
 		}
 	}
 
@@ -385,7 +380,7 @@
 				downloadFolderSaving = false;
 			}
 		} catch (error) {
-			console.warn('download folder pick failed', error);
+			errorMsg = 'Could not open the folder picker. Please try again.';
 			downloadFolderSaving = false;
 		}
 	}
@@ -408,7 +403,7 @@
 	}
 
 	onMount(() => {
-		if ($pendingTidalLogin) activeCategory = 'sources';
+		if ($pendingTidalLogin) activeCategory = 'services';
 		const tauriUnlisteners: Array<() => void> = [];
 		void refreshDownloadFolder();
 		const tick = setInterval(() => {
@@ -507,7 +502,7 @@
 
 		void refreshTidalStatus();
 		void loadSyncInfo();
-		void loadVisibleSettingsCategory();
+		untrack(() => void loadVisibleSettingsCategory());
 		const cancelBackgroundSettingsLoad = scheduleSettingsBackgroundLoad();
 		void loadDesktopAppInfo();
 		void setupDesktopUpdateListeners(tauriUnlisteners);
@@ -579,8 +574,8 @@
 	function formatSyncDate(isoString: string): string {
 		if (!isoString) return 'Never';
 		// Handle both formats: with and without timezone
-		const date = isoString.endsWith('Z') || isoString.includes('+') 
-			? new Date(isoString) 
+		const date = isoString.endsWith('Z') || isoString.includes('+')
+			? new Date(isoString)
 			: new Date(isoString + 'Z');
 		const now = new Date();
 		const diffMs = now.getTime() - date.getTime();
@@ -593,14 +588,21 @@
 		return date.toLocaleDateString();
 	}
 
+	let syncPreferencesBusy = $state(false);
 	async function toggleAutoSync() {
+		if (syncPreferencesBusy || !$syncInfo) return;
+		syncPreferencesBusy = true; errorMsg = '';
 		const current = $syncInfo?.auto_sync_daily ?? false;
-		await setAutoSyncDaily(!current);
+		if (!await setAutoSyncDaily(!current)) errorMsg = 'Daily sync could not be saved. Please retry.';
+		syncPreferencesBusy = false;
 	}
 
 	async function toggleSyncEnrichment() {
+		if (syncPreferencesBusy || !$syncInfo) return;
+		syncPreferencesBusy = true; errorMsg = '';
 		const current = $syncInfo?.enrich_from_favorite_albums ?? true;
-		await setSyncEnrichment(!current);
+		if (!await setSyncEnrichment(!current)) errorMsg = 'Sync options could not be saved. Please retry.';
+		syncPreferencesBusy = false;
 	}
 
 	let recleanRunning = $state(false);
@@ -723,19 +725,21 @@
 
 	async function loadLastfmStatus() {
 		const [configResp, enrichResp] = await Promise.allSettled([
-			authFetch(`${getApiBase()}/api/lastfm/status`),
-			authFetch(`${getApiBase()}/api/library/enrich/lastfm/status`)
+			api.getLastfmStatus(),
+			authFetch(`${getApiBase()}/api/library/enrich/lastfm/status`).then(async response => {
+				if (!response.ok) throw new Error('Tag status unavailable');
+				return response.json();
+			})
 		]);
 		if (configResp.status === 'fulfilled') {
 			markServerOnline();
-			const data = await configResp.value.json();
-			lastfmConfigured = data.configured === true;
+			lastfmConfigured = configResp.value.enrichment === true;
 		} else if (isFetchConnectionError(configResp.reason)) {
 			markServerOffline();
 		}
 
 		if (enrichResp.status === 'fulfilled') {
-			const data2 = await enrichResp.value.json();
+			const data2 = enrichResp.value;
 			lastfmTotal = data2.total_tracks ?? 0;
 			lastfmChecked = data2.checked_tracks ?? 0;
 			lastfmEnrichedCount = data2.enriched_tracks ?? 0;
@@ -747,40 +751,7 @@
 			lastfmPrefetchDone = data2.prefetch_done ?? 0;
 			lastfmRunStartedAt = data2.run_started_at ?? 0;
 		}
-	}
-
-	async function saveLastfmConfig() {
-		lastfmSaving = true;
-		lastfmError = '';
-		try {
-			const resp = await authFetch(`${getApiBase()}/api/lastfm/config`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ api_key: lastfmApiKey })
-			});
-			markServerOnline();
-			const data = await resp.json();
-			if (data.status === 'ok') {
-				lastfmConfigured = true;
-				lastfmApiKey = '';
-			} else {
-				lastfmError = data.message ?? 'Failed to save Last.fm API key.';
-			}
-		} catch (e) {
-			lastfmError = e instanceof Error ? e.message : String(e);
-			if (isFetchConnectionError(e)) markServerOffline();
-		} finally {
-			lastfmSaving = false;
-		}
-	}
-
-	async function clearLastfmConfig() {
-		try {
-			await authFetch(`${getApiBase()}/api/lastfm/config`, { method: 'DELETE' });
-			markServerOnline();
-		} catch {}
-		lastfmConfigured = false;
-		lastfmError = '';
+		lastfmStatusKnown = configResp.status === 'fulfilled' && enrichResp.status === 'fulfilled';
 	}
 
 	async function startLastfmEnrichment(mode: '' | 'retry_untagged' | 'refresh' = '') {
@@ -1042,7 +1013,7 @@
 				}
 			}
 			if (!componentUnmounted) {
-				radioSimilarityLabel = 'Still building. Check back in a few minutes.';
+				radioSimilarityLabel = 'Status not confirmed. Refresh to check the last successful build.';
 			}
 		} catch (error) {
 			if (isFetchConnectionError(error)) {
@@ -1375,35 +1346,24 @@
 			? new Date(portableSnapshot.generated_at).toLocaleString()
 			: 'Not exported yet'
 	);
-	let portableSnapshotCopy = $derived(
-		portableSnapshot?.exists
-			? 'Export here after enrichment, commit `data/musicbrainz`, then pull and import on the other machine.'
-			: 'No portable snapshot is present yet. Export one here first, then commit and push it.'
-	);
+	let portableSnapshotCopy = $derived(portableSnapshot?.exists ? 'Copy this enrichment folder to the same path on the other machine, then import it.' : 'Export enrichment for transfer. This is not a library backup.');
 
 	// ─── Category rail ───────────────────────────────────────────────────
 	// Splits the previously stacked panels into focused pages. Each panel
 	// belongs to exactly one category; empty columns are hidden by CSS.
-	type SettingsCategory = 'appearance' | 'sources' | 'audio' | 'account';
+	type SettingsCategory = SettingsCategoryId;
 	let activeCategory = $state<SettingsCategory>('appearance');
 	let handledTidalLoginRequest = $state('');
 	$effect(() => {
-		const requestedCategory = page.url.searchParams.get('category');
-		if (
-			requestedCategory === 'appearance' ||
-			requestedCategory === 'sources' ||
-			requestedCategory === 'audio' ||
-			requestedCategory === 'account'
-		) {
-			activeCategory = requestedCategory;
-		}
-		const requested = page.url.searchParams.get('tidalLogin');
-		if (requested !== '1') return;
-		const key = page.url.href;
-		if (handledTidalLoginRequest === key) return;
-		handledTidalLoginRequest = key;
-		activeCategory = 'sources';
-		window.history.replaceState({}, '', '/settings');
+		const destination = resolveSettingsLocation(page.url);
+		activeCategory = destination.category;
+		if (typeof window === 'undefined') return;
+		untrack(() => void loadVisibleSettingsCategory());
+		if (destination.entry) void revealSetting(destination.entry);
+		if (page.url.searchParams.get('tidalLogin') !== '1' || handledTidalLoginRequest === page.url.href) return;
+		handledTidalLoginRequest = page.url.href;
+		activeCategory = 'services';
+		void goto(settingsHref('services', 'connect-tidal'), { replaceState: true, noScroll: true });
 		void connectTidal();
 	});
 	// Single shared preview — shader prop changes reuse the same GL context,
@@ -1509,13 +1469,13 @@
 	const AUDIO_QUALITY_OPTIONS: { value: AudioQuality; label: string }[] = [
 		{ value: 'LOW', label: 'Low (96 kbps AAC)' },
 		{ value: 'HIGH', label: 'High (320 kbps AAC)' },
-		{ value: 'LOSSLESS', label: 'Lossless (CD quality FLAC)' },
-		{ value: 'HI_RES_LOSSLESS', label: 'Hi-Res Lossless (up to 24-bit / 192 kHz FLAC)' }
+		{ value: 'LOSSLESS', label: 'Lossless' },
+		{ value: 'HI_RES_LOSSLESS', label: 'Hi-Res Lossless' }
 	];
 
 	const VIDEO_QUALITY_OPTIONS: { value: VideoQualityMode; label: string }[] = [
-		{ value: 'MAX', label: 'Max available' },
-		{ value: 'AUTO', label: 'Auto adaptive' }
+		{ value: 'MAX', label: 'Highest' },
+		{ value: 'AUTO', label: 'Auto' }
 	];
 
 	const EXCLUSIVE_LATENCY_OPTIONS: { value: ExclusiveLatencyMode; label: string }[] = [
@@ -1552,7 +1512,7 @@
 	}
 
 	function loadVisibleSettingsCategory() {
-		if (activeCategory === 'sources') {
+		if (activeCategory === 'library') {
 			void loadMbStatus();
 			void loadPortableSnapshot();
 			void loadRadioSimilarityStatus();
@@ -1560,7 +1520,7 @@
 			void loadDatabaseStats();
 			return;
 		}
-		if (activeCategory === 'audio') {
+		if (activeCategory === 'playback') {
 			void loadPlaybackRuntime();
 			void loadAudioStats();
 			void syncAnalysisStatus();
@@ -1568,39 +1528,53 @@
 			void loadAudioOutput();
 			return;
 		}
-		if (activeCategory === 'account') {
+		if (activeCategory === 'services') {
 			void loadLastfmStatus();
 		}
 	}
 
 	function selectSettingsCategory(category: SettingsCategory) {
-		if (activeCategory === category) return;
 		activeCategory = category;
-		void loadVisibleSettingsCategory();
+		void goto(settingsHref(category), { noScroll: true, keepFocus: true });
 	}
-
 	let settingsQuery = $state('');
 	let searchFocused = $state(false);
+	let searchSelected = $state(0);
 	let searchMatches = $derived(searchSettings(settingsQuery));
-
-	function jumpToSetting(entry: SettingsSearchEntry) {
-		settingsQuery = '';
-		searchFocused = false;
-		selectSettingsCategory(entry.category);
-		// Wait two frames so the freshly-switched category renders before we
-		// scroll to and flash the target section.
-		requestAnimationFrame(() => {
-			requestAnimationFrame(() => {
-				const el = document.querySelector(`[data-setting-id="${entry.id}"]`);
-				if (el instanceof HTMLElement) {
-					el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-					el.classList.add('setting-flash');
-					setTimeout(() => el.classList.remove('setting-flash'), 1600);
-				}
-			});
-		});
+	let searchAnnouncement = $state('');
+	async function revealSetting(entry: SettingsSearchEntry) {
+		await tick();
+		const el = document.querySelector('[data-setting-id="' + (entry.target ?? entry.id) + '"]');
+		if (!(el instanceof HTMLElement)) return;
+		const requested = entry.focus ? el.querySelector(entry.focus) : el;
+		for (let ancestor: HTMLElement | null = (requested ?? el) as HTMLElement; ancestor; ancestor = ancestor.parentElement) {
+			if (ancestor instanceof HTMLDetailsElement) ancestor.open = true;
+		}
+		await tick();
+		const focus = requested instanceof HTMLDetailsElement ? requested.querySelector('summary')
+			: requested !== el ? requested : el.querySelector('input, select, button, summary, a');
+		el.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'center' });
+		if (focus instanceof HTMLElement) focus.focus({ preventScroll: true });
+		else { el.tabIndex = -1; el.focus({ preventScroll: true }); }
+		searchAnnouncement = requested ? entry.label : entry.label + ': choose its prerequisite to make this control available.';
 	}
-
+	function jumpToSetting(entry: SettingsSearchEntry) {
+		settingsQuery = ''; searchFocused = false; searchSelected = 0;
+		void goto(settingsHref(entry.category, entry.id), { noScroll: true, keepFocus: true }).then(() => revealSetting(entry));
+	}
+	function searchKeydown(event: KeyboardEvent) {
+		if (event.key === 'Escape') { settingsQuery = ''; searchFocused = false; return; }
+		if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+			event.preventDefault();
+			searchSelected = Math.max(0, Math.min(searchMatches.length - 1, searchSelected + (event.key === 'ArrowDown' ? 1 : -1)));
+		} else if (event.key === 'Enter' && searchMatches.length) {
+			event.preventDefault(); jumpToSetting(searchMatches[Math.min(searchSelected, searchMatches.length - 1)]);
+		}
+	}
+	function changeAppearance(change: Partial<AppearanceValues>) {
+		if (change.palette) setPalette(change.palette);
+		if (change.theme) surfaceMode.set(change.theme);
+	}
 	function scheduleSettingsBackgroundLoad(): () => void {
 		settingsBackgroundLoadCancelled = false;
 		const cancelers = [
@@ -1696,10 +1670,9 @@
 		$audioSettings.settings?.sample_rate_follow === true
 	);
 	let djProcessingActive = $derived(playbackRuntime?.dj_engine_enabled === true);
-	let bitPerfectActive = $derived(bitPerfectSettingsActive && !djProcessingActive);
+	let bitPerfectActive = $derived(bitPerfectSettingsActive && $exclusiveStatus.engaged && !djProcessingActive);
 
-	function onBitPerfectToggle(e: Event) {
-		const enable = (e.target as HTMLInputElement).checked;
+	function setOutputPreset(enable: boolean) {
 		if (enable) {
 			void audioSettings.patch({
 				quality: 'HI_RES_LOSSLESS',
@@ -1720,336 +1693,25 @@
 		void audioSettings.patch({ video_quality_mode: value });
 	}
 
-	const settingsCategories: { id: SettingsCategory; label: string; icon: string; hint: string }[] = [
-		{ id: 'appearance', label: 'Appearance', icon: '◐', hint: 'Theme + player layout' },
-		{ id: 'sources', label: 'Sources', icon: '⟐', hint: 'Services + data' },
-		{ id: 'audio', label: 'Audio', icon: '♪', hint: 'Output + analysis' },
-		{ id: 'account', label: 'Account', icon: '⚙', hint: 'PIN + updates' },
-	];
+	const settingsCategories = SETTINGS_CATEGORIES;
 
 	let activeCategoryMeta = $derived(
 		settingsCategories.find((category) => category.id === activeCategory) ?? settingsCategories[0]
 	);
 
-	let activePalette = $derived(PALETTES.find((p) => p.id === $palette) ?? PALETTES[0]);
-	let activeSwatches = $derived([
-		activePalette.shader.c1,
-		activePalette.shader.c2,
-		activePalette.shader.c3,
-		activePalette.shader.c4
-	]);
-	let paletteMenuOpen = $state(false);
-
-	function paletteSwatchesFor(p: Palette) {
-		return [p.shader.c1, p.shader.c2, p.shader.c3, p.shader.c4];
-	}
-
-	function choosePalette(id: PaletteId) {
-		setPalette(id);
-		paletteMenuOpen = false;
-	}
-
-	function closePaletteMenuOnFocusOut(e: FocusEvent) {
-		const current = e.currentTarget;
-		const next = e.relatedTarget;
-		if (!(current instanceof HTMLElement)) return;
-		if (next instanceof Node && current.contains(next)) return;
-		paletteMenuOpen = false;
-	}
-
-	function onPaletteTriggerKeydown(e: KeyboardEvent) {
-		if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
-			e.preventDefault();
-			paletteMenuOpen = true;
-		}
-		if (e.key === 'Escape') {
-			paletteMenuOpen = false;
-		}
-	}
 </script>
 
-<svelte:head>
-	<title>Settings | NOOR</title>
-</svelte:head>
-
-<div class="page-shell settings-page animate-in">
-	<header class="settings-command">
-		<div class="settings-title">
-			<p class="eyebrow">Settings</p>
-			<h1>Settings</h1>
-			<p>Sources, appearance, audio, access, and updates.</p>
-		</div>
-		<div class="settings-status">
-			<StateBadge label={tidalBadgeLabel} tone={tidalBadgeTone} />
-			<StateBadge label={serverBadgeLabel} tone={serverBadgeTone} />
-			<StateBadge label={runtimeAvailable ? 'Runtime active' : 'Runtime idle'} tone={runtimeAvailable ? 'active' : 'muted'} />
-		</div>
-	</header>
-
-	{#if errorMsg}
-		<EmptyState title="Something needs attention" copy={errorMsg} />
-	{/if}
-
-	{#if discoverySafetyWatchdogRun}
-		<div class="safety-watchdog-popup glass-panel" role="status">
-			<div>
-				<strong>Discovery training paused for laptop safety.</strong>
-				<p>
-					Your computer was protected from a long high-CPU run. Try Medium or Low, keep the laptop plugged in, or run it later.
-				</p>
-			</div>
-			<button class="btn btn-glass" type="button" onclick={() => dismissedSafetyRunId = discoverySafetyWatchdogRun?.id ?? null}>
-				Close
-			</button>
-		</div>
-	{/if}
-
-	<div class="settings-search">
-		<svg class="settings-search-icon" viewBox="0 0 24 24" aria-hidden="true">
-			<circle cx="11" cy="11" r="7" />
-			<path d="M21 21l-4.2-4.2" />
-		</svg>
-		<input
-			type="search"
-			class="settings-search-input"
-			placeholder="Search settings..."
-			bind:value={settingsQuery}
-			onfocus={() => (searchFocused = true)}
-			onblur={() => setTimeout(() => (searchFocused = false), 150)}
-			onkeydown={(e) => {
-				if (e.key === 'Enter' && searchMatches.length) jumpToSetting(searchMatches[0]);
-				else if (e.key === 'Escape') settingsQuery = '';
-			}}
-			aria-label="Search settings"
-		/>
-		{#if searchFocused && settingsQuery.trim() && searchMatches.length}
-			<ul class="settings-search-results">
-				{#each searchMatches as match (match.id)}
-					<li>
-						<button type="button" class="settings-search-result" onclick={() => jumpToSetting(match)}>
-							<span class="settings-search-result-label">{match.label}</span>
-							<span class="settings-search-result-cat">{match.category}</span>
-						</button>
-					</li>
-				{/each}
-			</ul>
-		{:else if searchFocused && settingsQuery.trim()}
-			<div class="settings-search-empty">No settings match that search.</div>
-		{/if}
-	</div>
-
-	<section class="settings-status-strip">
-		<div>
-			<span>Sync</span>
-			<strong>{$syncStatus === 'syncing' ? `${$syncProgress ?? 0}%` : $syncStatus === 'done' ? 'Done' : $syncStatus === 'error' ? 'Failed' : $syncStatus === 'cancelled' ? 'Cancelled' : 'Ready'}</strong>
-		</div>
-		<div>
-			<span>Enrichment</span>
-			<strong>{enrichmentPercent}%</strong>
-		</div>
-		<div>
-			<span>Output</span>
-			<strong>{playbackRuntime?.device_name ?? 'Waiting'}</strong>
-		</div>
-		<div>
-			<span>Active panel</span>
-			<strong>{activeCategoryMeta.label}</strong>
-		</div>
-	</section>
-
-	<nav class="settings-rail" aria-label="Settings categories">
-		{#each settingsCategories as cat (cat.id)}
-			<button
-				type="button"
-				class="settings-rail-btn"
-				class:active={activeCategory === cat.id}
-				onclick={() => selectSettingsCategory(cat.id)}
-				aria-pressed={activeCategory === cat.id}
-			>
-				<span class="settings-rail-icon" aria-hidden="true">
-					{#if cat.id === 'appearance'}
-						<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" /><path d="M12 4v16M4 12h16" /></svg>
-					{:else if cat.id === 'sources'}
-						<svg viewBox="0 0 24 24"><path d="M7 7h10v10H7z" /><path d="M12 2v5M12 17v5M2 12h5M17 12h5" /></svg>
-					{:else if cat.id === 'audio'}
-						<svg viewBox="0 0 24 24"><path d="M9 18V5l10-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="16" cy="16" r="3" /></svg>
-					{:else if cat.id === 'account'}
-						<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4" /><path d="M5 21c1.5-4 4-6 7-6s5.5 2 7 6" /></svg>
-					{:else}
-						<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 11v6M12 7h.01" /></svg>
-					{/if}
-				</span>
-				<span class="settings-rail-copy">
-					<strong>{cat.label}</strong>
-					<span class="settings-rail-hint">{cat.hint}</span>
-				</span>
-			</button>
-		{/each}
-	</nav>
-
-	<section
-		class="settings-grid"
-		class:single-column={activeCategory === 'appearance'}
-		class:split-even={activeCategory === 'sources' || activeCategory === 'account'}
-	>
-		<div class="settings-main">
-			{#if activeCategory === 'account'}
-			<PhoneRemotePanel />
-			{/if}
-			{#if activeCategory === 'appearance'}
-			<section data-setting-id="player-position" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Player" title="Player position" subtitle="Choose its preferred place. Narrow windows use the bottom player until there is room beside your music." />
-				<div class="player-position-options" role="group" aria-label="Preferred player position">
-					{#each [
-						{ id: 'right', icon: '▣', label: 'Right side' },
-						{ id: 'left', icon: '◧', label: 'Left side' },
-						{ id: 'bottom', icon: '▤', label: 'Bottom' }
-					] as option (option.id)}
-						<button
-							type="button"
-							class="player-position-option"
-							class:active={$playerPlacement === option.id}
-							aria-pressed={$playerPlacement === option.id}
-							onclick={() => playerPlacement.set(option.id as PlayerPlacement)}
-						>
-							<span aria-hidden="true">{option.icon}</span>
-							<strong>{option.label}</strong>
-						</button>
-					{/each}
-				</div>
-			</section>
-			<section data-setting-id="player-artwork" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Player" title="Artwork" subtitle="Choose how album art appears in the side player. The bottom player keeps a larger square cover." />
-				<div class="player-position-options artwork-options" role="group" aria-label="Side player artwork style">
-					{#each [
-						{ id: 'square', icon: '□', label: 'Square cover' },
-						{ id: 'banner', icon: '▭', label: 'Wide banner' }
-					] as option (option.id)}
-						<button type="button" class="player-position-option" class:active={$playerArtworkStyle === option.id} aria-pressed={$playerArtworkStyle === option.id} onclick={() => playerArtworkStyle.set(option.id as PlayerArtworkStyle)}>
-							<span aria-hidden="true">{option.icon}</span><strong>{option.label}</strong>
-						</button>
-					{/each}
-				</div>
-			</section>
-			<section data-setting-id="player-information" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Player" title="Streaming quality" subtitle="Choose how much quality information appears. Sample rate and bit depth show when the stream reports them." />
-				<div class="quality-setting-row">
-					<strong>Side panel</strong>
-					<div class="quality-mode-options" role="group" aria-label="Side panel streaming quality">
-						{#each QUALITY_DISPLAY_OPTIONS as option (option.id)}
-							<button type="button" class:active={$sideQualityDisplay === option.id} aria-pressed={$sideQualityDisplay === option.id} onclick={() => sideQualityDisplay.set(option.id)}>{option.label}</button>
-						{/each}
-					</div>
-				</div>
-				<div class="quality-setting-row">
-					<strong>Bottom player</strong>
-					<div class="quality-mode-options" role="group" aria-label="Bottom player streaming quality">
-						{#each QUALITY_DISPLAY_OPTIONS as option (option.id)}
-							<button type="button" class:active={$bottomQualityDisplay === option.id} aria-pressed={$bottomQualityDisplay === option.id} onclick={() => bottomQualityDisplay.set(option.id)}>{option.label}</button>
-						{/each}
-					</div>
-				</div>
-			</section>
-			<section data-setting-id="surface-mode" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Appearance" title="Surface mode" subtitle="Choose the listening deck's light, dark, or system appearance independently of its accent and wallpaper." />
-				<div class="player-position-options" role="group" aria-label="Surface mode">
-					{#each [
-						{ id: 'dark', icon: '◕', label: 'Dark' },
-						{ id: 'light', icon: '◑', label: 'Light' },
-						{ id: 'system', icon: '◐', label: 'System' }
-					] as option (option.id)}
-						<button type="button" class="player-position-option" class:active={$surfaceMode === option.id} aria-pressed={$surfaceMode === option.id} onclick={() => surfaceMode.set(option.id as SurfaceMode)}>
-							<span aria-hidden="true">{option.icon}</span><strong>{option.label}</strong>
-						</button>
-					{/each}
-				</div>
-				<div class="appearance-player-preview" aria-label="Player appearance preview">
-					<span class="preview-cover" aria-hidden="true">♫</span>
-					<span class="preview-copy"><strong>{$currentTrack?.title ?? 'Your music here'}</strong><small>{$currentTrack?.artist_name ?? 'NOORwave'}</small></span>
-					<span class="preview-play" aria-hidden="true">▶</span>
-					<span class="preview-progress" aria-hidden="true"><span></span></span>
-				</div>
-			</section>
-			<section data-setting-id="colour-scheme" class="glass-panel section-panel palette-section" class:palette-section-open={paletteMenuOpen}>
-				<SectionHeader eyebrow="Palette" title="Colour scheme" subtitle="UI accent, wallpaper, and no-wallpaper colours." />
-				<div class="palette-row">
-					<div
-						class="palette-picker"
-						onfocusout={closePaletteMenuOnFocusOut}
-					>
-						<button
-							type="button"
-							class="palette-trigger"
-							aria-haspopup="listbox"
-							aria-expanded={paletteMenuOpen}
-							onclick={() => (paletteMenuOpen = !paletteMenuOpen)}
-							onkeydown={onPaletteTriggerKeydown}
-						>
-							<span class="palette-band" aria-hidden="true">
-								<svg viewBox="0 0 96 16" preserveAspectRatio="none">
-									<defs>
-										<linearGradient id="active-palette-band" x1="0" x2="1" y1="0" y2="0">
-											{#each activeSwatches as c, i (i)}
-												<stop offset={`${(i / (activeSwatches.length - 1)) * 100}%`} stop-color={rgbCss(c)} />
-											{/each}
-										</linearGradient>
-									</defs>
-									<rect width="96" height="16" rx="3" fill="url(#active-palette-band)" />
-								</svg>
-							</span>
-							<span class="palette-trigger-copy">
-								<strong>{activePalette.label}</strong>
-								<small>{activePalette.sublabel}</small>
-							</span>
-							<span class="palette-trigger-caret" aria-hidden="true">▾</span>
-						</button>
-						{#if paletteMenuOpen}
-							<div class="palette-menu" role="listbox" aria-label="Colour scheme">
-								{#each PALETTES as p (p.id)}
-									<button
-										type="button"
-										class="palette-option"
-										class:active={$palette === p.id}
-										role="option"
-										aria-selected={$palette === p.id}
-										onclick={() => choosePalette(p.id)}
-									>
-										<span class="palette-band" aria-hidden="true">
-											<svg viewBox="0 0 96 16" preserveAspectRatio="none">
-												<defs>
-													<linearGradient id={`palette-band-${p.id}`} x1="0" x2="1" y1="0" y2="0">
-														{#each paletteSwatchesFor(p) as c, i (i)}
-															<stop offset={`${(i / 3) * 100}%`} stop-color={rgbCss(c)} />
-														{/each}
-													</linearGradient>
-												</defs>
-												<rect width="96" height="16" rx="3" fill={`url(#palette-band-${p.id})`} />
-											</svg>
-										</span>
-										<span class="palette-option-copy">
-											<strong>{p.label}</strong>
-											<small>{p.sublabel}</small>
-										</span>
-									</button>
-								{/each}
-							</div>
-						{/if}
-					</div>
-					<div class="palette-swatches" aria-hidden="true">
-						{#each activeSwatches as c, i (i)}
-							<span class="palette-swatch" style={`background: ${rgbCss(c)}`}></span>
-						{/each}
-					</div>
-				</div>
-			</section>
-
-			<section data-setting-id="interface-size" class="glass-panel section-panel">
-				<SectionHeader
-					eyebrow="Scale"
-					title="Interface size"
-					subtitle="Zoom the entire UI. Also: Ctrl + scroll, Ctrl + / − , Ctrl + 0 to reset."
-				/>
-				<div class="zoom-row">
+<svelte:head><title>Settings | NOORwave</title></svelte:head>
+<div class="page-shell glass-panel settings-page settings-scope">
+<header class="settings-command"><h1>Settings</h1><div class="settings-search">
+<input type="search" placeholder="Search settings" bind:value={settingsQuery} oninput={() => { searchSelected = 0; searchFocused = true; }} onfocus={() => searchFocused = true} onblur={() => setTimeout(() => searchFocused = false, 150)} onkeydown={searchKeydown} aria-label="Search settings" role="combobox" aria-autocomplete="list" aria-expanded={searchFocused && !!settingsQuery.trim()} aria-controls="settings-results" aria-activedescendant={searchFocused && searchMatches.length ? 'setting-result-' + Math.min(searchSelected, searchMatches.length - 1) : undefined} />
+{#if searchFocused && settingsQuery.trim()}<ul id="settings-results" class="settings-search-results" role="listbox" aria-label="Matching settings">{#each searchMatches as match, index (match.id)}<li role="presentation"><button id={'setting-result-' + index} role="option" aria-selected={index === searchSelected} class:selected={index === searchSelected} onmousedown={(event) => event.preventDefault()} onclick={() => jumpToSetting(match)}><span>{match.label}</span><small>{categoryLabel(match.category)}</small></button></li>{/each}{#if !searchMatches.length}<li role="presentation">No matching settings.</li>{/if}</ul>{/if}
+</div></header><span class="sr-only" role="status">{settingsQuery.trim() ? searchMatches.length + ' settings found' : searchAnnouncement}</span>
+{#if errorMsg}<p class="error inline-notice" role="alert">{errorMsg}</p>{:else if serverStatus === 'offline'}<p class="error inline-notice" role="alert">Some settings could not be loaded. Check the server connection and retry.</p>{/if}
+{#if discoverySafetyWatchdogRun}<div class="inline-notice" role="status"><strong>Discovery training paused for laptop safety.</strong><p>Try a lower intensity, keep your laptop plugged in, or run it later.</p><button class="btn btn-glass" onclick={() => dismissedSafetyRunId = discoverySafetyWatchdogRun?.id ?? null}>Dismiss</button></div>{/if}
+<div class="settings-layout"><nav class="settings-rail" aria-label="Settings categories">{#each settingsCategories as cat}<a class:active={activeCategory === cat.id} href={settingsHref(cat.id)} aria-current={activeCategory === cat.id ? 'page' : undefined} onclick={(event) => { event.preventDefault(); selectSettingsCategory(cat.id); }}>{cat.label}</a>{/each}</nav><div class="settings-content"><h2>{activeCategoryMeta.label}</h2>
+{#if activeCategory === 'appearance'}
+<SettingGroup title="Interface"><AppearanceFields values={{ palette: $palette, theme: $surfaceMode, background: $wallpaper }} onchange={changeAppearance} showBackground={false} /><SettingRow label={'Interface size · ' + Math.round($uiZoom * 100) + '%'} id="interface-size"><div class="zoom-row">
 					<button
 						type="button"
 						class="btn btn-glass btn-sm zoom-step"
@@ -2074,33 +1736,58 @@
 						aria-label="Increase interface size"
 						disabled={$uiZoom >= ZOOM_MAX - 1e-6}
 					>+</button>
-					<span class="zoom-readout" aria-live="polite">{Math.round($uiZoom * 100)}%</span>
+
 					<button
 						type="button"
 						class="btn btn-glass btn-sm"
 						onclick={resetZoom}
-						disabled={Math.abs($uiZoom - 1) < 1e-6}
-					>Reset</button>
+						aria-label="Reset interface size" title="Reset interface size" disabled={Math.abs($uiZoom - 1) < 1e-6}
+					>↺</button>
+				</div></SettingRow><details><summary>Keyboard shortcuts</summary><p class="setting-status">Ctrl + scroll or Ctrl + / − to resize; Ctrl + 0 to reset.</p></details></SettingGroup><SettingGroup title="Player"><SettingRow label="Position" id="player-position"><div class="player-position-options" role="group" aria-label="Preferred player position">
+					{#each [
+						{ id: 'right', icon: '▣', label: 'Right' },
+						{ id: 'left', icon: '◧', label: 'Left' },
+						{ id: 'bottom', icon: '▤', label: 'Bottom' }
+					] as option (option.id)}
+						<button
+							type="button"
+							class="player-position-option"
+							class:active={$playerPlacement === option.id}
+							aria-pressed={$playerPlacement === option.id}
+							onclick={() => playerPlacement.set(option.id as PlayerPlacement)}
+						>
+							<strong>{option.label}</strong>
+						</button>
+					{/each}
+				</div></SettingRow><SettingRow label="Side artwork" id="player-artwork"><div class="player-position-options artwork-options" role="group" aria-label="Side player artwork style">
+					{#each [
+						{ id: 'square', icon: '□', label: 'Square' },
+						{ id: 'banner', icon: '▭', label: 'Banner' }
+					] as option (option.id)}
+						<button type="button" class="player-position-option" class:active={$playerArtworkStyle === option.id} aria-pressed={$playerArtworkStyle === option.id} onclick={() => playerArtworkStyle.set(option.id as PlayerArtworkStyle)}>
+							<strong>{option.label}</strong>
+						</button>
+					{/each}
+				</div></SettingRow><div data-setting-id="player-information"><div class="quality-setting-row">
+					<span>Side quality</span>
+					<div class="quality-mode-options" role="group" aria-label="Side panel streaming quality">
+						{#each QUALITY_DISPLAY_OPTIONS as option (option.id)}
+							<button type="button" class="quality-mode-option" class:active={$sideQualityDisplay === option.id} aria-pressed={$sideQualityDisplay === option.id} onclick={() => sideQualityDisplay.set(option.id)}>{option.label}</button>
+						{/each}
+					</div>
 				</div>
-			</section>
-
-			<section data-setting-id="horizontal-shelves" class="glass-panel section-panel">
-				<SectionHeader
-					eyebrow="Navigation"
-					title="Horizontal shelves"
-					subtitle="Choose how mouse and trackpad gestures behave over album, artist, and playlist shelves."
-				/>
-				<div class="info-list">
+				<div class="quality-setting-row">
+					<span>Bottom quality</span>
+					<div class="quality-mode-options" role="group" aria-label="Bottom player streaming quality">
+						{#each QUALITY_DISPLAY_OPTIONS as option (option.id)}
+							<button type="button" class="quality-mode-option" class:active={$bottomQualityDisplay === option.id} aria-pressed={$bottomQualityDisplay === option.id} onclick={() => bottomQualityDisplay.set(option.id)}>{option.label}</button>
+						{/each}
+					</div>
+				</div></div></SettingGroup><SettingGroup title="Interaction"><div data-setting-id="horizontal-shelves"><div class="info-list">
 					<div class="info-row">
 						<div>
-							<span>Use vertical wheel to browse shelves</span>
-							<p class="info-row-hint">
-								{#if $horizontalShelfWheel}
-									After a short hover, a fresh vertical wheel gesture moves the shelf sideways. Page gestures and shelf boundaries remain unlocked.
-								{:else}
-									Native mode: vertical gestures scroll the page; horizontal gestures scroll shelves. Recommended for trackpads.
-								{/if}
-							</p>
+							<span>Scroll shelves with mouse wheel</span>
+
 						</div>
 						<strong>
 							<Toggle
@@ -2110,13 +1797,7 @@
 							/>
 						</strong>
 					</div>
-				</div>
-			</section>
-
-			<section data-setting-id="background" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Wallpaper" title="Background" subtitle="Preview, then apply." />
-
-				<div class="wallpaper-big-preview">
+				</div></div></SettingGroup><section class="glass-tile section-panel" data-setting-id="background"><SectionHeader title="Background" /><div class="info-row"><span>Selected background</span><strong>{WALLPAPERS.find((item) => item.id === $wallpaper)?.label ?? "Off"}</strong></div><details><summary>Choose background</summary><div class="wallpaper-big-preview">
 					{#if previewShader}
 						<ShaderWallpaper
 							shader={previewShader}
@@ -2131,7 +1812,7 @@
 						</div>
 					{:else}
 						<div class="wallpaper-big-preview-hint">
-							<span>Hover a tile to preview</span>
+							<span>Focus or hover a background to preview</span>
 						</div>
 					{/if}
 				</div>
@@ -2146,7 +1827,7 @@
 								class:previewing={previewTileId === 'none'}
 								onclick={() => setWallpaper('none')}
 								aria-pressed={$wallpaper === 'none'}
-								onpointerenter={() => onTileEnter(wallpaperNone!)}
+								onpointerenter={() => onTileEnter(wallpaperNone!)} onfocus={() => onTileEnter(wallpaperNone!)}
 								onpointerleave={onTileLeave}
 							>
 								<span class="wallpaper-tile-swatch wallpaper-tile-swatch-none"></span>
@@ -2169,7 +1850,7 @@
 								<span class="wallpaper-group-caret" class:open={openGroups[group.key]}>&#9656;</span>
 								<span class="wallpaper-group-name">{group.label}</span>
 								<span class="wallpaper-group-count">{group.options.length}</span>
-								<span class="wallpaper-group-blurb">{group.blurb}</span>
+
 							</button>
 							{#if openGroups[group.key]}
 								<div class="wallpaper-grid">
@@ -2179,9 +1860,9 @@
 											class="wallpaper-tile"
 											class:active={$wallpaper === option.id}
 											class:previewing={previewTileId === option.id}
-											onclick={() => setWallpaper(option.id)}
+											onclick={() => { onTileEnter(option); setWallpaper(option.id); }}
 											aria-pressed={$wallpaper === option.id}
-											onpointerenter={() => onTileEnter(option)}
+											onpointerenter={() => onTileEnter(option)} onfocus={() => onTileEnter(option)}
 											onpointerleave={onTileLeave}
 										>
 											<span
@@ -2200,20 +1881,20 @@
 					{/each}
 				</div>
 
-				<div class="wallpaper-tune">
+				</details><details><summary>Background settings</summary><div class="wallpaper-tune">
 					<div class="wallpaper-group">
 						<div class="wallpaper-group-head">
 							<h4>Reacts to music</h4>
-							<p>How the background answers what is playing.</p>
+
 						</div>
 
 						<div class="wallpaper-control">
 							<span>
 								<strong>Beat reactivity</strong>
-								<small>Let the playing track drive the reactive wallpapers.</small>
+
 							</span>
 							<div class="wallpaper-control-field">
-								<Toggle
+								<Toggle label="Beat reactivity"
 									checked={$wallpaperReactive}
 									onchange={(e) => setWallpaperReactive(e.currentTarget.checked)}
 								/>
@@ -2310,7 +1991,7 @@
 					<div class="wallpaper-group">
 						<div class="wallpaper-group-head">
 							<h4>Rendering</h4>
-							<p>Colours, sharpness, and how much GPU it uses.</p>
+
 						</div>
 
 						<label class="wallpaper-control">
@@ -2450,7 +2131,7 @@
 
 						<label class="wallpaper-control">
 							<span>
-								<strong>Wallpaper blur</strong>
+								<strong>Blur</strong>
 								<small>Soften or sharpen the background layer.</small>
 							</span>
 							<div class="wallpaper-control-field">
@@ -2461,7 +2142,7 @@
 									step="1"
 									value={$wallpaperBlur}
 									oninput={(e) => setWallpaperBlur(parseInt((e.currentTarget as HTMLInputElement).value, 10))}
-									aria-label="Wallpaper blur"
+									aria-label="Background blur"
 								/>
 								<output>{$wallpaperBlur}px</output>
 							</div>
@@ -2469,7 +2150,7 @@
 
 						<label class="wallpaper-control">
 							<span>
-								<strong>Wallpaper FPS</strong>
+								<strong>Frame rate</strong>
 								<small>Higher looks smoother. Lower saves GPU.</small>
 							</span>
 							<div class="wallpaper-control-field">
@@ -2480,79 +2161,258 @@
 									step="1"
 									value={$wallpaperFps}
 									oninput={(e) => setWallpaperFps(parseInt((e.currentTarget as HTMLInputElement).value, 10))}
-									aria-label="Wallpaper FPS"
+									aria-label="Frame rate"
 								/>
 								<output>{$wallpaperFps} FPS</output>
 							</div>
 						</label>
 					</div>
-				</div>
-			</section>
-			{/if}
-
-			{#if activeCategory === 'account'}
-			<IntegrationsPanel />
-
-			{/if}
-
-			{#if activeCategory === 'sources'}
-			<section data-setting-id="connect-tidal" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Streaming" title="Connect TIDAL" subtitle="Auth, sync, and playback metadata." />
-
-				{#if $pendingTidalLogin}
-					<div class="auth-card glass">
-						<p class="page-copy">{$pendingTidalLogin.phase === 'starting' ? 'Opening TIDAL sign-in…' : 'Finish your TIDAL sign-in.'}</p>
-						<p class="page-copy">After sign-in, copy the full address from the final TIDAL page, even if it says page not found. Paste it here to finish.</p>
-						<div class="action-row">
-							<button type="button" class="btn btn-glass" onclick={() => void openTidalVerifyUrl()} disabled={$pendingTidalLogin.phase !== 'awaiting'}>
-								Open TIDAL sign-in
-							</button>
-						</div>
-						{#if $pendingTidalLogin.externalOpenError}
-							<p class="error" role="alert">{$pendingTidalLogin.externalOpenError}</p>
-							<input class="text-field" type="url" readonly value={$pendingTidalLogin.verifyUrl} aria-label="TIDAL sign-in URL" />
-						{/if}
-						<input
-							class="text-field"
-							type="url"
-							bind:value={$pendingTidalLogin.redirectUrl}
-							disabled={$pendingTidalLogin.phase !== 'awaiting'}
-							aria-label="Final TIDAL redirect URL"
-							placeholder="https://tidal.com/android/login/auth?code=..."
-						/>
-						{#if $pendingTidalLogin.error}
-							<p class="error" role="alert">{$pendingTidalLogin.error}</p>
-						{/if}
-						<div class="action-row">
-							<button class="btn btn-glass" onclick={pasteTidalRedirectUrl} disabled={$pendingTidalLogin.phase !== 'awaiting'}>
-								Paste from clipboard
-							</button>
-							<button class="btn btn-primary" onclick={completeTidalLogin} disabled={$pendingTidalLogin.phase !== 'awaiting' || !$pendingTidalLogin.redirectUrl.trim()}>
-								{$pendingTidalLogin.phase === 'completing' ? 'Finishing login…' : 'Finish login'}
-							</button>
-							<button class="btn btn-glass" onclick={cancelTidalLogin} disabled={$pendingTidalLogin.phase !== 'awaiting'}>Cancel login</button>
-						</div>
+				</div></details></section>
+{:else if activeCategory === 'playback'}
+<section data-setting-id="playback-output" class="glass-tile section-panel">
+				<SectionHeader title="Playback output" />
+				{#if $audioSettings.settings}
+					{@const s = $audioSettings.settings}
+					{#if isWindows}<label class="audio-field"><span>Output preset</span><select aria-label="Output preset" value={bitPerfectSettingsActive ? 'bit-perfect' : !s.exclusive_mode && !s.sample_rate_follow && s.quality === 'LOSSLESS' ? 'shared' : 'custom'} onchange={(event) => setOutputPreset(event.currentTarget.value === 'bit-perfect')} disabled={$audioSettings.pendingApply}><option value="shared">Shared</option><option value="bit-perfect">Bit-perfect</option><option value="custom" disabled>Custom</option></select></label><p class="setting-status">Presets change stream quality, exclusive access and source-rate matching.</p>{/if}<p class="setting-status">{bitPerfectActive ? 'Exclusive output engaged; DJ processing off' : s.exclusive_mode && djProcessingActive ? 'DJ processing active' : s.exclusive_mode && !$exclusiveStatus.engaged ? 'Exclusive output requested; engagement not confirmed' : 'Shared output'}</p><div class="audio-field-grid">
+						<label class="audio-field">
+							<span>Stream quality</span>
+							<select
+								class="audio-select"
+								value={s.quality}
+								onchange={onAudioQualityChange}
+							>
+								{#each AUDIO_QUALITY_OPTIONS as opt (opt.value)}
+									<option value={opt.value}>{opt.label}</option>
+								{/each}
+							</select>
+						</label>
+						<label class="audio-field">
+							<span>Output device</span>
+							<select
+								class="audio-select"
+								value={s.output_device ?? '__default__'}
+								onchange={onAudioDeviceChange}
+							>
+								<option value="__default__">System default</option>
+								{#each audioDevices as d (d.id)}
+									<option value={d.id}>
+										{d.name}{d.is_default ? ' (default)' : ''}
+									</option>
+								{/each}
+							</select>
+						</label>
 					</div>
-				{:else if serverStatus === 'offline'}
-					<div class="auth-card glass">
-						<p class="page-copy">
-							NOOR cannot reach the backend, so it cannot confirm whether your saved
-							TIDAL session is still active.
+
+					{#if isWindows}
+						{#if s.exclusive_mode && !$exclusiveStatus.engaged && $exclusiveStatus.failureReason}
+									<div class="exclusive-failed-banner" role="alert">
+										<strong>Exclusive mode unavailable</strong>
+										<span class="setting-status-line">
+											{$exclusiveStatus.failureReason} Audio is currently routed
+											through Windows shared mixing.
+										</span>
+										<div class="exclusive-actions">
+											<button
+												type="button"
+												class="btn btn-primary btn-compact"
+												disabled={retryingExclusive}
+												onclick={retryExclusive}
+											>
+												{retryingExclusive ? 'Retrying...' : 'Retry'}
+											</button>
+											<button
+												type="button"
+												class="btn btn-compact"
+												onclick={disableExclusive}
+											>
+												Disable exclusive
+											</button>
+										</div>
+									</div>
+								{/if}<details class="audio-advanced">
+							<summary>
+								<span>Advanced output</span>
+
+							</summary>
+							<div class="info-list">
+								<div class="info-row">
+									<span>Exclusive output (WASAPI)</span>
+									<strong>
+										<Toggle label="Exclusive output (WASAPI)"
+											checked={s.exclusive_mode}
+											onchange={onAudioExclusiveToggle}
+										/>
+									</strong>
+								</div>
+								<p class="page-copy setting-caption">
+									Takes over the device while playing. Crossfade is bypassed; prepared same-rate tracks still hand off gaplessly.
+								</p>
+
+								{#if s.exclusive_mode && $exclusiveStatus.engaged && $exclusiveStatus.transportFormat}
+									<div class="info-row">
+										<span>Exclusive transport</span>
+										<strong>{$exclusiveStatus.transportFormat}</strong>
+									</div>
+								{/if}
+								{#if s.exclusive_mode}
+									<label class="audio-field audio-field-single">
+										<span>Exclusive buffer mode</span>
+										<select
+											class="audio-select"
+											value={s.exclusive_latency_mode}
+											onchange={onExclusiveLatencyModeChange}
+										>
+											{#each EXCLUSIVE_LATENCY_OPTIONS as opt (opt.value)}
+												<option value={opt.value}>{opt.label}</option>
+											{/each}
+										</select>
+									</label>
+									<p class="page-copy setting-caption">
+										Stable is best for music playback. Low latency and ultra low latency reduce output delay when the driver can keep up.
+									</p>
+								{/if}
+								<div class="info-row">
+									<span>Idle release</span>
+									<strong class="range-with-value">
+										<input
+											type="range"
+											class="exclusive-grace-slider" aria-label="Idle release" disabled={s.exclusive_release_on_pause}
+											min="5"
+											max="120"
+											step="5"
+											value={s.exclusive_release_grace_secs}
+											oninput={onExclusiveGraceChange}
+										/>
+										<span class="setting-numeric">
+											{s.exclusive_release_grace_secs}s
+										</span>
+									</strong>
+								</div>
+								<p class="page-copy setting-caption">
+									Lower values release the device faster after pause. Higher values avoid repeated device grabs.
+								</p>
+								<div class="info-row">
+									<span>Release on pause</span>
+									<strong>
+										<Toggle label="Release on pause"
+											checked={s.exclusive_release_on_pause}
+											onchange={onAudioReleaseOnPauseToggle}
+										/>
+									</strong>
+								</div>
+								<p class="page-copy setting-caption">
+									Frees the device the moment you pause so other apps can use it, instead of waiting out the idle release. Re-grabs on play; may add a brief gap on quick pause/resume.
+								</p>
+								<div class="info-row">
+									<span>Sample rate follows source</span>
+									<strong>
+										<Toggle label="Sample rate follows source"
+											checked={s.sample_rate_follow}
+											onchange={onAudioSrFollowToggle}
+										/>
+									</strong>
+								</div>
+								<p class="page-copy setting-caption">
+									Matches 44.1, 48, 96, or 192 kHz tracks when the device accepts the rate.
+								</p>
+							</div>
+						</details>
+					{:else}
+						<p class="page-copy setting-caption">Exclusive output is available on Windows.</p>
+					{/if}
+
+					{#if s.exclusive_mode && !$exclusiveStatus.engaged && $exclusiveStatus.failureReason}
+									<div class="exclusive-failed-banner" role="alert">
+										<strong>Exclusive mode unavailable</strong>
+										<span class="setting-status-line">
+											{$exclusiveStatus.failureReason} Audio is currently routed
+											through Windows shared mixing.
+										</span>
+										<div class="exclusive-actions">
+											<button
+												type="button"
+												class="btn btn-primary btn-compact"
+												disabled={retryingExclusive}
+												onclick={retryExclusive}
+											>
+												{retryingExclusive ? 'Retrying...' : 'Retry'}
+											</button>
+											<button
+												type="button"
+												class="btn btn-compact"
+												onclick={disableExclusive}
+											>
+												Disable exclusive
+											</button>
+										</div>
+									</div>
+								{/if}<details class="audio-advanced">
+						<summary>
+							<span>Video playback</span>
+
+						</summary>
+						<label class="audio-field audio-field-single">
+							<span>Video quality</span>
+							<select
+								class="audio-select"
+								aria-label="Video quality" value={s.video_quality_mode}
+								onchange={onVideoQualityModeChange}
+							>
+								{#each VIDEO_QUALITY_OPTIONS as opt (opt.value)}
+									<option value={opt.value}>{opt.label}</option>
+								{/each}
+							</select>
+						</label>
+						<p class="page-copy setting-caption">
+							Max uses the highest stream the video exposes. Auto adapts to bandwidth.
 						</p>
-						<div class="action-row">
-							<button class="btn btn-glass" onclick={() => void refreshTidalStatus()}>Retry status</button>
-						</div>
+					</details>
+
+					{#if $audioSettings.pendingApply}
+						<p class="page-copy setting-caption audio-muted">Output reconfiguring...</p>
+					{/if}
+					{#if $audioSettings.error}
+						<p class="page-copy audio-error">{$audioSettings.error}</p>
+					{/if}
+				{:else if $audioSettings.loading}
+					<p class="page-copy">Loading audio settings...</p>
+				{:else if $audioSettings.error}
+					<p class="page-copy audio-error">{$audioSettings.error}</p>
+				{/if}
+			</section><section class="glass-tile section-panel" data-setting-id="library-audio-data"><SectionHeader title="Analysis" />
+<SettingRow label="Analyse while playing" hint="Save BPM, key and energy as tracks play for DJ transitions and harmonic shuffle. Turning this off keeps existing analysis."><Toggle label="Analyse while playing" checked={$audioAnalysis.passiveEnabled} disabled={!$passiveDspKnown || $passiveDspPending} onchange={(event) => void setPassiveDspEnabled(event.currentTarget.checked)} /></SettingRow>
+{#if $audioAnalysisError}<p class="error" role="alert">{$audioAnalysisError}</p><button class="btn btn-glass" onclick={() => void loadPassiveDspState()} disabled={$passiveDspPending}>Retry setting</button>{/if}
+<details><summary>Analysis statistics</summary>
+<div class="info-row"><span>Analysed tracks</span><strong>{$audioAnalysis.stats ? $audioAnalysis.analyzed.toLocaleString() : '—'}</strong></div>
+<div class="info-row"><span>Average BPM</span><strong>{$audioAnalysis.stats?.avg_bpm?.toFixed(1) ?? '—'}</strong></div>
+<div class="info-row"><span>Most common key</span><strong>{$audioAnalysis.stats?.top_key ?? '—'}</strong></div>
+<div class="info-row"><span>Average energy</span><strong>{$audioAnalysis.stats?.avg_energy?.toFixed(2) ?? '—'}</strong></div></details></section><details data-setting-id="now-playing-path" class="glass-tile section-panel"><summary>Output details</summary><div class="info-list">
+					<div class="info-row">
+						<span>Device</span>
+						<strong>{playbackRuntime?.device_name ?? 'No device reported yet'}</strong>
 					</div>
-				{:else if $tidalStatus === 'disconnected'}
-					<div class="action-row">
-						<button class="btn btn-primary" onclick={connectTidal}>Connect TIDAL</button>
+					<div class="info-row">
+						<span>Format</span>
+						<strong>
+							{#if playbackRuntime}
+								{playbackRuntime.sample_rate} Hz · {playbackRuntime.channels} ch
+							{:else}
+								Waiting for runtime
+							{/if}
+						</strong>
 					</div>
-				{:else}
-					<div class="info-list">
-						<div class="info-row">
-							<span>Signed in as</span>
-							<strong>{$tidalUserId}</strong>
-						</div>
+					<div class="info-row">
+						<span>Track ID</span>
+						<strong>{playbackRuntime?.active_track_id ?? 'None'}</strong>
+					</div>
+				</div>
+
+				{#if playbackRuntime?.last_error}
+					<p class="runtime-error">{playbackRuntime.last_error}</p>
+				{/if}</details>{#if playbackRuntime?.last_error}<p class="error" role="alert">{playbackRuntime.last_error}</p>{/if}
+{:else if activeCategory === 'library'}
+<section data-setting-id="library-sync" class="glass-tile section-panel"><SectionHeader title="Sync" />{#if $tidalStatus === "connected"}					<div class="info-list">
+
 						<div class="info-row">
 							<span>Last sync</span>
 							<strong>
@@ -2562,7 +2422,7 @@
 									Failed
 								{:else if $syncStatus === 'cancelled'}
 									Cancelled
-								{:else if $syncInfo?.last_sync_at}
+								{:else if $syncInfo?.last_sync_kind && $syncInfo.last_sync_at}
 									{formatSyncDate($syncInfo.last_sync_at)}
 									{#if $syncInfo.last_sync_kind}
 										<span class="sync-count">
@@ -2577,7 +2437,7 @@
 								{:else if $syncStatus === 'done'}
 									Just completed
 								{:else}
-									Never synced
+									{$syncInfo ? 'Never synced' : 'Status unavailable'}
 								{/if}
 							</strong>
 						</div>
@@ -2588,25 +2448,15 @@
 							</div>
 						{/if}
 						<div class="info-row">
-							<span>Auto-sync daily</span>
+							<div><span>Sync daily</span><p class="info-row-hint">Check for changes when NOORwave starts if the last sync is more than a day old.</p></div>
 							<strong>
-								<Toggle
+								<Toggle label="Sync daily" disabled={!$syncInfo || syncPreferencesBusy}
 									checked={$syncInfo?.auto_sync_daily ?? false}
 									onchange={() => void toggleAutoSync()}
 								/>
 							</strong>
 						</div>
-						<div class="info-row">
-							<span title="Imports the rest of your favorited albums as hidden tracks that sharpen radio and recommendations. They never show in your library or Genre Galaxy - only tracks you like do.">
-								Learn from favorite albums
-							</span>
-							<strong>
-								<Toggle
-									checked={$syncInfo?.enrich_from_favorite_albums ?? true}
-									onchange={() => void toggleSyncEnrichment()}
-								/>
-							</strong>
-						</div>
+
 					</div>
 					<div class="action-row">
 						<button class="btn btn-primary" onclick={() => void syncLibrary()} disabled={$syncStatus === 'syncing'}>
@@ -2620,40 +2470,35 @@
 								Sync library
 							{/if}
 						</button>
-						<button class="btn btn-glass" onclick={() => void syncLibrary('full')} disabled={$syncStatus === 'syncing'}>
-							Full resync
-						</button>
+
 						{#if $syncStatus === 'syncing'}
 							<button class="btn btn-glass" onclick={handleCancelSync}>Cancel</button>
 						{/if}
-						<button
-							class="btn btn-glass"
-							onclick={() => void handleReclean()}
-							disabled={recleanRunning || $syncStatus === 'syncing'}
-							title="Move non-liked album tracks to the hidden discovery pool and merge exact duplicate copies. Liked songs are never removed."
-						>
-							{recleanRunning ? 'Recleaning…' : 'Reclean library'}
-						</button>
-						<button class="btn btn-glass" onclick={disconnectTidal}>Disconnect</button>
+
+
 					</div>
-					{#if recleanSummary}
+					<details><summary>Sync options</summary><div class="info-row">
+							<div><span>Learn from favorite albums</span><p class="info-row-hint">Use other tracks on your favorite albums for discovery. They stay hidden from your library and Genre Galaxy unless you like them.</p></div>
+							<strong>
+								<Toggle label="Learn from favorite albums" disabled={!$syncInfo || syncPreferencesBusy}
+									checked={$syncInfo?.enrich_from_favorite_albums ?? true}
+									onchange={() => void toggleSyncEnrichment()}
+								/>
+							</strong>
+						</div><div class="action-row"><button class="btn btn-glass" onclick={() => void syncLibrary('full')} disabled={$syncStatus === 'syncing'}>
+							Full resync
+						</button></div><p class="setting-status">A full resync checks your entire TIDAL collection; use it if a normal sync misses changes.</p></details>{#if recleanSummary}
 						<p class="reclean-summary">{recleanSummary}</p>
 					{/if}
-				{/if}
-			</section>
-
-			{/if}
-
-			{#if activeCategory === 'sources'}
-			<section data-setting-id="musicbrainz-enrichment" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Metadata" title="MusicBrainz enrichment" subtitle="Genre coverage for browsing and discovery." />
+				{:else}<p class="setting-status">Connect TIDAL to sync your library.</p><a class="btn btn-glass" href={settingsHref("services", "connect-tidal")}>Connect TIDAL</a>{/if}</section><section data-setting-id="musicbrainz-enrichment" class="glass-tile section-panel">
+				<SectionHeader title="MusicBrainz genres" /><p class="setting-status">Fill missing genres from MusicBrainz for Genre Galaxy and genre-aware playback. Progress is saved between runs.</p>
 
 				<div class="stat-grid inner-metrics">
-					<MetricPair label="Tagged" value={mbStats ? mbStats.enriched_tracks.toLocaleString() : '0'} copy="Tracks with genres found." />
-					<MetricPair label="Remaining" value={mbStats ? mbStats.remaining.toLocaleString() : '—'} copy="Not yet queried from MusicBrainz." />
+					<div class="info-row"><span>Tagged</span><strong>{mbStats ? mbStats.enriched_tracks.toLocaleString() : '—'}</strong></div>
+					<div class="info-row"><span>Remaining</span><strong>{mbStats ? mbStats.remaining.toLocaleString() : '—'}</strong></div>
 				</div>
 
-				<div class="enrichment-progress">
+				{#if mbStatus === 'running'}<div class="enrichment-progress">
 					<div class="enrichment-progress-copy">
 						<p>{enrichmentProcessedLabel}</p>
 						<span>{enrichmentStatusCopy}</span>
@@ -2664,7 +2509,7 @@
 					{#if mbProgressLabel}
 						<p class="page-copy">{mbProgressLabel}</p>
 					{/if}
-				</div>
+				</div>{/if}
 
 				<div class="action-row">
 					<button class="btn btn-primary" onclick={startEnrichment} disabled={mbStatus === 'running' || mbStats?.remaining === 0}>
@@ -2674,53 +2519,22 @@
 								? 'All enriched'
 								: mbStats && mbStats.checked_tracks > 0
 									? 'Resume enrichment'
-									: 'Start enrichment'}
+									: 'Enrich genres'}
 					</button>
 					<button class="btn btn-glass" onclick={refreshGalaxy}>Refresh genre galaxy</button>
 				</div>
 				{#if galaxyRefreshLabel}
 					<p class="galaxy-refresh-label">{galaxyRefreshLabel}</p>
 				{/if}
-			</section>
-
-			<section data-setting-id="last-fm-tags" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Metadata" title="Last.fm tags" subtitle="Crowd tags from a local API key." />
-
-				{#if lastfmError}
+			</section><section data-setting-id="last-fm-tags" class="glass-tile section-panel"><SectionHeader title="Last.fm tags" /><p class="setting-status">Add community tags to liked tracks and albums. A Last.fm API key is enough; account approval is optional for tags.</p>{#if lastfmError}
 					<p class="page-copy is-error" role="alert">{lastfmError}</p>
 				{/if}
 
-				{#if !lastfmConfigured}
-					<div class="info-list">
-						<div class="info-row">
-							<span>API Key</span>
-							<input
-								type="password"
-								class="text-input"
-								bind:value={lastfmApiKey}
-								placeholder="32-character hex string"
-								autocomplete="off"
-							/>
-						</div>
-					</div>
-					<div class="action-row">
-						<button
-							class="btn btn-primary"
-							onclick={saveLastfmConfig}
-							disabled={lastfmSaving || !lastfmApiKey}
-						>
-							{lastfmSaving ? 'Verifying…' : 'Save API key'}
-						</button>
-					</div>
-				{:else}
+				{#if !lastfmStatusKnown}<p class="setting-status">Tag status unavailable.</p><button class="btn btn-glass" onclick={() => void loadLastfmStatus()}>Refresh status</button>{:else if !lastfmConfigured}<p class="setting-status">Configure Last.fm to enrich tags.</p><a class="btn btn-glass" href={settingsHref('services', 'lastfm-service')}>Set up Last.fm</a>{:else}
 					<div class="stat-grid inner-metrics">
-						<MetricPair label="Tagged" value={lastfmEnrichedCount.toLocaleString()} copy="Tracks with Last.fm genre or context tags." />
-						<MetricPair label="Checked" value={`${lastfmChecked.toLocaleString()} / ${lastfmTotal.toLocaleString()}`} copy="Eligible tracks already queried." />
-						<MetricPair
-							label="Remaining"
-							value={lastfmRemaining.toLocaleString()}
-							copy="Favorited tracks still pending Last.fm lookup. Last.fm allows ~5 req/sec, so a full pass takes ~30 min per 10k tracks."
-						/>
+						<div class="info-row"><span>Tagged</span><strong>{lastfmEnrichedCount.toLocaleString()}</strong></div>
+						<div class="info-row"><span>Checked</span><strong>{`${lastfmChecked.toLocaleString()} / ${lastfmTotal.toLocaleString()}`}</strong></div>
+						<div class="info-row"><span>Remaining</span><strong>{lastfmRemaining.toLocaleString()}</strong></div>
 					</div>
 
 					<div class="enrichment-progress">
@@ -2735,7 +2549,7 @@
 								{:else if !lastfmIsRunning && lastfmRemaining === 0 && lastfmTotal > 0}
 									All {lastfmTotal.toLocaleString()} eligible tracks checked. Recheck tags to refresh Last.fm coverage.
 								{:else if !lastfmIsRunning && lastfmRemaining > 0}
-									{lastfmRemaining.toLocaleString()} favorited tracks pending. Full pass ~{lastfmEtaLabel}. Click Enrich to start; runs in the background even if you close this tab.
+									{lastfmRemaining.toLocaleString()} favorited tracks pending. Estimated {lastfmEtaLabel}. Enrichment continues in the background while NOORwave is running.
 								{:else}
 									No favorited tracks or albums ready for Last.fm enrichment.
 								{/if}
@@ -2788,235 +2602,11 @@
 						{#if lastfmIsRunning}
 							<button class="btn btn-glass" onclick={stopLastfmEnrichment}>Stop</button>
 						{/if}
-						<button class="btn btn-glass" onclick={resetLastfmEnrichment} disabled={lastfmIsRunning}>Reset checked state</button>
-						<button class="btn btn-glass" onclick={clearLastfmConfig} disabled={lastfmIsRunning}>Clear API key</button>
+
+
 					</div>
-				{/if}
-			</section>
-			{/if}
-
-
-			{#if activeCategory === 'audio'}
-			<section data-setting-id="playback-output" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Output" title="Playback output" subtitle="Quality, device, and bit-perfect routing." />
-				{#if $audioSettings.settings}
-					{@const s = $audioSettings.settings}
-					<div class="audio-mode-summary">
-						<div>
-							<span class="audio-mode-label">Current mode</span>
-							<strong>
-								{bitPerfectActive ? 'Bit-perfect exclusive' : s.exclusive_mode && djProcessingActive ? 'Exclusive with DJ processing' : s.exclusive_mode ? 'Exclusive output' : 'Shared output'}
-							</strong>
-							<p>
-								{#if bitPerfectActive}
-									Hi-Res Lossless, exclusive WASAPI, native sample rates. Crossfade is bypassed; same-rate gapless prebuffer stays on.
-								{:else if s.exclusive_mode && djProcessingActive}
-									Exclusive device control is on. DJ processing is active, so playback is not bit-perfect.
-								{:else if s.exclusive_mode}
-									Exclusive device control is on. Crossfade is bypassed for bit-perfect output.
-								{:else}
-									Windows shared output. Crossfade and normal system audio mixing are available.
-								{/if}
-							</p>
-						</div>
-						{#if isWindows}
-							<span class="audio-mode-toggle">
-								<Toggle
-									checked={bitPerfectSettingsActive}
-									onchange={onBitPerfectToggle}
-									label="Toggle bit-perfect mode"
-								/>
-							</span>
-						{/if}
-					</div>
-
-					<div class="audio-field-grid">
-						<label class="audio-field">
-							<span>Stream quality</span>
-							<select
-								class="audio-select"
-								value={s.quality}
-								onchange={onAudioQualityChange}
-							>
-								{#each AUDIO_QUALITY_OPTIONS as opt (opt.value)}
-									<option value={opt.value}>{opt.label}</option>
-								{/each}
-							</select>
-						</label>
-						<label class="audio-field">
-							<span>Output device</span>
-							<select
-								class="audio-select"
-								value={s.output_device ?? '__default__'}
-								onchange={onAudioDeviceChange}
-							>
-								<option value="__default__">System default</option>
-								{#each audioDevices as d (d.id)}
-									<option value={d.id}>
-										{d.name}{d.is_default ? ' (default)' : ''}
-									</option>
-								{/each}
-							</select>
-						</label>
-					</div>
-
-					{#if isWindows}
-						<details class="audio-advanced">
-							<summary>
-								<span>Advanced output</span>
-								<small>Exclusive mode, rate matching, idle release</small>
-							</summary>
-							<div class="info-list">
-								<div class="info-row">
-									<span>Exclusive output (WASAPI)</span>
-									<strong>
-										<Toggle
-											checked={s.exclusive_mode}
-											onchange={onAudioExclusiveToggle}
-										/>
-									</strong>
-								</div>
-								<p class="page-copy setting-caption">
-									Takes over the device while playing. Crossfade is bypassed; prepared same-rate tracks still hand off gaplessly.
-								</p>
-								{#if s.exclusive_mode && !$exclusiveStatus.engaged && $exclusiveStatus.failureReason}
-									<div class="exclusive-failed-banner" role="alert">
-										<strong>Exclusive mode unavailable</strong>
-										<span class="setting-status-line">
-											{$exclusiveStatus.failureReason} Audio is currently routed
-											through Windows shared mixing.
-										</span>
-										<div class="exclusive-actions">
-											<button
-												type="button"
-												class="btn btn-primary btn-compact"
-												disabled={retryingExclusive}
-												onclick={retryExclusive}
-											>
-												{retryingExclusive ? 'Retrying...' : 'Retry'}
-											</button>
-											<button
-												type="button"
-												class="btn btn-compact"
-												onclick={disableExclusive}
-											>
-												Disable exclusive
-											</button>
-										</div>
-									</div>
-								{/if}
-								{#if s.exclusive_mode && $exclusiveStatus.engaged && $exclusiveStatus.transportFormat}
-									<div class="info-row">
-										<span>Exclusive transport</span>
-										<strong>{$exclusiveStatus.transportFormat}</strong>
-									</div>
-								{/if}
-								{#if s.exclusive_mode}
-									<label class="audio-field audio-field-single">
-										<span>Exclusive buffer mode</span>
-										<select
-											class="audio-select"
-											value={s.exclusive_latency_mode}
-											onchange={onExclusiveLatencyModeChange}
-										>
-											{#each EXCLUSIVE_LATENCY_OPTIONS as opt (opt.value)}
-												<option value={opt.value}>{opt.label}</option>
-											{/each}
-										</select>
-									</label>
-									<p class="page-copy setting-caption">
-										Stable is best for music playback. Low latency and ultra low latency reduce output delay when the driver can keep up.
-									</p>
-								{/if}
-								<div class="info-row">
-									<span>Idle release</span>
-									<strong class="range-with-value">
-										<input
-											type="range"
-											class="exclusive-grace-slider"
-											min="5"
-											max="120"
-											step="5"
-											value={s.exclusive_release_grace_secs}
-											oninput={onExclusiveGraceChange}
-										/>
-										<span class="setting-numeric">
-											{s.exclusive_release_grace_secs}s
-										</span>
-									</strong>
-								</div>
-								<p class="page-copy setting-caption">
-									Lower values release the device faster after pause. Higher values avoid repeated device grabs.
-								</p>
-								<div class="info-row">
-									<span>Release on pause</span>
-									<strong>
-										<Toggle
-											checked={s.exclusive_release_on_pause}
-											onchange={onAudioReleaseOnPauseToggle}
-										/>
-									</strong>
-								</div>
-								<p class="page-copy setting-caption">
-									Frees the device the moment you pause so other apps can use it, instead of waiting out the idle release. Re-grabs on play; may add a brief gap on quick pause/resume.
-								</p>
-								<div class="info-row">
-									<span>Sample rate follows source</span>
-									<strong>
-										<Toggle
-											checked={s.sample_rate_follow}
-											onchange={onAudioSrFollowToggle}
-										/>
-									</strong>
-								</div>
-								<p class="page-copy setting-caption">
-									Matches 44.1, 48, 96, or 192 kHz tracks when the device accepts the rate.
-								</p>
-							</div>
-						</details>
-					{:else}
-						<p class="page-copy setting-caption">Exclusive output is available on Windows.</p>
-					{/if}
-
-					<details class="audio-advanced">
-						<summary>
-							<span>Video playback</span>
-							<small>Quality for music videos</small>
-						</summary>
-						<label class="audio-field audio-field-single">
-							<span>Video quality</span>
-							<select
-								class="audio-select"
-								value={s.video_quality_mode}
-								onchange={onVideoQualityModeChange}
-							>
-								{#each VIDEO_QUALITY_OPTIONS as opt (opt.value)}
-									<option value={opt.value}>{opt.label}</option>
-								{/each}
-							</select>
-						</label>
-						<p class="page-copy setting-caption">
-							Max uses the highest stream the video exposes. Auto adapts to bandwidth.
-						</p>
-					</details>
-
-					{#if $audioSettings.pendingApply}
-						<p class="page-copy setting-caption audio-muted">Output reconfiguring...</p>
-					{/if}
-					{#if $audioSettings.error}
-						<p class="page-copy audio-error">{$audioSettings.error}</p>
-					{/if}
-				{:else if $audioSettings.loading}
-					<p class="page-copy">Loading audio settings...</p>
-				{:else if $audioSettings.error}
-					<p class="page-copy audio-error">{$audioSettings.error}</p>
-				{/if}
-			</section>
-			{/if}
-
-			{#if activeCategory === 'audio'}
-			<section data-setting-id="downloads" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Output" title="Downloads" subtitle="Save tracks to disk as FLAC or MP3." />
+				{/if}</section><section data-setting-id="downloads" class="glass-tile section-panel">
+				<SectionHeader title="Downloads" />
 
 				<div class="download-settings">
 					<label class="audio-field download-folder-field">
@@ -3053,7 +2643,7 @@
 								aria-pressed={$defaultDownloadFormat === 'flac'}
 								onclick={() => setDownloadFormat('flac')}
 							>
-								FLAC<small>Lossless</small>
+								FLAC
 							</button>
 							<button
 								type="button"
@@ -3062,7 +2652,7 @@
 								aria-pressed={$defaultDownloadFormat === 'aac'}
 								onclick={() => setDownloadFormat('aac')}
 							>
-								AAC<small>M4A, best lossy</small>
+								AAC
 							</button>
 							<button
 								type="button"
@@ -3071,12 +2661,12 @@
 								aria-pressed={$defaultDownloadFormat === 'mp3'}
 								onclick={() => setDownloadFormat('mp3')}
 							>
-								MP3<small>320 kbps</small>
+								MP3
 							</button>
 						</div>
 					</div>
 
-					<div class="audio-field">
+					{#if $defaultDownloadFormat === 'flac'}<div class="audio-field">
 						<span>FLAC quality</span>
 						<div class="download-format-toggle" role="group" aria-label="FLAC download quality">
 							<button
@@ -3086,7 +2676,7 @@
 								aria-pressed={$defaultFlacQuality === 'hires'}
 								onclick={() => setFlacQuality('hires')}
 							>
-								Hi-Res<small>Best available</small>
+								Hi-Res
 							</button>
 							<button
 								type="button"
@@ -3095,12 +2685,12 @@
 								aria-pressed={$defaultFlacQuality === 'cd'}
 								onclick={() => setFlacQuality('cd')}
 							>
-								CD<small>16-bit / 44.1 kHz</small>
+								CD
 							</button>
 						</div>
-					</div>
+					</div>{/if}
 
-					<div class="audio-field">
+					{#if $defaultDownloadFormat === 'mp3'}<div class="audio-field">
 						<span>MP3 source</span>
 						<div class="download-format-toggle" role="group" aria-label="MP3 transcode source">
 							<button
@@ -3110,7 +2700,7 @@
 								aria-pressed={$defaultMp3Source === 'aac'}
 								onclick={() => setMp3Source('aac')}
 							>
-								AAC<small>Fast</small>
+								AAC
 							</button>
 							<button
 								type="button"
@@ -3119,81 +2709,20 @@
 								aria-pressed={$defaultMp3Source === 'lossless'}
 								onclick={() => setMp3Source('lossless')}
 							>
-								Lossless<small>Best MP3, slower</small>
+								Lossless
 							</button>
 						</div>
-					</div>
+					</div>{/if}
 
-					<p class="download-settings-hint">
-						FLAC saves the lossless master; MP3 is a smaller portable copy. Right-click any track,
-						album, or playlist to download, or use the download button on the now-playing artwork.
-					</p>
+
 				</div>
-			</section>
-			{/if}
+			</section><details data-setting-id="discovery-engine" class="glass-tile section-panel" open={discoveryIsRunning}><summary>Discovery<span class="disclosure-status">{discoveryIsRunning ? "Training · " + Math.round((discoveryStatus?.latest_run?.progress ?? 0) * 100) + "%" : discoveryStatus ? Math.round(discoveryStatus.coverage_ratio * 100) + "% coverage" : "Status unavailable"}</span></summary><p class="setting-status">Training can use substantial CPU. Review the estimate and safety profile; you can stop at any time.</p>
 
-			{#if activeCategory === 'audio'}
-			<section data-setting-id="discovery-engine" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Learning" title="Discovery engine" subtitle="Learned radio coverage and training." />
-
-				<div class="discovery-warning glass-panel">
-					<h4>⚠ Heads up — this runs hot.</h4>
-					<p>
-						A retrain pegs every CPU core for 10–30 seconds on a typical library, longer on bigger ones. Your fans will spin up. If you're on a laptop or somewhere thermally constrained, expect heat. Hit <strong>Stop</strong> any time.
-					</p>
-				</div>
-
-				<details class="discovery-guide glass-panel">
-					<summary>How discovery works — when to retrain, what activates a model</summary>
-					<div class="guide-body">
-						<p>
-							The discovery engine learns a similarity space over your library: every track gets a vector, and each track's top neighbours are pre-computed and stored. Radio, automix, "more like this", and the discover page all read those neighbours. Until a trained model is active, those surfaces fall back to a metadata-only heuristic (same artist / genre / decade), which is flat — same handful of tracks every time.
-						</p>
-
-						<h5>When to retrain</h5>
-						<ul>
-							<li><strong>First time</strong> after syncing your library — there's no model yet.</li>
-							<li><strong>After a big sync</strong> — new tracks have no neighbours until you retrain.</li>
-							<li><strong>After a few weeks of listening</strong> — the model improves with real plays. New transitions teach it which tracks belong together.</li>
-							<li><strong>You don't need to retrain often.</strong> Once a week or so when you've added music or listened a lot. Daily is overkill.</li>
-						</ul>
-
-						<h5>Incremental refresh vs Full retrain</h5>
-						<p>
-							<strong>Incremental refresh</strong> reuses the cached audio-proxy features from the last run and only rebuilds the behavioural + similarity stages. Faster — typically 30–50% of a Full Retrain wall-clock. Use this for routine refreshes.
-						</p>
-						<p>
-							<strong>Full retrain</strong> bypasses cached audio-proxy features and recomputes current library tracks from scratch. Use this if you've changed intensity tier, suspect the cache is stale, or it's been a long time since the last clean rebuild.
-						</p>
-						<p>
-							On the very first run there's nothing cached, so both buttons do identical work.
-						</p>
-
-						<h5>Intensity tiers</h5>
-						<p>
-							<strong>Max</strong> (96-dim, 64 neighbours, 8-track context) — best radio quality, slowest. Recommended for libraries under ~10k or overnight runs.
-							<br /><strong>Medium</strong> (64-dim, 32 neighbours, 5-track context) — the default. Indistinguishable from Max for most listening; ~50% of the wall-clock.
-							<br /><strong>Low</strong> (48-dim, 24 neighbours, 3-track context) — skips the audio-proxy stage entirely. Cold tracks lose their metadata anchor, but the engine stays usable on modest hardware.
-						</p>
-
-						<h5>Why a model might not activate</h5>
-						<p>
-							A run can complete with full coverage but still leave Active model on <strong>Fallback only</strong>. The activation gate scales with how much you've actually listened:
-						</p>
-						<ul>
-							<li><strong>0 plays</strong> — needs ≥ 50% coverage. Cold-start mode.</li>
-							<li><strong>1–49 plays</strong> — needs ≥ 70% coverage. Recall@10 isn't reliable on a tiny held-out set, so the gate looks at coverage only.</li>
-							<li><strong>50+ plays</strong> — needs ≥ 85% coverage AND ≥ 15% recall@10. Full strict gate.</li>
-						</ul>
-						<p>
-							If you complete a run and the model doesn't activate, you'll usually see Coverage well above the relevant threshold but Active model still says Fallback. That means recall didn't clear — keep listening, retrain again in a week, and the gate will pass naturally.
-						</p>
-					</div>
-				</details>
+				<details class="discovery-guide"><summary>About discovery training</summary><p class="setting-status">Training finds connections across your library. Refresh after adding music or listening history; a full retrain also rebuilds cached audio features.</p><p class="setting-status">Training completion and model activation are separate. Recommendations use the existing fallback until a model meets the activation criteria.</p></details>
 
 				<div class="stat-grid inner-metrics">
-					<MetricPair label="Coverage" value={discoveryStatus ? `${Math.round(discoveryStatus.coverage_ratio * 100)}%` : '—'} copy="Playable tracks with learned neighborhoods." />
-					<MetricPair label="Embedded" value={discoveryStatus?.embedded_tracks?.toLocaleString() ?? '0'} copy="Tracks with stored embedding vectors." />
+					<div class="info-row"><span>Coverage</span><strong>{discoveryStatus ? `${Math.round(discoveryStatus.coverage_ratio * 100)}%` : '—'}</strong></div>
+					<div class="info-row"><span>Embedded</span><strong>{discoveryStatus?.embedded_tracks?.toLocaleString() ?? '0'}</strong></div>
 				</div>
 
 				<div class="portable-card glass">
@@ -3240,11 +2769,7 @@
 						<option value="v2">V2 recommended</option>
 						<option value="v1">V1 legacy</option>
 					</select>
-					<div class="engine-detail glass-tile">
-						<strong>{DISCOVERY_ENGINE_PRESETS[discoveryEngine].title}</strong>
-						<span>{DISCOVERY_ENGINE_PRESETS[discoveryEngine].tagline}</span>
-						<p>{DISCOVERY_ENGINE_PRESETS[discoveryEngine].detail}</p>
-					</div>
+
 					{#if !discoveryEngineTrainable}
 						<div class="legacy-engine-note">
 							V1 is read-only in this build. Switch to V2 to train or refresh discovery.
@@ -3335,23 +2860,12 @@
 				</div>
 
 				<div class="action-row">
-					<button class="btn btn-primary" onclick={() => void startDiscoveryTraining('incremental')} disabled={discoveryIsRunning || !discoveryEngineTrainable}>Incremental refresh</button>
+					<button class="btn btn-primary" onclick={() => void startDiscoveryTraining('incremental')} disabled={discoveryIsRunning || !discoveryEngineTrainable}>Refresh discovery</button>
 					<button class="btn btn-glass" onclick={() => void startDiscoveryTraining('full', true)} disabled={discoveryIsRunning || !discoveryEngineTrainable}>Full retrain</button>
 					{#if discoveryIsRunning}
-						<button class="btn btn-glass" onclick={() => void stopDiscoveryTraining()}>Stop</button>
+						<button class="btn btn-glass" onclick={() => void stopDiscoveryTraining()}>Stop training</button>
 					{/if}
-				</div>
-			</section>
-
-			<section data-setting-id="radio-similarity-index" class="glass-panel section-panel">
-				<SectionHeader
-					eyebrow="Learning"
-					title="Radio similarity index"
-					subtitle="Metadata-heuristic recall lane for radio (co-album, co-artist, co-listen, genre)."
-				/>
-				<p>
-					The radio Engine lane reads a precomputed <code>track_similarity</code> index. It's separate from the discovery model's learned neighbours — radio uses both. If it's never built, the Engine lane silently contributes nothing. Building it can take a few minutes on large libraries.
-				</p>
+				</div></details><details data-setting-id="radio-similarity-index" class="glass-tile section-panel" open={radioSimilarityBusy}><summary>Radio index<span class="disclosure-status">{radioSimilarityRowCount === null ? "Unknown" : radioSimilarityRowCount.toLocaleString() + " pairs"}</span></summary><p class="setting-status">A separate radio index. Automatic rebuilds wait while the app is busy.</p><details><summary>Automatic rebuilds</summary><p class="setting-status">Rebuilds may wait for playback, sync, enrichment, analysis or training. The scheduler checks hourly after a six-hour rebuild interval; startup checks are delayed.</p></details>
 				<div class="info-list">
 					<div class="info-row">
 						<span>Indexed pairs</span>
@@ -3359,92 +2873,21 @@
 					</div>
 					<div class="info-row">
 						<span>Last built</span>
-						<strong>{radioSimilarityBuiltAt ?? 'Never'}</strong>
+						<strong>{radioSimilarityBuiltAt ?? (radioSimilarityRowCount === null ? 'Unknown' : 'Never')}</strong>
 					</div>
 				</div>
 				<div class="action-row">
 					<button class="btn btn-primary" onclick={() => void buildRadioSimilarity()} disabled={radioSimilarityBusy}>
-						{radioSimilarityBusy ? 'Building…' : 'Build radio similarity index'}
+						{radioSimilarityBusy ? 'Building…' : (radioSimilarityBuiltAt ? 'Rebuild radio index' : 'Build radio index')}
 					</button>
 				</div>
-				{#if radioSimilarityLabel}
+				<button class="btn btn-glass" onclick={() => void loadRadioSimilarityStatus()}>Refresh status</button>{#if radioSimilarityLabel}
 					<p class="galaxy-refresh-label">{radioSimilarityLabel}</p>
-				{/if}
-			</section>
-			{/if}
-		</div>
-
-		<div class="settings-side">
-
-			{#if activeCategory === 'account'}
-			<section data-setting-id="app-updates" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Desktop" title="App updates" subtitle="Version, install mode, and update checks." />
-				<div class="inner-metrics">
-					<MetricPair label="Version" value={appVersion || 'Unknown'} copy="Current app build." />
-					<MetricPair label="Install mode" value={installModeLabel} copy={desktopAppAvailable ? 'Detected from the running shell.' : 'Use the desktop app for update checks.'} />
-					<MetricPair label="Updates" value={updateStatus} copy={updateAvailableVersion ? 'Ready from the tray menu or this panel.' : 'Manual checks use the active release channel.'} />
-				</div>
-				<div class="action-row">
-					{#if updateAvailableVersion}
-						<button
-							type="button"
-							class="btn btn-primary"
-							onclick={() => void openPatchInfoFromSettings()}
-						>
-							Patch info
-						</button>
-					{/if}
-					<button
-						type="button"
-						class={updateAvailableVersion ? 'btn btn-glass' : 'btn btn-primary'}
-						onclick={() => void checkForUpdatesNow()}
-						disabled={!desktopAppAvailable || updateChecking}
-					>
-						{updateChecking ? 'Checking...' : 'Check for updates'}
-					</button>
-					{#if !desktopAppAvailable}
-						<span class="page-copy setting-caption">Available in the desktop app.</span>
-					{/if}
-				</div>
-				{#if updateError}
-					<p class="field-error" role="alert">{updateError}</p>
-				{/if}
-			</section>
-
-			{#if desktopAppAvailable}
-			<section data-setting-id="closing-the-window" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Desktop" title="Closing the window" subtitle="Quit NOORwave, or keep it running in the tray." />
-				<div class="info-list">
-					<div class="info-row">
-						<div>
-							<span>Minimize to tray on close</span>
-							<p class="info-row-hint">
-								{minimizeToTray
-									? 'Closing the window keeps NOORwave running in the tray. Quit from the tray menu.'
-									: 'Closing the window quits NOORwave. Turn this on to keep it running in the tray instead.'}
-							</p>
-						</div>
-						<strong>
-							<Toggle
-								checked={minimizeToTray}
-								onchange={(e) => void setMinimizeToTray(e.currentTarget.checked)}
-							/>
-						</strong>
-					</div>
-				</div>
-			</section>
-			{/if}
-			{/if}
-
-			{#if activeCategory === 'sources'}
-			<section data-setting-id="portable-snapshot" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Transfer" title="Portable snapshot" subtitle="Export/import MusicBrainz and Last.fm enrichment." />
-
-				<div class="stat-grid inner-metrics">
-					<MetricPair label="Snapshot checked" value={portableSnapshot?.checked_rows?.toLocaleString() ?? '0'} copy="Tracks marked as already processed." />
-					<MetricPair label="Snapshot genres" value={portableSnapshot?.genre_rows?.toLocaleString() ?? '0'} copy="Genre rows ready to import elsewhere." />
-					<MetricPair label="Last.fm checked" value={portableSnapshot?.lastfm_checked_rows?.toLocaleString() ?? '0'} copy="Last.fm tracks marked as already processed." />
-					<MetricPair label="Context tags" value={portableSnapshot?.context_tag_rows?.toLocaleString() ?? '0'} copy="Last.fm mood and activity tags ready to import." />
+				{/if}</details><details data-setting-id="portable-snapshot" class="glass-tile section-panel"><summary>Enrichment transfer</summary><div class="stat-grid inner-metrics">
+					<div class="info-row"><span>Snapshot checked</span><strong>{portableSnapshot?.checked_rows?.toLocaleString() ?? '0'}</strong></div>
+					<div class="info-row"><span>Snapshot genres</span><strong>{portableSnapshot?.genre_rows?.toLocaleString() ?? '0'}</strong></div>
+					<div class="info-row"><span>Last.fm checked</span><strong>{portableSnapshot?.lastfm_checked_rows?.toLocaleString() ?? '0'}</strong></div>
+					<div class="info-row"><span>Context tags</span><strong>{portableSnapshot?.context_tag_rows?.toLocaleString() ?? '0'}</strong></div>
 				</div>
 
 				<div class="portable-card glass">
@@ -3470,27 +2913,26 @@
 
 				<div class="action-row">
 					<button class="btn btn-primary" onclick={exportPortableSnapshot} disabled={portableAction !== null}>
-						{portableAction === 'export' ? 'Exporting…' : 'Export snapshot'}
+						{portableAction === 'export' ? 'Exporting…' : 'Export enrichment'}
 					</button>
 					<button
 						class="btn btn-glass"
 						onclick={importPortableSnapshot}
 						disabled={portableAction !== null || !portableSnapshot?.exists}
 					>
-						{portableAction === 'import' ? 'Importing…' : 'Import snapshot'}
+						{portableAction === 'import' ? 'Importing…' : 'Import enrichment'}
 					</button>
-				</div>
-			</section>
-			{/if}
-
-			{#if activeCategory === 'sources'}
-			<section data-setting-id="database-size" class="glass-panel section-panel">
-				<SectionHeader
-					eyebrow="Cleanup"
-					title="Database size"
-					subtitle="How much disk noor.db is using, and how to get some back."
-				/>
-				{#if databaseStats}
+				</div></details><details class="glass-tile section-panel" data-setting-id="library-maintenance"><summary>Library management</summary>
+<SettingRow label="Clean library" hint="Move non-liked album tracks to the hidden discovery pool and merge exact duplicates. Liked songs stay.">
+	<button class="btn btn-glass" onclick={() => void handleReclean()} disabled={recleanRunning || $syncStatus === 'syncing'}>{recleanRunning ? 'Cleaning…' : 'Clean library'}</button>
+</SettingRow>
+<SettingRow label="Reset Last.fm tags" hint="Clear Last.fm tags and check markers so the next enrichment run fetches them again.">
+	<button class="btn btn-glass danger" onclick={resetLastfmEnrichment} disabled={lastfmIsRunning}>Reset tags</button>
+</SettingRow>
+<SettingRow label="Clear audio analysis" hint="Remove saved BPM, key and energy analysis. Your music and listening history stay.">
+	<button class="btn btn-glass danger" onclick={clearAllAnalysis}>Clear analysis</button>
+</SettingRow>
+{#if $audioAnalysisError}<p class="error" role="alert">{$audioAnalysisError}</p>{/if}{#if recleanSummary}<p class="setting-status">{recleanSummary}</p>{/if}{#if lastfmError}<p class="error" role="alert">{lastfmError}</p>{/if}<details data-setting-id="database-size" class="glass-tile section-panel" open={databaseCompacting}><summary>Database storage</summary>{#if databaseStats}
 					<p class="page-copy database-size-headline">
 						<strong>{formatBytes(databaseStats.file_bytes)}</strong>
 						{#if databaseStats.estimated_reclaimable_bytes > 0}
@@ -3541,26 +2983,8 @@
 					>
 						{databaseCompacting ? 'Compacting…' : 'Compact database'}
 					</button>
-				</div>
-			</section>
-
-			<section data-setting-id="clear-non-library-entries" class="glass-panel section-panel">
-				<SectionHeader
-					eyebrow="Cleanup"
-					title="Clear non-library entries"
-					subtitle="Prune tidal_stream tracks that left no trace."
-				/>
-				<p class="page-copy">
-					Last.fm radio recommendations get resolved into <code>tidal_stream</code> rows in the
-					tracks table so playback, listen history, and the resolution cache all keep working.
-					This action removes any such row that you never played, never favorited, and isn't in
-					any queue or playlist.
-				</p>
-				<p class="page-copy is-warning">
-					Cascades to trained data referencing those tracks (embeddings, neighbours, transitions).
-					Storage savings are tiny — even 1,000 tracks/month for 10 years is ~20MB. Run for
-					tidiness only.
-				</p>
+				</div></details><details data-setting-id="clear-non-library-entries" class="glass-tile section-panel" open={purgeRunning}><summary>Remove unused recommendations</summary><p class="setting-status">Remove recommendations never played, liked, queued or added to playlists.</p>
+				<p class="setting-status">Associated trained data is also removed. Review the confirmation before continuing.</p>
 				{#if purgeLastDeleted !== null}
 					<p class="page-copy">
 						Last run deleted <strong>{purgeLastDeleted.toLocaleString()}</strong> orphan track{purgeLastDeleted === 1 ? '' : 's'}.
@@ -3571,96 +2995,99 @@
 				{/if}
 				<div class="action-row">
 					<button class="btn btn-glass danger" onclick={purgeOrphanTidalStream} disabled={purgeRunning}>
-						{purgeRunning ? 'Purging…' : 'Clear non-library entries'}
+						{purgeRunning ? 'Purging…' : 'Remove unused recommendations'}
 					</button>
+				</div></details></details>
+{:else if activeCategory === 'services'}
+<section data-setting-id="connect-tidal" class="glass-tile section-panel"><SectionHeader title="TIDAL" />{#if $pendingTidalLogin}
+					<div class="auth-card glass">
+						<p class="page-copy">{$pendingTidalLogin.phase === 'starting' ? 'Opening TIDAL sign-in…' : 'Finish your TIDAL sign-in.'}</p>
+						<p class="page-copy">After sign-in, copy the full address from the final TIDAL page, even if it says page not found. Paste it here to finish.</p>
+						<div class="action-row">
+							<button type="button" class="btn btn-glass" onclick={() => void openTidalVerifyUrl()} disabled={$pendingTidalLogin.phase !== 'awaiting'}>
+								Open TIDAL sign-in
+							</button>
+						</div>
+						{#if $pendingTidalLogin.externalOpenError}
+							<p class="error" role="alert">{$pendingTidalLogin.externalOpenError}</p>
+							<input class="text-field" type="url" readonly value={$pendingTidalLogin.verifyUrl} aria-label="TIDAL sign-in URL" />
+						{/if}
+						<input
+							class="text-field"
+							type="url"
+							bind:value={$pendingTidalLogin.redirectUrl}
+							disabled={$pendingTidalLogin.phase !== 'awaiting'}
+							aria-label="Final TIDAL redirect URL"
+							placeholder="https://tidal.com/android/login/auth?code=..."
+						/>
+						{#if $pendingTidalLogin.error}
+							<p class="error" role="alert">{$pendingTidalLogin.error}</p>
+						{/if}
+						<div class="action-row">
+							<button class="btn btn-glass" onclick={pasteTidalRedirectUrl} disabled={$pendingTidalLogin.phase !== 'awaiting'}>
+								Paste from clipboard
+							</button>
+							<button class="btn btn-primary" onclick={completeTidalLogin} disabled={$pendingTidalLogin.phase !== 'awaiting' || !$pendingTidalLogin.redirectUrl.trim()}>
+								{$pendingTidalLogin.phase === 'completing' ? 'Finishing login…' : 'Finish login'}
+							</button>
+							<button class="btn btn-glass" onclick={cancelTidalLogin} disabled={$pendingTidalLogin.phase !== 'awaiting'}>Cancel login</button>
+						</div>
+					</div>
+				{:else if serverStatus === 'offline'}
+					<div class="auth-card glass">
+						<p class="page-copy">
+							NOOR cannot reach the backend, so it cannot confirm whether your saved
+							TIDAL session is still active.
+						</p>
+						<div class="action-row">
+							<button class="btn btn-glass" onclick={() => void refreshTidalStatus()}>Retry status</button>
+						</div>
+					</div>
+				{:else if $tidalStatus === 'disconnected'}
+					<div class="action-row">
+						<button class="btn btn-primary" onclick={connectTidal}>Connect TIDAL</button>
+					</div>
+				{:else}<div class="info-row"><span>Account</span><strong>{$tidalUserId ?? 'Connected'}</strong></div><div class="action-row"><button class="btn btn-glass" onclick={disconnectTidal}>Disconnect</button><a class="btn btn-glass" href={settingsHref('library', 'library-sync')}>Library sync</a></div>{/if}
+<details><summary>More content settings</summary>
+    <TidalContentSetting />
+	<p class="setting-status">Manage explicit content in the TIDAL app.</p>
+	<div class="action-row"><ExternalLink href="https://support.tidal.com/hc/en-us/articles/48031883413521-AI-Policy">About TIDAL’s AI labels</ExternalLink><ExternalLink href="https://support.tidal.com/hc/en-us/articles/9936639051153-Explicit-Content">Explicit content settings</ExternalLink></div>
+</details></section><IntegrationsPanel />
+{:else if activeCategory === 'remote'}
+<PhoneRemotePanel />
+{:else if activeCategory === 'app'}
+<StartupSetting /><CloseBehaviorSetting /><section data-setting-id="app-updates" class="glass-tile section-panel">
+				<SectionHeader title="App updates" />
+				<div class="inner-metrics">
+					<div class="info-row"><span>Version</span><strong>{appVersion || 'Unknown'}</strong></div>
+					<div class="info-row"><span>Install mode</span><strong>{installModeLabel}</strong></div>
+					<div class="info-row"><span>Updates</span><strong>{updateStatus}</strong></div>
 				</div>
-			</section>
-			{/if}
+				<div class="action-row">
+					{#if updateAvailableVersion}
+						<button
+							type="button"
+							class="btn btn-primary"
+							onclick={() => void openPatchInfoFromSettings()}
+						>
+							View update details
+						</button>
+					{/if}
+					<button
+						type="button"
+						class={updateAvailableVersion ? 'btn btn-glass' : 'btn btn-primary'}
+						onclick={() => void checkForUpdatesNow()}
+						disabled={!desktopAppAvailable || updateChecking}
+					>
+						{updateChecking ? 'Checking...' : 'Check for updates'}
+					</button>
 
-			{#if activeCategory === 'audio'}
-			<section data-setting-id="now-playing-path" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Runtime" title="Now playing path" subtitle="Current device and format." />
-				<div class="info-list">
-					<div class="info-row">
-						<span>Device</span>
-						<strong>{playbackRuntime?.device_name ?? 'No device reported yet'}</strong>
-					</div>
-					<div class="info-row">
-						<span>Format</span>
-						<strong>
-							{#if playbackRuntime}
-								{playbackRuntime.sample_rate} Hz · {playbackRuntime.channels} ch
-							{:else}
-								Waiting for runtime
-							{/if}
-						</strong>
-					</div>
-					<div class="info-row">
-						<span>Track ID</span>
-						<strong>{playbackRuntime?.active_track_id ?? 'None'}</strong>
-					</div>
 				</div>
-
-				{#if playbackRuntime?.last_error}
-					<p class="runtime-error">{playbackRuntime.last_error}</p>
+				{#if updateError}
+					<p class="field-error" role="alert">{updateError}</p>
 				{/if}
 			</section>
-			{/if}
-
-			{#if activeCategory === 'audio'}
-			<section data-setting-id="library-audio-data" class="glass-panel section-panel">
-				<SectionHeader eyebrow="Analysis" title="Library audio data" subtitle="Passive BPM, key, and energy capture." />
-
-				<div class="stat-grid inner-metrics">
-					<MetricPair label="Analyzed" value={$audioAnalysis.analyzed.toLocaleString()} copy="Tracks with DSP features." />
-					<MetricPair label="Avg BPM" value={$audioAnalysis.stats?.avg_bpm?.toFixed(1) ?? '—'} copy="Average tempo across analyzed tracks." />
-					<MetricPair label="Top Key" value={$audioAnalysis.stats?.top_key ?? '—'} copy="Most common key signature." />
-					<MetricPair label="Avg Energy" value={$audioAnalysis.stats?.avg_energy?.toFixed(2) ?? '—'} copy="Average energy level (0–1)." />
-				</div>
-
-				<p class="analysis-note">
-					New data is captured from playback. There is no bulk scan because large TIDAL preview bursts trigger rate limits.
-				</p>
-
-				<div class="info-row">
-					<div>
-						<span>Passive analysis</span>
-						<p class="info-row-hint">
-							{$audioAnalysis.passiveEnabled
-								? 'New tracks you play will be analysed and added to the library DSP table.'
-								: 'Disabled — playback is not being analysed. Existing data stays untouched.'}
-						</p>
-					</div>
-					<strong>
-						<Toggle
-							checked={$audioAnalysis.passiveEnabled}
-							onchange={(e) => void setPassiveDspEnabled((e.currentTarget as HTMLInputElement).checked)}
-						/>
-					</strong>
-				</div>
-
-				<div class="action-row">
-					<button class="btn btn-glass danger" onclick={clearAllAnalysis}>Clear All</button>
-				</div>
-
-				<details class="advanced-details">
-					<summary>Advanced analysis limits</summary>
-					<div class="setting-row">
-						<label for="dsp-max-duration">Max duration per track (seconds)</label>
-						<input id="dsp-max-duration" type="number" value="30" min="10" max="120" />
-					</div>
-					<div class="setting-row">
-						<label for="dsp-reanalyze-interval">Re-analyze interval (days)</label>
-						<input id="dsp-reanalyze-interval" type="number" value="30" min="1" max="365" />
-					</div>
-				</details>
-			</section>
-			{/if}
-
-		</div>
-	</section>
-</div>
-
+{/if}</div></div></div>
 {#if databaseCompacting}
 	<!-- Blocking on purpose: the database is being rewritten and quitting midway
 	     is the one thing that can hurt. No close button, no dismiss-on-click. -->
@@ -3686,6 +3113,7 @@
 {/if}
 
 <style>
+
 	.database-size-headline {
 		display: flex;
 		flex-wrap: wrap;
@@ -3767,64 +3195,6 @@
 		font-variant-numeric: tabular-nums;
 	}
 
-	.audio-mode-summary {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--space-4);
-		padding: var(--space-4);
-		border-left: 3px solid var(--accent);
-		border-radius: var(--radius-sm);
-		background: rgba(255, 255, 255, 0.03);
-	}
-
-	.audio-mode-summary > div {
-		display: grid;
-		gap: var(--space-1);
-		min-width: 0;
-	}
-
-	.audio-mode-label,
-	.audio-field > span,
-	.audio-advanced summary small {
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-bold);
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		color: var(--text-tertiary, var(--text-secondary));
-	}
-
-	.audio-mode-summary strong {
-		font-size: var(--font-size-lg);
-		line-height: var(--line-height-tight);
-	}
-
-	.audio-mode-summary p {
-		margin: 0;
-		font-size: var(--font-size-sm);
-		line-height: var(--line-height-normal);
-		color: var(--text-secondary);
-	}
-
-	.audio-mode-toggle {
-		flex: 0 0 auto;
-	}
-
-	.audio-field-grid {
-		display: grid;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
-		gap: var(--space-3);
-	}
-
-	.audio-field {
-		display: grid;
-		gap: var(--space-2);
-		min-width: 0;
-	}
-
-	.audio-field-single {
-		margin-top: var(--space-3);
-	}
 
 	.audio-select {
 		width: 100%;
@@ -3872,47 +3242,6 @@
 	.download-format-toggle {
 		display: flex;
 		gap: var(--space-2);
-	}
-
-	.download-format-option {
-		flex: 1 1 0;
-		display: grid;
-		gap: 2px;
-		justify-items: center;
-		padding: 8px 12px;
-		border: 1px solid var(--panel-border);
-		border-radius: var(--radius-sm);
-		background: rgba(255, 255, 255, 0.05);
-		color: var(--text-secondary);
-		font-family: inherit;
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-medium);
-		cursor: pointer;
-		transition:
-			background 160ms ease,
-			border-color 160ms ease,
-			color 160ms ease;
-	}
-
-	.download-format-option small {
-		font-size: var(--font-size-xs);
-		opacity: 0.7;
-	}
-
-	.download-format-option:hover {
-		border-color: var(--accent-line);
-	}
-
-	.download-format-option.active {
-		background: var(--accent-soft);
-		border-color: var(--accent-line);
-		color: var(--accent-strong);
-	}
-
-	.download-settings-hint {
-		margin: 0;
-		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
 	}
 
 	.audio-advanced summary {
@@ -4012,8 +3341,7 @@
 		color: var(--text-secondary);
 	}
 
-	.engine-copy p,
-	.engine-detail p {
+	.engine-copy p {
 		margin: 0;
 		font-size: var(--font-size-sm);
 		line-height: var(--line-height-normal);
@@ -4036,20 +3364,6 @@
 		opacity: 0.6;
 	}
 
-	.engine-detail {
-		grid-column: 1 / -1;
-		display: grid;
-		gap: var(--space-2);
-		padding: var(--space-3);
-	}
-
-	.engine-detail strong {
-		font-size: var(--font-size-md);
-		font-weight: var(--font-weight-semibold);
-		line-height: var(--line-height-snug);
-	}
-
-	.engine-detail span,
 	.legacy-engine-note {
 		font-size: var(--font-size-sm);
 		line-height: var(--line-height-normal);
@@ -4073,31 +3387,6 @@
 
 	.safety-profile-row p {
 		margin: var(--space-2) 0 0;
-		font-size: var(--font-size-sm);
-		line-height: var(--line-height-normal);
-		color: var(--text-secondary);
-	}
-
-	.safety-watchdog-popup {
-		display: flex;
-		align-items: flex-start;
-		justify-content: space-between;
-		gap: var(--gap);
-		margin-bottom: var(--space-4);
-		padding: var(--space-4);
-		border-left: 3px solid var(--state-warning);
-	}
-
-	.safety-watchdog-popup strong {
-		display: block;
-		margin-bottom: var(--space-2);
-		font-size: var(--font-size-md);
-		font-weight: var(--font-weight-semibold);
-		line-height: var(--line-height-snug);
-	}
-
-	.safety-watchdog-popup p {
-		margin: 0;
 		font-size: var(--font-size-sm);
 		line-height: var(--line-height-normal);
 		color: var(--text-secondary);
@@ -4249,183 +3538,6 @@
 		}
 	}
 
-	.settings-page {
-		gap: 14px;
-	}
-
-	.settings-command {
-		display: flex;
-		align-items: flex-start;
-		justify-content: space-between;
-		gap: 18px;
-		padding: 4px 0 2px;
-	}
-
-	.settings-title {
-		display: grid;
-		gap: 5px;
-		min-width: 0;
-	}
-
-	.settings-title h1 {
-		font-family: var(--font-body);
-		font-size: var(--font-size-xl);
-		font-weight: var(--font-weight-bold);
-		line-height: var(--line-height-tight);
-		letter-spacing: 0;
-	}
-
-	.settings-title p:not(.eyebrow) {
-		color: var(--text-secondary);
-		max-width: 64ch;
-	}
-
-	.settings-status {
-		display: flex;
-		justify-content: flex-end;
-		flex-wrap: wrap;
-		gap: 8px;
-	}
-
-	.settings-status-strip {
-		display: grid;
-		grid-template-columns: repeat(4, minmax(0, 1fr));
-		gap: 1px;
-		overflow: hidden;
-		border: 1px solid var(--border-subtle);
-		border-radius: 12px;
-		background: var(--border-subtle);
-	}
-
-	.settings-status-strip div {
-		min-width: 0;
-		display: grid;
-		gap: 3px;
-		padding: 10px 12px;
-		background: color-mix(in srgb, var(--bg-elevated) 72%, transparent);
-	}
-
-	.settings-status-strip span {
-		color: var(--text-tertiary);
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-bold);
-		letter-spacing: 0.09em;
-		text-transform: uppercase;
-	}
-
-	.settings-status-strip strong {
-		min-width: 0;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		font-size: var(--font-size-sm);
-	}
-
-	.settings-search {
-		position: relative;
-		margin-bottom: var(--space-3);
-	}
-
-	.settings-search-icon {
-		position: absolute;
-		left: 14px;
-		top: 50%;
-		transform: translateY(-50%);
-		width: 16px;
-		height: 16px;
-		fill: none;
-		stroke: currentColor;
-		stroke-width: 2;
-		stroke-linecap: round;
-		opacity: 0.5;
-		pointer-events: none;
-	}
-
-	.settings-search-input {
-		width: 100%;
-		padding: 10px 14px 10px 40px;
-		background: var(--bg-surface);
-		border: 1px solid var(--panel-border);
-		border-radius: var(--radius-md);
-		color: inherit;
-		font-size: var(--font-size-sm);
-	}
-
-	.settings-search-input::placeholder {
-		color: var(--text-tertiary);
-	}
-
-	.settings-search-input:focus {
-		outline: none;
-		border-color: var(--accent);
-	}
-
-	.settings-search-results {
-		position: absolute;
-		z-index: var(--z-overlay);
-		top: calc(100% + 6px);
-		left: 0;
-		right: 0;
-		margin: 0;
-		padding: 6px;
-		list-style: none;
-		background: var(--bg-elevated);
-		border: 1px solid var(--panel-border);
-		border-radius: var(--radius-md);
-		box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
-		max-height: 320px;
-		overflow-y: auto;
-	}
-
-	.settings-search-results li {
-		list-style: none;
-	}
-
-	.settings-search-result {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--gap-sm);
-		width: 100%;
-		padding: 8px 12px;
-		background: transparent;
-		border: none;
-		border-radius: var(--radius-sm);
-		color: inherit;
-		cursor: pointer;
-		text-align: left;
-	}
-
-	.settings-search-result:hover {
-		background: var(--bg-surface);
-	}
-
-	.settings-search-result-label {
-		font-size: var(--font-size-sm);
-	}
-
-	.settings-search-result-cat {
-		flex: 0 0 auto;
-		font-size: var(--font-size-2xs);
-		text-transform: uppercase;
-		letter-spacing: 0.06em;
-		color: var(--text-tertiary);
-	}
-
-	.settings-search-empty {
-		position: absolute;
-		z-index: var(--z-overlay);
-		top: calc(100% + 6px);
-		left: 0;
-		right: 0;
-		padding: 14px;
-		background: var(--bg-elevated);
-		border: 1px solid var(--panel-border);
-		border-radius: var(--radius-md);
-		font-size: var(--font-size-sm);
-		color: var(--text-tertiary);
-	}
-
 	:global(.setting-flash) {
 		animation: settingFlash 1.6s ease;
 	}
@@ -4442,344 +3554,9 @@
 		}
 	}
 
-	.settings-grid {
-		display: grid;
-		grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.65fr);
-		gap: var(--space-4);
-		align-items: start;
-	}
-
-	.settings-grid.single-column {
-		grid-template-columns: minmax(0, 1fr);
-	}
-
-	.settings-main,
-	.settings-side {
-		display: grid;
-		gap: 12px;
-	}
-
-	.settings-main:empty,
-	.settings-side:empty {
-		display: none;
-	}
-
 	/* Sources and Account split their cards across two even columns (main + side).
 	   Each whole card lives in one column, so they fill the width without the
 	   multicol split that tore tall cards (like the integrations panel) in half. */
-	.settings-grid.split-even {
-		grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-	}
-
-	.settings-rail {
-		display: grid;
-		grid-template-columns: repeat(4, minmax(0, 1fr));
-		gap: 6px;
-		padding: 6px;
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md);
-		background: rgba(255, 255, 255, 0.022);
-	}
-
-	.settings-rail-btn {
-		all: unset;
-		display: flex;
-		align-items: center;
-		gap: 9px;
-		min-width: 0;
-		min-height: 46px;
-		padding: 8px 12px;
-		border-radius: 9px;
-		border: 1px solid transparent;
-		background: transparent;
-		cursor: pointer;
-		transition: background 180ms ease, border-color 180ms ease, transform 180ms ease;
-	}
-
-	.settings-rail-btn:hover {
-		background: rgba(255, 255, 255, 0.05);
-		border-color: rgba(255, 255, 255, 0.12);
-	}
-
-	.settings-rail-btn.active {
-		background: color-mix(in srgb, var(--accent-strong, #6366f1) 12%, transparent);
-		border-color: color-mix(in srgb, var(--accent-strong, #6366f1) 36%, transparent);
-	}
-
-	.settings-rail-icon {
-		flex: 0 0 auto;
-		width: 30px;
-		height: 30px;
-		display: grid;
-		place-items: center;
-		border-radius: 7px;
-		background: var(--bg-surface);
-		color: var(--text-secondary);
-	}
-
-	.settings-rail-icon svg {
-		width: 17px;
-		height: 17px;
-		fill: none;
-		stroke: currentColor;
-		stroke-width: 1.8;
-		stroke-linecap: round;
-		stroke-linejoin: round;
-	}
-
-	.settings-rail-btn.active .settings-rail-icon {
-		background: color-mix(in srgb, var(--accent-strong, #6366f1) 25%, transparent);
-		color: var(--text-primary);
-	}
-
-	.settings-rail-copy {
-		display: flex;
-		flex-direction: column;
-		min-width: 0;
-		max-width: 22ch;
-	}
-
-	.settings-rail-copy strong {
-		font-size: var(--font-size-sm);
-		color: var(--text-primary);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.settings-rail-hint {
-		font-size: var(--font-size-xs);
-		color: var(--text-secondary);
-		white-space: normal;
-		display: -webkit-box;
-		line-clamp: 1;
-		-webkit-line-clamp: 1;
-		-webkit-box-orient: vertical;
-		overflow: hidden;
-	}
-
-	.palette-row {
-		display: flex;
-		align-items: center;
-		gap: 14px;
-		flex-wrap: wrap;
-	}
-
-	.player-position-options {
-		display: grid;
-		grid-template-columns: repeat(3, minmax(0, 1fr));
-		gap: 10px;
-	}
-
-	.player-position-options.artwork-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-
-	.quality-setting-row {
-		display: grid;
-		grid-template-columns: 130px minmax(0, 1fr);
-		align-items: center;
-		gap: 12px;
-		margin-top: 10px;
-	}
-
-	.quality-setting-row strong { font-size: var(--font-size-sm); }
-
-	.quality-mode-options {
-		display: grid;
-		grid-template-columns: repeat(4, minmax(0, 1fr));
-		gap: 6px;
-	}
-
-	.quality-mode-options button {
-		min-height: 34px;
-		padding: 6px 8px;
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-sm);
-		background: var(--bg-surface);
-		color: var(--text-secondary);
-		font: inherit;
-		font-size: var(--font-size-xs);
-		cursor: pointer;
-	}
-
-	.quality-mode-options button:hover,
-	.quality-mode-options button.active { border-color: var(--accent-line); background: var(--accent-soft); color: var(--text-primary); }
-	.quality-mode-options button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-	@media (max-width: 920px) {
-		.quality-setting-row { grid-template-columns: 1fr; gap: 6px; }
-	}
-
-	.player-position-option {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		min-height: 56px;
-		padding: 10px 14px;
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md);
-		background: var(--bg-surface);
-		color: var(--text-secondary);
-		font: inherit;
-		cursor: pointer;
-	}
-
-	.player-position-option span { font-size: var(--font-size-xl); }
-	.player-position-option strong { font-size: var(--font-size-sm); }
-	.player-position-option:hover,
-	.player-position-option:focus-visible,
-	.player-position-option.active {
-		border-color: var(--accent-line);
-		background: var(--accent-soft);
-		color: var(--text-primary);
-	}
-	.player-position-option:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-	.appearance-player-preview {
-		display: grid;
-		grid-template-columns: 44px minmax(0, 1fr) 40px;
-		grid-template-rows: auto 3px;
-		align-items: center;
-		gap: 10px 12px;
-		max-width: 430px;
-		margin-top: 16px;
-		padding: 12px;
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md);
-		background: var(--player-surface);
-		box-shadow: var(--panel-shadow);
-	}
-	.preview-cover {
-		grid-row: 1;
-		display: grid;
-		place-items: center;
-		width: 44px;
-		aspect-ratio: 1;
-		border-radius: var(--radius-sm);
-		background: linear-gradient(135deg, var(--accent-soft), var(--bg-raised));
-		color: var(--accent-strong);
-	}
-	.preview-copy { display: flex; flex-direction: column; min-width: 0; gap: 3px; }
-	.preview-copy strong,
-	.preview-copy small { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-	.preview-copy strong { color: var(--text-primary); font-family: var(--font-display); }
-	.preview-copy small { color: var(--text-secondary); }
-	.preview-play { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: var(--accent); color: var(--text-on-accent); }
-	.preview-progress { grid-column: 1 / -1; grid-row: 2; height: 3px; border-radius: 3px; background: var(--player-progress-track); }
-	.preview-progress span { display: block; width: 38%; height: 100%; border-radius: inherit; background: var(--accent); }
-
-	.palette-picker {
-		position: relative;
-		flex: 1;
-		min-width: 220px;
-	}
-
-	.palette-trigger,
-	.palette-option {
-		width: 100%;
-		display: grid;
-		grid-template-columns: minmax(76px, 96px) minmax(0, 1fr) auto;
-		align-items: center;
-		gap: 10px;
-		text-align: left;
-		border: 1px solid var(--border-subtle);
-		background: color-mix(in srgb, var(--instrument-surface) 78%, transparent);
-		color: var(--text-primary);
-		cursor: pointer;
-	}
-
-	.palette-trigger {
-		min-height: 46px;
-		padding: 8px 10px;
-		border-radius: var(--radius-sm);
-	}
-
-	.palette-trigger:hover,
-	.palette-trigger:focus-visible,
-	.palette-option:hover,
-	.palette-option:focus-visible,
-	.palette-option.active {
-		border-color: color-mix(in srgb, var(--accent-strong) 48%, transparent);
-		background: color-mix(in srgb, var(--accent-soft) 56%, var(--instrument-surface));
-		outline: none;
-	}
-
-	.palette-band {
-		display: block;
-		min-width: 0;
-		height: 16px;
-		border-radius: 4px;
-		overflow: hidden;
-		border: 1px solid rgba(255, 255, 255, 0.16);
-		background: var(--bg-raised);
-		box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.24) inset;
-	}
-
-	.palette-band svg {
-		display: block;
-		width: 100%;
-		height: 100%;
-	}
-
-	.palette-trigger-copy,
-	.palette-option-copy {
-		min-width: 0;
-		display: grid;
-		gap: 2px;
-	}
-
-	.palette-trigger-copy strong,
-	.palette-option-copy strong {
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-semibold);
-		color: var(--text-primary);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.palette-trigger-copy small,
-	.palette-option-copy small {
-		font-size: var(--font-size-xs);
-		color: var(--text-tertiary);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.palette-trigger-caret {
-		font-size: var(--font-size-xs);
-		color: var(--text-secondary);
-		line-height: 1;
-	}
-
-	.palette-menu {
-		position: absolute;
-		inset-inline: 0;
-		top: calc(100% + 6px);
-		z-index: var(--z-overlay);
-		max-height: min(420px, 58vh);
-		overflow-y: auto;
-		display: grid;
-		gap: 4px;
-		padding: 6px;
-		border-radius: var(--radius-sm);
-		border: 1px solid var(--border-strong);
-		background: var(--material-grain), var(--bg-surface-strong);
-		backdrop-filter: var(--blur-modal);
-		-webkit-backdrop-filter: var(--blur-modal);
-		box-shadow: var(--panel-shadow);
-	}
-
-	.palette-option {
-		grid-template-columns: minmax(68px, 88px) minmax(0, 1fr);
-		padding: 8px;
-		border-radius: var(--radius-xs);
-	}
-
-	.palette-swatches {
-		display: flex;
-		gap: 6px;
-	}
 
 	.palette-swatch {
 		width: 22px;
@@ -4807,13 +3584,6 @@
 		accent-color: var(--accent);
 	}
 
-	.zoom-readout {
-		min-width: 4ch;
-		text-align: right;
-		font-variant-numeric: tabular-nums;
-		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
-	}
 
 	/* ── Shared preview panel ── */
 	.wallpaper-big-preview {
@@ -4912,13 +3682,6 @@
 		background: rgba(255, 255, 255, 0.06);
 	}
 
-	.wallpaper-group-blurb {
-		font-size: var(--font-size-xs);
-		color: var(--text-tertiary, var(--text-secondary));
-		margin-left: auto;
-		text-align: right;
-	}
-
 	.wallpaper-group-toggle:hover .wallpaper-group-name {
 		color: var(--accent, #7c80ff);
 	}
@@ -4951,13 +3714,6 @@
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
 		color: var(--text-secondary);
-	}
-
-	.wallpaper-group-head p {
-		margin: 0;
-		font-size: var(--font-size-xs);
-		color: var(--text-tertiary, var(--text-secondary));
-		line-height: var(--line-height-snug);
 	}
 
 	.wallpaper-control {
@@ -5332,28 +4088,6 @@
 		width: fit-content;
 	}
 
-
-	.section-panel {
-		padding: 16px;
-		display: flex;
-		flex-direction: column;
-		gap: 14px;
-		border-radius: var(--radius-md);
-	}
-
-	.palette-section-open {
-		position: relative;
-		z-index: calc(var(--z-overlay) + 1);
-	}
-
-	.settings-grid.single-column .settings-main {
-		max-width: none;
-	}
-
-	.settings-grid.single-column .section-panel {
-		max-width: none;
-	}
-
 	.inner-metrics {
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 	}
@@ -5410,23 +4144,6 @@
 		transition: width 200ms ease;
 	}
 
-	.discovery-warning {
-		border-left: 4px solid rgba(220, 70, 70, 0.6);
-		padding: 1rem 1.25rem;
-		margin-bottom: 1.25rem;
-	}
-
-	.discovery-warning h4 {
-		font-size: var(--font-size-md);
-		font-weight: var(--font-weight-semibold);
-		margin: 0 0 0.4rem;
-	}
-
-	.discovery-warning p {
-		margin: 0;
-		line-height: var(--line-height-normal);
-	}
-
 	.discovery-guide {
 		padding: 14px 18px;
 		margin-top: 12px;
@@ -5454,35 +4171,6 @@
 
 	.discovery-guide[open] > summary::before {
 		transform: rotate(90deg);
-	}
-
-	.guide-body {
-		margin-top: 14px;
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
-		font-size: var(--font-size-sm);
-		line-height: var(--line-height-loose);
-		color: var(--text-secondary);
-	}
-
-	.guide-body h5 {
-		margin: 8px 0 0;
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-semibold);
-		color: var(--text-primary);
-	}
-
-	.guide-body ul {
-		margin: 0;
-		padding-left: 18px;
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-	}
-
-	.guide-body p {
-		margin: 0;
 	}
 
 	.action-row {
@@ -5528,50 +4216,15 @@
 		color: var(--signal-text);
 	}
 
-	@media (max-width: 960px) {
-		.settings-command {
-			flex-direction: column;
-		}
-
-		.settings-status {
-			justify-content: flex-start;
-		}
-
-		.settings-status-strip {
-			grid-template-columns: repeat(2, minmax(0, 1fr));
-		}
-
-		.settings-grid {
-			grid-template-columns: 1fr;
-		}
-
-		.settings-rail {
-			grid-template-columns: repeat(3, minmax(0, 1fr));
-		}
-	}
-
 	@media (max-width: 640px) {
-		.settings-status-strip,
-		.settings-rail {
-			grid-template-columns: 1fr;
-		}
-
-		.settings-rail-btn {
-			padding: 10px 11px;
-		}
 
 		.inner-metrics {
 			grid-template-columns: 1fr;
 		}
 
-		.audio-mode-summary,
 		.audio-advanced summary {
 			align-items: flex-start;
 			flex-direction: column;
-		}
-
-		.audio-field-grid {
-			grid-template-columns: 1fr;
 		}
 
 		.wallpaper-tune {
@@ -5605,23 +4258,6 @@
 		color: rgba(255, 255, 255, 0.6);
 	}
 
-
-	.analysis-note {
-		font-size: var(--font-size-sm);
-		color: var(--text-secondary);
-		line-height: var(--line-height-normal);
-		margin: var(--space-3) 0;
-		max-width: 60ch;
-	}
-
-	.info-row-hint {
-		font-size: var(--font-size-xs);
-		color: var(--text-tertiary, var(--text-secondary));
-		margin: 4px 0 0;
-		line-height: var(--line-height-snug);
-		max-width: 60ch;
-	}
-
 	/* Danger button */
 	.btn.danger {
 		background: rgba(232, 135, 138, 0.12);
@@ -5635,36 +4271,6 @@
 	}
 
 	/* Advanced details */
-	.advanced-details {
-		margin-top: 4px;
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-sm);
-		padding: 10px 14px;
-	}
-
-	.advanced-details summary {
-		cursor: pointer;
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-semibold);
-		color: var(--text-secondary);
-	}
-
-	.setting-row {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--space-3);
-		padding: 8px 0;
-	}
-
-	.setting-row label {
-		font-size: var(--font-size-sm);
-		color: var(--text-secondary);
-	}
-
-	.setting-row input {
-		width: 80px;
-	}
 
 	.field-error {
 		font-size: var(--font-size-sm);
@@ -5678,4 +4284,5 @@
 	.is-warning {
 		color: var(--state-warning);
 	}
+
 </style>

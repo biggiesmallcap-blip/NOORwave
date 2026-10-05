@@ -69,7 +69,15 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_065,
     MIGRATION_066,
     MIGRATION_067,
+    MIGRATION_068,
 ];
+
+const MIGRATION_068: &str = r#"
+CREATE TABLE IF NOT EXISTS tidal_track_labels (
+    tidal_id INTEGER PRIMARY KEY,
+    ai INTEGER CHECK(ai IN (0,1))
+);
+"#;
 
 const MIGRATION_001: &str = r#"
 -- =============================================

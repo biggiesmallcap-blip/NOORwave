@@ -80,7 +80,7 @@ Automix keeps a running runway of tracks ahead of you and tells you why each one
 
 ### The phone in your pocket is the remote
 
-There is a full PWA at `/remote`, served by the same process on the same port. No companion app, no second service, no cloud round trip. **Settings -> Connection -> Phone Remote** owns the whole setup: enable trusted-LAN access, scan a one-use QR code (or enter its temporary six-digit code), and manage each paired phone by name. Local discovery provides a stable `.local` address when the network supports it, with a direct Wi-Fi address as the fallback. Once connected you get transport, the live queue, search, artist and album browsing, action sheets, and a sleep timer. Add it to your home screen and it behaves like a native remote.
+There is a full PWA at `/remote`, served by the same process on the same port. No companion app, no second service, no cloud round trip. **Settings -> Remote -> Phone remote** owns the whole setup: enable trusted-LAN access, scan a one-use QR code (or enter its temporary six-digit code), and manage each paired phone by name. Local discovery provides a stable `.local` address when the network supports it, with a direct Wi-Fi address as the fallback. Once connected you get transport, the live queue, search, artist and album browsing, action sheets, and a sleep timer. Add it to your home screen and it behaves like a native remote.
 
 ### A library that behaves like a local collection
 
@@ -114,7 +114,7 @@ It also compounds: the more your library is tagged and the more listening histor
 How to set it up:
 
 1. Create an API account at [last.fm/api/account/create](https://www.last.fm/api/account/create). It takes about a minute and is free.
-2. In NOORwave, go to **Settings -> Sources -> Last.fm** and paste the API key. Add the shared secret too if you want scrobbling.
+2. In NOORwave, go to **Settings -> Services -> Last.fm** and paste the API key. Add the shared secret too if you want scrobbling.
 3. Run the enrichment pass from the same panel. It is resumable and shows progress. Leave it running while you listen.
 
 No Last.fm key ships with the app, so this step is on you. It is worth the minute.
@@ -164,13 +164,13 @@ For the full desktop shell, which launches the server for you and adds the tray,
 cargo run -p noor-app
 ```
 
-On first run the server prints its master access PIN in the startup banner. On loopback the desktop UI fetches it automatically. Normal phone setup uses the QR flow in **Settings -> Connection -> Phone Remote**; the master PIN remains available there under **Recovery: use the master PIN** for browsers that cannot pair.
+On first run the server prints its master access PIN in the startup banner. On loopback the desktop UI fetches it automatically. Normal phone setup uses the QR flow in **Settings -> Remote -> Phone remote**; the master PIN remains available there under **Recovery: use the master PIN** for browsers that cannot pair.
 
 ## The Phone Remote, Set Up
 
 In the installed desktop app:
 
-1. Open **Settings -> Connection -> Phone Remote** and enable **Make phone remote available whenever NOORwave is running**. Use this only on a trusted local network.
+1. Open **Settings -> Remote -> Phone remote** and enable **Allow phone remote**. Use this only on a trusted local network.
 2. Optional: enable **Start NOORwave in the tray when I sign in** so the remote is available without opening the main window first.
 3. Select **Show pairing QR**, then scan it with the phone's camera. If NOORwave is already installed on the phone's home screen, enter the temporary six-digit code instead. The QR and code expire after two minutes and work once.
 4. Open the paired remote and optionally add it to the phone's home screen. The device receives its own persistent credential; the permanent master PIN is not embedded in the QR.

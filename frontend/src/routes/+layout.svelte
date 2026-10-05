@@ -65,6 +65,7 @@
 	import Toast from '$lib/components/Toast.svelte';
 	import CommandPalette from '$lib/components/CommandPalette.svelte';
 	import ShortcutHelp from '$lib/components/ShortcutHelp.svelte';
+	import DiscoverySetupGuide from '$lib/components/onboarding/DiscoverySetupGuide.svelte';
 	import PlayerBar from '$lib/shell/PlayerBar.svelte';
 	import PlayerLayoutSelect from '$lib/shell/PlayerLayoutSelect.svelte';
 	import SidebarNav from '$lib/shell/SidebarNav.svelte';
@@ -1429,10 +1430,12 @@
 <!-- Skipped on the phone remote: the fixed shader layer shows through and
      flickers when the mobile address bar collapses past 100svh, and the
      remote shell is opaque anyway. -->
-<div class="wallpaper-layer" aria-hidden="true">
+<div class="wallpaper-layer" class:onboarding-wallpaper={isOnboardingRouteEarly} data-theme={isOnboardingRouteEarly ? "dark" : undefined} aria-hidden="true">
 	{#if activeWallpaper.shader && !isRemoteRoute}
 		<ShaderWallpaper
 			shader={activeWallpaper.shader}
+			paletteOverride={isOnboardingRouteEarly ? "futuro" : undefined}
+			colorSourceOverride={isOnboardingRouteEarly ? "palette" : undefined}
 			interactive={false}
 			maxDpr={$wallpaperQuality === 'high' ? 2 : 1}
 			targetFps={$wallpaperFps}
@@ -1445,6 +1448,7 @@
 
 <ContextMenu />
 <Toast />
+<DiscoverySetupGuide enabled={authReady && onboardingChecked && !isOnboardingRoute && !page.url.pathname.startsWith('/connect')} />
 <DownloadProgressPill />
 <CommandPalette />
 <QuietMode />
@@ -2359,6 +2363,8 @@
 {/if}
 
 <style>
+	.wallpaper-layer.onboarding-wallpaper { opacity: 1; }
+
 	.onboarding-check {
 		position: fixed;
 		inset: 0;
@@ -2400,7 +2406,7 @@
 		transform-origin: center;
 	}
 
-	:global([data-theme="light"]) .wallpaper-layer {
+	:global([data-theme="light"]) .wallpaper-layer:not(.onboarding-wallpaper) {
 		opacity: 0.22;
 		filter: blur(var(--wallpaper-blur, 10px)) saturate(0.78);
 	}

@@ -5393,6 +5393,8 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
+            CREATE TABLE server_config (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE tidal_track_labels (tidal_id INTEGER PRIMARY KEY, ai INTEGER);
             CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT);
             CREATE TABLE albums (id INTEGER PRIMARY KEY, title TEXT, artwork_url TEXT, year INTEGER);
             CREATE TABLE tracks (

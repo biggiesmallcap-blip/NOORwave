@@ -1,10 +1,12 @@
 pub mod audio_settings;
 pub mod catalog_name;
+pub mod discovery_setup;
 pub mod models;
 pub mod queries;
 pub mod remote;
 pub mod schema;
 pub mod signals;
+pub mod tidal_content;
 
 use anyhow::Result;
 use rusqlite::Connection;

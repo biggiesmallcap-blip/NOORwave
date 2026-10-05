@@ -25,7 +25,7 @@
 		position: relative;
 		display: inline-block;
 		width: 44px;
-		height: 24px;
+		height: var(--toggle-hit-height, 24px);
 		cursor: pointer;
 	}
 
@@ -37,11 +37,11 @@
 
 	.toggle-slider {
 		position: absolute;
-		top: 0;
+		top: calc((var(--toggle-hit-height, 24px) - 24px) / 2);
 		left: 0;
 		right: 0;
-		bottom: 0;
-		background: rgba(255, 255, 255, 0.12);
+		height: 24px;
+		background: var(--border-muted);
 		border-radius: 999px;
 		transition: background var(--motion-base);
 	}
@@ -53,7 +53,7 @@
 		width: 18px;
 		left: 3px;
 		bottom: 3px;
-		background: white;
+		background: var(--text-primary);
 		border-radius: 50%;
 		transition: transform var(--motion-base);
 	}

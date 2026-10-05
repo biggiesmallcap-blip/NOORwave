@@ -24,9 +24,12 @@
 		interactive?: boolean;
 		/** Per-shader beat-gain so 100% reactivity reads consistently across shaders. */
 		reactGain?: number;
+		/** Scoped previews and onboarding branding never change saved preferences. */
+		paletteOverride?: PaletteId;
+		colorSourceOverride?: 'palette' | 'art';
 	};
 
-	let { shader, maxDpr = 2, targetFps = 45, interactive = true, reactGain = 1 }: Props = $props();
+	let { shader, maxDpr = 2, targetFps = 45, interactive = true, reactGain = 1, paletteOverride, colorSourceOverride }: Props = $props();
 
 	let host: HTMLDivElement;
 	let canvas: HTMLCanvasElement;
@@ -558,14 +561,14 @@ float peakAt(float t){
 
 			// Colours: fixed palette, or extracted from cover art when the user picked
 			// "Album art" and extraction succeeded (else it falls back to the palette).
-			if (colorSource === 'art' && artColors) {
+			if ((colorSourceOverride ?? colorSource) === 'art' && artColors) {
 				const a = artColors;
 				gl!.uniform3f(uColor1!, a[0][0], a[0][1], a[0][2]);
 				gl!.uniform3f(uColor2!, a[1][0], a[1][1], a[1][2]);
 				gl!.uniform3f(uColor3!, a[2][0], a[2][1], a[2][2]);
 				gl!.uniform3f(uColor4!, a[3][0], a[3][1], a[3][2]);
 			} else {
-				const pal = paletteById(currentPalette).shader;
+				const pal = paletteById(paletteOverride ?? currentPalette).shader;
 				gl!.uniform3f(uColor1!, pal.c1[0], pal.c1[1], pal.c1[2]);
 				gl!.uniform3f(uColor2!, pal.c2[0], pal.c2[1], pal.c2[2]);
 				gl!.uniform3f(uColor3!, pal.c3[0], pal.c3[1], pal.c3[2]);
@@ -597,7 +600,12 @@ float peakAt(float t){
 		document.addEventListener('visibilitychange', onVisibility);
 
 		// Recompile when the shader prop changes.
-		$effect.root(() => {
+		const disposeEffects = $effect.root(() => {
+			$effect(() => {
+				void paletteOverride;
+				void colorSourceOverride;
+				needsPaint = true;
+			});
 			$effect(() => {
 				if (prog && shader) {
 					try {
@@ -610,6 +618,7 @@ float peakAt(float t){
 		});
 
 		return () => {
+			disposeEffects();
 			running = false;
 			cancelAnimationFrame(raf);
 			ro.disconnect();

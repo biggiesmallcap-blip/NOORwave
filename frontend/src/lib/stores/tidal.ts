@@ -117,9 +117,10 @@ export async function setAutoSyncDaily(enabled: boolean) {
 			body: JSON.stringify({ service: 'tidal', enabled })
 		});
 		if (resp.ok) {
-			loadSyncInfo(); // Refresh
+			await loadSyncInfo();
 		}
-	} catch {}
+		return resp.ok;
+	} catch { return false; }
 }
 
 export async function setSyncEnrichment(enabled: boolean) {
@@ -130,9 +131,10 @@ export async function setSyncEnrichment(enabled: boolean) {
 			body: JSON.stringify({ service: 'tidal', enabled })
 		});
 		if (resp.ok) {
-			loadSyncInfo(); // Refresh
+			await loadSyncInfo();
 		}
-	} catch {}
+		return resp.ok;
+	} catch { return false; }
 }
 
 // Demote pre-rework album fill to hidden background rows and auto-merge

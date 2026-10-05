@@ -478,10 +478,12 @@ pub(super) async fn listenbrainz_status(
 pub(super) async fn listenbrainz_clear_config(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
-    let _ = state.read().await.db.with_conn(|conn| {
-        crate::services::listenbrainz::clear_credentials(conn)?;
-        Ok::<_, anyhow::Error>(())
-    });
+    state
+        .read()
+        .await
+        .db
+        .with_conn(crate::services::listenbrainz::clear_credentials)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({"status": "cleared"})))
 }
 
@@ -489,10 +491,12 @@ pub(super) async fn lastfm_clear_config(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
     use crate::services::lastfm;
-    let _ = state.read().await.db.with_conn(|conn| {
-        lastfm::auth::clear_credentials(conn)?;
-        Ok(())
-    });
+    state
+        .read()
+        .await
+        .db
+        .with_conn(lastfm::auth::clear_credentials)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({"status": "cleared"})))
 }
 
@@ -870,9 +874,11 @@ pub(super) async fn lastfm_auth_disconnect(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
     use crate::services::lastfm;
-    let _ = state.read().await.db.with_conn(|conn| {
-        lastfm::auth::clear_session(conn)?;
-        Ok(())
-    });
+    state
+        .read()
+        .await
+        .db
+        .with_conn(lastfm::auth::clear_session)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({"status": "disconnected"})))
 }

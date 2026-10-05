@@ -1,14 +1,43 @@
-import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cacheKeys } from './api_queries';
 import { dataCache } from './query';
 import { applyCacheUpdateForWsMessage, clearWsCacheTimers } from './ws_events';
 
 describe('WebSocket cache updates', () => {
+	afterEach(() => vi.unstubAllGlobals());
 	beforeEach(() => {
 		vi.useFakeTimers();
 		clearWsCacheTimers();
 		dataCache.clear();
 	});
+
+    test('AI preference changes invalidate music results and persisted snapshots only', () => {
+        const values = new Map<string, string>();
+        vi.stubGlobal('localStorage', {
+            get length() { return values.size; },
+            key: (index: number) => [...values.keys()][index] ?? null,
+            getItem: (key: string) => values.get(key) ?? null,
+            setItem: (key: string, value: string) => values.set(key, value),
+            removeItem: (key: string) => values.delete(key),
+            clear: () => values.clear(),
+        });
+        const music = ['api', 'getTidalHomeModules'];
+        const unrelated = ['api', 'getAudioSettings'];
+        dataCache.prime(music, { items: [{ id: 1 }] });
+        dataCache.prime(unrelated, { volume: 50 });
+        localStorage.setItem('noor.query.test.getTidalHomeModules', 'stale');
+        localStorage.setItem('noor.query.test.search', 'stale');
+        localStorage.setItem('noor.query.test.getAudioSettings', 'keep');
+        localStorage.setItem('noor.theme', 'dark');
+        applyCacheUpdateForWsMessage({ type: 'tidal_content_settings_changed' });
+        expect(dataCache.getState(music)?.stale).toBe(true);
+        expect(dataCache.getState(unrelated)?.stale).toBe(false);
+        expect(localStorage.getItem('noor.query.test.getTidalHomeModules')).toBeNull();
+        expect(localStorage.getItem('noor.query.test.search')).toBeNull();
+        expect(localStorage.getItem('noor.query.test.getAudioSettings')).toBe('keep');
+        expect(localStorage.getItem('noor.theme')).toBe('dark');
+        localStorage.clear();
+    });
 
 	test('patches discovery training progress without dropping cached status', () => {
 		dataCache.prime(cacheKeys.settings.discoveryStatus(), {

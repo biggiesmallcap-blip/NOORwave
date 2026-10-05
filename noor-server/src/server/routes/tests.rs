@@ -8030,6 +8030,7 @@ async fn all_api_routes_are_registered() {
         ("GET", "/api/artists/1/tracks"),
         ("GET", "/api/artists/1/discography"),
         ("GET", "/api/artists/1/spotify-stats"),
+        ("GET", "/api/tidal/content-settings"),
         ("GET", "/api/tidal/albums/1/tracks"),
         ("POST", "/api/tidal/albums/1/import"),
         ("POST", "/api/tidal/tracks/import"),
@@ -8173,6 +8174,8 @@ async fn all_api_routes_are_registered() {
         ("GET", "/api/lastfm/config"),
         ("DELETE", "/api/lastfm/config"),
         ("GET", "/api/lastfm/status"),
+        ("GET", "/api/setup/discovery"),
+        ("POST", "/api/setup/discovery"),
         ("POST", "/api/listenbrainz/config"),
         ("GET", "/api/listenbrainz/config"),
         ("DELETE", "/api/listenbrainz/config"),
@@ -8260,4 +8263,154 @@ async fn all_api_routes_are_registered() {
 fn play_next_inserts_after_current_when_anchored() {
     assert_eq!(play_next_after_position(Some(3)), Some(3));
     assert_eq!(play_next_after_position(None), None);
+}
+
+#[tokio::test]
+async fn tidal_ai_settings_api_saves_validates_and_broadcasts() {
+    let db = fresh_migrated_db();
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+    let mut events = state.read().await.event_tx.subscribe();
+    let app = api_routes(state.clone());
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/tidal/content-settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["hide_ai_generated"], false);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/tidal/content-settings")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"hide_ai_generated":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        db.with_conn(|conn| Ok(crate::db::tidal_content::enabled(conn)?))
+            .unwrap()
+    );
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        crate::AppEvent::TidalContentSettingsChanged
+    ));
+    for invalid in [
+        r#"{"hide_ai_generated":"true"}"#,
+        r#"{"hide_ai_generated":false,"unknown":1}"#,
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/tidal/content-settings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(invalid))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    assert!(
+        db.with_conn(|conn| Ok(crate::db::tidal_content::enabled(conn)?))
+            .unwrap()
+    );
+    ensure_tidal_content_allowed(&state, 1).await.unwrap(); // unknown metadata remains playable
+}
+
+#[tokio::test]
+async fn tidal_ai_cached_browse_is_reversible_and_playback_queue_is_preserved() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn| {
+        crate::db::tidal_content::observe(conn, &serde_json::json!([{"id":1,"duration":180,"ai":true},{"id":2,"duration":180,"ai":false},{"id":3,"duration":180,"ai":true}]))?;
+        conn.execute("INSERT INTO artists(id,name) VALUES(1,'Artist')", [])?;
+        conn.execute("INSERT INTO tracks(id,tidal_id,title,artist_id,is_library) VALUES(3,3,'Saved',1,1)", [])?;
+        crate::db::tidal_content::set_enabled(conn, true)?;
+        Ok(())
+    }).unwrap();
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+    let cached = serde_json::json!({"items":[{"id":1,"duration":180},{"id":2,"duration":180},{"id":3,"duration":180}],"totalNumberOfItems":3,"offset":0});
+    let app = Router::new()
+        .route(
+            "/api/tidal/cached-test",
+            get({
+                let payload = cached.clone();
+                move || {
+                    let payload = payload.clone();
+                    async move { Json(payload) }
+                }
+            }),
+        )
+        .route(
+            "/api/playback/state",
+            get({
+                let payload = cached.clone();
+                move || {
+                    let payload = payload.clone();
+                    async move { Json(payload) }
+                }
+            }),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            tidal_content_routes::filter_browse,
+        ));
+    for (path, count) in [("/api/tidal/cached-test", 2), ("/api/playback/state", 3)] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["items"].as_array().unwrap().len(), count);
+        assert_eq!(body["totalNumberOfItems"], 3);
+    }
+    assert!(
+        ensure_tidal_content_allowed(&state, 1)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("AI-generated music filter")
+    );
+    ensure_tidal_content_allowed(&state, 3).await.unwrap();
+    db.with_conn(|conn| Ok(crate::db::tidal_content::set_enabled(conn, false)?))
+        .unwrap();
+    ensure_tidal_content_allowed(&state, 1).await.unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/tidal/cached-test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body, cached);
 }

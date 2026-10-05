@@ -827,7 +827,8 @@ async fn fetch_tidal_chart(state: &SharedState, limit: i32) -> anyhow::Result<Ve
         tidal_http_client,
         tokens.access_token.clone(),
         tokens.country_code.clone(),
-    );
+    )
+    .with_metadata_store(state.read().await.db.clone());
     let tracks = match client.get_editorial_top_tracks(limit).await {
         Ok(t) => t,
         Err(e) if super::error_looks_like_auth(&e) => {

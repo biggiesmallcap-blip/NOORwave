@@ -489,6 +489,13 @@ pub fn get_onboarding_complete(conn: &Connection) -> Result<bool> {
         return Ok(true);
     }
 
+    // Persist first-run intent before TIDAL connects so a reload cannot mistake
+    // an unfinished setup for a legacy installation with an existing account.
+    conn.execute(
+        "INSERT OR IGNORE INTO server_config(key,value) VALUES('onboarding_complete','0')",
+        [],
+    )?;
+    super::discovery_setup::enroll(conn)?;
     Ok(false)
 }
 
@@ -631,6 +638,9 @@ pub fn get_tracks_with_dsp(
     let order_clause = track_order_clause(sort_by, sort_dir);
 
     let mut conditions = Vec::new();
+    if let Some(predicate) = super::tidal_content::browse_predicate(conn)? {
+        conditions.push(predicate.to_string());
+    }
     if let Some(pred) = favorite_predicate(favorite_only, liked_only) {
         conditions.push(pred.to_string());
     }
@@ -698,9 +708,17 @@ pub fn get_tracks_with_dsp(
 
 pub fn get_track_count(conn: &Connection, favorite_only: bool, liked_only: bool) -> Result<i64> {
     // FROM tracks t alias is required so favorite_predicate's "t."-prefixed SQL applies.
-    let filter = match favorite_predicate(favorite_only, liked_only) {
-        Some(pred) => format!(" WHERE {pred}"),
-        None => String::new(),
+    let mut conditions = Vec::new();
+    if let Some(predicate) = favorite_predicate(favorite_only, liked_only) {
+        conditions.push(predicate);
+    }
+    if let Some(predicate) = super::tidal_content::browse_predicate(conn)? {
+        conditions.push(predicate);
+    }
+    let filter = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
     };
     Ok(conn.query_row(
         &format!("SELECT COUNT(*) FROM tracks t{filter}"),
@@ -3462,11 +3480,15 @@ pub fn get_genre_evolution(conn: &Connection, days: i64) -> Result<Vec<GenreEvol
 }
 
 pub fn get_discovery_candidate_tracks(conn: &Connection, limit: i64) -> Result<Vec<Track>> {
+    let filter = super::tidal_content::browse_predicate(conn)?
+        .map(|predicate| format!(" WHERE {predicate}"))
+        .unwrap_or_default();
     let mut stmt = conn.prepare(&format!(
         "SELECT {}
          FROM tracks t
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
+         {filter}
          ORDER BY t.is_favorite DESC, t.play_count DESC, t.date_added DESC, t.title ASC
          LIMIT ?1",
         track_projection("a")
@@ -3501,6 +3523,14 @@ pub fn get_tracks_excluding_with_limit(
         sql.push(')');
     }
 
+    if let Some(predicate) = super::tidal_content::browse_predicate(conn)? {
+        sql.push_str(if excluded_track_ids.is_empty() {
+            " WHERE "
+        } else {
+            " AND "
+        });
+        sql.push_str(predicate);
+    }
     sql.push_str(" ORDER BY t.is_favorite DESC, t.play_count ASC, t.fidelity_score DESC, t.date_added DESC, t.title ASC");
 
     if max_candidates > 0 {
@@ -3780,6 +3810,9 @@ fn search_tracks_fts(conn: &Connection, fts_query: &str, limit: i64) -> Result<V
     //   16 = t.fidelity_score
     //   17 = t.is_favorite
     //   18 = t.play_count
+    let filter = super::tidal_content::browse_predicate(conn)?
+        .map(|predicate| format!(" AND {predicate}"))
+        .unwrap_or_default();
     let projection = track_projection("a");
     let mut stmt = conn.prepare(&format!(
         "SELECT {projection}
@@ -3787,14 +3820,14 @@ fn search_tracks_fts(conn: &Connection, fts_query: &str, limit: i64) -> Result<V
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
          JOIN tracks_fts ON tracks_fts.rowid = t.id
-         WHERE tracks_fts MATCH ?1
+         WHERE tracks_fts MATCH ?1 {filter}
          UNION
          SELECT {projection}
          FROM tracks t
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
          JOIN artists_fts ON artists_fts.rowid = t.artist_id
-         WHERE artists_fts MATCH ?1
+         WHERE artists_fts MATCH ?1 {filter}
          ORDER BY 17 DESC, 18 DESC, 16 DESC, 2 ASC
          LIMIT ?2"
     ))?;
@@ -3804,6 +3837,9 @@ fn search_tracks_fts(conn: &Connection, fts_query: &str, limit: i64) -> Result<V
 }
 
 fn search_tracks_like(conn: &Connection, normalized: &str, limit: i64) -> Result<Vec<Track>> {
+    let filter = super::tidal_content::browse_predicate(conn)?
+        .map(|predicate| format!(" AND {predicate}"))
+        .unwrap_or_default();
     let contains_pattern = format!("%{normalized}%");
     let prefix_pattern = format!("{normalized}%");
     let mut stmt = conn.prepare(&format!(
@@ -3811,9 +3847,9 @@ fn search_tracks_like(conn: &Connection, normalized: &str, limit: i64) -> Result
          FROM tracks t
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
-         WHERE LOWER(t.title) LIKE ?1
+         WHERE (LOWER(t.title) LIKE ?1
             OR LOWER(COALESCE(a.name, '')) LIKE ?1
-            OR LOWER(COALESCE(al.title, '')) LIKE ?1
+            OR LOWER(COALESCE(al.title, '')) LIKE ?1) {filter}
          ORDER BY
             CASE
                 WHEN LOWER(COALESCE(a.name, '')) = ?2 THEN 0
@@ -9155,9 +9191,15 @@ mod tests {
         schema::run_migrations(&conn).expect("migrations");
 
         assert!(!get_onboarding_complete(&conn).expect("read flag"));
+        assert_eq!(read_onboarding_value(&conn).as_deref(), Some("0"));
+        conn.execute(
+            "INSERT INTO service_auth(service,user_id) VALUES('tidal','new-user')",
+            [],
+        )
+        .unwrap();
         assert!(
-            read_onboarding_value(&conn).is_none(),
-            "must not write a row when nothing implies completion"
+            !get_onboarding_complete(&conn).unwrap(),
+            "Connecting TIDAL must not finish a setup in progress"
         );
     }
 

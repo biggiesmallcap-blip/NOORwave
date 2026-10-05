@@ -1,6 +1,9 @@
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import { api, type AudioFeaturesStats } from '$lib/api/client';
 import { cachedApi } from '$lib/cache/api_queries';
+export const passiveDspKnown = writable(false);
+export const passiveDspPending = writable(false);
+export const audioAnalysisError = writable('');
 
 interface AudioAnalysisState {
 	isRunning: boolean;
@@ -58,11 +61,13 @@ export async function syncAnalysisStatus() {
 
 export async function clearAllAnalysis() {
 	if (!confirm('Delete all audio analysis data?')) return;
+	audioAnalysisError.set('');
 	try {
 		await api.resetAudioAnalysis();
 		audioAnalysis.update((s) => ({ ...s, analyzed: 0, stats: null }));
 	} catch (e) {
 		console.error('Failed to reset analysis:', e);
+		audioAnalysisError.set('Audio analysis could not be cleared. Retry when the server is available.');
 	}
 }
 
@@ -70,17 +75,27 @@ export async function loadPassiveDspState() {
 	try {
 		const { enabled } = await cachedApi.getPassiveDsp();
 		audioAnalysis.update((s) => ({ ...s, passiveEnabled: enabled }));
+		passiveDspKnown.set(true);
+		audioAnalysisError.set('');
 	} catch (e) {
 		console.error('Failed to load passive DSP setting:', e);
+		if (!get(passiveDspKnown)) audioAnalysisError.set('Analysis setting is unavailable. Retry to load it.');
 	}
 }
 
 export async function setPassiveDspEnabled(enabled: boolean) {
+	if (get(passiveDspPending) || !get(passiveDspKnown)) return;
+	const previous = get(audioAnalysis).passiveEnabled;
+	passiveDspPending.set(true);
+	audioAnalysisError.set('');
 	audioAnalysis.update((s) => ({ ...s, passiveEnabled: enabled }));
 	try {
 		await api.setPassiveDsp(enabled);
 	} catch (e) {
 		console.error('Failed to update passive DSP setting:', e);
-		audioAnalysis.update((s) => ({ ...s, passiveEnabled: !enabled }));
+		audioAnalysis.update((s) => ({ ...s, passiveEnabled: previous }));
+		audioAnalysisError.set('Analysis setting could not be saved. Your previous choice is retained.');
+	} finally {
+		passiveDspPending.set(false);
 	}
 }

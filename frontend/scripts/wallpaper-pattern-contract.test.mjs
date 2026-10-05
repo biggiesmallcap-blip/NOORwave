@@ -90,8 +90,8 @@ describe('pattern wallpaper contract', () => {
 		expect(settingsSource).toContain('setWallpaperFps');
 		expect(settingsSource).toContain('wallpaperBlur');
 		expect(settingsSource).toContain('setWallpaperBlur');
-		expect(settingsSource).toContain('Wallpaper FPS');
-		expect(settingsSource).toContain('Wallpaper blur');
+		expect(settingsSource).toContain('Frame rate');
+		expect(settingsSource).toContain('Background blur');
 		expect(settingsSource).toContain('min={WALLPAPER_FPS_MIN}');
 		expect(settingsSource).toContain('max={WALLPAPER_FPS_MAX}');
 		expect(settingsSource).toContain('min={WALLPAPER_BLUR_MIN}');

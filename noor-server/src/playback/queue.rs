@@ -176,11 +176,16 @@ fn insert_tracks_with_reasons_at_position(
     source: &str,
     start_pos: i32,
 ) -> Result<()> {
-    for (idx, (track, reason)) in tracks.iter().enumerate() {
+    let mut position = start_pos;
+    for (track, reason) in tracks {
+        if crate::db::tidal_content::local_is_blocked(conn, track.id)? {
+            continue;
+        }
         conn.execute(
             "INSERT INTO queue (track_id, position, source, reason) VALUES (?1, ?2, ?3, ?4)",
-            params![track.id, start_pos + idx as i32, source, reason],
+            params![track.id, position, source, reason],
         )?;
+        position += 1;
     }
     Ok(())
 }
@@ -303,9 +308,15 @@ pub fn insert_external_tracks_after(
     }
     let target = after_position + 1;
     let tx = conn.unchecked_transaction()?;
+    let mut allowed_count = 0;
+    for insert in inserts {
+        if !external_is_blocked(&tx, insert)? {
+            allowed_count += 1;
+        }
+    }
     tx.execute(
         "UPDATE queue SET position = position + ?1 WHERE position >= ?2",
-        params![inserts.len() as i32, target],
+        params![allowed_count, target],
     )?;
     let results = insert_many_at_position(&tx, inserts, target)?;
     tx.commit()?;
@@ -318,14 +329,28 @@ fn insert_many_at_position(
     start_position: i32,
 ) -> Result<Vec<InsertResult>> {
     let mut results = Vec::with_capacity(inserts.len());
-    for (idx, insert) in inserts.iter().enumerate() {
+    for insert in inserts {
+        if external_is_blocked(conn, insert)? {
+            continue;
+        }
         results.push(insert_at_position(
             conn,
             insert,
-            start_position + idx as i32,
+            start_position + results.len() as i32,
         )?);
     }
     Ok(results)
+}
+
+fn external_is_blocked(conn: &Connection, insert: &ExternalTrackInsert<'_>) -> Result<bool> {
+    match insert.local_track_id {
+        Some(id) => Ok(crate::db::tidal_content::local_is_blocked(conn, id)?),
+        None => Ok(insert
+            .tidal_id_hint
+            .map(|id| crate::db::tidal_content::is_blocked(conn, id))
+            .transpose()?
+            .unwrap_or(false)),
+    }
 }
 
 fn insert_at_position(
@@ -333,6 +358,9 @@ fn insert_at_position(
     insert: &ExternalTrackInsert<'_>,
     position: i32,
 ) -> Result<InsertResult> {
+    if external_is_blocked(conn, insert)? {
+        anyhow::bail!("Hidden by your AI-generated music filter");
+    }
     if let Some(track_id) = insert.local_track_id {
         conn.execute(
             "INSERT INTO queue (track_id, position, source, reason) VALUES (?1, ?2, ?3, ?4)",
@@ -820,10 +848,64 @@ pub fn gc_pending_queue(conn: &Connection) -> Result<(usize, usize)> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn tidal_ai_mixed_batches_keep_contiguous_positions_and_saved_tracks() {
+        let conn = conn();
+        crate::db::tidal_content::observe(&conn, &serde_json::json!([{"id":101,"duration":180,"ai":true},{"id":102,"duration":180,"ai":false},{"id":103,"duration":180,"ai":true}])).unwrap();
+        crate::db::tidal_content::set_enabled(&conn, true).unwrap();
+        conn.execute("UPDATE tracks SET is_library=1,tidal_id=103 WHERE id=1", [])
+            .unwrap();
+        let inserts = [
+            ExternalTrackInsert {
+                tidal_id_hint: Some(101),
+                ..Default::default()
+            },
+            ExternalTrackInsert {
+                tidal_id_hint: Some(102),
+                ..Default::default()
+            },
+            ExternalTrackInsert {
+                local_track_id: Some(1),
+                ..Default::default()
+            },
+        ];
+        let results = append_external_tracks(&conn, &inserts).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            load_queue(&conn)
+                .unwrap()
+                .iter()
+                .map(|item| item.position)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        let results = insert_external_tracks_after(&conn, &inserts, 0).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            load_queue(&conn)
+                .unwrap()
+                .iter()
+                .map(|item| item.position)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        assert!(insert_external_track_after(&conn, &inserts[0], 0).is_err());
+        assert_eq!(
+            load_queue(&conn)
+                .unwrap()
+                .iter()
+                .map(|item| item.position)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+    }
+
     fn conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
+            CREATE TABLE server_config (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE tidal_track_labels (tidal_id INTEGER PRIMARY KEY, ai INTEGER);
             CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT);
             CREATE TABLE albums (id INTEGER PRIMARY KEY, title TEXT, artwork_url TEXT);
             CREATE TABLE tracks (
@@ -842,6 +924,7 @@ mod tests {
                 best_source TEXT,
                 fidelity_score INTEGER DEFAULT 0,
                 is_favorite INTEGER DEFAULT 0,
+                is_library INTEGER DEFAULT 0,
                 play_count INTEGER DEFAULT 0,
                 last_played_at TEXT,
                 date_added TEXT,
