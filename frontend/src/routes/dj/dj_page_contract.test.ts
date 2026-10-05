@@ -7,6 +7,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../..');
 const page = readFileSync(join(root, 'routes/dj/+page.svelte'), 'utf8');
 const cockpit = readFileSync(join(root, 'lib/components/dj-cockpit/DjCockpit.svelte'), 'utf8');
+const refreshLoader = readFileSync(join(root, 'lib/components/dj-cockpit/cockpit_refresh.ts'), 'utf8');
 const transitionLane = readFileSync(
 	join(root, 'lib/components/dj-cockpit/TransitionLane.svelte'),
 	'utf8',
@@ -59,15 +60,15 @@ describe('dj cockpit page contract', () => {
 	});
 
 	test('dj_toggle_round_trips_server_config', () => {
-		expect(cockpit).toContain('api.getDjEnabled()');
+		expect(refreshLoader).toContain('client.getDjEnabled()');
 		expect(cockpit).toContain('api.setDjEnabled(next)');
 	});
 
 	test('dj_disabled_state_explains_legacy_path', () => {
 		expect(cockpit).toContain('role="switch"');
-		expect(cockpit).toContain('aria-checked={enabled}');
+		expect(cockpit).toContain('aria-checked={enabled ?? false}');
 		expect(cockpit).toContain('DJ transitions');
-		expect(cockpit).toContain("{enabled ? 'On' : 'Off'}");
+		expect(cockpit).toContain("enabled == null ? 'Connecting' : enabled ? 'On' : 'Off'");
 		expect(cockpit).toContain('Enable DJ transitions');
 		expect(cockpit).toContain('Disable DJ transitions');
 		expect(cockpit).not.toContain("'DJ transitions on'");

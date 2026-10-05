@@ -2,7 +2,16 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DjProfile {
+    /// Tempo of the phase grid. Independent clip tempo must not relabel this grid.
     pub bpm: Option<f32>,
+    /// Independently analysed DSP tempo, useful when phase evidence is limited.
+    #[serde(default)]
+    pub tempo_bpm: Option<f32>,
+    #[serde(default)]
+    pub tempo_confidence: Option<f32>,
+    /// Uniform, zero-anchored grids estimate periodicity without measured phase.
+    #[serde(default)]
+    pub grid_is_synthetic: bool,
     pub camelot_key: Option<String>,
     pub energy: Option<f32>,
     pub beat_grid_seconds: Vec<f32>,
@@ -22,6 +31,14 @@ pub struct DjProfile {
     pub lufs_loud_body: Option<f32>,
     pub true_peak_dbtp: Option<f32>,
     pub profile_confidence: f32,
+    #[serde(default)]
+    pub beat_confidence: Option<f32>,
+    #[serde(default)]
+    pub energy_contour: Vec<f32>,
+    #[serde(default)]
+    pub analysis_scope_seconds: Option<f32>,
+    #[serde(default)]
+    pub vocals_known: bool,
     pub safe_crossfade_only: bool,
     pub profile_version: String,
 }

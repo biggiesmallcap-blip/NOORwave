@@ -5,7 +5,7 @@ use axum::{
     routing::{get, post},
 };
 use chrono::Utc;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -154,17 +154,23 @@ struct DjProfileCorrectionResponse {
 struct SetDjPolicyRequest {
     mix_intent: Option<String>,
     transition_speed_bias: Option<String>,
+    preferred_strategy: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct DjPolicyResponse {
     mix_intent: String,
     transition_speed_bias: String,
+    preferred_strategy: String,
 }
 
 #[derive(Debug, Serialize)]
 struct DjStatusResponse {
     enabled: bool,
+    transition_plan: Option<noor_mix::TransitionProgram>,
+    playback_position_ms: Option<i64>,
+    feedback_transition_event_id: Option<i64>,
+    active_transition: Option<DjActiveTransition>,
     current: Option<DjDeckStatus>,
     next: Option<DjDeckStatus>,
     planning_status: String,
@@ -176,6 +182,7 @@ struct DjStatusResponse {
     planning_reason: Option<String>,
     sync_target: Option<String>,
     planned_start_ms: Option<i64>,
+    runtime_planned_start_ms: Option<i64>,
     actual_start_ms: Option<i64>,
     timing_delta_ms: Option<i64>,
     timing_source: Option<String>,
@@ -208,6 +215,10 @@ struct DjDeckStatus {
     profile_retry_after_ms: Option<i64>,
     profile_retry_reason: Option<String>,
     profile_confidence: Option<f64>,
+    beat_confidence: Option<f64>,
+    grid_is_synthetic: bool,
+    analysis_scope_ms: Option<i64>,
+    energy: Option<f64>,
     beat_count: Option<usize>,
     downbeat_count: Option<usize>,
     phrase_count: Option<usize>,
@@ -223,6 +234,17 @@ struct DjDeckStatus {
     passive_analysis_status: Option<String>,
     passive_analysis_reason: Option<String>,
     safe_crossfade_only: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct DjActiveTransition {
+    event_id: i64,
+    outgoing: DjDeckStatus,
+    incoming: DjDeckStatus,
+    program: noor_mix::TransitionProgram,
+    start_ms: i64,
+    actual_start_ms: i64,
+    elapsed_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -261,6 +283,7 @@ struct DjTimingHistoryEvent {
     planning_reason: Option<String>,
     rejected_alternatives: Vec<DjRejectedAlternative>,
     planned_start_ms: Option<i64>,
+    runtime_planned_start_ms: Option<i64>,
     actual_start_ms: Option<i64>,
     timing_delta_ms: Option<i64>,
     timing_source: Option<String>,
@@ -438,6 +461,13 @@ async fn set_enabled(
         if payload.enabled {
             if let Some(lookahead) = lookahead {
                 let _ = lookahead.dispatch(&runtime);
+                let generation = super::current_playback_generation(&*state.read().await);
+                super::spawn_dj_pair_preparation(
+                    state.clone(),
+                    runtime.clone(),
+                    lookahead,
+                    generation,
+                );
             }
         } else {
             let _ = runtime.start_dj_lookahead(None, None, None, None, u64::MAX, 0);
@@ -531,6 +561,33 @@ async fn get_status(
                 };
                 let latest_transition =
                     latest_open_transition_for_pair(conn, current_ref.as_ref(), next_ref.as_ref())?;
+                let transition_plan = latest_transition.as_ref().and_then(|event| {
+                    conn.query_row(
+                        "SELECT program_json FROM dj_transition_events WHERE id = ?1",
+                        [event.id],
+                        |row| row.get::<_, String>(0),
+                    ).ok().and_then(|json| serde_json::from_str(&json).ok())
+                });
+                let playback_position_ms = state.playback_runtime.as_ref().zip(
+                    state.playback_runtime_info.as_ref(),
+                ).map(|(runtime, info)| runtime.handle.get_position_ms(info.sample_rate, info.channels));
+                let active_transition = if enabled {
+                    let elapsed_ms = state.playback_runtime.as_ref().zip(
+                        state.playback_runtime_info.as_ref(),
+                    ).and_then(|(runtime, info)| runtime.handle.get_dj_handoff_elapsed_ms(info.sample_rate, info.channels));
+                    active_transition_for_runtime(conn,
+                        state.active_listen_session.as_ref()
+                            .filter(|session| Some(session.track_id) == active_track_id),
+                        current_ref.as_ref(), elapsed_ms)?
+                } else { None };
+                let feedback_transition_event_id = conn.query_row(
+                    "SELECT id FROM dj_transition_events
+                     WHERE actual_start_ms IS NOT NULL
+                       AND timing_status IN ('fired', 'late')
+                       AND runtime_renderer_status IN ('rendered_handoff', 'rendered_overlay', 'legacy_overlap')
+                     ORDER BY id DESC LIMIT 1",
+                    [], |row| row.get::<_, i64>(0),
+                ).optional()?;
                 let ready_pair_due = active_track_id
                     .and_then(|track_id| {
                         let duration_ms = current_track_duration_ms(conn, track_id).ok().flatten();
@@ -578,6 +635,10 @@ async fn get_status(
                 )?;
                 Ok(DjStatusResponse {
                     enabled,
+                    transition_plan,
+                    playback_position_ms,
+                    feedback_transition_event_id,
+                    active_transition,
                     current,
                     next,
                     planning_status,
@@ -591,6 +652,10 @@ async fn get_status(
                     planning_reason: renderer_status.planning_reason,
                     sync_target: renderer_status.sync_target,
                     planned_start_ms: renderer_status.planned_start_ms,
+                    runtime_planned_start_ms: latest_transition.as_ref().and_then(|event| {
+                        conn.query_row("SELECT runtime_planned_start_ms FROM dj_transition_events WHERE id = ?1",
+                            [event.id], |row| row.get::<_, Option<i64>>(0)).ok().flatten()
+                    }),
                     actual_start_ms: renderer_status.actual_start_ms,
                     timing_delta_ms: renderer_status.timing_delta_ms,
                     timing_source: renderer_status.timing_source,
@@ -664,7 +729,18 @@ fn missing_dj_profile_refs_for_pair(
         let inflight_key = dj_profile_inflight_key(&key);
         let rebuild_inflight = dj_profile_rebuild_is_inflight(inflight, &inflight_key);
         let deck = deck_status(conn, &media_ref, label, rebuild_inflight)?;
-        if deck_needs_profile_rebuild(&deck) {
+        let outdated_analysis = queries::get_audio_dj_profile(conn, &key)?.is_some_and(|profile| {
+            profile.source.starts_with("dj_playback")
+                && profile.profile_version
+                    != crate::services::audio_analysis::dj_profile::DJ_PROFILE_VERSION
+        });
+        if deck_needs_profile_rebuild(&deck)
+            || (outdated_analysis
+                && !rebuild_inflight
+                && (deck.profile_status == "ready"
+                    || (deck.profile_status == "retrying"
+                        && deck.profile_retry_after_ms.unwrap_or(0) <= 0)))
+        {
             missing.push(media_ref);
         }
     }
@@ -995,13 +1071,17 @@ async fn queue_tidal_profile_rebuild(
 
     let requests = dj_profile_analysis_stream_requests(tidal_id);
     let track = rebuild_track_for_tidal_ref(&state, tidal_id).await;
-    let (http_client, generation) = {
+    let (http_client, generation, runtime) = {
         let state_guard = state.read().await;
         (
             state_guard.http_client.clone(),
             state_guard
                 .playback_generation
                 .load(std::sync::atomic::Ordering::Relaxed),
+            state_guard
+                .playback_runtime
+                .as_ref()
+                .map(|runtime| runtime.handle.clone()),
         )
     };
     let config = PlaybackRuntimeConfig::new(http_client, tokens.access_token, None)
@@ -1016,17 +1096,26 @@ async fn queue_tidal_profile_rebuild(
     let auto_slot_for_decode = auto_slot;
     tokio::task::spawn_blocking(move || {
         let _auto_slot = auto_slot_for_decode;
+        // Prefer the fresh manifest that already produced this deck's audio.
+        // The normal quality fallback remains available if it cannot be reused.
+        let mut resolved = runtime.and_then(|runtime| runtime.resolved_analysis_stream(track.id));
         let mut last_error = None;
         let mut decoded = false;
         for (attempt_index, request) in requests.into_iter().enumerate() {
             let quality = request.audio_quality.clone();
-            let job = player::PreparedPlaybackJob::new(
+            let mut job = player::PreparedPlaybackJob::new(
                 track.clone(),
                 PlaybackSourceRequest::TidalStream(request),
                 GaplessPlan::disabled(),
             )
             .with_generation(generation)
             .with_dj_media_ref(media_ref.clone());
+            if let Some(info) = resolved.take() {
+                job.resolved_stream = Some(player::ResolvedStream {
+                    info,
+                    resolved_at: Instant::now(),
+                });
+            }
             let shared = dj_profile_rebuild_shared(track.id, generation);
             match decode_and_buffer_job(config.clone(), job, shared, 48_000, 2) {
                 Ok(()) => {
@@ -1572,16 +1661,20 @@ async fn set_mix_intent(
 async fn get_policy(
     State(state): State<SharedState>,
 ) -> Result<Json<DjPolicyResponse>, StatusCode> {
-    let (mix_intent, transition_speed_bias) = {
+    let (mix_intent, transition_speed_bias, preferred_strategy) = {
         let state = state.read().await;
         state
             .db
-            .with_conn(queries::get_dj_global_policy)
+            .with_conn(|conn| {
+                let (intent, speed) = queries::get_dj_global_policy(conn)?;
+                Ok((intent, speed, queries::get_dj_preferred_strategy(conn)?))
+            })
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
     Ok(Json(DjPolicyResponse {
         mix_intent,
         transition_speed_bias,
+        preferred_strategy,
     }))
 }
 
@@ -1589,7 +1682,7 @@ async fn set_policy(
     State(state): State<SharedState>,
     Json(payload): Json<SetDjPolicyRequest>,
 ) -> Result<Json<DjPolicyResponse>, StatusCode> {
-    let (mix_intent, transition_speed_bias) = {
+    let (mix_intent, transition_speed_bias, preferred_strategy) = {
         let state = state.read().await;
         state
             .db
@@ -1600,14 +1693,35 @@ async fn set_policy(
                     .transition_speed_bias
                     .clone()
                     .unwrap_or(current_speed);
-                queries::set_dj_global_policy(conn, &mix_intent, &transition_speed_bias)?;
-                Ok((mix_intent, transition_speed_bias))
+                let preferred_strategy = payload
+                    .preferred_strategy
+                    .clone()
+                    .unwrap_or(queries::get_dj_preferred_strategy(conn)?);
+                // All policy fields are committed together; an invalid
+                // strategy must not partially save the other controls.
+                let transaction = conn.unchecked_transaction()?;
+                queries::set_dj_preferred_strategy(&transaction, &preferred_strategy)?;
+                queries::set_dj_global_policy(&transaction, &mix_intent, &transition_speed_bias)?;
+                transaction.commit()?;
+                Ok((mix_intent, transition_speed_bias, preferred_strategy))
             })
             .map_err(|_| StatusCode::BAD_REQUEST)?
     };
+    let runtime = state
+        .read()
+        .await
+        .playback_runtime
+        .as_ref()
+        .map(|r| r.handle.clone());
+    if let Some(runtime) = runtime
+        && let Err(error) = super::refresh_prepared_dj_transition(&state, &runtime).await
+    {
+        tracing::warn!("DJ policy saved; prepared transition refresh skipped: {error:?}");
+    }
     Ok(Json(DjPolicyResponse {
         mix_intent,
         transition_speed_bias,
+        preferred_strategy,
     }))
 }
 
@@ -1615,33 +1729,18 @@ async fn record_feedback(
     State(state): State<SharedState>,
     Json(payload): Json<DjFeedbackRequest>,
 ) -> Result<Json<FeedbackResponse>, StatusCode> {
-    let rating = feedback_rating(&payload.rating).ok_or(StatusCode::BAD_REQUEST)?;
-    if let Some(id) = payload.transition_event_id {
-        let state = state.read().await;
-        state
-            .db
-            .with_conn(|conn| {
-                conn.execute(
-                    "UPDATE dj_transition_events
-                     SET user_rating = ?1,
-                         outcome = COALESCE(outcome, ?2),
-                         outcome_at = COALESCE(outcome_at, datetime('now')),
-                         rejected_alternatives_json = COALESCE(rejected_alternatives_json, ?3)
-                     WHERE id = ?4",
-                    params![
-                        rating,
-                        if rating < 0 {
-                            "bad_feedback"
-                        } else {
-                            "good_feedback"
-                        },
-                        payload.reason.as_deref(),
-                        id
-                    ],
-                )?;
-                Ok(())
-            })
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    feedback_rating(&payload.rating).ok_or(StatusCode::BAD_REQUEST)?;
+    let id = payload.transition_event_id.ok_or(StatusCode::BAD_REQUEST)?;
+    let accepted = state
+        .read()
+        .await
+        .db
+        .with_conn(|conn| {
+            queries::record_dj_feedback(conn, id, &payload.rating, payload.reason.as_deref())
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !accepted {
+        return Err(StatusCode::CONFLICT);
     }
     Ok(Json(FeedbackResponse { accepted: true }))
 }
@@ -1799,18 +1898,23 @@ fn deck_status(
     let profile = queries::get_audio_dj_profile(conn, &key)?;
     let correction = queries::get_audio_dj_profile_correction(conn, &key)?;
     let rebuild_key = dj_profile_inflight_key(&key);
-    let rebuild_failure = if profile.is_some() {
+    let updating_analysis = profile.as_ref().is_some_and(|row| {
+        row.source.starts_with("dj_playback") && !dj_profile_row_is_current(row)
+    });
+    let rebuild_failure = if profile.is_some() && !updating_analysis {
         clear_dj_profile_rebuild_failure(&rebuild_key);
         None
     } else {
         recent_dj_profile_rebuild_failure(&rebuild_key)
     };
-    let profile_status = if profile.is_some() {
+    let profile_status = if profile.is_some() && !updating_analysis {
         "ready".to_string()
     } else if let Some(failure) = rebuild_failure.as_ref() {
         failure.status.clone()
     } else if rebuild_inflight {
         "analyzing".to_string()
+    } else if profile.is_some() {
+        "ready".to_string()
     } else {
         "missing".to_string()
     };
@@ -1880,6 +1984,19 @@ fn deck_status(
         .map(|row| decode_marker_blob_ms(&row.manual_drop_blob))
         .unwrap_or_default();
     let waveform_status = waveform_status(&profile_status, &waveform_peaks);
+    let energy = media_ref
+        .track_id()
+        .or_else(|| profile.as_ref().and_then(|row| row.track_id))
+        .map(|track_id| queries::get_audio_dsp_features(conn, track_id))
+        .transpose()?
+        .flatten()
+        .and_then(|features| features.energy)
+        .or_else(|| {
+            profile
+                .as_ref()
+                .and_then(|row| row.lufs_loud_body)
+                .map(crate::services::audio_analysis::features::energy_from_db)
+        });
     Ok(DjDeckStatus {
         media_ref_kind: key.media_ref_kind,
         media_ref_id: key.media_ref_id,
@@ -1891,6 +2008,15 @@ fn deck_status(
         profile_retry_after_ms,
         profile_retry_reason,
         profile_confidence,
+        beat_confidence: profile.as_ref().and_then(|row| row.beat_confidence),
+        grid_is_synthetic: profile.as_ref().is_some_and(|row| {
+            crate::playback::dj_engine::dj_grid_is_synthetic(
+                row,
+                &decode_f32_blob(&row.beat_grid_blob).unwrap_or_default(),
+            )
+        }),
+        analysis_scope_ms: profile.as_ref().map(|row| row.analysis_scope_ms),
+        energy,
         beat_count,
         downbeat_count,
         phrase_count,
@@ -1922,6 +2048,103 @@ fn capped_waveform_peaks(blob: &[u8]) -> Vec<f32> {
         .take(DJ_WAVEFORM_PEAK_COUNT)
         .map(|peak| peak.clamp(0.0, 1.0))
         .collect()
+}
+
+fn active_transition_for_runtime(
+    conn: &Connection,
+    session: Option<&player::ActiveListenSession>,
+    current: Option<&DjMediaRef>,
+    elapsed_ms: Option<i64>,
+) -> anyhow::Result<Option<DjActiveTransition>> {
+    // The installed overlap's output clock is the evidence of live mixing.
+    // Pause flushes listening history, and resume starts a new listen session;
+    // neither action removes the audio already installed in the buffer.
+    let Some(elapsed_ms) = elapsed_ms else {
+        return Ok(None);
+    };
+    let session_id = session
+        .filter(|session| session.transition_visual_valid)
+        .and_then(|session| session.dj_transition_event_id);
+    let event_id = if session_id.is_some() {
+        session_id
+    } else if let Some(current) = current {
+        let key = current.profile_key();
+        conn.query_row("SELECT id FROM dj_transition_events
+            WHERE to_media_ref_kind = ?1 AND to_media_ref_id = ?2
+              AND actual_start_ms IS NOT NULL AND runtime_rendered_dj_mixer = 1
+              AND runtime_renderer_status = 'rendered_handoff' AND timing_status IN ('fired', 'late')
+            ORDER BY id DESC LIMIT 1",
+            params![key.media_ref_kind, key.media_ref_id], |row| row.get::<_, i64>(0)).optional()?
+    } else {
+        None
+    };
+    event_id
+        .map(|id| active_transition_for_event(conn, id, elapsed_ms))
+        .transpose()
+        .map(Option::flatten)
+}
+
+fn active_transition_for_event(
+    conn: &Connection,
+    id: i64,
+    position_ms: i64,
+) -> anyhow::Result<Option<DjActiveTransition>> {
+    let event = conn
+        .query_row(
+            "SELECT from_media_ref_kind, from_media_ref_id, to_media_ref_kind, to_media_ref_id,
+                program_json, COALESCE(runtime_planned_start_ms, planned_start_ms, actual_start_ms), actual_start_ms
+         FROM dj_transition_events WHERE id = ?1 AND runtime_rendered_dj_mixer = 1
+           AND actual_start_ms IS NOT NULL
+           AND runtime_renderer_status = 'rendered_handoff' AND timing_status IN ('fired', 'late')",
+            [id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((from_kind, from_id, to_kind, to_id, json, start_ms, actual_start_ms)) = event else {
+        return Ok(None);
+    };
+    let Ok(program) = serde_json::from_str::<noor_mix::TransitionProgram>(&json) else {
+        return Ok(None);
+    };
+    let duration_ms =
+        program.resolve_at.saturating_mul(1000) / u64::from(program.sample_rate.max(1));
+    if position_ms < 0 || position_ms as u64 >= duration_ms {
+        return Ok(None);
+    }
+    let media_ref = |kind: &str, id: &str| {
+        let id = id.parse::<i64>().ok()?;
+        match kind {
+            "library_track" => Some(DjMediaRef::LibraryTrack { track_id: id }),
+            "tidal_track" => Some(DjMediaRef::TidalTrack {
+                tidal_id: id,
+                track_id: None,
+            }),
+            _ => None,
+        }
+    };
+    let (Some(from), Some(to)) = (media_ref(&from_kind, &from_id), media_ref(&to_kind, &to_id))
+    else {
+        return Ok(None);
+    };
+    Ok(Some(DjActiveTransition {
+        event_id: id,
+        outgoing: deck_status(conn, &from, None, false)?,
+        incoming: deck_status(conn, &to, None, false)?,
+        program,
+        start_ms,
+        actual_start_ms,
+        elapsed_ms: position_ms,
+    }))
 }
 
 fn waveform_status(profile_status: &str, peaks: &[f32]) -> String {
@@ -2229,7 +2452,7 @@ fn latest_dj_transition_timing_history(
                 e.template, e.program_json, e.fallback_reason,
                 planned_start_ms, actual_start_ms, timing_delta_ms,
                 timing_source, timing_status, e.started_at, e.rejected_alternatives_json,
-                e.runtime_rendered_dj_mixer, e.runtime_renderer_status, e.runtime_renderer_reason
+                e.runtime_rendered_dj_mixer, e.runtime_renderer_status, e.runtime_renderer_reason, e.runtime_planned_start_ms
          FROM dj_transition_events e
          LEFT JOIN tracks from_track ON from_track.id = e.from_track_id
          LEFT JOIN artists from_artist ON from_artist.id = from_track.artist_id
@@ -2287,6 +2510,7 @@ fn latest_dj_transition_timing_history(
             renderer_template: renderer_template_from_program_json(&program_json),
             planning_reason: row.get(7)?,
             planned_start_ms: row.get(8)?,
+            runtime_planned_start_ms: row.get(18)?,
             actual_start_ms: row.get(9)?,
             timing_delta_ms,
             timing_source: row.get(11)?,
@@ -2668,6 +2892,11 @@ fn is_renderable_template(template: &str) -> bool {
             | "SlamCut"
             | "LongHarmonicBlend"
             | "DropTease16"
+            | "ClubMix"
+            | "QuickMix"
+            | "EnergyLift"
+            | "EnergyReset"
+            | "DropSwap"
     )
 }
 
@@ -2762,6 +2991,21 @@ fn media_ref_label(
     {
         return Ok(row);
     }
+    // Executed events retain provider identity after queue promotion. They
+    // need not retain the local track id to display the original pair.
+    if let DjMediaRef::TidalTrack { tidal_id, .. } = media_ref
+        && let Some(row) = conn
+            .query_row(
+                "SELECT t.title, ar.name FROM tracks t
+                 LEFT JOIN artists ar ON ar.id = t.artist_id
+                 WHERE t.tidal_id = ?1 ORDER BY t.id LIMIT 1",
+                params![tidal_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?
+    {
+        return Ok(row);
+    }
     match media_ref {
         DjMediaRef::PendingQueueItem {
             pending_artist,
@@ -2798,7 +3042,8 @@ fn safe_crossfade_suggestion(
 fn feedback_rating(value: &str) -> Option<i64> {
     match value {
         "good" => Some(1),
-        "bad" | "too_safe" | "too_bold" => Some(-1),
+        "bad" => Some(-1),
+        "too_safe" | "too_bold" => Some(0),
         _ => None,
     }
 }
@@ -2809,6 +3054,109 @@ mod tests {
     use crate::services::audio_analysis::dj_profile::{DJ_PROFILE_VERSION, encode_f32_blob};
 
     static TEST_AUTO_REBUILD_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn active_scene_preserves_executed_pair_and_ends_at_resolve() {
+        let db = crate::db::Database::open_in_memory().expect("db");
+        db.with_conn(|conn| {
+            crate::db::schema::run_migrations(conn)?;
+            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id) VALUES
+                (1, 'Outgoing', 1), (2, 'Incoming', 1), (3, 'Following', 1)",
+                [],
+            )?;
+            let program = noor_mix::planner::bass_swap_16_program(48_000, 2, 16_000);
+            let json = serde_json::to_string(&program)?;
+            conn.execute(
+                "INSERT INTO dj_transition_events (from_media_ref_kind, from_media_ref_id,
+                to_media_ref_kind, to_media_ref_id, template, program_json, planner_version,
+                planned_start_ms, runtime_planned_start_ms, actual_start_ms, timing_status, runtime_rendered_dj_mixer, runtime_renderer_status)
+                VALUES ('library_track', '1', 'library_track', '2', 'BassSwap16', ?1, 'test',
+                    160000, 162000, 164000, 'fired', 1, 'rendered_handoff')",
+                [&json],
+            )?;
+            let id = conn.last_insert_rowid();
+            let active = active_transition_for_event(conn, id, 8000)?.expect("audible mix");
+            assert_eq!(active.outgoing.title, "Outgoing");
+            assert_eq!(active.incoming.title, "Incoming");
+            assert_eq!(active.program.resolve_at, program.resolve_at);
+            assert_eq!(active.elapsed_ms, 8000);
+            // Late joins already include skipped output frames in elapsed;
+            // curve/source origin is the decoded target, not the late fire.
+            assert_eq!(active.start_ms, 162000);
+            assert_eq!(active.actual_start_ms, 164000);
+            let incoming = DjMediaRef::LibraryTrack { track_id: 2 };
+            // Pause has flushed the listening session; its installed audio
+            // overlap remains frozen on the runtime output clock.
+            assert_eq!(active_transition_for_runtime(conn, None, Some(&incoming), Some(8000))?
+                .map(|active| active.event_id), Some(id));
+            let resumed = player::ActiveListenSession::start(2, Utc::now(),
+                crate::db::models::ListenSource::Unknown, None);
+            assert_eq!(active_transition_for_runtime(conn, Some(&resumed), Some(&incoming), Some(8000))?
+                .map(|active| active.event_id), Some(id));
+            // An accepted seek clears the actual overlap clock. History
+            // alone must never recreate a live transition after it.
+            assert!(active_transition_for_runtime(conn, None, Some(&incoming), None)?.is_none());
+            assert!(active_transition_for_runtime(conn, None,
+                Some(&DjMediaRef::LibraryTrack { track_id: 3 }), Some(8000))?.is_none());
+            assert!(active_transition_for_event(conn, id, 16000)?.is_none());
+            assert!(active_transition_for_event(conn, id, -1)?.is_none());
+            conn.execute("UPDATE tracks SET tidal_id = id * 100", [])?;
+            conn.execute(
+                "UPDATE dj_transition_events SET from_media_ref_kind = 'tidal_track',
+                 from_media_ref_id = '100', to_media_ref_kind = 'tidal_track',
+                 to_media_ref_id = '200' WHERE id = ?1", [id])?;
+            let streamed = active_transition_for_event(conn, id, 8000)?.expect("streamed pair");
+            assert_eq!(streamed.outgoing.title, "Outgoing");
+            assert_eq!(streamed.incoming.title, "Incoming");
+            assert_eq!(streamed.outgoing.artist.as_deref(), Some("Artist"));
+            assert_eq!(streamed.incoming.artist.as_deref(), Some("Artist"));
+            conn.execute(
+                "UPDATE dj_transition_events SET runtime_renderer_status = 'legacy_overlap'
+                WHERE id = ?1",
+                [id],
+            )?;
+            assert!(active_transition_for_event(conn, id, 8000)?.is_none());
+            Ok(())
+        })
+        .expect("executed scene");
+    }
+
+    #[tokio::test]
+    async fn policy_handler_round_trips_strategy_and_rejects_partial_invalid_saves() {
+        let db = crate::db::Database::open_in_memory().expect("db");
+        db.with_conn(crate::db::schema::run_migrations)
+            .expect("schema");
+        let state = fresh_test_state_with_dj_tx(db, None);
+        let response = set_policy(
+            State(state.clone()),
+            Json(SetDjPolicyRequest {
+                mix_intent: Some("bold".into()),
+                transition_speed_bias: Some("faster".into()),
+                preferred_strategy: Some("club_mix".into()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(response.preferred_strategy, "club_mix");
+        assert!(
+            set_policy(
+                State(state.clone()),
+                Json(SetDjPolicyRequest {
+                    mix_intent: Some("safe".into()),
+                    transition_speed_bias: None,
+                    preferred_strategy: Some("invalid".into()),
+                })
+            )
+            .await
+            .is_err()
+        );
+        let response = get_policy(State(state)).await.unwrap().0;
+        assert_eq!(response.mix_intent, "bold");
+        assert_eq!(response.preferred_strategy, "club_mix");
+    }
 
     fn test_profile_row(key: &AudioDjProfileKey, version: &str) -> AudioDjProfileRow {
         AudioDjProfileRow {
@@ -2855,6 +3203,10 @@ mod tests {
             profile_retry_after_ms: None,
             profile_retry_reason: None,
             profile_confidence: profile_ready.then_some(0.85),
+            beat_confidence: profile_ready.then_some(0.9),
+            grid_is_synthetic: false,
+            analysis_scope_ms: profile_ready.then_some(90_000),
+            energy: None,
             beat_count: profile_ready.then_some(128),
             downbeat_count: profile_ready.then_some(32),
             phrase_count: profile_ready.then_some(8),
@@ -3508,6 +3860,7 @@ mod tests {
                 tier: noor_mix::Tier::FullBlend,
                 template: template.to_string(),
                 drop_source: None,
+                decision: None,
                 sample_rate: 48_000,
                 channels: 2,
                 deck_a_start_frame: 0,
@@ -3535,6 +3888,7 @@ mod tests {
             tier: noor_mix::Tier::FullBlend,
             template: "DropTease16".to_string(),
             drop_source: None,
+            decision: None,
             sample_rate: 48_000,
             channels: 2,
             deck_a_start_frame: 0,
@@ -3571,6 +3925,7 @@ mod tests {
 
         let manual_program = noor_mix::TransitionProgram {
             drop_source: Some("manual_drop_cue".to_string()),
+            decision: None,
             ..program
         };
         let manual_json = serde_json::to_string(&manual_program).expect("manual program json");
@@ -4094,6 +4449,48 @@ mod tests {
     }
 
     #[test]
+    fn timing_history_distinguishes_decoded_target_from_metadata_estimate() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::schema::run_migrations(&conn).unwrap();
+        conn.execute("INSERT INTO dj_transition_events
+            (template, program_json, planner_version, planned_start_ms, timing_source, timing_status)
+            VALUES ('SafeCrossfade', '{\"template\":\"SafeCrossfade\"}', 'test', 401000, 'fallback_overlap', 'armed')", []).unwrap();
+        let id = conn.last_insert_rowid();
+        queries::update_dj_transition_fire_timing_with_runtime_target(
+            &conn,
+            id,
+            403006,
+            Some(403000),
+            "fired",
+            true,
+            "rendered_handoff",
+            "none",
+        )
+        .unwrap();
+        let history = latest_dj_transition_timing_history(&conn, 5).unwrap();
+        assert_eq!(history[0].planned_start_ms, Some(401000));
+        assert_eq!(history[0].runtime_planned_start_ms, Some(403000));
+        assert_eq!(history[0].actual_start_ms, Some(403006));
+        assert_eq!(history[0].timing_delta_ms, Some(6));
+        assert_eq!(history[0].timing_quality, "tight");
+        // Actual lateness stays visible even with a decoded target.
+        queries::update_dj_transition_fire_timing_with_runtime_target(
+            &conn,
+            id,
+            405006,
+            Some(403000),
+            "fired",
+            true,
+            "rendered_handoff",
+            "none",
+        )
+        .unwrap();
+        let history = latest_dj_transition_timing_history(&conn, 5).unwrap();
+        assert_eq!(history[0].timing_delta_ms, Some(2006));
+        assert_eq!(history[0].timing_quality, "bad");
+    }
+
+    #[test]
     fn timing_direction_labels_delta_direction_and_status() {
         assert_eq!(timing_direction(Some("fired"), Some(150)), "on_time");
         assert_eq!(timing_direction(Some("fired"), Some(-151)), "early");
@@ -4117,6 +4514,7 @@ mod tests {
                 renderer_template: Some("SafeCrossfade".to_string()),
                 planning_reason: None,
                 planned_start_ms: Some(10_000),
+                runtime_planned_start_ms: None,
                 actual_start_ms: Some(10_100),
                 timing_delta_ms: Some(100),
                 timing_source: Some("downbeat_sync".to_string()),
@@ -4139,6 +4537,7 @@ mod tests {
                 renderer_template: Some("SafeCrossfade".to_string()),
                 planning_reason: Some("next_profile_missing".to_string()),
                 planned_start_ms: Some(20_000),
+                runtime_planned_start_ms: None,
                 actual_start_ms: Some(20_800),
                 timing_delta_ms: Some(800),
                 timing_source: Some("beat_sync".to_string()),
@@ -4161,6 +4560,7 @@ mod tests {
                 renderer_template: Some("SafeCrossfade".to_string()),
                 planning_reason: Some("analysis_late".to_string()),
                 planned_start_ms: Some(30_000),
+                runtime_planned_start_ms: None,
                 actual_start_ms: None,
                 timing_delta_ms: None,
                 timing_source: Some("fallback_overlap".to_string()),
@@ -4202,6 +4602,7 @@ mod tests {
                 renderer_template: Some("SafeCrossfade".to_string()),
                 planning_reason: None,
                 planned_start_ms: Some(10_000),
+                runtime_planned_start_ms: None,
                 actual_start_ms: Some(10_100),
                 timing_delta_ms: Some(100),
                 timing_source: Some("downbeat_sync".to_string()),
@@ -4224,6 +4625,7 @@ mod tests {
                 renderer_template: Some("SafeCrossfade".to_string()),
                 planning_reason: None,
                 planned_start_ms: Some(10_000),
+                runtime_planned_start_ms: None,
                 actual_start_ms: Some(50_001),
                 timing_delta_ms: Some(40_001),
                 timing_source: Some("downbeat_sync".to_string()),
@@ -4695,6 +5097,70 @@ mod tests {
         deck.profile_retry_after_ms = Some(0);
 
         assert!(deck_needs_profile_rebuild(&deck));
+    }
+
+    #[test]
+    fn outdated_dj_analysis_preserves_failure_backoff_and_retries_only_when_due() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::schema::run_migrations(&conn).unwrap();
+        let media_ref = DjMediaRef::TidalTrack {
+            tidal_id: 129999877,
+            track_id: None,
+        };
+        let key = media_ref.profile_key();
+        let failure_key = dj_profile_inflight_key(&key);
+        clear_dj_profile_rebuild_failure(&failure_key);
+        let mut row = test_profile_row(&key, "dj_profile_v2");
+        row.source = "dj_playback".into();
+        row.waveform_peaks_blob = encode_f32_blob(&[0.2, 0.5]);
+        queries::upsert_audio_dj_profile(&conn, &row).unwrap();
+        record_dj_profile_rebuild_failure(
+            &failure_key,
+            "retrying",
+            "DASH stream prebuffer failed".into(),
+        );
+        let pair = crate::playback::dj_lookahead::DjLookaheadPair {
+            current: Some(media_ref.clone()),
+            next: None,
+            current_queue_item_id: None,
+            next_queue_item_id: None,
+            queue_generation: 0,
+        };
+        let inflight = Arc::new(Mutex::new(HashMap::new()));
+        assert!(
+            missing_dj_profile_refs_for_pair(&conn, pair.clone(), &[], &inflight)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            recent_dj_profile_rebuild_failure(&failure_key)
+                .unwrap()
+                .attempts,
+            1
+        );
+        profile_rebuild_failures()
+            .lock()
+            .unwrap()
+            .get_mut(&failure_key)
+            .unwrap()
+            .next_retry_at = Some(Instant::now() - Duration::from_secs(1));
+        assert_eq!(
+            missing_dj_profile_refs_for_pair(&conn, pair.clone(), &[], &inflight).unwrap(),
+            vec![media_ref]
+        );
+        for _ in 1..DJ_PROFILE_MAX_TRANSIENT_ATTEMPTS {
+            record_dj_profile_rebuild_failure(
+                &failure_key,
+                "retrying",
+                "DASH stream prebuffer failed".into(),
+            );
+        }
+        assert!(
+            missing_dj_profile_refs_for_pair(&conn, pair, &[], &inflight)
+                .unwrap()
+                .is_empty()
+        );
+        clear_dj_profile_rebuild_failure(&failure_key);
     }
 
     #[test]

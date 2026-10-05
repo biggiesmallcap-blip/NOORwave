@@ -921,14 +921,7 @@ pub(crate) fn decode_and_buffer_job(
                     }
                 };
 
-                let buffered_samples = {
-                    let mut guard = shared
-                        .buffer
-                        .lock()
-                        .map_err(|_| anyhow!("playback buffer poisoned"))?;
-                    guard.samples.extend_from_slice(&resampled);
-                    guard.samples.len()
-                };
+                let buffered_samples = shared.append_decoded_samples(&resampled)?;
                 decoded_packets += 1;
                 decoded_samples += resampled.len() as u64;
 
@@ -1007,6 +1000,7 @@ pub(crate) fn decode_and_buffer_job(
                 // Fade ramps are applied dynamically in the CPAL callback. No baking needed.
 
                 guard.mark_finished();
+                shared.publish_buffered_samples(guard.samples.len());
                 guard.samples.len() as u64
             };
             // total_samples is ABSOLUTE (offset + local count) to match

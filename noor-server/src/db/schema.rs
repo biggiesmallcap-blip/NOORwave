@@ -70,7 +70,14 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_066,
     MIGRATION_067,
     MIGRATION_068,
+    MIGRATION_069,
 ];
+
+const MIGRATION_069: &str = r#"
+-- Retain the original metadata/grid estimate separately from the target
+-- actually used by the decoded-audio countdown. Historical rows stay intact.
+ALTER TABLE dj_transition_events ADD COLUMN runtime_planned_start_ms INTEGER;
+"#;
 
 const MIGRATION_068: &str = r#"
 CREATE TABLE IF NOT EXISTS tidal_track_labels (

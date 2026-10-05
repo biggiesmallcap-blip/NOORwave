@@ -379,6 +379,8 @@ if (typeof window !== 'undefined') {
 
 export const isPlaying = writable(false);
 export const position = writable(0);
+// Accepted seeks invalidate an active DJ animation immediately, before its next poll.
+export const playbackSeekRevision = writable(0);
 /**
  * How many ms of the current track are decoded into the playback buffer.
  * Drives the buffered-bar overlay in the scrubber and clamps the user's
@@ -757,6 +759,7 @@ export async function setPlayerPosition(nextPositionMs: number) {
 		// applies the corrective snapshot); transition errors get 500
 		// (treat as recoverable error - the user can retry the drag).
 		const result = await api.setPlaybackPosition(nextPositionMs, true);
+		if (isLatestPlaybackIntent(intentSeq)) playbackSeekRevision.update((revision) => revision + 1);
 		if (!applyStateIfLatest(result.state, intentSeq)) return;
 		noteSuccess();
 	} catch (error) {

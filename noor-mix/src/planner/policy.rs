@@ -1,6 +1,6 @@
 use super::template::TransitionTemplate;
 
-pub const DJ_PLANNER_VERSION: &str = "dj_planner_v1";
+pub const DJ_PLANNER_VERSION: &str = "dj_planner_v2";
 
 #[derive(Debug, Clone)]
 pub struct Policy {
@@ -11,6 +11,10 @@ pub struct Policy {
     pub mix_intent: MixIntent,
     pub safety_template_override: Option<TransitionTemplate>,
     pub require_full_profile: bool,
+    pub preferred_strategy: String,
+    pub recent_templates: Vec<String>,
+    pub strategy_feedback: Vec<(String, f32)>,
+    pub adventurousness_bias: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +44,10 @@ impl Default for Policy {
             mix_intent: MixIntent::Balanced,
             safety_template_override: None,
             require_full_profile: false,
+            preferred_strategy: "adaptive".to_string(),
+            recent_templates: Vec::new(),
+            strategy_feedback: Vec::new(),
+            adventurousness_bias: 0.0,
         }
     }
 }

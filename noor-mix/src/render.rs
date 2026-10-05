@@ -144,6 +144,7 @@ mod tests {
             tier: Tier::FullBlend,
             template: "SafeCrossfade".to_string(),
             drop_source: None,
+            decision: None,
             sample_rate: 48_000,
             channels: 1,
             deck_a_start_frame: 0,

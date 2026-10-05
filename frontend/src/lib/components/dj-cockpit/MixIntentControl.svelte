@@ -1,24 +1,29 @@
 <script lang="ts">
-	import type { DjMixIntent, DjTransitionSpeedBias } from '$lib/api/client';
+	import type { DjMixIntent, DjTransitionSpeedBias, DjStrategy } from '$lib/api/client';
+	import { strategyLabels } from './transition_scene';
 
 	let {
 		intent,
 		speed,
+		strategy,
 		disabled = false,
 		onIntentChange,
 		onSpeedChange,
+		onStrategyChange,
 	}: {
 		intent: DjMixIntent;
 		speed: DjTransitionSpeedBias;
+		strategy: DjStrategy;
 		disabled?: boolean;
 		onIntentChange: (intent: DjMixIntent) => void;
 		onSpeedChange: (speed: DjTransitionSpeedBias) => void;
+		onStrategyChange: (strategy: DjStrategy) => void;
 	} = $props();
 
 	const intents: Array<{ value: DjMixIntent; label: string }> = [
-		{ value: 'safe', label: 'Safe' },
+		{ value: 'safe', label: 'Conservative' },
 		{ value: 'balanced', label: 'Balanced' },
-		{ value: 'bold', label: 'Bold' },
+		{ value: 'bold', label: 'Adventurous' },
 	];
 
 	const speeds: Array<{ value: DjTransitionSpeedBias; label: string }> = [
@@ -29,6 +34,15 @@
 </script>
 
 <div class="policy-controls">
+	<label class="control-block">
+		<span class="control-label">Transition style</span>
+		<select aria-label="Transition style" value={strategy} {disabled} onchange={(event) => onStrategyChange(event.currentTarget.value as DjStrategy)}>
+			{#each ['adaptive', 'smooth_blend', 'club_mix', 'quick_mix', 'energy_lift', 'energy_reset', 'drop_swap', 'bass_swap', 'cut', 'wildcard'] as value}
+				<option {value}>{strategyLabels[value]}</option>
+			{/each}
+		</select>
+		<span class="style-note">A preference; the safest suitable plan still wins.</span>
+	</label>
 	<div class="control-block">
 		<span class="control-label">Mix intent</span>
 		<div class="segmented" role="group" aria-label="Mix intent">
@@ -65,6 +79,9 @@
 </div>
 
 <style>
+	select { min-height: 2.75rem; padding: var(--space-2) var(--space-3); border: 1px solid var(--border-muted); border-radius: var(--radius-sm); background: var(--bg-surface); color: var(--text-primary); font-size: var(--font-size-sm); }
+	select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+	.style-note { font-size: var(--font-size-2xs); color: var(--text-tertiary); }
 	.policy-controls {
 		display: flex;
 		flex-wrap: wrap;

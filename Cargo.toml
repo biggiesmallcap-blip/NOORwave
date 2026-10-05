@@ -7,3 +7,17 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = "line-tables-only"
+
+# Beat tracking must finish during lookahead in test/dev playback too. These
+# existing DSP kernels otherwise spend minutes on a bounded 90-second clip.
+[profile.dev.package.madmom_beats_port_core]
+opt-level = 3
+
+[profile.dev.package.ndarray]
+opt-level = 3
+
+[profile.dev.package.matrixmultiply]
+opt-level = 3
+
+[profile.dev.package.rustfft]
+opt-level = 3

@@ -15,7 +15,7 @@
 		if (deck?.profile_status === 'analyzing') return 'Analyzing';
 		if (!deck?.profile_ready) return 'Profile missing';
 		if (deck.profile_confidence == null) return 'Profile ready';
-		return `${Math.round(deck.profile_confidence * 100)}% confidence`;
+		return `${Math.round(deck.profile_confidence * 100)}% profile scope confidence`;
 	}
 
 	function retryLabel(deck: DjDeckStatus) {
@@ -69,6 +69,7 @@
 						>
 							{confidenceLabel(item.deck)}
 						</span>
+						{#if item.deck.beat_confidence != null}<span>{Math.round(item.deck.beat_confidence * 100)}% beat confidence</span>{/if}
 						{#if item.deck.safe_crossfade_only}
 							<span class="safe-only">Safe only</span>
 						{/if}

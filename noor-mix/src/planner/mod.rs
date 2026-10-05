@@ -1,3 +1,4 @@
+mod adaptive;
 pub mod policy;
 pub mod safety;
 pub mod scoring;
@@ -19,6 +20,13 @@ const PLANNER_SAMPLE_RATE: u32 = 48_000;
 pub struct Planner;
 
 impl Planner {
+    pub fn plan_adaptive(
+        outgoing: &DjProfile,
+        incoming: &DjProfile,
+        policy: &Policy,
+    ) -> TransitionProgram {
+        adaptive::plan(outgoing, incoming, policy)
+    }
     pub fn choose_template(
         outgoing: &DjProfile,
         incoming: &DjProfile,
@@ -162,6 +170,7 @@ fn build_program(
         tier: tier_for_template(template),
         template: template_name(template).to_string(),
         drop_source: None,
+        decision: None,
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -372,6 +381,7 @@ pub fn bass_swap_16_program(
         tier: Tier::FullBlend,
         template: "BassSwap16".to_string(),
         drop_source: None,
+        decision: None,
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -404,6 +414,7 @@ pub fn bass_swap_32_program(
         tier: Tier::FullBlend,
         template: "BassSwap32".to_string(),
         drop_source: None,
+        decision: None,
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -431,6 +442,7 @@ pub fn slam_cut_program(sample_rate: u32, channels: u16, duration_ms: u32) -> Tr
         tier: Tier::SafeCrossfade,
         template: "SlamCut".to_string(),
         drop_source: None,
+        decision: None,
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -460,6 +472,7 @@ pub fn long_harmonic_blend_program(
         tier: Tier::FullBlend,
         template: "LongHarmonicBlend".to_string(),
         drop_source: None,
+        decision: None,
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -500,6 +513,7 @@ pub fn filter_sweep_eq_wash_program(
         tier: Tier::FullBlend,
         template: "FilterSweep".to_string(),
         drop_source: None,
+        decision: None,
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -532,6 +546,7 @@ pub fn drop_tease_16_program(
         tier: Tier::FullBlend,
         template: "DropTease16".to_string(),
         drop_source: None,
+        decision: None,
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -577,6 +592,7 @@ pub fn drop_preview_16_program(
         tier: Tier::FullBlend,
         template: "DropPreview16".to_string(),
         drop_source: Some(drop_source_for_profile(incoming).to_string()),
+        decision: None,
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -617,7 +633,13 @@ fn duration_samples(
         TransitionTemplate::DropTease16 => bar_samples * 16,
         TransitionTemplate::SlamCut => bar_samples.max(1),
         TransitionTemplate::SafeCrossfade => {
-            u64::from(policy.default_crossfade_ms) * u64::from(sample_rate.max(1)) / 1_000
+            let duration_ms = match policy.transition_speed_bias {
+                TransitionSpeedBias::Slower => policy.default_crossfade_ms.saturating_mul(3) / 2,
+                TransitionSpeedBias::Neutral => policy.default_crossfade_ms,
+                TransitionSpeedBias::Faster => policy.default_crossfade_ms / 2,
+            }
+            .clamp(250, 10_000);
+            u64::from(duration_ms) * u64::from(sample_rate.max(1)) / 1_000
         }
     }
     .max(1)
@@ -1070,6 +1092,13 @@ mod tests {
             lufs_loud_body: Some(-12.0),
             true_peak_dbtp: Some(-1.0),
             profile_confidence: 1.0,
+            beat_confidence: None,
+            tempo_bpm: None,
+            tempo_confidence: None,
+            grid_is_synthetic: false,
+            energy_contour: vec![],
+            analysis_scope_seconds: None,
+            vocals_known: false,
             safe_crossfade_only: false,
             profile_version: "test".to_string(),
         }

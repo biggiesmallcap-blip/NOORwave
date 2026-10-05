@@ -1,38 +1,43 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { api, type DjMixIntent, type DjProfileCorrectionRequest, type DjStatusResponse, type DjTransitionSpeedBias } from '$lib/api/client';
+	import { api, type DjMixIntent, type DjProfileCorrectionRequest, type DjStatusResponse, type DjTransitionSpeedBias, type DjStrategy } from '$lib/api/client';
 	import { showToast } from '$lib/stores/toast';
 	import MixIntentControl from './MixIntentControl.svelte';
 	import ProfileCorrectionPanel from './ProfileCorrectionPanel.svelte';
 	import QueuePairPanel from './QueuePairPanel.svelte';
 	import SafetyGuardrailPanel from './SafetyGuardrailPanel.svelte';
 	import TransitionLane from './TransitionLane.svelte';
+	import TransitionStory from './TransitionStory.svelte';
+	import { createCockpitRefresh } from './cockpit_refresh';
 
 	let status = $state<DjStatusResponse | null>(null);
-	let enabled = $state(false);
+	let enabled = $state<boolean | null>(null);
 	let mixIntent = $state<DjMixIntent>('balanced');
 	let speedBias = $state<DjTransitionSpeedBias>('neutral');
+	let strategy = $state<DjStrategy>('adaptive');
 	let loading = $state(true);
 	let saving = $state(false);
 	let debugOpen = $state(false);
 	let rebuildStatus = $state('');
+	let loadError = $state('');
+	const cockpitRefresh = createCockpitRefresh(api);
 
 	let transitionArmed = $derived(Boolean(status?.selected_program || status?.last_transition_event_id));
 
-	async function refresh(showLoading = false) {
+	async function refresh(showLoading = false, force = false) {
 		if (showLoading) loading = true;
 		try {
-			const [enabledResponse, policyResponse, statusResponse] = await Promise.all([
-				api.getDjEnabled(),
-				api.getDjPolicy(),
-				api.getDjStatus(),
-			]);
-			enabled = enabledResponse.enabled;
-			mixIntent = policyResponse.mix_intent;
-			speedBias = policyResponse.transition_speed_bias;
-			status = statusResponse;
-		} catch {
-			showToast('Could not load DJ cockpit.', 'error');
+			const snapshot = await cockpitRefresh.refresh(showLoading || force);
+			if (!snapshot) return;
+			if (snapshot.enabled) enabled = snapshot.enabled.enabled;
+			else if (snapshot.status) enabled = snapshot.status.enabled;
+			if (snapshot.policy) {
+				mixIntent = snapshot.policy.mix_intent;
+				speedBias = snapshot.policy.transition_speed_bias;
+				strategy = snapshot.policy.preferred_strategy ?? 'adaptive';
+			}
+			if (snapshot.status) status = snapshot.status;
+			loadError = snapshot.error;
 		} finally {
 			loading = false;
 		}
@@ -43,7 +48,7 @@
 		const interval = window.setInterval(() => {
 			void refresh();
 		}, 2_000);
-		return () => window.clearInterval(interval);
+		return () => { window.clearInterval(interval); cockpitRefresh.dispose(); };
 	});
 
 	async function setEnabled(next: boolean) {
@@ -51,7 +56,7 @@
 		try {
 			const response = await api.setDjEnabled(next);
 			enabled = response.enabled;
-			await refresh();
+			await refresh(false, true);
 		} catch {
 			showToast('Could not update DJ engine.', 'error');
 		} finally {
@@ -63,7 +68,7 @@
 		mixIntent = next;
 		try {
 			await api.setDjMixIntent(next);
-			await refresh();
+			await refresh(false, true);
 		} catch {
 			showToast('Could not update mix intent.', 'error');
 		}
@@ -73,10 +78,19 @@
 		speedBias = next;
 		try {
 			await api.setDjPolicy({ transition_speed_bias: next });
-			await refresh();
+			await refresh(false, true);
 		} catch {
 			showToast('Could not update transition speed.', 'error');
 		}
+	}
+
+	async function setStrategy(next: DjStrategy) {
+		saving = true;
+		try {
+			await api.setDjPolicy({ preferred_strategy: next });
+			await refresh(false, true);
+		} catch { showToast('Could not update transition strategy.', 'error'); }
+		finally { saving = false; }
 	}
 
 	async function saveCorrection(correction: DjProfileCorrectionRequest) {
@@ -84,7 +98,7 @@
 		try {
 			await api.setDjProfileCorrection(correction);
 			showToast('DJ correction saved.', 'success');
-			await refresh();
+			await refresh(false, true);
 		} catch {
 			showToast('Could not save DJ correction.', 'error');
 		} finally {
@@ -110,7 +124,7 @@
 		try {
 			const response = await api.rebuildDjProfile(ref);
 			rebuildStatus = rebuildProfileStatusMessage(response.status, response.accepted);
-			await refresh();
+			await refresh(false, true);
 		} catch {
 			rebuildStatus = 'Profile rebuild failed';
 			showToast('Could not rebuild DJ profile.', 'error');
@@ -131,11 +145,11 @@
 	async function recordFeedback(rating: 'good' | 'bad' | 'too_safe' | 'too_bold') {
 		try {
 			await api.recordDjFeedback({
-				transition_event_id: status?.last_transition_event_id,
+				transition_event_id: status?.feedback_transition_event_id,
 				rating,
 			});
 			showToast('DJ feedback recorded.', 'success');
-			await refresh();
+			await refresh(false, true);
 		} catch {
 			showToast('Could not record DJ feedback.', 'error');
 		}
@@ -156,8 +170,9 @@
 <section class="dj-cockpit" aria-labelledby="dj-cockpit-heading">
 	<header class="topbar">
 		<div>
-			<p class="eyebrow">DJ cockpit</p>
-			<h1 id="dj-cockpit-heading">Transition control</h1>
+			<p class="eyebrow">NOORwave · DJ</p>
+			<h1 id="dj-cockpit-heading">Let the music move</h1>
+			<a href="/automix">Shape your Automix queue →</a>
 		</div>
 		<div class="engine-toggle">
 			<span class="engine-label">DJ transitions</span>
@@ -165,24 +180,31 @@
 				class="engine-switch"
 				type="button"
 				role="switch"
-				aria-checked={enabled}
+				aria-checked={enabled ?? false}
 				aria-label={enabled ? 'Disable DJ transitions' : 'Enable DJ transitions'}
-				disabled={saving}
+				disabled={saving || enabled == null}
 				onclick={() => void setEnabled(!enabled)}
 			>
 				<span class="switch-track" aria-hidden="true">
 					<span class="switch-thumb"></span>
 				</span>
-				<span class="switch-state">{enabled ? 'On' : 'Off'}</span>
+				<span class="switch-state">{enabled == null ? 'Connecting' : enabled ? 'On' : 'Off'}</span>
 			</button>
 		</div>
 	</header>
 
-	{#if !enabled}
+	{#if loadError}
+		<div class="load-status" role="status">
+			<p>DJ information is temporarily unavailable. {status ? 'Showing the last update while retrying.' : 'Retrying automatically.'}</p>
+			<button class="btn btn-glass" type="button" onclick={() => void refresh(false, true)}>Retry now</button>
+			<details><summary>Request details</summary><p>{loadError}</p></details>
+		</div>
+	{/if}
+	{#if enabled === false}
 		<p class="disabled-note">
 			Playback is using the legacy path. DJ lookahead and transition planning are stopped.
 		</p>
-	{:else}
+	{:else if enabled}
 		<p class="enabled-note">
 			DJ is planning the next eligible current-plus-next pair.
 		</p>
@@ -191,13 +213,23 @@
 	<MixIntentControl
 		intent={mixIntent}
 		speed={speedBias}
+		{strategy}
 		disabled={loading || saving}
 		onIntentChange={(next) => void setIntent(next)}
 		onSpeedChange={(next) => void setSpeed(next)}
+		onStrategyChange={(next) => void setStrategy(next)}
 	/>
+	<TransitionStory {status} {enabled} />
+	<div class="feedback" role="group" aria-label="Rate the last played transition">
+		<span>Last transition</span>
+		{#each [{value: 'good', label: 'Good'}, {value: 'bad', label: 'Bad'}, {value: 'too_safe', label: 'Too safe'}, {value: 'too_bold', label: 'Too bold'}] as item}
+			<button class="btn btn-glass" type="button" disabled={!status?.feedback_transition_event_id} onclick={() => void recordFeedback(item.value as 'good' | 'bad' | 'too_safe' | 'too_bold')}>{item.label}</button>
+		{/each}
+	</div>
 
 	<div class="workspace">
 		<div class="primary-column">
+			<details class="disclosure"><summary>Diagnostics</summary>
 			<TransitionLane
 				{status}
 				debugOpen={debugOpen}
@@ -205,9 +237,11 @@
 				onFeedback={(rating) => void recordFeedback(rating)}
 			/>
 			<QueuePairPanel current={status?.current} next={status?.next} />
+			</details>
 		</div>
 
 		<aside class="side-column">
+			<details class="disclosure"><summary>Fine Tune</summary>
 			<ProfileCorrectionPanel
 				current={status?.current}
 				next={status?.next}
@@ -221,11 +255,20 @@
 				<p class="rebuild-status" role="status">{rebuildStatus}</p>
 			{/if}
 			<SafetyGuardrailPanel {status} onAcceptSafeOnly={acceptSafeOnlySuggestion} />
+			</details>
 		</aside>
 	</div>
 </section>
 
 <style>
+	.load-status { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: var(--space-3); color: var(--text-secondary); background: var(--bg-surface); }
+	.load-status > p { margin: 0; flex: 1; min-width: 15rem; font-size: var(--font-size-sm); }
+	.load-status details { width: 100%; overflow-wrap: anywhere; font-size: var(--font-size-xs); }
+	a { color: var(--accent); font-size: var(--font-size-sm); }
+	.feedback { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); color: var(--text-secondary); font-size: var(--font-size-sm); }
+	.disclosure { border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: var(--space-3); background: var(--bg-surface); }
+	summary { cursor: pointer; font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); padding: var(--space-2); }
+	summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 	.dj-cockpit {
 		width: min(100%, var(--content-width));
 		margin: 0 auto;
