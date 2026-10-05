@@ -1405,7 +1405,13 @@ pub fn get_known_album_tidal_ids(
         return Ok(HashMap::new());
     }
     let placeholders = placeholders(tidal_ids.len());
-    let sql = format!("SELECT tidal_id, id FROM albums WHERE tidal_id IN ({placeholders})");
+    let sql = if crate::db::catalogue::enabled(conn)? {
+        format!(
+            "SELECT tidal_id,album_id FROM tidal_album_aliases WHERE tidal_id IN ({placeholders})"
+        )
+    } else {
+        format!("SELECT tidal_id,id FROM albums WHERE tidal_id IN ({placeholders})")
+    };
     let params = params_from_iter(tidal_ids.iter().copied());
     let mut stmt = conn.prepare(&sql)?;
     let mut map = HashMap::new();
@@ -3593,11 +3599,12 @@ pub fn get_existing_tidal_track_ids(conn: &Connection, tidal_ids: &[i64]) -> Res
     }
 
     let placeholders = placeholders(tidal_ids.len());
-    let query = format!(
-        "SELECT tidal_id
-         FROM tracks
-         WHERE tidal_id IN ({placeholders})"
-    );
+    let table = if crate::db::catalogue::enabled(conn)? {
+        "tidal_track_aliases"
+    } else {
+        "tracks"
+    };
+    let query = format!("SELECT tidal_id FROM {table} WHERE tidal_id IN ({placeholders})");
     let params = params_from_iter(tidal_ids.iter().copied());
     let mut stmt = conn.prepare(&query)?;
     let ids = stmt
@@ -3621,8 +3628,13 @@ pub fn get_tidal_track_library_states(
         return Ok(HashMap::new());
     }
     let placeholders = placeholders(tidal_ids.len());
-    let sql =
-        format!("SELECT tidal_id, id, is_favorite FROM tracks WHERE tidal_id IN ({placeholders})");
+    let sql = if crate::db::catalogue::enabled(conn)? {
+        format!(
+            "SELECT a.tidal_id,t.id,t.is_favorite FROM tidal_track_aliases a JOIN tracks t ON t.id=a.track_id WHERE a.tidal_id IN ({placeholders})"
+        )
+    } else {
+        format!("SELECT tidal_id,id,is_favorite FROM tracks WHERE tidal_id IN ({placeholders})")
+    };
     let params = params_from_iter(tidal_ids.iter().copied());
     let mut stmt = conn.prepare(&sql)?;
     let mut map = HashMap::new();

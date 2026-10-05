@@ -5,17 +5,14 @@
 //! `library::duplicates::auto_merge_pending`. Variants (alt_version) and
 //! groups touching local files are left pending for the Duplicates UI.
 //!
-//! Liked songs are hard-protected: the keep-rule prefers the liked row, and a
-//! merged-away liked copy folds its like into the kept row locally AND on
-//! TIDAL (favorite the kept id, unfavorite the removed one) so the next Full
-//! sync's favorite reconciliation cannot wipe the transfer.
+//! Catalogue aliases and saved dates are retained locally. This pass never
+//! changes provider favorites; the user chooses remote favorite mutations.
 //!
 //! Triggered after every completed sync/import via the `LibrarySynced`
 //! listener in `main.rs` (same run-if-idle shape as `tidal::repair`), and
 //! synchronously from the Settings "Reclean library" action.
 
 use crate::library::duplicates as dup;
-use crate::services::tidal::mutations as tidal_mutations;
 use crate::{AppEvent, SharedState};
 use serde::Serialize;
 use std::sync::OnceLock;
@@ -44,7 +41,7 @@ impl Drop for RunningGuard {
     }
 }
 
-/// Scan + auto-merge + TIDAL like reconciliation. Returns `None` when a pass
+/// Scan + auto-merge with local catalogue identity preservation. Returns `None` when a pass
 /// is already running (the Reclean endpoint surfaces that as a conflict).
 pub async fn run_dedupe_pass(state: &SharedState) -> anyhow::Result<Option<DedupeSummary>> {
     if running_flag()
@@ -64,56 +61,6 @@ pub async fn run_dedupe_pass(state: &SharedState) -> anyhow::Result<Option<Dedup
             Ok((scan_stats, merge_stats))
         })?
     };
-
-    // Push transferred likes to TIDAL. Best-effort: the local like is already
-    // on the kept row; this keeps TIDAL's favorites list pointing at the same
-    // copy so Full-sync reconciliation agrees.
-    if !merge_stats.favorite_transfers.is_empty() {
-        let (tokens, http) = {
-            let s = state.read().await;
-            (s.tidal_tokens.clone(), s.http_client.clone())
-        };
-        if let Some(t) = tokens {
-            for (kept_tidal_id, loser_tidal_ids) in &merge_stats.favorite_transfers {
-                if let Err(e) = tidal_mutations::add_favorite_track(
-                    &http,
-                    &t.access_token,
-                    &t.user_id,
-                    *kept_tidal_id,
-                    &t.country_code,
-                )
-                .await
-                {
-                    warn!(
-                        target: "noor.dedupe",
-                        "failed to favorite kept TIDAL track {kept_tidal_id}: {e}"
-                    );
-                }
-                for loser in loser_tidal_ids {
-                    if let Err(e) = tidal_mutations::remove_favorite_track(
-                        &http,
-                        &t.access_token,
-                        &t.user_id,
-                        *loser,
-                        &t.country_code,
-                    )
-                    .await
-                    {
-                        warn!(
-                            target: "noor.dedupe",
-                            "failed to unfavorite removed TIDAL track {loser}: {e}"
-                        );
-                    }
-                }
-            }
-        } else {
-            warn!(
-                target: "noor.dedupe",
-                transfers = merge_stats.favorite_transfers.len(),
-                "TIDAL not connected; likes transferred locally only"
-            );
-        }
-    }
 
     {
         let s = state.read().await;

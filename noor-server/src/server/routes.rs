@@ -33,6 +33,7 @@ use tracing::{error, info, warn};
 mod analytics_routes;
 mod audio_analysis_routes;
 pub(crate) mod catalog_routes;
+mod catalogue_routes;
 mod chart_routes;
 mod discovery_routes;
 mod discovery_space_routes;
@@ -769,6 +770,10 @@ pub fn api_routes(state: SharedState) -> Router {
         )
         // Sportify-based discovery resolver - single, bulk, and cache-only status poll.
         .route("/api/resolve/tidal/track", get(resolve_tidal_track))
+        .route(
+            "/api/library/catalogue/status",
+            get(catalogue_routes::status),
+        )
         .route("/api/resolve/tidal/bulk", post(resolve_tidal_bulk))
         .route("/api/resolve/tidal/status", get(resolve_tidal_status))
         // Sportify (anonymous Spotify metadata proxy) discovery surface.
@@ -1478,15 +1483,7 @@ async fn get_radio_tracks(
     } else if let Some(tidal_id) = payload.seed_tidal_id {
         state
             .db
-            .with_conn(|conn| {
-                Ok(conn
-                    .query_row(
-                        "SELECT id FROM tracks WHERE tidal_id = ?1 LIMIT 1",
-                        params![tidal_id],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .optional()?)
-            })
+            .with_conn(|conn| crate::db::catalogue::track_id(conn, tidal_id))
             .map_err(|e| {
                 tracing::error!("DB error resolving tidal_id {}: {}", tidal_id, e);
                 (
@@ -3400,13 +3397,7 @@ async fn inject_discovery_tracks(state: &SharedState, current_track: &crate::db:
                 let tidal_id = candidate.tidal_track_id.unwrap();
 
                 // Skip if this track is already in the library (normal automix handles it)
-                let already_exists: bool = conn
-                    .query_row(
-                        "SELECT 1 FROM tracks WHERE tidal_id = ?1",
-                        rusqlite::params![tidal_id],
-                        |_| Ok(true),
-                    )
-                    .unwrap_or(false);
+                let already_exists=crate::db::catalogue::track_id(conn,tidal_id)?.is_some();
                 if already_exists {
                     continue;
                 }
@@ -3490,12 +3481,8 @@ async fn inject_discovery_tracks(state: &SharedState, current_track: &crate::db:
                     candidate.album_title.as_deref(),
                 ) {
                     (Some(album_tidal_id), Some(album_title)) if !album_title.is_empty() => {
-                        match conn.query_row(
-                            "SELECT id FROM albums WHERE tidal_id = ?1",
-                            rusqlite::params![album_tidal_id],
-                            |row| row.get::<_, i64>(0),
-                        ) {
-                            Ok(id) => {
+                        match crate::db::catalogue::album_id(conn, album_tidal_id)? {
+                            Some(id) => {
                                 if let Some(url) = candidate.artwork_url.as_deref() {
                                     let _ = conn.execute(
                                         "UPDATE albums SET artwork_url = ?1
@@ -3505,7 +3492,7 @@ async fn inject_discovery_tracks(state: &SharedState, current_track: &crate::db:
                                 }
                                 Some(id)
                             }
-                            Err(_) => {
+                            None => {
                                 if conn
                                     .execute(
                                         "INSERT INTO albums (tidal_id, title, artist_id, artwork_url, source)
@@ -3948,6 +3935,13 @@ async fn set_track_favorite(
                      WHERE id = ?2",
                     rusqlite::params![if payload.favorite { 1 } else { 0 }, payload.track_id],
                 )?;
+                if crate::db::catalogue::enabled(conn)? {
+                    conn.execute("UPDATE tracks SET library_added_at=date_added,
+                        library_date_source='user',remote_favorite_state=?2 WHERE id=?1",
+                        params![payload.track_id,if payload.favorite {"favorite"}else{"not_favorite"}])?;
+                    conn.execute("UPDATE tidal_track_aliases SET is_favorite=?2 WHERE track_id=?1",
+                        params![payload.track_id,payload.favorite as i32])?;
+                }
                 Ok(())
             })
             .map_err(|error| {
@@ -5569,12 +5563,24 @@ fn version_intent_matches(pending: VersionClass, candidate: VersionClass) -> boo
 
 async fn find_pending_tidal_match(
     client: &TidalClient,
+    db: &crate::db::Database,
     pending_artist: &str,
     pending_title: &str,
     tidal_id_hint: Option<i64>,
 ) -> anyhow::Result<Option<(f64, tidal_import::ImportTrackMetadata)>> {
     if let Some(tidal_id) = tidal_id_hint.filter(|id| *id > 0) {
-        let track = client.get_track(tidal_id).await?;
+        let selected = db.with_conn(|conn| {
+            let local = crate::db::catalogue::track_id(conn, tidal_id)?;
+            Ok(match local {
+                Some(id) => conn
+                    .query_row("SELECT tidal_id FROM tracks WHERE id=?1", [id], |r| {
+                        r.get::<_, Option<i64>>(0)
+                    })?
+                    .unwrap_or(tidal_id),
+                None => tidal_id,
+            })
+        })?;
+        let track = client.get_track(selected).await?;
         return Ok(Some((1.0, import_metadata_from_tidal_track(track))));
     }
 
@@ -5799,6 +5805,7 @@ async fn resolve_pending_row(
     .with_metadata_store(state.read().await.db.clone());
     let resolved = match find_pending_tidal_match(
         &client,
+        &db,
         &pending_artist,
         &pending_title,
         tidal_id_hint,
@@ -5817,6 +5824,7 @@ async fn resolve_pending_row(
             match recover_tidal_client(&state, &tokens).await {
                 Ok(fresh_client) => match find_pending_tidal_match(
                     &fresh_client,
+                    &db,
                     &pending_artist,
                     &pending_title,
                     tidal_id_hint,
@@ -5987,55 +5995,61 @@ async fn resolve_pending_current_queue_item(
         tokens.country_code.clone(),
     )
     .with_metadata_store(state.read().await.db.clone());
-    let resolved =
-        match find_pending_tidal_match(&client, &pending_artist, &pending_title, tidal_id_hint)
-            .await
-        {
-            Ok(r) => r,
-            Err(error) if error_looks_like_auth(&error) => {
-                // Expired-token recovery, same shape as resolve_pending_row:
-                // this is the row the user is actively waiting on, so it must
-                // not fail on a stale session the single-flight helper can
-                // refresh in one round trip.
-                let retried = match recover_tidal_client(state, &tokens).await {
-                    Ok(fresh_client) => {
-                        find_pending_tidal_match(
-                            &fresh_client,
-                            &pending_artist,
-                            &pending_title,
-                            tidal_id_hint,
-                        )
-                        .await
-                    }
-                    Err(refresh_error) => Err(refresh_error),
-                };
-                match retried {
-                    Ok(r) => r,
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "noor.playback.resolve",
-                            event = "pending_current_resolve_api_failed",
-                            queue_item_id,
-                            error = %error,
-                            "TIDAL lookup failed for current pending queue row after token refresh"
-                        );
-                        release_lock(&db, queue_item_id);
-                        return None;
-                    }
+    let resolved = match find_pending_tidal_match(
+        &client,
+        &db,
+        &pending_artist,
+        &pending_title,
+        tidal_id_hint,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(error) if error_looks_like_auth(&error) => {
+            // Expired-token recovery, same shape as resolve_pending_row:
+            // this is the row the user is actively waiting on, so it must
+            // not fail on a stale session the single-flight helper can
+            // refresh in one round trip.
+            let retried = match recover_tidal_client(state, &tokens).await {
+                Ok(fresh_client) => {
+                    find_pending_tidal_match(
+                        &fresh_client,
+                        &db,
+                        &pending_artist,
+                        &pending_title,
+                        tidal_id_hint,
+                    )
+                    .await
+                }
+                Err(refresh_error) => Err(refresh_error),
+            };
+            match retried {
+                Ok(r) => r,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "noor.playback.resolve",
+                        event = "pending_current_resolve_api_failed",
+                        queue_item_id,
+                        error = %error,
+                        "TIDAL lookup failed for current pending queue row after token refresh"
+                    );
+                    release_lock(&db, queue_item_id);
+                    return None;
                 }
             }
-            Err(error) => {
-                tracing::warn!(
-                    target: "noor.playback.resolve",
-                    event = "pending_current_resolve_api_failed",
-                    queue_item_id,
-                    error = %error,
-                    "TIDAL lookup failed for current pending queue row"
-                );
-                release_lock(&db, queue_item_id);
-                return None;
-            }
-        };
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "noor.playback.resolve",
+                event = "pending_current_resolve_api_failed",
+                queue_item_id,
+                error = %error,
+                "TIDAL lookup failed for current pending queue row"
+            );
+            release_lock(&db, queue_item_id);
+            return None;
+        }
+    };
 
     let (score, metadata) = match resolved {
         Some(pair) => pair,
@@ -11420,11 +11434,9 @@ async fn emit_track_skipped(state: &SharedState, track_id: i64, title: &str, rea
     });
 }
 
-/// TIDAL returned `4005 / asset-not-ready` for a track that used to play, which
-/// usually means the catalog id rotated. In the background, search TIDAL for
-/// the same artist + title, verify a candidate actually streams, and swap the
-/// row's `tidal_id` in place so the track heals for next time. Best-effort:
-/// any failure leaves the row untouched (it's already been skipped this time).
+/// After asset-not-ready, search for an equivalent recording and retain a
+/// verified candidate as an alias. Switch only with independent evidence that
+/// the selected release is unavailable; transient asset errors are insufficient.
 fn spawn_tidal_id_reresolve(state: &SharedState, track_id: i64) {
     let state = state.clone();
     tokio::spawn(async move {
@@ -11515,28 +11527,69 @@ async fn reresolve_tidal_id(state: &SharedState, track_id: i64) -> anyhow::Resul
         return Ok(None);
     }
 
-    let new_id = candidate.id;
-    let updated = db.with_conn(move |conn| {
-        // Guard the UNIQUE(tidal_id): if another row already owns this id, leave
-        // both alone rather than erroring.
-        let clash: bool = conn
-            .query_row(
-                "SELECT 1 FROM tracks WHERE tidal_id = ?1 AND id != ?2",
-                rusqlite::params![new_id, track_id],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        if clash {
-            return Ok(0usize);
+    let full = client.get_track(candidate.id).await?;
+    let verified = db.with_conn(|conn| {
+        let incoming = crate::library::duplicates::IncomingTrack {
+            tidal_id: full.id,
+            title: &full.title,
+            artist_name: &full.artist.name,
+            isrc: full.isrc.as_deref(),
+            duration_ms: full.duration * 1000,
+        };
+        let candidates = crate::library::duplicates::fetch_import_candidates(
+            conn,
+            full.id,
+            full.artist.id,
+            full.isrc.as_deref(),
+            incoming.duration_ms,
+        )?;
+        let same = candidates
+            .into_iter()
+            .filter(|c| c.track_id == track_id)
+            .collect::<Vec<_>>();
+        Ok(matches!(
+            crate::library::duplicates::decide_import(&incoming, &same),
+            crate::library::duplicates::ImportDecision::LinkAlias { .. }
+        ))
+    })?;
+    if !verified {
+        return Ok(None);
+    }
+    // A transient asset failure does not prove that a catalogue release was withdrawn.
+    let unavailable = if let Some(old) = old_tidal_id {
+        match client.get_track(old).await {
+            Ok(track) => {
+                track.stream_ready == Some(false)
+                    || track.extra.get("allowStreaming").and_then(|v| v.as_bool()) == Some(false)
+            }
+            Err(error) => error
+                .to_string()
+                .to_lowercase()
+                .starts_with("tidal api error 404 "),
         }
-        Ok(conn.execute(
-            "UPDATE tracks SET tidal_id = ?1, updated_at = datetime('now') WHERE id = ?2",
-            rusqlite::params![new_id, track_id],
-        )?)
+    } else {
+        false
+    };
+    let new_id = full.id;
+    let updated = db.with_conn(|conn| {
+        let tx = conn.unchecked_transaction()?;
+        if crate::db::catalogue::track_id(&tx, new_id)?.is_some_and(|id| id != track_id) {
+            return Ok(false);
+        }
+        crate::db::catalogue::record_track(&tx, track_id, &full, false, None)?;
+        crate::db::catalogue::observe(&tx, new_id, "available", "stream_check")?;
+        if unavailable && let Some(old) = old_tidal_id {
+            crate::db::catalogue::observe(&tx, old, "unavailable", "metadata_check")?;
+        }
+        let selected: Option<i64> =
+            tx.query_row("SELECT tidal_id FROM tracks WHERE id=?1", [track_id], |r| {
+                r.get(0)
+            })?;
+        tx.commit()?;
+        Ok(selected == Some(new_id))
     })?;
 
-    Ok((updated > 0).then_some(new_id))
+    Ok(updated.then_some(new_id))
 }
 
 fn describe_tidal_playback_error(error: &TidalPlaybackError) -> String {
@@ -12298,6 +12351,51 @@ pub(super) fn insert_tidal_track(
     is_library: bool,
     favorite_created: Option<&str>,
 ) -> anyhow::Result<Option<i64>> {
+    let catalogue = crate::db::catalogue::enabled(conn)?;
+    if catalogue {
+        let known = crate::db::catalogue::track_id(conn, track.id)?;
+        let matched = if known.is_some() {
+            known
+        } else {
+            let incoming = crate::library::duplicates::IncomingTrack {
+                tidal_id: track.id,
+                title: &track.title,
+                artist_name: &track.artist.name,
+                isrc: track.isrc.as_deref(),
+                duration_ms: track.duration * 1000,
+            };
+            let candidates = crate::library::duplicates::fetch_import_candidates(
+                conn,
+                track.id,
+                track.artist.id,
+                track.isrc.as_deref(),
+                incoming.duration_ms,
+            )?;
+            match crate::library::duplicates::decide_import(&incoming, &candidates) {
+                crate::library::duplicates::ImportDecision::LinkAlias {
+                    existing_track_id, ..
+                } => Some(existing_track_id),
+                _ => None,
+            }
+        };
+        if let Some(id) = matched {
+            crate::db::catalogue::record_track(conn, id, track, is_favorite, favorite_created)?;
+            crate::db::catalogue::curate(conn, id, is_favorite, is_library, favorite_created)?;
+            conn.execute(
+                "UPDATE tracks SET title=?2,best_quality=COALESCE(?3,best_quality)
+                WHERE id=?1 AND tidal_id=?4",
+                params![id, track.title, track.audio_quality, track.id],
+            )?;
+            queries::replace_track_source_genres(
+                conn,
+                id,
+                &infer_tidal_track_genres(track),
+                "tidal",
+                0.82,
+            )?;
+            return Ok(Some(id));
+        }
+    }
     // Ensure artist exists first (tracks.artist_id is NOT NULL)
     conn.execute(
         "INSERT INTO artists (tidal_id, name) VALUES (?1, ?2)
@@ -12332,7 +12430,7 @@ pub(super) fn insert_tidal_track(
             is_favorite=MAX(tracks.is_favorite, excluded.is_favorite),
             is_library=MAX(tracks.is_library, excluded.is_library),
             date_added=CASE
-                WHEN ?11 = 1 AND ?12 IS NOT NULL THEN excluded.date_added
+                WHEN ?11 = 1 AND ?12 IS NOT NULL AND tracks.is_library=0 AND tracks.is_favorite=0 THEN excluded.date_added
                 ELSE tracks.date_added
             END",
         rusqlite::params![
@@ -12352,6 +12450,22 @@ pub(super) fn insert_tidal_track(
         )
         .ok();
     if let Some(local_track_id) = local_track_id {
+        if catalogue {
+            crate::db::catalogue::record_track(
+                conn,
+                local_track_id,
+                track,
+                is_favorite,
+                favorite_created,
+            )?;
+            crate::db::catalogue::curate(
+                conn,
+                local_track_id,
+                is_favorite,
+                is_library,
+                favorite_created,
+            )?;
+        }
         let canonical_genres = infer_tidal_track_genres(track);
         queries::replace_track_source_genres(
             conn,
@@ -12380,6 +12494,13 @@ pub(super) fn apply_tidal_favorite_flags(
             table,
             prev_count
         );
+    }
+
+    if crate::db::catalogue::enabled(conn)? {
+        let tx = conn.unchecked_transaction()?;
+        crate::db::catalogue::reconcile_favorites(&tx, favorite_ids, table == "albums")?;
+        tx.commit()?;
+        return Ok(());
     }
 
     // Scope the reset to TIDAL-sourced rows so manually-imported albums/tracks

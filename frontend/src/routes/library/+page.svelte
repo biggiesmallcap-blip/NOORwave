@@ -313,6 +313,17 @@
 	});
 
 
+	type CatalogueStatus = { availability: string; favorite_state: string };
+	let catalogueStatus = $state<Record<number, CatalogueStatus>>({});
+	async function loadCatalogueStatus() {
+		try {
+			const data = await api.getCatalogueStatus();
+			catalogueStatus = Object.fromEntries(data.tracks.map(track => [track.id, track]));
+		} catch (error) {
+			console.error('Could not check saved track availability:', error);
+		}
+	}
+
 	onMount(() => {
 		// Load only if the persistent stores are empty. On a back-nav the stores
 		// still hold every page the user scrolled through; reloading page 1 here
@@ -320,12 +331,14 @@
 		// bottom of the first page. A fresh visit starts empty and loads normally.
 		if (get(albums).length === 0) void loadAlbums(albumSortField, albumSortDir);
 		if (get(tracks).length === 0) void loadTracks();
+		void loadCatalogueStatus();
 		void loadBatchMeta();
 		void loadRecentTracks();
 		void loadDecadeChips();
 		const unsubscribeWs = wsMessages.subscribe((messages) => {
 			const latest = messages.at(-1);
 			if (!latest) return;
+			if (latest.type === 'library_synced') void loadCatalogueStatus();
 			if (latest.type === 'listen_history_updated') {
 				void loadRecentTracks();
 			}
@@ -2752,6 +2765,13 @@
 					</span>
 					<span class="col-title">
 						<span class="track-title">{track.title}</span>
+						{#if catalogueStatus[track.id]}
+							<span class="catalogue-status" title={catalogueStatus[track.id].availability === 'unavailable'
+								? 'This saved recording is currently unavailable on TIDAL. Your saved date and library entry are preserved.'
+								: 'This saved recording is missing from TIDAL favorites. Your saved date and library entry are preserved.'}>
+								{catalogueStatus[track.id].availability === 'unavailable' ? 'Unavailable' : 'Saved locally'}
+							</span>
+						{/if}
 						{#if track.camelot_key}
 							<span class="camelot-badge-inline">{track.camelot_key}</span>
 						{/if}
@@ -3570,6 +3590,12 @@
 		font-weight: var(--font-weight-bold);
 		font-family: var(--font-mono);
 		vertical-align: middle;
+	}
+
+	.catalogue-status {
+		font-size: 0.7rem;
+		color: var(--text-secondary);
+		white-space: nowrap;
 	}
 
 	.bpm-inline {
