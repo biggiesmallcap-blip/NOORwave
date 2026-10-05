@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-restart-managed-server"
+description = "Enables the restart_managed_server command without any pre-configured scope."
+commands.allow = ["restart_managed_server"]
+
+[[permission]]
+identifier = "deny-restart-managed-server"
+description = "Denies the restart_managed_server command without any pre-configured scope."
+commands.deny = ["restart_managed_server"]

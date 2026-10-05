@@ -1,0 +1,112 @@
+{
+  "date": "2026-10-05",
+  "baseCommit": "72a741750a05e0d4f390a2f05f0ae137bd0b0451",
+  "lockfileSha256": "8a5ae4e54db39c38d2cfe78dd1b22d08aabe19cb18edac2af86cc498ddc7f4ed",
+  "upgrades": {
+    "tauri": "2.12.1",
+    "tauriBuild": "2.7.1",
+    "tauriRuntime": "2.12.1",
+    "tauriRuntimeWry": "2.12.1",
+    "wry": "0.57.0",
+    "rustls": "0.23.45",
+    "h2": "0.4.19",
+    "crossbeamEpoch": "0.9.21",
+    "eventListener": "5.4.2"
+  },
+  "separatelyReviewedTauriAdvisories": [
+    "GHSA-7gmj-67g7-phm9",
+    "GHSA-w28w-mhc8-qvjv"
+  ],
+  "scan": {
+    "provider": "https://api.osv.dev/v1/querybatch",
+    "queriedPackageVersions": 762,
+    "findings": [
+      {
+        "package": {
+          "ecosystem": "crates.io",
+          "name": "ansi_term"
+        },
+        "version": "0.12.1",
+        "advisories": [
+          {
+            "id": "RUSTSEC-2021-0139",
+            "modified": "2023-09-06T22:52:31Z"
+          }
+        ]
+      },
+      {
+        "package": {
+          "ecosystem": "crates.io",
+          "name": "atty"
+        },
+        "version": "0.2.14",
+        "advisories": [
+          {
+            "id": "GHSA-g98v-hv3f-hcfr",
+            "modified": "2026-09-10T03:49:53.897184Z"
+          },
+          {
+            "id": "RUSTSEC-2021-0145",
+            "modified": "2023-11-08T04:19:25.814075Z"
+          },
+          {
+            "id": "RUSTSEC-2024-0375",
+            "modified": "2024-09-26T12:26:22Z"
+          }
+        ]
+      },
+      {
+        "package": {
+          "ecosystem": "crates.io",
+          "name": "glib"
+        },
+        "version": "0.18.5",
+        "advisories": [
+          {
+            "id": "GHSA-wrw7-89jp-8q8g",
+            "modified": "2025-10-28T06:29:26.473225Z"
+          },
+          {
+            "id": "RUSTSEC-2024-0429",
+            "modified": "2025-10-28T06:29:26.473225Z"
+          }
+        ]
+      },
+      {
+        "package": {
+          "ecosystem": "crates.io",
+          "name": "proc-macro-error"
+        },
+        "version": "1.0.4",
+        "advisories": [
+          {
+            "id": "RUSTSEC-2024-0370",
+            "modified": "2026-06-07T20:00:03.923932Z"
+          }
+        ]
+      }
+    ]
+  },
+  "validation": {
+    "rustWorkspacePassed": 1851,
+    "rustWorkspaceIgnored": 6,
+    "formatting": "passed",
+    "clippy": "passed with existing warnings",
+    "windowsDesktopBuild": "passed (debug portable, CLI 2.12.1)",
+    "nativeWindowsSmoke": {
+      "appUrl": "http://127.0.0.1:17611",
+      "baseline": 2,
+      "passed": [
+        "desktop commands",
+        "Ctrl+wheel in/out",
+        "Ctrl+plus/minus/reset",
+        "persisted zoom after reload",
+        "ordinary wheel scrolling",
+        "50–200% bounds"
+      ]
+    },
+    "signedInstaller": "not tested",
+    "macOSDesktop": "not tested",
+    "linuxDesktop": "not tested"
+  }
+}

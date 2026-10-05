@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-remote-host-state"
+description = "Enables the get_remote_host_state command without any pre-configured scope."
+commands.allow = ["get_remote_host_state"]
+
+[[permission]]
+identifier = "deny-get-remote-host-state"
+description = "Denies the get_remote_host_state command without any pre-configured scope."
+commands.deny = ["get_remote_host_state"]

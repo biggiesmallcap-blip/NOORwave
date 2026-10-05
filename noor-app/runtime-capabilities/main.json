@@ -1,0 +1,29 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-loopback",
+  "description": "Main window access for NOORwave's configured loopback UI.",
+  "local": false,
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:17600/**"]
+  },
+  "permissions": [
+    "allow-check-for-updates-now",
+    "allow-get-update-state",
+    "allow-install-pending-update",
+    "allow-get-install-mode",
+    "allow-get-minimize-to-tray",
+    "allow-set-minimize-to-tray",
+    "allow-get-remote-host-state",
+    "allow-set-remote-host-mode",
+    "allow-restart-managed-server",
+    "allow-get-startup-state",
+    "allow-set-start-at-login",
+    "core:webview:allow-set-webview-zoom",
+    "core:event:default",
+    "opener:default",
+    "opener:allow-reveal-item-in-dir",
+    "updater:default",
+    "dialog:default"
+  ]
+}

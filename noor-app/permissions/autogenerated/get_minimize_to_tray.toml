@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-minimize-to-tray"
+description = "Enables the get_minimize_to_tray command without any pre-configured scope."
+commands.allow = ["get_minimize_to_tray"]
+
+[[permission]]
+identifier = "deny-get-minimize-to-tray"
+description = "Denies the get_minimize_to_tray command without any pre-configured scope."
+commands.deny = ["get_minimize_to_tray"]
