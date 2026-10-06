@@ -924,6 +924,614 @@ fn test_tidal_track(id: i64, title: &str) -> crate::services::tidal::client::Tid
 }
 
 #[test]
+fn catalogue_replacements_keep_dates_and_resolve_both_ids_after_resync() {
+    for (old_id, new_id, title, isrc, duration) in [
+        (122611523, 556255961, "Smoko", "AUBEC1712176", 180),
+        (42089470, 544138444, "Warrior", "AUUM71402038", 303),
+    ] {
+        let db = fresh_migrated_db();
+        db.with_conn(|conn| {
+            let mut old = test_tidal_track(old_id, title);
+            old.isrc = Some(isrc.into());
+            old.duration = duration;
+            let local =
+                insert_tidal_track(conn, &old, true, true, Some("2020-06-10T07:10:44.221+0000"))?
+                    .unwrap();
+            let mut replacement = old.clone();
+            replacement.id = new_id;
+            for _ in 0..2 {
+                assert_eq!(
+                    insert_tidal_track(
+                        conn,
+                        &replacement,
+                        true,
+                        true,
+                        Some("2026-09-18T07:37:31.000Z")
+                    )?,
+                    Some(local)
+                );
+                apply_tidal_favorite_flags(conn, "tracks", &HashSet::from([new_id]), 1)?;
+            }
+            assert_eq!(crate::db::catalogue::track_id(conn, old_id)?, Some(local));
+            assert_eq!(crate::db::catalogue::track_id(conn, new_id)?, Some(local));
+            let row: (String, i64, i64) = conn.query_row(
+                "SELECT date_added,is_favorite,tidal_id FROM tracks WHERE id=?1",
+                [local],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            assert_eq!(row, ("2020-06-10T07:10:44.221Z".into(), 1, old_id));
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get::<_, i64>(0))?,
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
+}
+
+#[test]
+fn catalogue_intentional_relike_survives_noop_sync_and_older_merge() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn|{
+        use crate::db::catalogue_favorites as intent;
+        let mut track=test_tidal_track(10,"Song");track.isrc=Some("ISRC1".into());
+        let local=insert_tidal_track(conn,&track,true,true,Some("2020-06-10T07:00:00Z"))?.unwrap();
+        intent::request(conn,"track",local,false)?;
+        intent::request(conn,"track",local,true)?;
+        let date:String=conn.query_row("SELECT date_added FROM tracks WHERE id=?1",[local],|r|r.get(0))?;
+        assert!(crate::db::catalogue::timestamp(&date)>crate::db::catalogue::timestamp("2020-06-10T07:00:00Z"));
+        assert!(!intent::request(conn,"track",local,true)?);
+        insert_tidal_track(conn,&track,true,true,Some("2099-01-01T00:00:00Z"))?;
+        conn.execute("INSERT INTO tracks(id,tidal_id,title,artist_id,isrc,duration_ms,is_library,is_favorite,date_added,library_added_at,library_date_source)
+            SELECT 300,20,'Song',artist_id,'ISRC1',180000,1,1,'2010-01-01T00:00:00Z','2010-01-01T00:00:00Z','provider' FROM tracks WHERE id=?1",[local])?;
+        conn.execute("INSERT INTO duplicate_groups(status) VALUES('pending')",[])?;let group=conn.last_insert_rowid();
+        for id in [local,300]{conn.execute("INSERT INTO duplicate_members(group_id,track_id,is_preferred) VALUES(?1,?2,0)",params![group,id])?;}
+        crate::library::duplicates::merge_group(conn,group,local)?;
+        assert_eq!(conn.query_row("SELECT date_added FROM tracks WHERE id=?1",[local],|r|r.get::<_,String>(0))?,date);
+        assert!(conn.query_row("SELECT EXISTS(SELECT 1 FROM catalogue_merge_audit WHERE entity='date_choice' AND snapshot_json LIKE '%2020-06-10%')",[],|r|r.get::<_,bool>(0))?);
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn catalogue_unlike_targets_all_aliases_and_rejects_stale_snapshots() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn| {
+        use crate::db::{catalogue, catalogue_favorites as intent};
+        let mut track = test_tidal_track(10, "Song");
+        track.isrc = Some("ISRC1".into());
+        let local =
+            insert_tidal_track(conn, &track, true, true, Some("2020-01-01T00:00:00Z"))?.unwrap();
+        track.id = 20;
+        insert_tidal_track(conn, &track, true, true, Some("2020-01-01T00:00:00Z"))?;
+        let stale = intent::now();
+        intent::request(conn, "track", local, false)?;
+        let operations = intent::pending(conn)?;
+        assert_eq!(
+            operations.iter().map(|op| op.tidal_id).collect::<Vec<_>>(),
+            vec![10, 20]
+        );
+        catalogue::reconcile_favorites_at(conn, &HashSet::from([10, 20]), false, &stale)?;
+        assert!(
+            !conn.query_row("SELECT is_favorite FROM tracks WHERE id=?1", [local], |r| r
+                .get::<_, bool>(0))?
+        );
+        for op in &operations {
+            intent::finish(conn, op, None)?;
+        }
+        catalogue::reconcile_favorites_at(conn, &HashSet::new(), false, &intent::now())?;
+        catalogue::reconcile_favorites_at(conn, &HashSet::from([10]), false, &stale)?;
+        assert!(
+            !conn.query_row("SELECT is_favorite FROM tracks WHERE id=?1", [local], |r| r
+                .get::<_, bool>(0))?
+        );
+        catalogue::reconcile_favorites_at(conn, &HashSet::from([10]), false, &intent::now())?;
+        assert!(
+            conn.query_row("SELECT is_favorite FROM tracks WHERE id=?1", [local], |r| r
+                .get::<_, bool>(0))?
+        );
+        catalogue::reconcile_favorites_at(conn, &HashSet::new(), false, &stale)?;
+        assert!(
+            conn.query_row("SELECT is_favorite FROM tracks WHERE id=?1", [local], |r| r
+                .get::<_, bool>(0))?
+        );
+        let alias_state: i64 = conn.query_row(
+            "SELECT is_favorite FROM tidal_track_aliases WHERE tidal_id=10",
+            [],
+            |r| r.get(0),
+        )?;
+        crate::db::catalogue::reconcile_favorites_at(
+            conn,
+            &HashSet::new(),
+            false,
+            "1900-01-01T00:00:00Z",
+        )?;
+        assert_eq!(
+            conn.query_row(
+                "SELECT is_favorite FROM tidal_track_aliases WHERE tidal_id=10",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?,
+            alias_state
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn catalogue_reversed_failed_action_keeps_new_revision_and_date() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn| {
+        use crate::db::catalogue_favorites as intent;
+        let mut track = test_tidal_track(10, "Song");
+        track.isrc = Some("ISRC1".into());
+        let id =
+            insert_tidal_track(conn, &track, true, true, Some("2020-01-01T00:00:00Z"))?.unwrap();
+        intent::request(conn, "track", id, false)?;
+        let old = intent::pending(conn)?.remove(0);
+        intent::finish(conn, &old, Some("offline"))?;
+        assert!(intent::pending(conn)?.is_empty());
+        intent::request(conn, "track", id, true)?;
+        let date: String =
+            conn.query_row("SELECT date_added FROM tracks WHERE id=?1", [id], |r| {
+                r.get(0)
+            })?;
+        intent::finish(conn, &old, None)?;
+        let latest = intent::pending(conn)?.remove(0);
+        assert!(latest.favorite && latest.revision > old.revision);
+        intent::finish(conn, &latest, None)?;
+        assert_eq!(
+            conn.query_row("SELECT date_added FROM tracks WHERE id=?1", [id], |r| {
+                r.get::<_, String>(0)
+            })?,
+            date
+        );
+        assert!(
+            conn.query_row("SELECT is_favorite FROM tracks WHERE id=?1", [id], |r| r
+                .get::<_, bool>(
+                0
+            ))?
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn catalogue_shared_recording_identity_examples() {
+    use crate::library::duplicates::{
+        ExistingCandidate, ImportDecision, IncomingTrack, decide_import,
+    };
+    let cases: Value = serde_json::from_str(include_str!(
+        "../../../../scripts/fixtures/tidal-recording-identity.json"
+    ))
+    .unwrap();
+    for case in cases.as_array().unwrap() {
+        let left = &case["before"];
+        let right = &case["after"];
+        let incoming = IncomingTrack {
+            tidal_id: 10,
+            title: left["title"].as_str().unwrap(),
+            artist_name: "Artist",
+            isrc: Some("ISRC1"),
+            duration_ms: 180000,
+            version: left["catalogue_version"].as_str(),
+            explicit: left["catalogue_explicit"].as_bool(),
+        };
+        let candidate = ExistingCandidate {
+            track_id: 1,
+            tidal_id: Some(20),
+            title: right["title"].as_str().unwrap().into(),
+            artist_name: "Artist".into(),
+            isrc: Some("ISRC1".into()),
+            duration_ms: 180000,
+            version: right["catalogue_version"].as_str().map(str::to_owned),
+            explicit: right["catalogue_explicit"].as_bool(),
+        };
+        assert_eq!(
+            matches!(
+                decide_import(&incoming, &[candidate]),
+                ImportDecision::LinkAlias { .. }
+            ),
+            case["equivalent"].as_bool().unwrap()
+        );
+    }
+}
+
+#[test]
+fn catalogue_distinct_descriptors_and_provider_versions_never_auto_merge() {
+    for (left, right, version_left, version_right, explicit_left, explicit_right) in [
+        (
+            "Song (2009 Remaster)",
+            "Song (2024 Remaster)",
+            None,
+            None,
+            None,
+            None,
+        ),
+        (
+            "Song (Live at Wembley)",
+            "Song (Live at Glastonbury)",
+            None,
+            None,
+            None,
+            None,
+        ),
+        ("Song (Explicit)", "Song (Clean)", None, None, None, None),
+        (
+            "Song",
+            "Song",
+            Some("2009 Remaster"),
+            Some("2024 Remaster"),
+            None,
+            None,
+        ),
+        ("Song", "Song", None, None, Some(true), Some(false)),
+        ("Song", "Song", None, None, Some(false), None),
+    ] {
+        let db = fresh_migrated_db();
+        db.with_conn(|conn| {
+            let mut a = test_tidal_track(10, left);
+            a.isrc = Some("ISRC1".into());
+            if let Some(v) = version_left {
+                a.extra.insert("version".into(), json!(v));
+            }
+            if let Some(v) = explicit_left {
+                a.extra.insert("explicit".into(), json!(v));
+            }
+            let mut b = test_tidal_track(20, right);
+            b.isrc = Some("ISRC1".into());
+            if let Some(v) = version_right {
+                b.extra.insert("version".into(), json!(v));
+            }
+            if let Some(v) = explicit_right {
+                b.extra.insert("explicit".into(), json!(v));
+            }
+            let x =
+                insert_tidal_track(conn, &a, true, true, Some("2020-01-01T00:00:00Z"))?.unwrap();
+            let y =
+                insert_tidal_track(conn, &b, true, true, Some("2020-01-01T00:00:00Z"))?.unwrap();
+            assert_ne!(x, y);
+            crate::library::duplicates::scan(conn)?;
+            assert_eq!(
+                crate::library::duplicates::auto_merge_pending(conn)?.removed_tracks,
+                0
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get::<_, i64>(0))?,
+                2
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
+}
+
+#[test]
+fn catalogue_availability_batches_pair_releases_and_make_fair_progress() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn|{
+        conn.execute("INSERT INTO artists(id,name,tidal_id) VALUES(1,'Artist',10)",[])?;
+        for id in 1..=24 {
+            conn.execute("INSERT INTO tracks(id,tidal_id,title,artist_id,is_library) VALUES(?1,?1,'Song',1,1)",[id])?;
+            conn.execute("INSERT INTO tidal_track_aliases(tidal_id,track_id) VALUES(?1,?2)",params![id+100,id])?;
+        }
+        let first=crate::services::tidal::catalogue::candidate_ids(conn,24)?;
+        assert_eq!(first.len(),24);
+        for pair in first.chunks_exact(2){assert_eq!(pair[1],pair[0]+100);}
+        for id in first {conn.execute("UPDATE tidal_track_aliases SET checked_at=datetime('now') WHERE tidal_id=?1",[id])?;}
+        let second=crate::services::tidal::catalogue::candidate_ids(conn,24)?;
+        assert_eq!(second.len(),24);
+        assert!(second.iter().all(|id|*id>12));
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn catalogue_switch_requires_unavailable_current_and_preserves_queue_and_dates() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn| {
+        let mut old = test_tidal_track(122611523, "Smoko");
+        old.isrc = Some("AUBEC1712176".into());
+        let local =
+            insert_tidal_track(conn, &old, true, true, Some("2020-06-10T07:10:44.221+0000"))?
+                .unwrap();
+        conn.execute(
+            "INSERT INTO queue(track_id,position,source,tidal_id_hint) VALUES(?1,0,'user',?2)",
+            params![local, old.id],
+        )?;
+        let mut new = old.clone();
+        new.id = 556255961;
+        insert_tidal_track(conn, &new, true, true, Some("2026-09-18T07:37:31.000Z"))?;
+        assert!(!crate::db::catalogue::observe(
+            conn, old.id, "error", "timeout"
+        )?);
+        assert!(!crate::db::catalogue::observe(
+            conn, old.id, "unknown", "legacy"
+        )?);
+        assert!(crate::db::catalogue::observe(
+            conn,
+            old.id,
+            "unavailable",
+            "metadata_404"
+        )?);
+        assert_eq!(
+            conn.query_row("SELECT tidal_id FROM tracks WHERE id=?1", [local], |r| r
+                .get::<_, i64>(0))?,
+            new.id
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT tidal_id_hint FROM queue WHERE track_id=?1",
+                [local],
+                |r| r.get::<_, i64>(0)
+            )?,
+            new.id
+        );
+        insert_tidal_track(conn, &old, false, false, None)?;
+        let external = queue::ExternalTrackInsert {
+            artist: "Artist",
+            title: "Smoko",
+            source: "user",
+            tidal_id_hint: Some(old.id),
+            ..Default::default()
+        };
+        conn.execute("INSERT INTO queue(position,source,pending_artist,pending_title,pending_at,tidal_id_hint)
+            VALUES(1,'user','Artist','Smoko',datetime('now'),?1)",[old.id])?;
+        let restored_queue=queue::load_queue(conn)?;
+        assert!(restored_queue[1].is_pending);
+        assert_eq!(restored_queue[1].track.id,local);
+        let queued = queue::append_external_tracks(conn, &[external])?;
+        assert!(matches!(queued[0],queue::InsertResult::Library{track_id,..} if track_id==local));
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get::<_, i64>(0))?,
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT date_added FROM tracks WHERE id=?1", [local], |r| {
+                r.get::<_, String>(0)
+            })?,
+            "2020-06-10T07:10:44.221Z"
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn catalogue_title_only_and_shared_isrc_versions_remain_separate() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn| {
+        let mut base = test_tidal_track(10, "Song");
+        base.isrc = Some("ISRC1".into());
+        insert_tidal_track(conn, &base, true, true, None)?;
+        let mut live = base.clone();
+        live.id = 11;
+        live.title = "Song (Live)".into();
+        insert_tidal_track(conn, &live, true, true, None)?;
+        let mut other = base.clone();
+        other.id = 12;
+        other.isrc = None;
+        insert_tidal_track(conn, &other, true, true, None)?;
+        let mut remaster = base.clone();
+        remaster.id = 13;
+        remaster.title = "Song (2024 Remaster)".into();
+        insert_tidal_track(conn, &remaster, true, true, None)?;
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get::<_, i64>(0))?,
+            4
+        );
+        let stats = crate::library::duplicates::scan(conn)?;
+        let merged = crate::library::duplicates::auto_merge_pending(conn)?;
+        assert!(stats.groups_found > 0);
+        assert_eq!(merged.removed_tracks, 0);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn catalogue_discovery_does_not_set_saved_date_and_recovered_date_is_protected() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn| {
+        let track = test_tidal_track(10, "Song");
+        let local = insert_tidal_track(conn, &track, false, false, None)?.unwrap();
+        conn.execute(
+            "UPDATE tracks SET date_added='2010-01-01 00:00:00' WHERE id=?1",
+            [local],
+        )?;
+        insert_tidal_track(
+            conn,
+            &track,
+            true,
+            true,
+            Some("2020-06-10T07:10:44.221+0000"),
+        )?;
+        assert_eq!(
+            conn.query_row("SELECT date_added FROM tracks WHERE id=?1", [local], |r| {
+                r.get::<_, String>(0)
+            })?,
+            "2020-06-10T07:10:44.221Z"
+        );
+        conn.execute(
+            "UPDATE tracks SET library_date_source='recovered' WHERE id=?1",
+            [local],
+        )?;
+        insert_tidal_track(conn, &track, true, true, Some("2015-01-01T00:00:00Z"))?;
+        assert_eq!(
+            conn.query_row("SELECT date_added FROM tracks WHERE id=?1", [local], |r| {
+                r.get::<_, String>(0)
+            })?,
+            "2020-06-10T07:10:44.221Z"
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn catalogue_missing_unavailable_favorite_is_unresolved_but_verified_unlike_clears() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn| {
+        let a = test_tidal_track(10, "Song A");
+        let b = test_tidal_track(11, "Song B");
+        let local = insert_tidal_track(conn, &a, true, true, None)?.unwrap();
+        insert_tidal_track(conn, &b, true, true, None)?;
+        crate::db::catalogue::observe(conn, a.id, "unavailable", "metadata_404")?;
+        apply_tidal_favorite_flags(conn, "tracks", &HashSet::from([b.id]), 2)?;
+        let state: (i64, String) = conn.query_row(
+            "SELECT is_favorite,remote_favorite_state FROM tracks WHERE id=?1",
+            [local],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        assert_eq!(state, (1, "unresolved".into()));
+        crate::db::catalogue::observe(conn, a.id, "available", "metadata")?;
+        apply_tidal_favorite_flags(conn, "tracks", &HashSet::from([b.id]), 2)?;
+        assert_eq!(
+            conn.query_row("SELECT is_favorite FROM tracks WHERE id=?1", [local], |r| r
+                .get::<_, i64>(0))?,
+            0
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn catalogue_alias_identity_refresh_and_owner_guards_prevent_wrong_recording() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn| {
+        let mut old = test_tidal_track(10, "Song");
+        old.isrc = Some("ISRC1".into());
+        let local = insert_tidal_track(conn, &old, true, true, None)?.unwrap();
+        let mut changed_selected = old.clone();
+        changed_selected.title = "Song (Live in Sydney)".into();
+        insert_tidal_track(conn, &changed_selected, true, true, None)?;
+        assert_eq!(
+            conn.query_row("SELECT title FROM tracks WHERE id=?1", [local], |r| r
+                .get::<_, String>(0))?,
+            "Song"
+        );
+        // Fresh correct metadata can clear the conflict; wrong metadata cannot redefine identity.
+        crate::db::catalogue::record_track(conn, local, &old, true, None)?;
+        let mut alias = old.clone();
+        alias.id = 11;
+        insert_tidal_track(conn, &alias, false, false, None)?;
+        alias.title = "Song (Live)".into();
+        crate::db::catalogue::record_track(conn, local, &alias, false, None)?;
+        crate::db::catalogue::observe(conn, alias.id, "available", "stream_check")?;
+        assert!(!crate::db::catalogue::observe(
+            conn,
+            old.id,
+            "unavailable",
+            "metadata_404"
+        )?);
+        assert_eq!(
+            conn.query_row(
+                "SELECT evidence FROM tidal_track_aliases WHERE tidal_id=11",
+                [],
+                |r| r.get::<_, String>(0)
+            )?,
+            "identity_conflict"
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO tracks(tidal_id,title,artist_id) VALUES(11,'Other',1)",
+                []
+            )
+            .is_err()
+        );
+        assert_eq!(crate::db::catalogue::track_id(conn, 11)?, Some(local));
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn catalogue_merge_preserves_alias_dates_references_and_rolls_back_audit_on_failure() {
+    for fail in [false, true] {
+        let db = fresh_migrated_db();
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO artists(id,name,tidal_id) VALUES(1,'Artist',10)",[])?;
+            conn.execute("INSERT INTO tracks(id,tidal_id,title,artist_id,isrc,duration_ms,is_library,is_favorite,date_added,library_added_at,library_date_source)
+                VALUES(1,10,'Song',1,'ISRC1',180000,1,0,'2026-01-01 00:00:00','2026-01-01 00:00:00','provider'),
+                      (2,11,'Song',1,'ISRC1',180000,1,1,'2020-06-10T07:10:44.221+0000','2020-06-10T07:10:44.221+0000','recovered')",[])?;
+            conn.execute("INSERT INTO queue(track_id,position,source,tidal_id_hint) VALUES(2,0,'user',11)",[])?;
+            conn.execute("INSERT INTO listen_history(track_id,started_at) VALUES(2,'2026-01-01')",[])?;
+            conn.execute("INSERT INTO duplicate_groups(status) VALUES('pending')",[])?;
+            let group=conn.last_insert_rowid();
+            for track in [1,2] {conn.execute("INSERT INTO duplicate_members(group_id,track_id,is_preferred) VALUES(?1,?2,0)",params![group,track])?;}
+            if fail {conn.execute_batch("CREATE TRIGGER forced_catalogue_failure BEFORE DELETE ON tracks WHEN OLD.id=2 BEGIN SELECT RAISE(ABORT,'forced failure'); END;")?;}
+            let result=crate::library::duplicates::merge_group(conn,group,1);
+            if fail {
+                assert!(result.is_err());
+                assert_eq!(crate::db::catalogue::track_id(conn,11)?,Some(2));
+                assert_eq!(conn.query_row("SELECT COUNT(*) FROM catalogue_merge_audit",[],|r|r.get::<_,i64>(0))?,0);
+                assert_eq!(conn.query_row("SELECT date_added FROM tracks WHERE id=1",[],|r|r.get::<_,String>(0))?,"2026-01-01 00:00:00");
+            } else {
+                result?;
+                assert_eq!(crate::db::catalogue::track_id(conn,11)?,Some(1));
+                assert_eq!(conn.query_row("SELECT date_added FROM tracks WHERE id=1",[],|r|r.get::<_,String>(0))?,"2020-06-10T07:10:44.221Z");
+                assert_eq!(conn.query_row("SELECT library_date_source FROM tracks WHERE id=1",[],|r|r.get::<_,String>(0))?,"recovered");
+                assert_eq!(conn.query_row("SELECT track_id FROM queue",[],|r|r.get::<_,i64>(0))?,1);
+                assert_eq!(conn.query_row("SELECT track_id FROM listen_history",[],|r|r.get::<_,i64>(0))?,1);
+                assert_eq!(conn.query_row("SELECT COUNT(*) FROM catalogue_merge_audit WHERE entity='track'",[],|r|r.get::<_,i64>(0))?,1);
+            }
+            Ok(())
+        }).unwrap();
+    }
+}
+
+#[test]
+fn catalogue_album_version_conflicts_stay_separate_and_merge_keeps_unlike_intent() {
+    for conflict in [false, true] {
+        let db = fresh_migrated_db();
+        db.with_conn(|c| {
+            c.execute_batch("INSERT INTO artists(id,name,tidal_id) VALUES(1,'Artist',10); INSERT INTO albums(id,tidal_id,title,artist_id,track_count,is_favorite) VALUES(1,100,'Album',1,1,1),(2,200,'Album',1,1,1);
+                INSERT INTO tracks(id,tidal_id,title,artist_id,album_id,isrc,duration_ms,disc_number,track_number) VALUES(1,10,'One',1,1,'ISRC1',180000,1,1);")?;
+            crate::db::catalogue_favorites::request(c,"album",2,false)?;
+            let mut track=test_tidal_track(20,"One");track.isrc=Some("ISRC1".into());
+            if conflict {track.extra.insert("version".into(),json!("2024 Remaster"));}
+            crate::db::catalogue::reconcile_album(c,200,&[track])?;
+            assert_eq!(c.query_row("SELECT COUNT(*) FROM albums",[],|r|r.get::<_,i64>(0))?,if conflict {2}else{1});
+            assert_eq!(c.query_row("SELECT is_favorite FROM albums WHERE id=?1",[if conflict{2}else{1}],|r|r.get::<_,i64>(0))?,0);
+            Ok(())
+        }).unwrap();
+    }
+}
+
+#[test]
+fn catalogue_album_replacements_need_complete_matching_recording_sets() {
+    for changed in [false, true] {
+        let db = fresh_migrated_db();
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO artists(id,name,tidal_id) VALUES(1,'Artist',10)",[])?;
+            conn.execute("INSERT INTO albums(id,tidal_id,title,artist_id,track_count,is_favorite,enrich_completed_at) VALUES
+                (1,100,'Album',1,2,1,'2020-01-01'),(2,200,'Album',1,2,0,NULL)",[])?;
+            conn.execute("INSERT INTO tracks(id,tidal_id,title,artist_id,album_id,isrc,duration_ms,disc_number,track_number) VALUES
+                (1,10,'One',1,1,'ISRC1',180000,1,1),(2,11,'Two',1,1,'ISRC2',180000,1,2)",[])?;
+            let mut one=test_tidal_track(20,"One");one.isrc=Some("ISRC1".into());
+            let mut two=test_tidal_track(21,"Two");two.isrc=Some(if changed {"OTHER"} else {"ISRC2"}.into());two.track_number=Some(2);
+            // A partial result cannot establish album equivalence.
+            crate::db::catalogue::reconcile_album(conn,200,&[one.clone()])?;
+            assert_eq!(crate::db::catalogue::album_id(conn,200)?,Some(2));
+            crate::db::catalogue::reconcile_album(conn,200,&[one.clone(),two.clone()])?;
+            crate::db::catalogue::reconcile_album(conn,200,&[one,two])?;
+            assert_eq!(crate::db::catalogue::album_id(conn,200)?,Some(if changed {2} else {1}));
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM albums",[],|r|r.get::<_,i64>(0))?,if changed {2} else {1});
+            if !changed {
+                assert_eq!(conn.query_row("SELECT tidal_id FROM albums WHERE id=1",[],|r|r.get::<_,i64>(0))?,200);
+                assert!(conn.execute("INSERT INTO albums(tidal_id,title,artist_id) VALUES(200,'Other',1)",[]).is_err());
+                assert_eq!(conn.query_row("SELECT enrich_completed_at FROM albums WHERE id=1",[],|r|r.get::<_,String>(0))?,"2020-01-01");
+            }
+            Ok(())
+        }).unwrap();
+    }
+}
+
+#[test]
 fn insert_tidal_track_uses_favorite_created_as_date_added() {
     let db = fresh_migrated_db();
     db.with_conn(|conn| {
@@ -936,7 +1544,7 @@ fn insert_tidal_track_uses_favorite_created_as_date_added() {
             [],
             |row| row.get(0),
         )?;
-        assert_eq!(date_added, "2026-05-01T12:34:56.000Z");
+        assert_eq!(date_added, "2026-05-01T12:34:56Z");
         Ok(())
     })
     .expect("inserted favorite track");
@@ -969,7 +1577,7 @@ fn transferred_favorite_uses_tidal_created_date_and_keeps_earliest() {
             [track_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
-        assert_eq!(state, (1, 1, "2024-07-22T03:55:51.120+0000".to_string()));
+        assert_eq!(state, (1, 1, "2024-07-22T03:55:51.120Z".to_string()));
         Ok(())
     })
     .expect("favorite transfer preserves provider date");
@@ -1010,7 +1618,7 @@ fn playlist_import_reuses_same_recording_instead_of_creating_today_duplicate() {
         )?;
         assert_eq!(
             playlist_track,
-            (2201, "2024-07-22T03:55:51.120+0000".to_string())
+            (2201, "2024-07-22T03:55:51.120Z".to_string())
         );
         Ok(())
     })

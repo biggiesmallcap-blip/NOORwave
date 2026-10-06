@@ -70,7 +70,111 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_066,
     MIGRATION_067,
     MIGRATION_068,
+    MIGRATION_069,
+    MIGRATION_070,
 ];
+
+pub(crate) const MIGRATION_070: &str = r#"
+ALTER TABLE tracks ADD COLUMN date_choice_at TEXT;
+ALTER TABLE tracks ADD COLUMN catalogue_version TEXT;
+ALTER TABLE tracks ADD COLUMN catalogue_explicit INTEGER;
+UPDATE tracks SET catalogue_version=(SELECT json_extract(metadata_json,'$.version') FROM tidal_track_aliases WHERE tidal_id=tracks.tidal_id AND json_valid(metadata_json)),
+    catalogue_explicit=(SELECT CASE WHEN json_type(metadata_json,'$.explicit') IN ('true','false') THEN json_extract(metadata_json,'$.explicit') END FROM tidal_track_aliases WHERE tidal_id=tracks.tidal_id AND json_valid(metadata_json));
+
+CREATE TABLE tidal_favorite_snapshots (entity TEXT PRIMARY KEY CHECK(entity IN ('track','album')),started_at TEXT NOT NULL);
+CREATE TABLE tidal_favorite_intents (
+    entity TEXT NOT NULL CHECK(entity IN ('track','album')),
+    local_id INTEGER NOT NULL,
+    favorite INTEGER NOT NULL CHECK(favorite IN (0,1)),
+    revision INTEGER NOT NULL DEFAULT 1,
+    requested_at TEXT NOT NULL,
+    completed_at TEXT,
+    confirmed_at TEXT,
+    PRIMARY KEY(entity,local_id)
+);
+CREATE TABLE tidal_favorite_operations (
+    entity TEXT NOT NULL,
+    local_id INTEGER NOT NULL,
+    tidal_id INTEGER NOT NULL,
+    revision INTEGER NOT NULL,
+    favorite INTEGER NOT NULL CHECK(favorite IN (0,1)),
+    done INTEGER NOT NULL DEFAULT 0,
+    attempted_at TEXT,
+    last_error TEXT,
+    PRIMARY KEY(entity,local_id,tidal_id),
+    FOREIGN KEY(entity,local_id) REFERENCES tidal_favorite_intents(entity,local_id) ON DELETE CASCADE
+);
+CREATE INDEX idx_tidal_favorite_pending ON tidal_favorite_operations(done,attempted_at);
+CREATE TRIGGER tracks_favorite_intent_delete AFTER DELETE ON tracks BEGIN
+    DELETE FROM tidal_favorite_intents WHERE entity='track' AND local_id=OLD.id;
+END;
+CREATE TRIGGER albums_favorite_intent_delete AFTER DELETE ON albums BEGIN
+    DELETE FROM tidal_favorite_intents WHERE entity='album' AND local_id=OLD.id;
+END;
+"#;
+
+pub(crate) const MIGRATION_069: &str = r#"
+ALTER TABLE tracks ADD COLUMN library_added_at TEXT;
+ALTER TABLE tracks ADD COLUMN library_date_source TEXT;
+ALTER TABLE tracks ADD COLUMN remote_favorite_state TEXT NOT NULL DEFAULT 'unknown';
+UPDATE tracks SET library_added_at=date_added, library_date_source='legacy'
+WHERE is_favorite=1 OR is_library=1;
+CREATE TABLE tidal_track_aliases (
+    tidal_id INTEGER PRIMARY KEY,
+    track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    metadata_json TEXT,
+    availability TEXT NOT NULL DEFAULT 'unknown'
+        CHECK(availability IN ('unknown','available','unavailable','error')),
+    checked_at TEXT,
+    evidence TEXT NOT NULL DEFAULT 'legacy',
+    favorite_created TEXT,
+    is_favorite INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_tidal_alias_track ON tidal_track_aliases(track_id);
+INSERT INTO tidal_track_aliases(tidal_id,track_id,is_favorite,favorite_created)
+SELECT tidal_id,id,is_favorite,CASE WHEN is_favorite=1 THEN date_added END FROM tracks WHERE tidal_id>0;
+CREATE TRIGGER tracks_catalogue_insert AFTER INSERT ON tracks WHEN NEW.tidal_id>0 BEGIN
+    SELECT CASE WHEN EXISTS(SELECT 1 FROM tidal_track_aliases WHERE tidal_id=NEW.tidal_id AND track_id!=NEW.id)
+        THEN RAISE(ABORT,'TIDAL ID already belongs to another recording') END;
+    INSERT OR IGNORE INTO tidal_track_aliases(tidal_id,track_id,is_favorite)
+    VALUES(NEW.tidal_id,NEW.id,NEW.is_favorite);
+END;
+CREATE TRIGGER tracks_catalogue_update AFTER UPDATE OF tidal_id ON tracks WHEN NEW.tidal_id>0 BEGIN
+    SELECT CASE WHEN EXISTS(SELECT 1 FROM tidal_track_aliases WHERE tidal_id=NEW.tidal_id AND track_id!=NEW.id)
+        THEN RAISE(ABORT,'TIDAL ID already belongs to another recording') END;
+    INSERT OR IGNORE INTO tidal_track_aliases(tidal_id,track_id,is_favorite)
+    VALUES(NEW.tidal_id,NEW.id,NEW.is_favorite);
+END;
+CREATE TABLE tidal_album_aliases (
+    tidal_id INTEGER PRIMARY KEY,
+    album_id INTEGER NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+    fingerprint TEXT,
+    is_favorite INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_tidal_album_alias_album ON tidal_album_aliases(album_id);
+INSERT INTO tidal_album_aliases(tidal_id,album_id,is_favorite)
+SELECT tidal_id,id,is_favorite FROM albums WHERE tidal_id>0;
+CREATE TRIGGER albums_catalogue_insert AFTER INSERT ON albums WHEN NEW.tidal_id>0 BEGIN
+    SELECT CASE WHEN EXISTS(SELECT 1 FROM tidal_album_aliases WHERE tidal_id=NEW.tidal_id AND album_id!=NEW.id)
+        THEN RAISE(ABORT,'TIDAL ID already belongs to another album') END;
+    INSERT OR IGNORE INTO tidal_album_aliases(tidal_id,album_id,is_favorite)
+    VALUES(NEW.tidal_id,NEW.id,NEW.is_favorite);
+END;
+CREATE TRIGGER albums_catalogue_update AFTER UPDATE OF tidal_id ON albums WHEN NEW.tidal_id>0 BEGIN
+    SELECT CASE WHEN EXISTS(SELECT 1 FROM tidal_album_aliases WHERE tidal_id=NEW.tidal_id AND album_id!=NEW.id)
+        THEN RAISE(ABORT,'TIDAL ID already belongs to another album') END;
+    INSERT OR IGNORE INTO tidal_album_aliases(tidal_id,album_id,is_favorite)
+    VALUES(NEW.tidal_id,NEW.id,NEW.is_favorite);
+END;
+CREATE TABLE catalogue_merge_audit (
+    id INTEGER PRIMARY KEY,
+    entity TEXT NOT NULL,
+    kept_id INTEGER NOT NULL,
+    removed_id INTEGER NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"#;
 
 const MIGRATION_068: &str = r#"
 CREATE TABLE IF NOT EXISTS tidal_track_labels (
@@ -1821,11 +1925,26 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     for (i, migration) in MIGRATIONS.iter().enumerate() {
         let migration_id = (i + 1) as i64;
         if migration_id > applied {
-            conn.execute_batch(migration)?;
-            conn.execute(
-                "INSERT OR IGNORE INTO _migrations (id) VALUES (?1)",
-                [migration_id],
-            )?;
+            if migration_id >= 69 {
+                // Alias backfill and the completion marker must commit together.
+                // A crash or failed constraint rolls back the entire migration.
+                let tx = conn.unchecked_transaction()?;
+                tx.execute_batch(migration)?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO _migrations(id) VALUES(?1)",
+                    [migration_id],
+                )?;
+                if migration_id == 70 {
+                    crate::db::catalogue::normalize_saved_dates(&tx)?;
+                }
+                tx.commit()?;
+            } else {
+                conn.execute_batch(migration)?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO _migrations(id) VALUES(?1)",
+                    [migration_id],
+                )?;
+            }
             tracing::info!("Applied migration {}", migration_id);
         }
     }
@@ -1850,11 +1969,26 @@ pub(super) fn apply_migrations_up_to(conn: &Connection, n: usize) -> Result<()> 
     for (i, migration) in MIGRATIONS[..limit].iter().enumerate() {
         let migration_id = (i + 1) as i64;
         if migration_id > applied {
-            conn.execute_batch(migration)?;
-            conn.execute(
-                "INSERT OR IGNORE INTO _migrations (id) VALUES (?1)",
-                [migration_id],
-            )?;
+            if migration_id >= 69 {
+                // Alias backfill and the completion marker must commit together.
+                // A crash or failed constraint rolls back the entire migration.
+                let tx = conn.unchecked_transaction()?;
+                tx.execute_batch(migration)?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO _migrations(id) VALUES(?1)",
+                    [migration_id],
+                )?;
+                if migration_id == 70 {
+                    crate::db::catalogue::normalize_saved_dates(&tx)?;
+                }
+                tx.commit()?;
+            } else {
+                conn.execute_batch(migration)?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO _migrations(id) VALUES(?1)",
+                    [migration_id],
+                )?;
+            }
         }
     }
 
@@ -2251,6 +2385,89 @@ mod tests {
         assert_eq!(token, "123456");
         assert_eq!(user_id, "existing-user");
         assert_eq!(hash_is_unique, 1);
+    }
+
+    #[test]
+    fn migration_070_date_normalization_is_atomic_and_restart_safe() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migrations_up_to(&conn, 69).unwrap();
+        conn.execute_batch("INSERT INTO artists(id,name) VALUES(1,'Artist');
+            INSERT INTO tracks(id,tidal_id,title,artist_id,is_library,date_added,library_added_at) VALUES(1,10,'Saved',1,1,'2020-06-10 07:10:44','2020-06-10 07:10:44');
+            CREATE TRIGGER force_format_failure BEFORE UPDATE OF date_added ON tracks BEGIN SELECT RAISE(ABORT,'forced'); END;").unwrap();
+        assert!(run_migrations(&conn).is_err());
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name='date_choice_at'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM _migrations WHERE id=70", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        conn.execute_batch("DROP TRIGGER force_format_failure;")
+            .unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT date_added FROM tracks", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "2020-06-10T07:10:44Z"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM catalogue_merge_audit WHERE entity='date_format'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn migration_069_rolls_back_failed_backfill_and_can_restart() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migrations_up_to(&conn, 68).unwrap();
+        conn.execute_batch("INSERT INTO artists(id,name) VALUES(1,'Artist');
+            INSERT INTO tracks(id,tidal_id,title,artist_id,is_library,date_added) VALUES(1,10,'Saved',1,1,'2020-01-01');
+            CREATE TABLE tidal_track_aliases(conflicting_column INTEGER);").unwrap();
+        assert!(run_migrations(&conn).is_err());
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name='library_added_at'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        conn.execute_batch("DROP TABLE tidal_track_aliases;")
+            .unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT library_added_at FROM tracks WHERE id=1", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            "2020-01-01"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT track_id FROM tidal_track_aliases WHERE tidal_id=10",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
     }
 
     #[test]

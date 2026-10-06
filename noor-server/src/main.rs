@@ -710,6 +710,9 @@ async fn main() -> Result<()> {
     // Initialize database
     let db = db::Database::open(&db_path)?;
     db.run_migrations()?;
+    if let Err(error) = db::catalogue_recovery::consume_pending(&db) {
+        tracing::warn!(%error,"Reviewed catalogue recovery left pending; ordinary startup continues");
+    }
     // Desktop-managed launches make the JSON preference authoritative. Mirror
     // it before readiness so the HTTP status and future standalone launches
     // agree; persistence failure aborts startup instead of reporting success.
@@ -1093,6 +1096,8 @@ async fn main() -> Result<()> {
                     Ok(AppEvent::LibrarySynced) => {
                         services::auto_enrich::run_if_idle(listener_state.clone()).await;
                         services::tidal::repair::run_if_idle(listener_state.clone()).await;
+                        services::tidal::catalogue::run_if_idle(listener_state.clone()).await;
+                        services::tidal::favorites::run_if_idle(listener_state.clone()).await;
                         // Auto-dedupe: merges same-recording duplicates after
                         // every sync/import. Emits LibrarySynced only when it
                         // changed rows, so the retrigger converges.
@@ -1121,6 +1126,7 @@ async fn main() -> Result<()> {
             tokio::time::sleep(std::time::Duration::from_secs(90)).await;
             services::auto_enrich::run_if_idle(loop_state.clone()).await;
             services::tidal::repair::run_if_idle(loop_state.clone()).await;
+            services::tidal::catalogue::run_if_idle(loop_state.clone()).await;
             services::library_dedupe::run_if_idle(loop_state.clone()).await;
             services::library_videos::run_if_idle(loop_state.clone()).await;
             // First fold after an upgrade: migration 060 adds the columns
@@ -1133,9 +1139,22 @@ async fn main() -> Result<()> {
                 ticker.tick().await;
                 services::auto_enrich::run_if_idle(loop_state.clone()).await;
                 services::tidal::repair::run_if_idle(loop_state.clone()).await;
+                services::tidal::catalogue::run_if_idle(loop_state.clone()).await;
                 services::library_dedupe::run_if_idle(loop_state.clone()).await;
                 services::library_videos::run_if_idle(loop_state.clone()).await;
                 services::catalog_name_backfill::run_if_idle(loop_state.clone()).await;
+            }
+        });
+    }
+
+    {
+        let favorite_state = state.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                ticker.tick().await;
+                services::tidal::favorites::run_if_idle(favorite_state.clone()).await;
+                services::tidal::catalogue::run_if_idle(favorite_state.clone()).await;
             }
         });
     }

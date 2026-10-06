@@ -2,6 +2,43 @@ use anyhow::Result;
 
 const TIDAL_API_URL: &str = "https://api.tidal.com/v1";
 
+fn writes_allowed(policy: Option<&str>, development: bool) -> bool {
+    match policy {
+        Some("allow") => true,
+        Some("deny") => false,
+        Some(_) => false,
+        None => !development,
+    }
+}
+
+pub(crate) fn check_library_writes() -> Result<()> {
+    let development = cfg!(debug_assertions)
+        || std::env::var_os("NOOR_DEV_PORT").is_some()
+        || std::env::current_exe()
+            .ok()
+            .is_some_and(|p| p.components().any(|v| v.as_os_str() == "target"));
+    anyhow::ensure!(
+        writes_allowed(
+            std::env::var("NOOR_TIDAL_LIBRARY_WRITES").ok().as_deref(),
+            development
+        ),
+        "TIDAL library writes are disabled for this development instance"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod write_policy_tests {
+    #[test]
+    fn development_denies_writes_and_installed_explicit_actions_remain_enabled() {
+        assert!(!super::writes_allowed(None, true));
+        assert!(super::writes_allowed(None, false));
+        assert!(super::writes_allowed(Some("allow"), true));
+        assert!(!super::writes_allowed(Some("deny"), false));
+        assert!(!super::writes_allowed(Some("unknown"), false));
+    }
+}
+
 /// Add a track to TIDAL favorites.
 pub async fn add_favorite_track(
     http: &reqwest::Client,
@@ -10,6 +47,7 @@ pub async fn add_favorite_track(
     track_id: i64,
     country_code: &str,
 ) -> Result<()> {
+    check_library_writes()?;
     crate::services::tidal::backoff::global().check()?;
     let resp = http
         .post(format!(
@@ -39,6 +77,7 @@ pub async fn remove_favorite_track(
     track_id: i64,
     country_code: &str,
 ) -> Result<()> {
+    check_library_writes()?;
     crate::services::tidal::backoff::global().check()?;
     let resp = http
         .delete(format!(
@@ -67,6 +106,7 @@ pub async fn add_favorite_album(
     album_id: i64,
     country_code: &str,
 ) -> Result<()> {
+    check_library_writes()?;
     crate::services::tidal::backoff::global().check()?;
     let resp = http
         .post(format!(
@@ -96,6 +136,7 @@ pub async fn remove_favorite_album(
     album_id: i64,
     country_code: &str,
 ) -> Result<()> {
+    check_library_writes()?;
     crate::services::tidal::backoff::global().check()?;
     let resp = http
         .delete(format!(

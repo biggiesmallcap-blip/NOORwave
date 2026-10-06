@@ -193,13 +193,7 @@ fn upsert_album_tx(
     artwork_url: Option<&str>,
     track_count: i32,
 ) -> Result<i64> {
-    let existing: Option<i64> = tx
-        .query_row(
-            "SELECT id FROM albums WHERE tidal_id = ?1",
-            params![tidal_id],
-            |row| row.get(0),
-        )
-        .optional()?;
+    let existing = crate::db::catalogue::album_id(tx, tidal_id)?;
     if let Some(id) = existing {
         return Ok(id);
     }
@@ -235,13 +229,22 @@ pub async fn import_track_from_metadata(
     conn_pool.with_conn(move |conn| {
         let tx = conn.unchecked_transaction()?;
 
-        let existing: Option<(i64, i64, Option<i64>)> = tx
-            .query_row(
-                "SELECT id, artist_id, album_id FROM tracks WHERE tidal_id = ?1",
-                params![meta.tidal_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?;
+        let known = crate::db::catalogue::track_id(&tx, meta.tidal_id)?;
+        let existing = known
+            .map(|id| {
+                tx.query_row(
+                    "SELECT id,artist_id,album_id FROM tracks WHERE id=?1",
+                    [id],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                        ))
+                    },
+                )
+            })
+            .transpose()?;
 
         if let Some((local_id, artist_id, album_id)) = existing {
             tx.commit()?;
@@ -311,13 +314,7 @@ fn upsert_album_from_metadata_tx(
     artwork_url: Option<&str>,
 ) -> Result<i64> {
     if let Some(tid) = album_tidal_id.filter(|t| *t > 0) {
-        let existing: Option<i64> = tx
-            .query_row(
-                "SELECT id FROM albums WHERE tidal_id = ?1",
-                params![tid],
-                |row| row.get(0),
-            )
-            .optional()?;
+        let existing = crate::db::catalogue::album_id(tx, tid)?;
         if let Some(id) = existing {
             backfill_album_artwork(tx, id, artwork_url)?;
             return Ok(id);
@@ -327,8 +324,8 @@ fn upsert_album_from_metadata_tx(
     if let Some(title) = album_title {
         let existing: Option<i64> = tx
             .query_row(
-                "SELECT id FROM albums WHERE artist_id = ?1 AND title = ?2 LIMIT 1",
-                params![artist_id, title],
+                "SELECT id FROM albums WHERE artist_id = ?1 AND title = ?2 AND (tidal_id IS NULL OR ?3 IS NULL) LIMIT 1",
+                params![artist_id, title, album_tidal_id],
                 |row| row.get(0),
             )
             .optional()?;
@@ -862,14 +859,11 @@ fn upsert_track_tx(
     artist_id: i64,
     album_id: i64,
 ) -> Result<i64> {
-    let existing: Option<i64> = tx
-        .query_row(
-            "SELECT id FROM tracks WHERE tidal_id = ?1",
-            params![t.id],
-            |row| row.get(0),
-        )
-        .optional()?;
+    let existing = crate::db::catalogue::track_id(tx, t.id)?;
     if let Some(id) = existing {
+        if crate::db::catalogue::enabled(tx)? {
+            crate::db::catalogue::record_track(tx, id, t, false, None)?;
+        }
         return Ok(id);
     }
 
@@ -904,5 +898,9 @@ fn upsert_track_tx(
             TIDAL_STREAM_SOURCE,
         ],
     )?;
-    Ok(tx.last_insert_rowid())
+    let id = tx.last_insert_rowid();
+    if crate::db::catalogue::enabled(tx)? {
+        crate::db::catalogue::record_track(tx, id, t, false, None)?;
+    }
+    Ok(id)
 }

@@ -27,7 +27,7 @@ struct TidalRequestLimiter {
     background: Semaphore,
 }
 
-struct TidalRequestPermits<'a> {
+pub(crate) struct TidalRequestPermits<'a> {
     _total: SemaphorePermit<'a>,
     _background: Option<SemaphorePermit<'a>>,
 }
@@ -105,6 +105,12 @@ static REQUEST_LIMITER: OnceLock<TidalRequestLimiter> = OnceLock::new();
 fn request_limiter() -> &'static TidalRequestLimiter {
     REQUEST_LIMITER
         .get_or_init(|| TidalRequestLimiter::new(MAX_INFLIGHT_REQUESTS, MAX_BACKGROUND_REQUESTS))
+}
+
+pub(crate) async fn background_request_permit() -> Result<TidalRequestPermits<'static>> {
+    request_limiter()
+        .acquire(TidalRequestPriority::Background)
+        .await
 }
 
 #[cfg(test)]

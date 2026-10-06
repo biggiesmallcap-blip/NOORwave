@@ -34,7 +34,7 @@
 		lastSelectedTrackId, lastSelectedAlbumId,
 		selectTrackIds, selectAlbumIds, clearSelection,
 	} from '$lib/stores/library';
-	import { formatTrackDuration, formatDateShort, getQualityClass } from '$lib/utils/format';
+	import { formatTrackDuration, formatDateShort, savedDateMillis, getQualityClass } from '$lib/utils/format';
 	import { api, type Album, type Artist, type AudioSearchResult, type Genre, type Playlist, type Track } from '$lib/api/client';
 	import { cachedApi, invalidateLibraryCaches } from '$lib/cache/api_queries';
 	import { invalidatePlaylistCaches } from '$lib/cache/ws_events';
@@ -313,6 +313,17 @@
 	});
 
 
+	type CatalogueStatus = { availability: string; favorite_state: string };
+	let catalogueStatus = $state<Record<number, CatalogueStatus>>({});
+	async function loadCatalogueStatus() {
+		try {
+			const data = await api.getCatalogueStatus();
+			catalogueStatus = Object.fromEntries(data.tracks.map(track => [track.id, track]));
+		} catch (error) {
+			console.error('Could not check saved track availability:', error);
+		}
+	}
+
 	onMount(() => {
 		// Load only if the persistent stores are empty. On a back-nav the stores
 		// still hold every page the user scrolled through; reloading page 1 here
@@ -320,12 +331,14 @@
 		// bottom of the first page. A fresh visit starts empty and loads normally.
 		if (get(albums).length === 0) void loadAlbums(albumSortField, albumSortDir);
 		if (get(tracks).length === 0) void loadTracks();
+		void loadCatalogueStatus();
 		void loadBatchMeta();
 		void loadRecentTracks();
 		void loadDecadeChips();
 		const unsubscribeWs = wsMessages.subscribe((messages) => {
 			const latest = messages.at(-1);
 			if (!latest) return;
+			if (latest.type === 'library_synced') void loadCatalogueStatus();
 			if (latest.type === 'listen_history_updated') {
 				void loadRecentTracks();
 			}
@@ -1125,7 +1138,7 @@
 				case 'artist':   av = a.artist_name?.toLowerCase(); bv = b.artist_name?.toLowerCase(); break;
 				case 'album':    av = a.album_title?.toLowerCase(); bv = b.album_title?.toLowerCase(); break;
 				case 'play_count':     av = a.play_count;          bv = b.play_count;                 break;
-				case 'date_added':     av = a.date_added;          bv = b.date_added;                 break;
+				case 'date_added':     av = savedDateMillis(a.date_added); bv = savedDateMillis(b.date_added);                 break;
 				case 'last_played_at': av = a.last_played_at;      bv = b.last_played_at;             break;
 				case 'bpm':            av = a.bpm;                 bv = b.bpm;                        break;
 				case 'energy':         av = a.energy;              bv = b.energy;                     break;
@@ -1350,7 +1363,7 @@
 		for (const track of $tracks) {
 			if (!track.album_id || !track.date_added) continue;
 			const existing = albumDateMap.get(track.album_id);
-			if (!existing || track.date_added > existing.date) {
+			if (!existing || (savedDateMillis(track.date_added) ?? -Infinity) > (savedDateMillis(existing.date) ?? -Infinity)) {
 				albumDateMap.set(track.album_id, {
 					card: {
 						id: track.album_id,
@@ -1365,7 +1378,7 @@
 		}
 
 		return [...albumDateMap.values()]
-			.sort((a, b) => b.date.localeCompare(a.date))
+			.sort((a, b) => (savedDateMillis(b.date) ?? -Infinity) - (savedDateMillis(a.date) ?? -Infinity))
 			.slice(0, 20)
 			.map(({ card }) => card);
 	});
@@ -2752,6 +2765,13 @@
 					</span>
 					<span class="col-title">
 						<span class="track-title">{track.title}</span>
+						{#if catalogueStatus[track.id]}
+							<span class="catalogue-status" title={catalogueStatus[track.id].availability === 'unavailable'
+								? 'This saved recording is currently unavailable on TIDAL. Your saved date and library entry are preserved.'
+								: 'This saved recording is missing from TIDAL favorites. Your saved date and library entry are preserved.'}>
+								{catalogueStatus[track.id].availability === 'unavailable' ? 'Unavailable' : 'Saved locally'}
+							</span>
+						{/if}
 						{#if track.camelot_key}
 							<span class="camelot-badge-inline">{track.camelot_key}</span>
 						{/if}
@@ -3570,6 +3590,12 @@
 		font-weight: var(--font-weight-bold);
 		font-family: var(--font-mono);
 		vertical-align: middle;
+	}
+
+	.catalogue-status {
+		font-size: var(--font-size-xs);
+		color: var(--text-secondary);
+		white-space: nowrap;
 	}
 
 	.bpm-inline {

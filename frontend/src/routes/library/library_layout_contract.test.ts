@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const source = readFileSync(join(here, '+page.svelte'), 'utf8');
+const source = readFileSync(join(here, '+page.svelte'), 'utf8').replace(/\r\n/g, '\n');
 
 function countOccurrences(haystack: string, needle: string): number {
 	return haystack.split(needle).length - 1;
