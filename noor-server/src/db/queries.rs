@@ -7574,6 +7574,79 @@ pub fn set_dj_global_policy(
     Ok(())
 }
 
+pub fn get_dj_preferred_strategy(conn: &Connection) -> Result<String> {
+    Ok(conn
+        .query_row(
+            "SELECT value FROM server_config WHERE key = 'dj_preferred_strategy'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| "adaptive".to_string()))
+}
+
+pub fn set_dj_preferred_strategy(conn: &Connection, strategy: &str) -> Result<()> {
+    if !matches!(
+        strategy,
+        "adaptive"
+            | "wildcard"
+            | "smooth_blend"
+            | "club_mix"
+            | "quick_mix"
+            | "energy_lift"
+            | "energy_reset"
+            | "drop_swap"
+            | "bass_swap"
+            | "cut"
+    ) {
+        bail!("unknown DJ strategy: {strategy}");
+    }
+    conn.execute(
+        "INSERT OR REPLACE INTO server_config (key, value) VALUES ('dj_preferred_strategy', ?1)",
+        [strategy],
+    )?;
+    Ok(())
+}
+
+pub fn record_dj_feedback(
+    conn: &Connection,
+    id: i64,
+    category: &str,
+    reason: Option<&str>,
+) -> Result<bool> {
+    let rating = match category {
+        "good" => 1,
+        "bad" => -1,
+        "too_safe" | "too_bold" => 0,
+        _ => bail!("unknown DJ feedback"),
+    };
+    let transaction = conn.unchecked_transaction()?;
+    let changed = transaction.execute(
+        "UPDATE dj_transition_events SET user_rating = ?1
+         WHERE id = ?2 AND actual_start_ms IS NOT NULL
+           AND timing_status IN ('fired', 'late')
+           AND runtime_renderer_status IN ('rendered_handoff', 'rendered_overlay', 'legacy_overlap')",
+        params![rating, id],
+    )?;
+    if changed == 0 {
+        return Ok(false);
+    }
+    // Keep feedback categories separate from planner alternatives and playback
+    // outcomes, using the existing config table without a schema migration.
+    transaction.execute(
+        "INSERT OR REPLACE INTO server_config (key, value) VALUES (?1, ?2)",
+        params![format!("dj_feedback:{id}"), category],
+    )?;
+    if let Some(reason) = reason {
+        transaction.execute(
+            "INSERT OR REPLACE INTO server_config (key, value) VALUES (?1, ?2)",
+            params![format!("dj_feedback_reason:{id}"), reason],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(true)
+}
+
 fn validate_dj_fallback_reason(reason: Option<&str>) -> Result<()> {
     if let Some(reason) = reason
         && !matches!(
@@ -7600,7 +7673,10 @@ fn validate_dj_fallback_reason(reason: Option<&str>) -> Result<()> {
 
 fn validate_dj_timing_source(source: Option<&str>) -> Result<()> {
     if let Some(source) = source
-        && !matches!(source, "downbeat_sync" | "beat_sync" | "fallback_overlap")
+        && !matches!(
+            source,
+            "downbeat_sync" | "beat_sync" | "phrase_sync" | "mix_out_sync" | "fallback_overlap"
+        )
     {
         bail!("unknown DJ timing source: {source}");
     }
@@ -7742,6 +7818,7 @@ pub fn replace_armed_dj_transition_event(
              planner_version = ?5,
              fallback_reason = ?6,
              planned_start_ms = ?7,
+             runtime_planned_start_ms = NULL,
              actual_start_ms = NULL,
              timing_delta_ms = NULL,
              timing_source = ?8,
@@ -7775,6 +7852,28 @@ pub fn update_dj_transition_fire_timing(
     runtime_renderer_status: &str,
     runtime_renderer_reason: &str,
 ) -> Result<()> {
+    update_dj_transition_fire_timing_with_runtime_target(
+        conn,
+        id,
+        actual_start_ms,
+        None,
+        timing_status,
+        runtime_rendered_dj_mixer,
+        runtime_renderer_status,
+        runtime_renderer_reason,
+    )
+}
+
+pub fn update_dj_transition_fire_timing_with_runtime_target(
+    conn: &Connection,
+    id: i64,
+    actual_start_ms: i64,
+    runtime_planned_start_ms: Option<i64>,
+    timing_status: &str,
+    runtime_rendered_dj_mixer: bool,
+    runtime_renderer_status: &str,
+    runtime_renderer_reason: &str,
+) -> Result<()> {
     validate_dj_timing_status(Some(timing_status))?;
     validate_dj_runtime_renderer_status(Some(runtime_renderer_status))?;
     validate_dj_runtime_renderer_reason(Some(runtime_renderer_reason))?;
@@ -7784,10 +7883,14 @@ pub fn update_dj_transition_fire_timing(
                  WHEN ?3 = 'missed' THEN NULL
                  ELSE ?2
              END,
+             runtime_planned_start_ms = CASE
+                 WHEN ?3 = 'missed' THEN NULL
+                 ELSE ?7
+             END,
              timing_delta_ms = CASE
                  WHEN ?3 = 'missed' THEN NULL
-                 WHEN planned_start_ms IS NULL THEN NULL
-                 ELSE ?2 - planned_start_ms
+                 WHEN COALESCE(?7, planned_start_ms) IS NULL THEN NULL
+                 ELSE ?2 - COALESCE(?7, planned_start_ms)
              END,
              timing_status = ?3,
              runtime_rendered_dj_mixer = ?4,
@@ -7801,6 +7904,7 @@ pub fn update_dj_transition_fire_timing(
             if runtime_rendered_dj_mixer { 1 } else { 0 },
             runtime_renderer_status,
             runtime_renderer_reason,
+            runtime_planned_start_ms,
         ],
     )?;
     conn.execute(
@@ -8382,6 +8486,50 @@ mod tests {
         }
 
         #[test]
+        fn musical_policy_and_feedback_round_trip_without_changing_playback_outcomes() {
+            let conn = setup_conn();
+            assert_eq!(get_dj_preferred_strategy(&conn).unwrap(), "adaptive");
+            set_dj_preferred_strategy(&conn, "club_mix").unwrap();
+            assert_eq!(get_dj_preferred_strategy(&conn).unwrap(), "club_mix");
+            assert!(set_dj_preferred_strategy(&conn, "unknown").is_err());
+            assert_eq!(get_dj_preferred_strategy(&conn).unwrap(), "club_mix");
+            let id = insert_event(&conn);
+            assert!(!record_dj_feedback(&conn, id, "good", None).unwrap());
+            update_dj_transition_fire_timing(
+                &conn,
+                id,
+                172_000,
+                "fired",
+                true,
+                "rendered_handoff",
+                "none",
+            )
+            .unwrap();
+            record_dj_feedback(&conn, id, "too_safe", Some("More variation")).unwrap();
+            let (rating, outcome, category): (i64, Option<String>, String) = conn
+                .query_row(
+                    "SELECT e.user_rating, e.outcome, c.value FROM dj_transition_events e
+                 JOIN server_config c ON c.key = 'dj_feedback:' || e.id WHERE e.id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(rating, 0);
+            assert!(outcome.is_none());
+            assert_eq!(category, "too_safe");
+            record_dj_feedback(&conn, id, "good", None).unwrap();
+            let category: String = conn
+                .query_row(
+                    "SELECT value FROM server_config WHERE key = ?1",
+                    [format!("dj_feedback:{id}")],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(category, "good", "a repeated vote replaces the prior vote");
+            assert!(!record_dj_feedback(&conn, 999_999, "bad", None).unwrap());
+        }
+
+        #[test]
         fn insert_dj_transition_event_round_trips_external_refs() {
             let conn = setup_conn();
             let id = insert_dj_transition_event(
@@ -8601,6 +8749,58 @@ mod tests {
             assert_eq!(row.3, Some(1));
             assert_eq!(row.4.as_deref(), Some("rendered_handoff"));
             assert_eq!(row.5.as_deref(), Some("none"));
+        }
+
+        #[test]
+        fn decoded_countdown_target_preserves_metadata_error_separately_from_fire_delta() {
+            let conn = setup_conn();
+            let id = insert_event(&conn);
+            conn.execute(
+                "UPDATE dj_transition_events SET timing_source = 'fallback_overlap',
+                planned_start_ms = 401000 WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+            update_dj_transition_fire_timing_with_runtime_target(
+                &conn,
+                id,
+                403_006,
+                Some(403_000),
+                "fired",
+                true,
+                "rendered_handoff",
+                "none",
+            )
+            .unwrap();
+            let timing: (i64, i64, i64, i64) = conn.query_row(
+                "SELECT planned_start_ms, runtime_planned_start_ms, actual_start_ms, timing_delta_ms
+                 FROM dj_transition_events WHERE id = ?1", [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            ).unwrap();
+            assert_eq!(timing, (401_000, 403_000, 403_006, 6));
+            // The visible original estimate still exposes the 2s duration
+            // mismatch; the scheduler's 6ms precision is measured honestly.
+            assert_eq!(timing.1 - timing.0, 2_000);
+            update_dj_transition_fire_timing_with_runtime_target(
+                &conn,
+                id,
+                409_000,
+                Some(403_000),
+                "missed",
+                false,
+                "boundary_fallback",
+                "manual_seek_suppressed",
+            )
+            .unwrap();
+            let cleared: (i64, Option<i64>, Option<i64>) = conn
+                .query_row(
+                    "SELECT planned_start_ms, runtime_planned_start_ms, timing_delta_ms
+                 FROM dj_transition_events WHERE id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(cleared, (401_000, None, None));
         }
 
         #[test]

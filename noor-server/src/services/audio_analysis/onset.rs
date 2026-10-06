@@ -24,6 +24,29 @@ pub struct OnsetEnvelope {
 }
 
 pub fn compute_onset_envelope(samples: &[f32], sample_rate: u32) -> Option<OnsetEnvelope> {
+    compute_onset_envelope_inner(samples, sample_rate, None)
+}
+
+/// Restrict the same spectral-flux calculation to a frequency band. Filtering
+/// PCM alone is insufficient: log compression amplifies residual treble, and
+/// summing its many FFT bins can overpower a kick's few bass bins.
+pub fn compute_onset_envelope_in_band(
+    samples: &[f32],
+    sample_rate: u32,
+    low_hz: f64,
+    high_hz: f64,
+) -> Option<OnsetEnvelope> {
+    if !low_hz.is_finite() || !high_hz.is_finite() || low_hz < 0.0 || high_hz <= low_hz {
+        return None;
+    }
+    compute_onset_envelope_inner(samples, sample_rate, Some((low_hz, high_hz)))
+}
+
+fn compute_onset_envelope_inner(
+    samples: &[f32],
+    sample_rate: u32,
+    band: Option<(f64, f64)>,
+) -> Option<OnsetEnvelope> {
     if sample_rate == 0 || samples.len() < ODF_FFT_SIZE + ODF_HOP {
         return None;
     }
@@ -34,6 +57,18 @@ pub fn compute_onset_envelope(samples: &[f32], sample_rate: u32) -> Option<Onset
 
     let num_frames = (samples.len() - ODF_FFT_SIZE) / ODF_HOP + 1;
     let bins = ODF_FFT_SIZE / 2;
+    let (first_bin, end_bin) = band.map_or((1, bins), |(low, high)| {
+        let bin_scale = ODF_FFT_SIZE as f64 / f64::from(sample_rate);
+        (
+            (low * bin_scale).ceil().max(1.0) as usize,
+            ((high * bin_scale).floor() as usize)
+                .saturating_add(1)
+                .min(bins),
+        )
+    });
+    if first_bin >= end_bin {
+        return None;
+    }
 
     let mut planner = rustfft::FftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(ODF_FFT_SIZE);
@@ -51,7 +86,7 @@ pub fn compute_onset_envelope(samples: &[f32], sample_rate: u32) -> Option<Onset
         fft.process(&mut buf);
 
         let mut sf = 0.0f64;
-        for k in 1..bins {
+        for k in first_bin..end_bin {
             let mag = buf[k].norm() as f64;
             let log_mag = (1.0 + LOG_COMPRESS_GAMMA * mag).ln();
             if f > 0 {

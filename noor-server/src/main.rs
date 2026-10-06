@@ -53,7 +53,9 @@ pub struct NextPrebufferKey {
 pub struct DropPreviewRuntimeState {
     pub track_id: i64,
     pub generation: u64,
-    pub actual_fire_ms: i64,
+    pub queue_generation: u64,
+    pub actual_fire_ms: Option<i64>,
+    pub skipped_reason: Option<&'static str>,
 }
 
 /// Shared application state accessible by all modules

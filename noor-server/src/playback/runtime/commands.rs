@@ -1,7 +1,8 @@
 use super::OutputDeviceSelection;
 use crate::db::audio_settings::ExclusiveLatencyMode;
 use crate::playback::dj_lookahead::DjMediaRef;
-use crate::playback::player::{PlaybackSourceKind, PreparedPlaybackJob};
+use crate::playback::gapless::GaplessPlan;
+use crate::playback::player::{PlaybackSourceKind, PreparedPlaybackJob, PreparedTransitionProgram};
 
 #[derive(Debug, Clone)]
 pub enum PlaybackRuntimeCommand {
@@ -10,6 +11,19 @@ pub enum PlaybackRuntimeCommand {
     Pause,
     Resume,
     Stop,
+    /// Replay current device metadata after an event listener subscribes.
+    /// Startup Ready may precede listener registration on the HTTP side.
+    RequestReady,
+    /// Reuse a successfully decoded deck's fresh manifest for background DSP.
+    ResolvedAnalysisStream {
+        track_id: i64,
+        respond_to: std::sync::mpsc::Sender<Option<crate::services::tidal::stream::StreamInfo>>,
+    },
+    UpdatePreparedTransition {
+        transition: PreparedTransitionProgram,
+        gapless: GaplessPlan,
+        respond_to: std::sync::mpsc::Sender<bool>,
+    },
     /// Drop the WASAPI exclusive device immediately (ahead of the idle grace)
     /// so another app can take the endpoint in shared mode. Triggered when the
     /// WebView needs to play a TIDAL video's audio while exclusive mode is on.
@@ -62,6 +76,9 @@ pub enum PlaybackRuntimeCommand {
         track_id: i64,
         generation: u64,
         trigger_position_samples: u64,
+        /// Exact anchor or decoded-end countdown threshold observed by the
+        /// audio callback, rather than a metadata duration estimate.
+        trigger_target_samples: u64,
     },
     DropPreviewStart {
         track_id: i64,
@@ -165,15 +182,25 @@ pub enum PlaybackRuntimeEvent {
         outgoing_track_id: i64,
         generation: u64,
         actual_start_ms: i64,
+        runtime_planned_start_ms: Option<i64>,
         timing_status: String,
         runtime_rendered_dj_mixer: bool,
         runtime_renderer_status: String,
         runtime_renderer_reason: String,
+        /// The executable program after local audio alignment/fallback.
+        runtime_program_json: Option<String>,
     },
     DropPreviewStarted {
         track_id: i64,
         generation: u64,
         actual_start_ms: i64,
+        queue_generation: u64,
+    },
+    DropPreviewSkipped {
+        track_id: i64,
+        generation: u64,
+        queue_generation: u64,
+        reason: &'static str,
     },
     /// Fired when the current track is within `NEAR_END_THRESHOLD_MS` of its end.
     /// The listener should peek the next track and send `PrepareNext` to pre-buffer it.
@@ -203,6 +230,9 @@ pub enum PlaybackRuntimeEvent {
     },
     PreparedTrackError {
         track_id: i64,
+        generation: u64,
+        /// Exact source that failed, before a catalog-id heal or queue change.
+        tidal_id: Option<i64>,
         message: String,
     },
     Error {

@@ -12,7 +12,7 @@ use tracing::{debug, info, warn};
 use super::bpm::{self, BeatGridAnalysis};
 use super::{onset, tempo};
 
-pub const DJ_PROFILE_VERSION: &str = "dj_profile_v2";
+pub const DJ_PROFILE_VERSION: &str = "dj_profile_v3";
 pub const DJ_WAVEFORM_PEAK_COUNT: usize = 512;
 const DJ_PROFILE_DB_LOCK_RETRY_LIMIT: usize = 6;
 const DJ_PROFILE_DB_LOCK_RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -116,18 +116,27 @@ fn persist_dj_analysis_job(
         return Ok(());
     }
 
-    let analysis = if job.tidal_id.is_some() {
-        fallback_beat_grid_analysis(&job.samples, job.sample_rate).or_else(|| {
-            warn!(
-                media_ref_kind = %key.media_ref_kind,
-                media_ref_id = %key.media_ref_id,
-                "Persisting provisional DJ profile with default beat grid"
-            );
-            provisional_beat_grid_analysis(&job.samples, job.sample_rate)
-        })
+    // The existing measured beat/downbeat detector runs on this serialized
+    // background actor for streamed and library material alike. Source type
+    // must not silently replace measured phase with a zero-origin comb.
+    let analysis_started = std::time::Instant::now();
+    info!(media_ref_id=%key.media_ref_id,"Measured DJ beat analysis started");
+    let (analysis, source) = if let Some(measured) = analyzer(&job.samples, job.sample_rate) {
+        (Some(measured), "dj_playback_measured")
+    } else if let Some(tempo) = fallback_beat_grid_analysis(&job.samples, job.sample_rate) {
+        (Some(tempo), "dj_playback_tempo")
+    } else if job.tidal_id.is_some() {
+        warn!(
+            media_ref_kind = %key.media_ref_kind,
+            media_ref_id = %key.media_ref_id,
+            "Persisting provisional DJ profile with default beat grid"
+        );
+        (
+            provisional_beat_grid_analysis(&job.samples, job.sample_rate),
+            "dj_playback_provisional",
+        )
     } else {
-        analyzer(&job.samples, job.sample_rate)
-            .or_else(|| fallback_beat_grid_analysis(&job.samples, job.sample_rate))
+        (None, "dj_playback_tempo")
     };
     let Some(analysis) = analysis else {
         warn!(
@@ -139,15 +148,15 @@ fn persist_dj_analysis_job(
     };
 
     with_dj_profile_db_retry("persist DJ profile", || {
-        db.with_conn(|conn| {
-            persist_dj_analysis_job_from_analysis(conn, &job, "dj_playback", &analysis)
-        })
+        db.with_conn(|conn| persist_dj_analysis_job_from_analysis(conn, &job, source, &analysis))
     })?;
     info!(
         media_ref_kind = %key.media_ref_kind,
         media_ref_id = %key.media_ref_id,
         beats = analysis.beats_seconds.len(),
         downbeats = analysis.downbeats_seconds.len(),
+        source,
+        analysis_ms = analysis_started.elapsed().as_millis(),
         "DJ profile persisted"
     );
     Ok(())
@@ -760,7 +769,7 @@ mod tests {
     #[test]
     fn dj_profile_version_is_independent_from_planner_version() {
         assert_ne!(DJ_PROFILE_VERSION, "dj_planner_v1");
-        assert_eq!(DJ_PROFILE_VERSION, "dj_profile_v2");
+        assert_eq!(DJ_PROFILE_VERSION, "dj_profile_v3");
     }
 
     #[test]
@@ -1172,6 +1181,40 @@ mod tests {
 
         assert_eq!(result.expect("retry result"), "ok");
         assert_eq!(attempts.get(), 2);
+    }
+
+    #[test]
+    fn tidal_analysis_uses_measured_detector_phase_before_tempo_fallback() {
+        fn measured(_: &[f32], _: u32) -> Option<BeatGridAnalysis> {
+            let mut result = analysis(64);
+            for second in &mut result.beats_seconds {
+                *second += 0.17;
+            }
+            for second in &mut result.downbeats_seconds {
+                *second += 0.17;
+            }
+            Some(result)
+        }
+        let db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let job = DjAnalysisJob {
+            media_ref: tidal_ref(987),
+            track_id: None,
+            queue_item_id: None,
+            tidal_id: Some(987),
+            samples: click_train(48_000, 90, 120.0),
+            sample_rate: 48_000,
+            analysis_scope_ms: 90_000,
+            deadline_generation: 1,
+        };
+        persist_dj_analysis_job(&db, job, measured).unwrap();
+        let row = db
+            .with_conn(|conn| queries::get_audio_dj_profile(conn, &key("tidal_track", "987")))
+            .unwrap()
+            .unwrap();
+        let beats = decode_f32_blob(&row.beat_grid_blob).unwrap();
+        assert!((beats[0] - 0.17).abs() < 0.001);
+        assert_eq!(row.source, "dj_playback_measured");
     }
 
     #[test]

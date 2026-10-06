@@ -13,7 +13,7 @@ use crate::playback::dj_lookahead::{DjLookaheadPair, DjMediaRef};
 use crate::playback::gapless::{self, GaplessPlan, GaplessSettings};
 use crate::playback::queue::{self, ShuffleDebug, ShuffleMode};
 use crate::playback::shuffle::generate_shuffle_seed;
-use crate::services::audio_analysis::dj_profile::decode_f32_blob;
+use crate::services::audio_analysis::dj_profile::{decode_f32_blob, decode_u32_blob};
 use crate::services::tidal::stream::{self, StreamInfo, StreamRequest};
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
@@ -245,6 +245,9 @@ pub struct ActiveListenSession {
     pub position_in_session: i32,
     pub transition_from_track_id: Option<i64>,
     pub dj_transition_event_id: Option<i64>,
+    /// A transport seek invalidates the audible transition view without
+    /// discarding the event identity used for listening history and feedback.
+    pub transition_visual_valid: bool,
 }
 
 // Tracks the rolling state of the user's current listening session across multiple
@@ -440,6 +443,23 @@ pub fn attach_dj_transition_plan_for_pair_with_current_duration(
             let existing_event_id = existing.id;
             let existing_program = existing.program.clone();
             let existing_anchor = existing.anchor_start_ms();
+            let duration_ms = current_duration_ms.or(engine
+                .db()
+                .with_conn(|conn| current_track_duration_ms(conn, current))?);
+            let mut restored_gapless = dj_gapless_plan_from_program(&existing_program);
+            if existing_anchor.is_some() {
+                // Structural alignment can reserve more tail than the audio
+                // envelope itself. Restore that saved window when reusing the
+                // event, rather than reverting to the player's crossfade setting.
+                if let Some(overlap_ms) = duration_ms
+                    .zip(existing.planned_start_ms)
+                    .map(|(duration, start)| duration.saturating_sub(start))
+                    .filter(|overlap| (250..=DJ_MAX_RENDER_MS as i64).contains(overlap))
+                {
+                    restored_gapless.overlap_ms = overlap_ms as i32;
+                }
+            }
+            job.gapless = restored_gapless;
             let fire_ahead_ms = engine.db().with_conn(dj_transition_fire_ahead_ms)?;
             job = job.with_prepared_transition(PreparedTransitionProgram {
                 program: existing_program,
@@ -459,9 +479,8 @@ pub fn attach_dj_transition_plan_for_pair_with_current_duration(
         engine.plan_transition_details(current, next, sample_rate.max(1), channels.max(1))?
     {
         let planned_template = plan.program.template.clone();
-        let render_timing_unstable =
-            matches!(planned_template.as_str(), "FilterSweep" | "BassSwap16")
-                && engine.db().with_conn(render_timing_unstable)?;
+        let render_timing_unstable = timing_sensitive_dj_program(&plan.program)
+            && engine.db().with_conn(render_timing_unstable)?;
         let (renderer_program, renderer_fallback_reason) = v1_renderable_program(
             &plan.program,
             sample_rate.max(1),
@@ -509,13 +528,109 @@ struct ArmedDjTransitionEvent {
     timing_source: Option<String>,
 }
 
+/// A proposed update for a queued deck. Persist only after the runtime accepts
+/// it; an already audible transition must retain its original program.
+pub(crate) struct PreparedDjTransitionUpdate {
+    pub transition: PreparedTransitionProgram,
+    pub gapless: GaplessPlan,
+    current: DjMediaRef,
+    next: DjMediaRef,
+    plan: DjTransitionPlan,
+    timing: DjTransitionTimingPlan,
+}
+
+pub(crate) fn plan_prepared_dj_transition_update(
+    engine: &DjEngine,
+    pair: DjLookaheadPair,
+    sample_rate: u32,
+    channels: u16,
+    current_position_ms: i64,
+) -> Result<Option<PreparedDjTransitionUpdate>> {
+    let (Some(current), Some(next), Some(next_queue_id)) =
+        (pair.current, pair.next, pair.next_queue_item_id)
+    else {
+        return Ok(None);
+    };
+    let existing = engine
+        .db()
+        .with_conn(|conn| latest_armed_dj_transition_event_for_pair(conn, &current, &next))?;
+    let Some(existing) = existing else {
+        return Ok(None);
+    };
+    if existing
+        .planned_start_ms
+        .is_none_or(|start| start <= current_position_ms.saturating_add(2_000))
+    {
+        return Ok(None);
+    }
+    let Some(mut plan) = engine.plan_transition_details(&current, &next, sample_rate, channels)?
+    else {
+        return Ok(None);
+    };
+    let unstable = timing_sensitive_dj_program(&plan.program)
+        && engine.db().with_conn(render_timing_unstable)?;
+    let (rendered, fallback) =
+        v1_renderable_program(&plan.program, sample_rate, channels, unstable);
+    plan.program = rendered;
+    plan.fallback_reason = fallback.or(plan.fallback_reason);
+    let timing = dj_gapless_plan_for_pair(engine, &current, None, &plan.program);
+    if timing
+        .planned_start_ms
+        .is_none_or(|start| start <= current_position_ms.saturating_add(2_000))
+    {
+        return Ok(None);
+    }
+    if serde_json::to_string(&plan.program)?
+        == serde_json::to_string(&existing.program.clone().rescaled_to(sample_rate))?
+        && timing.planned_start_ms == existing.planned_start_ms
+        && Some(timing.timing_source) == existing.timing_source.as_deref()
+    {
+        return Ok(None);
+    }
+    let fire_ahead_ms = engine.db().with_conn(dj_transition_fire_ahead_ms)?;
+    Ok(Some(PreparedDjTransitionUpdate {
+        transition: PreparedTransitionProgram {
+            program: plan.program.clone(),
+            transition_event_id: Some(existing.id),
+            fire_ahead_ms,
+            queue_generation: pair.queue_generation,
+            current_queue_item_id: pair.current_queue_item_id,
+            next_queue_item_id: Some(next_queue_id),
+            anchor_start_ms: timing.anchor_start_ms,
+        },
+        gapless: timing.gapless,
+        current,
+        next,
+        plan,
+        timing,
+    }))
+}
+
+pub(crate) fn persist_prepared_dj_transition_update(
+    engine: &DjEngine,
+    update: &PreparedDjTransitionUpdate,
+) -> Result<()> {
+    log_dj_transition_event(
+        engine,
+        update.transition.transition_event_id,
+        &update.current,
+        &update.next,
+        &update.plan.program.template,
+        &update.plan,
+        &update.timing,
+    )?;
+    Ok(())
+}
+
 impl ArmedDjTransitionEvent {
     /// The planned start doubles as the decoded-audio-time fire anchor, but
     /// only when it was derived from an analysis grid; a fallback overlap's
     /// planned start is metadata arithmetic and must not be fired against.
     fn anchor_start_ms(&self) -> Option<i64> {
         match self.timing_source.as_deref() {
-            Some("downbeat_sync") | Some("beat_sync") => self.planned_start_ms,
+            Some("downbeat_sync" | "beat_sync" | "phrase_sync" | "mix_out_sync") => {
+                self.planned_start_ms
+            }
             _ => None,
         }
     }
@@ -595,11 +710,7 @@ const DJ_FILTER_SWEEP_TIMING_WINDOW: i64 = 20;
 const DJ_FILTER_SWEEP_TIMING_MIN_ROWS: usize = 4;
 const DJ_FILTER_SWEEP_MEDIAN_ABS_MAX_MS: i64 = 300;
 const DJ_FILTER_SWEEP_WORST_ABS_MAX_MS: i64 = 750;
-const DJ_FILTER_SWEEP_RENDER_MS: u32 = 18_000;
-const DJ_BASS_SWAP_16_RENDER_MS: u32 = 24_000;
-const DJ_BASS_SWAP_32_RENDER_MS: u32 = 28_000;
-const DJ_SLAM_CUT_RENDER_MS: u32 = 200;
-const DJ_LONG_HARMONIC_BLEND_RENDER_MS: u32 = 24_000;
+const DJ_MAX_RENDER_MS: u64 = 28_000;
 
 fn dj_transition_fire_ahead_ms(conn: &Connection) -> Result<u32> {
     let deltas = dj_timing_calibration_deltas(conn, DJ_FIRE_AHEAD_WINDOW)?;
@@ -612,14 +723,19 @@ fn render_timing_unstable(conn: &Connection) -> Result<bool> {
 }
 
 fn dj_timing_calibration_deltas(conn: &Connection, limit: i64) -> Result<Vec<i64>> {
+    // Calibration describes recent runtime conditions, not a permanent veto
+    // carried by copied libraries or a months-old seek/decoder incident.
+    // Historical events remain available unchanged in the timing UI.
     let mut stmt = conn.prepare(
         "SELECT timing_delta_ms
          FROM dj_transition_events
          WHERE timing_status = 'fired'
            AND timing_delta_ms IS NOT NULL
+           AND timing_source IN ('downbeat_sync', 'beat_sync', 'phrase_sync', 'mix_out_sync')
            AND runtime_rendered_dj_mixer = 1
            AND runtime_renderer_status IN ('rendered_handoff', 'rendered_overlay')
            AND COALESCE(runtime_renderer_reason, 'none') = 'none'
+           AND datetime(started_at) >= datetime('now', '-24 hours')
          ORDER BY started_at DESC, id DESC
          LIMIT ?1",
     )?;
@@ -763,36 +879,101 @@ fn synced_dj_overlap_ms(
     let Some(profile) = queries::get_audio_dj_profile(conn, &key)? else {
         return Ok(None);
     };
-    if profile.profile_confidence < 0.65 {
+    if !profile.profile_confidence.is_finite() || profile.profile_confidence < 0.65 {
         return Ok(None);
     }
 
-    let downbeats = decode_f32_blob(&profile.downbeats_blob).unwrap_or_default();
-    if let Some(overlap_ms) = synced_overlap_from_grid_ms(
-        duration_ms,
-        &downbeats,
-        preferred_overlap_ms,
-        Some(program.resolve_at),
-        program.sample_rate,
-    ) {
+    let correction = queries::get_audio_dj_profile_correction(conn, &key)?;
+    let beats = decode_f32_blob(&profile.beat_grid_blob).unwrap_or_default();
+    if crate::playback::dj_engine::dj_grid_is_synthetic(&profile, &beats) {
+        // A zero-origin tempo projection is not measured phase. Scope and
+        // raw confidence cannot certify its guessed beats or phrase markers.
+        return Ok(None);
+    }
+    let original_downbeats = decode_f32_blob(&profile.downbeats_blob).unwrap_or_default();
+    let beat_ms = median_delta(&grid_intervals_ms(&beats))
+        .unwrap_or(500)
+        .max(1);
+    let multiplier = correction
+        .as_ref()
+        .and_then(|value| value.bpm_multiplier)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(1.0);
+    let corrected_beat_ms = beat_ms as f64 / multiplier;
+    let downbeat_shift_ms = correction
+        .as_ref()
+        .and_then(|value| value.downbeat_offset_beats)
+        .unwrap_or(0) as f64
+        * corrected_beat_ms;
+    let downbeats = original_downbeats
+        .iter()
+        .map(|seconds| *seconds + (downbeat_shift_ms / 1_000.0) as f32)
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .collect::<Vec<_>>();
+    let phrase_offset = correction
+        .as_ref()
+        .and_then(|value| value.phrase_offset_bars)
+        .unwrap_or(0);
+    let phrase_ms = decode_u32_blob(&profile.phrase_boundaries_blob)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|bar| {
+            let index = usize::try_from(i64::from(bar) + phrase_offset).ok()?;
+            let seconds = *original_downbeats.get(index)?;
+            let marker = (f64::from(seconds) * 1_000.0 + downbeat_shift_ms).round() as i64;
+            (marker >= 0 && marker <= profile.analysis_scope_ms).then_some(marker)
+        })
+        .collect::<Vec<_>>();
+    // Structure extracted from the first 90 seconds describes that analysed
+    // region, not a three-minute track's true outro. Only real, covered tail
+    // cues may earn structural preference; phrases are never extrapolated.
+    let mix_out_ms = decode_f32_blob(&profile.mix_out_blob)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .map(|seconds| (seconds * 1_000.0).round() as i64)
+        .filter(|ms| *ms <= profile.analysis_scope_ms)
+        .collect::<Vec<_>>();
+    let outro_ms = profile
+        .outro_start_seconds
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .map(|seconds| (seconds * 1_000.0).round() as i64)
+        .filter(|ms| *ms <= profile.analysis_scope_ms);
+    // Playback analysis intentionally covers the first 90 seconds and earns
+    // a scope score of .65. That coverage does not weaken a well-supported
+    // tempo grid. Keep structural cues scope-bounded, while allowing stable,
+    // high-confidence rhythm to retain the established absolute fire anchor.
+    let confident_grid = profile
+        .beat_confidence
+        .is_some_and(|confidence| confidence.is_finite() && confidence >= 0.75);
+    let program_ms =
+        ((program.resolve_at.saturating_mul(1_000)) / u64::from(program.sample_rate.max(1))) as i64;
+    let preferred_ms = if program.template == "SafeCrossfade" {
+        i64::from(preferred_overlap_ms).max(8_000)
+    } else {
+        i64::from(preferred_overlap_ms).max(250)
+    };
+    for (measured, source) in [(&downbeats, "downbeat_sync"), (&beats, "beat_sync")] {
+        let Some((overlap_ms, timing_source)) = tail_transition_candidate_ms(
+            duration_ms,
+            measured,
+            preferred_ms,
+            program_ms,
+            &program.template,
+            confident_grid && stable_grid(measured),
+            &phrase_ms,
+            &mix_out_ms,
+            outro_ms,
+            source,
+        ) else {
+            continue;
+        };
         return Ok(Some(SyncedDjOverlap {
             overlap_ms,
-            timing_source: "downbeat_sync",
+            timing_source,
         }));
     }
-
-    let beats = decode_f32_blob(&profile.beat_grid_blob).unwrap_or_default();
-    Ok(synced_overlap_from_grid_ms(
-        duration_ms,
-        &beats,
-        preferred_overlap_ms,
-        Some(program.resolve_at),
-        program.sample_rate,
-    )
-    .map(|overlap_ms| SyncedDjOverlap {
-        overlap_ms,
-        timing_source: "beat_sync",
-    }))
+    Ok(None)
 }
 
 fn current_track_duration_ms(conn: &Connection, current: &DjMediaRef) -> Result<Option<i64>> {
@@ -823,6 +1004,7 @@ fn current_track_duration_ms(conn: &Connection, current: &DjMediaRef) -> Result<
     }
 }
 
+#[cfg(test)]
 fn synced_overlap_from_grid_ms(
     duration_ms: i64,
     grid_seconds: &[f32],
@@ -830,7 +1012,6 @@ fn synced_overlap_from_grid_ms(
     program_samples: Option<u64>,
     sample_rate: u32,
 ) -> Option<i32> {
-    const MIN_SYNC_OVERLAP_MS: i64 = 8_000;
     const MAX_SYNC_OVERLAP_MS: i64 = 28_000;
     let preferred_ms = preferred_overlap_ms.max(250) as i64;
     let program_ms = program_samples
@@ -839,10 +1020,7 @@ fn synced_overlap_from_grid_ms(
                 .clamp(250, i64::MAX as u64) as i64
         })
         .unwrap_or(preferred_ms);
-    let min_overlap_ms = preferred_ms
-        .max(program_ms)
-        .max(MIN_SYNC_OVERLAP_MS)
-        .min(MAX_SYNC_OVERLAP_MS);
+    let min_overlap_ms = preferred_ms.max(program_ms).min(MAX_SYNC_OVERLAP_MS);
     let grid = extrapolated_grid_ms(grid_seconds, duration_ms)?;
 
     grid.into_iter()
@@ -852,6 +1030,96 @@ fn synced_overlap_from_grid_ms(
                 .then_some(overlap_ms as i32)
         })
         .min()
+}
+
+fn grid_intervals_ms(grid_seconds: &[f32]) -> Vec<i64> {
+    grid_seconds
+        .windows(2)
+        .filter_map(|pair| {
+            let delta = ((pair[1] - pair[0]) * 1_000.0).round();
+            (delta.is_finite() && delta > 0.0).then_some(delta as i64)
+        })
+        .collect()
+}
+
+fn stable_grid(grid_seconds: &[f32]) -> bool {
+    let intervals = grid_intervals_ms(grid_seconds);
+    let Some(median) = median_delta(&intervals).filter(|median| *median >= 100) else {
+        return false;
+    };
+    intervals.len() >= 3
+        && intervals
+            .iter()
+            .filter(|interval| (**interval - median).abs() <= (median / 5).max(20))
+            .count()
+            * 4
+            >= intervals.len() * 3
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tail_transition_candidate_ms(
+    duration_ms: i64,
+    measured_grid: &[f32],
+    preferred_ms: i64,
+    program_ms: i64,
+    template: &str,
+    extrapolate: bool,
+    phrase_ms: &[i64],
+    mix_out_ms: &[i64],
+    outro_ms: Option<i64>,
+    grid_source: &'static str,
+) -> Option<(i32, &'static str)> {
+    let min_overlap = preferred_ms.max(program_ms).max(250);
+    let extra = match template {
+        "SlamCut" => 2_000,
+        "QuickMix" => 4_000,
+        _ => 8_000,
+    };
+    let max_overlap = (min_overlap + extra).min(DJ_MAX_RENDER_MS as i64);
+    let grid = if extrapolate {
+        extrapolated_grid_ms(measured_grid, duration_ms)?
+    } else {
+        measured_grid
+            .iter()
+            .filter(|seconds| seconds.is_finite() && **seconds >= 0.0)
+            .map(|seconds| (seconds * 1_000.0).round() as i64)
+            .collect::<Vec<_>>()
+    };
+    grid.into_iter()
+        .filter_map(|start_ms| {
+            let overlap = duration_ms.saturating_sub(start_ms);
+            if overlap < min_overlap || overlap > max_overlap {
+                return None;
+            }
+            // A structural cue can beat a slightly later grid marker, but never
+            // buy an arbitrary mid-song skip. Extra tail removal costs score.
+            let phrase = phrase_ms.iter().any(|ms| (*ms - start_ms).abs() <= 100);
+            let mix_out = mix_out_ms.iter().any(|ms| (*ms - start_ms).abs() <= 100);
+            let outro = outro_ms.is_some_and(|ms| (ms - start_ms).abs() <= 100);
+            let score = if phrase {
+                0.24
+            } else if mix_out {
+                0.16
+            } else if outro {
+                0.10
+            } else {
+                0.0
+            } - (overlap - min_overlap) as f64 / 1_000.0 * 0.04;
+            let source = if phrase {
+                "phrase_sync"
+            } else if mix_out {
+                "mix_out_sync"
+            } else {
+                grid_source
+            };
+            Some((overlap as i32, source, score))
+        })
+        .max_by(|left, right| {
+            left.2
+                .total_cmp(&right.2)
+                .then_with(|| right.0.cmp(&left.0))
+        })
+        .map(|(overlap, source, _)| (overlap, source))
 }
 
 fn extrapolated_grid_ms(grid_seconds: &[f32], duration_ms: i64) -> Option<Vec<i64>> {
@@ -870,24 +1138,62 @@ fn extrapolated_grid_ms(grid_seconds: &[f32], duration_ms: i64) -> Option<Vec<i6
         return (!grid.is_empty()).then_some(grid);
     }
 
-    // Extrapolate past the last detected marker using the MEDIAN spacing; the
-    // previous minimum let one noisy near-duplicate pair flood the tail with
-    // arbitrarily dense fake markers, so the "synced" overlap could start
-    // anywhere instead of on a real beat.
-    let deltas = grid
-        .windows(2)
-        .filter_map(|pair| {
-            let delta = pair[1].saturating_sub(pair[0]);
-            (delta > 0).then_some(delta)
-        })
-        .collect::<Vec<_>>();
-    let interval_ms = median_delta(&deltas).filter(|delta| *delta > 0)?;
-    let mut next = grid.last().copied()?.saturating_add(interval_ms);
-    while next < duration_ms {
-        grid.push(next);
-        next = next.saturating_add(interval_ms);
+    // Keep the fitted fractional period and origin until each final marker is
+    // rounded. Repeatedly adding an integer-ms interval accumulates phase
+    // error. This projection is still an estimate outside measured coverage;
+    // the caller's confidence gates and renderer phase check remain required.
+    let fit = noor_mix::beat_grid::fit_beat_grid(grid_seconds)?;
+    let last_seconds = *grid.last()? as f64 / 1_000.0;
+    let mut index = ((last_seconds - fit.origin_seconds) / fit.period_seconds)
+        .floor()
+        .max(0.0)
+        + 1.0;
+    let end_index =
+        ((duration_ms as f64 / 1_000.0 - fit.origin_seconds) / fit.period_seconds).ceil();
+    if end_index - index > 65_536.0 {
+        return None;
+    }
+    while index < end_index {
+        let next = ((fit.origin_seconds + index * fit.period_seconds) * 1_000.0).round() as i64;
+        if next >= duration_ms {
+            break;
+        }
+        if grid.last().is_none_or(|previous| next > *previous) {
+            grid.push(next);
+        }
+        index += 1.0;
     }
     Some(grid)
+}
+
+fn timing_sensitive_dj_program(program: &noor_mix::TransitionProgram) -> bool {
+    // A short unity-rate energy handoff uses the same protected scheduling
+    // as QuickMix. It does not claim phrase/drop lock, so historical phase
+    // jitter must not erase its energy envelope solely because of its name.
+    if matches!(program.template.as_str(), "EnergyLift" | "EnergyReset")
+        && program
+            .decision
+            .as_ref()
+            .is_some_and(|decision| decision.outgoing_window == "tempo_informed_short_overlap")
+        && program.resolve_at <= 4 * u64::from(program.sample_rate)
+        && program.deck_b_start_frame == 0
+        && program.automation.iter().all(|event| {
+            !matches!(event.param, noor_mix::Param::PlaybackRate(_))
+                || ((event.from - 1.0).abs() < 0.0001 && (event.to - 1.0).abs() < 0.0001)
+        })
+    {
+        return false;
+    }
+    matches!(
+        program.template.as_str(),
+        "FilterSweep"
+            | "BassSwap16"
+            | "BassSwap32"
+            | "ClubMix"
+            | "EnergyLift"
+            | "EnergyReset"
+            | "DropSwap"
+    )
 }
 
 fn v1_renderable_program(
@@ -896,125 +1202,81 @@ fn v1_renderable_program(
     channels: u16,
     render_timing_unstable: bool,
 ) -> (noor_mix::TransitionProgram, Option<&'static str>) {
+    // The safe path is a proven fallback and already carries its own envelope.
     if program.template == "SafeCrossfade" {
         return (program.clone(), None);
     }
-    if program.template == "BassSwap16" {
-        if render_timing_unstable {
-            let mut renderer_program = crate::playback::dj_engine::safe_crossfade_program(
-                sample_rate,
-                channels,
-                noor_mix::Policy::default(),
-            );
-            preserve_planner_sync_fields(&mut renderer_program, program);
-            return (renderer_program, Some("timing_unstable"));
-        }
-        let mut renderer_program = noor_mix::planner::bass_swap_16_program(
-            sample_rate,
-            channels,
-            DJ_BASS_SWAP_16_RENDER_MS,
-        );
-        preserve_planner_sync_fields(&mut renderer_program, program);
-        return (renderer_program, None);
-    }
-    if program.template == "BassSwap32" {
-        if render_timing_unstable {
-            let mut renderer_program = crate::playback::dj_engine::safe_crossfade_program(
-                sample_rate,
-                channels,
-                noor_mix::Policy::default(),
-            );
-            preserve_planner_sync_fields(&mut renderer_program, program);
-            return (renderer_program, Some("timing_unstable"));
-        }
-        let mut renderer_program = noor_mix::planner::bass_swap_32_program(
-            sample_rate,
-            channels,
-            DJ_BASS_SWAP_32_RENDER_MS,
-        );
-        preserve_planner_sync_fields(&mut renderer_program, program);
-        return (renderer_program, None);
-    }
-    if program.template == "SlamCut" {
-        let mut renderer_program =
-            noor_mix::planner::slam_cut_program(sample_rate, channels, DJ_SLAM_CUT_RENDER_MS);
-        preserve_planner_sync_fields(&mut renderer_program, program);
-        return (renderer_program, None);
-    }
-    if program.template == "LongHarmonicBlend" {
-        let rate = program
-            .automation
-            .iter()
-            .find(|event| event.param == noor_mix::Param::PlaybackRate(noor_mix::DeckId::B))
-            .map(|event| event.to)
-            .unwrap_or(1.0);
-        let mut renderer_program = noor_mix::planner::long_harmonic_blend_program(
-            sample_rate,
-            channels,
-            DJ_LONG_HARMONIC_BLEND_RENDER_MS,
-            rate,
-        );
-        preserve_planner_sync_fields(&mut renderer_program, program);
-        return (renderer_program, None);
-    }
-    if program.template == "DropTease16" {
-        let mut renderer_program =
-            noor_mix::planner::drop_tease_16_program(sample_rate, channels, 16_000);
-        preserve_planner_sync_fields(&mut renderer_program, program);
-        return (renderer_program, None);
-    }
-    if program.template == "FilterSweep" {
-        if render_timing_unstable {
-            let mut renderer_program = crate::playback::dj_engine::safe_crossfade_program(
-                sample_rate,
-                channels,
-                noor_mix::Policy::default(),
-            );
-            preserve_planner_sync_fields(&mut renderer_program, program);
-            return (renderer_program, Some("timing_unstable"));
-        }
-        let mut renderer_program = noor_mix::planner::filter_sweep_eq_wash_program(
-            sample_rate,
-            channels,
-            DJ_FILTER_SWEEP_RENDER_MS,
-        );
-        preserve_planner_sync_fields(&mut renderer_program, program);
-        return (renderer_program, None);
-    }
-    (
-        crate::playback::dj_engine::safe_crossfade_program(
+    let supported = matches!(
+        program.template.as_str(),
+        "BassSwap16"
+            | "BassSwap32"
+            | "SlamCut"
+            | "LongHarmonicBlend"
+            | "DropTease16"
+            | "FilterSweep"
+            | "ClubMix"
+            | "QuickMix"
+            | "EnergyLift"
+            | "EnergyReset"
+            | "DropSwap"
+    );
+    let mut renderer_program = program.clone().rescaled_to(sample_rate.max(1));
+    renderer_program.channels = channels.max(1);
+    let duration_valid = renderer_program.resolve_at > 0
+        && renderer_program.resolve_at
+            <= DJ_MAX_RENDER_MS * u64::from(renderer_program.sample_rate) / 1_000;
+    // The handoff resumes deck B after the frames it consumed. Preserve the
+    // existing constant-rate contract; dynamic rates or deck A nudges need a
+    // different consumption model and must not reach this renderer.
+    let rates = renderer_program
+        .automation
+        .iter()
+        .filter(|event| matches!(event.param, noor_mix::Param::PlaybackRate(_)))
+        .collect::<Vec<_>>();
+    let rates_valid = rates.len() <= 1
+        && rates.iter().all(|event| {
+            event.param == noor_mix::Param::PlaybackRate(noor_mix::DeckId::B)
+                && event.start_sample == 0
+                && event.end_sample >= renderer_program.resolve_at
+                && (event.from - event.to).abs() <= 0.0001
+        });
+    let safety_valid = noor_mix::planner::safety::validate_audio_safety(
+        &renderer_program,
+        &noor_mix::planner::safety::AudioSafetyPolicy::default(),
+    )
+    .is_ok();
+    let reason = if !supported {
+        Some("template_not_renderable")
+    } else if render_timing_unstable && timing_sensitive_dj_program(program) {
+        Some("timing_unstable")
+    } else if !duration_valid || !rates_valid || !safety_valid {
+        Some("audio_safety_rejected")
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        let mut fallback = crate::playback::dj_engine::safe_crossfade_program(
             sample_rate,
             channels,
             noor_mix::Policy::default(),
-        ),
-        Some("template_not_renderable"),
-    )
-}
-
-fn preserve_planner_sync_fields(
-    renderer_program: &mut noor_mix::TransitionProgram,
-    planner_program: &noor_mix::TransitionProgram,
-) {
-    renderer_program.deck_a_start_frame = planner_program.deck_a_start_frame;
-    renderer_program.deck_b_start_frame = planner_program.deck_b_start_frame;
-    if let Some(rate) = planner_program
-        .automation
-        .iter()
-        .find(|event| event.param == noor_mix::Param::PlaybackRate(noor_mix::DeckId::B))
-        .map(|event| event.to)
-    {
-        renderer_program
-            .automation
-            .retain(|event| event.param != noor_mix::Param::PlaybackRate(noor_mix::DeckId::B));
-        renderer_program.automation.push(noor_mix::AutomationEvent {
-            param: noor_mix::Param::PlaybackRate(noor_mix::DeckId::B),
-            start_sample: 0,
-            end_sample: renderer_program.resolve_at,
-            from: rate,
-            to: rate,
-            curve: noor_mix::Curve::Linear,
-        });
+        );
+        // Source positions remain useful even when the ambitious envelope
+        // cannot be rendered. Never carry rejected rate/automation into safety.
+        if reason == "timing_unstable" && rates_valid && safety_valid {
+            fallback.deck_a_start_frame = renderer_program.deck_a_start_frame;
+            fallback.deck_b_start_frame = renderer_program.deck_b_start_frame;
+            if let Some(event) = rates.first() {
+                let mut rate = (**event).clone();
+                rate.end_sample = fallback.resolve_at;
+                fallback.automation.push(rate);
+            }
+        }
+        return (fallback, Some(reason));
     }
+    // Keep the planner's beat-derived length, phase markers, gain/EQ curves,
+    // source cues, drop provenance and explanation intact. Rebuilding from the
+    // template label erased the musical decisions before the mixer heard them.
+    (renderer_program, None)
 }
 
 fn log_dj_transition_event(
@@ -1091,11 +1353,13 @@ impl ActiveListenSession {
             position_in_session: position,
             transition_from_track_id: transition_from,
             dj_transition_event_id: None,
+            transition_visual_valid: false,
         }
     }
 
     pub fn with_dj_transition_event_id(mut self, event_id: Option<i64>) -> Self {
         self.dj_transition_event_id = event_id;
+        self.transition_visual_valid = event_id.is_some();
         self
     }
 
@@ -1125,7 +1389,7 @@ pub fn latest_open_dj_transition_event_for_pair(
            AND outcome IS NULL
          ORDER BY CASE timing_status
              WHEN 'fired' THEN 0
-             WHEN 'late' THEN 1
+             WHEN 'late' THEN 0
              WHEN 'armed' THEN 2
              ELSE 3
          END,
@@ -2899,11 +3163,12 @@ mod tests {
                 "INSERT INTO dj_transition_events (
                     from_media_ref_kind, from_media_ref_id, to_media_ref_kind, to_media_ref_id,
                     template, program_json, planner_version, timing_delta_ms, timing_status,
+                    timing_source,
                     runtime_rendered_dj_mixer, runtime_renderer_status, runtime_renderer_reason
                  ) VALUES (
                     'tidal_track', '1', 'tidal_track', '2',
                     'SafeCrossfade', '{\"template\":\"SafeCrossfade\"}', 'dj-v1',
-                    ?1, 'fired', ?2, ?3, ?4
+                    ?1, 'fired', 'downbeat_sync', ?2, ?3, ?4
                  )",
                 params![
                     delta_ms,
@@ -2968,6 +3233,26 @@ mod tests {
                 .expect("selected");
 
             assert_eq!(selected, Some(fired_id));
+            // A new late execution is still this session's mix. An older
+            // tight fire must not replace its cue, renderer or listen outcome.
+            let late_id = duplicate.transition_event_id.unwrap();
+            db.with_conn(|conn| {
+                queries::update_dj_transition_fire_timing(
+                    conn,
+                    late_id,
+                    172_400,
+                    "late",
+                    true,
+                    "rendered_handoff",
+                    "next_decode_late_at_fire",
+                )
+            })
+            .expect("mark newer late execution");
+            assert_eq!(
+                db.with_conn(|conn| latest_open_dj_transition_event_for_pair(conn, Some(1), 2))
+                    .expect("latest execution"),
+                Some(late_id)
+            );
         }
 
         #[test]
@@ -2978,6 +3263,169 @@ mod tests {
 
             assert_eq!(second.transition_event_id, first.transition_event_id);
             assert_eq!(event_count(&db), 1);
+        }
+
+        #[test]
+        fn future_policy_replan_retains_event_and_refuses_to_rewrite_fired_audio() {
+            let db = db_with_pair();
+            db.with_conn(|conn| {
+                conn.execute("DELETE FROM audio_dj_profiles", [])?;
+                Ok(())
+            })
+            .expect("missing analysis");
+            let first = plan(&db);
+            let first_id = first.transition_event_id.unwrap();
+            db.with_conn(|conn| queries::set_dj_global_policy(conn, "balanced", "slower"))
+                .expect("slower policy");
+            let engine = DjEngine::new(db.clone());
+            let pair = db.with_conn(load_dj_lookahead_pair).unwrap();
+            let update = plan_prepared_dj_transition_update(&engine, pair, 48_000, 2, 90_000)
+                .unwrap()
+                .expect("future update");
+            assert_eq!(update.transition.transition_event_id, Some(first_id));
+            assert_eq!(update.gapless.overlap_ms, 9000);
+            persist_prepared_dj_transition_update(&engine, &update).unwrap();
+            assert_eq!(event_count(&db), 1);
+            let pair = db.with_conn(load_dj_lookahead_pair).unwrap();
+            assert!(
+                plan_prepared_dj_transition_update(&engine, pair, 48_000, 2, 90_000)
+                    .unwrap()
+                    .is_none()
+            );
+            db.with_conn(|conn| {
+                queries::update_dj_transition_fire_timing(
+                    conn,
+                    first_id,
+                    171_006,
+                    "fired",
+                    true,
+                    "rendered_handoff",
+                    "none",
+                )
+            })
+            .unwrap();
+            db.with_conn(|conn| queries::set_dj_global_policy(conn, "balanced", "faster"))
+                .unwrap();
+            let pair = db.with_conn(load_dj_lookahead_pair).unwrap();
+            assert!(
+                plan_prepared_dj_transition_update(&engine, pair, 48_000, 2, 90_000)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        #[test]
+        fn armed_event_reuse_restores_its_audio_and_structural_windows() {
+            for rhythmic in [false, true] {
+                let db = db_with_pair();
+                db.with_conn(|conn| {
+                    queries::set_dj_global_policy(conn, "safe", "neutral")?;
+                    if rhythmic {
+                        // Safe audio is 6s, while its measured grid alignment
+                        // reserves 8s of the outgoing tail.
+                        conn.execute("UPDATE audio_dj_profiles SET profile_confidence = .65", [])?;
+                        // Conservative personality still admits a good smooth
+                        // blend. Use the real safe-only control for this fixture.
+                        conn.execute(
+                            "INSERT INTO audio_dj_profile_corrections
+                            (media_ref_kind, media_ref_id, safe_crossfade_only)
+                            VALUES ('tidal_track', '1', 1)",
+                            [],
+                        )?;
+                    } else {
+                        conn.execute("UPDATE audio_dj_profiles SET beat_confidence = .05", [])?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+                let prepare = || {
+                    let mut job = next_job(&db);
+                    job.gapless = GaplessPlan {
+                        enabled: true,
+                        overlap_ms: 5_000,
+                        prebuffer_ms: 500,
+                        requires_stream_metadata: true,
+                    };
+                    attach_test_dj_transition_plan(&db, job, 48_000, 2).unwrap()
+                };
+                let first = prepare();
+                let repeated = prepare();
+                assert_eq!(
+                    first.gapless.overlap_ms,
+                    if rhythmic { 8_000 } else { 6_000 }
+                );
+                assert_eq!(
+                    repeated.gapless, first.gapless,
+                    "a reused event must not inherit the configured 5s crossfade"
+                );
+                assert_eq!(
+                    repeated
+                        .prepared_transition
+                        .as_ref()
+                        .unwrap()
+                        .transition_event_id,
+                    first
+                        .prepared_transition
+                        .as_ref()
+                        .unwrap()
+                        .transition_event_id
+                );
+                assert_eq!(
+                    repeated
+                        .prepared_transition
+                        .as_ref()
+                        .unwrap()
+                        .anchor_start_ms,
+                    first.prepared_transition.as_ref().unwrap().anchor_start_ms
+                );
+                assert_eq!(event_count(&db), 1);
+            }
+        }
+
+        #[test]
+        fn partial_scope_keeps_measured_rhythm_but_cannot_certify_synthetic_phase() {
+            let db = db_with_pair();
+            let current = DjMediaRef::TidalTrack {
+                track_id: Some(1),
+                tidal_id: 1,
+            };
+            let program = noor_mix::planner::bass_swap_16_program(48_000, 2, 16_000);
+            db.with_conn(|conn| {
+                conn.execute(
+                    "UPDATE audio_dj_profiles SET profile_confidence = .65, beat_confidence = .9",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+            let measured = db
+                .with_conn(|conn| {
+                    synced_dj_overlap_ms(conn, &current, Some(180_000), &program, 16_000)
+                })
+                .unwrap()
+                .unwrap();
+            assert_eq!(measured.overlap_ms, 16_000);
+            assert_eq!(measured.timing_source, "downbeat_sync");
+            db.with_conn(|conn| {
+                conn.execute(
+                    "UPDATE audio_dj_profiles SET source = 'dj_playback', beat_confidence = 1.0",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+            assert!(
+                db.with_conn(|conn| synced_dj_overlap_ms(
+                    conn,
+                    &current,
+                    Some(180_000),
+                    &program,
+                    16_000
+                ))
+                .unwrap()
+                .is_none(),
+                "uniform zero-origin tempo projections cannot certify phase"
+            );
         }
 
         #[test]
@@ -3013,7 +3461,7 @@ mod tests {
             let replanned = plan(&db);
 
             assert_eq!(replanned.transition_event_id, Some(fallback_id));
-            assert_eq!(replanned.program.template, "BassSwap16");
+            assert_eq!(replanned.program.template, "LongHarmonicBlend");
             assert_eq!(event_count(&db), 1);
             let row: (String, Option<String>) = db
                 .with_conn(|conn| {
@@ -3026,7 +3474,7 @@ mod tests {
                     .map_err(Into::into)
                 })
                 .expect("replanned row");
-            assert_eq!(row.0, "BassSwap16");
+            assert_eq!(row.0, "LongHarmonicBlend");
             assert_eq!(row.1, None);
         }
 
@@ -3084,8 +3532,8 @@ mod tests {
                 .expect("rejected");
             let parsed: Vec<Value> = serde_json::from_str(&rejected).expect("json");
 
-            // The planner is a decision tree, not a scorer, so it logs an empty
-            // list rather than a fabricated per-alternative ranking.
+            // Admitted candidate scores live in program.decision. This legacy
+            // rejection field must not fabricate scores for discarded choices.
             assert!(parsed.is_empty());
         }
 
@@ -3111,6 +3559,8 @@ mod tests {
         #[test]
         fn v1_planner_logs_and_prepares_bass_swap_16_when_renderable() {
             let db = db_with_pair();
+            db.with_conn(|conn| queries::set_dj_preferred_strategy(conn, "bass_swap"))
+                .expect("prefer bass swap for the renderer contract");
             let transition = plan(&db);
 
             assert_eq!(transition.program.template, "BassSwap16");
@@ -3130,7 +3580,7 @@ mod tests {
 
             assert_eq!(row.0, "BassSwap16");
             assert_eq!(renderer_program.template, "BassSwap16");
-            assert_eq!(renderer_program.resolve_at, 1_152_000);
+            assert_eq!(renderer_program.resolve_at, 768_000);
             assert_eq!(row.2, None);
         }
 
@@ -3138,6 +3588,8 @@ mod tests {
         fn v1_planner_keeps_drop_tease_overlay_out_of_end_transition() {
             let db = db_with_pair();
             make_pair_drop_tease_ready(&db);
+            db.with_conn(|conn| queries::set_dj_preferred_strategy(conn, "bass_swap"))
+                .expect("prefer bass swap for the end transition");
             let transition = plan(&db);
 
             assert_eq!(transition.program.template, "BassSwap32");
@@ -3167,6 +3619,13 @@ mod tests {
             // intent; balanced intent now degrades to SafeCrossfade.
             db.with_conn(|conn| {
                 queries::set_dj_global_policy(conn, "bold", "neutral")?;
+                // Independent tempo corroborates the corrected measured
+                // grid; this renderer test must not depend on contradictory
+                // analysis being admitted as beat-accurate evidence.
+                conn.execute(
+                    "UPDATE audio_dsp_features SET bpm = 126.0 WHERE track_id = 2",
+                    [],
+                )?;
                 queries::upsert_audio_dj_profile_correction(
                     conn,
                     &AudioDjProfileCorrectionRow {
@@ -3204,18 +3663,18 @@ mod tests {
 
             assert_eq!(row.0, "FilterSweep");
             assert_eq!(renderer_program.template, "FilterSweep");
-            assert_eq!(renderer_program.resolve_at, 864_000);
+            assert_eq!(renderer_program.resolve_at, 384_000);
             assert_eq!(row.2, None);
         }
 
         #[test]
-        fn v1_renderable_program_passes_filter_sweep_with_wider_duration() {
-            let input = noor_mix::planner::filter_sweep_eq_wash_program(48_000, 2, 32_000);
+        fn v1_renderable_program_preserves_filter_sweep_duration() {
+            let input = noor_mix::planner::filter_sweep_eq_wash_program(48_000, 2, 20_000);
 
             let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
 
             assert_eq!(program.template, "FilterSweep");
-            assert_eq!(program.resolve_at, 864_000);
+            assert_eq!(program.resolve_at, 960_000);
             assert_eq!(reason, None);
             assert!(
                 program
@@ -3227,7 +3686,7 @@ mod tests {
 
         #[test]
         fn v1_renderable_program_passes_bass_swap_16_with_low_handoff() {
-            let mut input = noor_mix::planner::bass_swap_16_program(48_000, 2, 32_000);
+            let mut input = noor_mix::planner::bass_swap_16_program(48_000, 2, 16_000);
             input.deck_b_start_frame = 384_000;
             input.automation.push(noor_mix::AutomationEvent {
                 param: noor_mix::Param::PlaybackRate(noor_mix::DeckId::B),
@@ -3241,7 +3700,7 @@ mod tests {
             let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
 
             assert_eq!(program.template, "BassSwap16");
-            assert_eq!(program.resolve_at, 1_152_000);
+            assert_eq!(program.resolve_at, 768_000);
             assert_eq!(program.deck_b_start_frame, 384_000);
             assert_eq!(reason, None);
             let rate = program
@@ -3264,7 +3723,7 @@ mod tests {
             let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
 
             assert_eq!(program.template, "BassSwap32");
-            assert_eq!(program.resolve_at, 1_344_000);
+            assert_eq!(program.resolve_at, 768_000);
             assert_eq!(reason, None);
             assert!(program.automation.iter().any(|event| event.param
                 == noor_mix::Param::LowGain(noor_mix::DeckId::B)
@@ -3274,13 +3733,12 @@ mod tests {
 
         #[test]
         fn v1_renderable_program_passes_slam_cut_as_short_gain_cut() {
-            let mut input = noor_mix::planner::filter_sweep_eq_wash_program(48_000, 2, 10_000);
-            input.template = "SlamCut".to_string();
+            let input = noor_mix::planner::slam_cut_program(48_000, 2, 40);
 
             let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
 
             assert_eq!(program.template, "SlamCut");
-            assert_eq!(program.resolve_at, 9_600);
+            assert_eq!(program.resolve_at, 1_920);
             assert_eq!(reason, None);
             assert!(program.automation.iter().all(|event| !matches!(
                 event.param,
@@ -3292,12 +3750,12 @@ mod tests {
 
         #[test]
         fn v1_renderable_program_passes_long_harmonic_blend_rate() {
-            let input = noor_mix::planner::long_harmonic_blend_program(48_000, 2, 32_000, 0.985);
+            let input = noor_mix::planner::long_harmonic_blend_program(48_000, 2, 16_000, 0.985);
 
             let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
 
             assert_eq!(program.template, "LongHarmonicBlend");
-            assert_eq!(program.resolve_at, 1_152_000);
+            assert_eq!(program.resolve_at, 768_000);
             assert_eq!(reason, None);
             let rate = program
                 .automation
@@ -3310,8 +3768,7 @@ mod tests {
 
         #[test]
         fn v1_renderable_program_defaults_long_harmonic_blend_rate() {
-            let mut input = noor_mix::planner::filter_sweep_eq_wash_program(48_000, 2, 10_000);
-            input.template = "LongHarmonicBlend".to_string();
+            let input = noor_mix::planner::long_harmonic_blend_program(48_000, 2, 16_000, 1.0);
 
             let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
 
@@ -3328,8 +3785,8 @@ mod tests {
 
         #[test]
         fn v1_renderable_program_preserves_drop_tease_as_overlay() {
-            let mut input = noor_mix::planner::filter_sweep_eq_wash_program(48_000, 2, 10_000);
-            input.template = "DropTease16".to_string();
+            let mut input = noor_mix::planner::drop_tease_16_program(48_000, 2, 10_000);
+            input.drop_source = Some("manual_drop_cue".to_string());
             input.deck_b_start_frame = 384_000;
 
             let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
@@ -3344,6 +3801,156 @@ mod tests {
         }
 
         #[test]
+        fn renderer_preserves_strategy_automation_phase_and_drop_provenance() {
+            let mut input = noor_mix::planner::bass_swap_16_program(48_000, 2, 12_000);
+            input.template = "EnergyLift".to_string();
+            input.intro_start = 48_000;
+            input.fade_start = 400_000;
+            input.deck_b_start_frame = 96_000;
+            input.drop_source = Some("profile_drop_candidate".to_string());
+            input.automation[0].curve = noor_mix::Curve::Cosine;
+            let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
+            assert_eq!(reason, None);
+            assert_eq!(program, input);
+        }
+
+        #[test]
+        fn renderer_rescales_every_planner_marker_without_rebuilding_envelope() {
+            let input = noor_mix::planner::bass_swap_16_program(48_000, 2, 12_000);
+            let (program, reason) = v1_renderable_program(&input, 44_100, 2, false);
+            assert_eq!(reason, None);
+            assert_eq!(program, input.rescaled_to(44_100));
+        }
+
+        #[test]
+        fn renderer_accepts_new_styles_without_collapsing_their_programs() {
+            for template in [
+                "ClubMix",
+                "QuickMix",
+                "EnergyLift",
+                "EnergyReset",
+                "DropSwap",
+            ] {
+                let mut input = noor_mix::planner::bass_swap_16_program(48_000, 2, 4_000);
+                input.template = template.to_string();
+                let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
+                assert_eq!(reason, None, "{template}");
+                assert_eq!(program, input, "{template}");
+            }
+        }
+
+        #[test]
+        fn renderer_rejects_oversized_invalid_and_dynamic_rate_programs_to_safety() {
+            let oversized = noor_mix::planner::bass_swap_16_program(48_000, 2, 32_000);
+            let mut invalid = noor_mix::planner::bass_swap_16_program(48_000, 2, 12_000);
+            invalid.swap_start = invalid.resolve_at + 1;
+            let mut dynamic =
+                noor_mix::planner::long_harmonic_blend_program(48_000, 2, 12_000, 1.0);
+            let rate = dynamic
+                .automation
+                .iter_mut()
+                .find(|event| event.param == noor_mix::Param::PlaybackRate(noor_mix::DeckId::B))
+                .unwrap();
+            rate.to = 1.02;
+            for input in [oversized, invalid, dynamic] {
+                let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
+                assert_eq!(program.template, "SafeCrossfade");
+                assert_eq!(reason, Some("audio_safety_rejected"));
+                assert_eq!(program.resolve_at, 288_000);
+                assert!(
+                    !program
+                        .automation
+                        .iter()
+                        .any(|event| matches!(event.param, noor_mix::Param::PlaybackRate(_)))
+                );
+            }
+        }
+
+        #[test]
+        fn short_cut_schedules_its_own_tail_window_and_honours_downbeat_correction() {
+            let db = db_with_pair();
+            let program = noor_mix::planner::slam_cut_program(48_000, 2, 40);
+            let current = DjMediaRef::TidalTrack {
+                track_id: Some(1),
+                tidal_id: 1,
+            };
+            let overlap = db
+                .with_conn(|conn| {
+                    synced_dj_overlap_ms(conn, &current, Some(180_000), &program, 250)
+                })
+                .unwrap()
+                .unwrap();
+            assert_eq!(overlap.overlap_ms, 2_000);
+            db.with_conn(|conn| {
+                queries::upsert_audio_dj_profile_correction(
+                    conn,
+                    &AudioDjProfileCorrectionRow {
+                        media_ref_kind: "tidal_track".to_string(),
+                        media_ref_id: "1".to_string(),
+                        bpm_multiplier: None,
+                        downbeat_offset_beats: Some(1),
+                        phrase_offset_bars: None,
+                        safe_crossfade_only: false,
+                        transition_speed_bias: None,
+                        manual_drop_blob: vec![],
+                        notes: None,
+                        created_at: "now".to_string(),
+                        updated_at: "now".to_string(),
+                    },
+                )
+            })
+            .unwrap();
+            let corrected = db
+                .with_conn(|conn| {
+                    synced_dj_overlap_ms(conn, &current, Some(180_000), &program, 250)
+                })
+                .unwrap()
+                .unwrap();
+            assert_eq!(corrected.overlap_ms, 1_500);
+        }
+
+        #[test]
+        fn incomplete_analysis_never_earns_a_false_tail_phrase_and_weak_beats_are_not_projected() {
+            let db = db_with_pair();
+            let program = noor_mix::planner::bass_swap_16_program(48_000, 2, 20_000);
+            let current = DjMediaRef::TidalTrack {
+                track_id: Some(1),
+                tidal_id: 1,
+            };
+            db.with_conn(|conn| {
+                let key = current.profile_key();
+                let mut profile = queries::get_audio_dj_profile(conn, &key)?.unwrap();
+                // A malformed/out-of-scope structural cue must not make a
+                // partial 90s analysis claim to know the true 180s tail.
+                profile.mix_out_blob = encode_f32_blob(&[156.0]);
+                profile.outro_start_seconds = Some(156.0);
+                queries::upsert_audio_dj_profile(conn, &profile)
+            })
+            .unwrap();
+            let overlap = db
+                .with_conn(|conn| {
+                    synced_dj_overlap_ms(conn, &current, Some(180_000), &program, 20_000)
+                })
+                .unwrap()
+                .unwrap();
+            assert_eq!(overlap.overlap_ms, 20_000);
+            assert_eq!(overlap.timing_source, "downbeat_sync");
+            db.with_conn(|conn| {
+                let key = current.profile_key();
+                let mut profile = queries::get_audio_dj_profile(conn, &key)?.unwrap();
+                profile.beat_confidence = Some(0.4);
+                queries::upsert_audio_dj_profile(conn, &profile)
+            })
+            .unwrap();
+            let weak = db
+                .with_conn(|conn| {
+                    synced_dj_overlap_ms(conn, &current, Some(180_000), &program, 20_000)
+                })
+                .unwrap();
+            assert!(weak.is_none());
+        }
+
+        #[test]
         fn unstable_timing_downgrades_filter_sweep_to_safe_crossfade() {
             let input = noor_mix::planner::filter_sweep_eq_wash_program(48_000, 2, 10_000);
 
@@ -3351,6 +3958,34 @@ mod tests {
 
             assert_eq!(program.template, "SafeCrossfade");
             assert_eq!(reason, Some("timing_unstable"));
+        }
+
+        #[test]
+        fn short_phase_uncertain_energy_handoffs_keep_their_envelopes_with_old_phase_jitter() {
+            for template in ["EnergyLift", "EnergyReset"] {
+                let mut input = noor_mix::planner::bass_swap_16_program(48_000, 2, 4_000);
+                input.template = template.into();
+                input.decision = Some(noor_mix::program::TransitionDecision {
+                    strategy: template.into(),
+                    confidence: 0.65,
+                    score: 0.7,
+                    reason: "Compatible tempo; phase is unverified".into(),
+                    energy_direction: "lift".into(),
+                    incoming_entry_seconds: 0.0,
+                    incoming_drop_seconds: None,
+                    outgoing_window: "tempo_informed_short_overlap".into(),
+                    duration_beats: 8.0,
+                    candidates: vec![],
+                });
+                let (rendered, reason) = v1_renderable_program(&input, 48_000, 2, true);
+                assert_eq!(reason, None);
+                assert_eq!(rendered, input);
+                input.decision.as_mut().unwrap().outgoing_window = "phrase_end".into();
+                assert_eq!(
+                    v1_renderable_program(&input, 48_000, 2, true).1,
+                    Some("timing_unstable")
+                );
+            }
         }
 
         #[test]
@@ -3380,15 +4015,9 @@ mod tests {
                 2,
                 noor_mix::Policy::default(),
             );
-            let filter = noor_mix::planner::filter_sweep_eq_wash_program(
-                48_000,
-                2,
-                DJ_FILTER_SWEEP_RENDER_MS,
-            );
-            let bass_swap =
-                noor_mix::planner::bass_swap_16_program(48_000, 2, DJ_BASS_SWAP_16_RENDER_MS);
-            let bass_swap_32 =
-                noor_mix::planner::bass_swap_32_program(48_000, 2, DJ_BASS_SWAP_32_RENDER_MS);
+            let filter = noor_mix::planner::filter_sweep_eq_wash_program(48_000, 2, 18_000);
+            let bass_swap = noor_mix::planner::bass_swap_16_program(48_000, 2, 24_000);
+            let bass_swap_32 = noor_mix::planner::bass_swap_32_program(48_000, 2, 28_000);
 
             // SafeCrossfade dropped from 12s to 6s: two full-spectrum tracks
             // fighting for 12 seconds read as mud next to the beat-matched
@@ -3468,6 +4097,53 @@ mod tests {
             let unstable = db.with_conn(render_timing_unstable).expect("gate");
 
             assert!(unstable);
+        }
+
+        #[test]
+        fn old_session_timing_cannot_permanently_veto_current_mixes() {
+            let db = db_with_pair();
+            db.with_conn(|conn| {
+                for _ in 0..20 {
+                    insert_timing_sample(conn, 2_000, true, "rendered_handoff", "none")?;
+                }
+                assert!(render_timing_unstable(conn)?);
+                conn.execute(
+                    "UPDATE dj_transition_events SET started_at = datetime('now', '-2 days')",
+                    [],
+                )?;
+                for delta in [3, 7, 1, 6] {
+                    insert_timing_sample(conn, delta, true, "rendered_handoff", "none")?;
+                }
+                assert!(!render_timing_unstable(conn)?);
+                assert_eq!(dj_transition_fire_ahead_ms(conn)?, 0);
+                assert_eq!(
+                    conn.query_row("SELECT count(*) FROM dj_transition_events", [], |row| row
+                        .get::<_, i64>(
+                        0
+                    ))?,
+                    24
+                );
+                Ok(())
+            })
+            .unwrap();
+        }
+
+        #[test]
+        fn rendered_fallback_duration_errors_do_not_calibrate_creative_timing() {
+            let db = db_with_pair();
+            db.with_conn(|conn| {
+                for _ in 0..20 {
+                    insert_timing_sample(conn, 2_000, true, "rendered_handoff", "none")?;
+                }
+                conn.execute(
+                    "UPDATE dj_transition_events SET timing_source = 'fallback_overlap'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(db.with_conn(dj_transition_fire_ahead_ms).unwrap(), 0);
+            assert!(!db.with_conn(render_timing_unstable).unwrap());
         }
 
         #[test]
@@ -4167,6 +4843,75 @@ mod tests {
     }
 
     #[test]
+    fn phrase_candidate_can_win_within_a_bounded_tail_without_a_mid_song_skip() {
+        let candidate = tail_transition_candidate_ms(
+            120_000,
+            &[92.0, 94.0, 96.0, 98.0, 100.0],
+            20_000,
+            20_000,
+            "ClubMix",
+            false,
+            &[96_000],
+            &[],
+            None,
+            "downbeat_sync",
+        )
+        .unwrap();
+        assert_eq!(candidate, (24_000, "phrase_sync"));
+        let early_phrase = tail_transition_candidate_ms(
+            120_000,
+            &[20.0, 94.0, 96.0, 98.0, 100.0],
+            20_000,
+            20_000,
+            "ClubMix",
+            false,
+            &[20_000],
+            &[],
+            None,
+            "downbeat_sync",
+        )
+        .unwrap();
+        assert_eq!(early_phrase, (20_000, "downbeat_sync"));
+    }
+
+    #[test]
+    fn quick_mix_uses_a_shorter_grid_window_and_unstable_grid_cannot_project() {
+        let candidate = tail_transition_candidate_ms(
+            120_000,
+            &[114.0, 116.0, 118.0],
+            3_000,
+            3_000,
+            "QuickMix",
+            false,
+            &[],
+            &[],
+            None,
+            "downbeat_sync",
+        )
+        .unwrap();
+        assert_eq!(candidate.0, 4_000);
+        assert!(stable_grid(&[0.0, 2.0, 4.0, 6.0, 8.0]));
+        assert!(!stable_grid(&[0.0, 0.1, 4.0, 4.3, 10.0]));
+    }
+
+    #[test]
+    fn extrapolated_grid_preserves_fractional_period_and_fitted_phase() {
+        let bpm = 174.0_f64;
+        let beats = (0..250)
+            .map(|beat| ((0.13 + beat as f64 * 60.0 / bpm) * 100.0).round() as f32 / 100.0)
+            .collect::<Vec<_>>();
+        let projected = extrapolated_grid_ms(&beats, 270_000).unwrap();
+        let last = *projected.last().unwrap() as f64 / 1000.0;
+        let index = ((last - 0.13) * bpm / 60.0).round();
+        let actual = 0.13 + index * 60.0 / bpm;
+        assert!(
+            (last - actual).abs() < 0.02,
+            "tail phase error={}s",
+            last - actual
+        );
+    }
+
+    #[test]
     fn synced_overlap_uses_projected_downbeat_before_track_end() {
         let overlap_ms =
             synced_overlap_from_grid_ms(180_000, &[0.0, 2.0, 4.0], 8_000, Some(8_000 * 48), 48_000)
@@ -4224,6 +4969,7 @@ mod tests {
                 tier: noor_mix::program::Tier::SafeCrossfade,
                 template: "SafeCrossfade".to_string(),
                 drop_source: None,
+                decision: None,
                 sample_rate: 48_000,
                 channels: 2,
                 deck_a_start_frame: 0,
@@ -4247,6 +4993,8 @@ mod tests {
             Some(200_000)
         );
         assert_eq!(event(Some("beat_sync")).anchor_start_ms(), Some(200_000));
+        assert_eq!(event(Some("phrase_sync")).anchor_start_ms(), Some(200_000));
+        assert_eq!(event(Some("mix_out_sync")).anchor_start_ms(), Some(200_000));
         // A fallback overlap's planned start is metadata arithmetic; firing
         // against it would reintroduce the duration-mismatch error.
         assert_eq!(event(Some("fallback_overlap")).anchor_start_ms(), None);

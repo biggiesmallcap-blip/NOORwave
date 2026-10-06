@@ -1218,6 +1218,8 @@ export type DjProfileResponse = {
 
 export type DjMixIntent = 'safe' | 'balanced' | 'bold';
 
+export type DjStrategy = 'adaptive' | 'wildcard' | 'smooth_blend' | 'club_mix' | 'quick_mix' | 'energy_lift' | 'energy_reset' | 'drop_swap' | 'bass_swap' | 'cut';
+
 export type DjMixIntentResponse = {
 	intent: DjMixIntent;
 };
@@ -1225,6 +1227,52 @@ export type DjMixIntentResponse = {
 export type DjPolicyResponse = {
 	mix_intent: DjMixIntent;
 	transition_speed_bias: DjTransitionSpeedBias;
+	preferred_strategy?: DjStrategy;
+};
+
+export type DjAutomationEvent = {
+	param: Partial<Record<'DeckGain' | 'LowGain' | 'MidGain' | 'HighGain' | 'PlaybackRate', 'A' | 'B'>>;
+	start_sample: number;
+	end_sample: number;
+	from: number;
+	to: number;
+	curve: 'Linear' | 'EqualPowerIn' | 'EqualPowerOut' | 'Cosine';
+};
+
+export type DjTransitionProgram = {
+	template: string;
+	tier: 'SafeCrossfade' | 'FullBlend';
+	sample_rate: number;
+	channels: number;
+	deck_a_start_frame: number;
+	deck_b_start_frame: number;
+	sync_start: number;
+	intro_start: number;
+	swap_start: number;
+	fade_start: number;
+	resolve_at: number;
+	loops: Array<{ deck: 'A' | 'B'; start_frame: number; end_frame: number }>;
+	automation: DjAutomationEvent[];
+	decision?: {
+		strategy: string;
+		confidence: number;
+		score: number;
+		reason: string;
+		energy_direction: string;
+		incoming_entry_seconds: number;
+		incoming_drop_seconds?: number;
+		outgoing_window: string;
+		duration_beats: number;
+		candidates: Array<{
+			strategy: string;
+			score: number;
+			quality_score: number;
+			entry_seconds: number;
+			duration_seconds: number;
+			reason: string;
+			components: Array<{ name: string; value: number; weight: number }>;
+		}>;
+	};
 };
 
 export type DjDeckStatus = {
@@ -1238,6 +1286,10 @@ export type DjDeckStatus = {
 	profile_retry_after_ms?: number;
 	profile_retry_reason?: string;
 	profile_confidence?: number;
+	beat_confidence?: number;
+	grid_is_synthetic?: boolean;
+	analysis_scope_ms?: number;
+	energy?: number;
 	beat_count?: number;
 	downbeat_count?: number;
 	phrase_count?: number;
@@ -1304,6 +1356,17 @@ export type DjRuntimeRendererReason =
 
 export type DjStatusResponse = {
 	enabled: boolean;
+	transition_plan?: DjTransitionProgram;
+	playback_position_ms?: number;
+	active_transition?: {
+		event_id: number;
+		outgoing: DjDeckStatus;
+		incoming: DjDeckStatus;
+		program: DjTransitionProgram;
+		start_ms: number;
+		actual_start_ms?: number;
+		elapsed_ms: number;
+	};
 	current?: DjDeckStatus;
 	next?: DjDeckStatus;
 	planning_status:
@@ -1324,6 +1387,7 @@ export type DjStatusResponse = {
 	planning_reason?: string;
 	sync_target?: string;
 	planned_start_ms?: number;
+	runtime_planned_start_ms?: number;
 	actual_start_ms?: number;
 	timing_delta_ms?: number;
 	timing_source?: string;
@@ -1338,6 +1402,7 @@ export type DjStatusResponse = {
 	rejected_alternatives: DjRejectedAlternative[];
 	profile_confidence_floor: number;
 	last_transition_event_id?: number;
+	feedback_transition_event_id?: number;
 	recent_timing_events: DjTimingHistoryEvent[];
 	timing_history_summary: DjTimingHistorySummary;
 	safe_crossfade_suggestion?: {
@@ -1358,6 +1423,7 @@ export type DjTimingHistoryEvent = {
 	renderer_template?: string;
 	planning_reason?: string;
 	planned_start_ms?: number;
+	runtime_planned_start_ms?: number;
 	actual_start_ms?: number;
 	timing_delta_ms?: number;
 	timing_source?: string;

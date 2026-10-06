@@ -1,4 +1,5 @@
 pub mod automation;
+pub mod beat_grid;
 pub mod deck;
 pub mod eq;
 pub mod limiter;

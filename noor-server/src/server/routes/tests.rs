@@ -4779,7 +4779,16 @@ async fn prepared_runtime_track_error_keeps_current_playback_running() {
         });
     }
 
-    handle_prepared_runtime_track_error(&state, 2, "prebuffer decode failed").await;
+    let generation = current_playback_generation(&*state.read().await);
+    handle_prepared_runtime_track_error_for_runtime(
+        &state,
+        None,
+        2,
+        generation,
+        None,
+        "prebuffer decode failed",
+    )
+    .await;
 
     let (current_track_id, current_queue_item_id, is_playing): (Option<i64>, Option<i64>, bool) =
         db.with_conn(|conn| {
@@ -4800,6 +4809,413 @@ async fn prepared_runtime_track_error_keeps_current_playback_running() {
     let info = guard.playback_runtime_info.as_ref().expect("runtime info");
     assert_eq!(info.active_track_id, Some(1));
     assert_eq!(info.last_error.as_deref(), Some("prebuffer decode failed"));
+}
+
+#[tokio::test]
+async fn unavailable_prepared_next_is_skipped_without_interrupting_current_track() {
+    let db = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let (current_qid, failed_qid, duplicate_qid) = db.with_conn(|conn| {
+        conn.execute("UPDATE tracks SET tidal_id = 864212 WHERE id = 2", [])?;
+        conn.execute("INSERT INTO tracks (id, title, artist_id, duration_ms, source) VALUES (3, 'Playable next', 1, 180000, 'tidal_stream')", [])?;
+        conn.execute("INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'test')", [])?;
+        let current_qid = conn.last_insert_rowid();
+        conn.execute("INSERT INTO queue (track_id, position, source) VALUES (2, 1, 'test')", [])?;
+        let failed_qid = conn.last_insert_rowid();
+        conn.execute("INSERT INTO queue (track_id, position, source) VALUES (3, 2, 'test')", [])?;
+        conn.execute("INSERT INTO queue (track_id, position, source) VALUES (2, 3, 'test')", [])?;
+        let duplicate_qid = conn.last_insert_rowid();
+        conn.execute("UPDATE playback_state SET current_track_id = 1, current_queue_item_id = ?1, position_ms = 42000, is_playing = 1 WHERE id = 1", [current_qid])?;
+        Ok((current_qid, failed_qid, duplicate_qid))
+    }).expect("queue");
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+    {
+        let mut guard = state.write().await;
+        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+            device_name: "Test DAC".to_string(),
+            sample_rate: 48_000,
+            channels: 2,
+            active_track_id: Some(1),
+            last_error: None,
+            exclusive_engaged: false,
+            exclusive_transport_format: None,
+        });
+    }
+    let mut events = state.read().await.event_tx.subscribe();
+    let generation = current_playback_generation(&*state.read().await);
+    handle_prepared_runtime_track_error_for_runtime(&state, None, 2, generation, Some(864212),
+        r#"TIDAL rejected playback request with 401 Unauthorized: {"status":401,"subStatus":4005,"userMessage":"Asset is not ready for playback"}"#).await;
+    let snapshot = db.with_conn(player::load_snapshot).expect("snapshot");
+    assert_eq!(
+        snapshot.state.current_track.as_ref().map(|track| track.id),
+        Some(1)
+    );
+    assert_eq!(snapshot.state.current_queue_item_id, Some(current_qid));
+    assert_eq!(snapshot.state.position_ms, 42_000);
+    assert!(snapshot.state.is_playing);
+    assert!(
+        !snapshot.queue.iter().any(|row| row.id == failed_qid),
+        "proven unavailable next row must be skipped immediately"
+    );
+    assert!(
+        snapshot.queue.iter().any(|row| row.id == duplicate_qid),
+        "a skip removes the failed row, not every occurrence of the track"
+    );
+    assert_eq!(snapshot.queue[1].track.id, 3);
+    assert_eq!(
+        current_playback_generation(&*state.read().await),
+        generation
+    );
+    let mut skipped = false;
+    while let Ok(event) = events.try_recv() {
+        skipped |= matches!(event, AppEvent::TrackSkipped { track_id: 2, .. });
+    }
+    assert!(
+        skipped,
+        "notify the listener when an upcoming track is skipped"
+    );
+}
+
+#[test]
+fn delayed_unavailable_next_failure_cannot_remove_changed_queue_or_source() {
+    for change in [
+        "generation",
+        "reorder",
+        "replacement_row",
+        "healed_source",
+        "repeat_one",
+        "active_track",
+    ] {
+        let db = fresh_migrated_db();
+        seed_basic_tracks(&db);
+        db.with_conn(|conn| {
+            conn.execute("UPDATE tracks SET tidal_id = 864216 WHERE id = 2", [])?;
+            conn.execute("INSERT INTO tracks (id, title, artist_id, duration_ms, source) VALUES (3, 'Replacement next', 1, 180000, 'tidal_stream')", [])?;
+            conn.execute("INSERT INTO queue (id, track_id, position, source) VALUES (10, 1, 0, 'test'), (11, 2, 1, 'test'), (12, 3, 2, 'test')", [])?;
+            conn.execute("UPDATE playback_state SET current_track_id = 1, current_queue_item_id = 10, position_ms = 42000, is_playing = 1 WHERE id = 1", [])?;
+            Ok(())
+        }).expect("queue");
+        let mut state = fresh_test_state(db.clone());
+        state.playback_runtime_info = Some(PlaybackRuntimeInfo {
+            device_name: "Test DAC".to_string(),
+            sample_rate: 48_000,
+            channels: 2,
+            active_track_id: Some(1),
+            last_error: None,
+            exclusive_engaged: false,
+            exclusive_transport_format: None,
+        });
+        let generation = current_playback_generation(&state);
+        let (pair, next) = db
+            .with_conn(|conn| {
+                Ok((
+                    crate::playback::dj_lookahead::load_dj_lookahead_pair(conn)?,
+                    player::peek_next_track(conn, false)?.expect("next"),
+                ))
+            })
+            .expect("captured pair before request");
+        match change {
+            "generation" => state.playback_generation.store(generation + 1, std::sync::atomic::Ordering::Relaxed),
+            "reorder" => db.with_conn(|conn| { queue::move_queue_item(conn, 11, 2)?; Ok(()) }).expect("reorder"),
+            "replacement_row" => db.with_conn(|conn| {
+                conn.execute("DELETE FROM queue WHERE id = 11", [])?;
+                conn.execute("INSERT INTO queue (id, track_id, position, source) VALUES (13, 2, 1, 'test')", [])?;
+                Ok(())
+            }).expect("same track in replacement row"),
+            "healed_source" => db.with_conn(|conn| { conn.execute("UPDATE tracks SET tidal_id = 864217 WHERE id = 2", [])?; Ok(()) }).expect("new source id"),
+            "repeat_one" => db.with_conn(|conn| { conn.execute("UPDATE playback_state SET repeat_mode = 'one' WHERE id = 1", [])?; Ok(()) }).expect("repeat one"),
+            "active_track" => state.playback_runtime_info.as_mut().expect("runtime").active_track_id = Some(3),
+            _ => unreachable!(),
+        }
+        let before = db
+            .with_conn(player::load_snapshot)
+            .expect("before delayed failure");
+        assert!(
+            !remove_unavailable_upcoming_row(
+                &mut state,
+                1,
+                generation,
+                &pair,
+                &next,
+                "TIDAL asset 4005"
+            )
+            .expect("guarded skip"),
+            "{change}"
+        );
+        let after = db
+            .with_conn(player::load_snapshot)
+            .expect("after delayed failure");
+        assert_eq!(
+            after.queue.iter().map(|row| row.id).collect::<Vec<_>>(),
+            before.queue.iter().map(|row| row.id).collect::<Vec<_>>(),
+            "{change}"
+        );
+        assert_eq!(after.state.current_queue_item_id, Some(10), "{change}");
+        assert_eq!(after.state.position_ms, 42_000, "{change}");
+        assert!(after.state.is_playing, "{change}");
+    }
+}
+
+#[tokio::test]
+async fn stale_runtime_prepared_error_does_not_change_active_queue() {
+    let db = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    db.with_conn(|conn| {
+        conn.execute("UPDATE tracks SET tidal_id = 864218 WHERE id = 2", [])?;
+        conn.execute("INSERT INTO queue (id, track_id, position, source) VALUES (10, 1, 0, 'test'), (11, 2, 1, 'test')", [])?;
+        conn.execute("UPDATE playback_state SET current_track_id = 1, current_queue_item_id = 10, is_playing = 1 WHERE id = 1", [])?;
+        Ok(())
+    }).expect("queue");
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+    let (old_tx, _old_rx) = std::sync::mpsc::channel();
+    let old_handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(old_tx);
+    let (new_tx, _new_rx) = std::sync::mpsc::channel();
+    {
+        let mut guard = state.write().await;
+        guard.playback_runtime = Some(PlaybackRuntimeState {
+            access_token: "new".into(),
+            handle: playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(new_tx),
+        });
+        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+            device_name: "Test DAC".to_string(),
+            sample_rate: 48_000,
+            channels: 2,
+            active_track_id: Some(1),
+            last_error: None,
+            exclusive_engaged: false,
+            exclusive_transport_format: None,
+        });
+    }
+    let generation = current_playback_generation(&*state.read().await);
+    handle_prepared_runtime_track_error_for_runtime(&state, Some(&old_handle), 2, generation, Some(864218),
+        r#"TIDAL rejected playback request with 401 Unauthorized: {"subStatus":4005,"userMessage":"Asset is not ready for playback"}"#).await;
+    let snapshot = db.with_conn(player::load_snapshot).expect("snapshot");
+    assert_eq!(snapshot.queue.len(), 2);
+    assert_eq!(snapshot.state.current_queue_item_id, Some(10));
+    assert!(
+        state
+            .read()
+            .await
+            .playback_runtime_info
+            .as_ref()
+            .expect("runtime")
+            .last_error
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn delayed_prepared_asset_failure_does_not_remove_new_generation_or_healed_source() {
+    for changed in ["generation", "source"] {
+        let db = fresh_migrated_db();
+        seed_basic_tracks(&db);
+        db.with_conn(|conn| {
+            conn.execute("UPDATE tracks SET tidal_id = 864219 WHERE id = 2", [])?;
+            conn.execute("INSERT INTO queue (id, track_id, position, source) VALUES (10, 1, 0, 'test'), (11, 2, 1, 'test')", [])?;
+            conn.execute("UPDATE playback_state SET current_track_id = 1, current_queue_item_id = 10, position_ms = 42000, is_playing = 1 WHERE id = 1", [])?;
+            Ok(())
+        }).expect("queue");
+        let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+        let (command_tx, _command_rx) = std::sync::mpsc::channel();
+        let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+        let generation = {
+            let mut guard = state.write().await;
+            guard.playback_runtime = Some(PlaybackRuntimeState {
+                access_token: "same-runtime".into(),
+                handle: handle.clone(),
+            });
+            guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+                device_name: "Test DAC".to_string(),
+                sample_rate: 48_000,
+                channels: 2,
+                active_track_id: Some(1),
+                last_error: None,
+                exclusive_engaged: false,
+                exclusive_transport_format: None,
+            });
+            current_playback_generation(&guard)
+        };
+        if changed == "generation" {
+            state
+                .write()
+                .await
+                .playback_generation
+                .store(generation + 1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            db.with_conn(|conn| {
+                conn.execute("UPDATE tracks SET tidal_id = 864220 WHERE id = 2", [])?;
+                Ok(())
+            })
+            .expect("catalog heal before old event arrives");
+        }
+        handle_prepared_runtime_track_error_for_runtime(&state, Some(&handle), 2, generation, Some(864219),
+            r#"TIDAL rejected playback request with 401 Unauthorized: {"subStatus":4005,"userMessage":"Asset is not ready for playback"}"#).await;
+        let snapshot = db.with_conn(player::load_snapshot).expect("snapshot");
+        assert_eq!(snapshot.queue.len(), 2, "{changed}");
+        assert_eq!(snapshot.state.current_queue_item_id, Some(10), "{changed}");
+        assert_eq!(snapshot.state.position_ms, 42_000, "{changed}");
+        assert!(snapshot.state.is_playing, "{changed}");
+        assert!(
+            state
+                .read()
+                .await
+                .playback_runtime_info
+                .as_ref()
+                .expect("runtime")
+                .last_error
+                .is_none(),
+            "{changed}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pause_and_resume_snapshots_preserve_runtime_position_after_seek() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn| {
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])?;
+        conn.execute("INSERT INTO tracks (id, title, artist_id, source, duration_ms) VALUES (1, 'Track', 1, 'tidal', 180000)", [])?;
+        conn.execute("INSERT INTO queue (id, track_id, position, source) VALUES (1, 1, 0, 'manual')", [])?;
+        conn.execute("UPDATE playback_state SET current_track_id = 1, current_queue_item_id = 1, position_ms = 0, is_playing = 1 WHERE id = 1", [])?;
+        Ok(())
+    }).unwrap();
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
+    let (command_tx, _command_rx) = std::sync::mpsc::channel();
+    let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    {
+        let mut guard = state.write().await;
+        guard.playback_runtime = Some(PlaybackRuntimeState {
+            access_token: "test-token".to_string(),
+            handle: handle.clone(),
+        });
+        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+            device_name: "Test DAC".to_string(),
+            sample_rate: 48_000,
+            channels: 2,
+            active_track_id: Some(1),
+            last_error: None,
+            exclusive_engaged: false,
+            exclusive_transport_format: None,
+        });
+        guard
+            .audio_active
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    for target_ms in [10_000, 3_000, 20_000] {
+        handle.test_publish_position(target_ms as u64 * 96);
+        let paused = pause_playback(State(state.clone())).await.unwrap().0;
+        assert_eq!(paused["state"]["position_ms"], target_ms);
+        assert_eq!(paused["state"]["is_playing"], false);
+        let resumed = resume_playback(State(state.clone())).await.unwrap().0;
+        assert_eq!(resumed["state"]["position_ms"], target_ms);
+        assert_eq!(resumed["state"]["is_playing"], true);
+    }
+}
+
+#[tokio::test]
+async fn runtime_listener_receives_ready_before_its_task_first_runs() {
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        fresh_migrated_db(),
+    )));
+    let (command_tx, command_rx) = std::sync::mpsc::channel();
+    let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    state.write().await.playback_runtime = Some(PlaybackRuntimeState {
+        access_token: "test-token".to_string(),
+        handle: handle.clone(),
+    });
+    spawn_playback_runtime_listener(state.clone(), handle.clone());
+    assert!(matches!(
+        command_rx.try_recv(),
+        Ok(playback_runtime::PlaybackRuntimeCommand::RequestReady)
+    ));
+    // No yield: the OS runtime can emit Ready before Tokio polls the listener.
+    assert!(
+        handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::Ready {
+            device_name: "Test DAC".to_string(),
+            sample_rate: 48_000,
+            channels: 2,
+        })
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if state.read().await.playback_runtime_info.is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        state
+            .read()
+            .await
+            .playback_runtime_info
+            .as_ref()
+            .unwrap()
+            .sample_rate,
+        48_000
+    );
+}
+
+#[tokio::test]
+async fn early_pair_preparation_uses_playback_generation_before_near_end() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn| {
+        conn.execute("INSERT INTO artists (id,name) VALUES (1,'Artist')",[])?;
+        conn.execute("INSERT INTO tracks (id,title,artist_id,duration_ms) VALUES (1,'Outgoing',1,180000),(2,'Incoming',1,180000)",[])?;
+        conn.execute("INSERT INTO queue (id,track_id,position,source) VALUES (11,1,0,'manual'),(12,2,1,'manual')",[])?;
+        conn.execute("UPDATE playback_state SET current_track_id=1,current_queue_item_id=11,position_ms=2000,is_playing=1 WHERE id=1",[])?;
+        queries::set_dj_engine_enabled(conn,true)
+    }).unwrap();
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
+    let (command_tx, command_rx) = std::sync::mpsc::channel();
+    let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    let lookahead = {
+        let mut guard = state.write().await;
+        guard
+            .playback_generation
+            .store(71, std::sync::atomic::Ordering::Relaxed);
+        guard.playback_runtime = Some(PlaybackRuntimeState {
+            access_token: "test".into(),
+            handle: handle.clone(),
+        });
+        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+            device_name: "Test DAC".into(),
+            sample_rate: 48000,
+            channels: 2,
+            active_track_id: Some(1),
+            last_error: None,
+            exclusive_engaged: false,
+            exclusive_transport_format: None,
+        });
+        active_dj_lookahead_start_for_state(&guard).unwrap()
+    };
+    assert_ne!(
+        lookahead.queue_generation, 71,
+        "queue identity is distinct from playback generation"
+    );
+    let observed = tokio::task::spawn_blocking(move || {
+        let command = command_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("early preparation must reach runtime");
+        match command {
+            playback_runtime::PlaybackRuntimeCommand::TrackStatus {
+                track_id,
+                generation,
+                respond_to,
+            } => {
+                respond_to
+                    .send(playback_runtime::PlaybackTrackStatus::Prepared)
+                    .unwrap();
+                (track_id, generation)
+            }
+            other => panic!("unexpected preparation command {other:?}"),
+        }
+    });
+    spawn_dj_pair_preparation(state.clone(), handle, lookahead, 71);
+    assert_eq!(observed.await.unwrap(), (2, 71));
+    state.write().await.playback_runtime = None;
 }
 
 #[tokio::test]

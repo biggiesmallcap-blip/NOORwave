@@ -183,6 +183,7 @@ mod tests {
             tier: Tier::SafeCrossfade,
             template: "SafeCrossfade".to_string(),
             drop_source: None,
+            decision: None,
             sample_rate,
             channels,
             deck_a_start_frame: 0,

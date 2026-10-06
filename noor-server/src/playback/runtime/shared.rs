@@ -1,4 +1,5 @@
 use super::commands::{PlaybackRuntimeCommand, PlaybackRuntimeEvent, PlaybackTerminalReason};
+use super::timeline::AtomicHandoffTimeline;
 use crate::playback::gapless::GaplessPlan;
 use crate::playback::player::PlaybackSourceKind;
 use anyhow::{Result, anyhow};
@@ -206,6 +207,13 @@ fn write_output_buffer<T>(
         }
     };
 
+    // An accepted paused seek can cancel its old pause ramp while this
+    // callback waits for the buffer. Recheck before draining the new cursor.
+    if shared.paused.load(Ordering::SeqCst) && !shared.pause_fade_armed.load(Ordering::Relaxed) {
+        data.fill_with(|| convert(0.0));
+        return;
+    }
+
     let seek_target = shared.seek_target_samples.load(Ordering::Relaxed);
     if seek_target != u64::MAX
         && shared
@@ -356,6 +364,7 @@ fn write_output_buffer<T>(
             .position_samples
             .fetch_add(written as u64, Ordering::Relaxed);
     }
+    shared.publish_source_position();
 
     // Real-time-safe telemetry: a relaxed atomic store + a load + conditional
     // CAS, no allocation. The buffered_samples mirror lets the HTTP /
@@ -444,16 +453,16 @@ fn write_output_buffer<T>(
         if xfade > 0 {
             let pos = shared.position_samples.load(Ordering::Relaxed);
             let trigger = shared.dj_fire_trigger_samples.load(Ordering::Relaxed);
-            let fire = if trigger != u64::MAX {
+            let trigger_target = if trigger != u64::MAX {
                 // Beat-anchored DJ fire: the trigger is an absolute position
                 // on the decoded-audio timeline, immune to the metadata /
                 // decoded duration mismatch of the total-based countdown.
-                pos >= trigger
+                Some(trigger)
             } else {
                 let total = shared.total_samples.load(Ordering::Relaxed);
-                total > 0 && total.saturating_sub(pos) <= xfade
+                (total > 0).then(|| total.saturating_sub(xfade))
             };
-            if fire {
+            if let Some(trigger_target_samples) = trigger_target.filter(|target| pos >= *target) {
                 shared
                     .crossfade_start_signaled
                     .store(true, Ordering::Relaxed);
@@ -461,6 +470,7 @@ fn write_output_buffer<T>(
                     track_id: shared.track_id,
                     generation: shared.generation,
                     trigger_position_samples: pos,
+                    trigger_target_samples,
                 });
             }
         }
@@ -534,6 +544,16 @@ pub(crate) struct PlaybackSharedState {
     /// with; `paused` itself still flips synchronously for every other reader.
     pub(crate) pause_fade_armed: AtomicBool,
     pub(crate) position_samples: Arc<AtomicU64>,
+    /// Public original-track position; the buffer counter above remains on
+    /// the output clock so decoding, compaction and sample consumption stay
+    /// unchanged when an incoming cue/rate is used.
+    pub(crate) source_position_samples: Arc<AtomicU64>,
+    pub(crate) source_offset_samples: Arc<AtomicU64>,
+    pub(crate) handoff_elapsed_samples: Arc<AtomicU64>,
+    pub(crate) handoff_timeline: AtomicHandoffTimeline,
+    /// Bounded source prefix replaced by the rendered mix. On manual seek
+    /// the runtime restores plain incoming audio instead of replaying deck A.
+    pub(crate) handoff_source_prefix: Mutex<Option<Vec<f32>>>,
     pub(crate) seek_target_samples: AtomicU64,
     pub(crate) total_samples: AtomicU64,
     /// Mirror of `buffer.samples.len()` published from the audio callback so
@@ -609,6 +629,11 @@ impl PlaybackSharedState {
             0
         };
         let volume_smoothed = AtomicU32::new(volume_ctl.load(Ordering::Relaxed));
+        let source_position_samples =
+            Arc::new(AtomicU64::new(position_samples.load(Ordering::Relaxed)));
+        let source_offset_samples = Arc::new(AtomicU64::new(
+            position_offset_samples.load(Ordering::Relaxed),
+        ));
         Self {
             track_id,
             generation,
@@ -631,6 +656,11 @@ impl PlaybackSharedState {
             transport_gain: AtomicU32::new(1.0f32.to_bits()),
             pause_fade_armed: AtomicBool::new(false),
             position_samples,
+            source_position_samples,
+            source_offset_samples,
+            handoff_elapsed_samples: Arc::new(AtomicU64::new(u64::MAX)),
+            handoff_timeline: AtomicHandoffTimeline::default(),
+            handoff_source_prefix: Mutex::new(None),
             seek_target_samples: AtomicU64::new(u64::MAX),
             total_samples: AtomicU64::new(estimated_total_samples.unwrap_or(0)),
             buffered_samples: Arc::new(AtomicU64::new(0)),
@@ -751,12 +781,17 @@ impl PlaybackSharedState {
 
     pub(crate) fn set_manual_seek_crossfade_suppression(&self, target_samples: u64) -> bool {
         let total = self.total_samples.load(Ordering::Relaxed);
-        let threshold_samples = (NEAR_END_THRESHOLD_MS as u64)
+        // NearEnd's 30-second threshold schedules preparation; it is not the
+        // audible transition window. Only protect an already-crossed window
+        // or a seek with less than half a second of preparation time.
+        let threshold_samples = 500_u64
             .saturating_mul(u64::from(self.device_sample_rate))
             .saturating_mul(u64::from(self.device_channels.max(1)))
             / 1_000;
         let crossfade_samples = self.crossfade_samples.load(Ordering::Relaxed);
-        let transition_start_samples = total.saturating_sub(crossfade_samples);
+        let countdown_start = total.saturating_sub(crossfade_samples);
+        let anchor = self.dj_fire_trigger_samples.load(Ordering::Relaxed);
+        let transition_start_samples = countdown_start.min(anchor);
         let suppress = total > 0
             && (target_samples >= transition_start_samples
                 || total.saturating_sub(target_samples) <= threshold_samples.max(1));
@@ -769,13 +804,176 @@ impl PlaybackSharedState {
     /// consumers outside the buffer mutex (the route-side seek ack and the
     /// frontend buffered-bar scrubber). Published as an ABSOLUTE-track
     /// upper bound (offset + buffer length) so a route-side caller can
-    /// compare directly against an absolute target_samples. Cost: a load
-    /// plus a single Relaxed atomic store, no allocation - consistent with
-    /// the other telemetry atomics flipped inside the CPAL critical section.
+    /// compare directly against an absolute target_samples. Uses bounded
+    /// atomic reads/stores and arithmetic, without allocating or locking.
     pub(crate) fn publish_buffered_samples(&self, samples_len: usize) {
         let offset = self.position_offset_samples.load(Ordering::Relaxed);
-        self.buffered_samples
-            .store(offset.saturating_add(samples_len as u64), Ordering::Relaxed);
+        let channels = u64::from(self.device_channels.max(1));
+        let source_offset = self
+            .handoff_timeline
+            .snapshot()
+            .filter(|timeline| {
+                offset / channels
+                    < timeline
+                        .output_origin
+                        .saturating_add(timeline.output_frames)
+            })
+            // The original incoming prefix is retained until a seek restores
+            // it. While the mix is still buffered, the opening is decoded too.
+            .map_or_else(
+                || self.output_to_source_samples(offset),
+                |timeline| timeline.output_origin.saturating_mul(channels),
+            );
+        self.source_offset_samples
+            .store(source_offset, Ordering::Relaxed);
+        self.buffered_samples.store(
+            self.output_to_source_samples(offset.saturating_add(samples_len as u64)),
+            Ordering::Relaxed,
+        );
+    }
+
+    pub(crate) fn output_to_source_samples(&self, output_samples: u64) -> u64 {
+        let channels = u64::from(self.device_channels.max(1));
+        self.handoff_timeline
+            .snapshot()
+            .map_or(output_samples, |timeline| {
+                timeline
+                    .source_frame(output_samples / channels)
+                    .saturating_mul(channels)
+            })
+    }
+
+    pub(crate) fn source_to_output_samples(&self, source_samples: u64) -> Option<u64> {
+        let channels = u64::from(self.device_channels.max(1));
+        match self.handoff_timeline.snapshot() {
+            None => Some(source_samples),
+            Some(timeline) => timeline
+                .output_frame(source_samples / channels)
+                .map(|frame| frame.saturating_mul(channels)),
+        }
+    }
+
+    pub(crate) fn publish_source_position(&self) {
+        let output = self.position_samples.load(Ordering::Relaxed);
+        self.source_position_samples
+            .store(self.output_to_source_samples(output), Ordering::Relaxed);
+        let channels = u64::from(self.device_channels.max(1));
+        let elapsed = self
+            .handoff_timeline
+            .snapshot()
+            .and_then(|timeline| {
+                let frames = (output / channels).saturating_sub(timeline.output_origin);
+                (frames < timeline.output_frames).then(|| frames.saturating_mul(channels))
+            })
+            .unwrap_or(u64::MAX);
+        self.handoff_elapsed_samples
+            .store(elapsed, Ordering::Relaxed);
+    }
+
+    /// Off the audio thread. Preserve source sample indices and the decoded
+    /// remainder while retiring the handoff mapping on an accepted seek.
+    pub(crate) fn restore_source_buffer_after_seek(&self) -> Result<bool> {
+        let mut guard = self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow!("playback buffer poisoned"))?;
+        let Some(timeline) = self.handoff_timeline.snapshot() else {
+            return Ok(false);
+        };
+        let channels = u64::from(self.device_channels.max(1));
+        let offset = self.position_offset_samples.load(Ordering::Relaxed);
+        let output = self.position_samples.load(Ordering::Relaxed);
+        let source_position = self.output_to_source_samples(output);
+        let source_total =
+            self.output_to_source_samples(self.total_samples.load(Ordering::Relaxed));
+        let mix_end = timeline
+            .output_origin
+            .saturating_add(timeline.output_frames)
+            .saturating_mul(channels);
+        let mut prefix = self
+            .handoff_source_prefix
+            .lock()
+            .map_err(|_| anyhow!("handoff prefix poisoned"))?;
+        let source_offset = if offset < mix_end {
+            let remainder_at = mix_end.saturating_sub(offset) as usize;
+            let mut original = prefix
+                .take()
+                .ok_or_else(|| anyhow!("handoff source prefix missing"))?;
+            original.extend_from_slice(&guard.samples[remainder_at.min(guard.samples.len())..]);
+            guard.samples = original;
+            timeline.output_origin.saturating_mul(channels)
+        } else {
+            prefix.take();
+            self.output_to_source_samples(offset)
+        };
+        guard.read_pos = source_position
+            .saturating_sub(source_offset)
+            .min(guard.samples.len() as u64) as usize;
+        for trigger in [
+            &self.dj_fire_trigger_samples,
+            &self.drop_preview_trigger_samples,
+        ] {
+            let output_trigger = trigger.load(Ordering::Relaxed);
+            if output_trigger != u64::MAX {
+                trigger.store(
+                    self.output_to_source_samples(output_trigger),
+                    Ordering::Relaxed,
+                );
+            }
+        }
+        self.position_offset_samples
+            .store(source_offset, Ordering::Relaxed);
+        self.position_samples
+            .store(source_position, Ordering::Relaxed);
+        self.total_samples.store(source_total, Ordering::Relaxed);
+        self.handoff_timeline.clear();
+        self.publish_source_position();
+        self.publish_buffered_samples(guard.samples.len());
+        Ok(true)
+    }
+
+    /// Apply decoded seeks under the existing buffer mutex before acknowledging
+    /// them. The source clock and cursor advance together, even while paused.
+    pub(crate) fn apply_in_buffer_seek(&self, target_samples: u64) -> Result<()> {
+        let mut guard = self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow!("playback buffer poisoned"))?;
+        let offset = self.position_offset_samples.load(Ordering::Relaxed);
+        let local = target_samples
+            .checked_sub(offset)
+            .ok_or_else(|| anyhow!("seek precedes decoded audio"))?;
+        if !guard.seek_to(local as usize) {
+            return Err(anyhow!("seek exceeds decoded audio"));
+        }
+        if self.paused.load(Ordering::SeqCst) {
+            // A pause's short ramp belongs to its old playhead. It must not
+            // drain audio from the newly sought position while still paused.
+            self.disarm_pause_fade();
+            self.transport_gain
+                .store(0.0f32.to_bits(), Ordering::Relaxed);
+        }
+        self.seek_target_samples.store(u64::MAX, Ordering::Relaxed);
+        self.position_samples
+            .store(target_samples, Ordering::Relaxed);
+        self.publish_source_position();
+        self.publish_buffered_samples(guard.samples.len());
+        Ok(())
+    }
+
+    /// Decoder-side publication is necessary while the output gate is paused:
+    /// the callback cannot publish a range it never visits.
+    pub(crate) fn append_decoded_samples(&self, samples: &[f32]) -> Result<usize> {
+        let mut guard = self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow!("playback buffer poisoned"))?;
+        if guard.sealed_for_render {
+            return Ok(guard.samples.len());
+        }
+        guard.samples.extend_from_slice(samples);
+        self.publish_buffered_samples(guard.samples.len());
+        Ok(guard.samples.len())
     }
 
     pub(crate) fn unread_buffered_samples(&self) -> Result<usize> {
@@ -837,6 +1035,9 @@ pub(crate) struct PlaybackBuffer {
     pub(crate) starved_notified: bool,
     pub(crate) finished: bool,
     pub(crate) finished_notified: bool,
+    /// A bounded optional overlay owns this buffer after installation. A
+    /// decoder still winding down must not append the original song to it.
+    pub(crate) sealed_for_render: bool,
 }
 
 impl PlaybackBuffer {
@@ -850,6 +1051,7 @@ impl PlaybackBuffer {
             starved_notified: false,
             finished: false,
             finished_notified: false,
+            sealed_for_render: false,
         }
     }
 
@@ -915,6 +1117,7 @@ impl PlaybackBuffer {
         self.starved_notified = false;
         self.finished = false;
         self.finished_notified = false;
+        self.sealed_for_render = false;
     }
 }
 
@@ -964,6 +1167,107 @@ mod tests {
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
         ))
+    }
+
+    #[test]
+    fn seeking_thirty_seconds_before_the_end_preserves_a_future_mix() {
+        let shared = test_shared_state();
+        shared.total_samples.store(120 * 96_000, Ordering::Relaxed);
+        shared
+            .crossfade_samples
+            .store(6 * 96_000, Ordering::Relaxed);
+        assert!(!shared.set_manual_seek_crossfade_suppression(90 * 96_000));
+        assert!(!shared.set_manual_seek_crossfade_suppression(110 * 96_000));
+        assert!(shared.set_manual_seek_crossfade_suppression(114 * 96_000));
+        assert!(shared.set_manual_seek_crossfade_suppression(119 * 96_000));
+        // Seeking back before the window enables this pair again.
+        assert!(!shared.set_manual_seek_crossfade_suppression(90 * 96_000));
+    }
+
+    #[test]
+    fn paused_seek_cancels_a_pending_pause_fade_before_moving_the_playhead() {
+        let shared = test_shared_state();
+        {
+            let mut buffer = shared.buffer.lock().unwrap();
+            buffer.samples = vec![0.7; 192_000];
+            buffer.mark_finished();
+        }
+        assert!(shared.begin_fade_out());
+        shared.apply_in_buffer_seek(96_000).unwrap();
+        assert!(drain_gain(&shared, 128).iter().all(|sample| *sample == 0.0));
+        assert_eq!(shared.position_samples.load(Ordering::Relaxed), 96_000);
+    }
+
+    #[test]
+    fn paused_seek_updates_source_clock_and_cursor_without_emitting_audio() {
+        let shared = test_shared_state();
+        shared
+            .position_offset_samples
+            .store(48_000, Ordering::Relaxed);
+        shared.position_samples.store(48_000, Ordering::Relaxed);
+        {
+            let mut buffer = shared.buffer.lock().unwrap();
+            buffer.samples = vec![0.7; 192_000];
+            buffer.mark_finished();
+        }
+        shared.paused.store(true, Ordering::SeqCst);
+        let (command_tx, _) = mpsc::channel();
+        let handle = super::super::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+        *handle.position_source.lock().unwrap() = Arc::clone(&shared.source_position_samples);
+        for target in [192_000, 72_000] {
+            shared.apply_in_buffer_seek(target).unwrap();
+            assert_eq!(
+                shared.buffer.lock().unwrap().read_pos,
+                (target - 48_000) as usize
+            );
+            assert_eq!(
+                handle.get_position_ms(48_000, 2),
+                (target * 1000 / 96_000) as i64
+            );
+            assert_eq!(shared.seek_target_samples.load(Ordering::Relaxed), u64::MAX);
+            assert!(drain_gain(&shared, 128).iter().all(|sample| *sample == 0.0));
+            assert_eq!(shared.position_samples.load(Ordering::Relaxed), target);
+        }
+        assert!(shared.apply_in_buffer_seek(47_999).is_err());
+        shared.paused.store(false, Ordering::SeqCst);
+        shared.apply_in_buffer_seek(96_000).unwrap();
+        assert_eq!(shared.position_samples.load(Ordering::Relaxed), 96_000);
+        assert_eq!(handle.get_position_ms(48_000, 2), 1000);
+        assert!(drain_gain(&shared, 128).iter().any(|sample| *sample > 0.0));
+        assert_eq!(
+            shared.source_position_samples.load(Ordering::Relaxed),
+            96_256
+        );
+    }
+
+    #[test]
+    fn paused_decoder_append_publishes_the_seek_range_without_an_audio_callback() {
+        let shared = test_shared_state();
+        shared.paused.store(true, Ordering::SeqCst);
+        shared
+            .position_offset_samples
+            .store(96_000, Ordering::Relaxed);
+        shared.position_samples.store(96_000, Ordering::Relaxed);
+        shared.append_decoded_samples(&vec![0.7; 192_000]).unwrap();
+        let (command_tx, _) = mpsc::channel();
+        let handle = super::super::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+        *handle.position_source.lock().unwrap() = Arc::clone(&shared.source_position_samples);
+        *handle.buffered_source.lock().unwrap() = Arc::clone(&shared.buffered_samples);
+        *handle.offset_source.lock().unwrap() = Arc::clone(&shared.source_offset_samples);
+        assert_eq!(handle.get_buffered_start_ms(48_000, 2), 1000);
+        assert_eq!(handle.get_buffered_ms(48_000, 2), 3000);
+        assert_eq!(
+            super::super::evaluate_seek_decision(
+                192_000,
+                handle.buffered_start_samples(),
+                handle.buffered_samples(),
+                true
+            ),
+            super::super::SeekDecision::Dispatch
+        );
+        shared.apply_in_buffer_seek(192_000).unwrap();
+        assert_eq!(handle.get_position_ms(48_000, 2), 2000);
+        assert!(drain_gain(&shared, 128).iter().all(|sample| *sample == 0.0));
     }
 
     /// Drives one callback over an all-1.0 input, so every output sample is
@@ -1649,10 +1953,12 @@ mod tests {
                 track_id,
                 generation,
                 trigger_position_samples,
+                trigger_target_samples,
             } => {
                 assert_eq!(track_id, shared.track_id);
                 assert_eq!(generation, shared.generation);
                 assert_eq!(trigger_position_samples, 9_604);
+                assert_eq!(trigger_target_samples, 9_500);
             }
             other => panic!("expected CrossfadeStart, got {other:?}"),
         }

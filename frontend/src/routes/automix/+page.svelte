@@ -31,6 +31,8 @@
 		type PlaybackRuntimeInfo
 	} from '$lib/api/client';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
+	import TransitionStory from '$lib/components/dj-cockpit/TransitionStory.svelte';
+	import type { DjStatusResponse } from '$lib/api/client';
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
@@ -50,6 +52,15 @@
 	import { captureScroll, restoreScroll } from '$lib/navigation/scroll';
 
 	let saving = $state(false);
+	let djStatus = $state<DjStatusResponse | null>(null);
+	async function refreshDjStory() {
+		try { djStatus = await api.getDjStatus(); } catch { djStatus = null; }
+	}
+	onMount(() => {
+		void refreshDjStory();
+		const interval = window.setInterval(() => void refreshDjStory(), 2_000);
+		return () => window.clearInterval(interval);
+	});
 	let draftCrossfade = $state(0);
 	let errorMsg = $state('');
 	let runtime = $state<PlaybackRuntimeInfo | null>(null);
@@ -310,10 +321,11 @@
 <div class="page-shell automix-page animate-in">
 	<PageHeader
 		eyebrow="Automix"
-		title="Automix diagnostics"
-		subtitle="Seed health, queue blend forecast, and controls for fixing weak transitions."
+		title="Keep the music flowing"
+		subtitle="Shape the queue, then let DJ find the right way between tracks."
 	>
 		{#snippet actions()}
+			<a class="btn btn-glass" href="/dj">DJ transitions →</a>
 			<button class="btn btn-glass" onclick={loadControlData} disabled={saving}>Refresh data</button>
 			<button class="btn btn-glass" onclick={startCurrentSongRadio} disabled={saving || !$currentTrack}>
 				Start radio
@@ -327,11 +339,14 @@
 			</button>
 		{/snippet}
 	</PageHeader>
+	{#if djStatus?.enabled}<TransitionStory status={djStatus} compact />{/if}
 
 	{#if errorMsg}
 		<div class="error-banner glass-panel">{errorMsg}</div>
 	{/if}
 
+	<details class="automix-disclosure">
+		<summary>Diagnostics</summary>
 	<section class="diagnostic-top">
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<div
@@ -422,6 +437,7 @@
 		<MetricPair label="Model" value={discoveryCoverageLabel} copy={`${discoveryStatus?.playable_tracks?.toLocaleString() ?? 0} playable indexed.`} />
 		<MetricPair label="DSP" value={audioStats?.total_analyzed?.toLocaleString() ?? '0'} copy={`BPM ${audioStats?.avg_bpm?.toFixed(1) ?? '--'} / key ${audioStats?.top_key ?? '--'}.`} />
 	</section>
+	</details>
 
 	<section class="queue-lab glass-panel">
 		<div class="card-heading">
@@ -600,6 +616,8 @@
 		</section>
 	</section>
 
+	<details class="automix-disclosure">
+		<summary>Library signals</summary>
 	<section class="data-calls">
 		<div class="glass-panel data-card">
 			<span>Embedding coverage</span>
@@ -617,9 +635,14 @@
 			<div class="mini-bar"><i style={`width:${percentLabel(analyzedCoverage ?? 0)}`}></i></div>
 		</div>
 	</section>
+	</details>
 </div>
 
 <style>
+	.automix-disclosure { border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: var(--space-3); background: var(--bg-surface); }
+	.automix-disclosure > summary { cursor: pointer; padding: var(--space-2); color: var(--text-secondary); font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); }
+	.automix-disclosure > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+	.automix-disclosure[open] > summary { margin-bottom: var(--space-3); }
 	.automix-page {
 		gap: var(--space-5);
 	}

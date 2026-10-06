@@ -57,7 +57,7 @@ mod video_discovery_routes;
 pub use tidal_sync_routes::trigger_auto_sync;
 
 type TidalPlaylistTracksCache = Arc<Mutex<HashMap<String, (Instant, Vec<TidalTrack>)>>>;
-type DropPreviewArmKey = (i64, i64, u64);
+type DropPreviewArmKey = (usize, i64, i64, u64, u64);
 
 const TIDAL_PLAYLIST_TRACKS_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 const DJ_LOOKAHEAD_DEADLINE_SAMPLES: u64 = 48_000 * 30;
@@ -72,6 +72,20 @@ const TIDAL_SEARCH_UPSTREAM_TIMEOUT_SECS: u64 = 8;
 
 static DROP_PREVIEW_ARM_ATTEMPTS: OnceLock<Mutex<HashMap<DropPreviewArmKey, Instant>>> =
     OnceLock::new();
+// One preparation task per active pair, including when a seek emits Started.
+static DJ_PAIR_PREPARATION_TASKS: OnceLock<Mutex<HashSet<(usize, i64, i64, u64, u64)>>> =
+    OnceLock::new();
+
+struct DjPairPreparationGuard((usize, i64, i64, u64, u64));
+impl Drop for DjPairPreparationGuard {
+    fn drop(&mut self) {
+        if let Some(tasks) = DJ_PAIR_PREPARATION_TASKS.get()
+            && let Ok(mut tasks) = tasks.lock()
+        {
+            tasks.remove(&self.0);
+        }
+    }
+}
 
 async fn queue_missing_dj_profiles_after_pair_change(state: SharedState, context: &'static str) {
     if let Err(status) = dj_routes::queue_missing_dj_profiles_for_current_pair(state).await {
@@ -106,33 +120,208 @@ async fn start_dj_lookahead_and_queue_profiles_after_pair_change(
     handle: playback_runtime::PlaybackRuntimeHandle,
     context: &'static str,
 ) {
-    let lookahead = {
+    let (lookahead, playback_generation) = {
         let state_guard = state.read().await;
-        active_dj_lookahead_start_for_state(&state_guard)
+        (
+            active_dj_lookahead_start_for_state(&state_guard),
+            current_playback_generation(&state_guard),
+        )
     };
     if let Some(lookahead) = lookahead {
         let _ = lookahead.dispatch(&handle);
-        spawn_drop_preview_scheduler(state.clone(), handle, lookahead);
+        spawn_dj_pair_preparation(
+            state.clone(),
+            handle.clone(),
+            lookahead.clone(),
+            playback_generation,
+        );
+        spawn_drop_preview_scheduler(state.clone(), handle, lookahead, playback_generation);
     }
     queue_missing_dj_profiles_after_pair_change(state, context).await;
+}
+
+fn spawn_dj_pair_preparation(
+    state: SharedState,
+    handle: playback_runtime::PlaybackRuntimeHandle,
+    lookahead: player::DjLookaheadStart,
+    playback_generation: u64,
+) {
+    let (Some(track_id), Some(next_queue_id)) = (
+        lookahead.current.as_ref().and_then(|r| r.track_id()),
+        lookahead.next_queue_item_id,
+    ) else {
+        return;
+    };
+    let key = (
+        Arc::as_ptr(&state) as usize,
+        track_id,
+        next_queue_id,
+        lookahead.queue_generation,
+        playback_generation,
+    );
+    if !DJ_PAIR_PREPARATION_TASKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(key)
+    {
+        return;
+    }
+    tokio::spawn(async move {
+        let _guard = DjPairPreparationGuard(key);
+        let mut prepare_attempts = 0_u64;
+        let mut next_prepare_attempt = Instant::now();
+        loop {
+            let same_pair = {
+                let state_guard = state.read().await;
+                state_guard
+                    .playback_runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                    && current_playback_generation(&state_guard) == playback_generation
+                    && state_guard
+                        .playback_runtime_info
+                        .as_ref()
+                        .and_then(|info| info.active_track_id)
+                        == Some(track_id)
+                    && active_dj_lookahead_start_for_state(&state_guard).is_some_and(|pair| {
+                        pair.current_queue_item_id == lookahead.current_queue_item_id
+                            && pair.next_queue_item_id == lookahead.next_queue_item_id
+                            && pair.queue_generation == lookahead.queue_generation
+                    })
+            };
+            if !same_pair {
+                break;
+            }
+            // Use the established peek/prebuffer path from track start. Keep
+            // network resolution away from the runtime event listener.
+            if prepare_attempts < 3 && Instant::now() >= next_prepare_attempt {
+                match handle_near_end(state.clone(), track_id, playback_generation).await {
+                    Ok(false) => {} // Already prepared or another preparation owns the slot.
+                    result => {
+                        prepare_attempts += 1;
+                        next_prepare_attempt =
+                            Instant::now() + Duration::from_secs(20 * prepare_attempts);
+                        if let Err(error) = result {
+                            warn!("Early DJ preparation skipped: {error:?}");
+                        }
+                    }
+                }
+            }
+            if let Err(error) = refresh_prepared_dj_transition(&state, &handle).await {
+                warn!("Prepared DJ plan refresh skipped: {error:?}");
+            }
+            // Profiles may arrive after the pair starts playing. An absent
+            // preview plan must not consume its one-preview-per-pair latch.
+            if let Err(error) = schedule_drop_preview_for_pair(
+                state.clone(),
+                handle.clone(),
+                lookahead.clone(),
+                playback_generation,
+            )
+            .await
+            {
+                warn!("Drop preview scheduling skipped: {error:?}");
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    });
+}
+
+async fn refresh_prepared_dj_transition(
+    state: &SharedState,
+    handle: &playback_runtime::PlaybackRuntimeHandle,
+) -> anyhow::Result<()> {
+    let (engine, update) = {
+        let state_guard = state.read().await;
+        let Some(info) = state_guard.playback_runtime_info.as_ref() else {
+            return Ok(());
+        };
+        let pair = state_guard
+            .db
+            .with_conn(|conn| active_dj_pair_for_state_and_conn(&state_guard, conn))?;
+        let engine = crate::playback::dj_engine::DjEngine::new(state_guard.db.clone());
+        if !state_guard.db.with_conn(queries::is_dj_engine_enabled)? {
+            return Ok(());
+        }
+        let update = player::plan_prepared_dj_transition_update(
+            &engine,
+            pair,
+            info.sample_rate,
+            info.channels,
+            handle.get_position_ms(info.sample_rate, info.channels),
+        )?;
+        (engine, update)
+    };
+    let Some(update) = update else {
+        return Ok(());
+    };
+    let runtime = handle.clone();
+    let transition = update.transition.clone();
+    let gapless = update.gapless.clone();
+    let accepted = tokio::task::spawn_blocking(move || {
+        runtime.update_prepared_transition(transition, gapless)
+    })
+    .await?;
+    if accepted {
+        player::persist_prepared_dj_transition_update(&engine, &update)?;
+        let _ = state
+            .read()
+            .await
+            .event_tx
+            .send(AppEvent::PlaybackStateChanged);
+    }
+    Ok(())
 }
 
 fn spawn_drop_preview_scheduler(
     state: SharedState,
     handle: playback_runtime::PlaybackRuntimeHandle,
     lookahead: player::DjLookaheadStart,
+    playback_generation: u64,
 ) {
     tokio::spawn(async move {
-        if let Err(error) = schedule_drop_preview_for_pair(state, handle, lookahead).await {
+        if let Err(error) =
+            schedule_drop_preview_for_pair(state, handle, lookahead, playback_generation).await
+        {
             warn!("Drop preview scheduling skipped: {error:?}");
         }
     });
+}
+
+fn drop_preview_pair_is_current(
+    state: &crate::AppState,
+    handle: &playback_runtime::PlaybackRuntimeHandle,
+    lookahead: &player::DjLookaheadStart,
+    playback_generation: u64,
+) -> bool {
+    state
+        .playback_runtime
+        .as_ref()
+        .is_some_and(|runtime| runtime.handle.is_same_runtime(handle))
+        && current_playback_generation(state) == playback_generation
+        && state
+            .playback_runtime_info
+            .as_ref()
+            .and_then(|info| info.active_track_id)
+            == lookahead
+                .current
+                .as_ref()
+                .and_then(|media| media.track_id())
+        && active_dj_lookahead_start_for_state(state).is_some_and(|pair| {
+            pair.current == lookahead.current
+                && pair.next == lookahead.next
+                && pair.current_queue_item_id == lookahead.current_queue_item_id
+                && pair.next_queue_item_id == lookahead.next_queue_item_id
+                && pair.queue_generation == lookahead.queue_generation
+        })
 }
 
 async fn schedule_drop_preview_for_pair(
     state: SharedState,
     handle: playback_runtime::PlaybackRuntimeHandle,
     lookahead: player::DjLookaheadStart,
+    playback_generation: u64,
 ) -> anyhow::Result<()> {
     let Some(current_ref) = lookahead.current.clone() else {
         return Ok(());
@@ -145,22 +334,12 @@ async fn schedule_drop_preview_for_pair(
     else {
         return Ok(());
     };
-    if !claim_drop_preview_arm(current_track_id, next_track_id, lookahead.queue_generation) {
-        return Ok(());
-    }
-
     let (next, runtime_info, user_quality) = {
         let state_guard = state.read().await;
-        let active_id = state_guard
-            .playback_runtime_info
-            .as_ref()
-            .and_then(|info| info.active_track_id);
         if !state_guard.db.with_conn(queries::is_dj_engine_enabled)? {
             return Ok(());
         }
-        if active_id != Some(current_track_id)
-            || current_playback_generation(&state_guard) != lookahead.queue_generation
-        {
+        if !drop_preview_pair_is_current(&state_guard, &handle, &lookahead, playback_generation) {
             return Ok(());
         }
         let current = state_guard
@@ -201,6 +380,15 @@ async fn schedule_drop_preview_for_pair(
         Some(request) => request,
         None => return Ok(()),
     };
+    if !claim_drop_preview_arm(
+        Arc::as_ptr(&state) as usize,
+        current_track_id,
+        next_track_id,
+        lookahead.queue_generation,
+        playback_generation,
+    ) {
+        return Ok(());
+    }
     let stream_info = match resolve_tidal_playback_stream(&state, &next, &stream_request).await {
         Ok(info) => Some(info),
         Err(error) => {
@@ -233,7 +421,7 @@ async fn schedule_drop_preview_for_pair(
     };
 
     let mut job = player::build_playback_preparation(&next, stream_info.as_ref(), 0, user_quality)
-        .with_generation(lookahead.queue_generation)
+        .with_generation(playback_generation)
         .with_dj_media_ref(next_ref.clone())
         .with_prepared_transition(player::PreparedTransitionProgram {
             program,
@@ -242,28 +430,25 @@ async fn schedule_drop_preview_for_pair(
             queue_generation: lookahead.queue_generation,
             current_queue_item_id: lookahead.current_queue_item_id,
             next_queue_item_id: lookahead.next_queue_item_id,
-            anchor_start_ms: None,
+            anchor_start_ms: Some(plan.planned_fire_ms),
         });
     job.gapless = crate::playback::gapless::GaplessPlan::disabled();
 
     {
         let state_guard = state.read().await;
-        let active_id = state_guard
-            .playback_runtime_info
-            .as_ref()
-            .and_then(|info| info.active_track_id);
         if !state_guard.db.with_conn(queries::is_dj_engine_enabled)? {
             return Ok(());
         }
-        if active_id != Some(current_track_id)
-            || current_playback_generation(&state_guard) != lookahead.queue_generation
-        {
+        if !drop_preview_pair_is_current(&state_guard, &handle, &lookahead, playback_generation) {
             return Ok(());
         }
         let info = state_guard
             .playback_runtime_info
             .as_ref()
             .context("playback runtime info missing")?;
+        if info.sample_rate != sample_rate || info.channels != channels {
+            return Ok(());
+        }
         let position_ms = handle.get_position_ms(info.sample_rate, info.channels);
         if position_ms >= plan.planned_fire_ms {
             return Ok(());
@@ -275,7 +460,7 @@ async fn schedule_drop_preview_for_pair(
     handle.prepare_drop_preview(job)?;
     handle.arm_drop_preview(
         current_track_id,
-        lookahead.queue_generation,
+        playback_generation,
         trigger_position_samples,
     )?;
     info!(
@@ -306,29 +491,45 @@ fn samples_from_ms_for_runtime(ms: i64, sample_rate: u32, channels: u16) -> u64 
         / 1000
 }
 
-fn claim_drop_preview_arm(current_track_id: i64, next_track_id: i64, generation: u64) -> bool {
+fn claim_drop_preview_arm(
+    state_id: usize,
+    current_track_id: i64,
+    next_track_id: i64,
+    queue_generation: u64,
+    playback_generation: u64,
+) -> bool {
     let attempts = DROP_PREVIEW_ARM_ATTEMPTS.get_or_init(|| Mutex::new(HashMap::new()));
     let now = Instant::now();
     let mut attempts = attempts.lock().unwrap_or_else(|error| error.into_inner());
     claim_drop_preview_arm_at(
         &mut attempts,
+        state_id,
         current_track_id,
         next_track_id,
-        generation,
+        queue_generation,
+        playback_generation,
         now,
     )
 }
 
 fn claim_drop_preview_arm_at(
     attempts: &mut HashMap<DropPreviewArmKey, Instant>,
+    state_id: usize,
     current_track_id: i64,
     next_track_id: i64,
-    generation: u64,
+    queue_generation: u64,
+    playback_generation: u64,
     now: Instant,
 ) -> bool {
     let retry_after = Duration::from_secs(DROP_PREVIEW_ARM_RETRY_SECS);
     attempts.retain(|_, last_attempt| now.duration_since(*last_attempt) < retry_after);
-    let key = (current_track_id, next_track_id, generation);
+    let key = (
+        state_id,
+        current_track_id,
+        next_track_id,
+        queue_generation,
+        playback_generation,
+    );
     if let Some(last_attempt) = attempts.get(&key)
         && now.duration_since(*last_attempt) < retry_after
     {
@@ -338,19 +539,27 @@ fn claim_drop_preview_arm_at(
     true
 }
 
-async fn refresh_dj_after_queue_change(state: SharedState, context: &'static str) {
-    let runtime = {
-        let state_guard = state.read().await;
-        state_guard
-            .playback_runtime
-            .as_ref()
-            .map(|runtime| runtime.handle.clone())
-    };
-    if let Some(runtime) = runtime {
-        start_dj_lookahead_and_queue_profiles_after_pair_change(state, runtime, context).await;
-    } else {
-        queue_missing_dj_profiles_after_pair_change(state, context).await;
-    }
+fn refresh_dj_after_queue_change(
+    state: SharedState,
+    context: &'static str,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    // Preparation can remove an unavailable next row and request a new pair.
+    // Box this scheduling boundary so that bounded retry has no recursive
+    // opaque-future type through the spawned preparation task.
+    Box::pin(async move {
+        let runtime = {
+            let state_guard = state.read().await;
+            state_guard
+                .playback_runtime
+                .as_ref()
+                .map(|runtime| runtime.handle.clone())
+        };
+        if let Some(runtime) = runtime {
+            start_dj_lookahead_and_queue_profiles_after_pair_change(state, runtime, context).await;
+        } else {
+            queue_missing_dj_profiles_after_pair_change(state, context).await;
+        }
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -4566,7 +4775,10 @@ async fn resolve_tidal_runtime_stream(
     };
 
     match tidal_stream::resolve_stream(&http, &tokens.access_token, &request).await {
-        Ok(info) => Ok(info),
+        Ok(info) => {
+            dj_routes::clear_unavailable_tidal_source(request.track_id);
+            Ok(info)
+        }
         Err(error) if error.is_session_expired() => {
             tracing::warn!(
                 target: "noor.playback.tidal",
@@ -4577,7 +4789,10 @@ async fn resolve_tidal_runtime_stream(
             );
             let refreshed = recover_tidal_session(state, &http, &tokens).await?;
             match tidal_stream::resolve_stream(&http, &refreshed.access_token, &request).await {
-                Ok(info) => Ok(info),
+                Ok(info) => {
+                    dj_routes::clear_unavailable_tidal_source(request.track_id);
+                    Ok(info)
+                }
                 Err(retry_error) if retry_error.is_session_expired() => {
                     let _ = clear_tidal_session(state).await;
                     Err(anyhow::anyhow!(
@@ -4653,7 +4868,10 @@ async fn resolve_tidal_playback_stream(
     };
 
     match tidal_stream::resolve_stream(&http, &tokens.access_token, request).await {
-        Ok(info) => Ok(info),
+        Ok(info) => {
+            dj_routes::clear_unavailable_tidal_source(request.track_id);
+            Ok(info)
+        }
         Err(err) if err.is_session_expired() => {
             tracing::warn!(
                 target: "noor.playback.tidal",
@@ -4690,7 +4908,10 @@ async fn resolve_tidal_playback_stream(
             );
 
             match tidal_stream::resolve_stream(&http, &refreshed.access_token, request).await {
-                Ok(info) => Ok(info),
+                Ok(info) => {
+                    dj_routes::clear_unavailable_tidal_source(request.track_id);
+                    Ok(info)
+                }
                 Err(retry_err) if retry_err.is_session_expired() => {
                     // Still expired after a successful refresh: TIDAL revoked the account.
                     // Only clear now since we know the refresh token itself is dead.
@@ -4890,7 +5111,10 @@ async fn pause_playback(State(state): State<SharedState>) -> Result<Json<Value>,
     let state_guard = state.read().await;
     let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
 
-    let snapshot = overlay_snapshot_with_external_track(&state, snapshot).await;
+    drop(state_guard);
+    let live_position_ms = current_live_position_ms(&state).await;
+    let snapshot =
+        overlay_snapshot_with_external_track_and_position(&state, snapshot, live_position_ms).await;
     Ok(Json(json!({ "state": snapshot.state })))
 }
 
@@ -5022,7 +5246,10 @@ async fn resume_playback(State(state): State<SharedState>) -> Result<Json<Value>
     let state_guard = state.read().await;
     let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
 
-    let snapshot = overlay_snapshot_with_external_track(&state, snapshot).await;
+    drop(state_guard);
+    let live_position_ms = current_live_position_ms(&state).await;
+    let snapshot =
+        overlay_snapshot_with_external_track_and_position(&state, snapshot, live_position_ms).await;
     Ok(Json(json!({ "state": snapshot.state })))
 }
 
@@ -6897,6 +7124,17 @@ async fn set_playback_position(
         }
         None => playback_runtime::SeekToOutcome::RejectedOutOfBuffer,
     };
+
+    // A fired event remains part of listening history, but an accepted seek
+    // means its rendered overlap is no longer the live visual association.
+    if matches!(
+        outcome,
+        playback_runtime::SeekToOutcome::Dispatched
+            | playback_runtime::SeekToOutcome::DispatchedCrossfadeSuppressed
+    ) && let Some(session) = state.write().await.active_listen_session.as_mut()
+    {
+        session.transition_visual_valid = false;
+    }
 
     let snapshot = build_live_playback_snapshot(&state).await?;
     let _ = {
@@ -9822,9 +10060,14 @@ fn spawn_playback_runtime_listener(
     state: SharedState,
     handle: playback_runtime::PlaybackRuntimeHandle,
 ) {
+    // Subscribe before scheduling the task: native runtime events can arrive
+    // before Tokio first polls it. Replay device metadata if startup Ready
+    // was already sent before the handle reached this layer.
+    let mut rx = handle.subscribe();
+    if let Err(error) = handle.request_ready() {
+        warn!("Could not request runtime device metadata: {error}");
+    }
     tokio::spawn(async move {
-        let mut rx = handle.subscribe();
-
         loop {
             match rx.recv().await {
                 Ok(playback_runtime::PlaybackRuntimeEvent::Finished {
@@ -9859,23 +10102,39 @@ fn spawn_playback_runtime_listener(
                 Ok(playback_runtime::PlaybackRuntimeEvent::DjTransitionPromoted {
                     transition_event_id,
                     actual_start_ms,
+                    runtime_planned_start_ms,
                     timing_status,
                     runtime_rendered_dj_mixer,
                     runtime_renderer_status,
                     runtime_renderer_reason,
+                    runtime_program_json,
                     ..
                 }) => {
                     let state_guard = state.read().await;
                     match state_guard.db.with_conn(|conn| {
-                        queries::update_dj_transition_fire_timing(
+                        queries::update_dj_transition_fire_timing_with_runtime_target(
                             conn,
                             transition_event_id,
                             actual_start_ms,
+                            runtime_planned_start_ms,
                             timing_status.as_str(),
                             runtime_rendered_dj_mixer,
                             runtime_renderer_status.as_str(),
                             runtime_renderer_reason.as_str(),
-                        )
+                        )?;
+                        if let Some(program_json) = runtime_program_json.as_ref() {
+                            // Keep the event identity/timing, but display its
+                            // executed cue, rate and fallback instead of an
+                            // earlier planner hypothesis.
+                            conn.execute(
+                                "UPDATE dj_transition_events SET program_json=?1,
+                                 fallback_reason=CASE WHEN template!=json_extract(?1,'$.template')
+                                   AND json_extract(?1,'$.template') IN ('SafeCrossfade','SlamCut')
+                                   THEN 'beat_sync_unverified' ELSE fallback_reason END WHERE id=?2",
+                                rusqlite::params![program_json, transition_event_id],
+                            )?;
+                        }
+                        Ok(())
                     }) {
                         Ok(()) => {
                             info!(
@@ -9915,9 +10174,19 @@ fn spawn_playback_runtime_listener(
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::PreparedTrackError {
                     track_id,
+                    generation,
+                    tidal_id,
                     message,
                 }) => {
-                    handle_prepared_runtime_track_error(&state, track_id, &message).await;
+                    handle_prepared_runtime_track_error_for_runtime(
+                        &state,
+                        Some(&handle),
+                        track_id,
+                        generation,
+                        tidal_id,
+                        &message,
+                    )
+                    .await;
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Ready {
                     device_name,
@@ -10061,12 +10330,47 @@ fn spawn_playback_runtime_listener(
                     track_id,
                     generation,
                     actual_start_ms,
+                    queue_generation,
                 }) => {
                     let mut state_guard = state.write().await;
+                    if current_playback_generation(&state_guard) != generation
+                        || !state_guard
+                            .playback_runtime
+                            .as_ref()
+                            .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                    {
+                        continue;
+                    }
                     state_guard.last_drop_preview = Some(crate::DropPreviewRuntimeState {
                         track_id,
                         generation,
-                        actual_fire_ms: actual_start_ms,
+                        queue_generation,
+                        actual_fire_ms: Some(actual_start_ms),
+                        skipped_reason: None,
+                    });
+                    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+                }
+                Ok(playback_runtime::PlaybackRuntimeEvent::DropPreviewSkipped {
+                    track_id,
+                    generation,
+                    queue_generation,
+                    reason,
+                }) => {
+                    let mut state_guard = state.write().await;
+                    if current_playback_generation(&state_guard) != generation
+                        || !state_guard
+                            .playback_runtime
+                            .as_ref()
+                            .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                    {
+                        continue;
+                    }
+                    state_guard.last_drop_preview = Some(crate::DropPreviewRuntimeState {
+                        track_id,
+                        generation,
+                        queue_generation,
+                        actual_fire_ms: None,
+                        skipped_reason: Some(reason),
                     });
                     let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
                 }
@@ -10095,9 +10399,12 @@ fn spawn_playback_runtime_listener(
                     generation,
                 }) => {
                     // Pre-decode the next track so the transition is gapless.
-                    if let Err(err) = handle_near_end(state.clone(), track_id, generation).await {
-                        warn!("Failed to pre-buffer next track: {err:?}");
-                    }
+                    let next_state = state.clone();
+                    tokio::spawn(async move {
+                        if let Err(err) = handle_near_end(next_state, track_id, generation).await {
+                            warn!("Failed to pre-buffer next track: {err:?}");
+                        }
+                    });
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged {
                     device_name,
@@ -10195,8 +10502,112 @@ async fn handle_near_end(
     state: SharedState,
     current_track_id: i64,
     generation: u64,
-) -> anyhow::Result<()> {
-    let (next_track, runtime_handle, crossfade_ms) = {
+) -> anyhow::Result<bool> {
+    let mut skipped = false;
+    let mut result = Ok(false);
+    for _ in 0..PLAYBACK_ADVANCE_PENDING_SKIP_LIMIT {
+        match prepare_near_end_once(state.clone(), current_track_id, generation).await {
+            Ok(NearEndPreparationOutcome::SkippedUnavailable) => {
+                skipped = true;
+                result = Ok(true);
+            }
+            Ok(NearEndPreparationOutcome::Attempted) => {
+                result = Ok(true);
+                break;
+            }
+            Ok(NearEndPreparationOutcome::Idle) => {
+                result = Ok(skipped);
+                break;
+            }
+            Err(error) => {
+                result = Err(error);
+                break;
+            }
+        }
+    }
+    if skipped {
+        refresh_dj_after_queue_change(state, "skip_unavailable_prebuffer").await;
+    }
+    result
+}
+
+enum NearEndPreparationOutcome {
+    Idle,
+    Attempted,
+    SkippedUnavailable,
+}
+
+/// Remove only the captured upcoming queue row. A late network failure must
+/// never remove a replacement row, a healed TIDAL id, or the active track.
+fn remove_unavailable_upcoming_row(
+    state: &mut crate::AppState,
+    current_track_id: i64,
+    generation: u64,
+    expected_pair: &crate::playback::dj_lookahead::DjLookaheadPair,
+    next: &crate::db::models::Track,
+    reason: &str,
+) -> anyhow::Result<bool> {
+    if current_playback_generation(state) != generation
+        || state
+            .playback_runtime_info
+            .as_ref()
+            .and_then(|info| info.active_track_id)
+            != Some(current_track_id)
+        || expected_pair.current_queue_item_id.is_none()
+        || expected_pair.next_queue_item_id.is_none()
+        || expected_pair.current_queue_item_id == expected_pair.next_queue_item_id
+        || next.id == current_track_id
+    {
+        return Ok(false);
+    }
+    let cleared = recently_cleared(state);
+    let removed = state.db.with_conn(|conn| {
+        if player::current_track_id(conn)? != Some(current_track_id) {
+            return Ok(false);
+        }
+        let still_next = player::peek_next_track(conn, cleared)?;
+        let pair = crate::playback::dj_lookahead::load_dj_lookahead_pair(conn)?;
+        if pair != *expected_pair
+            || pair
+                .next
+                .as_ref()
+                .and_then(|media_ref| media_ref.track_id())
+                != Some(next.id)
+            || !still_next
+                .is_some_and(|track| track.id == next.id && track.tidal_id == next.tidal_id)
+        {
+            return Ok(false);
+        }
+        let outcome = player::remove_queue_item_and_reconcile(
+            conn,
+            expected_pair
+                .next_queue_item_id
+                .expect("validated upcoming row"),
+        )?;
+        debug_assert!(!outcome.removed_current);
+        Ok(true)
+    })?;
+    if removed {
+        state.pending_stream_display = None;
+        let _ = state.event_tx.send(AppEvent::TrackSkipped {
+            track_id: next.id,
+            title: next.title.clone(),
+            reason: reason.to_string(),
+        });
+        let _ = state.event_tx.send(AppEvent::QueueUpdated);
+        tracing::info!(target: "noor.playback.advance", event = "skip_unavailable_next",
+            track_id = next.id, queue_item_id = expected_pair.next_queue_item_id,
+            generation, "Skipped unavailable upcoming track; current playback continues");
+    }
+    Ok(removed)
+}
+
+async fn prepare_near_end_once(
+    state: SharedState,
+    current_track_id: i64,
+    generation: u64,
+) -> anyhow::Result<NearEndPreparationOutcome> {
+    let (next_track, expected_pair, runtime_handle, crossfade_ms) = {
         let state_guard = state.read().await;
 
         // Guard: only proceed if the current track is still the one that fired NearEnd.
@@ -10205,16 +10616,20 @@ async fn handle_near_end(
             .as_ref()
             .and_then(|info| info.active_track_id);
         if active_id != Some(current_track_id) {
-            return Ok(());
+            return Ok(NearEndPreparationOutcome::Idle);
         }
         if current_playback_generation(&state_guard) != generation {
-            return Ok(());
+            return Ok(NearEndPreparationOutcome::Idle);
         }
 
         let cleared = recently_cleared(&state_guard);
-        let next = state_guard
-            .db
-            .with_conn(|conn| player::peek_next_track(conn, cleared))?;
+        let (next, pair) = state_guard.db.with_conn(|conn| {
+            let next = player::peek_next_track(conn, cleared)?;
+            Ok((
+                next,
+                crate::playback::dj_lookahead::load_dj_lookahead_pair(conn)?,
+            ))
+        })?;
         let handle = state_guard
             .playback_runtime
             .as_ref()
@@ -10228,18 +10643,18 @@ async fn handle_near_end(
             .map_err(anyhow::Error::from)
         })?;
 
-        (next, handle, crossfade)
+        (next, pair, handle, crossfade)
     };
 
     let (Some(next), Some(handle)) = (next_track, runtime_handle) else {
-        return Ok(());
+        return Ok(NearEndPreparationOutcome::Idle);
     };
     if matches!(
         handle.track_status(next.id, generation),
         playback_runtime::PlaybackTrackStatus::Active
             | playback_runtime::PlaybackTrackStatus::Prepared
     ) {
-        return Ok(());
+        return Ok(NearEndPreparationOutcome::Idle);
     }
     let prebuffer_key = crate::NextPrebufferKey {
         current_track_id,
@@ -10249,7 +10664,7 @@ async fn handle_near_end(
     {
         let mut state_guard = state.write().await;
         if !claim_next_prebuffer_slot(&mut state_guard.next_prebuffer_inflight, prebuffer_key) {
-            return Ok(());
+            return Ok(NearEndPreparationOutcome::Idle);
         }
     }
 
@@ -10257,6 +10672,7 @@ async fn handle_near_end(
         state.clone(),
         current_track_id,
         generation,
+        expected_pair,
         next,
         handle,
         crossfade_ms,
@@ -10266,22 +10682,29 @@ async fn handle_near_end(
         let mut state_guard = state.write().await;
         release_next_prebuffer_slot(&mut state_guard.next_prebuffer_inflight, prebuffer_key);
     }
-    result
+    result.map(|skipped| {
+        if skipped {
+            NearEndPreparationOutcome::SkippedUnavailable
+        } else {
+            NearEndPreparationOutcome::Attempted
+        }
+    })
 }
 
 async fn handle_near_end_prebuffer_next(
     state: SharedState,
     current_track_id: i64,
     generation: u64,
+    expected_pair: crate::playback::dj_lookahead::DjLookaheadPair,
     next: crate::db::models::Track,
     handle: playback_runtime::PlaybackRuntimeHandle,
     crossfade_ms: i32,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     // Resolve the stream URL for the next track (we need a live access token).
     let user_quality = current_user_audio_quality(&state).await;
     let stream_request = match player::build_tidal_stream_request(&next, user_quality.clone()) {
         Some(req) => req,
-        None => return Ok(()), // local library: skip pre-buffer for now
+        None => return Ok(false), // local library: skip pre-buffer for now
     };
 
     let stream_info = match resolve_tidal_playback_stream(&state, &next, &stream_request).await {
@@ -10292,7 +10715,36 @@ async fn handle_near_end_prebuffer_next(
                 next.id,
                 describe_tidal_playback_error(&error)
             );
-            return Ok(());
+            if error.is_track_unplayable() {
+                let skipped = {
+                    let mut guard = state.write().await;
+                    if guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                    {
+                        let skipped = remove_unavailable_upcoming_row(
+                            &mut guard,
+                            current_track_id,
+                            generation,
+                            &expected_pair,
+                            &next,
+                            &describe_tidal_playback_error(&error),
+                        )?;
+                        if skipped {
+                            dj_routes::record_unavailable_tidal_source(stream_request.track_id);
+                        }
+                        skipped
+                    } else {
+                        false
+                    }
+                };
+                if skipped && error.is_asset_not_ready() {
+                    spawn_tidal_id_reresolve(&state, next.id);
+                }
+                return Ok(skipped);
+            }
+            return Ok(false);
         }
     };
 
@@ -10311,7 +10763,7 @@ async fn handle_near_end_prebuffer_next(
                 "Skipping pre-buffer for next track {} after TIDAL session refresh; next transition will cold-start",
                 next.id
             );
-            return Ok(());
+            return Ok(false);
         }
     };
 
@@ -10337,7 +10789,7 @@ async fn handle_near_end_prebuffer_next(
             || current_playback_generation(&state_guard) != generation
             || still_next != Some(next.id)
         {
-            return Ok(());
+            return Ok(false);
         }
     }
 
@@ -10382,7 +10834,7 @@ async fn handle_near_end_prebuffer_next(
                         "Skipping pre-buffer for next track {}: sample-rate-follow will switch native format from {} Hz/{} bit to {} Hz/{} bit at track start",
                         next.id, current_rate, current_depth_label, next_rate, next_depth_label
                     );
-                    return Ok(());
+                    return Ok(false);
                 }
                 if next_rate as u32 != current_rate {
                     let device_sel = match settings.output_device {
@@ -10462,10 +10914,10 @@ async fn handle_near_end_prebuffer_next(
             .with_conn(player::current_track_id)
             .unwrap_or(None);
         if active_id != Some(current_track_id) || db_current != Some(current_track_id) {
-            return Ok(());
+            return Ok(false);
         }
         if current_playback_generation(&state_guard) != generation {
-            return Ok(());
+            return Ok(false);
         }
     }
 
@@ -10486,7 +10938,7 @@ async fn handle_near_end_prebuffer_next(
         });
     }
     info!("Pre-buffering next track: {} (id {})", next.title, next.id);
-    Ok(())
+    Ok(false)
 }
 
 fn claim_next_prebuffer_slot(
@@ -10686,6 +11138,7 @@ async fn switch_runtime_to_snapshot_current(
                         if err.is_track_unplayable() && unplayable_skips < MAX_UNPLAYABLE_SKIPS =>
                     {
                         unplayable_skips += 1;
+                        dj_routes::record_unavailable_tidal_source(stream_request.track_id);
                         let reason = if err.is_asset_not_ready() {
                             "Not available on TIDAL right now"
                         } else {
@@ -11125,20 +11578,85 @@ async fn handle_runtime_track_error(
     handle_runtime_finished_with_retry(state, failed_track_id, generation).await
 }
 
-async fn handle_prepared_runtime_track_error(state: &SharedState, track_id: i64, message: &str) {
+async fn handle_prepared_runtime_track_error_for_runtime(
+    state: &SharedState,
+    expected_runtime: Option<&playback_runtime::PlaybackRuntimeHandle>,
+    track_id: i64,
+    generation: u64,
+    failed_tidal_id: Option<i64>,
+    message: &str,
+) {
     tracing::warn!(
         target: "noor.playback.advance",
         event = "prepared_track_error",
         track_id,
+        generation,
+        tidal_id = failed_tidal_id,
         error = %message,
         "prepared track failed; keeping current playback"
     );
-    {
+    let skipped = {
         let mut state_guard = state.write().await;
+        if current_playback_generation(&state_guard) != generation
+            || expected_runtime.is_some_and(|expected| {
+                !state_guard
+                    .playback_runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.handle.is_same_runtime(expected))
+            })
+        {
+            return;
+        }
+        // Only explicit TIDAL 4005 is a catalog failure here. The exact source
+        // and playback generation travel with the event, so a delayed failure
+        // cannot discard a freshly healed or re-prepared next track.
+        let rejected = tidal_stream::StreamResolveError::StreamRejected {
+            message: message.to_string(),
+        };
+        let mut skipped = false;
+        if rejected.is_asset_not_ready() {
+            let current = state_guard
+                .playback_runtime_info
+                .as_ref()
+                .and_then(|info| info.active_track_id);
+            let captured = state_guard.db.with_conn(|conn| {
+                let next = player::peek_next_track(conn, recently_cleared(&state_guard))?;
+                let pair = crate::playback::dj_lookahead::load_dj_lookahead_pair(conn)?;
+                Ok((pair, next))
+            });
+            if let (Some(current), Ok((pair, Some(next)))) = (current, captured)
+                && next.id == track_id
+                && let Some(tidal_id) = next.tidal_id
+            {
+                if failed_tidal_id != Some(tidal_id) {
+                    return;
+                }
+                match remove_unavailable_upcoming_row(
+                    &mut state_guard,
+                    current,
+                    generation,
+                    &pair,
+                    &next,
+                    message,
+                ) {
+                    Ok(true) => {
+                        dj_routes::record_unavailable_tidal_source(tidal_id);
+                        skipped = true;
+                    }
+                    Ok(false) => {}
+                    Err(error) => warn!("Failed to skip unavailable prepared next row: {error}"),
+                }
+            }
+        }
         if let Some(info) = state_guard.playback_runtime_info.as_mut() {
             info.last_error = Some(message.to_string());
         }
         let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+        skipped
+    };
+    if skipped {
+        spawn_tidal_id_reresolve(state, track_id);
+        refresh_dj_after_queue_change(state.clone(), "skip_unavailable_prepared_next").await;
     }
     report_playback_failure(state, message);
 }
@@ -12465,3 +12983,6 @@ async fn scrobbling_backfill(State(state): State<SharedState>) -> Result<Json<Va
 
 #[cfg(test)]
 pub(super) mod tests;
+
+#[cfg(test)]
+mod drop_preview_tests;

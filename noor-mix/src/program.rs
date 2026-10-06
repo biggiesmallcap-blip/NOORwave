@@ -50,11 +50,45 @@ pub struct LoopRegion {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransitionScoreComponent {
+    pub name: String,
+    pub value: f32,
+    pub weight: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransitionCandidateScore {
+    pub strategy: String,
+    pub score: f32,
+    pub quality_score: f32,
+    pub entry_seconds: f32,
+    pub duration_seconds: f32,
+    pub reason: String,
+    pub components: Vec<TransitionScoreComponent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransitionDecision {
+    pub strategy: String,
+    pub confidence: f32,
+    pub score: f32,
+    pub reason: String,
+    pub energy_direction: String,
+    pub incoming_entry_seconds: f32,
+    pub incoming_drop_seconds: Option<f32>,
+    pub outgoing_window: String,
+    pub duration_beats: f32,
+    pub candidates: Vec<TransitionCandidateScore>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransitionProgram {
     pub tier: Tier,
     pub template: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drop_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<TransitionDecision>,
     pub sample_rate: u32,
     pub channels: u16,
     #[serde(default)]
@@ -200,6 +234,7 @@ mod tests {
             tier: Tier::FullBlend,
             template: "BassSwap16".to_string(),
             drop_source: None,
+            decision: None,
             sample_rate: 48_000,
             channels: 2,
             deck_a_start_frame: 0,

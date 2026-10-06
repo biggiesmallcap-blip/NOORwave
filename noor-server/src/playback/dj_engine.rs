@@ -92,8 +92,8 @@ impl DjEngine {
             // The planner emits frame positions at its fixed planning rate;
             // rescale so every frame field is denominated in the rate the
             // renderer decks actually use instead of just relabeling it.
-            let mut program =
-                Planner::plan(&outgoing, &incoming, &policy).rescaled_to(sample_rate.max(1));
+            let mut program = Planner::plan_adaptive(&outgoing, &incoming, &policy)
+                .rescaled_to(sample_rate.max(1));
             program.channels = channels.max(1);
             if let Err(error) = noor_mix::planner::safety::validate_audio_safety(
                 &program,
@@ -161,11 +161,9 @@ fn plan_from_program(
     fallback_reason: Option<&'static str>,
 ) -> DjTransitionPlan {
     DjTransitionPlan {
-        // No rejected-alternatives list: the planner is a short-circuiting
-        // decision tree, not a scorer, so there is no honest per-alternative
-        // ranking to report. The old fabricated list (a fixed top-3 with
-        // invented scores) only misled the cockpit into implying a contest
-        // that never happened.
+        // Actual suitable candidates and their score components travel in
+        // program.decision. Keep the legacy rejected-alternatives field empty
+        // rather than fabricating scores for candidates never evaluated.
         rejected_alternatives: Vec::new(),
         program,
         planner_version: DJ_PLANNER_VERSION,
@@ -188,8 +186,14 @@ fn runtime_safety_decision(outgoing: &DjProfile, incoming: &DjProfile) -> Runtim
             force_safe_crossfade: true,
         };
     }
-    if outgoing.profile_confidence < PROFILE_CONFIDENCE_FLOOR as f32
+    if !outgoing.profile_confidence.is_finite()
+        || !incoming.profile_confidence.is_finite()
+        || outgoing.profile_confidence < PROFILE_CONFIDENCE_FLOOR as f32
         || incoming.profile_confidence < PROFILE_CONFIDENCE_FLOOR as f32
+        || [outgoing.beat_confidence, incoming.beat_confidence]
+            .into_iter()
+            .flatten()
+            .any(|confidence| !confidence.is_finite() || confidence < 0.25)
     {
         return RuntimeSafetyDecision {
             fallback_reason: Some("profile_low_confidence"),
@@ -217,6 +221,10 @@ pub(crate) fn safe_crossfade_program(
 fn fallback_profile() -> DjProfile {
     DjProfile {
         bpm: Some(120.0),
+        tempo_bpm: None,
+        tempo_confidence: None,
+        grid_is_synthetic: true,
+        grid_is_measured: false,
         camelot_key: Some("8A".to_string()),
         energy: Some(0.5),
         beat_grid_seconds: vec![0.0, 0.5],
@@ -239,6 +247,10 @@ fn fallback_profile() -> DjProfile {
         lufs_loud_body: Some(-12.0),
         true_peak_dbtp: Some(-1.0),
         profile_confidence: 1.0,
+        beat_confidence: None,
+        energy_contour: vec![],
+        analysis_scope_seconds: None,
+        vocals_known: false,
         safe_crossfade_only: false,
         profile_version: "fallback".to_string(),
     }
@@ -253,8 +265,60 @@ fn policy_from_db(
     let mut policy = Policy {
         mix_intent: parse_mix_intent(&mix_intent),
         transition_speed_bias: parse_speed_bias(&transition_speed_bias),
+        preferred_strategy: queries::get_dj_preferred_strategy(conn)?,
         ..Policy::default()
     };
+
+    // Only played transitions influence diversity. An armed, cancelled or
+    // failed plan says nothing about what the listener actually heard.
+    let mut statement = conn.prepare(
+        "SELECT e.program_json, e.user_rating, c.value, e.runtime_renderer_status
+         FROM dj_transition_events e
+         LEFT JOIN server_config c ON c.key = 'dj_feedback:' || e.id
+         WHERE e.actual_start_ms IS NOT NULL
+           AND e.timing_status IN ('fired', 'late')
+           AND e.runtime_renderer_status IN ('rendered_handoff', 'rendered_overlay', 'legacy_overlap')
+         ORDER BY e.id DESC LIMIT 20",
+    )?;
+    let history = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<i64>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    for (index, event) in history.enumerate() {
+        let (json, rating, category, renderer) = event?;
+        let Ok(program) = serde_json::from_str::<TransitionProgram>(&json) else {
+            continue;
+        };
+        let heard_template = if renderer == "legacy_overlap" {
+            "SafeCrossfade".to_string()
+        } else {
+            program.template
+        };
+        if index < 6 {
+            policy.recent_templates.push(heard_template.clone());
+        }
+        match category.as_deref() {
+            Some("too_safe") => policy.adventurousness_bias += 0.02,
+            Some("too_bold") => policy.adventurousness_bias -= 0.02,
+            Some("good") | Some("bad") => policy.strategy_feedback.push((
+                heard_template,
+                if category.as_deref() == Some("good") {
+                    0.03
+                } else {
+                    -0.04
+                },
+            )),
+            _ if rating.is_some() => policy
+                .strategy_feedback
+                .push((heard_template, if rating == Some(1) { 0.02 } else { -0.02 })),
+            _ => {}
+        }
+    }
+    policy.adventurousness_bias = policy.adventurousness_bias.clamp(-0.1, 0.1);
 
     let outgoing_bias = outgoing
         .and_then(|row| row.transition_speed_bias.as_deref())
@@ -350,6 +414,51 @@ fn profile_from_row(conn: &Connection, row: &AudioDjProfileRow) -> Result<DjProf
     let safe_transition_windows =
         decode_f32_blob(&row.safe_transition_windows_blob).unwrap_or_default();
     let dsp = dsp_features_for_profile(conn, row)?;
+    let grid_is_synthetic = dj_grid_is_synthetic(row, &beat_grid_seconds);
+    let tempo_bpm = dsp
+        .as_ref()
+        .and_then(|features| features.bpm)
+        .filter(|bpm| bpm.is_finite() && (30.0..=240.0).contains(bpm))
+        .map(|bpm| bpm as f32)
+        .or_else(|| {
+            (grid_is_synthetic
+                && dsp.as_ref().and_then(|f| f.bpm).is_none()
+                && row
+                    .beat_confidence
+                    .is_some_and(|c| c.is_finite() && c >= 0.65))
+            .then(|| estimate_bpm(&beat_grid_seconds))
+            .flatten()
+        });
+    let tempo_confidence = dsp
+        .as_ref()
+        .and_then(|features| features.beat_strength)
+        .filter(|confidence| confidence.is_finite() && (0.0..=1.0).contains(confidence))
+        .map(|confidence| confidence as f32)
+        .or_else(|| {
+            (grid_is_synthetic
+                && tempo_bpm.is_some()
+                && dsp.as_ref().and_then(|f| f.beat_strength).is_none()
+                && tempo_bpm
+                    .zip(estimate_bpm(&beat_grid_seconds))
+                    .is_some_and(|(tempo, grid)| {
+                        let family =
+                            noor_mix::planner::scoring::nearest_tempo_family_bpm(grid, tempo);
+                        noor_mix::planner::scoring::bpm_delta_pct(grid, family) <= 3.0
+                    }))
+            .then_some(row.beat_confidence)
+            .flatten()
+            .filter(|c| c.is_finite() && (0.65..=1.0).contains(c))
+            .map(|c| c as f32)
+        });
+    // Autocorrelation strength is evidence of tempo periodicity, not beat phase.
+    // Preserve its low-confidence values; only cap overstated synthetic phase.
+    let beat_confidence = row.beat_confidence.map(|confidence| {
+        if grid_is_synthetic && confidence.is_finite() {
+            (confidence as f32).min(0.5)
+        } else {
+            confidence as f32
+        }
+    });
     // Fallback energy comes from the profile's own loud-body LUFS through the
     // same absolute map as the stored DSP scalar (analysis v11). The old
     // fallback averaged the peak-normalized energy contour, which is a
@@ -366,6 +475,10 @@ fn profile_from_row(conn: &Connection, row: &AudioDjProfileRow) -> Result<DjProf
         .map(|value| value as f32);
     Ok(DjProfile {
         bpm: estimate_bpm(&beat_grid_seconds),
+        tempo_bpm,
+        tempo_confidence,
+        grid_is_synthetic,
+        grid_is_measured: row.source == "dj_playback_measured",
         camelot_key: dsp.and_then(|features| features.camelot_key),
         energy,
         beat_grid_seconds,
@@ -391,8 +504,37 @@ fn profile_from_row(conn: &Connection, row: &AudioDjProfileRow) -> Result<DjProf
         lufs_loud_body: row.lufs_loud_body.map(|value| value as f32),
         true_peak_dbtp: row.true_peak_dbtp.map(|value| value as f32),
         profile_confidence: row.profile_confidence as f32,
+        beat_confidence,
+        energy_contour: decode_f32_blob(&row.energy_contour_blob).unwrap_or_default(),
+        analysis_scope_seconds: (row.analysis_scope_ms > 0)
+            .then_some(row.analysis_scope_ms as f32 / 1000.0),
+        // The current analyser writes zero-filled vocal arrays. They are not
+        // measured evidence of instrumental material.
+        vocals_known: false,
         safe_crossfade_only: false,
         profile_version: row.profile_version.clone(),
+    })
+}
+
+pub(crate) fn dj_grid_is_synthetic(row: &AudioDjProfileRow, beats: &[f32]) -> bool {
+    match row.source.as_str() {
+        "dj_playback_measured" => return false,
+        "dj_playback_tempo" | "dj_playback_provisional" => return true,
+        _ => {}
+    }
+    // Current profiles do not persist detector provenance: both the DBN and
+    // onset fallback are called "dj_playback". A zero-anchored arithmetic grid
+    // matches the fallback signature; treat it as synthetic when provenance
+    // cannot establish measured phase. Restrict this conservative inference to
+    // that analyser source so imported and legacy profiles keep their contract.
+    if row.source != "dj_playback" || beats.len() < 4 || beats[0].abs() > 0.0001 {
+        return false;
+    }
+    let Some(interval) = median_beat_interval(beats) else {
+        return false;
+    };
+    beats.iter().enumerate().all(|(index, seconds)| {
+        seconds.is_finite() && (*seconds - index as f32 * interval).abs() <= 0.001
     })
 }
 
@@ -418,13 +560,18 @@ fn dsp_features_for_profile(
         .unwrap_or(Ok(None))
 }
 
-// Tempo from the beat grid via the MEDIAN inter-beat interval. The previous
-// mean (span / count) let a single undetected beat or a silence gap stretch
-// the average and skew the whole estimate; the median tolerates sparse and
-// irregular grids as long as most intervals are genuine.
+// Fit multiple measured beats without counting gaps as single beats. An
+// adjacent-interval median preserves detector-frame quantization bias, which
+// can turn a small requested nudge into audible drift across a long mix.
 fn estimate_bpm(beats: &[f32]) -> Option<f32> {
-    let median = median_beat_interval(beats)?;
-    Some(60.0 / median)
+    // A short, jittered fragment cannot average detector error reliably. Keep
+    // the established median estimate until eight measured inliers support a
+    // multi-beat fit; profile and phase confidence remain separate evidence.
+    let period = noor_mix::beat_grid::fit_beat_grid(beats)
+        .filter(|fit| fit.inlier_count >= 8)
+        .map(|fit| fit.period_seconds)
+        .or_else(|| median_beat_interval(beats).map(f64::from))?;
+    Some((60.0 / period) as f32)
 }
 
 fn median_beat_interval(beats: &[f32]) -> Option<f32> {
@@ -459,6 +606,44 @@ mod tests {
         let db = Database::open_in_memory().expect("db");
         db.with_conn(schema::run_migrations).expect("migrations");
         db
+    }
+
+    #[test]
+    fn diversity_and_feedback_follow_played_audio_instead_of_armed_intent() {
+        let db = db();
+        db.with_conn(|conn| {
+            let program =
+                super::super::dj_engine::safe_crossfade_program(48_000, 2, Policy::default());
+            let mut creative = program.clone();
+            creative.template = "EnergyLift".into();
+            let json = serde_json::to_string(&creative)?;
+            for (status, renderer, actual) in [
+                ("fired", "rendered_handoff", Some(1000)),
+                ("late", "legacy_overlap", Some(1000)),
+                ("armed", "rendered_handoff", None),
+                ("missed", "boundary_fallback", None),
+            ] {
+                conn.execute(
+                    "INSERT INTO dj_transition_events (template, program_json, planner_version,
+                        timing_status, runtime_renderer_status, actual_start_ms)
+                     VALUES ('EnergyLift', ?1, 'test', ?2, ?3, ?4)",
+                    rusqlite::params![json, status, renderer, actual],
+                )?;
+            }
+            assert!(queries::record_dj_feedback(conn, 1, "too_safe", None)?);
+            assert!(queries::record_dj_feedback(conn, 2, "good", None)?);
+            assert!(!queries::record_dj_feedback(conn, 3, "bad", None)?);
+            let policy = policy_from_db(conn, None, None)?;
+            assert_eq!(policy.recent_templates, ["SafeCrossfade", "EnergyLift"]);
+            assert_eq!(policy.strategy_feedback, [("SafeCrossfade".into(), 0.03)]);
+            assert!((policy.adventurousness_bias - 0.02).abs() < 1e-6);
+            // Replacing a vote must not count as a second preference signal.
+            assert!(queries::record_dj_feedback(conn, 1, "too_bold", None)?);
+            let policy = policy_from_db(conn, None, None)?;
+            assert!((policy.adventurousness_bias + 0.02).abs() < 1e-6);
+            Ok(())
+        })
+        .expect("played history policy");
     }
 
     fn key(kind: &str, id: &str) -> AudioDjProfileKey {
@@ -536,6 +721,343 @@ mod tests {
             .expect("profile");
         let energy = profile.energy.expect("fallback energy");
         assert!((energy - 0.75).abs() < 1e-6, "got {energy}");
+    }
+
+    fn evidence_profile(
+        db: &Database,
+        grid_bpm: f32,
+        grid_confidence: f64,
+        dsp_bpm: f64,
+        dsp_strength: f64,
+    ) -> DjProfile {
+        seed_profile(db, "library_track", 1, 0.65);
+        let mut row = fixture_profile_row("library_track", 1, 0.65);
+        row.source = "dj_playback".to_string();
+        row.beat_grid_blob = encode_f32_blob(
+            &(0..96)
+                .map(|index| index as f32 * (60.0 / grid_bpm))
+                .collect::<Vec<_>>(),
+        );
+        row.beat_confidence = Some(grid_confidence);
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE audio_dsp_features SET bpm = ?1, beat_strength = ?2 WHERE track_id = 1",
+                rusqlite::params![dsp_bpm, dsp_strength],
+            )?;
+            profile_from_row(conn, &row)
+        })
+        .expect("profile evidence")
+    }
+
+    #[test]
+    fn contradictory_synthetic_grid_keeps_independent_tempo_without_claiming_phase() {
+        let profile = evidence_profile(&db(), 115.0, 1.0, 171.43, 0.851);
+        assert!(profile.grid_is_synthetic);
+        assert!((profile.bpm.expect("grid tempo") - 115.0).abs() < 0.01);
+        assert!((profile.tempo_bpm.expect("DSP tempo") - 171.43).abs() < 0.01);
+        assert_eq!(profile.beat_confidence, Some(0.5));
+        assert!((profile.tempo_confidence.expect("DSP strength") - 0.851).abs() < 0.001);
+    }
+
+    #[test]
+    fn corroborated_half_time_grid_still_does_not_establish_measured_phase() {
+        let profile = evidence_profile(&db(), 63.0, 0.437, 125.11, 0.533);
+        assert!(profile.grid_is_synthetic);
+        assert!((profile.bpm.expect("grid tempo") - 63.0).abs() < 0.01);
+        assert!((profile.tempo_bpm.expect("DSP tempo") - 125.11).abs() < 0.01);
+        assert!((profile.beat_confidence.expect("grid strength") - 0.437).abs() < 0.001);
+        assert!((profile.tempo_confidence.expect("moderate tempo strength") - 0.533).abs() < 0.001);
+    }
+
+    #[test]
+    fn independent_tempo_does_not_replace_measured_grid_or_upgrade_confidence() {
+        let db = db();
+        seed_profile(&db, "library_track", 1, 0.9);
+        let mut row = fixture_profile_row("library_track", 1, 0.9);
+        row.source = "dj_playback".to_string();
+        row.beat_grid_blob = encode_f32_blob(&[0.12, 0.62, 1.13, 1.63, 2.12, 2.63]);
+        let profile = db.with_conn(|conn| {
+            conn.execute("UPDATE audio_dsp_features SET bpm = 171.43, beat_strength = 0.53 WHERE track_id = 1", [])?;
+            profile_from_row(conn, &row)
+        }).expect("measured profile");
+        assert!(!profile.grid_is_synthetic);
+        assert_eq!(profile.beat_confidence, Some(0.9));
+        assert!((profile.bpm.expect("measured tempo") - 120.0).abs() < 0.01);
+        assert!((profile.tempo_bpm.expect("independent tempo") - 171.43).abs() < 0.01);
+    }
+
+    #[test]
+    fn synthetic_inference_respects_provenance_and_clock_jitter() {
+        let mut row = fixture_profile_row("library_track", 1, 0.9);
+        let uniform = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5];
+        assert!(!dj_grid_is_synthetic(&row, &uniform));
+        row.source = "dj_playback".to_string();
+        assert!(dj_grid_is_synthetic(&row, &uniform));
+        assert!(!dj_grid_is_synthetic(
+            &row,
+            &[0.0, 0.49, 1.0, 1.5, 2.01, 2.5]
+        ));
+        assert!(!dj_grid_is_synthetic(&row, &[0.1, 0.6, 1.1, 1.6, 2.1]));
+        assert!(!dj_grid_is_synthetic(&row, &[0.0, 0.5]));
+    }
+
+    #[test]
+    fn grid_corrections_do_not_relabel_independent_tempo_or_certify_synthetic_phase() {
+        let mut profile = evidence_profile(&db(), 63.0, 0.9, 125.11, 0.533);
+        let correction = AudioDjProfileCorrectionRow {
+            media_ref_kind: "library_track".to_string(),
+            media_ref_id: "1".to_string(),
+            bpm_multiplier: Some(2.0),
+            downbeat_offset_beats: Some(1),
+            phrase_offset_bars: Some(1),
+            safe_crossfade_only: false,
+            transition_speed_bias: None,
+            manual_drop_blob: Vec::new(),
+            notes: None,
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        };
+        apply_correction(&mut profile, Some(&correction));
+        assert!((profile.bpm.expect("corrected grid") - 126.0).abs() < 0.01);
+        assert!((profile.tempo_bpm.expect("independent tempo") - 125.11).abs() < 0.01);
+        assert!(profile.grid_is_synthetic);
+        assert_eq!(profile.beat_confidence, Some(0.5));
+    }
+
+    #[test]
+    fn malformed_independent_evidence_is_unknown_and_invalid_grid_confidence_stays_unsafe() {
+        let db = db();
+        seed_profile(&db, "library_track", 1, 0.9);
+        let mut row = fixture_profile_row("library_track", 1, 0.9);
+        row.source = "dj_playback".to_string();
+        row.beat_confidence = Some(f64::INFINITY);
+        let profile = db.with_conn(|conn| {
+            conn.execute("UPDATE audio_dsp_features SET bpm = -1, beat_strength = 1.7 WHERE track_id = 1", [])?;
+            profile_from_row(conn, &row)
+        }).expect("invalid evidence profile");
+        assert_eq!(profile.tempo_bpm, None);
+        assert_eq!(profile.tempo_confidence, None);
+        assert!(runtime_safety_decision(&profile, &profile).force_safe_crossfade);
+    }
+
+    #[test]
+    fn legacy_serialized_profiles_default_to_unknown_independent_tempo() {
+        let mut json = serde_json::to_value(fallback_profile()).expect("profile JSON");
+        for field in [
+            "tempo_bpm",
+            "tempo_confidence",
+            "grid_is_synthetic",
+            "grid_is_measured",
+        ] {
+            json.as_object_mut().expect("object").remove(field);
+        }
+        let profile: DjProfile = serde_json::from_value(json).expect("legacy profile");
+        assert_eq!(profile.tempo_bpm, None);
+        assert_eq!(profile.tempo_confidence, None);
+        assert!(!profile.grid_is_synthetic);
+        assert!(!profile.grid_is_measured);
+    }
+
+    fn seed_persisted_tidal_evidence(
+        db: &Database,
+        tidal_id: i64,
+        grid_bpm: f32,
+        grid_confidence: f64,
+        dsp_bpm: f64,
+        dsp_strength: f64,
+    ) {
+        seed_profile(db, "tidal_track", tidal_id, 0.65);
+        let mut row = fixture_profile_row("tidal_track", tidal_id, 0.65);
+        let beat_count = (90.0 * grid_bpm / 60.0).floor() as usize;
+        let beats = (0..beat_count)
+            .map(|index| index as f32 * (60.0 / grid_bpm))
+            .collect::<Vec<_>>();
+        let downbeats = beats.iter().step_by(4).copied().collect::<Vec<_>>();
+        row.source = "dj_playback".to_string();
+        row.analysis_scope_ms = 90_001;
+        row.beat_confidence = Some(grid_confidence);
+        row.beat_grid_blob = encode_f32_blob(&beats);
+        row.downbeats_blob = encode_f32_blob(&downbeats);
+        row.phrase_boundaries_blob =
+            encode_u32_blob(&(0..downbeats.len() as u32).step_by(8).collect::<Vec<_>>());
+        row.mix_in_blob = encode_f32_blob(&downbeats[..4]);
+        row.mix_out_blob = encode_f32_blob(&downbeats[downbeats.len() - 4..]);
+        row.intro_end_seconds = Some(f64::from(downbeats[8]));
+        row.outro_start_seconds = Some(f64::from(downbeats[downbeats.len() - 8]));
+        db.with_conn(|conn| {
+            queries::upsert_audio_dj_profile(conn, &row)?;
+            conn.execute(
+                "UPDATE audio_dsp_features SET bpm = ?1, beat_strength = ?2,
+                    analysis_source = 'passive', analysis_offset_ms = 15000,
+                    samples_analyzed = 1323000 WHERE track_id = ?3",
+                rusqlite::params![dsp_bpm, dsp_strength, 100_000 + tidal_id],
+            )?;
+            Ok(())
+        })
+        .expect("persist TIDAL evidence");
+    }
+
+    #[test]
+    fn persisted_measured_grid_can_outweigh_weak_scalar_for_a_short_verified_mix() {
+        let db = db();
+        enable(&db);
+        seed_persisted_tidal_evidence(&db, 12301, 122.85, 0.82, 122.85, 0.8);
+        seed_persisted_tidal_evidence(&db, 12302, 124.078, 0.839, 177.593, 0.562);
+        db.with_conn(|conn| {
+            conn.execute("UPDATE audio_dj_profiles SET source='dj_playback_measured' WHERE media_ref_id IN ('12301','12302')", [])?;
+            Ok(())
+        }).unwrap();
+        let program = plan(
+            &db,
+            ref_for("tidal_track", 12301),
+            ref_for("tidal_track", 12302),
+        )
+        .unwrap();
+        assert_eq!(program.template, "BassSwap16");
+        assert!(
+            (6.0..=9.0).contains(&(program.resolve_at as f64 / f64::from(program.sample_rate)))
+        );
+        assert_eq!(program.decision.as_ref().unwrap().duration_beats, 16.0);
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE audio_dj_profiles SET source='imported' WHERE media_ref_id='12302'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            plan(
+                &db,
+                ref_for("tidal_track", 12301),
+                ref_for("tidal_track", 12302)
+            )
+            .unwrap()
+            .template,
+            "SafeCrossfade"
+        );
+    }
+
+    #[test]
+    fn persisted_tidal_tempo_evidence_reaches_a_short_unstretched_mix_through_engine_safety() {
+        let db = db();
+        enable(&db);
+        seed_persisted_tidal_evidence(&db, 56_351_661, 115.0, 1.0, 171.43, 0.851);
+        seed_persisted_tidal_evidence(&db, 31_901_774, 58.0, 0.378, 174.04, 0.714);
+        let engine = DjEngine::new(db);
+        let plan = engine
+            .plan_transition_details(
+                &ref_for("tidal_track", 56_351_661),
+                &ref_for("tidal_track", 31_901_774),
+                44_100,
+                2,
+            )
+            .expect("engine plan")
+            .expect("DJ enabled");
+        assert_eq!(plan.program.template, "QuickMix");
+        assert_eq!(plan.fallback_reason, None);
+        assert_eq!(plan.program.deck_b_start_frame, 0);
+        assert!(plan.program.resolve_at < 4 * u64::from(plan.program.sample_rate));
+        for frame in [0, plan.program.resolve_at / 2, plan.program.resolve_at] {
+            assert_eq!(
+                noor_mix::automation::param_value_at(
+                    &plan.program.automation,
+                    noor_mix::program::Param::PlaybackRate(noor_mix::program::DeckId::B),
+                    frame,
+                ),
+                1.0
+            );
+        }
+        let decision = plan
+            .program
+            .decision
+            .as_ref()
+            .expect("honest decision facts");
+        assert_eq!(decision.outgoing_window, "tempo_informed_short_overlap");
+        assert!(decision.reason.contains("phase is unverified"));
+        assert_eq!(decision.incoming_entry_seconds, 0.0);
+        plan.program.validate().expect("valid rescaled program");
+    }
+
+    #[test]
+    fn persisted_tidal_conflicting_tempos_keep_protection_through_the_engine() {
+        let db = db();
+        enable(&db);
+        seed_persisted_tidal_evidence(&db, 1_477_825, 63.0, 0.437, 125.11, 0.533);
+        seed_persisted_tidal_evidence(&db, 56_351_661, 115.0, 1.0, 171.43, 0.851);
+        let plan = DjEngine::new(db)
+            .plan_transition_details(
+                &ref_for("tidal_track", 1_477_825),
+                &ref_for("tidal_track", 56_351_661),
+                44_100,
+                2,
+            )
+            .expect("engine plan")
+            .expect("DJ enabled");
+        assert_eq!(plan.program.template, "SafeCrossfade");
+        assert_eq!(plan.program.deck_b_start_frame, 0);
+        assert!(
+            plan.program
+                .decision
+                .as_ref()
+                .expect("decision")
+                .candidates
+                .is_empty()
+        );
+        plan.program.validate().expect("valid protected crossfade");
+    }
+
+    #[test]
+    fn reported_endor_tabu_tempos_admit_partial_mix_and_measured_phase_admits_club_mix() {
+        let db = db();
+        enable(&db);
+        seed_persisted_tidal_evidence(&db, 320_747_472, 121.0, 1.0, 122.009, 0.567618);
+        seed_persisted_tidal_evidence(&db, 87_727_865, 121.0, 1.0, 122.2335, 0.920015);
+        let from = ref_for("tidal_track", 320_747_472);
+        let to = ref_for("tidal_track", 87_727_865);
+        let engine = DjEngine::new(db.clone());
+        let partial = engine
+            .plan_transition_details(&from, &to, 48_000, 2)
+            .unwrap()
+            .unwrap();
+        assert_ne!(partial.program.template, "SafeCrossfade");
+        assert!(partial.program.resolve_at <= 4 * 48_000);
+        assert!(
+            partial
+                .program
+                .decision
+                .as_ref()
+                .unwrap()
+                .reason
+                .contains("phase is unverified")
+        );
+        db.with_conn(|conn| {
+            queries::set_dj_preferred_strategy(conn, "club_mix")?;
+            for media_ref in [&from, &to] {
+                let mut row =
+                    queries::get_audio_dj_profile(conn, &media_ref.profile_key())?.unwrap();
+                row.source = "dj_playback_measured".into();
+                let measured = decode_f32_blob(&row.beat_grid_blob)
+                    .unwrap()
+                    .into_iter()
+                    .map(|beat| beat + 0.17)
+                    .collect::<Vec<_>>();
+                row.beat_grid_blob = encode_f32_blob(&measured);
+                row.downbeats_blob =
+                    encode_f32_blob(&measured.iter().step_by(4).copied().collect::<Vec<_>>());
+                queries::upsert_audio_dj_profile(conn, &row)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let measured = engine
+            .plan_transition_details(&from, &to, 48_000, 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(measured.program.template, "ClubMix");
+        assert!(measured.program.resolve_at > 12 * 48_000);
+        noor_mix::planner::safety::validate_audio_safety(&measured.program, &Default::default())
+            .unwrap();
     }
 
     fn seed_profile(db: &Database, kind: &str, id: i64, confidence: f64) {
@@ -774,7 +1296,13 @@ mod tests {
             ref_for("library_track", 2),
         )
         .expect("program");
-        assert_eq!(program.template, "BassSwap16");
+        assert_eq!(program.template, "LongHarmonicBlend");
+        assert!(
+            program
+                .decision
+                .as_ref()
+                .is_some_and(|decision| decision.candidates.len() > 1)
+        );
         program.validate().expect("valid");
     }
 
@@ -784,6 +1312,8 @@ mod tests {
         enable(&db);
         db.with_conn(|conn| queries::set_dj_global_policy(conn, "bold", "neutral"))
             .expect("set bold policy");
+        db.with_conn(|conn| queries::set_dj_preferred_strategy(conn, "bass_swap"))
+            .expect("prefer the existing bass swap");
         seed_profile(&db, "library_track", 1, 0.9);
         seed_profile(&db, "library_track", 2, 0.9);
 
@@ -799,7 +1329,7 @@ mod tests {
     }
 
     #[test]
-    fn balanced_policy_can_plan_drop_tease_from_manual_drop_cue() {
+    fn balanced_policy_aligns_a_drop_swap_from_manual_drop_cue() {
         let db = db();
         enable(&db);
         seed_profile(&db, "library_track", 1, 0.9);
@@ -814,8 +1344,8 @@ mod tests {
         )
         .expect("program");
 
-        assert_eq!(program.template, "DropTease16");
-        assert_eq!(program.deck_b_start_frame, 768_000);
+        assert_eq!(program.template, "DropSwap");
+        assert_eq!(program.deck_b_start_frame + program.swap_start, 32 * 48_000);
     }
 
     #[test]
@@ -826,25 +1356,29 @@ mod tests {
             .expect("set bold policy");
         seed_profile(&db, "library_track", 1, 0.9);
         seed_profile(&db, "library_track", 2, 0.9);
+        // The pair is unsyncable inside the 3% nudge band, but each measured
+        // grid agrees with its independent tempo. A contradictory grid must
+        // not be made eligible just to exercise the adventurous filter path.
+        let mut incoming = fixture_profile_row("library_track", 2, 0.9);
+        let beats = (0..64)
+            .map(|index| 0.12 + index as f32 * (60.0 / 126.0))
+            .collect::<Vec<_>>();
+        let downbeats = beats.iter().step_by(4).copied().collect::<Vec<_>>();
+        incoming.beat_grid_blob = encode_f32_blob(&beats);
+        incoming.downbeats_blob = encode_f32_blob(&downbeats);
+        incoming.mix_in_blob = encode_f32_blob(&downbeats[..4]);
+        incoming.mix_out_blob = encode_f32_blob(&downbeats[12..]);
+        incoming.intro_end_seconds = Some(f64::from(downbeats[8]));
+        incoming.outro_start_seconds = Some(f64::from(downbeats[8]));
         db.with_conn(|conn| {
-            queries::upsert_audio_dj_profile_correction(
-                conn,
-                &AudioDjProfileCorrectionRow {
-                    media_ref_kind: "library_track".to_string(),
-                    media_ref_id: "2".to_string(),
-                    bpm_multiplier: Some(1.05),
-                    downbeat_offset_beats: None,
-                    phrase_offset_bars: None,
-                    safe_crossfade_only: false,
-                    transition_speed_bias: None,
-                    manual_drop_blob: Vec::new(),
-                    notes: None,
-                    created_at: "now".to_string(),
-                    updated_at: "now".to_string(),
-                },
-            )
+            queries::upsert_audio_dj_profile(conn, &incoming)?;
+            conn.execute(
+                "UPDATE audio_dsp_features SET bpm = 126.0 WHERE track_id = 2",
+                [],
+            )?;
+            Ok(())
         })
-        .expect("tempo correction");
+        .expect("consistent measured tempo evidence");
         let engine = DjEngine::new(db);
 
         let plan = engine
@@ -858,8 +1392,8 @@ mod tests {
             .expect("plan");
 
         assert_eq!(plan.program.template, "FilterSweep");
-        // The planner is a short-circuiting decision tree, not a scorer, so it
-        // reports no fabricated per-alternative ranking.
+        // The old compatibility field remains empty; genuine scored choices
+        // are exposed by the program's decision metadata.
         assert!(plan.rejected_alternatives.is_empty());
     }
 
@@ -1154,6 +1688,20 @@ mod tests {
     }
 
     #[test]
+    fn estimate_bpm_preserves_sub_frame_tempo_over_quantized_markers() {
+        for bpm in [121.0_f64, 122.0, 174.0] {
+            let beats = (0..180)
+                .map(|beat| ((0.13 + beat as f64 * 60.0 / bpm) * 100.0).round() as f32 / 100.0)
+                .collect::<Vec<_>>();
+            let estimated = estimate_bpm(&beats).unwrap();
+            assert!(
+                (f64::from(estimated) - bpm).abs() < 0.03,
+                "{bpm} estimated as {estimated}"
+            );
+        }
+    }
+
+    #[test]
     fn estimate_bpm_uses_median_interval_across_grid_gaps() {
         // 120 BPM grid with one undetected beat; the old span/count mean
         // would report ~103 BPM.
@@ -1257,12 +1805,12 @@ mod tests {
             .expect("plan");
 
         let program = plan.program;
-        assert_eq!(program.template, "BassSwap16");
+        assert_eq!(program.template, "LongHarmonicBlend");
         assert_eq!(program.sample_rate, 44_100);
         // 1.0s downbeat at 44.1 kHz, not the 48 kHz planning-rate frame.
         assert_eq!(program.deck_b_start_frame, 44_100);
-        // 16 bars at 120 BPM = 32s at either rate.
-        assert_eq!(program.resolve_at, 1_411_200);
+        // The adaptive smooth blend is 48 beats = 24s at either rate.
+        assert_eq!(program.resolve_at, 1_058_400);
         program.validate().expect("valid at device rate");
     }
 

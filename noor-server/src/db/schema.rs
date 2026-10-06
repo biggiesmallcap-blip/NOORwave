@@ -72,7 +72,13 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_068,
     MIGRATION_069,
     MIGRATION_070,
+    MIGRATION_071,
 ];
+
+const MIGRATION_071: &str = r#"
+-- Separate the decoded countdown target from the original metadata estimate.
+ALTER TABLE dj_transition_events ADD COLUMN runtime_planned_start_ms INTEGER;
+"#;
 
 pub(crate) const MIGRATION_070: &str = r#"
 ALTER TABLE tracks ADD COLUMN date_choice_at TEXT;
@@ -1909,6 +1915,34 @@ INSERT OR IGNORE INTO _migrations (id) VALUES (67);
 COMMIT;
 "#;
 
+// Pre-merge DJ test builds used migration 69 for this timing column. Apply
+// master's catalogue migration atomically without renumbering saved history.
+fn repair_dj_preview_migration_collision(conn: &Connection) -> Result<()> {
+    let preview_schema: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _migrations WHERE id=69)
+         AND EXISTS(SELECT 1 FROM pragma_table_info('dj_transition_events') WHERE name='runtime_planned_start_ms')
+         AND NOT EXISTS(SELECT 1 FROM pragma_table_info('tracks') WHERE name='library_added_at')",
+        [], |row| row.get(0),
+    )?;
+    if preview_schema {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(MIGRATION_069)?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+fn execute_migration(conn: &Connection, id: i64, sql: &str) -> Result<()> {
+    if id == 71 && conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('dj_transition_events') WHERE name='runtime_planned_start_ms')",
+        [], |row| row.get::<_, bool>(0),
+    )? {
+        return Ok(());
+    }
+    conn.execute_batch(sql)?;
+    Ok(())
+}
+
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     // Create migrations table if not exists
     conn.execute_batch(
@@ -1917,6 +1951,8 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             applied_at TEXT DEFAULT (datetime('now'))
         );",
     )?;
+
+    repair_dj_preview_migration_collision(conn)?;
 
     let applied: i64 = conn
         .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
@@ -1929,7 +1965,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
                 // Alias backfill and the completion marker must commit together.
                 // A crash or failed constraint rolls back the entire migration.
                 let tx = conn.unchecked_transaction()?;
-                tx.execute_batch(migration)?;
+                execute_migration(&tx, migration_id, migration)?;
                 tx.execute(
                     "INSERT OR IGNORE INTO _migrations(id) VALUES(?1)",
                     [migration_id],
@@ -1961,6 +1997,8 @@ pub(super) fn apply_migrations_up_to(conn: &Connection, n: usize) -> Result<()> 
         );",
     )?;
 
+    repair_dj_preview_migration_collision(conn)?;
+
     let applied: i64 = conn
         .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
         .unwrap_or(0);
@@ -1973,7 +2011,7 @@ pub(super) fn apply_migrations_up_to(conn: &Connection, n: usize) -> Result<()> 
                 // Alias backfill and the completion marker must commit together.
                 // A crash or failed constraint rolls back the entire migration.
                 let tx = conn.unchecked_transaction()?;
-                tx.execute_batch(migration)?;
+                execute_migration(&tx, migration_id, migration)?;
                 tx.execute(
                     "INSERT OR IGNORE INTO _migrations(id) VALUES(?1)",
                     [migration_id],
@@ -2385,6 +2423,57 @@ mod tests {
         assert_eq!(token, "123456");
         assert_eq!(user_id, "existing-user");
         assert_eq!(hash_is_unique, 1);
+    }
+
+    #[test]
+    fn migration_071_upgrades_master_and_existing_dj_test_databases() {
+        for preview_build in [false, true] {
+            let conn = Connection::open_in_memory().unwrap();
+            apply_migrations_up_to(&conn, if preview_build { 68 } else { 70 }).unwrap();
+            conn.execute_batch("INSERT INTO artists(id,name) VALUES(1,'Artist');
+                INSERT INTO tracks(id,tidal_id,title,artist_id,is_library,date_added) VALUES(1,10,'Saved',1,1,'2020-01-01');").unwrap();
+            if preview_build {
+                conn.execute_batch(MIGRATION_071).unwrap();
+                conn.execute("INSERT INTO _migrations(id) VALUES(69)", [])
+                    .unwrap();
+                conn.execute_batch("CREATE TABLE tidal_track_aliases(conflicting_column INTEGER);")
+                    .unwrap();
+                assert!(run_migrations(&conn).is_err());
+                assert_eq!(conn.query_row("SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name='library_added_at'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+                assert_eq!(
+                    conn.query_row("SELECT COUNT(*) FROM _migrations WHERE id=69", [], |r| r
+                        .get::<_, i64>(0))
+                        .unwrap(),
+                    1
+                );
+                conn.execute_batch("DROP TABLE tidal_track_aliases;")
+                    .unwrap();
+            }
+            run_migrations(&conn).unwrap();
+            run_migrations(&conn).unwrap();
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM _migrations", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                71
+            );
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM pragma_table_info('dj_transition_events') WHERE name='runtime_planned_start_ms'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+            assert_eq!(
+                conn.query_row(
+                    "SELECT track_id FROM tidal_track_aliases WHERE tidal_id=10",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            assert_eq!(
+                conn.query_row("SELECT title FROM tracks WHERE id=1", [], |r| r
+                    .get::<_, String>(0))
+                    .unwrap(),
+                "Saved"
+            );
+        }
     }
 
     #[test]

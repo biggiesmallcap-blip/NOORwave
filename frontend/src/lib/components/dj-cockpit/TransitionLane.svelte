@@ -17,6 +17,7 @@
 	let fallback = $derived(status?.fallback_reason ?? null);
 	let planningStatus = $derived(status?.planning_status ?? 'disabled');
 	let transitionId = $derived(status?.last_transition_event_id ?? null);
+	let feedbackId = $derived(status?.feedback_transition_event_id ?? null);
 	let transitionArmed = $derived(
 		planningStatus === 'armed' ||
 			(planningStatus !== 'missed' &&
@@ -139,6 +140,10 @@
 		switch (source) {
 			case 'downbeat_sync':
 				return 'Beat-locked (downbeat)';
+			case 'phrase_sync':
+				return 'Phrase-aligned';
+			case 'mix_out_sync':
+				return 'Outro-aligned';
 			case 'beat_sync':
 				return 'Beat-locked (grid)';
 			case 'fallback_overlap':
@@ -392,10 +397,10 @@
 	<TransitionWaveform current={status?.current} next={status?.next} {status} />
 
 	<div class="lane-actions" aria-label="Transition feedback">
-		<button type="button" disabled={!transitionId} onclick={() => onFeedback('good')}>Good</button>
-		<button type="button" disabled={!transitionId} onclick={() => onFeedback('bad')}>Bad</button>
-		<button type="button" disabled={!transitionId} onclick={() => onFeedback('too_safe')}>Too safe</button>
-		<button type="button" disabled={!transitionId} onclick={() => onFeedback('too_bold')}>Too bold</button>
+		<button type="button" disabled={!feedbackId} onclick={() => onFeedback('good')}>Good</button>
+		<button type="button" disabled={!feedbackId} onclick={() => onFeedback('bad')}>Bad</button>
+		<button type="button" disabled={!feedbackId} onclick={() => onFeedback('too_safe')}>Too safe</button>
+		<button type="button" disabled={!feedbackId} onclick={() => onFeedback('too_bold')}>Too bold</button>
 	</div>
 
 	<div class="history-block">
@@ -450,7 +455,11 @@
 							</div>
 							<div>
 								<dt>Planned fire</dt>
-								<dd>{formatTimingMs(event.planned_start_ms)}</dd>
+								<dd>{formatTimingMs(event.runtime_planned_start_ms ?? event.planned_start_ms)}
+									{#if event.runtime_planned_start_ms != null && event.runtime_planned_start_ms !== event.planned_start_ms}
+										<small class="estimate-note">Metadata estimate {formatTimingMs(event.planned_start_ms)}</small>
+									{/if}
+								</dd>
 							</div>
 							<div>
 								<dt>Actual fire</dt>
@@ -513,7 +522,11 @@
 				</div>
 				<div>
 					<dt>Planned fire</dt>
-					<dd>{formatTimingMs(status?.planned_start_ms)}</dd>
+					<dd>{formatTimingMs(status?.runtime_planned_start_ms ?? status?.planned_start_ms)}
+						{#if status?.runtime_planned_start_ms != null && status.runtime_planned_start_ms !== status.planned_start_ms}
+							<small class="estimate-note">Metadata estimate {formatTimingMs(status.planned_start_ms)}</small>
+						{/if}
+					</dd>
 				</div>
 				<div>
 					<dt>Actual fire</dt>
@@ -627,6 +640,7 @@
 </section>
 
 <style>
+	.estimate-note { display: block; margin-top: var(--space-1); color: var(--text-tertiary); font-size: var(--font-size-2xs); font-weight: var(--font-weight-medium); }
 	.transition-lane {
 		display: grid;
 		gap: var(--space-3);
