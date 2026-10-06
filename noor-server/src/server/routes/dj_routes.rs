@@ -3413,6 +3413,7 @@ mod tests {
             current_stream_display: None,
             pending_stream_display: None,
             next_prebuffer_inflight: None,
+            early_unavailable_skips: None,
             last_drop_preview: None,
             active_listen_session: None,
             live_listen_session: None,

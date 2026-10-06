@@ -232,7 +232,7 @@ async fn refresh_prepared_dj_transition(
     state: &SharedState,
     handle: &playback_runtime::PlaybackRuntimeHandle,
 ) -> anyhow::Result<()> {
-    let (engine, update) = {
+    let (db, pair, sample_rate, channels, position_ms) = {
         let state_guard = state.read().await;
         let Some(info) = state_guard.playback_runtime_info.as_ref() else {
             return Ok(());
@@ -240,19 +240,31 @@ async fn refresh_prepared_dj_transition(
         let pair = state_guard
             .db
             .with_conn(|conn| active_dj_pair_for_state_and_conn(&state_guard, conn))?;
-        let engine = crate::playback::dj_engine::DjEngine::new(state_guard.db.clone());
-        if !state_guard.db.with_conn(queries::is_dj_engine_enabled)? {
-            return Ok(());
-        }
-        let update = player::plan_prepared_dj_transition_update(
-            &engine,
+        (
+            state_guard.db.clone(),
             pair,
             info.sample_rate,
             info.channels,
             handle.get_position_ms(info.sample_rate, info.channels),
-        )?;
-        (engine, update)
+        )
     };
+    // Planning runs every preparation tick; keep it off the async workers and
+    // outside the app-state lock so it never delays playback commands.
+    let (engine, update) = tokio::task::spawn_blocking(move || {
+        let engine = crate::playback::dj_engine::DjEngine::new(db);
+        if !engine.db().with_conn(queries::is_dj_engine_enabled)? {
+            return anyhow::Ok((engine, None));
+        }
+        let update = player::plan_prepared_dj_transition_update(
+            &engine,
+            pair,
+            sample_rate,
+            channels,
+            position_ms,
+        )?;
+        Ok((engine, update))
+    })
+    .await??;
     let Some(update) = update else {
         return Ok(());
     };
@@ -10560,6 +10572,20 @@ fn remove_unavailable_upcoming_row(
     {
         return Ok(false);
     }
+    // Each preparation task restarts its own loop after a pair change, so the
+    // advance path's skip limit is enforced per playing track, not per call.
+    let used = state
+        .early_unavailable_skips
+        .filter(|(track_id, skip_generation, _)| {
+            *track_id == current_track_id && *skip_generation == generation
+        })
+        .map_or(0, |(_, _, count)| count);
+    if used >= PLAYBACK_ADVANCE_PENDING_SKIP_LIMIT {
+        tracing::info!(target: "noor.playback.advance", event = "skip_unavailable_next_limit",
+            track_id = next.id, generation,
+            "Early unavailable-row skip limit reached; leaving the row for advance");
+        return Ok(false);
+    }
     let cleared = recently_cleared(state);
     let removed = state.db.with_conn(|conn| {
         if player::current_track_id(conn)? != Some(current_track_id) {
@@ -10588,6 +10614,7 @@ fn remove_unavailable_upcoming_row(
         Ok(true)
     })?;
     if removed {
+        state.early_unavailable_skips = Some((current_track_id, generation, used + 1));
         state.pending_stream_display = None;
         let _ = state.event_tx.send(AppEvent::TrackSkipped {
             track_id: next.id,

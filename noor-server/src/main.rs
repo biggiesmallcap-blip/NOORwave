@@ -128,6 +128,10 @@ pub struct AppState {
     pub current_stream_display: Option<StreamDisplayInfo>,
     pub pending_stream_display: Option<StreamDisplayInfo>,
     pub next_prebuffer_inflight: Option<NextPrebufferKey>,
+    /// Unavailable upcoming rows removed early while one track plays, as
+    /// (current track id, playback generation, count). Shared by every
+    /// preparation task so a chain of pair changes keeps the skip limit.
+    pub early_unavailable_skips: Option<(i64, u64, usize)>,
     pub last_drop_preview: Option<DropPreviewRuntimeState>,
     pub active_listen_session: Option<playback::player::ActiveListenSession>,
     pub live_listen_session: Option<playback::player::LiveListenSession>,
@@ -937,6 +941,7 @@ async fn main() -> Result<()> {
         current_stream_display: None,
         pending_stream_display: None,
         next_prebuffer_inflight: None,
+        early_unavailable_skips: None,
         last_drop_preview: None,
         active_listen_session: None,
         live_listen_session: None,

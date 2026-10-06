@@ -53,13 +53,37 @@
 
 	let saving = $state(false);
 	let djStatus = $state<DjStatusResponse | null>(null);
+	let djStoryInFlight = false;
 	async function refreshDjStory() {
-		try { djStatus = await api.getDjStatus(); } catch { djStatus = null; }
+		// One request at a time; keep the last story through a transient failure.
+		if (djStoryInFlight || document.visibilityState !== 'visible') return;
+		djStoryInFlight = true;
+		try { djStatus = await api.getDjStatus(); } catch { /* retry on the next tick */ }
+		finally { djStoryInFlight = false; }
 	}
 	onMount(() => {
-		void refreshDjStory();
-		const interval = window.setInterval(() => void refreshDjStory(), 2_000);
-		return () => window.clearInterval(interval);
+		let disposed = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		// Poll briskly only while DJ is on; otherwise just notice it being enabled.
+		const schedule = () => {
+			if (disposed) return;
+			timer = setTimeout(async () => {
+				await refreshDjStory();
+				schedule();
+			}, djStatus?.enabled ? 2_000 : 10_000);
+		};
+		const visibilityChanged = () => {
+			if (document.visibilityState !== 'visible') return;
+			clearTimeout(timer);
+			void refreshDjStory().finally(schedule);
+		};
+		void refreshDjStory().finally(schedule);
+		document.addEventListener('visibilitychange', visibilityChanged);
+		return () => {
+			disposed = true;
+			clearTimeout(timer);
+			document.removeEventListener('visibilitychange', visibilityChanged);
+		};
 	});
 	let draftCrossfade = $state(0);
 	let errorMsg = $state('');

@@ -1834,6 +1834,7 @@ pub(in crate::server) fn fresh_test_state(db: Database) -> crate::AppState {
         current_stream_display: None,
         pending_stream_display: None,
         next_prebuffer_inflight: None,
+        early_unavailable_skips: None,
         last_drop_preview: None,
         active_listen_session: None,
         live_listen_session: None,
@@ -4954,6 +4955,68 @@ fn delayed_unavailable_next_failure_cannot_remove_changed_queue_or_source() {
         assert_eq!(after.state.position_ms, 42_000, "{change}");
         assert!(after.state.is_playing, "{change}");
     }
+}
+
+#[test]
+fn early_unavailable_skips_share_one_limit_per_playing_track() {
+    let db = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    db.with_conn(|conn| {
+        conn.execute("INSERT INTO queue (id, track_id, position, source) VALUES (10, 1, 0, 'test')", [])?;
+        for offset in 0..10_i64 {
+            let track_id = 3 + offset;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, duration_ms, source) VALUES (?1, 'Unavailable', 1, 180000, 'tidal_stream')",
+                [track_id],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (id, track_id, position, source) VALUES (?1, ?2, ?3, 'test')",
+                [20 + offset, track_id, 1 + offset],
+            )?;
+        }
+        conn.execute("UPDATE playback_state SET current_track_id = 1, current_queue_item_id = 10, is_playing = 1 WHERE id = 1", [])?;
+        Ok(())
+    }).expect("queue");
+    let mut state = fresh_test_state(db.clone());
+    state.playback_runtime_info = Some(PlaybackRuntimeInfo {
+        device_name: "Test DAC".to_string(),
+        sample_rate: 48_000,
+        channels: 2,
+        active_track_id: Some(1),
+        last_error: None,
+        exclusive_engaged: false,
+        exclusive_transport_format: None,
+    });
+    let generation = current_playback_generation(&state);
+    let try_skip = |state: &mut crate::AppState, generation: u64| {
+        let (pair, next) = db
+            .with_conn(|conn| {
+                Ok((
+                    crate::playback::dj_lookahead::load_dj_lookahead_pair(conn)?,
+                    player::peek_next_track(conn, false)?.expect("next"),
+                ))
+            })
+            .expect("pair");
+        remove_unavailable_upcoming_row(state, 1, generation, &pair, &next, "TIDAL asset 4005")
+            .expect("skip")
+    };
+    // Each preparation task loops separately; the budget belongs to the track.
+    for _ in 0..PLAYBACK_ADVANCE_PENDING_SKIP_LIMIT {
+        assert!(try_skip(&mut state, generation));
+    }
+    assert!(!try_skip(&mut state, generation), "limit reached");
+    let remaining = db
+        .with_conn(player::load_snapshot)
+        .expect("snapshot")
+        .queue
+        .len();
+    assert_eq!(remaining, 11 - PLAYBACK_ADVANCE_PENDING_SKIP_LIMIT);
+
+    // A new playback generation starts a fresh budget.
+    state
+        .playback_generation
+        .store(generation + 1, std::sync::atomic::Ordering::Relaxed);
+    assert!(try_skip(&mut state, generation + 1));
 }
 
 #[tokio::test]
