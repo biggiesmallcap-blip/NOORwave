@@ -59,7 +59,7 @@ pub struct ShuffleApplyResult {
 }
 
 pub fn load_queue(conn: &Connection) -> Result<Vec<QueueItem>> {
-    let mut stmt = conn.prepare(
+    let sql =
         // Phase 2c-ii-a: LEFT JOIN so pending rows (track_id IS NULL) appear.
         // COALESCE fills non-nullable Track fields from pending_* columns so the
         // row mapper doesn't need to know whether a row is pending or resolved.
@@ -101,8 +101,14 @@ pub fn load_queue(conn: &Connection) -> Result<Vec<QueueItem>> {
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
          LEFT JOIN tracks lt ON lt.tidal_id = q.tidal_id_hint
-         ORDER BY q.position ASC, q.id ASC",
-    )?;
+         ORDER BY q.position ASC, q.id ASC";
+    let sql = if crate::db::catalogue::enabled(conn)? {
+        sql.replace("LEFT JOIN tracks lt ON lt.tidal_id = q.tidal_id_hint",
+            "LEFT JOIN tidal_track_aliases alias ON alias.tidal_id=q.tidal_id_hint LEFT JOIN tracks lt ON lt.id=alias.track_id")
+    } else {
+        sql.to_owned()
+    };
+    let mut stmt = conn.prepare(&sql)?;
 
     let items = stmt
         .query_map([], |row| {
@@ -361,7 +367,15 @@ fn insert_at_position(
     if external_is_blocked(conn, insert)? {
         anyhow::bail!("Hidden by your AI-generated music filter");
     }
-    if let Some(track_id) = insert.local_track_id {
+    let known_alias = insert
+        .tidal_id_hint
+        .map(|tid| crate::db::catalogue::track_id(conn, tid))
+        .transpose()?
+        .flatten();
+    if let Some(track_id) = insert.local_track_id.or(known_alias) {
+        if crate::db::tidal_content::local_is_blocked(conn, track_id)? {
+            anyhow::bail!("Hidden by your AI-generated music filter");
+        }
         conn.execute(
             "INSERT INTO queue (track_id, position, source, reason) VALUES (?1, ?2, ?3, ?4)",
             params![track_id, position, insert.source, insert.reason],
@@ -1265,18 +1279,10 @@ mod tests {
         let conn = conn();
         conn.execute("UPDATE tracks SET is_favorite = 1 WHERE id = 3", [])
             .unwrap();
-        append_external_track(
-            &conn,
-            &ExternalTrackInsert {
-                artist: "A",
-                title: "Track 3 again",
-                source: "user_queue",
-                // Seeded track 3 has tidal_id 3, so the lt join matches.
-                tidal_id_hint: Some(3),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        // Simulate a pending row saved before the matching song was imported.
+        // New queue inserts resolve known provider IDs directly.
+        conn.execute("INSERT INTO queue(position,source,pending_artist,pending_title,pending_at,tidal_id_hint)
+            VALUES(0,'user_queue','A','Track 3 again',datetime('now'),3)",[]).unwrap();
 
         let rows = load_queue(&conn).unwrap();
         assert!(

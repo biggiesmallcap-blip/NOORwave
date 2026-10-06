@@ -15,6 +15,7 @@ import {
 	formatCount,
 	formatDate,
 	formatDateShort,
+	savedDateMillis,
 	formatDelta,
 	formatDr,
 	formatDuration,
@@ -319,5 +320,18 @@ describe('getQualityClass', () => {
 		expect(getQualityClass('HIGH')).toBe('lossy');
 		expect(getQualityClass('LOW')).toBe('lossy');
 		expect(getQualityClass('UNKNOWN')).toBe('lossy');
+	});
+});
+
+
+describe('saved date labels and ordering use the same UTC instant', () => {
+	test('legacy SQL UTC and offset ISO timestamps agree', () => {
+		expect(savedDateMillis('2020-06-10 07:10:44.221')).toBe(savedDateMillis('2020-06-10T17:10:44.221+10:00'));
+		expect(savedDateMillis('2026-01-01T00:00:00Z')).toBeGreaterThan(savedDateMillis('2020-06-10T07:10:44.221Z')!);
+	});
+	test('missing and invalid dates have an explicit empty fallback', () => {
+		expect(savedDateMillis(null)).toBeNull();
+		expect(savedDateMillis('not a date')).toBeNull();
+		expect(formatDateShort('not a date')).toBe('—');
 	});
 });

@@ -55,6 +55,8 @@ const ALT_VERSION_TOKENS: &[&str] = &[
     "demo",
     "vip",
     "rework",
+    "clean",
+    "explicit",
 ];
 
 /// Phrase-level alt-version markers detected via substring (post-normalize).
@@ -274,7 +276,7 @@ fn is_ignorable_title_segment(segment: &str) -> bool {
     let normalized = normalize(segment);
     matches!(
         normalized.as_str(),
-        "feat" | "ft" | "featuring" | "original" | "explicit" | "clean"
+        "feat" | "ft" | "featuring" | "original"
     ) || normalized.starts_with("feat ")
         || normalized.starts_with("ft ")
         || normalized.starts_with("featuring ")
@@ -416,6 +418,8 @@ pub struct IncomingTrack<'a> {
     pub artist_name: &'a str,
     pub isrc: Option<&'a str>,
     pub duration_ms: i64,
+    pub version: Option<&'a str>,
+    pub explicit: Option<bool>,
 }
 
 /// An existing tracks row that could be the same recording as an incoming one.
@@ -426,16 +430,41 @@ pub struct ExistingCandidate {
     pub artist_name: String,
     pub isrc: Option<String>,
     pub duration_ms: i64,
+    pub version: Option<String>,
+    pub explicit: Option<bool>,
+}
+
+/// Full meaningful descriptors retain years, venues, and mix names. Coarse
+/// keywords may group candidates, but cannot establish interchangeable audio.
+pub fn versions_compatible(
+    left: &str,
+    left_version: Option<&str>,
+    left_explicit: Option<bool>,
+    right: &str,
+    right_version: Option<&str>,
+    right_explicit: Option<bool>,
+) -> bool {
+    let descriptor = |title: &str| {
+        let (alt, master) = extract_variant_markers(title);
+        if alt.is_empty() && master.is_empty() {
+            String::new()
+        } else {
+            canonicalize_title(title)
+        }
+    };
+    descriptor(left) == descriptor(right)
+        && left_version.map(normalize).filter(|s| !s.is_empty())
+            == right_version.map(normalize).filter(|s| !s.is_empty())
+        && left_explicit == right_explicit
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ImportDecision {
     /// No same-recording match: run the normal `ON CONFLICT(tidal_id)` upsert.
     Insert,
-    /// The same recording already exists under a DIFFERENT tidal_id. The
-    /// caller decides the side effect (liked sync transfers the like; album
-    /// enrichment just skips).
-    SkipDuplicate {
+    /// Strong recording identity under another provider ID. The caller must
+    /// retain the incoming ID and metadata as a catalogue alias.
+    LinkAlias {
         existing_track_id: i64,
         existing_tidal_id: Option<i64>,
     },
@@ -453,9 +482,8 @@ fn normalize_isrc(isrc: &str) -> Option<String> {
 /// Sorted alt-version fingerprint ("remix"/"live"/"acoustic"/... tokens and
 /// phrases) for a title. Two titles are only the same recording when these
 /// agree - that is what keeps distinct versions alive while single/album/
-/// deluxe/compilation copies collapse. Master markers (remaster/extended/...)
-/// are deliberately NOT part of the fingerprint: a remaster is the same
-/// recording, and an extended cut is separated by the duration gate instead.
+/// deluxe/compilation copies collapse. Master markers are checked separately
+/// so explicit remasters and extended cuts remain distinct.
 fn alt_fingerprint(row: &MatchRow) -> Vec<&'static str> {
     let mut v = row.alt_markers.clone();
     v.sort_unstable();
@@ -464,11 +492,11 @@ fn alt_fingerprint(row: &MatchRow) -> Vec<&'static str> {
 
 /// Decide whether an incoming track is a new recording or a copy of an
 /// existing row. Pure function over pre-fetched candidates; both sync phases
-/// and album enrichment share it. Only literal same-recording copies are ever
-/// skipped - there is deliberately no "skip variant" outcome.
+/// and album enrichment share it. Verified copies retain their provider ID as
+/// an alias; uncertain matches and distinct versions remain separate.
 pub fn decide_import(incoming: &IncomingTrack, candidates: &[ExistingCandidate]) -> ImportDecision {
     // Rule 0: same tidal_id = same row, not a duplicate. The normal upsert
-    // must run so re-syncs keep refreshing title/quality/fidelity/date_added.
+    // must run so re-syncs refresh provider metadata while retaining saved dates.
     if candidates
         .iter()
         .any(|c| c.tidal_id == Some(incoming.tidal_id))
@@ -482,7 +510,7 @@ pub fn decide_import(incoming: &IncomingTrack, candidates: &[ExistingCandidate])
         incoming.title,
         incoming.artist_name,
         Some(incoming.duration_ms),
-        None,
+        incoming.isrc.map(str::to_owned),
         None,
         None,
         None,
@@ -496,21 +524,7 @@ pub fn decide_import(incoming: &IncomingTrack, candidates: &[ExistingCandidate])
     let inc_alt = alt_fingerprint(&inc_row);
 
     for cand in candidates {
-        // ISRC path: same registered recording. The duration guard defends
-        // against the known ISRC-reuse-with-different-length upstream bug.
         let cand_isrc = cand.isrc.as_deref().and_then(normalize_isrc);
-        if let (Some(a), Some(b)) = (inc_isrc.as_deref(), cand_isrc.as_deref())
-            && a == b
-            && durations_compatible(incoming.duration_ms, cand.duration_ms, 15_000, 8)
-        {
-            return ImportDecision::SkipDuplicate {
-                existing_track_id: cand.track_id,
-                existing_tidal_id: cand.tidal_id,
-            };
-        }
-
-        // Title path: fuzzy same-recording match, gated on matching variant
-        // fingerprints so "Song" never swallows "Song (Live)".
         let cand_row = build_match_row(
             cand.track_id,
             &cand.title,
@@ -527,19 +541,34 @@ pub fn decide_import(incoming: &IncomingTrack, candidates: &[ExistingCandidate])
             0,
             false,
         );
-        if alt_fingerprint(&cand_row) == inc_alt && rows_match(&inc_row, &cand_row, false) {
-            return ImportDecision::SkipDuplicate {
+        if inc_isrc.is_some()
+            && inc_isrc == cand_isrc
+            && alt_fingerprint(&cand_row) == inc_alt
+            && cand_row.master_markers == inc_row.master_markers
+            && rows_match(&inc_row, &cand_row, true)
+            && versions_compatible(
+                incoming.title,
+                incoming.version,
+                incoming.explicit,
+                &cand.title,
+                cand.version.as_deref(),
+                cand.explicit,
+            )
+        {
+            return ImportDecision::LinkAlias {
                 existing_track_id: cand.track_id,
                 existing_tidal_id: cand.tidal_id,
             };
         }
+        // Title-only matches remain separate for review. They cannot establish
+        // recording identity strongly enough to discard a provider release.
     }
 
     ImportDecision::Insert
 }
 
 const IMPORT_CANDIDATE_SELECT: &str =
-    "SELECT t.id, t.tidal_id, t.title, COALESCE(a.name, ''), t.isrc, COALESCE(t.duration_ms, 0)
+    "SELECT t.id, t.tidal_id, t.title, COALESCE(a.name, ''), t.isrc, COALESCE(t.duration_ms, 0), NULL AS catalogue_version, NULL AS catalogue_explicit
      FROM tracks t
      LEFT JOIN artists a ON t.artist_id = a.id";
 
@@ -559,6 +588,8 @@ fn collect_import_candidates(
             artist_name: row.get(3)?,
             isrc: row.get(4)?,
             duration_ms: row.get(5)?,
+            version: row.get(6)?,
+            explicit: row.get(7)?,
         })
     })?;
     for row in rows {
@@ -582,11 +613,28 @@ pub fn fetch_import_candidates(
     duration_ms: i64,
 ) -> Result<Vec<ExistingCandidate>> {
     let mut out: Vec<ExistingCandidate> = Vec::new();
+    let select = if crate::db::catalogue_favorites::enabled(conn)? {
+        IMPORT_CANDIDATE_SELECT.replace(
+            "NULL AS catalogue_version, NULL AS catalogue_explicit",
+            "t.catalogue_version,t.catalogue_explicit",
+        )
+    } else {
+        IMPORT_CANDIDATE_SELECT.to_owned()
+    };
     let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    if let Some(id) = crate::db::catalogue::track_id(conn, tidal_id)? {
+        collect_import_candidates(
+            conn,
+            &format!("{select} WHERE t.id = ?1"),
+            &[&id],
+            &mut seen,
+            &mut out,
+        )?;
+    }
 
     collect_import_candidates(
         conn,
-        &format!("{IMPORT_CANDIDATE_SELECT} WHERE t.tidal_id = ?1"),
+        &format!("{select} WHERE t.tidal_id = ?1"),
         &[&tidal_id],
         &mut seen,
         &mut out,
@@ -595,7 +643,7 @@ pub fn fetch_import_candidates(
     if let Some(isrc) = isrc.map(str::trim).filter(|s| !s.is_empty()) {
         collect_import_candidates(
             conn,
-            &format!("{IMPORT_CANDIDATE_SELECT} WHERE t.isrc = ?1 AND t.isrc != ''"),
+            &format!("{select} WHERE upper(trim(t.isrc)) = upper(trim(?1)) AND t.isrc != ''"),
             &[&isrc],
             &mut seen,
             &mut out,
@@ -605,7 +653,7 @@ pub fn fetch_import_candidates(
     collect_import_candidates(
         conn,
         &format!(
-            "{IMPORT_CANDIDATE_SELECT}
+            "{select}
              WHERE t.artist_id = (SELECT id FROM artists WHERE tidal_id = ?1)
                AND ABS(COALESCE(t.duration_ms, 0) - ?2) <= 15000"
         ),
@@ -1201,6 +1249,39 @@ fn load_members_with_classify_rows(
     Ok((members, match_rows))
 }
 
+fn verified_recording_pair(conn: &Connection, left: &MatchRow, right: &MatchRow) -> Result<bool> {
+    if left.id == right.id {
+        return Ok(true);
+    }
+    let metadata = |id| -> Result<(Option<String>, Option<bool>)> {
+        if crate::db::catalogue_favorites::enabled(conn)? {
+            Ok(conn.query_row(
+                "SELECT catalogue_version,catalogue_explicit FROM tracks WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        } else {
+            Ok((None, None))
+        }
+    };
+    let (lv, le) = metadata(left.id)?;
+    let (rv, re) = metadata(right.id)?;
+    Ok(left.isrc.as_deref().and_then(normalize_isrc).is_some()
+        && left.isrc.as_deref().and_then(normalize_isrc)
+            == right.isrc.as_deref().and_then(normalize_isrc)
+        && alt_fingerprint(left) == alt_fingerprint(right)
+        && left.master_markers == right.master_markers
+        && rows_match(left, right, true)
+        && versions_compatible(
+            &left.norm_title,
+            lv.as_deref(),
+            le,
+            &right.norm_title,
+            rv.as_deref(),
+            re,
+        ))
+}
+
 // ── Resolve ───────────────────────────────────────────────────────────────────
 
 pub struct ResolveResult {
@@ -1216,6 +1297,23 @@ pub fn resolve_group(
     group_id: i64,
     preferred_track_id: i64,
 ) -> Result<ResolveResult> {
+    if crate::db::catalogue::enabled(conn)? {
+        let (_, rows) = load_members_with_classify_rows(conn, group_id)?;
+        let mut verified = rows.iter().any(|r| r.id == preferred_track_id);
+        for left in &rows {
+            for right in &rows {
+                verified &= verified_recording_pair(conn, left, right)?;
+            }
+        }
+        if verified {
+            let outcome = merge_group(conn, group_id, preferred_track_id)?;
+            return Ok(ResolveResult {
+                removed_track_ids: outcome.removed_track_ids,
+                tidal_ids_to_unfavorite: vec![],
+                reconcile: outcome.reconcile,
+            });
+        }
+    }
     conn.execute(
         "UPDATE duplicate_members SET is_preferred = 0 WHERE group_id = ?1",
         params![group_id],
@@ -1336,6 +1434,9 @@ pub fn merge_group(
         .filter_map(|l| l.1)
         .collect();
 
+    for &(removed, _, _, _, _) in &losers {
+        crate::db::catalogue::retain_merge(&tx, preferred_track_id, removed)?;
+    }
     // Fold flags, plays, and the earliest library date into the kept row: a
     // merge can move a like, never lose one or make an old recording look as
     // though it was added on the day a duplicate catalogue copy arrived.
@@ -1352,6 +1453,7 @@ pub fn merge_group(
                  FROM duplicate_members dm2
                  JOIN tracks t2 ON t2.id = dm2.track_id
                  WHERE dm2.group_id = ?5 AND t2.date_added IS NOT NULL
+                   AND (t2.is_library=1 OR t2.is_favorite=1)
                  ORDER BY substr(t2.date_added, 1, 10) ASC,
                           substr(t2.date_added, 12, 8) ASC
                  LIMIT 1),
@@ -1360,6 +1462,18 @@ pub fn merge_group(
          WHERE id = ?4",
         params![fav_fold, lib_fold, plays_fold, preferred_track_id, group_id],
     )?;
+    if crate::db::catalogue::enabled(&tx)? {
+        tx.execute(
+            "UPDATE tracks SET date_added=COALESCE(library_added_at,date_added) WHERE id=?1",
+            [preferred_track_id],
+        )?;
+        if let Some(desired) = crate::db::catalogue_favorites::desired(&tx, preferred_track_id)? {
+            tx.execute(
+                "UPDATE tracks SET is_favorite=?2 WHERE id=?1",
+                params![preferred_track_id, desired as i32],
+            )?;
+        }
+    }
     // Zero the folded counters on the losers so an interrupted merge that
     // re-runs after the next scan cannot double-count plays.
     for &(loser_id, _, _, _, _) in &losers {
@@ -1419,11 +1533,27 @@ pub fn merge_group(
         params![preferred_track_id],
     )?;
 
-    let reconcile = crate::playback::player::reconcile_after_track_delete_in_transaction(
+    let mut queue_repointed = false;
+    let mut current_repointed = false;
+    if crate::db::catalogue::enabled(&tx)? {
+        for &removed in &removed_track_ids {
+            queue_repointed |= tx.execute(
+                "UPDATE queue SET track_id=?1 WHERE track_id=?2",
+                params![preferred_track_id, removed],
+            )? > 0;
+            current_repointed |= tx.execute(
+                "UPDATE playback_state SET current_track_id=?1 WHERE current_track_id=?2",
+                params![preferred_track_id, removed],
+            )? > 0;
+        }
+    }
+    let mut reconcile = crate::playback::player::reconcile_after_track_delete_in_transaction(
         &tx,
         &removed_track_ids,
     )?;
 
+    reconcile.queue_changed |= queue_repointed;
+    reconcile.current_changed |= current_repointed;
     // Explicit cleanup of remaining loser references. The shipped DB would
     // cascade most of these on the tracks delete, but being explicit keeps
     // behavior identical when foreign_keys is off (tests, older DBs).
@@ -1469,6 +1599,9 @@ pub fn merge_group(
         params![group_id],
     )?;
 
+    if crate::db::catalogue::enabled(&tx)? {
+        crate::db::catalogue::choose_available(&tx, preferred_track_id)?;
+    }
     let kept_tidal_id: Option<i64> = tx
         .query_row(
             "SELECT tidal_id FROM tracks WHERE id = ?1",
@@ -1520,8 +1653,8 @@ pub struct AutoMergeStats {
     pub removed_tracks: usize,
     /// Groups left for the Duplicates UI (alt_version, local files).
     pub skipped_groups: usize,
-    /// (kept tidal_id, favorited loser tidal_ids) pairs the caller must
-    /// reconcile on TIDAL.
+    /// Historical transfer summary. Automatic consolidation is local and
+    /// never authorizes provider writes.
     #[serde(skip)]
     pub favorite_transfers: Vec<(i64, Vec<i64>)>,
     pub queue_changed: bool,
@@ -1554,7 +1687,13 @@ pub fn auto_merge_pending(conn: &Connection) -> Result<AutoMergeStats> {
             relationship.as_str(),
             "exact_duplicate" | "quality_variant" | "cross_album_reissue" | "remaster"
         );
-        if !same_recording || touches_local_file {
+        let mut verified = true;
+        for left in &classify_rows {
+            for right in &classify_rows {
+                verified &= verified_recording_pair(conn, left, right)?;
+            }
+        }
+        if !same_recording || touches_local_file || !verified {
             stats.skipped_groups += 1;
             continue;
         }
@@ -2186,6 +2325,8 @@ mod tests {
             artist_name: "Test Artist",
             isrc,
             duration_ms,
+            version: None,
+            explicit: None,
         }
     }
 
@@ -2203,6 +2344,8 @@ mod tests {
             artist_name: "Test Artist".to_string(),
             isrc: isrc.map(str::to_string),
             duration_ms,
+            version: None,
+            explicit: None,
         }
     }
 
@@ -2220,7 +2363,7 @@ mod tests {
         let cands = vec![candidate(7, Some(99), "Song", Some("ISRC1"), 201_000)];
         assert_eq!(
             decide_import(&inc, &cands),
-            ImportDecision::SkipDuplicate {
+            ImportDecision::LinkAlias {
                 existing_track_id: 7,
                 existing_tidal_id: Some(99),
             }
@@ -2242,18 +2385,12 @@ mod tests {
     }
 
     #[test]
-    fn decide_import_single_vs_album_same_title_skips() {
+    fn decide_import_title_only_match_remains_for_review() {
         // Same recording released on a single and an album: no ISRC on the
         // incoming copy, title+artist+duration collapse it.
         let inc = incoming(42, "Song", None, 200_000);
         let cands = vec![candidate(7, Some(99), "Song", None, 200_500)];
-        assert_eq!(
-            decide_import(&inc, &cands),
-            ImportDecision::SkipDuplicate {
-                existing_track_id: 7,
-                existing_tidal_id: Some(99),
-            }
-        );
+        assert_eq!(decide_import(&inc, &cands), ImportDecision::Insert);
     }
 
     #[test]
@@ -2277,18 +2414,12 @@ mod tests {
     }
 
     #[test]
-    fn decide_import_collapses_remaster_of_same_recording() {
+    fn decide_import_unverified_remaster_remains_for_review() {
         // Master markers are not part of the variant fingerprint: a remaster
         // with matching duration is the same recording.
         let inc = incoming(42, "Song (2011 Remaster)", None, 200_000);
         let cands = vec![candidate(7, Some(99), "Song", None, 200_500)];
-        assert_eq!(
-            decide_import(&inc, &cands),
-            ImportDecision::SkipDuplicate {
-                existing_track_id: 7,
-                existing_tidal_id: Some(99),
-            }
-        );
+        assert_eq!(decide_import(&inc, &cands), ImportDecision::Insert);
     }
 
     #[test]

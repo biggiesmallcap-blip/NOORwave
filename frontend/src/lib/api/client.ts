@@ -2487,6 +2487,10 @@ async function fetchApi<T>(
 }
 
 export const api = {
+    getCatalogueStatus() {
+        return fetchApi<{ tracks: { id: number; availability: string; favorite_state: string; releases: number }[] }>('/api/library/catalogue/status');
+    },
+
     getTidalContentSettings() {
         return fetchApi<{ hide_ai_generated: boolean }>('/api/tidal/content-settings');
     },

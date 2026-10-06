@@ -18,7 +18,7 @@ pub struct SyncStats {
     /// enrichment fill is counted separately so "tracks synced" keeps meaning
     /// library tracks.
     pub tracks: usize,
-    /// Same-recording copies skipped by import dedupe.
+    /// Same-recording releases retained as aliases instead of extra local rows.
     pub duplicates_skipped: usize,
     /// Hidden album-fill rows written by the discovery-enrichment pass.
     pub background_tracks: usize,
@@ -471,6 +471,12 @@ async fn do_tidal_sync(
         Ok(())
     };
 
+    {
+        let db = state.read().await.db.clone();
+        if let Err(error) = crate::db::catalogue_recovery::consume_pending(&db) {
+            tracing::warn!(%error,"Reviewed catalogue recovery left pending before sync");
+        }
+    }
     let sync_info = {
         let s = state.read().await;
         s.db.with_conn(|conn| Ok(crate::db::queries::get_sync_info(conn, "tidal")?))?
@@ -491,6 +497,7 @@ async fn do_tidal_sync(
             .and_then(|info| info.tidal_favorite_track_cursor.clone()),
         ..Default::default()
     };
+    let favorite_snapshot_started = crate::db::catalogue_favorites::now();
     let mut favorite_album_ids = HashSet::new();
     let mut favorite_track_ids = HashSet::new();
 
@@ -613,6 +620,13 @@ async fn do_tidal_sync(
                          ON CONFLICT(tidal_id) DO UPDATE SET name=excluded.name, photo_url=COALESCE(excluded.photo_url, artists.photo_url)",
                         rusqlite::params![album.artist.id, album.artist.name, photo],
                     )?;
+                    if let Some(existing)=crate::db::catalogue::album_id(&tx,album.id)? {
+                        tx.execute("UPDATE albums SET is_favorite=?6,title=?2,year=COALESCE(?3,year),
+                            artwork_url=COALESCE(?4,artwork_url),track_count=COALESCE(?5,track_count) WHERE id=?1",
+                            rusqlite::params![existing,album.title,year,artwork,album.number_of_tracks,crate::db::catalogue_favorites::desired_entity(&tx,"album",existing)?.unwrap_or(true) as i32])?;
+                        tx.execute("UPDATE tidal_album_aliases SET is_favorite=1 WHERE tidal_id=?1",[album.id])?;
+                        continue;
+                    }
                     tx.execute(
                         "INSERT INTO albums (tidal_id, title, artist_id, year, artwork_url, release_type, track_count, is_favorite, source)
                          VALUES (?1, ?2, (SELECT id FROM artists WHERE tidal_id=?3), ?4, ?5, ?6, ?7, 1, 'tidal')
@@ -697,7 +711,8 @@ async fn do_tidal_sync(
                         rusqlite::params![track.artist.id, track.artist.name],
                     )?;
                     // Ensure album ref
-                    if let Some(ref album_ref) = track.album {
+                    if let Some(ref album_ref) = track.album
+                        && crate::db::catalogue::album_id(&tx,album_ref.id)?.is_none() {
                         let artwork = TC::get_artwork_url(&album_ref.cover, 640);
                         tx.execute(
                             "INSERT OR IGNORE INTO albums (tidal_id, title, artist_id, artwork_url, is_favorite, source)
@@ -715,7 +730,9 @@ async fn do_tidal_sync(
                         artist_name: &track.artist.name,
                         isrc: track.isrc.as_deref(),
                         duration_ms: track.duration * 1000,
-                    };
+                        version: track.extra.get("version").and_then(|v|v.as_str()),
+    explicit: track.extra.get("explicit").and_then(|v|v.as_bool()),
+};
                     let candidates = dup::fetch_import_candidates(
                         &tx,
                         track.id,
@@ -728,21 +745,14 @@ async fn do_tidal_sync(
                             super::insert_tidal_track(&tx, track, true, true, fav.created.as_deref())?;
                             page_inserted += 1;
                         }
-                        dup::ImportDecision::SkipDuplicate {
+                        dup::ImportDecision::LinkAlias {
                             existing_track_id,
                             existing_tidal_id,
                         } => {
-                            promote_duplicate_favorite(
-                                &tx,
-                                existing_track_id,
-                                fav.created.as_deref(),
-                            )?;
-                            // Keep the transferred like stable across the
-                            // Full-mode reconciliation, which resets and
-                            // re-sets is_favorite by tidal_id.
-                            if let Some(existing_tidal_id) = existing_tidal_id {
-                                favorite_track_ids.insert(existing_tidal_id);
-                            }
+                            // Persist the new provider ID as an alias before promotion.
+                            super::insert_tidal_track(&tx, track, true, true, fav.created.as_deref())?;
+                            // Reconciliation resolves the actual remote ID through its alias.
+                            let _ = (existing_track_id, existing_tidal_id);
                             page_skipped += 1;
                         }
                     }
@@ -914,17 +924,19 @@ async fn do_tidal_sync(
     if sync_mode_reconciles_favorites(sync_mode) {
         let s = state.read().await;
         s.db.with_conn(|conn| {
-            super::apply_tidal_favorite_flags(
+            super::apply_tidal_favorite_flags_at(
                 conn,
                 "albums",
                 &favorite_album_ids,
                 prev_album_count,
+                &favorite_snapshot_started,
             )?;
-            super::apply_tidal_favorite_flags(
+            super::apply_tidal_favorite_flags_at(
                 conn,
                 "tracks",
                 &favorite_track_ids,
                 prev_track_count,
+                &favorite_snapshot_started,
             )?;
             Ok(())
         })?;
@@ -952,7 +964,7 @@ async fn do_tidal_sync(
 /// (is_library = 0): invisible in the Library grid and Genre Galaxy, but
 /// feeding radio, similarity, and DiscoverSpace. DB-driven so it also covers
 /// albums favorited before this feature existed, albums synced while the
-/// toggle was off, and interrupted runs. Same-recording copies are skipped
+/// toggle was off, and interrupted runs. Same-recording copies are retained as aliases
 /// via decide_import; variants (remix/live/...) are kept.
 async fn run_favorite_album_enrichment(
     client: &TidalClient,
@@ -1042,7 +1054,9 @@ async fn run_favorite_album_enrichment(
                             artist_name: &track.artist.name,
                             isrc: track.isrc.as_deref(),
                             duration_ms: track.duration * 1000,
-                        };
+                            version: track.extra.get("version").and_then(|v|v.as_str()),
+    explicit: track.extra.get("explicit").and_then(|v|v.as_bool()),
+};
                         let candidates = dup::fetch_import_candidates(
                             &tx,
                             track.id,
@@ -1055,15 +1069,17 @@ async fn run_favorite_album_enrichment(
                                 super::insert_tidal_track(&tx, track, false, false, None)?;
                                 inserted += 1;
                             }
-                            dup::ImportDecision::SkipDuplicate { .. } => {
+                            dup::ImportDecision::LinkAlias { .. } => {
+                                super::insert_tidal_track(&tx, track, false, false, None)?;
                                 skipped += 1;
                             }
                         }
                     }
+                    crate::db::catalogue::reconcile_album(&tx, album_id, &tracks)?;
                     // Mark done inside the same tx: a crash re-runs the whole
                     // album (idempotent upserts), never half-marks it.
                     tx.execute(
-                        "UPDATE albums SET enrich_completed_at = datetime('now') WHERE tidal_id = ?1",
+                        "UPDATE albums SET enrich_completed_at = datetime('now') WHERE id = (SELECT album_id FROM tidal_album_aliases WHERE tidal_id=?1)",
                         rusqlite::params![album_id],
                     )?;
                     tx.commit()?;
@@ -1081,7 +1097,7 @@ async fn run_favorite_album_enrichment(
     }
 
     tracing::info!(
-        "Enrichment complete: {} hidden tracks added, {} duplicate copies skipped",
+        "Enrichment complete: {} hidden tracks added, {} catalogue aliases retained",
         stats.background_tracks,
         stats.duplicates_skipped
     );
@@ -1441,7 +1457,9 @@ pub(super) fn replace_playlist_tracks(
             "INSERT INTO artists (tidal_id, name) VALUES (?1, ?2) ON CONFLICT(tidal_id) DO UPDATE SET name=excluded.name",
             rusqlite::params![track.artist.id, track.artist.name],
         )?;
-        if let Some(ref album_ref) = track.album {
+        if let Some(ref album_ref) = track.album
+            && crate::db::catalogue::album_id(&tx, album_ref.id)?.is_none()
+        {
             let artwork =
                 crate::services::tidal::client::TidalClient::get_artwork_url(&album_ref.cover, 640);
             tx.execute(
@@ -1462,6 +1480,8 @@ pub(super) fn replace_playlist_tracks(
             artist_name: &track.artist.name,
             isrc: track.isrc.as_deref(),
             duration_ms: track.duration * 1000,
+            version: track.extra.get("version").and_then(|v| v.as_str()),
+            explicit: track.extra.get("explicit").and_then(|v| v.as_bool()),
         };
         let candidates = dup::fetch_import_candidates(
             &tx,
@@ -1474,13 +1494,10 @@ pub(super) fn replace_playlist_tracks(
             dup::ImportDecision::Insert => {
                 super::insert_tidal_track(&tx, track, false, true, None)?
             }
-            dup::ImportDecision::SkipDuplicate {
+            dup::ImportDecision::LinkAlias {
                 existing_track_id, ..
             } => {
-                tx.execute(
-                    "UPDATE tracks SET is_library = 1 WHERE id = ?1",
-                    rusqlite::params![existing_track_id],
-                )?;
+                super::insert_tidal_track(&tx, track, false, true, None)?;
                 Some(existing_track_id)
             }
         };
@@ -1503,14 +1520,17 @@ pub(super) fn replace_playlist_tracks(
     Ok(position)
 }
 
-/// Transfer a TIDAL favorite onto the canonical local copy of the recording.
-/// Its provider timestamp still describes when the user added the favorite,
-/// even when the provider id itself is discarded as a duplicate.
+/// Promote a provider-observed favorite without replacing the chosen date.
+/// The provider timestamp describes its per-ID favorite relationship; aliases
+/// retain that evidence independently from intentional user date choices.
 pub(super) fn promote_duplicate_favorite(
     conn: &rusqlite::Connection,
     track_id: i64,
     favorite_created: Option<&str>,
 ) -> anyhow::Result<()> {
+    if crate::db::catalogue::enabled(conn)? {
+        return crate::db::catalogue::curate(conn, track_id, true, true, favorite_created);
+    }
     conn.execute(
         "UPDATE tracks SET
            date_added = CASE

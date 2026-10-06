@@ -621,6 +621,20 @@ fn fill_dash_template(template: &str, number: u64, time: u64) -> String {
         .into_owned()
 }
 
+/// Availability work yields transport capacity to interactive metadata calls.
+pub(crate) async fn resolve_stream_background(
+    http: &reqwest::Client,
+    access_token: &str,
+    request: &StreamRequest,
+) -> std::result::Result<StreamInfo, StreamResolveError> {
+    let _permit = super::client::background_request_permit()
+        .await
+        .map_err(|error| StreamResolveError::RequestFailed {
+            message: error.to_string(),
+        })?;
+    resolve_stream(http, access_token, request).await
+}
+
 /// Resolve a TIDAL stream using a pre-built request description.
 pub async fn resolve_stream(
     http: &reqwest::Client,

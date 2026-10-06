@@ -553,6 +553,14 @@ fn favorite_predicate(favorite_only: bool, liked_only: bool) -> Option<&'static 
     }
 }
 
+// SQLite accepts ISO offsets with a colon; older TIDAL timestamps omit it.
+// Keep labels and ordering consistent across those and UTC SQL timestamps.
+const SAVED_DATE_INSTANT: &str = "julianday(CASE WHEN t.date_added GLOB '*[+-][0-9][0-9][0-9][0-9]' THEN substr(t.date_added,1,length(t.date_added)-2) || ':' || substr(t.date_added,-2) ELSE t.date_added END)";
+
+fn saved_date_order(dir: &str) -> String {
+    format!("({SAVED_DATE_INSTANT} IS NULL) ASC, {SAVED_DATE_INSTANT} {dir}, t.id {dir}")
+}
+
 fn track_order_clause(sort_by: &str, sort_dir: &str) -> String {
     let dir = if sort_dir == "asc" { "ASC" } else { "DESC" };
     match sort_by {
@@ -565,7 +573,7 @@ fn track_order_clause(sort_by: &str, sort_dir: &str) -> String {
         "artist" => format!("a_artists.name {dir}"),
         "album" => format!("al.title {dir}"),
         "year" => format!("al.year {dir}"),
-        "date_added" => format!("t.date_added {dir}, t.id {dir}"),
+        "date_added" => saved_date_order(dir),
         "duration" => format!("t.duration_ms {dir}"),
         "play_count" => format!("t.play_count {dir}"),
         "fidelity" => format!("t.fidelity_score {dir}"),
@@ -573,7 +581,7 @@ fn track_order_clause(sort_by: &str, sort_dir: &str) -> String {
         "energy" => format!("COALESCE(a.energy, 0) {dir}"),
         "danceability" => format!("COALESCE(a.danceability, 0) {dir}"),
         "last_played_at" => format!("COALESCE(t.last_played_at, '') {dir}"),
-        _ => format!("t.date_added {dir}, t.id {dir}"),
+        _ => saved_date_order(dir),
     }
 }
 
@@ -1405,7 +1413,13 @@ pub fn get_known_album_tidal_ids(
         return Ok(HashMap::new());
     }
     let placeholders = placeholders(tidal_ids.len());
-    let sql = format!("SELECT tidal_id, id FROM albums WHERE tidal_id IN ({placeholders})");
+    let sql = if crate::db::catalogue::enabled(conn)? {
+        format!(
+            "SELECT tidal_id,album_id FROM tidal_album_aliases WHERE tidal_id IN ({placeholders})"
+        )
+    } else {
+        format!("SELECT tidal_id,id FROM albums WHERE tidal_id IN ({placeholders})")
+    };
     let params = params_from_iter(tidal_ids.iter().copied());
     let mut stmt = conn.prepare(&sql)?;
     let mut map = HashMap::new();
@@ -1819,8 +1833,9 @@ pub fn get_all_tracks(conn: &Connection) -> Result<Vec<Track>> {
          FROM tracks t
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
-         ORDER BY t.date_added DESC, t.id DESC",
-        track_projection("a")
+         ORDER BY {}",
+        track_projection("a"),
+        saved_date_order("DESC")
     ))?;
 
     let tracks = stmt
@@ -3593,11 +3608,12 @@ pub fn get_existing_tidal_track_ids(conn: &Connection, tidal_ids: &[i64]) -> Res
     }
 
     let placeholders = placeholders(tidal_ids.len());
-    let query = format!(
-        "SELECT tidal_id
-         FROM tracks
-         WHERE tidal_id IN ({placeholders})"
-    );
+    let table = if crate::db::catalogue::enabled(conn)? {
+        "tidal_track_aliases"
+    } else {
+        "tracks"
+    };
+    let query = format!("SELECT tidal_id FROM {table} WHERE tidal_id IN ({placeholders})");
     let params = params_from_iter(tidal_ids.iter().copied());
     let mut stmt = conn.prepare(&query)?;
     let ids = stmt
@@ -3621,8 +3637,13 @@ pub fn get_tidal_track_library_states(
         return Ok(HashMap::new());
     }
     let placeholders = placeholders(tidal_ids.len());
-    let sql =
-        format!("SELECT tidal_id, id, is_favorite FROM tracks WHERE tidal_id IN ({placeholders})");
+    let sql = if crate::db::catalogue::enabled(conn)? {
+        format!(
+            "SELECT a.tidal_id,t.id,t.is_favorite FROM tidal_track_aliases a JOIN tracks t ON t.id=a.track_id WHERE a.tidal_id IN ({placeholders})"
+        )
+    } else {
+        format!("SELECT tidal_id,id,is_favorite FROM tracks WHERE tidal_id IN ({placeholders})")
+    };
     let params = params_from_iter(tidal_ids.iter().copied());
     let mut stmt = conn.prepare(&sql)?;
     let mut map = HashMap::new();
@@ -10836,14 +10857,33 @@ mod tests {
     }
 
     #[test]
+    fn saved_date_order_compares_offsets_and_legacy_sql_dates() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE tracks(id INTEGER,date_added TEXT);
+            INSERT INTO tracks VALUES(1,'2020-01-01T01:00:00+1000'),(2,'2019-12-31 16:00:00'),(3,'2019-12-31T15:30:00Z'),(4,'invalid');").unwrap();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT t.id FROM tracks t ORDER BY {}",
+                saved_date_order("DESC")
+            ))
+            .unwrap();
+        let ids = stmt
+            .query_map([], |r| r.get::<_, i64>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(ids, vec![2, 3, 1, 4]);
+    }
+
+    #[test]
     fn date_added_order_clause_has_explicit_id_tiebreaker() {
         assert_eq!(
             track_order_clause("date_added", "desc"),
-            "t.date_added DESC, t.id DESC"
+            saved_date_order("DESC")
         );
         assert_eq!(
             track_order_clause("date_added", "asc"),
-            "t.date_added ASC, t.id ASC"
+            saved_date_order("ASC")
         );
     }
 
