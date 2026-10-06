@@ -968,6 +968,9 @@ impl PlaybackSharedState {
             .buffer
             .lock()
             .map_err(|_| anyhow!("playback buffer poisoned"))?;
+        if guard.sealed_for_render {
+            return Ok(guard.samples.len());
+        }
         guard.samples.extend_from_slice(samples);
         self.publish_buffered_samples(guard.samples.len());
         Ok(guard.samples.len())
@@ -1032,6 +1035,9 @@ pub(crate) struct PlaybackBuffer {
     pub(crate) starved_notified: bool,
     pub(crate) finished: bool,
     pub(crate) finished_notified: bool,
+    /// A bounded optional overlay owns this buffer after installation. A
+    /// decoder still winding down must not append the original song to it.
+    pub(crate) sealed_for_render: bool,
 }
 
 impl PlaybackBuffer {
@@ -1045,6 +1051,7 @@ impl PlaybackBuffer {
             starved_notified: false,
             finished: false,
             finished_notified: false,
+            sealed_for_render: false,
         }
     }
 
@@ -1110,6 +1117,7 @@ impl PlaybackBuffer {
         self.starved_notified = false;
         self.finished = false;
         self.finished_notified = false;
+        self.sealed_for_render = false;
     }
 }
 

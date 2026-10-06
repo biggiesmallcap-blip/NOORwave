@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import type { DjDeckStatus, DjStatusResponse, DjTransitionProgram } from '$lib/api/client';
-import { curveFraction, executionLabel, hasBassAutomation, parameterAt, sourceSeconds, sceneMarkers, storySnapshot, transitionOriginMs, transitionProgress } from './transition_scene';
+import { curveFraction, dropPreviewExplanation, executionLabel, hasBassAutomation, parameterAt, sourceSeconds, sceneMarkers, seekBlockedEventId, storySnapshot, strategyDescription, transitionExplanation, transitionOriginMs, transitionProgress } from './transition_scene';
 
 const program: DjTransitionProgram = {
 	template: 'ClubMix', tier: 'FullBlend', sample_rate: 1000, channels: 2,
@@ -35,6 +35,48 @@ function status(): DjStatusResponse {
 }
 
 describe('the visual represents the audio program', () => {
+	test('skipped previews explain actual marker, harmonic, analysis and source limitations', () => {
+		expect(dropPreviewExplanation({ status: 'skipped', reason: 'no_safe_mid_song_marker' })).toContain('opening alone does not map the full song');
+		expect(dropPreviewExplanation({ status: 'skipped', reason: 'missing_incoming_drop' })).toContain('incoming track');
+		expect(dropPreviewExplanation({ status: 'skipped', reason: 'harmonic_incompatible' })).toContain('unknown or unsuitable');
+		for (const reason of ['safe_crossfade_only', 'profile_low_confidence', 'current_profile_missing', 'next_profile_missing', 'current_source_unavailable', 'next_source_unavailable']) {
+			expect(dropPreviewExplanation({ status: 'skipped', reason })).toMatch(/^Drop preview skipped:/);
+			expect(dropPreviewExplanation({ status: 'skipped', reason })).not.toContain(reason);
+		}
+		expect(dropPreviewExplanation({ status: 'armed', reason: 'no_safe_mid_song_marker' })).toBeNull();
+		expect(dropPreviewExplanation({ status: 'fired' })).toBeNull();
+		expect(dropPreviewExplanation(undefined)).toBeNull();
+	});
+	test('a seek blocks only audio already executed, preserving an armed event future fire', () => {
+		const armed = { ...status(), last_transition_event_id: 7, timing_status: 'armed' };
+		expect(seekBlockedEventId(armed)).toBeNull();
+		const live = activeStatus();
+		expect(seekBlockedEventId(live)).toBe(7);
+		const shown = storySnapshot(live, { id: 2, tidal_id: null }, 24000, seekBlockedEventId(armed));
+		expect(transitionProgress(shown)).toBe(0.4);
+		expect(seekBlockedEventId({ ...armed, timing_status: 'fired', runtime_rendered_dj_mixer: true,
+			runtime_renderer_status: 'rendered_overlay' })).toBe(7);
+	});
+	test('TIDAL identity matches the promoted library track independently of library ID', () => {
+		const live = activeStatus();
+		live.active_transition!.incoming = { ...deck(2), media_ref_kind: 'tidal_track', media_ref_id: '91002' };
+		const shown = storySnapshot(live, { id: 2, tidal_id: 91002 }, 24000);
+		expect(shown?.next?.media_ref_id).toBe('91002');
+		expect(transitionProgress(shown)).toBe(0.4);
+		expect(storySnapshot(live, { id: 2, tidal_id: 91003 }, 24000)?.active_transition).toBeUndefined();
+	});
+	test('safety causes are explained and active audio ignores the next pair planning cause', () => {
+		const safe = { ...program, template: 'SafeCrossfade' };
+		expect(transitionExplanation({ ...status(), transition_plan: safe,
+			fallback_reason: 'beat_sync_unverified' })).toContain('decoded overlap');
+		expect(transitionExplanation({ ...status(), runtime_renderer_status: 'legacy_overlap',
+			runtime_renderer_reason: 'lookahead_pair_mismatch' })).toContain('different queue pair');
+		const shown = storySnapshot({ ...activeStatus(), fallback_reason: 'missing_next_profile' },
+			{ id: 2, tidal_id: null }, 24000);
+		expect(transitionExplanation(shown)).toBe(strategyDescription('ClubMix'));
+		expect(strategyDescription('bass_swap')).toContain('outgoing bass');
+		expect(strategyDescription('drop_swap')).toContain('analysed drop');
+	});
 	test('equal-power curves agree with the mixer and held events retain their endpoints', () => {
 		expect(curveFraction('EqualPowerOut', 0.5)).toBeCloseTo(1 - Math.SQRT1_2);
 		const a = parameterAt(program, 'DeckGain', 'A', 5000), b = parameterAt(program, 'DeckGain', 'B', 5000);

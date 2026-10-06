@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from 'vitest';
 import type { DjStatusResponse } from '$lib/api/client';
-import { createCockpitRefresh } from './cockpit_refresh';
+import { cockpitPollInterval, createCockpitRefresh, newlyConfirmedCut } from './cockpit_refresh';
 
 function client() {
 	return {
@@ -11,6 +11,28 @@ function client() {
 }
 
 describe('cockpit polling through partial failures', () => {
+	test('fast polls are bounded to foreground playback near an actual opportunity', () => {
+		const armed = { enabled: true, planned_start_ms: 100000, drop_preview: { status: 'skipped' } } as DjStatusResponse;
+		expect(cockpitPollInterval(armed, 95000, true, true)).toBe(2000);
+		expect(cockpitPollInterval(armed, 97000, true, true)).toBe(500);
+		expect(cockpitPollInterval(armed, 97000, false, true)).toBe(2000);
+		expect(cockpitPollInterval(armed, 97000, true, false)).toBe(2000);
+		expect(cockpitPollInterval(armed, 102000, true, true)).toBe(2000);
+		expect(cockpitPollInterval({ ...armed, active_transition: {} as never }, 2000, true, true)).toBe(500);
+		expect(cockpitPollInterval({ ...armed, drop_preview: { status: 'armed', planned_fire_ms: 60000 } }, 57000, true, true)).toBe(500);
+	});
+	test('a new confirmed cut is acknowledged without replaying old history or planned cuts', () => {
+		const previous = { recent_timing_events: [] } as unknown as DjStatusResponse;
+		const cut = { event_id: 7, planned_template: 'SlamCut', renderer_template: 'SlamCut',
+			actual_start_ms: 100010, timing_status: 'fired', runtime_rendered_dj_mixer: true,
+			runtime_renderer_status: 'rendered_handoff', from_title: 'A', to_title: 'B' } as const;
+		const next = { recent_timing_events: [cut] } as unknown as DjStatusResponse;
+		expect(newlyConfirmedCut(previous, next)).toBe('Cut fired · A → B');
+		expect(newlyConfirmedCut(null, next)).toBeNull();
+		expect(newlyConfirmedCut(next, next)).toBeNull();
+		expect(newlyConfirmedCut(previous, { ...next, recent_timing_events: [{ ...cut, renderer_template: 'SafeCrossfade' }] } as DjStatusResponse)).toBeNull();
+		expect(newlyConfirmedCut(previous, { ...next, recent_timing_events: [{ ...cut, actual_start_ms: undefined }] } as DjStatusResponse)).toBeNull();
+	});
 	test('a failed status request retains usable enabled and policy responses', async () => {
 		const api = client();
 		api.getDjStatus.mockRejectedValue(new Error('HTTP 500'));
@@ -35,7 +57,7 @@ describe('cockpit polling through partial failures', () => {
 		expect(api.getDjStatus).toHaveBeenCalledTimes(2);
 		api.getDjStatus.mockResolvedValue({ enabled: true } as DjStatusResponse);
 		expect((await refresh.refresh(true))?.error).toBe('');
-		expect((await refresh.refresh())?.enabled?.enabled).toBe(true);
+		expect((await refresh.refresh())?.status?.enabled).toBe(true);
 	});
 	test('a slow poll cannot create overlapping request groups or update after unmount', async () => {
 		const api = client();
@@ -49,5 +71,18 @@ describe('cockpit polling through partial failures', () => {
 		finish({ enabled: true } as DjStatusResponse);
 		expect(await pending).toBeNull();
 		expect(await refresh.refresh(true)).toBeNull();
+	});
+	test('fast status polls do not repeat policy and enabled requests within two seconds', async () => {
+		const api = client();
+		let time = 0;
+		const refresh = createCockpitRefresh(api, () => time);
+		await refresh.refresh();
+		for (time = 500; time < 2000; time += 500) await refresh.refresh();
+		expect(api.getDjStatus).toHaveBeenCalledTimes(4);
+		expect(api.getDjEnabled).toHaveBeenCalledTimes(1);
+		expect(api.getDjPolicy).toHaveBeenCalledTimes(1);
+		await refresh.refresh();
+		expect(api.getDjEnabled).toHaveBeenCalledTimes(2);
+		expect(api.getDjPolicy).toHaveBeenCalledTimes(2);
 	});
 });

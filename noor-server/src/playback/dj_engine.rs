@@ -224,6 +224,7 @@ fn fallback_profile() -> DjProfile {
         tempo_bpm: None,
         tempo_confidence: None,
         grid_is_synthetic: true,
+        grid_is_measured: false,
         camelot_key: Some("8A".to_string()),
         energy: Some(0.5),
         beat_grid_seconds: vec![0.0, 0.5],
@@ -477,6 +478,7 @@ fn profile_from_row(conn: &Connection, row: &AudioDjProfileRow) -> Result<DjProf
         tempo_bpm,
         tempo_confidence,
         grid_is_synthetic,
+        grid_is_measured: row.source == "dj_playback_measured",
         camelot_key: dsp.and_then(|features| features.camelot_key),
         energy,
         beat_grid_seconds,
@@ -841,13 +843,19 @@ mod tests {
     #[test]
     fn legacy_serialized_profiles_default_to_unknown_independent_tempo() {
         let mut json = serde_json::to_value(fallback_profile()).expect("profile JSON");
-        for field in ["tempo_bpm", "tempo_confidence", "grid_is_synthetic"] {
+        for field in [
+            "tempo_bpm",
+            "tempo_confidence",
+            "grid_is_synthetic",
+            "grid_is_measured",
+        ] {
             json.as_object_mut().expect("object").remove(field);
         }
         let profile: DjProfile = serde_json::from_value(json).expect("legacy profile");
         assert_eq!(profile.tempo_bpm, None);
         assert_eq!(profile.tempo_confidence, None);
         assert!(!profile.grid_is_synthetic);
+        assert!(!profile.grid_is_measured);
     }
 
     fn seed_persisted_tidal_evidence(
@@ -887,6 +895,47 @@ mod tests {
             Ok(())
         })
         .expect("persist TIDAL evidence");
+    }
+
+    #[test]
+    fn persisted_measured_grid_can_outweigh_weak_scalar_for_a_short_verified_mix() {
+        let db = db();
+        enable(&db);
+        seed_persisted_tidal_evidence(&db, 12301, 122.85, 0.82, 122.85, 0.8);
+        seed_persisted_tidal_evidence(&db, 12302, 124.078, 0.839, 177.593, 0.562);
+        db.with_conn(|conn| {
+            conn.execute("UPDATE audio_dj_profiles SET source='dj_playback_measured' WHERE media_ref_id IN ('12301','12302')", [])?;
+            Ok(())
+        }).unwrap();
+        let program = plan(
+            &db,
+            ref_for("tidal_track", 12301),
+            ref_for("tidal_track", 12302),
+        )
+        .unwrap();
+        assert_eq!(program.template, "BassSwap16");
+        assert!(
+            (6.0..=9.0).contains(&(program.resolve_at as f64 / f64::from(program.sample_rate)))
+        );
+        assert_eq!(program.decision.as_ref().unwrap().duration_beats, 16.0);
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE audio_dj_profiles SET source='imported' WHERE media_ref_id='12302'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            plan(
+                &db,
+                ref_for("tidal_track", 12301),
+                ref_for("tidal_track", 12302)
+            )
+            .unwrap()
+            .template,
+            "SafeCrossfade"
+        );
     }
 
     #[test]

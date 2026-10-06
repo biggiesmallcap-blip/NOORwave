@@ -2,13 +2,14 @@
 	import { onMount } from 'svelte';
 	import { api, type DjMixIntent, type DjProfileCorrectionRequest, type DjStatusResponse, type DjTransitionSpeedBias, type DjStrategy } from '$lib/api/client';
 	import { showToast } from '$lib/stores/toast';
+	import { currentTrack, isPlaying, position } from '$lib/stores/player';
 	import MixIntentControl from './MixIntentControl.svelte';
 	import ProfileCorrectionPanel from './ProfileCorrectionPanel.svelte';
 	import QueuePairPanel from './QueuePairPanel.svelte';
 	import SafetyGuardrailPanel from './SafetyGuardrailPanel.svelte';
 	import TransitionLane from './TransitionLane.svelte';
 	import TransitionStory from './TransitionStory.svelte';
-	import { createCockpitRefresh } from './cockpit_refresh';
+	import { cockpitPollInterval, createCockpitRefresh, newlyConfirmedCut } from './cockpit_refresh';
 
 	let status = $state<DjStatusResponse | null>(null);
 	let enabled = $state<boolean | null>(null);
@@ -20,6 +21,8 @@
 	let debugOpen = $state(false);
 	let rebuildStatus = $state('');
 	let loadError = $state('');
+	let firedCut = $state<string | null>(null);
+	let cutTimer: ReturnType<typeof setTimeout> | undefined;
 	const cockpitRefresh = createCockpitRefresh(api);
 
 	let transitionArmed = $derived(Boolean(status?.selected_program || status?.last_transition_event_id));
@@ -36,7 +39,15 @@
 				speedBias = snapshot.policy.transition_speed_bias;
 				strategy = snapshot.policy.preferred_strategy ?? 'adaptive';
 			}
-			if (snapshot.status) status = snapshot.status;
+			if (snapshot.status) {
+				const confirmation = newlyConfirmedCut(status, snapshot.status);
+				if (confirmation) {
+					firedCut = confirmation;
+					clearTimeout(cutTimer);
+					cutTimer = setTimeout(() => { firedCut = null; }, 4000);
+				}
+				status = snapshot.status;
+			}
 			loadError = snapshot.error;
 		} finally {
 			loading = false;
@@ -44,11 +55,43 @@
 	}
 
 	onMount(() => {
-		void refresh(true);
-		const interval = window.setInterval(() => {
-			void refresh();
-		}, 2_000);
-		return () => { window.clearInterval(interval); cockpitRefresh.dispose(); };
+		let disposed = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let dueAt = 0;
+		const interval = () => cockpitPollInterval(status, $position, $isPlaying, document.visibilityState === 'visible');
+		function schedule(delay: number) {
+			if (disposed) return;
+			clearTimeout(timer);
+			dueAt = Date.now() + delay;
+			timer = setTimeout(async () => {
+				await refresh();
+				schedule(interval());
+			}, delay);
+		}
+		function accelerate() {
+			const delay = interval();
+			if (dueAt > Date.now() + delay) schedule(delay);
+		}
+		void refresh(true).finally(() => schedule(interval()));
+		const stopPosition = position.subscribe(accelerate);
+		const stopPlaying = isPlaying.subscribe(() => { if (dueAt) schedule(interval()); });
+		let trackId = $currentTrack?.id;
+		const stopTrack = currentTrack.subscribe((track) => {
+			if (track?.id !== trackId) {
+				trackId = track?.id;
+				if (document.visibilityState === 'visible') schedule(200);
+			}
+		});
+		const visibilityChanged = () => schedule(interval());
+		document.addEventListener('visibilitychange', visibilityChanged);
+		return () => {
+			disposed = true;
+			clearTimeout(timer);
+			clearTimeout(cutTimer);
+			stopPosition(); stopPlaying(); stopTrack();
+			document.removeEventListener('visibilitychange', visibilityChanged);
+			cockpitRefresh.dispose();
+		};
 	});
 
 	async function setEnabled(next: boolean) {
@@ -220,6 +263,7 @@
 		onStrategyChange={(next) => void setStrategy(next)}
 	/>
 	<TransitionStory {status} {enabled} />
+	{#if firedCut}<p class="enabled-note" role="status">{firedCut}</p>{/if}
 	<div class="feedback" role="group" aria-label="Rate the last played transition">
 		<span>Last transition</span>
 		{#each [{value: 'good', label: 'Good'}, {value: 'bad', label: 'Bad'}, {value: 'too_safe', label: 'Too safe'}, {value: 'too_bold', label: 'Too bold'}] as item}

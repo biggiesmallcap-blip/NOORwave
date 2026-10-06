@@ -49,12 +49,24 @@ pub(super) fn plan(
     }
     let confidence =
         finite_unit(outgoing.profile_confidence).min(finite_unit(incoming.profile_confidence));
-    if outgoing.safe_crossfade_only || incoming.safe_crossfade_only || confidence < 0.65 {
+    if outgoing.safe_crossfade_only || incoming.safe_crossfade_only {
         return safe(
             outgoing,
             incoming,
             policy,
-            "Analysis confidence requires a protected crossfade",
+            "A safe-only correction requires a protected crossfade",
+        );
+    }
+    if confidence < 0.65 {
+        return safe(
+            outgoing,
+            incoming,
+            policy,
+            &format!(
+                "Analysis confidence is {:.0}% for the outgoing track and {:.0}% for the incoming track; at least 65% is required",
+                finite_unit(outgoing.profile_confidence) * 100.0,
+                finite_unit(incoming.profile_confidence) * 100.0
+            ),
         );
     }
     if policy.require_full_profile
@@ -380,6 +392,48 @@ pub(super) fn plan(
     // rate: manufactured grids must not imply beat/phrase alignment.
     let mut decision_confidence = confidence.min(beat_confidence);
     let mut duration_bpm = a_bpm;
+    // A weak independent tempo scalar must not veto a strong, explicitly
+    // measured pulse. This limited alternative never earns phrase/drop/cut
+    // eligibility: the runtime must verify its complete decoded overlap.
+    let short_seconds = 16.0 * 60.0 / a_bpm;
+    if candidates.is_empty()
+        && !conservative
+        && rate.is_some()
+        && (6.0..=9.0).contains(&short_seconds)
+        && [outgoing, incoming]
+            .into_iter()
+            .all(measured_grid_supports_short_mix)
+    {
+        let first = self::entries(incoming, 0.0)
+            .into_iter()
+            .next()
+            .unwrap_or(Entry {
+                seconds: 0.0,
+                phrase: false,
+                breakdown: false,
+            });
+        add(
+            &mut candidates,
+            outgoing,
+            incoming,
+            policy,
+            first,
+            "BassSwap16",
+            16.0,
+            a_bpm,
+            rate,
+            0.76,
+            "A strong measured grid outweighs a weak conflicting tempo estimate; decoded beats must verify before this short bass mix",
+            None,
+            "measured_short_overlap",
+            confidence,
+            beat_confidence,
+            harmonic,
+            energy_move,
+            0.25,
+            false,
+        );
+    }
     if candidates.is_empty()
         && !conservative
         && let Some((tempo, tempo_confidence)) = compatible_independent_tempos(outgoing, incoming)
@@ -464,7 +518,7 @@ pub(super) fn plan(
             outgoing,
             incoming,
             policy,
-            "No musical candidate passes the rhythm and confidence gates",
+            &no_candidate_reason(outgoing, incoming, policy, rate),
         );
     }
 
@@ -552,6 +606,74 @@ fn grid_tempo_is_credible(profile: &DjProfile) -> bool {
         return false;
     };
     scoring::bpm_delta_pct(grid, scoring::nearest_tempo_family_bpm(grid, tempo)) <= 3.0
+}
+
+fn measured_grid_supports_short_mix(profile: &DjProfile) -> bool {
+    if profile.grid_is_synthetic
+        || !profile
+            .beat_confidence
+            .is_some_and(|value| value.is_finite() && value >= 0.55)
+        || profile.beat_grid_seconds.len() < 8
+    {
+        return false;
+    }
+    if grid_tempo_is_credible(profile) {
+        return true;
+    }
+    profile.grid_is_measured
+        && profile.beat_confidence.is_some_and(|value| value >= 0.75)
+        && profile
+            .tempo_confidence
+            .is_some_and(|value| value.is_finite() && (0.0..0.65).contains(&value))
+        && crate::beat_grid::fit_beat_grid(&profile.beat_grid_seconds).is_some_and(|fit| {
+            fit.inlier_count >= 32
+                && fit.measured_end_seconds - fit.measured_start_seconds
+                    >= fit.period_seconds * 16.0
+                && fit.max_error_seconds <= 0.04
+        })
+}
+
+fn no_candidate_reason(a: &DjProfile, b: &DjProfile, policy: &Policy, rate: Option<f32>) -> String {
+    let mut reasons = Vec::new();
+    if rate.is_none() {
+        reasons.push(format!("The measured tempos ({:.1} and {:.1} BPM) need more than the supported 3% rate adjustment", a.bpm.unwrap_or(0.0), b.bpm.unwrap_or(0.0)));
+    }
+    for (name, profile) in [("Outgoing", a), ("Incoming", b)] {
+        if profile.grid_is_synthetic {
+            reasons.push(format!(
+                "{name} beat positions are estimated rather than measured"
+            ));
+        } else if !grid_tempo_is_credible(profile) {
+            reasons.push(format!("{name} measured tempo {:.1} BPM conflicts with the independent {:.1} BPM estimate ({:.0}% confidence)", profile.bpm.unwrap_or(0.0), profile.tempo_bpm.unwrap_or(0.0), finite_unit(profile.tempo_confidence.unwrap_or(0.0)) * 100.0));
+        } else if profile
+            .beat_confidence
+            .is_some_and(|value| !value.is_finite() || value < 0.55)
+        {
+            reasons.push(format!(
+                "{name} beat confidence is {:.0}%; a rhythmic blend requires at least 55%",
+                finite_unit(profile.beat_confidence.unwrap_or(0.0)) * 100.0
+            ));
+        } else if profile
+            .beat_grid_seconds
+            .iter()
+            .filter(|value| value.is_finite() && **value >= 0.0)
+            .count()
+            < 2
+        {
+            reasons.push(format!("{name} measured beat positions are unavailable"));
+        }
+    }
+    if matches!(policy.mix_intent, MixIntent::Safe) && compatible_independent_tempos(a, b).is_some()
+    {
+        reasons.push("Conservative mode requires measured phase; tempo evidence alone only supports a short mix in Balanced or Adventurous mode".to_string());
+    }
+    if reasons.is_empty() {
+        reasons.push(
+            "No entry passes the available phrase, downbeat and musical suitability checks"
+                .to_string(),
+        );
+    }
+    format!("Protected crossfade: {}.", reasons.join(". "))
 }
 
 fn compatible_independent_tempos(a: &DjProfile, b: &DjProfile) -> Option<(f32, f32)> {
@@ -1309,6 +1431,7 @@ mod tests {
             tempo_bpm: None,
             tempo_confidence: None,
             grid_is_synthetic: false,
+            grid_is_measured: false,
             energy_contour: vec![0.2, 0.2, 0.7],
             analysis_scope_seconds: Some(120.0),
             vocals_known: true,
@@ -1531,6 +1654,60 @@ mod tests {
                 .as_str(),
             "SafeCrossfade" | "QuickMix"
         ));
+    }
+
+    #[test]
+    fn strong_measured_grid_with_weak_conflicting_tempo_can_try_a_verified_short_mix() {
+        let mut a = profile();
+        a.bpm = Some(122.85);
+        a.beat_grid_seconds = (0..180)
+            .map(|beat| 0.13 + beat as f32 * 60.0 / 122.85)
+            .collect();
+        a.downbeat_seconds = a.beat_grid_seconds.iter().step_by(4).copied().collect();
+        a.grid_is_measured = true;
+        let mut b = a.clone();
+        b.bpm = Some(124.078);
+        b.beat_grid_seconds = (0..180)
+            .map(|beat| 0.21 + beat as f32 * 60.0 / 124.078)
+            .collect();
+        b.downbeat_seconds = b.beat_grid_seconds.iter().step_by(4).copied().collect();
+        b.tempo_bpm = Some(177.593);
+        b.tempo_confidence = Some(0.562);
+        b.beat_confidence = Some(0.839);
+        let plan = crate::Planner::plan_adaptive(&a, &b, &Policy::default());
+        assert_eq!(plan.template, "BassSwap16");
+        assert!(plan.resolve_at >= 6 * u64::from(plan.sample_rate));
+        assert!(plan.resolve_at <= 9 * u64::from(plan.sample_rate));
+        assert_eq!(plan.decision.as_ref().unwrap().duration_beats, 16.0);
+        assert!(
+            plan.decision
+                .as_ref()
+                .unwrap()
+                .reason
+                .contains("measured grid")
+        );
+        assert!(
+            plan.decision
+                .as_ref()
+                .unwrap()
+                .candidates
+                .iter()
+                .all(|c| c.strategy == "BassSwap16")
+        );
+        for invalid in 0..4 {
+            let mut bad = b.clone();
+            match invalid {
+                0 => bad.grid_is_measured = false,
+                1 => bad.tempo_confidence = Some(0.9),
+                2 => bad.grid_is_synthetic = true,
+                _ => bad.beat_confidence = Some(0.5),
+            }
+            assert_eq!(
+                crate::Planner::plan_adaptive(&a, &bad, &Policy::default()).template,
+                "SafeCrossfade",
+                "invalid evidence {invalid}"
+            );
+        }
     }
 
     #[test]

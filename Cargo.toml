@@ -21,3 +21,8 @@ opt-level = 3
 
 [profile.dev.package.rustfft]
 opt-level = 3
+
+# Native DJ rendering runs gain/EQ envelopes for every audio frame. Keep this
+# existing DSP loop optimized during test/dev playback as well as releases.
+[profile.dev.package.noor-mix]
+opt-level = 3

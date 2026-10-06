@@ -211,6 +211,7 @@ mod tests {
             tempo_bpm: None,
             tempo_confidence: None,
             grid_is_synthetic: false,
+            grid_is_measured: false,
             energy_contour: vec![],
             analysis_scope_seconds: None,
             vocals_known: false,

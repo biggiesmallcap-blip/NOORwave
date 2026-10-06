@@ -11,6 +11,96 @@ pub(super) struct AudioBeatSync {
     pub residual_ms: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PulseRejection {
+    IncompletePcm,
+    InvalidAudio,
+    InsufficientDynamics,
+    TooFewOnsets,
+    NoCoherentPulse {
+        sparse: usize,
+        coverage: usize,
+        timing: usize,
+    },
+    WeakPulse,
+    AmbiguousPhase,
+}
+
+impl std::fmt::Display for PulseRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IncompletePcm => f.write_str("complete decoded audio is not available"),
+            Self::InvalidAudio => f.write_str("audio cannot be analysed reliably"),
+            Self::InsufficientDynamics => f.write_str("bass dynamics do not support a beat lock"),
+            Self::TooFewOnsets => f.write_str("too few bass onsets support the pulse"),
+            Self::NoCoherentPulse {
+                sparse,
+                coverage,
+                timing,
+            } => write!(
+                f,
+                "no consistent pulse fit ({sparse} sparse, {coverage} coverage, {timing} timing rejections)"
+            ),
+            Self::WeakPulse => f.write_str("pulse strength is below the required support"),
+            Self::AmbiguousPhase => f.write_str("competing offbeat pulses make phase ambiguous"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BeatSyncRejection {
+    InvalidPlanTempo,
+    WindowTooLong,
+    Outgoing(PulseRejection),
+    Incoming(PulseRejection),
+    RateLimit,
+    CueOutsideVerifiedWindow,
+    DropTiming,
+    ResidualLimit,
+    AudioSafety,
+}
+
+impl std::fmt::Display for BeatSyncRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidPlanTempo => {
+                f.write_str("the plan does not provide a supported pulse period")
+            }
+            Self::WindowTooLong => f.write_str("the analysis window exceeds its bounded duration"),
+            Self::Outgoing(reason) => write!(f, "outgoing audio: {reason}"),
+            Self::Incoming(reason) => write!(f, "incoming audio: {reason}"),
+            Self::RateLimit => {
+                f.write_str("matching the local tempos would exceed the 3% rate limit")
+            }
+            Self::CueOutsideVerifiedWindow => {
+                f.write_str("the adjusted cue exceeds the verified audio window")
+            }
+            Self::DropTiming => f.write_str("beat correction would displace the verified drop cue"),
+            Self::ResidualLimit => f.write_str("combined pulse timing exceeds the residual limit"),
+            Self::AudioSafety => {
+                f.write_str("the corrected plan does not pass audio safety checks")
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct BeatSyncFailures {
+    attempts: Vec<(u64, BeatSyncRejection)>,
+}
+
+impl std::fmt::Display for BeatSyncFailures {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, (duration_ms, reason)) in self.attempts.iter().take(3).enumerate() {
+            if index > 0 {
+                f.write_str("; ")?;
+            }
+            write!(f, "{:.1}s window: {reason}", *duration_ms as f64 / 1_000.0)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Pulse {
     period: f64,
@@ -20,7 +110,7 @@ struct Pulse {
 }
 
 pub(super) fn required(program: &TransitionProgram) -> bool {
-    program.decision.is_some()
+    (program.decision.is_some() || program.template == "DropPreview16")
         && program.resolve_at >= u64::from(program.sample_rate) * 6
         && matches!(
             program.template.as_str(),
@@ -33,22 +123,38 @@ pub(super) fn required(program: &TransitionProgram) -> bool {
                 | "EnergyLift"
                 | "EnergyReset"
                 | "DropSwap"
+                | "DropPreview16"
         )
 }
 
+#[cfg(test)]
 pub(super) fn synchronize(
     program: &mut TransitionProgram,
     outgoing: &[f32],
     incoming: &[f32],
 ) -> Option<AudioBeatSync> {
+    synchronize_checked(program, outgoing, incoming).ok()
+}
+
+fn synchronize_checked(
+    program: &mut TransitionProgram,
+    outgoing: &[f32],
+    incoming: &[f32],
+) -> Result<AudioBeatSync, BeatSyncRejection> {
     let duration = program.resolve_at as f64 / f64::from(program.sample_rate.max(1));
     if duration > 30.0 {
-        return None;
+        return Err(BeatSyncRejection::WindowTooLong);
     }
-    let beats = f64::from(program.decision.as_ref()?.duration_beats);
+    let beats = f64::from(
+        program
+            .decision
+            .as_ref()
+            .ok_or(BeatSyncRejection::InvalidPlanTempo)?
+            .duration_beats,
+    );
     let expected_period = duration / beats;
     if !(0.25..=1.0).contains(&expected_period) {
-        return None;
+        return Err(BeatSyncRejection::InvalidPlanTempo);
     }
     let old_rate = program
         .automation
@@ -57,14 +163,15 @@ pub(super) fn synchronize(
             (event.param == Param::PlaybackRate(DeckId::B)).then_some(f64::from(event.to))
         })
         .unwrap_or(1.0);
-    let a = pulse_from_pcm(
+    let a = pulse_from_pcm_checked(
         outgoing,
         program.deck_a_start_frame,
         program.channels,
         program.sample_rate,
         duration,
         expected_period,
-    )?;
+    )
+    .map_err(BeatSyncRejection::Outgoing)?;
     // The old rate is a search hint, not a bound on corrected consumption.
     // Cover the maximum permitted rate and both directions of cue movement.
     let margin = expected_period * 1.06;
@@ -75,21 +182,22 @@ pub(super) fn synchronize(
     let lead_seconds = lead_frames as f64 / f64::from(program.sample_rate);
     let incoming_seconds = duration * 1.03 + margin + lead_seconds;
     if incoming_seconds > 33.0 {
-        return None;
+        return Err(BeatSyncRejection::WindowTooLong);
     }
-    let mut b = pulse_from_pcm(
+    let mut b = pulse_from_pcm_checked(
         incoming,
         analysis_start,
         program.channels,
         program.sample_rate,
         incoming_seconds,
         expected_period * old_rate,
-    )?;
+    )
+    .map_err(BeatSyncRejection::Incoming)?;
     b.phase = (b.phase - lead_seconds).rem_euclid(b.period);
     let rate = b.period / a.period;
     // Keep the established constant-B-rate handoff and its small nudge limits.
     if !(0.97..=1.03).contains(&rate) {
-        return None;
+        return Err(BeatSyncRejection::RateLimit);
     }
     let mut shift =
         (b.phase - a.phase * rate + b.period / 2.0).rem_euclid(b.period) - b.period / 2.0;
@@ -100,40 +208,49 @@ pub(super) fn synchronize(
     }
     // A verified drop cue must retain its structural arrival time.
     if program.drop_source.is_some() && shift.abs() > 0.03 {
-        return None;
+        return Err(BeatSyncRejection::DropTiming);
     }
     let shift_frames = (shift * f64::from(program.sample_rate)).round() as i64;
     let start = program
         .deck_b_start_frame
-        .checked_add_signed(shift_frames)?;
+        .checked_add_signed(shift_frames)
+        .ok_or(BeatSyncRejection::CueOutsideVerifiedWindow)?;
     if let Some(drop) = program
         .decision
         .as_ref()
         .and_then(|decision| decision.incoming_drop_seconds)
     {
-        let entry = f64::from(program.decision.as_ref()?.incoming_entry_seconds);
+        let entry = f64::from(
+            program
+                .decision
+                .as_ref()
+                .ok_or(BeatSyncRejection::InvalidPlanTempo)?
+                .incoming_entry_seconds,
+        );
         let arrival =
             entry + shift + program.swap_start as f64 * rate / f64::from(program.sample_rate);
         if program.drop_source.is_some() && (arrival - f64::from(drop)).abs() > 0.03 {
-            return None;
+            return Err(BeatSyncRejection::DropTiming);
         }
     }
     let consumed = (program.resolve_at as f64 * rate).ceil() as u64;
-    let analysis_end =
-        analysis_start.checked_add((incoming_seconds * f64::from(program.sample_rate)) as u64)?;
-    if start < analysis_start || start.checked_add(consumed + 1)? > analysis_end {
-        return None;
+    let analysis_end = analysis_start
+        .checked_add((incoming_seconds * f64::from(program.sample_rate)) as u64)
+        .ok_or(BeatSyncRejection::CueOutsideVerifiedWindow)?;
+    let consumed_end = start
+        .checked_add(consumed + 1)
+        .ok_or(BeatSyncRejection::CueOutsideVerifiedWindow)?;
+    if start < analysis_start || consumed_end > analysis_end {
+        return Err(BeatSyncRejection::CueOutsideVerifiedWindow);
     }
-    if start.checked_add(consumed + 1)?
-        > (incoming.len() / usize::from(program.channels.max(1))) as u64
-    {
-        return None;
+    if consumed_end > (incoming.len() / usize::from(program.channels.max(1))) as u64 {
+        return Err(BeatSyncRejection::Incoming(PulseRejection::IncompletePcm));
     }
     // Check the entire decoded overlap, including one extra incoming beat
     // for the possible phase adjustment; do not project a short sample.
     let drift_bound = a.error + b.error / rate;
     if drift_bound > 0.04 {
-        return None;
+        return Err(BeatSyncRejection::ResidualLimit);
     }
     program.deck_b_start_frame = start;
     program
@@ -153,7 +270,7 @@ pub(super) fn synchronize(
             .reason
             .push_str("; beat phase and tempo verified in the decoded mix window");
     }
-    Some(AudioBeatSync {
+    Ok(AudioBeatSync {
         rate: rate as f32,
         cue_shift_frames: shift_frames,
         confidence: a.confidence.min(b.confidence),
@@ -209,16 +326,23 @@ pub(super) fn musical_prefixes(program: &TransitionProgram) -> Vec<TransitionPro
 
 /// Verify the full plan first. Each shorter alternative must independently
 /// pass the same complete-window phase, tempo, coverage and safety checks.
-pub(super) fn synchronize_or_shorten(
+pub(super) fn synchronize_or_shorten_checked(
     program: &mut TransitionProgram,
     outgoing: &[f32],
     incoming: &[f32],
-) -> Option<AudioBeatSync> {
+) -> Result<AudioBeatSync, BeatSyncFailures> {
     let original = program.clone();
     let prefixes = musical_prefixes(&original);
+    let mut attempts = Vec::with_capacity(3);
     for (index, mut candidate) in std::iter::once(original).chain(prefixes).enumerate() {
-        let Some(sync) = synchronize(&mut candidate, outgoing, incoming) else {
-            continue;
+        let duration_ms =
+            candidate.resolve_at.saturating_mul(1_000) / u64::from(candidate.sample_rate.max(1));
+        let sync = match synchronize_checked(&mut candidate, outgoing, incoming) {
+            Ok(sync) => sync,
+            Err(reason) => {
+                attempts.push((duration_ms, reason));
+                continue;
+            }
         };
         if noor_mix::planner::safety::validate_audio_safety(
             &candidate,
@@ -226,6 +350,7 @@ pub(super) fn synchronize_or_shorten(
         )
         .is_err()
         {
+            attempts.push((duration_ms, BeatSyncRejection::AudioSafety));
             continue;
         }
         if index > 0 {
@@ -236,11 +361,12 @@ pub(super) fn synchronize_or_shorten(
             }
         }
         *program = candidate;
-        return Some(sync);
+        return Ok(sync);
     }
-    None
+    Err(BeatSyncFailures { attempts })
 }
 
+#[cfg(test)]
 fn pulse_from_pcm(
     samples: &[f32],
     start_frame: u64,
@@ -249,10 +375,35 @@ fn pulse_from_pcm(
     seconds: f64,
     expected_period: f64,
 ) -> Option<Pulse> {
+    pulse_from_pcm_checked(
+        samples,
+        start_frame,
+        channels,
+        sample_rate,
+        seconds,
+        expected_period,
+    )
+    .ok()
+}
+
+fn pulse_from_pcm_checked(
+    samples: &[f32],
+    start_frame: u64,
+    channels: u16,
+    sample_rate: u32,
+    seconds: f64,
+    expected_period: f64,
+) -> Result<Pulse, PulseRejection> {
     let channels = usize::from(channels.max(1));
-    let start = usize::try_from(start_frame).ok()?.checked_mul(channels)?;
+    let start = usize::try_from(start_frame)
+        .ok()
+        .and_then(|frame| frame.checked_mul(channels))
+        .ok_or(PulseRejection::InvalidAudio)?;
     let count = (seconds * f64::from(sample_rate)) as usize;
-    let end = start.checked_add(count.checked_mul(channels)?)?;
+    let end = count
+        .checked_mul(channels)
+        .and_then(|count| start.checked_add(count))
+        .ok_or(PulseRejection::InvalidAudio)?;
     let clip = match samples.get(start..end) {
         Some(clip) => clip,
         None => {
@@ -262,7 +413,7 @@ fn pulse_from_pcm(
                 available_frames = samples.len() / channels,
                 "DJ beat verification waiting for complete decoded overlap"
             );
-            return None;
+            return Err(PulseRejection::IncompletePcm);
         }
     };
     // Use the existing spectral-flux analyser, bounded to 33 seconds and ~24kHz.
@@ -295,7 +446,7 @@ fn pulse_from_pcm(
         })
         .collect();
     if energies.len() < 16 || energies.iter().any(|value| !value.is_finite()) {
-        return None;
+        return Err(PulseRejection::InvalidAudio);
     }
     energies.sort_by(f64::total_cmp);
     let low = energies[energies.len() / 10];
@@ -306,9 +457,10 @@ fn pulse_from_pcm(
             high,
             "DJ beat lock rejected: insufficient bass dynamics"
         );
-        return None;
+        return Err(PulseRejection::InsufficientDynamics);
     }
-    let envelope = compute_onset_envelope_in_band(&mono, rate, 30.0, 150.0)?;
+    let envelope = compute_onset_envelope_in_band(&mono, rate, 30.0, 150.0)
+        .ok_or(PulseRejection::TooFewOnsets)?;
     let peaks: Vec<(f64, f64)> = envelope
         .odf
         .windows(5)
@@ -319,7 +471,7 @@ fn pulse_from_pcm(
                 .then_some(((i + 2) as f64 * envelope.hop_seconds, peak))
         })
         .collect();
-    fit_pulse(&peaks, seconds, expected_period)
+    fit_pulse_checked(&peaks, seconds, expected_period)
 }
 
 fn closest(peaks: &[(f64, f64)], time: f64) -> Option<(f64, f64)> {
@@ -331,13 +483,22 @@ fn closest(peaks: &[(f64, f64)], time: f64) -> Option<(f64, f64)> {
         .min_by(|a, b| (a.0 - time).abs().total_cmp(&(b.0 - time).abs()))
 }
 
+#[cfg(test)]
 fn fit_pulse(peaks: &[(f64, f64)], seconds: f64, expected: f64) -> Option<Pulse> {
+    fit_pulse_checked(peaks, seconds, expected).ok()
+}
+
+fn fit_pulse_checked(
+    peaks: &[(f64, f64)],
+    seconds: f64,
+    expected: f64,
+) -> Result<Pulse, PulseRejection> {
     if peaks.len() < 8 {
         tracing::debug!(
             peaks = peaks.len(),
             "DJ beat lock rejected: too few bass onsets"
         );
-        return None;
+        return Err(PulseRejection::TooFewOnsets);
     }
     let mut best: Option<(f64, Pulse)> = None;
     let mut candidates = Vec::new();
@@ -367,7 +528,11 @@ fn fit_pulse(peaks: &[(f64, f64)], seconds: f64, expected: f64) -> Option<Pulse>
             drift_rejections = rejected[2],
             "DJ beat lock rejected: no coherent whole-window pulse"
         );
-        return None;
+        return Err(PulseRejection::NoCoherentPulse {
+            sparse: rejected[0],
+            coverage: rejected[1],
+            timing: rejected[2],
+        });
     };
     if score < 0.5 {
         tracing::debug!(
@@ -375,7 +540,7 @@ fn fit_pulse(peaks: &[(f64, f64)], seconds: f64, expected: f64) -> Option<Pulse>
             expected,
             "DJ beat lock rejected: weak periodic pulse"
         );
-        return None;
+        return Err(PulseRejection::WeakPulse);
     }
     // Equally strong offbeat bass cannot certify which pulse is the kick.
     // Competing half-beat phases must have a meaningful separation in score.
@@ -391,9 +556,9 @@ fn fit_pulse(peaks: &[(f64, f64)], seconds: f64, expected: f64) -> Option<Pulse>
             phase = pulse.phase,
             "DJ beat lock rejected: competing offbeat phase"
         );
-        return None;
+        return Err(PulseRejection::AmbiguousPhase);
     }
-    Some(pulse)
+    Ok(pulse)
 }
 
 #[derive(Clone, Copy)]
@@ -555,6 +720,84 @@ mod tests {
             time += period;
         }
         samples
+    }
+
+    #[test]
+    fn checked_verification_distinguishes_missing_audio_and_unsupported_dynamics() {
+        let complete = kicks(0.5, 16, None);
+        let partial = kicks(0.5, 3, None);
+        assert_eq!(
+            synchronize_checked(&mut rhythmic_program(12, 1.0), &partial, &complete).err(),
+            Some(BeatSyncRejection::Outgoing(PulseRejection::IncompletePcm))
+        );
+        assert_eq!(
+            synchronize_checked(&mut rhythmic_program(12, 1.0), &complete, &partial).err(),
+            Some(BeatSyncRejection::Incoming(PulseRejection::IncompletePcm))
+        );
+        assert_eq!(
+            synchronize_checked(
+                &mut rhythmic_program(12, 1.0),
+                &complete,
+                &vec![0.0; 24_000 * 16],
+            )
+            .err(),
+            Some(BeatSyncRejection::Incoming(
+                PulseRejection::InsufficientDynamics
+            ))
+        );
+    }
+
+    #[test]
+    fn checked_verification_keeps_each_bounded_prefix_failure() {
+        let partial = kicks(0.5, 3, None);
+        let mut program = rhythmic_program(24, 1.0);
+        program.template = "BassSwap32".into();
+        let failures = synchronize_or_shorten_checked(&mut program, &partial, &partial)
+            .expect_err("unavailable audio must not certify a shorter phrase");
+        assert_eq!(failures.attempts.len(), 3);
+        assert_eq!(
+            failures
+                .attempts
+                .iter()
+                .map(|(duration, _)| *duration)
+                .collect::<Vec<_>>(),
+            vec![24_000, 16_000, 8_000]
+        );
+        assert!(failures.attempts.iter().all(|(_, failure)| {
+            *failure == BeatSyncRejection::Outgoing(PulseRejection::IncompletePcm)
+        }));
+        let reason = failures.to_string();
+        assert!(
+            reason
+                .contains("24.0s window: outgoing audio: complete decoded audio is not available")
+        );
+        assert!(reason.contains("8.0s window:"));
+        assert!(reason.len() < 400);
+        assert_eq!(program.template, "BassSwap32");
+        assert_eq!(program.deck_b_start_frame, 0);
+    }
+
+    #[test]
+    fn checked_fit_reports_weak_and_ambiguous_support_separately() {
+        let weak: Vec<_> = (0..32)
+            .map(|beat| (0.03 + beat as f64 * 0.5, 0.49))
+            .collect();
+        assert_eq!(
+            fit_pulse_checked(&weak, 16.0, 0.5).err(),
+            Some(PulseRejection::WeakPulse)
+        );
+        let ambiguous: Vec<_> = (0..32)
+            .flat_map(|beat| {
+                [
+                    (0.03 + beat as f64 * 0.5, 1.0),
+                    (0.28 + beat as f64 * 0.5, 1.0),
+                ]
+            })
+            .collect();
+        assert_eq!(
+            fit_pulse_checked(&ambiguous, 16.0, 0.5).err(),
+            Some(PulseRejection::AmbiguousPhase)
+        );
     }
 
     #[test]

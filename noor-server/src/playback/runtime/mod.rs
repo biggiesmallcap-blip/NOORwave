@@ -1538,46 +1538,63 @@ fn build_prepared_dj_mixer_for_engine_at_start(
     program.deck_a_start_frame = active_snapshot.start_frame;
     program.deck_b_start_frame = next_snapshot.start_frame;
     if beat_sync::required(&program) {
-        if let Some(sync) = beat_sync::synchronize_or_shorten(
+        match beat_sync::synchronize_or_shorten_checked(
             &mut program,
             &active_snapshot.samples,
             &next_snapshot.samples,
         ) {
-            info!(
-                current_track_id = active.track_id,
-                next_track_id = incoming.track_id,
-                rate = sync.rate,
-                cue_shift_frames = sync.cue_shift_frames,
-                confidence = sync.confidence,
-                residual_ms = sync.residual_ms,
-                "DJ beat sync verified against decoded mix audio"
-            );
-        } else {
-            // A long rhythmic overlap needs more than a successful timer or
-            // an opening-grid projection. Preserve the established protected
-            // renderer, with a short overlap when local percussion is unclear.
-            let mut fallback = crate::playback::dj_engine::safe_crossfade_program(
-                program.sample_rate,
-                program.channels,
-                noor_mix::Policy {
-                    default_crossfade_ms: 4_000,
-                    ..Default::default()
-                },
-            );
-            fallback.deck_a_start_frame = program.deck_a_start_frame;
-            fallback.deck_b_start_frame = program.deck_b_start_frame;
-            fallback.decision = program.decision.clone();
-            if let Some(decision) = fallback.decision.as_mut() {
-                decision.strategy = "SafeCrossfade".into();
-                decision.reason="Decoded rhythm does not support a reliable long beat lock; using a short protected overlap".into();
-                decision.duration_beats = 0.0;
+            Ok(sync) => {
+                info!(
+                    current_track_id = active.track_id,
+                    next_track_id = incoming.track_id,
+                    rate = sync.rate,
+                    cue_shift_frames = sync.cue_shift_frames,
+                    confidence = sync.confidence,
+                    residual_ms = sync.residual_ms,
+                    "DJ beat sync verified against decoded mix audio"
+                );
             }
-            program = fallback;
-            info!(
-                current_track_id = active.track_id,
-                next_track_id = incoming.track_id,
-                "DJ long overlap shortened: decoded beat sync unverified"
-            );
+            Err(failures) => {
+                if program.template == "DropPreview16" {
+                    // A preview is an optional overlay. An unverified overlay
+                    // must never turn into a handoff or replace either live deck.
+                    info!(
+                        current_track_id = active.track_id,
+                        next_track_id = incoming.track_id,
+                        rejections = %failures,
+                        "DJ drop preview skipped: decoded beat sync unverified"
+                    );
+                    return Err(DjRuntimeRendererReason::MixerRejected);
+                }
+                // A long rhythmic overlap needs more than a successful timer or
+                // an opening-grid projection. Preserve the established protected
+                // renderer, with a short overlap when local percussion is unclear.
+                let mut fallback = crate::playback::dj_engine::safe_crossfade_program(
+                    program.sample_rate,
+                    program.channels,
+                    noor_mix::Policy {
+                        default_crossfade_ms: 4_000,
+                        ..Default::default()
+                    },
+                );
+                fallback.deck_a_start_frame = program.deck_a_start_frame;
+                fallback.deck_b_start_frame = program.deck_b_start_frame;
+                fallback.decision = program.decision.clone();
+                if let Some(decision) = fallback.decision.as_mut() {
+                    decision.strategy = "SafeCrossfade".into();
+                    decision.reason = format!(
+                        "Decoded rhythm does not support a reliable long beat lock ({failures}); using a short protected overlap"
+                    );
+                    decision.duration_beats = 0.0;
+                }
+                program = fallback;
+                info!(
+                    current_track_id = active.track_id,
+                    next_track_id = incoming.track_id,
+                    rejections = %failures,
+                    "DJ long overlap shortened: decoded beat sync unverified"
+                );
+            }
         }
     }
     if let Err(error) = noor_mix::planner::safety::validate_audio_safety(
@@ -2229,14 +2246,50 @@ fn install_prepared_drop_preview_mixer_buffer(
         return Err(DjRuntimeRendererReason::NextTrackChanged);
     }
 
+    // The outgoing track continues while verification/rendering runs. Join
+    // the preview at the same elapsed output frame so its verified beats
+    // follow the live track, rather than replaying the original preview cue.
+    let channels = usize::from(state.device_channels.max(1));
+    let live_output_frame = {
+        let active = state
+            .engine
+            .as_ref()
+            .ok_or(DjRuntimeRendererReason::ActiveTrackChanged)?;
+        let guard = active
+            .shared
+            .buffer
+            .lock()
+            .map_err(|_| DjRuntimeRendererReason::BufferLockFailed)?;
+        active
+            .shared
+            .position_offset_samples
+            .load(Ordering::Relaxed)
+            .saturating_add(guard.read_pos as u64)
+            / channels as u64
+    };
+    if live_output_frame < prepared.deck_a_output_start_frame {
+        return Err(DjRuntimeRendererReason::HandoffSeamTooLate);
+    }
+    let skip_frames = live_output_frame - prepared.deck_a_output_start_frame;
+    if skip_frames.saturating_mul(2) > prepared.program.resolve_at {
+        return Err(DjRuntimeRendererReason::HandoffSeamTooLate);
+    }
+
     let prepared = state
         .prepared_drop_preview_mixer
         .take()
         .ok_or(DjRuntimeRendererReason::PreparedMixerMissing)?;
-    let rendered = prepared.rendered;
+    let mut rendered = prepared.rendered;
     if rendered.is_empty() {
         return Err(DjRuntimeRendererReason::RenderBufferFailed);
     }
+    let skip_samples = (skip_frames as usize).saturating_mul(channels);
+    bake_seam_fade_in(
+        &mut rendered,
+        skip_samples,
+        channels,
+        state.device_sample_rate,
+    );
     let preview = state
         .drop_preview_engine
         .as_ref()
@@ -2246,17 +2299,26 @@ fn install_prepared_drop_preview_mixer_buffer(
         Err(_) => return Err(DjRuntimeRendererReason::BufferLockFailed),
     };
     guard.samples = rendered;
-    guard.read_pos = 0;
+    guard.read_pos = skip_samples.min(guard.samples.len());
     guard.started = false;
     guard.started_notified = false;
     guard.starved_notified = false;
     guard.finished_notified = false;
     guard.finished = true;
+    guard.sealed_for_render = true;
     preview
         .shared
         .total_samples
         .store(guard.samples.len() as u64, Ordering::Relaxed);
     preview.shared.publish_buffered_samples(guard.samples.len());
+    preview.shared.position_samples.store(
+        preview
+            .shared
+            .position_offset_samples
+            .load(Ordering::Relaxed)
+            .saturating_add(guard.read_pos as u64),
+        Ordering::Relaxed,
+    );
     preview.shared.crossfade_samples.store(0, Ordering::Relaxed);
     preview
         .shared
@@ -2475,6 +2537,8 @@ fn prepare_drop_preview_mixer(
     state: &mut PlaybackRuntimeLoopState,
     max_block_samples: usize,
 ) -> Result<(), DjRuntimeRendererReason> {
+    // A failed fire-time rebuild must not leave an earlier render playable.
+    state.prepared_drop_preview_mixer = None;
     if !state.dj_engine_enabled {
         state.prepared_drop_preview_mixer = None;
         return Err(DjRuntimeRendererReason::DjDisabled);
@@ -2492,6 +2556,19 @@ fn prepare_drop_preview_mixer(
     if transition.program.template != "DropPreview16" {
         state.prepared_drop_preview_mixer = None;
         return Err(DjRuntimeRendererReason::ProgramNotMixerRenderable);
+    }
+    if !prepared_dj_lookahead_matches_pair(
+        state,
+        transition.queue_generation,
+        transition.current_queue_item_id,
+        transition.next_queue_item_id,
+    ) || incoming
+        .job
+        .dj_media_ref
+        .as_ref()
+        .is_some_and(|media| state.dj_lookahead.as_ref().map(|pair| &pair.next) != Some(media))
+    {
+        return Err(DjRuntimeRendererReason::LookaheadPairMismatch);
     }
     match build_prepared_dj_mixer_for_engine(state, &transition, incoming, max_block_samples) {
         Ok(prepared) => {
@@ -2588,6 +2665,11 @@ fn start_prepared_drop_preview_overlay(
         track_id: active_track_id,
         generation: active_generation,
         actual_start_ms,
+        queue_generation: preview
+            .job
+            .prepared_transition
+            .as_ref()
+            .map_or(0, |plan| plan.queue_generation),
     });
     Ok(())
 }
@@ -3646,7 +3728,7 @@ fn run_runtime_loop(
                         .map(|engine| (engine.track_id, engine.generation))
                         == Some((track_id, generation))
                     {
-                        let _ = prepare_drop_preview_mixer(
+                        let preparation = prepare_drop_preview_mixer(
                             &mut state,
                             dj_mixer_max_block_samples(&output_config),
                         );
@@ -3663,12 +3745,28 @@ fn run_runtime_loop(
                             state.device_sample_rate,
                             state.device_channels,
                         );
-                        if let Err(reason) = start_prepared_drop_preview_overlay(
-                            &mut state,
-                            &event_tx,
-                            actual_start_ms,
-                        ) {
+                        if let Err(reason) = preparation.and_then(|()| {
+                            start_prepared_drop_preview_overlay(
+                                &mut state,
+                                &event_tx,
+                                actual_start_ms,
+                            )
+                        }) {
                             debug!("Drop preview start skipped: {}", reason.as_str());
+                            let _ = event_tx.send(PlaybackRuntimeEvent::DropPreviewSkipped {
+                                track_id,
+                                generation,
+                                queue_generation: state
+                                    .drop_preview_engine
+                                    .as_ref()
+                                    .and_then(|engine| engine.job.prepared_transition.as_ref())
+                                    .map_or(0, |plan| plan.queue_generation),
+                                reason: if reason == DjRuntimeRendererReason::MixerRejected {
+                                    "beat_sync_unverified"
+                                } else {
+                                    reason.as_str()
+                                },
+                            });
                             state.prepared_drop_preview_mixer = None;
                             if let Some(mut engine) = state.drop_preview_engine.take() {
                                 engine.stop();
@@ -3999,8 +4097,10 @@ fn run_runtime_loop(
                                 "Playback terminal ignored for prepared engine: track_id={}, generation={}, outcome={:?}",
                                 track_id, generation, outcome
                             );
-                            if let PlaybackTerminalReason::Error(message) = &outcome {
-                                emit_prepared_track_failure(&event_tx, track_id, message);
+                            if let PlaybackTerminalReason::Error(message) = &outcome
+                                && let Some(next_engine) = state.next_engine.as_ref()
+                            {
+                                emit_prepared_track_failure(&event_tx, &next_engine.job, message);
                             }
                             if let Some(mut engine) = state.next_engine.take() {
                                 engine.stop();
@@ -4717,13 +4817,22 @@ fn report_runtime_command_error(
 /// treating it as an active-track playback failure.
 fn emit_prepared_track_failure(
     event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
-    track_id: i64,
+    job: &PreparedPlaybackJob,
     message: &str,
 ) {
+    let track_id = job.track.id;
+    let tidal_id = match &job.source {
+        crate::playback::player::PlaybackSourceRequest::TidalStream(request) => {
+            Some(request.track_id)
+        }
+        crate::playback::player::PlaybackSourceRequest::LocalLibrary => None,
+    };
     let surfaced = format!("Pre-buffered track {track_id} failed: {message}");
     warn!("{surfaced}");
     let _ = event_tx.send(PlaybackRuntimeEvent::PreparedTrackError {
         track_id,
+        generation: job.generation,
+        tidal_id,
         message: surfaced,
     });
 }
@@ -6513,6 +6622,7 @@ mod tests {
                 track_id,
                 generation,
                 actual_start_ms,
+                ..
             } => {
                 assert_eq!(track_id, 1);
                 assert_eq!(generation, 20);
@@ -6524,6 +6634,160 @@ mod tests {
             event_rx.try_recv().is_err(),
             "preview must not finish outgoing"
         );
+    }
+
+    fn verified_preview_fixture() -> PlaybackRuntimeLoopState {
+        let mut state = test_runtime_loop_state();
+        start_dj_lookahead_in_state(
+            &mut state,
+            Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+            Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+            Some(11),
+            Some(12),
+            20,
+            48_000,
+        );
+        let active = test_engine_with_shared(1, 20);
+        let mut pcm = vec![0.0; 18 * 48_000 * 2];
+        for beat in 0..36 {
+            let start = ((0.02 + beat as f64 * 0.5) * 48_000.0) as usize;
+            for frame in 0..2400 {
+                let t = frame as f64 / 48_000.0;
+                let kick = (0.4 * (2.0 * std::f64::consts::PI * 60.0 * t).cos() * (-t * 80.0).exp())
+                    as f32;
+                for channel in 0..2 {
+                    if let Some(sample) = pcm.get_mut((start + frame) * 2 + channel) {
+                        *sample = kick;
+                    }
+                }
+            }
+        }
+        finish_engine_buffer(&active, &pcm);
+        let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+        transition.anchor_start_ms = Some(1000);
+        transition.program = noor_mix::planner::bass_swap_16_program(48_000, 2, 12_000);
+        transition.program.template = "DropPreview16".into();
+        transition.program.decision = Some(noor_mix::program::TransitionDecision {
+            strategy: "DropPreview16".into(),
+            confidence: 0.9,
+            score: 0.8,
+            reason: "Verified preview fixture".into(),
+            energy_direction: "preview".into(),
+            incoming_entry_seconds: 0.0,
+            incoming_drop_seconds: None,
+            outgoing_window: "mid_song_preview".into(),
+            duration_beats: 24.0,
+            candidates: vec![],
+        });
+        let mut preview = test_engine_with_shared(2, 20);
+        preview.job = PreparedPlaybackJob::test_fixture(2, 20).with_prepared_transition(transition);
+        preview.shared.paused.store(true, Ordering::SeqCst);
+        finish_engine_buffer(&preview, &pcm);
+        let next = test_engine_with_shared(3, 20);
+        next.shared.paused.store(true, Ordering::SeqCst);
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+        state.drop_preview_engine = Some(preview);
+        state
+    }
+
+    #[test]
+    fn preview_verifies_decoded_beats_and_joins_live_outgoing_clock() {
+        let mut state = verified_preview_fixture();
+        prepare_drop_preview_mixer(&mut state, 1024).unwrap();
+        assert_eq!(
+            state
+                .prepared_drop_preview_mixer
+                .as_ref()
+                .unwrap()
+                .program
+                .template,
+            "DropPreview16"
+        );
+        let active = state.engine.as_ref().unwrap();
+        active.shared.buffer.lock().unwrap().read_pos = 3 * 48_000 * 2;
+        active
+            .shared
+            .position_samples
+            .store(3 * 48_000 * 2, Ordering::Relaxed);
+        install_prepared_drop_preview_mixer_buffer(&mut state).unwrap();
+        let preview = state.drop_preview_engine.as_ref().unwrap();
+        let rendered_len = preview.shared.buffer.lock().unwrap().samples.len();
+        preview
+            .shared
+            .append_decoded_samples(&[0.99; 1024])
+            .unwrap();
+        assert_eq!(
+            preview.shared.buffer.lock().unwrap().samples.len(),
+            rendered_len,
+            "late decoder data must not extend a bounded rendered preview into the original song"
+        );
+        assert_eq!(
+            state
+                .drop_preview_engine
+                .as_ref()
+                .unwrap()
+                .shared
+                .buffer
+                .lock()
+                .unwrap()
+                .read_pos,
+            2 * 48_000 * 2
+        );
+        assert_eq!(state.engine.as_ref().unwrap().track_id, 1);
+        assert_eq!(state.next_engine.as_ref().unwrap().track_id, 3);
+        assert!(
+            state
+                .next_engine
+                .as_ref()
+                .unwrap()
+                .shared
+                .paused
+                .load(Ordering::SeqCst)
+        );
+    }
+
+    #[test]
+    fn unverified_preview_clears_stale_render_without_handoff_fallback() {
+        let mut state = verified_preview_fixture();
+        prepare_drop_preview_mixer(&mut state, 1024).unwrap();
+        let preview = state.drop_preview_engine.as_ref().unwrap();
+        preview.shared.buffer.lock().unwrap().samples.fill(0.2);
+        assert_eq!(
+            prepare_drop_preview_mixer(&mut state, 1024),
+            Err(DjRuntimeRendererReason::MixerRejected)
+        );
+        assert!(state.prepared_drop_preview_mixer.is_none());
+        assert!(state.prepared_dj_mixer.is_none());
+        assert_eq!(state.engine.as_ref().unwrap().track_id, 1);
+        assert_eq!(state.next_engine.as_ref().unwrap().track_id, 3);
+        assert!(
+            state
+                .drop_preview_engine
+                .as_ref()
+                .unwrap()
+                .shared
+                .paused
+                .load(Ordering::SeqCst)
+        );
+    }
+
+    #[test]
+    fn preview_does_not_join_after_its_bass_swap_window() {
+        let mut state = verified_preview_fixture();
+        prepare_drop_preview_mixer(&mut state, 1024).unwrap();
+        let active = state.engine.as_ref().unwrap();
+        active.shared.buffer.lock().unwrap().read_pos = 14 * 48_000 * 2;
+        active
+            .shared
+            .position_samples
+            .store(14 * 48_000 * 2, Ordering::Relaxed);
+        assert_eq!(
+            install_prepared_drop_preview_mixer_buffer(&mut state),
+            Err(DjRuntimeRendererReason::HandoffSeamTooLate)
+        );
+        assert_eq!(state.engine.as_ref().unwrap().track_id, 1);
+        assert_eq!(state.next_engine.as_ref().unwrap().track_id, 3);
     }
 
     #[test]
@@ -7585,6 +7849,197 @@ mod tests {
                     .source_start,
                 executed.deck_b_start_frame,
                 "{name}"
+            );
+        }
+    }
+
+    /// An offline benchmark of the same decoded-rhythm correction and
+    /// per-frame gain/EQ renderer used by prepared handoffs. Input synthesis
+    /// and PCM copies are excluded, and each run verifies its audible result.
+    #[test]
+    #[ignore = "offline DJ CPU benchmark: run with --ignored --nocapture"]
+    fn benchmark_verified_bass_render_96khz() {
+        const SAMPLE_RATE: u32 = 96_000;
+        const CHANNELS: u16 = 2;
+        const SECONDS: usize = 24;
+        const BLOCK_SAMPLES: usize = 1024;
+        let thread_cpu_ms = || {
+            #[cfg(windows)]
+            {
+                use windows_sys::Win32::Foundation::FILETIME;
+                use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+                let empty = || FILETIME {
+                    dwLowDateTime: 0,
+                    dwHighDateTime: 0,
+                };
+                let (mut created, mut ended, mut kernel, mut user) =
+                    (empty(), empty(), empty(), empty());
+                // The current-thread pseudo handle is valid for this call,
+                // and all four writable FILETIME pointers remain in scope.
+                let succeeded = unsafe {
+                    GetThreadTimes(
+                        GetCurrentThread(),
+                        &mut created,
+                        &mut ended,
+                        &mut kernel,
+                        &mut user,
+                    )
+                };
+                if succeeded == 0 {
+                    return None;
+                }
+                let ticks = |time: FILETIME| {
+                    (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
+                };
+                Some((ticks(kernel) + ticks(user)) as f64 / 10_000.0)
+            }
+            #[cfg(not(windows))]
+            {
+                None::<f64>
+            }
+        };
+        let cpu_delta =
+            |start: Option<f64>, end: Option<f64>| start.zip(end).map(|(start, end)| end - start);
+
+        let kicks = |bpm: f64, phase: f64, channel: usize, frequency: f64| {
+            // Extra decoded audio covers the verified incoming rate and cue
+            // movement, rather than repeating or extrapolating a short clip.
+            let mut pcm = vec![0.0; 30 * SAMPLE_RATE as usize * usize::from(CHANNELS)];
+            for beat in 0..64 {
+                let start =
+                    ((phase + beat as f64 * 60.0 / bpm) * f64::from(SAMPLE_RATE)).round() as usize;
+                for frame in 0..SAMPLE_RATE as usize / 20 {
+                    let t = frame as f64 / f64::from(SAMPLE_RATE);
+                    let kick = (0.4
+                        * (2.0 * std::f64::consts::PI * frequency * t).cos()
+                        * (-t * 80.0).exp()) as f32;
+                    if let Some(sample) = pcm.get_mut((start + frame) * 2 + channel) {
+                        *sample = kick;
+                    }
+                }
+            }
+            pcm
+        };
+        let outgoing = kicks(121.0, 0.173, 0, 60.0);
+        let incoming = kicks(122.0, 0.031, 1, 110.0);
+        let mut original =
+            noor_mix::planner::bass_swap_32_program(SAMPLE_RATE, CHANNELS, SECONDS as u32 * 1000);
+        original.decision = Some(noor_mix::program::TransitionDecision {
+            strategy: "BassSwap32".into(),
+            confidence: 0.9,
+            score: 0.8,
+            reason: "Offline verified bass render benchmark".into(),
+            energy_direction: "steady".into(),
+            incoming_entry_seconds: 0.0,
+            incoming_drop_seconds: None,
+            outgoing_window: "phrase_end".into(),
+            duration_beats: 48.0,
+            candidates: vec![],
+        });
+
+        for run in 1..=3 {
+            // Mixer takes ownership of decoded PCM. Allocate these copies
+            // outside the timer so the two build profiles compare kernels.
+            let deck_a = noor_mix::deck::DeckBuffer::new(outgoing.clone(), CHANNELS);
+            let deck_b = noor_mix::deck::DeckBuffer::new(incoming.clone(), CHANNELS);
+            let mut program = original.clone();
+            let total_started = std::time::Instant::now();
+            let total_cpu_started = thread_cpu_ms();
+            let verification_started = std::time::Instant::now();
+            let verification_cpu_started = thread_cpu_ms();
+            let sync =
+                beat_sync::synchronize_or_shorten_checked(&mut program, &outgoing, &incoming)
+                    .expect("stable complete kick trains must verify without fallback");
+            let verification_ms = verification_started.elapsed().as_secs_f64() * 1000.0;
+            let verification_cpu_ms = cpu_delta(verification_cpu_started, thread_cpu_ms());
+            assert_eq!(program.template, "BassSwap32");
+            assert_eq!(program.resolve_at, SECONDS as u64 * u64::from(SAMPLE_RATE));
+            assert!((f64::from(sync.rate) - 121.0 / 122.0).abs() < 0.001);
+            assert!(sync.confidence >= 0.5);
+            assert!(sync.residual_ms <= 40.0);
+            noor_mix::planner::safety::validate_audio_safety(&program, &Default::default())
+                .unwrap();
+
+            let prepare_started = std::time::Instant::now();
+            let prepare_cpu_started = thread_cpu_ms();
+            let mut mixer =
+                noor_mix::Mixer::new(program.clone(), deck_a, deck_b, BLOCK_SAMPLES).unwrap();
+            let prepare_ms = prepare_started.elapsed().as_secs_f64() * 1000.0;
+            let prepare_cpu_ms = cpu_delta(prepare_cpu_started, thread_cpu_ms());
+            let render_started = std::time::Instant::now();
+            let render_cpu_started = thread_cpu_ms();
+            let rendered = render_mixer_to_buffer(
+                &mut mixer,
+                program.resolve_at,
+                usize::from(CHANNELS),
+                BLOCK_SAMPLES,
+            )
+            .unwrap();
+            let render_ms = render_started.elapsed().as_secs_f64() * 1000.0;
+            let render_cpu_ms = cpu_delta(render_cpu_started, thread_cpu_ms());
+            let total_ms = total_started.elapsed().as_secs_f64() * 1000.0;
+            let total_cpu_ms = cpu_delta(total_cpu_started, thread_cpu_ms());
+
+            assert_eq!(rendered.len(), SECONDS * SAMPLE_RATE as usize * 2);
+            assert!(rendered.iter().all(|sample| sample.is_finite()));
+            let peak = rendered
+                .iter()
+                .map(|sample| sample.abs())
+                .fold(0.0_f32, f32::max);
+            assert!(peak > 0.01 && peak <= 0.98 + f32::EPSILON);
+            let channel_rms = |start: usize, end: usize, channel: usize| {
+                let power = (start..end)
+                    .map(|frame| f64::from(rendered[frame * 2 + channel]).powi(2))
+                    .sum::<f64>();
+                (power / (end - start) as f64).sqrt()
+            };
+            let early = [
+                channel_rms(SAMPLE_RATE as usize, 5 * SAMPLE_RATE as usize, 0),
+                channel_rms(SAMPLE_RATE as usize, 5 * SAMPLE_RATE as usize, 1),
+            ];
+            let late = [
+                channel_rms(19 * SAMPLE_RATE as usize, 23 * SAMPLE_RATE as usize, 0),
+                channel_rms(19 * SAMPLE_RATE as usize, 23 * SAMPLE_RATE as usize, 1),
+            ];
+            assert!(early[0] > early[1], "outgoing bass must own the opening");
+            assert!(late[1] > late[0], "incoming bass must own the ending");
+
+            // Preserve the real bass/gain automation. Channel separation lets
+            // us measure both physical kick peaks during the audible handoff.
+            let mut peak_phase_error_ms = 0.0_f64;
+            for beat in [20, 22, 24, 26] {
+                let expected_seconds = 0.173 + beat as f64 * 60.0 / 121.0;
+                let expected_frame = expected_seconds * f64::from(SAMPLE_RATE);
+                let radius = SAMPLE_RATE as usize / 25;
+                let center = expected_frame.round() as usize;
+                let peaks: Vec<_> = (0..2)
+                    .map(|channel| {
+                        ((center - radius)..=(center + radius))
+                            .max_by(|&a, &b| {
+                                rendered[a * 2 + channel]
+                                    .abs()
+                                    .total_cmp(&rendered[b * 2 + channel].abs())
+                            })
+                            .unwrap()
+                    })
+                    .collect();
+                let delta_ms = peaks[0].abs_diff(peaks[1]) as f64 / f64::from(SAMPLE_RATE) * 1000.0;
+                peak_phase_error_ms = peak_phase_error_ms.max(delta_ms);
+                assert!(
+                    delta_ms <= 25.0,
+                    "rendered kick phase error {delta_ms:.3}ms"
+                );
+            }
+            let cue = program.deck_b_start_frame as f64 / f64::from(SAMPLE_RATE);
+            let first_incoming = (0.031 + 60.0 / 122.0 - cue) / f64::from(sync.rate);
+            assert!((first_incoming - 0.173).abs() < 0.02);
+            println!(
+                "DJ_CPU_BENCH run={run} sample_rate={SAMPLE_RATE} channels={CHANNELS} duration_s={SECONDS} samples={} verification_ms={verification_ms:.3} verification_cpu_ms={verification_cpu_ms:?} mixer_prepare_ms={prepare_ms:.3} mixer_prepare_cpu_ms={prepare_cpu_ms:?} render_ms={render_ms:.3} render_cpu_ms={render_cpu_ms:?} total_ms={total_ms:.3} total_cpu_ms={total_cpu_ms:?} render_realtime_ratio={:.5} rate={:.8} confidence={:.6} residual_ms={:.3} rendered_peak_phase_ms={peak_phase_error_ms:.3} peak={peak:.6} early_rms={early:?} late_rms={late:?}",
+                rendered.len(),
+                render_ms / (SECONDS as f64 * 1000.0),
+                sync.rate,
+                sync.confidence,
+                sync.residual_ms,
             );
         }
     }
@@ -9886,11 +10341,25 @@ mod tests {
     fn emit_prepared_track_failure_sends_prepared_error_event() {
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
 
-        emit_prepared_track_failure(&event_tx, 42, "decode failed: malformed packet");
+        let mut job = PreparedPlaybackJob::test_fixture(42, 7);
+        // The request is the actual decoded source, even if other metadata is
+        // older or has since been healed to a different catalog id.
+        job.track.tidal_id = Some(111);
+        job.source = crate::playback::player::PlaybackSourceRequest::TidalStream(
+            StreamRequest::new(222, "LOSSLESS"),
+        );
+        emit_prepared_track_failure(&event_tx, &job, "decode failed: malformed packet");
 
         match event_rx.try_recv().expect("error event should be emitted") {
-            PlaybackRuntimeEvent::PreparedTrackError { track_id, message } => {
+            PlaybackRuntimeEvent::PreparedTrackError {
+                track_id,
+                generation,
+                tidal_id,
+                message,
+            } => {
                 assert_eq!(track_id, 42);
+                assert_eq!(generation, 7);
+                assert_eq!(tidal_id, Some(222));
                 assert!(message.contains("Pre-buffered track 42 failed"));
                 assert!(message.contains("decode failed: malformed packet"));
             }

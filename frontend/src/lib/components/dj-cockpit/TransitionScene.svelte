@@ -10,8 +10,12 @@
 	let showPlan = $derived(Boolean(plan && durationMs(plan) > 0 && status?.enabled && !isFallback));
 	let bassHandoff = $derived(hasBassAutomation(plan) && plan?.template !== 'SafeCrossfade');
 	let showGrid = $derived(showPlan && plan?.template !== 'SafeCrossfade');
-	let markersA = $derived(plan && showGrid ? sceneMarkers(plan, 'A', status?.current, transitionOriginMs(status)) : []);
-	let markersB = $derived(plan && showGrid ? sceneMarkers(plan, 'B', status?.next) : []);
+	let outgoingProfile = $derived(status?.current);
+	let incomingProfile = $derived(status?.next);
+	let originMs = $derived(transitionOriginMs(status));
+	// Output-clock ticks move the cursors, while plan geometry stays unchanged.
+	let markersA = $derived(plan && showGrid ? sceneMarkers(plan, 'A', outgoingProfile, originMs) : []);
+	let markersB = $derived(plan && showGrid ? sceneMarkers(plan, 'B', incomingProfile) : []);
 	let energyDelta = $derived(status?.current?.energy != null && status?.next?.energy != null ? status.next.energy - status.current.energy : 0);
 	let frame = $derived(plan ? (liveProgress ?? 0) * plan.resolve_at : 0);
 	let gainA = $derived(plan ? parameterAt(plan, 'DeckGain', 'A', frame) : 1);
@@ -42,6 +46,12 @@
 			return `${i ? 'L' : 'M'}${p.x.toFixed(2)},${p.y.toFixed(2)}`;
 		}).join(' ');
 	}
+	let laneA = $derived(laneShape('A'));
+	let laneB = $derived(laneShape('B'));
+	let envelopeA = $derived(plan ? envelope(plan, 'A') : '');
+	let envelopeB = $derived(plan ? envelope(plan, 'B') : '');
+	let bassEnvelopeA = $derived(plan && hasBassAutomation(plan, 'A') ? envelope(plan, 'A', true) : '');
+	let bassEnvelopeB = $derived(plan && hasBassAutomation(plan, 'B') ? envelope(plan, 'B', true) : '');
 
 	function exitSeconds(program: DjTransitionProgram) {
 		// A starts at the scheduled live position; deck_a_start_frame is often buffer-relative zero.
@@ -67,8 +77,8 @@
 			{@const right = point(depth, 'B')}
 			<path class="floor-line" d={`M${left.x},${left.y - 20} L${right.x},${right.y + 20}`} />
 		{/each}
-		<polygon class="lane lane-a" points={laneShape('A')} fill={`url(#${sceneId}-depth)`} />
-		<polygon class="lane lane-b" points={laneShape('B')} fill={`url(#${sceneId}-depth)`} />
+		<polygon class="lane lane-a" points={laneA} fill={`url(#${sceneId}-depth)`} />
+		<polygon class="lane lane-b" points={laneB} fill={`url(#${sceneId}-depth)`} />
 		<text class="lane-label" x="18" y="88">Outgoing</text>
 		<text class="lane-label incoming-label" x="18" y="164">Incoming</text>
 		{#if plan}
@@ -81,8 +91,8 @@
 					{@const p = point(marker.fraction, lane.deck)}
 					<line class={`marker ${marker.kind}`} x1={p.x} x2={p.x} y1={p.y - 11 * p.depth} y2={p.y + 11 * p.depth} />
 				{/each}
-				<path class={`envelope deck-${lane.deck}`} d={envelope(plan, lane.deck)} />
-				{#if hasBassAutomation(plan, lane.deck)}<path class={`bass-envelope deck-${lane.deck}`} d={envelope(plan, lane.deck, true)} />{/if}
+				<path class={`envelope deck-${lane.deck}`} d={lane.deck === 'A' ? envelopeA : envelopeB} />
+				{#if hasBassAutomation(plan, lane.deck)}<path class={`bass-envelope deck-${lane.deck}`} d={lane.deck === 'A' ? bassEnvelopeA : bassEnvelopeB} />{/if}
 			{/each}
 			{#if liveProgress != null}
 				{@const a = point(liveProgress, 'A', gainA)}

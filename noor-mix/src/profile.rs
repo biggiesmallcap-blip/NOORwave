@@ -12,6 +12,9 @@ pub struct DjProfile {
     /// Uniform, zero-anchored grids estimate periodicity without measured phase.
     #[serde(default)]
     pub grid_is_synthetic: bool,
+    /// Explicit detector provenance; older/imported profiles default to unknown.
+    #[serde(default)]
+    pub grid_is_measured: bool,
     pub camelot_key: Option<String>,
     pub energy: Option<f32>,
     pub beat_grid_seconds: Vec<f32>,

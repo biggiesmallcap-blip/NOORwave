@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { DjMixIntent, DjTransitionSpeedBias, DjStrategy } from '$lib/api/client';
-	import { strategyLabels } from './transition_scene';
+	import { strategyDescription, strategyLabels } from './transition_scene';
 
 	let {
 		intent,
@@ -42,6 +42,7 @@
 			{/each}
 		</select>
 		<span class="style-note">A preference; the safest suitable plan still wins.</span>
+		<span class="style-note">{strategyDescription(strategy)}</span>
 	</label>
 	<div class="control-block">
 		<span class="control-label">Mix intent</span>
@@ -77,11 +78,13 @@
 		</div>
 	</div>
 </div>
+<p class="style-note">The main handoff usually happens near the outgoing track’s ending. Separately, DJ can tease a compatible incoming drop around the middle when analysis identifies a safe phrase and drop marker.</p>
 
 <style>
 	select { min-height: 2.75rem; padding: var(--space-2) var(--space-3); border: 1px solid var(--border-muted); border-radius: var(--radius-sm); background: var(--bg-surface); color: var(--text-primary); font-size: var(--font-size-sm); }
 	select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 	.style-note { font-size: var(--font-size-2xs); color: var(--text-tertiary); }
+	p.style-note { margin: 0; }
 	.policy-controls {
 		display: flex;
 		flex-wrap: wrap;
@@ -93,6 +96,7 @@
 		display: grid;
 		gap: var(--space-1);
 		min-width: min(100%, 17rem);
+		max-width: 24rem;
 	}
 
 	.control-label {

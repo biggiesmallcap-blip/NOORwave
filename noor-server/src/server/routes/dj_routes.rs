@@ -496,10 +496,6 @@ async fn get_status(
             .as_ref()
             .and_then(|info| info.active_track_id);
         let active_generation = super::current_playback_generation(&state);
-        let drop_preview_actual_fire_ms = state.last_drop_preview.and_then(|preview| {
-            (Some(preview.track_id) == active_track_id && preview.generation == active_generation)
-                .then_some(preview.actual_fire_ms)
-        });
         state
             .db
             .with_conn(|conn| {
@@ -507,6 +503,12 @@ async fn get_status(
                 let pair = super::active_dj_pair_for_state_and_conn(&state, conn)?;
                 let current_ref = pair.current.clone();
                 let next_ref = pair.next.clone();
+                let preview_outcome = state.last_drop_preview.filter(|preview| {
+                    Some(preview.track_id) == active_track_id
+                        && preview.generation == active_generation
+                        && preview.queue_generation == pair.queue_generation
+                });
+                let drop_preview_actual_fire_ms = preview_outcome.and_then(|preview| preview.actual_fire_ms);
                 let current = match pair.current {
                     Some(media_ref) => {
                         let key = media_ref.profile_key();
@@ -624,7 +626,7 @@ async fn get_status(
                     renderer_status_for_transition(latest_transition.as_ref());
                 renderer_status.overlay_details =
                     annotate_overlay_drop_source(renderer_status.overlay_details, next.as_ref());
-                let drop_preview = drop_preview_status(
+                let mut drop_preview = drop_preview_status(
                     conn,
                     enabled,
                     current_ref.as_ref(),
@@ -636,6 +638,11 @@ async fn get_status(
                     }),
                     drop_preview_actual_fire_ms,
                 )?;
+                if let Some(reason) = preview_outcome.and_then(|preview| preview.skipped_reason) {
+                    drop_preview.status = "skipped".into();
+                    drop_preview.actual_fire_ms = None;
+                    drop_preview.reason = Some(reason.into());
+                }
                 Ok(DjStatusResponse {
                     enabled,
                     transition_plan,
@@ -724,6 +731,9 @@ fn missing_dj_profile_refs_for_pair(
 ) -> anyhow::Result<Vec<DjMediaRef>> {
     let mut missing = Vec::new();
     for media_ref in [pair.current, pair.next].into_iter().flatten() {
+        if unsupported_auto_profile_rebuild_status(&media_ref).is_some() {
+            continue;
+        }
         let key = media_ref.profile_key();
         let label = ephemeral_labels
             .iter()
@@ -971,6 +981,14 @@ async fn queue_tidal_profile_rebuild(
     };
     let media_key = media_ref.profile_key();
     if !force {
+        if recent_dj_profile_rebuild_failure(&dj_profile_inflight_key(&media_key))
+            .is_some_and(|failure| failure.status == "source_unavailable")
+        {
+            return Ok(RebuildDjProfileResponse {
+                accepted: false,
+                status: "source_unavailable".to_string(),
+            });
+        }
         let already_current = {
             let state_guard = state.read().await;
             state_guard
@@ -1231,7 +1249,9 @@ fn next_dj_profile_analysis_quality(
     // such as the LOW/AAC tier routing to an unreachable ad CDN. Previously
     // only asset-not-ready fell back, so a LOW-tier CDN timeout gave up without
     // ever trying the LOSSLESS stream that resolves fine.
-    if !profile_rebuild_error_is_retryable(&error.to_string()) {
+    if !profile_rebuild_error_is_asset_not_ready_chain(error)
+        && !profile_rebuild_error_is_retryable_chain(error)
+    {
         return None;
     }
     DJ_PROFILE_ANALYSIS_TIDAL_QUALITIES
@@ -1262,7 +1282,7 @@ async fn queue_profile_rebuild_if_idle(
 ) -> Result<(), StatusCode> {
     let key = media_ref.profile_key();
     if let Some(status) = unsupported_auto_profile_rebuild_status(&media_ref) {
-        tracing::info!(
+        tracing::debug!(
             media_ref_kind = %key.media_ref_kind,
             media_ref_id = %key.media_ref_id,
             status,
@@ -1409,6 +1429,19 @@ fn profile_rebuild_failures() -> &'static Mutex<HashMap<String, DjProfileRebuild
 
 fn record_dj_profile_rebuild_failure(key: &str, status: &str, message: String) -> Option<Duration> {
     let mut guard = profile_rebuild_failures().lock().ok()?;
+    guard
+        .retain(|_, failure| failure.recorded_at.elapsed() <= profile_rebuild_failure_ttl(failure));
+    // This is short-lived suppression, not a permanent catalog blacklist.
+    // Keep old failures bounded even when many unavailable assets are visited.
+    if guard.len() >= 512 && !guard.contains_key(key) {
+        if let Some(oldest_key) = guard
+            .iter()
+            .min_by_key(|(_, failure)| failure.recorded_at)
+            .map(|(key, _)| key.clone())
+        {
+            guard.remove(&oldest_key);
+        }
+    }
     // Carry the attempt count across automatic retries (the accept path no
     // longer clears it) so a chronically-failing stream backs off and finally
     // gives up instead of re-decoding every 25s forever.
@@ -1455,17 +1488,39 @@ fn clear_dj_profile_rebuild_failure(key: &str) {
     }
 }
 
+pub(super) fn record_unavailable_tidal_source(tidal_id: i64) {
+    record_dj_profile_rebuild_failure(
+        &format!("tidal_track:{tidal_id}"),
+        "source_unavailable",
+        "Track is unavailable on TIDAL. Automatic analysis stopped.".to_string(),
+    );
+}
+
+pub(super) fn clear_unavailable_tidal_source(tidal_id: i64) {
+    let key = format!("tidal_track:{tidal_id}");
+    if let Ok(mut guard) = profile_rebuild_failures().lock()
+        && guard
+            .get(&key)
+            .is_some_and(|failure| failure.status == "source_unavailable")
+    {
+        // A newly resolved stream establishes that the source is available.
+        // Preserve transient decode attempt counts until decoding succeeds.
+        guard.remove(&key);
+    }
+}
+
+fn profile_rebuild_failure_ttl(failure: &DjProfileRebuildFailure) -> Duration {
+    Duration::from_secs(if failure.status == "decode_failed" {
+        DJ_PROFILE_EXHAUSTED_FAILURE_TTL_SECS
+    } else {
+        DJ_PROFILE_REBUILD_FAILURE_TTL_SECS
+    })
+}
+
 fn recent_dj_profile_rebuild_failure(key: &str) -> Option<DjProfileRebuildFailure> {
     let mut guard = profile_rebuild_failures().lock().ok()?;
     match guard.get(key) {
-        Some(failure)
-            if failure.recorded_at.elapsed()
-                <= Duration::from_secs(if failure.status == "decode_failed" {
-                    DJ_PROFILE_EXHAUSTED_FAILURE_TTL_SECS
-                } else {
-                    DJ_PROFILE_REBUILD_FAILURE_TTL_SECS
-                }) =>
-        {
+        Some(failure) if failure.recorded_at.elapsed() <= profile_rebuild_failure_ttl(failure) => {
             Some(failure.clone())
         }
         Some(_) => {
@@ -1477,19 +1532,51 @@ fn recent_dj_profile_rebuild_failure(key: &str) -> Option<DjProfileRebuildFailur
 }
 
 fn profile_rebuild_failure_status(error: &anyhow::Error) -> &'static str {
-    let message = error.to_string();
-    if profile_rebuild_error_is_retryable(message.as_str()) {
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<tidal_stream::StreamResolveError>()
+            .is_some_and(|error| error.is_asset_not_ready() || error.is_track_specific_rejection())
+    }) || profile_rebuild_error_is_asset_not_ready_chain(error)
+    {
+        // Called only after the bounded quality fallback has been exhausted.
+        "source_unavailable"
+    } else if profile_rebuild_error_is_retryable_chain(error) {
         "retrying"
     } else {
         "decode_failed"
     }
 }
 
+fn profile_rebuild_error_is_asset_not_ready_chain(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<tidal_stream::StreamResolveError>()
+            .is_some_and(tidal_stream::StreamResolveError::is_asset_not_ready)
+            || profile_rebuild_error_is_asset_not_ready(&cause.to_string())
+    })
+}
+
+fn profile_rebuild_error_is_retryable_chain(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        if let Some(error) = cause.downcast_ref::<tidal_stream::StreamResolveError>() {
+            match error {
+                tidal_stream::StreamResolveError::RequestFailed { .. } => return true,
+                tidal_stream::StreamResolveError::UpstreamHttp { status, .. } => {
+                    return status.is_server_error()
+                        || status.as_u16() == 408
+                        || status.as_u16() == 429;
+                }
+                _ => {}
+            }
+        }
+        profile_rebuild_error_is_retryable(&cause.to_string())
+    })
+}
+
 fn profile_rebuild_error_is_retryable(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     message.contains("DASH stream prebuffer failed")
         || message.contains("DASH segment")
-        || profile_rebuild_error_is_asset_not_ready(message)
         || lower.contains("timed out")
         || lower.contains("request failed")
         || lower.contains("chunk error")
@@ -1533,6 +1620,9 @@ fn profile_rebuild_retry_after_ms(failure: &DjProfileRebuildFailure) -> Option<i
 }
 
 fn profile_rebuild_error_message(error: &anyhow::Error, status: &str) -> String {
+    if status == "source_unavailable" {
+        return "Track is unavailable on TIDAL. Automatic analysis stopped.".to_string();
+    }
     if status == "retrying" {
         let message = error.to_string();
         if profile_rebuild_error_is_asset_not_ready(&message) {
@@ -1915,13 +2005,19 @@ fn deck_status(
         decode_f32_blob(&row.waveform_peaks_blob).is_none_or(|peaks| peaks.is_empty())
             || (row.source.starts_with("dj_playback") && !dj_profile_row_is_current(row))
     });
-    let rebuild_failure = if profile.is_some() && !updating_analysis {
+    let known_failure = recent_dj_profile_rebuild_failure(&rebuild_key);
+    let source_unavailable = known_failure
+        .as_ref()
+        .is_some_and(|failure| failure.status == "source_unavailable");
+    let rebuild_failure = if profile.is_some() && !updating_analysis && !source_unavailable {
         clear_dj_profile_rebuild_failure(&rebuild_key);
         None
     } else {
-        recent_dj_profile_rebuild_failure(&rebuild_key)
+        known_failure
     };
-    let profile_status = if profile.is_some() && !updating_analysis {
+    let profile_status = if source_unavailable {
+        "source_unavailable".to_string()
+    } else if profile.is_some() && !updating_analysis {
         "ready".to_string()
     } else if let Some(failure) = rebuild_failure.as_ref() {
         failure.status.clone()
@@ -2221,6 +2317,12 @@ fn drop_preview_status(
     else {
         return Ok(skipped("pair_missing"));
     };
+    if current.profile_status == "source_unavailable" {
+        return Ok(skipped("current_source_unavailable"));
+    }
+    if next.profile_status == "source_unavailable" {
+        return Ok(skipped("next_source_unavailable"));
+    }
     if !current.profile_ready {
         return Ok(skipped(&deck_profile_unavailable_reason(
             "current", current,
@@ -5058,16 +5160,194 @@ mod tests {
     }
 
     #[test]
-    fn asset_not_ready_profile_rebuild_errors_are_retrying() {
-        let error = anyhow::Error::msg(
-            r#"TIDAL playback request was rejected: TIDAL rejected playback request with 401 Unauthorized: {"status":401,"subStatus":4005,"userMessage":"Asset is not ready for playback"}"#,
-        );
+    fn exhausted_quality_asset_not_ready_stops_automatic_analysis() {
+        let error = anyhow::Error::from(tidal_stream::StreamResolveError::StreamRejected {
+            message: r#"TIDAL rejected playback request with 401 Unauthorized: {"status":401,"subStatus":4005,"userMessage":"Asset is not ready for playback"}"#.to_string(),
+        }).context("Resolving the LOSSLESS analysis stream");
 
-        assert_eq!(profile_rebuild_failure_status(&error), "retrying");
+        assert_eq!(profile_rebuild_failure_status(&error), "source_unavailable");
         assert_eq!(
-            profile_rebuild_error_message(&error, "retrying"),
-            "TIDAL asset is not ready. Retrying analysis."
+            profile_rebuild_error_message(&error, "source_unavailable"),
+            "Track is unavailable on TIDAL. Automatic analysis stopped."
         );
+        assert_eq!(
+            next_dj_profile_analysis_quality(0, &error),
+            Some("LOSSLESS")
+        );
+        assert_eq!(next_dj_profile_analysis_quality(1, &error), None);
+    }
+
+    #[test]
+    fn unresolved_pending_rows_do_not_requeue_unsupported_analysis() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        let incoming = DjMediaRef::TidalTrack {
+            tidal_id: 864210,
+            track_id: None,
+        };
+        let pair = crate::playback::dj_lookahead::DjLookaheadPair {
+            current: Some(DjMediaRef::PendingQueueItem {
+                queue_item_id: 43,
+                pending_artist: "Unavailable artist".to_string(),
+                pending_title: "Unavailable track".to_string(),
+                tidal_id_hint: None,
+            }),
+            next: Some(incoming.clone()),
+            current_queue_item_id: Some(43),
+            next_queue_item_id: Some(44),
+            queue_generation: 1,
+        };
+        let inflight = Arc::new(Mutex::new(HashMap::new()));
+        let missing = missing_dj_profile_refs_for_pair(&conn, pair, &[], &inflight)
+            .expect("automatic analysis candidates");
+        assert_eq!(missing, vec![incoming]);
+    }
+
+    #[test]
+    fn cached_profile_does_not_erase_known_unavailable_asset() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        let media_ref = DjMediaRef::TidalTrack {
+            tidal_id: 864211,
+            track_id: None,
+        };
+        let key = media_ref.profile_key();
+        let rebuild_key = dj_profile_inflight_key(&key);
+        queries::upsert_audio_dj_profile(&conn, &test_profile_row(&key, DJ_PROFILE_VERSION))
+            .expect("cached profile");
+        record_dj_profile_rebuild_failure(
+            &rebuild_key,
+            "source_unavailable",
+            "Unavailable asset".to_string(),
+        );
+        let deck = deck_status(&conn, &media_ref, None, false).expect("deck status");
+        assert!(deck.profile_ready);
+        assert_eq!(deck.profile_status, "source_unavailable");
+        assert!(!deck_needs_profile_rebuild(&deck));
+        assert!(recent_dj_profile_rebuild_failure(&rebuild_key).is_some());
+        let ready = test_deck_status(true, "ready");
+        let unavailable_current = drop_preview_status(
+            &conn,
+            true,
+            Some(&media_ref),
+            Some(&media_ref),
+            Some(&deck),
+            Some(&ready),
+            Some(240_000),
+            None,
+        )
+        .expect("unavailable outgoing preview");
+        assert_eq!(
+            unavailable_current.reason.as_deref(),
+            Some("current_source_unavailable")
+        );
+        let unavailable_next = drop_preview_status(
+            &conn,
+            true,
+            Some(&media_ref),
+            Some(&media_ref),
+            Some(&ready),
+            Some(&deck),
+            Some(240_000),
+            None,
+        )
+        .expect("unavailable incoming preview");
+        assert_eq!(
+            unavailable_next.reason.as_deref(),
+            Some("next_source_unavailable")
+        );
+        clear_dj_profile_rebuild_failure(&rebuild_key);
+    }
+
+    #[test]
+    fn fresh_tidal_resolution_clears_only_unavailable_suppression() {
+        let unavailable_key = "tidal_track:864213";
+        let transient_key = "tidal_track:864214";
+        clear_dj_profile_rebuild_failure(unavailable_key);
+        clear_dj_profile_rebuild_failure(transient_key);
+        record_unavailable_tidal_source(864213);
+        record_dj_profile_rebuild_failure(
+            transient_key,
+            "retrying",
+            "DASH stream prebuffer failed".to_string(),
+        );
+        assert!(recent_dj_profile_rebuild_failure(unavailable_key).is_some());
+        clear_unavailable_tidal_source(864213);
+        clear_unavailable_tidal_source(864214);
+        assert!(recent_dj_profile_rebuild_failure(unavailable_key).is_none());
+        assert_eq!(
+            recent_dj_profile_rebuild_failure(transient_key)
+                .expect("transient attempts survive resolution")
+                .attempts,
+            1
+        );
+        clear_dj_profile_rebuild_failure(transient_key);
+    }
+
+    #[test]
+    fn typed_tidal_transient_failures_keep_quality_fallback_and_retry() {
+        for status in [
+            reqwest::StatusCode::REQUEST_TIMEOUT,
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            let error = anyhow::Error::from(tidal_stream::StreamResolveError::UpstreamHttp {
+                status,
+                body: "Temporary upstream failure".to_string(),
+            })
+            .context("Resolving analysis stream");
+            assert_eq!(
+                profile_rebuild_failure_status(&error),
+                "retrying",
+                "{status}"
+            );
+            assert_eq!(
+                next_dj_profile_analysis_quality(0, &error),
+                Some("LOSSLESS"),
+                "{status}"
+            );
+        }
+        let rejection = anyhow::Error::from(tidal_stream::StreamResolveError::StreamRejected {
+            message: "TIDAL rejected playback request with 403 Forbidden".to_string(),
+        })
+        .context("Resolving analysis stream");
+        assert_eq!(
+            profile_rebuild_failure_status(&rejection),
+            "source_unavailable"
+        );
+        assert_eq!(next_dj_profile_analysis_quality(0, &rejection), None);
+    }
+
+    #[tokio::test]
+    async fn known_unavailable_source_does_not_start_another_automatic_batch() {
+        let db = crate::db::Database::open_in_memory().expect("db");
+        db.with_conn(|conn| {
+            crate::db::schema::run_migrations(conn)?;
+            Ok(())
+        })
+        .expect("migrations");
+        let (dj_tx, _dj_rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = fresh_test_state_with_dj_tx(db, Some(dj_tx.clone()));
+        let media_ref = DjMediaRef::TidalTrack {
+            tidal_id: 864215,
+            track_id: None,
+        };
+        let rebuild_key = dj_profile_inflight_key(&media_ref.profile_key());
+        record_unavailable_tidal_source(864215);
+        let response = queue_tidal_profile_rebuild(state.clone(), media_ref, dj_tx, false)
+            .await
+            .expect("automatic batch decision");
+        assert!(!response.accepted);
+        assert_eq!(response.status, "source_unavailable");
+        assert!(!dj_profile_rebuild_is_inflight(
+            &state.read().await.dj_profile_rebuild_inflight,
+            &rebuild_key
+        ));
+        let failure =
+            recent_dj_profile_rebuild_failure(&rebuild_key).expect("terminal suppression");
+        assert_eq!(failure.attempts, 1);
+        assert!(failure.next_retry_at.is_none());
+        clear_dj_profile_rebuild_failure(&rebuild_key);
     }
 
     #[test]

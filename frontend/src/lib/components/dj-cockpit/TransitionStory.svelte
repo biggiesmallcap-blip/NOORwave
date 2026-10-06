@@ -2,14 +2,14 @@
 	import type { DjStatusResponse } from '$lib/api/client';
 	import { currentTrack, isPlaying, playbackSeekRevision, position } from '$lib/stores/player';
 	import TransitionScene from './TransitionScene.svelte';
-	import { energyLabel, executionLabel, hasBassAutomation, isPlaybackFallback, storySnapshot, strategyLabel, timeLabel, transitionDurationLabel, transitionOriginMs, transitionProgress } from './transition_scene';
+	import { dropPreviewExplanation, energyLabel, executionLabel, isPlaybackFallback, seekBlockedEventId, storySnapshot, strategyDescription, strategyLabel, timeLabel, transitionDurationLabel, transitionExplanation, transitionOriginMs, transitionProgress } from './transition_scene';
 
 	let { status, compact = false, enabled = null }: { status: DjStatusResponse | null; compact?: boolean; enabled?: boolean | null } = $props();
 	let lastSeekRevision = $state($playbackSeekRevision);
 	let blockedEventId = $state<number | null>(null);
 	$effect(() => {
 		if ($playbackSeekRevision !== lastSeekRevision) {
-			blockedEventId = status?.active_transition?.event_id ?? status?.last_transition_event_id ?? null;
+			blockedEventId = seekBlockedEventId(status);
 			lastSeekRevision = $playbackSeekRevision;
 		}
 	});
@@ -32,13 +32,11 @@
 		: countdown != null && countdown > 0
 			? `${shown?.timing_source === 'fallback_overlap' && shown?.runtime_planned_start_ms == null ? 'Estimated' : 'Scheduled'} in ${Math.ceil(countdown)}s`
 			: 'Scheduled · waiting for audio');
-	let safeExplanation = $derived(status?.planning_reason === 'profile_low_confidence'
-		? 'A dependable crossfade keeps this pair flowing while analysis is limited.'
-		: status?.planning_reason === 'safety_override_safe'
-			? 'Your safe-only correction protects this pair.'
-			: plan?.template === 'SafeCrossfade' ? `This is a gain crossfade${hasBassAutomation(plan) ? ' with a modest bass duck' : ''}. It does not assume beat alignment or a bass swap.`
-				: hasBassAutomation(plan) ? 'The audio program controls both track levels and the bass handoff.'
-					: 'The audio program controls the track levels and incoming entry.');
+	let explanation = $derived(transitionExplanation(shown));
+	let preview = $derived(shown?.current && !shown.active_transition ? shown.drop_preview : undefined);
+	let previewReason = $derived(dropPreviewExplanation(preview));
+	let previewConfirmed = $derived(preview?.status === 'fired' && preview.actual_fire_ms != null
+		&& positionMs != null && positionMs >= preview.actual_fire_ms && positionMs - preview.actual_fire_ms < 8000);
 </script>
 
 <section class="transition-story" class:compact aria-label="Outgoing to incoming transition">
@@ -64,6 +62,11 @@
 		<span>{energyLabel(shown)}</span>
 		{#if confidence != null}<span>{Math.round(confidence * 100)}% plan confidence</span>{/if}
 	</div>
+	{#if previewConfirmed}
+		<p role="status">Drop preview fired{#if preview?.incoming_drop_ms != null} · incoming drop at {timeLabel(preview.incoming_drop_ms / 1000)}{/if}</p>
+	{:else if preview?.status === 'armed' && preview.planned_fire_ms != null}
+		<p>Drop preview scheduled at {timeLabel(preview.planned_fire_ms / 1000)} in the outgoing track.</p>
+	{/if}
 	{#if !compact}<TransitionScene status={shown} progress={fallback ? null : progress} playing={$isPlaying} />{/if}
 	{#if progress != null && !fallback}
 		<progress max="1" value={progress ?? 0} aria-label="Transition progress"></progress>
@@ -71,7 +74,10 @@
 	{#if !compact}
 		<details class="why">
 			<summary>Why this transition?</summary>
-			<p>{decision?.reason ?? safeExplanation}</p>
+			<p>{explanation}</p>
+			{#if previewReason}<p>{previewReason}</p>{/if}
+			{#if plan}<p>{strategyDescription(plan.template)}</p>{/if}
+			{#if startMs != null}<p>Outgoing transition starts at {timeLabel(startMs / 1000)}. Incoming entry is a position in the next track.</p>{/if}
 			{#if decision}
 				<div class="reason-facts">
 					<span>{decision.duration_beats.toFixed(0)} beats</span>

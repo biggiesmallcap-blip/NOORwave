@@ -194,6 +194,13 @@ pub enum PlaybackRuntimeEvent {
         track_id: i64,
         generation: u64,
         actual_start_ms: i64,
+        queue_generation: u64,
+    },
+    DropPreviewSkipped {
+        track_id: i64,
+        generation: u64,
+        queue_generation: u64,
+        reason: &'static str,
     },
     /// Fired when the current track is within `NEAR_END_THRESHOLD_MS` of its end.
     /// The listener should peek the next track and send `PrepareNext` to pre-buffer it.
@@ -223,6 +230,9 @@ pub enum PlaybackRuntimeEvent {
     },
     PreparedTrackError {
         track_id: i64,
+        generation: u64,
+        /// Exact source that failed, before a catalog-id heal or queue change.
+        tidal_id: Option<i64>,
         message: String,
     },
     Error {

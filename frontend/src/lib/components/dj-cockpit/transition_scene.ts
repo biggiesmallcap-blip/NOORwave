@@ -14,6 +14,74 @@ export function strategyLabel(value?: string) {
 	return value ? strategyLabels[value] ?? value.replaceAll('_', ' ') : 'Finding the next mix';
 }
 
+export function strategyDescription(value?: string): string {
+	const label = strategyLabel(value);
+	const descriptions: Record<string, string> = {
+		Adaptive: 'Chooses among suitable overlaps, bass handoffs, energy changes and cuts for this pair.',
+		Wildcard: 'Favours a less familiar suitable transition while retaining audio safety checks.',
+		'Smooth blend': 'A longer overlap gradually trades track levels, favouring compatible harmony and space for both tracks.',
+		'Club mix': 'Overlaps rhythmic phrases and hands over the bass. Longer mixes require verified tempo and beat phase.',
+		'Quick mix': 'A short overlap brings the incoming track forward quickly and limits competing vocals or rhythms.',
+		'Energy lift': 'Keeps the outgoing track prominent during the build, then gives the incoming track and its bass a stronger arrival.',
+		'Energy reset': 'Withdraws the outgoing track and its bass earlier, letting a calmer incoming section create breathing room.',
+		'Drop swap': 'Introduces the incoming build quietly, then trades track levels and bass at its analysed drop.',
+		'Bass swap': 'Lets both tracks overlap rhythmically while removing the outgoing bass before bringing in the incoming bass.',
+		'Cut / slam': 'Uses a very short handoff rather than a prolonged overlap, with downbeat timing when analysis supports it.',
+		'Drop tease': 'An automatic mid-song preview briefly plays a compatible incoming drop over a safe outgoing phrase. It requires analysed drop and mid-song markers.',
+		'Filter sweep': 'Changes tone through a short overlap to clear space for the incoming phrase.',
+		'Safe crossfade': 'Trades track levels without assuming beat alignment. It protects playback when a more involved mix cannot be verified.',
+	};
+	return descriptions[label] ?? 'The chosen audio programme sets the overlap, track levels and incoming entry.';
+}
+
+export function transitionExplanation(status: DjStatusResponse | null): string {
+	const program = status?.transition_plan;
+	const reasons: Record<string, string> = {
+		profile_low_confidence: 'The available analysis is not confident enough for a more involved mix.',
+		safety_override_safe: 'A saved safe-only correction protects this pair.',
+		beat_sync_unverified: 'The decoded overlap did not provide a stable enough beat match for the planned rhythmic mix.',
+		lookahead_pair_mismatch: 'The prepared audio belongs to a different queue pair, so playback uses a protected handoff.',
+		prepared_mixer_missing: 'The planned mix was not prepared in time, so playback uses the available safe handoff.',
+		next_deck_not_decoded: 'Not enough incoming audio was decoded in time for the planned overlap.',
+		next_decode_late_at_fire: 'The incoming audio arrived after the planned start.',
+		active_deck_not_decoded: 'Not enough outgoing audio was available to prepare the planned overlap.',
+		next_deck_missing_at_fire: 'The incoming deck was not ready at the planned start.',
+		handoff_seam_too_late: 'The prepared overlap could no longer be joined cleanly, so playback protected the handoff.',
+		manual_seek_suppressed: 'A seek cancelled the earlier mix window. The next confirmed handoff will animate when it starts.',
+		current_profile_decode_failed: 'Analysis could not decode the outgoing track.',
+		next_profile_decode_failed: 'Analysis could not decode the incoming track.',
+		missing_current_profile: 'The outgoing track does not yet have a usable DJ profile.',
+		missing_next_profile: 'The incoming track does not yet have a usable DJ profile.',
+	};
+	const decisionReason = program?.decision?.reason;
+	// During a handoff, status can already contain the NEXT pair's planning cause.
+	// Its cause must not explain the programme currently audible on the old pair.
+	if (status?.active_transition) return decisionReason ?? strategyDescription(program?.template);
+	const cause = [status?.fallback_reason, status?.downgrade_reason, status?.runtime_renderer_reason, status?.planning_reason]
+		.find((reason) => reason && reason !== 'none' && reasons[reason]);
+	if (cause && decisionReason) return `${reasons[cause]} ${decisionReason}`;
+	if (cause) return reasons[cause];
+	if (decisionReason) return decisionReason;
+	return strategyDescription(program?.template);
+}
+
+export function dropPreviewExplanation(preview?: DjStatusResponse['drop_preview']): string | null {
+	if (preview?.status !== 'skipped' || !preview.reason || preview.reason === 'none') return null;
+	const reasons: Record<string, string> = {
+		no_safe_mid_song_marker: 'No measured safe beat or phrase marker near the middle of the outgoing track is available. Analysis of the opening alone does not map the full song.',
+		missing_incoming_drop: 'No usable drop marker was found in the incoming track.',
+		harmonic_incompatible: 'The keys are unknown or unsuitable for an overlapping drop preview.',
+		safe_crossfade_only: 'A saved safe-only correction prevents an overlapping drop preview.',
+		profile_low_confidence: 'The available profile confidence is too low for a drop preview.',
+		current_profile_missing: 'The outgoing DJ profile is not available yet.',
+		next_profile_missing: 'The incoming DJ profile is not available yet.',
+		current_source_unavailable: 'The outgoing audio source is unavailable.',
+		next_source_unavailable: 'The incoming audio source is unavailable.',
+		beat_sync_unverified: 'The preview audio did not provide a stable enough beat match. The outgoing track keeps playing.',
+	};
+	return `Drop preview skipped: ${reasons[preview.reason] ?? preview.reason.replaceAll('_', ' ')}`;
+}
+
 export function curveFraction(curve: DjAutomationEvent['curve'], fraction: number) {
 	const t = Math.max(0, Math.min(1, fraction));
 	if (curve === 'EqualPowerIn') return Math.sin(t * Math.PI / 2);
@@ -128,6 +196,15 @@ export function isPlaybackFallback(status: DjStatusResponse | null) {
 export function transitionOriginMs(status: DjStatusResponse | null) {
 	return status?.active_transition?.start_ms ?? status?.runtime_planned_start_ms
 		?? status?.planned_start_ms ?? status?.actual_start_ms;
+}
+
+// A seek invalidates audio already mixing, not an armed event's future fire.
+// The runtime deliberately reuses an armed event after seeking within a track.
+export function seekBlockedEventId(status: DjStatusResponse | null): number | null {
+	if (status?.active_transition) return status.active_transition.event_id;
+	return status?.runtime_rendered_dj_mixer && status.runtime_renderer_status === 'rendered_overlay'
+		&& ['fired', 'late'].includes(status.timing_status ?? '')
+		? status.last_transition_event_id ?? null : null;
 }
 
 type PlayingTrack = { id: number; tidal_id: number | null };
