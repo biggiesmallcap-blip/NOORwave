@@ -27,6 +27,7 @@
 pub mod cache;
 pub mod client;
 pub mod hashes;
+pub mod playlist_search;
 pub mod resolver;
 pub mod token;
 

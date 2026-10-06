@@ -71,12 +71,13 @@ pub(super) async fn sportify_discovery_search(
     let limit = clamp_search_limit(params.limit);
     let offset = clamp_search_offset(params.offset);
 
-    let (sportify_client, cache_cfg, db) = {
+    let (sportify_client, cache_cfg, db, spotify_public) = {
         let s = state.read().await;
         (
             s.sportify_client.clone(),
             s.sportify_cache_config,
             s.db.clone(),
+            s.spotify_public.clone(),
         )
     };
     let Some(sportify_client) = sportify_client else {
@@ -103,20 +104,16 @@ pub(super) async fn sportify_discovery_search(
             let fetch_db = db.clone();
             let fetch_q = q.to_string();
             let fetch = tokio::spawn(async move {
-                let fetched = match fetch_client.search(&fetch_q, kind, limit, offset).await {
-                    Ok(fetched) => fetched,
-                    Err(primary_error) => {
-                        crate::services::spotify::catalog::search_playlists_from_saved_credentials(
-                            &fetch_db, &fetch_q, limit, offset,
-                        )
-                        .await
-                        .map_err(|fallback_error| {
-                            anyhow::anyhow!(
-                                "sportify_search: {primary_error}; spotify_fallback: {fallback_error}"
-                            )
-                        })?
-                    }
-                };
+                let fetched = search_playlists_with_fallbacks(
+                    &fetch_client,
+                    &spotify_public,
+                    &fetch_db,
+                    &fetch_q,
+                    kind,
+                    limit,
+                    offset,
+                )
+                .await?;
                 fetch_db.with_conn(|conn| {
                     sp_cache::put_search(conn, &fetch_q, kind, limit, offset, &fetched)
                 })?;
@@ -149,6 +146,71 @@ pub(super) async fn sportify_discovery_search(
     .map_err(super::internal)?;
 
     Ok(Json(serde_json::to_value(normalized).unwrap_or(json!({}))))
+}
+
+/// Playlist search across every Spotify source we have, in order: the
+/// Sportify proxy mirrors, the Web API with the user's saved app credentials,
+/// then the web player's own anonymous `searchDesktop` operation.
+///
+/// A source that answers with zero playlists falls through just like one
+/// that errors. The proxies return a 200-but-empty page when their upstream
+/// token is degraded, and that used to end the search there: the Spotify
+/// rail came back empty and only TIDAL's editorial playlists were left, so
+/// user-made playlists never showed up.
+async fn search_playlists_with_fallbacks(
+    proxy: &crate::services::sportify::SportifyClient,
+    spotify_public: &crate::services::spotify_public::SpotifyPublicClient,
+    db: &crate::db::Database,
+    q: &str,
+    kind: crate::services::sportify::client::SportifySearchKind,
+    limit: u32,
+    offset: u32,
+) -> anyhow::Result<crate::services::sportify::models::SportifySearchResults> {
+    use crate::services::sportify::models::SportifySearchResults;
+
+    let mut errors = Vec::new();
+    let mut empty: Option<SportifySearchResults> = None;
+    let mut settle = |source: &str, result: anyhow::Result<SportifySearchResults>| match result {
+        Ok(found) if !found.playlists.is_empty() => Some(found),
+        Ok(found) => {
+            tracing::debug!("sportify_search: {source} returned no playlists for {q:?}");
+            empty.get_or_insert(found);
+            None
+        }
+        Err(e) => {
+            errors.push(format!("{source}: {e}"));
+            None
+        }
+    };
+
+    if let Some(found) = settle(
+        "sportify_search",
+        proxy.search(q, kind, limit, offset).await,
+    ) {
+        return Ok(found);
+    }
+    let web_api = crate::services::spotify::catalog::search_playlists_from_saved_credentials(
+        db, q, limit, offset,
+    )
+    .await;
+    if let Some(found) = settle("spotify_fallback", web_api) {
+        return Ok(found);
+    }
+    let anonymous = spotify_public
+        .search_playlists(q, limit, offset)
+        .await
+        .map(|body| SportifySearchResults {
+            playlists:
+                crate::services::spotify_public::playlist_search::playlists_from_search_desktop(
+                    &body,
+                ),
+            ..SportifySearchResults::default()
+        });
+    if let Some(found) = settle("spotify_public", anonymous) {
+        return Ok(found);
+    }
+
+    empty.ok_or_else(|| anyhow::anyhow!(errors.join("; ")))
 }
 
 pub(super) async fn sportify_discovery_track(

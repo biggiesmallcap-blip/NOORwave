@@ -73,6 +73,45 @@ mod tests {
     }
 
     #[test]
+    fn playlist_search_keeps_good_rows_when_one_row_is_malformed() {
+        // Spotify returns `null` slots for hidden playlists, and user-made
+        // playlists often carry `images: null` or a `followers` object.
+        // None of those may blank the page.
+        let value = json!({
+            "success": true,
+            "results": [
+                null,
+                { "id": "curated", "name": "Deep Focus", "owner": "Spotify" },
+                {
+                    "id": "user-made",
+                    "name": "my gym mix",
+                    "images": null,
+                    "tracks": null,
+                    "owner": { "id": "someone", "display_name": "someone" },
+                    "followers": { "href": null, "total": 12 }
+                },
+                { "id": 42, "name": "bad id type" }
+            ]
+        });
+
+        let out = search_results_from_value(&value, SportifySearchKind::Playlist);
+        let ids: Vec<_> = out
+            .playlists
+            .iter()
+            .filter_map(|p| p.spotify_id())
+            .collect();
+        assert_eq!(ids, vec!["curated", "user-made"]);
+        assert_eq!(out.playlists[1].follower_count(), Some(12));
+        assert_eq!(
+            out.playlists[1]
+                .owner
+                .as_ref()
+                .and_then(|o| o.display_name()),
+            Some("someone")
+        );
+    }
+
+    #[test]
     fn client_config_collects_fallback_base_urls() {
         let client = SportifyClient::new(SportifyClientConfig {
             base_url: "https://primary.example/".to_string(),
@@ -507,20 +546,26 @@ fn search_results_from_value(value: &Value, kind: SportifySearchKind) -> Sportif
     let array = extract_search_items(value, kind);
 
     match kind {
-        SportifySearchKind::Track => {
-            out.tracks = serde_json::from_value(array).unwrap_or_default();
-        }
-        SportifySearchKind::Album => {
-            out.albums = serde_json::from_value(array).unwrap_or_default();
-        }
-        SportifySearchKind::Artist => {
-            out.artists = serde_json::from_value(array).unwrap_or_default();
-        }
-        SportifySearchKind::Playlist => {
-            out.playlists = serde_json::from_value(array).unwrap_or_default();
-        }
+        SportifySearchKind::Track => out.tracks = parse_rows(array),
+        SportifySearchKind::Album => out.albums = parse_rows(array),
+        SportifySearchKind::Artist => out.artists = parse_rows(array),
+        SportifySearchKind::Playlist => out.playlists = parse_rows(array),
     }
     out
+}
+
+/// Deserialize search rows one at a time. Deserializing the whole array at
+/// once meant a single odd row (a `null` slot, which Spotify returns for
+/// playlists it hides, or a user playlist with `images: null`) failed the
+/// entire page and search silently came back empty.
+fn parse_rows<T: DeserializeOwned>(array: Value) -> Vec<T> {
+    let Value::Array(rows) = array else {
+        return Vec::new();
+    };
+    rows.into_iter()
+        .filter(|row| row.is_object())
+        .filter_map(|row| serde_json::from_value(row).ok())
+        .collect()
 }
 
 fn sportify_resource_path(resource: &str, spotify_id: &str) -> String {
