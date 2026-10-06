@@ -20,7 +20,8 @@ param(
     [switch]$CheckOnly,
     [switch]$InstallMissing,
     [switch]$SkipFrontendInstall,
-    [switch]$NoZip
+    [switch]$NoZip,
+    [string]$RecoveryManifest
 )
 
 Set-StrictMode -Version Latest
@@ -28,6 +29,7 @@ $ErrorActionPreference = "Stop"
 
 $Root = Split-Path $PSScriptRoot -Parent
 Set-Location $Root
+
 
 $Missing = New-Object System.Collections.Generic.List[object]
 
@@ -83,9 +85,18 @@ function Invoke-Native {
         [string[]]$Arguments
     )
 
-    & $FilePath @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "$FilePath $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
+    $previousRecoveryManifest = $env:NOOR_CATALOGUE_RECOVERY_MANIFEST
+    try {
+        if ($FilePath -eq 'cargo' -and $RecoveryManifest) {
+            $env:NOOR_CATALOGUE_RECOVERY_MANIFEST = (Resolve-Path -LiteralPath $RecoveryManifest).Path
+        }
+        & $FilePath @Arguments
+        if ($LASTEXITCODE -ne 0) {
+            throw "$FilePath $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
+        }
+    }
+    finally {
+        $env:NOOR_CATALOGUE_RECOVERY_MANIFEST = $previousRecoveryManifest
     }
 }
 
@@ -315,6 +326,14 @@ function Assemble-Portable {
 
     Copy-Item -LiteralPath (Join-Path $Root "target\release\noor-app.exe") -Destination (Join-Path $outDir "NOORwave.exe")
     Copy-Item -LiteralPath (Join-Path $Root "target\release\noor-server.exe") -Destination (Join-Path $outDir "noor-server.exe")
+if ($RecoveryManifest) {
+    $reviewedRecovery = Get-Content -LiteralPath $RecoveryManifest -Raw | ConvertFrom-Json
+    if ($reviewedRecovery.version -ne 2 -or $reviewedRecovery.changes_favorites -ne $false -or -not $reviewedRecovery.batch_id -or @($reviewedRecovery.entries | Where-Object { $_.status -ne "reviewed" }).Count) {
+        throw "Recovery payload must be a reviewed version-2 manifest"
+    }
+    Copy-Item -LiteralPath $RecoveryManifest -Destination (Join-Path $outDir "tidal-catalogue-recovery.json")
+}
+
     Copy-Item -LiteralPath (Join-Path $Root "frontend\build") -Destination (Join-Path $outDir "www") -Recurse
 
     if (Get-Command Unblock-File -ErrorAction SilentlyContinue) {

@@ -471,6 +471,12 @@ async fn do_tidal_sync(
         Ok(())
     };
 
+    {
+        let db = state.read().await.db.clone();
+        if let Err(error) = crate::db::catalogue_recovery::consume_pending(&db) {
+            tracing::warn!(%error,"Reviewed catalogue recovery left pending before sync");
+        }
+    }
     let sync_info = {
         let s = state.read().await;
         s.db.with_conn(|conn| Ok(crate::db::queries::get_sync_info(conn, "tidal")?))?
@@ -491,6 +497,7 @@ async fn do_tidal_sync(
             .and_then(|info| info.tidal_favorite_track_cursor.clone()),
         ..Default::default()
     };
+    let favorite_snapshot_started = crate::db::catalogue_favorites::now();
     let mut favorite_album_ids = HashSet::new();
     let mut favorite_track_ids = HashSet::new();
 
@@ -614,9 +621,9 @@ async fn do_tidal_sync(
                         rusqlite::params![album.artist.id, album.artist.name, photo],
                     )?;
                     if let Some(existing)=crate::db::catalogue::album_id(&tx,album.id)? {
-                        tx.execute("UPDATE albums SET is_favorite=1,title=?2,year=COALESCE(?3,year),
+                        tx.execute("UPDATE albums SET is_favorite=?6,title=?2,year=COALESCE(?3,year),
                             artwork_url=COALESCE(?4,artwork_url),track_count=COALESCE(?5,track_count) WHERE id=?1",
-                            rusqlite::params![existing,album.title,year,artwork,album.number_of_tracks])?;
+                            rusqlite::params![existing,album.title,year,artwork,album.number_of_tracks,crate::db::catalogue_favorites::desired_entity(&tx,"album",existing)?.unwrap_or(true) as i32])?;
                         tx.execute("UPDATE tidal_album_aliases SET is_favorite=1 WHERE tidal_id=?1",[album.id])?;
                         continue;
                     }
@@ -723,7 +730,9 @@ async fn do_tidal_sync(
                         artist_name: &track.artist.name,
                         isrc: track.isrc.as_deref(),
                         duration_ms: track.duration * 1000,
-                    };
+                        version: track.extra.get("version").and_then(|v|v.as_str()),
+    explicit: track.extra.get("explicit").and_then(|v|v.as_bool()),
+};
                     let candidates = dup::fetch_import_candidates(
                         &tx,
                         track.id,
@@ -915,17 +924,19 @@ async fn do_tidal_sync(
     if sync_mode_reconciles_favorites(sync_mode) {
         let s = state.read().await;
         s.db.with_conn(|conn| {
-            super::apply_tidal_favorite_flags(
+            super::apply_tidal_favorite_flags_at(
                 conn,
                 "albums",
                 &favorite_album_ids,
                 prev_album_count,
+                &favorite_snapshot_started,
             )?;
-            super::apply_tidal_favorite_flags(
+            super::apply_tidal_favorite_flags_at(
                 conn,
                 "tracks",
                 &favorite_track_ids,
                 prev_track_count,
+                &favorite_snapshot_started,
             )?;
             Ok(())
         })?;
@@ -1043,7 +1054,9 @@ async fn run_favorite_album_enrichment(
                             artist_name: &track.artist.name,
                             isrc: track.isrc.as_deref(),
                             duration_ms: track.duration * 1000,
-                        };
+                            version: track.extra.get("version").and_then(|v|v.as_str()),
+    explicit: track.extra.get("explicit").and_then(|v|v.as_bool()),
+};
                         let candidates = dup::fetch_import_candidates(
                             &tx,
                             track.id,
@@ -1467,6 +1480,8 @@ pub(super) fn replace_playlist_tracks(
             artist_name: &track.artist.name,
             isrc: track.isrc.as_deref(),
             duration_ms: track.duration * 1000,
+            version: track.extra.get("version").and_then(|v| v.as_str()),
+            explicit: track.extra.get("explicit").and_then(|v| v.as_bool()),
         };
         let candidates = dup::fetch_import_candidates(
             &tx,
@@ -1505,9 +1520,9 @@ pub(super) fn replace_playlist_tracks(
     Ok(position)
 }
 
-/// Transfer a TIDAL favorite onto the canonical local copy of the recording.
-/// Its provider timestamp still describes when the user added the favorite,
-/// even when the provider id itself is discarded as a duplicate.
+/// Promote a provider-observed favorite without replacing the chosen date.
+/// The provider timestamp describes its per-ID favorite relationship; aliases
+/// retain that evidence independently from intentional user date choices.
 pub(super) fn promote_duplicate_favorite(
     conn: &rusqlite::Connection,
     track_id: i64,

@@ -34,18 +34,19 @@ class RecoveryTests(unittest.TestCase):
             with closing(sqlite3.connect(path)) as conn, conn:
                 conn.executescript(schema)
                 conn.execute("INSERT INTO tracks VALUES(1,?,'Smoko','AUBEC1712176',1,1,180000,?,1,1)", [tid, date])
-        self.manifest = recovery.audit(self.current, [self.old])
+        self.manifest = recovery.review(recovery.audit(self.current, [self.old]), {122611523})
         source = (pathlib.Path(__file__).resolve().parents[1] / "noor-server/src/db/schema.rs").read_text(encoding="utf-8")
         migration = re.search(r'pub\(crate\) const MIGRATION_069: &str = r#"(.*?)"#;', source, re.S).group(1)
         with closing(sqlite3.connect(self.current)) as conn, conn:
             conn.executescript(migration)
+            conn.executescript(re.search(r'pub\(crate\) const MIGRATION_070: &str = r#"(.*?)"#;', source, re.S).group(1))
 
     def test_restores_date_and_alias_without_changing_favorites_and_repeats_safely(self):
         self.assertEqual(recovery.apply(self.current, self.manifest, self.root / "backup.db"), 1)
         self.assertEqual(recovery.apply(self.current, self.manifest, self.root / "repeat.db"), 0)
         with closing(sqlite3.connect(self.current)) as conn, conn:
             self.assertEqual(conn.execute("SELECT date_added,is_favorite FROM tracks").fetchone(),
-                             ("2020-06-10T07:10:44.221+0000", 1))
+                             ("2020-06-10T07:10:44.221000Z", 1))
             self.assertEqual(conn.execute("SELECT track_id FROM tidal_track_aliases WHERE tidal_id=122611523").fetchone(), (1,))
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM catalogue_merge_audit").fetchone(), (1,))
         with closing(sqlite3.connect(self.root / "backup.db")) as conn, conn:
@@ -72,6 +73,42 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.old.read_bytes(), before)
         with self.assertRaises(ValueError):
             recovery.apply(self.current, manifest, self.root / "backup.db")
+
+    def test_shared_recording_identity_examples(self):
+        path = pathlib.Path(__file__).parent / "fixtures/tidal-recording-identity.json"
+        for case in json.loads(path.read_text(encoding="utf-8")):
+            self.assertEqual(recovery.same_recording(case["before"], case["after"]), case["equivalent"])
+
+    def test_same_id_conflicting_isrc_is_review_only(self):
+        with closing(sqlite3.connect(self.old)) as conn, conn:
+            conn.execute("UPDATE tracks SET tidal_id=556255961,isrc='DIFFERENT'")
+        report = recovery.audit(self.current, [self.old])
+        self.assertEqual(report["entries"][0]["status"], "review")
+        self.assertIsNone(report["entries"][0]["current"])
+
+    def test_relike_after_review_rejects_stale_manifest(self):
+        with closing(sqlite3.connect(self.current)) as conn, conn:
+            conn.execute("UPDATE tracks SET date_added='2026-10-06T12:00:00Z',library_added_at='2026-10-06T12:00:00Z',library_date_source='user',date_choice_at='2026-10-06T12:00:00Z'")
+        with self.assertRaisesRegex(ValueError, "choice changed"):
+            recovery.apply(self.current, self.manifest, self.root / "backup.db")
+        with closing(sqlite3.connect(self.current)) as conn:
+            self.assertEqual(conn.execute("SELECT date_added FROM tracks").fetchone()[0], "2026-10-06T12:00:00Z")
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM catalogue_merge_audit").fetchone()[0], 0)
+
+    def test_repeat_never_undoes_a_later_relike(self):
+        recovery.apply(self.current, self.manifest, self.root / "backup.db")
+        with closing(sqlite3.connect(self.current)) as conn, conn:
+            conn.execute("UPDATE tracks SET date_added='2026-10-06T12:00:00Z',library_added_at='2026-10-06T12:00:00Z',library_date_source='user',date_choice_at='2026-10-06T12:00:00Z'")
+        self.assertEqual(recovery.apply(self.current, self.manifest, self.root / "repeat.db"), 0)
+        with closing(sqlite3.connect(self.current)) as conn:
+            self.assertEqual(conn.execute("SELECT date_added FROM tracks").fetchone()[0], "2026-10-06T12:00:00Z")
+
+    def test_distinct_version_evidence_rejects_recovery(self):
+        for key, value in [("title", "Smoko (2024 Remaster)"), ("catalogue_version", "Live in Sydney"), ("catalogue_explicit", 1)]:
+            with closing(sqlite3.connect(self.current)) as conn, conn:
+                conn.execute("UPDATE tracks SET title='Smoko',catalogue_version=NULL,catalogue_explicit=NULL")
+                conn.execute(f"UPDATE tracks SET {key}=?", [value])
+            self.assertEqual(recovery.audit(self.current, [self.old])["entries"][0]["status"], "review")
 
     def test_backup_includes_wal_transactions(self):
         with closing(sqlite3.connect(self.current)) as writer, writer:

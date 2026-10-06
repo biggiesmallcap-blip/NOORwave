@@ -5,6 +5,10 @@
 $root = Split-Path -Parent $PSScriptRoot
 $frontend = Join-Path $root 'frontend'
 
+# A copied database can still authenticate to the real cloud account.
+# Override deliberately before launching only when provider writes are wanted.
+if (-not $env:NOOR_TIDAL_LIBRARY_WRITES) { $env:NOOR_TIDAL_LIBRARY_WRITES = 'deny' }
+
 $backendCmd = 'cargo run -p noor-server'
 $frontendCmd = 'pnpm dev'
 

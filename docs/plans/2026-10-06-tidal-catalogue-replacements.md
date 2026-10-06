@@ -1,5 +1,7 @@
 # Preserve library entries across TIDAL catalogue replacements
 
+**Superseded behavior and rollout scope:** The [final adversarial review](2026-10-06-tidal-library-dates-review.md) found additional recovery, identity, and favorite-intent issues. Use the [revised action plan](2026-10-06-tidal-library-dates-action-plan.md) for further work. An intentional unlike/re-like should renew the displayed date and move the song to the top; automatic resync must retain the chosen or accepted recovered date. Recovery covers a full-library audit, using nine known examples to validate behavior. The implementation/validation record below describes the original committed PR, not approval to merge or repair the live library.
+
 Prepared 6 October 2026. Prevention and recovery tooling are implemented in this checkout. The two-song recovery has been tested on a consistent copy of the installed library. The installed application and live library have not been changed.
 
 **Problem and evidence**

@@ -10,7 +10,7 @@ use crate::services::learning as discovery_learning;
 use crate::services::tidal::{
     auth as tidal_auth,
     client::{TidalClient, TidalSearchCatalog, TidalSearchTrack, TidalSearchVideo, TidalTrack},
-    import as tidal_import, mutations as tidal_mutations, stream as tidal_stream,
+    import as tidal_import, stream as tidal_stream,
 };
 use crate::smart::external_discovery as external_discovery_engine;
 use crate::{AppEvent, PlaybackRuntimeInfo, PlaybackRuntimeState, SharedState};
@@ -3906,42 +3906,21 @@ async fn set_track_favorite(
     let was_favorite = track.is_favorite;
     let state_changed = was_favorite != payload.favorite;
 
-    let (tidal_tokens, http_client) = {
-        let s = state.read().await;
-        (s.tidal_tokens.clone(), s.http_client.clone())
-    };
-    // Fall back to persisted tokens when the in-memory slot is empty (e.g. just after startup).
-    let tidal_tokens = if tidal_tokens.is_none() {
-        load_persisted_tidal_tokens(&state).await.ok().flatten()
-    } else {
-        tidal_tokens
-    };
-
     // Update local DB immediately - Tidal sync happens in the background.
-    // When liking for the first time, bump date_added so the track sorts to top of the library.
+    // An intentional re-like moves the song to the top once; delivery retries retain that action time.
     {
         let state = state.read().await;
         state
             .db
             .with_conn(|conn| {
-                // Liking a track promotes it into the library (covers an
-                // explicit like of a previously-transient import); unliking
-                // never demotes is_library, so an intentionally-unstarred
-                // genuine track stays visible. See MIGRATION_052.
-                conn.execute(
-                    "UPDATE tracks SET is_favorite = ?1, \
-                     is_library = CASE WHEN ?1 = 1 THEN 1 ELSE is_library END, \
-                     date_added = CASE WHEN ?1 = 1 AND is_favorite = 0 THEN datetime('now') ELSE date_added END \
-                     WHERE id = ?2",
-                    rusqlite::params![if payload.favorite { 1 } else { 0 }, payload.track_id],
+                let tx = conn.unchecked_transaction()?;
+                crate::db::catalogue_favorites::request(
+                    &tx,
+                    "track",
+                    payload.track_id,
+                    payload.favorite,
                 )?;
-                if crate::db::catalogue::enabled(conn)? {
-                    conn.execute("UPDATE tracks SET library_added_at=date_added,
-                        library_date_source='user',remote_favorite_state=?2 WHERE id=?1",
-                        params![payload.track_id,if payload.favorite {"favorite"}else{"not_favorite"}])?;
-                    conn.execute("UPDATE tidal_track_aliases SET is_favorite=?2 WHERE track_id=?1",
-                        params![payload.track_id,payload.favorite as i32])?;
-                }
+                tx.commit()?;
                 Ok(())
             })
             .map_err(|error| {
@@ -3965,85 +3944,7 @@ async fn set_track_favorite(
         crate::services::scrobbling::enqueue_favorite_love(state.clone(), &track).await;
     }
 
-    // Fire Tidal sync in the background so the response returns immediately.
-    if let (Some(tidal_id), Some(tokens)) = (tidal_id, tidal_tokens) {
-        if state_changed {
-            let favorite = payload.favorite;
-            let state_for_sync = state.clone();
-            tokio::spawn(async move {
-                let result = if favorite {
-                    tidal_mutations::add_favorite_track(
-                        &http_client,
-                        &tokens.access_token,
-                        &tokens.user_id,
-                        tidal_id,
-                        &tokens.country_code,
-                    )
-                    .await
-                } else {
-                    tidal_mutations::remove_favorite_track(
-                        &http_client,
-                        &tokens.access_token,
-                        &tokens.user_id,
-                        tidal_id,
-                        &tokens.country_code,
-                    )
-                    .await
-                };
-                if let Err(error) = result {
-                    if error_looks_like_auth(&error) {
-                        // Token expired - refresh and retry once, matching the pattern
-                        // used by search/stream/playlist paths in this file.
-                        match recover_tidal_session(&state_for_sync, &http_client, &tokens).await {
-                            Ok(refreshed) => {
-                                let retry = if favorite {
-                                    tidal_mutations::add_favorite_track(
-                                        &http_client,
-                                        &refreshed.access_token,
-                                        &refreshed.user_id,
-                                        tidal_id,
-                                        &refreshed.country_code,
-                                    )
-                                    .await
-                                } else {
-                                    tidal_mutations::remove_favorite_track(
-                                        &http_client,
-                                        &refreshed.access_token,
-                                        &refreshed.user_id,
-                                        tidal_id,
-                                        &refreshed.country_code,
-                                    )
-                                    .await
-                                };
-                                if let Err(e2) = retry {
-                                    error!(
-                                        "Failed to sync {} favorite for tidal track {tidal_id} after session refresh: {e2}",
-                                        if favorite { "set" } else { "clear" },
-                                    );
-                                }
-                            }
-                            Err(re) => {
-                                error!(
-                                    "Session refresh failed while syncing {} favorite for tidal track {tidal_id}: {re}",
-                                    if favorite { "set" } else { "clear" },
-                                );
-                            }
-                        }
-                    } else {
-                        warn!(
-                            "Failed to background-sync {} favorite for tidal track {tidal_id}: {error}",
-                            if favorite { "set" } else { "clear" },
-                        );
-                    }
-                }
-            });
-        }
-    } else if tidal_id.is_some() && state_changed {
-        warn!(
-            "Track {} has tidal_id but no tokens available for sync",
-            payload.track_id
-        );
-    }
+    crate::services::tidal::favorites::run_if_idle(state.clone()).await;
 
     Ok(Json(json!({
         "track_id": payload.track_id,
@@ -4111,23 +4012,17 @@ async fn set_album_favorite(
 
     let state_changed = was_favorite != payload.favorite;
 
-    let (tidal_tokens, http_client) = {
-        let s = state.read().await;
-        (s.tidal_tokens.clone(), s.http_client.clone())
-    };
-    let tidal_tokens = if tidal_tokens.is_none() {
-        load_persisted_tidal_tokens(&state).await.ok().flatten()
-    } else {
-        tidal_tokens
-    };
-
     {
         let s = state.read().await;
         s.db.with_conn(|conn| {
-            conn.execute(
-                "UPDATE albums SET is_favorite = ?1 WHERE id = ?2",
-                rusqlite::params![if payload.favorite { 1 } else { 0 }, payload.album_id],
+            let tx = conn.unchecked_transaction()?;
+            crate::db::catalogue_favorites::request(
+                &tx,
+                "album",
+                payload.album_id,
+                payload.favorite,
             )?;
+            tx.commit()?;
             Ok(())
         })
         .map_err(|error| {
@@ -4147,82 +4042,7 @@ async fn set_album_favorite(
         let _ = s.event_tx.send(AppEvent::LibrarySynced);
     }
 
-    if let (Some(tidal_id), Some(tokens)) = (tidal_id, tidal_tokens) {
-        if state_changed {
-            let favorite = payload.favorite;
-            let state_for_sync = state.clone();
-            tokio::spawn(async move {
-                let result = if favorite {
-                    tidal_mutations::add_favorite_album(
-                        &http_client,
-                        &tokens.access_token,
-                        &tokens.user_id,
-                        tidal_id,
-                        &tokens.country_code,
-                    )
-                    .await
-                } else {
-                    tidal_mutations::remove_favorite_album(
-                        &http_client,
-                        &tokens.access_token,
-                        &tokens.user_id,
-                        tidal_id,
-                        &tokens.country_code,
-                    )
-                    .await
-                };
-                if let Err(error) = result {
-                    if error_looks_like_auth(&error) {
-                        match recover_tidal_session(&state_for_sync, &http_client, &tokens).await {
-                            Ok(refreshed) => {
-                                let retry = if favorite {
-                                    tidal_mutations::add_favorite_album(
-                                        &http_client,
-                                        &refreshed.access_token,
-                                        &refreshed.user_id,
-                                        tidal_id,
-                                        &refreshed.country_code,
-                                    )
-                                    .await
-                                } else {
-                                    tidal_mutations::remove_favorite_album(
-                                        &http_client,
-                                        &refreshed.access_token,
-                                        &refreshed.user_id,
-                                        tidal_id,
-                                        &refreshed.country_code,
-                                    )
-                                    .await
-                                };
-                                if let Err(e2) = retry {
-                                    error!(
-                                        "Failed to sync {} favorite for tidal album {tidal_id} after session refresh: {e2}",
-                                        if favorite { "set" } else { "clear" },
-                                    );
-                                }
-                            }
-                            Err(re) => {
-                                error!(
-                                    "Session refresh failed while syncing {} favorite for tidal album {tidal_id}: {re}",
-                                    if favorite { "set" } else { "clear" },
-                                );
-                            }
-                        }
-                    } else {
-                        warn!(
-                            "Failed to background-sync {} favorite for tidal album {tidal_id}: {error}",
-                            if favorite { "set" } else { "clear" },
-                        );
-                    }
-                }
-            });
-        }
-    } else if tidal_id.is_some() && state_changed {
-        warn!(
-            "Album {} has tidal_id but no tokens available for sync",
-            payload.album_id
-        );
-    }
+    crate::services::tidal::favorites::run_if_idle(state.clone()).await;
 
     Ok(Json(json!({
         "album_id": payload.album_id,
@@ -9655,7 +9475,7 @@ async fn tidal_artist_core(
     Ok(Json(payload))
 }
 
-pub(super) async fn recover_tidal_session(
+pub(crate) async fn recover_tidal_session(
     state: &SharedState,
     http: &reqwest::Client,
     tokens: &tidal_auth::TidalTokens,
@@ -11535,6 +11355,8 @@ async fn reresolve_tidal_id(state: &SharedState, track_id: i64) -> anyhow::Resul
             artist_name: &full.artist.name,
             isrc: full.isrc.as_deref(),
             duration_ms: full.duration * 1000,
+            version: full.extra.get("version").and_then(|v| v.as_str()),
+            explicit: full.extra.get("explicit").and_then(|v| v.as_bool()),
         };
         let candidates = crate::library::duplicates::fetch_import_candidates(
             conn,
@@ -12363,6 +12185,8 @@ pub(super) fn insert_tidal_track(
                 artist_name: &track.artist.name,
                 isrc: track.isrc.as_deref(),
                 duration_ms: track.duration * 1000,
+                version: track.extra.get("version").and_then(|v| v.as_str()),
+                explicit: track.extra.get("explicit").and_then(|v| v.as_bool()),
             };
             let candidates = crate::library::duplicates::fetch_import_candidates(
                 conn,
@@ -12381,11 +12205,6 @@ pub(super) fn insert_tidal_track(
         if let Some(id) = matched {
             crate::db::catalogue::record_track(conn, id, track, is_favorite, favorite_created)?;
             crate::db::catalogue::curate(conn, id, is_favorite, is_library, favorite_created)?;
-            conn.execute(
-                "UPDATE tracks SET title=?2,best_quality=COALESCE(?3,best_quality)
-                WHERE id=?1 AND tidal_id=?4",
-                params![id, track.title, track.audio_quality, track.id],
-            )?;
             queries::replace_track_source_genres(
                 conn,
                 id,
@@ -12479,11 +12298,28 @@ pub(super) fn insert_tidal_track(
     Ok(local_track_id)
 }
 
+#[cfg(test)]
 pub(super) fn apply_tidal_favorite_flags(
     conn: &rusqlite::Connection,
     table: &str,
     favorite_ids: &HashSet<i64>,
     prev_count: i64,
+) -> anyhow::Result<()> {
+    apply_tidal_favorite_flags_at(
+        conn,
+        table,
+        favorite_ids,
+        prev_count,
+        &crate::db::catalogue_favorites::now(),
+    )
+}
+
+pub(super) fn apply_tidal_favorite_flags_at(
+    conn: &rusqlite::Connection,
+    table: &str,
+    favorite_ids: &HashSet<i64>,
+    prev_count: i64,
+    snapshot_started: &str,
 ) -> anyhow::Result<()> {
     // Refuse to wipe favorites if this run somehow returned zero items but the
     // previous run had a real population, almost always a transient TIDAL API
@@ -12498,7 +12334,12 @@ pub(super) fn apply_tidal_favorite_flags(
 
     if crate::db::catalogue::enabled(conn)? {
         let tx = conn.unchecked_transaction()?;
-        crate::db::catalogue::reconcile_favorites(&tx, favorite_ids, table == "albums")?;
+        crate::db::catalogue::reconcile_favorites_at(
+            &tx,
+            favorite_ids,
+            table == "albums",
+            snapshot_started,
+        )?;
         tx.commit()?;
         return Ok(());
     }

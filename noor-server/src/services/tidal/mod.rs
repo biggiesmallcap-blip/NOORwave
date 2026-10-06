@@ -4,6 +4,7 @@ pub mod backoff;
 pub mod cache;
 pub mod catalogue;
 pub mod client;
+pub mod favorites;
 pub mod import;
 pub mod mutations;
 pub mod play_reporter;

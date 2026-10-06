@@ -55,6 +55,8 @@ const ALT_VERSION_TOKENS: &[&str] = &[
     "demo",
     "vip",
     "rework",
+    "clean",
+    "explicit",
 ];
 
 /// Phrase-level alt-version markers detected via substring (post-normalize).
@@ -274,7 +276,7 @@ fn is_ignorable_title_segment(segment: &str) -> bool {
     let normalized = normalize(segment);
     matches!(
         normalized.as_str(),
-        "feat" | "ft" | "featuring" | "original" | "explicit" | "clean"
+        "feat" | "ft" | "featuring" | "original"
     ) || normalized.starts_with("feat ")
         || normalized.starts_with("ft ")
         || normalized.starts_with("featuring ")
@@ -416,6 +418,8 @@ pub struct IncomingTrack<'a> {
     pub artist_name: &'a str,
     pub isrc: Option<&'a str>,
     pub duration_ms: i64,
+    pub version: Option<&'a str>,
+    pub explicit: Option<bool>,
 }
 
 /// An existing tracks row that could be the same recording as an incoming one.
@@ -426,6 +430,32 @@ pub struct ExistingCandidate {
     pub artist_name: String,
     pub isrc: Option<String>,
     pub duration_ms: i64,
+    pub version: Option<String>,
+    pub explicit: Option<bool>,
+}
+
+/// Full meaningful descriptors retain years, venues, and mix names. Coarse
+/// keywords may group candidates, but cannot establish interchangeable audio.
+pub fn versions_compatible(
+    left: &str,
+    left_version: Option<&str>,
+    left_explicit: Option<bool>,
+    right: &str,
+    right_version: Option<&str>,
+    right_explicit: Option<bool>,
+) -> bool {
+    let descriptor = |title: &str| {
+        let (alt, master) = extract_variant_markers(title);
+        if alt.is_empty() && master.is_empty() {
+            String::new()
+        } else {
+            canonicalize_title(title)
+        }
+    };
+    descriptor(left) == descriptor(right)
+        && left_version.map(normalize).filter(|s| !s.is_empty())
+            == right_version.map(normalize).filter(|s| !s.is_empty())
+        && left_explicit == right_explicit
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -516,6 +546,14 @@ pub fn decide_import(incoming: &IncomingTrack, candidates: &[ExistingCandidate])
             && alt_fingerprint(&cand_row) == inc_alt
             && cand_row.master_markers == inc_row.master_markers
             && rows_match(&inc_row, &cand_row, true)
+            && versions_compatible(
+                incoming.title,
+                incoming.version,
+                incoming.explicit,
+                &cand.title,
+                cand.version.as_deref(),
+                cand.explicit,
+            )
         {
             return ImportDecision::LinkAlias {
                 existing_track_id: cand.track_id,
@@ -530,7 +568,7 @@ pub fn decide_import(incoming: &IncomingTrack, candidates: &[ExistingCandidate])
 }
 
 const IMPORT_CANDIDATE_SELECT: &str =
-    "SELECT t.id, t.tidal_id, t.title, COALESCE(a.name, ''), t.isrc, COALESCE(t.duration_ms, 0)
+    "SELECT t.id, t.tidal_id, t.title, COALESCE(a.name, ''), t.isrc, COALESCE(t.duration_ms, 0), NULL AS catalogue_version, NULL AS catalogue_explicit
      FROM tracks t
      LEFT JOIN artists a ON t.artist_id = a.id";
 
@@ -550,6 +588,8 @@ fn collect_import_candidates(
             artist_name: row.get(3)?,
             isrc: row.get(4)?,
             duration_ms: row.get(5)?,
+            version: row.get(6)?,
+            explicit: row.get(7)?,
         })
     })?;
     for row in rows {
@@ -573,11 +613,19 @@ pub fn fetch_import_candidates(
     duration_ms: i64,
 ) -> Result<Vec<ExistingCandidate>> {
     let mut out: Vec<ExistingCandidate> = Vec::new();
+    let select = if crate::db::catalogue_favorites::enabled(conn)? {
+        IMPORT_CANDIDATE_SELECT.replace(
+            "NULL AS catalogue_version, NULL AS catalogue_explicit",
+            "t.catalogue_version,t.catalogue_explicit",
+        )
+    } else {
+        IMPORT_CANDIDATE_SELECT.to_owned()
+    };
     let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
     if let Some(id) = crate::db::catalogue::track_id(conn, tidal_id)? {
         collect_import_candidates(
             conn,
-            &format!("{IMPORT_CANDIDATE_SELECT} WHERE t.id = ?1"),
+            &format!("{select} WHERE t.id = ?1"),
             &[&id],
             &mut seen,
             &mut out,
@@ -586,7 +634,7 @@ pub fn fetch_import_candidates(
 
     collect_import_candidates(
         conn,
-        &format!("{IMPORT_CANDIDATE_SELECT} WHERE t.tidal_id = ?1"),
+        &format!("{select} WHERE t.tidal_id = ?1"),
         &[&tidal_id],
         &mut seen,
         &mut out,
@@ -595,7 +643,7 @@ pub fn fetch_import_candidates(
     if let Some(isrc) = isrc.map(str::trim).filter(|s| !s.is_empty()) {
         collect_import_candidates(
             conn,
-            &format!("{IMPORT_CANDIDATE_SELECT} WHERE t.isrc = ?1 AND t.isrc != ''"),
+            &format!("{select} WHERE upper(trim(t.isrc)) = upper(trim(?1)) AND t.isrc != ''"),
             &[&isrc],
             &mut seen,
             &mut out,
@@ -605,7 +653,7 @@ pub fn fetch_import_candidates(
     collect_import_candidates(
         conn,
         &format!(
-            "{IMPORT_CANDIDATE_SELECT}
+            "{select}
              WHERE t.artist_id = (SELECT id FROM artists WHERE tidal_id = ?1)
                AND ABS(COALESCE(t.duration_ms, 0) - ?2) <= 15000"
         ),
@@ -1201,6 +1249,39 @@ fn load_members_with_classify_rows(
     Ok((members, match_rows))
 }
 
+fn verified_recording_pair(conn: &Connection, left: &MatchRow, right: &MatchRow) -> Result<bool> {
+    if left.id == right.id {
+        return Ok(true);
+    }
+    let metadata = |id| -> Result<(Option<String>, Option<bool>)> {
+        if crate::db::catalogue_favorites::enabled(conn)? {
+            Ok(conn.query_row(
+                "SELECT catalogue_version,catalogue_explicit FROM tracks WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        } else {
+            Ok((None, None))
+        }
+    };
+    let (lv, le) = metadata(left.id)?;
+    let (rv, re) = metadata(right.id)?;
+    Ok(left.isrc.as_deref().and_then(normalize_isrc).is_some()
+        && left.isrc.as_deref().and_then(normalize_isrc)
+            == right.isrc.as_deref().and_then(normalize_isrc)
+        && alt_fingerprint(left) == alt_fingerprint(right)
+        && left.master_markers == right.master_markers
+        && rows_match(left, right, true)
+        && versions_compatible(
+            &left.norm_title,
+            lv.as_deref(),
+            le,
+            &right.norm_title,
+            rv.as_deref(),
+            re,
+        ))
+}
+
 // ── Resolve ───────────────────────────────────────────────────────────────────
 
 pub struct ResolveResult {
@@ -1218,18 +1299,12 @@ pub fn resolve_group(
 ) -> Result<ResolveResult> {
     if crate::db::catalogue::enabled(conn)? {
         let (_, rows) = load_members_with_classify_rows(conn, group_id)?;
-        let verified = rows.iter().any(|r| r.id == preferred_track_id)
-            && rows.iter().all(|left| {
-                rows.iter().all(|right| {
-                    left.id == right.id
-                        || (left.isrc.as_deref().and_then(normalize_isrc).is_some()
-                            && left.isrc.as_deref().and_then(normalize_isrc)
-                                == right.isrc.as_deref().and_then(normalize_isrc)
-                            && alt_fingerprint(left) == alt_fingerprint(right)
-                            && left.master_markers == right.master_markers
-                            && rows_match(left, right, true))
-                })
-            });
+        let mut verified = rows.iter().any(|r| r.id == preferred_track_id);
+        for left in &rows {
+            for right in &rows {
+                verified &= verified_recording_pair(conn, left, right)?;
+            }
+        }
         if verified {
             let outcome = merge_group(conn, group_id, preferred_track_id)?;
             return Ok(ResolveResult {
@@ -1392,6 +1467,12 @@ pub fn merge_group(
             "UPDATE tracks SET date_added=COALESCE(library_added_at,date_added) WHERE id=?1",
             [preferred_track_id],
         )?;
+        if let Some(desired) = crate::db::catalogue_favorites::desired(&tx, preferred_track_id)? {
+            tx.execute(
+                "UPDATE tracks SET is_favorite=?2 WHERE id=?1",
+                params![preferred_track_id, desired as i32],
+            )?;
+        }
     }
     // Zero the folded counters on the losers so an interrupted merge that
     // re-runs after the next scan cannot double-count plays.
@@ -1572,8 +1653,8 @@ pub struct AutoMergeStats {
     pub removed_tracks: usize,
     /// Groups left for the Duplicates UI (alt_version, local files).
     pub skipped_groups: usize,
-    /// (kept tidal_id, favorited loser tidal_ids) pairs the caller must
-    /// reconcile on TIDAL.
+    /// Historical transfer summary. Automatic consolidation is local and
+    /// never authorizes provider writes.
     #[serde(skip)]
     pub favorite_transfers: Vec<(i64, Vec<i64>)>,
     pub queue_changed: bool,
@@ -1606,17 +1687,12 @@ pub fn auto_merge_pending(conn: &Connection) -> Result<AutoMergeStats> {
             relationship.as_str(),
             "exact_duplicate" | "quality_variant" | "cross_album_reissue" | "remaster"
         );
-        let verified = classify_rows.iter().all(|left| {
-            classify_rows.iter().all(|right| {
-                left.id == right.id
-                    || (left.isrc.as_deref().and_then(normalize_isrc).is_some()
-                        && left.isrc.as_deref().and_then(normalize_isrc)
-                            == right.isrc.as_deref().and_then(normalize_isrc)
-                        && alt_fingerprint(left) == alt_fingerprint(right)
-                        && left.master_markers == right.master_markers
-                        && rows_match(left, right, true))
-            })
-        });
+        let mut verified = true;
+        for left in &classify_rows {
+            for right in &classify_rows {
+                verified &= verified_recording_pair(conn, left, right)?;
+            }
+        }
         if !same_recording || touches_local_file || !verified {
             stats.skipped_groups += 1;
             continue;
@@ -2249,6 +2325,8 @@ mod tests {
             artist_name: "Test Artist",
             isrc,
             duration_ms,
+            version: None,
+            explicit: None,
         }
     }
 
@@ -2266,6 +2344,8 @@ mod tests {
             artist_name: "Test Artist".to_string(),
             isrc: isrc.map(str::to_string),
             duration_ms,
+            version: None,
+            explicit: None,
         }
     }
 

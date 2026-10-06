@@ -1,0 +1,135 @@
+[
+  {
+    "before": {
+      "title": "Song",
+      "artist": "Artist",
+      "isrc": "ISRC1",
+      "duration_ms": 180000,
+      "catalogue_version": null,
+      "catalogue_explicit": null
+    },
+    "after": {
+      "title": "Song",
+      "artist": "Artist",
+      "isrc": "ISRC1",
+      "duration_ms": 180000,
+      "catalogue_version": null,
+      "catalogue_explicit": null
+    },
+    "equivalent": true
+  },
+  {
+    "before": {
+      "title": "Song (2011 Remaster)",
+      "artist": "Artist",
+      "isrc": "ISRC1",
+      "duration_ms": 180000,
+      "catalogue_version": null,
+      "catalogue_explicit": null
+    },
+    "after": {
+      "title": "Song (2024 Remaster)",
+      "artist": "Artist",
+      "isrc": "ISRC1",
+      "duration_ms": 180000,
+      "catalogue_version": null,
+      "catalogue_explicit": null
+    },
+    "equivalent": false
+  },
+  {
+    "before": {
+      "title": "Song (Live in Paris)",
+      "artist": "Artist",
+      "isrc": "ISRC1",
+      "duration_ms": 180000,
+      "catalogue_version": null,
+      "catalogue_explicit": null
+    },
+    "after": {
+      "title": "Song (Live in London)",
+      "artist": "Artist",
+      "isrc": "ISRC1",
+      "duration_ms": 180000,
+      "catalogue_version": null,
+      "catalogue_explicit": null
+    },
+    "equivalent": false
+  },
+  {
+    "before": {
+      "title": "Song (Clean)",
+      "artist": "Artist",
+      "isrc": "ISRC1",
+      "duration_ms": 180000,
+      "catalogue_version": null,
+      "catalogue_explicit": null
+    },
+    "after": {
+      "title": "Song (Explicit)",
+      "artist": "Artist",
+      "isrc": "ISRC1",
+      "duration_ms": 180000,
+      "catalogue_version": null,
+      "catalogue_explicit": null
+    },
+    "equivalent": false
+  },
+  {
+    "before": {
+      "title": "Song",
+      "artist": "Artist",
+      "isrc": "ISRC1",
+      "duration_ms": 180000,
+      "catalogue_version": "2011 Remaster",
+      "catalogue_explicit": null
+    },
+    "after": {
+      "title": "Song",
+      "artist": "Artist",
+      "isrc": "ISRC1",
+      "duration_ms": 180000,
+      "catalogue_version": "2024 Remaster",
+      "catalogue_explicit": null
+    },
+    "equivalent": false
+  },
+  {
+    "before": {
+      "title": "Song",
+      "artist": "Artist",
+      "isrc": "ISRC1",
+      "duration_ms": 180000,
+      "catalogue_version": null,
+      "catalogue_explicit": true
+    },
+    "after": {
+      "title": "Song",
+      "artist": "Artist",
+      "isrc": "ISRC1",
+      "duration_ms": 180000,
+      "catalogue_version": null,
+      "catalogue_explicit": false
+    },
+    "equivalent": false
+  },
+  {
+    "before": {
+      "title": "Song",
+      "artist": "Artist",
+      "isrc": "ISRC1",
+      "duration_ms": 180000,
+      "catalogue_version": null,
+      "catalogue_explicit": null
+    },
+    "after": {
+      "title": "Song",
+      "artist": "Artist",
+      "isrc": "ISRC1",
+      "duration_ms": 180000,
+      "catalogue_version": null,
+      "catalogue_explicit": false
+    },
+    "equivalent": false
+  }
+]

@@ -34,7 +34,7 @@
 		lastSelectedTrackId, lastSelectedAlbumId,
 		selectTrackIds, selectAlbumIds, clearSelection,
 	} from '$lib/stores/library';
-	import { formatTrackDuration, formatDateShort, getQualityClass } from '$lib/utils/format';
+	import { formatTrackDuration, formatDateShort, savedDateMillis, getQualityClass } from '$lib/utils/format';
 	import { api, type Album, type Artist, type AudioSearchResult, type Genre, type Playlist, type Track } from '$lib/api/client';
 	import { cachedApi, invalidateLibraryCaches } from '$lib/cache/api_queries';
 	import { invalidatePlaylistCaches } from '$lib/cache/ws_events';
@@ -1138,7 +1138,7 @@
 				case 'artist':   av = a.artist_name?.toLowerCase(); bv = b.artist_name?.toLowerCase(); break;
 				case 'album':    av = a.album_title?.toLowerCase(); bv = b.album_title?.toLowerCase(); break;
 				case 'play_count':     av = a.play_count;          bv = b.play_count;                 break;
-				case 'date_added':     av = a.date_added;          bv = b.date_added;                 break;
+				case 'date_added':     av = savedDateMillis(a.date_added); bv = savedDateMillis(b.date_added);                 break;
 				case 'last_played_at': av = a.last_played_at;      bv = b.last_played_at;             break;
 				case 'bpm':            av = a.bpm;                 bv = b.bpm;                        break;
 				case 'energy':         av = a.energy;              bv = b.energy;                     break;
@@ -1363,7 +1363,7 @@
 		for (const track of $tracks) {
 			if (!track.album_id || !track.date_added) continue;
 			const existing = albumDateMap.get(track.album_id);
-			if (!existing || track.date_added > existing.date) {
+			if (!existing || (savedDateMillis(track.date_added) ?? -Infinity) > (savedDateMillis(existing.date) ?? -Infinity)) {
 				albumDateMap.set(track.album_id, {
 					card: {
 						id: track.album_id,
@@ -1378,7 +1378,7 @@
 		}
 
 		return [...albumDateMap.values()]
-			.sort((a, b) => b.date.localeCompare(a.date))
+			.sort((a, b) => (savedDateMillis(b.date) ?? -Infinity) - (savedDateMillis(a.date) ?? -Infinity))
 			.slice(0, 20)
 			.map(({ card }) => card);
 	});
@@ -3593,7 +3593,7 @@
 	}
 
 	.catalogue-status {
-		font-size: 0.7rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-secondary);
 		white-space: nowrap;
 	}

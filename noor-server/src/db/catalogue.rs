@@ -54,7 +54,7 @@ pub fn timestamp(raw: &str) -> Option<DateTime<Utc>> {
         .map(|t| t.with_timezone(&Utc))
         .ok()
         .or_else(|| {
-            NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
+            NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f")
                 .ok()
                 .map(|t| t.and_utc())
         })
@@ -76,6 +76,44 @@ pub fn earliest(left: Option<&str>, right: Option<&str>) -> Option<String> {
     .map(str::to_owned)
 }
 
+pub fn canonical_date(raw: &str) -> Option<String> {
+    timestamp(raw).map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
+}
+
+pub fn normalize_saved_dates(conn: &Connection) -> Result<()> {
+    let rows = {
+        let mut stmt = conn.prepare(
+            "SELECT id,date_added,library_added_at FROM tracks WHERE is_library=1 OR is_favorite=1",
+        )?;
+        stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (id, visible, saved) in rows {
+        let Some(date) = saved
+            .as_deref()
+            .or(visible.as_deref())
+            .and_then(canonical_date)
+        else {
+            continue;
+        };
+        if visible.as_deref() == Some(&date) && saved.as_deref() == Some(&date) {
+            continue;
+        }
+        conn.execute("INSERT INTO catalogue_merge_audit(entity,kept_id,removed_id,snapshot_json) VALUES('date_format',?1,?1,json_object('date_added',?2,'library_added_at',?3))",params![id,visible,saved])?;
+        conn.execute(
+            "UPDATE tracks SET date_added=?2,library_added_at=?2 WHERE id=?1",
+            params![id, date],
+        )?;
+    }
+    Ok(())
+}
+
 /// A discovery import date is not the date the user first saved a recording.
 pub fn curate(
     conn: &Connection,
@@ -93,7 +131,8 @@ pub fn curate(
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     let valid_created = created.filter(|v| timestamp(v).is_some());
-    // Explicit re-adds and repaired dates are protected from provider timestamps.
+    // The effective library date can be an intentional re-like or accepted
+    // recovery. Neither is replaced by an automatic provider observation.
     let protected = matches!(source.as_deref(), Some("user" | "recovered"));
     let date = if protected {
         old.clone()
@@ -101,6 +140,8 @@ pub fn curate(
         earliest(old.as_deref(), valid_created)
     }
     .unwrap_or_else(|| Utc::now().format("%Y-%m-%d %H:%M:%S").to_string());
+    let date = canonical_date(&date).unwrap_or(date);
+    let favorite = crate::db::catalogue_favorites::desired(conn, id)?.unwrap_or(favorite);
     conn.execute("UPDATE tracks SET date_added=?2,library_added_at=?2,
         library_date_source=COALESCE(library_date_source,?3),
         is_library=MAX(is_library,?4),is_favorite=MAX(is_favorite,?5),
@@ -161,37 +202,10 @@ pub fn record_track(
         conn.query_row("SELECT tidal_id FROM tracks WHERE id=?1", [local_id], |r| {
             r.get(0)
         })?;
-    if selected != Some(track.id) {
-        let incoming = crate::library::duplicates::IncomingTrack {
-            tidal_id: track.id,
-            title: &track.title,
-            artist_name: &track.artist.name,
-            isrc: track.isrc.as_deref(),
-            duration_ms: track.duration * 1000,
-        };
-        let candidate = conn.query_row(
-            "SELECT t.tidal_id,t.title,a.name,t.isrc,COALESCE(t.duration_ms,0)
-            FROM tracks t JOIN artists a ON a.id=t.artist_id WHERE t.id=?1",
-            [local_id],
-            |r| {
-                Ok(crate::library::duplicates::ExistingCandidate {
-                    track_id: local_id,
-                    tidal_id: r.get(0)?,
-                    title: r.get(1)?,
-                    artist_name: r.get(2)?,
-                    isrc: r.get(3)?,
-                    duration_ms: r.get(4)?,
-                })
-            },
-        )?;
-        if !matches!(
-            crate::library::duplicates::decide_import(&incoming, &[candidate]),
-            crate::library::duplicates::ImportDecision::LinkAlias { .. }
-        ) {
-            conn.execute("UPDATE tidal_track_aliases SET availability='error',evidence='identity_conflict',checked_at=datetime('now') WHERE tidal_id=?1",[track.id])?;
-            tracing::warn!(target:"noor.catalogue",local_id,tidal_id=track.id,"catalogue alias identity needs review");
-            return Ok(());
-        }
+    if !identity_matches(conn, local_id, track, selected == Some(track.id))? {
+        conn.execute("UPDATE tidal_track_aliases SET availability='error',evidence='identity_conflict',checked_at=datetime('now') WHERE tidal_id=?1",[track.id])?;
+        tracing::warn!(target:"noor.catalogue",local_id,tidal_id=track.id,"catalogue identity needs review");
+        return Ok(());
     }
     conn.execute("INSERT INTO tidal_track_aliases(tidal_id,track_id,metadata_json,availability,checked_at,evidence,favorite_created,is_favorite)
         VALUES(?1,?2,?3,?4,datetime('now'),'metadata',?5,?6)
@@ -235,6 +249,10 @@ pub fn record_track(
             track.id
         ],
     )?;
+    if selected == Some(track.id) && crate::db::catalogue_favorites::enabled(conn)? {
+        conn.execute("UPDATE tracks SET catalogue_version=COALESCE(?2,catalogue_version),catalogue_explicit=COALESCE(?3,catalogue_explicit) WHERE id=?1",
+            params![local_id,track.extra.get("version").and_then(|v|v.as_str()),track.extra.get("explicit").and_then(|v|v.as_bool())])?;
+    }
     choose_available(conn, local_id)?;
     Ok(())
 }
@@ -260,6 +278,9 @@ pub fn choose_available(conn: &Connection, local_id: i64) -> Result<bool> {
         return Ok(false);
     };
     let track: TidalTrack = serde_json::from_str(&json)?;
+    if !identity_matches(conn, local_id, &track, false)? {
+        return Ok(false);
+    }
     let old_id: i64 =
         conn.query_row("SELECT tidal_id FROM tracks WHERE id=?1", [local_id], |r| {
             r.get(0)
@@ -300,12 +321,90 @@ pub fn choose_available(conn: &Connection, local_id: i64) -> Result<bool> {
             fidelity
         ],
     )?;
+    if crate::db::catalogue_favorites::enabled(conn)? {
+        conn.execute(
+            "UPDATE tracks SET catalogue_version=?2,catalogue_explicit=?3 WHERE id=?1",
+            params![
+                local_id,
+                track.extra.get("version").and_then(|v| v.as_str()),
+                track.extra.get("explicit").and_then(|v| v.as_bool())
+            ],
+        )?;
+    }
     conn.execute(
         "UPDATE queue SET tidal_id_hint=?2 WHERE track_id=?1 AND tidal_id_hint=?3",
         params![local_id, new_id, old_id],
     )?;
     tracing::info!(target:"noor.catalogue",local_id,old_id,new_id,"selected available catalogue replacement");
     Ok(true)
+}
+
+fn identity_matches(
+    conn: &Connection,
+    id: i64,
+    track: &TidalTrack,
+    adopt_unknown: bool,
+) -> Result<bool> {
+    use crate::library::duplicates::{
+        ExistingCandidate, ImportDecision, IncomingTrack, decide_import,
+    };
+    let mut candidate=conn.query_row("SELECT t.tidal_id,t.title,a.name,t.isrc,COALESCE(t.duration_ms,0) FROM tracks t JOIN artists a ON a.id=t.artist_id WHERE t.id=?1",[id],|r|Ok(ExistingCandidate{track_id:id,tidal_id:r.get(0)?,title:r.get(1)?,artist_name:r.get(2)?,isrc:r.get(3)?,duration_ms:r.get(4)?,version:None,explicit:None}))?;
+    if crate::db::catalogue_favorites::enabled(conn)? {
+        (candidate.version, candidate.explicit) = conn.query_row(
+            "SELECT catalogue_version,catalogue_explicit FROM tracks WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+    }
+    let version = track.extra.get("version").and_then(|v| v.as_str());
+    let explicit = track.extra.get("explicit").and_then(|v| v.as_bool());
+    if adopt_unknown {
+        if candidate.isrc.is_none() {
+            candidate.isrc = track.isrc.clone();
+        }
+        if candidate.version.is_none() {
+            candidate.version = version.map(str::to_owned);
+        }
+        if candidate.explicit.is_none() {
+            candidate.explicit = explicit;
+        }
+        if candidate.duration_ms == 0 {
+            candidate.duration_ms = track.duration * 1000;
+        }
+    }
+    // Avoid the import shortcut for an existing primary ID: refreshed metadata
+    // must still agree with the independent recording identity we already saved.
+    let mut incoming_isrc = track.isrc.clone();
+    if adopt_unknown && incoming_isrc.is_none() {
+        incoming_isrc = candidate.isrc.clone();
+    }
+    if adopt_unknown && incoming_isrc.is_none() {
+        candidate.isrc = Some("__same_provider_id__".into());
+        incoming_isrc = candidate.isrc.clone();
+    }
+    let effective_version = if adopt_unknown && !track.extra.contains_key("version") {
+        candidate.version.clone()
+    } else {
+        version.map(str::to_owned)
+    };
+    let effective_explicit = if adopt_unknown && !track.extra.contains_key("explicit") {
+        candidate.explicit
+    } else {
+        explicit
+    };
+    let incoming = IncomingTrack {
+        tidal_id: 0,
+        title: &track.title,
+        artist_name: &track.artist.name,
+        isrc: incoming_isrc.as_deref(),
+        duration_ms: track.duration * 1000,
+        version: effective_version.as_deref(),
+        explicit: effective_explicit,
+    };
+    Ok(matches!(
+        decide_import(&incoming, &[candidate]),
+        ImportDecision::LinkAlias { .. }
+    ))
 }
 
 pub fn observe(
@@ -332,7 +431,8 @@ pub fn retain_merge(conn: &Connection, kept: i64, removed: i64) -> Result<()> {
         "INSERT INTO catalogue_merge_audit(entity,kept_id,removed_id,snapshot_json)
         SELECT 'track',?1,id,json_object('tidal_id',tidal_id,'date_added',date_added,
         'library_added_at',library_added_at,'is_favorite',is_favorite,'is_library',is_library,
-        'title',title,'isrc',isrc,'album_id',album_id) FROM tracks WHERE id=?2",
+        'library_date_source',library_date_source,'title',title,'isrc',isrc,'album_id',album_id,
+        'kept_before',(SELECT json_object('date_added',date_added,'library_added_at',library_added_at,'library_date_source',library_date_source) FROM tracks WHERE id=?1)) FROM tracks WHERE id=?2",
         params![kept, removed],
     )?;
     conn.execute(
@@ -347,14 +447,55 @@ pub fn retain_merge(conn: &Connection, kept: i64, removed: i64) -> Result<()> {
     let (a,b,sa,sb):(Option<String>,Option<String>,Option<String>,Option<String>)=conn.query_row(
         "SELECT k.library_added_at,r.library_added_at,k.library_date_source,r.library_date_source FROM tracks k JOIN tracks r ON r.id=?2 WHERE k.id=?1",
         params![kept,removed],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
-    if let Some(date) = earliest(a.as_deref(), b.as_deref()) {
+    let choices: Option<(Option<String>, Option<String>)> =
+        if crate::db::catalogue_favorites::enabled(conn)? {
+            Some(conn.query_row("SELECT k.date_choice_at,r.date_choice_at FROM tracks k JOIN tracks r ON r.id=?2 WHERE k.id=?1",params![kept,removed],|r|Ok((r.get(0)?,r.get(1)?)))?)
+        } else {
+            None
+        };
+    let protected_a = matches!(sa.as_deref(), Some("user" | "recovered"));
+    let protected_b = matches!(sb.as_deref(), Some("user" | "recovered"));
+    let choose_b = match choices.as_ref() {
+        Some((ca, cb)) => match (
+            ca.as_deref().and_then(timestamp),
+            cb.as_deref().and_then(timestamp),
+        ) {
+            (Some(x), Some(y)) => Some(y > x),
+            (None, Some(_)) => Some(true),
+            (Some(_), None) => Some(false),
+            _ => None,
+        },
+        None => None,
+    }
+    .or_else(|| {
+        if protected_a {
+            Some(false)
+        } else if protected_b {
+            Some(true)
+        } else {
+            None
+        }
+    });
+    let chosen = match choose_b {
+        Some(true) => b.clone(),
+        Some(false) => a.clone(),
+        None => earliest(a.as_deref(), b.as_deref()),
+    };
+    if let Some(date) = chosen {
         let source = if a.as_deref() == Some(date.as_str()) {
             sa
         } else {
             sb
         };
-        conn.execute("UPDATE tracks SET library_added_at=?2,date_added=?2,library_date_source=COALESCE(?3,'merged') WHERE id=?1",params![kept,date,source])?;
+        conn.execute("UPDATE tracks SET library_added_at=?2,date_added=?2,library_date_source=COALESCE(?3,'merged') WHERE id=?1",params![kept,canonical_date(&date).unwrap_or(date),source])?;
+        if let Some((ca, cb)) = choices {
+            conn.execute(
+                "UPDATE tracks SET date_choice_at=?2 WHERE id=?1",
+                params![kept, if choose_b == Some(true) { cb } else { ca }],
+            )?;
+        }
     }
+    crate::db::catalogue_favorites::retain_merge(conn, "track", kept, removed)?;
     Ok(())
 }
 
@@ -385,11 +526,32 @@ mod tests {
 }
 
 /// A complete favorites snapshot updates alias state, not just the selected ID.
-pub fn reconcile_favorites(
+pub fn reconcile_favorites_at(
     conn: &Connection,
     ids: &std::collections::HashSet<i64>,
     albums: bool,
+    started: &str,
 ) -> Result<()> {
+    let entity = if albums { "album" } else { "track" };
+    let has_intents = crate::db::catalogue_favorites::enabled(conn)?;
+    if has_intents {
+        let previous: Option<String> = conn
+            .query_row(
+                "SELECT started_at FROM tidal_favorite_snapshots WHERE entity=?1",
+                [entity],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if previous
+            .as_deref()
+            .and_then(timestamp)
+            .zip(timestamp(started))
+            .is_some_and(|(previous, current)| previous > current)
+        {
+            // A late response must not erase newer per-alias observations.
+            return Ok(());
+        }
+    }
     let (table, aliases, fk) = if albums {
         ("albums", "tidal_album_aliases", "album_id")
     } else {
@@ -417,6 +579,14 @@ pub fn reconcile_favorites(
             WHEN remote_favorite_state='not_favorite' THEN 0 ELSE is_favorite END
             WHERE source='tidal' AND tidal_id IS NOT NULL",
             [],
+        )?;
+    }
+    if has_intents {
+        conn.execute("INSERT INTO tidal_favorite_snapshots(entity,started_at) VALUES(?1,?2) ON CONFLICT(entity) DO UPDATE SET started_at=excluded.started_at",params![entity,started])?;
+        crate::db::catalogue_favorites::protect_snapshot(
+            conn,
+            if albums { "album" } else { "track" },
+            started,
         )?;
     }
     Ok(())
@@ -458,6 +628,11 @@ pub fn reconcile_album(conn: &Connection, tidal_id: i64, tracks: &[TidalTrack]) 
                     t.title.trim().to_lowercase(),
                     t.duration,
                     t.artist.id,
+                    t.extra
+                        .get("version")
+                        .and_then(|v| v.as_str())
+                        .map(|v| v.trim().to_lowercase()),
+                    t.extra.get("explicit").and_then(|v| v.as_bool()),
                 )
             })
             .collect::<Vec<_>>(),
@@ -483,7 +658,7 @@ pub fn reconcile_album(conn: &Connection, tidal_id: i64, tracks: &[TidalTrack]) 
         .collect::<Result<Vec<_>, _>>()?
     };
     for (id, provider, count) in candidates {
-        let mut stmt=conn.prepare("SELECT COALESCE(t.disc_number,1),t.track_number,t.isrc,lower(trim(t.title)),t.duration_ms/1000,a.tidal_id
+        let mut stmt=conn.prepare("SELECT COALESCE(t.disc_number,1),t.track_number,t.isrc,lower(trim(t.title)),t.duration_ms/1000,a.tidal_id,t.catalogue_version,t.catalogue_explicit
             FROM tracks t JOIN artists a ON a.id=t.artist_id WHERE t.album_id=?1
             ORDER BY COALESCE(t.disc_number,1),t.track_number")?;
         let stored = stmt
@@ -496,6 +671,9 @@ pub fn reconcile_album(conn: &Connection, tidal_id: i64, tracks: &[TidalTrack]) 
                     r.get::<_, String>(3)?,
                     r.get::<_, Option<i64>>(4)?,
                     r.get::<_, Option<i64>>(5)?,
+                    r.get::<_, Option<String>>(6)?
+                        .map(|v| v.trim().to_lowercase()),
+                    r.get::<_, Option<bool>>(7)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -520,6 +698,8 @@ pub fn reconcile_album(conn: &Connection, tidal_id: i64, tracks: &[TidalTrack]) 
                         r.3.clone(),
                         r.4.unwrap(),
                         r.5.unwrap(),
+                        r.6.clone(),
+                        r.7,
                     )
                 })
                 .collect::<Vec<_>>(),
@@ -552,6 +732,13 @@ pub fn reconcile_album(conn: &Connection, tidal_id: i64, tracks: &[TidalTrack]) 
     )?;
     conn.execute("UPDATE albums SET is_favorite=MAX(is_favorite,(SELECT is_favorite FROM albums WHERE id=?2)),
         enrich_completed_at=COALESCE(enrich_completed_at,(SELECT enrich_completed_at FROM albums WHERE id=?2)) WHERE id=?1",params![kept,removed])?;
+    crate::db::catalogue_favorites::retain_merge(conn, "album", kept, removed)?;
+    if let Some(value) = crate::db::catalogue_favorites::desired_entity(conn, "album", kept)? {
+        conn.execute(
+            "UPDATE albums SET is_favorite=?2 WHERE id=?1",
+            params![kept, value as i32],
+        )?;
+    }
     conn.execute("DELETE FROM albums WHERE id=?1", [removed])?;
     // The incoming release supplied the complete verified tracklist. Use it
     // for future catalogue detail fetches while retaining the old album ID.

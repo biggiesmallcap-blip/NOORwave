@@ -1,6 +1,8 @@
 pub mod audio_settings;
 pub mod catalog_name;
 pub mod catalogue;
+pub mod catalogue_favorites;
+pub mod catalogue_recovery;
 pub mod discovery_setup;
 pub mod models;
 pub mod queries;
@@ -69,6 +71,10 @@ impl Database {
         let conn = Connection::open(path)?;
         conn.execute_batch(CONNECTION_PRAGMAS)?;
         Ok(conn)
+    }
+
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
     }
 
     pub fn run_migrations(&self) -> Result<()> {

@@ -44,23 +44,13 @@ async fn check_candidates(state: &SharedState) -> anyhow::Result<()> {
     let Some(tokens) = tokens else {
         return Ok(());
     };
-    let ids = db.with_conn(|conn| {
-        let mut stmt = conn.prepare(
-            "SELECT a.tidal_id FROM tidal_track_aliases a JOIN tracks t ON t.id=a.track_id
-            WHERE (t.is_library=1 OR t.is_favorite=1) AND
-            (SELECT COUNT(*) FROM tidal_track_aliases x WHERE x.track_id=t.id)>1
-            AND (a.checked_at IS NULL OR julianday(a.checked_at)<julianday('now','-1 day'))
-            ORDER BY (a.tidal_id=t.tidal_id) DESC,a.checked_at,a.tidal_id LIMIT 24",
-        )?;
-        Ok(stmt
-            .query_map([], |r| r.get::<_, i64>(0))?
-            .collect::<Result<Vec<_>, _>>()?)
-    })?;
+    let ids = db.with_conn(|conn| candidate_ids(conn, 24))?;
     let client = TidalClient::with_http(
         http.clone(),
         tokens.access_token.clone(),
         tokens.country_code.clone(),
-    );
+    )
+    .for_background_work();
     let mut any_observed = false;
     let mut any_switched = false;
     for id in ids {
@@ -90,7 +80,7 @@ async fn check_candidates(state: &SharedState) -> anyhow::Result<()> {
                     let available = matches!(
                         tokio::time::timeout(
                             Duration::from_secs(12),
-                            stream::resolve_stream(
+                            stream::resolve_stream_background(
                                 &http,
                                 &tokens.access_token,
                                 &StreamRequest::new(id, "LOW")
@@ -155,4 +145,39 @@ async fn check_candidates(state: &SharedState) -> anyhow::Result<()> {
         let _ = events.send(AppEvent::LibrarySynced);
     }
     Ok(())
+}
+
+/// Fairness is by recording, and a selected release travels with one stale
+/// alternative. The pair can establish fresh replacement evidence together.
+pub(crate) fn candidate_ids(
+    conn: &rusqlite::Connection,
+    budget: usize,
+) -> anyhow::Result<Vec<i64>> {
+    let locals = {
+        let mut stmt = conn.prepare(
+            "SELECT t.id FROM tracks t JOIN tidal_track_aliases a ON a.track_id=t.id
+        WHERE (t.is_library=1 OR t.is_favorite=1) AND a.evidence!='identity_conflict'
+        GROUP BY t.id HAVING (COUNT(*)>1 OR MAX(t.remote_favorite_state='unresolved')=1)
+        AND SUM(a.checked_at IS NULL OR julianday(a.checked_at)<=julianday('now','-1 day'))>0
+        ORDER BY SUM(a.checked_at IS NULL) DESC,MIN(a.checked_at),t.id LIMIT ?1",
+        )?;
+        stmt.query_map([budget as i64], |r| r.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut ids = Vec::new();
+    for local in locals {
+        if ids.len() >= budget {
+            break;
+        }
+        let mut stmt=conn.prepare("SELECT a.tidal_id FROM tidal_track_aliases a JOIN tracks t ON t.id=a.track_id
+            WHERE a.track_id=?1 AND a.evidence!='identity_conflict'
+            ORDER BY (a.tidal_id=t.tidal_id) DESC,(a.checked_at IS NOT NULL),a.checked_at,a.tidal_id LIMIT 2")?;
+        for id in stmt.query_map([local], |r| r.get::<_, i64>(0))? {
+            if ids.len() >= budget {
+                break;
+            }
+            ids.push(id?);
+        }
+    }
+    Ok(ids)
 }

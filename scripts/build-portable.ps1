@@ -11,7 +11,8 @@ both release executables. Package before installer bundling patches the app.
 
 param(
     [switch]$UsePrebuiltFrontend,
-    [switch]$UsePrebuiltBinaries
+    [switch]$UsePrebuiltBinaries,
+    [string]$RecoveryManifest
 )
 
 Set-StrictMode -Version Latest
@@ -19,6 +20,7 @@ $ErrorActionPreference = "Stop"
 
 $Root = Split-Path $PSScriptRoot -Parent
 Set-Location $Root
+
 
 function Invoke-Native {
     param(
@@ -29,9 +31,18 @@ function Invoke-Native {
         [string[]]$Arguments
     )
 
-    & $FilePath @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "$FilePath $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
+    $previousRecoveryManifest = $env:NOOR_CATALOGUE_RECOVERY_MANIFEST
+    try {
+        if ($FilePath -eq 'cargo' -and $RecoveryManifest) {
+            $env:NOOR_CATALOGUE_RECOVERY_MANIFEST = (Resolve-Path -LiteralPath $RecoveryManifest).Path
+        }
+        & $FilePath @Arguments
+        if ($LASTEXITCODE -ne 0) {
+            throw "$FilePath $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
+        }
+    }
+    finally {
+        $env:NOOR_CATALOGUE_RECOVERY_MANIFEST = $previousRecoveryManifest
     }
 }
 
@@ -85,6 +96,14 @@ New-Item -ItemType Directory -Force $Dist | Out-Null
 
 Copy-Item (Join-Path $Root "target\release\noor-app.exe") (Join-Path $Dist "NOORwave.exe")
 Copy-Item (Join-Path $Root "target\release\noor-server.exe") (Join-Path $Dist "noor-server.exe")
+if ($RecoveryManifest) {
+    $reviewedRecovery = Get-Content -LiteralPath $RecoveryManifest -Raw | ConvertFrom-Json
+    if ($reviewedRecovery.version -ne 2 -or $reviewedRecovery.changes_favorites -ne $false -or -not $reviewedRecovery.batch_id -or @($reviewedRecovery.entries | Where-Object { $_.status -ne "reviewed" }).Count) {
+        throw "Recovery payload must be a reviewed version-2 manifest"
+    }
+    Copy-Item -LiteralPath $RecoveryManifest -Destination (Join-Path $Dist "tidal-catalogue-recovery.json")
+}
+
 Copy-Item -Recurse $FrontendBuild (Join-Path $Dist "www")
 
 # 5. Zip

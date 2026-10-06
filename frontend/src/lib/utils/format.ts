@@ -66,12 +66,19 @@ export function formatTotalDuration(ms: number | null | undefined): string {
  * Uses an em-dash for the empty sentinel because it appears beside formatted
  * dates in track-row metadata, not in analytics tiles.
  */
+/** Stored SQL dates are UTC; missing/invalid values sort last. */
+export function savedDateMillis(value: string | null | undefined): number | null {
+	if (!value) return null;
+	const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)
+		? `${value.replace(' ', 'T')}Z` : value;
+	const instant = Date.parse(normalized);
+	return Number.isFinite(instant) ? instant : null;
+}
+
 export function formatDateShort(iso: string | null): string {
-	if (!iso) return '—';
-	const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(iso)
-		? `${iso.replace(' ', 'T')}Z`
-		: iso;
-	const d = new Date(normalized);
+	const instant = savedDateMillis(iso);
+	if (instant === null) return '—';
+	const d = new Date(instant);
 	const now = new Date();
 	const diffMs = now.getTime() - d.getTime();
 	const diffDays = Math.floor(diffMs / 86400000);
