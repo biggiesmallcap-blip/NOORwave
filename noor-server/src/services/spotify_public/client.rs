@@ -55,10 +55,10 @@ struct Inner {
     token: RwLock<Option<TokenResponse>>,
     hashes: RwLock<RefreshedHashes>,
     breaker: RwLock<Breaker>,
-    /// Last time a missing `searchDesktop` hash sent us scraping the bundle,
-    /// so a bundle that lacks it costs one scrape per cooldown, not one per
-    /// search keystroke.
-    search_desktop_scraped_ms: std::sync::atomic::AtomicI64,
+    /// Last time a missing scrape-only hash (`searchDesktop`,
+    /// `fetchPlaylist`) sent us scraping the bundle, so a bundle that lacks
+    /// it costs one scrape per cooldown, not one per search keystroke.
+    scrape_only_hash_scraped_ms: std::sync::atomic::AtomicI64,
 }
 
 /// Trips after repeated failures so a broken anonymous surface degrades to a
@@ -114,7 +114,7 @@ impl SpotifyPublicClient {
                 token: RwLock::new(None),
                 hashes: RwLock::new(persisted.unwrap_or_default()),
                 breaker: RwLock::new(Breaker::default()),
-                search_desktop_scraped_ms: std::sync::atomic::AtomicI64::new(0),
+                scrape_only_hash_scraped_ms: std::sync::atomic::AtomicI64::new(0),
             }),
         })
     }
@@ -166,6 +166,7 @@ impl SpotifyPublicClient {
             "queryArtistOverview" => Some(h.query_artist_overview),
             "assistedCurationSearch" => Some(h.search_modal_results),
             "searchDesktop" => self.inner.hashes.read().await.search_desktop.clone(),
+            "fetchPlaylist" => self.inner.hashes.read().await.fetch_playlist.clone(),
             _ => None,
         }
     }
@@ -185,6 +186,9 @@ impl SpotifyPublicClient {
         }
         if fresh.search_desktop.is_some() {
             current.search_desktop = fresh.search_desktop.clone();
+        }
+        if fresh.fetch_playlist.is_some() {
+            current.fetch_playlist = fresh.fetch_playlist.clone();
         }
         let snapshot = current.clone();
         drop(current);
@@ -377,22 +381,7 @@ impl SpotifyPublicClient {
     /// Spotify's editorial ones. Raw GraphQL body; see
     /// [`super::playlist_search::playlists_from_search_desktop`].
     pub async fn search_playlists(&self, query: &str, limit: u32, offset: u32) -> Result<Value> {
-        const SCRAPE_COOLDOWN_MS: i64 = 10 * 60 * 1000;
-        use std::sync::atomic::Ordering;
-
-        let mut hash = self.inner.hashes.read().await.search_desktop.clone();
-        if hash.is_none() {
-            let last = self.inner.search_desktop_scraped_ms.load(Ordering::Relaxed);
-            let now = now_ms();
-            if now - last >= SCRAPE_COOLDOWN_MS {
-                self.inner
-                    .search_desktop_scraped_ms
-                    .store(now, Ordering::Relaxed);
-                self.refresh_hashes().await?;
-                hash = self.inner.hashes.read().await.search_desktop.clone();
-            }
-        }
-        let hash = hash.ok_or_else(|| anyhow!("searchDesktop: no operation hash available"))?;
+        let hash = self.scrape_only_hash("searchDesktop").await?;
         let vars = serde_json::json!({
             "searchTerm": query,
             "offset": offset,
@@ -405,6 +394,52 @@ impl SpotifyPublicClient {
             "includeAuthors": false,
         });
         self.persisted_query("searchDesktop", &hash, &vars).await
+    }
+}
+
+impl SpotifyPublicClient {
+    /// Hash for an operation that has no baked-in default. Scrapes the
+    /// web-player bundle when it is missing, at most once per cooldown.
+    async fn scrape_only_hash(&self, op_name: &str) -> Result<String> {
+        const SCRAPE_COOLDOWN_MS: i64 = 10 * 60 * 1000;
+        use std::sync::atomic::Ordering;
+
+        if let Some(hash) = self.hash_for(op_name).await {
+            return Ok(hash);
+        }
+        let last = self
+            .inner
+            .scrape_only_hash_scraped_ms
+            .load(Ordering::Relaxed);
+        let now = now_ms();
+        if now - last >= SCRAPE_COOLDOWN_MS {
+            self.inner
+                .scrape_only_hash_scraped_ms
+                .store(now, Ordering::Relaxed);
+            self.refresh_hashes().await?;
+        }
+        self.hash_for(op_name)
+            .await
+            .ok_or_else(|| anyhow!("{op_name}: no operation hash available"))
+    }
+
+    /// One page of a playlist through the web player's `fetchPlaylist`
+    /// operation: metadata plus `limit` tracks from `offset`. Raw GraphQL
+    /// body; see [`super::playlist_search::playlist_from_fetch_playlist`].
+    pub async fn fetch_playlist_page(
+        &self,
+        spotify_playlist_id: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Value> {
+        let hash = self.scrape_only_hash("fetchPlaylist").await?;
+        let vars = serde_json::json!({
+            "uri": format!("spotify:playlist:{spotify_playlist_id}"),
+            "offset": offset,
+            "limit": limit,
+            "enableWatchFeedEntrypoint": false,
+        });
+        self.persisted_query("fetchPlaylist", &hash, &vars).await
     }
 }
 

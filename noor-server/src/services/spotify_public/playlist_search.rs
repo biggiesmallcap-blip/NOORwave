@@ -38,6 +38,12 @@ fn playlist_from_item(item: &Value) -> Option<SportifyPlaylist> {
         .get("data")
         .or_else(|| item.pointer("/item/data"))
         .unwrap_or(item);
+    playlist_from_data(data)
+}
+
+/// One playlist object (`__typename: "Playlist"`). `fetchPlaylist`'s
+/// `playlistV2` has the same shape, so [`super::playlist_fetch`] reuses it.
+pub(super) fn playlist_from_data(data: &Value) -> Option<SportifyPlaylist> {
     if let Some(kind) = data.get("__typename").and_then(Value::as_str)
         && kind != "Playlist"
     {

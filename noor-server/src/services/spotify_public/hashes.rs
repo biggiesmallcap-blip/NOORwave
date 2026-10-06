@@ -96,6 +96,10 @@ pub struct RefreshedHashes {
     /// it is scraped from the bundle on first use.
     #[serde(default)]
     pub search_desktop: Option<String>,
+    /// `fetchPlaylist`, the web player's playlist page (metadata + tracks).
+    /// Scraped on first use, like `search_desktop`.
+    #[serde(default)]
+    pub fetch_playlist: Option<String>,
 }
 
 /// Hits open.spotify.com once, finds the web-player JS bundle, downloads it,
@@ -141,6 +145,7 @@ pub async fn refresh_from_js(client: &Client) -> Result<RefreshedHashes> {
                 "queryArtistOverview" => out.query_artist_overview = Some(hash),
                 "assistedCurationSearch" => out.search_modal_results = Some(hash),
                 "searchDesktop" => out.search_desktop = Some(hash),
+                "fetchPlaylist" => out.fetch_playlist = Some(hash),
                 _ => {}
             }
         }
