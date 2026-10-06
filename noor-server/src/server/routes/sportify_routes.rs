@@ -71,12 +71,13 @@ pub(super) async fn sportify_discovery_search(
     let limit = clamp_search_limit(params.limit);
     let offset = clamp_search_offset(params.offset);
 
-    let (sportify_client, cache_cfg, db) = {
+    let (sportify_client, cache_cfg, db, spotify_public) = {
         let s = state.read().await;
         (
             s.sportify_client.clone(),
             s.sportify_cache_config,
             s.db.clone(),
+            s.spotify_public.clone(),
         )
     };
     let Some(sportify_client) = sportify_client else {
@@ -103,20 +104,16 @@ pub(super) async fn sportify_discovery_search(
             let fetch_db = db.clone();
             let fetch_q = q.to_string();
             let fetch = tokio::spawn(async move {
-                let fetched = match fetch_client.search(&fetch_q, kind, limit, offset).await {
-                    Ok(fetched) => fetched,
-                    Err(primary_error) => {
-                        crate::services::spotify::catalog::search_playlists_from_saved_credentials(
-                            &fetch_db, &fetch_q, limit, offset,
-                        )
-                        .await
-                        .map_err(|fallback_error| {
-                            anyhow::anyhow!(
-                                "sportify_search: {primary_error}; spotify_fallback: {fallback_error}"
-                            )
-                        })?
-                    }
-                };
+                let fetched = search_playlists_with_fallbacks(
+                    &fetch_client,
+                    &spotify_public,
+                    &fetch_db,
+                    &fetch_q,
+                    kind,
+                    limit,
+                    offset,
+                )
+                .await?;
                 fetch_db.with_conn(|conn| {
                     sp_cache::put_search(conn, &fetch_q, kind, limit, offset, &fetched)
                 })?;
@@ -149,6 +146,126 @@ pub(super) async fn sportify_discovery_search(
     .map_err(super::internal)?;
 
     Ok(Json(serde_json::to_value(normalized).unwrap_or(json!({}))))
+}
+
+/// Playlist search across every Spotify source we have, in order: the
+/// Sportify proxy mirrors, the Web API with the user's saved app credentials,
+/// then the web player's own anonymous `searchDesktop` operation.
+///
+/// A source that answers with zero playlists falls through just like one
+/// that errors. The proxies return a 200-but-empty page when their upstream
+/// token is degraded, and that used to end the search there: the Spotify
+/// rail came back empty and only TIDAL's editorial playlists were left, so
+/// user-made playlists never showed up.
+async fn search_playlists_with_fallbacks(
+    proxy: &crate::services::sportify::SportifyClient,
+    spotify_public: &crate::services::spotify_public::SpotifyPublicClient,
+    db: &crate::db::Database,
+    q: &str,
+    kind: crate::services::sportify::client::SportifySearchKind,
+    limit: u32,
+    offset: u32,
+) -> anyhow::Result<crate::services::sportify::models::SportifySearchResults> {
+    use crate::services::sportify::models::SportifySearchResults;
+
+    let mut errors = Vec::new();
+    let mut empty: Option<SportifySearchResults> = None;
+    let mut settle = |source: &str, result: anyhow::Result<SportifySearchResults>| match result {
+        Ok(found) if !found.playlists.is_empty() => Some(found),
+        Ok(found) => {
+            tracing::debug!("sportify_search: {source} returned no playlists for {q:?}");
+            empty.get_or_insert(found);
+            None
+        }
+        Err(e) => {
+            errors.push(format!("{source}: {e}"));
+            None
+        }
+    };
+
+    if let Some(found) = settle(
+        "sportify_search",
+        proxy.search(q, kind, limit, offset).await,
+    ) {
+        return Ok(found);
+    }
+    let web_api = crate::services::spotify::catalog::search_playlists_from_saved_credentials(
+        db, q, limit, offset,
+    )
+    .await;
+    if let Some(found) = settle("spotify_fallback", web_api) {
+        return Ok(found);
+    }
+    let anonymous = spotify_public
+        .search_playlists(q, limit, offset)
+        .await
+        .map(|body| SportifySearchResults {
+            playlists:
+                crate::services::spotify_public::playlist_search::playlists_from_search_desktop(
+                    &body,
+                ),
+            ..SportifySearchResults::default()
+        });
+    if let Some(found) = settle("spotify_public", anonymous) {
+        return Ok(found);
+    }
+
+    empty.ok_or_else(|| anyhow::anyhow!(errors.join("; ")))
+}
+
+/// A Spotify playlist with its tracks, from cache or from the first source
+/// that answers: the Sportify proxies, the Web API with saved app
+/// credentials, then the web player's anonymous `fetchPlaylist` operation.
+/// The last one means a playlist found through the anonymous search
+/// fallback still opens (and saves) while the proxies are down.
+async fn load_playlist(
+    proxy: &crate::services::sportify::SportifyClient,
+    spotify_public: &crate::services::spotify_public::SpotifyPublicClient,
+    db: &crate::db::Database,
+    cache_cfg: &crate::services::sportify::cache::SportifyCacheConfig,
+    id: &str,
+) -> Result<crate::services::sportify::models::SportifyPlaylist, (StatusCode, Json<Value>)> {
+    use crate::services::sportify::cache as sp_cache;
+
+    if let Some(cached) = db
+        .with_conn(|conn| sp_cache::get_playlist_meta(conn, cache_cfg, id))
+        .map_err(super::internal)?
+    {
+        return Ok(cached);
+    }
+
+    let mut errors = Vec::new();
+    let mut fetched = match proxy.playlist(id).await {
+        Ok(fetched) => Some(fetched),
+        Err(e) => {
+            errors.push(format!("sportify_playlist_fetch: {e}"));
+            None
+        }
+    };
+    if fetched.is_none() {
+        match crate::services::spotify::catalog::playlist_from_saved_credentials(db, id).await {
+            Ok(found) => fetched = Some(found),
+            Err(e) => errors.push(format!("spotify_fallback: {e}")),
+        }
+    }
+    if fetched.is_none() {
+        match crate::services::spotify_public::playlist_fetch::fetch_playlist(spotify_public, id)
+            .await
+        {
+            Ok(found) => fetched = Some(found),
+            Err(e) => errors.push(format!("spotify_public: {e}")),
+        }
+    }
+    let Some(fetched) = fetched else {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": errors.join("; ") })),
+        ));
+    };
+
+    db.with_conn(|conn| sp_cache::put_playlist_meta(conn, id, &fetched))
+        .map_err(super::internal)?;
+    Ok(fetched)
 }
 
 pub(super) async fn sportify_discovery_track(
@@ -287,7 +404,7 @@ pub(super) async fn sportify_discovery_playlist(
     State(state): State<SharedState>,
     Path(spotify_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    use crate::services::sportify::{cache as sp_cache, normalize, stats};
+    use crate::services::sportify::{normalize, stats};
 
     let id = spotify_id.trim();
     if id.is_empty() {
@@ -297,12 +414,13 @@ pub(super) async fn sportify_discovery_playlist(
         ));
     }
 
-    let (sportify_client, cache_cfg, db) = {
+    let (sportify_client, cache_cfg, db, spotify_public) = {
         let s = state.read().await;
         (
             s.sportify_client.clone(),
             s.sportify_cache_config,
             s.db.clone(),
+            s.spotify_public.clone(),
         )
     };
     let Some(sportify_client) = sportify_client else {
@@ -312,37 +430,7 @@ pub(super) async fn sportify_discovery_playlist(
         ));
     };
 
-    let playlist = match db
-        .with_conn(|conn| sp_cache::get_playlist_meta(conn, &cache_cfg, id))
-        .map_err(super::internal)?
-    {
-        Some(p) => p,
-        None => {
-            let fetched = match sportify_client.playlist(id).await {
-                Ok(fetched) => fetched,
-                Err(primary_error) => {
-                    crate::services::spotify::catalog::playlist_from_saved_credentials(&db, id)
-                        .await
-                        .map_err(|fallback_error| {
-                            (
-                                StatusCode::BAD_GATEWAY,
-                                Json(json!({
-                                    "error": format!(
-                                        "sportify_playlist_fetch: {primary_error}; spotify_fallback: {fallback_error}"
-                                    )
-                                })),
-                            )
-                        })?
-                }
-            };
-            db.with_conn(|conn| {
-                sp_cache::put_playlist_meta(conn, id, &fetched)?;
-                Ok::<_, anyhow::Error>(())
-            })
-            .map_err(super::internal)?;
-            fetched
-        }
-    };
+    let playlist = load_playlist(&sportify_client, &spotify_public, &db, &cache_cfg, id).await?;
     db.with_conn(|conn| {
         stats::write_track_playcounts(conn, &playlist.tracks);
         Ok::<_, anyhow::Error>(())
@@ -366,8 +454,6 @@ pub(super) async fn sportify_discovery_playlist_meta(
     State(state): State<SharedState>,
     Path(spotify_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    use crate::services::sportify::cache as sp_cache;
-
     let id = spotify_id.trim();
     if id.is_empty() {
         return Err((
@@ -376,12 +462,13 @@ pub(super) async fn sportify_discovery_playlist_meta(
         ));
     }
 
-    let (sportify_client, cache_cfg, db) = {
+    let (sportify_client, cache_cfg, db, spotify_public) = {
         let s = state.read().await;
         (
             s.sportify_client.clone(),
             s.sportify_cache_config,
             s.db.clone(),
+            s.spotify_public.clone(),
         )
     };
     let Some(sportify_client) = sportify_client else {
@@ -391,37 +478,7 @@ pub(super) async fn sportify_discovery_playlist_meta(
         ));
     };
 
-    let playlist = match db
-        .with_conn(|conn| sp_cache::get_playlist_meta(conn, &cache_cfg, id))
-        .map_err(super::internal)?
-    {
-        Some(p) => p,
-        None => {
-            let fetched = match sportify_client.playlist(id).await {
-                Ok(fetched) => fetched,
-                Err(primary_error) => {
-                    crate::services::spotify::catalog::playlist_from_saved_credentials(&db, id)
-                        .await
-                        .map_err(|fallback_error| {
-                            (
-                                StatusCode::BAD_GATEWAY,
-                                Json(json!({
-                                    "error": format!(
-                                        "sportify_playlist_fetch: {primary_error}; spotify_fallback: {fallback_error}"
-                                    )
-                                })),
-                            )
-                        })?
-                }
-            };
-            db.with_conn(|conn| {
-                sp_cache::put_playlist_meta(conn, id, &fetched)?;
-                Ok::<_, anyhow::Error>(())
-            })
-            .map_err(super::internal)?;
-            fetched
-        }
-    };
+    let playlist = load_playlist(&sportify_client, &spotify_public, &db, &cache_cfg, id).await?;
 
     Ok(Json(sportify_playlist_meta_value(id, &playlist)))
 }
@@ -1057,7 +1114,7 @@ pub(super) async fn save_spotify_playlist(
     State(state): State<SharedState>,
     Json(body): Json<SaveSpotifyPlaylistBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    use crate::services::sportify::{cache as sp_cache, recommend};
+    use crate::services::sportify::cache as sp_cache;
 
     let id = body.spotify_id.trim();
     if id.is_empty() {
@@ -1067,12 +1124,13 @@ pub(super) async fn save_spotify_playlist(
         ));
     }
 
-    let (sportify_client, cache_cfg, db) = {
+    let (sportify_client, cache_cfg, db, spotify_public) = {
         let s = state.read().await;
         (
             s.sportify_client.clone(),
             s.sportify_cache_config,
             s.db.clone(),
+            s.spotify_public.clone(),
         )
     };
     let Some(sportify_client) = sportify_client else {
@@ -1082,14 +1140,7 @@ pub(super) async fn save_spotify_playlist(
         ));
     };
 
-    let playlist = recommend::cached_playlist(&sportify_client, &db, &cache_cfg, id)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "error": format!("sportify_playlist_fetch: {e}") })),
-            )
-        })?;
+    let playlist = load_playlist(&sportify_client, &spotify_public, &db, &cache_cfg, id).await?;
 
     let playlist_name = body
         .name
