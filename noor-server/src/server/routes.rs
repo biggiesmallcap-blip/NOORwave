@@ -10197,6 +10197,7 @@ fn spawn_playback_runtime_listener(
                     runtime_rendered_dj_mixer,
                     runtime_renderer_status,
                     runtime_renderer_reason,
+                    runtime_program_json,
                     ..
                 }) => {
                     let state_guard = state.read().await;
@@ -10210,7 +10211,20 @@ fn spawn_playback_runtime_listener(
                             runtime_rendered_dj_mixer,
                             runtime_renderer_status.as_str(),
                             runtime_renderer_reason.as_str(),
-                        )
+                        )?;
+                        if let Some(program_json) = runtime_program_json.as_ref() {
+                            // Keep the event identity/timing, but display its
+                            // executed cue, rate and fallback instead of an
+                            // earlier planner hypothesis.
+                            conn.execute(
+                                "UPDATE dj_transition_events SET program_json=?1,
+                                 fallback_reason=CASE WHEN template!=json_extract(?1,'$.template')
+                                   AND json_extract(?1,'$.template') IN ('SafeCrossfade','SlamCut')
+                                   THEN 'beat_sync_unverified' ELSE fallback_reason END WHERE id=?2",
+                                rusqlite::params![program_json, transition_event_id],
+                            )?;
+                        }
+                        Ok(())
                     }) {
                         Ok(()) => {
                             info!(

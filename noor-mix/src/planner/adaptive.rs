@@ -586,6 +586,18 @@ fn add(
     clash: f32,
     vocals_known: bool,
 ) {
+    // Structure/imported cues describe useful sections, not necessarily exact
+    // phase. Rhythmic programs must enter on a measured marker. Verified drop
+    // swaps retain their rate-aware lead so the requested drop stays exact;
+    // phase-unverified short overlaps deliberately keep the raw opening.
+    let entry = if name != "DropSwap" && (rate.is_some() || name == "SlamCut") {
+        let Some(entry) = snap_rhythmic_entry(incoming, entry, name == "SlamCut") else {
+            return;
+        };
+        entry
+    } else {
+        entry
+    };
     let seconds = transition_seconds(name, beats, bpm);
     let duration = (seconds * super::PLANNER_SAMPLE_RATE as f32).round() as u64;
     let mut program = program(name, duration, outgoing, incoming, policy);
@@ -646,6 +658,40 @@ fn add(
         drop_seconds,
         window,
     });
+}
+
+fn snap_rhythmic_entry(profile: &DjProfile, entry: Entry, downbeat_only: bool) -> Option<Entry> {
+    let grid = if downbeat_only {
+        &profile.downbeat_seconds
+    } else {
+        &profile.beat_grid_seconds
+    };
+    let scope = profile
+        .analysis_scope_seconds
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(45.0)
+        .min(45.0);
+    let nearest = grid
+        .iter()
+        .copied()
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0 && *seconds <= scope)
+        .min_by(|left, right| {
+            (left - entry.seconds)
+                .abs()
+                .total_cmp(&(right - entry.seconds).abs())
+        })?;
+    let beat_seconds = 60.0 / valid_bpm(profile.bpm)?;
+    let max_shift = beat_seconds * if downbeat_only { 2.1 } else { 0.6 };
+    if (nearest - entry.seconds).abs() > max_shift {
+        return None;
+    }
+    Some(Entry {
+        seconds: nearest,
+        phrase: phrase_seconds(profile)
+            .iter()
+            .any(|seconds| (*seconds - nearest).abs() < 0.1),
+        breakdown: entry.breakdown,
+    })
 }
 
 fn program(
@@ -1266,6 +1312,40 @@ mod tests {
             energy_contour: vec![0.2, 0.2, 0.7],
             analysis_scope_seconds: Some(120.0),
             vocals_known: true,
+        }
+    }
+
+    #[test]
+    fn rhythmic_candidates_snap_imported_cues_to_measured_beats() {
+        let a = profile();
+        let mut b = profile();
+        b.beat_grid_seconds = (0..240).map(|beat| 0.13 + beat as f32 * 0.5).collect();
+        b.downbeat_seconds = (0..60).map(|bar| 0.13 + bar as f32 * 2.0).collect();
+        b.mix_in_seconds = vec![0.23, 2.23];
+        b.breakdown_seconds = vec![1.23];
+        let planned = crate::Planner::plan_adaptive(
+            &a,
+            &b,
+            &Policy {
+                preferred_strategy: "club_mix".into(),
+                ..Policy::default()
+            },
+        );
+        let decision = planned.decision.unwrap();
+        let club = decision
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.strategy == "ClubMix")
+            .collect::<Vec<_>>();
+        assert!(club.len() >= 2);
+        for candidate in club {
+            assert!(
+                b.beat_grid_seconds
+                    .iter()
+                    .any(|beat| (*beat - candidate.entry_seconds).abs() < 0.0001),
+                "off-beat cue {}",
+                candidate.entry_seconds
+            );
         }
     }
 

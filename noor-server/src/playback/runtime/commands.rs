@@ -187,6 +187,8 @@ pub enum PlaybackRuntimeEvent {
         runtime_rendered_dj_mixer: bool,
         runtime_renderer_status: String,
         runtime_renderer_reason: String,
+        /// The executable program after local audio alignment/fallback.
+        runtime_program_json: Option<String>,
     },
     DropPreviewStarted {
         track_id: i64,

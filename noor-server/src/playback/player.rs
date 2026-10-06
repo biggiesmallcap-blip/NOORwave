@@ -1138,22 +1138,30 @@ fn extrapolated_grid_ms(grid_seconds: &[f32], duration_ms: i64) -> Option<Vec<i6
         return (!grid.is_empty()).then_some(grid);
     }
 
-    // Extrapolate past the last detected marker using the MEDIAN spacing; the
-    // previous minimum let one noisy near-duplicate pair flood the tail with
-    // arbitrarily dense fake markers, so the "synced" overlap could start
-    // anywhere instead of on a real beat.
-    let deltas = grid
-        .windows(2)
-        .filter_map(|pair| {
-            let delta = pair[1].saturating_sub(pair[0]);
-            (delta > 0).then_some(delta)
-        })
-        .collect::<Vec<_>>();
-    let interval_ms = median_delta(&deltas).filter(|delta| *delta > 0)?;
-    let mut next = grid.last().copied()?.saturating_add(interval_ms);
-    while next < duration_ms {
-        grid.push(next);
-        next = next.saturating_add(interval_ms);
+    // Keep the fitted fractional period and origin until each final marker is
+    // rounded. Repeatedly adding an integer-ms interval accumulates phase
+    // error. This projection is still an estimate outside measured coverage;
+    // the caller's confidence gates and renderer phase check remain required.
+    let fit = noor_mix::beat_grid::fit_beat_grid(grid_seconds)?;
+    let last_seconds = *grid.last()? as f64 / 1_000.0;
+    let mut index = ((last_seconds - fit.origin_seconds) / fit.period_seconds)
+        .floor()
+        .max(0.0)
+        + 1.0;
+    let end_index =
+        ((duration_ms as f64 / 1_000.0 - fit.origin_seconds) / fit.period_seconds).ceil();
+    if end_index - index > 65_536.0 {
+        return None;
+    }
+    while index < end_index {
+        let next = ((fit.origin_seconds + index * fit.period_seconds) * 1_000.0).round() as i64;
+        if next >= duration_ms {
+            break;
+        }
+        if grid.last().is_none_or(|previous| next > *previous) {
+            grid.push(next);
+        }
+        index += 1.0;
     }
     Some(grid)
 }
@@ -1381,7 +1389,7 @@ pub fn latest_open_dj_transition_event_for_pair(
            AND outcome IS NULL
          ORDER BY CASE timing_status
              WHEN 'fired' THEN 0
-             WHEN 'late' THEN 1
+             WHEN 'late' THEN 0
              WHEN 'armed' THEN 2
              ELSE 3
          END,
@@ -3225,6 +3233,26 @@ mod tests {
                 .expect("selected");
 
             assert_eq!(selected, Some(fired_id));
+            // A new late execution is still this session's mix. An older
+            // tight fire must not replace its cue, renderer or listen outcome.
+            let late_id = duplicate.transition_event_id.unwrap();
+            db.with_conn(|conn| {
+                queries::update_dj_transition_fire_timing(
+                    conn,
+                    late_id,
+                    172_400,
+                    "late",
+                    true,
+                    "rendered_handoff",
+                    "next_decode_late_at_fire",
+                )
+            })
+            .expect("mark newer late execution");
+            assert_eq!(
+                db.with_conn(|conn| latest_open_dj_transition_event_for_pair(conn, Some(1), 2))
+                    .expect("latest execution"),
+                Some(late_id)
+            );
         }
 
         #[test]
@@ -4864,6 +4892,23 @@ mod tests {
         assert_eq!(candidate.0, 4_000);
         assert!(stable_grid(&[0.0, 2.0, 4.0, 6.0, 8.0]));
         assert!(!stable_grid(&[0.0, 0.1, 4.0, 4.3, 10.0]));
+    }
+
+    #[test]
+    fn extrapolated_grid_preserves_fractional_period_and_fitted_phase() {
+        let bpm = 174.0_f64;
+        let beats = (0..250)
+            .map(|beat| ((0.13 + beat as f64 * 60.0 / bpm) * 100.0).round() as f32 / 100.0)
+            .collect::<Vec<_>>();
+        let projected = extrapolated_grid_ms(&beats, 270_000).unwrap();
+        let last = *projected.last().unwrap() as f64 / 1000.0;
+        let index = ((last - 0.13) * bpm / 60.0).round();
+        let actual = 0.13 + index * 60.0 / bpm;
+        assert!(
+            (last - actual).abs() < 0.02,
+            "tail phase error={}s",
+            last - actual
+        );
     }
 
     #[test]

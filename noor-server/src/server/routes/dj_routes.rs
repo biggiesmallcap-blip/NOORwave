@@ -2079,9 +2079,7 @@ fn active_transition_for_runtime(
     let session_id = session
         .filter(|session| session.transition_visual_valid)
         .and_then(|session| session.dj_transition_event_id);
-    let event_id = if session_id.is_some() {
-        session_id
-    } else if let Some(current) = current {
+    let latest_id = if let Some(current) = current {
         let key = current.profile_key();
         conn.query_row("SELECT id FROM dj_transition_events
             WHERE to_media_ref_kind = ?1 AND to_media_ref_id = ?2
@@ -2091,6 +2089,14 @@ fn active_transition_for_runtime(
             params![key.media_ref_kind, key.media_ref_id], |row| row.get::<_, i64>(0)).optional()?
     } else {
         None
+    };
+    // Started can open the listening session before promotion timing is
+    // persisted. Its remembered event may then belong to an earlier mix of
+    // this track. The installed overlap clock still supplies the live proof;
+    // prefer a newer confirmed execution for this same incoming track.
+    let event_id = match (session_id, latest_id) {
+        (Some(session), Some(latest)) => Some(session.max(latest)),
+        (session, latest) => session.or(latest),
     };
     event_id
         .map(|id| active_transition_for_event(conn, id, elapsed_ms))
@@ -2892,7 +2898,10 @@ fn planning_reason_without_renderer_downgrade(transition: &OpenTransition) -> Op
 fn is_renderer_downgrade_reason(reason: &str) -> bool {
     matches!(
         reason,
-        "template_not_renderable" | "timing_unstable" | "overlay_not_handoff"
+        "template_not_renderable"
+            | "timing_unstable"
+            | "overlay_not_handoff"
+            | "beat_sync_unverified"
     )
 }
 
@@ -3132,6 +3141,25 @@ mod tests {
                 [id],
             )?;
             assert!(active_transition_for_event(conn, id, 8000)?.is_none());
+            // A replay of this pair starts its listen session before the new
+            // promotion is persisted. It must show this execution's safety
+            // programme instead of the earlier BassSwap.
+            conn.execute("UPDATE dj_transition_events SET runtime_renderer_status='rendered_handoff' WHERE id=?1", [id])?;
+            let safe = crate::playback::dj_engine::safe_crossfade_program(48_000, 2,
+                noor_mix::Policy {default_crossfade_ms: 4000, ..Default::default()});
+            conn.execute("INSERT INTO dj_transition_events (from_media_ref_kind, from_media_ref_id,
+                to_media_ref_kind, to_media_ref_id, template, program_json, planner_version,
+                planned_start_ms, actual_start_ms, timing_status, runtime_rendered_dj_mixer, runtime_renderer_status)
+                SELECT from_media_ref_kind, from_media_ref_id, to_media_ref_kind, to_media_ref_id,
+                    template, ?1, planner_version, planned_start_ms, actual_start_ms,
+                    timing_status, runtime_rendered_dj_mixer, runtime_renderer_status
+                FROM dj_transition_events WHERE id=?2", params![serde_json::to_string(&safe)?, id])?;
+            let latest = conn.last_insert_rowid();
+            let stale_session = resumed.with_dj_transition_event_id(Some(id));
+            let replay = active_transition_for_runtime(conn, Some(&stale_session),
+                Some(&DjMediaRef::TidalTrack { tidal_id: 200, track_id: Some(2) }), Some(1000))?.expect("current execution");
+            assert_eq!(replay.event_id, latest);
+            assert_eq!(replay.program.template, "SafeCrossfade");
             Ok(())
         })
         .expect("executed scene");

@@ -13,6 +13,7 @@ use anyhow::{Context, Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::{SampleFormat, StreamConfig};
 
+mod beat_sync;
 pub mod commands;
 mod device;
 mod engine;
@@ -839,6 +840,9 @@ struct PlaybackRuntimeLoopState {
     prepared_dj_mixer: Option<PreparedDjMixer>,
     prepared_drop_preview_mixer: Option<PreparedDjMixer>,
     last_dj_renderer_failure: Option<DjRuntimeRendererFailure>,
+    /// Do not repeat a rejected DSP/render attempt just because a later fire
+    /// miss replaces the public diagnostic reason with a decode delay.
+    dj_readiness_permanent_failure: Option<DjRuntimeRendererFailure>,
     /// User transport intent as most recently processed by this loop: `true`
     /// from a Pause command until a Resume (or an explicitly-unpaused job)
     /// clears it. Every engine cold start and promotion consults this, so an
@@ -855,6 +859,10 @@ struct PlaybackRuntimeLoopState {
 
 struct PreparedDjMixer {
     program: noor_mix::TransitionProgram,
+    max_block_samples: usize,
+    // Absolute output-clock origin survives decoder buffer compaction. The
+    // program's start frame remains buffer-local for the captured Mixer deck.
+    deck_a_output_start_frame: u64,
     /// The full transition mix, rendered at build (prepare/decode-complete)
     /// time rather than at fire time. Rendering 8-28s of dual-deck audio
     /// takes long enough that doing it inside the fire handler used to let
@@ -867,8 +875,20 @@ struct PreparedDjMixer {
 }
 
 struct RuntimeDeckSnapshot {
-    deck: noor_mix::deck::DeckBuffer,
+    samples: Vec<f32>,
     start_frame: u64,
+    output_start_frame: u64,
+}
+
+#[derive(Clone, Copy)]
+struct CrossfadeReadinessSnapshot {
+    base_ready: bool,
+    finished: bool,
+    unread_samples: u64,
+    decoded_samples: u64,
+    read_samples: u64,
+    offset_samples: u64,
+    start_threshold_samples: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -897,6 +917,8 @@ struct DjRuntimeRendererFailure {
     transition_event_id: Option<i64>,
     current_track_id: Option<i64>,
     next_track_id: Option<i64>,
+    current_engine_generation: Option<u64>,
+    next_engine_generation: Option<u64>,
     reason: DjRuntimeRendererReason,
 }
 
@@ -941,6 +963,9 @@ enum DjRuntimeRendererReason {
     /// The live deck A playhead is already past the midpoint of the rendered
     /// transition, so joining it would play only the tail of the blend.
     HandoffSeamTooLate,
+    /// A late protected overlap could not be rebuilt; the live decks use
+    /// the short seam ramps instead of reviving an unverified long overlap.
+    ProtectedHandoffCut,
 }
 
 impl DjRuntimeRendererReason {
@@ -964,6 +989,7 @@ impl DjRuntimeRendererReason {
             Self::SyncWindowNotSignaled => "sync_window_not_signaled",
             Self::ManualSeekSuppressed => "manual_seek_suppressed",
             Self::HandoffSeamTooLate => "handoff_seam_too_late",
+            Self::ProtectedHandoffCut => "protected_handoff_cut",
         }
     }
 }
@@ -1123,15 +1149,27 @@ fn record_runtime_renderer_failure(
     transition: &PreparedTransitionProgram,
     reason: DjRuntimeRendererReason,
 ) {
-    state.last_dj_renderer_failure = Some(DjRuntimeRendererFailure {
+    let failure = DjRuntimeRendererFailure {
         queue_generation: transition.queue_generation,
         current_queue_item_id: transition.current_queue_item_id,
         next_queue_item_id: transition.next_queue_item_id,
         transition_event_id: transition.transition_event_id,
         current_track_id: state.engine.as_ref().map(|engine| engine.track_id),
         next_track_id: state.next_engine.as_ref().map(|engine| engine.track_id),
+        current_engine_generation: state.engine.as_ref().map(|engine| engine.generation),
+        next_engine_generation: state.next_engine.as_ref().map(|engine| engine.generation),
         reason,
-    });
+    };
+    if matches!(
+        reason,
+        DjRuntimeRendererReason::ProgramNotMixerRenderable
+            | DjRuntimeRendererReason::MixerRejected
+            | DjRuntimeRendererReason::RenderBufferFailed
+            | DjRuntimeRendererReason::BufferLockFailed
+    ) {
+        state.dj_readiness_permanent_failure = Some(failure);
+    }
+    state.last_dj_renderer_failure = Some(failure);
 }
 
 fn record_current_runtime_renderer_failure(
@@ -1167,6 +1205,10 @@ fn renderer_failure_matches_current_transition(
         && failure.transition_event_id == transition.transition_event_id
         && failure.current_track_id == state.engine.as_ref().map(|engine| engine.track_id)
         && failure.next_track_id == state.next_engine.as_ref().map(|engine| engine.track_id)
+        && failure.current_engine_generation
+            == state.engine.as_ref().map(|engine| engine.generation)
+        && failure.next_engine_generation
+            == state.next_engine.as_ref().map(|engine| engine.generation)
 }
 
 fn start_dj_lookahead_in_state(
@@ -1277,6 +1319,7 @@ fn decoded_deck_snapshot(
     engine: &PlaybackEngine,
     channels: u16,
     start_frame: u64,
+    cue_is_local: bool,
     required_frames: u64,
     late_tolerance_frames: u64,
     reason: DjRuntimeRendererReason,
@@ -1286,11 +1329,51 @@ fn decoded_deck_snapshot(
         .buffer
         .lock()
         .map_err(|_| DjRuntimeRendererReason::BufferLockFailed)?;
-    if guard.samples.is_empty() {
+    // Planner cues use original source time. A restarted or compacted deck's
+    // PCM begins at its published offset; resolve both under the buffer mutex
+    // so a snapshot cannot certify audio at a different source position.
+    // Protected recovery already supplies a normalized buffer-local cue.
+    let start_frame = if cue_is_local {
+        start_frame
+    } else {
+        let channel_count = u64::from(channels.max(1));
+        let output_frame = engine
+            .shared
+            .source_to_output_samples(start_frame.saturating_mul(channel_count))
+            .ok_or(reason)?
+            / channel_count;
+        let offset_frame = engine
+            .shared
+            .position_offset_samples
+            .load(Ordering::Relaxed)
+            / channel_count;
+        output_frame.checked_sub(offset_frame).ok_or(reason)?
+    };
+    snapshot_decoded_buffer(
+        engine,
+        &guard,
+        channels,
+        start_frame,
+        required_frames,
+        late_tolerance_frames,
+        reason,
+    )
+}
+
+fn snapshot_decoded_buffer(
+    engine: &PlaybackEngine,
+    buffer: &shared::PlaybackBuffer,
+    channels: u16,
+    start_frame: u64,
+    required_frames: u64,
+    late_tolerance_frames: u64,
+    reason: DjRuntimeRendererReason,
+) -> Result<RuntimeDeckSnapshot, DjRuntimeRendererReason> {
+    if buffer.samples.is_empty() {
         return Err(reason);
     }
     let channels = usize::from(channels.max(1));
-    let frames = (guard.samples.len() / channels) as u64;
+    let frames = (buffer.samples.len() / channels) as u64;
     if start_frame >= frames {
         return Err(reason);
     }
@@ -1299,8 +1382,16 @@ fn decoded_deck_snapshot(
         return Err(reason);
     }
     Ok(RuntimeDeckSnapshot {
-        deck: noor_mix::deck::DeckBuffer::new(guard.samples.clone(), channels as u16),
+        samples: buffer.samples.clone(),
         start_frame,
+        // The caller holds the buffer lock, so the decoder cannot move the
+        // offset between capturing the PCM and its absolute render origin.
+        output_start_frame: engine
+            .shared
+            .position_offset_samples
+            .load(Ordering::Relaxed)
+            / channels as u64
+            + start_frame,
     })
 }
 
@@ -1308,24 +1399,33 @@ fn active_deck_snapshot(
     engine: &PlaybackEngine,
     channels: u16,
     program_start_frame: u64,
+    anchored_output_start_frame: Option<u64>,
     required_frames: u64,
     late_tolerance_frames: u64,
 ) -> Result<RuntimeDeckSnapshot, DjRuntimeRendererReason> {
-    let start_frame = {
-        let guard = engine
+    let guard = engine
+        .shared
+        .buffer
+        .lock()
+        .map_err(|_| DjRuntimeRendererReason::BufferLockFailed)?;
+    let channel_count = u64::from(channels.max(1));
+    let start_frame = if let Some(output_frame) = anchored_output_start_frame {
+        let offset_frames = engine
             .shared
-            .buffer
-            .lock()
-            .map_err(|_| DjRuntimeRendererReason::BufferLockFailed)?;
-        if program_start_frame == 0 {
-            let channels = usize::from(channels.max(1));
-            (guard.read_pos / channels) as u64
-        } else {
-            program_start_frame
-        }
+            .position_offset_samples
+            .load(Ordering::Relaxed)
+            / channel_count;
+        output_frame
+            .checked_sub(offset_frames)
+            .ok_or(DjRuntimeRendererReason::ActiveDeckNotDecoded)?
+    } else if program_start_frame == 0 {
+        guard.read_pos as u64 / channel_count
+    } else {
+        program_start_frame
     };
-    decoded_deck_snapshot(
+    snapshot_decoded_buffer(
         engine,
+        &guard,
         channels,
         start_frame,
         required_frames,
@@ -1360,6 +1460,22 @@ fn build_prepared_dj_mixer_for_engine(
     incoming: &PlaybackEngine,
     max_block_samples: usize,
 ) -> Result<PreparedDjMixer, DjRuntimeRendererReason> {
+    build_prepared_dj_mixer_for_engine_at_start(
+        state,
+        transition,
+        incoming,
+        max_block_samples,
+        false,
+    )
+}
+
+fn build_prepared_dj_mixer_for_engine_at_start(
+    state: &PlaybackRuntimeLoopState,
+    transition: &PreparedTransitionProgram,
+    incoming: &PlaybackEngine,
+    max_block_samples: usize,
+    force_live_start: bool,
+) -> Result<PreparedDjMixer, DjRuntimeRendererReason> {
     let active = state
         .engine
         .as_ref()
@@ -1374,6 +1490,9 @@ fn build_prepared_dj_mixer_for_engine(
         .program
         .clone()
         .rescaled_to(state.device_sample_rate.max(1));
+    if force_live_start {
+        program.deck_a_start_frame = 0;
+    }
     if let Err(error) = noor_mix::planner::safety::validate_audio_safety(
         &program,
         &noor_mix::planner::safety::AudioSafetyPolicy::default(),
@@ -1386,18 +1505,24 @@ fn build_prepared_dj_mixer_for_engine(
     // beat-anchored plan is built ahead of time, so pin deck A to the
     // planned fire position instead; the install-time skip then reconciles
     // the (small) distance the live deck actually travelled past it.
-    if program.deck_a_start_frame == 0 {
-        if let Some(anchor_frame) = anchored_deck_a_frame(state, transition, active) {
-            program.deck_a_start_frame = anchor_frame;
+    let anchored_output_start_frame = (program.deck_a_start_frame == 0 && !force_live_start)
+        .then(|| anchored_deck_a_output_frame(state, transition, active))
+        .flatten();
+    let mut deck_b_required_frames = deck_b_consumed_frames(&program)
+        .ok_or(DjRuntimeRendererReason::ProgramNotMixerRenderable)?;
+    // Preserve the original first-choice plan, but let the same decoded cue
+    // prepare a shorter bass phrase when only its complete PCM is available.
+    for prefix in beat_sync::musical_prefixes(&program) {
+        if let Some(consumed) = deck_b_consumed_frames(&prefix) {
+            deck_b_required_frames = deck_b_required_frames.min(consumed);
         }
     }
-    let deck_b_consumed_frames = deck_b_consumed_frames(&program)
-        .ok_or(DjRuntimeRendererReason::ProgramNotMixerRenderable)?;
     let late_tolerance_frames = dj_renderer_late_tolerance_frames(state.device_sample_rate);
     let active_snapshot = active_deck_snapshot(
         active,
         state.device_channels,
         program.deck_a_start_frame,
+        anchored_output_start_frame,
         program.resolve_at,
         late_tolerance_frames,
     )?;
@@ -1405,16 +1530,67 @@ fn build_prepared_dj_mixer_for_engine(
         incoming,
         state.device_channels,
         program.deck_b_start_frame,
-        deck_b_consumed_frames.saturating_add(1),
+        force_live_start,
+        deck_b_required_frames.saturating_add(1),
         late_tolerance_frames,
         DjRuntimeRendererReason::NextDeckNotDecoded,
     )?;
     program.deck_a_start_frame = active_snapshot.start_frame;
     program.deck_b_start_frame = next_snapshot.start_frame;
+    if beat_sync::required(&program) {
+        if let Some(sync) = beat_sync::synchronize_or_shorten(
+            &mut program,
+            &active_snapshot.samples,
+            &next_snapshot.samples,
+        ) {
+            info!(
+                current_track_id = active.track_id,
+                next_track_id = incoming.track_id,
+                rate = sync.rate,
+                cue_shift_frames = sync.cue_shift_frames,
+                confidence = sync.confidence,
+                residual_ms = sync.residual_ms,
+                "DJ beat sync verified against decoded mix audio"
+            );
+        } else {
+            // A long rhythmic overlap needs more than a successful timer or
+            // an opening-grid projection. Preserve the established protected
+            // renderer, with a short overlap when local percussion is unclear.
+            let mut fallback = crate::playback::dj_engine::safe_crossfade_program(
+                program.sample_rate,
+                program.channels,
+                noor_mix::Policy {
+                    default_crossfade_ms: 4_000,
+                    ..Default::default()
+                },
+            );
+            fallback.deck_a_start_frame = program.deck_a_start_frame;
+            fallback.deck_b_start_frame = program.deck_b_start_frame;
+            fallback.decision = program.decision.clone();
+            if let Some(decision) = fallback.decision.as_mut() {
+                decision.strategy = "SafeCrossfade".into();
+                decision.reason="Decoded rhythm does not support a reliable long beat lock; using a short protected overlap".into();
+                decision.duration_beats = 0.0;
+            }
+            program = fallback;
+            info!(
+                current_track_id = active.track_id,
+                next_track_id = incoming.track_id,
+                "DJ long overlap shortened: decoded beat sync unverified"
+            );
+        }
+    }
+    if let Err(error) = noor_mix::planner::safety::validate_audio_safety(
+        &program,
+        &noor_mix::planner::safety::AudioSafetyPolicy::default(),
+    ) {
+        warn!("Corrected DJ transition program failed audio safety: {error:?}");
+        return Err(DjRuntimeRendererReason::MixerRejected);
+    }
     let mut mixer = match noor_mix::Mixer::new(
         program.clone(),
-        active_snapshot.deck,
-        next_snapshot.deck,
+        noor_mix::deck::DeckBuffer::new(active_snapshot.samples, state.device_channels),
+        noor_mix::deck::DeckBuffer::new(next_snapshot.samples, state.device_channels),
         max_block_samples,
     ) {
         Ok(mixer) => mixer,
@@ -1432,6 +1608,8 @@ fn build_prepared_dj_mixer_for_engine(
     .ok_or(DjRuntimeRendererReason::RenderBufferFailed)?;
     Ok(PreparedDjMixer {
         program,
+        max_block_samples,
+        deck_a_output_start_frame: active_snapshot.output_start_frame,
         rendered,
         current_track_id: active.track_id,
         next_track_id: incoming.track_id,
@@ -1441,7 +1619,24 @@ fn build_prepared_dj_mixer_for_engine(
 /// Buffer-local deck A frame for a beat-anchored transition: the anchor is
 /// absolute track time on the decoded-audio timeline, the deck buffer may
 /// start mid-track after a segment seek.
+#[cfg(test)]
 fn anchored_deck_a_frame(
+    state: &PlaybackRuntimeLoopState,
+    transition: &PreparedTransitionProgram,
+    active: &PlaybackEngine,
+) -> Option<u64> {
+    let anchor_frame_abs = anchored_deck_a_output_frame(state, transition, active)?;
+    let channels = u64::from(state.device_channels.max(1));
+    let offset_frames = active
+        .shared
+        .position_offset_samples
+        .load(Ordering::Relaxed)
+        / channels;
+    let local = anchor_frame_abs.checked_sub(offset_frames)?;
+    (local > 0).then_some(local)
+}
+
+fn anchored_deck_a_output_frame(
     state: &PlaybackRuntimeLoopState,
     transition: &PreparedTransitionProgram,
     active: &PlaybackEngine,
@@ -1455,20 +1650,25 @@ fn anchored_deck_a_frame(
         active.shared.source_to_output_samples(source_anchor)?
     } else {
         let total = active.shared.total_samples.load(Ordering::Relaxed);
-        let overlap = active.shared.crossfade_samples.load(Ordering::Relaxed);
+        let mut overlap = active.shared.crossfade_samples.load(Ordering::Relaxed);
+        if beat_sync::required(&transition.program) {
+            // The countdown is expressed in whole milliseconds, while a
+            // beat-derived programme retains fractional-millisecond frames.
+            // Its PCM window must not overrun EOF by that rounding difference.
+            let exact_window = transition
+                .program
+                .clone()
+                .rescaled_to(state.device_sample_rate.max(1))
+                .resolve_at
+                .saturating_mul(channels);
+            overlap = overlap.max(exact_window);
+        }
         if total == 0 || overlap == 0 {
             return None;
         }
         total.saturating_sub(overlap)
     };
-    let anchor_frame_abs = anchor_samples / channels;
-    let offset_frames = active
-        .shared
-        .position_offset_samples
-        .load(Ordering::Relaxed)
-        / channels;
-    let local = anchor_frame_abs.checked_sub(offset_frames)?;
-    (local > 0).then_some(local)
+    Some(anchor_samples / channels)
 }
 
 fn handoff_mixer_program(program: &noor_mix::TransitionProgram) -> bool {
@@ -1542,6 +1742,214 @@ fn deck_b_consumed_frames(program: &noor_mix::TransitionProgram) -> Option<u64> 
 fn install_prepared_handoff_mixer_buffer(
     state: &mut PlaybackRuntimeLoopState,
 ) -> Result<(), DjRuntimeRendererReason> {
+    let result = install_prepared_handoff_mixer_buffer_once(state);
+    if result.is_ok()
+        || !state.dj_engine_enabled
+        || matches!(
+            result,
+            Err(DjRuntimeRendererReason::LookaheadPairMismatch
+                | DjRuntimeRendererReason::ActiveTrackChanged
+                | DjRuntimeRendererReason::NextTrackChanged
+                | DjRuntimeRendererReason::DjDisabled
+                | DjRuntimeRendererReason::ManualSeekSuppressed)
+        )
+    {
+        return result;
+    }
+    // A long adaptive overlap may be unavailable before local verification
+    // can even run, or its protected replacement may have arrived late.
+    // Neither failure permits the original long legacy overlap. Try one
+    // small protected mix from the live outgoing cursor and the same cue.
+    let recovery = (|| {
+        let active = state.engine.as_ref()?;
+        let incoming = state.next_engine.as_ref()?;
+        let mut transition = state
+            .next_engine
+            .as_ref()?
+            .job
+            .prepared_transition
+            .as_ref()?
+            .clone();
+        if !beat_sync::required(&transition.program)
+            || !prepared_dj_lookahead_matches_pair(
+                state,
+                transition.queue_generation,
+                transition.current_queue_item_id,
+                transition.next_queue_item_id,
+            )
+        {
+            return None;
+        }
+        let lookahead = state.dj_lookahead.as_ref()?;
+        if lookahead
+            .current
+            .as_ref()
+            .and_then(DjMediaRef::track_id)
+            .is_some_and(|track_id| track_id != active.track_id)
+            || lookahead
+                .next
+                .track_id()
+                .is_some_and(|track_id| track_id != incoming.track_id)
+        {
+            return None;
+        }
+        let (source_program, max_block_samples, cue_is_local) =
+            state.prepared_dj_mixer.as_ref().map_or_else(
+                || {
+                    (
+                        transition
+                            .program
+                            .clone()
+                            .rescaled_to(state.device_sample_rate.max(1)),
+                        DJ_MIXER_DEFAULT_MAX_BLOCK_FRAMES
+                            * usize::from(state.device_channels.max(1)),
+                        false,
+                    )
+                },
+                |prepared| (prepared.program.clone(), prepared.max_block_samples, true),
+            );
+        // Prepared Mixer cues address its captured buffer. A programme that
+        // never prepared still addresses source time; normalize that cue
+        // against the incoming buffer offset under the same mutex as PCM.
+        let incoming_offset_frames = {
+            let _buffer_guard = incoming.shared.buffer.lock().ok();
+            incoming
+                .shared
+                .position_offset_samples
+                .load(Ordering::Relaxed)
+                / u64::from(state.device_channels.max(1))
+        };
+        let mut protected = crate::playback::dj_engine::safe_crossfade_program(
+            state.device_sample_rate,
+            state.device_channels,
+            noor_mix::Policy {
+                default_crossfade_ms: 4_000,
+                ..Default::default()
+            },
+        );
+        protected.deck_b_start_frame = if cue_is_local {
+            source_program.deck_b_start_frame
+        } else {
+            source_program
+                .deck_b_start_frame
+                .saturating_sub(incoming_offset_frames)
+        };
+        protected.decision = source_program.decision;
+        if let Some(decision) = protected.decision.as_mut() {
+            decision.strategy = "SafeCrossfade".into();
+            decision.reason = "Long overlap could not join reliably; protected overlap rebuilt from current outgoing audio".into();
+            decision.incoming_entry_seconds =
+                incoming_offset_frames.saturating_add(protected.deck_b_start_frame) as f32
+                    / state.device_sample_rate.max(1) as f32;
+            decision.duration_beats = 0.0;
+            decision.incoming_drop_seconds = None;
+        }
+        transition.program = protected;
+        Some((transition, max_block_samples))
+    })();
+    let Some((transition, max_block_samples)) = recovery else {
+        return result;
+    };
+    let rebuilt = state
+        .next_engine
+        .as_ref()
+        .ok_or(DjRuntimeRendererReason::NextDeckNotDecoded)
+        .and_then(|incoming| {
+            build_prepared_dj_mixer_for_engine_at_start(
+                state,
+                &transition,
+                incoming,
+                max_block_samples,
+                true,
+            )
+        });
+    let recovery_result = rebuilt.and_then(|prepared| {
+        state.prepared_dj_mixer = Some(prepared);
+        install_prepared_handoff_mixer_buffer_once(state)
+    });
+    if recovery_result.is_ok() {
+        return recovery_result;
+    }
+    warn!(
+        reason = recovery_result.err().map(DjRuntimeRendererReason::as_str),
+        "DJ protected overlap could not join live audio; using a short seam cut"
+    );
+    arm_protected_handoff_cut(state, &transition.program);
+    Err(DjRuntimeRendererReason::ProtectedHandoffCut)
+}
+
+fn arm_protected_handoff_cut(
+    state: &mut PlaybackRuntimeLoopState,
+    protected_program: &noor_mix::TransitionProgram,
+) {
+    state.prepared_dj_mixer = None;
+    let cut_samples = u64::from(shared::DJ_HANDOFF_FADE_MS)
+        * u64::from(state.device_sample_rate.max(1))
+        * u64::from(state.device_channels.max(1))
+        / 1_000;
+    if let Some(outgoing) = state.engine.as_ref() {
+        outgoing
+            .shared
+            .crossfade_samples
+            .store(0, Ordering::Relaxed);
+        outgoing.shared.dj_fadeout_start_samples.store(
+            outgoing.shared.position_samples.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+    }
+    if let Some(incoming) = state.next_engine.as_mut() {
+        // Preserve the protected incoming cue when its decoded buffer is
+        // available. The recovery uses original source PCM, with unity rate.
+        if let Ok(mut buffer) = incoming.shared.buffer.lock() {
+            let cue = protected_program
+                .deck_b_start_frame
+                .saturating_mul(u64::from(state.device_channels.max(1)));
+            if cue < buffer.samples.len() as u64 {
+                buffer.read_pos = cue as usize;
+                incoming.shared.position_samples.store(
+                    incoming
+                        .shared
+                        .position_offset_samples
+                        .load(Ordering::Relaxed)
+                        .saturating_add(cue),
+                    Ordering::Relaxed,
+                );
+                incoming.shared.publish_source_position();
+            }
+        }
+        incoming
+            .shared
+            .crossfade_samples
+            .store(cut_samples, Ordering::Relaxed);
+        incoming.job.gapless.overlap_ms = shared::DJ_HANDOFF_FADE_MS as i32;
+        if let Some(transition) = incoming.job.prepared_transition.as_mut() {
+            let mut cut = noor_mix::planner::slam_cut_program(
+                state.device_sample_rate,
+                state.device_channels,
+                shared::DJ_HANDOFF_FADE_MS,
+            );
+            cut.deck_b_start_frame = incoming
+                .shared
+                .source_position_samples
+                .load(Ordering::Relaxed)
+                / u64::from(state.device_channels.max(1));
+            cut.decision = protected_program.decision.clone();
+            if let Some(decision) = cut.decision.as_mut() {
+                decision.strategy = "SlamCut".into();
+                decision.reason = "Decoded beat sync was unverified and the protected overlap could not join live audio; using a short seam cut".into();
+                decision.incoming_entry_seconds =
+                    cut.deck_b_start_frame as f32 / state.device_sample_rate.max(1) as f32;
+                decision.incoming_drop_seconds = None;
+                decision.duration_beats = 0.0;
+            }
+            transition.program = cut;
+        }
+    }
+}
+
+fn install_prepared_handoff_mixer_buffer_once(
+    state: &mut PlaybackRuntimeLoopState,
+) -> Result<(), DjRuntimeRendererReason> {
     let prepared = state
         .prepared_dj_mixer
         .as_ref()
@@ -1570,7 +1978,7 @@ fn install_prepared_handoff_mixer_buffer(
     // starts at? The rendered buffer must be joined at that offset or the
     // handoff replays (or drops) exactly that stretch of the outgoing track.
     let channels = usize::from(state.device_channels.max(1));
-    let live_deck_a_frame = {
+    let live_deck_a_output_frame = {
         let active = state
             .engine
             .as_ref()
@@ -1580,11 +1988,15 @@ fn install_prepared_handoff_mixer_buffer(
             .buffer
             .lock()
             .map_err(|_| DjRuntimeRendererReason::BufferLockFailed)?;
-        (guard.read_pos / channels) as u64
+        active
+            .shared
+            .position_offset_samples
+            .load(Ordering::Relaxed)
+            .saturating_add(guard.read_pos as u64)
+            / channels as u64
     };
-    let deck_a_start_frame = prepared.program.deck_a_start_frame;
     let resolve_at = prepared.program.resolve_at;
-    let skip_frames = live_deck_a_frame.saturating_sub(deck_a_start_frame);
+    let skip_frames = live_deck_a_output_frame.saturating_sub(prepared.deck_a_output_start_frame);
     // Joining past the halfway point means most of the transition already
     // "happened" while we weren't playing it; a plain fallback sounds better
     // than the tail of a blend.
@@ -1610,7 +2022,7 @@ fn install_prepared_handoff_mixer_buffer(
 
     let next = state
         .next_engine
-        .as_ref()
+        .as_mut()
         .ok_or(DjRuntimeRendererReason::NextDeckNotDecoded)?;
     let deck_b_consumed_frames = deck_b_consumed_frames(&prepared.program)
         .ok_or(DjRuntimeRendererReason::ProgramNotMixerRenderable)?;
@@ -1679,6 +2091,16 @@ fn install_prepared_handoff_mixer_buffer(
     );
     next.shared.publish_buffered_samples(guard.samples.len());
     next.shared.publish_source_position();
+    // Persist and expose the audio that actually executed, including the
+    // verified cue/rate or the protected short fallback. Buffer-local A
+    // positions must not escape as source-track cues.
+    if let Some(transition) = next.job.prepared_transition.as_mut() {
+        let mut executed = prepared.program.clone();
+        executed.deck_a_start_frame = 0;
+        executed.deck_b_start_frame =
+            original_offset_samples / channels as u64 + prepared.program.deck_b_start_frame;
+        transition.program = executed;
+    }
     next.shared.crossfade_samples.store(0, Ordering::Relaxed);
     next.shared
         .crossfade_start_signaled
@@ -1875,6 +2297,125 @@ fn can_prepare_dj_mixer_before_fire(state: &PlaybackRuntimeLoopState) -> bool {
             .load(Ordering::Relaxed)
 }
 
+/// The next decoder can pause at its high-water mark without ever reaching
+/// EOF. Wake the existing serialized completion handler when real PCM becomes
+/// sufficient instead of waiting for a notification that may never arrive.
+fn dj_pcm_readiness_wakeup(state: &PlaybackRuntimeLoopState) -> Option<PlaybackRuntimeCommand> {
+    let transition = adaptive_rhythmic_transition(state)?;
+    let active = state.engine.as_ref()?;
+    let incoming = state.next_engine.as_ref()?;
+    if active.shared.stopped.load(Ordering::Relaxed)
+        || incoming.shared.stopped.load(Ordering::Relaxed)
+        || active_engine_suppresses_crossfade_after_seek(state)
+        || !can_prepare_dj_mixer_before_fire(state)
+        || state
+            .dj_readiness_permanent_failure
+            .is_some_and(|failure| renderer_failure_matches_current_transition(state, failure))
+    {
+        return None;
+    }
+    let fired = active
+        .shared
+        .crossfade_start_signaled
+        .load(Ordering::Relaxed);
+    let prepared_matches = prepared_dj_mixer_matches_pair(state);
+    if (!fired && prepared_matches)
+        || (fired && (state.user_paused || active.shared.paused.load(Ordering::Relaxed)))
+    {
+        return None;
+    }
+    let program = transition
+        .program
+        .clone()
+        .rescaled_to(state.device_sample_rate.max(1));
+    let channels = u64::from(state.device_channels.max(1));
+    let next_buffer = crossfade_readiness_snapshot(incoming)?;
+    let full_incoming = next_buffer.base_ready
+        && adaptive_next_required_samples(state, next_buffer)
+            .is_some_and(|required| required != u64::MAX && next_buffer.unread_samples >= required);
+    let (full_outgoing, live_outgoing) = {
+        let buffer = active.shared.buffer.lock().ok()?;
+        let offset_frames = active
+            .shared
+            .position_offset_samples
+            .load(Ordering::Relaxed)
+            / channels;
+        let available_frames = buffer.samples.len() as u64 / channels;
+        let live_frame = buffer.read_pos as u64 / channels;
+        let start = if program.deck_a_start_frame == 0 {
+            match anchored_deck_a_output_frame(state, transition, active) {
+                Some(anchor) => anchor.checked_sub(offset_frames),
+                None => Some(live_frame),
+            }
+        } else {
+            Some(program.deck_a_start_frame)
+        };
+        let full = if fired && prepared_matches {
+            let prepared = state.prepared_dj_mixer.as_ref()?;
+            offset_frames
+                .saturating_add(live_frame)
+                .saturating_sub(prepared.deck_a_output_start_frame)
+                <= prepared.program.resolve_at / 2
+        } else {
+            start.is_some_and(|start| {
+                start.saturating_add(program.resolve_at) <= available_frames
+                    && (!fired || live_frame.saturating_sub(start) <= program.resolve_at / 2)
+            })
+        };
+        let protected_frames = u64::from(state.device_sample_rate.max(1)) * 9 / 2;
+        (
+            full,
+            live_frame.saturating_add(protected_frames) <= available_frames,
+        )
+    };
+    if !(full_incoming && full_outgoing) {
+        // A late anchor may have compacted away, or its midpoint may already
+        // have passed. The install helper then builds a fresh four-second
+        // protected overlap from live A, preserving the actual incoming cue.
+        let cue_samples = if prepared_matches {
+            state
+                .prepared_dj_mixer
+                .as_ref()?
+                .program
+                .deck_b_start_frame
+                .saturating_mul(channels)
+                .saturating_add(next_buffer.offset_samples)
+        } else {
+            program.deck_b_start_frame.saturating_mul(channels)
+        };
+        let protected_samples = u64::from(state.device_sample_rate.max(1)) * channels * 9 / 2;
+        let protected_incoming = cue_samples
+            .checked_sub(next_buffer.offset_samples)
+            .is_some_and(|cue| {
+                next_buffer.base_ready
+                    && cue.saturating_add(protected_samples) <= next_buffer.decoded_samples
+            });
+        if !fired || full_outgoing || !live_outgoing || !protected_incoming {
+            return None;
+        }
+    }
+    Some(PlaybackRuntimeCommand::NextDecodeComplete {
+        track_id: incoming.track_id,
+        generation: incoming.generation,
+    })
+}
+
+fn crossfade_readiness_snapshot(engine: &PlaybackEngine) -> Option<CrossfadeReadinessSnapshot> {
+    let buffer = engine.shared.buffer.lock().ok()?;
+    Some(CrossfadeReadinessSnapshot {
+        base_ready: buffer.is_ready(),
+        finished: buffer.finished,
+        unread_samples: buffer.samples.len().saturating_sub(buffer.read_pos) as u64,
+        decoded_samples: buffer.samples.len() as u64,
+        read_samples: buffer.read_pos as u64,
+        offset_samples: engine
+            .shared
+            .position_offset_samples
+            .load(Ordering::Relaxed),
+        start_threshold_samples: buffer.start_threshold_samples as u64,
+    })
+}
+
 fn resolved_analysis_stream_in_state(
     state: &PlaybackRuntimeLoopState,
     track_id: i64,
@@ -1919,6 +2460,7 @@ fn prepare_dj_mixer_for_pair(
         Ok(prepared) => {
             state.prepared_dj_mixer = Some(prepared);
             state.last_dj_renderer_failure = None;
+            state.dj_readiness_permanent_failure = None;
             Ok(())
         }
         Err(reason) => {
@@ -2016,6 +2558,7 @@ fn start_prepared_overlay(
                 .as_str()
                 .to_string(),
             runtime_renderer_reason: runtime_renderer_reason.as_str().to_string(),
+            runtime_program_json: None,
         });
     }
     Ok(())
@@ -2141,6 +2684,7 @@ fn update_prepared_transition_in_state(
     let job = next.job.clone();
     state.prepared_dj_mixer = None;
     state.last_dj_renderer_failure = None;
+    state.dj_readiness_permanent_failure = None;
     arm_active_transition_window(state, &job)
 }
 
@@ -2166,6 +2710,7 @@ fn arm_active_transition_window(
     if samples == 0 {
         return false;
     }
+    state.dj_readiness_permanent_failure = None;
     engine
         .shared
         .crossfade_samples
@@ -2312,6 +2857,7 @@ fn set_dj_engine_enabled_in_state(state: &mut PlaybackRuntimeLoopState, enabled:
     state.prepared_dj_mixer = None;
     state.prepared_drop_preview_mixer = None;
     state.last_dj_renderer_failure = None;
+    state.dj_readiness_permanent_failure = None;
     if let Some(engine) = state.engine.as_ref() {
         engine.shared.clear_drop_preview_trigger();
     }
@@ -2370,6 +2916,7 @@ fn run_runtime_loop(
         prepared_dj_mixer: None,
         prepared_drop_preview_mixer: None,
         last_dj_renderer_failure: None,
+        dj_readiness_permanent_failure: None,
         user_paused: false,
         silent_start_streak: 0,
     };
@@ -2386,8 +2933,21 @@ fn run_runtime_loop(
     );
 
     let mut stall_tracker = StallTracker::new();
+    let mut last_dj_readiness_check = Instant::now();
     loop {
-        let command = match command_rx.recv_timeout(STALL_WATCHDOG_TICK) {
+        // Check between commands as well as on idle ticks: a busy cockpit
+        // must not starve preparation or a decode-delayed handoff. Dispatch
+        // directly, retaining this loop's generation checks and panic guard.
+        let readiness_wakeup = if last_dj_readiness_check.elapsed() >= STALL_WATCHDOG_TICK {
+            last_dj_readiness_check = Instant::now();
+            dj_pcm_readiness_wakeup(&state)
+        } else {
+            None
+        };
+        let command = match readiness_wakeup
+            .map(Ok)
+            .unwrap_or_else(|| command_rx.recv_timeout(STALL_WATCHDOG_TICK))
+        {
             Ok(command) => command,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 // Emit any warns the audio callback latched (underrun,
@@ -2639,6 +3199,7 @@ fn run_runtime_loop(
                                     .store(false, Ordering::Relaxed);
                             }
                             state.prepared_dj_mixer = None;
+                            state.dj_readiness_permanent_failure = None;
                             let outcome = if suppressed {
                                 SeekToOutcome::DispatchedCrossfadeSuppressed
                             } else {
@@ -2884,19 +3445,13 @@ fn run_runtime_loop(
                             .as_ref()
                             .map(|e| e.shared.crossfade_samples.load(Ordering::Relaxed))
                             .unwrap_or(0);
-                        let next_ready = state
+                        let next_buffer = state
                             .next_engine
                             .as_ref()
-                            .and_then(|e| {
-                                e.shared.buffer.lock().ok().map(|g| {
-                                    let unread = g.samples.len().saturating_sub(g.read_pos) as u64;
-                                    crossfade_next_ready(
-                                        g.is_ready(),
-                                        g.finished,
-                                        unread,
-                                        crossfade_samples,
-                                    )
-                                })
+                            .and_then(crossfade_readiness_snapshot);
+                        let next_ready = next_buffer
+                            .map(|buffer| {
+                                dj_crossfade_next_ready(&state, buffer, crossfade_samples)
                             })
                             .unwrap_or(false);
                         if next_ready && !active_engine_suppresses_crossfade_after_seek(&state) {
@@ -2967,6 +3522,89 @@ fn run_runtime_loop(
                                 );
                             }
                         } else if !active_engine_suppresses_crossfade_after_seek(&state) {
+                            let incoming = state.next_engine.as_ref();
+                            let incoming_rate = incoming.map(|engine| {
+                                engine
+                                    .shared
+                                    .target_sample_rate
+                                    .load(Ordering::Relaxed)
+                                    .max(1)
+                            });
+                            let runtime_samples_per_second =
+                                f64::from(state.device_sample_rate.max(1))
+                                    * f64::from(state.device_channels.max(1));
+                            let incoming_samples_per_second =
+                                f64::from(incoming_rate.unwrap_or(state.device_sample_rate).max(1))
+                                    * f64::from(state.device_channels.max(1));
+                            let program = incoming
+                                .and_then(|engine| engine.job.prepared_transition.as_ref())
+                                .map(|transition| {
+                                    transition
+                                        .program
+                                        .clone()
+                                        .rescaled_to(state.device_sample_rate.max(1))
+                                });
+                            let program_required_seconds = program.as_ref().and_then(|program| {
+                                deck_b_consumed_frames(program).map(|consumed| {
+                                    program.deck_b_start_frame.saturating_add(consumed) as f64
+                                        / f64::from(state.device_sample_rate.max(1))
+                                })
+                            });
+                            let reason = runtime_renderer_fire_block_reason(&state, next_ready);
+                            info!(
+                                outgoing_track_id = track_id,
+                                next_track_id = incoming.map(|engine| engine.track_id),
+                                transition_event_id = incoming
+                                    .and_then(|engine| engine.job.prepared_transition.as_ref())
+                                    .and_then(|transition| transition.transition_event_id),
+                                reason = reason.as_str(),
+                                next_present = incoming.is_some(),
+                                buffer_lock_ok = next_buffer.is_some(),
+                                base_ready = next_buffer.map(|buffer| buffer.base_ready),
+                                finished = next_buffer.map(|buffer| buffer.finished),
+                                incoming_unread_seconds = next_buffer
+                                    .map(|buffer| buffer.unread_samples as f64
+                                        / incoming_samples_per_second),
+                                incoming_unread_runtime_seconds = next_buffer
+                                    .map(|buffer| buffer.unread_samples as f64
+                                        / runtime_samples_per_second),
+                                incoming_decoded_samples =
+                                    next_buffer.map(|buffer| buffer.decoded_samples),
+                                incoming_read_samples =
+                                    next_buffer.map(|buffer| buffer.read_samples),
+                                incoming_offset_samples =
+                                    next_buffer.map(|buffer| buffer.offset_samples),
+                                start_threshold_samples =
+                                    next_buffer.map(|buffer| buffer.start_threshold_samples),
+                                required_long_seconds =
+                                    crossfade_samples.saturating_add(crossfade_samples / 8) as f64
+                                        / runtime_samples_per_second,
+                                required_program_source_seconds = program_required_seconds,
+                                required_adaptive_unread_seconds = next_buffer
+                                    .and_then(|buffer| adaptive_next_required_samples(
+                                        &state, buffer
+                                    ))
+                                    .map(|samples| samples as f64 / runtime_samples_per_second),
+                                runtime_sample_rate = state.device_sample_rate,
+                                output_config_sample_rate = output_config.sample_rate,
+                                incoming_engine_sample_rate =
+                                    incoming.map(|engine| engine.shared.device_sample_rate),
+                                incoming_decoder_target_sample_rate = incoming_rate,
+                                outgoing_engine_sample_rate = state
+                                    .engine
+                                    .as_ref()
+                                    .map(|engine| engine.shared.device_sample_rate),
+                                outgoing_decoder_target_sample_rate =
+                                    state.engine.as_ref().map(|engine| engine
+                                        .shared
+                                        .target_sample_rate
+                                        .load(Ordering::Relaxed)),
+                                prepared_mixer_matches = prepared_dj_mixer_matches_pair(&state),
+                                last_prepare_failure = state
+                                    .last_dj_renderer_failure
+                                    .map(|failure| failure.reason.as_str()),
+                                "DJ transition fire blocked by incoming audio readiness"
+                            );
                             // The next deck can't back the full fade in time. Silence the
                             // outgoing track's own fade-out so it plays at full volume to its
                             // end rather than fading down into a gap; the boundary then makes a
@@ -2974,7 +3612,6 @@ fn run_runtime_loop(
                             if let Some(active) = state.engine.as_ref() {
                                 active.shared.crossfade_samples.store(0, Ordering::Relaxed);
                             }
-                            let reason = runtime_renderer_fire_block_reason(&state, next_ready);
                             record_current_runtime_renderer_failure(&mut state, reason);
                         }
                         // If not ready yet, NextDecodeComplete handles the late path.
@@ -4053,6 +4690,7 @@ fn stop_current_engine(state: &mut PlaybackRuntimeLoopState) {
 }
 
 fn stop_all_engines(state: &mut PlaybackRuntimeLoopState) {
+    state.dj_readiness_permanent_failure = None;
     state.prepared_dj_mixer = None;
     state.prepared_drop_preview_mixer = None;
     // Retire as one batch so the audible decks share a single fade window
@@ -4279,6 +4917,115 @@ fn crossfade_next_ready(
     unread_samples >= crossfade_samples.saturating_add(margin)
 }
 
+fn adaptive_rhythmic_transition(
+    state: &PlaybackRuntimeLoopState,
+) -> Option<&PreparedTransitionProgram> {
+    let active = state.engine.as_ref()?;
+    let incoming = state.next_engine.as_ref()?;
+    let transition = incoming.job.prepared_transition.as_ref()?;
+    let lookahead = state.dj_lookahead.as_ref()?;
+    (state.dj_engine_enabled
+        && beat_sync::required(&transition.program)
+        && lookahead.matches_pair(
+            transition.queue_generation,
+            transition.current_queue_item_id,
+            transition.next_queue_item_id,
+        )
+        && lookahead
+            .current
+            .as_ref()
+            .and_then(DjMediaRef::track_id)
+            .is_none_or(|id| id == active.track_id)
+        && lookahead
+            .next
+            .track_id()
+            .is_none_or(|id| id == incoming.track_id)
+        && active.shared.target_sample_rate.load(Ordering::Relaxed) == state.device_sample_rate
+        && incoming.shared.target_sample_rate.load(Ordering::Relaxed) == state.device_sample_rate
+        && incoming.shared.device_channels == state.device_channels)
+        .then_some(transition)
+}
+
+fn adaptive_next_required_samples(
+    state: &PlaybackRuntimeLoopState,
+    buffer: CrossfadeReadinessSnapshot,
+) -> Option<u64> {
+    let transition = adaptive_rhythmic_transition(state)?;
+    if prepared_dj_mixer_matches_pair(state) {
+        let prepared = state.prepared_dj_mixer.as_ref()?;
+        if handoff_mixer_program(&prepared.program) {
+            let channels = u64::from(state.device_channels.max(1));
+            let cue = prepared.program.deck_b_start_frame.saturating_mul(channels);
+            if cue < buffer.read_samples {
+                return Some(u64::MAX);
+            }
+            // Verification has already completed. Install the actual rendered
+            // programme, including a shorter protected replacement, using its
+            // corrected consumption and continuation rather than the original
+            // plan's larger analysis budget.
+            let frames = deck_b_consumed_frames(&prepared.program)?
+                .saturating_add(2)
+                .saturating_add(u64::from(state.device_sample_rate.max(1)) / 2);
+            return Some(
+                cue.saturating_add(frames.saturating_mul(channels))
+                    .saturating_sub(buffer.read_samples),
+            );
+        }
+    }
+    let program = transition
+        .program
+        .clone()
+        .rescaled_to(state.device_sample_rate.max(1));
+    let beats = f64::from(program.decision.as_ref()?.duration_beats);
+    if !beats.is_finite() || beats <= 0.0 {
+        return None;
+    }
+    let channels = u64::from(state.device_channels.max(1));
+    let cue = program.deck_b_start_frame.saturating_mul(channels);
+    if cue < buffer.offset_samples {
+        return Some(u64::MAX);
+    }
+    // Bound the whole decoded beat-fit window and any verified rate/cue
+    // correction, then retain half a second of source continuation. The
+    // outgoing countdown length is not the incoming programme's PCM demand.
+    let verification_frames = |candidate: &noor_mix::TransitionProgram| {
+        let beats = f64::from(candidate.decision.as_ref().unwrap().duration_beats);
+        (candidate.resolve_at as f64 * 1.03
+            + candidate.resolve_at as f64 / beats * 1.06
+            + f64::from(state.device_sample_rate.max(1)) * 0.5)
+            .ceil() as u64
+            + 1
+    };
+    // Eligible shorter bass phrases are independently verified at build
+    // time. Requiring the rejected long analysis budget would prevent them
+    // from ever preparing while the next decoder is below that watermark.
+    let frames = beat_sync::musical_prefixes(&program)
+        .iter()
+        .map(verification_frames)
+        .fold(verification_frames(&program), u64::min);
+    Some(
+        cue.saturating_add(frames.saturating_mul(channels))
+            .saturating_sub(buffer.offset_samples.saturating_add(buffer.read_samples)),
+    )
+}
+
+fn dj_crossfade_next_ready(
+    state: &PlaybackRuntimeLoopState,
+    buffer: CrossfadeReadinessSnapshot,
+    crossfade_samples: u64,
+) -> bool {
+    match adaptive_next_required_samples(state, buffer) {
+        Some(u64::MAX) => false,
+        Some(required) => buffer.finished || buffer.base_ready && buffer.unread_samples >= required,
+        None => crossfade_next_ready(
+            buffer.base_ready,
+            buffer.finished,
+            buffer.unread_samples,
+            crossfade_samples,
+        ),
+    }
+}
+
 fn promote_next_to_active(
     state: &mut PlaybackRuntimeLoopState,
     event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
@@ -4299,13 +5046,30 @@ fn promote_next_to_active(
         .prepared_transition
         .as_ref()
         .and_then(|transition| transition.transition_event_id);
+    let runtime_program_json = (runtime_renderer.rendered
+        || runtime_renderer.reason == DjRuntimeRendererReason::ProtectedHandoffCut)
+        .then(|| {
+            next.job
+                .prepared_transition
+                .as_ref()
+                .and_then(|transition| serde_json::to_string(&transition.program).ok())
+        })
+        .flatten();
     if runtime_renderer.rendered {
         next.shared.crossfade_samples.store(0, Ordering::Relaxed);
         next.shared
             .fadein_start_samples
             .store(u64::MAX, Ordering::Relaxed);
     } else {
-        next.shared.fadein_start_samples.store(0, Ordering::Relaxed);
+        let fadein_start =
+            if runtime_renderer.reason == DjRuntimeRendererReason::ProtectedHandoffCut {
+                next.shared.position_samples.load(Ordering::Relaxed)
+            } else {
+                0
+            };
+        next.shared
+            .fadein_start_samples
+            .store(fadein_start, Ordering::Relaxed);
     }
     // Honor the user-pause latch: crossfade promotion must not un-pause a
     // deck behind the user's back (the paused-button-but-audio-playing bug).
@@ -4383,6 +5147,7 @@ fn promote_next_to_active(
                 runtime_rendered_dj_mixer: runtime_renderer.rendered,
                 runtime_renderer_status: runtime_renderer.status.as_str().to_string(),
                 runtime_renderer_reason: runtime_renderer.reason.as_str().to_string(),
+                runtime_program_json,
             });
         }
         // Tell the routes layer that the audible "current" track has flipped.
@@ -4475,6 +5240,7 @@ fn promote_prepared_at_boundary(
                 actual_start_ms: boundary_handoff_ms,
                 runtime_planned_start_ms: None,
                 timing_status: "missed".to_string(),
+                runtime_program_json: None,
                 runtime_rendered_dj_mixer: false,
                 runtime_renderer_status: runtime_renderer.status.as_str().to_string(),
                 runtime_renderer_reason: runtime_renderer.reason.as_str().to_string(),
@@ -6512,6 +7278,1120 @@ mod tests {
     }
 
     #[test]
+    fn rhythmic_render_locks_decoded_kicks_across_the_whole_overlap() {
+        let mut state = test_runtime_loop_state();
+        start_dj_lookahead_in_state(
+            &mut state,
+            Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+            Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+            Some(11),
+            Some(12),
+            20,
+            48_000,
+        );
+        fn kicks(bpm: f64, phase: f64, channel: usize, hz: f64) -> Vec<f32> {
+            let mut pcm = vec![0.0; 48_000 * 18 * 2];
+            let mut beat = phase;
+            while beat < 18.0 {
+                let start = (beat * 48_000.0).round() as usize;
+                for frame in 0..2400 {
+                    let t = frame as f64 / 48_000.0;
+                    let sample = (2.0 * std::f64::consts::PI * hz * t).cos() * (-t * 80.0).exp();
+                    if (start + frame) * 2 + channel < pcm.len() {
+                        pcm[(start + frame) * 2 + channel] += sample as f32;
+                    }
+                }
+                beat += 60.0 / bpm;
+            }
+            pcm
+        }
+        let active = test_engine_with_shared(1, 20);
+        finish_engine_buffer(&active, &kicks(121.0, 0.173, 0, 60.0));
+        let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+        transition.program = noor_mix::planner::bass_swap_16_program(48_000, 2, 12_000);
+        transition.program.automation = [noor_mix::DeckId::A, noor_mix::DeckId::B]
+            .into_iter()
+            .map(|deck| noor_mix::AutomationEvent {
+                param: noor_mix::Param::DeckGain(deck),
+                start_sample: 0,
+                end_sample: 576_000,
+                from: 0.35,
+                to: 0.35,
+                curve: noor_mix::Curve::Linear,
+            })
+            .collect();
+        transition
+            .program
+            .automation
+            .push(noor_mix::AutomationEvent {
+                param: noor_mix::Param::PlaybackRate(noor_mix::DeckId::B),
+                start_sample: 0,
+                end_sample: 576_000,
+                from: 0.98,
+                to: 0.98,
+                curve: noor_mix::Curve::Linear,
+            });
+        transition.program.decision = Some(noor_mix::program::TransitionDecision {
+            strategy: "BassSwap16".into(),
+            confidence: 0.65,
+            score: 0.8,
+            reason: "Rhythmic overlap".into(),
+            energy_direction: "steady".into(),
+            incoming_entry_seconds: 0.0,
+            incoming_drop_seconds: None,
+            outgoing_window: "phrase_end".into(),
+            duration_beats: 24.0,
+            candidates: vec![],
+        });
+        let mut next = test_engine_with_shared(2, 21);
+        next.job = PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition);
+        finish_engine_buffer(&next, &kicks(122.0, 0.031, 1, 110.0));
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+        prepare_dj_mixer_for_pair(&mut state, 1024).unwrap();
+        let prepared = state.prepared_dj_mixer.as_ref().unwrap();
+        let rate = prepared
+            .program
+            .automation
+            .iter()
+            .find(|event| event.param == noor_mix::Param::PlaybackRate(noor_mix::DeckId::B))
+            .unwrap()
+            .to as f64;
+        assert!(
+            (rate - 121.0 / 122.0).abs() < 0.001,
+            "tempo lock must come from actual PCM, rate={rate}"
+        );
+        let cue = prepared.program.deck_b_start_frame as f64 / 48_000.0;
+        let incoming_first = (0.031 + 60.0 / 122.0 - cue) / rate;
+        assert!(
+            (incoming_first - 0.173).abs() < 0.02,
+            "phase must lock at the seam, cue={cue}"
+        );
+        // Verify actual rendered stereo PCM, with the two decks isolated into
+        // different channels: every beat remains aligned, not just the first.
+        for beat in 2..22 {
+            let expected = (0.173 + beat as f64 * 60.0 / 121.0) * 48_000.0;
+            let peak = |channel: usize| {
+                let center = expected as usize;
+                ((center - 1200)..(center + 1200))
+                    .max_by(|a, b| {
+                        prepared.rendered[*a * 2 + channel]
+                            .abs()
+                            .total_cmp(&prepared.rendered[*b * 2 + channel].abs())
+                    })
+                    .unwrap()
+            };
+            assert!(
+                peak(0).abs_diff(peak(1)) < 960,
+                "rendered kicks drifted on beat {beat}"
+            );
+        }
+        let verified_cue = prepared.program.deck_b_start_frame;
+        install_prepared_handoff_mixer_buffer(&mut state).unwrap();
+        let executed = &state
+            .next_engine
+            .as_ref()
+            .unwrap()
+            .job
+            .prepared_transition
+            .as_ref()
+            .unwrap()
+            .program;
+        assert_eq!(executed.deck_b_start_frame, verified_cue);
+        assert!(
+            executed
+                .decision
+                .as_ref()
+                .unwrap()
+                .reason
+                .contains("verified in the decoded mix window")
+        );
+    }
+
+    #[test]
+    fn long_bass_mix_verifies_musical_prefixes_before_using_a_protected_overlap() {
+        // All alternatives retain the same source starts. A missing/drifting
+        // tail can shorten the overlap, but cannot certify an unstable prefix.
+        for (name, jump_after, stop_after, incoming_seconds, expected_beats, expected_seconds) in [
+            ("stable full window", None, None, 30, 48.0, 24),
+            ("late phase jump", Some(18.0), None, 30, 32.0, 16),
+            ("vanishing tail percussion", None, Some(18.0), 30, 32.0, 16),
+            ("only longer prefix decoded", None, None, 20, 32.0, 16),
+            ("only shorter prefix decoded", None, None, 11, 16.0, 8),
+            ("unstable prefixes", Some(4.0), None, 30, 0.0, 4),
+        ] {
+            let mut state = test_runtime_loop_state();
+            start_dj_lookahead_in_state(
+                &mut state,
+                Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+                Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+                Some(11),
+                Some(12),
+                20,
+                48_000,
+            );
+            let kicks = |seconds: usize, jump: Option<f64>, stop: Option<f64>| {
+                let mut pcm = vec![0.0; seconds * 48_000 * 2];
+                for beat in 0..seconds * 2 {
+                    let time = 0.02 + beat as f64 * 0.5;
+                    if stop.is_some_and(|end| time >= end) {
+                        break;
+                    }
+                    let actual = time
+                        + if jump.is_some_and(|after| time >= after) {
+                            0.17
+                        } else {
+                            0.0
+                        };
+                    let start = (actual * 48_000.0).round() as usize;
+                    for frame in 0..2400 {
+                        let t = frame as f64 / 48_000.0;
+                        let kick = ((2.0 * std::f64::consts::PI * 60.0 * t).cos()
+                            * (-t * 80.0).exp()) as f32;
+                        for channel in 0..2 {
+                            if let Some(sample) = pcm.get_mut((start + frame) * 2 + channel) {
+                                *sample = kick;
+                            }
+                        }
+                    }
+                }
+                pcm
+            };
+            let active = test_engine_with_shared(1, 20);
+            finish_engine_buffer(&active, &kicks(30, jump_after, stop_after));
+            active
+                .shared
+                .total_samples
+                .store(30 * 96_000, Ordering::Relaxed);
+            active.shared.buffer.lock().unwrap().read_pos = 48_000 * 2;
+            active
+                .shared
+                .position_samples
+                .store(48_000 * 2, Ordering::Relaxed);
+            let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+            transition.program = noor_mix::planner::bass_swap_32_program(48_000, 2, 24_000);
+            transition.program.deck_a_start_frame = 48_000;
+            transition.program.deck_b_start_frame = 48_000;
+            transition.program.decision = Some(noor_mix::program::TransitionDecision {
+                strategy: "BassSwap32".into(),
+                confidence: 0.9,
+                score: 0.8,
+                reason: "Long rhythmic bass swap".into(),
+                energy_direction: "steady".into(),
+                incoming_entry_seconds: 1.0,
+                incoming_drop_seconds: None,
+                outgoing_window: "phrase_end".into(),
+                duration_beats: 48.0,
+                candidates: vec![],
+            });
+            let original = transition.program.clone();
+            let mut next = test_engine_with_shared(2, 21);
+            next.job =
+                PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition);
+            // The short-window cases deliberately never emit decode EOF.
+            next.shared.buffer.lock().unwrap().samples = kicks(incoming_seconds, None, None);
+            state.engine = Some(active);
+            state.next_engine = Some(next);
+            let buffer = crossfade_readiness_snapshot(state.next_engine.as_ref().unwrap()).unwrap();
+            assert!(
+                dj_crossfade_next_ready(&state, buffer, 24 * 96_000),
+                "{name}"
+            );
+            assert!(dj_pcm_readiness_wakeup(&state).is_some(), "{name}");
+
+            prepare_dj_mixer_for_pair(&mut state, 1024).unwrap();
+            let prepared = state.prepared_dj_mixer.as_ref().unwrap();
+            let expected_template = if expected_beats == 48.0 {
+                "BassSwap32"
+            } else if expected_beats > 0.0 {
+                "BassSwap16"
+            } else {
+                "SafeCrossfade"
+            };
+            assert_eq!(prepared.program.template, expected_template, "{name}");
+            assert_eq!(
+                prepared.program.resolve_at,
+                expected_seconds * 48_000,
+                "{name}"
+            );
+            assert_eq!(
+                prepared.program.decision.as_ref().unwrap().duration_beats,
+                expected_beats,
+                "{name}"
+            );
+            assert_eq!(
+                prepared.program.deck_a_start_frame, original.deck_a_start_frame,
+                "{name}"
+            );
+            assert!(
+                prepared
+                    .program
+                    .deck_b_start_frame
+                    .abs_diff(original.deck_b_start_frame)
+                    < 960,
+                "{name}"
+            );
+            if expected_beats > 0.0 && expected_beats < 48.0 {
+                assert!(
+                    prepared
+                        .program
+                        .decision
+                        .as_ref()
+                        .unwrap()
+                        .reason
+                        .contains("shorter verified phrase"),
+                    "{name}"
+                );
+                // Keep the existing envelope/EQ shape and values; only its
+                // musical timeline is compressed to the verified phrase.
+                for event in original
+                    .automation
+                    .iter()
+                    .filter(|event| !matches!(event.param, noor_mix::Param::PlaybackRate(_)))
+                {
+                    let actual = prepared
+                        .program
+                        .automation
+                        .iter()
+                        .find(|actual| {
+                            actual.param == event.param
+                                && actual.from == event.from
+                                && actual.to == event.to
+                        })
+                        .unwrap();
+                    assert_eq!(actual.curve, event.curve);
+                }
+                noor_mix::planner::safety::validate_audio_safety(
+                    &prepared.program,
+                    &Default::default(),
+                )
+                .unwrap();
+            }
+            install_prepared_handoff_mixer_buffer(&mut state).unwrap();
+            let incoming = state.next_engine.as_ref().unwrap();
+            let executed = &incoming.job.prepared_transition.as_ref().unwrap().program;
+            assert_eq!(executed.template, expected_template, "{name}");
+            assert_eq!(
+                executed.decision.as_ref().unwrap().duration_beats,
+                expected_beats,
+                "{name}"
+            );
+            assert_eq!(
+                incoming
+                    .shared
+                    .handoff_timeline
+                    .snapshot()
+                    .unwrap()
+                    .source_start,
+                executed.deck_b_start_frame,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn musical_bass_prefixes_do_not_alter_drops_loops_or_other_strategies() {
+        let mut program = noor_mix::planner::bass_swap_32_program(48_000, 2, 24_000);
+        program.decision = Some(noor_mix::program::TransitionDecision {
+            strategy: "BassSwap32".into(),
+            confidence: 0.9,
+            score: 0.8,
+            reason: "Bass swap".into(),
+            energy_direction: "steady".into(),
+            incoming_entry_seconds: 0.0,
+            incoming_drop_seconds: None,
+            outgoing_window: "phrase_end".into(),
+            duration_beats: 48.0,
+            candidates: vec![],
+        });
+        assert_eq!(beat_sync::musical_prefixes(&program).len(), 2);
+        let mut drop = program.clone();
+        drop.decision.as_mut().unwrap().incoming_drop_seconds = Some(24.0);
+        assert!(beat_sync::musical_prefixes(&drop).is_empty());
+        let mut verified_drop = program.clone();
+        verified_drop.drop_source = Some("manual".into());
+        assert!(beat_sync::musical_prefixes(&verified_drop).is_empty());
+        let mut looped = program.clone();
+        looped.loops.push(noor_mix::program::LoopRegion {
+            deck: noor_mix::DeckId::B,
+            start_frame: 0,
+            end_frame: 48_000,
+        });
+        assert!(beat_sync::musical_prefixes(&looped).is_empty());
+        program.template = "ClubMix".into();
+        assert!(beat_sync::musical_prefixes(&program).is_empty());
+    }
+
+    #[test]
+    fn verified_drop_mix_preserves_source_cues_with_a_nonzero_incoming_offset() {
+        let mut state = test_runtime_loop_state();
+        start_dj_lookahead_in_state(
+            &mut state,
+            Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+            Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+            Some(11),
+            Some(12),
+            20,
+            48_000,
+        );
+        let mut pcm = vec![0.0; 18 * 48_000 * 2];
+        for beat in 0..36 {
+            let start = ((0.02 + beat as f64 * 0.5) * 48_000.0).round() as usize;
+            for frame in 0..2400 {
+                let t = frame as f64 / 48_000.0;
+                let kick =
+                    ((2.0 * std::f64::consts::PI * 60.0 * t).cos() * (-t * 80.0).exp()) as f32;
+                for channel in 0..2 {
+                    if let Some(sample) = pcm.get_mut((start + frame) * 2 + channel) {
+                        *sample = kick;
+                    }
+                }
+            }
+        }
+        let active = test_engine_with_shared(1, 20);
+        finish_engine_buffer(&active, &pcm);
+        let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+        transition.program = noor_mix::planner::bass_swap_16_program(48_000, 2, 12_000);
+        transition.program.template = "DropSwap".into();
+        transition.program.drop_source = Some("manual".into());
+        transition.program.deck_b_start_frame = 2 * 48_000;
+        let source_drop = 2.0 + transition.program.swap_start as f32 / 48_000.0;
+        transition.program.decision = Some(noor_mix::program::TransitionDecision {
+            strategy: "DropSwap".into(),
+            confidence: 0.9,
+            score: 0.8,
+            reason: "Verified source drop".into(),
+            energy_direction: "lift".into(),
+            incoming_entry_seconds: 2.0,
+            incoming_drop_seconds: Some(source_drop),
+            outgoing_window: "phrase_end".into(),
+            duration_beats: 24.0,
+            candidates: vec![],
+        });
+        let mut next = test_engine_with_shared(2, 21);
+        next.job = PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition);
+        // A restart decoded from source second one. Both its source cue and
+        // drop remain absolute source positions, while Mixer indexes local PCM.
+        next.shared
+            .position_offset_samples
+            .store(48_000 * 2, Ordering::Relaxed);
+        next.shared
+            .position_samples
+            .store(48_000 * 2, Ordering::Relaxed);
+        finish_engine_buffer(&next, &pcm[48_000 * 2..]);
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+
+        prepare_dj_mixer_for_pair(&mut state, 1024).unwrap();
+        let prepared = state.prepared_dj_mixer.as_ref().unwrap();
+        assert_eq!(prepared.program.template, "DropSwap");
+        let source_cue = 48_000 + prepared.program.deck_b_start_frame;
+        assert!(source_cue.abs_diff(2 * 48_000) <= 1440);
+        let decision = prepared.program.decision.as_ref().unwrap();
+        assert!(
+            (f64::from(decision.incoming_entry_seconds) - source_cue as f64 / 48_000.0).abs()
+                <= 1.0 / 48_000.0,
+            "verified decision must describe the actual source cue"
+        );
+        assert_eq!(decision.incoming_drop_seconds, Some(source_drop));
+        assert!(
+            decision
+                .reason
+                .contains("verified in the decoded mix window")
+        );
+        let rate = prepared
+            .program
+            .automation
+            .iter()
+            .find(|event| event.param == noor_mix::Param::PlaybackRate(noor_mix::DeckId::B))
+            .unwrap()
+            .to;
+        let arrival =
+            decision.incoming_entry_seconds + prepared.program.swap_start as f32 * rate / 48_000.0;
+        assert!((arrival - source_drop).abs() <= 0.03);
+
+        install_prepared_handoff_mixer_buffer(&mut state).unwrap();
+        let next = state.next_engine.as_ref().unwrap();
+        let executed = &next.job.prepared_transition.as_ref().unwrap().program;
+        assert_eq!(executed.template, "DropSwap");
+        assert_eq!(executed.deck_b_start_frame, source_cue);
+        assert_eq!(
+            next.shared
+                .handoff_timeline
+                .snapshot()
+                .unwrap()
+                .source_start,
+            source_cue
+        );
+        assert_eq!(
+            executed.decision.as_ref().unwrap().incoming_drop_seconds,
+            Some(source_drop)
+        );
+        assert!(
+            (executed.decision.as_ref().unwrap().incoming_entry_seconds
+                - source_cue as f32 / 48_000.0)
+                .abs()
+                <= 1.0 / 48_000.0
+        );
+    }
+
+    #[test]
+    fn unverified_rhythmic_audio_uses_a_short_protected_render() {
+        let mut state = test_runtime_loop_state();
+        start_dj_lookahead_in_state(
+            &mut state,
+            Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+            Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+            Some(11),
+            Some(12),
+            20,
+            48_000,
+        );
+        let active = test_engine_with_shared(1, 20);
+        let pcm: Vec<f32> = (0..48_000 * 18 * 2)
+            .map(|sample| ((sample / 2) as f32 * 0.01).sin() * 0.2)
+            .collect();
+        finish_engine_buffer(&active, &pcm);
+        let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+        transition.program = noor_mix::planner::bass_swap_16_program(48_000, 2, 12_000);
+        transition.program.decision = Some(noor_mix::program::TransitionDecision {
+            strategy: "BassSwap16".into(),
+            confidence: 0.65,
+            score: 0.8,
+            reason: "Rhythmic overlap".into(),
+            energy_direction: "steady".into(),
+            incoming_entry_seconds: 0.0,
+            incoming_drop_seconds: None,
+            outgoing_window: "phrase_end".into(),
+            duration_beats: 24.0,
+            candidates: vec![],
+        });
+        let mut next = test_engine_with_shared(2, 21);
+        next.job = PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition);
+        finish_engine_buffer(&next, &pcm);
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+        prepare_dj_mixer_for_pair(&mut state, 1024).unwrap();
+        let prepared = state.prepared_dj_mixer.as_ref().unwrap();
+        assert_eq!(prepared.program.template, "SafeCrossfade");
+        assert_eq!(prepared.program.resolve_at, 4 * 48_000);
+        assert!(
+            prepared
+                .program
+                .automation
+                .iter()
+                .all(|event| !matches!(event.param, noor_mix::Param::PlaybackRate(_)))
+        );
+        install_prepared_handoff_mixer_buffer(&mut state).unwrap();
+        assert_eq!(
+            state
+                .next_engine
+                .as_ref()
+                .unwrap()
+                .job
+                .prepared_transition
+                .as_ref()
+                .unwrap()
+                .program
+                .template,
+            "SafeCrossfade"
+        );
+    }
+
+    fn state_with_unverified_rhythmic_tracks() -> PlaybackRuntimeLoopState {
+        let mut state = test_runtime_loop_state();
+        start_dj_lookahead_in_state(
+            &mut state,
+            Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+            Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+            Some(11),
+            Some(12),
+            20,
+            48_000,
+        );
+        let active = test_engine_with_shared(1, 20);
+        // Distinct outgoing levels reveal any replay of the earlier render.
+        // Neither deck has percussion suitable for a long fixed-rate lock.
+        let outgoing: Vec<f32> = (0..18 * 48_000 * 2)
+            .map(|sample| if sample < 3 * 48_000 * 2 { 0.05 } else { 0.4 })
+            .collect();
+        finish_engine_buffer(&active, &outgoing);
+        let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+        transition.transition_event_id = Some(77);
+        transition.anchor_start_ms = Some(0);
+        transition.program = noor_mix::planner::bass_swap_16_program(48_000, 2, 12_000);
+        transition.program.decision = Some(noor_mix::program::TransitionDecision {
+            strategy: "BassSwap16".into(),
+            confidence: 0.65,
+            score: 0.8,
+            reason: "Rhythmic overlap".into(),
+            energy_direction: "steady".into(),
+            incoming_entry_seconds: 0.0,
+            incoming_drop_seconds: None,
+            outgoing_window: "phrase_end".into(),
+            duration_beats: 24.0,
+            candidates: vec![],
+        });
+        let mut next = test_engine_with_shared(2, 21);
+        next.job = PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition);
+        finish_engine_buffer(&next, &vec![0.1; 18 * 48_000 * 2]);
+        active
+            .shared
+            .crossfade_samples
+            .store(12 * 48_000 * 2, Ordering::Relaxed);
+        next.shared
+            .crossfade_samples
+            .store(12 * 48_000 * 2, Ordering::Relaxed);
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+        state
+    }
+
+    fn state_with_late_unverified_rhythmic_mix() -> PlaybackRuntimeLoopState {
+        let mut state = state_with_unverified_rhythmic_tracks();
+        prepare_dj_mixer_for_pair(&mut state, 1024).unwrap();
+        let prepared = state.prepared_dj_mixer.as_ref().unwrap();
+        assert_eq!(prepared.program.template, "SafeCrossfade");
+        assert_eq!(prepared.program.resolve_at, 4 * 48_000);
+        let active = state.engine.as_ref().unwrap();
+        active.shared.buffer.lock().unwrap().read_pos = 3 * 48_000 * 2;
+        active
+            .shared
+            .position_samples
+            .store(3 * 48_000 * 2, Ordering::Relaxed);
+        state
+    }
+
+    #[test]
+    fn dj_readiness_prepares_when_pcm_arrives_before_decode_eof() {
+        let mut state = state_with_unverified_rhythmic_tracks();
+        state.user_paused = true;
+        let incoming = state.next_engine.as_ref().unwrap();
+        {
+            let mut buffer = incoming.shared.buffer.lock().unwrap();
+            buffer.finished = false;
+            buffer.samples.truncate(8 * 48_000 * 2);
+        }
+        assert!(dj_pcm_readiness_wakeup(&state).is_none());
+        incoming
+            .shared
+            .append_decoded_samples(&vec![0.1; 7 * 48_000 * 2])
+            .unwrap();
+        assert!(matches!(
+            dj_pcm_readiness_wakeup(&state),
+            Some(PlaybackRuntimeCommand::NextDecodeComplete {
+                track_id: 2,
+                generation: 21
+            })
+        ));
+        // The existing completion handler prepares this paused pair without
+        // advancing it. The prepared render becomes the successful-attempt latch.
+        prepare_dj_mixer_for_pair(&mut state, 1024).unwrap();
+        assert!(dj_pcm_readiness_wakeup(&state).is_none());
+        assert_eq!(state.engine.as_ref().unwrap().track_id, 1);
+        assert!(
+            !state
+                .next_engine
+                .as_ref()
+                .unwrap()
+                .shared
+                .buffer
+                .lock()
+                .unwrap()
+                .finished
+        );
+    }
+
+    #[test]
+    fn dj_readiness_recovers_a_missed_anchor_from_live_pcm_without_waiting_for_eof() {
+        let mut state = state_with_unverified_rhythmic_tracks();
+        let transition = state
+            .next_engine
+            .as_mut()
+            .unwrap()
+            .job
+            .prepared_transition
+            .as_mut()
+            .unwrap();
+        transition.anchor_start_ms = Some(1_000);
+        transition.program.deck_b_start_frame = 2 * 48_000;
+        let outgoing = state.engine.as_ref().unwrap();
+        outgoing.shared.buffer.lock().unwrap().read_pos = 6 * 48_000 * 2;
+        outgoing
+            .shared
+            .position_samples
+            .store(6 * 48_000 * 2, Ordering::Relaxed);
+        outgoing
+            .shared
+            .crossfade_start_signaled
+            .store(true, Ordering::Relaxed);
+        outgoing.shared.compact_consumed_buffer(48_000 * 2).unwrap();
+        let incoming = state.next_engine.as_ref().unwrap();
+        incoming
+            .shared
+            .position_offset_samples
+            .store(48_000 * 2, Ordering::Relaxed);
+        {
+            let mut buffer = incoming.shared.buffer.lock().unwrap();
+            buffer.finished = false;
+            buffer.samples.truncate(6 * 48_000 * 2);
+        }
+        assert!(matches!(
+            dj_pcm_readiness_wakeup(&state),
+            Some(PlaybackRuntimeCommand::NextDecodeComplete {
+                track_id: 2,
+                generation: 21
+            })
+        ));
+        assert_eq!(
+            prepare_dj_mixer_for_pair(&mut state, 1024),
+            Err(DjRuntimeRendererReason::ActiveDeckNotDecoded)
+        );
+        install_prepared_handoff_mixer_buffer(&mut state).unwrap();
+        let incoming = state.next_engine.as_ref().unwrap();
+        let executed = &incoming.job.prepared_transition.as_ref().unwrap().program;
+        assert_eq!(executed.template, "SafeCrossfade");
+        assert_eq!(executed.resolve_at, 4 * 48_000);
+        assert_eq!(executed.deck_b_start_frame, 2 * 48_000);
+        assert!(
+            incoming.shared.buffer.lock().unwrap().samples[40 * 48 * 2] > 0.39,
+            "join live outgoing audio, not its earlier anchor"
+        );
+        assert_eq!(
+            incoming
+                .shared
+                .source_position_samples
+                .load(Ordering::Relaxed),
+            2 * 48_000 * 2,
+            "preserve the incoming source cue across its buffer offset"
+        );
+    }
+
+    #[test]
+    fn prepared_short_mix_uses_its_actual_pcm_budget_at_fire_and_retry() {
+        let mut state = state_with_unverified_rhythmic_tracks();
+        let incoming = state.next_engine.as_ref().unwrap();
+        {
+            let mut buffer = incoming.shared.buffer.lock().unwrap();
+            buffer.finished = false;
+            buffer.samples.truncate(25 * 48_000); // 12.5 seconds, stereo.
+        }
+        let buffer = crossfade_readiness_snapshot(incoming).unwrap();
+        assert!(!dj_crossfade_next_ready(&state, buffer, 12 * 96_000));
+        prepare_dj_mixer_for_pair(&mut state, 1024).unwrap();
+        assert_eq!(
+            state.prepared_dj_mixer.as_ref().unwrap().program.template,
+            "SafeCrossfade"
+        );
+        assert!(dj_crossfade_next_ready(&state, buffer, 12 * 96_000));
+        let outgoing = state.engine.as_ref().unwrap();
+        outgoing
+            .shared
+            .crossfade_start_signaled
+            .store(true, Ordering::Relaxed);
+        outgoing.shared.buffer.lock().unwrap().read_pos = 48_000 * 2;
+        outgoing
+            .shared
+            .position_samples
+            .store(48_000 * 2, Ordering::Relaxed);
+        assert!(
+            dj_pcm_readiness_wakeup(&state).is_some(),
+            "install the ready short programme before its midpoint"
+        );
+        install_prepared_handoff_mixer_buffer(&mut state).unwrap();
+        assert_eq!(
+            state
+                .next_engine
+                .as_ref()
+                .unwrap()
+                .job
+                .prepared_transition
+                .as_ref()
+                .unwrap()
+                .program
+                .template,
+            "SafeCrossfade"
+        );
+    }
+
+    #[test]
+    fn dj_readiness_respects_transport_pair_and_permanent_failure_guards() {
+        let mut state = state_with_unverified_rhythmic_tracks();
+        assert!(dj_pcm_readiness_wakeup(&state).is_some());
+        state.dj_engine_enabled = false;
+        assert!(dj_pcm_readiness_wakeup(&state).is_none());
+        state.dj_engine_enabled = true;
+        state.dj_lookahead.as_mut().unwrap().queue_generation += 1;
+        assert!(dj_pcm_readiness_wakeup(&state).is_none());
+        state.dj_lookahead.as_mut().unwrap().queue_generation -= 1;
+        let outgoing = state.engine.as_ref().unwrap();
+        outgoing
+            .shared
+            .suppress_crossfade_after_seek
+            .store(true, Ordering::Relaxed);
+        assert!(dj_pcm_readiness_wakeup(&state).is_none());
+        outgoing
+            .shared
+            .suppress_crossfade_after_seek
+            .store(false, Ordering::Relaxed);
+        outgoing
+            .shared
+            .crossfade_start_signaled
+            .store(true, Ordering::Relaxed);
+        state.user_paused = true;
+        assert!(dj_pcm_readiness_wakeup(&state).is_none());
+        state.user_paused = false;
+        outgoing
+            .shared
+            .crossfade_start_signaled
+            .store(false, Ordering::Relaxed);
+        let mut job = state.next_engine.as_ref().unwrap().job.clone();
+        job.gapless.overlap_ms = 12_000;
+        let transition = job.prepared_transition.as_ref().unwrap();
+        record_runtime_renderer_failure(
+            &mut state,
+            transition,
+            DjRuntimeRendererReason::MixerRejected,
+        );
+        record_runtime_renderer_failure(
+            &mut state,
+            transition,
+            DjRuntimeRendererReason::NextDecodeLateAtFire,
+        );
+        assert!(
+            dj_pcm_readiness_wakeup(&state).is_none(),
+            "a fire miss must not erase a permanent render rejection"
+        );
+        state.next_engine.as_mut().unwrap().generation += 1;
+        assert!(
+            dj_pcm_readiness_wakeup(&state).is_some(),
+            "an old decoder generation cannot block a fresh engine"
+        );
+        record_runtime_renderer_failure(
+            &mut state,
+            transition,
+            DjRuntimeRendererReason::MixerRejected,
+        );
+        assert!(dj_pcm_readiness_wakeup(&state).is_none());
+        assert!(arm_active_transition_window(&mut state, &job));
+        assert!(
+            dj_pcm_readiness_wakeup(&state).is_some(),
+            "an explicit plan rearm permits a fresh attempt"
+        );
+    }
+
+    #[test]
+    fn partial_long_mix_preparation_promotes_a_short_protected_render() {
+        let mut state = state_with_unverified_rhythmic_tracks();
+        for engine in [
+            state.engine.as_ref().unwrap(),
+            state.next_engine.as_ref().unwrap(),
+        ] {
+            engine
+                .shared
+                .buffer
+                .lock()
+                .unwrap()
+                .samples
+                .truncate(6 * 48_000 * 2);
+        }
+        // An incoming restart already decoded from source second one. Its
+        // planned second-two cue is buffer-local second one, not second two.
+        let incoming = state.next_engine.as_mut().unwrap();
+        incoming
+            .shared
+            .position_offset_samples
+            .store(48_000 * 2, Ordering::Relaxed);
+        incoming
+            .shared
+            .position_samples
+            .store(48_000 * 2, Ordering::Relaxed);
+        incoming.shared.publish_source_position();
+        incoming
+            .job
+            .prepared_transition
+            .as_mut()
+            .unwrap()
+            .program
+            .deck_b_start_frame = 2 * 48_000;
+        assert_eq!(
+            prepare_dj_mixer_for_pair(&mut state, 1024),
+            Err(DjRuntimeRendererReason::ActiveDeckNotDecoded)
+        );
+        assert!(state.prepared_dj_mixer.is_none());
+        // Although the original twelve-second overlap is unavailable, four
+        // seconds can still be rendered safely from the current outgoing cue.
+        let active = state.engine.as_ref().unwrap();
+        active.shared.buffer.lock().unwrap().read_pos = 48_000 * 2;
+        active
+            .shared
+            .position_samples
+            .store(48_000 * 2, Ordering::Relaxed);
+        install_prepared_handoff_mixer_buffer(&mut state).unwrap();
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        let position_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+        let buffered_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+        let offset_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+        promote_next_to_active(
+            &mut state,
+            &event_tx,
+            &position_source,
+            &buffered_source,
+            &offset_source,
+            "late",
+            None,
+            None,
+            DjRuntimeRendererOutcome::rendered_handoff(),
+        );
+        let active = state.engine.as_ref().unwrap();
+        let executed = &active.job.prepared_transition.as_ref().unwrap().program;
+        assert_eq!(executed.template, "SafeCrossfade");
+        assert_eq!(executed.resolve_at, 4 * 48_000);
+        assert_eq!(executed.deck_b_start_frame, 2 * 48_000);
+        assert_eq!(
+            active
+                .shared
+                .handoff_timeline
+                .snapshot()
+                .unwrap()
+                .source_start,
+            2 * 48_000
+        );
+        assert_eq!(active.shared.crossfade_samples.load(Ordering::Relaxed), 0);
+        match event_rx.try_recv().unwrap() {
+            PlaybackRuntimeEvent::DjTransitionPromoted {
+                runtime_rendered_dj_mixer,
+                runtime_program_json,
+                ..
+            } => {
+                assert!(runtime_rendered_dj_mixer);
+                let executed: noor_mix::TransitionProgram =
+                    serde_json::from_str(&runtime_program_json.unwrap()).unwrap();
+                assert_eq!(executed.template, "SafeCrossfade");
+                assert_eq!(executed.resolve_at, 4 * 48_000);
+            }
+            other => panic!("expected short protected event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn protected_recovery_preserves_track_and_queue_pair_guards() {
+        let mut state = state_with_unverified_rhythmic_tracks();
+        state.dj_lookahead.as_mut().unwrap().queue_generation += 1;
+        assert_eq!(
+            install_prepared_handoff_mixer_buffer(&mut state),
+            Err(DjRuntimeRendererReason::PreparedMixerMissing)
+        );
+        assert!(state.prepared_dj_mixer.is_none());
+        assert_eq!(
+            state
+                .next_engine
+                .as_ref()
+                .unwrap()
+                .shared
+                .crossfade_samples
+                .load(Ordering::Relaxed),
+            12 * 48_000 * 2
+        );
+        state.dj_lookahead.as_mut().unwrap().queue_generation -= 1;
+        state.dj_lookahead.as_mut().unwrap().next = DjMediaRef::LibraryTrack { track_id: 3 };
+        assert_eq!(
+            install_prepared_handoff_mixer_buffer(&mut state),
+            Err(DjRuntimeRendererReason::PreparedMixerMissing)
+        );
+        assert!(
+            state
+                .next_engine
+                .as_ref()
+                .unwrap()
+                .shared
+                .handoff_timeline
+                .snapshot()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn late_protected_handoff_rebuilds_from_live_audio_after_compaction() {
+        let mut state = state_with_late_unverified_rhythmic_mix();
+        let active = state.engine.as_ref().unwrap();
+        assert!(active.shared.compact_consumed_buffer(4_800 * 2).unwrap() > 0);
+        install_prepared_handoff_mixer_buffer(&mut state).unwrap();
+        let next = state.next_engine.as_ref().unwrap();
+        let buffer = next.shared.buffer.lock().unwrap();
+        assert_eq!(buffer.read_pos, 0);
+        assert!(
+            buffer.samples[2_400 * 2] > 0.3,
+            "play the live outgoing level, not its earlier render"
+        );
+        let executed = &next.job.prepared_transition.as_ref().unwrap().program;
+        assert_eq!(executed.template, "SafeCrossfade");
+        assert_eq!(executed.resolve_at, 4 * 48_000);
+        assert!(
+            executed
+                .decision
+                .as_ref()
+                .unwrap()
+                .reason
+                .contains("rebuilt from current outgoing audio")
+        );
+        assert_eq!(
+            next.shared
+                .handoff_timeline
+                .snapshot()
+                .unwrap()
+                .output_frames,
+            4 * 48_000
+        );
+        assert_eq!(next.shared.crossfade_samples.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn failed_late_protected_rebuild_uses_and_reports_a_short_cut() {
+        let mut state = state_with_late_unverified_rhythmic_mix();
+        // A can continue normally but has too little decoded tail for a fresh
+        // four-second mix. The original twelve-second overlap stays rejected.
+        state
+            .engine
+            .as_ref()
+            .unwrap()
+            .shared
+            .buffer
+            .lock()
+            .unwrap()
+            .samples
+            .truncate(5 * 48_000 * 2);
+        assert_eq!(
+            install_prepared_handoff_mixer_buffer(&mut state),
+            Err(DjRuntimeRendererReason::ProtectedHandoffCut)
+        );
+        let next = state.next_engine.as_ref().unwrap();
+        assert_eq!(
+            next.shared.crossfade_samples.load(Ordering::Relaxed),
+            15 * 48 * 2
+        );
+        let executed = &next.job.prepared_transition.as_ref().unwrap().program;
+        assert_eq!(executed.template, "SlamCut");
+        assert_eq!(executed.resolve_at, 15 * 48);
+        assert_eq!(
+            state
+                .engine
+                .as_ref()
+                .unwrap()
+                .shared
+                .crossfade_samples
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            state
+                .engine
+                .as_ref()
+                .unwrap()
+                .shared
+                .dj_fadeout_start_samples
+                .load(Ordering::Relaxed),
+            3 * 48_000 * 2
+        );
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        let position_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+        let buffered_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+        let offset_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+        promote_next_to_active(
+            &mut state,
+            &event_tx,
+            &position_source,
+            &buffered_source,
+            &offset_source,
+            "late",
+            None,
+            None,
+            DjRuntimeRendererOutcome::legacy_overlap(DjRuntimeRendererReason::ProtectedHandoffCut),
+        );
+        match event_rx.try_recv().unwrap() {
+            PlaybackRuntimeEvent::DjTransitionPromoted {
+                runtime_renderer_reason,
+                runtime_program_json,
+                ..
+            } => {
+                assert_eq!(runtime_renderer_reason, "protected_handoff_cut");
+                let executed: noor_mix::TransitionProgram =
+                    serde_json::from_str(&runtime_program_json.unwrap()).unwrap();
+                assert_eq!(executed.template, "SlamCut");
+                assert_eq!(executed.resolve_at, 15 * 48);
+            }
+            other => panic!("expected executed cut event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handoff_install_preserves_absolute_origin_when_outgoing_buffer_compacts() {
+        let mut state = test_runtime_loop_state();
+        start_dj_lookahead_in_state(
+            &mut state,
+            Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+            Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+            Some(11),
+            Some(12),
+            20,
+            48_000,
+        );
+        let active = test_engine_with_shared(1, 20);
+        let outgoing = (0..256)
+            .map(|sample| sample as f32 / 1_000.0)
+            .collect::<Vec<_>>();
+        finish_engine_buffer(&active, &outgoing);
+        {
+            let mut buffer = active.shared.buffer.lock().unwrap();
+            buffer.read_pos = 20 * 2;
+        }
+        active
+            .shared
+            .position_samples
+            .store(20 * 2, Ordering::Relaxed);
+        let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+        transition.program = noor_mix::planner::slam_cut_program(48_000, 2, 1);
+        let mut next = test_engine_with_shared(2, 21);
+        next.job = PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition);
+        finish_engine_buffer(&next, &vec![0.1; 256]);
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+        prepare_dj_mixer_for_pair(&mut state, 64).unwrap();
+        assert_eq!(
+            state
+                .prepared_dj_mixer
+                .as_ref()
+                .unwrap()
+                .program
+                .deck_a_start_frame,
+            20
+        );
+        {
+            let active = state.engine.as_ref().unwrap();
+            active.shared.buffer.lock().unwrap().read_pos = 24 * 2;
+            active
+                .shared
+                .position_samples
+                .store(24 * 2, Ordering::Relaxed);
+            // Decoder compaction moves the local cursor back to frame four,
+            // while the absolute playhead stays at frame twenty-four.
+            assert_eq!(
+                active.shared.compact_consumed_buffer(4 * 2).unwrap(),
+                20 * 2
+            );
+            assert_eq!(active.shared.buffer.lock().unwrap().read_pos, 4 * 2);
+        }
+        install_prepared_handoff_mixer_buffer(&mut state).unwrap();
+        let next = state.next_engine.as_ref().unwrap();
+        assert_eq!(
+            next.shared.buffer.lock().unwrap().read_pos,
+            4 * 2,
+            "join four frames into the existing rendered transition, without replaying deck A"
+        );
+        assert_eq!(next.shared.position_samples.load(Ordering::Relaxed), 4 * 2);
+    }
+
+    #[test]
     fn handoff_install_rejects_join_past_transition_midpoint() {
         let mut state = test_runtime_loop_state();
         start_dj_lookahead_in_state(
@@ -7556,6 +9436,140 @@ mod tests {
         );
     }
 
+    fn native_adaptive_readiness_case()
+    -> (PlaybackRuntimeLoopState, CrossfadeReadinessSnapshot, u64) {
+        let mut state = state_with_unverified_rhythmic_tracks();
+        let transition = state
+            .next_engine
+            .as_mut()
+            .unwrap()
+            .job
+            .prepared_transition
+            .as_mut()
+            .unwrap();
+        let decision = transition.program.decision.clone();
+        transition.program = noor_mix::planner::bass_swap_32_program(48_000, 2, 23_226);
+        // Keep the full-window readiness regression independent of optional
+        // BassSwap32 musical prefix recovery, which is exercised with PCM.
+        transition.program.template = "BassSwap16".into();
+        transition.program.resolve_at = 1_114_854; // Native programme: 23.226125s.
+        transition.program.deck_b_start_frame = 36_818; // Native source cue: 0.767033s.
+        transition.program.decision = decision;
+        transition.program.decision.as_mut().unwrap().duration_beats = 48.0;
+        let unread = (26.097739583333333_f64 * 96_000.0).floor() as u64;
+        let buffer = CrossfadeReadinessSnapshot {
+            base_ready: true,
+            finished: false,
+            unread_samples: unread,
+            decoded_samples: unread,
+            read_samples: 0,
+            offset_samples: 0,
+            start_threshold_samples: 72_000,
+        };
+        (state, buffer, 23_226 * 96)
+    }
+
+    #[test]
+    fn adaptive_readiness_accepts_the_native_pcm_window_without_the_outgoing_margin() {
+        let (state, buffer, outgoing_window) = native_adaptive_readiness_case();
+        assert!(!crossfade_next_ready(
+            true,
+            false,
+            buffer.unread_samples,
+            outgoing_window
+        ));
+        let required_seconds =
+            adaptive_next_required_samples(&state, buffer).unwrap() as f64 / 96_000.0;
+        assert!((25.70..25.71).contains(&required_seconds));
+        assert!(dj_crossfade_next_ready(&state, buffer, outgoing_window));
+        assert!(!dj_crossfade_next_ready(
+            &state,
+            CrossfadeReadinessSnapshot {
+                base_ready: false,
+                ..buffer
+            },
+            outgoing_window
+        ));
+    }
+
+    #[test]
+    fn adaptive_readiness_includes_incoming_cue_corrected_rate_and_buffer_offset() {
+        let (mut state, mut buffer, outgoing_window) = native_adaptive_readiness_case();
+        let transition = state
+            .next_engine
+            .as_mut()
+            .unwrap()
+            .job
+            .prepared_transition
+            .as_mut()
+            .unwrap();
+        transition.program.resolve_at = 1_097_134; // Confronted: 22.856958s.
+        transition.program.deck_b_start_frame = 127_251; // 2.651063s source cue.
+        buffer.unread_samples = 25_900 * 96;
+        assert!(!dj_crossfade_next_ready(&state, buffer, outgoing_window));
+        let original_requirement = adaptive_next_required_samples(&state, buffer).unwrap();
+        buffer.offset_samples = 96_000;
+        buffer.read_samples = 24_000;
+        assert_eq!(
+            adaptive_next_required_samples(&state, buffer).unwrap(),
+            original_requirement - 120_000
+        );
+        buffer.offset_samples = 3 * 96_000; // Cue is no longer decoded.
+        assert!(!dj_crossfade_next_ready(
+            &state,
+            CrossfadeReadinessSnapshot {
+                finished: true,
+                ..buffer
+            },
+            outgoing_window
+        ));
+    }
+
+    #[test]
+    fn adaptive_readiness_preserves_legacy_disabled_stale_and_rate_mismatch_gates() {
+        let (mut state, buffer, outgoing_window) = native_adaptive_readiness_case();
+        state
+            .next_engine
+            .as_ref()
+            .unwrap()
+            .shared
+            .target_sample_rate
+            .store(44_100, Ordering::Relaxed);
+        assert!(!dj_crossfade_next_ready(&state, buffer, outgoing_window));
+        state
+            .next_engine
+            .as_ref()
+            .unwrap()
+            .shared
+            .target_sample_rate
+            .store(48_000, Ordering::Relaxed);
+        state.dj_lookahead.as_mut().unwrap().queue_generation += 1;
+        assert!(!dj_crossfade_next_ready(&state, buffer, outgoing_window));
+        state.dj_lookahead.as_mut().unwrap().queue_generation -= 1;
+        state.dj_engine_enabled = false;
+        assert!(!dj_crossfade_next_ready(&state, buffer, outgoing_window));
+        state.dj_engine_enabled = true;
+        state
+            .next_engine
+            .as_mut()
+            .unwrap()
+            .job
+            .prepared_transition
+            .as_mut()
+            .unwrap()
+            .program
+            .decision = None;
+        assert!(!dj_crossfade_next_ready(&state, buffer, outgoing_window));
+        assert!(dj_crossfade_next_ready(
+            &state,
+            CrossfadeReadinessSnapshot {
+                finished: true,
+                ..buffer
+            },
+            outgoing_window
+        ));
+    }
+
     #[test]
     fn stall_tracker_flags_starved_active_engine_after_threshold() {
         let mut state = test_runtime_loop_state();
@@ -7862,6 +9876,7 @@ mod tests {
             prepared_dj_mixer: None,
             prepared_drop_preview_mixer: None,
             last_dj_renderer_failure: None,
+            dj_readiness_permanent_failure: None,
             user_paused: false,
             silent_start_streak: 0,
         }
@@ -8197,6 +10212,40 @@ mod tests {
         assert!(
             rendered.rendered[0] > 0.5,
             "must contain the outgoing tail, not its opening"
+        );
+    }
+
+    #[test]
+    fn rhythmic_tail_snapshot_retains_fractional_millisecond_frames_at_eof() {
+        let (state, _, _) = native_adaptive_readiness_case();
+        let active = state.engine.as_ref().unwrap();
+        let mut transition = state
+            .next_engine
+            .as_ref()
+            .unwrap()
+            .job
+            .prepared_transition
+            .clone()
+            .unwrap();
+        transition.anchor_start_ms = None;
+        transition.program.resolve_at = 371_618; // 7.7420417s at 48 kHz.
+        let total_frames = 10 * 48_000;
+        active.shared.buffer.lock().unwrap().samples = vec![0.2; total_frames * 2];
+        active
+            .shared
+            .total_samples
+            .store((total_frames * 2) as u64, Ordering::Relaxed);
+        active
+            .shared
+            .crossfade_samples
+            .store(371_616 * 2, Ordering::Relaxed);
+        let anchor = anchored_deck_a_output_frame(&state, &transition, active).unwrap();
+        let snapshot =
+            active_deck_snapshot(active, 2, 0, Some(anchor), transition.program.resolve_at, 0)
+                .expect("complete fractional-beat window must fit before EOF");
+        assert_eq!(
+            snapshot.start_frame + transition.program.resolve_at,
+            total_frames as u64
         );
     }
 

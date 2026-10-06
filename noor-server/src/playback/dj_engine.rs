@@ -558,13 +558,18 @@ fn dsp_features_for_profile(
         .unwrap_or(Ok(None))
 }
 
-// Tempo from the beat grid via the MEDIAN inter-beat interval. The previous
-// mean (span / count) let a single undetected beat or a silence gap stretch
-// the average and skew the whole estimate; the median tolerates sparse and
-// irregular grids as long as most intervals are genuine.
+// Fit multiple measured beats without counting gaps as single beats. An
+// adjacent-interval median preserves detector-frame quantization bias, which
+// can turn a small requested nudge into audible drift across a long mix.
 fn estimate_bpm(beats: &[f32]) -> Option<f32> {
-    let median = median_beat_interval(beats)?;
-    Some(60.0 / median)
+    // A short, jittered fragment cannot average detector error reliably. Keep
+    // the established median estimate until eight measured inliers support a
+    // multi-beat fit; profile and phase confidence remain separate evidence.
+    let period = noor_mix::beat_grid::fit_beat_grid(beats)
+        .filter(|fit| fit.inlier_count >= 8)
+        .map(|fit| fit.period_seconds)
+        .or_else(|| median_beat_interval(beats).map(f64::from))?;
+    Some((60.0 / period) as f32)
 }
 
 fn median_beat_interval(beats: &[f32]) -> Option<f32> {
@@ -1631,6 +1636,20 @@ mod tests {
             })
             .expect("count");
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn estimate_bpm_preserves_sub_frame_tempo_over_quantized_markers() {
+        for bpm in [121.0_f64, 122.0, 174.0] {
+            let beats = (0..180)
+                .map(|beat| ((0.13 + beat as f64 * 60.0 / bpm) * 100.0).round() as f32 / 100.0)
+                .collect::<Vec<_>>();
+            let estimated = estimate_bpm(&beats).unwrap();
+            assert!(
+                (f64::from(estimated) - bpm).abs() < 0.03,
+                "{bpm} estimated as {estimated}"
+            );
+        }
     }
 
     #[test]
