@@ -1,3 +1,10 @@
+<script lang="ts" module>
+	import type { VideoStationsResponse as LineupResponse } from '$lib/api/client';
+	// The last lineup, kept across visits so switching back to this tab
+	// renders at once and refreshes quietly instead of popping in.
+	let lastLineup: LineupResponse | null = null;
+</script>
+
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
 	import { api, type TidalSearchVideo, type VideoStationCard, type VideoStationsResponse } from '$lib/api/client';
@@ -16,7 +23,7 @@
 	const POLL_MS = 3000;
 	const POLL_LIMIT = 10;
 
-	let data = $state<VideoStationsResponse | null>(null);
+	let data = $state<VideoStationsResponse | null>(lastLineup);
 	let error = $state<string | null>(null);
 	let starting = $state<string | null>(null);
 	let timer: ReturnType<typeof setTimeout> | null = null;
@@ -28,6 +35,7 @@
 	async function load(attempt = 0) {
 		try {
 			data = await api.getVideoStations();
+			lastLineup = data;
 			error = null;
 		} catch {
 			error = 'Could not load stations.';
@@ -69,7 +77,15 @@
 <div class="stations-page">
 	{#if error}
 		<EmptyState title="Could not load stations" copy={error} />
-	{:else if !data || (empty && data.building)}
+	{:else if !data}
+		<!-- First visit: row-shaped placeholders hold the page's shape, so
+		     the lineup lands without a jump. -->
+		<div class="placeholder-rows" aria-busy="true" aria-label="Loading stations">
+			{#each Array(6) as _, index (index)}
+				<div class="placeholder-row"><span></span><span></span></div>
+			{/each}
+		</div>
+	{:else if empty && data.building}
 		<div class="skeleton"><Skeleton rows={3} label="Building your stations" /></div>
 	{:else if empty && data.catalog_videos < SMALL_CATALOG}
 		<EmptyState
@@ -83,11 +99,6 @@
 	{:else if empty}
 		<EmptyState title="No stations today" copy="Nothing has enough videos you haven't seen yet. Check back tomorrow." />
 	{:else}
-		<header class="lineup-head">
-			<h2>Today's lineup</h2>
-			<span class="lineup-count">{data.stations.length} {data.stations.length === 1 ? 'station' : 'stations'}</span>
-		</header>
-
 		{#if grouped.spotlight}
 			<StationSpotlight
 				card={grouped.spotlight}
@@ -131,21 +142,31 @@
 	}
 	.skeleton { padding: var(--space-4) 0; }
 
-	.lineup-head {
-		display: flex;
-		align-items: baseline;
-		justify-content: space-between;
-		gap: var(--space-3);
-		padding: 0 12px;
+	.placeholder-rows {
+		display: grid;
+		gap: 2px;
 	}
-	.lineup-head h2 {
-		margin: 0;
-		font-size: var(--font-size-lg);
-		color: var(--text-primary);
+	.placeholder-row {
+		display: grid;
+		grid-template-columns: 220px minmax(0, 1fr);
+		gap: 18px;
+		padding: 10px 12px;
 	}
-	.lineup-count {
-		color: var(--text-tertiary);
-		font-size: var(--font-size-sm);
+	.placeholder-row span {
+		height: 76px;
+		border-radius: 8px;
+		background: var(--bg-raised);
+		animation: placeholder-pulse 1.4s ease-in-out infinite;
+	}
+	.placeholder-row span:first-child {
+		height: 44px;
+		align-self: center;
+	}
+	@keyframes placeholder-pulse {
+		50% { opacity: 0.55; }
+	}
+	@media (max-width: 860px) {
+		.placeholder-row { grid-template-columns: minmax(0, 1fr); }
 	}
 
 	/* A group is a small label over its channel rows. */
