@@ -6,4 +6,5 @@
 //! scheduler that ranks jobs by expected value, and the crawler that spends a
 //! governed call budget on them. Radio and the related row only read.
 
+pub mod artist_state;
 pub mod names;
