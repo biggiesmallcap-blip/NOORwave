@@ -8,7 +8,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::Notify;
@@ -16,7 +16,7 @@ use tokio::sync::Notify;
 use super::artist_state::{self, CheckResult};
 use super::governor::{self, Governor, Mode};
 use super::harvest::{self, HarvestContext};
-use super::scheduler::{self, Calibration, Job, JobClass, JobKind, PlanInput};
+use super::scheduler::{self, Calibration, Job, JobClass, JobKind, MixPolicy, PlanInput};
 use super::source::{DiscoverySource, LiveSource};
 use super::{expand, graph, names, roots};
 use crate::SharedState;
@@ -205,6 +205,7 @@ pub async fn execute<S: DiscoverySource>(db: &Database, src: &S, job: &Job) -> J
         JobKind::GenreSearch { genre } => genre_search(db, src, genre).await,
         JobKind::HarvestMixes => harvest_mixes(db, src).await,
         JobKind::HarvestEditorial { playlists } => harvest_editorial(db, src, *playlists).await,
+        JobKind::ArtistMix { mix_id } => artist_mix(db, src, job.artist_id, mix_id).await,
     };
     result.unwrap_or_else(|error| {
         tracing::debug!(target: "noor.video_discovery", %error, job = scheduler::label(&job.kind), "job failed");
@@ -380,6 +381,78 @@ async fn harvest_editorial<S: DiscoverySource>(
     Ok(report)
 }
 
+const ARTIST_MIX_KEY: &str = "video_discovery.artist_mix";
+const MIX_TRIALS: usize = 5;
+
+/// Verdict stored as `on`, `off`, or `trial:<tries>`.
+pub fn mix_policy(conn: &Connection) -> Result<MixPolicy> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM server_config WHERE key = ?1",
+            [ARTIST_MIX_KEY],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(match value.as_deref() {
+        Some("on") => MixPolicy::On,
+        Some("off") => MixPolicy::Off,
+        Some(other) => {
+            let tries = other
+                .strip_prefix("trial:")
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(0);
+            MixPolicy::Trial {
+                remaining: MIX_TRIALS.saturating_sub(tries),
+            }
+        }
+        None => MixPolicy::Trial {
+            remaining: MIX_TRIALS,
+        },
+    })
+}
+
+pub fn record_mix_trial(conn: &Connection, found_videos: bool) -> Result<()> {
+    let verdict = match mix_policy(conn)? {
+        MixPolicy::On | MixPolicy::Off => return Ok(()),
+        MixPolicy::Trial { .. } if found_videos => "on".to_string(),
+        MixPolicy::Trial { remaining } => {
+            let tries = MIX_TRIALS - remaining + 1;
+            if tries >= MIX_TRIALS {
+                "off".to_string()
+            } else {
+                format!("trial:{tries}")
+            }
+        }
+    };
+    conn.execute(
+        "INSERT INTO server_config (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![ARTIST_MIX_KEY, verdict],
+    )?;
+    Ok(())
+}
+
+async fn artist_mix<S: DiscoverySource>(
+    db: &Database,
+    src: &S,
+    artist_id: i64,
+    mix_id: &str,
+) -> Result<JobReport> {
+    let videos = src.mix_videos(mix_id).await?;
+    let key = format!("artistmix:{mix_id}");
+    let summary = db.with_conn(|conn| {
+        artist_state::record_mix_check(conn, artist_id)?;
+        record_mix_trial(conn, !videos.is_empty())?;
+        harvest::ingest(conn, &videos, HarvestContext::List { key: &key })
+    })?;
+    Ok(JobReport {
+        calls: 1,
+        new_videos: summary.new_videos,
+        empty: videos.is_empty(),
+        ..Default::default()
+    })
+}
+
 // --- Markers and scheduled harvests --------------------------------------
 
 fn marker_age_hours(conn: &Connection, key: &str) -> Result<Option<f64>> {
@@ -461,7 +534,7 @@ pub fn build_plan(conn: &Connection, limit: usize) -> Result<Vec<Job>> {
     let states = artist_state::load_all(conn)?;
     let calibration = Calibration::load(conn)?;
     let mut jobs = scheduled_jobs(conn)?;
-    jobs.extend(scheduler::plan(
+    jobs.extend(scheduler::plan_with_mixes(
         &PlanInput {
             relevance: &relevance,
             deep: &deep,
@@ -470,6 +543,7 @@ pub fn build_plan(conn: &Connection, limit: usize) -> Result<Vec<Job>> {
             priority: &root_ids,
             calibration: &calibration,
         },
+        mix_policy(conn)?,
         limit,
     ));
     Ok(jobs)
@@ -771,6 +845,7 @@ pub struct DiscoveryStatus {
     pub catalog_videos: i64,
     pub checked_last_day: i64,
     pub probe_yield_last_day: Option<f64>,
+    pub artist_mix: String,
     pub hour: HourStats,
 }
 
@@ -810,6 +885,7 @@ pub fn status(conn: &Connection) -> Result<DiscoveryStatus> {
         artists_with_videos: with_videos,
         catalog_videos: catalog,
         checked_last_day: checked_day,
+        artist_mix: format!("{:?}", mix_policy(conn)?),
         probe_yield_last_day: (checked_day > 0).then(|| found_day as f64 / checked_day as f64),
         hour,
     })
@@ -1022,5 +1098,24 @@ mod tests {
             })
             .unwrap();
         assert!(linked);
+    }
+
+    #[test]
+    fn the_mix_verdict_turns_on_at_the_first_hit_and_off_after_five_misses() {
+        let db = db();
+        db.with_conn(|conn| {
+            assert_eq!(mix_policy(conn)?, MixPolicy::Trial { remaining: 5 });
+            for _ in 0..4 {
+                record_mix_trial(conn, false)?;
+            }
+            assert_eq!(mix_policy(conn)?, MixPolicy::Trial { remaining: 1 });
+            record_mix_trial(conn, false)?;
+            assert_eq!(mix_policy(conn)?, MixPolicy::Off);
+            conn.execute("DELETE FROM server_config WHERE key = ?1", [ARTIST_MIX_KEY])?;
+            record_mix_trial(conn, true)?;
+            assert_eq!(mix_policy(conn)?, MixPolicy::On);
+            Ok(())
+        })
+        .unwrap();
     }
 }

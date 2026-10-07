@@ -250,6 +250,14 @@ mod tests {
         assert!(outcome.ok);
         assert_eq!(outcome.related, 4);
         assert_eq!(
+            src.calls(),
+            vec![
+                "similar:10",
+                "search_artists:Ghost Band",
+                "search_artists:Searched"
+            ]
+        );
+        assert_eq!(
             outcome.tidal_calls, 3,
             "similar + two searches; Beyonce resolved from the ledger"
         );

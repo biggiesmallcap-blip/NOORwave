@@ -18,6 +18,7 @@ pub enum JobKind {
     GenreSearch { genre: String },
     HarvestMixes,
     HarvestEditorial { playlists: bool },
+    ArtistMix { mix_id: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -56,6 +57,7 @@ pub fn label(kind: &JobKind) -> &'static str {
         JobKind::GenreSearch { .. } => "genre_search",
         JobKind::HarvestMixes => "harvest_mixes",
         JobKind::HarvestEditorial { .. } => "harvest_editorial",
+        JobKind::ArtistMix { .. } => "artist_mix",
     }
 }
 
@@ -266,6 +268,48 @@ pub fn plan(input: &PlanInput, limit: usize) -> Vec<Job> {
             jobs.push(job);
         }
     }
+    rank(&mut jobs);
+    jobs.truncate(limit);
+    jobs
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MixPolicy {
+    Off,
+    Trial { remaining: usize },
+    On,
+}
+
+pub const MIX_RECHECK_DAYS: f64 = 14.0;
+
+/// `plan` plus artist-mix jobs for roots, gated by the trial verdict.
+pub fn plan_with_mixes(input: &PlanInput, policy: MixPolicy, limit: usize) -> Vec<Job> {
+    let mut jobs = plan(input, usize::MAX);
+    let allowed = match policy {
+        MixPolicy::Off => 0,
+        MixPolicy::Trial { remaining } => remaining,
+        MixPolicy::On => usize::MAX,
+    };
+    let mut mixes: Vec<Job> = input
+        .roots
+        .iter()
+        .filter_map(|id| {
+            let state = input.states.get(id)?;
+            let mix_id = state.mix_id.clone()?;
+            if state.mix_age_days.is_some_and(|age| age < MIX_RECHECK_DAYS) {
+                return None;
+            }
+            let relevance = input.relevance.get(id).map_or(1.0, |r| r.score);
+            Some(Job {
+                artist_id: *id,
+                kind: JobKind::ArtistMix { mix_id },
+                class: JobClass::Normal,
+                value: relevance * 0.9,
+            })
+        })
+        .collect();
+    rank(&mut mixes);
+    jobs.extend(mixes.into_iter().take(allowed));
     rank(&mut jobs);
     jobs.truncate(limit);
     jobs
@@ -525,5 +569,41 @@ mod tests {
         assert_eq!(jobs[1].artist_id, 50);
         assert_eq!(jobs.iter().filter(|j| j.artist_id == 51).count(), 1);
         assert!(!jobs.iter().any(|j| j.artist_id == 52), "already checked");
+    }
+
+    #[test]
+    fn artist_mixes_follow_the_trial_verdict() {
+        let mut with_mix = state(1);
+        with_mix.mix_id = Some("m1".into());
+        with_mix.expand_due = false;
+        with_mix.checked_age_days = Some(1.0);
+        with_mix.check_due = false;
+        let mut other = with_mix.clone();
+        other.artist_tidal_id = 2;
+        other.mix_id = Some("m2".into());
+        let states = HashMap::from([(1, with_mix), (2, other)]);
+        let relevance = HashMap::from([(1, rel(1.0, 0)), (2, rel(1.0, 0))]);
+        let roots = HashSet::from([1, 2]);
+        let calibration = Calibration::default();
+        let count = |policy| {
+            plan_with_mixes(
+                &PlanInput {
+                    relevance: &relevance,
+                    deep: &HashMap::new(),
+                    states: &states,
+                    roots: &roots,
+                    priority: &roots,
+                    calibration: &calibration,
+                },
+                policy,
+                20,
+            )
+            .iter()
+            .filter(|j| matches!(j.kind, JobKind::ArtistMix { .. }))
+            .count()
+        };
+        assert_eq!(count(MixPolicy::Off), 0);
+        assert_eq!(count(MixPolicy::Trial { remaining: 1 }), 1);
+        assert_eq!(count(MixPolicy::On), 2);
     }
 }
