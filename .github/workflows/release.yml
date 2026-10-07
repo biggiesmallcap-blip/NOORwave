@@ -1,15 +1,21 @@
 name: Release
 
 # Release rules:
-#   1. Tags must be vX.Y.Z. Before tagging: bump noor-server/Cargo.toml,
-#      noor-app/Cargo.toml, noor-app/tauri.conf.json, refresh Cargo.lock.
+#   1. Tags must be vX.Y.Z. scripts/release-bump.ps1 bumps noor-server/Cargo.toml,
+#      noor-app/Cargo.toml, noor-app/tauri.conf.json and the two Cargo.lock entries.
 #   2. Before tagging, add docs/releases/vX.Y.Z.md. CI embeds that file in
 #      latest.json; notes added after the tag are too late for the updater manifest.
-#   3. CI stages a draft. Verify assets and prepend the notes before publishing.
+#   3. CI stages a draft whose body leads with those notes. Verify assets, then publish.
 #   4. When editing this file, audit every `uses:` for Node-version deprecations.
 #      Dependabot opens weekly grouped PRs (.github/dependabot.yml) - review and merge.
 #   5. SHA-pinned action refs MUST keep their `# vN.N.N` trailing comment so
 #      humans can read intent without dereferencing the SHA.
+#   6. Release builds and cache warmers use the rust-toolchain.toml compiler. After
+#      changing that pin or Rust deps, let the Windows warmer on master finish before
+#      tagging: a cache saved after this run's restore step cannot speed it up.
+#   7. Windows compiles server and app once (Tauri CLI --no-bundle), copies those into
+#      the portable zip, then runs `tauri bundle` for NSIS. Keep that order: the bundler
+#      patches the app with installer metadata. The warmer must use the same compile.
 
 on:
   push:
@@ -26,55 +32,37 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout release notes
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            docs/releases
+            .github/release-body.md
+          sparse-checkout-cone-mode: false
+
+      # The curated notes lead the release page so nobody has to prepend them by hand.
+      - name: Compose release body
+        shell: pwsh
+        run: |
+          $tag = "${env:GITHUB_REF_NAME}"
+          $notesPath = "docs/releases/$tag.md"
+          if (-not (Test-Path -LiteralPath $notesPath)) {
+            throw "Missing $notesPath. Write release notes before pushing the tag."
+          }
+          $notes = (Get-Content -Raw -LiteralPath $notesPath).Trim()
+          if (-not $notes.StartsWith("## What's new in $tag")) {
+            throw "$notesPath must start with '## What''s new in $tag'"
+          }
+          $template = (Get-Content -Raw -LiteralPath ".github/release-body.md").Replace('{{TAG}}', $tag).Trim()
+          $utf8 = New-Object System.Text.UTF8Encoding $false
+          [System.IO.File]::WriteAllText("release-body.md", "$notes`n`n$template`n", $utf8)
+
       - name: Create draft GitHub release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           draft: true
           generate_release_notes: true
-          body: |
-            Desktop hi-fi player for your TIDAL library. Windows installer plus portable recovery zip, and portable macOS and Linux builds.
-
-            ## Downloads
-
-            | Platform | File |
-            |---|---|
-            | Windows (installer) | `NOORwave-vX.X.X-windows-x64-setup.exe` |
-            | Windows (portable) | `NOORwave-vX.X.X-windows-x64.zip` |
-            | macOS (Apple Silicon) | `NOORwave-vX.X.X-macos-arm64.tar.gz` |
-            | macOS (Intel) | `NOORwave-vX.X.X-macos-x64.tar.gz` |
-            | Linux | `NOORwave-vX.X.X-linux-x64.tar.gz` |
-
-            **Windows:** run the installer (installs to `%LOCALAPPDATA%\Programs\NOORwave`, auto-updates), or unzip and double-click `NOORwave.exe`.
-            **macOS / Linux:** unzip, then run `./NOORwave`.
-
-            Each build bundles the app, the local `noor-server`, and the UI in `www/` (don't delete it). The Windows portable zip is your recovery path if the installer or updater is ever blocked.
-
-            <details>
-            <summary><b>Windows blocked at first launch?</b></summary>
-
-            Builds are not CA-signed yet, so SmartScreen or Smart App Control may warn on or block the first launch on strict systems. The installed updater payload is still signed with the project's Tauri key, so updates stay verified. The portable zip is the simplest fallback. To build your own copy from source:
-            ```powershell
-            .\scripts\build-windows11-release.cmd
-            ```
-            The result is still unsigned, so strict Smart App Control may still block it.
-            </details>
-
-            <details>
-            <summary><b>macOS blocked by Gatekeeper?</b></summary>
-
-            ```
-            xattr -cr NOORwave noor-server
-            ```
-            </details>
-
-            <details>
-            <summary><b>Verify your download</b></summary>
-
-            ```
-            sha256sum -c sha256sums.txt
-            ```
-            On Windows, compare the setup exe and portable zip against `sha256sums.txt`.
-            </details>
+          body_path: release-body.md
 
   build-windows:
     needs: create-release
