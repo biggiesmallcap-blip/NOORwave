@@ -43,7 +43,11 @@ describe('persistent video dock contract', () => {
 		expect(dock).toContain('onFullscreenToggle={toggleExpanded}');
 		expect(dock).toContain('document.documentElement.requestFullscreen?.()');
 		expect(dock).toContain("if (event.key === 'Escape' && expanded && !document.fullscreenElement) expanded = false;");
-		expect(dock).toContain('if (expanded) return { top: 0, left: 0, width: viewportWidth, height: viewportHeight };');
+		// One motion at a time: glide first, then window fullscreen; on the way
+		// out, window first, then glide.
+		expect(dock).toContain('if (expanded) return morphing ? { top: 0, left: 0, width: viewportWidth, height: viewportHeight } : null;');
+		expect(dock).toMatch(/fullscreenTimer = setTimeout\(\(\) => \{[\s\S]*requestFullscreen[\s\S]*\}, MORPH_MS\);/);
+		expect(dock).toContain('requestAnimationFrame(() => requestAnimationFrame(() => (expanded = false)));');
 		expect(player).toMatch(/if \(onFullscreenToggle\) \{\s*onFullscreenToggle\(\);\s*return;/);
 	});
 

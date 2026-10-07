@@ -179,13 +179,34 @@
 	// back on exit (button, double-click, F, or Esc).
 	let expanded = $state(false);
 
+	// One motion at a time. Asking for window fullscreen during the glide
+	// resized the window mid-flight, so the glide's target moved under it and
+	// the two fought (visible jank in Chrome and WebView2 alike). In: glide to
+	// fill the current window, then go fullscreen - by then the dock is pinned
+	// to the window edges and simply grows with it. Out: leave fullscreen
+	// first, let the page settle at its normal size, then glide back.
+	let fullscreenTimer: ReturnType<typeof setTimeout> | null = null;
+
 	function toggleExpanded() {
+		if (fullscreenTimer) {
+			clearTimeout(fullscreenTimer);
+			fullscreenTimer = null;
+		}
 		if (expanded) {
-			expanded = false;
-			if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+			if (document.fullscreenElement) {
+				// fullscreenchange collapses once the window is back to size.
+				void document.exitFullscreen().catch(() => (expanded = false));
+			} else {
+				expanded = false;
+			}
 		} else {
 			expanded = true;
-			void document.documentElement.requestFullscreen?.().catch(() => {});
+			fullscreenTimer = setTimeout(() => {
+				fullscreenTimer = null;
+				if (expanded && !document.fullscreenElement) {
+					void document.documentElement.requestFullscreen?.().catch(() => {});
+				}
+			}, MORPH_MS);
 		}
 	}
 
@@ -196,7 +217,10 @@
 	$effect(() => {
 		// Esc (or any other way out of window fullscreen) collapses too.
 		const onFullscreenChange = () => {
-			if (!document.fullscreenElement && expanded) expanded = false;
+			if (document.fullscreenElement || !expanded) return;
+			// Two frames: the window has resized and the stage has re-laid out,
+			// so the glide back aims at where the player really belongs.
+			requestAnimationFrame(() => requestAnimationFrame(() => (expanded = false)));
 		};
 		// Esc with no window fullscreen (the request can be refused).
 		const onKeydown = (event: KeyboardEvent) => {
@@ -218,7 +242,10 @@
 	type Place = 'full' | 'panel' | 'mini' | 'expanded';
 	let place = $derived<Place>(expanded ? 'expanded' : mode);
 	let box = $derived.by(() => {
-		if (expanded) return { top: 0, left: 0, width: viewportWidth, height: viewportHeight };
+		// Gliding in: explicit pixels so the size animates. Once there, no
+		// inline box at all - CSS pins the dock to the window edges, so the
+		// window going fullscreen resizes it in the same frame.
+		if (expanded) return morphing ? { top: 0, left: 0, width: viewportWidth, height: viewportHeight } : null;
 		if (mode !== 'mini' && rect) return rect;
 		if (position) return { top: position.top, left: position.left, width: size.width, height: size.height };
 		return null;
@@ -320,6 +347,7 @@
 	onDestroy(() => {
 		if (rafId) cancelAnimationFrame(rafId);
 		if (morphTimer) clearTimeout(morphTimer);
+		if (fullscreenTimer) clearTimeout(fullscreenTimer);
 	});
 </script>
 
@@ -582,6 +610,10 @@
 	/* Fullscreen: covers the window, above the sidebar and player bar. */
 	.video-dock.expanded {
 		position: fixed;
+		top: 0;
+		left: 0;
+		width: 100vw;
+		height: 100vh;
 		z-index: 1000;
 		background: #000;
 		border-radius: 0;
