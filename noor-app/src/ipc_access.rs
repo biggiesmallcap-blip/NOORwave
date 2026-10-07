@@ -69,6 +69,7 @@ mod tests {
             for path in ["/", "/settings?tab=general"] {
                 let origin = format!("{base}{path}");
                 assert!(invoke(&window, &origin, "get_install_mode"));
+                assert!(invoke(&window, &origin, "plugin:app|version"));
                 assert!(invoke(&window, &origin, "plugin:webview|set_webview_zoom"));
             }
         }
@@ -90,7 +91,11 @@ mod tests {
             "https://tauri.localhost/",
             "tauri://localhost/",
         ] {
-            for command in ["get_install_mode", "plugin:webview|set_webview_zoom"] {
+            for command in [
+                "get_install_mode",
+                "plugin:app|version",
+                "plugin:webview|set_webview_zoom",
+            ] {
                 assert!(!invoke(&window, origin, command), "{origin}: {command}");
             }
         }
@@ -101,6 +106,11 @@ mod tests {
             &other,
             "http://127.0.0.1:17611/",
             "get_install_mode"
+        ));
+        assert!(!invoke(
+            &other,
+            "http://127.0.0.1:17611/",
+            "plugin:app|version"
         ));
     }
 }
