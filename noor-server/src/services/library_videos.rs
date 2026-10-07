@@ -707,20 +707,18 @@ pub async fn run_if_idle(state: SharedState) {
                         _ => continue,
                     };
 
-                let mut total = None;
-                let videos = match client
+                let (videos, total) = match client
                     .get_artist_videos(target.tidal_artist_id, VIDEOS_PER_ARTIST, 0)
                     .await
                 {
                     Ok(page) => {
-                        total = page.total_number_of_items;
                         if page
                             .total_number_of_items
                             .is_some_and(|total| total > page.items.len() as i64)
                         {
                             larger_catalogs += 1;
                         }
-                        page.items
+                        (page.items, page.total_number_of_items)
                     }
                     Err(e) => {
                         // Do not stamp the ledger on failure: an unstamped artist
