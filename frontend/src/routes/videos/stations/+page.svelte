@@ -5,7 +5,7 @@
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import StationRow from '$lib/components/video/StationRow.svelte';
 	import StationSpotlight from '$lib/components/video/StationSpotlight.svelte';
-	import { SMALL_CATALOG, groupStations, numberStations, stationMeta } from '$lib/components/video/stations';
+	import { SMALL_CATALOG, groupStations, numberStations, sceneFamilyLabel, stationMeta } from '$lib/components/video/stations';
 	import { showToast } from '$lib/stores/toast';
 	import { playVideoStation, videoSession, videoStationOnAir } from '$lib/stores/video_session';
 
@@ -101,7 +101,9 @@
 		{#each grouped.rows as row (row.id)}
 			<section class="group" aria-label={row.title}>
 				<h3 class="group-label">{row.title}</h3>
-				{#each row.stations as station (station.id)}
+				{#each row.stations as station, index (station.id)}
+					{@const family = sceneFamilyLabel(row.stations, index)}
+					{#if family}<h4 class="family-label">{family}</h4>{/if}
 					<StationRow
 						card={station}
 						number={numbers.get(station.id) ?? ''}
@@ -162,6 +164,15 @@
 		text-transform: uppercase;
 		letter-spacing: 1.5px;
 		color: var(--accent);
+	}
+
+	/* Explore's families: quieter than the group label above them. */
+	.family-label {
+		margin: 8px 0 2px;
+		padding: 0 12px;
+		color: var(--text-tertiary);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-medium);
 	}
 
 	.note {

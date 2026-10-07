@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import type { VideoStationCard } from '$lib/api/client';
-import { cleanBio, groupStations, numberStations, previewArtists, spotlightArtistId, stationFrames, stationMeta } from './stations';
+import { cleanBio, groupStations, numberStations, previewArtists, sceneFamilyLabel, spotlightArtistId, stationFrames, stationMeta } from './stations';
 
 function card(id: string, group: VideoStationCard['group']): VideoStationCard {
 	return { id, group, title: id, subtitle: '', unwatched_count: 40, preview: [] };
@@ -83,6 +83,21 @@ describe('channel guide', () => {
 			['charts', '05'],
 		]);
 		expect(numberStations(null, rows).get('wild-card')).toBe('01');
+	});
+});
+
+describe('explore scenes', () => {
+	test('sit between vibes and themes', () => {
+		const { rows } = groupStations([card('live', 'themes'), card('scene:jazz', 'explore'), card('vibe:dark', 'vibes')]);
+		expect(rows.map((row) => row.id)).toEqual(['vibes', 'explore', 'themes']);
+	});
+
+	test('label a family once, where it starts', () => {
+		const row = ['scene:latin', 'scene:reggaeton', 'scene:metal', 'scene:punk', 'scene:jazz'].map((id) => card(id, 'explore'));
+		expect(row.map((_, index) => sceneFamilyLabel(row, index))).toEqual([
+			'Latin and Caribbean', null, 'Heavier', null, 'Timeless',
+		]);
+		expect(sceneFamilyLabel([card('genre:pop', 'genres')], 0)).toBeNull();
 	});
 });
 

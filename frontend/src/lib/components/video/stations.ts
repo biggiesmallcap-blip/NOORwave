@@ -4,9 +4,34 @@ export const STATION_ROWS = [
 	{ id: 'for_you', title: 'For you' },
 	{ id: 'genres', title: 'Your genres' },
 	{ id: 'vibes', title: 'Vibes' },
+	{ id: 'explore', title: 'Explore' },
 	{ id: 'themes', title: 'Themes' },
 	{ id: 'charts', title: 'Charts' },
 ] as const;
+
+/** Explore scenes fall into a few families, shown as quiet sub-labels. */
+const SCENE_FAMILIES: Record<string, string> = {
+	latin: 'Latin and Caribbean',
+	reggaeton: 'Latin and Caribbean',
+	reggae: 'Latin and Caribbean',
+	afrobeats: 'Global pop',
+	'k-pop': 'Global pop',
+	metal: 'Heavier',
+	punk: 'Heavier',
+	classical: 'Timeless',
+	jazz: 'Timeless',
+	country: 'Timeless',
+	'disco-funk': 'Timeless',
+};
+
+/** The sub-label to show before `stations[index]` when it starts a new
+ *  family (Explore only). */
+export function sceneFamilyLabel(stations: VideoStationCard[], index: number): string | null {
+	const family = (card: VideoStationCard | undefined) =>
+		card?.id.startsWith('scene:') ? SCENE_FAMILIES[card.id.slice(6)] ?? null : null;
+	const current = family(stations[index]);
+	return current && current !== family(stations[index - 1]) ? current : null;
+}
 
 /** Below this the catalog is too thin for stations to feel endless. */
 export const SMALL_CATALOG = 500;

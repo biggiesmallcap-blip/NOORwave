@@ -7,7 +7,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 use super::pick::Candidate;
-use super::{StationId, Vibe};
+use super::{Scene, StationId, Vibe};
 use crate::services::video_discovery::names::name_key;
 use crate::services::video_discovery::{graph, roots};
 use crate::services::video_radio::video_song_key;
@@ -44,6 +44,49 @@ pub fn vibe_terms(vibe: Vibe) -> (&'static [&'static str], &'static [&'static st
             &["Darkwave", "Gothic Rock", "Industrial", "Dark Ambient"],
             &["dark"],
         ),
+    }
+}
+
+/// Genre names (lowercase) that make up each Explore scene. Matched against
+/// library track genres and the genres TIDAL/Last.fm gave video artists.
+pub fn scene_genres(scene: Scene) -> &'static [&'static str] {
+    match scene {
+        Scene::Latin => &[
+            "latin",
+            "latin pop",
+            "latino",
+            "salsa",
+            "bachata",
+            "cumbia",
+            "spanish",
+            "brazilian",
+        ],
+        Scene::Reggaeton => &["reggaeton"],
+        Scene::Reggae => &["reggae", "roots reggae", "dancehall"],
+        Scene::Afrobeats => &["afrobeats", "afrobeat"],
+        Scene::Kpop => &["k-pop", "kpop"],
+        Scene::Metal => &[
+            "metal",
+            "heavy metal",
+            "nu metal",
+            "nu-metal",
+            "thrash metal",
+            "progressive metal",
+            "power metal",
+            "metalcore",
+            "black metal",
+            "alternative metal",
+        ],
+        Scene::Punk => &["punk", "punk rock", "post-punk", "pop punk", "skate punk"],
+        Scene::Classical => &[
+            "classical",
+            "contemporary classical",
+            "opera",
+            "classical piano",
+        ],
+        Scene::Jazz => &["jazz"],
+        Scene::Country => &["country", "americana"],
+        Scene::DiscoFunk => &["disco", "funk"],
     }
 }
 
@@ -232,6 +275,26 @@ fn artists_by_genre_names(conn: &Connection, names: &[&str]) -> Result<HashSet<i
     )
 }
 
+/// Artists for a scene: library artists with two tracks in one of its genres,
+/// plus video artists TIDAL or Last.fm filed under one. Case-insensitive.
+fn artists_by_scene(conn: &Connection, scene: Scene) -> Result<HashSet<i64>> {
+    artist_set(
+        conn,
+        &format!(
+            "SELECT a.tidal_id FROM artists a
+               JOIN tracks t ON t.artist_id = a.id
+               JOIN track_genres tg ON tg.track_id = t.id
+               JOIN genres g ON g.id = tg.genre_id
+              WHERE a.tidal_id > 0 AND lower(g.name) IN (SELECT value FROM json_each(?1))
+              GROUP BY a.tidal_id HAVING COUNT(DISTINCT t.id) >= {MIN_TRACKS_PER_ARTIST}
+             UNION
+             SELECT seed_tidal_id FROM video_seed_genres
+              WHERE lower(genre_name) IN (SELECT value FROM json_each(?1))"
+        ),
+        &serde_json::to_string(scene_genres(scene))?,
+    )
+}
+
 fn artists_by_tags(conn: &Connection, tags: &[&str]) -> Result<HashSet<i64>> {
     if tags.is_empty() {
         return Ok(HashSet::new());
@@ -322,6 +385,7 @@ pub fn candidates(
             artists.extend(artists_by_tags(conn, tags)?);
             catalog(conn, Some(&artists), "")?
         }
+        StationId::Scene(scene) => catalog(conn, Some(&artists_by_scene(conn, *scene)?), "")?,
         StationId::Duets => catalog(conn, None, "")?
             .into_iter()
             .filter(is_duet)
@@ -470,6 +534,24 @@ pub(crate) mod tests {
             vec![1]
         );
         assert_eq!(pool_ids(&conn, StationId::Vibe(Vibe::Psychedelic)), vec![1]);
+    }
+
+    #[test]
+    fn scenes_match_library_genres_and_video_artist_genres_in_any_case() {
+        let conn = conn();
+        library_artist_with_genre(&conn, 1, 100, "Reggaeton", 2);
+        library_artist_with_genre(&conn, 2, 200, "Latin Pop", 2);
+        conn.execute(
+            "INSERT INTO video_seed_genres (seed_tidal_id, genre_name) VALUES (300, 'salsa')",
+            [],
+        )
+        .unwrap();
+        for (id, artist) in [(1, 100), (2, 200), (3, 300), (4, 400)] {
+            add_video(&conn, &video(id, artist));
+        }
+        assert_eq!(pool_ids(&conn, StationId::Scene(Scene::Reggaeton)), vec![1]);
+        assert_eq!(pool_ids(&conn, StationId::Scene(Scene::Latin)), vec![2, 3]);
+        assert!(pool_ids(&conn, StationId::Scene(Scene::Metal)).is_empty());
     }
 
     #[test]
