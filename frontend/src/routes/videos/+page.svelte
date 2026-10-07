@@ -135,7 +135,6 @@
 				<GuideRow
 					title={set.title}
 					titleHint={set.blurb}
-					meta={set.blurb}
 					count={`${set.items.length} ${set.items.length === 1 ? 'video' : 'videos'}`}
 					label={set.title}
 					frames={frames(set)}

@@ -187,10 +187,18 @@
 		cursor: pointer;
 		transition: opacity 120ms ease;
 	}
+	/* At rest the wall of thumbnails sits a little dim and muted, so a page
+	   of rows reads calm; the row under the pointer comes up to full color. */
 	.frame :global(img) {
 		width: 100%;
 		height: 100%;
 		object-fit: cover;
+		filter: saturate(0.7) brightness(0.8);
+		transition: filter 160ms ease;
+	}
+	.guide-row:hover .frame :global(img),
+	.guide-row:focus-within .frame :global(img) {
+		filter: none;
 	}
 	/* Hover is instant and in place (the strip clips anything that moves):
 	   the other frames dim, this one names its video. */
