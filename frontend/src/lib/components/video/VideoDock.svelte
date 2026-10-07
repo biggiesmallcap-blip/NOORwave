@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { page } from '$app/state';
+	import { navigating, page } from '$app/state';
 	import { api } from '$lib/api/client';
 	import VideoPlayer from '$lib/components/video/VideoPlayer.svelte';
 	import { audioSettings } from '$lib/stores/audio_settings';
@@ -72,6 +72,11 @@
 	let viewportWidth = $state(typeof window === 'undefined' ? 1280 : window.innerWidth);
 	let viewportHeight = $state(typeof window === 'undefined' ? 800 : window.innerHeight);
 	let rafId = 0;
+	let dockEl = $state<HTMLDivElement | null>(null);
+	/** Where the dock was drawn at the start of this frame: the "from" of a glide. */
+	let lastDockRect: DOMRect | null = null;
+	let glide: Animation | null = null;
+
 	let workspace: HTMLElement | null = null;
 
 	function sameRect(a: Rect | null, b: DOMRect) {
@@ -79,6 +84,7 @@
 	}
 
 	function track() {
+		if (dockEl?.isConnected) lastDockRect = dockEl.getBoundingClientRect();
 		const panel = $videoPanelAnchor;
 		const panelRect = panel?.isConnected ? panel.getBoundingClientRect() : null;
 		const usable = Boolean(panelRect && panelRect.width >= PANEL_MIN_WIDTH && panelRect.height > 0);
@@ -91,7 +97,13 @@
 		const anchor = mode === 'full' ? stage : mode === 'panel' ? panel : null;
 		if (active && anchor) {
 			const r = anchor === panel && panelRect ? panelRect : anchor === stage && stageRect ? stageRect : anchor.getBoundingClientRect();
-			if (!sameRect(rect, r)) rect = { top: r.top, left: r.left, width: r.width, height: r.height };
+			// Hold still on the stage while a page change is in flight: the
+			// outgoing page reflows for a frame (the stage grew ~4%), and
+			// following it showed as a twitch right before the glide.
+			// (navigating.to also clears on a cancelled navigation, unlike a
+			// before/after pair, so the hold can never stick.)
+			const holdStill = navigating.to !== null && mode === 'full' && rect !== null;
+			if (!holdStill && !sameRect(rect, r)) rect = { top: r.top, left: r.left, width: r.width, height: r.height };
 		} else if (rect !== null) {
 			rect = null;
 		}
@@ -236,23 +248,88 @@
 
 	// --- Moves between places glide ---
 	// Stage, corner, queue panel and fullscreen are all the same element, so
-	// every move animates left/top/width/height from where it was instead of
-	// cutting (watch page -> corner, corner -> watch page, in and out of
-	// fullscreen).
+	// every move animates from where it was instead of cutting.
+	//
+	// Page moves (watch page <-> corner <-> queue panel) are a FLIP transform:
+	// the dock takes its new box at once and a compositor animation carries
+	// it there from the old one. Animating left/top/width/height instead
+	// re-laid-out and re-scaled the playing video every frame while the next
+	// page was rendering, which stuttered. Controls fade for the glide so the
+	// scale never shows stretched text.
+	//
+	// Fullscreen keeps a size transition: the window is not 16:9, so a scale
+	// would stretch the picture, and nothing else renders during it.
 	type Place = 'full' | 'panel' | 'mini' | 'expanded';
 	let place = $derived<Place>(expanded ? 'expanded' : mode);
 	let box = $derived.by(() => {
 		// Gliding in: explicit pixels so the size animates. Once there, no
 		// inline box at all - CSS pins the dock to the window edges, so the
 		// window going fullscreen resizes it in the same frame.
-		if (expanded) return morphing ? { top: 0, left: 0, width: viewportWidth, height: viewportHeight } : null;
+		if (expanded) return geometryMorph ? { top: 0, left: 0, width: viewportWidth, height: viewportHeight } : null;
 		if (mode !== 'mini' && rect) return rect;
 		if (position) return { top: position.top, left: position.left, width: size.width, height: size.height };
 		return null;
 	});
 	let morphing = $state(false);
+	let geometryMorph = $state(false);
 	let previousPlace: Place | null = null;
 	let morphTimer: ReturnType<typeof setTimeout> | null = null;
+	const GLIDE_EASING = 'cubic-bezier(0.22, 0.7, 0.2, 1)';
+
+	function endGlide() {
+		morphing = false;
+		geometryMorph = false;
+		if (dockEl) {
+			dockEl.style.transition = '';
+			dockEl.style.animationDuration = '';
+			dockEl.style.transform = '';
+			dockEl.style.transformOrigin = '';
+		}
+	}
+
+	/** Invert the jump: draw the dock at its old box via a transform, then let
+	 *  that transform run out. Runs after the DOM took the new box. */
+	function flipFrom(from: DOMRect | null) {
+		if (!dockEl || !from || from.width <= 0 || from.height <= 0) return;
+		// The class that switches transitions off lands a beat after the new
+		// box, so the corner's drag-snap transition has already started and
+		// would hand us a half-moved box. Cancel it inline first (jumps to the
+		// real target), then measure. Cleared again in endGlide.
+		dockEl.style.transition = 'none';
+		// Same timing gap for the arrival animation: dock-in had started
+		// (scale 0.96, 14px down) and skewed the measurement, so the glide
+		// began ~30px off and corrected itself mid-flight. Finish it now.
+		dockEl.style.animationDuration = '0s';
+		const to = dockEl.getBoundingClientRect();
+		if (to.width <= 0 || to.height <= 0) return;
+		const dx = from.left - to.left;
+		const dy = from.top - to.top;
+		const sx = from.width / to.width;
+		const sy = from.height / to.height;
+		const start = `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`;
+		glide?.cancel();
+		// Pin the start inline too: a new animation only takes over on the
+		// next frame, and without this the dock painted once at its new box.
+		const el = dockEl;
+		el.style.transformOrigin = '0 0';
+		el.style.transform = start;
+		glide = el.animate(
+			[
+				{ transformOrigin: '0 0', transform: start },
+				{ transformOrigin: '0 0', transform: 'translate(0, 0) scale(1, 1)' },
+			],
+			{ duration: MORPH_MS, easing: GLIDE_EASING }
+		);
+		// Start on this frame rather than pending until the next one.
+		if (document.timeline.currentTime != null) glide.startTime = document.timeline.currentTime;
+		// Once the animation is driving, the inline pin must go, or it would
+		// show again when the animation ends.
+		void glide.ready.then(() => {
+			el.style.transform = '';
+			el.style.transformOrigin = '';
+		}).catch(() => {});
+	}
+
 	$effect(() => {
 		const next = place;
 		if (!active) {
@@ -260,9 +337,15 @@
 			return;
 		}
 		if (previousPlace !== null && previousPlace !== next) {
-			morphing = true;
-			if (morphTimer) clearTimeout(morphTimer);
-			morphTimer = setTimeout(() => (morphing = false), MORPH_MS);
+			const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+			const fullscreenMove = previousPlace === 'expanded' || next === 'expanded';
+			if (!reducedMotion) {
+				morphing = true;
+				geometryMorph = fullscreenMove;
+				if (!fullscreenMove) flipFrom(lastDockRect);
+				if (morphTimer) clearTimeout(morphTimer);
+				morphTimer = setTimeout(endGlide, MORPH_MS);
+			}
 		}
 		previousPlace = next;
 	});
@@ -348,11 +431,13 @@
 		if (rafId) cancelAnimationFrame(rafId);
 		if (morphTimer) clearTimeout(morphTimer);
 		if (fullscreenTimer) clearTimeout(fullscreenTimer);
+		glide?.cancel();
 	});
 </script>
 
 {#if active}
 	<div
+		bind:this={dockEl}
 		class="video-dock"
 		class:mini={place === 'mini'}
 		class:panel={place === 'panel'}
@@ -362,6 +447,7 @@
 		class:collapsed={place === 'mini' && collapsed}
 		class:dragging={drag !== null}
 		class:morphing
+		class:geometry-morph={geometryMorph}
 		onwheel={forwardWheel}
 		class:positioned={place !== 'mini' && box !== null}
 		style:top={box ? `${box.top}px` : null}
@@ -462,7 +548,9 @@
 	/* Arriving on the watch page: the player settles into the stage instead
 	   of snapping there from the corner. */
 	.video-dock.full.positioned {
-		animation: stage-in 0.28s cubic-bezier(0.22, 0.7, 0.2, 1) both;
+		/* backwards, not both: a held last frame (transform: none) would beat
+		   the inline start pin of a FLIP glide and flash the end box. */
+		animation: stage-in 0.28s cubic-bezier(0.22, 0.7, 0.2, 1) backwards;
 	}
 
 	@keyframes stage-in {
@@ -488,7 +576,7 @@
 		overflow: hidden;
 		box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
 		border: 1px solid rgba(255, 255, 255, 0.12);
-		animation: dock-in 0.22s ease both;
+		animation: dock-in 0.22s ease backwards;
 	}
 
 	.video-dock.mini.placed {
@@ -619,13 +707,20 @@
 		border-radius: 0;
 	}
 
-	/* Every move between places glides. Last in the sheet and as specific as
-	   .mini.placed, so it wins over that rule's short drag-snap transition.
-	   Zero duration rather than animation: none - removing the animation when
-	   the glide ends would restart dock-in or stage-in and pop a second time;
-	   with the same name kept, it has already finished by then. */
+	/* During any glide. Last in the sheet and as specific as .mini.placed, so
+	   it wins over that rule's drag-snap transition, which would otherwise
+	   slide left/top underneath the transform glide. Zero duration rather
+	   than animation: none - removing the animation when the glide ends would
+	   restart dock-in or stage-in and pop a second time; with the same name
+	   kept, it has already finished by then. */
 	.video-dock.morphing:is(.mini, .panel, .full, .expanded) {
 		animation-duration: 0s;
+		transition: none;
+		will-change: transform;
+	}
+
+	/* In and out of fullscreen: a size transition (see the script). */
+	.video-dock.geometry-morph:is(.mini, .panel, .full, .expanded) {
 		transition:
 			left 0.32s cubic-bezier(0.22, 0.7, 0.2, 1),
 			top 0.32s cubic-bezier(0.22, 0.7, 0.2, 1),
@@ -634,9 +729,11 @@
 			border-radius 0.32s ease;
 	}
 
-	@media (prefers-reduced-motion: reduce) {
-		.video-dock.morphing:is(.mini, .panel, .full, .expanded) {
-			transition: none;
-		}
+	/* Controls sit out the glide, so the transform's scale never shows
+	   stretched buttons or text. */
+	.video-dock.morphing :global(:is(.controls, .top-meta, .up-next-pill)),
+	.video-dock.morphing .mini-chrome {
+		opacity: 0;
+		transition: none;
 	}
 </style>

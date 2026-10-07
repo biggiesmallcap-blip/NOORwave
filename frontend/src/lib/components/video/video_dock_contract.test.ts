@@ -33,6 +33,16 @@ describe('persistent video dock contract', () => {
 		// already placed rather than parked at the CSS fallback corner.
 		expect(dock).toMatch(/if \(active\) \{\s*if \(!workspace\?\.isConnected\)/);
 		expect(dock).toContain('if (previousPlace !== null && previousPlace !== next)');
+		// Page moves are a compositor transform (FLIP), not a per-frame
+		// relayout of the playing video.
+		expect(dock).toContain('glide = el.animate(');
+		// Measured with the arrival animation finished and snap transitions off,
+		// and the start pinned inline so no frame shows the end box early.
+		expect(dock).toContain("dockEl.style.animationDuration = '0s';");
+		expect(dock).toContain('el.style.transform = start;');
+		expect(dock).toContain('animation: dock-in 0.22s ease backwards;');
+		expect(dock).toContain('if (dockEl?.isConnected) lastDockRect = dockEl.getBoundingClientRect();');
+		expect(dock).toContain('if (!fullscreenMove) flipFrom(lastDockRect);');
 		// Zero duration, not animation: none - removing it would replay dock-in.
 		expect(dock).toContain('animation-duration: 0s;');
 		expect(dock).not.toMatch(/\.morphing \{[^}]*\n\s*animation: none;/);
@@ -45,7 +55,7 @@ describe('persistent video dock contract', () => {
 		expect(dock).toContain("if (event.key === 'Escape' && expanded && !document.fullscreenElement) expanded = false;");
 		// One motion at a time: glide first, then window fullscreen; on the way
 		// out, window first, then glide.
-		expect(dock).toContain('if (expanded) return morphing ? { top: 0, left: 0, width: viewportWidth, height: viewportHeight } : null;');
+		expect(dock).toContain('if (expanded) return geometryMorph ? { top: 0, left: 0, width: viewportWidth, height: viewportHeight } : null;');
 		expect(dock).toMatch(/fullscreenTimer = setTimeout\(\(\) => \{[\s\S]*requestFullscreen[\s\S]*\}, MORPH_MS\);/);
 		expect(dock).toContain('requestAnimationFrame(() => requestAnimationFrame(() => (expanded = false)));');
 		expect(player).toMatch(/if \(onFullscreenToggle\) \{\s*onFullscreenToggle\(\);\s*return;/);
