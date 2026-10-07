@@ -1,4 +1,4 @@
-# NOORwave — TIDAL desktop music player
+# NOORwave: TIDAL desktop music player
 
 <p align="center">
   <img width="1280" height="640" alt="NOORwave" src="frontend/static/social/source-animated.svg" />
@@ -10,10 +10,10 @@
 
 NOORwave is a desktop music player for TIDAL built for **instant local search and fast library browsing**. Your synced library lives in a SQLite database on your own machine, so searching your saved collection runs locally. Your library and listening history stay on your disk; TIDAL supplies the audio.
 
-**Music video indexing** finds live performances, covers, and alternate versions of tracks in your library, bringing them together in a video wall you can browse by genre and year. Gapless hi-fi playback, music discovery, automix, and phone remote control round out the player.
+**Music video indexing** finds live performances, covers, and alternate versions of tracks in your library, bringing them together in a video wall you can browse by genre and year. Video stations turn that growing catalog into a daily lineup you can keep watching. Gapless hi-fi playback, music discovery, automix, and phone remote control round out the player.
 
 <p align="center">
-  Instant local search &middot; fast library browsing &middot; music video indexing &middot; gapless lossless playback &middot; Genre Galaxy &middot; planned DJ transitions &middot; phone remote
+  Instant local search &middot; fast library browsing &middot; video indexing and stations &middot; gapless lossless playback &middot; Genre Galaxy &middot; planned DJ transitions &middot; phone remote
 </p>
 
 <p align="center">
@@ -60,8 +60,6 @@ Your library, drawn as gravity. Fourteen families, a couple hundred genres, size
 
 ### Your music videos, indexed
 
-Two halves, and the second one is the interesting half.
-
 **Discovery** is what you expect: search TIDAL's full video catalogue, play it in-app over HLS with a quality selector, autoplay through results, and pull in TIDAL's video mixes.
 
 **Library indexing** is the part no other client does. A background pass walks the artists in your library and asks TIDAL what videos exist for the tracks you have liked, then keeps every hit. Not deduped down to one canonical clip: live takes, covers, and alternate cuts are all kept on purpose, because a richer wall beats a tidy one. Four different videos titled "Jamming" get told apart by release year and runtime. The result is a filterable wall of videos *for music you already love*, sortable by genre, year, and recency, with Play all and Shuffle across the lot. When a match is wrong, hide it once and it stays hidden through the 90-day re-scan.
@@ -70,9 +68,17 @@ Two halves, and the second one is the interesting half.
   <img alt="Liked videos: a filterable wall of videos for tracks in your library" src="docs/assets/shots/videolikes.webp" width="900" />
 </p>
 
+### Video stations that keep playing
+
+Open **Videos -> Stations** for a daily lineup drawn from your taste and the indexed catalog, including a rotating artist spotlight. Stations refill as you watch, drawing on genres, artist relationships, tags and charts where the catalog has enough videos. The page explains when discovery is still building the catalog or there is not enough to play.
+
+Background discovery fills in liked artists first, then explores related and new artists. Video radio and related-video suggestions use those connections, with videos you watch and enjoy helping guide the search. In **Settings -> Services -> TIDAL -> Video discovery**, choose **Full**, **Limited** for about a tenth of the requests, or **Off** to stop background discovery while retaining lookups for video radio you start.
+
 ### Transitions that are planned, not hoped for
 
-The DJ cockpit is a control surface, not a crossfade slider. It reads the outgoing and incoming tracks as profiles, plans the transition ahead of time, and shows you the plan: the transition lane, the waveform of the pair, the mix intent (faster, balanced, neutral), and the guardrails that will veto a move it cannot land cleanly. Harmonic and BPM matching run off real analysis: Camelot key detection via chromagram and Krumhansl-Schmuckler, tempo, energy. Compatible keys get favoured, clashes get penalised, and when a track has not been analysed yet the scoring stays neutral instead of guessing.
+The DJ cockpit reads the outgoing and incoming tracks as audio profiles and plans the cues, duration and gain changes ahead of time. Blends, cuts, bass swaps and energy changes use the available beat, phrase and harmonic evidence. **Conservative**, **Balanced** and **Adventurous** preferences guide the choices; uncertain analysis falls back to a safe crossfade.
+
+DJ and Automix show the outgoing track, transition and incoming track together, with animation driven by confirmed playback. **Why this transition?**, **Fine Tune** and **Diagnostics** expose the reasoning and controls. Harmonic and BPM matching use Camelot key detection, tempo and energy analysis. Compatible keys get favoured, clashes get penalised, and unanalyzed tracks keep neutral scores. Seeking through a mix follows the incoming track's original audio and position, including while paused.
 
 ### Automix that learns *your* library
 
@@ -85,6 +91,8 @@ There is a full PWA at `/remote`, served by the same process on the same port. N
 ### A library that behaves like a local collection
 
 Incremental TIDAL sync, instant local search, artist and album pages, playlists, duplicate detection, and metadata enrichment from MusicBrainz, Last.fm, and Discogs. Anything you want on disk, you can have on disk: right-click a track, album, or playlist and save it as bit-perfect FLAC or 320 kbps MP3, tagged, into an `Artist/Album/NN - Title` tree you pick once.
+
+TIDAL catalogue replacements preserve track identity, original library dates and explicit favorite choices through sync. Playlist search also finds user-made Spotify playlists, with fallback sources for searching, opening and saving when the metadata proxy is unavailable.
 
 <p align="center">
   <img alt="Library: top artists, suggestions, and shuffle picks" src="docs/assets/shots/library.webp" width="900" />
@@ -121,7 +129,7 @@ No Last.fm key ships with the app, so this step is on you. It is worth the minut
 
 ## Download
 
-Latest build: [GitHub Releases](../../releases/latest).
+Latest build: [GitHub Releases](../../releases/latest). Read the [v0.19.47 release notes](docs/releases/v0.19.47.md) for this release's changes.
 
 | Platform | Artifact | Notes |
 |---|---|---|
@@ -132,6 +140,8 @@ Latest build: [GitHub Releases](../../releases/latest).
 | Linux x64 | `NOORwave-vX.Y.Z-linux-x64.tar.gz` | Portable. |
 
 Windows builds are not CA-signed yet, so SmartScreen can warn on first launch. The updater payload itself is signed with the project's Tauri updater key.
+
+The Windows portable zip remains the recovery option if installation or updating is blocked. Installed app code lives under `%LOCALAPPDATA%\Programs\NOORwave`, with your database, settings and logs under `%LOCALAPPDATA%\NOORwave`.
 
 ## Run From Source
 
