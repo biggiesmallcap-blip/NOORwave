@@ -290,6 +290,7 @@
 	/* An empty 16/9 frame the fixed dock sits on top of. Dark fill so it
 	   reads as a video surface in the frame before the dock paints. */
 	.stage-anchor {
+		position: relative;
 		width: 100%;
 		aspect-ratio: 16 / 9;
 		border-radius: 8px;

@@ -42,7 +42,9 @@ describe('persistent video dock contract', () => {
 		expect(dock).toContain('el.style.transform = start;');
 		expect(dock).toContain('animation: dock-in 0.22s ease backwards;');
 		expect(dock).toContain('if (dockEl?.isConnected) lastDockRect = dockEl.getBoundingClientRect();');
-		expect(dock).toContain('if (!fullscreenMove) flipFrom(lastDockRect);');
+		expect(dock).toContain('else flipFrom(lastDockRect);');
+		// Moving the host restarts CSS animations; they are finished on the spot.
+		expect(dock).toContain('if (animation !== glide) animation.finish();');
 		// Zero duration, not animation: none - removing it would replay dock-in.
 		expect(dock).toContain('animation-duration: 0s;');
 		expect(dock).not.toMatch(/\.morphing \{[^}]*\n\s*animation: none;/);
@@ -55,16 +57,21 @@ describe('persistent video dock contract', () => {
 		expect(dock).toContain("if (event.key === 'Escape' && expanded && !document.fullscreenElement) expanded = false;");
 		// One motion at a time: glide first, then window fullscreen; on the way
 		// out, window first, then glide.
-		expect(dock).toContain('if (expanded) return geometryMorph ? { top: 0, left: 0, width: viewportWidth, height: viewportHeight } : null;');
+		expect(dock).toContain('if (expanded) return null;');
+		expect(dock).toContain('if (fullscreenMove) sizeGlideFrom(lastDockRect);');
 		expect(dock).toMatch(/fullscreenTimer = setTimeout\(\(\) => \{[\s\S]*requestFullscreen[\s\S]*\}, MORPH_MS\);/);
 		expect(dock).toContain('requestAnimationFrame(() => requestAnimationFrame(() => (expanded = false)));');
 		expect(player).toMatch(/if \(onFullscreenToggle\) \{\s*onFullscreenToggle\(\);\s*return;/);
 	});
 
-	test('wheel over the docked video scrolls the page underneath', () => {
-		expect(dock).toContain('onwheel={forwardWheel}');
-		expect(dock).toContain('wheelTarget = Math.min(Math.max(base + event.deltaY * scale, 0), max);');
-		expect(dock).toContain("workspace.scrollTo({ top: wheelTarget, behavior: 'smooth' });");
+	test('on the watch page the player lives in the stage and scrolls natively', () => {
+		// A fixed layer chasing the stage rect trailed compositor scrolling by
+		// a frame, so the video slid out of its frame while scrolling.
+		expect(dock).toContain('<div class="video-dock-host" bind:this={host}>');
+		expect(dock).toContain('stage.appendChild(host);');
+		expect(dock).toContain('const unsubscribeStage = videoStageAnchor.subscribe((stage) => {');
+		expect(dock).toContain(':global(.stage-anchor) > .video-dock-host > .video-dock {');
+		expect(dock).not.toContain('onwheel=');
 	});
 
 	test('frees the exclusive device when a video starts playing', () => {
