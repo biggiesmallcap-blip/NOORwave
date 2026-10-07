@@ -1253,6 +1253,11 @@ pub fn api_routes(state: SharedState) -> Router {
             get(video_station_routes::get_video_stations),
         )
         .route(
+            "/api/videos/stations/settings",
+            get(video_station_routes::get_video_station_settings)
+                .put(video_station_routes::put_video_station_settings),
+        )
+        .route(
             "/api/videos/stations/{id}/next",
             post(video_station_routes::post_video_station_next),
         )

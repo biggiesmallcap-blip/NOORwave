@@ -1,75 +1,79 @@
+<script lang="ts" module>
+	import type { VideoDiscoverSet as ShelfSet } from '$lib/api/client';
+	// The last shelves, kept across visits so switching back to this tab
+	// renders at once and refreshes quietly instead of popping in.
+	let lastSets: ShelfSet[] | null = null;
+</script>
+
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	import {
-		api,
-		type TidalHomeModule,
-		type VideoDiscoverSet,
-	} from '$lib/api/client';
-	import TidalDiscoverShelves from '$lib/components/search/TidalDiscoverShelves.svelte';
-	import VideoSetShelf from '$lib/components/video/VideoSetShelf.svelte';
+	import { api, type TidalSearchVideo, type VideoDiscoverSet } from '$lib/api/client';
+	import GuideFeature from '$lib/components/video/GuideFeature.svelte';
+	import GuidePlaceholder from '$lib/components/video/GuidePlaceholder.svelte';
+	import GuideRow from '$lib/components/video/GuideRow.svelte';
 	import { buildBrowseMix } from '$lib/video/browse_mix';
-	import { playEditorialItem, playFromShelf, playVideoCollection } from '$lib/video/play_collection';
+	import { playFromShelf, playVideoCollection } from '$lib/video/play_collection';
 	import { videoSectionQuery, watchUrl } from '$lib/video/section';
 
-	// The Videos tab: today's picks, the built shelves and a little of TIDAL's
-	// editorial video page. Browsing only - picking anything opens the watch
-	// page (see routes/videos/+layout.svelte).
+	// The Videos tab, laid out like the station guide: today's picks as the
+	// featured row, then one row per built shelf with a filmstrip of its
+	// videos. A frame plays the shelf from that video. Browsing only - picking
+	// anything opens the watch page (see routes/videos/+layout.svelte).
+	// TIDAL's editorial modules live on their own tab.
 
 	const HINTS = ['music video', 'live session', 'official video', 'visualizer'];
 	// While the server assembles today's set (building: true, no snapshot yet),
 	// re-fetch a few times so the picks appear without a manual reload.
 	const BUILD_POLL_MS = 6000;
 	const BUILD_POLL_MAX = 20;
-	// TIDAL's videos page ships several modules; a couple is plenty next to the
-	// library-derived shelves.
-	const EDITORIAL_MODULE_MAX = 3;
 
-	let discoverSets = $state<VideoDiscoverSet[]>([]);
-	let editorialModules = $state<TidalHomeModule[]>([]);
-	let loadingBrowse = $state(true);
+	let discoverSets = $state<VideoDiscoverSet[]>(lastSets ?? []);
+	let loadingBrowse = $state(lastSets == null);
 	let browsePollTimer: ReturnType<typeof setTimeout> | null = null;
 	let browsePolls = 0;
 
-	// The daily set leads as the first rail; every other built set is its own
-	// rail below it.
+	// The daily set leads as the featured row; every other built set is its
+	// own row below it.
 	let dailySet = $derived(discoverSets.find((s) => s.slug === 'daily-picks') ?? null);
 	let shelfSets = $derived(
 		discoverSets.filter((s) => s.slug !== 'daily-picks' && s.items.length > 0)
 	);
 	let browseMix = $derived(buildBrowseMix(discoverSets));
-	let hasBrowseContent = $derived(
-		Boolean(dailySet) || shelfSets.length > 0 || editorialModules.length > 0
-	);
+	let canStartRadio = $derived(browseMix.length >= 4);
+	let hasBrowseContent = $derived(Boolean(dailySet) || shelfSets.length > 0);
 
 	async function loadBrowse() {
 		try {
-			const [discover, page] = await Promise.allSettled([
-				api.getVideosDiscover(),
-				api.getTidalPage('videos'),
-			]);
-			if (discover.status === 'fulfilled') {
-				discoverSets = discover.value.sets ?? [];
-				// Sets build one at a time server-side, so keep polling while
-				// more are on the way - the page fills in shelf by shelf.
-				if (discover.value.building && browsePolls < BUILD_POLL_MAX) {
-					browsePolls += 1;
-					browsePollTimer = setTimeout(() => void loadBrowse(), BUILD_POLL_MS);
-				}
+			const discover = await api.getVideosDiscover();
+			discoverSets = discover.sets ?? [];
+			lastSets = discoverSets;
+			// Sets build one at a time server-side, so keep polling while more
+			// are on the way - the page fills in row by row.
+			if (discover.building && browsePolls < BUILD_POLL_MAX) {
+				browsePolls += 1;
+				browsePollTimer = setTimeout(() => void loadBrowse(), BUILD_POLL_MS);
 			}
-			if (page.status === 'fulfilled' && editorialModules.length === 0) {
-				editorialModules = (page.value.modules ?? [])
-					.filter((m) => m.items.length >= 4)
-					.slice(0, EDITORIAL_MODULE_MAX);
-			}
+		} catch {
+			// Nothing to browse; the landing hints below take over.
 		} finally {
 			loadingBrowse = false;
 		}
 	}
 
+	/** Frames for a shelf: its videos that have a picture. */
+	function frames(set: VideoDiscoverSet): TidalSearchVideo[] {
+		return set.items.filter((video) => Boolean(video.artwork_url));
+	}
+
 	function playFromSet(set: VideoDiscoverSet, index: number) {
 		const video = set.items[index];
 		if (video) void playFromShelf(video, set.items, set.title, { autoplay: true });
+	}
+
+	function playSetFrom(set: VideoDiscoverSet, startWith?: TidalSearchVideo) {
+		const index = startWith ? set.items.findIndex((item) => item.tidal_id === startWith.tidal_id) : 0;
+		playFromSet(set, Math.max(0, index));
 	}
 
 	function playBrowseMix() {
@@ -112,53 +116,41 @@
 </script>
 
 <div class="videos-page">
-	{#if browseMix.length >= 4}
-		<div class="browse-mix">
-			<div>
-				<p class="eyebrow">Keep watching</p>
-				<h2>Video radio</h2>
-				<p>Starts with your picks, then keeps finding related artists and genres.</p>
+	{#if dailySet}
+		<GuideFeature label={`Daily picks: ${dailySet.title}`} frames={frames(dailySet)} rise={0} onpick={(video) => dailySet && playSetFrom(dailySet, video)}>
+			<span class="eyebrow">Daily picks</span>
+			<button type="button" class="feature-title" onclick={() => dailySet && playFromSet(dailySet, 0)}>{dailySet.title}</button>
+			{#if dailySet.blurb}<p class="feature-blurb">{dailySet.blurb}</p>{/if}
+			<div class="feature-actions">
+				<button type="button" class="btn btn-primary" onclick={() => dailySet && playFromSet(dailySet, 0)}>Play all</button>
+				{#if canStartRadio}
+					<button type="button" class="btn btn-glass" title="Starts with your picks, then keeps finding related artists and genres." onclick={playBrowseMix}>Start video radio</button>
+				{/if}
 			</div>
-			<button type="button" class="mix-play" onclick={playBrowseMix}>Start radio</button>
+		</GuideFeature>
+	{:else if loadingBrowse}
+		<GuidePlaceholder />
+	{:else if canStartRadio}
+		<div class="radio-line">
+			<p>Video radio starts with your picks, then keeps finding related artists and genres.</p>
+			<button type="button" class="btn btn-glass" onclick={playBrowseMix}>Start video radio</button>
 		</div>
 	{/if}
-	{#if dailySet}
-		<VideoSetShelf
-			eyebrow="Daily picks"
-			title={dailySet.title}
-			blurb={dailySet.blurb}
-			items={dailySet.items}
-			onSelect={(_video, index) => dailySet && playFromSet(dailySet, index)}
-			onPlayAll={() => dailySet && playFromSet(dailySet, 0)}
-		/>
-	{:else if loadingBrowse}
-		<p class="picks-loading">Assembling today's picks...</p>
-	{/if}
-	{#each shelfSets as set, i (set.slug)}
-		<VideoSetShelf
-			index={dailySet ? i + 1 : i}
-			title={set.title}
-			blurb={set.blurb}
-			items={set.items}
-			onSelect={(_video, index) => playFromSet(set, index)}
-			onPlayAll={() => playFromSet(set, 0)}
-		/>
-	{/each}
 
-	{#if editorialModules.length > 0}
-		<section class="results-section">
-			<div class="section-heading section-heading--split">
-				<div class="section-heading">
-					<p class="eyebrow">From TIDAL's desk</p>
-					<h2>Editorial picks</h2>
-				</div>
-				<a class="text-btn" href="/videos/editorial">More from TIDAL</a>
-			</div>
-			<TidalDiscoverShelves
-				modules={editorialModules}
-				mediaKind="video"
-				onItemSelect={(item) => playEditorialItem(item, editorialModules)}
-			/>
+	{#if shelfSets.length > 0}
+		<section class="group" aria-label="From your library">
+			<h3 class="group-label rise-in-shelf" style="--rise-index: 1">From your library</h3>
+			{#each shelfSets as set, index (set.slug)}
+				<GuideRow
+					title={set.title}
+					titleHint={set.blurb}
+					count={`${set.items.length} ${set.items.length === 1 ? 'video' : 'videos'}`}
+					label={set.title}
+					frames={frames(set)}
+					rise={index + 1}
+					onplay={(startWith) => playSetFrom(set, startWith)}
+				/>
+			{/each}
 		</section>
 	{/if}
 
@@ -180,88 +172,71 @@
 	.videos-page {
 		display: grid;
 		/* minmax(0, 1fr) not the default auto: an auto track sizes to its
-		   widest child's min-content, so a shelf rail of 12 cards would blow the
-		   column (and the page) past the container instead of scrolling. */
+		   widest child's min-content, so a filmstrip would blow the column
+		   (and the page) past the container instead of clipping. */
 		grid-template-columns: minmax(0, 1fr);
-		gap: 28px;
+		gap: 18px;
 	}
 
-	.browse-mix {
+	/* The section label from /search: small, uppercase, accent. */
+	.eyebrow,
+	.group-label {
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-semibold);
+		text-transform: uppercase;
+		letter-spacing: 1.5px;
+		color: var(--accent);
+	}
+
+	.feature-title {
+		max-width: 100%;
+		padding: 0;
+		border: 0;
+		background: transparent;
+		color: var(--text-primary);
+		font: inherit;
+		font-size: var(--font-size-2xl);
+		font-weight: var(--font-weight-bold);
+		line-height: var(--line-height-tight);
+		text-align: left;
+		cursor: pointer;
+		overflow-wrap: anywhere;
+	}
+	.feature-title:hover { text-decoration: underline; text-underline-offset: 4px; }
+	.feature-blurb {
+		max-width: 62ch;
+		margin: 0;
+		color: var(--text-secondary);
+	}
+	.feature-actions {
 		display: flex;
-		align-items: end;
+		flex-wrap: wrap;
+		gap: var(--space-2);
+		margin-top: var(--space-1);
+	}
+
+	.radio-line {
+		display: flex;
+		align-items: center;
 		justify-content: space-between;
 		gap: var(--space-4);
-		padding: 0 2px;
+		padding: 0 12px;
 	}
-
-	.browse-mix h2,
-	.browse-mix p {
+	.radio-line p {
 		margin: 0;
-	}
-
-	.browse-mix h2 {
-		font-size: var(--font-size-lg);
-	}
-
-	.browse-mix p:not(.eyebrow) {
 		color: var(--text-secondary);
 		font-size: var(--font-size-sm);
 	}
 
-	.mix-play {
-		flex: 0 0 auto;
-		padding: var(--space-2) var(--space-4);
-		border: 1px solid var(--accent-line);
-		border-radius: 999px;
-		background: var(--accent-soft);
-		color: var(--text-primary);
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-bold);
-		cursor: pointer;
-	}
-
-	.mix-play:hover,
-	.mix-play:focus-visible {
-		background: var(--bg-hover);
-		outline: 2px solid var(--accent);
-		outline-offset: 2px;
-	}
-
-	.picks-loading {
-		margin: 0;
-		padding: 4px 2px;
-		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
-	}
-
-	.results-section {
+	.group {
 		display: grid;
-		gap: 14px;
+		grid-template-columns: minmax(0, 1fr);
+		gap: 2px;
+		min-width: 0;
 	}
-
-	.section-heading {
-		display: flex;
-		align-items: baseline;
-		justify-content: flex-start;
-		gap: 12px;
-	}
-
-	.section-heading--split {
-		justify-content: space-between;
-		width: 100%;
-	}
-
-	/* Matches VideoSetShelf's heading so a section and a shelf read as the
-	   same kind of thing rather than two competing scales. */
-	.section-heading h2 {
-		margin: 0;
-		color: var(--text-primary);
-		font-size: var(--font-size-lg);
-	}
-
-	.text-btn {
-		color: var(--accent-strong);
-		font-weight: var(--font-weight-bold);
+	.group-label {
+		margin: 6px 0 4px;
+		padding: 0 12px;
 	}
 
 	.landing-row {
@@ -297,9 +272,8 @@
 		border-color: var(--accent-line);
 	}
 
-	@media (max-width: 620px) {
-		.videos-page {
-			gap: 20px;
-		}
+	@media (max-width: 860px) {
+		.feature-title { font-size: var(--font-size-xl); }
+		.radio-line { flex-direction: column; align-items: flex-start; }
 	}
 </style>

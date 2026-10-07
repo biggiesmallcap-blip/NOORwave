@@ -305,11 +305,23 @@ export interface VideoDiscoveryStatus {
 
 export interface VideoStationCard {
 	id: string;
-	group: 'spotlight' | 'for_you' | 'genres' | 'vibes' | 'themes' | 'charts';
+	group: 'spotlight' | 'for_you' | 'genres' | 'vibes' | 'explore' | 'themes' | 'charts';
 	title: string;
 	subtitle: string;
 	unwatched_count: number;
 	preview: TidalSearchVideo[];
+}
+
+export interface VideoStationScene {
+	slug: string;
+	title: string;
+	subtitle: string;
+}
+
+export interface VideoStationSettings {
+	enabled: boolean;
+	hidden: string[];
+	scenes: VideoStationScene[];
 }
 
 export interface VideoStationsResponse {
@@ -2529,6 +2541,15 @@ export const api = {
         return fetchApi<{ setting: VideoDiscoverySetting }>('/api/videos/discovery/settings', undefined, {
             method: 'PUT', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ setting }),
+        });
+    },
+    getVideoStationSettings() {
+        return fetchApi<VideoStationSettings>('/api/videos/stations/settings');
+    },
+    setVideoStationSettings(settings: { enabled: boolean; hidden: string[] }) {
+        return fetchApi<VideoStationSettings>('/api/videos/stations/settings', undefined, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(settings),
         });
     },
     getVideoDiscoveryStatus() {

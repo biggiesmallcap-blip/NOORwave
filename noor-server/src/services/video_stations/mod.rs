@@ -5,6 +5,7 @@
 pub mod lineup;
 pub mod pick;
 pub mod pool;
+pub mod settings;
 
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -70,6 +71,93 @@ impl Vibe {
     }
 }
 
+/// Genre scenes for the Explore row. Unlike "Your genres" they do not depend
+/// on listening history; each draws on a list of genre names (see
+/// `pool::scene_genres`) and the listener can switch any of them off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Scene {
+    Latin,
+    Reggaeton,
+    Reggae,
+    Afrobeats,
+    Kpop,
+    Metal,
+    Punk,
+    Classical,
+    Jazz,
+    Country,
+    DiscoFunk,
+}
+
+impl Scene {
+    /// Display order: Latin and Caribbean, global pop, heavier, timeless.
+    pub const ALL: [Scene; 11] = [
+        Scene::Latin,
+        Scene::Reggaeton,
+        Scene::Reggae,
+        Scene::Afrobeats,
+        Scene::Kpop,
+        Scene::Metal,
+        Scene::Punk,
+        Scene::Classical,
+        Scene::Jazz,
+        Scene::Country,
+        Scene::DiscoFunk,
+    ];
+
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Latin => "latin",
+            Self::Reggaeton => "reggaeton",
+            Self::Reggae => "reggae",
+            Self::Afrobeats => "afrobeats",
+            Self::Kpop => "k-pop",
+            Self::Metal => "metal",
+            Self::Punk => "punk",
+            Self::Classical => "classical",
+            Self::Jazz => "jazz",
+            Self::Country => "country",
+            Self::DiscoFunk => "disco-funk",
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Latin => "Latin",
+            Self::Reggaeton => "Reggaeton",
+            Self::Reggae => "Reggae and dancehall",
+            Self::Afrobeats => "Afrobeats",
+            Self::Kpop => "K-pop",
+            Self::Metal => "Metal",
+            Self::Punk => "Punk",
+            Self::Classical => "Classical",
+            Self::Jazz => "Jazz",
+            Self::Country => "Country and Americana",
+            Self::DiscoFunk => "Disco and funk",
+        }
+    }
+
+    pub fn subtitle(self) -> &'static str {
+        match self {
+            Self::Latin => "Latin pop, salsa, bachata and cumbia",
+            Self::Reggaeton => "Perreo, dembow and urbano",
+            Self::Reggae => "Roots, reggae and dancehall",
+            Self::Afrobeats => "Afrobeats and afrobeat",
+            Self::Kpop => "Idol groups and K-pop soloists",
+            Self::Metal => "Heavy, thrash, nu and prog metal",
+            Self::Punk => "Punk rock, post-punk and pop punk",
+            Self::Classical => "Orchestras, opera and solo piano",
+            Self::Jazz => "From standards to the new scene",
+            Self::Country => "Country, Americana and roots",
+            Self::DiscoFunk => "Grooves for the floor",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|scene| scene.slug() == raw)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StationId {
     WildCard,
@@ -78,6 +166,7 @@ pub enum StationId {
     BigOnes,
     Genre(String),
     Vibe(Vibe),
+    Scene(Scene),
     Duets,
     Live,
     Spotlight(i64),
@@ -107,6 +196,8 @@ impl StationId {
                     valid_slug(slug).then(|| Self::Genre(slug.to_string()))
                 } else if let Some(vibe) = raw.strip_prefix("vibe:") {
                     Vibe::parse(vibe).map(Self::Vibe)
+                } else if let Some(scene) = raw.strip_prefix("scene:") {
+                    Scene::parse(scene).map(Self::Scene)
                 } else if let Some(id) = raw.strip_prefix("spotlight:") {
                     id.parse::<i64>()
                         .ok()
@@ -127,6 +218,7 @@ impl StationId {
             Self::BigOnes => "big-ones".into(),
             Self::Genre(slug) => format!("genre:{slug}"),
             Self::Vibe(vibe) => format!("vibe:{}", vibe.slug()),
+            Self::Scene(scene) => format!("scene:{}", scene.slug()),
             Self::Duets => "duets".into(),
             Self::Live => "live".into(),
             Self::Spotlight(id) => format!("spotlight:{id}"),
@@ -140,7 +232,7 @@ impl StationId {
             Self::Shuffle => Order::Uniform,
             Self::DeepCuts => Order::DeepCuts,
             Self::BigOnes | Self::Spotlight(_) => Order::Popularity,
-            Self::Genre(_) | Self::Vibe(_) => Order::LeanMixed,
+            Self::Genre(_) | Self::Vibe(_) | Self::Scene(_) => Order::LeanMixed,
             Self::Duets => Order::ArtistHop,
             Self::Live => Order::Lean,
             Self::Charts => Order::Chart,

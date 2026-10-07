@@ -2,7 +2,7 @@ import { afterEach, expect, test, vi } from 'vitest';
 import { get } from 'svelte/store';
 import { api, type TidalSearchVideo } from '$lib/api/client';
 
-import { advanceVideo, clearVideoSession, noteVideoProgress, playVideo, playVideoStation, radioRetryPolicy, refillVideoRadio, reportVideoEnded, videoSession } from './video_session';
+import { advanceVideo, clearVideoSession, noteVideoProgress, playVideo, playVideoStation, radioRetryPolicy, refillVideoRadio, reportVideoEnded, videoSession, videoStationOnAir } from './video_session';
 
 vi.mock('$lib/api/client', () => ({
 	api: {
@@ -266,4 +266,37 @@ test('a station refills from its own endpoint and ends with the station message'
 	expect(await advanceVideo()).toBe(false);
 	videoSession.radioExhausted(2);
 	expect(get(videoSession).radioIssue).toContain("You've seen everything in Wild card station");
+});
+
+test('a station started from a frame plays that video first and asks the station for the rest', async () => {
+	const frame = video(7, 70, 'C', 'Frame');
+	const rest = video(8, 80, 'D', 'Rest');
+	vi.mocked(api.getVideoStationNext)
+		.mockResolvedValueOnce({ items: [frame, rest], exhausted: false })
+		.mockResolvedValue({ items: [], exhausted: true });
+	vi.mocked(api.getTidalVideoStream).mockResolvedValue({
+		hls_url: 'https://example.test/frame.m3u8', expires_at: null, quality: 'HIGH',
+	});
+
+	expect(await playVideoStation({ id: 'genre:rock', title: 'Rock' }, { startWith: frame })).toBe(true);
+	expect(get(videoSession).current?.tidal_id).toBe(7);
+	expect(get(videoSession).queue.map((v) => v.tidal_id).slice(0, 2)).toEqual([7, 8]);
+	expect(vi.mocked(api.getVideoStationNext).mock.calls[0]).toEqual([
+		'genre:rock', expect.objectContaining({ exclude_video_ids: [7] }),
+	]);
+	expect(get(videoStationOnAir)).toBe('genre:rock');
+
+	clearVideoSession();
+	expect(get(videoStationOnAir)).toBeNull();
+});
+
+test('a frame still plays when the station has nothing else yet', async () => {
+	const frame = video(9, 90, 'E', 'Alone');
+	vi.mocked(api.getVideoStationNext).mockResolvedValue({ items: [], exhausted: false });
+	vi.mocked(api.getTidalVideoStream).mockResolvedValue({
+		hls_url: 'https://example.test/alone.m3u8', expires_at: null, quality: 'HIGH',
+	});
+
+	expect(await playVideoStation({ id: 'live', title: 'Live and acoustic' }, { startWith: frame })).toBe(true);
+	expect(get(videoSession).current?.tidal_id).toBe(9);
 });

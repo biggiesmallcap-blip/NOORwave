@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use super::pool::{self, Listener, VARIOUS_ARTISTS_ID};
-use super::{BATCH, StationId, Vibe, pick, pick_input, seed_for, to_item};
+use super::{BATCH, Scene, StationId, Vibe, pick, pick_input, seed_for, settings, to_item};
 use crate::services::video_discovery::graph;
 use crate::services::video_sets::VideoSetItem;
 
@@ -239,7 +239,9 @@ fn planned(conn: &Connection) -> Result<Vec<(StationId, &'static str, String, St
             "The most popular videos you haven't watched".into(),
         ),
     ];
-    for (slug, name) in top_genres(conn)? {
+    let genres = top_genres(conn)?;
+    let covered: HashSet<String> = genres.iter().map(|(slug, _)| slug.clone()).collect();
+    for (slug, name) in genres {
         stations.push((
             StationId::Genre(slug),
             "genres",
@@ -253,6 +255,17 @@ fn planned(conn: &Connection) -> Result<Vec<(StationId, &'static str, String, St
             "vibes",
             vibe.title().into(),
             vibe.subtitle().into(),
+        ));
+    }
+    for scene in settings::load(conn)?.scenes() {
+        if scene_covered(scene, &covered) {
+            continue;
+        }
+        stations.push((
+            StationId::Scene(scene),
+            "explore",
+            scene.title().into(),
+            scene.subtitle().into(),
         ));
     }
     stations.push((
@@ -274,6 +287,20 @@ fn planned(conn: &Connection) -> Result<Vec<(StationId, &'static str, String, St
         "Today's charts, as videos".into(),
     ));
     Ok(stations)
+}
+
+/// A scene is left out when one of its genres is already a "Your genres"
+/// station, so the guide never carries the same music twice.
+fn scene_covered(scene: Scene, genre_slugs: &HashSet<String>) -> bool {
+    pool::scene_genres(scene)
+        .iter()
+        .any(|genre| genre_slugs.contains(&genre.replace(' ', "-")))
+}
+
+/// Drop `day`'s lineup so the next request rebuilds it (settings changed).
+pub fn clear_day(conn: &Connection, day: &str) -> Result<()> {
+    conn.execute("DELETE FROM video_station_lineup WHERE day = ?1", [day])?;
+    Ok(())
 }
 
 /// Build, store and return the lineup for `day` (local date, YYYY-MM-DD).
@@ -406,6 +433,58 @@ mod tests {
         let shuffle = cards.iter().find(|c| c.id == "shuffle").unwrap();
         assert_eq!(shuffle.preview.len(), BATCH);
         assert_eq!(shuffle.unwatched_count, 60);
+    }
+
+    #[test]
+    fn explore_scenes_follow_settings_and_skip_covered_genres() {
+        let conn = conn();
+        conn.execute(
+            "INSERT INTO video_seed_genres (seed_tidal_id, genre_name) VALUES (77, 'Reggaeton'), (88, 'jazz')",
+            [],
+        )
+        .unwrap();
+        for id in 301..=340 {
+            add_video(&conn, &video(id, 77));
+        }
+        for id in 401..=440 {
+            add_video(&conn, &video(id, 88));
+        }
+        let ids = |cards: &[StationCard]| cards.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+
+        let cards = build(&conn, "2026-10-07").unwrap();
+        assert!(ids(&cards).contains(&"scene:reggaeton".to_string()));
+        assert!(ids(&cards).contains(&"scene:jazz".to_string()));
+        assert_eq!(
+            cards.iter().find(|c| c.id == "scene:jazz").unwrap().group,
+            "explore"
+        );
+        assert!(
+            !ids(&cards).contains(&"scene:metal".to_string()),
+            "too few videos"
+        );
+
+        settings::save(
+            &conn,
+            &settings::ExploreSettings {
+                enabled: true,
+                hidden: vec!["jazz".into()],
+            },
+        )
+        .unwrap();
+        let cards = build(&conn, "2026-10-07").unwrap();
+        assert!(!ids(&cards).contains(&"scene:jazz".to_string()));
+        assert!(ids(&cards).contains(&"scene:reggaeton".to_string()));
+
+        let covered = HashSet::from(["reggaeton".to_string()]);
+        assert!(scene_covered(Scene::Reggaeton, &covered));
+        assert!(scene_covered(
+            Scene::Reggae,
+            &HashSet::from(["roots-reggae".to_string()])
+        ));
+        assert!(!scene_covered(
+            Scene::Punk,
+            &HashSet::from(["rock".to_string()])
+        ));
     }
 
     #[test]
