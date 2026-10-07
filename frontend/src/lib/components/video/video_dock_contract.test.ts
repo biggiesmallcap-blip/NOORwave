@@ -31,12 +31,11 @@ describe('persistent video dock contract', () => {
 	test('leaving the stage glides the same player into place, with no snap or second pop', () => {
 		// Bounds are known in every mode, so the first non-full frame is
 		// already placed rather than parked at the CSS fallback corner.
-		expect(dock).toContain('		if (active) {
-			if (!workspace?.isConnected)');
+		expect(dock).toMatch(/if \(active\) \{\s*if \(!workspace\?\.isConnected\)/);
 		expect(dock).toContain("if (previousMode === 'full' && next !== 'full')");
 		// Zero duration, not animation: none - removing it would replay dock-in.
 		expect(dock).toContain('animation-duration: 0s;');
-		expect(dock).not.toMatch(/\.morphing \{[^}]*animation: none/);
+		expect(dock).not.toMatch(/\.morphing \{[^}]*\n\s*animation: none;/);
 	});
 
 	test('wheel over the docked video scrolls the page underneath', () => {
