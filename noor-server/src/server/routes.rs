@@ -54,6 +54,7 @@ mod tidal_content_routes;
 mod tidal_home_routes;
 mod tidal_sync_routes;
 mod video_discovery_routes;
+mod video_station_routes;
 pub use tidal_sync_routes::trigger_auto_sync;
 
 type TidalPlaylistTracksCache = Arc<Mutex<HashMap<String, (Instant, Vec<TidalTrack>)>>>;
@@ -1247,6 +1248,14 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/videos/discovery/settings",
             get(video_discovery_routes::get_video_discovery_settings)
                 .put(video_discovery_routes::put_video_discovery_settings),
+        )
+        .route(
+            "/api/videos/stations",
+            get(video_station_routes::get_video_stations),
+        )
+        .route(
+            "/api/videos/stations/{id}/next",
+            post(video_station_routes::post_video_station_next),
         )
         // The liked-videos library wall. Pure reads over what the background
         // resolve has found; the TIDAL fan-out is never on a request path.

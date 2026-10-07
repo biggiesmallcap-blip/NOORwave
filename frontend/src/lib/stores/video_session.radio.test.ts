@@ -2,11 +2,12 @@ import { afterEach, expect, test, vi } from 'vitest';
 import { get } from 'svelte/store';
 import { api, type TidalSearchVideo } from '$lib/api/client';
 
-import { advanceVideo, clearVideoSession, noteVideoProgress, playVideo, radioRetryPolicy, refillVideoRadio, reportVideoEnded, videoSession } from './video_session';
+import { advanceVideo, clearVideoSession, noteVideoProgress, playVideo, playVideoStation, radioRetryPolicy, refillVideoRadio, reportVideoEnded, videoSession } from './video_session';
 
 vi.mock('$lib/api/client', () => ({
 	api: {
 		getVideoRadioNext: vi.fn(),
+		getVideoStationNext: vi.fn(),
 		getTidalVideoStream: vi.fn(),
 		recordVideoHistory: vi.fn().mockResolvedValue({ ok: true }),
 		finishVideoHistory: vi.fn().mockResolvedValue({ ok: true }),
@@ -238,4 +239,31 @@ test('watch time is reported when a video ends and when it is replaced', async (
 		watched_ms: 5_000, video_duration_ms: 180_000, completed: false,
 	});
 	expect(api.finishVideoHistory).toHaveBeenCalledTimes(2);
+});
+
+test('a station refills from its own endpoint and ends with the station message', async () => {
+	radioRetryPolicy.delayMs = 0;
+	const first = video(1, 10, 'A', 'One');
+	const second = video(2, 20, 'B', 'Two');
+	vi.mocked(api.getVideoStationNext)
+		.mockResolvedValueOnce({ items: [first], exhausted: false })
+		.mockResolvedValueOnce({ items: [second], exhausted: false })
+		.mockResolvedValue({ items: [], exhausted: true });
+	vi.mocked(api.getTidalVideoStream).mockResolvedValue({
+		hls_url: 'https://example.test/station.m3u8', expires_at: null, quality: 'HIGH',
+	});
+
+	expect(await playVideoStation({ id: 'wild-card', title: 'Wild card' })).toBe(true);
+	await vi.waitFor(() => expect(get(videoSession).queue.map((v) => v.tidal_id)).toEqual([1, 2]));
+	expect(api.getVideoRadioNext).not.toHaveBeenCalled();
+	expect(vi.mocked(api.getVideoStationNext).mock.calls[1]).toEqual([
+		'wild-card', expect.objectContaining({ exclude_video_ids: [1] }),
+	]);
+	expect(get(videoSession).sourceLabel).toBe('Wild card station');
+
+	expect(await advanceVideo()).toBe(true);
+	expect(get(videoSession).current?.tidal_id).toBe(2);
+	expect(await advanceVideo()).toBe(false);
+	videoSession.radioExhausted(2);
+	expect(get(videoSession).radioIssue).toContain("You've seen everything in Wild card station");
 });

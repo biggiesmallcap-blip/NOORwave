@@ -44,7 +44,10 @@ export interface VideoPlayContext {
 	resetRadio?: boolean;
 	/** Library radio keeps the supplied opening queue and refills from the
 	 * listener's taste and recently played artists instead of one fixed artist. */
-	radioScope?: 'artist' | 'library';
+	radioScope?: 'artist' | 'library' | 'station';
+	/** Station mode: refills come from this station instead of artist radio. */
+	stationId?: string;
+	stationNonce?: string;
 }
 
 export interface PreloadedVideoStream {
@@ -137,6 +140,7 @@ export const videoSession = {
 		radioSeenSongs = [state.current];
 		radioSeedVideoId = state.current.tidal_id;
 		radioRefill = null;
+		clearStation();
 		persistAutoplayPreference(true);
 		const queue = radioStartQueue(state.current);
 		update({ queue, continuous: true, autoplay: true, radioIssue: null,
@@ -156,6 +160,7 @@ export const videoSession = {
 		radioGeneration += 1;
 		radioRefill = null;
 		radioSeedVideoId = null;
+		clearStation();
 		update({ continuous: false, radioSeedArtistId: null, radioSeedArtistName: null,
 			radioIssue: null, radioSearching: false, radioDiscoveryMessage: null, radioHits: [], sourceLabel: 'Video queue' });
 	},
@@ -165,10 +170,14 @@ export const videoSession = {
 		radioGeneration += 1;
 		radioRefill = null;
 		radioSeedVideoId = null;
+		const issue = radioStationTitle
+			? `You've seen everything in ${radioStationTitle}. Pick another station to keep going.`
+			: 'Radio could not find another video. Start radio to try again.';
+		clearStation();
 		persistAutoplayPreference(false);
 		update({ continuous: false, radioSeedArtistId: null, radioSeedArtistName: null,
 			autoplay: false, playing: false, radioSearching: false, sourceLabel: 'Video queue',
-			radioIssue: 'Radio could not find another video. Start radio to try again.' });
+			radioIssue: issue });
 	},
 	setPlaying(playing: boolean) {
 		update({ playing });
@@ -246,6 +255,15 @@ let radioRefill: Promise<number> | null = null;
 let radioSeenIds: number[] = [];
 let radioSeenSongs: VideoSessionItem[] = [];
 let radioSeedVideoId: number | null = null;
+let radioStationId: string | null = null;
+let radioStationTitle: string | null = null;
+let radioStationNonce = '';
+
+function clearStation() {
+	radioStationId = null;
+	radioStationTitle = null;
+	radioStationNonce = '';
+}
 let lastRefillBuilding = false;
 
 /** How a station that is still being built is waited on. Tests shorten it. */
@@ -345,9 +363,13 @@ export async function playVideo(
 		radioSeenIds = [item.tidal_id];
 		radioSeenSongs = [item];
 		radioRefill = null;
-		radioSeedVideoId = ctx.radioScope !== 'library' ? item.tidal_id : null;
+		const station = ctx.radioScope === 'station' ? ctx.stationId ?? null : null;
+		radioStationId = station;
+		radioStationTitle = station ? ctx.sourceLabel : null;
+		radioStationNonce = station ? ctx.stationNonce ?? Math.random().toString(36).slice(2) : '';
+		radioSeedVideoId = !ctx.radioScope || ctx.radioScope === 'artist' ? item.tidal_id : null;
 	}
-	const artistRadio = ctx.radioScope !== 'library';
+	const artistRadio = !ctx.radioScope || ctx.radioScope === 'artist';
 	const queue = ctx.resetRadio && ctx.continuous && artistRadio ? radioStartQueue(item) : ctx.queue;
 	const seed = artistRadio ? item : null;
 	const radioSeedArtistId = ctx.continuous ? (ctx.resetRadio ? seed?.artist_id ?? null : state.radioSeedArtistId) : null;
@@ -439,17 +461,24 @@ export function refillVideoRadio(force = false): Promise<number> {
 	const excluded = state.queue.map((v) => v.tidal_id);
 	const recentArtists = state.queue.slice(Math.max(0, state.currentIndex - 8), state.currentIndex + 1)
 		.map((v) => v.artist_id).filter((id): id is number => id != null);
-	const pending = api.getVideoRadioNext({
-		seed_artist_id: state.radioSeedArtistId,
-		seed_artist_name: state.radioSeedArtistName,
-		seed_video_id: radioSeedVideoId,
-		exclude_video_ids: excluded,
-		recent_video_ids: radioSeenIds.slice(-96),
-		recent_songs: [...state.queue, ...radioSeenSongs].slice(-128).map((video) => ({
-			artist_id: video.artist_id ?? null, artist_name: video.artist_name ?? null, title: video.title,
-		})),
-		recent_artist_ids: recentArtists,
-	}).then(({ items, building }) => {
+	const request: Promise<{ items: VideoSessionItem[]; building: boolean; exhausted: boolean }> = radioStationId
+		? api.getVideoStationNext(radioStationId, {
+			exclude_video_ids: excluded,
+			recent_video_ids: radioSeenIds.slice(-128),
+			session_nonce: radioStationNonce,
+		}).then(({ items, exhausted }) => ({ items, building: false, exhausted }))
+		: api.getVideoRadioNext({
+			seed_artist_id: state.radioSeedArtistId,
+			seed_artist_name: state.radioSeedArtistName,
+			seed_video_id: radioSeedVideoId,
+			exclude_video_ids: excluded,
+			recent_video_ids: radioSeenIds.slice(-96),
+			recent_songs: [...state.queue, ...radioSeenSongs].slice(-128).map((video) => ({
+				artist_id: video.artist_id ?? null, artist_name: video.artist_name ?? null, title: video.title,
+			})),
+			recent_artist_ids: recentArtists,
+		}).then(({ items, building }) => ({ items, building: Boolean(building), exhausted: false }));
+	const pending = request.then(({ items, building, exhausted }) => {
 		lastRefillBuilding = Boolean(building);
 		const current = get(session);
 		if (generation !== radioGeneration || !current.continuous || !current.active) return 0;
@@ -463,9 +492,11 @@ export function refillVideoRadio(force = false): Promise<number> {
 		});
 		if (fresh.length === 0) {
 			update({
-				radioDiscoveryMessage: building
-					? 'Finding more videos for this station...'
-					: 'No new videos in this pass. Checking again as the queue plays.',
+				radioDiscoveryMessage: exhausted && radioStationTitle
+					? `You've seen everything in ${radioStationTitle}.`
+					: building
+						? 'Finding more videos for this station...'
+						: 'No new videos in this pass. Checking again as the queue plays.',
 			});
 			return 0;
 		}
@@ -501,6 +532,21 @@ export function refillVideoRadio(force = false): Promise<number> {
 		if (generation === radioGeneration && get(session).continuous) update({ radioSearching: false });
 	});
 	return pending;
+}
+
+/** Start a station: its first batch becomes the queue, refills follow. */
+export async function playVideoStation(station: { id: string; title: string }): Promise<boolean> {
+	const stationNonce = Math.random().toString(36).slice(2);
+	const { items } = await api.getVideoStationNext(station.id, {
+		exclude_video_ids: [], recent_video_ids: [], session_nonce: stationNonce,
+	});
+	const first = items[0];
+	if (!first) return false;
+	return playVideo(first, {
+		queue: items, source: 'mix', sourceLabel: `${station.title} station`,
+		autoplay: true, continuous: true, resetRadio: true,
+		radioScope: 'station', stationId: station.id, stationNonce,
+	});
 }
 
 /** Re-fetch the current video's stream (expiry / network recovery). */
@@ -599,6 +645,7 @@ export function clearVideoSession() {
 	radioSeenSongs = [];
 	radioRefill = null;
 	radioSeedVideoId = null;
+	clearStation();
 	session.set({ ...initialState, autoplay: loadAutoplayPreference() });
 	videoBrowseMode.set(false);
 }
