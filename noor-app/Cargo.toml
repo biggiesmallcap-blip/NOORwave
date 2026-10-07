@@ -1,6 +1,6 @@
 [package]
 name = "noor-app"
-version = "0.18.0"
+version = "0.19.47"
 edition = "2021"
 
 [[bin]]
