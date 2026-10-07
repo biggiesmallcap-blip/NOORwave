@@ -1220,7 +1220,7 @@ fn catalogue_availability_batches_pair_releases_and_make_fair_progress() {
         }
         let first=crate::services::tidal::catalogue::candidate_ids(conn,24)?;
         assert_eq!(first.len(),24);
-        for pair in first.chunks_exact(2){assert_eq!(pair[1],pair[0]+100);}
+        for pair in first.as_chunks::<2>().0{assert_eq!(pair[1],pair[0]+100);}
         for id in first {conn.execute("UPDATE tidal_track_aliases SET checked_at=datetime('now') WHERE tidal_id=?1",[id])?;}
         let second=crate::services::tidal::catalogue::candidate_ids(conn,24)?;
         assert_eq!(second.len(),24);
@@ -1684,12 +1684,14 @@ fn insert_tidal_track_marks_library_and_self_heals_on_conflict() {
 
 #[test]
 fn runtime_output_settings_preserve_persisted_exclusive_preferences() {
-    let mut settings = crate::db::audio_settings::AudioSettings::default();
-    settings.output_device = Some("Zen DAC V2".to_string());
-    settings.exclusive_mode = true;
-    settings.sample_rate_follow = true;
-    settings.exclusive_release_grace_secs = 12;
-    settings.exclusive_latency_mode = crate::db::audio_settings::ExclusiveLatencyMode::LowLatency;
+    let settings = crate::db::audio_settings::AudioSettings {
+        output_device: Some("Zen DAC V2".to_string()),
+        exclusive_mode: true,
+        sample_rate_follow: true,
+        exclusive_release_grace_secs: 12,
+        exclusive_latency_mode: crate::db::audio_settings::ExclusiveLatencyMode::LowLatency,
+        ..Default::default()
+    };
 
     let output = runtime_output_settings_from_audio_settings(&settings);
 
@@ -1892,7 +1894,7 @@ async fn build_test_app() -> Router {
 pub(in crate::server) fn fresh_migrated_db() -> Database {
     let db = Database::open_in_memory().expect("db opened");
     db.run_migrations().expect("migrations");
-    db.with_conn(|conn| schema::run_migrations(conn))
+    db.with_conn(schema::run_migrations)
         .expect("schema migrations");
     db
 }
@@ -5500,8 +5502,10 @@ async fn runtime_track_error_advances_to_next_library_track() {
 async fn disabling_exclusive_clears_runtime_engaged_state() {
     let db = fresh_migrated_db();
     db.with_conn(|conn| {
-        let mut settings = crate::db::audio_settings::AudioSettings::default();
-        settings.exclusive_mode = true;
+        let settings = crate::db::audio_settings::AudioSettings {
+            exclusive_mode: true,
+            ..Default::default()
+        };
         crate::db::audio_settings::save(conn, &settings)?;
         Ok(())
     })
@@ -5541,8 +5545,10 @@ async fn disabling_exclusive_clears_runtime_engaged_state() {
     .unwrap();
     assert_eq!(body["runtime"]["exclusive_transport_format"], "i24-in-32");
 
-    let mut next_settings = crate::db::audio_settings::AudioSettings::default();
-    next_settings.exclusive_mode = false;
+    let next_settings = crate::db::audio_settings::AudioSettings {
+        exclusive_mode: false,
+        ..Default::default()
+    };
     let resp = app
         .clone()
         .oneshot(
@@ -6302,7 +6308,7 @@ async fn create_playlist_from_queue_imports_pending_tidal_rows_with_hint() {
 async fn promote_pending_row_emit_broadcasts_queue_updated() {
     let db = Database::open_in_memory().expect("db opened");
     db.run_migrations().expect("migrations");
-    db.with_conn(|conn| schema::run_migrations(conn))
+    db.with_conn(schema::run_migrations)
         .expect("schema migrations");
 
     // Seed an artist + a real track to be the promotion target, plus a
@@ -6374,7 +6380,7 @@ async fn promote_pending_row_emit_broadcasts_queue_updated() {
 async fn promote_pending_row_emit_marks_external_candidate_resolved() {
     let db = Database::open_in_memory().expect("db opened");
     db.run_migrations().expect("migrations");
-    db.with_conn(|conn| schema::run_migrations(conn))
+    db.with_conn(schema::run_migrations)
         .expect("schema migrations");
 
     db.with_conn(|conn| {

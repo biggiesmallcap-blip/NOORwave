@@ -1163,10 +1163,9 @@ pub(super) async fn save_spotify_playlist(
                 };
                 if let Some(hit) =
                     sp_cache::get_tidal_resolution(conn, &cache_cfg, spotify_track_id)?
+                    && let Some(tidal_id) = importable_tidal_id(hit.tidal_track_id)
                 {
-                    if let Some(tidal_id) = importable_tidal_id(hit.tidal_track_id) {
-                        out.push((t.clone(), tidal_id));
-                    }
+                    out.push((t.clone(), tidal_id));
                 }
             }
             Ok::<_, anyhow::Error>(out)
@@ -1419,10 +1418,9 @@ async fn import_cached_sportify_tracks(
                 };
                 if let Some(hit) =
                     sp_cache::get_tidal_resolution(conn, cache_cfg, spotify_track_id)?
+                    && let Some(tidal_id) = importable_tidal_id(hit.tidal_track_id)
                 {
-                    if let Some(tidal_id) = importable_tidal_id(hit.tidal_track_id) {
-                        out.push((t.clone(), tidal_id));
-                    }
+                    out.push((t.clone(), tidal_id));
                 }
             }
             Ok::<_, anyhow::Error>(out)

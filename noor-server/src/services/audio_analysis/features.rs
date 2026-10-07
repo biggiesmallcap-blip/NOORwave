@@ -170,10 +170,10 @@ pub fn compute_lufs(samples: &[f32], sample_rate: u32) -> Option<f64> {
 /// Approach:
 /// 1. Inverse bilinear at `from_sr` (T1 = 1/from_sr) to obtain the underlying
 ///    continuous-time biquad in the variable u = s·T1/2:
-///       B(u) = B0 + B1·u + B2·u²,   A(u) = A0 + A1·u + A2·u²
+///    `B(u) = B0 + B1·u + B2·u²`, `A(u) = A0 + A1·u + A2·u²`
 ///    where
-///       B0 = b0 + b1 + b2,   B1 = 2(b0 − b2),   B2 = b0 − b1 + b2
-///       A0 = a0 + a1 + a2,   A1 = 2(a0 − a2),   A2 = a0 − a1 + a2
+///    `B0 = b0 + b1 + b2`, `B1 = 2(b0 − b2)`, `B2 = b0 − b1 + b2`,
+///    `A0 = a0 + a1 + a2`, `A1 = 2(a0 − a2)`, `A2 = a0 − a1 + a2`.
 /// 2. Re-bilinear at `to_sr` (T2 = 1/to_sr). Substituting u = r·(1 − z⁻¹)/(1 + z⁻¹)
 ///    with r = T1/T2 = to_sr/from_sr and clearing (1 + z⁻¹)² yields a new biquad.
 ///
@@ -310,9 +310,9 @@ pub fn compute_stft_features(samples: &[f32], sample_rate: u32) -> Option<StftFe
         let mut weighted_sum = 0.0f64;
         let mut magnitude_sum = 0.0f64;
 
-        for bin in 1..(STFT_FFT_SIZE / 2) {
+        for (bin, value) in fft_input.iter().enumerate().take(STFT_FFT_SIZE / 2).skip(1) {
             let freq = bin as f64 * sample_rate as f64 / STFT_FFT_SIZE as f64;
-            let magnitude = fft_input[bin].norm() as f64;
+            let magnitude = value.norm() as f64;
             let power = magnitude * magnitude;
 
             weighted_sum += freq * magnitude;

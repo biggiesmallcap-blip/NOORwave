@@ -132,13 +132,13 @@ fn compute_pcp(samples: &[f32], sample_rate: u32) -> [f64; 12] {
 
         // Accumulate bin magnitudes into pitch classes
         // Only use bins for C2-C7 range (approx 65-2093 Hz)
-        for bin in 1..(FFT_SIZE / 2) {
+        for (bin, value) in fft_input.iter().enumerate().take(FFT_SIZE / 2).skip(1) {
             let freq = bin as f64 * sample_rate as f64 / FFT_SIZE as f64;
             if !(65.0..=2100.0).contains(&freq) {
                 continue;
             }
 
-            let magnitude = fft_input[bin].norm();
+            let magnitude = value.norm();
             let power = magnitude * magnitude;
 
             // Map frequency to pitch class

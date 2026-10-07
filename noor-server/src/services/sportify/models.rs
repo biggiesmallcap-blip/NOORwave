@@ -419,8 +419,8 @@ pub struct SportifySearchResults {
 mod tests {
     use super::*;
 
-    /// Regression: playlist-body track shape uses `title` + flat `artist`
-    /// + top-level `thumbnail`. The first ship missed this and every track
+    /// Regression: playlist-body track shape uses `title` + flat `artist` +
+    /// top-level `thumbnail`. The first ship missed this and every track
     /// deserialized into all-None defaults.
     #[test]
     fn deserializes_playlist_track_shape() {

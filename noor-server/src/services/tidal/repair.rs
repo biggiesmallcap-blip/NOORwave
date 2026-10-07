@@ -167,9 +167,9 @@ pub async fn run_if_idle(state: SharedState) {
                 Ok(track) => {
                     mark_attempted(local_id);
                     let res = db.with_conn(move |conn| {
-                        Ok(crate::services::tidal::import::repair_track_metadata_tx(
+                        crate::services::tidal::import::repair_track_metadata_tx(
                             conn, local_id, &track,
-                        )?)
+                        )
                     });
                     match res {
                         Ok(true) => repaired += 1,

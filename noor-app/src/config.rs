@@ -47,10 +47,8 @@ fn recover_interrupted_replacement(path: &Path) -> Result<(), ConfigError> {
         return Ok(());
     }
 
-    if path.exists() {
-        if load_at(path).is_ok() {
-            return Ok(());
-        }
+    if path.exists() && load_at(path).is_ok() {
+        return Ok(());
     }
     load_at(&backup_path).map_err(|error| {
         ConfigError(format!(

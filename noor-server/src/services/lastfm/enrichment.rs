@@ -174,9 +174,7 @@ fn should_mark_track_checked(track_lookup_failed: bool, artist_lookup_failed: bo
 
 fn context_confidence(count: Option<u32>) -> f64 {
     match count {
-        Some(count) => ((count as f64).ln_1p() / (100f64).ln_1p())
-            .min(1.0)
-            .max(0.1),
+        Some(count) => ((count as f64).ln_1p() / (100f64).ln_1p()).clamp(0.1, 1.0),
         None => 0.5,
     }
 }

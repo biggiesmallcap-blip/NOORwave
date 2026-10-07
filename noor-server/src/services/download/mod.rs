@@ -63,18 +63,13 @@ impl DownloadFormat {
 
 /// Source quality for lossless (FLAC) downloads. TIDAL exposes two lossless tiers and
 /// they differ a lot in size, so this is user-selectable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FlacQuality {
     /// CD quality: 16-bit / 44.1 kHz (TIDAL `LOSSLESS`). Much smaller files.
     Cd,
     /// Best available master, up to 24-bit / 192 kHz (TIDAL `HI_RES_LOSSLESS`).
+    #[default]
     HiRes,
-}
-
-impl Default for FlacQuality {
-    fn default() -> Self {
-        Self::HiRes
-    }
 }
 
 impl FlacQuality {
@@ -103,20 +98,15 @@ impl FlacQuality {
 
 /// Source tier to transcode an MP3 from. Both squash to 320 kbps MP3; the difference is
 /// fetch/decode speed vs how clean the source is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mp3Source {
     /// TIDAL `HIGH` (AAC ~320 kbps): small + fast. The MP3 is then a second lossy hop,
     /// but the difference is inaudible for a portable copy.
+    #[default]
     Aac,
     /// TIDAL `LOSSLESS` (FLAC 16/44.1): bigger + slower, but a single lossy hop, so the
     /// best-sounding MP3.
     Lossless,
-}
-
-impl Default for Mp3Source {
-    fn default() -> Self {
-        Self::Aac
-    }
 }
 
 impl Mp3Source {
@@ -575,11 +565,7 @@ fn encode_mp3(encoded: Vec<u8>, out_path: &Path) -> Result<(), DownloadError> {
     let mut stereo: Vec<f32> = Vec::new();
     let mut mp3_chunk: Vec<u8> = Vec::new();
 
-    loop {
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(_) => break,
-        };
+    while let Ok(packet) = format.next_packet() {
         if packet.track_id() != track_id {
             continue;
         }

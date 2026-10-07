@@ -314,6 +314,29 @@ fn put_cached_genre_snapshot(
     guard.insert(key, CachedGenreSnapshot { stored_at, payload });
 }
 
+pub(super) async fn get_genre_tracks(
+    State(state): State<SharedState>,
+    Path(id): Path<i64>,
+    Query(params): Query<GenreTrackParams>,
+) -> Result<Json<Value>, StatusCode> {
+    require_positive_genre_id(id)?;
+
+    let include_descendants = params.include_descendants.unwrap_or(true);
+    let filter = crate::genre::filter::GalaxyFilterRule::from_query(params.filter.as_deref());
+    let state = state.read().await;
+    state
+        .db
+        .with_conn(|conn| {
+            let tracks =
+                queries::get_tracks_by_genre_filtered(conn, id, include_descendants, filter)?;
+            Ok(Json(json!({
+                "tracks": tracks,
+                "filter": filter.label().as_ref(),
+            })))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,27 +405,4 @@ mod tests {
         );
         assert!(cache.lock().expect("lock cache").is_empty());
     }
-}
-
-pub(super) async fn get_genre_tracks(
-    State(state): State<SharedState>,
-    Path(id): Path<i64>,
-    Query(params): Query<GenreTrackParams>,
-) -> Result<Json<Value>, StatusCode> {
-    require_positive_genre_id(id)?;
-
-    let include_descendants = params.include_descendants.unwrap_or(true);
-    let filter = crate::genre::filter::GalaxyFilterRule::from_query(params.filter.as_deref());
-    let state = state.read().await;
-    state
-        .db
-        .with_conn(|conn| {
-            let tracks =
-                queries::get_tracks_by_genre_filtered(conn, id, include_descendants, filter)?;
-            Ok(Json(json!({
-                "tracks": tracks,
-                "filter": filter.label().as_ref(),
-            })))
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }

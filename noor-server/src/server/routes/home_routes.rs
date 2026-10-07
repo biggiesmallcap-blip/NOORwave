@@ -54,10 +54,10 @@ pub(super) async fn get_home_picks(
     // full scan (and the top-played query) on every home remount / tab switch.
     {
         let cache = state_guard.home_picks_cache.lock().unwrap();
-        if let Some((computed_at, payload)) = cache.as_ref() {
-            if computed_at.elapsed() < PICKS_TTL {
-                return Ok(Json(payload.clone()));
-            }
+        if let Some((computed_at, payload)) = cache.as_ref()
+            && computed_at.elapsed() < PICKS_TTL
+        {
+            return Ok(Json(payload.clone()));
         }
     }
 
@@ -585,14 +585,13 @@ fn artwork_from_catalog(
     entity: &str,
     catalog: &crate::services::tidal::client::TidalSearchCatalog,
 ) -> Option<String> {
-    if entity == "artist" {
-        if let Some(url) = catalog
+    if entity == "artist"
+        && let Some(url) = catalog
             .artists
             .first()
             .and_then(|a| a.artwork_url.clone().or_else(|| a.picture.clone()))
-        {
-            return Some(url);
-        }
+    {
+        return Some(url);
     }
     catalog
         .tracks

@@ -5,12 +5,12 @@
 //!   2. Multiply by log-Gaussian prior centred at log2(120), σ = 0.6 octaves.
 //!   3. Argmax → primary tempo candidate.
 //!   4. Octave disambiguation:
-//!      a. Check the integer double (best × 2): if its biased-normalised
-//!         autocorrelation is ≥ 0.85 × the winner's, prefer it (catches DnB-style
-//!         fundamental-at-double-speed cases).
-//!      b. Else find the half-tempo candidate via lag search (target_lag = 2 ×
-//!         best_lag) and prefer it when its raw autocorrelation exceeds the
-//!         winner's (catches reggae-style dominant-sub-harmonic cases).
+//!      - (a) Check the integer double (best × 2): if its biased-normalised
+//!        autocorrelation is ≥ 0.85 × the winner's, prefer it (catches DnB-style
+//!        fundamental-at-double-speed cases).
+//!      - (b) Else find the half-tempo candidate via lag search (target_lag = 2 ×
+//!        best_lag) and prefer it when its raw autocorrelation exceeds the
+//!        winner's (catches reggae-style dominant-sub-harmonic cases).
 //!
 //! ## Why the disambiguation is asymmetric (do NOT "simplify" this)
 //!

@@ -375,15 +375,15 @@ pub(crate) fn cap_albums_per_artist(
         if chosen.len() >= limit {
             break;
         }
-        if max_per_artist > 0 {
-            if let Some(artist_id) = album.artist_id {
-                let count = per_artist.entry(artist_id).or_insert(0);
-                if *count >= max_per_artist {
-                    skipped.push(album);
-                    continue;
-                }
-                *count += 1;
+        if max_per_artist > 0
+            && let Some(artist_id) = album.artist_id
+        {
+            let count = per_artist.entry(artist_id).or_insert(0);
+            if *count >= max_per_artist {
+                skipped.push(album);
+                continue;
             }
+            *count += 1;
         }
         chosen.push(album);
     }
@@ -885,7 +885,7 @@ mod tests {
     fn fresh_migrated_db() -> Database {
         let db = Database::open_in_memory().expect("db opened");
         db.run_migrations().expect("migrations");
-        db.with_conn(|conn| schema::run_migrations(conn))
+        db.with_conn(schema::run_migrations)
             .expect("schema migrations");
         db
     }

@@ -353,12 +353,12 @@ pub(super) fn synchronize_or_shorten_checked(
             attempts.push((duration_ms, BeatSyncRejection::AudioSafety));
             continue;
         }
-        if index > 0 {
-            if let Some(decision) = candidate.decision.as_mut() {
-                decision
-                    .reason
-                    .push_str("; shorter verified phrase avoids the unavailable or unstable tail");
-            }
+        if index > 0
+            && let Some(decision) = candidate.decision.as_mut()
+        {
+            decision
+                .reason
+                .push_str("; shorter verified phrase avoids the unavailable or unstable tail");
         }
         *program = candidate;
         return Ok(sync);

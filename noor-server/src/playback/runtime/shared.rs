@@ -1281,7 +1281,12 @@ mod tests {
     }
 
     fn frame_gains(output: &[f32]) -> Vec<f32> {
-        output.chunks_exact(2).map(|frame| frame[0]).collect()
+        output
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|frame| frame[0])
+            .collect()
     }
 
     fn max_frame_delta(gains: &[f32]) -> f32 {
@@ -1349,7 +1354,7 @@ mod tests {
             "512 frames is shorter than the 20ms ramp, so the gain must still \
              be in flight, not already collapsed to silence"
         );
-        for frame in output.chunks_exact(2) {
+        for frame in output.as_chunks::<2>().0 {
             assert_eq!(
                 frame[0], frame[1],
                 "both channels of a frame must share one gain"

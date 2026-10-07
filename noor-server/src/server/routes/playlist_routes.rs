@@ -711,25 +711,6 @@ fn clamp_artist_search_limit(limit: Option<i64>) -> i64 {
     limit.unwrap_or(20).clamp(1, 50)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn empty_artist_search_response_keeps_route_payload_shape() {
-        let Json(body) = empty_artist_search_response();
-        assert_eq!(body, json!({ "artists": [] }));
-    }
-
-    #[test]
-    fn artist_search_limit_is_bounded() {
-        assert_eq!(clamp_artist_search_limit(None), 20);
-        assert_eq!(clamp_artist_search_limit(Some(-5)), 1);
-        assert_eq!(clamp_artist_search_limit(Some(0)), 1);
-        assert_eq!(clamp_artist_search_limit(Some(5_000)), 50);
-    }
-}
-
 pub(super) async fn create_smart_playlist_route(
     State(state): State<SharedState>,
     Json(payload): Json<CreateSmartPlaylistRequest>,
@@ -922,4 +903,23 @@ fn resolve_smart_playlist_tracks(
     let tracks = queries::get_all_tracks(conn)?;
     let context = build_smart_playlist_context(conn)?;
     resolve_smart_playlist_tracks_with_context(playlist, &tracks, &context)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_artist_search_response_keeps_route_payload_shape() {
+        let Json(body) = empty_artist_search_response();
+        assert_eq!(body, json!({ "artists": [] }));
+    }
+
+    #[test]
+    fn artist_search_limit_is_bounded() {
+        assert_eq!(clamp_artist_search_limit(None), 20);
+        assert_eq!(clamp_artist_search_limit(Some(-5)), 1);
+        assert_eq!(clamp_artist_search_limit(Some(0)), 1);
+        assert_eq!(clamp_artist_search_limit(Some(5_000)), 50);
+    }
 }

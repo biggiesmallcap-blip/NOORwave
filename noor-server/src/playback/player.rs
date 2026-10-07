@@ -793,7 +793,7 @@ fn median_delta(deltas: &[i64]) -> Option<i64> {
     let mut values = deltas.to_vec();
     values.sort_unstable();
     let middle = values.len() / 2;
-    if values.len() % 2 == 0 {
+    if values.len().is_multiple_of(2) {
         Some((values[middle - 1] + values[middle]) / 2)
     } else {
         Some(values[middle])
@@ -7155,6 +7155,6 @@ mod parity_tests {
         assert!(parse_days_since_last_played("malformed") >= 14.0);
         // Sanity: a well-formed timestamp parses to a small positive number.
         let recent = parse_days_since_last_played("2026-05-13T12:00:00Z");
-        assert!(recent >= 0.0 && recent < 365.0);
+        assert!((0.0..365.0).contains(&recent));
     }
 }

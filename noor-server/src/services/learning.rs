@@ -1267,16 +1267,13 @@ pub fn discovery_training_worker_threads_for_available(
     match profile {
         DiscoveryTrainingSafetyProfile::LaptopSafe => available_threads
             .saturating_sub(1)
-            .max(1)
-            .min(DISCOVERY_TRAINING_LAPTOP_MAX_WORKERS),
+            .clamp(1, DISCOVERY_TRAINING_LAPTOP_MAX_WORKERS),
         DiscoveryTrainingSafetyProfile::Balanced => available_threads
             .saturating_sub(2)
-            .max(1)
-            .min(DISCOVERY_TRAINING_BALANCED_MAX_WORKERS),
+            .clamp(1, DISCOVERY_TRAINING_BALANCED_MAX_WORKERS),
         DiscoveryTrainingSafetyProfile::Performance => available_threads
             .saturating_sub(1)
-            .max(1)
-            .min(DISCOVERY_TRAINING_PERFORMANCE_MAX_WORKERS),
+            .clamp(1, DISCOVERY_TRAINING_PERFORMANCE_MAX_WORKERS),
     }
 }
 
@@ -2710,7 +2707,7 @@ fn rank_preview_candidates(
             })
         })
         .collect::<Vec<_>>();
-    results.sort_by(|left, right| right.score.cmp(&left.score));
+    results.sort_by_key(|left| std::cmp::Reverse(left.score));
     results.truncate(limit.max(1));
     results
 }
@@ -2754,7 +2751,7 @@ fn resolve_prompt_anchor_ids(
             }
         })
         .collect::<Vec<_>>();
-    scored.sort_by(|left, right| right.1.cmp(&left.1));
+    scored.sort_by_key(|left| std::cmp::Reverse(left.1));
     scored
         .into_iter()
         .take(3)
@@ -2791,11 +2788,10 @@ pub fn pack_vector_f64(vector: &[f64]) -> Vec<u8> {
 }
 
 pub fn unpack_vector_blob(blob: &[u8]) -> Vec<f64> {
-    blob.chunks_exact(4)
-        .map(|chunk| {
-            let bytes: [u8; 4] = [chunk[0], chunk[1], chunk[2], chunk[3]];
-            f32::from_le_bytes(bytes) as f64
-        })
+    blob.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk) as f64)
         .collect()
 }
 
@@ -2925,6 +2921,27 @@ fn append_active_baseline_metrics(
     metrics.insert("baseline_active_model_id".to_string(), model_id as f64);
     metrics.extend(baseline_metrics);
     Ok(())
+}
+
+fn parse_reason_tags(reason_json: Option<&str>) -> Vec<String> {
+    serde_json::from_str::<Vec<DiscoveryNeighborReason>>(reason_json.unwrap_or("[]"))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|reason| reason.label)
+        .collect()
+}
+
+fn reason_label(key: &str) -> &'static str {
+    match key {
+        "behavioral" => "same pocket",
+        "audio_texture" => "audio texture",
+        "album_context" => "album-adjacent",
+        "artist_affinity" => "session neighbor",
+        "genre_branch" => "genre branch",
+        "lastfm_direct" => "Last.fm direct",
+        "lastfm_branch" => "Last.fm branch",
+        _ => "learned signal",
+    }
 }
 
 #[cfg(test)]
@@ -3575,26 +3592,5 @@ mod tests {
 
         assert!(manual > passive);
         assert!(passive < 1.0);
-    }
-}
-
-fn parse_reason_tags(reason_json: Option<&str>) -> Vec<String> {
-    serde_json::from_str::<Vec<DiscoveryNeighborReason>>(reason_json.unwrap_or("[]"))
-        .unwrap_or_default()
-        .into_iter()
-        .map(|reason| reason.label)
-        .collect()
-}
-
-fn reason_label(key: &str) -> &'static str {
-    match key {
-        "behavioral" => "same pocket",
-        "audio_texture" => "audio texture",
-        "album_context" => "album-adjacent",
-        "artist_affinity" => "session neighbor",
-        "genre_branch" => "genre branch",
-        "lastfm_direct" => "Last.fm direct",
-        "lastfm_branch" => "Last.fm branch",
-        _ => "learned signal",
     }
 }

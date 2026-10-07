@@ -1228,7 +1228,7 @@ fn try_claim_auto_dj_profile_rebuild_slot_from(
 }
 
 fn release_auto_dj_profile_rebuild_slot(counter: &AtomicUsize) {
-    let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+    let _ = counter.try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
         active.checked_sub(1)
     });
 }
@@ -1433,14 +1433,14 @@ fn record_dj_profile_rebuild_failure(key: &str, status: &str, message: String) -
         .retain(|_, failure| failure.recorded_at.elapsed() <= profile_rebuild_failure_ttl(failure));
     // This is short-lived suppression, not a permanent catalog blacklist.
     // Keep old failures bounded even when many unavailable assets are visited.
-    if guard.len() >= 512 && !guard.contains_key(key) {
-        if let Some(oldest_key) = guard
+    if guard.len() >= 512
+        && !guard.contains_key(key)
+        && let Some(oldest_key) = guard
             .iter()
             .min_by_key(|(_, failure)| failure.recorded_at)
             .map(|(key, _)| key.clone())
-        {
-            guard.remove(&oldest_key);
-        }
+    {
+        guard.remove(&oldest_key);
     }
     // Carry the attempt count across automatic retries (the accept path no
     // longer clears it) so a chronically-failing stream backs off and finally
@@ -2817,7 +2817,7 @@ fn median_delta(deltas: &[i64]) -> Option<i64> {
     let mut values = deltas.to_vec();
     values.sort_unstable();
     let middle = values.len() / 2;
-    if values.len() % 2 == 0 {
+    if values.len().is_multiple_of(2) {
         Some((values[middle - 1] + values[middle]) / 2)
     } else {
         Some(values[middle])

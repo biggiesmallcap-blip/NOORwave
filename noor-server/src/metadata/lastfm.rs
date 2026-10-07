@@ -534,7 +534,7 @@ impl LastFmClient {
             _ => "chart.gettoptracks",
         };
         let mut all_params = vec![("method", method.to_string())];
-        all_params.extend(params.into_iter());
+        all_params.extend(params);
 
         let payload = self.get_json(&all_params).await?;
         Ok(parse_chart_tracks(&payload, limit as usize))
@@ -577,7 +577,7 @@ impl LastFmClient {
             _ => "chart.gettopartists",
         };
         let mut all_params = vec![("method", method.to_string())];
-        all_params.extend(params.into_iter());
+        all_params.extend(params);
 
         let payload = self.get_json(&all_params).await?;
         Ok(parse_chart_artists(&payload, limit as usize))

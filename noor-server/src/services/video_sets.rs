@@ -295,7 +295,7 @@ pub fn weekly_bucket_key(date: chrono::NaiveDate) -> String {
 /// no cryptographic requirement, just stability.
 pub fn build_seed(slug: &str, bucket_key: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in slug.bytes().chain([b'|']).chain(bucket_key.bytes()) {
+    for byte in slug.bytes().chain(*b"|").chain(bucket_key.bytes()) {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
@@ -890,7 +890,7 @@ pub async fn fetch_long_form(
 // --- Assembly ---
 
 /// Exclusion-free assembly. Production always holds out recently-watched videos
-/// via `assemble_set_excluding`; this shim keeps the curation tests, which don't
+/// via `assemble_set_with_context`; this shim keeps the curation tests, which don't
 /// care about watch history, readable.
 #[cfg(test)]
 pub fn assemble_set(
@@ -925,6 +925,7 @@ fn pick_era_decade(groups: &[(AnchorArtist, Vec<VideoCandidate>)]) -> Option<i32
 /// `assemble_set` with a hold-out set of TIDAL video ids to skip (recently
 /// watched). Seed videos, if this grows any, would be exempt; these sets have
 /// none, so the exclusion is unconditional.
+#[cfg(test)]
 pub fn assemble_set_excluding(
     plan: &SetPlan,
     groups: &[(AnchorArtist, Vec<VideoCandidate>)],
@@ -953,9 +954,9 @@ pub fn assemble_set_with_context(
     // Era chooses its decade from what came back; every other archetype leaves
     // this None and keeps all candidates.
     let era_decade = if plan.archetype == Archetype::Era {
-        match pick_era_decade(groups) {
-            Some(decade) => Some(decade),
-            None => return None,
+        {
+            let decade = pick_era_decade(groups)?;
+            Some(decade)
         }
     } else {
         None
