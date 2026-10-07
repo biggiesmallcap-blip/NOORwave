@@ -58,6 +58,7 @@
 		stageUsable ? 'full' : panelUsable ? 'panel' : 'mini'
 	);
 	const PANEL_MIN_WIDTH = 200;
+	const MORPH_MS = 320;
 
 	let qualityMode = $derived($audioSettings.settings?.video_quality_mode ?? 'MAX');
 	let upNext = $derived($videoSessionUpcoming[0] ?? null);
@@ -94,7 +95,10 @@
 			rect = null;
 		}
 
-		if (active && mode === 'mini') {
+		// Bounds are tracked in every mode, not just mini: the frame the stage
+		// goes away must already know the corner, or the window shows for a
+		// frame at the CSS fallback spot and then snaps (the "jerk").
+		if (active) {
 			if (!workspace?.isConnected) workspace = document.querySelector('main.workspace');
 			const w = workspace?.getBoundingClientRect();
 			if (w && (!bounds || bounds.left !== w.left || bounds.top !== w.top || bounds.right !== w.right || bounds.bottom !== w.bottom)) {
@@ -166,6 +170,22 @@
 		if (!active) collapsed = false;
 	});
 
+	// Leaving the watch page: the same player glides from the stage into its
+	// corner or the queue panel (left/top/width/height transition) instead of
+	// popping in fresh.
+	let morphing = $state(false);
+	let previousMode: 'full' | 'panel' | 'mini' | null = null;
+	let morphTimer: ReturnType<typeof setTimeout> | null = null;
+	$effect(() => {
+		const next = mode;
+		if (previousMode === 'full' && next !== 'full') {
+			morphing = true;
+			if (morphTimer) clearTimeout(morphTimer);
+			morphTimer = setTimeout(() => (morphing = false), MORPH_MS);
+		}
+		previousMode = next;
+	});
+
 	// --- Prefetch the next stream for gapless autoplay ---
 	let prefetched = $state<PreloadedVideoStream & { videoId: number } | null>(null);
 	let prefetchSeq = 0;
@@ -230,12 +250,22 @@
 		void goto(WATCH_PATH);
 	}
 
+	/** The dock floats above main.workspace rather than inside it, so a wheel
+	 *  over the docked video reached nothing and the page would not scroll.
+	 *  Hand it to the workspace while the video sits in the page. */
+	function forwardWheel(event: WheelEvent) {
+		if (mode !== 'full' || !workspace) return;
+		const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? workspace.clientHeight : 1;
+		workspace.scrollBy({ top: event.deltaY * scale, left: event.deltaX * scale });
+	}
+
 	function closeDock() {
 		clearVideoSession();
 	}
 
 	onDestroy(() => {
 		if (rafId) cancelAnimationFrame(rafId);
+		if (morphTimer) clearTimeout(morphTimer);
 	});
 </script>
 
@@ -248,6 +278,8 @@
 		class:placed
 		class:collapsed={mode === 'mini' && collapsed}
 		class:dragging={drag !== null}
+		class:morphing
+		onwheel={forwardWheel}
 		class:positioned={mode !== 'mini' && rect !== null}
 		style:top={mode !== 'mini' && rect ? `${rect.top}px` : position ? `${position.top}px` : null}
 		style:left={mode !== 'mini' && rect ? `${rect.left}px` : position ? `${position.left}px` : null}
@@ -381,6 +413,19 @@
 			top 0.18s ease,
 			width 0.18s ease,
 			height 0.18s ease;
+	}
+
+	.video-dock.mini.placed.morphing,
+	.video-dock.panel.positioned.morphing {
+		/* Zero duration, not animation: none. Removing the animation when the
+		   glide ends would restart dock-in and pop the window a second time;
+		   with the same name kept, it has already finished by then. */
+		animation-duration: 0s;
+		transition:
+			left 0.32s cubic-bezier(0.22, 0.7, 0.2, 1),
+			top 0.32s cubic-bezier(0.22, 0.7, 0.2, 1),
+			width 0.32s cubic-bezier(0.22, 0.7, 0.2, 1),
+			height 0.32s cubic-bezier(0.22, 0.7, 0.2, 1);
 	}
 
 	.video-dock.mini.placed.dragging {

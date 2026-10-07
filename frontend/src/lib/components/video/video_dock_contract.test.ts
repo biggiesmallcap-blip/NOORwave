@@ -28,6 +28,22 @@ describe('persistent video dock contract', () => {
 		expect(dock).toContain("class:mini={mode === 'mini'}");
 	});
 
+	test('leaving the stage glides the same player into place, with no snap or second pop', () => {
+		// Bounds are known in every mode, so the first non-full frame is
+		// already placed rather than parked at the CSS fallback corner.
+		expect(dock).toContain('		if (active) {
+			if (!workspace?.isConnected)');
+		expect(dock).toContain("if (previousMode === 'full' && next !== 'full')");
+		// Zero duration, not animation: none - removing it would replay dock-in.
+		expect(dock).toContain('animation-duration: 0s;');
+		expect(dock).not.toMatch(/\.morphing \{[^}]*animation: none/);
+	});
+
+	test('wheel over the docked video scrolls the page underneath', () => {
+		expect(dock).toContain('onwheel={forwardWheel}');
+		expect(dock).toContain('workspace.scrollBy({ top: event.deltaY * scale');
+	});
+
 	test('frees the exclusive device when a video starts playing', () => {
 		expect(dock).toContain('api.releaseExclusivePlayback()');
 		expect(client).toContain("'/api/playback/exclusive/release'");
