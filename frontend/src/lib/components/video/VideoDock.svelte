@@ -58,7 +58,7 @@
 		stageUsable ? 'full' : panelUsable ? 'panel' : 'mini'
 	);
 	const PANEL_MIN_WIDTH = 200;
-	const MORPH_MS = 320;
+	const MORPH_MS = 520;
 
 	let qualityMode = $derived($audioSettings.settings?.video_quality_mode ?? 'MAX');
 	let upNext = $derived($videoSessionUpcoming[0] ?? null);
@@ -274,7 +274,7 @@
 	let geometryMorph = $state(false);
 	let previousPlace: Place | null = null;
 	let morphTimer: ReturnType<typeof setTimeout> | null = null;
-	const GLIDE_EASING = 'cubic-bezier(0.22, 0.7, 0.2, 1)';
+	const GLIDE_EASING = 'cubic-bezier(0.32, 0.72, 0, 1)';
 
 	function endGlide() {
 		morphing = false;
@@ -417,10 +417,26 @@
 	/** The dock floats above main.workspace rather than inside it, so a wheel
 	 *  over the docked video reached nothing and the page would not scroll.
 	 *  Hand it to the workspace while the video sits in the page. */
+	//
+	// Eased like a normal wheel scroll rather than one instant jump. Each
+	// notch adds to a running target, so a fast spin keeps its full distance
+	// (a plain smooth scrollBy restarts from the mid-animation position and
+	// drops part of every notch).
+	let wheelTarget: number | null = null;
+	let wheelIdle: ReturnType<typeof setTimeout> | null = null;
+
 	function forwardWheel(event: WheelEvent) {
 		if (mode !== 'full' || expanded || !workspace) return;
 		const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? workspace.clientHeight : 1;
-		workspace.scrollBy({ top: event.deltaY * scale, left: event.deltaX * scale });
+		const max = workspace.scrollHeight - workspace.clientHeight;
+		const base = wheelTarget ?? workspace.scrollTop;
+		wheelTarget = Math.min(Math.max(base + event.deltaY * scale, 0), max);
+		workspace.scrollTo({ top: wheelTarget, behavior: 'smooth' });
+		if (wheelIdle) clearTimeout(wheelIdle);
+		wheelIdle = setTimeout(() => {
+			wheelTarget = null;
+			wheelIdle = null;
+		}, 250);
 	}
 
 	function closeDock() {
@@ -431,6 +447,7 @@
 		if (rafId) cancelAnimationFrame(rafId);
 		if (morphTimer) clearTimeout(morphTimer);
 		if (fullscreenTimer) clearTimeout(fullscreenTimer);
+		if (wheelIdle) clearTimeout(wheelIdle);
 		glide?.cancel();
 	});
 </script>
@@ -722,11 +739,11 @@
 	/* In and out of fullscreen: a size transition (see the script). */
 	.video-dock.geometry-morph:is(.mini, .panel, .full, .expanded) {
 		transition:
-			left 0.32s cubic-bezier(0.22, 0.7, 0.2, 1),
-			top 0.32s cubic-bezier(0.22, 0.7, 0.2, 1),
-			width 0.32s cubic-bezier(0.22, 0.7, 0.2, 1),
-			height 0.32s cubic-bezier(0.22, 0.7, 0.2, 1),
-			border-radius 0.32s ease;
+			left 0.52s cubic-bezier(0.32, 0.72, 0, 1),
+			top 0.52s cubic-bezier(0.32, 0.72, 0, 1),
+			width 0.52s cubic-bezier(0.32, 0.72, 0, 1),
+			height 0.52s cubic-bezier(0.32, 0.72, 0, 1),
+			border-radius 0.52s ease;
 	}
 
 	/* Controls sit out the glide, so the transform's scale never shows

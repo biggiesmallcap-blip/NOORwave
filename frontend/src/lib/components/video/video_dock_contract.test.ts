@@ -63,7 +63,8 @@ describe('persistent video dock contract', () => {
 
 	test('wheel over the docked video scrolls the page underneath', () => {
 		expect(dock).toContain('onwheel={forwardWheel}');
-		expect(dock).toContain('workspace.scrollBy({ top: event.deltaY * scale');
+		expect(dock).toContain('wheelTarget = Math.min(Math.max(base + event.deltaY * scale, 0), max);');
+		expect(dock).toContain("workspace.scrollTo({ top: wheelTarget, behavior: 'smooth' });");
 	});
 
 	test('frees the exclusive device when a video starts playing', () => {
