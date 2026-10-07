@@ -122,15 +122,29 @@ fn merge_facts(mut fresh: VideoCandidate, old: VideoCandidate) -> VideoCandidate
 
 /// Savepoints nest inside a caller's transaction (the liked-video scanner
 /// writes inside one) and also work on their own.
+///
+/// On its own it takes the write lock up front (`BEGIN IMMEDIATE`). A deferred
+/// transaction that reads first and then writes cannot wait for the lock: in
+/// WAL mode SQLite fails the upgrade with "database is locked" at once when
+/// another connection committed in between, regardless of `busy_timeout`.
 fn with_savepoint<T>(conn: &Connection, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-    conn.execute_batch("SAVEPOINT video_harvest")?;
+    let (begin, commit, rollback) = if conn.is_autocommit() {
+        ("BEGIN IMMEDIATE", "COMMIT", "ROLLBACK")
+    } else {
+        (
+            "SAVEPOINT video_harvest",
+            "RELEASE video_harvest",
+            "ROLLBACK TO video_harvest; RELEASE video_harvest",
+        )
+    };
+    conn.execute_batch(begin)?;
     match f(conn) {
         Ok(value) => {
-            conn.execute_batch("RELEASE video_harvest")?;
+            conn.execute_batch(commit)?;
             Ok(value)
         }
         Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK TO video_harvest; RELEASE video_harvest");
+            let _ = conn.execute_batch(rollback);
             Err(error)
         }
     }
@@ -406,6 +420,44 @@ mod tests {
         assert!(pairs.contains(&(1, 9)));
         assert!(!pairs.contains(&(1, 10)));
         assert_eq!(colist_pairs(&[5, 5, -1], 8), Vec::<(i64, i64)>::new());
+    }
+
+    #[test]
+    fn ingest_waits_for_another_writer_instead_of_failing() {
+        let path = std::env::temp_dir().join(format!(
+            "noor-harvest-lock-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let open = || {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;")
+                .unwrap();
+            conn
+        };
+        let writer = open();
+        crate::db::schema::run_migrations(&writer).unwrap();
+        let crawler = open();
+        // Another writer holds the lock and commits while the harvest waits.
+        writer
+            .execute_batch(
+                "BEGIN IMMEDIATE; INSERT INTO server_config (key, value) VALUES ('busy', '1');",
+            )
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            writer.execute_batch("COMMIT").unwrap();
+        });
+        let summary = ingest(&crawler, &[video(9, 90)], HarvestContext::Search);
+        release.join().unwrap();
+        drop(crawler);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+        assert_eq!(summary.unwrap().stored, 1);
     }
 
     #[test]
