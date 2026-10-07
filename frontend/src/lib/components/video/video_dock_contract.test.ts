@@ -60,11 +60,14 @@ describe('persistent video dock contract', () => {
 		expect(dock).toContain('onFullscreenToggle={toggleExpanded}');
 		expect(dock).toContain('document.documentElement.requestFullscreen?.()');
 		expect(dock).toContain("if (event.key === 'Escape' && expanded && !document.fullscreenElement) expanded = false;");
-		// One motion at a time: glide first, then window fullscreen; on the way
-		// out, window first, then glide.
+		// One motion at a time, window first both ways: going in, the glide
+		// waits for the window to finish growing (gliding first showed the
+		// native title bar over the filled window); going out, window first,
+		// then glide.
 		expect(dock).toContain('if (expanded) return null;');
 		expect(dock).toContain('fullscreenMove ? sizeGlideFrom(lastDockRect)');
-		expect(dock).toMatch(/fullscreenTimer = setTimeout\(\(\) => \{[\s\S]*requestFullscreen[\s\S]*\}, MORPH_MS\);/);
+		expect(dock).not.toMatch(/expanded = true;\s*fullscreenTimer = setTimeout/);
+		expect(dock).toMatch(/enteringFullscreen = false;\s*afterWindowSettles\(\(\) => \{[\s\S]*?if \(active\) expanded = true;/);
 		expect(dock).toContain('requestAnimationFrame(() => requestAnimationFrame(() => (expanded = false)));');
 		expect(player).toMatch(/if \(onFullscreenToggle\) \{\s*onFullscreenToggle\(\);\s*return;/);
 	});

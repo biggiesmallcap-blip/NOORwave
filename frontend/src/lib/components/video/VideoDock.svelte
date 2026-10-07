@@ -216,17 +216,15 @@
 
 	// One motion at a time. Asking for window fullscreen during the glide
 	// resized the window mid-flight, so the glide's target moved under it and
-	// the two fought (visible jank in Chrome and WebView2 alike). In: glide to
-	// fill the current window, then go fullscreen - by then the dock is pinned
-	// to the window edges and simply grows with it. Out: leave fullscreen
-	// first, let the page settle at its normal size, then glide back.
-	let fullscreenTimer: ReturnType<typeof setTimeout> | null = null;
+	// the two fought (visible jank in Chrome and WebView2 alike). In: go
+	// fullscreen first, wait for the window to reach its final size, then
+	// glide to fill it. Gliding first filled the still-windowed app for the
+	// whole glide, so the native title bar (minimize / maximize / close) sat
+	// over a black frame before the window went fullscreen. Out: leave
+	// fullscreen first, let the page settle at its normal size, then glide back.
+	let enteringFullscreen = false;
 
 	function toggleExpanded() {
-		if (fullscreenTimer) {
-			clearTimeout(fullscreenTimer);
-			fullscreenTimer = null;
-		}
 		if (expanded) {
 			if (document.fullscreenElement) {
 				// fullscreenchange collapses once the window is back to size.
@@ -234,15 +232,50 @@
 			} else {
 				expanded = false;
 			}
-		} else {
-			expanded = true;
-			fullscreenTimer = setTimeout(() => {
-				fullscreenTimer = null;
-				if (expanded && !document.fullscreenElement) {
-					void document.documentElement.requestFullscreen?.().catch(() => {});
-				}
-			}, MORPH_MS);
+			return;
 		}
+		if (enteringFullscreen) return;
+		if (document.fullscreenElement) {
+			expanded = true;
+			return;
+		}
+		const request = document.documentElement.requestFullscreen?.();
+		if (!request) {
+			expanded = true;
+			return;
+		}
+		enteringFullscreen = true;
+		// Refused (no user activation, policy): still fill the window.
+		request.catch(() => {
+			enteringFullscreen = false;
+			if (active) expanded = true;
+		});
+	}
+
+	/** Resolves once the window has finished growing. WebView2 resizes the
+	 *  host window after fullscreenchange; browsers usually before it. Done
+	 *  when the viewport covers the screen or has held still for a few frames,
+	 *  capped so a window that never reaches screen size still expands. */
+	function afterWindowSettles(done: () => void) {
+		const start = performance.now();
+		let lastW = window.innerWidth;
+		let lastH = window.innerHeight;
+		let still = 0;
+		const tick = () => {
+			const w = window.innerWidth;
+			const h = window.innerHeight;
+			const fills = w >= screen.width - 2 && h >= screen.height - 2;
+			still = w === lastW && h === lastH ? still + 1 : 0;
+			lastW = w;
+			lastH = h;
+			if (fills || still >= 4 || performance.now() - start > 400) {
+				// One more frame so the dock measures the re-laid-out page.
+				requestAnimationFrame(done);
+				return;
+			}
+			requestAnimationFrame(tick);
+		};
+		requestAnimationFrame(tick);
 	}
 
 	$effect(() => {
@@ -252,7 +285,18 @@
 	$effect(() => {
 		// Esc (or any other way out of window fullscreen) collapses too.
 		const onFullscreenChange = () => {
-			if (document.fullscreenElement || !expanded) return;
+			if (document.fullscreenElement) {
+				if (!enteringFullscreen) return;
+				enteringFullscreen = false;
+				afterWindowSettles(() => {
+					if (!document.fullscreenElement) return;
+					if (active) expanded = true;
+					else void document.exitFullscreen().catch(() => {});
+				});
+				return;
+			}
+			enteringFullscreen = false;
+			if (!expanded) return;
 			// Two frames: the window has resized and the stage has re-laid out,
 			// so the glide back aims at where the player really belongs.
 			requestAnimationFrame(() => requestAnimationFrame(() => (expanded = false)));
@@ -539,7 +583,6 @@
 	onDestroy(() => {
 		if (rafId) cancelAnimationFrame(rafId);
 		if (morphTimer) clearTimeout(morphTimer);
-		if (fullscreenTimer) clearTimeout(fullscreenTimer);
 		if (unfoldTimer) clearTimeout(unfoldTimer);
 		glide?.cancel();
 		unsubscribeStage();
