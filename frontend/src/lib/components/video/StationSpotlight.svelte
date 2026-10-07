@@ -129,7 +129,7 @@
 		margin: 0;
 		color: var(--text-tertiary);
 		font-size: var(--font-size-sm);
-		line-height: 1.55;
+		line-height: var(--line-height-normal);
 		overflow-wrap: anywhere;
 	}
 	.actions {

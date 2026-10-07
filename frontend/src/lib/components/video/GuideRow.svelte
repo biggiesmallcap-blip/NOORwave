@@ -243,7 +243,7 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		line-height: 1.25;
+		line-height: var(--line-height-snug);
 	}
 	.caption-title {
 		font-size: var(--font-size-xs);
