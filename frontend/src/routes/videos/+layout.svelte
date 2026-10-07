@@ -7,6 +7,7 @@
 	import VideoNavigation from '$lib/components/video/VideoNavigation.svelte';
 	import VideoSearchResults from '$lib/components/video/VideoSearchResults.svelte';
 	import { goBack } from '$lib/navigation/back';
+	import { captureScroll, restoreScroll, scrollWorkspaceTop } from '$lib/navigation/scroll';
 	import { videoStageReveal } from '$lib/stores/video_session';
 	import { WATCH_PATH, videoSectionQuery, videoTabFor } from '$lib/video/section';
 
@@ -27,11 +28,22 @@
 	// A new page starts with an empty field, except when the Liked tab hands
 	// its filter over to a full TIDAL search.
 	let carryQuery = false;
-	afterNavigate(({ from, to }) => {
+	afterNavigate(({ from, to, type }) => {
 		if (from?.url.pathname === to?.url.pathname) return;
 		if (carryQuery) carryQuery = false;
 		else videoSectionQuery.set('');
+		// The app scrolls main.workspace, which SvelteKit's reset never
+		// touches: a pick halfway down a tab would open the watch page halfway
+		// down. Forward moves start at the top; Back/Forward restore below.
+		if (type !== 'popstate') scrollWorkspaceTop();
 	});
+
+	// Per history entry: Back from the watch page lands on the tab at the
+	// tile you picked from.
+	export const snapshot = {
+		capture: () => captureScroll(),
+		restore: (top: number) => restoreScroll(top),
+	};
 
 	function searchAllOfTidal() {
 		carryQuery = true;
