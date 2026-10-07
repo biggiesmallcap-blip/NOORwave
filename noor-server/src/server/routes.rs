@@ -9838,13 +9838,7 @@ async fn begin_tidal_client_recovery(state: &SharedState) -> TidalClientRecovery
     }
 }
 
-pub(super) fn error_looks_like_auth(err: &anyhow::Error) -> bool {
-    let message = err.to_string().to_ascii_lowercase();
-    message.contains("401")
-        || message.contains("substatus\":6001")
-        || message.contains("valid session")
-        || message.contains("unauthorized")
-}
+pub(super) use crate::services::tidal::auth::error_looks_like_auth;
 
 async fn current_playback_runtime(
     state: &SharedState,
