@@ -690,7 +690,7 @@ async fn load_lastfm_track_chart(
                 }
             }
         }
-        merged.sort_by(|a, b| b.playcount.unwrap_or(0).cmp(&a.playcount.unwrap_or(0)));
+        merged.sort_by_key(|a| std::cmp::Reverse(a.playcount.unwrap_or(0)));
         merged.truncate(limit as usize);
         return Ok(merged);
     }
@@ -748,7 +748,7 @@ async fn fetch_lastfm_artist_chart(
                     }
                 }
             }
-            merged.sort_by(|a, b| b.listeners.unwrap_or(0).cmp(&a.listeners.unwrap_or(0)));
+            merged.sort_by_key(|a| std::cmp::Reverse(a.listeners.unwrap_or(0)));
             merged.truncate(limit as usize);
             merged
         }

@@ -139,6 +139,9 @@ pub(crate) enum ExclusiveRenderRole {
 
 #[derive(Clone)]
 pub(crate) struct ExclusiveRenderSource {
+    // Only inspected by the render-snapshot tests; kept so they can assert
+    // which slot is active vs prepared.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub role: ExclusiveRenderRole,
     pub shared: Arc<PlaybackSharedState>,
 }
@@ -997,15 +1000,15 @@ fn convert_f32_to_bytes(
         Format::F32 => {
             // Each sample is 4 bytes, channels * 4 = blockalign.
             debug_assert_eq!(blockalign, channels * 4);
-            for (chunk, &s) in dst.chunks_exact_mut(4).zip(src.iter()) {
-                chunk.copy_from_slice(&s.to_le_bytes());
+            for (chunk, &s) in dst.as_chunks_mut::<4>().0.iter_mut().zip(src.iter()) {
+                *chunk = s.to_le_bytes();
             }
         }
         Format::I32 => {
             debug_assert_eq!(blockalign, channels * 4);
-            for (chunk, &s) in dst.chunks_exact_mut(4).zip(src.iter()) {
+            for (chunk, &s) in dst.as_chunks_mut::<4>().0.iter_mut().zip(src.iter()) {
                 let v = f32_to_i32_pcm(s);
-                chunk.copy_from_slice(&v.to_le_bytes());
+                *chunk = v.to_le_bytes();
             }
         }
         Format::I24In32 => {
@@ -1013,23 +1016,23 @@ fn convert_f32_to_bytes(
             // means the valid PCM payload is left-aligned, leaving the low
             // byte clear.
             debug_assert_eq!(blockalign, channels * 4);
-            for (chunk, &s) in dst.chunks_exact_mut(4).zip(src.iter()) {
+            for (chunk, &s) in dst.as_chunks_mut::<4>().0.iter_mut().zip(src.iter()) {
                 let v = f32_to_i24_pcm(s) << 8;
-                chunk.copy_from_slice(&v.to_le_bytes());
+                *chunk = v.to_le_bytes();
             }
         }
         Format::I24Packed => {
             debug_assert_eq!(blockalign, channels * 3);
-            for (chunk, &s) in dst.chunks_exact_mut(3).zip(src.iter()) {
+            for (chunk, &s) in dst.as_chunks_mut::<3>().0.iter_mut().zip(src.iter()) {
                 let v = f32_to_i24_pcm(s);
                 chunk.copy_from_slice(&v.to_le_bytes()[0..3]);
             }
         }
         Format::I16 => {
             debug_assert_eq!(blockalign, channels * 2);
-            for (chunk, &s) in dst.chunks_exact_mut(2).zip(src.iter()) {
+            for (chunk, &s) in dst.as_chunks_mut::<2>().0.iter_mut().zip(src.iter()) {
                 let v = f32_to_i16_pcm(s);
-                chunk.copy_from_slice(&v.to_le_bytes());
+                *chunk = v.to_le_bytes();
             }
         }
     }

@@ -519,17 +519,15 @@ fn build_behavioral_embeddings(
                 .filter(|id| allowed.contains(id))
                 .collect();
             let len = filtered.len();
-            for i in 0..len {
-                let track_id = filtered[i];
+            for (i, &track_id) in filtered.iter().enumerate() {
                 let left = i.saturating_sub(window);
                 let right = (i + window + 1).min(len);
                 let entry = co.entry(track_id).or_default();
                 let count_entry = co_count.entry(track_id).or_default();
-                for j in left..right {
+                for (j, &other) in filtered.iter().enumerate().take(right).skip(left) {
                     if i == j {
                         continue;
                     }
-                    let other = filtered[j];
                     let distance = (i as isize - j as isize).unsigned_abs();
                     let weighted = weight / (distance as f64).max(1.0);
                     *entry.entry(other).or_default() += weighted;
@@ -1280,8 +1278,8 @@ fn compute_in_degree(neighbors: &mut [TrainerNeighbor]) {
         // Average rank over the tied group [i..j) using 0-indexed positions.
         let avg_rank = (i + j - 1) as f64 / 2.0;
         let pct = if n > 0.0 { avg_rank / n } else { 0.0 };
-        for k in i..j {
-            percentile_map.insert(ordered[k].0, pct);
+        for entry in &ordered[i..j] {
+            percentile_map.insert(entry.0, pct);
         }
         i = j;
     }
@@ -1533,7 +1531,7 @@ fn compute_reason_hit_rates(
         .collect();
     // Stable, descending by impressions — most-evidence reasons surface first
     // when an operator skims the table.
-    out.sort_by(|a, b| b.impressions.cmp(&a.impressions));
+    out.sort_by_key(|a| std::cmp::Reverse(a.impressions));
     out
 }
 
@@ -1879,7 +1877,7 @@ mod tests {
                     .or_insert(0) += indeg[idx];
             }
             let mut artists: Vec<_> = by_artist.into_iter().collect();
-            artists.sort_by(|a, b| b.1.cmp(&a.1));
+            artists.sort_by_key(|a| std::cmp::Reverse(a.1));
             eprintln!(
                 "[{label}] n={n} max_indeg={max} gini={gini:.3} orphans={orphans} top1%_share={top1_share:.3}"
             );

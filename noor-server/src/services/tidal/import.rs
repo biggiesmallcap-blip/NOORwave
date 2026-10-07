@@ -455,6 +455,58 @@ pub fn repair_track_metadata_tx(
     Ok(true)
 }
 
+fn upsert_track_tx(
+    tx: &rusqlite::Transaction<'_>,
+    t: &TidalTrack,
+    artist_id: i64,
+    album_id: i64,
+) -> Result<i64> {
+    let existing = crate::db::catalogue::track_id(tx, t.id)?;
+    if let Some(id) = existing {
+        if crate::db::catalogue::enabled(tx)? {
+            crate::db::catalogue::record_track(tx, id, t, false, None)?;
+        }
+        return Ok(id);
+    }
+
+    let quality = t.audio_quality.as_deref().unwrap_or("LOSSLESS");
+    let fidelity: i32 = match quality {
+        "HI_RES_LOSSLESS" => 900,
+        "HI_RES" => 800,
+        "LOSSLESS" => 700,
+        "HIGH" => 400,
+        _ => 200,
+    };
+    let duration_ms = t.duration * 1000;
+
+    tx.execute(
+        "INSERT INTO tracks (
+            tidal_id, title, artist_id, album_id,
+            disc_number, track_number, duration_ms, isrc,
+            best_quality, best_source, fidelity_score,
+            is_favorite, source
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'tidal', ?10, 0, ?11)",
+        params![
+            t.id,
+            t.title,
+            artist_id,
+            album_id,
+            t.volume_number.unwrap_or(1),
+            t.track_number,
+            duration_ms,
+            t.isrc,
+            quality,
+            fidelity,
+            TIDAL_STREAM_SOURCE,
+        ],
+    )?;
+    let id = tx.last_insert_rowid();
+    if crate::db::catalogue::enabled(tx)? {
+        crate::db::catalogue::record_track(tx, id, t, false, None)?;
+    }
+    Ok(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -574,7 +626,7 @@ mod tests {
 
         let track = tidal_track_json(266425080, 196, Some((6196, "Realise")));
         let changed = db
-            .with_conn(|conn| Ok(repair_track_metadata_tx(conn, 500, &track)?))
+            .with_conn(|conn| repair_track_metadata_tx(conn, 500, &track))
             .unwrap();
         assert!(
             changed,
@@ -638,7 +690,7 @@ mod tests {
 
         let track = tidal_track_json(999, 0, None);
         let changed = db
-            .with_conn(|conn| Ok(repair_track_metadata_tx(conn, 501, &track)?))
+            .with_conn(|conn| repair_track_metadata_tx(conn, 501, &track))
             .unwrap();
         assert!(
             !changed,
@@ -851,56 +903,4 @@ mod tests {
         assert_eq!(imported.artist_id, existing_artist_id);
         assert_eq!(imported.album_id, Some(existing_album_id));
     }
-}
-
-fn upsert_track_tx(
-    tx: &rusqlite::Transaction<'_>,
-    t: &TidalTrack,
-    artist_id: i64,
-    album_id: i64,
-) -> Result<i64> {
-    let existing = crate::db::catalogue::track_id(tx, t.id)?;
-    if let Some(id) = existing {
-        if crate::db::catalogue::enabled(tx)? {
-            crate::db::catalogue::record_track(tx, id, t, false, None)?;
-        }
-        return Ok(id);
-    }
-
-    let quality = t.audio_quality.as_deref().unwrap_or("LOSSLESS");
-    let fidelity: i32 = match quality {
-        "HI_RES_LOSSLESS" => 900,
-        "HI_RES" => 800,
-        "LOSSLESS" => 700,
-        "HIGH" => 400,
-        _ => 200,
-    };
-    let duration_ms = t.duration * 1000;
-
-    tx.execute(
-        "INSERT INTO tracks (
-            tidal_id, title, artist_id, album_id,
-            disc_number, track_number, duration_ms, isrc,
-            best_quality, best_source, fidelity_score,
-            is_favorite, source
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'tidal', ?10, 0, ?11)",
-        params![
-            t.id,
-            t.title,
-            artist_id,
-            album_id,
-            t.volume_number.unwrap_or(1),
-            t.track_number,
-            duration_ms,
-            t.isrc,
-            quality,
-            fidelity,
-            TIDAL_STREAM_SOURCE,
-        ],
-    )?;
-    let id = tx.last_insert_rowid();
-    if crate::db::catalogue::enabled(tx)? {
-        crate::db::catalogue::record_track(tx, id, t, false, None)?;
-    }
-    Ok(id)
 }

@@ -313,7 +313,7 @@ fn extract_variant_markers(title: &str) -> (Vec<&'static str>, Vec<&'static str>
     let mut master: Vec<&'static str> = Vec::new();
 
     for &marker in ALT_VERSION_TOKENS {
-        if tokens.iter().any(|t| *t == marker) && !alt.contains(&marker) {
+        if tokens.contains(&marker) && !alt.contains(&marker) {
             alt.push(marker);
         }
     }
@@ -323,7 +323,7 @@ fn extract_variant_markers(title: &str) -> (Vec<&'static str>, Vec<&'static str>
         }
     }
     for &marker in MASTER_TOKENS {
-        if tokens.iter().any(|t| *t == marker) && !master.contains(&marker) {
+        if tokens.contains(&marker) && !master.contains(&marker) {
             master.push(marker);
         }
     }

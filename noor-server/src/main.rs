@@ -486,203 +486,6 @@ fn mirror_managed_host_mode(db: &db::Database, resolved: &ResolvedBind) -> Resul
     })
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn host_flag_detection() {
-        // Simulate args: just test the parsing logic directly
-        let args = ["noor-server".to_string(), "--host".to_string()];
-        let has_host = args.iter().any(|a| a == "--host");
-        assert!(has_host);
-
-        let args_no_flag = ["noor-server".to_string()];
-        let has_host = args_no_flag.iter().any(|a| a == "--host");
-        assert!(!has_host);
-    }
-
-    #[test]
-    fn managed_host_preference_is_mirrored_but_external_control_is_not() {
-        let db = crate::db::Database::open_in_memory().expect("open db");
-        db.run_migrations().expect("migrations");
-        let managed = super::ResolvedBind {
-            addr: "0.0.0.0:17600".to_owned(),
-            control: crate::server::remote::HostControl::Desktop,
-            configured_host_mode: true,
-        };
-        super::mirror_managed_host_mode(&db, &managed).expect("mirror managed preference");
-        assert!(super::configured_host_mode(&db));
-
-        let external = super::ResolvedBind {
-            addr: "127.0.0.1:17600".to_owned(),
-            control: crate::server::remote::HostControl::Environment,
-            configured_host_mode: false,
-        };
-        super::mirror_managed_host_mode(&db, &external).expect("external control does not write");
-        assert!(super::configured_host_mode(&db));
-    }
-
-    #[test]
-    fn managed_host_mirror_failure_is_reported() {
-        let db = crate::db::Database::open_in_memory().expect("open db");
-        db.run_migrations().expect("migrations");
-        db.with_conn(|connection| {
-            connection.execute("DROP TABLE server_config", [])?;
-            Ok(())
-        })
-        .expect("drop config table");
-        let managed = super::ResolvedBind {
-            addr: "127.0.0.1:17600".to_owned(),
-            control: crate::server::remote::HostControl::Desktop,
-            configured_host_mode: false,
-        };
-        assert!(super::mirror_managed_host_mode(&db, &managed).is_err());
-    }
-
-    #[test]
-    fn bind_precedence_keeps_noor_addr_authoritative_over_managed_mode() {
-        let external =
-            super::resolve_bind_inputs(false, Some("127.0.0.1:19000"), Some("true"), true, 17600);
-        assert_eq!(external.addr, "127.0.0.1:19000");
-        assert_eq!(
-            external.control,
-            crate::server::remote::HostControl::Environment
-        );
-
-        let managed_false = super::resolve_bind_inputs(true, None, Some("false"), true, 17600);
-        assert_eq!(managed_false.addr, "127.0.0.1:17600");
-        assert_eq!(
-            managed_false.control,
-            crate::server::remote::HostControl::Desktop
-        );
-        assert!(!managed_false.configured_host_mode);
-    }
-
-    // Characterization test for restart reconciliation. The audio runtime is
-    // ephemeral, but the queue and its playhead are durable session state: on
-    // restart they remain available and resume rebuilds the runtime on demand.
-    #[test]
-    fn boot_reconcile_preserves_queue_and_playhead_and_marks_orphan_runs_failed() {
-        let db = crate::db::Database::open_in_memory().expect("open in-memory db");
-        db.run_migrations().expect("migrations");
-
-        // Seed: a stale session (track playing mid-position, queue with rows),
-        // a "running" training run that would otherwise be orphaned, AND user
-        // prefs we expect the wipe to PRESERVE.
-        db.with_conn(|conn| {
-            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;
-            conn.execute(
-                "INSERT INTO tracks (
-                    id, title, artist_id, duration_ms, source, fidelity_score
-                 ) VALUES (1, 'T', 1, 180000, 'tidal_stream', 0)",
-                [],
-            )?;
-            conn.execute(
-                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
-                [],
-            )?;
-            conn.execute(
-                "UPDATE playback_state
-                 SET is_playing = 1, current_track_id = 1,
-                     current_queue_item_id = (SELECT id FROM queue LIMIT 1),
-                     position_ms = 12345,
-                     volume = 0.73, shuffle_mode = 'weighted', repeat_mode = 'one',
-                     automix_enabled = 1
-                 WHERE id = 1",
-                [],
-            )?;
-            conn.execute(
-                "INSERT INTO training_runs (stage, status, started_at)
-                 VALUES ('train', 'running', datetime('now'))",
-                [],
-            )?;
-            Ok::<_, anyhow::Error>(())
-        })
-        .expect("seed");
-
-        // Run the boot reconciliation SQL verbatim from the startup path.
-        db.with_conn(|conn| {
-            conn.execute(
-                "UPDATE playback_state SET is_playing = 0, position_ms = 0 WHERE id = 1",
-                [],
-            )?;
-            conn.execute(
-                "UPDATE training_runs
-                 SET status = 'failed',
-                     finished_at = datetime('now'),
-                     error_text = COALESCE(error_text, 'interrupted by server restart')
-                 WHERE status = 'running'",
-                [],
-            )?;
-            Ok::<_, anyhow::Error>(())
-        })
-        .expect("wipe");
-
-        // Post-conditions.
-        db.with_conn(|conn| {
-            let queue_count: i64 =
-                conn.query_row("SELECT COUNT(*) FROM queue", [], |r| r.get(0))?;
-            assert_eq!(queue_count, 1, "queue must survive a restart");
-
-            let (
-                is_playing,
-                current_track_id,
-                current_queue_item_id,
-                position_ms,
-                volume,
-                shuffle_mode,
-                repeat_mode,
-                automix_enabled,
-            ): (i64, Option<i64>, Option<i64>, i64, f64, String, String, i64) = conn.query_row(
-                "SELECT is_playing, current_track_id, current_queue_item_id, position_ms,
-                        volume, shuffle_mode, repeat_mode, automix_enabled
-                 FROM playback_state WHERE id = 1",
-                [],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                        r.get(6)?,
-                        r.get(7)?,
-                    ))
-                },
-            )?;
-            // Runtime-only state is reset while the durable playhead survives.
-            assert_eq!(is_playing, 0, "is_playing must reset to 0");
-            assert_eq!(current_track_id, Some(1), "current track must survive");
-            assert!(
-                current_queue_item_id.is_some(),
-                "queue playhead must survive"
-            );
-            assert_eq!(position_ms, 0, "position_ms must reset to 0");
-            // Preserved (CLAUDE.md guarantee):
-            assert!(
-                (volume - 0.73).abs() < 1e-9,
-                "user prefs: volume must survive boot wipe, got {volume}"
-            );
-            assert_eq!(
-                shuffle_mode, "weighted",
-                "user prefs: shuffle_mode must survive"
-            );
-            assert_eq!(repeat_mode, "one", "user prefs: repeat_mode must survive");
-            assert_eq!(automix_enabled, 1, "user prefs: automix flag must survive");
-
-            let training_status: String =
-                conn.query_row("SELECT status FROM training_runs LIMIT 1", [], |r| r.get(0))?;
-            assert_eq!(
-                training_status, "failed",
-                "orphan training_runs must be marked failed"
-            );
-
-            Ok::<_, anyhow::Error>(())
-        })
-        .expect("assert");
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
@@ -1322,4 +1125,201 @@ async fn main() -> Result<()> {
     .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn host_flag_detection() {
+        // Simulate args: just test the parsing logic directly
+        let args = ["noor-server".to_string(), "--host".to_string()];
+        let has_host = args.iter().any(|a| a == "--host");
+        assert!(has_host);
+
+        let args_no_flag = ["noor-server".to_string()];
+        let has_host = args_no_flag.iter().any(|a| a == "--host");
+        assert!(!has_host);
+    }
+
+    #[test]
+    fn managed_host_preference_is_mirrored_but_external_control_is_not() {
+        let db = crate::db::Database::open_in_memory().expect("open db");
+        db.run_migrations().expect("migrations");
+        let managed = super::ResolvedBind {
+            addr: "0.0.0.0:17600".to_owned(),
+            control: crate::server::remote::HostControl::Desktop,
+            configured_host_mode: true,
+        };
+        super::mirror_managed_host_mode(&db, &managed).expect("mirror managed preference");
+        assert!(super::configured_host_mode(&db));
+
+        let external = super::ResolvedBind {
+            addr: "127.0.0.1:17600".to_owned(),
+            control: crate::server::remote::HostControl::Environment,
+            configured_host_mode: false,
+        };
+        super::mirror_managed_host_mode(&db, &external).expect("external control does not write");
+        assert!(super::configured_host_mode(&db));
+    }
+
+    #[test]
+    fn managed_host_mirror_failure_is_reported() {
+        let db = crate::db::Database::open_in_memory().expect("open db");
+        db.run_migrations().expect("migrations");
+        db.with_conn(|connection| {
+            connection.execute("DROP TABLE server_config", [])?;
+            Ok(())
+        })
+        .expect("drop config table");
+        let managed = super::ResolvedBind {
+            addr: "127.0.0.1:17600".to_owned(),
+            control: crate::server::remote::HostControl::Desktop,
+            configured_host_mode: false,
+        };
+        assert!(super::mirror_managed_host_mode(&db, &managed).is_err());
+    }
+
+    #[test]
+    fn bind_precedence_keeps_noor_addr_authoritative_over_managed_mode() {
+        let external =
+            super::resolve_bind_inputs(false, Some("127.0.0.1:19000"), Some("true"), true, 17600);
+        assert_eq!(external.addr, "127.0.0.1:19000");
+        assert_eq!(
+            external.control,
+            crate::server::remote::HostControl::Environment
+        );
+
+        let managed_false = super::resolve_bind_inputs(true, None, Some("false"), true, 17600);
+        assert_eq!(managed_false.addr, "127.0.0.1:17600");
+        assert_eq!(
+            managed_false.control,
+            crate::server::remote::HostControl::Desktop
+        );
+        assert!(!managed_false.configured_host_mode);
+    }
+
+    // Characterization test for restart reconciliation. The audio runtime is
+    // ephemeral, but the queue and its playhead are durable session state: on
+    // restart they remain available and resume rebuilds the runtime on demand.
+    #[test]
+    fn boot_reconcile_preserves_queue_and_playhead_and_marks_orphan_runs_failed() {
+        let db = crate::db::Database::open_in_memory().expect("open in-memory db");
+        db.run_migrations().expect("migrations");
+
+        // Seed: a stale session (track playing mid-position, queue with rows),
+        // a "running" training run that would otherwise be orphaned, AND user
+        // prefs we expect the wipe to PRESERVE.
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;
+            conn.execute(
+                "INSERT INTO tracks (
+                    id, title, artist_id, duration_ms, source, fidelity_score
+                 ) VALUES (1, 'T', 1, 180000, 'tidal_stream', 0)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE playback_state
+                 SET is_playing = 1, current_track_id = 1,
+                     current_queue_item_id = (SELECT id FROM queue LIMIT 1),
+                     position_ms = 12345,
+                     volume = 0.73, shuffle_mode = 'weighted', repeat_mode = 'one',
+                     automix_enabled = 1
+                 WHERE id = 1",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO training_runs (stage, status, started_at)
+                 VALUES ('train', 'running', datetime('now'))",
+                [],
+            )?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .expect("seed");
+
+        // Run the boot reconciliation SQL verbatim from the startup path.
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE playback_state SET is_playing = 0, position_ms = 0 WHERE id = 1",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE training_runs
+                 SET status = 'failed',
+                     finished_at = datetime('now'),
+                     error_text = COALESCE(error_text, 'interrupted by server restart')
+                 WHERE status = 'running'",
+                [],
+            )?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .expect("wipe");
+
+        // Post-conditions.
+        db.with_conn(|conn| {
+            let queue_count: i64 =
+                conn.query_row("SELECT COUNT(*) FROM queue", [], |r| r.get(0))?;
+            assert_eq!(queue_count, 1, "queue must survive a restart");
+
+            let (
+                is_playing,
+                current_track_id,
+                current_queue_item_id,
+                position_ms,
+                volume,
+                shuffle_mode,
+                repeat_mode,
+                automix_enabled,
+            ): (i64, Option<i64>, Option<i64>, i64, f64, String, String, i64) = conn.query_row(
+                "SELECT is_playing, current_track_id, current_queue_item_id, position_ms,
+                        volume, shuffle_mode, repeat_mode, automix_enabled
+                 FROM playback_state WHERE id = 1",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                    ))
+                },
+            )?;
+            // Runtime-only state is reset while the durable playhead survives.
+            assert_eq!(is_playing, 0, "is_playing must reset to 0");
+            assert_eq!(current_track_id, Some(1), "current track must survive");
+            assert!(
+                current_queue_item_id.is_some(),
+                "queue playhead must survive"
+            );
+            assert_eq!(position_ms, 0, "position_ms must reset to 0");
+            // Preserved (CLAUDE.md guarantee):
+            assert!(
+                (volume - 0.73).abs() < 1e-9,
+                "user prefs: volume must survive boot wipe, got {volume}"
+            );
+            assert_eq!(
+                shuffle_mode, "weighted",
+                "user prefs: shuffle_mode must survive"
+            );
+            assert_eq!(repeat_mode, "one", "user prefs: repeat_mode must survive");
+            assert_eq!(automix_enabled, 1, "user prefs: automix flag must survive");
+
+            let training_status: String =
+                conn.query_row("SELECT status FROM training_runs LIMIT 1", [], |r| r.get(0))?;
+            assert_eq!(
+                training_status, "failed",
+                "orphan training_runs must be marked failed"
+            );
+
+            Ok::<_, anyhow::Error>(())
+        })
+        .expect("assert");
+    }
 }

@@ -86,7 +86,6 @@ const MAX_SILENT_START_STREAK: u32 = 3;
 ///
 /// This tracker notices an active engine making no progress in either shape and
 /// asks the loop to force the queue forward.
-
 struct StallTracker {
     watching: Option<(i64, u64)>,
     last_position: u64,
@@ -3182,6 +3181,8 @@ fn run_runtime_loop(
                     // among in-buffer fast path / segment-restart / reject;
                     // the actual mutation happens in phase 2 with the
                     // immutable borrow already dropped (per r6 fix C).
+                    // Lives for one seek on the stack; boxing the job buys nothing.
+                    #[allow(clippy::large_enum_variant)]
                     enum SeekHandling {
                         InBuffer { target_samples: u64 },
                         Reject,
@@ -3879,15 +3880,15 @@ fn run_runtime_loop(
                             }
                         }
                     }
-                    if let Some(engine) = state.fading_out_engine.as_mut() {
-                        if let Err(error) = engine.pause() {
-                            report_runtime_command_error(&event_tx, "Pause", error);
-                        }
+                    if let Some(engine) = state.fading_out_engine.as_mut()
+                        && let Err(error) = engine.pause()
+                    {
+                        report_runtime_command_error(&event_tx, "Pause", error);
                     }
-                    if let Some(engine) = state.drop_preview_engine.as_mut() {
-                        if let Err(error) = engine.pause() {
-                            report_runtime_command_error(&event_tx, "Pause", error);
-                        }
+                    if let Some(engine) = state.drop_preview_engine.as_mut()
+                        && let Err(error) = engine.pause()
+                    {
+                        report_runtime_command_error(&event_tx, "Pause", error);
                     }
                     // Instrumentation only (slice C0): correlate an explicit user
                     // pause with the render thread's idle-release timing in the logs.
@@ -4026,19 +4027,18 @@ fn run_runtime_loop(
                             }
                         }
                     }
-                    if let Some(engine) = state.fading_out_engine.as_mut() {
-                        if let Err(error) = engine.resume() {
-                            report_runtime_command_error(&event_tx, "Resume", error);
-                        }
+                    if let Some(engine) = state.fading_out_engine.as_mut()
+                        && let Err(error) = engine.resume()
+                    {
+                        report_runtime_command_error(&event_tx, "Resume", error);
                     }
                     if let Some(engine) = state
                         .drop_preview_engine
                         .as_mut()
                         .filter(|engine| !engine.shared.paused.load(Ordering::SeqCst))
+                        && let Err(error) = engine.resume()
                     {
-                        if let Err(error) = engine.resume() {
-                            report_runtime_command_error(&event_tx, "Resume", error);
-                        }
+                        report_runtime_command_error(&event_tx, "Resume", error);
                     }
                 }
                 PlaybackRuntimeCommand::Stop => {
@@ -10540,7 +10540,7 @@ mod tests {
             requires_stream_metadata: false,
         };
         state.next_engine.as_mut().unwrap().job.prepared_transition = Some(transition.clone());
-        state.next_engine.as_mut().unwrap().job.gapless = gapless.clone();
+        state.next_engine.as_mut().unwrap().job.gapless = gapless;
         let job = state.next_engine.as_ref().unwrap().job.clone();
         assert!(arm_active_transition_window(&mut state, &job));
         transition.program = crate::playback::dj_engine::safe_crossfade_program(
@@ -10551,7 +10551,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let mut slower = gapless.clone();
+        let mut slower = gapless;
         slower.overlap_ms = 9000;
         assert!(update_prepared_transition_in_state(
             &mut state,
@@ -10602,9 +10602,7 @@ mod tests {
         let mut stale = transition.clone();
         stale.next_queue_item_id = Some(99);
         assert!(!update_prepared_transition_in_state(
-            &mut state,
-            stale,
-            gapless.clone()
+            &mut state, stale, gapless
         ));
         state
             .engine
@@ -10616,7 +10614,7 @@ mod tests {
         assert!(!update_prepared_transition_in_state(
             &mut state,
             transition.clone(),
-            gapless.clone()
+            gapless
         ));
         state
             .engine

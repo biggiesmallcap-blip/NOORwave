@@ -213,9 +213,10 @@ fn looks_like_era(tag: &str) -> bool {
 
 pub fn classify_tag_context(raw: &str, is_known_genre: bool) -> ClassifiedTag {
     let normalized = normalize_key(raw);
-    let context = if normalized.is_empty() || normalized.len() > 50 {
-        TagContext::Noise
-    } else if in_list(HARD_NOISE_TAGS, &normalized) {
+    let context = if normalized.is_empty()
+        || normalized.len() > 50
+        || in_list(HARD_NOISE_TAGS, &normalized)
+    {
         TagContext::Noise
     } else if is_known_genre {
         TagContext::Genre

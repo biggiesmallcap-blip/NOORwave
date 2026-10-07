@@ -1131,18 +1131,18 @@ fn build_metadata_fallback(
     }
 
     // Stage 2: same album - appends to whatever stage 1 produced.
-    if result.len() < needed {
-        if let Some(album_id) = seed.album_id {
-            let album_tracks = queries::get_album_tracks(conn, album_id)?;
-            for t in album_tracks {
-                if seen.insert(t.id) {
-                    if stage_hit.is_none() {
-                        stage_hit = Some("album");
-                    }
-                    result.push(t);
-                    if result.len() >= needed {
-                        break;
-                    }
+    if result.len() < needed
+        && let Some(album_id) = seed.album_id
+    {
+        let album_tracks = queries::get_album_tracks(conn, album_id)?;
+        for t in album_tracks {
+            if seen.insert(t.id) {
+                if stage_hit.is_none() {
+                    stage_hit = Some("album");
+                }
+                result.push(t);
+                if result.len() >= needed {
+                    break;
                 }
             }
         }
@@ -1434,6 +1434,242 @@ fn cap_per_artist<T>(
     kept
 }
 
+/// Score a candidate for automix selection *and* emit the signals that
+/// produced that score. The reason shown to the user is built from these
+/// signals (see `automix_scored_reason`), so the explanation is derived from
+/// the same pass that ranked the track - it cannot drift from or contradict
+/// the score. `value` is byte-identical to the pre-signal scorer.
+#[cfg(test)]
+pub(crate) fn automix_score(
+    track: &Track,
+    genres: &[String],
+    taste: &TasteVector,
+    seed: &SeedContext,
+    seed_features: Option<&AudioDspFeatures>,
+    candidate_features: Option<&AudioDspFeatures>,
+) -> AutomixScore {
+    let genres = genres
+        .iter()
+        .map(|path| queue::TrackGenreEvidence {
+            path: path.clone(),
+            confidence: 1.0,
+        })
+        .collect::<Vec<_>>();
+    automix_score_with_genre_confidence(
+        track,
+        &genres,
+        taste,
+        seed,
+        seed_features,
+        candidate_features,
+    )
+}
+
+fn automix_score_with_genre_confidence(
+    track: &Track,
+    genres: &[queue::TrackGenreEvidence],
+    taste: &TasteVector,
+    seed: &SeedContext,
+    seed_features: Option<&AudioDspFeatures>,
+    candidate_features: Option<&AudioDspFeatures>,
+) -> AutomixScore {
+    let mut score = 1.0;
+    let mut signals = Vec::new();
+
+    // Hard suppression for recently skipped tracks
+    if taste.skipped_track_ids.contains(&track.id) {
+        score *= 0.1;
+        signals.push(AutomixSignal::penalty("recently skipped"));
+    }
+
+    // Same-artist: gentle familiarity boost, not enough to cause artist runs.
+    // Artist spread is handled at the queue level by decluster_by_album.
+    if Some(track.artist_id) == seed.artist_id && track.artist_id != 0 {
+        score *= 1.1;
+        signals.push(AutomixSignal::boost("same artist"));
+    }
+
+    if seed.source.as_deref() == Some(track.source.as_str()) {
+        score *= 1.05;
+        signals.push(AutomixSignal::boost("same source"));
+    }
+
+    if track.is_favorite {
+        score *= 1.2;
+        signals.push(AutomixSignal::boost("favorite"));
+    }
+
+    // Unplayed tracks get a meaningful boost so they surface before heavily-played ones.
+    if track.play_count == 0 {
+        score *= 1.35;
+        signals.push(AutomixSignal::boost("unplayed"));
+    } else if let Some(last_played) = track.last_played_at.as_deref() {
+        // Time-decay penalty: full suppression at <1 day, fades to zero by 14 days.
+        let days_since = parse_days_since_last_played(last_played);
+        if days_since < 14.0 {
+            let penalty = 0.5 + 0.5 * (days_since / 14.0);
+            score *= penalty;
+            signals.push(AutomixSignal::penalty("recently played"));
+        }
+    }
+
+    if track.artist_id != 0
+        && let Some(affinity) = taste.artist_affinity.get(&track.artist_id)
+    {
+        score += affinity.pos * 0.5;
+        score -= affinity.neg * 0.65;
+        // Label by the net effect on the score, not the raw counts.
+        let net = affinity.pos * 0.5 - affinity.neg * 0.65;
+        if net > 0.0 {
+            signals.push(AutomixSignal::boost("artist affinity"));
+        } else if net < 0.0 {
+            signals.push(AutomixSignal::penalty("recent skip penalty"));
+        }
+    }
+
+    let mut shares_seed_genre = false;
+    let mut genre_affinity_net = 0.0;
+    let normalized_genres = genres.iter().map(|genre| {
+        (
+            normalize_genre_key(&genre.path),
+            genre.confidence.clamp(0.0, 1.0),
+        )
+    });
+    for (genre, candidate_confidence) in normalized_genres {
+        let seed_confidence = seed
+            .genre_confidence
+            .get(&genre)
+            .copied()
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+        let match_confidence = candidate_confidence.min(seed_confidence);
+        if seed.genres.contains(&genre) {
+            // Weight the seed-genre match by rarity when automix supplied it: a
+            // niche shared genre is a stronger signal than a library-wide one.
+            // 0.5 (the absent-data default) maps to a 1.0 multiplier, so callers
+            // without rarity data and existing tests keep the original flat +1.8.
+            let rarity = seed.genre_rarity.get(&genre).copied().unwrap_or(0.5);
+            score += 1.8 * (0.7 + 0.6 * rarity) * match_confidence;
+            shares_seed_genre |= match_confidence > 0.0;
+        }
+        if let Some(affinity) = taste.genre_affinity.get(&genre) {
+            let net = affinity.pos * 0.4 - affinity.neg * 0.5;
+            let affinity_confidence = if seed.genres.contains(&genre) {
+                match_confidence
+            } else {
+                candidate_confidence
+            };
+            score += net * affinity_confidence;
+            genre_affinity_net += net * affinity_confidence;
+        }
+    }
+    if shares_seed_genre {
+        signals.push(AutomixSignal::boost("shared genres"));
+    }
+    if genre_affinity_net > 0.0 {
+        signals.push(AutomixSignal::boost("genre affinity"));
+    } else if genre_affinity_net < 0.0 {
+        signals.push(AutomixSignal::penalty("genre mismatch"));
+    }
+
+    score += (track.fidelity_score.max(0) as f64) * 0.003;
+
+    // DSP harmonic/BPM/energy scoring - only applied when BOTH tracks have features.
+    // Unanalyzed tracks are never penalised; they simply skip this pass.
+    if let (Some(seed), Some(cand)) = (seed_features, candidate_features) {
+        // Camelot + BPM multiplier (shared with radio post-scoring).
+        score *= compute_harmonic_multiplier(
+            seed.camelot_key.as_deref(),
+            cand.camelot_key.as_deref(),
+            seed.bpm,
+            cand.bpm,
+        );
+
+        // The multiplier folds Camelot *and* BPM together, so it can read >1.0
+        // even on a key clash that happens to share a tempo. Derive the
+        // harmonic signal from the Camelot relationship directly - via the same
+        // `camelot_relation` the multiplier uses - so the "Why" never claims a
+        // fit the keys don't have, and the two can't drift apart.
+        if let (Some(a), Some(b)) = (seed.camelot_key.as_deref(), cand.camelot_key.as_deref()) {
+            signals.push(match camelot_relation(a, b) {
+                CamelotRelation::Compatible => AutomixSignal::boost("harmonic match"),
+                CamelotRelation::Adjacent => AutomixSignal::boost("adjacent key"),
+                CamelotRelation::Clash => AutomixSignal::penalty("key clash"),
+            });
+        }
+
+        // Energy whiplash penalty.
+        if let (Some(seed_energy), Some(cand_energy)) = (seed.energy, cand.energy)
+            && (seed_energy - cand_energy).abs() > 0.5
+        {
+            score *= 0.7;
+            signals.push(AutomixSignal::penalty("energy whiplash"));
+        }
+    }
+
+    AutomixScore {
+        value: score.max(0.05),
+        signals,
+    }
+}
+
+/// Parse an ISO-8601 timestamp and return days elapsed since then.
+/// Returns `f64::MAX` on failure so malformed timestamps get maximum recency penalty.
+pub(crate) fn parse_days_since_last_played(timestamp: &str) -> f64 {
+    let Ok(dt) = chrono::DateTime::parse_from_rfc3339(timestamp) else {
+        return f64::MAX;
+    };
+    let elapsed = chrono::Utc::now().signed_duration_since(dt.with_timezone(&chrono::Utc));
+    elapsed.num_seconds().max(0) as f64 / 86_400.0
+}
+
+fn matches_preferred_genres(
+    genres: &[queue::TrackGenreEvidence],
+    taste: &TasteVector,
+    seed: &SeedContext,
+) -> bool {
+    genres.iter().any(|genre| {
+        let key = normalize_genre_key(&genre.path);
+        let candidate_confidence = genre.confidence.clamp(0.0, 1.0);
+        let seed_confidence = seed
+            .genre_confidence
+            .get(&key)
+            .copied()
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+        (seed.genres.contains(&key) && candidate_confidence.min(seed_confidence) >= 0.5)
+            || (candidate_confidence >= 0.5
+                && taste
+                    .genre_affinity
+                    .get(&key)
+                    .is_some_and(|affinity| affinity.pos > 0.0))
+    })
+}
+
+fn weighted_session_shuffle(entries: &[ScoredTrack]) -> Vec<Track> {
+    let mut rng = rand::rng();
+    weighted_session_shuffle_with_rng(entries, &mut rng)
+}
+
+fn weighted_session_shuffle_with_rng<R: rand::Rng + ?Sized>(
+    entries: &[ScoredTrack],
+    rng: &mut R,
+) -> Vec<Track> {
+    let profile = WeightedShuffleProfile::default();
+    let mut weighted = entries
+        .iter()
+        .map(|entry| {
+            let weight = profile.weight_for(&entry.track) * entry.score.max(0.05);
+            let uniform = rng.random_range(f64::EPSILON..1.0);
+            let key = -uniform.ln() / weight;
+            (key, entry.track.clone())
+        })
+        .collect::<Vec<_>>();
+
+    weighted.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(Ordering::Equal));
+    weighted.into_iter().map(|(_, track)| track).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1552,21 +1788,23 @@ mod tests {
         assert!((mid.score_multiplier - 1.0).abs() < 1e-9);
         assert!(near_threshold.score_multiplier < 1.0);
         assert!(strong_hub.score_multiplier < near_threshold.score_multiplier);
-        assert!(strong_hub.reasons.iter().any(|r| *r == "hub penalty"));
-        assert!(!mid.reasons.iter().any(|r| *r == "hub penalty"));
+        assert!(strong_hub.reasons.contains(&"hub penalty"));
+        assert!(!mid.reasons.contains(&"hub penalty"));
     }
 
     #[test]
     fn scorer_weights_rare_seed_genre_above_broad_one() {
         use crate::smart::taste_vector::{SeedContext, TasteVector};
         let taste = TasteVector::default();
-        let mut seed = SeedContext::default();
-        seed.genres = ["rare".to_string(), "broad".to_string()]
-            .into_iter()
-            .collect();
-        seed.genre_rarity = [("rare".to_string(), 0.95), ("broad".to_string(), 0.10)]
-            .into_iter()
-            .collect();
+        let seed = SeedContext {
+            genres: ["rare".to_string(), "broad".to_string()]
+                .into_iter()
+                .collect(),
+            genre_rarity: [("rare".to_string(), 0.95), ("broad".to_string(), 0.10)]
+                .into_iter()
+                .collect(),
+            ..SeedContext::default()
+        };
 
         let track = track_with_album(2, None);
         let rare = automix_score(&track, &["rare".to_string()], &taste, &seed, None, None).value;
@@ -1856,239 +2094,4 @@ mod tests {
             }
         }
     }
-}
-
-/// Score a candidate for automix selection *and* emit the signals that
-/// produced that score. The reason shown to the user is built from these
-/// signals (see `automix_scored_reason`), so the explanation is derived from
-/// the same pass that ranked the track - it cannot drift from or contradict
-/// the score. `value` is byte-identical to the pre-signal scorer.
-pub(crate) fn automix_score(
-    track: &Track,
-    genres: &[String],
-    taste: &TasteVector,
-    seed: &SeedContext,
-    seed_features: Option<&AudioDspFeatures>,
-    candidate_features: Option<&AudioDspFeatures>,
-) -> AutomixScore {
-    let genres = genres
-        .iter()
-        .map(|path| queue::TrackGenreEvidence {
-            path: path.clone(),
-            confidence: 1.0,
-        })
-        .collect::<Vec<_>>();
-    automix_score_with_genre_confidence(
-        track,
-        &genres,
-        taste,
-        seed,
-        seed_features,
-        candidate_features,
-    )
-}
-
-fn automix_score_with_genre_confidence(
-    track: &Track,
-    genres: &[queue::TrackGenreEvidence],
-    taste: &TasteVector,
-    seed: &SeedContext,
-    seed_features: Option<&AudioDspFeatures>,
-    candidate_features: Option<&AudioDspFeatures>,
-) -> AutomixScore {
-    let mut score = 1.0;
-    let mut signals = Vec::new();
-
-    // Hard suppression for recently skipped tracks
-    if taste.skipped_track_ids.contains(&track.id) {
-        score *= 0.1;
-        signals.push(AutomixSignal::penalty("recently skipped"));
-    }
-
-    // Same-artist: gentle familiarity boost, not enough to cause artist runs.
-    // Artist spread is handled at the queue level by decluster_by_album.
-    if Some(track.artist_id) == seed.artist_id && track.artist_id != 0 {
-        score *= 1.1;
-        signals.push(AutomixSignal::boost("same artist"));
-    }
-
-    if seed.source.as_deref() == Some(track.source.as_str()) {
-        score *= 1.05;
-        signals.push(AutomixSignal::boost("same source"));
-    }
-
-    if track.is_favorite {
-        score *= 1.2;
-        signals.push(AutomixSignal::boost("favorite"));
-    }
-
-    // Unplayed tracks get a meaningful boost so they surface before heavily-played ones.
-    if track.play_count == 0 {
-        score *= 1.35;
-        signals.push(AutomixSignal::boost("unplayed"));
-    } else if let Some(last_played) = track.last_played_at.as_deref() {
-        // Time-decay penalty: full suppression at <1 day, fades to zero by 14 days.
-        let days_since = parse_days_since_last_played(last_played);
-        if days_since < 14.0 {
-            let penalty = 0.5 + 0.5 * (days_since / 14.0);
-            score *= penalty;
-            signals.push(AutomixSignal::penalty("recently played"));
-        }
-    }
-
-    if track.artist_id != 0
-        && let Some(affinity) = taste.artist_affinity.get(&track.artist_id)
-    {
-        score += affinity.pos * 0.5;
-        score -= affinity.neg * 0.65;
-        // Label by the net effect on the score, not the raw counts.
-        let net = affinity.pos * 0.5 - affinity.neg * 0.65;
-        if net > 0.0 {
-            signals.push(AutomixSignal::boost("artist affinity"));
-        } else if net < 0.0 {
-            signals.push(AutomixSignal::penalty("recent skip penalty"));
-        }
-    }
-
-    let mut shares_seed_genre = false;
-    let mut genre_affinity_net = 0.0;
-    let normalized_genres = genres.iter().map(|genre| {
-        (
-            normalize_genre_key(&genre.path),
-            genre.confidence.clamp(0.0, 1.0),
-        )
-    });
-    for (genre, candidate_confidence) in normalized_genres {
-        let seed_confidence = seed
-            .genre_confidence
-            .get(&genre)
-            .copied()
-            .unwrap_or(1.0)
-            .clamp(0.0, 1.0);
-        let match_confidence = candidate_confidence.min(seed_confidence);
-        if seed.genres.contains(&genre) {
-            // Weight the seed-genre match by rarity when automix supplied it: a
-            // niche shared genre is a stronger signal than a library-wide one.
-            // 0.5 (the absent-data default) maps to a 1.0 multiplier, so callers
-            // without rarity data and existing tests keep the original flat +1.8.
-            let rarity = seed.genre_rarity.get(&genre).copied().unwrap_or(0.5);
-            score += 1.8 * (0.7 + 0.6 * rarity) * match_confidence;
-            shares_seed_genre |= match_confidence > 0.0;
-        }
-        if let Some(affinity) = taste.genre_affinity.get(&genre) {
-            let net = affinity.pos * 0.4 - affinity.neg * 0.5;
-            let affinity_confidence = if seed.genres.contains(&genre) {
-                match_confidence
-            } else {
-                candidate_confidence
-            };
-            score += net * affinity_confidence;
-            genre_affinity_net += net * affinity_confidence;
-        }
-    }
-    if shares_seed_genre {
-        signals.push(AutomixSignal::boost("shared genres"));
-    }
-    if genre_affinity_net > 0.0 {
-        signals.push(AutomixSignal::boost("genre affinity"));
-    } else if genre_affinity_net < 0.0 {
-        signals.push(AutomixSignal::penalty("genre mismatch"));
-    }
-
-    score += (track.fidelity_score.max(0) as f64) * 0.003;
-
-    // DSP harmonic/BPM/energy scoring - only applied when BOTH tracks have features.
-    // Unanalyzed tracks are never penalised; they simply skip this pass.
-    if let (Some(seed), Some(cand)) = (seed_features, candidate_features) {
-        // Camelot + BPM multiplier (shared with radio post-scoring).
-        score *= compute_harmonic_multiplier(
-            seed.camelot_key.as_deref(),
-            cand.camelot_key.as_deref(),
-            seed.bpm,
-            cand.bpm,
-        );
-
-        // The multiplier folds Camelot *and* BPM together, so it can read >1.0
-        // even on a key clash that happens to share a tempo. Derive the
-        // harmonic signal from the Camelot relationship directly - via the same
-        // `camelot_relation` the multiplier uses - so the "Why" never claims a
-        // fit the keys don't have, and the two can't drift apart.
-        if let (Some(a), Some(b)) = (seed.camelot_key.as_deref(), cand.camelot_key.as_deref()) {
-            signals.push(match camelot_relation(a, b) {
-                CamelotRelation::Compatible => AutomixSignal::boost("harmonic match"),
-                CamelotRelation::Adjacent => AutomixSignal::boost("adjacent key"),
-                CamelotRelation::Clash => AutomixSignal::penalty("key clash"),
-            });
-        }
-
-        // Energy whiplash penalty.
-        if let (Some(seed_energy), Some(cand_energy)) = (seed.energy, cand.energy)
-            && (seed_energy - cand_energy).abs() > 0.5
-        {
-            score *= 0.7;
-            signals.push(AutomixSignal::penalty("energy whiplash"));
-        }
-    }
-
-    AutomixScore {
-        value: score.max(0.05),
-        signals,
-    }
-}
-
-/// Parse an ISO-8601 timestamp and return days elapsed since then.
-/// Returns `f64::MAX` on failure so malformed timestamps get maximum recency penalty.
-pub(crate) fn parse_days_since_last_played(timestamp: &str) -> f64 {
-    let Ok(dt) = chrono::DateTime::parse_from_rfc3339(timestamp) else {
-        return f64::MAX;
-    };
-    let elapsed = chrono::Utc::now().signed_duration_since(dt.with_timezone(&chrono::Utc));
-    elapsed.num_seconds().max(0) as f64 / 86_400.0
-}
-
-fn matches_preferred_genres(
-    genres: &[queue::TrackGenreEvidence],
-    taste: &TasteVector,
-    seed: &SeedContext,
-) -> bool {
-    genres.iter().any(|genre| {
-        let key = normalize_genre_key(&genre.path);
-        let candidate_confidence = genre.confidence.clamp(0.0, 1.0);
-        let seed_confidence = seed
-            .genre_confidence
-            .get(&key)
-            .copied()
-            .unwrap_or(1.0)
-            .clamp(0.0, 1.0);
-        (seed.genres.contains(&key) && candidate_confidence.min(seed_confidence) >= 0.5)
-            || (candidate_confidence >= 0.5
-                && taste
-                    .genre_affinity
-                    .get(&key)
-                    .is_some_and(|affinity| affinity.pos > 0.0))
-    })
-}
-
-fn weighted_session_shuffle(entries: &[ScoredTrack]) -> Vec<Track> {
-    let mut rng = rand::rng();
-    weighted_session_shuffle_with_rng(entries, &mut rng)
-}
-
-fn weighted_session_shuffle_with_rng<R: rand::Rng + ?Sized>(
-    entries: &[ScoredTrack],
-    rng: &mut R,
-) -> Vec<Track> {
-    let profile = WeightedShuffleProfile::default();
-    let mut weighted = entries
-        .iter()
-        .map(|entry| {
-            let weight = profile.weight_for(&entry.track) * entry.score.max(0.05);
-            let uniform = rng.random_range(f64::EPSILON..1.0);
-            let key = -uniform.ln() / weight;
-            (key, entry.track.clone())
-        })
-        .collect::<Vec<_>>();
-
-    weighted.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(Ordering::Equal));
-    weighted.into_iter().map(|(_, track)| track).collect()
 }

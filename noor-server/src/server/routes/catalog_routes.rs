@@ -112,14 +112,14 @@ fn store_artist_core_payload(tidal_artist_id: i64, payload: Value) {
     let mut cache = artist_core_payload_cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if cache.len() >= ARTIST_PAYLOAD_CACHE_CAP && !cache.contains_key(&tidal_artist_id) {
-        if let Some(oldest) = cache
+    if cache.len() >= ARTIST_PAYLOAD_CACHE_CAP
+        && !cache.contains_key(&tidal_artist_id)
+        && let Some(oldest) = cache
             .iter()
             .max_by_key(|(_, entry)| entry.built_at.elapsed())
             .map(|(id, _)| *id)
-        {
-            cache.remove(&oldest);
-        }
+    {
+        cache.remove(&oldest);
     }
     cache.insert(
         tidal_artist_id,
@@ -155,6 +155,7 @@ fn cached_artist_payload(tidal_artist_id: i64, preview: bool, max_age: Duration)
         .map(|entry| entry.payload.clone())
 }
 
+#[cfg(test)]
 fn store_artist_payload(tidal_artist_id: i64, preview: bool, payload: Value) {
     store_artist_payload_for(tidal_artist_id, preview, payload, ARTIST_PAYLOAD_CACHE_TTL);
 }
@@ -169,14 +170,14 @@ fn store_artist_payload_for(
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let key = (tidal_artist_id, preview);
-    if cache.len() >= ARTIST_PAYLOAD_CACHE_CAP && !cache.contains_key(&key) {
-        if let Some(oldest) = cache
+    if cache.len() >= ARTIST_PAYLOAD_CACHE_CAP
+        && !cache.contains_key(&key)
+        && let Some(oldest) = cache
             .iter()
             .max_by_key(|(_, entry)| entry.built_at.elapsed())
             .map(|(id, _)| *id)
-        {
-            cache.remove(&oldest);
-        }
+    {
+        cache.remove(&oldest);
     }
     cache.insert(
         key,
@@ -245,13 +246,12 @@ where
             }
             Err(first_error) => {
                 tokio::time::sleep(ARTIST_FETCH_RETRY_BACKOFF).await;
-                attempt().await.map_err(|retry_error| {
+                attempt().await.inspect_err(|_retry_error| {
                     tracing::debug!(
                         label,
                         first_error = %first_error,
                         "TIDAL artist fetch retry failed"
                     );
-                    retry_error
                 })
             }
         }
@@ -772,10 +772,9 @@ pub(super) async fn get_album_tracks(
 
     // TIDAL session needed for the catalog fetch - best-effort only.
     let (tokens, tidal_http_client) = {
-        let persisted = match load_persisted_tidal_tokens(&state).await {
-            Ok(p) => p,
-            Err(_) => None,
-        };
+        let persisted = load_persisted_tidal_tokens(&state)
+            .await
+            .unwrap_or_default();
         let s = state.read().await;
         (
             s.tidal_tokens.clone().or(persisted),
@@ -1281,10 +1280,11 @@ async fn build_uncached_tidal_artist_core_payload(
             .as_ref()
             .err()
             .is_some_and(error_looks_like_auth);
-    if all_failed && looks_like_auth {
-        if let Ok(retry_client) = recover_tidal_client(state, tokens).await {
-            (top_res, profile_res) = fetch_core(&retry_client, tidal_artist_id).await;
-        }
+    if all_failed
+        && looks_like_auth
+        && let Ok(retry_client) = recover_tidal_client(state, tokens).await
+    {
+        (top_res, profile_res) = fetch_core(&retry_client, tidal_artist_id).await;
     }
 
     let available = top_res.is_ok() || profile_res.is_ok();
@@ -1922,14 +1922,14 @@ pub(super) async fn get_tidal_artist_release_page(
         client.get_artist_albums(tidal_artist_id, 50, query.offset, Some(filter))
     })
     .await;
-    if page.as_ref().err().is_some_and(error_looks_like_auth) {
-        if let Ok(recovered) = recover_tidal_client(&state, &tokens).await {
-            let recovered = recovered.for_background_work();
-            page = bounded_artist_fetch("release-page", ARTIST_ALBUM_GROUP_TIMEOUT, || {
-                recovered.get_artist_albums(tidal_artist_id, 50, query.offset, Some(filter))
-            })
-            .await;
-        }
+    if page.as_ref().err().is_some_and(error_looks_like_auth)
+        && let Ok(recovered) = recover_tidal_client(&state, &tokens).await
+    {
+        let recovered = recovered.for_background_work();
+        page = bounded_artist_fetch("release-page", ARTIST_ALBUM_GROUP_TIMEOUT, || {
+            recovered.get_artist_albums(tidal_artist_id, 50, query.offset, Some(filter))
+        })
+        .await;
     }
     match page {
         Ok(page) => {
@@ -1989,7 +1989,7 @@ pub(super) async fn get_artist_spotify_stats(
                 .into_iter()
                 .filter(|t| t.isrc.as_deref().is_some_and(|s| !s.trim().is_empty()))
                 .collect::<Vec<_>>();
-            sorted.sort_by(|a, b| b.play_count.cmp(&a.play_count));
+            sorted.sort_by_key(|a| std::cmp::Reverse(a.play_count));
             sorted.truncate(10);
 
             let artist_name = sorted

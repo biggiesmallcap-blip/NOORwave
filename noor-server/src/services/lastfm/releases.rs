@@ -102,7 +102,7 @@ pub async fn fetch_new_releases(http: &reqwest::Client, api_key: &str) -> Result
         .collect();
 
     // Fetch top albums per artist with bounded concurrency.
-    let album_lists: Vec<Vec<AlbumCandidate>> = stream::iter(scan_artists.into_iter())
+    let album_lists: Vec<Vec<AlbumCandidate>> = stream::iter(scan_artists)
         .map(|(artist, rank)| {
             let http = http.clone();
             let api_key = api_key.to_string();
@@ -139,7 +139,7 @@ pub async fn fetch_new_releases(http: &reqwest::Client, api_key: &str) -> Result
     candidates.truncate(CANDIDATES_FOR_GETINFO);
 
     // Enrich each candidate with album.getInfo (image + release date).
-    let enriched: Vec<EnrichedAlbum> = stream::iter(candidates.into_iter())
+    let enriched: Vec<EnrichedAlbum> = stream::iter(candidates)
         .map(|cand| {
             let http = http.clone();
             let api_key = api_key.to_string();

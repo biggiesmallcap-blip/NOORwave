@@ -259,7 +259,7 @@ async fn refresh_prepared_dj_transition(
     };
     let runtime = handle.clone();
     let transition = update.transition.clone();
-    let gapless = update.gapless.clone();
+    let gapless = update.gapless;
     let accepted = tokio::task::spawn_blocking(move || {
         runtime.update_prepared_transition(transition, gapless)
     })
@@ -572,7 +572,6 @@ pub struct DiscoveryExternalResultRequest {
     album_title: Option<String>,
     artwork_url: Option<String>,
     duration_ms: Option<i64>,
-    audio_quality: Option<String>,
     normalized_genres: Option<Vec<String>>,
 }
 
@@ -1704,7 +1703,7 @@ async fn get_radio_tracks(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let creativity = payload.creativity.unwrap_or(0.3).clamp(0.0, 1.0);
     let context_window = payload.context_window.unwrap_or(5).max(0) as usize;
-    let limit = payload.limit.unwrap_or(20).max(1).min(50);
+    let limit = payload.limit.unwrap_or(20).clamp(1, 50);
     let exclude_ids = payload.exclude_ids.unwrap_or_default();
 
     let state = state.read().await;
@@ -3389,7 +3388,7 @@ async fn get_discovery_artists(
     State(state): State<SharedState>,
     Query(query): Query<DiscoveryArtistsQuery>,
 ) -> Result<Json<Value>, StatusCode> {
-    let limit = query.limit.unwrap_or(50).max(1).min(200);
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
 
     let artists = state
         .read()
@@ -5999,10 +5998,8 @@ async fn resolve_pending_current_queue_item(
         s.db.clone()
     };
 
-    let (queue_item_id, pending_artist, pending_title, tidal_id_hint) = db
-        .with_conn(|conn| pending::current_pending(conn))
-        .ok()
-        .flatten()?;
+    let (queue_item_id, pending_artist, pending_title, tidal_id_hint) =
+        db.with_conn(pending::current_pending).ok().flatten()?;
 
     if !playback_generation_is_current(state, expected_generation).await {
         return None;
@@ -7366,22 +7363,21 @@ fn current_queue_position(conn: &rusqlite::Connection) -> anyhow::Result<Option<
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
 
-    if let Some(queue_item_id) = current_queue_item_id {
-        if queue_item_matches_current_track(conn, queue_item_id, current_track_id)?
-            && let Some(position) = queue_item_position(conn, queue_item_id)?
-        {
-            return Ok(Some(position));
-        }
+    if let Some(queue_item_id) = current_queue_item_id
+        && queue_item_matches_current_track(conn, queue_item_id, current_track_id)?
+        && let Some(position) = queue_item_position(conn, queue_item_id)?
+    {
+        return Ok(Some(position));
     }
 
-    if let Some(track_id) = current_track_id {
-        if let Some((queue_item_id, position)) = first_queue_item_for_track(conn, track_id)? {
-            conn.execute(
-                "UPDATE playback_state SET current_queue_item_id = ?1 WHERE id = 1",
-                params![queue_item_id],
-            )?;
-            return Ok(Some(position));
-        }
+    if let Some(track_id) = current_track_id
+        && let Some((queue_item_id, position)) = first_queue_item_for_track(conn, track_id)?
+    {
+        conn.execute(
+            "UPDATE playback_state SET current_queue_item_id = ?1 WHERE id = 1",
+            params![queue_item_id],
+        )?;
+        return Ok(Some(position));
     }
 
     if current_queue_item_id.is_some() {

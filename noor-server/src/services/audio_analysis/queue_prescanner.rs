@@ -134,9 +134,7 @@ fn cached_prescan_failure_class(track_id: i64) -> Option<PrescanFailureClass> {
     let Ok(mut guard) = PRESCAN_NEGATIVE_CACHE.lock() else {
         return None;
     };
-    let Some(entry) = guard.get(&track_id).copied() else {
-        return None;
-    };
+    let entry = guard.get(&track_id).copied()?;
     if entry.expires_at <= StdInstant::now() {
         guard.remove(&track_id);
         return None;
@@ -148,9 +146,7 @@ pub fn prescan_status_for_track(track_id: i64) -> Option<PrescanStatusSnapshot> 
     let Ok(mut guard) = PRESCAN_NEGATIVE_CACHE.lock() else {
         return None;
     };
-    let Some(entry) = guard.get(&track_id).copied() else {
-        return None;
-    };
+    let entry = guard.get(&track_id).copied()?;
     if entry.expires_at <= StdInstant::now() {
         guard.remove(&track_id);
         return None;
@@ -445,7 +441,7 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
     }
 
     let tidal_id: Option<i64> = db
-        .with_conn(|conn| Ok(queries::get_track_tidal_ids(conn, &[track_id])?))
+        .with_conn(|conn| queries::get_track_tidal_ids(conn, &[track_id]))
         .ok()
         .and_then(|pairs| pairs.into_iter().next().map(|(_, tid)| tid));
     let Some(tidal_id) = tidal_id else {
@@ -824,8 +820,8 @@ pub fn spawn(state: SharedState) {
                     }
                 }
                 _ = tokio::time::sleep(wait) => {
-                    if let Some(d) = deadline {
-                        if Instant::now() >= d {
+                    if let Some(d) = deadline
+                        && Instant::now() >= d {
                             // Enforce inter-batch cooldown so rapid bursts of
                             // QueueUpdated (Last.fm radio promotions) don't fire
                             // back-to-back batches that hammer TIDAL.
@@ -840,7 +836,6 @@ pub fn spawn(state: SharedState) {
                             run_batch(&state, &mut event_rx).await;
                             last_batch_end = Some(Instant::now());
                         }
-                    }
                 }
             }
         }

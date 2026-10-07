@@ -1598,10 +1598,12 @@ impl TidalClient {
             .any(|value| value.contains("video mix") || value.contains("music video"))
     }
 
-    /// TIDAL mix `images` ships in two shapes depending on the page version:
-    ///   1. dict keyed by size: `{"SQUARE": {"url": "..."}, "MEDIUM": {...}}`
-    ///   2. dict keyed by image kind: `{"640": {"imageId": "..."}, ...}`
-    ///   3. flat array: `[{"url": "..."}]`
+    /// TIDAL mix `images` ships in three shapes depending on the page version:
+    ///
+    /// 1. dict keyed by size: `{"SQUARE": {"url": "..."}, "MEDIUM": {...}}`
+    /// 2. dict keyed by image kind: `{"640": {"imageId": "..."}, ...}`
+    /// 3. flat array: `[{"url": "..."}]`
+    ///
     /// We accept all three. For shape 2 we feed `imageId` through the standard
     /// `resources.tidal.com` artwork builder.
     fn pick_mix_image(images: Option<&serde_json::Value>) -> Option<String> {

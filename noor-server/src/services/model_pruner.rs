@@ -132,7 +132,7 @@ mod tests {
     fn db_with_models() -> Database {
         let db = Database::open_in_memory().expect("db opened");
         db.run_migrations().expect("migrations");
-        db.with_conn(|conn| schema::run_migrations(conn))
+        db.with_conn(schema::run_migrations)
             .expect("schema migrations");
         db.with_conn(|conn| {
             conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;

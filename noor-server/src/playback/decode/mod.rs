@@ -998,14 +998,15 @@ pub(crate) fn decode_and_buffer_job(
             // Flush the passive analysis tap for tracks that ended before the
             // 45s capture threshold, so short tracks still get analysed (from
             // the start, since there is not enough audio to skip an intro).
-            if !analysis_sent && !analysis_buf.is_empty() {
-                if let Some(tx) = &config.analysis_tx {
-                    let _ = tx.send((
-                        shared.track_id,
-                        std::mem::take(&mut analysis_buf),
-                        decoded_sample_rate,
-                    ));
-                }
+            if !analysis_sent
+                && !analysis_buf.is_empty()
+                && let Some(tx) = &config.analysis_tx
+            {
+                let _ = tx.send((
+                    shared.track_id,
+                    std::mem::take(&mut analysis_buf),
+                    decoded_sample_rate,
+                ));
             }
 
             // Apply fade-in / fade-out ramps and mark the stream complete.

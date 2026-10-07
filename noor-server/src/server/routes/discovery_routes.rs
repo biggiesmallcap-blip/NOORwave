@@ -269,7 +269,7 @@ pub(super) async fn discover_new_music(
         }
     }
     feed.results
-        .sort_by(|left, right| right.score.cmp(&left.score));
+        .sort_by_key(|left| std::cmp::Reverse(left.score));
 
     Ok(Json(json!({ "feed": feed })))
 }
@@ -413,7 +413,7 @@ pub(super) async fn discover_connected_music(
         }
     }
     feed.results
-        .sort_by(|left, right| right.score.cmp(&left.score));
+        .sort_by_key(|left| std::cmp::Reverse(left.score));
 
     Ok(Json(json!({ "feed": feed })))
 }

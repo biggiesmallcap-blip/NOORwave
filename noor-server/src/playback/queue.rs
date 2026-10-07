@@ -54,7 +54,6 @@ pub struct ShuffleDebug {
 
 #[derive(Debug, Clone)]
 pub struct ShuffleApplyResult {
-    pub queue: Vec<QueueItem>,
     pub debug: Option<ShuffleDebug>,
 }
 
@@ -500,10 +499,7 @@ pub fn apply_shuffle_with_seed(
     });
 
     if queue_items.len() <= 1 || mode == ShuffleMode::Off || candidate_count <= 1 {
-        return Ok(ShuffleApplyResult {
-            queue: queue_items,
-            debug,
-        });
+        return Ok(ShuffleApplyResult { debug });
     }
 
     let locked_qids: Vec<i64> = queue_items[..split_index].iter().map(|i| i.id).collect();
@@ -521,10 +517,7 @@ pub fn apply_shuffle_with_seed(
     }
     tx.commit()?;
 
-    Ok(ShuffleApplyResult {
-        queue: load_queue(conn)?,
-        debug,
-    })
+    Ok(ShuffleApplyResult { debug })
 }
 
 pub(crate) fn reorder_tracks_with_seed(
@@ -1596,13 +1589,20 @@ mod tests {
 
         let first =
             apply_shuffle_with_seed(&conn, ShuffleMode::True, None, 7_654_321, "test").unwrap();
-        let first_ids: Vec<i64> = first.queue.iter().map(|item| item.track.id).collect();
+        let first_ids: Vec<i64> = load_queue(&conn)
+            .unwrap()
+            .iter()
+            .map(|item| item.track.id)
+            .collect();
         let first_debug = first.debug.expect("shuffle debug");
 
         replace_queue(&conn, &tracks, "test").unwrap();
-        let second =
-            apply_shuffle_with_seed(&conn, ShuffleMode::True, None, 7_654_321, "test").unwrap();
-        let second_ids: Vec<i64> = second.queue.iter().map(|item| item.track.id).collect();
+        apply_shuffle_with_seed(&conn, ShuffleMode::True, None, 7_654_321, "test").unwrap();
+        let second_ids: Vec<i64> = load_queue(&conn)
+            .unwrap()
+            .iter()
+            .map(|item| item.track.id)
+            .collect();
 
         assert_eq!(first_ids, second_ids);
         assert_eq!(first_debug.mode, "true");
@@ -1640,7 +1640,7 @@ mod tests {
         let current_qid = before[0].id;
         let before_pending_qids = before[1..].iter().map(|item| item.id).collect::<Vec<_>>();
 
-        let shuffled = apply_shuffle_with_seed(
+        apply_shuffle_with_seed(
             &conn,
             ShuffleMode::True,
             Some(current_qid),
@@ -1648,12 +1648,12 @@ mod tests {
             "test",
         )
         .unwrap();
-        let after_pending_qids = shuffled.queue[1..]
+        let after_pending_qids = load_queue(&conn).unwrap()[1..]
             .iter()
             .map(|item| item.id)
             .collect::<Vec<_>>();
 
-        assert_eq!(shuffled.queue[0].id, current_qid);
+        assert_eq!(load_queue(&conn).unwrap()[0].id, current_qid);
         assert_ne!(after_pending_qids, before_pending_qids);
         let mut sorted_before = before_pending_qids;
         let mut sorted_after = after_pending_qids;
@@ -1706,9 +1706,12 @@ mod tests {
             .map(|item| item.id)
             .collect();
 
-        let shuffled =
-            apply_shuffle_with_seed(&conn, ShuffleMode::True, None, 7_654_321, "test").unwrap();
-        let after_qids: Vec<i64> = shuffled.queue.iter().map(|item| item.id).collect();
+        apply_shuffle_with_seed(&conn, ShuffleMode::True, None, 7_654_321, "test").unwrap();
+        let after_qids: Vec<i64> = load_queue(&conn)
+            .unwrap()
+            .iter()
+            .map(|item| item.id)
+            .collect();
 
         assert_ne!(after_qids, before_qids);
         let mut sorted_before = before_qids.clone();

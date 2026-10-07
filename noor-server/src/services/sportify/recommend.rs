@@ -28,9 +28,9 @@ use crate::db::Database;
 
 use super::cache::{self as sp_cache, SportifyCacheConfig};
 use super::client::{SportifyClient, SportifySearchKind};
-use super::models::{
-    SportifyAlbum, SportifyArtist, SportifyPlaylist, SportifySearchResults, SportifyTrack,
-};
+#[cfg(test)]
+use super::models::SportifyPlaylist;
+use super::models::{SportifyAlbum, SportifyArtist, SportifySearchResults, SportifyTrack};
 use super::stats;
 
 /// Cap on per-row item counts so a `/related` response stays small enough to
@@ -129,6 +129,7 @@ pub async fn cached_artist(
     Ok(fetched)
 }
 
+#[cfg(test)]
 pub async fn cached_playlist(
     client: &SportifyClient,
     db: &Database,
@@ -181,10 +182,10 @@ pub async fn cached_search(
     limit: u32,
     offset: u32,
 ) -> Result<SportifySearchResults> {
-    if let Some(s) = db.with_conn(|conn| sp_cache::get_search(conn, cfg, q, kind, limit, offset))? {
-        if !(matches!(kind, SportifySearchKind::Playlist) && s.playlists.is_empty()) {
-            return Ok(s);
-        }
+    if let Some(s) = db.with_conn(|conn| sp_cache::get_search(conn, cfg, q, kind, limit, offset))?
+        && !(matches!(kind, SportifySearchKind::Playlist) && s.playlists.is_empty())
+    {
+        return Ok(s);
     }
     let fetched = client.search(q, kind, limit, offset).await?;
     db.with_conn(|conn| sp_cache::put_search(conn, q, kind, limit, offset, &fetched))?;

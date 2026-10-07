@@ -388,7 +388,7 @@ fn build_discovery_blend_space(
     // candidates that have no library genre rows.
     let mut ext_candidate_by_identity: HashMap<String, i64> = HashMap::new();
     if let Some(model) = model {
-        let per_seed_limit = limit.max(1).min(200);
+        let per_seed_limit = limit.clamp(1, 200);
         let seed_id_set = library_seed_ids.iter().copied().collect::<HashSet<_>>();
         let seed_identity_set = seeds
             .iter()
@@ -804,7 +804,7 @@ pub(super) async fn get_discovery_blend_space(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let mut seeds =
         blend::validate_and_normalize_seeds(&payload.seeds).map_err(blend_seed_error_response)?;
-    let limit = payload.limit.unwrap_or(60).max(1).min(200);
+    let limit = payload.limit.unwrap_or(60).clamp(1, 200);
     let coherence = payload.coherence.unwrap_or(0.5).clamp(0.0, 1.0);
     let filters = payload.filters.unwrap_or_default();
     let session_id = payload.session_id;
@@ -877,7 +877,7 @@ pub(super) async fn add_discovery_blend_to_queue(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let mut seeds =
         blend::validate_and_normalize_seeds(&payload.seeds).map_err(blend_seed_error_response)?;
-    let limit = payload.limit.unwrap_or(60).max(1).min(200);
+    let limit = payload.limit.unwrap_or(60).clamp(1, 200);
     let coherence = payload.coherence.unwrap_or(0.5).clamp(0.0, 1.0);
     let filters = payload.filters.unwrap_or_default();
     let session_id = payload.session_id;
@@ -947,7 +947,7 @@ pub(super) async fn make_discovery_blend_radio(
     State(state): State<SharedState>,
     Json(mut payload): Json<DiscoveryBlendRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    payload.limit = Some(payload.limit.unwrap_or(200).max(120).min(200));
+    payload.limit = Some(payload.limit.unwrap_or(200).clamp(120, 200));
     play_discovery_blend_inner(state, payload, "blend_radio").await
 }
 
@@ -958,7 +958,7 @@ async fn play_discovery_blend_inner(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let mut seeds =
         blend::validate_and_normalize_seeds(&payload.seeds).map_err(blend_seed_error_response)?;
-    let limit = payload.limit.unwrap_or(60).max(1).min(200);
+    let limit = payload.limit.unwrap_or(60).clamp(1, 200);
     let coherence = payload.coherence.unwrap_or(0.5).clamp(0.0, 1.0);
     let filters = payload.filters.unwrap_or_default();
     let session_id = payload.session_id;
@@ -1275,7 +1275,7 @@ pub(super) async fn get_discovery_space(
     Json(payload): Json<DiscoverySpaceRequest>,
 ) -> Result<Json<Value>, StatusCode> {
     let mode = payload.mode.unwrap_or_else(|| "radio".to_string());
-    let limit = payload.limit.unwrap_or(60).max(1).min(200);
+    let limit = payload.limit.unwrap_or(60).clamp(1, 200);
     let seed_id = payload.seed_track_id.unwrap_or(0);
     let prompt = payload.prompt.as_deref().unwrap_or("").trim().to_string();
     let coherence = payload.coherence.unwrap_or(0.5).clamp(0.0, 1.0);

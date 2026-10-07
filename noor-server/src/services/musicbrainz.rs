@@ -230,7 +230,7 @@ fn extract_tags(data: MbRecordingSearch) -> Vec<(String, Option<u32>)> {
 
     let mut tags: Vec<(i32, String)> = rec.tags.into_iter().map(|t| (t.count, t.name)).collect();
     // Sort highest count first, deduplicate, cap at 5.
-    tags.sort_by(|a, b| b.0.cmp(&a.0));
+    tags.sort_by_key(|a| std::cmp::Reverse(a.0));
     let mut seen = std::collections::HashSet::new();
     tags.into_iter()
         .filter_map(|(count, name)| {
@@ -776,6 +776,110 @@ pub fn import_portable_snapshot(conn: &Connection) -> Result<PortableSnapshotImp
     })
 }
 
+// ── Main enrichment runner ────────────────────────────────────────────────────
+
+/// Run the full enrichment job. Calls `on_progress` every `report_every` tracks.
+/// Respects MusicBrainz 1 req/sec rate limit.
+pub async fn run_enrichment(
+    state: crate::SharedState,
+    client: reqwest::Client,
+    on_progress: impl Fn(EnrichmentProgress) + Send + 'static,
+    report_every: usize,
+) -> Result<EnrichmentProgress> {
+    let total = {
+        let g = state.read().await;
+        g.db.with_conn(count_unenriched_tracks)?
+    };
+    info!("MusicBrainz enrichment: {total} tracks to process");
+
+    let mut processed = 0;
+    let mut genres_assigned = 0;
+    let mut last_request = Instant::now()
+        .checked_sub(MIN_REQUEST_INTERVAL)
+        .unwrap_or(Instant::now());
+    let batch_size = 200;
+
+    loop {
+        // Re-query from offset 0 each iteration — rows move out of the set as they're marked checked.
+        let batch = {
+            let g = state.read().await;
+            g.db.with_conn(|conn| load_unenriched_tracks(conn, batch_size, 0))?
+        };
+        if batch.is_empty() {
+            break;
+        }
+
+        for track in batch {
+            // Rate limit.
+            let elapsed = last_request.elapsed();
+            if elapsed < MIN_REQUEST_INTERVAL {
+                tokio::time::sleep(MIN_REQUEST_INTERVAL - elapsed).await;
+            }
+            last_request = Instant::now();
+
+            let genres = if let Some(isrc) = &track.isrc {
+                match fetch_genres_by_isrc(&client, isrc).await {
+                    Ok(g) => g,
+                    Err(err) => {
+                        warn!(
+                            "MusicBrainz ISRC lookup failed for track {}: {err:#}",
+                            track.id
+                        );
+                        vec![]
+                    }
+                }
+            } else if let Some(artist) = &track.artist_name {
+                match fetch_genres_by_title(&client, artist, &track.title).await {
+                    Ok(g) => g,
+                    Err(err) => {
+                        warn!(
+                            "MusicBrainz title lookup failed for track {}: {err:#}",
+                            track.id
+                        );
+                        vec![]
+                    }
+                }
+            } else {
+                // No ISRC and no artist name — mark checked with no genres.
+                let g = state.read().await;
+                if let Err(err) = g.db.with_conn(|conn| mark_checked(conn, track.id)) {
+                    warn!("Failed to mark track {} as MB checked: {err:#}", track.id);
+                }
+                processed += 1;
+                continue;
+            };
+
+            let inserted = {
+                let g = state.read().await;
+                // write_genres calls mark_checked internally, so it's always recorded.
+                g.db.with_conn(|conn| write_genres(conn, track.id, &genres))?
+            };
+            genres_assigned += inserted;
+            processed += 1;
+
+            if processed % report_every == 0 {
+                on_progress(EnrichmentProgress {
+                    processed,
+                    total,
+                    genres_assigned,
+                });
+            }
+        }
+    }
+
+    let final_progress = EnrichmentProgress {
+        processed,
+        total,
+        genres_assigned,
+    };
+    on_progress(final_progress.clone());
+    info!(
+        "MusicBrainz enrichment complete: {} tracks processed, {} genre assignments",
+        processed, genres_assigned
+    );
+    Ok(final_progress)
+}
+
 #[cfg(test)]
 mod portable_snapshot_tests {
     use super::*;
@@ -962,108 +1066,4 @@ mod portable_snapshot_tests {
         clear_snapshot_db_path();
         fs::remove_dir_all(db_path.parent().unwrap()).unwrap();
     }
-}
-
-// ── Main enrichment runner ────────────────────────────────────────────────────
-
-/// Run the full enrichment job. Calls `on_progress` every `report_every` tracks.
-/// Respects MusicBrainz 1 req/sec rate limit.
-pub async fn run_enrichment(
-    state: crate::SharedState,
-    client: reqwest::Client,
-    on_progress: impl Fn(EnrichmentProgress) + Send + 'static,
-    report_every: usize,
-) -> Result<EnrichmentProgress> {
-    let total = {
-        let g = state.read().await;
-        g.db.with_conn(count_unenriched_tracks)?
-    };
-    info!("MusicBrainz enrichment: {total} tracks to process");
-
-    let mut processed = 0;
-    let mut genres_assigned = 0;
-    let mut last_request = Instant::now()
-        .checked_sub(MIN_REQUEST_INTERVAL)
-        .unwrap_or(Instant::now());
-    let batch_size = 200;
-
-    loop {
-        // Re-query from offset 0 each iteration — rows move out of the set as they're marked checked.
-        let batch = {
-            let g = state.read().await;
-            g.db.with_conn(|conn| load_unenriched_tracks(conn, batch_size, 0))?
-        };
-        if batch.is_empty() {
-            break;
-        }
-
-        for track in batch {
-            // Rate limit.
-            let elapsed = last_request.elapsed();
-            if elapsed < MIN_REQUEST_INTERVAL {
-                tokio::time::sleep(MIN_REQUEST_INTERVAL - elapsed).await;
-            }
-            last_request = Instant::now();
-
-            let genres = if let Some(isrc) = &track.isrc {
-                match fetch_genres_by_isrc(&client, isrc).await {
-                    Ok(g) => g,
-                    Err(err) => {
-                        warn!(
-                            "MusicBrainz ISRC lookup failed for track {}: {err:#}",
-                            track.id
-                        );
-                        vec![]
-                    }
-                }
-            } else if let Some(artist) = &track.artist_name {
-                match fetch_genres_by_title(&client, artist, &track.title).await {
-                    Ok(g) => g,
-                    Err(err) => {
-                        warn!(
-                            "MusicBrainz title lookup failed for track {}: {err:#}",
-                            track.id
-                        );
-                        vec![]
-                    }
-                }
-            } else {
-                // No ISRC and no artist name — mark checked with no genres.
-                let g = state.read().await;
-                if let Err(err) = g.db.with_conn(|conn| mark_checked(conn, track.id)) {
-                    warn!("Failed to mark track {} as MB checked: {err:#}", track.id);
-                }
-                processed += 1;
-                continue;
-            };
-
-            let inserted = {
-                let g = state.read().await;
-                // write_genres calls mark_checked internally, so it's always recorded.
-                g.db.with_conn(|conn| write_genres(conn, track.id, &genres))?
-            };
-            genres_assigned += inserted;
-            processed += 1;
-
-            if processed % report_every == 0 {
-                on_progress(EnrichmentProgress {
-                    processed,
-                    total,
-                    genres_assigned,
-                });
-            }
-        }
-    }
-
-    let final_progress = EnrichmentProgress {
-        processed,
-        total,
-        genres_assigned,
-    };
-    on_progress(final_progress.clone());
-    info!(
-        "MusicBrainz enrichment complete: {} tracks processed, {} genre assignments",
-        processed, genres_assigned
-    );
-    Ok(final_progress)
 }

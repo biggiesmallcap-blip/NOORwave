@@ -314,9 +314,7 @@ fn origin_from_url(raw: &str) -> Option<String> {
     if scheme != "http" && scheme != "https" {
         return None;
     }
-    let authority_end = rest
-        .find(|ch| matches!(ch, '/' | '?' | '#'))
-        .unwrap_or(rest.len());
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     if authority_end == 0 {
         return None;
     }
@@ -370,6 +368,9 @@ async fn onboarding_complete_handler(
     Ok(Json(json!({ "complete": true })))
 }
 
+// axum middleware: the rejection is itself a `Response`, so the large Err is
+// inherent to the signature.
+#[allow(clippy::result_large_err)]
 async fn require_token(
     State(state): State<SharedState>,
     mut req: Request,

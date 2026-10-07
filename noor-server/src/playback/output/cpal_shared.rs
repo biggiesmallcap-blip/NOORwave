@@ -120,25 +120,6 @@ fn build_output_stream(
     Ok(stream)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn emit_cpal_stream_error_warns_and_emits_runtime_error_event() {
-        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
-
-        emit_cpal_stream_error(&event_tx, cpal::StreamError::DeviceNotAvailable);
-
-        match event_rx.try_recv().expect("error event should be emitted") {
-            PlaybackRuntimeEvent::Error { message } => {
-                assert!(message.contains("Playback output stream error"));
-            }
-            other => panic!("expected error event, got {other:?}"),
-        }
-    }
-}
-
 fn start_cpal_stream(stream: &Stream) -> Result<()> {
     stream.play().context("failed to start cpal stream")
 }
@@ -206,6 +187,25 @@ pub(crate) fn build_started_output_stream_with_rate_fallback(
                 )
             })?;
             Ok((stream, fallback_config.sample_rate))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn emit_cpal_stream_error_warns_and_emits_runtime_error_event() {
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+
+        emit_cpal_stream_error(&event_tx, cpal::StreamError::DeviceNotAvailable);
+
+        match event_rx.try_recv().expect("error event should be emitted") {
+            PlaybackRuntimeEvent::Error { message } => {
+                assert!(message.contains("Playback output stream error"));
+            }
+            other => panic!("expected error event, got {other:?}"),
         }
     }
 }
