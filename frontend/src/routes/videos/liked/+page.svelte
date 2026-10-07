@@ -316,7 +316,6 @@
 
 <div class="page">
 	<header class="search-header">
-		<VideoNavigation current="liked" />
 		<div class="search-tools">
 			<SearchField
 				bind:value={query}
@@ -337,6 +336,7 @@
 				</button>
 			</div>
 		</div>
+		<VideoNavigation current="liked" />
 
 		<!-- Narrow, order, play. Genre and year are selects rather than pill
 		     rails because they are unbounded - 35 genres and 40 years as chips

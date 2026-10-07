@@ -133,10 +133,10 @@ describe('Video modules never fall through to the audio detail page', () => {
 });
 
 describe('Browse while playing', () => {
-	test('navigation stays above search and keeps destinations available during playback', () => {
+	test('navigation pills sit under search, as on /search and /library, and stay available during playback', () => {
 		const header = source.slice(source.indexOf('<header class="search-header">'), source.indexOf('</header>'));
 		expect(header).toContain('<VideoNavigation current="videos" canBrowse={hasBrowseContent} />');
-		expect(header.indexOf('<VideoNavigation')).toBeLessThan(header.indexOf('<SearchField'));
+		expect(header.indexOf('<SearchField')).toBeLessThan(header.indexOf('<VideoNavigation'));
 		expect(navigation).toContain("{ id: 'editorial', href: '/tidal/videos', label: 'TIDAL editorial' }");
 		// The hero keeps metadata only.
 		const hero = source.slice(source.indexOf('{#if showVideoHero}'), source.indexOf('<!-- Legacy landing chips'));

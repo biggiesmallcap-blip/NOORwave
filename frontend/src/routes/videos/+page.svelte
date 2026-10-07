@@ -803,7 +803,6 @@
 
 <div class="videos-page">
 	<header class="search-header">
-		<VideoNavigation current="videos" canBrowse={hasBrowseContent} />
 		<div class="search-tools">
 			<SearchField
 				bind:value={query}
@@ -814,6 +813,7 @@
 				oninput={onInput}
 			/>
 		</div>
+		<VideoNavigation current="videos" canBrowse={hasBrowseContent} />
 		{#if searchFocused && recent.length > 0}
 			<div class="recent-inline">
 				<span class="eyebrow">Recent</span>
