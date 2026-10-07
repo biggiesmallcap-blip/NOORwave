@@ -10,6 +10,7 @@
 	import { api, type TidalSearchVideo, type VideoStationCard, type VideoStationsResponse } from '$lib/api/client';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
+	import GuidePlaceholder from '$lib/components/video/GuidePlaceholder.svelte';
 	import StationRow from '$lib/components/video/StationRow.svelte';
 	import StationSpotlight from '$lib/components/video/StationSpotlight.svelte';
 	import { SMALL_CATALOG, groupStations, numberStations, sceneFamilyLabel, stationMeta } from '$lib/components/video/stations';
@@ -46,6 +47,11 @@
 		}
 	}
 
+	/** Entrance slot: channel order, so the guide cascades top to bottom. */
+	function riseFor(card: VideoStationCard): number {
+		return Number(numbers.get(card.id) ?? 1) - 1;
+	}
+
 	function isOnAir(card: VideoStationCard): boolean {
 		return $videoSession.continuous && $videoStationOnAir === card.id;
 	}
@@ -78,13 +84,7 @@
 	{#if error}
 		<EmptyState title="Could not load stations" copy={error} />
 	{:else if !data}
-		<!-- First visit: row-shaped placeholders hold the page's shape, so
-		     the lineup lands without a jump. -->
-		<div class="placeholder-rows" aria-busy="true" aria-label="Loading stations">
-			{#each Array(6) as _, index (index)}
-				<div class="placeholder-row"><span></span><span></span></div>
-			{/each}
-		</div>
+		<GuidePlaceholder />
 	{:else if empty && data.building}
 		<div class="skeleton"><Skeleton rows={3} label="Building your stations" /></div>
 	{:else if empty && data.catalog_videos < SMALL_CATALOG}
@@ -105,22 +105,24 @@
 				number={numbers.get(grouped.spotlight.id) ?? '01'}
 				busy={starting === grouped.spotlight.id}
 				onAir={isOnAir(grouped.spotlight)}
+				rise={0}
 				onplay={(card, startWith) => void start(card, startWith)}
 			/>
 		{/if}
 
 		{#each grouped.rows as row (row.id)}
 			<section class="group" aria-label={row.title}>
-				<h3 class="group-label">{row.title}</h3>
+				<h3 class="group-label rise-in-shelf" style={`--rise-index: ${riseFor(row.stations[0])}`}>{row.title}</h3>
 				{#each row.stations as station, index (station.id)}
 					{@const family = sceneFamilyLabel(row.stations, index)}
-					{#if family}<h4 class="family-label">{family}</h4>{/if}
+					{#if family}<h4 class="family-label rise-in-shelf" style={`--rise-index: ${riseFor(station)}`}>{family}</h4>{/if}
 					<StationRow
 						card={station}
 						number={numbers.get(station.id) ?? ''}
 						meta={stationMeta(station, row.stations)}
 						busy={starting === station.id}
 						onAir={isOnAir(station)}
+						rise={riseFor(station)}
 						onplay={(card, startWith) => void start(card, startWith)}
 					/>
 				{/each}
@@ -141,33 +143,6 @@
 		gap: 18px;
 	}
 	.skeleton { padding: var(--space-4) 0; }
-
-	.placeholder-rows {
-		display: grid;
-		gap: 2px;
-	}
-	.placeholder-row {
-		display: grid;
-		grid-template-columns: 220px minmax(0, 1fr);
-		gap: 18px;
-		padding: 10px 12px;
-	}
-	.placeholder-row span {
-		height: 76px;
-		border-radius: 8px;
-		background: var(--bg-raised);
-		animation: placeholder-pulse 1.4s ease-in-out infinite;
-	}
-	.placeholder-row span:first-child {
-		height: 44px;
-		align-self: center;
-	}
-	@keyframes placeholder-pulse {
-		50% { opacity: 0.55; }
-	}
-	@media (max-width: 860px) {
-		.placeholder-row { grid-template-columns: minmax(0, 1fr); }
-	}
 
 	/* A group is a small label over its channel rows. */
 	.group {

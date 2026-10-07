@@ -1,8 +1,16 @@
+<script lang="ts" module>
+	import type { VideoDiscoverSet as ShelfSet } from '$lib/api/client';
+	// The last shelves, kept across visits so switching back to this tab
+	// renders at once and refreshes quietly instead of popping in.
+	let lastSets: ShelfSet[] | null = null;
+</script>
+
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { api, type TidalSearchVideo, type VideoDiscoverSet } from '$lib/api/client';
 	import GuideFeature from '$lib/components/video/GuideFeature.svelte';
+	import GuidePlaceholder from '$lib/components/video/GuidePlaceholder.svelte';
 	import GuideRow from '$lib/components/video/GuideRow.svelte';
 	import { buildBrowseMix } from '$lib/video/browse_mix';
 	import { playFromShelf, playVideoCollection } from '$lib/video/play_collection';
@@ -20,8 +28,8 @@
 	const BUILD_POLL_MS = 6000;
 	const BUILD_POLL_MAX = 20;
 
-	let discoverSets = $state<VideoDiscoverSet[]>([]);
-	let loadingBrowse = $state(true);
+	let discoverSets = $state<VideoDiscoverSet[]>(lastSets ?? []);
+	let loadingBrowse = $state(lastSets == null);
 	let browsePollTimer: ReturnType<typeof setTimeout> | null = null;
 	let browsePolls = 0;
 
@@ -39,6 +47,7 @@
 		try {
 			const discover = await api.getVideosDiscover();
 			discoverSets = discover.sets ?? [];
+			lastSets = discoverSets;
 			// Sets build one at a time server-side, so keep polling while more
 			// are on the way - the page fills in row by row.
 			if (discover.building && browsePolls < BUILD_POLL_MAX) {
@@ -108,7 +117,7 @@
 
 <div class="videos-page">
 	{#if dailySet}
-		<GuideFeature label={`Daily picks: ${dailySet.title}`} frames={frames(dailySet)} onpick={(video) => dailySet && playSetFrom(dailySet, video)}>
+		<GuideFeature label={`Daily picks: ${dailySet.title}`} frames={frames(dailySet)} rise={0} onpick={(video) => dailySet && playSetFrom(dailySet, video)}>
 			<span class="eyebrow">Daily picks</span>
 			<button type="button" class="feature-title" onclick={() => dailySet && playFromSet(dailySet, 0)}>{dailySet.title}</button>
 			{#if dailySet.blurb}<p class="feature-blurb">{dailySet.blurb}</p>{/if}
@@ -120,7 +129,7 @@
 			</div>
 		</GuideFeature>
 	{:else if loadingBrowse}
-		<p class="picks-loading">Assembling today's picks...</p>
+		<GuidePlaceholder />
 	{:else if canStartRadio}
 		<div class="radio-line">
 			<p>Video radio starts with your picks, then keeps finding related artists and genres.</p>
@@ -130,14 +139,15 @@
 
 	{#if shelfSets.length > 0}
 		<section class="group" aria-label="From your library">
-			<h3 class="group-label">From your library</h3>
-			{#each shelfSets as set (set.slug)}
+			<h3 class="group-label rise-in-shelf" style="--rise-index: 1">From your library</h3>
+			{#each shelfSets as set, index (set.slug)}
 				<GuideRow
 					title={set.title}
 					titleHint={set.blurb}
 					count={`${set.items.length} ${set.items.length === 1 ? 'video' : 'videos'}`}
 					label={set.title}
 					frames={frames(set)}
+					rise={index + 1}
 					onplay={(startWith) => playSetFrom(set, startWith)}
 				/>
 			{/each}
@@ -227,13 +237,6 @@
 	.group-label {
 		margin: 6px 0 4px;
 		padding: 0 12px;
-	}
-
-	.picks-loading {
-		margin: 0;
-		padding: 4px 12px;
-		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
 	}
 
 	.landing-row {

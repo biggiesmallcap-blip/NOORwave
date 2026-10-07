@@ -9,11 +9,12 @@
 	// Channel 01: the day's artist. A short intro (portrait, why it is here,
 	// a line of bio) beside a mosaic of their videos. The profile loads after
 	// the guide and only adds to the row; without it the row is complete.
-	let { card, number, busy = false, onAir = false, onplay }: {
+	let { card, number, busy = false, onAir = false, rise = null, onplay }: {
 		card: VideoStationCard;
 		number: string;
 		busy?: boolean;
 		onAir?: boolean;
+		rise?: number | null;
 		onplay: (card: VideoStationCard, startWith?: TidalSearchVideo) => void;
 	} = $props();
 
@@ -48,7 +49,7 @@
 	}
 </script>
 
-<GuideFeature label={`Today's spotlight: ${card.title}`} {frames} {busy} {onAir} onpick={(video) => onplay(card, video)}>
+<GuideFeature label={`Today's spotlight: ${card.title}`} {frames} {busy} {onAir} {rise} onpick={(video) => onplay(card, video)}>
 	<div class="who">
 		<div class="portrait">
 			<ArtworkImage src={portrait ?? lead} size={160} fallbackText={card.title.slice(0, 1)} decorative={true} fadeIn={true} />

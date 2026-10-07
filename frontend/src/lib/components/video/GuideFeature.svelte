@@ -14,6 +14,7 @@
 		frames,
 		busy = false,
 		onAir = false,
+		rise = null,
 		onpick,
 		children,
 	}: {
@@ -21,6 +22,8 @@
 		frames: TidalSearchVideo[];
 		busy?: boolean;
 		onAir?: boolean;
+		/** Slot in the page's entrance cascade (`rise-in-shelf` in app.css). */
+		rise?: number | null;
 		onpick: (video: TidalSearchVideo) => void;
 		children: Snippet;
 	} = $props();
@@ -38,7 +41,14 @@
 	}
 </script>
 
-<article class="feature" class:on-air={onAir} aria-busy={busy} aria-label={label}>
+<article
+	class="feature"
+	class:on-air={onAir}
+	class:rise-in-shelf={rise != null}
+	style={rise != null ? `--rise-index: ${rise}` : undefined}
+	aria-busy={busy}
+	aria-label={label}
+>
 	<div class="wash" aria-hidden="true">
 		<ArtworkImage src={lead} size={320} fallbackText="" decorative={true} fadeIn={true} />
 	</div>

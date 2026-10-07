@@ -36,7 +36,7 @@ describe('Videos tab browse state', () => {
 
 	test('every other built set is a guide row; a frame plays the set from that video', () => {
 		expect(source).toContain("discoverSets.filter((s) => s.slug !== 'daily-picks'");
-		expect(source).toContain('{#each shelfSets as set (set.slug)}');
+		expect(source).toContain('{#each shelfSets as set, index (set.slug)}');
 		expect(source).toContain('<GuideRow');
 		expect(source).toContain('onplay={(startWith) => playSetFrom(set, startWith)}');
 		expect(source).not.toContain('VideoSetShelf');

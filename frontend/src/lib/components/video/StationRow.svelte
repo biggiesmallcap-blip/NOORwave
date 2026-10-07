@@ -5,12 +5,13 @@
 
 	// One channel in the station guide. A frame starts the station from that
 	// video.
-	let { card, number, meta, busy = false, onAir = false, onplay }: {
+	let { card, number, meta, busy = false, onAir = false, rise = null, onplay }: {
 		card: VideoStationCard;
 		number: string;
 		meta: string;
 		busy?: boolean;
 		onAir?: boolean;
+		rise?: number | null;
 		onplay: (card: VideoStationCard, startWith?: TidalSearchVideo) => void;
 	} = $props();
 
@@ -27,5 +28,6 @@
 	{onAir}
 	{busy}
 	frames={stationFrames(card)}
+	{rise}
 	onplay={(startWith) => onplay(card, startWith)}
 />

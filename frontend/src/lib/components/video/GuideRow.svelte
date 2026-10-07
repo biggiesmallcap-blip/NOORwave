@@ -19,6 +19,7 @@
 		onAir = false,
 		busy = false,
 		frames,
+		rise = null,
 		onplay,
 	}: {
 		title: string;
@@ -31,6 +32,8 @@
 		onAir?: boolean;
 		busy?: boolean;
 		frames: TidalSearchVideo[];
+		/** Slot in the page's entrance cascade (`rise-in-shelf` in app.css). */
+		rise?: number | null;
 		onplay: (startWith?: TidalSearchVideo) => void;
 	} = $props();
 
@@ -44,7 +47,15 @@
 	}
 </script>
 
-<article class="guide-row" class:on-air={onAir} class:numbered={number != null} aria-busy={busy} aria-label={label}>
+<article
+	class="guide-row"
+	class:on-air={onAir}
+	class:numbered={number != null}
+	class:rise-in-shelf={rise != null}
+	style={rise != null ? `--rise-index: ${rise}` : undefined}
+	aria-busy={busy}
+	aria-label={label}
+>
 	<div class="ident">
 		{#if number != null}<span class="number">{number}</span>{/if}
 		{#if onAir}<span class="on-air-tag">On air</span>{/if}
