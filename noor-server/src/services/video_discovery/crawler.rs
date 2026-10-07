@@ -32,6 +32,7 @@ const BOOT_DELAY: Duration = Duration::from_secs(120);
 const REPLAN_EVERY: Duration = Duration::from_secs(120);
 const PLAN_BATCH: usize = 50;
 const IDLE_NAP: Duration = Duration::from_secs(300);
+const LIKED_SCAN_WAIT: Duration = Duration::from_secs(30);
 const AUTH_PAUSE: Duration = Duration::from_secs(300);
 const STATION_JOB_LIMIT: usize = 6;
 const MAX_MIXES: usize = 4;
@@ -783,9 +784,13 @@ pub fn spawn(state: SharedState) {
 }
 
 async fn run(state: SharedState) {
-    let (db, audio) = {
+    let (db, audio, liked_scan) = {
         let s = state.read().await;
-        (s.db.clone(), s.audio_active.clone())
+        (
+            s.db.clone(),
+            s.audio_active.clone(),
+            s.library_video_scan_running.clone(),
+        )
     };
     bootstrap(&db).await;
     let mut governor = Governor::new();
@@ -811,6 +816,15 @@ async fn run(state: SharedState) {
         let budget = setting.budget();
         if let Some(urgent) = next_urgent() {
             run_urgent(&db, &src, &mut governor, mode, &budget, urgent).await;
+            continue;
+        }
+        if liked_scan.load(Ordering::SeqCst) {
+            // The liked wall comes first: on a fresh library the liked-video
+            // scanner owns the TIDAL session until its pass ends. Stations the
+            // listener starts (above) still run.
+            queue.clear();
+            planned_at = None;
+            nap(LIKED_SCAN_WAIT).await;
             continue;
         }
         if !setting.background() {

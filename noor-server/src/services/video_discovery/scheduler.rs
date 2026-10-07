@@ -247,6 +247,32 @@ fn rank(jobs: &mut [Job]) {
     });
 }
 
+/// Every `NEW_ARTIST_SLOT`th job goes to new-artist work (Normal class) when
+/// there is any, so keeping liked libraries complete never starves discovery.
+pub const NEW_ARTIST_SLOT: usize = 3;
+
+/// Merge ranked priority and new-artist work: two priority jobs, then one
+/// new-artist job, repeating; whichever list runs out leaves the rest to the
+/// other. Each list keeps its own ranking.
+fn interleave(jobs: Vec<Job>) -> Vec<Job> {
+    let (normal, priority): (Vec<Job>, Vec<Job>) = jobs
+        .into_iter()
+        .partition(|job| job.class == JobClass::Normal);
+    let mut normal = normal.into_iter().peekable();
+    let mut priority = priority.into_iter().peekable();
+    let mut out = Vec::new();
+    while normal.peek().is_some() || priority.peek().is_some() {
+        let slot_for_new = (out.len() + 1) % NEW_ARTIST_SLOT == 0;
+        let next = if slot_for_new {
+            normal.next().or_else(|| priority.next())
+        } else {
+            priority.next().or_else(|| normal.next())
+        };
+        out.extend(next);
+    }
+    out
+}
+
 pub fn plan(input: &PlanInput, limit: usize) -> Vec<Job> {
     let mut jobs = Vec::new();
     for (&artist_id, relevance) in input.relevance {
@@ -269,6 +295,7 @@ pub fn plan(input: &PlanInput, limit: usize) -> Vec<Job> {
         }
     }
     rank(&mut jobs);
+    let mut jobs = interleave(jobs);
     jobs.truncate(limit);
     jobs
 }
@@ -311,6 +338,7 @@ pub fn plan_with_mixes(input: &PlanInput, policy: MixPolicy, limit: usize) -> Ve
     rank(&mut mixes);
     jobs.extend(mixes.into_iter().take(allowed));
     rank(&mut jobs);
+    let mut jobs = interleave(jobs);
     jobs.truncate(limit);
     jobs
 }
@@ -605,5 +633,51 @@ mod tests {
         assert_eq!(count(MixPolicy::Off), 0);
         assert_eq!(count(MixPolicy::Trial { remaining: 1 }), 1);
         assert_eq!(count(MixPolicy::On), 2);
+    }
+
+    #[test]
+    fn a_third_of_the_plan_goes_to_new_artists() {
+        let mut states = HashMap::new();
+        let mut relevance = HashMap::new();
+        // Six liked artists due a weekly recheck, three unchecked neighbors.
+        for id in 1..=6 {
+            states.insert(id, checked(id, 8.0, true, false));
+            relevance.insert(id, rel(1.0, 0));
+        }
+        for id in 11..=13 {
+            relevance.insert(id, rel(0.3, 1));
+        }
+        let priority: HashSet<i64> = (1..=6).collect();
+        let calibration = Calibration::default();
+        let jobs = plan(
+            &PlanInput {
+                relevance: &relevance,
+                deep: &HashMap::new(),
+                states: &states,
+                roots: &HashSet::new(),
+                priority: &priority,
+                calibration: &calibration,
+            },
+            9,
+        );
+        let classes: Vec<JobClass> = jobs.iter().map(|j| j.class).collect();
+        use JobClass::{Normal as N, Priority as P};
+        assert_eq!(classes, vec![P, P, N, P, P, N, P, P, N]);
+        let only_priority = plan(
+            &PlanInput {
+                relevance: &states.keys().map(|id| (*id, rel(1.0, 0))).collect(),
+                deep: &HashMap::new(),
+                states: &states,
+                roots: &HashSet::new(),
+                priority: &priority,
+                calibration: &calibration,
+            },
+            9,
+        );
+        assert_eq!(
+            only_priority.len(),
+            6,
+            "an empty new-artist list never blocks liked work"
+        );
     }
 }

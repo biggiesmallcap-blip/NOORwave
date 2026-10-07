@@ -408,10 +408,13 @@ pub fn match_liked_for_tidal_artist(
 
 /// Keep every video returned by the artist lookup, including songs that were
 /// never liked. Radio can then start from this catalog without another call.
+/// TIDAL's total is recorded so the discovery crawler can page the rest of a
+/// liked artist's library (and match liked songs there) after this pass.
 fn cache_artist_catalog(
     conn: &Connection,
     target: &ScanTarget,
     videos: &[TidalArtistVideo],
+    total: Option<i64>,
 ) -> Result<()> {
     let anchor = video_sets::AnchorArtist {
         tidal_id: target.tidal_artist_id,
@@ -425,6 +428,13 @@ fn cache_artist_catalog(
         .collect();
     let tx = conn.unchecked_transaction()?;
     video_radio::cache_groups_without_prune(&tx, &[(anchor, candidates)])?;
+    crate::services::video_discovery::artist_state::record_page(
+        &tx,
+        target.tidal_artist_id,
+        0,
+        videos.len() as i64,
+        total,
+    )?;
     tx.commit()?;
     Ok(())
 }
@@ -697,11 +707,13 @@ pub async fn run_if_idle(state: SharedState) {
                         _ => continue,
                     };
 
+                let mut total = None;
                 let videos = match client
                     .get_artist_videos(target.tidal_artist_id, VIDEOS_PER_ARTIST, 0)
                     .await
                 {
                     Ok(page) => {
+                        total = page.total_number_of_items;
                         if page
                             .total_number_of_items
                             .is_some_and(|total| total > page.items.len() as i64)
@@ -728,7 +740,8 @@ pub async fn run_if_idle(state: SharedState) {
 
                 let matches = match_videos(&tracks, &videos);
                 hits += matches.len();
-                if let Err(e) = with_scan_conn!(|conn| cache_artist_catalog(conn, &target, &videos))
+                if let Err(e) =
+                    with_scan_conn!(|conn| cache_artist_catalog(conn, &target, &videos, total))
                 {
                     warn!(
                         target: "noor.library_videos",
@@ -902,7 +915,7 @@ mod tests {
         let conn = setup();
         let target = artists_needing_scan(&conn).unwrap().remove(0);
         let videos = vec![video(900, "Song"), video(901, "Other Song")];
-        cache_artist_catalog(&conn, &target, &videos).unwrap();
+        cache_artist_catalog(&conn, &target, &videos, Some(120)).unwrap();
         let liked = liked_tracks_for_artist(&conn, target.artist_id).unwrap();
         store_artist_scan(&conn, target.artist_id, &match_videos(&liked, &videos)).unwrap();
 
@@ -918,6 +931,14 @@ mod tests {
             .unwrap();
         assert_eq!(catalog_count, 2);
         assert_eq!(liked_count, 1);
+        let state = crate::services::video_discovery::artist_state::get(&conn, 5001)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (state.fetched_count, state.total_videos),
+            (2, Some(120)),
+            "the crawler can page the rest of the library"
+        );
         assert!(
             !crate::services::video_discovery::artist_state::get(&conn, 5001)
                 .unwrap()
@@ -1000,7 +1021,7 @@ mod tests {
         store_artist_scan(&conn, 1, &[]).unwrap();
         assert_eq!(artists_needing_scan(&conn).unwrap().len(), 1);
         let target = artists_needing_scan(&conn).unwrap().remove(0);
-        cache_artist_catalog(&conn, &target, &[]).unwrap();
+        cache_artist_catalog(&conn, &target, &[], Some(0)).unwrap();
         assert!(artists_needing_scan(&conn).unwrap().is_empty());
     }
 
