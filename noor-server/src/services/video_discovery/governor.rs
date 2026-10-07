@@ -238,7 +238,7 @@ mod tests {
         governor.record(start, day(), Mode::Idle, &LIMITED_BUDGET, 1, 0.5);
         assert_eq!(
             governor.wait(start, day(), Mode::Idle, &LIMITED_BUDGET, 1, false),
-            Some(Duration::from_secs(10))
+            Some(Duration::from_secs(60))
         );
         governor.record(
             start,

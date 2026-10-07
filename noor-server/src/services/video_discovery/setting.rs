@@ -38,11 +38,12 @@ pub const FULL_BUDGET: Budget = Budget {
     daily: 6000,
 };
 
-/// About a tenth of the full budget. Also caps on-demand station lookups when
-/// background discovery is off.
+/// About a tenth of the full budget, spread evenly over the hour rather than
+/// spent in a burst. Also caps on-demand station lookups when background
+/// discovery is off (station work skips the spacing, never the caps).
 pub const LIMITED_BUDGET: Budget = Budget {
-    idle_spacing: Duration::from_secs(10),
-    active_spacing: Duration::from_secs(30),
+    idle_spacing: Duration::from_secs(60),
+    active_spacing: Duration::from_secs(180),
     idle_per_hour: 60,
     active_per_hour: 20,
     daily: 500,
