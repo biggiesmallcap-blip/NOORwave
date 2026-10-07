@@ -19,6 +19,17 @@
 		videoStageAnchor,
 	} from '$lib/stores/video_session';
 	import { WATCH_PATH, watchUrl } from '$lib/video/section';
+	import {
+		FOCUS_ROWS,
+		MAX_FOCUS_LEVEL,
+		focusLevel,
+		gridColumns,
+		mergeFeed,
+		needsMore,
+		placeholderCount,
+		radioExclusions,
+		trimToRows,
+	} from '$lib/video/related_feed';
 
 	// The watch page: the one place the big player lives. The persistent dock
 	// positions the live <video> over this page's stage; everything else here
@@ -33,6 +44,23 @@
 	let relatedVideos = $state<(TidalSearchVideo & { why?: string })[]>([]);
 	let relatedLoading = $state(false);
 	let relatedRequest = 0;
+	// Below the close picks the grid keeps going from the video radio feed,
+	// softer the further it gets (see related_feed.ts).
+	const FEED_BATCH_MAX = 10;
+	const FEED_RETRY_MS = 3000;
+	let feedLoading = $state(false);
+	let feedDone = $state(false);
+	let feedWaiting = $state(false);
+	let feedBatches = 0;
+	let feedMisses = 0;
+	let feedRetry: ReturnType<typeof setTimeout> | null = null;
+	let gridEl = $state<HTMLDivElement | null>(null);
+	let columns = $state(1);
+	let rowLevels = $state<number[]>([]);
+	let nearEnd = $state(false);
+
+	let shownRelated = $derived(feedDone ? trimToRows(relatedVideos, columns) : relatedVideos);
+	let placeholders = $derived(placeholderCount(shownRelated.length, columns, feedLoading || feedWaiting));
 
 	let current = $derived($videoSession.current);
 	let streamUrl = $derived($videoSession.streamUrl);
@@ -75,6 +103,67 @@
 			resetRadio: true,
 		});
 		if (!ok) showToast($videoSession.error ?? 'This video could not be loaded.', 'error', 3200);
+	}
+
+	/** Unmeasured rows below the sharp ones start out of focus, so a new
+	 *  batch never flashes sharp before the first measurement. */
+	function tileFocus(index: number): number {
+		const row = Math.floor(index / columns);
+		return rowLevels[row] ?? (row < FOCUS_ROWS ? 0 : MAX_FOCUS_LEVEL);
+	}
+
+	function resetFeed() {
+		feedLoading = false;
+		feedDone = false;
+		feedWaiting = false;
+		feedBatches = 0;
+		feedMisses = 0;
+		if (feedRetry) clearTimeout(feedRetry);
+		feedRetry = null;
+	}
+
+	/** One more batch for the extension, from the video radio feed seeded on
+	 *  the playing video. Stops after FEED_BATCH_MAX batches or when the feed
+	 *  stays dry; a feed that is still being built is retried shortly. */
+	async function loadMoreRelated() {
+		const item = current;
+		if (!item || feedLoading || feedDone || feedWaiting || relatedLoading) return;
+		const seq = relatedRequest;
+		feedLoading = true;
+		const { exclude, recentArtists } = radioExclusions(relatedVideos, item.tidal_id);
+		try {
+			const { items, building } = await api.getVideoRadioNext({
+				seed_artist_id: item.artist_id,
+				seed_artist_name: item.artist_name,
+				seed_video_id: item.tidal_id,
+				exclude_video_ids: exclude,
+				recent_video_ids: [],
+				recent_songs: [],
+				recent_artist_ids: recentArtists,
+			});
+			if (seq !== relatedRequest) return;
+			const merged = mergeFeed(relatedVideos, items, item.tidal_id);
+			feedBatches += 1;
+			if (merged.length > relatedVideos.length) {
+				relatedVideos = merged;
+				feedMisses = 0;
+			} else {
+				feedMisses += 1;
+			}
+			if (feedBatches >= FEED_BATCH_MAX || (feedMisses > 0 && !building) || feedMisses >= 3) {
+				feedDone = true;
+			} else if (feedMisses > 0) {
+				feedWaiting = true;
+				feedRetry = setTimeout(() => {
+					feedRetry = null;
+					feedWaiting = false;
+				}, FEED_RETRY_MS);
+			}
+		} catch {
+			if (seq === relatedRequest) feedDone = true;
+		} finally {
+			if (seq === relatedRequest) feedLoading = false;
+		}
 	}
 
 	function closeVideo() {
@@ -143,6 +232,7 @@
 		const item = current;
 		const seq = ++relatedRequest;
 		relatedVideos = [];
+		resetFeed();
 		relatedLoading = Boolean(item?.artist_id || item?.artist_name);
 		if (!item || (!item.artist_id && !item.artist_name)) return;
 		const controller = new AbortController();
@@ -168,6 +258,61 @@
 		};
 		timer = setTimeout(() => void fetchRelated(), 400);
 		return () => { clearTimeout(timer); controller.abort(); ++relatedRequest; };
+	});
+
+	// Depth of field: lower rows sit out of focus until they scroll up past
+	// the focus line (three quarters down the visible area), and the feed
+	// loads more when the grid's end is within a screen of view. Measured on
+	// the workspace's scroll (the app scrolls main.workspace, not the window)
+	// and whenever the grid resizes or grows.
+	const NEAR_END_PX = 900;
+	function measureRelated() {
+		const grid = gridEl;
+		const scroller = grid?.closest('main.workspace') ?? null;
+		if (!grid) return;
+		columns = gridColumns(getComputedStyle(grid).gridTemplateColumns);
+		const view = scroller?.getBoundingClientRect() ?? { top: 0, bottom: window.innerHeight, height: window.innerHeight };
+		const focusLine = view.top + view.height * 0.75;
+		const tiles = grid.children;
+		const firstTop = tiles[0]?.getBoundingClientRect().top ?? 0;
+		const rowHeight = tiles[columns]
+			? tiles[columns].getBoundingClientRect().top - firstTop
+			: (tiles[0]?.getBoundingClientRect().height ?? 1);
+		const levels: number[] = [];
+		for (let row = 0; row * columns < tiles.length; row += 1) {
+			const top = tiles[row * columns].getBoundingClientRect().top;
+			levels.push(focusLevel(row, top, focusLine, rowHeight));
+		}
+		if (levels.join() !== rowLevels.join()) rowLevels = levels;
+		nearEnd = grid.getBoundingClientRect().bottom - view.bottom < NEAR_END_PX;
+	}
+
+	$effect(() => {
+		const grid = gridEl;
+		if (!grid) return;
+		const scroller = grid.closest('main.workspace') ?? window;
+		const observer = new ResizeObserver(() => measureRelated());
+		observer.observe(grid);
+		scroller.addEventListener('scroll', measureRelated, { passive: true });
+		window.addEventListener('resize', measureRelated);
+		return () => {
+			observer.disconnect();
+			scroller.removeEventListener('scroll', measureRelated);
+			window.removeEventListener('resize', measureRelated);
+		};
+	});
+
+	// New tiles: re-measure once they are in the DOM.
+	$effect(() => {
+		void shownRelated.length;
+		void placeholders;
+		queueMicrotask(measureRelated);
+	});
+
+	// Fill the sharp rows first, then keep going while the end is near.
+	$effect(() => {
+		if (!current || relatedLoading || feedLoading || feedDone || feedWaiting) return;
+		if (needsMore(relatedVideos.length, columns) || nearEnd) void loadMoreRelated();
 	});
 </script>
 
@@ -241,21 +386,31 @@
 		</div>
 	</div>
 
-	{#if current && (relatedLoading || relatedVideos.length > 0)}
+	{#if current && (relatedLoading || feedLoading || relatedVideos.length > 0)}
 		<section class="related" aria-label="Related videos">
 			<div class="section-heading">
 				<p class="eyebrow">Keep exploring</p>
 				<h2>Related to {current.artist_name ?? 'this video'}</h2>
 			</div>
-			{#if relatedVideos.length > 0}
-				<div class="video-grid">
-					{#each relatedVideos as video (video.tidal_id)}
-						<div class="related-card">
+			{#if relatedVideos.length > 0 || feedLoading}
+				<!-- Two full rows in focus, then the extension softens row by row;
+				     hover or focus brings a tile back into focus. -->
+				<div class="video-grid" bind:this={gridEl}>
+					{#each shownRelated as video, index (video.tidal_id)}
+						<div class="related-card" data-focus={tileFocus(index)}>
 							<VideoCard {video} onSelect={(item) => !('id' in item) && void playRelated(item)} />
 							{#if video.why}<span class="related-why">{video.why}</span>{/if}
 						</div>
 					{/each}
+					{#each Array(placeholders) as _, offset (offset)}
+						<div class="related-card placeholder" data-focus={tileFocus(shownRelated.length + offset)} aria-hidden="true">
+							<div class="placeholder-frame"></div>
+						</div>
+					{/each}
 				</div>
+				{#if feedDone && shownRelated.length > FOCUS_ROWS * columns}
+					<p class="related-end">End of the line</p>
+				{/if}
 			{:else}
 				<p class="related-loading">Finding a few connected videos...</p>
 			{/if}
@@ -416,6 +571,37 @@
 		display: grid;
 		align-content: start;
 		gap: 5px;
+	}
+
+	/* Out of focus below the fold: a soft blur and dim that deepen for
+	   three rows, then hold, and clear as the row scrolls into view. */
+	.related-card {
+		transition: filter 320ms ease, opacity 320ms ease;
+	}
+	.related-card[data-focus='1'] { filter: blur(0.6px); opacity: 0.82; }
+	.related-card[data-focus='2'] { filter: blur(1.1px); opacity: 0.68; }
+	.related-card[data-focus='3'] { filter: blur(1.6px); opacity: 0.56; }
+	.related-card:hover,
+	.related-card:focus-within {
+		filter: none;
+		opacity: 1;
+	}
+
+	.placeholder-frame {
+		aspect-ratio: 16 / 9;
+		border-radius: 8px;
+		background: var(--bg-raised);
+		animation: placeholder-pulse 1.4s ease-in-out infinite;
+	}
+	@keyframes placeholder-pulse {
+		50% { opacity: 0.55; }
+	}
+
+	.related-end {
+		margin: 4px 0 0;
+		text-align: center;
+		color: var(--text-tertiary);
+		font-size: var(--font-size-xs);
 	}
 
 	.related-why,

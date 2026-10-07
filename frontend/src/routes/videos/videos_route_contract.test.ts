@@ -86,3 +86,19 @@ describe('watch page contract', () => {
 		expect(layoutSource).toContain(".app-shell[data-player-layout='bottom'] .video-radio-hits { display: none; }");
 	});
 });
+
+describe('watch page related grid contract', () => {
+	test('keeps going from the video radio feed below the close picks', () => {
+		expect(watch).toContain('api.getVideoRadioNext({');
+		expect(watch).toContain('radioExclusions(relatedVideos, item.tidal_id)');
+		expect(watch).toContain('needsMore(relatedVideos.length, columns) || nearEnd');
+		expect(watch).toContain('feedDone ? trimToRows(relatedVideos, columns) : relatedVideos');
+	});
+
+	test('focus follows the workspace scroll, not the window', () => {
+		expect(watch).toContain("grid.closest('main.workspace')");
+		expect(watch).toContain("scroller.addEventListener('scroll', measureRelated, { passive: true })");
+		expect(watch).toContain('data-focus={tileFocus(index)}');
+		expect(watch).toContain('.related-card:focus-within');
+	});
+});
