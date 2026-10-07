@@ -134,6 +134,9 @@
 	 *  bottom nav that the window must clear. */
 	let placed = $derived(mode === 'mini' && bounds !== null && viewportWidth > 720);
 	let size = $derived(miniSize(viewportWidth, collapsed));
+	/** The window's size even while it is a pill: the player keeps it, so the
+	 *  pill morph only uncovers or covers the video and never resizes it. */
+	let windowSize = $derived(miniSize(viewportWidth, false));
 	let position = $derived.by(() => {
 		if (!placed || !bounds) return null;
 		if (drag) return { left: drag.left, top: drag.top };
@@ -184,6 +187,25 @@
 	$effect(() => {
 		if (!active) collapsed = false;
 	});
+
+	// Window <-> pill: the box animates its size (CSS) around a player that
+	// stays at window size, pinned to the corner the two share. Resizing the
+	// playing video with the box re-laid it out every frame, and the video
+	// lagged the box edges. The player's chrome sits the morph out.
+	const PILL_MS = 240;
+	let unfolding = $state(false);
+	let unfoldTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function setCollapsed(next: boolean) {
+		if (next === collapsed) return;
+		collapsed = next;
+		unfolding = true;
+		if (unfoldTimer) clearTimeout(unfoldTimer);
+		unfoldTimer = setTimeout(() => {
+			unfoldTimer = null;
+			unfolding = false;
+		}, PILL_MS);
+	}
 
 	// --- Fullscreen: the same player grows to fill the window ---
 	// Not native element fullscreen, which swaps the video into the top layer
@@ -359,24 +381,25 @@
 	}
 
 	/** Fullscreen in and out: animate position and size from the old box. */
-	function sizeGlideFrom(from: DOMRect | null) {
-		if (!dockEl || !from || from.width <= 0 || from.height <= 0) return;
+	function sizeGlideFrom(from: DOMRect | null): Animation | null {
+		if (!dockEl || !from || from.width <= 0 || from.height <= 0) return null;
 		const to = measureLanding();
-		if (!to) return;
+		if (!to) return null;
 		glide?.cancel();
 		const px = (r: { top: number; left: number; width: number; height: number }) => ({
 			top: `${r.top}px`, left: `${r.left}px`, width: `${r.width}px`, height: `${r.height}px`,
 		});
 		glide = dockEl.animate([px(from), px(to)], { duration: MORPH_MS, easing: GLIDE_EASING });
 		if (document.timeline.currentTime != null) glide.startTime = document.timeline.currentTime;
+		return glide;
 	}
 
 	/** Invert the jump: draw the dock at its old box via a transform, then let
 	 *  that transform run out. Runs after the DOM took the new box. */
-	function flipFrom(from: DOMRect | null) {
-		if (!dockEl || !from || from.width <= 0 || from.height <= 0) return;
+	function flipFrom(from: DOMRect | null): Animation | null {
+		if (!dockEl || !from || from.width <= 0 || from.height <= 0) return null;
 		const to = measureLanding();
-		if (!to) return;
+		if (!to) return null;
 		const dx = from.left - to.left;
 		const dy = from.top - to.top;
 		const sx = from.width / to.width;
@@ -395,14 +418,17 @@
 			],
 			{ duration: MORPH_MS, easing: GLIDE_EASING }
 		);
-		// Start on this frame rather than pending until the next one.
-		if (document.timeline.currentTime != null) glide.startTime = document.timeline.currentTime;
+		// Left pending on purpose: it starts when the compositor first runs
+		// it, and the inline pin holds the start pose until then. Pinning the
+		// start time to this frame skipped the first ~40% of the path whenever
+		// the page change kept the main thread busy before the next frame.
 		// Once the animation is driving, the inline pin must go, or it would
 		// show again when the animation ends.
 		void glide.ready.then(() => {
 			el.style.transform = '';
 			el.style.transformOrigin = '';
 		}).catch(() => {});
+		return glide;
 	}
 
 	$effect(() => {
@@ -425,10 +451,18 @@
 			const fullscreenMove = previousPlace === 'expanded' || next === 'expanded';
 			if (!reducedMotion) {
 				morphing = true;
-				if (fullscreenMove) sizeGlideFrom(lastDockRect);
-				else flipFrom(lastDockRect);
+				const started = fullscreenMove ? sizeGlideFrom(lastDockRect) : flipFrom(lastDockRect);
+				// Land when the glide really ends (it may start a frame late);
+				// the timer only covers a glide that never started or never
+				// reports back.
 				if (morphTimer) clearTimeout(morphTimer);
-				morphTimer = setTimeout(endGlide, MORPH_MS);
+				morphTimer = setTimeout(endGlide, started ? MORPH_MS * 2 : MORPH_MS);
+				started?.finished.then(() => {
+					if (glide !== started) return;
+					if (morphTimer) clearTimeout(morphTimer);
+					morphTimer = null;
+					endGlide();
+				}, () => {});
 			}
 		}
 		previousPlace = next;
@@ -506,6 +540,7 @@
 		if (rafId) cancelAnimationFrame(rafId);
 		if (morphTimer) clearTimeout(morphTimer);
 		if (fullscreenTimer) clearTimeout(fullscreenTimer);
+		if (unfoldTimer) clearTimeout(unfoldTimer);
 		glide?.cancel();
 		unsubscribeStage();
 		// Never moveHome() here: by teardown Svelte may already have removed
@@ -530,7 +565,11 @@
 		class:collapsed={place === 'mini' && collapsed}
 		class:dragging={drag !== null}
 		class:morphing
+		class:unfolding
 		class:positioned={place !== 'mini' && box !== null}
+		data-corner={corner}
+		style:--window-w={`${windowSize.width}px`}
+		style:--window-h={`${windowSize.height}px`}
 		style:top={box ? `${box.top}px` : null}
 		style:left={box ? `${box.left}px` : null}
 		style:width={box ? `${box.width}px` : null}
@@ -566,7 +605,7 @@
 		{:else if mode === 'mini' && collapsed}
 			<div class="pill">
 				<span class="pill-title">{$videoSession.current?.title ?? 'Video'}</span>
-				<button type="button" class="mini-btn" aria-label="Show video" title="Show video" onclick={() => (collapsed = false)}>&#x25A2;</button>
+				<button type="button" class="mini-btn" aria-label="Show video" title="Show video" onclick={() => setCollapsed(false)}>&#x25A2;</button>
 				<button type="button" class="mini-btn" aria-label="Close video" title="Close video" onclick={closeDock}>&#x2715;</button>
 			</div>
 		{:else if mode !== 'full'}
@@ -583,7 +622,7 @@
 						onpointercancel={endDrag}
 						onkeydown={moveWithKeys}>&#x283F;</button
 					>
-					<button type="button" class="mini-btn" aria-label="Minimise video" title="Minimise" onclick={() => (collapsed = true)}>&#x2212;</button>
+					<button type="button" class="mini-btn" aria-label="Minimise video" title="Minimise" onclick={() => setCollapsed(true)}>&#x2212;</button>
 				{/if}
 				{#if !onWatchPage}
 					<button
@@ -692,12 +731,23 @@
 		right: auto;
 		bottom: auto;
 		aspect-ratio: auto;
-		transition:
-			left 0.18s ease,
-			top 0.18s ease,
-			width 0.18s ease,
-			height 0.18s ease;
+		transition-property: left, top, width, height, border-radius, border-color;
+		transition-duration: 0.24s;
+		transition-timing-function: cubic-bezier(0.22, 0.7, 0.2, 1);
 	}
+
+	/* Placed, the player keeps the window's size (border-box minus the 1px
+	   border) pinned to the corner the window and the pill share, so folding
+	   into the pill and back only covers and uncovers the video. */
+	.video-dock.mini.placed .player-surface {
+		position: absolute;
+		width: calc(var(--window-w) - 2px);
+		height: calc(var(--window-h) - 2px);
+	}
+	.video-dock.mini.placed[data-corner^='t'] .player-surface { top: 0; }
+	.video-dock.mini.placed[data-corner^='b'] .player-surface { bottom: 0; }
+	.video-dock.mini.placed[data-corner$='l'] .player-surface { left: 0; }
+	.video-dock.mini.placed[data-corner$='r'] .player-surface { right: 0; }
 
 
 	.video-dock.mini.placed.dragging {
@@ -713,11 +763,26 @@
 		border-color: var(--border-strong);
 	}
 
+	/* Half the pill's height: fully round, and unlike 999px it eases
+	   smoothly to and from the window's 10px. */
+	.video-dock.mini.placed.collapsed {
+		border-radius: 22px;
+	}
+
 	.video-dock.collapsed .player-surface {
-		position: absolute;
-		inset: 0;
 		visibility: hidden;
 		pointer-events: none;
+	}
+
+	.video-dock.collapsed:not(.placed) .player-surface {
+		position: absolute;
+		inset: 0;
+	}
+
+	/* Folding into the pill the video stays until the pill has faded in
+	   over it; unfolding it shows at once. */
+	.video-dock.mini.placed.collapsed .player-surface {
+		transition: visibility 0s linear 0.24s;
 	}
 
 	.pill {
@@ -728,6 +793,17 @@
 		gap: 6px;
 		height: 100%;
 		padding: 0 8px 0 16px;
+		background: var(--bg-raised);
+		border-radius: inherit;
+	}
+
+	.video-dock.placed .pill {
+		animation: pill-in 0.24s ease both;
+	}
+
+	@keyframes pill-in {
+		from { opacity: 0; }
+		to { opacity: 1; }
 	}
 
 	.pill-title {
@@ -756,6 +832,14 @@
 	.video-dock.panel:hover .mini-chrome,
 	.mini-chrome:focus-within {
 		opacity: 1;
+	}
+
+	/* The window's buttons take the top edge while they show; the title
+	   steps aside instead of running under them. */
+	.video-dock.mini:hover :global(.top-meta),
+	.video-dock.panel:hover :global(.top-meta),
+	.video-dock:has(.mini-chrome:focus-within) :global(.top-meta) {
+		opacity: 0;
 	}
 
 	.mini-btn {
@@ -829,10 +913,12 @@
 	}
 
 	/* Controls sit out the glide, so the transform's scale never shows
-	   stretched buttons or text. */
-	.video-dock.morphing :global(:is(.controls, .top-meta, .up-next-pill)),
-	.video-dock.morphing .mini-chrome {
-		opacity: 0;
+	   stretched buttons or text, and the pill morph, so they never pile up
+	   in a half-open window. */
+	.video-dock:is(.morphing, .unfolding) :global(:is(.controls, .top-meta, .up-next-pill)),
+	.video-dock:is(.morphing, .unfolding) .mini-chrome {
+		/* Beats the hover reveal: the pointer is usually on the dock. */
+		opacity: 0 !important;
 		transition: none;
 	}
 </style>

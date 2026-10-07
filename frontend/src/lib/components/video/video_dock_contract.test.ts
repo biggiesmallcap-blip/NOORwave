@@ -42,7 +42,12 @@ describe('persistent video dock contract', () => {
 		expect(dock).toContain('el.style.transform = start;');
 		expect(dock).toContain('animation: dock-in 0.22s ease backwards;');
 		expect(dock).toContain('if (dockEl?.isConnected) lastDockRect = dockEl.getBoundingClientRect();');
-		expect(dock).toContain('else flipFrom(lastDockRect);');
+		expect(dock).toContain('const started = fullscreenMove ? sizeGlideFrom(lastDockRect) : flipFrom(lastDockRect);');
+		// The FLIP starts when the compositor runs it (a pinned start time
+		// skipped part of the path after a busy page change), and the dock
+		// lands when the glide really finishes.
+		expect(dock).not.toMatch(/function flipFrom[\s\S]*?glide\.startTime[\s\S]*?\n\t\}/);
+		expect(dock).toContain('started?.finished.then(');
 		// Moving the host restarts CSS animations; they are finished on the spot.
 		expect(dock).toContain('if (animation !== glide) animation.finish();');
 		// Zero duration, not animation: none - removing it would replay dock-in.
@@ -58,7 +63,7 @@ describe('persistent video dock contract', () => {
 		// One motion at a time: glide first, then window fullscreen; on the way
 		// out, window first, then glide.
 		expect(dock).toContain('if (expanded) return null;');
-		expect(dock).toContain('if (fullscreenMove) sizeGlideFrom(lastDockRect);');
+		expect(dock).toContain('fullscreenMove ? sizeGlideFrom(lastDockRect)');
 		expect(dock).toMatch(/fullscreenTimer = setTimeout\(\(\) => \{[\s\S]*requestFullscreen[\s\S]*\}, MORPH_MS\);/);
 		expect(dock).toContain('requestAnimationFrame(() => requestAnimationFrame(() => (expanded = false)));');
 		expect(player).toMatch(/if \(onFullscreenToggle\) \{\s*onFullscreenToggle\(\);\s*return;/);
@@ -78,6 +83,17 @@ describe('persistent video dock contract', () => {
 		expect(dock).toContain("if (place === 'full' && stage?.isConnected) moveIntoStage(stage);");
 		// The move in lands as the glide ends, so stage-in must not replay there.
 		expect(dock).toMatch(/> \.video-dock-host > \.video-dock \{[^}]*animation: none !important;/);
+	});
+
+	test('window <-> pill only covers and uncovers a video that keeps its size', () => {
+		// Resizing the playing video with the box re-laid it out every frame
+		// and it lagged the box edges.
+		expect(dock).toContain('let windowSize = $derived(miniSize(viewportWidth, false));');
+		expect(dock).toContain('width: calc(var(--window-w) - 2px);');
+		expect(dock).toContain(".video-dock.mini.placed[data-corner^='b'] .player-surface { bottom: 0; }");
+		expect(dock).toContain(".video-dock.mini.placed[data-corner$='r'] .player-surface { right: 0; }");
+		expect(dock).toContain('onclick={() => setCollapsed(true)}');
+		expect(dock).toContain('.video-dock:is(.morphing, .unfolding) .mini-chrome');
 	});
 
 	test('frees the exclusive device when a video starts playing', () => {
