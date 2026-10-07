@@ -186,7 +186,9 @@ impl SetPlan {
 }
 
 /// A candidate video, normalized across the artist-videos and search paths.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Facts past `release_year` were added for discovery; serde defaults keep
+/// catalog rows written before them readable.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VideoCandidate {
     pub tidal_id: i64,
     pub title: String,
@@ -199,6 +201,32 @@ pub struct VideoCandidate {
     /// TIDAL video shape, so it rides in `extra`; absent for the era set means
     /// the video is simply not a candidate, never a crash.
     pub release_year: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub popularity: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub featured_artist_ids: Vec<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explicit: Option<bool>,
+}
+
+fn extra_popularity(extra: &HashMap<String, serde_json::Value>) -> Option<i32> {
+    extra
+        .get("popularity")?
+        .as_i64()
+        .and_then(|p| i32::try_from(p).ok())
+        .filter(|p| *p >= 0)
+}
+
+fn extra_str(extra: &HashMap<String, serde_json::Value>, key: &str) -> Option<String> {
+    extra
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 /// Pull a four-digit year out of TIDAL's flattened extras. The field is
@@ -219,6 +247,13 @@ impl From<&TidalArtistVideo> for VideoCandidate {
             album_tidal_id: v.album.as_ref().map(|al| al.id),
             artwork_url: TidalClient::get_artwork_url(&v.image_id, 640),
             release_year: extra_release_year(&v.extra),
+            popularity: extra_popularity(&v.extra),
+            video_type: extra_str(&v.extra, "type"),
+            featured_artist_ids: crate::services::video_discovery::harvest::featured_artist_ids(
+                &v.extra,
+            ),
+            quality: extra_str(&v.extra, "quality"),
+            explicit: v.extra.get("explicit").and_then(serde_json::Value::as_bool),
         }
     }
 }
@@ -234,6 +269,13 @@ impl From<&TidalSearchVideo> for VideoCandidate {
             album_tidal_id: v.album_id,
             artwork_url: v.artwork_url.clone(),
             release_year: extra_release_year(&v.extra),
+            popularity: extra_popularity(&v.extra),
+            video_type: Some(v.r#type.clone()).filter(|kind| !kind.is_empty()),
+            featured_artist_ids: crate::services::video_discovery::harvest::featured_artist_ids(
+                &v.extra,
+            ),
+            quality: v.quality.clone(),
+            explicit: v.explicit,
         }
     }
 }
@@ -1381,6 +1423,7 @@ mod tests {
             album_tidal_id: None,
             artwork_url: None,
             release_year: None,
+            ..Default::default()
         }
     }
 

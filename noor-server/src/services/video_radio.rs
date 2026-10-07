@@ -311,35 +311,31 @@ pub fn cache_groups_without_prune(
     conn: &Connection,
     groups: &[(AnchorArtist, Vec<VideoCandidate>)],
 ) -> Result<()> {
+    use crate::services::video_discovery::artist_state::{self, CheckResult};
+    use crate::services::video_discovery::harvest::{self, HarvestContext};
     for (anchor, videos) in groups {
-        if anchor.tidal_id > 0 {
-            mark_artist_scanned(conn, anchor.tidal_id)?;
+        if anchor.tidal_id <= 0 {
+            harvest::ingest(conn, videos, HarvestContext::Search)?;
+            continue;
         }
-        for video in videos {
-            let artist_id = video
-                .artist_id
-                .or((anchor.tidal_id > 0).then_some(anchor.tidal_id));
-            let mut normalized = video.clone();
-            normalized.artist_id = artist_id;
-            if normalized.artist_name.is_none() && anchor.tidal_id > 0 {
-                normalized.artist_name = Some(anchor.name.clone());
+        let summary = harvest::ingest(
+            conn,
+            videos,
+            HarvestContext::ArtistPage {
+                artist_id: anchor.tidal_id,
+                name: &anchor.name,
+            },
+        )?;
+        mark_artist_scanned(conn, anchor.tidal_id)?;
+        artist_state::record_page(conn, anchor.tidal_id, 0, videos.len() as i64, None)?;
+        let result = if videos.is_empty() {
+            CheckResult::Empty
+        } else {
+            CheckResult::Found {
+                new_videos: summary.new_videos as i64,
             }
-            conn.execute(
-                "INSERT INTO video_catalog (tidal_video_id, artist_tidal_id, artist_name, item_json)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(tidal_video_id) DO UPDATE SET
-                   artist_tidal_id = excluded.artist_tidal_id,
-                   artist_name = excluded.artist_name,
-                   item_json = excluded.item_json,
-                   fetched_at = datetime('now')",
-                params![
-                    video.tidal_id,
-                    artist_id,
-                    normalized.artist_name.as_deref(),
-                    serde_json::to_string(&normalized)?,
-                ],
-            )?;
-        }
+        };
+        artist_state::record_check(conn, anchor.tidal_id, result)?;
     }
     Ok(())
 }
@@ -1025,6 +1021,7 @@ pub fn load_candidates(
                     &image_id, 640,
                 ),
                 release_year,
+                ..Default::default()
             },
             *lane.get(&artist_id).unwrap_or(&SourceLane::Library),
         ));
@@ -1173,8 +1170,8 @@ pub fn select_seeded_batch(
             artist_name: video.artist_name.clone(),
             album_tidal_id: video.album_tidal_id,
             artwork_url: video.artwork_url.clone(),
-            quality: None,
-            explicit: None,
+            quality: video.quality.clone(),
+            explicit: video.explicit,
             kind: "Music Video".into(),
             why: match lane {
                 SourceLane::Seed => "More from this artist",
@@ -1264,8 +1261,8 @@ pub fn select_batch(
             artist_name: video.artist_name.clone(),
             album_tidal_id: video.album_tidal_id,
             artwork_url: video.artwork_url.clone(),
-            quality: None,
-            explicit: None,
+            quality: video.quality.clone(),
+            explicit: video.explicit,
             kind: "Music Video".into(),
             why: String::new(),
         });
@@ -1296,6 +1293,7 @@ mod tests {
             album_tidal_id: None,
             artwork_url: None,
             release_year: Some(2024),
+            ..Default::default()
         };
         cache_groups(&conn, &[(anchor, vec![video])]).unwrap();
         store_related(&conn, 42, &[(43, "Neighbour".into(), "tidal")]).unwrap();
@@ -1323,6 +1321,7 @@ mod tests {
             album_tidal_id: None,
             artwork_url: None,
             release_year: None,
+            ..Default::default()
         };
         cache_groups(
             &conn,
@@ -1397,6 +1396,7 @@ mod tests {
             album_tidal_id: None,
             artwork_url: None,
             release_year: None,
+            ..Default::default()
         };
         cache_groups(
             &conn,
@@ -1463,6 +1463,7 @@ mod tests {
             album_tidal_id: None,
             artwork_url: None,
             release_year: None,
+            ..Default::default()
         };
         let pool = vec![
             (candidate(1, 1), SourceLane::Seed),
@@ -1498,6 +1499,7 @@ mod tests {
                         album_tidal_id: None,
                         artwork_url: None,
                         release_year: None,
+                        ..Default::default()
                     },
                     if artist <= 8 {
                         SourceLane::Seed
@@ -1544,6 +1546,7 @@ mod tests {
                     album_tidal_id: None,
                     artwork_url: None,
                     release_year: None,
+                    ..Default::default()
                 },
                 lane,
             )
@@ -1624,6 +1627,7 @@ mod tests {
                         album_tidal_id: None,
                         artwork_url: None,
                         release_year: None,
+                        ..Default::default()
                     },
                     lane,
                 )
@@ -1675,6 +1679,7 @@ mod tests {
                         album_tidal_id: None,
                         artwork_url: None,
                         release_year: None,
+                        ..Default::default()
                     },
                     lane,
                 )
@@ -1922,6 +1927,7 @@ mod tests {
             album_tidal_id: None,
             artwork_url: None,
             release_year: None,
+            ..Default::default()
         };
         let seed_videos = (1..=650).map(|id| make_video(id, 10, "Seed")).collect();
         cache_groups_without_prune(
