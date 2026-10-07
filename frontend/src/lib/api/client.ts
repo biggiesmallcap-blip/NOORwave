@@ -303,6 +303,23 @@ export interface VideoDiscoveryStatus {
 	catalog_videos: number;
 }
 
+export interface VideoStationCard {
+	id: string;
+	group: 'spotlight' | 'for_you' | 'genres' | 'vibes' | 'themes' | 'charts';
+	title: string;
+	subtitle: string;
+	unwatched_count: number;
+	preview: TidalSearchVideo[];
+}
+
+export interface VideoStationsResponse {
+	day: string | null;
+	building: boolean;
+	catalog_videos: number;
+	discovery_setting: VideoDiscoverySetting;
+	stations: VideoStationCard[];
+}
+
 export interface TidalSearchVideo {
 	tidal_id: number;
 	title: string;
@@ -4174,6 +4191,22 @@ export const api = {
 			method: 'POST',
 			body: JSON.stringify(body),
 		});
+	},
+
+	getVideoStations(): Promise<VideoStationsResponse> {
+		return fetchApi<VideoStationsResponse>('/api/videos/stations');
+	},
+
+	getVideoStationNext(id: string, body: {
+		exclude_video_ids: number[];
+		recent_video_ids: number[];
+		session_nonce: string;
+	}): Promise<{ items: TidalSearchVideo[]; exhausted: boolean }> {
+		return fetchApi<{ items: TidalSearchVideo[]; exhausted: boolean }>(
+			`/api/videos/stations/${encodeURIComponent(id)}/next`, undefined, {
+				method: 'POST',
+				body: JSON.stringify(body),
+			});
 	},
 
 	getRelatedVideos(body: {
