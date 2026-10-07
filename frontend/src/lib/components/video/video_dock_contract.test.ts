@@ -32,7 +32,7 @@ describe('persistent video dock contract', () => {
 		// Bounds are known in every mode, so the first non-full frame is
 		// already placed rather than parked at the CSS fallback corner.
 		expect(dock).toMatch(/if \(active\) \{\s*if \(!workspace\?\.isConnected\)/);
-		expect(dock).toContain('if (previousPlace !== null && previousPlace !== next)');
+		expect(dock).toContain('const moving = previousPlace !== null && previousPlace !== next;');
 		// Page moves are a compositor transform (FLIP), not a per-frame
 		// relayout of the playing video.
 		expect(dock).toContain('glide = el.animate(');
@@ -72,6 +72,12 @@ describe('persistent video dock contract', () => {
 		expect(dock).toContain('const unsubscribeStage = videoStageAnchor.subscribe((stage) => {');
 		expect(dock).toContain(':global(.stage-anchor) > .video-dock-host > .video-dock {');
 		expect(dock).not.toContain('onwheel=');
+		// Gliding onto the stage stays a fixed layer until it lands: inside the
+		// stage the glide was clipped by its overflow and faded with the page.
+		expect(dock).toContain("else if ((!moving || reducedMotion) && $videoStageAnchor) moveIntoStage($videoStageAnchor);");
+		expect(dock).toContain("if (place === 'full' && stage?.isConnected) moveIntoStage(stage);");
+		// The move in lands as the glide ends, so stage-in must not replay there.
+		expect(dock).toMatch(/> \.video-dock-host > \.video-dock \{[^}]*animation: none !important;/);
 	});
 
 	test('frees the exclusive device when a video starts playing', () => {

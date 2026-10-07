@@ -272,7 +272,11 @@
 
 	/** Re-inserting an element restarts its CSS animations, so a move
 	 *  replayed stage-in or dock-in (a 10-14px nudge, and a skewed start box
-	 *  for the next glide). Finish them on the spot. */
+	 *  for the next glide). Finish them on the spot. Moves home happen as a
+	 *  glide starts, so by the time its 0s duration override comes off they
+	 *  are past their real length and stay finished. The move into the stage
+	 *  happens as a glide ends, so there the dock has no animation at all
+	 *  (see the in-stage CSS). */
 	function settleRestartedAnimations() {
 		for (const animation of dockEl?.getAnimations() ?? []) {
 			if (animation !== glide) animation.finish();
@@ -409,17 +413,17 @@
 			return;
 		}
 		// Host placement first, so a FLIP measures the dock where it lands.
-		// Coming back from fullscreen it stays fixed until the size glide
-		// ends (endGlide moves it in).
-		const fromFullscreen = previousPlace === 'expanded';
-		if (next === 'full' && !fromFullscreen && $videoStageAnchor) moveIntoStage($videoStageAnchor);
-		else if (next !== 'full') moveHome();
-		if (previousPlace !== null && previousPlace !== next) {
-			const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+		// Gliding onto the stage it stays a fixed layer until the glide ends
+		// (endGlide moves it in): inside the stage it was clipped by the
+		// stage's overflow and faded with the arriving page, so the video
+		// grew out from behind the frame.
+		const moving = previousPlace !== null && previousPlace !== next;
+		const reducedMotion = moving && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+		if (next !== 'full') moveHome();
+		else if ((!moving || reducedMotion) && $videoStageAnchor) moveIntoStage($videoStageAnchor);
+		if (moving) {
 			const fullscreenMove = previousPlace === 'expanded' || next === 'expanded';
-			if (reducedMotion) {
-				if (next === 'full' && $videoStageAnchor) moveIntoStage($videoStageAnchor);
-			} else {
+			if (!reducedMotion) {
 				morphing = true;
 				if (fullscreenMove) sizeGlideFrom(lastDockRect);
 				else flipFrom(lastDockRect);
@@ -612,7 +616,9 @@
 	/* In the stage the dock is part of the page: it fills the stage and
 	   scrolls with it. The fixed-mode rect the frame loop keeps writing
 	   inline is overridden here; it is what the dock falls back to the
-	   instant it leaves the stage, so it never flashes elsewhere. */
+	   instant it leaves the stage, so it never flashes elsewhere. No arrival
+	   animation here: it glided in as a fixed layer already, and stage-in
+	   restarted by the move would replay (fade + 10px drop) on landing. */
 	:global(.stage-anchor) > .video-dock-host > .video-dock {
 		position: absolute !important;
 		top: 0 !important;
@@ -621,6 +627,7 @@
 		height: 100% !important;
 		opacity: 1;
 		pointer-events: auto;
+		animation: none !important;
 	}
 	.video-dock {
 		z-index: 60;

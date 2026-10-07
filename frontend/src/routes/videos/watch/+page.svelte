@@ -266,10 +266,11 @@
 <style>
 	/* One column: the player, what is playing, then the related row.
 	   Borderless, like the rest of the video section. The width cap keeps a
-	   16:9 player short enough that its title and actions stay on screen. */
+	   16:9 player short enough that its title and actions stay on screen,
+	   including above the bottom player bar when that layout is on. */
 	.watch {
 		width: 100%;
-		max-width: max(480px, calc((100dvh - 300px) * 16 / 9));
+		max-width: max(480px, calc((100dvh - var(--bottom-player-height, 0px) - 300px) * 16 / 9));
 		margin: 0 auto;
 		animation: watch-in 0.28s cubic-bezier(0.22, 0.7, 0.2, 1) both;
 	}
