@@ -657,6 +657,11 @@ export function clearVideoSession() {
  *  while actually being a fixed element that never unmounts on navigation. */
 export const videoStageAnchor = writable<HTMLElement | null>(null);
 
+/** The video queue panel's artwork slot. While it is on screen and large
+ *  enough, the dock plays the video there instead of floating a window over
+ *  the queue. Published by the layout; null when the panel is closed. */
+export const videoPanelAnchor = writable<HTMLElement | null>(null);
+
 /** True while the listener has stepped back to the picks with a video still
  *  playing. The route hides its stage anchor, so the dock falls to its mini
  *  corner player and the editorial shelves take the page back. Playback is

@@ -9,6 +9,7 @@
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 	import VideoCard from '$lib/components/video/VideoCard.svelte';
+	import VideoBackLink from '$lib/components/video/VideoBackLink.svelte';
 	import VideoNavigation from '$lib/components/video/VideoNavigation.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
@@ -315,8 +316,8 @@
 </svelte:head>
 
 <div class="page">
+	<VideoBackLink current="liked" />
 	<header class="search-header">
-		<VideoNavigation current="liked" />
 		<div class="search-tools">
 			<SearchField
 				bind:value={query}
@@ -337,6 +338,7 @@
 				</button>
 			</div>
 		</div>
+		<VideoNavigation current="liked" />
 
 		<!-- Narrow, order, play. Genre and year are selects rather than pill
 		     rails because they are unbounded - 35 genres and 40 years as chips

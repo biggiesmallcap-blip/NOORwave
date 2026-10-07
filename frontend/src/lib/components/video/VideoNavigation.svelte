@@ -1,9 +1,10 @@
 <script lang="ts">
-	import { setVideoBrowseMode, videoBrowseMode, videoSession } from '$lib/stores/video_session';
-
-	let { current, canBrowse = false }: {
+	// Sub-navigation for the video pages. Same treatment as the category pills
+	// under the search field on /search and /library: a centered row of quiet
+	// outline pills, the current page filled with the accent. The way back to
+	// the player is the standard back button (VideoBackLink), not a tab.
+	let { current }: {
 		current: 'videos' | 'liked' | 'stations' | 'editorial';
-		canBrowse?: boolean;
 	} = $props();
 
 	const destinations = [
@@ -14,51 +15,67 @@
 	] as const;
 </script>
 
-<div class="video-navigation">
-	<nav aria-label="Video pages">
-		{#each destinations as destination (destination.id)}
-			<a
-				class="btn btn-glass destination"
-				href={destination.href}
-				aria-current={current === destination.id ? 'page' : undefined}
-			>{destination.label}</a>
-		{/each}
-	</nav>
-	{#if $videoSession.active}
-		{#if current === 'videos' && !$videoBrowseMode && canBrowse}
-			<button type="button" class="back-link" onclick={() => setVideoBrowseMode(true)}>Back to picks</button>
-		{:else if current === 'videos' && $videoBrowseMode}
-			<button type="button" class="back-link" onclick={() => setVideoBrowseMode(false)}>Back to the player</button>
-		{:else if current !== 'videos'}
-			<a class="back-link" href="/videos" onclick={() => setVideoBrowseMode(false)}>Back to the player</a>
-		{/if}
-	{/if}
-</div>
+<nav class="video-navigation" aria-label="Video pages">
+	{#each destinations as destination (destination.id)}
+		<a
+			class="nav-pill"
+			class:active={current === destination.id}
+			href={destination.href}
+			aria-current={current === destination.id ? 'page' : undefined}
+		>{destination.label}</a>
+	{/each}
+</nav>
 
 <style>
-	.video-navigation,
-	nav {
+	.video-navigation {
 		display: flex;
 		align-items: center;
-		justify-content: flex-start;
+		justify-content: center;
 		flex-wrap: wrap;
-		gap: var(--space-2);
+		gap: 6px;
+		width: 100%;
+		max-width: 720px;
+		margin: 0 auto;
 		min-width: 0;
 	}
 
-	.destination {
+	.nav-pill {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 6px;
+		height: var(--control-h);
+		padding: 0 14px;
+		border-radius: 999px;
+		border: 1px solid var(--border-subtle);
+		background: transparent;
+		color: var(--text-secondary);
+		font-family: inherit;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-medium);
 		white-space: nowrap;
 		text-decoration: none;
+		cursor: pointer;
+		transition:
+			background var(--motion-fast),
+			border-color var(--motion-fast),
+			color var(--motion-fast);
 	}
 
-	.destination[aria-current='page'] {
-		background: var(--accent-soft);
-		border-color: var(--accent-line);
-		color: var(--accent-strong);
+	.nav-pill:hover {
+		background: var(--bg-hover);
+		color: var(--text-primary);
 	}
 
-	.destination:focus-visible {
-		outline: 2px solid var(--accent-strong);
+	.nav-pill.active {
+		background: var(--accent);
+		border-color: var(--accent);
+		color: var(--text-on-accent);
+		font-weight: var(--font-weight-semibold);
+	}
+
+	.nav-pill:focus-visible {
+		outline: 2px solid var(--accent);
 		outline-offset: 2px;
 	}
 </style>

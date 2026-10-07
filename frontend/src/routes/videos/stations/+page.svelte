@@ -4,9 +4,11 @@
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import MediaRail from '$lib/components/ui/MediaRail.svelte';
 	import StationCard from '$lib/components/video/StationCard.svelte';
+	import VideoBackLink from '$lib/components/video/VideoBackLink.svelte';
 	import VideoNavigation from '$lib/components/video/VideoNavigation.svelte';
-	import { SMALL_CATALOG, groupStations, spotlightArtistId } from '$lib/components/video/stations';
+	import { SMALL_CATALOG, groupStations, previewArtists, spotlightArtistId, stationMeta } from '$lib/components/video/stations';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { showToast } from '$lib/stores/toast';
@@ -67,7 +69,8 @@
 	<title>Video stations - NOOR</title>
 </svelte:head>
 
-<div class="page">
+<div class="stations-page">
+	<VideoBackLink current="stations" />
 	<header class="stations-header">
 		<VideoNavigation current="stations" />
 	</header>
@@ -90,27 +93,49 @@
 	{:else}
 		{#if grouped.spotlight}
 			{@const spot = grouped.spotlight}
+			{@const lead = spot.preview.find((video) => video.artwork_url)?.artwork_url ?? null}
+			{@const artists = previewArtists(spot, 4)}
 			<section class="spotlight" aria-label="Today's spotlight">
+				<div class="spotlight-backdrop" aria-hidden="true">
+					<ArtworkImage src={lead} size={320} fallbackText="" decorative={true} fadeIn={true} />
+				</div>
 				<button type="button" class="spotlight-art" aria-label={`Play ${spot.title} station`} onclick={() => void start(spot)}>
-					<ArtworkImage src={spot.preview[0]?.artwork_url ?? null} size={640} fallbackText="VID" decorative={true} fadeIn={true} />
+					<ArtworkImage src={lead} size={1080} fallbackText="VID" decorative={true} fadeIn={true} />
 				</button>
 				<div class="spotlight-copy">
 					<span class="eyebrow">Today's spotlight</span>
 					<button type="button" class="spotlight-name" oncontextmenu={(event) => artistMenu(event, spot)} onclick={() => void start(spot)}>{spot.title}</button>
-					<span class="subtitle">{spot.subtitle}</span>
-					<button type="button" class="btn btn-primary" disabled={starting === spot.id} onclick={() => void start(spot)}>Play station</button>
+					<span class="spotlight-sub">{spot.subtitle}</span>
+					{#if artists.length > 1}
+						<span class="spotlight-with">With {artists.slice(1).join(', ')}</span>
+					{/if}
+					<div class="spotlight-actions">
+						<button type="button" class="btn btn-primary" disabled={starting === spot.id} onclick={() => void start(spot)}>
+							{starting === spot.id ? 'Starting...' : 'Play station'}
+						</button>
+					</div>
 				</div>
 			</section>
 		{/if}
 
 		{#each grouped.rows as row (row.id)}
 			<section class="row" aria-label={row.title}>
-				<h2>{row.title}</h2>
-				<div class="grid">
-					{#each row.stations as card (card.id)}
-						<StationCard {card} busy={starting === card.id} onplay={(c) => void start(c)} />
-					{/each}
-				</div>
+				<header class="row-head">
+					<h2>{row.title}</h2>
+					<span class="row-count">{row.stations.length} {row.stations.length === 1 ? 'station' : 'stations'}</span>
+				</header>
+				<MediaRail items={row.stations} getKey={(station) => station.id} ariaLabel={row.title}>
+					{#snippet card(station)}
+						<div class="rail-card">
+							<StationCard
+								card={station}
+								meta={stationMeta(station, row.stations)}
+								busy={starting === station.id}
+								onplay={(c) => void start(c)}
+							/>
+						</div>
+					{/snippet}
+				</MediaRail>
 			</section>
 		{/each}
 
@@ -121,55 +146,132 @@
 </div>
 
 <style>
-	.page {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-5);
-		padding: var(--space-5) var(--space-5) var(--space-7);
-		width: 100%;
-		max-width: var(--content-width);
+	/* Same frame as /videos: content width, and a minmax(0, 1fr) column so
+	   rails scroll instead of widening the page. */
+	.stations-page {
+		width: min(100%, var(--content-width));
 		margin: 0 auto;
-	}
-	.stations-header { padding: 0 4px; }
-	.skeleton { padding: var(--space-4) 0; }
-	.spotlight {
 		display: grid;
-		grid-template-columns: minmax(0, 360px) minmax(0, 1fr);
-		gap: var(--space-5);
+		grid-template-columns: minmax(0, 1fr);
+		gap: 28px;
+		padding: 0 4px max(var(--bottom-player-height, 0px), 44px, var(--safe-bottom));
+	}
+	.stations-header {
+		padding-top: var(--space-2);
+	}
+	.skeleton { padding: var(--space-4) 0; }
+
+	/* Spotlight: a wide hero over a blurred wash of its own artwork. */
+	.spotlight {
+		position: relative;
+		display: grid;
+		grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+		gap: clamp(20px, 3vw, 40px);
 		align-items: center;
+		padding: clamp(16px, 2.4vw, 28px);
+		border: 1px solid var(--border-subtle);
+		border-radius: 16px;
+		overflow: hidden;
+		isolation: isolate;
+	}
+	.spotlight-backdrop {
+		position: absolute;
+		inset: 0;
+		z-index: -1;
+		opacity: 0.3;
+		filter: blur(48px) saturate(1.3);
+		transform: scale(1.2);
+		pointer-events: none;
+	}
+	.spotlight-backdrop :global(img) {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
 	}
 	.spotlight-art {
 		padding: 0;
 		border: 0;
-		background: transparent;
+		background: var(--bg-raised);
 		border-radius: 12px;
 		overflow: hidden;
 		aspect-ratio: 16 / 9;
 		cursor: pointer;
+		box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
+		transition: transform var(--motion-fast);
 	}
+	.spotlight-art:hover,
+	.spotlight-art:focus-visible { transform: translateY(-2px); }
+	.spotlight-art:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 	.spotlight-art :global(img) { width: 100%; height: 100%; object-fit: cover; }
-	.spotlight-copy { display: grid; gap: 6px; justify-items: start; }
-	.eyebrow { font-size: var(--font-size-sm); color: var(--text-secondary); }
+	.spotlight-copy {
+		display: grid;
+		gap: 8px;
+		justify-items: start;
+		min-width: 0;
+	}
+	/* The section label from /search: small, uppercase, accent. */
+	.eyebrow {
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-semibold);
+		text-transform: uppercase;
+		letter-spacing: 1.5px;
+		color: var(--accent);
+	}
 	.spotlight-name {
+		max-width: 100%;
 		padding: 0;
 		border: 0;
 		background: transparent;
 		color: var(--text-primary);
-		font-size: var(--font-size-xl);
-		font-weight: var(--font-weight-semibold);
-		cursor: pointer;
+		font: inherit;
+		font-size: var(--font-size-3xl);
+		font-weight: var(--font-weight-bold);
+		line-height: var(--line-height-tight);
 		text-align: left;
+		cursor: pointer;
+		overflow-wrap: anywhere;
 	}
-	.subtitle { color: var(--text-secondary); }
-	.row { display: grid; gap: var(--space-3); }
-	.row h2 { margin: 0; font-size: var(--font-size-lg); color: var(--text-primary); }
-	.grid {
+	.spotlight-name:hover { text-decoration: underline; text-underline-offset: 4px; }
+	.spotlight-sub { color: var(--text-secondary); }
+	.spotlight-with {
+		color: var(--text-tertiary);
+		font-size: var(--font-size-sm);
+	}
+	.spotlight-actions { margin-top: var(--space-2); }
+
+	/* Rows: the shelf heading used on /videos, cards on a horizontal rail. */
+	.row {
 		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-		gap: var(--space-4);
+		grid-template-columns: minmax(0, 1fr);
+		gap: 10px;
+		min-width: 0;
 	}
+	.row-head {
+		display: flex;
+		align-items: baseline;
+		gap: var(--space-3);
+		padding: 0 2px;
+	}
+	.row-head h2 {
+		margin: 0;
+		font-size: var(--font-size-lg);
+		color: var(--text-primary);
+	}
+	.row-count {
+		color: var(--text-tertiary);
+		font-size: var(--font-size-sm);
+	}
+	.rail-card {
+		flex: 0 0 auto;
+		width: clamp(220px, 21vw, 300px);
+		scroll-snap-align: start;
+	}
+
 	.note { color: var(--text-secondary); font-size: var(--font-size-sm); }
-	@media (max-width: 720px) {
+
+	@media (max-width: 860px) {
 		.spotlight { grid-template-columns: 1fr; }
+		.spotlight-name { font-size: var(--font-size-2xl); }
+		.rail-card { width: 64vw; }
 	}
 </style>

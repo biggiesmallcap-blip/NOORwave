@@ -23,3 +23,29 @@ export function spotlightArtistId(card: VideoStationCard): number | null {
 	const match = /^spotlight:(\d+)$/.exec(card.id);
 	return match ? Number(match[1]) : null;
 }
+
+/** Distinct artist names in a station's preview, in order, at most `limit`. */
+export function previewArtists(card: VideoStationCard, limit = 3): string[] {
+	const seen = new Set<string>();
+	const names: string[] = [];
+	for (const video of card.preview) {
+		const name = video.artist_name?.trim();
+		if (!name || seen.has(name.toLowerCase())) continue;
+		seen.add(name.toLowerCase());
+		names.push(name);
+		if (names.length >= limit) break;
+	}
+	return names;
+}
+
+/** The line under a station's title. A subtitle that other cards in the same
+ *  row repeat word for word ("Artists you like and ones you...") says nothing,
+ *  so those cards name the artists inside instead. */
+export function stationMeta(card: VideoStationCard, row: VideoStationCard[]): string {
+	const subtitle = card.subtitle.trim();
+	const repeated = row.filter((other) => other.subtitle.trim() === subtitle).length > 1;
+	if (subtitle && !repeated) return subtitle;
+	const artists = previewArtists(card);
+	if (artists.length > 0) return artists.join(', ');
+	return `${card.unwatched_count} videos you have not seen`;
+}

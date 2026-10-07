@@ -7,6 +7,7 @@ const source = read('../src/routes/videos/+page.svelte');
 const dock = read('../src/lib/components/video/VideoDock.svelte');
 const store = read('../src/lib/stores/video_session.ts');
 const navigation = read('../src/lib/components/video/VideoNavigation.svelte');
+const back = read('../src/lib/components/video/VideoBackLink.svelte');
 const shelves = read('../src/lib/components/search/TidalDiscoverShelves.svelte');
 const appCss = read('../src/app.css');
 
@@ -133,10 +134,14 @@ describe('Video modules never fall through to the audio detail page', () => {
 });
 
 describe('Browse while playing', () => {
-	test('navigation stays above search and keeps destinations available during playback', () => {
+	test('navigation pills sit under search, as on /search and /library, and stay available during playback', () => {
 		const header = source.slice(source.indexOf('<header class="search-header">'), source.indexOf('</header>'));
-		expect(header).toContain('<VideoNavigation current="videos" canBrowse={hasBrowseContent} />');
-		expect(header.indexOf('<VideoNavigation')).toBeLessThan(header.indexOf('<SearchField'));
+		expect(header).toContain('<VideoNavigation current="videos" />');
+		// The way back to the player is the shared back button, first on the page.
+		expect(source).toContain('<div class="videos-page">\n\t<VideoBackLink current="videos" canBrowse={hasBrowseContent} />');
+		expect(back).toContain('class="back-link"');
+		expect(back).not.toContain('nav-pill');
+		expect(header.indexOf('<SearchField')).toBeLessThan(header.indexOf('<VideoNavigation'));
 		expect(navigation).toContain("{ id: 'editorial', href: '/tidal/videos', label: 'TIDAL editorial' }");
 		// The hero keeps metadata only.
 		const hero = source.slice(source.indexOf('{#if showVideoHero}'), source.indexOf('<!-- Legacy landing chips'));
@@ -146,20 +151,20 @@ describe('Browse while playing', () => {
 	});
 
 	test('the route offers a way back to the picks without stopping playback', () => {
-		expect(navigation).toContain('setVideoBrowseMode(true)');
-		expect(navigation).toContain('>Back to picks</button>');
+		expect(back).toContain('setVideoBrowseMode(true)');
+		expect(back).toContain('aria-label="Back to picks"');
 		// Browse mode must withdraw the stage anchor: its absence is the signal
 		// the dock reads to fall back to the mini player.
 		expect(source).toContain('let showVideoHero = $derived(\n\t\t!browseMode &&');
 	});
 
 	test('and a way back to the player that does not restart it', () => {
-		expect(navigation).toContain('setVideoBrowseMode(false)');
-		expect(navigation).toContain('Back to the player');
+		expect(back).toContain('setVideoBrowseMode(false)');
+		expect(back).toContain('aria-label="Back to the player"');
 	});
 
 	test('the dock docks to the corner in browse mode and stays mounted', () => {
-		expect(dock).toContain("let mode = $derived(onVideosRoute && !$videoBrowseMode ? 'full' : 'mini')");
+		expect(dock).toContain("onVideosRoute && !$videoBrowseMode ? 'full' : panelUsable ? 'panel' : 'mini'");
 		expect(dock).toContain('setVideoBrowseMode(false)');
 		// Exact match: full mode positions the player over a stage anchor, and
 		// /videos is the only route that publishes one.
