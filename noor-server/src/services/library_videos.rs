@@ -334,43 +334,76 @@ pub fn match_videos(tracks: &[LikedTrack], videos: &[TidalArtistVideo]) -> Vec<V
 /// Takes `&Connection` rather than `&mut` so the caller can hold the shared
 /// pooled connection for just this write. The TIDAL call that produced
 /// `matches` happens outside any lock.
+fn upsert_matches(conn: &Connection, matches: &[VideoMatch]) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "INSERT INTO library_videos
+             (track_id, tidal_video_id, video_title, duration_seconds, image_id,
+              match_score, release_year)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(track_id, tidal_video_id) DO UPDATE SET
+             video_title      = excluded.video_title,
+             duration_seconds = excluded.duration_seconds,
+             image_id         = excluded.image_id,
+             match_score      = excluded.match_score,
+             release_year     = excluded.release_year",
+    )?;
+    for m in matches {
+        stmt.execute(params![
+            m.track_id,
+            m.tidal_video_id,
+            m.video_title,
+            m.duration_seconds,
+            m.image_id,
+            m.match_score,
+            m.release_year,
+        ])?;
+    }
+    Ok(())
+}
+
 pub fn store_artist_scan(conn: &Connection, artist_id: i64, matches: &[VideoMatch]) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
-    {
-        let mut stmt = tx.prepare(
-            "INSERT INTO library_videos
-                 (track_id, tidal_video_id, video_title, duration_seconds, image_id,
-                  match_score, release_year)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(track_id, tidal_video_id) DO UPDATE SET
-                 video_title      = excluded.video_title,
-                 duration_seconds = excluded.duration_seconds,
-                 image_id         = excluded.image_id,
-                 match_score      = excluded.match_score,
-                 release_year     = excluded.release_year",
-        )?;
-        for m in matches {
-            stmt.execute(params![
-                m.track_id,
-                m.tidal_video_id,
-                m.video_title,
-                m.duration_seconds,
-                m.image_id,
-                m.match_score,
-                m.release_year,
-            ])?;
-        }
-        tx.execute(
-            "INSERT INTO library_video_scans (artist_id, scanned_at, video_count)
-             VALUES (?1, datetime('now'), ?2)
-             ON CONFLICT(artist_id) DO UPDATE SET
-                 scanned_at  = excluded.scanned_at,
-                 video_count = excluded.video_count",
-            params![artist_id, matches.len() as i64],
-        )?;
-    }
+    upsert_matches(&tx, matches)?;
+    tx.execute(
+        "INSERT INTO library_video_scans (artist_id, scanned_at, video_count)
+         VALUES (?1, datetime('now'), ?2)
+         ON CONFLICT(artist_id) DO UPDATE SET
+             scanned_at  = excluded.scanned_at,
+             video_count = excluded.video_count",
+        params![artist_id, matches.len() as i64],
+    )?;
     tx.commit()?;
     Ok(())
+}
+
+/// The crawler re-checks liked artists weekly. Match each page it fetches
+/// against liked songs so new videos reach the liked wall without waiting for
+/// the scanner's 90-day pass. Suppressed matches stay suppressed (the upsert
+/// never touches that column).
+pub fn match_liked_for_tidal_artist(
+    conn: &Connection,
+    tidal_artist_id: i64,
+    videos: &[TidalArtistVideo],
+) -> Result<usize> {
+    if videos.is_empty() {
+        return Ok(0);
+    }
+    let local_ids: Vec<i64> = {
+        let mut stmt = conn.prepare("SELECT id FROM artists WHERE tidal_id = ?1")?;
+        stmt.query_map([tidal_artist_id], |row| row.get(0))?
+            .collect::<Result<_, _>>()?
+    };
+    let mut hits = 0;
+    for artist_id in local_ids {
+        let tracks = liked_tracks_for_artist(conn, artist_id)?;
+        if tracks.is_empty() {
+            continue;
+        }
+        let matches = match_videos(&tracks, videos);
+        hits += matches.len();
+        upsert_matches(conn, &matches)?;
+    }
+    Ok(hits)
 }
 
 /// Keep every video returned by the artist lookup, including songs that were
@@ -780,6 +813,20 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn a_crawler_page_adds_liked_song_matches_without_restamping_the_scan() {
+        let conn = setup();
+        let liked = liked_tracks_for_artist(&conn, 1).unwrap();
+        let title = liked[0].title.clone();
+        let videos = vec![video(900, &title)];
+        let hits = match_liked_for_tidal_artist(&conn, 5001, &videos).unwrap();
+        assert_eq!(hits, 1);
+        let stamped: i64 = conn
+            .query_row("SELECT COUNT(*) FROM library_video_scans", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stamped, 0, "the liked-wall scanner keeps its own ledger");
     }
 
     #[test]
