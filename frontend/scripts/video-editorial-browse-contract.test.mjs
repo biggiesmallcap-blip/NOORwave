@@ -164,7 +164,7 @@ describe('Browse while playing', () => {
 	});
 
 	test('the dock docks to the corner in browse mode and stays mounted', () => {
-		expect(dock).toContain("let mode = $derived(onVideosRoute && !$videoBrowseMode ? 'full' : 'mini')");
+		expect(dock).toContain("onVideosRoute && !$videoBrowseMode ? 'full' : panelUsable ? 'panel' : 'mini'");
 		expect(dock).toContain('setVideoBrowseMode(false)');
 		// Exact match: full mode positions the player over a stage anchor, and
 		// /videos is the only route that publishes one.
