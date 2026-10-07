@@ -2,6 +2,7 @@
 //! lineup decides which stations exist; every refill picks fresh videos
 //! from the catalog. Nothing here calls TIDAL.
 
+pub mod lineup;
 pub mod pick;
 pub mod pool;
 
