@@ -252,23 +252,28 @@
 		});
 	}
 
-	/** Resolves once the window has finished growing. WebView2 resizes the
-	 *  host window after fullscreenchange; browsers usually before it. Done
-	 *  when the viewport covers the screen or has held still for a few frames,
-	 *  capped so a window that never reaches screen size still expands. */
+	/** Runs once the window has finished growing. WebView2 resizes the host
+	 *  window after fullscreenchange; browsers usually before it. Done when
+	 *  the viewport covers the screen, or has grown and then held still (UI
+	 *  zoom keeps it below screen.width in CSS px). A viewport that has not
+	 *  grown after a short beat was already full size; capped either way. */
 	function afterWindowSettles(done: () => void) {
 		const start = performance.now();
-		let lastW = window.innerWidth;
-		let lastH = window.innerHeight;
+		const fromW = window.innerWidth;
+		const fromH = window.innerHeight;
+		let lastW = fromW;
+		let lastH = fromH;
 		let still = 0;
 		const tick = () => {
 			const w = window.innerWidth;
 			const h = window.innerHeight;
+			const elapsed = performance.now() - start;
 			const fills = w >= screen.width - 2 && h >= screen.height - 2;
+			const grew = w !== fromW || h !== fromH;
 			still = w === lastW && h === lastH ? still + 1 : 0;
 			lastW = w;
 			lastH = h;
-			if (fills || still >= 4 || performance.now() - start > 400) {
+			if (fills || (grew && still >= 3) || (!grew && elapsed > 250) || elapsed > 800) {
 				// One more frame so the dock measures the re-laid-out page.
 				requestAnimationFrame(done);
 				return;
