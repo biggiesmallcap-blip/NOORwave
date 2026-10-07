@@ -73,7 +73,96 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_069,
     MIGRATION_070,
     MIGRATION_071,
+    MIGRATION_072,
 ];
+
+// Video discovery crawler. `video_artist_state` is the one ledger per TIDAL
+// artist (catalog checks, relationship expansion, popularity, name key);
+// `video_colist_seen` keeps a curated list from counting the same pair twice.
+// Edges gain a rank and a weight so relevance can follow strong links first.
+// Runs inside the >= 69 migration transaction: no BEGIN/COMMIT here.
+const MIGRATION_072: &str = r#"
+CREATE TABLE IF NOT EXISTS video_artist_state (
+    artist_tidal_id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    name_key TEXT NOT NULL DEFAULT '',
+    popularity INTEGER,
+    mix_id TEXT,
+    seen_main INTEGER NOT NULL DEFAULT 0,
+    seen_featured INTEGER NOT NULL DEFAULT 0,
+    fetched_count INTEGER NOT NULL DEFAULT 0,
+    total_videos INTEGER,
+    last_checked_at TEXT,
+    next_check_at TEXT,
+    empty_streak INTEGER NOT NULL DEFAULT 0,
+    nothing_new_streak INTEGER NOT NULL DEFAULT 0,
+    fail_streak INTEGER NOT NULL DEFAULT 0,
+    last_expanded_at TEXT,
+    next_expand_at TEXT,
+    expand_fail_streak INTEGER NOT NULL DEFAULT 0,
+    mix_checked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_video_artist_state_name_key ON video_artist_state(name_key);
+CREATE INDEX IF NOT EXISTS idx_video_artist_state_next_check ON video_artist_state(next_check_at);
+
+CREATE TABLE IF NOT EXISTS video_colist_seen (
+    list_key TEXT NOT NULL,
+    artist_a INTEGER NOT NULL,
+    artist_b INTEGER NOT NULL,
+    PRIMARY KEY (list_key, artist_a, artist_b)
+);
+
+ALTER TABLE video_related_artists ADD COLUMN rank INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE video_related_artists ADD COLUMN weight REAL NOT NULL DEFAULT 0.5;
+UPDATE video_related_artists SET rank = (
+    SELECT COUNT(*) FROM video_related_artists o
+     WHERE o.seed_tidal_id = video_related_artists.seed_tidal_id
+       AND o.source = video_related_artists.source
+       AND o.rowid < video_related_artists.rowid
+);
+UPDATE video_related_artists SET weight = CASE source
+    WHEN 'tidal' THEN MAX(0.6, 1.0 - 0.04 * rank)
+    WHEN 'lastfm' THEN MAX(0.3, 1.0 - 0.035 * rank)
+    ELSE 0.4 END;
+
+ALTER TABLE video_history ADD COLUMN video_duration_ms INTEGER;
+
+INSERT OR IGNORE INTO video_artist_state (artist_tidal_id, name, seen_main, fetched_count)
+SELECT artist_tidal_id, COALESCE(MAX(artist_name), ''), 1, COUNT(*)
+  FROM video_catalog WHERE artist_tidal_id > 0 GROUP BY artist_tidal_id;
+
+INSERT OR IGNORE INTO video_artist_state (artist_tidal_id)
+SELECT artist_tidal_id FROM video_artist_scans WHERE artist_tidal_id > 0;
+UPDATE video_artist_state SET last_checked_at = (
+    SELECT scanned_at FROM video_artist_scans s
+     WHERE s.artist_tidal_id = video_artist_state.artist_tidal_id)
+ WHERE artist_tidal_id IN (SELECT artist_tidal_id FROM video_artist_scans);
+UPDATE video_artist_state SET empty_streak = 1, next_check_at = datetime(last_checked_at, '+60 days')
+ WHERE last_checked_at IS NOT NULL AND seen_main = 0;
+UPDATE video_artist_state SET next_check_at = datetime(last_checked_at, '+30 days')
+ WHERE last_checked_at IS NOT NULL AND seen_main = 1;
+
+INSERT OR IGNORE INTO video_artist_state (artist_tidal_id, name)
+SELECT related_tidal_id, MIN(name) FROM video_related_artists
+ WHERE related_tidal_id > 0 GROUP BY related_tidal_id;
+INSERT OR IGNORE INTO video_artist_state (artist_tidal_id)
+SELECT seed_tidal_id FROM video_related_scans WHERE seed_tidal_id > 0;
+UPDATE video_artist_state SET
+    last_expanded_at = (SELECT scanned_at FROM video_related_scans r
+                         WHERE r.seed_tidal_id = video_artist_state.artist_tidal_id),
+    next_expand_at = (SELECT datetime(scanned_at, '+30 days') FROM video_related_scans r
+                       WHERE r.seed_tidal_id = video_artist_state.artist_tidal_id)
+ WHERE artist_tidal_id IN (SELECT seed_tidal_id FROM video_related_scans);
+UPDATE video_artist_state SET next_expand_at = (
+    SELECT retry_at FROM video_related_retries r
+     WHERE r.seed_tidal_id = video_artist_state.artist_tidal_id)
+ WHERE artist_tidal_id IN (SELECT seed_tidal_id FROM video_related_retries);
+UPDATE video_artist_state SET name = COALESCE(
+    (SELECT name FROM artists a WHERE a.tidal_id = video_artist_state.artist_tidal_id AND a.name <> '' LIMIT 1),
+    (SELECT name FROM video_related_artists r WHERE r.related_tidal_id = video_artist_state.artist_tidal_id AND r.name <> '' LIMIT 1),
+    '')
+ WHERE name = '';
+"#;
 
 const MIGRATION_071: &str = r#"
 -- Separate the decoded countdown target from the original metadata estimate.
@@ -2039,6 +2128,78 @@ mod tests {
     use rusqlite::Connection;
 
     #[test]
+    fn migration_072_builds_the_video_discovery_ledger() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migrations_up_to(&conn, 71).unwrap();
+        conn.execute_batch(
+            "INSERT INTO artists (id, tidal_id, name) VALUES (1, 10, 'Seed Artist');
+             INSERT INTO video_catalog (tidal_video_id, artist_tidal_id, artist_name, item_json)
+                 VALUES (900, 10, 'Seed Artist', '{\"tidal_id\":900,\"title\":\"Song\",\"duration_s\":200,\"artist_id\":10,\"artist_name\":\"Seed Artist\",\"album_tidal_id\":null,\"artwork_url\":null,\"release_year\":null}');
+             INSERT INTO video_artist_scans (artist_tidal_id, scanned_at) VALUES
+                 (10, datetime('now', '-3 days')), (20, datetime('now', '-3 days'));
+             INSERT INTO video_related_artists (seed_tidal_id, related_tidal_id, name, source) VALUES
+                 (10, 20, 'Empty Neighbor', 'tidal'), (10, 30, 'Second', 'tidal'), (10, 40, 'Fm', 'lastfm');
+             INSERT INTO video_related_scans (seed_tidal_id, scanned_at) VALUES (10, datetime('now', '-1 day'));",
+        )
+        .unwrap();
+        run_migrations(&conn).unwrap();
+
+        type Row = (String, bool, i64, bool, i64, Option<i64>);
+        let row =
+            |id: i64| -> Row {
+                conn.query_row(
+                "SELECT name, seen_main, fetched_count, last_checked_at IS NOT NULL, empty_streak,
+                        CAST(ROUND(julianday(next_check_at) - julianday('now')) AS INTEGER)
+                   FROM video_artist_state WHERE artist_tidal_id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )
+            .unwrap()
+            };
+        assert_eq!(row(10), ("Seed Artist".into(), true, 1, true, 0, Some(27)));
+        assert_eq!(
+            row(20),
+            ("Empty Neighbor".into(), false, 0, true, 1, Some(57))
+        );
+        assert_eq!(row(30).0, "Second");
+
+        let mut stmt = conn
+            .prepare("SELECT related_tidal_id, rank, weight FROM video_related_artists ORDER BY related_tidal_id")
+            .unwrap();
+        let edges: Vec<(i64, i64, f64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            edges.iter().map(|e| (e.0, e.1)).collect::<Vec<_>>(),
+            vec![(20, 0), (30, 1), (40, 0)]
+        );
+        assert!((edges[0].2 - 1.0).abs() < 1e-9);
+        assert!((edges[1].2 - 0.96).abs() < 1e-9);
+        assert!((edges[2].2 - 1.0).abs() < 1e-9);
+
+        let expanded: (bool, i64) = conn
+            .query_row(
+                "SELECT last_expanded_at IS NOT NULL,
+                        CAST(ROUND(julianday(next_expand_at) - julianday('now')) AS INTEGER)
+                   FROM video_artist_state WHERE artist_tidal_id = 10",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(expanded, (true, 29));
+        let has_duration: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('video_history') WHERE name = 'video_duration_ms')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(has_duration);
+    }
+
+    #[test]
     fn migration_041_preserves_existing_artist_stats() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
@@ -2455,7 +2616,7 @@ mod tests {
                 conn.query_row("SELECT COUNT(*) FROM _migrations", [], |r| r
                     .get::<_, i64>(0))
                     .unwrap(),
-                71
+                MIGRATIONS.len() as i64
             );
             assert_eq!(conn.query_row("SELECT COUNT(*) FROM pragma_table_info('dj_transition_events') WHERE name='runtime_planned_start_ms'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
             assert_eq!(
