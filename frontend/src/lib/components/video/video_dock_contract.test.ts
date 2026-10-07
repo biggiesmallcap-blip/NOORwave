@@ -25,17 +25,26 @@ describe('persistent video dock contract', () => {
 		expect(dock).toContain('stageRect.width > 0 && stageRect.height > 0');
 		expect(dock).not.toContain("page.url.pathname === '/videos'");
 		expect(dock).toContain('getBoundingClientRect()');
-		expect(dock).toContain("class:mini={mode === 'mini'}");
+		expect(dock).toContain("class:mini={place === 'mini'}");
 	});
 
 	test('leaving the stage glides the same player into place, with no snap or second pop', () => {
 		// Bounds are known in every mode, so the first non-full frame is
 		// already placed rather than parked at the CSS fallback corner.
 		expect(dock).toMatch(/if \(active\) \{\s*if \(!workspace\?\.isConnected\)/);
-		expect(dock).toContain("if (previousMode === 'full' && next !== 'full')");
+		expect(dock).toContain('if (previousPlace !== null && previousPlace !== next)');
 		// Zero duration, not animation: none - removing it would replay dock-in.
 		expect(dock).toContain('animation-duration: 0s;');
 		expect(dock).not.toMatch(/\.morphing \{[^}]*\n\s*animation: none;/);
+	});
+
+	test('fullscreen grows the same player to fill the window instead of a hard cut', () => {
+		const player = readFileSync(join(here, 'VideoPlayer.svelte'), 'utf8');
+		expect(dock).toContain('onFullscreenToggle={toggleExpanded}');
+		expect(dock).toContain('document.documentElement.requestFullscreen?.()');
+		expect(dock).toContain("if (event.key === 'Escape' && expanded && !document.fullscreenElement) expanded = false;");
+		expect(dock).toContain('if (expanded) return { top: 0, left: 0, width: viewportWidth, height: viewportHeight };');
+		expect(player).toMatch(/if \(onFullscreenToggle\) \{\s*onFullscreenToggle\(\);\s*return;/);
 	});
 
 	test('wheel over the docked video scrolls the page underneath', () => {

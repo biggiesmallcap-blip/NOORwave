@@ -70,6 +70,7 @@
 	let rect = $state<Rect | null>(null);
 	let bounds = $state<Bounds | null>(null);
 	let viewportWidth = $state(typeof window === 'undefined' ? 1280 : window.innerWidth);
+	let viewportHeight = $state(typeof window === 'undefined' ? 800 : window.innerHeight);
 	let rafId = 0;
 	let workspace: HTMLElement | null = null;
 
@@ -105,6 +106,7 @@
 				bounds = { left: w.left, top: w.top, right: w.right, bottom: w.bottom };
 			}
 			if (window.innerWidth !== viewportWidth) viewportWidth = window.innerWidth;
+			if (window.innerHeight !== viewportHeight) viewportHeight = window.innerHeight;
 		}
 		rafId = requestAnimationFrame(track);
 	}
@@ -170,20 +172,72 @@
 		if (!active) collapsed = false;
 	});
 
-	// Leaving the watch page: the same player glides from the stage into its
-	// corner or the queue panel (left/top/width/height transition) instead of
-	// popping in fresh.
+	// --- Fullscreen: the same player grows to fill the window ---
+	// Not native element fullscreen, which swaps the video into the top layer
+	// in one hard cut. The dock glides from wherever it sits to cover the
+	// window while the window itself goes fullscreen underneath, and glides
+	// back on exit (button, double-click, F, or Esc).
+	let expanded = $state(false);
+
+	function toggleExpanded() {
+		if (expanded) {
+			expanded = false;
+			if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+		} else {
+			expanded = true;
+			void document.documentElement.requestFullscreen?.().catch(() => {});
+		}
+	}
+
+	$effect(() => {
+		if (!active) expanded = false;
+	});
+
+	$effect(() => {
+		// Esc (or any other way out of window fullscreen) collapses too.
+		const onFullscreenChange = () => {
+			if (!document.fullscreenElement && expanded) expanded = false;
+		};
+		// Esc with no window fullscreen (the request can be refused).
+		const onKeydown = (event: KeyboardEvent) => {
+			if (event.key === 'Escape' && expanded && !document.fullscreenElement) expanded = false;
+		};
+		document.addEventListener('fullscreenchange', onFullscreenChange);
+		window.addEventListener('keydown', onKeydown);
+		return () => {
+			document.removeEventListener('fullscreenchange', onFullscreenChange);
+			window.removeEventListener('keydown', onKeydown);
+		};
+	});
+
+	// --- Moves between places glide ---
+	// Stage, corner, queue panel and fullscreen are all the same element, so
+	// every move animates left/top/width/height from where it was instead of
+	// cutting (watch page -> corner, corner -> watch page, in and out of
+	// fullscreen).
+	type Place = 'full' | 'panel' | 'mini' | 'expanded';
+	let place = $derived<Place>(expanded ? 'expanded' : mode);
+	let box = $derived.by(() => {
+		if (expanded) return { top: 0, left: 0, width: viewportWidth, height: viewportHeight };
+		if (mode !== 'mini' && rect) return rect;
+		if (position) return { top: position.top, left: position.left, width: size.width, height: size.height };
+		return null;
+	});
 	let morphing = $state(false);
-	let previousMode: 'full' | 'panel' | 'mini' | null = null;
+	let previousPlace: Place | null = null;
 	let morphTimer: ReturnType<typeof setTimeout> | null = null;
 	$effect(() => {
-		const next = mode;
-		if (previousMode === 'full' && next !== 'full') {
+		const next = place;
+		if (!active) {
+			previousPlace = null;
+			return;
+		}
+		if (previousPlace !== null && previousPlace !== next) {
 			morphing = true;
 			if (morphTimer) clearTimeout(morphTimer);
 			morphTimer = setTimeout(() => (morphing = false), MORPH_MS);
 		}
-		previousMode = next;
+		previousPlace = next;
 	});
 
 	// --- Prefetch the next stream for gapless autoplay ---
@@ -254,7 +308,7 @@
 	 *  over the docked video reached nothing and the page would not scroll.
 	 *  Hand it to the workspace while the video sits in the page. */
 	function forwardWheel(event: WheelEvent) {
-		if (mode !== 'full' || !workspace) return;
+		if (mode !== 'full' || expanded || !workspace) return;
 		const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? workspace.clientHeight : 1;
 		workspace.scrollBy({ top: event.deltaY * scale, left: event.deltaX * scale });
 	}
@@ -272,19 +326,20 @@
 {#if active}
 	<div
 		class="video-dock"
-		class:mini={mode === 'mini'}
-		class:panel={mode === 'panel'}
-		class:full={mode === 'full'}
-		class:placed
-		class:collapsed={mode === 'mini' && collapsed}
+		class:mini={place === 'mini'}
+		class:panel={place === 'panel'}
+		class:full={place === 'full'}
+		class:expanded
+		class:placed={placed && !expanded}
+		class:collapsed={place === 'mini' && collapsed}
 		class:dragging={drag !== null}
 		class:morphing
 		onwheel={forwardWheel}
-		class:positioned={mode !== 'mini' && rect !== null}
-		style:top={mode !== 'mini' && rect ? `${rect.top}px` : position ? `${position.top}px` : null}
-		style:left={mode !== 'mini' && rect ? `${rect.left}px` : position ? `${position.left}px` : null}
-		style:width={mode !== 'mini' && rect ? `${rect.width}px` : position ? `${size.width}px` : null}
-		style:height={mode !== 'mini' && rect ? `${rect.height}px` : position ? `${size.height}px` : null}
+		class:positioned={place !== 'mini' && box !== null}
+		style:top={box ? `${box.top}px` : null}
+		style:left={box ? `${box.left}px` : null}
+		style:width={box ? `${box.width}px` : null}
+		style:height={box ? `${box.height}px` : null}
 	>
 		<div class="player-surface" aria-hidden={mode === 'mini' && collapsed}>
 			<VideoPlayer
@@ -293,7 +348,9 @@
 				title={$videoSession.current?.title ?? 'Video'}
 				artist={$videoSession.current?.artist_name ?? null}
 				qualityMode={qualityMode}
-				variant={mode === 'full' ? 'full' : 'mini'}
+				variant={place === 'full' || expanded ? 'full' : 'mini'}
+				fullscreenActive={expanded}
+				onFullscreenToggle={toggleExpanded}
 				onProgress={noteVideoProgress}
 				autoplayNext={$videoSession.autoplay}
 				hasNext={hasNext}
@@ -309,7 +366,9 @@
 			/>
 		</div>
 
-		{#if mode === 'mini' && collapsed}
+		{#if expanded}
+			<!-- Fullscreen: the player's own controls only. -->
+		{:else if mode === 'mini' && collapsed}
 			<div class="pill">
 				<span class="pill-title">{$videoSession.current?.title ?? 'Video'}</span>
 				<button type="button" class="mini-btn" aria-label="Show video" title="Show video" onclick={() => (collapsed = false)}>&#x25A2;</button>
@@ -415,18 +474,6 @@
 			height 0.18s ease;
 	}
 
-	.video-dock.mini.placed.morphing,
-	.video-dock.panel.positioned.morphing {
-		/* Zero duration, not animation: none. Removing the animation when the
-		   glide ends would restart dock-in and pop the window a second time;
-		   with the same name kept, it has already finished by then. */
-		animation-duration: 0s;
-		transition:
-			left 0.32s cubic-bezier(0.22, 0.7, 0.2, 1),
-			top 0.32s cubic-bezier(0.22, 0.7, 0.2, 1),
-			width 0.32s cubic-bezier(0.22, 0.7, 0.2, 1),
-			height 0.32s cubic-bezier(0.22, 0.7, 0.2, 1);
-	}
 
 	.video-dock.mini.placed.dragging {
 		transition: none;
@@ -529,6 +576,35 @@
 			right: 10px;
 			bottom: calc(76px + var(--safe-bottom, 0px));
 			width: min(64vw, 240px);
+		}
+	}
+
+	/* Fullscreen: covers the window, above the sidebar and player bar. */
+	.video-dock.expanded {
+		position: fixed;
+		z-index: 1000;
+		background: #000;
+		border-radius: 0;
+	}
+
+	/* Every move between places glides. Last in the sheet and as specific as
+	   .mini.placed, so it wins over that rule's short drag-snap transition.
+	   Zero duration rather than animation: none - removing the animation when
+	   the glide ends would restart dock-in or stage-in and pop a second time;
+	   with the same name kept, it has already finished by then. */
+	.video-dock.morphing:is(.mini, .panel, .full, .expanded) {
+		animation-duration: 0s;
+		transition:
+			left 0.32s cubic-bezier(0.22, 0.7, 0.2, 1),
+			top 0.32s cubic-bezier(0.22, 0.7, 0.2, 1),
+			width 0.32s cubic-bezier(0.22, 0.7, 0.2, 1),
+			height 0.32s cubic-bezier(0.22, 0.7, 0.2, 1),
+			border-radius 0.32s ease;
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.video-dock.morphing:is(.mini, .panel, .full, .expanded) {
+			transition: none;
 		}
 	}
 </style>

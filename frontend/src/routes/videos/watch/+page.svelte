@@ -274,9 +274,11 @@
 		animation: watch-in 0.28s cubic-bezier(0.22, 0.7, 0.2, 1) both;
 	}
 
+	/* Fade only: the player glides into the stage, so a slide here would
+	   move the stage under it and nudge the video a second time. */
 	@keyframes watch-in {
-		from { opacity: 0; transform: translateY(8px); }
-		to { opacity: 1; transform: none; }
+		from { opacity: 0; }
+		to { opacity: 1; }
 	}
 
 	.watch-main {
