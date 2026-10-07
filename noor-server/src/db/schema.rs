@@ -74,7 +74,25 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_070,
     MIGRATION_071,
     MIGRATION_072,
+    MIGRATION_073,
 ];
+
+// Video stations: one row per station in a day's lineup, with a stored
+// preview so the Stations tab opens instantly. Runs inside the >= 69
+// migration transaction: no BEGIN/COMMIT here.
+const MIGRATION_073: &str = r#"
+CREATE TABLE IF NOT EXISTS video_station_lineup (
+    day TEXT NOT NULL,
+    station_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    grp TEXT NOT NULL,
+    title TEXT NOT NULL,
+    subtitle TEXT NOT NULL,
+    unwatched_count INTEGER NOT NULL,
+    preview_json TEXT NOT NULL,
+    PRIMARY KEY (day, station_id)
+);
+"#;
 
 // Video discovery crawler. `video_artist_state` is the one ledger per TIDAL
 // artist (catalog checks, relationship expansion, popularity, name key);
@@ -2131,6 +2149,25 @@ pub(super) fn apply_migrations_up_to(conn: &Connection, n: usize) -> Result<()> 
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    #[test]
+    fn migration_073_creates_the_station_lineup() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO video_station_lineup
+                 (day, station_id, position, grp, title, subtitle, unwatched_count, preview_json)
+             VALUES ('2026-10-07', 'shuffle', 0, 'for_you', 'Pure shuffle', '', 40, '[]')",
+            [],
+        )
+        .unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM video_station_lineup", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
 
     #[test]
     fn migration_072_builds_the_video_discovery_ledger() {
