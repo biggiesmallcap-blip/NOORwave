@@ -10,3 +10,4 @@ pub mod artist_state;
 pub mod graph;
 pub mod harvest;
 pub mod names;
+pub mod roots;
