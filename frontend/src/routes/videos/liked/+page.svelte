@@ -63,7 +63,7 @@
 			tidal_id: version.tidal_video_id,
 			title: version.video_title,
 			duration_ms: version.duration_ms,
-			artist_id: video.artist_id,
+			artist_id: video.artist_tidal_id,
 			artist_name: video.artist_name,
 			album_tidal_id: null,
 			artwork_url: version.artwork_url,

@@ -132,6 +132,24 @@ pub fn enjoyed_from_rows(rows: &[WatchRow], liked: &HashSet<i64>) -> Vec<Root> {
     roots
 }
 
+/// Liked-wall plays used to log the local `artists.id` as `artist_tidal_id`, so
+/// a Bee Gees watch credited TIDAL artist 126 (Richie Havens) and seeded his
+/// radio. Rewrites rows whose id names a local artist of the same name with a
+/// different TIDAL id. Idempotent: a repaired row no longer matches.
+pub fn repair_local_artist_ids(conn: &Connection) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE video_history
+            SET artist_tidal_id = (SELECT a.tidal_id FROM artists a
+                                    WHERE a.id = video_history.artist_tidal_id)
+          WHERE EXISTS (SELECT 1 FROM artists a
+                         WHERE a.id = video_history.artist_tidal_id
+                           AND a.name = video_history.artist_name
+                           AND a.tidal_id > 0
+                           AND a.tidal_id <> video_history.artist_tidal_id)",
+        [],
+    )?)
+}
+
 pub fn enjoyed_roots(conn: &Connection, liked: &HashSet<i64>) -> Result<Vec<Root>> {
     let mut stmt = conn.prepare(
         "SELECT artist_tidal_id, julianday('now') - julianday(started_at),
@@ -213,6 +231,27 @@ mod tests {
             duration_ms: Some(200_000),
             completed,
         }
+    }
+
+    #[test]
+    fn repair_rewrites_local_artist_ids_only() {
+        let conn = conn();
+        conn.execute_batch(
+            "INSERT INTO artists (id, tidal_id, name) VALUES (126, 15096, 'Bee Gees'), (4149, 126, 'Richie Havens');
+             INSERT INTO video_history (tidal_video_id, artist_tidal_id, artist_name) VALUES
+                 (1, 126, 'Bee Gees'), (2, 126, 'Richie Havens'), (3, 15096, 'Bee Gees');",
+        )
+        .unwrap();
+        assert_eq!(repair_local_artist_ids(&conn).unwrap(), 1);
+        assert_eq!(repair_local_artist_ids(&conn).unwrap(), 0);
+        let ids: Vec<i64> = conn
+            .prepare("SELECT artist_tidal_id FROM video_history ORDER BY tidal_video_id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(ids, vec![15096, 126, 15096]);
     }
 
     #[test]
