@@ -6,6 +6,7 @@
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import MediaRail from '$lib/components/ui/MediaRail.svelte';
 	import StationCard from '$lib/components/video/StationCard.svelte';
+	import VideoBackLink from '$lib/components/video/VideoBackLink.svelte';
 	import VideoNavigation from '$lib/components/video/VideoNavigation.svelte';
 	import { SMALL_CATALOG, groupStations, previewArtists, spotlightArtistId, stationMeta } from '$lib/components/video/stations';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
@@ -69,6 +70,7 @@
 </svelte:head>
 
 <div class="stations-page">
+	<VideoBackLink current="stations" />
 	<header class="stations-header">
 		<VideoNavigation current="stations" />
 	</header>

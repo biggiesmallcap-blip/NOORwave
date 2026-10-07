@@ -9,6 +9,7 @@
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 	import VideoCard from '$lib/components/video/VideoCard.svelte';
+	import VideoBackLink from '$lib/components/video/VideoBackLink.svelte';
 	import VideoNavigation from '$lib/components/video/VideoNavigation.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
@@ -315,6 +316,7 @@
 </svelte:head>
 
 <div class="page">
+	<VideoBackLink current="liked" />
 	<header class="search-header">
 		<div class="search-tools">
 			<SearchField

@@ -14,6 +14,7 @@
 	import TidalDiscoverShelves from '$lib/components/search/TidalDiscoverShelves.svelte';
 	import VideoCard from '$lib/components/video/VideoCard.svelte';
 	import VideoSetShelf from '$lib/components/video/VideoSetShelf.svelte';
+	import VideoBackLink from '$lib/components/video/VideoBackLink.svelte';
 	import VideoNavigation from '$lib/components/video/VideoNavigation.svelte';
 	import { buildBrowseMix } from '$lib/video/browse_mix';
 	import SearchField from '$lib/search/ui/SearchField.svelte';
@@ -802,6 +803,7 @@
 {/snippet}
 
 <div class="videos-page">
+	<VideoBackLink current="videos" canBrowse={hasBrowseContent} />
 	<header class="search-header">
 		<div class="search-tools">
 			<SearchField
@@ -813,7 +815,7 @@
 				oninput={onInput}
 			/>
 		</div>
-		<VideoNavigation current="videos" canBrowse={hasBrowseContent} />
+		<VideoNavigation current="videos" />
 		{#if searchFocused && recent.length > 0}
 			<div class="recent-inline">
 				<span class="eyebrow">Recent</span>

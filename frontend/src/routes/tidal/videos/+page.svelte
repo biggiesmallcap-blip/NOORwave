@@ -1,5 +1,6 @@
 <script lang="ts">
 	import TidalEditorialPage from '$lib/components/tidal/TidalEditorialPage.svelte';
+	import VideoBackLink from '$lib/components/video/VideoBackLink.svelte';
 	import VideoNavigation from '$lib/components/video/VideoNavigation.svelte';
 </script>
 
@@ -14,6 +15,7 @@
 	mediaKind="video"
 >
 	{#snippet navigation()}
+		<VideoBackLink current="editorial" />
 		<VideoNavigation current="editorial" />
 	{/snippet}
 </TidalEditorialPage>
