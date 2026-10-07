@@ -50,16 +50,19 @@ describe('watch page contract', () => {
 		expect(watch).not.toContain('$:');
 	});
 
-	test('shows up next from the live queue and keep exploring from related', () => {
-		expect(watch).toContain('$videoSessionUpcoming.slice(0, UP_NEXT_MAX)');
-		expect(watch).toContain('onclick={() => void playQueuedVideo(item.tidal_id)}');
+	test('one queue: up next is the app queue panel, the page keeps exploring', () => {
+		// A second up-next list beside the player duplicated the queue panel
+		// and, taller than the player column, opened a gap under the video.
+		expect(watch).not.toContain('videoSessionUpcoming');
+		expect(watch).not.toContain('class="up-next"');
 		expect(watch).toContain('await api.getRelatedVideos({');
 		expect(watch).toContain('if (seq !== relatedRequest) return;');
 		expect(watch).toContain('Keep exploring');
 	});
 
 	test('the address follows the playing video, so reload and copied links reopen it', () => {
-		expect(watch).toContain('replaceState(`${WATCH_PATH}?videoId=${id}`, page.state);');
+		expect(watch).toContain('replaceState(watchUrl(id, {');
+		expect(watch).toContain('artistName: current?.artist_name,');
 		expect(watch).toContain('function openFromUrl()');
 		expect(watch).toContain("if ($videoSession.current?.tidal_id === videoId) return;");
 	});

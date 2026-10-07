@@ -4,32 +4,27 @@
 	import { page } from '$app/state';
 	import { api, type TidalSearchVideo } from '$lib/api/client';
 	import VideoCard from '$lib/components/video/VideoCard.svelte';
-	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
-	import { buildVideoMenu } from '$lib/player/video_menu';
 	import { assertOnline } from '$lib/stores/player';
 	import { showToast } from '$lib/stores/toast';
 	import { audioSettings } from '$lib/stores/audio_settings';
 	import { formatTrackDuration } from '$lib/utils/format';
 	import {
 		clearVideoSession,
-		playQueuedVideo,
 		playVideo,
 		videoSession,
-		videoSessionUpcoming,
 		videoStageAnchor,
 	} from '$lib/stores/video_session';
-	import { WATCH_PATH } from '$lib/video/section';
+	import { WATCH_PATH, watchUrl } from '$lib/video/section';
 
 	// The watch page: the one place the big player lives. The persistent dock
 	// positions the live <video> over this page's stage; everything else here
-	// is about what is playing - who it is, what comes next, where to go from
-	// it. Back returns to the tab the video was picked on.
-
-	const UP_NEXT_MAX = 12;
+	// is about what is playing - who it is and where to go from it. What comes
+	// next is the app's video queue panel, not a second list here. Back
+	// returns to the tab the video was picked on.
 
 	let stageAnchor = $state<HTMLDivElement | null>(null);
 	let savedVideoIds = $state<Set<number>>(new Set());
@@ -44,7 +39,6 @@
 	let loadingStream = $derived($videoSession.loading);
 	let hasSession = $derived(Boolean(current || streamUrl || loadingStream));
 	let videoIsSaved = $derived(current ? savedVideoIds.has(current.tidal_id) : false);
-	let upNext = $derived($videoSessionUpcoming.slice(0, UP_NEXT_MAX));
 
 	async function toggleSavedVideo() {
 		const item = current;
@@ -130,7 +124,11 @@
 		const id = current?.tidal_id;
 		if (id == null || page.url.pathname !== WATCH_PATH) return;
 		if (page.url.searchParams.get('videoId') === String(id)) return;
-		replaceState(`${WATCH_PATH}?videoId=${id}`, page.state);
+		replaceState(watchUrl(id, {
+			title: current?.title,
+			artistId: current?.artist_id,
+			artistName: current?.artist_name,
+		}), page.state);
 	});
 
 	// Hand the stage to the persistent dock.
@@ -241,43 +239,6 @@
 				</div>
 			{/if}
 		</div>
-
-		<aside class="up-next" aria-label="Up next">
-			<div class="side-heading">
-				<p class="eyebrow">Up next</p>
-				{#if $videoSession.continuous && $videoSession.autoplay}
-					<span class="side-note">Radio keeps going</span>
-				{/if}
-			</div>
-			{#if upNext.length > 0}
-				<ol class="up-next-list">
-					{#each upNext as item (item.tidal_id)}
-						<li>
-							<button
-								type="button"
-								class="up-next-row"
-								onclick={() => void playQueuedVideo(item.tidal_id)}
-								oncontextmenu={(event) => {
-									event.preventDefault();
-									event.stopPropagation();
-									openContextMenu(event, buildVideoMenu(item, { inQueue: true }), item.title);
-								}}
-							>
-								<span class="thumb">
-									<ArtworkImage src={item.artwork_url ?? null} size={160} fallbackText="VID" decorative={true} fadeIn={true} />
-								</span>
-								<span class="row-copy">
-									<span class="row-title">{item.title}</span>
-									<span class="row-sub">{item.artist_name ?? 'TIDAL video'}{item.duration_ms ? ` . ${formatTrackDuration(item.duration_ms)}` : ''}</span>
-								</span>
-							</button>
-						</li>
-					{/each}
-				</ol>
-			{:else}
-				<p class="side-note">Nothing queued after this one.</p>
-			{/if}
-		</aside>
 	</div>
 
 	{#if current && (relatedLoading || relatedVideos.length > 0)}
@@ -303,13 +264,13 @@
 {/if}
 
 <style>
-	/* Player on the left, the queue beside it; the related row runs full
-	   width below. Borderless, like the rest of the video section. */
+	/* One column: the player, what is playing, then the related row.
+	   Borderless, like the rest of the video section. The width cap keeps a
+	   16:9 player short enough that its title and actions stay on screen. */
 	.watch {
-		display: grid;
-		grid-template-columns: minmax(0, 1fr) minmax(260px, 340px);
-		gap: 24px;
-		align-items: start;
+		width: 100%;
+		max-width: max(480px, calc((100dvh - 300px) * 16 / 9));
+		margin: 0 auto;
 		animation: watch-in 0.28s cubic-bezier(0.22, 0.7, 0.2, 1) both;
 	}
 
@@ -416,95 +377,6 @@
 		opacity: 0.6;
 	}
 
-	.up-next {
-		display: grid;
-		gap: var(--space-3);
-		min-width: 0;
-	}
-
-	.side-heading {
-		display: flex;
-		align-items: baseline;
-		justify-content: space-between;
-		gap: var(--space-3);
-	}
-
-	.side-heading .eyebrow {
-		margin: 0;
-	}
-
-	.side-note {
-		margin: 0;
-		color: var(--text-tertiary);
-		font-size: var(--font-size-xs);
-	}
-
-	.up-next-list {
-		list-style: none;
-		margin: 0;
-		padding: 0;
-		display: grid;
-		gap: 4px;
-	}
-
-	.up-next-row {
-		display: grid;
-		grid-template-columns: 112px minmax(0, 1fr);
-		gap: var(--space-3);
-		align-items: center;
-		width: 100%;
-		padding: 6px;
-		border: 0;
-		border-radius: 8px;
-		background: transparent;
-		text-align: left;
-		cursor: pointer;
-		transition: background var(--motion-fast);
-	}
-
-	.up-next-row:hover,
-	.up-next-row:focus-visible {
-		background: var(--bg-hover);
-	}
-
-	.thumb {
-		display: block;
-		aspect-ratio: 16 / 9;
-		border-radius: 6px;
-		overflow: hidden;
-		background: var(--bg-raised);
-	}
-
-	.thumb :global(img) {
-		width: 100%;
-		height: 100%;
-		object-fit: cover;
-	}
-
-	.row-copy {
-		display: grid;
-		gap: 2px;
-		min-width: 0;
-	}
-
-	.row-title,
-	.row-sub {
-		overflow: hidden;
-		white-space: nowrap;
-		text-overflow: ellipsis;
-	}
-
-	.row-title {
-		color: var(--text-primary);
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-semibold);
-	}
-
-	.row-sub {
-		color: var(--text-tertiary);
-		font-size: var(--font-size-xs);
-	}
-
 	.related {
 		display: grid;
 		gap: 14px;
@@ -550,12 +422,6 @@
 
 	.related-loading {
 		margin: 0;
-	}
-
-	@media (max-width: 980px) {
-		.watch {
-			grid-template-columns: minmax(0, 1fr);
-		}
 	}
 
 	@media (max-width: 620px) {
