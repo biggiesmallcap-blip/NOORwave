@@ -4,39 +4,34 @@ import { resolve } from 'node:path';
 
 const read = (rel) => readFileSync(resolve(import.meta.dirname, rel), 'utf8');
 const source = read('../src/routes/videos/+page.svelte');
+const layout = read('../src/routes/videos/+layout.svelte');
+const watch = read('../src/routes/videos/watch/+page.svelte');
 const dock = read('../src/lib/components/video/VideoDock.svelte');
 const store = read('../src/lib/stores/video_session.ts');
-const navigation = read('../src/lib/components/video/VideoNavigation.svelte');
-const back = read('../src/lib/components/video/VideoBackLink.svelte');
+const section = read('../src/lib/video/section.ts');
+const playCollection = read('../src/lib/video/play_collection.ts');
 const shelves = read('../src/lib/components/search/TidalDiscoverShelves.svelte');
 const appCss = read('../src/app.css');
 
-describe('Videos editorial browse state', () => {
-	test('hero slot arbitration: the layer yields only while the player owns the stage', () => {
-		expect(source).toContain('let videoSessionActive = $derived');
-		expect(source).toContain('let playerOwnsStage = $derived(videoSessionActive && !browseMode)');
-		expect(source).toContain('let showEditorialLayer = $derived(!playerOwnsStage');
-		expect(source).toContain('{#if showEditorialLayer}');
-		expect(source).toContain('transition:fade');
-	});
+function functionBody(text, signature) {
+	const start = text.indexOf(signature);
+	return text.slice(start, text.indexOf('\n}\n', start));
+}
 
-	test('search focus recedes the layer without unmounting it', () => {
-		expect(source).toContain('let searchFocused = $derived(query.trim().length > 0)');
-		expect(source).toContain('class:receded={searchFocused}');
-		expect(source).toContain('.editorial-layer.receded');
-		expect(source).toContain('grid-template-rows: 0fr');
-		expect(source).toContain('pointer-events: none');
+describe('Videos tab browse state', () => {
+	test('the tab only browses: no player, hero, or search of its own', () => {
+		expect(source).not.toContain('<VideoPlayer');
+		expect(source).not.toContain('videoStageAnchor');
+		expect(source).not.toContain('<SearchField');
+		expect(source).not.toContain('<VideoNavigation');
 	});
 
 	test('daily picks lead as a shelf and play through the shared video queue', () => {
 		expect(source).toContain("discoverSets.find((s) => s.slug === 'daily-picks')");
-		// Daily picks are a normal clean shelf now, not a mural.
 		expect(source).toContain('eyebrow="Daily picks"');
 		expect(source).not.toContain('<ChartMural');
-		expect(source).toContain('await playVideo(video, {');
-		// Every editorial surface plays through one path, never an inline player.
-		expect(source).toContain('async function playFromQueue');
-		expect(source).not.toContain('<VideoPlayer');
+		expect(playCollection).toContain('export async function playFromShelf');
+		expect(playCollection).toContain('const ok = await playVideo(video, {');
 	});
 
 	test('every other built set renders as its own shelf', () => {
@@ -47,26 +42,32 @@ describe('Videos editorial browse state', () => {
 	});
 
 	test('shelf playback uses the full row while browse radio uses the library mix', () => {
-		const shelfPlay = source.slice(source.indexOf('async function playFromSet'), source.indexOf('async function playBrowseMix'));
-		expect(shelfPlay).toContain('await playFromQueue(video, set.items, set.title, true);');
-		const browsePlay = source.slice(source.indexOf('async function playBrowseMix'), source.indexOf('async function toggleSavedVideo'));
-		expect(browsePlay).toContain("await playFromQueue(first, browseMix, 'Video radio', true, true, 'library');");
+		const shelfPlay = source.slice(source.indexOf('function playFromSet'), source.indexOf('function playBrowseMix'));
+		expect(shelfPlay).toContain('playFromShelf(video, set.items, set.title, { autoplay: true })');
+		const browsePlay = source.slice(source.indexOf('function playBrowseMix'), source.indexOf('async function handleDeepLink'));
+		expect(browsePlay).toContain("playFromShelf(first, browseMix, 'Video radio', { autoplay: true, continuous: true, radioScope: 'library' })");
 		expect(source).toContain('onPlayAll={() => dailySet && playFromSet(dailySet, 0)}');
-		expect(source).toContain('onPlayAll={() => playFromSet(set, 0)}');
 	});
 
 	test('TIDAL editorial modules render through the shared shelves with claimed clicks', () => {
 		expect(source).toContain("api.getTidalPage('videos')");
 		expect(source).toContain("From TIDAL's desk");
 		expect(source).toContain('<TidalDiscoverShelves');
-		expect(source).toContain('onItemSelect={handleEditorialSelect}');
-		// Same-route goto is a no-op, so the route must claim these clicks.
-		expect(source).toContain('function handleEditorialSelect(item: TidalHomeItem): boolean');
-		expect(source).toContain('href="/tidal/videos">More from TIDAL</a>');
+		expect(source).toContain('onItemSelect={(item) => playEditorialItem(item, editorialModules)}');
+		expect(playCollection).toContain('export function playEditorialItem(item: TidalHomeItem, modules: TidalHomeModule[]): boolean');
+		expect(source).toContain('href="/videos/editorial">More from TIDAL</a>');
 	});
 
-	test('legacy landing chips only appear when there is no editorial content', () => {
-		expect(source).toContain('!hasBrowseContent && !loadingBrowse}');
+	test('landing chips only appear when there is no editorial content', () => {
+		expect(source).toContain('{#if !hasBrowseContent && !loadingBrowse}');
+		expect(source).toContain('onclick={() => videoSectionQuery.set(item)}');
+	});
+
+	test('old deep links move to the watch page or play their collection', () => {
+		expect(source).toContain('await goto(watchUrl(videoId, {');
+		expect(source).toContain("await goto('/videos', { replaceState: true, keepFocus: true });");
+		expect(source).toContain("void playVideoCollection('mix', mixId)");
+		expect(source).toContain("void playVideoCollection('playlist', playlistId)");
 	});
 
 	test('shelves ease themselves in, staggered by their place in the stack', () => {
@@ -89,95 +90,60 @@ describe('Videos editorial browse state', () => {
 	});
 });
 
-describe('Queue rows for shelf and editorial picks', () => {
-	test('the jump lookup searches the live session queue, not just search results', () => {
-		// Shelf and editorial picks only ever live in the session queue, so a
-		// lookup limited to the route's local arrays left every queue row dead
-		// for those sources.
-		expect(source).toContain('function findVideoInCurrentContext');
-		const body = source.slice(
-			source.indexOf('function findVideoInCurrentContext'),
-			source.indexOf('function toggleVideoAutoplay')
-		);
-		expect(body).toContain('...$videoSession.queue');
-	});
-
-	test('jumping inside a shelf keeps that shelf as the queue', () => {
-		// Otherwise the fallthrough swaps the shelf for the (usually empty)
-		// search results and autoplay dies.
-		const body = source.slice(
-			source.indexOf('function buildPlayContext'),
-			source.indexOf('async function selectVideo')
-		);
-		expect(body).toContain('session.queue.some((item) => item.tidal_id === video.tidal_id)');
-		expect(body).toContain('queue: session.queue');
-		expect(body).toContain('sourceLabel: session.sourceLabel');
-	});
-});
-
 describe('Video modules never fall through to the audio detail page', () => {
 	test('View all is hidden for video modules unless the host handles it', () => {
 		// /search/discover/[id] plays every item via playTidalTrackNow, so
 		// following it from a video module plays the song, not the video.
-		//
-		// The condition gained a second clause (the module must have come from
-		// home-modules, or the detail route 404s on its id), so assert the video
-		// clause on its own rather than pinning the whole expression.
 		expect(shelves).toContain("mediaKind !== 'video' || Boolean(onViewAll)");
 		expect(shelves).toContain('let showViewAll = $derived(');
-		// The button is now decided per module, since whether there is anything
-		// behind the link depends on that module's `more_path`. `canViewAll`
-		// still folds in `showViewAll`, so the video rule holds.
 		expect(shelves).toContain('{#if canViewAll(mod)}');
 		expect(shelves).toContain('return showViewAll && Boolean(mod.more_path);');
 	});
+
+	test('a video item outside the section opens the watch page', () => {
+		expect(shelves).toContain('void goto(watchUrl(item.id));');
+		expect(shelves).not.toContain('/videos?videoId=');
+	});
 });
 
-describe('Browse while playing', () => {
-	test('navigation pills sit under search, as on /search and /library, and stay available during playback', () => {
-		const header = source.slice(source.indexOf('<header class="search-header">'), source.indexOf('</header>'));
-		expect(header).toContain('<VideoNavigation current="videos" />');
-		// The way back to the player is the shared back button, first on the page.
-		expect(source).toContain('<div class="videos-page">\n\t<VideoBackLink current="videos" canBrowse={hasBrowseContent} />');
-		expect(back).toContain('class="back-link"');
-		expect(back).not.toContain('nav-pill');
+describe('Video section flow', () => {
+	test('one header for every tab: Back and search on the first row, pills under it', () => {
+		const header = layout.slice(layout.indexOf('<header class="video-header">'), layout.indexOf('</header>'));
+		expect(header).toContain('class="back-link"');
+		expect(header.indexOf('class="back-link"')).toBeLessThan(header.indexOf('<SearchField'));
 		expect(header.indexOf('<SearchField')).toBeLessThan(header.indexOf('<VideoNavigation'));
-		expect(navigation).toContain("{ id: 'editorial', href: '/tidal/videos', label: 'TIDAL editorial' }");
-		// The hero keeps metadata only.
-		const hero = source.slice(source.indexOf('{#if showVideoHero}'), source.indexOf('<!-- Legacy landing chips'));
-		expect(hero).not.toContain('Back to picks');
-		expect(hero).not.toContain('hero-actions');
-		expect(source).toContain('width: min(100%, 560px)');
+		expect(header).toContain('<VideoNavigation current={tab} />');
+		expect(section).toContain("{ id: 'editorial', href: '/videos/editorial', label: 'TIDAL editorial' }");
 	});
 
-	test('the route offers a way back to the picks without stopping playback', () => {
-		expect(back).toContain('setVideoBrowseMode(true)');
-		expect(back).toContain('aria-label="Back to picks"');
-		// Browse mode must withdraw the stage anchor: its absence is the signal
-		// the dock reads to fall back to the mini player.
-		expect(source).toContain('let showVideoHero = $derived(\n\t\t!browseMode &&');
+	test('Back is unconditional and returns to where the listener came from', () => {
+		expect(layout).toContain("onclick={() => goBack(onWatchPage ? '/videos' : '/')}");
+		const row = layout.slice(layout.indexOf('<div class="search-row">'), layout.indexOf('<div class="search-slot">'));
+		expect(row).not.toContain('{#if');
 	});
 
-	test('and a way back to the player that does not restart it', () => {
-		expect(back).toContain('setVideoBrowseMode(false)');
-		expect(back).toContain('aria-label="Back to the player"');
+	test('the field filters likes on Liked and searches TIDAL everywhere else', () => {
+		expect(layout).toContain("let searchingTidal = $derived(query.length > 0 && tab !== 'liked');");
+		expect(layout).toContain('<VideoSearchResults />');
+		expect(layout).toContain('<div class="section-body" hidden={searchingTidal}>');
+		expect(layout).toContain('Search all of TIDAL for');
 	});
 
-	test('the dock docks to the corner in browse mode and stays mounted', () => {
-		expect(dock).toContain("onVideosRoute && !$videoBrowseMode ? 'full' : panelUsable ? 'panel' : 'mini'");
-		expect(dock).toContain('setVideoBrowseMode(false)');
-		// Exact match: full mode positions the player over a stage anchor, and
-		// /videos is the only route that publishes one.
-		expect(dock).toContain("page.url.pathname === '/videos'");
-		expect(dock).toContain('getBoundingClientRect()');
+	test('every pick opens the watch page; queue steps never move the listener', () => {
+		expect(layout).toContain('const nonce = $videoStageReveal;');
+		expect(layout).toContain('if (window.location.pathname !== WATCH_PATH) void goto(WATCH_PATH);');
+		expect(store).toContain('if (!opts.step) revealVideoStage();');
+		for (const fn of ['export async function advanceVideo', 'export async function previousVideo', 'export async function nextVideo']) {
+			expect(functionBody(store, fn), fn).toContain('step: true');
+		}
 	});
 
-	test('browse mode resets when a new video starts or the session ends', () => {
-		expect(store).toContain('export const videoBrowseMode = writable(false)');
-		expect(store).toContain('export function setVideoBrowseMode');
-		const playVideoBody = store.slice(store.indexOf('export async function playVideo'));
-		expect(playVideoBody).toContain('videoBrowseMode.set(false)');
-		const clearBody = store.slice(store.indexOf('export function clearVideoSession'));
-		expect(clearBody).toContain('videoBrowseMode.set(false)');
+	test('only the watch page publishes a stage; everywhere else is the corner player', () => {
+		expect(watch).toContain('videoStageAnchor.set(stageAnchor)');
+		expect(source).not.toContain('videoStageAnchor');
+		expect(dock).toContain("stageUsable ? 'full' : panelUsable ? 'panel' : 'mini'");
+		expect(dock).toContain('stageRect.width > 0 && stageRect.height > 0');
+		expect(dock).toContain('void goto(WATCH_PATH);');
+		expect(store).not.toContain('videoBrowseMode');
 	});
 });

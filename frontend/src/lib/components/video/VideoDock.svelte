@@ -15,8 +15,6 @@
 		refreshVideoStream,
 		refillVideoRadio,
 		reportVideoEnded,
-		setVideoBrowseMode,
-		videoBrowseMode,
 		videoPanelAnchor,
 		videoSession,
 		videoSessionUpcoming,
@@ -33,11 +31,12 @@
 		type Bounds,
 		type Corner,
 	} from './mini_dock';
+	import { WATCH_PATH } from '$lib/video/section';
 
 	// The dock renders a single VideoPlayer that never unmounts while a session
 	// is active, so audio keeps playing across route changes. Where it sits:
 	//
-	// - full: on /videos, positioned over the route's stage placeholder.
+	// - full: on /videos/watch, positioned over the watch page's stage.
 	// - panel: the video queue panel is open in a side layout, so the video
 	//   plays in that panel's artwork slot. No floating window to cover the
 	//   queue, and no still image duplicating the video.
@@ -45,16 +44,18 @@
 	//   panel or the bottom player bar), snapped to a corner the listener can
 	//   change by dragging or with the arrow keys, and shrinkable to a pill.
 	//
-	// Full mode is an exact match, not a prefix: /videos is the only route that
-	// publishes a stage. A prefix let /videos/liked claim full mode with no
-	// anchor to track, so the player rendered unpositioned across that page.
-	let onVideosRoute = $derived(page.url.pathname === '/videos');
+	// Full mode keys off the published stage, not the path: only the watch
+	// page publishes one, and a stage hidden under search results (zero size)
+	// drops the player to the corner instead of shrinking it to nothing.
+	let onWatchPage = $derived(page.url.pathname === WATCH_PATH);
 	let active = $derived($videoSession.active && Boolean($videoSession.streamUrl));
 	/** Set by the frame loop: the panel's artwork slot exists and is big enough
 	 *  to watch in (the bottom layout's 96 px thumbnail is not). */
 	let panelUsable = $state(false);
+	/** Set by the frame loop: the watch page's stage exists and has a size. */
+	let stageUsable = $state(false);
 	let mode = $derived<'full' | 'panel' | 'mini'>(
-		onVideosRoute && !$videoBrowseMode ? 'full' : panelUsable ? 'panel' : 'mini'
+		stageUsable ? 'full' : panelUsable ? 'panel' : 'mini'
 	);
 	const PANEL_MIN_WIDTH = 200;
 
@@ -80,10 +81,14 @@
 		const panelRect = panel?.isConnected ? panel.getBoundingClientRect() : null;
 		const usable = Boolean(panelRect && panelRect.width >= PANEL_MIN_WIDTH && panelRect.height > 0);
 		if (usable !== panelUsable) panelUsable = usable;
+		const stage = $videoStageAnchor;
+		const stageRect = stage?.isConnected ? stage.getBoundingClientRect() : null;
+		const stageOk = Boolean(stageRect && stageRect.width > 0 && stageRect.height > 0);
+		if (stageOk !== stageUsable) stageUsable = stageOk;
 
-		const anchor = mode === 'full' ? $videoStageAnchor : mode === 'panel' ? panel : null;
+		const anchor = mode === 'full' ? stage : mode === 'panel' ? panel : null;
 		if (active && anchor) {
-			const r = anchor === panel && panelRect ? panelRect : anchor.getBoundingClientRect();
+			const r = anchor === panel && panelRect ? panelRect : anchor === stage && stageRect ? stageRect : anchor.getBoundingClientRect();
 			if (!sameRect(rect, r)) rect = { top: r.top, left: r.left, width: r.width, height: r.height };
 		} else if (rect !== null) {
 			rect = null;
@@ -220,10 +225,9 @@
 	}
 
 	function returnToVideos() {
-		// Also the way out of browse mode: on /videos this hands the hero slot
-		// back to the player, elsewhere it navigates there first.
-		setVideoBrowseMode(false);
-		if (!onVideosRoute) void goto('/videos');
+		// The watch page shows whatever is playing, so this is one hop back to
+		// the big player from anywhere.
+		void goto(WATCH_PATH);
 	}
 
 	function closeDock() {
@@ -295,13 +299,15 @@
 					>
 					<button type="button" class="mini-btn" aria-label="Minimise video" title="Minimise" onclick={() => (collapsed = true)}>&#x2212;</button>
 				{/if}
-				<button
-					type="button"
-					class="mini-btn"
-					aria-label={onVideosRoute ? 'Back to the player' : 'Back to videos'}
-					title={onVideosRoute ? 'Back to the player' : 'Back to videos'}
-					onclick={returnToVideos}>&#x2922;</button
-				>
+				{#if !onWatchPage}
+					<button
+						type="button"
+						class="mini-btn"
+						aria-label="Open the player"
+						title="Open the player"
+						onclick={returnToVideos}>&#x2922;</button
+					>
+				{/if}
 				<button type="button" class="mini-btn" aria-label="Close video" title="Close video" onclick={closeDock}>&#x2715;</button>
 			</div>
 		{/if}
@@ -332,6 +338,17 @@
 	.video-dock.panel.positioned {
 		opacity: 1;
 		pointer-events: auto;
+	}
+
+	/* Arriving on the watch page: the player settles into the stage instead
+	   of snapping there from the corner. */
+	.video-dock.full.positioned {
+		animation: stage-in 0.28s cubic-bezier(0.22, 0.7, 0.2, 1) both;
+	}
+
+	@keyframes stage-in {
+		from { opacity: 0; transform: translateY(10px) scale(0.985); }
+		to { opacity: 1; transform: none; }
 	}
 
 	/* Matches the panel's artwork slot it covers. */

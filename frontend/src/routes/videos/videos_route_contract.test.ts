@@ -4,56 +4,64 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const source = readFileSync(join(here, '+page.svelte'), 'utf8');
+const watch = readFileSync(join(here, 'watch/+page.svelte'), 'utf8');
+const sectionLayout = readFileSync(join(here, '+layout.svelte'), 'utf8');
+const search = readFileSync(join(here, '../../lib/components/video/VideoSearchResults.svelte'), 'utf8');
 const layoutSource = readFileSync(join(here, '../+layout.svelte'), 'utf8');
 
-describe('videos route contract', () => {
-	test('guards video search pagination against stale query and mix changes', () => {
-		expect(source).toContain('let loadMoreSeq = 0;');
-		expect(source).toContain('loadMoreSeq += 1;');
-		expect(source).toContain('const seq = ++loadMoreSeq;');
-		expect(source).toContain('const pageQuery = lastQuery;');
-		expect(source).toContain('const pageOffset = offset;');
-		expect(source).toContain('const isCurrentLoadMore = () =>');
-		expect(source).toContain('seq === loadMoreSeq');
-		expect(source).toContain('lastQuery === pageQuery');
-		expect(source).toContain('offset === pageOffset');
-		expect(source).toContain('const result = await api.searchTidalVideos(pageQuery, PAGE_SIZE, pageOffset);');
-		expect(source).toContain('if (!isCurrentLoadMore()) return 0;');
-		expect(source).toContain('if (seq === loadMoreSeq) loadingMore = false;');
+describe('video search results contract', () => {
+	test('guards video search pagination against stale queries', () => {
+		expect(search).toContain('let loadMoreSeq = 0;');
+		expect(search).toContain('loadMoreSeq += 1;');
+		expect(search).toContain('const seq = ++loadMoreSeq;');
+		expect(search).toContain('const pageQuery = lastQuery;');
+		expect(search).toContain('const pageOffset = offset;');
+		expect(search).toContain('const isCurrentLoadMore = () =>');
+		expect(search).toContain('seq === loadMoreSeq');
+		expect(search).toContain('lastQuery === pageQuery');
+		expect(search).toContain('offset === pageOffset');
+		expect(search).toContain('const result = await api.searchTidalVideos(pageQuery, PAGE_SIZE, pageOffset);');
+		expect(search).toContain('if (!isCurrentLoadMore()) return 0;');
+		expect(search).toContain('if (seq === loadMoreSeq) loadingMore = false;');
 	});
 
-	test('guards video mix loads against stale route responses', () => {
-		expect(source).toContain('let mixLoadSeq = 0;');
-		expect(source).toContain('const seq = ++mixLoadSeq;');
-		expect(source).toContain('const isCurrentMixLoad = () => seq === mixLoadSeq && activeMixId === mixId;');
-		expect(source).toContain('if (!isCurrentMixLoad()) return;');
-		expect(source).toContain('if (autoPlayFirst && isCurrentMixLoad() && mixItems.length > 0)');
-		expect(source).toContain('if (isCurrentMixLoad()) showToast(mixError, \'error\', 3200);');
-		expect(source).toContain('if (seq === mixLoadSeq) loadingMix = false;');
-		expect(source).toContain('mixLoadSeq += 1;');
+	test('a result plays with the whole result list queued behind it', () => {
+		expect(search).toContain('queue: videos,');
+		expect(search).toContain("source: 'search',");
+		expect(search).toContain('<VideoCard {video}');
 	});
+});
 
-	test('keeps video selection, stream, and context actions wired', () => {
-		// Playback is delegated to the persistent dock via the controller; the
-		// route picks a video and hands it to playVideo() with a play context.
-		expect(source).toContain('const ok = await playVideo(video, buildPlayContext(video));');
-		expect(source).toContain('void selectVideo(video);');
-		expect(source).toContain('async function loadMix(mixId: string, autoPlayFirst = false)');
-		expect(source).toContain('await loadMix(mixId, shouldPlayCollection);');
-		expect(source).toContain('event.preventDefault();');
-		expect(source).toContain('event.stopPropagation();');
-		expect(source).toContain('buildArtistMenu({ tidal_id: selectedVideo.artist_id');
-		expect(source).toContain('<VideoCard {video}');
-		expect(source).not.toContain('$:');
-	});
-
-	test('hands the hero placeholder to the persistent video dock', () => {
+describe('watch page contract', () => {
+	test('hands its stage to the persistent video dock', () => {
 		// The live <video> lives in VideoDock so audio survives navigation; the
-		// route only exposes an anchor the dock positions its player over.
-		expect(source).toContain('bind:this={stageAnchor}');
-		expect(source).toContain('videoStageAnchor.set(stageAnchor)');
-		expect(source).not.toContain('<VideoPlayer');
+		// page only exposes an anchor the dock positions its player over.
+		expect(watch).toContain('bind:this={stageAnchor}');
+		expect(watch).toContain('videoStageAnchor.set(stageAnchor)');
+		expect(watch).not.toContain('<VideoPlayer');
+	});
+
+	test('keeps artist context actions, saving, and closing wired', () => {
+		expect(watch).toContain('event.preventDefault();');
+		expect(watch).toContain('event.stopPropagation();');
+		expect(watch).toContain('buildArtistMenu({ tidal_id: current.artist_id');
+		expect(watch).toContain('await api.setVideoSaved(item, saved)');
+		expect(watch).toContain('clearVideoSession()');
+		expect(watch).not.toContain('$:');
+	});
+
+	test('shows up next from the live queue and keep exploring from related', () => {
+		expect(watch).toContain('$videoSessionUpcoming.slice(0, UP_NEXT_MAX)');
+		expect(watch).toContain('onclick={() => void playQueuedVideo(item.tidal_id)}');
+		expect(watch).toContain('await api.getRelatedVideos({');
+		expect(watch).toContain('if (seq !== relatedRequest) return;');
+		expect(watch).toContain('Keep exploring');
+	});
+
+	test('the address follows the playing video, so reload and copied links reopen it', () => {
+		expect(watch).toContain('replaceState(`${WATCH_PATH}?videoId=${id}`, page.state);');
+		expect(watch).toContain('function openFromUrl()');
+		expect(watch).toContain("if ($videoSession.current?.tidal_id === videoId) return;");
 	});
 
 	test('reserves the measured bottom player inset for video content and queue', () => {
@@ -61,7 +69,7 @@ describe('videos route contract', () => {
 		expect(layoutSource).toContain('bind:this={bottomPlayerElement}');
 		expect(layoutSource).toContain("shell.style.setProperty('--bottom-player-height'");
 		expect(layoutSource).toContain('new ResizeObserver(updateBottomPlayerHeight)');
-		expect(source).toContain('max(var(--bottom-player-height, 0px), 44px, var(--safe-bottom))');
+		expect(sectionLayout).toContain('max(var(--bottom-player-height, 0px), 44px, var(--safe-bottom))');
 		expect(layoutSource).toContain('bottom: calc(var(--bottom-player-height) + var(--space-2));');
 		expect(layoutSource).toMatch(
 			/\.app-shell\[data-player-layout='bottom'\] \.video-queue-panel\.queue-drawer-open \{[^}]*z-index: var\(--z-overlay\);/

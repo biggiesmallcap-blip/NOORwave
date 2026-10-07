@@ -58,6 +58,7 @@
 		type DiscoCategory,
 		type PopularTrackItem,
 	} from './artist_discography';
+	import { watchUrl } from '$lib/video/section';
 	import { failedPreviewReleaseLinks } from './artist_release_loading';
 
 	// One artist view, two data sources. A library artist is keyed by local id
@@ -1034,7 +1035,7 @@
 			{@const videoArt = artworkCandidate(video.artwork_url, 320)}
 			<a
 				class="grid-card video-card-rail"
-				href={`/videos?videoId=${video.tidal_id}`}
+				href={watchUrl(video.tidal_id)}
 				oncontextmenu={(e) => {
 					e.preventDefault();
 					e.stopPropagation();

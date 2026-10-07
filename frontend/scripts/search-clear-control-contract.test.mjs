@@ -15,7 +15,7 @@ describe('search clear controls', () => {
 		const pages = [
 			'src/routes/library/+page.svelte',
 			'src/routes/search/+page.svelte',
-			'src/routes/videos/+page.svelte'
+			'src/routes/videos/+layout.svelte'
 		];
 
 		for (const page of pages) {
@@ -54,7 +54,7 @@ describe('search clear controls', () => {
 		for (const path of [
 			'src/routes/library/+page.svelte',
 			'src/routes/search/+page.svelte',
-			'src/routes/videos/+page.svelte'
+			'src/routes/videos/+layout.svelte'
 		]) {
 			expect(read(path), path).toContain('variant="page"');
 		}

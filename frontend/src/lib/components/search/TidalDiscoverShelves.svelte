@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { watchUrl } from '$lib/video/section';
 	import {
 		type TidalHomeItem,
 		type TidalHomeModule
@@ -50,7 +51,7 @@
 		// payload shapes may still surface videos as pseudo-tracks, handled
 		// by the mediaKind branch below.)
 		if (item.kind === 'video') {
-			void goto(`/videos?videoId=${encodeURIComponent(item.id)}`);
+			void goto(watchUrl(item.id));
 			return;
 		}
 		// On the editorial video page every remaining item is a music video
@@ -59,7 +60,7 @@
 		// the song instead.
 		if (mediaKind === 'video') {
 			if (item.kind === 'track') {
-				void goto(`/videos?videoId=${encodeURIComponent(item.id)}`);
+				void goto(watchUrl(item.id));
 				return;
 			}
 			if (item.kind === 'playlist') {

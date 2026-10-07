@@ -351,7 +351,7 @@ function recordWatch(item: VideoSessionItem) {
 export async function playVideo(
 	item: VideoSessionItem,
 	ctx: VideoPlayContext,
-	opts: { preloaded?: PreloadedVideoStream | null } = {}
+	opts: { preloaded?: PreloadedVideoStream | null; step?: boolean } = {}
 ): Promise<boolean> {
 	// Re-selecting the video that is already playing (returning to /videos with
 	// its ?videoId= still in the URL, a stale jump request, clicking its own
@@ -381,7 +381,7 @@ export async function playVideo(
 		!state.error &&
 		!opts.preloaded
 	) {
-		videoBrowseMode.set(false);
+		if (!opts.step) revealVideoStage();
 		update({
 			queue,
 			source: sourceFor(item, ctx),
@@ -399,9 +399,10 @@ export async function playVideo(
 
 	if (state.current && state.current.tidal_id !== item.tidal_id) finishWatch(false);
 	const seq = ++streamSeq;
-	// Picking something new always means "show it": browsing the shelves with
-	// a video docked ends the moment you choose the next one.
-	videoBrowseMode.set(false);
+	// Picking something new always means "show it": the video pages scroll
+	// their stage back into view. Queue steps (autoplay, next, previous) keep
+	// the listener where they are.
+	if (!opts.step) revealVideoStage();
 	update({
 		current: item,
 		queue,
@@ -593,7 +594,7 @@ export async function advanceVideo(opts: { preloaded?: PreloadedVideoStream | nu
 			if (replenished) return playVideo(replenished, {
 				queue: refreshed.queue, source: refreshed.source,
 				sourceLabel: refreshed.sourceLabel, autoplay: true, continuous: true,
-			});
+			}, { step: true });
 		}
 		update({ playing: false });
 		return false;
@@ -604,7 +605,7 @@ export async function advanceVideo(opts: { preloaded?: PreloadedVideoStream | nu
 		sourceLabel: state.sourceLabel,
 		autoplay: true,
 		continuous: state.continuous,
-	}, opts);
+	}, { ...opts, step: true });
 }
 
 /** Return to a video already played in this session. Keeps the queue context. */
@@ -615,7 +616,7 @@ export async function previousVideo(): Promise<boolean> {
 	return playVideo(previous, {
 		queue: state.queue, source: state.source, sourceLabel: state.sourceLabel,
 		autoplay: state.autoplay, continuous: state.continuous,
-	});
+	}, { step: true });
 }
 
 /** Skip to the next queued video regardless of the autoplay preference. */
@@ -632,7 +633,7 @@ export async function nextVideo(): Promise<boolean> {
 	return playVideo(next, {
 		queue: refreshed.queue, source: refreshed.source, sourceLabel: refreshed.sourceLabel,
 		autoplay: refreshed.autoplay, continuous: refreshed.continuous,
-	});
+	}, { step: true });
 }
 
 /** Stop the video session entirely and free the dock. */
@@ -647,14 +648,15 @@ export function clearVideoSession() {
 	radioSeedVideoId = null;
 	clearStation();
 	session.set({ ...initialState, autoplay: loadAutoplayPreference() });
-	videoBrowseMode.set(false);
 }
 
-// ─── Cross-component requests (dispatched from layout, served by the dock) ───
+// ─── Stage plumbing shared by the video pages and the dock ───
 
-/** The /videos route's in-page placeholder. The persistent dock copies this
- *  element's rect each frame so the live player appears docked into the hero
- *  while actually being a fixed element that never unmounts on navigation. */
+/** The video section's stage placeholder, published by routes/videos/+layout
+ *  only while the stage is on screen. The persistent dock copies this
+ *  element's rect each frame so the live player appears docked into the stage
+ *  while actually being a fixed element that never unmounts on navigation.
+ *  Null (stage scrolled away, or off the video pages) means the corner player. */
 export const videoStageAnchor = writable<HTMLElement | null>(null);
 
 /** The video queue panel's artwork slot. While it is on screen and large
@@ -662,30 +664,11 @@ export const videoStageAnchor = writable<HTMLElement | null>(null);
  *  the queue. Published by the layout; null when the panel is closed. */
 export const videoPanelAnchor = writable<HTMLElement | null>(null);
 
-/** True while the listener has stepped back to the picks with a video still
- *  playing. The route hides its stage anchor, so the dock falls to its mini
- *  corner player and the editorial shelves take the page back. Playback is
- *  untouched either way - this only decides who owns the hero slot. */
-export const videoBrowseMode = writable(false);
+/** Bumped whenever the listener picks a video (not on queue steps). The
+ *  video section layout scrolls its stage back into view on each bump, so a
+ *  click far down a tab always lands on the player. */
+export const videoStageReveal = writable(0);
 
-export function setVideoBrowseMode(browsing: boolean) {
-	videoBrowseMode.set(browsing);
-}
-
-export const videoJumpRequest = writable<{ videoId: number; nonce: number } | null>(null);
-export const videoAutoplayToggleRequest = writable(0);
-export const videoClearRequest = writable(0);
-
-let jumpNonce = 0;
-
-export function requestVideoJump(videoId: number) {
-	videoJumpRequest.set({ videoId, nonce: ++jumpNonce });
-}
-
-export function requestVideoAutoplayToggle() {
-	videoAutoplayToggleRequest.update((nonce) => nonce + 1);
-}
-
-export function requestVideoClear() {
-	videoClearRequest.update((n) => n + 1);
+export function revealVideoStage() {
+	videoStageReveal.update((n) => n + 1);
 }

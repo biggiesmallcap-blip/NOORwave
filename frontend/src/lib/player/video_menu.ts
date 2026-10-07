@@ -3,6 +3,7 @@ import type { TidalSearchVideo, TidalVideoMix, TidalVideoMixItem } from '$lib/ap
 import type { MenuItem } from '$lib/stores/context_menu';
 import { addVideoToQueue, playQueuedVideo, playVideo, playVideoNext, removeVideoFromQueue } from '$lib/stores/video_session';
 import { showToast } from '$lib/stores/toast';
+import { isVideoSectionPath, watchUrl } from '$lib/video/section';
 
 type VideoLike = TidalSearchVideo | TidalVideoMix | TidalVideoMixItem;
 
@@ -19,7 +20,7 @@ export function isVideoMix(video: VideoLike): video is TidalVideoMix {
 }
 
 export function videoPageUrl(videoId: number | string): string {
-	return `/videos?videoId=${videoId}`;
+	return watchUrl(videoId);
 }
 
 // Search results and mix items satisfy this directly. Artist-page rails add
@@ -67,15 +68,13 @@ export function buildVideoMenu(video: VideoMenuSource, options: VideoMenuOptions
 			label: 'Start video radio',
 			icon: '◉',
 			onSelect: () => {
-				const params = new URLSearchParams({ videoId: String(video.tidal_id), radio: '1' });
-				if (video.artist_id != null) params.set('artistId', String(video.artist_id));
-				if (video.artist_name) params.set('artistName', video.artist_name);
-				if (video.title) params.set('title', video.title);
-				if (location.pathname === '/videos') {
+				// Inside the video section the pick itself opens the watch page;
+				// elsewhere, the watch page's deep link starts the radio.
+				if (isVideoSectionPath(location.pathname)) {
 					void playVideo(item, { queue: [item], source: 'direct', sourceLabel: `${item.artist_name ?? 'Video'} radio`, autoplay: true, continuous: true, resetRadio: true });
 					return;
 				}
-				void goto(`/videos?${params.toString()}`);
+				void goto(watchUrl(video.tidal_id, { radio: true, title: video.title, artistId: video.artist_id, artistName: video.artist_name }));
 			},
 		},
 		{

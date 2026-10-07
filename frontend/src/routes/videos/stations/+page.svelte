@@ -6,8 +6,6 @@
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import MediaRail from '$lib/components/ui/MediaRail.svelte';
 	import StationCard from '$lib/components/video/StationCard.svelte';
-	import VideoBackLink from '$lib/components/video/VideoBackLink.svelte';
-	import VideoNavigation from '$lib/components/video/VideoNavigation.svelte';
 	import { SMALL_CATALOG, groupStations, previewArtists, spotlightArtistId, stationMeta } from '$lib/components/video/stations';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { openContextMenu } from '$lib/stores/context_menu';
@@ -70,11 +68,6 @@
 </svelte:head>
 
 <div class="stations-page">
-	<VideoBackLink current="stations" />
-	<header class="stations-header">
-		<VideoNavigation current="stations" />
-	</header>
-
 	{#if error}
 		<EmptyState title="Could not load stations" copy={error} />
 	{:else if !data || (empty && data.building)}
@@ -148,16 +141,11 @@
 <style>
 	/* Same frame as /videos: content width, and a minmax(0, 1fr) column so
 	   rails scroll instead of widening the page. */
+	/* Width, gutters and the bottom inset come from the video layout. */
 	.stations-page {
-		width: min(100%, var(--content-width));
-		margin: 0 auto;
 		display: grid;
 		grid-template-columns: minmax(0, 1fr);
 		gap: 28px;
-		padding: 0 4px max(var(--bottom-player-height, 0px), 44px, var(--safe-bottom));
-	}
-	.stations-header {
-		padding-top: var(--space-2);
 	}
 	.skeleton { padding: var(--space-4) 0; }
 

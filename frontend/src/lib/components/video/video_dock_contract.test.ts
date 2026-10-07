@@ -17,14 +17,13 @@ describe('persistent video dock contract', () => {
 		expect(layout).toContain('<VideoDock />');
 	});
 
-	test('docks into the route placeholder when on /videos, corner thumbnail off it', () => {
-		// Exact match, not a prefix. Full mode positions the player over the
-		// stage anchor, and /videos is the only route that publishes one; a
-		// prefix let /videos/liked claim full mode with nothing to track, so the
-		// player rendered unpositioned over that page's grid.
-		expect(dock).toContain("page.url.pathname === '/videos'");
-		expect(dock).not.toContain("startsWith('/videos')");
-		expect(dock).toContain('videoStageAnchor');
+	test('docks into the watch page stage, corner player everywhere else', () => {
+		// Full mode follows the published stage, not the path: only the watch
+		// page publishes one, and a stage with no size (hidden under search
+		// results) drops to the corner instead of shrinking the video to nothing.
+		expect(dock).toContain("stageUsable ? 'full' : panelUsable ? 'panel' : 'mini'");
+		expect(dock).toContain('stageRect.width > 0 && stageRect.height > 0');
+		expect(dock).not.toContain("page.url.pathname === '/videos'");
 		expect(dock).toContain('getBoundingClientRect()');
 		expect(dock).toContain("class:mini={mode === 'mini'}");
 	});

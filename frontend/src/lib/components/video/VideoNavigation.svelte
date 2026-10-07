@@ -1,26 +1,21 @@
 <script lang="ts">
-	// Sub-navigation for the video pages. Same treatment as the category pills
-	// under the search field on /search and /library: a centered row of quiet
-	// outline pills, the current page filled with the accent. The way back to
-	// the player is the standard back button (VideoBackLink), not a tab.
-	let { current }: {
-		current: 'videos' | 'liked' | 'stations' | 'editorial';
-	} = $props();
+	import { VIDEO_TABS, type VideoTab } from '$lib/video/section';
 
-	const destinations = [
-		{ id: 'videos', href: '/videos', label: 'Videos' },
-		{ id: 'liked', href: '/videos/liked', label: 'Liked videos' },
-		{ id: 'stations', href: '/videos/stations', label: 'Stations' },
-		{ id: 'editorial', href: '/tidal/videos', label: 'TIDAL editorial' },
-	] as const;
+	// Sub-navigation for the video section. Same treatment as the category
+	// pills under the search field on /search and /library: a centered row of
+	// quiet outline pills, the current tab filled with the accent. The watch
+	// page passes null, so no tab is lit while a video has the page. Tab hops
+	// replace the history entry, so Back leaves the section in one step.
+	let { current }: { current: VideoTab | null } = $props();
 </script>
 
 <nav class="video-navigation" aria-label="Video pages">
-	{#each destinations as destination (destination.id)}
+	{#each VIDEO_TABS as destination (destination.id)}
 		<a
 			class="nav-pill"
 			class:active={current === destination.id}
 			href={destination.href}
+			data-sveltekit-replacestate
 			aria-current={current === destination.id ? 'page' : undefined}
 		>{destination.label}</a>
 	{/each}
