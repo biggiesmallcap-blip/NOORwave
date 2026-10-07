@@ -2,13 +2,14 @@
 	import { setVideoBrowseMode, videoBrowseMode, videoSession } from '$lib/stores/video_session';
 
 	let { current, canBrowse = false }: {
-		current: 'videos' | 'liked' | 'editorial';
+		current: 'videos' | 'liked' | 'stations' | 'editorial';
 		canBrowse?: boolean;
 	} = $props();
 
 	const destinations = [
 		{ id: 'videos', href: '/videos', label: 'Videos' },
 		{ id: 'liked', href: '/videos/liked', label: 'Liked videos' },
+		{ id: 'stations', href: '/videos/stations', label: 'Stations' },
 		{ id: 'editorial', href: '/tidal/videos', label: 'TIDAL editorial' },
 	] as const;
 </script>
