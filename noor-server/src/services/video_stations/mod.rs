@@ -3,6 +3,16 @@
 //! from the catalog. Nothing here calls TIDAL.
 
 pub mod pick;
+pub mod pool;
+
+use std::collections::HashSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
+
+use anyhow::Result;
+use rusqlite::Connection;
+
+use pick::{Order, PickInput};
+use pool::Listener;
 
 use crate::services::video_sets::{VideoCandidate, VideoSetItem};
 
@@ -123,6 +133,24 @@ impl StationId {
         }
     }
 
+    pub fn order(&self) -> Order {
+        match self {
+            Self::WildCard => Order::Rings,
+            Self::Shuffle => Order::Uniform,
+            Self::DeepCuts => Order::DeepCuts,
+            Self::BigOnes | Self::Spotlight(_) => Order::Popularity,
+            Self::Genre(_) | Self::Vibe(_) => Order::LeanMixed,
+            Self::Duets => Order::ArtistHop,
+            Self::Live => Order::Lean,
+            Self::Charts => Order::Chart,
+        }
+    }
+
+    /// A spotlight is one artist on purpose; everything else spaces artists.
+    pub fn spacing(&self) -> bool {
+        !matches!(self, Self::Spotlight(_))
+    }
+
     /// Stations that only ever play videos the listener has not watched.
     pub fn unwatched_only(&self) -> bool {
         matches!(
@@ -152,9 +180,74 @@ pub fn to_item(video: &VideoCandidate) -> VideoSetItem {
     }
 }
 
+pub const BATCH: usize = 12;
+
+pub fn pick_input<'a>(
+    station: &StationId,
+    excluded: &'a HashSet<i64>,
+    seed: u64,
+    limit: usize,
+) -> PickInput<'a> {
+    PickInput {
+        order: station.order(),
+        unwatched_only: station.unwatched_only(),
+        prefer_live_cuts: *station == StationId::Live,
+        spacing: station.spacing(),
+        excluded,
+        seed,
+        limit,
+    }
+}
+
+/// Stable per station, day and listening session, so refills continue one
+/// order while a replay tomorrow (or a new session) reshuffles.
+pub fn seed_for(station: &StationId, day: &str, nonce: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    (station.as_string(), day, nonce).hash(&mut hasher);
+    hasher.finish()
+}
+
+pub fn next_batch(
+    conn: &Connection,
+    listener: &Listener,
+    station: &StationId,
+    excluded: &HashSet<i64>,
+    seed: u64,
+) -> Result<Vec<VideoSetItem>> {
+    let candidates = pool::candidates(conn, listener, station)?;
+    let videos = pick::pick(candidates, &pick_input(station, excluded, seed, BATCH));
+    Ok(videos.iter().map(to_item).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refill_skips_what_the_session_already_has() {
+        let conn = pool::tests::conn();
+        for id in 1..=20 {
+            pool::tests::add_video(&conn, &pool::tests::video(id, 100 + id));
+        }
+        let listener = pool::load_listener(&conn).unwrap();
+        let station = StationId::Shuffle;
+        let seed = seed_for(&station, "2026-10-07", "abc");
+        let first = next_batch(&conn, &listener, &station, &HashSet::new(), seed).unwrap();
+        assert_eq!(first.len(), BATCH);
+        let seen: HashSet<i64> = first.iter().map(|v| v.tidal_id).collect();
+        let second = next_batch(&conn, &listener, &station, &seen, seed).unwrap();
+        assert_eq!(second.len(), 8);
+        assert!(second.iter().all(|v| !seen.contains(&v.tidal_id)));
+        let third_seen: HashSet<i64> = seen
+            .union(&second.iter().map(|v| v.tidal_id).collect())
+            .copied()
+            .collect();
+        assert!(
+            next_batch(&conn, &listener, &station, &third_seen, seed)
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn station_ids_round_trip() {
