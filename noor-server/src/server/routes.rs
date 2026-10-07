@@ -1243,6 +1243,11 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/videos/discovery/status",
             get(video_discovery_routes::get_video_discovery_status),
         )
+        .route(
+            "/api/videos/discovery/settings",
+            get(video_discovery_routes::get_video_discovery_settings)
+                .put(video_discovery_routes::put_video_discovery_settings),
+        )
         // The liked-videos library wall. Pure reads over what the background
         // resolve has found; the TIDAL fan-out is never on a request path.
         .route(

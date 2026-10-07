@@ -291,6 +291,18 @@ export interface TidalSearchArtist {
 	in_library: boolean;
 }
 
+/** How much background video discovery the server runs. */
+export type VideoDiscoverySetting = 'full' | 'limited' | 'off';
+
+export interface VideoDiscoveryStatus {
+	setting: VideoDiscoverySetting;
+	mode: string;
+	calls_last_hour: number;
+	calls_today: number;
+	artists_with_videos: number;
+	catalog_videos: number;
+}
+
 export interface TidalSearchVideo {
 	tidal_id: number;
 	title: string;
@@ -2491,6 +2503,18 @@ export const api = {
         return fetchApi<{ tracks: { id: number; availability: string; favorite_state: string; releases: number }[] }>('/api/library/catalogue/status');
     },
 
+    getVideoDiscoverySettings() {
+        return fetchApi<{ setting: VideoDiscoverySetting }>('/api/videos/discovery/settings');
+    },
+    setVideoDiscoverySettings(setting: VideoDiscoverySetting) {
+        return fetchApi<{ setting: VideoDiscoverySetting }>('/api/videos/discovery/settings', undefined, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ setting }),
+        });
+    },
+    getVideoDiscoveryStatus() {
+        return fetchApi<VideoDiscoveryStatus>('/api/videos/discovery/status');
+    },
     getTidalContentSettings() {
         return fetchApi<{ hide_ai_generated: boolean }>('/api/tidal/content-settings');
     },

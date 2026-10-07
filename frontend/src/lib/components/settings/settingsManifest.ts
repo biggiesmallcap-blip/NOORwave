@@ -37,6 +37,7 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
 	{ id: 'library-maintenance', category: 'library', label: 'Library management', keywords: 'maintenance clean reclean merge duplicates reset last.fm tags clear audio analysis' },
 	{ id: 'connect-tidal', category: 'services', label: 'TIDAL', keywords: 'connect tidal login auth authentication streaming disconnect' },
 	{ id: 'tidal-content-preferences', category: 'services', label: 'Hide AI-generated tracks', keywords: 'tidal ai artificial intelligence generated recordings songs music filter block allow preferences' },
+	{ id: 'video-discovery', category: 'services', label: 'Video discovery', keywords: 'music videos video radio crawler crawl index indexing background discovery tidal requests limited off' },
 	{ id: 'lastfm-service', category: 'services', label: 'Last.fm connection', keywords: 'lastfm last.fm scrobble scrobbling profile recommendations api key secret credentials account approval auth disconnect' },
 	{ id: 'listenbrainz-service', category: 'services', label: 'ListenBrainz connection', keywords: 'listenbrainz scrobble scrobbling profile recommendations token connect disconnect' },
 	{ id: 'listening-history', category: 'services', label: 'Listening history', keywords: 'backfill upload last 30 days pending failed status submissions scrobbles' },

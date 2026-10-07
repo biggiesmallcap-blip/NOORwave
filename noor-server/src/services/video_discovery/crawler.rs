@@ -17,6 +17,7 @@ use super::artist_state::{self, CheckResult};
 use super::governor::{self, Governor, Mode};
 use super::harvest::{self, HarvestContext};
 use super::scheduler::{self, Calibration, Job, JobClass, JobKind, MixPolicy, PlanInput};
+use super::setting::{self, Budget};
 use super::source::{DiscoverySource, LiveSource};
 use super::{expand, graph, names, roots};
 use crate::SharedState;
@@ -106,6 +107,11 @@ pub fn is_building(urgent: Urgent) -> bool {
         .lock()
         .map(|q| q.is_building(urgent))
         .unwrap_or(false)
+}
+
+/// Wake the loop now, e.g. after the discovery setting changed.
+pub fn wake() {
+    wake_signal().notify_one();
 }
 
 fn next_urgent() -> Option<Urgent> {
@@ -694,11 +700,18 @@ async fn run_governed<S: DiscoverySource>(
     src: &S,
     governor: &mut Governor,
     mode: Mode,
+    budget: &Budget,
     job: &Job,
     urgent: bool,
 ) -> JobReport {
-    if let Some(wait) = governor.wait(Instant::now(), today(), mode, job.estimated_calls(), urgent)
-    {
+    if let Some(wait) = governor.wait(
+        Instant::now(),
+        today(),
+        mode,
+        budget,
+        job.estimated_calls(),
+        urgent,
+    ) {
         tokio::time::sleep(wait).await;
     }
     let report = execute(db, src, job).await;
@@ -706,6 +719,7 @@ async fn run_governed<S: DiscoverySource>(
         Instant::now(),
         today(),
         mode,
+        budget,
         report.calls.max(1),
         rand::random::<f64>(),
     );
@@ -719,6 +733,7 @@ async fn run_urgent<S: DiscoverySource>(
     src: &S,
     governor: &mut Governor,
     mode: Mode,
+    budget: &Budget,
     urgent: Urgent,
 ) {
     match urgent {
@@ -729,7 +744,7 @@ async fn run_urgent<S: DiscoverySource>(
                 class: JobClass::Urgent,
                 value: 1.0,
             };
-            run_governed(db, src, governor, mode, &job, true).await;
+            run_governed(db, src, governor, mode, budget, &job, true).await;
         }
         Urgent::Station(seed) => {
             // Round two sees the neighbors round one's expansion discovered.
@@ -748,7 +763,7 @@ async fn run_urgent<S: DiscoverySource>(
                     break;
                 }
                 for job in &jobs {
-                    let report = run_governed(db, src, governor, mode, job, true).await;
+                    let report = run_governed(db, src, governor, mode, budget, job, true).await;
                     if report.auth_failed {
                         finish(urgent);
                         return;
@@ -792,8 +807,19 @@ async fn run(state: SharedState) {
             continue;
         }
         let mode = governor::current_mode(audio.load(Ordering::Relaxed));
+        let setting = db.with_conn(setting::load).unwrap_or_default();
+        let budget = setting.budget();
         if let Some(urgent) = next_urgent() {
-            run_urgent(&db, &src, &mut governor, mode, urgent).await;
+            run_urgent(&db, &src, &mut governor, mode, &budget, urgent).await;
+            continue;
+        }
+        if !setting.background() {
+            // Off: only stations the listener starts are looked up. A request
+            // or a setting change wakes the loop.
+            queue.clear();
+            planned_at = None;
+            publish_budget(&governor, mode);
+            nap(IDLE_NAP).await;
             continue;
         }
         if queue.is_empty() || planned_at.is_none_or(|at| at.elapsed() >= REPLAN_EVERY) {
@@ -813,14 +839,19 @@ async fn run(state: SharedState) {
         let Some(job) = queue.front().cloned() else {
             continue;
         };
-        if let Some(wait) =
-            governor.wait(Instant::now(), today(), mode, job.estimated_calls(), false)
-        {
+        if let Some(wait) = governor.wait(
+            Instant::now(),
+            today(),
+            mode,
+            &budget,
+            job.estimated_calls(),
+            false,
+        ) {
             nap(wait).await;
             continue;
         }
         queue.pop_front();
-        let report = run_governed(&db, &src, &mut governor, mode, &job, false).await;
+        let report = run_governed(&db, &src, &mut governor, mode, &budget, &job, false).await;
         if report.auth_failed {
             queue.clear();
             nap(AUTH_PAUSE).await;
@@ -836,6 +867,8 @@ async fn run(state: SharedState) {
 
 #[derive(Debug, Serialize)]
 pub struct DiscoveryStatus {
+    /// The listener's setting: full, limited or off.
+    pub setting: String,
     pub mode: String,
     pub calls_last_hour: usize,
     pub calls_today: usize,
@@ -877,6 +910,7 @@ pub fn status(conn: &Connection) -> Result<DiscoveryStatus> {
         .and_then(|s| s.clone())
         .unwrap_or_default();
     Ok(DiscoveryStatus {
+        setting: setting::load(conn)?.as_str().to_string(),
         mode: mode.to_string(),
         calls_last_hour: calls_hour,
         calls_today: calls_day,

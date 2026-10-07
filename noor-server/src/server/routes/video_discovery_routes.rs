@@ -16,6 +16,7 @@ use crate::db::Database;
 use crate::services::library_videos;
 use crate::services::tidal::client::TidalClient;
 use crate::services::video_discovery::crawler::{self, Urgent};
+use crate::services::video_discovery::setting::{self as discovery_setting, DiscoverySetting};
 use crate::services::video_discovery::{graph, names, roots};
 use crate::services::video_radio;
 use crate::services::video_sets::{
@@ -595,6 +596,36 @@ pub(super) async fn post_videos_history_finish(
     Json(json!({ "ok": updated > 0 }))
 }
 
+#[derive(Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct VideoDiscoverySettings {
+    setting: DiscoverySetting,
+}
+
+/// `GET /api/videos/discovery/settings`.
+pub(super) async fn get_video_discovery_settings(
+    State(state): State<SharedState>,
+) -> Result<Json<VideoDiscoverySettings>, axum::http::StatusCode> {
+    let db = { state.read().await.db.clone() };
+    let setting = db
+        .with_conn(discovery_setting::load)
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(VideoDiscoverySettings { setting }))
+}
+
+/// `PUT /api/videos/discovery/settings`. Full, limited or off; the crawler
+/// picks the change up immediately.
+pub(super) async fn put_video_discovery_settings(
+    State(state): State<SharedState>,
+    Json(body): Json<VideoDiscoverySettings>,
+) -> Result<Json<VideoDiscoverySettings>, axum::http::StatusCode> {
+    let db = { state.read().await.db.clone() };
+    db.with_conn(|conn| discovery_setting::save(conn, body.setting))
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    crawler::wake();
+    Ok(Json(body))
+}
+
 /// `GET /api/videos/discovery/status`. Crawler progress for verification.
 pub(super) async fn get_video_discovery_status(State(state): State<SharedState>) -> Json<Value> {
     let db = { state.read().await.db.clone() };
@@ -833,6 +864,35 @@ mod tests {
             })
             .unwrap();
         assert_eq!(row, (170_000, 180_000, true));
+    }
+
+    #[tokio::test]
+    async fn the_discovery_setting_round_trips_and_shows_in_status() {
+        let db = crate::server::routes::tests::fresh_migrated_db();
+        let shared = state(db.clone());
+        assert_eq!(
+            get_video_discovery_settings(State(shared.clone()))
+                .await
+                .unwrap()
+                .0
+                .setting,
+            DiscoverySetting::Full
+        );
+        let saved = put_video_discovery_settings(
+            State(shared.clone()),
+            Json(VideoDiscoverySettings {
+                setting: DiscoverySetting::Off,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.0.setting, DiscoverySetting::Off);
+        let status = get_video_discovery_status(State(shared)).await;
+        assert_eq!(status.0["setting"], json!("off"));
+        assert!(
+            serde_json::from_value::<VideoDiscoverySettings>(json!({ "setting": "turbo" }))
+                .is_err()
+        );
     }
 }
 

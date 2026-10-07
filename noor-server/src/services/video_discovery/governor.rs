@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 
 use chrono::NaiveDate;
 
+use super::setting::Budget;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Idle,
@@ -22,11 +24,6 @@ impl Mode {
     }
 }
 
-pub const IDLE_SPACING: Duration = Duration::from_secs(2);
-pub const ACTIVE_SPACING: Duration = Duration::from_secs(12);
-pub const IDLE_PER_HOUR: usize = 500;
-pub const ACTIVE_PER_HOUR: usize = 150;
-pub const DAILY_CAP: usize = 6000;
 const HOUR: Duration = Duration::from_secs(3600);
 const VIDEO_ACTIVE_WINDOW_SECS: i64 = 600;
 
@@ -92,16 +89,17 @@ impl Governor {
         now: Instant,
         today: NaiveDate,
         mode: Mode,
+        budget: &Budget,
         calls: usize,
         urgent: bool,
     ) -> Option<Duration> {
         self.roll(now, today);
-        if self.day_calls + calls > DAILY_CAP {
+        if self.day_calls + calls > budget.daily {
             return Some(Duration::from_secs(600));
         }
         let per_hour = match mode {
-            Mode::Idle => IDLE_PER_HOUR,
-            Mode::Active => ACTIVE_PER_HOUR,
+            Mode::Idle => budget.idle_per_hour,
+            Mode::Active => budget.active_per_hour,
         };
         if self.calls.len() + calls > per_hour {
             let oldest = self.calls.front().copied().unwrap_or(now);
@@ -125,6 +123,7 @@ impl Governor {
         now: Instant,
         today: NaiveDate,
         mode: Mode,
+        budget: &Budget,
         calls: usize,
         jitter_unit: f64,
     ) {
@@ -134,8 +133,8 @@ impl Governor {
         }
         self.day_calls += calls;
         let spacing = match mode {
-            Mode::Idle => IDLE_SPACING,
-            Mode::Active => ACTIVE_SPACING,
+            Mode::Idle => budget.idle_spacing,
+            Mode::Active => budget.active_spacing,
         };
         self.next_allowed = Some(now + jittered(spacing * calls.max(1) as u32, jitter_unit));
     }
@@ -152,6 +151,9 @@ impl Governor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::video_discovery::setting::{FULL_BUDGET, LIMITED_BUDGET};
+
+    const B: &Budget = &FULL_BUDGET;
 
     fn day() -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 10, 7).unwrap()
@@ -161,21 +163,28 @@ mod tests {
     fn spacing_depends_on_mode_and_jitter() {
         let start = Instant::now();
         let mut idle = Governor::new();
-        assert_eq!(idle.wait(start, day(), Mode::Idle, 1, false), None);
-        idle.record(start, day(), Mode::Idle, 1, 0.5);
+        assert_eq!(idle.wait(start, day(), Mode::Idle, B, 1, false), None);
+        idle.record(start, day(), Mode::Idle, B, 1, 0.5);
         assert_eq!(
-            idle.wait(start, day(), Mode::Idle, 1, false),
+            idle.wait(start, day(), Mode::Idle, B, 1, false),
             Some(Duration::from_secs(2))
         );
         assert_eq!(
-            idle.wait(start + Duration::from_secs(2), day(), Mode::Idle, 1, false),
+            idle.wait(
+                start + Duration::from_secs(2),
+                day(),
+                Mode::Idle,
+                B,
+                1,
+                false
+            ),
             None
         );
 
         let mut active = Governor::new();
-        active.record(start, day(), Mode::Active, 1, 0.0);
+        active.record(start, day(), Mode::Active, B, 1, 0.0);
         assert_eq!(
-            active.wait(start, day(), Mode::Active, 1, false),
+            active.wait(start, day(), Mode::Active, B, 1, false),
             Some(Duration::from_secs(6))
         );
         assert_eq!(
@@ -188,27 +197,63 @@ mod tests {
     fn hourly_and_daily_caps_hold_even_for_urgent_work() {
         let start = Instant::now();
         let mut governor = Governor::new();
-        governor.record(start, day(), Mode::Active, ACTIVE_PER_HOUR, 0.0);
-        assert!(governor.wait(start, day(), Mode::Active, 1, true).is_some());
+        governor.record(
+            start,
+            day(),
+            Mode::Active,
+            B,
+            FULL_BUDGET.active_per_hour,
+            0.0,
+        );
+        assert!(
+            governor
+                .wait(start, day(), Mode::Active, B, 1, true)
+                .is_some()
+        );
         assert_eq!(
-            governor.wait(start + HOUR, day(), Mode::Active, 1, true),
+            governor.wait(start + HOUR, day(), Mode::Active, B, 1, true),
             None
         );
 
         let mut daily = Governor::new();
         daily.day = Some(day());
-        daily.day_calls = DAILY_CAP;
-        assert!(daily.wait(start, day(), Mode::Idle, 1, true).is_some());
+        daily.day_calls = FULL_BUDGET.daily;
+        assert!(daily.wait(start, day(), Mode::Idle, B, 1, true).is_some());
         let tomorrow = day().succ_opt().unwrap();
-        assert_eq!(daily.wait(start, tomorrow, Mode::Idle, 1, true), None);
+        assert_eq!(daily.wait(start, tomorrow, Mode::Idle, B, 1, true), None);
     }
 
     #[test]
     fn urgent_work_skips_spacing() {
         let start = Instant::now();
         let mut governor = Governor::new();
-        governor.record(start, day(), Mode::Idle, 1, 0.5);
-        assert_eq!(governor.wait(start, day(), Mode::Idle, 1, true), None);
+        governor.record(start, day(), Mode::Idle, B, 1, 0.5);
+        assert_eq!(governor.wait(start, day(), Mode::Idle, B, 1, true), None);
+    }
+
+    #[test]
+    fn the_limited_budget_spaces_and_caps_harder() {
+        let start = Instant::now();
+        let mut governor = Governor::new();
+        governor.record(start, day(), Mode::Idle, &LIMITED_BUDGET, 1, 0.5);
+        assert_eq!(
+            governor.wait(start, day(), Mode::Idle, &LIMITED_BUDGET, 1, false),
+            Some(Duration::from_secs(10))
+        );
+        governor.record(
+            start,
+            day(),
+            Mode::Idle,
+            &LIMITED_BUDGET,
+            LIMITED_BUDGET.idle_per_hour - 1,
+            0.5,
+        );
+        assert!(
+            governor
+                .wait(start, day(), Mode::Idle, &LIMITED_BUDGET, 1, true)
+                .is_some()
+        );
+        assert_eq!(governor.wait(start, day(), Mode::Idle, B, 1, true), None);
     }
 
     #[test]
