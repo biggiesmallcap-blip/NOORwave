@@ -648,12 +648,13 @@ async fn bootstrap(db: &Database) {
     let result = blocking(db, |conn| {
         let keyed = names::bootstrap_library_names(conn)?;
         let backfilled = backfill_popularity(conn)?;
-        Ok((keyed, backfilled))
+        let history_repaired = roots::repair_local_artist_ids(conn)?;
+        Ok((keyed, backfilled, history_repaired))
     })
     .await;
     match result {
-        Ok((keyed, backfilled)) => {
-            tracing::info!(target: "noor.video_discovery", keyed, backfilled, "video discovery bootstrap complete")
+        Ok((keyed, backfilled, history_repaired)) => {
+            tracing::info!(target: "noor.video_discovery", keyed, backfilled, history_repaired, "video discovery bootstrap complete")
         }
         Err(error) => {
             tracing::warn!(target: "noor.video_discovery", %error, "video discovery bootstrap failed")

@@ -409,7 +409,9 @@ export interface LikedVideo {
 	song_key: string;
 	track_title: string;
 	artist_name: string | null;
+	/** Local library id, for grouping only. Never put it in a video item. */
 	artist_id: number | null;
+	artist_tidal_id: number | null;
 	album_year: number | null;
 	genre: string | null;
 	liked_at: string | null;

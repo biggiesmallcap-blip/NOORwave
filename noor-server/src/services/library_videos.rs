@@ -183,7 +183,11 @@ pub struct LikedVideoGroup {
     pub song_key: String,
     pub track_title: String,
     pub artist_name: Option<String>,
+    /// Local `artists.id`: only for grouping. Anything that leaves the wall as a
+    /// video item must use `artist_tidal_id`, or a local id gets read as a TIDAL
+    /// id and the artist link lands on a stranger.
     pub artist_id: Option<i64>,
+    pub artist_tidal_id: Option<i64>,
     pub album_year: Option<i64>,
     pub genre: Option<String>,
     pub liked_at: Option<String>,
@@ -460,7 +464,8 @@ pub fn load_wall(conn: &Connection) -> Result<Vec<LikedVideoGroup>> {
                 g.name,
                 t.date_added,
                 lv.match_score,
-                lv.release_year
+                lv.release_year,
+                ar.tidal_id
            FROM library_videos lv
            JOIN tracks t              ON t.id = lv.track_id AND t.is_favorite = 1
            LEFT JOIN artists ar       ON ar.id = t.artist_id
@@ -476,6 +481,7 @@ pub fn load_wall(conn: &Connection) -> Result<Vec<LikedVideoGroup>> {
         track_title: String,
         artist_name: Option<String>,
         artist_id: Option<i64>,
+        artist_tidal_id: Option<i64>,
         album_year: Option<i64>,
         genre: Option<String>,
         liked_at: Option<String>,
@@ -498,6 +504,7 @@ pub fn load_wall(conn: &Connection) -> Result<Vec<LikedVideoGroup>> {
                 track_title: row.get(3)?,
                 artist_name: row.get(4)?,
                 artist_id: row.get(5)?,
+                artist_tidal_id: row.get::<_, Option<i64>>(13)?.filter(|id| *id > 0),
                 album_year: row.get(8)?,
                 genre: row.get(9)?,
                 liked_at: row.get(10)?,
@@ -519,6 +526,7 @@ pub fn load_wall(conn: &Connection) -> Result<Vec<LikedVideoGroup>> {
                 track_title: item.track_title,
                 artist_name: item.artist_name,
                 artist_id: item.artist_id,
+                artist_tidal_id: item.artist_tidal_id,
                 album_year: item.album_year,
                 genre: item.genre,
                 liked_at: item.liked_at,
