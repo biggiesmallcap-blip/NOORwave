@@ -1235,6 +1235,14 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/videos/history",
             post(video_discovery_routes::post_videos_history),
         )
+        .route(
+            "/api/videos/history/{id}/finish",
+            post(video_discovery_routes::post_videos_history_finish),
+        )
+        .route(
+            "/api/videos/discovery/status",
+            get(video_discovery_routes::get_video_discovery_status),
+        )
         // The liked-videos library wall. Pure reads over what the background
         // resolve has found; the TIDAL fan-out is never on a request path.
         .route(
@@ -8916,6 +8924,27 @@ async fn tidal_request_tokens(
     Ok(s.tidal_tokens.clone().or(persisted))
 }
 
+/// Every video list the listener opens teaches the discovery crawler.
+async fn harvest_seen_videos(
+    state: &SharedState,
+    videos: &[crate::services::tidal::client::TidalSearchVideo],
+    list_key: Option<String>,
+) {
+    use crate::services::video_discovery::harvest::{self, HarvestContext};
+    let db = state.read().await.db.clone();
+    let candidates: Vec<crate::services::video_sets::VideoCandidate> = videos
+        .iter()
+        .map(crate::services::video_sets::VideoCandidate::from)
+        .collect();
+    let ctx = match list_key.as_deref() {
+        Some(key) => HarvestContext::List { key },
+        None => HarvestContext::Search,
+    };
+    if let Err(error) = db.with_conn(|conn| harvest::ingest(conn, &candidates, ctx)) {
+        tracing::debug!(target: "noor.video_discovery", %error, "could not harvest seen videos");
+    }
+}
+
 async fn tidal_video_search(
     State(state): State<SharedState>,
     Query(params): Query<TidalSearchParams>,
@@ -8977,6 +9006,8 @@ async fn tidal_video_search(
             ));
         }
     };
+
+    harvest_seen_videos(&state, &videos, None).await;
 
     Ok(Json(json!({
         "videos": videos.into_iter().map(tidal_video_to_resp).collect::<Vec<_>>()
@@ -9145,6 +9176,8 @@ async fn tidal_video_playback(
         ));
     }
 
+    crate::services::video_discovery::governor::note_video_activity();
+
     let Some(tokens) = tidal_request_tokens(&state).await? else {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -9267,6 +9300,8 @@ async fn tidal_video_mix_items(
         }
     };
 
+    harvest_seen_videos(&state, &items, Some(format!("mix:{mix_id}"))).await;
+
     Ok(Json(json!({
         "items": items.into_iter().map(tidal_video_to_resp).collect::<Vec<_>>()
     })))
@@ -9334,6 +9369,8 @@ async fn tidal_video_playlist_items(
             ));
         }
     };
+
+    harvest_seen_videos(&state, &items, Some(format!("playlist:{uuid}"))).await;
 
     Ok(Json(json!({
         "items": items.into_iter().map(tidal_video_to_resp).collect::<Vec<_>>()

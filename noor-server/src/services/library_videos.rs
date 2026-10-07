@@ -217,11 +217,11 @@ pub fn artists_needing_scan(conn: &Connection) -> Result<Vec<ScanTarget>> {
            FROM artists a
            JOIN tracks t ON t.artist_id = a.id AND t.is_favorite = 1
            LEFT JOIN library_video_scans s ON s.artist_id = a.id
-           LEFT JOIN video_artist_scans vs ON vs.artist_tidal_id = a.tidal_id
+           LEFT JOIN video_artist_state vs ON vs.artist_tidal_id = a.tidal_id
           WHERE a.tidal_id IS NOT NULL
           GROUP BY a.id
          HAVING s.scanned_at IS NULL
-             OR vs.scanned_at IS NULL
+             OR vs.last_checked_at IS NULL
              OR s.scanned_at < datetime('now', '-{RESCAN_AFTER_DAYS} days')
              OR MAX({DATE_ADDED_NORMALIZED}) > s.scanned_at
           ORDER BY s.scanned_at IS NOT NULL, a.id"
@@ -765,7 +765,6 @@ pub async fn run_if_idle(state: SharedState) {
             scanned, hits, indexed, larger_catalogs,
             "liked-video pass complete"
         );
-        video_radio::warm_liked_graph_if_idle(state).await;
     });
 }
 
@@ -919,7 +918,12 @@ mod tests {
             .unwrap();
         assert_eq!(catalog_count, 2);
         assert_eq!(liked_count, 1);
-        assert!(!video_radio::artist_due(&conn, 5001).unwrap());
+        assert!(
+            !crate::services::video_discovery::artist_state::get(&conn, 5001)
+                .unwrap()
+                .unwrap()
+                .never_checked()
+        );
     }
 
     #[test]
@@ -940,7 +944,12 @@ mod tests {
     fn a_scanned_artist_is_not_rescanned_until_something_changes() {
         let conn = setup();
         store_artist_scan(&conn, 1, &[]).unwrap();
-        video_radio::mark_artist_scanned(&conn, 5001).unwrap();
+        crate::services::video_discovery::artist_state::record_check(
+            &conn,
+            5001,
+            crate::services::video_discovery::artist_state::CheckResult::Empty,
+        )
+        .unwrap();
 
         assert!(
             artists_needing_scan(&conn).unwrap().is_empty(),
@@ -972,7 +981,12 @@ mod tests {
         )
         .unwrap();
         store_artist_scan(&conn, 1, &[]).unwrap();
-        video_radio::mark_artist_scanned(&conn, 5001).unwrap();
+        crate::services::video_discovery::artist_state::record_check(
+            &conn,
+            5001,
+            crate::services::video_discovery::artist_state::CheckResult::Empty,
+        )
+        .unwrap();
 
         assert!(
             artists_needing_scan(&conn).unwrap().is_empty(),
@@ -994,7 +1008,12 @@ mod tests {
     fn a_stale_scan_is_rechecked() {
         let conn = setup();
         store_artist_scan(&conn, 1, &[]).unwrap();
-        video_radio::mark_artist_scanned(&conn, 5001).unwrap();
+        crate::services::video_discovery::artist_state::record_check(
+            &conn,
+            5001,
+            crate::services::video_discovery::artist_state::CheckResult::Empty,
+        )
+        .unwrap();
         conn.execute(
             "UPDATE library_video_scans
                 SET scanned_at = datetime('now', '-91 days') WHERE artist_id = 1",

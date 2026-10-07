@@ -162,6 +162,11 @@ UPDATE video_artist_state SET name = COALESCE(
     (SELECT name FROM video_related_artists r WHERE r.related_tidal_id = video_artist_state.artist_tidal_id AND r.name <> '' LIMIT 1),
     '')
  WHERE name = '';
+DROP TABLE IF EXISTS video_artist_scans;
+DROP TABLE IF EXISTS video_bridge_scans;
+DROP TABLE IF EXISTS video_related_attempts;
+DROP TABLE IF EXISTS video_related_retries;
+DROP TABLE IF EXISTS video_related_scans;
 "#;
 
 const MIGRATION_071: &str = r#"
