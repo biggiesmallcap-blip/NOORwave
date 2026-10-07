@@ -47,12 +47,15 @@
 			<button
 				type="button"
 				class="frame"
-				title={frameLabel(video)}
 				aria-label={`Play ${card.title} from ${frameLabel(video)}`}
 				onclick={() => onplay(card, video)}
 				oncontextmenu={(event) => frameMenu(event, video)}
 			>
 				<ArtworkImage src={video.artwork_url} size={320} fallbackText="" decorative={true} fadeIn={true} />
+				<span class="caption" aria-hidden="true">
+					<span class="caption-title">{video.title}</span>
+					{#if video.artist_name}<span class="caption-artist">{video.artist_name}</span>{/if}
+				</span>
 			</button>
 		{/each}
 	</div>
@@ -64,10 +67,10 @@
 
 <style>
 	.station-row {
-		--frame-h: 76px;
+		--frame-h: 84px;
 		position: relative;
 		display: grid;
-		grid-template-columns: 220px minmax(0, 1fr) auto;
+		grid-template-columns: 260px minmax(0, 1fr) auto;
 		align-items: center;
 		gap: 18px;
 		padding: 10px 12px;
@@ -98,7 +101,7 @@
 		grid-row: span 3;
 		align-self: start;
 		color: var(--text-tertiary);
-		font-size: var(--font-size-sm);
+		font-size: var(--font-size-lg);
 		font-variant-numeric: tabular-nums;
 		font-weight: var(--font-weight-semibold);
 	}
@@ -118,7 +121,9 @@
 		background: transparent;
 		color: var(--text-primary);
 		font: inherit;
-		font-weight: var(--font-weight-semibold);
+		font-size: var(--font-size-lg);
+		font-weight: var(--font-weight-bold);
+		line-height: var(--line-height-tight);
 		text-align: left;
 		cursor: pointer;
 		overflow: hidden;
@@ -133,13 +138,20 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
+	/* Up to two lines, so a full subtitle reads instead of cutting off. */
 	.meta {
 		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
+		font-size: var(--font-size-md);
+		line-height: 1.3;
+		white-space: normal;
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		-webkit-box-orient: vertical;
 	}
 	.count {
 		color: var(--text-tertiary);
-		font-size: var(--font-size-xs);
+		font-size: var(--font-size-sm);
 	}
 
 	/* Frames wrap onto a clipped second line: whole frames only, as many
@@ -155,6 +167,7 @@
 	/* Frames on the visible line stretch a little to close the gap at the
 	   right edge (the picture covers the extra width). */
 	.frame {
+		position: relative;
 		flex: 1 0 auto;
 		height: var(--frame-h);
 		aspect-ratio: 16 / 9;
@@ -164,22 +177,54 @@
 		overflow: hidden;
 		background: var(--bg-raised);
 		cursor: pointer;
-		transition: transform var(--motion-fast), opacity var(--motion-fast);
+		transition: opacity 120ms ease;
 	}
 	.frame :global(img) {
 		width: 100%;
 		height: 100%;
 		object-fit: cover;
 	}
-	.strip:hover .frame { opacity: 0.7; }
+	/* Hover is instant and in place (the strip clips anything that moves):
+	   the other frames dim, this one names its video. */
+	.strip:hover .frame { opacity: 0.5; }
 	.strip .frame:hover,
 	.strip .frame:focus-visible {
 		opacity: 1;
-		transform: translateY(-2px);
 	}
 	.frame:focus-visible {
 		outline: 2px solid var(--accent);
-		outline-offset: 2px;
+		outline-offset: -2px;
+	}
+	.caption {
+		position: absolute;
+		inset: auto 0 0 0;
+		display: grid;
+		padding: 18px 8px 6px;
+		background: linear-gradient(to top, rgba(0, 0, 0, 0.88), rgba(0, 0, 0, 0.55) 60%, transparent);
+		color: #fff;
+		text-align: left;
+		opacity: 0;
+		transition: opacity 120ms ease;
+		pointer-events: none;
+	}
+	.frame:hover .caption,
+	.frame:focus-visible .caption {
+		opacity: 1;
+	}
+	.caption-title,
+	.caption-artist {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		line-height: 1.25;
+	}
+	.caption-title {
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
+	}
+	.caption-artist {
+		font-size: var(--font-size-2xs);
+		color: rgba(255, 255, 255, 0.78);
 	}
 
 	.play {
@@ -212,7 +257,7 @@
 
 	@media (max-width: 860px) {
 		.station-row {
-			--frame-h: 56px;
+			--frame-h: 60px;
 			grid-template-columns: minmax(0, 1fr);
 			gap: 10px;
 		}

@@ -92,12 +92,15 @@
 				type="button"
 				class="frame"
 				class:lead={index === 0}
-				title={frameLabel(video)}
 				aria-label={`Play ${card.title} from ${frameLabel(video)}`}
 				onclick={() => onplay(card, video)}
 				oncontextmenu={(event) => frameMenu(event, video)}
 			>
 				<ArtworkImage src={video.artwork_url} size={index === 0 ? 640 : 320} fallbackText="" decorative={true} fadeIn={true} />
+				<span class="caption" aria-hidden="true">
+					<span class="caption-title">{video.title}</span>
+					{#if video.artist_name}<span class="caption-artist">{video.artist_name}</span>{/if}
+				</span>
 			</button>
 		{/each}
 	</div>
@@ -185,16 +188,15 @@
 		margin: 0;
 		color: var(--text-secondary);
 	}
+	/* One sentence, already shortened at a clause break by cleanBio, so it
+	   is never clipped here. */
 	.bio {
+		max-width: 62ch;
 		margin: 0;
 		color: var(--text-tertiary);
 		font-size: var(--font-size-sm);
 		line-height: 1.55;
-		display: -webkit-box;
-		-webkit-line-clamp: 3;
-		line-clamp: 3;
-		-webkit-box-orient: vertical;
-		overflow: hidden;
+		overflow-wrap: anywhere;
 	}
 	.actions {
 		display: flex;
@@ -214,6 +216,7 @@
 	.mosaic[data-count='2'],
 	.mosaic[data-count='3'] { grid-template-columns: 2fr 1fr; }
 	.frame {
+		position: relative;
 		padding: 0;
 		border: 0;
 		border-radius: 8px;
@@ -243,6 +246,35 @@
 	.frame :global(img) { width: 100%; height: 100%; object-fit: cover; }
 	.frame:hover,
 	.frame:focus-visible { transform: translateY(-2px); }
+	.caption {
+		position: absolute;
+		inset: auto 0 0 0;
+		display: grid;
+		padding: 22px 10px 8px;
+		background: linear-gradient(to top, rgba(0, 0, 0, 0.88), rgba(0, 0, 0, 0.55) 60%, transparent);
+		color: #fff;
+		text-align: left;
+		opacity: 0;
+		transition: opacity 120ms ease;
+		pointer-events: none;
+	}
+	.frame:hover .caption,
+	.frame:focus-visible .caption { opacity: 1; }
+	.caption-title,
+	.caption-artist {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		line-height: 1.25;
+	}
+	.caption-title {
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+	}
+	.caption-artist {
+		font-size: var(--font-size-xs);
+		color: rgba(255, 255, 255, 0.78);
+	}
 	.frame:focus-visible {
 		outline: 2px solid var(--accent);
 		outline-offset: 2px;

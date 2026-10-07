@@ -65,9 +65,12 @@ export function numberStations(
 	return new Map(order.map((station, index) => [station.id, String(index + 1).padStart(2, '0')]));
 }
 
-const BIO_MAX = 240;
+const BIO_MAX = 200;
 const BIO_MIN = 40;
 const NAMED_ENTITIES: Record<string, string> = { amp: '&', quot: '"', apos: "'", lt: '<', gt: '>', nbsp: ' ' };
+// A period after one of these (or after a lone initial, "J. Cole") does not
+// end the sentence.
+const ABBREVIATIONS = new Set(['mr', 'mrs', 'ms', 'dr', 'st', 'jr', 'sr', 'vs', 'feat', 'ft', 'no', 'vol', 'mt']);
 
 function decodeEntity(match: string, code: string): string {
 	const lower = code.toLowerCase();
@@ -76,21 +79,34 @@ function decodeEntity(match: string, code: string): string {
 	return Number.isInteger(point) && point > 0 && point <= 0x10ffff ? String.fromCodePoint(point) : match;
 }
 
-/** Cut at the last sentence end that fits, else at a word with "...". */
-function excerpt(text: string): string {
-	const head = text.slice(0, BIO_MAX);
-	let end = -1;
-	for (const match of head.matchAll(/[.!?](?=\s|$)/g)) {
-		if (match.index >= BIO_MIN) end = match.index;
+/** The first sentence, ending at its punctuation. */
+function firstSentence(text: string): string {
+	for (const match of text.matchAll(/[.!?](?=\s+["'(]?[A-Z0-9]|$)/g)) {
+		const before = text.slice(0, match.index);
+		const word = /([A-Za-z]+)$/.exec(before)?.[1] ?? '';
+		if (match[0] === '.' && (ABBREVIATIONS.has(word.toLowerCase()) || /^[A-Z]$/.test(word))) continue;
+		if (match.index + 1 >= BIO_MIN) return text.slice(0, match.index + 1);
 	}
-	if (end >= 0) return head.slice(0, end + 1);
-	const space = head.lastIndexOf(' ');
-	return `${(space > BIO_MIN ? head.slice(0, space) : head).replace(/[\s,;:]+$/, '')}...`;
+	return text;
+}
+
+/** A sentence too long for the row ends at its last clause break that fits
+ *  (a comma, semicolon or spaced dash), else at a word, with "...". */
+function shorten(sentence: string): string {
+	if (sentence.length <= BIO_MAX) return sentence;
+	const head = sentence.slice(0, BIO_MAX);
+	let cut = -1;
+	for (const match of head.matchAll(/(,|;|\s[-\u2013\u2014])\s/g)) {
+		if (match.index >= BIO_MIN) cut = match.index;
+	}
+	if (cut < 0) cut = head.lastIndexOf(' ');
+	return `${head.slice(0, cut > BIO_MIN ? cut : BIO_MAX).replace(/[\s,;:-]+$/, '')}...`;
 }
 
 /** TIDAL bios arrive with [wimpLink ...]Name[/wimpLink] markup, stray HTML
- *  and entities, and are sometimes broken outright. Returns a short plain
- *  excerpt, or null when nothing readable is left. */
+ *  and entities, and are sometimes broken outright. Returns the first
+ *  sentence as plain text (shortened at a clause break when it runs long),
+ *  or null when nothing readable is left. */
 export function cleanBio(raw: string | null | undefined): string | null {
 	if (!raw) return null;
 	let text = raw;
@@ -101,6 +117,6 @@ export function cleanBio(raw: string | null | undefined): string | null {
 	text = text.replace(/<\s*\/?\s*(br|p)\b[^>]*>/gi, ' ').replace(/<\/?[a-z][^>]*>/gi, '');
 	if (/[[\]<>]/.test(text)) return null;
 	text = text.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, decodeEntity).replace(/\s+/g, ' ').trim();
-	if (text.length > BIO_MAX) text = excerpt(text);
+	text = shorten(firstSentence(text));
 	return text.length >= BIO_MIN ? text : null;
 }

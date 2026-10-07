@@ -101,14 +101,21 @@ describe('spotlight bio cleanup', () => {
 			.toBe(`Simon & Garfunkel were a folk duo from New York, and they're "sung".`);
 	});
 
-	test('cuts long text at a sentence end, else at a word', () => {
-		const sentences = `${long} ${'His songs explored faith, love, loss and politics across six decades. '.repeat(5)}`;
-		const cut = cleanBio(sentences)!;
-		expect(cut.length).toBeLessThanOrEqual(240);
-		expect(cut.endsWith('.')).toBe(true);
+	test('keeps only the first sentence', () => {
+		expect(cleanBio(`${long} His songs explored faith, love, loss and politics across six decades.`)).toBe(long);
+		expect(cleanBio('Produced by Dr. Dre and J. Cole, the record went on to sell millions. It was later remastered.'))
+			.toBe('Produced by Dr. Dre and J. Cole, the record went on to sell millions.');
+	});
+
+	test('a long first sentence ends at a clause break, never mid-word', () => {
+		const cohen = "One of the most fascinating and enigmatic - if not the most successful - singer/songwriters of the late '60s, "
+			+ 'Leonard Cohen retained an audience across six decades of music-making, interrupted by various digressions into personal and spiritual exile.';
+		const cut = cleanBio(cohen)!;
+		expect(cut).toBe("One of the most fascinating and enigmatic - if not the most successful - singer/songwriters of the late '60s, "
+			+ 'Leonard Cohen retained an audience across six decades of music-making...');
 		const words = cleanBio(`${'word '.repeat(80)}end`)!;
-		expect(words.endsWith('...')).toBe(true);
-		expect(words.length).toBeLessThanOrEqual(243);
+		expect(words.endsWith('word...')).toBe(true);
+		expect(words.length).toBeLessThanOrEqual(203);
 	});
 
 	test('hides bios that are empty, too short or still broken', () => {
