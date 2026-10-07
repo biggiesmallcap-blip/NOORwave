@@ -126,6 +126,7 @@
 		videoSessionUpcoming,
 		type VideoSessionItem,
 	} from '$lib/stores/video_session';
+	import { isVideoSectionPath } from '$lib/video/section';
 	import VideoDock from '$lib/components/video/VideoDock.svelte';
 
 	let { children } = $props();
@@ -1286,7 +1287,7 @@
 		runtime: $playbackRuntimeInfo,
 		exclusiveEngaged: $exclusiveStatus.engaged,
 	}));
-	let videoRouteActive = $derived(page.url.pathname.startsWith('/videos') || page.url.pathname === '/tidal/videos');
+	let videoRouteActive = $derived(isVideoSectionPath(page.url.pathname));
 	// The panel's artwork slot doubles as a stage: the video dock plays there
 	// while the panel is open (see VideoDock). Cleared when the panel unmounts.
 	let videoPanelArtWrap = $state<HTMLElement | null>(null);

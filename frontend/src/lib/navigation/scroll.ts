@@ -38,3 +38,9 @@ export function restoreScroll(top: number, maxFrames = 30): void {
 	};
 	requestAnimationFrame(tick);
 }
+
+/** Jump the workspace to the top, for forward navigations between pages that
+ *  share a layout (SvelteKit's own reset only targets the window). */
+export function scrollWorkspaceTop(): void {
+	workspaceEl()?.scrollTo({ top: 0, behavior: 'auto' });
+}

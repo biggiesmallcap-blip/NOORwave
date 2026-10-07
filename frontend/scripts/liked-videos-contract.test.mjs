@@ -8,12 +8,14 @@ const APP_CSS = 'src/app.css';
 
 describe('liked videos contract', () => {
 	test('all video pages share navigation with a current-page indicator', () => {
-		const videos = readFileSync(VIDEOS_PAGE, 'utf8');
-		expect(videos).toContain('<VideoNavigation current="videos"');
-		const page = readFileSync(PAGE, 'utf8');
-		expect(page).toContain('<VideoNavigation current="liked" />');
-		const editorial = readFileSync('src/routes/tidal/videos/+page.svelte', 'utf8');
-		expect(editorial).toContain('<VideoNavigation current="editorial" />');
+		// One layout renders the pills for every video page; the tab is read
+		// from the path, so no page carries its own copy.
+		const layout = readFileSync('src/routes/videos/+layout.svelte', 'utf8');
+		expect(layout).toContain('<VideoNavigation current={tab} />');
+		expect(layout).toContain('let tab = $derived(videoTabFor(page.url.pathname));');
+		for (const path of [VIDEOS_PAGE, PAGE, 'src/routes/videos/stations/+page.svelte', 'src/routes/videos/editorial/+page.svelte']) {
+			expect(readFileSync(path, 'utf8'), path).not.toContain('<VideoNavigation');
+		}
 		const navigation = readFileSync('src/lib/components/video/VideoNavigation.svelte', 'utf8');
 		expect(navigation).toContain('aria-label="Video pages"');
 		expect(navigation).toContain("aria-current={current === destination.id ? 'page' : undefined}");

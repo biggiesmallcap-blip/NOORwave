@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { onDestroy, untrack, type Snippet } from 'svelte';
-	import { ApiError, api, type TidalHomeModule } from '$lib/api/client';
+	import { onDestroy, untrack } from 'svelte';
+	import { ApiError, api, type TidalHomeItem, type TidalHomeModule } from '$lib/api/client';
 	import { tidalStatus } from '$lib/stores/tidal';
 	import { goBack } from '$lib/navigation/back';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
@@ -18,7 +18,11 @@
 		errorText?: string;
 		backFallback?: string;
 		mediaKind?: 'audio' | 'video';
-		navigation?: Snippet;
+		/** Inside a section layout that owns Back, width and gutters (the video
+		 *  section): no back button and no page padding of its own. */
+		embedded?: boolean;
+		/** Claim a shelf click; gets the loaded modules for queue context. */
+		onItemSelect?: (item: TidalHomeItem, modules: TidalHomeModule[]) => boolean;
 	};
 
 	let {
@@ -31,7 +35,8 @@
 		errorText = 'Could not load this TIDAL page.',
 		backFallback = '/library',
 		mediaKind = 'audio',
-		navigation,
+		embedded = false,
+		onItemSelect,
 	}: Props = $props();
 
 	let modules = $state<TidalHomeModule[]>([]);
@@ -102,10 +107,8 @@
 
 <svelte:head><title>{title} . NOOR</title></svelte:head>
 
-<div class="page" data-tidal-editorial-page={pagePath}>
-	{#if navigation}
-		{@render navigation()}
-	{:else}
+<div class="page" class:embedded data-tidal-editorial-page={pagePath}>
+	{#if !embedded}
 		<button class="back-link" type="button" onclick={() => goBack(backFallback)}>Back</button>
 	{/if}
 	<PageHeader {eyebrow} {title} {subtitle} variant="editorial" />
@@ -113,7 +116,11 @@
 	{#if viewState === 'loading'}
 		<p class="muted-line">Loading {title}...</p>
 	{:else if viewState === 'ready'}
-		<TidalDiscoverShelves {modules} {mediaKind} />
+		<TidalDiscoverShelves
+			{modules}
+			{mediaKind}
+			onItemSelect={onItemSelect ? (item) => onItemSelect(item, modules) : undefined}
+		/>
 	{:else if viewState === 'empty'}
 		<p class="muted-line">{emptyText} <button class="inline-link" onclick={() => void load()}>Retry</button></p>
 	{:else if viewState === 'disconnected'}
@@ -131,6 +138,12 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-5);
+	}
+
+	.page.embedded {
+		max-width: none;
+		margin: 0;
+		padding: 0;
 	}
 
 	.back-link {
