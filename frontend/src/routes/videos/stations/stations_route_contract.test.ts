@@ -7,6 +7,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const page = readFileSync(join(here, '+page.svelte'), 'utf8');
 const row = readFileSync(join(here, '../../../lib/components/video/StationRow.svelte'), 'utf8');
 const spotlight = readFileSync(join(here, '../../../lib/components/video/StationSpotlight.svelte'), 'utf8');
+const guideRow = readFileSync(join(here, '../../../lib/components/video/GuideRow.svelte'), 'utf8');
+const guideFeature = readFileSync(join(here, '../../../lib/components/video/GuideFeature.svelte'), 'utf8');
 
 describe('stations channel guide contract', () => {
 	test('renders numbered rows and the spotlight, not rails of cards', () => {
@@ -19,10 +21,11 @@ describe('stations channel guide contract', () => {
 
 	test('a frame starts its station from that video', () => {
 		expect(page).toContain('playVideoStation({ id: card.id, title: card.title }, { startWith })');
-		for (const source of [row, spotlight]) {
-			expect(source).toContain('onclick={() => onplay(card, video)}');
-			expect(source).toContain('buildVideoMenu(video)');
-		}
+		expect(row).toContain('onplay={(startWith) => onplay(card, startWith)}');
+		expect(spotlight).toContain('onpick={(video) => onplay(card, video)}');
+		expect(guideRow).toContain('onclick={() => onplay(video)}');
+		expect(guideFeature).toContain('onclick={() => onpick(video)}');
+		for (const source of [guideRow, guideFeature]) expect(source).toContain('buildVideoMenu(video)');
 	});
 
 	test('marks the station on air from the session', () => {

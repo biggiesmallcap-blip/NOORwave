@@ -26,19 +26,20 @@ describe('Videos tab browse state', () => {
 		expect(source).not.toContain('<VideoNavigation');
 	});
 
-	test('daily picks lead as a shelf and play through the shared video queue', () => {
+	test('daily picks lead as the featured row and play through the shared video queue', () => {
 		expect(source).toContain("discoverSets.find((s) => s.slug === 'daily-picks')");
-		expect(source).toContain('eyebrow="Daily picks"');
+		expect(source).toContain('<GuideFeature label={`Daily picks: ${dailySet.title}`}');
 		expect(source).not.toContain('<ChartMural');
 		expect(playCollection).toContain('export async function playFromShelf');
 		expect(playCollection).toContain('const ok = await playVideo(video, {');
 	});
 
-	test('every other built set renders as its own shelf', () => {
+	test('every other built set is a guide row; a frame plays the set from that video', () => {
 		expect(source).toContain("discoverSets.filter((s) => s.slug !== 'daily-picks'");
-		expect(source).toContain('{#each shelfSets as set, i (set.slug)}');
-		expect(source).toContain('<VideoSetShelf');
-		expect(source).toContain('onPlayAll={() => playFromSet(set, 0)}');
+		expect(source).toContain('{#each shelfSets as set (set.slug)}');
+		expect(source).toContain('<GuideRow');
+		expect(source).toContain('onplay={(startWith) => playSetFrom(set, startWith)}');
+		expect(source).not.toContain('VideoSetShelf');
 	});
 
 	test('shelf playback uses the full row while browse radio uses the library mix', () => {
@@ -46,19 +47,16 @@ describe('Videos tab browse state', () => {
 		expect(shelfPlay).toContain('playFromShelf(video, set.items, set.title, { autoplay: true })');
 		const browsePlay = source.slice(source.indexOf('function playBrowseMix'), source.indexOf('async function handleDeepLink'));
 		expect(browsePlay).toContain("playFromShelf(first, browseMix, 'Video radio', { autoplay: true, continuous: true, radioScope: 'library' })");
-		expect(source).toContain('onPlayAll={() => dailySet && playFromSet(dailySet, 0)}');
+		expect(source).toContain('onclick={() => dailySet && playFromSet(dailySet, 0)}>Play all</button>');
 	});
 
-	test('TIDAL editorial modules render through the shared shelves with claimed clicks', () => {
-		expect(source).toContain("api.getTidalPage('videos')");
-		expect(source).toContain("From TIDAL's desk");
-		expect(source).toContain('<TidalDiscoverShelves');
-		expect(source).toContain('onItemSelect={(item) => playEditorialItem(item, editorialModules)}');
+	test("TIDAL's editorial modules stay on their own tab", () => {
+		expect(source).not.toContain("api.getTidalPage('videos')");
+		expect(source).not.toContain('<TidalDiscoverShelves');
 		expect(playCollection).toContain('export function playEditorialItem(item: TidalHomeItem, modules: TidalHomeModule[]): boolean');
-		expect(source).toContain('href="/videos/editorial">More from TIDAL</a>');
 	});
 
-	test('landing chips only appear when there is no editorial content', () => {
+	test('landing chips only appear when there is nothing to browse', () => {
 		expect(source).toContain('{#if !hasBrowseContent && !loadingBrowse}');
 		expect(source).toContain('onclick={() => videoSectionQuery.set(item)}');
 	});
@@ -68,20 +66,6 @@ describe('Videos tab browse state', () => {
 		expect(source).toContain("await goto('/videos', { replaceState: true, keepFocus: true });");
 		expect(source).toContain("void playVideoCollection('mix', mixId)");
 		expect(source).toContain("void playVideoCollection('playlist', playlistId)");
-	});
-
-	test('shelves ease themselves in, staggered by their place in the stack', () => {
-		// Sets are built one at a time and land across several polls, so each
-		// shelf owns its entrance. The index only spaces out a batch that shows
-		// up together; daily picks holds slot 0 whenever it is present.
-		const shelf = read('../src/lib/components/video/VideoSetShelf.svelte');
-		expect(shelf).toContain('class="set-shelf rise-in-shelf"');
-		expect(shelf).toContain('style={`--rise-index: ${index}`}');
-		expect(shelf).not.toContain('@keyframes shelf-in');
-		expect(appCss).toContain('animation: rise-in-shelf 340ms ease-out both;');
-		expect(appCss).toContain('animation-delay: calc(min(var(--rise-index, 0), 8) * 70ms);');
-		expect(appCss).toContain('@media (prefers-reduced-motion: reduce)');
-		expect(source).toContain('index={dailySet ? i + 1 : i}');
 	});
 
 	test('shelf posters fade in instead of popping as each decodes', () => {
