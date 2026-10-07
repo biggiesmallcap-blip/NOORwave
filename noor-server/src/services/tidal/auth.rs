@@ -804,3 +804,12 @@ mod tests {
         path
     }
 }
+
+/// True when an API error means the session is no longer valid.
+pub fn error_looks_like_auth(err: &anyhow::Error) -> bool {
+    let message = err.to_string().to_ascii_lowercase();
+    message.contains("401")
+        || message.contains("substatus\":6001")
+        || message.contains("valid session")
+        || message.contains("unauthorized")
+}

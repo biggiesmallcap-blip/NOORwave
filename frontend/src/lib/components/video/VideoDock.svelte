@@ -9,10 +9,12 @@
 	import {
 		advanceVideo,
 		nextVideo,
+		noteVideoProgress,
 		previousVideo,
 		clearVideoSession,
 		refreshVideoStream,
 		refillVideoRadio,
+		reportVideoEnded,
 		setVideoBrowseMode,
 		videoBrowseMode,
 		videoSession,
@@ -97,6 +99,7 @@
 	});
 
 	async function handleEnded() {
+		reportVideoEnded();
 		const endedVideoId = $videoSession.current?.tidal_id;
 		const wasRadio = $videoSession.continuous && $videoSession.autoplay;
 		const preloaded = prefetched?.videoId === upNext?.tidal_id ? prefetched : null;
@@ -149,6 +152,7 @@
 			artist={$videoSession.current?.artist_name ?? null}
 			qualityMode={qualityMode}
 			variant={mode === 'mini' ? 'mini' : 'full'}
+			onProgress={noteVideoProgress}
 			autoplayNext={$videoSession.autoplay}
 			hasNext={hasNext}
 			hasPrevious={hasPrevious}

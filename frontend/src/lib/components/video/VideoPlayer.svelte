@@ -23,6 +23,7 @@
 		onNext?: () => void;
 		onToggleAutoplay?: () => void;
 		onPlay?: () => void;
+		onProgress?: (positionMs: number, durationMs: number) => void;
 		refreshStream?: () => Promise<string>;
 	};
 
@@ -44,6 +45,7 @@
 		onNext,
 		onToggleAutoplay,
 		onPlay,
+		onProgress,
 		refreshStream,
 	}: Props = $props();
 
@@ -418,7 +420,10 @@
 			loading = false;
 		}}
 		ondurationchange={() => (duration = videoEl?.duration ?? 0)}
-		ontimeupdate={() => (currentTime = videoEl?.currentTime ?? 0)}
+		ontimeupdate={() => {
+			currentTime = videoEl?.currentTime ?? 0;
+			onProgress?.(currentTime * 1000, (videoEl?.duration ?? 0) * 1000);
+		}}
 		onvolumechange={() => {
 			volume = videoEl?.volume ?? volume;
 			muted = videoEl?.muted ?? muted;

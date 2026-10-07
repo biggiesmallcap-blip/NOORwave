@@ -59,6 +59,7 @@
 	import Toggle from '$lib/components/ui/Toggle.svelte';
 	import { searchSettings, type SettingsSearchEntry } from '$lib/components/settings/settingsSearch';
 	import TidalContentSetting from '$lib/components/settings/TidalContentSetting.svelte';
+	import VideoDiscoverySetting from '$lib/components/settings/VideoDiscoverySetting.svelte';
 	import IntegrationsPanel from '$lib/components/settings/IntegrationsPanel.svelte';
 	import PhoneRemotePanel from '$lib/components/settings/PhoneRemotePanel.svelte';
 	import {
@@ -3048,6 +3049,7 @@
 						<button class="btn btn-primary" onclick={connectTidal}>Connect TIDAL</button>
 					</div>
 				{:else}<div class="info-row"><span>Account</span><strong>{$tidalUserId ?? 'Connected'}</strong></div><div class="action-row"><button class="btn btn-glass" onclick={disconnectTidal}>Disconnect</button><a class="btn btn-glass" href={settingsHref('library', 'library-sync')}>Library sync</a></div>{/if}
+<VideoDiscoverySetting />
 <details><summary>More content settings</summary>
     <TidalContentSetting />
 	<p class="setting-status">Manage explicit content in the TIDAL app.</p>

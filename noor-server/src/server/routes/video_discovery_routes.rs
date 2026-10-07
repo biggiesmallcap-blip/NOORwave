@@ -12,19 +12,27 @@
 //! shelf by shelf across a few client polls rather than all at once at the end.
 
 use crate::SharedState;
+use crate::db::Database;
 use crate::services::library_videos;
 use crate::services::tidal::client::TidalClient;
+use crate::services::video_discovery::crawler::{self, Urgent};
+use crate::services::video_discovery::setting::{self as discovery_setting, DiscoverySetting};
+use crate::services::video_discovery::{graph, names, roots};
 use crate::services::video_radio;
 use crate::services::video_sets::{
     self, ALBUM_LOVE_SLUG, Archetype, DAILY_PICKS_SLUG, DJ_SETS_SLUG, ERA_SLUG, GENRE_SLUG_PREFIX,
     ONE_STEP_OUT_SLUG, RECENTLY_WATCHED_DAYS, SetPlan, VideoSet,
 };
-use axum::{extract::State, response::Json};
+use axum::{
+    extract::{Path, State},
+    response::Json,
+};
 use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 /// One build pass at a time, process-wide. A skipped kick is retried by the
 /// next request after the running pass finishes, so this never wedges.
@@ -206,6 +214,8 @@ pub(super) struct VideoRadioRequest {
     pub seed_artist_id: Option<i64>,
     pub seed_artist_name: Option<String>,
     #[serde(default)]
+    pub seed_video_id: Option<i64>,
+    #[serde(default)]
     pub exclude_video_ids: Vec<i64>,
     #[serde(default)]
     pub recent_video_ids: Vec<i64>,
@@ -222,40 +232,88 @@ pub(super) struct RecentVideoSong {
     pub title: String,
 }
 
-static VIDEO_RADIO_FETCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// How long a cold station waits for its first crawl before answering.
+const COLD_START_WAIT: Duration = if cfg!(test) {
+    Duration::from_millis(50)
+} else {
+    Duration::from_secs(5)
+};
+const RELATED_HEALTHY: usize = 6;
 
-fn video_radio_payload(items: &[video_sets::VideoSetItem], familiar: &HashSet<i64>) -> Value {
+fn video_radio_payload(
+    items: &[video_sets::VideoSetItem],
+    familiar: &HashSet<i64>,
+    building: bool,
+) -> Value {
     let unfamiliar_video_ids: Vec<i64> = items
         .iter()
         .filter(|item| item.artist_id.is_some_and(|id| !familiar.contains(&id)))
         .map(|item| item.tidal_id)
         .collect();
-    json!({ "items": items, "unfamiliar_video_ids": unfamiliar_video_ids })
+    json!({ "items": items, "unfamiliar_video_ids": unfamiliar_video_ids, "building": building })
+}
+
+fn lookup_seed(
+    db: &Database,
+    artist_id: Option<i64>,
+    artist_name: Option<&str>,
+    video_id: Option<i64>,
+) -> Option<i64> {
+    if let Some(id) = artist_id.filter(|id| *id > 0) {
+        return Some(id);
+    }
+    if let Some(name) = artist_name.filter(|name| !name.trim().is_empty() && name.len() <= 120)
+        && let Ok(Some(id)) = db.with_conn(|conn| names::find_local(conn, name))
+    {
+        return Some(id);
+    }
+    let video_id = video_id.filter(|id| *id > 0)?;
+    db.with_conn(|conn| {
+        Ok(conn.query_row(
+            "SELECT COALESCE(
+                (SELECT artist_tidal_id FROM video_catalog WHERE tidal_video_id = ?1 AND artist_tidal_id > 0),
+                (SELECT a.tidal_id FROM library_videos lv
+                   JOIN tracks t ON t.id = lv.track_id
+                   JOIN artists a ON a.id = t.artist_id
+                  WHERE lv.tidal_video_id = ?1 AND a.tidal_id > 0 LIMIT 1))",
+            [video_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )?)
+    })
+    .ok()
+    .flatten()
+}
+
+async fn resolve_seed(
+    db: &Database,
+    artist_id: Option<i64>,
+    artist_name: Option<&str>,
+    video_id: Option<i64>,
+) -> Option<i64> {
+    if let Some(seed) = lookup_seed(db, artist_id, artist_name, video_id) {
+        return Some(seed);
+    }
+    let video_id = video_id.filter(|id| *id > 0)?;
+    crawler::request(Urgent::Video(video_id));
+    crawler::wait_until_built(Urgent::Video(video_id), COLD_START_WAIT).await;
+    lookup_seed(db, None, None, Some(video_id))
 }
 
 pub(super) async fn post_videos_radio_next(
     State(state): State<SharedState>,
     Json(body): Json<VideoRadioRequest>,
 ) -> Json<Value> {
-    let (db, http, tidal_http, tokens) = {
-        let s = state.read().await;
-        (
-            s.db.clone(),
-            s.http_client.clone(),
-            s.tidal_http_client.clone(),
-            s.tidal_tokens.clone(),
-        )
-    };
-    let seed_id = body.seed_artist_id.filter(|id| *id > 0).or_else(|| {
-        body.seed_artist_name
-            .as_deref()
-            .filter(|name| name.len() <= 120)
-            .and_then(|name| {
-                db.with_conn(|conn| video_radio::local_artist_id(conn, name))
-                    .ok()
-                    .flatten()
-            })
-    });
+    let db = { state.read().await.db.clone() };
+    let seed_id = resolve_seed(
+        &db,
+        body.seed_artist_id,
+        body.seed_artist_name.as_deref(),
+        body.seed_video_id,
+    )
+    .await;
+    if let Some(seed) = seed_id {
+        roots::touch_station(seed);
+    }
     let excluded: HashSet<i64> = body
         .exclude_video_ids
         .into_iter()
@@ -287,21 +345,18 @@ pub(super) async fn post_videos_radio_next(
         Ok(values) => values,
         Err(e) => {
             tracing::warn!("video radio taste read failed: {e}");
-            return Json(json!({ "items": [], "unfamiliar_video_ids": [] }));
+            return Json(video_radio_payload(&[], &HashSet::new(), false));
         }
     };
-    let load = || -> anyhow::Result<_> {
+    let load = || -> anyhow::Result<(Vec<video_sets::VideoSetItem>, usize)> {
         db.with_conn(|conn| {
-            let pool = video_radio::artist_pool(
-                conn,
-                seed_id,
-                if seed_id.is_some() {
-                    &[]
-                } else {
-                    &recent_artists
-                },
-                if seed_id.is_some() { &[] } else { &anchors },
-            )?;
+            let graph = graph::cached(conn)?;
+            let (recent, library): (&[i64], &[video_sets::AnchorArtist]) = if seed_id.is_some() {
+                (&[], &[])
+            } else {
+                (&recent_artists, &anchors)
+            };
+            let pool = video_radio::station_pool(conn, &graph, seed_id, recent, library)?;
             let candidates = video_radio::load_candidates(conn, &pool)?;
             let watched = video_sets::recently_watched_video_ids(conn, RECENTLY_WATCHED_DAYS)?;
             let strict_exclude = excluded.union(&recent_seen).copied().collect();
@@ -324,316 +379,31 @@ pub(super) async fn post_videos_radio_next(
                     12,
                 )
             };
-            let unfamiliar_count = video_radio::unfamiliar_artist_count(&items, &familiar, seed_id);
-            let fresh_count = items.len();
-            Ok::<_, anyhow::Error>((pool, items, fresh_count, unfamiliar_count))
+            let unfamiliar = video_radio::unfamiliar_artist_count(&items, &familiar, seed_id);
+            Ok((items, unfamiliar))
         })
     };
-    let (mut pool, mut items, mut fresh_count, mut unfamiliar_count) = match load() {
+    let (mut items, unfamiliar) = match load() {
         Ok(value) => value,
         Err(e) => {
             tracing::warn!("video radio cache read failed: {e}");
-            return Json(json!({ "items": [], "unfamiliar_video_ids": [] }));
+            return Json(video_radio_payload(&[], &familiar, false));
         }
     };
-
-    // Single-flight across all sessions. Wait for any active fill, then
-    // re-read the cache so simultaneous listeners do not duplicate API calls.
-    // The scan ledger also throttles empty catalogs and empty relationships.
-    let relationship_due = seed_id.is_some_and(|id| {
-        db.with_conn(|conn| video_radio::related_due(conn, id))
-            .unwrap_or(false)
-    });
-    let bridge_due = seed_id.is_some_and(|id| {
-        db.with_conn(|conn| video_radio::bridge_due(conn, id))
-            .unwrap_or(false)
-    });
-    if video_radio::queue_needs_discovery(
-        fresh_count,
-        unfamiliar_count,
-        relationship_due,
-        bridge_due,
-    ) {
-        let _guard = VIDEO_RADIO_FETCH_LOCK.lock().await;
-        if let Ok((current_pool, current_items, current_fresh_count, current_unfamiliar_count)) =
-            load()
-        {
-            pool = current_pool;
-            items = current_items;
-            fresh_count = current_fresh_count;
-            unfamiliar_count = current_unfamiliar_count;
-        }
-        if !video_radio::queue_needs_discovery(
-            fresh_count,
-            unfamiliar_count,
-            seed_id.is_some_and(|id| {
-                db.with_conn(|conn| video_radio::related_due(conn, id))
-                    .unwrap_or(false)
-            }),
-            seed_id.is_some_and(|id| {
-                db.with_conn(|conn| video_radio::bridge_due(conn, id))
-                    .unwrap_or(false)
-            }),
-        ) {
-            return Json(video_radio_payload(&items, &familiar));
-        }
-        let tokens = match tokens {
-            Some(tokens) => Some(tokens),
-            None => super::load_persisted_tidal_tokens(&state)
-                .await
-                .ok()
-                .flatten(),
-        };
-        if let Some(tokens) = tokens {
-            let client =
-                TidalClient::with_http(tidal_http, tokens.access_token, tokens.country_code);
-            let mut refreshed_seed_relations = false;
-            if let Some(id) = seed_id {
-                let due = db
-                    .with_conn(|conn| video_radio::reserve_related_scan(conn, id))
-                    .unwrap_or(false);
-                if due {
-                    refreshed_seed_relations = true;
-                    if let Err(e) =
-                        video_radio::refresh_video_relations(&db, http.clone(), &client, id).await
-                    {
-                        tracing::warn!("video radio relationship cache failed: {e}");
-                    }
-                    if let Ok(next) = db.with_conn(|conn| {
-                        video_radio::artist_pool(
-                            conn,
-                            seed_id,
-                            if seed_id.is_some() {
-                                &[]
-                            } else {
-                                &recent_artists
-                            },
-                            if seed_id.is_some() { &[] } else { &anchors },
-                        )
-                    }) {
-                        pool = next;
-                    }
-                }
-            }
-            // Inspect one direct neighbor when discovery is thin or the
-            // hourly bridge check is due. Two neighbors must agree before a
-            // second-hop artist enters the pool. Shared ledgers bound calls.
-            if !refreshed_seed_relations
-                && let Some(id) = seed_id
-                && (fresh_count < 8
-                    || unfamiliar_count < video_radio::UNFAMILIAR_ARTISTS_FOR_HEALTHY_QUEUE
-                    || db
-                        .with_conn(|conn| video_radio::bridge_due(conn, id))
-                        .unwrap_or(false))
-            {
-                let bridge = db
-                    .with_conn(|conn| video_radio::next_bridge_seed(conn, id))
-                    .ok()
-                    .flatten();
-                let _ = db.with_conn(|conn| video_radio::mark_bridge_scanned(conn, id));
-                if let Some((bridge_id, _)) = bridge
-                    && db
-                        .with_conn(|conn| video_radio::reserve_related_scan(conn, bridge_id))
-                        .unwrap_or(false)
-                {
-                    if let Err(e) =
-                        video_radio::refresh_video_relations(&db, http, &client, bridge_id).await
-                    {
-                        tracing::debug!("video radio bridge relationship scan failed: {e}");
-                    }
-                    if let Ok(next) =
-                        db.with_conn(|conn| video_radio::artist_pool(conn, seed_id, &[], &[]))
-                    {
-                        pool = next;
-                    }
-                }
-            }
-            // Fetch the seed first, then direct and corroborated second-hop
-            // artists. A thin queue gets one extra catalog lookup this pass.
-            let mut fetch_pool = pool.clone();
-            fetch_pool.sort_by_key(|(id, _, lane)| (lane.fetch_priority(), !familiar.contains(id)));
-            let mut fetched = 0;
-            let mut fetched_bridges = 0;
-            let fetch_budget = if fresh_count < 8 { 3 } else { 2 };
-            for (id, name, lane) in &fetch_pool {
-                if fetched >= fetch_budget {
-                    break;
-                }
-                if *lane == video_radio::SourceLane::Bridge && fetched_bridges >= 1 {
-                    continue;
-                }
-                if *id <= 0
-                    || db
-                        .with_conn(|conn| video_radio::reserve_artist_scan(conn, *id))
-                        .unwrap_or(false)
-                        == false
-                {
-                    continue;
-                }
-                // Even empty or failed scans are reserved so an unavailable
-                // artist is not requested at every song boundary.
-                fetched += 1;
-                if *lane == video_radio::SourceLane::Bridge {
-                    fetched_bridges += 1;
-                }
-                match client.get_artist_videos(*id, 50, 0).await {
-                    Ok(page) => {
-                        let anchor = video_sets::AnchorArtist {
-                            tidal_id: *id,
-                            name: name.clone(),
-                            listens: 1,
-                            via: None,
-                        };
-                        let videos = page
-                            .items
-                            .iter()
-                            .map(video_sets::VideoCandidate::from)
-                            .collect();
-                        if let Err(e) = db
-                            .with_conn(|conn| video_radio::cache_groups(conn, &[(anchor, videos)]))
-                        {
-                            tracing::warn!("video radio catalog write failed: {e}");
-                        }
-                    }
-                    Err(e) => tracing::debug!("video radio artist {id} fetch failed: {e}"),
-                }
-            }
-            if let Ok((_, refreshed, _, unfamiliar)) = load() {
-                items = refreshed;
-                unfamiliar_count = unfamiliar;
-            }
-            // A genre search can uncover more videos by already verified
-            // neighbors. The genre ledger permits one search per genre per
-            // 14 days and one search globally per 30 minutes.
-            if unfamiliar_count < video_radio::UNFAMILIAR_ARTISTS_FOR_HEALTHY_QUEUE
-                && let Some(id) = seed_id
-                && let Ok(Some(genre)) = db.with_conn(|conn| video_radio::seed_genre(conn, id))
-                && db
-                    .with_conn(|conn| video_radio::genre_due(conn, &genre))
-                    .unwrap_or(false)
-            {
-                let _ = db.with_conn(|conn| video_radio::mark_genre_scanned(conn, &genre));
-                let query = format!("{genre} music video");
-                if let Ok(found) = client.search_videos(&query, 20, 0).await {
-                    // A broad search query is not proof that every returned
-                    // artist shares this genre. Only index videos from the
-                    // seed and artists already linked by local or provider data.
-                    let allowed: HashSet<i64> = pool
-                        .iter()
-                        .filter(|(_, _, lane)| lane.is_close())
-                        .map(|(artist_id, _, _)| *artist_id)
-                        .collect();
-                    let videos: Vec<video_sets::VideoCandidate> = found
-                        .iter()
-                        .map(video_sets::VideoCandidate::from)
-                        .filter(|video| video.artist_id.is_some_and(|id| allowed.contains(&id)))
-                        .collect();
-                    let anchor = video_sets::AnchorArtist {
-                        tidal_id: -1,
-                        name: query,
-                        listens: 1,
-                        via: None,
-                    };
-                    if let Err(e) =
-                        db.with_conn(|conn| video_radio::cache_groups(conn, &[(anchor, videos)]))
-                    {
-                        tracing::warn!("video radio genre catalog write failed: {e}");
-                    }
-                    if let Ok((_, refreshed, _, _)) = load() {
-                        items = refreshed;
-                    }
-                }
+    let mut building = false;
+    if let Some(seed) = seed_id
+        && video_radio::queue_needs_discovery(items.len(), unfamiliar)
+    {
+        crawler::request(Urgent::Station(seed));
+        if items.iter().all(|item| item.artist_id == Some(seed)) {
+            crawler::wait_until_built(Urgent::Station(seed), COLD_START_WAIT).await;
+            if let Ok((next, _)) = load() {
+                items = next;
             }
         }
+        building = crawler::is_building(Urgent::Station(seed));
     }
-    Json(video_radio_payload(&items, &familiar))
-}
-
-/// Related videos read the cached catalog immediately. A separate, bounded
-/// background pass fills missing links without waiting for a radio refill.
-static VIDEO_RELATED_BUILD_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-
-fn kick_related_build(state: &SharedState, seed_id: i64) -> bool {
-    if VIDEO_RELATED_BUILD_IN_FLIGHT.swap(true, Ordering::SeqCst) {
-        return true;
-    }
-    let state = state.clone();
-    tokio::spawn(async move {
-        if let Err(e) = build_related_cache(&state, seed_id).await {
-            tracing::warn!("video related cache build failed: {e}");
-        }
-        VIDEO_RELATED_BUILD_IN_FLIGHT.store(false, Ordering::SeqCst);
-    });
-    true
-}
-
-async fn build_related_cache(state: &SharedState, seed_id: i64) -> anyhow::Result<()> {
-    let (db, http, tidal_http, tokens) = {
-        let s = state.read().await;
-        (
-            s.db.clone(),
-            s.http_client.clone(),
-            s.tidal_http_client.clone(),
-            s.tidal_tokens.clone(),
-        )
-    };
-    let tokens = match tokens {
-        Some(tokens) => Some(tokens),
-        None => super::load_persisted_tidal_tokens(state)
-            .await
-            .ok()
-            .flatten(),
-    };
-    let Some(tokens) = tokens else {
-        return Ok(());
-    };
-    if !db.with_conn(|conn| video_radio::reserve_related_scan(conn, seed_id))? {
-        return Ok(());
-    }
-    let client = TidalClient::with_http(tidal_http, tokens.access_token, tokens.country_code);
-    video_radio::refresh_video_relations(&db, http, &client, seed_id).await?;
-    let mut pool = db.with_conn(|conn| video_radio::artist_pool(conn, Some(seed_id), &[], &[]))?;
-    pool.sort_by_key(|(_, _, lane)| {
-        if *lane == video_radio::SourceLane::Seed {
-            2
-        } else {
-            lane.fetch_priority()
-        }
-    });
-    let mut fetched = 0;
-    for (id, name, _) in pool.into_iter().filter(|(_, _, lane)| lane.is_close()) {
-        if fetched >= 2 {
-            break;
-        }
-        if !db.with_conn(|conn| video_radio::reserve_artist_scan(conn, id))? {
-            continue;
-        }
-        fetched += 1;
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(8),
-            client.get_artist_videos(id, 50, 0),
-        )
-        .await
-        {
-            Ok(Ok(page)) => {
-                let anchor = video_sets::AnchorArtist {
-                    tidal_id: id,
-                    name,
-                    listens: 1,
-                    via: None,
-                };
-                let videos = page
-                    .items
-                    .iter()
-                    .map(video_sets::VideoCandidate::from)
-                    .collect();
-                db.with_conn(|conn| video_radio::cache_groups(conn, &[(anchor, videos)]))?;
-            }
-            Ok(Err(e)) => tracing::debug!("video related artist {id} fetch failed: {e}"),
-            Err(_) => tracing::debug!("video related artist {id} fetch timed out"),
-        }
-    }
-    Ok(())
+    Json(video_radio_payload(&items, &familiar, building))
 }
 
 /// General library anchors never appear in this section.
@@ -650,39 +420,18 @@ pub(super) async fn post_videos_related(
     Json(body): Json<RelatedVideosRequest>,
 ) -> Json<Value> {
     let db = { state.read().await.db.clone() };
-    let seed_id = body.seed_artist_id.filter(|id| *id > 0).or_else(|| {
-        body.seed_artist_name
-            .as_deref()
-            .filter(|name| name.len() <= 120)
-            .and_then(|name| {
-                db.with_conn(|conn| video_radio::local_artist_id(conn, name))
-                    .ok()
-                    .flatten()
-            })
-    });
-    let Some(seed_id) = seed_id else {
+    let Some(seed_id) = lookup_seed(
+        &db,
+        body.seed_artist_id,
+        body.seed_artist_name.as_deref(),
+        None,
+    ) else {
         return Json(json!({ "items": [], "building": false }));
     };
-    let due = db
-        .with_conn(|conn| video_radio::related_due(conn, seed_id))
-        .unwrap_or(false);
-    let building = if due {
-        let connected = { state.read().await.tidal_tokens.is_some() };
-        let connected = connected
-            || super::load_persisted_tidal_tokens(&state)
-                .await
-                .ok()
-                .flatten()
-                .is_some();
-        connected && kick_related_build(&state, seed_id)
-    } else {
-        VIDEO_RELATED_BUILD_IN_FLIGHT.load(Ordering::SeqCst)
-            || VIDEO_RADIO_FETCH_LOCK.try_lock().is_err()
-    };
-    let s = state.read().await;
-    let items =
-        s.db.with_conn(|conn| -> anyhow::Result<Vec<video_sets::VideoSetItem>> {
-            let pool = video_radio::artist_pool(conn, Some(seed_id), &[], &[])?;
+    let items = db
+        .with_conn(|conn| -> anyhow::Result<Vec<video_sets::VideoSetItem>> {
+            let graph = graph::cached(conn)?;
+            let pool = video_radio::station_pool(conn, &graph, Some(seed_id), &[], &[])?;
             let related: Vec<_> = pool
                 .iter()
                 .filter(|(_, _, lane)| lane.is_close())
@@ -715,7 +464,10 @@ pub(super) async fn post_videos_related(
             Ok(selected)
         })
         .unwrap_or_default();
-    Json(json!({ "items": items, "building": building }))
+    if items.len() < RELATED_HEALTHY {
+        crawler::request(Urgent::Station(seed_id));
+    }
+    Json(json!({ "items": items, "building": crawler::is_building(Urgent::Station(seed_id)) }))
 }
 
 fn record_set_exposure(
@@ -771,8 +523,9 @@ pub(super) async fn post_videos_history(
     State(state): State<SharedState>,
     Json(body): Json<RecordVideoPlay>,
 ) -> Json<Value> {
+    crate::services::video_discovery::governor::note_video_activity();
     let s = state.read().await;
-    let result = s.db.with_conn(|conn| -> anyhow::Result<()> {
+    let result = s.db.with_conn(|conn| -> anyhow::Result<i64> {
         conn.execute(
             "INSERT INTO video_history (tidal_video_id, title, artist_tidal_id, artist_name) \
              VALUES (?1, ?2, ?3, ?4)",
@@ -780,19 +533,106 @@ pub(super) async fn post_videos_history(
                 body.tidal_video_id,
                 body.title,
                 body.artist_tidal_id,
-                body.artist_name,
+                body.artist_name
             ],
         )?;
-        Ok(())
+        Ok(conn.last_insert_rowid())
     });
-    if let Err(e) = result {
-        tracing::warn!(
-            target = "noor.videos",
-            event = "history_write_failed",
-            "video history write failed: {e}"
-        );
+    match result {
+        Ok(id) => Json(json!({ "ok": true, "id": id })),
+        Err(e) => {
+            tracing::warn!(
+                target = "noor.videos",
+                event = "history_write_failed",
+                "video history write failed: {e}"
+            );
+            Json(json!({ "ok": true }))
+        }
     }
-    Json(json!({ "ok": true }))
+}
+
+#[derive(Deserialize)]
+pub(super) struct FinishVideoPlay {
+    pub watched_ms: i64,
+    #[serde(default)]
+    pub video_duration_ms: Option<i64>,
+    #[serde(default)]
+    pub completed: bool,
+}
+
+/// `POST /api/videos/history/{id}/finish`. Watch time feeds enjoyed roots.
+pub(super) async fn post_videos_history_finish(
+    State(state): State<SharedState>,
+    Path(id): Path<i64>,
+    Json(body): Json<FinishVideoPlay>,
+) -> Json<Value> {
+    const MAX_MS: i64 = 24 * 3600 * 1000;
+    let valid = id > 0
+        && (0..=MAX_MS).contains(&body.watched_ms)
+        && body
+            .video_duration_ms
+            .is_none_or(|d| (0..=MAX_MS).contains(&d));
+    if !valid {
+        return Json(json!({ "ok": false }));
+    }
+    let s = state.read().await;
+    let updated =
+        s.db.with_conn(|conn| {
+            Ok(conn.execute(
+                "UPDATE video_history SET
+                     duration_watched_ms = MAX(COALESCE(duration_watched_ms, 0), ?2),
+                     video_duration_ms = COALESCE(?3, video_duration_ms),
+                     completed = MAX(completed, ?4)
+                 WHERE id = ?1",
+                params![
+                    id,
+                    body.watched_ms,
+                    body.video_duration_ms,
+                    i64::from(body.completed)
+                ],
+            )?)
+        })
+        .unwrap_or(0);
+    Json(json!({ "ok": updated > 0 }))
+}
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct VideoDiscoverySettings {
+    setting: DiscoverySetting,
+}
+
+/// `GET /api/videos/discovery/settings`.
+pub(super) async fn get_video_discovery_settings(
+    State(state): State<SharedState>,
+) -> Result<Json<VideoDiscoverySettings>, axum::http::StatusCode> {
+    let db = { state.read().await.db.clone() };
+    let setting = db
+        .with_conn(discovery_setting::load)
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(VideoDiscoverySettings { setting }))
+}
+
+/// `PUT /api/videos/discovery/settings`. Full, limited or off; the crawler
+/// picks the change up immediately.
+pub(super) async fn put_video_discovery_settings(
+    State(state): State<SharedState>,
+    Json(body): Json<VideoDiscoverySettings>,
+) -> Result<Json<VideoDiscoverySettings>, axum::http::StatusCode> {
+    let db = { state.read().await.db.clone() };
+    db.with_conn(|conn| discovery_setting::save(conn, body.setting))
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    crawler::wake();
+    Ok(Json(body))
+}
+
+/// `GET /api/videos/discovery/status`. Crawler progress for verification.
+pub(super) async fn get_video_discovery_status(State(state): State<SharedState>) -> Json<Value> {
+    let db = { state.read().await.db.clone() };
+    match db.with_conn(crawler::status) {
+        Ok(status) => Json(json!(status)),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
 }
 
 // ── Liked videos ─────────────────────────────────────────────────────────────
@@ -914,28 +754,145 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    #[tokio::test]
-    async fn related_response_does_not_wait_for_radio_fetch_lock() {
-        let db = crate::server::routes::tests::fresh_migrated_db();
-        let state = Arc::new(tokio::sync::RwLock::new(
+    fn state(db: crate::db::Database) -> SharedState {
+        Arc::new(tokio::sync::RwLock::new(
             crate::server::routes::tests::fresh_test_state(db),
-        ));
-        let _radio_guard = VIDEO_RADIO_FETCH_LOCK.lock().await;
+        ))
+    }
+
+    #[tokio::test]
+    async fn related_reads_the_cache_and_asks_the_crawler_for_more() {
+        let db = crate::server::routes::tests::fresh_migrated_db();
         let response = tokio::time::timeout(
             std::time::Duration::from_millis(500),
             post_videos_related(
-                State(state),
+                State(state(db)),
                 Json(RelatedVideosRequest {
-                    seed_artist_id: Some(42),
-                    seed_artist_name: Some("Artist".into()),
+                    seed_artist_id: Some(4242),
+                    seed_artist_name: None,
                     exclude_video_ids: Vec::new(),
                 }),
             ),
         )
         .await
-        .expect("related response must use cache without waiting for radio");
-        assert!(response.0["items"].is_array());
+        .expect("related never waits on TIDAL");
+        assert_eq!(response.0["items"], json!([]));
+        assert_eq!(response.0["building"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn radio_refill_answers_from_the_graph_without_tidal() {
+        let db = crate::server::routes::tests::fresh_migrated_db();
+        db.with_conn(|conn| {
+            let video = |id, artist| video_sets::VideoCandidate {
+                tidal_id: id,
+                title: format!("Song {id}"),
+                artist_id: Some(artist),
+                artist_name: Some(format!("Artist {artist}")),
+                ..Default::default()
+            };
+            let anchor = |id| video_sets::AnchorArtist { tidal_id: id, name: format!("Artist {id}"), listens: 1, via: None };
+            video_radio::cache_groups(conn, &[(anchor(4343), vec![video(1, 4343)]), (anchor(4344), vec![video(2, 4344)])])?;
+            conn.execute(
+                "INSERT INTO video_related_artists (seed_tidal_id, related_tidal_id, name, source, rank, weight)
+                 VALUES (4343, 4344, 'Artist 4344', 'tidal', 0, 1.0)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            post_videos_radio_next(
+                State(state(db)),
+                Json(VideoRadioRequest {
+                    seed_artist_id: Some(4343),
+                    seed_artist_name: None,
+                    seed_video_id: Some(1),
+                    exclude_video_ids: vec![1],
+                    recent_video_ids: Vec::new(),
+                    recent_songs: Vec::new(),
+                    recent_artist_ids: vec![4343],
+                }),
+            ),
+        )
+        .await
+        .expect("refill answers from the cache");
+        let ids: Vec<i64> = response.0["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["tidal_id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![2]);
         assert!(response.0["building"].is_boolean());
+    }
+
+    #[tokio::test]
+    async fn finishing_a_watch_records_time_and_completion() {
+        let db = crate::server::routes::tests::fresh_migrated_db();
+        let shared = state(db.clone());
+        let started = post_videos_history(
+            State(shared.clone()),
+            Json(RecordVideoPlay {
+                tidal_video_id: 77,
+                title: Some("Song".into()),
+                artist_tidal_id: Some(9),
+                artist_name: None,
+            }),
+        )
+        .await;
+        let id = started.0["id"].as_i64().expect("history id");
+        let finished = post_videos_history_finish(
+            State(shared),
+            Path(id),
+            Json(FinishVideoPlay {
+                watched_ms: 170_000,
+                video_duration_ms: Some(180_000),
+                completed: true,
+            }),
+        )
+        .await;
+        assert_eq!(finished.0["ok"], json!(true));
+        let row: (i64, i64, bool) = db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT duration_watched_ms, video_duration_ms, completed FROM video_history WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(row, (170_000, 180_000, true));
+    }
+
+    #[tokio::test]
+    async fn the_discovery_setting_round_trips_and_shows_in_status() {
+        let db = crate::server::routes::tests::fresh_migrated_db();
+        let shared = state(db.clone());
+        assert_eq!(
+            get_video_discovery_settings(State(shared.clone()))
+                .await
+                .unwrap()
+                .0
+                .setting,
+            DiscoverySetting::Full
+        );
+        let saved = put_video_discovery_settings(
+            State(shared.clone()),
+            Json(VideoDiscoverySettings {
+                setting: DiscoverySetting::Off,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.0.setting, DiscoverySetting::Off);
+        let status = get_video_discovery_status(State(shared)).await;
+        assert_eq!(status.0["setting"], json!("off"));
+        assert!(
+            serde_json::from_value::<VideoDiscoverySettings>(json!({ "setting": "turbo" }))
+                .is_err()
+        );
     }
 }
 

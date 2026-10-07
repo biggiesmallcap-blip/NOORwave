@@ -291,6 +291,18 @@ export interface TidalSearchArtist {
 	in_library: boolean;
 }
 
+/** How much background video discovery the server runs. */
+export type VideoDiscoverySetting = 'full' | 'limited' | 'off';
+
+export interface VideoDiscoveryStatus {
+	setting: VideoDiscoverySetting;
+	mode: string;
+	calls_last_hour: number;
+	calls_today: number;
+	artists_with_videos: number;
+	catalog_videos: number;
+}
+
 export interface TidalSearchVideo {
 	tidal_id: number;
 	title: string;
@@ -2491,6 +2503,18 @@ export const api = {
         return fetchApi<{ tracks: { id: number; availability: string; favorite_state: string; releases: number }[] }>('/api/library/catalogue/status');
     },
 
+    getVideoDiscoverySettings() {
+        return fetchApi<{ setting: VideoDiscoverySetting }>('/api/videos/discovery/settings');
+    },
+    setVideoDiscoverySettings(setting: VideoDiscoverySetting) {
+        return fetchApi<{ setting: VideoDiscoverySetting }>('/api/videos/discovery/settings', undefined, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ setting }),
+        });
+    },
+    getVideoDiscoveryStatus() {
+        return fetchApi<VideoDiscoveryStatus>('/api/videos/discovery/status');
+    },
     getTidalContentSettings() {
         return fetchApi<{ hide_ai_generated: boolean }>('/api/tidal/content-settings');
     },
@@ -4100,8 +4124,18 @@ export const api = {
 		title?: string | null;
 		artist_tidal_id?: number | null;
 		artist_name?: string | null;
-	}): Promise<{ ok: boolean }> {
-		return fetchApi<{ ok: boolean }>('/api/videos/history', undefined, {
+	}): Promise<{ ok: boolean; id?: number }> {
+		return fetchApi<{ ok: boolean; id?: number }>('/api/videos/history', undefined, {
+			method: 'POST',
+			body: JSON.stringify(body),
+		});
+	},
+
+	finishVideoHistory(
+		id: number,
+		body: { watched_ms: number; video_duration_ms: number | null; completed: boolean },
+	): Promise<{ ok: boolean }> {
+		return fetchApi<{ ok: boolean }>(`/api/videos/history/${id}/finish`, undefined, {
 			method: 'POST',
 			body: JSON.stringify(body),
 		});
@@ -4130,12 +4164,13 @@ export const api = {
 	getVideoRadioNext(body: {
 		seed_artist_id: number | null;
 		seed_artist_name: string | null;
+		seed_video_id?: number | null;
 		exclude_video_ids: number[];
 		recent_video_ids: number[];
 		recent_songs: { artist_id: number | null; artist_name: string | null; title: string }[];
 		recent_artist_ids: number[];
-	}): Promise<{ items: TidalSearchVideo[]; unfamiliar_video_ids: number[] }> {
-		return fetchApi<{ items: TidalSearchVideo[]; unfamiliar_video_ids: number[] }>('/api/videos/radio/next', undefined, {
+	}): Promise<{ items: TidalSearchVideo[]; unfamiliar_video_ids: number[]; building?: boolean }> {
+		return fetchApi<{ items: TidalSearchVideo[]; unfamiliar_video_ids: number[]; building?: boolean }>('/api/videos/radio/next', undefined, {
 			method: 'POST',
 			body: JSON.stringify(body),
 		});

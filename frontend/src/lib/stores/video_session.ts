@@ -135,6 +135,7 @@ export const videoSession = {
 		radioGeneration += 1;
 		radioSeenIds = [state.current.tidal_id];
 		radioSeenSongs = [state.current];
+		radioSeedVideoId = state.current.tidal_id;
 		radioRefill = null;
 		persistAutoplayPreference(true);
 		const queue = radioStartQueue(state.current);
@@ -154,6 +155,7 @@ export const videoSession = {
 	stopRadio() {
 		radioGeneration += 1;
 		radioRefill = null;
+		radioSeedVideoId = null;
 		update({ continuous: false, radioSeedArtistId: null, radioSeedArtistName: null,
 			radioIssue: null, radioSearching: false, radioDiscoveryMessage: null, radioHits: [], sourceLabel: 'Video queue' });
 	},
@@ -162,6 +164,7 @@ export const videoSession = {
 		if (!state.continuous || state.current?.tidal_id !== expectedVideoId) return;
 		radioGeneration += 1;
 		radioRefill = null;
+		radioSeedVideoId = null;
 		persistAutoplayPreference(false);
 		update({ continuous: false, radioSeedArtistId: null, radioSeedArtistName: null,
 			autoplay: false, playing: false, radioSearching: false, sourceLabel: 'Video queue',
@@ -242,6 +245,56 @@ let radioGeneration = 0;
 let radioRefill: Promise<number> | null = null;
 let radioSeenIds: number[] = [];
 let radioSeenSongs: VideoSessionItem[] = [];
+let radioSeedVideoId: number | null = null;
+let lastRefillBuilding = false;
+
+/** How a station that is still being built is waited on. Tests shorten it. */
+export const radioRetryPolicy = { delayMs: 4000, attempts: 5 };
+
+// --- Watch reporting: feeds the crawler's "enjoyed" roots ---
+
+interface WatchRecord {
+	videoId: number;
+	historyId: number | null;
+	watchedMs: number;
+	durationMs: number | null;
+	finished: boolean;
+	completed: boolean;
+}
+
+let watch: WatchRecord | null = null;
+
+function sendFinish(record: WatchRecord) {
+	if (record.historyId == null) return;
+	void api
+		.finishVideoHistory(record.historyId, {
+			watched_ms: Math.round(record.watchedMs),
+			video_duration_ms: record.durationMs != null ? Math.round(record.durationMs) : null,
+			completed: record.completed,
+		})
+		.catch(() => {});
+}
+
+function finishWatch(completed: boolean) {
+	const record = watch;
+	if (!record || record.finished) return;
+	record.finished = true;
+	record.completed = completed;
+	sendFinish(record);
+}
+
+/** Position from the dock's player. Kept outside the store so a 4 Hz
+ *  timeupdate does not re-render every subscriber. */
+export function noteVideoProgress(positionMs: number, durationMs?: number) {
+	if (!watch || watch.finished || !Number.isFinite(positionMs)) return;
+	watch.watchedMs = Math.max(watch.watchedMs, positionMs);
+	if (durationMs && Number.isFinite(durationMs) && durationMs > 0) watch.durationMs = durationMs;
+}
+
+/** The current video played to its end. */
+export function reportVideoEnded() {
+	finishWatch(true);
+}
 
 function sourceFor(item: VideoSessionItem, ctx: VideoPlayContext): VideoSessionSource {
 	if (ctx.source !== 'none') return ctx.source;
@@ -250,8 +303,15 @@ function sourceFor(item: VideoSessionItem, ctx: VideoPlayContext): VideoSessionS
 }
 
 /** Log a started video so the editorial builder can hold it out of the next few
- *  rotations. Fire-and-forget: a dropped write only costs a repeat pick. */
+ *  rotations, then report how much of it was watched. Fire-and-forget: a
+ *  dropped write only costs a repeat pick. */
 function recordWatch(item: VideoSessionItem) {
+	if (watch && watch.videoId !== item.tidal_id) finishWatch(false);
+	const record: WatchRecord = {
+		videoId: item.tidal_id, historyId: null, watchedMs: 0,
+		durationMs: item.duration_ms ?? null, finished: false, completed: false,
+	};
+	watch = record;
 	const artistId = 'artist_id' in item ? item.artist_id : null;
 	void api
 		.recordVideoHistory({
@@ -259,6 +319,10 @@ function recordWatch(item: VideoSessionItem) {
 			title: item.title ?? null,
 			artist_tidal_id: artistId ?? null,
 			artist_name: item.artist_name ?? null,
+		})
+		.then((result) => {
+			record.historyId = result?.id ?? null;
+			if (record.finished) sendFinish(record);
 		})
 		.catch(() => {});
 }
@@ -281,6 +345,7 @@ export async function playVideo(
 		radioSeenIds = [item.tidal_id];
 		radioSeenSongs = [item];
 		radioRefill = null;
+		radioSeedVideoId = ctx.radioScope !== 'library' ? item.tidal_id : null;
 	}
 	const artistRadio = ctx.radioScope !== 'library';
 	const queue = ctx.resetRadio && ctx.continuous && artistRadio ? radioStartQueue(item) : ctx.queue;
@@ -310,6 +375,7 @@ export async function playVideo(
 		return true;
 	}
 
+	if (state.current && state.current.tidal_id !== item.tidal_id) finishWatch(false);
 	const seq = ++streamSeq;
 	// Picking something new always means "show it": browsing the shelves with
 	// a video docked ends the moment you choose the next one.
@@ -365,6 +431,7 @@ export function refillVideoRadio(force = false): Promise<number> {
 	if (radioRefill) return radioRefill;
 	const state = get(session);
 	if (!state.active || !state.continuous || !state.autoplay || (!force && state.queue.length - state.currentIndex > 5)) {
+		lastRefillBuilding = false;
 		return Promise.resolve(0);
 	}
 	const generation = radioGeneration;
@@ -375,13 +442,15 @@ export function refillVideoRadio(force = false): Promise<number> {
 	const pending = api.getVideoRadioNext({
 		seed_artist_id: state.radioSeedArtistId,
 		seed_artist_name: state.radioSeedArtistName,
+		seed_video_id: radioSeedVideoId,
 		exclude_video_ids: excluded,
 		recent_video_ids: radioSeenIds.slice(-96),
 		recent_songs: [...state.queue, ...radioSeenSongs].slice(-128).map((video) => ({
 			artist_id: video.artist_id ?? null, artist_name: video.artist_name ?? null, title: video.title,
 		})),
 		recent_artist_ids: recentArtists,
-	}).then(({ items }) => {
+	}).then(({ items, building }) => {
+		lastRefillBuilding = Boolean(building);
 		const current = get(session);
 		if (generation !== radioGeneration || !current.continuous || !current.active) return 0;
 		const existing = new Set(current.queue.map((v) => v.tidal_id));
@@ -393,7 +462,11 @@ export function refillVideoRadio(force = false): Promise<number> {
 			return true;
 		});
 		if (fresh.length === 0) {
-			update({ radioDiscoveryMessage: 'No new videos in this pass. Checking again as the queue plays.' });
+			update({
+				radioDiscoveryMessage: building
+					? 'Finding more videos for this station...'
+					: 'No new videos in this pass. Checking again as the queue plays.',
+			});
 			return 0;
 		}
 		// Refills extend the selected queue. Keep every upcoming pick in order,
@@ -416,6 +489,7 @@ export function refillVideoRadio(force = false): Promise<number> {
 		radioSeenSongs = radioSeenSongs.slice(-128);
 		return fresh.length;
 	}).catch(() => {
+		lastRefillBuilding = false;
 		if (generation === radioGeneration && get(session).continuous) {
 			update({ radioDiscoveryMessage: 'Could not check for more videos. Radio will retry near the end of the queue.' });
 		}
@@ -440,6 +514,20 @@ export async function refreshVideoStream(): Promise<string> {
 	return stream.hls_url;
 }
 
+/** Refill until a next video exists, waiting while the server is still
+ *  building this station. */
+async function refillUntilNext(currentId: number | undefined): Promise<VideoSessionItem | null | 'superseded'> {
+	for (let attempt = 0; ; attempt += 1) {
+		await refillVideoRadio(true);
+		const refreshed = get(session);
+		if (!refreshed.continuous || refreshed.current?.tidal_id !== currentId) return 'superseded';
+		const next = refreshed.queue[findCurrentIndex(refreshed.queue, refreshed.current) + 1];
+		if (next) return next;
+		if (!lastRefillBuilding || attempt >= radioRetryPolicy.attempts) return null;
+		await new Promise((resolve) => setTimeout(resolve, radioRetryPolicy.delayMs));
+	}
+}
+
 /** Advance to the next queued video when autoplay is on. Returns false at the
  *  end of the loaded queue (the route tops the queue up while it's mounted). */
 export async function advanceVideo(opts: { preloaded?: PreloadedVideoStream | null } = {}): Promise<boolean> {
@@ -450,13 +538,12 @@ export async function advanceVideo(opts: { preloaded?: PreloadedVideoStream | nu
 	const next = state.queue[index + 1];
 	if (!next) {
 		if (state.continuous) {
-			await refillVideoRadio();
+			const replenished = await refillUntilNext(state.current?.tidal_id);
+			// A click may have replaced radio while its request was in flight.
+			if (replenished === 'superseded') return true;
 			const refreshed = get(session);
-			// A click may have replaced radio while its network request was in
-			// flight. Leave the new session and its autoplay preference alone.
-			if (!refreshed.continuous || !refreshed.autoplay || refreshed.current?.tidal_id !== state.current?.tidal_id) return true;
-			const nextIndex = findCurrentIndex(refreshed.queue, refreshed.current);
-			const replenished = refreshed.queue[nextIndex + 1];
+			if (!refreshed.autoplay) return true;
+			// No preloaded stream here: it belonged to a video that did not exist yet.
 			if (replenished) return playVideo(replenished, {
 				queue: refreshed.queue, source: refreshed.source,
 				sourceLabel: refreshed.sourceLabel, autoplay: true, continuous: true,
@@ -490,7 +577,7 @@ export async function nextVideo(): Promise<boolean> {
 	const state = get(session);
 	if (!state.active) return false;
 	if (state.continuous && !state.queue[state.currentIndex + 1]) {
-		await refillVideoRadio(true);
+		if ((await refillUntilNext(state.current?.tidal_id)) === 'superseded') return false;
 	}
 	const refreshed = get(session);
 	if (refreshed.current?.tidal_id !== state.current?.tidal_id) return false;
@@ -504,11 +591,14 @@ export async function nextVideo(): Promise<boolean> {
 
 /** Stop the video session entirely and free the dock. */
 export function clearVideoSession() {
+	finishWatch(false);
+	watch = null;
 	streamSeq += 1;
 	radioGeneration += 1;
 	radioSeenIds = [];
 	radioSeenSongs = [];
 	radioRefill = null;
+	radioSeedVideoId = null;
 	session.set({ ...initialState, autoplay: loadAutoplayPreference() });
 	videoBrowseMode.set(false);
 }

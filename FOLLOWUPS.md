@@ -10,6 +10,17 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### video radio: selection scoring on top of the crawler
+
+- Source: video radio audit, 2026-10-07. The crawler now supplies relevance,
+  popularity, watch time and skips; selection still uses fixed lane slots.
+- Affected: `noor-server/src/services/video_radio.rs` (`select_seeded_batch`,
+  `select_batch`).
+- Why it matters: the seed artist takes about half of each batch, non-music
+  clips (commentary, interviews, trailers, under 90 s) are not filtered, the
+  best cut of a song is not preferred, and skips do not demote videos.
+- Spawned by: branch `bsc/video-radio-audit-c7af6d` (video discovery crawler).
+
 ### tests: stabilize relative-date checks across daylight saving changes
 
 - Source: Clay UI verification on 2026-10-04. Four existing `formatDateShort`

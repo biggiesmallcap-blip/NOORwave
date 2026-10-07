@@ -1,15 +1,18 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import { get } from 'svelte/store';
 import { api, type TidalSearchVideo } from '$lib/api/client';
-import { advanceVideo, clearVideoSession, playVideo, refillVideoRadio, videoSession } from './video_session';
+
+import { advanceVideo, clearVideoSession, noteVideoProgress, playVideo, radioRetryPolicy, refillVideoRadio, reportVideoEnded, videoSession } from './video_session';
 
 vi.mock('$lib/api/client', () => ({
 	api: {
 		getVideoRadioNext: vi.fn(),
 		getTidalVideoStream: vi.fn(),
 		recordVideoHistory: vi.fn().mockResolvedValue({ ok: true }),
+		finishVideoHistory: vi.fn().mockResolvedValue({ ok: true }),
 	},
 }));
+
 
 function video(id: number, artistId: number, artistName: string, title: string): TidalSearchVideo {
 	return {
@@ -22,6 +25,7 @@ function video(id: number, artistId: number, artistName: string, title: string):
 afterEach(() => {
 	clearVideoSession();
 	vi.clearAllMocks();
+	radioRetryPolicy.delayMs = 4000;
 });
 
 test('a shelf queue plays every artist in order and stops without starting radio', async () => {
@@ -179,4 +183,59 @@ test('radio reports only videos actually added to the queue', async () => {
 	expect(get(videoSession).radioDiscoveryMessage).toBe('2 new videos added to your queue.');
 	videoSession.stopRadio();
 	expect(get(videoSession).radioHits).toEqual([]);
+});
+
+const preloaded = { preloaded: { url: 'https://example.test/stream.m3u8', expiresAt: null } };
+
+test('a station still being built is retried instead of ending radio', async () => {
+	radioRetryPolicy.delayMs = 0;
+	const seed = video(1, 10, 'Seed', 'Seed song');
+	const found = video(2, 20, 'Neighbor', 'Neighbor song');
+	const empty = { items: [], unfamiliar_video_ids: [], building: false };
+	vi.mocked(api.getVideoRadioNext)
+		.mockResolvedValue(empty)
+		.mockResolvedValueOnce({ items: [], unfamiliar_video_ids: [], building: true })
+		.mockResolvedValueOnce({ items: [], unfamiliar_video_ids: [], building: true })
+		.mockResolvedValueOnce({ items: [found], unfamiliar_video_ids: [2], building: false });
+	vi.mocked(api.getTidalVideoStream).mockResolvedValue({
+		hls_url: 'https://example.test/next.m3u8', expires_at: null, quality: 'HIGH',
+	});
+
+	await playVideo(seed, {
+		queue: [seed], source: 'direct', sourceLabel: 'Seed radio', autoplay: true,
+		continuous: true, resetRadio: true,
+	}, preloaded);
+	await vi.waitFor(() => expect(get(videoSession).radioSearching).toBe(false));
+	expect(await advanceVideo(preloaded)).toBe(true);
+	expect(get(videoSession).current).toEqual(found);
+	expect(get(videoSession).radioIssue).toBeNull();
+	expect(api.getVideoRadioNext).toHaveBeenCalledWith(expect.objectContaining({ seed_video_id: 1 }));
+});
+
+test('watch time is reported when a video ends and when it is replaced', async () => {
+	vi.mocked(api.recordVideoHistory)
+		.mockResolvedValueOnce({ ok: true, id: 7 })
+		.mockResolvedValueOnce({ ok: true, id: 8 })
+		.mockResolvedValue({ ok: true, id: 9 });
+	const first = video(1, 10, 'A', 'One');
+	const second = video(2, 20, 'B', 'Two');
+	const third = video(3, 30, 'C', 'Three');
+	const ctx = { queue: [first, second, third], source: 'mix' as const, sourceLabel: 'Shelf', autoplay: true };
+
+	await playVideo(first, ctx, preloaded);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	noteVideoProgress(170_000, 180_000);
+	reportVideoEnded();
+	expect(api.finishVideoHistory).toHaveBeenCalledWith(7, {
+		watched_ms: 170_000, video_duration_ms: 180_000, completed: true,
+	});
+
+	await playVideo(second, ctx, preloaded);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	noteVideoProgress(5_000);
+	await playVideo(third, ctx, preloaded);
+	expect(api.finishVideoHistory).toHaveBeenLastCalledWith(8, {
+		watched_ms: 5_000, video_duration_ms: 180_000, completed: false,
+	});
+	expect(api.finishVideoHistory).toHaveBeenCalledTimes(2);
 });

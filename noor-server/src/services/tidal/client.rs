@@ -892,6 +892,23 @@ impl TidalClient {
             .collect())
     }
 
+    /// One video by id. Same item shape as an artist's video list.
+    pub async fn get_video(&self, video_id: i64) -> Result<TidalArtistVideo> {
+        let url = format!(
+            "{}/videos/{}?countryCode={}",
+            TIDAL_API_URL, video_id, self.country_code
+        );
+        self.get_json(&url).await
+    }
+
+    /// Artist-only search for name resolution; cheaper than the core search.
+    pub async fn search_artists(&self, query: &str, limit: i32) -> Result<Vec<TidalSearchArtist>> {
+        Ok(self
+            .search_catalog_with_types(query, limit, 0, "ARTISTS")
+            .await?
+            .artists)
+    }
+
     /// Fetch Tidal editorial "Top Tracks" for the user's region.
     ///
     /// Tidal's public-ish editorial endpoints (e.g. `featured/{path}/tracks`)
