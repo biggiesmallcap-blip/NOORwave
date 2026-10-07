@@ -7,6 +7,7 @@
 //! governed call budget on them. Radio and the related row only read.
 
 pub mod artist_state;
+pub mod crawler;
 pub mod expand;
 pub mod governor;
 pub mod graph;
