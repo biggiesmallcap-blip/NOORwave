@@ -259,10 +259,15 @@ let radioStationId: string | null = null;
 let radioStationTitle: string | null = null;
 let radioStationNonce = '';
 
+const onAirStation = writable<string | null>(null);
+/** The station whose refills feed the current session, for "On air" marks. */
+export const videoStationOnAir = { subscribe: onAirStation.subscribe };
+
 function clearStation() {
 	radioStationId = null;
 	radioStationTitle = null;
 	radioStationNonce = '';
+	onAirStation.set(null);
 }
 let lastRefillBuilding = false;
 
@@ -365,6 +370,7 @@ export async function playVideo(
 		radioRefill = null;
 		const station = ctx.radioScope === 'station' ? ctx.stationId ?? null : null;
 		radioStationId = station;
+		onAirStation.set(station);
 		radioStationTitle = station ? ctx.sourceLabel : null;
 		radioStationNonce = station ? ctx.stationNonce ?? Math.random().toString(36).slice(2) : '';
 		radioSeedVideoId = !ctx.radioScope || ctx.radioScope === 'artist' ? item.tidal_id : null;
@@ -536,15 +542,22 @@ export function refillVideoRadio(force = false): Promise<number> {
 }
 
 /** Start a station: its first batch becomes the queue, refills follow. */
-export async function playVideoStation(station: { id: string; title: string }): Promise<boolean> {
+/** Start a station. `startWith` (a frame picked from its preview) plays
+ *  first and the station carries on after it. */
+export async function playVideoStation(
+	station: { id: string; title: string },
+	opts: { startWith?: VideoSessionItem } = {},
+): Promise<boolean> {
 	const stationNonce = Math.random().toString(36).slice(2);
+	const lead = opts.startWith ?? null;
 	const { items } = await api.getVideoStationNext(station.id, {
-		exclude_video_ids: [], recent_video_ids: [], session_nonce: stationNonce,
+		exclude_video_ids: lead ? [lead.tidal_id] : [], recent_video_ids: [], session_nonce: stationNonce,
 	});
-	const first = items[0];
+	const queue = lead ? [lead, ...items.filter((item) => item.tidal_id !== lead.tidal_id)] : items;
+	const first = queue[0];
 	if (!first) return false;
 	return playVideo(first, {
-		queue: items, source: 'mix', sourceLabel: `${station.title} station`,
+		queue, source: 'mix', sourceLabel: `${station.title} station`,
 		autoplay: true, continuous: true, resetRadio: true,
 		radioScope: 'station', stationId: station.id, stationNonce,
 	});

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import type { VideoStationCard } from '$lib/api/client';
-import { groupStations, previewArtists, spotlightArtistId, stationMeta } from './stations';
+import { cleanBio, groupStations, numberStations, previewArtists, spotlightArtistId, stationFrames, stationMeta } from './stations';
 
 function card(id: string, group: VideoStationCard['group']): VideoStationCard {
 	return { id, group, title: id, subtitle: '', unwatched_count: 40, preview: [] };
@@ -55,5 +55,66 @@ describe('station meta line', () => {
 	test('falls back to the video count when there is nothing else to say', () => {
 		const bare = withArtists(card('charts', 'charts'), '', []);
 		expect(stationMeta(bare, [bare])).toBe('40 videos you have not seen');
+	});
+});
+
+describe('channel guide', () => {
+	test('frames are the previews that have artwork, in order', () => {
+		const station = withArtists(card('wild-card', 'for_you'), '', ['A', 'B', 'C']);
+		station.preview[0].artwork_url = 'https://img/a';
+		station.preview[2].artwork_url = 'https://img/c';
+		expect(stationFrames(station).map((video) => video.tidal_id)).toEqual([1, 3]);
+	});
+
+	test('numbers channels down the page, spotlight first', () => {
+		const { spotlight, rows } = groupStations([
+			card('genre:rock', 'genres'),
+			card('spotlight:5396', 'spotlight'),
+			card('wild-card', 'for_you'),
+			card('shuffle', 'for_you'),
+			card('charts', 'charts'),
+		]);
+		const numbers = numberStations(spotlight, rows);
+		expect([...numbers.entries()]).toEqual([
+			['spotlight:5396', '01'],
+			['wild-card', '02'],
+			['shuffle', '03'],
+			['genre:rock', '04'],
+			['charts', '05'],
+		]);
+		expect(numberStations(null, rows).get('wild-card')).toBe('01');
+	});
+});
+
+describe('spotlight bio cleanup', () => {
+	const long = 'Leonard Cohen was a Canadian singer, songwriter, poet and novelist.';
+
+	test('unwraps TIDAL link markup to its text', () => {
+		expect(cleanBio(`[wimpLink artistId="3829"]Leonard Cohen[/wimpLink] was a Canadian singer, songwriter, poet and novelist.`))
+			.toBe(long);
+		expect(cleanBio(`He toured with [wimpLink albumId="12"]Songs of Love and Hate[/wimpLink] and [b]Various Positions[/b] in the eighties.`))
+			.toBe('He toured with Songs of Love and Hate and Various Positions in the eighties.');
+	});
+
+	test('drops tags, decodes entities and collapses whitespace', () => {
+		expect(cleanBio('Simon &amp; Garfunkel were a folk duo<br/><br />from   New York&#44; and they&#x27;re &quot;sung&quot;.'))
+			.toBe(`Simon & Garfunkel were a folk duo from New York, and they're "sung".`);
+	});
+
+	test('cuts long text at a sentence end, else at a word', () => {
+		const sentences = `${long} ${'His songs explored faith, love, loss and politics across six decades. '.repeat(5)}`;
+		const cut = cleanBio(sentences)!;
+		expect(cut.length).toBeLessThanOrEqual(240);
+		expect(cut.endsWith('.')).toBe(true);
+		const words = cleanBio(`${'word '.repeat(80)}end`)!;
+		expect(words.endsWith('...')).toBe(true);
+		expect(words.length).toBeLessThanOrEqual(243);
+	});
+
+	test('hides bios that are empty, too short or still broken', () => {
+		expect(cleanBio(null)).toBeNull();
+		expect(cleanBio('   ')).toBeNull();
+		expect(cleanBio('Singer.')).toBeNull();
+		expect(cleanBio('[wimpLink artistId="1"]Leonard Cohen was a Canadian singer and a poet of rare and stubborn grace')).toBeNull();
 	});
 });
