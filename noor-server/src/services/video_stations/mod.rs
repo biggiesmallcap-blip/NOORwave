@@ -2,6 +2,8 @@
 //! lineup decides which stations exist; every refill picks fresh videos
 //! from the catalog. Nothing here calls TIDAL.
 
+pub mod pick;
+
 use crate::services::video_sets::{VideoCandidate, VideoSetItem};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
