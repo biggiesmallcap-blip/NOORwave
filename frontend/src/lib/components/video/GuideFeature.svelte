@@ -71,7 +71,9 @@
 		display: grid;
 		grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
 		gap: clamp(18px, 2.6vw, 36px);
-		align-items: center;
+		/* Top-aligned, not centered: the mosaic lands in the same place on
+		   every page whatever the height of the intro beside it. */
+		align-items: start;
 		padding: clamp(14px, 2vw, 22px);
 		border-radius: 16px;
 		overflow: hidden;
