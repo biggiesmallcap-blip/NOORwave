@@ -366,10 +366,9 @@ pub fn load_candidates(
         if let (Some(priority), Ok(video)) = (
             artist_id.and_then(|id| lane.get(&id)),
             serde_json::from_str::<VideoCandidate>(&json),
-        ) {
-            if seen.insert(video.tidal_id) {
-                out.push((video, *priority));
-            }
+        ) && seen.insert(video.tidal_id)
+        {
+            out.push((video, *priority));
         }
     }
     // Liked-song video matches are already indexed by the library scanner.

@@ -271,7 +271,7 @@ async fn catalog_page<S: DiscoverySource>(
     })?;
     let fetched = offset + received;
     let more = received > 0 && page.total.is_some_and(|total| total > fetched);
-    let follow_up = (more && job.class >= JobClass::Priority).then(|| Job {
+    let follow_up = (more && job.class >= JobClass::Priority).then_some(Job {
         artist_id: id,
         kind: JobKind::Page { offset: fetched },
         class: job.class,

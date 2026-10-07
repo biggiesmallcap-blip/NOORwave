@@ -13,6 +13,9 @@ use crate::metadata::lastfm::LastFmClient;
 use crate::services::tidal::client::{TidalArtistVideo, TidalClient};
 use crate::services::video_sets::VideoCandidate;
 
+/// Last.fm similar-artist names with their match scores, in rank order.
+pub type SimilarNames = Vec<(String, Option<f64>)>;
+
 pub const ARTIST_PAGE_SIZE: i32 = 50;
 const CALL_TIMEOUT: Duration = Duration::from_secs(8);
 const LASTFM_SPACING: Duration = Duration::from_secs(1);
@@ -54,7 +57,7 @@ pub trait DiscoverySource: Send + Sync {
     fn lastfm_similar(
         &self,
         name: &str,
-    ) -> impl Future<Output = Result<Option<Vec<(String, Option<f64>)>>>> + Send;
+    ) -> impl Future<Output = Result<Option<SimilarNames>>> + Send;
     fn lastfm_tags(&self, name: &str) -> impl Future<Output = Result<Option<Vec<String>>>> + Send;
     fn video(&self, video_id: i64) -> impl Future<Output = Result<VideoCandidate>> + Send;
     fn search_videos(
@@ -149,7 +152,7 @@ impl DiscoverySource for LiveSource {
             .collect())
     }
 
-    async fn lastfm_similar(&self, name: &str) -> Result<Option<Vec<(String, Option<f64>)>>> {
+    async fn lastfm_similar(&self, name: &str) -> Result<Option<SimilarNames>> {
         let Some(lastfm) = &self.lastfm else {
             return Ok(None);
         };
@@ -241,7 +244,7 @@ pub mod fake {
         pub failing_similar: HashSet<i64>,
         pub artists: HashMap<i64, ArtistRef>,
         pub search: HashMap<String, Vec<ArtistRef>>,
-        pub lastfm: Option<HashMap<String, Vec<(String, Option<f64>)>>>,
+        pub lastfm: Option<HashMap<String, SimilarNames>>,
         pub videos: HashMap<i64, VideoCandidate>,
         pub mixes: HashMap<String, Vec<VideoCandidate>>,
         pub editorial: Vec<EditorialModule>,
@@ -339,7 +342,7 @@ pub mod fake {
             Ok(self.search.get(name).cloned().unwrap_or_default())
         }
 
-        async fn lastfm_similar(&self, name: &str) -> Result<Option<Vec<(String, Option<f64>)>>> {
+        async fn lastfm_similar(&self, name: &str) -> Result<Option<SimilarNames>> {
             Ok(self
                 .lastfm
                 .as_ref()
