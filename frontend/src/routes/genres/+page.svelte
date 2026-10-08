@@ -745,10 +745,10 @@
 							: activeModeCopy}
 				</p>
 				<p class="hud-meta-line">
-					<strong>{taxonomy.length}</strong> families
-					<span>{galaxyData.nodes.length}</span> genres
-					<span>{activeThisMonthCount}</span> active
-					<span>{rediscoveryCount}</span> rediscover
+					<span class="hud-stat"><strong>{taxonomy.length}</strong>families</span>
+					<span class="hud-stat"><strong>{galaxyData.nodes.length}</strong>genres</span>
+					<span class="hud-stat"><strong>{activeThisMonthCount}</strong>active</span>
+					<span class="hud-stat"><strong>{rediscoveryCount}</strong>rediscover</span>
 				</p>
 			</div>
 
@@ -766,39 +766,6 @@
 				{/each}
 			</div>
 
-			{#if viewMode === 'heat' || viewMode === 'rediscover'}
-				<div class="mode-actions glass-panel" aria-label="Mode actions">
-					{#if viewMode === 'rediscover'}
-						<button
-							class="btn btn-primary"
-							disabled={modeActionBusy || rediscoverCandidates.length === 0}
-							onclick={() => void playRediscover()}
-						>
-							{modeActionBusy
-								? 'Building mix...'
-								: selectedId !== null
-									? 'Play rediscover in selection'
-									: `Play rediscover (${rediscoverCandidates.length} genres)`}
-						</button>
-					{:else if viewMode === 'heat'}
-						<button
-							class="btn btn-primary"
-							disabled={modeActionBusy || hottestNodes.length === 0}
-							onclick={() => void playHottest()}
-						>
-							{modeActionBusy ? 'Building mix...' : 'Play hottest'}
-						</button>
-						<button
-							class="btn btn-glass"
-							disabled={modeActionBusy || hottestNodes.length === 0}
-							onclick={() => void saveHeatPlaylist()}
-						>
-							Save as playlist
-						</button>
-					{/if}
-				</div>
-			{/if}
-
 			{#if actionError}
 				<div class="error-toast glass-panel" role="status" aria-live="polite">{actionError}</div>
 			{/if}
@@ -808,6 +775,38 @@
 			{/if}
 
 			<div class="control-dock glass-panel">
+				{#if viewMode === 'heat' || viewMode === 'rediscover'}
+					<div class="dock-actions" aria-label="Mode actions">
+						{#if viewMode === 'rediscover'}
+							<button
+								class="btn btn-primary"
+								disabled={modeActionBusy || rediscoverCandidates.length === 0}
+								onclick={() => void playRediscover()}
+							>
+								{modeActionBusy
+									? 'Building mix...'
+									: selectedId !== null
+										? 'Play rediscover in selection'
+										: `Play rediscover (${rediscoverCandidates.length} genres)`}
+							</button>
+						{:else if viewMode === 'heat'}
+							<button
+								class="btn btn-primary"
+								disabled={modeActionBusy || hottestNodes.length === 0}
+								onclick={() => void playHottest()}
+							>
+								{modeActionBusy ? 'Building mix...' : 'Play hottest'}
+							</button>
+							<button
+								class="btn btn-glass"
+								disabled={modeActionBusy || hottestNodes.length === 0}
+								onclick={() => void saveHeatPlaylist()}
+							>
+								Save as playlist
+							</button>
+						{/if}
+					</div>
+				{/if}
 				<form class="search-shell" onsubmit={(event) => void handleSearchSubmit(event)}>
 					<SearchField
 						bind:value={searchQuery}
@@ -897,8 +896,9 @@
 <style>
 	.genres-route {
 		position: relative;
-		margin: -28px -30px -48px;
-		min-height: 100vh;
+		margin: calc(-28px - var(--safe-top)) calc(-30px - var(--safe-right)) calc(-48px - var(--safe-bottom))
+			calc(-30px - var(--safe-left));
+		height: calc(100dvh - var(--bottom-player-height, 0px));
 		overflow: hidden;
 		background:
 			radial-gradient(circle at 16% 12%, var(--atlas-haze-a), transparent 34%),
@@ -909,7 +909,7 @@
 
 	.galaxy-stage {
 		position: relative;
-		min-height: 100vh;
+		height: 100%;
 		overflow: hidden;
 	}
 
@@ -936,7 +936,6 @@
 
 	.hud,
 	.mode-switcher,
-	.mode-actions,
 	.control-dock,
 	.seed-builder,
 	.error-toast,
@@ -945,24 +944,19 @@
 		z-index: 6;
 	}
 
-	.mode-actions {
-		/* Bottom-center, above the control dock: the genre panel opens on the
-		   right and was burying the action right after the user armed it. */
-		left: 50%;
-		bottom: 78px;
-		transform: translateX(-50%);
-		padding: 8px;
+	.dock-actions {
 		display: inline-flex;
 		align-items: center;
 		gap: 8px;
+		flex-shrink: 0;
 	}
 
-	/* Seed builder shares that slot; lift it when a mode action bar is up. */
-	.galaxy-stage:has(.mode-actions) .seed-builder {
-		bottom: 150px;
+	.dock-actions .btn {
+		padding: 8px 14px;
+		font-size: var(--font-size-xs);
 	}
 
-	.mode-actions .btn:disabled {
+	.dock-actions .btn:disabled {
 		opacity: 0.45;
 		cursor: not-allowed;
 	}
@@ -981,7 +975,7 @@
 	.hud {
 		top: 20px;
 		left: 20px;
-		width: min(292px, calc(100% - 40px));
+		max-width: min(360px, calc(100% - 40px));
 		padding: 10px 12px;
 		display: flex;
 		flex-direction: column;
@@ -1025,27 +1019,21 @@
 
 	.hud-status,
 	.hud-meta-line {
-		margin: 0;
-		color: var(--signal-text);
-	}
-
-	.hud-status {
-		font-size: var(--font-size-xs);
-		line-height: var(--line-height-snug);
-	}
-
-	.hud-meta-line {
 		display: flex;
-		align-items: center;
-		gap: 7px;
+		align-items: baseline;
+		gap: 4px 12px;
 		flex-wrap: wrap;
 		font-size: var(--font-size-2xs);
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
 	}
 
-	.hud-meta-line strong,
-	.hud-meta-line span {
+	.hud-stat {
+		white-space: nowrap;
+	}
+
+	.hud-meta-line strong {
+		margin-right: 4px;
 		color: var(--text-primary);
 		font-size: var(--font-size-xs);
 		font-variant-numeric: tabular-nums;
@@ -1184,9 +1172,8 @@
 			margin: -24px -24px -40px;
 		}
 
-		.galaxy-stage,
 		.genres-route {
-			min-height: calc(100dvh - 40px);
+			height: calc(100dvh - 40px - var(--bottom-player-height, 0px));
 		}
 
 		.hud {
@@ -1199,14 +1186,6 @@
 			top: auto;
 			right: 16px;
 			bottom: 120px;
-		}
-
-		.mode-actions {
-			left: 50%;
-			right: auto;
-			top: auto;
-			transform: translateX(-50%);
-			bottom: 82px;
 		}
 
 		.control-dock,
@@ -1226,11 +1205,12 @@
 	@media (max-width: 760px) {
 		.genres-route {
 			margin: -22px -18px -30px;
+			height: auto;
 			overflow: visible;
 		}
 
 		.galaxy-stage {
-			min-height: auto;
+			height: auto;
 			display: flex;
 			flex-direction: column;
 			gap: 14px;
@@ -1248,8 +1228,7 @@
 
 		.hud,
 		.mode-switcher,
-		.mode-actions,
-		.control-dock,
+			.control-dock,
 		.seed-builder,
 		.error-toast,
 		.notice-toast {
@@ -1261,11 +1240,6 @@
 			bottom: auto;
 			transform: none;
 			width: 100%;
-		}
-
-		.mode-actions {
-			order: 3;
-			flex-wrap: wrap;
 		}
 
 		.hud {

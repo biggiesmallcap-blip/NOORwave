@@ -32,6 +32,10 @@ describe('genre galaxy UI contract', () => {
 		expect(galaxy).not.toContain('selectedId === node.id || hoveredNodeId === node.id');
 		expect(galaxy).toContain('class="hover-card"');
 		expect(galaxy).toContain('Top:');
+		expect(route).toContain('class="hud-stat"');
+		const panel = readFileSync('src/lib/components/Genre/GenrePanel.svelte', 'utf8');
+		// The panel opens under the view tabs, not on top of them.
+		expect(panel).toContain('top: 84px;');
 		expect(galaxy).not.toContain('class="mix-pill"');
 		expect(galaxy).not.toContain('mixPillPosition');
 		expect(galaxy).toContain('class="hover-hint"');
@@ -41,7 +45,9 @@ describe('genre galaxy UI contract', () => {
 	test('heat and rediscover modes expose real playback actions', () => {
 		const route = readFileSync('src/routes/genres/+page.svelte', 'utf8');
 
-		expect(route).toContain('class="mode-actions glass-panel"');
+		// Mode actions live in the dock instead of a third floating bar.
+		expect(route).toContain('class="dock-actions"');
+		expect(route).not.toContain('mode-actions');
 		expect(route).toContain('async function playRediscover');
 		expect(route).toContain('async function playHottest');
 		expect(route).toContain('async function saveHeatPlaylist');

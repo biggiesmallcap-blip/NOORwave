@@ -246,10 +246,11 @@
 <style>
 	.genre-panel {
 		position: absolute;
-		top: 20px;
+		/* Below the view tabs (top 20 + ~52 tall) and above the dock. */
+		top: 84px;
 		right: 20px;
 		width: min(360px, calc(100% - 40px));
-		max-height: calc(100% - 40px);
+		max-height: calc(100% - 84px - 104px);
 		padding: 20px;
 		display: flex;
 		flex-direction: column;
