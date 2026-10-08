@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { prefersReducedMotion } from '$lib/stores/motion';
 	interface Props {
 		rail: HTMLElement | null;
 		label?: string;
@@ -26,10 +27,7 @@
 		if (!rail) return;
 		rail.scrollBy({
 			left: direction * Math.max(160, rail.clientWidth * 0.85),
-			behavior: typeof matchMedia === 'function'
-				&& matchMedia('(prefers-reduced-motion: reduce)').matches
-				? 'auto'
-				: 'smooth',
+			behavior: prefersReducedMotion() ? 'auto' : 'smooth',
 		});
 	}
 
@@ -108,7 +106,7 @@
 	}
 
 	.rail-control:focus-visible {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
 	}
 

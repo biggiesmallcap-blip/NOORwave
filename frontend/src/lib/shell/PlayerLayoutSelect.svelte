@@ -129,7 +129,7 @@
 	}
 
 	.corner-tab:focus-visible {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
 	}
 
@@ -206,7 +206,7 @@
 		color: var(--text-primary);
 	}
 
-	.layout-option:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+	.layout-option:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: -2px; }
 	.check { width: 14px; color: var(--accent-strong); text-align: right; }
 	.fallback-note { margin: 6px 9px 3px; color: var(--text-tertiary); font-size: var(--font-size-2xs); line-height: var(--line-height-snug); }
 </style>

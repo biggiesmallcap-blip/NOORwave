@@ -5,6 +5,7 @@
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import FilterChip from '$lib/components/ui/FilterChip.svelte';
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { buildTrackMenu } from '$lib/player/track_menu';
@@ -254,7 +255,6 @@
 
 <div class="page-shell duplicates-page animate-in">
 	<PageHeader
-		eyebrow="Duplicates"
 		title="Duplicate review"
 		subtitle="Compare versions, keep the best copy, or dismiss the match."
 	>
@@ -283,15 +283,9 @@
 		<div class="filter-row" role="group" aria-label="Filter by relationship">
 			{#each RELATIONSHIPS as rel (rel)}
 				{@const active = activeRelationships.has(rel)}
-				<button
-					type="button"
-					class="filter-chip"
-					class:active
-					onclick={() => toggleRelationship(rel)}
-					aria-pressed={active}
-				>
+				<FilterChip pressed={active} onclick={() => toggleRelationship(rel)}>
 					{relationshipLabel(rel)}
-				</button>
+				</FilterChip>
 			{/each}
 		</div>
 	{/if}
@@ -316,7 +310,7 @@
 				{@const preferred = group.members.find((member) => member.is_preferred)?.track}
 				{@const lead = group.members[0]?.track}
 				{@const isExact = group.relationship === 'exact_duplicate'}
-				<section class="group-card glass-panel" class:busy>
+				<section class="group-card" class:busy>
 					<div class="group-head">
 						<div class="group-title">
 							<p class="eyebrow">{lead?.artist_name ?? 'Unknown artist'}</p>
@@ -442,35 +436,6 @@
 		padding: var(--space-1) 0;
 	}
 
-	.filter-chip {
-		display: inline-flex;
-		align-items: center;
-		height: var(--control-h);
-		padding: 0 14px;
-		border-radius: 999px;
-		border: 1px solid var(--border-subtle);
-		background: transparent;
-		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
-		font-family: inherit;
-		cursor: pointer;
-		transition:
-			background var(--motion-fast),
-			border-color var(--motion-fast),
-			color var(--motion-fast);
-	}
-
-	.filter-chip:hover {
-		background: var(--bg-hover);
-		color: var(--text-primary);
-	}
-
-	.filter-chip.active {
-		background: var(--accent-soft);
-		border-color: var(--accent-line);
-		color: var(--text-primary);
-	}
-
 	.groups-list {
 		display: flex;
 		flex-direction: column;
@@ -478,7 +443,6 @@
 	}
 
 	.group-card {
-		padding: var(--space-5);
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-5);

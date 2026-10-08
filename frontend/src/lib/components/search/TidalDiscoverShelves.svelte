@@ -343,7 +343,6 @@
 				style={nested ? undefined : `--rise-index: ${startIndex + modIndex}`}
 			>
 				<SectionHeader
-					eyebrow={nested ? '' : 'TIDAL'}
 					title={mod.title}
 					variant="charts"
 					level={nested ? 3 : 2}
@@ -538,7 +537,7 @@
 		min-width: 0;
 	}
 	.rail:focus-visible {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
 	}
 	.rail::-webkit-scrollbar { height: 6px; }
@@ -577,7 +576,7 @@
 		transform: translateY(-4px);
 	}
 	.card:focus-visible {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 4px;
 	}
 	.card:hover :global(.play-overlay),

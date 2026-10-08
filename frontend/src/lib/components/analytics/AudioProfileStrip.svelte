@@ -24,7 +24,7 @@
 	const trackCoverage = $derived(profile.track_coverage ?? profile.coverage);
 </script>
 
-<section class="audio glass" aria-label="Audio profile">
+<section class="audio" aria-label="Audio profile">
 	<header class="head">
 		<span class="eyebrow">Audio profile</span>
 		<span class="coverage">
@@ -56,7 +56,6 @@
 
 <style>
 	.audio {
-		padding: var(--space-4);
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-3);

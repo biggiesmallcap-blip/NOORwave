@@ -94,11 +94,11 @@ describe('trending shelf contract', () => {
 		expect(source).not.toContain('padding: 4px 10px');
 	});
 
-	test('keeps mural titles neutral while allowing small source accents', () => {
+	test('keeps mural titles neutral and does not repeat the section source', () => {
 		expect(muralSource).toContain('.chart-mural-title');
 		expect(muralSource).toContain('color: var(--text-primary)');
-		expect(muralSource).toContain('.chart-mural-kind');
-		expect(muralSource).toContain('color: var(--chart-mural-accent)');
+		// The section header names the chart; the mural does not repeat it.
+		expect(muralSource).not.toContain('chart-mural-kind');
 		expect(muralSource).not.toContain('.chart-mural-title {\n\t\tcolor: var(--chart-mural-accent)');
 	});
 

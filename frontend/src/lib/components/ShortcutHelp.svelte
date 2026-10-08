@@ -98,7 +98,6 @@
 		>
 			<header class="shortcut-header">
 				<div>
-					<p class="shortcut-eyebrow">Player</p>
 					<h2 id="shortcut-help-title">Keyboard shortcuts</h2>
 				</div>
 				<button
@@ -173,14 +172,6 @@
 		border-bottom: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
 	}
 
-	.shortcut-eyebrow {
-		margin: 0 0 4px;
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-bold);
-		letter-spacing: 0.12em;
-		text-transform: uppercase;
-		color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
-	}
 
 	h2,
 	h3 {

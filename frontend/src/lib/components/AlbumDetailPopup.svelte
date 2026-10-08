@@ -12,9 +12,11 @@
 		type TidalArtworkSize,
 	} from '$lib/utils/artwork';
 	import { portal } from '$lib/actions/portal';
+	import ActionBar from '$lib/components/ui/ActionBar.svelte';
+	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import { goto } from '$app/navigation';
 
-	let { album, tracks, loading, onClose, isLocal = true, onPlay, onShuffle, onPlayFrom, artistHref = null }: {
+	let { album, tracks, loading, onClose, isLocal = true, onPlay, onShuffle, onPlayFrom, artistHref = null, albumHref = null }: {
 		album: Album;
 		tracks: Track[];
 		loading: boolean;
@@ -41,6 +43,11 @@
 		 * derived and the caller passes `/tidal/artists/{id}` instead.
 		 */
 		artistHref?: string | null;
+		/**
+		 * The full album page. Derived for library albums; a TIDAL-only album
+		 * passes `/tidal/albums/{id}`. Null hides the link.
+		 */
+		albumHref?: string | null;
 	} = $props();
 	let failedArtworkUrls = $state<Record<string, boolean>>({});
 	let popupArtwork = $derived(artworkCandidate(album.artwork_url, 640));
@@ -156,6 +163,15 @@
 	// mounted over the page it just opened, and its outside-click handler is on
 	// the window, so the next click anywhere would dismiss instead of doing what
 	// it looked like it would do.
+	let resolvedAlbumHref = $derived(albumHref ?? (isLocal && album.id != null ? `/albums/${album.id}` : null));
+
+	function openAlbumPage() {
+		if (!resolvedAlbumHref) return;
+		const href = resolvedAlbumHref;
+		requestClose();
+		void goto(href);
+	}
+
 	function openArtistPage() {
 		if (!resolvedArtistHref) return;
 		const href = resolvedArtistHref;
@@ -258,23 +274,23 @@
 						<span class="popup-chip">{album.source}</span>
 					</div>
 					<div class="popup-actions">
-						<button class="popup-cta popup-cta--primary" onclick={playWholeAlbum}>
-							<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor" /></svg>
-							Play
-						</button>
-						<button class="popup-cta popup-cta--ghost" onclick={shuffleWholeAlbum}>
-							<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-								<path d="M16 3h5v5" /><path d="M4 20 21 3" /><path d="M21 16v5h-5" /><path d="m15 15 6 6" /><path d="M4 4l5 5" />
-							</svg>
-							Shuffle
-						</button>
+						<!-- The same action bar as the album page, so the quick view and
+						     the page never drift apart (audit round 2). -->
+						<ActionBar
+							onplay={playWholeAlbum}
+							onshuffle={shuffleWholeAlbum}
+							shuffleHint="Play this album in random order"
+						/>
+						{#if resolvedAlbumHref}
+							<button type="button" class="popup-link" onclick={openAlbumPage}>Open album page</button>
+						{/if}
 					</div>
 				</div>
 			</div>
 		</div>
 
 		{#if loading}
-			<div class="popup-loading"><div class="spinner spinner-sm"></div><span>Loading tracks…</span></div>
+			<Skeleton rows={6} label="Loading tracks" />
 		{:else if tracks.length === 0}
 			<div class="popup-empty">No tracks synced yet.</div>
 		{:else}
@@ -408,7 +424,7 @@
 		cursor: pointer;
 		backdrop-filter: blur(8px);
 		-webkit-backdrop-filter: blur(8px);
-		transition: background 120ms ease, color 120ms ease, transform 120ms ease;
+		transition: background var(--motion-fast), color var(--motion-fast), transform var(--motion-fast);
 	}
 	.popup-close:hover {
 		background: var(--bg-hover);
@@ -539,45 +555,33 @@
 
 	.popup-actions {
 		display: flex;
+		align-items: center;
 		gap: 10px;
 		margin-top: 10px;
 	}
 
-	.popup-cta {
-		display: inline-flex;
-		align-items: center;
-		gap: 8px;
-		padding: 9px 20px;
-		border-radius: 999px;
+	/* A quiet text link, pushed to the end of the row so Play stays the CTA. */
+	.popup-link {
+		margin-left: auto;
+		padding: 4px 2px;
+		background: none;
+		border: 0;
+		color: var(--text-secondary);
+		font: inherit;
 		font-size: var(--font-size-sm);
 		font-weight: var(--font-weight-semibold, 600);
 		cursor: pointer;
-		border: 1px solid transparent;
-		transition: transform 120ms ease, background 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
-	}
-	.popup-cta:active { transform: scale(0.97); }
-
-	.popup-cta--primary {
-		background: var(--accent);
-		color: var(--text-on-accent);
-		box-shadow: 0 8px 22px -8px var(--accent-glow);
-	}
-	.popup-cta--primary:hover {
-		background: var(--accent-strong);
-		box-shadow: 0 10px 26px -8px var(--accent-glow);
-		transform: translateY(-1px);
 	}
 
-	.popup-cta--ghost {
-		background: color-mix(in srgb, var(--bg-elevated) 45%, transparent);
-		border-color: var(--panel-border);
+	.popup-link:hover {
 		color: var(--text-primary);
-		backdrop-filter: blur(6px);
-		-webkit-backdrop-filter: blur(6px);
+		text-decoration: underline;
 	}
-	.popup-cta--ghost:hover {
-		background: var(--bg-hover);
-		border-color: var(--accent-line);
+
+	.popup-link:focus-visible {
+		outline: 2px solid var(--accent-strong);
+		outline-offset: 2px;
+		border-radius: 4px;
 	}
 
 	/* ── Track list ─────────────────────────────────────────────────────────── */
@@ -614,7 +618,7 @@
 		padding: 9px 12px;
 		border-radius: 10px;
 		cursor: pointer;
-		transition: background 120ms ease;
+		transition: background var(--motion-fast);
 		min-width: 0;
 	}
 	.popup-track-row:hover {
@@ -634,7 +638,7 @@
 	.popup-track-num,
 	.popup-row-play {
 		grid-area: 1 / 1;
-		transition: opacity 120ms ease;
+		transition: opacity var(--motion-fast);
 	}
 	.popup-track-num {
 		color: var(--text-tertiary);
@@ -687,7 +691,7 @@
 		color: var(--text-tertiary);
 		cursor: pointer;
 		opacity: 0;
-		transition: background 120ms ease, color 120ms ease, opacity 120ms ease;
+		transition: background var(--motion-fast), color var(--motion-fast), opacity var(--motion-fast);
 	}
 	.popup-track-row:hover .popup-track-menu,
 	.popup-track-row.playing .popup-track-menu {
@@ -728,7 +732,6 @@
 		.popup-backdrop { animation: none; }
 	}
 
-	.popup-loading,
 	.popup-empty {
 		display: flex;
 		align-items: center;

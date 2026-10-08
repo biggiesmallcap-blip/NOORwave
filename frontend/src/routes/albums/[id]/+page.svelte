@@ -21,6 +21,8 @@
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import MediaRail from '$lib/components/ui/MediaRail.svelte';
 	import DetailHero from '$lib/components/ui/DetailHero.svelte';
+	import ActionBar from '$lib/components/ui/ActionBar.svelte';
+	import ErrorState from '$lib/components/ui/ErrorState.svelte';
 	import { goBack } from '$lib/navigation/back';
 	import { captureScroll, restoreScroll } from '$lib/navigation/scroll';
 	import { openContextMenu } from '$lib/stores/context_menu';
@@ -33,7 +35,8 @@
 		upscaleTidalArtwork,
 		type TidalArtworkSize,
 	} from '$lib/utils/artwork';
-	import { formatTotalDuration } from '$lib/utils/format';
+	import { formatTotalDuration, formatTrackDuration } from '$lib/utils/format';
+	import { groupWorks } from '$lib/album/album_works';
 	import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';
 	import { currentTrackMatchesTracks, mergeAlbumTracks } from '$lib/utils/track';
 
@@ -62,6 +65,9 @@
 		}
 		return map;
 	});
+	// Plays only earn a column when they vary: world plays from Spotify. A
+	// column of "0 local" on every row was repeated noise.
+	let showPlays = $derived(playcountByIsrc.size > 0);
 
 	// Phase 5B: back/forward state via SvelteKit snapshot.
 	export const snapshot: Snapshot<{ scrollY: number }> = {
@@ -202,6 +208,21 @@
 	// (instead of owned-then-TIDAL blocks) keeps "click a song to start the
 	// album from there" visually truthful for scattered ownership.
 	let displayEntries = $derived(mergeAlbumTracks(tracks, tidalOnlyTracks));
+	// Long works ("Suite No. 1: I. Prelude") get a work header; rows show the
+	// movement. Ordinary albums stay a flat list.
+	let works = $derived(
+		groupWorks(displayEntries.map((entry) => (entry.kind === 'local' ? entry.local.title : entry.tidal.title))),
+	);
+	let workStarts = $derived(new Map(works.groups.map((group) => [group.start, group])));
+	function entryDurationMs(index: number): number {
+		const entry = displayEntries[index];
+		return (entry?.kind === 'local' ? entry.local.duration_ms : entry?.tidal.duration_ms) ?? 0;
+	}
+	function workDurationMs(start: number, end: number): number {
+		let total = 0;
+		for (let index = start; index <= end; index += 1) total += entryDurationMs(index);
+		return total;
+	}
 
 	// Hand playAlbum/shuffleAlbum the listing already on screen so playing
 	// doesn't refetch (a live TIDAL round trip for partial albums) and the
@@ -291,11 +312,11 @@
 	{#if loading}
 		<div class="status-wrap"><Skeleton rows={4} label="Loading album" /></div>
 	{:else if error}
-		<EmptyState title="Album could not load" copy={error}>
+		<ErrorState title="Album could not load" {error} onretry={() => void load(albumId)}>
 			{#snippet actions()}
 				<a class="empty-action" href="/library">Back to library</a>
 			{/snippet}
-		</EmptyState>
+		</ErrorState>
 	{:else if !header()}
 		<EmptyState title="Album not found" copy="It may have been deleted or moved.">
 			{#snippet actions()}
@@ -331,97 +352,69 @@
 						<span>{h.total_track_count} {h.total_track_count === 1 ? 'song' : 'songs'}</span>
 						<span class="dot">·</span>
 						<span class="hero-duration">{formatTotalDuration(h.total_ms)}</span>
-			{/snippet}
-			{#snippet details()}
-					{#if h.library_track_count > 0 && h.library_track_count < h.total_track_count}
-						<p class="hero-library-substat">
-							{h.library_track_count} in your library
-						</p>
-					{/if}
+						{#if h.library_track_count > 0 && h.library_track_count < h.total_track_count}
+							<span class="dot">·</span>
+							<span>{h.library_track_count} in your library</span>
+						{/if}
 			{/snippet}
 			{#snippet actions()}
-			<button
-				class="play-fab"
-				aria-label={isAlbumPlaying ? 'Pause' : 'Play album'}
-				onclick={onHeroPlay}
-			>
-				{#if isAlbumPlaying}
-					<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"/><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"/></svg>
-				{:else}
-					<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M8 5.5v13a1 1 0 001.5.87l11-6.5a1 1 0 000-1.74l-11-6.5A1 1 0 008 5.5z" fill="currentColor"/></svg>
-				{/if}
-			</button>
-
-			<button class="ghost-btn" aria-label="Shuffle" onclick={() => void shuffleAlbum(albumId, albumData())}>
-				<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M16 3h5v5M4 20l17-17M21 16v5h-5M4 4l5 5m6 6l6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-			</button>
-
-			<button
-				class="ghost-btn"
-				class:pending={radioPending}
-				aria-label="Album radio"
-				disabled={radioPending}
-				onclick={onRadioClick}
-			>
-				{#if radioPending}
-					<span class="btn-spinner" aria-hidden="true"></span>
-				{:else}
-					<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="currentColor"/><path d="M8.5 8.5a5 5 0 000 7M15.5 8.5a5 5 0 010 7M5.5 5.5a9 9 0 000 13M18.5 5.5a9 9 0 010 13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
-				{/if}
-			</button>
-
-			<button
-				class="ghost-btn"
-				class:active={albumIsFavorite}
-				class:pending={favoritePending}
-				aria-label={albumIsFavorite ? 'Remove album from your library' : 'Save album to your library'}
-				aria-pressed={albumIsFavorite}
-				disabled={favoritePending}
-				onclick={onLikeAlbum}
-			>
-				{#if albumIsFavorite}
-					<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z" fill="currentColor"/></svg>
-				{:else}
-					<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z" stroke="currentColor" stroke-width="2" fill="none"/></svg>
-				{/if}
-			</button>
-
-			{#if isPartialAlbum}
-				<button
-					class="save-album-btn"
-					class:pending={savePending}
-					disabled={savePending}
-					onclick={onSaveAlbum}
+				<ActionBar
+					playing={isAlbumPlaying}
+					onplay={onHeroPlay}
+					onshuffle={() => void shuffleAlbum(albumId, albumData())}
+					shuffleHint="Play this album in random order"
+					onradio={onRadioClick}
+					radioHint="Similar tracks across your library and TIDAL"
+					{radioPending}
+					liked={albumIsFavorite}
+					onlike={onLikeAlbum}
+					likeLabel="Save album to your library"
+					unlikeLabel="Remove album from your library"
+					likePending={favoritePending}
+					onmore={(e) => openContextMenu(e, buildAlbumMenu({
+						id: albumId,
+						title: h.title,
+						artist_id: h.artist_id,
+						artist_name: h.artist_name,
+					}, { isLocal: true, hideOpen: true }), h.title)}
 				>
-					{#if savePending}
-						<span class="btn-spinner" aria-hidden="true"></span>
-					{:else}
-						<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+					{#if isPartialAlbum}
+						<button
+							class="save-album-btn"
+							class:pending={savePending}
+							disabled={savePending}
+							onclick={onSaveAlbum}
+						>
+							{#if savePending}
+								<span class="btn-spinner" aria-hidden="true"></span>
+							{:else}
+								<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+							{/if}
+							Save full album
+						</button>
 					{/if}
-					Save full album
-				</button>
-			{/if}
 
-			<span class="actions-spacer"></span>
-
-			<span class="actions-hint">Click a song to start the album from there</span>
+				</ActionBar>
 			{/snippet}
 		</DetailHero>
 
-		<p class="actions-microcopy">
-			<strong>Shuffle</strong> plays this album in random order.
-			<strong>Radio</strong> finds similar tracks across your library and Tidal.
-		</p>
-
-		<section class="track-table">
+		<section class="track-table" class:with-plays={showPlays}>
 			<div class="track-header">
 				<span class="col-num">#</span>
 				<span class="col-title">Title</span>
-				<span class="col-plays">Plays</span>
+				{#if showPlays}<span class="col-plays">Plays</span>{/if}
+				<span class="col-status" aria-hidden="true"></span>
 				<span class="col-duration"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2" fill="none"/><path d="M12 7v5l3 2" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg></span>
 			</div>
 			<ol class="track-list">
 				{#each displayEntries as entry, idx (entry.kind === 'local' ? entry.local.id : `tidal-${entry.tidal.tidal_id}`)}
+					{@const work = workStarts.get(idx)}
+					{#if work}
+						<li class="work-head">
+							<span class="work-title">{work.work}</span>
+							<span class="work-duration">{formatTotalDuration(workDurationMs(work.start, work.end))}</span>
+						</li>
+					{/if}
 					{#if entry.kind === 'local'}
 						{@const track = entry.local}
 						<TrackRow
@@ -431,7 +424,9 @@
 							isCurrent={$currentTrack?.id === track.id}
 							isPlaying={$isPlaying}
 							showAlbum={false}
-							showPlayCount={true}
+							showArtist={track.artist_name !== h.artist_name}
+							displayTitle={works.displayTitles[idx]}
+							showPlayCount={showPlays}
 							worldPlayCount={track.isrc ? playcountByIsrc.get(track.isrc) : null}
 							onRowClick={() => onRowClick(track)}
 							menuOptions={{ hideAlbumActions: true }}
@@ -462,23 +457,15 @@
 								&& (e.preventDefault(), ok && void playAlbum(albumId, track.tidal_id, albumData()))}
 						>
 							<span class="tidal-row-num">{track.track_number ?? idx + 1}</span>
-							<span class="tidal-row-title">{track.title}</span>
-							<span class="tidal-row-plays" aria-hidden="true">-</span>
-							<span class="tidal-row-pill" aria-label="From TIDAL">TIDAL</span>
-							<span class="tidal-row-duration">
-								{#if track.duration_ms}
-									{Math.floor(track.duration_ms / 1000 / 60)}:{String(
-										Math.round((track.duration_ms / 1000) % 60),
-									).padStart(2, '0')}
-								{/if}
-							</span>
+							<span class="tidal-row-title">{works.displayTitles[idx]}</span>
+							{#if showPlays}<span class="tidal-row-plays" aria-hidden="true"></span>{/if}
+							<span class="status-glyph" title="Not in your library">{'\u25CB'}</span>
+							<span class="tidal-row-duration">{formatTrackDuration(track.duration_ms)}</span>
 						</li>
 					{/if}
 				{/each}
 			</ol>
 		</section>
-
-		<p class="footnote">{h.artist_name}</p>
 
 		{#if otherAlbums.length > 0}
 			<section class="more-section">
@@ -582,8 +569,6 @@
 		display: inline-block;
 		animation: btn-spin 0.7s linear infinite;
 	}
-	.ghost-btn.pending { opacity: 0.85; cursor: progress; }
-	.ghost-btn:disabled { cursor: progress; }
 	@keyframes btn-spin {
 		to { transform: rotate(360deg); }
 	}
@@ -596,47 +581,6 @@
 	.hero-link:hover { text-decoration: underline; }
 	.dot { opacity: 0.5; }
 	.hero-duration { color: var(--text-tertiary); }
-
-	.play-fab {
-		all: unset;
-		width: 56px;
-		height: 56px;
-		border-radius: 50%;
-		display: grid;
-		place-items: center;
-		background: var(--accent);
-		color: var(--text-on-accent);
-		cursor: pointer;
-		transition: transform var(--motion-fast), background var(--motion-fast), box-shadow var(--motion-fast);
-		box-shadow: 0 8px 24px -8px var(--accent-glow);
-	}
-
-	.play-fab:hover {
-		transform: scale(1.06);
-		background: var(--accent-strong);
-	}
-
-	.play-fab:active { transform: scale(0.98); }
-
-	.ghost-btn {
-		all: unset;
-		width: 40px;
-		height: 40px;
-		border-radius: 50%;
-		display: grid;
-		place-items: center;
-		color: var(--text-secondary);
-		cursor: pointer;
-		transition: color var(--motion-fast), background var(--motion-fast);
-	}
-
-	.ghost-btn:hover {
-		color: var(--text-primary);
-		background: var(--bg-hover);
-	}
-
-	.ghost-btn.active { color: var(--accent); }
-	.ghost-btn.active:hover { color: var(--accent-strong); }
 
 	.save-album-btn {
 		all: unset;
@@ -657,28 +601,12 @@
 	.save-album-btn.pending { opacity: 0.85; cursor: progress; }
 	.save-album-btn:disabled { cursor: progress; }
 
-	.actions-spacer { flex: 1; }
 
-	.actions-hint {
-		color: var(--text-tertiary);
-		font-size: var(--font-size-xs);
-	}
 
-	.actions-microcopy {
-		margin: 0;
-		padding: 0 var(--space-6) var(--space-2);
-		color: var(--text-tertiary);
-		font-size: var(--font-size-xs);
-		line-height: var(--line-height-normal);
-	}
 
-	.actions-microcopy strong {
-		color: var(--text-secondary);
-		font-weight: var(--font-weight-semibold);
-	}
 
 	.track-table {
-		padding: var(--space-2) var(--space-6) 0;
+		padding: var(--space-2) 0 0;
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
@@ -686,7 +614,7 @@
 
 	.track-header {
 		display: grid;
-		grid-template-columns: 40px 1fr 132px auto 64px;
+		grid-template-columns: 40px 1fr auto 64px;
 		align-items: center;
 		gap: var(--gap);
 		padding: var(--space-2) var(--space-4) var(--space-3);
@@ -700,6 +628,10 @@
 
 	.col-num { text-align: center; }
 	.col-plays { text-align: right; }
+	.track-table.with-plays .track-header,
+	.track-table.with-plays .tidal-album-row {
+		grid-template-columns: 40px 1fr 132px auto 64px;
+	}
 	.col-duration { display: grid; place-items: center; }
 
 	.track-list {
@@ -715,12 +647,12 @@
 	   .track-header so it lines up cleanly with TrackRow above. */
 	.tidal-album-row {
 		display: grid;
-		grid-template-columns: 40px 1fr 132px auto 64px;
+		grid-template-columns: 40px 1fr auto 64px;
 		align-items: center;
 		gap: var(--gap);
 		padding: var(--space-2) var(--space-4);
 		cursor: pointer;
-		transition: background 120ms ease;
+		transition: background var(--motion-fast);
 		min-height: 44px;
 	}
 	.tidal-album-row:hover { background: rgba(255, 255, 255, 0.04); }
@@ -739,21 +671,32 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
-	.tidal-row-plays {
-		text-align: right;
+	.status-glyph {
 		color: var(--text-tertiary);
+		font-size: var(--font-size-xs);
 	}
-	.tidal-row-pill {
-		font-size: var(--font-size-2xs);
-		font-weight: var(--font-weight-bold);
-		letter-spacing: 0.06em;
-		padding: 3px 8px;
-		border-radius: 4px;
-		background: rgba(0, 184, 212, 0.16);
-		color: rgba(120, 220, 240, 0.95);
-		border: 1px solid rgba(0, 184, 212, 0.3);
-		text-transform: uppercase;
+
+	/* A work inside a long album: the shared title prefix and its length. */
+	.work-head {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: var(--space-3);
+		padding: var(--space-4) var(--space-4) var(--space-1);
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
 	}
+
+	.work-head:first-child {
+		padding-top: var(--space-1);
+	}
+
+	.work-duration {
+		color: var(--text-tertiary);
+		font-weight: var(--font-weight-medium);
+		font-variant-numeric: tabular-nums;
+	}
+
 	.tidal-row-duration {
 		text-align: right;
 		color: var(--text-tertiary);
@@ -761,21 +704,10 @@
 		font-variant-numeric: tabular-nums;
 	}
 
-	.hero-library-substat {
-		margin: 4px 0 0;
-		font-size: var(--font-size-xs);
-		color: var(--text-tertiary);
-	}
 
-	.footnote {
-		padding: var(--space-5) var(--space-6) var(--space-1);
-		color: var(--text-tertiary);
-		font-size: var(--font-size-xs);
-		margin: 0;
-	}
 
 	.more-section {
-		padding: var(--space-6) var(--space-6) 0;
+		padding: var(--space-6) 0 0;
 		display: flex;
 		flex-direction: column;
 		gap: var(--gap);
@@ -874,9 +806,10 @@
 	}
 
 	@container workspace (max-width: 720px) {
-		.track-table { padding: var(--space-2) var(--space-3) 0; }
-		.track-header { grid-template-columns: 36px 1fr auto 56px; }
+		.track-table { padding: var(--space-2) 0 0; }
+		.track-header,
+		.track-table.with-plays .track-header { grid-template-columns: 36px 1fr auto 56px; }
 		.col-plays { display: none; }
-		.more-section { padding: var(--space-5) var(--space-4) 0; }
+		.more-section { padding: var(--space-5) 0 0; }
 	}
 </style>

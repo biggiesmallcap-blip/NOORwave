@@ -161,7 +161,7 @@
 		color: #fff;
 		text-align: left;
 		opacity: 0;
-		transition: opacity 120ms ease;
+		transition: opacity var(--motion-fast);
 		pointer-events: none;
 	}
 	.frame:hover .caption,
@@ -182,7 +182,7 @@
 		color: rgba(255, 255, 255, 0.78);
 	}
 	.frame:focus-visible {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
 	}
 

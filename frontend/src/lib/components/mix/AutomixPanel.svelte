@@ -1,17 +1,19 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	// The Automix part of the Mix page: Up next (the forecast queue), This
+	// session (queue source and shuffle, plus whatever the page passes as
+	// `session`), and the one Diagnostics disclosure (Automix health and
+	// library signals, plus the page's `diagnostics`). The Mix header owns the
+	// Automix switch, Start radio and Refresh data (`refresh()` below).
+	import { onMount, type Snippet } from 'svelte';
 	import {
 		automixEnabled,
 		automixDiscoverNew,
 		automixUseLearning,
 		automixAllowExternal,
-		crossfadeMs,
 		shuffleMode,
 		currentTrack,
 		currentTrackFeatures,
 		playbackQueue,
-		setPlayerAutomixEnabled,
-		setPlayerCrossfadeMs,
 		setPlayerShuffleMode,
 		setPlayerDiscoverNew,
 		setPlayerAutomixUseLearning,
@@ -20,8 +22,7 @@
 		currentStreamDisplay,
 		refreshPlaybackState,
 		moveQueueTrackNext,
-		removeTrackFromQueue,
-		startSongRadio
+		removeTrackFromQueue
 	} from '$lib/stores/player';
 	import {
 		api,
@@ -30,12 +31,11 @@
 		type DiscoveryStatus,
 		type PlaybackRuntimeInfo
 	} from '$lib/api/client';
-	import PageHeader from '$lib/components/ui/PageHeader.svelte';
-	import TransitionStory from '$lib/components/dj-cockpit/TransitionStory.svelte';
-	import type { DjStatusResponse } from '$lib/api/client';
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import FilterChip from '$lib/components/ui/FilterChip.svelte';
+	import Segmented from '$lib/components/ui/Segmented.svelte';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import QueueSourceLegend from '$lib/components/QueueSourceLegend.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
@@ -48,32 +48,15 @@
 		invalidateCacheForTrack,
 		type AutomixForecastRow
 	} from './automix_diagnostics';
-	import type { Snapshot } from './$types';
-	import { captureScroll, restoreScroll } from '$lib/navigation/scroll';
+
+	let { session, diagnostics }: { session?: Snippet; diagnostics?: Snippet } = $props();
 
 	let saving = $state(false);
-	let djStatus = $state<DjStatusResponse | null>(null);
-	async function refreshDjStory() {
-		try { djStatus = await api.getDjStatus(); } catch { djStatus = null; }
-	}
-	onMount(() => {
-		void refreshDjStory();
-		const interval = window.setInterval(() => void refreshDjStory(), 2_000);
-		return () => window.clearInterval(interval);
-	});
-	let draftCrossfade = $state(0);
 	let errorMsg = $state('');
 	let runtime = $state<PlaybackRuntimeInfo | null>(null);
 	let runtimeAvailable = $state(false);
 	let audioStats = $state<AudioFeaturesStats | null>(null);
 	let discoveryStatus = $state<DiscoveryStatus | null>(null);
-
-	export const snapshot: Snapshot<{ scrollY: number }> = {
-		capture: () => ({ scrollY: captureScroll() }),
-		restore: (saved) => {
-			restoreScroll(saved.scrollY);
-		}
-	};
 
 	function handleDspUpdated(event: Event) {
 		const trackId = (event as CustomEvent<{ trackId: number }>).detail?.trackId;
@@ -93,15 +76,16 @@
 	onMount(() => {
 		void refreshPlaybackState();
 		void loadControlData();
-		const unsub = crossfadeMs.subscribe((v) => {
-			draftCrossfade = v;
-		});
 		window.addEventListener('noor:dsp_updated', handleDspUpdated);
 		return () => {
-			unsub();
 			window.removeEventListener('noor:dsp_updated', handleDspUpdated);
 		};
 	});
+
+	/** Reload runtime, analysis and model stats (the Mix header's Refresh data). */
+	export function refresh() {
+		return loadControlData();
+	}
 
 	async function loadControlData() {
 		try {
@@ -135,10 +119,6 @@
 		}
 	}
 
-	function applyAutomix(enabled: boolean) {
-		return runSaving(() => setPlayerAutomixEnabled(enabled, draftCrossfade));
-	}
-
 	let bpmOverrideSaving = $state(false);
 
 	async function applyBpmMultiplier(factor: number) {
@@ -169,24 +149,14 @@
 		return runSaving(() => setPlayerAutomixAllowExternal(!$automixAllowExternal));
 	}
 
-	function saveCrossfade() {
-		return runSaving(() => setPlayerCrossfadeMs(draftCrossfade));
-	}
-
-	const CROSSFADE_STEPS = [0, 1000, 2000, 3000, 5000, 8000, 10000, 12000];
-
-	function crossfadeLabel(ms: number): string {
-		if (ms === 0) return 'Off';
-		if (ms < 1000) return `${ms}ms`;
-		return `${ms / 1000}s`;
-	}
-
 	const shuffleModes = [
-		{ mode: 'off' as const, label: 'Off', copy: 'Queue order stays untouched.', meter: 0.15 },
-		{ mode: 'genre' as const, label: 'Genre mix', copy: 'Clustered flow with related detours.', meter: 0.62 },
-		{ mode: 'weighted' as const, label: 'Smart shuffle', copy: 'Freshness, favorites, and skips all count.', meter: 0.8 },
-		{ mode: 'true' as const, label: 'True random', copy: 'Flat random coverage for the full queue.', meter: 0.38 }
+		{ mode: 'off' as const, label: 'Off', copy: 'Queue order stays untouched.' },
+		{ mode: 'genre' as const, label: 'Genre mix', copy: 'Clustered flow with related detours.' },
+		{ mode: 'weighted' as const, label: 'Smart shuffle', copy: 'Freshness, favorites, and skips all count.' },
+		{ mode: 'true' as const, label: 'True random', copy: 'Flat random coverage for the full queue.' }
 	];
+	const SHUFFLE_OPTIONS = shuffleModes.map(({ mode, label }) => ({ value: mode, label }));
+	const shuffleCopy = $derived(shuffleModes.find((option) => option.mode === $shuffleMode)?.copy ?? '');
 
 	const queueUpcoming = $derived(
 		$playbackQueue.filter((item) => {
@@ -307,145 +277,17 @@
 		featureCacheVersion++;
 	}
 
-	async function startCurrentSongRadio() {
-		const trackId = $currentTrack?.id;
-		if (!trackId) return;
-		await runSaving(() => startSongRadio(trackId));
-	}
 </script>
 
-<svelte:head>
-	<title>Automix | NOOR</title>
-</svelte:head>
-
-<div class="page-shell automix-page animate-in">
-	<PageHeader
-		eyebrow="Automix"
-		title="Keep the music flowing"
-		subtitle="Shape the queue, then let DJ find the right way between tracks."
-	>
-		{#snippet actions()}
-			<a class="btn btn-glass" href="/dj">DJ transitions →</a>
-			<button class="btn btn-glass" onclick={loadControlData} disabled={saving}>Refresh data</button>
-			<button class="btn btn-glass" onclick={startCurrentSongRadio} disabled={saving || !$currentTrack}>
-				Start radio
-			</button>
-			<button
-				class="btn {$automixEnabled ? 'btn-primary' : 'btn-glass'}"
-				onclick={() => applyAutomix(!$automixEnabled)}
-				disabled={saving}
-			>
-				{$automixEnabled ? 'Automix on' : 'Automix off'}
-			</button>
-		{/snippet}
-	</PageHeader>
-	{#if djStatus?.enabled}<TransitionStory status={djStatus} compact />{/if}
-
+<div class="automix-panel">
 	{#if errorMsg}
-		<div class="error-banner glass-panel">{errorMsg}</div>
+		<div class="error-banner" role="alert">{errorMsg}</div>
 	{/if}
 
-	<details class="automix-disclosure">
-		<summary>Diagnostics</summary>
-	<section class="diagnostic-top">
-		<!-- svelte-ignore a11y_no_static_element_interactions -->
-		<div
-			class="seed-panel glass-panel"
-			oncontextmenu={(e) => {
-				if ($currentTrack) openTrackContextMenu(e, $currentTrack);
-			}}
-		>
-			<div class="seed-art-shell">
-				<ArtworkImage
-					className="seed-art"
-					src={$currentTrack?.artwork_url}
-					alt={$currentTrack?.title ?? 'Current seed artwork'}
-					size={640}
-					fallbackText="NOOR"
-					decorative={true}
-				/>
-			</div>
-			<div class="seed-copy">
-				<p class="eyebrow">Current seed</p>
-				<h2>{$currentTrack?.title ?? 'No active track'}</h2>
-				<p>{$currentTrack?.artist_name ?? 'Start playback to seed Automix.'}</p>
-				<div class="signal-strip">
-					<span>{currentFeatureSummary}</span>
-					{#if $currentTrackFeatures && $currentTrack}
-						<button
-							type="button"
-							class="bpm-tweak"
-							title="Halve the detected BPM (for doubled-tempo detections)"
-							disabled={bpmOverrideSaving}
-							onclick={() => applyBpmMultiplier(0.5)}
-						>
-							÷2
-						</button>
-						<button
-							type="button"
-							class="bpm-tweak"
-							title="Double the detected BPM (for half-time detections)"
-							disabled={bpmOverrideSaving}
-							onclick={() => applyBpmMultiplier(2.0)}
-						>
-							×2
-						</button>
-					{/if}
-					<span>{$currentStreamDisplay?.audio_quality ?? 'Stream idle'}</span>
-					<span>{runtime?.device_name ?? (runtimeAvailable ? 'Runtime ready' : 'Runtime offline')}</span>
-				</div>
-			</div>
-		</div>
 
-		<div class="health-panel glass-panel">
-			<div class="card-heading">
-				<div>
-					<p class="eyebrow">Health</p>
-					<h3>{health.label}</h3>
-				</div>
-				<StateBadge
-					label={health.label}
-					tone={health.status === 'ready' ? 'active' : health.status === 'blocked' ? 'error' : 'warning'}
-					compact={true}
-				/>
-			</div>
-			<div class="health-reasons">
-				{#each health.reasons.slice(0, 4) as reason}
-					<span>{reason}</span>
-				{/each}
-			</div>
-			<div class="radar-stats">
-				<div>
-					<span>Good</span>
-					<strong>{forecastCounts.good}</strong>
-				</div>
-				<div>
-					<span>Pending</span>
-					<strong>{forecastCounts.pending}</strong>
-				</div>
-				<div>
-					<span>Clashes</span>
-					<strong>{forecastCounts.clash}</strong>
-				</div>
-			</div>
-		</div>
-	</section>
-
-	<section class="stat-grid">
-		<MetricPair label="Upcoming" value={queueUpcoming.length} copy="After current track." />
-		<MetricPair label="Automix" value={automixQueueCount} copy="Generated rows." />
-		<MetricPair label="Model" value={discoveryCoverageLabel} copy={`${discoveryStatus?.playable_tracks?.toLocaleString() ?? 0} playable indexed.`} />
-		<MetricPair label="DSP" value={audioStats?.total_analyzed?.toLocaleString() ?? '0'} copy={`BPM ${audioStats?.avg_bpm?.toFixed(1) ?? '--'} / key ${audioStats?.top_key ?? '--'}.`} />
-	</section>
-	</details>
-
-	<section class="queue-lab glass-panel">
+	<section class="queue-lab">
 		<div class="card-heading">
-			<div>
-				<p class="eyebrow">Forecast</p>
-				<h3>Upcoming blends</h3>
-			</div>
-			<StateBadge label={`${queueUpcoming.slice(0, INDICATOR_WINDOW).length} visible`} tone="default" compact={true} />
+			<h2 class="t-section">Up next <span class="heading-count">{queueUpcoming.length}</span></h2>
 		</div>
 
 		<!-- The player panel used to carry this legend as permanent chrome. It
@@ -474,14 +316,14 @@
 						/>
 						<div class="queue-meta">
 							<strong>{row.item.track.title}</strong>
-							<span>{row.item.track.artist_name ?? 'Unknown artist'}</span>
+							<span>{row.item.track.artist_name ?? 'Unknown artist'} &middot; {row.sourceLabel}</span>
 						</div>
 						<div class="forecast-diagnostics">
-							<span>{formatFeatureSummary(row.nextFeatures)}</span>
+							{#if row.nextFeatures}<span>{formatFeatureSummary(row.nextFeatures)}</span>{/if}
 							{#if row.selectionReasonLabel}
 								<span class="selection-reason"><b>Why</b>{row.selectionReasonLabel}</span>
 							{/if}
-							{#if row.verdict !== 'unknown'}
+							{#if row.verdict !== 'unknown' && row.verdict !== 'pending'}
 								<b class="compat-pill compat-{row.verdict}">
 									{row.keyLabel ?? row.verdict}
 									{#if row.bpmDeltaLabel}
@@ -489,16 +331,12 @@
 									{/if}
 								</b>
 							{:else}
-								<b class="compat-pill">Analyzing</b>
+								<span class="t-meta" title={row.missing.length > 0 ? `Waiting for ${row.missing.join(', ')}` : undefined}>Analysing</span>
 							{/if}
 							{#if row.energyDeltaLabel}
 								<span>{row.energyDeltaLabel}</span>
 							{/if}
-							{#if row.missing.length > 0}
-								<span class="dsp-missing"><b>DSP</b>{row.missing.join(', ')}</span>
-							{/if}
 						</div>
-						<StateBadge label={row.sourceLabel} tone={row.isExternalPending ? 'default' : 'active'} compact={true} />
 						<div class="forecast-actions">
 							<button
 								class="forecast-action icon"
@@ -537,130 +375,184 @@
 		{/if}
 	</section>
 
-	<section class="control-layout">
-		<section class="glass-panel control-card">
-			<div class="card-heading">
-				<div>
-					<p class="eyebrow">Fade</p>
-					<h3>Crossfade</h3>
-				</div>
-				<StateBadge label={crossfadeLabel($crossfadeMs)} tone={$crossfadeMs > 0 ? 'active' : 'muted'} compact={true} />
+	<section class="mix-session" aria-labelledby="mix-session-heading">
+		<h2 id="mix-session-heading" class="t-section">This session</h2>
+		<div class="session-row">
+			<span class="row-label">Queue source</span>
+			<div class="chips">
+				<FilterChip pressed={$automixDiscoverNew} onclick={toggleDiscoverNew} disabled={saving} title="Search beyond local tracks.">Include new</FilterChip>
+				<FilterChip pressed={$automixUseLearning} onclick={toggleUseLearning} disabled={saving} title="Use listening signals.">Learned radio</FilterChip>
+				<FilterChip pressed={$automixAllowExternal} onclick={toggleAllowExternal} disabled={saving} title="Allow stream candidates.">External picks</FilterChip>
 			</div>
-
-			<div class="crossfade-steps">
-				{#each CROSSFADE_STEPS as step}
-					<button
-						class="step-btn {draftCrossfade === step ? 'active' : ''}"
-						onclick={() => {
-							draftCrossfade = step;
-						}}
-					>
-						{crossfadeLabel(step)}
-					</button>
-				{/each}
-			</div>
-
-			<div class="slider-row">
-				<input type="range" min="0" max="12000" step="500" bind:value={draftCrossfade} class="crossfade-slider" />
-				<span class="slider-value">{crossfadeLabel(draftCrossfade)}</span>
-			</div>
-
-			<button class="btn btn-primary save-btn" onclick={saveCrossfade} disabled={saving || draftCrossfade === $crossfadeMs}>
-				{saving ? 'Saving...' : 'Apply crossfade'}
-			</button>
-		</section>
-
-		<section class="glass-panel control-card">
-			<div class="card-heading">
-				<div>
-					<p class="eyebrow">Policy</p>
-					<h3>Queue source</h3>
-				</div>
-			</div>
-			<div class="policy-grid">
-				<button class="policy-toggle {$automixDiscoverNew ? 'active' : ''}" onclick={toggleDiscoverNew} disabled={saving} aria-pressed={$automixDiscoverNew}>
-					<strong>Include new</strong>
-					<span>Search beyond local tracks.</span>
-				</button>
-				<button class="policy-toggle {$automixUseLearning ? 'active' : ''}" onclick={toggleUseLearning} disabled={saving} aria-pressed={$automixUseLearning}>
-					<strong>Learned radio</strong>
-					<span>Use listening signals.</span>
-				</button>
-				<button class="policy-toggle {$automixAllowExternal ? 'active' : ''}" onclick={toggleAllowExternal} disabled={saving} aria-pressed={$automixAllowExternal}>
-					<strong>External picks</strong>
-					<span>Allow stream candidates.</span>
-				</button>
-			</div>
-		</section>
-
-		<section class="glass-panel control-card wide">
-			<div class="card-heading">
-				<div>
-					<p class="eyebrow">Shuffle</p>
-					<h3>Mode</h3>
-				</div>
-			</div>
-			<div class="shuffle-options">
-				{#each shuffleModes as { mode, label, copy, meter }}
-					<button
-						class="shuffle-opt {$shuffleMode === mode ? 'active' : ''}"
-						onclick={() => void setPlayerShuffleMode(mode)}
-						style={`--meter:${meter}`}
-					>
-						<span class="shuffle-meter"></span>
-						<strong>{label}</strong>
-						<small>{copy}</small>
-					</button>
-				{/each}
-			</div>
-		</section>
+		</div>
+		<div class="session-row">
+			<span class="row-label">Shuffle</span>
+			<Segmented label="Shuffle" options={SHUFFLE_OPTIONS} value={$shuffleMode} onchange={(mode) => void setPlayerShuffleMode(mode)} />
+			<span class="t-meta">{shuffleCopy}</span>
+		</div>
+		{@render session?.()}
+		<p class="t-meta">Crossfade lives in <a href="/settings?category=playback">Settings, Playback</a>.</p>
 	</section>
 
 	<details class="automix-disclosure">
-		<summary>Library signals</summary>
+		<summary>Diagnostics</summary>
+		<div class="diagnostics-body">
+	<section class="diagnostic-top">
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div
+			class="seed-panel"
+			oncontextmenu={(e) => {
+				if ($currentTrack) openTrackContextMenu(e, $currentTrack);
+			}}
+		>
+			<div class="seed-art-shell">
+				<ArtworkImage
+					className="seed-art"
+					src={$currentTrack?.artwork_url}
+					alt={$currentTrack?.title ?? 'Current seed artwork'}
+					size={640}
+					fallbackText="NOOR"
+					decorative={true}
+				/>
+			</div>
+			<div class="seed-copy">
+				<h3>Current seed</h3>
+				<p class="seed-title">{$currentTrack?.title ?? 'No active track'}</p>
+				<p>{$currentTrack?.artist_name ?? 'Start playback to seed Automix.'}</p>
+				<div class="signal-strip">
+					<span>{currentFeatureSummary}</span>
+					{#if $currentTrackFeatures && $currentTrack}
+						<button
+							type="button"
+							class="bpm-tweak"
+							title="Halve the detected BPM (for doubled-tempo detections)"
+							disabled={bpmOverrideSaving}
+							onclick={() => applyBpmMultiplier(0.5)}
+						>
+							÷2
+						</button>
+						<button
+							type="button"
+							class="bpm-tweak"
+							title="Double the detected BPM (for half-time detections)"
+							disabled={bpmOverrideSaving}
+							onclick={() => applyBpmMultiplier(2.0)}
+						>
+							×2
+						</button>
+					{/if}
+					<span>{$currentStreamDisplay?.audio_quality ?? 'Stream idle'}</span>
+					<span>{runtime?.device_name ?? (runtimeAvailable ? 'Runtime ready' : 'Runtime offline')}</span>
+				</div>
+			</div>
+		</div>
+
+		<div class="health-panel">
+			<div class="card-heading">
+				<div>
+					<h3>Health</h3>
+				</div>
+				<StateBadge
+					label={health.label}
+					tone={health.status === 'ready' ? 'active' : health.status === 'blocked' ? 'error' : 'warning'}
+					compact={true}
+				/>
+			</div>
+			<div class="health-reasons">
+				{#each health.reasons.slice(0, 4) as reason}
+					<span>{reason}</span>
+				{/each}
+			</div>
+			<div class="radar-stats">
+				<div>
+					<span>Good</span>
+					<strong>{forecastCounts.good}</strong>
+				</div>
+				<div>
+					<span>Pending</span>
+					<strong>{forecastCounts.pending}</strong>
+				</div>
+				<div>
+					<span>Clashes</span>
+					<strong>{forecastCounts.clash}</strong>
+				</div>
+			</div>
+		</div>
+	</section>
+
+	<section class="stat-grid">
+		<MetricPair label="Upcoming" value={queueUpcoming.length} copy="After current track." />
+		<MetricPair label="Automix" value={automixQueueCount} copy="Generated rows." />
+		<MetricPair label="Model" value={discoveryCoverageLabel} copy={`${discoveryStatus?.playable_tracks?.toLocaleString() ?? 0} playable indexed.`} />
+		<MetricPair label="DSP" value={audioStats?.total_analyzed?.toLocaleString() ?? '0'} copy={`BPM ${audioStats?.avg_bpm?.toFixed(1) ?? '--'} / key ${audioStats?.top_key ?? '--'}.`} />
+	</section>
 	<section class="data-calls">
-		<div class="glass-panel data-card">
+		<div class="data-card">
 			<span>Embedding coverage</span>
 			<strong>{percentLabel(discoveryStatus?.coverage_ratio)}</strong>
 			<div class="mini-bar"><i style={`width:${percentLabel(discoveryStatus?.coverage_ratio)}`}></i></div>
 		</div>
-		<div class="glass-panel data-card">
+		<div class="data-card">
 			<span>Neighbor tracks</span>
 			<strong>{discoveryStatus?.neighbor_tracks?.toLocaleString() ?? '0'}</strong>
 			<div class="mini-bar"><i style={`width:${Math.min(100, (discoveryStatus?.neighbor_tracks ?? 0) / 100).toFixed(0)}%`}></i></div>
 		</div>
-		<div class="glass-panel data-card">
+		<div class="data-card">
 			<span>Queue DSP proxy</span>
 			<strong>{analyzedCoverage == null ? '--' : percentLabel(analyzedCoverage)}</strong>
 			<div class="mini-bar"><i style={`width:${percentLabel(analyzedCoverage ?? 0)}`}></i></div>
 		</div>
 	</section>
+			{@render diagnostics?.()}
+		</div>
 	</details>
+
 </div>
 
 <style>
 	.automix-disclosure { border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: var(--space-3); background: var(--bg-surface); }
 	.automix-disclosure > summary { cursor: pointer; padding: var(--space-2); color: var(--text-secondary); font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); }
-	.automix-disclosure > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+	.automix-disclosure > summary:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
 	.automix-disclosure[open] > summary { margin-bottom: var(--space-3); }
-	.automix-page {
+	.automix-panel {
+		display: grid;
 		gap: var(--space-5);
+		min-width: 0;
 	}
 
-	.automix-page :global(.page-header) {
+	.mix-session {
+		display: grid;
+		gap: var(--space-3);
+	}
+
+	.mix-session h2,
+	.mix-session p {
+		margin: 0;
+	}
+
+	.session-row {
+		display: flex;
+		flex-wrap: wrap;
 		align-items: center;
-		padding-top: 2px;
+		gap: var(--space-2) var(--space-3);
 	}
 
-	.automix-page :global(.page-header .intro) {
-		max-width: 68ch;
+	.row-label {
+		min-width: 7rem;
+		color: var(--text-tertiary);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
+	}
+
+	.chips {
+		display: flex;
+		flex-wrap: wrap;
 		gap: var(--space-2);
 	}
 
-	.automix-page :global(.page-header .subtitle) {
-		max-width: 62ch;
-		font-size: var(--font-size-md);
-		line-height: var(--line-height-loose);
+	.diagnostics-body {
+		display: grid;
+		gap: var(--space-4);
 	}
 
 	.error-banner {
@@ -674,11 +566,6 @@
 		grid-template-columns: minmax(0, 1.25fr) minmax(18rem, 0.75fr);
 		gap: var(--space-4);
 		align-items: stretch;
-	}
-
-	.seed-panel,
-	.health-panel {
-		padding: var(--space-4);
 	}
 
 	.seed-panel {
@@ -717,16 +604,20 @@
 		gap: var(--space-2);
 	}
 
-	.seed-copy h2 {
-		font-family: var(--font-body);
-		font-size: var(--font-size-3xl);
-		font-weight: var(--font-weight-bold);
+	.seed-copy h3,
+	.seed-copy p {
+		margin: 0;
+	}
+
+	.seed-title {
+		font-family: var(--font-display);
+		font-size: var(--font-size-2xl);
+		font-weight: var(--font-weight-semibold);
 		line-height: var(--line-height-tight);
-		letter-spacing: 0;
 		overflow-wrap: anywhere;
 	}
 
-	.seed-copy p:not(.eyebrow) {
+	.seed-copy p:not(.seed-title) {
 		color: var(--text-secondary);
 	}
 
@@ -737,10 +628,7 @@
 	}
 
 	.signal-strip span,
-	.compat-pill,
-	.step-btn,
-	.policy-toggle,
-	.shuffle-opt {
+	.compat-pill {
 		border: 1px solid var(--border-subtle);
 		background: rgba(255, 255, 255, 0.035);
 	}
@@ -761,7 +649,7 @@
 		font-size: var(--font-size-xs);
 		font-variant-numeric: tabular-nums;
 		cursor: pointer;
-		transition: background-color 120ms ease, color 120ms ease;
+		transition: background-color var(--motion-fast), color var(--motion-fast);
 	}
 
 	.bpm-tweak:hover:not(:disabled) {
@@ -804,8 +692,7 @@
 		gap: var(--space-2);
 	}
 
-	.health-reasons span,
-	.forecast-action {
+	.health-reasons span {
 		border: 1px solid var(--border-subtle);
 		background: rgba(255, 255, 255, 0.035);
 	}
@@ -818,26 +705,16 @@
 		line-height: 1;
 	}
 
-	.control-layout {
-		display: grid;
-		grid-template-columns: repeat(2, minmax(18rem, 1fr));
-		gap: var(--space-4);
-	}
-
-	.control-card,
-	.queue-lab,
 	.data-card {
-		padding: var(--space-4);
+		display: grid;
+		gap: var(--space-1);
 	}
 
-	.control-card {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
-	}
-
-	.control-card.wide {
-		grid-column: 1 / -1;
+	.heading-count {
+		margin-left: var(--space-1);
+		color: var(--text-tertiary);
+		font-weight: var(--font-weight-medium);
+		font-variant-numeric: tabular-nums;
 	}
 
 	.card-heading {
@@ -851,118 +728,9 @@
 		font-size: var(--font-size-md);
 	}
 
-	.crossfade-steps,
-	.policy-grid,
-	.shuffle-options,
 	.data-calls {
 		display: grid;
 		gap: var(--space-2);
-	}
-
-	.crossfade-steps {
-		grid-template-columns: repeat(auto-fit, minmax(4.5rem, 1fr));
-	}
-
-	.step-btn {
-		padding: var(--space-2) var(--space-3);
-		border-radius: 999px;
-		color: var(--text-secondary);
-		transition:
-			background var(--motion-fast),
-			border-color var(--motion-fast),
-			color var(--motion-fast);
-	}
-
-	.step-btn.active,
-	.step-btn:hover {
-		border-color: var(--accent-line);
-		background: var(--accent-soft);
-		color: var(--text-primary);
-	}
-
-	.slider-row {
-		display: flex;
-		align-items: center;
-		gap: var(--space-3);
-	}
-
-	.crossfade-slider {
-		flex: 1;
-	}
-
-	.slider-value {
-		min-width: 3rem;
-		text-align: right;
-		font-variant-numeric: tabular-nums;
-		color: var(--text-secondary);
-	}
-
-	.save-btn {
-		align-self: flex-start;
-	}
-
-	.policy-grid {
-		grid-template-columns: repeat(3, minmax(0, 1fr));
-	}
-
-	.policy-toggle {
-		display: grid;
-		gap: var(--space-1);
-		padding: var(--space-3);
-		border-radius: var(--radius-md);
-		text-align: left;
-		transition:
-			background var(--motion-fast),
-			border-color var(--motion-fast),
-			color var(--motion-fast);
-	}
-
-	.policy-toggle span,
-	.shuffle-opt small {
-		color: var(--text-secondary);
-		font-size: var(--font-size-xs);
-	}
-
-	.policy-toggle.active {
-		border-color: var(--accent-line);
-		background: var(--accent-soft);
-	}
-
-	.shuffle-options {
-		grid-template-columns: repeat(4, minmax(0, 1fr));
-	}
-
-	.shuffle-opt {
-		--meter: 0.4;
-		position: relative;
-		overflow: hidden;
-		display: grid;
-		gap: var(--space-2);
-		padding: var(--space-3);
-		border-radius: var(--radius-md);
-		text-align: left;
-	}
-
-	.shuffle-meter {
-		width: 100%;
-		height: 0.3125rem;
-		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.08);
-		overflow: hidden;
-	}
-
-	.shuffle-meter::after {
-		content: '';
-		display: block;
-		width: calc(var(--meter) * 100%);
-		height: 100%;
-		border-radius: inherit;
-		background: linear-gradient(90deg, var(--accent), var(--state-success));
-	}
-
-	.shuffle-opt.active {
-		border-color: var(--accent-line);
-		background: var(--accent-soft);
 	}
 
 	.queue-lab {
@@ -977,22 +745,20 @@
 
 	.forecast-row {
 		display: grid;
-		grid-template-columns: 2.125rem clamp(2.25rem, 3vw, 2.75rem) minmax(0, 1fr) minmax(14rem, 0.85fr) auto auto;
+		grid-template-columns: 2.125rem clamp(2.25rem, 3vw, 2.75rem) minmax(0, 1fr) minmax(14rem, 0.85fr) auto;
 		align-items: center;
 		gap: var(--space-3);
 		padding: var(--space-2);
 		border-radius: var(--radius-sm);
-		background: rgba(255, 255, 255, 0.026);
-		border: 1px solid transparent;
+		transition: background var(--motion-fast);
 	}
 
 	.forecast-row:hover {
-		border-color: var(--border-subtle);
-		background: rgba(255, 255, 255, 0.045);
+		background: var(--bg-hover);
 	}
 
 	.forecast-row.verdict-clash {
-		border-color: color-mix(in srgb, var(--state-error) 28%, transparent);
+		box-shadow: inset 2px 0 0 color-mix(in srgb, var(--state-error) 70%, transparent);
 	}
 
 	.queue-index {
@@ -1027,8 +793,7 @@
 	.queue-meta strong,
 	.queue-meta span,
 	.forecast-diagnostics span,
-	.selection-reason,
-	.dsp-missing {
+	.selection-reason {
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -1041,8 +806,7 @@
 		line-height: var(--line-height-snug);
 	}
 
-	.selection-reason,
-	.dsp-missing {
+	.selection-reason {
 		display: inline-flex;
 		align-items: center;
 		gap: var(--space-1);
@@ -1050,22 +814,13 @@
 		color: var(--text-primary);
 	}
 
-	.selection-reason b,
-	.dsp-missing b {
+	.selection-reason b {
 		flex: 0 0 auto;
 		color: var(--accent);
 		font-size: var(--font-size-2xs);
 		font-weight: var(--font-weight-bold);
 		line-height: 1;
 		text-transform: uppercase;
-	}
-
-	.dsp-missing {
-		color: var(--text-secondary);
-	}
-
-	.dsp-missing b {
-		color: var(--state-warning);
 	}
 
 	.compat-pill {
@@ -1106,10 +861,19 @@
 	.forecast-actions {
 		display: flex;
 		gap: var(--space-1);
+		opacity: 0;
+		transition: opacity var(--motion-fast);
+	}
+
+	.forecast-row:hover .forecast-actions,
+	.forecast-row:focus-within .forecast-actions {
+		opacity: 1;
 	}
 
 	.forecast-action {
 		padding: var(--space-1);
+		border: 0;
+		background: transparent;
 		border-radius: 999px;
 		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
@@ -1130,13 +894,11 @@
 	}
 
 	.forecast-action:hover:not(:disabled) {
-		border-color: var(--accent-line);
-		background: var(--accent-soft);
+		background: var(--bg-hover);
 		color: var(--text-primary);
 	}
 
 	.forecast-action.danger:hover:not(:disabled) {
-		border-color: color-mix(in srgb, var(--state-error) 45%, transparent);
 		color: var(--state-error);
 	}
 
@@ -1177,14 +939,8 @@
 
 	@media (max-width: 980px) {
 		.diagnostic-top,
-		.control-layout,
 		.data-calls {
 			grid-template-columns: 1fr;
-		}
-
-		.shuffle-options,
-		.policy-grid {
-			grid-template-columns: 1fr 1fr;
 		}
 
 		.forecast-row {
@@ -1198,9 +954,7 @@
 	}
 
 	@media (max-width: 640px) {
-		.seed-panel,
-		.shuffle-options,
-		.policy-grid {
+		.seed-panel {
 			grid-template-columns: 1fr;
 		}
 

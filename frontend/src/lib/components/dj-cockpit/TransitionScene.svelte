@@ -123,7 +123,7 @@
 </div>
 
 <style>
-	.scene { position: relative; overflow: hidden; border-radius: var(--radius-lg); background: radial-gradient(ellipse at 50% 65%, var(--accent-soft), transparent 64%), var(--bg-base); border: 1px solid var(--border-subtle); }
+	.scene { position: relative; overflow: hidden; border-radius: var(--radius-lg); background: radial-gradient(ellipse at 50% 65%, var(--accent-soft), transparent 64%), var(--bg-base); }
 	.scene-heading { display: flex; justify-content: space-between; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-4) 0; font-size: var(--font-size-xs); color: var(--text-tertiary); }
 	.scene-heading strong { color: var(--text-secondary); font-weight: var(--font-weight-medium); }
 	svg { display: block; width: 100%; height: auto; max-height: 18rem; }

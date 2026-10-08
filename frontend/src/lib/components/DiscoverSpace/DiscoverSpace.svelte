@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { prefersReducedMotion as reduceMotionNow } from '$lib/stores/motion';
 	import { onMount, onDestroy } from 'svelte';
 	import { discoverSpaceStore } from './discover_space_store';
 	import { applyForces, kineticEnergy, findNodeNear } from './discover_space_physics';
@@ -107,8 +108,7 @@
 	let isWarping = false;
 
 	// Reduced motion
-	const prefersReducedMotion = typeof window !== 'undefined' &&
-		window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+	const prefersReducedMotion = reduceMotionNow();
 
 	// FPS tracking (debug)
 	let fpsFrames: number[] = [];

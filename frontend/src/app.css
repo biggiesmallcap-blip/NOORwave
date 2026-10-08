@@ -34,7 +34,9 @@
 
 	--text-primary:  rgba(255, 255, 255, 0.93);
 	--text-secondary:rgba(255, 255, 255, 0.58);
-	--text-tertiary: rgba(255, 255, 255, 0.36);
+	/* The floor for readable text: 0.50 is about 5.3:1 on --bg-base. Disabled
+	   and decorative text uses --text-muted. */
+	--text-tertiary: rgba(255, 255, 255, 0.5);
 	--text-muted:    rgba(255, 255, 255, 0.24);
 
 	--accent:        #7c80ff;
@@ -54,6 +56,13 @@
 	--state-active:   var(--accent);
 	--state-favorite: #ff4d6d;
 	--state-favorite-glow: rgba(255, 77, 109, 0.35);
+
+	/* Artwork filters are theme tokens: dimming tuned for a dark ground reads as
+	   muddy on a light one. Wall: dense rows of stills at rest (station strips).
+	   Collage: the angled Library murals and hero. Backdrop: blurred hero art. */
+	--art-wall-filter:     saturate(0.7) brightness(0.8);
+	--art-collage-filter:  saturate(1.08) brightness(1.04);
+	--art-backdrop-filter: blur(64px) saturate(1.08) brightness(0.72);
 
 	--quality-hires:    #c9a84c;
 	--quality-lossless: #6db89b;
@@ -124,7 +133,7 @@
 
 	--text-primary:  rgba(9, 13, 22, 0.96);
 	--text-secondary:rgba(9, 13, 22, 0.72);
-	--text-tertiary: rgba(9, 13, 22, 0.54);
+	--text-tertiary: rgba(9, 13, 22, 0.6);
 	--text-muted:    rgba(9, 13, 22, 0.42);
 
 	--accent:        #5558e0;
@@ -142,6 +151,10 @@
 	--state-error:    #c84040;
 	--state-favorite: #d6354a;
 	--state-favorite-glow: rgba(214, 53, 74, 0.22);
+
+	--art-wall-filter:     saturate(0.94);
+	--art-collage-filter:  none;
+	--art-backdrop-filter: blur(64px) saturate(1.12) brightness(1.02);
 
 	--quality-hires:    #a07a20;
 	--quality-lossless: #2d8a6e;
@@ -315,6 +328,23 @@
 	--motion-fast: 130ms cubic-bezier(0.25, 0.8, 0.25, 1);
 	--motion-base: 210ms cubic-bezier(0.25, 0.8, 0.25, 1);
 	--motion-slow: 340ms cubic-bezier(0.25, 0.8, 0.25, 1);
+	/* Exit is shorter and accelerates away; press is the quick scale-down. */
+	--motion-exit: 140ms cubic-bezier(0.4, 0, 1, 1);
+	--motion-press: 90ms cubic-bezier(0.25, 0.8, 0.25, 1);
+	/* Bare curves, only for keyframes and WAAPI where a token cannot be used. */
+	--ease-standard: cubic-bezier(0.25, 0.8, 0.25, 1);
+	--ease-exit: cubic-bezier(0.4, 0, 1, 1);
+
+	/* Page rhythm (see STYLING.md, "Page frames"). Header and row gaps are
+	   fixed so the frame sits at the same place on every route. */
+	--page-top: 28px;
+	--header-gap: 28px;
+	--section-gap: var(--space-7);
+	--group-gap: var(--space-3);
+	--row-gap: 2px;
+	--measure-command: 720px;
+	--measure-form: 760px;
+	--measure-text: 65ch;
 
 	/* Blur tiers — three is the maximum that should ever exist. Anything outside
 	 * these tokens is drift. Applied via `backdrop-filter: var(--blur-*)`. */
@@ -351,6 +381,9 @@
 	--font-size-2xl: clamp(1.5rem,    1.5vw + 1.125rem,  2rem);       /* 24-32 px */
 	--font-size-3xl: clamp(1.75rem,   2vw   + 1.25rem,   2.5rem);     /* 28-40 px */
 	--font-size-4xl: clamp(2.5rem,    2.5vw + 2rem,      3.5rem);     /* 40-56 px */
+	/* The uppercase label role. Its own step so it never drops below 11px:
+	   --font-size-2xs reaches 9.5px at 1280 wide, too small for uppercase. */
+	--font-size-label: clamp(0.6875rem, 0.156vw + 0.5625rem, 0.75rem); /* 11-12 px */
 
 	/* Weight tokens — three steps. Raw 400 (regular) and 800 (extra-bold) are
 	   permitted by lint as documented exceptions; require a code comment. */
@@ -570,12 +603,73 @@ h4 {
 	font-weight: var(--font-weight-semibold);
 }
 
-.eyebrow {
-	font-size: var(--font-size-xs);
+/* Typography roles (STYLING.md, "Typography roles"). Use these, or the
+   shared headers that apply them, instead of hand-rolling a heading or label.
+   `.eyebrow` is the legacy name for the label role. */
+.t-entity {
+	font-family: var(--font-display);
+	font-size: var(--font-size-4xl);
+	font-weight: var(--font-weight-semibold);
+	line-height: var(--line-height-tight);
+	letter-spacing: 0;
+	text-wrap: balance;
+}
+
+.t-page-title {
+	font-family: var(--font-body);
+	font-size: var(--font-size-2xl);
 	font-weight: var(--font-weight-bold);
-	letter-spacing: 0.13em;
+	line-height: var(--line-height-tight);
+	letter-spacing: 0;
+}
+
+.t-section {
+	font-family: var(--font-body);
+	font-size: var(--font-size-lg);
+	font-weight: var(--font-weight-bold);
+	line-height: var(--line-height-snug);
+	letter-spacing: 0;
+}
+
+.t-label,
+.eyebrow {
+	font-family: var(--font-body);
+	font-size: var(--font-size-label);
+	font-weight: var(--font-weight-semibold);
+	line-height: var(--line-height-snug);
+	letter-spacing: 0.12em;
 	text-transform: uppercase;
+	color: var(--accent-strong);
+}
+
+.t-row-title {
+	font-size: var(--font-size-sm);
+	font-weight: var(--font-weight-semibold);
+	line-height: var(--line-height-snug);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.t-meta {
+	font-size: var(--font-size-xs);
+	color: var(--text-secondary);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.t-body {
+	font-size: var(--font-size-sm);
+	line-height: var(--line-height-normal);
+	max-width: var(--measure-text);
+}
+
+.t-micro {
+	font-size: var(--font-size-2xs);
+	font-weight: var(--font-weight-medium);
 	color: var(--text-tertiary);
+	font-variant-numeric: tabular-nums;
 }
 
 /* "← Back to X" link used at the top of detail pages (search/discover,
@@ -595,6 +689,8 @@ h4 {
 	/* Matches the app's control height so it lines up with buttons and is a
 	   comfortable target rather than a 26px sliver. */
 	min-height: var(--control-h);
+	/* A pill, never a bar: some routes put it in a stretching flex column. */
+	inline-size: fit-content;
 	padding: 0 var(--space-3);
 	border: 1px solid var(--border-subtle);
 	border-radius: 999px;
@@ -627,7 +723,7 @@ h4 {
 }
 
 .back-link:focus-visible {
-	outline: 2px solid var(--accent);
+	outline: 2px solid var(--accent-strong);
 	outline-offset: 2px;
 }
 
@@ -708,8 +804,12 @@ h4 {
 	}
 }
 
-.btn:hover:not(:disabled)  { transform: translateY(-1px); }
-.btn:active:not(:disabled) { transform: translateY(0); }
+/* No hover lift: hover is a fill change. Press scales in quickly and
+   releases at the normal speed. */
+.btn:active:not(:disabled) {
+	transform: scale(0.97);
+	transition-duration: 90ms;
+}
 
 .btn:disabled {
 	opacity: 0.42;
@@ -783,7 +883,7 @@ h4 {
 
 .row-btn:focus-visible {
 	opacity: 1;
-	outline: 2px solid var(--accent);
+	outline: 2px solid var(--accent-strong);
 	outline-offset: 2px;
 }
 
@@ -869,9 +969,12 @@ input[type='range']  { accent-color: var(--accent); }
 input[type='checkbox'] { accent-color: var(--accent); }
 
 /* ── Focus rings ──────────────────────────────────────── */
+/* Solid --accent-strong: it clears 3:1 on the ground in every palette and
+   theme (paletteTheme derives a darker one for light surfaces). The old
+   --accent-line ring was a 28% tint, about 1.4:1. */
 :focus-visible {
-	outline: 2px solid var(--accent-line);
-	outline-offset: 3px;
+	outline: 2px solid var(--accent-strong);
+	outline-offset: 2px;
 }
 
 /* ── Quality badges ───────────────────────────────────── */
@@ -1005,6 +1108,18 @@ input[type='checkbox'] { accent-color: var(--accent); }
 	.rise-in-card {
 		animation: none;
 	}
+}
+
+/* Settings > Appearance > Reduce motion. data-motion="reduce" is set when the
+   preference is "Always" or the OS asks (src/lib/stores/motion.ts), so this
+   also covers components that only have a prefers-reduced-motion query. */
+:root[data-motion='reduce'] *,
+:root[data-motion='reduce'] *::before,
+:root[data-motion='reduce'] *::after {
+	animation-duration: 1ms !important;
+	animation-iteration-count: 1 !important;
+	transition-duration: 1ms !important;
+	scroll-behavior: auto !important;
 }
 
 /* ── Responsive ───────────────────────────────────────── */

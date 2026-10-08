@@ -89,7 +89,9 @@
 			{#if titleContent}
 				<div class="title-slot">{@render titleContent()}</div>
 			{:else}
-				<h1>{title}</h1>
+				<!-- Long names (classical works, deluxe editions) step down a size so
+				     they do not take two 56px lines. -->
+				<h1 class:long={title.length > 40} class:very-long={title.length > 70}>{title}</h1>
 			{/if}
 			{#if meta}
 				<div class="meta">{@render meta()}</div>
@@ -105,14 +107,15 @@
 </header>
 
 <style>
+	/* Not a box (STYLING.md "Detail header"): the backdrop is decoration
+	   behind the hero and fades into the ground on every side. The container
+	   lets ActionBar fold its labels by the hero's width. */
 	.detail-hero {
+		container: detail-hero / inline-size;
 		position: relative;
 		isolation: isolate;
 		overflow: hidden;
-		padding: var(--space-5);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-lg);
-		background: color-mix(in srgb, var(--bg-elevated) 82%, transparent);
+		padding: var(--space-4) 0;
 	}
 
 	.detail-hero.immersive {
@@ -122,9 +125,6 @@
 	.detail-hero.text-only {
 		overflow: visible;
 		padding: var(--space-3) 0 0;
-		border: 0;
-		border-radius: 0;
-		background: none;
 	}
 
 	.backdrop {
@@ -132,6 +132,7 @@
 		inset: -4rem;
 		z-index: -2;
 		opacity: 0.32;
+		mask-image: linear-gradient(90deg, transparent, #000 18%, #000 82%, transparent);
 	}
 
 	.backdrop::after {
@@ -151,7 +152,7 @@
 		width: 100%;
 		height: 100%;
 		object-fit: cover;
-		filter: blur(64px) saturate(1.08) brightness(0.72);
+		filter: var(--art-backdrop-filter);
 		transform: scale(1.16);
 	}
 
@@ -246,6 +247,16 @@
 		font-size: var(--font-size-4xl);
 	}
 
+	h1.long,
+	.immersive h1.long {
+		font-size: var(--font-size-2xl);
+	}
+
+	h1.very-long,
+	.immersive h1.very-long {
+		font-size: var(--font-size-xl);
+	}
+
 	.meta,
 	.actions {
 		display: flex;
@@ -268,14 +279,6 @@
 	}
 
 	@media (max-width: 760px) {
-		.detail-hero {
-			padding: var(--space-4) var(--space-3);
-		}
-
-		.detail-hero.text-only {
-			padding-inline: 0;
-		}
-
 		.inner {
 			flex-direction: column;
 			align-items: flex-start;

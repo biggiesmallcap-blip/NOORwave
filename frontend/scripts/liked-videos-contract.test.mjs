@@ -11,14 +11,13 @@ describe('liked videos contract', () => {
 		// One layout renders the pills for every video page; the tab is read
 		// from the path, so no page carries its own copy.
 		const layout = readFileSync('src/routes/videos/+layout.svelte', 'utf8');
-		expect(layout).toContain('<VideoNavigation current={tab} />');
+		expect(layout).toContain('<ScopeTabs tabs={VIDEO_TABS} current={tab} label="Video pages" replaceState />');
 		expect(layout).toContain('let tab = $derived(videoTabFor(page.url.pathname));');
 		for (const path of [VIDEOS_PAGE, PAGE, 'src/routes/videos/stations/+page.svelte', 'src/routes/videos/editorial/+page.svelte']) {
-			expect(readFileSync(path, 'utf8'), path).not.toContain('<VideoNavigation');
+			expect(readFileSync(path, 'utf8'), path).not.toContain('<ScopeTabs');
 		}
-		const navigation = readFileSync('src/lib/components/video/VideoNavigation.svelte', 'utf8');
-		expect(navigation).toContain('aria-label="Video pages"');
-		expect(navigation).toContain("aria-current={current === destination.id ? 'page' : undefined}");
+		const navigation = readFileSync('src/lib/components/ui/ScopeTabs.svelte', 'utf8');
+		expect(navigation).toContain("aria-current={current === tab.id ? 'page' : undefined}");
 	});
 
 	test('a version shows what tells it apart from its siblings', () => {

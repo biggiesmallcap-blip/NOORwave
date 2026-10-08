@@ -111,23 +111,22 @@
     padding: 4px 2px 12px;
     /* Edge fade hints at horizontally-scrollable content. mask-image works
        on Chrome/Safari/Firefox; -webkit- prefix kept for older WebKit. */
+    /* Trailing edge only: a leading fade cut the first caption at rest. */
     mask-image: linear-gradient(
       to right,
-      transparent 0,
-      black 16px,
+      black 0,
       black calc(100% - 32px),
       transparent 100%
     );
     -webkit-mask-image: linear-gradient(
       to right,
-      transparent 0,
-      black 16px,
+      black 0,
       black calc(100% - 32px),
       transparent 100%
     );
   }
 
-  .albums-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .albums-row:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
 
   .albums-row::-webkit-scrollbar { display: none; }
 
@@ -155,7 +154,7 @@
   }
 
   .album-card:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-strong);
     outline-offset: 4px;
     border-radius: var(--radius-xs);
   }

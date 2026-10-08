@@ -73,6 +73,14 @@
 				: null,
 	);
 
+	const albumHref = $derived(
+		detail?.isLocal && detail.localAlbumId
+			? `/albums/${detail.localAlbumId}`
+			: detail?.tidalAlbumId
+				? `/tidal/albums/${detail.tidalAlbumId}`
+				: null,
+	);
+
 	function play() {
 		if (!detail) return;
 		if (detail.localAlbumId) return void playAlbum(detail.localAlbumId);
@@ -112,6 +120,7 @@
 		{loading}
 		isLocal={detail.isLocal}
 		{artistHref}
+		{albumHref}
 		onPlay={play}
 		onShuffle={shuffle}
 		onPlayFrom={playFrom}

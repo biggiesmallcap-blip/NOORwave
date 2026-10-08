@@ -14,8 +14,16 @@ describe('SearchField contract', () => {
 		expect(field).toContain('filtersToChips');
 		expect(field).toContain('stripFilter');
 		expect(field).toContain("from '$lib/search/facets'");
-		expect(field).toContain('matchFacets');
 		expect(field).toContain('inlineCompletionFor');
+	});
+
+	test('has no filter-suggestion dropdown under the field', () => {
+		// The focus popover listed every filter key (Tempo, Musical key...) under
+		// the field and was removed on request; Tab-completion and the chips stay.
+		expect(field).not.toContain('matchFacets');
+		expect(field).not.toContain('sf-popover');
+		expect(field).not.toContain('Add a filter');
+		expect(field).not.toContain('facets?: boolean');
 	});
 
 	test('value and inputEl are two-way bindable so shells keep control', () => {

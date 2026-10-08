@@ -1,23 +1,11 @@
 <script lang="ts" module>
 	import type { Track as CachedTrack } from '$lib/api/client';
 
-	type CachedHomeAlbumCard = {
-		id: number;
-		title: string;
-		artist_id: number | null;
-		artist_name: string | null;
-		artwork_url: string | null;
-	};
-
-	const HOME_PANEL_CACHE_REFRESH_MS = 5 * 60 * 1000;
+	// Recent tracks, kept across visits so the landing paints at once and
+	// refreshes quietly. The suggestion murals keep their own cache in
+	// LibraryMurals.svelte.
 	const homePanelCandidateCache = {
 		recentTracks: [] as CachedTrack[],
-		randomTracks: [] as CachedTrack[],
-		randomAlbums: [] as CachedHomeAlbumCard[],
-		randomRequestKey: '',
-		suggestionTracks: [] as CachedTrack[],
-		suggestionAlbums: [] as CachedHomeAlbumCard[],
-		suggestionRequestKey: '',
 	};
 </script>
 
@@ -29,11 +17,20 @@
 	import {
 		tracks, albums, artists as artistsStore, isLoading, isLoadingMore, totalTracks, totalAlbums,
 		sortBy, sortDir, viewMode, searchQuery,
-		loadTracks, loadAlbums,
+		loadTracks, loadAlbums, requestedTracksLikedOnly,
 		selectedTrackIds, selectedAlbumIds,
 		lastSelectedTrackId, lastSelectedAlbumId,
 		selectTrackIds, selectAlbumIds, clearSelection,
 	} from '$lib/stores/library';
+	import { initials } from '$lib/utils/text';
+	import Skeleton from '$lib/components/ui/Skeleton.svelte';
+	import { LIBRARY_TABS, restoreLibraryTab, tabCountLabel, viewCountLabel, type LibraryTab } from '$lib/components/library/library_tabs';
+	import { librarySongsScope } from '$lib/stores/library_songs';
+	import CommandHeader from '$lib/components/ui/CommandHeader.svelte';
+	import ScopeTabs from '$lib/components/ui/ScopeTabs.svelte';
+	import Segmented from '$lib/components/ui/Segmented.svelte';
+	import Dropdown from '$lib/components/ui/Dropdown.svelte';
+	import FilterChip from '$lib/components/ui/FilterChip.svelte';
 	import { formatTrackDuration, formatDateShort, savedDateMillis, getQualityClass } from '$lib/utils/format';
 	import { api, type Album, type Artist, type AudioSearchResult, type Genre, type Playlist, type Track } from '$lib/api/client';
 	import { cachedApi, invalidateLibraryCaches } from '$lib/cache/api_queries';
@@ -47,7 +44,6 @@
 		playLibrary,
 		addTrackToQueue,
 		playTrackNext,
-		shuffleMode,
 		playAlbum as playAlbumNow,
 		playArtist as playArtistNow,
 		shuffleArtist as shuffleArtistNow
@@ -59,7 +55,9 @@
 	import ArtistCarousel from '$lib/components/ArtistCarousel.svelte';
 	import AlbumCarousel from '$lib/components/AlbumCarousel.svelte';
 	import AlbumDetailPopup from '$lib/components/AlbumDetailPopup.svelte';
-	import { lazyTidalArt, composeTidalArtQuery, peekTidalArt } from '$lib/actions/lazy-tidal-art';
+	import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
+	import LibraryMurals from '$lib/components/library/LibraryMurals.svelte';
+	import type { HomeAlbumCard } from '$lib/components/library/library_murals';
 	import { portal } from '$lib/actions/portal';
 	import { openContextMenu, openMenuAtElement, type MenuItem } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
@@ -147,17 +145,46 @@
 	// whole-library Shuffle queue depth; automix extends past it.
 	const SHUFFLE_SAMPLE_SIZE = 200;
 	const RECENT_TRACK_LIMIT = 10;
-	const HOME_MURAL_ITEM_LIMIT = 12;
 	const ALL_SEARCH_ARTIST_PREVIEW_LIMIT = 12;
 	const ALL_SEARCH_ALBUM_PREVIEW_LIMIT = 12;
 	const ALL_SEARCH_TRACK_PREVIEW_LIMIT = 10;
 
-	let activeTab = $state<'all' | 'tracks' | 'liked' | 'albums' | 'artists'>('all');
-	// Only render the second toolbar row when the tab actually contributes
-	// controls to it, so tabs without any never leave a gap behind.
-	const hasToolbarActions = $derived(
-		activeTab === 'tracks' || activeTab === 'liked' || activeTab === 'albums'
+	let activeTab = $state<LibraryTab>('all');
+	// Songs lists liked songs unless Settings > Library widens it to every
+	// library song (TIDAL and Spotify behave the same way).
+	let likedOnly = $derived($librarySongsScope === 'liked');
+
+	// Tab counts come from the list endpoints' totals (there is no counts
+	// endpoint): one-row queries, refreshed when the Songs scope changes and
+	// after deletes. Artists have no total, so their tab shows none.
+	let libraryCounts = $state<{ tracks: number | null; albums: number | null }>({ tracks: null, albums: null });
+
+	async function loadLibraryCounts() {
+		const [songs, albumsRes] = await Promise.allSettled([
+			api.getTracks('date_added', 'desc', 1, 0, true, likedOnly),
+			api.getAlbums('title', 'asc', 1, 0, true, null),
+		]);
+		libraryCounts = {
+			tracks: songs.status === 'fulfilled' ? songs.value.total : null,
+			albums: albumsRes.status === 'fulfilled' ? albumsRes.value.total : null,
+		};
+	}
+
+	let libraryTabs = $derived(
+		LIBRARY_TABS.map((tab) => ({
+			...tab,
+			count: tab.id === 'tracks' ? tabCountLabel(libraryCounts.tracks) : tab.id === 'albums' ? tabCountLabel(libraryCounts.albums) : null,
+		})),
 	);
+	let viewCount = $derived(
+		viewCountLabel(activeTab, activeTab === 'albums' ? $totalAlbums : $totalTracks, likedOnly),
+	);
+
+	$effect(() => {
+		// eslint-disable-next-line @typescript-eslint/no-unused-expressions
+		likedOnly;
+		void loadLibraryCounts();
+	});
 	let playlists = $state<Playlist[]>([]);
 	let genres = $state<Genre[]>([]);
 	let selectedPlaylistId = $state('');
@@ -261,6 +288,11 @@
 		artist: 'Artist',
 		year: 'Year',
 	};
+	const ALBUM_SORT_OPTIONS = (['title', 'artist', 'year'] as const).map((value) => ({ value, label: ALBUM_SORT_LABELS[value] }));
+	const ALBUM_LAYOUT_OPTIONS = [
+		{ value: 'grid', label: 'Grid' },
+		{ value: 'list', label: 'List' },
+	] as const;
 
 	// Track detail panel
 	let expandedTrackId = $state<number | null>(null);
@@ -430,25 +462,19 @@
 		if ($searchQuery.trim()) return;
 		// Albums have their own ordering control (setAlbumSort); handleSort only
 		// drives the track/liked list column headers.
-		if (activeTab === 'tracks') {
-			loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, false);
-		} else if (activeTab === 'liked') {
-			loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, true);
-		}
+		if (activeTab === 'tracks') loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, likedOnly);
 		clearSelection();
 	}
 
-	function switchTab(tab: 'all' | 'tracks' | 'liked' | 'albums' | 'artists') {
+	function switchTab(tab: LibraryTab) {
 		activeTab = tab;
 		expandedTrackId = null;
 		expandedAlbumId = null;
 		detailTrack = null;
 		detailAlbum = null;
 		if (!$searchQuery.trim()) {
-			// Tracks and Liked share the $tracks store but represent different result sets,
-			// so always refetch from offset 0 when entering either - never reuse stale rows.
-			if (tab === 'tracks') loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, false);
-			if (tab === 'liked') loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, true);
+			// Always refetch Songs from offset 0 - never reuse stale rows.
+			if (tab === 'tracks') loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, likedOnly);
 			if (tab === 'albums') loadAlbums(albumSortField, albumSortDir, PAGE_SIZE, 0, activeDecade);
 		}
 		if (tab === 'artists' && artists.length === 0) void loadArtists();
@@ -543,7 +569,7 @@
 					const audio = await api.searchAudio({
 						...params,
 						shuffle: true,
-						liked_only: activeTab === 'liked',
+						liked_only: activeTab === 'tracks' && likedOnly,
 						limit: SHUFFLE_SAMPLE_SIZE,
 					});
 					const ids = audio.tracks.map((t) => t.id);
@@ -569,7 +595,7 @@
 		await playLibrary({
 			sortBy: $sortBy,
 			sortDir: $sortDir,
-			likedOnly: activeTab === 'liked',
+			likedOnly: activeTab === 'tracks' && likedOnly,
 			shuffle,
 		});
 	}
@@ -684,7 +710,7 @@
 		if (artistCount > 0) parts.push(`${artistCount} artist match${artistCount === 1 ? '' : 'es'}`);
 		if (albumCount > 0) parts.push(`${albumCount} album match${albumCount === 1 ? '' : 'es'}`);
 		if (trackCount > 0) parts.push(`${trackCount} track match${trackCount === 1 ? '' : 'es'}`);
-		return parts.length ? parts.join(', ') : 'No library matches';
+		return parts.length ? parts.join(', ') : '0 matches';
 	}
 
 	function selectionRange<T extends { id: number }>(
@@ -776,7 +802,7 @@
 	}
 
 	function handleTrackListKeydown(event: KeyboardEvent) {
-		if (activeTab !== 'tracks' && activeTab !== 'liked') return;
+		if (activeTab !== 'tracks') return;
 		if (event.key === 'ArrowDown') {
 			event.preventDefault();
 			if (visibleTracks.length === 0) return;
@@ -870,6 +896,7 @@
 		try {
 			const result = await api.batchDelete([...removedTrackIds], [...removedAlbumIds]);
 			invalidateLibraryCaches();
+			void loadLibraryCounts();
 			clearSelection();
 			const parts: string[] = [];
 			if (result.removed_tracks) parts.push(`${result.removed_tracks} track${result.removed_tracks === 1 ? '' : 's'}`);
@@ -882,7 +909,7 @@
 			// Restore the optimistic removals from the server on failure.
 			batchError = `Failed to delete selection: ${error}`;
 			invalidateLibraryCaches();
-			void loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, activeTab === 'liked');
+			void loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, likedOnly);
 			void loadAlbums(albumSortField, albumSortDir, PAGE_SIZE, 0, activeDecade);
 		} finally {
 			batchBusy = null;
@@ -906,8 +933,9 @@
 				...undoAlbums.map((a) => api.setAlbumFavorite(a.id, true)),
 			]);
 			invalidateLibraryCaches();
-			if (undoTracks.length) await loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, activeTab === 'liked');
+			if (undoTracks.length) await loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, likedOnly);
 			if (undoAlbums.length) await loadAlbums(albumSortField, albumSortDir, PAGE_SIZE, 0, activeDecade);
+			void loadLibraryCounts();
 			const count = undoTracks.length + undoAlbums.length;
 			batchMessage = `Restored ${count} item${count === 1 ? '' : 's'} to your library.`;
 		} catch (error) {
@@ -1050,9 +1078,9 @@
 			return;
 		}
 		if ($isLoading || $isLoadingMore) return;
-		if (activeTab === 'tracks' || activeTab === 'liked') {
+		if (activeTab === 'tracks') {
 			if ($tracks.length >= $totalTracks) return;
-			await loadTracks($sortBy, $sortDir, PAGE_SIZE, $tracks.length, activeTab === 'liked');
+			await loadTracks($sortBy, $sortDir, PAGE_SIZE, $tracks.length, likedOnly);
 			return;
 		}
 		if ($albums.length >= $totalAlbums) return;
@@ -1072,7 +1100,7 @@
 				const audio = await api.searchAudio({
 					...params,
 					shuffle: true,
-					liked_only: activeTab === 'liked',
+					liked_only: activeTab === 'tracks' && likedOnly,
 					limit: 1,
 				});
 				const randomTrack = audio.tracks[0];
@@ -1108,24 +1136,24 @@
 	let libraryModeLabel = $derived(
 		activeTab === 'albums' ? 'Album view'
 			: activeTab === 'artists' ? 'Artist view'
-			: activeTab === 'liked' ? 'Liked view'
-			: 'Track view'
+			: activeTab === 'tracks' ? 'Songs view'
+			: 'Library view'
 	);
 	let libraryModeCopy = $derived(
 		activeTab === 'albums'
 			? 'Artwork-first browse with quick album actions.'
 			: activeTab === 'artists'
 			? 'Browse your artists and explore their tracks.'
-			: activeTab === 'liked'
-			? "Tracks you've explicitly liked."
+			: activeTab === 'tracks' && likedOnly
+			? "Songs you've liked."
 			: 'Dense track management with direct playback and batch work.'
 	);
 	let isSearchMode = $derived(Boolean($searchQuery.trim()));
 	let visibleTracks = $derived.by(() => {
 		if (!$searchQuery.trim()) return $tracks;
 		// Search results don't know about liked_only, so filter client-side
-		// to keep the Liked tab's promise honest while a query is active.
-		const results = activeTab === 'liked'
+		// to keep Songs' promise honest while a query is active.
+		const results = activeTab === 'tracks' && likedOnly
 			? searchResults.tracks.filter(t => t.is_favorite)
 			: searchResults.tracks;
 		if (!$sortBy || $sortBy === 'relevance') return results;
@@ -1198,7 +1226,7 @@
 	let allSearchTotal = $derived(allSearchArtists.length + visibleAlbums.length + visibleTracks.length);
 	let canLoadMore = $derived(
 		!$searchQuery.trim() &&
-		((activeTab === 'tracks' || activeTab === 'liked')
+		(activeTab === 'tracks'
 			? $tracks.length < $totalTracks
 			: activeTab === 'albums'
 			? $albums.length < $totalAlbums
@@ -1213,21 +1241,21 @@
 		searchTotal !== null && searchResults.tracks.length < searchTotal
 	);
 	let searchSummary = $derived.by(() => {
-		if (searchTruncated && (activeTab === 'tracks' || activeTab === 'liked' || activeTab === 'all')) {
+		if (searchTruncated && (activeTab === 'tracks' || activeTab === 'all')) {
 			return `top ${searchResults.tracks.length} of ${searchTotal} track matches`;
 		}
 		return activeTab === 'all'
 			? formatSearchSummary(allSearchArtists.length, visibleAlbums.length, visibleTracks.length)
-			: (activeTab === 'tracks' || activeTab === 'liked')
+			: activeTab === 'tracks'
 			? `${visibleTracks.length} track match${visibleTracks.length === 1 ? '' : 'es'}`
 			: `${visibleAlbums.length} album match${visibleAlbums.length === 1 ? '' : 'es'}`;
 	});
 	let loadedSummary = $derived(
 		activeTab === 'albums'
 			? `${$albums.length} of ${$totalAlbums} albums loaded`
-			: activeTab === 'liked'
-			? `${$tracks.length} of ${$totalTracks} liked tracks loaded`
-			: `${$tracks.length} of ${$totalTracks} tracks loaded`
+			: likedOnly
+			? `${$tracks.length} of ${$totalTracks} songs loaded`
+			: `${$tracks.length} of ${$totalTracks} library songs loaded`
 	);
 
 	// ── Home view derived data ──────────────────────────────────────────────
@@ -1329,34 +1357,6 @@
 		return map;
 	});
 
-	interface HomeAlbumCard {
-		id: number;
-		title: string;
-		artist_id: number | null;
-		artist_name: string | null;
-		artwork_url: string | null;
-	}
-
-	type HomeMuralItemKind = 'track' | 'album';
-
-	interface HomeMuralItem {
-		id: number;
-		kind: HomeMuralItemKind;
-		title: string;
-		subtitle: string;
-		artwork_url: string | null;
-		track?: Track;
-		album?: HomeAlbumCard;
-	}
-
-	interface HomeMuralPanel {
-		id: string;
-		label: string;
-		caption: string;
-		kind: HomeMuralItemKind;
-		items: HomeMuralItem[];
-	}
-
 	let recentAlbums = $derived.by<HomeAlbumCard[]>(() => {
 		const albumDateMap = new Map<number, { card: HomeAlbumCard; date: string }>();
 
@@ -1383,177 +1383,11 @@
 			.map(({ card }) => card);
 	});
 
-	let randomPanelTracks = $state<Track[]>(homePanelCandidateCache.randomTracks);
-	let randomPanelAlbums = $state<HomeAlbumCard[]>(homePanelCandidateCache.randomAlbums);
-	let randomPanelRequestKey = $state(homePanelCandidateCache.randomRequestKey);
-	// Server-ranked hidden-gem picks. The server owns seed selection, recency
-	// exclusion and ranking; there is deliberately no client-side fallback. An
-	// empty discovery panel is a correct outcome - a panel full of what was just
-	// played is not, and that is exactly what the old same-artist tail-fill
-	// produced.
-	let suggestionTracks = $state<Track[]>(homePanelCandidateCache.suggestionTracks);
-	let suggestionAlbums = $state<HomeAlbumCard[]>(homePanelCandidateCache.suggestionAlbums);
-	let suggestionCandidateRequestKey = $state(homePanelCandidateCache.suggestionRequestKey);
-
-	// Max tracks (and albums) one artist may contribute to a suggestion panel, so
-	// a single prolific neighbour can't clone-fill it. Mirrors the server cap.
-	const SUGGESTION_ARTIST_CAP = 2;
-
-	function suggestionArtistKey(track: Track): number | string {
-		return track.artist_id ?? track.artist_name ?? '';
-	}
-
-	// Greedy per-artist cap, then a top-up pass from what the cap skipped. An
-	// empty key (missing artist) is never capped so those tracks don't all
-	// collapse into one synthetic bucket. The top-up matters because the cap is
-	// meant to shape the head of the mural, not shorten it: dropping capped
-	// tracks outright left the panel showing 5 of 12 whenever the server's list
-	// leaned on a few artists. Mirrors the server-side cap in
-	// noor-server/src/server/routes/home_suggestions.rs.
-	function capPerArtist(tracks: Track[], max: number, limit: number): Track[] {
-		const perArtist = new Map<number | string, number>();
-		const out: Track[] = [];
-		const skipped: Track[] = [];
-		for (const track of tracks) {
-			if (out.length >= limit) break;
-			const key = suggestionArtistKey(track);
-			if (max > 0 && key !== '') {
-				const count = perArtist.get(key) ?? 0;
-				if (count >= max) {
-					skipped.push(track);
-					continue;
-				}
-				perArtist.set(key, count + 1);
-			}
-			out.push(track);
-		}
-		for (const track of skipped) {
-			if (out.length >= limit) break;
-			out.push(track);
-		}
-		return out;
-	}
-
-	let suggestedTrackItems = $derived.by<HomeMuralItem[]>(() =>
-		capPerArtist(suggestionTracks, SUGGESTION_ARTIST_CAP, HOME_MURAL_ITEM_LIMIT)
-			.map(trackToMuralItem)
-	);
-
-	let suggestedAlbumItems = $derived.by<HomeMuralItem[]>(() =>
-		suggestionAlbums.slice(0, HOME_MURAL_ITEM_LIMIT).map(albumToMuralItem)
-	);
-
-	let randomTrackItems = $derived.by<HomeMuralItem[]>(() =>
-		randomPanelTracks.map(trackToMuralItem)
-	);
-
-	let randomAlbumItems = $derived.by<HomeMuralItem[]>(() =>
-		randomPanelAlbums.map(albumToMuralItem)
-	);
-
-	let homeMuralPanels = $derived.by<HomeMuralPanel[]>(() => {
-		const panels: HomeMuralPanel[] = [
-			{
-				id: 'suggested-tracks',
-				label: 'Suggested tracks',
-				caption: 'Listen history suggestions',
-				kind: 'track',
-				items: suggestedTrackItems,
-			},
-			{
-				id: 'suggested-albums',
-				label: 'Suggested albums',
-				caption: 'Listen history suggestions',
-				kind: 'album',
-				items: suggestedAlbumItems,
-			},
-			{
-				id: 'random-tracks',
-				label: 'Random tracks',
-				caption: 'Library shuffle picks',
-				kind: 'track',
-				items: randomTrackItems,
-			},
-			{
-				id: 'random-albums',
-				label: 'Random albums',
-				caption: 'Library shuffle picks',
-				kind: 'album',
-				items: randomAlbumItems,
-			},
-		];
-		return panels.filter(panel => panel.items.length > 0);
-	});
-
-	// Per-tile lazy artwork. Keyed by domain-prefixed id so we never collide
+	// Per-row lazy artwork. Keyed by domain-prefixed id so we never collide
 	// (track 5 and album 5 are independent entries). Populated by lazyTidalArt
-	// when a tile without baked artwork scrolls into view.
+	// when a row without baked artwork scrolls into view.
 	let lazyArt = $state<Record<string, string>>({});
 	let artistLazyArt = $state<Record<number, string>>({});
-
-	function homePanelRefreshBucket(): number {
-		return Math.floor(Date.now() / HOME_PANEL_CACHE_REFRESH_MS);
-	}
-
-	// Both random murals come from one server call. The old path derived random
-	// offsets from $totalTracks / $totalAlbums and issued a single-row paginated
-	// request per pick, so it could not start until the library store had loaded
-	// its first page and then paid 24 round trips - which is why these panels
-	// popped in well after the rest of the home view. The server owns the sample
-	// now (keyed to a five-minute bucket so it stays put across remounts), and
-	// this fires on mount alongside the suggestion murals.
-	async function loadRandomPanelCandidates(requestKey: string) {
-		const result = await cachedApi
-			.getHomeShufflePicks(HOME_MURAL_ITEM_LIMIT)
-			.catch(error => {
-				console.error('Failed to load library shuffle picks:', error);
-				return { tracks: [] as Track[], albums: [] as Album[] };
-			});
-		if (randomPanelRequestKey !== requestKey) return;
-		const tracksForPanel = uniqueById(result.tracks ?? []);
-		const albumsForPanel = uniqueById(result.albums ?? []).map(album => ({
-			id: album.id,
-			title: album.title,
-			artist_id: album.artist_id ?? null,
-			artist_name: album.artist_name,
-			artwork_url: album.artwork_url,
-		}));
-		randomPanelTracks = tracksForPanel;
-		randomPanelAlbums = albumsForPanel;
-		homePanelCandidateCache.randomTracks = tracksForPanel;
-		homePanelCandidateCache.randomAlbums = albumsForPanel;
-		homePanelCandidateCache.randomRequestKey = requestKey;
-	}
-
-	function uniqueById<T extends { id: number }>(items: T[]): T[] {
-		const seen = new Set<number>();
-		const result: T[] = [];
-		for (const item of items) {
-			if (seen.has(item.id)) continue;
-			seen.add(item.id);
-			result.push(item);
-		}
-		return result;
-	}
-
-	// No seeds are sent: the server picks its own blend of recent plays and
-	// long-term top artists, which keeps this request independent of how far the
-	// library store has loaded and keeps the server cache key stable across a boot.
-	async function loadSuggestionCandidates(requestKey: string) {
-		const result = await cachedApi
-			.getHomeSuggestions([], 50)
-			.catch(error => {
-				console.error('Failed to load home suggestions:', error);
-				return { tracks: [] as Track[], albums: [] as HomeAlbumCard[] };
-			});
-		if (suggestionCandidateRequestKey === requestKey) {
-			suggestionTracks = result.tracks ?? [];
-			suggestionAlbums = result.albums ?? [];
-			homePanelCandidateCache.suggestionTracks = suggestionTracks;
-			homePanelCandidateCache.suggestionAlbums = suggestionAlbums;
-			homePanelCandidateCache.suggestionRequestKey = requestKey;
-		}
-	}
 
 	function albumFromHomeCard(card: HomeAlbumCard): Album {
 		return {
@@ -1570,57 +1404,6 @@
 		};
 	}
 
-	function trackToMuralItem(track: Track): HomeMuralItem {
-		return {
-			id: track.id,
-			kind: 'track',
-			title: track.title,
-			subtitle: track.artist_name ?? track.album_title ?? 'Unknown artist',
-			artwork_url: track.artwork_url,
-			track,
-		};
-	}
-
-	function albumToMuralItem(album: HomeAlbumCard): HomeMuralItem {
-		return {
-			id: album.id,
-			kind: 'album',
-			title: album.title,
-			subtitle: album.artist_name ?? 'Unknown artist',
-			artwork_url: album.artwork_url,
-			album,
-		};
-	}
-
-	function fallbackLetters(label: string): string {
-		return label.split(/\s+/).map(part => part[0]?.toUpperCase() ?? '').join('').slice(0, 2) || '?';
-	}
-
-	// Domain-prefixed key so a track and an album with the same numeric id never
-	// collide in the lazyArt map (mirrors the track/album row keys).
-	function muralItemKey(item: HomeMuralItem): string {
-		return `${item.kind}-${item.id}`;
-	}
-
-	// Search terms the lazy Tidal-art lookup resolves against, shared by the
-	// mural's lazy action and the synchronous cache peek so both hit the same key.
-	function muralItemLazyQuery(item: HomeMuralItem): { artist: string | null; title: string } {
-		if (item.kind === 'album') {
-			return { artist: item.album?.artist_name ?? null, title: item.album?.title ?? item.title };
-		}
-		return { artist: item.track?.artist_name ?? null, title: item.title };
-	}
-
-	// Artwork with the same "always loaded" chain as the home-recs murals: baked
-	// art -> already-resolved lazy art -> previously-cached art (peek). The peek
-	// paints a full collage on first launch; live lookups swap in fresh art.
-	function muralItemArtwork(item: HomeMuralItem): string | null {
-		const resolved = item.artwork_url ?? lazyArt[muralItemKey(item)];
-		if (resolved) return resolved;
-		const query = muralItemLazyQuery(item);
-		return peekTidalArt(composeTidalArtQuery(query.artist, query.title));
-	}
-
 	function artistImageSources(
 		photoUrl: string | null | undefined,
 		lazyUrl: string | null | undefined,
@@ -1634,92 +1417,6 @@
 		const found = $albums.find(album => album.id === card.id);
 		void openAlbumDetail(found ?? albumFromHomeCard(card));
 	}
-
-	async function playHomeMuralTrack(item: HomeMuralItem, panel: HomeMuralPanel) {
-		if (!item.track) return;
-		const seen = new Set<number>();
-		const trackIds = panel.items
-			.filter((candidate) => candidate.kind === 'track' && candidate.track)
-			.map((candidate) => candidate.track!.id)
-			.filter((trackId) => {
-				if (seen.has(trackId)) return false;
-				seen.add(trackId);
-				return true;
-			});
-		if (!seen.has(item.track.id)) {
-			trackIds.unshift(item.track.id);
-		}
-
-		try {
-			if (trackIds.length > 0) {
-				const replaced = await api.replacePlaybackQueue(
-					trackIds.map((track_id) => ({ track_id })),
-					{ shuffleMode: get(shuffleMode) }
-				);
-				const selected = replaced.queue.find((queueItem) => queueItem.track.id === item.track!.id);
-				if (selected) await api.playQueueItem(selected.id);
-			}
-		} catch (error) {
-			console.error('Failed to play home panel track:', error);
-			await playTrackNow(item.track.id);
-		}
-	}
-
-	function openHomeMuralItem(item: HomeMuralItem, panel: HomeMuralPanel) {
-		if (item.kind === 'track' && item.track) {
-			void playHomeMuralTrack(item, panel);
-			return;
-		}
-		if (item.kind === 'album' && item.album) {
-			openHomeAlbumCard(item.album);
-		}
-	}
-
-	function openHomeMuralItemContextMenu(event: MouseEvent, item: HomeMuralItem) {
-		event.preventDefault();
-		event.stopPropagation();
-		if (item.kind === 'track' && item.track) {
-			openContextMenu(event, buildTrackMenu(item.track), item.title);
-			return;
-		}
-		if (item.kind === 'album' && item.album) {
-			handleHomeAlbumContextMenu(event, item.id, item.album);
-		}
-	}
-
-	// Fires once per refresh bucket, immediately on mount - deliberately NOT
-	// keyed off $totalTracks / $totalAlbums. Those stay 0 until the library
-	// store's first page lands, which is what delayed these panels behind
-	// everything else on the page.
-	$effect(() => {
-		const requestKey = String(homePanelRefreshBucket());
-		if (randomPanelRequestKey === requestKey) return;
-		randomPanelRequestKey = requestKey;
-
-		void loadRandomPanelCandidates(requestKey).catch((error) => {
-			console.error('Failed to load random library panels:', error);
-		});
-	});
-
-	// Fires once per refresh bucket, immediately on mount. Deliberately does NOT
-	// depend on any client-derived seed list: the old one read the whole $tracks
-	// store, so the request key churned as the library paged in during boot,
-	// refiring this with a different seed set each time. Every distinct seed set
-	// is a separate server cache key, so boot paid the ~1s cold path repeatedly
-	// and only after the library had loaded. The server derives its own seeds
-	// from listen_history now, so this starts in parallel with everything else.
-	$effect(() => {
-		const requestKey = String(homePanelRefreshBucket());
-		if (suggestionCandidateRequestKey === requestKey) return;
-		suggestionCandidateRequestKey = requestKey;
-
-		// Keep the last-good candidates on failure instead of zeroing (which made
-		// the whole panel vanish). loadSuggestionCandidates already degrades to []
-		// internally, so this only fires on unexpected throws.
-		void loadSuggestionCandidates(requestKey).catch((error) => {
-			console.error('Failed to load suggestion candidates:', error);
-		});
-	});
 
 	// ── Home view handlers ─────────────────────────────────────────────────
 
@@ -1794,7 +1491,7 @@
 	// Track-list virtualization: follow the workspace scroll while a track
 	// list is on screen.
 	$effect(() => {
-		if (activeTab !== 'tracks' && activeTab !== 'liked') return;
+		if (activeTab !== 'tracks') return;
 		// Capturing listener on the document sees scrolls of any container
 		// (workspace on desktop, document on mobile) without re-binding when
 		// the responsive layout flips between them.
@@ -1864,7 +1561,7 @@
 	function currentLoadedCount(): number {
 		if (activeTab === 'artists') return artists.length
 		if (activeTab === 'albums') return get(albums).length
-		if (activeTab === 'tracks' || activeTab === 'liked') return get(tracks).length
+		if (activeTab === 'tracks') return get(tracks).length
 		return 0
 	}
 	export const snapshot: Snapshot<LibrarySnapshot> = {
@@ -1881,10 +1578,7 @@
 			loadedCount: currentLoadedCount()
 		}),
 		restore: (saved) => {
-			const validTabs = ['all', 'tracks', 'liked', 'albums', 'artists'] as const
-			if ((validTabs as readonly string[]).includes(saved.activeTab)) {
-				activeTab = saved.activeTab as typeof activeTab
-			}
+			activeTab = restoreLibraryTab(saved.activeTab)
 			if (typeof saved.searchQuery === 'string') searchQuery.set(saved.searchQuery)
 			if (typeof saved.sortBy === 'string') sortBy.set(saved.sortBy)
 			if (saved.sortDir === 'asc' || saved.sortDir === 'desc') sortDir.set(saved.sortDir)
@@ -1917,6 +1611,14 @@
 		if (activeTab !== 'albums') activeDecade = null;
 	})
 
+	// Songs reloads when its rows came from the other scope: the setting changed
+	// while away, or a back-nav restored Songs over rows loaded for All.
+	$effect(() => {
+		if (activeTab !== 'tracks' || $searchQuery.trim()) return;
+		if (requestedTracksLikedOnly() === likedOnly) return;
+		void loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, likedOnly);
+	})
+
 	// Keep the highlighted track in view as the cursor moves.
 	$effect(() => {
 		if (cursorIndex < 0) return;
@@ -1947,116 +1649,70 @@
 }} />
 
 <div class="page-shell library">
-	<div class="library-search-shell">
-		<SearchField
-			bind:value={$searchQuery}
-			variant="page"
-			facets
-			inlineCompletion
-			filterChips
-			placeholder={activeTab === 'albums' ? 'Search albums or artists' : 'Search tracks, albums, or artists'}
-		/>
-		<div class="filter-pills">
-			<div class="filter-pill-group filter-pill-group--primary">
-				<button class="filter-pill" class:active={activeTab === 'all'}     onclick={() => switchTab('all')}>All</button>
-				<button class="filter-pill" class:active={activeTab === 'tracks'}  onclick={() => switchTab('tracks')}>Tracks</button>
-				<button class="filter-pill" class:active={activeTab === 'liked'}   onclick={() => switchTab('liked')}>Liked</button>
-				<button class="filter-pill" class:active={activeTab === 'albums'}  onclick={() => switchTab('albums')}>Albums</button>
-				<button class="filter-pill" class:active={activeTab === 'artists'} onclick={() => switchTab('artists')}>Artists</button>
-				<button class="filter-pill" onclick={() => void playRandomLibrary()} title="Random play">
-					<span class="pill-glyph" aria-hidden="true">⤮</span>Random
-				</button>
-			</div>
-
-			{#if hasToolbarActions}
-			<div class="filter-pill-actions">
-				{#if activeTab === 'tracks' || activeTab === 'liked'}
-					<div class="play-controls" role="group" aria-label="Play this view">
-						<button class="filter-pill filter-pill--accent" onclick={() => void playTrackView(false)} title="Play this view">
-							<span class="pill-glyph" aria-hidden="true">▶</span>Play
-						</button>
-						<button class="filter-pill" onclick={() => void playTrackView(true)} title="Shuffle this view">
-							<span class="pill-glyph" aria-hidden="true">⤮</span>Shuffle
-						</button>
-					</div>
-				{/if}
-				{#if activeTab === 'albums'}
-					<div class="album-sort" role="group" aria-label="Sort albums">
-						<span class="album-sort-label">Sort</span>
-						{#each (['title', 'artist', 'year'] as const) as field (field)}
-							<button
-								class="album-sort-btn"
-								class:active={albumSortField === field}
-								onclick={() => setAlbumSort(field)}
-								aria-pressed={albumSortField === field}
-								title="Sort by {ALBUM_SORT_LABELS[field]}{albumSortField === field ? (albumSortDir === 'asc' ? ' (ascending)' : ' (descending)') : ''}"
-							>
-								{ALBUM_SORT_LABELS[field]}{#if albumSortField === field}<span class="album-sort-arrow">{albumSortDir === 'asc' ? '↑' : '↓'}</span>{/if}
+	<CommandHeader>
+		{#snippet field()}
+			<SearchField
+				bind:value={$searchQuery}
+				variant="page"
+				inlineCompletion
+				filterChips
+				placeholder={activeTab === 'albums' ? 'Search albums or artists' : 'Search tracks, albums, or artists'}
+			/>
+		{/snippet}
+		{#snippet tabs()}
+			<ScopeTabs tabs={libraryTabs} current={activeTab} label="Library views" onselect={(id) => switchTab(id as LibraryTab)} />
+		{/snippet}
+		{#snippet toolbar()}
+			<div class="library-toolbar">
+				<div class="toolbar-start">
+					{#if searchBusy}
+						<span class="t-meta">Searching...</span>
+					{:else if isSearchMode}
+						<span class="t-meta">{searchSummary}</span>
+						{#if searchTruncated && (activeTab === 'tracks' || activeTab === 'all')}
+							<button type="button" class="toolbar-link" disabled={searchLoadingMore} onclick={() => void loadMoreSearchResults()}>
+								{searchLoadingMore ? 'Loading...' : 'Show more'}
 							</button>
-						{/each}
-					</div>
-					<div class="view-toggle" role="group" aria-label="Album view layout">
+						{/if}
+						<button type="button" class="toolbar-link" onclick={() => searchQuery.set('')}>Clear</button>
+					{:else}
+						{#if viewCount}<span class="t-meta view-count">{viewCount}</span>{/if}
+						{#if activeTab === 'albums' && decadeOptions.length > 0}
+							{#each decadeOptions as decade (decade)}
+								<FilterChip pressed={activeDecade === decade} onclick={() => selectDecade(decade)}>{decade}s</FilterChip>
+							{/each}
+						{/if}
+					{/if}
+				</div>
+				<div class="toolbar-end">
+					{#if activeTab === 'tracks'}
+						<button type="button" class="btn btn-primary" onclick={() => void playTrackView(false)}>Play</button>
+						<button type="button" class="btn btn-glass" onclick={() => void playTrackView(true)}>Shuffle</button>
+					{:else if activeTab === 'albums'}
+						<Dropdown label="Sort albums" options={ALBUM_SORT_OPTIONS} value={albumSortField} onchange={(field) => setAlbumSort(field)} />
 						<button
-							class="view-toggle-btn"
-							class:active={$viewMode === 'grid'}
-							onclick={() => viewMode.set('grid')}
-							aria-pressed={$viewMode === 'grid'}
-							aria-label="Grid view"
-							title="Grid view"
-						>
-							<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-								<rect x="2" y="2" width="5" height="5" rx="1"/>
-								<rect x="9" y="2" width="5" height="5" rx="1"/>
-								<rect x="2" y="9" width="5" height="5" rx="1"/>
-								<rect x="9" y="9" width="5" height="5" rx="1"/>
-							</svg>
-						</button>
-						<button
-							class="view-toggle-btn"
-							class:active={$viewMode === 'list'}
-							onclick={() => viewMode.set('list')}
-							aria-pressed={$viewMode === 'list'}
-							aria-label="List view"
-							title="List view"
-						>
-							<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-								<line x1="3" y1="4" x2="13" y2="4"/>
-								<line x1="3" y1="8" x2="13" y2="8"/>
-								<line x1="3" y1="12" x2="13" y2="12"/>
-							</svg>
-						</button>
-					</div>
-				{/if}
+							type="button"
+							class="btn btn-glass sort-dir"
+							aria-label={albumSortDir === 'asc' ? 'Ascending, switch to descending' : 'Descending, switch to ascending'}
+							title={albumSortDir === 'asc' ? 'Ascending' : 'Descending'}
+							onclick={() => setAlbumSort(albumSortField)}
+						>{albumSortDir === 'asc' ? 'A-Z' : 'Z-A'}</button>
+						<Segmented label="Album layout" options={ALBUM_LAYOUT_OPTIONS} value={$viewMode} onchange={(mode) => viewMode.set(mode)} />
+					{:else}
+						<button type="button" class="btn btn-glass" onclick={() => void playRandomLibrary()}>Random</button>
+					{/if}
+				</div>
 			</div>
-			{/if}
-		</div>
-
-		<div class="library-search-meta">
-			{#if searchBusy}
-				<span class="library-status">Searching…</span>
-			{:else if isSearchMode}
-				<span class="library-status">{searchSummary}</span>
-				{#if searchTruncated && (activeTab === 'tracks' || activeTab === 'liked' || activeTab === 'all')}
-					<button
-						class="filter-pill"
-						disabled={searchLoadingMore}
-						onclick={() => void loadMoreSearchResults()}
-					>
-						{searchLoadingMore ? 'Loading…' : 'Show more'}
-					</button>
-				{/if}
-				<button class="filter-pill" onclick={() => (searchQuery.set(''))}>Clear</button>
-			{/if}
-		</div>
-	</div>
+		{/snippet}
+	</CommandHeader>
 
 
 	{#if searchError}
-		<div class="batch-feedback error glass">{searchError}</div>
+		<div class="batch-feedback error">{searchError}</div>
 	{/if}
 
 	{#if isSearchMode && searchUnmatchedGenres.length > 0}
-		<div class="batch-feedback error glass">
+		<div class="batch-feedback error">
 			No genre named {searchUnmatchedGenres.map((g) => `"${g}"`).join(', ')} - nothing was
 			filtered by it. Genre filters match library genre names or slugs (see the Genres page).
 		</div>
@@ -2069,7 +1725,7 @@
 				<button class="btn btn-glass" disabled={batchBusy === 'delete'} onclick={confirmDeleteSelection}>
 					{batchBusy === 'delete' ? 'Deleting…' : 'Delete'}
 				</button>
-				{#if activeTab === 'tracks' || activeTab === 'liked'}
+				{#if activeTab === 'tracks'}
 					<select bind:value={selectedPlaylistId} class="batch-select">
 						{#each playlists as playlist}
 							<option value={playlist.id}>{playlist.name}</option>
@@ -2092,7 +1748,7 @@
 	{/if}
 
 	{#if batchMessage}
-		<div class="batch-feedback success glass">
+		<div class="batch-feedback success">
 			<span>{batchMessage}</span>
 			{#if pendingUndo.tracks.length > 0 || pendingUndo.albums.length > 0}
 				<button class="btn btn-glass" disabled={undoBusy} onclick={undoDelete}>
@@ -2103,11 +1759,11 @@
 	{/if}
 
 	{#if batchError}
-		<div class="batch-feedback error glass">{batchError}</div>
+		<div class="batch-feedback error">{batchError}</div>
 	{/if}
 
 	{#if $isLoading}
-		<div class="loading"><div class="spinner"></div><span>Loading library…</span></div>
+		<Skeleton rows={10} label="Loading library" />
 
 	{:else if activeTab === 'all' && isSearchMode}
 		<div class="library-search-results">
@@ -2143,7 +1799,8 @@
 										src={artistImageSources(artist.photo_url, artistLazyArt[artist.id], fallbackSrc)}
 										alt={artist.name}
 										size={320}
-										fallbackText={artist.name.charAt(0).toUpperCase()}
+										fallbackText={initials(artist.name)}
+										tint
 									/>
 								</div>
 								<span class="artist-name">{artist.name}</span>
@@ -2291,7 +1948,10 @@
 			{/if}
 
 			{#if allSearchTotal === 0}
-				<EmptyState title="No library matches" copy="Try a different artist, album, or track name." />
+				<!-- An empty scoped search offers the wider scope first. -->
+				<EmptyState title="Nothing in your library matches" copy="Try another spelling, or look on TIDAL.">
+					{#snippet actions()}<a class="btn btn-primary" href={`/search?q=${encodeURIComponent($searchQuery.trim())}`}>Search TIDAL for "{$searchQuery.trim()}"</a>{/snippet}
+				</EmptyState>
 			{/if}
 		</div>
 
@@ -2310,63 +1970,8 @@
 				<div class="home-loading">Loading your library…</div>
 			{/if}
 
-			{#if homeMuralPanels.length > 0}
-				<section class="home-mural-grid rise-in-shelf" style="--rise-index: 1" aria-label="Library suggestion panels">
-					{#each homeMuralPanels as panel, i (panel.id)}
-						<article class="home-mural-panel rise-in-card" aria-label={panel.label} style={`--rise-index: ${i}`}>
-							<div class="home-mural-bg">
-								{#each panel.items as item (`${panel.id}-${item.kind}-${item.id}`)}
-									{@const muralArt = muralItemArtwork(item)}
-									<button
-										class="home-mural-tile"
-										class:home-mural-tile--album={item.kind === 'album'}
-										type="button"
-										onclick={() => openHomeMuralItem(item, panel)}
-										oncontextmenu={(event) => openHomeMuralItemContextMenu(event, item)}
-										aria-label={`${item.kind === 'track' ? 'Play' : 'Open'} ${item.title}`}
-										title={`${item.title}${item.subtitle ? ` - ${item.subtitle}` : ''}`}
-										use:lazyTidalArt={{
-											enabled: muralArt === null,
-											query: muralItemLazyQuery(item),
-											onResolve: (url) => (lazyArt[muralItemKey(item)] = url),
-										}}
-									>
-										<ArtworkImage
-											className="home-mural-art"
-											src={muralArt}
-											size={320}
-											fallbackText={fallbackLetters(item.title)}
-											decorative={true}
-											loading="eager"
-											fadeIn={true}
-										/>
-									</button>
-								{/each}
-							</div>
-							<div class="home-mural-shade"></div>
-							<div class="home-mural-copy">
-								<span class="home-mural-caption">{panel.caption}</span>
-								<h3 class="home-mural-title">{panel.label}</h3>
-								<span class="home-mural-count">{panel.items.length} picks</span>
-							</div>
-						</article>
-					{/each}
-				</section>
-			{/if}
-
-			{#if recentArtists.length > 0}
-				<section class="home-section rise-in-shelf" style="--rise-index: 2">
-					<h3 class="section-label">Recently Played Artists</h3>
-					<ArtistCarousel
-						artists={recentArtists}
-						onArtistClick={handleHomeArtistClick}
-						onContextMenu={handleHomeArtistContextMenu}
-					/>
-				</section>
-			{/if}
-
 			{#if recentAlbums.length > 0}
-				<section class="home-section rise-in-shelf" style="--rise-index: 3">
+				<section class="home-section rise-in-shelf" style="--rise-index: 1">
 					<h3 class="section-label">Recently Added</h3>
 					<AlbumCarousel
 						albums={recentAlbums}
@@ -2378,13 +1983,19 @@
 				</section>
 			{/if}
 
+			<LibraryMurals
+				riseIndex={2}
+				onOpenAlbum={openHomeAlbumCard}
+				onAlbumContextMenu={(event, card) => handleHomeAlbumContextMenu(event, card.id, card)}
+			/>
+
 			{#if recentTracks.length > 0}
-				<section class="home-section rise-in-shelf" style="--rise-index: 4">
+				<section class="home-section home-section--tracks rise-in-shelf" style="--rise-index: 3">
 					<div class="section-header-row">
 						<h3 class="section-label">Recent Tracks</h3>
 						<button class="view-all-link" onclick={() => void goto('/history')}>View all →</button>
 					</div>
-					<div class="home-track-list">
+					<div class="home-track-list home-track-list--split">
 						{#each recentTracks as track (track.id)}
 							{@const trackKey = `track-${track.id}`}
 							{@const trackArt = track.artwork_url ?? lazyArt[trackKey] ?? null}
@@ -2438,21 +2049,22 @@
 					</div>
 				</section>
 			{/if}
+
+			{#if recentArtists.length > 0}
+				<section class="home-section rise-in-shelf" style="--rise-index: 4">
+					<h3 class="section-label">Recently Played Artists</h3>
+					<ArtistCarousel
+						artists={recentArtists}
+						onArtistClick={handleHomeArtistClick}
+						onContextMenu={handleHomeArtistContextMenu}
+					/>
+				</section>
+			{/if}
+
+
 		</div>
 
 	{:else if activeTab === 'albums'}
-		{#if decadeOptions.length > 1}
-			<div class="decade-strip">
-				<button class="decade-chip" class:active={activeDecade === null} onclick={() => selectDecade(null)}>All</button>
-				{#each decadeOptions as decade (decade)}
-					<button
-						class="decade-chip"
-						class:active={activeDecade === decade}
-						onclick={() => selectDecade(decade)}
-					>{decade}s</button>
-				{/each}
-			</div>
-		{/if}
 		<!-- Skeleton grid while the first page loads, so we never flash an empty state -->
 		{#if $isLoading && visibleAlbums.length === 0 && !isSearchMode}
 			<div class="album-grid" aria-hidden="true">
@@ -2550,7 +2162,13 @@
 		</div>
 
 		{#if visibleAlbums.length === 0 && !$isLoading}
-			<EmptyState title={isSearchMode ? 'No albums match this search' : 'No albums yet'} copy={isSearchMode ? 'Try a broader search term or switch to tracks.' : 'Connect TIDAL in Settings and run a sync to populate the library.'} />
+			{#if isSearchMode}
+				<EmptyState title="No albums match this search" copy="Try another spelling, or look on TIDAL.">
+					{#snippet actions()}<a class="btn btn-primary" href={`/search?q=${encodeURIComponent($searchQuery.trim())}`}>Search TIDAL for "{$searchQuery.trim()}"</a>{/snippet}
+				</EmptyState>
+			{:else}
+				<EmptyState title="No albums yet" copy="Connect TIDAL in Settings and run a sync to populate the library." />
+			{/if}
 		{:else if !isSearchMode && $albums.length < $totalAlbums}
 			<div class="load-more-row">
 				<span class="load-more-count">{$albums.length} of {$totalAlbums} albums</span>
@@ -2598,7 +2216,8 @@
 								src={artistImageSources(artist.photo_url, artistLazyArt[artist.id], fallbackSrc)}
 								alt={artist.name}
 								size={320}
-								fallbackText={artist.name.charAt(0).toUpperCase()}
+								fallbackText={initials(artist.name)}
+								tint
 							/>
 						</div>
 						<span class="artist-name">{artist.name}</span>
@@ -2620,7 +2239,7 @@
 			{/if}
 		{/if}
 
-	{:else if activeTab === 'tracks' || activeTab === 'liked'}
+	{:else if activeTab === 'tracks'}
 		<!-- Track List (shared between Tracks and Liked tabs - server filters via likedOnly) -->
 		<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 		<div class="track-list" role="list" bind:clientWidth={trackListWidth} onkeydown={handleTrackListKeydown}>
@@ -2805,7 +2424,9 @@
 					</span>{/if}
 					{#if showQualityAtWidth}
 						<span class="col-quality">
-							{#if track.best_quality}
+							<!-- Lossless is what almost every row has; only the exceptions
+							     (Hi-Res, lossy) earn a mark. -->
+							{#if track.best_quality && track.best_quality !== 'LOSSLESS'}
 								<span class="quality-badge {getQualityClass(track.best_quality)}">
 									{track.best_quality.replace(/_/g, ' ')}
 								</span>
@@ -2866,7 +2487,7 @@
 					<span class="col-duration">{formatTrackDuration(track.duration_ms)}</span>
 					<span class="col-actions">
 						<button class="detail-btn" title="View details" onclick={(event) => { event.stopPropagation(); void openTrackDetail(track); }}>ℹ</button>
-						<button class="menu-trigger" aria-label="Track actions" onclick={(event) => toggleTrackMenu(track.id, event)}>
+						<button class="menu-trigger" aria-label="Track actions" aria-expanded={activeTrackMenuId === track.id} onclick={(event) => toggleTrackMenu(track.id, event)}>
 							⋯
 						</button>
 						{#if activeTrackMenuId === track.id}
@@ -2893,14 +2514,20 @@
 		</div>
 
 		{#if visibleTracks.length === 0}
-			<EmptyState title={isSearchMode ? 'No tracks match this search' : 'No tracks yet'} copy={isSearchMode ? 'Try a different artist, album, or track name.' : 'Connect TIDAL in Settings to sync your library.'} />
+			{#if isSearchMode}
+				<EmptyState title="No songs match this search" copy="Try another spelling, or look on TIDAL.">
+					{#snippet actions()}<a class="btn btn-primary" href={`/search?q=${encodeURIComponent($searchQuery.trim())}`}>Search TIDAL for "{$searchQuery.trim()}"</a>{/snippet}
+				</EmptyState>
+			{:else}
+				<EmptyState title="No songs yet" copy="Connect TIDAL in Settings to sync your library." />
+			{/if}
 		{:else if !isSearchMode && $tracks.length < $totalTracks}
 			<div class="load-more-row">
-				<span class="load-more-count">{$tracks.length} of {$totalTracks} {activeTab === 'liked' ? 'liked tracks' : 'tracks'}</span>
+				<span class="load-more-count">{$tracks.length} of {$totalTracks} {likedOnly ? 'songs' : 'library songs'}</span>
 				<button
 					class="btn btn-glass"
 					disabled={$isLoadingMore}
-					onclick={() => loadTracks($sortBy, $sortDir, PAGE_SIZE, $tracks.length, activeTab === 'liked')}
+					onclick={() => loadTracks($sortBy, $sortDir, PAGE_SIZE, $tracks.length, likedOnly)}
 				>
 					{$isLoadingMore ? 'Loading…' : 'Load More'}
 				</button>
@@ -3053,7 +2680,9 @@
 	   the view toggle and the decade chips - sizes off the app-wide
 	   --control-h token in app.css, so the rows under the search field read as
 	   one system and match the other pages' pill rows. */
+	/* The header-to-content gap matches Videos (STYLING.md "Command header"). */
 	.library {
+		gap: var(--header-gap);
 		padding-bottom: 8px;
 	}
 
@@ -3062,8 +2691,8 @@
 	.library-home {
 		display: flex;
 		flex-direction: column;
-		gap: 24px;
-		padding: 8px 0 40px;
+		gap: var(--space-6);
+		padding: 0 0 40px;
 	}
 
 	.library-search-results {
@@ -3089,166 +2718,6 @@
 		gap: 12px;
 	}
 
-	.home-mural-grid {
-		display: grid;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
-		gap: var(--space-4);
-	}
-
-	/* Entrance motion comes from the shared `rise-in-card` in app.css, applied
-	   in the markup. This used to carry a fourth private copy of the rise
-	   keyframes, with its own `--mural-index` and a `both` fill - `both` keeps
-	   the animation applied forever, which gives the panel a permanent stacking
-	   context and traps a popout's z-index inside it. */
-	.home-mural-panel {
-		position: relative;
-		min-height: clamp(140px, 15vw, 210px);
-		border-radius: var(--radius-md);
-		overflow: hidden;
-		border: 1px solid var(--border-subtle);
-		background: var(--panel-bg);
-	}
-
-	.home-mural-bg {
-		position: absolute;
-		inset: -7%;
-		z-index: 0;
-		display: grid;
-		grid-template-columns: repeat(6, minmax(0, 1fr));
-		grid-template-rows: repeat(2, minmax(0, 1fr));
-		background: linear-gradient(120deg, var(--panel-bg), color-mix(in srgb, var(--accent-soft) 24%, transparent));
-	}
-
-	.home-mural-bg::after {
-		content: '';
-		position: absolute;
-		inset: 0;
-		background:
-			radial-gradient(circle at 78% 42%, rgba(255,255,255,0.2), transparent 30%),
-			linear-gradient(90deg, rgba(0,0,0,0.06), transparent 42%, rgba(0,0,0,0.02));
-		pointer-events: none;
-	}
-
-	.home-mural-tile {
-		appearance: none;
-		position: relative;
-		min-width: 0;
-		min-height: 0;
-		padding: 0;
-		border: 0;
-		background: var(--bg-raised);
-		color: var(--text-primary);
-		cursor: pointer;
-		overflow: hidden;
-		opacity: 0.96;
-		filter: saturate(1.18) brightness(1.16);
-		transform: skewX(-7deg) scaleX(1.08);
-		transform-origin: center;
-		transition:
-			filter var(--motion-fast),
-			opacity var(--motion-fast),
-			transform var(--motion-base),
-			box-shadow var(--motion-base);
-	}
-
-	.home-mural-tile::after {
-		content: '';
-		position: absolute;
-		inset: 0;
-		background: linear-gradient(90deg, rgba(0,0,0,0.18), transparent 48%, rgba(0,0,0,0.2));
-		opacity: 0.18;
-		pointer-events: none;
-	}
-
-	.home-mural-tile:hover,
-	.home-mural-tile:focus-visible {
-		z-index: var(--z-raised);
-		opacity: 1;
-		filter: saturate(1.8) brightness(1.42);
-		transform: skewX(-7deg) scaleX(1.08) scale(1.045);
-		box-shadow:
-			0 0 0 1px rgba(255,255,255,0.32),
-			0 14px 30px rgba(0,0,0,0.32),
-			0 0 24px color-mix(in srgb, var(--accent) 38%, transparent);
-		outline: none;
-	}
-
-	.home-mural-tile :global(.home-mural-art) {
-		display: block;
-		width: 100%;
-		height: 100%;
-	}
-
-	.home-mural-tile :global(.home-mural-art:not(.fallback)) {
-		object-fit: cover;
-		transform: skewX(7deg) scale(1.24);
-		/* opacity here (not just transform) so the ArtworkImage fadeIn actually
-		   eases in - this rule outranks the component's own transition. */
-		transition: transform var(--motion-base), opacity 260ms ease-out;
-	}
-
-	.home-mural-tile:hover :global(.home-mural-art:not(.fallback)),
-	.home-mural-tile:focus-visible :global(.home-mural-art:not(.fallback)) {
-		transform: skewX(7deg) scale(1.34);
-	}
-
-	.home-mural-tile :global(.home-mural-art.fallback) {
-		display: grid;
-		place-items: center;
-		background: linear-gradient(135deg, var(--bg-raised), color-mix(in srgb, var(--accent-soft) 28%, var(--bg-surface)));
-		color: rgba(255,255,255,0.78);
-		transform: skewX(7deg) scale(1.08);
-	}
-
-	.home-mural-tile :global(.home-mural-art.fallback span) {
-		font-size: var(--font-size-xl);
-		font-weight: var(--font-weight-bold);
-	}
-
-	.home-mural-shade {
-		position: absolute;
-		inset: 0;
-		z-index: var(--z-base);
-		background: linear-gradient(90deg, rgba(0,0,0,0.68) 0%, rgba(0,0,0,0.3) 42%, rgba(0,0,0,0.06) 78%, transparent 100%);
-		pointer-events: none;
-	}
-
-	.home-mural-copy {
-		position: relative;
-		z-index: calc(var(--z-base) + 1);
-		display: flex;
-		flex-direction: column;
-		justify-content: flex-end;
-		gap: var(--space-1);
-		min-height: clamp(140px, 15vw, 210px);
-		max-width: min(22rem, 70%);
-		padding: var(--space-4);
-		text-shadow: 0 2px 18px rgba(0,0,0,0.62);
-		pointer-events: none;
-	}
-
-	.home-mural-caption,
-	.home-mural-count {
-		font-size: var(--font-size-2xs);
-		font-weight: var(--font-weight-semibold);
-		letter-spacing: 0;
-		text-transform: uppercase;
-		color: var(--accent);
-	}
-
-	.home-mural-title {
-		margin: 0;
-		color: var(--text-primary);
-		font-size: var(--font-size-xl);
-		font-weight: var(--font-weight-bold);
-		line-height: var(--line-height-tight);
-	}
-
-	.home-mural-count {
-		color: var(--text-secondary);
-		text-transform: none;
-	}
-
 	.section-label {
 		font-size: var(--font-size-xs);
 		font-weight: var(--font-weight-bold);
@@ -3271,7 +2740,7 @@
 		border: none;
 		cursor: pointer;
 		padding: 0;
-		transition: color 0.15s;
+		transition: color var(--motion-fast);
 	}
 
 	.view-all-link:hover { color: var(--text-primary, #fff); }
@@ -3292,12 +2761,31 @@
 		padding: 6px 8px;
 		border-radius: 6px;
 		cursor: pointer;
-		transition: background 0.1s;
+		transition: background var(--motion-press);
 	}
 
 	.home-track-row:hover { background: var(--bg-hover); }
 
-	.home-track-row.playing .ht-title { color: var(--accent); }
+	.home-track-row.playing .ht-title { color: var(--accent-strong); }
+
+	/* Recent tracks on the landing read as two columns on wide content, so ten
+	   tracks take five rows instead of a long single column. */
+	.home-section--tracks {
+		container-type: inline-size;
+	}
+
+	.home-track-list--split {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		column-gap: var(--space-6);
+		row-gap: 2px;
+	}
+
+	@container (max-width: 860px) {
+		.home-track-list--split {
+			grid-template-columns: minmax(0, 1fr);
+		}
+	}
 
 	.ht-art {
 		width: 36px;
@@ -3360,13 +2848,13 @@
 
 	.ht-duration {
 		font-size: var(--font-size-xs);
-		color: var(--text-muted, rgba(255,255,255,0.4));
+		color: var(--text-tertiary);
 		font-variant-numeric: tabular-nums;
 	}
 
 	.ht-actions {
 		opacity: 0;
-		transition: opacity 0.15s;
+		transition: opacity var(--motion-fast);
 	}
 
 	.home-track-row:hover .ht-actions { opacity: 1; }
@@ -3380,7 +2868,7 @@
 		border-radius: 4px;
 		display: flex;
 		align-items: center;
-		transition: color 0.15s;
+		transition: color var(--motion-fast);
 	}
 
 	.btn-icon:hover { color: var(--text-primary, #fff); }
@@ -3390,37 +2878,6 @@
 		font-size: var(--font-size-sm);
 		padding: 40px;
 		text-align: center;
-	}
-
-	/* ─── Loading ───────────────────────── */
-
-	.loading {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		gap: 12px;
-		padding: 48px 0;
-		color: var(--text-secondary);
-		font-size: var(--font-size-md);
-	}
-
-	.spinner {
-		width: 24px;
-		height: 24px;
-		border: 2px solid var(--border-subtle);
-		border-top-color: var(--accent);
-		border-radius: 50%;
-		animation: spin 0.6s linear infinite;
-	}
-
-	.spinner-sm {
-		width: 16px;
-		height: 16px;
-		border-width: 2px;
-	}
-
-	@keyframes spin {
-		to { transform: rotate(360deg); }
 	}
 
 	/* ─── Hero Section ──────────────────── */
@@ -3472,39 +2929,6 @@
 		border-color: rgba(124, 128, 255, 0.22);
 	}
 
-	.decade-strip {
-		display: flex;
-		gap: 6px;
-		flex-wrap: wrap;
-		margin-bottom: 16px;
-	}
-	/* Match the primary tab pills (.filter-pill) so the Albums toolbar reads as
-	   one system - pill radius, subtle border, bg-hover, accent when active. */
-	.decade-chip {
-		display: inline-flex;
-		align-items: center;
-		height: var(--control-h);
-		padding: 0 14px;
-		border-radius: 999px;
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-medium);
-		cursor: pointer;
-		border: 1px solid var(--border-subtle);
-		background: transparent;
-		color: var(--text-secondary);
-		font-family: inherit;
-		transition: background 0.15s, color 0.15s, border-color 0.15s;
-	}
-	.decade-chip:hover {
-		background: var(--bg-hover);
-		color: var(--text-primary);
-	}
-	.decade-chip.active {
-		background: var(--accent);
-		border-color: var(--accent);
-		color: var(--text-on-accent);
-	}
-
 	.library-hero-subtitle {
 		max-width: 48ch;
 		color: var(--text-secondary);
@@ -3529,30 +2953,6 @@
 	.library-stat-chip.emphasis {
 		color: var(--text-primary);
 		background: rgba(255, 255, 255, 0.06);
-	}
-
-	/* ─── Toolbar ───────────────────────── */
-
-	.library-toolbar {
-		display: grid;
-		grid-template-columns: minmax(220px, 420px) 1fr;
-		gap: var(--gap);
-		align-items: center;
-		padding: 12px 14px;
-		margin-bottom: var(--gap);
-	}
-
-	.toolbar-meta {
-		display: flex;
-		align-items: center;
-		justify-content: flex-end;
-		gap: 10px;
-		flex-wrap: wrap;
-	}
-
-	.toolbar-note {
-		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
 	}
 
 	/* ─── New DSP Columns ───────────────────────── */
@@ -3625,7 +3025,7 @@
 		height: 100%;
 		border-radius: 2px;
 		background: linear-gradient(90deg, var(--accent), #b0b3ff);
-		transition: width 200ms ease;
+		transition: width var(--motion-base);
 	}
 
 	.mini-bar-fill.dance {
@@ -3641,196 +3041,39 @@
 		vertical-align: middle;
 	}
 
-	.library-search-shell {
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
-		width: 100%;
-		max-width: var(--content-width);
-		margin: 0 auto var(--space-5);
-		padding: 0 4px;
-	}
-
-	.library-status {
-		font-size: var(--font-size-xs);
-		color: var(--text-muted, rgba(255,255,255,0.4));
-	}
-
-	.library-search-meta {
-		min-height: 28px;
+	.library-toolbar {
 		display: flex;
 		align-items: center;
-		justify-content: center;
-		gap: 8px;
-		width: 100%;
-		max-width: 720px;
-		margin: -4px auto 0;
-		text-align: center;
-	}
-
-	/* Two centered rows: the category tabs never move, and whatever the tab
-	   brings with it (play controls, sort, view layout) sits on its own row
-	   underneath so nothing overflows sideways or drifts off the baseline. */
-	.filter-pills {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 8px;
-		width: 100%;
-		max-width: 720px;
-		margin: 0 auto;
-	}
-
-	.filter-pill-group,
-	.filter-pill-actions {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		gap: 6px;
+		justify-content: space-between;
+		gap: var(--space-2) var(--space-3);
 		flex-wrap: wrap;
-		max-width: 100%;
+		width: 100%;
 	}
 
-	.play-controls {
-		display: inline-flex;
+	.toolbar-start,
+	.toolbar-end {
+		display: flex;
 		align-items: center;
-		gap: 6px;
+		gap: var(--space-2);
+		flex-wrap: wrap;
+		min-width: 0;
 	}
 
-	.filter-pill--accent {
-		background: var(--accent);
-		border-color: var(--accent);
-		color: var(--text-on-accent);
+	.view-count {
+		margin-right: var(--space-2);
+		font-variant-numeric: tabular-nums;
 	}
 
-	.filter-pill--accent:hover {
-		background: var(--accent);
-		filter: brightness(1.08);
-		color: var(--text-on-accent);
-	}
-
-	.filter-pill {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		gap: 6px;
-		height: var(--control-h);
-		padding: 0 14px;
-		border-radius: 999px;
-		border: 1px solid var(--border-subtle, rgba(255,255,255,0.1));
-		background: transparent;
-		color: var(--text-secondary, rgba(255,255,255,0.6));
-		font-family: inherit;
+	.toolbar-link {
+		all: unset;
+		color: var(--text-secondary);
 		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-medium);
+		font-weight: var(--font-weight-semibold);
 		cursor: pointer;
-		transition: background 0.15s, color 0.15s, border-color 0.15s;
-		white-space: nowrap;
 	}
 
-	.pill-glyph {
-		font-size: var(--font-size-xs);
-		line-height: 1;
-	}
-
-	.filter-pill:hover {
-		background: var(--bg-hover);
-		color: var(--text-primary, #fff);
-	}
-
-	.filter-pill.active {
-		background: var(--accent);
-		border-color: var(--accent);
-		color: var(--text-on-accent);
-	}
-
-	.album-sort {
-		display: inline-flex;
-		align-items: center;
-		gap: 2px;
-		height: var(--control-h);
-		padding: 0 2px;
-		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid var(--border-subtle);
-	}
-
-	.album-sort-label {
-		font-size: var(--font-size-2xs);
-		text-transform: uppercase;
-		letter-spacing: 0.06em;
-		color: var(--text-tertiary);
-		padding: 0 6px 0 10px;
-	}
-
-	.album-sort-btn {
-		display: inline-flex;
-		align-items: center;
-		gap: 3px;
-		height: calc(var(--control-h) - 6px);
-		padding: 0 10px;
-		border: 0;
-		border-radius: 999px;
-		background: transparent;
-		color: var(--text-tertiary);
-		font-family: inherit;
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-medium);
-		cursor: pointer;
-		transition: background 140ms ease, color 140ms ease;
-	}
-
-	.album-sort-btn:hover {
-		color: var(--text-primary);
-		background: rgba(255, 255, 255, 0.06);
-	}
-
-	.album-sort-btn.active {
-		background: var(--accent-soft);
-		color: var(--text-primary);
-	}
-
-	.album-sort-arrow {
-		font-size: var(--font-size-2xs);
-		color: var(--accent);
-		line-height: 1;
-	}
-
-	.view-toggle {
-		display: inline-flex;
-		align-items: center;
-		gap: 2px;
-		height: var(--control-h);
-		padding: 0 2px;
-		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid var(--border-subtle);
-	}
-
-	.view-toggle-btn {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		width: calc(var(--control-h) - 6px);
-		height: calc(var(--control-h) - 6px);
-		padding: 0;
-		border: 0;
-		border-radius: 999px;
-		background: transparent;
-		color: var(--text-tertiary);
-		cursor: pointer;
-		transition: background 140ms ease, color 140ms ease;
-	}
-
-	.view-toggle-btn:hover {
-		color: var(--text-primary);
-		background: rgba(255, 255, 255, 0.06);
-	}
-
-	.view-toggle-btn.active {
-		background: var(--accent-soft);
-		color: var(--accent);
-	}
+	.toolbar-link:hover { color: var(--text-primary); }
+	.toolbar-link:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
 
 	/* ─── Batch Bar ─────────────────────── */
 
@@ -3844,7 +3087,6 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: var(--gap);
-		padding: var(--gap-sm) var(--gap);
 		margin-bottom: var(--gap);
 	}
 
@@ -4135,13 +3377,6 @@
 			flex-direction: column;
 		}
 
-		.library-toolbar {
-			grid-template-columns: 1fr;
-		}
-
-		.toolbar-meta {
-			justify-content: flex-start;
-		}
 
 		.detail-album-hero,
 		.detail-track-hero {
@@ -4166,19 +3401,6 @@
 	}
 
 	@media (max-width: 760px) {
-		.home-mural-grid {
-			grid-template-columns: 1fr;
-		}
-
-		.home-mural-bg {
-			grid-template-columns: repeat(4, minmax(0, 1fr));
-			grid-template-rows: repeat(3, minmax(0, 1fr));
-		}
-
-		.home-mural-copy {
-			max-width: 82%;
-		}
-
 		.library-hero {
 			padding: 16px;
 			gap: 12px;
@@ -4193,16 +3415,6 @@
 		.library-hero-actions {
 			width: 100%;
 			justify-content: flex-start;
-		}
-
-		.filter-pills,
-		.filter-pill-group--primary,
-		.filter-pill-actions {
-			width: 100%;
-		}
-
-		.filter-pill {
-			flex: 1;
 		}
 
 		.batch-select {
@@ -4494,7 +3706,7 @@
 	}
 
 	.album-card.selected {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 4px;
 		border-radius: var(--radius-md);
 	}
@@ -4502,7 +3714,7 @@
 	.album-card:focus-visible,
 	.track-row:focus-visible,
 	.header-sort:focus-visible {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
 	}
 
@@ -4676,7 +3888,7 @@
 		color: var(--text-primary);
 		font-size: var(--font-size-md);
 		line-height: 1;
-		transition: background 0.15s ease, border-color 0.15s ease;
+		transition: background var(--motion-fast), border-color var(--motion-fast);
 	}
 
 	.menu-trigger:hover {
@@ -4738,7 +3950,7 @@
 		font-size: var(--font-size-sm);
 		text-align: left;
 		cursor: pointer;
-		transition: background 0.1s ease;
+		transition: background var(--motion-press);
 		white-space: nowrap;
 	}
 
@@ -4781,6 +3993,7 @@
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
 		color: var(--text-tertiary);
+		white-space: nowrap;
 	}
 
 	.header-sort {
@@ -4830,6 +4043,23 @@
 
 	.track-row:hover {
 		background: var(--bg-hover);
+	}
+
+	/* Row actions appear on hover or focus and never reflow the row. */
+	.track-row .col-actions .detail-btn,
+	.track-row .col-actions .menu-trigger {
+		opacity: 0;
+		border-color: transparent;
+		background: transparent;
+		transition: opacity var(--motion-fast), background var(--motion-fast);
+	}
+
+	.track-row:hover .col-actions .detail-btn,
+	.track-row:hover .col-actions .menu-trigger,
+	.track-row:focus-within .col-actions .detail-btn,
+	.track-row:focus-within .col-actions .menu-trigger,
+	.track-row .col-actions .menu-trigger[aria-expanded='true'] {
+		opacity: 1;
 	}
 
 	.track-row.selected {
@@ -5061,8 +4291,6 @@
 				". album quality";
 			gap: 6px 12px;
 			padding: 12px;
-			border: 1px solid var(--border-subtle);
-			background: rgba(255, 255, 255, 0.02);
 		}
 
 		.track-row.no-album {
@@ -5120,31 +4348,25 @@
 		flex-direction: column;
 		align-items: center;
 		gap: 10px;
-		padding: 16px 10px 14px;
-		border-radius: var(--radius-lg);
-		background: rgba(255, 255, 255, 0.03);
-		border: 1px solid rgba(255, 255, 255, 0.07);
+		padding: 12px 8px;
+		border-radius: var(--radius-md);
 		cursor: pointer;
-		transition:
-			background var(--motion-fast),
-			border-color var(--motion-fast),
-			transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
+		/* On the ground: no tile, no lift. Hover is a fill (STYLING.md
+		   "Boundaries"). */
+		transition: background var(--motion-fast);
 		text-align: center;
 	}
 
 	.artist-card:hover {
-		background: rgba(255, 255, 255, 0.06);
-		border-color: rgba(255, 255, 255, 0.13);
-		transform: translateY(-2px);
+		background: var(--bg-hover);
 	}
 
 	.artist-photo {
-		width: 72px;
-		height: 72px;
+		width: 96px;
+		height: 96px;
 		border-radius: 50%;
 		overflow: hidden;
 		background: var(--accent-soft);
-		border: 1px solid var(--accent-line);
 		display: grid;
 		place-items: center;
 		flex-shrink: 0;

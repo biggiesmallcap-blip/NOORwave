@@ -389,7 +389,6 @@
 	{#if current && (relatedLoading || feedLoading || relatedVideos.length > 0)}
 		<section class="related" aria-label="Related videos">
 			<div class="section-heading">
-				<p class="eyebrow">Keep exploring</p>
 				<h2>Related to {current.artist_name ?? 'this video'}</h2>
 			</div>
 			{#if relatedVideos.length > 0 || feedLoading}
@@ -550,9 +549,6 @@
 		gap: 12px;
 	}
 
-	.section-heading .eyebrow {
-		margin: 0;
-	}
 
 	.section-heading h2 {
 		margin: 0;
@@ -576,7 +572,7 @@
 	/* Out of focus below the fold: a soft blur and dim that deepen for
 	   three rows, then hold, and clear as the row scrolls into view. */
 	.related-card {
-		transition: filter 320ms ease, opacity 320ms ease;
+		transition: filter var(--motion-slow), opacity var(--motion-slow);
 	}
 	.related-card[data-focus='1'] { filter: blur(0.6px); opacity: 0.82; }
 	.related-card[data-focus='2'] { filter: blur(1.1px); opacity: 0.68; }

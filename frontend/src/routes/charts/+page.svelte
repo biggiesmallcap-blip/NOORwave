@@ -93,10 +93,8 @@
 
 <div class="page">
   <PageHeader
-    eyebrow="Charts"
     title="What's hot"
     subtitle="Worldwide trending tracks from Last.fm and editorial Spotify chart playlists."
-    variant="editorial"
   />
 
   <section class="trending-block">
@@ -108,7 +106,6 @@
   </section>
 
   <SectionHeader
-    eyebrow="Spotify playlists"
     title="Chart playlists"
     subtitle="Click any to play on TIDAL."
     variant="charts"
@@ -143,7 +140,7 @@
 </div>
 
 <style>
-  .page { max-width: var(--content-width); margin: 0 auto; padding: var(--space-5) var(--space-4) var(--space-7); display: flex; flex-direction: column; gap: var(--space-5); }
+  .page { width: min(100%, var(--content-width)); margin: 0 auto; padding-bottom: var(--space-7); display: flex; flex-direction: column; gap: var(--space-5); }
   .trending-block { display: flex; flex-direction: column; gap: var(--gap); }
 
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(180px, 100%), 1fr)); gap: var(--gap); }
@@ -162,7 +159,7 @@
     box-sizing: border-box;
   }
   .card:hover { transform: translateY(-4px); }
-  .card:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+  .card:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 4px; }
   .art-wrap { position: relative; aspect-ratio: 1 / 1; width: 100%; border-radius: var(--radius-md); overflow: hidden; background: var(--bg-raised); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22); transition: box-shadow var(--motion-base); }
   .card:hover .art-wrap { box-shadow: 0 12px 26px -6px rgba(0, 0, 0, 0.5); }
   :global(.chart-playlist-art) { width: 100%; height: 100%; object-fit: cover; }

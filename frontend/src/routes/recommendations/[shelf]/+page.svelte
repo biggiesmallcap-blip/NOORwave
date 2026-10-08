@@ -114,7 +114,6 @@
 <div class="page" data-recommendation-shelf={slug}>
 	<button class="back-link" type="button" onclick={() => goBack('/')}>Back</button>
 	<DetailHero
-		eyebrow="Connected profiles"
 		title={shelf?.title ?? (loading ? 'Loading...' : 'Recommendations')}
 		variant="text"
 	>
@@ -189,9 +188,9 @@
 <style>
 	/* Same shell, padding and rhythm as TidalEditorialPage. */
 	.page {
-		max-width: var(--content-width);
+		width: min(100%, var(--content-width));
 		margin: 0 auto;
-		padding: var(--space-5) var(--space-4) var(--space-7);
+		padding: 0 0 var(--space-7);
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-5);
@@ -254,7 +253,7 @@
 	}
 
 	.rec-tile:focus-visible {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 4px;
 	}
 

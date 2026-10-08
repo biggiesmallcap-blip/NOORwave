@@ -403,7 +403,7 @@
 	{:else}
 		{#if shownSaved.length > 0}
 			<section class="saved-section" aria-label="Saved videos">
-				<div class="saved-heading"><p class="eyebrow">Chosen by you</p><h2>Saved videos</h2></div>
+				<div class="saved-heading"><h2>Saved videos</h2></div>
 				<div class="video-grid">
 					{#each shownSaved as video (video.tidal_id)}
 						<VideoCard {video} onSelect={(item) => !('id' in item) && void playVideo(item, { queue: savedVideos, source: 'search', sourceLabel: 'Saved videos' })} />
@@ -412,7 +412,7 @@
 			</section>
 		{/if}
 		{#if filtered.length > 0}
-		<div class="saved-heading"><p class="eyebrow">From liked songs</p><h2>Video matches</h2></div>
+		<div class="saved-heading"><h2>Video matches from liked songs</h2></div>
 		<div class="video-grid">
 			{#each shown as video, index (video.song_key)}
 				<div
@@ -807,7 +807,7 @@
 	}
 
 	.video-card:focus-visible {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 4px;
 		border-radius: var(--radius-xs);
 	}

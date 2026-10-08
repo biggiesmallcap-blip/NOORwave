@@ -16,11 +16,18 @@
 </div>
 
 <style>
+	/* Shown after 150ms so fast loads do not flash (STYLING.md "States"). */
 	.skeleton-wrap {
 		display: flex;
 		flex-direction: column;
 		gap: 10px;
 		padding: 18px 0;
+		animation: skeleton-in var(--motion-fast) 150ms both;
+	}
+
+	@keyframes skeleton-in {
+		from { opacity: 0; }
+		to { opacity: 1; }
 	}
 
 	.skeleton-row {

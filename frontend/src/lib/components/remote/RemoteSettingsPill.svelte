@@ -443,7 +443,7 @@
 		border-radius: 999px;
 		background: var(--surface-2);
 		position: relative;
-		transition: background 180ms ease;
+		transition: background var(--motion-base);
 	}
 
 	.remote-settings-row.on .remote-settings-switch {

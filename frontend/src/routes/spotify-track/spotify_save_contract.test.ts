@@ -23,8 +23,10 @@ describe('Spotify save to library contract', () => {
 		expect(trackPage).toContain('let saving = $state(false);');
 		expect(trackPage).toContain('const canSave = $derived');
 		expect(trackPage).toContain('api.saveSpotifyTrack(id)');
-		expect(trackPage).toContain('disabled={saving || !canSave}');
-		expect(trackPage).toContain("{saving ? 'Saving...' : 'Save to library'}");
+		// Save is the ActionBar heart: hidden until there is something to save,
+		// pending while it runs.
+		expect(trackPage).toContain('onlike={canSave ? save : undefined}');
+		expect(trackPage).toContain('likePending={saving}');
 		expect(trackPage).toContain('Save failed: {saveErr}');
 		expect(trackPage).not.toContain('$:');
 	});
@@ -48,9 +50,9 @@ describe('Spotify save to library contract', () => {
 	test('wires the Spotify album page to save resolved album tracks', () => {
 		expect(albumPage).toContain('let saving = $state(false);');
 		expect(albumPage).toContain('api.saveSpotifyAlbum(id)');
-		expect(albumPage).toContain('disabled={saving || resolvedCount === 0}');
+		expect(albumPage).toContain('onlike={resolvedCount > 0 ? save : undefined}');
 		expect(albumPage).toContain('Saved ${res.imported} ${trackLabel(res.imported)}');
-		expect(albumPage).toContain("{saving ? 'Saving...' : 'Save to library'}");
+		expect(albumPage).toContain('likePending={saving}');
 		expect(albumPage).toContain('Save failed: {saveErr}');
 		expect(albumPage).not.toContain('$:');
 	});

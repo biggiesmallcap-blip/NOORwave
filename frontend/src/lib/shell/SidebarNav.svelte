@@ -20,11 +20,13 @@
 <nav class="nav" aria-label="Primary">
 	{#each NAVIGATION_ZONES as zone}
 		<div class="nav-zone" style:--zone-grow={zone.items.length} style:--zone-max={zoneMaxHeight(zone.items.length)}>
-			<p class="nav-zone-label">{zone.label}</p>
+			<!-- Settings is pinned on its own; it needs no group name. -->
+			{#if zone.label !== 'System'}<p class="nav-zone-label">{zone.label}</p>{/if}
 			{#each zone.items as item}
 				<a
 					href={item.path}
 					aria-label={item.label}
+					title={item.label}
 					class="nav-item"
 					class:special={item.id === 'genres'}
 					class:active={isNavItemActive(item.path)}

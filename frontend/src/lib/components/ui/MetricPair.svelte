@@ -10,7 +10,8 @@
 	} = $props();
 </script>
 
-<div class="metric-pair glass">
+<!-- A stat on the ground: never a bordered tile (STYLING.md "Boundaries"). -->
+<div class="metric-pair">
 	<span class="label">{label}</span>
 	<strong>{value}</strong>
 	{#if copy}
@@ -20,27 +21,28 @@
 
 <style>
 	.metric-pair {
-		padding: 16px;
 		display: flex;
 		flex-direction: column;
-		gap: 6px;
+		gap: 2px;
+		min-width: 0;
 	}
 
 	.label {
-		color: var(--text-tertiary);
+		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
 	}
 
 	strong {
 		font-family: var(--font-body);
 		font-size: var(--font-size-xl);
 		font-weight: var(--font-weight-bold);
-		letter-spacing: -0.01em;
+		font-variant-numeric: tabular-nums;
+		line-height: var(--line-height-tight);
 	}
 
 	p {
-		color: var(--text-secondary);
+		margin: 0;
+		color: var(--text-tertiary);
+		font-size: var(--font-size-xs);
 	}
 </style>

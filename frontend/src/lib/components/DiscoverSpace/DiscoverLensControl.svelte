@@ -120,7 +120,7 @@
 		font-size: var(--font-size-xs);
 		font-weight: var(--font-weight-medium);
 		cursor: pointer;
-		transition: background 0.12s, color 0.12s;
+		transition: background var(--motion-fast), color var(--motion-fast);
 	}
 	.lens-btn:hover {
 		color: rgba(255, 255, 255, 0.85);

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { prefersReducedMotion } from '$lib/stores/motion';
 	import '../app.css';
 	import { onDestroy, onMount, tick } from 'svelte';
 	import { page } from '$app/state';
@@ -1043,11 +1044,6 @@
 			top: list.scrollTop + rowTop,
 			behavior: animate && !prefersReducedMotion() ? 'smooth' : 'auto',
 		});
-	}
-
-	function prefersReducedMotion(): boolean {
-		if (typeof window === 'undefined' || !window.matchMedia) return false;
-		return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 	}
 
 	$effect(() => {
@@ -3433,7 +3429,7 @@
 	}
 
 	.queue-row-hit:focus-visible {
-		outline: 2px solid var(--accent-line);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: -2px;
 	}
 
@@ -3853,6 +3849,28 @@
 	}
 
 	/* ── Mobile layout when a labeled sidebar no longer fits ──── */
+	/* Narrow windows (audit "Near the window floor the chrome takes the
+	   screen"): the sidebar becomes an icon rail so list content shows on first
+	   paint. Labels stay as accessible names and tooltips. */
+	@media (max-width: 899px) and (min-width: 680px) {
+		.app-shell { --sidebar-width: 72px; }
+		.sidebar { padding-inline: 8px; }
+		.app-shell .sidebar .brand .brand-splash,
+		:global([data-theme='light']) .app-shell .sidebar .brand .brand-splash { display: none; }
+		.app-shell .sidebar .brand .brand-icon { display: block; width: 36px; height: 36px; margin: 0 auto; }
+		.sidebar :global(.nav-label),
+		.sidebar :global(.nav-zone-label) {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			overflow: hidden;
+			clip-path: inset(50%);
+			white-space: nowrap;
+		}
+		.sidebar :global(.nav-item) { justify-content: center; padding-inline: 0; }
+		.sidebar-footer { display: none; }
+	}
+
 	@media (max-width: 679px) {
 		/* Show mobile chrome */
 		.mobile-top-bar { display: flex; }
@@ -4780,7 +4798,7 @@
 		font-size: var(--font-size-xl);
 		font-weight: var(--font-weight-semibold);
 		color: var(--text-primary);
-		transition: border-color 0.15s ease, background 0.15s ease;
+		transition: border-color var(--motion-fast), background var(--motion-fast);
 	}
 
 	.pin-digit.filled {

@@ -518,7 +518,7 @@
 		font-size: var(--font-size-xs);
 		cursor: pointer;
 		text-align: left;
-		transition: background 0.12s, color 0.12s;
+		transition: background var(--motion-fast), color var(--motion-fast);
 	}
 	.action-btn:hover:not(:disabled) { background: rgba(255,255,255,0.09); color: rgba(255,255,255,0.95); }
 	.action-btn.primary {

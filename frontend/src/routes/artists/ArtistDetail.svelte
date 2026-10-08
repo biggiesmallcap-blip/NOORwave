@@ -29,10 +29,13 @@
 		togglePlayback
 	} from '$lib/stores/player';
 	import TrackRow from '$lib/components/TrackRow.svelte';
-	import SearchField from '$lib/search/ui/SearchField.svelte';
+	import ActionBar from '$lib/components/ui/ActionBar.svelte';
+	import ErrorState from '$lib/components/ui/ErrorState.svelte';
+	import { formatTrackDuration } from '$lib/utils/format';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import MediaRail from '$lib/components/ui/MediaRail.svelte';
+	import ScopeTabs from '$lib/components/ui/ScopeTabs.svelte';
 	import DetailHero from '$lib/components/ui/DetailHero.svelte';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 	import { goBack } from '$lib/navigation/back';
@@ -668,43 +671,50 @@
 		if (album.id != null) void playAlbum(album.id);
 	}
 
-	let filterQuery = $state('');
+	// The page shows the music first; filtering releases lives on the full
+	// discography page (audit "Stage").
+	const filteredPopularItems = $derived(visiblePopularItems);
+	const hasAnyPopular = $derived(filteredPopularItems.length > 0);
+	const filteredTidalFullAlbums = $derived(tidalFullAlbums);
+	const filteredTidalSinglesEPs = $derived(tidalSinglesEPs);
+	const filteredTidalCompilations = $derived(tidalCompilations);
+	const filteredTidalLiveAlbums = $derived(tidalLiveAlbums);
 
-	function matchesFilter(title: string): boolean {
-		if (!filterQuery) return true;
-		return title.toLowerCase().includes(filterQuery.toLowerCase());
+	// Discography as tabs over one grid (audit "Stage"), instead of a rail per
+	// release type. The full list stays on the discography subroute.
+	const DISCO_PREVIEW = 12;
+	let discoTabs = $derived(
+		(
+			[
+				{ id: 'album', label: 'Albums', items: filteredTidalFullAlbums, path: '/discography/albums' },
+				{ id: 'ep_single', label: 'Singles & EPs', items: filteredTidalSinglesEPs, path: '/discography/singles' },
+				{ id: 'compilation', label: 'Compilations', items: filteredTidalCompilations, path: '/discography/compilations' },
+				{ id: 'live', label: 'Live', items: filteredTidalLiveAlbums, path: '/discography/albums' },
+			] as const
+		)
+			.filter((tab) => tab.items.length > 0)
+			.map((tab) => ({ ...tab, count: tab.items.length })),
+	);
+	let discoChoice = $state<DiscoCategory>('album');
+	let discoActive = $derived(discoTabs.find((tab) => tab.id === discoChoice) ?? discoTabs[0]);
+
+	function openArtistMenu(event: MouseEvent) {
+		const h = header();
+		if (!h) return;
+		openContextMenu(
+			event,
+			buildArtistMenu(
+				{
+					local_id: source.kind === 'local' ? source.artistId : null,
+					tidal_id: activeTidalArtistId,
+					name: h.name,
+					in_library: source.kind === 'local',
+				},
+				{ isLocal: source.kind === 'local', hideOpen: true },
+			),
+			h.name,
+		);
 	}
-
-	const filteredPopularItems = $derived(
-		visiblePopularItems.filter((item) => matchesFilter(item.track.title))
-	);
-	const hasAnyPopular = $derived(
-		filteredPopularItems.length > 0
-	);
-
-	const filteredTidalFullAlbums = $derived(
-		filterQuery
-			? tidalFullAlbums.filter((a) => a.title.toLowerCase().includes(filterQuery.toLowerCase()))
-			: tidalFullAlbums
-	);
-
-	const filteredTidalSinglesEPs = $derived(
-		filterQuery
-			? tidalSinglesEPs.filter((a) => a.title.toLowerCase().includes(filterQuery.toLowerCase()))
-			: tidalSinglesEPs
-	);
-
-	const filteredTidalCompilations = $derived(
-		filterQuery
-			? tidalCompilations.filter((a) => a.title.toLowerCase().includes(filterQuery.toLowerCase()))
-			: tidalCompilations
-	);
-
-	const filteredTidalLiveAlbums = $derived(
-		filterQuery
-			? tidalLiveAlbums.filter((a) => a.title.toLowerCase().includes(filterQuery.toLowerCase()))
-			: tidalLiveAlbums
-	);
 
 	function discographyAlbumMenu(album: TidalDiscographyAlbum, artistName: string) {
 		return buildAlbumMenu(
@@ -751,11 +761,11 @@
 	{#if loading}
 		<div class="status-wrap"><Skeleton rows={4} label="Loading artist" /></div>
 	{:else if error}
-		<EmptyState title="Artist could not load" copy={error}>
+		<ErrorState title="Artist could not load" {error} onretry={() => void load(artistId)}>
 			{#snippet actions()}
 				<a class="empty-action" href="/library">Back to library</a>
 			{/snippet}
-		</EmptyState>
+		</ErrorState>
 	{:else if !header()}
 		<EmptyState title="Artist not found" copy="It may have been deleted or moved.">
 			{#snippet actions()}
@@ -806,13 +816,11 @@
 			{/snippet}
 			{#snippet meta()}
 					{#if source.kind === 'tidal'}
-							{tidalTopTracks.length} top {tidalTopTracks.length === 1 ? 'track' : 'tracks'}
-							<span class="dot">·</span>
-							{tidalAlbums.length} {tidalAlbums.length === 1 ? 'release' : 'releases'}
+							{tidalAlbums.length} {tidalAlbums.length === 1 ? 'release' : 'releases'} on TIDAL
 					{:else}
+							In your library:
 							{#if artist?.track_count}
-								{artist.track_count.toLocaleString()} {artist.track_count === 1 ? 'song' : 'songs'}
-								<span class="dot">·</span>
+								{artist.track_count.toLocaleString()} {artist.track_count === 1 ? 'song' : 'songs'}{#if artist?.album_count},{/if}
 							{/if}
 							{#if artist?.album_count}
 								{artist.album_count.toLocaleString()} {artist.album_count === 1 ? 'album' : 'albums'}
@@ -820,11 +828,6 @@
 					{/if}
 			{/snippet}
 			{#snippet details()}
-					{#if h.library_track_count > 0}
-						<p class="hero-library-substat">
-							{h.library_track_count.toLocaleString()} {h.library_track_count === 1 ? 'song' : 'songs'} in your library
-						</p>
-					{/if}
 					{#if bioRendered}
 						<div class="hero-bio-panel" class:expanded={bioExpanded}>
 							<p class="hero-bio">
@@ -844,54 +847,18 @@
 					{/if}
 			{/snippet}
 			{#snippet actions()}
-			<button
-				class="play-fab"
-				class:pending={heroPlayPending}
-				aria-label={isArtistPlaying ? 'Pause' : 'Play'}
-				disabled={heroPlayPending}
-				onclick={onHeroPlay}
-			>
-				{#if isArtistPlaying}
-					<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"/><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"/></svg>
-				{:else}
-					<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M8 5.5v13a1 1 0 001.5.87l11-6.5a1 1 0 000-1.74l-11-6.5A1 1 0 008 5.5z" fill="currentColor"/></svg>
-				{/if}
-			</button>
-
-			<button class="ghost-btn" aria-label="Shuffle" onclick={onShuffleClick}>
-				<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M16 3h5v5M4 20l17-17M21 16v5h-5M4 4l5 5m6 6l6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-			</button>
-
-			<button
-				class="ghost-btn"
-				class:pending={radioPending}
-				aria-label="Artist radio"
-				disabled={radioPending}
-				onclick={onRadioClick}
-			>
-				{#if radioPending}
-					<span class="btn-spinner" aria-hidden="true"></span>
-				{:else}
-					<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="currentColor"/><path d="M8.5 8.5a5 5 0 000 7M15.5 8.5a5 5 0 010 7M5.5 5.5a9 9 0 000 13M18.5 5.5a9 9 0 010 13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
-				{/if}
-			</button>
+				<ActionBar
+					playing={isArtistPlaying}
+					onplay={onHeroPlay}
+					onshuffle={onShuffleClick}
+					shuffleHint="Play this artist's tracks in random order"
+					onradio={onRadioClick}
+					radioHint="Similar tracks across your library and TIDAL"
+					{radioPending}
+					onmore={openArtistMenu}
+				/>
 			{/snippet}
 		</DetailHero>
-
-		<p class="actions-microcopy">
-			<strong>Shuffle</strong> plays this artist's tracks in random order.
-			<strong>Radio</strong> finds similar tracks across your library and Tidal.
-		</p>
-
-		<div class="filter-bar">
-			<SearchField
-				bind:value={filterQuery}
-				variant="page"
-				size="sm"
-				fill
-				placeholder="Filter tracks and albums…"
-			/>
-		</div>
 
 		{#if hasAnyPopular}
 			<section class="section">
@@ -912,7 +879,7 @@
 								isCurrent={$currentTrack?.id === track.id}
 								isPlaying={$isPlaying}
 								showArtist={false}
-								showPlayCount={true}
+								showPlayCount={false}
 								onRowClick={() => void onTopTrackPlay(item)}
 								menuOptions={{ hideArtistActions: true }}
 							/>
@@ -961,6 +928,7 @@
 									<span class="tidal-row-album">{track.album_title}</span>
 								{/if}
 							</span>
+							<span class="status-glyph" title={track.is_in_library ? 'In your library' : 'Not in your library'}>{track.is_in_library ? '\u25CF' : '\u25CB'}</span>
 							<button
 								class="row-btn heart"
 								class:on={track.is_favorite}
@@ -968,7 +936,7 @@
 								title={track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
 								onclick={(e) => void onTidalTopHeartClick(track, e)}
 							>{track.is_favorite ? '♥' : '♡'}</button>
-							<span class="tidal-pill" aria-label="From TIDAL">TIDAL</span>
+							<span class="tidal-row-duration">{formatTrackDuration(track.duration_ms)}</span>
 						</li>
 						{/if}
 					{/each}
@@ -1010,7 +978,6 @@
 						<div class="grid-art placeholder">♫</div>
 					{/if}
 					{#if !album.in_library}
-						<span class="badge-new">TIDAL</span>
 						<button
 							class="art-play-overlay"
 							onclick={(e) => { e.preventDefault(); e.stopPropagation(); void playTidalAlbum(album.tidal_id) }}
@@ -1102,77 +1069,27 @@
 			</a>
 		{/snippet}
 
-		{#if hasAnyTidalAlbums}
-			{#if filteredTidalFullAlbums.length > 0}
-				<section class="section">
-					<div class="shelf-head">
-						<h2 class="section-title">Albums</h2>
-						<span class="shelf-count">{filteredTidalFullAlbums.length}</span>
-						<a class="shelf-link" href={`${discographyBase}/discography/albums`}>View all →</a>
-					</div>
-					<MediaRail
-						items={filteredTidalFullAlbums}
-						getKey={(a) => a.tidal_id}
-					>
-						{#snippet card(album)}
-							{@render discographyCard(album, 'album')}
-						{/snippet}
-					</MediaRail>
-				</section>
-			{/if}
-
-			{#if filteredTidalSinglesEPs.length > 0}
-				<section class="section">
-					<div class="shelf-head">
-						<h2 class="section-title">Singles and EPs</h2>
-						<span class="shelf-count">{filteredTidalSinglesEPs.length}</span>
-						<a class="shelf-link" href={`${discographyBase}/discography/singles`}>View all →</a>
-					</div>
-					<MediaRail
-						items={filteredTidalSinglesEPs}
-						getKey={(a) => a.tidal_id}
-					>
-						{#snippet card(album)}
-							{@render discographyCard(album, 'ep_single')}
-						{/snippet}
-					</MediaRail>
-				</section>
-			{/if}
-
-			{#if filteredTidalCompilations.length > 0}
-				<section class="section">
-					<div class="shelf-head">
-						<h2 class="section-title">Compilations</h2>
-						<span class="shelf-count">{filteredTidalCompilations.length}</span>
-						<a class="shelf-link" href={`${discographyBase}/discography/compilations`}>View all →</a>
-					</div>
-					<MediaRail
-						items={filteredTidalCompilations}
-						getKey={(a) => a.tidal_id}
-					>
-						{#snippet card(album)}
-							{@render discographyCard(album, 'compilation')}
-						{/snippet}
-					</MediaRail>
-				</section>
-			{/if}
-
-			{#if filteredTidalLiveAlbums.length > 0}
-				<section class="section">
-					<div class="shelf-head">
-						<h2 class="section-title">Live</h2>
-						<span class="shelf-count">{filteredTidalLiveAlbums.length}</span>
-					</div>
-					<MediaRail
-						items={filteredTidalLiveAlbums}
-						getKey={(a) => a.tidal_id}
-					>
-						{#snippet card(album)}
-							{@render discographyCard(album, 'live')}
-						{/snippet}
-					</MediaRail>
-				</section>
-			{/if}
+		{#if hasAnyTidalAlbums && discoActive}
+			<section class="section" aria-labelledby="discography-heading">
+				<div class="shelf-head">
+					<h2 id="discography-heading" class="section-title">Discography</h2>
+					<a class="shelf-link" href={`${discographyBase}${discoActive.path}`}>Open full discography</a>
+				</div>
+				{#if discoTabs.length > 1}
+					<ScopeTabs
+						tabs={discoTabs}
+						current={discoActive.id}
+						label="Release types"
+						align="start"
+						onselect={(id) => (discoChoice = id as DiscoCategory)}
+					/>
+				{/if}
+				<div class="disco-grid">
+					{#each discoActive.items.slice(0, DISCO_PREVIEW) as album (album.tidal_id)}
+						{@render discographyCard(album, discoActive.id)}
+					{/each}
+				</div>
+			</section>
 
 		{:else}
 			{#if fallbackFullAlbums.length > 0}
@@ -1295,7 +1212,7 @@
 		{#if tidalVideos.length > 0}
 			<section class="section">
 				<div class="shelf-head">
-					<p class="section-eyebrow">TIDAL · Videos</p>
+					<h2 class="section-title">Videos</h2>
 					<span class="shelf-count">{tidalVideos.length}</span>
 				</div>
 				<MediaRail items={tidalVideos} getKey={(v) => v.tidal_id}>
@@ -1361,21 +1278,6 @@
 	}
 	.empty-action:hover { background: var(--accent); color: var(--text-on-accent); }
 
-	.btn-spinner {
-		width: 16px;
-		height: 16px;
-		border-radius: 50%;
-		border: 2px solid currentColor;
-		border-right-color: transparent;
-		display: inline-block;
-		animation: btn-spin 0.7s linear infinite;
-	}
-	.ghost-btn.pending { opacity: 0.85; cursor: progress; }
-	.ghost-btn:disabled { cursor: progress; }
-	@keyframes btn-spin {
-		to { transform: rotate(360deg); }
-	}
-
 	.hero-portrait {
 		width: 100%;
 		height: 100%;
@@ -1433,11 +1335,6 @@
 		}
 	}
 
-	.hero-library-substat {
-		margin: 0;
-		font-size: var(--font-size-xs);
-		color: var(--text-tertiary);
-	}
 
 	.hero-bio-panel {
 		margin: 6px 0 0;
@@ -1478,16 +1375,6 @@
 		text-transform: uppercase;
 	}
 
-	/* Eyebrow above the Videos rail (small uppercase label, sits where the
-	   h2 normally would, paired with the existing shelf-count). */
-	.section-eyebrow {
-		margin: 0;
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-		letter-spacing: 0.06em;
-		text-transform: uppercase;
-		color: var(--text-secondary);
-	}
 
 	/* Video rail card, reusing .grid-card sizing while the art slot is a
 	   wider 16:9 to match how videos render. */
@@ -1501,7 +1388,7 @@
 	}
 	.video-play-overlay {
 		opacity: 0;
-		transition: opacity 0.18s ease;
+		transition: opacity var(--motion-base);
 	}
 	.video-card-rail:hover .video-play-overlay {
 		opacity: 1;
@@ -1521,7 +1408,7 @@
 		text-decoration: none;
 		color: inherit;
 		border-radius: 12px;
-		transition: background 140ms ease;
+		transition: background var(--motion-fast);
 	}
 	.similar-card:hover {
 		background: rgba(255, 255, 255, 0.04);
@@ -1567,64 +1454,8 @@
 		color: var(--text-tertiary);
 	}
 
-	.filter-bar {
-		padding: var(--space-2) var(--space-6) 0;
-		max-width: calc(260px + 64px);
-	}
-
-	.actions-microcopy {
-		margin: 0;
-		padding: 0 var(--space-6) var(--space-2);
-		color: var(--text-tertiary);
-		font-size: var(--font-size-xs);
-		line-height: var(--line-height-normal);
-	}
-
-	.actions-microcopy strong {
-		color: var(--text-secondary);
-		font-weight: var(--font-weight-semibold);
-	}
-
-	.play-fab {
-		all: unset;
-		width: 56px;
-		height: 56px;
-		border-radius: 50%;
-		display: grid;
-		place-items: center;
-		background: var(--accent);
-		color: var(--text-on-accent);
-		cursor: pointer;
-		transition: transform var(--motion-fast), background var(--motion-fast);
-		box-shadow: 0 8px 24px -8px var(--accent-glow);
-	}
-
-	.play-fab:hover {
-		transform: scale(1.06);
-		background: var(--accent-strong);
-	}
-
-	.play-fab:active { transform: scale(0.98); }
-
-	.ghost-btn {
-		all: unset;
-		width: 40px;
-		height: 40px;
-		border-radius: 50%;
-		display: grid;
-		place-items: center;
-		color: var(--text-secondary);
-		cursor: pointer;
-		transition: color var(--motion-fast), background var(--motion-fast);
-	}
-
-	.ghost-btn:hover {
-		color: var(--text-primary);
-		background: var(--bg-hover);
-	}
-
 	.section {
-		padding: var(--space-5) var(--space-6) 0;
+		padding: var(--space-5) 0 0;
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-4);
@@ -1636,6 +1467,27 @@
 		font-weight: var(--font-weight-bold);
 		margin: 0;
 		letter-spacing: 0;
+	}
+
+	.badge-new {
+		position: absolute;
+		top: 8px;
+		right: 8px;
+		padding: 3px 8px;
+		border-radius: 999px;
+		background: rgba(0, 0, 0, 0.55);
+		color: #fff;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-bold);
+		letter-spacing: 0.12em;
+		backdrop-filter: var(--blur-base);
+		-webkit-backdrop-filter: var(--blur-base);
+	}
+
+	.disco-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(min(160px, 100%), 1fr));
+		gap: var(--space-5) var(--space-4);
 	}
 
 	.shelf-head {
@@ -1661,7 +1513,10 @@
 		color: var(--text-primary);
 	}
 
+	/* A readable list width on wide windows (and at reduced interface size),
+	   so title and duration stay within one glance. */
 	.popular-list {
+		width: min(100%, 72rem);
 		list-style: none;
 		margin: 0;
 		padding: 0;
@@ -1748,20 +1603,6 @@
 		transform: translateY(0);
 	}
 
-	.badge-new {
-		position: absolute;
-		top: 8px;
-		right: 8px;
-		padding: 3px 8px;
-		border-radius: 999px;
-		background: rgba(0, 0, 0, 0.55);
-		color: #fff;
-		font-size: var(--font-size-2xs);
-		font-weight: var(--font-weight-bold);
-		letter-spacing: 0.12em;
-		backdrop-filter: var(--blur-base);
-		-webkit-backdrop-filter: var(--blur-base);
-	}
 
 	.grid-card.not-in-library .grid-title {
 		color: var(--text-secondary);
@@ -1806,7 +1647,7 @@
 	}
 
 	@media (max-width: 720px) {
-		.section { padding: var(--space-4) var(--space-4) 0; }
+		.section { padding: var(--space-4) 0 0; }
 	}
 
 	.popular-row-wrap {
@@ -1822,7 +1663,7 @@
 		left: 0;
 		background: linear-gradient(90deg, var(--accent-soft, rgba(125, 99, 255, 0.18)) 0%, transparent 100%);
 		pointer-events: none;
-		transition: width 400ms ease;
+		transition: width var(--motion-slow);
 		z-index: 0;
 	}
 
@@ -1835,13 +1676,15 @@
 	   so the merged Top tracks list scans as one continuous list. */
 	.tidal-popular-row {
 		display: grid;
-		grid-template-columns: 32px 40px 1fr auto auto;
+		/* Same columns as TrackRow's numbered row: number, art, title, actions,
+		   a 60px duration, so local and TIDAL rows line up. */
+		grid-template-columns: 32px 42px 1fr auto auto 60px;
 		align-items: center;
-		gap: var(--space-3);
-		padding: var(--space-2) var(--space-3);
+		gap: 14px;
+		padding: 8px 12px;
 		border-radius: var(--radius-sm, 8px);
 		cursor: pointer;
-		transition: background 120ms ease;
+		transition: background var(--motion-fast);
 		min-height: 52px;
 	}
 	.tidal-popular-row:hover .row-btn,
@@ -1857,8 +1700,8 @@
 		font-variant-numeric: tabular-nums;
 	}
 	.tidal-row-art {
-		width: 40px;
-		height: 40px;
+		width: 42px;
+		height: 42px;
 		border-radius: 4px;
 		object-fit: cover;
 		display: block;
@@ -1891,21 +1734,23 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
-	.tidal-pill {
-		font-size: var(--font-size-2xs);
-		font-weight: var(--font-weight-bold);
-		letter-spacing: 0.06em;
-		padding: 3px 8px;
-		border-radius: 4px;
-		background: rgba(0, 184, 212, 0.16);
-		color: rgba(120, 220, 240, 0.95);
-		border: 1px solid rgba(0, 184, 212, 0.3);
-		text-transform: uppercase;
+	.status-glyph {
+		color: var(--text-tertiary);
+		font-size: var(--font-size-xs);
+		line-height: 1;
+	}
+
+	.tidal-row-duration {
+		text-align: right;
+		color: var(--text-secondary);
+		font-size: var(--font-size-sm);
+		font-variant-numeric: tabular-nums;
 	}
 
 	.show-all-btn {
-		margin: 12px auto 0;
+		margin: 12px 0 0;
 		display: block;
+		width: fit-content;
 		padding: 6px 16px;
 		border-radius: 999px;
 		background: rgba(255, 255, 255, 0.06);
@@ -1913,7 +1758,7 @@
 		color: var(--text-secondary, rgba(255, 255, 255, 0.7));
 		font-size: var(--font-size-sm);
 		cursor: pointer;
-		transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+		transition: background var(--motion-fast), color var(--motion-fast), border-color var(--motion-fast);
 	}
 	.show-all-btn:hover {
 		background: rgba(255, 255, 255, 0.11);

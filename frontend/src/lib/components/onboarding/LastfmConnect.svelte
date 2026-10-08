@@ -325,7 +325,7 @@
 		border: 1px solid transparent;
 		cursor: pointer;
 		font-weight: var(--font-weight-medium);
-		transition: background 120ms, border-color 120ms;
+		transition: background var(--motion-fast), border-color var(--motion-fast);
 	}
 	.btn-primary { background: rgba(255, 255, 255, 0.92); color: #0a0d14; }
 	.btn-primary:hover:not(:disabled) { background: #fff; }

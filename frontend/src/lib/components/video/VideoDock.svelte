@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { prefersReducedMotion } from '$lib/stores/motion';
 	import { onDestroy } from 'svelte';
 	import { get } from 'svelte/store';
 	import { goto } from '$app/navigation';
@@ -573,7 +574,7 @@
 		// stage's overflow and faded with the arriving page, so the video
 		// grew out from behind the frame.
 		const moving = previousPlace !== null && previousPlace !== next;
-		const reducedMotion = moving && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+		const reducedMotion = moving && prefersReducedMotion();
 		if (next !== 'full') moveHome();
 		else if (!dimming && (!moving || reducedMotion) && $videoStageAnchor) moveIntoStage($videoStageAnchor);
 		if (reducedMotion && next === 'expanded') dimming = false;
@@ -957,7 +958,7 @@
 		display: flex;
 		gap: 5px;
 		opacity: 0;
-		transition: opacity 0.16s ease;
+		transition: opacity var(--motion-fast);
 	}
 
 	.video-dock.mini:hover .mini-chrome,
@@ -992,7 +993,7 @@
 	}
 
 	.mini-btn:focus-visible {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
 	}
 
@@ -1030,7 +1031,7 @@
 		background: #000;
 		opacity: 0;
 		pointer-events: none;
-		transition: opacity 90ms ease;
+		transition: opacity var(--motion-press);
 	}
 
 	.fullscreen-dim.on {

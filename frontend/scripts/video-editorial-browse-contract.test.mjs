@@ -23,7 +23,7 @@ describe('Videos tab browse state', () => {
 		expect(source).not.toContain('<VideoPlayer');
 		expect(source).not.toContain('videoStageAnchor');
 		expect(source).not.toContain('<SearchField');
-		expect(source).not.toContain('<VideoNavigation');
+		expect(source).not.toContain('<ScopeTabs');
 	});
 
 	test('daily picks lead as the featured row and play through the shared video queue', () => {
@@ -92,18 +92,19 @@ describe('Video modules never fall through to the audio detail page', () => {
 
 describe('Video section flow', () => {
 	test('one header for every tab: Back and search on the first row, pills under it', () => {
-		const header = layout.slice(layout.indexOf('<header class="video-header">'), layout.indexOf('</header>'));
-		expect(header).toContain('class="back-link"');
-		expect(header.indexOf('class="back-link"')).toBeLessThan(header.indexOf('<SearchField'));
-		expect(header.indexOf('<SearchField')).toBeLessThan(header.indexOf('<VideoNavigation'));
-		expect(header).toContain('<VideoNavigation current={tab} />');
+		// The shared CommandHeader puts Back beside the field and the tabs
+		// snippet under it (command-header-contract.test.mjs).
+		const header = layout.slice(layout.indexOf('<CommandHeader'), layout.indexOf('</CommandHeader>'));
+		expect(header).toContain('{#snippet field()}');
+		expect(header.indexOf('<SearchField')).toBeLessThan(header.indexOf('{#snippet tabs()}'));
+		expect(header).toContain('<ScopeTabs tabs={VIDEO_TABS} current={tab} label="Video pages" replaceState />');
 		expect(section).toContain("{ id: 'editorial', href: '/videos/editorial', label: 'TIDAL editorial' }");
 	});
 
 	test('Back is unconditional and returns to where the listener came from', () => {
-		expect(layout).toContain("onclick={() => goBack(onWatchPage ? '/videos' : '/')}");
-		const row = layout.slice(layout.indexOf('<div class="search-row">'), layout.indexOf('<div class="search-slot">'));
-		expect(row).not.toContain('{#if');
+		const open = layout.slice(layout.indexOf('<CommandHeader'), layout.indexOf('{#snippet field()}'));
+		expect(open).toContain("onback={() => goBack(onWatchPage ? '/videos' : '/')}");
+		expect(layout.slice(0, layout.indexOf('<CommandHeader')).split('<div class="video-section">')[1]).not.toContain('{#if');
 	});
 
 	test('the field filters likes on Liked and searches TIDAL everywhere else', () => {

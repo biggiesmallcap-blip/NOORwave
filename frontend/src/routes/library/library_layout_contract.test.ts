@@ -20,48 +20,26 @@ function cssBlock(selector: string): string {
 }
 
 describe('library layout contracts', () => {
-	test('primary category pills stay centered under the search input', () => {
-		expect(source).toContain('class="filter-pill-group filter-pill-group--primary"');
-		expect(source).toContain('class="filter-pill-actions"');
-		expect(source).toContain('class="library-search-meta"');
-		const primaryStart = source.indexOf('class="filter-pill-group filter-pill-group--primary"');
-		const actionsStart = source.indexOf('class="filter-pill-actions"');
-		const randomStart = source.indexOf('title="Random play"');
-		const metaStart = source.indexOf('class="library-search-meta"');
-		const statusStart = source.indexOf('class="library-status"');
-		expect(primaryStart).toBeGreaterThan(-1);
-		expect(actionsStart).toBeGreaterThan(primaryStart);
-		expect(randomStart).toBeGreaterThan(primaryStart);
-		expect(randomStart).toBeLessThan(actionsStart);
-		expect(metaStart).toBeGreaterThan(actionsStart);
-		expect(statusStart).toBeGreaterThan(metaStart);
+	test('Songs follows the songs-scope setting; Liked is no longer a tab', () => {
+		expect(source).toContain("let likedOnly = $derived($librarySongsScope === 'liked');");
+		expect(source).not.toContain("switchTab('liked')");
+		expect(source).toContain('restoreLibraryTab(saved.activeTab)');
+	});
 
-		const row = cssBlock('.filter-pills');
-		expect(row).toContain('max-width: 720px');
-		expect(row).toContain('margin: 0 auto');
-		// Tabs on their own row, contextual actions stacked underneath - both
-		// centered, so the tab row never shifts and nothing overflows sideways.
-		expect(row).toContain('flex-direction: column');
-		expect(row).toContain('align-items: center');
-
-		const groups = cssBlock('.filter-pill-group,\n\t.filter-pill-actions');
-		expect(groups).toContain('justify-content: center');
-		expect(groups).toContain('flex-wrap: wrap');
-
-		// Every toolbar control shares one height and the pill radius, sized off
-		// the app-wide token so the other pages' pill rows match.
-		const appCss = readFileSync(join(here, '../../app.css'), 'utf8');
-		expect(appCss).toContain('--control-h: 30px');
-		for (const selector of ['.filter-pill', '.album-sort', '.view-toggle', '.decade-chip']) {
-			const block = cssBlock(selector);
-			expect(block, selector).toContain('height: var(--control-h)');
-			expect(block, selector).toContain('border-radius: 999px');
-		}
-		expect(source).not.toContain('filter-pill--ghost');
-
-		const meta = cssBlock('.library-search-meta');
-		expect(meta).toContain('min-height');
-		expect(meta).toContain('justify-content: center');
+	test('the command header holds the field, the tabs and a toolbar on every tab', () => {
+		const header = source.indexOf('<CommandHeader>');
+		const tabs = source.indexOf('<ScopeTabs tabs={libraryTabs}');
+		const toolbar = source.indexOf('<div class="library-toolbar">');
+		expect(header).toBeGreaterThan(-1);
+		expect(tabs).toBeGreaterThan(header);
+		expect(toolbar).toBeGreaterThan(tabs);
+		// The search status replaces the toolbar's start, so the header keeps
+		// one height while searching.
+		const status = source.indexOf('{#if searchBusy}', toolbar);
+		expect(status).toBeGreaterThan(toolbar);
+		const row = cssBlock('.library-toolbar');
+		expect(row).toContain('justify-content: space-between');
+		expect(row).toContain('flex-wrap: wrap');
 	});
 
 	test('album_cards_route_artwork_through_shared_fallback_component', () => {
@@ -80,7 +58,7 @@ describe('library layout contracts', () => {
 		expect(source).toContain('class="artist-photo"');
 		expect(countOccurrences(source, 'className="artist-photo-img"')).toBe(2);
 		expect(countOccurrences(source, 'src={artistImageSources(artist.photo_url, artistLazyArt[artist.id], fallbackSrc)}')).toBe(2);
-		expect(countOccurrences(source, 'fallbackText={artist.name.charAt(0).toUpperCase()}')).toBe(2);
+		expect(countOccurrences(source, 'fallbackText={initials(artist.name)}')).toBe(2);
 		expect(countOccurrences(source, 'enabled: !artistLazyArt[artist.id] && !fallbackSrc')).toBe(2);
 		expect(source).toContain(':global(.artist-photo-img)');
 		expect(source).not.toContain('failedArtistImages');

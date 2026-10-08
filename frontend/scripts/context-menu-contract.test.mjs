@@ -32,7 +32,7 @@ describe('context menu coverage contract', () => {
 	});
 
 	test('automix track references use the shared track menu builder', () => {
-		const source = readFileSync('src/routes/automix/+page.svelte', 'utf8');
+		const source = readFileSync('src/lib/components/mix/AutomixPanel.svelte', 'utf8');
 
 		expect(source).toContain('buildTrackMenu');
 		expect(source).toContain('oncontextmenu');

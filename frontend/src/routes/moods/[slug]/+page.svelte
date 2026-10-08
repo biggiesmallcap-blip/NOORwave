@@ -7,7 +7,7 @@
   import DetailHero from '$lib/components/ui/DetailHero.svelte';
   import SpotifyMoodRail from '$lib/components/moods/SpotifyMoodRail.svelte';
   import { SPOTIFY_MOODS_BY_SLUG } from '$lib/components/moods/spotify-moods-data';
-  import { getCachedMoodPage, putCachedMoodPage } from '$lib/stores/tidal-moods-cache';
+  import { getCachedMoodCategories, getCachedMoodPage, putCachedMoodPage } from '$lib/stores/tidal-moods-cache';
   import { goBack } from '$lib/navigation/back';
 
   type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
@@ -44,7 +44,9 @@
     loadGeneration = generation;
     activeMoodController?.abort();
     activeMoodController = null;
-    title = humanize(s);
+    // TIDAL's own name from the moods list when we have it; the slug is a
+    // last resort ("mood_djselector" is not a title).
+    title = getCachedMoodCategories()?.find((category) => category.slug === s)?.title ?? humanize(s);
     // Cache hit: render immediately without a skeleton, no network call.
     const cached = getCachedMoodPage(s);
     if (cached !== null) {
@@ -90,7 +92,7 @@
 
 <div class="page">
   <button class="back-link" type="button" onclick={() => goBack('/moods')}>Back</button>
-  <DetailHero eyebrow="TIDAL mood" title={title || '...'} variant="text" />
+  <DetailHero eyebrow="Mood" title={title || '...'} variant="text" />
 
   {#if spotifyCategory}
     <section class="spotify-block">
@@ -113,7 +115,7 @@
 </div>
 
 <style>
-  .page { max-width: var(--content-width); margin: 0 auto; padding: var(--space-6) var(--space-6) calc(var(--space-7) * 2); display: flex; flex-direction: column; gap: var(--space-5); }
+  .page { width: min(100%, var(--content-width)); margin: 0 auto; padding: 0 0 calc(var(--space-7) * 2); display: flex; flex-direction: column; gap: var(--space-5); }
   .back-link { align-self: flex-start; }
   .muted-line { margin: 0; font-size: var(--font-size-sm); color: var(--text-secondary); }
   .inline-link { background: none; border: none; padding: 0; font: inherit; color: var(--accent-line); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; margin-left: var(--space-1); }

@@ -79,7 +79,7 @@
 		height: 100%;
 		background: rgba(124, 128, 255, 0.7);
 		border-radius: 999px;
-		transition: width 0.3s ease;
+		transition: width var(--motion-slow);
 	}
 	.training-count { font-size: var(--font-size-2xs); color: rgba(255,255,255,0.35); white-space: nowrap; }
 

@@ -1,14 +1,13 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { goto } from '$app/navigation';
 	import type { Unsubscriber } from 'svelte/store';
 	import type { Snapshot } from './$types';
-	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import { captureScroll, restoreScroll } from '$lib/navigation/scroll';
 	import {
 		type RSSFeedItem,
 	} from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
+	import JumpBackInShelf from '$lib/components/home/JumpBackInShelf.svelte';
 	import YourMixesShelf from '$lib/components/home/YourMixesShelf.svelte';
 	import PersonalRadioShelf from '$lib/components/home/PersonalRadioShelf.svelte';
 	import HomeRecommendationsShelf from '$lib/components/home/HomeRecommendationsShelf.svelte';
@@ -22,15 +21,6 @@
 	// Home page data
 	let articles = $state<RSSFeedItem[]>([]);
 	let news = $state<RSSFeedItem[]>([]);
-	let homeQuery = $state('');
-
-	function homeSearchKeydown(event: KeyboardEvent) {
-		if (event.key !== 'Enter') return;
-		const q = homeQuery.trim();
-		if (!q) return;
-		event.preventDefault();
-		void goto(`/search?q=${encodeURIComponent(q)}`);
-	}
 
 	// Loading states
 	let error = $state<string | null>(null);
@@ -113,7 +103,7 @@
 </svelte:head>
 
 {#snippet articleCard(article: RSSFeedItem)}
-	<a class="article-card glass-tile" href={article.link} target="_blank" rel="noopener">
+	<a class="article-card" href={article.link} target="_blank" rel="noopener">
 		<div class="article-content">
 			<h3 class="article-title">{article.title}</h3>
 			{#if article.description}
@@ -164,68 +154,23 @@
 		</nav>
 
 
-		<!-- Home is the browse surface, so the search box lives here too, but the
-		     searching itself stays on /search rather than being duplicated: that
-		     route already owns the debounce, the provider fan-out, the filter
-		     pills and the result ranking, and it already seeds itself from ?q=
-		     on mount. This is a handoff, not a second implementation. -->
-		<div class="home-search">
-			<SearchField
-				bind:value={homeQuery}
-				variant="page"
-				placeholder="Search Tidal's full catalogue"
-				ariaLabel="Search"
-				onkeydown={homeSearchKeydown}
-			/>
-		</div>
-
-		<!-- `index` is the section's slot in the stack. It only spaces out the
-		     entrance animation; nothing else reads it. YourMixesShelf owns two
-		     sections (music + video), so the next index skips a slot, and
-		     HomeRecommendationsShelf renders one section per provider shelf.
-
-		     Order alternates heavy and light so no two murals or two grids sit
-		     next to each other, which is what made the old page read as a stack
-		     of slabs. -->
-
-		<!-- Your Mixes (TIDAL) — replaces the prime above-Trending slot. -->
-		<YourMixesShelf index={0} />
-
-		<!-- Personal Radio Stations (TIDAL) -->
-		<PersonalRadioShelf index={2} />
-
-		<!-- Provider recommendations load independently from profile integrations. -->
-		<HomeRecommendationsShelf index={3} />
-
-		<!-- TIDAL's own editorial home modules (The Hits, New Tracks, New
-		     Albums, Spotlighted Uploads, From our editors). These used to render
-		     only in the /search empty state, which meant the app had two browse
-		     surfaces and Home was the thinner one. -->
-		<!-- Slots 6-10 are reserved: this renders one section per TIDAL module
-		     and there are usually five, so later sections start at 11. The
-		     indices only drive the entrance stagger, but two sections sharing a
-		     slot land together and break the cascade. -->
-		<DiscoverShelves index={6} quiet />
-
-		<!-- Moods preview rail. Pulls the first chunk of categories from
-		     /api/tidal/moods and links each tile to /moods/[slug]. Full
-		     listing lives at /moods. -->
-		<HomeMoodsRail index={11} />
-
-		<!-- Previews of two editorial routes that already existed but had
-		     nothing linking to them. Each hides itself when TIDAL returns no
-		     modules for the page, which new-releases currently does. -->
-		<HomeEditorialPreview
-			pagePath="new-releases"
-			title="New releases"
-			href="/new-releases"
-			index={12}
-		/>
-		<HomeEditorialPreview pagePath="hires" title="Hi-Res picks" href="/hires" index={13} />
+		<!-- Order (audit Round 2): continue listening, then personal rows, then
+		     what is new, then browsing, then reading. `index` only staggers the
+		     entrance; HomeRecommendationsShelf and DiscoverShelves render one
+		     section per shelf, so their successors skip slots. -->
+		<JumpBackInShelf index={0} />
+		<YourMixesShelf kind="music" index={1} />
+		<HomeRecommendationsShelf index={2} />
+		<HomeEditorialPreview pagePath="new-releases" title="New releases" href="/new-releases" index={5} />
+		<PersonalRadioShelf index={6} />
+		<HomeMoodsRail index={7} />
+		<DiscoverShelves index={8} quiet />
+		<YourMixesShelf kind="video" index={13} />
+		<HomeEditorialPreview pagePath="hires" title="Hi-Res picks" href="/hires" index={14} />
 
 		<!-- Weekly Articles Section -->
-		<section class="discovery-section rise-in-shelf" style="--rise-index: 14">
-			<SectionHeader eyebrow="Features" title="Weekly articles" variant="charts" level={2}>
+		<section class="discovery-section rise-in-shelf" style="--rise-index: 15">
+			<SectionHeader title="Weekly articles" variant="charts" level={2}>
 				{#snippet actions()}
 					{#if sectionsLoading.articles}
 						<span class="loading-indicator">Loading...</span>
@@ -248,8 +193,8 @@
 		</section>
 
 		<!-- Industry News Section -->
-		<section class="discovery-section rise-in-shelf" style="--rise-index: 15">
-			<SectionHeader eyebrow="Industry" title="Latest news" variant="charts" level={2}>
+		<section class="discovery-section rise-in-shelf" style="--rise-index: 16">
+			<SectionHeader title="Latest news" variant="charts" level={2}>
 				{#snippet actions()}
 					{#if sectionsLoading.news}
 						<span class="loading-indicator">Loading...</span>
@@ -314,11 +259,6 @@
 		padding-bottom: 40px;
 	}
 
-	.home-search {
-		width: min(100%, 720px);
-		margin-inline: auto;
-	}
-
 	/* Discovery sections. Two spacing values on this page and no others:
 	   --space-5 between sections (from .page-shell) and --space-3 between a
 	   section's header and its content. */
@@ -342,7 +282,6 @@
 		min-width: 0;
 		height: 100%;
 		box-sizing: border-box;
-		padding: 18px;
 		text-decoration: none;
 		color: inherit;
 		transition: transform var(--motion-base), box-shadow var(--motion-base);

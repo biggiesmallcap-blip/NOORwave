@@ -485,7 +485,7 @@
 	}
 
 	.remote-art.swiping {
-		transition: box-shadow 120ms ease, border-radius 120ms ease;
+		transition: box-shadow var(--motion-fast), border-radius var(--motion-fast);
 	}
 
 	.remote-art.swiping,
@@ -523,7 +523,7 @@
 			rgba(255, 255, 255, 0) 70%
 		);
 		mix-blend-mode: screen;
-		transition: opacity 220ms ease;
+		transition: opacity var(--motion-base);
 	}
 
 	.remote-art.swiping .remote-art-sheen {

@@ -18,14 +18,12 @@
 		pagePath,
 		title,
 		href,
-		eyebrow = 'TIDAL',
 		limitModules = 2,
 		index = 0,
 	}: {
 		pagePath: string;
 		title: string;
 		href: string;
-		eyebrow?: string;
 		limitModules?: number;
 		index?: number;
 	} = $props();
@@ -54,7 +52,7 @@
 		data-section={`editorial-${pagePath}`}
 		style={`--rise-index: ${index}`}
 	>
-		<SectionHeader {eyebrow} {title} variant="charts" level={2} {href} />
+		<SectionHeader {title} variant="charts" level={2} {href} />
 		<TidalDiscoverShelves {modules} nested />
 	</section>
 {/if}

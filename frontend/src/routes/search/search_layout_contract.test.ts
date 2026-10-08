@@ -114,8 +114,8 @@ describe('search layout contracts', () => {
 	});
 
 	test('all-results view caps each section preview while category views keep full lists', () => {
-		expect(source).toContain('const ALL_VIEW_ARTIST_LIMIT = 8');
-		expect(source).toContain('const ALL_VIEW_ALBUM_LIMIT = 8');
+		expect(source).toContain('const ALL_VIEW_ARTIST_LIMIT = 24');
+		expect(source).toContain('const ALL_VIEW_ALBUM_LIMIT = 24');
 		expect(source).toContain('const ALL_VIEW_TRACK_LIMIT = 10');
 		expect(source).toContain('const ALL_VIEW_PLAYLIST_LIMIT = 12');
 		expect(source).toContain("filterMode === 'all' ? sortedArtists.slice(0, ALL_VIEW_ARTIST_LIMIT) : sortedArtists");

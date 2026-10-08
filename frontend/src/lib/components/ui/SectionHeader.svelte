@@ -1,10 +1,11 @@
 <script lang="ts">
+	// A section gets a title, never an eyebrow over it (STYLING.md "Typography").
+	// Where the source matters, say it once in the subtitle.
 	import type { Snippet } from 'svelte';
 
 	let {
 		title,
 		subtitle = '',
-		eyebrow = '',
 		variant = 'default',
 		level = 3,
 		href = '',
@@ -13,7 +14,6 @@
 	}: {
 		title: string;
 		subtitle?: string;
-		eyebrow?: string;
 		variant?: 'default' | 'charts';
 		level?: 2 | 3;
 		/** Route this section is a preview of. Renders a trailing link, which is
@@ -26,13 +26,10 @@
 
 <div class="section-header" class:charts={variant === 'charts'}>
 	<div class="copy">
-		{#if eyebrow}
-			<p class="eyebrow">{eyebrow}</p>
-		{/if}
 		{#if level === 2}
-			<h2 class="title">{title}</h2>
+			<h2 class="title t-section">{title}</h2>
 		{:else}
-			<h3 class="title">{title}</h3>
+			<h3 class="title t-section">{title}</h3>
 		{/if}
 		{#if subtitle}
 			<p class="subtitle">{subtitle}</p>
@@ -66,14 +63,6 @@
 		gap: 6px;
 	}
 
-	.eyebrow {
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-		letter-spacing: 0.14em;
-		text-transform: uppercase;
-		color: var(--text-tertiary);
-	}
-
 	.subtitle {
 		color: var(--text-secondary);
 	}
@@ -90,22 +79,10 @@
 		gap: var(--space-1);
 	}
 
-	/* The charts variant used to re-style the eyebrow (zero tracking,
-	   --text-muted). Between that, the global `.eyebrow` and one component's
-	   local override, the same word rendered three different ways in a single
-	   scroll on Home. The eyebrow is now identical in both variants; charts
-	   only adjusts the metrics it needs for its tighter header. */
-	.section-header.charts .eyebrow {
-		margin: 0;
-		line-height: 1;
-	}
-
+	/* Charts only tightens the metrics for its denser header. */
 	.section-header.charts .title {
 		color: var(--text-primary);
-		font-size: var(--font-size-lg);
-		font-weight: var(--font-weight-bold);
 		line-height: var(--line-height-tight);
-		letter-spacing: 0;
 	}
 
 	.section-header.charts .subtitle {

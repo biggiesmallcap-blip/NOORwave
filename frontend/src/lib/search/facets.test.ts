@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { FACETS, matchFacets, inlineCompletionFor, facetForToken } from './facets';
+import { FACETS, inlineCompletionFor, facetForToken } from './facets';
 import { SUPPORTED_KEYS } from './query_parser';
 
 describe('facet descriptors', () => {
@@ -18,26 +18,6 @@ describe('facet descriptors', () => {
       expect(suggested.has(key)).toBe(true);
     }
     expect(suggested.has('vocal')).toBe(false);
-  });
-});
-
-describe('matchFacets', () => {
-  test('empty tail returns the full list', () => {
-    expect(matchFacets('')).toEqual(FACETS);
-  });
-
-  test('narrows by key prefix', () => {
-    expect(matchFacets('be').map((f) => f.key)).toEqual([]); // no key starts with 'be'
-    expect(matchFacets('bp').map((f) => f.key)).toEqual(['bpm']);
-    expect(matchFacets('a').map((f) => f.key)).toEqual(['artist', 'album']);
-  });
-
-  test('narrows by label prefix too', () => {
-    expect(matchFacets('tempo').map((f) => f.key)).toEqual(['bpm']);
-  });
-
-  test('a chosen key (contains colon) suggests nothing', () => {
-    expect(matchFacets('key:')).toEqual([]);
   });
 });
 

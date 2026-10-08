@@ -38,7 +38,8 @@
 		menuOptions,
 		selected = false,
 		onSelect,
-		worldPlayCount = null
+		worldPlayCount = null,
+		displayTitle
 	}: {
 		track: TrackInput;
 		variant: TrackRowVariant;
@@ -53,6 +54,8 @@
 		selected?: boolean;
 		onSelect?: (e: MouseEvent | KeyboardEvent) => void;
 		worldPlayCount?: number | null;
+		/** Shown instead of the title, e.g. the movement inside a grouped work. */
+		displayTitle?: string;
 	} = $props();
 
 	let playable = $derived(canPlayTrack(track));
@@ -152,6 +155,7 @@
 	<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 	<li
 		class="track-row numbered"
+		class:no-plays={!showPlayCount}
 		class:active={isCurrent}
 		class:selected
 		class:disabled={!rowInteractive}
@@ -179,7 +183,7 @@
 			{/if}
 		</div>
 		<div class="cell-meta">
-			<p class="title">{track.title}</p>
+			<p class="title">{displayTitle ?? track.title}</p>
 			{#if showArtist && track.artist_name}
 				{#if track.artist_id != null && track.artist_id > 0}
 					<a
@@ -247,6 +251,7 @@
 	<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 	<li
 		class="track-row indexed"
+		class:no-plays={!showPlayCount}
 		class:active={isCurrent}
 		class:selected
 		class:disabled={!rowInteractive}
@@ -274,7 +279,7 @@
 			{/if}
 		</span>
 		<div class="cell-meta">
-			<p class="title">{track.title}</p>
+			<p class="title">{displayTitle ?? track.title}</p>
 			{#if showArtist && track.artist_name}
 				{#if track.artist_id != null && track.artist_id > 0}
 					<a
@@ -366,7 +371,7 @@
 			<div class="cell-art-thumb placeholder"><span>♫</span></div>
 		{/if}
 		<div class="cell-meta">
-			<p class="title">{track.title}</p>
+			<p class="title">{displayTitle ?? track.title}</p>
 			<p class="sub">
 				{#if showArtist && track.artist_name}
 					{#if track.artist_id != null && track.artist_id > 0}
@@ -447,7 +452,7 @@
 		oncontextmenu={handleContextMenu}
 	>
 		<div class="cell-meta">
-			<p class="title">{track.title}</p>
+			<p class="title">{displayTitle ?? track.title}</p>
 			{#if showArtist && track.artist_name}
 				{#if track.artist_id != null && track.artist_id > 0}
 					<a
@@ -493,6 +498,12 @@
 		padding: 8px 12px;
 	}
 
+	/* Without the plays column the actions and duration keep their own
+	   columns, so durations line up with other rows in the same list. */
+	.track-row.numbered.no-plays {
+		grid-template-columns: 32px 42px 1fr auto 60px;
+	}
+
 	.track-row.numbered .cell-index {
 		color: var(--text-secondary);
 		text-align: center;
@@ -522,6 +533,10 @@
 	/* indexed (album track list) */
 	.track-row.indexed {
 		grid-template-columns: 40px 1fr 132px auto 64px;
+	}
+
+	.track-row.indexed.no-plays {
+		grid-template-columns: 40px 1fr auto 64px;
 	}
 
 	.track-row.indexed .cell-num {

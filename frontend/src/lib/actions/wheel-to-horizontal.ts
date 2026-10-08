@@ -1,3 +1,4 @@
+import { prefersReducedMotion } from '$lib/stores/motion';
 /**
  * Svelte action: convert vertical wheel events into horizontal scroll on a
  * horizontally-overflowing element (album rails, artist rails, video carousels).
@@ -21,9 +22,7 @@ const EDGE_EPSILON = 2;
 type GestureOwner = 'page' | 'rail' | null;
 
 function preferredScrollBehavior(): ScrollBehavior {
-	return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
-		? 'auto'
-		: 'smooth';
+	return prefersReducedMotion() ? 'auto' : 'smooth';
 }
 
 export function wheelToHorizontal(node: HTMLElement, opts: Options = {}) {

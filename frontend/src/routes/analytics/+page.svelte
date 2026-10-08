@@ -129,7 +129,7 @@
 </script>
 
 <div class="analytics-tree" class:dim={windowChanging}>
-	<PageHeader title="Library analytics" eyebrow="Analytics">
+	<PageHeader title="Library analytics">
 		{#snippet actions()}
 			<TimeRangePills bind:value={range} />
 			<button
@@ -145,13 +145,13 @@
 
 	{#if initialLoading}
 		<!-- ── Initial load skeletons ─────────────────────────────────── -->
-		<div class="skeleton-hero glass"></div>
-		<div class="skeleton-strip glass"></div>
-		<div class="skeleton-chart glass"></div>
-		<div class="skeleton-chart glass"></div>
+		<div class="skeleton-hero"></div>
+		<div class="skeleton-strip"></div>
+		<div class="skeleton-chart"></div>
+		<div class="skeleton-chart"></div>
 		<div class="skeleton-duo">
-			<div class="skeleton-list glass"></div>
-			<div class="skeleton-list glass"></div>
+			<div class="skeleton-list"></div>
+			<div class="skeleton-list"></div>
 		</div>
 	{:else if error}
 		<EmptyState title="Couldn't load analytics" copy={error}>
@@ -161,7 +161,7 @@
 		</EmptyState>
 	{:else if signals}
 		<!-- ── Hero — Listening Pulse ───────────────────────────────────────── -->
-		<div class="section glass hero-card">
+		<div class="section hero-card">
 			<ListenRidgeline
 				rows={signals.ridgeline}
 				heroStats={signals.kpis.hero_stats}
@@ -175,14 +175,14 @@
 
 		<!-- ── Tempo ridges ─────────────────────────────────────────────────── -->
 		{#if showTempo}
-			<div class="section glass">
+			<div class="section">
 				<TempoRidges tempo={signals.tempo} />
 			</div>
 		{/if}
 
 		<!-- ── Sonic field ──────────────────────────────────────────────────── -->
 		{#if showSonic}
-			<div class="section glass">
+			<div class="section">
 				<SonicField field={signals.sonic_field} />
 			</div>
 		{/if}
@@ -218,9 +218,9 @@
 
 <style>
 	.analytics-tree {
-		max-width: var(--content-width);
+		width: min(100%, var(--content-width));
 		margin: 0 auto;
-		padding: var(--space-5) var(--space-5) var(--space-8);
+		padding-bottom: var(--space-8);
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-5);
@@ -230,18 +230,27 @@
 	.analytics-tree.dim {
 		opacity: 0.55;
 		pointer-events: none;
-		transition: opacity 150ms ease;
+		transition: opacity var(--motion-fast);
 	}
 
 	.section {
-		padding: var(--space-4);
+		min-width: 0;
 	}
 
 	.hero-card {
 		padding: var(--space-5);
+		border-radius: var(--radius-lg);
+		background: var(--bg-surface);
 	}
 
 	/* ── Initial load skeletons ─────────────────────── */
+
+	.skeleton-hero,
+	.skeleton-strip,
+	.skeleton-chart,
+	.skeleton-list {
+		background: var(--bg-surface);
+	}
 
 	.skeleton-hero {
 		height: 460px;

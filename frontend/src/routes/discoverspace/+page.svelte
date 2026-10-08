@@ -198,8 +198,8 @@
 	<!-- Header -->
 	<div class="page-header">
 		<div class="header-text">
-			<span class="eyebrow">{PAGE_TITLE}</span>
-			<h1>{PAGE_SUBTITLE}</h1>
+			<h1 class="t-page-title">{PAGE_TITLE}</h1>
+			<p class="tagline">{PAGE_SUBTITLE}</p>
 		</div>
 		<form class="search-form" onsubmit={handleSearch}>
 			<SearchField
@@ -400,21 +400,17 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: var(--space-4, 16px);
-		padding: 0 var(--space-3, 12px);
 		flex-shrink: 0;
 	}
 	.header-text { display: flex; flex-direction: column; gap: 2px; }
-	.eyebrow {
-		font-size: var(--font-size-xs);
-		text-transform: uppercase;
-		letter-spacing: 0.12em;
-		color: rgba(255,255,255,0.35);
+	.tagline {
+		margin: 0;
+		font-size: var(--font-size-sm);
+		color: var(--text-secondary);
 	}
 	h1 {
-		font-size: var(--font-size-lg);
-		font-weight: var(--font-weight-semibold);
-		color: rgba(255,255,255,0.9);
 		margin: 0;
+		color: var(--text-primary);
 	}
 
 	.search-form {
@@ -462,7 +458,7 @@
 		padding: 4px 12px;
 		font-size: var(--font-size-xs);
 		cursor: pointer;
-		transition: background 0.15s, color 0.15s;
+		transition: background var(--motion-fast), color var(--motion-fast);
 	}
 	.seed-toggle:hover:not(:disabled) { background: rgba(91,78,248,0.2); color: #fff; }
 	.seed-toggle:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -684,7 +680,7 @@
 		color: rgba(160,165,255,0.9);
 		font-size: var(--font-size-sm);
 		cursor: pointer;
-		transition: background 0.15s;
+		transition: background var(--motion-fast);
 	}
 	.retry-btn:hover { background: rgba(124,128,255,0.22); }
 

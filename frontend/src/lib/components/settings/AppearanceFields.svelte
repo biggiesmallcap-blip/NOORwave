@@ -43,7 +43,7 @@
 	.theme-options label { position: relative; cursor: pointer; padding: var(--space-2) var(--space-3); min-height: var(--settings-control-height, 40px); display: flex; align-items: center; border: 1px solid var(--border-muted); border-radius: var(--radius-sm); background: var(--bg-elevated); font-size: var(--font-size-sm); }
 	.theme-options input { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
 	.theme-options label.chosen { background: var(--accent-soft); border-color: var(--accent-line); }
-	.theme-options label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 3px; }
+	.theme-options label:has(input:focus-visible) { outline: 2px solid var(--accent-strong); outline-offset: 3px; }
 	.palette-field { display: flex; align-items: center; gap: var(--space-2); min-width: 0; width: 100%; }
 	.swatches { display: flex; flex-shrink: 0; gap: 2px; }
 	.swatches span { width: 10px; height: 20px; border-radius: 2px; }

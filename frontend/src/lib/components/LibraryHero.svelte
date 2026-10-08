@@ -161,7 +161,7 @@
             </svg>
             Play All
           </button>
-          <button class="btn btn-glass" onclick={() => onShuffle(current.id)}>Shuffle</button>
+          <button class="btn hero-shuffle" onclick={() => onShuffle(current.id)}>Shuffle</button>
         </div>
       </div>
     </div>
@@ -183,10 +183,9 @@
 <style>
   .library-hero-card {
     position: relative;
-    border-radius: 12px;
+    border-radius: var(--radius-md);
     overflow: hidden;
-    background: var(--panel-bg);
-    border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
+    background: var(--bg-raised);
     min-height: 200px;
   }
 
@@ -201,24 +200,16 @@
     background: linear-gradient(120deg, var(--panel-bg), color-mix(in srgb, var(--accent-soft) 28%, transparent));
   }
 
-  .hero-bg-mural::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background:
-      radial-gradient(circle at 78% 50%, rgba(255,255,255,0.24), transparent 28%),
-      linear-gradient(90deg, rgba(0,0,0,0.08), transparent 34%, rgba(0,0,0,0.04));
-    pointer-events: none;
-  }
-
+  /* Text sits on artwork, so the copy is white on a dark scrim in every theme.
+     The scrim fades out by two thirds of the width so the collage stays bright. */
   .hero-overlay {
     position: absolute;
     inset: 0;
     background: linear-gradient(
       to right,
-      rgba(0,0,0,0.66) 0%,
-      rgba(0,0,0,0.34) 38%,
-      rgba(0,0,0,0.08) 68%,
+      rgba(8,8,12,0.66) 0%,
+      rgba(8,8,12,0.34) 38%,
+      rgba(8,8,12,0.08) 68%,
       transparent 100%
     );
     z-index: 1;
@@ -226,7 +217,7 @@
   }
 
   .library-hero-card:not(.has-image) .hero-overlay {
-    background: rgba(0,0,0,0.45);
+    background: rgba(8,8,12,0.45);
   }
 
   .hero-content {
@@ -262,8 +253,7 @@
     overflow: hidden;
     transform: skewX(-8deg) scaleX(1.1);
     transform-origin: center;
-    opacity: 0.96;
-    filter: saturate(1.18) brightness(1.16);
+    filter: var(--art-collage-filter);
     box-shadow: none;
     transition:
       opacity var(--motion-fast),
@@ -272,39 +262,13 @@
       box-shadow var(--motion-base);
   }
 
-  .mural-panel::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background: linear-gradient(
-      90deg,
-      rgba(0,0,0,0.34),
-      rgba(0,0,0,0.05) 46%,
-      rgba(0,0,0,0.38)
-    );
-    opacity: 0.22;
-    pointer-events: none;
-  }
-
   .mural-panel--featured {
     z-index: var(--z-raised);
-    opacity: 1;
     transform: skewX(-8deg) scaleX(1.1) scale(1.045);
-    filter: saturate(1.95) contrast(1.2) brightness(1.52);
+    filter: saturate(1.14) brightness(1.06);
     box-shadow:
-      0 0 0 1px rgba(255,255,255,0.34),
-      0 14px 34px rgba(0,0,0,0.34),
-      0 0 30px color-mix(in srgb, var(--accent) 46%, transparent);
-  }
-
-  .mural-panel--featured::after {
-    opacity: 0.08;
-    background: linear-gradient(
-      90deg,
-      rgba(0,0,0,0.12),
-      rgba(255,255,255,0.08) 48%,
-      rgba(0,0,0,0.18)
-    );
+      0 0 0 1px rgba(255,255,255,0.4),
+      0 14px 34px rgba(0,0,0,0.34);
   }
 
   .mural-panel :global(.mural-panel-art) {
@@ -348,7 +312,7 @@
 
   .mural-panel:focus-visible,
   .hero-title-link:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-strong);
     outline-offset: 4px;
     border-radius: 8px;
   }
@@ -364,10 +328,10 @@
   .hero-kind {
     font-size: var(--font-size-2xs);
     font-weight: var(--font-weight-semibold);
-    letter-spacing: 0;
-    color: var(--accent);
+    letter-spacing: 0.12em;
+    color: rgba(255,255,255,0.76);
     text-transform: uppercase;
-    transition: color 300ms ease;
+    transition: color var(--motion-slow);
   }
 
   .hero-kind--forgotten {
@@ -378,7 +342,7 @@
     font-size: var(--font-size-3xl);
     font-weight: var(--font-weight-bold);
     line-height: var(--line-height-tight);
-    color: var(--text-primary, #fff);
+    color: #fff;
     margin: 0;
   }
 
@@ -390,7 +354,7 @@
 
   .hero-sub {
     font-size: var(--font-size-sm);
-    color: var(--text-secondary, rgba(255,255,255,0.55));
+    color: rgba(255,255,255,0.76);
     margin: 2px 0 8px;
   }
 
@@ -416,6 +380,22 @@
     font-weight: var(--font-weight-semibold);
   }
 
+  /* Sits on artwork, so it keeps light-on-dark in every theme instead of the
+     themed glass button, which went dark-on-dark in light mode. */
+  .hero-shuffle {
+    padding: 10px 20px;
+    border: 1px solid rgba(255,255,255,0.22);
+    border-radius: 999px;
+    background: rgba(8,8,12,0.42);
+    color: #fff;
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-semibold);
+  }
+
+  .hero-shuffle:hover:not(:disabled) {
+    background: rgba(8,8,12,0.62);
+  }
+
   /* Matches the home/trending mural nav (.chart-nav): dark side-by-side circles
      anchored bottom-right, faintly visible by default and brightening on hover. */
   .hero-nav {
@@ -428,8 +408,8 @@
     aspect-ratio: 1 / 1;
     border: 1px solid var(--panel-border);
     border-radius: 50%;
-    background: rgba(0,0,0,0.5);
-    color: var(--text-primary);
+    background: rgba(8,8,12,0.5);
+    color: #fff;
     cursor: pointer;
     font-size: var(--font-size-xl);
     line-height: 1;
@@ -441,7 +421,7 @@
     opacity: 1;
     outline: none;
   }
-  .hero-nav:hover { background: rgba(0,0,0,0.75); }
+  .hero-nav:hover { background: rgba(8,8,12,0.75); }
   .hero-nav--prev { right: calc(var(--space-3) + clamp(32px, 3vw, 40px) + var(--space-2)); }
   .hero-nav--next { right: var(--space-3); }
 
@@ -460,7 +440,7 @@
     height: 6px;
     border-radius: 50%;
     background: rgba(255,255,255,0.25);
-    transition: background 200ms ease;
+    transition: background var(--motion-base);
   }
   .hero-dot.active { background: rgba(255,255,255,0.85); }
 

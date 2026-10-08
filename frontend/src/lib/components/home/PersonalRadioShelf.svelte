@@ -134,7 +134,7 @@
 {/snippet}
 
 <section class="discovery-section rise-in-shelf" data-section="personal-radio" style={`--rise-index: ${index}`}>
-	<SectionHeader eyebrow="TIDAL" title="Personal Radio" variant="charts" level={2}>
+	<SectionHeader title="Personal Radio" variant="charts" level={2}>
 		{#snippet actions()}
 			{#if viewState === 'loading' || refreshing}
 				<span class="loading-indicator">Loading…</span>
@@ -197,7 +197,7 @@
 		transform: translateY(-4px);
 	}
 	.mix-card:focus-visible {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 4px;
 	}
 

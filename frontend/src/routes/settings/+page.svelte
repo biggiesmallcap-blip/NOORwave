@@ -1,9 +1,12 @@
 <script lang="ts">
+	import { motionPreference, prefersReducedMotion } from '$lib/stores/motion';
+	import { librarySongsScope } from '$lib/stores/library_songs';
 	import { onMount, tick, untrack } from 'svelte';
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import SettingGroup from '$lib/components/settings/SettingGroup.svelte';
 	import SettingRow from '$lib/components/settings/SettingRow.svelte';
+	import Segmented from '$lib/components/ui/Segmented.svelte';
 	import AppearanceFields, { type AppearanceValues } from '$lib/components/settings/AppearanceFields.svelte';
 	import StartupSetting from '$lib/components/settings/StartupSetting.svelte';
 	import CloseBehaviorSetting from '$lib/components/settings/CloseBehaviorSetting.svelte';
@@ -108,7 +111,7 @@
 	} from '$lib/stores/wallpaper';
 	import { PALETTES, rgbCss, type Palette, type PaletteId } from '$lib/components/wallpaper/palettes';
 	import { artPalette, artPaletteStatus } from '$lib/stores/artPalette';
-	import { currentTrack } from '$lib/stores/player';
+	import { crossfadeMs, currentTrack, setPlayerCrossfadeMs } from '$lib/stores/player';
 	import { upscaleTidalArtwork } from '$lib/utils/artwork';
 	import { palette, setPalette } from '$lib/stores/palette';
 	import { uiZoom, setZoom, zoomIn, zoomOut, resetZoom, MIN as ZOOM_MIN, MAX as ZOOM_MAX, WHEEL_STEP as ZOOM_STEP } from '$lib/stores/uiZoom';
@@ -415,6 +418,23 @@
 	function setMp3Source(mp3_source: Mp3Source) {
 		void saveDownloadSettings({ mp3_source });
 	}
+
+	// Settings > Playback > Transitions. Crossfade is the plain fade between
+	// tracks; DJ plans its own overlaps, so it applies when DJ is off. The DJ
+	// transition style is DJ policy and lives on the Mix page.
+	const CROSSFADE_OPTIONS = [
+		{ value: '0', label: 'Off' },
+		{ value: '2000', label: '2s' },
+		{ value: '5000', label: '5s' },
+		{ value: '8000', label: '8s' },
+		{ value: '12000', label: '12s' },
+	] as const;
+	// A stored crossfade that is not one of the steps shows as the nearest step.
+	let crossfadeStep = $derived(
+		CROSSFADE_OPTIONS.reduce<(typeof CROSSFADE_OPTIONS)[number]>((best, option) =>
+			Math.abs(Number(option.value) - $crossfadeMs) < Math.abs(Number(best.value) - $crossfadeMs) ? option : best,
+		CROSSFADE_OPTIONS[0]).value,
+	);
 
 	onMount(() => {
 		if ($pendingTidalLogin) activeCategory = 'services';
@@ -1567,7 +1587,7 @@
 		await tick();
 		const focus = requested instanceof HTMLDetailsElement ? requested.querySelector('summary')
 			: requested !== el ? requested : el.querySelector('input, select, button, summary, a');
-		el.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'center' });
+		el.scrollIntoView({ behavior: prefersReducedMotion() ? 'instant' : 'smooth', block: 'center' });
 		if (focus instanceof HTMLElement) focus.focus({ preventScroll: true });
 		else { el.tabIndex = -1; el.focus({ preventScroll: true }); }
 		searchAnnouncement = requested ? entry.label : entry.label + ': choose its prerequisite to make this control available.';
@@ -1719,8 +1739,8 @@
 </script>
 
 <svelte:head><title>Settings | NOORwave</title></svelte:head>
-<div class="page-shell glass-panel settings-page settings-scope">
-<header class="settings-command"><h1>Settings</h1><div class="settings-search">
+<div class="page-shell settings-page settings-scope">
+<header class="settings-command"><h1 class="t-page-title">Settings</h1><div class="settings-search">
 <input type="search" placeholder="Search settings" bind:value={settingsQuery} oninput={() => { searchSelected = 0; searchFocused = true; }} onfocus={() => searchFocused = true} onblur={() => setTimeout(() => searchFocused = false, 150)} onkeydown={searchKeydown} aria-label="Search settings" role="combobox" aria-autocomplete="list" aria-expanded={searchFocused && !!settingsQuery.trim()} aria-controls="settings-results" aria-activedescendant={searchFocused && searchMatches.length ? 'setting-result-' + Math.min(searchSelected, searchMatches.length - 1) : undefined} />
 {#if searchFocused && settingsQuery.trim()}<ul id="settings-results" class="settings-search-results" role="listbox" aria-label="Matching settings">{#each searchMatches as match, index (match.id)}<li role="presentation"><button id={'setting-result-' + index} role="option" aria-selected={index === searchSelected} class:selected={index === searchSelected} onmousedown={(event) => event.preventDefault()} onclick={() => jumpToSetting(match)}><span>{match.label}</span><small>{categoryLabel(match.category)}</small></button></li>{/each}{#if !searchMatches.length}<li role="presentation">No matching settings.</li>{/if}</ul>{/if}
 </div></header><span class="sr-only" role="status">{settingsQuery.trim() ? searchMatches.length + ' settings found' : searchAnnouncement}</span>
@@ -1760,7 +1780,12 @@
 						onclick={resetZoom}
 						aria-label="Reset interface size" title="Reset interface size" disabled={Math.abs($uiZoom - 1) < 1e-6}
 					>↺</button>
-				</div></SettingRow><details><summary>Keyboard shortcuts</summary><p class="setting-status">Ctrl + scroll or Ctrl + / − to resize; Ctrl + 0 to reset.</p></details></SettingGroup><SettingGroup title="Player"><SettingRow label="Position" id="player-position"><div class="player-position-options" role="group" aria-label="Preferred player position">
+				</div></SettingRow><details><summary>Keyboard shortcuts</summary><p class="setting-status">Ctrl + scroll or Ctrl + / − to resize; Ctrl + 0 to reset.</p></details><SettingRow label="Reduce motion" id="reduce-motion" hint="Turns off slides, scales and looping animation. Follow system uses your operating system's setting."><Segmented
+					label="Reduce motion"
+					options={[{ value: 'system', label: 'Follow system' }, { value: 'reduce', label: 'Always' }]}
+					value={$motionPreference}
+					onchange={(value) => motionPreference.set(value)}
+				/></SettingRow></SettingGroup><SettingGroup title="Player"><SettingRow label="Position" id="player-position"><div class="player-position-options" role="group" aria-label="Preferred player position">
 					{#each [
 						{ id: 'right', icon: '▣', label: 'Right' },
 						{ id: 'left', icon: '◧', label: 'Left' },
@@ -1968,17 +1993,17 @@
 
 						<label class="wallpaper-control">
 							<span>
-								<strong>Reduce motion</strong>
-								<small>Calms the reaction. Auto follows your system setting.</small>
+								<strong>Background motion</strong>
+								<small>Calms the reaction. Auto follows Reduce motion above.</small>
 							</span>
 							<div class="wallpaper-control-field">
 								<select
 									class="audio-select"
 									value={$wallpaperReduceMotion}
 									onchange={(e) => setWallpaperReduceMotion((e.currentTarget as HTMLSelectElement).value as WallpaperReduceMotion)}
-									aria-label="Reduce motion"
+									aria-label="Background motion"
 								>
-									<option value="auto">Auto (system)</option>
+									<option value="auto">Auto</option>
 									<option value="on">On</option>
 									<option value="off">Off</option>
 								</select>
@@ -2452,6 +2477,11 @@
 				{:else if $audioSettings.error}
 					<p class="page-copy audio-error">{$audioSettings.error}</p>
 				{/if}
+			</section><section class="glass-tile section-panel" data-setting-id="transitions"><SectionHeader title="Transitions" />
+				<SettingRow label="Crossfade" hint="How long one track fades into the next when DJ transitions are off.">
+					<Segmented label="Crossfade" options={CROSSFADE_OPTIONS} value={crossfadeStep} onchange={(value) => void setPlayerCrossfadeMs(Number(value))} />
+				</SettingRow>
+				<p class="setting-status">DJ transition style, mix intent and speed are on the <a href="/mix">Mix page</a>.</p>
 			</section><section class="glass-tile section-panel" data-setting-id="library-audio-data"><SectionHeader title="Analysis" />
 <SettingRow label="Analyse while playing" hint="Save BPM, key and energy as tracks play for DJ transitions and harmonic shuffle. Turning this off keeps existing analysis."><Toggle label="Analyse while playing" checked={$audioAnalysis.passiveEnabled} disabled={!$passiveDspKnown || $passiveDspPending} onchange={(event) => void setPassiveDspEnabled(event.currentTarget.checked)} /></SettingRow>
 {#if $audioAnalysisError}<p class="error" role="alert">{$audioAnalysisError}</p><button class="btn btn-glass" onclick={() => void loadPassiveDspState()} disabled={$passiveDspPending}>Retry setting</button>{/if}
@@ -2484,6 +2514,12 @@
 					<p class="runtime-error">{playbackRuntime.last_error}</p>
 				{/if}</details>{#if playbackRuntime?.last_error}<p class="error" role="alert">{playbackRuntime.last_error}</p>{/if}
 {:else if activeCategory === 'library'}
+<SettingGroup title="Songs"><SettingRow label="Songs tab shows" id="library-songs-scope" hint="Liked songs, as in TIDAL and Spotify, or every song in your library, including tracks from saved albums and local imports."><Segmented
+	label="Songs tab shows"
+	options={[{ value: 'liked', label: 'Liked songs' }, { value: 'library', label: 'All library songs' }]}
+	value={$librarySongsScope}
+	onchange={(value) => librarySongsScope.set(value)}
+/></SettingRow></SettingGroup>
 <section data-setting-id="library-sync" class="glass-tile section-panel"><SectionHeader title="Sync" />{#if $tidalStatus === "connected"}					<div class="info-list">
 
 						<div class="info-row">
@@ -3513,7 +3549,7 @@
 		border: 1px solid rgba(255, 255, 255, 0.07);
 		color: inherit;
 		cursor: pointer;
-		transition: background 0.15s ease, border-color 0.15s ease;
+		transition: background var(--motion-fast), border-color var(--motion-fast);
 	}
 
 	.intensity-option:hover:not(:disabled) {
@@ -3735,7 +3771,7 @@
 	.wallpaper-group-caret {
 		font-size: var(--font-size-2xs);
 		color: var(--text-tertiary, var(--text-secondary));
-		transition: transform 160ms ease;
+		transition: transform var(--motion-fast);
 	}
 
 	.wallpaper-group-caret.open {
@@ -4101,7 +4137,7 @@
 		border: 1px solid var(--border-subtle);
 		background: rgba(255, 255, 255, 0.02);
 		cursor: pointer;
-		transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+		transition: border-color var(--motion-fast), background var(--motion-fast), box-shadow var(--motion-fast);
 	}
 
 	.wallpaper-tile:hover,
@@ -4216,7 +4252,7 @@
 		height: 100%;
 		border-radius: inherit;
 		background: linear-gradient(90deg, rgba(151, 126, 255, 0.85), rgba(120, 160, 255, 0.72));
-		transition: width 200ms ease;
+		transition: width var(--motion-base);
 	}
 
 	.discovery-guide {
@@ -4240,7 +4276,7 @@
 	.discovery-guide > summary::before {
 		content: '▸ ';
 		display: inline-block;
-		transition: transform 0.15s ease;
+		transition: transform var(--motion-fast);
 		margin-right: 4px;
 	}
 

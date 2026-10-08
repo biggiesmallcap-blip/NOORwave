@@ -364,7 +364,7 @@
 		filter: blur(60px) saturate(160%);
 		transform: scale(1.1);
 		pointer-events: none;
-		transition: opacity 320ms ease;
+		transition: opacity var(--motion-slow);
 	}
 
 	.quiet-backdrop-art.is-ready {
@@ -407,7 +407,7 @@
 		cursor: pointer;
 		backdrop-filter: var(--blur-overlay);
 		-webkit-backdrop-filter: var(--blur-overlay);
-		transition: background 160ms ease, transform 160ms ease;
+		transition: background var(--motion-fast), transform var(--motion-fast);
 	}
 
 	.quiet-close:hover {
@@ -437,7 +437,7 @@
 	   intermediate scans and the fade always runs over real pixels. */
 	.quiet-art-img {
 		opacity: 0;
-		transition: opacity 260ms ease;
+		transition: opacity var(--motion-base);
 	}
 
 	.quiet-art-img.is-ready {
@@ -492,7 +492,7 @@
 		cursor: pointer;
 		backdrop-filter: var(--blur-base);
 		-webkit-backdrop-filter: var(--blur-base);
-		transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
+		transition: background var(--motion-fast), color var(--motion-fast), border-color var(--motion-fast);
 	}
 
 	.quiet-search-pill:hover {
@@ -547,7 +547,7 @@
 		border: none;
 		font-size: var(--font-size-sm);
 		cursor: pointer;
-		transition: transform 160ms ease, box-shadow 160ms ease;
+		transition: transform var(--motion-fast), box-shadow var(--motion-fast);
 	}
 
 	.quiet-empty-btn:hover {

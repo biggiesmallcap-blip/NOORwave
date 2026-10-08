@@ -151,9 +151,11 @@ describe('artist page layout contracts', () => {
 
 	test('links artist shelves to searchable see-all routes', () => {
 		expect(source).toContain('href={`${discographyBase}/discography/tracks`}');
-		expect(source).toContain('href={`${discographyBase}/discography/albums`}');
-		expect(source).toContain('href={`${discographyBase}/discography/singles`}');
-		expect(source).toContain('href={`${discographyBase}/discography/compilations`}');
+		// One "Open full discography" link follows the active release tab.
+		expect(source).toContain('href={`${discographyBase}${discoActive.path}`}');
+		expect(source).toContain("path: '/discography/albums'");
+		expect(source).toContain("path: '/discography/singles'");
+		expect(source).toContain("path: '/discography/compilations'");
 		expect(discographySource).toContain("type Section = 'tracks' | 'albums' | 'singles' | 'compilations';");
 		expect(discographySource).toContain('cachedApi.getArtistDiscographyPreview(id)');
 		expect(discographySource).toContain('api.getTidalArtistReleasePage(tidalId, filter, offset)');

@@ -196,7 +196,7 @@
 		overflow: hidden;
 		background: var(--bg-raised);
 		cursor: pointer;
-		transition: opacity 120ms ease;
+		transition: opacity var(--motion-fast);
 	}
 	/* At rest the wall of thumbnails sits a little dim and muted, so a page
 	   of rows reads calm; the row under the pointer comes up to full color. */
@@ -204,8 +204,8 @@
 		width: 100%;
 		height: 100%;
 		object-fit: cover;
-		filter: saturate(0.7) brightness(0.8);
-		transition: filter 160ms ease;
+		filter: var(--art-wall-filter);
+		transition: filter var(--motion-fast);
 	}
 	.guide-row:hover .frame :global(img),
 	.guide-row:focus-within .frame :global(img) {
@@ -219,7 +219,7 @@
 		opacity: 1;
 	}
 	.frame:focus-visible {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: -2px;
 	}
 	.caption {
@@ -231,7 +231,7 @@
 		color: #fff;
 		text-align: left;
 		opacity: 0;
-		transition: opacity 120ms ease;
+		transition: opacity var(--motion-fast);
 		pointer-events: none;
 	}
 	.frame:hover .caption,
@@ -278,7 +278,7 @@
 		opacity: 1;
 	}
 	.play:focus-visible {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
 	}
 

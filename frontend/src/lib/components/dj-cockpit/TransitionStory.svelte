@@ -67,7 +67,8 @@
 	{:else if preview?.status === 'armed' && preview.planned_fire_ms != null}
 		<p>Drop preview scheduled at {timeLabel(preview.planned_fire_ms / 1000)} in the outgoing track.</p>
 	{/if}
-	{#if !compact}<TransitionScene status={shown} progress={fallback ? null : progress} playing={$isPlaying} />{/if}
+	<!-- With DJ off the strip above already says so; an empty scene would repeat it. -->
+	{#if !compact && (status?.enabled ?? enabled) !== false}<TransitionScene status={shown} progress={fallback ? null : progress} playing={$isPlaying} />{/if}
 	{#if progress != null && !fallback}
 		<progress max="1" value={progress ?? 0} aria-label="Transition progress"></progress>
 	{/if}
@@ -123,7 +124,7 @@
 	progress::-webkit-progress-bar { background: var(--bg-raised); border-radius: 999px; }
 	progress::-webkit-progress-value { background: var(--accent); border-radius: 999px; }
 	summary { cursor: pointer; padding: var(--space-2) 0; color: var(--text-secondary); font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); }
-	summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: var(--radius-xs); }
+	summary:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 3px; border-radius: var(--radius-xs); }
 	.why { border-top: 1px solid var(--border-subtle); }
 	.why > p { padding: var(--space-2) 0; }
 	.reason-facts, .score-components { display: flex; flex-wrap: wrap; gap: var(--space-2); font-size: var(--font-size-xs); color: var(--text-tertiary); }

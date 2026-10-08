@@ -1,9 +1,9 @@
 /* Shared form patterns, scoped to Settings and guided setup. */
 .settings-scope { --settings-control-height: 40px; --toggle-hit-height: 44px; font-size: var(--font-size-md); color: var(--text-primary); }
 .settings-scope .setting-group,
-.settings-scope .section-panel { border: 1px solid var(--border-subtle); border-radius: var(--radius-md); box-shadow: none; min-width: 0; padding: var(--space-4); }
+.settings-scope .section-panel { background: none; backdrop-filter: none; -webkit-backdrop-filter: none; border: 0; border-radius: 0; box-shadow: none; min-width: 0; padding: 0; }
 .settings-scope .setting-group-title,
-.settings-scope .section-header .title { margin: 0 0 var(--space-2); font-size: var(--font-size-md); font-weight: var(--font-weight-semibold); }
+.settings-scope .section-panel > .section-header .title { margin: 0 0 var(--space-1); font-family: var(--font-body); font-size: var(--font-size-label); font-weight: var(--font-weight-semibold); line-height: var(--line-height-snug); letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent-strong); }
 .settings-scope .setting-row,
 .settings-scope .info-row,
 .settings-scope .quality-setting-row,
@@ -38,15 +38,16 @@
 .settings-scope summary::before { content: '›'; color: var(--text-secondary); }
 .settings-scope details[open] > summary::before { transform: rotate(90deg); }
 .settings-scope summary .disclosure-status { margin-left: auto; font-size: var(--font-size-sm); font-weight: normal; color: var(--text-secondary); }
-.settings-scope :is(button, input, select, summary, a):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.settings-scope :is(button, input, select, summary, a):focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 3px; }
 .settings-scope :is(button, input, select):disabled { opacity: 0.55; cursor: not-allowed; }
 .settings-scope .player-position-options,
 .settings-scope .quality-mode-options,
-.settings-scope .download-format-toggle { display: flex; gap: var(--space-1); flex-wrap: wrap; }
+.settings-scope .download-format-toggle { display: inline-flex; gap: 2px; flex-wrap: wrap; padding: 3px; border-radius: 999px; background: var(--bg-surface); }
 .settings-scope .player-position-option,
 .settings-scope .quality-mode-option,
-.settings-scope .download-format-option { padding: var(--space-2) var(--space-3); background: var(--bg-elevated); border: 1px solid var(--border-muted); color: var(--text-secondary); cursor: pointer; font-family: inherit; }
-.settings-scope :is(.player-position-option, .quality-mode-option, .download-format-option).active { background: var(--accent-soft); border-color: var(--accent-line); color: var(--text-primary); }
+.settings-scope .download-format-option { min-height: calc(var(--settings-control-height) - 6px); padding: 0 var(--space-3); background: transparent; border: 0; border-radius: 999px; color: var(--text-secondary); cursor: pointer; font-family: inherit; transition: background var(--motion-fast), color var(--motion-fast); }
+.settings-scope :is(.player-position-option, .quality-mode-option, .download-format-option):hover { color: var(--text-primary); }
+.settings-scope :is(.player-position-option, .quality-mode-option, .download-format-option).active { background: var(--bg-raised); color: var(--text-primary); font-weight: var(--font-weight-semibold); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3); }
 .settings-scope .setting-status { margin: var(--space-2) 0; color: var(--text-secondary); font-size: var(--font-size-sm); }
 .settings-scope .inline-notice { padding: var(--space-3); background: var(--bg-elevated); border-left: 3px solid var(--accent); border-radius: var(--radius-sm); }
 .settings-scope .inline-notice p { margin: var(--space-1) 0; font-size: var(--font-size-sm); }
@@ -57,20 +58,22 @@
 }
 @media (pointer: coarse), (max-width: 640px) { .settings-scope { --settings-control-height: 44px; } }
 
-.settings-page.settings-scope { container: settings / inline-size; max-width: 1112px; padding: var(--space-6); margin: 0 auto; gap: 0; }
-.settings-page .settings-command { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); margin-bottom: var(--space-6); }
-.settings-page h1 { margin: 0; font-size: var(--font-size-3xl); font-weight: var(--font-weight-semibold); }
+.settings-page.settings-scope { container: settings / inline-size; width: min(100%, var(--content-width)); max-width: none; padding: 0 0 var(--space-7); margin: 0 auto; gap: 0; }
+/* The header spans the rail and the form, so the search sits at the form's
+   edge instead of the far side of a wide window. */
+.settings-page .settings-command { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); margin-bottom: var(--space-6); max-width: calc(176px + var(--space-7) + var(--measure-form)); }
+.settings-page h1 { margin: 0; }
 .settings-page .settings-search { position: relative; width: 300px; max-width: 100%; }
 .settings-page .settings-search-results { position: absolute; inset: 100% 0 auto; z-index: 20; padding: var(--space-1); list-style: none; max-height: 360px; overflow: auto; background: var(--bg-elevated); border: 1px solid var(--border-muted); border-radius: var(--radius-md); }
 .settings-page .settings-search-results button { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); min-height: 44px; padding: var(--space-2); background: transparent; border: none; color: var(--text-primary); text-align: left; cursor: pointer; }
 .settings-page .settings-search-results button.selected { background: var(--accent-soft); }
 .settings-page .settings-search-results small { color: var(--text-secondary); }
-.settings-page .settings-layout { display: grid; grid-template-columns: 176px minmax(0, 800px); gap: var(--space-6); }
+.settings-page .settings-layout { display: grid; grid-template-columns: 176px minmax(0, var(--measure-form)); gap: var(--space-7); }
 .settings-page .settings-rail { display: flex; flex-direction: column; gap: var(--space-1); }
 .settings-page .settings-rail a { display: flex; align-items: center; min-height: 44px; padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); text-decoration: none; color: var(--text-secondary); }
-.settings-page .settings-rail a.active { background: var(--accent-soft); color: var(--text-primary); font-weight: var(--font-weight-semibold); }
+.settings-page .settings-rail a.active { background: var(--bg-hover); color: var(--text-primary); font-weight: var(--font-weight-semibold); box-shadow: inset 2px 0 0 var(--accent); }
 .settings-page .settings-content { min-width: 0; display: flex; flex-direction: column; gap: var(--space-6); }
-.settings-page .settings-content h2 { font-size: var(--font-size-xl); font-weight: var(--font-weight-semibold); margin: 0; }
+.settings-page .settings-content > h2 { font-size: var(--font-size-lg); font-weight: var(--font-weight-bold); margin: 0; }
 .settings-page .setting-group > section { background: transparent; border: 0; padding: 0; }
 .settings-page .zoom-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); width: 100%; min-width: 0; }
 .settings-page .zoom-row input { flex: 1; width: auto; }
@@ -93,4 +96,4 @@
 	.settings-page .settings-command { align-items: flex-start; flex-direction: column; }
 	.settings-page .settings-search { width: 100%; }
 }
-@media (max-width: 640px) { .settings-page { padding: var(--space-4); } }
+

@@ -263,6 +263,9 @@
 	let draftClauses = $state<DraftClause[]>([]);
 	let editorSaving = $state(false);
 	let editorError = $state('');
+	// Rule problems show after the first save attempt, not on an empty new
+	// sheet (audit "States": no validation errors on open).
+	let showClauseErrors = $state(false);
 	let nameInput = $state<string>(''); // tag input buffer for genre/artist
 	// Per-clause tag input buffers keyed by draft id
 	let tagInputs = $state<Record<number, string>>({});
@@ -611,6 +614,7 @@
 		draftClauses = [defaultDraft()];
 		tagInputs = {};
 		editorError = '';
+		showClauseErrors = false;
 		editorOpen = true;
 		editorInitialSig = currentDraftSig();
 		void loadGenreSuggestions();
@@ -622,6 +626,7 @@
 		draftName = playlist.name;
 		draftDescription = playlist.description ?? '';
 		editorError = '';
+		showClauseErrors = false;
 
 		try {
 			const def = playlist.smart_rules ? JSON.parse(playlist.smart_rules) : null;
@@ -844,6 +849,7 @@
 	}
 
 	async function saveEditor() {
+		showClauseErrors = true;
 		const name = draftName.trim();
 		if (!name) { editorError = 'Name is required.'; return; }
 		if (draftClauses.length === 0) { editorError = 'Add at least one rule.'; return; }
@@ -1179,7 +1185,6 @@
 
 <div class="page-shell playlists-page animate-in">
 	<PageHeader
-		eyebrow="Playlists"
 		title="Playlists"
 		subtitle="Synced lists and rules-based smart sets."
 	>
@@ -1189,7 +1194,7 @@
 		{/snippet}
 	</PageHeader>
 
-	<section class="playlist-control-band glass">
+	<section class="playlist-control-band">
 		<div class="playlist-search-wrap">
 			<SearchField
 				bind:value={playlistQuery}
@@ -1247,7 +1252,7 @@
 	</section>
 
 	{#if deleteError}
-		<div class="feedback-bar error glass">{deleteError}</div>
+		<div class="feedback-bar error">{deleteError}</div>
 	{/if}
 
 	{#if loadError}
@@ -1655,7 +1660,7 @@
 							</select>
 						{/if}
 
-						{#if clauseValidation(clause)}
+						{#if showClauseErrors && clauseValidation(clause)}
 							<p class="clause-error">{clauseValidation(clause)}</p>
 						{/if}
 					</div>
@@ -1694,7 +1699,6 @@
 		display: flex;
 		flex-direction: column;
 		gap: 14px;
-		padding: 16px;
 	}
 
 	.playlist-search-wrap {
@@ -1820,7 +1824,7 @@
 	}
 
 	.playlist-hit:focus-visible {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 3px;
 	}
 
@@ -1985,7 +1989,7 @@
 		border: 1px solid var(--border-subtle);
 		color: var(--text-secondary);
 		cursor: pointer;
-		transition: background 150ms ease, color 150ms ease;
+		transition: background var(--motion-fast), color var(--motion-fast);
 	}
 
 	.close-btn:hover {
@@ -1994,7 +1998,7 @@
 	}
 
 	.close-btn:focus-visible {
-		outline: 2px solid var(--accent-line);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
 	}
 
@@ -2040,7 +2044,7 @@
 		font-size: var(--font-size-sm);
 		color: var(--text-primary);
 		width: 100%;
-		transition: border-color 150ms ease, box-shadow 150ms ease;
+		transition: border-color var(--motion-fast), box-shadow var(--motion-fast);
 	}
 
 	.field-input:focus-visible {
@@ -2090,12 +2094,12 @@
 		color: var(--text-secondary);
 		background: transparent;
 		border: none;
-		transition: background 150ms ease, color 150ms ease;
+		transition: background var(--motion-fast), color var(--motion-fast);
 		cursor: pointer;
 	}
 
 	.logic-btn:focus-visible {
-		outline: 2px solid var(--accent-line);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
 	}
 
@@ -2147,7 +2151,7 @@
 		color: var(--text-tertiary);
 		cursor: pointer;
 		flex-shrink: 0;
-		transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
+		transition: background var(--motion-fast), color var(--motion-fast), border-color var(--motion-fast);
 	}
 
 	.remove-btn:hover {
@@ -2157,7 +2161,7 @@
 	}
 
 	.remove-btn:focus-visible {
-		outline: 2px solid var(--accent-line);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
 	}
 
@@ -2196,7 +2200,7 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		transition: background 150ms ease;
+		transition: background var(--motion-fast);
 	}
 
 	.tag-remove:hover {
@@ -2204,7 +2208,7 @@
 	}
 
 	.tag-remove:focus-visible {
-		outline: 2px solid var(--accent-line);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
 	}
 
@@ -2247,9 +2251,6 @@
 	.editor-error { font-size: var(--font-size-sm); color: var(--state-error); }
 
 	@media (max-width: 760px) {
-		.playlist-control-band {
-			padding: 12px;
-		}
 
 		.playlist-toolbar {
 			display: flex;

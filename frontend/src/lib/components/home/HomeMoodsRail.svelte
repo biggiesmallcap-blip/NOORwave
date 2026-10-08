@@ -177,7 +177,6 @@
 {#if categories.length > 0 || loading}
 	<section bind:this={sectionEl} class="moods-rail rise-in-shelf" data-section="moods" style={`--rise-index: ${index}`}>
 		<SectionHeader
-			eyebrow="TIDAL"
 			title="Moods & Activities"
 			variant="charts"
 			level={2}
@@ -227,7 +226,7 @@
 		box-sizing: border-box;
 	}
 	.card:hover { transform: translateY(-4px); }
-	.card:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+	.card:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 4px; }
 	.art-wrap { position: relative; aspect-ratio: 1 / 1; width: 100%; border-radius: var(--radius-md); overflow: hidden; background: var(--bg-raised); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22); transition: box-shadow var(--motion-base); }
 	.card:hover .art-wrap { box-shadow: 0 12px 26px -6px rgba(0, 0, 0, 0.5); }
 	:global(.mood-art) { width: 100%; height: 100%; object-fit: cover; display: block; }

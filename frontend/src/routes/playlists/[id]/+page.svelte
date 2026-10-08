@@ -24,6 +24,8 @@
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import DetailHero from '$lib/components/ui/DetailHero.svelte';
+	import ActionBar from '$lib/components/ui/ActionBar.svelte';
+	import ErrorState from '$lib/components/ui/ErrorState.svelte';
 	import SelectionBar from '$lib/components/ui/SelectionBar.svelte';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildPlaylistMenu, buildAddToPlaylistSubmenu } from '$lib/player/playlist_menu';
@@ -289,11 +291,11 @@
 	<button class="back-link" type="button" onclick={() => goBack('/playlists')}>Back</button>
 
 	{#if error}
-		<EmptyState title="Playlist unavailable" copy={error}>
+		<ErrorState title="Playlist unavailable" {error} onretry={() => void load()}>
 			{#snippet actions()}
 				<button class="btn btn-glass" onclick={() => goto('/playlists')}>All playlists</button>
 			{/snippet}
-		</EmptyState>
+		</ErrorState>
 	{:else if loading && !playlist}
 		<Skeleton rows={6} label="Loading playlist" />
 	{:else if playlist}
@@ -361,41 +363,23 @@
 						{/if}
 			{/snippet}
 			{#snippet actions()}
-						<button class="btn btn-primary" disabled={!tracks.length} onclick={() => void playAll()}>
-							Play
-						</button>
-						<button
-							class="btn btn-glass"
-							disabled={!tracks.length}
-							onclick={() => void shufflePlaylist(tracks)}
-						>
-							Shuffle
-						</button>
-						<button
-							class="btn btn-glass"
-							disabled={!tracks.length}
-							onclick={() => void startPlaylistRadio(tracks)}
-						>
-							Radio
-						</button>
-						<button
-							class="icon-btn"
-							class:active={isFavorite}
-							aria-label={isFavorite ? 'Remove from favourites' : 'Add to favourites'}
-							aria-pressed={isFavorite}
-							title={isFavorite ? 'Remove from favourites' : 'Add to favourites'}
-							onclick={() => void toggleFavorite()}
-						>
-							&#9829;
-						</button>
-						<button class="icon-btn" aria-label="More actions" title="More actions" onclick={openHeaderMenu}>
-							&#8943;
-						</button>
+				<ActionBar
+					onplay={tracks.length ? () => void playAll() : undefined}
+					onshuffle={tracks.length ? () => void shufflePlaylist(tracks) : undefined}
+					shuffleHint="Play this playlist in random order"
+					onradio={tracks.length ? () => void startPlaylistRadio(tracks) : undefined}
+					radioHint="Similar tracks across your library and TIDAL"
+					liked={isFavorite}
+					onlike={() => void toggleFavorite()}
+					likeLabel="Add to favourites"
+					unlikeLabel="Remove from favourites"
+					onmore={openHeaderMenu}
+				/>
 			{/snippet}
 		</DetailHero>
 
 		{#if pendingDelete}
-			<div class="confirm-strip glass">
+			<div class="confirm-strip">
 				<span>Delete "{playlist.name}"{isTidal ? ' from TIDAL too' : ''}? This cannot be undone.</span>
 				<button class="btn btn-glass btn-sm" onclick={() => (pendingDelete = false)}>Cancel</button>
 				<button class="btn btn-sm danger-solid" disabled={busy} onclick={() => void confirmDelete()}>
@@ -525,7 +509,7 @@
 
 	.rename-form input:focus-visible {
 		border-color: var(--accent-line);
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 1px;
 	}
 
@@ -562,32 +546,8 @@
 		color: #fff;
 	}
 
-	.icon-btn {
-		display: inline-flex;
-		width: var(--control-h);
-		height: var(--control-h);
-		align-items: center;
-		justify-content: center;
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-sm);
-		background: var(--bg-surface);
-		color: var(--text-secondary);
-		cursor: pointer;
-		transition:
-			background var(--motion-fast),
-			color var(--motion-fast),
-			border-color var(--motion-fast);
-	}
 
-	.icon-btn:hover {
-		border-color: var(--accent-line);
-		background: var(--accent-soft);
-		color: var(--text-primary);
-	}
 
-	.icon-btn.active {
-		color: var(--state-favorite);
-	}
 
 	.detail-tracks {
 		display: flex;

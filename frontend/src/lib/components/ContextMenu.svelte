@@ -249,7 +249,7 @@
 		padding: 8px 10px;
 		border-radius: 8px;
 		cursor: pointer;
-		transition: background 80ms ease;
+		transition: background var(--motion-press);
 	}
 
 	.context-menu-item:hover,
@@ -298,7 +298,7 @@
 	}
 
 	.context-menu-caret {
-		transition: transform 120ms ease;
+		transition: transform var(--motion-fast);
 	}
 
 	.context-menu-caret.open {

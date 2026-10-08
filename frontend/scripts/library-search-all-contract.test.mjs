@@ -34,7 +34,9 @@ describe('library all-tab search contract', () => {
 		expect(s).toContain('{#if visibleAlbums.length > 0}');
 		expect(s).toContain('{#if visibleTracks.length > 0}');
 		expect(s).toContain('{#if allSearchTotal === 0}');
-		expect(s).toContain("title=\"No library matches\"");
+		expect(s).toContain("title=\"Nothing in your library matches\"");
+		// The empty scoped search offers the wider scope.
+		expect(s).toContain("Search TIDAL for");
 	});
 
 	test('view-all actions switch to existing category pills', () => {
