@@ -79,4 +79,11 @@ describe('genre galaxy UI contract', () => {
 		expect(galaxy).not.toContain('rgba(10, 10, 18, 0.92)');
 		expect(galaxy).not.toContain('rgba(13, 15, 24, 0.96)');
 	});
+
+	test('planets are flat matte discs', () => {
+		const galaxy = readFileSync('src/lib/components/Genre/GenreGalaxy.svelte', 'utf8');
+
+		expect(galaxy).not.toContain('BODY_GLOW_FACTOR');
+		expect(galaxy).toContain('sctx.createLinearGradient(0, 0, 0, radius * 2)');
+	});
 });

@@ -200,10 +200,10 @@
 	}
 
 	// --- Sprite cache --------------------------------------------------------
-	// Building radial gradients per node per frame is what made the canvas both
-	// fuzzy and slow. Node radius + color are stable, so each unique body and
-	// glow is rendered ONCE to an offscreen sprite and blitted with drawImage.
-	const BODY_GLOW_FACTOR = 1.4;
+	// Node radius + color are stable, so each unique body is rendered ONCE to an
+	// offscreen sprite and blitted with drawImage. Bodies are flat matte discs:
+	// no specular highlight, no rim, no built-in halo. Glow is data, so it only
+	// ever comes from the mode glow pass (Heat / Vibe / Rediscover).
 	const nodeSpriteCache = new Map<string, HTMLCanvasElement>();
 	const glowSpriteCache = new Map<string, HTMLCanvasElement>();
 	const edgeColorCache = new Map<number, string>();
@@ -227,55 +227,29 @@
 		glowSpriteCache.clear();
 	}
 
-	function getNodeSprite(color: string, radius: number, jitter: number): HTMLCanvasElement | null {
+	function getNodeSprite(color: string, radius: number): HTMLCanvasElement | null {
 		const hex = normalizeColor(color);
-		const key = `${hex}|${Math.round(radius * 2)}|${Math.round(jitter * 20)}`;
+		const key = `${hex}|${Math.round(radius * 2)}`;
 		const cached = nodeSpriteCache.get(key);
 		if (cached) return cached;
 
-		const half = radius * BODY_GLOW_FACTOR;
-		const size = Math.max(4, Math.ceil(half * 2 * spriteDpr));
+		const size = Math.max(4, Math.ceil(radius * 2 * spriteDpr));
 		const sprite = document.createElement('canvas');
 		sprite.width = size;
 		sprite.height = size;
 		const sctx = sprite.getContext('2d');
 		if (!sctx) return null;
-		sctx.scale(size / (half * 2), size / (half * 2));
+		sctx.scale(size / (radius * 2), size / (radius * 2));
 
-		// Tight ambient glow hugging the body - subtle, not a haze.
-		const glow = sctx.createRadialGradient(half, half, radius * 0.82, half, half, half);
-		glow.addColorStop(0, hexToRgba(hex, 0.22));
-		glow.addColorStop(1, hexToRgba(hex, 0));
-		sctx.fillStyle = glow;
-		sctx.beginPath();
-		sctx.arc(half, half, half, 0, Math.PI * 2);
-		sctx.fill();
-
-		// Crisp solid body, gently lit toward the upper-left. Opaque to the edge
-		// so the disc stays sharp - no feathering, no pearl, no dark rim.
-		const body = sctx.createRadialGradient(
-			half - radius * 0.2,
-			half - radius * 0.24,
-			radius * 0.1,
-			half,
-			half,
-			radius
-		);
-		body.addColorStop(0, shadeRgba(hex, 0.24 + jitter, 1));
-		body.addColorStop(0.62, hex);
-		body.addColorStop(1, shadeRgba(hex, -0.14, 1));
+		// A barely-there top-to-bottom falloff keeps the disc from reading as a
+		// sticker without turning it into a lit billiard ball.
+		const body = sctx.createLinearGradient(0, 0, 0, radius * 2);
+		body.addColorStop(0, shadeRgba(hex, 0.08, 1));
+		body.addColorStop(1, shadeRgba(hex, -0.1, 1));
 		sctx.fillStyle = body;
 		sctx.beginPath();
-		sctx.arc(half, half, radius, 0, Math.PI * 2);
+		sctx.arc(radius, radius, radius, 0, Math.PI * 2);
 		sctx.fill();
-
-		// Hairline lit rim so the edge reads crisp against the glow.
-		const rimWidth = Math.max(0.75, radius * 0.045);
-		sctx.lineWidth = rimWidth;
-		sctx.strokeStyle = shadeRgba(hex, 0.38, 0.38);
-		sctx.beginPath();
-		sctx.arc(half, half, radius - rimWidth / 2, 0, Math.PI * 2);
-		sctx.stroke();
 
 		nodeSpriteCache.set(key, sprite);
 		return sprite;
@@ -1111,11 +1085,9 @@
 			} else {
 				ctx.globalAlpha = activity;
 			}
-			const jitter = ((node.id * 37) % 20) / 100; // 0 .. 0.19, stable per node
-			const sprite = getNodeSprite(baseColor, node.radius, jitter);
+			const sprite = getNodeSprite(baseColor, node.radius);
 			if (sprite) {
-				const half = radius * BODY_GLOW_FACTOR;
-				ctx.drawImage(sprite, screen.x - half, screen.y - half, half * 2, half * 2);
+				ctx.drawImage(sprite, screen.x - radius, screen.y - radius, radius * 2, radius * 2);
 			}
 		}
 		ctx.globalAlpha = 1;
