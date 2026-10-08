@@ -77,8 +77,16 @@ fn kick_build(db: Database, day: String) {
 pub(super) async fn get_video_stations(State(state): State<SharedState>) -> Json<Value> {
     let db = { state.read().await.db.clone() };
     let day = today();
+    // A lineup an older release built is treated as missing: it is still
+    // shown below while today's is rebuilt with the current stations.
     let todays = db
-        .with_conn(|conn| lineup::load(conn, &day))
+        .with_conn(|conn| {
+            if lineup::is_current(conn)? {
+                lineup::load(conn, &day)
+            } else {
+                Ok(Vec::new())
+            }
+        })
         .unwrap_or_default();
     let (shown_day, stations) = if todays.is_empty() {
         kick_build(db.clone(), day.clone());
