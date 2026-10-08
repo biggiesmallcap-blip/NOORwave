@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { DjMixIntent, DjTransitionSpeedBias, DjStrategy } from '$lib/api/client';
+	import Segmented from '$lib/components/ui/Segmented.svelte';
 	import { strategyDescription, strategyLabels } from './transition_scene';
 
 	let {
@@ -46,36 +47,12 @@
 	</label>
 	<div class="control-block">
 		<span class="control-label">Mix intent</span>
-		<div class="segmented" role="group" aria-label="Mix intent">
-			{#each intents as item}
-				<button
-					type="button"
-					class:active={intent === item.value}
-					aria-pressed={intent === item.value}
-					disabled={disabled}
-					onclick={() => onIntentChange(item.value)}
-				>
-					{item.label}
-				</button>
-			{/each}
-		</div>
+		<Segmented label="Mix intent" options={intents} value={intent} {disabled} full onchange={onIntentChange} />
 	</div>
 
 	<div class="control-block">
 		<span class="control-label">Transition speed</span>
-		<div class="segmented" role="group" aria-label="Transition speed">
-			{#each speeds as item}
-				<button
-					type="button"
-					class:active={speed === item.value}
-					aria-pressed={speed === item.value}
-					disabled={disabled}
-					onclick={() => onSpeedChange(item.value)}
-				>
-					{item.label}
-				</button>
-			{/each}
-		</div>
+		<Segmented label="Transition speed" options={speeds} value={speed} {disabled} full onchange={onSpeedChange} />
 	</div>
 </div>
 <p class="style-note">The main handoff usually happens near the outgoing track’s ending. Separately, DJ can tease a compatible incoming drop around the middle when analysis identifies a safe phrase and drop marker.</p>
@@ -104,53 +81,5 @@
 		font-size: var(--font-size-xs);
 		font-weight: var(--font-weight-semibold);
 		line-height: var(--line-height-tight);
-	}
-
-	.segmented {
-		display: grid;
-		grid-template-columns: repeat(3, minmax(0, 1fr));
-		gap: var(--space-1);
-		padding: var(--space-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-sm);
-		background: color-mix(in srgb, var(--bg-surface) 88%, transparent);
-	}
-
-	button {
-		min-height: 2.75rem;
-		border: 1px solid transparent;
-		border-radius: var(--radius-xs);
-		background: transparent;
-		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-semibold);
-		line-height: 1;
-		cursor: pointer;
-		transition:
-			background var(--motion-fast),
-			border-color var(--motion-fast),
-			color var(--motion-fast);
-	}
-
-	button:hover,
-	button:focus-visible {
-		border-color: var(--border-muted);
-		color: var(--text-primary);
-	}
-
-	button:focus-visible {
-		outline: 2px solid var(--accent-strong);
-		outline-offset: 2px;
-	}
-
-	button.active {
-		border-color: var(--accent-line);
-		background: var(--accent-soft);
-		color: var(--accent-strong);
-	}
-
-	button:disabled {
-		cursor: not-allowed;
-		opacity: 0.55;
 	}
 </style>

@@ -17,8 +17,10 @@ in `app.css`. `CommandHeader` and `ScopeTabs` are built and mounted on
 Videos; Search, Library and Playlists move their `.filter-pill` rows onto
 them in their route PRs (Videos keeps `--space-4` between field
 and tabs to stay pixel-identical; settle it against the spec's `--space-3`
-when Search moves over). Still to build, one PR each: shared components
-(`Segmented`, `FilterChip`, `Dropdown`, `ActionBar`, one `TrackRow`
+when Search moves over). `Segmented` is built and used by the DJ intent and
+speed; Settings, Analytics range and the Library grid/list toggle move onto
+it in their route PRs. Still to build, one PR each: shared components
+(`FilterChip`, `Dropdown`, `ActionBar`, one `TrackRow`
 anatomy, `ErrorState` and the skeleton delay); route migrations (Library
 toolbar, Search composition and keyboard, artist Stage, shared `AlbumDetail`,
 Playlists, Settings in place, Mix page for Automix + DJ, Home and the remaining
