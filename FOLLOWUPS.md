@@ -10,30 +10,30 @@ back to the PR or commit that flagged it.
 
 ## Open
 
-### design: system adoption (phases 2-4 of the October 2026 audit)
+### design: system adoption (remaining after the October 2026 audit)
 
-`frontend/STYLING.md` now describes the target system and its foundations are
-in `app.css`. `CommandHeader` and `ScopeTabs` are built and mounted on
-Videos and Library; Search and Playlists move their `.filter-pill` rows onto
-them in their route PRs (Videos keeps `--space-4` between field
-and tabs to stay pixel-identical; settle it against the spec's `--space-3`
-when Search moves over). `Segmented` is built and used by the DJ intent and
-speed and the Library album layout; Settings and Analytics range move onto
-it in their route PRs. `FilterChip` is built and used by Duplicates and the
-Library decades. `Dropdown` is built and used by the DJ transition style and
-the Library album sort. App-wide, Space on any focused button is play/pause
-(the window shortcut cancels button activation): a product call. `ActionBar`
-is built and used by the album hero, and `DetailHero` is borderless; artist,
-playlist, TIDAL album and Spotify heroes move onto `ActionBar` in their route
-PRs. Global `.btn-secondary` / `.btn-ghost` / `.btn-icon` are still not added
-(local classes with those names in LastfmConnect, Library and the Spotify
-pages would pick up stray properties). Still to build, one PR each: shared
-components (one `TrackRow` anatomy, `ErrorState` and the skeleton delay); route migrations (Search composition and keyboard, artist Stage, shared `AlbumDetail`,
-Playlists, Settings in place, the remaining
-title-header routes, removing eyebrow-over-title stacks); then motion lint
-warnings and the sub-760px icon rail. Settled: Songs lists liked songs
-(Settings > Library widens it), in-app Reduce motion, Home order. Open product
-calls: Search Enter behaviour, nav groups.
+The audit's foundations, shared components and route migrations are in (see
+`frontend/STYLING.md` "Adoption status"). What is left needs a product call or
+backend work:
+- Search Enter: Enter in the field plays the focused song or the top result;
+  the audit proposes Enter stays and Ctrl+Enter opens the top result. Habit
+  change, so it waits for a decision.
+- Navigation groups: Atlas/Signals/System, or by job (Listen, Explore, Mix,
+  Tools); and "Discover" vs its page title "Sound Space" should match.
+- Library per-tab mural strips (plan Task 8): decide whether Songs and Albums
+  want a compact strip at all.
+- Library A to Z index and artist sorting (symbols last, "The" ignored): needs
+  letter offsets and artist totals from the server.
+- Proxy playlist relevance floor in Search (backend scoring).
+- Album label and release metadata for the liner-notes line (TIDAL
+  enrichment, backend).
+- 90 animation declarations still use raw durations (keyframes with custom
+  curves); move them onto `--motion-*` as those components are touched.
+- Global `.btn-secondary` / `.btn-ghost` / `.btn-icon` are still not added
+  (local classes with those names in LastfmConnect, Library and the Spotify
+  pages would pick up stray properties).
+- App-wide, Space on any focused button is play/pause (the window shortcut
+  cancels button activation): a product call.
 Spawned by: design audit 2026-10-08 (artifact 7N4YSfzjpyu98GRLM5X5hF)
 
 ### video stations: phase 2 (decades, oddities, full tag coverage)
