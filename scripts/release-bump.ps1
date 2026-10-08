@@ -91,11 +91,11 @@ try {
     if ($Ship) {
         $null = Invoke-Checked git @('push', '--quiet', 'origin', 'master')
         & (Join-Path $PSScriptRoot 'release-preflight.ps1') -Tag $Tag
-        $null = Invoke-Checked git @('tag', $Tag)
+        $null = Invoke-Checked git @('tag', '-m', $Tag, $Tag)
         $null = Invoke-Checked git @('push', '--quiet', 'origin', $Tag)
         Write-Host "Pushed $Tag. Watch: gh run watch `$(gh run list --workflow Release --limit 1 --json databaseId --jq '.[0].databaseId')"
     } else {
-        Write-Host "Next: git push origin master; scripts\release-preflight.ps1 -Tag $Tag; git tag $Tag; git push origin $Tag"
+        Write-Host "Next: git push origin master; scripts\release-preflight.ps1 -Tag $Tag; git tag -m $Tag $Tag; git push origin $Tag"
     }
 }
 finally {
