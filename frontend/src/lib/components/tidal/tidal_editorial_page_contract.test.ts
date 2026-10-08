@@ -34,7 +34,8 @@ describe('TIDAL editorial page routes', () => {
 	});
 
 	test('wires non-colliding editorial pages to documented TIDAL paths', () => {
-		expect(routeSource('explore')).toContain('pagePath="explore"');
+		// Explore was never linked and TIDAL returns no modules for it.
+		expect(existsSync(join(routesRoot, 'explore', '+page.svelte'))).toBe(false);
 		expect(routeSource('hires')).toContain('pagePath="hires"');
 		expect(routeSource('new-releases')).toContain('pagePath="new-releases"');
 	});
