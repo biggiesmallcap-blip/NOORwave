@@ -54,8 +54,14 @@ themed discs centred on the first card's artwork (`71af0720`); the Search top
 result shows its art sharp on the right through `--art-wall-filter` instead
 of a blurred backdrop, and long names wrap (`2dbf5227`); Spotify playlist
 cards share the TIDAL card footprint with the source chip inside the art
-(`fe96d157`). An on-disk artwork cache is a separate feature, not part of
-this audit.
+(`fe96d157`). Segmented pills keep equal columns no narrower than their
+labels and the Player settings use Segmented (`9a07f00a`); Search keeps the
+previous results dimmed while a new query loads, paints library and TIDAL
+results together, and rises sections in once per query (`459d80cb`).
+
+Beyond the audit, also from that review: an on-disk artwork cache with a size
+setting in Settings > Library (Off to 1 GB, default 150 MB), loopback-only
+`/artwork/tidal/...` route, least recently shown dropped first (`db7b0cb5`).
 
 ---
 
