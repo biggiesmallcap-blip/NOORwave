@@ -87,8 +87,13 @@ def tour(src: Path, names: list[str], dst: Path) -> None:
         append_images=frames[1:],
         duration=durations,
         loop=0,
-        quality=70,
-        method=4,
+        quality=82,
+        method=6,
+        # Every frame a keyframe: lossy inter-frame deltas stack up across the
+        # crossfades and show as blocky colour glitches on GitHub.
+        kmin=0,
+        kmax=1,
+        allow_mixed=False,
     )
 
 
