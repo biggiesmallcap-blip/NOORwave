@@ -34,10 +34,41 @@ Settings > Library to widen it (`32a34154`); Home leads with Jump back in
 (`6997f4ad`); Automix and DJ became one Mix page (`58587704`), with crossfade
 in Settings > Playback (`f8fc885a`) and the DJ transition style kept on Mix.
 
-Open items (product calls or backend work) are tracked in `FOLLOWUPS.md`
-("design: system adoption"): Search Enter behaviour, navigation groups and
-naming, Library mural strips, the A to Z index, the search relevance floor,
-album label metadata, and the remaining raw animation durations.
+Open calls from the audit, decided 2026-10-09 and built: Enter in Search
+plays the top result in place and never leaves the results (`309bdee4`); the
+sidebar is grouped by job, Listen, Explore, Tools, with Settings pinned and
+"Sound Space" named to match its page (`5ba6f7f9`); Library tabs get no mural
+strips; artists sort letters first ignoring "The", with an A to Z index and
+artist count, Spotify playlist search has a relevance floor, and album pages
+show a label and release line (`88dac60b`); one-shot animations use the motion
+tokens and the motion lint is clean (`chore(motion)` after `88dac60b`).
+
+The last two calls, also decided 2026-10-09: the global `.btn-secondary`,
+`.btn-ghost` and `.btn-icon` classes are added, and Space presses a focused
+control while play/pause stays on the page and the player transport. Jump
+back in cards got the same hover response as the Music Mixes cards.
+
+Review fixes after live verification, 2026-10-09: A to Z jumps load the gap
+in parallel pages and land on the letter (`71af0720`); shelf arrows are solid
+themed discs centred on the first card's artwork (`71af0720`); the Search top
+result shows its art sharp on the right through `--art-wall-filter` instead
+of a blurred backdrop, and long names wrap (`2dbf5227`); Spotify playlist
+cards share the TIDAL card footprint with the source chip inside the art
+(`fe96d157`). Segmented pills keep equal columns no narrower than their
+labels and the Player settings use Segmented (`9a07f00a`); Search keeps the
+previous results dimmed while a new query loads, paints library and TIDAL
+results together, and rises sections in once per query (`459d80cb`).
+
+Beyond the audit, also from that review: an on-disk artwork cache with a size
+setting in Settings > Library (Off to 1 GB, default 150 MB), loopback-only
+`/artwork/tidal/...` route, least recently shown dropped first (`db7b0cb5`).
+The cache row always shows (disabled on a server without the endpoint) and
+setting rows size the control column to its content (`e6fee827`). Verified
+live 2026-10-09 against a worktree server on a copy of the database: A to Z
+rail and count, album label line, search relevance floor, cache hits in about
+2 ms, the cache size setting, and the search load-in timeline. Using the
+cache in the installed app needs the new noor-server installed, which is the
+owner's call.
 
 ---
 

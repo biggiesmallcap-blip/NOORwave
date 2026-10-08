@@ -174,7 +174,7 @@
 		opacity: 0;
 		pointer-events: none;
 		transition:
-			transform 280ms cubic-bezier(0.22, 1, 0.36, 1),
+			transform var(--motion-base),
 			opacity var(--motion-base);
 		z-index: 6;
 		/* Panel themes to the selected genre via --genre-accent: a soft top-right

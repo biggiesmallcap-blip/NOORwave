@@ -134,6 +134,12 @@
 			<div class="chart-mural-meta">
 				<h3 class="chart-mural-title">{title}</h3>
 				<p class="chart-mural-sub">{subtitle}</p>
+				<!-- A status that only repeats the button is dropped, so the pair
+				     never says the same thing twice. It sits on its own quiet line
+				     rather than beside the button. -->
+				{#if metric && metric !== actionLabel}
+					<p class="chart-mural-why">{metric}</p>
+				{/if}
 				<div class="chart-mural-actions">
 					<button
 						class="btn btn-primary chart-mural-play"
@@ -146,31 +152,20 @@
 						</svg>
 						{actionLabel}
 					</button>
-					<!-- A status that only repeats the button ("Resolve on TIDAL") is
-					     dropped, so the pair never says the same thing twice. -->
-					{#if metric && metric !== actionLabel}
-						<span>{metric}</span>
-					{/if}
 				</div>
 			</div>
 		</div>
 		{#if items.length > 1}
-			<button
-				class="chart-nav chart-nav--prev"
-				type="button"
-				onclick={() => onJump(-1)}
-				aria-label="Previous chart entry"
-			>
-				&lsaquo;
-			</button>
-			<button
-				class="chart-nav chart-nav--next"
-				type="button"
-				onclick={() => onJump(1)}
-				aria-label="Next chart entry"
-			>
-				&rsaquo;
-			</button>
+			<!-- One pager in the top corner: previous, position, next. -->
+			<div class="chart-pager">
+				<button class="chart-nav" type="button" onclick={() => onJump(-1)} aria-label="Previous chart entry">
+					<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 5-7 7 7 7" /></svg>
+				</button>
+				<span class="chart-pager-count" aria-live="polite">{currentIndex + 1} / {items.length}</span>
+				<button class="chart-nav" type="button" onclick={() => onJump(1)} aria-label="Next chart entry">
+					<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 5 7 7-7 7" /></svg>
+				</button>
+			</div>
 		{/if}
 	</div>
 {/if}
@@ -181,10 +176,28 @@
 		--chart-mural-soft: var(--accent-soft);
 		position: relative;
 		min-height: clamp(220px, 24vw, 360px);
-		border: 1px solid var(--panel-border);
 		border-radius: var(--radius-md);
 		overflow: hidden;
-		background: var(--panel-bg);
+		/* clip-path, not just overflow: the tiles are composited layers
+		   (fade-in, hover scale), and a rounded overflow clip let their bright
+		   edges glow through the anti-aliased corners. */
+		clip-path: inset(0 round var(--radius-md));
+		isolation: isolate;
+		background: var(--bg-base);
+	}
+
+	/* The edge is drawn above the art, so no tile can show around it at
+	   the corners. */
+	.chart-mural::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		z-index: var(--z-raised);
+		border-radius: inherit;
+		/* A dark inner edge, not a light hairline: a light line over dark
+		   art read as a glowing rim, worst at the rounded corners. */
+		box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.45);
+		pointer-events: none;
 	}
 
 	.chart-mural.accent-lastfm {
@@ -345,11 +358,15 @@
 		font-weight: var(--font-weight-bold);
 	}
 
+	/* A deep plate behind the text that falls off smoothly into the collage,
+	   plus a soft floor, so the copy reads without heavy text shadows. */
 	.chart-mural-shade {
 		position: absolute;
 		inset: 0;
 		z-index: var(--z-base);
-		background: linear-gradient(90deg, rgba(0,0,0,0.72) 0%, rgba(0,0,0,0.36) 42%, rgba(0,0,0,0.08) 78%, transparent 100%);
+		background:
+			linear-gradient(90deg, rgba(8, 8, 12, 0.9) 0%, rgba(8, 8, 12, 0.76) 30%, rgba(8, 8, 12, 0.32) 56%, transparent 80%),
+			linear-gradient(0deg, rgba(8, 8, 12, 0.45) 0%, transparent 45%);
 		pointer-events: none;
 	}
 
@@ -357,7 +374,9 @@
 	 * reads as muddy. Lighten it (text still reads via its shadow) and push the
 	 * collage saturation up so the artwork looks vivid instead of dimmed. */
 	:global([data-theme="light"]) .chart-mural-shade {
-		background: linear-gradient(90deg, rgba(0,0,0,0.52) 0%, rgba(0,0,0,0.24) 44%, rgba(0,0,0,0.05) 78%, transparent 100%);
+		background:
+			linear-gradient(90deg, rgba(8, 8, 12, 0.78) 0%, rgba(8, 8, 12, 0.6) 30%, rgba(8, 8, 12, 0.2) 56%, transparent 80%),
+			linear-gradient(0deg, rgba(8, 8, 12, 0.32) 0%, transparent 45%);
 	}
 
 	:global([data-theme="light"]) .chart-mural-tile {
@@ -375,7 +394,7 @@
 		display: grid;
 		align-items: center;
 		min-height: inherit;
-		padding: var(--space-5);
+		padding: var(--space-6) var(--space-6);
 		pointer-events: none;
 	}
 
@@ -383,22 +402,18 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-1);
-		max-width: min(42rem, 58vw);
-		/* Text sits over a dark-scrimmed art collage, so it stays light in both
-		 * themes and leans on a strong shadow to read over bright album tiles. */
-		text-shadow: 0 2px 16px rgba(0,0,0,0.8), 0 1px 4px rgba(0,0,0,0.6);
+		max-width: min(36rem, 52%);
+		text-shadow: 0 1px 8px rgba(0, 0, 0, 0.45);
 	}
 
 	.chart-mural-title {
 		margin: 0;
 		color: #fff;
-		font-size: var(--font-size-4xl);
+		font-size: var(--font-size-3xl);
 		font-weight: var(--font-weight-bold);
 		line-height: var(--line-height-tight);
-		letter-spacing: 0;
-		/* Two lines, not one. At --font-size-4xl a single nowrap line clipped
-		   most real track titles mid-word ("Live and Learn [Extend..."), and the
-		   mural has the vertical room for a second. */
+		letter-spacing: -0.01em;
+		/* Two lines at most: long titles wrap once, then end in an ellipsis. */
 		overflow: hidden;
 		display: -webkit-box;
 		line-clamp: 2;
@@ -408,28 +423,33 @@
 	}
 
 	.chart-mural-sub {
-		margin: 0 0 var(--space-2);
-		color: rgba(255, 255, 255, 0.82);
-		font-size: var(--font-size-sm);
+		margin: 0;
+		color: rgba(255, 255, 255, 0.86);
+		font-size: var(--font-size-md);
+		font-weight: var(--font-weight-medium);
+	}
+
+	.chart-mural-why {
+		margin: 0;
+		color: rgba(255, 255, 255, 0.62);
+		font-size: var(--font-size-xs);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	.chart-mural-actions {
 		display: flex;
 		align-items: center;
 		gap: var(--space-2);
+		margin-top: var(--space-4);
 		pointer-events: auto;
-	}
-
-	.chart-mural-actions span {
-		color: rgba(255, 255, 255, 0.82);
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
 	}
 
 	.chart-mural-play {
 		display: flex;
 		align-items: center;
-		gap: var(--space-1);
+		gap: var(--space-2);
 		font-size: var(--font-size-sm);
 		font-weight: var(--font-weight-semibold);
 	}
@@ -439,42 +459,60 @@
 		opacity: 0.58;
 	}
 
-	.chart-nav {
+	/* Pager: solid discs and a position count, together in the top corner. */
+	.chart-pager {
 		position: absolute;
-		right: var(--space-3);
-		bottom: var(--space-4);
+		top: var(--space-4);
+		right: var(--space-4);
 		z-index: var(--z-raised);
-		display: grid;
-		place-items: center;
-		width: clamp(32px, 3vw, 40px);
-		aspect-ratio: 1 / 1;
-		border: 1px solid var(--panel-border);
-		border-radius: 50%;
-		background: rgba(0,0,0,0.5);
-		color: var(--text-primary);
-		cursor: pointer;
-		font-size: var(--font-size-xl);
-		line-height: 1;
-		opacity: 0.78;
-		transition: opacity var(--motion-fast), background var(--motion-fast);
+		display: flex;
+		align-items: center;
+		gap: var(--space-1);
+		padding: 3px;
+		border-radius: 999px;
+		background: rgba(8, 8, 12, 0.62);
+		box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
 	}
 
-	.chart-mural:hover .chart-nav,
-	.chart-nav:focus-visible {
-		opacity: 1;
-		outline: none;
+	.chart-pager-count {
+		min-width: 3.5em;
+		color: rgba(255, 255, 255, 0.86);
+		font-size: var(--font-size-xs);
+		font-variant-numeric: tabular-nums;
+		text-align: center;
+	}
+
+	.chart-nav {
+		display: grid;
+		place-items: center;
+		width: 30px;
+		height: 30px;
+		padding: 0;
+		border: 0;
+		border-radius: 50%;
+		background: transparent;
+		color: #fff;
+		cursor: pointer;
+		transition: background var(--motion-fast);
 	}
 
 	.chart-nav:hover {
-		background: rgba(0,0,0,0.75);
+		background: rgba(255, 255, 255, 0.14);
 	}
 
-	.chart-nav--prev {
-		right: calc(var(--space-3) + clamp(32px, 3vw, 40px) + var(--space-2));
+	.chart-nav:focus-visible {
+		outline: 2px solid var(--accent-strong);
+		outline-offset: 1px;
 	}
 
-	.chart-nav--next {
-		right: var(--space-3);
+	.chart-nav svg {
+		width: 16px;
+		height: 16px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 2.4;
+		stroke-linecap: round;
+		stroke-linejoin: round;
 	}
 
 	.chart-mural-loading {
@@ -525,15 +563,11 @@
 		}
 
 		.chart-mural-content {
-			padding: var(--space-4);
+			padding: var(--space-5) var(--space-4);
 		}
 
 		.chart-mural-meta {
 			max-width: 100%;
-		}
-
-		.chart-mural-title {
-			font-size: var(--font-size-3xl);
 		}
 	}
 </style>

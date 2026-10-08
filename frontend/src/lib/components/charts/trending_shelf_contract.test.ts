@@ -72,7 +72,7 @@ describe('trending shelf contract', () => {
 		expect(source).toContain('playTrackNow');
 		expect(source).toContain('playChartTidalTrack');
 		expect(source).toContain('isEntryUnresolved');
-		expect(source).toContain('Resolve on TIDAL');
+		expect(source).toContain('Matched on TIDAL when played');
 		// The Last.fm placeholder guard used to be a private copy in this file.
 		// It now lives in $lib/utils/artwork so the home recommendation shelves
 		// get it too; what matters here is that this shelf still routes its
@@ -103,8 +103,9 @@ describe('trending shelf contract', () => {
 	});
 
 	test('keeps mural navigation controls out of the title area', () => {
-		expect(muralSource).toContain('bottom: var(--space-4)');
-		expect(muralSource).toContain('right: calc(var(--space-3) + clamp(32px, 3vw, 40px) + var(--space-2))');
+		// One pager in the top-right corner, away from the title on the left.
+		expect(muralSource).toContain('<div class="chart-pager">');
+		expect(muralSource).toContain('right: var(--space-4)');
 		expect(muralSource).not.toContain('top: 50%');
 		expect(muralSource).not.toContain('left: var(--space-3)');
 	});

@@ -186,11 +186,11 @@
 		font-size: var(--font-size-sm);
 		scrollbar-width: thin;
 		will-change: opacity, transform, filter;
-		animation: context-menu-enter 160ms cubic-bezier(0.2, 0.9, 0.25, 1) both;
+		animation: context-menu-enter var(--motion-fast) both;
 	}
 
 	.context-menu.closing {
-		animation: context-menu-exit 160ms ease-in both;
+		animation: context-menu-exit var(--motion-exit) both;
 	}
 
 	@keyframes context-menu-enter {

@@ -3,6 +3,7 @@
 	import { goto, replaceState } from '$app/navigation';
 	import { page } from '$app/state';
 	import { api, type TidalSearchVideo } from '$lib/api/client';
+	import { likeSongForVideo, likeSongOnVideoSave } from '$lib/videos/like_song_for_video';
 	import VideoCard from '$lib/components/video/VideoCard.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
@@ -68,6 +69,16 @@
 	let hasSession = $derived(Boolean(current || streamUrl || loadingStream));
 	let videoIsSaved = $derived(current ? savedVideoIds.has(current.tidal_id) : false);
 
+	// Settings > Library: saving a video can also like its song.
+	async function likeSongAfterSave(item: TidalSearchVideo) {
+		try {
+			const title = await likeSongForVideo(item);
+			showToast(title ? `Also liked the song "${title}".` : 'No matching song to like on TIDAL.');
+		} catch {
+			showToast('Could not like the song for this video.', 'error');
+		}
+	}
+
 	async function toggleSavedVideo() {
 		const item = current;
 		if (!item || savingVideo) return;
@@ -82,6 +93,7 @@
 			savedVideoChanges += 1;
 			savedVideoIds = next;
 			showToast(saved ? 'Saved to liked videos.' : 'Removed from liked videos.');
+			if (saved && $likeSongOnVideoSave === 'on') void likeSongAfterSave(item);
 		} catch (err) {
 			showToast(err instanceof Error ? err.message : 'Could not update liked videos.', 'error');
 		} finally {
@@ -426,7 +438,7 @@
 		width: 100%;
 		max-width: max(480px, calc((100dvh - var(--bottom-player-height, 0px) - 300px) * 16 / 9));
 		margin: 0 auto;
-		animation: watch-in 0.28s cubic-bezier(0.22, 0.7, 0.2, 1) both;
+		animation: watch-in var(--motion-slow) both;
 	}
 
 	/* Fade only: the player glides into the stage, so a slide here would

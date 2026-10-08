@@ -30,7 +30,7 @@ describe('Mix page', () => {
 		expect(registry.mix.path).toBe('/mix');
 		expect(registry.automix).toBeUndefined();
 		expect(registry.dj).toBeUndefined();
-		expect(nav.navigationZones.find((zone) => zone.label === 'Listen').routeIds).toContain('mix');
+		expect(nav.navigationZones.find((zone) => zone.label === 'Tools').routeIds).toContain('mix');
 	});
 
 	test('one Diagnostics disclosure holds both engines', () => {

@@ -60,3 +60,11 @@ describe('Search Enter never leaves the results', () => {
 		expect(fn).not.toContain('goto(');
 	});
 });
+
+describe('Space presses a focused control', () => {
+	const layout = read('../src/routes/+layout.svelte');
+	test('the play/pause shortcut yields to focused controls outside the transport', () => {
+		expect(layout).toContain('if (spaceActivatesFocusedControl(target)) return;');
+		expect(layout).toContain("return control.closest('[data-transport]') == null;");
+	});
+});

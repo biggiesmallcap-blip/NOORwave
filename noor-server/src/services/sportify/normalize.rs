@@ -321,6 +321,42 @@ pub fn playlist_from_sportify(p: &SportifyPlaylist, source_endpoint: &str) -> Di
     }
 }
 
+/// Relevance floor for proxy playlist search (audit "Search"): the proxies
+/// answer any query, so a keyboard-mash query used to fill Search with
+/// unrelated playlists of emoji. Keep a playlist only when its title or
+/// description contains one of the query's words (2+ characters), and drop
+/// titles with no letters or digits at all. A query with no usable words is
+/// not judged.
+pub fn passes_relevance_floor(query: &str, playlist: &DiscoveryPlaylist) -> bool {
+    fn words(text: &str) -> String {
+        text.chars()
+            .map(|c| {
+                if c.is_alphanumeric() {
+                    c.to_lowercase().next().unwrap_or(c)
+                } else {
+                    ' '
+                }
+            })
+            .collect()
+    }
+    let title = words(playlist.title.as_deref().unwrap_or(""));
+    if title.chars().filter(|c| c.is_alphanumeric()).count() < 2 {
+        return false;
+    }
+    let query_words: Vec<String> = words(query)
+        .split_whitespace()
+        .filter(|word| word.chars().count() >= 2)
+        .map(str::to_string)
+        .collect();
+    if query_words.is_empty() {
+        return true;
+    }
+    let description = words(playlist.description.as_deref().unwrap_or(""));
+    query_words
+        .iter()
+        .any(|word| title.contains(word.as_str()) || description.contains(word.as_str()))
+}
+
 pub fn search_from_sportify(
     s: &SportifySearchResults,
     source_endpoint: &str,
@@ -381,4 +417,46 @@ pub fn enrich_tracks_with_tidal_cache(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod relevance_floor_tests {
+    use super::*;
+
+    fn playlist(title: &str, description: Option<&str>) -> DiscoveryPlaylist {
+        DiscoveryPlaylist {
+            title: Some(title.to_string()),
+            description: description.map(str::to_string),
+            ..DiscoveryPlaylist::default()
+        }
+    }
+
+    #[test]
+    fn keeps_playlists_that_mention_the_query() {
+        assert!(passes_relevance_floor(
+            "radiohead",
+            &playlist("This Is Radiohead", None)
+        ));
+        assert!(passes_relevance_floor(
+            "love songs",
+            &playlist("Rainy day", Some("Love ballads"))
+        ));
+    }
+
+    #[test]
+    fn drops_unrelated_and_symbol_only_playlists() {
+        assert!(!passes_relevance_floor(
+            "qwzxkj",
+            &playlist("Chill vibes", None)
+        ));
+        assert!(!passes_relevance_floor(
+            "love",
+            &playlist("\u{1F496}\u{1F496}", None)
+        ));
+    }
+
+    #[test]
+    fn a_query_without_words_is_not_judged() {
+        assert!(passes_relevance_floor("!", &playlist("Anything", None)));
+    }
 }

@@ -1,17 +1,18 @@
 import { writable } from 'svelte/store';
 
-// The video section: four browse tabs plus one watch page, all under
+// The video section: five browse tabs plus one watch page, all under
 // routes/videos/+layout.svelte. The tabs are for browsing; picking a video on
 // any of them opens the watch page, which is the only place the big player
 // lives. Leaving it shrinks the player to the corner.
 
 export const WATCH_PATH = '/videos/watch';
 
-export type VideoTab = 'videos' | 'liked' | 'stations' | 'editorial';
+export type VideoTab = 'videos' | 'liked' | 'history' | 'stations' | 'editorial';
 
 export const VIDEO_TABS: readonly { id: VideoTab; href: string; label: string }[] = [
 	{ id: 'videos', href: '/videos', label: 'Videos' },
 	{ id: 'liked', href: '/videos/liked', label: 'Liked videos' },
+	{ id: 'history', href: '/videos/history', label: 'History' },
 	{ id: 'stations', href: '/videos/stations', label: 'Stations' },
 	{ id: 'editorial', href: '/videos/editorial', label: 'TIDAL editorial' },
 ];

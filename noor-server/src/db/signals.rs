@@ -111,47 +111,57 @@ fn median_of_sorted(sorted: &[i64]) -> Option<f64> {
     }
 }
 
-/// Rhythm CV formula. Returns None if fewer than 5 days have any listens.
+/// Rhythm: how much your days share the same listening hours. Returns None
+/// if fewer than 5 days have any listens.
 ///
-/// For each day d in window:
-///   sigma_d = stddev(listens per hour across 24 hours of day d)
-/// mean_sigma = average of sigma_d over days with listens
-/// mean_listens = mean hourly listens across window (per hour-slot, total/days/24)
-/// cv = mean_sigma / mean_listens
-/// rhythm = round(100 * clamp(1 - cv, 0, 1))
+/// Each active day becomes a share-of-listens profile over the 24 hours,
+/// lightly smoothed across neighbouring hours (circularly) so 20:00 one day
+/// and 21:00 the next still count as the same habit. The score is 100 times
+/// one minus the average total-variation distance between each day and the
+/// window's average day: the same hours every day scores near 100, scattered
+/// hours score low. Shares, not counts, so a quiet week and a busy week with
+/// the same routine score identically.
 ///
-/// CV form so a quiet week and a busy week with the same routine score identically.
+/// (It used to be the coefficient of variation across one day's 24 hours,
+/// which measured listening around the clock: anyone who listens only part
+/// of the day scored 0.)
 fn compute_rhythm(per_day_per_hour: &[[i64; 24]]) -> Option<i32> {
-    let active: Vec<&[i64; 24]> = per_day_per_hour
+    let profiles: Vec<[f64; 24]> = per_day_per_hour
         .iter()
         .filter(|hours| hours.iter().any(|&h| h > 0))
+        .map(|hours| {
+            let mut smoothed = [0.0f64; 24];
+            for (hour, value) in smoothed.iter_mut().enumerate() {
+                let prev = hours[(hour + 23) % 24] as f64;
+                let here = hours[hour] as f64;
+                let next = hours[(hour + 1) % 24] as f64;
+                *value = 0.25 * prev + 0.5 * here + 0.25 * next;
+            }
+            let total: f64 = smoothed.iter().sum();
+            smoothed.map(|value| value / total)
+        })
         .collect();
-    if active.len() < 5 {
+    if profiles.len() < 5 {
         return None;
     }
-    let mut total_listens: f64 = 0.0;
-    let mut sigma_sum: f64 = 0.0;
-    for hours in &active {
-        let mean = hours.iter().map(|&h| h as f64).sum::<f64>() / 24.0;
-        let var = hours
-            .iter()
-            .map(|&h| {
-                let diff = h as f64 - mean;
-                diff * diff
-            })
-            .sum::<f64>()
-            / 24.0;
-        sigma_sum += var.sqrt();
-        total_listens += mean * 24.0;
+    let mut mean = [0.0f64; 24];
+    for profile in &profiles {
+        for (slot, value) in mean.iter_mut().zip(profile) {
+            *slot += value / profiles.len() as f64;
+        }
     }
-    let mean_sigma = sigma_sum / active.len() as f64;
-    let mean_listens_per_hour = total_listens / (active.len() as f64 * 24.0);
-    if mean_listens_per_hour == 0.0 {
-        return Some(0);
-    }
-    let cv = mean_sigma / mean_listens_per_hour;
-    let rhythm = (100.0 * (1.0 - cv).clamp(0.0, 1.0)).round() as i32;
-    Some(rhythm)
+    let average_distance = profiles
+        .iter()
+        .map(|profile| {
+            0.5 * profile
+                .iter()
+                .zip(&mean)
+                .map(|(value, average)| (value - average).abs())
+                .sum::<f64>()
+        })
+        .sum::<f64>()
+        / profiles.len() as f64;
+    Some((100.0 * (1.0 - average_distance).clamp(0.0, 1.0)).round() as i32)
 }
 
 /// Listen-weighted median over (bpm, listens) pairs. Mathematically identical to
@@ -1277,30 +1287,50 @@ mod tests {
 
     // --- Analytics signals tests ------------------------------------------
 
-    /// Rhythm: even routine = high score (low CV -> rhythm near 100).
+    /// Rhythm: the same evening hour every day is a strong routine.
     #[test]
-    fn compute_rhythm_even_routine_scores_high() {
+    fn compute_rhythm_same_hours_every_day_scores_high() {
         let mut days = Vec::new();
-        for _ in 0..7 {
-            // 1 listen each hour, every hour, every day = perfect routine.
-            days.push([1i64; 24]);
-        }
-        let r = compute_rhythm(&days).expect("active days >= 5");
-        assert!(r >= 95, "even routine should score near 100, got {r}");
-    }
-
-    /// Rhythm: spiky one-day pattern = low score (high CV -> rhythm near 0).
-    #[test]
-    fn compute_rhythm_spiky_scores_low() {
-        let mut days = Vec::new();
-        for _ in 0..7 {
-            // All 24 listens in hour 21, zero everywhere else.
+        for day in 0..7 {
+            // Busy and quiet days alike, always at 21:00.
             let mut h = [0i64; 24];
-            h[21] = 24;
+            h[21] = if day % 2 == 0 { 24 } else { 3 };
             days.push(h);
         }
         let r = compute_rhythm(&days).expect("active days >= 5");
-        assert!(r <= 5, "spiky pattern should score near 0, got {r}");
+        assert!(
+            r >= 95,
+            "same hours every day should score near 100, got {r}"
+        );
+    }
+
+    /// Rhythm: a neighbouring hour still counts as the same habit.
+    #[test]
+    fn compute_rhythm_tolerates_an_hour_of_drift() {
+        let mut days = Vec::new();
+        for day in 0..7 {
+            let mut h = [0i64; 24];
+            h[20 + day % 2] = 5;
+            days.push(h);
+        }
+        let r = compute_rhythm(&days).expect("active days >= 5");
+        assert!(
+            r >= 60,
+            "an hour of drift should still read as routine, got {r}"
+        );
+    }
+
+    /// Rhythm: each day at a different time of day is no routine.
+    #[test]
+    fn compute_rhythm_scattered_hours_score_low() {
+        let mut days = Vec::new();
+        for day in 0..8 {
+            let mut h = [0i64; 24];
+            h[day * 3] = 5;
+            days.push(h);
+        }
+        let r = compute_rhythm(&days).expect("active days >= 5");
+        assert!(r <= 25, "scattered hours should score low, got {r}");
     }
 
     /// Rhythm: <5 active days returns None (renders as `--` in the UI).

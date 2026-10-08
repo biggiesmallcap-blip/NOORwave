@@ -1592,7 +1592,7 @@
 		-webkit-backdrop-filter: var(--blur-base);
 		border: 1px solid var(--panel-border);
 		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-		animation: hover-card-in 140ms ease-out both;
+		animation: hover-card-in var(--motion-fast) both;
 	}
 
 	@keyframes hover-card-in {

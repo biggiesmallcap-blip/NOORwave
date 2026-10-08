@@ -356,7 +356,7 @@
 		   scroll-dismiss doesn't freeze page scrolling. The panel re-enables pointer
 		   events for its own interactions; outside clicks are handled on window. */
 		pointer-events: none;
-		animation: backdrop-fade 180ms ease-out both;
+		animation: backdrop-fade var(--motion-base) both;
 	}
 
 	@keyframes backdrop-fade {
@@ -377,7 +377,7 @@
 		box-shadow:
 			0 28px 70px -22px rgba(0, 0, 0, 0.6),
 			0 2px 8px -2px rgba(0, 0, 0, 0.3);
-		animation: popup-bloom 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+		animation: popup-bloom var(--motion-base) both;
 		overflow: hidden;
 	}
 
@@ -393,7 +393,7 @@
 	}
 
 	.popup-panel.closing {
-		animation: popup-collapse 200ms cubic-bezier(0.4, 0, 1, 1) forwards;
+		animation: popup-collapse var(--motion-exit) forwards;
 		pointer-events: none;
 	}
 

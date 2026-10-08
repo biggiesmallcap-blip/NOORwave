@@ -85,7 +85,8 @@ export function recommendationActionLabel(item: ProviderRecommendationItem): str
 	if (entity === 'album') return 'Play album';
 	if (item.local_track_id) return 'Play';
 	if ((item.tidal_id ?? 0) > 0) return 'Play from TIDAL';
-	return 'Resolve on TIDAL';
+	// Pressing it finds the song on TIDAL and plays it, so it says Play.
+	return 'Play';
 }
 
 export function recommendationHrefFromSearch(

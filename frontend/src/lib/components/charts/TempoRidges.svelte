@@ -296,7 +296,9 @@
 </div>
 
 <!-- SR-only summary -->
-<table class="sr-only" aria-label="Tempo ridges summary">
+<!-- A table ignores width: 1px and grows to its content (it pushed the
+     page sideways), so the hidden box is a wrapper around it. -->
+<div class="sr-only"><table aria-label="Tempo ridges summary">
 	<caption>
 		Median {formatBpm(tempo.stats.median, { decimals: 0, suffix: 'BPM' })};
 		Mode {formatBpm(tempo.stats.mode, { decimals: 0, suffix: 'BPM' })};
@@ -320,7 +322,7 @@
 			</tr>
 		{/each}
 	</tbody>
-</table>
+</table></div>
 
 <style>
 	.tempo {

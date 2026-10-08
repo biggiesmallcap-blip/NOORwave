@@ -1181,7 +1181,7 @@
 			linear-gradient(180deg, color-mix(in srgb, var(--instrument-surface-strong) 94%, transparent), color-mix(in srgb, var(--instrument-surface) 90%, transparent)),
 			var(--panel-bg);
 		box-shadow: 0 22px 54px rgba(0, 0, 0, 0.52);
-		animation: drawer-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+		animation: drawer-in var(--motion-base) both;
 	}
 
 	@keyframes drawer-in {

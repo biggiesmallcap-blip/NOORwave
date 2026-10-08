@@ -1276,6 +1276,132 @@ fn galaxy_library_gate(inner: &str) -> String {
     )
 }
 
+/// Turns artist photos stored as bare TIDAL image ids ("3a503460-3914-...")
+/// into image URLs (750px: artist photos have no 640 size). An import path once stored the id itself, which the app
+/// loaded as a relative path, so those artists showed only an initial.
+/// Idempotent and cheap; runs at every startup and finds nothing once healed.
+pub fn repair_bare_artist_photos(conn: &Connection) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE artists
+            SET photo_url = 'https://resources.tidal.com/images/'
+                || replace(photo_url, '-', '/') || '/750x750.jpg'
+          WHERE photo_url LIKE '________-____-____-____-____________'
+            AND length(photo_url) = 36",
+        [],
+    )?)
+}
+
+/// Liner-note facts for an album page: its TIDAL id, the stored label (an
+/// empty string means "looked up, TIDAL had none") and its year.
+pub fn get_album_credits(
+    conn: &Connection,
+    album_id: i64,
+) -> Result<Option<(Option<i64>, Option<String>, Option<i32>)>> {
+    Ok(conn
+        .query_row(
+            "SELECT tidal_id, label, year FROM albums WHERE id = ?1",
+            params![album_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?)
+}
+
+pub fn set_album_label(conn: &Connection, album_id: i64, label: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE albums SET label = ?2 WHERE id = ?1",
+        params![album_id, label],
+    )?;
+    Ok(())
+}
+
+/// The label line from a TIDAL album's copyright ("(P) 2003 Parlophone
+/// Records Ltd" -> "Parlophone Records Ltd"): copyright marks and years are
+/// trimmed so the line reads as a name. Empty when TIDAL sends none.
+pub fn label_from_copyright(copyright: Option<&str>) -> String {
+    let Some(text) = copyright else {
+        return String::new();
+    };
+    let mut rest = text.trim();
+    loop {
+        let before = rest;
+        for mark in ["\u{2117}", "\u{a9}", "(P)", "(p)", "(C)", "(c)"] {
+            if let Some(stripped) = rest.strip_prefix(mark) {
+                rest = stripped.trim_start();
+            }
+        }
+        let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+        if digits == 4 {
+            rest = rest[digits..].trim_start_matches([',', ' ', '-']);
+        }
+        if rest == before {
+            break;
+        }
+    }
+    rest.trim().to_string()
+}
+
+/// Sort key for artist names: a leading "The " is ignored, so "The Beatles"
+/// files under B.
+const ARTIST_SORT_KEY: &str =
+    "CASE WHEN lower(a.name) LIKE 'the %' THEN substr(a.name, 5) ELSE a.name END";
+
+/// Artist order shared by the list and its A to Z index: names that start
+/// with a letter first (case-insensitive), then digits and symbols, so
+/// "*NSYNC" and "070 Shake" no longer lead the list.
+fn artist_order_clause(dir: &str) -> String {
+    format!(
+        "CASE WHEN {key} GLOB '[A-Za-z]*' THEN 0 ELSE 1 END, {key} COLLATE NOCASE {dir}, a.id",
+        key = ARTIST_SORT_KEY
+    )
+}
+
+/// First list offset for each initial in the artist order, plus the total.
+/// Initials are A-Z; everything else is "#" and sorts last.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ArtistLetterOffset {
+    pub letter: String,
+    pub offset: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ArtistLetterIndex {
+    pub total: i64,
+    pub letters: Vec<ArtistLetterOffset>,
+}
+
+pub fn get_artist_letter_index(conn: &Connection) -> Result<ArtistLetterIndex> {
+    let sql = format!(
+        "SELECT {key} FROM artists a ORDER BY {order}",
+        key = ARTIST_SORT_KEY,
+        order = artist_order_clause("ASC")
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let keys = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut letters: Vec<ArtistLetterOffset> = Vec::new();
+    for (index, key) in keys.iter().enumerate() {
+        let letter = match key.trim_start().chars().next() {
+            Some(c) if c.is_ascii_alphabetic() => c.to_ascii_uppercase().to_string(),
+            _ => "#".to_string(),
+        };
+        if letters
+            .last()
+            .map(|entry| entry.letter != letter)
+            .unwrap_or(true)
+        {
+            letters.push(ArtistLetterOffset {
+                letter,
+                offset: index as i64,
+            });
+        }
+    }
+    Ok(ArtistLetterIndex {
+        total: keys.len() as i64,
+        letters,
+    })
+}
+
 pub fn get_artists(
     conn: &Connection,
     sort_by: &str,
@@ -1283,18 +1409,17 @@ pub fn get_artists(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Artist>> {
-    let order_col = match sort_by {
-        "name" => "a.name",
-        _ => "a.name",
-    };
+    // Name is the only artist sort today; keep the parameter for the API shape.
+    let _ = sort_by;
     let dir = if sort_dir == "asc" { "ASC" } else { "DESC" };
 
     let sql = format!(
         "SELECT a.id, a.tidal_id, a.ytmusic_id, a.soundcloud_id,
                 a.name, a.name_sort, a.biography, a.photo_url
          FROM artists a
-         ORDER BY {order_col} {dir}
-         LIMIT ?1 OFFSET ?2"
+         ORDER BY {order}
+         LIMIT ?1 OFFSET ?2",
+        order = artist_order_clause(dir)
     );
 
     let mut stmt = conn.prepare(&sql)?;
@@ -8139,6 +8264,113 @@ mod tests {
     use super::*;
     use crate::db::schema;
     use rusqlite::Connection;
+
+    #[test]
+    fn bare_artist_photo_ids_become_urls() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute(
+            "INSERT INTO artists (id, name, photo_url) VALUES
+                (1, 'Bare', '3a503460-3914-4d4a-b4de-aa93f4020d08'),
+                (2, 'Url', 'https://resources.tidal.com/images/a/b/c/d/e/640x640.jpg'),
+                (3, 'None', NULL)",
+            [],
+        )
+        .expect("artists");
+        assert_eq!(repair_bare_artist_photos(&conn).expect("repair"), 1);
+        let url: String = conn
+            .query_row("SELECT photo_url FROM artists WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("photo");
+        assert_eq!(
+            url,
+            "https://resources.tidal.com/images/3a503460/3914/4d4a/b4de/aa93f4020d08/750x750.jpg"
+        );
+        assert_eq!(repair_bare_artist_photos(&conn).expect("again"), 0);
+    }
+
+    #[test]
+    fn label_from_copyright_keeps_the_name() {
+        assert_eq!(
+            label_from_copyright(Some("(P) 2003 Parlophone Records Ltd")),
+            "Parlophone Records Ltd"
+        );
+        assert_eq!(
+            label_from_copyright(Some("\u{2117} 2026 Mediaphon")),
+            "Mediaphon"
+        );
+        assert_eq!(label_from_copyright(Some("Warp Records")), "Warp Records");
+        assert_eq!(label_from_copyright(None), "");
+    }
+
+    #[test]
+    fn album_label_round_trips() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("artist");
+        conn.execute(
+            "INSERT INTO albums (id, title, artist_id, tidal_id, year) VALUES (7, 'Album', 1, 99, 2001)",
+            [],
+        )
+        .expect("album");
+        assert_eq!(
+            get_album_credits(&conn, 7).expect("credits"),
+            Some((Some(99), None, Some(2001)))
+        );
+        set_album_label(&conn, 7, "Warp").expect("label");
+        assert_eq!(
+            get_album_credits(&conn, 7).expect("credits"),
+            Some((Some(99), Some("Warp".to_string()), Some(2001)))
+        );
+        assert_eq!(get_album_credits(&conn, 8).expect("missing"), None);
+    }
+
+    #[test]
+    fn artists_sort_letters_first_ignoring_the_and_index_by_initial() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        for (id, name) in [
+            (1, "*NSYNC"),
+            (2, "070 Shake"),
+            (3, "The Beatles"),
+            (4, "abba"),
+            (5, "Radiohead"),
+        ] {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (?1, ?2)",
+                params![id, name],
+            )
+            .expect("artist");
+        }
+        let names: Vec<String> = get_artists(&conn, "name", "asc", 10, 0)
+            .expect("artists")
+            .into_iter()
+            .map(|artist| artist.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["abba", "The Beatles", "Radiohead", "*NSYNC", "070 Shake"]
+        );
+
+        let index = get_artist_letter_index(&conn).expect("index");
+        assert_eq!(index.total, 5);
+        let letters: Vec<(String, i64)> = index
+            .letters
+            .into_iter()
+            .map(|entry| (entry.letter, entry.offset))
+            .collect();
+        assert_eq!(
+            letters,
+            vec![
+                ("A".into(), 0),
+                ("B".into(), 1),
+                ("R".into(), 2),
+                ("#".into(), 3)
+            ]
+        );
+    }
 
     fn read_onboarding_value(conn: &Connection) -> Option<String> {
         conn.query_row(

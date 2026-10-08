@@ -9,6 +9,8 @@
 .settings-scope .quality-setting-row,
 .settings-scope .audio-field,
 .settings-scope .wallpaper-control { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 240px); gap: var(--space-4); align-items: center; min-height: 56px; padding: var(--space-2) 0; border-bottom: 1px solid var(--border-subtle); }
+/* A setting's control takes the width it needs (pills never overlap the hint). */
+.settings-scope .setting-row { grid-template-columns: minmax(0, 1fr) minmax(180px, max-content); }
 .settings-scope .setting-row:last-child,
 .settings-scope .info-row:last-child { border-bottom: 0; }
 .settings-scope .setting-control { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2); }

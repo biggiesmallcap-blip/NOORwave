@@ -167,15 +167,17 @@
     </div>
 
     {#if artists.length > 1}
-      <button class="hero-nav hero-nav--prev" onclick={() => jump(-1)} aria-label="Previous artist">&lsaquo;</button>
-      <button class="hero-nav hero-nav--next" onclick={() => jump(1)} aria-label="Next artist">&rsaquo;</button>
-      {#if artists.length <= 8}
-        <div class="hero-dots" aria-hidden="true">
-          {#each artists as _, i}
-            <span class="hero-dot" class:active={i === currentIndex}></span>
-          {/each}
-        </div>
-      {/if}
+      <!-- One pager in the top corner (as on the chart murals): previous,
+           position, next. -->
+      <div class="hero-pager">
+        <button class="hero-nav" type="button" onclick={() => jump(-1)} aria-label="Previous artist">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 5-7 7 7 7" /></svg>
+        </button>
+        <span class="hero-pager-count" aria-live="polite">{currentIndex + 1} / {artists.length}</span>
+        <button class="hero-nav" type="button" onclick={() => jump(1)} aria-label="Next artist">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 5 7 7-7 7" /></svg>
+        </button>
+      </div>
     {/if}
   </div>
 {/if}
@@ -185,8 +187,24 @@
     position: relative;
     border-radius: var(--radius-md);
     overflow: hidden;
-    background: var(--bg-raised);
+    /* clip-path, not just overflow: composited art tiles otherwise glow
+       through the anti-aliased rounded corners. */
+    clip-path: inset(0 round var(--radius-md));
+    isolation: isolate;
+    background: var(--bg-base);
     min-height: 200px;
+  }
+
+  .library-hero-card::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: var(--z-raised);
+    border-radius: inherit;
+    /* A dark inner edge, not a light hairline: a light line over dark
+       art read as a glowing rim, worst at the rounded corners. */
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.45);
+    pointer-events: none;
   }
 
   .hero-bg-mural {
@@ -205,13 +223,11 @@
   .hero-overlay {
     position: absolute;
     inset: 0;
-    background: linear-gradient(
-      to right,
-      rgba(8,8,12,0.66) 0%,
-      rgba(8,8,12,0.34) 38%,
-      rgba(8,8,12,0.08) 68%,
-      transparent 100%
-    );
+    /* A deep plate behind the text that falls off into the collage, plus a
+       soft floor (the chart murals use the same pair). */
+    background:
+      linear-gradient(90deg, rgba(8,8,12,0.9) 0%, rgba(8,8,12,0.76) 30%, rgba(8,8,12,0.32) 56%, transparent 80%),
+      linear-gradient(0deg, rgba(8,8,12,0.45) 0%, transparent 45%);
     z-index: 1;
     pointer-events: none;
   }
@@ -225,7 +241,7 @@
     z-index: 2;
     display: grid;
     align-items: center;
-    padding: 28px 32px;
+    padding: var(--space-6);
     pointer-events: none;
   }
 
@@ -320,9 +336,9 @@
   .hero-meta {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    max-width: min(36rem, 55vw);
-    text-shadow: 0 2px 18px rgba(0,0,0,0.62);
+    gap: var(--space-1);
+    max-width: min(36rem, 52%);
+    text-shadow: 0 1px 8px rgba(0,0,0,0.45);
   }
 
   .hero-kind {
@@ -340,6 +356,7 @@
 
   .hero-title {
     font-size: var(--font-size-3xl);
+    letter-spacing: -0.01em;
     font-weight: var(--font-weight-bold);
     line-height: var(--line-height-tight);
     color: #fff;
@@ -353,16 +370,17 @@
   }
 
   .hero-sub {
-    font-size: var(--font-size-sm);
-    color: rgba(255,255,255,0.76);
-    margin: 2px 0 8px;
+    font-size: var(--font-size-md);
+    font-weight: var(--font-weight-medium);
+    color: rgba(255,255,255,0.86);
+    margin: 0;
   }
 
   .hero-actions {
     display: flex;
-    gap: 10px;
+    gap: var(--space-2);
     align-items: center;
-    margin-top: 4px;
+    margin-top: var(--space-4);
     pointer-events: auto;
     /* Shrink the hit area to just the buttons. As a stretched flex child this row
        spans the full meta width, and pointer-events:auto made that empty band
@@ -396,53 +414,57 @@
     background: rgba(8,8,12,0.62);
   }
 
-  /* Matches the home/trending mural nav (.chart-nav): dark side-by-side circles
-     anchored bottom-right, faintly visible by default and brightening on hover. */
-  .hero-nav {
+  /* Matches the chart mural pager: solid discs and a position count in the
+     top corner, clear of the title. */
+  .hero-pager {
     position: absolute;
-    bottom: var(--space-4);
+    top: var(--space-4);
+    right: var(--space-4);
     z-index: var(--z-raised);
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 3px;
+    border-radius: 999px;
+    background: rgba(8,8,12,0.62);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+  }
+
+  .hero-pager-count {
+    min-width: 3.5em;
+    color: rgba(255,255,255,0.86);
+    font-size: var(--font-size-xs);
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+  }
+
+  .hero-nav {
     display: grid;
     place-items: center;
-    width: clamp(32px, 3vw, 40px);
-    aspect-ratio: 1 / 1;
-    border: 1px solid var(--panel-border);
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 0;
     border-radius: 50%;
-    background: rgba(8,8,12,0.5);
+    background: transparent;
     color: #fff;
     cursor: pointer;
-    font-size: var(--font-size-xl);
-    line-height: 1;
-    opacity: 0.78;
-    transition: opacity var(--motion-fast), background var(--motion-fast);
+    transition: background var(--motion-fast);
   }
-  .library-hero-card:hover .hero-nav,
+  .hero-nav:hover { background: rgba(255,255,255,0.14); }
   .hero-nav:focus-visible {
-    opacity: 1;
-    outline: none;
+    outline: 2px solid var(--accent-strong);
+    outline-offset: 1px;
   }
-  .hero-nav:hover { background: rgba(8,8,12,0.75); }
-  .hero-nav--prev { right: calc(var(--space-3) + clamp(32px, 3vw, 40px) + var(--space-2)); }
-  .hero-nav--next { right: var(--space-3); }
-
-  .hero-dots {
-    position: absolute;
-    bottom: 10px;
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 3;
-    display: flex;
-    gap: 6px;
+  .hero-nav svg {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2.4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
   }
-
-  .hero-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: rgba(255,255,255,0.25);
-    transition: background var(--motion-base);
-  }
-  .hero-dot.active { background: rgba(255,255,255,0.85); }
 
   @media (max-width: 760px) {
     .hero-bg-mural {

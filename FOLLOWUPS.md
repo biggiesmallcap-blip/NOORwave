@@ -12,28 +12,14 @@ back to the PR or commit that flagged it.
 
 ### design: system adoption (remaining after the October 2026 audit)
 
-The audit's foundations, shared components and route migrations are in (see
-`frontend/STYLING.md` "Adoption status"). What is left needs a product call or
-backend work:
-- Search Enter: Enter in the field plays the focused song or the top result;
-  the audit proposes Enter stays and Ctrl+Enter opens the top result. Habit
-  change, so it waits for a decision.
-- Navigation groups: Atlas/Signals/System, or by job (Listen, Explore, Mix,
-  Tools); and "Discover" vs its page title "Sound Space" should match.
-- Library per-tab mural strips (plan Task 8): decide whether Songs and Albums
-  want a compact strip at all.
-- Library A to Z index and artist sorting (symbols last, "The" ignored): needs
-  letter offsets and artist totals from the server.
-- Proxy playlist relevance floor in Search (backend scoring).
-- Album label and release metadata for the liner-notes line (TIDAL
-  enrichment, backend).
-- 90 animation declarations still use raw durations (keyframes with custom
-  curves); move them onto `--motion-*` as those components are touched.
-- Global `.btn-secondary` / `.btn-ghost` / `.btn-icon` are still not added
-  (local classes with those names in LastfmConnect, Library and the Spotify
-  pages would pick up stray properties).
-- App-wide, Space on any focused button is play/pause (the window shortcut
-  cancels button activation): a product call.
+The audit's foundations, components, route migrations and its open calls are
+done (see `frontend/STYLING.md` "Adoption status" and
+`docs/specs/2026-10-08-styling-proposed.md`). Decided 2026-10-09: Enter in
+Search plays in place, the sidebar is grouped by job, Library tabs get no
+mural strips, and the A to Z index, playlist relevance floor and album label
+line are built; the global `.btn-secondary` / `.btn-ghost` / `.btn-icon`
+classes exist, and Space presses a focused control (play/pause stays on the
+page and the player transport). Nothing from the audit is open.
 Spawned by: design audit 2026-10-08 (artifact 7N4YSfzjpyu98GRLM5X5hF)
 
 ### video stations: phase 2 (decades, oddities, full tag coverage)
@@ -52,11 +38,13 @@ Spawned by: design audit 2026-10-08 (artifact 7N4YSfzjpyu98GRLM5X5hF)
 
 - Source: video radio audit, 2026-10-07. The crawler now supplies relevance,
   popularity, watch time and skips; selection still uses fixed lane slots.
+  Skips are handled since 2026-10-09 (skipped once sinks, twice is left
+  out); the rest below is open.
 - Affected: `noor-server/src/services/video_radio.rs` (`select_seeded_batch`,
   `select_batch`).
 - Why it matters: the seed artist takes about half of each batch, non-music
-  clips (commentary, interviews, trailers, under 90 s) are not filtered, the
-  best cut of a song is not preferred, and skips do not demote videos.
+  clips (commentary, interviews, trailers, under 90 s) are not filtered, and
+  the best cut of a song is not preferred.
 - Spawned by: branch `bsc/video-radio-audit-c7af6d` (video discovery crawler).
 
 ### tests: stabilize relative-date checks across daylight saving changes
@@ -80,9 +68,6 @@ Spawned by: design audit 2026-10-08 (artifact 7N4YSfzjpyu98GRLM5X5hF)
 Shipped so far: daily-picks mural, genre shelves, album-love, one-step-out
 adjacency, long-form sets, folded TIDAL editorial, browse-while-playing.
 Still open:
-- video_history table written from VideoDock play/ended events; feeds
-  exclude-recently-watched in the set builder and, later, video rows into
-  TasteVector artist affinity.
 - Forgotten-favorites shelf (high historical plays, no recent listens) - the
   one archetype the listen history supports that nothing else surfaces.
 - Parse releaseDate in parse_search_video (the raw payload carries it) to

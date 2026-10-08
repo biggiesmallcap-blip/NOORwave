@@ -402,9 +402,6 @@
   .state { padding: 80px 0; text-align: center; color: var(--text-muted); }
   .state.error { color: #ef4444; }
   .resolved-count { color: var(--accent); font-weight: var(--font-weight-semibold); }
-  .btn-primary, .btn-secondary { background: var(--accent); color: var(--bg-base); border: none; padding: 9px 14px; border-radius: 999px; font-weight: var(--font-weight-bold); cursor: pointer; font-size: var(--font-size-sm); }
-  .btn-secondary { background: var(--border-subtle); color: var(--text-primary); border: 1px solid var(--panel-border); }
-  .btn-primary:disabled, .btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
   .resolving-badge { font-size: var(--font-size-xs); color: var(--text-muted); font-style: italic; }
   .toast { margin: var(--space-2) 0 0; font-size: var(--font-size-xs); padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); width: fit-content; }
   .toast.success { background: rgba(125, 200, 175, 0.12); color: var(--accent); }

@@ -304,10 +304,10 @@
 		return `#${index + 1} - ${item.artist_name ?? 'Unknown artist'}`;
 	}
 
-	function itemMetric(shelf: ProviderRecommendationShelf, item: ProviderRecommendationItem, index: number): string {
-		const count = shelfItems(shelf).length;
-		const position = `${index + 1} of ${count}`;
-		return item.reason ? `${position} - ${item.reason}` : position;
+	// The mural's pager already shows the position, so the line is just the
+	// reason this was recommended.
+	function itemMetric(item: ProviderRecommendationItem): string {
+		return item.reason ?? '';
 	}
 
 	// Built once per shelf and reused until the data or the resolved artwork
@@ -605,7 +605,7 @@
 							ariaLabel={`${shelf.title} carousel`}
 							title={currentItem.title}
 							subtitle={itemSubtitle(currentItem, currentIndex)}
-							metric={itemMetric(shelf, currentItem, currentIndex)}
+							metric={itemMetric(currentItem)}
 							actionLabel={resolvingItems[itemKey(shelf, currentItem, currentIndex)] ? 'Resolving...' : actionLabel(currentItem)}
 							actionDisabled={Boolean(resolvingItems[itemKey(shelf, currentItem, currentIndex)])}
 							accent={shelf.provider === 'lastfm' ? 'lastfm' : 'accent'}

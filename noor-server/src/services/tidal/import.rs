@@ -128,6 +128,15 @@ pub async fn import_album(
     })
 }
 
+/// A TIDAL image id as the API sends it: a dashed uuid.
+fn is_tidal_image_id(value: &str) -> bool {
+    value.len() == 36
+        && value.char_indices().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
 fn upsert_artist_tx(
     tx: &rusqlite::Transaction<'_>,
     tidal_id: i64,
@@ -256,11 +265,20 @@ pub async fn import_track_from_metadata(
             });
         }
 
+        // Callers hand over a URL, but a bare TIDAL image id has slipped
+        // through before and left artist tiles blank; store it as a URL.
+        let artist_picture = meta.artist_picture.as_deref().map(|picture| {
+            if is_tidal_image_id(picture) {
+                TidalClient::get_artwork_url(&Some(picture.to_string()), 750).unwrap_or_default()
+            } else {
+                picture.to_string()
+            }
+        });
         let artist_id = upsert_artist_tx(
             &tx,
             meta.artist_tidal_id.unwrap_or(0),
             &meta.artist_name,
-            meta.artist_picture.as_deref(),
+            artist_picture.as_deref(),
         )?;
 
         let album_id: Option<i64> = if meta.album_title.is_some() || meta.album_tidal_id.is_some() {

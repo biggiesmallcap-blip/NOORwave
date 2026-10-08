@@ -10,7 +10,7 @@
 </script>
 
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import { get } from 'svelte/store';
 	import type { Snapshot } from './$types';
 	import { captureScroll, restoreScroll } from '$lib/navigation/scroll';
@@ -23,6 +23,7 @@
 		selectTrackIds, selectAlbumIds, clearSelection,
 	} from '$lib/stores/library';
 	import { initials } from '$lib/utils/text';
+	import { prefersReducedMotion } from '$lib/stores/motion';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import { LIBRARY_TABS, restoreLibraryTab, tabCountLabel, viewCountLabel, type LibraryTab } from '$lib/components/library/library_tabs';
 	import { librarySongsScope } from '$lib/stores/library_songs';
@@ -173,7 +174,7 @@
 	let libraryTabs = $derived(
 		LIBRARY_TABS.map((tab) => ({
 			...tab,
-			count: tab.id === 'tracks' ? tabCountLabel(libraryCounts.tracks) : tab.id === 'albums' ? tabCountLabel(libraryCounts.albums) : null,
+			count: tab.id === 'tracks' ? tabCountLabel(libraryCounts.tracks) : tab.id === 'albums' ? tabCountLabel(libraryCounts.albums) : tab.id === 'artists' ? tabCountLabel(artistLetters?.total) : null,
 		})),
 	);
 	let viewCount = $derived(
@@ -478,6 +479,7 @@
 			if (tab === 'albums') loadAlbums(albumSortField, albumSortDir, PAGE_SIZE, 0, activeDecade);
 		}
 		if (tab === 'artists' && artists.length === 0) void loadArtists();
+		if (tab === 'artists' && !artistLetters) void loadArtistLetters();
 		clearSelection();
 	}
 
@@ -502,6 +504,58 @@
 	// Re-page artists up to `targetCount` in one restore pass (back-nav), so a
 	// deep scroll position is reachable. Pages sequentially like loadMoreArtists
 	// and fills the grid progressively; stops when the source is exhausted.
+	// A to Z index for the Artists tab (audit "Library is a second Home"):
+	// the server returns each initial's first offset in the list order, so a
+	// jump pages up to it instead of scrolling through every artist before it.
+	const AZ_LETTERS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '#'];
+	let artistLetters = $state<{ total: number; letters: { letter: string; offset: number }[] } | null>(null);
+	let artistLetterOffsets = $derived(new Map(artistLetters?.letters.map((entry) => [entry.letter, entry.offset]) ?? []));
+
+	async function loadArtistLetters() {
+		try {
+			artistLetters = await api.getArtistLetters();
+		} catch {
+			// Older servers lack the index; the tab works without it.
+			artistLetters = null;
+		}
+	}
+
+	async function jumpToArtistLetter(letter: string) {
+		const offset = artistLetterOffsets.get(letter);
+		if (offset == null) return;
+		if (artists.length <= offset && !artistsExhausted) {
+			artistsLoadingMore = true;
+			try {
+				// The server caps a page at 200; the gap is fetched in parallel
+				// batches so a jump to M does not wait on 50 sequential pages.
+				const JUMP_PAGE = 200;
+				const target = offset + PAGE_SIZE / 4;
+				const starts: number[] = [];
+				for (let start = artists.length; start <= target; start += JUMP_PAGE) starts.push(start);
+				for (let i = 0; i < starts.length && !artistsExhausted; i += 6) {
+					const pages = await Promise.all(
+						starts.slice(i, i + 6).map((start) => cachedApi.getArtists('name', 'asc', JUMP_PAGE, start))
+					);
+					const seen = new Set(artists.map((a) => a.id));
+					const fresh = pages.flatMap((page) => page.artists).filter((a) => !seen.has(a.id) && seen.add(a.id));
+					artists = [...artists, ...fresh];
+					if (pages.some((page) => page.artists.length < JUMP_PAGE)) artistsExhausted = true;
+				}
+			} catch (err) {
+				console.error('Failed to page artists for the index:', err);
+			} finally {
+				artistsLoadingMore = false;
+			}
+		}
+		await tick();
+		const card = document.querySelector(`[data-artist-index="${offset}"]`);
+		if (!card) return;
+		// A smooth scroll across thousands of cards is cut short as rows load
+		// in under it, so only nearby jumps animate.
+		const near = Math.abs(card.getBoundingClientRect().top) < window.innerHeight * 2;
+		card.scrollIntoView({ block: 'start', behavior: near && !prefersReducedMotion() ? 'smooth' : 'auto' });
+	}
+
 	async function loadArtistsUpTo(targetCount: number) {
 		artistsLoading = true;
 		artistsExhausted = false;
@@ -1919,7 +1973,7 @@
 								<span class="ht-duration">{formatTrackDuration(track.duration_ms)}</span>
 								<div class="ht-actions">
 									<button
-										class="btn-icon"
+										class="ht-icon-btn"
 										title="View details"
 										onclick={(e) => { e.stopPropagation(); void openTrackDetail(track); }}
 										aria-label="View details"
@@ -1927,7 +1981,7 @@
 										i
 									</button>
 									<button
-										class="btn-icon"
+										class="ht-icon-btn"
 										title="Add to queue"
 										onclick={(e) => { e.stopPropagation(); void addTrackToQueue(track.id); }}
 										aria-label="Add to queue"
@@ -2030,7 +2084,7 @@
 								<span class="ht-duration">{formatTrackDuration(track.duration_ms)}</span>
 								<div class="ht-actions">
 									<button
-										class="btn-icon"
+										class="ht-icon-btn"
 										title="Add to queue"
 										onclick={(e) => { e.stopPropagation(); void addTrackToQueue(track.id); }}
 										aria-label="Add to queue"
@@ -2185,17 +2239,19 @@
 	{:else if activeTab === 'artists'}
 		<!-- Artist Grid -->
 		{#if artistsLoading && !isSearchMode}
-			<div class="loading">Loading artists…</div>
+			<Skeleton rows={8} label="Loading artists" />
 		{:else if visibleArtists.length === 0}
 			<EmptyState
 				title={isSearchMode ? 'No artists match' : 'No artists yet'}
 				copy={isSearchMode ? `Nothing in your library matches "${$searchQuery.trim()}". Try a different search.` : 'Sync your TIDAL library in Settings to populate artists.'}
 			/>
 		{:else}
+			<div class="artists-indexed" class:with-index={!isSearchMode && artistLetters != null}>
 			<div class="artist-grid">
-				{#each visibleArtists as artist (artist.id)}
+				{#each visibleArtists as artist, artistIndex (artist.id)}
 					{@const fallbackSrc = artistArtworkById.get(artist.id)}
 					<button
+						data-artist-index={isSearchMode ? undefined : artistIndex}
 						class="artist-card"
 						onclick={() => void goto(`/artists/${artist.id}`)}
 						oncontextmenu={(e) => {
@@ -2223,6 +2279,18 @@
 						<span class="artist-name">{artist.name}</span>
 					</button>
 				{/each}
+			</div>
+			{#if !isSearchMode && artistLetters}
+				<nav class="az-rail" aria-label="Jump to letter">
+					{#each AZ_LETTERS as letter (letter)}
+						<button
+							type="button"
+							disabled={!artistLetterOffsets.has(letter)}
+							onclick={() => void jumpToArtistLetter(letter)}
+						>{letter}</button>
+					{/each}
+				</nav>
+			{/if}
 			</div>
 
 			{#if !isSearchMode && !artistsExhausted && artists.length > 0}
@@ -2859,7 +2927,7 @@
 
 	.home-track-row:hover .ht-actions { opacity: 1; }
 
-	.btn-icon {
+	.ht-icon-btn {
 		background: none;
 		border: none;
 		cursor: pointer;
@@ -2871,7 +2939,7 @@
 		transition: color var(--motion-fast);
 	}
 
-	.btn-icon:hover { color: var(--text-primary, #fff); }
+	.ht-icon-btn:hover { color: var(--text-primary, #fff); }
 
 	.home-loading {
 		color: var(--text-secondary, rgba(255,255,255,0.5));
@@ -3107,7 +3175,7 @@
 		flex-direction: column;
 		gap: 24px;
 		margin-bottom: var(--gap);
-		animation: panel-slide 200ms ease-out both;
+		animation: panel-slide var(--motion-base) both;
 	}
 
 	@keyframes panel-slide {
@@ -3459,7 +3527,7 @@
 		align-items: center;
 		justify-content: center;
 		padding: 24px;
-		animation: backdrop-in 180ms ease both;
+		animation: backdrop-in var(--motion-base) both;
 	}
 
 	@keyframes backdrop-in {
@@ -3477,7 +3545,7 @@
 		gap: 20px;
 		padding: 24px;
 		border-radius: var(--radius-lg);
-		animation: modal-pop 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+		animation: modal-pop var(--motion-base) both;
 		scrollbar-width: thin;
 	}
 
@@ -4341,6 +4409,46 @@
 	@container workspace (max-width: 720px) {
 		.track-row .camelot-badge-inline,
 		.track-row .bpm-inline { display: none; }
+	}
+
+	.artists-indexed.with-index {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) 20px;
+		gap: var(--space-3);
+		align-items: start;
+	}
+
+	.az-rail {
+		position: sticky;
+		top: var(--space-3);
+		display: grid;
+		gap: 1px;
+	}
+
+	.az-rail button {
+		all: unset;
+		text-align: center;
+		padding: 1px 0;
+		border-radius: 4px;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-semibold);
+		color: var(--text-secondary);
+		cursor: pointer;
+	}
+
+	.az-rail button:hover:not(:disabled) {
+		color: var(--text-primary);
+		background: var(--bg-hover);
+	}
+
+	.az-rail button:focus-visible {
+		outline: 2px solid var(--accent-strong);
+		outline-offset: 1px;
+	}
+
+	.az-rail button:disabled {
+		color: var(--text-muted);
+		cursor: default;
 	}
 
 	.artist-card {

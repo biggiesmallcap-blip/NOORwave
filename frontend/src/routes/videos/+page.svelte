@@ -8,7 +8,8 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { api, type TidalSearchVideo, type VideoDiscoverSet } from '$lib/api/client';
+	import { api, type TidalSearchVideo, type VideoDiscoverSet, type VideoHistoryEntry } from '$lib/api/client';
+	import { playVideo } from '$lib/stores/video_session';
 	import GuideFeature from '$lib/components/video/GuideFeature.svelte';
 	import GuidePlaceholder from '$lib/components/video/GuidePlaceholder.svelte';
 	import GuideRow from '$lib/components/video/GuideRow.svelte';
@@ -105,8 +106,27 @@
 		else if (playlistId) void playVideoCollection('playlist', playlistId);
 	}
 
+	// Recently watched: the last videos you played, newest first, so a video
+	// you left is one click away. The full list is the History tab.
+	let recentlyWatched = $state<TidalSearchVideo[]>([]);
+	async function loadRecentlyWatched() {
+		try {
+			const { items } = await api.getVideoHistory(24);
+			recentlyWatched = items.map((entry: VideoHistoryEntry) => entry.video);
+		} catch {
+			recentlyWatched = [];
+		}
+	}
+
+	function playRecentlyWatched(startWith?: TidalSearchVideo) {
+		const first = startWith ?? recentlyWatched[0];
+		if (!first) return;
+		void playVideo(first, { queue: recentlyWatched, source: 'search', sourceLabel: 'Recently watched' });
+	}
+
 	onMount(() => {
 		void loadBrowse();
+		void loadRecentlyWatched();
 		void handleDeepLink();
 	});
 
@@ -135,6 +155,20 @@
 			<p>Video radio starts with your picks, then keeps finding related artists and genres.</p>
 			<button type="button" class="btn btn-glass" onclick={playBrowseMix}>Start video radio</button>
 		</div>
+	{/if}
+
+	{#if recentlyWatched.length > 0}
+		<section class="group" aria-label="Recently watched">
+			<GuideRow
+				title="Recently watched"
+				titleHint="The videos you played last, newest first. The full list is in History."
+				count={`${recentlyWatched.length} ${recentlyWatched.length === 1 ? 'video' : 'videos'}`}
+				label="Recently watched"
+				frames={recentlyWatched}
+				rise={1}
+				onplay={(startWith) => playRecentlyWatched(startWith)}
+			/>
+		</section>
 	{/if}
 
 	{#if shelfSets.length > 0}

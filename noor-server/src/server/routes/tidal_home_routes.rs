@@ -797,9 +797,17 @@ pub(super) async fn get_tidal_moods(
             json!({ "categories": cached, "source": "tidal", "cached": true }),
         ));
     }
-    let categories = default_tidal_mood_categories();
+    // Cold start: the in-memory cache is empty, so serve the last resolved list
+    // (thumbnails included) from the DB instead of thumbnail-less defaults.
+    let db = state.read().await.db.clone();
+    let persisted = load_persisted_mood_categories(&db, &tokens.country_code);
+    let categories = persisted
+        .clone()
+        .unwrap_or_else(default_tidal_mood_categories);
     let (response_categories, pending_probe_slugs, cached_probe_hits) =
         apply_cached_mood_category_probes(categories, &tokens.country_code, &page_modules_cache);
+    let response_categories =
+        fill_missing_mood_thumbnails(response_categories, persisted.as_deref());
     let pending_probe_count = pending_probe_slugs.len();
 
     put_cached_tidal_mood_categories_with_ttl(
@@ -884,6 +892,7 @@ async fn refresh_tidal_moods_cache(
     )
     .with_metadata_store(state.read().await.db.clone());
     let mut active_country_code = tokens.country_code.clone();
+    let db = state.read().await.db.clone();
     let raw = match active_client.get_page_raw("pages/moods").await {
         Ok(r) => r,
         Err(e) if super::error_looks_like_auth(&e) => {
@@ -908,6 +917,7 @@ async fn refresh_tidal_moods_cache(
         Err(e) => {
             tracing::warn!("TIDAL get_tidal_moods failed: {e}");
             cache_default_moods_with_thumbnails(
+                db,
                 mood_cache,
                 page_modules_cache,
                 active_client,
@@ -921,6 +931,7 @@ async fn refresh_tidal_moods_cache(
     if live_categories.is_empty() {
         tracing::warn!("TIDAL get_tidal_moods returned no PAGE_LINKS categories");
         cache_default_moods_with_thumbnails(
+            db,
             mood_cache,
             page_modules_cache,
             active_client,
@@ -936,10 +947,17 @@ async fn refresh_tidal_moods_cache(
             &active_country_code,
             &page_modules_cache,
         );
+    // Keep last-known artwork visible while the probes for this list run.
+    let persisted = load_persisted_mood_categories(&db, &active_country_code);
+    let response_categories =
+        fill_missing_mood_thumbnails(response_categories, persisted.as_deref());
     put_cached_tidal_mood_categories(&mood_cache, response_categories.clone());
 
-    if !pending_probe_slugs.is_empty() {
+    if pending_probe_slugs.is_empty() {
+        persist_mood_categories(&db, &active_country_code, &response_categories);
+    } else {
         run_mood_thumbnail_probe_refresh(
+            db,
             mood_cache.clone(),
             page_modules_cache,
             active_client,
@@ -965,6 +983,7 @@ async fn refresh_tidal_moods_cache(
 /// leaving the rail showing the thumbnail-less hardcoded fallbacks forever. Keeps
 /// every default category even when its own probe yields nothing.
 async fn cache_default_moods_with_thumbnails(
+    db: crate::db::Database,
     mood_cache: TidalMoodCategoriesCache,
     page_modules_cache: TidalPageModulesCache,
     probe_client: TidalClient,
@@ -1028,6 +1047,7 @@ async fn cache_default_moods_with_thumbnails(
 
     let found = thumbnails.len();
     let merged = merge_default_mood_thumbnails(categories, &thumbnails);
+    persist_mood_categories(&db, &country_code, &merged);
     put_cached_tidal_mood_categories(&mood_cache, merged);
     tracing::info!(
         route = "tidal_moods_default_probe",
@@ -1136,6 +1156,7 @@ fn mood_probe_from_modules(modules: &[TidalHomeModule]) -> (bool, Option<String>
 }
 
 async fn run_mood_thumbnail_probe_refresh(
+    db: crate::db::Database,
     mood_cache: TidalMoodCategoriesCache,
     page_modules_cache: TidalPageModulesCache,
     probe_client: TidalClient,
@@ -1237,6 +1258,7 @@ async fn run_mood_thumbnail_probe_refresh(
 
     clear_tidal_moods_probe_failure(tidal_moods_probe_failure_cooldown());
     let refreshed_categories = apply_mood_probe_results(categories, &probe);
+    persist_mood_categories(&db, &country_code, &refreshed_categories);
     put_cached_tidal_mood_categories(&mood_cache, refreshed_categories.clone());
     tracing::info!(
         route = "tidal_moods_probe",
@@ -1250,6 +1272,109 @@ async fn run_mood_thumbnail_probe_refresh(
         timeout_ms = MOOD_THUMBNAIL_PROBE_TIMEOUT.as_millis(),
         "TIDAL moods thumbnail/background probe complete"
     );
+}
+
+/// TIDAL still lists links on `pages/moods` whose pages no longer load (the
+/// Magazine); drop them so the rail never shows a dead tile.
+fn is_dead_mood_link(slug: &str, title: &str) -> bool {
+    slug.to_ascii_lowercase().contains("magazine")
+        || title.to_ascii_lowercase().contains("magazine")
+}
+
+const PERSISTED_MOODS_CONFIG_KEY: &str = "tidal_moods.categories.v1";
+
+/// Last resolved mood list for `country_code`, persisted so an app restart
+/// renders real artwork immediately instead of waiting on the probes.
+fn load_persisted_mood_categories(
+    db: &crate::db::Database,
+    country_code: &str,
+) -> Option<Vec<Value>> {
+    let raw: Option<String> = db
+        .with_conn(|conn| {
+            use rusqlite::OptionalExtension;
+            Ok(conn
+                .query_row(
+                    "SELECT value FROM server_config WHERE key = ?1",
+                    [PERSISTED_MOODS_CONFIG_KEY],
+                    |row| row.get(0),
+                )
+                .optional()?)
+        })
+        .ok()
+        .flatten();
+    let stored: Value = serde_json::from_str(&raw?).ok()?;
+    parse_persisted_mood_categories(&stored, country_code)
+}
+
+fn parse_persisted_mood_categories(stored: &Value, country_code: &str) -> Option<Vec<Value>> {
+    if stored.get("country").and_then(|c| c.as_str()) != Some(country_code) {
+        return None;
+    }
+    let categories: Vec<Value> = stored
+        .get("categories")?
+        .as_array()?
+        .iter()
+        .filter(|c| {
+            let slug = c.get("slug").and_then(|s| s.as_str()).unwrap_or("");
+            let title = c.get("title").and_then(|s| s.as_str()).unwrap_or("");
+            !slug.is_empty() && !is_dead_mood_link(slug, title)
+        })
+        .cloned()
+        .collect();
+    (!categories.is_empty()).then_some(categories)
+}
+
+fn persist_mood_categories(db: &crate::db::Database, country_code: &str, categories: &[Value]) {
+    // Only worth keeping once artwork has resolved; a thumbnail-less list would
+    // just reproduce the cold-start placeholders.
+    if !categories
+        .iter()
+        .any(|c| c.get("thumbnail").is_some_and(|t| t.is_string()))
+    {
+        return;
+    }
+    let payload = json!({ "country": country_code, "categories": categories }).to_string();
+    if let Err(e) = db.with_conn(|conn| {
+        conn.execute(
+            "INSERT OR REPLACE INTO server_config (key, value) VALUES (?1, ?2)",
+            rusqlite::params![PERSISTED_MOODS_CONFIG_KEY, payload],
+        )?;
+        Ok(())
+    }) {
+        tracing::debug!(route = "tidal_moods", error = %e, "Failed to persist mood categories");
+    }
+}
+
+/// Copy thumbnails from `persisted` (by slug) onto categories still missing one.
+fn fill_missing_mood_thumbnails(categories: Vec<Value>, persisted: Option<&[Value]>) -> Vec<Value> {
+    let Some(persisted) = persisted else {
+        return categories;
+    };
+    let known: HashMap<&str, &Value> = persisted
+        .iter()
+        .filter_map(|c| {
+            let slug = c.get("slug")?.as_str()?;
+            let thumb = c.get("thumbnail").filter(|t| t.is_string())?;
+            Some((slug, thumb))
+        })
+        .collect();
+    categories
+        .into_iter()
+        .map(|mut category| {
+            let has_thumb = category.get("thumbnail").is_some_and(|t| t.is_string());
+            if !has_thumb
+                && let Some(thumb) = category
+                    .get("slug")
+                    .and_then(|s| s.as_str())
+                    .and_then(|slug| known.get(slug))
+                    .map(|t| (*t).clone())
+                && let Some(obj) = category.as_object_mut()
+            {
+                obj.insert("thumbnail".to_string(), thumb);
+            }
+            category
+        })
+        .collect()
 }
 
 fn get_cached_tidal_mood_categories(cache: &TidalMoodCategoriesCache) -> Option<Vec<Value>> {
@@ -1308,6 +1433,9 @@ fn extract_page_links(payload: &Value) -> Vec<Value> {
                     continue;
                 }
                 let slug = api_path.strip_prefix("pages/").unwrap_or(api_path);
+                if is_dead_mood_link(slug, title) {
+                    continue;
+                }
                 out.push(json!({
                     "slug": slug,
                     "title": title,
@@ -1376,6 +1504,58 @@ mod tests {
 
     fn cooldown_state(value: Option<Instant>) -> Mutex<Option<Instant>> {
         Mutex::new(value)
+    }
+
+    #[test]
+    fn extract_page_links_drops_tidal_magazine() {
+        let payload = json!({ "rows": [{ "modules": [{
+            "type": "PAGE_LINKS",
+            "pagedList": { "items": [
+                { "title": "For DJs", "apiPath": "pages/m_for_djs" },
+                { "title": "TIDAL Magazine", "apiPath": "pages/magazine" },
+                { "title": "Autumn", "apiPath": "pages/m_autumn" },
+            ] }
+        }] }] });
+        let slugs: Vec<String> = extract_page_links(&payload)
+            .iter()
+            .map(|c| c["slug"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(slugs, vec!["m_for_djs", "m_autumn"]);
+    }
+
+    #[test]
+    fn persisted_moods_round_trip_and_fill_missing_thumbnails() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        // Thumbnail-less lists are not persisted.
+        persist_mood_categories(
+            &db,
+            "AU",
+            &[json!({ "slug": "m_a", "title": "A", "thumbnail": null })],
+        );
+        assert!(load_persisted_mood_categories(&db, "AU").is_none());
+
+        persist_mood_categories(
+            &db,
+            "AU",
+            &[
+                json!({ "slug": "m_a", "title": "A", "thumbnail": "https://img/a.jpg" }),
+                json!({ "slug": "magazine", "title": "TIDAL Magazine", "thumbnail": null }),
+            ],
+        );
+        let persisted = load_persisted_mood_categories(&db, "AU").unwrap();
+        assert_eq!(persisted.len(), 1, "dead magazine link filtered on load");
+        assert!(load_persisted_mood_categories(&db, "US").is_none());
+
+        let filled = fill_missing_mood_thumbnails(
+            vec![
+                json!({ "slug": "m_a", "title": "A", "thumbnail": null }),
+                json!({ "slug": "m_b", "title": "B", "thumbnail": null }),
+            ],
+            Some(&persisted),
+        );
+        assert_eq!(filled[0]["thumbnail"], "https://img/a.jpg");
+        assert!(filled[1]["thumbnail"].is_null());
     }
 
     #[test]
