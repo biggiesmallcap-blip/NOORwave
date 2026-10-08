@@ -201,7 +201,7 @@
 	// up in the home-modules cache and 404s otherwise
 	// (tidal_home_routes.rs: load_tidal_home_modules_cached, then
 	// `modules.into_iter().find(...)`). Every module rendered from an editorial
-	// page - /hires, /new-releases, /explore, and the Hi-Res preview on Home -
+	// page - /hires, /new-releases, and the Hi-Res preview on Home -
 	// comes from /api/tidal/page/{section} instead, so its id is never in that
 	// cache and the link could only ever land on "That discover shelf doesn't
 	// exist anymore".

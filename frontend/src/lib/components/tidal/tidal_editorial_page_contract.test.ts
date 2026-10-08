@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
@@ -34,7 +34,8 @@ describe('TIDAL editorial page routes', () => {
 	});
 
 	test('wires non-colliding editorial pages to documented TIDAL paths', () => {
-		expect(routeSource('explore')).toContain('pagePath="explore"');
+		// Explore was never linked and TIDAL returns no modules for it.
+		expect(existsSync(join(routesRoot, 'explore', '+page.svelte'))).toBe(false);
 		expect(routeSource('hires')).toContain('pagePath="hires"');
 		expect(routeSource('new-releases')).toContain('pagePath="new-releases"');
 	});
@@ -42,12 +43,13 @@ describe('TIDAL editorial page routes', () => {
 	test('does not replace existing genres or videos workflows', () => {
 		expect(routeSource('genres')).toContain('GenreGalaxy');
 		expect(routeSource('videos')).toContain('GuideRow');
-		expect(routeSource('genres')).toContain('href="/tidal/genres"');
+		expect(routeSource('genres')).not.toContain('/tidal/genres');
 		expect(routeSource('videos/editorial')).toContain('embedded');
 	});
 
 	test('wires colliding TIDAL editorial pages under the tidal namespace', () => {
-		expect(routeSource('tidal/genres')).toContain('pagePath="genres"');
+		// TIDAL genres had no entry point besides the removed galaxy dock link.
+		expect(existsSync(join(routesRoot, 'tidal', 'genres', '+page.svelte'))).toBe(false);
 		expect(routeSource('videos/editorial')).toContain('pagePath="videos"');
 		expect(routeSource('tidal/videos')).toContain("goto('/videos/editorial', { replaceState: true })");
 	});

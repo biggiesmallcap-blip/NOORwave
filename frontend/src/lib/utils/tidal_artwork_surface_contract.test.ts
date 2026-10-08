@@ -18,7 +18,7 @@ const sharedArtistView = source('routes/artists/ArtistDetail.svelte');
 const tidalArtistRoute = source('routes/tidal/artists/[id]/+page.svelte');
 const tidalAlbumRoute = source('routes/tidal/albums/[id]/+page.svelte');
 const duplicatesRoute = source('routes/duplicates/+page.svelte');
-const genreInterior = source('lib/components/Genre/GenreInterior.svelte');
+const genreDetail = source('lib/components/Genre/GenreDetail.svelte');
 const detailHero = source('lib/components/ui/DetailHero.svelte');
 const artworkImage = source('lib/components/ui/ArtworkImage.svelte');
 
@@ -75,10 +75,8 @@ describe('TIDAL artwork surface contracts', () => {
 		expect(duplicatesRoute).toContain('size={320}');
 		expect(duplicatesRoute).not.toContain('<img class="member-art" src={member.track.artwork_url}');
 
-		expect(genreInterior).toContain("import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte'");
-		expect(genreInterior).toContain('className="track-art"');
-		expect(genreInterior).toContain('src={track.artwork_url}');
-		expect(genreInterior).toContain('size={320}');
-		expect(genreInterior).not.toContain('<img class="track-art" src={track.artwork_url}');
+		// Track artwork comes from the shared TrackRow (ArtworkImage, size 320).
+		expect(genreDetail).toContain("import TrackRow from '$lib/components/TrackRow.svelte';");
+		expect(genreDetail).not.toContain('<img');
 	});
 });

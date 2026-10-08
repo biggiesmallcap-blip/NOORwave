@@ -2083,8 +2083,78 @@ pub fn get_genre_tree_filtered(
     conn: &Connection,
     filter: crate::genre::filter::GalaxyFilterRule,
 ) -> Result<Vec<Genre>> {
-    let genres = get_genres_filtered(conn, filter)?;
+    let mut genres = get_genres_filtered(conn, filter)?;
+    let subtree_counts = genre_subtree_track_counts(conn, filter)?;
+    for genre in &mut genres {
+        genre.track_count = Some(subtree_counts.get(&genre.id).copied().unwrap_or(0));
+    }
     Ok(build_genre_tree(genres))
+}
+
+/// Distinct library tracks under each genre's whole subtree, using the same
+/// membership rules as `get_tracks_by_genre_filtered(.., include_descendants =
+/// true)`: the galaxy library gate, the confidence filter, and the Spotify
+/// dominance rule. A node's count always equals the list its genre page shows.
+fn genre_subtree_track_counts(
+    conn: &Connection,
+    filter: crate::genre::filter::GalaxyFilterRule,
+) -> Result<HashMap<i64, i64>> {
+    let mut parent_of: HashMap<i64, Option<i64>> = HashMap::new();
+    let mut stmt = conn.prepare("SELECT id, parent_id FROM genres")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
+    })?;
+    for row in rows {
+        let (id, parent) = row?;
+        parent_of.insert(id, parent);
+    }
+    // Self first, then each ancestor up to the root.
+    let ancestors_of = |genre_id: i64| -> Vec<i64> {
+        let mut chain = Vec::new();
+        let mut cursor = Some(genre_id);
+        while let Some(id) = cursor {
+            if chain.contains(&id) {
+                break; // cycle guard
+            }
+            chain.push(id);
+            cursor = parent_of.get(&id).copied().flatten();
+        }
+        chain
+    };
+
+    // A track Spotify tagged at all only counts under subtrees that contain one
+    // of its Spotify tags (raw table, independent of the confidence filter).
+    let mut spotify_ancestors: HashMap<i64, HashSet<i64>> = HashMap::new();
+    let mut stmt =
+        conn.prepare("SELECT track_id, genre_id FROM track_genres WHERE source = 'spotify'")?;
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
+    for row in rows {
+        let (track_id, genre_id) = row?;
+        spotify_ancestors
+            .entry(track_id)
+            .or_default()
+            .extend(ancestors_of(genre_id));
+    }
+
+    let sub = galaxy_library_gate(&crate::genre::filter::filter_subquery(filter));
+    let mut members: HashMap<i64, HashSet<i64>> = HashMap::new();
+    let mut stmt = conn.prepare(&format!("SELECT track_id, genre_id FROM ({sub})"))?;
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
+    for row in rows {
+        let (track_id, genre_id) = row?;
+        let spotify = spotify_ancestors.get(&track_id);
+        for ancestor in ancestors_of(genre_id) {
+            if spotify.is_some_and(|allowed| !allowed.contains(&ancestor)) {
+                continue;
+            }
+            members.entry(ancestor).or_default().insert(track_id);
+        }
+    }
+
+    Ok(members
+        .into_iter()
+        .map(|(id, tracks)| (id, tracks.len() as i64))
+        .collect())
 }
 
 pub fn get_genre_heat_filtered(
@@ -4133,17 +4203,12 @@ fn build_genre_tree(genres: Vec<Genre>) -> Vec<Genre> {
 
         for child in &mut children {
             child.children = attach_children(Some(child.id), children_by_parent);
-            child.track_count = Some(aggregate_track_count(child));
         }
 
         children
     }
 
     attach_children(None, &mut children_by_parent)
-}
-
-fn aggregate_track_count(node: &Genre) -> i64 {
-    node.track_count.unwrap_or(0) + node.children.iter().map(aggregate_track_count).sum::<i64>()
 }
 
 fn placeholders(count: usize) -> String {
@@ -10829,6 +10894,63 @@ mod tests {
             .find(|g| g.name == "Country")
             .expect("country node");
         assert_eq!(country.track_count, Some(3));
+    }
+
+    #[test]
+    fn genre_tree_counts_distinct_library_tracks_per_subtree() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        seed_album_with_one_liked_track(&conn);
+        conn.execute(
+            "INSERT INTO genres (id, name, slug, parent_id) VALUES
+                (1, 'Electronic', 'electronic', NULL),
+                (2, 'House', 'house', 1),
+                (3, 'Deep House', 'deep-house', 2)",
+            [],
+        )
+        .unwrap();
+        // Track 1 is tagged at two levels of one branch; it must count once.
+        conn.execute(
+            "INSERT INTO track_genres (track_id, genre_id, source, confidence) VALUES
+                (1, 2, 'musicbrainz', 0.9),
+                (1, 3, 'musicbrainz', 0.9),
+                (2, 3, 'musicbrainz', 0.9),
+                (3, 1, 'musicbrainz', 0.9)",
+            [],
+        )
+        .unwrap();
+
+        let tree = get_genre_tree_filtered(&conn, crate::genre::filter::GalaxyFilterRule::All)
+            .expect("genre tree");
+        let electronic = tree.iter().find(|g| g.id == 1).expect("electronic root");
+        let house = electronic
+            .children
+            .iter()
+            .find(|g| g.id == 2)
+            .expect("house");
+        let deep = house
+            .children
+            .iter()
+            .find(|g| g.id == 3)
+            .expect("deep house");
+
+        assert_eq!(deep.track_count, Some(2));
+        assert_eq!(
+            house.track_count,
+            Some(2),
+            "track 1 tagged twice counts once"
+        );
+        assert_eq!(electronic.track_count, Some(3));
+
+        // The node count must equal what the genre page lists.
+        let listed = get_tracks_by_genre_filtered(
+            &conn,
+            1,
+            true,
+            crate::genre::filter::GalaxyFilterRule::All,
+        )
+        .expect("electronic tracks");
+        assert_eq!(electronic.track_count, Some(listed.len() as i64));
     }
 
     #[test]

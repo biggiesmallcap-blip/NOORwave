@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, test } from 'vitest';
 
 describe('genre galaxy UI contract', () => {
@@ -19,27 +19,37 @@ describe('genre galaxy UI contract', () => {
 		expect(galaxy).toContain('function getNodeSprite');
 		const drawFrameBody = galaxy.slice(galaxy.indexOf('function drawFrame()'));
 		expect(drawFrameBody).toContain('drawParallaxStars(ctx);');
-		expect(galaxy).toContain('const inActiveFamily = activeFamilyId !== null && node.familyId === activeFamilyId;');
-		expect(galaxy).toContain('if (inActiveFamily && node.depth === 1) return 0.86;');
-		expect(galaxy).toContain("if (inActiveFamily && node.depth === 2 && zoomLevel !== 'galaxy')");
-		expect(galaxy).toContain('function labelUsesChip');
-		expect(galaxy).toContain('function clampLabelRect');
+		expect(galaxy).toContain("import { labelAlpha, labelPriority, placeLabels, type LabelRect } from './galaxyLabels';");
+		expect(galaxy).toContain('const accepted = placeLabels(candidates, { width, height });');
+		expect(galaxy).not.toContain('function clampLabelRect');
+		expect(galaxy).not.toContain('function labelAlphaForNode');
+		expect(galaxy).not.toContain('Iowan Old Style');
 		expect(galaxy).toContain('const HOVER_CARD_CURSOR_CLEARANCE_X = 28;');
 		expect(galaxy).toContain('const HOVER_CARD_CURSOR_CLEARANCE_Y = 24;');
 		expect(galaxy).toContain('function placeHoverCard(');
 		expect(galaxy).toContain("hoverCardPosition.align === 'right' ? 'translate(-100%, -100%)' : 'translate(0, -100%)'");
-		expect(galaxy).toContain('const labelActivity = activeFamilyLabel && labelUsesChip(node) ? Math.max(activity, 0.82) : activity;');
 		expect(galaxy).toContain('if (hoveredNodeId === node.id && !isDragging) continue;');
 		expect(galaxy).not.toContain('selectedId === node.id || hoveredNodeId === node.id');
-		expect(galaxy).toContain('const { x: chipX, y: chipY } = clampLabelRect(');
 		expect(galaxy).toContain('class="hover-card"');
 		expect(galaxy).toContain('Top:');
+		// Overview refits when the canvas changes size (bottom player, window resize).
+		expect(galaxy).toContain('fitToNodes(nodes, 0.8, true);');
+		expect(route).toContain('class="hud-stat"');
+		const panel = readFileSync('src/lib/components/Genre/GenrePanel.svelte', 'utf8');
+		// The panel opens under the view tabs, not on top of them.
+		expect(panel).toContain('top: 84px;');
+		expect(galaxy).not.toContain('class="mix-pill"');
+		expect(galaxy).not.toContain('mixPillPosition');
+		expect(galaxy).toContain('class="hover-hint"');
+		expect(route).not.toContain('onMix={(id) => void handleMix(id)}');
 	});
 
 	test('heat and rediscover modes expose real playback actions', () => {
 		const route = readFileSync('src/routes/genres/+page.svelte', 'utf8');
 
-		expect(route).toContain('class="mode-actions glass-panel"');
+		// Mode actions live in the dock instead of a third floating bar.
+		expect(route).toContain('class="dock-actions"');
+		expect(route).not.toContain('mode-actions');
 		expect(route).toContain('async function playRediscover');
 		expect(route).toContain('async function playHottest');
 		expect(route).toContain('async function saveHeatPlaylist');
@@ -51,12 +61,59 @@ describe('genre galaxy UI contract', () => {
 		expect(route).toContain('api.createPlaylistFromQueue(name, true)');
 		// Core play (Start mix + heat/rediscover) plays LOCAL genre tracks,
 		// shuffled and bounded - the whole point of the galaxy. Radio is opt-in.
-		expect(route).toContain('function sampleGenreQueue');
+		const playback = readFileSync('src/lib/components/Genre/genrePlayback.ts', 'utf8');
+		expect(playback).toContain('export function sampleGenreQueue');
+		expect(route).toContain("from '$lib/components/Genre/genrePlayback'");
 		expect(route).toContain("playTracksInContext(ids, undefined, { shuffle: true })");
 		expect(route).toContain('async function handleRadio');
 		expect(route).toContain("startGenreRadio(seed, 'mixed', label)");
 		const player = readFileSync('src/lib/stores/player.ts', 'utf8');
 		expect(player).toContain('export async function startGenreRadio');
 		expect(player).toContain('api.startRadioSong({ seed_track_id: seedTrackId, blend');
+	});
+
+	test('canvas colours come from the palette theme, not hard-coded navy', () => {
+		const route = readFileSync('src/routes/genres/+page.svelte', 'utf8');
+		const galaxy = readFileSync('src/lib/components/Genre/GenreGalaxy.svelte', 'utf8');
+
+		expect(route).toContain('let galaxyTheme = $derived(buildGalaxyTheme($palette));');
+		expect(route).toContain('theme={galaxyTheme}');
+		expect(galaxy).toContain('fill.addColorStop(0, theme.sky[0]);');
+		expect(galaxy).not.toContain('rgba(18, 20, 38, 0.99)');
+		expect(galaxy).not.toContain("'#4a4d5e'");
+		expect(galaxy).not.toContain("'#3a3d4e'");
+		expect(galaxy).toContain('theme.starTints[star.tintIndex]');
+		// The map is always night, so the whole route uses the dark token set.
+		expect(route).toContain('data-theme="dark"');
+		expect(route).toContain("applyPaletteTheme(routeEl, $palette, 'dark')");
+		expect(route).not.toContain('rgba(8, 10, 18, 0.92)');
+		expect(route).not.toContain('#0d0e15');
+		expect(galaxy).not.toContain('rgba(10, 10, 18, 0.92)');
+		expect(galaxy).not.toContain('rgba(13, 15, 24, 0.96)');
+	});
+
+	test('planets are flat matte discs', () => {
+		const galaxy = readFileSync('src/lib/components/Genre/GenreGalaxy.svelte', 'utf8');
+
+		expect(galaxy).not.toContain('BODY_GLOW_FACTOR');
+		expect(galaxy).toContain('sctx.createLinearGradient(0, 0, 0, radius * 2)');
+	});
+
+	test('genre details open inside the galaxy, not on a separate page', () => {
+		const route = readFileSync('src/routes/genres/+page.svelte', 'utf8');
+		const galaxy = readFileSync('src/lib/components/Genre/GenreGalaxy.svelte', 'utf8');
+		const panel = readFileSync('src/lib/components/Genre/GenrePanel.svelte', 'utf8');
+
+		expect(existsSync('src/routes/genres/[id]/+page.svelte')).toBe(false);
+		expect(route).not.toContain('GenreInterior');
+		expect(route).not.toContain('goto(');
+		expect(route).toContain('<aside class="genre-drawer glass-panel"');
+		expect(route).toContain('onSelectGenre={selectGenreInDrawer}');
+		expect(route).toContain('open={selectedNode !== null && !detailsOpen}');
+		expect(route).toContain("page.url.searchParams.get('focus')");
+		expect(galaxy).toContain('onOpenGenre(node.id);');
+		expect(galaxy).toContain('camera.targetX = node.x + rightInset / 2 / targetScale;');
+		expect(panel).toContain('>Expand</button>');
+		expect(panel).not.toContain('Open interior');
 	});
 });

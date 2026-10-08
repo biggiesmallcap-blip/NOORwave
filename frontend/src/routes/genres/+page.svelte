@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
+	import { replaceState } from '$app/navigation';
+	import { page } from '$app/state';
 	import type { Unsubscriber } from 'svelte/store';
 	import { api, type Genre, type GenreHeat, type GenreCohort, type GenreEvolutionPoint, type GenreAudioMetrics, type Track } from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
@@ -10,9 +12,14 @@
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import GenreGalaxy from '$lib/components/Genre/GenreGalaxy.svelte';
 	import GenrePanel from '$lib/components/Genre/GenrePanel.svelte';
-	import GenreInterior from '$lib/components/Genre/GenreInterior.svelte';
+	import GenreDetail from '$lib/components/Genre/GenreDetail.svelte';
+	import { buildGenreSummary } from '$lib/components/Genre/genreSummary';
 	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import { buildGalaxyData } from '$lib/components/Genre/galaxyBuilder';
+	import { pickSeedTrackId, sampleGenreQueue, shuffled } from '$lib/components/Genre/genrePlayback';
+	import { palette } from '$lib/stores/palette';
+	import { buildGalaxyTheme } from '$lib/components/Genre/galaxyTheme';
+	import { applyPaletteTheme } from '$lib/components/wallpaper/paletteTheme';
 	import type { GalaxyViewMode, GalaxyNode } from '$lib/components/Genre/galaxy.types';
 
 	let taxonomy = $state<Genre[]>([]);
@@ -43,7 +50,24 @@
 	let focusNodeId = $state<number | null>(null);
 	let resetViewToken = $state(0);
 	let selectedSeedIds = $state<number[]>([]);
-	let interiorOpen = $state(false);
+	let galaxyTheme = $derived(buildGalaxyTheme($palette));
+	// The genre details drawer opens inside the galaxy (no separate page): the
+	// compact panel widens into it and the map recentres beside it.
+	let detailsOpen = $state(false);
+	let drawerWidth = $state(0);
+	let selectedSummary = $derived(
+		selectedId === null || !detailsOpen
+			? null
+			: buildGenreSummary({ genres: taxonomy, heat, cohorts, evolution, metrics }, selectedId)
+	);
+	let mapRightInset = $derived(selectedSummary ? drawerWidth + 20 : 0);
+	// The map is a night sky in every theme. Scope the dark token set, with this
+	// palette's dark accents, to the route so HUD, dock, panel and hover card stay
+	// legible in light mode instead of mixing light text with a dark canvas.
+	let routeEl = $state<HTMLDivElement | null>(null);
+	$effect(() => {
+		if (routeEl) applyPaletteTheme(routeEl, $palette, 'dark');
+	});
 	const viewModes: GalaxyViewMode[] = ['map', 'heat', 'vibe', 'rediscover'];
 
 	// Prune to subtrees that actually contain tracks. The default is on because
@@ -93,11 +117,6 @@
 			default: return 'Canonical library map.';
 		}
 	});
-	let selectedNodeCohort = $derived(
-		selectedNode?.cohortId
-			? cohorts.find((c) => c.id === selectedNode.cohortId)
-			: null
-	);
 	type NearbyEntry = { id: number; name: string };
 	let searchHighlightIds = $derived.by<Set<number>>(() => {
 		const query = searchQuery.trim().toLowerCase();
@@ -351,15 +370,33 @@
 
 	function handleSelect(id: number | null) {
 		selectedId = id;
-		interiorOpen = false;
 		actionError = null;
 		actionNotice = null;
 		if (id === null) {
 			focusNodeId = null;
+			detailsOpen = false;
 		}
 		if (id !== null) {
 			void getOrLoadPanelTracks(id);
 		}
+		// Mirror the selection into the URL so a reload or Back lands on the
+		// same focused genre.
+		try {
+			replaceState(id === null ? '/genres' : `/genres?focus=${id}`, {});
+		} catch {
+			// Router not ready yet during first paint; the next selection syncs it.
+		}
+	}
+
+	function openGenreDetails(id: number) {
+		if (selectedId !== id) handleSelect(id);
+		detailsOpen = true;
+	}
+
+	// Lineage and sub-genre chips in the drawer fly the map to that genre.
+	function selectGenreInDrawer(id: number) {
+		handleSelect(id);
+		void focusNode(id);
 	}
 
 	function toggleSeed(id: number) {
@@ -426,18 +463,6 @@
 					loadingArtistNodes = nextLoading;
 				}
 			})
-		);
-	}
-
-	// The core of the galaxy: play YOUR LOCAL tracks for a genre, shuffled. A
-	// bounded random sample keeps the queue sane on huge genres; shuffle mode
-	// keeps it fresh each launch. This is local library playback - not radio.
-	const MAX_GENRE_QUEUE = 300;
-
-	function sampleGenreQueue(tracks: Track[]): number[] {
-		return shuffled(tracks.filter((track) => track.id > 0).map((track) => track.id)).slice(
-			0,
-			MAX_GENRE_QUEUE
 		);
 	}
 
@@ -526,25 +551,6 @@
 			}
 		}
 		return ids;
-	}
-
-	function randomItem<T>(items: T[]): T | undefined {
-		if (items.length === 0) return undefined;
-		return items[Math.floor(Math.random() * items.length)];
-	}
-
-	function shuffled<T>(items: T[]): T[] {
-		const copy = items.slice();
-		for (let i = copy.length - 1; i > 0; i -= 1) {
-			const j = Math.floor(Math.random() * (i + 1));
-			[copy[i], copy[j]] = [copy[j], copy[i]];
-		}
-		return copy;
-	}
-
-	// Pick a random library track to seed the optional Radio station from.
-	function pickSeedTrackId(tracks: Track[]): number | null {
-		return randomItem(tracks.filter((track) => track.id > 0))?.id ?? null;
 	}
 
 	// Gather local tracks across several genres, sampled and shuffled into a
@@ -668,6 +674,12 @@
 
 		void loadGalaxy();
 
+		const focusParam = Number(page.url.searchParams.get('focus'));
+		if (Number.isInteger(focusParam) && focusParam > 0) {
+			handleSelect(focusParam);
+			void focusNode(focusParam);
+		}
+
 		return () => {
 			wsUnsubscribe?.();
 			if (galaxyRefreshTimer) clearTimeout(galaxyRefreshTimer);
@@ -681,7 +693,7 @@
 	<title>Genres | NOOR</title>
 </svelte:head>
 
-<div class="genres-route animate-in">
+<div class="genres-route animate-in" data-theme="dark" bind:this={routeEl}>
 	<div class="galaxy-stage">
 		{#if loading}
 			<div class="state-overlay">
@@ -712,12 +724,13 @@
 					labelsEnabled={labelsEnabled}
 					autoDrift={autoDrift}
 					searchHighlightIds={searchHighlightIds}
+					theme={galaxyTheme}
 					{artistChipMap}
 					onSelect={handleSelect}
 					onToggleSeed={toggleSeed}
-					onMix={(id) => void handleMix(id)}
 					onZoomFamily={(familyId) => void loadArtistChipsForFamily(familyId)}
-					onEnterInterior={(id) => { handleSelect(id); interiorOpen = true; }}
+					onOpenGenre={openGenreDetails}
+					rightInset={mapRightInset}
 				/>
 			</div>
 
@@ -734,10 +747,10 @@
 							: activeModeCopy}
 				</p>
 				<p class="hud-meta-line">
-					<strong>{taxonomy.length}</strong> families
-					<span>{galaxyData.nodes.length}</span> genres
-					<span>{activeThisMonthCount}</span> active
-					<span>{rediscoveryCount}</span> rediscover
+					<span class="hud-stat"><strong>{taxonomy.length}</strong>families</span>
+					<span class="hud-stat"><strong>{galaxyData.nodes.length}</strong>genres</span>
+					<span class="hud-stat"><strong>{activeThisMonthCount}</strong>active</span>
+					<span class="hud-stat"><strong>{rediscoveryCount}</strong>rediscover</span>
 				</p>
 			</div>
 
@@ -755,39 +768,6 @@
 				{/each}
 			</div>
 
-			{#if viewMode === 'heat' || viewMode === 'rediscover'}
-				<div class="mode-actions glass-panel" aria-label="Mode actions">
-					{#if viewMode === 'rediscover'}
-						<button
-							class="btn btn-primary"
-							disabled={modeActionBusy || rediscoverCandidates.length === 0}
-							onclick={() => void playRediscover()}
-						>
-							{modeActionBusy
-								? 'Building mix...'
-								: selectedId !== null
-									? 'Play rediscover in selection'
-									: `Play rediscover (${rediscoverCandidates.length} genres)`}
-						</button>
-					{:else if viewMode === 'heat'}
-						<button
-							class="btn btn-primary"
-							disabled={modeActionBusy || hottestNodes.length === 0}
-							onclick={() => void playHottest()}
-						>
-							{modeActionBusy ? 'Building mix...' : 'Play hottest'}
-						</button>
-						<button
-							class="btn btn-glass"
-							disabled={modeActionBusy || hottestNodes.length === 0}
-							onclick={() => void saveHeatPlaylist()}
-						>
-							Save as playlist
-						</button>
-					{/if}
-				</div>
-			{/if}
-
 			{#if actionError}
 				<div class="error-toast glass-panel" role="status" aria-live="polite">{actionError}</div>
 			{/if}
@@ -797,6 +777,38 @@
 			{/if}
 
 			<div class="control-dock glass-panel">
+				{#if viewMode === 'heat' || viewMode === 'rediscover'}
+					<div class="dock-actions" aria-label="Mode actions">
+						{#if viewMode === 'rediscover'}
+							<button
+								class="btn btn-primary"
+								disabled={modeActionBusy || rediscoverCandidates.length === 0}
+								onclick={() => void playRediscover()}
+							>
+								{modeActionBusy
+									? 'Building mix...'
+									: selectedId !== null
+										? 'Play rediscover in selection'
+										: `Play rediscover (${rediscoverCandidates.length} genres)`}
+							</button>
+						{:else if viewMode === 'heat'}
+							<button
+								class="btn btn-primary"
+								disabled={modeActionBusy || hottestNodes.length === 0}
+								onclick={() => void playHottest()}
+							>
+								{modeActionBusy ? 'Building mix...' : 'Play hottest'}
+							</button>
+							<button
+								class="btn btn-glass"
+								disabled={modeActionBusy || hottestNodes.length === 0}
+								onclick={() => void saveHeatPlaylist()}
+							>
+								Save as playlist
+							</button>
+						{/if}
+					</div>
+				{/if}
 				<form class="search-shell" onsubmit={(event) => void handleSearchSubmit(event)}>
 					<SearchField
 						bind:value={searchQuery}
@@ -822,7 +834,6 @@
 				>
 					Library only
 				</button>
-				<a class="dock-link" href="/tidal/genres">TIDAL genres</a>
 			</div>
 
 			{#if selectedSeedIds.length > 0}
@@ -860,26 +871,25 @@
 				tracks={selectedTracks}
 				nearbyGenres={nearbyGenres}
 				isSeed={selectedNode !== null && selectedSeedIds.includes(selectedNode.id)}
-				loading={selectedTrackLoading}
-				error={selectedTrackError}
-				open={selectedNode !== null && !interiorOpen}
+				open={selectedNode !== null && !detailsOpen}
 				onClose={() => handleSelect(null)}
 				onMix={() => selectedNode && void handleMix(selectedNode.id)}
 				onRadio={() => selectedNode && void handleRadio(selectedNode.id)}
 				onToggleSeed={() => selectedNode && toggleSeed(selectedNode.id)}
-				onOpenInterior={() => { if (selectedNode) interiorOpen = true; }}
+				onOpenGenre={() => { if (selectedNode) openGenreDetails(selectedNode.id); }}
 				onSelectNearby={(id) => { handleSelect(id); void focusNode(id); }}
 			/>
 
-			{#if interiorOpen && selectedNode}
-				<GenreInterior
-					node={selectedNode}
-					heat={selectedHeat}
-					cohortLabel={selectedNodeCohort?.label ?? null}
-					onClose={() => (interiorOpen = false)}
-					onPlayMix={() => selectedNode && void handleMix(selectedNode.id)}
-				/>
+			{#if selectedSummary}
+				<aside class="genre-drawer glass-panel" bind:clientWidth={drawerWidth} aria-label="Genre details">
+					<GenreDetail
+						node={selectedSummary}
+						onClose={() => (detailsOpen = false)}
+						onSelectGenre={selectGenreInDrawer}
+					/>
+				</aside>
 			{/if}
+
 		{/if}
 	</div>
 </div>
@@ -887,8 +897,9 @@
 <style>
 	.genres-route {
 		position: relative;
-		margin: -28px -30px -48px;
-		min-height: 100vh;
+		margin: calc(-28px - var(--safe-top)) calc(-30px - var(--safe-right)) calc(-48px - var(--safe-bottom))
+			calc(-30px - var(--safe-left));
+		height: calc(100dvh - var(--bottom-player-height, 0px));
 		overflow: hidden;
 		background:
 			radial-gradient(circle at 16% 12%, var(--atlas-haze-a), transparent 34%),
@@ -899,8 +910,10 @@
 
 	.galaxy-stage {
 		position: relative;
-		min-height: 100vh;
-		overflow: hidden;
+		height: 100%;
+		/* clip, not hidden: the off-screen panel (translateX) makes a hidden box
+		   scrollable, and focusing a drawer button would scroll it sideways. */
+		overflow: clip;
 	}
 
 	.galaxy-map-frame {
@@ -917,7 +930,7 @@
 		z-index: 9;
 		background:
 			radial-gradient(circle at 20% 20%, var(--atlas-haze-a), transparent 32%),
-			linear-gradient(180deg, rgba(8, 10, 18, 0.92), rgba(6, 7, 14, 0.96));
+			color-mix(in srgb, var(--bg-base) 94%, transparent);
 	}
 
 	.state-overlay :global(.empty-state) {
@@ -926,7 +939,6 @@
 
 	.hud,
 	.mode-switcher,
-	.mode-actions,
 	.control-dock,
 	.seed-builder,
 	.error-toast,
@@ -935,24 +947,19 @@
 		z-index: 6;
 	}
 
-	.mode-actions {
-		/* Bottom-center, above the control dock: the genre panel opens on the
-		   right and was burying the action right after the user armed it. */
-		left: 50%;
-		bottom: 78px;
-		transform: translateX(-50%);
-		padding: 8px;
+	.dock-actions {
 		display: inline-flex;
 		align-items: center;
 		gap: 8px;
+		flex-shrink: 0;
 	}
 
-	/* Seed builder shares that slot; lift it when a mode action bar is up. */
-	.galaxy-stage:has(.mode-actions) .seed-builder {
-		bottom: 150px;
+	.dock-actions .btn {
+		padding: 8px 14px;
+		font-size: var(--font-size-xs);
 	}
 
-	.mode-actions .btn:disabled {
+	.dock-actions .btn:disabled {
 		opacity: 0.45;
 		cursor: not-allowed;
 	}
@@ -971,7 +978,7 @@
 	.hud {
 		top: 20px;
 		left: 20px;
-		width: min(292px, calc(100% - 40px));
+		max-width: min(360px, calc(100% - 40px));
 		padding: 10px 12px;
 		display: flex;
 		flex-direction: column;
@@ -1026,16 +1033,20 @@
 
 	.hud-meta-line {
 		display: flex;
-		align-items: center;
-		gap: 7px;
+		align-items: baseline;
+		gap: 4px 12px;
 		flex-wrap: wrap;
 		font-size: var(--font-size-2xs);
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
 	}
 
-	.hud-meta-line strong,
-	.hud-meta-line span {
+	.hud-stat {
+		white-space: nowrap;
+	}
+
+	.hud-meta-line strong {
+		margin-right: 4px;
 		color: var(--text-primary);
 		font-size: var(--font-size-xs);
 		font-variant-numeric: tabular-nums;
@@ -1056,7 +1067,6 @@
 
 	.mode-btn,
 	.dock-btn,
-	.dock-link,
 	.seed-chip {
 		padding: 8px 12px;
 		border-radius: 999px;
@@ -1078,7 +1088,6 @@
 
 	.mode-btn.active,
 	.dock-btn.active,
-	.dock-link,
 	.seed-chip {
 		background: color-mix(in srgb, var(--accent-soft) 78%, var(--instrument-surface));
 		border-color: color-mix(in srgb, var(--accent-line) 92%, transparent);
@@ -1088,15 +1097,8 @@
 
 	.mode-btn:hover,
 	.dock-btn:hover,
-	.dock-link:hover,
 	.seed-chip:hover {
 		transform: translateY(-1px);
-	}
-
-	.dock-link {
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-		text-decoration: none;
 	}
 
 	.control-dock {
@@ -1163,6 +1165,36 @@
 		flex-shrink: 0;
 	}
 
+	.genre-drawer {
+		/* Same slot as the compact panel (under the tabs, above the dock), wider. */
+		position: absolute;
+		top: 84px;
+		right: 20px;
+		bottom: 104px;
+		width: min(720px, calc(56% - 20px));
+		z-index: 6;
+		padding: 20px 22px;
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		border-color: color-mix(in srgb, var(--instrument-border) 72%, transparent);
+		background:
+			linear-gradient(180deg, color-mix(in srgb, var(--instrument-surface-strong) 94%, transparent), color-mix(in srgb, var(--instrument-surface) 90%, transparent)),
+			var(--panel-bg);
+		box-shadow: 0 22px 54px rgba(0, 0, 0, 0.52);
+		animation: drawer-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+	}
+
+	@keyframes drawer-in {
+		from {
+			opacity: 0;
+			transform: translateX(32px);
+		}
+		to {
+			opacity: 1;
+			transform: none;
+		}
+	}
+
 	.error-toast {
 		top: 74px;
 		left: 20px;
@@ -1183,9 +1215,8 @@
 			margin: -24px -24px -40px;
 		}
 
-		.galaxy-stage,
 		.genres-route {
-			min-height: calc(100dvh - 40px);
+			height: calc(100dvh - 40px - var(--bottom-player-height, 0px));
 		}
 
 		.hud {
@@ -1200,14 +1231,6 @@
 			bottom: 120px;
 		}
 
-		.mode-actions {
-			left: 50%;
-			right: auto;
-			top: auto;
-			transform: translateX(-50%);
-			bottom: 82px;
-		}
-
 		.control-dock,
 		.seed-builder {
 			left: 16px;
@@ -1220,17 +1243,26 @@
 		.seed-builder {
 			bottom: 92px;
 		}
+
+		.genre-drawer {
+			top: auto;
+			left: 16px;
+			right: 16px;
+			bottom: 16px;
+			width: auto;
+			max-height: 70vh;
+		}
 	}
 
 	@media (max-width: 760px) {
 		.genres-route {
 			margin: -22px -18px -30px;
+			height: auto;
 			overflow: visible;
-			background: linear-gradient(180deg, #0d0e15 0%, #090a11 52%, #07070b 100%);
 		}
 
 		.galaxy-stage {
-			min-height: auto;
+			height: auto;
 			display: flex;
 			flex-direction: column;
 			gap: 14px;
@@ -1248,8 +1280,7 @@
 
 		.hud,
 		.mode-switcher,
-		.mode-actions,
-		.control-dock,
+			.control-dock,
 		.seed-builder,
 		.error-toast,
 		.notice-toast {
@@ -1261,11 +1292,6 @@
 			bottom: auto;
 			transform: none;
 			width: 100%;
-		}
-
-		.mode-actions {
-			order: 3;
-			flex-wrap: wrap;
 		}
 
 		.hud {
@@ -1298,6 +1324,14 @@
 
 		.seed-chips {
 			width: 100%;
+		}
+
+		.genre-drawer {
+			position: relative;
+			inset: auto;
+			width: 100%;
+			max-height: none;
+			order: 6;
 		}
 	}
 </style>

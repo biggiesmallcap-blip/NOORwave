@@ -6,7 +6,7 @@
 	import TidalDiscoverShelves from '$lib/components/search/TidalDiscoverShelves.svelte';
 
 	// A few shelves off a TIDAL editorial page, with the header linking to the
-	// full route. Those routes (/new-releases, /hires, /explore) already exist
+	// full route. Those routes (/new-releases, /hires) already exist
 	// and are built on TidalEditorialPage, but nothing in the app links to them,
 	// so they were unreachable. This is the entry point.
 	//
