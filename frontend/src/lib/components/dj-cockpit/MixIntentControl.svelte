@@ -1,25 +1,21 @@
 <script lang="ts">
-	import type { DjMixIntent, DjTransitionSpeedBias, DjStrategy } from '$lib/api/client';
-	import Dropdown from '$lib/components/ui/Dropdown.svelte';
+	// Per-session shaping of DJ transitions. The default transition style is a
+	// standing preference and lives in Settings > Playback > Transitions.
+	import type { DjMixIntent, DjTransitionSpeedBias } from '$lib/api/client';
 	import Segmented from '$lib/components/ui/Segmented.svelte';
-	import { strategyDescription, strategyLabels } from './transition_scene';
 
 	let {
 		intent,
 		speed,
-		strategy,
 		disabled = false,
 		onIntentChange,
 		onSpeedChange,
-		onStrategyChange,
 	}: {
 		intent: DjMixIntent;
 		speed: DjTransitionSpeedBias;
-		strategy: DjStrategy;
 		disabled?: boolean;
 		onIntentChange: (intent: DjMixIntent) => void;
 		onSpeedChange: (speed: DjTransitionSpeedBias) => void;
-		onStrategyChange: (strategy: DjStrategy) => void;
 	} = $props();
 
 	const intents: Array<{ value: DjMixIntent; label: string }> = [
@@ -27,10 +23,6 @@
 		{ value: 'balanced', label: 'Balanced' },
 		{ value: 'bold', label: 'Adventurous' },
 	];
-
-	const strategies = (
-		['adaptive', 'smooth_blend', 'club_mix', 'quick_mix', 'energy_lift', 'energy_reset', 'drop_swap', 'bass_swap', 'cut', 'wildcard'] as const
-	).map((value) => ({ value, label: strategyLabels[value] }));
 
 	const speeds: Array<{ value: DjTransitionSpeedBias; label: string }> = [
 		{ value: 'slower', label: 'Slower' },
@@ -40,12 +32,6 @@
 </script>
 
 <div class="policy-controls">
-	<div class="control-block">
-		<span class="control-label">Transition style</span>
-		<Dropdown label="Transition style" options={strategies} value={strategy} {disabled} full onchange={onStrategyChange} />
-		<span class="style-note">A preference; the safest suitable plan still wins.</span>
-		<span class="style-note">{strategyDescription(strategy)}</span>
-	</div>
 	<div class="control-block">
 		<span class="control-label">Mix intent</span>
 		<Segmented label="Mix intent" options={intents} value={intent} {disabled} full onchange={onIntentChange} />

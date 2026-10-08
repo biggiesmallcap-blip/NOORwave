@@ -11,7 +11,6 @@
 		currentTrackFeatures,
 		playbackQueue,
 		setPlayerAutomixEnabled,
-		setPlayerCrossfadeMs,
 		setPlayerShuffleMode,
 		setPlayerDiscoverNew,
 		setPlayerAutomixUseLearning,
@@ -61,7 +60,6 @@
 		const interval = window.setInterval(() => void refreshDjStory(), 2_000);
 		return () => window.clearInterval(interval);
 	});
-	let draftCrossfade = $state(0);
 	let errorMsg = $state('');
 	let runtime = $state<PlaybackRuntimeInfo | null>(null);
 	let runtimeAvailable = $state(false);
@@ -93,12 +91,8 @@
 	onMount(() => {
 		void refreshPlaybackState();
 		void loadControlData();
-		const unsub = crossfadeMs.subscribe((v) => {
-			draftCrossfade = v;
-		});
 		window.addEventListener('noor:dsp_updated', handleDspUpdated);
 		return () => {
-			unsub();
 			window.removeEventListener('noor:dsp_updated', handleDspUpdated);
 		};
 	});
@@ -136,7 +130,7 @@
 	}
 
 	function applyAutomix(enabled: boolean) {
-		return runSaving(() => setPlayerAutomixEnabled(enabled, draftCrossfade));
+		return runSaving(() => setPlayerAutomixEnabled(enabled, $crossfadeMs));
 	}
 
 	let bpmOverrideSaving = $state(false);
@@ -167,18 +161,6 @@
 
 	function toggleAllowExternal() {
 		return runSaving(() => setPlayerAutomixAllowExternal(!$automixAllowExternal));
-	}
-
-	function saveCrossfade() {
-		return runSaving(() => setPlayerCrossfadeMs(draftCrossfade));
-	}
-
-	const CROSSFADE_STEPS = [0, 1000, 2000, 3000, 5000, 8000, 10000, 12000];
-
-	function crossfadeLabel(ms: number): string {
-		if (ms === 0) return 'Off';
-		if (ms < 1000) return `${ms}ms`;
-		return `${ms / 1000}s`;
 	}
 
 	const shuffleModes = [
@@ -537,39 +519,9 @@
 		{/if}
 	</section>
 
+	<p class="t-meta">Crossfade and the default transition style are in <a href="/settings?category=playback">Settings, Playback</a>.</p>
+
 	<section class="control-layout">
-		<section class="glass-panel control-card">
-			<div class="card-heading">
-				<div>
-					<p class="eyebrow">Fade</p>
-					<h3>Crossfade</h3>
-				</div>
-				<StateBadge label={crossfadeLabel($crossfadeMs)} tone={$crossfadeMs > 0 ? 'active' : 'muted'} compact={true} />
-			</div>
-
-			<div class="crossfade-steps">
-				{#each CROSSFADE_STEPS as step}
-					<button
-						class="step-btn {draftCrossfade === step ? 'active' : ''}"
-						onclick={() => {
-							draftCrossfade = step;
-						}}
-					>
-						{crossfadeLabel(step)}
-					</button>
-				{/each}
-			</div>
-
-			<div class="slider-row">
-				<input type="range" min="0" max="12000" step="500" bind:value={draftCrossfade} class="crossfade-slider" />
-				<span class="slider-value">{crossfadeLabel(draftCrossfade)}</span>
-			</div>
-
-			<button class="btn btn-primary save-btn" onclick={saveCrossfade} disabled={saving || draftCrossfade === $crossfadeMs}>
-				{saving ? 'Saving...' : 'Apply crossfade'}
-			</button>
-		</section>
-
 		<section class="glass-panel control-card">
 			<div class="card-heading">
 				<div>
@@ -738,7 +690,6 @@
 
 	.signal-strip span,
 	.compat-pill,
-	.step-btn,
 	.policy-toggle,
 	.shuffle-opt {
 		border: 1px solid var(--border-subtle);
@@ -851,54 +802,11 @@
 		font-size: var(--font-size-md);
 	}
 
-	.crossfade-steps,
 	.policy-grid,
 	.shuffle-options,
 	.data-calls {
 		display: grid;
 		gap: var(--space-2);
-	}
-
-	.crossfade-steps {
-		grid-template-columns: repeat(auto-fit, minmax(4.5rem, 1fr));
-	}
-
-	.step-btn {
-		padding: var(--space-2) var(--space-3);
-		border-radius: 999px;
-		color: var(--text-secondary);
-		transition:
-			background var(--motion-fast),
-			border-color var(--motion-fast),
-			color var(--motion-fast);
-	}
-
-	.step-btn.active,
-	.step-btn:hover {
-		border-color: var(--accent-line);
-		background: var(--accent-soft);
-		color: var(--text-primary);
-	}
-
-	.slider-row {
-		display: flex;
-		align-items: center;
-		gap: var(--space-3);
-	}
-
-	.crossfade-slider {
-		flex: 1;
-	}
-
-	.slider-value {
-		min-width: 3rem;
-		text-align: right;
-		font-variant-numeric: tabular-nums;
-		color: var(--text-secondary);
-	}
-
-	.save-btn {
-		align-self: flex-start;
 	}
 
 	.policy-grid {

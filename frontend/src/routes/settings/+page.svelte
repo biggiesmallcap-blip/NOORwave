@@ -27,6 +27,7 @@
 		type DiscoveryEngine,
 		type DiscoveryStatus,
 		type DiscoveryTrainingSafetyProfile,
+		type DjStrategy,
 		type MusicBrainzStatus,
 		type PlaybackRuntimeInfo,
 		type PortableMusicBrainzSnapshotStatus
@@ -111,7 +112,9 @@
 	} from '$lib/stores/wallpaper';
 	import { PALETTES, rgbCss, type Palette, type PaletteId } from '$lib/components/wallpaper/palettes';
 	import { artPalette, artPaletteStatus } from '$lib/stores/artPalette';
-	import { currentTrack } from '$lib/stores/player';
+	import { crossfadeMs, currentTrack, setPlayerCrossfadeMs } from '$lib/stores/player';
+	import { strategyLabels } from '$lib/components/dj-cockpit/transition_scene';
+	import Dropdown from '$lib/components/ui/Dropdown.svelte';
 	import { upscaleTidalArtwork } from '$lib/utils/artwork';
 	import { palette, setPalette } from '$lib/stores/palette';
 	import { uiZoom, setZoom, zoomIn, zoomOut, resetZoom, MIN as ZOOM_MIN, MAX as ZOOM_MAX, WHEEL_STEP as ZOOM_STEP } from '$lib/stores/uiZoom';
@@ -419,8 +422,55 @@
 		void saveDownloadSettings({ mp3_source });
 	}
 
+	// Settings > Playback > Transitions. Crossfade is the plain fade between
+	// tracks; DJ plans its own overlaps, so it applies when DJ is off.
+	const CROSSFADE_OPTIONS = [
+		{ value: '0', label: 'Off' },
+		{ value: '2000', label: '2s' },
+		{ value: '5000', label: '5s' },
+		{ value: '8000', label: '8s' },
+		{ value: '12000', label: '12s' },
+	] as const;
+	const STRATEGY_OPTIONS = (
+		['adaptive', 'smooth_blend', 'club_mix', 'quick_mix', 'energy_lift', 'energy_reset', 'drop_swap', 'bass_swap', 'cut', 'wildcard'] as const
+	).map((value) => ({ value, label: strategyLabels[value] }));
+
+	let defaultStrategy = $state<DjStrategy>('adaptive');
+	let transitionsSaving = $state(false);
+
+	async function loadTransitionDefaults() {
+		try {
+			const policy = await api.getDjPolicy();
+			defaultStrategy = policy.preferred_strategy ?? 'adaptive';
+		} catch {
+			// The row keeps its default; the Mix page shows connection problems.
+		}
+	}
+
+	async function setDefaultStrategy(next: DjStrategy) {
+		const previous = defaultStrategy;
+		defaultStrategy = next;
+		transitionsSaving = true;
+		try {
+			await api.setDjPolicy({ preferred_strategy: next });
+		} catch {
+			defaultStrategy = previous;
+			showToast('Could not update the transition style.', 'error');
+		} finally {
+			transitionsSaving = false;
+		}
+	}
+
+	// A stored crossfade that is not one of the steps shows as the nearest step.
+	let crossfadeStep = $derived(
+		CROSSFADE_OPTIONS.reduce<(typeof CROSSFADE_OPTIONS)[number]>((best, option) =>
+			Math.abs(Number(option.value) - $crossfadeMs) < Math.abs(Number(best.value) - $crossfadeMs) ? option : best,
+		CROSSFADE_OPTIONS[0]).value,
+	);
+
 	onMount(() => {
 		if ($pendingTidalLogin) activeCategory = 'services';
+		void loadTransitionDefaults();
 		const tauriUnlisteners: Array<() => void> = [];
 		void refreshDownloadFolder();
 		const tick = setInterval(() => {
@@ -2460,6 +2510,13 @@
 				{:else if $audioSettings.error}
 					<p class="page-copy audio-error">{$audioSettings.error}</p>
 				{/if}
+			</section><section class="glass-tile section-panel" data-setting-id="transitions"><SectionHeader title="Transitions" />
+				<SettingRow label="Crossfade" hint="How long one track fades into the next when DJ transitions are off.">
+					<Segmented label="Crossfade" options={CROSSFADE_OPTIONS} value={crossfadeStep} onchange={(value) => void setPlayerCrossfadeMs(Number(value))} />
+				</SettingRow>
+				<SettingRow label="Default transition style" hint="What DJ reaches for first; the safest suitable plan still wins. Mix intent and speed on the Mix page shape it per session.">
+					<Dropdown label="Default transition style" options={STRATEGY_OPTIONS} value={defaultStrategy} disabled={transitionsSaving} onchange={(value) => void setDefaultStrategy(value)} />
+				</SettingRow>
 			</section><section class="glass-tile section-panel" data-setting-id="library-audio-data"><SectionHeader title="Analysis" />
 <SettingRow label="Analyse while playing" hint="Save BPM, key and energy as tracks play for DJ transitions and harmonic shuffle. Turning this off keeps existing analysis."><Toggle label="Analyse while playing" checked={$audioAnalysis.passiveEnabled} disabled={!$passiveDspKnown || $passiveDspPending} onchange={(event) => void setPassiveDspEnabled(event.currentTarget.checked)} /></SettingRow>
 {#if $audioAnalysisError}<p class="error" role="alert">{$audioAnalysisError}</p><button class="btn btn-glass" onclick={() => void loadPassiveDspState()} disabled={$passiveDspPending}>Retry setting</button>{/if}

@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 
 const read = (rel) => readFileSync(resolve(import.meta.dirname, rel), 'utf8');
 const dd = read('../src/lib/components/ui/Dropdown.svelte');
-const mixIntent = read('../src/lib/components/dj-cockpit/MixIntentControl.svelte');
+const settings = read('../src/routes/settings/+page.svelte');
 
 // STYLING.md "Dropdown": a sunken trigger that opens a listbox in the shared
 // overlay layer. Reachable and closable by keyboard; focus stays inside the
@@ -55,9 +55,8 @@ describe('Dropdown', () => {
 	});
 });
 
-describe('DJ transition style uses Dropdown', () => {
-	test('the native select is replaced', () => {
-		expect(mixIntent).toContain('<Dropdown label="Transition style"');
-		expect(mixIntent).not.toContain('<select');
+describe('the default transition style uses Dropdown', () => {
+	test('Settings > Playback mounts it', () => {
+		expect(settings).toContain('<Dropdown label="Default transition style"');
 	});
 });

@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { api, type DjMixIntent, type DjProfileCorrectionRequest, type DjStatusResponse, type DjTransitionSpeedBias, type DjStrategy } from '$lib/api/client';
+	import { api, type DjMixIntent, type DjProfileCorrectionRequest, type DjStatusResponse, type DjTransitionSpeedBias } from '$lib/api/client';
 	import { showToast } from '$lib/stores/toast';
 	import { currentTrack, isPlaying, position } from '$lib/stores/player';
 	import MixIntentControl from './MixIntentControl.svelte';
@@ -15,7 +15,6 @@
 	let enabled = $state<boolean | null>(null);
 	let mixIntent = $state<DjMixIntent>('balanced');
 	let speedBias = $state<DjTransitionSpeedBias>('neutral');
-	let strategy = $state<DjStrategy>('adaptive');
 	let loading = $state(true);
 	let saving = $state(false);
 	let debugOpen = $state(false);
@@ -37,7 +36,6 @@
 			if (snapshot.policy) {
 				mixIntent = snapshot.policy.mix_intent;
 				speedBias = snapshot.policy.transition_speed_bias;
-				strategy = snapshot.policy.preferred_strategy ?? 'adaptive';
 			}
 			if (snapshot.status) {
 				const confirmation = newlyConfirmedCut(status, snapshot.status);
@@ -125,15 +123,6 @@
 		} catch {
 			showToast('Could not update transition speed.', 'error');
 		}
-	}
-
-	async function setStrategy(next: DjStrategy) {
-		saving = true;
-		try {
-			await api.setDjPolicy({ preferred_strategy: next });
-			await refresh(false, true);
-		} catch { showToast('Could not update transition strategy.', 'error'); }
-		finally { saving = false; }
 	}
 
 	async function saveCorrection(correction: DjProfileCorrectionRequest) {
@@ -256,11 +245,9 @@
 	<MixIntentControl
 		intent={mixIntent}
 		speed={speedBias}
-		{strategy}
 		disabled={loading || saving}
 		onIntentChange={(next) => void setIntent(next)}
 		onSpeedChange={(next) => void setSpeed(next)}
-		onStrategyChange={(next) => void setStrategy(next)}
 	/>
 	<TransitionStory {status} {enabled} />
 	{#if firedCut}<p class="enabled-note" role="status">{firedCut}</p>{/if}
