@@ -1653,7 +1653,6 @@
 	@media (max-width: 760px) {
 		.galaxy-wrap {
 			border-radius: 26px;
-			background: linear-gradient(180deg, rgba(13, 15, 24, 0.96), rgba(8, 10, 16, 0.98));
 		}
 
 		.galaxy-canvas {
@@ -1679,7 +1678,7 @@
 		min-width: 160px;
 		max-width: 260px;
 		border-radius: var(--radius-sm);
-		background: rgba(10, 10, 18, 0.92);
+		background: color-mix(in srgb, var(--bg-surface-strong) 94%, transparent);
 		backdrop-filter: var(--blur-base);
 		-webkit-backdrop-filter: var(--blur-base);
 		border: 1px solid var(--panel-border);

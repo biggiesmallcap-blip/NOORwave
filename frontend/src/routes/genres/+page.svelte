@@ -15,6 +15,7 @@
 	import { buildGalaxyData } from '$lib/components/Genre/galaxyBuilder';
 	import { palette } from '$lib/stores/palette';
 	import { buildGalaxyTheme } from '$lib/components/Genre/galaxyTheme';
+	import { applyPaletteTheme } from '$lib/components/wallpaper/paletteTheme';
 	import type { GalaxyViewMode, GalaxyNode } from '$lib/components/Genre/galaxy.types';
 
 	let taxonomy = $state<Genre[]>([]);
@@ -47,6 +48,13 @@
 	let selectedSeedIds = $state<number[]>([]);
 	let interiorOpen = $state(false);
 	let galaxyTheme = $derived(buildGalaxyTheme($palette));
+	// The map is a night sky in every theme. Scope the dark token set, with this
+	// palette's dark accents, to the route so HUD, dock, panel and hover card stay
+	// legible in light mode instead of mixing light text with a dark canvas.
+	let routeEl = $state<HTMLDivElement | null>(null);
+	$effect(() => {
+		if (routeEl) applyPaletteTheme(routeEl, $palette, 'dark');
+	});
 	const viewModes: GalaxyViewMode[] = ['map', 'heat', 'vibe', 'rediscover'];
 
 	// Prune to subtrees that actually contain tracks. The default is on because
@@ -684,7 +692,7 @@
 	<title>Genres | NOOR</title>
 </svelte:head>
 
-<div class="genres-route animate-in">
+<div class="genres-route animate-in" data-theme="dark" bind:this={routeEl}>
 	<div class="galaxy-stage">
 		{#if loading}
 			<div class="state-overlay">
@@ -920,7 +928,7 @@
 		z-index: 9;
 		background:
 			radial-gradient(circle at 20% 20%, var(--atlas-haze-a), transparent 32%),
-			linear-gradient(180deg, rgba(8, 10, 18, 0.92), rgba(6, 7, 14, 0.96));
+			color-mix(in srgb, var(--bg-base) 94%, transparent);
 	}
 
 	.state-overlay :global(.empty-state) {
@@ -1220,7 +1228,6 @@
 		.genres-route {
 			margin: -22px -18px -30px;
 			overflow: visible;
-			background: linear-gradient(180deg, #0d0e15 0%, #090a11 52%, #07070b 100%);
 		}
 
 		.galaxy-stage {

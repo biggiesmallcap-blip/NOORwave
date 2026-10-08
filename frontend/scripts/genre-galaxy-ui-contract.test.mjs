@@ -71,5 +71,12 @@ describe('genre galaxy UI contract', () => {
 		expect(galaxy).not.toContain("'#4a4d5e'");
 		expect(galaxy).not.toContain("'#3a3d4e'");
 		expect(galaxy).toContain('theme.starTints[star.tintIndex]');
+		// The map is always night, so the whole route uses the dark token set.
+		expect(route).toContain('data-theme="dark"');
+		expect(route).toContain("applyPaletteTheme(routeEl, $palette, 'dark')");
+		expect(route).not.toContain('rgba(8, 10, 18, 0.92)');
+		expect(route).not.toContain('#0d0e15');
+		expect(galaxy).not.toContain('rgba(10, 10, 18, 0.92)');
+		expect(galaxy).not.toContain('rgba(13, 15, 24, 0.96)');
 	});
 });
