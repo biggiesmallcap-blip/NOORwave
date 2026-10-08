@@ -76,15 +76,32 @@ describe('persistent video dock contract', () => {
 		// Tauri's own fullscreen showed the desktop and the old title bar
 		// through the window while it resized; noor-app switches in one step.
 		expect(dock).toContain("import { hasNativeVideoFullscreen, setNativeVideoFullscreen } from '$lib/tauri/video_fullscreen';");
-		expect(dock).toMatch(/if \(nativeSwitch\) \{\s*if \(expanded\) collapse\(\);\s*else enterNativeFullscreen\(\);\s*return;/);
+		expect(dock).toMatch(/if \(nativeSwitch && \$videoFullscreenStyle !== 'classic'\) \{\s*if \(expanded\) collapse\(\);\s*else enterNativeFullscreen\(\);\s*return;/);
+		// A style change mid-fullscreen still leaves through the native path.
+		expect(dock).toMatch(/if \(nativeOn \|\| nativePending\) \{\s*if \(expanded\) collapse\(\);\s*return;/);
+		// Dimming is the listener's choice (Settings > Playback > Video playback).
+		expect(dock).toContain("const dim = get(videoFullscreenStyle) === 'dim';");
+		expect(dock).toContain('}, dim ? DIM_MS : 0);');
 		// In: the window switches first (the command returns once it has),
 		// then the dock grows into it, same order as the browser path.
 		expect(dock).toContain('requestAnimationFrame(() => requestAnimationFrame(() => (expanded = nativeOn && active)));');
-		expect(dock).not.toMatch(/function endGlide\(\) \{\s*morphing = false;\s*if \(place === 'expanded'\)/);
+		expect(dock).not.toContain("if (place === 'expanded') enterNativeFullscreen();");
+		// Lights down first: the page re-lays out at fullscreen size before the
+		// window grows (the queue shifted and was cut off), so that happens in
+		// the dark with the dock above the dim, held still, out of the stage.
+		expect(dock).toMatch(/if \(dim\) \{[^}]*moveHome\(\);\s*dimming = true;\s*\}\s*setTimeout\(\(\) => \{\s*void setNativeVideoFullscreen\(true\)/);
+		expect(dock).toContain("const holdStill = (dimming || navigating.to !== null) && mode === 'full' && rect !== null;");
+		expect(dock).toContain("else if (!dimming && (!moving || reducedMotion) && $videoStageAnchor) moveIntoStage($videoStageAnchor);");
+		expect(dock).toContain('<div class="fullscreen-dim" class:on={dimming} aria-hidden="true"></div>');
+		expect(dock).toMatch(/\.fullscreen-dim \{[^}]*z-index: 999;/);
+		expect(dock).toMatch(/\.video-dock\.dimming \{\s*z-index: 1000;/);
+		// The dim lifts once the dock covers the window (or at once, without motion).
+		expect(dock).toContain("if (place === 'expanded') dimming = false;");
+		expect(dock).toContain("if (reducedMotion && next === 'expanded') dimming = false;");
 		// Out: the window comes back first, then the dock glides home.
 		expect(dock).toMatch(/void leaveNativeFullscreen\(\)\.then\(\(\) =>\s*requestAnimationFrame\(\(\) => requestAnimationFrame\(\(\) => \(expanded = false\)\)\)/);
 		// Ending the session or tearing down never strands the window fullscreen.
-		expect(dock).toMatch(/if \(active\) return;\s*void leaveNativeFullscreen\(\);\s*expanded = false;/);
+		expect(dock).toMatch(/if \(active\) return;\s*dimming = false;\s*void leaveNativeFullscreen\(\);\s*expanded = false;/);
 		expect(dock).toMatch(/glide\?\.cancel\(\);\s*void leaveNativeFullscreen\(\);/);
 	});
 
@@ -98,7 +115,7 @@ describe('persistent video dock contract', () => {
 		expect(dock).not.toContain('onwheel=');
 		// Gliding onto the stage stays a fixed layer until it lands: inside the
 		// stage the glide was clipped by its overflow and faded with the page.
-		expect(dock).toContain("else if ((!moving || reducedMotion) && $videoStageAnchor) moveIntoStage($videoStageAnchor);");
+		expect(dock).toContain("else if (!dimming && (!moving || reducedMotion) && $videoStageAnchor) moveIntoStage($videoStageAnchor);");
 		expect(dock).toContain("if (place === 'full' && stage?.isConnected) moveIntoStage(stage);");
 		// The move in lands as the glide ends, so stage-in must not replay there.
 		expect(dock).toMatch(/> \.video-dock-host > \.video-dock \{[^}]*animation: none !important;/);

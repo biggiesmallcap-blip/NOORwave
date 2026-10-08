@@ -112,6 +112,8 @@
 	import { upscaleTidalArtwork } from '$lib/utils/artwork';
 	import { palette, setPalette } from '$lib/stores/palette';
 	import { uiZoom, setZoom, zoomIn, zoomOut, resetZoom, MIN as ZOOM_MIN, MAX as ZOOM_MAX, WHEEL_STEP as ZOOM_STEP } from '$lib/stores/uiZoom';
+	import { videoFullscreenStyle, VIDEO_FULLSCREEN_STYLES, type VideoFullscreenStyle } from '$lib/stores/video_fullscreen_style';
+	import { hasNativeVideoFullscreen } from '$lib/tauri/video_fullscreen';
 	import { playerPlacement, type PlayerPlacement } from '$lib/stores/playerLayout';
 	import { playerArtworkStyle, type PlayerArtworkStyle } from '$lib/stores/playerArtwork';
 	import { bottomQualityDisplay, sideQualityDisplay, type QualityDisplay } from '$lib/stores/playerInformation';
@@ -1695,6 +1697,9 @@
 		void audioSettings.patch({ video_quality_mode: value });
 	}
 
+	// Desktop app only: browsers always use the Fullscreen API.
+	const nativeVideoFullscreen = hasNativeVideoFullscreen();
+
 	const settingsCategories = SETTINGS_CATEGORIES;
 
 	let activeCategoryMeta = $derived(
@@ -2368,6 +2373,24 @@
 						<p class="page-copy setting-caption">
 							Max uses the highest stream the video exposes. Auto adapts to bandwidth.
 						</p>
+						{#if nativeVideoFullscreen}
+							<label class="audio-field audio-field-single">
+								<span>Fullscreen transition</span>
+								<select
+									class="audio-select"
+									aria-label="Fullscreen transition"
+									value={$videoFullscreenStyle}
+									onchange={(e) => videoFullscreenStyle.set((e.currentTarget as HTMLSelectElement).value as VideoFullscreenStyle)}
+								>
+									{#each VIDEO_FULLSCREEN_STYLES as opt (opt.value)}
+										<option value={opt.value}>{opt.label}</option>
+									{/each}
+								</select>
+							</label>
+							<p class="page-copy setting-caption">
+								Grow takes the window fullscreen, then grows the video into it. Dim, then grow darkens the page first. Classic is the window's own fullscreen.
+							</p>
+						{/if}
 					</details>
 
 					{#if $audioSettings.pendingApply}
