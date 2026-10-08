@@ -13,9 +13,10 @@
 	type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
 
 	// Position in the home stack, used only to stagger the entrance so shelves
-	// that resolve together cascade instead of landing as one slab. This shelf
-	// owns two sections, so the video rail sits one slot further down.
-	let { index = 0 }: { index?: number } = $props();
+	// that resolve together cascade instead of landing as one slab.
+	// One section per instance: Home places music mixes near the top and
+	// video mixes near the bottom. Both instances share the cached query.
+	let { index = 0, kind = 'music' }: { index?: number; kind?: 'music' | 'video' } = $props();
 
 	// Reactive, persisted query: hydrates the localStorage snapshot synchronously at
 	// init so the shelf paints last-known mixes with no skeleton, then revalidates in
@@ -130,12 +131,11 @@
 				<span class="video-badge">Video</span>
 			{/if}
 		</div>
-		<div class="meta">
-			<h3 class="title">{mix.title}</h3>
-			{#if mix.sub_title}
-				<p class="artist">{mix.sub_title}</p>
-			{/if}
-		</div>
+		<!-- TIDAL prints the mix name on its artwork; the caption only adds the
+		     subtitle (the artists in it), so the name is not read twice. -->
+		{#if mix.sub_title}
+			<div class="meta"><p class="artist">{mix.sub_title}</p></div>
+		{/if}
 	</button>
 {/snippet}
 
@@ -147,7 +147,6 @@
 	<div class="mix-card skeleton">
 		<div class="art-wrap"><div class="art skeleton-art"></div></div>
 		<div class="meta">
-			<div class="skeleton-line skeleton-line-title"></div>
 			<div class="skeleton-line skeleton-line-sub"></div>
 		</div>
 	</div>
@@ -165,6 +164,7 @@
 	/>
 {/snippet}
 
+{#if kind === 'music'}
 <section class="discovery-section rise-in-shelf" data-section="your-mixes" style={`--rise-index: ${index}`}>
 	<SectionHeader eyebrow="TIDAL" title="Music Mixes" variant="charts" level={2}>
 		{#snippet actions()}
@@ -192,9 +192,10 @@
 		</p>
 	{/if}
 </section>
+{/if}
 
-{#if viewState === 'ready' && videoMixes.length > 0}
-	<section class="discovery-section rise-in-shelf" data-section="your-video-mixes" style={`--rise-index: ${index + 1}`}>
+{#if kind === 'video' && viewState === 'ready' && videoMixes.length > 0}
+	<section class="discovery-section rise-in-shelf" data-section="your-video-mixes" style={`--rise-index: ${index}`}>
 		<SectionHeader eyebrow="TIDAL" title="Video Mixes" variant="charts" level={2} />
 		{@render mixRail(videoMixes)}
 	</section>
@@ -309,16 +310,6 @@
 		gap: 4px;
 		min-width: 0;
 	}
-	.title {
-		margin: 0;
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-semibold);
-		color: var(--text-primary, #fff);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		line-height: var(--line-height-snug);
-	}
 	.artist {
 		margin: 0;
 		font-size: var(--font-size-xs);
@@ -344,7 +335,6 @@
 		border-radius: 4px;
 		background: rgba(255, 255, 255, 0.08);
 	}
-	.skeleton-line-title { width: 75%; }
 	.skeleton-line-sub   { width: 50%; }
 	@keyframes shimmer {
 		0%   { background-position: 200% 0; }

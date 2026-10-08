@@ -87,12 +87,9 @@ describe('Home owns browse, /search owns searching', () => {
 		expect(search).toContain('fetchedMosaicIds.delete(id)');
 	});
 
-	test('Home hands search off rather than reimplementing it', () => {
-		expect(home).toContain('SearchField');
-		expect(home).toContain('/search?q=');
-		// /search seeds itself from the query param on mount, so the handoff
-		// needs nothing on the receiving end.
-		expect(search).toContain("new URLSearchParams(window.location.search).get('q')");
+	test('Home does not search; the top bar and /search own it', () => {
+		// Home's own search box duplicated the top-bar field (audit Round 2).
+		expect(home).not.toContain('SearchField');
 		// The debounce, provider fan-out and ranking stay on /search only.
 		expect(home).not.toContain('searchTidal');
 	});
