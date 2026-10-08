@@ -204,7 +204,7 @@
 		width: 100%;
 		height: 100%;
 		object-fit: cover;
-		filter: saturate(0.7) brightness(0.8);
+		filter: var(--art-wall-filter);
 		transition: filter 160ms ease;
 	}
 	.guide-row:hover .frame :global(img),

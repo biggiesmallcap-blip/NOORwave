@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(here, '[id]', '+page.svelte'), 'utf8');
 const detailHeroSource = readFileSync(join(here, '../../lib/components/ui/DetailHero.svelte'), 'utf8');
+const appCss = readFileSync(join(here, '../../app.css'), 'utf8');
 
 function cssBlockFrom(input: string, selector: string): string {
 	const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -21,10 +22,13 @@ describe('album page layout contracts', () => {
 		const backdrop = cssBlockFrom(detailHeroSource, '.backdrop');
 		expect(backdrop).toContain('opacity: 0.32');
 
+		// The filter is a theme token: the dark value keeps the subtle dim, the
+		// light value must not darken art on a light ground.
 		const backdropArt = cssBlockFrom(detailHeroSource, '.backdrop :global(.backdrop-art)');
-		expect(backdropArt).toContain('saturate(1.08)');
-		expect(backdropArt).toContain('brightness(0.72)');
+		expect(backdropArt).toContain('filter: var(--art-backdrop-filter)');
 		expect(backdropArt).not.toContain('saturate(1.6)');
+		expect(appCss).toContain('--art-backdrop-filter: blur(64px) saturate(1.08) brightness(0.72)');
+		expect(appCss).toContain('--art-backdrop-filter: blur(64px) saturate(1.12) brightness(1.02)');
 	});
 
 	test('loads album Spotify stats and passes album track world plays to TrackRow', () => {

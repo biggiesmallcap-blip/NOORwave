@@ -104,17 +104,16 @@
 		/* Firefox + most browsers — slim track, semi-transparent thumb. */
 		scrollbar-width: thin;
 		scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+		/* Trailing edge only: a leading fade cut the first caption at rest. */
 		mask-image: linear-gradient(
 			to right,
-			transparent 0,
-			black 16px,
+			black 0,
 			black calc(100% - 32px),
 			transparent 100%
 		);
 		-webkit-mask-image: linear-gradient(
 			to right,
-			transparent 0,
-			black 16px,
+			black 0,
 			black calc(100% - 32px),
 			transparent 100%
 		);

@@ -74,17 +74,16 @@
     overflow-x: auto;
     scrollbar-width: none;
     padding: 4px 2px 12px;
+    /* Trailing edge only: a leading fade cut the first caption at rest. */
     mask-image: linear-gradient(
       to right,
-      transparent 0,
-      black 16px,
+      black 0,
       black calc(100% - 32px),
       transparent 100%
     );
     -webkit-mask-image: linear-gradient(
       to right,
-      transparent 0,
-      black 16px,
+      black 0,
       black calc(100% - 32px),
       transparent 100%
     );

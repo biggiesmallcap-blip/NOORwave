@@ -55,6 +55,13 @@
 	--state-favorite: #ff4d6d;
 	--state-favorite-glow: rgba(255, 77, 109, 0.35);
 
+	/* Artwork filters are theme tokens: dimming tuned for a dark ground reads as
+	   muddy on a light one. Wall: dense rows of stills at rest (station strips).
+	   Collage: the angled Library murals and hero. Backdrop: blurred hero art. */
+	--art-wall-filter:     saturate(0.7) brightness(0.8);
+	--art-collage-filter:  saturate(1.08) brightness(1.04);
+	--art-backdrop-filter: blur(64px) saturate(1.08) brightness(0.72);
+
 	--quality-hires:    #c9a84c;
 	--quality-lossless: #6db89b;
 	--quality-lossy:    #8b90a8;
@@ -142,6 +149,10 @@
 	--state-error:    #c84040;
 	--state-favorite: #d6354a;
 	--state-favorite-glow: rgba(214, 53, 74, 0.22);
+
+	--art-wall-filter:     saturate(0.94);
+	--art-collage-filter:  none;
+	--art-backdrop-filter: blur(64px) saturate(1.12) brightness(1.02);
 
 	--quality-hires:    #a07a20;
 	--quality-lossless: #2d8a6e;

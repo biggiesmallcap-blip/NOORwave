@@ -151,7 +151,7 @@
 		width: 100%;
 		height: 100%;
 		object-fit: cover;
-		filter: blur(64px) saturate(1.08) brightness(0.72);
+		filter: var(--art-backdrop-filter);
 		transform: scale(1.16);
 	}
 
