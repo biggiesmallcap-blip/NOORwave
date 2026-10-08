@@ -24,3 +24,16 @@ describe('no eyebrow over a title', () => {
 		expect(page).not.toContain('<span class="eyebrow">{PAGE_TITLE}</span>');
 	});
 });
+
+// STYLING.md "Boundaries": Settings is a form on the ground. No page panel,
+// no group panels; groups are a label over hairline rows.
+describe('Settings is a form, not a panel', () => {
+	const page = read('../src/routes/settings/+page.svelte');
+	const css = read('../src/lib/components/settings/settings.css');
+	test('the page is not wrapped in glass', () => {
+		expect(page).toContain('<div class="page-shell settings-page settings-scope">');
+	});
+	test('groups and sections drop their box', () => {
+		expect(css).toMatch(/\.settings-scope \.section-panel \{ background: none;[^}]*border: 0;[^}]*padding: 0;/);
+	});
+});

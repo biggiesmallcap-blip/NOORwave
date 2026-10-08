@@ -1739,8 +1739,8 @@
 </script>
 
 <svelte:head><title>Settings | NOORwave</title></svelte:head>
-<div class="page-shell glass-panel settings-page settings-scope">
-<header class="settings-command"><h1>Settings</h1><div class="settings-search">
+<div class="page-shell settings-page settings-scope">
+<header class="settings-command"><h1 class="t-page-title">Settings</h1><div class="settings-search">
 <input type="search" placeholder="Search settings" bind:value={settingsQuery} oninput={() => { searchSelected = 0; searchFocused = true; }} onfocus={() => searchFocused = true} onblur={() => setTimeout(() => searchFocused = false, 150)} onkeydown={searchKeydown} aria-label="Search settings" role="combobox" aria-autocomplete="list" aria-expanded={searchFocused && !!settingsQuery.trim()} aria-controls="settings-results" aria-activedescendant={searchFocused && searchMatches.length ? 'setting-result-' + Math.min(searchSelected, searchMatches.length - 1) : undefined} />
 {#if searchFocused && settingsQuery.trim()}<ul id="settings-results" class="settings-search-results" role="listbox" aria-label="Matching settings">{#each searchMatches as match, index (match.id)}<li role="presentation"><button id={'setting-result-' + index} role="option" aria-selected={index === searchSelected} class:selected={index === searchSelected} onmousedown={(event) => event.preventDefault()} onclick={() => jumpToSetting(match)}><span>{match.label}</span><small>{categoryLabel(match.category)}</small></button></li>{/each}{#if !searchMatches.length}<li role="presentation">No matching settings.</li>{/if}</ul>{/if}
 </div></header><span class="sr-only" role="status">{settingsQuery.trim() ? searchMatches.length + ' settings found' : searchAnnouncement}</span>
