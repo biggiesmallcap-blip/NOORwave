@@ -137,6 +137,9 @@ pub(super) async fn sportify_discovery_search(
     };
 
     let mut normalized = normalize::search_from_sportify(&payload, "sportify_search");
+    normalized
+        .playlists
+        .retain(|playlist| normalize::passes_relevance_floor(q, playlist));
     db.with_conn(|conn| {
         for playlist in normalized.playlists.iter_mut() {
             normalize::enrich_tracks_with_tidal_cache(conn, &cache_cfg, &mut playlist.tracks)?;

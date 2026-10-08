@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import type { Snapshot } from './$types';
-	import { type Track, type TidalDiscographyTrack, type SpotifyTrackStats } from '$lib/api/client';
+	import { api, type Track, type TidalDiscographyTrack, type SpotifyTrackStats } from '$lib/api/client';
 	import { cachedApi, invalidateLibraryCaches } from '$lib/cache/api_queries';
 	import {
 		playAlbum,
@@ -110,6 +110,8 @@
 		moreLoadSeq += 1;
 		spotifyStats = null;
 		void loadSpotifyStats(id);
+		credits = null;
+		void loadCredits(id);
 	});
 
 	$effect(() => {
@@ -135,6 +137,25 @@
 			if (seq === moreLoadSeq) moreLoading = false;
 		}
 	}
+
+	// Liner notes (audit "Album page"): label and release line under the hero.
+	// Older servers without the endpoint just leave the line out.
+	let credits = $state<{ label: string | null; release_date: string | null; year: number | null } | null>(null);
+	async function loadCredits(albumIdToLoad: number) {
+		try {
+			const result = await api.getAlbumCredits(albumIdToLoad);
+			if (albumId === albumIdToLoad) credits = result;
+		} catch {
+			if (albumId === albumIdToLoad) credits = null;
+		}
+	}
+	let creditsLine = $derived.by(() => {
+		if (!credits) return '';
+		const released = credits.release_date
+			? new Date(credits.release_date).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })
+			: credits.year != null ? String(credits.year) : '';
+		return [credits.label, released ? `Released ${released}` : ''].filter(Boolean).join(' - ');
+	});
 
 	async function loadSpotifyStats(albumIdToLoad: number) {
 		try {
@@ -397,6 +418,10 @@
 				</ActionBar>
 			{/snippet}
 		</DetailHero>
+
+		{#if creditsLine}
+			<p class="liner-line">{creditsLine}</p>
+		{/if}
 
 		<section class="track-table" class:with-plays={showPlays}>
 			<div class="track-header">
@@ -671,6 +696,12 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
+	.liner-line {
+		margin: 0;
+		color: var(--text-secondary);
+		font-size: var(--font-size-sm);
+	}
+
 	.status-glyph {
 		color: var(--text-tertiary);
 		font-size: var(--font-size-xs);

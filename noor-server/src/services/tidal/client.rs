@@ -590,6 +590,15 @@ impl TidalClient {
         )
     }
 
+    /// One album's metadata (release date, copyright and the rest in `extra`).
+    pub async fn get_album(&self, album_id: i64) -> Result<TidalAlbum> {
+        let url = format!(
+            "{}/albums/{}?countryCode={}",
+            TIDAL_API_URL, album_id, self.country_code
+        );
+        self.get_json(&url).await
+    }
+
     pub async fn get_album_tracks_page(
         &self,
         album_id: i64,
