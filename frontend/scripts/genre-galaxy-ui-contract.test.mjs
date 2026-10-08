@@ -32,6 +32,10 @@ describe('genre galaxy UI contract', () => {
 		expect(galaxy).not.toContain('selectedId === node.id || hoveredNodeId === node.id');
 		expect(galaxy).toContain('class="hover-card"');
 		expect(galaxy).toContain('Top:');
+		expect(galaxy).not.toContain('class="mix-pill"');
+		expect(galaxy).not.toContain('mixPillPosition');
+		expect(galaxy).toContain('class="hover-hint"');
+		expect(route).not.toContain('onMix={(id) => void handleMix(id)}');
 	});
 
 	test('heat and rediscover modes expose real playback actions', () => {

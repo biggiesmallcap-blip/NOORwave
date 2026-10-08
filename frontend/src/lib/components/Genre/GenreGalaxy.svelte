@@ -32,7 +32,6 @@
 		theme,
 		onSelect = () => {},
 		onToggleSeed = () => {},
-		onMix = () => {},
 		onZoomFamily = () => {},
 		onEnterInterior = () => {}
 	}: {
@@ -50,7 +49,6 @@
 		theme: GalaxyTheme;
 		onSelect?: (id: number | null) => void;
 		onToggleSeed?: (id: number) => void;
-		onMix?: (id: number) => void;
 		onZoomFamily?: (familyId: number) => void;
 		onEnterInterior?: (id: number) => void;
 	} = $props();
@@ -69,7 +67,6 @@
 	let activeFamilyId = $state<number | null>(null);
 	let zoomLevel = $state<ZoomLevel>('galaxy');
 	let isDragging = $state(false);
-	let mixPillPosition = $state<{ x: number; y: number } | null>(null);
 	let hoverCardPosition = $state<HoverCardPosition | null>(null);
 	let camera = $state<Camera>({
 		x: 0,
@@ -1191,10 +1188,8 @@
 
 		if (hoveredNode && !isDragging) {
 			const screen = worldToScreen(hoveredNode.x, hoveredNode.y);
-			mixPillPosition = { x: screen.x, y: screen.y - hoveredNode.radius - 18 };
 			hoverCardPosition = placeHoverCard(screen, hoveredNode.radius);
 		} else {
-			mixPillPosition = null;
 			hoverCardPosition = null;
 		}
 	}
@@ -1297,7 +1292,6 @@
 	function handlePointerLeave() {
 		if (activePointerId === null) {
 			hoveredNodeId = null;
-			mixPillPosition = null;
 			hoverCardPosition = null;
 		}
 	}
@@ -1498,19 +1492,6 @@
 		}}
 	></canvas>
 
-	{#if hoveredNode && mixPillPosition && !isDragging}
-		<button
-			class="mix-pill"
-			style={`transform: translate(${mixPillPosition.x}px, ${mixPillPosition.y}px) translate(-50%, -100%);`}
-			onclick={(event) => {
-				event.stopPropagation();
-				onMix(hoveredNode.id);
-			}}
-		>
-			▶ Mix
-		</button>
-	{/if}
-
 	{#if hoverCardNode && hoverCardPosition && !isDragging && hoverCardId === hoveredNodeId}
 		{@const hoverArtists = artistChipMap.get(hoverCardNode.id) ?? []}
 		{@const hoverListenSec = Math.floor(hoverCardNode.totalListenedMs / 1000)}
@@ -1541,6 +1522,7 @@
 					{#if hoverCardNode.avgDanceability != null}<span>D {hoverCardNode.avgDanceability.toFixed(2)}</span>{/if}
 				</span>
 			{/if}
+			<span class="hover-hint">Click to open - double-click for the genre page</span>
 		</div>
 	{/if}
 </div>
@@ -1574,36 +1556,6 @@
 		cursor: grabbing;
 	}
 
-	.mix-pill {
-		position: absolute;
-		left: 0;
-		top: 0;
-		padding: 7px 14px;
-		border-radius: 999px;
-		background: color-mix(in srgb, var(--accent-soft) 78%, var(--instrument-surface));
-		color: var(--text-primary);
-		border: 1px solid color-mix(in srgb, var(--accent-line) 88%, transparent);
-		box-shadow:
-			0 0 20px color-mix(in srgb, var(--accent-glow) 82%, transparent),
-			inset 0 1px 0 color-mix(in srgb, var(--instrument-edge) 40%, transparent);
-		backdrop-filter: var(--blur-overlay);
-		-webkit-backdrop-filter: var(--blur-overlay);
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-bold);
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		pointer-events: auto;
-		z-index: 5;
-		transition: transform var(--motion-fast), box-shadow var(--motion-fast), border-color var(--motion-fast);
-	}
-
-	.mix-pill:hover {
-		box-shadow:
-			0 0 26px color-mix(in srgb, var(--accent-glow) 94%, transparent),
-			inset 0 1px 0 color-mix(in srgb, var(--instrument-edge) 56%, transparent);
-		border-color: color-mix(in srgb, var(--accent-line) 100%, transparent);
-	}
-
 	@media (max-width: 760px) {
 		.galaxy-wrap {
 			border-radius: 26px;
@@ -1612,10 +1564,6 @@
 		.galaxy-canvas {
 			cursor: default;
 			touch-action: pan-y pinch-zoom;
-		}
-
-		.mix-pill {
-			display: none;
 		}
 	}
 
@@ -1669,6 +1617,12 @@
 		font-size: var(--font-size-2xs);
 		color: var(--signal-text);
 		font-variant-numeric: tabular-nums;
+	}
+
+	.hover-hint {
+		margin-top: 2px;
+		font-size: var(--font-size-2xs);
+		color: var(--text-muted);
 	}
 
 	.hover-vibe {

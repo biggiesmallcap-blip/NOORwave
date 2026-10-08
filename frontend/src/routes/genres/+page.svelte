@@ -727,7 +727,6 @@
 					{artistChipMap}
 					onSelect={handleSelect}
 					onToggleSeed={toggleSeed}
-					onMix={(id) => void handleMix(id)}
 					onZoomFamily={(familyId) => void loadArtistChipsForFamily(familyId)}
 					onEnterInterior={(id) => { handleSelect(id); interiorOpen = true; }}
 				/>
