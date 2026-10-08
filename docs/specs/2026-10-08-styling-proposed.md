@@ -34,10 +34,17 @@ Settings > Library to widen it (`32a34154`); Home leads with Jump back in
 (`6997f4ad`); Automix and DJ became one Mix page (`58587704`), with crossfade
 in Settings > Playback (`f8fc885a`) and the DJ transition style kept on Mix.
 
-Open items (product calls or backend work) are tracked in `FOLLOWUPS.md`
-("design: system adoption"): Search Enter behaviour, navigation groups and
-naming, Library mural strips, the A to Z index, the search relevance floor,
-album label metadata, and the remaining raw animation durations.
+Open calls from the audit, decided 2026-10-09 and built: Enter in Search
+plays the top result in place and never leaves the results (`309bdee4`); the
+sidebar is grouped by job, Listen, Explore, Tools, with Settings pinned and
+"Sound Space" named to match its page (`5ba6f7f9`); Library tabs get no mural
+strips; artists sort letters first ignoring "The", with an A to Z index and
+artist count, Spotify playlist search has a relevance floor, and album pages
+show a label and release line (`88dac60b`); one-shot animations use the motion
+tokens and the motion lint is clean (`chore(motion)` after `88dac60b`).
+
+Remaining small calls (global button classes, Space on focused buttons) are in
+`FOLLOWUPS.md` ("design: system adoption").
 
 ---
 
