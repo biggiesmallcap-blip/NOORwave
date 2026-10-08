@@ -1118,19 +1118,23 @@
 			const screen = worldToScreen(node.x, node.y);
 			const text = node.depth === 0 ? node.name.toUpperCase() : node.name;
 			ctx.font = node.depth === 0 ? fontFamilyLabel : fontNodeLabel;
-			const padX = selected ? 8 : 2;
+			// Family names and the selection sit on a soft pill so planets behind
+			// them never swallow the text; sub-genre names get an outline instead.
+			const chip = selected || node.depth === 0;
+			const padX = chip ? 8 : 2;
 			const rectWidth = ctx.measureText(text).width + padX * 2;
-			const rectHeight = selected ? 20 : 15;
+			const rectHeight = chip ? 20 : 15;
 			candidates.push({
 				id: node.id,
 				x: screen.x - rectWidth / 2,
 				y: screen.y + node.radius + 6,
+				altY: screen.y - node.radius - 6 - rectHeight,
 				width: rectWidth,
 				height: rectHeight,
 				priority: labelPriority(node.depth, selected, inLineage, node.heatNorm),
 				text,
 				alpha,
-				chip: selected,
+				chip,
 				depth: node.depth
 			});
 		}
@@ -1148,8 +1152,10 @@
 				ctx.fillStyle = theme.labelChipBg;
 				ctx.fill();
 			} else {
-				ctx.shadowBlur = 6;
-				ctx.shadowColor = 'rgba(0, 0, 0, 0.55)';
+				ctx.lineJoin = 'round';
+				ctx.lineWidth = 3;
+				ctx.strokeStyle = theme.labelChipBg;
+				ctx.strokeText(label.text, label.x + label.width / 2, label.y + label.height / 2);
 			}
 			ctx.fillStyle = label.chip || label.depth <= 1 ? theme.labelText : theme.labelMuted;
 			ctx.fillText(label.text, label.x + label.width / 2, label.y + label.height / 2);

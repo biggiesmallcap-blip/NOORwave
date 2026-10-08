@@ -55,4 +55,14 @@ describe('placeLabels', () => {
 		const accepted = placeLabels([{ id: 1, x: 760, y: 100, width: 80, height: 16, priority: 1 }], viewport);
 		expect(accepted.size).toBe(0);
 	});
+
+	test('a colliding label moves to its fallback spot before being dropped', () => {
+		const below = { id: 2, x: 120, y: 104, width: 80, height: 16, priority: 1, altY: 40 };
+		const accepted = placeLabels(
+			[{ id: 1, x: 100, y: 100, width: 80, height: 16, priority: 5 }, below],
+			{ width: 800, height: 600 }
+		);
+		expect(accepted.size).toBe(2);
+		expect(below.y).toBe(40);
+	});
 });

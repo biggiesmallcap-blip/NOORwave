@@ -32,11 +32,21 @@ export function labelPriority(depth: number, selected: boolean, inLineage: boole
 	return 200 - depth * 50 + heatNorm * 10;
 }
 
-export type LabelRect = { id: number; x: number; y: number; width: number; height: number; priority: number };
+export type LabelRect = {
+	id: number;
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+	priority: number;
+	/** Fallback y (e.g. above the planet) tried when the primary spot collides. */
+	altY?: number;
+};
 
 /**
- * Greedy placement, highest priority first. A label is dropped when it would
- * overlap an accepted one (with `gap` px clearance) or is not fully on screen.
+ * Greedy placement, highest priority first. A label that would overlap an
+ * accepted one (with `gap` px clearance) or leave the screen tries its `altY`
+ * spot, then is dropped.
  */
 export function placeLabels(
 	candidates: LabelRect[],
@@ -45,21 +55,30 @@ export function placeLabels(
 ): Set<number> {
 	const accepted: LabelRect[] = [];
 	const ordered = [...candidates].sort((a, b) => b.priority - a.priority || a.id - b.id);
-	for (const label of ordered) {
-		const onScreen =
-			label.x >= 0 &&
-			label.y >= 0 &&
-			label.x + label.width <= viewport.width &&
-			label.y + label.height <= viewport.height;
-		if (!onScreen) continue;
-		const collides = accepted.some(
+	const fits = (label: LabelRect) =>
+		label.x >= 0 &&
+		label.y >= 0 &&
+		label.x + label.width <= viewport.width &&
+		label.y + label.height <= viewport.height &&
+		!accepted.some(
 			(other) =>
 				label.x < other.x + other.width + gap &&
 				other.x < label.x + label.width + gap &&
 				label.y < other.y + other.height + gap &&
 				other.y < label.y + label.height + gap
 		);
-		if (!collides) accepted.push(label);
+	for (const label of ordered) {
+		if (fits(label)) {
+			accepted.push(label);
+			continue;
+		}
+		if (label.altY === undefined) continue;
+		const moved = { ...label, y: label.altY };
+		if (fits(moved)) {
+			// Callers draw from the candidate object, so move it in place.
+			label.y = label.altY;
+			accepted.push(label);
+		}
 	}
 	return new Set(accepted.map((label) => label.id));
 }
