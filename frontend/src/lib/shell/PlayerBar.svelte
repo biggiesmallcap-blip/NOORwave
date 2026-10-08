@@ -365,7 +365,7 @@
 	}
 
 	.player-queue-trigger:focus-visible {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
 	}
 
@@ -442,7 +442,7 @@
 	}
 
 	.np-artwork-open:focus-visible {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: -3px;
 	}
 
@@ -505,7 +505,7 @@
 	.np-artwork-favorite:hover,
 	.np-artwork-favorite.active { color: var(--accent-strong); border-color: var(--accent-line); }
 	.np-artwork-favorite:disabled { opacity: 0.55; cursor: default; }
-	.np-artwork-favorite:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+	.np-artwork-favorite:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
 
 	@media (hover: none) {
 		.np-artwork-quiet-cue { opacity: 0.65; }

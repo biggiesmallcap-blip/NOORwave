@@ -538,7 +538,7 @@
 		min-width: 0;
 	}
 	.rail:focus-visible {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
 	}
 	.rail::-webkit-scrollbar { height: 6px; }
@@ -577,7 +577,7 @@
 		transform: translateY(-4px);
 	}
 	.card:focus-visible {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 4px;
 	}
 	.card:hover :global(.play-overlay),

@@ -10,6 +10,19 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### design: system adoption (phases 2-4 of the October 2026 audit)
+
+`frontend/STYLING.md` now describes the target system and its foundations are
+in `app.css`. Still to build, one PR each: shared components (`CommandHeader`,
+`ScopeTabs`, `Segmented`, `FilterChip`, `Dropdown`, `ActionBar`, one `TrackRow`
+anatomy, `ErrorState` and the skeleton delay); route migrations (Library
+toolbar, Search composition and keyboard, artist Stage, shared `AlbumDetail`,
+Playlists, Settings in place, Mix page for Automix + DJ, Home and the remaining
+title-header routes, removing eyebrow-over-title stacks); then motion lint
+warnings and the sub-760px icon rail. Open product calls: Liked as a filter
+chip, Search Enter behaviour, in-app Reduce motion, Home order, nav groups.
+Spawned by: design audit 2026-10-08 (artifact 7N4YSfzjpyu98GRLM5X5hF)
+
 ### video stations: phase 2 (decades, oddities, full tag coverage)
 
 - Source: video stations design, 2026-10-07.

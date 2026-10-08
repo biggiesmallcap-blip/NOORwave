@@ -525,7 +525,7 @@
 
 	.rename-form input:focus-visible {
 		border-color: var(--accent-line);
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 1px;
 	}
 

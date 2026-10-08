@@ -76,7 +76,7 @@
     mask-image: linear-gradient(to right, transparent 0, black 16px, black calc(100% - 32px), transparent 100%);
     -webkit-mask-image: linear-gradient(to right, transparent 0, black 16px, black calc(100% - 32px), transparent 100%);
   }
-  .rail:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .rail:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
   .rail::-webkit-scrollbar { height: 6px; }
   .rail::-webkit-scrollbar-track { background: var(--bg-surface); border-radius: var(--radius-xs); }
   .rail::-webkit-scrollbar-thumb { background: var(--border-subtle); border-radius: var(--radius-xs); }

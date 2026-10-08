@@ -21,9 +21,9 @@
 <header class="page-header" class:editorial={variant === 'editorial'}>
 	<div class="intro">
 		{#if eyebrow}
-			<p class="eyebrow">{eyebrow}</p>
+			<p class="t-label">{eyebrow}</p>
 		{/if}
-		<h1>{title}</h1>
+		<h1 class="t-page-title">{title}</h1>
 		{#if subtitle}
 			<p class="subtitle">{subtitle}</p>
 		{/if}
@@ -60,27 +60,9 @@
 		gap: 10px;
 	}
 
-	.eyebrow {
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-		letter-spacing: 0.14em;
-		text-transform: uppercase;
-		color: var(--text-tertiary);
-	}
-
-	h1 {
-		font-family: var(--font-body);
-		font-size: var(--font-size-2xl);
-		font-weight: var(--font-weight-bold);
-		line-height: var(--line-height-tight);
-		letter-spacing: 0;
-	}
-
 	.page-header.editorial h1 {
 		color: var(--text-primary);
 		font-size: var(--font-size-3xl);
-		font-weight: var(--font-weight-bold);
-		letter-spacing: 0;
 	}
 
 	.subtitle {

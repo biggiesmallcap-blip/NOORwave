@@ -1820,7 +1820,7 @@
 	}
 
 	.playlist-hit:focus-visible {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 3px;
 	}
 
@@ -1994,7 +1994,7 @@
 	}
 
 	.close-btn:focus-visible {
-		outline: 2px solid var(--accent-line);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
 	}
 
@@ -2095,7 +2095,7 @@
 	}
 
 	.logic-btn:focus-visible {
-		outline: 2px solid var(--accent-line);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
 	}
 
@@ -2157,7 +2157,7 @@
 	}
 
 	.remove-btn:focus-visible {
-		outline: 2px solid var(--accent-line);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
 	}
 
@@ -2204,7 +2204,7 @@
 	}
 
 	.tag-remove:focus-visible {
-		outline: 2px solid var(--accent-line);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
 	}
 

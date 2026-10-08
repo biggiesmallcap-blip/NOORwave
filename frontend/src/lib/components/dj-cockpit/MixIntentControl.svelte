@@ -82,7 +82,7 @@
 
 <style>
 	select { min-height: 2.75rem; padding: var(--space-2) var(--space-3); border: 1px solid var(--border-muted); border-radius: var(--radius-sm); background: var(--bg-surface); color: var(--text-primary); font-size: var(--font-size-sm); }
-	select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+	select:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
 	.style-note { font-size: var(--font-size-2xs); color: var(--text-tertiary); }
 	p.style-note { margin: 0; }
 	.policy-controls {
@@ -139,7 +139,7 @@
 	}
 
 	button:focus-visible {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
 	}
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { applyPaletteTheme } from './paletteTheme';
+import { applyPaletteTheme, contrastRatio, readableOnLight } from './paletteTheme';
+import { PALETTES } from './palettes';
 
 function themeRoot() {
 	const attributes = new Map<string, string>();
@@ -42,5 +43,24 @@ describe('palette theme application', () => {
 		expect(root.properties.get('--accent')).toBe('#7c80ff');
 		expect(root.properties.get('--accent-soft')).toBe('rgba(124, 128, 255, 0.14)');
 		expect(root.properties.get('--atlas-haze-a')).toBe('rgba(194, 56, 242, 0.18)');
+	});
+
+	it('gives every palette a readable --accent-strong on its ground', () => {
+		for (const palette of PALETTES) {
+			const dark = themeRoot();
+			applyPaletteTheme(dark, palette.id, 'dark');
+			expect(contrastRatio(dark.properties.get('--accent-strong')!, '#0b0b0f')).toBeGreaterThanOrEqual(4.5);
+
+			const light = themeRoot();
+			applyPaletteTheme(light, palette.id, 'light');
+			const ground = palette.lightUi ? '#eee5d5' : '#f2f4f7';
+			expect(contrastRatio(light.properties.get('--accent-strong')!, ground)).toBeGreaterThanOrEqual(4.5);
+		}
+	});
+
+	it('darkens a pale accent for light surfaces and keeps a readable one', () => {
+		expect(readableOnLight('#7c80ff')).not.toBe('#7c80ff');
+		expect(contrastRatio(readableOnLight('#7c80ff'), '#f2f4f7')).toBeGreaterThanOrEqual(4.5);
+		expect(readableOnLight('#3a3dc8')).toBe('#3a3dc8');
 	});
 });

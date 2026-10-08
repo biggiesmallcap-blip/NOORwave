@@ -38,7 +38,7 @@
 .settings-scope summary::before { content: '›'; color: var(--text-secondary); }
 .settings-scope details[open] > summary::before { transform: rotate(90deg); }
 .settings-scope summary .disclosure-status { margin-left: auto; font-size: var(--font-size-sm); font-weight: normal; color: var(--text-secondary); }
-.settings-scope :is(button, input, select, summary, a):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.settings-scope :is(button, input, select, summary, a):focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 3px; }
 .settings-scope :is(button, input, select):disabled { opacity: 0.55; cursor: not-allowed; }
 .settings-scope .player-position-options,
 .settings-scope .quality-mode-options,

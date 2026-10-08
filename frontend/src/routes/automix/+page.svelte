@@ -641,7 +641,7 @@
 <style>
 	.automix-disclosure { border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: var(--space-3); background: var(--bg-surface); }
 	.automix-disclosure > summary { cursor: pointer; padding: var(--space-2); color: var(--text-secondary); font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); }
-	.automix-disclosure > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+	.automix-disclosure > summary:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
 	.automix-disclosure[open] > summary { margin-bottom: var(--space-3); }
 	.automix-page {
 		gap: var(--space-5);

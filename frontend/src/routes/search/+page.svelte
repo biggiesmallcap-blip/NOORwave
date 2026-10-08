@@ -2413,7 +2413,7 @@
     transition: transform var(--motion-base);
   }
   .idle-card:hover { transform: translateY(-4px); }
-  .idle-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+  .idle-card:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 4px; }
 
   .idle-art {
     position: relative;
@@ -2529,7 +2529,7 @@
   }
   .artists-row:focus-visible,
   .albums-row:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-strong);
     outline-offset: 2px;
   }
 

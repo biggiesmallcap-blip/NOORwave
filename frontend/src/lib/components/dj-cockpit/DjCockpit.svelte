@@ -312,7 +312,7 @@
 	.feedback { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); color: var(--text-secondary); font-size: var(--font-size-sm); }
 	.disclosure { border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: var(--space-3); background: var(--bg-surface); }
 	summary { cursor: pointer; font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); padding: var(--space-2); }
-	summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+	summary:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
 	.dj-cockpit {
 		width: min(100%, var(--content-width));
 		margin: 0 auto;
@@ -399,7 +399,7 @@
 	}
 
 	.engine-switch:focus-visible {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
 	}
 

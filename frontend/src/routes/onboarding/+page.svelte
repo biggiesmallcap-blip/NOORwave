@@ -328,7 +328,7 @@
 	.dot:disabled { cursor: default; }
 	.dot.active { background: var(--accent-line); }
 	.dot.current, .dot:not(:disabled):hover { background: var(--accent); }
-	.dot:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+	.dot:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 4px; }
 	.step {
 		display: flex;
 		flex-direction: column;
@@ -387,7 +387,7 @@
 		transition: background var(--motion-fast), border-color var(--motion-fast);
 	}
 	.audio-choice:hover { background: var(--bg-hover); border-color: var(--border-strong); }
-	.audio-choice:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+	.audio-choice:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 3px; }
 	.audio-choice.selected { border-color: var(--accent-line); background: var(--accent-soft); }
 	.audio-choice.subtle { background: transparent; }
 	.audio-choice-title {

@@ -63,7 +63,7 @@
 	}
 
 	.toggle-switch input:focus-visible + .toggle-slider {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--accent-strong);
 		outline-offset: 3px;
 	}
 

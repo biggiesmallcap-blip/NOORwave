@@ -89,7 +89,7 @@
     );
   }
 
-  .artists-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .artists-row:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
 
   .artists-row::-webkit-scrollbar { display: none; }
 
