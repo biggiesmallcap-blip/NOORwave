@@ -1,5 +1,5 @@
-// Facet descriptors: the single source of truth for the search fill suggestions
-// (the focus-when-empty facet-name popover and the inline Tab-completion). Each
+// Facet descriptors: the single source of truth for the search filter keys
+// (the idle "Try a filter" tiles on /search and the inline Tab-completion). Each
 // entry pairs a supported filter key with a human label + example so the
 // suggestion UI is self-documenting. Value suggestions (musical keys, Camelot
 // wheel, genre lists) are intentionally NOT modelled here yet - they are a
@@ -34,16 +34,6 @@ const FACET_META: { key: string; label: string; description: string; example: st
 export const FACETS: FacetDescriptor[] = FACET_META.filter((m) => SUPPORTED_KEYS.has(m.key)).map(
   (m) => ({ key: m.key, token: `${m.key}:`, label: m.label, description: m.description, example: m.example })
 );
-
-// Narrow the facet list as the user types a bare trailing word. Empty tail
-// returns the full list (focus-when-empty). A tail containing ':' means a key
-// has already been chosen, so there is nothing left to suggest.
-export function matchFacets(rawTail: string): FacetDescriptor[] {
-  const tail = rawTail.trim().toLowerCase();
-  if (!tail) return FACETS;
-  if (tail.includes(':')) return [];
-  return FACETS.filter((f) => f.key.startsWith(tail) || f.label.toLowerCase().startsWith(tail));
-}
 
 // Inline completion: when the trailing word uniquely prefixes one facet key
 // (min two chars to avoid single-letter noise), return the token to complete to.

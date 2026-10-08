@@ -1,12 +1,13 @@
 <script lang="ts">
 	// Shared search input primitive. Owns the token-driven field recipe and the
-	// faceted fill affordances (focus facet-name popover, inline Tab-completion,
-	// removable filter chips) because those are a pure function of the text plus
-	// parseQuery. It does NOT own debounce/orchestration or domain keybindings
+	// filter affordances (inline Tab-completion, removable filter chips) because
+	// those are a pure function of the text plus parseQuery. There is deliberately
+	// no suggestion dropdown: the old focus popover listed every filter key under
+	// the field and read as noise over the results it covered. It does NOT own debounce/orchestration or domain keybindings
 	// (Enter=play, arrows=cursor, slash mode) - shells forward those via onkeydown.
 	import type { Snippet } from 'svelte';
 	import { parseQuery, filtersToChips, stripFilter } from '$lib/search/query_parser';
-	import { FACETS, matchFacets, inlineCompletionFor, type FacetDescriptor } from '$lib/search/facets';
+	import { inlineCompletionFor } from '$lib/search/facets';
 
 	interface Props {
 		value?: string;
@@ -15,7 +16,6 @@
 		variant?: 'page' | 'modal';
 		size?: 'md' | 'sm';
 		fill?: boolean;
-		facets?: boolean;
 		inlineCompletion?: boolean;
 		filterChips?: boolean;
 		suppressSuggestions?: boolean;
@@ -37,7 +37,6 @@
 		variant = 'page',
 		size = 'md',
 		fill = false,
-		facets = false,
 		inlineCompletion = false,
 		filterChips = false,
 		suppressSuggestions = false,
@@ -52,23 +51,14 @@
 		onblur = undefined,
 	}: Props = $props();
 
-	let focused = $state(false);
-
 	const parsed = $derived(parseQuery(value));
 	const chips = $derived(filterChips ? filtersToChips(parsed.filters) : []);
 
 	// The word currently being typed (after the last space). Empty when the
 	// value is empty or ends with a space.
 	const tail = $derived(value.slice(value.lastIndexOf(' ') + 1));
-	const isEmpty = $derived(value.trim() === '');
 	const isSlash = $derived(value.startsWith('/'));
 
-	const suggestions = $derived<FacetDescriptor[]>(
-		isEmpty ? FACETS : tail ? matchFacets(tail) : []
-	);
-	const showPopover = $derived(
-		facets && focused && !suppressSuggestions && !isSlash && suggestions.length > 0
-	);
 	// Tab-completion target: only when the trailing word uniquely prefixes a facet.
 	const tabCompletion = $derived(
 		inlineCompletion && !suppressSuggestions && !isSlash ? inlineCompletionFor(tail) : null
@@ -109,12 +99,10 @@
 	}
 
 	function handleFocus() {
-		focused = true;
 		onfocus?.();
 	}
 
 	function handleBlur() {
-		focused = false;
 		onblur?.();
 	}
 
@@ -158,27 +146,6 @@
 		/>
 		{#if trailing}{@render trailing()}{/if}
 	</div>
-
-	{#if showPopover}
-		<div class="sf-popover" aria-label="Filter suggestions">
-			<p class="sf-pop-head">Add a filter</p>
-			{#each suggestions as facet (facet.key)}
-				<button
-					type="button"
-					class="sf-suggestion"
-					onmousedown={(e) => e.preventDefault()}
-					onclick={() => completeTail(facet.token)}
-				>
-					<span class="sf-tok">{facet.token}</span>
-					<span class="sf-label">{facet.label}</span>
-					<span class="sf-ex">{facet.example}</span>
-				</button>
-			{/each}
-			{#if tabCompletion}
-				<p class="sf-pop-foot"><kbd>Tab</kbd> completes <code>{tabCompletion}</code></p>
-			{/if}
-		</div>
-	{/if}
 
 	{#if filterChips && chips.length > 0}
 		<div class="sf-chips">
@@ -271,78 +238,6 @@
 		color: var(--text-tertiary);
 	}
 
-	.sf-popover {
-		position: absolute;
-		top: calc(100% + 6px);
-		left: 0;
-		right: 0;
-		z-index: var(--z-overlay);
-		background: var(--bg-elevated);
-		border: 1px solid var(--border-strong);
-		border-radius: var(--radius-md);
-		box-shadow: 0 24px 48px -20px rgba(0, 0, 0, 0.65);
-		padding: 6px;
-		max-height: 320px;
-		overflow-y: auto;
-	}
-	.sf-pop-head,
-	.sf-pop-foot {
-		margin: 0;
-		padding: 6px 10px;
-		font-size: var(--font-size-2xs);
-		color: var(--text-muted);
-	}
-	.sf-pop-head {
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-	}
-	.sf-pop-foot {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-	}
-	.sf-pop-foot code {
-		font-family: var(--font-mono);
-		font-size: var(--font-size-2xs);
-		color: var(--accent-strong);
-	}
-	.sf-suggestion {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		width: 100%;
-		padding: 7px 10px;
-		background: none;
-		border: none;
-		border-radius: var(--radius-sm);
-		color: var(--text-primary);
-		font-family: inherit;
-		font-size: var(--font-size-sm);
-		text-align: left;
-		cursor: pointer;
-		transition: background var(--motion-fast);
-	}
-	.sf-suggestion:hover {
-		background: var(--bg-hover);
-	}
-	.sf-tok {
-		font-family: var(--font-mono);
-		font-size: var(--font-size-xs);
-		color: var(--accent-strong);
-		flex-shrink: 0;
-		min-width: 92px;
-	}
-	.sf-label {
-		color: var(--text-secondary);
-	}
-	.sf-ex {
-		margin-left: auto;
-		font-family: var(--font-mono);
-		font-size: var(--font-size-2xs);
-		color: var(--text-muted);
-		flex-shrink: 0;
-	}
-
 	.sf-chips {
 		margin: 10px 0 0;
 		display: flex;
@@ -379,13 +274,4 @@
 		color: var(--text-primary);
 	}
 
-	.sf-popover kbd {
-		background: var(--bg-raised);
-		border: 1px solid var(--border-subtle);
-		border-radius: 4px;
-		padding: 1px 5px;
-		font-size: var(--font-size-2xs);
-		font-family: var(--font-mono);
-		color: var(--text-secondary);
-	}
 </style>
