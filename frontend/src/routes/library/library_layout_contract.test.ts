@@ -58,7 +58,7 @@ describe('library layout contracts', () => {
 		expect(source).toContain('class="artist-photo"');
 		expect(countOccurrences(source, 'className="artist-photo-img"')).toBe(2);
 		expect(countOccurrences(source, 'src={artistImageSources(artist.photo_url, artistLazyArt[artist.id], fallbackSrc)}')).toBe(2);
-		expect(countOccurrences(source, 'fallbackText={artist.name.charAt(0).toUpperCase()}')).toBe(2);
+		expect(countOccurrences(source, 'fallbackText={initials(artist.name)}')).toBe(2);
 		expect(countOccurrences(source, 'enabled: !artistLazyArt[artist.id] && !fallbackSrc')).toBe(2);
 		expect(source).toContain(':global(.artist-photo-img)');
 		expect(source).not.toContain('failedArtistImages');

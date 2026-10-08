@@ -395,7 +395,7 @@
 		</DetailHero>
 
 		{#if pendingDelete}
-			<div class="confirm-strip glass">
+			<div class="confirm-strip">
 				<span>Delete "{playlist.name}"{isTidal ? ' from TIDAL too' : ''}? This cannot be undone.</span>
 				<button class="btn btn-glass btn-sm" onclick={() => (pendingDelete = false)}>Cancel</button>
 				<button class="btn btn-sm danger-solid" disabled={busy} onclick={() => void confirmDelete()}>

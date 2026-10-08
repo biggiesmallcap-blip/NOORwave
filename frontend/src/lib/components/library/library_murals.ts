@@ -136,14 +136,14 @@ export function buildMuralPanels(sources: HomeMuralSources): HomeMuralPanel[] {
 		{
 			id: 'suggested-tracks',
 			label: 'Suggested tracks',
-			caption: 'Listen history suggestions',
+			caption: 'from your listening history',
 			kind: 'track',
 			items: capPerArtist(sources.suggestionTracks, SUGGESTION_ARTIST_CAP, HOME_MURAL_ITEM_LIMIT).map(trackToMuralItem),
 		},
 		{
 			id: 'suggested-albums',
 			label: 'Suggested albums',
-			caption: 'Listen history suggestions',
+			caption: 'from your listening history',
 			kind: 'album',
 			// Rendered as the server ranked them. The old same-artist expansion
 			// tail-filled this with the album that was just played.
@@ -152,14 +152,14 @@ export function buildMuralPanels(sources: HomeMuralSources): HomeMuralPanel[] {
 		{
 			id: 'random-tracks',
 			label: 'Random tracks',
-			caption: 'Library shuffle picks',
+			caption: 'shuffled from your library',
 			kind: 'track',
 			items: sources.randomTracks.slice(0, HOME_MURAL_ITEM_LIMIT).map(trackToMuralItem),
 		},
 		{
 			id: 'random-albums',
 			label: 'Random albums',
-			caption: 'Library shuffle picks',
+			caption: 'shuffled from your library',
 			kind: 'album',
 			items: sources.randomAlbums.slice(0, HOME_MURAL_ITEM_LIMIT).map(albumToMuralItem),
 		},

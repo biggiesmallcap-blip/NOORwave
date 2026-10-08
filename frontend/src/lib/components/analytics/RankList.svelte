@@ -104,7 +104,7 @@
 	);
 </script>
 
-<section class="rank glass" aria-label={title}>
+<section class="rank" aria-label={title}>
 	<header class="head">
 		<span class="eyebrow">{title}</span>
 	</header>
@@ -164,7 +164,6 @@
 
 <style>
 	.rank {
-		padding: var(--space-4);
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-3);

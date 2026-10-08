@@ -71,7 +71,7 @@ describe('library home hero contract', () => {
 
 		expect(muralModel).toContain("label: 'Suggested tracks'");
 		expect(muralModel).toContain("label: 'Suggested albums'");
-		expect(muralModel).toContain("caption: 'Listen history suggestions'");
+		expect(muralModel).toContain("caption: 'from your listening history'");
 		expect(muralModel).toContain("label: 'Random tracks'");
 		expect(muralModel).toContain("label: 'Random albums'");
 		expect(muralModel).toContain('export const HOME_PANEL_CACHE_REFRESH_MS = 5 * 60 * 1000');

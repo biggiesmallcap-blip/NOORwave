@@ -22,6 +22,7 @@
 		lastSelectedTrackId, lastSelectedAlbumId,
 		selectTrackIds, selectAlbumIds, clearSelection,
 	} from '$lib/stores/library';
+	import { initials } from '$lib/utils/text';
 	import { LIBRARY_TABS, restoreLibraryTab, tabCountLabel, viewCountLabel, type LibraryTab } from '$lib/components/library/library_tabs';
 	import { librarySongsScope } from '$lib/stores/library_songs';
 	import CommandHeader from '$lib/components/ui/CommandHeader.svelte';
@@ -1706,11 +1707,11 @@
 
 
 	{#if searchError}
-		<div class="batch-feedback error glass">{searchError}</div>
+		<div class="batch-feedback error">{searchError}</div>
 	{/if}
 
 	{#if isSearchMode && searchUnmatchedGenres.length > 0}
-		<div class="batch-feedback error glass">
+		<div class="batch-feedback error">
 			No genre named {searchUnmatchedGenres.map((g) => `"${g}"`).join(', ')} - nothing was
 			filtered by it. Genre filters match library genre names or slugs (see the Genres page).
 		</div>
@@ -1746,7 +1747,7 @@
 	{/if}
 
 	{#if batchMessage}
-		<div class="batch-feedback success glass">
+		<div class="batch-feedback success">
 			<span>{batchMessage}</span>
 			{#if pendingUndo.tracks.length > 0 || pendingUndo.albums.length > 0}
 				<button class="btn btn-glass" disabled={undoBusy} onclick={undoDelete}>
@@ -1757,7 +1758,7 @@
 	{/if}
 
 	{#if batchError}
-		<div class="batch-feedback error glass">{batchError}</div>
+		<div class="batch-feedback error">{batchError}</div>
 	{/if}
 
 	{#if $isLoading}
@@ -1797,7 +1798,8 @@
 										src={artistImageSources(artist.photo_url, artistLazyArt[artist.id], fallbackSrc)}
 										alt={artist.name}
 										size={320}
-										fallbackText={artist.name.charAt(0).toUpperCase()}
+										fallbackText={initials(artist.name)}
+										tint
 									/>
 								</div>
 								<span class="artist-name">{artist.name}</span>
@@ -2204,7 +2206,8 @@
 								src={artistImageSources(artist.photo_url, artistLazyArt[artist.id], fallbackSrc)}
 								alt={artist.name}
 								size={320}
-								fallbackText={artist.name.charAt(0).toUpperCase()}
+								fallbackText={initials(artist.name)}
+								tint
 							/>
 						</div>
 						<span class="artist-name">{artist.name}</span>
@@ -3097,7 +3100,6 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: var(--gap);
-		padding: var(--gap-sm) var(--gap);
 		margin-bottom: var(--gap);
 	}
 
@@ -4284,8 +4286,6 @@
 				". album quality";
 			gap: 6px 12px;
 			padding: 12px;
-			border: 1px solid var(--border-subtle);
-			background: rgba(255, 255, 255, 0.02);
 		}
 
 		.track-row.no-album {
@@ -4343,31 +4343,25 @@
 		flex-direction: column;
 		align-items: center;
 		gap: 10px;
-		padding: 16px 10px 14px;
-		border-radius: var(--radius-lg);
-		background: rgba(255, 255, 255, 0.03);
-		border: 1px solid rgba(255, 255, 255, 0.07);
+		padding: 12px 8px;
+		border-radius: var(--radius-md);
 		cursor: pointer;
-		transition:
-			background var(--motion-fast),
-			border-color var(--motion-fast),
-			transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
+		/* On the ground: no tile, no lift. Hover is a fill (STYLING.md
+		   "Boundaries"). */
+		transition: background var(--motion-fast);
 		text-align: center;
 	}
 
 	.artist-card:hover {
-		background: rgba(255, 255, 255, 0.06);
-		border-color: rgba(255, 255, 255, 0.13);
-		transform: translateY(-2px);
+		background: var(--bg-hover);
 	}
 
 	.artist-photo {
-		width: 72px;
-		height: 72px;
+		width: 96px;
+		height: 96px;
 		border-radius: 50%;
 		overflow: hidden;
 		background: var(--accent-soft);
-		border: 1px solid var(--accent-line);
 		display: grid;
 		place-items: center;
 		flex-shrink: 0;

@@ -12,7 +12,8 @@
 	} = $props();
 </script>
 
-<div class="empty-state glass-panel">
+<!-- Empty states sit on the ground with a next step, not in a box. -->
+<div class="empty-state">
 	<h3>{title}</h3>
 	{#if copy}
 		<p>{copy}</p>
@@ -26,7 +27,7 @@
 
 <style>
 	.empty-state {
-		padding: 24px;
+		padding: var(--space-5) 0;
 		display: flex;
 		flex-direction: column;
 		align-items: flex-start;

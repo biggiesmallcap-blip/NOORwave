@@ -1188,7 +1188,7 @@
 		{/snippet}
 	</PageHeader>
 
-	<section class="playlist-control-band glass">
+	<section class="playlist-control-band">
 		<div class="playlist-search-wrap">
 			<SearchField
 				bind:value={playlistQuery}
@@ -1246,7 +1246,7 @@
 	</section>
 
 	{#if deleteError}
-		<div class="feedback-bar error glass">{deleteError}</div>
+		<div class="feedback-bar error">{deleteError}</div>
 	{/if}
 
 	{#if loadError}
@@ -1693,7 +1693,6 @@
 		display: flex;
 		flex-direction: column;
 		gap: 14px;
-		padding: 16px;
 	}
 
 	.playlist-search-wrap {
@@ -2246,9 +2245,6 @@
 	.editor-error { font-size: var(--font-size-sm); color: var(--state-error); }
 
 	@media (max-width: 760px) {
-		.playlist-control-band {
-			padding: 12px;
-		}
 
 		.playlist-toolbar {
 			display: flex;

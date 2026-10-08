@@ -61,8 +61,8 @@ describe('buildMuralPanels', () => {
 			randomAlbums: [album(9)],
 		});
 		expect(panels.map((p) => p.id)).toEqual(['suggested-tracks', 'random-albums']);
-		expect(panels[0].caption).toBe('Listen history suggestions');
-		expect(panels[1].caption).toBe('Library shuffle picks');
+		expect(panels[0].caption).toBe('from your listening history');
+		expect(panels[1].caption).toBe('shuffled from your library');
 	});
 
 	test('caps every panel at the item limit', () => {

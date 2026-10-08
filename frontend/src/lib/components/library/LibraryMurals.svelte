@@ -201,9 +201,9 @@
 					</div>
 					<div class="scrim" aria-hidden="true"></div>
 					<div class="copy">
-						<span class="caption">{panel.caption}</span>
+						<!-- One title; the source reads once in the line under it. -->
 						<h3 class="title">{panel.label}</h3>
-						<span class="count">{panel.items.length} picks</span>
+						<span class="count">{panel.items.length} picks {panel.caption}</span>
 					</div>
 					{#if panel.kind === 'track'}
 						<button class="play" type="button" onclick={() => playPanel(panel)} aria-label={`Play ${panel.label}`}>
@@ -359,14 +359,6 @@
 		pointer-events: none;
 	}
 
-	.caption {
-		font-size: var(--font-size-2xs);
-		font-weight: var(--font-weight-semibold);
-		line-height: var(--line-height-snug);
-		letter-spacing: 0.12em;
-		text-transform: uppercase;
-		color: rgba(255, 255, 255, 0.76);
-	}
 
 	.title {
 		margin: 0;

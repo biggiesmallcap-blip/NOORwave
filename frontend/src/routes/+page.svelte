@@ -103,7 +103,7 @@
 </svelte:head>
 
 {#snippet articleCard(article: RSSFeedItem)}
-	<a class="article-card glass-tile" href={article.link} target="_blank" rel="noopener">
+	<a class="article-card" href={article.link} target="_blank" rel="noopener">
 		<div class="article-content">
 			<h3 class="article-title">{article.title}</h3>
 			{#if article.description}
@@ -282,7 +282,6 @@
 		min-width: 0;
 		height: 100%;
 		box-sizing: border-box;
-		padding: 18px;
 		text-decoration: none;
 		color: inherit;
 		transition: transform var(--motion-base), box-shadow var(--motion-base);

@@ -310,7 +310,7 @@
 				{@const preferred = group.members.find((member) => member.is_preferred)?.track}
 				{@const lead = group.members[0]?.track}
 				{@const isExact = group.relationship === 'exact_duplicate'}
-				<section class="group-card glass-panel" class:busy>
+				<section class="group-card" class:busy>
 					<div class="group-head">
 						<div class="group-title">
 							<p class="eyebrow">{lead?.artist_name ?? 'Unknown artist'}</p>
@@ -443,7 +443,6 @@
 	}
 
 	.group-card {
-		padding: var(--space-5);
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-5);

@@ -23,7 +23,7 @@
 	const isEmpty = $derived(cohorts.every((c) => c.tracks === 0));
 </script>
 
-<section class="cohort glass" aria-label="Listening cohorts">
+<section class="cohort" aria-label="Listening cohorts">
 	<header class="head">
 		<span class="eyebrow">Cohorts</span>
 	</header>
@@ -66,7 +66,6 @@
 
 <style>
 	.cohort {
-		padding: var(--space-4);
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-3);
