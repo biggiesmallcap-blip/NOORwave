@@ -2423,7 +2423,9 @@
 					</span>{/if}
 					{#if showQualityAtWidth}
 						<span class="col-quality">
-							{#if track.best_quality}
+							<!-- Lossless is what almost every row has; only the exceptions
+							     (Hi-Res, lossy) earn a mark. -->
+							{#if track.best_quality && track.best_quality !== 'LOSSLESS'}
 								<span class="quality-badge {getQualityClass(track.best_quality)}">
 									{track.best_quality.replace(/_/g, ' ')}
 								</span>
@@ -2484,7 +2486,7 @@
 					<span class="col-duration">{formatTrackDuration(track.duration_ms)}</span>
 					<span class="col-actions">
 						<button class="detail-btn" title="View details" onclick={(event) => { event.stopPropagation(); void openTrackDetail(track); }}>ℹ</button>
-						<button class="menu-trigger" aria-label="Track actions" onclick={(event) => toggleTrackMenu(track.id, event)}>
+						<button class="menu-trigger" aria-label="Track actions" aria-expanded={activeTrackMenuId === track.id} onclick={(event) => toggleTrackMenu(track.id, event)}>
 							⋯
 						</button>
 						{#if activeTrackMenuId === track.id}
@@ -4021,6 +4023,7 @@
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
 		color: var(--text-tertiary);
+		white-space: nowrap;
 	}
 
 	.header-sort {
@@ -4070,6 +4073,23 @@
 
 	.track-row:hover {
 		background: var(--bg-hover);
+	}
+
+	/* Row actions appear on hover or focus and never reflow the row. */
+	.track-row .col-actions .detail-btn,
+	.track-row .col-actions .menu-trigger {
+		opacity: 0;
+		border-color: transparent;
+		background: transparent;
+		transition: opacity var(--motion-fast), background var(--motion-fast);
+	}
+
+	.track-row:hover .col-actions .detail-btn,
+	.track-row:hover .col-actions .menu-trigger,
+	.track-row:focus-within .col-actions .detail-btn,
+	.track-row:focus-within .col-actions .menu-trigger,
+	.track-row .col-actions .menu-trigger[aria-expanded='true'] {
+		opacity: 1;
 	}
 
 	.track-row.selected {
