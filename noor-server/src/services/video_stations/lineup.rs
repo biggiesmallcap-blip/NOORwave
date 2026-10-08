@@ -297,6 +297,24 @@ fn scene_covered(scene: Scene, genre_slugs: &HashSet<String>) -> bool {
         .any(|genre| genre_slugs.contains(&genre.replace(' ', "-")))
 }
 
+/// Bump when a release changes which stations a lineup can hold. A lineup
+/// stored under an older version is rebuilt on the next visit, so new
+/// stations show the day they ship instead of tomorrow.
+const LINEUP_VERSION: i64 = 2;
+const VERSION_KEY: &str = "video_stations.lineup_version";
+
+/// Whether the stored lineup was built by this release's planner.
+pub fn is_current(conn: &Connection) -> Result<bool> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT value FROM server_config WHERE key = ?1",
+            [VERSION_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(stored.and_then(|raw| raw.parse::<i64>().ok()) == Some(LINEUP_VERSION))
+}
+
 /// Drop `day`'s lineup so the next request rebuilds it (settings changed).
 pub fn clear_day(conn: &Connection, day: &str) -> Result<()> {
     conn.execute("DELETE FROM video_station_lineup WHERE day = ?1", [day])?;
@@ -353,6 +371,11 @@ pub fn save(conn: &Connection, day: &str, cards: &[StationCard]) -> Result<()> {
     tx.execute(
         "DELETE FROM video_station_lineup WHERE day < date(?1, '-1 day')",
         [day],
+    )?;
+    tx.execute(
+        "INSERT INTO server_config (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![VERSION_KEY, LINEUP_VERSION.to_string()],
     )?;
     tx.commit()?;
     Ok(())
@@ -485,6 +508,20 @@ mod tests {
             Scene::Punk,
             &HashSet::from(["rock".to_string()])
         ));
+    }
+
+    #[test]
+    fn a_lineup_from_an_older_release_is_not_current() {
+        let conn = conn();
+        assert!(!is_current(&conn).unwrap(), "no stamp yet");
+        build(&conn, "2026-10-07").unwrap();
+        assert!(is_current(&conn).unwrap());
+        conn.execute(
+            "UPDATE server_config SET value = '1' WHERE key = ?1",
+            [VERSION_KEY],
+        )
+        .unwrap();
+        assert!(!is_current(&conn).unwrap());
     }
 
     #[test]
