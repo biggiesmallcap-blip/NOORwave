@@ -15,7 +15,8 @@ export type AppRouteId =
 	| 'duplicates'
 	| 'settings';
 
-export type AppRouteZone = 'Atlas' | 'Signals' | 'System';
+// Sidebar groups answer "what do I want to do" (audit "Navigation hierarchy").
+export type AppRouteZone = 'Listen' | 'Explore' | 'Tools' | 'System';
 
 export interface AppRoute {
 	id: AppRouteId;
@@ -33,7 +34,7 @@ export const APP_ROUTES = routeRegistryData as AppRouteRegistry;
 
 export const APP_ROUTE_IDS = Object.keys(APP_ROUTES) as AppRouteId[];
 
-export const ROUTE_ZONES = ['Atlas', 'Signals', 'System'] as const satisfies readonly AppRouteZone[];
+export const ROUTE_ZONES = ['Listen', 'Explore', 'Tools', 'System'] as const satisfies readonly AppRouteZone[];
 
 export function appRoute(id: AppRouteId): AppRoute {
 	return { id, ...APP_ROUTES[id] };

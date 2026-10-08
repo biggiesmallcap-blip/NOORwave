@@ -20,22 +20,22 @@ describe('route registry', () => {
 
 		expect(ids).toEqual([
 			'home',
-			'library',
 			'search',
-			'videos',
-			'genres',
-			'charts',
-			'moods',
+			'library',
 			'playlists',
-			'discover',
 			'mix',
+			'discover',
+			'genres',
+			'moods',
+			'charts',
+			'videos',
 			'analytics',
 			'duplicates',
 			'settings',
 		]);
 		expect(appRoute('discover').path).toBe('/discoverspace');
 		expect(APP_ROUTES.genres.label).toBe('Genre Galaxy');
-		expect(ROUTE_ZONES).toEqual(['Atlas', 'Signals', 'System']);
+		expect(ROUTE_ZONES).toEqual(['Listen', 'Explore', 'Tools', 'System']);
 	});
 
 	test('recognizes route ids without accepting random strings', () => {
@@ -46,7 +46,7 @@ describe('route registry', () => {
 
 describe('navigation route groups', () => {
 	test('matches the current desktop and mobile navigation order', () => {
-		expect(NAVIGATION_ZONES.map((zone) => zone.label)).toEqual(['Atlas', 'Signals', 'System']);
+		expect(NAVIGATION_ZONES.map((zone) => zone.label)).toEqual(['Listen', 'Explore', 'Tools', 'System']);
 		expect(NAVIGATION_ZONES.flatMap((zone) => zone.items.map((item) => item.id))).toEqual(
 			Object.keys(APP_ROUTES)
 		);

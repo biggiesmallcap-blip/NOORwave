@@ -1,12 +1,16 @@
 {
 	"navigationZones": [
 		{
-			"label": "Atlas",
-			"routeIds": ["home", "library", "search", "videos", "genres", "charts", "moods", "playlists", "discover"]
+			"label": "Listen",
+			"routeIds": ["home", "search", "library", "playlists", "mix"]
 		},
 		{
-			"label": "Signals",
-			"routeIds": ["mix", "analytics", "duplicates"]
+			"label": "Explore",
+			"routeIds": ["discover", "genres", "moods", "charts", "videos"]
+		},
+		{
+			"label": "Tools",
+			"routeIds": ["analytics", "duplicates"]
 		},
 		{
 			"label": "System",
