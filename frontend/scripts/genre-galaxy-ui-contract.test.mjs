@@ -59,4 +59,17 @@ describe('genre galaxy UI contract', () => {
 		expect(player).toContain('export async function startGenreRadio');
 		expect(player).toContain('api.startRadioSong({ seed_track_id: seedTrackId, blend');
 	});
+
+	test('canvas colours come from the palette theme, not hard-coded navy', () => {
+		const route = readFileSync('src/routes/genres/+page.svelte', 'utf8');
+		const galaxy = readFileSync('src/lib/components/Genre/GenreGalaxy.svelte', 'utf8');
+
+		expect(route).toContain('let galaxyTheme = $derived(buildGalaxyTheme($palette));');
+		expect(route).toContain('theme={galaxyTheme}');
+		expect(galaxy).toContain('fill.addColorStop(0, theme.sky[0]);');
+		expect(galaxy).not.toContain('rgba(18, 20, 38, 0.99)');
+		expect(galaxy).not.toContain("'#4a4d5e'");
+		expect(galaxy).not.toContain("'#3a3d4e'");
+		expect(galaxy).toContain('theme.starTints[star.tintIndex]');
+	});
 });

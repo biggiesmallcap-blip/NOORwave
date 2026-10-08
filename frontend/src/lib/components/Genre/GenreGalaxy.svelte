@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { innerWidth } from 'svelte/reactivity/window';
 	import { clamp } from '$lib/utils/math';
 	import {
@@ -11,6 +11,7 @@
 		type HeatParticle,
 		type ZoomLevel
 	} from './galaxy.types';
+	import type { GalaxyTheme } from './galaxyTheme';
 
 	type ArtistChipMap = Map<number, string[]>;
 	type HoverCardPosition = { x: number; y: number; align: 'left' | 'right' };
@@ -27,6 +28,7 @@
 		autoDrift = false,
 		artistChipMap = new Map<number, string[]>(),
 		searchHighlightIds = new Set<number>(),
+		theme,
 		onSelect = () => {},
 		onToggleSeed = () => {},
 		onMix = () => {},
@@ -44,6 +46,7 @@
 		autoDrift?: boolean;
 		artistChipMap?: ArtistChipMap;
 		searchHighlightIds?: Set<number>;
+		theme: GalaxyTheme;
 		onSelect?: (id: number | null) => void;
 		onToggleSeed?: (id: number) => void;
 		onMix?: (id: number) => void;
@@ -104,6 +107,16 @@
 			hoverCardId = target;
 			hoverCardTimer = null;
 		}, HOVER_INTENT_MS);
+	});
+
+	// A palette change repaints the sky and rebuilds sprites (muted node fill).
+	$effect(() => {
+		void theme;
+		untrack(() => {
+			invalidateSprites();
+			drawBackgroundLayer();
+		});
+		pendingConnectionRedraw = true;
 	});
 
 	// Vibe mode: energy color mapping
@@ -293,7 +306,7 @@
 	// poster. These two star layers live in (scaled) world space and shift with
 	// the camera at different rates - pan, zoom, or drift and the depth shows.
 	// ~185 stars tiled, trivial per-frame cost.
-	type ParallaxStar = { x: number; y: number; size: number; alpha: number; tint: string; phase: number };
+	type ParallaxStar = { x: number; y: number; size: number; alpha: number; tintIndex: 0 | 1 | 2; phase: number };
 	const STAR_TILE = 1024;
 
 	function makeStarLayer(
@@ -317,12 +330,7 @@
 				y: rnd() * STAR_TILE,
 				size: sizeMin + rnd() * sizeVar,
 				alpha: alphaMin + rnd() * alphaVar,
-				tint:
-					warmth > 0.82
-						? 'rgb(196, 208, 255)'
-						: warmth < 0.15
-							? 'rgb(255, 224, 196)'
-							: 'rgb(255, 255, 255)',
+				tintIndex: warmth > 0.82 ? 2 : warmth < 0.15 ? 1 : 0,
 				phase: rnd() * Math.PI * 2
 			});
 		}
@@ -349,7 +357,8 @@
 				const alpha = layer.twinkle
 					? star.alpha * (0.68 + 0.32 * Math.sin(now / 850 + star.phase))
 					: star.alpha;
-				ctx.fillStyle = star.tint;
+				const [red, green, blue] = theme.starTints[star.tintIndex];
+				ctx.fillStyle = `rgb(${red}, ${green}, ${blue})`;
 				// Tile so the field is endless in every direction.
 				for (let tx = sx - STAR_TILE; tx < width + 4; tx += STAR_TILE) {
 					if (tx < -4) continue;
@@ -670,54 +679,38 @@
 		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 		ctx.clearRect(0, 0, width, height);
 
-		// Deep space gradient
+		// Night sky in the active palette's colours (galaxyTheme). Always dark.
 		const fill = ctx.createRadialGradient(width * 0.48, height * 0.48, 24, width * 0.5, height * 0.5, width * 0.86);
-		fill.addColorStop(0, 'rgba(18, 20, 38, 0.99)');
-		fill.addColorStop(0.38, 'rgba(10, 13, 27, 0.99)');
-		fill.addColorStop(0.74, 'rgba(5, 8, 18, 1)');
-		fill.addColorStop(1, 'rgba(2, 4, 10, 1)');
+		fill.addColorStop(0, theme.sky[0]);
+		fill.addColorStop(0.38, theme.sky[1]);
+		fill.addColorStop(0.74, theme.sky[2]);
+		fill.addColorStop(1, theme.sky[3]);
 		ctx.fillStyle = fill;
 		ctx.fillRect(0, 0, width, height);
 
-		// Nebula clouds - saturated enough to actually read as a living sky.
-		const nebulaA = ctx.createRadialGradient(width * 0.22, height * 0.28, 0, width * 0.22, height * 0.28, width * 0.34);
-		nebulaA.addColorStop(0, 'rgba(88, 144, 255, 0.3)');
-		nebulaA.addColorStop(0.5, 'rgba(124, 128, 255, 0.14)');
-		nebulaA.addColorStop(1, 'rgba(124, 128, 255, 0)');
-		ctx.fillStyle = nebulaA;
-		ctx.fillRect(0, 0, width, height);
+		// Palette haze clouds: soft enough to tint the sky without fogging nodes.
+		const clouds: Array<[number, number, number, string]> = [
+			[0.22, 0.28, 0.34, theme.haze[0]],
+			[0.76, 0.18, 0.28, theme.haze[1]],
+			[0.72, 0.8, 0.36, theme.haze[2]],
+			[0.12, 0.85, 0.3, theme.haze[0]]
+		];
+		for (const [cx, cy, reach, color] of clouds) {
+			const cloud = ctx.createRadialGradient(width * cx, height * cy, 0, width * cx, height * cy, width * reach);
+			cloud.addColorStop(0, color);
+			cloud.addColorStop(1, 'rgba(0, 0, 0, 0)');
+			ctx.fillStyle = cloud;
+			ctx.fillRect(0, 0, width, height);
+		}
 
-		const nebulaB = ctx.createRadialGradient(width * 0.76, height * 0.18, 0, width * 0.76, height * 0.18, width * 0.28);
-		nebulaB.addColorStop(0, 'rgba(236, 180, 98, 0.18)');
-		nebulaB.addColorStop(0.42, 'rgba(179, 123, 244, 0.14)');
-		nebulaB.addColorStop(1, 'rgba(247, 37, 133, 0)');
-		ctx.fillStyle = nebulaB;
-		ctx.fillRect(0, 0, width, height);
-
-		const nebulaC = ctx.createRadialGradient(width * 0.72, height * 0.8, 0, width * 0.72, height * 0.8, width * 0.36);
-		nebulaC.addColorStop(0, 'rgba(6, 214, 160, 0.16)');
-		nebulaC.addColorStop(0.46, 'rgba(59, 130, 246, 0.09)');
-		nebulaC.addColorStop(1, 'rgba(6, 214, 160, 0)');
-		ctx.fillStyle = nebulaC;
-		ctx.fillRect(0, 0, width, height);
-
-		const nebulaD = ctx.createRadialGradient(width * 0.12, height * 0.85, 0, width * 0.12, height * 0.85, width * 0.3);
-		nebulaD.addColorStop(0, 'rgba(190, 96, 220, 0.14)');
-		nebulaD.addColorStop(0.5, 'rgba(120, 80, 220, 0.07)');
-		nebulaD.addColorStop(1, 'rgba(120, 80, 220, 0)');
-		ctx.fillStyle = nebulaD;
-		ctx.fillRect(0, 0, width, height);
-
-		// Broad diagonal milky band across the middle - the thing that makes it
-		// read as a galaxy instead of a dark room.
+		// Broad diagonal milky band across the middle.
 		ctx.save();
 		ctx.translate(width * 0.52, height * 0.44);
 		ctx.rotate(-0.34);
 		ctx.scale(1.7, 0.5);
 		const band = ctx.createRadialGradient(0, 0, 0, 0, 0, width * 0.55);
-		band.addColorStop(0, 'rgba(168, 178, 255, 0.11)');
-		band.addColorStop(0.55, 'rgba(130, 140, 230, 0.055)');
-		band.addColorStop(1, 'rgba(130, 140, 230, 0)');
+		band.addColorStop(0, theme.band);
+		band.addColorStop(1, 'rgba(0, 0, 0, 0)');
 		ctx.fillStyle = band;
 		ctx.fillRect(-width, -height, width * 2, height * 2);
 		ctx.restore();
@@ -731,12 +724,10 @@
 			return seed / 4294967296;
 		};
 
-		const starTint = (warmth: number, alpha: number) =>
-			warmth > 0.82
-				? `rgba(196, 208, 255, ${alpha})`
-				: warmth < 0.15
-					? `rgba(255, 224, 196, ${alpha})`
-					: `rgba(255, 255, 255, ${alpha})`;
+		const starTint = (warmth: number, alpha: number) => {
+			const [red, green, blue] = theme.starTints[warmth > 0.82 ? 2 : warmth < 0.15 ? 1 : 0];
+			return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+		};
 
 		const dustCount = isCompactViewport ? 280 : 520;
 		for (let index = 0; index < dustCount; index += 1) {
@@ -944,7 +935,7 @@
 			Math.max(width, height) * 0.68
 		);
 		vignette.addColorStop(0, 'rgba(0, 0, 0, 0)');
-		vignette.addColorStop(1, 'rgba(4, 6, 12, 0.28)');
+		vignette.addColorStop(1, theme.vignette);
 		ctx.save();
 		ctx.fillStyle = vignette;
 		ctx.fillRect(0, 0, width, height);
@@ -1109,14 +1100,14 @@
 				} else {
 					// No DSP coverage — render desaturated so Vibe is honest about its data.
 					ctx.globalAlpha = activity * 0.55;
-					baseColor = '#4a4d5e';
+					baseColor = theme.mutedNode;
 				}
 			} else if (viewMode === 'heat') {
 				// Cold nodes fade, hot nodes stay full bright.
 				ctx.globalAlpha = activity * (0.5 + node.heatNorm * 0.6);
 			} else if (viewMode === 'rediscover') {
 				ctx.globalAlpha = activity;
-				baseColor = isRediscoverCandidate(node) ? node.color : '#3a3d4e';
+				baseColor = isRediscoverCandidate(node) ? node.color : theme.mutedNode;
 			} else {
 				ctx.globalAlpha = activity;
 			}
@@ -1200,18 +1191,18 @@
 					chipHeight
 				);
 				roundedRectPath(ctx, chipX, chipY, chipWidth, chipHeight, 10);
-				ctx.fillStyle = node.depth === 2 ? 'rgba(7, 9, 18, 0.9)' : 'rgba(8, 10, 18, 0.8)';
+				ctx.fillStyle = theme.labelChipBg;
 				ctx.fill();
 				ctx.lineWidth = 1;
 				ctx.strokeStyle = hexToRgba(node.color, node.depth === 0 ? 0.5 : node.depth === 1 ? 0.4 : 0.42);
 				ctx.stroke();
 				ctx.textBaseline = 'middle';
-				ctx.fillStyle = node.depth === 2 ? 'rgba(248, 250, 255, 0.98)' : 'rgba(246, 248, 255, 0.96)';
+				ctx.fillStyle = theme.labelText;
 				ctx.shadowBlur = node.depth === 2 ? 12 : 8;
 				ctx.shadowColor = 'rgba(0, 0, 0, 0.45)';
 				ctx.fillText(label, chipX + chipWidth / 2, chipY + chipHeight / 2);
 			} else {
-				ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+				ctx.fillStyle = theme.labelText;
 				ctx.shadowBlur = 10;
 				ctx.shadowColor = 'rgba(0, 0, 0, 0.35)';
 				ctx.fillText(label, screen.x, screen.y + node.radius + 8);

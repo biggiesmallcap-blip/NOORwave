@@ -13,6 +13,8 @@
 	import GenreInterior from '$lib/components/Genre/GenreInterior.svelte';
 	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import { buildGalaxyData } from '$lib/components/Genre/galaxyBuilder';
+	import { palette } from '$lib/stores/palette';
+	import { buildGalaxyTheme } from '$lib/components/Genre/galaxyTheme';
 	import type { GalaxyViewMode, GalaxyNode } from '$lib/components/Genre/galaxy.types';
 
 	let taxonomy = $state<Genre[]>([]);
@@ -44,6 +46,7 @@
 	let resetViewToken = $state(0);
 	let selectedSeedIds = $state<number[]>([]);
 	let interiorOpen = $state(false);
+	let galaxyTheme = $derived(buildGalaxyTheme($palette));
 	const viewModes: GalaxyViewMode[] = ['map', 'heat', 'vibe', 'rediscover'];
 
 	// Prune to subtrees that actually contain tracks. The default is on because
@@ -712,6 +715,7 @@
 					labelsEnabled={labelsEnabled}
 					autoDrift={autoDrift}
 					searchHighlightIds={searchHighlightIds}
+					theme={galaxyTheme}
 					{artistChipMap}
 					onSelect={handleSelect}
 					onToggleSeed={toggleSeed}
