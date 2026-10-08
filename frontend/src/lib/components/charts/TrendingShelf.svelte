@@ -171,7 +171,7 @@
 		const key = entryKey(entry, index);
 		if (resolvingEntries[key]) return 'Resolving';
 		if (entry.local_track) return 'In library';
-		if (isEntryUnresolved(entry)) return 'Resolve on TIDAL';
+		if (isEntryUnresolved(entry)) return 'Matched on TIDAL when played';
 		if (entry.tidal_playable) return 'TIDAL ready';
 		return 'Unavailable';
 	}
@@ -179,7 +179,8 @@
 	function entryActionLabel(entry: ChartEntry, index: number): string {
 		const key = entryKey(entry, index);
 		if (resolvingEntries[key]) return 'Resolving...';
-		if (isEntryUnresolved(entry)) return 'Resolve on TIDAL';
+		// Pressing it finds the song on TIDAL and plays it, so it says Play.
+		if (isEntryUnresolved(entry)) return 'Play';
 		const target = entryTarget(entry);
 		return target ? getPlayableLabel(target) : 'Unavailable';
 	}

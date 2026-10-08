@@ -221,7 +221,8 @@ describe('home recommendations shelf contract', () => {
 		expect(source).toContain("shelf.entity_type === 'artist'");
 		expect(source).toContain("shelf.entity_type === 'album'");
 		expect(source).toContain('itemMetric');
-		expect(source).toContain('${index + 1} of ${count}');
+		// Position lives in the mural pager, not the status line.
+		expect(source).toContain('metric={itemMetric(currentItem)}');
 		expect(source).toContain('openRecommendationItem');
 		// Card identity lives in the shared helper so the rail and the View all
 		// grid key the same card the same way.
@@ -391,7 +392,7 @@ describe('home recommendations shelf contract', () => {
 		expect(source).toContain('item.local_track_id');
 		expect(source).toContain('playChartTidalTrack');
 		expect(recommendationMenu).toContain('tidal_id: item.tidal_id ?? 0');
-		expect(recommendationActionLabel(rec({ entity_type: 'track' }))).toBe('Resolve on TIDAL');
+		expect(recommendationActionLabel(rec({ entity_type: 'track' }))).toBe('Play');
 	});
 
 	test('can play the visible recommendation set through standard TIDAL mix playback', () => {
