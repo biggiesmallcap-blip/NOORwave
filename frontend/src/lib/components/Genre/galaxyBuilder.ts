@@ -9,6 +9,7 @@ import {
 	type RootFamilyKey
 } from './galaxy.types';
 import { runSimulation } from './simulation';
+import { varyFamilyColor } from './galaxyColor';
 
 function nodeRadius(depth: number, trackCount: number): number {
 	const base = depth === 0 ? 18 : depth === 1 ? 10 : depth === 2 ? 7 : 5.5;
@@ -79,7 +80,7 @@ function placeChildren(
 			vy: 0,
 			radius: nodeRadius(depth, child.track_count ?? 0),
 			heatNorm,
-			color: palette.color,
+			color: varyFamilyColor(palette.color, child.id, depth),
 			glowColor: palette.glowColor,
 			cohortId: null,
 			evolutionHistory: [],
