@@ -1,9 +1,5 @@
 <script lang="ts">
-	import { addTrackToQueue, playTrackNow } from '$lib/stores/player';
-	import { formatTrackDuration, formatDuration, getQualityClass } from '$lib/utils/format';
-	import { openContextMenu } from '$lib/stores/context_menu';
-	import { buildTrackMenu } from '$lib/player/track_menu';
-	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import { formatDuration } from '$lib/utils/format';
 	import type { GenreHeat, Track } from '$lib/api/client';
 	import type { GalaxyNode } from './galaxy.types';
 
@@ -15,8 +11,6 @@
 		tracks = [],
 		nearbyGenres = [],
 		isSeed = false,
-		loading = false,
-		error = null,
 		open = false,
 		onClose = () => {},
 		onMix = () => {},
@@ -30,8 +24,6 @@
 		tracks?: Track[];
 		nearbyGenres?: NearbyEntry[];
 		isSeed?: boolean;
-		loading?: boolean;
-		error?: string | null;
 		open?: boolean;
 		onClose?: () => void;
 		onMix?: () => void;
@@ -41,33 +33,7 @@
 		onSelectNearby?: (id: number) => void;
 	} = $props();
 
-	function handleTrackContextMenu(event: MouseEvent, track: Track) {
-		openContextMenu(event, buildTrackMenu(track));
-	}
-
-	function runOnActivation(event: KeyboardEvent, action: () => void) {
-		if (event.key !== 'Enter' && event.key !== ' ') return;
-		event.preventDefault();
-		action();
-	}
-
-	async function handleTrackPlay(trackId: number) {
-		await playTrackNow(trackId);
-	}
-
-	async function handleQueueTrack(trackId: number, event: MouseEvent) {
-		event.stopPropagation();
-		await addTrackToQueue(trackId);
-	}
-
 	let listenedTime = $derived(listenHeat?.total_listened_ms ?? node?.totalListenedMs ?? 0);
-	let showTracks = $state(false);
-
-	// The panel is a quick peek, not the browse surface - render only the first
-	// slice. Genres resolve to thousands of tracks and dumping every row into the
-	// DOM here froze the panel. Full searchable list lives in the interior.
-	const PANEL_TRACK_CAP = 50;
-	let shownPanelTracks = $derived(tracks.slice(0, PANEL_TRACK_CAP));
 
 	// Top-3 artists derived from the panel's track sample.
 	let topArtists = $derived.by(() => {
@@ -189,57 +155,6 @@
 			</div>
 		{/if}
 
-		<div class="track-section">
-			<button class="tracks-toggle" onclick={() => (showTracks = !showTracks)}>
-				{showTracks ? '▲ Hide tracks' : `Preview tracks (${node.trackCount.toLocaleString()}) ▼`}
-			</button>
-			{#if showTracks}
-				{#if loading}
-					<EmptyState title="Loading tracks" copy={`Pulling ${node.name} tracks for the panel.`} />
-				{:else if error}
-					<EmptyState title="Tracks could not load" copy={error} />
-				{:else if tracks.length === 0}
-					<EmptyState title="No tracks in this branch" copy="This node does not currently resolve to any playable tracks." />
-				{:else}
-					<div class="track-list">
-						{#each shownPanelTracks as track (track.id)}
-							<div
-								class="track-row"
-								role="button"
-								tabindex="0"
-								onclick={() => void handleTrackPlay(track.id)}
-								onkeydown={(event) => runOnActivation(event, () => void handleTrackPlay(track.id))}
-								oncontextmenu={(event) => handleTrackContextMenu(event, track)}
-							>
-								<div class="track-main">
-									<strong>{track.title}</strong>
-									<p>
-										{track.artist_name ?? 'Unknown artist'}
-										{#if track.album_title}
-											<span> · {track.album_title}</span>
-										{/if}
-									</p>
-								</div>
-								<div class="track-side">
-									{#if track.best_quality}
-										<span class={`quality-badge ${getQualityClass(track.best_quality)}`}>
-											{track.best_quality.replaceAll('_', ' ')}
-										</span>
-									{/if}
-									<span>{formatTrackDuration(track.duration_ms)}</span>
-									<button class="queue-btn" onclick={(event) => void handleQueueTrack(track.id, event)}>+</button>
-								</div>
-							</div>
-						{/each}
-					</div>
-					{#if tracks.length > PANEL_TRACK_CAP}
-						<button class="browse-all" onclick={onOpenGenre}>
-							See all {tracks.length.toLocaleString()} tracks
-						</button>
-					{/if}
-				{/if}
-			{/if}
-		</div>
 	{/if}
 </div>
 
@@ -305,9 +220,7 @@
 	}
 
 	.panel-subtitle,
-	.family-name,
-	.track-main p,
-	.track-side span {
+	.family-name {
 		color: var(--signal-text);
 	}
 
@@ -460,43 +373,6 @@
 		box-shadow: 0 0 16px color-mix(in srgb, var(--genre-accent, transparent) 34%, transparent);
 	}
 
-	.tracks-toggle {
-		width: 100%;
-		background: color-mix(in srgb, var(--instrument-surface) 84%, transparent);
-		border: 1px solid color-mix(in srgb, var(--instrument-border) 58%, transparent);
-		border-radius: var(--radius);
-		padding: 8px 12px;
-		font-size: var(--font-size-xs);
-		color: var(--signal-text);
-		text-align: left;
-		cursor: pointer;
-		transition:
-			background var(--motion-fast),
-			border-color var(--motion-fast);
-	}
-
-	.tracks-toggle:hover {
-		background: color-mix(in srgb, var(--instrument-surface-strong) 88%, transparent);
-		border-color: color-mix(in srgb, var(--instrument-border) 86%, transparent);
-	}
-
-	.browse-all {
-		width: 100%;
-		padding: 9px 12px;
-		border-radius: var(--radius);
-		border: 1px dashed color-mix(in srgb, var(--instrument-border) 60%, transparent);
-		background: transparent;
-		color: var(--signal-text);
-		font-size: var(--font-size-xs);
-		cursor: pointer;
-		transition: color var(--motion-fast), border-color var(--motion-fast);
-	}
-
-	.browse-all:hover {
-		color: var(--text-primary);
-		border-color: color-mix(in srgb, var(--genre-accent, var(--accent-line)) 70%, transparent);
-	}
-
 	.nearby-chip {
 		padding: 4px 9px;
 		border-radius: 999px;
@@ -588,82 +464,6 @@
 		border-radius: 2px 2px 0 0;
 	}
 
-	.track-section {
-		display: flex;
-		flex-direction: column;
-		gap: 12px;
-		min-height: 0;
-	}
-
-	.track-list {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-		overflow-y: auto;
-		max-height: 50vh;
-		padding-right: 4px;
-	}
-
-	.track-row {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 12px;
-		padding: 11px 12px;
-		border-radius: var(--radius);
-		background: color-mix(in srgb, var(--instrument-surface) 82%, transparent);
-		border: 1px solid color-mix(in srgb, var(--instrument-border) 56%, transparent);
-		transition:
-			background var(--motion-fast),
-			border-color var(--motion-fast),
-			transform var(--motion-fast);
-	}
-
-	.track-row:hover {
-		border-color: color-mix(in srgb, var(--instrument-border) 86%, transparent);
-		background: color-mix(in srgb, var(--instrument-surface-strong) 88%, transparent);
-		transform: translateY(-1px);
-	}
-
-	.track-main,
-	.track-side {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-	}
-
-	.track-main {
-		min-width: 0;
-		flex: 1;
-		flex-direction: column;
-		align-items: flex-start;
-		gap: 4px;
-	}
-
-	.track-main strong,
-	.track-main p {
-		max-width: 100%;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.track-side {
-		flex-shrink: 0;
-		flex-direction: column;
-		align-items: flex-end;
-		gap: 6px;
-	}
-
-	.queue-btn {
-		width: 28px;
-		height: 28px;
-		border-radius: 999px;
-		border: 1px solid color-mix(in srgb, var(--instrument-border) 64%, transparent);
-		background: color-mix(in srgb, var(--accent-soft) 88%, transparent);
-		color: var(--accent-strong);
-	}
-
 	@media (max-width: 1180px) {
 		.genre-panel {
 			top: auto;
@@ -689,16 +489,5 @@
 			transform: translateY(0);
 		}
 
-		.track-list {
-			padding-right: 0;
-		}
-
-		.track-row {
-			align-items: flex-start;
-		}
-
-		.track-side {
-			align-items: flex-end;
-		}
 	}
 </style>

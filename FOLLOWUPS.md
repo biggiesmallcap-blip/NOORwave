@@ -10,16 +10,6 @@ back to the PR or commit that flagged it.
 
 ## Open
 
-### genres: GenrePanel track rows should use the shared TrackRow
-
-- Source: Genre Galaxy overhaul, 2026-10-08. The genre page now uses
-  `TrackRow`; the galaxy side panel still renders its own compact rows
-  (quality badge, duration, + queue).
-- Affected: `frontend/src/lib/components/Genre/GenrePanel.svelte`.
-- Why it matters: two row designs for the same tracks; switch the panel to
-  `TrackRow variant="compact"` and drop the bespoke row CSS.
-- Spawned by: the Genre Galaxy overhaul commit series.
-
 ### tests: stabilize relative-date checks across daylight saving changes
 
 - Source: Clay UI verification on 2026-10-04. Four existing `formatDateShort`

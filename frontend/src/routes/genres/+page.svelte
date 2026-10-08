@@ -871,8 +871,6 @@
 				tracks={selectedTracks}
 				nearbyGenres={nearbyGenres}
 				isSeed={selectedNode !== null && selectedSeedIds.includes(selectedNode.id)}
-				loading={selectedTrackLoading}
-				error={selectedTrackError}
 				open={selectedNode !== null && !detailsOpen}
 				onClose={() => handleSelect(null)}
 				onMix={() => selectedNode && void handleMix(selectedNode.id)}
