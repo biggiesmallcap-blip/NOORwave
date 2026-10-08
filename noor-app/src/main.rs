@@ -97,6 +97,12 @@ fn main() {
             .min_inner_size(480.0, 360.0)
             .resizable(true)
             .decorations(true)
+            // Paint the window and webview dark (the dark theme's base). Going
+            // fullscreen, tao drops the title bar and then grows the window a
+            // frame before WebView2 catches up; unpainted, that exposed the
+            // old caption (its close button) and whatever sat behind the
+            // window on the right and bottom edges.
+            .background_color(tauri::window::Color(11, 11, 15, 255))
             // Keep creation deterministic and unfocused. A normal launch is
             // shown after bounded readiness; autostart remains tray-only.
             .visible(false)
