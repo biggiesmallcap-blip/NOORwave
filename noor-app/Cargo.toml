@@ -27,6 +27,9 @@ tauri-plugin-opener = "2.5.4"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.10.1"
+# Same versions wry uses, for the video fullscreen switch.
+webview2-com = "=0.39.1"
+windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 tempfile = "3"

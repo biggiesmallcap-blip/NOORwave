@@ -59,7 +59,7 @@ describe('persistent video dock contract', () => {
 		const player = readFileSync(join(here, 'VideoPlayer.svelte'), 'utf8');
 		expect(dock).toContain('onFullscreenToggle={toggleExpanded}');
 		expect(dock).toContain('document.documentElement.requestFullscreen?.()');
-		expect(dock).toContain("if (event.key === 'Escape' && expanded && !document.fullscreenElement) expanded = false;");
+		expect(dock).toContain("if (event.key === 'Escape' && expanded && !document.fullscreenElement) collapse();");
 		// One motion at a time, window first both ways: going in, the glide
 		// waits for the window to finish growing (gliding first showed the
 		// native title bar over the filled window); going out, window first,
@@ -70,6 +70,22 @@ describe('persistent video dock contract', () => {
 		expect(dock).toMatch(/enteringFullscreen = false;\s*afterWindowSettles\(\(\) => \{[\s\S]*?if \(active\) expanded = true;/);
 		expect(dock).toContain('requestAnimationFrame(() => requestAnimationFrame(() => (expanded = false)));');
 		expect(player).toMatch(/if \(onFullscreenToggle\) \{\s*onFullscreenToggle\(\);\s*return;/);
+	});
+
+	test('in the desktop app the window switch is native and hidden behind the dock', () => {
+		// Tauri's own fullscreen showed the desktop and the old title bar
+		// through the window while it resized; noor-app switches in one step.
+		expect(dock).toContain("import { hasNativeVideoFullscreen, setNativeVideoFullscreen } from '$lib/tauri/video_fullscreen';");
+		expect(dock).toMatch(/if \(nativeSwitch\) \{\s*if \(expanded\) collapse\(\);\s*else expanded = true;\s*return;/);
+		// In: the glide fills the window first, then the window switches, so
+		// only the black dock and the video show while WebView2 catches up.
+		expect(dock).toMatch(/function endGlide\(\) \{\s*morphing = false;\s*if \(place === 'expanded'\) enterNativeFullscreen\(\);/);
+		expect(dock).toContain("if (reducedMotion && next === 'expanded') enterNativeFullscreen();");
+		// Out: the window comes back first, then the dock glides home.
+		expect(dock).toMatch(/void leaveNativeFullscreen\(\)\.then\(\(\) =>\s*requestAnimationFrame\(\(\) => requestAnimationFrame\(\(\) => \(expanded = false\)\)\)/);
+		// Ending the session or tearing down never strands the window fullscreen.
+		expect(dock).toMatch(/if \(active\) return;\s*void leaveNativeFullscreen\(\);\s*expanded = false;/);
+		expect(dock).toMatch(/glide\?\.cancel\(\);\s*void leaveNativeFullscreen\(\);/);
 	});
 
 	test('on the watch page the player lives in the stage and scrolls natively', () => {

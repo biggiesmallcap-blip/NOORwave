@@ -33,6 +33,7 @@
 		type Corner,
 	} from './mini_dock';
 	import { WATCH_PATH } from '$lib/video/section';
+	import { hasNativeVideoFullscreen, setNativeVideoFullscreen } from '$lib/tauri/video_fullscreen';
 
 	// The dock renders a single VideoPlayer that never unmounts while a session
 	// is active, so audio keeps playing across route changes. Where it sits:
@@ -224,7 +225,53 @@
 	// fullscreen first, let the page settle at its normal size, then glide back.
 	let enteringFullscreen = false;
 
+	// Inside the desktop app the window switch is native instead (see
+	// $lib/tauri/video_fullscreen), and the order flips: in, the dock glides
+	// to fill the window, then the window goes fullscreen; out, the window
+	// comes back, then the dock glides home. Either way only the black dock
+	// and the video are on screen while the window changes, so WebView2
+	// drawing the page a frame late never shows the app layout jumping.
+	const nativeSwitch = hasNativeVideoFullscreen();
+	let nativeOn = false;
+	let nativePending = false;
+
+	/** Called when the glide into the window lands. */
+	function enterNativeFullscreen() {
+		if (!nativeSwitch || nativeOn || nativePending || !expanded) return;
+		nativePending = true;
+		void setNativeVideoFullscreen(true).then((ok) => {
+			nativePending = false;
+			nativeOn = ok;
+			// Left while the window was switching: switch straight back.
+			if (ok && !expanded) void leaveNativeFullscreen();
+		});
+	}
+
+	async function leaveNativeFullscreen() {
+		if (!nativeOn) return;
+		nativeOn = false;
+		await setNativeVideoFullscreen(false);
+	}
+
+	/** Out of fullscreen by any route (button, double-click, F, Esc). */
+	function collapse() {
+		if (nativeOn) {
+			// Two frames: the stage has re-laid out at the restored size, so
+			// the glide back aims at where the player really belongs.
+			void leaveNativeFullscreen().then(() =>
+				requestAnimationFrame(() => requestAnimationFrame(() => (expanded = false)))
+			);
+			return;
+		}
+		expanded = false;
+	}
+
 	function toggleExpanded() {
+		if (nativeSwitch) {
+			if (expanded) collapse();
+			else expanded = true;
+			return;
+		}
 		if (expanded) {
 			if (document.fullscreenElement) {
 				// fullscreenchange collapses once the window is back to size.
@@ -284,7 +331,9 @@
 	}
 
 	$effect(() => {
-		if (!active) expanded = false;
+		if (active) return;
+		void leaveNativeFullscreen();
+		expanded = false;
 	});
 
 	$effect(() => {
@@ -308,7 +357,7 @@
 		};
 		// Esc with no window fullscreen (the request can be refused).
 		const onKeydown = (event: KeyboardEvent) => {
-			if (event.key === 'Escape' && expanded && !document.fullscreenElement) expanded = false;
+			if (event.key === 'Escape' && expanded && !document.fullscreenElement) collapse();
 		};
 		document.addEventListener('fullscreenchange', onFullscreenChange);
 		window.addEventListener('keydown', onKeydown);
@@ -404,6 +453,7 @@
 
 	function endGlide() {
 		morphing = false;
+		if (place === 'expanded') enterNativeFullscreen();
 		const stage = get(videoStageAnchor);
 		if (place === 'full' && stage?.isConnected) moveIntoStage(stage);
 		if (dockEl) {
@@ -498,6 +548,7 @@
 		else if ((!moving || reducedMotion) && $videoStageAnchor) moveIntoStage($videoStageAnchor);
 		if (moving) {
 			const fullscreenMove = previousPlace === 'expanded' || next === 'expanded';
+			if (reducedMotion && next === 'expanded') enterNativeFullscreen();
 			if (!reducedMotion) {
 				morphing = true;
 				const started = fullscreenMove ? sizeGlideFrom(lastDockRect) : flipFrom(lastDockRect);
@@ -590,6 +641,7 @@
 		if (morphTimer) clearTimeout(morphTimer);
 		if (unfoldTimer) clearTimeout(unfoldTimer);
 		glide?.cancel();
+		void leaveNativeFullscreen();
 		unsubscribeStage();
 		// Never moveHome() here: by teardown Svelte may already have removed
 		// the host, and re-inserting it would resurrect a dead dock (a second
