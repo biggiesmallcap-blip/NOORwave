@@ -526,11 +526,20 @@
 		if (artists.length <= offset && !artistsExhausted) {
 			artistsLoadingMore = true;
 			try {
-				while (artists.length <= offset + PAGE_SIZE / 4 && !artistsExhausted) {
-					const data = await cachedApi.getArtists('name', 'asc', PAGE_SIZE, artists.length);
+				// The server caps a page at 200; the gap is fetched in parallel
+				// batches so a jump to M does not wait on 50 sequential pages.
+				const JUMP_PAGE = 200;
+				const target = offset + PAGE_SIZE / 4;
+				const starts: number[] = [];
+				for (let start = artists.length; start <= target; start += JUMP_PAGE) starts.push(start);
+				for (let i = 0; i < starts.length && !artistsExhausted; i += 6) {
+					const pages = await Promise.all(
+						starts.slice(i, i + 6).map((start) => cachedApi.getArtists('name', 'asc', JUMP_PAGE, start))
+					);
 					const seen = new Set(artists.map((a) => a.id));
-					artists = [...artists, ...data.artists.filter((a) => !seen.has(a.id))];
-					if (data.artists.length < PAGE_SIZE) artistsExhausted = true;
+					const fresh = pages.flatMap((page) => page.artists).filter((a) => !seen.has(a.id) && seen.add(a.id));
+					artists = [...artists, ...fresh];
+					if (pages.some((page) => page.artists.length < JUMP_PAGE)) artistsExhausted = true;
 				}
 			} catch (err) {
 				console.error('Failed to page artists for the index:', err);
@@ -539,9 +548,12 @@
 			}
 		}
 		await tick();
-		document
-			.querySelector(`[data-artist-index="${offset}"]`)
-			?.scrollIntoView({ block: 'start', behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
+		const card = document.querySelector(`[data-artist-index="${offset}"]`);
+		if (!card) return;
+		// A smooth scroll across thousands of cards is cut short as rows load
+		// in under it, so only nearby jumps animate.
+		const near = Math.abs(card.getBoundingClientRect().top) < window.innerHeight * 2;
+		card.scrollIntoView({ block: 'start', behavior: near && !prefersReducedMotion() ? 'smooth' : 'auto' });
 	}
 
 	async function loadArtistsUpTo(targetCount: number) {
