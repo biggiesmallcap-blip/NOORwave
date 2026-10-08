@@ -37,3 +37,17 @@ describe('Settings is a form, not a panel', () => {
 		expect(css).toMatch(/\.settings-scope \.section-panel \{ background: none;[^}]*border: 0;[^}]*padding: 0;/);
 	});
 });
+
+// Audit "Search: answer first": the top result and five songs share the
+// first screen; library marks are a ring, not a red dot.
+describe('Search answers first', () => {
+	const search = read('../src/routes/search/+page.svelte');
+	test('five songs sit beside the top result in the All view', () => {
+		expect(search).toContain('<div class="answer-split" class:with-songs={answerTracks.length > 0}>');
+		expect(search).toContain('visibleTracks.slice(0, ANSWER_SONGS)');
+		expect(search).toContain('{@render songRow(track, idx)}');
+	});
+	test('the keyboard cursor stays in view', () => {
+		expect(search).toContain("scrollIntoView({ block: 'nearest' })");
+	});
+});

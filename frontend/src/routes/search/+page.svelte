@@ -946,6 +946,14 @@
     return candidates[0].tr
   })
 
+  // All view with a top result: five songs sit beside it, the rest follow.
+  const ANSWER_SONGS = 5
+  const answerTracks = $derived(
+    filterMode === 'all' && topResult ? visibleTracks.slice(0, ANSWER_SONGS) : []
+  )
+  const laterOffset = $derived(answerTracks.length)
+  const laterTracks = $derived(visibleTracks.slice(answerTracks.length))
+
   function topResultHref(top: TopResult): string {
     switch (top.kind) {
       case 'artist':
@@ -1158,6 +1166,12 @@
     if (cursor >= sortedTracks.length) cursor = sortedTracks.length - 1
   })
 
+  // Arrow keys move through songs from the field; keep that row in view.
+  $effect(() => {
+    if (cursor < 0) return
+    document.querySelector(`[data-cursor-idx="${cursor}"]`)?.scrollIntoView({ block: 'nearest' })
+  })
+
   const toPlayable = tidalSearchTrackToPlayable;
 
   function actOnTrack(track: TidalSearchTrack, mode: 'play' | 'queue' | 'next') {
@@ -1308,6 +1322,103 @@
   })
 
 </script>
+
+{#snippet songRow(track: TidalSearchTrack, idx: number)}
+  <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <li
+    class="track-row"
+    class:cursor={cursor === idx}
+    class:disabled={!canPlaySearchTrack(track)}
+    data-cursor-idx={idx}
+    role="button"
+    tabindex={canPlaySearchTrack(track) ? 0 : -1}
+    aria-disabled={!canPlaySearchTrack(track)}
+    onclick={() => canPlaySearchTrack(track) && void playTidalTrackNow(toPlayable(track))}
+    onmouseenter={() => { cursor = idx }}
+    onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), canPlaySearchTrack(track) && void playTidalTrackNow(toPlayable(track)))}
+    oncontextmenu={(e) => openTidalTrackContextMenu(e, track)}
+  >
+    {#if track.artwork_url}
+      <ArtworkImage
+        className="track-art"
+        src={track.artwork_url}
+        alt={track.title}
+        size={320}
+        loading="lazy"
+        decoding="async"
+        fallbackText={initials(track.title)}
+      />
+    {:else}
+      <div class="track-art fallback" style={`background: ${letterColor(track.title)}`}>
+        <span>♫</span>
+      </div>
+    {/if}
+    <div class="track-meta">
+      <p class="track-title">
+        {track.title}
+        {#if track.in_library}<span class="lib-dot" aria-label="In your library"></span>{/if}
+      </p>
+      <p class="track-subtitle">
+        {#if track.artist_name}
+          {#if track.artist_id != null}
+            <a
+              href={`/tidal/artists/${track.artist_id}`}
+              class="subtitle-link"
+              onclick={(e) => e.stopPropagation()}
+              oncontextmenu={(e) => openTidalArtistContextMenu(e, track)}
+            >{track.artist_name}</a>
+          {:else}
+            <span>{track.artist_name}</span>
+          {/if}
+        {/if}
+        {#if track.artist_name && track.album_title} - {/if}
+        {#if track.album_title}
+          {#if track.album_tidal_id != null}
+            <a
+              href={`/tidal/albums/${track.album_tidal_id}`}
+              class="subtitle-link"
+              onclick={(e) => e.stopPropagation()}
+              oncontextmenu={(e) => openTidalAlbumContextMenu(e, track)}
+            >{track.album_title}</a>
+          {:else}
+            <span>{track.album_title}</span>
+          {/if}
+        {/if}
+      </p>
+    </div>
+    <span class="track-duration">{formatTrackDuration(track.duration_ms)}</span>
+    <div class="row-actions">
+      <button
+        class="row-btn"
+        disabled={!canPlaySearchTrack(track)}
+        onclick={(e) => { e.stopPropagation(); canPlaySearchTrack(track) && void playTidalTrackNow(toPlayable(track)) }}
+        title={playableSearchLabel(track)}
+        aria-label="Play {track.title}"
+      >▶</button>
+      <button
+        class="row-btn"
+        disabled={!canPlaySearchTrack(track)}
+        onclick={(e) => { e.stopPropagation(); canPlaySearchTrack(track) && void addTidalTrackToQueue(toPlayable(track)) }}
+        title={canPlaySearchTrack(track) ? 'Add to queue' : playableSearchLabel(track)}
+        aria-label="Queue {track.title}"
+      >＋</button>
+      <button
+        class="row-btn"
+        onclick={(e) => { e.stopPropagation(); void startTidalSongRadio(toPlayable(track)) }}
+        title="Song radio - mix of related tracks from your library and Tidal"
+        aria-label="Start radio from {track.title}"
+      >◎</button>
+      <button
+        class="row-btn"
+        onclick={(e) => openTidalTrackContextMenu(e, track)}
+        title="More options"
+        aria-label="More options"
+      >⋯</button>
+    </div>
+  </li>
+{/snippet}
 
 {#snippet listenCard(entry: ListenHistoryEntry)}
   <button
@@ -1561,6 +1672,9 @@
     {#if topResult}
       {@const top = topResult}
       {@const topHeroBgSources = topHeroBackgroundSources(top)}
+      <!-- Answer first: the top result and the five likeliest songs share the
+           first screen (audit "Search: answer first, explore second"). -->
+      <div class="answer-split" class:with-songs={answerTracks.length > 0}>
       <section class="top-result-section">
         <h3 class="section-label">Top Result</h3>
         <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -1629,6 +1743,20 @@
           </div>
         </div>
       </section>
+      {#if answerTracks.length > 0}
+        <section class="results-section answer-songs" aria-labelledby="answer-songs-heading">
+          <div class="answer-head">
+            <h3 id="answer-songs-heading" class="section-label">Songs</h3>
+            <button type="button" class="answer-all" onclick={() => { filterMode = 'tracks' }}>All songs</button>
+          </div>
+          <ul class="tracks-list">
+            {#each answerTracks as track, idx (track.tidal_id)}
+              {@render songRow(track, idx)}
+            {/each}
+          </ul>
+        </section>
+      {/if}
+      </div>
     {/if}
 
     {#if visibleArtists.length > 0}
@@ -1851,9 +1979,9 @@
       </section>
     {/if}
 
-    {#if visibleTracks.length > 0}
+    {#if filterMode === 'tracks' ? visibleTracks.length > 0 : laterTracks.length > 0}
       <section class="results-section">
-        <h3 class="section-label">Tracks</h3>
+        <h3 class="section-label">{answerTracks.length > 0 ? 'More songs' : 'Songs'}</h3>
         {#if filterMode === 'tracks'}
           <div class="search-track-table" role="list">
             <div class="search-track-header">
@@ -1971,101 +2099,8 @@
           </div>
         {:else}
         <ul class="tracks-list">
-          {#each visibleTracks as track, idx (track.tidal_id)}
-            <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
-            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-            <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-            <li
-              class="track-row"
-              class:cursor={cursor === idx}
-              class:disabled={!canPlaySearchTrack(track)}
-              data-cursor-idx={idx}
-              role="button"
-              tabindex={canPlaySearchTrack(track) ? 0 : -1}
-              aria-disabled={!canPlaySearchTrack(track)}
-              onclick={() => canPlaySearchTrack(track) && void playTidalTrackNow(toPlayable(track))}
-              onmouseenter={() => { cursor = idx }}
-              onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), canPlaySearchTrack(track) && void playTidalTrackNow(toPlayable(track)))}
-              oncontextmenu={(e) => openTidalTrackContextMenu(e, track)}
-            >
-              {#if track.artwork_url}
-                <ArtworkImage
-                  className="track-art"
-                  src={track.artwork_url}
-                  alt={track.title}
-                  size={320}
-                  loading="lazy"
-                  decoding="async"
-                  fallbackText={initials(track.title)}
-                />
-              {:else}
-                <div class="track-art fallback" style={`background: ${letterColor(track.title)}`}>
-                  <span>♫</span>
-                </div>
-              {/if}
-              <div class="track-meta">
-                <p class="track-title">
-                  {track.title}
-                  {#if track.in_library}<span class="lib-dot" aria-label="In your library"></span>{/if}
-                </p>
-                <p class="track-subtitle">
-                  {#if track.artist_name}
-                    {#if track.artist_id != null}
-                      <a
-                        href={`/tidal/artists/${track.artist_id}`}
-                        class="subtitle-link"
-                        onclick={(e) => e.stopPropagation()}
-                        oncontextmenu={(e) => openTidalArtistContextMenu(e, track)}
-                      >{track.artist_name}</a>
-                    {:else}
-                      <span>{track.artist_name}</span>
-                    {/if}
-                  {/if}
-                  {#if track.artist_name && track.album_title} - {/if}
-                  {#if track.album_title}
-                    {#if track.album_tidal_id != null}
-                      <a
-                        href={`/tidal/albums/${track.album_tidal_id}`}
-                        class="subtitle-link"
-                        onclick={(e) => e.stopPropagation()}
-                        oncontextmenu={(e) => openTidalAlbumContextMenu(e, track)}
-                      >{track.album_title}</a>
-                    {:else}
-                      <span>{track.album_title}</span>
-                    {/if}
-                  {/if}
-                </p>
-              </div>
-              <span class="track-duration">{formatTrackDuration(track.duration_ms)}</span>
-              <div class="row-actions">
-                <button
-                  class="row-btn"
-                  disabled={!canPlaySearchTrack(track)}
-                  onclick={(e) => { e.stopPropagation(); canPlaySearchTrack(track) && void playTidalTrackNow(toPlayable(track)) }}
-                  title={playableSearchLabel(track)}
-                  aria-label="Play {track.title}"
-                >▶</button>
-                <button
-                  class="row-btn"
-                  disabled={!canPlaySearchTrack(track)}
-                  onclick={(e) => { e.stopPropagation(); canPlaySearchTrack(track) && void addTidalTrackToQueue(toPlayable(track)) }}
-                  title={canPlaySearchTrack(track) ? 'Add to queue' : playableSearchLabel(track)}
-                  aria-label="Queue {track.title}"
-                >＋</button>
-                <button
-                  class="row-btn"
-                  onclick={(e) => { e.stopPropagation(); void startTidalSongRadio(toPlayable(track)) }}
-                  title="Song radio - mix of related tracks from your library and Tidal"
-                  aria-label="Start radio from {track.title}"
-                >◎</button>
-                <button
-                  class="row-btn"
-                  onclick={(e) => openTidalTrackContextMenu(e, track)}
-                  title="More options"
-                  aria-label="More options"
-                >⋯</button>
-              </div>
-            </li>
+          {#each laterTracks as track, idx (track.tidal_id)}
+            {@render songRow(track, idx + laterOffset)}
           {/each}
         </ul>
         {/if}
@@ -2271,6 +2306,28 @@
     color: var(--text-primary);
   }
   .top-result-section { margin-bottom: 28px; max-width: var(--content-width); margin-left: auto; margin-right: auto; }
+  .answer-split { width: 100%; }
+  .answer-split.with-songs {
+    display: grid;
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+    gap: 28px;
+    align-items: start;
+  }
+  .answer-split.with-songs .top-result-section { margin: 0; width: 100%; }
+  .answer-songs { margin: 0; min-width: 0; }
+  .answer-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .answer-all {
+    all: unset;
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-semibold);
+  }
+  .answer-all:hover { color: var(--text-primary); }
+  .answer-all:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
+  @container workspace (max-width: 900px) {
+    .answer-split.with-songs { grid-template-columns: minmax(0, 1fr); }
+  }
   .top-result-card {
     display: grid;
     grid-template-columns: 168px 1fr;
@@ -2564,8 +2621,9 @@
     width: 10px;
     height: 10px;
     border-radius: 50%;
-    background: var(--accent);
-    border: 2px solid var(--bg-base);
+    /* In your library: a success-coloured ring, never a red (alert) dot. */
+    background: var(--bg-base);
+    box-shadow: inset 0 0 0 2px var(--state-success), 0 0 0 2px var(--bg-base);
   }
   .source-chip {
     position: absolute;
@@ -2585,10 +2643,10 @@
   .spotify-card { text-decoration: none; }
   .lib-dot {
     display: inline-block;
-    width: 6px;
-    height: 6px;
+    width: 7px;
+    height: 7px;
     border-radius: 50%;
-    background: var(--accent);
+    box-shadow: inset 0 0 0 1.5px var(--state-success);
     margin-left: 6px;
     vertical-align: middle;
     flex-shrink: 0;
