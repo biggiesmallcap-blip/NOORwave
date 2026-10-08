@@ -8,6 +8,7 @@
 	import SettingRow from '$lib/components/settings/SettingRow.svelte';
 	import Segmented from '$lib/components/ui/Segmented.svelte';
 	import Dropdown from '$lib/components/ui/Dropdown.svelte';
+	import { likeSongOnVideoSave } from '$lib/videos/like_song_for_video';
 	import AppearanceFields, { type AppearanceValues } from '$lib/components/settings/AppearanceFields.svelte';
 	import StartupSetting from '$lib/components/settings/StartupSetting.svelte';
 	import CloseBehaviorSetting from '$lib/components/settings/CloseBehaviorSetting.svelte';
@@ -2530,6 +2531,12 @@
 	options={[{ value: 'liked', label: 'Liked songs' }, { value: 'library', label: 'All library songs' }]}
 	value={$librarySongsScope}
 	onchange={(value) => librarySongsScope.set(value)}
+/></SettingRow></SettingGroup>
+<SettingGroup title="Videos"><SettingRow label="Saving a video likes its song" id="library-video-likes-song" hint="When you save a music video, the matching song (same artist and title) is liked too, so it shows in your Library and TIDAL favorites. Removing a video never unlikes the song."><Segmented
+	label="Saving a video likes its song"
+	options={[{ value: 'off', label: 'Off' }, { value: 'on', label: 'On' }]}
+	value={$likeSongOnVideoSave}
+	onchange={(value) => likeSongOnVideoSave.set(value)}
 /></SettingRow></SettingGroup>
 <SettingGroup title="Artwork"><SettingRow label="Artwork cache" id="library-artwork-cache" hint={artworkCacheHint(artworkCache)}><Dropdown
 	label="Artwork cache"

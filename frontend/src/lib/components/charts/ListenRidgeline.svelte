@@ -89,7 +89,35 @@
 		rows.length >= WEEKLY_GRANULARITY_THRESHOLD ? 'week' : 'day',
 	);
 
+	// Hide empty days (hero mode, on by default, remembered): days or weeks
+	// without a listen are dropped instead of drawn as flat lines.
+	const HIDE_EMPTY_KEY = 'noor:analytics:listening-pulse:hide-empty';
+	let hideEmpty = $state(true);
+	onMount(() => {
+		try {
+			const stored = localStorage.getItem(HIDE_EMPTY_KEY);
+			if (stored !== null) hideEmpty = stored === '1';
+		} catch {
+			// Storage blocked: keep the default.
+		}
+	});
+	function setHideEmpty(value: boolean) {
+		hideEmpty = value;
+		try {
+			localStorage.setItem(HIDE_EMPTY_KEY, value ? '1' : '0');
+		} catch {
+			// Storage full or blocked: the choice lasts this session.
+		}
+	}
+
 	const displayRows = $derived.by(() => {
+		const grouped = groupedRows;
+		if (mode !== 'hero' || !hideEmpty) return grouped;
+		const filled = grouped.filter((row) => row.hourly.some((count) => count > 0));
+		return filled.length > 0 ? filled : grouped;
+	});
+
+	const groupedRows = $derived.by(() => {
 		if (granularity === 'day') return rows;
 		const out: RidgeRow[] = [];
 		for (let i = 0; i < rows.length; i += 7) {
@@ -443,6 +471,16 @@
 					{/if}
 				</p>
 				<p class="chart-note">Ridge shape is normalized per row; side ticks show volume.</p>
+				<div class="sigma-row">
+					<label class="sigma-control">
+						<input
+							type="checkbox"
+							checked={hideEmpty}
+							onchange={(event) => setHideEmpty(event.currentTarget.checked)}
+						/>
+						<span class="sigma-label">Hide empty {granularity === 'week' ? 'weeks' : 'days'}</span>
+					</label>
+				</div>
 				{#if sigma === undefined && granularity === 'day'}
 					<div class="sigma-row">
 						<label class="sigma-control" title="KDE bandwidth for the chart - wider smooths spikes into clusters, narrower preserves sharp single-hour peaks. The peak stat uses a fixed bandwidth and is unaffected.">

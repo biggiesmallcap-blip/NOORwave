@@ -291,10 +291,10 @@ export interface TidalSearchArtist {
 	in_library: boolean;
 }
 
-/** How much background video discovery the server runs. */
 /** Settings > Library > Artwork cache. `max_mb` 0 is off. */
 export type ArtworkCacheSettings = { max_mb: number; used_bytes: number; options_mb: number[] };
 
+/** How much background video discovery the server runs. */
 export type VideoDiscoverySetting = 'full' | 'limited' | 'off';
 
 export interface VideoDiscoveryStatus {

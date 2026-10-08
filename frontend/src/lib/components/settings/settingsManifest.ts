@@ -29,6 +29,7 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
 	{ id: 'transitions', category: 'playback', label: 'Transitions', keywords: 'crossfade fade gap blend' },
 	{ id: 'library-audio-data', category: 'playback', label: 'Analyse while playing', keywords: 'analysis bpm key energy dsp passive audio data' },
 	{ id: 'library-songs-scope', category: 'library', label: 'Songs tab shows', keywords: 'liked library songs tracks favorites hearted albums' },
+	{ id: 'library-video-likes-song', category: 'library', label: 'Saving a video likes its song', keywords: 'video save liked song favorite favourite music video library sync' },
 	{ id: 'library-artwork-cache', category: 'library', label: 'Artwork cache', keywords: 'artwork cover pictures images cache disk storage size offline instant' },
 	{ id: 'library-sync', category: 'library', label: 'Sync library', keywords: 'tidal sync daily auto-sync full resync cancel favourite favorite albums' },
 	{ id: 'musicbrainz-enrichment', category: 'library', label: 'MusicBrainz genres', keywords: 'genre metadata enrich tags galaxy resume' },
