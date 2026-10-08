@@ -5,12 +5,12 @@
 	import { page } from '$app/state';
 	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import CommandHeader from '$lib/components/ui/CommandHeader.svelte';
-	import VideoNavigation from '$lib/components/video/VideoNavigation.svelte';
+	import ScopeTabs from '$lib/components/ui/ScopeTabs.svelte';
 	import VideoSearchResults from '$lib/components/video/VideoSearchResults.svelte';
 	import { goBack } from '$lib/navigation/back';
 	import { captureScroll, restoreScroll, scrollWorkspaceTop } from '$lib/navigation/scroll';
 	import { videoStageReveal } from '$lib/stores/video_session';
-	import { WATCH_PATH, videoSectionQuery, videoTabFor } from '$lib/video/section';
+	import { VIDEO_TABS, WATCH_PATH, videoSectionQuery, videoTabFor } from '$lib/video/section';
 
 	// One frame for the whole video section, so every tab has the same top:
 	// the shared command header puts Back and the search field on the first
@@ -75,7 +75,9 @@
 			/>
 		{/snippet}
 		{#snippet tabs()}
-			<VideoNavigation current={tab} />
+			<!-- No tab is lit on the watch page. Tab hops replace the history
+			     entry, so Back leaves the section in one step. -->
+			<ScopeTabs tabs={VIDEO_TABS} current={tab} label="Video pages" replaceState />
 		{/snippet}
 		{#if tab === 'liked' && query}
 			<p class="scope-note">

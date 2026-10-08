@@ -13,11 +13,12 @@ back to the PR or commit that flagged it.
 ### design: system adoption (phases 2-4 of the October 2026 audit)
 
 `frontend/STYLING.md` now describes the target system and its foundations are
-in `app.css`. `CommandHeader` is built and mounted on Videos; Search and
-Library mount it in their route PRs (Videos keeps `--space-4` between field
+in `app.css`. `CommandHeader` and `ScopeTabs` are built and mounted on
+Videos; Search, Library and Playlists move their `.filter-pill` rows onto
+them in their route PRs (Videos keeps `--space-4` between field
 and tabs to stay pixel-identical; settle it against the spec's `--space-3`
 when Search moves over). Still to build, one PR each: shared components
-(`ScopeTabs`, `Segmented`, `FilterChip`, `Dropdown`, `ActionBar`, one `TrackRow`
+(`Segmented`, `FilterChip`, `Dropdown`, `ActionBar`, one `TrackRow`
 anatomy, `ErrorState` and the skeleton delay); route migrations (Library
 toolbar, Search composition and keyboard, artist Stage, shared `AlbumDetail`,
 Playlists, Settings in place, Mix page for Automix + DJ, Home and the remaining

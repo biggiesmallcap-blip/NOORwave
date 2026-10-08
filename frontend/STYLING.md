@@ -6,7 +6,7 @@ The reference surfaces are `/videos/stations` and `/videos/liked`. When in doubt
 
 ## Adoption status
 
-This file describes the target system from the October 2026 design audit. The foundations are in code: layout, label and motion tokens, the `.t-*` role classes, the solid focus ring, the contrast floor, and buttons without a hover lift. `CommandHeader` (`$lib/components/ui/CommandHeader.svelte`) is built and mounted on Videos. Not built yet: `ScopeTabs`, `Segmented`, `FilterChip`, `Dropdown`, `ActionBar`, `ErrorState`, the single `TrackRow` anatomy, the skeleton delay, the motion lint warnings, and the narrow-window icon rail. Until a component exists, follow its rule with local markup and move to the component when it lands. The remaining work is tracked in `FOLLOWUPS.md` ("Design system adoption").
+This file describes the target system from the October 2026 design audit. The foundations are in code: layout, label and motion tokens, the `.t-*` role classes, the solid focus ring, the contrast floor, and buttons without a hover lift. `CommandHeader` and `ScopeTabs` (`$lib/components/ui/`) are built and mounted on Videos. Not built yet: `Segmented`, `FilterChip`, `Dropdown`, `ActionBar`, `ErrorState`, the single `TrackRow` anatomy, the skeleton delay, the motion lint warnings, and the narrow-window icon rail. Until a component exists, follow its rule with local markup and move to the component when it lands. The remaining work is tracked in `FOLLOWUPS.md` ("Design system adoption").
 
 ## Principles
 

@@ -23,7 +23,7 @@ describe('Videos tab browse state', () => {
 		expect(source).not.toContain('<VideoPlayer');
 		expect(source).not.toContain('videoStageAnchor');
 		expect(source).not.toContain('<SearchField');
-		expect(source).not.toContain('<VideoNavigation');
+		expect(source).not.toContain('<ScopeTabs');
 	});
 
 	test('daily picks lead as the featured row and play through the shared video queue', () => {
@@ -97,7 +97,7 @@ describe('Video section flow', () => {
 		const header = layout.slice(layout.indexOf('<CommandHeader'), layout.indexOf('</CommandHeader>'));
 		expect(header).toContain('{#snippet field()}');
 		expect(header.indexOf('<SearchField')).toBeLessThan(header.indexOf('{#snippet tabs()}'));
-		expect(header).toContain('<VideoNavigation current={tab} />');
+		expect(header).toContain('<ScopeTabs tabs={VIDEO_TABS} current={tab} label="Video pages" replaceState />');
 		expect(section).toContain("{ id: 'editorial', href: '/videos/editorial', label: 'TIDAL editorial' }");
 	});
 
