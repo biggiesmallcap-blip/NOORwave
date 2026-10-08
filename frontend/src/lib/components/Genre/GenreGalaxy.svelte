@@ -12,6 +12,7 @@
 		type ZoomLevel
 	} from './galaxy.types';
 	import type { GalaxyTheme } from './galaxyTheme';
+	import { labelAlpha, labelPriority, placeLabels, type LabelRect } from './galaxyLabels';
 
 	type ArtistChipMap = Map<number, string[]>;
 	type HoverCardPosition = { x: number; y: number; align: 'left' | 'right' };
@@ -144,6 +145,20 @@
 		return lineage;
 	});
 
+	// How far each family's cluster reaches from its hub (world units), so the
+	// family name sits under the whole cluster instead of on top of it.
+	let familyExtentById = $derived.by(() => {
+		const roots = new Map(nodes.filter((node) => node.depth === 0).map((node) => [node.familyId, node]));
+		const extents = new Map<number, number>();
+		for (const node of nodes) {
+			const root = roots.get(node.familyId);
+			if (!root) continue;
+			const reach = Math.hypot(node.x - root.x, node.y - root.y) + node.radius;
+			extents.set(node.familyId, Math.max(extents.get(node.familyId) ?? 0, reach));
+		}
+		return extents;
+	});
+
 	let bgCanvas: HTMLCanvasElement | null = null;
 	let connCanvas: HTMLCanvasElement | null = null;
 	let resizeObserver: ResizeObserver | null = null;
@@ -168,8 +183,8 @@
 	const HOVER_CARD_CURSOR_CLEARANCE_Y = 24;
 	const HOVER_CARD_EDGE_MARGIN = 12;
 	const HOVER_CARD_ESTIMATED_WIDTH = 260;
-	const fontBody = '600 12px "Avenir Next", "Segoe UI", sans-serif';
-	const fontDisplay = '600 13px "Iowan Old Style", Georgia, serif';
+	const fontFamilyLabel = '600 11px "Avenir Next", "Segoe UI", sans-serif';
+	const fontNodeLabel = '500 11px "Avenir Next", "Segoe UI", sans-serif';
 
 	function hexToRgba(hex: string, alpha: number): string {
 		const normalized = hex.replace('#', '');
@@ -916,56 +931,6 @@
 		ctx.restore();
 	}
 
-	function labelAlphaForNode(node: GalaxyNode): number {
-		const inActiveFamily = activeFamilyId !== null && node.familyId === activeFamilyId;
-
-		if (isCompactViewport) {
-			if (selectedId === node.id) return 0.96;
-			if (selectedLineageHas(node.id) && node.depth <= 1) return 0.8;
-			return node.depth === 0 ? 0.72 : 0;
-		}
-		if (!labelsEnabled) {
-			if (selectedId === node.id) return 0.96;
-			if (node.depth === 0) return 0.74;
-			return 0;
-		}
-		if (selectedId === node.id) return 0.96;
-		if (inActiveFamily && node.depth === 0) return 0.94;
-		if (inActiveFamily && node.depth === 1) return 0.86;
-		if (inActiveFamily && selectedLineageHas(node.id)) return 0.82;
-		if (inActiveFamily && node.depth === 2 && zoomLevel !== 'galaxy') {
-			return clamp(0.62 + node.heatNorm * 0.16, 0.62, 0.78);
-		}
-		if (inActiveFamily && camera.scale > 1.35 && node.trackCount >= 20) {
-			return clamp(0.32 + node.heatNorm * 0.2, 0.32, 0.56);
-		}
-		if (camera.scale < 0.8) return node.depth === 0 ? 0.92 : 0;
-		if (camera.scale < 2) {
-			if (node.depth > 1) return 0;
-			return node.depth === 0 ? 0.94 : clamp((camera.scale - 0.8) / 1.2, 0.15, 0.88);
-		}
-		if (node.depth > 1) {
-			if (activeFamilyId !== null && node.trackCount >= 25 && camera.scale > 2.8) {
-				return clamp(0.34 + node.heatNorm * 0.22, 0.34, 0.58);
-			}
-			return 0;
-		}
-		return clamp(0.6 + node.heatNorm * 0.25, 0.6, 0.95);
-	}
-
-	function labelUsesChip(node: GalaxyNode): boolean {
-		const inActiveFamily = activeFamilyId !== null && node.familyId === activeFamilyId;
-		return node.depth <= 1 || (inActiveFamily && node.depth === 2 && zoomLevel !== 'galaxy');
-	}
-
-	function clampLabelRect(x: number, y: number, rectWidth: number, rectHeight: number) {
-		const margin = 8;
-		return {
-			x: clamp(x, margin, Math.max(margin, width - rectWidth - margin)),
-			y: clamp(y, margin, Math.max(margin, height - rectHeight - margin))
-		};
-	}
-
 	function placeHoverCard(screen: { x: number; y: number }, nodeRadius: number): HoverCardPosition {
 		const rightX = screen.x + nodeRadius + HOVER_CARD_CURSOR_CLEARANCE_X;
 		const leftX = screen.x - nodeRadius - HOVER_CARD_CURSOR_CLEARANCE_X;
@@ -1134,51 +1099,68 @@
 			}
 		}
 
+		// Labels: one visibility rule (galaxyLabels.labelAlpha), then a greedy
+		// collision pass so names never stack. Off-screen labels are dropped,
+		// not pinned to the edge.
+		type Candidate = LabelRect & { text: string; alpha: number; chip: boolean; depth: number };
+		const candidates: Candidate[] = [];
 		for (const node of visibleNodes) {
-			if (hoveredNodeId === node.id && !isDragging) continue;
-			const alpha = labelAlphaForNode(node);
-			if (alpha <= 0) continue;
-			const activity = nodeActivity(node);
-			const activeFamilyLabel = activeFamilyId !== null && node.familyId === activeFamilyId;
-			const labelActivity = activeFamilyLabel && labelUsesChip(node) ? Math.max(activity, 0.82) : activity;
-			if (labelActivity < 0.22) continue;
+			if (hoveredNodeId === node.id && !isDragging) continue; // the hover card names it
+			const selected = selectedId === node.id;
+			const inLineage = selectedLineageHas(node.id);
+			const alpha =
+				labelAlpha({
+					depth: node.depth,
+					zoom: camera.scale,
+					selected,
+					inLineage,
+					labelsEnabled,
+					compact: isCompactViewport
+				}) * (selected ? 1 : Math.max(nodeActivity(node), 0.35));
+			if (alpha < 0.05) continue;
 
 			const screen = worldToScreen(node.x, node.y);
-			const fontSize = node.depth === 0 ? 13 : node.depth === 1 ? 11.5 : 11;
-			const label = node.depth === 0 ? node.name.toUpperCase() : node.name;
-			ctx.save();
-			ctx.globalAlpha = alpha * labelActivity;
-			ctx.font = node.depth === 0 ? fontDisplay : fontBody.replace('12px', `${fontSize}px`);
-			ctx.textAlign = 'center';
-			ctx.textBaseline = 'top';
+			const text = node.depth === 0 ? node.name.toUpperCase() : node.name;
+			ctx.font = node.depth === 0 ? fontFamilyLabel : fontNodeLabel;
+			const padX = selected ? 8 : 2;
+			const rectWidth = ctx.measureText(text).width + padX * 2;
+			const rectHeight = selected ? 20 : 15;
+			const below =
+				node.depth === 0 && zoomLevel === 'galaxy'
+					? (familyExtentById.get(node.familyId) ?? 0) * camera.scale
+					: node.radius;
+			candidates.push({
+				id: node.id,
+				x: screen.x - rectWidth / 2,
+				y: screen.y + below + 6,
+				width: rectWidth,
+				height: rectHeight,
+				priority: labelPriority(node.depth, selected, inLineage, node.heatNorm),
+				text,
+				alpha,
+				chip: selected,
+				depth: node.depth
+			});
+		}
 
-			if (labelUsesChip(node)) {
-				const textWidth = ctx.measureText(label).width;
-				const chipWidth = textWidth + (node.depth === 0 ? 18 : node.depth === 1 ? 14 : 12);
-				const chipHeight = node.depth === 0 ? 22 : node.depth === 1 ? 19 : 18;
-				const { x: chipX, y: chipY } = clampLabelRect(
-					screen.x - chipWidth / 2,
-					screen.y + node.radius + 8,
-					chipWidth,
-					chipHeight
-				);
-				roundedRectPath(ctx, chipX, chipY, chipWidth, chipHeight, 10);
+		const accepted = placeLabels(candidates, { width, height });
+		for (const label of candidates) {
+			if (!accepted.has(label.id)) continue;
+			ctx.save();
+			ctx.globalAlpha = label.alpha;
+			ctx.font = label.depth === 0 ? fontFamilyLabel : fontNodeLabel;
+			ctx.textAlign = 'center';
+			ctx.textBaseline = 'middle';
+			if (label.chip) {
+				roundedRectPath(ctx, label.x, label.y, label.width, label.height, 10);
 				ctx.fillStyle = theme.labelChipBg;
 				ctx.fill();
-				ctx.lineWidth = 1;
-				ctx.strokeStyle = hexToRgba(node.color, node.depth === 0 ? 0.5 : node.depth === 1 ? 0.4 : 0.42);
-				ctx.stroke();
-				ctx.textBaseline = 'middle';
-				ctx.fillStyle = theme.labelText;
-				ctx.shadowBlur = node.depth === 2 ? 12 : 8;
-				ctx.shadowColor = 'rgba(0, 0, 0, 0.45)';
-				ctx.fillText(label, chipX + chipWidth / 2, chipY + chipHeight / 2);
 			} else {
-				ctx.fillStyle = theme.labelText;
-				ctx.shadowBlur = 10;
-				ctx.shadowColor = 'rgba(0, 0, 0, 0.35)';
-				ctx.fillText(label, screen.x, screen.y + node.radius + 8);
+				ctx.shadowBlur = 6;
+				ctx.shadowColor = 'rgba(0, 0, 0, 0.55)';
 			}
+			ctx.fillStyle = label.chip || label.depth <= 1 ? theme.labelText : theme.labelMuted;
+			ctx.fillText(label.text, label.x + label.width / 2, label.y + label.height / 2);
 			ctx.restore();
 		}
 	}
