@@ -116,7 +116,6 @@ Automix keeps a running runway of tracks ahead of you and tells you why each one
 - **25+ colour schemes** (Iris, Clay, Ember, Abyss, Neon, Obsidian, and more), each in light, dark, or following your system.
 - **50+ animated backgrounds**: aurora ribbons, liquid chrome, spiral galaxies, stained glass, synthwave, live spectrum analysers. They pulse to the music, bend toward your cursor, and can take their colours from the album art.
 
-Screenshots in this README follow your GitHub theme. Flip it and watch them change.
 
 ### The phone in your pocket is the remote
 
