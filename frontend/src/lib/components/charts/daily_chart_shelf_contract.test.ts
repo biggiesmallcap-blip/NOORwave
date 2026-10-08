@@ -29,7 +29,7 @@ describe('daily chart shelf contract', () => {
 		expect(dailyIndex).toBeGreaterThan(trendingIndex);
 		expect(playlistsIndex).toBeGreaterThan(dailyIndex);
 		expect(chartsPage).toContain('PageHeader');
-		expect(chartsPage).toContain('variant="editorial"');
+		expect(chartsPage).not.toContain('variant="editorial"');
 		expect(chartsPage).toContain('SectionHeader');
 		expect(chartsPage).toContain('variant="charts"');
 		expect(chartsPage).toContain('level={2}');
@@ -119,7 +119,7 @@ describe('daily chart shelf contract', () => {
 
 	test('keeps chart page titles neutral with shared headers and artwork images', () => {
 		expect(chartsPage).toContain('<PageHeader');
-		expect(chartsPage).toContain('variant="editorial"');
+		expect(chartsPage).not.toContain('variant="editorial"');
 		expect(chartsPage).toContain('<SectionHeader');
 		expect(chartsPage).toContain('<ArtworkImage');
 		expect(chartsPage).toContain('className="chart-playlist-art"');

@@ -126,7 +126,6 @@
   <PageHeader
     title="Moods & Activities"
     subtitle="Editorial categories from TIDAL. Click a tile to explore."
-    variant="editorial"
   />
 
   {#if viewState === 'loading'}
@@ -163,7 +162,7 @@
 </div>
 
 <style>
-  .page { max-width: var(--content-width); margin: 0 auto; padding: var(--space-6) var(--space-6) calc(var(--space-7) * 2); display: flex; flex-direction: column; gap: var(--space-5); }
+  .page { width: min(100%, var(--content-width)); margin: 0 auto; padding-bottom: calc(var(--space-7) * 2); display: flex; flex-direction: column; gap: var(--space-5); }
   .muted-line { margin: 0; font-size: var(--font-size-sm); color: var(--text-secondary); }
   .inline-link { background: none; border: none; padding: 0; font: inherit; color: var(--accent-line); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; margin-left: var(--space-1); }
 

@@ -198,7 +198,7 @@
 	<!-- Header -->
 	<div class="page-header">
 		<div class="header-text">
-			<h1>{PAGE_TITLE}</h1>
+			<h1 class="t-page-title">{PAGE_TITLE}</h1>
 			<p class="tagline">{PAGE_SUBTITLE}</p>
 		</div>
 		<form class="search-form" onsubmit={handleSearch}>
@@ -400,7 +400,6 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: var(--space-4, 16px);
-		padding: 0 var(--space-3, 12px);
 		flex-shrink: 0;
 	}
 	.header-text { display: flex; flex-direction: column; gap: 2px; }
@@ -410,10 +409,8 @@
 		color: var(--text-secondary);
 	}
 	h1 {
-		font-size: var(--font-size-lg);
-		font-weight: var(--font-weight-semibold);
-		color: rgba(255,255,255,0.9);
 		margin: 0;
+		color: var(--text-primary);
 	}
 
 	.search-form {

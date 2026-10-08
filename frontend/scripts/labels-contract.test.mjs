@@ -20,7 +20,7 @@ describe('no eyebrow over a title', () => {
 
 	test('Sound Space is the title, its tagline sits under it', () => {
 		const page = read('../src/routes/discoverspace/+page.svelte');
-		expect(page).toContain('<h1>{PAGE_TITLE}</h1>');
+		expect(page).toContain('<h1 class="t-page-title">{PAGE_TITLE}</h1>');
 		expect(page).not.toContain('<span class="eyebrow">{PAGE_TITLE}</span>');
 	});
 });

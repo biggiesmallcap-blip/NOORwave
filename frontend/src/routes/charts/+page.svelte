@@ -95,7 +95,6 @@
   <PageHeader
     title="What's hot"
     subtitle="Worldwide trending tracks from Last.fm and editorial Spotify chart playlists."
-    variant="editorial"
   />
 
   <section class="trending-block">
@@ -141,7 +140,7 @@
 </div>
 
 <style>
-  .page { max-width: var(--content-width); margin: 0 auto; padding: var(--space-5) var(--space-4) var(--space-7); display: flex; flex-direction: column; gap: var(--space-5); }
+  .page { width: min(100%, var(--content-width)); margin: 0 auto; padding-bottom: var(--space-7); display: flex; flex-direction: column; gap: var(--space-5); }
   .trending-block { display: flex; flex-direction: column; gap: var(--gap); }
 
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(180px, 100%), 1fr)); gap: var(--gap); }

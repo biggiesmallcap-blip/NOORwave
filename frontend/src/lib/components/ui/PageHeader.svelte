@@ -5,19 +5,17 @@
 	let {
 		title,
 		subtitle = '',
-		variant = 'default',
 		actions,
 		meta
 	}: {
 		title: string;
 		subtitle?: string;
-		variant?: 'default' | 'editorial';
 		actions?: Snippet;
 		meta?: Snippet;
 	} = $props();
 </script>
 
-<header class="page-header" class:editorial={variant === 'editorial'}>
+<header class="page-header">
 	<div class="intro">
 		<h1 class="t-page-title">{title}</h1>
 		{#if subtitle}
@@ -56,10 +54,6 @@
 		gap: 10px;
 	}
 
-	.page-header.editorial h1 {
-		color: var(--text-primary);
-		font-size: var(--font-size-3xl);
-	}
 
 	.subtitle {
 		color: var(--text-secondary);
