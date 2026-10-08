@@ -1740,7 +1740,7 @@
             </div>
           {/if}
           <div class="top-meta">
-            <span class="top-kind">{top.kind === 'artist' ? 'Artist' : top.kind === 'album' ? 'Album' : 'Track'}{#if top.entry.in_library} · In your library{/if}</span>
+            <span class="top-kind">{[top.kind === 'artist' ? 'Artist' : top.kind === 'album' ? 'Album' : 'Track', top.entry.in_library ? 'In your library' : null].filter(Boolean).join(' · ')}</span>
             <h2 class="top-title">
               {top.kind === 'artist' ? top.entry.name : top.entry.title}
             </h2>
@@ -1951,7 +1951,7 @@
                   />
                 </div>
                 <p class="album-title">{playlist.title}</p>
-                <p class="album-artist">TIDAL · {playlist.number_of_tracks ?? '?'} tracks</p>
+                <p class="album-artist">{['TIDAL', playlist.number_of_tracks != null ? `${playlist.number_of_tracks} tracks` : null].filter(Boolean).join(' · ')}</p>
               </div>
             {:else}
               {@const playlist = entry.playlist}
@@ -1980,7 +1980,7 @@
                 </div>
                 <p class="album-title">{playlist.title ?? 'Untitled playlist'}</p>
                 <p class="album-artist">
-                  {#if playlist.owner}{playlist.owner} · {/if}{playlist.totalTracks ?? '?'} tracks
+                  {[playlist.owner || 'Spotify', playlist.totalTracks != null ? `${playlist.totalTracks} tracks` : null].filter(Boolean).join(' · ')}
                 </p>
               </a>
             {/if}
@@ -2641,10 +2641,13 @@
     background: var(--bg-base);
     box-shadow: inset 0 0 0 2px var(--state-success), 0 0 0 2px var(--bg-base);
   }
+  /* Source chip: inside the art's top-left corner, so a Spotify card keeps
+     the same footprint and text baseline as every other playlist card. */
   .source-chip {
     position: absolute;
-    bottom: 6px;
+    top: 6px;
     left: 6px;
+    line-height: 1.2;
     padding: 2px 6px;
     border-radius: 4px;
     font-size: var(--font-size-2xs);
@@ -3057,8 +3060,6 @@
   .infinite-spinner { font-style: italic; }
   .infinite-end { letter-spacing: 0.04em; }
 
-  .spotify-card { --card-w: clamp(120px, 11vw, 168px); flex: 0 0 var(--card-w); width: var(--card-w); display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-2); border-radius: var(--radius-md); text-decoration: none; color: inherit; cursor: pointer; }
-  .spotify-card:hover, .spotify-card:focus-visible { background: var(--bg-hover); outline: none; }
   @keyframes playlist-loading-pulse {
     0% { background-position: 100% 0; }
     100% { background-position: -100% 0; }
