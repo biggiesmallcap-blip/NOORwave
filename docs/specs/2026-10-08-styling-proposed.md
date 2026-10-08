@@ -62,6 +62,13 @@ results together, and rises sections in once per query (`459d80cb`).
 Beyond the audit, also from that review: an on-disk artwork cache with a size
 setting in Settings > Library (Off to 1 GB, default 150 MB), loopback-only
 `/artwork/tidal/...` route, least recently shown dropped first (`db7b0cb5`).
+The cache row always shows (disabled on a server without the endpoint) and
+setting rows size the control column to its content (`e6fee827`). Verified
+live 2026-10-09 against a worktree server on a copy of the database: A to Z
+rail and count, album label line, search relevance floor, cache hits in about
+2 ms, the cache size setting, and the search load-in timeline. Using the
+cache in the installed app needs the new noor-server installed, which is the
+owner's call.
 
 ---
 
