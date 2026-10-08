@@ -26,7 +26,7 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
 	{ id: 'video-quality', target: 'playback-output', focus: '[aria-label="Video quality"]', category: 'playback', label: 'Video quality', keywords: 'max highest auto video' },
 	{ id: 'video-fullscreen', target: 'playback-output', focus: '[aria-label="Fullscreen transition"]', category: 'playback', label: 'Fullscreen transition', keywords: 'video fullscreen full screen dim grow classic animation' },
 	{ id: 'now-playing-path', category: 'playback', label: 'Output details', keywords: 'runtime device format now playing track path diagnostics' },
-	{ id: 'transitions', category: 'playback', label: 'Transitions', keywords: 'crossfade fade gap blend dj transition style default strategy' },
+	{ id: 'transitions', category: 'playback', label: 'Transitions', keywords: 'crossfade fade gap blend' },
 	{ id: 'library-audio-data', category: 'playback', label: 'Analyse while playing', keywords: 'analysis bpm key energy dsp passive audio data' },
 	{ id: 'library-songs-scope', category: 'library', label: 'Songs tab shows', keywords: 'liked library songs tracks favorites hearted albums' },
 	{ id: 'library-sync', category: 'library', label: 'Sync library', keywords: 'tidal sync daily auto-sync full resync cancel favourite favorite albums' },

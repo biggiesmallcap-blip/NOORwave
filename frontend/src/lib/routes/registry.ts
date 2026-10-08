@@ -10,8 +10,7 @@ export type AppRouteId =
 	| 'moods'
 	| 'playlists'
 	| 'discover'
-	| 'automix'
-	| 'dj'
+	| 'mix'
 	| 'analytics'
 	| 'duplicates'
 	| 'settings';

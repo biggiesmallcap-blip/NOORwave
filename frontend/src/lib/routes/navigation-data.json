@@ -6,7 +6,7 @@
 		},
 		{
 			"label": "Signals",
-			"routeIds": ["automix", "dj", "analytics", "duplicates"]
+			"routeIds": ["mix", "analytics", "duplicates"]
 		},
 		{
 			"label": "System",
@@ -14,13 +14,13 @@
 		}
 	],
 	"mobileTabRouteIds": ["home", "library", "genres", "discover"],
-	"mobileMoreRouteIds": ["playlists", "automix", "dj", "analytics", "duplicates", "settings"],
+	"mobileMoreRouteIds": ["playlists", "mix", "analytics", "duplicates", "settings"],
 	"smokePhaseRouteIds": {
 		"shell": ["home", "library", "search", "settings"],
 		"links": ["home", "library", "search", "playlists", "videos", "settings"],
-		"menus": ["home", "library", "search", "automix", "duplicates"],
+		"menus": ["home", "library", "search", "mix", "duplicates"],
 		"artist-album": ["library", "search"],
-		"styling": ["home", "library", "search", "settings", "automix", "genres"],
+		"styling": ["home", "library", "search", "settings", "mix", "genres"],
 		"performance": ["home", "library", "search", "analytics", "discover", "videos"]
 	}
 }

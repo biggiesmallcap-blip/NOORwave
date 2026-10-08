@@ -28,8 +28,7 @@ describe('route registry', () => {
 			'moods',
 			'playlists',
 			'discover',
-			'automix',
-			'dj',
+			'mix',
 			'analytics',
 			'duplicates',
 			'settings',
@@ -54,8 +53,7 @@ describe('navigation route groups', () => {
 		expect(MOBILE_TAB_ROUTE_IDS).toEqual(['home', 'library', 'genres', 'discover']);
 		expect(MOBILE_MORE_ROUTE_IDS).toEqual([
 			'playlists',
-			'automix',
-			'dj',
+			'mix',
 			'analytics',
 			'duplicates',
 			'settings',

@@ -10,7 +10,7 @@ function readSource(path: string): string {
 
 describe('automix artwork rendering contract', () => {
 	it('routes seed and forecast artwork through ArtworkImage with TIDAL-safe sizes', () => {
-		const source = readSource('routes/automix/+page.svelte');
+		const source = readSource('lib/components/mix/AutomixPanel.svelte');
 
 		expect(source).toContain("import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte'");
 		expect(source).toContain('className="seed-art"');

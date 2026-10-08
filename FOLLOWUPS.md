@@ -29,7 +29,7 @@ PRs. Global `.btn-secondary` / `.btn-ghost` / `.btn-icon` are still not added
 (local classes with those names in LastfmConnect, Library and the Spotify
 pages would pick up stray properties). Still to build, one PR each: shared
 components (one `TrackRow` anatomy, `ErrorState` and the skeleton delay); route migrations (Search composition and keyboard, artist Stage, shared `AlbumDetail`,
-Playlists, Settings in place, Mix page for Automix + DJ, the remaining
+Playlists, Settings in place, the remaining
 title-header routes, removing eyebrow-over-title stacks); then motion lint
 warnings and the sub-760px icon rail. Settled: Songs lists liked songs
 (Settings > Library widens it), in-app Reduce motion, Home order. Open product

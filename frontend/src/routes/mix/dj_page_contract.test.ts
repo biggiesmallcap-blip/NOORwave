@@ -5,8 +5,15 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../..');
-const page = readFileSync(join(root, 'routes/dj/+page.svelte'), 'utf8');
-const cockpit = readFileSync(join(root, 'lib/components/dj-cockpit/DjCockpit.svelte'), 'utf8');
+const page = readFileSync(join(root, 'routes/mix/+page.svelte'), 'utf8');
+// The cockpit is split across the Mix page (switch), DjCockpit, DjDiagnostics
+// and the shared dj_engine store; the contracts read them as one.
+const cockpit = [
+	page,
+	readFileSync(join(root, 'lib/components/dj-cockpit/DjCockpit.svelte'), 'utf8'),
+	readFileSync(join(root, 'lib/components/dj-cockpit/DjDiagnostics.svelte'), 'utf8'),
+	readFileSync(join(root, 'lib/components/dj-cockpit/dj_engine.ts'), 'utf8'),
+].join('\n');
 const refreshLoader = readFileSync(join(root, 'lib/components/dj-cockpit/cockpit_refresh.ts'), 'utf8');
 const transitionLane = readFileSync(
 	join(root, 'lib/components/dj-cockpit/TransitionLane.svelte'),
@@ -36,8 +43,8 @@ const remotePage = readFileSync(join(root, 'routes/remote/+page.svelte'), 'utf8'
 
 describe('dj cockpit page contract', () => {
 	test('dj_page_is_linked_from_main_navigation', () => {
-		expect(navigation).toContain('"dj"');
-		expect(registry).toContain('/dj');
+		expect(navigation).toContain('"mix"');
+		expect(registry).toContain('/mix');
 		expect(page).toContain('DjCockpit');
 	});
 
@@ -65,12 +72,10 @@ describe('dj cockpit page contract', () => {
 	});
 
 	test('dj_disabled_state_explains_legacy_path', () => {
-		expect(cockpit).toContain('role="switch"');
-		expect(cockpit).toContain('aria-checked={enabled ?? false}');
-		expect(cockpit).toContain('DJ transitions');
-		expect(cockpit).toContain("enabled == null ? 'Connecting' : enabled ? 'On' : 'Off'");
-		expect(cockpit).toContain('Enable DJ transitions');
-		expect(cockpit).toContain('Disable DJ transitions');
+		expect(page).toContain('role="switch"');
+		expect(page).toContain('aria-checked={$djEnabled ?? false}');
+		expect(page).toContain('aria-label="DJ transitions"');
+		expect(page).toContain("$djEnabled == null ? 'DJ connecting' : 'DJ transitions'");
 		expect(cockpit).not.toContain("'DJ transitions on'");
 		expect(cockpit).not.toContain('Use legacy playback');
 		expect(cockpit).toContain('Playback is using the legacy path');
@@ -80,8 +85,8 @@ describe('dj cockpit page contract', () => {
 
 	test('dj_page_renders_current_and_next_pair', () => {
 		expect(cockpit).toContain('QueuePairPanel');
-		expect(cockpit).toContain('current={status?.current}');
-		expect(cockpit).toContain('next={status?.next}');
+		expect(cockpit).toContain('current={$status?.current}');
+		expect(cockpit).toContain('next={$status?.next}');
 	});
 
 	test('dj_page_exposes_global_policy_controls', () => {

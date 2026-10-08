@@ -6,7 +6,7 @@ The reference surfaces are `/videos/stations` and `/videos/liked`. When in doubt
 
 ## Adoption status
 
-This file describes the target system from the October 2026 design audit. The foundations are in code: layout, label and motion tokens, the `.t-*` role classes, the solid focus ring, the contrast floor, and buttons without a hover lift. `CommandHeader` and `ScopeTabs` (`$lib/components/ui/`) are built and mounted on Videos and Library; `Segmented` is built and used by the DJ mix intent and speed, the Library album layout, and the Reduce motion and Songs settings; `FilterChip` is built and used by the Duplicates relationship filters and the Library decades; `Dropdown` is built and used by the DJ transition style and the Library album sort; `ActionBar` is built and used by the album hero, and `DetailHero` is borderless. Not built yet: `ErrorState`, the single `TrackRow` anatomy, the skeleton delay, the motion lint warnings, and the narrow-window icon rail. Until a component exists, follow its rule with local markup and move to the component when it lands. The remaining work is tracked in `FOLLOWUPS.md` ("Design system adoption").
+This file describes the target system from the October 2026 design audit. The foundations are in code: layout, label and motion tokens, the `.t-*` role classes, the solid focus ring, the contrast floor, and buttons without a hover lift. `CommandHeader` and `ScopeTabs` (`$lib/components/ui/`) are built and mounted on Videos and Library; `Segmented` is built and used by the DJ mix intent and speed, the Library album layout, and the Reduce motion and Songs settings; `FilterChip` is built and used by the Duplicates relationship filters and the Library decades; `Dropdown` is built and used by the DJ transition style and the Library album sort; `ActionBar` is built and used by the album hero, and `DetailHero` is borderless. `/mix` replaces Automix and DJ: one title header with both switches, the DJ deck, Up next, This session and one Diagnostics disclosure; it is the reference for live-control pages. Not built yet: `ErrorState`, the single `TrackRow` anatomy, the skeleton delay, the motion lint warnings, and the narrow-window icon rail. Until a component exists, follow its rule with local markup and move to the component when it lands. The remaining work is tracked in `FOLLOWUPS.md` ("Design system adoption").
 
 ## Principles
 
@@ -295,7 +295,7 @@ Rules:
 
 ### Reduced motion
 
-`prefers-reduced-motion` is the operating system's accessibility setting (Windows: Settings, Accessibility, Visual effects, Animation effects off). The WebView reports it to CSS; NOORwave does not have its own switch unless a "Reduce motion" setting is added under Appearance. Under `prefers-reduced-motion: reduce`: transforms are removed, durations drop to 80ms opacity changes, entry motion and skeleton shimmer stop, the playing glyph is static, and scroll behaviour is `auto`. Colour and focus changes stay.
+`prefers-reduced-motion` is the operating system's accessibility setting (Windows: Settings, Accessibility, Visual effects, Animation effects off). The WebView reports it to CSS; Settings > Appearance > Reduce motion (Follow system, Always) sets `data-motion="reduce"` on the root, which app.css treats like the OS setting. Under `prefers-reduced-motion: reduce`: transforms are removed, durations drop to 80ms opacity changes, entry motion and skeleton shimmer stop, the playing glyph is static, and scroll behaviour is `auto`. Colour and focus changes stay.
 
 ## Responsive and dense content
 
