@@ -72,15 +72,15 @@ describe('persistent video dock contract', () => {
 		expect(player).toMatch(/if \(onFullscreenToggle\) \{\s*onFullscreenToggle\(\);\s*return;/);
 	});
 
-	test('in the desktop app the window switch is native and hidden behind the dock', () => {
+	test('in the desktop app the window switch is native, window first then the glide', () => {
 		// Tauri's own fullscreen showed the desktop and the old title bar
 		// through the window while it resized; noor-app switches in one step.
 		expect(dock).toContain("import { hasNativeVideoFullscreen, setNativeVideoFullscreen } from '$lib/tauri/video_fullscreen';");
-		expect(dock).toMatch(/if \(nativeSwitch\) \{\s*if \(expanded\) collapse\(\);\s*else expanded = true;\s*return;/);
-		// In: the glide fills the window first, then the window switches, so
-		// only the black dock and the video show while WebView2 catches up.
-		expect(dock).toMatch(/function endGlide\(\) \{\s*morphing = false;\s*if \(place === 'expanded'\) enterNativeFullscreen\(\);/);
-		expect(dock).toContain("if (reducedMotion && next === 'expanded') enterNativeFullscreen();");
+		expect(dock).toMatch(/if \(nativeSwitch\) \{\s*if \(expanded\) collapse\(\);\s*else enterNativeFullscreen\(\);\s*return;/);
+		// In: the window switches first (the command returns once it has),
+		// then the dock grows into it, same order as the browser path.
+		expect(dock).toContain('requestAnimationFrame(() => requestAnimationFrame(() => (expanded = nativeOn && active)));');
+		expect(dock).not.toMatch(/function endGlide\(\) \{\s*morphing = false;\s*if \(place === 'expanded'\)/);
 		// Out: the window comes back first, then the dock glides home.
 		expect(dock).toMatch(/void leaveNativeFullscreen\(\)\.then\(\(\) =>\s*requestAnimationFrame\(\(\) => requestAnimationFrame\(\(\) => \(expanded = false\)\)\)/);
 		// Ending the session or tearing down never strands the window fullscreen.

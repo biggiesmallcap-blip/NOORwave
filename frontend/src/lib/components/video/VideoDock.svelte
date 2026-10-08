@@ -226,24 +226,28 @@
 	let enteringFullscreen = false;
 
 	// Inside the desktop app the window switch is native instead (see
-	// $lib/tauri/video_fullscreen), and the order flips: in, the dock glides
-	// to fill the window, then the window goes fullscreen; out, the window
-	// comes back, then the dock glides home. Either way only the black dock
-	// and the video are on screen while the window changes, so WebView2
-	// drawing the page a frame late never shows the app layout jumping.
+	// $lib/tauri/video_fullscreen), in the same order: the window goes
+	// fullscreen in one step, then the dock grows into it; out, the window
+	// comes back, then the dock glides home. The command returns once the
+	// window has switched, so no settle polling is needed.
 	const nativeSwitch = hasNativeVideoFullscreen();
 	let nativeOn = false;
 	let nativePending = false;
 
-	/** Called when the glide into the window lands. */
 	function enterNativeFullscreen() {
-		if (!nativeSwitch || nativeOn || nativePending || !expanded) return;
+		if (nativeOn || nativePending) return;
 		nativePending = true;
 		void setNativeVideoFullscreen(true).then((ok) => {
 			nativePending = false;
 			nativeOn = ok;
-			// Left while the window was switching: switch straight back.
-			if (ok && !expanded) void leaveNativeFullscreen();
+			if (!active) {
+				void leaveNativeFullscreen();
+				return;
+			}
+			// Refused: still fill the window. Switched: two frames so the dock
+			// measures the page at its fullscreen size, then glide.
+			if (!ok) expanded = true;
+			else requestAnimationFrame(() => requestAnimationFrame(() => (expanded = nativeOn && active)));
 		});
 	}
 
@@ -269,7 +273,7 @@
 	function toggleExpanded() {
 		if (nativeSwitch) {
 			if (expanded) collapse();
-			else expanded = true;
+			else enterNativeFullscreen();
 			return;
 		}
 		if (expanded) {
@@ -453,7 +457,6 @@
 
 	function endGlide() {
 		morphing = false;
-		if (place === 'expanded') enterNativeFullscreen();
 		const stage = get(videoStageAnchor);
 		if (place === 'full' && stage?.isConnected) moveIntoStage(stage);
 		if (dockEl) {
@@ -548,7 +551,6 @@
 		else if ((!moving || reducedMotion) && $videoStageAnchor) moveIntoStage($videoStageAnchor);
 		if (moving) {
 			const fullscreenMove = previousPlace === 'expanded' || next === 'expanded';
-			if (reducedMotion && next === 'expanded') enterNativeFullscreen();
 			if (!reducedMotion) {
 				morphing = true;
 				const started = fullscreenMove ? sizeGlideFrom(lastDockRect) : flipFrom(lastDockRect);
