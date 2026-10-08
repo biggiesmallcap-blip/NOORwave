@@ -34,7 +34,7 @@
 	} from './mini_dock';
 	import { WATCH_PATH } from '$lib/video/section';
 	import { hasNativeVideoFullscreen, setNativeVideoFullscreen } from '$lib/tauri/video_fullscreen';
-	import { videoFullscreenStyle } from '$lib/stores/video_fullscreen_style';
+	import { videoFullscreenDimMs, videoFullscreenGrowMs, videoFullscreenStyle } from '$lib/stores/video_fullscreen_style';
 
 	// The dock renders a single VideoPlayer that never unmounts while a session
 	// is active, so audio keeps playing across route changes. Where it sits:
@@ -62,8 +62,6 @@
 	);
 	const PANEL_MIN_WIDTH = 200;
 	const MORPH_MS = 320;
-	/** Growing into fullscreen and back: quicker than page moves. */
-	const FULLSCREEN_MS = 240;
 
 	let qualityMode = $derived($audioSettings.settings?.video_quality_mode ?? 'MAX');
 	let upNext = $derived($videoSessionUpcoming[0] ?? null);
@@ -243,7 +241,6 @@
 	 *  the window grows, and anything on the right edge (the queue) can
 	 *  shift and be cut off for a frame. */
 	let dimming = $state(false);
-	const DIM_MS = 90;
 
 	function enterNativeFullscreen() {
 		if (nativeOn || nativePending) return;
@@ -269,7 +266,7 @@
 				if (!ok) expanded = true;
 				else requestAnimationFrame(() => requestAnimationFrame(() => (expanded = nativeOn && active)));
 			});
-		}, dim ? DIM_MS : 0);
+		}, dim ? get(videoFullscreenDimMs) : 0);
 	}
 
 	async function leaveNativeFullscreen() {
@@ -521,7 +518,7 @@
 		const px = (r: { top: number; left: number; width: number; height: number }) => ({
 			top: `${r.top}px`, left: `${r.left}px`, width: `${r.width}px`, height: `${r.height}px`,
 		});
-		glide = dockEl.animate([px(from), px(to)], { duration: FULLSCREEN_MS, easing: GLIDE_EASING });
+		glide = dockEl.animate([px(from), px(to)], { duration: get(videoFullscreenGrowMs), easing: GLIDE_EASING });
 		if (document.timeline.currentTime != null) glide.startTime = document.timeline.currentTime;
 		return glide;
 	}
@@ -589,7 +586,7 @@
 				// the timer only covers a glide that never started or never
 				// reports back.
 				if (morphTimer) clearTimeout(morphTimer);
-				morphTimer = setTimeout(endGlide, started ? MORPH_MS * 2 : MORPH_MS);
+				morphTimer = setTimeout(endGlide, started ? Math.max(MORPH_MS, get(videoFullscreenGrowMs)) * 2 : MORPH_MS);
 				started?.finished.then(() => {
 					if (glide !== started) return;
 					if (morphTimer) clearTimeout(morphTimer);
@@ -687,7 +684,7 @@
 
 <div class="video-dock-host" bind:this={host}>
 {#if active}
-	<div class="fullscreen-dim" class:on={dimming} aria-hidden="true"></div>
+	<div class="fullscreen-dim" class:on={dimming} style:transition-duration={`${$videoFullscreenDimMs}ms`} aria-hidden="true"></div>
 	<div
 		bind:this={dockEl}
 		class="video-dock"
@@ -1033,7 +1030,7 @@
 		background: #000;
 		opacity: 0;
 		pointer-events: none;
-		transition: opacity 0.09s ease;
+		transition: opacity 90ms ease;
 	}
 
 	.fullscreen-dim.on {

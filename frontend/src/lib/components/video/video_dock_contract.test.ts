@@ -81,7 +81,12 @@ describe('persistent video dock contract', () => {
 		expect(dock).toMatch(/if \(nativeOn \|\| nativePending\) \{\s*if \(expanded\) collapse\(\);\s*return;/);
 		// Dimming is the listener's choice (Settings > Playback > Video playback).
 		expect(dock).toContain("const dim = get(videoFullscreenStyle) === 'dim';");
-		expect(dock).toContain('}, dim ? DIM_MS : 0);');
+		expect(dock).toContain('}, dim ? get(videoFullscreenDimMs) : 0);');
+		// Both speeds are the listener's (Settings sliders), read at use time.
+		expect(dock).toContain('{ duration: get(videoFullscreenGrowMs), easing: GLIDE_EASING }');
+		expect(dock).toContain('style:transition-duration={`${$videoFullscreenDimMs}ms`}');
+		// The safety timer outlasts the slowest grow the slider allows.
+		expect(dock).toContain('started ? Math.max(MORPH_MS, get(videoFullscreenGrowMs)) * 2 : MORPH_MS');
 		// In: the window switches first (the command returns once it has),
 		// then the dock grows into it, same order as the browser path.
 		expect(dock).toContain('requestAnimationFrame(() => requestAnimationFrame(() => (expanded = nativeOn && active)));');
@@ -92,7 +97,7 @@ describe('persistent video dock contract', () => {
 		expect(dock).toMatch(/if \(dim\) \{[^}]*moveHome\(\);\s*dimming = true;\s*\}\s*setTimeout\(\(\) => \{\s*void setNativeVideoFullscreen\(true\)/);
 		expect(dock).toContain("const holdStill = (dimming || navigating.to !== null) && mode === 'full' && rect !== null;");
 		expect(dock).toContain("else if (!dimming && (!moving || reducedMotion) && $videoStageAnchor) moveIntoStage($videoStageAnchor);");
-		expect(dock).toContain('<div class="fullscreen-dim" class:on={dimming} aria-hidden="true"></div>');
+		expect(dock).toContain('<div class="fullscreen-dim" class:on={dimming} style:transition-duration={`${$videoFullscreenDimMs}ms`} aria-hidden="true"></div>');
 		expect(dock).toMatch(/\.fullscreen-dim \{[^}]*z-index: 999;/);
 		expect(dock).toMatch(/\.video-dock\.dimming \{\s*z-index: 1000;/);
 		// The dim lifts once the dock covers the window (or at once, without motion).

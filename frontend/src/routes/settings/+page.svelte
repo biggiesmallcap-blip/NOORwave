@@ -112,7 +112,17 @@
 	import { upscaleTidalArtwork } from '$lib/utils/artwork';
 	import { palette, setPalette } from '$lib/stores/palette';
 	import { uiZoom, setZoom, zoomIn, zoomOut, resetZoom, MIN as ZOOM_MIN, MAX as ZOOM_MAX, WHEEL_STEP as ZOOM_STEP } from '$lib/stores/uiZoom';
-	import { videoFullscreenStyle, VIDEO_FULLSCREEN_STYLES, type VideoFullscreenStyle } from '$lib/stores/video_fullscreen_style';
+	import {
+		videoFullscreenStyle,
+		videoFullscreenGrowMs,
+		videoFullscreenDimMs,
+		VIDEO_FULLSCREEN_STYLES,
+		VIDEO_FULLSCREEN_GROW_MIN,
+		VIDEO_FULLSCREEN_GROW_MAX,
+		VIDEO_FULLSCREEN_DIM_MIN,
+		VIDEO_FULLSCREEN_DIM_MAX,
+		type VideoFullscreenStyle,
+	} from '$lib/stores/video_fullscreen_style';
 	import { hasNativeVideoFullscreen } from '$lib/tauri/video_fullscreen';
 	import { playerPlacement, type PlayerPlacement } from '$lib/stores/playerLayout';
 	import { playerArtworkStyle, type PlayerArtworkStyle } from '$lib/stores/playerArtwork';
@@ -2390,6 +2400,44 @@
 							<p class="page-copy setting-caption">
 								Grow takes the window fullscreen, then grows the video into it. Dim, then grow darkens the page first. Classic is the window's own fullscreen.
 							</p>
+							<label class="wallpaper-control">
+								<span>
+									<strong>Grow speed</strong>
+									<small>How long the video takes to fill the screen and shrink back.</small>
+								</span>
+								<div class="wallpaper-control-field">
+									<input
+										type="range"
+										min={VIDEO_FULLSCREEN_GROW_MIN}
+										max={VIDEO_FULLSCREEN_GROW_MAX}
+										step="10"
+										value={$videoFullscreenGrowMs}
+										oninput={(e) => videoFullscreenGrowMs.set(parseInt((e.currentTarget as HTMLInputElement).value, 10))}
+										aria-label="Fullscreen grow speed"
+									/>
+									<output>{$videoFullscreenGrowMs} ms</output>
+								</div>
+							</label>
+							{#if $videoFullscreenStyle === 'dim'}
+								<label class="wallpaper-control">
+									<span>
+										<strong>Dim length</strong>
+										<small>How long the page takes to fade to black first.</small>
+									</span>
+									<div class="wallpaper-control-field">
+										<input
+											type="range"
+											min={VIDEO_FULLSCREEN_DIM_MIN}
+											max={VIDEO_FULLSCREEN_DIM_MAX}
+											step="10"
+											value={$videoFullscreenDimMs}
+											oninput={(e) => videoFullscreenDimMs.set(parseInt((e.currentTarget as HTMLInputElement).value, 10))}
+											aria-label="Fullscreen dim length"
+										/>
+										<output>{$videoFullscreenDimMs} ms</output>
+									</div>
+								</label>
+							{/if}
 						{/if}
 					</details>
 
