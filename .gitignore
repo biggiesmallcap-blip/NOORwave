@@ -93,3 +93,6 @@ docs/assets/screenshot-*.png
 .repowise/.env
 .mcp.json
 .tauri/
+
+# Raw README captures; build-readme-tour.py turns them into docs/assets/shots/
+docs/assets/raw/

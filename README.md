@@ -1,26 +1,18 @@
-# NOORwave: TIDAL desktop music player
+# NOORwave
 
 <p align="center">
   <img width="1280" height="640" alt="NOORwave" src="frontend/static/social/source-animated.svg" />
 </p>
 
 <p align="center">
-  <strong>Your TIDAL library, at local speed. Your music videos, indexed.</strong>
-</p>
-
-NOORwave is a desktop music player for TIDAL built for **instant local search and fast library browsing**. Your synced library lives in a SQLite database on your own machine, so searching your saved collection runs locally. Your library and listening history stay on your disk; TIDAL supplies the audio.
-
-**Music video indexing** finds live performances, covers, and alternate versions of tracks in your library, bringing them together in a video wall you can browse by genre and year. Video stations turn that growing catalog into a daily lineup you can keep watching. Gapless hi-fi playback, music discovery, automix, and phone remote control round out the player.
-
-<p align="center">
-  Instant local search &middot; fast library browsing &middot; video indexing and stations &middot; gapless lossless playback &middot; Genre Galaxy &middot; planned DJ transitions &middot; phone remote
+  <strong>Your TIDAL library at local speed. Every music video for the songs you love. Your genres, drawn as a galaxy.</strong>
 </p>
 
 <p align="center">
-  <a href="../../releases/latest">Download</a> &middot;
+  <a href="../../releases/latest"><strong>Download</strong></a> &middot;
   <a href="#connect-lastfm-seriously">Last.fm setup</a> &middot;
   <a href="#run-from-source">Run from source</a> &middot;
-  <a href="#the-phone-in-your-pocket-is-the-remote">Phone remote</a> &middot;
+  <a href="#the-phone-remote-set-up">Phone remote</a> &middot;
   <a href="#where-this-actually-is">Project status</a>
 </p>
 
@@ -32,78 +24,129 @@ NOORwave is a desktop music player for TIDAL built for **instant local search an
   <img src="https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-5B4B8A?style=flat-square" alt="PolyForm Noncommercial 1.0.0"/>
 </p>
 
+<p align="center">
+  <img alt="A tour of NOORwave: home, video stations, the video player, Genre Galaxy, library, and analytics in dark, warm, and light themes" src="docs/assets/shots/tour.webp" width="960" />
+</p>
+
 ## Why this exists
 
-Streaming apps are built for browsing a catalogue. They are not built for the person who has thousands of tracks saved and wants to *listen*: to know what they own, to move through it fast, to have one record land on the next without a hole in the middle.
+Streaming apps are built for browsing a catalogue. NOORwave is built for the person with thousands of saved tracks who wants to *listen*.
 
-NOORwave is that second thing. It pulls your TIDAL library down into a SQLite database on your own machine, then builds a real desktop player on top of it. Search answers instantly because it never leaves your disk. The queue is something you shape, not something that happens to you. Transitions are planned instead of stumbled into. And your own taste becomes a map you can fly through.
+It pulls your TIDAL library into SQLite on your own disk and puts a real desktop player on top. Search never leaves your machine. The queue is yours to shape. Transitions are planned. Your taste becomes a map you can fly through.
 
-TIDAL stays the source of the audio. Everything else, the library, the play history, the audio analysis, the learned similarity, lives on your machine and belongs to you.
+TIDAL supplies the audio. The library, play history, audio analysis, and learned similarity live on your machine and belong to you.
+
+## What you get
+
+| | |
+|---|---|
+| **Instant everything** | Your library lives in local SQLite. Search, filters, and pages answer before you lift your finger. |
+| **Every music video, indexed** | Live takes, covers, and alternate cuts for the songs you already love, plus video stations that never run dry. |
+| **Genre Galaxy** | Your library drawn as gravity. Fly in, click a cluster, start a session. |
+| **Gapless, bit-perfect** | Next track pre-buffered 15s out. Output follows the source sample rate. WASAPI exclusive on Windows. |
+| **Planned DJ transitions** | Cues, blends, and bass swaps planned from beat, phrase, and key analysis. |
+| **Automix that learns** | An embedding model trained on *your* listening keeps the runway full and tells you why. |
+| **Make it yours** | Dock the player left, right, or bottom. 25+ colour schemes, light or dark, 50+ animated backgrounds that move to the beat. |
+| **Phone remote** | Scan a QR code. Your phone is the remote. No app store, no cloud. |
+
+## Speed is the feature
+
+Your whole TIDAL library is mirrored into a SQLite database on your disk. Search runs locally, so results land as you type: no spinner, no round trip, no rate limit. Artist pages, album pages, filters, and shuffle all read from the same local copy. Sync is incremental, so keeping it fresh costs seconds, not minutes.
 
 <p align="center">
-  <img alt="NOORwave home: TIDAL mixes, video mixes, and personal radio" src="docs/assets/shots/home.webp" width="900" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/shots/home-dark.webp" />
+    <img alt="Home: TIDAL music mixes, video mixes, and personal radio" src="docs/assets/shots/home-light.webp" width="900" />
+  </picture>
 </p>
 
-## The parts worth showing up for
+## Your music videos, indexed
 
-### Gapless is the baseline, not a checkbox
+**This is the part no other TIDAL client does.**
 
-A `NearEnd` event fires 15 seconds before a track ends so the next one is already decoded and buffered when the current one runs out. On every transition the output stream is rebuilt to match the source sample rate, so a 96 kHz record plays at 96 kHz instead of being quietly resampled to whatever the device was last set to. On Windows, NOORwave drives WASAPI in exclusive mode directly, which means the OS mixer is out of the path entirely. Crossfade, DASH segment seek, media keys, and tray transport are all in the core player rather than bolted on.
+A background pass walks the artists in your library and asks TIDAL for every video tied to the tracks you have liked, then keeps all of them. Live takes, covers, acoustic sessions, alternate cuts: nothing is deduped down to one canonical clip, because a rich wall beats a tidy one. Four videos called "Jamming" get told apart by year and runtime. Filter by genre, year, and recency, then Play all or Shuffle. Hide a bad match once and it stays hidden through every re-scan.
 
-### Genre Galaxy
-
-Your library, drawn as gravity. Fourteen families, a couple hundred genres, sized by how much of it you own and how much of it you actually play. Fly in, click a cluster, and start a session from it. Four lenses on the same map: **Map** for structure, **Heat** for what you have been playing, **Vibe** for mood, and **Rediscover** for the corners you have not touched in months. Toggle between your library's genres and TIDAL's, with auto drift on or off.
+It plays in-app over HLS with a quality picker, a video session queue, and **Keep exploring** rows of related artists under every clip. You can still search TIDAL's full video catalogue and play its video mixes.
 
 <p align="center">
-  <img alt="Genre Galaxy: the library drawn as genre gravity" src="docs/assets/shots/genregalaxy.webp" width="900" />
-</p>
-
-### Your music videos, indexed
-
-**Discovery** is what you expect: search TIDAL's full video catalogue, play it in-app over HLS with a quality selector, autoplay through results, and pull in TIDAL's video mixes.
-
-**Library indexing** is the part no other client does. A background pass walks the artists in your library and asks TIDAL what videos exist for the tracks you have liked, then keeps every hit. Not deduped down to one canonical clip: live takes, covers, and alternate cuts are all kept on purpose, because a richer wall beats a tidy one. Four different videos titled "Jamming" get told apart by release year and runtime. The result is a filterable wall of videos *for music you already love*, sortable by genre, year, and recency, with Play all and Shuffle across the lot. When a match is wrong, hide it once and it stays hidden through the 90-day re-scan.
-
-<p align="center">
-  <img alt="Liked videos: a filterable wall of videos for tracks in your library" src="docs/assets/shots/videolikes.webp" width="900" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/shots/video-warm.webp" />
+    <img alt="The in-app video player with the video session queue" src="docs/assets/shots/video-light.webp" width="900" />
+  </picture>
 </p>
 
 ### Video stations that keep playing
 
-Open **Videos -> Stations** for a daily lineup drawn from your taste and the indexed catalog, including a rotating artist spotlight. Stations refill as you watch, drawing on genres, artist relationships, tags and charts where the catalog has enough videos. The page explains when discovery is still building the catalog or there is not enough to play.
+**Videos -> Stations** serves a daily lineup: an artist spotlight, a wild card, deep cuts, big ones you missed, and a station for each of your genres. Every station shows how many videos you have not seen yet, and refills as you watch, steered by artist relationships and what you actually finish.
 
-Background discovery fills in liked artists first, then explores related and new artists. Video radio and related-video suggestions use those connections, with videos you watch and enjoy helping guide the search. In **Settings -> Services -> TIDAL -> Video discovery**, choose **Full**, **Limited** for about a tenth of the requests, or **Off** to stop background discovery while retaining lookups for video radio you start.
+Behind it, a crawler maps the artist graph outward from your liked artists, so the catalog keeps growing on its own. Dial it in **Settings -> Services -> TIDAL -> Video discovery**: **Full**, **Limited** (about a tenth of the requests), or **Off**.
+
+<p align="center">
+  <img alt="Video stations: today's spotlight, for-you stations, and genre stations" src="docs/assets/shots/stations-dark.webp" width="900" />
+</p>
+
+## Genre Galaxy
+
+Your library as a star map. Fourteen genre families, nearly two hundred genres, each sized by how much you own and how much you play. Fly in, click a cluster, and a session starts from it.
+
+Four lenses on the same sky: **Map** for structure, **Heat** for what is on rotation, **Vibe** for mood, **Rediscover** for the corners you forgot. Flip between your library's genres and TIDAL's, and let **Auto drift** wander for you.
+
+Genre runs through everything else too: a genre shuffle mode, genre-aware automix, genre video stations, and tags from MusicBrainz and Last.fm stitched into one taxonomy.
+
+<p align="center">
+  <img alt="Genre Galaxy: the library drawn as genre gravity" src="docs/assets/shots/galaxy-dark.webp" width="900" />
+</p>
+
+## Make it yours
+
+<p align="center">
+  <img alt="The same home screen cycling through dark, warm, and light looks" src="docs/assets/shots/themes.webp" width="900" />
+</p>
+
+- **Dock the player** on the right, the left, or as a bar along the bottom. On narrow windows it folds into a mobile layout.
+- **25+ colour schemes** (Iris, Clay, Ember, Abyss, Neon, Obsidian, and more), each in light, dark, or following your system.
+- **50+ animated backgrounds**: aurora ribbons, liquid chrome, spiral galaxies, stained glass, synthwave, live spectrum analysers. They pulse to the music, bend toward your cursor, and can take their colours from the album art.
+
+Every screenshot in this README follows your GitHub theme. Flip it and watch them change.
+
+## The rest of the player
+
+### Gapless is the baseline
+
+A `NearEnd` event fires 15 seconds before a track ends, so the next one is decoded and waiting. Every transition rebuilds the output stream at the source rate: a 96 kHz record plays at 96 kHz, never quietly resampled. On Windows, NOORwave drives WASAPI exclusive mode directly and takes the OS mixer out of the path. Crossfade, DASH seek, media keys, and tray transport are all core.
 
 ### Transitions that are planned, not hoped for
 
-The DJ cockpit reads the outgoing and incoming tracks as audio profiles and plans the cues, duration and gain changes ahead of time. Blends, cuts, bass swaps and energy changes use the available beat, phrase and harmonic evidence. **Conservative**, **Balanced** and **Adventurous** preferences guide the choices; uncertain analysis falls back to a safe crossfade.
-
-DJ and Automix show the outgoing track, transition and incoming track together, with animation driven by confirmed playback. **Why this transition?**, **Fine Tune** and **Diagnostics** expose the reasoning and controls. Harmonic and BPM matching use Camelot key detection, tempo and energy analysis. Compatible keys get favoured, clashes get penalised, and unanalyzed tracks keep neutral scores. Seeking through a mix follows the incoming track's original audio and position, including while paused.
+The DJ cockpit reads both tracks as audio profiles and plans cues, duration, and gain ahead of time. Blends, cuts, bass swaps, and energy changes lean on beat, phrase, and Camelot key evidence. Pick **Conservative**, **Balanced**, or **Adventurous**. When analysis is unsure, it falls back to a clean crossfade. **Why this transition?**, **Fine Tune**, and **Diagnostics** show the reasoning.
 
 ### Automix that learns *your* library
 
-Automix keeps a running runway of tracks ahead of you and tells you why each one is there. It prefers learned neighbours from an embedding model trained on your own listening history, penalises hub tracks so the same twenty songs do not leak into every genre, and falls back to a session taste profile when the model has nothing to say. Clear the queue by hand and it backs off for a minute instead of immediately refilling what you just deleted. Four shuffle modes sit on a separate axis: plain, weighted by favourites and recency, genre-bucketed, and harmonically stabilised.
+Automix keeps a runway of tracks ahead and explains each pick. It prefers neighbours from an embedding model trained on your own history, penalises hub tracks so the same twenty songs do not leak everywhere, and backs off for a minute after you clear the queue by hand. Shuffle has four modes: plain, weighted, genre-bucketed, and harmonically stabilised.
 
 ### The phone in your pocket is the remote
 
-There is a full PWA at `/remote`, served by the same process on the same port. No companion app, no second service, no cloud round trip. **Settings -> Remote -> Phone remote** owns the whole setup: enable trusted-LAN access, scan a one-use QR code (or enter its temporary six-digit code), and manage each paired phone by name. Local discovery provides a stable `.local` address when the network supports it, with a direct Wi-Fi address as the fallback. Once connected you get transport, the live queue, search, artist and album browsing, action sheets, and a sleep timer. Add it to your home screen and it behaves like a native remote.
+A full PWA at `/remote`, served by the same process. Scan a one-use QR code in **Settings -> Remote -> Phone remote** and you get transport, the live queue, search, browsing, and a sleep timer. Add it to your home screen and it feels native. Same LAN only, no cloud relay.
 
-### A library that behaves like a local collection
+### A library that feels local
 
-Incremental TIDAL sync, instant local search, artist and album pages, playlists, duplicate detection, and metadata enrichment from MusicBrainz, Last.fm, and Discogs. Anything you want on disk, you can have on disk: right-click a track, album, or playlist and save it as bit-perfect FLAC or 320 kbps MP3, tagged, into an `Artist/Album/NN - Title` tree you pick once.
-
-TIDAL catalogue replacements preserve track identity, original library dates and explicit favorite choices through sync. Playlist search also finds user-made Spotify playlists, with fallback sources for searching, opening and saving when the metadata proxy is unavailable.
+Artist and album pages, playlists, duplicate detection, and enrichment from MusicBrainz, Last.fm, and Discogs. Right-click anything to save it as bit-perfect FLAC or 320 kbps MP3, tagged into an `Artist/Album/NN - Title` tree.
 
 <p align="center">
-  <img alt="Library: top artists, suggestions, and shuffle picks" src="docs/assets/shots/library.webp" width="900" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/shots/library-dark.webp" />
+    <img alt="Library: top artists, suggestions, and shuffle picks" src="docs/assets/shots/library-light.webp" width="900" />
+  </picture>
 </p>
 
-### Listening analytics that are about listening
+### Analytics about listening
 
-Not a year-end slideshow. A ridgeline of when you actually listen across the day, peak hour, session count, completion rate, skip rate, and how all of it has moved over 24 hours, 7 days, 14 days, 30 days, or all time.
+Not a year-end slideshow. A ridgeline of when you listen through the day, peak hour, sessions, completion, and skip rate, over 24 hours to all time. Here with the player docked along the bottom.
 
 <p align="center">
-  <img alt="Analytics: listening pulse, completion, and skip rate over time" src="docs/assets/shots/analytics.webp" width="900" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/shots/analytics-warm.webp" />
+    <img alt="Analytics: listening pulse, completion, and skip rate, with the player docked along the bottom" src="docs/assets/shots/analytics-light.webp" width="900" />
+  </picture>
 </p>
 
 ## Connect Last.fm. Seriously.
@@ -282,17 +325,13 @@ Small, focused changes. Rust, Svelte, and TypeScript are the first-class languag
 cargo fmt --all -- --check
 ```
 
-To refresh the screenshots in this README, with `noor-server` running:
+To refresh the screenshots in this README, drop 2000-wide window captures into `docs/assets/raw/` named `<surface>-<theme>.webp` (for example `home-dark.webp`), then:
 
 ```powershell
-node scripts/capture-screenshots.mjs
+python scripts/build-readme-tour.py
 ```
 
-```powershell
-python scripts/polish-screenshots.py
-```
-
-The first captures the five surfaces off the live app at 1920x1080. The second downscales them and rounds the corners into `docs/assets/shots/`.
+It crops the caption strip, rounds the corners into `docs/assets/shots/`, and bakes the rotating `tour.webp` and `themes.webp`.
 
 ## Disclaimer
 
