@@ -429,8 +429,8 @@
 		[
 			// Keep the mode named, not just its value: a bare "Genre mix" in the
 			// sidebar reads as a notification rather than current state.
+			// Automix and Include New show their state on their own chips below.
 			$shuffleMode !== 'off' ? `Shuffle: ${shuffleStatusLabels[$shuffleMode]}` : null,
-			$automixEnabled ? 'Automix on' : null,
 		]
 			.filter(Boolean)
 			.join(' - '),
@@ -1633,7 +1633,7 @@
 
 				<div class="live-actions" role="group" aria-label="Session controls">
 					<button
-						class="queue-icon-btn queue-automix-btn"
+						class="session-chip queue-automix-btn"
 						class:active={$automixEnabled}
 						title={$automixEnabled ? 'Automix on' : 'Automix off'}
 						aria-label={$automixEnabled ? 'Disable automix' : 'Enable automix'}
@@ -1646,9 +1646,10 @@
 								fill="currentColor"
 							/>
 						</svg>
+						<span>Automix</span>
 					</button>
 					<button
-						class="queue-icon-btn queue-discover-btn"
+						class="session-chip queue-discover-btn"
 						class:active={$automixDiscoverNew}
 						title={$automixDiscoverNew ? 'Include New: on - pulling in tracks outside your library' : 'Include New: off - tap to find new music during automix'}
 						aria-label={$automixDiscoverNew ? 'Disable discover new' : 'Enable discover new'}
@@ -1658,6 +1659,7 @@
 						<svg width="12" height="12" viewBox="0 0 15 15" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
 							<path d="M7.5 1a6.5 6.5 0 1 0 0 13A6.5 6.5 0 0 0 7.5 1zm0 1a5.5 5.5 0 1 1 0 11A5.5 5.5 0 0 1 7.5 2zM7 4.5V7H4.5a.5.5 0 0 0 0 1H7v2.5a.5.5 0 0 0 1 0V8h2.5a.5.5 0 0 0 0-1H8V4.5a.5.5 0 0 0-1 0z" fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"/>
 						</svg>
+						<span>New</span>
 					</button>
 					<button
 						class="queue-icon-btn queue-help-btn"
@@ -3051,10 +3053,54 @@
 		text-overflow: ellipsis;
 	}
 
+	/* One row: the two automix toggles as labelled chips that show their own
+	   state, and the shortcuts button pushed to the far end. */
 	.live-actions {
 		display: flex;
 		align-items: center;
 		gap: 6px;
+	}
+
+	.live-actions .queue-help-btn {
+		margin-left: auto;
+	}
+
+	.session-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		height: 26px;
+		padding: 0 10px 0 8px;
+		border: 1px solid var(--border-subtle);
+		border-radius: 999px;
+		background: var(--bg-surface);
+		color: var(--text-secondary);
+		font-family: inherit;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-semibold);
+		line-height: 1;
+		white-space: nowrap;
+		cursor: pointer;
+		transition:
+			background var(--motion-fast),
+			border-color var(--motion-fast),
+			color var(--motion-fast);
+	}
+
+	.session-chip:hover {
+		background: var(--bg-hover);
+		color: var(--text-primary);
+	}
+
+	.session-chip:focus-visible {
+		outline: 2px solid var(--accent-strong);
+		outline-offset: 2px;
+	}
+
+	.session-chip.active {
+		background: var(--accent-soft);
+		border-color: var(--accent-line);
+		color: var(--accent-strong);
 	}
 
 	.live-dot {
@@ -3269,19 +3315,6 @@
 		align-items: center;
 		gap: 8px;
 		flex-shrink: 0;
-	}
-
-	.queue-automix-btn.active {
-		background: var(--accent-soft);
-		border-color: var(--accent-line);
-		box-shadow: 0 0 10px var(--accent), 0 0 0 1px var(--accent-line);
-	}
-
-	.queue-discover-btn.active {
-		background: var(--accent-soft);
-		border-color: var(--accent-line);
-		color: var(--accent-strong);
-		box-shadow: 0 0 10px var(--accent), 0 0 0 1px var(--accent-line);
 	}
 
 	.queue-icon-btn {
