@@ -263,6 +263,9 @@
 	let draftClauses = $state<DraftClause[]>([]);
 	let editorSaving = $state(false);
 	let editorError = $state('');
+	// Rule problems show after the first save attempt, not on an empty new
+	// sheet (audit "States": no validation errors on open).
+	let showClauseErrors = $state(false);
 	let nameInput = $state<string>(''); // tag input buffer for genre/artist
 	// Per-clause tag input buffers keyed by draft id
 	let tagInputs = $state<Record<number, string>>({});
@@ -611,6 +614,7 @@
 		draftClauses = [defaultDraft()];
 		tagInputs = {};
 		editorError = '';
+		showClauseErrors = false;
 		editorOpen = true;
 		editorInitialSig = currentDraftSig();
 		void loadGenreSuggestions();
@@ -622,6 +626,7 @@
 		draftName = playlist.name;
 		draftDescription = playlist.description ?? '';
 		editorError = '';
+		showClauseErrors = false;
 
 		try {
 			const def = playlist.smart_rules ? JSON.parse(playlist.smart_rules) : null;
@@ -844,6 +849,7 @@
 	}
 
 	async function saveEditor() {
+		showClauseErrors = true;
 		const name = draftName.trim();
 		if (!name) { editorError = 'Name is required.'; return; }
 		if (draftClauses.length === 0) { editorError = 'Add at least one rule.'; return; }
@@ -1654,7 +1660,7 @@
 							</select>
 						{/if}
 
-						{#if clauseValidation(clause)}
+						{#if showClauseErrors && clauseValidation(clause)}
 							<p class="clause-error">{clauseValidation(clause)}</p>
 						{/if}
 					</div>

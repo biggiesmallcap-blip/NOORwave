@@ -146,7 +146,9 @@
 						</svg>
 						{actionLabel}
 					</button>
-					{#if metric}
+					<!-- A status that only repeats the button ("Resolve on TIDAL") is
+					     dropped, so the pair never says the same thing twice. -->
+					{#if metric && metric !== actionLabel}
 						<span>{metric}</span>
 					{/if}
 				</div>
