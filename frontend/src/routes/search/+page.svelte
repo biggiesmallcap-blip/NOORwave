@@ -12,7 +12,7 @@
   import { buildArtistMenu } from '$lib/player/artist_menu'
   import { downloadTidalPlaylist } from '$lib/stores/downloads'
   import { openContextMenu, type MenuItem } from '$lib/stores/context_menu'
-  import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio, playTrackNow, playTidalPlaylist, playTracksInContext } from '$lib/stores/player'
+  import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio, playTrackNow, playTidalPlaylist, playTracksInContext, playArtist } from '$lib/stores/player'
   import { formatTrackDuration } from '$lib/utils/format'
   import { parseQuery, type ParsedQuery } from '$lib/search/query_parser'
   import { buildAudioParams as sharedBuildAudioParams } from '$lib/search/audio_params'
@@ -971,6 +971,15 @@
     }
   }
 
+  function playTopArtistInPlace(artist: TidalSearchArtist, mode: 'play' | 'queue' | 'next') {
+    if (mode === 'play' && artist.local_id != null) {
+      void playArtist(artist.local_id)
+      return
+    }
+    const song = sortedTracks.find((track) => sameArtistName(track.artist_name, artist.name)) ?? sortedTracks[0]
+    if (song) actOnTrack(song, mode)
+  }
+
   function topResultPlay(top: TopResult) {
     if (top.kind === 'track') {
       void playTidalTrackNow(toPlayable(top.entry))
@@ -1210,8 +1219,12 @@
       if (target) {
         actOnTrack(target, mode)
       } else if (topResult) {
+        // Enter plays and never leaves the results (audit "Search"): an
+        // artist plays from your library, or its first matching song here.
+        // Opening the artist page is the card or its Open button.
         if (topResult.kind === 'track') actOnTrack(topResult.entry, mode)
-        else topResultPlay(topResult)
+        else if (topResult.kind === 'album') topResultPlay(topResult)
+        else playTopArtistInPlace(topResult.entry, mode)
       }
       return
     }

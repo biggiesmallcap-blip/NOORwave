@@ -51,3 +51,12 @@ describe('Search answers first', () => {
 		expect(search).toContain("scrollIntoView({ block: 'nearest' })");
 	});
 });
+
+describe('Search Enter never leaves the results', () => {
+	const search = read('../src/routes/search/+page.svelte');
+	test('an artist top result plays in place instead of navigating', () => {
+		expect(search).toContain('else playTopArtistInPlace(topResult.entry, mode)');
+		const fn = search.slice(search.indexOf('function playTopArtistInPlace'), search.indexOf('function topResultPlay'));
+		expect(fn).not.toContain('goto(');
+	});
+});
