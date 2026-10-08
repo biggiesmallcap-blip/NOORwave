@@ -11,6 +11,9 @@
 	import { goBack } from '$lib/navigation/back';
 	import TidalTrackRow from '$lib/components/TidalTrackRow.svelte';
 	import DetailHero from '$lib/components/ui/DetailHero.svelte';
+	import ActionBar from '$lib/components/ui/ActionBar.svelte';
+	import { buildAlbumMenu } from '$lib/player/album_menu';
+	import { groupWorks } from '$lib/album/album_works';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { firstArtworkUrl } from '$lib/utils/artwork';
@@ -74,6 +77,12 @@
 		);
 	}
 
+	let works = $derived(groupWorks(tracks.map((track) => track.title)));
+	let workStarts = $derived(new Map(works.groups.map((group) => [group.start, group])));
+	function workDurationMs(start: number, end: number): number {
+		return tracks.slice(start, end + 1).reduce((sum, track) => sum + (track.duration_ms ?? 0), 0);
+	}
+
 	let radioPending = $state(false);
 	async function radioFromAlbum() {
 		const first = tracks[0];
@@ -114,7 +123,7 @@
 		{@const h = header()!}
 
 		<DetailHero
-			eyebrow="Album · TIDAL preview"
+			eyebrow="Album"
 			title={h.title}
 			artwork={h.artwork_url}
 			backdrop={h.artwork_url}
@@ -142,14 +151,26 @@
 						<span>{h.track_count} songs</span>
 						<span class="dot">·</span>
 						<span>{formatTotalDuration(h.total_ms)}</span>
+						<span class="dot">·</span>
+						<span>On TIDAL</span>
 			{/snippet}
 			{#snippet actions()}
-						<button class="play-all-btn" onclick={() => void playLoadedAlbum()}>▶ Play All</button>
-						<button class="action-btn" onclick={() => void shuffleLoadedAlbum()}>⤮ Shuffle</button>
-						<button class="action-btn" disabled={radioPending} onclick={() => void radioFromAlbum()}>◉ Radio</button>
-						<button class="save-btn" disabled={savePending} onclick={() => void saveToLibrary()}>
-							{savePending ? 'Saving…' : '＋ Save to library'}
-						</button>
+				<ActionBar
+					onplay={() => void playLoadedAlbum()}
+					onshuffle={() => void shuffleLoadedAlbum()}
+					shuffleHint="Play this album in random order"
+					onradio={() => void radioFromAlbum()}
+					radioHint="Similar tracks across your library and TIDAL"
+					{radioPending}
+					onlike={() => void saveToLibrary()}
+					likeLabel="Save album to your library"
+					likePending={savePending}
+					onmore={(e) => openContextMenu(e, buildAlbumMenu({
+						tidal_id: tidalAlbumId,
+						title: h.title,
+						artist_name: h.artist_name,
+					}, { isLocal: false, hideOpen: true }), h.title)}
+				/>
 			{/snippet}
 		</DetailHero>
 
@@ -162,11 +183,20 @@
 			</div>
 			<ol class="track-list">
 				{#each tracks as track, idx (track.tidal_id)}
+					{@const work = workStarts.get(idx)}
+					{#if work}
+						<li class="work-head">
+							<span>{work.work}</span>
+							<span class="work-duration">{formatTotalDuration(workDurationMs(work.start, work.end))}</span>
+						</li>
+					{/if}
 					<TidalTrackRow
 						track={tidalDiscographyTrackToPlayable(track)}
 						variant="indexed"
 						index={idx}
 						showAlbum={false}
+						showArtist={track.artist_name !== h.artist_name}
+						displayTitle={works.displayTitles[idx]}
 						onRowClick={() => void playLoadedAlbum(idx)}
 					/>
 				{/each}
@@ -197,46 +227,8 @@
 	.hero-link { color: var(--text-primary); font-weight: var(--font-weight-bold); }
 	.dot { opacity: 0.5; }
 
-	.play-all-btn {
-		background: var(--accent);
-		color: var(--text-on-accent);
-		border: none;
-		border-radius: 20px;
-		padding: 8px 22px;
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-semibold);
-		cursor: pointer;
-		transition: opacity 0.15s;
-	}
-	.play-all-btn:hover { opacity: 0.85; }
 
-	.action-btn {
-		background: var(--bg-surface);
-		color: var(--text-secondary);
-		border: 1px solid var(--border-subtle);
-		border-radius: 20px;
-		padding: 8px 18px;
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-semibold);
-		cursor: pointer;
-		transition: color 0.15s, background 0.15s, border-color 0.15s;
-	}
-	.action-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
-	.action-btn:disabled { cursor: progress; opacity: 0.7; }
 
-	.save-btn {
-		background: var(--accent-soft);
-		color: var(--accent-strong);
-		border: 1px solid var(--accent-line);
-		border-radius: 20px;
-		padding: 8px 18px;
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-semibold);
-		cursor: pointer;
-		transition: background 0.15s, color 0.15s;
-	}
-	.save-btn:hover { background: var(--accent); color: var(--text-on-accent); }
-	.save-btn:disabled { cursor: progress; opacity: 0.85; }
 
 	.track-table {
 		padding: var(--space-5) var(--space-6) 0;
@@ -260,6 +252,22 @@
 	}
 
 	.col-num { text-align: center; }
+
+	.work-head {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: var(--space-3);
+		padding: var(--space-4) var(--space-4) var(--space-1);
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+	}
+
+	.work-duration {
+		color: var(--text-tertiary);
+		font-weight: var(--font-weight-medium);
+		font-variant-numeric: tabular-nums;
+	}
 	.col-duration { display: grid; place-items: center; }
 
 	.track-list {

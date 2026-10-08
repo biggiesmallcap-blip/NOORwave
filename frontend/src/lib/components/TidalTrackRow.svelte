@@ -28,7 +28,8 @@
 		index = 0,
 		showAlbum = true,
 		showArtist = true,
-		onRowClick
+		onRowClick,
+		displayTitle
 	}: {
 		track: TidalTrackInput;
 		variant: TidalTrackRowVariant;
@@ -38,6 +39,8 @@
 		showAlbum?: boolean;
 		showArtist?: boolean;
 		onRowClick?: () => void;
+		/** Shown instead of the title, e.g. the movement inside a grouped work. */
+		displayTitle?: string;
 	} = $props();
 
 	const playable = $derived(canPlayTrack(track));
@@ -177,7 +180,7 @@
 			{/if}
 		</div>
 		<div class="cell-meta">
-			<p class="title">{track.title}</p>
+			<p class="title">{displayTitle ?? track.title}</p>
 			<p class="sub">
 				{#if showArtist && track.artist_name}
 					<!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -253,7 +256,7 @@
 			{/if}
 		</span>
 		<div class="cell-meta">
-			<p class="title">{track.title}</p>
+			<p class="title">{displayTitle ?? track.title}</p>
 			{#if showArtist && track.artist_name}
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
 				<span class="sub" oncontextmenu={openArtistContextMenu}>{track.artist_name}</span>
@@ -325,7 +328,7 @@
 			<div class="cell-art-thumb placeholder"><span>♫</span></div>
 		{/if}
 		<div class="cell-meta">
-			<p class="title">{track.title}</p>
+			<p class="title">{displayTitle ?? track.title}</p>
 			<p class="sub">
 				{#if showArtist && track.artist_name}
 					<!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -394,7 +397,7 @@
 		oncontextmenu={handleContextMenu}
 	>
 		<div class="cell-meta">
-			<p class="title">{track.title}</p>
+			<p class="title">{displayTitle ?? track.title}</p>
 			{#if showArtist && track.artist_name}
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
 				<span class="sub" oncontextmenu={openArtistContextMenu}>{track.artist_name}</span>

@@ -34,7 +34,8 @@
 		upscaleTidalArtwork,
 		type TidalArtworkSize,
 	} from '$lib/utils/artwork';
-	import { formatTotalDuration } from '$lib/utils/format';
+	import { formatTotalDuration, formatTrackDuration } from '$lib/utils/format';
+	import { groupWorks } from '$lib/album/album_works';
 	import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';
 	import { currentTrackMatchesTracks, mergeAlbumTracks } from '$lib/utils/track';
 
@@ -63,6 +64,9 @@
 		}
 		return map;
 	});
+	// Plays only earn a column when they vary: world plays from Spotify. A
+	// column of "0 local" on every row was repeated noise.
+	let showPlays = $derived(playcountByIsrc.size > 0);
 
 	// Phase 5B: back/forward state via SvelteKit snapshot.
 	export const snapshot: Snapshot<{ scrollY: number }> = {
@@ -203,6 +207,21 @@
 	// (instead of owned-then-TIDAL blocks) keeps "click a song to start the
 	// album from there" visually truthful for scattered ownership.
 	let displayEntries = $derived(mergeAlbumTracks(tracks, tidalOnlyTracks));
+	// Long works ("Suite No. 1: I. Prelude") get a work header; rows show the
+	// movement. Ordinary albums stay a flat list.
+	let works = $derived(
+		groupWorks(displayEntries.map((entry) => (entry.kind === 'local' ? entry.local.title : entry.tidal.title))),
+	);
+	let workStarts = $derived(new Map(works.groups.map((group) => [group.start, group])));
+	function entryDurationMs(index: number): number {
+		const entry = displayEntries[index];
+		return (entry?.kind === 'local' ? entry.local.duration_ms : entry?.tidal.duration_ms) ?? 0;
+	}
+	function workDurationMs(start: number, end: number): number {
+		let total = 0;
+		for (let index = start; index <= end; index += 1) total += entryDurationMs(index);
+		return total;
+	}
 
 	// Hand playAlbum/shuffleAlbum the listing already on screen so playing
 	// doesn't refetch (a live TIDAL round trip for partial albums) and the
@@ -332,20 +351,19 @@
 						<span>{h.total_track_count} {h.total_track_count === 1 ? 'song' : 'songs'}</span>
 						<span class="dot">·</span>
 						<span class="hero-duration">{formatTotalDuration(h.total_ms)}</span>
-			{/snippet}
-			{#snippet details()}
-					{#if h.library_track_count > 0 && h.library_track_count < h.total_track_count}
-						<p class="hero-library-substat">
-							{h.library_track_count} in your library
-						</p>
-					{/if}
+						{#if h.library_track_count > 0 && h.library_track_count < h.total_track_count}
+							<span class="dot">·</span>
+							<span>{h.library_track_count} in your library</span>
+						{/if}
 			{/snippet}
 			{#snippet actions()}
 				<ActionBar
 					playing={isAlbumPlaying}
 					onplay={onHeroPlay}
 					onshuffle={() => void shuffleAlbum(albumId, albumData())}
+					shuffleHint="Play this album in random order"
 					onradio={onRadioClick}
+					radioHint="Similar tracks across your library and TIDAL"
 					{radioPending}
 					liked={albumIsFavorite}
 					onlike={onLikeAlbum}
@@ -375,27 +393,27 @@
 						</button>
 					{/if}
 
-					<span class="actions-spacer"></span>
-
-					<span class="actions-hint">Click a song to start the album from there</span>
 				</ActionBar>
 			{/snippet}
 		</DetailHero>
 
-		<p class="actions-microcopy">
-			<strong>Shuffle</strong> plays this album in random order.
-			<strong>Radio</strong> finds similar tracks across your library and Tidal.
-		</p>
-
-		<section class="track-table">
+		<section class="track-table" class:with-plays={showPlays}>
 			<div class="track-header">
 				<span class="col-num">#</span>
 				<span class="col-title">Title</span>
-				<span class="col-plays">Plays</span>
+				{#if showPlays}<span class="col-plays">Plays</span>{/if}
+				<span class="col-status" aria-hidden="true"></span>
 				<span class="col-duration"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2" fill="none"/><path d="M12 7v5l3 2" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg></span>
 			</div>
 			<ol class="track-list">
 				{#each displayEntries as entry, idx (entry.kind === 'local' ? entry.local.id : `tidal-${entry.tidal.tidal_id}`)}
+					{@const work = workStarts.get(idx)}
+					{#if work}
+						<li class="work-head">
+							<span class="work-title">{work.work}</span>
+							<span class="work-duration">{formatTotalDuration(workDurationMs(work.start, work.end))}</span>
+						</li>
+					{/if}
 					{#if entry.kind === 'local'}
 						{@const track = entry.local}
 						<TrackRow
@@ -405,7 +423,9 @@
 							isCurrent={$currentTrack?.id === track.id}
 							isPlaying={$isPlaying}
 							showAlbum={false}
-							showPlayCount={true}
+							showArtist={track.artist_name !== h.artist_name}
+							displayTitle={works.displayTitles[idx]}
+							showPlayCount={showPlays}
 							worldPlayCount={track.isrc ? playcountByIsrc.get(track.isrc) : null}
 							onRowClick={() => onRowClick(track)}
 							menuOptions={{ hideAlbumActions: true }}
@@ -436,23 +456,15 @@
 								&& (e.preventDefault(), ok && void playAlbum(albumId, track.tidal_id, albumData()))}
 						>
 							<span class="tidal-row-num">{track.track_number ?? idx + 1}</span>
-							<span class="tidal-row-title">{track.title}</span>
-							<span class="tidal-row-plays" aria-hidden="true">-</span>
-							<span class="tidal-row-pill" aria-label="From TIDAL">TIDAL</span>
-							<span class="tidal-row-duration">
-								{#if track.duration_ms}
-									{Math.floor(track.duration_ms / 1000 / 60)}:{String(
-										Math.round((track.duration_ms / 1000) % 60),
-									).padStart(2, '0')}
-								{/if}
-							</span>
+							<span class="tidal-row-title">{works.displayTitles[idx]}</span>
+							{#if showPlays}<span class="tidal-row-plays" aria-hidden="true"></span>{/if}
+							<span class="status-glyph" title="Not in your library">{'\u25CB'}</span>
+							<span class="tidal-row-duration">{formatTrackDuration(track.duration_ms)}</span>
 						</li>
 					{/if}
 				{/each}
 			</ol>
 		</section>
-
-		<p class="footnote">{h.artist_name}</p>
 
 		{#if otherAlbums.length > 0}
 			<section class="more-section">
@@ -588,25 +600,9 @@
 	.save-album-btn.pending { opacity: 0.85; cursor: progress; }
 	.save-album-btn:disabled { cursor: progress; }
 
-	.actions-spacer { flex: 1; }
 
-	.actions-hint {
-		color: var(--text-tertiary);
-		font-size: var(--font-size-xs);
-	}
 
-	.actions-microcopy {
-		margin: 0;
-		padding: 0 var(--space-6) var(--space-2);
-		color: var(--text-tertiary);
-		font-size: var(--font-size-xs);
-		line-height: var(--line-height-normal);
-	}
 
-	.actions-microcopy strong {
-		color: var(--text-secondary);
-		font-weight: var(--font-weight-semibold);
-	}
 
 	.track-table {
 		padding: var(--space-2) var(--space-6) 0;
@@ -617,7 +613,7 @@
 
 	.track-header {
 		display: grid;
-		grid-template-columns: 40px 1fr 132px auto 64px;
+		grid-template-columns: 40px 1fr auto 64px;
 		align-items: center;
 		gap: var(--gap);
 		padding: var(--space-2) var(--space-4) var(--space-3);
@@ -631,6 +627,10 @@
 
 	.col-num { text-align: center; }
 	.col-plays { text-align: right; }
+	.track-table.with-plays .track-header,
+	.track-table.with-plays .tidal-album-row {
+		grid-template-columns: 40px 1fr 132px auto 64px;
+	}
 	.col-duration { display: grid; place-items: center; }
 
 	.track-list {
@@ -646,7 +646,7 @@
 	   .track-header so it lines up cleanly with TrackRow above. */
 	.tidal-album-row {
 		display: grid;
-		grid-template-columns: 40px 1fr 132px auto 64px;
+		grid-template-columns: 40px 1fr auto 64px;
 		align-items: center;
 		gap: var(--gap);
 		padding: var(--space-2) var(--space-4);
@@ -670,21 +670,32 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
-	.tidal-row-plays {
-		text-align: right;
+	.status-glyph {
 		color: var(--text-tertiary);
+		font-size: var(--font-size-xs);
 	}
-	.tidal-row-pill {
-		font-size: var(--font-size-2xs);
-		font-weight: var(--font-weight-bold);
-		letter-spacing: 0.06em;
-		padding: 3px 8px;
-		border-radius: 4px;
-		background: rgba(0, 184, 212, 0.16);
-		color: rgba(120, 220, 240, 0.95);
-		border: 1px solid rgba(0, 184, 212, 0.3);
-		text-transform: uppercase;
+
+	/* A work inside a long album: the shared title prefix and its length. */
+	.work-head {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: var(--space-3);
+		padding: var(--space-4) var(--space-4) var(--space-1);
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
 	}
+
+	.work-head:first-child {
+		padding-top: var(--space-1);
+	}
+
+	.work-duration {
+		color: var(--text-tertiary);
+		font-weight: var(--font-weight-medium);
+		font-variant-numeric: tabular-nums;
+	}
+
 	.tidal-row-duration {
 		text-align: right;
 		color: var(--text-tertiary);
@@ -692,18 +703,7 @@
 		font-variant-numeric: tabular-nums;
 	}
 
-	.hero-library-substat {
-		margin: 4px 0 0;
-		font-size: var(--font-size-xs);
-		color: var(--text-tertiary);
-	}
 
-	.footnote {
-		padding: var(--space-5) var(--space-6) var(--space-1);
-		color: var(--text-tertiary);
-		font-size: var(--font-size-xs);
-		margin: 0;
-	}
 
 	.more-section {
 		padding: var(--space-6) var(--space-6) 0;
@@ -806,7 +806,8 @@
 
 	@container workspace (max-width: 720px) {
 		.track-table { padding: var(--space-2) var(--space-3) 0; }
-		.track-header { grid-template-columns: 36px 1fr auto 56px; }
+		.track-header,
+		.track-table.with-plays .track-header { grid-template-columns: 36px 1fr auto 56px; }
 		.col-plays { display: none; }
 		.more-section { padding: var(--space-5) var(--space-4) 0; }
 	}

@@ -89,7 +89,9 @@
 			{#if titleContent}
 				<div class="title-slot">{@render titleContent()}</div>
 			{:else}
-				<h1>{title}</h1>
+				<!-- Long names (classical works, deluxe editions) step down a size so
+				     they do not take two 56px lines. -->
+				<h1 class:long={title.length > 40} class:very-long={title.length > 70}>{title}</h1>
 			{/if}
 			{#if meta}
 				<div class="meta">{@render meta()}</div>
@@ -243,6 +245,16 @@
 	.immersive h1,
 	.immersive .title-slot :global(h1) {
 		font-size: var(--font-size-4xl);
+	}
+
+	h1.long,
+	.immersive h1.long {
+		font-size: var(--font-size-2xl);
+	}
+
+	h1.very-long,
+	.immersive h1.very-long {
+		font-size: var(--font-size-xl);
 	}
 
 	.meta,
