@@ -2647,7 +2647,7 @@
     position: absolute;
     top: 6px;
     left: 6px;
-    line-height: 1.2;
+    line-height: 1;
     padding: 2px 6px;
     border-radius: 4px;
     font-size: var(--font-size-2xs);
