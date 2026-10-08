@@ -107,14 +107,40 @@ export function upscaleTidalArtwork(
 	return rawUrl.replace(TIDAL_ARTWORK_SIZE, `/${safeSize}x${safeSize}.jpg$1`);
 }
 
+const TIDAL_IMAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * A bare TIDAL image id ("3a503460-3914-...") as an image URL; anything else
+ * unchanged. Some stored artist photos are the id itself, which the browser
+ * loaded as a relative path and the tile fell back to an initial.
+ */
+export function tidalImageIdToUrl(value: string): string {
+	const trimmed = value.trim();
+	return TIDAL_IMAGE_ID.test(trimmed)
+		? `https://resources.tidal.com/images/${trimmed.replaceAll('-', '/')}/750x750.jpg`
+		: value;
+}
+
 /**
  * The same TIDAL picture through noor-server's on-disk artwork cache
  * (`/artwork/tidal/...`, Settings > Library > Artwork cache), or null when
  * the page is not on this machine: the route only answers loopback requests.
  * Callers keep the direct URL as the fallback.
  */
+// A server without the cache route answers with its HTML page, so every
+// picture would fail once before its direct fallback. After a few failures
+// and no success the cache is skipped for the rest of the session.
+let artworkCacheFailures = 0;
+let artworkCacheWorks = false;
+
+export function noteCachedArtworkResult(ok: boolean): void {
+	if (ok) artworkCacheWorks = true;
+	else artworkCacheFailures += 1;
+}
+
 export function cachedTidalArtwork(url: string | null | undefined): string | null {
 	if (!url || typeof window === 'undefined' || !isRenderableTidalArtworkUrl(url)) return null;
+	if (!artworkCacheWorks && artworkCacheFailures >= 3) return null;
 	const { protocol, hostname, origin } = window.location;
 	if (hostname !== 'localhost' && hostname !== '127.0.0.1' && hostname !== '[::1]') return null;
 	const base = import.meta.env.DEV

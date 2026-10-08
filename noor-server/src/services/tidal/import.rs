@@ -256,11 +256,20 @@ pub async fn import_track_from_metadata(
             });
         }
 
+        // Callers hand over a URL, but a bare TIDAL image id has slipped
+        // through before and left artist tiles blank; store it as a URL.
+        let artist_picture = meta.artist_picture.as_deref().map(|picture| {
+            if picture.starts_with("http") {
+                picture.to_string()
+            } else {
+                TidalClient::get_artwork_url(&Some(picture.to_string()), 750).unwrap_or_default()
+            }
+        });
         let artist_id = upsert_artist_tx(
             &tx,
             meta.artist_tidal_id.unwrap_or(0),
             &meta.artist_name,
-            meta.artist_picture.as_deref(),
+            artist_picture.as_deref(),
         )?;
 
         let album_id: Option<i64> = if meta.album_title.is_some() || meta.album_tidal_id.is_some() {

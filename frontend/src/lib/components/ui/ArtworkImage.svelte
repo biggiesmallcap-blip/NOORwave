@@ -1,6 +1,8 @@
 <script lang="ts">
 	import {
 		cachedTidalArtwork,
+		noteCachedArtworkResult,
+		tidalImageIdToUrl,
 		tidalArtworkFallbackSizes,
 		upscaleTidalArtwork,
 		type TidalArtworkSize
@@ -99,6 +101,7 @@
 		const values = Array.isArray(value) ? value : [value];
 		return values
 			.filter((candidate): candidate is string => typeof candidate === 'string' && candidate.trim().length > 0)
+			.map(tidalImageIdToUrl)
 			.filter((candidate, index, list) => list.indexOf(candidate) === index);
 	}
 </script>
@@ -114,8 +117,10 @@
 		fetchpriority={fetchPriority}
 		onload={() => {
 			loaded = true;
+			if (attempts[failedAttempts]?.cached) noteCachedArtworkResult(true);
 		}}
 		onerror={() => {
+			if (attempts[failedAttempts]?.cached) noteCachedArtworkResult(false);
 			failedAttempts += 1;
 		}}
 	/>

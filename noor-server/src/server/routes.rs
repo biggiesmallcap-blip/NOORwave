@@ -5354,7 +5354,8 @@ fn import_metadata_from_tidal_track(t: TidalTrack) -> tidal_import::ImportTrackM
         title: t.title,
         artist_name: t.artist.name,
         artist_tidal_id: Some(t.artist.id),
-        artist_picture: t.artist.picture,
+        // Artist photos come in 160/320/480/750; 640 is a cover size.
+        artist_picture: TidalClient::get_artwork_url(&t.artist.picture, 750),
         album_title,
         album_tidal_id,
         album_artwork_url,

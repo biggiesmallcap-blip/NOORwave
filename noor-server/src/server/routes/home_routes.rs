@@ -589,7 +589,13 @@ fn artwork_from_catalog(
         && let Some(url) = catalog
             .artists
             .first()
-            .and_then(|a| a.artwork_url.clone().or_else(|| a.picture.clone()))
+            // `picture` is TIDAL's bare image id, not a URL: passing it on
+            // made the tile load a relative path and show its initial.
+            .and_then(|a| {
+                a.artwork_url.clone().or_else(|| {
+                    crate::services::tidal::client::TidalClient::get_artwork_url(&a.picture, 750)
+                })
+            })
     {
         return Some(url);
     }

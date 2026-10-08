@@ -515,6 +515,11 @@ async fn main() -> Result<()> {
     // Initialize database
     let db = db::Database::open(&db_path)?;
     db.run_migrations()?;
+    match db.with_conn(db::queries::repair_bare_artist_photos) {
+        Ok(0) => {}
+        Ok(repaired) => info!(repaired, "Artist photos stored as bare TIDAL ids repaired"),
+        Err(error) => tracing::warn!(%error, "Artist photo repair failed"),
+    }
     if let Err(error) = db::catalogue_recovery::consume_pending(&db) {
         tracing::warn!(%error,"Reviewed catalogue recovery left pending; ordinary startup continues");
     }
