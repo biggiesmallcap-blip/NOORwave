@@ -96,20 +96,30 @@
 		margin: 0;
 	}
 
+	/* Inline notices with a status dot, not banners (the deck is the page's
+	   one raised surface). */
 	.disabled-note,
 	.enabled-note {
-		padding: var(--space-3);
-		border: 1px solid color-mix(in srgb, var(--state-warning) 36%, transparent);
-		border-radius: var(--radius-sm);
-		background: color-mix(in srgb, var(--state-warning) 10%, transparent);
-		color: var(--state-warning);
+		display: flex;
+		align-items: baseline;
+		gap: var(--space-2);
+		color: var(--text-secondary);
 		font-size: var(--font-size-sm);
 		line-height: var(--line-height-snug);
 	}
 
-	.enabled-note {
-		border-color: color-mix(in srgb, var(--state-success) 32%, transparent);
-		background: color-mix(in srgb, var(--state-success) 8%, transparent);
-		color: var(--text-secondary);
+	.disabled-note::before,
+	.enabled-note::before {
+		content: '';
+		flex: none;
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: var(--state-warning);
+		transform: translateY(-1px);
+	}
+
+	.enabled-note::before {
+		background: var(--state-success);
 	}
 </style>

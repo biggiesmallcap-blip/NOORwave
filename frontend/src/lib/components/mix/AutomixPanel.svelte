@@ -281,11 +281,11 @@
 
 <div class="automix-panel">
 	{#if errorMsg}
-		<div class="error-banner glass-panel">{errorMsg}</div>
+		<div class="error-banner" role="alert">{errorMsg}</div>
 	{/if}
 
 
-	<section class="queue-lab glass-panel">
+	<section class="queue-lab">
 		<div class="card-heading">
 			<div>
 				<h2 class="t-section">Up next</h2>
@@ -322,11 +322,11 @@
 							<span>{row.item.track.artist_name ?? 'Unknown artist'}</span>
 						</div>
 						<div class="forecast-diagnostics">
-							<span>{formatFeatureSummary(row.nextFeatures)}</span>
+							{#if row.nextFeatures}<span>{formatFeatureSummary(row.nextFeatures)}</span>{/if}
 							{#if row.selectionReasonLabel}
 								<span class="selection-reason"><b>Why</b>{row.selectionReasonLabel}</span>
 							{/if}
-							{#if row.verdict !== 'unknown'}
+							{#if row.verdict !== 'unknown' && row.verdict !== 'pending'}
 								<b class="compat-pill compat-{row.verdict}">
 									{row.keyLabel ?? row.verdict}
 									{#if row.bpmDeltaLabel}
@@ -334,13 +334,10 @@
 									{/if}
 								</b>
 							{:else}
-								<b class="compat-pill">Analyzing</b>
+								<span class="t-meta" title={row.missing.length > 0 ? `Waiting for ${row.missing.join(', ')}` : undefined}>Analysing</span>
 							{/if}
 							{#if row.energyDeltaLabel}
 								<span>{row.energyDeltaLabel}</span>
-							{/if}
-							{#if row.missing.length > 0}
-								<span class="dsp-missing"><b>DSP</b>{row.missing.join(', ')}</span>
 							{/if}
 						</div>
 						<StateBadge label={row.sourceLabel} tone={row.isExternalPending ? 'default' : 'active'} compact={true} />
@@ -407,7 +404,7 @@
 	<section class="diagnostic-top">
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<div
-			class="seed-panel glass-panel"
+			class="seed-panel"
 			oncontextmenu={(e) => {
 				if ($currentTrack) openTrackContextMenu(e, $currentTrack);
 			}}
@@ -454,7 +451,7 @@
 			</div>
 		</div>
 
-		<div class="health-panel glass-panel">
+		<div class="health-panel">
 			<div class="card-heading">
 				<div>
 					<h3>Health</h3>
@@ -494,17 +491,17 @@
 		<MetricPair label="DSP" value={audioStats?.total_analyzed?.toLocaleString() ?? '0'} copy={`BPM ${audioStats?.avg_bpm?.toFixed(1) ?? '--'} / key ${audioStats?.top_key ?? '--'}.`} />
 	</section>
 	<section class="data-calls">
-		<div class="glass-panel data-card">
+		<div class="data-card">
 			<span>Embedding coverage</span>
 			<strong>{percentLabel(discoveryStatus?.coverage_ratio)}</strong>
 			<div class="mini-bar"><i style={`width:${percentLabel(discoveryStatus?.coverage_ratio)}`}></i></div>
 		</div>
-		<div class="glass-panel data-card">
+		<div class="data-card">
 			<span>Neighbor tracks</span>
 			<strong>{discoveryStatus?.neighbor_tracks?.toLocaleString() ?? '0'}</strong>
 			<div class="mini-bar"><i style={`width:${Math.min(100, (discoveryStatus?.neighbor_tracks ?? 0) / 100).toFixed(0)}%`}></i></div>
 		</div>
-		<div class="glass-panel data-card">
+		<div class="data-card">
 			<span>Queue DSP proxy</span>
 			<strong>{analyzedCoverage == null ? '--' : percentLabel(analyzedCoverage)}</strong>
 			<div class="mini-bar"><i style={`width:${percentLabel(analyzedCoverage ?? 0)}`}></i></div>
@@ -573,11 +570,6 @@
 		grid-template-columns: minmax(0, 1.25fr) minmax(18rem, 0.75fr);
 		gap: var(--space-4);
 		align-items: stretch;
-	}
-
-	.seed-panel,
-	.health-panel {
-		padding: var(--space-4);
 	}
 
 	.seed-panel {
@@ -718,9 +710,9 @@
 		line-height: 1;
 	}
 
-	.queue-lab,
 	.data-card {
-		padding: var(--space-4);
+		display: grid;
+		gap: var(--space-1);
 	}
 
 	.card-heading {
@@ -756,17 +748,15 @@
 		gap: var(--space-3);
 		padding: var(--space-2);
 		border-radius: var(--radius-sm);
-		background: rgba(255, 255, 255, 0.026);
-		border: 1px solid transparent;
+		transition: background var(--motion-fast);
 	}
 
 	.forecast-row:hover {
-		border-color: var(--border-subtle);
-		background: rgba(255, 255, 255, 0.045);
+		background: var(--bg-hover);
 	}
 
 	.forecast-row.verdict-clash {
-		border-color: color-mix(in srgb, var(--state-error) 28%, transparent);
+		box-shadow: inset 2px 0 0 color-mix(in srgb, var(--state-error) 70%, transparent);
 	}
 
 	.queue-index {
@@ -801,8 +791,7 @@
 	.queue-meta strong,
 	.queue-meta span,
 	.forecast-diagnostics span,
-	.selection-reason,
-	.dsp-missing {
+	.selection-reason {
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -815,8 +804,7 @@
 		line-height: var(--line-height-snug);
 	}
 
-	.selection-reason,
-	.dsp-missing {
+	.selection-reason {
 		display: inline-flex;
 		align-items: center;
 		gap: var(--space-1);
@@ -824,22 +812,13 @@
 		color: var(--text-primary);
 	}
 
-	.selection-reason b,
-	.dsp-missing b {
+	.selection-reason b {
 		flex: 0 0 auto;
 		color: var(--accent);
 		font-size: var(--font-size-2xs);
 		font-weight: var(--font-weight-bold);
 		line-height: 1;
 		text-transform: uppercase;
-	}
-
-	.dsp-missing {
-		color: var(--text-secondary);
-	}
-
-	.dsp-missing b {
-		color: var(--state-warning);
 	}
 
 	.compat-pill {

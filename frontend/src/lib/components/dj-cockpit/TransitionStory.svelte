@@ -67,7 +67,8 @@
 	{:else if preview?.status === 'armed' && preview.planned_fire_ms != null}
 		<p>Drop preview scheduled at {timeLabel(preview.planned_fire_ms / 1000)} in the outgoing track.</p>
 	{/if}
-	{#if !compact}<TransitionScene status={shown} progress={fallback ? null : progress} playing={$isPlaying} />{/if}
+	<!-- With DJ off the strip above already says so; an empty scene would repeat it. -->
+	{#if !compact && (status?.enabled ?? enabled) !== false}<TransitionScene status={shown} progress={fallback ? null : progress} playing={$isPlaying} />{/if}
 	{#if progress != null && !fallback}
 		<progress max="1" value={progress ?? 0} aria-label="Transition progress"></progress>
 	{/if}

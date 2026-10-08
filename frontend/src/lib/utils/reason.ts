@@ -1,8 +1,9 @@
 /**
  * Parse a queue-row provenance string into a structured breakdown.
  *
- * The backend emits reasons as `"<prefix> | <json>"` where the prefix
- * is human-readable and the JSON suffix carries scoring components for
+ * The backend emits reasons as `"<prefix> | <json>"` (sometimes with more
+ * human text after the JSON) where the prefix is human-readable and the JSON
+ * carries scoring components for
  * the queue tooltip (genre Jaccard, affinity multiplier, etc.). Older
  * reasons from before Phase 2b only have the prefix; we degrade
  * gracefully — the prefix is always preserved.
@@ -36,34 +37,28 @@ export function parseReason(raw: string | null | undefined): ReasonBreakdown | n
 	const trimmed = raw.trim();
 	if (!trimmed) return null;
 
-	// Split on the rightmost ' | ' so prefixes that legitimately contain
-	// that pattern (unlikely but possible in human strings) are preserved.
-	const sepIdx = trimmed.lastIndexOf(SEPARATOR);
-	if (sepIdx < 0) {
-		return { prefix: trimmed };
-	}
-
-	const prefix = trimmed.slice(0, sepIdx).trim();
-	const jsonPart = trimmed.slice(sepIdx + SEPARATOR.length).trim();
-
-	if (!jsonPart.startsWith('{')) {
-		return { prefix: trimmed };
-	}
+	// Reasons are ' | '-joined segments: human text, at most one JSON object
+	// of scores, and sometimes more human text after it ("automix: audio
+	// texture | {...} | dj: hub penalty"). The JSON is never for display.
+	const segments = trimmed.split(SEPARATOR).map((segment) => segment.trim()).filter(Boolean);
+	const jsonIndex = segments.findIndex((segment) => segment.startsWith('{'));
+	const human = segments.filter((_, index) => index !== jsonIndex).join('; ');
+	const out: ReasonBreakdown = { prefix: human || trimmed };
+	if (jsonIndex < 0) return out;
 
 	try {
-		const parsed = JSON.parse(jsonPart) as Partial<ReasonBreakdown>;
-		const out: ReasonBreakdown = { prefix };
+		const parsed = JSON.parse(segments[jsonIndex]) as Partial<ReasonBreakdown>;
 		if (typeof parsed.genre_jaccard === 'number' && Number.isFinite(parsed.genre_jaccard)) {
 			out.genre_jaccard = parsed.genre_jaccard;
 		}
 		if (typeof parsed.affinity_mult === 'number' && Number.isFinite(parsed.affinity_mult)) {
 			out.affinity_mult = parsed.affinity_mult;
 		}
-		return out;
 	} catch {
-		// Malformed JSON suffix: fall back to the whole string as prefix.
-		return { prefix: trimmed };
+		// Malformed or truncated JSON (the server caps reason length): the
+		// human segments are still the reason.
 	}
+	return out;
 }
 
 /**
