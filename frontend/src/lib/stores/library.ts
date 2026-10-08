@@ -39,6 +39,13 @@ export const lastSelectedAlbumId = albumSelection.lastId;
 
 const PAGE_SIZE = 100;
 let currentTrackListLikedOnly = false;
+// The scope of the newest track-list request, set before it resolves so a
+// caller can tell whether $tracks already is (or is becoming) the list it wants.
+let requestedTrackListLikedOnly: boolean | null = null;
+
+export function requestedTracksLikedOnly(): boolean | null {
+	return requestedTrackListLikedOnly;
+}
 
 export async function loadTracks(
 	sort = 'date_added',
@@ -47,6 +54,7 @@ export async function loadTracks(
 	offset = 0,
 	likedOnly = false,
 ) {
+	if (offset === 0) requestedTrackListLikedOnly = likedOnly;
 	if (offset === 0) isLoading.set(true);
 	else isLoadingMore.set(true);
 	try {

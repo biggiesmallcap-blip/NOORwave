@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { motionPreference, prefersReducedMotion } from '$lib/stores/motion';
+	import { librarySongsScope } from '$lib/stores/library_songs';
 	import { onMount, tick, untrack } from 'svelte';
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
@@ -2491,6 +2492,12 @@
 					<p class="runtime-error">{playbackRuntime.last_error}</p>
 				{/if}</details>{#if playbackRuntime?.last_error}<p class="error" role="alert">{playbackRuntime.last_error}</p>{/if}
 {:else if activeCategory === 'library'}
+<SettingGroup title="Songs"><SettingRow label="Songs tab shows" id="library-songs-scope" hint="Liked songs, as in TIDAL and Spotify, or every song in your library, including tracks from saved albums and local imports."><Segmented
+	label="Songs tab shows"
+	options={[{ value: 'liked', label: 'Liked songs' }, { value: 'library', label: 'All library songs' }]}
+	value={$librarySongsScope}
+	onchange={(value) => librarySongsScope.set(value)}
+/></SettingRow></SettingGroup>
 <section data-setting-id="library-sync" class="glass-tile section-panel"><SectionHeader title="Sync" />{#if $tidalStatus === "connected"}					<div class="info-list">
 
 						<div class="info-row">

@@ -17,11 +17,13 @@
 	import {
 		tracks, albums, artists as artistsStore, isLoading, isLoadingMore, totalTracks, totalAlbums,
 		sortBy, sortDir, viewMode, searchQuery,
-		loadTracks, loadAlbums,
+		loadTracks, loadAlbums, requestedTracksLikedOnly,
 		selectedTrackIds, selectedAlbumIds,
 		lastSelectedTrackId, lastSelectedAlbumId,
 		selectTrackIds, selectAlbumIds, clearSelection,
 	} from '$lib/stores/library';
+	import { LIBRARY_TABS, restoreLibraryTab, type LibraryTab } from '$lib/components/library/library_tabs';
+	import { librarySongsScope } from '$lib/stores/library_songs';
 	import { formatTrackDuration, formatDateShort, savedDateMillis, getQualityClass } from '$lib/utils/format';
 	import { api, type Album, type Artist, type AudioSearchResult, type Genre, type Playlist, type Track } from '$lib/api/client';
 	import { cachedApi, invalidateLibraryCaches } from '$lib/cache/api_queries';
@@ -140,11 +142,14 @@
 	const ALL_SEARCH_ALBUM_PREVIEW_LIMIT = 12;
 	const ALL_SEARCH_TRACK_PREVIEW_LIMIT = 10;
 
-	let activeTab = $state<'all' | 'tracks' | 'liked' | 'albums' | 'artists'>('all');
+	let activeTab = $state<LibraryTab>('all');
+	// Songs lists liked songs unless Settings > Library widens it to every
+	// library song (TIDAL and Spotify behave the same way).
+	let likedOnly = $derived($librarySongsScope === 'liked');
 	// Only render the second toolbar row when the tab actually contributes
 	// controls to it, so tabs without any never leave a gap behind.
 	const hasToolbarActions = $derived(
-		activeTab === 'tracks' || activeTab === 'liked' || activeTab === 'albums'
+		activeTab === 'tracks' || activeTab === 'albums'
 	);
 	let playlists = $state<Playlist[]>([]);
 	let genres = $state<Genre[]>([]);
@@ -418,25 +423,19 @@
 		if ($searchQuery.trim()) return;
 		// Albums have their own ordering control (setAlbumSort); handleSort only
 		// drives the track/liked list column headers.
-		if (activeTab === 'tracks') {
-			loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, false);
-		} else if (activeTab === 'liked') {
-			loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, true);
-		}
+		if (activeTab === 'tracks') loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, likedOnly);
 		clearSelection();
 	}
 
-	function switchTab(tab: 'all' | 'tracks' | 'liked' | 'albums' | 'artists') {
+	function switchTab(tab: LibraryTab) {
 		activeTab = tab;
 		expandedTrackId = null;
 		expandedAlbumId = null;
 		detailTrack = null;
 		detailAlbum = null;
 		if (!$searchQuery.trim()) {
-			// Tracks and Liked share the $tracks store but represent different result sets,
-			// so always refetch from offset 0 when entering either - never reuse stale rows.
-			if (tab === 'tracks') loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, false);
-			if (tab === 'liked') loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, true);
+			// Always refetch Songs from offset 0 - never reuse stale rows.
+			if (tab === 'tracks') loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, likedOnly);
 			if (tab === 'albums') loadAlbums(albumSortField, albumSortDir, PAGE_SIZE, 0, activeDecade);
 		}
 		if (tab === 'artists' && artists.length === 0) void loadArtists();
@@ -531,7 +530,7 @@
 					const audio = await api.searchAudio({
 						...params,
 						shuffle: true,
-						liked_only: activeTab === 'liked',
+						liked_only: activeTab === 'tracks' && likedOnly,
 						limit: SHUFFLE_SAMPLE_SIZE,
 					});
 					const ids = audio.tracks.map((t) => t.id);
@@ -557,7 +556,7 @@
 		await playLibrary({
 			sortBy: $sortBy,
 			sortDir: $sortDir,
-			likedOnly: activeTab === 'liked',
+			likedOnly: activeTab === 'tracks' && likedOnly,
 			shuffle,
 		});
 	}
@@ -764,7 +763,7 @@
 	}
 
 	function handleTrackListKeydown(event: KeyboardEvent) {
-		if (activeTab !== 'tracks' && activeTab !== 'liked') return;
+		if (activeTab !== 'tracks') return;
 		if (event.key === 'ArrowDown') {
 			event.preventDefault();
 			if (visibleTracks.length === 0) return;
@@ -870,7 +869,7 @@
 			// Restore the optimistic removals from the server on failure.
 			batchError = `Failed to delete selection: ${error}`;
 			invalidateLibraryCaches();
-			void loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, activeTab === 'liked');
+			void loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, likedOnly);
 			void loadAlbums(albumSortField, albumSortDir, PAGE_SIZE, 0, activeDecade);
 		} finally {
 			batchBusy = null;
@@ -894,7 +893,7 @@
 				...undoAlbums.map((a) => api.setAlbumFavorite(a.id, true)),
 			]);
 			invalidateLibraryCaches();
-			if (undoTracks.length) await loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, activeTab === 'liked');
+			if (undoTracks.length) await loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, likedOnly);
 			if (undoAlbums.length) await loadAlbums(albumSortField, albumSortDir, PAGE_SIZE, 0, activeDecade);
 			const count = undoTracks.length + undoAlbums.length;
 			batchMessage = `Restored ${count} item${count === 1 ? '' : 's'} to your library.`;
@@ -1038,9 +1037,9 @@
 			return;
 		}
 		if ($isLoading || $isLoadingMore) return;
-		if (activeTab === 'tracks' || activeTab === 'liked') {
+		if (activeTab === 'tracks') {
 			if ($tracks.length >= $totalTracks) return;
-			await loadTracks($sortBy, $sortDir, PAGE_SIZE, $tracks.length, activeTab === 'liked');
+			await loadTracks($sortBy, $sortDir, PAGE_SIZE, $tracks.length, likedOnly);
 			return;
 		}
 		if ($albums.length >= $totalAlbums) return;
@@ -1060,7 +1059,7 @@
 				const audio = await api.searchAudio({
 					...params,
 					shuffle: true,
-					liked_only: activeTab === 'liked',
+					liked_only: activeTab === 'tracks' && likedOnly,
 					limit: 1,
 				});
 				const randomTrack = audio.tracks[0];
@@ -1096,24 +1095,24 @@
 	let libraryModeLabel = $derived(
 		activeTab === 'albums' ? 'Album view'
 			: activeTab === 'artists' ? 'Artist view'
-			: activeTab === 'liked' ? 'Liked view'
-			: 'Track view'
+			: activeTab === 'tracks' ? 'Songs view'
+			: 'Library view'
 	);
 	let libraryModeCopy = $derived(
 		activeTab === 'albums'
 			? 'Artwork-first browse with quick album actions.'
 			: activeTab === 'artists'
 			? 'Browse your artists and explore their tracks.'
-			: activeTab === 'liked'
-			? "Tracks you've explicitly liked."
+			: activeTab === 'tracks' && likedOnly
+			? "Songs you've liked."
 			: 'Dense track management with direct playback and batch work.'
 	);
 	let isSearchMode = $derived(Boolean($searchQuery.trim()));
 	let visibleTracks = $derived.by(() => {
 		if (!$searchQuery.trim()) return $tracks;
 		// Search results don't know about liked_only, so filter client-side
-		// to keep the Liked tab's promise honest while a query is active.
-		const results = activeTab === 'liked'
+		// to keep Songs' promise honest while a query is active.
+		const results = activeTab === 'tracks' && likedOnly
 			? searchResults.tracks.filter(t => t.is_favorite)
 			: searchResults.tracks;
 		if (!$sortBy || $sortBy === 'relevance') return results;
@@ -1186,7 +1185,7 @@
 	let allSearchTotal = $derived(allSearchArtists.length + visibleAlbums.length + visibleTracks.length);
 	let canLoadMore = $derived(
 		!$searchQuery.trim() &&
-		((activeTab === 'tracks' || activeTab === 'liked')
+		(activeTab === 'tracks'
 			? $tracks.length < $totalTracks
 			: activeTab === 'albums'
 			? $albums.length < $totalAlbums
@@ -1201,21 +1200,21 @@
 		searchTotal !== null && searchResults.tracks.length < searchTotal
 	);
 	let searchSummary = $derived.by(() => {
-		if (searchTruncated && (activeTab === 'tracks' || activeTab === 'liked' || activeTab === 'all')) {
+		if (searchTruncated && (activeTab === 'tracks' || activeTab === 'all')) {
 			return `top ${searchResults.tracks.length} of ${searchTotal} track matches`;
 		}
 		return activeTab === 'all'
 			? formatSearchSummary(allSearchArtists.length, visibleAlbums.length, visibleTracks.length)
-			: (activeTab === 'tracks' || activeTab === 'liked')
+			: activeTab === 'tracks'
 			? `${visibleTracks.length} track match${visibleTracks.length === 1 ? '' : 'es'}`
 			: `${visibleAlbums.length} album match${visibleAlbums.length === 1 ? '' : 'es'}`;
 	});
 	let loadedSummary = $derived(
 		activeTab === 'albums'
 			? `${$albums.length} of ${$totalAlbums} albums loaded`
-			: activeTab === 'liked'
-			? `${$tracks.length} of ${$totalTracks} liked tracks loaded`
-			: `${$tracks.length} of ${$totalTracks} tracks loaded`
+			: likedOnly
+			? `${$tracks.length} of ${$totalTracks} songs loaded`
+			: `${$tracks.length} of ${$totalTracks} library songs loaded`
 	);
 
 	// ── Home view derived data ──────────────────────────────────────────────
@@ -1451,7 +1450,7 @@
 	// Track-list virtualization: follow the workspace scroll while a track
 	// list is on screen.
 	$effect(() => {
-		if (activeTab !== 'tracks' && activeTab !== 'liked') return;
+		if (activeTab !== 'tracks') return;
 		// Capturing listener on the document sees scrolls of any container
 		// (workspace on desktop, document on mobile) without re-binding when
 		// the responsive layout flips between them.
@@ -1521,7 +1520,7 @@
 	function currentLoadedCount(): number {
 		if (activeTab === 'artists') return artists.length
 		if (activeTab === 'albums') return get(albums).length
-		if (activeTab === 'tracks' || activeTab === 'liked') return get(tracks).length
+		if (activeTab === 'tracks') return get(tracks).length
 		return 0
 	}
 	export const snapshot: Snapshot<LibrarySnapshot> = {
@@ -1538,10 +1537,7 @@
 			loadedCount: currentLoadedCount()
 		}),
 		restore: (saved) => {
-			const validTabs = ['all', 'tracks', 'liked', 'albums', 'artists'] as const
-			if ((validTabs as readonly string[]).includes(saved.activeTab)) {
-				activeTab = saved.activeTab as typeof activeTab
-			}
+			activeTab = restoreLibraryTab(saved.activeTab)
 			if (typeof saved.searchQuery === 'string') searchQuery.set(saved.searchQuery)
 			if (typeof saved.sortBy === 'string') sortBy.set(saved.sortBy)
 			if (saved.sortDir === 'asc' || saved.sortDir === 'desc') sortDir.set(saved.sortDir)
@@ -1572,6 +1568,14 @@
 	// Reset decade filter when leaving albums tab.
 	$effect(() => {
 		if (activeTab !== 'albums') activeDecade = null;
+	})
+
+	// Songs reloads when its rows came from the other scope: the setting changed
+	// while away, or a back-nav restored Songs over rows loaded for All.
+	$effect(() => {
+		if (activeTab !== 'tracks' || $searchQuery.trim()) return;
+		if (requestedTracksLikedOnly() === likedOnly) return;
+		void loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, likedOnly);
 	})
 
 	// Keep the highlighted track in view as the cursor moves.
@@ -1614,11 +1618,9 @@
 		/>
 		<div class="filter-pills">
 			<div class="filter-pill-group filter-pill-group--primary">
-				<button class="filter-pill" class:active={activeTab === 'all'}     onclick={() => switchTab('all')}>All</button>
-				<button class="filter-pill" class:active={activeTab === 'tracks'}  onclick={() => switchTab('tracks')}>Tracks</button>
-				<button class="filter-pill" class:active={activeTab === 'liked'}   onclick={() => switchTab('liked')}>Liked</button>
-				<button class="filter-pill" class:active={activeTab === 'albums'}  onclick={() => switchTab('albums')}>Albums</button>
-				<button class="filter-pill" class:active={activeTab === 'artists'} onclick={() => switchTab('artists')}>Artists</button>
+				{#each LIBRARY_TABS as tab (tab.id)}
+					<button class="filter-pill" class:active={activeTab === tab.id} onclick={() => switchTab(tab.id)}>{tab.label}</button>
+				{/each}
 				<button class="filter-pill" onclick={() => void playRandomLibrary()} title="Random play">
 					<span class="pill-glyph" aria-hidden="true">⤮</span>Random
 				</button>
@@ -1626,7 +1628,7 @@
 
 			{#if hasToolbarActions}
 			<div class="filter-pill-actions">
-				{#if activeTab === 'tracks' || activeTab === 'liked'}
+				{#if activeTab === 'tracks'}
 					<div class="play-controls" role="group" aria-label="Play this view">
 						<button class="filter-pill filter-pill--accent" onclick={() => void playTrackView(false)} title="Play this view">
 							<span class="pill-glyph" aria-hidden="true">▶</span>Play
@@ -1693,7 +1695,7 @@
 				<span class="library-status">Searching…</span>
 			{:else if isSearchMode}
 				<span class="library-status">{searchSummary}</span>
-				{#if searchTruncated && (activeTab === 'tracks' || activeTab === 'liked' || activeTab === 'all')}
+				{#if searchTruncated && (activeTab === 'tracks' || activeTab === 'all')}
 					<button
 						class="filter-pill"
 						disabled={searchLoadingMore}
@@ -1727,7 +1729,7 @@
 				<button class="btn btn-glass" disabled={batchBusy === 'delete'} onclick={confirmDeleteSelection}>
 					{batchBusy === 'delete' ? 'Deleting…' : 'Delete'}
 				</button>
-				{#if activeTab === 'tracks' || activeTab === 'liked'}
+				{#if activeTab === 'tracks'}
 					<select bind:value={selectedPlaylistId} class="batch-select">
 						{#each playlists as playlist}
 							<option value={playlist.id}>{playlist.name}</option>
@@ -2242,7 +2244,7 @@
 			{/if}
 		{/if}
 
-	{:else if activeTab === 'tracks' || activeTab === 'liked'}
+	{:else if activeTab === 'tracks'}
 		<!-- Track List (shared between Tracks and Liked tabs - server filters via likedOnly) -->
 		<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 		<div class="track-list" role="list" bind:clientWidth={trackListWidth} onkeydown={handleTrackListKeydown}>
@@ -2518,11 +2520,11 @@
 			<EmptyState title={isSearchMode ? 'No tracks match this search' : 'No tracks yet'} copy={isSearchMode ? 'Try a different artist, album, or track name.' : 'Connect TIDAL in Settings to sync your library.'} />
 		{:else if !isSearchMode && $tracks.length < $totalTracks}
 			<div class="load-more-row">
-				<span class="load-more-count">{$tracks.length} of {$totalTracks} {activeTab === 'liked' ? 'liked tracks' : 'tracks'}</span>
+				<span class="load-more-count">{$tracks.length} of {$totalTracks} {likedOnly ? 'songs' : 'library songs'}</span>
 				<button
 					class="btn btn-glass"
 					disabled={$isLoadingMore}
-					onclick={() => loadTracks($sortBy, $sortDir, PAGE_SIZE, $tracks.length, activeTab === 'liked')}
+					onclick={() => loadTracks($sortBy, $sortDir, PAGE_SIZE, $tracks.length, likedOnly)}
 				>
 					{$isLoadingMore ? 'Loading…' : 'Load More'}
 				</button>

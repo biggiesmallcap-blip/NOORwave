@@ -20,6 +20,12 @@ function cssBlock(selector: string): string {
 }
 
 describe('library layout contracts', () => {
+	test('Songs follows the songs-scope setting; Liked is no longer a tab', () => {
+		expect(source).toContain("let likedOnly = $derived($librarySongsScope === 'liked');");
+		expect(source).not.toContain("switchTab('liked')");
+		expect(source).toContain('restoreLibraryTab(saved.activeTab)');
+	});
+
 	test('primary category pills stay centered under the search input', () => {
 		expect(source).toContain('class="filter-pill-group filter-pill-group--primary"');
 		expect(source).toContain('class="filter-pill-actions"');
