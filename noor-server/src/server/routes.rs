@@ -756,6 +756,10 @@ pub fn api_routes(state: SharedState) -> Router {
             get(catalog_routes::get_album_decades),
         )
         .route(
+            "/api/albums/{id}/credits",
+            get(catalog_routes::get_album_credits),
+        )
+        .route(
             "/api/albums/{id}/tracks",
             get(catalog_routes::get_album_tracks),
         )
@@ -764,6 +768,10 @@ pub fn api_routes(state: SharedState) -> Router {
             get(catalog_routes::get_album_spotify_stats),
         )
         .route("/api/artists", get(catalog_routes::get_artists))
+        .route(
+            "/api/artists/letters",
+            get(catalog_routes::get_artist_letters),
+        )
         .route("/api/artists/{id}", get(catalog_routes::get_artist))
         .route(
             "/api/artists/{id}/tracks",

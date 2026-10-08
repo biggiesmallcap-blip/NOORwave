@@ -91,7 +91,7 @@
 		pointer-events: none;
 		font-family: inherit;
 		color: #e8e8f0;
-		animation: reason-card-fade-in 100ms ease-out;
+		animation: reason-card-fade-in var(--motion-press);
 	}
 
 	@keyframes reason-card-fade-in {

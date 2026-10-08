@@ -80,12 +80,19 @@
 {/if}
 
 <style>
+	/* Same hover response as the Music Mixes cards beside it: the card lifts
+	   and the artwork shadow deepens. */
 	.jump-card {
 		all: unset;
 		display: grid;
 		gap: 4px;
 		width: 100%;
 		cursor: pointer;
+		transition: transform var(--motion-base);
+	}
+
+	.jump-card:hover {
+		transform: translateY(-4px);
 	}
 
 	.art {
@@ -94,6 +101,12 @@
 		aspect-ratio: 1;
 		border-radius: var(--radius-md);
 		background: var(--bg-raised);
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+		transition: box-shadow var(--motion-base);
+	}
+
+	.jump-card:hover .art {
+		box-shadow: 0 12px 26px -6px rgba(0, 0, 0, 0.5);
 	}
 
 	.art :global(.jump-art) {

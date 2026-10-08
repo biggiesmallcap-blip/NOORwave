@@ -245,7 +245,7 @@
 		onEnterQuietMode={onEnterQuietMode}
 	/>
 
-	<div class="np-controls">
+	<div class="np-controls" data-transport>
 		<button
 			class="np-mute-btn"
 			type="button"
@@ -516,7 +516,7 @@
 		height: 100%;
 		object-fit: cover;
 		display: block;
-		animation: artwork-fade-in 320ms ease both;
+		animation: artwork-fade-in var(--motion-slow) both;
 	}
 
 	@keyframes artwork-fade-in {

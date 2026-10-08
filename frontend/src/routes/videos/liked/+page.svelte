@@ -578,9 +578,9 @@
 		cursor: pointer;
 		white-space: nowrap;
 		transition:
-			background 0.15s,
-			color 0.15s,
-			border-color 0.15s;
+			background var(--motion-fast),
+			color var(--motion-fast),
+			border-color var(--motion-fast);
 	}
 
 	.tool-btn:hover:not(:disabled) {

@@ -470,6 +470,79 @@ pub(super) async fn get_artists(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+/// `GET /api/albums/{id}/credits`: the liner-note line for an album page.
+/// The label is filled once from TIDAL's copyright and stored (an empty value
+/// records "TIDAL has none", so the lookup never repeats); the release date
+/// comes from TIDAL when the lookup runs, else the stored year stands in.
+pub(super) async fn get_album_credits(
+    State(state): State<SharedState>,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, StatusCode> {
+    let row = {
+        let s = state.read().await;
+        s.db.with_conn(|conn| queries::get_album_credits(conn, id))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+    let Some((tidal_id, label, year)) = row else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let mut release_date: Option<String> = None;
+    let mut label = label;
+    if let (None, Some(tidal_album_id)) = (&label, tidal_id) {
+        let (tokens, tidal_http_client) = {
+            let persisted = load_persisted_tidal_tokens(&state)
+                .await
+                .unwrap_or_default();
+            let s = state.read().await;
+            (
+                s.tidal_tokens.clone().or(persisted),
+                s.tidal_http_client.clone(),
+            )
+        };
+        if let Some(tokens) = tokens {
+            let client = TidalClient::with_http(
+                tidal_http_client,
+                tokens.access_token.clone(),
+                tokens.country_code.clone(),
+            );
+            match client.get_album(tidal_album_id).await {
+                Ok(album) => {
+                    let copyright = album.extra.get("copyright").and_then(Value::as_str);
+                    let found = queries::label_from_copyright(copyright);
+                    let s = state.read().await;
+                    let _ =
+                        s.db.with_conn(|conn| queries::set_album_label(conn, id, &found));
+                    release_date = album.release_date.clone();
+                    label = Some(found);
+                }
+                Err(e) => tracing::debug!(?e, album_id = id, "album credits: TIDAL lookup failed"),
+            }
+        }
+    }
+    let label = label.filter(|value| !value.is_empty());
+    Ok(Json(
+        json!({ "label": label, "release_date": release_date, "year": year }),
+    ))
+}
+
+/// `GET /api/artists/letters`: the artist total and the first list offset of
+/// each initial, in the same order as `GET /api/artists`, so the Library can
+/// jump to a letter without paging through everything before it.
+pub(super) async fn get_artist_letters(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let state = state.read().await;
+    state
+        .db
+        .with_conn(|conn| {
+            let index = queries::get_artist_letter_index(conn)?;
+            Ok(Json(
+                json!({ "total": index.total, "letters": index.letters }),
+            ))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 fn clamp_catalog_list_limit(limit: Option<i64>, default: i64) -> i64 {
     limit.unwrap_or(default).clamp(1, CATALOG_LIST_LIMIT_MAX)
 }

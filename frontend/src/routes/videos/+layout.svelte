@@ -113,7 +113,7 @@
 		display: grid;
 		grid-template-columns: minmax(0, 1fr);
 		min-width: 0;
-		animation: body-in 0.2s ease both;
+		animation: body-in var(--motion-base) both;
 	}
 
 	.section-body[hidden] {

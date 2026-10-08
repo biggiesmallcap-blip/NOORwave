@@ -40,7 +40,7 @@ describe('persistent video dock contract', () => {
 		// and the start pinned inline so no frame shows the end box early.
 		expect(dock).toContain("dockEl.style.animationDuration = '0s';");
 		expect(dock).toContain('el.style.transform = start;');
-		expect(dock).toContain('animation: dock-in 0.22s ease backwards;');
+		expect(dock).toContain('animation: dock-in var(--motion-base) backwards;');
 		expect(dock).toContain('if (dockEl?.isConnected) lastDockRect = dockEl.getBoundingClientRect();');
 		expect(dock).toContain('const started = fullscreenMove ? sizeGlideFrom(lastDockRect) : flipFrom(lastDockRect);');
 		// The FLIP starts when the compositor runs it (a pinned start time

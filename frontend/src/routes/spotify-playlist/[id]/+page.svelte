@@ -583,24 +583,6 @@
     max-width: 60ch;
   }
   .resolved-count { color: var(--accent); font-weight: var(--font-weight-semibold); }
-  .btn-primary,
-  .btn-secondary {
-    background: var(--accent);
-    color: var(--bg-base);
-    border: none;
-    padding: 9px 14px;
-    border-radius: 999px;
-    font-weight: var(--font-weight-bold);
-    cursor: pointer;
-    font-size: var(--font-size-sm);
-  }
-  .btn-secondary {
-    background: var(--border-subtle);
-    color: var(--text-primary);
-    border: 1px solid var(--panel-border);
-  }
-  .btn-primary:disabled,
-  .btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
   .resolving-badge {
     font-size: var(--font-size-xs);
     color: var(--text-muted);

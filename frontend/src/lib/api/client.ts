@@ -2624,6 +2624,11 @@ export const api = {
 		}>(`/api/albums/${id}/tracks`);
 	},
 
+	/** Liner-note facts: label (filled once from TIDAL), release date, year. */
+	getAlbumCredits(id: number) {
+		return fetchApi<{ label: string | null; release_date: string | null; year: number | null }>(`/api/albums/${id}/credits`);
+	},
+
 	getAlbumSpotifyStats(id: number) {
 		return fetchApi<SpotifyTrackStats>(`/api/albums/${id}/spotify-stats`);
 	},
@@ -2635,6 +2640,12 @@ export const api = {
 			limit: String(limit),
 			offset: String(offset),
 		});
+	},
+
+	/** Artist total and the first list offset of each initial (A-Z, then #),
+	 *  in the same order as getArtists. */
+	getArtistLetters() {
+		return fetchApi<{ total: number; letters: { letter: string; offset: number }[] }>('/api/artists/letters');
 	},
 
 	getArtist(id: number) {

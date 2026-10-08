@@ -184,7 +184,7 @@ The `clay` colour scheme coordinates parchment, ink, and terracotta across the e
 | `Segmented` | Choosing one value (theme, time range, grid or list, transition speed). | A sunken track with a sliding thumb in `--bg-raised` and `--text-primary`. Never accent. |
 | `FilterChip` | Toggling a filter on and off (Liked, a decade, a genre). | Pill. Active is `--accent-soft` fill, `--accent-strong` text, `--accent-line` border. |
 | `Dropdown` | Picking from a list in a toolbar (sort, genre, year). | A chip showing label and value with a chevron, opening the shared menu surface. No native `select` in toolbars. |
-| Buttons | Primary: `--accent` fill. Secondary: `--bg-surface` fill, no border (today `.btn-glass`, which still has a hairline). Ghost: text only. Icon: round, 36px (40 and 48 in the player). | Sizes 30, 36, 44. No hover lift. Press scales to 0.97. |
+| Buttons | Primary: `--accent` fill. Secondary: `--bg-surface` fill, no border (`.btn-secondary`; `.btn-glass` is the older variant with a hairline). Ghost: text only. Icon: round, 36px (40 and 48 in the player). | Sizes 30, 36, 44. No hover lift. Press scales to 0.97. |
 | `ActionBar` | The action row of every detail hero. | Play (primary, labelled), Shuffle, Radio (secondary, labelled), Like and More (icon). Labels collapse to icons with tooltips below 1100px of content width. |
 | Search field | Every search entry point. | `SearchField`, 48px in a command header, 36px inline. Sunken fill, no border at rest, focus ring on focus. |
 | Focus | Every interactive element. | `outline: 2px solid var(--accent-strong); outline-offset: 2px`. Inside clipped containers use `outline-offset: -2px`. |
@@ -340,7 +340,7 @@ All right-click menus are rendered by `ContextMenu.svelte`; do not create one-of
 ## Global utility classes
 
 - `.t-entity`, `.t-page-title`, `.t-section`, `.t-label`, `.t-row-title`, `.t-meta`, `.t-body`, `.t-micro` - the typography roles.
-- `.btn`, `.btn-primary`, `.btn-glass` - buttons. Global `.btn-secondary`, `.btn-ghost` and `.btn-icon` are not added yet because some components define local classes with those names; `ActionBar` carries its own button styles.
+- `.btn` with `.btn-primary`, `.btn-secondary` (fill, no border), `.btn-ghost` (text only), `.btn-icon` (round, 36px) or the older `.btn-glass` (fill with a hairline) - buttons. `ActionBar` carries its own button styles.
 - `.row-btn` - a borderless icon action inside a row, hidden until hover or focus, always occupying its space.
 - `.back-link` - the back pill on detail routes. It supplies its own chevron and is `inline-size: fit-content`. Do not show it on top-level destinations. The one exception is the Videos section header, where Back deliberately returns to wherever the listener came from.
 - `.quality-badge` - only where quality differs from the surrounding content.

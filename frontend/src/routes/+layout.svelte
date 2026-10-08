@@ -562,6 +562,14 @@
 		window.removeEventListener('noor:unauthorized', handleUnauthorized);
 	});
 
+	const SPACE_CONTROLS = 'button, a[href], summary, select, [role="button"], [role="switch"], [role="tab"], [role="radio"], [role="checkbox"], [role="menuitem"], [role="option"]';
+
+	function spaceActivatesFocusedControl(target: HTMLElement | null): boolean {
+		const control = target?.closest?.(SPACE_CONTROLS);
+		if (!control) return false;
+		return control.closest('[data-transport]') == null;
+	}
+
 	function isTypingTarget(target: EventTarget | null): boolean {
 		if (!(target instanceof HTMLElement)) return false;
 		const tag = target.tagName;
@@ -670,6 +678,10 @@
 		switch (event.key) {
 			case ' ':
 			case 'Spacebar':
+				// Space presses a focused control, as everywhere on the web; it
+				// only toggles playback when focus is on the page or on the
+				// player's own transport.
+				if (spaceActivatesFocusedControl(target)) return;
 				event.preventDefault();
 				void togglePlayback();
 				break;
@@ -3119,7 +3131,7 @@
 		border-radius: var(--radius-sm);
 		background: color-mix(in srgb, var(--accent-soft) 70%, transparent);
 		border: 1px solid var(--accent-line);
-		animation: queue-undo-slide-in 180ms ease-out;
+		animation: queue-undo-slide-in var(--motion-base);
 	}
 
 	@keyframes queue-undo-slide-in {
@@ -3967,7 +3979,7 @@
 			z-index: 30;
 			display: flex;
 			flex-direction: column;
-			animation: mini-player-in 200ms cubic-bezier(0.25, 0.8, 0.25, 1) both;
+			animation: mini-player-in var(--motion-base) both;
 		}
 
 		@keyframes mini-player-in {
@@ -4160,7 +4172,7 @@
 			z-index: 41;
 			padding: 12px 0 8px;
 			box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.24);
-			animation: sheet-up 240ms cubic-bezier(0.25, 0.8, 0.25, 1) both;
+			animation: sheet-up var(--motion-base) both;
 		}
 
 		@keyframes sheet-up {
@@ -4242,7 +4254,7 @@
 			flex-direction: column;
 			gap: 16px;
 			box-shadow: 0 -16px 48px rgba(0, 0, 0, 0.32);
-			animation: np-sheet-up 280ms cubic-bezier(0.25, 0.8, 0.25, 1) both;
+			animation: np-sheet-up var(--motion-slow) both;
 		}
 
 		@keyframes np-sheet-up {

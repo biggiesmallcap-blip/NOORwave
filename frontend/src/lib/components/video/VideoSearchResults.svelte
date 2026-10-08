@@ -205,7 +205,7 @@
 		display: grid;
 		grid-template-columns: minmax(0, 1fr);
 		gap: 24px;
-		animation: results-in 0.2s ease both;
+		animation: results-in var(--motion-base) both;
 	}
 
 	@keyframes results-in {

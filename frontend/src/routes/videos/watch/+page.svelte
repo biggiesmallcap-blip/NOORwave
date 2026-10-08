@@ -426,7 +426,7 @@
 		width: 100%;
 		max-width: max(480px, calc((100dvh - var(--bottom-player-height, 0px) - 300px) * 16 / 9));
 		margin: 0 auto;
-		animation: watch-in 0.28s cubic-bezier(0.22, 0.7, 0.2, 1) both;
+		animation: watch-in var(--motion-slow) both;
 	}
 
 	/* Fade only: the player glides into the stage, so a slide here would

@@ -3631,7 +3631,7 @@
 		height: 100%;
 		border-radius: 2px;
 		background: var(--accent, var(--color-accent));
-		transition: width 0.6s ease;
+		transition: width var(--motion-slow);
 	}
 
 	.discovery-stage {
@@ -3650,7 +3650,7 @@
 	}
 
 	:global(.setting-flash) {
-		animation: settingFlash 1.6s ease;
+		animation: settingFlash 1.6s ease; /* motion-ok: a deliberate search-hit highlight */
 	}
 
 	@keyframes -global-settingFlash {
