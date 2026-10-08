@@ -186,7 +186,7 @@
 		object-fit: cover;
 		object-position: center 30%;
 		opacity: 0.42;
-		filter: grayscale(0.45) contrast(1.06) brightness(0.82);
+		filter: var(--art-wall-filter);
 		-webkit-mask-image: linear-gradient(to right, transparent 0%, #000 55%);
 		mask-image: linear-gradient(to right, transparent 0%, #000 55%);
 	}
