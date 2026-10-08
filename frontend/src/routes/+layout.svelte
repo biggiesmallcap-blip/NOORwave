@@ -562,6 +562,14 @@
 		window.removeEventListener('noor:unauthorized', handleUnauthorized);
 	});
 
+	const SPACE_CONTROLS = 'button, a[href], summary, select, [role="button"], [role="switch"], [role="tab"], [role="radio"], [role="checkbox"], [role="menuitem"], [role="option"]';
+
+	function spaceActivatesFocusedControl(target: HTMLElement | null): boolean {
+		const control = target?.closest?.(SPACE_CONTROLS);
+		if (!control) return false;
+		return control.closest('.transport, .np-controls') == null;
+	}
+
 	function isTypingTarget(target: EventTarget | null): boolean {
 		if (!(target instanceof HTMLElement)) return false;
 		const tag = target.tagName;
@@ -670,6 +678,10 @@
 		switch (event.key) {
 			case ' ':
 			case 'Spacebar':
+				// Space presses a focused control, as everywhere on the web; it
+				// only toggles playback when focus is on the page or on the
+				// player's own transport.
+				if (spaceActivatesFocusedControl(target)) return;
 				event.preventDefault();
 				void togglePlayback();
 				break;
