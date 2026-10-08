@@ -25,6 +25,7 @@
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import DetailHero from '$lib/components/ui/DetailHero.svelte';
 	import ActionBar from '$lib/components/ui/ActionBar.svelte';
+	import ErrorState from '$lib/components/ui/ErrorState.svelte';
 	import SelectionBar from '$lib/components/ui/SelectionBar.svelte';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildPlaylistMenu, buildAddToPlaylistSubmenu } from '$lib/player/playlist_menu';
@@ -290,11 +291,11 @@
 	<button class="back-link" type="button" onclick={() => goBack('/playlists')}>Back</button>
 
 	{#if error}
-		<EmptyState title="Playlist unavailable" copy={error}>
+		<ErrorState title="Playlist unavailable" {error} onretry={() => void load()}>
 			{#snippet actions()}
 				<button class="btn btn-glass" onclick={() => goto('/playlists')}>All playlists</button>
 			{/snippet}
-		</EmptyState>
+		</ErrorState>
 	{:else if loading && !playlist}
 		<Skeleton rows={6} label="Loading playlist" />
 	{:else if playlist}

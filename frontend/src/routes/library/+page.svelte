@@ -709,7 +709,7 @@
 		if (artistCount > 0) parts.push(`${artistCount} artist match${artistCount === 1 ? '' : 'es'}`);
 		if (albumCount > 0) parts.push(`${albumCount} album match${albumCount === 1 ? '' : 'es'}`);
 		if (trackCount > 0) parts.push(`${trackCount} track match${trackCount === 1 ? '' : 'es'}`);
-		return parts.length ? parts.join(', ') : 'No library matches';
+		return parts.length ? parts.join(', ') : '0 matches';
 	}
 
 	function selectionRange<T extends { id: number }>(
@@ -1947,7 +1947,10 @@
 			{/if}
 
 			{#if allSearchTotal === 0}
-				<EmptyState title="No library matches" copy="Try a different artist, album, or track name." />
+				<!-- An empty scoped search offers the wider scope first. -->
+				<EmptyState title="Nothing in your library matches" copy="Try another spelling, or look on TIDAL.">
+					{#snippet actions()}<a class="btn btn-primary" href={`/search?q=${encodeURIComponent($searchQuery.trim())}`}>Search TIDAL for "{$searchQuery.trim()}"</a>{/snippet}
+				</EmptyState>
 			{/if}
 		</div>
 
@@ -2158,7 +2161,13 @@
 		</div>
 
 		{#if visibleAlbums.length === 0 && !$isLoading}
-			<EmptyState title={isSearchMode ? 'No albums match this search' : 'No albums yet'} copy={isSearchMode ? 'Try a broader search term or switch to tracks.' : 'Connect TIDAL in Settings and run a sync to populate the library.'} />
+			{#if isSearchMode}
+				<EmptyState title="No albums match this search" copy="Try another spelling, or look on TIDAL.">
+					{#snippet actions()}<a class="btn btn-primary" href={`/search?q=${encodeURIComponent($searchQuery.trim())}`}>Search TIDAL for "{$searchQuery.trim()}"</a>{/snippet}
+				</EmptyState>
+			{:else}
+				<EmptyState title="No albums yet" copy="Connect TIDAL in Settings and run a sync to populate the library." />
+			{/if}
 		{:else if !isSearchMode && $albums.length < $totalAlbums}
 			<div class="load-more-row">
 				<span class="load-more-count">{$albums.length} of {$totalAlbums} albums</span>
@@ -2502,7 +2511,13 @@
 		</div>
 
 		{#if visibleTracks.length === 0}
-			<EmptyState title={isSearchMode ? 'No tracks match this search' : 'No tracks yet'} copy={isSearchMode ? 'Try a different artist, album, or track name.' : 'Connect TIDAL in Settings to sync your library.'} />
+			{#if isSearchMode}
+				<EmptyState title="No songs match this search" copy="Try another spelling, or look on TIDAL.">
+					{#snippet actions()}<a class="btn btn-primary" href={`/search?q=${encodeURIComponent($searchQuery.trim())}`}>Search TIDAL for "{$searchQuery.trim()}"</a>{/snippet}
+				</EmptyState>
+			{:else}
+				<EmptyState title="No songs yet" copy="Connect TIDAL in Settings to sync your library." />
+			{/if}
 		{:else if !isSearchMode && $tracks.length < $totalTracks}
 			<div class="load-more-row">
 				<span class="load-more-count">{$tracks.length} of {$totalTracks} {likedOnly ? 'songs' : 'library songs'}</span>

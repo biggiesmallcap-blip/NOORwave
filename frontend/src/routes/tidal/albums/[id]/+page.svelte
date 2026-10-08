@@ -12,6 +12,7 @@
 	import TidalTrackRow from '$lib/components/TidalTrackRow.svelte';
 	import DetailHero from '$lib/components/ui/DetailHero.svelte';
 	import ActionBar from '$lib/components/ui/ActionBar.svelte';
+	import ErrorState from '$lib/components/ui/ErrorState.svelte';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { groupWorks } from '$lib/album/album_works';
 	import { openContextMenu } from '$lib/stores/context_menu';
@@ -116,7 +117,7 @@
 	{#if loading}
 		<p class="status" role="status" aria-live="polite">Loading from TIDAL…</p>
 	{:else if error}
-		<p class="status error">{error}</p>
+		<ErrorState title="Album could not load" {error} onretry={() => void load(tidalAlbumId)} />
 	{:else if !header()}
 		<p class="status" role="status" aria-live="polite">Album not found.</p>
 	{:else}
@@ -222,7 +223,6 @@
 		text-align: center;
 		color: var(--text-secondary);
 	}
-	.status.error { color: var(--state-error); }
 
 	.hero-link { color: var(--text-primary); font-weight: var(--font-weight-bold); }
 	.dot { opacity: 0.5; }

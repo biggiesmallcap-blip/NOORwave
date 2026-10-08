@@ -22,6 +22,7 @@
 	import MediaRail from '$lib/components/ui/MediaRail.svelte';
 	import DetailHero from '$lib/components/ui/DetailHero.svelte';
 	import ActionBar from '$lib/components/ui/ActionBar.svelte';
+	import ErrorState from '$lib/components/ui/ErrorState.svelte';
 	import { goBack } from '$lib/navigation/back';
 	import { captureScroll, restoreScroll } from '$lib/navigation/scroll';
 	import { openContextMenu } from '$lib/stores/context_menu';
@@ -311,11 +312,11 @@
 	{#if loading}
 		<div class="status-wrap"><Skeleton rows={4} label="Loading album" /></div>
 	{:else if error}
-		<EmptyState title="Album could not load" copy={error}>
+		<ErrorState title="Album could not load" {error} onretry={() => void load(albumId)}>
 			{#snippet actions()}
 				<a class="empty-action" href="/library">Back to library</a>
 			{/snippet}
-		</EmptyState>
+		</ErrorState>
 	{:else if !header()}
 		<EmptyState title="Album not found" copy="It may have been deleted or moved.">
 			{#snippet actions()}

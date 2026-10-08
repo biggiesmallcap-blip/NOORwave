@@ -30,6 +30,7 @@
 	} from '$lib/stores/player';
 	import TrackRow from '$lib/components/TrackRow.svelte';
 	import ActionBar from '$lib/components/ui/ActionBar.svelte';
+	import ErrorState from '$lib/components/ui/ErrorState.svelte';
 	import { formatTrackDuration } from '$lib/utils/format';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
@@ -760,11 +761,11 @@
 	{#if loading}
 		<div class="status-wrap"><Skeleton rows={4} label="Loading artist" /></div>
 	{:else if error}
-		<EmptyState title="Artist could not load" copy={error}>
+		<ErrorState title="Artist could not load" {error} onretry={() => void load(artistId)}>
 			{#snippet actions()}
 				<a class="empty-action" href="/library">Back to library</a>
 			{/snippet}
-		</EmptyState>
+		</ErrorState>
 	{:else if !header()}
 		<EmptyState title="Artist not found" copy="It may have been deleted or moved.">
 			{#snippet actions()}
