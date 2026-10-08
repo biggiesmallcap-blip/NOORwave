@@ -23,6 +23,7 @@
 		selectTrackIds, selectAlbumIds, clearSelection,
 	} from '$lib/stores/library';
 	import { initials } from '$lib/utils/text';
+	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import { LIBRARY_TABS, restoreLibraryTab, tabCountLabel, viewCountLabel, type LibraryTab } from '$lib/components/library/library_tabs';
 	import { librarySongsScope } from '$lib/stores/library_songs';
 	import CommandHeader from '$lib/components/ui/CommandHeader.svelte';
@@ -1762,7 +1763,7 @@
 	{/if}
 
 	{#if $isLoading}
-		<div class="loading"><div class="spinner"></div><span>Loading library…</span></div>
+		<Skeleton rows={10} label="Loading library" />
 
 	{:else if activeTab === 'all' && isSearchMode}
 		<div class="library-search-results">
@@ -2877,37 +2878,6 @@
 		font-size: var(--font-size-sm);
 		padding: 40px;
 		text-align: center;
-	}
-
-	/* ─── Loading ───────────────────────── */
-
-	.loading {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		gap: 12px;
-		padding: 48px 0;
-		color: var(--text-secondary);
-		font-size: var(--font-size-md);
-	}
-
-	.spinner {
-		width: 24px;
-		height: 24px;
-		border: 2px solid var(--border-subtle);
-		border-top-color: var(--accent);
-		border-radius: 50%;
-		animation: spin 0.6s linear infinite;
-	}
-
-	.spinner-sm {
-		width: 16px;
-		height: 16px;
-		border-width: 2px;
-	}
-
-	@keyframes spin {
-		to { transform: rotate(360deg); }
 	}
 
 	/* ─── Hero Section ──────────────────── */
