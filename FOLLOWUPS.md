@@ -23,9 +23,13 @@ it in their route PRs. `FilterChip` is built and used by Duplicates; the
 Library decade chips move onto it with the Library toolbar. `Dropdown` is
 built and used by the DJ transition style; Library sort and genre move onto
 it with the toolbar. App-wide, Space on any focused button is play/pause
-(the window shortcut cancels button activation): a product call. Still to build,
-one PR each: shared components ( `ActionBar`, one `TrackRow`
-anatomy, `ErrorState` and the skeleton delay); route migrations (Library
+(the window shortcut cancels button activation): a product call. `ActionBar`
+is built and used by the album hero, and `DetailHero` is borderless; artist,
+playlist, TIDAL album and Spotify heroes move onto `ActionBar` in their route
+PRs. Global `.btn-secondary` / `.btn-ghost` / `.btn-icon` are still not added
+(local classes with those names in LastfmConnect, Library and the Spotify
+pages would pick up stray properties). Still to build, one PR each: shared
+components (one `TrackRow` anatomy, `ErrorState` and the skeleton delay); route migrations (Library
 toolbar, Search composition and keyboard, artist Stage, shared `AlbumDetail`,
 Playlists, Settings in place, Mix page for Automix + DJ, Home and the remaining
 title-header routes, removing eyebrow-over-title stacks); then motion lint

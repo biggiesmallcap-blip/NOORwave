@@ -6,7 +6,7 @@ The reference surfaces are `/videos/stations` and `/videos/liked`. When in doubt
 
 ## Adoption status
 
-This file describes the target system from the October 2026 design audit. The foundations are in code: layout, label and motion tokens, the `.t-*` role classes, the solid focus ring, the contrast floor, and buttons without a hover lift. `CommandHeader` and `ScopeTabs` (`$lib/components/ui/`) are built and mounted on Videos; `Segmented` is built and used by the DJ mix intent and speed; `FilterChip` is built and used by the Duplicates relationship filters; `Dropdown` is built and used by the DJ transition style. Not built yet: `ActionBar`, `ErrorState`, the single `TrackRow` anatomy, the skeleton delay, the motion lint warnings, and the narrow-window icon rail. Until a component exists, follow its rule with local markup and move to the component when it lands. The remaining work is tracked in `FOLLOWUPS.md` ("Design system adoption").
+This file describes the target system from the October 2026 design audit. The foundations are in code: layout, label and motion tokens, the `.t-*` role classes, the solid focus ring, the contrast floor, and buttons without a hover lift. `CommandHeader` and `ScopeTabs` (`$lib/components/ui/`) are built and mounted on Videos; `Segmented` is built and used by the DJ mix intent and speed; `FilterChip` is built and used by the Duplicates relationship filters; `Dropdown` is built and used by the DJ transition style; `ActionBar` is built and used by the album hero, and `DetailHero` is borderless. Not built yet: `ErrorState`, the single `TrackRow` anatomy, the skeleton delay, the motion lint warnings, and the narrow-window icon rail. Until a component exists, follow its rule with local markup and move to the component when it lands. The remaining work is tracked in `FOLLOWUPS.md` ("Design system adoption").
 
 ## Principles
 
@@ -340,7 +340,7 @@ All right-click menus are rendered by `ContextMenu.svelte`; do not create one-of
 ## Global utility classes
 
 - `.t-entity`, `.t-page-title`, `.t-section`, `.t-label`, `.t-row-title`, `.t-meta`, `.t-body`, `.t-micro` - the typography roles.
-- `.btn`, `.btn-primary`, `.btn-glass` - buttons. Global `.btn-secondary`, `.btn-ghost` and `.btn-icon` arrive with `ActionBar`; some components define local classes with those names today.
+- `.btn`, `.btn-primary`, `.btn-glass` - buttons. Global `.btn-secondary`, `.btn-ghost` and `.btn-icon` are not added yet because some components define local classes with those names; `ActionBar` carries its own button styles.
 - `.row-btn` - a borderless icon action inside a row, hidden until hover or focus, always occupying its space.
 - `.back-link` - the back pill on detail routes. It supplies its own chevron and is `inline-size: fit-content`. Do not show it on top-level destinations. The one exception is the Videos section header, where Back deliberately returns to wherever the listener came from.
 - `.quality-badge` - only where quality differs from the surrounding content.

@@ -21,6 +21,7 @@
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import MediaRail from '$lib/components/ui/MediaRail.svelte';
 	import DetailHero from '$lib/components/ui/DetailHero.svelte';
+	import ActionBar from '$lib/components/ui/ActionBar.svelte';
 	import { goBack } from '$lib/navigation/back';
 	import { captureScroll, restoreScroll } from '$lib/navigation/scroll';
 	import { openContextMenu } from '$lib/stores/context_menu';
@@ -340,71 +341,44 @@
 					{/if}
 			{/snippet}
 			{#snippet actions()}
-			<button
-				class="play-fab"
-				aria-label={isAlbumPlaying ? 'Pause' : 'Play album'}
-				onclick={onHeroPlay}
-			>
-				{#if isAlbumPlaying}
-					<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"/><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"/></svg>
-				{:else}
-					<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M8 5.5v13a1 1 0 001.5.87l11-6.5a1 1 0 000-1.74l-11-6.5A1 1 0 008 5.5z" fill="currentColor"/></svg>
-				{/if}
-			</button>
-
-			<button class="ghost-btn" aria-label="Shuffle" onclick={() => void shuffleAlbum(albumId, albumData())}>
-				<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M16 3h5v5M4 20l17-17M21 16v5h-5M4 4l5 5m6 6l6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-			</button>
-
-			<button
-				class="ghost-btn"
-				class:pending={radioPending}
-				aria-label="Album radio"
-				disabled={radioPending}
-				onclick={onRadioClick}
-			>
-				{#if radioPending}
-					<span class="btn-spinner" aria-hidden="true"></span>
-				{:else}
-					<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="currentColor"/><path d="M8.5 8.5a5 5 0 000 7M15.5 8.5a5 5 0 010 7M5.5 5.5a9 9 0 000 13M18.5 5.5a9 9 0 010 13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
-				{/if}
-			</button>
-
-			<button
-				class="ghost-btn"
-				class:active={albumIsFavorite}
-				class:pending={favoritePending}
-				aria-label={albumIsFavorite ? 'Remove album from your library' : 'Save album to your library'}
-				aria-pressed={albumIsFavorite}
-				disabled={favoritePending}
-				onclick={onLikeAlbum}
-			>
-				{#if albumIsFavorite}
-					<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z" fill="currentColor"/></svg>
-				{:else}
-					<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z" stroke="currentColor" stroke-width="2" fill="none"/></svg>
-				{/if}
-			</button>
-
-			{#if isPartialAlbum}
-				<button
-					class="save-album-btn"
-					class:pending={savePending}
-					disabled={savePending}
-					onclick={onSaveAlbum}
+				<ActionBar
+					playing={isAlbumPlaying}
+					onplay={onHeroPlay}
+					onshuffle={() => void shuffleAlbum(albumId, albumData())}
+					onradio={onRadioClick}
+					{radioPending}
+					liked={albumIsFavorite}
+					onlike={onLikeAlbum}
+					likeLabel="Save album to your library"
+					unlikeLabel="Remove album from your library"
+					likePending={favoritePending}
+					onmore={(e) => openContextMenu(e, buildAlbumMenu({
+						id: albumId,
+						title: h.title,
+						artist_id: h.artist_id,
+						artist_name: h.artist_name,
+					}, { isLocal: true, hideOpen: true }), h.title)}
 				>
-					{#if savePending}
-						<span class="btn-spinner" aria-hidden="true"></span>
-					{:else}
-						<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+					{#if isPartialAlbum}
+						<button
+							class="save-album-btn"
+							class:pending={savePending}
+							disabled={savePending}
+							onclick={onSaveAlbum}
+						>
+							{#if savePending}
+								<span class="btn-spinner" aria-hidden="true"></span>
+							{:else}
+								<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+							{/if}
+							Save full album
+						</button>
 					{/if}
-					Save full album
-				</button>
-			{/if}
 
-			<span class="actions-spacer"></span>
+					<span class="actions-spacer"></span>
 
-			<span class="actions-hint">Click a song to start the album from there</span>
+					<span class="actions-hint">Click a song to start the album from there</span>
+				</ActionBar>
 			{/snippet}
 		</DetailHero>
 
@@ -582,8 +556,6 @@
 		display: inline-block;
 		animation: btn-spin 0.7s linear infinite;
 	}
-	.ghost-btn.pending { opacity: 0.85; cursor: progress; }
-	.ghost-btn:disabled { cursor: progress; }
 	@keyframes btn-spin {
 		to { transform: rotate(360deg); }
 	}
@@ -596,47 +568,6 @@
 	.hero-link:hover { text-decoration: underline; }
 	.dot { opacity: 0.5; }
 	.hero-duration { color: var(--text-tertiary); }
-
-	.play-fab {
-		all: unset;
-		width: 56px;
-		height: 56px;
-		border-radius: 50%;
-		display: grid;
-		place-items: center;
-		background: var(--accent);
-		color: var(--text-on-accent);
-		cursor: pointer;
-		transition: transform var(--motion-fast), background var(--motion-fast), box-shadow var(--motion-fast);
-		box-shadow: 0 8px 24px -8px var(--accent-glow);
-	}
-
-	.play-fab:hover {
-		transform: scale(1.06);
-		background: var(--accent-strong);
-	}
-
-	.play-fab:active { transform: scale(0.98); }
-
-	.ghost-btn {
-		all: unset;
-		width: 40px;
-		height: 40px;
-		border-radius: 50%;
-		display: grid;
-		place-items: center;
-		color: var(--text-secondary);
-		cursor: pointer;
-		transition: color var(--motion-fast), background var(--motion-fast);
-	}
-
-	.ghost-btn:hover {
-		color: var(--text-primary);
-		background: var(--bg-hover);
-	}
-
-	.ghost-btn.active { color: var(--accent); }
-	.ghost-btn.active:hover { color: var(--accent-strong); }
 
 	.save-album-btn {
 		all: unset;

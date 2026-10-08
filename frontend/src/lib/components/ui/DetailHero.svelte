@@ -105,14 +105,15 @@
 </header>
 
 <style>
+	/* Not a box (STYLING.md "Detail header"): the backdrop is decoration
+	   behind the hero and fades into the ground on every side. The container
+	   lets ActionBar fold its labels by the hero's width. */
 	.detail-hero {
+		container: detail-hero / inline-size;
 		position: relative;
 		isolation: isolate;
 		overflow: hidden;
-		padding: var(--space-5);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-lg);
-		background: color-mix(in srgb, var(--bg-elevated) 82%, transparent);
+		padding: var(--space-4) 0;
 	}
 
 	.detail-hero.immersive {
@@ -122,9 +123,6 @@
 	.detail-hero.text-only {
 		overflow: visible;
 		padding: var(--space-3) 0 0;
-		border: 0;
-		border-radius: 0;
-		background: none;
 	}
 
 	.backdrop {
@@ -132,6 +130,7 @@
 		inset: -4rem;
 		z-index: -2;
 		opacity: 0.32;
+		mask-image: linear-gradient(90deg, transparent, #000 18%, #000 82%, transparent);
 	}
 
 	.backdrop::after {
@@ -268,14 +267,6 @@
 	}
 
 	@media (max-width: 760px) {
-		.detail-hero {
-			padding: var(--space-4) var(--space-3);
-		}
-
-		.detail-hero.text-only {
-			padding-inline: 0;
-		}
-
 		.inner {
 			flex-direction: column;
 			align-items: flex-start;
