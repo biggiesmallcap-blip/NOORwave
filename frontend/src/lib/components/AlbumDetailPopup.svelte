@@ -14,7 +14,7 @@
 	import { portal } from '$lib/actions/portal';
 	import { goto } from '$app/navigation';
 
-	let { album, tracks, loading, onClose, isLocal = true, onPlay, onShuffle, onPlayFrom, artistHref = null }: {
+	let { album, tracks, loading, onClose, isLocal = true, onPlay, onShuffle, onPlayFrom, artistHref = null, albumHref = null }: {
 		album: Album;
 		tracks: Track[];
 		loading: boolean;
@@ -41,6 +41,11 @@
 		 * derived and the caller passes `/tidal/artists/{id}` instead.
 		 */
 		artistHref?: string | null;
+		/**
+		 * The full album page. Derived for library albums; a TIDAL-only album
+		 * passes `/tidal/albums/{id}`. Null hides the link.
+		 */
+		albumHref?: string | null;
 	} = $props();
 	let failedArtworkUrls = $state<Record<string, boolean>>({});
 	let popupArtwork = $derived(artworkCandidate(album.artwork_url, 640));
@@ -156,6 +161,15 @@
 	// mounted over the page it just opened, and its outside-click handler is on
 	// the window, so the next click anywhere would dismiss instead of doing what
 	// it looked like it would do.
+	let resolvedAlbumHref = $derived(albumHref ?? (isLocal && album.id != null ? `/albums/${album.id}` : null));
+
+	function openAlbumPage() {
+		if (!resolvedAlbumHref) return;
+		const href = resolvedAlbumHref;
+		requestClose();
+		void goto(href);
+	}
+
 	function openArtistPage() {
 		if (!resolvedArtistHref) return;
 		const href = resolvedArtistHref;
@@ -268,6 +282,9 @@
 							</svg>
 							Shuffle
 						</button>
+						{#if resolvedAlbumHref}
+							<button type="button" class="popup-link" onclick={openAlbumPage}>Open album page</button>
+						{/if}
 					</div>
 				</div>
 			</div>
@@ -539,8 +556,33 @@
 
 	.popup-actions {
 		display: flex;
+		align-items: center;
 		gap: 10px;
 		margin-top: 10px;
+	}
+
+	/* A quiet text link, pushed to the end of the row so Play stays the CTA. */
+	.popup-link {
+		margin-left: auto;
+		padding: 4px 2px;
+		background: none;
+		border: 0;
+		color: var(--text-secondary);
+		font: inherit;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold, 600);
+		cursor: pointer;
+	}
+
+	.popup-link:hover {
+		color: var(--text-primary);
+		text-decoration: underline;
+	}
+
+	.popup-link:focus-visible {
+		outline: 2px solid var(--accent-strong);
+		outline-offset: 2px;
+		border-radius: 4px;
 	}
 
 	.popup-cta {
