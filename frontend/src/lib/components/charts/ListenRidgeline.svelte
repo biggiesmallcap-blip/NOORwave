@@ -465,7 +465,9 @@
 </div>
 
 <!-- SR-only summary for assistive tech -->
-<table class="sr-only" aria-label="Listening pulse summary">
+<!-- A table ignores width: 1px and grows to its content (it pushed the
+     page sideways), so the hidden box is a wrapper around it. -->
+<div class="sr-only"><table aria-label="Listening pulse summary">
 	<caption>
 		Listening clusters around {formatHour(peakHour)};
 		Rhythm {heroStats?.rhythm ?? '--'};
@@ -492,7 +494,7 @@
 			</tr>
 		{/each}
 	</tbody>
-</table>
+</table></div>
 
 <script module lang="ts">
 	function rowsTotalListens(rows: RidgeRow[]): number {
@@ -566,11 +568,10 @@
 		min-width: 0;
 	}
 
+	/* In flow above the chart: floating over it sat the title on the 00:00
+	   axis label. */
 	.title-row {
-		position: absolute;
-		top: var(--space-3);
-		left: var(--space-4);
-		z-index: 2;
+		padding: var(--space-3) var(--space-4) 0;
 		pointer-events: none;
 	}
 

@@ -271,7 +271,9 @@
 </div>
 
 <!-- SR-only summary: top 20 by listens -->
-<table class="sr-only" aria-label="Sonic field summary, top 20 tracks by listens">
+<!-- A table ignores width: 1px and grows to its content (it pushed the
+     page sideways), so the hidden box is a wrapper around it. -->
+<div class="sr-only"><table aria-label="Sonic field summary, top 20 tracks by listens">
 	<thead>
 		<tr>
 			<th scope="col">Title</th><th scope="col">Artist</th>
@@ -291,7 +293,7 @@
 			</tr>
 		{/each}
 	</tbody>
-</table>
+</table></div>
 
 <style>
 	.sonic {
