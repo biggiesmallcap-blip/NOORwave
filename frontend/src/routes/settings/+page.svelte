@@ -7,6 +7,7 @@
 	import SettingGroup from '$lib/components/settings/SettingGroup.svelte';
 	import SettingRow from '$lib/components/settings/SettingRow.svelte';
 	import Segmented from '$lib/components/ui/Segmented.svelte';
+	import Dropdown from '$lib/components/ui/Dropdown.svelte';
 	import AppearanceFields, { type AppearanceValues } from '$lib/components/settings/AppearanceFields.svelte';
 	import StartupSetting from '$lib/components/settings/StartupSetting.svelte';
 	import CloseBehaviorSetting from '$lib/components/settings/CloseBehaviorSetting.svelte';
@@ -29,7 +30,8 @@
 		type DiscoveryTrainingSafetyProfile,
 		type MusicBrainzStatus,
 		type PlaybackRuntimeInfo,
-		type PortableMusicBrainzSnapshotStatus
+		type PortableMusicBrainzSnapshotStatus,
+		type ArtworkCacheSettings
 	} from '$lib/api/client';
 	import { wsMessages } from '$lib/api/ws';
 	import {
@@ -436,8 +438,30 @@
 		CROSSFADE_OPTIONS[0]).value,
 	);
 
+	// Artwork cache (Settings > Library): covers and artist photos saved on
+	// disk next to the database. Older servers lack the endpoint; the row hides.
+	let artworkCache = $state<ArtworkCacheSettings | null>(null);
+	async function loadArtworkCache() {
+		try {
+			artworkCache = await api.getArtworkCache();
+		} catch {
+			artworkCache = null;
+		}
+	}
+	async function setArtworkCacheSize(value: string) {
+		try {
+			artworkCache = await api.setArtworkCacheSize(Number(value));
+		} catch (err) {
+			console.error('Failed to save the artwork cache size:', err);
+		}
+	}
+	function cacheSizeLabel(mb: number): string {
+		return mb === 0 ? 'Off' : mb >= 1000 ? `${mb / 1000} GB` : `${mb} MB`;
+	}
+
 	onMount(() => {
 		if ($pendingTidalLogin) activeCategory = 'services';
+		void loadArtworkCache();
 		const tauriUnlisteners: Array<() => void> = [];
 		void refreshDownloadFolder();
 		const tick = setInterval(() => {
@@ -2520,6 +2544,14 @@
 	value={$librarySongsScope}
 	onchange={(value) => librarySongsScope.set(value)}
 /></SettingRow></SettingGroup>
+{#if artworkCache}
+<SettingGroup title="Artwork"><SettingRow label="Artwork cache" id="library-artwork-cache" hint={`Covers and artist photos you have seen are kept on disk so they load instantly; the oldest are dropped first. ${artworkCache.max_mb === 0 ? 'Off: pictures load from TIDAL each time.' : `Using ${Math.round(artworkCache.used_bytes / 1048576)} MB.`}`}><Dropdown
+	label="Artwork cache"
+	options={artworkCache.options_mb.map((mb) => ({ value: String(mb), label: cacheSizeLabel(mb) }))}
+	value={String(artworkCache.max_mb)}
+	onchange={(value) => void setArtworkCacheSize(value)}
+/></SettingRow></SettingGroup>
+{/if}
 <section data-setting-id="library-sync" class="glass-tile section-panel"><SectionHeader title="Sync" />{#if $tidalStatus === "connected"}					<div class="info-list">
 
 						<div class="info-row">

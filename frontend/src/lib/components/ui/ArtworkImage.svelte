@@ -1,5 +1,6 @@
 <script lang="ts">
 	import {
+		cachedTidalArtwork,
 		tidalArtworkFallbackSizes,
 		upscaleTidalArtwork,
 		type TidalArtworkSize
@@ -54,20 +55,27 @@
 	let lastSize = $state<TidalArtworkSize>();
 	const sources = $derived(normalizeSources(src));
 	const srcKey = $derived(sources.join('\n'));
+	// The first try goes through the local artwork cache; if that fails the
+	// direct TIDAL sizes follow as before.
 	const attempts = $derived(
-		sources.flatMap((source) =>
-			tidalArtworkFallbackSizes(source, size).map((fallbackSize) => ({ source, size: fallbackSize }))
-		)
+		sources.flatMap((source) => {
+			const direct = tidalArtworkFallbackSizes(source, size).map((fallbackSize) => ({
+				source,
+				size: fallbackSize,
+				cached: false,
+			}));
+			return direct.length > 0 && cachedTidalArtwork(upscaleTidalArtwork(source, size))
+				? [{ ...direct[0], cached: true }, ...direct]
+				: direct;
+		})
 	);
 	const exhausted = $derived(failedAttempts >= attempts.length);
-	const resolvedSrc = $derived(
-		!exhausted
-			? upscaleTidalArtwork(
-					attempts[failedAttempts]?.source,
-					attempts[failedAttempts]?.size ?? size,
-				)
-			: null
-	);
+	const resolvedSrc = $derived.by(() => {
+		if (exhausted) return null;
+		const attempt = attempts[failedAttempts];
+		const url = upscaleTidalArtwork(attempt?.source, attempt?.size ?? size);
+		return attempt?.cached ? (cachedTidalArtwork(url) ?? url) : url;
+	});
 
 	let imgEl = $state<HTMLImageElement>();
 

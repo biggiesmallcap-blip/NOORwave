@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
 mod analytics_routes;
+mod artwork_cache_routes;
 mod audio_analysis_routes;
 pub(crate) mod catalog_routes;
 mod catalogue_routes;
@@ -1250,6 +1251,11 @@ pub fn api_routes(state: SharedState) -> Router {
         .route(
             "/api/videos/discovery/status",
             get(video_discovery_routes::get_video_discovery_status),
+        )
+        .route(
+            "/api/artwork-cache",
+            get(artwork_cache_routes::get_artwork_cache)
+                .put(artwork_cache_routes::put_artwork_cache),
         )
         .route(
             "/api/videos/discovery/settings",

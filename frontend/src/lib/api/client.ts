@@ -292,6 +292,9 @@ export interface TidalSearchArtist {
 }
 
 /** How much background video discovery the server runs. */
+/** Settings > Library > Artwork cache. `max_mb` 0 is off. */
+export type ArtworkCacheSettings = { max_mb: number; used_bytes: number; options_mb: number[] };
+
 export type VideoDiscoverySetting = 'full' | 'limited' | 'off';
 
 export interface VideoDiscoveryStatus {
@@ -2534,6 +2537,15 @@ export const api = {
         return fetchApi<{ tracks: { id: number; availability: string; favorite_state: string; releases: number }[] }>('/api/library/catalogue/status');
     },
 
+    getArtworkCache() {
+        return fetchApi<ArtworkCacheSettings>('/api/artwork-cache');
+    },
+    setArtworkCacheSize(max_mb: number) {
+        return fetchApi<ArtworkCacheSettings>('/api/artwork-cache', undefined, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ max_mb }),
+        });
+    },
     getVideoDiscoverySettings() {
         return fetchApi<{ setting: VideoDiscoverySetting }>('/api/videos/discovery/settings');
     },

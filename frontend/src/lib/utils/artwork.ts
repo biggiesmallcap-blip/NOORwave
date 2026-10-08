@@ -107,6 +107,23 @@ export function upscaleTidalArtwork(
 	return rawUrl.replace(TIDAL_ARTWORK_SIZE, `/${safeSize}x${safeSize}.jpg$1`);
 }
 
+/**
+ * The same TIDAL picture through noor-server's on-disk artwork cache
+ * (`/artwork/tidal/...`, Settings > Library > Artwork cache), or null when
+ * the page is not on this machine: the route only answers loopback requests.
+ * Callers keep the direct URL as the fallback.
+ */
+export function cachedTidalArtwork(url: string | null | undefined): string | null {
+	if (!url || typeof window === 'undefined' || !isRenderableTidalArtworkUrl(url)) return null;
+	const { protocol, hostname, origin } = window.location;
+	if (hostname !== 'localhost' && hostname !== '127.0.0.1' && hostname !== '[::1]') return null;
+	const base = import.meta.env.DEV
+		? `${protocol}//${hostname}:${String(import.meta.env.NOOR_PORT || '17600')}`
+		: origin;
+	const path = new URL(url).pathname.replace(/^\/images\//, '');
+	return `${base}/artwork/tidal/${path}`;
+}
+
 function isTidalResourceUrl(url: string | null | undefined): boolean {
 	if (!url) return false;
 	try {

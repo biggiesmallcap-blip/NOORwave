@@ -783,6 +783,7 @@ async fn main() -> Result<()> {
         downloads: services::download::DownloadManager::new(),
     }));
 
+    services::artwork_cache::spawn(state.clone());
     services::audio_analysis::queue_prescanner::spawn(state.clone());
     info!("Queue DSP prescanner spawned");
     services::scrobbling::spawn_periodic_drain(state.clone());
