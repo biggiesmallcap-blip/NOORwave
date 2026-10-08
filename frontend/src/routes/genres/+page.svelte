@@ -991,6 +991,16 @@
 
 	.hud-status,
 	.hud-meta-line {
+		margin: 0;
+		color: var(--signal-text);
+	}
+
+	.hud-status {
+		font-size: var(--font-size-xs);
+		line-height: var(--line-height-snug);
+	}
+
+	.hud-meta-line {
 		display: flex;
 		align-items: baseline;
 		gap: 4px 12px;
