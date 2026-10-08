@@ -23,6 +23,7 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
 	{ id: 'playback-output', category: 'playback', label: 'Audio output', keywords: 'quality device bit-perfect exclusive wasapi sample rate follow latency crossfade lossless output dac' },
 	{ id: 'advanced-output', target: 'playback-output', focus: '.audio-advanced', category: 'playback', label: 'Advanced output', keywords: 'exclusive buffer idle release pause sample rate latency grace' },
 	{ id: 'video-quality', target: 'playback-output', focus: '[aria-label="Video quality"]', category: 'playback', label: 'Video quality', keywords: 'max highest auto video' },
+	{ id: 'video-fullscreen', target: 'playback-output', focus: '[aria-label="Fullscreen transition"]', category: 'playback', label: 'Fullscreen transition', keywords: 'video fullscreen full screen dim grow classic animation' },
 	{ id: 'now-playing-path', category: 'playback', label: 'Output details', keywords: 'runtime device format now playing track path diagnostics' },
 	{ id: 'library-audio-data', category: 'playback', label: 'Analyse while playing', keywords: 'analysis bpm key energy dsp passive audio data' },
 	{ id: 'library-sync', category: 'library', label: 'Sync library', keywords: 'tidal sync daily auto-sync full resync cancel favourite favorite albums' },

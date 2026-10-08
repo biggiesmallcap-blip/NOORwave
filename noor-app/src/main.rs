@@ -14,6 +14,7 @@ mod sidecar_paths;
 mod startup;
 mod tray;
 mod updater;
+mod video_fullscreen;
 mod window_state;
 
 use sidecar::SidecarState;
@@ -56,6 +57,7 @@ fn main() {
         .manage(sidecar_state.clone() as Arc<SidecarState>)
         .manage(lifecycle.clone() as Arc<remote_lifecycle::RemoteLifecycle>)
         .manage(startup::StartupRuntime::new(launch_mode))
+        .manage(video_fullscreen::VideoFullscreen::default())
         .invoke_handler(tauri::generate_handler![
             commands::check_for_updates_now,
             commands::get_update_state,
@@ -68,6 +70,7 @@ fn main() {
             remote_lifecycle::restart_managed_server,
             startup::get_startup_state,
             startup::set_start_at_login,
+            video_fullscreen::set_video_fullscreen,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

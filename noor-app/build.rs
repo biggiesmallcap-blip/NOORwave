@@ -13,6 +13,7 @@ fn main() {
         "restart_managed_server",
         "get_startup_state",
         "set_start_at_login",
+        "set_video_fullscreen",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("failed to build Tauri app permissions");

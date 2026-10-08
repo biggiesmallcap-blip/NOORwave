@@ -3605,6 +3605,8 @@ dependencies = [
  "tauri-runtime",
  "tauri-runtime-wry",
  "tempfile",
+ "webview2-com",
+ "windows 0.62.2",
  "winreg 0.10.1",
 ]
 

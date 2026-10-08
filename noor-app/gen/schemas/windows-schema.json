@@ -411,6 +411,12 @@
           "markdownDescription": "Enables the set_start_at_login command without any pre-configured scope."
         },
         {
+          "description": "Enables the set_video_fullscreen command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-video-fullscreen",
+          "markdownDescription": "Enables the set_video_fullscreen command without any pre-configured scope."
+        },
+        {
           "description": "Denies the check_for_updates_now command without any pre-configured scope.",
           "type": "string",
           "const": "deny-check-for-updates-now",
@@ -475,6 +481,12 @@
           "type": "string",
           "const": "deny-set-start-at-login",
           "markdownDescription": "Denies the set_start_at_login command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_video_fullscreen command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-video-fullscreen",
+          "markdownDescription": "Denies the set_video_fullscreen command without any pre-configured scope."
         },
         {
           "description": "This permission set configures if your\napplication can enable or disable auto\nstarting the application on boot.\n\n#### Granted Permissions\n\nIt allows all to check, enable and\ndisable the automatic start on boot.\n\n\n#### This default permission set includes:\n\n- `allow-enable`\n- `allow-disable`\n- `allow-is-enabled`",
