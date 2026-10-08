@@ -23,7 +23,13 @@
 		onNext?: () => void;
 		onToggleAutoplay?: () => void;
 		onPlay?: () => void;
+		onProgress?: (positionMs: number, durationMs: number) => void;
 		refreshStream?: () => Promise<string>;
+		/** Host-driven fullscreen (the dock grows itself to fill the window).
+		 *  When set, the player asks the host instead of using native element
+		 *  fullscreen, and mirrors the host's state for its chrome. */
+		fullscreenActive?: boolean;
+		onFullscreenToggle?: () => void;
 	};
 
 	let {
@@ -44,7 +50,10 @@
 		onNext,
 		onToggleAutoplay,
 		onPlay,
+		onProgress,
 		refreshStream,
+		fullscreenActive = false,
+		onFullscreenToggle,
 	}: Props = $props();
 
 	let container: HTMLDivElement | null = $state(null);
@@ -271,6 +280,10 @@
 	}
 
 	async function toggleFullscreen() {
+		if (onFullscreenToggle) {
+			onFullscreenToggle();
+			return;
+		}
 		if (!container) return;
 		if (document.fullscreenElement) await document.exitFullscreen();
 		else await container.requestFullscreen();
@@ -326,6 +339,7 @@
 		HlsClass = mod.default;
 		restoreVolume();
 		fullscreenListener = () => {
+			if (onFullscreenToggle) return;
 			fullscreen = document.fullscreenElement === container;
 			if (fullscreen) revealChrome();
 			else {
@@ -335,6 +349,13 @@
 		};
 		document.addEventListener('fullscreenchange', fullscreenListener);
 		await load(src);
+	});
+
+	// Host-driven fullscreen: mirror the host's state.
+	$effect(() => {
+		if (!onFullscreenToggle) return;
+		fullscreen = fullscreenActive;
+		if (fullscreenActive) revealChrome();
 	});
 
 	$effect(() => {
@@ -418,7 +439,10 @@
 			loading = false;
 		}}
 		ondurationchange={() => (duration = videoEl?.duration ?? 0)}
-		ontimeupdate={() => (currentTime = videoEl?.currentTime ?? 0)}
+		ontimeupdate={() => {
+			currentTime = videoEl?.currentTime ?? 0;
+			onProgress?.(currentTime * 1000, (videoEl?.duration ?? 0) * 1000);
+		}}
 		onvolumechange={() => {
 			volume = videoEl?.volume ?? volume;
 			muted = videoEl?.muted ?? muted;

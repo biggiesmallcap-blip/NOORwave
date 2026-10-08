@@ -186,7 +186,9 @@ impl SetPlan {
 }
 
 /// A candidate video, normalized across the artist-videos and search paths.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Facts past `release_year` were added for discovery; serde defaults keep
+/// catalog rows written before them readable.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VideoCandidate {
     pub tidal_id: i64,
     pub title: String,
@@ -199,6 +201,32 @@ pub struct VideoCandidate {
     /// TIDAL video shape, so it rides in `extra`; absent for the era set means
     /// the video is simply not a candidate, never a crash.
     pub release_year: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub popularity: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub featured_artist_ids: Vec<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explicit: Option<bool>,
+}
+
+fn extra_popularity(extra: &HashMap<String, serde_json::Value>) -> Option<i32> {
+    extra
+        .get("popularity")?
+        .as_i64()
+        .and_then(|p| i32::try_from(p).ok())
+        .filter(|p| *p >= 0)
+}
+
+fn extra_str(extra: &HashMap<String, serde_json::Value>, key: &str) -> Option<String> {
+    extra
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 /// Pull a four-digit year out of TIDAL's flattened extras. The field is
@@ -219,6 +247,13 @@ impl From<&TidalArtistVideo> for VideoCandidate {
             album_tidal_id: v.album.as_ref().map(|al| al.id),
             artwork_url: TidalClient::get_artwork_url(&v.image_id, 640),
             release_year: extra_release_year(&v.extra),
+            popularity: extra_popularity(&v.extra),
+            video_type: extra_str(&v.extra, "type"),
+            featured_artist_ids: crate::services::video_discovery::harvest::featured_artist_ids(
+                &v.extra,
+            ),
+            quality: extra_str(&v.extra, "quality"),
+            explicit: v.extra.get("explicit").and_then(serde_json::Value::as_bool),
         }
     }
 }
@@ -234,6 +269,13 @@ impl From<&TidalSearchVideo> for VideoCandidate {
             album_tidal_id: v.album_id,
             artwork_url: v.artwork_url.clone(),
             release_year: extra_release_year(&v.extra),
+            popularity: extra_popularity(&v.extra),
+            video_type: Some(v.r#type.clone()).filter(|kind| !kind.is_empty()),
+            featured_artist_ids: crate::services::video_discovery::harvest::featured_artist_ids(
+                &v.extra,
+            ),
+            quality: v.quality.clone(),
+            explicit: v.explicit,
         }
     }
 }
@@ -253,7 +295,7 @@ pub fn weekly_bucket_key(date: chrono::NaiveDate) -> String {
 /// no cryptographic requirement, just stability.
 pub fn build_seed(slug: &str, bucket_key: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in slug.bytes().chain([b'|']).chain(bucket_key.bytes()) {
+    for byte in slug.bytes().chain(*b"|").chain(bucket_key.bytes()) {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
@@ -848,7 +890,7 @@ pub async fn fetch_long_form(
 // --- Assembly ---
 
 /// Exclusion-free assembly. Production always holds out recently-watched videos
-/// via `assemble_set_excluding`; this shim keeps the curation tests, which don't
+/// via `assemble_set_with_context`; this shim keeps the curation tests, which don't
 /// care about watch history, readable.
 #[cfg(test)]
 pub fn assemble_set(
@@ -883,6 +925,7 @@ fn pick_era_decade(groups: &[(AnchorArtist, Vec<VideoCandidate>)]) -> Option<i32
 /// `assemble_set` with a hold-out set of TIDAL video ids to skip (recently
 /// watched). Seed videos, if this grows any, would be exempt; these sets have
 /// none, so the exclusion is unconditional.
+#[cfg(test)]
 pub fn assemble_set_excluding(
     plan: &SetPlan,
     groups: &[(AnchorArtist, Vec<VideoCandidate>)],
@@ -911,9 +954,9 @@ pub fn assemble_set_with_context(
     // Era chooses its decade from what came back; every other archetype leaves
     // this None and keeps all candidates.
     let era_decade = if plan.archetype == Archetype::Era {
-        match pick_era_decade(groups) {
-            Some(decade) => Some(decade),
-            None => return None,
+        {
+            let decade = pick_era_decade(groups)?;
+            Some(decade)
         }
     } else {
         None
@@ -1381,6 +1424,7 @@ mod tests {
             album_tidal_id: None,
             artwork_url: None,
             release_year: None,
+            ..Default::default()
         }
     }
 

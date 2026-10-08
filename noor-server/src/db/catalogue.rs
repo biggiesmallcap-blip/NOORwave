@@ -467,7 +467,7 @@ pub fn retain_merge(conn: &Connection, kept: i64, removed: i64) -> Result<()> {
         },
         None => None,
     }
-    .or_else(|| {
+    .or({
         if protected_a {
             Some(false)
         } else if protected_b {
@@ -497,32 +497,6 @@ pub fn retain_merge(conn: &Connection, kept: i64, removed: i64) -> Result<()> {
     }
     crate::db::catalogue_favorites::retain_merge(conn, "track", kept, removed)?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn saved_dates_compare_offsets_and_legacy_formats_chronologically() {
-        assert_eq!(
-            earliest(
-                Some("2020-06-10T08:00:00+1000"),
-                Some("2020-06-09 23:00:00")
-            ),
-            Some("2020-06-10T08:00:00+1000".into())
-        );
-        assert_eq!(
-            earliest(
-                Some("2020-06-10 07:00:00"),
-                Some("2020-06-10T06:59:59.123+0000")
-            ),
-            Some("2020-06-10T06:59:59.123+0000".into())
-        );
-        assert_eq!(
-            earliest(Some("not a date"), Some("2020-01-01T00:00:00Z")),
-            Some("2020-01-01T00:00:00Z".into())
-        );
-    }
 }
 
 /// A complete favorites snapshot updates alias state, not just the selected ID.
@@ -747,4 +721,30 @@ pub fn reconcile_album(conn: &Connection, tidal_id: i64, tracks: &[TidalTrack]) 
         params![kept, tidal_id],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn saved_dates_compare_offsets_and_legacy_formats_chronologically() {
+        assert_eq!(
+            earliest(
+                Some("2020-06-10T08:00:00+1000"),
+                Some("2020-06-09 23:00:00")
+            ),
+            Some("2020-06-10T08:00:00+1000".into())
+        );
+        assert_eq!(
+            earliest(
+                Some("2020-06-10 07:00:00"),
+                Some("2020-06-10T06:59:59.123+0000")
+            ),
+            Some("2020-06-10T06:59:59.123+0000".into())
+        );
+        assert_eq!(
+            earliest(Some("not a date"), Some("2020-01-01T00:00:00Z")),
+            Some("2020-01-01T00:00:00Z".into())
+        );
+    }
 }

@@ -238,7 +238,7 @@ impl PlaybackEngine {
             track_id,
             generation,
             source_kind,
-            job.gapless.clone(),
+            job.gapless,
             output_sample_rate,
             device_channels,
             estimated_total_samples,

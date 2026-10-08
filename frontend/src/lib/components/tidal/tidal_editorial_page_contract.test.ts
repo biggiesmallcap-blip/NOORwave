@@ -41,14 +41,15 @@ describe('TIDAL editorial page routes', () => {
 
 	test('does not replace existing genres or videos workflows', () => {
 		expect(routeSource('genres')).toContain('GenreGalaxy');
-		expect(routeSource('videos')).toContain('VideoCard');
+		expect(routeSource('videos')).toContain('GuideRow');
 		expect(routeSource('genres')).not.toContain('/tidal/genres');
-		expect(routeSource('videos')).toContain('<VideoNavigation current="videos"');
+		expect(routeSource('videos/editorial')).toContain('embedded');
 	});
 
 	test('wires colliding TIDAL editorial pages under the tidal namespace', () => {
 		// TIDAL genres had no entry point besides the removed galaxy dock link.
 		expect(existsSync(join(routesRoot, 'tidal', 'genres', '+page.svelte'))).toBe(false);
-		expect(routeSource('tidal/videos')).toContain('pagePath="videos"');
+		expect(routeSource('videos/editorial')).toContain('pagePath="videos"');
+		expect(routeSource('tidal/videos')).toContain("goto('/videos/editorial', { replaceState: true })");
 	});
 });

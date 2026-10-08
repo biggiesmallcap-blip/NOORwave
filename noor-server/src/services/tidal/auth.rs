@@ -575,15 +575,12 @@ pub async fn refresh_token(
     if !is_pkce {
         warn_if_fallback_client_credentials();
     }
-    let client_id;
-    let client_secret;
-    if is_pkce {
-        client_id = tidal_pkce_client_id()?;
-        client_secret = tidal_pkce_client_secret()?;
+
+    let (client_id, client_secret) = if is_pkce {
+        (tidal_pkce_client_id()?, tidal_pkce_client_secret()?)
     } else {
-        client_id = tidal_client_id();
-        client_secret = tidal_client_secret();
-    }
+        (tidal_client_id(), tidal_client_secret())
+    };
     let resp = http
         .post(format!("{}/token", TIDAL_AUTH_URL))
         .header(reqwest::header::USER_AGENT, TIDAL_BROWSER_USER_AGENT)
@@ -635,6 +632,15 @@ pub async fn refresh_token(
             .to_string(),
         auth_flow: Some(if is_pkce { "pkce" } else { "device" }.to_string()),
     })
+}
+
+/// True when an API error means the session is no longer valid.
+pub fn error_looks_like_auth(err: &anyhow::Error) -> bool {
+    let message = err.to_string().to_ascii_lowercase();
+    message.contains("401")
+        || message.contains("substatus\":6001")
+        || message.contains("valid session")
+        || message.contains("unauthorized")
 }
 
 #[cfg(test)]

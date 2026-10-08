@@ -17,16 +17,86 @@ describe('persistent video dock contract', () => {
 		expect(layout).toContain('<VideoDock />');
 	});
 
-	test('docks into the route placeholder when on /videos, corner thumbnail off it', () => {
-		// Exact match, not a prefix. Full mode positions the player over the
-		// stage anchor, and /videos is the only route that publishes one; a
-		// prefix let /videos/liked claim full mode with nothing to track, so the
-		// player rendered unpositioned over that page's grid.
-		expect(dock).toContain("page.url.pathname === '/videos'");
-		expect(dock).not.toContain("startsWith('/videos')");
-		expect(dock).toContain('videoStageAnchor');
+	test('docks into the watch page stage, corner player everywhere else', () => {
+		// Full mode follows the published stage, not the path: only the watch
+		// page publishes one, and a stage with no size (hidden under search
+		// results) drops to the corner instead of shrinking the video to nothing.
+		expect(dock).toContain("stageUsable ? 'full' : panelUsable ? 'panel' : 'mini'");
+		expect(dock).toContain('stageRect.width > 0 && stageRect.height > 0');
+		expect(dock).not.toContain("page.url.pathname === '/videos'");
 		expect(dock).toContain('getBoundingClientRect()');
-		expect(dock).toContain("class:mini={mode === 'mini'}");
+		expect(dock).toContain("class:mini={place === 'mini'}");
+	});
+
+	test('leaving the stage glides the same player into place, with no snap or second pop', () => {
+		// Bounds are known in every mode, so the first non-full frame is
+		// already placed rather than parked at the CSS fallback corner.
+		expect(dock).toMatch(/if \(active\) \{\s*if \(!workspace\?\.isConnected\)/);
+		expect(dock).toContain('const moving = previousPlace !== null && previousPlace !== next;');
+		// Page moves are a compositor transform (FLIP), not a per-frame
+		// relayout of the playing video.
+		expect(dock).toContain('glide = el.animate(');
+		// Measured with the arrival animation finished and snap transitions off,
+		// and the start pinned inline so no frame shows the end box early.
+		expect(dock).toContain("dockEl.style.animationDuration = '0s';");
+		expect(dock).toContain('el.style.transform = start;');
+		expect(dock).toContain('animation: dock-in 0.22s ease backwards;');
+		expect(dock).toContain('if (dockEl?.isConnected) lastDockRect = dockEl.getBoundingClientRect();');
+		expect(dock).toContain('const started = fullscreenMove ? sizeGlideFrom(lastDockRect) : flipFrom(lastDockRect);');
+		// The FLIP starts when the compositor runs it (a pinned start time
+		// skipped part of the path after a busy page change), and the dock
+		// lands when the glide really finishes.
+		expect(dock).not.toMatch(/function flipFrom[\s\S]*?glide\.startTime[\s\S]*?\n\t\}/);
+		expect(dock).toContain('started?.finished.then(');
+		// Moving the host restarts CSS animations; they are finished on the spot.
+		expect(dock).toContain('if (animation !== glide) animation.finish();');
+		// Zero duration, not animation: none - removing it would replay dock-in.
+		expect(dock).toContain('animation-duration: 0s;');
+		expect(dock).not.toMatch(/\.morphing \{[^}]*\n\s*animation: none;/);
+	});
+
+	test('fullscreen grows the same player to fill the window instead of a hard cut', () => {
+		const player = readFileSync(join(here, 'VideoPlayer.svelte'), 'utf8');
+		expect(dock).toContain('onFullscreenToggle={toggleExpanded}');
+		expect(dock).toContain('document.documentElement.requestFullscreen?.()');
+		expect(dock).toContain("if (event.key === 'Escape' && expanded && !document.fullscreenElement) expanded = false;");
+		// One motion at a time, window first both ways: going in, the glide
+		// waits for the window to finish growing (gliding first showed the
+		// native title bar over the filled window); going out, window first,
+		// then glide.
+		expect(dock).toContain('if (expanded) return null;');
+		expect(dock).toContain('fullscreenMove ? sizeGlideFrom(lastDockRect)');
+		expect(dock).not.toMatch(/expanded = true;\s*fullscreenTimer = setTimeout/);
+		expect(dock).toMatch(/enteringFullscreen = false;\s*afterWindowSettles\(\(\) => \{[\s\S]*?if \(active\) expanded = true;/);
+		expect(dock).toContain('requestAnimationFrame(() => requestAnimationFrame(() => (expanded = false)));');
+		expect(player).toMatch(/if \(onFullscreenToggle\) \{\s*onFullscreenToggle\(\);\s*return;/);
+	});
+
+	test('on the watch page the player lives in the stage and scrolls natively', () => {
+		// A fixed layer chasing the stage rect trailed compositor scrolling by
+		// a frame, so the video slid out of its frame while scrolling.
+		expect(dock).toContain('<div class="video-dock-host" bind:this={host}>');
+		expect(dock).toContain('stage.appendChild(host);');
+		expect(dock).toContain('const unsubscribeStage = videoStageAnchor.subscribe((stage) => {');
+		expect(dock).toContain(':global(.stage-anchor) > .video-dock-host > .video-dock {');
+		expect(dock).not.toContain('onwheel=');
+		// Gliding onto the stage stays a fixed layer until it lands: inside the
+		// stage the glide was clipped by its overflow and faded with the page.
+		expect(dock).toContain("else if ((!moving || reducedMotion) && $videoStageAnchor) moveIntoStage($videoStageAnchor);");
+		expect(dock).toContain("if (place === 'full' && stage?.isConnected) moveIntoStage(stage);");
+		// The move in lands as the glide ends, so stage-in must not replay there.
+		expect(dock).toMatch(/> \.video-dock-host > \.video-dock \{[^}]*animation: none !important;/);
+	});
+
+	test('window <-> pill only covers and uncovers a video that keeps its size', () => {
+		// Resizing the playing video with the box re-laid it out every frame
+		// and it lagged the box edges.
+		expect(dock).toContain('let windowSize = $derived(miniSize(viewportWidth, false));');
+		expect(dock).toContain('width: calc(var(--window-w) - 2px);');
+		expect(dock).toContain(".video-dock.mini.placed[data-corner^='b'] .player-surface { bottom: 0; }");
+		expect(dock).toContain(".video-dock.mini.placed[data-corner$='r'] .player-surface { right: 0; }");
+		expect(dock).toContain('onclick={() => setCollapsed(true)}');
+		expect(dock).toContain('.video-dock:is(.morphing, .unfolding) .mini-chrome');
 	});
 
 	test('frees the exclusive device when a video starts playing', () => {

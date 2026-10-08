@@ -9,15 +9,14 @@
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 	import VideoCard from '$lib/components/video/VideoCard.svelte';
-	import VideoNavigation from '$lib/components/video/VideoNavigation.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
-	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildVideoMenu } from '$lib/player/video_menu';
 	import { showToast } from '$lib/stores/toast';
 	import { formatTrackDuration } from '$lib/utils/format';
 	import { playVideo } from '$lib/stores/video_session';
+	import { videoSectionQuery } from '$lib/video/section';
 
 	// While the background resolve is still working, re-fetch so the wall fills
 	// in without a manual reload. Same cadence as the editorial set build.
@@ -33,7 +32,8 @@
 	let tidalConnected = $state(true);
 	let refreshing = $state(false);
 
-	let query = $state('');
+	// The video layout's search field filters this wall while on this tab.
+	let query = $derived($videoSectionQuery);
 	let activeGenre = $state<string | null>(null);
 	let activeYear = $state<number | null>(null);
 	let sort = $state<'recent' | 'title'>('recent');
@@ -63,7 +63,7 @@
 			tidal_id: version.tidal_video_id,
 			title: version.video_title,
 			duration_ms: version.duration_ms,
-			artist_id: video.artist_id,
+			artist_id: video.artist_tidal_id,
 			artist_name: video.artist_name,
 			album_tidal_id: null,
 			artwork_url: version.artwork_url,
@@ -316,34 +316,12 @@
 
 <div class="page">
 	<header class="search-header">
-		<VideoNavigation current="liked" />
-		<div class="search-tools">
-			<SearchField
-				bind:value={query}
-				placeholder="Search your liked videos"
-				ariaLabel="Search your liked videos"
-				variant="page"
-				fill
-				suppressSuggestions
-			/>
-			<div class="tools-action">
-				<button
-					type="button"
-					class="header-action"
-					onclick={() => void refresh()}
-					disabled={refreshing || !tidalConnected}
-				>
-					{refreshing ? 'Refreshing...' : 'Refresh'}
-				</button>
-			</div>
-		</div>
-
 		<!-- Narrow, order, play. Genre and year are selects rather than pill
 		     rails because they are unbounded - 35 genres and 40 years as chips
 		     buried the wall under five rows of chrome. -->
-		{#if !loading && videos.length > 0}
+		{#if !loading}
 			<div class="tools">
-				{#if genres.length > 0}
+				{#if videos.length > 0 && genres.length > 0}
 					<select class="tool-select" bind:value={activeGenre} aria-label="Filter by genre">
 						<option value={null}>All genres</option>
 						{#each genres as genre (genre)}
@@ -352,7 +330,7 @@
 					</select>
 				{/if}
 
-				{#if years.length > 0}
+				{#if videos.length > 0 && years.length > 0}
 					<select class="tool-select" bind:value={activeYear} aria-label="Filter by year">
 						<option value={null}>All years</option>
 						{#each years as year (year)}
@@ -361,13 +339,25 @@
 					</select>
 				{/if}
 
-				<select class="tool-select" bind:value={sort} aria-label="Sort">
-					<option value="recent">Recently liked</option>
-					<option value="title">A-Z</option>
-				</select>
+				{#if videos.length > 0}
+					<select class="tool-select" bind:value={sort} aria-label="Sort">
+						<option value="recent">Recently liked</option>
+						<option value="title">A-Z</option>
+					</select>
+				{/if}
 
-				<button class="tool-btn tool-btn--accent" onclick={() => void playAll()}>Play all</button>
-				<button class="tool-btn" onclick={() => void shuffle()}>Shuffle</button>
+				{#if videos.length > 0}
+					<button class="tool-btn tool-btn--accent" onclick={() => void playAll()}>Play all</button>
+					<button class="tool-btn" onclick={() => void shuffle()}>Shuffle</button>
+				{/if}
+				<button
+					type="button"
+					class="tool-btn"
+					onclick={() => void refresh()}
+					disabled={refreshing || !tidalConnected}
+				>
+					{refreshing ? 'Refreshing...' : 'Refresh'}
+				</button>
 			</div>
 		{/if}
 
@@ -514,11 +504,11 @@
 </div>
 
 <style>
+	/* Width, gutters and the bottom inset come from the video layout. */
 	.page {
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-4);
-		padding: var(--space-5) var(--space-5) var(--space-8);
 	}
 	.saved-section { display: grid; gap: var(--space-4); padding-bottom: var(--space-5); border-bottom: 1px solid var(--border-subtle); }
 	.saved-heading { display: grid; gap: 3px; }
@@ -529,55 +519,6 @@
 		flex-direction: column;
 		gap: var(--space-4);
 		width: 100%;
-		max-width: var(--content-width);
-		margin: 0 auto var(--space-2);
-		padding: 0 4px;
-	}
-
-	.search-tools {
-		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto;
-		align-items: center;
-		gap: var(--space-3);
-		width: min(100%, 720px);
-		margin: 0 auto;
-	}
-
-	.tools-action {
-		display: flex;
-		justify-content: flex-end;
-		gap: var(--space-2);
-		min-width: 0;
-	}
-
-	.header-action {
-		display: inline-flex;
-		align-items: center;
-		height: var(--control-h, 30px);
-		padding: 0 14px;
-		border-radius: 999px;
-		border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
-		background: transparent;
-		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-medium);
-		text-decoration: none;
-		white-space: nowrap;
-		cursor: pointer;
-		transition:
-			background 0.15s,
-			color 0.15s,
-			border-color 0.15s;
-	}
-
-	.header-action:hover:not(:disabled) {
-		background: var(--bg-hover);
-		color: var(--text-primary);
-	}
-
-	.header-action:disabled {
-		opacity: 0.5;
-		cursor: default;
 	}
 
 	.scan-note {
@@ -642,9 +583,14 @@
 			border-color 0.15s;
 	}
 
-	.tool-btn:hover {
+	.tool-btn:hover:not(:disabled) {
 		background: var(--bg-hover);
 		color: var(--text-primary);
+	}
+
+	.tool-btn:disabled {
+		opacity: 0.5;
+		cursor: default;
 	}
 
 	/* Accent belongs to the primary action alone, so it never competes with a

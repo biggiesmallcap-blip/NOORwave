@@ -121,10 +121,12 @@
 	import {
 		playQueuedVideo,
 		clearVideoSession,
+		videoPanelAnchor,
 		videoSession,
 		videoSessionUpcoming,
 		type VideoSessionItem,
 	} from '$lib/stores/video_session';
+	import { isVideoSectionPath } from '$lib/video/section';
 	import VideoDock from '$lib/components/video/VideoDock.svelte';
 
 	let { children } = $props();
@@ -1285,7 +1287,14 @@
 		runtime: $playbackRuntimeInfo,
 		exclusiveEngaged: $exclusiveStatus.engaged,
 	}));
-	let videoRouteActive = $derived(page.url.pathname.startsWith('/videos') || page.url.pathname === '/tidal/videos');
+	let videoRouteActive = $derived(isVideoSectionPath(page.url.pathname));
+	// The panel's artwork slot doubles as a stage: the video dock plays there
+	// while the panel is open (see VideoDock). Cleared when the panel unmounts.
+	let videoPanelArtWrap = $state<HTMLElement | null>(null);
+	$effect(() => {
+		videoPanelAnchor.set(videoPanelArtWrap);
+		return () => videoPanelAnchor.set(null);
+	});
 	let videoChromeActive = $derived(videoRouteActive && ($videoSession.active || $videoSession.queue.length > 0));
 	let mobilePlayerVisible = $derived(Boolean($currentTrack) && !videoChromeActive);
 	let progressWidth = $derived(
@@ -1670,7 +1679,7 @@
 		<aside bind:this={bottomPlayerElement} class="now-playing-panel video-queue-panel" class:queue-drawer-open={videoQueueDrawerOpen} aria-label="Video queue">
 			<div class="video-panel-top">
 				<div class="video-panel-heading"><p class="eyebrow">Video session</p><PlayerLayoutSelect effective={effectivePlayerLayout} /></div>
-				<div class="video-panel-art-wrap">
+				<div class="video-panel-art-wrap" bind:this={videoPanelArtWrap}>
 					{#if currentVideoArtwork}
 						<img
 							class="video-panel-art"

@@ -6,8 +6,8 @@ use num_complex::Complex32;
 use rustfft::FftPlanner;
 use std::collections::HashMap;
 
-/// Shazam-style constellation map fingerprint extraction.
-/// Returns (hashes, peak_count) where hashes are (u32 hash, u32 time_offset) pairs.
+// Shazam-style constellation map fingerprint extraction.
+// Returns (hashes, peak_count) where hashes are (u32 hash, u32 time_offset) pairs.
 
 const FFT_SIZE: usize = 2048;
 const HOP_SIZE: usize = 512;
@@ -71,8 +71,13 @@ pub fn extract_fingerprint(samples: &[f32], _sample_rate: u32) -> (Vec<(u32, u32
         for &(anchor_freq, _anchor_mag) in &peaks_per_frame[anchor_idx] {
             // Zone: next 5 frames
             let zone_end = (anchor_idx + 6).min(peaks_per_frame.len());
-            for target_idx in (anchor_idx + 1)..zone_end {
-                for &(target_freq, _) in &peaks_per_frame[target_idx] {
+            for (target_idx, target_peaks) in peaks_per_frame
+                .iter()
+                .enumerate()
+                .take(zone_end)
+                .skip(anchor_idx + 1)
+            {
+                for &(target_freq, _) in target_peaks {
                     // Hash: ((anchor_freq & 0x1FF) << 23) | ((target_freq & 0x1FF) << 14) | ((delta_t) & 0x3FF)
                     let delta_t = (target_idx - anchor_idx) as u32;
                     let hash = ((anchor_freq as u32 & 0x1FF) << 23)

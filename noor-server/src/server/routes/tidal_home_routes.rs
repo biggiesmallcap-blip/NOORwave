@@ -551,7 +551,7 @@ pub(super) async fn get_tidal_page_modules_with_id(
 fn resolve_page_path(section: &str, id: Option<&str>) -> Result<String, StatusCode> {
     let section = section.trim_matches('/');
     let normalized_id = id.map(normalize_tidal_page_id).transpose()?;
-    let wire_section = match (section, normalized_id.as_deref()) {
+    let wire_section = match (section, normalized_id) {
         ("explore", None) => "explore",
         ("hires", None) => "hires",
         ("videos", None) => "videos",
@@ -1049,12 +1049,10 @@ fn merge_default_mood_thumbnails(
                 .get("slug")
                 .and_then(|s| s.as_str())
                 .map(String::from)
+                && let Some(url) = thumbnails.get(&slug)
+                && let Some(obj) = category.as_object_mut()
             {
-                if let Some(url) = thumbnails.get(&slug) {
-                    if let Some(obj) = category.as_object_mut() {
-                        obj.insert("thumbnail".to_string(), Value::String(url.clone()));
-                    }
-                }
+                obj.insert("thumbnail".to_string(), Value::String(url.clone()));
             }
             category
         })
@@ -1103,10 +1101,10 @@ fn apply_mood_probe_results(
                 if *is_empty {
                     return None;
                 }
-                if let Some(url) = thumbnail {
-                    if let Some(obj) = category.as_object_mut() {
-                        obj.insert("thumbnail".to_string(), Value::String(url.clone()));
-                    }
+                if let Some(url) = thumbnail
+                    && let Some(obj) = category.as_object_mut()
+                {
+                    obj.insert("thumbnail".to_string(), Value::String(url.clone()));
                 }
             }
             Some(category)
@@ -1320,6 +1318,49 @@ fn extract_page_links(payload: &Value) -> Vec<Value> {
         }
     }
     out
+}
+
+/// Drill-down for one mood / activity category. `slug` is the path segment
+/// returned by `/api/tidal/moods` (e.g. `mood_party`) and is proxied to
+/// `pages/{slug}` on TIDAL. Slug pattern is restricted to lowercase
+/// alphanumeric + underscores so callers can't escape the `pages/` namespace.
+pub(super) async fn get_tidal_mood_page(
+    State(state): State<SharedState>,
+    Path(slug): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    if slug.is_empty()
+        || slug.len() > 64
+        || !slug
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let wire_path = format!("pages/{}", slug);
+    fetch_page_modules(state, wire_path).await
+}
+
+// Shared TIDAL session loader -- mirrors the inline block other handlers use.
+async fn load_tidal_session(
+    state: &SharedState,
+) -> (
+    Option<crate::services::tidal::auth::TidalTokens>,
+    reqwest::Client,
+) {
+    let in_memory = {
+        let s = state.read().await;
+        (s.tidal_tokens.clone(), s.tidal_http_client.clone())
+    };
+    match in_memory.0 {
+        Some(t) => (Some(t), in_memory.1),
+        None => {
+            let persisted = super::load_persisted_tidal_tokens(state)
+                .await
+                .ok()
+                .flatten();
+            (persisted, in_memory.1)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1663,49 +1704,6 @@ mod tests {
         assert_eq!(pending[0], "mood_uncached");
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0]["thumbnail"], "https://img.example/cached.jpg");
-    }
-}
-
-/// Drill-down for one mood / activity category. `slug` is the path segment
-/// returned by `/api/tidal/moods` (e.g. `mood_party`) and is proxied to
-/// `pages/{slug}` on TIDAL. Slug pattern is restricted to lowercase
-/// alphanumeric + underscores so callers can't escape the `pages/` namespace.
-pub(super) async fn get_tidal_mood_page(
-    State(state): State<SharedState>,
-    Path(slug): Path<String>,
-) -> Result<Json<Value>, StatusCode> {
-    if slug.is_empty()
-        || slug.len() > 64
-        || !slug
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-    {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let wire_path = format!("pages/{}", slug);
-    fetch_page_modules(state, wire_path).await
-}
-
-// Shared TIDAL session loader -- mirrors the inline block other handlers use.
-async fn load_tidal_session(
-    state: &SharedState,
-) -> (
-    Option<crate::services::tidal::auth::TidalTokens>,
-    reqwest::Client,
-) {
-    let in_memory = {
-        let s = state.read().await;
-        (s.tidal_tokens.clone(), s.tidal_http_client.clone())
-    };
-    match in_memory.0 {
-        Some(t) => (Some(t), in_memory.1),
-        None => {
-            let persisted = super::load_persisted_tidal_tokens(state)
-                .await
-                .ok()
-                .flatten();
-            (persisted, in_memory.1)
-        }
     }
 }
 

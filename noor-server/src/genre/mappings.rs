@@ -49,9 +49,7 @@ impl GenreResolution {
         }
 
         let mut names = self.matches.iter().map(|item| item.canonical_name.as_str());
-        let Some(first) = names.next() else {
-            return None;
-        };
+        let first = names.next()?;
 
         if names.all(|name| name == first) {
             Some(first)
@@ -290,9 +288,7 @@ impl GenreCatalog {
                 .then_with(|| left_name.cmp(right_name))
         });
 
-        let Some((best_name, best_norm, best_score)) = scored.first() else {
-            return None;
-        };
+        let (best_name, best_norm, best_score) = scored.first()?;
 
         // Raised from 0.90 to reduce false positives (e.g. "british" → "britpop").
         if *best_score < 0.92 {

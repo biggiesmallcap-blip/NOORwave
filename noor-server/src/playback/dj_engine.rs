@@ -492,7 +492,9 @@ fn profile_from_row(conn: &Connection, row: &AudioDjProfileRow) -> Result<DjProf
         drop_seconds: decode_f32_blob(&row.drop_blob).unwrap_or_default(),
         manual_drop_seconds: vec![],
         safe_transition_windows: safe_transition_windows
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|chunk| noor_mix::profile::TransitionWindow {
                 start_seconds: chunk[0],
                 end_seconds: chunk[1],
@@ -1834,8 +1836,10 @@ mod tests {
 
     #[test]
     fn program_rejected_by_audio_safety_falls_back_to_safe_crossfade() {
-        let mut policy = Policy::default();
-        policy.default_crossfade_ms = 0;
+        let policy = Policy {
+            default_crossfade_ms: 0,
+            ..Policy::default()
+        };
         let program = safe_crossfade_program(48_000, 2, policy);
         assert_eq!(program.template, "SafeCrossfade");
         program.validate().expect("fallback valid");

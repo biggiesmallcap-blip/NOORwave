@@ -70,7 +70,7 @@ describe('video menu contracts', () => {
 		expect(openItem).toBeDefined();
 		openItem?.onSelect?.();
 
-		expect(goto).toHaveBeenCalledWith('/videos?videoId=12345');
+		expect(goto).toHaveBeenCalledWith('/videos/watch?videoId=12345');
 		expect(open).not.toHaveBeenCalled();
 	});
 });

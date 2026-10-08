@@ -143,17 +143,17 @@ where
     let key = lastfm_similar_cache_key(artist, title);
     let now = Instant::now();
 
-    if let Ok(mut guard) = cache.lock() {
-        if let Some(entry) = guard.get(&key) {
-            if now.duration_since(entry.fetched_at) <= LASTFM_SIMILAR_CACHE_TTL
-                && entry.requested_limit >= limit
-            {
-                tracing::debug!(artist, title, limit, "lastfm similar cache hit");
-                return Ok(entry.tracks.iter().take(limit).cloned().collect());
-            }
-            if now.duration_since(entry.fetched_at) > LASTFM_SIMILAR_CACHE_TTL {
-                guard.remove(&key);
-            }
+    if let Ok(mut guard) = cache.lock()
+        && let Some(entry) = guard.get(&key)
+    {
+        if now.duration_since(entry.fetched_at) <= LASTFM_SIMILAR_CACHE_TTL
+            && entry.requested_limit >= limit
+        {
+            tracing::debug!(artist, title, limit, "lastfm similar cache hit");
+            return Ok(entry.tracks.iter().take(limit).cloned().collect());
+        }
+        if now.duration_since(entry.fetched_at) > LASTFM_SIMILAR_CACHE_TTL {
+            guard.remove(&key);
         }
     }
 
@@ -1001,7 +1001,7 @@ fn normalize_source_scores(candidates: &mut [RadioCandidate]) {
         by_source.entry(c.source).or_default().push(idx);
     }
 
-    for (_source, indices) in by_source.iter() {
+    for indices in by_source.values() {
         let n = indices.len();
         if n < 5 {
             continue;

@@ -892,6 +892,23 @@ impl TidalClient {
             .collect())
     }
 
+    /// One video by id. Same item shape as an artist's video list.
+    pub async fn get_video(&self, video_id: i64) -> Result<TidalArtistVideo> {
+        let url = format!(
+            "{}/videos/{}?countryCode={}",
+            TIDAL_API_URL, video_id, self.country_code
+        );
+        self.get_json(&url).await
+    }
+
+    /// Artist-only search for name resolution; cheaper than the core search.
+    pub async fn search_artists(&self, query: &str, limit: i32) -> Result<Vec<TidalSearchArtist>> {
+        Ok(self
+            .search_catalog_with_types(query, limit, 0, "ARTISTS")
+            .await?
+            .artists)
+    }
+
     /// Fetch Tidal editorial "Top Tracks" for the user's region.
     ///
     /// Tidal's public-ish editorial endpoints (e.g. `featured/{path}/tracks`)
@@ -1581,10 +1598,12 @@ impl TidalClient {
             .any(|value| value.contains("video mix") || value.contains("music video"))
     }
 
-    /// TIDAL mix `images` ships in two shapes depending on the page version:
-    ///   1. dict keyed by size: `{"SQUARE": {"url": "..."}, "MEDIUM": {...}}`
-    ///   2. dict keyed by image kind: `{"640": {"imageId": "..."}, ...}`
-    ///   3. flat array: `[{"url": "..."}]`
+    /// TIDAL mix `images` ships in three shapes depending on the page version:
+    ///
+    /// 1. dict keyed by size: `{"SQUARE": {"url": "..."}, "MEDIUM": {...}}`
+    /// 2. dict keyed by image kind: `{"640": {"imageId": "..."}, ...}`
+    /// 3. flat array: `[{"url": "..."}]`
+    ///
     /// We accept all three. For shape 2 we feed `imageId` through the standard
     /// `resources.tidal.com` artwork builder.
     fn pick_mix_image(images: Option<&serde_json::Value>) -> Option<String> {

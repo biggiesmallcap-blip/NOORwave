@@ -300,10 +300,10 @@ fn derive_why(
         hits.push(("same artist".to_string(), "artist"));
     }
 
-    if let (Some(se), Some(ce)) = (seed.energy, cand.energy) {
-        if (se - ce).abs() <= 0.15 {
-            hits.push(("matching energy".to_string(), "energy"));
-        }
+    if let (Some(se), Some(ce)) = (seed.energy, cand.energy)
+        && (se - ce).abs() <= 0.15
+    {
+        hits.push(("matching energy".to_string(), "energy"));
     }
 
     if hits.is_empty() {
@@ -378,37 +378,35 @@ pub fn passes_filters(
     year: Option<i64>,
     heard_in_session: bool,
 ) -> bool {
-    if let Some(b) = cand.bpm {
-        if filters.bpm_min.is_some_and(|min| b < min) || filters.bpm_max.is_some_and(|max| b > max)
-        {
-            return false;
-        }
+    if let Some(b) = cand.bpm
+        && (filters.bpm_min.is_some_and(|min| b < min)
+            || filters.bpm_max.is_some_and(|max| b > max))
+    {
+        return false;
     }
-    if let Some(e) = cand.energy {
-        if filters.energy_min.is_some_and(|min| e < min)
-            || filters.energy_max.is_some_and(|max| e > max)
-        {
-            return false;
-        }
+    if let Some(e) = cand.energy
+        && (filters.energy_min.is_some_and(|min| e < min)
+            || filters.energy_max.is_some_and(|max| e > max))
+    {
+        return false;
     }
-    if filters.key_compatible_only {
-        if let Some(sc) = seed_camelot {
-            match cand.camelot.as_deref() {
-                Some(cc) => {
-                    if camelot_relation(sc, cc) == CamelotRelation::Clash {
-                        return false;
-                    }
+    if filters.key_compatible_only
+        && let Some(sc) = seed_camelot
+    {
+        match cand.camelot.as_deref() {
+            Some(cc) => {
+                if camelot_relation(sc, cc) == CamelotRelation::Clash {
+                    return false;
                 }
-                None => return false,
             }
+            None => return false,
         }
     }
-    if let Some(y) = year {
-        if filters.year_min.is_some_and(|min| y < min)
-            || filters.year_max.is_some_and(|max| y > max)
-        {
-            return false;
-        }
+    if let Some(y) = year
+        && (filters.year_min.is_some_and(|min| y < min)
+            || filters.year_max.is_some_and(|max| y > max))
+    {
+        return false;
     }
     if filters.exclude_in_library && cand.is_in_library {
         return false;
@@ -616,7 +614,7 @@ mod tests {
         };
         let m2 = harmonic_multiplier(&seed, &clash, 0.35);
         assert!(
-            m2 >= 0.70 && m2 < 1.0,
+            (0.70..1.0).contains(&m2),
             "expected penalty above floor, got {m2}"
         );
     }

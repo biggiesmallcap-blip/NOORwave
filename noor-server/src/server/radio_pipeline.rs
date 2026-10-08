@@ -211,18 +211,17 @@ pub fn append_radio_queue_from_candidates(
     let candidates = rank_radio_candidates(conn, append_seed_track_id(conn), candidates);
 
     let tx = conn.unchecked_transaction()?;
-    let mut pos: i32 = tx.query_row(
+    let next_pos: i32 = tx.query_row(
         "SELECT COALESCE(MAX(position) + 1, 0) FROM queue",
         [],
         |row| row.get(0),
     )?;
 
     let mut pending_item_ids = Vec::new();
-    for c in &candidates {
+    for (pos, c) in (next_pos..).zip(&candidates) {
         if insert_radio_candidate(&tx, c, pos)? {
             pending_item_ids.push(tx.last_insert_rowid());
         }
-        pos += 1;
     }
 
     tx.commit()?;

@@ -736,7 +736,6 @@ pub(super) async fn stop_lastfm_enrichment(
 /// the Last.fm auth URL in a new tab, clicks "Yes, allow access", returns to
 /// NOORwave, and clicks "I've authorized". Then /complete redeems the token
 /// for a session_key encrypted on disk.
-
 pub(super) async fn lastfm_auth_start(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {

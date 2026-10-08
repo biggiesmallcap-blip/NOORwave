@@ -33,16 +33,12 @@ const FULL_SYNC_INTERVAL_SECS: i64 = 7 * 24 * 60 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 enum SyncModeRequest {
+    #[default]
     Auto,
     Full,
     Incremental,
-}
-
-impl Default for SyncModeRequest {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -479,7 +475,7 @@ async fn do_tidal_sync(
     }
     let sync_info = {
         let s = state.read().await;
-        s.db.with_conn(|conn| Ok(crate::db::queries::get_sync_info(conn, "tidal")?))?
+        s.db.with_conn(|conn| crate::db::queries::get_sync_info(conn, "tidal"))?
     };
     let sync_mode =
         choose_effective_sync_mode(requested_mode, sync_info.as_ref(), current_unix_epoch());
@@ -950,10 +946,10 @@ async fn do_tidal_sync(
         .as_ref()
         .map(|info| info.enrich_from_favorite_albums)
         .unwrap_or(true);
-    if enrich_enabled {
-        if let Err(e) = run_favorite_album_enrichment(client, state, cancel, &mut stats).await {
-            tracing::warn!("Discovery enrichment stopped early: {e}");
-        }
+    if enrich_enabled
+        && let Err(e) = run_favorite_album_enrichment(client, state, cancel, &mut stats).await
+    {
+        tracing::warn!("Discovery enrichment stopped early: {e}");
     }
     send_tidal_sync_progress(state, 0.99).await;
 
@@ -1523,6 +1519,7 @@ pub(super) fn replace_playlist_tracks(
 /// Promote a provider-observed favorite without replacing the chosen date.
 /// The provider timestamp describes its per-ID favorite relationship; aliases
 /// retain that evidence independently from intentional user date choices.
+#[cfg(test)]
 pub(super) fn promote_duplicate_favorite(
     conn: &rusqlite::Connection,
     track_id: i64,

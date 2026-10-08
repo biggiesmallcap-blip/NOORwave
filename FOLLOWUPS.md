@@ -10,6 +10,29 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### video stations: phase 2 (decades, oddities, full tag coverage)
+
+- Source: video stations design, 2026-10-07.
+- Affected: `noor-server/src/services/video_stations/`,
+  `noor-server/src/services/video_discovery/expand.rs`.
+- Why it matters: decades need year repair (TIDAL video dates are upload
+  dates; library `track_context_tags` era tags are the likely source).
+  Oddities need novelty/comedy/experimental tags, and genre and vibe stations
+  only reach artists with library tracks or radio seed tags, about half the
+  catalog. Collecting Last.fm artist tags for crawled artists fixes both.
+- Spawned by: branch `bsc/video-radio-audit-c7af6d` (video stations).
+
+### video radio: selection scoring on top of the crawler
+
+- Source: video radio audit, 2026-10-07. The crawler now supplies relevance,
+  popularity, watch time and skips; selection still uses fixed lane slots.
+- Affected: `noor-server/src/services/video_radio.rs` (`select_seeded_batch`,
+  `select_batch`).
+- Why it matters: the seed artist takes about half of each batch, non-music
+  clips (commentary, interviews, trailers, under 90 s) are not filtered, the
+  best cut of a song is not preferred, and skips do not demote videos.
+- Spawned by: branch `bsc/video-radio-audit-c7af6d` (video discovery crawler).
+
 ### tests: stabilize relative-date checks across daylight saving changes
 
 - Source: Clay UI verification on 2026-10-04. Four existing `formatDateShort`

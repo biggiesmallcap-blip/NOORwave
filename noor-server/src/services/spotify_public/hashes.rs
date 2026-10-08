@@ -80,6 +80,10 @@ const HASH_EXTRACT_PATTERNS: &[(&str, &str)] = &[
         "assistedCurationSearch",
         r#""assistedCurationSearch","query","([a-f0-9]{64})""#,
     ),
+    (
+        "searchDesktop",
+        r#""searchDesktop","query","([a-f0-9]{64})""#,
+    ),
 ];
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -87,6 +91,15 @@ pub struct RefreshedHashes {
     pub get_track: Option<String>,
     pub query_artist_overview: Option<String>,
     pub search_modal_results: Option<String>,
+    /// `searchDesktop`, the web player's main search. Only it returns the
+    /// playlist bucket (user-made playlists included). No baked-in default:
+    /// it is scraped from the bundle on first use.
+    #[serde(default)]
+    pub search_desktop: Option<String>,
+    /// `fetchPlaylist`, the web player's playlist page (metadata + tracks).
+    /// Scraped on first use, like `search_desktop`.
+    #[serde(default)]
+    pub fetch_playlist: Option<String>,
 }
 
 /// Hits open.spotify.com once, finds the web-player JS bundle, downloads it,
@@ -131,6 +144,8 @@ pub async fn refresh_from_js(client: &Client) -> Result<RefreshedHashes> {
                 "getTrack" => out.get_track = Some(hash),
                 "queryArtistOverview" => out.query_artist_overview = Some(hash),
                 "assistedCurationSearch" => out.search_modal_results = Some(hash),
+                "searchDesktop" => out.search_desktop = Some(hash),
+                "fetchPlaylist" => out.fetch_playlist = Some(hash),
                 _ => {}
             }
         }

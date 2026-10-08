@@ -341,8 +341,8 @@ pub fn decode_f32_blob(blob: &[u8]) -> Option<Vec<f32>> {
         return None;
     }
     let mut values = Vec::with_capacity(count);
-    for chunk in payload.chunks_exact(4) {
-        let value = f32::from_le_bytes(chunk.try_into().ok()?);
+    for chunk in payload.as_chunks::<4>().0 {
+        let value = f32::from_le_bytes(*chunk);
         if !value.is_finite() {
             return None;
         }
@@ -393,8 +393,10 @@ pub fn decode_u32_blob(blob: &[u8]) -> Option<Vec<u32>> {
     }
     Some(
         payload
-            .chunks_exact(4)
-            .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("chunk size")))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| u32::from_le_bytes(*chunk))
             .collect(),
     )
 }

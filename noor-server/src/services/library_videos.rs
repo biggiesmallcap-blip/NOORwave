@@ -183,7 +183,11 @@ pub struct LikedVideoGroup {
     pub song_key: String,
     pub track_title: String,
     pub artist_name: Option<String>,
+    /// Local `artists.id`: only for grouping. Anything that leaves the wall as a
+    /// video item must use `artist_tidal_id`, or a local id gets read as a TIDAL
+    /// id and the artist link lands on a stranger.
     pub artist_id: Option<i64>,
+    pub artist_tidal_id: Option<i64>,
     pub album_year: Option<i64>,
     pub genre: Option<String>,
     pub liked_at: Option<String>,
@@ -217,11 +221,11 @@ pub fn artists_needing_scan(conn: &Connection) -> Result<Vec<ScanTarget>> {
            FROM artists a
            JOIN tracks t ON t.artist_id = a.id AND t.is_favorite = 1
            LEFT JOIN library_video_scans s ON s.artist_id = a.id
-           LEFT JOIN video_artist_scans vs ON vs.artist_tidal_id = a.tidal_id
+           LEFT JOIN video_artist_state vs ON vs.artist_tidal_id = a.tidal_id
           WHERE a.tidal_id IS NOT NULL
           GROUP BY a.id
          HAVING s.scanned_at IS NULL
-             OR vs.scanned_at IS NULL
+             OR vs.last_checked_at IS NULL
              OR s.scanned_at < datetime('now', '-{RESCAN_AFTER_DAYS} days')
              OR MAX({DATE_ADDED_NORMALIZED}) > s.scanned_at
           ORDER BY s.scanned_at IS NOT NULL, a.id"
@@ -334,51 +338,87 @@ pub fn match_videos(tracks: &[LikedTrack], videos: &[TidalArtistVideo]) -> Vec<V
 /// Takes `&Connection` rather than `&mut` so the caller can hold the shared
 /// pooled connection for just this write. The TIDAL call that produced
 /// `matches` happens outside any lock.
+fn upsert_matches(conn: &Connection, matches: &[VideoMatch]) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "INSERT INTO library_videos
+             (track_id, tidal_video_id, video_title, duration_seconds, image_id,
+              match_score, release_year)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(track_id, tidal_video_id) DO UPDATE SET
+             video_title      = excluded.video_title,
+             duration_seconds = excluded.duration_seconds,
+             image_id         = excluded.image_id,
+             match_score      = excluded.match_score,
+             release_year     = excluded.release_year",
+    )?;
+    for m in matches {
+        stmt.execute(params![
+            m.track_id,
+            m.tidal_video_id,
+            m.video_title,
+            m.duration_seconds,
+            m.image_id,
+            m.match_score,
+            m.release_year,
+        ])?;
+    }
+    Ok(())
+}
+
 pub fn store_artist_scan(conn: &Connection, artist_id: i64, matches: &[VideoMatch]) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
-    {
-        let mut stmt = tx.prepare(
-            "INSERT INTO library_videos
-                 (track_id, tidal_video_id, video_title, duration_seconds, image_id,
-                  match_score, release_year)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(track_id, tidal_video_id) DO UPDATE SET
-                 video_title      = excluded.video_title,
-                 duration_seconds = excluded.duration_seconds,
-                 image_id         = excluded.image_id,
-                 match_score      = excluded.match_score,
-                 release_year     = excluded.release_year",
-        )?;
-        for m in matches {
-            stmt.execute(params![
-                m.track_id,
-                m.tidal_video_id,
-                m.video_title,
-                m.duration_seconds,
-                m.image_id,
-                m.match_score,
-                m.release_year,
-            ])?;
-        }
-        tx.execute(
-            "INSERT INTO library_video_scans (artist_id, scanned_at, video_count)
-             VALUES (?1, datetime('now'), ?2)
-             ON CONFLICT(artist_id) DO UPDATE SET
-                 scanned_at  = excluded.scanned_at,
-                 video_count = excluded.video_count",
-            params![artist_id, matches.len() as i64],
-        )?;
-    }
+    upsert_matches(&tx, matches)?;
+    tx.execute(
+        "INSERT INTO library_video_scans (artist_id, scanned_at, video_count)
+         VALUES (?1, datetime('now'), ?2)
+         ON CONFLICT(artist_id) DO UPDATE SET
+             scanned_at  = excluded.scanned_at,
+             video_count = excluded.video_count",
+        params![artist_id, matches.len() as i64],
+    )?;
     tx.commit()?;
     Ok(())
 }
 
+/// The crawler re-checks liked artists weekly. Match each page it fetches
+/// against liked songs so new videos reach the liked wall without waiting for
+/// the scanner's 90-day pass. Suppressed matches stay suppressed (the upsert
+/// never touches that column).
+pub fn match_liked_for_tidal_artist(
+    conn: &Connection,
+    tidal_artist_id: i64,
+    videos: &[TidalArtistVideo],
+) -> Result<usize> {
+    if videos.is_empty() {
+        return Ok(0);
+    }
+    let local_ids: Vec<i64> = {
+        let mut stmt = conn.prepare("SELECT id FROM artists WHERE tidal_id = ?1")?;
+        stmt.query_map([tidal_artist_id], |row| row.get(0))?
+            .collect::<Result<_, _>>()?
+    };
+    let mut hits = 0;
+    for artist_id in local_ids {
+        let tracks = liked_tracks_for_artist(conn, artist_id)?;
+        if tracks.is_empty() {
+            continue;
+        }
+        let matches = match_videos(&tracks, videos);
+        hits += matches.len();
+        upsert_matches(conn, &matches)?;
+    }
+    Ok(hits)
+}
+
 /// Keep every video returned by the artist lookup, including songs that were
 /// never liked. Radio can then start from this catalog without another call.
+/// TIDAL's total is recorded so the discovery crawler can page the rest of a
+/// liked artist's library (and match liked songs there) after this pass.
 fn cache_artist_catalog(
     conn: &Connection,
     target: &ScanTarget,
     videos: &[TidalArtistVideo],
+    total: Option<i64>,
 ) -> Result<()> {
     let anchor = video_sets::AnchorArtist {
         tidal_id: target.tidal_artist_id,
@@ -392,6 +432,13 @@ fn cache_artist_catalog(
         .collect();
     let tx = conn.unchecked_transaction()?;
     video_radio::cache_groups_without_prune(&tx, &[(anchor, candidates)])?;
+    crate::services::video_discovery::artist_state::record_page(
+        &tx,
+        target.tidal_artist_id,
+        0,
+        videos.len() as i64,
+        total,
+    )?;
     tx.commit()?;
     Ok(())
 }
@@ -417,7 +464,8 @@ pub fn load_wall(conn: &Connection) -> Result<Vec<LikedVideoGroup>> {
                 g.name,
                 t.date_added,
                 lv.match_score,
-                lv.release_year
+                lv.release_year,
+                ar.tidal_id
            FROM library_videos lv
            JOIN tracks t              ON t.id = lv.track_id AND t.is_favorite = 1
            LEFT JOIN artists ar       ON ar.id = t.artist_id
@@ -433,6 +481,7 @@ pub fn load_wall(conn: &Connection) -> Result<Vec<LikedVideoGroup>> {
         track_title: String,
         artist_name: Option<String>,
         artist_id: Option<i64>,
+        artist_tidal_id: Option<i64>,
         album_year: Option<i64>,
         genre: Option<String>,
         liked_at: Option<String>,
@@ -455,6 +504,7 @@ pub fn load_wall(conn: &Connection) -> Result<Vec<LikedVideoGroup>> {
                 track_title: row.get(3)?,
                 artist_name: row.get(4)?,
                 artist_id: row.get(5)?,
+                artist_tidal_id: row.get::<_, Option<i64>>(13)?.filter(|id| *id > 0),
                 album_year: row.get(8)?,
                 genre: row.get(9)?,
                 liked_at: row.get(10)?,
@@ -476,6 +526,7 @@ pub fn load_wall(conn: &Connection) -> Result<Vec<LikedVideoGroup>> {
                 track_title: item.track_title,
                 artist_name: item.artist_name,
                 artist_id: item.artist_id,
+                artist_tidal_id: item.artist_tidal_id,
                 album_year: item.album_year,
                 genre: item.genre,
                 liked_at: item.liked_at,
@@ -664,7 +715,7 @@ pub async fn run_if_idle(state: SharedState) {
                         _ => continue,
                     };
 
-                let videos = match client
+                let (videos, total) = match client
                     .get_artist_videos(target.tidal_artist_id, VIDEOS_PER_ARTIST, 0)
                     .await
                 {
@@ -675,7 +726,7 @@ pub async fn run_if_idle(state: SharedState) {
                         {
                             larger_catalogs += 1;
                         }
-                        page.items
+                        (page.items, page.total_number_of_items)
                     }
                     Err(e) => {
                         // Do not stamp the ledger on failure: an unstamped artist
@@ -695,7 +746,8 @@ pub async fn run_if_idle(state: SharedState) {
 
                 let matches = match_videos(&tracks, &videos);
                 hits += matches.len();
-                if let Err(e) = with_scan_conn!(|conn| cache_artist_catalog(conn, &target, &videos))
+                if let Err(e) =
+                    with_scan_conn!(|conn| cache_artist_catalog(conn, &target, &videos, total))
                 {
                     warn!(
                         target: "noor.library_videos",
@@ -732,7 +784,6 @@ pub async fn run_if_idle(state: SharedState) {
             scanned, hits, indexed, larger_catalogs,
             "liked-video pass complete"
         );
-        video_radio::warm_liked_graph_if_idle(state).await;
     });
 }
 
@@ -780,6 +831,20 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn a_crawler_page_adds_liked_song_matches_without_restamping_the_scan() {
+        let conn = setup();
+        let liked = liked_tracks_for_artist(&conn, 1).unwrap();
+        let title = liked[0].title.clone();
+        let videos = vec![video(900, &title)];
+        let hits = match_liked_for_tidal_artist(&conn, 5001, &videos).unwrap();
+        assert_eq!(hits, 1);
+        let stamped: i64 = conn
+            .query_row("SELECT COUNT(*) FROM library_video_scans", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stamped, 0, "the liked-wall scanner keeps its own ledger");
     }
 
     #[test]
@@ -856,7 +921,7 @@ mod tests {
         let conn = setup();
         let target = artists_needing_scan(&conn).unwrap().remove(0);
         let videos = vec![video(900, "Song"), video(901, "Other Song")];
-        cache_artist_catalog(&conn, &target, &videos).unwrap();
+        cache_artist_catalog(&conn, &target, &videos, Some(120)).unwrap();
         let liked = liked_tracks_for_artist(&conn, target.artist_id).unwrap();
         store_artist_scan(&conn, target.artist_id, &match_videos(&liked, &videos)).unwrap();
 
@@ -872,7 +937,20 @@ mod tests {
             .unwrap();
         assert_eq!(catalog_count, 2);
         assert_eq!(liked_count, 1);
-        assert!(!video_radio::artist_due(&conn, 5001).unwrap());
+        let state = crate::services::video_discovery::artist_state::get(&conn, 5001)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (state.fetched_count, state.total_videos),
+            (2, Some(120)),
+            "the crawler can page the rest of the library"
+        );
+        assert!(
+            !crate::services::video_discovery::artist_state::get(&conn, 5001)
+                .unwrap()
+                .unwrap()
+                .never_checked()
+        );
     }
 
     #[test]
@@ -893,7 +971,12 @@ mod tests {
     fn a_scanned_artist_is_not_rescanned_until_something_changes() {
         let conn = setup();
         store_artist_scan(&conn, 1, &[]).unwrap();
-        video_radio::mark_artist_scanned(&conn, 5001).unwrap();
+        crate::services::video_discovery::artist_state::record_check(
+            &conn,
+            5001,
+            crate::services::video_discovery::artist_state::CheckResult::Empty,
+        )
+        .unwrap();
 
         assert!(
             artists_needing_scan(&conn).unwrap().is_empty(),
@@ -925,7 +1008,12 @@ mod tests {
         )
         .unwrap();
         store_artist_scan(&conn, 1, &[]).unwrap();
-        video_radio::mark_artist_scanned(&conn, 5001).unwrap();
+        crate::services::video_discovery::artist_state::record_check(
+            &conn,
+            5001,
+            crate::services::video_discovery::artist_state::CheckResult::Empty,
+        )
+        .unwrap();
 
         assert!(
             artists_needing_scan(&conn).unwrap().is_empty(),
@@ -939,7 +1027,7 @@ mod tests {
         store_artist_scan(&conn, 1, &[]).unwrap();
         assert_eq!(artists_needing_scan(&conn).unwrap().len(), 1);
         let target = artists_needing_scan(&conn).unwrap().remove(0);
-        cache_artist_catalog(&conn, &target, &[]).unwrap();
+        cache_artist_catalog(&conn, &target, &[], Some(0)).unwrap();
         assert!(artists_needing_scan(&conn).unwrap().is_empty());
     }
 
@@ -947,7 +1035,12 @@ mod tests {
     fn a_stale_scan_is_rechecked() {
         let conn = setup();
         store_artist_scan(&conn, 1, &[]).unwrap();
-        video_radio::mark_artist_scanned(&conn, 5001).unwrap();
+        crate::services::video_discovery::artist_state::record_check(
+            &conn,
+            5001,
+            crate::services::video_discovery::artist_state::CheckResult::Empty,
+        )
+        .unwrap();
         conn.execute(
             "UPDATE library_video_scans
                 SET scanned_at = datetime('now', '-91 days') WHERE artist_id = 1",

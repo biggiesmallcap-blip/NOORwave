@@ -230,11 +230,16 @@ pub struct SportifyPlaylist {
     pub thumbnail: Option<String>,
     /// Some endpoints return an `images` array instead. Pick whichever is
     /// present in [`crate::services::sportify::normalize`].
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_empty")]
     pub images: Vec<SportifyImage>,
     #[serde(default)]
     pub owner: Option<SportifyPlaylistOwner>,
-    #[serde(default, alias = "follower_count", alias = "followerCount")]
+    #[serde(
+        default,
+        alias = "follower_count",
+        alias = "followerCount",
+        deserialize_with = "deserialize_count"
+    )]
     pub followers: Option<i64>,
     #[serde(default, rename = "snapshot_id", alias = "snapshotId")]
     pub snapshot_id: Option<String>,
@@ -249,7 +254,7 @@ pub struct SportifyPlaylist {
     /// Spotify-facing URL on the playlist body (search shape).
     #[serde(default)]
     pub url: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_empty")]
     pub tracks: Vec<SportifyTrack>,
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
@@ -352,6 +357,38 @@ where
         .collect())
 }
 
+/// `null` where a list is expected (Spotify sends `images: null` for user
+/// playlists without custom artwork) reads as an empty list.
+fn deserialize_null_as_empty<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// Counts ship either flat (`12`) or in the Web API's `{ "total": 12 }` shape.
+fn deserialize_count<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        Flat(i64),
+        Total {
+            #[serde(default)]
+            total: Option<i64>,
+        },
+    }
+    Ok(
+        Option::<Repr>::deserialize(deserializer)?.and_then(|r| match r {
+            Repr::Flat(n) => Some(n),
+            Repr::Total { total } => total,
+        }),
+    )
+}
+
 fn extra_string(extra: &HashMap<String, serde_json::Value>, key: &str) -> Option<String> {
     extra.get(key).and_then(|v| v.as_str()).map(str::to_string)
 }
@@ -382,8 +419,8 @@ pub struct SportifySearchResults {
 mod tests {
     use super::*;
 
-    /// Regression: playlist-body track shape uses `title` + flat `artist`
-    /// + top-level `thumbnail`. The first ship missed this and every track
+    /// Regression: playlist-body track shape uses `title` + flat `artist` +
+    /// top-level `thumbnail`. The first ship missed this and every track
     /// deserialized into all-None defaults.
     #[test]
     fn deserializes_playlist_track_shape() {

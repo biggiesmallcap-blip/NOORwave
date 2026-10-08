@@ -180,10 +180,10 @@ pub fn build_submit_payload(kind: ListenType, listen: &ListenPayload) -> Value {
     metadata.insert("additional_info".to_string(), Value::Object(additional));
 
     let mut item = serde_json::Map::new();
-    if !matches!(kind, ListenType::PlayingNow) {
-        if let Some(ts) = listen.listened_at {
-            item.insert("listened_at".to_string(), json!(ts));
-        }
+    if !matches!(kind, ListenType::PlayingNow)
+        && let Some(ts) = listen.listened_at
+    {
+        item.insert("listened_at".to_string(), json!(ts));
     }
     item.insert("track_metadata".to_string(), Value::Object(metadata));
 

@@ -11,6 +11,7 @@
 //! Each path like `"Electronic > House"` produces a weighted set:
 //! - the leaf segment (`"House"`) gets weight `1.0`,
 //! - every other segment (`"Electronic"`) gets weight [`ANCESTOR_WEIGHT`].
+//!
 //! When the same name appears in multiple paths (leaf in one, ancestor
 //! in another), the larger weight wins.
 //!
@@ -121,7 +122,7 @@ pub fn weighted_jaccard(seed: &HashMap<String, f64>, cand: &HashMap<String, f64>
     } else {
         0.0
     };
-    (base + bonus).min(1.0).max(0.0)
+    (base + bonus).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]

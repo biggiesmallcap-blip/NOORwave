@@ -54,6 +54,7 @@ mod tidal_content_routes;
 mod tidal_home_routes;
 mod tidal_sync_routes;
 mod video_discovery_routes;
+mod video_station_routes;
 pub use tidal_sync_routes::trigger_auto_sync;
 
 type TidalPlaylistTracksCache = Arc<Mutex<HashMap<String, (Instant, Vec<TidalTrack>)>>>;
@@ -258,7 +259,7 @@ async fn refresh_prepared_dj_transition(
     };
     let runtime = handle.clone();
     let transition = update.transition.clone();
-    let gapless = update.gapless.clone();
+    let gapless = update.gapless;
     let accepted = tokio::task::spawn_blocking(move || {
         runtime.update_prepared_transition(transition, gapless)
     })
@@ -571,7 +572,6 @@ pub struct DiscoveryExternalResultRequest {
     album_title: Option<String>,
     artwork_url: Option<String>,
     duration_ms: Option<i64>,
-    audio_quality: Option<String>,
     normalized_genres: Option<Vec<String>>,
 }
 
@@ -1235,6 +1235,32 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/videos/history",
             post(video_discovery_routes::post_videos_history),
         )
+        .route(
+            "/api/videos/history/{id}/finish",
+            post(video_discovery_routes::post_videos_history_finish),
+        )
+        .route(
+            "/api/videos/discovery/status",
+            get(video_discovery_routes::get_video_discovery_status),
+        )
+        .route(
+            "/api/videos/discovery/settings",
+            get(video_discovery_routes::get_video_discovery_settings)
+                .put(video_discovery_routes::put_video_discovery_settings),
+        )
+        .route(
+            "/api/videos/stations",
+            get(video_station_routes::get_video_stations),
+        )
+        .route(
+            "/api/videos/stations/settings",
+            get(video_station_routes::get_video_station_settings)
+                .put(video_station_routes::put_video_station_settings),
+        )
+        .route(
+            "/api/videos/stations/{id}/next",
+            post(video_station_routes::post_video_station_next),
+        )
         // The liked-videos library wall. Pure reads over what the background
         // resolve has found; the TIDAL fan-out is never on a request path.
         .route(
@@ -1682,7 +1708,7 @@ async fn get_radio_tracks(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let creativity = payload.creativity.unwrap_or(0.3).clamp(0.0, 1.0);
     let context_window = payload.context_window.unwrap_or(5).max(0) as usize;
-    let limit = payload.limit.unwrap_or(20).max(1).min(50);
+    let limit = payload.limit.unwrap_or(20).clamp(1, 50);
     let exclude_ids = payload.exclude_ids.unwrap_or_default();
 
     let state = state.read().await;
@@ -3367,7 +3393,7 @@ async fn get_discovery_artists(
     State(state): State<SharedState>,
     Query(query): Query<DiscoveryArtistsQuery>,
 ) -> Result<Json<Value>, StatusCode> {
-    let limit = query.limit.unwrap_or(50).max(1).min(200);
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
 
     let artists = state
         .read()
@@ -5977,10 +6003,8 @@ async fn resolve_pending_current_queue_item(
         s.db.clone()
     };
 
-    let (queue_item_id, pending_artist, pending_title, tidal_id_hint) = db
-        .with_conn(|conn| pending::current_pending(conn))
-        .ok()
-        .flatten()?;
+    let (queue_item_id, pending_artist, pending_title, tidal_id_hint) =
+        db.with_conn(pending::current_pending).ok().flatten()?;
 
     if !playback_generation_is_current(state, expected_generation).await {
         return None;
@@ -7344,22 +7368,21 @@ fn current_queue_position(conn: &rusqlite::Connection) -> anyhow::Result<Option<
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
 
-    if let Some(queue_item_id) = current_queue_item_id {
-        if queue_item_matches_current_track(conn, queue_item_id, current_track_id)?
-            && let Some(position) = queue_item_position(conn, queue_item_id)?
-        {
-            return Ok(Some(position));
-        }
+    if let Some(queue_item_id) = current_queue_item_id
+        && queue_item_matches_current_track(conn, queue_item_id, current_track_id)?
+        && let Some(position) = queue_item_position(conn, queue_item_id)?
+    {
+        return Ok(Some(position));
     }
 
-    if let Some(track_id) = current_track_id {
-        if let Some((queue_item_id, position)) = first_queue_item_for_track(conn, track_id)? {
-            conn.execute(
-                "UPDATE playback_state SET current_queue_item_id = ?1 WHERE id = 1",
-                params![queue_item_id],
-            )?;
-            return Ok(Some(position));
-        }
+    if let Some(track_id) = current_track_id
+        && let Some((queue_item_id, position)) = first_queue_item_for_track(conn, track_id)?
+    {
+        conn.execute(
+            "UPDATE playback_state SET current_queue_item_id = ?1 WHERE id = 1",
+            params![queue_item_id],
+        )?;
+        return Ok(Some(position));
     }
 
     if current_queue_item_id.is_some() {
@@ -8916,6 +8939,27 @@ async fn tidal_request_tokens(
     Ok(s.tidal_tokens.clone().or(persisted))
 }
 
+/// Every video list the listener opens teaches the discovery crawler.
+async fn harvest_seen_videos(
+    state: &SharedState,
+    videos: &[crate::services::tidal::client::TidalSearchVideo],
+    list_key: Option<String>,
+) {
+    use crate::services::video_discovery::harvest::{self, HarvestContext};
+    let db = state.read().await.db.clone();
+    let candidates: Vec<crate::services::video_sets::VideoCandidate> = videos
+        .iter()
+        .map(crate::services::video_sets::VideoCandidate::from)
+        .collect();
+    let ctx = match list_key.as_deref() {
+        Some(key) => HarvestContext::List { key },
+        None => HarvestContext::Search,
+    };
+    if let Err(error) = db.with_conn(|conn| harvest::ingest(conn, &candidates, ctx)) {
+        tracing::debug!(target: "noor.video_discovery", %error, "could not harvest seen videos");
+    }
+}
+
 async fn tidal_video_search(
     State(state): State<SharedState>,
     Query(params): Query<TidalSearchParams>,
@@ -8977,6 +9021,8 @@ async fn tidal_video_search(
             ));
         }
     };
+
+    harvest_seen_videos(&state, &videos, None).await;
 
     Ok(Json(json!({
         "videos": videos.into_iter().map(tidal_video_to_resp).collect::<Vec<_>>()
@@ -9145,6 +9191,8 @@ async fn tidal_video_playback(
         ));
     }
 
+    crate::services::video_discovery::governor::note_video_activity();
+
     let Some(tokens) = tidal_request_tokens(&state).await? else {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -9267,6 +9315,8 @@ async fn tidal_video_mix_items(
         }
     };
 
+    harvest_seen_videos(&state, &items, Some(format!("mix:{mix_id}"))).await;
+
     Ok(Json(json!({
         "items": items.into_iter().map(tidal_video_to_resp).collect::<Vec<_>>()
     })))
@@ -9334,6 +9384,8 @@ async fn tidal_video_playlist_items(
             ));
         }
     };
+
+    harvest_seen_videos(&state, &items, Some(format!("playlist:{uuid}"))).await;
 
     Ok(Json(json!({
         "items": items.into_iter().map(tidal_video_to_resp).collect::<Vec<_>>()
@@ -9838,13 +9890,7 @@ async fn begin_tidal_client_recovery(state: &SharedState) -> TidalClientRecovery
     }
 }
 
-pub(super) fn error_looks_like_auth(err: &anyhow::Error) -> bool {
-    let message = err.to_string().to_ascii_lowercase();
-    message.contains("401")
-        || message.contains("substatus\":6001")
-        || message.contains("valid session")
-        || message.contains("unauthorized")
-}
+pub(super) use crate::services::tidal::auth::error_looks_like_auth;
 
 async fn current_playback_runtime(
     state: &SharedState,

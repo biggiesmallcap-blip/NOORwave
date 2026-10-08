@@ -222,7 +222,7 @@ fn prepare_passive_analysis_samples(samples: Vec<f32>, sample_rate: u32) -> (Vec
     (downsampled, downsampled_rate)
 }
 
-/// Camelot compatibility helpers (reused by automix scoring + radio).
+// Camelot compatibility helpers (reused by automix scoring + radio).
 
 /// Check if two Camelot keys are compatible (same number, or differ by 1 mod 12).
 pub fn camelot_compatible(a: &str, b: &str) -> bool {
@@ -272,6 +272,46 @@ pub fn camelot_relation(a: &str, b: &str) -> CamelotRelation {
     } else {
         CamelotRelation::Clash
     }
+}
+
+/// Compute a shared harmonic/BPM multiplier used by both automix (`player.rs`)
+/// and radio post-scoring (`server/routes.rs`).
+///
+/// Returns 1.0 when either side is unanalyzed so we never penalise tracks we
+/// simply don't know anything about.
+///
+/// Camelot: compatible → *2.2, adjacent → *1.4, clash → *0.6
+/// BPM: diff <5 → *1.8, <10 → *1.3, <20 → *0.9, else *0.65
+pub fn compute_harmonic_multiplier(
+    seed_camelot: Option<&str>,
+    cand_camelot: Option<&str>,
+    seed_bpm: Option<f64>,
+    cand_bpm: Option<f64>,
+) -> f64 {
+    let mut mult = 1.0_f64;
+
+    if let (Some(a), Some(b)) = (seed_camelot, cand_camelot) {
+        mult *= match camelot_relation(a, b) {
+            CamelotRelation::Compatible => 2.2,
+            CamelotRelation::Adjacent => 1.4,
+            CamelotRelation::Clash => 0.6,
+        };
+    }
+
+    if let (Some(a), Some(b)) = (seed_bpm, cand_bpm) {
+        let diff = (a - b).abs();
+        if diff < 5.0 {
+            mult *= 1.8;
+        } else if diff < 10.0 {
+            mult *= 1.3;
+        } else if diff < 20.0 {
+            mult *= 0.9;
+        } else {
+            mult *= 0.65;
+        }
+    }
+
+    mult
 }
 
 #[cfg(test)]
@@ -372,44 +412,4 @@ mod tests {
         assert!(camelot_adjacent("8A", "9A"));
         assert!(camelot_adjacent("12B", "1B"));
     }
-}
-
-/// Compute a shared harmonic/BPM multiplier used by both automix (`player.rs`)
-/// and radio post-scoring (`server/routes.rs`).
-///
-/// Returns 1.0 when either side is unanalyzed so we never penalise tracks we
-/// simply don't know anything about.
-///
-/// Camelot: compatible → *2.2, adjacent → *1.4, clash → *0.6
-/// BPM: diff <5 → *1.8, <10 → *1.3, <20 → *0.9, else *0.65
-pub fn compute_harmonic_multiplier(
-    seed_camelot: Option<&str>,
-    cand_camelot: Option<&str>,
-    seed_bpm: Option<f64>,
-    cand_bpm: Option<f64>,
-) -> f64 {
-    let mut mult = 1.0_f64;
-
-    if let (Some(a), Some(b)) = (seed_camelot, cand_camelot) {
-        mult *= match camelot_relation(a, b) {
-            CamelotRelation::Compatible => 2.2,
-            CamelotRelation::Adjacent => 1.4,
-            CamelotRelation::Clash => 0.6,
-        };
-    }
-
-    if let (Some(a), Some(b)) = (seed_bpm, cand_bpm) {
-        let diff = (a - b).abs();
-        if diff < 5.0 {
-            mult *= 1.8;
-        } else if diff < 10.0 {
-            mult *= 1.3;
-        } else if diff < 20.0 {
-            mult *= 0.9;
-        } else {
-            mult *= 0.65;
-        }
-    }
-
-    mult
 }

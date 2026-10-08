@@ -41,7 +41,6 @@ pub fn normalize_reason_tags(raw_tags: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Pick the primary reason from a list of raw tags using the first non-unknown result.
 // ─── 2. Source normalizer ────────────────────────────────────────────────────
 
 pub fn normalize_source(source: &str) -> &'static str {

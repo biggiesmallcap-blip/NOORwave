@@ -3290,7 +3290,7 @@ pub fn get_genre_cohorts_filtered(
     }
 
     let mut cohorts: Vec<_> = cohort_map.into_values().collect();
-    cohorts.sort_by(|a, b| b.listen_count.cmp(&a.listen_count));
+    cohorts.sort_by_key(|a| std::cmp::Reverse(a.listen_count));
 
     Ok(cohorts)
 }
@@ -3479,10 +3479,10 @@ pub fn get_external_candidate_genre_tags(
     let mut map = HashMap::new();
     for r in rows {
         let (id, raw) = r?;
-        if let Ok(tags) = serde_json::from_str::<Vec<String>>(&raw) {
-            if !tags.is_empty() {
-                map.insert(id, tags);
-            }
+        if let Ok(tags) = serde_json::from_str::<Vec<String>>(&raw)
+            && !tags.is_empty()
+        {
+            map.insert(id, tags);
         }
     }
     Ok(map)
@@ -6932,8 +6932,7 @@ pub fn get_dsp_harmonic_keys_batch(
     if track_ids.is_empty() {
         return Ok(out);
     }
-    let placeholders = std::iter::repeat("?")
-        .take(track_ids.len())
+    let placeholders = std::iter::repeat_n("?", track_ids.len())
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
@@ -7908,6 +7907,7 @@ pub fn replace_armed_dj_transition_event(
     Ok(())
 }
 
+#[cfg(test)]
 pub fn update_dj_transition_fire_timing(
     conn: &Connection,
     id: i64,
@@ -12426,7 +12426,7 @@ pub fn expand_genre_descendants(conn: &Connection, ids: &[i64]) -> Result<Vec<i6
 /// "Psychedelic Rock" @ 0.29 on psytrance tracks) neither match nor rank.
 /// confidence is clamped to 1.0 for ranking so the handful of miscalibrated
 /// >1.0 rows (docs/genre-data-quality-2026-05-07.md) can't outrank a clean
-/// 1.0 tag.
+/// > 1.0 tag.
 fn genre_match_join_sql(filters: &AudioFilters) -> String {
     if filters.genre_ids.is_empty() {
         return String::new();

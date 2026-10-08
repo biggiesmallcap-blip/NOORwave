@@ -27,6 +27,8 @@
 pub mod cache;
 pub mod client;
 pub mod hashes;
+pub mod playlist_fetch;
+pub mod playlist_search;
 pub mod resolver;
 pub mod token;
 
@@ -123,7 +125,7 @@ pub async fn fetch_album_playcounts(
     }
 
     let mut out = Vec::with_capacity(seeds.len());
-    for (seed, handle) in seeds.iter().zip(handles.into_iter()) {
+    for (seed, handle) in seeds.iter().zip(handles) {
         let playcount = handle.await.ok().flatten();
         out.push(TrackStat {
             isrc: seed.isrc.clone(),

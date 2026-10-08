@@ -1,6 +1,6 @@
 [package]
 name = "noor-server"
-version = "0.18.0"
+version = "0.20.30"
 edition = "2024"
 description = "NOORwave - Multi-service music library manager and hi-fi player"
 
@@ -13,6 +13,13 @@ description = "NOORwave - Multi-service music library manager and hi-fi player"
 # flag - that requires `cmake` on the build host to compile BoringSSL.
 default = ["spotify-public"]
 spotify-public = []
+
+[lints.clippy]
+# Route handlers and DB helpers thread many independent inputs (state, ids,
+# flags) and return wide row tuples; wrapping each in a one-off struct or type
+# alias hurts readability more than it helps.
+too_many_arguments = "allow"
+type_complexity = "allow"
 
 [dependencies]
 # Web server
