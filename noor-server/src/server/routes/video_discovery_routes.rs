@@ -464,10 +464,15 @@ pub(super) async fn post_videos_related(
             Ok(selected)
         })
         .unwrap_or_default();
-    if items.len() < RELATED_HEALTHY {
+    // Only a short row waits on the crawler. A full one must not report a
+    // build the station radio started: the watch page holds its extension
+    // while `building` is true, and those builds run for minutes.
+    let short = items.len() < RELATED_HEALTHY;
+    if short {
         crawler::request(Urgent::Station(seed_id));
     }
-    Json(json!({ "items": items, "building": crawler::is_building(Urgent::Station(seed_id)) }))
+    let building = short && crawler::is_building(Urgent::Station(seed_id));
+    Json(json!({ "items": items, "building": building }))
 }
 
 fn record_set_exposure(
@@ -778,6 +783,47 @@ mod tests {
         .expect("related never waits on TIDAL");
         assert_eq!(response.0["items"], json!([]));
         assert_eq!(response.0["building"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn healthy_related_row_ignores_a_station_build_it_did_not_ask_for() {
+        let db = crate::server::routes::tests::fresh_migrated_db();
+        db.with_conn(|conn| {
+            let videos = (1..=8)
+                .map(|id| video_sets::VideoCandidate {
+                    tidal_id: 9_000 + id,
+                    title: format!("Song {id}"),
+                    artist_id: Some(4545),
+                    artist_name: Some("Artist 4545".into()),
+                    ..Default::default()
+                })
+                .collect();
+            let anchor = video_sets::AnchorArtist {
+                tidal_id: 4545,
+                name: "Artist 4545".into(),
+                listens: 1,
+                via: None,
+            };
+            video_radio::cache_groups(conn, &[(anchor, videos)])
+        })
+        .unwrap();
+        // The station radio started for this artist is still being crawled.
+        crawler::request(Urgent::Station(4545));
+        let response = post_videos_related(
+            State(state(db)),
+            Json(RelatedVideosRequest {
+                seed_artist_id: Some(4545),
+                seed_artist_name: None,
+                exclude_video_ids: Vec::new(),
+            }),
+        )
+        .await;
+        assert_eq!(response.0["items"].as_array().unwrap().len(), 8);
+        assert_eq!(
+            response.0["building"],
+            json!(false),
+            "a full row must not hold the page's extension on someone else's build"
+        );
     }
 
     #[tokio::test]
