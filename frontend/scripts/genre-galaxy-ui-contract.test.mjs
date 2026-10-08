@@ -32,6 +32,8 @@ describe('genre galaxy UI contract', () => {
 		expect(galaxy).not.toContain('selectedId === node.id || hoveredNodeId === node.id');
 		expect(galaxy).toContain('class="hover-card"');
 		expect(galaxy).toContain('Top:');
+		// Overview refits when the canvas changes size (bottom player, window resize).
+		expect(galaxy).toContain('fitToNodes(nodes, 0.8, true);');
 		expect(route).toContain('class="hud-stat"');
 		const panel = readFileSync('src/lib/components/Genre/GenrePanel.svelte', 'utf8');
 		// The panel opens under the view tabs, not on top of them.

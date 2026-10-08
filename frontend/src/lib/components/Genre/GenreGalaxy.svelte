@@ -142,20 +142,6 @@
 		return lineage;
 	});
 
-	// How far each family's cluster reaches from its hub (world units), so the
-	// family name sits under the whole cluster instead of on top of it.
-	let familyExtentById = $derived.by(() => {
-		const roots = new Map(nodes.filter((node) => node.depth === 0).map((node) => [node.familyId, node]));
-		const extents = new Map<number, number>();
-		for (const node of nodes) {
-			const root = roots.get(node.familyId);
-			if (!root) continue;
-			const reach = Math.hypot(node.x - root.x, node.y - root.y) + node.radius;
-			extents.set(node.familyId, Math.max(extents.get(node.familyId) ?? 0, reach));
-		}
-		return extents;
-	});
-
 	let bgCanvas: HTMLCanvasElement | null = null;
 	let connCanvas: HTMLCanvasElement | null = null;
 	let resizeObserver: ResizeObserver | null = null;
@@ -1122,14 +1108,10 @@
 			const padX = selected ? 8 : 2;
 			const rectWidth = ctx.measureText(text).width + padX * 2;
 			const rectHeight = selected ? 20 : 15;
-			const below =
-				node.depth === 0 && zoomLevel === 'galaxy'
-					? (familyExtentById.get(node.familyId) ?? 0) * camera.scale
-					: node.radius;
 			candidates.push({
 				id: node.id,
 				x: screen.x - rectWidth / 2,
-				y: screen.y + below + 6,
+				y: screen.y + node.radius + 6,
 				width: rectWidth,
 				height: rectHeight,
 				priority: labelPriority(node.depth, selected, inLineage, node.heatNorm),
@@ -1412,6 +1394,12 @@
 		if (wrapEl) {
 			resizeObserver = new ResizeObserver(() => {
 				resizeCanvas();
+				// The overview framing was computed for the old size (window resize,
+				// bottom player appearing). Refit while the user is still at the
+				// overview; never yank a view they zoomed into.
+				if (zoomLevel === 'galaxy' && activeFamilyId === null && selectedId === null) {
+					fitToNodes(nodes, 0.8, true);
+				}
 				pendingConnectionRedraw = true;
 			});
 			resizeObserver.observe(wrapEl);
