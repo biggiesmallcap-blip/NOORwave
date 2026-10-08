@@ -2358,7 +2358,6 @@
     border-color: var(--accent-line);
     background: var(--bg-raised);
   }
-  .top-result-card.in-library { border-color: var(--accent-line); }
   .top-art {
     width: 168px;
     height: 168px;
@@ -2402,7 +2401,11 @@
     margin: 0;
     color: var(--text-primary);
     overflow: hidden;
-    text-overflow: ellipsis;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
   }
   .top-sub {
     font-size: var(--font-size-sm);
@@ -2837,11 +2840,13 @@
     position: absolute;
     inset: 0;
     background:
-      linear-gradient(to right, rgba(0,0,0,0.64) 0%, rgba(0,0,0,0.36) 42%, rgba(0,0,0,0.12) 100%),
-      linear-gradient(to top, rgba(0,0,0,0.18), rgba(0,0,0,0.02));
+      radial-gradient(120% 90% at 100% 0%, transparent 40%, rgba(0,0,0,0.28) 100%),
+      linear-gradient(to top, rgba(0,0,0,0.22), transparent 60%);
     pointer-events: none;
     z-index: 1;
   }
+  /* The artist avatar is 100px; the column follows so the name gets the room. */
+  .top-result-card.artist-hero { grid-template-columns: 112px 1fr; }
   .top-result-card.artist-hero .top-meta {
     position: relative;
     z-index: 3;
