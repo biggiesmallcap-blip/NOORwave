@@ -19,8 +19,9 @@ them in their route PRs (Videos keeps `--space-4` between field
 and tabs to stay pixel-identical; settle it against the spec's `--space-3`
 when Search moves over). `Segmented` is built and used by the DJ intent and
 speed; Settings, Analytics range and the Library grid/list toggle move onto
-it in their route PRs. Still to build, one PR each: shared components
-(`FilterChip`, `Dropdown`, `ActionBar`, one `TrackRow`
+it in their route PRs. `FilterChip` is built and used by Duplicates; the
+Library decade chips move onto it with the Library toolbar. Still to build,
+one PR each: shared components (`Dropdown`, `ActionBar`, one `TrackRow`
 anatomy, `ErrorState` and the skeleton delay); route migrations (Library
 toolbar, Search composition and keyboard, artist Stage, shared `AlbumDetail`,
 Playlists, Settings in place, Mix page for Automix + DJ, Home and the remaining

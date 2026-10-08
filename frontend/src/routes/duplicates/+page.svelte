@@ -5,6 +5,7 @@
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import FilterChip from '$lib/components/ui/FilterChip.svelte';
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { buildTrackMenu } from '$lib/player/track_menu';
@@ -283,15 +284,9 @@
 		<div class="filter-row" role="group" aria-label="Filter by relationship">
 			{#each RELATIONSHIPS as rel (rel)}
 				{@const active = activeRelationships.has(rel)}
-				<button
-					type="button"
-					class="filter-chip"
-					class:active
-					onclick={() => toggleRelationship(rel)}
-					aria-pressed={active}
-				>
+				<FilterChip pressed={active} onclick={() => toggleRelationship(rel)}>
 					{relationshipLabel(rel)}
-				</button>
+				</FilterChip>
 			{/each}
 		</div>
 	{/if}
@@ -440,35 +435,6 @@
 		flex-wrap: wrap;
 		gap: var(--gap-sm);
 		padding: var(--space-1) 0;
-	}
-
-	.filter-chip {
-		display: inline-flex;
-		align-items: center;
-		height: var(--control-h);
-		padding: 0 14px;
-		border-radius: 999px;
-		border: 1px solid var(--border-subtle);
-		background: transparent;
-		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
-		font-family: inherit;
-		cursor: pointer;
-		transition:
-			background var(--motion-fast),
-			border-color var(--motion-fast),
-			color var(--motion-fast);
-	}
-
-	.filter-chip:hover {
-		background: var(--bg-hover);
-		color: var(--text-primary);
-	}
-
-	.filter-chip.active {
-		background: var(--accent-soft);
-		border-color: var(--accent-line);
-		color: var(--text-primary);
 	}
 
 	.groups-list {
