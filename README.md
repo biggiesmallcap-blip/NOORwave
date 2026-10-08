@@ -298,9 +298,9 @@ Release mechanics live in [docs/release-checklist.md](docs/release-checklist.md)
 
 ## Where This Actually Is
 
-**Late-stage work in progress, built by one person.**
+**1.0, built by one person.**
 
-It is not a demo. It is the player I use every day, and it is stable enough that the daily-driver path (sync, search, queue, gapless playback, remote) is genuinely solid. But it is also one developer's project moving fast, and it shows in places.
+It is not a demo. It is the player I use every day, and the daily-driver path (sync, search, queue, gapless playback, remote) is genuinely solid. 1.0 means the whole app now shares one design and one way of working. It is still one developer's project moving fast, and it shows in places.
 
 What that means for you:
 
