@@ -37,7 +37,9 @@
 		else if (event.key === 'Home') to = 0;
 		else if (event.key === 'End') to = last;
 		if (from < 0 || to < 0) return;
+		// The window-level player shortcuts read arrows as seek.
 		event.preventDefault();
+		event.stopPropagation();
 		items[to].focus();
 		if (!routed) onselect?.(tabs[to].id);
 	}

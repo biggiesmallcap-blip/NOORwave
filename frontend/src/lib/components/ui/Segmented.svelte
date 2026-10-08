@@ -34,7 +34,9 @@
 		else if (event.key === 'Home') to = 0;
 		else if (event.key === 'End') to = last;
 		if (to < 0) return;
+		// The window-level player shortcuts read arrows as seek and volume.
 		event.preventDefault();
+		event.stopPropagation();
 		onchange(options[to].value);
 		root?.querySelectorAll<HTMLElement>('[role="radio"]')[to]?.focus();
 	}

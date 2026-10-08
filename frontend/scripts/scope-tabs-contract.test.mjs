@@ -26,6 +26,8 @@ describe('ScopeTabs', () => {
 	test('arrow keys, Home and End move between tabs', () => {
 		for (const key of ["'ArrowRight'", "'ArrowLeft'", "'Home'", "'End'"]) expect(tabs).toContain(key);
 		expect(tabs).toContain('onkeydown={onKeydown}');
+		// The window's player shortcuts read arrows as seek.
+		expect(tabs).toContain('event.stopPropagation();');
 	});
 
 	test('the active tab is the accent fill; counts are tertiary', () => {

@@ -20,6 +20,8 @@ describe('Segmented', () => {
 		for (const key of ["'ArrowRight'", "'ArrowLeft'", "'ArrowDown'", "'ArrowUp'", "'Home'", "'End'"]) {
 			expect(seg).toContain(key);
 		}
+		// The window's player shortcuts read arrows as seek and volume.
+		expect(seg).toContain('event.stopPropagation();');
 	});
 
 	test('the thumb is neutral, slides on --motion-base, and stops sliding for reduced motion', () => {
