@@ -20,8 +20,11 @@ and tabs to stay pixel-identical; settle it against the spec's `--space-3`
 when Search moves over). `Segmented` is built and used by the DJ intent and
 speed; Settings, Analytics range and the Library grid/list toggle move onto
 it in their route PRs. `FilterChip` is built and used by Duplicates; the
-Library decade chips move onto it with the Library toolbar. Still to build,
-one PR each: shared components (`Dropdown`, `ActionBar`, one `TrackRow`
+Library decade chips move onto it with the Library toolbar. `Dropdown` is
+built and used by the DJ transition style; Library sort and genre move onto
+it with the toolbar. App-wide, Space on any focused button is play/pause
+(the window shortcut cancels button activation): a product call. Still to build,
+one PR each: shared components ( `ActionBar`, one `TrackRow`
 anatomy, `ErrorState` and the skeleton delay); route migrations (Library
 toolbar, Search composition and keyboard, artist Stage, shared `AlbumDetail`,
 Playlists, Settings in place, Mix page for Automix + DJ, Home and the remaining
