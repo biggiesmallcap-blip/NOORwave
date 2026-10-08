@@ -59,7 +59,9 @@
 @media (pointer: coarse), (max-width: 640px) { .settings-scope { --settings-control-height: 44px; } }
 
 .settings-page.settings-scope { container: settings / inline-size; width: min(100%, var(--content-width)); max-width: none; padding: 0 0 var(--space-7); margin: 0 auto; gap: 0; }
-.settings-page .settings-command { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); margin-bottom: var(--space-6); }
+/* The header spans the rail and the form, so the search sits at the form's
+   edge instead of the far side of a wide window. */
+.settings-page .settings-command { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); margin-bottom: var(--space-6); max-width: calc(176px + var(--space-7) + var(--measure-form)); }
 .settings-page h1 { margin: 0; }
 .settings-page .settings-search { position: relative; width: 300px; max-width: 100%; }
 .settings-page .settings-search-results { position: absolute; inset: 100% 0 auto; z-index: 20; padding: var(--space-1); list-style: none; max-height: 360px; overflow: auto; background: var(--bg-elevated); border: 1px solid var(--border-muted); border-radius: var(--radius-md); }

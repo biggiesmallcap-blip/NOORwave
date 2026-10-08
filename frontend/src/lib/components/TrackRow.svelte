@@ -155,6 +155,7 @@
 	<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 	<li
 		class="track-row numbered"
+		class:no-plays={!showPlayCount}
 		class:active={isCurrent}
 		class:selected
 		class:disabled={!rowInteractive}
@@ -495,6 +496,12 @@
 		grid-template-columns: 32px 42px 1fr 150px auto 60px;
 		gap: 14px;
 		padding: 8px 12px;
+	}
+
+	/* Without the plays column the actions and duration keep their own
+	   columns, so durations line up with other rows in the same list. */
+	.track-row.numbered.no-plays {
+		grid-template-columns: 32px 42px 1fr auto 60px;
 	}
 
 	.track-row.numbered .cell-index {

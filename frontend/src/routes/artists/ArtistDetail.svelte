@@ -1513,7 +1513,10 @@
 		color: var(--text-primary);
 	}
 
+	/* A readable list width on wide windows (and at reduced interface size),
+	   so title and duration stay within one glance. */
 	.popular-list {
+		width: min(100%, 72rem);
 		list-style: none;
 		margin: 0;
 		padding: 0;
@@ -1673,10 +1676,12 @@
 	   so the merged Top tracks list scans as one continuous list. */
 	.tidal-popular-row {
 		display: grid;
-		grid-template-columns: 32px 40px 1fr auto auto 3.25rem;
+		/* Same columns as TrackRow's numbered row: number, art, title, actions,
+		   a 60px duration, so local and TIDAL rows line up. */
+		grid-template-columns: 32px 42px 1fr auto auto 60px;
 		align-items: center;
-		gap: var(--space-3);
-		padding: var(--space-2) var(--space-3);
+		gap: 14px;
+		padding: 8px 12px;
 		border-radius: var(--radius-sm, 8px);
 		cursor: pointer;
 		transition: background var(--motion-fast);
@@ -1695,8 +1700,8 @@
 		font-variant-numeric: tabular-nums;
 	}
 	.tidal-row-art {
-		width: 40px;
-		height: 40px;
+		width: 42px;
+		height: 42px;
 		border-radius: 4px;
 		object-fit: cover;
 		display: block;
@@ -1743,8 +1748,9 @@
 	}
 
 	.show-all-btn {
-		margin: 12px auto 0;
+		margin: 12px 0 0;
 		display: block;
+		width: fit-content;
 		padding: 6px 16px;
 		border-radius: 999px;
 		background: rgba(255, 255, 255, 0.06);

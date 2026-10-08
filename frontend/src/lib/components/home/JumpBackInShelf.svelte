@@ -1,7 +1,8 @@
 <script lang="ts">
 	// Home's first row: the last tracks you played, newest first, one card per
-	// track. Same data as Search's idle "Jump back in" (getRecentListens(20) is
-	// cached, so both pages share one request). Hidden when there is no history.
+	// track. The same recent-listens source as Search's idle "Jump back in", with
+	// a longer window so the rail fills wide windows. Hidden when there is no
+	// history.
 	import { onMount } from 'svelte';
 	import type { ListenHistoryEntry } from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
@@ -15,11 +16,12 @@
 
 	let { index = 0 }: { index?: number } = $props();
 
-	const LIMIT = 8;
+	// Enough distinct tracks to fill the rail on wide windows; it scrolls.
+	const LIMIT = 16;
 	let entries = $state<ListenHistoryEntry[]>([]);
 
 	onMount(() => {
-		const recent = cachedApi.getRecentListens(20);
+		const recent = cachedApi.getRecentListens(50);
 		void recent
 			.then((res) => {
 				const seen = new Set<number>();

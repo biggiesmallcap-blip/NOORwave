@@ -42,7 +42,7 @@ describe('mix tiles print their name once', () => {
 
 describe('Jump back in', () => {
 	test('reuses the recent listens query and the shared track menu', () => {
-		expect(jump).toContain('cachedApi.getRecentListens(20)');
+		expect(jump).toContain('cachedApi.getRecentListens(50)');
 		expect(jump).toContain('buildTrackMenu(');
 		expect(jump).toContain('playTrackNow(entry.track_id)');
 	});

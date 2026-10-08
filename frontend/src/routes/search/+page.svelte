@@ -47,8 +47,10 @@
   // rail fills in lazily, so give it the same budget as the TIDAL primary
   // instead of aborting right before the response lands.
   const SPOTIFY_PLAYLIST_SEARCH_TIMEOUT_MS = 8000
-  const ALL_VIEW_ARTIST_LIMIT = 8
-  const ALL_VIEW_ALBUM_LIMIT = 8
+  // Enough to fill the rail on wide windows and at reduced interface size;
+  // the rails scroll, so extra items cost nothing on narrow ones.
+  const ALL_VIEW_ARTIST_LIMIT = 24
+  const ALL_VIEW_ALBUM_LIMIT = 24
   const ALL_VIEW_TRACK_LIMIT = 10
   const ALL_VIEW_PLAYLIST_LIMIT = 12
   const EMPTY_TIDAL_RESULTS: TidalSearchResults = { tracks: [], albums: [], artists: [], videos: [] }
