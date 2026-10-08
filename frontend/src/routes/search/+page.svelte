@@ -79,6 +79,14 @@
   let playlistRail: HTMLElement | null = $state(null)
   let activeQuery = $state('')
   let results = $state<TidalSearchResults | null>(null)
+  // A new query keeps the previous results on screen, dimmed, until its own
+  // first results land (no blank flash between queries); shownQuery keys the
+  // results so they rise in once per query, not on every merge.
+  let resultsStale = $state(false)
+  let shownQuery = $state('')
+  // Library results usually beat TIDAL by a few hundred ms. Holding them this
+  // long lets both paint together instead of the page re-shuffling twice.
+  const LOCAL_RESULTS_HOLD_MS = 300
   let audioResults = $state<AudioSearchResult[] | null>(null)
   // Full matching-set size + unknown genre tokens for filtered (audio)
   // searches, so a capped list reads "top 50 of N" and a typo'd genre is
@@ -415,6 +423,15 @@
     underratedTracks = null
   }
 
+  // The first response of a new query replaces the dimmed previous results.
+  function takeFreshResults(q: string) {
+    if (resultsStale) {
+      clearVisibleSearchResults()
+      resultsStale = false
+    }
+    shownQuery = q
+  }
+
   function invalidateSearchSideLoads() {
     clearDiscoveryPanelLoad()
     discoveryLoadSeq += 1
@@ -473,7 +490,8 @@
       const q = query.trim()
       activeQuery = q
       loading = true
-      clearVisibleSearchResults()
+      resultsStale = results !== null || audioResults !== null
+      if (!resultsStale) clearVisibleSearchResults()
       const intent = parseIntent(q)
       const controller = new AbortController()
       abortController = controller
@@ -488,6 +506,7 @@
         if (first) void playTidalTrackNow(toPlayable(first))
         query = ''
         activeQuery = ''
+        resultsStale = false
         results = null
         return
       }
@@ -500,6 +519,7 @@
         if (first) void startTidalSongRadio(toPlayable(first))
         query = ''
         activeQuery = ''
+        resultsStale = false
         results = null
         return
       }
@@ -514,6 +534,7 @@
         if (effectiveHasFilters) {
           resetProviderLoading()
           const res = await api.searchAudio(buildAudioParams(effectiveParsed), signal)
+          takeFreshResults(q)
           audioResults = res.tracks
           audioTotal = res.total ?? null
           audioUnmatchedGenres = res.unmatched_genres ?? []
@@ -555,7 +576,13 @@
           void localPromise.then((localResults) => {
             if (!isCurrentSearch(q, generation, signal)) return
             localSnapshot = localResults
-            results = mergeLocalIntoTidal(localResults, tidalSnapshot ?? EMPTY_TIDAL_RESULTS)
+            const apply = () => {
+              if (!isCurrentSearch(q, generation, signal)) return
+              takeFreshResults(q)
+              results = mergeLocalIntoTidal(localResults, tidalSnapshot ?? EMPTY_TIDAL_RESULTS)
+            }
+            if (tidalSnapshot) apply()
+            else setTimeout(() => { if (!tidalSnapshot) apply() }, LOCAL_RESULTS_HOLD_MS)
           }).catch(() => undefined).finally(() => {
             if (!isCurrentSearch(q, generation, signal)) return
             loadingLocal = false
@@ -564,6 +591,7 @@
           void tracksPromise.then((tidalResults) => {
             if (!isCurrentSearch(q, generation, signal)) return
             tidalSnapshot = tidalResults
+            takeFreshResults(q)
             results = localSnapshot ? mergeLocalIntoTidal(localSnapshot, tidalResults) : tidalResults
             if (!cached) {
               // Cache only the raw TIDAL response so later hits can re-merge
@@ -647,7 +675,10 @@
         error = String(e)
       } finally {
         if (abortController === controller) abortController = null
-        if (!signal.aborted) loading = false
+        if (!signal.aborted) {
+          loading = false
+          if (resultsStale) takeFreshResults(q)
+        }
       }
     }, PRIMARY_SEARCH_DEBOUNCE_MS)
   }
@@ -1541,6 +1572,7 @@
     {/if}
   </div>
 
+  <div class="results-stage" class:stale={resultsStale} aria-busy={resultsStale}>
   {#if !query.trim()}
     {#if recent.length > 0}
       <section class="recent-section">
@@ -1681,6 +1713,7 @@
     </section>
 
   {:else if results}
+    {#key shownQuery}
 
     {#if topResult}
       {@const top = topResult}
@@ -1797,6 +1830,7 @@
               <div class="avatar-wrap">
                 <ArtworkImage
                   className="artist-avatar"
+                      fadeIn={true}
                   src={artistArtworkSources(artist)}
                   alt={artist.name}
                   size={320}
@@ -1843,6 +1877,7 @@
                 {#if album.artwork_url}
                   <ArtworkImage
                     className="album-art"
+                      fadeIn={true}
                     src={album.artwork_url}
                     alt={album.title}
                     size={320}
@@ -1931,6 +1966,7 @@
                   {#if playlist.artwork_url}
                     <ArtworkImage
                       className="album-art"
+                      fadeIn={true}
                       src={playlist.artwork_url}
                       alt={playlist.title}
                       size={320}
@@ -1964,6 +2000,7 @@
                   {#if playlist.thumbnail}
                     <ArtworkImage
                       className="album-art"
+                      fadeIn={true}
                       src={playlist.thumbnail}
                       alt={playlist.title ?? 'Spotify playlist'}
                       size={320}
@@ -2214,11 +2251,37 @@
         {/if}
       </div>
     {/if}
+    {/key}
 
   {/if}
+  </div>
 </div>
 
 <style>
+  /* Results motion (audit "Motion"): the previous query's results dim while
+     the next loads, and each section rises in once when it first appears
+     (late sections such as playlists animate on their own arrival). */
+  .results-stage {
+    transition: opacity var(--motion-base);
+  }
+  .results-stage.stale {
+    opacity: 0.45;
+    pointer-events: none;
+  }
+  .results-stage :global(:is(.answer-split, .results-section)) {
+    animation: results-rise var(--motion-slow) both;
+  }
+  .results-stage :global(.results-section:not(.answer-songs)) {
+    animation-delay: 70ms;
+  }
+  @keyframes results-rise {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .results-stage :global(:is(.answer-split, .results-section)) { animation: none; }
+  }
+
   .search-page {
     width: min(100%, var(--content-width));
     margin: 0 auto;
