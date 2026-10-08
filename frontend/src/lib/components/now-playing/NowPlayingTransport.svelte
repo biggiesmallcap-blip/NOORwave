@@ -92,7 +92,7 @@
 	}}
 />
 
-<div class="transport" class:bottom={layout === 'bottom'} aria-label="Playback controls">
+<div class="transport" data-transport class:bottom={layout === 'bottom'} aria-label="Playback controls">
 	{#if layout === 'side'}
 	<div class="transport-group transport-group-secondary" role="group" aria-label="Track and shuffle controls">
 		{#if onToggleFavorite}

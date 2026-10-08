@@ -245,7 +245,7 @@
 		onEnterQuietMode={onEnterQuietMode}
 	/>
 
-	<div class="np-controls">
+	<div class="np-controls" data-transport>
 		<button
 			class="np-mute-btn"
 			type="button"

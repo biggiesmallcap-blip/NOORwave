@@ -567,7 +567,7 @@
 	function spaceActivatesFocusedControl(target: HTMLElement | null): boolean {
 		const control = target?.closest?.(SPACE_CONTROLS);
 		if (!control) return false;
-		return control.closest('.transport, .np-controls') == null;
+		return control.closest('[data-transport]') == null;
 	}
 
 	function isTypingTarget(target: EventTarget | null): boolean {
