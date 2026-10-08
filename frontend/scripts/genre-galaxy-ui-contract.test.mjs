@@ -59,7 +59,9 @@ describe('genre galaxy UI contract', () => {
 		expect(route).toContain('api.createPlaylistFromQueue(name, true)');
 		// Core play (Start mix + heat/rediscover) plays LOCAL genre tracks,
 		// shuffled and bounded - the whole point of the galaxy. Radio is opt-in.
-		expect(route).toContain('function sampleGenreQueue');
+		const playback = readFileSync('src/lib/components/Genre/genrePlayback.ts', 'utf8');
+		expect(playback).toContain('export function sampleGenreQueue');
+		expect(route).toContain("from '$lib/components/Genre/genrePlayback'");
 		expect(route).toContain("playTracksInContext(ids, undefined, { shuffle: true })");
 		expect(route).toContain('async function handleRadio');
 		expect(route).toContain("startGenreRadio(seed, 'mixed', label)");
