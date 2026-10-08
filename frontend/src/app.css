@@ -839,6 +839,42 @@ h4 {
 	border-color: var(--border-strong);
 }
 
+/* Secondary: a fill without a border. Ghost: text only. Icon: round, 36px
+   (STYLING.md "Controls"). */
+.btn-secondary {
+	background: var(--bg-surface);
+	color: var(--text-primary);
+}
+
+.btn-secondary:hover:not(:disabled) {
+	background: var(--bg-hover);
+}
+
+.btn-ghost {
+	background: transparent;
+	color: var(--text-secondary);
+}
+
+.btn-ghost:hover:not(:disabled) {
+	background: var(--bg-hover);
+	color: var(--text-primary);
+}
+
+.btn-icon {
+	width: 36px;
+	height: 36px;
+	min-height: 36px;
+	padding: 0;
+	border-radius: 50%;
+	background: transparent;
+	color: var(--text-secondary);
+}
+
+.btn-icon:hover:not(:disabled) {
+	background: var(--bg-hover);
+	color: var(--text-primary);
+}
+
 /*
  * .row-btn - a borderless icon action inside a browse row.
  *

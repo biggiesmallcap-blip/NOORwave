@@ -1961,7 +1961,7 @@
 								<span class="ht-duration">{formatTrackDuration(track.duration_ms)}</span>
 								<div class="ht-actions">
 									<button
-										class="btn-icon"
+										class="ht-icon-btn"
 										title="View details"
 										onclick={(e) => { e.stopPropagation(); void openTrackDetail(track); }}
 										aria-label="View details"
@@ -1969,7 +1969,7 @@
 										i
 									</button>
 									<button
-										class="btn-icon"
+										class="ht-icon-btn"
 										title="Add to queue"
 										onclick={(e) => { e.stopPropagation(); void addTrackToQueue(track.id); }}
 										aria-label="Add to queue"
@@ -2072,7 +2072,7 @@
 								<span class="ht-duration">{formatTrackDuration(track.duration_ms)}</span>
 								<div class="ht-actions">
 									<button
-										class="btn-icon"
+										class="ht-icon-btn"
 										title="Add to queue"
 										onclick={(e) => { e.stopPropagation(); void addTrackToQueue(track.id); }}
 										aria-label="Add to queue"
@@ -2915,7 +2915,7 @@
 
 	.home-track-row:hover .ht-actions { opacity: 1; }
 
-	.btn-icon {
+	.ht-icon-btn {
 		background: none;
 		border: none;
 		cursor: pointer;
@@ -2927,7 +2927,7 @@
 		transition: color var(--motion-fast);
 	}
 
-	.btn-icon:hover { color: var(--text-primary, #fff); }
+	.ht-icon-btn:hover { color: var(--text-primary, #fff); }
 
 	.home-loading {
 		color: var(--text-secondary, rgba(255,255,255,0.5));

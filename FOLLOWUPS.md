@@ -17,12 +17,9 @@ done (see `frontend/STYLING.md` "Adoption status" and
 `docs/specs/2026-10-08-styling-proposed.md`). Decided 2026-10-09: Enter in
 Search plays in place, the sidebar is grouped by job, Library tabs get no
 mural strips, and the A to Z index, playlist relevance floor and album label
-line are built. Still open, both small product calls:
-- Global `.btn-secondary` / `.btn-ghost` / `.btn-icon` are not added (local
-  classes with those names in LastfmConnect, Library and the Spotify pages
-  would pick up stray properties).
-- App-wide, Space on any focused button is play/pause (the window shortcut
-  cancels button activation).
+line are built; the global `.btn-secondary` / `.btn-ghost` / `.btn-icon`
+classes exist, and Space presses a focused control (play/pause stays on the
+page and the player transport). Nothing from the audit is open.
 Spawned by: design audit 2026-10-08 (artifact 7N4YSfzjpyu98GRLM5X5hF)
 
 ### video stations: phase 2 (decades, oddities, full tag coverage)

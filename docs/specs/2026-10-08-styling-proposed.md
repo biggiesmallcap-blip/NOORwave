@@ -43,8 +43,10 @@ artist count, Spotify playlist search has a relevance floor, and album pages
 show a label and release line (`88dac60b`); one-shot animations use the motion
 tokens and the motion lint is clean (`chore(motion)` after `88dac60b`).
 
-Remaining small calls (global button classes, Space on focused buttons) are in
-`FOLLOWUPS.md` ("design: system adoption").
+The last two calls, also decided 2026-10-09: the global `.btn-secondary`,
+`.btn-ghost` and `.btn-icon` classes are added, and Space presses a focused
+control while play/pause stays on the page and the player transport. Jump
+back in cards got the same hover response as the Music Mixes cards.
 
 ---
 
