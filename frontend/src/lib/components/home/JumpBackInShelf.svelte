@@ -78,6 +78,14 @@
 {/if}
 
 <style>
+	/* The same header-to-rail gap as every other Home shelf (the rule is
+	   scoped per component, so this shelf needs its own copy). */
+	.discovery-section {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-3);
+	}
+
 	/* Same hover response as the Music Mixes cards beside it: the card lifts
 	   and the artwork shadow deepens. */
 	.jump-card {
