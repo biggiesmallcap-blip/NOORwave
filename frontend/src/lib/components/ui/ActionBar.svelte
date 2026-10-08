@@ -11,7 +11,9 @@
 		onplay,
 		playLabel = 'Play',
 		onshuffle,
+		shuffleHint = 'Shuffle',
 		onradio,
+		radioHint,
 		radioLabel = 'Radio',
 		radioPending = false,
 		liked = false,
@@ -27,7 +29,11 @@
 		onplay?: () => void;
 		playLabel?: string;
 		onshuffle?: () => void;
+		/** Tooltip for Shuffle; explains what it shuffles. */
+		shuffleHint?: string;
 		onradio?: () => void;
+		/** Tooltip for Radio; defaults to the radio label. */
+		radioHint?: string;
 		radioLabel?: string;
 		radioPending?: boolean;
 		liked?: boolean;
@@ -54,7 +60,7 @@
 	{/if}
 
 	{#if onshuffle}
-		<button type="button" class="ab-btn secondary" title="Shuffle" onclick={onshuffle}>
+		<button type="button" class="ab-btn secondary" title={shuffleHint} onclick={onshuffle}>
 			<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M16 3h5v5M4 20l17-17M21 16v5h-5M4 4l5 5m6 6l6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" /></svg>
 			<span class="label">Shuffle</span>
 		</button>
@@ -64,7 +70,7 @@
 		<button
 			type="button"
 			class="ab-btn secondary"
-			title={radioLabel}
+			title={radioHint ?? radioLabel}
 			disabled={radioPending}
 			aria-busy={radioPending || undefined}
 			onclick={onradio}
