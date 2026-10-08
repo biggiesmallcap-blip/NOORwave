@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
+	import { goto, replaceState } from '$app/navigation';
+	import { page } from '$app/state';
 	import type { Unsubscriber } from 'svelte/store';
 	import { api, type Genre, type GenreHeat, type GenreCohort, type GenreEvolutionPoint, type GenreAudioMetrics, type Track } from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
@@ -10,7 +12,6 @@
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import GenreGalaxy from '$lib/components/Genre/GenreGalaxy.svelte';
 	import GenrePanel from '$lib/components/Genre/GenrePanel.svelte';
-	import GenreInterior from '$lib/components/Genre/GenreInterior.svelte';
 	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import { buildGalaxyData } from '$lib/components/Genre/galaxyBuilder';
 	import { pickSeedTrackId, sampleGenreQueue, shuffled } from '$lib/components/Genre/genrePlayback';
@@ -47,7 +48,6 @@
 	let focusNodeId = $state<number | null>(null);
 	let resetViewToken = $state(0);
 	let selectedSeedIds = $state<number[]>([]);
-	let interiorOpen = $state(false);
 	let galaxyTheme = $derived(buildGalaxyTheme($palette));
 	// The map is a night sky in every theme. Scope the dark token set, with this
 	// palette's dark accents, to the route so HUD, dock, panel and hover card stay
@@ -105,11 +105,6 @@
 			default: return 'Canonical library map.';
 		}
 	});
-	let selectedNodeCohort = $derived(
-		selectedNode?.cohortId
-			? cohorts.find((c) => c.id === selectedNode.cohortId)
-			: null
-	);
 	type NearbyEntry = { id: number; name: string };
 	let searchHighlightIds = $derived.by<Set<number>>(() => {
 		const query = searchQuery.trim().toLowerCase();
@@ -363,7 +358,6 @@
 
 	function handleSelect(id: number | null) {
 		selectedId = id;
-		interiorOpen = false;
 		actionError = null;
 		actionNotice = null;
 		if (id === null) {
@@ -372,6 +366,17 @@
 		if (id !== null) {
 			void getOrLoadPanelTracks(id);
 		}
+		// Mirror the selection into the URL so returning from a genre page (Back
+		// or the "Galaxy" crumb) lands on the same focused genre.
+		try {
+			replaceState(id === null ? '/genres' : `/genres?focus=${id}`, {});
+		} catch {
+			// Router not ready yet during first paint; the next selection syncs it.
+		}
+	}
+
+	function openGenrePage(id: number) {
+		void goto(`/genres/${id}`);
 	}
 
 	function toggleSeed(id: number) {
@@ -649,6 +654,12 @@
 
 		void loadGalaxy();
 
+		const focusParam = Number(page.url.searchParams.get('focus'));
+		if (Number.isInteger(focusParam) && focusParam > 0) {
+			handleSelect(focusParam);
+			void focusNode(focusParam);
+		}
+
 		return () => {
 			wsUnsubscribe?.();
 			if (galaxyRefreshTimer) clearTimeout(galaxyRefreshTimer);
@@ -698,7 +709,7 @@
 					onSelect={handleSelect}
 					onToggleSeed={toggleSeed}
 					onZoomFamily={(familyId) => void loadArtistChipsForFamily(familyId)}
-					onEnterInterior={(id) => { handleSelect(id); interiorOpen = true; }}
+					onOpenGenre={openGenrePage}
 				/>
 			</div>
 
@@ -841,24 +852,15 @@
 				isSeed={selectedNode !== null && selectedSeedIds.includes(selectedNode.id)}
 				loading={selectedTrackLoading}
 				error={selectedTrackError}
-				open={selectedNode !== null && !interiorOpen}
+				open={selectedNode !== null}
 				onClose={() => handleSelect(null)}
 				onMix={() => selectedNode && void handleMix(selectedNode.id)}
 				onRadio={() => selectedNode && void handleRadio(selectedNode.id)}
 				onToggleSeed={() => selectedNode && toggleSeed(selectedNode.id)}
-				onOpenInterior={() => { if (selectedNode) interiorOpen = true; }}
+				onOpenGenre={() => { if (selectedNode) openGenrePage(selectedNode.id); }}
 				onSelectNearby={(id) => { handleSelect(id); void focusNode(id); }}
 			/>
 
-			{#if interiorOpen && selectedNode}
-				<GenreInterior
-					node={selectedNode}
-					heat={selectedHeat}
-					cohortLabel={selectedNodeCohort?.label ?? null}
-					onClose={() => (interiorOpen = false)}
-					onPlayMix={() => selectedNode && void handleMix(selectedNode.id)}
-				/>
-			{/if}
 		{/if}
 	</div>
 </div>

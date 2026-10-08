@@ -113,8 +113,8 @@ describe('context menu coverage contract', () => {
 		expect(mural).toContain('oncontextmenu');
 	});
 
-	test('genre interior artist chips use shared artist menus', () => {
-		const source = readFileSync('src/lib/components/Genre/GenreInterior.svelte', 'utf8');
+	test('genre page top artists use shared artist menus', () => {
+		const source = readFileSync('src/lib/components/Genre/GenreDetail.svelte', 'utf8');
 
 		expect(source).toContain('buildArtistMenu');
 		expect(source).toContain('handleArtistContextMenu');

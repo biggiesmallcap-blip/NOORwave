@@ -96,4 +96,18 @@ describe('genre galaxy UI contract', () => {
 		expect(galaxy).not.toContain('BODY_GLOW_FACTOR');
 		expect(galaxy).toContain('sctx.createLinearGradient(0, 0, 0, radius * 2)');
 	});
+
+	test('genres open as their own page and the galaxy restores focus on return', () => {
+		const route = readFileSync('src/routes/genres/+page.svelte', 'utf8');
+		const galaxy = readFileSync('src/lib/components/Genre/GenreGalaxy.svelte', 'utf8');
+		const panel = readFileSync('src/lib/components/Genre/GenrePanel.svelte', 'utf8');
+
+		expect(route).not.toContain('GenreInterior');
+		expect(route).not.toContain('interiorOpen');
+		expect(route).toContain('void goto(`/genres/${id}`);');
+		expect(route).toContain("page.url.searchParams.get('focus')");
+		expect(galaxy).toContain('onOpenGenre(node.id);');
+		expect(panel).toContain('Open genre page');
+		expect(panel).not.toContain('Open interior');
+	});
 });

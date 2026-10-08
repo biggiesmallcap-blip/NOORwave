@@ -33,7 +33,7 @@
 		onSelect = () => {},
 		onToggleSeed = () => {},
 		onZoomFamily = () => {},
-		onEnterInterior = () => {}
+		onOpenGenre = () => {}
 	}: {
 		nodes?: GalaxyNode[];
 		edges?: GalaxyEdge[];
@@ -50,7 +50,7 @@
 		onSelect?: (id: number | null) => void;
 		onToggleSeed?: (id: number) => void;
 		onZoomFamily?: (familyId: number) => void;
-		onEnterInterior?: (id: number) => void;
+		onOpenGenre?: (id: number) => void;
 	} = $props();
 
 	let wrapEl: HTMLDivElement | null = null;
@@ -1487,7 +1487,7 @@
 		ondblclick={(event) => {
 			const node = getNodeAtPoint(event.offsetX, event.offsetY);
 			if (node) {
-				onEnterInterior(node.id);
+				onOpenGenre(node.id);
 			}
 		}}
 	></canvas>

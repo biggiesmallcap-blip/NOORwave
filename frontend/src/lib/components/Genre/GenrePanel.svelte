@@ -22,7 +22,7 @@
 		onMix = () => {},
 		onRadio = () => {},
 		onToggleSeed = () => {},
-		onOpenInterior = () => {},
+		onOpenGenre = () => {},
 		onSelectNearby = () => {}
 	}: {
 		node?: GalaxyNode | null;
@@ -37,7 +37,7 @@
 		onMix?: () => void;
 		onRadio?: () => void;
 		onToggleSeed?: () => void;
-		onOpenInterior?: () => void;
+		onOpenGenre?: () => void;
 		onSelectNearby?: (id: number) => void;
 	} = $props();
 
@@ -127,7 +127,7 @@
 				<button class={`ghost-btn ${isSeed ? 'is-seed' : ''}`} onclick={onToggleSeed}>
 					{isSeed ? 'Seed locked' : 'Lock as seed'}
 				</button>
-				<button class="ghost-btn" onclick={onOpenInterior}>Open interior</button>
+				<button class="ghost-btn" onclick={onOpenGenre}>Open genre page</button>
 			</div>
 		</div>
 
@@ -233,8 +233,8 @@
 						{/each}
 					</div>
 					{#if tracks.length > PANEL_TRACK_CAP}
-						<button class="browse-all" onclick={onOpenInterior}>
-							Open interior to browse &amp; search all {tracks.length.toLocaleString()} tracks
+						<button class="browse-all" onclick={onOpenGenre}>
+							See all {tracks.length.toLocaleString()} tracks
 						</button>
 					{/if}
 				{/if}
