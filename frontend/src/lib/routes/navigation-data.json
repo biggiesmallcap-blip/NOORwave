@@ -2,15 +2,15 @@
 	"navigationZones": [
 		{
 			"label": "Listen",
-			"routeIds": ["home", "search", "library", "playlists", "mix"]
+			"routeIds": ["home", "search", "library", "playlists", "videos"]
 		},
 		{
 			"label": "Explore",
-			"routeIds": ["discover", "genres", "moods", "charts", "videos"]
+			"routeIds": ["discover", "genres", "moods", "charts"]
 		},
 		{
 			"label": "Tools",
-			"routeIds": ["analytics", "duplicates"]
+			"routeIds": ["mix", "analytics", "duplicates"]
 		},
 		{
 			"label": "System",
