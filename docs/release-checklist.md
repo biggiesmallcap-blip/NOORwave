@@ -32,6 +32,6 @@ Then confirm the latest-release endpoint and updater manifest show the new versi
 Fix on `master`, then move the tag (only while no artifacts have shipped):
 
 ```powershell
-git tag -f vX.Y.Z <sha>
+git tag -f -m vX.Y.Z vX.Y.Z <sha>
 git push origin -f vX.Y.Z
 ```
