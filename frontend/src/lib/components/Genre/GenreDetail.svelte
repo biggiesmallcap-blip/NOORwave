@@ -19,7 +19,16 @@
 
 	type TopArtist = { name: string; artistId: number | null; count: number };
 
-	let { node }: { node: GenreSummary } = $props();
+	let {
+		node,
+		onClose = () => {},
+		onSelectGenre = () => {}
+	}: {
+		node: GenreSummary;
+		onClose?: () => void;
+		/** Lineage and sub-genre chips move the galaxy to that genre instead of navigating away. */
+		onSelectGenre?: (id: number) => void;
+	} = $props();
 
 	let tracks = $state<Track[]>([]);
 	let topArtists = $state<TopArtist[]>([]);
@@ -171,17 +180,31 @@
 
 <div class="genre-detail" style={`--genre-accent: ${node.color}`}>
 	<header class="genre-hero">
-		<nav class="crumbs" aria-label="Genre lineage">
-			<a href={`/genres?focus=${node.id}`}>Galaxy</a>
-			{#each node.lineage as ancestor (ancestor.id)}
-				<span class="crumb-sep" aria-hidden="true">/</span>
-				<a href={`/genres/${ancestor.id}`}>{ancestor.name}</a>
-			{/each}
-		</nav>
+		<div class="detail-top">
+			<nav class="crumbs" aria-label="Genre lineage">
+				{#if node.lineage.length === 0}
+					<span class="crumb-family">Genre family</span>
+				{/if}
+				{#each node.lineage as ancestor, index (ancestor.id)}
+					<button type="button" class:crumb-family={index === 0} onclick={() => onSelectGenre(ancestor.id)}>
+						{ancestor.name}
+					</button>
+					<span class="crumb-sep" aria-hidden="true">/</span>
+				{/each}
+				{#if node.lineage.length > 0}
+					<span class="crumb-current">{node.name}</span>
+				{/if}
+			</nav>
+			<button class="close-btn" type="button" onclick={onClose} aria-label="Collapse genre details">
+				<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+					<path d="M3.5 3.5l9 9M12.5 3.5l-9 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+				</svg>
+			</button>
+		</div>
 
 		<div class="hero-main">
 			<div class="hero-copy">
-				<h1><span class="genre-dot" aria-hidden="true"></span>{node.name}</h1>
+				<h2 class="genre-title"><span class="genre-dot" aria-hidden="true"></span>{node.name}</h2>
 				<p class="hero-stats">
 					<span><strong>{trackCount.toLocaleString()}</strong> tracks</span>
 					{#if node.listenCount > 0}
@@ -214,9 +237,9 @@
 		{#if node.children.length > 0}
 			<div class="subgenres" aria-label="Sub-genres">
 				{#each node.children as child (child.id)}
-					<a class="subgenre-chip" href={`/genres/${child.id}`}>
+					<button type="button" class="subgenre-chip" onclick={() => onSelectGenre(child.id)}>
 						{child.name}<span>{child.trackCount.toLocaleString()}</span>
-					</a>
+					</button>
 				{/each}
 			</div>
 		{/if}
@@ -327,8 +350,8 @@
 	.genre-detail {
 		display: flex;
 		flex-direction: column;
-		gap: 28px;
-		max-width: 1280px;
+		gap: 22px;
+		container-type: inline-size;
 	}
 
 	.genre-hero {
@@ -337,25 +360,72 @@
 		gap: 14px;
 	}
 
+	.detail-top {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+	}
+
 	.crumbs {
 		display: flex;
 		align-items: center;
 		gap: 8px;
 		flex-wrap: wrap;
 		font-size: var(--font-size-xs);
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
 	}
 
-	.crumbs a {
+	.crumb-family {
+		color: var(--genre-accent);
+		font-weight: var(--font-weight-semibold);
+	}
+
+	.crumbs .crumb-family {
+		color: var(--genre-accent);
+	}
+
+	.crumbs button {
+		padding: 0;
+		border: 0;
+		background: none;
 		color: var(--text-secondary);
-		text-decoration: none;
+		font: inherit;
+		letter-spacing: inherit;
+		text-transform: inherit;
+		cursor: pointer;
 	}
 
-	.crumbs a:hover {
+	.crumbs button:hover {
 		color: var(--text-primary);
 	}
 
 	.crumb-sep {
 		color: var(--text-muted);
+	}
+
+	.crumb-current {
+		color: var(--text-primary);
+	}
+
+	.close-btn {
+		display: grid;
+		place-items: center;
+		width: 34px;
+		height: 34px;
+		flex-shrink: 0;
+		border-radius: 50%;
+		border: 1px solid var(--border-subtle);
+		background: var(--bg-surface);
+		color: var(--text-secondary);
+		cursor: pointer;
+		transition: background var(--motion-fast), color var(--motion-fast);
+	}
+
+	.close-btn:hover {
+		background: var(--bg-hover);
+		color: var(--text-primary);
 	}
 
 	.hero-main {
@@ -374,14 +444,14 @@
 		min-width: 0;
 	}
 
-	h1 {
+	.genre-title {
 		display: flex;
 		align-items: center;
 		gap: 12px;
 		margin: 0;
 		color: var(--text-primary);
 		font-family: var(--font-display);
-		font-size: var(--font-size-3xl);
+		font-size: var(--font-size-2xl);
 		line-height: var(--line-height-tight);
 	}
 
@@ -437,8 +507,9 @@
 		background: var(--bg-surface);
 		border: 1px solid var(--border-subtle);
 		color: var(--text-primary);
+		font: inherit;
 		font-size: var(--font-size-xs);
-		text-decoration: none;
+		cursor: pointer;
 		transition: background var(--motion-fast), border-color var(--motion-fast);
 	}
 
@@ -458,16 +529,19 @@
 		font-size: var(--font-size-sm);
 	}
 
+	/* The drawer is narrow: one column, artists as compact pills above the
+	   tracks. A wide drawer gets the ranked artist list beside the tracks. */
 	.genre-body {
 		display: grid;
-		grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
-		gap: 32px;
+		grid-template-columns: minmax(0, 1fr);
+		gap: 22px;
 		align-items: start;
 	}
 
-	@container workspace (max-width: 900px) {
+	@container (min-width: 760px) {
 		.genre-body {
-			grid-template-columns: minmax(0, 1fr);
+			grid-template-columns: minmax(200px, 260px) minmax(0, 1fr);
+			gap: 28px;
 		}
 	}
 
@@ -612,5 +686,25 @@
 		margin: 0;
 		color: var(--text-muted);
 		font-size: var(--font-size-sm);
+	}
+
+	/* Narrow drawer: artists as compact pills. Last so it beats the base rules. */
+	@container (max-width: 759px) {
+		.artist-list {
+			flex-direction: row;
+			flex-wrap: wrap;
+			gap: 6px;
+		}
+
+		.artist-row {
+			padding: 5px 10px;
+			border-radius: 999px;
+			background: var(--bg-surface);
+			font-size: var(--font-size-xs);
+		}
+
+		.artist-bar {
+			display: none;
+		}
 	}
 </style>

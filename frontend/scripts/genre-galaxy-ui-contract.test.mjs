@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, test } from 'vitest';
 
 describe('genre galaxy UI contract', () => {
@@ -99,17 +99,21 @@ describe('genre galaxy UI contract', () => {
 		expect(galaxy).toContain('sctx.createLinearGradient(0, 0, 0, radius * 2)');
 	});
 
-	test('genres open as their own page and the galaxy restores focus on return', () => {
+	test('genre details open inside the galaxy, not on a separate page', () => {
 		const route = readFileSync('src/routes/genres/+page.svelte', 'utf8');
 		const galaxy = readFileSync('src/lib/components/Genre/GenreGalaxy.svelte', 'utf8');
 		const panel = readFileSync('src/lib/components/Genre/GenrePanel.svelte', 'utf8');
 
+		expect(existsSync('src/routes/genres/[id]/+page.svelte')).toBe(false);
 		expect(route).not.toContain('GenreInterior');
-		expect(route).not.toContain('interiorOpen');
-		expect(route).toContain('void goto(`/genres/${id}`);');
+		expect(route).not.toContain('goto(');
+		expect(route).toContain('<aside class="genre-drawer glass-panel"');
+		expect(route).toContain('onSelectGenre={selectGenreInDrawer}');
+		expect(route).toContain('open={selectedNode !== null && !detailsOpen}');
 		expect(route).toContain("page.url.searchParams.get('focus')");
 		expect(galaxy).toContain('onOpenGenre(node.id);');
-		expect(panel).toContain('Open genre page');
+		expect(galaxy).toContain('camera.targetX = node.x + rightInset / 2 / targetScale;');
+		expect(panel).toContain('>Expand</button>');
 		expect(panel).not.toContain('Open interior');
 	});
 });

@@ -127,7 +127,7 @@
 				<button class={`ghost-btn ${isSeed ? 'is-seed' : ''}`} onclick={onToggleSeed}>
 					{isSeed ? 'Seed locked' : 'Lock as seed'}
 				</button>
-				<button class="ghost-btn" onclick={onOpenGenre}>Open genre page</button>
+				<button class="ghost-btn" onclick={onOpenGenre}>Expand</button>
 			</div>
 		</div>
 

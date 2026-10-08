@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
-	import { goto, replaceState } from '$app/navigation';
+	import { replaceState } from '$app/navigation';
 	import { page } from '$app/state';
 	import type { Unsubscriber } from 'svelte/store';
 	import { api, type Genre, type GenreHeat, type GenreCohort, type GenreEvolutionPoint, type GenreAudioMetrics, type Track } from '$lib/api/client';
@@ -12,6 +12,8 @@
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import GenreGalaxy from '$lib/components/Genre/GenreGalaxy.svelte';
 	import GenrePanel from '$lib/components/Genre/GenrePanel.svelte';
+	import GenreDetail from '$lib/components/Genre/GenreDetail.svelte';
+	import { buildGenreSummary } from '$lib/components/Genre/genreSummary';
 	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import { buildGalaxyData } from '$lib/components/Genre/galaxyBuilder';
 	import { pickSeedTrackId, sampleGenreQueue, shuffled } from '$lib/components/Genre/genrePlayback';
@@ -49,6 +51,16 @@
 	let resetViewToken = $state(0);
 	let selectedSeedIds = $state<number[]>([]);
 	let galaxyTheme = $derived(buildGalaxyTheme($palette));
+	// The genre details drawer opens inside the galaxy (no separate page): the
+	// compact panel widens into it and the map recentres beside it.
+	let detailsOpen = $state(false);
+	let drawerWidth = $state(0);
+	let selectedSummary = $derived(
+		selectedId === null || !detailsOpen
+			? null
+			: buildGenreSummary({ genres: taxonomy, heat, cohorts, evolution, metrics }, selectedId)
+	);
+	let mapRightInset = $derived(selectedSummary ? drawerWidth + 20 : 0);
 	// The map is a night sky in every theme. Scope the dark token set, with this
 	// palette's dark accents, to the route so HUD, dock, panel and hover card stay
 	// legible in light mode instead of mixing light text with a dark canvas.
@@ -362,12 +374,13 @@
 		actionNotice = null;
 		if (id === null) {
 			focusNodeId = null;
+			detailsOpen = false;
 		}
 		if (id !== null) {
 			void getOrLoadPanelTracks(id);
 		}
-		// Mirror the selection into the URL so returning from a genre page (Back
-		// or the "Galaxy" crumb) lands on the same focused genre.
+		// Mirror the selection into the URL so a reload or Back lands on the
+		// same focused genre.
 		try {
 			replaceState(id === null ? '/genres' : `/genres?focus=${id}`, {});
 		} catch {
@@ -375,8 +388,15 @@
 		}
 	}
 
-	function openGenrePage(id: number) {
-		void goto(`/genres/${id}`);
+	function openGenreDetails(id: number) {
+		if (selectedId !== id) handleSelect(id);
+		detailsOpen = true;
+	}
+
+	// Lineage and sub-genre chips in the drawer fly the map to that genre.
+	function selectGenreInDrawer(id: number) {
+		handleSelect(id);
+		void focusNode(id);
 	}
 
 	function toggleSeed(id: number) {
@@ -709,7 +729,8 @@
 					onSelect={handleSelect}
 					onToggleSeed={toggleSeed}
 					onZoomFamily={(familyId) => void loadArtistChipsForFamily(familyId)}
-					onOpenGenre={openGenrePage}
+					onOpenGenre={openGenreDetails}
+					rightInset={mapRightInset}
 				/>
 			</div>
 
@@ -852,14 +873,24 @@
 				isSeed={selectedNode !== null && selectedSeedIds.includes(selectedNode.id)}
 				loading={selectedTrackLoading}
 				error={selectedTrackError}
-				open={selectedNode !== null}
+				open={selectedNode !== null && !detailsOpen}
 				onClose={() => handleSelect(null)}
 				onMix={() => selectedNode && void handleMix(selectedNode.id)}
 				onRadio={() => selectedNode && void handleRadio(selectedNode.id)}
 				onToggleSeed={() => selectedNode && toggleSeed(selectedNode.id)}
-				onOpenGenre={() => { if (selectedNode) openGenrePage(selectedNode.id); }}
+				onOpenGenre={() => { if (selectedNode) openGenreDetails(selectedNode.id); }}
 				onSelectNearby={(id) => { handleSelect(id); void focusNode(id); }}
 			/>
+
+			{#if selectedSummary}
+				<aside class="genre-drawer glass-panel" bind:clientWidth={drawerWidth} aria-label="Genre details">
+					<GenreDetail
+						node={selectedSummary}
+						onClose={() => (detailsOpen = false)}
+						onSelectGenre={selectGenreInDrawer}
+					/>
+				</aside>
+			{/if}
 
 		{/if}
 	</div>
@@ -882,7 +913,9 @@
 	.galaxy-stage {
 		position: relative;
 		height: 100%;
-		overflow: hidden;
+		/* clip, not hidden: the off-screen panel (translateX) makes a hidden box
+		   scrollable, and focusing a drawer button would scroll it sideways. */
+		overflow: clip;
 	}
 
 	.galaxy-map-frame {
@@ -1134,6 +1167,36 @@
 		flex-shrink: 0;
 	}
 
+	.genre-drawer {
+		/* Same slot as the compact panel (under the tabs, above the dock), wider. */
+		position: absolute;
+		top: 84px;
+		right: 20px;
+		bottom: 104px;
+		width: min(720px, calc(56% - 20px));
+		z-index: 6;
+		padding: 20px 22px;
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		border-color: color-mix(in srgb, var(--instrument-border) 72%, transparent);
+		background:
+			linear-gradient(180deg, color-mix(in srgb, var(--instrument-surface-strong) 94%, transparent), color-mix(in srgb, var(--instrument-surface) 90%, transparent)),
+			var(--panel-bg);
+		box-shadow: 0 22px 54px rgba(0, 0, 0, 0.52);
+		animation: drawer-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+	}
+
+	@keyframes drawer-in {
+		from {
+			opacity: 0;
+			transform: translateX(32px);
+		}
+		to {
+			opacity: 1;
+			transform: none;
+		}
+	}
+
 	.error-toast {
 		top: 74px;
 		left: 20px;
@@ -1181,6 +1244,15 @@
 
 		.seed-builder {
 			bottom: 92px;
+		}
+
+		.genre-drawer {
+			top: auto;
+			left: 16px;
+			right: 16px;
+			bottom: 16px;
+			width: auto;
+			max-height: 70vh;
 		}
 	}
 
@@ -1254,6 +1326,14 @@
 
 		.seed-chips {
 			width: 100%;
+		}
+
+		.genre-drawer {
+			position: relative;
+			inset: auto;
+			width: 100%;
+			max-height: none;
+			order: 6;
 		}
 	}
 </style>

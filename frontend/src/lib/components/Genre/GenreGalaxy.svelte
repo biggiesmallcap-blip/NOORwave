@@ -33,7 +33,8 @@
 		onSelect = () => {},
 		onToggleSeed = () => {},
 		onZoomFamily = () => {},
-		onOpenGenre = () => {}
+		onOpenGenre = () => {},
+		rightInset = 0
 	}: {
 		nodes?: GalaxyNode[];
 		edges?: GalaxyEdge[];
@@ -51,6 +52,8 @@
 		onToggleSeed?: (id: number) => void;
 		onZoomFamily?: (familyId: number) => void;
 		onOpenGenre?: (id: number) => void;
+		/** Screen px covered on the right (details drawer); focus centres in what is left. */
+		rightInset?: number;
 	} = $props();
 
 	let wrapEl: HTMLDivElement | null = null;
@@ -115,6 +118,15 @@
 			drawBackgroundLayer();
 		});
 		pendingConnectionRedraw = true;
+	});
+
+	// Drawer opening or closing: keep the selected genre centred in the open map.
+	$effect(() => {
+		void rightInset;
+		untrack(() => {
+			const node = selectedId === null ? null : nodeById.get(selectedId);
+			if (node) focusNode(node);
+		});
 	});
 
 	// Vibe mode: energy color mapping
@@ -551,9 +563,10 @@
 	function focusNode(node: GalaxyNode) {
 		activeFamilyId = node.familyId;
 		zoomLevel = 'node';
-		camera.targetX = node.x;
+		const targetScale = clamp(node.depth === 0 ? 1.35 : node.depth === 1 ? 2.5 : 3.4, 0.3, 8);
+		camera.targetX = node.x + rightInset / 2 / targetScale;
 		camera.targetY = node.y;
-		camera.targetScale = clamp(node.depth === 0 ? 1.35 : node.depth === 1 ? 2.5 : 3.4, 0.3, 8);
+		camera.targetScale = targetScale;
 		pendingConnectionRedraw = true;
 	}
 
