@@ -455,6 +455,13 @@
 			console.error('Failed to save the artwork cache size:', err);
 		}
 	}
+	// Older servers lack the endpoint: the row stays visible but disabled.
+	function artworkCacheHint(cache: ArtworkCacheSettings | null): string {
+		const base = 'Covers and artist photos you have seen are kept on disk so they load instantly; the oldest are dropped first.';
+		if (!cache) return base;
+		if (cache.max_mb === 0) return `${base} Off: pictures load from TIDAL each time.`;
+		return `${base} Using ${Math.round(cache.used_bytes / 1048576)} MB of ${cacheSizeLabel(cache.max_mb)}.`;
+	}
 	function cacheSizeLabel(mb: number): string {
 		return mb === 0 ? 'Off' : mb >= 1000 ? `${mb / 1000} GB` : `${mb} MB`;
 	}
@@ -2524,14 +2531,13 @@
 	value={$librarySongsScope}
 	onchange={(value) => librarySongsScope.set(value)}
 /></SettingRow></SettingGroup>
-{#if artworkCache}
-<SettingGroup title="Artwork"><SettingRow label="Artwork cache" id="library-artwork-cache" hint={`Covers and artist photos you have seen are kept on disk so they load instantly; the oldest are dropped first. ${artworkCache.max_mb === 0 ? 'Off: pictures load from TIDAL each time.' : `Using ${Math.round(artworkCache.used_bytes / 1048576)} MB.`}`}><Dropdown
+<SettingGroup title="Artwork"><SettingRow label="Artwork cache" id="library-artwork-cache" hint={artworkCacheHint(artworkCache)}><Dropdown
 	label="Artwork cache"
-	options={artworkCache.options_mb.map((mb) => ({ value: String(mb), label: cacheSizeLabel(mb) }))}
-	value={String(artworkCache.max_mb)}
+	options={(artworkCache?.options_mb ?? [0, 100, 150, 250, 500, 1000]).map((mb) => ({ value: String(mb), label: cacheSizeLabel(mb) }))}
+	value={String(artworkCache?.max_mb ?? 150)}
+	disabled={artworkCache === null}
 	onchange={(value) => void setArtworkCacheSize(value)}
 /></SettingRow></SettingGroup>
-{/if}
 <section data-setting-id="library-sync" class="glass-tile section-panel"><SectionHeader title="Sync" />{#if $tidalStatus === "connected"}					<div class="info-list">
 
 						<div class="info-row">
