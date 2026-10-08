@@ -617,7 +617,7 @@
 		-webkit-backdrop-filter: var(--blur-overlay);
 		color: rgba(255, 255, 255, 0.92);
 		transform: translate(-50%, 0);
-		animation: up-next-drop 0.24s ease both;
+		animation: up-next-drop var(--motion-base) both;
 		pointer-events: none;
 	}
 

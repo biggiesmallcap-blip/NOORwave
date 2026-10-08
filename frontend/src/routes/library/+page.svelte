@@ -3163,7 +3163,7 @@
 		flex-direction: column;
 		gap: 24px;
 		margin-bottom: var(--gap);
-		animation: panel-slide 200ms ease-out both;
+		animation: panel-slide var(--motion-base) both;
 	}
 
 	@keyframes panel-slide {
@@ -3515,7 +3515,7 @@
 		align-items: center;
 		justify-content: center;
 		padding: 24px;
-		animation: backdrop-in 180ms ease both;
+		animation: backdrop-in var(--motion-base) both;
 	}
 
 	@keyframes backdrop-in {
@@ -3533,7 +3533,7 @@
 		gap: 20px;
 		padding: 24px;
 		border-radius: var(--radius-lg);
-		animation: modal-pop 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+		animation: modal-pop var(--motion-base) both;
 		scrollbar-width: thin;
 	}
 

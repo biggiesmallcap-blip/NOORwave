@@ -831,7 +831,7 @@
 	.video-dock.full.positioned {
 		/* backwards, not both: a held last frame (transform: none) would beat
 		   the inline start pin of a FLIP glide and flash the end box. */
-		animation: stage-in 0.28s cubic-bezier(0.22, 0.7, 0.2, 1) backwards;
+		animation: stage-in var(--motion-slow) backwards;
 	}
 
 	@keyframes stage-in {
@@ -857,7 +857,7 @@
 		overflow: hidden;
 		box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
 		border: 1px solid rgba(255, 255, 255, 0.12);
-		animation: dock-in 0.22s ease backwards;
+		animation: dock-in var(--motion-base) backwards;
 	}
 
 	.video-dock.mini.placed {
@@ -931,7 +931,7 @@
 	}
 
 	.video-dock.placed .pill {
-		animation: pill-in 0.24s ease both;
+		animation: pill-in var(--motion-base) both;
 	}
 
 	@keyframes pill-in {

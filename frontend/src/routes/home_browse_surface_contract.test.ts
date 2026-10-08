@@ -119,7 +119,7 @@ describe('Entry motion is shared, not recopied', () => {
 		// backwards, not both: a filled opacity/transform animation holds a
 		// stacking context for the life of the element, which traps a popout's
 		// z-index inside its own card.
-		expect(appCss).toContain('animation: rise-in-card 300ms ease-out backwards;');
+		expect(appCss).toContain('animation: rise-in-card var(--motion-slow) backwards;');
 		expect(appCss).toContain('prefers-reduced-motion');
 	});
 

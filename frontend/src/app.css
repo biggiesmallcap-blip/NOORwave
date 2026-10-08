@@ -1045,7 +1045,7 @@ input[type='checkbox'] { accent-color: var(--accent); }
 
 /* ── Page animation ───────────────────────────────────── */
 .animate-in {
-	animation: page-enter 240ms cubic-bezier(0.22, 0.7, 0.2, 1) both;
+	animation: page-enter var(--motion-base) both;
 }
 
 @keyframes page-enter {
@@ -1080,7 +1080,7 @@ input[type='checkbox'] { accent-color: var(--accent); }
    Callers keep route-specific layout and hover transitions; this class owns
    only the entrance animation. */
 .rise-in-shelf {
-	animation: rise-in-shelf 340ms ease-out both;
+	animation: rise-in-shelf var(--motion-slow) both;
 	/* Capped, because the delay is dead time where the element is invisible.
 	   Home stacks sixteen sections; uncapped, the last one would sit blank for
 	   over a second. The cap keeps the cascade legible near the top of the page
@@ -1089,7 +1089,7 @@ input[type='checkbox'] { accent-color: var(--accent); }
 }
 
 .rise-in-card {
-	animation: rise-in-card 300ms ease-out backwards;
+	animation: rise-in-card var(--motion-slow) backwards;
 	animation-delay: calc(min(var(--rise-index, 0), 11) * 22ms);
 }
 

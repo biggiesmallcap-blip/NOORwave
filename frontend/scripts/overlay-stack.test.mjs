@@ -34,8 +34,8 @@ describe('overlay stack contract', () => {
 		expect(component).toContain('class:closing={$contextMenu.closing}');
 		expect(component).toContain('context-menu-enter');
 		expect(component).toContain('context-menu-exit');
-		expect(component).toContain('animation: context-menu-enter 160ms');
-		expect(component).toContain('animation: context-menu-exit 160ms');
+		expect(component).toContain('animation: context-menu-enter var(--motion-fast)');
+		expect(component).toContain('animation: context-menu-exit var(--motion-exit)');
 		expect(component).toContain('.context-menu.closing');
 		expect(component).not.toContain('pointer-events: none;');
 	});

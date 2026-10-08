@@ -3119,7 +3119,7 @@
 		border-radius: var(--radius-sm);
 		background: color-mix(in srgb, var(--accent-soft) 70%, transparent);
 		border: 1px solid var(--accent-line);
-		animation: queue-undo-slide-in 180ms ease-out;
+		animation: queue-undo-slide-in var(--motion-base);
 	}
 
 	@keyframes queue-undo-slide-in {
@@ -3967,7 +3967,7 @@
 			z-index: 30;
 			display: flex;
 			flex-direction: column;
-			animation: mini-player-in 200ms cubic-bezier(0.25, 0.8, 0.25, 1) both;
+			animation: mini-player-in var(--motion-base) both;
 		}
 
 		@keyframes mini-player-in {
@@ -4160,7 +4160,7 @@
 			z-index: 41;
 			padding: 12px 0 8px;
 			box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.24);
-			animation: sheet-up 240ms cubic-bezier(0.25, 0.8, 0.25, 1) both;
+			animation: sheet-up var(--motion-base) both;
 		}
 
 		@keyframes sheet-up {
@@ -4242,7 +4242,7 @@
 			flex-direction: column;
 			gap: 16px;
 			box-shadow: 0 -16px 48px rgba(0, 0, 0, 0.32);
-			animation: np-sheet-up 280ms cubic-bezier(0.25, 0.8, 0.25, 1) both;
+			animation: np-sheet-up var(--motion-slow) both;
 		}
 
 		@keyframes np-sheet-up {

@@ -516,7 +516,7 @@
 		height: 100%;
 		object-fit: cover;
 		display: block;
-		animation: artwork-fade-in 320ms ease both;
+		animation: artwork-fade-in var(--motion-slow) both;
 	}
 
 	@keyframes artwork-fade-in {

@@ -9,7 +9,9 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join, extname } from 'node:path';
 
 const ROOT = 'src';
-const PROPERTY = /^\s*(transition|transition-duration|animation|animation-duration)\s*:/;
+// Shorthands only: the tokens bundle duration and easing, so they cannot be
+// used in `*-duration` overrides, which stay raw on purpose.
+const PROPERTY = /^\s*(transition|animation)\s*:/;
 const RAW = /(?<![\w-])\d*\.?\d+m?s\b/;
 const verbose = process.argv.includes('--verbose');
 
@@ -25,6 +27,9 @@ function walk(dir) {
 
 const hits = [];
 for (const file of walk(ROOT)) {
+	// The phone remote has its own touch language (spring curves), outside the
+	// desktop motion system.
+	if (/[\\/]remote[\\/]/.test(file)) continue;
 	const lines = readFileSync(file, 'utf8').split('\n');
 	let continuing = false;
 	lines.forEach((line, index) => {
@@ -32,9 +37,15 @@ for (const file of walk(ROOT)) {
 		if (!starts && !continuing) return;
 		// Multi-line transition lists continue until the declaration ends.
 		continuing = !line.includes(';');
-		// Reduced-motion overrides set 1ms on purpose.
-		if (/\b1ms\b/.test(line) || /\b0s\b/.test(line)) return;
-		if (RAW.test(line.replace(/var\([^)]*\)/g, ''))) hits.push(`${file}:${index + 1}: ${line.trim()}`);
+		// Reduced-motion overrides set 1ms on purpose, and looping animations
+		// (spinners, shimmer, pulses) keep their own period.
+		if (/\b1ms\b/.test(line) || /\b0s\b/.test(line) || /\binfinite\b/.test(line)) return;
+		// Linear timing tracks real time (progress fills); `motion-ok` marks a
+		// deliberate exception with its reason on the same line.
+		if (/\blinear\b/.test(line) || line.includes('motion-ok')) return;
+		// A raw value after a token is a delay, not a duration.
+		if (line.includes('var(--motion-')) return;
+		if (RAW.test(line)) hits.push(`${file}:${index + 1}: ${line.trim()}`);
 	});
 }
 

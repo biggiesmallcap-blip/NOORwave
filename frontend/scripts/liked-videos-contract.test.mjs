@@ -177,7 +177,7 @@ describe('liked videos contract', () => {
 		// `backwards`, not `both`. A filled opacity/transform animation keeps a
 		// stacking context alive forever, which trapped the versions popout's
 		// z-index inside its own card and painted it under later cards.
-		expect(appCss).toContain('animation: rise-in-card 300ms ease-out backwards;');
+		expect(appCss).toContain('animation: rise-in-card var(--motion-slow) backwards;');
 		expect(page).toContain('.card-slot.open {');
 		expect(page).toContain('class:open={openVersions === video.song_key}');
 	});
