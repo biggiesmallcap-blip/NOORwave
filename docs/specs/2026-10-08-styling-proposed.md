@@ -48,6 +48,28 @@ The last two calls, also decided 2026-10-09: the global `.btn-secondary`,
 control while play/pause stays on the page and the player transport. Jump
 back in cards got the same hover response as the Music Mixes cards.
 
+Review fixes after live verification, 2026-10-09: A to Z jumps load the gap
+in parallel pages and land on the letter (`71af0720`); shelf arrows are solid
+themed discs centred on the first card's artwork (`71af0720`); the Search top
+result shows its art sharp on the right through `--art-wall-filter` instead
+of a blurred backdrop, and long names wrap (`2dbf5227`); Spotify playlist
+cards share the TIDAL card footprint with the source chip inside the art
+(`fe96d157`). Segmented pills keep equal columns no narrower than their
+labels and the Player settings use Segmented (`9a07f00a`); Search keeps the
+previous results dimmed while a new query loads, paints library and TIDAL
+results together, and rises sections in once per query (`459d80cb`).
+
+Beyond the audit, also from that review: an on-disk artwork cache with a size
+setting in Settings > Library (Off to 1 GB, default 150 MB), loopback-only
+`/artwork/tidal/...` route, least recently shown dropped first (`db7b0cb5`).
+The cache row always shows (disabled on a server without the endpoint) and
+setting rows size the control column to its content (`e6fee827`). Verified
+live 2026-10-09 against a worktree server on a copy of the database: A to Z
+rail and count, album label line, search relevance floor, cache hits in about
+2 ms, the cache size setting, and the search load-in timeline. Using the
+cache in the installed app needs the new noor-server installed, which is the
+owner's call.
+
 ---
 
 ## The proposal as approved

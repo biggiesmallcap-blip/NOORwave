@@ -342,6 +342,7 @@ function recordWatch(item: VideoSessionItem) {
 			title: item.title ?? null,
 			artist_tidal_id: artistId ?? null,
 			artist_name: item.artist_name ?? null,
+			video: item,
 		})
 		.then((result) => {
 			record.historyId = result?.id ?? null;

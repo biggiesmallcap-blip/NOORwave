@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
 mod analytics_routes;
+mod artwork_cache_routes;
 mod audio_analysis_routes;
 pub(crate) mod catalog_routes;
 mod catalogue_routes;
@@ -1241,7 +1242,13 @@ pub fn api_routes(state: SharedState) -> Router {
         )
         .route(
             "/api/videos/history",
-            post(video_discovery_routes::post_videos_history),
+            get(video_discovery_routes::get_videos_history)
+                .post(video_discovery_routes::post_videos_history)
+                .delete(video_discovery_routes::delete_videos_history),
+        )
+        .route(
+            "/api/videos/history/videos/{video_id}",
+            axum::routing::delete(video_discovery_routes::delete_video_from_history),
         )
         .route(
             "/api/videos/history/{id}/finish",
@@ -1250,6 +1257,11 @@ pub fn api_routes(state: SharedState) -> Router {
         .route(
             "/api/videos/discovery/status",
             get(video_discovery_routes::get_video_discovery_status),
+        )
+        .route(
+            "/api/artwork-cache",
+            get(artwork_cache_routes::get_artwork_cache)
+                .put(artwork_cache_routes::put_artwork_cache),
         )
         .route(
             "/api/videos/discovery/settings",
@@ -5348,7 +5360,8 @@ fn import_metadata_from_tidal_track(t: TidalTrack) -> tidal_import::ImportTrackM
         title: t.title,
         artist_name: t.artist.name,
         artist_tidal_id: Some(t.artist.id),
-        artist_picture: t.artist.picture,
+        // Artist photos come in 160/320/480/750; 640 is a cover size.
+        artist_picture: TidalClient::get_artwork_url(&t.artist.picture, 750),
         album_title,
         album_tidal_id,
         album_artwork_url,

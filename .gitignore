@@ -10,6 +10,7 @@ noor.db-wal
 noor.db-shm
 noor.db-journal
 .noor_secret
+artwork-cache/
 *.exe
 .env
 .noor_secret

@@ -1276,6 +1276,21 @@ fn galaxy_library_gate(inner: &str) -> String {
     )
 }
 
+/// Turns artist photos stored as bare TIDAL image ids ("3a503460-3914-...")
+/// into image URLs (750px: artist photos have no 640 size). An import path once stored the id itself, which the app
+/// loaded as a relative path, so those artists showed only an initial.
+/// Idempotent and cheap; runs at every startup and finds nothing once healed.
+pub fn repair_bare_artist_photos(conn: &Connection) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE artists
+            SET photo_url = 'https://resources.tidal.com/images/'
+                || replace(photo_url, '-', '/') || '/750x750.jpg'
+          WHERE photo_url LIKE '________-____-____-____-____________'
+            AND length(photo_url) = 36",
+        [],
+    )?)
+}
+
 /// Liner-note facts for an album page: its TIDAL id, the stored label (an
 /// empty string means "looked up, TIDAL had none") and its year.
 pub fn get_album_credits(
@@ -8249,6 +8264,31 @@ mod tests {
     use super::*;
     use crate::db::schema;
     use rusqlite::Connection;
+
+    #[test]
+    fn bare_artist_photo_ids_become_urls() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute(
+            "INSERT INTO artists (id, name, photo_url) VALUES
+                (1, 'Bare', '3a503460-3914-4d4a-b4de-aa93f4020d08'),
+                (2, 'Url', 'https://resources.tidal.com/images/a/b/c/d/e/640x640.jpg'),
+                (3, 'None', NULL)",
+            [],
+        )
+        .expect("artists");
+        assert_eq!(repair_bare_artist_photos(&conn).expect("repair"), 1);
+        let url: String = conn
+            .query_row("SELECT photo_url FROM artists WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("photo");
+        assert_eq!(
+            url,
+            "https://resources.tidal.com/images/3a503460/3914/4d4a/b4de/aa93f4020d08/750x750.jpg"
+        );
+        assert_eq!(repair_bare_artist_photos(&conn).expect("again"), 0);
+    }
 
     #[test]
     fn label_from_copyright_keeps_the_name() {

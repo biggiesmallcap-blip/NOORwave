@@ -27,8 +27,9 @@ describe('library home hero contract', () => {
 		expect(libraryHero).toContain('mural-panel--featured');
 		// Text over the collage is white on a dark scrim in every theme; theme
 		// text tokens turned the title dark-on-dark in light mode.
-		expect(libraryHero).toContain('rgba(8,8,12,0.66) 0%');
-		expect(libraryHero).toContain('rgba(8,8,12,0.08) 68%');
+		// A deep left plate that falls off into the collage, plus a soft floor.
+		expect(libraryHero).toContain('rgba(8,8,12,0.9) 0%');
+		expect(libraryHero).toContain('transparent 80%');
 		expect(libraryHero).toContain('color: #fff;');
 		expect(libraryHero).not.toContain('color: var(--text-primary, #fff)');
 		// Collage filters are theme tokens, and the featured tile is lifted, not blown out.

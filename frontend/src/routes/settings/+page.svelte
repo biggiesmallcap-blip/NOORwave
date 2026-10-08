@@ -7,6 +7,8 @@
 	import SettingGroup from '$lib/components/settings/SettingGroup.svelte';
 	import SettingRow from '$lib/components/settings/SettingRow.svelte';
 	import Segmented from '$lib/components/ui/Segmented.svelte';
+	import Dropdown from '$lib/components/ui/Dropdown.svelte';
+	import { likeSongOnVideoSave } from '$lib/videos/like_song_for_video';
 	import AppearanceFields, { type AppearanceValues } from '$lib/components/settings/AppearanceFields.svelte';
 	import StartupSetting from '$lib/components/settings/StartupSetting.svelte';
 	import CloseBehaviorSetting from '$lib/components/settings/CloseBehaviorSetting.svelte';
@@ -29,7 +31,8 @@
 		type DiscoveryTrainingSafetyProfile,
 		type MusicBrainzStatus,
 		type PlaybackRuntimeInfo,
-		type PortableMusicBrainzSnapshotStatus
+		type PortableMusicBrainzSnapshotStatus,
+		type ArtworkCacheSettings
 	} from '$lib/api/client';
 	import { wsMessages } from '$lib/api/ws';
 	import {
@@ -436,8 +439,37 @@
 		CROSSFADE_OPTIONS[0]).value,
 	);
 
+	// Artwork cache (Settings > Library): covers and artist photos saved on
+	// disk next to the database. Older servers lack the endpoint; the row hides.
+	let artworkCache = $state<ArtworkCacheSettings | null>(null);
+	async function loadArtworkCache() {
+		try {
+			artworkCache = await api.getArtworkCache();
+		} catch {
+			artworkCache = null;
+		}
+	}
+	async function setArtworkCacheSize(value: string) {
+		try {
+			artworkCache = await api.setArtworkCacheSize(Number(value));
+		} catch (err) {
+			console.error('Failed to save the artwork cache size:', err);
+		}
+	}
+	// Older servers lack the endpoint: the row stays visible but disabled.
+	function artworkCacheHint(cache: ArtworkCacheSettings | null): string {
+		const base = 'Covers and artist photos you have seen are kept on disk so they load instantly; the oldest are dropped first.';
+		if (!cache) return base;
+		if (cache.max_mb === 0) return `${base} Off: pictures load from TIDAL each time.`;
+		return `${base} Using ${Math.round(cache.used_bytes / 1048576)} MB of ${cacheSizeLabel(cache.max_mb)}.`;
+	}
+	function cacheSizeLabel(mb: number): string {
+		return mb === 0 ? 'Off' : mb >= 1000 ? `${mb / 1000} GB` : `${mb} MB`;
+	}
+
 	onMount(() => {
 		if ($pendingTidalLogin) activeCategory = 'services';
+		void loadArtworkCache();
 		const tauriUnlisteners: Array<() => void> = [];
 		void refreshDownloadFolder();
 		const tick = setInterval(() => {
@@ -1785,47 +1817,27 @@
 					options={[{ value: 'system', label: 'Follow system' }, { value: 'reduce', label: 'Always' }]}
 					value={$motionPreference}
 					onchange={(value) => motionPreference.set(value)}
-				/></SettingRow></SettingGroup><SettingGroup title="Player"><SettingRow label="Position" id="player-position"><div class="player-position-options" role="group" aria-label="Preferred player position">
-					{#each [
-						{ id: 'right', icon: '▣', label: 'Right' },
-						{ id: 'left', icon: '◧', label: 'Left' },
-						{ id: 'bottom', icon: '▤', label: 'Bottom' }
-					] as option (option.id)}
-						<button
-							type="button"
-							class="player-position-option"
-							class:active={$playerPlacement === option.id}
-							aria-pressed={$playerPlacement === option.id}
-							onclick={() => playerPlacement.set(option.id as PlayerPlacement)}
-						>
-							<strong>{option.label}</strong>
-						</button>
-					{/each}
-				</div></SettingRow><SettingRow label="Side artwork" id="player-artwork"><div class="player-position-options artwork-options" role="group" aria-label="Side player artwork style">
-					{#each [
-						{ id: 'square', icon: '□', label: 'Square' },
-						{ id: 'banner', icon: '▭', label: 'Banner' }
-					] as option (option.id)}
-						<button type="button" class="player-position-option" class:active={$playerArtworkStyle === option.id} aria-pressed={$playerArtworkStyle === option.id} onclick={() => playerArtworkStyle.set(option.id as PlayerArtworkStyle)}>
-							<strong>{option.label}</strong>
-						</button>
-					{/each}
-				</div></SettingRow><div data-setting-id="player-information"><div class="quality-setting-row">
-					<span>Side quality</span>
-					<div class="quality-mode-options" role="group" aria-label="Side panel streaming quality">
-						{#each QUALITY_DISPLAY_OPTIONS as option (option.id)}
-							<button type="button" class="quality-mode-option" class:active={$sideQualityDisplay === option.id} aria-pressed={$sideQualityDisplay === option.id} onclick={() => sideQualityDisplay.set(option.id)}>{option.label}</button>
-						{/each}
-					</div>
-				</div>
-				<div class="quality-setting-row">
-					<span>Bottom quality</span>
-					<div class="quality-mode-options" role="group" aria-label="Bottom player streaming quality">
-						{#each QUALITY_DISPLAY_OPTIONS as option (option.id)}
-							<button type="button" class="quality-mode-option" class:active={$bottomQualityDisplay === option.id} aria-pressed={$bottomQualityDisplay === option.id} onclick={() => bottomQualityDisplay.set(option.id)}>{option.label}</button>
-						{/each}
-					</div>
-				</div></div></SettingGroup><SettingGroup title="Interaction"><div data-setting-id="horizontal-shelves"><div class="info-list">
+				/></SettingRow></SettingGroup><SettingGroup title="Player"><SettingRow label="Position" id="player-position"><Segmented
+					label="Preferred player position"
+					options={[{ value: 'right', label: 'Right' }, { value: 'left', label: 'Left' }, { value: 'bottom', label: 'Bottom' }]}
+					value={$playerPlacement}
+					onchange={(value) => playerPlacement.set(value as PlayerPlacement)}
+				/></SettingRow><SettingRow label="Side artwork" id="player-artwork"><Segmented
+					label="Side player artwork style"
+					options={[{ value: 'square', label: 'Square' }, { value: 'banner', label: 'Banner' }]}
+					value={$playerArtworkStyle}
+					onchange={(value) => playerArtworkStyle.set(value as PlayerArtworkStyle)}
+				/></SettingRow><div data-setting-id="player-information"><SettingRow label="Side quality"><Segmented
+					label="Side panel streaming quality"
+					options={QUALITY_DISPLAY_OPTIONS.map((option) => ({ value: option.id, label: option.label }))}
+					value={$sideQualityDisplay}
+					onchange={(value) => sideQualityDisplay.set(value)}
+				/></SettingRow><SettingRow label="Bottom quality"><Segmented
+					label="Bottom player streaming quality"
+					options={QUALITY_DISPLAY_OPTIONS.map((option) => ({ value: option.id, label: option.label }))}
+					value={$bottomQualityDisplay}
+					onchange={(value) => bottomQualityDisplay.set(value)}
+				/></SettingRow></div></SettingGroup><SettingGroup title="Interaction"><div data-setting-id="horizontal-shelves"><div class="info-list">
 					<div class="info-row">
 						<div>
 							<span>Scroll shelves with mouse wheel</span>
@@ -2519,6 +2531,19 @@
 	options={[{ value: 'liked', label: 'Liked songs' }, { value: 'library', label: 'All library songs' }]}
 	value={$librarySongsScope}
 	onchange={(value) => librarySongsScope.set(value)}
+/></SettingRow></SettingGroup>
+<SettingGroup title="Videos"><SettingRow label="Saving a video likes its song" id="library-video-likes-song" hint="When you save a music video, the matching song (same artist and title) is liked too, so it shows in your Library and TIDAL favorites. Removing a video never unlikes the song."><Segmented
+	label="Saving a video likes its song"
+	options={[{ value: 'off', label: 'Off' }, { value: 'on', label: 'On' }]}
+	value={$likeSongOnVideoSave}
+	onchange={(value) => likeSongOnVideoSave.set(value)}
+/></SettingRow></SettingGroup>
+<SettingGroup title="Artwork"><SettingRow label="Artwork cache" id="library-artwork-cache" hint={artworkCacheHint(artworkCache)}><Dropdown
+	label="Artwork cache"
+	options={(artworkCache?.options_mb ?? [0, 100, 150, 250, 500, 1000]).map((mb) => ({ value: String(mb), label: cacheSizeLabel(mb) }))}
+	value={String(artworkCache?.max_mb ?? 150)}
+	disabled={artworkCache === null}
+	onchange={(value) => void setArtworkCacheSize(value)}
 /></SettingRow></SettingGroup>
 <section data-setting-id="library-sync" class="glass-tile section-panel"><SectionHeader title="Sync" />{#if $tidalStatus === "connected"}					<div class="info-list">
 

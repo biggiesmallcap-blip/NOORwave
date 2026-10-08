@@ -572,6 +572,57 @@ pub fn recently_watched_video_ids(conn: &Connection, days: i64) -> Result<HashSe
     Ok(rows.into_iter().collect())
 }
 
+/// Videos you skipped (stopped within 30 s and the first quarter, the same
+/// rule stations use), split into skipped once and skipped two or more times.
+/// A video you later watched properly is forgiven. Radio and the shelves sink
+/// the first group and leave the second out.
+pub fn skipped_video_ids(conn: &Connection) -> Result<(HashSet<i64>, HashSet<i64>)> {
+    use crate::services::video_discovery::roots;
+    let mut stmt = conn.prepare(
+        "SELECT tidal_video_id, duration_watched_ms, video_duration_ms, completed
+           FROM video_history
+          WHERE duration_watched_ms IS NOT NULL",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+            row.get::<_, i64>(3)? != 0,
+        ))
+    })?;
+    let mut skips = HashMap::<i64, u32>::new();
+    let mut enjoyed = HashSet::new();
+    for row in rows {
+        let (video, watched_ms, duration_ms, completed) = row?;
+        let watch = roots::WatchRow {
+            artist_id: 0,
+            age_days: 0.0,
+            watched_ms,
+            duration_ms,
+            completed,
+        };
+        if roots::is_enjoyed(&watch) {
+            enjoyed.insert(video);
+        } else if !completed && roots::is_skip(&watch) {
+            *skips.entry(video).or_default() += 1;
+        }
+    }
+    let mut once = HashSet::new();
+    let mut repeatedly = HashSet::new();
+    for (video, count) in skips {
+        if enjoyed.contains(&video) {
+            continue;
+        }
+        if count >= 2 {
+            repeatedly.insert(video);
+        } else {
+            once.insert(video);
+        }
+    }
+    Ok((once, repeatedly))
+}
+
 // --- Sampling ---
 
 /// Weighted sample without replacement. Square-root weighting keeps a strong
@@ -1409,6 +1460,28 @@ fn write_copy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skips_split_into_once_and_repeatedly_and_a_proper_watch_forgives() {
+        let conn = Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        conn.execute_batch(
+            "INSERT INTO video_history (tidal_video_id, duration_watched_ms, video_duration_ms, completed) VALUES
+                (1, 5000, 200000, 0),
+                (2, 4000, 200000, 0), (2, 8000, 200000, 0),
+                (3, 3000, 200000, 0), (3, 3000, 200000, 0), (3, 190000, 200000, 0),
+                (4, 120000, 200000, 0),
+                (5, NULL, NULL, 0)",
+        )
+        .expect("history");
+        let (once, repeatedly) = skipped_video_ids(&conn).expect("skips");
+        assert_eq!(once, HashSet::from([1]));
+        assert_eq!(
+            repeatedly,
+            HashSet::from([2]),
+            "3 was later watched properly"
+        );
+    }
 
     fn anchor(tidal_id: i64, name: &str, listens: i64) -> AnchorArtist {
         AnchorArtist::new(tidal_id, name.to_string(), listens)

@@ -158,7 +158,10 @@ describe('search layout contracts', () => {
 		expect(source).toContain('if (!query.trim()) {');
 		expect(source).toContain("activeQuery = ''");
 		expect(source).toContain('debounceTimer = setTimeout(async () => {');
-		expect(source).toContain("const q = query.trim()\n      activeQuery = q\n      loading = true\n      clearVisibleSearchResults()");
+		// The previous results stay, dimmed, until the new query's first results.
+		expect(source).toContain("const q = query.trim()\n      activeQuery = q\n      loading = true\n      resultsStale = results !== null || audioResults !== null\n      if (!resultsStale) clearVisibleSearchResults()");
+		expect(source).toContain('function takeFreshResults(q: string)');
+		expect(source).toContain('LOCAL_RESULTS_HOLD_MS');
 		expect(source).toContain("lastQuery = ''");
 		expect(source).toContain('vibeTrack = null');
 		expect(source).toContain('underratedTracks = null');

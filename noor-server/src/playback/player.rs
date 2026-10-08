@@ -2433,7 +2433,67 @@ pub(crate) fn build_session_taste_profile(
         }
     }
 
+    // Videos you watched properly count toward an artist too, a little less
+    // than listens do. A failure here only drops the video part.
+    if let Err(error) = add_video_watch_affinity(conn, &mut profile) {
+        tracing::debug!(%error, "taste: video watches skipped");
+    }
+
     Ok(profile)
+}
+
+/// Days of video watches that count toward taste.
+const VIDEO_TASTE_DAYS: f64 = 30.0;
+/// Most any one artist can gain from videos, so a binge of one artist's
+/// clips cannot outweigh what you actually listen to.
+const VIDEO_TASTE_ARTIST_CAP: f64 = 3.0;
+
+/// Adds artists whose videos you watched properly (finished, or 70% watched:
+/// the crawler's "enjoyed" rule) in the last 30 days: 1.2 for a watch today,
+/// fading to 0.4 at 30 days, at most 3.0 per artist. Recent listens add about
+/// 1 to 11, so videos nudge the profile rather than lead it. Only artists in
+/// your library count (taste is keyed by library artist).
+fn add_video_watch_affinity(conn: &Connection, profile: &mut SessionTasteProfile) -> Result<()> {
+    use crate::services::video_discovery::roots;
+    let mut stmt = conn.prepare(
+        "SELECT a.id, h.duration_watched_ms, h.video_duration_ms, h.completed,
+                julianday('now') - julianday(h.started_at)
+           FROM video_history h
+           JOIN artists a ON a.tidal_id = h.artist_tidal_id
+          WHERE h.artist_tidal_id > 0
+            AND h.duration_watched_ms IS NOT NULL
+            AND h.started_at >= datetime('now', '-30 days')",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+            row.get::<_, i64>(3)? != 0,
+            row.get::<_, f64>(4)?,
+        ))
+    })?;
+    let mut gained = HashMap::<i64, f64>::new();
+    for row in rows {
+        let (artist_id, watched_ms, duration_ms, completed, age_days) = row?;
+        let watch = roots::WatchRow {
+            artist_id,
+            age_days,
+            watched_ms,
+            duration_ms,
+            completed,
+        };
+        if !roots::is_enjoyed(&watch) {
+            continue;
+        }
+        let freshness = (1.0 - age_days.max(0.0) / VIDEO_TASTE_DAYS).clamp(0.0, 1.0);
+        let entry = gained.entry(artist_id).or_insert(0.0);
+        *entry = (*entry + 0.4 + 0.8 * freshness).min(VIDEO_TASTE_ARTIST_CAP);
+    }
+    for (artist_id, weight) in gained {
+        *profile.positive_artists.entry(artist_id).or_insert(0.0) += weight;
+    }
+    Ok(())
 }
 
 pub(super) fn normalize_genre_key(value: &str) -> String {
@@ -2443,6 +2503,37 @@ pub(super) fn normalize_genre_key(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn watched_videos_add_capped_artist_affinity_for_library_artists() {
+        let conn = Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        conn.execute_batch(
+            "INSERT INTO artists (id, name, tidal_id) VALUES (1, 'Watched', 100), (2, 'Skipped', 200);
+             INSERT INTO video_history (tidal_video_id, artist_tidal_id, duration_watched_ms, video_duration_ms, completed) VALUES
+                (1, 100, 200000, 200000, 1), (2, 100, 150000, 200000, 0),
+                (3, 100, 200000, 200000, 1), (4, 100, 200000, 200000, 1),
+                (5, 200, 5000, 200000, 0),
+                (6, 999, 200000, 200000, 1)",
+        )
+        .expect("rows");
+        let mut profile = SessionTasteProfile::default();
+        add_video_watch_affinity(&conn, &mut profile).expect("affinity");
+        let watched = profile.positive_artists.get(&1).copied().unwrap_or(0.0);
+        assert!(
+            (watched - VIDEO_TASTE_ARTIST_CAP).abs() < 1e-9,
+            "four enjoyed watches hit the cap, got {watched}"
+        );
+        assert!(
+            !profile.positive_artists.contains_key(&2),
+            "a skip adds nothing"
+        );
+        assert_eq!(
+            profile.positive_artists.len(),
+            1,
+            "artists outside the library are ignored"
+        );
+    }
     use crate::playback::automix::{
         automix_score, automix_scored_reason, build_automix_extension_with_reasons,
         evaluate_automix_for_seed,

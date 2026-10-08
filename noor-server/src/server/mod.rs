@@ -135,6 +135,7 @@ fn build_router(
             post(onboarding_complete_handler),
         )
         .route("/api/shutdown", post(shutdown_handler))
+        .route("/artwork/tidal/{*path}", get(artwork_handler))
         .with_state(state.clone())
         .merge(remote::public_routes(remote.clone()))
         .layer(Extension(shutdown_tx.clone()));
@@ -201,6 +202,42 @@ async fn shutdown_handler(
         tracing::warn!("flush on shutdown failed: {err}");
     }
     StatusCode::OK
+}
+
+/// `GET /artwork/tidal/{path}`: a TIDAL picture through the on-disk artwork
+/// cache. Unauthenticated because `<img>` cannot send the token, so it is
+/// loopback-only and serves nothing but TIDAL image paths (public CDN files).
+/// With the cache off it redirects to TIDAL.
+async fn artwork_handler(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    axum::extract::Path(path): axum::extract::Path<String>,
+) -> Response {
+    if require_loopback(addr).is_err() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if !crate::services::artwork_cache::valid_tidal_path(&path) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if !crate::services::artwork_cache::enabled() {
+        return axum::response::Redirect::temporary(&crate::services::artwork_cache::tidal_url(
+            &path,
+        ))
+        .into_response();
+    }
+    match crate::services::artwork_cache::get_or_fetch(&path).await {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg")),
+                (
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("public, max-age=31536000, immutable"),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => StatusCode::BAD_GATEWAY.into_response(),
+    }
 }
 
 async fn ping_handler() -> Json<serde_json::Value> {
@@ -483,9 +520,12 @@ async fn require_token(
 }
 
 async fn no_store_cache(req: Request, next: Next) -> Response {
+    let is_artwork = req.uri().path().starts_with("/artwork/");
     let mut resp = next.run(req).await;
-    resp.headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if !is_artwork {
+        resp.headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
     resp
 }
 

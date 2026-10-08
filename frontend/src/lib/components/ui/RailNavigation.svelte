@@ -9,6 +9,34 @@
 	let hasOverflow = $state(false);
 	let canPrevious = $state(false);
 	let canNext = $state(false);
+	let controls = $state<HTMLElement | null>(null);
+	// Vertical center of the first card's artwork, relative to the controls
+	// box, so the arrows sit mid-picture instead of mid-card (art plus text).
+	let artCenter = $state<number | null>(null);
+
+	const ART = 'img, picture, [data-rail-art], .art, .artwork, .cover, .thumb';
+
+	function measureArt() {
+		const art = rail?.firstElementChild?.querySelector<HTMLElement>(ART);
+		if (!art || !controls) {
+			artCenter = null;
+			return;
+		}
+		// Layout offsets, not client rects: cards rise in and lift on hover with
+		// transforms, which must not move the arrows.
+		const host = controls.offsetParent;
+		let top = 0;
+		let node: HTMLElement | null = art;
+		while (node && node !== host) {
+			top += node.offsetTop;
+			node = node.offsetParent as HTMLElement | null;
+		}
+		if (!node || art.offsetHeight === 0) {
+			artCenter = null;
+			return;
+		}
+		artCenter = Math.round(top - controls.offsetTop + art.offsetHeight / 2);
+	}
 
 	function updateState() {
 		if (!rail) {
@@ -21,6 +49,7 @@
 		hasOverflow = max > 2;
 		canPrevious = rail.scrollLeft > 2;
 		canNext = rail.scrollLeft < max - 2;
+		if (hasOverflow) queueMicrotask(measureArt);
 	}
 
 	function move(direction: -1 | 1) {
@@ -57,10 +86,17 @@
 </script>
 
 {#if hasOverflow}
-	<div class="rail-controls" role="group" aria-label={`${label} navigation`}>
+	<div
+		class="rail-controls"
+		class:art-aligned={artCenter !== null}
+		style:--rail-art-center={artCenter === null ? undefined : `${artCenter}px`}
+		role="group"
+		aria-label={`${label} navigation`}
+		bind:this={controls}
+	>
 		<button
 			type="button"
-			class="btn btn-glass rail-control previous"
+			class="rail-control previous"
 			onclick={() => move(-1)}
 			disabled={!canPrevious}
 			aria-label={`Show previous items in ${label}`}
@@ -69,7 +105,7 @@
 		</button>
 		<button
 			type="button"
-			class="btn btn-glass rail-control next"
+			class="rail-control next"
 			onclick={() => move(1)}
 			disabled={!canNext}
 			aria-label={`Show next items in ${label}`}
@@ -91,18 +127,40 @@
 		z-index: 4;
 	}
 
+	/* Arrows center on the first card's artwork when there is one. */
+	.rail-controls.art-aligned {
+		align-items: flex-start;
+	}
+
+	.rail-controls.art-aligned .rail-control {
+		margin-top: calc(var(--rail-art-center) - 18px);
+	}
+
+	/* A solid themed disc with a full-strength chevron: readable over any
+	   cover, the same in every shelf. */
 	.rail-control {
-		width: 40px;
-		height: 40px;
+		width: 36px;
+		height: 36px;
 		display: grid;
 		place-items: center;
 		padding: 0;
+		border: 1px solid var(--border-strong);
 		border-radius: 999px;
-		box-shadow: var(--panel-shadow);
-		backdrop-filter: blur(10px);
-		-webkit-backdrop-filter: blur(10px);
+		background: var(--bg-surface-strong);
+		color: var(--text-primary);
+		box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
 		cursor: pointer;
 		pointer-events: auto;
+		transition: background var(--motion-fast), transform var(--motion-fast);
+	}
+
+	.rail-control:hover {
+		background: color-mix(in srgb, var(--bg-surface-strong) 82%, var(--text-primary));
+		transform: scale(1.06);
+	}
+
+	.rail-control:active {
+		transform: scale(0.96);
 	}
 
 	.rail-control:focus-visible {
@@ -120,7 +178,7 @@
 		height: 20px;
 		fill: none;
 		stroke: currentColor;
-		stroke-width: 2;
+		stroke-width: 2.4;
 		stroke-linecap: round;
 		stroke-linejoin: round;
 	}
@@ -133,6 +191,10 @@
 		.rail-control {
 			width: 44px;
 			height: 44px;
+		}
+
+		.rail-controls.art-aligned .rail-control {
+			margin-top: calc(var(--rail-art-center) - 22px);
 		}
 	}
 </style>

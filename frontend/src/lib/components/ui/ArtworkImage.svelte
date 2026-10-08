@@ -1,5 +1,8 @@
 <script lang="ts">
 	import {
+		cachedTidalArtwork,
+		noteCachedArtworkResult,
+		tidalImageIdToUrl,
 		tidalArtworkFallbackSizes,
 		upscaleTidalArtwork,
 		type TidalArtworkSize
@@ -54,20 +57,27 @@
 	let lastSize = $state<TidalArtworkSize>();
 	const sources = $derived(normalizeSources(src));
 	const srcKey = $derived(sources.join('\n'));
+	// The first try goes through the local artwork cache; if that fails the
+	// direct TIDAL sizes follow as before.
 	const attempts = $derived(
-		sources.flatMap((source) =>
-			tidalArtworkFallbackSizes(source, size).map((fallbackSize) => ({ source, size: fallbackSize }))
-		)
+		sources.flatMap((source) => {
+			const direct = tidalArtworkFallbackSizes(source, size).map((fallbackSize) => ({
+				source,
+				size: fallbackSize,
+				cached: false,
+			}));
+			return direct.length > 0 && cachedTidalArtwork(upscaleTidalArtwork(source, size))
+				? [{ ...direct[0], cached: true }, ...direct]
+				: direct;
+		})
 	);
 	const exhausted = $derived(failedAttempts >= attempts.length);
-	const resolvedSrc = $derived(
-		!exhausted
-			? upscaleTidalArtwork(
-					attempts[failedAttempts]?.source,
-					attempts[failedAttempts]?.size ?? size,
-				)
-			: null
-	);
+	const resolvedSrc = $derived.by(() => {
+		if (exhausted) return null;
+		const attempt = attempts[failedAttempts];
+		const url = upscaleTidalArtwork(attempt?.source, attempt?.size ?? size);
+		return attempt?.cached ? (cachedTidalArtwork(url) ?? url) : url;
+	});
 
 	let imgEl = $state<HTMLImageElement>();
 
@@ -91,6 +101,7 @@
 		const values = Array.isArray(value) ? value : [value];
 		return values
 			.filter((candidate): candidate is string => typeof candidate === 'string' && candidate.trim().length > 0)
+			.map(tidalImageIdToUrl)
 			.filter((candidate, index, list) => list.indexOf(candidate) === index);
 	}
 </script>
@@ -106,8 +117,10 @@
 		fetchpriority={fetchPriority}
 		onload={() => {
 			loaded = true;
+			if (attempts[failedAttempts]?.cached) noteCachedArtworkResult(true);
 		}}
 		onerror={() => {
+			if (attempts[failedAttempts]?.cached) noteCachedArtworkResult(false);
 			failedAttempts += 1;
 		}}
 	/>
@@ -174,17 +187,21 @@
 		z-index: 2;
 	}
 
+	/* The art sits sharp on the right and fades into the card, toned down so
+	   it frames the result instead of washing the whole card in a blurred
+	   blob. */
 	.top-hero-bg {
 		position: absolute;
-		inset: -16px;
+		inset: 0 0 0 auto;
 		z-index: 0;
-		width: calc(100% + 32px);
-		height: calc(100% + 32px);
+		width: 62%;
+		height: 100%;
 		object-fit: cover;
-		object-position: center;
-		opacity: 0.72;
-		filter: blur(12px) saturate(1.08) contrast(0.96);
-		transform: scale(1.02);
+		object-position: center 30%;
+		opacity: 0.42;
+		filter: var(--art-wall-filter);
+		-webkit-mask-image: linear-gradient(to right, transparent 0%, #000 55%);
+		mask-image: linear-gradient(to right, transparent 0%, #000 55%);
 	}
 
 	.top-hero-bg.fallback {
