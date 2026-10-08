@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { prefersReducedMotion } from '$lib/stores/motion';
 	import '../app.css';
 	import { onDestroy, onMount, tick } from 'svelte';
 	import { page } from '$app/state';
@@ -1043,11 +1044,6 @@
 			top: list.scrollTop + rowTop,
 			behavior: animate && !prefersReducedMotion() ? 'smooth' : 'auto',
 		});
-	}
-
-	function prefersReducedMotion(): boolean {
-		if (typeof window === 'undefined' || !window.matchMedia) return false;
-		return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 	}
 
 	$effect(() => {

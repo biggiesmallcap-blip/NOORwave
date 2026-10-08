@@ -1110,6 +1110,18 @@ input[type='checkbox'] { accent-color: var(--accent); }
 	}
 }
 
+/* Settings > Appearance > Reduce motion. data-motion="reduce" is set when the
+   preference is "Always" or the OS asks (src/lib/stores/motion.ts), so this
+   also covers components that only have a prefers-reduced-motion query. */
+:root[data-motion='reduce'] *,
+:root[data-motion='reduce'] *::before,
+:root[data-motion='reduce'] *::after {
+	animation-duration: 1ms !important;
+	animation-iteration-count: 1 !important;
+	transition-duration: 1ms !important;
+	scroll-behavior: auto !important;
+}
+
 /* ── Responsive ───────────────────────────────────────── */
 @media (max-width: 1100px) {
 	.page-shell { gap: var(--space-5); }

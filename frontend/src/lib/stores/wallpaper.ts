@@ -1,6 +1,7 @@
 import { writable } from 'svelte/store';
 import type { WallpaperId } from '$lib/components/wallpaper/shaders';
 import { createPersistedStore, oneOf } from './persisted';
+import { reduceMotion } from './motion';
 
 const STORAGE_KEY = 'noor-wallpaper';
 const FPS_STORAGE_KEY = 'noor-wallpaper-fps';
@@ -123,23 +124,22 @@ export const wallpaperIdle = createPersistedStore<WallpaperIdle>(IDLE_STORAGE_KE
 	parse: oneOf(['drift', 'frozen', 'demo'] as const),
 });
 
-// Effective reduce-motion state: resolves 'auto' against the live media query so
-// the renderer can just read a boolean. Updated on setting change and on OS change.
+// Effective reduce-motion state, so the renderer can just read a boolean.
 export const wallpaperReduceMotionActive = writable<boolean>(false);
-if (typeof window !== 'undefined' && window.matchMedia) {
-	const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
-	let mode: WallpaperReduceMotion = 'auto';
-	const recompute = () => {
-		wallpaperReduceMotionActive.set(mode === 'on' || (mode === 'auto' && mq.matches));
-	};
-	wallpaperReduceMotion.subscribe((v) => {
-		mode = v;
-		recompute();
-	});
-	// Safari <14 uses addListener; modern browsers use addEventListener.
-	if (mq.addEventListener) mq.addEventListener('change', recompute);
-	else if (mq.addListener) mq.addListener(recompute);
-}
+// 'auto' follows the app-wide Reduce motion state (which itself follows the OS
+// unless the listener chose Always).
+let wallpaperMotionMode: WallpaperReduceMotion = 'auto';
+let appReducesMotion = false;
+const recomputeWallpaperMotion = () =>
+	wallpaperReduceMotionActive.set(wallpaperMotionMode === 'on' || (wallpaperMotionMode === 'auto' && appReducesMotion));
+wallpaperReduceMotion.subscribe((v) => {
+	wallpaperMotionMode = v;
+	recomputeWallpaperMotion();
+});
+reduceMotion.subscribe((v) => {
+	appReducesMotion = v;
+	recomputeWallpaperMotion();
+});
 
 if (typeof document !== 'undefined') {
 	wallpaperBlur.subscribe((value) => {

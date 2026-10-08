@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { prefersReducedMotion } from '$lib/stores/motion';
 	import { onDestroy } from 'svelte';
 	import { get } from 'svelte/store';
 	import { goto } from '$app/navigation';
@@ -573,7 +574,7 @@
 		// stage's overflow and faded with the arriving page, so the video
 		// grew out from behind the frame.
 		const moving = previousPlace !== null && previousPlace !== next;
-		const reducedMotion = moving && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+		const reducedMotion = moving && prefersReducedMotion();
 		if (next !== 'full') moveHome();
 		else if (!dimming && (!moving || reducedMotion) && $videoStageAnchor) moveIntoStage($videoStageAnchor);
 		if (reducedMotion && next === 'expanded') dimming = false;

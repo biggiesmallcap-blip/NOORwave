@@ -1,9 +1,11 @@
 <script lang="ts">
+	import { motionPreference, prefersReducedMotion } from '$lib/stores/motion';
 	import { onMount, tick, untrack } from 'svelte';
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import SettingGroup from '$lib/components/settings/SettingGroup.svelte';
 	import SettingRow from '$lib/components/settings/SettingRow.svelte';
+	import Segmented from '$lib/components/ui/Segmented.svelte';
 	import AppearanceFields, { type AppearanceValues } from '$lib/components/settings/AppearanceFields.svelte';
 	import StartupSetting from '$lib/components/settings/StartupSetting.svelte';
 	import CloseBehaviorSetting from '$lib/components/settings/CloseBehaviorSetting.svelte';
@@ -1567,7 +1569,7 @@
 		await tick();
 		const focus = requested instanceof HTMLDetailsElement ? requested.querySelector('summary')
 			: requested !== el ? requested : el.querySelector('input, select, button, summary, a');
-		el.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'center' });
+		el.scrollIntoView({ behavior: prefersReducedMotion() ? 'instant' : 'smooth', block: 'center' });
 		if (focus instanceof HTMLElement) focus.focus({ preventScroll: true });
 		else { el.tabIndex = -1; el.focus({ preventScroll: true }); }
 		searchAnnouncement = requested ? entry.label : entry.label + ': choose its prerequisite to make this control available.';
@@ -1760,7 +1762,12 @@
 						onclick={resetZoom}
 						aria-label="Reset interface size" title="Reset interface size" disabled={Math.abs($uiZoom - 1) < 1e-6}
 					>↺</button>
-				</div></SettingRow><details><summary>Keyboard shortcuts</summary><p class="setting-status">Ctrl + scroll or Ctrl + / − to resize; Ctrl + 0 to reset.</p></details></SettingGroup><SettingGroup title="Player"><SettingRow label="Position" id="player-position"><div class="player-position-options" role="group" aria-label="Preferred player position">
+				</div></SettingRow><details><summary>Keyboard shortcuts</summary><p class="setting-status">Ctrl + scroll or Ctrl + / − to resize; Ctrl + 0 to reset.</p></details><SettingRow label="Reduce motion" id="reduce-motion" hint="Turns off slides, scales and looping animation. Follow system uses your operating system's setting."><Segmented
+					label="Reduce motion"
+					options={[{ value: 'system', label: 'Follow system' }, { value: 'reduce', label: 'Always' }]}
+					value={$motionPreference}
+					onchange={(value) => motionPreference.set(value)}
+				/></SettingRow></SettingGroup><SettingGroup title="Player"><SettingRow label="Position" id="player-position"><div class="player-position-options" role="group" aria-label="Preferred player position">
 					{#each [
 						{ id: 'right', icon: '▣', label: 'Right' },
 						{ id: 'left', icon: '◧', label: 'Left' },
@@ -1968,17 +1975,17 @@
 
 						<label class="wallpaper-control">
 							<span>
-								<strong>Reduce motion</strong>
-								<small>Calms the reaction. Auto follows your system setting.</small>
+								<strong>Background motion</strong>
+								<small>Calms the reaction. Auto follows Reduce motion above.</small>
 							</span>
 							<div class="wallpaper-control-field">
 								<select
 									class="audio-select"
 									value={$wallpaperReduceMotion}
 									onchange={(e) => setWallpaperReduceMotion((e.currentTarget as HTMLSelectElement).value as WallpaperReduceMotion)}
-									aria-label="Reduce motion"
+									aria-label="Background motion"
 								>
-									<option value="auto">Auto (system)</option>
+									<option value="auto">Auto</option>
 									<option value="on">On</option>
 									<option value="off">Off</option>
 								</select>
