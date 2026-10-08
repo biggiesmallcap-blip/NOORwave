@@ -25,6 +25,7 @@
 				<a
 					href={item.path}
 					aria-label={item.label}
+					title={item.label}
 					class="nav-item"
 					class:special={item.id === 'genres'}
 					class:active={isNavItemActive(item.path)}

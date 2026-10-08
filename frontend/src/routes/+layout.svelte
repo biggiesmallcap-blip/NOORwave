@@ -3849,6 +3849,28 @@
 	}
 
 	/* ── Mobile layout when a labeled sidebar no longer fits ──── */
+	/* Narrow windows (audit "Near the window floor the chrome takes the
+	   screen"): the sidebar becomes an icon rail so list content shows on first
+	   paint. Labels stay as accessible names and tooltips. */
+	@media (max-width: 899px) and (min-width: 680px) {
+		.app-shell { --sidebar-width: 72px; }
+		.sidebar { padding-inline: 8px; }
+		.app-shell .sidebar .brand .brand-splash,
+		:global([data-theme='light']) .app-shell .sidebar .brand .brand-splash { display: none; }
+		.app-shell .sidebar .brand .brand-icon { display: block; width: 36px; height: 36px; margin: 0 auto; }
+		.sidebar :global(.nav-label),
+		.sidebar :global(.nav-zone-label) {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			overflow: hidden;
+			clip-path: inset(50%);
+			white-space: nowrap;
+		}
+		.sidebar :global(.nav-item) { justify-content: center; padding-inline: 0; }
+		.sidebar-footer { display: none; }
+	}
+
 	@media (max-width: 679px) {
 		/* Show mobile chrome */
 		.mobile-top-bar { display: flex; }
