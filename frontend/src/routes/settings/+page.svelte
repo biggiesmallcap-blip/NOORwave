@@ -1809,47 +1809,27 @@
 					options={[{ value: 'system', label: 'Follow system' }, { value: 'reduce', label: 'Always' }]}
 					value={$motionPreference}
 					onchange={(value) => motionPreference.set(value)}
-				/></SettingRow></SettingGroup><SettingGroup title="Player"><SettingRow label="Position" id="player-position"><div class="player-position-options" role="group" aria-label="Preferred player position">
-					{#each [
-						{ id: 'right', icon: '▣', label: 'Right' },
-						{ id: 'left', icon: '◧', label: 'Left' },
-						{ id: 'bottom', icon: '▤', label: 'Bottom' }
-					] as option (option.id)}
-						<button
-							type="button"
-							class="player-position-option"
-							class:active={$playerPlacement === option.id}
-							aria-pressed={$playerPlacement === option.id}
-							onclick={() => playerPlacement.set(option.id as PlayerPlacement)}
-						>
-							<strong>{option.label}</strong>
-						</button>
-					{/each}
-				</div></SettingRow><SettingRow label="Side artwork" id="player-artwork"><div class="player-position-options artwork-options" role="group" aria-label="Side player artwork style">
-					{#each [
-						{ id: 'square', icon: '□', label: 'Square' },
-						{ id: 'banner', icon: '▭', label: 'Banner' }
-					] as option (option.id)}
-						<button type="button" class="player-position-option" class:active={$playerArtworkStyle === option.id} aria-pressed={$playerArtworkStyle === option.id} onclick={() => playerArtworkStyle.set(option.id as PlayerArtworkStyle)}>
-							<strong>{option.label}</strong>
-						</button>
-					{/each}
-				</div></SettingRow><div data-setting-id="player-information"><div class="quality-setting-row">
-					<span>Side quality</span>
-					<div class="quality-mode-options" role="group" aria-label="Side panel streaming quality">
-						{#each QUALITY_DISPLAY_OPTIONS as option (option.id)}
-							<button type="button" class="quality-mode-option" class:active={$sideQualityDisplay === option.id} aria-pressed={$sideQualityDisplay === option.id} onclick={() => sideQualityDisplay.set(option.id)}>{option.label}</button>
-						{/each}
-					</div>
-				</div>
-				<div class="quality-setting-row">
-					<span>Bottom quality</span>
-					<div class="quality-mode-options" role="group" aria-label="Bottom player streaming quality">
-						{#each QUALITY_DISPLAY_OPTIONS as option (option.id)}
-							<button type="button" class="quality-mode-option" class:active={$bottomQualityDisplay === option.id} aria-pressed={$bottomQualityDisplay === option.id} onclick={() => bottomQualityDisplay.set(option.id)}>{option.label}</button>
-						{/each}
-					</div>
-				</div></div></SettingGroup><SettingGroup title="Interaction"><div data-setting-id="horizontal-shelves"><div class="info-list">
+				/></SettingRow></SettingGroup><SettingGroup title="Player"><SettingRow label="Position" id="player-position"><Segmented
+					label="Preferred player position"
+					options={[{ value: 'right', label: 'Right' }, { value: 'left', label: 'Left' }, { value: 'bottom', label: 'Bottom' }]}
+					value={$playerPlacement}
+					onchange={(value) => playerPlacement.set(value as PlayerPlacement)}
+				/></SettingRow><SettingRow label="Side artwork" id="player-artwork"><Segmented
+					label="Side player artwork style"
+					options={[{ value: 'square', label: 'Square' }, { value: 'banner', label: 'Banner' }]}
+					value={$playerArtworkStyle}
+					onchange={(value) => playerArtworkStyle.set(value as PlayerArtworkStyle)}
+				/></SettingRow><div data-setting-id="player-information"><SettingRow label="Side quality"><Segmented
+					label="Side panel streaming quality"
+					options={QUALITY_DISPLAY_OPTIONS.map((option) => ({ value: option.id, label: option.label }))}
+					value={$sideQualityDisplay}
+					onchange={(value) => sideQualityDisplay.set(value)}
+				/></SettingRow><SettingRow label="Bottom quality"><Segmented
+					label="Bottom player streaming quality"
+					options={QUALITY_DISPLAY_OPTIONS.map((option) => ({ value: option.id, label: option.label }))}
+					value={$bottomQualityDisplay}
+					onchange={(value) => bottomQualityDisplay.set(value)}
+				/></SettingRow></div></SettingGroup><SettingGroup title="Interaction"><div data-setting-id="horizontal-shelves"><div class="info-list">
 					<div class="info-row">
 						<div>
 							<span>Scroll shelves with mouse wheel</span>

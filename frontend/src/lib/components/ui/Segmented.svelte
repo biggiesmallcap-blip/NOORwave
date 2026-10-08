@@ -64,7 +64,7 @@
 			{disabled}
 			onclick={() => onchange(option.value)}
 			onkeydown={onKeydown}
-		>{option.label}</button>
+		><span class="label" data-label={option.label}>{option.label}</span></button>
 	{/each}
 </div>
 
@@ -74,7 +74,10 @@
 		isolation: isolate;
 		display: inline-grid;
 		grid-auto-flow: column;
-		grid-auto-columns: minmax(0, 1fr);
+		/* Plain 1fr: equal columns as wide as the widest label. minmax(0, 1fr)
+		   let a tight row squeeze them below their text, which spilled out. */
+		grid-auto-columns: 1fr;
+		flex-shrink: 0;
 		padding: 3px;
 		border-radius: 999px;
 		background: var(--bg-surface);
@@ -126,6 +129,20 @@
 	}
 
 	button[aria-checked='true'] {
+		font-weight: var(--font-weight-semibold);
+	}
+
+	/* A hidden semibold copy reserves the selected width, so choosing an
+	   option never widens its column or nudges its neighbours. */
+	.label {
+		display: inline-grid;
+	}
+
+	.label::after {
+		content: attr(data-label);
+		height: 0;
+		overflow: hidden;
+		visibility: hidden;
 		font-weight: var(--font-weight-semibold);
 	}
 
