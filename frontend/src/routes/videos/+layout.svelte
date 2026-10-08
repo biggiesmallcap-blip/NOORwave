@@ -4,6 +4,7 @@
 	import { afterNavigate, goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import SearchField from '$lib/search/ui/SearchField.svelte';
+	import CommandHeader from '$lib/components/ui/CommandHeader.svelte';
 	import VideoNavigation from '$lib/components/video/VideoNavigation.svelte';
 	import VideoSearchResults from '$lib/components/video/VideoSearchResults.svelte';
 	import { goBack } from '$lib/navigation/back';
@@ -12,8 +13,8 @@
 	import { WATCH_PATH, videoSectionQuery, videoTabFor } from '$lib/video/section';
 
 	// One frame for the whole video section, so every tab has the same top:
-	// Back and the search field on the first row (the same height as /search),
-	// the tab pills under it. The tabs are for browsing; picking a video on
+	// the shared command header puts Back and the search field on the first
+	// row (the same height as /search) and the tab pills under it. The tabs are for browsing; picking a video on
 	// any of them opens the watch page, the only place the big player lives.
 
 	let { children }: { children: Snippet } = $props();
@@ -63,31 +64,26 @@
 </script>
 
 <div class="video-section">
-	<header class="video-header">
-		<div class="search-row">
-			<button
-				type="button"
-				class="back-link"
-				onclick={() => goBack(onWatchPage ? '/videos' : '/')}
-			>Back</button>
-			<div class="search-slot">
-				<SearchField
-					bind:value={$videoSectionQuery}
-					variant="page"
-					placeholder={tab === 'liked' ? 'Search your liked videos' : 'Search TIDAL videos'}
-					ariaLabel={tab === 'liked' ? 'Search your liked videos' : 'Search TIDAL videos'}
-					suppressSuggestions
-				/>
-			</div>
-		</div>
-		<VideoNavigation current={tab} />
+	<CommandHeader onback={() => goBack(onWatchPage ? '/videos' : '/')}>
+		{#snippet field()}
+			<SearchField
+				bind:value={$videoSectionQuery}
+				variant="page"
+				placeholder={tab === 'liked' ? 'Search your liked videos' : 'Search TIDAL videos'}
+				ariaLabel={tab === 'liked' ? 'Search your liked videos' : 'Search TIDAL videos'}
+				suppressSuggestions
+			/>
+		{/snippet}
+		{#snippet tabs()}
+			<VideoNavigation current={tab} />
+		{/snippet}
 		{#if tab === 'liked' && query}
 			<p class="scope-note">
 				Filtering your liked videos.
 				<button type="button" class="link-btn" onclick={searchAllOfTidal}>Search all of TIDAL for "{query}"</button>
 			</p>
 		{/if}
-	</header>
+	</CommandHeader>
 
 	{#if searchingTidal}
 		<VideoSearchResults />
@@ -107,32 +103,8 @@
 		margin: 0 auto;
 		display: grid;
 		grid-template-columns: minmax(0, 1fr);
-		gap: 28px;
+		gap: var(--header-gap);
 		padding: 0 4px max(var(--bottom-player-height, 0px), 44px, var(--safe-bottom));
-	}
-
-	.video-header {
-		display: grid;
-		gap: var(--space-4);
-		width: 100%;
-	}
-
-	/* Back sits beside the field instead of on a row of its own, so the field
-	   lands at the same height as on /search. The side columns are equal, which
-	   keeps the field centered on the page. */
-	.search-row {
-		display: grid;
-		grid-template-columns: 1fr minmax(0, 720px) 1fr;
-		align-items: center;
-		gap: var(--space-3);
-	}
-
-	.search-row .back-link {
-		justify-self: start;
-	}
-
-	.search-slot {
-		min-width: 0;
 	}
 
 	.section-body {
@@ -167,10 +139,6 @@
 	@media (max-width: 620px) {
 		.video-section {
 			gap: 20px;
-		}
-
-		.search-row {
-			grid-template-columns: auto minmax(0, 1fr);
 		}
 	}
 </style>
