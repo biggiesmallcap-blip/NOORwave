@@ -14,27 +14,26 @@ back to the PR or commit that flagged it.
 
 `frontend/STYLING.md` now describes the target system and its foundations are
 in `app.css`. `CommandHeader` and `ScopeTabs` are built and mounted on
-Videos; Search, Library and Playlists move their `.filter-pill` rows onto
+Videos and Library; Search and Playlists move their `.filter-pill` rows onto
 them in their route PRs (Videos keeps `--space-4` between field
 and tabs to stay pixel-identical; settle it against the spec's `--space-3`
 when Search moves over). `Segmented` is built and used by the DJ intent and
-speed; Settings, Analytics range and the Library grid/list toggle move onto
-it in their route PRs. `FilterChip` is built and used by Duplicates; the
-Library decade chips move onto it with the Library toolbar. `Dropdown` is
-built and used by the DJ transition style; Library sort and genre move onto
-it with the toolbar. App-wide, Space on any focused button is play/pause
+speed and the Library album layout; Settings and Analytics range move onto
+it in their route PRs. `FilterChip` is built and used by Duplicates and the
+Library decades. `Dropdown` is built and used by the DJ transition style and
+the Library album sort. App-wide, Space on any focused button is play/pause
 (the window shortcut cancels button activation): a product call. `ActionBar`
 is built and used by the album hero, and `DetailHero` is borderless; artist,
 playlist, TIDAL album and Spotify heroes move onto `ActionBar` in their route
 PRs. Global `.btn-secondary` / `.btn-ghost` / `.btn-icon` are still not added
 (local classes with those names in LastfmConnect, Library and the Spotify
 pages would pick up stray properties). Still to build, one PR each: shared
-components (one `TrackRow` anatomy, `ErrorState` and the skeleton delay); route migrations (Library
-toolbar, Search composition and keyboard, artist Stage, shared `AlbumDetail`,
-Playlists, Settings in place, Mix page for Automix + DJ, Home and the remaining
+components (one `TrackRow` anatomy, `ErrorState` and the skeleton delay); route migrations (Search composition and keyboard, artist Stage, shared `AlbumDetail`,
+Playlists, Settings in place, Mix page for Automix + DJ, the remaining
 title-header routes, removing eyebrow-over-title stacks); then motion lint
-warnings and the sub-760px icon rail. Open product calls: Liked as a filter
-chip, Search Enter behaviour, in-app Reduce motion, Home order, nav groups.
+warnings and the sub-760px icon rail. Settled: Songs lists liked songs
+(Settings > Library widens it), in-app Reduce motion, Home order. Open product
+calls: Search Enter behaviour, nav groups.
 Spawned by: design audit 2026-10-08 (artifact 7N4YSfzjpyu98GRLM5X5hF)
 
 ### video stations: phase 2 (decades, oddities, full tag coverage)

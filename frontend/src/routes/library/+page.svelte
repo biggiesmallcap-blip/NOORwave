@@ -22,8 +22,13 @@
 		lastSelectedTrackId, lastSelectedAlbumId,
 		selectTrackIds, selectAlbumIds, clearSelection,
 	} from '$lib/stores/library';
-	import { LIBRARY_TABS, restoreLibraryTab, type LibraryTab } from '$lib/components/library/library_tabs';
+	import { LIBRARY_TABS, restoreLibraryTab, tabCountLabel, viewCountLabel, type LibraryTab } from '$lib/components/library/library_tabs';
 	import { librarySongsScope } from '$lib/stores/library_songs';
+	import CommandHeader from '$lib/components/ui/CommandHeader.svelte';
+	import ScopeTabs from '$lib/components/ui/ScopeTabs.svelte';
+	import Segmented from '$lib/components/ui/Segmented.svelte';
+	import Dropdown from '$lib/components/ui/Dropdown.svelte';
+	import FilterChip from '$lib/components/ui/FilterChip.svelte';
 	import { formatTrackDuration, formatDateShort, savedDateMillis, getQualityClass } from '$lib/utils/format';
 	import { api, type Album, type Artist, type AudioSearchResult, type Genre, type Playlist, type Track } from '$lib/api/client';
 	import { cachedApi, invalidateLibraryCaches } from '$lib/cache/api_queries';
@@ -146,11 +151,38 @@
 	// Songs lists liked songs unless Settings > Library widens it to every
 	// library song (TIDAL and Spotify behave the same way).
 	let likedOnly = $derived($librarySongsScope === 'liked');
-	// Only render the second toolbar row when the tab actually contributes
-	// controls to it, so tabs without any never leave a gap behind.
-	const hasToolbarActions = $derived(
-		activeTab === 'tracks' || activeTab === 'albums'
+
+	// Tab counts come from the list endpoints' totals (there is no counts
+	// endpoint): one-row queries, refreshed when the Songs scope changes and
+	// after deletes. Artists have no total, so their tab shows none.
+	let libraryCounts = $state<{ tracks: number | null; albums: number | null }>({ tracks: null, albums: null });
+
+	async function loadLibraryCounts() {
+		const [songs, albumsRes] = await Promise.allSettled([
+			api.getTracks('date_added', 'desc', 1, 0, true, likedOnly),
+			api.getAlbums('title', 'asc', 1, 0, true, null),
+		]);
+		libraryCounts = {
+			tracks: songs.status === 'fulfilled' ? songs.value.total : null,
+			albums: albumsRes.status === 'fulfilled' ? albumsRes.value.total : null,
+		};
+	}
+
+	let libraryTabs = $derived(
+		LIBRARY_TABS.map((tab) => ({
+			...tab,
+			count: tab.id === 'tracks' ? tabCountLabel(libraryCounts.tracks) : tab.id === 'albums' ? tabCountLabel(libraryCounts.albums) : null,
+		})),
 	);
+	let viewCount = $derived(
+		viewCountLabel(activeTab, activeTab === 'albums' ? $totalAlbums : $totalTracks, likedOnly),
+	);
+
+	$effect(() => {
+		// eslint-disable-next-line @typescript-eslint/no-unused-expressions
+		likedOnly;
+		void loadLibraryCounts();
+	});
 	let playlists = $state<Playlist[]>([]);
 	let genres = $state<Genre[]>([]);
 	let selectedPlaylistId = $state('');
@@ -254,6 +286,11 @@
 		artist: 'Artist',
 		year: 'Year',
 	};
+	const ALBUM_SORT_OPTIONS = (['title', 'artist', 'year'] as const).map((value) => ({ value, label: ALBUM_SORT_LABELS[value] }));
+	const ALBUM_LAYOUT_OPTIONS = [
+		{ value: 'grid', label: 'Grid' },
+		{ value: 'list', label: 'List' },
+	] as const;
 
 	// Track detail panel
 	let expandedTrackId = $state<number | null>(null);
@@ -857,6 +894,7 @@
 		try {
 			const result = await api.batchDelete([...removedTrackIds], [...removedAlbumIds]);
 			invalidateLibraryCaches();
+			void loadLibraryCounts();
 			clearSelection();
 			const parts: string[] = [];
 			if (result.removed_tracks) parts.push(`${result.removed_tracks} track${result.removed_tracks === 1 ? '' : 's'}`);
@@ -895,6 +933,7 @@
 			invalidateLibraryCaches();
 			if (undoTracks.length) await loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, likedOnly);
 			if (undoAlbums.length) await loadAlbums(albumSortField, albumSortDir, PAGE_SIZE, 0, activeDecade);
+			void loadLibraryCounts();
 			const count = undoTracks.length + undoAlbums.length;
 			batchMessage = `Restored ${count} item${count === 1 ? '' : 's'} to your library.`;
 		} catch (error) {
@@ -1608,107 +1647,62 @@
 }} />
 
 <div class="page-shell library">
-	<div class="library-search-shell">
-		<SearchField
-			bind:value={$searchQuery}
-			variant="page"
-			inlineCompletion
-			filterChips
-			placeholder={activeTab === 'albums' ? 'Search albums or artists' : 'Search tracks, albums, or artists'}
-		/>
-		<div class="filter-pills">
-			<div class="filter-pill-group filter-pill-group--primary">
-				{#each LIBRARY_TABS as tab (tab.id)}
-					<button class="filter-pill" class:active={activeTab === tab.id} onclick={() => switchTab(tab.id)}>{tab.label}</button>
-				{/each}
-				<button class="filter-pill" onclick={() => void playRandomLibrary()} title="Random play">
-					<span class="pill-glyph" aria-hidden="true">⤮</span>Random
-				</button>
-			</div>
-
-			{#if hasToolbarActions}
-			<div class="filter-pill-actions">
-				{#if activeTab === 'tracks'}
-					<div class="play-controls" role="group" aria-label="Play this view">
-						<button class="filter-pill filter-pill--accent" onclick={() => void playTrackView(false)} title="Play this view">
-							<span class="pill-glyph" aria-hidden="true">▶</span>Play
-						</button>
-						<button class="filter-pill" onclick={() => void playTrackView(true)} title="Shuffle this view">
-							<span class="pill-glyph" aria-hidden="true">⤮</span>Shuffle
-						</button>
-					</div>
-				{/if}
-				{#if activeTab === 'albums'}
-					<div class="album-sort" role="group" aria-label="Sort albums">
-						<span class="album-sort-label">Sort</span>
-						{#each (['title', 'artist', 'year'] as const) as field (field)}
-							<button
-								class="album-sort-btn"
-								class:active={albumSortField === field}
-								onclick={() => setAlbumSort(field)}
-								aria-pressed={albumSortField === field}
-								title="Sort by {ALBUM_SORT_LABELS[field]}{albumSortField === field ? (albumSortDir === 'asc' ? ' (ascending)' : ' (descending)') : ''}"
-							>
-								{ALBUM_SORT_LABELS[field]}{#if albumSortField === field}<span class="album-sort-arrow">{albumSortDir === 'asc' ? '↑' : '↓'}</span>{/if}
+	<CommandHeader>
+		{#snippet field()}
+			<SearchField
+				bind:value={$searchQuery}
+				variant="page"
+				inlineCompletion
+				filterChips
+				placeholder={activeTab === 'albums' ? 'Search albums or artists' : 'Search tracks, albums, or artists'}
+			/>
+		{/snippet}
+		{#snippet tabs()}
+			<ScopeTabs tabs={libraryTabs} current={activeTab} label="Library views" onselect={(id) => switchTab(id as LibraryTab)} />
+		{/snippet}
+		{#snippet toolbar()}
+			<div class="library-toolbar">
+				<div class="toolbar-start">
+					{#if searchBusy}
+						<span class="t-meta">Searching...</span>
+					{:else if isSearchMode}
+						<span class="t-meta">{searchSummary}</span>
+						{#if searchTruncated && (activeTab === 'tracks' || activeTab === 'all')}
+							<button type="button" class="toolbar-link" disabled={searchLoadingMore} onclick={() => void loadMoreSearchResults()}>
+								{searchLoadingMore ? 'Loading...' : 'Show more'}
 							</button>
-						{/each}
-					</div>
-					<div class="view-toggle" role="group" aria-label="Album view layout">
+						{/if}
+						<button type="button" class="toolbar-link" onclick={() => searchQuery.set('')}>Clear</button>
+					{:else}
+						{#if viewCount}<span class="t-meta view-count">{viewCount}</span>{/if}
+						{#if activeTab === 'albums' && decadeOptions.length > 0}
+							{#each decadeOptions as decade (decade)}
+								<FilterChip pressed={activeDecade === decade} onclick={() => selectDecade(decade)}>{decade}s</FilterChip>
+							{/each}
+						{/if}
+					{/if}
+				</div>
+				<div class="toolbar-end">
+					{#if activeTab === 'tracks'}
+						<button type="button" class="btn btn-primary" onclick={() => void playTrackView(false)}>Play</button>
+						<button type="button" class="btn btn-glass" onclick={() => void playTrackView(true)}>Shuffle</button>
+					{:else if activeTab === 'albums'}
+						<Dropdown label="Sort albums" options={ALBUM_SORT_OPTIONS} value={albumSortField} onchange={(field) => setAlbumSort(field)} />
 						<button
-							class="view-toggle-btn"
-							class:active={$viewMode === 'grid'}
-							onclick={() => viewMode.set('grid')}
-							aria-pressed={$viewMode === 'grid'}
-							aria-label="Grid view"
-							title="Grid view"
-						>
-							<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-								<rect x="2" y="2" width="5" height="5" rx="1"/>
-								<rect x="9" y="2" width="5" height="5" rx="1"/>
-								<rect x="2" y="9" width="5" height="5" rx="1"/>
-								<rect x="9" y="9" width="5" height="5" rx="1"/>
-							</svg>
-						</button>
-						<button
-							class="view-toggle-btn"
-							class:active={$viewMode === 'list'}
-							onclick={() => viewMode.set('list')}
-							aria-pressed={$viewMode === 'list'}
-							aria-label="List view"
-							title="List view"
-						>
-							<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-								<line x1="3" y1="4" x2="13" y2="4"/>
-								<line x1="3" y1="8" x2="13" y2="8"/>
-								<line x1="3" y1="12" x2="13" y2="12"/>
-							</svg>
-						</button>
-					</div>
-				{/if}
+							type="button"
+							class="btn btn-glass sort-dir"
+							aria-label={albumSortDir === 'asc' ? 'Ascending, switch to descending' : 'Descending, switch to ascending'}
+							title={albumSortDir === 'asc' ? 'Ascending' : 'Descending'}
+							onclick={() => setAlbumSort(albumSortField)}
+						>{albumSortDir === 'asc' ? 'A-Z' : 'Z-A'}</button>
+						<Segmented label="Album layout" options={ALBUM_LAYOUT_OPTIONS} value={$viewMode} onchange={(mode) => viewMode.set(mode)} />
+					{:else}
+						<button type="button" class="btn btn-glass" onclick={() => void playRandomLibrary()}>Random</button>
+					{/if}
+				</div>
 			</div>
-			{/if}
-		</div>
-
-		{#if searchBusy || isSearchMode}
-		<div class="library-search-meta">
-			{#if searchBusy}
-				<span class="library-status">Searching…</span>
-			{:else if isSearchMode}
-				<span class="library-status">{searchSummary}</span>
-				{#if searchTruncated && (activeTab === 'tracks' || activeTab === 'all')}
-					<button
-						class="filter-pill"
-						disabled={searchLoadingMore}
-						onclick={() => void loadMoreSearchResults()}
-					>
-						{searchLoadingMore ? 'Loading…' : 'Show more'}
-					</button>
-				{/if}
-				<button class="filter-pill" onclick={() => (searchQuery.set(''))}>Clear</button>
-			{/if}
-		</div>
-		{/if}
-	</div>
+		{/snippet}
+	</CommandHeader>
 
 
 	{#if searchError}
@@ -2065,18 +2059,6 @@
 		</div>
 
 	{:else if activeTab === 'albums'}
-		{#if decadeOptions.length > 1}
-			<div class="decade-strip">
-				<button class="decade-chip" class:active={activeDecade === null} onclick={() => selectDecade(null)}>All</button>
-				{#each decadeOptions as decade (decade)}
-					<button
-						class="decade-chip"
-						class:active={activeDecade === decade}
-						onclick={() => selectDecade(decade)}
-					>{decade}s</button>
-				{/each}
-			</div>
-		{/if}
 		<!-- Skeleton grid while the first page loads, so we never flash an empty state -->
 		{#if $isLoading && visibleAlbums.length === 0 && !isSearchMode}
 			<div class="album-grid" aria-hidden="true">
@@ -2677,7 +2659,9 @@
 	   the view toggle and the decade chips - sizes off the app-wide
 	   --control-h token in app.css, so the rows under the search field read as
 	   one system and match the other pages' pill rows. */
+	/* The header-to-content gap matches Videos (STYLING.md "Command header"). */
 	.library {
+		gap: var(--header-gap);
 		padding-bottom: 8px;
 	}
 
@@ -2955,39 +2939,6 @@
 		border-color: rgba(124, 128, 255, 0.22);
 	}
 
-	.decade-strip {
-		display: flex;
-		gap: 6px;
-		flex-wrap: wrap;
-		margin-bottom: 16px;
-	}
-	/* Match the primary tab pills (.filter-pill) so the Albums toolbar reads as
-	   one system - pill radius, subtle border, bg-hover, accent when active. */
-	.decade-chip {
-		display: inline-flex;
-		align-items: center;
-		height: var(--control-h);
-		padding: 0 14px;
-		border-radius: 999px;
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-medium);
-		cursor: pointer;
-		border: 1px solid var(--border-subtle);
-		background: transparent;
-		color: var(--text-secondary);
-		font-family: inherit;
-		transition: background 0.15s, color 0.15s, border-color 0.15s;
-	}
-	.decade-chip:hover {
-		background: var(--bg-hover);
-		color: var(--text-primary);
-	}
-	.decade-chip.active {
-		background: var(--accent);
-		border-color: var(--accent);
-		color: var(--text-on-accent);
-	}
-
 	.library-hero-subtitle {
 		max-width: 48ch;
 		color: var(--text-secondary);
@@ -3012,30 +2963,6 @@
 	.library-stat-chip.emphasis {
 		color: var(--text-primary);
 		background: rgba(255, 255, 255, 0.06);
-	}
-
-	/* ─── Toolbar ───────────────────────── */
-
-	.library-toolbar {
-		display: grid;
-		grid-template-columns: minmax(220px, 420px) 1fr;
-		gap: var(--gap);
-		align-items: center;
-		padding: 12px 14px;
-		margin-bottom: var(--gap);
-	}
-
-	.toolbar-meta {
-		display: flex;
-		align-items: center;
-		justify-content: flex-end;
-		gap: 10px;
-		flex-wrap: wrap;
-	}
-
-	.toolbar-note {
-		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
 	}
 
 	/* ─── New DSP Columns ───────────────────────── */
@@ -3124,199 +3051,39 @@
 		vertical-align: middle;
 	}
 
-	.library-search-shell {
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
-		width: 100%;
-		max-width: var(--content-width);
-		/* No bottom margin: the page-shell gap is the only space between the
-		   search header and the content. Stacking a margin, a reserved status row
-		   and a top padding on top of it opened a 98px hole on the landing. */
-		margin: 0 auto;
-		padding: 0 4px;
-	}
-
-	.library-status {
-		font-size: var(--font-size-xs);
-		color: var(--text-muted, rgba(255,255,255,0.4));
-	}
-
-	.library-search-meta {
-		min-height: 28px;
+	.library-toolbar {
 		display: flex;
 		align-items: center;
-		justify-content: center;
-		gap: 8px;
-		width: 100%;
-		max-width: 720px;
-		margin: -4px auto 0;
-		text-align: center;
-	}
-
-	/* Two centered rows: the category tabs never move, and whatever the tab
-	   brings with it (play controls, sort, view layout) sits on its own row
-	   underneath so nothing overflows sideways or drifts off the baseline. */
-	.filter-pills {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 8px;
-		width: 100%;
-		max-width: 720px;
-		margin: 0 auto;
-	}
-
-	.filter-pill-group,
-	.filter-pill-actions {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		gap: 6px;
+		justify-content: space-between;
+		gap: var(--space-2) var(--space-3);
 		flex-wrap: wrap;
-		max-width: 100%;
+		width: 100%;
 	}
 
-	.play-controls {
-		display: inline-flex;
+	.toolbar-start,
+	.toolbar-end {
+		display: flex;
 		align-items: center;
-		gap: 6px;
+		gap: var(--space-2);
+		flex-wrap: wrap;
+		min-width: 0;
 	}
 
-	.filter-pill--accent {
-		background: var(--accent);
-		border-color: var(--accent);
-		color: var(--text-on-accent);
+	.view-count {
+		margin-right: var(--space-2);
+		font-variant-numeric: tabular-nums;
 	}
 
-	.filter-pill--accent:hover {
-		background: var(--accent);
-		filter: brightness(1.08);
-		color: var(--text-on-accent);
-	}
-
-	.filter-pill {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		gap: 6px;
-		height: var(--control-h);
-		padding: 0 14px;
-		border-radius: 999px;
-		border: 1px solid var(--border-subtle, rgba(255,255,255,0.1));
-		background: transparent;
-		color: var(--text-secondary, rgba(255,255,255,0.6));
-		font-family: inherit;
+	.toolbar-link {
+		all: unset;
+		color: var(--text-secondary);
 		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-medium);
+		font-weight: var(--font-weight-semibold);
 		cursor: pointer;
-		transition: background 0.15s, color 0.15s, border-color 0.15s;
-		white-space: nowrap;
 	}
 
-	.pill-glyph {
-		font-size: var(--font-size-xs);
-		line-height: 1;
-	}
-
-	.filter-pill:hover {
-		background: var(--bg-hover);
-		color: var(--text-primary, #fff);
-	}
-
-	.filter-pill.active {
-		background: var(--accent);
-		border-color: var(--accent);
-		color: var(--text-on-accent);
-	}
-
-	.album-sort {
-		display: inline-flex;
-		align-items: center;
-		gap: 2px;
-		height: var(--control-h);
-		padding: 0 2px;
-		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid var(--border-subtle);
-	}
-
-	.album-sort-label {
-		font-size: var(--font-size-2xs);
-		text-transform: uppercase;
-		letter-spacing: 0.06em;
-		color: var(--text-tertiary);
-		padding: 0 6px 0 10px;
-	}
-
-	.album-sort-btn {
-		display: inline-flex;
-		align-items: center;
-		gap: 3px;
-		height: calc(var(--control-h) - 6px);
-		padding: 0 10px;
-		border: 0;
-		border-radius: 999px;
-		background: transparent;
-		color: var(--text-tertiary);
-		font-family: inherit;
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-medium);
-		cursor: pointer;
-		transition: background 140ms ease, color 140ms ease;
-	}
-
-	.album-sort-btn:hover {
-		color: var(--text-primary);
-		background: rgba(255, 255, 255, 0.06);
-	}
-
-	.album-sort-btn.active {
-		background: var(--accent-soft);
-		color: var(--text-primary);
-	}
-
-	.album-sort-arrow {
-		font-size: var(--font-size-2xs);
-		color: var(--accent);
-		line-height: 1;
-	}
-
-	.view-toggle {
-		display: inline-flex;
-		align-items: center;
-		gap: 2px;
-		height: var(--control-h);
-		padding: 0 2px;
-		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid var(--border-subtle);
-	}
-
-	.view-toggle-btn {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		width: calc(var(--control-h) - 6px);
-		height: calc(var(--control-h) - 6px);
-		padding: 0;
-		border: 0;
-		border-radius: 999px;
-		background: transparent;
-		color: var(--text-tertiary);
-		cursor: pointer;
-		transition: background 140ms ease, color 140ms ease;
-	}
-
-	.view-toggle-btn:hover {
-		color: var(--text-primary);
-		background: rgba(255, 255, 255, 0.06);
-	}
-
-	.view-toggle-btn.active {
-		background: var(--accent-soft);
-		color: var(--accent);
-	}
+	.toolbar-link:hover { color: var(--text-primary); }
+	.toolbar-link:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
 
 	/* ─── Batch Bar ─────────────────────── */
 
@@ -3621,13 +3388,6 @@
 			flex-direction: column;
 		}
 
-		.library-toolbar {
-			grid-template-columns: 1fr;
-		}
-
-		.toolbar-meta {
-			justify-content: flex-start;
-		}
 
 		.detail-album-hero,
 		.detail-track-hero {
@@ -3666,16 +3426,6 @@
 		.library-hero-actions {
 			width: 100%;
 			justify-content: flex-start;
-		}
-
-		.filter-pills,
-		.filter-pill-group--primary,
-		.filter-pill-actions {
-			width: 100%;
-		}
-
-		.filter-pill {
-			flex: 1;
 		}
 
 		.batch-select {
