@@ -822,7 +822,6 @@
 				>
 					Library only
 				</button>
-				<a class="dock-link" href="/tidal/genres">TIDAL genres</a>
 			</div>
 
 			{#if selectedSeedIds.length > 0}
@@ -1056,7 +1055,6 @@
 
 	.mode-btn,
 	.dock-btn,
-	.dock-link,
 	.seed-chip {
 		padding: 8px 12px;
 		border-radius: 999px;
@@ -1078,7 +1076,6 @@
 
 	.mode-btn.active,
 	.dock-btn.active,
-	.dock-link,
 	.seed-chip {
 		background: color-mix(in srgb, var(--accent-soft) 78%, var(--instrument-surface));
 		border-color: color-mix(in srgb, var(--accent-line) 92%, transparent);
@@ -1088,15 +1085,8 @@
 
 	.mode-btn:hover,
 	.dock-btn:hover,
-	.dock-link:hover,
 	.seed-chip:hover {
 		transform: translateY(-1px);
-	}
-
-	.dock-link {
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-		text-decoration: none;
 	}
 
 	.control-dock {

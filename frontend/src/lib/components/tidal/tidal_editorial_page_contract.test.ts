@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
@@ -42,12 +42,13 @@ describe('TIDAL editorial page routes', () => {
 	test('does not replace existing genres or videos workflows', () => {
 		expect(routeSource('genres')).toContain('GenreGalaxy');
 		expect(routeSource('videos')).toContain('VideoCard');
-		expect(routeSource('genres')).toContain('href="/tidal/genres"');
+		expect(routeSource('genres')).not.toContain('/tidal/genres');
 		expect(routeSource('videos')).toContain('<VideoNavigation current="videos"');
 	});
 
 	test('wires colliding TIDAL editorial pages under the tidal namespace', () => {
-		expect(routeSource('tidal/genres')).toContain('pagePath="genres"');
+		// TIDAL genres had no entry point besides the removed galaxy dock link.
+		expect(existsSync(join(routesRoot, 'tidal', 'genres', '+page.svelte'))).toBe(false);
 		expect(routeSource('tidal/videos')).toContain('pagePath="videos"');
 	});
 });
