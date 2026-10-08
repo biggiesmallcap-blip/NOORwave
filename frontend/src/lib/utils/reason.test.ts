@@ -31,6 +31,11 @@ describe('parseReason', () => {
 		expect(r?.affinity_mult).toBe(1.1);
 	});
 
+	it('drops every JSON segment, wherever it sits', () => {
+		const r = parseReason('automix: audio texture | {"score":0.68} | dj: hub penalty | {"dj_score":0.85}');
+		expect(r?.prefix).toBe('automix: audio texture; dj: hub penalty');
+	});
+
 	it('drops a malformed or truncated JSON tail and keeps the prefix', () => {
 		const r = parseReason('Genre match | {bad json');
 		expect(r?.prefix).toBe('Genre match');

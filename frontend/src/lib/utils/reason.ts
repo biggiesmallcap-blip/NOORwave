@@ -37,26 +37,27 @@ export function parseReason(raw: string | null | undefined): ReasonBreakdown | n
 	const trimmed = raw.trim();
 	if (!trimmed) return null;
 
-	// Reasons are ' | '-joined segments: human text, at most one JSON object
-	// of scores, and sometimes more human text after it ("automix: audio
-	// texture | {...} | dj: hub penalty"). The JSON is never for display.
+	// Reasons are ' | '-joined segments: human text and JSON score objects,
+	// in any order ("automix: audio texture | {...} | dj: hub penalty |
+	// {"dj_score":...}"). The JSON is never for display.
 	const segments = trimmed.split(SEPARATOR).map((segment) => segment.trim()).filter(Boolean);
-	const jsonIndex = segments.findIndex((segment) => segment.startsWith('{'));
-	const human = segments.filter((_, index) => index !== jsonIndex).join('; ');
+	const isJson = (segment: string) => segment.startsWith('{');
+	const human = segments.filter((segment) => !isJson(segment)).join('; ');
 	const out: ReasonBreakdown = { prefix: human || trimmed };
-	if (jsonIndex < 0) return out;
 
-	try {
-		const parsed = JSON.parse(segments[jsonIndex]) as Partial<ReasonBreakdown>;
-		if (typeof parsed.genre_jaccard === 'number' && Number.isFinite(parsed.genre_jaccard)) {
-			out.genre_jaccard = parsed.genre_jaccard;
+	for (const segment of segments.filter(isJson)) {
+		try {
+			const parsed = JSON.parse(segment) as Partial<ReasonBreakdown>;
+			if (typeof parsed.genre_jaccard === 'number' && Number.isFinite(parsed.genre_jaccard)) {
+				out.genre_jaccard ??= parsed.genre_jaccard;
+			}
+			if (typeof parsed.affinity_mult === 'number' && Number.isFinite(parsed.affinity_mult)) {
+				out.affinity_mult ??= parsed.affinity_mult;
+			}
+		} catch {
+			// Malformed or truncated JSON (the server caps reason length):
+			// the human segments are still the reason.
 		}
-		if (typeof parsed.affinity_mult === 'number' && Number.isFinite(parsed.affinity_mult)) {
-			out.affinity_mult = parsed.affinity_mult;
-		}
-	} catch {
-		// Malformed or truncated JSON (the server caps reason length): the
-		// human segments are still the reason.
 	}
 	return out;
 }

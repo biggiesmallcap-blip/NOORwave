@@ -287,10 +287,7 @@
 
 	<section class="queue-lab">
 		<div class="card-heading">
-			<div>
-				<h2 class="t-section">Up next</h2>
-			</div>
-			<StateBadge label={`${queueUpcoming.slice(0, INDICATOR_WINDOW).length} visible`} tone="default" compact={true} />
+			<h2 class="t-section">Up next <span class="heading-count">{queueUpcoming.length}</span></h2>
 		</div>
 
 		<!-- The player panel used to carry this legend as permanent chrome. It
@@ -319,7 +316,7 @@
 						/>
 						<div class="queue-meta">
 							<strong>{row.item.track.title}</strong>
-							<span>{row.item.track.artist_name ?? 'Unknown artist'}</span>
+							<span>{row.item.track.artist_name ?? 'Unknown artist'} &middot; {row.sourceLabel}</span>
 						</div>
 						<div class="forecast-diagnostics">
 							{#if row.nextFeatures}<span>{formatFeatureSummary(row.nextFeatures)}</span>{/if}
@@ -340,7 +337,6 @@
 								<span>{row.energyDeltaLabel}</span>
 							{/if}
 						</div>
-						<StateBadge label={row.sourceLabel} tone={row.isExternalPending ? 'default' : 'active'} compact={true} />
 						<div class="forecast-actions">
 							<button
 								class="forecast-action icon"
@@ -696,8 +692,7 @@
 		gap: var(--space-2);
 	}
 
-	.health-reasons span,
-	.forecast-action {
+	.health-reasons span {
 		border: 1px solid var(--border-subtle);
 		background: rgba(255, 255, 255, 0.035);
 	}
@@ -713,6 +708,13 @@
 	.data-card {
 		display: grid;
 		gap: var(--space-1);
+	}
+
+	.heading-count {
+		margin-left: var(--space-1);
+		color: var(--text-tertiary);
+		font-weight: var(--font-weight-medium);
+		font-variant-numeric: tabular-nums;
 	}
 
 	.card-heading {
@@ -743,7 +745,7 @@
 
 	.forecast-row {
 		display: grid;
-		grid-template-columns: 2.125rem clamp(2.25rem, 3vw, 2.75rem) minmax(0, 1fr) minmax(14rem, 0.85fr) auto auto;
+		grid-template-columns: 2.125rem clamp(2.25rem, 3vw, 2.75rem) minmax(0, 1fr) minmax(14rem, 0.85fr) auto;
 		align-items: center;
 		gap: var(--space-3);
 		padding: var(--space-2);
@@ -859,10 +861,19 @@
 	.forecast-actions {
 		display: flex;
 		gap: var(--space-1);
+		opacity: 0;
+		transition: opacity var(--motion-fast);
+	}
+
+	.forecast-row:hover .forecast-actions,
+	.forecast-row:focus-within .forecast-actions {
+		opacity: 1;
 	}
 
 	.forecast-action {
 		padding: var(--space-1);
+		border: 0;
+		background: transparent;
 		border-radius: 999px;
 		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
@@ -883,13 +894,11 @@
 	}
 
 	.forecast-action:hover:not(:disabled) {
-		border-color: var(--accent-line);
-		background: var(--accent-soft);
+		background: var(--bg-hover);
 		color: var(--text-primary);
 	}
 
 	.forecast-action.danger:hover:not(:disabled) {
-		border-color: color-mix(in srgb, var(--state-error) 45%, transparent);
 		color: var(--state-error);
 	}
 
