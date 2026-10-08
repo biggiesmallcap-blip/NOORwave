@@ -38,11 +38,13 @@ Spawned by: design audit 2026-10-08 (artifact 7N4YSfzjpyu98GRLM5X5hF)
 
 - Source: video radio audit, 2026-10-07. The crawler now supplies relevance,
   popularity, watch time and skips; selection still uses fixed lane slots.
+  Skips are handled since 2026-10-09 (skipped once sinks, twice is left
+  out); the rest below is open.
 - Affected: `noor-server/src/services/video_radio.rs` (`select_seeded_batch`,
   `select_batch`).
 - Why it matters: the seed artist takes about half of each batch, non-music
-  clips (commentary, interviews, trailers, under 90 s) are not filtered, the
-  best cut of a song is not preferred, and skips do not demote videos.
+  clips (commentary, interviews, trailers, under 90 s) are not filtered, and
+  the best cut of a song is not preferred.
 - Spawned by: branch `bsc/video-radio-audit-c7af6d` (video discovery crawler).
 
 ### tests: stabilize relative-date checks across daylight saving changes
@@ -66,9 +68,6 @@ Spawned by: design audit 2026-10-08 (artifact 7N4YSfzjpyu98GRLM5X5hF)
 Shipped so far: daily-picks mural, genre shelves, album-love, one-step-out
 adjacency, long-form sets, folded TIDAL editorial, browse-while-playing.
 Still open:
-- video_history table written from VideoDock play/ended events; feeds
-  exclude-recently-watched in the set builder and, later, video rows into
-  TasteVector artist affinity.
 - Forgotten-favorites shelf (high historical plays, no recent listens) - the
   one archetype the listen history supports that nothing else surfaces.
 - Parse releaseDate in parse_search_video (the raw payload carries it) to
