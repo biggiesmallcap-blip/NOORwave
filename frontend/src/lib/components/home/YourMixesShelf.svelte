@@ -166,7 +166,7 @@
 
 {#if kind === 'music'}
 <section class="discovery-section rise-in-shelf" data-section="your-mixes" style={`--rise-index: ${index}`}>
-	<SectionHeader eyebrow="TIDAL" title="Music Mixes" variant="charts" level={2}>
+	<SectionHeader title="Music Mixes" variant="charts" level={2}>
 		{#snippet actions()}
 			{#if viewState === 'loading' || refreshing}
 				<span class="loading-indicator">Loading…</span>
@@ -196,7 +196,7 @@
 
 {#if kind === 'video' && viewState === 'ready' && videoMixes.length > 0}
 	<section class="discovery-section rise-in-shelf" data-section="your-video-mixes" style={`--rise-index: ${index}`}>
-		<SectionHeader eyebrow="TIDAL" title="Video Mixes" variant="charts" level={2} />
+		<SectionHeader title="Video Mixes" variant="charts" level={2} />
 		{@render mixRail(videoMixes)}
 	</section>
 {/if}

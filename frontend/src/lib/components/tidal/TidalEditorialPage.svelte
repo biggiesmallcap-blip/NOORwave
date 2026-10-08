@@ -10,7 +10,6 @@
 
 	type Props = {
 		pagePath: string;
-		eyebrow?: string;
 		title: string;
 		subtitle: string;
 		emptyText?: string;
@@ -27,7 +26,6 @@
 
 	let {
 		pagePath,
-		eyebrow = 'TIDAL',
 		title,
 		subtitle,
 		emptyText = 'TIDAL returned no editorial modules right now.',
@@ -111,7 +109,7 @@
 	{#if !embedded}
 		<button class="back-link" type="button" onclick={() => goBack(backFallback)}>Back</button>
 	{/if}
-	<PageHeader {eyebrow} {title} {subtitle} variant="editorial" />
+	<PageHeader {title} {subtitle} variant="editorial" />
 
 	{#if viewState === 'loading'}
 		<p class="muted-line">Loading {title}...</p>

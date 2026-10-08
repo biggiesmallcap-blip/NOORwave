@@ -129,7 +129,7 @@
 </script>
 
 <div class="analytics-tree" class:dim={windowChanging}>
-	<PageHeader title="Library analytics" eyebrow="Analytics">
+	<PageHeader title="Library analytics">
 		{#snippet actions()}
 			<TimeRangePills bind:value={range} />
 			<button

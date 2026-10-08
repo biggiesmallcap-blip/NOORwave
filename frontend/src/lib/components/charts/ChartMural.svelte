@@ -27,7 +27,6 @@
 		items?: ChartMuralItem[];
 		currentIndex?: number;
 		ariaLabel: string;
-		kindLabel: string;
 		title: string;
 		subtitle: string;
 		metric?: string;
@@ -49,7 +48,6 @@
 		items = [],
 		currentIndex = 0,
 		ariaLabel,
-		kindLabel,
 		title,
 		subtitle,
 		metric = '',
@@ -134,7 +132,6 @@
 		<div class="chart-mural-shade"></div>
 		<div class="chart-mural-content">
 			<div class="chart-mural-meta">
-				<span class="chart-mural-kind">{kindLabel}</span>
 				<h3 class="chart-mural-title">{title}</h3>
 				<p class="chart-mural-sub">{subtitle}</p>
 				<div class="chart-mural-actions">
@@ -388,14 +385,6 @@
 		/* Text sits over a dark-scrimmed art collage, so it stays light in both
 		 * themes and leans on a strong shadow to read over bright album tiles. */
 		text-shadow: 0 2px 16px rgba(0,0,0,0.8), 0 1px 4px rgba(0,0,0,0.6);
-	}
-
-	.chart-mural-kind {
-		color: var(--chart-mural-accent);
-		font-size: var(--font-size-2xs);
-		font-weight: var(--font-weight-semibold);
-		letter-spacing: 0;
-		text-transform: uppercase;
 	}
 
 	.chart-mural-title {

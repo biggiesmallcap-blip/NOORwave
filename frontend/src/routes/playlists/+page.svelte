@@ -1179,7 +1179,6 @@
 
 <div class="page-shell playlists-page animate-in">
 	<PageHeader
-		eyebrow="Playlists"
 		title="Playlists"
 		subtitle="Synced lists and rules-based smart sets."
 	>

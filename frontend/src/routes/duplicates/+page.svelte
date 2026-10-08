@@ -255,7 +255,6 @@
 
 <div class="page-shell duplicates-page animate-in">
 	<PageHeader
-		eyebrow="Duplicates"
 		title="Duplicate review"
 		subtitle="Compare versions, keep the best copy, or dismiss the match."
 	>

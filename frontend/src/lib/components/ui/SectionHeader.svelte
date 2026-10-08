@@ -1,10 +1,11 @@
 <script lang="ts">
+	// A section gets a title, never an eyebrow over it (STYLING.md "Typography").
+	// Where the source matters, say it once in the subtitle.
 	import type { Snippet } from 'svelte';
 
 	let {
 		title,
 		subtitle = '',
-		eyebrow = '',
 		variant = 'default',
 		level = 3,
 		href = '',
@@ -13,7 +14,6 @@
 	}: {
 		title: string;
 		subtitle?: string;
-		eyebrow?: string;
 		variant?: 'default' | 'charts';
 		level?: 2 | 3;
 		/** Route this section is a preview of. Renders a trailing link, which is
@@ -26,9 +26,6 @@
 
 <div class="section-header" class:charts={variant === 'charts'}>
 	<div class="copy">
-		{#if eyebrow}
-			<p class="eyebrow t-label">{eyebrow}</p>
-		{/if}
 		{#if level === 2}
 			<h2 class="title t-section">{title}</h2>
 		{:else}
@@ -82,13 +79,7 @@
 		gap: var(--space-1);
 	}
 
-	/* Both variants share the label and section-title roles; charts only
-	   tightens the metrics for its denser header. */
-	.section-header.charts .eyebrow {
-		margin: 0;
-		line-height: 1;
-	}
-
+	/* Charts only tightens the metrics for its denser header. */
 	.section-header.charts .title {
 		color: var(--text-primary);
 		line-height: var(--line-height-tight);

@@ -177,7 +177,6 @@
 {#if categories.length > 0 || loading}
 	<section bind:this={sectionEl} class="moods-rail rise-in-shelf" data-section="moods" style={`--rise-index: ${index}`}>
 		<SectionHeader
-			eyebrow="TIDAL"
 			title="Moods & Activities"
 			variant="charts"
 			level={2}

@@ -338,7 +338,7 @@
 </script>
 
 <section class="daily-chart-shelf">
-	<SectionHeader eyebrow="Charts - Provider matrix" title="Market pulse" variant="charts" level={2}>
+	<SectionHeader title="Market pulse" variant="charts" level={2}>
 		{#snippet actions()}
 		<div class="region-tabs" role="tablist" aria-label="Daily chart region">
 			{#each REGIONS as region (region.code)}
@@ -379,7 +379,6 @@
 			items={muralItems}
 			currentIndex={currentEntryIndex}
 			ariaLabel={`${selectedProviderLabel()} ${selectedRegionLabel()} top ${chartEntries.length}`}
-			kindLabel={`${selectedProviderLabel()} top ${chartEntries.length} - ${selectedRegionLabel()}`}
 			title={currentEntry.title}
 			subtitle={entrySubtitle(currentEntry)}
 			metric={entryMetric(currentEntry)}
@@ -404,7 +403,6 @@
 			items={[]}
 			currentIndex={0}
 			ariaLabel="Loading market pulse"
-			kindLabel=""
 			title=""
 			subtitle=""
 			loading

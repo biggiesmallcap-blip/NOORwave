@@ -1,17 +1,16 @@
 <script lang="ts">
+	// The title header (STYLING.md "Page frames"): one title, no eyebrow over it.
 	import type { Snippet } from 'svelte';
 
 	let {
 		title,
 		subtitle = '',
-		eyebrow = '',
 		variant = 'default',
 		actions,
 		meta
 	}: {
 		title: string;
 		subtitle?: string;
-		eyebrow?: string;
 		variant?: 'default' | 'editorial';
 		actions?: Snippet;
 		meta?: Snippet;
@@ -20,9 +19,6 @@
 
 <header class="page-header" class:editorial={variant === 'editorial'}>
 	<div class="intro">
-		{#if eyebrow}
-			<p class="t-label">{eyebrow}</p>
-		{/if}
 		<h1 class="t-page-title">{title}</h1>
 		{#if subtitle}
 			<p class="subtitle">{subtitle}</p>

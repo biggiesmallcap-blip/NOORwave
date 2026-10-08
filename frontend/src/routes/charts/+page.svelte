@@ -93,7 +93,6 @@
 
 <div class="page">
   <PageHeader
-    eyebrow="Charts"
     title="What's hot"
     subtitle="Worldwide trending tracks from Last.fm and editorial Spotify chart playlists."
     variant="editorial"
@@ -108,7 +107,6 @@
   </section>
 
   <SectionHeader
-    eyebrow="Spotify playlists"
     title="Chart playlists"
     subtitle="Click any to play on TIDAL."
     variant="charts"

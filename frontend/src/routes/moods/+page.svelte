@@ -124,7 +124,6 @@
 
 <div class="page">
   <PageHeader
-    eyebrow="TIDAL"
     title="Moods & Activities"
     subtitle="Editorial categories from TIDAL. Click a tile to explore."
     variant="editorial"

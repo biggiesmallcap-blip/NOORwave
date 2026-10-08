@@ -423,8 +423,8 @@
 				/>
 			</div>
 			<div class="seed-copy">
-				<p class="eyebrow">Current seed</p>
-				<h2>{$currentTrack?.title ?? 'No active track'}</h2>
+				<h3>Current seed</h3>
+				<p class="seed-title">{$currentTrack?.title ?? 'No active track'}</p>
 				<p>{$currentTrack?.artist_name ?? 'Start playback to seed Automix.'}</p>
 				<div class="signal-strip">
 					<span>{currentFeatureSummary}</span>
@@ -457,8 +457,7 @@
 		<div class="health-panel glass-panel">
 			<div class="card-heading">
 				<div>
-					<p class="eyebrow">Health</p>
-					<h3>{health.label}</h3>
+					<h3>Health</h3>
 				</div>
 				<StateBadge
 					label={health.label}
@@ -617,16 +616,20 @@
 		gap: var(--space-2);
 	}
 
-	.seed-copy h2 {
-		font-family: var(--font-body);
-		font-size: var(--font-size-3xl);
-		font-weight: var(--font-weight-bold);
+	.seed-copy h3,
+	.seed-copy p {
+		margin: 0;
+	}
+
+	.seed-title {
+		font-family: var(--font-display);
+		font-size: var(--font-size-2xl);
+		font-weight: var(--font-weight-semibold);
 		line-height: var(--line-height-tight);
-		letter-spacing: 0;
 		overflow-wrap: anywhere;
 	}
 
-	.seed-copy p:not(.eyebrow) {
+	.seed-copy p:not(.seed-title) {
 		color: var(--text-secondary);
 	}
 

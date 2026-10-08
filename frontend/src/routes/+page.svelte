@@ -170,7 +170,7 @@
 
 		<!-- Weekly Articles Section -->
 		<section class="discovery-section rise-in-shelf" style="--rise-index: 15">
-			<SectionHeader eyebrow="Features" title="Weekly articles" variant="charts" level={2}>
+			<SectionHeader title="Weekly articles" variant="charts" level={2}>
 				{#snippet actions()}
 					{#if sectionsLoading.articles}
 						<span class="loading-indicator">Loading...</span>
@@ -194,7 +194,7 @@
 
 		<!-- Industry News Section -->
 		<section class="discovery-section rise-in-shelf" style="--rise-index: 16">
-			<SectionHeader eyebrow="Industry" title="Latest news" variant="charts" level={2}>
+			<SectionHeader title="Latest news" variant="charts" level={2}>
 				{#snippet actions()}
 					{#if sectionsLoading.news}
 						<span class="loading-indicator">Loading...</span>

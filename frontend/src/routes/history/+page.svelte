@@ -60,7 +60,7 @@
 </script>
 
 <div class="history-page">
-	<PageHeader title="Listening history" eyebrow="Recently played">
+	<PageHeader title="Listening history">
 		{#snippet meta()}
 			{#if total > 0}
 				<span class="count">{total.toLocaleString()} tracks</span>

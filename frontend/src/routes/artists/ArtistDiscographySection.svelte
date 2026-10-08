@@ -240,9 +240,8 @@
 		</EmptyState>
 	{:else}
 		<header class="page-head">
-			<p class="eyebrow">{artist?.name ?? 'Artist'}</p>
 			<h1>{SECTION_LABELS[section]}</h1>
-			<p>{section === 'tracks' ? visibleTracks.length : visibleAlbums.length} results</p>
+			<p>{artist?.name ?? 'Artist'} · {section === 'tracks' ? visibleTracks.length : visibleAlbums.length} results</p>
 			{#if releasesIncomplete}
 				<p class="release-progress" role="status">
 					{loadingMore ? 'Loading more releases…' : 'Some releases are still missing.'}
@@ -348,14 +347,6 @@
 		margin-bottom: var(--space-4);
 	}
 
-	.eyebrow {
-		margin: 0;
-		color: var(--accent);
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-		text-transform: uppercase;
-		letter-spacing: 0;
-	}
 
 	h1 {
 		margin: 0;

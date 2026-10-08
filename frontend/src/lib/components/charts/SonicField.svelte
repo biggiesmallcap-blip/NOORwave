@@ -150,7 +150,6 @@
 
 <div class="sonic">
 	<header class="header">
-		<span class="eyebrow">Sonic field</span>
 		<h2><span class="title">Energy &times; Danceability</span> <span class="counter">{formatCount(field.total)} tracks</span></h2>
 	</header>
 
@@ -311,13 +310,6 @@
 		gap: 2px;
 	}
 
-	.eyebrow {
-		font-family: var(--font-mono);
-		font-size: var(--font-size-xs);
-		text-transform: uppercase;
-		letter-spacing: 0.14em;
-		color: var(--text-tertiary);
-	}
 
 	.header h2 {
 		display: flex;

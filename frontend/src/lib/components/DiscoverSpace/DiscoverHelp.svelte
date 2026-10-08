@@ -29,7 +29,6 @@
 	<div class="help-panel" use:portal role="dialog" aria-label="Sound Space help">
 		<div class="panel-head">
 			<div class="panel-title">
-				<span class="panel-eyebrow">Sound Space</span>
 				<h2>How the map works</h2>
 			</div>
 			<button class="close-btn" onclick={close} aria-label="Close">×</button>
@@ -173,12 +172,6 @@
 		border-bottom: 1px solid var(--border-subtle);
 	}
 	.panel-title { display: flex; flex-direction: column; gap: 2px; }
-	.panel-eyebrow {
-		font-size: var(--font-size-2xs);
-		text-transform: uppercase;
-		letter-spacing: 0.14em;
-		color: rgba(124, 128, 255, 0.8);
-	}
 	h2 {
 		margin: 0;
 		font-size: var(--font-size-md);

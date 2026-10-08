@@ -343,7 +343,6 @@
 				style={nested ? undefined : `--rise-index: ${startIndex + modIndex}`}
 			>
 				<SectionHeader
-					eyebrow={nested ? '' : 'TIDAL'}
 					title={mod.title}
 					variant="charts"
 					level={nested ? 3 : 2}

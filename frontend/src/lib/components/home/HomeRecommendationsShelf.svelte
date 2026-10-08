@@ -546,7 +546,6 @@
 {:else if viewState === 'loading'}
 	<section class="profile-recommendations rise-in-shelf" data-section="provider-recommendations" style={`--rise-index: ${index}`}>
 		<SectionHeader
-			eyebrow="Connected profiles"
 			title="Recommendations"
 			subtitle="Building your Last.fm panels"
 			variant="charts"
@@ -554,7 +553,6 @@
 		/>
 		<ChartMural
 			ariaLabel="Loading Last.fm recommendations"
-			kindLabel="Last.fm recommended"
 			title="Loading recommendations"
 			subtitle="Checking your profile seeds"
 			loading
@@ -575,7 +573,6 @@
 					style={`--rise-index: ${index + shelfPosition}`}
 				>
 					<SectionHeader
-						eyebrow="Connected profiles"
 						title={shelf.title}
 						subtitle={shelfSubtitle(shelf)}
 						variant="charts"
@@ -606,7 +603,6 @@
 							items={muralItemsByShelf[key] ?? []}
 							currentIndex={currentIndex}
 							ariaLabel={`${shelf.title} carousel`}
-							kindLabel={shelf.provider === 'lastfm' ? `Last.fm ${shelf.entity_type ?? 'track'}s` : 'Connected profile'}
 							title={currentItem.title}
 							subtitle={itemSubtitle(currentItem, currentIndex)}
 							metric={itemMetric(shelf, currentItem, currentIndex)}
@@ -641,7 +637,6 @@
 {:else if viewState === 'empty'}
 	<section class="profile-recommendations" data-section="provider-recommendations-empty">
 		<SectionHeader
-			eyebrow="Connected profiles"
 			title="Recommendations"
 			subtitle="Last.fm has not returned profile recommendations yet"
 			variant="charts"
@@ -652,7 +647,6 @@
 {:else if viewState === 'error'}
 	<section class="profile-recommendations" data-section="provider-recommendations-error">
 		<SectionHeader
-			eyebrow="Connected profiles"
 			title="Recommendations"
 			subtitle="Provider request failed"
 			variant="charts"

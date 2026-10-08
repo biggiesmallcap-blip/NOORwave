@@ -371,7 +371,7 @@
 </script>
 
 <section class="trending-shelf">
-	<SectionHeader eyebrow="From Last.fm - Now moving" title="Trending" subtitle={subLabel} variant="charts" level={2}>
+	<SectionHeader title="Trending" subtitle={$selectedTrendingMode === 'tidal' ? subLabel : `${subLabel} on Last.fm`} variant="charts" level={2}>
 		{#snippet actions()}
 			<div class="trending-controls">
 				<div class="chip-group" role="tablist" aria-label="Trending scope">
@@ -432,7 +432,6 @@
 			items={muralItems}
 			currentIndex={currentEntryIndex}
 			ariaLabel={`Last.fm ${subLabel} top ${visibleEntries.length}`}
-			kindLabel={currentKindLabel()}
 			title={currentEntry ? entryTitle(currentEntry) : ''}
 			subtitle={currentEntry ? entrySubtitle(currentEntry, currentEntryIndex) : ''}
 			metric={currentEntry ? currentEntry.genre ?? entryStatusLabel(currentEntry, currentEntryIndex) : ''}

@@ -114,7 +114,6 @@
 <div class="page" data-recommendation-shelf={slug}>
 	<button class="back-link" type="button" onclick={() => goBack('/')}>Back</button>
 	<DetailHero
-		eyebrow="Connected profiles"
 		title={shelf?.title ?? (loading ? 'Loading...' : 'Recommendations')}
 		variant="text"
 	>

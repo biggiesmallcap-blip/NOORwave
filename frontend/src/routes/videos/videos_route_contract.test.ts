@@ -57,7 +57,7 @@ describe('watch page contract', () => {
 		expect(watch).not.toContain('class="up-next"');
 		expect(watch).toContain('await api.getRelatedVideos({');
 		expect(watch).toContain('if (seq !== relatedRequest) return;');
-		expect(watch).toContain('Keep exploring');
+		expect(watch).toContain('Related to {current.artist_name');
 	});
 
 	test('the address follows the playing video, so reload and copied links reopen it', () => {

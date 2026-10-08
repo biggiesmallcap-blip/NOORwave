@@ -198,8 +198,8 @@
 	<!-- Header -->
 	<div class="page-header">
 		<div class="header-text">
-			<span class="eyebrow">{PAGE_TITLE}</span>
-			<h1>{PAGE_SUBTITLE}</h1>
+			<h1>{PAGE_TITLE}</h1>
+			<p class="tagline">{PAGE_SUBTITLE}</p>
 		</div>
 		<form class="search-form" onsubmit={handleSearch}>
 			<SearchField
@@ -404,11 +404,10 @@
 		flex-shrink: 0;
 	}
 	.header-text { display: flex; flex-direction: column; gap: 2px; }
-	.eyebrow {
-		font-size: var(--font-size-xs);
-		text-transform: uppercase;
-		letter-spacing: 0.12em;
-		color: rgba(255,255,255,0.35);
+	.tagline {
+		margin: 0;
+		font-size: var(--font-size-sm);
+		color: var(--text-secondary);
 	}
 	h1 {
 		font-size: var(--font-size-lg);
