@@ -606,7 +606,7 @@
 
 
 	.track-table {
-		padding: var(--space-2) var(--space-6) 0;
+		padding: var(--space-2) 0 0;
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
@@ -707,7 +707,7 @@
 
 
 	.more-section {
-		padding: var(--space-6) var(--space-6) 0;
+		padding: var(--space-6) 0 0;
 		display: flex;
 		flex-direction: column;
 		gap: var(--gap);
@@ -806,10 +806,10 @@
 	}
 
 	@container workspace (max-width: 720px) {
-		.track-table { padding: var(--space-2) var(--space-3) 0; }
+		.track-table { padding: var(--space-2) 0 0; }
 		.track-header,
 		.track-table.with-plays .track-header { grid-template-columns: 36px 1fr auto 56px; }
 		.col-plays { display: none; }
-		.more-section { padding: var(--space-5) var(--space-4) 0; }
+		.more-section { padding: var(--space-5) 0 0; }
 	}
 </style>

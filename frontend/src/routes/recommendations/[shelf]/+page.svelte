@@ -188,9 +188,9 @@
 <style>
 	/* Same shell, padding and rhythm as TidalEditorialPage. */
 	.page {
-		max-width: var(--content-width);
+		width: min(100%, var(--content-width));
 		margin: 0 auto;
-		padding: var(--space-5) var(--space-4) var(--space-7);
+		padding: 0 0 var(--space-7);
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-5);

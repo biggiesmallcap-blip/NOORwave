@@ -21,6 +21,7 @@
   } from '$lib/stores/player';
   import { tidalStatus } from '$lib/stores/tidal';
   import DetailHero from '$lib/components/ui/DetailHero.svelte';
+  import ActionBar from '$lib/components/ui/ActionBar.svelte';
 
   const spotifyId = $derived($page.params.id ?? '');
 
@@ -279,6 +280,16 @@
       saving = false;
     }
   }
+
+  // Secondary queue actions live in More, so every detail hero shares one
+  // action order (STYLING.md "ActionBar").
+  function openHeroMore(event: MouseEvent, track: Parameters<typeof playTidalTrackNext>[0] | null | undefined) {
+    if (!track) return;
+    openContextMenu(event, [
+      { label: 'Play next', icon: '\u2934', onSelect: () => void playTidalTrackNext(track) },
+      { label: 'Add to queue', icon: '\uFF0B', onSelect: () => void addTidalTrackToQueue(track) },
+    ], 'Spotify track');
+  }
 </script>
 
 <svelte:head>
@@ -321,14 +332,17 @@
           {#if heroDetail.playcount !== null}<span>. {formatNumber(heroDetail.playcount)} plays</span>{/if}
       {/snippet}
       {#snippet actions()}
-          <button class="btn-primary" disabled={!playable} onclick={() => headerTrack && playTidalTrackNow(headerTrack)}>Play</button>
-          <button class="btn-secondary" disabled={!playable} onclick={() => headerTrack && playTidalTrackNext(headerTrack)}>Play next</button>
-          <button class="btn-secondary" disabled={!playable} onclick={() => headerTrack && addTidalTrackToQueue(headerTrack)}>Add to queue</button>
-          <button class="btn-secondary" disabled={!playable} onclick={() => headerTrack && startTidalSongRadio(headerTrack)}>Song radio</button>
-          <button class="btn-secondary" disabled={saving || !canSave} onclick={save}>
-            {saving ? 'Saving...' : 'Save to library'}
-          </button>
+          <ActionBar
+            onplay={playable ? () => headerTrack && playTidalTrackNow(headerTrack) : undefined}
+            onradio={playable ? () => headerTrack && startTidalSongRadio(headerTrack) : undefined}
+            radioLabel="Song radio"
+            onlike={canSave ? save : undefined}
+            likeLabel="Save to library"
+            likePending={saving}
+            onmore={playable ? (event) => openHeroMore(event, headerTrack) : undefined}
+          >
           {#if pendingIds.length > 0}<span class="resolving-badge">Resolving {pendingIds.length} more...</span>{/if}
+          </ActionBar>
       {/snippet}
       {#snippet details()}
         {#if saveResult}
@@ -399,13 +413,10 @@
 </div>
 
 <style>
-  .page { max-width: var(--content-width); margin: 0 auto; padding: var(--space-6) var(--space-6) calc(var(--space-7) * 2); display: flex; flex-direction: column; gap: var(--space-6); }
+  .page { width: min(100%, var(--content-width)); margin: 0 auto; padding: 0 0 calc(var(--space-7) * 2); display: flex; flex-direction: column; gap: var(--space-6); }
   .page > .back-link { align-self: flex-start; margin-bottom: var(--space-3); }
   .state { padding: calc(var(--space-7) * 2) 0; text-align: center; color: var(--text-muted); }
   .state.error { color: #ef4444; }
-  .btn-primary, .btn-secondary { background: var(--accent); color: var(--bg-base); border: none; padding: 9px 14px; border-radius: 999px; font-weight: var(--font-weight-bold); cursor: pointer; font-size: var(--font-size-sm); }
-  .btn-secondary { background: var(--border-subtle); color: var(--text-primary); border: 1px solid var(--panel-border); }
-  .btn-primary:disabled, .btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
   .resolving-badge { font-size: var(--font-size-xs); color: var(--text-muted); font-style: italic; }
   .toast { margin: var(--space-2) 0 0; font-size: var(--font-size-xs); padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); width: fit-content; }
   .toast.success { background: rgba(125, 200, 175, 0.12); color: var(--accent); }
@@ -425,7 +436,7 @@
   .row:hover .row-btn,
   .row:focus-within .row-btn { opacity: 1; }
   @media (max-width: 760px) {
-    .page { padding: var(--space-5) var(--space-4) calc(var(--space-7) * 2); gap: var(--space-5); }
+    .page { padding: 0 0 calc(var(--space-7) * 2); gap: var(--space-5); }
     .row { grid-template-columns: 28px 40px minmax(0,1fr) auto; gap: var(--gap-sm); }
     .dur { display: none; }
   }

@@ -231,7 +231,7 @@
 
 
 	.track-table {
-		padding: var(--space-5) var(--space-6) 0;
+		padding: var(--space-5) 0 0;
 		display: flex;
 		flex-direction: column;
 		gap: 4px;

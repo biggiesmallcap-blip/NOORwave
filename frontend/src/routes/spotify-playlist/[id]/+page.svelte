@@ -29,6 +29,7 @@
   import { SPOTIFY_MOODS_BY_SLUG } from '$lib/components/moods/spotify-moods-data';
   import { putCachedSpotifyChartMeta } from '$lib/stores/spotify-chart-meta-cache';
   import DetailHero from '$lib/components/ui/DetailHero.svelte';
+  import ActionBar from '$lib/components/ui/ActionBar.svelte';
 
   // Ephemeral Spotify playlist view. The playlist is NOT in the user's
   // library — clicking Save promotes it. Until then, navigation away loses
@@ -402,6 +403,15 @@
   );
   const playableCount = $derived(detail?.tracks.filter(isPlayable).length ?? 0);
   const totalCount = $derived(detail?.tracks.length ?? 0);
+
+  // Secondary queue actions live in More, so every detail hero shares one
+  // action order (STYLING.md "ActionBar").
+  function openHeroMore(event: MouseEvent) {
+    openContextMenu(event, [
+      { label: 'Play next', icon: '\u2934', onSelect: () => void playAllNext() },
+      { label: 'Add to queue', icon: '\uFF0B', onSelect: () => void addAllToQueue() },
+    ], 'Spotify playlist');
+  }
 </script>
 
 <svelte:head>
@@ -445,21 +455,21 @@
         {#if saveErr}<p class="toast error">Save failed: {saveErr}</p>{/if}
       {/snippet}
       {#snippet actions()}
-          <button class="btn-primary" disabled={playableCount === 0} onclick={playAll}>Play all</button>
-          <button class="btn-secondary" disabled={playableCount === 0} onclick={shuffleAll}>Shuffle</button>
-          <button class="btn-secondary" disabled={playableCount === 0} onclick={playAllNext}>Play next</button>
-          <button class="btn-secondary" disabled={playableCount === 0} onclick={addAllToQueue}>Add to queue</button>
-          <button class="btn-secondary" disabled={playableCount === 0} onclick={startPlaylistRadio}>Song radio</button>
-          <button
-            class="btn-secondary"
-            disabled={saving || resolvedCount === 0}
-            onclick={save}
+          <ActionBar
+            onplay={playableCount > 0 ? playAll : undefined}
+            playLabel="Play all"
+            onshuffle={playableCount > 0 ? shuffleAll : undefined}
+            onradio={playableCount > 0 ? startPlaylistRadio : undefined}
+            radioLabel="Song radio"
+            onlike={resolvedCount > 0 ? save : undefined}
+            likeLabel="Save to library"
+            likePending={saving}
+            onmore={playableCount > 0 ? openHeroMore : undefined}
           >
-            {saving ? 'Saving…' : 'Save to library'}
-          </button>
           {#if pendingIds.length > 0}
             <span class="resolving-badge">Resolving {pendingIds.length} more…</span>
           {/if}
+          </ActionBar>
       {/snippet}
     </DetailHero>
 
@@ -550,9 +560,9 @@
 
 <style>
   .page {
-    max-width: var(--content-width);
+    width: min(100%, var(--content-width));
     margin: 0 auto;
-    padding: var(--space-6) var(--space-6) calc(var(--space-7) * 2);
+    padding: 0 0 calc(var(--space-7) * 2);
     display: flex;
     flex-direction: column;
   }
@@ -690,7 +700,7 @@
   .row:hover .row-actions,
   .row:focus-within .row-actions { opacity: 1; }
   @media (max-width: 760px) {
-    .page { padding: var(--space-5) var(--space-4) calc(var(--space-7) * 2); }
+    .page { padding: 0 0 calc(var(--space-7) * 2); }
     .row {
       grid-template-columns: 28px 40px minmax(0, 1fr) auto;
       gap: var(--gap-sm);
