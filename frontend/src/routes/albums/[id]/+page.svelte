@@ -652,7 +652,7 @@
 		gap: var(--gap);
 		padding: var(--space-2) var(--space-4);
 		cursor: pointer;
-		transition: background 120ms ease;
+		transition: background var(--motion-fast);
 		min-height: 44px;
 	}
 	.tidal-album-row:hover { background: rgba(255, 255, 255, 0.04); }

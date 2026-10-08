@@ -4798,7 +4798,7 @@
 		font-size: var(--font-size-xl);
 		font-weight: var(--font-weight-semibold);
 		color: var(--text-primary);
-		transition: border-color 0.15s ease, background 0.15s ease;
+		transition: border-color var(--motion-fast), background var(--motion-fast);
 	}
 
 	.pin-digit.filled {

@@ -458,7 +458,7 @@
 		padding: 4px 12px;
 		font-size: var(--font-size-xs);
 		cursor: pointer;
-		transition: background 0.15s, color 0.15s;
+		transition: background var(--motion-fast), color var(--motion-fast);
 	}
 	.seed-toggle:hover:not(:disabled) { background: rgba(91,78,248,0.2); color: #fff; }
 	.seed-toggle:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -680,7 +680,7 @@
 		color: rgba(160,165,255,0.9);
 		font-size: var(--font-size-sm);
 		cursor: pointer;
-		transition: background 0.15s;
+		transition: background var(--motion-fast);
 	}
 	.retry-btn:hover { background: rgba(124,128,255,0.22); }
 

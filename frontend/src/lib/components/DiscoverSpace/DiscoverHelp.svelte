@@ -132,7 +132,7 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		transition: background 0.15s, color 0.15s, border-color 0.15s;
+		transition: background var(--motion-fast), color var(--motion-fast), border-color var(--motion-fast);
 	}
 	.help-btn:hover {
 		background: rgba(124, 128, 255, 0.18);

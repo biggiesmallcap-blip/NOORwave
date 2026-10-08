@@ -230,7 +230,7 @@
 	.analytics-tree.dim {
 		opacity: 0.55;
 		pointer-events: none;
-		transition: opacity 150ms ease;
+		transition: opacity var(--motion-fast);
 	}
 
 	.section {

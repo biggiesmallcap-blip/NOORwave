@@ -597,7 +597,7 @@
 		padding: 14px 16px 38px;
 		background: linear-gradient(180deg, rgba(0, 0, 0, 0.62), transparent);
 		pointer-events: none;
-		transition: opacity 0.18s ease, transform 0.18s ease;
+		transition: opacity var(--motion-base), transform var(--motion-base);
 	}
 
 	.up-next-pill {
@@ -677,7 +677,7 @@
 		gap: 8px;
 		padding: 36px 14px 14px;
 		background: linear-gradient(0deg, rgba(0, 0, 0, 0.72), transparent);
-		transition: opacity 0.18s ease, transform 0.18s ease;
+		transition: opacity var(--motion-base), transform var(--motion-base);
 	}
 
 	.chrome-hidden {

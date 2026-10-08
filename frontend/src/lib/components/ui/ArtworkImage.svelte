@@ -130,7 +130,7 @@
 	   reveal instead of tiles hard-popping in. Reduced-motion users skip it. */
 	.art-fade-in {
 		opacity: 0;
-		transition: opacity 260ms ease-out;
+		transition: opacity var(--motion-base);
 	}
 
 	.art-fade-in.art-loaded {
@@ -209,7 +209,7 @@
 		background: var(--bg-raised);
 		object-fit: cover;
 		display: block;
-		transition: opacity 0.15s;
+		transition: opacity var(--motion-fast);
 	}
 
 	:global(.artist-card:hover) .artist-avatar {
@@ -236,7 +236,7 @@
 		border-radius: 6px;
 		background: var(--bg-raised);
 		margin-bottom: 7px;
-		transition: opacity 0.15s;
+		transition: opacity var(--motion-fast);
 		object-fit: cover;
 		display: block;
 	}

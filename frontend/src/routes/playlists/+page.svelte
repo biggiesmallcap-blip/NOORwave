@@ -1989,7 +1989,7 @@
 		border: 1px solid var(--border-subtle);
 		color: var(--text-secondary);
 		cursor: pointer;
-		transition: background 150ms ease, color 150ms ease;
+		transition: background var(--motion-fast), color var(--motion-fast);
 	}
 
 	.close-btn:hover {
@@ -2044,7 +2044,7 @@
 		font-size: var(--font-size-sm);
 		color: var(--text-primary);
 		width: 100%;
-		transition: border-color 150ms ease, box-shadow 150ms ease;
+		transition: border-color var(--motion-fast), box-shadow var(--motion-fast);
 	}
 
 	.field-input:focus-visible {
@@ -2094,7 +2094,7 @@
 		color: var(--text-secondary);
 		background: transparent;
 		border: none;
-		transition: background 150ms ease, color 150ms ease;
+		transition: background var(--motion-fast), color var(--motion-fast);
 		cursor: pointer;
 	}
 
@@ -2151,7 +2151,7 @@
 		color: var(--text-tertiary);
 		cursor: pointer;
 		flex-shrink: 0;
-		transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
+		transition: background var(--motion-fast), color var(--motion-fast), border-color var(--motion-fast);
 	}
 
 	.remove-btn:hover {
@@ -2200,7 +2200,7 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		transition: background 150ms ease;
+		transition: background var(--motion-fast);
 	}
 
 	.tag-remove:hover {

@@ -2245,7 +2245,7 @@
     cursor: pointer;
     font-family: inherit;
     white-space: nowrap;
-    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    transition: background var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
   }
   .filter-pill:hover {
     border-color: var(--accent-line);
@@ -2299,7 +2299,7 @@
     color: var(--text-secondary);
     cursor: pointer;
     font-family: inherit;
-    transition: border-color 0.15s, color 0.15s;
+    transition: border-color var(--motion-fast), color var(--motion-fast);
   }
   .recent-chip:hover {
     border-color: var(--accent-line);
@@ -2337,7 +2337,7 @@
     background: var(--bg-elevated);
     border: 1px solid var(--border-subtle);
     text-decoration: none;
-    transition: transform 0.18s ease, border-color 0.18s, background 0.18s;
+    transition: transform var(--motion-base), border-color var(--motion-base), background var(--motion-base);
     align-items: center;
   }
   .top-result-card:hover {
@@ -2607,7 +2607,7 @@
     text-decoration: none;
     flex-shrink: 0;
     width: 84px;
-    transition: transform 0.18s ease;
+    transition: transform var(--motion-base);
   }
   .artist-card:hover { transform: translateY(-3px); }
   .avatar-wrap, .art-wrap {
@@ -2681,7 +2681,7 @@
     text-decoration: none;
     flex-shrink: 0;
     width: 128px;
-    transition: transform 0.18s ease;
+    transition: transform var(--motion-base);
   }
   .album-card:hover { transform: translateY(-3px); }
   .art-wrap:hover :global(.play-overlay),
@@ -2697,7 +2697,7 @@
     background-size: cover;
     background-position: center;
     margin-bottom: 7px;
-    transition: opacity 0.15s;
+    transition: opacity var(--motion-fast);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -2755,7 +2755,7 @@
     padding: 8px 8px;
     border-radius: 6px;
     cursor: pointer;
-    transition: background 0.12s;
+    transition: background var(--motion-fast);
   }
   .row-actions {
     display: flex;
@@ -2895,7 +2895,7 @@
     font-size: var(--font-size-sm);
     color: var(--text-primary);
     cursor: pointer;
-    transition: background 0.12s;
+    transition: background var(--motion-fast);
   }
   .search-track-row:hover { background: var(--bg-hover); }
   .search-track-row.cursor { background: var(--bg-hover); box-shadow: inset 2px 0 0 var(--accent); }

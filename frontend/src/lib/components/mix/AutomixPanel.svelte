@@ -649,7 +649,7 @@
 		font-size: var(--font-size-xs);
 		font-variant-numeric: tabular-nums;
 		cursor: pointer;
-		transition: background-color 120ms ease, color 120ms ease;
+		transition: background-color var(--motion-fast), color var(--motion-fast);
 	}
 
 	.bpm-tweak:hover:not(:disabled) {

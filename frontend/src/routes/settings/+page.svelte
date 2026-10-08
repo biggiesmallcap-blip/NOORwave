@@ -3549,7 +3549,7 @@
 		border: 1px solid rgba(255, 255, 255, 0.07);
 		color: inherit;
 		cursor: pointer;
-		transition: background 0.15s ease, border-color 0.15s ease;
+		transition: background var(--motion-fast), border-color var(--motion-fast);
 	}
 
 	.intensity-option:hover:not(:disabled) {
@@ -3771,7 +3771,7 @@
 	.wallpaper-group-caret {
 		font-size: var(--font-size-2xs);
 		color: var(--text-tertiary, var(--text-secondary));
-		transition: transform 160ms ease;
+		transition: transform var(--motion-fast);
 	}
 
 	.wallpaper-group-caret.open {
@@ -4137,7 +4137,7 @@
 		border: 1px solid var(--border-subtle);
 		background: rgba(255, 255, 255, 0.02);
 		cursor: pointer;
-		transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+		transition: border-color var(--motion-fast), background var(--motion-fast), box-shadow var(--motion-fast);
 	}
 
 	.wallpaper-tile:hover,
@@ -4252,7 +4252,7 @@
 		height: 100%;
 		border-radius: inherit;
 		background: linear-gradient(90deg, rgba(151, 126, 255, 0.85), rgba(120, 160, 255, 0.72));
-		transition: width 200ms ease;
+		transition: width var(--motion-base);
 	}
 
 	.discovery-guide {
@@ -4276,7 +4276,7 @@
 	.discovery-guide > summary::before {
 		content: '▸ ';
 		display: inline-block;
-		transition: transform 0.15s ease;
+		transition: transform var(--motion-fast);
 		margin-right: 4px;
 	}
 

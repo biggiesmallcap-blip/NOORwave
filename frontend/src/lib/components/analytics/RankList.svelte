@@ -216,7 +216,7 @@
 		width: 100%;
 		padding: var(--space-2) var(--space-1);
 		cursor: pointer;
-		transition: background-color 120ms ease;
+		transition: background-color var(--motion-fast);
 		box-sizing: border-box;
 	}
 

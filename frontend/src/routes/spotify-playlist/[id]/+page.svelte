@@ -615,7 +615,7 @@
     padding: var(--space-2) var(--space-3);
     border-radius: var(--radius-sm);
     cursor: pointer;
-    transition: background 100ms ease;
+    transition: background var(--motion-press);
   }
   .row:hover { background: rgba(255, 255, 255, 0.04); }
   .row.disabled { cursor: default; opacity: 0.55; }
@@ -684,7 +684,7 @@
     justify-content: flex-end;
     gap: 4px;
     opacity: 0;
-    transition: opacity 100ms ease;
+    transition: opacity var(--motion-press);
   }
   .row-actions .row-btn { opacity: 1; }
   .row:hover .row-actions,

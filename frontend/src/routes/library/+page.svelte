@@ -2739,7 +2739,7 @@
 		border: none;
 		cursor: pointer;
 		padding: 0;
-		transition: color 0.15s;
+		transition: color var(--motion-fast);
 	}
 
 	.view-all-link:hover { color: var(--text-primary, #fff); }
@@ -2760,7 +2760,7 @@
 		padding: 6px 8px;
 		border-radius: 6px;
 		cursor: pointer;
-		transition: background 0.1s;
+		transition: background var(--motion-press);
 	}
 
 	.home-track-row:hover { background: var(--bg-hover); }
@@ -2853,7 +2853,7 @@
 
 	.ht-actions {
 		opacity: 0;
-		transition: opacity 0.15s;
+		transition: opacity var(--motion-fast);
 	}
 
 	.home-track-row:hover .ht-actions { opacity: 1; }
@@ -2867,7 +2867,7 @@
 		border-radius: 4px;
 		display: flex;
 		align-items: center;
-		transition: color 0.15s;
+		transition: color var(--motion-fast);
 	}
 
 	.btn-icon:hover { color: var(--text-primary, #fff); }
@@ -3055,7 +3055,7 @@
 		height: 100%;
 		border-radius: 2px;
 		background: linear-gradient(90deg, var(--accent), #b0b3ff);
-		transition: width 200ms ease;
+		transition: width var(--motion-base);
 	}
 
 	.mini-bar-fill.dance {
@@ -3918,7 +3918,7 @@
 		color: var(--text-primary);
 		font-size: var(--font-size-md);
 		line-height: 1;
-		transition: background 0.15s ease, border-color 0.15s ease;
+		transition: background var(--motion-fast), border-color var(--motion-fast);
 	}
 
 	.menu-trigger:hover {
@@ -3980,7 +3980,7 @@
 		font-size: var(--font-size-sm);
 		text-align: left;
 		cursor: pointer;
-		transition: background 0.1s ease;
+		transition: background var(--motion-press);
 		white-space: nowrap;
 	}
 

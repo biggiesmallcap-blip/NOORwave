@@ -425,7 +425,7 @@
 		cursor: pointer;
 		backdrop-filter: blur(8px);
 		-webkit-backdrop-filter: blur(8px);
-		transition: background 120ms ease, color 120ms ease, transform 120ms ease;
+		transition: background var(--motion-fast), color var(--motion-fast), transform var(--motion-fast);
 	}
 	.popup-close:hover {
 		background: var(--bg-hover);
@@ -595,7 +595,7 @@
 		font-weight: var(--font-weight-semibold, 600);
 		cursor: pointer;
 		border: 1px solid transparent;
-		transition: transform 120ms ease, background 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+		transition: transform var(--motion-fast), background var(--motion-fast), border-color var(--motion-fast), box-shadow var(--motion-fast);
 	}
 	.popup-cta:active { transform: scale(0.97); }
 
@@ -656,7 +656,7 @@
 		padding: 9px 12px;
 		border-radius: 10px;
 		cursor: pointer;
-		transition: background 120ms ease;
+		transition: background var(--motion-fast);
 		min-width: 0;
 	}
 	.popup-track-row:hover {
@@ -676,7 +676,7 @@
 	.popup-track-num,
 	.popup-row-play {
 		grid-area: 1 / 1;
-		transition: opacity 120ms ease;
+		transition: opacity var(--motion-fast);
 	}
 	.popup-track-num {
 		color: var(--text-tertiary);
@@ -729,7 +729,7 @@
 		color: var(--text-tertiary);
 		cursor: pointer;
 		opacity: 0;
-		transition: background 120ms ease, color 120ms ease, opacity 120ms ease;
+		transition: background var(--motion-fast), color var(--motion-fast), opacity var(--motion-fast);
 	}
 	.popup-track-row:hover .popup-track-menu,
 	.popup-track-row.playing .popup-track-menu {

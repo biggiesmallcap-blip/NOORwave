@@ -958,7 +958,7 @@
 		display: flex;
 		gap: 5px;
 		opacity: 0;
-		transition: opacity 0.16s ease;
+		transition: opacity var(--motion-fast);
 	}
 
 	.video-dock.mini:hover .mini-chrome,
@@ -1031,7 +1031,7 @@
 		background: #000;
 		opacity: 0;
 		pointer-events: none;
-		transition: opacity 90ms ease;
+		transition: opacity var(--motion-press);
 	}
 
 	.fullscreen-dim.on {

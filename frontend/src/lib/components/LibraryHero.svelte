@@ -331,7 +331,7 @@
     letter-spacing: 0.12em;
     color: rgba(255,255,255,0.76);
     text-transform: uppercase;
-    transition: color 300ms ease;
+    transition: color var(--motion-slow);
   }
 
   .hero-kind--forgotten {
@@ -440,7 +440,7 @@
     height: 6px;
     border-radius: 50%;
     background: rgba(255,255,255,0.25);
-    transition: background 200ms ease;
+    transition: background var(--motion-base);
   }
   .hero-dot.active { background: rgba(255,255,255,0.85); }
 

@@ -161,7 +161,7 @@
 		color: #fff;
 		text-align: left;
 		opacity: 0;
-		transition: opacity 120ms ease;
+		transition: opacity var(--motion-fast);
 		pointer-events: none;
 	}
 	.frame:hover .caption,

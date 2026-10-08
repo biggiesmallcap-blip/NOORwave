@@ -572,7 +572,7 @@
 	/* Out of focus below the fold: a soft blur and dim that deepen for
 	   three rows, then hold, and clear as the row scrolls into view. */
 	.related-card {
-		transition: filter 320ms ease, opacity 320ms ease;
+		transition: filter var(--motion-slow), opacity var(--motion-slow);
 	}
 	.related-card[data-focus='1'] { filter: blur(0.6px); opacity: 0.82; }
 	.related-card[data-focus='2'] { filter: blur(1.1px); opacity: 0.68; }

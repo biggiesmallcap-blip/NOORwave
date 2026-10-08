@@ -103,7 +103,7 @@
 		height: 100%;
 		background: color-mix(in srgb, var(--accent) 45%, transparent);
 		border-radius: 2px;
-		transition: width 240ms ease;
+		transition: width var(--motion-base);
 	}
 	.dl-pill-bar-sweep {
 		position: absolute;

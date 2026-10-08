@@ -274,7 +274,7 @@
 		padding: 5px 6px;
 		border-radius: 8px;
 		cursor: pointer;
-		transition: background 0.12s, opacity 0.2s;
+		transition: background var(--motion-fast), opacity var(--motion-base);
 	}
 	.row:hover,
 	.row:focus-visible {

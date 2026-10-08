@@ -1388,7 +1388,7 @@
 	}
 	.video-play-overlay {
 		opacity: 0;
-		transition: opacity 0.18s ease;
+		transition: opacity var(--motion-base);
 	}
 	.video-card-rail:hover .video-play-overlay {
 		opacity: 1;
@@ -1408,7 +1408,7 @@
 		text-decoration: none;
 		color: inherit;
 		border-radius: 12px;
-		transition: background 140ms ease;
+		transition: background var(--motion-fast);
 	}
 	.similar-card:hover {
 		background: rgba(255, 255, 255, 0.04);
@@ -1660,7 +1660,7 @@
 		left: 0;
 		background: linear-gradient(90deg, var(--accent-soft, rgba(125, 99, 255, 0.18)) 0%, transparent 100%);
 		pointer-events: none;
-		transition: width 400ms ease;
+		transition: width var(--motion-slow);
 		z-index: 0;
 	}
 
@@ -1679,7 +1679,7 @@
 		padding: var(--space-2) var(--space-3);
 		border-radius: var(--radius-sm, 8px);
 		cursor: pointer;
-		transition: background 120ms ease;
+		transition: background var(--motion-fast);
 		min-height: 52px;
 	}
 	.tidal-popular-row:hover .row-btn,
@@ -1752,7 +1752,7 @@
 		color: var(--text-secondary, rgba(255, 255, 255, 0.7));
 		font-size: var(--font-size-sm);
 		cursor: pointer;
-		transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+		transition: background var(--motion-fast), color var(--motion-fast), border-color var(--motion-fast);
 	}
 	.show-all-btn:hover {
 		background: rgba(255, 255, 255, 0.11);

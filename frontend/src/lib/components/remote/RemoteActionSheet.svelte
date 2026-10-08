@@ -228,7 +228,7 @@
 		backdrop-filter: blur(6px);
 		-webkit-backdrop-filter: blur(6px);
 		opacity: 0;
-		transition: opacity 280ms ease;
+		transition: opacity var(--motion-slow);
 	}
 
 	.remote-actions-overlay.presented .remote-actions-scrim {
