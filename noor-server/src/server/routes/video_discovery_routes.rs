@@ -155,7 +155,9 @@ async fn build_missing_sets(
             let conn = plan_db.open_isolated()?;
             let plans = video_sets::plan_missing_sets(&conn, today)?;
             let known = video_sets::known_artist_tidal_ids(&conn)?;
-            let recent = video_sets::recently_watched_video_ids(&conn, RECENTLY_WATCHED_DAYS)?;
+            let mut recent = video_sets::recently_watched_video_ids(&conn, RECENTLY_WATCHED_DAYS)?;
+            // Videos you skipped more than once stay off new shelves.
+            recent.extend(video_sets::skipped_video_ids(&conn)?.1);
             let existing = video_sets::load_latest_sets(&conn)?;
             Ok((plans, known, recent, existing))
         })
@@ -358,8 +360,16 @@ pub(super) async fn post_videos_radio_next(
             };
             let pool = video_radio::station_pool(conn, &graph, seed_id, recent, library)?;
             let candidates = video_radio::load_candidates(conn, &pool)?;
-            let watched = video_sets::recently_watched_video_ids(conn, RECENTLY_WATCHED_DAYS)?;
-            let strict_exclude = excluded.union(&recent_seen).copied().collect();
+            // A video skipped once sinks like a recent watch; skipped more
+            // than once, radio leaves it out.
+            let (skipped_once, skipped_repeatedly) = video_sets::skipped_video_ids(conn)?;
+            let mut watched = video_sets::recently_watched_video_ids(conn, RECENTLY_WATCHED_DAYS)?;
+            watched.extend(skipped_once);
+            let strict_exclude = excluded
+                .union(&recent_seen)
+                .chain(skipped_repeatedly.iter())
+                .copied()
+                .collect();
             let items = if seed_id.is_some() {
                 video_radio::select_seeded_batch(
                     &candidates,
@@ -438,8 +448,12 @@ pub(super) async fn post_videos_related(
                 .cloned()
                 .collect();
             let candidates = video_radio::load_candidates(conn, &related)?;
-            let excluded: HashSet<i64> = body.exclude_video_ids.iter().take(64).copied().collect();
-            let watched = video_sets::recently_watched_video_ids(conn, RECENTLY_WATCHED_DAYS)?;
+            let (skipped_once, skipped_repeatedly) = video_sets::skipped_video_ids(conn)?;
+            let mut excluded: HashSet<i64> =
+                body.exclude_video_ids.iter().take(64).copied().collect();
+            excluded.extend(skipped_repeatedly);
+            let mut watched = video_sets::recently_watched_video_ids(conn, RECENTLY_WATCHED_DAYS)?;
+            watched.extend(skipped_once);
             let mut selected = video_radio::select_seeded_batch(
                 &candidates,
                 &excluded,
