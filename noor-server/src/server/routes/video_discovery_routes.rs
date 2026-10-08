@@ -520,6 +520,10 @@ pub(super) struct RecordVideoPlay {
     pub artist_tidal_id: Option<i64>,
     #[serde(default)]
     pub artist_name: Option<String>,
+    /// The whole video card (art, duration), kept in `video_catalog` so the
+    /// Recently watched shelf can draw it later. Ignored when its id differs.
+    #[serde(default)]
+    pub video: Option<Value>,
 }
 
 /// `POST /api/videos/history`. Fire-and-forget from the player; a failed write
@@ -541,7 +545,24 @@ pub(super) async fn post_videos_history(
                 body.artist_name
             ],
         )?;
-        Ok(conn.last_insert_rowid())
+        let id = conn.last_insert_rowid();
+        let card = body.video.as_ref().filter(|video| {
+            video.get("tidal_id").and_then(Value::as_i64) == Some(body.tidal_video_id)
+        });
+        if let Some(card) = card {
+            conn.execute(
+                "INSERT INTO video_catalog (tidal_video_id, artist_tidal_id, artist_name, item_json)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(tidal_video_id) DO NOTHING",
+                rusqlite::params![
+                    body.tidal_video_id,
+                    body.artist_tidal_id,
+                    body.artist_name,
+                    card.to_string()
+                ],
+            )?;
+        }
+        Ok(id)
     });
     match result {
         Ok(id) => Json(json!({ "ok": true, "id": id })),
@@ -554,6 +575,118 @@ pub(super) async fn post_videos_history(
             Json(json!({ "ok": true }))
         }
     }
+}
+
+#[derive(Deserialize)]
+pub(super) struct VideoHistoryQuery {
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// Your recent watches, newest first, one entry per video: the card (from
+/// `video_catalog` or saved videos, else the title the player recorded), when
+/// you last watched it, how far you got and whether you finished it.
+pub(crate) fn recent_video_history(
+    conn: &rusqlite::Connection,
+    limit: i64,
+) -> anyhow::Result<Vec<Value>> {
+    let mut stmt = conn.prepare(
+        "WITH latest AS (
+             SELECT tidal_video_id, MAX(id) AS id, COUNT(*) AS plays
+               FROM video_history GROUP BY tidal_video_id
+         )
+         SELECT h.tidal_video_id, h.title, h.artist_tidal_id, h.artist_name, h.started_at,
+                h.duration_watched_ms, h.video_duration_ms, h.completed, latest.plays,
+                COALESCE(c.item_json, s.item_json)
+           FROM latest
+           JOIN video_history h ON h.id = latest.id
+           LEFT JOIN video_catalog c ON c.tidal_video_id = h.tidal_video_id
+           LEFT JOIN saved_videos s ON s.tidal_video_id = h.tidal_video_id
+          ORDER BY h.id DESC
+          LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([limit], |row| {
+        let video_id: i64 = row.get(0)?;
+        let title: Option<String> = row.get(1)?;
+        let artist_id: Option<i64> = row.get(2)?;
+        let artist_name: Option<String> = row.get(3)?;
+        let card: Option<String> = row.get(9)?;
+        let mut video = card
+            .and_then(|json| serde_json::from_str::<Value>(&json).ok())
+            .filter(Value::is_object)
+            .unwrap_or_else(|| {
+                json!({
+                    "tidal_id": video_id,
+                    "title": title.unwrap_or_default(),
+                    "duration_ms": null,
+                    "artist_id": artist_id,
+                    "artist_name": artist_name,
+                    "album_tidal_id": null,
+                    "artwork_url": null,
+                    "quality": null,
+                    "explicit": null,
+                    "type": "Music Video",
+                })
+            });
+        let video_duration: Option<i64> = row.get(6)?;
+        if let Some(object) = video.as_object_mut()
+            && object.get("duration_ms").is_none_or(Value::is_null)
+            && let Some(duration) = video_duration
+        {
+            object.insert("duration_ms".into(), json!(duration));
+        }
+        Ok(json!({
+            "video": video,
+            "watched_at": row.get::<_, String>(4)?,
+            "watched_ms": row.get::<_, Option<i64>>(5)?,
+            "duration_ms": video_duration,
+            "completed": row.get::<_, i64>(7)? != 0,
+            "plays": row.get::<_, i64>(8)?,
+        }))
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// `GET /api/videos/history?limit=`: the Recently watched shelf and History tab.
+pub(super) async fn get_videos_history(
+    State(state): State<SharedState>,
+    axum::extract::Query(query): axum::extract::Query<VideoHistoryQuery>,
+) -> Json<Value> {
+    let limit = query.limit.unwrap_or(40).clamp(1, 200);
+    let s = state.read().await;
+    match s.db.with_conn(|conn| recent_video_history(conn, limit)) {
+        Ok(items) => Json(json!({ "items": items })),
+        Err(e) => {
+            tracing::warn!(target = "noor.videos", "video history read failed: {e}");
+            Json(json!({ "items": [] }))
+        }
+    }
+}
+
+/// `DELETE /api/videos/history`: clears your watch history.
+pub(super) async fn delete_videos_history(State(state): State<SharedState>) -> Json<Value> {
+    let s = state.read().await;
+    let cleared =
+        s.db.with_conn(|conn| Ok(conn.execute("DELETE FROM video_history", [])?))
+            .is_ok();
+    Json(json!({ "ok": cleared }))
+}
+
+/// `DELETE /api/videos/history/videos/{video_id}`: forgets one video's watches.
+pub(super) async fn delete_video_from_history(
+    State(state): State<SharedState>,
+    Path(video_id): Path<i64>,
+) -> Json<Value> {
+    let s = state.read().await;
+    let removed =
+        s.db.with_conn(|conn| {
+            Ok(conn.execute(
+                "DELETE FROM video_history WHERE tidal_video_id = ?1",
+                [video_id],
+            )?)
+        })
+        .is_ok();
+    Json(json!({ "ok": removed }))
 }
 
 #[derive(Deserialize)]
@@ -757,6 +890,34 @@ pub(super) async fn post_saved_video(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recent_history_is_one_entry_per_video_newest_first_with_its_card() {
+        let db = crate::server::routes::tests::fresh_migrated_db();
+        db.with_conn(|conn| {
+            conn.execute_batch(
+                r#"INSERT INTO video_history (tidal_video_id, title, artist_name, duration_watched_ms, video_duration_ms, completed)
+                       VALUES (1, 'Old', 'A', 1000, 200000, 0),
+                              (2, 'Card', 'B', 200000, 200000, 1),
+                              (1, 'Old', 'A', 90000, 200000, 0);
+                   INSERT INTO video_catalog (tidal_video_id, artist_name, item_json)
+                       VALUES (2, 'B', '{"tidal_id":2,"title":"Card","artwork_url":"https://x/a.jpg","duration_ms":200000}');"#,
+            )?;
+            let items = recent_video_history(conn, 10)?;
+            assert_eq!(items.len(), 2);
+            assert_eq!(items[0]["video"]["tidal_id"], 1, "rewatched video comes first");
+            assert_eq!(items[0]["plays"], 2);
+            assert_eq!(items[0]["watched_ms"], 90000);
+            assert_eq!(
+                items[0]["video"]["duration_ms"], 200000,
+                "duration filled from the watch"
+            );
+            assert_eq!(items[1]["video"]["artwork_url"], "https://x/a.jpg");
+            assert_eq!(items[1]["completed"], true);
+            Ok(())
+        })
+        .expect("history");
+    }
     use std::sync::Arc;
 
     fn state(db: crate::db::Database) -> SharedState {
@@ -885,6 +1046,7 @@ mod tests {
                 title: Some("Song".into()),
                 artist_tidal_id: Some(9),
                 artist_name: None,
+                video: None,
             }),
         )
         .await;

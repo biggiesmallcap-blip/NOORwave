@@ -1242,7 +1242,13 @@ pub fn api_routes(state: SharedState) -> Router {
         )
         .route(
             "/api/videos/history",
-            post(video_discovery_routes::post_videos_history),
+            get(video_discovery_routes::get_videos_history)
+                .post(video_discovery_routes::post_videos_history)
+                .delete(video_discovery_routes::delete_videos_history),
+        )
+        .route(
+            "/api/videos/history/videos/{video_id}",
+            axum::routing::delete(video_discovery_routes::delete_video_from_history),
         )
         .route(
             "/api/videos/history/{id}/finish",

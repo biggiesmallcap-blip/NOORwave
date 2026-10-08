@@ -377,6 +377,17 @@ export interface TidalVideoMix {
 	type: 'mix';
 }
 
+/** One video in your watch history: the card, when you last watched it, how
+ *  far you got, whether you finished it and how many times you watched it. */
+export interface VideoHistoryEntry {
+	video: TidalSearchVideo;
+	watched_at: string;
+	watched_ms: number | null;
+	duration_ms: number | null;
+	completed: boolean;
+	plays: number;
+}
+
 export type TidalVideoMixItem = TidalSearchVideo & {
 	mix_id?: string | number | null;
 };
@@ -4187,11 +4198,26 @@ export const api = {
 		title?: string | null;
 		artist_tidal_id?: number | null;
 		artist_name?: string | null;
+		/** The card itself, kept so the Recently watched shelf can draw it. */
+		video?: TidalSearchVideo | null;
 	}): Promise<{ ok: boolean; id?: number }> {
 		return fetchApi<{ ok: boolean; id?: number }>('/api/videos/history', undefined, {
 			method: 'POST',
 			body: JSON.stringify(body),
 		});
+	},
+
+	/** Recent watches, newest first, one per video (Recently watched, History). */
+	getVideoHistory(limit = 40): Promise<{ items: VideoHistoryEntry[] }> {
+		return fetchApi<{ items: VideoHistoryEntry[] }>(`/api/videos/history?limit=${limit}`);
+	},
+
+	clearVideoHistory(): Promise<{ ok: boolean }> {
+		return fetchApi<{ ok: boolean }>('/api/videos/history', undefined, { method: 'DELETE' });
+	},
+
+	removeVideoFromHistory(videoId: number): Promise<{ ok: boolean }> {
+		return fetchApi<{ ok: boolean }>(`/api/videos/history/videos/${videoId}`, undefined, { method: 'DELETE' });
 	},
 
 	finishVideoHistory(

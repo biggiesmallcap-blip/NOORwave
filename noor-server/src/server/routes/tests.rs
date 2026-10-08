@@ -9056,6 +9056,7 @@ async fn all_api_routes_are_registered() {
         ("GET", "/api/albums/1/tracks"),
         ("GET", "/api/albums/1/credits"),
         ("GET", "/api/artwork-cache"),
+        ("GET", "/api/videos/history"),
         ("GET", "/api/albums/1/spotify-stats"),
         ("GET", "/api/artists"),
         ("GET", "/api/artists/letters"),
