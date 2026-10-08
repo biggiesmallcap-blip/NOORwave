@@ -1,23 +1,11 @@
 <script lang="ts" module>
 	import type { Track as CachedTrack } from '$lib/api/client';
 
-	type CachedHomeAlbumCard = {
-		id: number;
-		title: string;
-		artist_id: number | null;
-		artist_name: string | null;
-		artwork_url: string | null;
-	};
-
-	const HOME_PANEL_CACHE_REFRESH_MS = 5 * 60 * 1000;
+	// Recent tracks, kept across visits so the landing paints at once and
+	// refreshes quietly. The suggestion murals keep their own cache in
+	// LibraryMurals.svelte.
 	const homePanelCandidateCache = {
 		recentTracks: [] as CachedTrack[],
-		randomTracks: [] as CachedTrack[],
-		randomAlbums: [] as CachedHomeAlbumCard[],
-		randomRequestKey: '',
-		suggestionTracks: [] as CachedTrack[],
-		suggestionAlbums: [] as CachedHomeAlbumCard[],
-		suggestionRequestKey: '',
 	};
 </script>
 
@@ -47,7 +35,6 @@
 		playLibrary,
 		addTrackToQueue,
 		playTrackNext,
-		shuffleMode,
 		playAlbum as playAlbumNow,
 		playArtist as playArtistNow,
 		shuffleArtist as shuffleArtistNow
@@ -59,7 +46,9 @@
 	import ArtistCarousel from '$lib/components/ArtistCarousel.svelte';
 	import AlbumCarousel from '$lib/components/AlbumCarousel.svelte';
 	import AlbumDetailPopup from '$lib/components/AlbumDetailPopup.svelte';
-	import { lazyTidalArt, composeTidalArtQuery, peekTidalArt } from '$lib/actions/lazy-tidal-art';
+	import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
+	import LibraryMurals from '$lib/components/library/LibraryMurals.svelte';
+	import type { HomeAlbumCard } from '$lib/components/library/library_murals';
 	import { portal } from '$lib/actions/portal';
 	import { openContextMenu, openMenuAtElement, type MenuItem } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
@@ -147,7 +136,6 @@
 	// whole-library Shuffle queue depth; automix extends past it.
 	const SHUFFLE_SAMPLE_SIZE = 200;
 	const RECENT_TRACK_LIMIT = 10;
-	const HOME_MURAL_ITEM_LIMIT = 12;
 	const ALL_SEARCH_ARTIST_PREVIEW_LIMIT = 12;
 	const ALL_SEARCH_ALBUM_PREVIEW_LIMIT = 12;
 	const ALL_SEARCH_TRACK_PREVIEW_LIMIT = 10;
@@ -1329,34 +1317,6 @@
 		return map;
 	});
 
-	interface HomeAlbumCard {
-		id: number;
-		title: string;
-		artist_id: number | null;
-		artist_name: string | null;
-		artwork_url: string | null;
-	}
-
-	type HomeMuralItemKind = 'track' | 'album';
-
-	interface HomeMuralItem {
-		id: number;
-		kind: HomeMuralItemKind;
-		title: string;
-		subtitle: string;
-		artwork_url: string | null;
-		track?: Track;
-		album?: HomeAlbumCard;
-	}
-
-	interface HomeMuralPanel {
-		id: string;
-		label: string;
-		caption: string;
-		kind: HomeMuralItemKind;
-		items: HomeMuralItem[];
-	}
-
 	let recentAlbums = $derived.by<HomeAlbumCard[]>(() => {
 		const albumDateMap = new Map<number, { card: HomeAlbumCard; date: string }>();
 
@@ -1383,177 +1343,11 @@
 			.map(({ card }) => card);
 	});
 
-	let randomPanelTracks = $state<Track[]>(homePanelCandidateCache.randomTracks);
-	let randomPanelAlbums = $state<HomeAlbumCard[]>(homePanelCandidateCache.randomAlbums);
-	let randomPanelRequestKey = $state(homePanelCandidateCache.randomRequestKey);
-	// Server-ranked hidden-gem picks. The server owns seed selection, recency
-	// exclusion and ranking; there is deliberately no client-side fallback. An
-	// empty discovery panel is a correct outcome - a panel full of what was just
-	// played is not, and that is exactly what the old same-artist tail-fill
-	// produced.
-	let suggestionTracks = $state<Track[]>(homePanelCandidateCache.suggestionTracks);
-	let suggestionAlbums = $state<HomeAlbumCard[]>(homePanelCandidateCache.suggestionAlbums);
-	let suggestionCandidateRequestKey = $state(homePanelCandidateCache.suggestionRequestKey);
-
-	// Max tracks (and albums) one artist may contribute to a suggestion panel, so
-	// a single prolific neighbour can't clone-fill it. Mirrors the server cap.
-	const SUGGESTION_ARTIST_CAP = 2;
-
-	function suggestionArtistKey(track: Track): number | string {
-		return track.artist_id ?? track.artist_name ?? '';
-	}
-
-	// Greedy per-artist cap, then a top-up pass from what the cap skipped. An
-	// empty key (missing artist) is never capped so those tracks don't all
-	// collapse into one synthetic bucket. The top-up matters because the cap is
-	// meant to shape the head of the mural, not shorten it: dropping capped
-	// tracks outright left the panel showing 5 of 12 whenever the server's list
-	// leaned on a few artists. Mirrors the server-side cap in
-	// noor-server/src/server/routes/home_suggestions.rs.
-	function capPerArtist(tracks: Track[], max: number, limit: number): Track[] {
-		const perArtist = new Map<number | string, number>();
-		const out: Track[] = [];
-		const skipped: Track[] = [];
-		for (const track of tracks) {
-			if (out.length >= limit) break;
-			const key = suggestionArtistKey(track);
-			if (max > 0 && key !== '') {
-				const count = perArtist.get(key) ?? 0;
-				if (count >= max) {
-					skipped.push(track);
-					continue;
-				}
-				perArtist.set(key, count + 1);
-			}
-			out.push(track);
-		}
-		for (const track of skipped) {
-			if (out.length >= limit) break;
-			out.push(track);
-		}
-		return out;
-	}
-
-	let suggestedTrackItems = $derived.by<HomeMuralItem[]>(() =>
-		capPerArtist(suggestionTracks, SUGGESTION_ARTIST_CAP, HOME_MURAL_ITEM_LIMIT)
-			.map(trackToMuralItem)
-	);
-
-	let suggestedAlbumItems = $derived.by<HomeMuralItem[]>(() =>
-		suggestionAlbums.slice(0, HOME_MURAL_ITEM_LIMIT).map(albumToMuralItem)
-	);
-
-	let randomTrackItems = $derived.by<HomeMuralItem[]>(() =>
-		randomPanelTracks.map(trackToMuralItem)
-	);
-
-	let randomAlbumItems = $derived.by<HomeMuralItem[]>(() =>
-		randomPanelAlbums.map(albumToMuralItem)
-	);
-
-	let homeMuralPanels = $derived.by<HomeMuralPanel[]>(() => {
-		const panels: HomeMuralPanel[] = [
-			{
-				id: 'suggested-tracks',
-				label: 'Suggested tracks',
-				caption: 'Listen history suggestions',
-				kind: 'track',
-				items: suggestedTrackItems,
-			},
-			{
-				id: 'suggested-albums',
-				label: 'Suggested albums',
-				caption: 'Listen history suggestions',
-				kind: 'album',
-				items: suggestedAlbumItems,
-			},
-			{
-				id: 'random-tracks',
-				label: 'Random tracks',
-				caption: 'Library shuffle picks',
-				kind: 'track',
-				items: randomTrackItems,
-			},
-			{
-				id: 'random-albums',
-				label: 'Random albums',
-				caption: 'Library shuffle picks',
-				kind: 'album',
-				items: randomAlbumItems,
-			},
-		];
-		return panels.filter(panel => panel.items.length > 0);
-	});
-
-	// Per-tile lazy artwork. Keyed by domain-prefixed id so we never collide
+	// Per-row lazy artwork. Keyed by domain-prefixed id so we never collide
 	// (track 5 and album 5 are independent entries). Populated by lazyTidalArt
-	// when a tile without baked artwork scrolls into view.
+	// when a row without baked artwork scrolls into view.
 	let lazyArt = $state<Record<string, string>>({});
 	let artistLazyArt = $state<Record<number, string>>({});
-
-	function homePanelRefreshBucket(): number {
-		return Math.floor(Date.now() / HOME_PANEL_CACHE_REFRESH_MS);
-	}
-
-	// Both random murals come from one server call. The old path derived random
-	// offsets from $totalTracks / $totalAlbums and issued a single-row paginated
-	// request per pick, so it could not start until the library store had loaded
-	// its first page and then paid 24 round trips - which is why these panels
-	// popped in well after the rest of the home view. The server owns the sample
-	// now (keyed to a five-minute bucket so it stays put across remounts), and
-	// this fires on mount alongside the suggestion murals.
-	async function loadRandomPanelCandidates(requestKey: string) {
-		const result = await cachedApi
-			.getHomeShufflePicks(HOME_MURAL_ITEM_LIMIT)
-			.catch(error => {
-				console.error('Failed to load library shuffle picks:', error);
-				return { tracks: [] as Track[], albums: [] as Album[] };
-			});
-		if (randomPanelRequestKey !== requestKey) return;
-		const tracksForPanel = uniqueById(result.tracks ?? []);
-		const albumsForPanel = uniqueById(result.albums ?? []).map(album => ({
-			id: album.id,
-			title: album.title,
-			artist_id: album.artist_id ?? null,
-			artist_name: album.artist_name,
-			artwork_url: album.artwork_url,
-		}));
-		randomPanelTracks = tracksForPanel;
-		randomPanelAlbums = albumsForPanel;
-		homePanelCandidateCache.randomTracks = tracksForPanel;
-		homePanelCandidateCache.randomAlbums = albumsForPanel;
-		homePanelCandidateCache.randomRequestKey = requestKey;
-	}
-
-	function uniqueById<T extends { id: number }>(items: T[]): T[] {
-		const seen = new Set<number>();
-		const result: T[] = [];
-		for (const item of items) {
-			if (seen.has(item.id)) continue;
-			seen.add(item.id);
-			result.push(item);
-		}
-		return result;
-	}
-
-	// No seeds are sent: the server picks its own blend of recent plays and
-	// long-term top artists, which keeps this request independent of how far the
-	// library store has loaded and keeps the server cache key stable across a boot.
-	async function loadSuggestionCandidates(requestKey: string) {
-		const result = await cachedApi
-			.getHomeSuggestions([], 50)
-			.catch(error => {
-				console.error('Failed to load home suggestions:', error);
-				return { tracks: [] as Track[], albums: [] as HomeAlbumCard[] };
-			});
-		if (suggestionCandidateRequestKey === requestKey) {
-			suggestionTracks = result.tracks ?? [];
-			suggestionAlbums = result.albums ?? [];
-			homePanelCandidateCache.suggestionTracks = suggestionTracks;
-			homePanelCandidateCache.suggestionAlbums = suggestionAlbums;
-			homePanelCandidateCache.suggestionRequestKey = requestKey;
-		}
-	}
 
 	function albumFromHomeCard(card: HomeAlbumCard): Album {
 		return {
@@ -1570,57 +1364,6 @@
 		};
 	}
 
-	function trackToMuralItem(track: Track): HomeMuralItem {
-		return {
-			id: track.id,
-			kind: 'track',
-			title: track.title,
-			subtitle: track.artist_name ?? track.album_title ?? 'Unknown artist',
-			artwork_url: track.artwork_url,
-			track,
-		};
-	}
-
-	function albumToMuralItem(album: HomeAlbumCard): HomeMuralItem {
-		return {
-			id: album.id,
-			kind: 'album',
-			title: album.title,
-			subtitle: album.artist_name ?? 'Unknown artist',
-			artwork_url: album.artwork_url,
-			album,
-		};
-	}
-
-	function fallbackLetters(label: string): string {
-		return label.split(/\s+/).map(part => part[0]?.toUpperCase() ?? '').join('').slice(0, 2) || '?';
-	}
-
-	// Domain-prefixed key so a track and an album with the same numeric id never
-	// collide in the lazyArt map (mirrors the track/album row keys).
-	function muralItemKey(item: HomeMuralItem): string {
-		return `${item.kind}-${item.id}`;
-	}
-
-	// Search terms the lazy Tidal-art lookup resolves against, shared by the
-	// mural's lazy action and the synchronous cache peek so both hit the same key.
-	function muralItemLazyQuery(item: HomeMuralItem): { artist: string | null; title: string } {
-		if (item.kind === 'album') {
-			return { artist: item.album?.artist_name ?? null, title: item.album?.title ?? item.title };
-		}
-		return { artist: item.track?.artist_name ?? null, title: item.title };
-	}
-
-	// Artwork with the same "always loaded" chain as the home-recs murals: baked
-	// art -> already-resolved lazy art -> previously-cached art (peek). The peek
-	// paints a full collage on first launch; live lookups swap in fresh art.
-	function muralItemArtwork(item: HomeMuralItem): string | null {
-		const resolved = item.artwork_url ?? lazyArt[muralItemKey(item)];
-		if (resolved) return resolved;
-		const query = muralItemLazyQuery(item);
-		return peekTidalArt(composeTidalArtQuery(query.artist, query.title));
-	}
-
 	function artistImageSources(
 		photoUrl: string | null | undefined,
 		lazyUrl: string | null | undefined,
@@ -1634,92 +1377,6 @@
 		const found = $albums.find(album => album.id === card.id);
 		void openAlbumDetail(found ?? albumFromHomeCard(card));
 	}
-
-	async function playHomeMuralTrack(item: HomeMuralItem, panel: HomeMuralPanel) {
-		if (!item.track) return;
-		const seen = new Set<number>();
-		const trackIds = panel.items
-			.filter((candidate) => candidate.kind === 'track' && candidate.track)
-			.map((candidate) => candidate.track!.id)
-			.filter((trackId) => {
-				if (seen.has(trackId)) return false;
-				seen.add(trackId);
-				return true;
-			});
-		if (!seen.has(item.track.id)) {
-			trackIds.unshift(item.track.id);
-		}
-
-		try {
-			if (trackIds.length > 0) {
-				const replaced = await api.replacePlaybackQueue(
-					trackIds.map((track_id) => ({ track_id })),
-					{ shuffleMode: get(shuffleMode) }
-				);
-				const selected = replaced.queue.find((queueItem) => queueItem.track.id === item.track!.id);
-				if (selected) await api.playQueueItem(selected.id);
-			}
-		} catch (error) {
-			console.error('Failed to play home panel track:', error);
-			await playTrackNow(item.track.id);
-		}
-	}
-
-	function openHomeMuralItem(item: HomeMuralItem, panel: HomeMuralPanel) {
-		if (item.kind === 'track' && item.track) {
-			void playHomeMuralTrack(item, panel);
-			return;
-		}
-		if (item.kind === 'album' && item.album) {
-			openHomeAlbumCard(item.album);
-		}
-	}
-
-	function openHomeMuralItemContextMenu(event: MouseEvent, item: HomeMuralItem) {
-		event.preventDefault();
-		event.stopPropagation();
-		if (item.kind === 'track' && item.track) {
-			openContextMenu(event, buildTrackMenu(item.track), item.title);
-			return;
-		}
-		if (item.kind === 'album' && item.album) {
-			handleHomeAlbumContextMenu(event, item.id, item.album);
-		}
-	}
-
-	// Fires once per refresh bucket, immediately on mount - deliberately NOT
-	// keyed off $totalTracks / $totalAlbums. Those stay 0 until the library
-	// store's first page lands, which is what delayed these panels behind
-	// everything else on the page.
-	$effect(() => {
-		const requestKey = String(homePanelRefreshBucket());
-		if (randomPanelRequestKey === requestKey) return;
-		randomPanelRequestKey = requestKey;
-
-		void loadRandomPanelCandidates(requestKey).catch((error) => {
-			console.error('Failed to load random library panels:', error);
-		});
-	});
-
-	// Fires once per refresh bucket, immediately on mount. Deliberately does NOT
-	// depend on any client-derived seed list: the old one read the whole $tracks
-	// store, so the request key churned as the library paged in during boot,
-	// refiring this with a different seed set each time. Every distinct seed set
-	// is a separate server cache key, so boot paid the ~1s cold path repeatedly
-	// and only after the library had loaded. The server derives its own seeds
-	// from listen_history now, so this starts in parallel with everything else.
-	$effect(() => {
-		const requestKey = String(homePanelRefreshBucket());
-		if (suggestionCandidateRequestKey === requestKey) return;
-		suggestionCandidateRequestKey = requestKey;
-
-		// Keep the last-good candidates on failure instead of zeroing (which made
-		// the whole panel vanish). loadSuggestionCandidates already degrades to []
-		// internally, so this only fires on unexpected throws.
-		void loadSuggestionCandidates(requestKey).catch((error) => {
-			console.error('Failed to load suggestion candidates:', error);
-		});
-	});
 
 	// ── Home view handlers ─────────────────────────────────────────────────
 
@@ -1951,7 +1608,6 @@
 		<SearchField
 			bind:value={$searchQuery}
 			variant="page"
-			facets
 			inlineCompletion
 			filterChips
 			placeholder={activeTab === 'albums' ? 'Search albums or artists' : 'Search tracks, albums, or artists'}
@@ -2031,6 +1687,7 @@
 			{/if}
 		</div>
 
+		{#if searchBusy || isSearchMode}
 		<div class="library-search-meta">
 			{#if searchBusy}
 				<span class="library-status">Searching…</span>
@@ -2048,6 +1705,7 @@
 				<button class="filter-pill" onclick={() => (searchQuery.set(''))}>Clear</button>
 			{/if}
 		</div>
+		{/if}
 	</div>
 
 
@@ -2310,63 +1968,8 @@
 				<div class="home-loading">Loading your library…</div>
 			{/if}
 
-			{#if homeMuralPanels.length > 0}
-				<section class="home-mural-grid rise-in-shelf" style="--rise-index: 1" aria-label="Library suggestion panels">
-					{#each homeMuralPanels as panel, i (panel.id)}
-						<article class="home-mural-panel rise-in-card" aria-label={panel.label} style={`--rise-index: ${i}`}>
-							<div class="home-mural-bg">
-								{#each panel.items as item (`${panel.id}-${item.kind}-${item.id}`)}
-									{@const muralArt = muralItemArtwork(item)}
-									<button
-										class="home-mural-tile"
-										class:home-mural-tile--album={item.kind === 'album'}
-										type="button"
-										onclick={() => openHomeMuralItem(item, panel)}
-										oncontextmenu={(event) => openHomeMuralItemContextMenu(event, item)}
-										aria-label={`${item.kind === 'track' ? 'Play' : 'Open'} ${item.title}`}
-										title={`${item.title}${item.subtitle ? ` - ${item.subtitle}` : ''}`}
-										use:lazyTidalArt={{
-											enabled: muralArt === null,
-											query: muralItemLazyQuery(item),
-											onResolve: (url) => (lazyArt[muralItemKey(item)] = url),
-										}}
-									>
-										<ArtworkImage
-											className="home-mural-art"
-											src={muralArt}
-											size={320}
-											fallbackText={fallbackLetters(item.title)}
-											decorative={true}
-											loading="eager"
-											fadeIn={true}
-										/>
-									</button>
-								{/each}
-							</div>
-							<div class="home-mural-shade"></div>
-							<div class="home-mural-copy">
-								<span class="home-mural-caption">{panel.caption}</span>
-								<h3 class="home-mural-title">{panel.label}</h3>
-								<span class="home-mural-count">{panel.items.length} picks</span>
-							</div>
-						</article>
-					{/each}
-				</section>
-			{/if}
-
-			{#if recentArtists.length > 0}
-				<section class="home-section rise-in-shelf" style="--rise-index: 2">
-					<h3 class="section-label">Recently Played Artists</h3>
-					<ArtistCarousel
-						artists={recentArtists}
-						onArtistClick={handleHomeArtistClick}
-						onContextMenu={handleHomeArtistContextMenu}
-					/>
-				</section>
-			{/if}
-
 			{#if recentAlbums.length > 0}
-				<section class="home-section rise-in-shelf" style="--rise-index: 3">
+				<section class="home-section rise-in-shelf" style="--rise-index: 1">
 					<h3 class="section-label">Recently Added</h3>
 					<AlbumCarousel
 						albums={recentAlbums}
@@ -2378,13 +1981,19 @@
 				</section>
 			{/if}
 
+			<LibraryMurals
+				riseIndex={2}
+				onOpenAlbum={openHomeAlbumCard}
+				onAlbumContextMenu={(event, card) => handleHomeAlbumContextMenu(event, card.id, card)}
+			/>
+
 			{#if recentTracks.length > 0}
-				<section class="home-section rise-in-shelf" style="--rise-index: 4">
+				<section class="home-section home-section--tracks rise-in-shelf" style="--rise-index: 3">
 					<div class="section-header-row">
 						<h3 class="section-label">Recent Tracks</h3>
 						<button class="view-all-link" onclick={() => void goto('/history')}>View all →</button>
 					</div>
-					<div class="home-track-list">
+					<div class="home-track-list home-track-list--split">
 						{#each recentTracks as track (track.id)}
 							{@const trackKey = `track-${track.id}`}
 							{@const trackArt = track.artwork_url ?? lazyArt[trackKey] ?? null}
@@ -2438,6 +2047,19 @@
 					</div>
 				</section>
 			{/if}
+
+			{#if recentArtists.length > 0}
+				<section class="home-section rise-in-shelf" style="--rise-index: 4">
+					<h3 class="section-label">Recently Played Artists</h3>
+					<ArtistCarousel
+						artists={recentArtists}
+						onArtistClick={handleHomeArtistClick}
+						onContextMenu={handleHomeArtistContextMenu}
+					/>
+				</section>
+			{/if}
+
+
 		</div>
 
 	{:else if activeTab === 'albums'}
@@ -3062,8 +2684,8 @@
 	.library-home {
 		display: flex;
 		flex-direction: column;
-		gap: 24px;
-		padding: 8px 0 40px;
+		gap: var(--space-6);
+		padding: 0 0 40px;
 	}
 
 	.library-search-results {
@@ -3087,166 +2709,6 @@
 		display: flex;
 		flex-direction: column;
 		gap: 12px;
-	}
-
-	.home-mural-grid {
-		display: grid;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
-		gap: var(--space-4);
-	}
-
-	/* Entrance motion comes from the shared `rise-in-card` in app.css, applied
-	   in the markup. This used to carry a fourth private copy of the rise
-	   keyframes, with its own `--mural-index` and a `both` fill - `both` keeps
-	   the animation applied forever, which gives the panel a permanent stacking
-	   context and traps a popout's z-index inside it. */
-	.home-mural-panel {
-		position: relative;
-		min-height: clamp(140px, 15vw, 210px);
-		border-radius: var(--radius-md);
-		overflow: hidden;
-		border: 1px solid var(--border-subtle);
-		background: var(--panel-bg);
-	}
-
-	.home-mural-bg {
-		position: absolute;
-		inset: -7%;
-		z-index: 0;
-		display: grid;
-		grid-template-columns: repeat(6, minmax(0, 1fr));
-		grid-template-rows: repeat(2, minmax(0, 1fr));
-		background: linear-gradient(120deg, var(--panel-bg), color-mix(in srgb, var(--accent-soft) 24%, transparent));
-	}
-
-	.home-mural-bg::after {
-		content: '';
-		position: absolute;
-		inset: 0;
-		background:
-			radial-gradient(circle at 78% 42%, rgba(255,255,255,0.2), transparent 30%),
-			linear-gradient(90deg, rgba(0,0,0,0.06), transparent 42%, rgba(0,0,0,0.02));
-		pointer-events: none;
-	}
-
-	.home-mural-tile {
-		appearance: none;
-		position: relative;
-		min-width: 0;
-		min-height: 0;
-		padding: 0;
-		border: 0;
-		background: var(--bg-raised);
-		color: var(--text-primary);
-		cursor: pointer;
-		overflow: hidden;
-		opacity: 0.96;
-		filter: saturate(1.18) brightness(1.16);
-		transform: skewX(-7deg) scaleX(1.08);
-		transform-origin: center;
-		transition:
-			filter var(--motion-fast),
-			opacity var(--motion-fast),
-			transform var(--motion-base),
-			box-shadow var(--motion-base);
-	}
-
-	.home-mural-tile::after {
-		content: '';
-		position: absolute;
-		inset: 0;
-		background: linear-gradient(90deg, rgba(0,0,0,0.18), transparent 48%, rgba(0,0,0,0.2));
-		opacity: 0.18;
-		pointer-events: none;
-	}
-
-	.home-mural-tile:hover,
-	.home-mural-tile:focus-visible {
-		z-index: var(--z-raised);
-		opacity: 1;
-		filter: saturate(1.8) brightness(1.42);
-		transform: skewX(-7deg) scaleX(1.08) scale(1.045);
-		box-shadow:
-			0 0 0 1px rgba(255,255,255,0.32),
-			0 14px 30px rgba(0,0,0,0.32),
-			0 0 24px color-mix(in srgb, var(--accent) 38%, transparent);
-		outline: none;
-	}
-
-	.home-mural-tile :global(.home-mural-art) {
-		display: block;
-		width: 100%;
-		height: 100%;
-	}
-
-	.home-mural-tile :global(.home-mural-art:not(.fallback)) {
-		object-fit: cover;
-		transform: skewX(7deg) scale(1.24);
-		/* opacity here (not just transform) so the ArtworkImage fadeIn actually
-		   eases in - this rule outranks the component's own transition. */
-		transition: transform var(--motion-base), opacity 260ms ease-out;
-	}
-
-	.home-mural-tile:hover :global(.home-mural-art:not(.fallback)),
-	.home-mural-tile:focus-visible :global(.home-mural-art:not(.fallback)) {
-		transform: skewX(7deg) scale(1.34);
-	}
-
-	.home-mural-tile :global(.home-mural-art.fallback) {
-		display: grid;
-		place-items: center;
-		background: linear-gradient(135deg, var(--bg-raised), color-mix(in srgb, var(--accent-soft) 28%, var(--bg-surface)));
-		color: rgba(255,255,255,0.78);
-		transform: skewX(7deg) scale(1.08);
-	}
-
-	.home-mural-tile :global(.home-mural-art.fallback span) {
-		font-size: var(--font-size-xl);
-		font-weight: var(--font-weight-bold);
-	}
-
-	.home-mural-shade {
-		position: absolute;
-		inset: 0;
-		z-index: var(--z-base);
-		background: linear-gradient(90deg, rgba(0,0,0,0.68) 0%, rgba(0,0,0,0.3) 42%, rgba(0,0,0,0.06) 78%, transparent 100%);
-		pointer-events: none;
-	}
-
-	.home-mural-copy {
-		position: relative;
-		z-index: calc(var(--z-base) + 1);
-		display: flex;
-		flex-direction: column;
-		justify-content: flex-end;
-		gap: var(--space-1);
-		min-height: clamp(140px, 15vw, 210px);
-		max-width: min(22rem, 70%);
-		padding: var(--space-4);
-		text-shadow: 0 2px 18px rgba(0,0,0,0.62);
-		pointer-events: none;
-	}
-
-	.home-mural-caption,
-	.home-mural-count {
-		font-size: var(--font-size-2xs);
-		font-weight: var(--font-weight-semibold);
-		letter-spacing: 0;
-		text-transform: uppercase;
-		color: var(--accent);
-	}
-
-	.home-mural-title {
-		margin: 0;
-		color: var(--text-primary);
-		font-size: var(--font-size-xl);
-		font-weight: var(--font-weight-bold);
-		line-height: var(--line-height-tight);
-	}
-
-	.home-mural-count {
-		color: var(--text-secondary);
-		text-transform: none;
 	}
 
 	.section-label {
@@ -3297,7 +2759,26 @@
 
 	.home-track-row:hover { background: var(--bg-hover); }
 
-	.home-track-row.playing .ht-title { color: var(--accent); }
+	.home-track-row.playing .ht-title { color: var(--accent-strong); }
+
+	/* Recent tracks on the landing read as two columns on wide content, so ten
+	   tracks take five rows instead of a long single column. */
+	.home-section--tracks {
+		container-type: inline-size;
+	}
+
+	.home-track-list--split {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		column-gap: var(--space-6);
+		row-gap: 2px;
+	}
+
+	@container (max-width: 860px) {
+		.home-track-list--split {
+			grid-template-columns: minmax(0, 1fr);
+		}
+	}
 
 	.ht-art {
 		width: 36px;
@@ -3360,7 +2841,7 @@
 
 	.ht-duration {
 		font-size: var(--font-size-xs);
-		color: var(--text-muted, rgba(255,255,255,0.4));
+		color: var(--text-tertiary);
 		font-variant-numeric: tabular-nums;
 	}
 
@@ -3647,7 +3128,10 @@
 		gap: 10px;
 		width: 100%;
 		max-width: var(--content-width);
-		margin: 0 auto var(--space-5);
+		/* No bottom margin: the page-shell gap is the only space between the
+		   search header and the content. Stacking a margin, a reserved status row
+		   and a top padding on top of it opened a 98px hole on the landing. */
+		margin: 0 auto;
 		padding: 0 4px;
 	}
 
@@ -4166,19 +3650,6 @@
 	}
 
 	@media (max-width: 760px) {
-		.home-mural-grid {
-			grid-template-columns: 1fr;
-		}
-
-		.home-mural-bg {
-			grid-template-columns: repeat(4, minmax(0, 1fr));
-			grid-template-rows: repeat(3, minmax(0, 1fr));
-		}
-
-		.home-mural-copy {
-			max-width: 82%;
-		}
-
 		.library-hero {
 			padding: 16px;
 			gap: 12px;
