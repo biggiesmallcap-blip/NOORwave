@@ -194,11 +194,7 @@ pub struct RadioProfile {
 impl RadioProfile {
     pub fn from_blend(blend: RadioBlend) -> Self {
         let (library_weight, lastfm_weight, engine_weight) = blend.weights();
-        let creativity = match blend {
-            RadioBlend::Familiar => 0.15,
-            RadioBlend::Mixed => 0.30,
-            RadioBlend::Adventurous => 0.50,
-        };
+        let creativity = blend.creativity();
         // Same-artist / same-album / genre_saturation penalties only fire when
         // diversity_rerank_enabled, so these defaults are inert until then.
         // min_confidence default 0.4 is the fused-edge floor — penalty applies
@@ -391,8 +387,11 @@ mod tests {
     fn profile_from_blend_carries_weights_and_creativity() {
         let p = RadioProfile::from_blend(RadioBlend::Familiar);
         assert_eq!(p.name(), "familiar");
-        assert!((p.library_weight - 0.60).abs() < 1e-9);
-        assert!((p.creativity - 0.15).abs() < 1e-9);
+        assert!((p.library_weight - 0.55).abs() < 1e-9);
+        assert!(
+            p.creativity.abs() < 1e-9,
+            "Familiar stays with the nearest neighbors"
+        );
         let total = p.library_weight + p.lastfm_weight + p.engine_weight;
         assert!((total - 1.0).abs() < 1e-9, "weights sum {}", total);
     }

@@ -48,11 +48,27 @@ pub enum RadioBlend {
 
 impl RadioBlend {
     /// Returns (library_weight, lastfm_weight, engine_weight) summing to 1.0.
+    ///
+    /// Lanes ordered by distance from the seed: engine (album, artist and
+    /// co-listen siblings) is closest, learned neighbors next (their reach set
+    /// by `creativity`), Last.fm furthest. More adventurous blends move weight
+    /// from the closest lane to the furthest; the old Adventurous gave siblings
+    /// half the queue.
     pub fn weights(self) -> (f64, f64, f64) {
         match self {
-            RadioBlend::Familiar => (0.60, 0.30, 0.10),
-            RadioBlend::Mixed => (0.30, 0.40, 0.30),
-            RadioBlend::Adventurous => (0.10, 0.40, 0.50),
+            RadioBlend::Familiar => (0.55, 0.15, 0.30),
+            RadioBlend::Mixed => (0.40, 0.40, 0.20),
+            RadioBlend::Adventurous => (0.40, 0.50, 0.10),
+        }
+    }
+
+    /// How far down the learned neighbor list the library lane reaches
+    /// (see `learning::radio_from_neighbors`).
+    pub fn creativity(self) -> f64 {
+        match self {
+            RadioBlend::Familiar => 0.0,
+            RadioBlend::Mixed => 0.25,
+            RadioBlend::Adventurous => 0.50,
         }
     }
 }
@@ -225,11 +241,7 @@ pub async fn orchestrate_song(
     let library_results: Vec<RadioCandidate> = {
         let mut excl: Vec<i64> = exclude_set.iter().copied().collect();
         excl.push(seed_track_id);
-        let creativity = match blend {
-            RadioBlend::Familiar => 0.15,
-            RadioBlend::Mixed => 0.30,
-            RadioBlend::Adventurous => 0.50,
-        };
+        let creativity = blend.creativity();
         let lib = crate::services::learning::radio_from_neighbors(
             db,
             seed_track_id,
@@ -1931,6 +1943,18 @@ mod tests {
     }
 
     #[test]
+    fn blends_get_further_from_the_seed_as_they_get_more_adventurous() {
+        // The engine lane is album, artist and co-listen siblings: the closest
+        // source. Last.fm reaches furthest. Adventurous must lean away from
+        // siblings, not toward them.
+        let (_, fam_lfm, fam_eng) = RadioBlend::Familiar.weights();
+        let (_, mix_lfm, mix_eng) = RadioBlend::Mixed.weights();
+        let (_, adv_lfm, adv_eng) = RadioBlend::Adventurous.weights();
+        assert!(fam_eng > mix_eng && mix_eng > adv_eng);
+        assert!(fam_lfm < mix_lfm && mix_lfm < adv_lfm);
+    }
+
+    #[test]
     fn weights_sum_to_one() {
         for blend in [
             RadioBlend::Familiar,
@@ -3526,11 +3550,7 @@ mod radio_diagnostic_harness {
         let library_results: Vec<RadioCandidate> = {
             let mut excl: Vec<i64> = exclude_set.iter().copied().collect();
             excl.push(seed_id);
-            let creativity = match blend {
-                RadioBlend::Familiar => 0.15,
-                RadioBlend::Mixed => 0.30,
-                RadioBlend::Adventurous => 0.50,
-            };
+            let creativity = blend.creativity();
             crate::services::learning::radio_from_neighbors(
                 &db,
                 seed_id,

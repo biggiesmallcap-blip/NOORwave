@@ -1976,6 +1976,9 @@ pub fn load_active_learning_model(db: &Database) -> Result<Option<ActiveLearning
     })
 }
 
+/// At creativity 1.0 the nearest neighbor's score is discounted by this much.
+const CREATIVITY_REACH: f64 = 0.6;
+
 pub fn radio_from_neighbors(
     db: &Database,
     seed_track_id: i64,
@@ -1995,10 +1998,17 @@ pub fn radio_from_neighbors(
             return Ok(Some(Vec::new()));
         }
 
+        // Creativity reaches down the neighbor list: it discounts the nearest
+        // ranks most and the furthest not at all, so it changes the order. The
+        // old uniform discount scaled every score alike and changed nothing.
+        let last_rank = neighbors.len().saturating_sub(1).max(1) as f64;
+        let reach = creativity.clamp(0.0, 1.0) * CREATIVITY_REACH;
         let mut rows = neighbors
             .into_iter()
-            .map(|neighbor| {
-                let adjusted = neighbor.score * (1.0 - creativity.clamp(0.0, 1.0) * 0.35);
+            .enumerate()
+            .map(|(position, neighbor)| {
+                let nearness = 1.0 - position as f64 / last_rank;
+                let adjusted = neighbor.score * (1.0 - reach * nearness);
                 let reasons = parse_reason_tags(neighbor.reason_json.as_deref());
                 DiscoveryRadioResult {
                     track_id: neighbor.track_id,
@@ -3186,6 +3196,61 @@ mod tests {
         assert_eq!(row.co_album_score, 0.0);
         assert_eq!(row.co_artist_score, 0.0);
         assert_eq!(row.genre_proximity, 0.0);
+    }
+
+    #[test]
+    fn radio_creativity_prefers_further_neighbors() {
+        let db = Database::open_in_memory().expect("in-memory db");
+        db.run_migrations().expect("migrations");
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;
+            for id in 1..=6 {
+                conn.execute(
+                    "INSERT INTO tracks (id, title, artist_id) VALUES (?1, 'T', 1)",
+                    rusqlite::params![id],
+                )?;
+            }
+            let model = queries::create_embedding_model(
+                conn,
+                "discovery-fusion-v2:creativity",
+                MODEL_FAMILY,
+                8,
+                "ready",
+                None,
+            )?;
+            queries::activate_embedding_model(conn, model.id)?;
+            for (rank, (neighbor, score)) in [(2, 1.00), (3, 0.97), (4, 0.94), (5, 0.91), (6, 0.88)]
+                .into_iter()
+                .enumerate()
+            {
+                conn.execute(
+                    "INSERT INTO track_neighbors (track_id, neighbor_track_id, model_id, rank, score)
+                     VALUES (1, ?1, ?2, ?3, ?4)",
+                    rusqlite::params![neighbor, model.id, rank as i64 + 1, score],
+                )?;
+            }
+            Ok(())
+        })
+        .expect("seed");
+
+        let order = |creativity: f64| {
+            radio_from_neighbors(&db, 1, &[], 5, creativity)
+                .expect("radio")
+                .expect("model")
+                .into_iter()
+                .map(|row| row.track_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            order(0.0),
+            vec![2, 3, 4, 5, 6],
+            "no creativity keeps nearest first"
+        );
+        assert_ne!(
+            order(0.5)[0],
+            2,
+            "high creativity reaches past the nearest neighbor"
+        );
     }
 
     #[test]
