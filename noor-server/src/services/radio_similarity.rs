@@ -67,7 +67,8 @@ const BUILT_GEN_KEY: &str = "radio_similarity_built_gen";
 const CHANGE_GEN_KEY: &str = "radio_similarity_change_gen";
 /// Bump when compute_track_similarity changes what it stores. An index built
 /// by an older version reads as never built, so every install rebuilds it once.
-/// v2: co-listen pairs (julianday window, log-scaled), per-track genre candidates.
+/// v2: co-listen pairs (julianday window, recency-weighted PPMI), per-track genre
+/// candidates.
 pub const SIMILARITY_BUILD_VERSION: i64 = 2;
 /// `server_config` key: SIMILARITY_BUILD_VERSION of the last successful rebuild.
 const BUILT_VERSION_KEY: &str = "radio_similarity_built_version";

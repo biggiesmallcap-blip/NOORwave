@@ -4383,7 +4383,7 @@ const CO_LISTEN_LOOKBACK_DAYS: i64 = 90;
 
 /// Build pre-computed similarity pairs for the radio feature, in four stages:
 ///   1. per-(track, genre) weights (genre rarity x tag confidence);
-///   2. co-listened pairs from listen_history, log-scaled;
+///   2. co-listened pairs from listen_history, recency-weighted PPMI;
 ///   3. candidate pairs: same album, same artist (artists with <= 100 tracks),
 ///      every co-listened pair, and each track's strongest genre partners;
 ///   4. per-component scores and the weighted total.
@@ -4488,12 +4488,14 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
     // Compared as text with datetime() output ("2026-10-07 04:24:43") it fails
     // on the same day, which left every co_listen_score at 0, so all time math
     // goes through julianday(). Early skips (under 30 s, not completed) are not
-    // co-listens.
+    // co-listens. Each listen counts by recency: 1.0 now, fading to 0.2 at the
+    // end of the lookback window.
     conn.execute_batch(&format!(
         "
         DROP TABLE IF EXISTS _listen_jd;
         CREATE TEMP TABLE _listen_jd AS
-        SELECT track_id, julianday(started_at) AS jd
+        SELECT track_id, julianday(started_at) AS jd,
+               MAX(0.2, 1.0 - (julianday('now') - julianday(started_at)) / {lookback}.0) AS w
         FROM listen_history
         WHERE track_id IS NOT NULL
           AND julianday(started_at) >= julianday('now', '-{lookback} days')
@@ -4509,37 +4511,59 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
             PRIMARY KEY (ta, tb)
         );
         INSERT INTO _co_listen (ta, tb, n)
-        SELECT MIN(a.track_id, b.track_id), MAX(a.track_id, b.track_id), CAST(COUNT(*) AS REAL)
+        SELECT MIN(a.track_id, b.track_id), MAX(a.track_id, b.track_id), SUM(MIN(a.w, b.w))
         FROM _listen_jd a
         JOIN _listen_jd b
             ON b.track_id != a.track_id
            AND b.jd BETWEEN a.jd AND a.jd + {window:.1} / 1440.0
         GROUP BY 1, 2
         HAVING COUNT(*) >= 2;
-        DROP TABLE _listen_jd;
         ",
         lookback = CO_LISTEN_LOOKBACK_DAYS,
         window = CO_LISTEN_WINDOW_MINUTES,
     ))?;
 
-    // Log scaling: n / max(n) left nearly every pair near zero next to one
-    // heavily repeated pair. Done in Rust; the bundled SQLite has no ln().
+    // Positive PMI times log count: a pair heard together more often than the
+    // two tracks' own play counts predict scores high; two popular tracks that
+    // merely co-occur score low. The log count keeps a single lucky pairing
+    // from topping the list. Normalized so the strongest pair scores 1.0. Done
+    // in Rust; the bundled SQLite has no ln().
     {
+        let marginals: HashMap<i64, f64> = {
+            let mut stmt =
+                conn.prepare("SELECT track_id, SUM(w) FROM _listen_jd GROUP BY track_id")?;
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<HashMap<_, _>, _>>()?
+        };
+        let total: f64 = marginals.values().sum();
         let pairs: Vec<(i64, i64, f64)> = {
             let mut stmt = conn.prepare("SELECT ta, tb, n FROM _co_listen")?;
             stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
                 .collect::<Result<Vec<_>, _>>()?
         };
-        let max_n = pairs.iter().map(|pair| pair.2).fold(0.0f64, f64::max);
-        if max_n > 0.0 {
-            let denominator = max_n.ln_1p();
+        let raw = pairs
+            .into_iter()
+            .map(|(ta, tb, n)| {
+                let wa = marginals.get(&ta).copied().unwrap_or(0.0);
+                let wb = marginals.get(&tb).copied().unwrap_or(0.0);
+                let pmi = if wa > 0.0 && wb > 0.0 && total > 0.0 {
+                    (n * total / (wa * wb)).ln().max(0.0)
+                } else {
+                    0.0
+                };
+                (ta, tb, pmi * n.ln_1p())
+            })
+            .collect::<Vec<_>>();
+        let max_raw = raw.iter().map(|pair| pair.2).fold(0.0f64, f64::max);
+        if max_raw > 0.0 {
             let mut update =
                 conn.prepare("UPDATE _co_listen SET score = ?3 WHERE ta = ?1 AND tb = ?2")?;
-            for (ta, tb, n) in pairs {
-                update.execute(params![ta, tb, n.ln_1p() / denominator])?;
+            for (ta, tb, value) in raw {
+                update.execute(params![ta, tb, value / max_raw])?;
             }
         }
     }
+    conn.execute_batch("DROP TABLE IF EXISTS _listen_jd;")?;
 
     // -- Stage 3: candidate pairs --
     // Each INSERT must satisfy CHECK (track_a < track_b).
@@ -8894,12 +8918,70 @@ mod tests {
             )
             .expect("co-listened pair is a candidate")
         };
+        // Both cross-artist pairs are scored; the strongest normalizes to 1.0.
+        let (a, b) = (co(1, 2), co(3, 4));
+        assert!(a > 0.0 && b > 0.0, "co(1, 2) = {a}, co(3, 4) = {b}");
+        assert!((a.max(b) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn compute_track_similarity_co_listen_prefers_pairs_beyond_chance() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("foreign keys");
+        schema::run_migrations(&conn).expect("migrations");
+        for id in 1..=8 {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (?1, ?2)",
+                params![id, format!("A{id}")],
+            )
+            .expect("artist");
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, duration_ms) VALUES (?1, ?2, ?1, 180000)",
+                params![id, format!("T{id}")],
+            )
+            .expect("track");
+        }
+        let listen = |track: i64, hours_ago: i64, minutes: i64| {
+            conn.execute(
+                "INSERT INTO listen_history (track_id, started_at, duration_listened_ms, completed)
+                 VALUES (?1, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now',
+                         printf('-%d hours', ?2), printf('+%d minutes', ?3)), 180000, 1)",
+                params![track, hours_ago, minutes],
+            )
+            .expect("listen");
+        };
+        // 1 and 2 are only ever heard together (twice).
+        for hours_ago in [10, 20] {
+            listen(1, hours_ago, 0);
+            listen(2, hours_ago, 5);
+        }
+        // 3 is popular: twice with 4, and once each with 5..8.
+        for hours_ago in [30, 40] {
+            listen(3, hours_ago, 0);
+            listen(4, hours_ago, 5);
+        }
+        for (partner, hours_ago) in [(5, 50), (6, 60), (7, 70), (8, 80)] {
+            listen(3, hours_ago, 0);
+            listen(partner, hours_ago, 5);
+        }
+
+        compute_track_similarity(&conn).expect("compute similarity");
+
+        let co = |a: i64, b: i64| -> f64 {
+            conn.query_row(
+                "SELECT co_listen_score FROM track_similarity WHERE track_a=?1 AND track_b=?2",
+                params![a, b],
+                |row| row.get(0),
+            )
+            .expect("co-listened pair")
+        };
         assert!(
-            (co(3, 4) - 1.0).abs() < 1e-9,
-            "most co-listened pair is 1.0"
+            co(1, 2) > co(3, 4),
+            "a pair heard only together ({}) beats a popular track's pair ({})",
+            co(1, 2),
+            co(3, 4)
         );
-        // log1p(2) / log1p(8) = ln 3 / ln 9 = 0.5; n / max(n) gave 0.25.
-        assert!((co(1, 2) - 3f64.ln() / 9f64.ln()).abs() < 1e-9);
     }
 
     #[test]
