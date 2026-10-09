@@ -10,6 +10,7 @@
 /// With rayon parallelism: ~10-30s for 32k tracks (was hours in Python).
 use crate::db::queries::EmbeddingTrackRow;
 use crate::genre::jaccard::{weighted_genre_set, weighted_jaccard};
+use crate::services::audio_analysis::tempo_delta;
 use rayon::prelude::*;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -1033,14 +1034,14 @@ fn similarity_neighbors(
                     contributions.push(("album_context", 0.12));
                 }
 
-                // BPM proximity — scaled bonus: 0.15 within 3 BPM, 0.08 within 8 BPM
-                if let (Some(a_bpm), Some(b_bpm)) = (meta.bpm, other_meta.bpm) {
-                    let diff = (a_bpm - b_bpm).abs();
-                    if diff <= 3.0 {
+                // BPM proximity: 0.15 within 2.5%, 0.08 within 6.5% (about 3 and
+                // 8 BPM at 125), octave-folded so 85 and 170 BPM match.
+                if let Some(diff) = tempo_delta(meta.bpm, other_meta.bpm) {
+                    if diff <= 0.025 {
                         metadata_score += 0.15;
                         reason_tags.push("bpm_match".to_string());
                         contributions.push(("bpm_match", 0.15));
-                    } else if diff <= 8.0 {
+                    } else if diff <= 0.065 {
                         metadata_score += 0.08;
                         reason_tags.push("bpm_match".to_string());
                         contributions.push(("bpm_match", 0.08));

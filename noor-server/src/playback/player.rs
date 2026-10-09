@@ -4609,7 +4609,7 @@ mod tests {
 
     #[test]
     fn automix_reason_does_not_claim_harmonic_match_on_key_clash_with_close_bpm() {
-        // 8A vs 10A is a Camelot clash, but a near-identical BPM pushes the
+        // 8A vs 11A is a Camelot clash, but a near-identical BPM pushes the
         // *combined* harmonic multiplier above 1.0. The reason must still call
         // it a key clash - deriving the signal from the Camelot relationship,
         // not the blended multiplier.
@@ -4625,7 +4625,7 @@ mod tests {
             ..blank_dsp_features()
         };
         let candidate_features = AudioDspFeatures {
-            camelot_key: Some("10A".to_string()),
+            camelot_key: Some("11A".to_string()),
             bpm: Some(122.0),
             ..blank_dsp_features()
         };

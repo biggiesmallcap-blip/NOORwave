@@ -27,7 +27,7 @@ use serde::Deserialize;
 
 use crate::genre::jaccard::weighted_jaccard;
 use crate::services::audio_analysis::{
-    CamelotRelation, camelot_relation, compute_harmonic_multiplier,
+    CamelotRelation, camelot_relation, compute_harmonic_multiplier, tempo_delta,
 };
 use crate::smart::taste_vector::TasteVector;
 
@@ -275,16 +275,14 @@ fn derive_why(
         (Some(a), Some(b)) => camelot_relation(a, b) == CamelotRelation::Compatible,
         _ => false,
     };
-    let bpm_diff = match (seed.bpm, cand.bpm) {
-        (Some(a), Some(b)) => Some((a - b).abs()),
-        _ => None,
-    };
+    // Octave-folded relative tempo difference (85 and 170 BPM match).
+    let bpm_diff = tempo_delta(seed.bpm, cand.bpm);
 
-    if key_compatible && bpm_diff.is_some_and(|d| d < 10.0) {
+    if key_compatible && bpm_diff.is_some_and(|d| d < 0.08) {
         hits.push(("same key, close BPM".to_string(), "key_bpm"));
     } else if key_compatible {
         hits.push(("compatible key".to_string(), "key"));
-    } else if bpm_diff.is_some_and(|d| d < 5.0) {
+    } else if bpm_diff.is_some_and(|d| d < 0.04) {
         hits.push(("matching tempo".to_string(), "bpm"));
     }
 

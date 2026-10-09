@@ -1,6 +1,6 @@
 use crate::db::models::{AudioDjProfileKey, AudioDspFeatures};
 use crate::db::queries;
-use crate::services::audio_analysis::{CamelotRelation, camelot_relation};
+use crate::services::audio_analysis::{CamelotRelation, camelot_relation, tempo_delta};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::cmp::Ordering;
@@ -373,23 +373,10 @@ enum TempoFit {
 }
 
 fn tempo_fit(seed_bpm: f64, candidate_bpm: f64) -> TempoFit {
-    if !seed_bpm.is_finite()
-        || !candidate_bpm.is_finite()
-        || seed_bpm <= 0.0
-        || candidate_bpm <= 0.0
-    {
-        return TempoFit::Wide;
-    }
-    let best_ratio_delta = [0.5, 1.0, 2.0]
-        .into_iter()
-        .map(|family| ((candidate_bpm * family) / seed_bpm - 1.0).abs())
-        .fold(f64::INFINITY, f64::min);
-    if best_ratio_delta <= 0.03 {
-        TempoFit::InsideNudge
-    } else if best_ratio_delta <= 0.08 {
-        TempoFit::Near
-    } else {
-        TempoFit::Wide
+    match tempo_delta(Some(seed_bpm), Some(candidate_bpm)) {
+        Some(delta) if delta <= 0.03 => TempoFit::InsideNudge,
+        Some(delta) if delta <= 0.08 => TempoFit::Near,
+        _ => TempoFit::Wide,
     }
 }
 

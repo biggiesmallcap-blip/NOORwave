@@ -151,12 +151,12 @@ fn metadata_bonus(seed: &TrackMeta, cand: &TrackMeta) -> (f64, Vec<(&'static str
         tags.push(("album_context", 0.12));
     }
 
-    if let (Some(a), Some(b)) = (seed.bpm, cand.bpm) {
-        let diff = (a - b).abs();
-        if diff <= 3.0 {
+    // Same octave-folded tempo rule as the trainer.
+    if let Some(diff) = crate::services::audio_analysis::tempo_delta(seed.bpm, cand.bpm) {
+        if diff <= 0.025 {
             score += 0.15;
             tags.push(("bpm_match", 0.15));
-        } else if diff <= 8.0 {
+        } else if diff <= 0.065 {
             score += 0.08;
             tags.push(("bpm_match", 0.08));
         }
