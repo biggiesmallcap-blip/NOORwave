@@ -5307,7 +5307,7 @@ mod tests {
                 artist_name: "Outside Artist".to_string(),
                 genre_tags_json: None,
                 duration_ms: Some(180_000),
-                expires_at: "2026-03-01 00:00:00".to_string(),
+                expires_at: "2099-01-01 00:00:00".to_string(),
             },
         )
         .unwrap();
@@ -5388,7 +5388,7 @@ mod tests {
                 artist_name: "Outside Artist".to_string(),
                 genre_tags_json: None,
                 duration_ms: Some(180_000),
-                expires_at: "2026-03-01 00:00:00".to_string(),
+                expires_at: "2099-01-01 00:00:00".to_string(),
             },
         )
         .unwrap();
@@ -5402,7 +5402,7 @@ mod tests {
                 artist_name: "Outside Artist".to_string(),
                 genre_tags_json: None,
                 duration_ms: Some(181_000),
-                expires_at: "2026-03-01 00:00:00".to_string(),
+                expires_at: "2099-01-01 00:00:00".to_string(),
             },
         )
         .unwrap();
@@ -5447,6 +5447,80 @@ mod tests {
             .unwrap();
         assert_eq!(hints.iter().filter(|hint| **hint == Some(99001)).count(), 1);
         assert!(hints.contains(&Some(99002)));
+    }
+
+    #[test]
+    fn ensure_automix_external_skips_hidden_ai_candidates_without_failing() {
+        let conn = conn();
+        conn.execute_batch(
+            "ALTER TABLE tracks ADD COLUMN is_library INTEGER DEFAULT 0;
+             CREATE TABLE tidal_track_labels (tidal_id INTEGER PRIMARY KEY, ai INTEGER);
+             INSERT INTO server_config (key, value) VALUES ('tidal_hide_ai', '1');
+             INSERT INTO tidal_track_labels (tidal_id, ai) VALUES (99001, 1);",
+        )
+        .unwrap();
+        let current = queue::get_tracks_by_ids(&conn, &[1]).unwrap().remove(0);
+        queue::append_tracks(&conn, std::slice::from_ref(&current), "user").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1, position_ms = 0, is_playing = 1,
+                 automix_enabled = 1, automix_allow_external = 1, automix_use_learning = 0",
+            [],
+        )
+        .unwrap();
+        let model = queries::create_embedding_model(
+            &conn,
+            "discovery-fusion-v2:test-external-ai",
+            "discovery-fusion-v2",
+            32,
+            "ready",
+            None,
+        )
+        .unwrap();
+        queries::activate_embedding_model(&conn, model.id).unwrap();
+        let candidate = |tidal_id: i64, title: &str| {
+            queries::upsert_external_track_candidate(
+                &conn,
+                &queries::ExternalTrackCandidateUpsert {
+                    tidal_id: Some(tidal_id),
+                    mbid: None,
+                    dedupe_key: format!("tidal:{tidal_id}"),
+                    title: title.to_string(),
+                    artist_name: "Outside Artist".to_string(),
+                    genre_tags_json: None,
+                    duration_ms: Some(180_000),
+                    expires_at: "2099-01-01 00:00:00".to_string(),
+                },
+            )
+            .unwrap()
+        };
+        let hidden = candidate(99001, "Hidden AI Track");
+        let fresh = candidate(99002, "Fresh External");
+        let neighbor = |candidate_id: i64, rank: i32| queries::ExternalCandidateNeighborWriteRow {
+            candidate_id,
+            rank,
+            score: 0.9,
+            audio_score: 0.9,
+            metadata_score: 0.0,
+            reason_json: None,
+        };
+        queries::replace_external_candidate_neighbors(
+            &conn,
+            model.id,
+            1,
+            &[neighbor(hidden.id, 1), neighbor(fresh.id, 2)],
+        )
+        .unwrap();
+
+        let queue = ensure_automix_queue_depth(&conn, 1, false)
+            .expect("hidden content must not fail the refill");
+
+        let external: Vec<&str> = queue
+            .iter()
+            .filter(|item| item.source == "automix-new")
+            .map(|item| item.track.title.as_str())
+            .collect();
+        assert_eq!(external, vec!["Fresh External"]);
     }
 
     #[test]

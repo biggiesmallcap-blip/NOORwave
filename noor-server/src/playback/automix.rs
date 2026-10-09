@@ -312,9 +312,15 @@ pub fn ensure_automix_queue_depth(
             .flatten()
     {
         let external_needed = needed.saturating_sub(generated_count).max(1);
-        let appended_external =
-            append_automix_external_candidates(conn, model.id, current_track.id, external_needed)?;
-        appended |= appended_external > 0;
+        // External picks are optional; a failure here must never fail the
+        // refill that next_track and peek_next_track depend on.
+        match append_automix_external_candidates(conn, model.id, current_track.id, external_needed)
+        {
+            Ok(appended_external) => appended |= appended_external > 0,
+            Err(error) => {
+                tracing::warn!(target: "noor.automix", %error, "external automix refill failed")
+            }
+        }
     }
 
     if !appended {
@@ -340,6 +346,12 @@ fn append_automix_external_candidates(
     )?;
     let mut candidates = Vec::new();
     for row in rows {
+        // Hidden content never reaches the insert, where it would bail.
+        if let Some(tidal_id) = row.tidal_id
+            && crate::db::tidal_content::is_blocked(conn, tidal_id)?
+        {
+            continue;
+        }
         if let Some(tidal_id) = row.tidal_id
             && queued_tidal_ids.contains(&tidal_id)
         {
@@ -385,7 +397,7 @@ fn append_automix_external_candidates(
     for ranked in ranked {
         let row = ranked.row;
         let reason = append_dj_reason("external similarity", ranked.score, &ranked.reasons);
-        queue::append_external_track(
+        if let Err(error) = queue::append_external_track(
             conn,
             &queue::ExternalTrackInsert {
                 artist: &row.artist_name,
@@ -395,7 +407,16 @@ fn append_automix_external_candidates(
                 tidal_id_hint: row.tidal_id,
                 ..Default::default()
             },
-        )?;
+        ) {
+            tracing::warn!(
+                target: "noor.automix",
+                %error,
+                artist = %row.artist_name,
+                title = %row.title,
+                "skipping external automix pick"
+            );
+            continue;
+        }
         appended += 1;
         if appended >= limit {
             break;

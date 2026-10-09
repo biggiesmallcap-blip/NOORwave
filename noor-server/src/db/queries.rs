@@ -6442,6 +6442,7 @@ pub fn get_external_candidate_neighbors(
          WHERE n.model_id = ?1
            AND n.library_track_id = ?2
            AND (?3 = 0 OR c.tidal_id IS NOT NULL)
+           AND julianday(c.expires_at) > julianday('now')
          ORDER BY n.rank ASC
          LIMIT ?4",
     )?;
@@ -10821,7 +10822,7 @@ mod tests {
                 artist_name: "Outside".to_string(),
                 genre_tags_json: None,
                 duration_ms: Some(100_000),
-                expires_at: "2026-03-01 00:00:00".to_string(),
+                expires_at: "2099-01-01 00:00:00".to_string(),
             },
         )
         .expect("unresolved");
@@ -10835,7 +10836,7 @@ mod tests {
                 artist_name: "Outside".to_string(),
                 genre_tags_json: None,
                 duration_ms: Some(100_000),
-                expires_at: "2026-03-01 00:00:00".to_string(),
+                expires_at: "2099-01-01 00:00:00".to_string(),
             },
         )
         .expect("resolved");
