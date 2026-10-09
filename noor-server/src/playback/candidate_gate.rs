@@ -167,12 +167,13 @@ impl CandidateGate {
             if Some(item.id) == skip_queue_item_id {
                 continue;
             }
-            gate.record(&item.track);
+            gate.note_queued(&item.track);
         }
         gate
     }
 
-    fn record(&mut self, track: &Track) {
+    /// Remember a track as already queued (the radio seed, for instance).
+    pub(crate) fn note_queued(&mut self, track: &Track) {
         if track.id > 0 {
             self.seen_track_ids.insert(track.id);
         }
@@ -249,7 +250,7 @@ impl CandidateGate {
         if !self.allows_track(track) {
             return false;
         }
-        self.record(track);
+        self.note_queued(track);
         true
     }
 

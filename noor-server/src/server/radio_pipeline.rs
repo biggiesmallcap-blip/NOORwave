@@ -1,3 +1,4 @@
+use crate::playback::candidate_gate::CandidateGate;
 use crate::playback::dj_queue_ranker::{
     GeneratedCandidate, append_dj_reason, mixing_active, rank_generated_candidates,
 };
@@ -46,6 +47,7 @@ pub fn build_radio_queue_from_candidates_with_seed(
     // orchestrate_song already excludes it; this filter is a defensive guard.
     let had_candidates = !candidates.is_empty() || seed_track_id.is_some();
     let candidates = filter_content_candidates(conn, candidates)?;
+    let candidates = gate_radio_candidates(conn, seed_track_id, candidates, false);
     let seed_track_id = match seed_track_id {
         Some(id) if crate::db::tidal_content::local_is_blocked(conn, id)? => None,
         seed => seed,
@@ -208,6 +210,7 @@ pub fn append_radio_queue_from_candidates(
     candidates: Vec<RadioCandidate>,
 ) -> rusqlite::Result<RadioQueueBuild> {
     let candidates = filter_content_candidates(conn, candidates)?;
+    let candidates = gate_radio_candidates(conn, None, candidates, true);
     let candidates = rank_radio_candidates(conn, append_seed_track_id(conn), candidates);
 
     let tx = conn.unchecked_transaction()?;
@@ -285,6 +288,43 @@ fn append_seed_track_id(conn: &rusqlite::Connection) -> Option<i64> {
         .ok()
         .flatten()
     })
+}
+
+/// The shared candidate gate for radio: recent plays, early skips, Not for
+/// me and anything already queued (any version) stay out, and versions of one
+/// recording inside the list collapse to the first. `keep_queue` is true when
+/// appending (the existing queue stays); a fresh station replaces it.
+fn gate_radio_candidates(
+    conn: &rusqlite::Connection,
+    seed_track_id: Option<i64>,
+    candidates: Vec<RadioCandidate>,
+    keep_queue: bool,
+) -> Vec<RadioCandidate> {
+    let queue_items = if keep_queue {
+        crate::playback::queue::load_queue(conn).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let mut gate = CandidateGate::load(conn, &queue_items, None);
+    if let Some(seed) = seed_track_id.and_then(|id| {
+        crate::playback::queue::get_track_by_id(conn, id)
+            .ok()
+            .flatten()
+    }) {
+        gate.note_queued(&seed);
+    }
+    candidates
+        .into_iter()
+        .filter(|candidate| {
+            gate.admit_candidate(
+                (candidate.track_id > 0).then_some(candidate.track_id),
+                candidate.tidal_track_id,
+                candidate.isrc.as_deref(),
+                &candidate.artist_name,
+                &candidate.title,
+            )
+        })
+        .collect()
 }
 
 fn rank_radio_candidates(
@@ -531,6 +571,30 @@ mod tests {
         .unwrap();
 
         assert_eq!(queued_track_ids(&conn), vec![Some(1), Some(20), Some(10)]);
+    }
+
+    #[test]
+    fn radio_queue_collapses_versions_of_one_recording() {
+        let conn = conn_with_queue();
+        build_radio_queue_from_candidates_with_seed(
+            &conn,
+            None,
+            vec![
+                candidate(0, false, "Band", "Song"),
+                candidate(0, false, "Band", "Song (2011 Remaster)"),
+                candidate(0, false, "Band", "Other Song"),
+            ],
+        )
+        .unwrap();
+
+        let titles: Vec<String> = conn
+            .prepare("SELECT pending_title FROM queue ORDER BY position ASC")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(titles, vec!["Song".to_string(), "Other Song".to_string()]);
     }
 
     #[test]

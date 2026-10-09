@@ -123,6 +123,48 @@ pub fn current_pending(conn: &Connection) -> Result<Option<(i64, String, String,
 /// temporary queue-item DJ profile to the resolved TIDAL key inside the same
 /// connection scope. Follow-up cleanup is best effort so it never masks a
 /// successful queue-row promotion.
+/// Whether a recommended row (radio, automix, discovery) may keep the track it
+/// just resolved to: the shared candidate gate runs again now that the real
+/// track is known (hidden, Not for me, recently played, already queued under
+/// another name). Rows the listener queued themselves always pass.
+pub fn resolved_track_admitted(
+    conn: &Connection,
+    queue_item_id: i64,
+    local_track_id: i64,
+) -> Result<bool> {
+    let source: Option<String> = conn
+        .query_row(
+            "SELECT source FROM queue WHERE id = ?1",
+            params![queue_item_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let recommended = source.as_deref().is_some_and(|source| {
+        source.starts_with("radio")
+            || source.starts_with("automix")
+            || source.starts_with("discover")
+    });
+    if !recommended {
+        return Ok(true);
+    }
+    let Some(track) = crate::playback::queue::get_track_by_id(conn, local_track_id)? else {
+        return Ok(true);
+    };
+    let items = crate::playback::queue::load_queue(conn)?;
+    let gate =
+        crate::playback::candidate_gate::CandidateGate::load(conn, &items, Some(queue_item_id));
+    Ok(gate.allows_track(&track))
+}
+
+/// Drop a pending row the gate rejected after resolution.
+pub fn drop_rejected(conn: &Connection, queue_item_id: i64) -> Result<bool> {
+    Ok(conn.execute(
+        "DELETE FROM queue WHERE id = ?1 AND track_id IS NULL",
+        params![queue_item_id],
+    )? == 1)
+}
+
 pub fn promote(
     conn: &Connection,
     queue_item_id: i64,
@@ -275,6 +317,30 @@ mod tests {
             media_ref_kind: kind.to_string(),
             media_ref_id: id.to_string(),
         }
+    }
+
+    #[test]
+    fn resolved_recommendation_already_queued_is_rejected_and_dropped() {
+        let conn = setup_conn();
+        let track_id = seed_track(&conn, Some(4242));
+        conn.execute(
+            "INSERT INTO queue (id, track_id, position, source) VALUES (1, ?1, 0, 'radio')",
+            params![track_id],
+        )
+        .expect("queued library row");
+        conn.execute(
+            "INSERT INTO queue (id, track_id, position, source, pending_artist, pending_title, pending_at)
+             VALUES (2, NULL, 1, 'radio', 'Artist', 'Track', datetime('now')),
+                    (3, NULL, 2, 'user', 'Artist', 'Track', datetime('now'))",
+            [],
+        )
+        .expect("pending rows");
+
+        // A radio row resolving to a track already queued is a duplicate.
+        assert!(!resolved_track_admitted(&conn, 2, track_id).expect("gate"));
+        assert!(drop_rejected(&conn, 2).expect("drop"));
+        // A row the listener queued is never second-guessed.
+        assert!(resolved_track_admitted(&conn, 3, track_id).expect("gate"));
     }
 
     #[test]

@@ -5724,6 +5724,30 @@ async fn resolve_pending_row(
         });
     }
 
+    // Recommended rows go through the shared gate again now that the real
+    // track is known; a rejected row is dropped instead of promoted.
+    let admitted = db
+        .with_conn(move |conn| pending::resolved_track_admitted(conn, queue_item_id, local_id))
+        .unwrap_or(true);
+    if !admitted {
+        let dropped = db
+            .with_conn(move |conn| pending::drop_rejected(conn, queue_item_id))
+            .unwrap_or(false);
+        if dropped {
+            let _ = event_tx.send(AppEvent::QueueUpdated);
+        } else {
+            release(&db, queue_item_id);
+        }
+        tracing::info!(
+            queue_item_id,
+            local_id,
+            artist = %pending_artist,
+            title = %pending_title,
+            "background resolver: dropped a recommended row the gate rejected"
+        );
+        return false;
+    }
+
     let score_stored = (score * 1000.0) as i32;
     let promoted = promote_pending_row_emit(&db, &event_tx, queue_item_id, local_id, score_stored);
 
