@@ -20,8 +20,8 @@ use crate::db::{
     queries,
 };
 use crate::playback::dj_queue_ranker::{
-    GeneratedCandidate, GeneratedCandidatePolicy, append_dj_reason, rank_generated_candidates,
-    rank_generated_candidates_chain,
+    GeneratedCandidate, GeneratedCandidatePolicy, append_dj_reason, mixing_active,
+    rank_generated_candidates, rank_generated_candidates_chain,
 };
 use crate::playback::player::{
     PlaybackSnapshot, build_session_taste_profile, load_snapshot, load_state, normalize_genre_key,
@@ -381,7 +381,7 @@ fn append_automix_external_candidates(
             reasons: Vec::new(),
         })
         .collect::<Vec<_>>();
-    let ranked = rank_generated_candidates(conn, seed_track_id, generated)
+    let ranked = rank_generated_candidates(conn, seed_track_id, generated, mixing_active(conn))
         .map(|ranked| {
             ranked
                 .into_iter()
@@ -449,7 +449,7 @@ fn rank_automix_selections(
         .iter()
         .map(|candidate| candidate.item.clone())
         .collect::<Vec<_>>();
-    rank_generated_candidates_chain(conn, seed_track_id, generated)
+    rank_generated_candidates_chain(conn, seed_track_id, generated, mixing_active(conn))
         .map(|ranked| {
             ranked
                 .into_iter()
@@ -564,25 +564,17 @@ pub(crate) fn build_automix_extension_with_reasons(
                     })
                 })
                 .collect::<Vec<_>>();
-            if let Some(seed) = shuffle_seed
-                && mode != ShuffleMode::Off
-            {
-                let tracks = ordered
-                    .iter()
-                    .map(|selection| selection.track.clone())
-                    .collect::<Vec<_>>();
-                let shuffled =
-                    queue::reorder_tracks_with_seed(conn, &tracks, mode, seed, "automix_learned")?;
-                let mut by_track = ordered
-                    .into_iter()
-                    .map(|selection| (selection.track.id, selection))
-                    .collect::<HashMap<_, _>>();
-                ordered = shuffled
-                    .into_iter()
-                    .filter_map(|track| by_track.remove(&track.id))
-                    .collect();
-            }
-            ordered = rank_automix_selections(conn, current_track.id, ordered);
+            // Neighbors arrive in relevance order; the ranker keeps that order
+            // and, while mixing, chains fit from the last track already queued
+            // so the first appended track follows the queue tail, not the
+            // track playing now.
+            let chain_from = queue_items
+                .iter()
+                .rev()
+                .find(|item| !item.is_pending && item.track.id > 0)
+                .map(|item| item.track.id)
+                .unwrap_or(current_track.id);
+            ordered = rank_automix_selections(conn, chain_from, ordered);
             ordered = cap_per_artist(
                 ordered,
                 |selection| selection.track.artist_id,
@@ -1997,8 +1989,15 @@ mod tests {
         );
         assert_eq!(tied_facts[0].track.id, 2);
 
+        // While mixing, a clearly better transition outweighs a slightly
+        // more trusted lane.
         let conn = Connection::open_in_memory().expect("db");
         create_dsp_schema(&conn);
+        conn.execute_batch(
+            "CREATE TABLE playback_state (id INTEGER PRIMARY KEY, crossfade_ms INTEGER);
+             INSERT INTO playback_state (id, crossfade_ms) VALUES (1, 4000);",
+        )
+        .expect("mixing on");
         insert_dsp(&conn, 1, 120.0, "1A");
         insert_dsp(&conn, 2, 145.0, "6B");
         insert_dsp(&conn, 3, 120.5, "1A");

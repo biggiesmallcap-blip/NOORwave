@@ -6527,6 +6527,7 @@ mod tests {
                 analysis_version TEXT NOT NULL DEFAULT 'test'
             );
             INSERT INTO server_config (key, value) VALUES ('discovery_engine', 'v2');
+            UPDATE playback_state SET crossfade_ms = 4000 WHERE id = 1;
             INSERT INTO embedding_models (
                 id, model_key, family, dimension, status, is_active, trained_at, created_at
             ) VALUES (
@@ -6542,7 +6543,7 @@ mod tests {
             INSERT INTO audio_dsp_features (track_id, bpm, camelot_key) VALUES
                 (1, 120.0, '1A'),
                 (2, 120.0, '2A'),
-                (3, 120.0, '12A'),
+                (3, 120.0, '12B'),
                 (4, 120.0, '3A');
             ",
         )
@@ -6559,7 +6560,7 @@ mod tests {
     }
 
     #[test]
-    fn learned_automix_smoke_prefers_next_track_fit_over_vague_similarity() {
+    fn learned_automix_keeps_relevance_and_lets_fit_nudge_only_while_mixing() {
         let conn = conn();
         conn.execute_batch(
             "
@@ -6633,13 +6634,27 @@ mod tests {
         .expect("schema");
         let seed = queue::get_track_by_id(&conn, 1).unwrap().unwrap();
 
-        let extension =
+        // Not mixing: relevance with lane policy decides, so the co-listened
+        // rank-1 neighbor leads even though it clashes on key and tempo.
+        let plain =
             extension_tracks(&conn, &seed, &[], ShuffleMode::Off, 5, true).expect("extension call");
+        assert_eq!(plain.first().map(|track| track.id), Some(2));
 
-        assert_eq!(extension.first().map(|track| track.id), Some(6));
-        assert_eq!(
-            extension.iter().map(|track| track.id).collect::<Vec<_>>(),
-            vec![6, 5, 3, 4, 2]
+        // Mixing: the clash drops behind close, well-fitting ranks but is not
+        // buried, and the far rank-5 fit does not jump to the top.
+        conn.execute(
+            "UPDATE playback_state SET crossfade_ms = 4000 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        let mixed =
+            extension_tracks(&conn, &seed, &[], ShuffleMode::Off, 5, true).expect("extension call");
+        let position = |id: i64| mixed.iter().position(|track| track.id == id).unwrap();
+        assert_eq!(mixed.first().map(|track| track.id), Some(3));
+        assert!(
+            (1..=3).contains(&position(2)),
+            "order: {:?}",
+            mixed.iter().map(|t| t.id).collect::<Vec<_>>()
         );
     }
 

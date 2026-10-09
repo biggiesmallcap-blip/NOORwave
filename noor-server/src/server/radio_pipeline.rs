@@ -1,5 +1,5 @@
 use crate::playback::dj_queue_ranker::{
-    GeneratedCandidate, append_dj_reason, rank_generated_candidates,
+    GeneratedCandidate, append_dj_reason, mixing_active, rank_generated_candidates,
 };
 use crate::services::radio::RadioCandidate;
 use rusqlite::OptionalExtension;
@@ -309,19 +309,24 @@ fn rank_radio_candidates(
         .iter()
         .map(|candidate| candidate.item.clone())
         .collect::<Vec<_>>();
-    rank_generated_candidates(conn, seed_track_id, generated)
-        .map(|ranked| {
-            ranked
-                .into_iter()
-                .map(|ranked| {
-                    let mut candidate = ranked.item;
-                    candidate.reason =
-                        append_dj_reason(&candidate.reason, ranked.score, &ranked.reasons);
-                    candidate
-                })
-                .collect()
-        })
-        .unwrap_or(fallback)
+    let ranked: Vec<RadioCandidate> =
+        rank_generated_candidates(conn, seed_track_id, generated, mixing_active(conn))
+            .map(|ranked| {
+                ranked
+                    .into_iter()
+                    .map(|ranked| {
+                        let mut candidate = ranked.item;
+                        candidate.reason =
+                            append_dj_reason(&candidate.reason, ranked.score, &ranked.reasons);
+                        candidate
+                    })
+                    .collect()
+            })
+            .unwrap_or(fallback);
+    // Ranking can reorder same-artist tracks next to each other; re-apply
+    // radio's artist spacing so the cap orchestrate_song built survives.
+    let limit = ranked.len();
+    crate::services::radio::enforce_artist_diversity(ranked, &[], limit)
 }
 
 #[cfg(test)]
@@ -490,10 +495,71 @@ mod tests {
         assert_eq!(hint, Some(9001));
     }
 
+    fn enable_mixing(conn: &rusqlite::Connection) {
+        conn.execute_batch(
+            "CREATE TABLE playback_state (id INTEGER PRIMARY KEY, crossfade_ms INTEGER);
+             INSERT INTO playback_state (id, crossfade_ms) VALUES (1, 4000);",
+        )
+        .unwrap();
+    }
+
+    fn queued_track_ids(conn: &rusqlite::Connection) -> Vec<Option<i64>> {
+        conn.prepare("SELECT track_id FROM queue ORDER BY position ASC")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn radio_queue_keeps_relevance_order_when_not_mixing() {
+        let conn = conn_with_queue();
+        add_dsp_table(&conn);
+        insert_features(&conn, 1, 124.0, "8A");
+        insert_features(&conn, 10, 126.0, "8A");
+        insert_features(&conn, 20, 145.0, "3B");
+
+        build_radio_queue_from_candidates_with_seed(
+            &conn,
+            Some(1),
+            vec![
+                candidate(20, true, "Clash Artist", "Clash Track"),
+                candidate(10, true, "Fit Artist", "Fit Track"),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(queued_track_ids(&conn), vec![Some(1), Some(20), Some(10)]);
+    }
+
+    #[test]
+    fn radio_queue_respaces_same_artist_after_ranking() {
+        let conn = conn_with_queue();
+        build_radio_queue_from_candidates_with_seed(
+            &conn,
+            Some(1),
+            vec![
+                candidate(11, true, "Same", "One"),
+                candidate(12, true, "Same", "Two"),
+                candidate(13, true, "Same", "Three"),
+                candidate(21, true, "Other", "Four"),
+            ],
+        )
+        .unwrap();
+
+        // Two in a row is the cap; the third same-artist track waits.
+        assert_eq!(
+            queued_track_ids(&conn),
+            vec![Some(1), Some(11), Some(12), Some(21), Some(13)]
+        );
+    }
+
     #[test]
     fn radio_queue_ranks_generated_candidates_by_dj_fit_after_seed() {
         let conn = conn_with_queue();
         add_dsp_table(&conn);
+        enable_mixing(&conn);
         insert_features(&conn, 1, 124.0, "8A");
         insert_features(&conn, 10, 126.0, "8A");
         insert_features(&conn, 20, 145.0, "3B");

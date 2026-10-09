@@ -1843,7 +1843,7 @@ fn artist_allowed(candidate_artist: &str, history: &[String]) -> bool {
 /// candidate whose artist would exceed the run or window cap given what came
 /// before it (recently played prefix + picks so far). Skipped candidates stay
 /// eligible for later slots once the window moves past their artist.
-fn enforce_artist_diversity(
+pub(crate) fn enforce_artist_diversity(
     ranked: Vec<RadioCandidate>,
     recent_artists: &[String],
     limit: usize,
