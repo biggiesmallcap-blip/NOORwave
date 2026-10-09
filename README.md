@@ -136,7 +136,7 @@ TIDAL catalogue replacements preserve track identity, original library dates and
 
 ### Listening analytics that are about listening
 
-Not a year-end slideshow. A ridgeline of when you actually listen across the day, peak hour, session count, completion rate, skip rate, and how all of it has moved over 24 hours, 7 days, 14 days, 30 days, or all time. Shown here with the player docked along the bottom.
+Not a year-end slideshow. A ridgeline of when you actually listen across the day, peak hour, session count, completion rate, skip rate, and how all of it has moved over 24 hours, 7 days, 14 days, 30 days, or all time. 
 
 <p align="center">
   <img alt="Listening analytics in the Clay light theme: listening pulse, rhythm, completion and skip rate over time" src="docs/assets/shots/analytics-light.webp" width="900" />
