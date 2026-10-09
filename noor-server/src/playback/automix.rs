@@ -1480,6 +1480,14 @@ pub(crate) fn automix_score(
     )
 }
 
+/// Full-overlap genre match is worth this much relevance on top of the 1.0 base.
+const AUTOMIX_GENRE_WEIGHT: f64 = 2.5;
+
+/// Relevance first, penalties last: genre overlap (weighted Jaccard, so extra
+/// tags dilute instead of stacking) and taste affinities build relevance;
+/// familiarity boosts scale it; the tamed harmonic fit nudges it; skip, recency
+/// and energy-whiplash penalties multiply the result so a shared genre can no
+/// longer cancel a skip.
 fn automix_score_with_genre_confidence(
     track: &Track,
     genres: &[queue::TrackGenreEvidence],
@@ -1488,51 +1496,16 @@ fn automix_score_with_genre_confidence(
     seed_features: Option<&AudioDspFeatures>,
     candidate_features: Option<&AudioDspFeatures>,
 ) -> AutomixScore {
-    let mut score = 1.0;
     let mut signals = Vec::new();
 
-    // Hard suppression for recently skipped tracks
-    if taste.skipped_track_ids.contains(&track.id) {
-        score *= 0.1;
-        signals.push(AutomixSignal::penalty("recently skipped"));
-    }
-
-    // Same-artist: gentle familiarity boost, not enough to cause artist runs.
-    // Artist spread is handled at the queue level by decluster_by_album.
-    if Some(track.artist_id) == seed.artist_id && track.artist_id != 0 {
-        score *= 1.1;
-        signals.push(AutomixSignal::boost("same artist"));
-    }
-
-    if seed.source.as_deref() == Some(track.source.as_str()) {
-        score *= 1.05;
-        signals.push(AutomixSignal::boost("same source"));
-    }
-
-    if track.is_favorite {
-        score *= 1.2;
-        signals.push(AutomixSignal::boost("favorite"));
-    }
-
-    // Unplayed tracks get a meaningful boost so they surface before heavily-played ones.
-    if track.play_count == 0 {
-        score *= 1.35;
-        signals.push(AutomixSignal::boost("unplayed"));
-    } else if let Some(last_played) = track.last_played_at.as_deref() {
-        // Time-decay penalty: full suppression at <1 day, fades to zero by 14 days.
-        let days_since = parse_days_since_last_played(last_played);
-        if days_since < 14.0 {
-            let penalty = 0.5 + 0.5 * (days_since / 14.0);
-            score *= penalty;
-            signals.push(AutomixSignal::penalty("recently played"));
-        }
-    }
+    // -- Relevance -----------------------------------------------------------
+    let mut relevance = 1.0;
 
     if track.artist_id != 0
         && let Some(affinity) = taste.artist_affinity.get(&track.artist_id)
     {
-        score += affinity.pos * 0.5;
-        score -= affinity.neg * 0.65;
+        relevance += affinity.pos * 0.5;
+        relevance -= affinity.neg * 0.65;
         // Label by the net effect on the score, not the raw counts.
         let net = affinity.pos * 0.5 - affinity.neg * 0.65;
         if net > 0.0 {
@@ -1542,43 +1515,55 @@ fn automix_score_with_genre_confidence(
         }
     }
 
-    let mut shares_seed_genre = false;
+    // Weighted Jaccard between the seed's genres and the candidate's: each
+    // genre weighs by rarity (0.5, the absent-data default, weighs 1.0), and a
+    // shared genre counts only as strongly as the weaker side believes it.
+    let genre_weight = |genre: &str| {
+        let rarity = seed.genre_rarity.get(genre).copied().unwrap_or(0.5);
+        0.7 + 0.6 * rarity
+    };
+    let mut shared_weight = 0.0;
+    let mut candidate_only_weight = 0.0;
     let mut genre_affinity_net = 0.0;
-    let normalized_genres = genres.iter().map(|genre| {
-        (
-            normalize_genre_key(&genre.path),
-            genre.confidence.clamp(0.0, 1.0),
-        )
-    });
-    for (genre, candidate_confidence) in normalized_genres {
-        let seed_confidence = seed
-            .genre_confidence
-            .get(&genre)
-            .copied()
-            .unwrap_or(1.0)
-            .clamp(0.0, 1.0);
-        let match_confidence = candidate_confidence.min(seed_confidence);
-        if seed.genres.contains(&genre) {
-            // Weight the seed-genre match by rarity when automix supplied it: a
-            // niche shared genre is a stronger signal than a library-wide one.
-            // 0.5 (the absent-data default) maps to a 1.0 multiplier, so callers
-            // without rarity data and existing tests keep the original flat +1.8.
-            let rarity = seed.genre_rarity.get(&genre).copied().unwrap_or(0.5);
-            score += 1.8 * (0.7 + 0.6 * rarity) * match_confidence;
-            shares_seed_genre |= match_confidence > 0.0;
+    let mut seen = HashSet::new();
+    for genre in genres {
+        let key = normalize_genre_key(&genre.path);
+        if !seen.insert(key.clone()) {
+            continue;
         }
-        if let Some(affinity) = taste.genre_affinity.get(&genre) {
+        let candidate_confidence = genre.confidence.clamp(0.0, 1.0);
+        let in_seed = seed.genres.contains(&key);
+        let match_confidence = if in_seed {
+            let seed_confidence = seed
+                .genre_confidence
+                .get(&key)
+                .copied()
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0);
+            candidate_confidence.min(seed_confidence)
+        } else {
+            0.0
+        };
+        if in_seed {
+            shared_weight += genre_weight(&key) * match_confidence;
+        } else {
+            candidate_only_weight += genre_weight(&key);
+        }
+        if let Some(affinity) = taste.genre_affinity.get(&key) {
             let net = affinity.pos * 0.4 - affinity.neg * 0.5;
-            let affinity_confidence = if seed.genres.contains(&genre) {
+            let affinity_confidence = if in_seed {
                 match_confidence
             } else {
                 candidate_confidence
             };
-            score += net * affinity_confidence;
+            relevance += net * affinity_confidence;
             genre_affinity_net += net * affinity_confidence;
         }
     }
-    if shares_seed_genre {
+    let seed_weight: f64 = seed.genres.iter().map(|genre| genre_weight(genre)).sum();
+    let union_weight = seed_weight + candidate_only_weight;
+    if shared_weight > 0.0 && union_weight > 0.0 {
+        relevance += AUTOMIX_GENRE_WEIGHT * shared_weight / union_weight;
         signals.push(AutomixSignal::boost("shared genres"));
     }
     if genre_affinity_net > 0.0 {
@@ -1587,18 +1572,44 @@ fn automix_score_with_genre_confidence(
         signals.push(AutomixSignal::penalty("genre mismatch"));
     }
 
-    score += (track.fidelity_score.max(0) as f64) * 0.003;
+    relevance += (track.fidelity_score.max(0) as f64) * 0.003;
+    let mut score = relevance.max(0.05);
 
-    // DSP harmonic/BPM/energy scoring - only applied when BOTH tracks have features.
-    // Unanalyzed tracks are never penalised; they simply skip this pass.
+    // -- Familiarity boosts --------------------------------------------------
+    // Same-artist: gentle familiarity boost, not enough to cause artist runs.
+    // Artist spread is handled at the queue level by decluster_by_album.
+    if Some(track.artist_id) == seed.artist_id && track.artist_id != 0 {
+        score *= 1.1;
+        signals.push(AutomixSignal::boost("same artist"));
+    }
+    if seed.source.as_deref() == Some(track.source.as_str()) {
+        score *= 1.05;
+        signals.push(AutomixSignal::boost("same source"));
+    }
+    if track.is_favorite {
+        score *= 1.2;
+        signals.push(AutomixSignal::boost("favorite"));
+    }
+    // Unplayed tracks get a meaningful boost so they surface before heavily-played ones.
+    if track.play_count == 0 {
+        score *= 1.35;
+        signals.push(AutomixSignal::boost("unplayed"));
+    }
+
+    // -- Harmonic fit, tamed -------------------------------------------------
+    // Only when BOTH tracks have features; unanalyzed tracks are never
+    // penalised. The raw multiplier swings x0.39..x3.96, so it is tamed the way
+    // discovery_ranking tames it.
+    let mut whiplash = false;
     if let (Some(seed), Some(cand)) = (seed_features, candidate_features) {
-        // Camelot + BPM multiplier (shared with radio post-scoring).
         score *= compute_harmonic_multiplier(
             seed.camelot_key.as_deref(),
             cand.camelot_key.as_deref(),
             seed.bpm,
             cand.bpm,
-        );
+        )
+        .powf(0.35)
+        .clamp(0.7, 1.4);
 
         // The multiplier folds Camelot *and* BPM together, so it can read >1.0
         // even on a key clash that happens to share a tempo. Derive the
@@ -1612,14 +1623,30 @@ fn automix_score_with_genre_confidence(
                 CamelotRelation::Clash => AutomixSignal::penalty("key clash"),
             });
         }
+        whiplash = matches!(
+            (seed.energy, cand.energy),
+            (Some(seed_energy), Some(cand_energy)) if (seed_energy - cand_energy).abs() > 0.5
+        );
+    }
 
-        // Energy whiplash penalty.
-        if let (Some(seed_energy), Some(cand_energy)) = (seed.energy, cand.energy)
-            && (seed_energy - cand_energy).abs() > 0.5
-        {
-            score *= 0.7;
-            signals.push(AutomixSignal::penalty("energy whiplash"));
+    // -- Penalties, applied last ---------------------------------------------
+    if taste.skipped_track_ids.contains(&track.id) {
+        score *= 0.1;
+        signals.push(AutomixSignal::penalty("recently skipped"));
+    }
+    if track.play_count > 0
+        && let Some(last_played) = track.last_played_at.as_deref()
+    {
+        // Time-decay penalty: half weight at <1 day, fading to none by 14 days.
+        let days_since = parse_days_since_last_played(last_played);
+        if days_since < 14.0 {
+            score *= 0.5 + 0.5 * (days_since / 14.0);
+            signals.push(AutomixSignal::penalty("recently played"));
         }
+    }
+    if whiplash {
+        score *= 0.7;
+        signals.push(AutomixSignal::penalty("energy whiplash"));
     }
 
     AutomixScore {
@@ -1854,6 +1881,116 @@ mod tests {
         )
         .value;
         assert!((rare_flat - broad_flat).abs() < 1e-9);
+    }
+
+    fn dsp(bpm: f64, key: &str) -> AudioDspFeatures {
+        AudioDspFeatures {
+            track_id: 0,
+            bpm: Some(bpm),
+            key_signature: None,
+            camelot_key: Some(key.to_string()),
+            loudness_lufs: None,
+            energy: None,
+            danceability: None,
+            beat_strength: None,
+            spectral_centroid: None,
+            stereo_width: None,
+            is_instrumental: false,
+            analysis_source: "test".to_string(),
+            analysis_offset_ms: 0,
+            samples_analyzed: None,
+            analyzed_at: "2026-01-01T00:00:00Z".to_string(),
+            analysis_version: "test".to_string(),
+        }
+    }
+
+    fn two_genre_seed() -> crate::smart::taste_vector::SeedContext {
+        crate::smart::taste_vector::SeedContext {
+            genres: ["house".to_string(), "deep house".to_string()]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn scorer_skip_penalty_survives_shared_genres() {
+        use crate::smart::taste_vector::TasteVector;
+        let seed = two_genre_seed();
+        let genres = ["house".to_string(), "deep house".to_string()];
+        let track = track_with_album(7, None);
+        let fresh =
+            automix_score(&track, &genres, &TasteVector::default(), &seed, None, None).value;
+        let mut skipped_taste = TasteVector::default();
+        skipped_taste.skipped_track_ids.insert(7);
+        let skipped = automix_score(&track, &genres, &skipped_taste, &seed, None, None).value;
+        assert!(
+            skipped <= fresh * 0.15,
+            "a skip must stay a strong penalty: {skipped} vs {fresh}"
+        );
+    }
+
+    #[test]
+    fn scorer_prefers_a_closer_genre_match_over_more_tags() {
+        use crate::smart::taste_vector::TasteVector;
+        let seed = two_genre_seed();
+        let track = track_with_album(8, None);
+        let exact = automix_score(
+            &track,
+            &["house".to_string(), "deep house".to_string()],
+            &TasteVector::default(),
+            &seed,
+            None,
+            None,
+        )
+        .value;
+        let sprawling = automix_score(
+            &track,
+            &[
+                "house".to_string(),
+                "deep house".to_string(),
+                "techno".to_string(),
+                "trance".to_string(),
+                "ambient".to_string(),
+            ],
+            &TasteVector::default(),
+            &seed,
+            None,
+            None,
+        )
+        .value;
+        assert!(exact > sprawling, "{exact} vs {sprawling}");
+    }
+
+    #[test]
+    fn scorer_keeps_harmonic_swing_within_bounds() {
+        use crate::smart::taste_vector::{SeedContext, TasteVector};
+        let taste = TasteVector::default();
+        let seed = SeedContext::default();
+        let track = track_with_album(9, None);
+        let seed_dsp = dsp(124.0, "8A");
+        let neutral = automix_score(&track, &[], &taste, &seed, None, None).value;
+        let fit = automix_score(
+            &track,
+            &[],
+            &taste,
+            &seed,
+            Some(&seed_dsp),
+            Some(&dsp(124.0, "8A")),
+        )
+        .value;
+        let clash = automix_score(
+            &track,
+            &[],
+            &taste,
+            &seed,
+            Some(&seed_dsp),
+            Some(&dsp(160.0, "2B")),
+        )
+        .value;
+        assert!(fit <= neutral * 1.4 + 1e-9, "{fit} vs {neutral}");
+        assert!(clash >= neutral * 0.7 - 1e-9, "{clash} vs {neutral}");
+        assert!(fit > neutral && clash < neutral);
     }
 
     #[test]
