@@ -1824,7 +1824,7 @@
 					onchange={(value) => playerPlacement.set(value as PlayerPlacement)}
 				/></SettingRow><SettingRow label="Side artwork" id="player-artwork"><Segmented
 					label="Side player artwork style"
-					options={[{ value: 'square', label: 'Square' }, { value: 'banner', label: 'Banner' }]}
+					options={[{ value: 'square', label: 'Square' }, { value: 'banner', label: 'Banner' }, { value: 'slim', label: 'Slim' }]}
 					value={$playerArtworkStyle}
 					onchange={(value) => playerArtworkStyle.set(value as PlayerArtworkStyle)}
 				/></SettingRow><div data-setting-id="player-information"><SettingRow label="Side quality"><Segmented
