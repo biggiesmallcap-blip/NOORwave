@@ -304,7 +304,7 @@ pub async fn orchestrate_song(
             "orchestrate_song: seed has no artist_name; Last.fm source skipped"
         );
     }
-    let lastfm_results: Vec<RadioCandidate> = if let (Some(client), Some(artist)) =
+    let mut lastfm_results: Vec<RadioCandidate> = if let (Some(client), Some(artist)) =
         (lastfm, seed_meta.artist_name.as_deref())
     {
         let fetch_limit = lfm_target.max(20);
@@ -344,6 +344,13 @@ pub async fn orchestrate_song(
     } else {
         Vec::new()
     };
+
+    // Adventurous reaches one Last.fm hop further: stored Last.fm links of the
+    // seed's learned neighbors, discounted. Familiar and Mixed stay with the
+    // seed's own Last.fm matches.
+    if blend == RadioBlend::Adventurous {
+        lastfm_results.extend(lastfm_two_hop_candidates(db, seed_track_id, lfm_target));
+    }
 
     // ── Engine source ─────────────────────────────────────────────────────────
     // Pre-computed track_similarity table (co-album / co-artist /
@@ -1881,6 +1888,69 @@ pub(crate) fn enforce_artist_diversity(
     out
 }
 
+/// A learned neighbor's own Last.fm links count at this fraction of its score.
+const LASTFM_TWO_HOP_WEIGHT: f64 = 0.65;
+/// Learned neighbors whose Last.fm links are followed.
+const LASTFM_TWO_HOP_SEEDS: i64 = 5;
+/// Weakest 2-hop link worth queueing.
+const LASTFM_TWO_HOP_MIN_SCORE: f64 = 0.10;
+
+/// Two hops through Last.fm: tracks Last.fm linked to the seed's learned
+/// neighbors (stored sightings, no network call), as Last.fm-lane candidates.
+fn lastfm_two_hop_candidates(
+    db: &Database,
+    seed_track_id: i64,
+    limit: usize,
+) -> Vec<RadioCandidate> {
+    let rows = db.with_conn(|conn| {
+        let Some(model) = crate::db::queries::get_selected_discovery_embedding_model(conn)? else {
+            return Ok(Vec::new());
+        };
+        let seeds = crate::db::queries::get_track_neighbors(
+            conn,
+            model.id,
+            seed_track_id,
+            LASTFM_TWO_HOP_SEEDS,
+            &[],
+        )?
+        .into_iter()
+        .map(|row| {
+            (
+                row.track_id,
+                LASTFM_TWO_HOP_WEIGHT * row.score.clamp(0.0, 1.0),
+            )
+        })
+        .collect::<Vec<_>>();
+        crate::db::queries::get_sighted_external_candidates(
+            conn,
+            &seeds,
+            LASTFM_TWO_HOP_MIN_SCORE,
+            limit.max(1) as i64,
+        )
+    });
+    rows.unwrap_or_default()
+        .into_iter()
+        .map(|row| RadioCandidate {
+            track_id: 0,
+            tidal_track_id: row.tidal_id,
+            title: row.title,
+            artist_name: row.artist_name,
+            album_title: None,
+            artwork_url: None,
+            duration_ms: row.duration_ms,
+            isrc: None,
+            is_in_library: false,
+            source: RadioSource::Lastfm,
+            reason: format!("Last.fm 2-hop {:.2}", row.score),
+            similarity_score: row.score.clamp(0.0, 1.0),
+            confidence: None,
+            candidate_in_degree_percentile: None,
+            support_count: None,
+            primary_reason: None,
+        })
+        .collect()
+}
+
 /// Most recent artists from listen history (chronological, oldest first),
 /// bounded by ARTIST_HISTORY_MAX_AGE_HOURS so stale sessions do not leak in.
 fn recent_played_artist_names(db: &Database, limit: usize) -> Vec<String> {
@@ -1940,6 +2010,68 @@ mod tests {
             recent_played_artist_names(&db, 10),
             vec!["Recent".to_string()]
         );
+    }
+
+    #[test]
+    fn lastfm_two_hop_follows_the_learned_neighbors_links() {
+        let db = Database::open(":memory:").expect("in-memory db");
+        db.run_migrations().expect("run migrations");
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id) VALUES (1, 'Seed', 1), (2, 'Neighbor', 1)",
+                [],
+            )?;
+            let model = crate::db::queries::create_embedding_model(
+                conn,
+                "discovery-fusion-v2:two-hop",
+                crate::db::queries::DISCOVERY_ENGINE_V2_FAMILY,
+                8,
+                "ready",
+                None,
+            )?;
+            crate::db::queries::activate_embedding_model(conn, model.id)?;
+            conn.execute(
+                "INSERT INTO track_neighbors (track_id, neighbor_track_id, model_id, rank, score)
+                 VALUES (1, 2, ?1, 1, 0.9)",
+                rusqlite::params![model.id],
+            )?;
+            let candidate = crate::db::queries::upsert_external_track_candidate(
+                conn,
+                &crate::db::queries::ExternalTrackCandidateUpsert {
+                    tidal_id: Some(7001),
+                    mbid: None,
+                    dedupe_key: "tidal:7001".to_string(),
+                    title: "Far Song".to_string(),
+                    artist_name: "Far Artist".to_string(),
+                    genre_tags_json: None,
+                    duration_ms: Some(200_000),
+                    expires_at: "2099-01-01 00:00:00".to_string(),
+                },
+            )?;
+            crate::db::queries::upsert_external_candidate_sighting(
+                conn,
+                &crate::db::queries::ExternalCandidateSightingUpsert {
+                    candidate_id: candidate.id,
+                    seed_track_id: 2,
+                    source: "lastfm_similar".to_string(),
+                    source_payload_json: None,
+                    similarity: Some(0.6),
+                    expires_at: "2099-01-01 00:00:00".to_string(),
+                },
+            )?;
+            Ok(())
+        })
+        .expect("seed");
+
+        let hops = lastfm_two_hop_candidates(&db, 1, 10);
+
+        assert_eq!(hops.len(), 1);
+        assert_eq!(hops[0].title, "Far Song");
+        assert_eq!(hops[0].tidal_track_id, Some(7001));
+        assert_eq!(hops[0].source, RadioSource::Lastfm);
+        // 0.6 similarity x 0.65 hop weight x 0.9 neighbor score.
+        assert!((hops[0].similarity_score - 0.351).abs() < 1e-9);
     }
 
     #[test]
