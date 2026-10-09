@@ -18,7 +18,6 @@
 		cyclePlayerShuffleMode,
 		cyclePlayerRepeatMode,
 		toggleTrackFavorite,
-		playerReady,
 	} from '$lib/stores/player';
 	import { quietModeOpen, closeQuietMode } from '$lib/stores/quiet_mode';
 	import { commandPaletteOpen } from '$lib/stores/command_palette';
@@ -36,14 +35,10 @@
 		type TidalArtworkSize,
 	} from '$lib/utils/artwork';
 
-	let isScrubbing = $state(false);
 	let favoritePending = $state(false);
 	let failedArtworkUrls = $state<Record<string, boolean>>({});
 
 	const shortcut = $derived(getCmdOrCtrlLabel());
-	const playerState = $derived(
-		$currentTrack ? ($isPlaying ? 'Playing' : 'Paused') : $playerReady ? 'Ready' : 'Connecting'
-	);
 
 	// Quiet mode still ends up on the full 1280 cover - it just no longer waits on it
 	// to show anything. The player bar has already fetched and decoded the 640, so
@@ -299,9 +294,6 @@
 				<NowPlayingMetadata
 					track={$currentTrack}
 					eyebrow="Quiet mode"
-					playerState={playerState}
-					isScrubbing={isScrubbing}
-					showStateBadge={false}
 				/>
 			</div>
 
@@ -310,8 +302,6 @@
 					position={$position}
 					duration={$currentTrack.duration_ms ?? 0}
 					onSeek={(p) => void setPlayerPosition(p)}
-					onScrubStart={() => { isScrubbing = true; }}
-					onScrubEnd={() => { isScrubbing = false; }}
 				/>
 			</div>
 

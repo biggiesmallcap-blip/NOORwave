@@ -1,5 +1,4 @@
 <script lang="ts">
-	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import type { Track } from '$lib/api/client';
 	import type { QualityDisplay } from '$lib/stores/playerInformation';
 	import { openContextMenu } from '$lib/stores/context_menu';
@@ -26,10 +25,6 @@
 		qualityLabel = '',
 		qualityClass = '',
 		qualityDisplay = 'details',
-		playerState,
-		isScrubbing,
-		showStateBadge = true,
-		stateBadgeCompact = true,
 	}: {
 		track: Track | null;
 		/** Off by default: the desktop panel is self-evidently the now-playing
@@ -43,10 +38,6 @@
 		qualityLabel?: string;
 		qualityClass?: string;
 		qualityDisplay?: QualityDisplay;
-		playerState: string;
-		isScrubbing: boolean;
-		showStateBadge?: boolean;
-		stateBadgeCompact?: boolean;
 	} = $props();
 
 	const titleRef = $derived(track ? trackRefFromTrack(track) : null);
@@ -121,11 +112,10 @@
 			<p class="np-source">{nowPlayingAttribution}</p>
 		{/if}
 	</div>
-	{#if showStateBadge && (playerState !== 'Playing' || isScrubbing || (qualityDisplay !== 'off' && (qualityLabel || streamDetail)))}
+	<!-- No play-state pill: the transport button already says playing/paused,
+	     and a pill that came and went shifted the whole panel. -->
+	{#if qualityDisplay !== 'off' && (qualityLabel || streamDetail)}
 		<div class="badge-row">
-			{#if playerState !== 'Playing' || isScrubbing}
-				<StateBadge label={isScrubbing ? 'Scrubbing' : playerState} tone={track ? 'active' : 'muted'} compact={stateBadgeCompact} />
-			{/if}
 			{#if qualityLabel && (qualityDisplay === 'icon' || qualityDisplay === 'both')}
 				<span class={`quality-badge quality-icon ${qualityClass}`} role="img" aria-label={`${qualityLabel}${streamDetail ? `, ${streamDetail}` : ''}`} title={`${qualityLabel}${streamDetail ? ` · ${streamDetail}` : ''}`}>
 					<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M1.5 8h2.2l1.4-3.6 2.5 7.2 2-5.4 1.4 1.8h3.5" /></svg>
@@ -217,11 +207,6 @@
 		gap: 8px;
 		flex-wrap: nowrap;
 		min-width: 0;
-	}
-
-	.badge-row :global(.state-badge) {
-		flex: 0 0 auto;
-		justify-content: flex-start;
 	}
 
 	.np-quality-chip {

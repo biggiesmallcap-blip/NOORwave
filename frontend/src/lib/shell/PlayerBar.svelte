@@ -26,8 +26,6 @@
 		streamDisplay,
 		nowPlayingAttribution,
 		streamDetail,
-		playerState,
-		isScrubbing,
 		position,
 		bufferedMs = 0,
 		isPlaying,
@@ -63,8 +61,6 @@
 		streamDisplay: StreamDisplayInfo | null;
 		nowPlayingAttribution: string | null;
 		streamDetail: string;
-		playerState: string;
-		isScrubbing: boolean;
 		position: number;
 		bufferedMs?: number;
 		isPlaying: boolean;
@@ -215,8 +211,6 @@
 		qualityLabel={qualityLabel}
 		qualityClass={qualityClass}
 		qualityDisplay={qualityDisplay}
-		playerState={playerState}
-		isScrubbing={isScrubbing}
 	/>
 
 	<NowPlayingProgress
