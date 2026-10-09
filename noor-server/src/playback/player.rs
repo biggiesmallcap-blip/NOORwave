@@ -6592,6 +6592,69 @@ mod tests {
     }
 
     #[test]
+    fn learned_automix_refill_stays_anchored_to_the_listeners_pick() {
+        let conn = conn();
+        conn.execute_batch(
+            "
+            CREATE TABLE track_neighbors (
+                track_id INTEGER NOT NULL,
+                neighbor_track_id INTEGER NOT NULL,
+                model_id INTEGER NOT NULL,
+                rank INTEGER NOT NULL,
+                score REAL NOT NULL DEFAULT 0,
+                behavioral_score REAL DEFAULT 0,
+                audio_score REAL DEFAULT 0,
+                metadata_score REAL DEFAULT 0,
+                reason_json TEXT,
+                computed_at TEXT DEFAULT (datetime('now')),
+                primary_reason TEXT,
+                confidence REAL NOT NULL DEFAULT 0,
+                support_count INTEGER NOT NULL DEFAULT 0,
+                candidate_in_degree INTEGER NOT NULL DEFAULT 0,
+                candidate_in_degree_percentile REAL NOT NULL DEFAULT 0,
+                play_count_seed INTEGER NOT NULL DEFAULT 0,
+                play_count_candidate INTEGER NOT NULL DEFAULT 0,
+                support_transition REAL NOT NULL DEFAULT 0,
+                support_colisten REAL NOT NULL DEFAULT 0,
+                support_structure REAL NOT NULL DEFAULT 0,
+                support_metadata REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (track_id, neighbor_track_id, model_id)
+            );
+            INSERT INTO server_config (key, value) VALUES ('discovery_engine', 'v2');
+            INSERT INTO embedding_models (
+                id, model_key, family, dimension, status, is_active, trained_at, created_at
+            ) VALUES (
+                1, 'test-anchor', 'discovery-fusion-v2', 3, 'ready', 1,
+                '2026-01-01 00:00:00', '2026-01-01 00:00:00'
+            );
+            -- Track 1 is what the listener picked; track 2 is an automix pick
+            -- now playing. Each has one learned neighbor.
+            INSERT INTO track_neighbors (
+                track_id, neighbor_track_id, model_id, rank, score, behavioral_score, primary_reason
+            ) VALUES
+                (1, 5, 1, 1, 0.90, 0.90, 'behavioral'),
+                (2, 6, 1, 1, 0.90, 0.90, 'behavioral');
+            ",
+        )
+        .expect("schema");
+        let picked = queue::get_tracks_by_ids(&conn, &[1]).unwrap();
+        queue::append_tracks(&conn, &picked, "user").unwrap();
+        let playing = queue::get_tracks_by_ids(&conn, &[2]).unwrap();
+        queue::append_tracks(&conn, &playing, "automix").unwrap();
+        let queue_items = queue::load_queue(&conn).unwrap();
+        let current = playing[0].clone();
+
+        let extension = extension_tracks(&conn, &current, &queue_items, ShuffleMode::Off, 2, true)
+            .expect("extension call");
+
+        // The anchor's neighbor leads; the playing pick's neighbor follows.
+        assert_eq!(
+            extension.iter().map(|track| track.id).collect::<Vec<_>>(),
+            vec![5, 6]
+        );
+    }
+
+    #[test]
     fn learned_automix_builds_chain_aware_order_from_overfetched_neighbors() {
         let conn = conn();
         conn.execute_batch(

@@ -332,6 +332,97 @@ pub fn ensure_automix_queue_depth(
     queue::load_queue(conn)
 }
 
+/// Where a refill draws from: the session anchor (the station seed or the
+/// last track the listener chose, never an automix pick), the playing track
+/// and the queue tail, weighted in that order. Anchoring keeps a long session
+/// from drifting one noisy hop at a time away from where it started.
+fn session_seeds(current_track: &Track, queue_items: &[QueueItem]) -> Vec<(i64, f64)> {
+    fn push(seeds: &mut Vec<(i64, f64)>, id: i64, weight: f64) {
+        if id > 0 && !seeds.iter().any(|(seed, _)| *seed == id) {
+            seeds.push((id, weight));
+        }
+    }
+    let playable = |item: &&QueueItem| !item.is_pending && item.track.id > 0;
+    let current_index = queue_items
+        .iter()
+        .position(|item| item.track.id == current_track.id);
+    let anchor = current_index.and_then(|index| {
+        queue_items[..=index]
+            .iter()
+            .rev()
+            .filter(playable)
+            .find(|item| !item.source.starts_with("automix"))
+            .map(|item| item.track.id)
+    });
+    let tail = queue_items
+        .iter()
+        .rev()
+        .find(playable)
+        .map(|item| item.track.id);
+
+    let mut seeds = Vec::new();
+    if let Some(anchor) = anchor {
+        push(&mut seeds, anchor, SESSION_ANCHOR_WEIGHT);
+    }
+    push(&mut seeds, current_track.id, SESSION_CURRENT_WEIGHT);
+    if let Some(tail) = tail {
+        push(&mut seeds, tail, SESSION_TAIL_WEIGHT);
+    }
+    seeds
+}
+
+const SESSION_ANCHOR_WEIGHT: f64 = 1.0;
+const SESSION_CURRENT_WEIGHT: f64 = 0.8;
+const SESSION_TAIL_WEIGHT: f64 = 0.6;
+
+/// Learned neighbors of several weighted seeds, merged: a candidate scores the
+/// weighted sum over the seeds that list it (agreement between anchor and
+/// current track counts), and keeps the row of its strongest seed for reasons.
+fn anchored_neighbors(
+    conn: &Connection,
+    model_id: i64,
+    seeds: &[(i64, f64)],
+    limit: i64,
+    excluded: &[i64],
+) -> Result<Vec<queries::EmbeddingNeighborRow>> {
+    let mut excluded = excluded.to_vec();
+    excluded.extend(seeds.iter().map(|(seed, _)| *seed));
+    let mut merged: HashMap<i64, (f64, f64, queries::EmbeddingNeighborRow)> = HashMap::new();
+    for (seed, weight) in seeds {
+        for row in queries::get_track_neighbors(conn, model_id, *seed, limit, &excluded)? {
+            let contribution = weight * row.score;
+            match merged.get_mut(&row.track_id) {
+                Some(entry) => {
+                    entry.0 += contribution;
+                    if contribution > entry.1 {
+                        entry.1 = contribution;
+                        entry.2 = row;
+                    }
+                }
+                None => {
+                    merged.insert(row.track_id, (contribution, contribution, row));
+                }
+            }
+        }
+    }
+    let mut rows = merged
+        .into_values()
+        .map(|(sum, _, mut row)| {
+            row.score = sum;
+            row
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.track_id.cmp(&right.track_id))
+    });
+    rows.truncate(limit.max(0) as usize);
+    Ok(rows)
+}
+
 /// Last.fm match (after neighbor weighting) an external pick needs.
 const EXTERNAL_MIN_SCORE: f64 = 0.15;
 /// Learned neighbors whose Last.fm links also count, at this weight.
@@ -500,10 +591,11 @@ pub(crate) fn build_automix_extension_with_reasons(
             .iter()
             .map(|item| item.track.id)
             .collect::<Vec<_>>();
-        let neighbors = queries::get_track_neighbors(
+        let seeds = session_seeds(current_track, queue_items);
+        let neighbors = anchored_neighbors(
             conn,
             model.id,
-            current_track.id,
+            &seeds,
             (needed * 4).max(24) as i64,
             &excluded,
         )?;
