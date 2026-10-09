@@ -338,17 +338,17 @@
 </section>
 
 <style>
-	.phone-remote-panel { display: flex; flex-direction: column; gap: 18px; padding: 24px; }
-	.remote-alert { padding: 10px 12px; border-radius: 8px; background: var(--accent-soft); margin: 0; }
+	.phone-remote-panel { display: flex; flex-direction: column; }
+	.remote-alert { padding: 10px 12px; border-radius: 8px; background: var(--accent-soft); margin: var(--space-2) 0; }
 	.remote-alert.error { color: var(--state-error); border: 1px solid color-mix(in srgb, var(--state-error) 40%, transparent); }
-	.status-line { display: flex; align-items: flex-start; gap: 10px; padding: 4px 0 16px; border-bottom: 1px solid var(--border-subtle); }
+	.status-line { display: flex; align-items: flex-start; gap: 10px; padding: 4px 0 16px; }
 	.status-line > span { width: 10px; height: 10px; margin-top: 6px; border-radius: 50%; background: var(--text-tertiary); box-shadow: 0 0 0 4px color-mix(in srgb, var(--text-tertiary) 12%, transparent); }
 	.status-line > span.online { background: var(--state-success); box-shadow: 0 0 0 4px color-mix(in srgb, var(--state-success) 14%, transparent); }
 	.status-line strong, .status-line small { display: block; }
 	.status-line small { color: var(--text-secondary); margin-top: 3px; }
 	.setting-row, .device-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 14px 0; border-top: 1px solid var(--border-subtle); }
 	.setting-row p, .pairing-block p, .manual p, .devices p, .diagnostics p { color: var(--text-secondary); margin: 4px 0 0; line-height: var(--line-height-normal); }
-	.pairing-block, .devices { display: flex; flex-direction: column; gap: 12px; padding-top: 18px; border-top: 1px solid var(--border-subtle); }
+	.pairing-block, .devices { display: flex; flex-direction: column; gap: 12px; padding: 18px 0; border-top: 1px solid var(--border-subtle); }
 	.connection-card { display: grid; gap: 10px; padding: 15px; border: 1px solid color-mix(in srgb, var(--accent-line) 68%, var(--border-subtle)); border-radius: var(--radius-md); background: linear-gradient(130deg, color-mix(in srgb, var(--accent-soft) 55%, transparent), transparent 62%), var(--bg-surface); }
 	.connection-card-heading, .connection-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 	.connection-card-heading > span:first-child { color: var(--text-secondary); font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); }
@@ -382,15 +382,15 @@
 	.pairing-url { justify-self: center; padding: 6px 9px; border-radius: var(--radius-xs); background: var(--bg-surface); color: var(--text-tertiary); text-align: center; }
 	.qr-wrap > .actions { justify-content: center; }
 	.actions, .pin-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-	.touch, summary, .device-row button { min-height: 44px; }
-	.manual, .diagnostics, .address-options { padding-top: 14px; border-top: 1px solid var(--border-subtle); }
+	.touch, .device-row button { min-height: 44px; }
+	.manual, .diagnostics, .address-options { border-top: 1px solid var(--border-subtle); }
 	.address-options { display: grid; gap: 10px; }
 	.address-options p { margin: 0; color: var(--text-secondary); }
 	.diagnostic-summary { color: var(--text-primary) !important; }
 	.troubleshooting-list { display: grid; gap: 6px; margin: 12px 0 0; padding-left: 20px; color: var(--text-secondary); }
 	.troubleshooting-list code { color: var(--accent-strong); font-family: var(--font-mono, monospace); }
 	.diagnostic-note { margin-top: 12px !important; padding: 9px 11px; border-left: 2px solid var(--accent-line); background: color-mix(in srgb, var(--accent-soft) 34%, transparent); }
-	summary { display: flex; align-items: center; cursor: pointer; font-weight: var(--font-weight-bold); }
+	summary { display: flex; align-items: center; cursor: pointer; }
 	.pin-row { margin: 12px 0; }
 	.pin-row code { font-size: var(--font-size-xl); letter-spacing: .18em; }
 	.device-row small { display: block; margin-top: 4px; color: var(--text-tertiary); }
