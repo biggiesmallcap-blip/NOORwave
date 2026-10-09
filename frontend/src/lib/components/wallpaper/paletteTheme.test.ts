@@ -45,6 +45,16 @@ describe('palette theme application', () => {
 		expect(root.properties.get('--atlas-haze-a')).toBe('rgba(194, 56, 242, 0.18)');
 	});
 
+	it('applies pure black as a monochrome accent with no atlas haze', () => {
+		const root = themeRoot();
+		applyPaletteTheme(root, 'void', 'dark');
+		expect(root.attributes.get('data-palette')).toBe('void');
+		expect(root.properties.get('--accent')).toBe('#ffffff');
+		expect(root.properties.get('--atlas-haze-a')).toBe('rgba(10, 10, 10, 0)');
+		applyPaletteTheme(root, 'void', 'light');
+		expect(root.properties.get('--accent')).toBe('#000000');
+	});
+
 	it('gives every palette a readable --accent-strong on its ground', () => {
 		for (const palette of PALETTES) {
 			const dark = themeRoot();

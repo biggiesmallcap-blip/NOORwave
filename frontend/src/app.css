@@ -287,6 +287,56 @@
 	--signal-text: #66513b;
 }
 
+/* Pure black (dark surface only): true #000 ground, neutral greys, no tint.
+ * In light mode the palette falls back to the stock light theme with a black
+ * accent. */
+[data-palette="void"][data-theme="dark"] {
+	--text-on-accent: #000;
+	--bg-base: #000;
+	--bg-elevated: #0e0e0e;
+	--bg-raised: #1a1a1a;
+	--bg-surface: rgba(255, 255, 255, 0.04);
+	--bg-hover: rgba(255, 255, 255, 0.08);
+	--bg-surface-strong: #121212;
+	--surface-0: #000;
+	--surface-1: rgba(255, 255, 255, 0.07);
+	--surface-2: rgba(255, 255, 255, 0.12);
+	--panel-bg: rgba(255, 255, 255, 0.035);
+	--panel-border: rgba(255, 255, 255, 0.08);
+	--panel-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+	--text-primary: #fff;
+	--text-secondary: rgba(255, 255, 255, 0.64);
+	--text-tertiary: rgba(255, 255, 255, 0.52);
+	--text-muted: rgba(255, 255, 255, 0.28);
+	--border-subtle: rgba(255, 255, 255, 0.07);
+	--border-muted: rgba(255, 255, 255, 0.09);
+	--border-strong: rgba(255, 255, 255, 0.16);
+	--quality-lossy: #8c8c8c;
+	--input-bg: rgba(255, 255, 255, 0.06);
+	--input-border: rgba(255, 255, 255, 0.10);
+	--input-focus: rgba(255, 255, 255, 0.09);
+	--scrollbar-thumb: rgba(255, 255, 255, 0.12);
+	--scrollbar-thumb-hover: rgba(255, 255, 255, 0.22);
+	--right-panel-bg: #000;
+	--right-panel-sep: rgba(255, 255, 255, 0.08);
+	--player-surface: rgba(0, 0, 0, 0.96);
+	--player-queue-surface: rgba(10, 10, 10, 0.96);
+	--player-art-shadow: rgba(0, 0, 0, 0.5);
+	--player-art-rim: rgba(255, 255, 255, 0.10);
+	--player-progress-track: rgba(255, 255, 255, 0.16);
+	--sidebar-bg: #000;
+	--atlas-bg: #000;
+	--instrument-surface: rgba(18, 18, 18, 0.72);
+	--instrument-surface-strong: rgba(22, 22, 22, 0.9);
+	--instrument-border: rgba(255, 255, 255, 0.12);
+	--instrument-edge: rgba(255, 255, 255, 0.12);
+	--signal-text: rgba(255, 255, 255, 0.66);
+}
+
+[data-palette="void"][data-theme="dark"] body {
+	background: #000;
+}
+
 /* ── Structural tokens (theme-independent) ────────────── */
 :root {
 	--sidebar-width: clamp(216px, 12vw, 248px);

@@ -2993,8 +2993,8 @@
 
 	.library-mode-pill {
 		color: var(--text-primary);
-		background: rgba(124, 128, 255, 0.12);
-		border-color: rgba(124, 128, 255, 0.22);
+		background: var(--accent-soft);
+		border-color: var(--accent-line);
 	}
 
 	.library-hero-subtitle {
