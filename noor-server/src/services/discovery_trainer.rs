@@ -9,6 +9,7 @@
 ///
 /// With rayon parallelism: ~10-30s for 32k tracks (was hours in Python).
 use crate::db::queries::EmbeddingTrackRow;
+use crate::genre::jaccard::{weighted_genre_set, weighted_jaccard};
 use rayon::prelude::*;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -235,6 +236,9 @@ pub struct ReasonHitRate {
 // observed rate by 5 percentage points — fine-grained enough to compare reasons
 // directionally without rare tags ("punk_lullabye") looking miraculous off n=2.
 pub const MIN_REASON_IMPRESSIONS: i64 = 20;
+
+/// Metadata bonus for a full genre match, scaled by weighted Jaccard overlap.
+const GENRE_BRANCH_BONUS: f64 = 0.18;
 
 // ── Core math utilities ───────────────────────────────────────────────────────
 
@@ -819,7 +823,8 @@ struct TrackMeta {
     track_id: i64,
     artist_lower: Option<String>,
     album: Option<String>,
-    genre_tokens: HashSet<String>,
+    /// Weighted genre set from genre paths only (leaf 1.0, ancestors 0.7).
+    genre_set: HashMap<String, f64>,
     bpm: Option<f64>,
     energy: Option<f64>,
     camelot_key: Option<String>,
@@ -858,20 +863,11 @@ fn similarity_neighbors(
         .map(|t| {
             let artist_lower = t.artist_name.as_ref().map(|s| s.to_lowercase());
             let album = t.album_title.clone();
-            let genre_tokens: HashSet<String> = metadata_tokens(t)
-                .into_iter()
-                .filter(|tok| {
-                    !tok.starts_with("dur_")
-                        && !tok.starts_with("bpm")
-                        && !tok.starts_with("energy_")
-                        && !tok.starts_with("key_")
-                })
-                .collect();
             TrackMeta {
                 track_id: t.track_id,
                 artist_lower,
                 album,
-                genre_tokens,
+                genre_set: weighted_genre_set(&t.genre_paths),
                 bpm: t.bpm,
                 energy: t.energy,
                 camelot_key: t.camelot_key.clone(),
@@ -1001,18 +997,18 @@ fn similarity_neighbors(
                     contributions.push(("artist_affinity", 0.2));
                 }
 
-                // Genre branch (pre-computed HashSets, no tokenization)
-                if !meta.genre_tokens.is_empty()
-                    && !other_meta.genre_tokens.is_empty()
-                    && meta
-                        .genre_tokens
-                        .intersection(&other_meta.genre_tokens)
-                        .next()
-                        .is_some()
-                {
-                    metadata_score += 0.18;
-                    reason_tags.push("genre_branch".to_string());
-                    contributions.push(("genre_branch", 0.18));
+                // Genre branch: weighted Jaccard over real genre paths, the same
+                // measure radio and Discovery Space use. No genres on either side
+                // is no signal. The old token set matched any shared title,
+                // artist, quality or source word.
+                if !meta.genre_set.is_empty() && !other_meta.genre_set.is_empty() {
+                    let overlap = weighted_jaccard(&meta.genre_set, &other_meta.genre_set);
+                    if overlap > 0.0 {
+                        let bonus = GENRE_BRANCH_BONUS * overlap;
+                        metadata_score += bonus;
+                        reason_tags.push("genre_branch".to_string());
+                        contributions.push(("genre_branch", bonus));
+                    }
                 }
 
                 // Album context
@@ -2821,5 +2817,39 @@ mod tests {
         let (embeddings, _, _, _) = build_behavioral_embeddings(&input, None, None);
         let direct = cosine(&embeddings[&1], &embeddings[&2]);
         assert!(direct > 0.9, "direct co-listen cosine was {direct}");
+    }
+
+    #[test]
+    fn genre_branch_requires_shared_genre_paths() {
+        let (mut tracks, behavioral, audio, fusion) = make_test_input(3, 16);
+        for track in &mut tracks {
+            track.best_quality = Some("LOSSLESS".to_string());
+            track.source = "tidal".to_string();
+        }
+        tracks[0].genre_paths = vec!["Electronic > House".to_string()];
+        tracks[1].genre_paths = vec!["Electronic > House".to_string()];
+        // tracks[2] has no genres; it shares only quality, source and artist words.
+        let result = similarity_neighbors(
+            &tracks,
+            &behavioral,
+            &audio,
+            &fusion,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            2,
+            None,
+            None,
+        );
+        let tags = |a: i64, b: i64| {
+            result
+                .iter()
+                .find(|n| n.track_id == a && n.neighbor_track_id == b)
+                .map(|n| n.reason_tags.clone())
+                .expect("edge")
+        };
+        assert!(tags(0, 1).iter().any(|t| t == "genre_branch"));
+        assert!(!tags(0, 2).iter().any(|t| t == "genre_branch"));
     }
 }
