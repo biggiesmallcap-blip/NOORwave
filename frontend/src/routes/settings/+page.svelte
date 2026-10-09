@@ -2859,7 +2859,7 @@
 					<div class="info-row"><span>Embedded</span><strong>{discoveryStatus?.embedded_tracks?.toLocaleString() ?? '0'}</strong></div>
 				</div>
 
-				<div class="portable-card glass">
+				<div class="portable-card">
 					<div class="info-list">
 						<div class="info-row">
 							<span>Active model</span>
@@ -3024,7 +3024,7 @@
 					<div class="info-row"><span>Context tags</span><strong>{portableSnapshot?.context_tag_rows?.toLocaleString() ?? '0'}</strong></div>
 				</div>
 
-				<div class="portable-card glass">
+				<div class="portable-card">
 					<div class="info-list">
 						<div class="info-row">
 							<span>Snapshot state</span>
@@ -3343,16 +3343,8 @@
 		font: inherit;
 	}
 
-	.audio-advanced {
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-sm);
-		padding: var(--space-3) var(--space-4);
-	}
-
 	.download-settings {
 		display: grid;
-		gap: var(--space-4);
-		margin-top: var(--space-3);
 	}
 
 	.download-folder-field {
@@ -3380,30 +3372,8 @@
 		gap: var(--space-2);
 	}
 
-	.audio-advanced summary {
-		display: flex;
-		align-items: baseline;
-		justify-content: space-between;
-		gap: var(--space-3);
-		cursor: pointer;
-		list-style: none;
-	}
-
 	.audio-advanced summary::-webkit-details-marker {
 		display: none;
-	}
-
-	.audio-advanced summary > span {
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-semibold);
-	}
-
-	.audio-advanced[open] {
-		background: rgba(255, 255, 255, 0.02);
-	}
-
-	.audio-advanced[open] summary {
-		margin-bottom: var(--space-3);
 	}
 
 	.exclusive-failed-banner {
@@ -3456,11 +3426,8 @@
 		grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
 		gap: var(--gap);
 		align-items: start;
-		padding: var(--space-4);
-		margin-bottom: var(--space-3);
-		border-radius: var(--radius-md);
-		background: var(--bg-surface);
-		border: 1px solid var(--border-subtle);
+		padding: var(--space-3) 0;
+		border-top: 1px solid var(--border-subtle);
 	}
 
 	.engine-copy {
@@ -3532,11 +3499,8 @@
 	.intensity-block {
 		display: grid;
 		gap: 14px;
-		padding: 16px;
-		margin-bottom: 12px;
-		border-radius: 10px;
-		background: rgba(255, 255, 255, 0.02);
-		border: 1px solid var(--border-subtle);
+		padding: var(--space-3) 0;
+		border-top: 1px solid var(--border-subtle);
 	}
 
 	.intensity-header {
@@ -4224,8 +4188,10 @@
 		width: fit-content;
 	}
 
+	/* Counts are rows of their group, one per line (no side-by-side tiles). */
 	.inner-metrics {
-		grid-template-columns: repeat(2, minmax(0, 1fr));
+		grid-template-columns: minmax(0, 1fr);
+		gap: 0;
 	}
 
 	.inner-metrics :global(.metric-pair) {
@@ -4323,9 +4289,8 @@
 	}
 
 	.portable-card {
-		padding: 16px;
 		display: grid;
-		gap: 12px;
+		gap: var(--space-2);
 	}
 
 	.text-field {
@@ -4358,10 +4323,6 @@
 			grid-template-columns: 1fr;
 		}
 
-		.audio-advanced summary {
-			align-items: flex-start;
-			flex-direction: column;
-		}
 
 		.wallpaper-tune {
 			grid-template-columns: 1fr;
