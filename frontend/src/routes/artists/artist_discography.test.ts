@@ -4,6 +4,7 @@ import {
 	buildPopularTrackItems,
 	categorizeTidalAlbum,
 	discographySectionFor,
+	isLiveAlbumTitle,
 	sortTidalAlbumsByReleaseDate,
 } from './artist_discography';
 
@@ -68,6 +69,63 @@ describe('categorizeTidalAlbum', () => {
 		expect(categorizeTidalAlbum(album({ release_type: 'LIVE' }))).toBe('live');
 		expect(categorizeTidalAlbum(album({ number_of_tracks: 2 }))).toBe('ep_single');
 		expect(categorizeTidalAlbum(album({ number_of_tracks: 8 }))).toBe('album');
+	});
+});
+
+describe('live album title detection', () => {
+	test('detects common live album titles', () => {
+		for (const title of [
+			'Live In Brazil',
+			'Live at Leeds',
+			'Alive in Tokyo (Live)',
+			'Greatest Hits [Live]',
+			'The Wall - Live in Berlin',
+			'Stop Making Sense: Live',
+			'MTV Unplugged in New York',
+			'Iron Maiden Live After Death',
+			'Songs Live from the Royal Albert Hall',
+			'Live (Deluxe Edition)',
+			'Live!',
+			'Live 2003',
+			'Greatest Hits Live',
+			'Hello, You Bastards: Live in Reno',
+			'The 25th Anniversary | LIVE',
+			'Old Friends Live On Stage',
+			'Tiny Desk Concert',
+		]) {
+			expect(isLiveAlbumTitle(title), title).toBe(true);
+		}
+	});
+
+	test('does not flag studio titles that merely contain "live"', () => {
+		for (const title of [
+			'Live Forever',
+			'Alive',
+			'Daft Punk Alive 2007',
+			'Living Things',
+			'Live and Let Die',
+			'Born to Live',
+			'Oliver',
+			'Show Me How To Live',
+			'How We Live (Remixes)',
+			'LONG.LIVE.A$AP (Deluxe Version)',
+			'Jump Up (feat. B Live)',
+			'Rare, Live And Classic',
+			'Obsessional (Rammeroni LIVE Remix)',
+			'Keep It Live (Expanded Edition)',
+			'',
+		]) {
+			expect(isLiveAlbumTitle(title), title).toBe(false);
+		}
+	});
+
+	test('moves live-titled ALBUMS releases to the live shelf, never singles or compilations', () => {
+		expect(categorizeTidalAlbum(album({ source_filter: 'ALBUMS', title: 'Live In Brazil' }))).toBe('live');
+		expect(categorizeTidalAlbum(album({ release_type: 'ALBUM', title: 'Live at Leeds' }))).toBe('live');
+		expect(categorizeTidalAlbum(album({ source_filter: 'ALBUMS', title: 'Magic Numbers' }))).toBe('album');
+		expect(categorizeTidalAlbum(album({ source_filter: 'EPSANDSINGLES', title: 'Song (Live)' }))).toBe('ep_single');
+		expect(categorizeTidalAlbum(album({ source_filter: 'COMPILATIONS', title: 'Best of Live' }))).toBe('compilation');
+		expect(discographySectionFor(album({ source_filter: 'ALBUMS', title: 'Live In Brazil' }))).toBe('albums');
 	});
 });
 

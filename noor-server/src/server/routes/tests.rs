@@ -8603,6 +8603,11 @@ async fn tidal_artist_release_page_only_accepts_known_filters_and_page_offsets()
             "/api/tidal/artists/1/releases?filter=UNKNOWN&offset=50",
             "Unknown artist release filter",
         ),
+        // TIDAL rejects filter=LIVE for every artist; never forward it.
+        (
+            "/api/tidal/artists/1/releases?filter=LIVE&offset=0",
+            "Unknown artist release filter",
+        ),
         (
             "/api/tidal/artists/1/releases?filter=EPSANDSINGLES&offset=51",
             "nonnegative page offset",

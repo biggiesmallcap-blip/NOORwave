@@ -894,7 +894,7 @@ export interface TidalArtistProfile {
 	release_filter_status?: ArtistReleaseFilterStatuses;
 }
 
-export type ArtistReleaseFilter = 'ALBUMS' | 'EPSANDSINGLES' | 'COMPILATIONS' | 'LIVE';
+export type ArtistReleaseFilter = 'ALBUMS' | 'EPSANDSINGLES' | 'COMPILATIONS';
 export interface ArtistReleaseFilterStatus {
 	failed: boolean;
 	has_more: boolean | null;

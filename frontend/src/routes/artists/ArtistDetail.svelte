@@ -1197,7 +1197,9 @@
 			{/if}
 		{/if}
 
-		{#if activeTidalArtistId != null && !tidalLoading && retryReleaseLinks.length > 0}
+		<!-- Only when the shelf is missing: "Open full discography" already
+		     re-fetches failed filters, so a second link would just duplicate it. -->
+		{#if activeTidalArtistId != null && !tidalLoading && !hasAnyTidalAlbums && retryReleaseLinks.length > 0}
 			<nav class="retry-release-links" aria-label="Release sections available to retry">
 				{#each retryReleaseLinks as link (link.section)}
 					<a href={`${discographyBase}${link.path}`}>{link.label}</a>

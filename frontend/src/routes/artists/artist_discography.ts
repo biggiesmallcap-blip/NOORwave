@@ -9,6 +9,35 @@ import type { Track, TidalDiscographyAlbum, TidalDiscographyTrack } from '$lib/a
 
 export type DiscoCategory = 'album' | 'ep_single' | 'compilation' | 'live';
 
+// TIDAL has no live flag: filter=LIVE is rejected and release_type is only
+// ALBUM / EP / SINGLE. Live albums arrive under ALBUMS, so the title is the
+// only signal. Tuned against a real library: "Live Forever", "Alive",
+// "LONG.LIVE.A$AP", "Born to Live" and "(feat. B Live)" must not match.
+const FEATURE_CREDIT = /[([]\s*(feat|ft|with)\b[^)\]]*[)\]]/gi;
+const LIVE_TITLE_PATTERNS = [
+	// "Live", "Live!", "Live: The Final Tour", "Live (Deluxe)", "Live 2003", "Live @ X"
+	/^live\s*([!:@(-]|\d{4}\b|$)/i,
+	// "Live in Brazil", "Live at Leeds", "Live from Red Rocks"
+	/^live\s+(at|in|from|on|aus|au|en|im)\b/i,
+	// "Bill Withers Live At Carnegie Hall", "Live After Death", "Live On Stage", "Live 2002"
+	/\blive\s+(at|from|after|on stage|sessions?|\d{4})\b/i,
+	// "Title (Live)", "[Live]", "(Deluxe / Live)", "(Live in Amsterdam)"
+	/[([/]\s*live\b/i,
+	/\blive\s*[)\]]/i,
+	// "Title - Live", "Title | LIVE", "Up Close & Live"; not "Rare, Live And Classic"
+	/\s[^\w\s(),[]\s*live\b/i,
+	// "Hello, You Bastards: Live in Reno"
+	/:\s*live\b/i,
+	// "Greatest Hits Live", "Absolutely Live"; not "Born to Live", "How We Live"
+	/(?<!\b(to|we|i|you|they|will|can|must|and|gonna|wanna)\s+)\blive\s*!?$/i,
+	/\b(unplugged|in concert|recorded live|tiny desk)\b/i,
+];
+
+export function isLiveAlbumTitle(title: string | null | undefined): boolean {
+	const text = (title ?? '').replace(FEATURE_CREDIT, '').trim();
+	return text.length > 0 && LIVE_TITLE_PATTERNS.some((pattern) => pattern.test(text));
+}
+
 export function categorizeTidalAlbum(album: TidalDiscographyAlbum): DiscoCategory {
 	// The TIDAL editorial filter is more authoritative than the per-album
 	// release_type body field; a compilation tagged release_type:"ALBUM"
@@ -22,14 +51,16 @@ export function categorizeTidalAlbum(album: TidalDiscographyAlbum): DiscoCategor
 		case 'EPSANDSINGLES':
 			return 'ep_single';
 		case 'ALBUMS':
-			return 'album';
+			return isLiveAlbumTitle(album.title) ? 'live' : 'album';
 	}
 	const type = (album.release_type ?? '').toUpperCase();
 	if (type === 'COMPILATION') return 'compilation';
 	if (type === 'LIVE') return 'live';
 	if (type === 'SINGLE' || type === 'EP') return 'ep_single';
-	if (type === 'ALBUM') return 'album';
-	return (album.number_of_tracks ?? 0) >= 3 ? 'album' : 'ep_single';
+	if (type === 'ALBUM' || (album.number_of_tracks ?? 0) >= 3) {
+		return isLiveAlbumTitle(album.title) ? 'live' : 'album';
+	}
+	return 'ep_single';
 }
 
 export type DiscographySection = 'albums' | 'singles' | 'compilations';

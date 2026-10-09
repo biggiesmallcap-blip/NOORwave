@@ -8,7 +8,7 @@ import type {
 import type { DiscographySection } from './artist_discography';
 
 const FILTERS: Record<Exclude<DiscographySection, 'tracks'>, ArtistReleaseFilter[]> = {
-	albums: ['ALBUMS', 'LIVE'],
+	albums: ['ALBUMS'],
 	singles: ['EPSANDSINGLES'],
 	compilations: ['COMPILATIONS'],
 };
