@@ -52,6 +52,46 @@ fn read_bool_flag(conn: &Connection, key: &str) -> bool {
     .unwrap_or(false)
 }
 
+/// The radio quality flags that new behavior depends on. They shipped off by
+/// default, so fresh installs got the legacy interleave. No UI sets them.
+const QUALITY_FLAGS: [&str; 5] = [
+    "radio_score_normalization_enabled",
+    "radio_confidence_penalty_enabled",
+    "radio_hub_penalty_enabled",
+    "radio_diversity_rerank_enabled",
+    "radio_source_quota_bonus_enabled",
+];
+/// Marks that the quality defaults were applied, so a later manual 'false'
+/// is never overwritten.
+const QUALITY_DEFAULTS_MARKER: &str = "radio_quality_defaults_v2";
+
+/// Turn the radio quality flags on once per install (at startup, after
+/// migrations). Self-terminating: the marker makes every later call a no-op.
+pub fn apply_quality_defaults_once(conn: &Connection) -> Result<()> {
+    let applied: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM server_config WHERE key = ?1)",
+        params![QUALITY_DEFAULTS_MARKER],
+        |row| row.get(0),
+    )?;
+    if applied {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    for key in QUALITY_FLAGS {
+        tx.execute(
+            "INSERT INTO server_config (key, value) VALUES (?1, 'true')
+             ON CONFLICT(key) DO UPDATE SET value = 'true'",
+            params![key],
+        )?;
+    }
+    tx.execute(
+        "INSERT INTO server_config (key, value) VALUES (?1, '1')",
+        params![QUALITY_DEFAULTS_MARKER],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn load_radio_flags(conn: &Connection) -> RadioFlags {
     RadioFlags {
         use_legacy_pipeline: read_bool_flag(conn, "radio_use_legacy_pipeline"),
@@ -307,6 +347,30 @@ mod tests {
         assert!(!flags.hub_penalty_enabled);
         assert!(!flags.diversity_rerank_enabled);
         assert!(!flags.source_quota_bonus_enabled);
+    }
+
+    #[test]
+    fn quality_defaults_turn_on_once_and_respect_later_choices() {
+        let conn = Connection::open_in_memory().expect("memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        apply_quality_defaults_once(&conn).expect("apply");
+        let flags = load_radio_flags(&conn);
+        assert!(!flags.use_legacy_pipeline, "the legacy switch stays off");
+        assert!(flags.score_normalization_enabled);
+        assert!(flags.confidence_penalty_enabled);
+        assert!(flags.hub_penalty_enabled);
+        assert!(flags.diversity_rerank_enabled);
+        assert!(flags.source_quota_bonus_enabled);
+
+        // A later deliberate 'false' survives the next startup.
+        conn.execute(
+            "UPDATE server_config SET value = 'false' WHERE key = 'radio_hub_penalty_enabled'",
+            [],
+        )
+        .expect("update");
+        apply_quality_defaults_once(&conn).expect("apply again");
+        assert!(!load_radio_flags(&conn).hub_penalty_enabled);
     }
 
     #[test]
