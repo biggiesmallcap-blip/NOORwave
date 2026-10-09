@@ -1879,8 +1879,8 @@ fn recent_played_artist_names(db: &Database, limit: usize) -> Vec<String> {
                  FROM listen_history lh
                  JOIN tracks t ON t.id = lh.track_id
                  LEFT JOIN artists ar ON ar.id = t.artist_id
-                 WHERE lh.started_at >= datetime('now', printf('-%d hours', ?1))
-                 ORDER BY lh.started_at DESC
+                 WHERE julianday(lh.started_at) >= julianday('now', printf('-%d hours', ?1))
+                 ORDER BY julianday(lh.started_at) DESC
                  LIMIT ?2",
             )?;
             let rows = stmt
@@ -1899,6 +1899,36 @@ fn recent_played_artist_names(db: &Database, limit: usize) -> Vec<String> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn recent_played_artist_names_keep_to_the_hour_window_for_rfc3339_rows() {
+        let db = Database::open(":memory:").expect("in-memory db");
+        db.run_migrations().expect("run migrations");
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (1, 'Recent'), (2, 'Stale')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, album_id, source)
+                 VALUES (1, 'Now', 1, NULL, 'tidal'), (2, 'Earlier', 2, NULL, 'tidal')",
+                [],
+            )?;
+            // RFC 3339, the way the player writes listen_history.
+            conn.execute(
+                "INSERT INTO listen_history (track_id, started_at) VALUES
+                    (1, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '-30 minutes')),
+                    (2, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '-5 hours'))",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("seed");
+        assert_eq!(
+            recent_played_artist_names(&db, 10),
+            vec!["Recent".to_string()]
+        );
+    }
 
     #[test]
     fn weights_sum_to_one() {

@@ -6844,7 +6844,10 @@ pub fn get_completion_weighted_listen_edges(
                 (a.session_id IS NOT NULL AND a.session_id = b.session_id)
                 OR (
                     (a.session_id IS NULL OR b.session_id IS NULL)
-                    AND b.started_at BETWEEN a.started_at AND datetime(a.started_at, printf('+%d minutes', ?1))
+                    -- julianday(): started_at is RFC 3339, datetime() output is not; text compares fail.
+                    AND julianday(b.started_at)
+                        BETWEEN julianday(a.started_at)
+                            AND julianday(a.started_at) + (?1 / 1440.0)
                 )
            )
         ORDER BY a.started_at ASC, a.id ASC, b.started_at ASC, b.id ASC",
@@ -10208,6 +10211,36 @@ mod tests {
         assert_eq!(grouped.get(&1).unwrap()[0].support_transition, 2.0);
         assert_eq!(grouped.get(&2).unwrap()[0].track_id, 4);
         assert_eq!(grouped.get(&2).unwrap()[0].support_transition, 3.0);
+    }
+
+    #[test]
+    fn completion_weighted_listen_edges_window_handles_rfc3339_rows() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("artist");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, duration_ms)
+             VALUES (1,'A',1,180000),(2,'B',1,180000),(3,'C',1,180000)",
+            [],
+        )
+        .expect("tracks");
+        // No session ids, so only the time window links listens.
+        conn.execute(
+            "INSERT INTO listen_history (id, track_id, started_at, duration_listened_ms, completed)
+             VALUES
+                (1, 1, '2026-10-01T10:00:00.123+00:00', 180000, 1),
+                (2, 2, '2026-10-01T10:10:00.456+00:00', 180000, 1),
+                (3, 3, '2026-10-01T13:00:00.789+00:00', 180000, 1)",
+            [],
+        )
+        .expect("listens");
+        let rows = get_completion_weighted_listen_edges(&conn, 45).expect("edges");
+        let pairs: Vec<(i64, i64)> = rows
+            .iter()
+            .map(|row| (row.from_track_id, row.to_track_id))
+            .collect();
+        assert_eq!(pairs, vec![(1, 2)]);
     }
 
     #[test]
