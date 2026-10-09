@@ -1312,7 +1312,6 @@ fn load_external_provider_last_refresh(db: &Database) -> Result<Option<chrono::N
 
 #[derive(Debug, Clone)]
 pub struct ActiveLearningModel {
-    pub model_id: i64,
     #[allow(dead_code)]
     pub family: String,
     /// Vector dimension for this trained model. Authoritative for any code
@@ -1970,7 +1969,6 @@ pub fn load_active_learning_model(db: &Database) -> Result<Option<ActiveLearning
             .map(|row| (row.track_id, unpack_vector_blob(&row.vector_blob)))
             .collect::<HashMap<_, _>>();
         Ok(Some(ActiveLearningModel {
-            model_id: model.id,
             family: model.family,
             dimension: model.dimension.max(0) as usize,
             vectors,
@@ -2131,33 +2129,6 @@ pub fn compute_external_embedding_scores(
             );
         }
         Ok(scores)
-    })
-}
-
-pub fn inject_query_seeds_from_neighbors(
-    db: &Database,
-    seed_track_id: i64,
-    limit: usize,
-) -> Result<Vec<String>> {
-    let Some(active) = load_active_learning_model(db)? else {
-        return Ok(Vec::new());
-    };
-    db.with_conn(|conn| {
-        let neighbors =
-            queries::get_track_neighbors(conn, active.model_id, seed_track_id, limit as i64, &[])?;
-        let mut queries = Vec::new();
-        for neighbor in neighbors {
-            if let Some(artist) = neighbor.artist_name {
-                queries.push(artist);
-            }
-            queries.push(neighbor.title);
-            if let Some(album) = neighbor.album_title {
-                queries.push(album);
-            }
-        }
-        queries.sort();
-        queries.dedup();
-        Ok(queries)
     })
 }
 

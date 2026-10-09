@@ -19,6 +19,7 @@ use crate::db::{
     models::{AudioDspFeatures, QueueItem, Track},
     queries,
 };
+use crate::playback::candidate_gate::CandidateGate;
 use crate::playback::dj_queue_ranker::{
     GeneratedCandidate, GeneratedCandidatePolicy, append_dj_reason, mixing_active,
     rank_generated_candidates, rank_generated_candidates_chain,
@@ -296,7 +297,6 @@ pub fn ensure_automix_queue_depth(
     )?;
 
     let mut appended = false;
-    let generated_count = extension.len();
     if !extension.is_empty() {
         let extension = extension
             .into_iter()
@@ -306,16 +306,18 @@ pub fn ensure_automix_queue_depth(
         appended = true;
     }
 
-    if state.automix_allow_external
-        && let Some(model) = queries::get_selected_discovery_embedding_model(conn)
+    // External picks ("Allow external" or "Include New"): tracks Last.fm
+    // linked to this seed or its learned neighbors, gated like every other
+    // source, filling up to a quarter of the batch when good ones exist.
+    if state.automix_allow_external || state.automix_discover_new {
+        let model_id = queries::get_selected_discovery_embedding_model(conn)
             .ok()
             .flatten()
-    {
-        let external_needed = needed.saturating_sub(generated_count).max(1);
+            .map(|model| model.id);
+        let external_slots = (needed / 4).max(1);
         // External picks are optional; a failure here must never fail the
         // refill that next_track and peek_next_track depend on.
-        match append_automix_external_candidates(conn, model.id, current_track.id, external_needed)
-        {
+        match append_automix_external_candidates(conn, model_id, current_track.id, external_slots) {
             Ok(appended_external) => appended |= appended_external > 0,
             Err(error) => {
                 tracing::warn!(target: "noor.automix", %error, "external automix refill failed")
@@ -330,39 +332,53 @@ pub fn ensure_automix_queue_depth(
     queue::load_queue(conn)
 }
 
+/// Last.fm match (after neighbor weighting) an external pick needs.
+const EXTERNAL_MIN_SCORE: f64 = 0.15;
+/// Learned neighbors whose Last.fm links also count, at this weight.
+const EXTERNAL_NEIGHBOR_SEEDS: i64 = 5;
+const EXTERNAL_NEIGHBOR_WEIGHT: f64 = 0.65;
+
 fn append_automix_external_candidates(
     conn: &Connection,
-    model_id: i64,
+    model_id: Option<i64>,
     seed_track_id: i64,
     limit: usize,
 ) -> Result<usize> {
-    let (queued_tidal_ids, queued_pairs) = load_queued_external_identities(conn)?;
-    let rows = queries::get_external_candidate_neighbors(
-        conn,
-        model_id,
-        seed_track_id,
-        (limit.max(1) * 4).max(12) as i64,
-        true,
-    )?;
-    let mut candidates = Vec::new();
-    for row in rows {
-        // Hidden content never reaches the insert, where it would bail.
-        if let Some(tidal_id) = row.tidal_id
-            && crate::db::tidal_content::is_blocked(conn, tidal_id)?
-        {
-            continue;
+    // Seeds: the playing track, plus its strongest learned neighbors at a
+    // discount, so a seed Last.fm never looked up still reaches its scene.
+    let mut weighted_seeds = vec![(seed_track_id, 1.0)];
+    if let Some(model_id) = model_id {
+        // Best effort: without neighbors the seed's own links still count.
+        let neighbors = queries::get_track_neighbors(
+            conn,
+            model_id,
+            seed_track_id,
+            EXTERNAL_NEIGHBOR_SEEDS,
+            &[],
+        )
+        .unwrap_or_default();
+        for row in neighbors {
+            weighted_seeds.push((
+                row.track_id,
+                EXTERNAL_NEIGHBOR_WEIGHT * row.score.clamp(0.0, 1.0),
+            ));
         }
-        if let Some(tidal_id) = row.tidal_id
-            && queued_tidal_ids.contains(&tidal_id)
-        {
-            continue;
-        }
-        let pair = normalize_external_pair(&row.artist_name, &row.title);
-        if queued_pairs.contains(&pair) {
-            continue;
-        }
-        candidates.push(row);
     }
+    let rows = queries::get_sighted_external_candidates(
+        conn,
+        &weighted_seeds,
+        EXTERNAL_MIN_SCORE,
+        (limit.max(1) * 4).max(12) as i64,
+    )?;
+    // Hidden content, Not for me, recent plays and anything already queued
+    // (any version) stay out; hidden rows never reach the insert, where they
+    // would bail.
+    let queue_items = queue::load_queue(conn)?;
+    let mut gate = CandidateGate::load(conn, &queue_items, None);
+    let candidates = rows
+        .into_iter()
+        .filter(|row| gate.admit_candidate(None, row.tidal_id, None, &row.artist_name, &row.title))
+        .collect::<Vec<_>>();
 
     let generated = candidates
         .into_iter()
@@ -396,7 +412,7 @@ fn append_automix_external_candidates(
     let mut appended = 0usize;
     for ranked in ranked {
         let row = ranked.row;
-        let reason = append_dj_reason("external similarity", ranked.score, &ranked.reasons);
+        let reason = append_dj_reason("Last.fm similar", ranked.score, &ranked.reasons);
         if let Err(error) = queue::append_external_track(
             conn,
             &queue::ExternalTrackInsert {
@@ -466,45 +482,6 @@ fn rank_automix_selections(
         .unwrap_or(fallback)
 }
 
-fn load_queued_external_identities(
-    conn: &Connection,
-) -> Result<(HashSet<i64>, HashSet<(String, String)>)> {
-    let mut stmt = conn.prepare(
-        "SELECT pending_artist, pending_title, tidal_id_hint
-         FROM queue
-         WHERE source = 'automix-new'
-           AND track_id IS NULL",
-    )?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<i64>>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-
-    let mut tidal_ids = HashSet::new();
-    let mut pairs = HashSet::new();
-    for (artist, title, tidal_id) in rows {
-        if let Some(tidal_id) = tidal_id.filter(|id| *id > 0) {
-            tidal_ids.insert(tidal_id);
-        }
-        if let (Some(artist), Some(title)) = (artist, title) {
-            pairs.insert(normalize_external_pair(&artist, &title));
-        }
-    }
-    Ok((tidal_ids, pairs))
-}
-
-fn normalize_external_pair(artist: &str, title: &str) -> (String, String) {
-    (
-        artist.trim().to_ascii_lowercase(),
-        title.trim().to_ascii_lowercase(),
-    )
-}
-
 pub(crate) fn build_automix_extension_with_reasons(
     conn: &Connection,
     current_track: &Track,
@@ -564,6 +541,18 @@ pub(crate) fn build_automix_extension_with_reasons(
                     })
                 })
                 .collect::<Vec<_>>();
+            // One gate for every source: recent plays, early skips, Not for me,
+            // hidden content and versions of queued tracks stay out.
+            let mut gate = CandidateGate::load(conn, queue_items, None);
+            ordered.retain(|selection| gate.admit_track(&selection.track));
+            // Taste reaches the learned path too: favorites and artist
+            // affinity scale the lane policy the ranker multiplies in.
+            let (taste, _) =
+                from_session_profile(&build_session_taste_profile(conn, current_track)?);
+            for selection in &mut ordered {
+                selection.ranking_policy.score_multiplier *=
+                    learned_taste_multiplier(&selection.track, &taste);
+            }
             // Neighbors arrive in relevance order; the ranker keeps that order
             // and, while mixing, chains fit from the last track already queued
             // so the first appended track follows the queue tail, not the
@@ -639,7 +628,10 @@ pub(crate) fn build_automix_extension_with_reasons(
     // for seeds that haven't been embedded yet (e.g. tracks without a
     // service ID, or library additions since the last training run).
     if similar.is_empty() {
-        let fallback = build_metadata_fallback(conn, current_track, &excluded_track_ids, needed)?;
+        let mut gate = CandidateGate::load(conn, queue_items, None);
+        let mut fallback =
+            build_metadata_fallback(conn, current_track, &excluded_track_ids, needed)?;
+        fallback.retain(|track| gate.admit_track(track));
         if fallback.is_empty() {
             tracing::debug!(
                 seed_track_id = current_track.id,
@@ -704,6 +696,14 @@ pub(crate) fn build_automix_extension_with_reasons(
                 candidates.push(track);
             }
         }
+    }
+
+    // Same gate as every other source; the first version of a recording in
+    // similarity order wins.
+    let mut gate = CandidateGate::load(conn, queue_items, None);
+    candidates.retain(|track| gate.admit_track(track));
+    if candidates.is_empty() {
+        return Ok(Vec::new());
     }
 
     let candidate_genres = queue::get_track_genre_evidence(conn, &candidates)?;
@@ -1478,6 +1478,19 @@ pub(crate) fn automix_score(
         seed_features,
         candidate_features,
     )
+}
+
+/// Taste on the learned path: favorites and artist affinity (the same net the
+/// fallback scorer uses) scale the lane policy, bounded to 0.6..1.4.
+fn learned_taste_multiplier(track: &Track, taste: &TasteVector) -> f64 {
+    let mut multiplier = if track.is_favorite { 1.2 } else { 1.0 };
+    if track.artist_id != 0
+        && let Some(affinity) = taste.artist_affinity.get(&track.artist_id)
+    {
+        let net = affinity.pos * 0.5 - affinity.neg * 0.65;
+        multiplier *= (1.0 + 0.1 * net).clamp(0.6, 1.4);
+    }
+    multiplier
 }
 
 /// Full-overlap genre match is worth this much relevance on top of the 1.0 base.

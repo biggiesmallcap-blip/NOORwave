@@ -2743,6 +2743,16 @@ mod tests {
                 created_at TEXT DEFAULT (datetime('now')),
                 updated_at TEXT DEFAULT (datetime('now'))
             );
+            CREATE TABLE external_track_candidate_sightings (
+                candidate_id INTEGER NOT NULL,
+                seed_track_id INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                source_payload_json TEXT,
+                similarity REAL,
+                seen_at TEXT DEFAULT (datetime('now')),
+                expires_at TEXT NOT NULL,
+                PRIMARY KEY (candidate_id, seed_track_id, source)
+            );
             CREATE TABLE external_track_candidate_neighbors (
                 library_track_id INTEGER NOT NULL,
                 candidate_id INTEGER NOT NULL,
@@ -5366,6 +5376,65 @@ mod tests {
         );
     }
 
+    /// Last.fm linked the candidate to track 1 (the playing seed).
+    fn sight_for_seed_one(conn: &Connection, candidate_id: i64, similarity: f64) {
+        queries::upsert_external_candidate_sighting(
+            conn,
+            &queries::ExternalCandidateSightingUpsert {
+                candidate_id,
+                seed_track_id: 1,
+                source: "lastfm_similar".to_string(),
+                source_payload_json: None,
+                similarity: Some(similarity),
+                expires_at: "2099-01-01 00:00:00".to_string(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn include_new_uses_the_lastfm_lane_and_skips_weak_links() {
+        let conn = conn();
+        let current = queue::get_tracks_by_ids(&conn, &[1]).unwrap().remove(0);
+        queue::append_tracks(&conn, std::slice::from_ref(&current), "user").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1, position_ms = 0, is_playing = 1, automix_enabled = 1,
+                 automix_allow_external = 0, automix_discover_new = 1, automix_use_learning = 0",
+            [],
+        )
+        .unwrap();
+        let candidate = |tidal_id: i64, title: &str| {
+            queries::upsert_external_track_candidate(
+                &conn,
+                &queries::ExternalTrackCandidateUpsert {
+                    tidal_id: Some(tidal_id),
+                    mbid: None,
+                    dedupe_key: format!("tidal:{tidal_id}"),
+                    title: title.to_string(),
+                    artist_name: "Outside Artist".to_string(),
+                    genre_tags_json: None,
+                    duration_ms: Some(180_000),
+                    expires_at: "2099-01-01 00:00:00".to_string(),
+                },
+            )
+            .unwrap()
+        };
+        let strong = candidate(99101, "Strong Link");
+        let weak = candidate(99102, "Weak Link");
+        sight_for_seed_one(&conn, strong.id, 0.7);
+        sight_for_seed_one(&conn, weak.id, 0.05);
+
+        let queue = ensure_automix_queue_depth(&conn, 1, false).unwrap();
+
+        let external: Vec<&str> = queue
+            .iter()
+            .filter(|item| item.source == "automix-new")
+            .map(|item| item.track.title.as_str())
+            .collect();
+        assert_eq!(external, vec!["Strong Link"]);
+    }
+
     #[test]
     fn ensure_automix_external_enabled_appends_pending_sidecar_rows() {
         let conn = conn();
@@ -5402,20 +5471,7 @@ mod tests {
             },
         )
         .unwrap();
-        queries::replace_external_candidate_neighbors(
-            &conn,
-            model.id,
-            1,
-            &[queries::ExternalCandidateNeighborWriteRow {
-                candidate_id: candidate.id,
-                rank: 1,
-                score: 0.9,
-                audio_score: 0.9,
-                metadata_score: 0.0,
-                reason_json: None,
-            }],
-        )
-        .unwrap();
+        sight_for_seed_one(&conn, candidate.id, 0.9);
 
         let queue = ensure_automix_queue_depth(&conn, 1, false).unwrap();
 
@@ -5497,30 +5553,8 @@ mod tests {
             },
         )
         .unwrap();
-        queries::replace_external_candidate_neighbors(
-            &conn,
-            model.id,
-            1,
-            &[
-                queries::ExternalCandidateNeighborWriteRow {
-                    candidate_id: first.id,
-                    rank: 1,
-                    score: 0.95,
-                    audio_score: 0.95,
-                    metadata_score: 0.0,
-                    reason_json: None,
-                },
-                queries::ExternalCandidateNeighborWriteRow {
-                    candidate_id: second.id,
-                    rank: 2,
-                    score: 0.9,
-                    audio_score: 0.9,
-                    metadata_score: 0.0,
-                    reason_json: None,
-                },
-            ],
-        )
-        .unwrap();
+        sight_for_seed_one(&conn, first.id, 0.95);
+        sight_for_seed_one(&conn, second.id, 0.9);
 
         ensure_automix_queue_depth(&conn, 2, false).unwrap();
 
@@ -5587,21 +5621,8 @@ mod tests {
         };
         let hidden = candidate(99001, "Hidden AI Track");
         let fresh = candidate(99002, "Fresh External");
-        let neighbor = |candidate_id: i64, rank: i32| queries::ExternalCandidateNeighborWriteRow {
-            candidate_id,
-            rank,
-            score: 0.9,
-            audio_score: 0.9,
-            metadata_score: 0.0,
-            reason_json: None,
-        };
-        queries::replace_external_candidate_neighbors(
-            &conn,
-            model.id,
-            1,
-            &[neighbor(hidden.id, 1), neighbor(fresh.id, 2)],
-        )
-        .unwrap();
+        sight_for_seed_one(&conn, hidden.id, 0.9);
+        sight_for_seed_one(&conn, fresh.id, 0.8);
 
         let queue = ensure_automix_queue_depth(&conn, 1, false)
             .expect("hidden content must not fail the refill");

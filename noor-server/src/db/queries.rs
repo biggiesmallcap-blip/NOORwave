@@ -6427,6 +6427,78 @@ pub fn replace_external_candidate_neighbors(
     Ok(())
 }
 
+/// External candidates Last.fm linked to the given seeds, best first. Each
+/// seed carries a weight (1.0 for the playing track, less for its learned
+/// neighbors); a candidate scores its best `similarity x weight`, and only
+/// scores at or above `min_score` count. Playable (TIDAL id) and unexpired only.
+pub fn get_sighted_external_candidates(
+    conn: &Connection,
+    weighted_seeds: &[(i64, f64)],
+    min_score: f64,
+    limit: i64,
+) -> Result<Vec<ExternalCandidateNeighborRow>> {
+    if weighted_seeds.is_empty() {
+        return Ok(Vec::new());
+    }
+    let values = (0..weighted_seeds.len())
+        .map(|i| format!("(?{}, ?{})", i * 2 + 3, i * 2 + 4))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "WITH w(seed_id, weight) AS (VALUES {values})
+         SELECT c.id, c.tidal_id, c.title, c.artist_name, c.duration_ms,
+                MAX(COALESCE(s.similarity, 0) * w.weight) AS score
+         FROM external_track_candidate_sightings s
+         JOIN w ON w.seed_id = s.seed_track_id
+         JOIN external_track_candidates c ON c.id = s.candidate_id
+         WHERE c.tidal_id IS NOT NULL
+           AND julianday(s.expires_at) > julianday('now')
+           AND julianday(c.expires_at) > julianday('now')
+         GROUP BY c.id
+         HAVING score >= ?1
+         ORDER BY score DESC, c.id
+         LIMIT ?2"
+    );
+    let mut bound: Vec<rusqlite::types::Value> = vec![min_score.into(), limit.max(1).into()];
+    for (seed_id, weight) in weighted_seeds {
+        bound.push((*seed_id).into());
+        bound.push((*weight).into());
+    }
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(bound), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, f64>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .enumerate()
+        .map(
+            |(rank, (candidate_id, tidal_id, title, artist_name, duration_ms, score))| {
+                ExternalCandidateNeighborRow {
+                    candidate_id,
+                    tidal_id,
+                    title,
+                    artist_name,
+                    duration_ms,
+                    rank: rank as i32 + 1,
+                    score,
+                    audio_score: 0.0,
+                    metadata_score: 0.0,
+                    reason_json: None,
+                }
+            },
+        )
+        .collect())
+}
+
 pub fn get_external_candidate_neighbors(
     conn: &Connection,
     model_id: i64,
@@ -10838,6 +10910,72 @@ mod tests {
             rows[0].source_payload_json.as_deref(),
             Some(r#"{"match":0.77}"#)
         );
+    }
+
+    #[test]
+    fn sighted_external_candidates_follow_lastfm_links_with_a_floor() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("artist");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id) VALUES (1, 'Seed', 1), (2, 'Neighbor', 1), (3, 'Elsewhere', 1)",
+            [],
+        )
+        .expect("tracks");
+        let candidate = |tidal_id: Option<i64>, title: &str| {
+            upsert_external_track_candidate(
+                &conn,
+                &ExternalTrackCandidateUpsert {
+                    tidal_id,
+                    mbid: None,
+                    dedupe_key: format!("test:{title}"),
+                    title: title.to_string(),
+                    artist_name: "Outside".to_string(),
+                    genre_tags_json: None,
+                    duration_ms: Some(200_000),
+                    expires_at: "2099-01-01 00:00:00".to_string(),
+                },
+            )
+            .expect("candidate")
+            .id
+        };
+        let direct = candidate(Some(501), "Direct");
+        let via_neighbor = candidate(Some(502), "Via Neighbor");
+        let weak = candidate(Some(503), "Weak");
+        let unplayable = candidate(None, "Unplayable");
+        let unrelated = candidate(Some(505), "Unrelated");
+        for (candidate_id, seed, similarity) in [
+            (direct, 1, 0.6),
+            (via_neighbor, 2, 0.5),
+            (weak, 1, 0.05),
+            (unplayable, 1, 0.9),
+            (unrelated, 3, 0.9),
+        ] {
+            upsert_external_candidate_sighting(
+                &conn,
+                &ExternalCandidateSightingUpsert {
+                    candidate_id,
+                    seed_track_id: seed,
+                    source: "lastfm_similar".to_string(),
+                    source_payload_json: None,
+                    similarity: Some(similarity),
+                    expires_at: "2099-01-01 00:00:00".to_string(),
+                },
+            )
+            .expect("sighting");
+        }
+
+        let rows = get_sighted_external_candidates(&conn, &[(1, 1.0), (2, 0.65)], 0.15, 10)
+            .expect("sighted");
+
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Direct", "Via Neighbor"]
+        );
+        assert!((rows[1].score - 0.325).abs() < 1e-9);
     }
 
     #[test]
