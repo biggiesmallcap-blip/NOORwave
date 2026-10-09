@@ -72,6 +72,7 @@
 	import {
 		applyTrainingProgress,
 		discoveryLastTrainedAt,
+		discoveryModelHeldBack,
 		shouldContinueDiscoveryCompletionRefresh,
 		shouldRefreshAfterTerminalDiscoveryProgress
 	} from '$lib/components/settings/discovery_status';
@@ -196,6 +197,7 @@
 	let portableSnapshot = $state<PortableMusicBrainzSnapshotStatus | null>(null);
 	let discoveryStatus = $state<DiscoveryStatus | null>(null);
 	let discoveryStatusLastTrainedAt = $derived(discoveryLastTrainedAt(discoveryStatus));
+	let discoveryStatusModelHeldBack = $derived(discoveryModelHeldBack(discoveryStatus));
 	let portableAction = $state<'export' | 'import' | null>(null);
 	let portableStatusLabel = $state('');
 	let galaxyRefreshLabel = $state('');
@@ -2883,6 +2885,12 @@
 								{/if}
 							</strong>
 						</div>
+						{#if discoveryStatusModelHeldBack}
+							<div class="info-row">
+								<span>Newer model</span>
+								<strong>Held back: it did not beat the active model</strong>
+							</div>
+						{/if}
 					</div>
 				</div>
 

@@ -68,3 +68,20 @@ export function shouldContinueDiscoveryCompletionRefresh(
 ): boolean {
 	return status?.latest_run?.status === 'running' && attempts < maxAttempts;
 }
+
+/**
+ * True when the latest run finished but its model did not replace the active
+ * one: the activation gate held it back because it did not beat the active
+ * model on the same held-out listening.
+ */
+export function discoveryModelHeldBack(status: DiscoveryStatus | null): boolean {
+	const run = status?.latest_run;
+	const active = status?.active_model;
+	return (
+		status?.selected_engine === 'v2' &&
+		run?.status === 'completed' &&
+		run.model_id != null &&
+		active != null &&
+		run.model_id !== active.id
+	);
+}

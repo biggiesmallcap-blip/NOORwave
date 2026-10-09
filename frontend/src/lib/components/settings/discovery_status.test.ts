@@ -3,6 +3,7 @@ import type { DiscoveryStatus } from '$lib/api/client';
 import {
 	applyTrainingProgress,
 	discoveryLastTrainedAt,
+	discoveryModelHeldBack,
 	shouldContinueDiscoveryCompletionRefresh,
 	shouldRefreshAfterTerminalDiscoveryProgress
 } from './discovery_status';
@@ -163,6 +164,63 @@ describe('discovery status display', () => {
 		expect(shouldContinueDiscoveryCompletionRefresh(running, 12, 12)).toBe(false);
 		expect(shouldContinueDiscoveryCompletionRefresh(completed, 1, 12)).toBe(false);
 		expect(shouldContinueDiscoveryCompletionRefresh(null, 1, 12)).toBe(false);
+	});
+
+	it('flags a completed run whose model did not replace the active one', () => {
+		const status = discoveryStatus({
+			latest_run: {
+				id: 30,
+				model_id: 30,
+				stage: 'evaluate',
+				status: 'completed',
+				progress: 1,
+				items_total: null,
+				items_done: 0,
+				started_at: '2026-10-01 09:00:00',
+				finished_at: '2026-10-01 09:10:00',
+				error_text: null
+			}
+		});
+
+		expect(discoveryModelHeldBack(status)).toBe(true);
+	});
+
+	it('does not flag a run that became the active model', () => {
+		const status = discoveryStatus({
+			latest_run: {
+				id: 13,
+				model_id: 13,
+				stage: 'evaluate',
+				status: 'completed',
+				progress: 1,
+				items_total: null,
+				items_done: 0,
+				started_at: '2026-05-11 13:00:00',
+				finished_at: '2026-05-11 13:06:25',
+				error_text: null
+			}
+		});
+
+		expect(discoveryModelHeldBack(status)).toBe(false);
+	});
+
+	it('does not flag failed runs or the V1 engine', () => {
+		const failed = discoveryStatus({
+			latest_run: {
+				id: 31,
+				model_id: 31,
+				stage: 'audio',
+				status: 'failed',
+				progress: 1,
+				items_total: null,
+				items_done: 0,
+				started_at: '2026-10-01 10:00:00',
+				finished_at: '2026-10-01 10:02:00',
+				error_text: 'Audio setup failed'
+			}
+		});
+		expect(discoveryModelHeldBack(failed)).toBe(false);
+		expect(discoveryModelHeldBack(discoveryStatus({ selected_engine: 'v1' }))).toBe(false);
 	});
 });
 
