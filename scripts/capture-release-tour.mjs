@@ -40,7 +40,7 @@ const SHOTS = [
 	{ name: 'home-dark', path: '/', settle: 3500 },
 	{ name: 'home-warm', path: '/', settle: 3500 },
 	{ name: 'home-light', path: '/', settle: 3500 },
-	{ name: 'search-dark', path: '/search', settle: 2500, type: 'moby' },
+	{ name: 'search-dark', path: '/search', settle: 4000, type: 'moby' },
 	{ name: 'artist-dark', path: `/artists/${ARTIST}`, settle: 3500 },
 	{ name: 'album-light', path: `/albums/${ALBUM}`, settle: 3500 },
 	{ name: 'library-dark', path: '/library', settle: 3500 },
@@ -95,6 +95,7 @@ for (const shot of SHOTS) {
 	const page = await context.newPage();
 	await page.goto(`${BASE}${shot.path}`, { waitUntil: 'networkidle', timeout: 60_000 });
 	if (shot.type) {
+		await page.locator('main input[type="search"], main input[placeholder*="Search"]').first().click();
 		await page.keyboard.type(shot.type, { delay: 60 });
 	}
 	await page.waitForTimeout(shot.settle);
