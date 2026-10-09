@@ -1313,7 +1313,6 @@ fn load_external_provider_last_refresh(db: &Database) -> Result<Option<chrono::N
 #[derive(Debug, Clone)]
 pub struct ActiveLearningModel {
     pub model_id: i64,
-    pub model_key: String,
     #[allow(dead_code)]
     pub family: String,
     /// Vector dimension for this trained model. Authoritative for any code
@@ -1972,7 +1971,6 @@ pub fn load_active_learning_model(db: &Database) -> Result<Option<ActiveLearning
             .collect::<HashMap<_, _>>();
         Ok(Some(ActiveLearningModel {
             model_id: model.id,
-            model_key: model.model_key,
             family: model.family,
             dimension: model.dimension.max(0) as usize,
             vectors,
@@ -1987,17 +1985,14 @@ pub fn radio_from_neighbors(
     limit: i64,
     creativity: f64,
 ) -> Result<Option<Vec<DiscoveryRadioResult>>> {
-    let Some(active) = load_active_learning_model(db)? else {
-        return Ok(None);
-    };
     db.with_conn(|conn| {
-        let neighbors = queries::get_track_neighbors(
-            conn,
-            active.model_id,
-            seed_track_id,
-            limit * 3,
-            exclude_ids,
-        )?;
+        // Only the model id and key are needed here; loading every embedding
+        // (tens of MB) per radio request was pure overhead.
+        let Some(active) = queries::get_selected_discovery_embedding_model(conn)? else {
+            return Ok(None);
+        };
+        let neighbors =
+            queries::get_track_neighbors(conn, active.id, seed_track_id, limit * 3, exclude_ids)?;
         if neighbors.is_empty() {
             return Ok(Some(Vec::new()));
         }
@@ -2018,9 +2013,11 @@ pub fn radio_from_neighbors(
                     similarity_score: neighbor.score,
                     adjusted_score: adjusted,
                     co_listen_score: neighbor.behavioral_score,
-                    co_album_score: neighbor.metadata_score,
-                    co_artist_score: neighbor.audio_score,
-                    genre_proximity: neighbor.metadata_score,
+                    // Learned rows have no album, artist or genre components;
+                    // reporting the proxy and bonus scores here mislabeled them.
+                    co_album_score: 0.0,
+                    co_artist_score: 0.0,
+                    genre_proximity: 0.0,
                     reason_tags: reasons,
                     model_key: Some(active.model_key.clone()),
                     source_mode: "embedding".to_string(),
@@ -3170,6 +3167,54 @@ mod tests {
             ),
             1
         );
+    }
+
+    #[test]
+    fn radio_from_neighbors_reports_learned_scores_without_mislabeling() {
+        let db = Database::open_in_memory().expect("in-memory db");
+        db.run_migrations().expect("migrations");
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id) VALUES (1, 'Seed', 1), (2, 'Next', 1)",
+                [],
+            )?;
+            let model = queries::create_embedding_model(
+                conn,
+                "discovery-fusion-v2:radio-test",
+                MODEL_FAMILY,
+                8,
+                "ready",
+                None,
+            )?;
+            queries::activate_embedding_model(conn, model.id)?;
+            conn.execute(
+                "INSERT INTO track_neighbors
+                    (track_id, neighbor_track_id, model_id, rank, score, behavioral_score,
+                     audio_score, metadata_score)
+                 VALUES (1, 2, ?1, 1, 0.9, 0.6, 0.7, 0.2)",
+                rusqlite::params![model.id],
+            )?;
+            Ok(())
+        })
+        .expect("seed");
+
+        let rows = radio_from_neighbors(&db, 1, &[], 5, 0.0)
+            .expect("radio")
+            .expect("active model");
+
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.track_id, 2);
+        assert_eq!(
+            row.model_key.as_deref(),
+            Some("discovery-fusion-v2:radio-test")
+        );
+        assert!((row.co_listen_score - 0.6).abs() < 1e-9);
+        // Learned rows carry no album, artist or genre components.
+        assert_eq!(row.co_album_score, 0.0);
+        assert_eq!(row.co_artist_score, 0.0);
+        assert_eq!(row.genre_proximity, 0.0);
     }
 
     #[test]
