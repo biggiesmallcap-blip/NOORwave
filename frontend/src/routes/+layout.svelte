@@ -67,6 +67,7 @@
 	import CommandPalette from '$lib/components/CommandPalette.svelte';
 	import ShortcutHelp from '$lib/components/ShortcutHelp.svelte';
 	import DiscoverySetupGuide from '$lib/components/onboarding/DiscoverySetupGuide.svelte';
+	import WelcomeRelease from '$lib/components/onboarding/WelcomeRelease.svelte';
 	import PlayerBar from '$lib/shell/PlayerBar.svelte';
 	import PlayerLayoutSelect from '$lib/shell/PlayerLayoutSelect.svelte';
 	import SidebarNav from '$lib/shell/SidebarNav.svelte';
@@ -1466,6 +1467,7 @@
 <ContextMenu />
 <Toast />
 <DiscoverySetupGuide enabled={authReady && onboardingChecked && !isOnboardingRoute && !page.url.pathname.startsWith('/connect')} />
+<WelcomeRelease enabled={authReady && onboardingChecked && !isOnboardingRoute && !isRemoteRoute && !page.url.pathname.startsWith('/connect')} version={serverVersion} />
 <DownloadProgressPill />
 <CommandPalette />
 <QuietMode />

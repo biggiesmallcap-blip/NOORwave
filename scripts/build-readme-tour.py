@@ -4,8 +4,9 @@ GitHub READMEs cannot run JS, so "rotating" shots are animated WebP files with
 crossfades baked in. Stills are emitted per theme so the README can swap them
 with <picture> + prefers-color-scheme to match the reader's GitHub theme.
 
-Raw captures are expected as <src>/<name>.webp|png, 2000 wide, with the Windows
-caption strip still on top (cropped here).
+Raw captures are expected as <src>/<name>.webp|png. Hand-taken window captures
+(2000 wide, caption strip on top) are cropped; pass --titlebar 0 for the
+chromeless 3200x1800 shots from scripts/capture-release-tour.mjs.
 
 Usage:
     python scripts/build-readme-tour.py [--src docs/assets/raw] [--out docs/assets/shots]
@@ -18,8 +19,9 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-STILL_WIDTH = 1280
-TOUR_WIDTH = 1000
+# Sized for 2x screens: the README shows stills at 900 and the tour at 960.
+STILL_WIDTH = 1800
+TOUR_WIDTH = 1600
 CORNER_RADIUS = 16
 # Caption strip on a 2000-wide Windows capture.
 TITLEBAR_PX_AT_2000 = 24
@@ -32,14 +34,15 @@ FADE_MS = 55
 # sells the theming.
 TOUR = [
     "home-dark",
+    "search-light",
     "stations-dark",
-    "video-warm",
+    "album-light",
     "galaxy-dark",
-    "library-light",
-    "video-light",
-    "analytics-warm",
-    "library-dark",
+    "videos-light",
+    "artist-dark",
     "analytics-light",
+    "library-dark",
+    "charts-light",
 ]
 # Same screen, three palettes.
 THEMES = ["home-dark", "home-warm", "home-light"]
@@ -98,10 +101,18 @@ def tour(src: Path, names: list[str], dst: Path) -> None:
 
 
 def main() -> None:
+    global TITLEBAR_PX_AT_2000
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", default="docs/assets/raw")
     ap.add_argument("--out", default="docs/assets/shots")
+    ap.add_argument(
+        "--titlebar",
+        type=int,
+        default=TITLEBAR_PX_AT_2000,
+        help="caption strip rows at 2000 wide; 0 for scripts/capture-release-tour.mjs output",
+    )
     args = ap.parse_args()
+    TITLEBAR_PX_AT_2000 = args.titlebar
     src, out = Path(args.src), Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 

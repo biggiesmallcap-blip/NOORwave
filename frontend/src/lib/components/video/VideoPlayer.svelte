@@ -648,6 +648,8 @@
 	}
 
 	.top-meta strong {
+		/* Text over video is always white; the theme colour vanished on light themes. */
+		color: rgba(255, 255, 255, 0.96);
 		font-size: var(--font-size-sm);
 	}
 
