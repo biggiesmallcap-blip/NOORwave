@@ -56,6 +56,7 @@ mod tidal_home_routes;
 mod tidal_sync_routes;
 mod video_discovery_routes;
 mod video_station_routes;
+pub use discovery_routes::{TrainingSpawn, spawn_discovery_training};
 pub use tidal_sync_routes::trigger_auto_sync;
 
 type TidalPlaylistTracksCache = Arc<Mutex<HashMap<String, (Instant, Vec<TidalTrack>)>>>;

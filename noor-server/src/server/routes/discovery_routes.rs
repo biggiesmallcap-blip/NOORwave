@@ -525,14 +525,23 @@ pub(super) async fn get_discovery_training_status(
     Ok(Json(json!({ "run": run, "stages": stages })))
 }
 
-pub(super) async fn start_discovery_training(
-    State(state): State<SharedState>,
-    Json(payload): Json<DiscoveryTrainRequest>,
-) -> Result<Json<Value>, StatusCode> {
+/// Outcome of asking for a training run. Shared by the Settings route and the
+/// upgrade retrain sweep (services::discovery_retrain).
+pub enum TrainingSpawn {
+    AlreadyRunning,
+    LegacyEngine(discovery_learning::DiscoveryEngine),
+    Started,
+}
+
+/// Start a discovery training run in the background unless one is running or
+/// the selected engine cannot train. Returns immediately.
+pub async fn spawn_discovery_training(
+    state: SharedState,
+    full_mode: bool,
+    rebuild_audio: bool,
+) -> TrainingSpawn {
     use std::sync::atomic::Ordering;
 
-    let (mode, full_mode) = parse_discovery_training_mode(payload.mode.as_deref())?;
-    let rebuild_audio = payload.rebuild_audio.unwrap_or(false);
     let (db, cancel) = {
         let guard = state.read().await;
         (guard.db.clone(), guard.discovery_train_cancel.clone())
@@ -545,22 +554,13 @@ pub(super) async fn start_discovery_training(
         .flatten()
         .map(|run| run.status == "running")
         .unwrap_or(false);
-
     if already_running {
-        return Ok(Json(json!({
-            "status": "already_running",
-            "mode": mode
-        })));
+        return TrainingSpawn::AlreadyRunning;
     }
 
     let engine = discovery_learning::load_discovery_engine(&db);
     if !engine.supports_training() {
-        return Ok(Json(json!({
-            "status": "legacy_trainer_unavailable",
-            "mode": mode,
-            "engine": engine.as_str(),
-            "message": "V1 legacy can read existing models. Switch to V2 to train a new model."
-        })));
+        return TrainingSpawn::LegacyEngine(engine);
     }
 
     // Reset cancel flag synchronously before spawning so that a Stop request
@@ -608,10 +608,33 @@ pub(super) async fn start_discovery_training(
             );
         }
     });
-    Ok(Json(json!({
-        "status": "training_started",
-        "mode": if full_mode { "full" } else { "incremental" }
-    })))
+    TrainingSpawn::Started
+}
+
+pub(super) async fn start_discovery_training(
+    State(state): State<SharedState>,
+    Json(payload): Json<DiscoveryTrainRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    let (mode, full_mode) = parse_discovery_training_mode(payload.mode.as_deref())?;
+    let rebuild_audio = payload.rebuild_audio.unwrap_or(false);
+    Ok(Json(
+        match spawn_discovery_training(state, full_mode, rebuild_audio).await {
+            TrainingSpawn::AlreadyRunning => json!({
+                "status": "already_running",
+                "mode": mode
+            }),
+            TrainingSpawn::LegacyEngine(engine) => json!({
+                "status": "legacy_trainer_unavailable",
+                "mode": mode,
+                "engine": engine.as_str(),
+                "message": "V1 legacy can read existing models. Switch to V2 to train a new model."
+            }),
+            TrainingSpawn::Started => json!({
+                "status": "training_started",
+                "mode": if full_mode { "full" } else { "incremental" }
+            }),
+        },
+    ))
 }
 
 pub(super) async fn stop_discovery_training(
