@@ -27,32 +27,36 @@ const ARTIST = flag('artist', '1');
 const ALBUM = flag('album', '1');
 const ONLY = flag('only', null);
 
-// theme: surface mode; palette: accent palette id from wallpaper/palettes.ts.
+// theme: surface mode; palette: palette id from wallpaper/palettes.ts. Dark
+// shots use Pure Black (void) so the imagery matches the cards.
 const THEMES = {
-	dark: { theme: 'dark', palette: 'clay' },
+	dark: { theme: 'dark', palette: 'void' },
 	warm: { theme: 'dark', palette: 'ember' },
 	light: { theme: 'light', palette: 'clay' }
 };
 
 // settle is per-surface: the galaxy runs a force layout, analytics draws ridges.
 // type: optional text typed into the focused search field after load.
+// Alternates Pure Black and Clay light so the tour shows both looks. README
+// names (home-*, library-*, analytics-*, stations-dark, galaxy-dark) are kept.
 const SHOTS = [
 	{ name: 'home-dark', path: '/', settle: 3500 },
-	{ name: 'home-warm', path: '/', settle: 3500 },
-	{ name: 'home-light', path: '/', settle: 3500 },
-	{ name: 'search-dark', path: '/search', settle: 4000, type: 'moby' },
+	{ name: 'search-light', path: '/search', settle: 4000, type: 'moby' },
 	{ name: 'artist-dark', path: `/artists/${ARTIST}`, settle: 3500 },
 	{ name: 'album-light', path: `/albums/${ALBUM}`, settle: 3500 },
 	{ name: 'library-dark', path: '/library', settle: 3500 },
-	{ name: 'library-light', path: '/library', settle: 3500 },
-	{ name: 'mix-dark', path: '/mix', settle: 3000 },
+	{ name: 'mix-light', path: '/mix', settle: 3000 },
 	{ name: 'stations-dark', path: '/videos/stations', settle: 4000 },
-	{ name: 'videos-warm', path: '/videos/liked', settle: 4000 },
+	{ name: 'videos-light', path: '/videos/liked', settle: 4000 },
 	{ name: 'galaxy-dark', path: '/genres', settle: 9000 },
+	{ name: 'charts-light', path: '/charts', settle: 4000 },
 	{ name: 'space-dark', path: '/discoverspace', settle: 7000 },
-	{ name: 'analytics-warm', path: '/analytics', settle: 5000 },
 	{ name: 'analytics-light', path: '/analytics', settle: 5000 },
-	{ name: 'settings-dark', path: '/settings', settle: 2500 }
+	{ name: 'settings-dark', path: '/settings', settle: 2500 },
+	{ name: 'home-light', path: '/', settle: 3500 },
+	{ name: 'home-warm', path: '/', settle: 3500 },
+	{ name: 'library-light', path: '/library', settle: 3500 },
+	{ name: 'analytics-warm', path: '/analytics', settle: 5000 }
 ];
 
 let browser;
@@ -81,16 +85,18 @@ for (const shot of SHOTS) {
 	if (ONLY && !ONLY.split(',').includes(shot.name)) continue;
 	const look = THEMES[shot.name.split('-').pop()];
 	const context = await browser.newContext({
-		// 1600x900 CSS px at 2x: the UI fills more of the frame than at 1920 and
-		// every frame is 3200x1800, so the 1080p/4K encodes are downscales, never blurry.
-		viewport: { width: 1600, height: 900 },
-		deviceScaleFactor: 2,
+		// A 1920x1080 window (100% UI, room to breathe) rendered at 5/3x, so every
+		// frame is 3200x1800 and the 1440p/1080p encodes are downscales, never blurry.
+		viewport: { width: 1920, height: 1080 },
+		deviceScaleFactor: 5 / 3,
 		colorScheme: look.theme === 'light' ? 'light' : 'dark'
 	});
 	await context.addInitScript((l) => {
 		localStorage.setItem('noor-theme', l.theme);
 		localStorage.setItem('noor-palette', l.palette);
 		localStorage.setItem('noor.onboarding.complete', '1');
+		// Half-height banner artwork in the side player instead of a big square.
+		localStorage.setItem('noor-player-artwork-style', 'banner');
 	}, look);
 	const page = await context.newPage();
 	await page.goto(`${BASE}${shot.path}`, { waitUntil: 'networkidle', timeout: 60_000 });
@@ -99,7 +105,7 @@ for (const shot of SHOTS) {
 		await page.keyboard.type(shot.type, { delay: 60 });
 	}
 	await page.waitForTimeout(shot.settle);
-	await page.mouse.move(1599, 450);
+	await page.mouse.move(1919, 540);
 	// The sidebar shows the server's version; a capture server running the
 	// previous binary would otherwise stamp the old number on the new release.
 	const label = flag('version-label', null);

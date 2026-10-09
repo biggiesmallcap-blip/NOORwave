@@ -37,18 +37,17 @@ FPS = 30
 # detail pages, video, the maps, then the themes as a closer.
 SLIDES = [
     ("home-dark", "Home", "Jump back in, mixes and your recommendations up front"),
-    ("search-dark", "Search", "The top result beside the five best songs. Enter plays it."),
+    ("search-light", "Search", "The top result beside the five best songs. Enter plays it."),
     ("artist-dark", "Artist pages", "One action bar, counts once, every row with its duration"),
     ("album-light", "Album pages", "Liner notes: tracks grouped by work, nothing repeated"),
     ("library-dark", "Library", "A command header, tab counts and an A to Z index"),
-    ("mix-dark", "Mix", "Automix and DJ transitions on one page"),
+    ("mix-light", "Mix", "Automix and DJ transitions on one page"),
     ("stations-dark", "Video stations", "A fresh lineup every day, drawn from your taste"),
-    ("videos-warm", "Your music videos", "Every video for the songs you love, on one wall"),
+    ("videos-light", "Your music videos", "Every video for the songs you love, on one wall"),
     ("galaxy-dark", "Genre Galaxy", "Your whole library as a star field"),
+    ("charts-light", "Charts", "Instant charts, refreshed daily"),
     ("space-dark", "Sound Space", "Discovery that branches from any song"),
-    ("analytics-warm", "Analytics", "Listening pulse, rhythm and your routine"),
-    ("home-light", "Light", "Every theme, every page, one design"),
-    ("home-warm", "Warm", "Pick a palette and the whole app follows"),
+    ("analytics-light", "Analytics", "Listening pulse, rhythm and your routine"),
 ]
 
 

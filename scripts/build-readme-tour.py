@@ -34,15 +34,15 @@ FADE_MS = 55
 # sells the theming.
 TOUR = [
     "home-dark",
-    "search-dark",
+    "search-light",
     "stations-dark",
-    "videos-warm",
-    "galaxy-dark",
-    "artist-dark",
     "album-light",
+    "galaxy-dark",
+    "videos-light",
+    "artist-dark",
+    "analytics-light",
     "library-dark",
-    "analytics-warm",
-    "home-light",
+    "charts-light",
 ]
 # Same screen, three palettes.
 THEMES = ["home-dark", "home-warm", "home-light"]
