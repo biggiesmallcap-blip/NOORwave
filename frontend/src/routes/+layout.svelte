@@ -3519,12 +3519,12 @@
 	}
 
 	.queue-row.active .queue-title {
-		color: var(--accent-strong);
+		color: var(--playing);
 	}
 
 	.queue-row.active {
-		border-color: var(--accent-line);
-		background: var(--accent-soft);
+		border-color: color-mix(in srgb, var(--playing) 28%, transparent);
+		background: var(--playing-soft);
 	}
 
 	.queue-row.active::before {
@@ -3535,7 +3535,7 @@
 		bottom: 10px;
 		width: 2px;
 		border-radius: 2px;
-		background: var(--accent);
+		background: var(--playing);
 	}
 
 	.queue-row.played {

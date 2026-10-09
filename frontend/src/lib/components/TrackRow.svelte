@@ -482,8 +482,8 @@
 	}
 
 	.track-row:hover { background: var(--bg-hover); }
-	.track-row.active { background: var(--accent-soft); }
-	.track-row.active .title { color: var(--accent-strong); }
+	.track-row.active { background: var(--playing-soft); }
+	.track-row.active .title { color: var(--playing); }
 	.track-row.selected { background: var(--accent-soft); }
 	.track-row.disabled {
 		cursor: default;
@@ -563,7 +563,7 @@
 	.track-row.indexed:hover .cell-num .play-hover { opacity: 1; }
 
 	.play-indicator {
-		color: var(--accent-strong);
+		color: var(--playing);
 		display: grid;
 		place-items: center;
 	}
@@ -576,7 +576,7 @@
 	}
 	.eq span {
 		width: 3px;
-		background: var(--accent-strong);
+		background: var(--playing);
 		animation: eq-bounce 0.9s infinite ease-in-out;
 		border-radius: 2px;
 	}

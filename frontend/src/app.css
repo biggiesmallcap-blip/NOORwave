@@ -54,6 +54,10 @@
 	--state-warning:  #c9a84c;
 	--state-error:    #e8878a;
 	--state-active:   var(--accent);
+	/* The currently playing track (row title, eq bars, queue marker). Follows
+	   the accent unless a palette sets its own, like Pure Black's cyan. */
+	--playing:        var(--accent-strong);
+	--playing-soft:   var(--accent-soft);
 	--state-favorite: #ff4d6d;
 	--state-favorite-glow: rgba(255, 77, 109, 0.35);
 
@@ -331,6 +335,8 @@
 	--instrument-border: rgba(255, 255, 255, 0.12);
 	--instrument-edge: rgba(255, 255, 255, 0.12);
 	--signal-text: rgba(255, 255, 255, 0.66);
+	--playing: #33ffee;
+	--playing-soft: rgba(51, 255, 238, 0.08);
 }
 
 [data-palette="void"][data-theme="dark"] body {
