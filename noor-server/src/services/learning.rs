@@ -26,6 +26,17 @@ use tokio::sync::broadcast::Sender;
 use tokio::sync::mpsc;
 
 const MODEL_FAMILY: &str = queries::DISCOVERY_ENGINE_V2_FAMILY;
+/// Bump when a trainer change makes existing models wrong, not just older.
+/// Installs whose active model predates it retrain once in the background
+/// (services::discovery_retrain), and the activation gate lets the new model
+/// replace the old one at near-parity.
+/// v3: context-only behavior hash, genre-path genre branch, word-free proxy.
+pub const TRAINER_CONFIG_VERSION: i64 = 3;
+/// Relative recall dip allowed when replacing a model from an older trainer
+/// version, whose numbers were measured on broken inputs.
+const UPGRADE_RECALL_TOLERANCE: f64 = 0.10;
+/// Coverage may not fall more than this below the active model's.
+const COVERAGE_REGRESSION_TOLERANCE: f64 = 0.02;
 const EXTERNAL_TRAINING_CANDIDATE_LIMIT: i64 = 1_000;
 const EXTERNAL_TRAINING_RESOLVED_LASTFM_LIMIT: i64 = 5_000;
 const LASTFM_DIRECT_EDGE_WEIGHT: f64 = 0.55;
@@ -1353,7 +1364,7 @@ pub async fn start_training(
             "safety_timeout_seconds": safety_timeout.as_secs(),
             "worker_threads": worker_threads,
             "trainer": "rust",
-            "trainer_config_version": 2,
+            "trainer_config_version": TRAINER_CONFIG_VERSION,
             "run_id": run.id,
         })
         .to_string();
@@ -1899,64 +1910,14 @@ pub async fn start_training(
     ));
 
     let metrics_json = fail_training_on_err!(serde_json::to_string(&output.metrics));
-    let coverage = output.metrics.get("coverage_ratio").copied().unwrap_or(0.0);
-    let recall = output
-        .metrics
-        .get("transition_recall_at_10")
-        .or_else(|| output.metrics.get("recall_at_10"))
-        .copied()
-        .unwrap_or(0.0);
-    // Thresholds scale with how much real playback signal exists. The strict
-    // recall@10 gate is only meaningful when the held-out set is big enough
-    // for the metric to be stable: `build_trainer_input` carves held-out
-    // pairs from playback_transitions and playlist sequences, so a user with
-    // a couple of plays has ≤10 held-out pairs and recall@10 collapses to
-    // noise (0% or 14%, neither carries information).
-    //
-    // Three tiers:
-    //   - 0 real plays         → coverage ≥ 0.5 (cold start, recall ignored)
-    //   - 1 ≤ plays < 50       → coverage ≥ 0.7 (warm, recall too noisy to gate on)
-    //   - ≥ 50 real plays      → coverage ≥ 0.85 ∧ recall ≥ 0.15 (full gate)
-    //
-    // 50 is the rough point where held-out has ~10+ pairs and a single hit
-    // no longer flips the metric by 10pp.
-    //
-    // Real-play counts MUST come from playback_transitions / listen_history
-    // only. Library-derived sequences (album / artist / genre / playlist /
-    // favorites) reflect what's been synced, not what's been listened to.
-    let playback_seqs = output
-        .metrics
-        .get("sequence_count.playback_transitions")
-        .copied()
-        .unwrap_or(0.0);
-    let listen_seqs = output
-        .metrics
-        .get("sequence_count.listen_history")
-        .copied()
-        .unwrap_or(0.0);
-    let playback_evidence = output
-        .metrics
-        .get("evidence_count.playback_transitions")
-        .copied()
-        .unwrap_or(0.0);
-    let listen_evidence = output
-        .metrics
-        .get("evidence_count.listen_history")
-        .copied()
-        .unwrap_or(0.0);
-    let real_play_seqs = playback_seqs + listen_seqs + playback_evidence + listen_evidence;
-    let baseline_gate = output
-        .metrics
-        .get("baseline_transition_recall_at_10")
-        .is_none_or(|baseline| recall >= *baseline);
-    let should_activate = baseline_gate
-        && if real_play_seqs >= 50.0 {
-            coverage >= 0.85 && recall >= 0.15
-        } else if real_play_seqs >= 1.0 {
-            coverage >= 0.7
-        } else {
-            coverage >= 0.5
-        };
+    let should_activate = should_activate_model(&output.metrics);
+    tracing::info!(
+        target: "noor.discovery.training",
+        run_id = run.id,
+        model_id = model.id,
+        should_activate,
+        "activation decision"
+    );
     if fail_training_on_err!(bail_if_cancelled("evaluate")) {
         return Ok(());
     }
@@ -2891,6 +2852,67 @@ fn evaluate_stored_neighbors_for_heldout(
     metrics
 }
 
+/// Trainer version recorded in a model's config_json. Models from before the
+/// field existed count as version 1.
+pub(crate) fn trainer_config_version_from_json(config_json: Option<&str>) -> i64 {
+    config_json
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .and_then(|value| value.get("trainer_config_version").and_then(|v| v.as_i64()))
+        .unwrap_or(1)
+}
+
+/// Decide whether a freshly trained model replaces the active one.
+///
+/// With an active model to compare against (baseline metrics on the same
+/// held-out transitions), the new model must match its recall, within
+/// UPGRADE_RECALL_TOLERANCE when the active model predates
+/// TRAINER_CONFIG_VERSION, and must not lose coverage. The absolute tiers apply
+/// only to a first activation, where there is nothing to compare against; a
+/// fixed floor mostly measured the trainer's own bugs (model 17 beat the active
+/// model 0.131 to 0.116 and was still held back).
+fn should_activate_model(metrics: &HashMap<String, f64>) -> bool {
+    let get = |key: &str| metrics.get(key).copied();
+    let coverage = get("coverage_ratio").unwrap_or(0.0);
+    let recall = get("transition_recall_at_10")
+        .or_else(|| get("recall_at_10"))
+        .unwrap_or(0.0);
+
+    if let Some(baseline_recall) = get("baseline_transition_recall_at_10") {
+        let upgrading =
+            get("baseline_trainer_config_version").unwrap_or(1.0) < TRAINER_CONFIG_VERSION as f64;
+        let tolerance = if upgrading {
+            UPGRADE_RECALL_TOLERANCE
+        } else {
+            0.0
+        };
+        let recall_ok = recall >= baseline_recall * (1.0 - tolerance);
+        let coverage_ok = get("baseline_coverage_ratio")
+            .is_none_or(|baseline| coverage >= baseline - COVERAGE_REGRESSION_TOLERANCE);
+        return recall_ok && coverage_ok;
+    }
+
+    // First activation. Recall@10 only means something once the held-out set
+    // is big enough, so the tiers scale with real plays. Real-play counts come
+    // from playback_transitions / listen_history only; library-derived
+    // sequences reflect what was synced, not what was heard.
+    let real_plays: f64 = [
+        "sequence_count.playback_transitions",
+        "sequence_count.listen_history",
+        "evidence_count.playback_transitions",
+        "evidence_count.listen_history",
+    ]
+    .iter()
+    .filter_map(|key| get(key))
+    .sum();
+    if real_plays >= 50.0 {
+        coverage >= 0.85 && recall >= 0.15
+    } else if real_plays >= 1.0 {
+        coverage >= 0.7
+    } else {
+        coverage >= 0.5
+    }
+}
+
 fn append_active_baseline_metrics(
     db: &Database,
     metrics: &mut HashMap<String, f64>,
@@ -2910,10 +2932,20 @@ fn append_active_baseline_metrics(
             return Ok(None);
         };
         let grouped = queries::get_track_neighbors_for_seeds(conn, active.id, &seed_ids, 20)?;
-        Ok(Some((
-            active.id,
-            evaluate_stored_neighbors_for_heldout(&grouped, heldout_examples),
-        )))
+        let mut metrics = evaluate_stored_neighbors_for_heldout(&grouped, heldout_examples);
+        if let Some(coverage) = active
+            .metrics_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+            .and_then(|value| value.get("coverage_ratio").and_then(|v| v.as_f64()))
+        {
+            metrics.insert("baseline_coverage_ratio".to_string(), coverage);
+        }
+        metrics.insert(
+            "baseline_trainer_config_version".to_string(),
+            trainer_config_version_from_json(active.config_json.as_deref()) as f64,
+        );
+        Ok(Some((active.id, metrics)))
     })?;
     let Some((model_id, baseline_metrics)) = baseline else {
         return Ok(());
@@ -3592,5 +3624,107 @@ mod tests {
 
         assert!(manual > passive);
         assert!(passive < 1.0);
+    }
+
+    fn gate_metrics(pairs: &[(&str, f64)]) -> HashMap<String, f64> {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), *value))
+            .collect()
+    }
+
+    #[test]
+    fn activation_accepts_an_improvement_below_the_old_absolute_floor() {
+        // Model 17 on a real library: better than the active model on the same
+        // held-out set, but under the old fixed 0.15 floor.
+        let metrics = gate_metrics(&[
+            ("coverage_ratio", 1.0),
+            ("transition_recall_at_10", 0.131),
+            ("baseline_transition_recall_at_10", 0.116),
+            ("baseline_coverage_ratio", 1.0),
+            (
+                "baseline_trainer_config_version",
+                TRAINER_CONFIG_VERSION as f64,
+            ),
+            ("evidence_count.listen_history", 5000.0),
+        ]);
+        assert!(should_activate_model(&metrics));
+    }
+
+    #[test]
+    fn activation_rejects_a_recall_regression_at_the_same_trainer_version() {
+        let metrics = gate_metrics(&[
+            ("coverage_ratio", 1.0),
+            ("transition_recall_at_10", 0.110),
+            ("baseline_transition_recall_at_10", 0.116),
+            ("baseline_coverage_ratio", 1.0),
+            (
+                "baseline_trainer_config_version",
+                TRAINER_CONFIG_VERSION as f64,
+            ),
+        ]);
+        assert!(!should_activate_model(&metrics));
+    }
+
+    #[test]
+    fn activation_allows_a_small_dip_when_replacing_an_older_trainer_version() {
+        let older = (TRAINER_CONFIG_VERSION - 1) as f64;
+        let small_dip = gate_metrics(&[
+            ("coverage_ratio", 1.0),
+            ("transition_recall_at_10", 0.110),
+            ("baseline_transition_recall_at_10", 0.116),
+            ("baseline_trainer_config_version", older),
+        ]);
+        assert!(should_activate_model(&small_dip));
+        let large_dip = gate_metrics(&[
+            ("coverage_ratio", 1.0),
+            ("transition_recall_at_10", 0.090),
+            ("baseline_transition_recall_at_10", 0.116),
+            ("baseline_trainer_config_version", older),
+        ]);
+        assert!(!should_activate_model(&large_dip));
+    }
+
+    #[test]
+    fn activation_rejects_a_coverage_loss() {
+        let metrics = gate_metrics(&[
+            ("coverage_ratio", 0.90),
+            ("transition_recall_at_10", 0.20),
+            ("baseline_transition_recall_at_10", 0.10),
+            ("baseline_coverage_ratio", 0.97),
+            (
+                "baseline_trainer_config_version",
+                TRAINER_CONFIG_VERSION as f64,
+            ),
+        ]);
+        assert!(!should_activate_model(&metrics));
+    }
+
+    #[test]
+    fn first_activation_keeps_the_absolute_tiers() {
+        let established = |recall: f64| {
+            gate_metrics(&[
+                ("coverage_ratio", 0.9),
+                ("transition_recall_at_10", recall),
+                ("evidence_count.listen_history", 100.0),
+            ])
+        };
+        assert!(!should_activate_model(&established(0.12)));
+        assert!(should_activate_model(&established(0.16)));
+        let cold_start = gate_metrics(&[("coverage_ratio", 0.6)]);
+        assert!(should_activate_model(&cold_start));
+    }
+
+    #[test]
+    fn trainer_config_version_defaults_to_one_for_old_models() {
+        assert_eq!(trainer_config_version_from_json(None), 1);
+        assert_eq!(
+            trainer_config_version_from_json(Some(r#"{"trainer":"rust"}"#)),
+            1
+        );
+        assert_eq!(
+            trainer_config_version_from_json(Some(r#"{"trainer_config_version":3}"#)),
+            3
+        );
     }
 }
