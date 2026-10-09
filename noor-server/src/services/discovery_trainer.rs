@@ -621,19 +621,16 @@ fn build_behavioral_embeddings(
                 return (track_id, Vec::new());
             }
             let mut vec = vec![0.0f64; dim];
+            // Hash the context track alone, so tracks heard in the same
+            // contexts share buckets and their cosine measures shared context.
+            // Hashing "{track_id}:{other}" gave every track private buckets and
+            // turned this vector into noise. The self term, weighted like the
+            // row's strongest context, lets a direct co-listen (A lists B, B
+            // lists A) count as similarity too.
+            let self_weight = neighbors.values().copied().fold(0.0f64, f64::max);
+            add_hashed_context(&mut vec, track_id, self_weight);
             for (&other, &score) in &neighbors {
-                let key = format!("{track_id}:{other}");
-                let digest = Sha256::digest(key.as_bytes());
-                let limit = usize::min(32, dim * 2);
-                for offset in (0..limit).step_by(2) {
-                    let bucket = digest[offset] as usize % dim;
-                    let sign = if digest[offset + 1] % 2 == 0 {
-                        1.0
-                    } else {
-                        -1.0
-                    };
-                    vec[bucket] += sign * score;
-                }
+                add_hashed_context(&mut vec, other, score);
             }
             let done = projected_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             if done.is_multiple_of(256)
@@ -655,6 +652,23 @@ fn build_behavioral_embeddings(
         })
         .collect();
     (embeddings, co_score, co_count, support_buckets)
+}
+
+/// Add one context track to a behavioral vector: a signed hashed projection of
+/// the track id, scaled by its co-occurrence weight.
+fn add_hashed_context(vec: &mut [f64], context_track_id: i64, weight: f64) {
+    let dim = vec.len();
+    let digest = Sha256::digest(context_track_id.to_string().as_bytes());
+    let limit = usize::min(32, dim * 2);
+    for offset in (0..limit).step_by(2) {
+        let bucket = digest[offset] as usize % dim;
+        let sign = if digest[offset + 1] % 2 == 0 {
+            1.0
+        } else {
+            -1.0
+        };
+        vec[bucket] += sign * weight;
+    }
 }
 
 fn add_support_bucket(
@@ -2765,5 +2779,47 @@ mod tests {
             .candidate_in_degree;
         assert_eq!(in_a, 1);
         assert_eq!(in_c, 3);
+    }
+
+    fn behavioral_input(sequences: Vec<Vec<i64>>) -> TrainerInput {
+        let (tracks, _, _, _) = make_test_input(25, 96);
+        TrainerInput {
+            seed: 13,
+            dimension: 96,
+            window_size: 1,
+            min_count: 1,
+            top_k: 3,
+            include_audio_proxy: false,
+            tracks,
+            external_candidates: Vec::new(),
+            sequences: vec![TrainerSequenceGroup {
+                label: "listen_history".to_string(),
+                weight: 1.0,
+                sequences,
+            }],
+            evidence_groups: Vec::new(),
+            heldout_pairs: Vec::new(),
+            heldout_examples: Vec::new(),
+            cached_audio_features: None,
+        }
+    }
+
+    #[test]
+    fn behavioral_vectors_match_tracks_heard_in_the_same_contexts() {
+        // 1 and 2 never meet, but both sit between 10 and 11. 3 sits elsewhere.
+        let input = behavioral_input(vec![vec![10, 1, 11], vec![10, 2, 11], vec![20, 3, 21]]);
+        let (embeddings, _, _, _) = build_behavioral_embeddings(&input, None, None);
+        let shared = cosine(&embeddings[&1], &embeddings[&2]);
+        let unrelated = cosine(&embeddings[&1], &embeddings[&3]);
+        assert!(shared > 0.5, "shared-context cosine was {shared}");
+        assert!(unrelated.abs() < 0.3, "unrelated cosine was {unrelated}");
+    }
+
+    #[test]
+    fn behavioral_vectors_match_a_direct_co_listen() {
+        let input = behavioral_input(vec![vec![1, 2]]);
+        let (embeddings, _, _, _) = build_behavioral_embeddings(&input, None, None);
+        let direct = cosine(&embeddings[&1], &embeddings[&2]);
+        assert!(direct > 0.9, "direct co-listen cosine was {direct}");
     }
 }
