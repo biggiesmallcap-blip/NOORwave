@@ -5757,6 +5757,15 @@ pub fn replace_track_neighbors(
 
 /// Replace neighbor rows for a single seed track only — used by the background
 /// per-seed refresh so it doesn't wipe every other track's neighbors.
+/// True when `seed_id` already has neighbor rows under `model_id`.
+pub fn seed_has_neighbors(conn: &Connection, model_id: i64, seed_id: i64) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM track_neighbors WHERE model_id = ?1 AND track_id = ?2)",
+        params![model_id, seed_id],
+        |row| row.get(0),
+    )?)
+}
+
 pub fn replace_seed_neighbors(
     conn: &Connection,
     model_id: i64,

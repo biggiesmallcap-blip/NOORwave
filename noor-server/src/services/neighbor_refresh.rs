@@ -1,15 +1,16 @@
 use crate::db::queries::{
     EmbeddingTrackRow, NeighborWriteRow, get_embedding_track_rows, get_model_embeddings,
-    get_selected_discovery_embedding_model, replace_seed_neighbors,
+    get_selected_discovery_embedding_model, replace_seed_neighbors, seed_has_neighbors,
 };
 use crate::services::learning::unpack_vector_blob;
 /// Background per-seed neighbor computation for DiscoverSpace.
 ///
 /// When `/api/discovery/space` is called with a seed_id, this module fires a
-/// non-blocking task that computes up-to-date embedding similarity for that seed
-/// against all library tracks, applies the same metadata bonuses as full training,
-/// writes the result to `track_neighbors` (replacing only the seed's rows), and
-/// broadcasts `AppEvent::DiscoverySpaceRefreshed` so the frontend auto-reloads.
+/// non-blocking task that computes embedding similarity for a seed full training
+/// did not cover, applies the same metadata bonuses as full training, writes the
+/// result to `track_neighbors`, and broadcasts `AppEvent::DiscoverySpaceRefreshed`
+/// so the frontend auto-reloads. Seeds training covered keep their trained rows:
+/// those carry behavioral support and hub statistics this pass cannot rebuild.
 ///
 /// Prerequisite: full training must have run at least once so embeddings exist.
 /// All failure paths are silent no-ops — the DiscoverSpace page degrades gracefully.
@@ -244,6 +245,21 @@ pub async fn refresh_seed_neighbors(
                 info!("[neighbor_refresh] no active model — skipping seed {seed_id}");
                 return Ok::<_, anyhow::Error>(None);
             };
+
+            // Training already ranked this seed with behavioral support,
+            // transition evidence and hub statistics. Recomputing it from the
+            // same embeddings would replace those rows with zero support and a
+            // flat 0.5 hub percentile, and automix and radio read the same rows.
+            if seed_has_neighbors(conn, model.id, seed_id)? {
+                lock_or_poisoned(&refreshed_for_blocking).insert(
+                    seed_id,
+                    RefreshEntry {
+                        model_id: model.id,
+                        at: Instant::now(),
+                    },
+                );
+                return Ok(None);
+            }
 
             let (vec_map, meta_map) = if let Some((cached_id, vm, mm)) = cached {
                 if cached_id == model.id {
@@ -506,5 +522,52 @@ mod tests {
             is_seed_fresh(&refreshed, seed_id, model_id),
             "seed should be marked fresh on the no-embeddings early-exit so the route layer can short-circuit subsequent /api/discovery/space calls and break the WS-driven reload loop"
         );
+    }
+
+    #[tokio::test]
+    async fn refresh_leaves_trained_seed_rows_alone() {
+        let (db, model_id) = db_with_active_model_no_embeddings();
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id) VALUES (1, 'Seed', 1), (2, 'Neighbor', 1)",
+                [],
+            )?;
+            let vector = crate::services::learning::pack_vector_f64(&[1.0, 0.0]);
+            conn.execute(
+                "INSERT INTO track_embeddings (track_id, model_id, vector_blob, l2_norm)
+                 VALUES (1, ?1, ?2, 1.0), (2, ?1, ?2, 1.0)",
+                rusqlite::params![model_id, vector],
+            )?;
+            conn.execute(
+                "INSERT INTO track_neighbors
+                    (track_id, neighbor_track_id, model_id, rank, score, support_count,
+                     candidate_in_degree_percentile)
+                 VALUES (1, 2, ?1, 1, 0.9, 7, 0.2)",
+                rusqlite::params![model_id],
+            )?;
+            Ok(())
+        })
+        .expect("seed rows");
+        let refreshed: Arc<Mutex<HashMap<i64, RefreshEntry>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let cache: Arc<Mutex<Option<EmbeddingCache>>> = Arc::new(Mutex::new(None));
+        let (tx, _rx) = broadcast::channel(8);
+
+        refresh_seed_neighbors(db.clone(), tx, 1, Arc::clone(&refreshed), cache).await;
+
+        let (support, percentile): (i64, f64) = db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT support_count, candidate_in_degree_percentile FROM track_neighbors
+                     WHERE model_id = ?1 AND track_id = 1 AND neighbor_track_id = 2",
+                    rusqlite::params![model_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?)
+            })
+            .expect("trained row survives");
+        assert_eq!(support, 7);
+        assert!((percentile - 0.2).abs() < 1e-9);
+        assert!(is_seed_fresh(&refreshed, 1, model_id));
     }
 }
