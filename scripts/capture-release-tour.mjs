@@ -56,14 +56,19 @@ const SHOTS = [
 	{ name: 'home-light', path: '/', settle: 3500 },
 	{ name: 'home-warm', path: '/', settle: 3500 },
 	{ name: 'library-light', path: '/library', settle: 3500 },
-	{ name: 'analytics-warm', path: '/analytics', settle: 5000 }
+	// The video player: open a saved video from the Liked wall (title, queue and
+	// related row come with it) and let a few seconds of picture play.
+	{ name: 'video-dark', path: '/videos/liked', settle: 75000, click: flag('video-dark', 'Roll On Slow') },
+	{ name: 'video-light', path: '/videos/liked', settle: 9000, click: flag('video-light', 'Fade Into You') }
 ];
 
+// Muted, and allowed to autoplay so the video shots show a playing clip.
+const CHROME_ARGS = ['--mute-audio', '--autoplay-policy=no-user-gesture-required'];
 let browser;
 try {
-	browser = await chromium.launch({ channel: 'chrome' });
+	browser = await chromium.launch({ channel: 'chrome', args: CHROME_ARGS });
 } catch {
-	browser = await chromium.launch();
+	browser = await chromium.launch({ args: CHROME_ARGS });
 }
 await mkdir(OUT, { recursive: true });
 
@@ -100,6 +105,10 @@ for (const shot of SHOTS) {
 	}, look);
 	const page = await context.newPage();
 	await page.goto(`${BASE}${shot.path}`, { waitUntil: 'networkidle', timeout: 60_000 });
+	if (shot.click) {
+		await page.waitForTimeout(2500);
+		await page.getByText(shot.click, { exact: true }).first().click();
+	}
 	if (shot.type) {
 		await page.locator('main input[type="search"], main input[placeholder*="Search"]').first().click();
 		await page.keyboard.type(shot.type, { delay: 60 });

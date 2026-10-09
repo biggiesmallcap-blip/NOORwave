@@ -67,7 +67,7 @@ Every clip plays with its own video session queue and a **Keep exploring** row o
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/shots/video-warm.webp" />
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/shots/video-dark.webp" />
     <img alt="NOORwave music video player with the video session queue and related artists" src="docs/assets/shots/video-light.webp" width="900" />
   </picture>
 </p>
@@ -139,10 +139,7 @@ TIDAL catalogue replacements preserve track identity, original library dates and
 Not a year-end slideshow. A ridgeline of when you actually listen across the day, peak hour, session count, completion rate, skip rate, and how all of it has moved over 24 hours, 7 days, 14 days, 30 days, or all time. Shown here with the player docked along the bottom.
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/shots/analytics-warm.webp" />
-    <img alt="Listening analytics: listening pulse, completion, and skip rate over time, with the player docked along the bottom" src="docs/assets/shots/analytics-light.webp" width="900" />
-  </picture>
+  <img alt="Listening analytics in the Clay light theme: listening pulse, rhythm, completion and skip rate over time" src="docs/assets/shots/analytics-light.webp" width="900" />
 </p>
 
 ## Connect Last.fm. Seriously.
