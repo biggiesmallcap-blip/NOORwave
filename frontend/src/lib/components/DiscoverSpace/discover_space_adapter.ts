@@ -40,7 +40,7 @@ function deterministicInitialPosition(
 // ─── Reason normalization (mirrors Rust normalizer) ──────────────────────────
 
 const REASON_MAP: Record<string, DiscoverReason> = {
-	harmonic: 'harmonic', harmonic_match: 'harmonic', audio_texture: 'harmonic',
+	harmonic: 'harmonic', harmonic_match: 'harmonic',
 	behavioural: 'behavioral', behavioral: 'behavioral', same_pocket: 'behavioral', taste_mesh: 'behavioral',
 	bpm_match: 'bpm',
 	artist_affinity: 'artist', artist_seed: 'artist', artist_repeat: 'artist', artist_continuity: 'artist',

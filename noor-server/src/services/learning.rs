@@ -2934,7 +2934,7 @@ fn parse_reason_tags(reason_json: Option<&str>) -> Vec<String> {
 fn reason_label(key: &str) -> &'static str {
     match key {
         "behavioral" => "same pocket",
-        "audio_texture" => "audio texture",
+        "metadata_similarity" | "audio_texture" => "similar metadata",
         "album_context" => "album-adjacent",
         "artist_affinity" => "session neighbor",
         "genre_branch" => "genre branch",

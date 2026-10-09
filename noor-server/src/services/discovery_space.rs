@@ -12,7 +12,9 @@ use std::collections::{HashMap, HashSet};
 /// to a normalized `DiscoverReason` member that the frontend understands.
 pub fn normalize_reason(tag: &str) -> &'static str {
     match tag.trim() {
-        "harmonic" | "harmonic_match" | "audio_texture" => "harmonic",
+        // The metadata proxy ("metadata_similarity", formerly "audio_texture")
+        // is not harmonic evidence; it falls through to "unknown".
+        "harmonic" | "harmonic_match" => "harmonic",
         "behavioural" | "behavioral" | "same_pocket" | "taste_mesh" => "behavioral",
         "bpm_match" => "bpm",
         "artist_affinity" | "artist_seed" | "artist_repeat" | "artist_continuity" => "artist",
@@ -377,7 +379,8 @@ mod tests {
     #[test]
     fn reason_known_tags_map_correctly() {
         assert_eq!(normalize_reason("harmonic_match"), "harmonic");
-        assert_eq!(normalize_reason("audio_texture"), "harmonic");
+        assert_eq!(normalize_reason("audio_texture"), "unknown");
+        assert_eq!(normalize_reason("metadata_similarity"), "unknown");
         assert_eq!(normalize_reason("behavioural"), "behavioral");
         assert_eq!(normalize_reason("behavioral"), "behavioral");
         assert_eq!(normalize_reason("same_pocket"), "behavioral");

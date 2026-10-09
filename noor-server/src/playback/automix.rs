@@ -991,8 +991,10 @@ fn automix_neighbor_policy(row: &queries::EmbeddingNeighborRow) -> GeneratedCand
         policy_reasons.push("lastfm branch");
     }
 
-    let primary_is_texture = row.primary_reason.as_deref() == Some("audio_texture");
-    let has_texture = primary_is_texture || has_tag("audio_texture");
+    // Models before trainer v3 call the metadata proxy "audio_texture".
+    let is_texture = |tag: &str| matches!(tag, "metadata_similarity" | "audio_texture");
+    let primary_is_texture = row.primary_reason.as_deref().is_some_and(is_texture);
+    let has_texture = primary_is_texture || reason_tags.iter().any(|tag| is_texture(tag));
     let has_supporting_reason = reason_tags.iter().any(|tag| {
         matches!(
             tag.as_str(),

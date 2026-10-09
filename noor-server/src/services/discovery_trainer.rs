@@ -15,6 +15,10 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
+// v5: tokens are the artist (one token), genre path segments and DSP buckets.
+// Title, album, quality, source and duration words matched unrelated tracks
+// through shared words ("simon", "lossless"); the bump makes every install
+// recompute instead of reusing v4 vectors.
 // v4: the stored DSP `energy` was rescaled from RMS/0.7 to a LUFS map
 // (analysis v11), which shifts nearly every track's energy_{N} bucket token.
 // The bump invalidates v3 caches so refreshes recompute against re-analysed
@@ -22,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 // v3: audio-proxy tokens are IDF-weighted (compute_token_idf), so common tokens
 // like broad genres no longer dominate the projection. The bump invalidates v2
 // caches so incremental refreshes recompute rather than mixing weighting schemes.
-pub const AUDIO_PROXY_FEATURE_VERSION: &str = "metadata-audio-proxy-v4";
+pub const AUDIO_PROXY_FEATURE_VERSION: &str = "metadata-audio-proxy-v5";
 
 // ── Progress update struct ────────────────────────────────────────────────────
 
@@ -240,6 +244,10 @@ pub const MIN_REASON_IMPRESSIONS: i64 = 20;
 /// Metadata bonus for a full genre match, scaled by weighted Jaccard overlap.
 const GENRE_BRANCH_BONUS: f64 = 0.18;
 
+/// The metadata proxy competes for primary_reason at this fraction of its
+/// cosine, so real listening evidence names the edge when both are present.
+const METADATA_REASON_WEIGHT: f64 = 0.6;
+
 // ── Core math utilities ───────────────────────────────────────────────────────
 
 fn normalize(vec: &[f64]) -> (Vec<f64>, f64) {
@@ -308,26 +316,25 @@ fn hashed_projection_weighted(
     normalize(&vec).0
 }
 
-/// Extract metadata tokens from a track row (mirrors Python's `metadata_tokens`).
+/// Tokens for the metadata proxy vector: the artist as one token, genre path
+/// segments, and DSP buckets. Title, album, quality, source and duration words
+/// are left out on purpose: they matched "Kathy's Song" to Carly Simon through
+/// "simon" and a Debussy piece to rap through "lossless".
 fn metadata_tokens(track: &EmbeddingTrackRow) -> Vec<String> {
     let mut tokens = Vec::new();
-    let fields: Vec<Option<&str>> = vec![
-        Some(&track.title),
-        track.artist_name.as_deref(),
-        track.album_title.as_deref(),
-        track.best_quality.as_deref(),
-        Some(&track.source),
-    ];
-    for value in fields.into_iter().flatten() {
-        let normalized = value.to_lowercase().replace(['/', '-'], " ");
-        tokens.extend(normalized.split_whitespace().map(String::from));
+    if let Some(artist) = track.artist_name.as_deref() {
+        let artist = artist.trim().to_lowercase();
+        if !artist.is_empty() {
+            tokens.push(format!("artist:{artist}"));
+        }
     }
-    if let Some(duration) = track.duration_ms {
-        tokens.push(format!("dur_{}", duration / 30_000));
-    }
-    for genre in &track.genre_paths {
-        let normalized = genre.to_lowercase().replace('>', " ");
-        tokens.extend(normalized.split_whitespace().map(String::from));
+    for path in &track.genre_paths {
+        for segment in path.split('>') {
+            let segment = segment.trim().to_lowercase();
+            if !segment.is_empty() {
+                tokens.push(format!("genre:{segment}"));
+            }
+        }
     }
     // DSP features — bucketed so nearby values share tokens
     if let Some(bpm) = track.bpm {
@@ -367,17 +374,19 @@ fn metadata_tokens(track: &EmbeddingTrackRow) -> Vec<String> {
             tokens.push(format!("key_{}{}", n, alt));
         }
     }
+    // A genre shared by several paths ("Electronic" under two leaves) counts once.
+    tokens.sort();
+    tokens.dedup();
     tokens
 }
 
+/// Same artist and genre token shapes as `metadata_tokens`, so external
+/// candidates live in the same space as library tracks.
 fn external_candidate_tokens(candidate: &TrainerExternalCandidate) -> Vec<String> {
     let mut tokens = Vec::new();
-    for value in [&candidate.title, &candidate.artist_name] {
-        let normalized = value.to_lowercase().replace(['/', '-'], " ");
-        tokens.extend(normalized.split_whitespace().map(String::from));
-    }
-    if let Some(duration) = candidate.duration_ms {
-        tokens.push(format!("dur_{}", duration / 30_000));
+    let artist = candidate.artist_name.trim().to_lowercase();
+    if !artist.is_empty() {
+        tokens.push(format!("artist:{artist}"));
     }
     if candidate.tidal_id.is_some() {
         tokens.push("tidal_resolved".to_string());
@@ -399,8 +408,12 @@ fn external_candidate_tokens(candidate: &TrainerExternalCandidate) -> Vec<String
         );
     }
     for genre in &candidate.genre_tags {
-        let normalized = genre.to_lowercase().replace('>', " ");
-        tokens.extend(normalized.split_whitespace().map(String::from));
+        for segment in genre.split('>') {
+            let segment = segment.trim().to_lowercase();
+            if !segment.is_empty() {
+                tokens.push(format!("genre:{segment}"));
+            }
+        }
     }
     tokens
 }
@@ -1080,8 +1093,10 @@ fn similarity_neighbors(
                     contributions.push(("behavioral", behavioral_score));
                 }
                 if audio_score > 0.35 {
-                    reason_tags.push("audio_texture".to_string());
-                    contributions.push(("audio_texture", audio_score));
+                    // Not audio: the proxy is artist, genre and DSP buckets.
+                    reason_tags.push("metadata_similarity".to_string());
+                    contributions
+                        .push(("metadata_similarity", audio_score * METADATA_REASON_WEIGHT));
                 }
 
                 let support_breakdown = seed_support_buckets
@@ -2044,12 +2059,15 @@ mod tests {
         ];
         let idf = compute_token_idf(&tracks);
         assert!(
-            idf["rare"] > idf["common"],
+            idf["genre:rare"] > idf["genre:common"],
             "a rare token must out-weigh a library-wide one"
         );
         // A token present in every track floors at weight 1.0.
-        assert!((idf["common"] - 1.0).abs() < 1e-9);
-        assert!((idf["tidal"] - 1.0).abs() < 1e-9);
+        assert!((idf["genre:common"] - 1.0).abs() < 1e-9);
+        assert!(
+            !idf.contains_key("tidal"),
+            "source words are not metadata tokens"
+        );
 
         // Applying the weights actually moves the projection away from the uniform one.
         let dim = 32;
@@ -2851,5 +2869,61 @@ mod tests {
         };
         assert!(tags(0, 1).iter().any(|t| t == "genre_branch"));
         assert!(!tags(0, 2).iter().any(|t| t == "genre_branch"));
+    }
+
+    #[test]
+    fn metadata_tokens_skip_title_album_quality_and_source_words() {
+        let track = EmbeddingTrackRow {
+            track_id: 1,
+            title: "Kathy's Song".to_string(),
+            artist_name: Some("Simon & Garfunkel".to_string()),
+            album_title: Some("Sounds of Silence".to_string()),
+            duration_ms: Some(200_000),
+            best_quality: Some("LOSSLESS".to_string()),
+            source: "tidal".to_string(),
+            play_count: 3,
+            is_favorite: false,
+            playlist_memberships: 0,
+            genre_paths: vec!["Folk > Folk Rock".to_string()],
+            bpm: None,
+            energy: None,
+            camelot_key: None,
+            danceability: None,
+            beat_strength: None,
+            loudness_lufs: None,
+        };
+        let tokens = metadata_tokens(&track);
+        assert!(tokens.contains(&"artist:simon & garfunkel".to_string()));
+        assert!(tokens.contains(&"genre:folk".to_string()));
+        assert!(tokens.contains(&"genre:folk rock".to_string()));
+        for word in [
+            "simon", "song", "kathy's", "silence", "lossless", "tidal", "dur_6",
+        ] {
+            assert!(!tokens.iter().any(|t| t == word), "unexpected token {word}");
+        }
+    }
+
+    #[test]
+    fn primary_reason_prefers_behavior_over_metadata_similarity() {
+        let (tracks, behavioral, audio, fusion) = make_test_input(3, 16);
+        let result = similarity_neighbors(
+            &tracks,
+            &behavioral,
+            &audio,
+            &fusion,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            2,
+            None,
+            None,
+        );
+        assert!(!result.is_empty());
+        for row in &result {
+            assert_eq!(row.primary_reason.as_deref(), Some("behavioral"));
+            assert!(row.reason_tags.iter().any(|t| t == "metadata_similarity"));
+            assert!(!row.reason_tags.iter().any(|t| t == "audio_texture"));
+        }
     }
 }
