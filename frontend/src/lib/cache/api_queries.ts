@@ -38,6 +38,10 @@ import {
 	type TidalArtistProfile,
 	type Track,
 	type AudioDevice,
+	type ChartMatrixResponse,
+	type ChartSnapshotResponse,
+	type LastfmCountry,
+	type LastfmGenre,
 } from '$lib/api/client';
 
 const SECOND = 1000;
@@ -101,6 +105,27 @@ const moodsOptions: QueryOptions = { ...longOptions, returnStale: true };
 // playlists, artist/album detail) - returnStale there would flash pre-mutation rows.
 const staticOptions: QueryOptions = { ...longOptions, returnStale: true };
 
+// Chart payloads: paint the last-known chart instantly on open, revalidate in
+// the background. An empty list is usually a transient upstream miss, so it
+// goes stale fast instead of pinning an empty shelf for the full window.
+function chartStaleMs(data: unknown): number {
+	const payload = (data ?? {}) as { tracks?: unknown[] | null; entries?: unknown[] | null; rows?: unknown[] | null };
+	const rows = payload.tracks ?? payload.entries ?? payload.rows ?? [];
+	return rows.length > 0 ? 15 * MINUTE : 30 * SECOND;
+}
+const chartOptions: QueryOptions = {
+	staleMs: 15 * MINUTE,
+	staleMsForData: chartStaleMs,
+	persist: scopedPersist(DAY),
+	returnStale: true,
+};
+// The curated country and genre lists are server constants.
+const chartCatalogOptions: QueryOptions = { staleMs: DAY, persist: scopedPersist(7 * DAY), returnStale: true };
+
+export type TrendingQuery = { source: 'lastfm' | 'tidal'; limit: number; country?: string; tag?: string };
+export type ChartSnapshotQuery = { source: string; period: string; region: string; limit: number };
+export type TrendingResponse = Awaited<ReturnType<typeof api.getTrending>>;
+
 export const cacheKeys = {
 	playbackState: () => ['api', 'getPlaybackState'] as const,
 	playbackRuntime: () => ['api', 'getPlaybackRuntime'] as const,
@@ -159,6 +184,15 @@ export const cacheKeys = {
 	tidalHomeModules: () => ['api', 'getTidalHomeModules'] as const,
 	tidalPage: (path: string) => ['api', 'getTidalPage', { path }] as const,
 	tidalMoods: () => ['api', 'getTidalMoods'] as const,
+	// Under one 'charts' prefix so the TIDAL-content invalidation (which matches
+	// /charts/) and invalidateChartCaches both reach every chart payload.
+	charts: {
+		trending: (opts: TrendingQuery) => ['api', 'charts', 'trending', opts] as const,
+		lastfmCountries: () => ['api', 'charts', 'lastfmCountries'] as const,
+		lastfmGenres: () => ['api', 'charts', 'lastfmGenres'] as const,
+		matrix: () => ['api', 'charts', 'matrix'] as const,
+		snapshot: (opts: ChartSnapshotQuery) => ['api', 'charts', 'snapshot', opts] as const,
+	},
 	settings: {
 		musicBrainzStatus: () => ['api', 'getMusicBrainzStatus'] as const,
 		portableMusicBrainzSnapshot: () => ['api', 'getPortableMusicBrainzSnapshot'] as const,
@@ -646,6 +680,38 @@ export const cachedApi = {
 			staticOptions,
 		);
 	},
+	trendingQuery(opts: TrendingQuery) {
+		return query<TrendingResponse>(cacheKeys.charts.trending(opts), () => api.getTrending(opts), chartOptions);
+	},
+	lastfmCountriesQuery() {
+		return query<{ countries: LastfmCountry[]; default_country: string }>(
+			cacheKeys.charts.lastfmCountries(),
+			() => api.getLastfmCountries(),
+			chartCatalogOptions,
+		);
+	},
+	lastfmGenresQuery() {
+		return query<{ genres: LastfmGenre[]; default_genre: string }>(
+			cacheKeys.charts.lastfmGenres(),
+			() => api.getLastfmGenres(),
+			chartCatalogOptions,
+		);
+	},
+	chartMatrixQuery() {
+		return query<ChartMatrixResponse>(cacheKeys.charts.matrix(), () => api.getChartMatrix(), chartOptions);
+	},
+	chartSnapshotQuery(opts: ChartSnapshotQuery) {
+		return query<ChartSnapshotResponse>(
+			cacheKeys.charts.snapshot(opts),
+			// The raw provider payloads are never rendered; dropping them keeps
+			// each persisted region x provider snapshot small in localStorage.
+			() => api.getChartSnapshot(opts).then((snapshot) => ({
+				...snapshot,
+				entries: snapshot.entries.map((entry) => ({ ...entry, raw_json: null, provider_positions_json: null })),
+			})),
+			chartOptions,
+		);
+	},
 	lastfmStatusQuery() {
 		return query<LastfmStatus>(cacheKeys.settings.lastfmStatus(), () => api.getLastfmStatus(), staticOptions);
 	},
@@ -687,6 +753,17 @@ export function invalidateHomeCaches(options: { refetch?: boolean } = {}): void 
 	dataCache.invalidatePrefix(['api', 'getTidalRadioStations'], options);
 	dataCache.invalidatePrefix(['api', 'getTidalHomeModules'], options);
 	dataCache.invalidatePrefix(['api', 'getTidalMoods'], options);
+}
+
+/**
+ * After a provider-matrix refresh: refetch the matrix now and mark every
+ * stored snapshot stale, so whichever region and provider is opened next
+ * reads the new day instead of hydrating yesterday's list.
+ */
+export function invalidateChartSnapshotCaches(): void {
+	ensureCacheScope();
+	dataCache.invalidatePrefix(cacheKeys.charts.matrix(), { refetch: true });
+	dataCache.invalidatePrefix(['api', 'charts', 'snapshot']);
 }
 
 export function patchDiscoveryProgress(progress: {

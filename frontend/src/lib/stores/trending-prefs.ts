@@ -28,3 +28,8 @@ export const selectedTrendingMode = createPersistedStore<TrendingMode>(MODE_KEY,
 });
 export const selectedCountry = createPersistedStore(COUNTRY_KEY, 'AU', { parse: nonEmpty });
 export const selectedGenre = createPersistedStore(GENRE_KEY, 'electronic', { parse: nonEmpty });
+
+/// Market pulse (daily provider charts) region and provider, remembered so the
+/// Charts page reopens on the chart the listener last looked at.
+export const selectedChartRegion = createPersistedStore('noor.charts.region', 'global', { parse: nonEmpty });
+export const selectedChartSource = createPersistedStore('noor.charts.source', 'spotify_daily', { parse: nonEmpty });

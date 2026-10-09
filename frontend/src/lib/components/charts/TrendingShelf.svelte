@@ -1,19 +1,18 @@
 <!--
-  Unified trending shelf. One grid, four scopes:
-    [Worldwide] [Country] [Genre] [Tidal]
+  Unified trending shelf. One mural, three scopes:
+    [Worldwide] [Country] [Genre]
   When `country` or `genre` is selected, a secondary chip row appears with the
   curated list from /api/charts/lastfm/{countries,genres}.
 
-  Replaces the previous separate "Trending" + "Trending by Country" +
-  "Trending by Genre" shelves so we don't render three copies of the same grid.
+  Every scope is a cached query (cachedApi.trendingQuery), so revisits and app
+  restarts paint the last list instantly and revalidate in the background.
 
-  Mounted by Home (always) and Search (only when the search query is empty).
+  Mounted by the Charts page.
 -->
 <script lang="ts">
-	import { onDestroy, onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { get } from 'svelte/store';
 	import {
-		api,
 		type ChartEntry,
 		type TidalPlayable,
 		type Track,
@@ -32,9 +31,12 @@
 		selectedGenre,
 		type TrendingMode,
 	} from '$lib/stores/trending-prefs';
-	import { getCached, putCached } from '$lib/stores/trending-cache';
+	import { cachedApi, type TrendingQuery } from '$lib/cache/api_queries';
 	import ChartMural, { type ChartMuralItem } from '$lib/components/charts/ChartMural.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import ErrorState from '$lib/components/ui/ErrorState.svelte';
+	import Segmented from '$lib/components/ui/Segmented.svelte';
+	import FilterChip from '$lib/components/ui/FilterChip.svelte';
 	import { composeTidalArtQuery, peekTidalArt } from '$lib/actions/lazy-tidal-art';
 	import { usableArtwork } from '$lib/utils/artwork';
 
@@ -47,31 +49,34 @@
 	// 404 ("not confirmed" in the Tidal client warning), so exposing the tab
 	// would always render an empty state. Add it back here when that endpoint
 	// is sorted; the store/type/backend route still accept the value.
-	const MODES: { id: TrendingMode; label: string }[] = [
-		{ id: 'worldwide', label: 'Worldwide' },
-		{ id: 'country', label: 'Country' },
-		{ id: 'genre', label: 'Genre' },
+	const MODES: { value: TrendingMode; label: string }[] = [
+		{ value: 'worldwide', label: 'Worldwide' },
+		{ value: 'country', label: 'Country' },
+		{ value: 'genre', label: 'Genre' },
 	];
 	const ROTATE_MS = 8000;
 
 	let countries = $state<LastfmCountry[]>([]);
 	let genres = $state<LastfmGenre[]>([]);
-	let curatedLoaded = $state(false);
+	let countriesReady = $state(false);
+	let genresReady = $state(false);
 
 	let tracks = $state<ChartEntry[]>([]);
+	// Which scope `tracks` belongs to. While another scope loads, the old list
+	// stays on screen dimmed instead of blanking to a skeleton.
+	let tracksToken = $state('');
+	let activeToken = $state('');
 	// Default to loading=true so first render doesn't briefly paint the empty
-	// state before the on-mount fetch flips it on.
+	// state before the query reports in.
 	let loading = $state(true);
-	let error = $state(false);
+	let refreshing = $state(false);
+	let error = $state<unknown>(null);
 	let currentEntryIndex = $state(0);
 	let muralPaused = $state(false);
 	let resolvingEntries = $state<Record<string, boolean>>({});
 	let lazyArtwork = $state<Record<string, string>>({});
-
-	let lastToken = '';
-	let chartLoadSeq = 0;
-	let curatedLoadSeq = 0;
-	let destroyed = false;
+	let reloadTick = $state(0);
+	let showingOtherScope = $derived(tracks.length > 0 && tracksToken !== activeToken);
 	let visibleEntries = $derived(tracks.slice(0, limit));
 	let currentEntry = $derived(visibleEntries[currentEntryIndex] ?? visibleEntries[0] ?? null);
 	let muralItems = $derived<ChartMuralItem[]>(
@@ -185,22 +190,25 @@
 		return target ? getPlayableLabel(target) : 'Unavailable';
 	}
 
-	function currentKindLabel(): string {
-		return `Last.fm top ${visibleEntries.length} - ${subLabel}`;
-	}
-
 	onMount(() => {
 		// Migrate stale 'tidal' from the pre-merge source key before reads happen.
-		if (!MODES.some((m) => m.id === get(selectedTrendingMode))) {
+		if (!MODES.some((m) => m.value === get(selectedTrendingMode))) {
 			selectedTrendingMode.set('worldwide');
 		}
-		void loadCurated();
-	});
-
-	onDestroy(() => {
-		destroyed = true;
-		chartLoadSeq += 1;
-		curatedLoadSeq += 1;
+		// The curated lists are server constants: cached for days, and a failed
+		// fetch still unblocks the shelf (the chip row just stays empty).
+		const unsubCountries = cachedApi.lastfmCountriesQuery().subscribe((state) => {
+			if (state.data) countries = state.data.countries;
+			if (state.data || state.error) countriesReady = true;
+		});
+		const unsubGenres = cachedApi.lastfmGenresQuery().subscribe((state) => {
+			if (state.data) genres = state.data.genres;
+			if (state.data || state.error) genresReady = true;
+		});
+		return () => {
+			unsubCountries();
+			unsubGenres();
+		};
 	});
 
 	$effect(() => {
@@ -215,90 +223,44 @@
 		return () => clearInterval(timer);
 	});
 
-	// Idiomatic Svelte 5: $effect tracks $store reads and re-runs on any change.
-	// Fires once on mount AND on every subsequent store update. The lastToken
-	// dedup makes no-op writes free; the curated guard delays country/genre
-	// modes until the static lists land.
+	function trendingQuery(mode: TrendingMode, country: string, genre: string): TrendingQuery {
+		if (mode === 'tidal') return { source: 'tidal', limit };
+		if (mode === 'country') return { source: 'lastfm', limit, country };
+		if (mode === 'genre') return { source: 'lastfm', limit, tag: genre };
+		return { source: 'lastfm', limit };
+	}
+
+	// One cached query per scope (api_queries chartOptions): a revisited scope
+	// paints its last list instantly - across navigations and app restarts -
+	// and revalidates in the background. Re-runs on any scope store change;
+	// the subscription is torn down with the effect, so a late answer for an
+	// old scope can never land on the new one.
 	$effect(() => {
 		const mode = $selectedTrendingMode;
 		const country = $selectedCountry;
 		const genre = $selectedGenre;
-		const ready = curatedLoaded;
-
-		if ((mode === 'country' || mode === 'genre') && !ready) return;
+		void reloadTick;
+		if (mode === 'country' && !countriesReady) return;
+		if (mode === 'genre' && !genresReady) return;
 
 		const token = tokenFor(mode, country, genre);
-		if (token === lastToken) return;
-		lastToken = token;
-
-		// Cache hit: skip the network round-trip. 6h shared with the backend
-		// keeps the shelf static across page navigations within the window.
-		const cached = getCached(token);
-		if (cached) {
-			chartLoadSeq += 1;
-			tracks = cached;
-			currentEntryIndex = 0;
-			loading = false;
-			error = false;
-			return;
-		}
-		void load(mode, country, genre, token);
+		activeToken = token;
+		const query = cachedApi.trendingQuery(trendingQuery(mode, country, genre));
+		return query.subscribe((state) => untrack(() => {
+			if (state.data) {
+				if (tracksToken !== token) currentEntryIndex = 0;
+				tracks = state.data.tracks ?? [];
+				tracksToken = token;
+			}
+			loading = state.loading;
+			refreshing = state.refreshing;
+			error = state.data ? null : state.error;
+			if (state.error && !state.data) console.error('[trending] fetch failed', { token, error: state.error });
+		}));
 	});
 
-	async function loadCurated() {
-		const seq = ++curatedLoadSeq;
-		try {
-			const [c, g] = await Promise.all([
-				api.getLastfmCountries(),
-				api.getLastfmGenres(),
-			]);
-			if (destroyed || seq !== curatedLoadSeq) return;
-			countries = c.countries;
-			genres = g.genres;
-		} catch (e) {
-			if (destroyed || seq !== curatedLoadSeq) return;
-			console.error('Failed to load curated chart lists:', e);
-		} finally {
-			if (!destroyed && seq === curatedLoadSeq) curatedLoaded = true;
-		}
-	}
-
-	async function load(mode: TrendingMode, country: string, genre: string, token: string) {
-		const seq = ++chartLoadSeq;
-		// Keep `tracks` populated while we fetch - replacing only when new data
-		// lands avoids the flash-to-empty-state and the resulting grid reflow.
-		loading = true;
-		error = false;
-		try {
-			let data: { tracks: ChartEntry[] | null };
-			if (mode === 'tidal') {
-				data = await api.getTrending({ source: 'tidal', limit });
-			} else if (mode === 'country') {
-				data = await api.getTrending({ source: 'lastfm', limit, country });
-			} else if (mode === 'genre') {
-				data = await api.getTrending({ source: 'lastfm', limit, tag: genre });
-			} else {
-				data = await api.getTrending({ source: 'lastfm', limit });
-			}
-			if (!isCurrentChartLoad(seq, token)) return;
-			const next = data.tracks ?? [];
-			tracks = next;
-			currentEntryIndex = 0;
-			// Only cache non-empty payloads so a transient 5xx returning [] doesn't
-			// poison the cache for 6h.
-			if (next.length > 0) putCached(token, next);
-		} catch (e) {
-			if (!isCurrentChartLoad(seq, token)) return;
-			console.error('[trending] fetch failed', { token, error: e });
-			tracks = [];
-			error = true;
-		} finally {
-			if (isCurrentChartLoad(seq, token)) loading = false;
-		}
-	}
-
-	function isCurrentChartLoad(seq: number, token: string): boolean {
-		return !destroyed && seq === chartLoadSeq && token === lastToken;
+	function retry() {
+		reloadTick += 1;
 	}
 
 	function pickMode(m: TrendingMode) {
@@ -374,61 +336,36 @@
 <section class="trending-shelf">
 	<SectionHeader title="Trending" subtitle={$selectedTrendingMode === 'tidal' ? subLabel : `${subLabel} on Last.fm`} variant="charts" level={2}>
 		{#snippet actions()}
-			<div class="trending-controls">
-				<div class="chip-group" role="tablist" aria-label="Trending scope">
-					{#each MODES as m (m.id)}
-						<button
-							type="button"
-							class="chip"
-							class:active={m.id === $selectedTrendingMode}
-							onclick={() => pickMode(m.id)}
-							role="tab"
-							aria-selected={m.id === $selectedTrendingMode}
-						>
-							{m.label}
-						</button>
-					{/each}
-				</div>
-				<!-- Always-rendered, fixed-width slot - flips opacity instead of mounting/unmounting,
-				     so the chip group doesn't reflow when fetches start/finish. -->
-				<span class="loading-indicator" class:visible={loading} aria-hidden={!loading}>Loading...</span>
-			</div>
+			<Segmented
+				options={MODES}
+				value={$selectedTrendingMode}
+				label="Trending scope"
+				onchange={pickMode}
+			/>
 		{/snippet}
 	</SectionHeader>
 
 	<!-- Always-rendered subrow; content swaps by mode. Reserves stable vertical
-	     space so the grid below doesn't jump when modes change. -->
-	<div class="chip-row" role="tablist" aria-label={$selectedTrendingMode === 'genre' ? 'Genre' : 'Country'}>
-		{#if $selectedTrendingMode === 'country' && countries.length > 0}
+	     space so the mural below doesn't jump when modes change. -->
+	<div class="chip-row" role="group" aria-label={$selectedTrendingMode === 'genre' ? 'Genre' : 'Country'}>
+		{#if $selectedTrendingMode === 'country'}
 			{#each countries as c (c.code)}
-				<button
-					type="button"
-					class="chip secondary"
-					class:active={c.code === $selectedCountry}
-					onclick={() => pickCountry(c.code)}
-					role="tab"
-					aria-selected={c.code === $selectedCountry}
-				>
+				<FilterChip pressed={c.code === $selectedCountry} onclick={() => pickCountry(c.code)}>
 					{c.label}
-				</button>
+				</FilterChip>
 			{/each}
-		{:else if $selectedTrendingMode === 'genre' && genres.length > 0}
+		{:else if $selectedTrendingMode === 'genre'}
 			{#each genres as g (g.key)}
-				<button
-					type="button"
-					class="chip secondary"
-					class:active={g.key === $selectedGenre}
-					onclick={() => pickGenre(g.key)}
-					role="tab"
-					aria-selected={g.key === $selectedGenre}
-				>
+				<FilterChip pressed={g.key === $selectedGenre} onclick={() => pickGenre(g.key)}>
 					{g.label}
-				</button>
+				</FilterChip>
 			{/each}
 		{/if}
 	</div>
 
-	{#if tracks.length > 0 || loading}
+	{#if error && (tracks.length === 0 || showingOtherScope)}
+		<ErrorState title="Couldn't load this chart" {error} onretry={retry} />
+	{:else if tracks.length > 0 || loading}
 		<ChartMural
 			items={muralItems}
 			currentIndex={currentEntryIndex}
@@ -439,8 +376,10 @@
 			actionLabel={currentEntry ? entryActionLabel(currentEntry, currentEntryIndex) : 'Unavailable'}
 			actionDisabled={!currentEntry || !isEntryPlayable(currentEntry)}
 			accent="lastfm"
-			loading={loading && tracks.length === 0}
+			loading={tracks.length === 0}
 			loadingLabel="Loading Last.fm chart"
+			refreshing={refreshing}
+			stale={showingOtherScope && loading}
 			onSelect={selectEntry}
 			onJump={jumpEntry}
 			onPlay={() => currentEntry && playEntry(currentEntry, currentEntryIndex)}
@@ -451,8 +390,6 @@
 			}}
 			onPauseChange={(paused) => muralPaused = paused}
 		/>
-	{:else if error}
-		<EmptyState title="Couldn't load this chart" copy="Try another scope or check the Last.fm key in Settings." />
 	{:else}
 		<EmptyState title="Nothing trending here yet" copy="Try another country, genre, or scope." />
 	{/if}
@@ -465,80 +402,12 @@
 		gap: var(--space-3);
 	}
 
-	.trending-controls {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
-		flex-wrap: nowrap; /* keeps chip-group + loading slot on a single line */
-		min-width: 0;
-	}
-
-	.chip-group {
-		display: inline-flex;
-		gap: var(--space-1);
-		padding: var(--space-1);
-		background: var(--panel-bg);
-		border: 1px solid var(--panel-border);
-		border-radius: 999px;
-	}
-
-	.chip {
-		background: var(--panel-bg);
-		border: 1px solid var(--panel-border);
-		color: var(--text-muted);
-		font: inherit;
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-		line-height: 1;
-		padding: var(--space-2) var(--space-3);
-		border-radius: 999px;
-		cursor: pointer;
-		white-space: nowrap;
-		transition: background var(--motion-base), border-color var(--motion-base), color var(--motion-base);
-	}
-
-	.chip:hover,
-	.chip:focus-visible {
-		background: var(--bg-hover);
-		border-color: var(--accent-line);
-		color: var(--text-primary);
-		outline: none;
-	}
-
-	.chip.active {
-		background: var(--bg-hover);
-		border-color: var(--accent-line);
-		color: var(--text-primary);
-	}
-
 	.chip-row {
 		display: flex;
 		flex-wrap: wrap;
 		gap: var(--space-1);
 		/* Reserves one row of chip height even when worldwide mode renders no
-		   chips, so switching modes doesn't shift the grid below. */
-		min-height: clamp(28px, 2vw, 36px);
+		   chips, so switching modes doesn't shift the mural below. */
+		min-height: var(--control-h);
 	}
-
-	.chip.secondary {
-		background: var(--panel-bg);
-	}
-	.chip.secondary.active {
-		background: var(--bg-hover);
-	}
-
-	.loading-indicator {
-		font-size: var(--font-size-xs);
-		color: var(--text-muted);
-		font-style: italic;
-		/* Reserve the slot so the chip group never reflows when loading toggles. */
-		min-width: clamp(52px, 4vw, 68px);
-		opacity: 0;
-		transition: opacity var(--motion-fast);
-		pointer-events: none;
-	}
-	.loading-indicator.visible {
-		opacity: 1;
-	}
-
 </style>

@@ -1,5 +1,13 @@
+<script module lang="ts">
+	// One provider-matrix refresh per app session, however often the page is
+	// opened. The server only re-scrapes when asked, so without this a matrix
+	// that already held data was never refreshed and "daily" charts went stale
+	// for as long as the app stayed installed.
+	let matrixRefreshStarted = false;
+</script>
+
 <script lang="ts">
-	import { onDestroy, onMount } from 'svelte';
+	import { onDestroy, onMount, untrack } from 'svelte';
 	import {
 		api,
 		type ChartMatrixCell,
@@ -9,75 +17,163 @@
 		type TidalPlayable,
 		type TidalSearchTrack,
 	} from '$lib/api/client';
+	import { cachedApi, invalidateChartSnapshotCaches } from '$lib/cache/api_queries';
+	import type { CachedQuery } from '$lib/cache/query';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
-	import { playTidalTrackNow, playerError } from '$lib/stores/player';
+	import ErrorState from '$lib/components/ui/ErrorState.svelte';
+	import Segmented from '$lib/components/ui/Segmented.svelte';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import { playTidalTrackNow, playTrackNow, playerError } from '$lib/stores/player';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildTidalTrackMenu } from '$lib/player/track_menu';
 	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
 	import ChartMural, { type ChartMuralItem } from '$lib/components/charts/ChartMural.svelte';
-	import { tidalSearchTrackToPlayable } from '$lib/utils/track';
-	import { gatedTidalSearch } from '$lib/actions/lazy-tidal-art';
+	import { selectedChartRegion, selectedChartSource } from '$lib/stores/trending-prefs';
+	import { composeTidalArtQuery, lazyTidalArt, peekTidalArt } from '$lib/actions/lazy-tidal-art';
+	import { usableArtwork } from '$lib/utils/artwork';
+	import {
+		chartMatchKey,
+		matchChartTrack,
+		peekChartMatch,
+		playableFromMatch,
+	} from '$lib/components/charts/chart_tidal_match';
 
 	const REGIONS = [
-		{ code: 'global', label: 'Global' },
-		{ code: 'US', label: 'US' },
-		{ code: 'UK', label: 'UK' },
-		{ code: 'AU', label: 'AU' },
-		{ code: 'CA', label: 'CA' },
-		{ code: 'NZ', label: 'NZ' },
+		{ value: 'global', label: 'Global' },
+		{ value: 'US', label: 'US' },
+		{ value: 'UK', label: 'UK' },
+		{ value: 'AU', label: 'AU' },
+		{ value: 'CA', label: 'CA' },
+		{ value: 'NZ', label: 'NZ' },
 	];
 
 	const PERIOD = 'daily';
 	const LIMIT = 20;
 	const ROTATE_MS = 8000;
 
-	let selectedRegion = $state('global');
-	let selectedSource = $state('spotify_daily');
+	type ChartItem = {
+		artist: string;
+		title: string;
+		album?: string | null;
+		entity_type: string;
+		artwork_url: string | null;
+		tidal_id: number | null;
+		local_track_id?: number | null;
+	};
+
 	let matrix = $state<ChartMatrixResponse | null>(null);
-	let data = $state<ChartSnapshotResponse | null>(null);
-	let resolvedTracks = $state<Record<number, TidalSearchTrack | null>>({});
-	let resolvingEntries = $state<Record<number, boolean>>({});
 	let matrixLoading = $state(true);
-	let loading = $state(true);
+	let matrixError = $state<unknown>(null);
 	let refreshingMatrix = $state(false);
-	let matrixError = $state(false);
-	let error = $state(false);
-	let requestToken = 0;
-	let destroyed = false;
-	let refreshAttempted = false;
-	let snapshotRefreshAttempted = false;
+
+	let data = $state<ChartSnapshotResponse | null>(null);
+	// Which chart `data` belongs to; while another chart loads, the old one stays
+	// on screen dimmed rather than blanking to a skeleton.
+	let dataToken = $state('');
+	let activeToken = $state('');
+	let loading = $state(true);
+	let refreshing = $state(false);
+	let error = $state<unknown>(null);
+
+	// TIDAL matches keyed by chartMatchKey(artist, title), shared across every
+	// region and provider (and, via chart_tidal_match, across visits).
+	let matches = $state<Record<string, TidalSearchTrack | null>>({});
+	let resolving = $state<Record<string, boolean>>({});
+	let lazyArt = $state<Record<string, string>>({});
+
 	let currentEntryIndex = $state(0);
 	let carouselPaused = $state(false);
-	let carouselTimer: ReturnType<typeof setInterval> | undefined;
+	let muralAnchor = $state<HTMLElement>();
+
+	let destroyed = false;
+	let snapshotRefreshAttempted = false;
+	let matrixQuery: CachedQuery<ChartMatrixResponse> | null = null;
+	let snapshotQuery: CachedQuery<ChartSnapshotResponse> | null = null;
 
 	let chartEntries = $derived(data?.entries ?? []);
 	let currentEntry = $derived(chartEntries[currentEntryIndex] ?? chartEntries[0] ?? null);
+	let showingOtherChart = $derived(chartEntries.length > 0 && dataToken !== activeToken);
+	let providerOptions = $derived(
+		(matrix?.providers ?? []).map((provider) => ({ value: provider.source_key, label: provider.label })),
+	);
 	let muralItems = $derived<ChartMuralItem[]>(
 		chartEntries.map((entry) => ({
 			id: String(entry.id),
 			title: entry.title,
 			subtitle: entrySubtitle(entry),
-			artwork: entryArtwork(entry),
-			fallbackText: entryFallbackText(entry),
+			artwork: itemArtwork(entry),
+			fallbackText: fallbackText(entry.title),
 			tileLabel: `Select ${entry.title}`,
 			tileTitle: `${entry.rank}. ${entry.title} - ${entry.artist}`,
 		})),
 	);
 
 	onMount(() => {
-		void loadMatrix();
-		void loadSnapshot(selectedRegion, selectedSource);
+		matrixQuery = cachedApi.chartMatrixQuery();
+		return matrixQuery.subscribe((state) => {
+			if (state.data) matrix = state.data;
+			matrixLoading = state.loading;
+			matrixError = state.data ? null : state.error;
+			if (state.error && !state.data) console.error('[daily-charts] matrix fetch failed', state.error);
+			// Decide on a fresh answer only: a hydrated copy is revalidating already.
+			if (state.data && !state.loading && !state.refreshing && matrixNeedsRefresh(state.data)) {
+				void refreshMatrix();
+			}
+		});
 	});
 
 	onDestroy(() => {
 		destroyed = true;
-		requestToken += 1;
-		stopCarousel();
+	});
+
+	// One cached query per region + provider: revisits paint instantly and
+	// revalidate in the background. The subscription is torn down with the
+	// effect, so a late answer for an old chart can never land on the new one.
+	$effect(() => {
+		const region = $selectedChartRegion;
+		const source = $selectedChartSource;
+		const token = `${source}:${region}`;
+		activeToken = token;
+		const query = cachedApi.chartSnapshotQuery({ source, period: PERIOD, region, limit: LIMIT });
+		snapshotQuery = query;
+		return query.subscribe((state) => untrack(() => {
+			if (state.data) {
+				if (dataToken !== token) currentEntryIndex = 0;
+				data = state.data;
+				dataToken = token;
+			}
+			loading = state.loading;
+			refreshing = state.refreshing;
+			error = state.data ? null : state.error;
+			if (state.error && !state.data) console.error('[daily-charts] snapshot fetch failed', state.error);
+			const fresh = state.data && !state.loading && !state.refreshing;
+			if (
+				fresh &&
+				!snapshotRefreshAttempted &&
+				state.data!.entries.length > 0 &&
+				state.data!.entries.length < Math.min(10, LIMIT)
+			) {
+				snapshotRefreshAttempted = true;
+				void refreshMatrix();
+			}
+		}));
+	});
+
+	// A persisted provider that the matrix no longer offers would leave the
+	// mural empty forever; fall back to the first one the server lists.
+	$effect(() => {
+		const providers = matrix?.providers ?? [];
+		if (providers.length === 0) return;
+		if (!providers.some((provider) => provider.source_key === $selectedChartSource)) {
+			selectedChartSource.set(providers[0].source_key);
+		}
 	});
 
 	$effect(() => {
-		if (chartEntries.length === 0) return;
-		void resolveVisibleEntries(chartEntries);
+		const entries = chartEntries;
+		untrack(() => {
+			for (const entry of entries) void resolveItem(entry);
+		});
 	});
 
 	$effect(() => {
@@ -85,43 +181,42 @@
 	});
 
 	$effect(() => {
-		stopCarousel();
 		if (chartEntries.length <= 1) return;
-		carouselTimer = setInterval(() => {
+		const timer = setInterval(() => {
 			if (!carouselPaused) jumpEntry(1);
 		}, ROTATE_MS);
-		return stopCarousel;
+		return () => clearInterval(timer);
 	});
 
-	async function loadMatrix() {
-		matrixLoading = true;
-		matrixError = false;
-		try {
-			const next = await api.getChartMatrix();
-			if (destroyed) return;
-			matrix = next;
-			if (!refreshAttempted && !matrixHasData(next)) {
-				refreshAttempted = true;
-				await refreshMatrix();
-			}
-		} catch (e) {
-			if (destroyed) return;
-			console.error('[daily-charts] matrix fetch failed', e);
-			matrix = null;
-			matrixError = true;
-		} finally {
-			if (!destroyed) matrixLoading = false;
-		}
+	function todayUtc(): string {
+		return new Date().toISOString().slice(0, 10);
 	}
 
-	async function refreshMatrix() {
+	function latestChartDate(next: ChartMatrixResponse): string | null {
+		let latest: string | null = null;
+		for (const row of next.rows) {
+			for (const cell of Object.values(row.cells)) {
+				if (cell && (!latest || cell.chart_date > latest)) latest = cell.chart_date;
+			}
+		}
+		return latest;
+	}
+
+	function matrixNeedsRefresh(next: ChartMatrixResponse): boolean {
+		if (!matrixHasData(next)) return true;
+		const latest = latestChartDate(next);
+		return latest !== null && latest < todayUtc();
+	}
+
+	async function refreshMatrix(force = false) {
+		if (matrixRefreshStarted && !force) return;
+		matrixRefreshStarted = true;
 		refreshingMatrix = true;
 		try {
 			await api.refreshChartMatrix();
 			if (destroyed) return;
-			matrix = await api.getChartMatrix();
-			if (destroyed) return;
-			void loadSnapshot(selectedRegion, selectedSource);
+			invalidateChartSnapshotCaches();
+			void snapshotQuery?.refresh().catch(() => undefined);
 		} catch (e) {
 			if (destroyed) return;
 			console.error('[daily-charts] matrix refresh failed', e);
@@ -130,59 +225,32 @@
 		}
 	}
 
-	async function loadSnapshot(region: string, source: string) {
-		const token = ++requestToken;
-		loading = true;
-		error = false;
-		try {
-			const next = await api.getChartSnapshot({
-				source,
-				period: PERIOD,
-				region,
-				limit: LIMIT,
-			});
-			if (destroyed || token !== requestToken) return;
-			data = next;
-			currentEntryIndex = 0;
-			if (
-				!snapshotRefreshAttempted &&
-				!refreshingMatrix &&
-				next.entries.length > 0 &&
-				next.entries.length < Math.min(10, LIMIT)
-			) {
-				snapshotRefreshAttempted = true;
-				void refreshMatrix();
-			}
-		} catch (e) {
-			if (destroyed || token !== requestToken) return;
-			console.error('[daily-charts] snapshot fetch failed', e);
-			data = null;
-			error = true;
-		} finally {
-			if (!destroyed && token === requestToken) loading = false;
-		}
+	function retrySnapshot() {
+		void snapshotQuery?.refresh().catch(() => undefined);
+	}
+
+	function retryMatrix() {
+		void matrixQuery?.refresh().catch(() => undefined);
 	}
 
 	function pickRegion(region: string) {
-		if (region === selectedRegion) return;
-		selectedRegion = region;
-		void loadSnapshot(region, selectedSource);
+		selectedChartRegion.set(region);
 	}
 
-	function pickProvider(region: string, source: string) {
-		selectedRegion = region;
-		selectedSource = source;
-		void loadSnapshot(region, source);
+	function pickProvider(source: string) {
+		selectedChartSource.set(source);
 	}
 
-	function cellMetric(cell: ChartMatrixCell): string {
-		if (cell.streams != null) return `${cell.streams.toLocaleString()} streams`;
-		if (cell.views != null) return `${cell.views.toLocaleString()} views`;
-		if (cell.points != null) return `${cell.points.toLocaleString()} pts`;
-		if (resolvedTracks[cell.entry_id]?.in_library) return 'In library';
-		if (resolvedTracks[cell.entry_id]) return 'TIDAL ready';
-		if (resolvingEntries[cell.entry_id]) return 'Resolving';
-		return 'Tap to resolve';
+	function focusCell(region: string, source: string) {
+		pickRegion(region);
+		pickProvider(source);
+		// The matrix sits below the mural; bring the chart that just changed into
+		// view instead of swapping it somewhere off screen.
+		const rect = muralAnchor?.getBoundingClientRect();
+		if (rect && rect.top < 0) {
+			const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+			muralAnchor?.scrollIntoView({ block: 'start', behavior: reduce ? 'auto' : 'smooth' });
+		}
 	}
 
 	function matrixHasData(next: ChartMatrixResponse | null): boolean {
@@ -198,25 +266,19 @@
 		);
 	}
 
-	function selectedRegionLabel(): string {
-		return REGIONS.find((region) => region.code === selectedRegion)?.label ?? selectedRegion;
+	function regionLabel(region: string): string {
+		return REGIONS.find((item) => item.value === region)?.label ?? region;
 	}
 
 	function selectedProviderLabel(): string {
 		return (
-			matrix?.providers.find((provider) => provider.source_key === selectedSource)?.label ??
+			matrix?.providers.find((provider) => provider.source_key === $selectedChartSource)?.label ??
 			'Spotify'
 		);
 	}
 
-	function stopCarousel() {
-		if (carouselTimer) clearInterval(carouselTimer);
-		carouselTimer = undefined;
-	}
-
-	function selectEntry(entryId: number) {
-		const nextIndex = chartEntries.findIndex((entry) => entry.id === entryId);
-		if (nextIndex >= 0) currentEntryIndex = nextIndex;
+	function selectEntry(index: number) {
+		if (chartEntries[index]) currentEntryIndex = index;
 	}
 
 	function jumpEntry(delta: number) {
@@ -224,275 +286,308 @@
 		currentEntryIndex = (currentEntryIndex + delta + chartEntries.length) % chartEntries.length;
 	}
 
-	function rankDeltaLabel(delta: number | null): string {
-		if (delta == null || delta === 0) return 'Steady';
+	// TIDAL matching
+
+	function isVideo(item: ChartItem): boolean {
+		return item.entity_type === 'video';
+	}
+
+	function needsMatch(item: ChartItem): boolean {
+		return !item.tidal_id && !item.local_track_id && !isVideo(item);
+	}
+
+	async function resolveItem(item: ChartItem): Promise<TidalSearchTrack | null> {
+		if (!needsMatch(item)) return null;
+		const key = chartMatchKey(item.artist, item.title);
+		if (key in matches) return matches[key];
+		const known = peekChartMatch(key);
+		if (known !== undefined) {
+			matches[key] = known;
+			return known;
+		}
+		resolving[key] = true;
+		try {
+			const hit = await matchChartTrack(item.artist, item.title);
+			if (!destroyed) matches[key] = hit;
+			return hit;
+		} catch {
+			// Breaker open or search failed: not a miss, so nothing is recorded
+			// and the next visit (or Play) tries again.
+			return null;
+		} finally {
+			if (!destroyed) resolving[key] = false;
+		}
+	}
+
+	function directPlayable(item: ChartItem): TidalPlayable {
+		return {
+			tidal_id: item.tidal_id!,
+			title: item.title,
+			artist_name: item.artist,
+			album_title: item.album ?? null,
+			artwork_url: item.artwork_url,
+			duration_ms: null,
+		};
+	}
+
+	async function playableFor(item: ChartItem): Promise<TidalPlayable | null> {
+		if (item.tidal_id) return directPlayable(item);
+		const hit = await resolveItem(item);
+		return hit ? playableFromMatch(hit, item.artwork_url) : null;
+	}
+
+	async function playItem(item: ChartItem) {
+		if (isVideo(item)) return;
+		if (item.local_track_id) {
+			await playTrackNow(item.local_track_id);
+			return;
+		}
+		const playable = await playableFor(item);
+		if (!playable) {
+			playerError.set({ message: "Couldn't find that chart entry on TIDAL." });
+			return;
+		}
+		await playTidalTrackNow(playable);
+	}
+
+	async function openItemContext(e: MouseEvent, item: ChartItem) {
+		e.preventDefault();
+		e.stopPropagation();
+		if (isVideo(item)) return;
+		const playable = await playableFor(item);
+		if (!playable) return;
+		openContextMenu(e, buildTidalTrackMenu(playable), playable.title);
+	}
+
+	function matchFor(item: ChartItem): TidalSearchTrack | null | undefined {
+		return matches[chartMatchKey(item.artist, item.title)];
+	}
+
+	function itemArtwork(item: ChartItem): string | null {
+		const key = chartMatchKey(item.artist, item.title);
+		return usableArtwork(
+			item.artwork_url,
+			matches[key]?.artwork_url,
+			lazyArt[key],
+			peekTidalArt(composeTidalArtQuery(item.artist, item.title)),
+		);
+	}
+
+	function fallbackText(title: string): string {
+		return (title.trim()[0] ?? 'N').toUpperCase();
+	}
+
+	function statusLabel(item: ChartItem): string {
+		if (isVideo(item)) return 'Video chart';
+		if (item.local_track_id) return 'In library';
+		if (item.tidal_id) return 'TIDAL ready';
+		const hit = matchFor(item);
+		if (hit?.in_library) return 'In library';
+		if (hit) return 'TIDAL ready';
+		if (hit === null) return 'Not found on TIDAL';
+		if (resolving[chartMatchKey(item.artist, item.title)]) return 'Finding on TIDAL';
+		return '';
+	}
+
+	function audienceLabel(item: { streams: number | null; views: number | null; points: number | null }): string {
+		if (item.streams != null) return `${item.streams.toLocaleString()} streams`;
+		if (item.views != null) return `${item.views.toLocaleString()} views`;
+		if (item.points != null) return `${item.points.toLocaleString()} pts`;
+		return '';
+	}
+
+	function movementLabel(delta: number | null): string {
+		if (delta == null) return '';
+		if (delta === 0) return 'Steady';
 		if (delta < 0) return `Up ${Math.abs(delta)}`;
 		return `Down ${delta}`;
 	}
 
-	async function resolveVisibleEntries(entries: ChartSnapshotEntry[]) {
-		await Promise.all(entries.slice(0, LIMIT).map((entry) => resolveEntry(entry)));
-	}
-
-	async function resolveEntry(entry: ChartSnapshotEntry): Promise<TidalSearchTrack | null> {
-		return resolveChartItem(entry.id, entry.artist, entry.title, entry.entity_type, entry.tidal_id);
-	}
-
-	async function resolveChartItem(
-		entryId: number,
-		artist: string,
-		title: string,
-		entityType: string,
-		tidalId: number | null,
-	): Promise<TidalSearchTrack | null> {
-		if (tidalId || entityType === 'video') return null;
-		if (entryId in resolvedTracks || resolvingEntries[entryId]) {
-			return resolvedTracks[entryId] ?? null;
-		}
-
-		resolvingEntries = { ...resolvingEntries, [entryId]: true };
-		try {
-			const query = [artist, title].filter(Boolean).join(' ');
-			// Shared gate, not a bare searchTidal: this shelf resolves its whole
-			// visible page at once, and an uncapped fan-out here would blow past
-			// the in-flight limit every other surface respects and trip TIDAL's
-			// rejections for all of them.
-			const results = await gatedTidalSearch(query, 1);
-			if (destroyed) return null;
-			const hit = results?.tracks[0] ?? null;
-			resolvedTracks = { ...resolvedTracks, [entryId]: hit };
-			return hit;
-		} catch (e) {
-			if (destroyed) return null;
-			console.error('[daily-charts] tidal resolve failed', e);
-			resolvedTracks = { ...resolvedTracks, [entryId]: null };
-			return null;
-		} finally {
-			if (!destroyed) resolvingEntries = { ...resolvingEntries, [entryId]: false };
-		}
-	}
-
-	async function playEntry(entry: ChartSnapshotEntry) {
-		const hit = resolvedTracks[entry.id] ?? (await resolveEntry(entry));
-		if (!hit) {
-			playerError.set({ message: "Couldn't find that chart entry on TIDAL." });
-			return;
-		}
-		await playTidalTrackNow(playableFromHit(hit, entry.artwork_url));
-	}
-
-	function playableFromHit(hit: TidalSearchTrack, fallbackArtwork: string | null): TidalPlayable {
-		const playable = tidalSearchTrackToPlayable(hit);
-		return {
-			...playable,
-			artwork_url: playable.artwork_url ?? fallbackArtwork,
-		};
-	}
-
-	async function openEntryContext(e: MouseEvent, entry: ChartSnapshotEntry) {
-		e.preventDefault();
-		e.stopPropagation();
-		const hit = resolvedTracks[entry.id] ?? (await resolveEntry(entry));
-		if (!hit) return;
-		const playable = playableFromHit(hit, entry.artwork_url);
-		openContextMenu(e, buildTidalTrackMenu(playable), playable.title);
-	}
-
-	async function openMatrixCellContext(e: MouseEvent, cell: ChartMatrixCell) {
-		e.preventDefault();
-		e.stopPropagation();
-		const hit =
-			resolvedTracks[cell.entry_id] ??
-			(await resolveChartItem(cell.entry_id, cell.artist, cell.title, cell.entity_type, cell.tidal_id));
-		if (!hit) return;
-		const playable = playableFromHit(hit, cell.artwork_url);
-		openContextMenu(e, buildTidalTrackMenu(playable), playable.title);
-	}
-
-	function entryArtwork(entry: ChartSnapshotEntry): string | null {
-		return resolvedTracks[entry.id]?.artwork_url ?? entry.artwork_url;
-	}
-
-	function entryFallbackText(entry: ChartSnapshotEntry): string {
-		return (entry.title.trim()[0] ?? 'N').toUpperCase();
-	}
-
-	function entryStatusLabel(entry: ChartSnapshotEntry): string {
-		if (entry.tidal_id || entry.resolution_status === 'tidal') return 'TIDAL ready';
-		if (resolvedTracks[entry.id]?.in_library) return 'In library';
-		if (resolvedTracks[entry.id]) return 'TIDAL ready';
-		if (resolvingEntries[entry.id]) return 'Resolving';
-		return entry.resolution_status;
-	}
-
 	function entryMetric(entry: ChartSnapshotEntry): string {
-		if (entry.streams != null) return `${entry.streams.toLocaleString()} streams`;
-		if (entry.views != null) return `${entry.views.toLocaleString()} views`;
-		if (entry.points != null) return `${entry.points.toLocaleString()} pts`;
-		return entryStatusLabel(entry);
+		const parts = [audienceLabel(entry), movementLabel(entry.rank_delta)].filter(Boolean);
+		return parts.length > 0 ? parts.join(' - ') : statusLabel(entry);
 	}
 
 	function entrySubtitle(entry: ChartSnapshotEntry): string {
-		return `#${entry.rank} ${rankDeltaLabel(entry.rank_delta)} - ${entry.artist}`;
+		return `#${entry.rank} - ${entry.artist}`;
+	}
+
+	function actionLabel(item: ChartItem): string {
+		if (isVideo(item)) return 'Video only';
+		if (resolving[chartMatchKey(item.artist, item.title)]) return 'Finding...';
+		return 'Play';
 	}
 </script>
 
 <section class="daily-chart-shelf">
-	<SectionHeader title="Market pulse" variant="charts" level={2}>
+	<SectionHeader title="Market pulse" subtitle="Daily leaders across stores and streaming services" variant="charts" level={2}>
 		{#snippet actions()}
-		<div class="region-tabs" role="tablist" aria-label="Daily chart region">
-			{#each REGIONS as region (region.code)}
-				<button
-					type="button"
-					class="chip"
-					class:active={region.code === selectedRegion}
-					role="tab"
-					aria-selected={region.code === selectedRegion}
-					onclick={() => pickRegion(region.code)}
-				>
-					{region.label}
-				</button>
-			{/each}
-		</div>
+			<Segmented
+				options={REGIONS}
+				value={$selectedChartRegion}
+				label="Daily chart region"
+				onchange={pickRegion}
+			/>
 		{/snippet}
 	</SectionHeader>
 
-	{#if matrix?.providers.length}
-		<div class="source-tabs" role="tablist" aria-label="Daily chart provider">
-			{#each matrix.providers as provider (provider.source_key)}
-				<button
-					type="button"
-					class="source-chip"
-					class:active={provider.source_key === selectedSource}
-					role="tab"
-					aria-selected={provider.source_key === selectedSource}
-					onclick={() => pickProvider(selectedRegion, provider.source_key)}
-				>
-					{provider.label}
-				</button>
-			{/each}
-		</div>
-	{/if}
+	<!-- Always rendered: holds its height while the provider list loads, so the
+	     mural below never jumps. -->
+	<div class="source-row">
+		{#if providerOptions.length > 0}
+			<Segmented
+				options={providerOptions}
+				value={$selectedChartSource}
+				label="Daily chart provider"
+				onchange={pickProvider}
+			/>
+		{/if}
+	</div>
 
-	{#if chartEntries.length > 0 && currentEntry}
-		<ChartMural
-			items={muralItems}
-			currentIndex={currentEntryIndex}
-			ariaLabel={`${selectedProviderLabel()} ${selectedRegionLabel()} top ${chartEntries.length}`}
-			title={currentEntry.title}
-			subtitle={entrySubtitle(currentEntry)}
-			metric={entryMetric(currentEntry)}
-			actionLabel="Play"
-			loading={loading && chartEntries.length === 0}
-			loadingLabel="Loading chart mural"
-			onSelect={(index) => {
-				const entry = chartEntries[index];
-				if (entry) selectEntry(entry.id);
-			}}
-			onJump={jumpEntry}
-			onPlay={() => playEntry(currentEntry)}
-			onCardContext={(event) => currentEntry && openEntryContext(event, currentEntry)}
-			onItemContext={(event, index) => {
-				const entry = chartEntries[index];
-				if (entry) void openEntryContext(event, entry);
-			}}
-			onPauseChange={(paused) => carouselPaused = paused}
-		/>
-	{:else if loading}
-		<ChartMural
-			items={[]}
-			currentIndex={0}
-			ariaLabel="Loading market pulse"
-			title=""
-			subtitle=""
-			loading
-			loadingLabel="Loading chart mural"
-		/>
-	{:else if error}
-		<EmptyState
-			title="Daily chart unavailable"
-			copy="Restart the NOOR server if this update just landed."
-		/>
-	{:else if !matrixLoading}
-		<EmptyState
-			title={`No ${selectedProviderLabel()} top list for ${selectedRegionLabel()}`}
-			copy="Try another provider or region."
-		/>
-	{/if}
+	<div class="mural-anchor" bind:this={muralAnchor}>
+		{#if error && (chartEntries.length === 0 || showingOtherChart)}
+			<ErrorState title="Couldn't load this chart" {error} onretry={retrySnapshot} />
+		{:else if chartEntries.length > 0 && currentEntry}
+			<ChartMural
+				items={muralItems}
+				currentIndex={currentEntryIndex}
+				ariaLabel={`${selectedProviderLabel()} ${regionLabel($selectedChartRegion)} top ${chartEntries.length}`}
+				title={currentEntry.title}
+				subtitle={entrySubtitle(currentEntry)}
+				metric={entryMetric(currentEntry)}
+				actionLabel={actionLabel(currentEntry)}
+				actionDisabled={isVideo(currentEntry) || matchFor(currentEntry) === null}
+				refreshing={refreshing || refreshingMatrix}
+				stale={showingOtherChart && loading}
+				onSelect={selectEntry}
+				onJump={jumpEntry}
+				onPlay={() => currentEntry && playItem(currentEntry)}
+				onItemActivate={(index) => {
+					const entry = chartEntries[index];
+					if (entry) void playItem(entry);
+				}}
+				onCardContext={(event) => currentEntry && openItemContext(event, currentEntry)}
+				onItemContext={(event, index) => {
+					const entry = chartEntries[index];
+					if (entry) void openItemContext(event, entry);
+				}}
+				onPauseChange={(paused) => carouselPaused = paused}
+			/>
+		{:else if loading || refreshingMatrix}
+			<ChartMural items={[]} ariaLabel="Loading market pulse" title="" subtitle="" loading loadingLabel="Loading chart" />
+		{:else}
+			<EmptyState
+				title={`No ${selectedProviderLabel()} top list for ${regionLabel($selectedChartRegion)}`}
+				copy="Try another provider or region."
+			/>
+		{/if}
+	</div>
 
 	{#if matrix?.providers.length}
-		<div class="matrix-shell" aria-label="Market pulse provider matrix">
-			<div class="matrix-heading">
-				<div>
-					<p>Provider comparison</p>
-					<h3>All markets</h3>
-				</div>
-				<span>{selectedRegionLabel()} focus</span>
-			</div>
-			<div class="matrix-grid">
-				<div class="matrix-head region-head">Region</div>
-				{#each matrix.providers as provider (provider.source_key)}
-					<div class="matrix-head">{provider.label}</div>
-				{/each}
-				{#each matrix.rows as row (row.region)}
-					<button
-						type="button"
-						class="matrix-region"
-						class:active={row.region === selectedRegion}
-						onclick={() => pickRegion(row.region)}
-					>
-						{row.region === 'global' ? 'Global' : row.region}
-					</button>
-					{#each matrix.providers as provider (provider.source_key)}
-						{@const cell = row.cells[provider.source_key]}
-						<button
-							type="button"
-							class="matrix-cell"
-							class:filled={Boolean(cell)}
-							class:active={Boolean(cell) && row.region === selectedRegion && provider.source_key === selectedSource}
-							onclick={() => {
-								if (cell) pickProvider(row.region, provider.source_key);
-								else pickRegion(row.region);
-							}}
-							oncontextmenu={(e) => {
-								if (cell) void openMatrixCellContext(e, cell);
-							}}
-							aria-label={`${provider.label} ${row.region}`}
-						>
-							{#if cell}
-								<strong>{cell.title}</strong>
-								<span>{cell.artist}</span>
-								<small>{cellMetric(cell)}</small>
-							{:else}
-								<span>No data</span>
-							{/if}
-						</button>
+		<div class="matrix-shell" role="region" aria-label="Market pulse provider matrix">
+			<h3 class="t-label matrix-label">All markets</h3>
+			<div class="matrix-scroll">
+				<div class="matrix-grid" role="table" style:--providers={matrix.providers.length}>
+					<div class="matrix-row matrix-head-row" role="row">
+						<span class="matrix-head" role="columnheader">Region</span>
+						{#each matrix.providers as provider (provider.source_key)}
+							<span class="matrix-head" role="columnheader">{provider.label}</span>
+						{/each}
+					</div>
+					{#each matrix.rows as row (row.region)}
+						<div class="matrix-row" role="row" class:selected={row.region === $selectedChartRegion}>
+							<div class="matrix-region-cell" role="rowheader">
+								<button type="button" class="matrix-region" onclick={() => pickRegion(row.region)}>
+									{regionLabel(row.region)}
+								</button>
+							</div>
+							{#each matrix.providers as provider (provider.source_key)}
+								{@const cell = row.cells[provider.source_key]}
+								{#if cell}
+									{@const key = chartMatchKey(cell.artist, cell.title)}
+									<!-- The menu is a mouse shortcut; keyboard users reach the
+									     same song through the two buttons inside. -->
+									<!-- svelte-ignore a11y_interactive_supports_focus -->
+									<div
+										class="matrix-cell"
+										role="cell"
+										class:active={row.region === $selectedChartRegion && provider.source_key === $selectedChartSource}
+										oncontextmenu={(e) => void openItemContext(e, cell)}
+									>
+										<button
+											type="button"
+											class="cell-art"
+											disabled={isVideo(cell)}
+											onclick={() => void playItem(cell)}
+											aria-label={`Play ${cell.title} by ${cell.artist}`}
+											title={isVideo(cell) ? 'Video chart' : `Play ${cell.title}`}
+											use:lazyTidalArt={{
+												enabled: !itemArtwork(cell) && !isVideo(cell),
+												query: { artist: cell.artist, title: cell.title },
+												onResolve: (url) => (lazyArt[key] = url),
+											}}
+										>
+											<ArtworkImage
+												src={itemArtwork(cell)}
+												size={160}
+												className="matrix-cell-art"
+												fallbackText={fallbackText(cell.title)}
+												tint
+												decorative
+											/>
+											{#if !isVideo(cell)}
+												<svg class="cell-play" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5l9.5 5.5L4 13.5V2.5z" /></svg>
+											{/if}
+										</button>
+										<button
+											type="button"
+											class="cell-text"
+											onclick={() => focusCell(row.region, provider.source_key)}
+											aria-label={`Show the ${provider.label} ${regionLabel(row.region)} chart`}
+										>
+											<strong class="t-row-title">{cell.title}</strong>
+											<span class="t-meta">{cell.artist}</span>
+											{#if audienceLabel(cell)}
+												<small>{audienceLabel(cell)}</small>
+											{/if}
+										</button>
+									</div>
+								{:else}
+									<div class="matrix-cell empty" role="cell">No data</div>
+								{/if}
+							{/each}
+						</div>
 					{/each}
-				{/each}
+				</div>
 			</div>
 		</div>
 	{:else if matrixLoading}
-		<div class="provider-strip" aria-label="Loading chart providers">
-			{#each Array.from({ length: 6 }) as _, i (i)}
-				<span class="provider-skeleton">{refreshingMatrix ? 'Refreshing' : 'Loading'}</span>
+		<div class="matrix-skeleton" role="status" aria-label="Loading chart providers">
+			{#each Array.from({ length: 4 }) as _, i (i)}
+				<span style:--idx={i}></span>
 			{/each}
 		</div>
 	{:else if matrixError}
-		<EmptyState
-			title="Market matrix unavailable"
-			copy="Restart the NOOR server if this update just landed."
-		/>
+		<ErrorState title="Couldn't load the market matrix" error={matrixError} onretry={retryMatrix} />
 	{/if}
 
-	{#if !matrixLoading && !matrixError && !regionHasMatrixData(selectedRegion)}
+	{#if !matrixLoading && !matrixError && !regionHasMatrixData($selectedChartRegion)}
 		<EmptyState
 			title={matrixHasData(matrix)
-				? `No provider leaders for ${selectedRegionLabel()}`
+				? `No provider leaders for ${regionLabel($selectedChartRegion)}`
 				: 'No market snapshot yet'}
 			copy={matrixHasData(matrix)
 				? 'This region has no provider leaders yet. Global data is available above.'
 				: 'NOOR tried to refresh the provider matrix, but there is no stored chart data yet.'}
-		/>
+		>
+			{#snippet actions()}
+				{#if !matrixHasData(matrix)}
+					<button type="button" class="btn btn-secondary" disabled={refreshingMatrix} onclick={() => refreshMatrix(true)}>
+						{refreshingMatrix ? 'Refreshing...' : 'Refresh charts'}
+					</button>
+				{/if}
+			{/snippet}
+		</EmptyState>
 	{/if}
 </section>
 
@@ -503,234 +598,252 @@
 		gap: var(--space-3);
 	}
 
-	.region-tabs {
-		display: inline-flex;
-		align-items: center;
-		gap: var(--space-1);
-		padding: var(--space-1);
-		border: 1px solid var(--panel-border);
-		border-radius: 999px;
-		background: var(--panel-bg);
-		overflow-x: auto;
-		max-width: 100%;
-	}
-
-	.provider-strip {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(min(112px, 100%), 1fr));
-		gap: var(--space-1);
-	}
-
-	.provider-strip span {
-		border: 1px solid var(--panel-border);
-		border-radius: 999px;
-		background: var(--panel-bg);
-		color: var(--text-secondary);
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-		line-height: 1;
-		padding: var(--space-2) var(--space-3);
-		text-align: center;
-		white-space: nowrap;
-	}
-
-	.provider-skeleton {
-		opacity: 0.55;
-	}
-
-	.source-tabs {
+	.source-row {
 		display: flex;
-		align-items: center;
-		gap: var(--space-1);
+		min-height: calc(var(--control-h) + 6px);
 		overflow-x: auto;
-		padding-bottom: var(--space-1);
+		scrollbar-width: none;
 	}
 
-	.source-chip {
-		border: 1px solid var(--panel-border);
-		border-radius: 999px;
-		background: var(--panel-bg);
-		color: var(--text-muted);
-		cursor: pointer;
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-		line-height: 1;
-		padding: var(--space-2) var(--space-3);
-		white-space: nowrap;
-		transition: background var(--motion-base), border-color var(--motion-base), color var(--motion-base);
+	.source-row::-webkit-scrollbar {
+		display: none;
 	}
 
-	.source-chip:hover,
-	.source-chip:focus-visible,
-	.source-chip.active {
-		background: var(--bg-hover);
-		border-color: var(--accent-line);
-		color: var(--text-primary);
-		outline: none;
+	.mural-anchor {
+		scroll-margin-top: var(--space-5);
 	}
 
 	.matrix-shell {
 		display: grid;
-		gap: var(--space-2);
+		gap: var(--group-gap);
+		margin-top: var(--space-5);
+	}
+
+	.matrix-label {
+		margin: 0;
+	}
+
+	.matrix-scroll {
 		overflow-x: auto;
 		padding-bottom: var(--space-1);
 	}
 
-	.matrix-heading {
-		display: flex;
-		align-items: end;
-		justify-content: space-between;
-		gap: var(--gap-sm);
-		min-width: 920px;
-	}
-
-	.matrix-heading p,
-	.matrix-heading h3 {
-		margin: 0;
-	}
-
-	.matrix-heading p {
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-		color: var(--text-muted);
-		text-transform: uppercase;
-		letter-spacing: 0;
-	}
-
-	.matrix-heading h3 {
-		font-size: var(--font-size-lg);
-		font-weight: var(--font-weight-bold);
-		line-height: var(--line-height-tight);
-	}
-
-	.matrix-heading span {
-		color: var(--text-secondary);
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-	}
-
 	.matrix-grid {
 		display: grid;
-		grid-template-columns: clamp(72px, 8vw, 96px) repeat(6, minmax(136px, 1fr));
-		gap: var(--space-1);
-		min-width: 920px;
+		grid-template-columns: minmax(64px, 88px) repeat(var(--providers, 6), minmax(156px, 1fr));
+		row-gap: var(--row-gap);
+		min-width: calc(88px + var(--providers, 6) * 160px);
 	}
 
-	.matrix-head,
-	.matrix-region,
-	.matrix-cell {
-		border: 1px solid var(--panel-border);
-		background: var(--panel-bg);
-		color: var(--text-secondary);
-		border-radius: var(--radius-xs);
+	/* Rows are subgrids so every column lines up with its header. */
+	.matrix-row {
+		display: grid;
+		grid-column: 1 / -1;
+		grid-template-columns: subgrid;
+		column-gap: var(--space-1);
+		border-radius: var(--radius-sm);
+	}
+
+	.matrix-head-row {
+		border-bottom: 1px solid var(--border-subtle);
+		border-radius: 0;
+		padding-bottom: var(--space-2);
+		margin-bottom: var(--space-1);
 	}
 
 	.matrix-head {
-		padding: var(--space-2) var(--space-3);
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-bold);
-		line-height: 1;
-		text-align: left;
+		padding: 0 var(--space-2);
+		font-size: var(--font-size-label);
+		font-weight: var(--font-weight-semibold);
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+		color: var(--text-tertiary);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
-	.region-head {
-		color: var(--text-muted);
+	.matrix-row.selected {
+		background: var(--bg-surface);
 	}
 
-	.matrix-region,
-	.matrix-cell {
-		min-height: clamp(58px, 6vw, 74px);
-		padding: var(--space-2) var(--space-3);
-		cursor: pointer;
-		transition: background var(--motion-base), border-color var(--motion-base), color var(--motion-base);
-	}
-
-	.matrix-region {
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-bold);
-		text-align: left;
-	}
-
-	.matrix-region.active,
-	.matrix-region:hover,
-	.matrix-cell:hover,
-	.matrix-cell:focus-visible,
-	.matrix-region:focus-visible,
-	.matrix-cell.active {
-		background: var(--bg-hover);
-		border-color: var(--accent-line);
-		color: var(--text-primary);
-		outline: none;
-	}
-
-	.matrix-cell {
+	.matrix-region-cell {
 		display: flex;
-		flex-direction: column;
-		align-items: flex-start;
-		justify-content: center;
-		gap: var(--space-1);
-		text-align: left;
 		min-width: 0;
 	}
 
-	.matrix-cell strong,
-	.matrix-cell span,
-	.matrix-cell small {
+	.matrix-region {
+		display: flex;
+		flex: 1;
+		align-items: center;
+		padding: 0 var(--space-2);
+		border: 0;
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--text-secondary);
+		font: inherit;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+		text-align: left;
+		cursor: pointer;
+		transition: color var(--motion-fast);
+	}
+
+	.matrix-region:hover,
+	.matrix-row.selected .matrix-region {
+		color: var(--text-primary);
+	}
+
+	.matrix-cell {
+		display: grid;
+		grid-template-columns: 40px minmax(0, 1fr);
+		align-items: center;
+		gap: var(--space-2);
+		min-width: 0;
+		min-height: 56px;
+		padding: var(--space-1) var(--space-2);
+		border-radius: var(--radius-sm);
+		transition: background var(--motion-fast);
+	}
+
+	.matrix-cell:hover {
+		background: var(--bg-hover);
+	}
+
+	.matrix-cell.active {
+		background: var(--accent-soft);
+	}
+
+	.matrix-cell.empty {
+		display: flex;
+		color: var(--text-tertiary);
+		font-size: var(--font-size-xs);
+	}
+
+	.cell-art {
+		position: relative;
+		width: 40px;
+		height: 40px;
+		padding: 0;
+		border: 0;
+		border-radius: var(--radius-xs);
+		overflow: hidden;
+		background: var(--bg-raised);
+		cursor: pointer;
+	}
+
+	.cell-art:disabled {
+		cursor: default;
+	}
+
+	:global(.matrix-cell-art),
+	:global(.matrix-cell-art.fallback) {
+		display: grid;
+		place-items: center;
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-bold);
+	}
+
+	.cell-play {
+		position: absolute;
+		inset: 0;
+		margin: auto;
+		width: 16px;
+		height: 16px;
+		fill: #fff;
+		opacity: 0;
+		filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.6));
+		transition: opacity var(--motion-fast);
+		pointer-events: none;
+	}
+
+	.cell-art::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		background: rgba(8, 8, 12, 0.45);
+		opacity: 0;
+		transition: opacity var(--motion-fast);
+		pointer-events: none;
+	}
+
+	.cell-art:not(:disabled):hover::after,
+	.cell-art:not(:disabled):focus-visible::after,
+	.cell-art:not(:disabled):hover .cell-play,
+	.cell-art:not(:disabled):focus-visible .cell-play {
+		opacity: 1;
+	}
+
+	.cell-text {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 1px;
+		min-width: 0;
+		padding: 0;
+		border: 0;
+		background: transparent;
+		color: var(--text-primary);
+		font: inherit;
+		text-align: left;
+		cursor: pointer;
+	}
+
+	.cell-text strong,
+	.cell-text span {
+		max-width: 100%;
+	}
+
+	.cell-text small {
 		max-width: 100%;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-	}
-
-	.matrix-cell strong {
-		color: var(--text-primary);
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-		line-height: var(--line-height-snug);
-	}
-
-	.matrix-cell span {
-		font-size: var(--font-size-xs);
-		color: var(--text-secondary);
-	}
-
-	.matrix-cell small {
+		color: var(--text-tertiary);
 		font-size: var(--font-size-2xs);
-		color: var(--text-muted);
-		line-height: 1;
+		font-variant-numeric: tabular-nums;
 	}
 
-	.matrix-cell:not(.filled) {
-		color: var(--text-muted);
-		opacity: 0.72;
+	.cell-art:focus-visible,
+	.cell-text:focus-visible,
+	.matrix-region:focus-visible {
+		outline: 2px solid var(--accent-strong);
+		outline-offset: 2px;
 	}
 
-	.chip {
-		border: 1px solid var(--panel-border);
-		border-radius: 999px;
-		background: var(--panel-bg);
-		color: var(--text-muted);
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-		line-height: 1;
-		padding: var(--space-2) var(--space-3);
-		cursor: pointer;
-		white-space: nowrap;
-		transition: background var(--motion-base), border-color var(--motion-base), color var(--motion-base);
+	.matrix-skeleton {
+		display: grid;
+		gap: var(--row-gap);
+		margin-top: var(--space-5);
+		animation: matrix-skeleton-in var(--motion-fast) 150ms both;
 	}
 
-	.chip:hover,
-	.chip:focus-visible {
-		background: var(--bg-hover);
-		border-color: var(--accent-line);
-		color: var(--text-primary);
-		outline: none;
+	.matrix-skeleton span {
+		height: 56px;
+		border-radius: var(--radius-sm);
+		background: linear-gradient(90deg, var(--bg-surface) 0%, var(--bg-hover) 50%, var(--bg-surface) 100%);
+		background-size: 200% 100%;
+		animation: matrix-shimmer 1.4s ease-in-out infinite;
+		animation-delay: calc(var(--idx) * 80ms);
+		opacity: 0.7;
 	}
 
-	.chip.active {
-		background: var(--bg-hover);
-		border-color: var(--accent-line);
-		color: var(--text-primary);
+	@keyframes matrix-skeleton-in {
+		from { opacity: 0; }
+		to { opacity: 1; }
 	}
 
+	@keyframes matrix-shimmer {
+		0% { background-position: 200% 0; }
+		100% { background-position: -200% 0; }
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.matrix-skeleton span {
+			animation: none;
+		}
+	}
 </style>

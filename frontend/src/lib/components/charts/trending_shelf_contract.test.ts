@@ -34,13 +34,16 @@ describe('trending shelf contract', () => {
 		expect(source).toContain('SectionHeader');
 		expect(source).toContain('variant="charts"');
 		expect(source).toContain('level={2}');
-		expect(source).toContain('api.getLastfmCountries()');
-		expect(source).toContain('api.getLastfmGenres()');
-		expect(source).toContain("api.getTrending({ source: 'lastfm', limit, country })");
-		expect(source).toContain("api.getTrending({ source: 'lastfm', limit, tag: genre })");
-		expect(source).toContain('getCached(token)');
-		expect(source).toContain('putCached(token, next)');
+		expect(source).toContain('cachedApi.lastfmCountriesQuery()');
+		expect(source).toContain('cachedApi.lastfmGenresQuery()');
+		expect(source).toContain("return { source: 'lastfm', limit, country };");
+		expect(source).toContain("return { source: 'lastfm', limit, tag: genre };");
+		// Persisted, revalidating per-scope query instead of a session-only map.
+		expect(source).toContain('cachedApi.trendingQuery(trendingQuery(mode, country, genre))');
+		expect(source).not.toContain('trending-cache');
 		expect(source).toContain('Couldn');
+		expect(source).toContain('<ErrorState');
+		expect(source).toContain('onretry={retry}');
 		expect(source).toContain('Nothing trending here yet');
 		expect(source).not.toContain('lastfm-more');
 		expect(source).not.toContain('lastfm-chart-list');
@@ -53,19 +56,15 @@ describe('trending shelf contract', () => {
 	});
 
 	test('ignores stale trending loads and cached-scope races', () => {
-		expect(source).toContain("import { onDestroy, onMount } from 'svelte';");
-		expect(source).toContain('let chartLoadSeq = 0;');
-		expect(source).toContain('let curatedLoadSeq = 0;');
-		expect(source).toContain('let destroyed = false;');
-		expect(source).toContain('onDestroy(() => {');
-		expect(source).toContain('chartLoadSeq += 1;');
-		expect(source).toContain('curatedLoadSeq += 1;');
-		expect(source).toContain('if (cached) {');
-		expect(source).toContain('const seq = ++chartLoadSeq;');
-		expect(source).toContain('if (!isCurrentChartLoad(seq, token)) return;');
-		expect(source).toContain('return !destroyed && seq === chartLoadSeq && token === lastToken;');
-		expect(source).toContain('const seq = ++curatedLoadSeq;');
-		expect(source).toContain('if (destroyed || seq !== curatedLoadSeq) return;');
+		// The scope effect owns its subscription, so leaving a scope tears it down
+		// and a late answer for that scope can never land on the next one.
+		expect(source).toContain("import { onMount, untrack } from 'svelte';");
+		expect(source).toContain('return query.subscribe((state) => untrack(() => {');
+		expect(source).toContain('tracksToken = token;');
+		// The previous scope stays on screen, dimmed, while the next one loads.
+		expect(source).toContain('let showingOtherScope = $derived(tracks.length > 0 && tracksToken !== activeToken);');
+		expect(source).toContain('stale={showingOtherScope && loading}');
+		expect(source).toContain("if (mode === 'country' && !countriesReady) return;");
 	});
 
 	test('preserves playback, TIDAL resolution, artwork fallback, and menus', () => {
@@ -87,10 +86,13 @@ describe('trending shelf contract', () => {
 		expect(source).toContain('onItemContext');
 	});
 
-	test('standardizes pill controls with bordered active chips', () => {
-		expect(source).toContain('border: 1px solid var(--panel-border)');
-		expect(source).toContain('border-color: var(--accent-line)');
-		expect(source).toContain('padding: var(--space-2) var(--space-3)');
+	test('uses the shared Segmented and FilterChip controls', () => {
+		expect(source).toContain('<Segmented');
+		expect(source).toContain('label="Trending scope"');
+		expect(source).toContain('<FilterChip pressed={c.code === $selectedCountry}');
+		expect(source).toContain('<FilterChip pressed={g.key === $selectedGenre}');
+		expect(source).not.toContain('class="chip"');
+		expect(source).not.toContain('class="chip secondary"');
 		expect(source).not.toContain('padding: 4px 10px');
 	});
 
@@ -107,6 +109,7 @@ describe('trending shelf contract', () => {
 		expect(muralSource).toContain('<div class="chart-pager">');
 		expect(muralSource).toContain('right: var(--space-4)');
 		expect(muralSource).not.toContain('top: 50%');
+		expect(muralSource).not.toContain('chart-mural-loading');
 		expect(muralSource).not.toContain('left: var(--space-3)');
 	});
 

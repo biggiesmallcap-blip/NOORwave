@@ -106,8 +106,9 @@ describe('context menu coverage contract', () => {
 		expect(trending).toContain('onCardContext');
 		expect(trending).toContain('onItemContext');
 		expect(daily).toContain('buildTidalTrackMenu');
-		expect(daily).toContain('openEntryContext');
-		expect(daily).toContain('openMatrixCellContext');
+		// One handler for mural tiles and matrix cells alike.
+		expect(daily).toContain('onItemContext');
+		expect(daily).toContain('oncontextmenu={(e) => void openItemContext(e, cell)}');
 		expect(mural).toContain('onCardContext');
 		expect(mural).toContain('onItemContext');
 		expect(mural).toContain('oncontextmenu');
