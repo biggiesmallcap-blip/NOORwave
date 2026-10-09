@@ -22,7 +22,6 @@
 		shuffleMode,
 		repeatMode,
 		playbackQueue,
-		playerReady,
 		playerError,
 		refreshPlaybackState,
 		playTrackNow,
@@ -1287,9 +1286,6 @@
 		return 'Video session';
 	}
 
-	let playerState = $derived(
-		$currentTrack ? ($isPlaying ? 'Playing' : 'Paused') : $playerReady ? 'Ready' : 'Connecting'
-	);
 	let streamDetailLabel = $derived(formatPlayerStreamDetail({
 		stream: $currentStreamDisplay,
 		runtime: $playbackRuntimeInfo,
@@ -1815,8 +1811,6 @@
 			streamDisplay={$currentStreamDisplay}
 			nowPlayingAttribution={nowPlayingAttribution}
 			streamDetail={streamDetailLabel}
-			playerState={playerState}
-			isScrubbing={isScrubbing}
 			position={$position}
 			bufferedMs={$buffered}
 			isPlaying={$isPlaying}
