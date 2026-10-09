@@ -42,13 +42,12 @@ fn artist_release_filter(filter: &str) -> Option<&'static str> {
         "ALBUMS" => Some("ALBUMS"),
         "EPSANDSINGLES" => Some("EPSANDSINGLES"),
         "COMPILATIONS" => Some("COMPILATIONS"),
-        "LIVE" => Some("LIVE"),
         _ => None,
     }
 }
 
 /// Deadline for one of the album-list groups (ALBUMS / EPSANDSINGLES /
-/// COMPILATIONS / LIVE) of the artist fan-out. Each group paginates
+/// COMPILATIONS) of the artist fan-out. Each group paginates
 /// sequentially, so it gets a larger budget than a single-call fetch. The
 /// timeout wraps the WHOLE group, including time spent queued on the global
 /// TIDAL request limiter, so a pile-up of slow requests degrades this page
@@ -1172,7 +1171,6 @@ struct TidalArtistBatch {
     albums: anyhow::Result<ArtistAlbumPages>,
     eps: anyhow::Result<ArtistAlbumPages>,
     comps: anyhow::Result<ArtistAlbumPages>,
-    live: anyhow::Result<ArtistAlbumPages>,
     top: anyhow::Result<TidalPaginatedResponse<TidalTrack>>,
     videos: anyhow::Result<TidalPaginatedResponse<TidalArtistVideo>>,
     similar: anyhow::Result<TidalPaginatedResponse<TidalArtist>>,
@@ -1192,7 +1190,6 @@ impl TidalArtistBatch {
         self.albums.is_ok()
             || self.eps.is_ok()
             || self.comps.is_ok()
-            || self.live.is_ok()
             || self.top.is_ok()
             || self.videos.is_ok()
             || self.similar.is_ok()
@@ -1205,7 +1202,6 @@ impl TidalArtistBatch {
             self.albums.as_ref().err(),
             self.eps.as_ref().err(),
             self.comps.as_ref().err(),
-            self.live.as_ref().err(),
             self.top.as_ref().err(),
             self.videos.as_ref().err(),
             self.similar.as_ref().err(),
@@ -1241,9 +1237,8 @@ async fn fetch_tidal_artist_batch(
     let compilations_fut = bounded_artist_fetch("compilations", ARTIST_ALBUM_GROUP_TIMEOUT, || {
         fetch_artist_album_pages(client, tidal_artist_id, "COMPILATIONS", max_album_pages)
     });
-    let live_fut = bounded_artist_fetch("live-albums", ARTIST_ALBUM_GROUP_TIMEOUT, || {
-        fetch_artist_album_pages(client, tidal_artist_id, "LIVE", max_album_pages)
-    });
+    // No LIVE group: TIDAL rejects filter=LIVE for every artist. Live albums
+    // arrive under ALBUMS and are bucketed client-side by release_type.
     // Top tracks raised from 10 -> 50 so the merged Top Tracks list on the
     // artist page surfaces a meaningful catalog even when the user has zero
     // library matches; 50 is TIDAL's per-page max.
@@ -1266,11 +1261,10 @@ async fn fetch_tidal_artist_batch(
         client.get_artist(tidal_artist_id)
     });
 
-    let (albums, eps, comps, live, top, videos, similar, bio, profile) = tokio::join!(
+    let (albums, eps, comps, top, videos, similar, bio, profile) = tokio::join!(
         albums_fut,
         eps_fut,
         compilations_fut,
-        live_fut,
         top_fut,
         videos_fut,
         similar_fut,
@@ -1282,7 +1276,6 @@ async fn fetch_tidal_artist_batch(
         albums,
         eps,
         comps,
-        live,
         top,
         videos,
         similar,
@@ -1531,7 +1524,6 @@ async fn build_tidal_artist_payload_with_depth(
         albums: albums_res,
         eps: eps_res,
         comps: comps_res,
-        live: live_res,
         top: top_res,
         videos: videos_res,
         similar: similar_res,
@@ -1546,7 +1538,6 @@ async fn build_tidal_artist_payload_with_depth(
         ("albums", albums_res.is_err()),
         ("eps_singles", eps_res.is_err()),
         ("compilations", comps_res.is_err()),
-        ("live", live_res.is_err()),
         ("top_tracks", top_res.is_err()),
         ("videos", videos_res.is_err()),
         ("similar_artists", similar_res.is_err()),
@@ -1579,7 +1570,7 @@ async fn build_tidal_artist_payload_with_depth(
             .filter(|t| t.artist.id == tidal_artist_id)
             .find_map(|t| t.artist.picture.clone())
     });
-    let album_cover_picture_id = [&albums_res, &eps_res, &comps_res, &live_res]
+    let album_cover_picture_id = [&albums_res, &eps_res, &comps_res]
         .iter()
         .filter_map(|res| res.as_ref().ok())
         .flat_map(|pages| pages.items.iter())
@@ -1616,13 +1607,11 @@ async fn build_tidal_artist_payload_with_depth(
         "ALBUMS": artist_release_status(&albums_res),
         "EPSANDSINGLES": artist_release_status(&eps_res),
         "COMPILATIONS": artist_release_status(&comps_res),
-        "LIVE": artist_release_status(&live_res),
     });
     let all_albums = merge_tidal_artist_album_filters([
         (albums_res.unwrap_or_default().items, "ALBUMS"),
         (eps_res.unwrap_or_default().items, "EPSANDSINGLES"),
         (comps_res.unwrap_or_default().items, "COMPILATIONS"),
-        (live_res.unwrap_or_default().items, "LIVE"),
     ]);
 
     let albums_payload = artist_albums_payload(state, all_albums).await;

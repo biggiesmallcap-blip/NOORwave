@@ -3,7 +3,7 @@ import { PALETTES, paletteById, rgbaCss } from './palettes';
 
 describe('wallpaper palettes', () => {
 	it('includes black and dark colour schemes', () => {
-		const darkIds = ['obsidian', 'carbon', 'blackout', 'nocturne'];
+		const darkIds = ['obsidian', 'carbon', 'blackout', 'nocturne', 'void'];
 
 		for (const id of darkIds) {
 			const palette = paletteById(id as (typeof PALETTES)[number]['id']);

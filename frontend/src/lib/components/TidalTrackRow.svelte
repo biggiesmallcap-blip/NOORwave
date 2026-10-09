@@ -419,8 +419,8 @@
 	}
 
 	.track-row:hover { background: var(--bg-hover); }
-	.track-row.active { background: var(--accent-soft); }
-	.track-row.active .title { color: var(--accent-strong); }
+	.track-row.active { background: var(--playing-soft); }
+	.track-row.active .title { color: var(--playing); }
 	.track-row.disabled {
 		cursor: default;
 		opacity: 0.62;
@@ -493,7 +493,7 @@
 	}
 	.eq span {
 		width: 3px;
-		background: var(--accent-strong);
+		background: var(--playing);
 		animation: eq-bounce 0.9s infinite ease-in-out;
 		border-radius: 2px;
 	}

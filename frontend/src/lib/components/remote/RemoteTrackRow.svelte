@@ -180,7 +180,7 @@
 	}
 
 	.remote-track-row.current {
-		background: color-mix(in oklab, var(--accent) 12%, transparent);
+		background: var(--playing-soft);
 		border-radius: 10px;
 	}
 
@@ -198,7 +198,7 @@
 	}
 
 	.remote-track-row.current .remote-track-button {
-		color: var(--accent);
+		color: var(--playing);
 	}
 
 	.remote-track-button:active {
@@ -236,14 +236,14 @@
 	}
 
 	.remote-track-row.current .remote-track-index {
-		color: var(--accent);
+		color: var(--playing);
 	}
 
 	.remote-track-now-dot {
 		width: 8px;
 		height: 8px;
 		border-radius: 999px;
-		background: var(--accent);
+		background: var(--playing);
 		display: inline-block;
 		animation: remote-track-pulse 1400ms ease-in-out infinite;
 	}

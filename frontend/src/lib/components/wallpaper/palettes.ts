@@ -4,7 +4,7 @@ export type PaletteId = 'clay' | 'iris' | 'sunset' | 'verdant' | 'cosmos' | 'mon
                       | 'ember' | 'arctic' | 'sakura' | 'abyss' | 'citrus'
                       | 'slate' | 'paper' | 'moss' | 'plum' | 'acid' | 'neon'
                       | 'futuro' | 'constr' | 'obsidian' | 'carbon' | 'blackout'
-                      | 'nocturne'
+                      | 'nocturne' | 'void'
                       | 'daylight' | 'linen' | 'meadow' | 'blush';
 
 export type Rgb = [number, number, number];
@@ -455,6 +455,33 @@ export const PALETTES: Palette[] = [
 			c2: [0.08, 0.02, 0.07],
 			c3: [0.44, 0.07, 0.20],
 			c4: [0.18, 0.36, 0.95]
+		}
+	},
+	// Pure black: true #000 ground with neutral greys and a white accent. The
+	// surface tokens live in app.css under [data-palette="void"].
+	{
+		id: 'void',
+		label: 'Pure Black',
+		sublabel: 'True black / white / grey',
+		ui: {
+			accent: '#ffffff',
+			accentStrong: '#ffffff',
+			accentSoft: 'rgba(255, 255, 255, 0.10)',
+			accentLine: 'rgba(255, 255, 255, 0.24)',
+			accentGlow: 'rgba(255, 255, 255, 0.06)'
+		},
+		lightUi: {
+			accent: '#000000',
+			accentStrong: '#000000',
+			accentSoft: 'rgba(0, 0, 0, 0.07)',
+			accentLine: 'rgba(0, 0, 0, 0.22)',
+			accentGlow: 'rgba(0, 0, 0, 0.08)'
+		},
+		shader: {
+			c1: [0.00, 0.00, 0.00],
+			c2: [0.04, 0.04, 0.04],
+			c3: [0.16, 0.16, 0.16],
+			c4: [0.42, 0.42, 0.42]
 		}
 	},
 	// Light-mode-tuned schemes: airy wallpaper bases (high c1) and accents picked
