@@ -10,6 +10,24 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### radio: TIDAL track-mix lane
+
+TIDAL's per-track mix ("Track Radio") would be a strong fourth candidate lane
+for song radio. Needs the TRACK_MIX id parsed from track payloads
+(services/tidal/client.rs has get_mix_tracks but no track-mix lookup), a lane
+weight per blend in services/radio.rs::RadioBlend::weights, and a live check
+against the TIDAL API; it was left out of the offline recommendation pass.
+Spawned by: recommendation audit phase 5
+
+### discovery: Last.fm tags for external candidates
+
+external_track_candidates.genre_tags_json is empty for Last.fm candidates, so
+the genre gate and the trainer's genre tokens cannot use them. Fetch
+track.getTopTags (or artist.getTopTags, cached per artist) during the external
+refresh in services/learning.rs::refresh_external_provider_candidates, under a
+per-refresh call budget, and store them in genre_tags_json.
+Spawned by: recommendation audit phase 5
+
 ### analytics: day windows compare RFC 3339 started_at as text
 
 listen_history.started_at is RFC 3339 ("2026-10-07T03:54:43...+00:00") while
@@ -21,19 +39,6 @@ analytics queries in db/queries.rs (get_genre_heat_filtered,
 get_listen_activity, get_genre_cohorts_filtered, get_genre_evolution) still
 compare text.
 Spawned by: recommendation audit phase 1 (L3 scope)
-
-### recommendations: audit phases 2 to 5
-
-Phase 1 fixed the data layer (behavior hash, genre branch, metadata proxy,
-track_similarity, activation gate). Still open: DJ fit as a bounded multiplier
-on relevance with spacing applied last (H1), automix fallback score math (H5),
-one key and tempo helper (M2), one candidate gate before insert and after
-pending resolution with version collapse (M6), merged automix paths (H2), skip
-semantics (M5), sighting-driven external picks and Include New (H3, M7),
-session anchor and radio continuation (M4), distance-based blends (M1), and new
-signals (session PMI, Last.fm edges, TIDAL mixes, external genres, DSP
-coverage) with an offline next-track replay harness.
-Spawned by: recommendation audit phase 1
 
 ### design: system adoption (remaining after the October 2026 audit)
 
@@ -714,15 +719,6 @@ services/discovery_ranking.rs::shape_score improves ranking; measure it with
 the next-track replay harness (recommendation audit phase 5).
 Spawned by: seed-branch discovery overhaul 2026-07-05
 
-### discovery: populate TasteVector.energy_pref / bpm_pref and use in m_taste
-
-smart/taste_vector.rs still carries the Phase 3 placeholder fields
-energy_pref/bpm_pref (allow(dead_code)). build_session_taste in
-discovery_ranking.rs could derive them from liked tracks' DSP rows and the
-taste multiplier could then nudge candidates toward the session's energy/tempo
-preference. Remove the placeholders' allow attributes when done.
-Spawned by: seed-branch discovery overhaul 2026-07-05
-
 ### discovery: era filter lies on compilations; consider original-year backfill
 
 The era filter uses albums.year (the only year data we have). Compilations and
@@ -749,13 +745,6 @@ then emit DiscoverySpaceRefreshed so the existing WS reload merges the Last.fm
 slice. Gate behind a fast_first_paint request flag and measure before
 defaulting on; the visible re-flow on reload is the cost.
 Spawned by: seed-branch discovery overhaul 2026-07-05 (phase 9 deferred)
-
-### discovery: adaptive coherence default from like/skip history
-
-The coherence slider defaults to 0.5. Once enough discovery_feedback rows
-exist per session/user, a small heuristic could pick the starting point (heavy
-skippers of external picks -> more familiar; heavy likers -> more adventurous).
-Spawned by: seed-branch discovery overhaul 2026-07-05
 
 ### a11y: canvas-level keyboard traversal in DiscoverSpace
 
