@@ -10,6 +10,31 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### analytics: day windows compare RFC 3339 started_at as text
+
+listen_history.started_at is RFC 3339 ("2026-10-07T03:54:43...+00:00") while
+the analytics queries compare it with datetime('now', '-N days') output
+("2026-10-07 04:24:43"). On the boundary day the 'T' sorts after the space, so
+each window includes up to one extra day. Recommendation code moved to
+julianday() in the recommendation data-layer pass; db/signals.rs and the
+analytics queries in db/queries.rs (get_genre_heat_filtered,
+get_listen_activity, get_genre_cohorts_filtered, get_genre_evolution) still
+compare text.
+Spawned by: recommendation audit phase 1 (L3 scope)
+
+### recommendations: audit phases 2 to 5
+
+Phase 1 fixed the data layer (behavior hash, genre branch, metadata proxy,
+track_similarity, activation gate). Still open: DJ fit as a bounded multiplier
+on relevance with spacing applied last (H1), automix fallback score math (H5),
+one key and tempo helper (M2), one candidate gate before insert and after
+pending resolution with version collapse (M6), merged automix paths (H2), skip
+semantics (M5), sighting-driven external picks and Include New (H3, M7),
+session anchor and radio continuation (M4), distance-based blends (M1), and new
+signals (session PMI, Last.fm edges, TIDAL mixes, external genres, DSP
+coverage) with an offline next-track replay harness.
+Spawned by: recommendation audit phase 1
+
 ### design: system adoption (remaining after the October 2026 audit)
 
 The audit's foundations, components, route migrations and its open calls are
@@ -681,11 +706,12 @@ Spawned by: genre galaxy overhaul 2026-07-05
 ### discovery: track_similarity co-occurrence as a v2 ranking signal
 
 The discovery_ranking blend deliberately excludes the track_similarity table
-(co-listen/co-album/co-artist): it is computed on demand and usually stale, so
-ranking on it would quietly prefer whatever was fresh at the last manual run.
-If it gets a freshness guarantee (background recompute or staleness stamp the
-ranker can check), add it as an m_cooccurrence multiplier next to m_genre in
-services/discovery_ranking.rs::shape_score.
+(co-listen/co-album/co-artist). It now rebuilds automatically
+(services/radio_similarity.rs) and, since the recommendation data-layer pass,
+carries real co-listen and per-track genre pairs, so freshness is no longer the
+blocker. Open question: whether an m_cooccurrence multiplier next to m_genre in
+services/discovery_ranking.rs::shape_score improves ranking; measure it with
+the next-track replay harness (recommendation audit phase 5).
 Spawned by: seed-branch discovery overhaul 2026-07-05
 
 ### discovery: populate TasteVector.energy_pref / bpm_pref and use in m_taste
