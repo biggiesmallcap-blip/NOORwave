@@ -67,3 +67,41 @@ SELECT CASE
 FROM listen_history lh
 WHERE julianday(lh.started_at) >= julianday('now', '-90 days')
 GROUP BY 1 ORDER BY listens DESC;
+
+SELECT '8. next-track replay, completed transitions, last 30 days' AS section;
+WITH t AS (
+    SELECT lh.transition_from_track_id AS prev, lh.track_id AS next
+    FROM listen_history lh
+    WHERE lh.transition_from_track_id IS NOT NULL
+      AND lh.transition_from_track_id != lh.track_id
+      AND lh.completed = 1
+      AND julianday(lh.started_at) >= julianday('now', '-30 days')
+),
+m AS (SELECT id FROM embedding_models WHERE is_active = 1)
+SELECT COUNT(*) AS transitions,
+       round(100.0 * SUM(EXISTS(SELECT 1 FROM track_neighbors n, m
+                                 WHERE n.model_id = m.id AND n.track_id = t.prev
+                                   AND n.neighbor_track_id = t.next AND n.rank <= 10))
+             / MAX(COUNT(*), 1), 2) AS hit_at_10_pct,
+       round(100.0 * SUM(EXISTS(SELECT 1 FROM track_neighbors n, m
+                                 WHERE n.model_id = m.id AND n.track_id = t.prev
+                                   AND n.neighbor_track_id = t.next AND n.rank <= 50))
+             / MAX(COUNT(*), 1), 2) AS hit_at_50_pct
+FROM t;
+
+SELECT '9. repeat within 24 h by source, last 90 days' AS section;
+SELECT CASE
+         WHEN lh.source LIKE 'automix%' THEN 'automix'
+         WHEN lh.source LIKE 'radio%' THEN 'radio'
+         ELSE COALESCE(lh.source, 'manual')
+       END AS src,
+       COUNT(*) AS listens,
+       round(100.0 * SUM(EXISTS(
+           SELECT 1 FROM listen_history p
+           WHERE p.track_id = lh.track_id AND p.id != lh.id
+             AND julianday(p.started_at) BETWEEN julianday(lh.started_at) - 1
+                                             AND julianday(lh.started_at)
+       )) / COUNT(*), 1) AS repeat_24h_pct
+FROM listen_history lh
+WHERE julianday(lh.started_at) >= julianday('now', '-90 days')
+GROUP BY 1 ORDER BY listens DESC;
