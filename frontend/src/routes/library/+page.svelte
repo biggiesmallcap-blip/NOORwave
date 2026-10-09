@@ -2834,7 +2834,7 @@
 
 	.home-track-row:hover { background: var(--bg-hover); }
 
-	.home-track-row.playing .ht-title { color: var(--accent-strong); }
+	.home-track-row.playing .ht-title { color: var(--playing); }
 
 	/* Recent tracks on the landing read as two columns on wide content, so ten
 	   tracks take five rows instead of a long single column. */
@@ -2993,8 +2993,8 @@
 
 	.library-mode-pill {
 		color: var(--text-primary);
-		background: rgba(124, 128, 255, 0.12);
-		border-color: rgba(124, 128, 255, 0.22);
+		background: var(--accent-soft);
+		border-color: var(--accent-line);
 	}
 
 	.library-hero-subtitle {
@@ -3365,7 +3365,7 @@
 	}
 
 	.detail-track-row.playing {
-		color: var(--accent);
+		color: var(--playing);
 	}
 
 	.detail-track-row.active {
@@ -4148,7 +4148,7 @@
 	}
 
 	.track-row.playing {
-		color: var(--accent);
+		color: var(--playing);
 	}
 
 	.col-num {
@@ -4225,7 +4225,7 @@
 	}
 
 	.playing-indicator {
-		color: var(--accent);
+		color: var(--playing);
 		font-size: var(--font-size-xs);
 	}
 

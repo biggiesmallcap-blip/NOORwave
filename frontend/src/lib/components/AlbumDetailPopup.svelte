@@ -625,7 +625,7 @@
 		background: var(--bg-hover);
 	}
 	.popup-track-row.playing {
-		background: var(--accent-soft);
+		background: var(--playing-soft);
 	}
 
 	.popup-track-index {
@@ -660,7 +660,7 @@
 		white-space: nowrap;
 	}
 	.popup-track-row.playing .popup-track-title {
-		color: var(--accent-strong);
+		color: var(--playing);
 		font-weight: var(--font-weight-semibold, 600);
 	}
 

@@ -2537,6 +2537,19 @@
 			var(--right-panel-bg);
 	}
 
+	/* Pure black is a flat ground: no shader, no frosted scrims. */
+	:global([data-palette="void"][data-theme="dark"]) .wallpaper-layer:not(.onboarding-wallpaper) {
+		display: none;
+	}
+
+	:global([data-palette="void"][data-theme="dark"]) .app-shell.has-wallpaper .sidebar,
+	:global([data-palette="void"][data-theme="dark"]) .app-shell.has-wallpaper .workspace,
+	:global([data-palette="void"][data-theme="dark"]) .app-shell.has-wallpaper .now-playing-panel {
+		background: #000;
+		backdrop-filter: none;
+		-webkit-backdrop-filter: none;
+	}
+
 	:global([data-palette="clay"]) .app-shell.has-wallpaper .sidebar {
 		background: var(--material-grain), var(--sidebar-bg);
 	}
@@ -3506,12 +3519,12 @@
 	}
 
 	.queue-row.active .queue-title {
-		color: var(--accent-strong);
+		color: var(--playing);
 	}
 
 	.queue-row.active {
-		border-color: var(--accent-line);
-		background: var(--accent-soft);
+		border-color: color-mix(in srgb, var(--playing) 28%, transparent);
+		background: var(--playing-soft);
 	}
 
 	.queue-row.active::before {
@@ -3522,7 +3535,7 @@
 		bottom: 10px;
 		width: 2px;
 		border-radius: 2px;
-		background: var(--accent);
+		background: var(--playing);
 	}
 
 	.queue-row.played {
@@ -4847,13 +4860,13 @@
 	}
 
 	.pin-digit.filled {
-		background: rgba(124, 128, 255, 0.12);
-		border-color: rgba(124, 128, 255, 0.45);
+		background: var(--accent-soft);
+		border-color: var(--accent-line);
 	}
 
 	.pin-digit.active {
-		border-color: rgba(124, 128, 255, 0.8);
-		box-shadow: 0 0 0 3px rgba(124, 128, 255, 0.15);
+		border-color: var(--accent);
+		box-shadow: 0 0 0 3px var(--accent-soft);
 	}
 
 	.pin-hidden-input {

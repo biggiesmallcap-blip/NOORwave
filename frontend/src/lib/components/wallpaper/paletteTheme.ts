@@ -53,9 +53,10 @@ export function applyPaletteTheme(root: ThemeRoot, id: PaletteId, mode: 'dark' |
 	root.style.setProperty('--accent-soft', ui.accentSoft);
 	root.style.setProperty('--accent-line', ui.accentLine);
 	root.style.setProperty('--accent-glow', ui.accentGlow);
-	// Parchment should keep its grain visible instead of taking on a bright haze.
-	const clay = palette.id === 'clay';
-	root.style.setProperty('--atlas-haze-a', rgbaCss(palette.shader.c2, clay ? 0.04 : 0.18));
-	root.style.setProperty('--atlas-haze-b', rgbaCss(palette.shader.c3, clay ? 0.025 : 0.13));
-	root.style.setProperty('--atlas-haze-c', rgbaCss(palette.shader.c4, clay ? 0.015 : 0.10));
+	// Parchment should keep its grain visible instead of taking on a bright haze;
+	// pure black takes none at all.
+	const haze = palette.id === 'clay' ? [0.04, 0.025, 0.015] : palette.id === 'void' ? [0, 0, 0] : [0.18, 0.13, 0.10];
+	root.style.setProperty('--atlas-haze-a', rgbaCss(palette.shader.c2, haze[0]));
+	root.style.setProperty('--atlas-haze-b', rgbaCss(palette.shader.c3, haze[1]));
+	root.style.setProperty('--atlas-haze-c', rgbaCss(palette.shader.c4, haze[2]));
 }
