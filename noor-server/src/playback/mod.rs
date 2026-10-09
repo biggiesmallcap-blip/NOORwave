@@ -1,4 +1,5 @@
 pub mod automix;
+pub mod candidate_gate;
 pub mod decode;
 pub mod dj_engine;
 pub mod dj_lookahead;
