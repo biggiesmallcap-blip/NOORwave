@@ -3837,6 +3837,47 @@ async fn discovery_feedback_rejects_actions_outside_allowlist() {
 }
 
 #[tokio::test]
+async fn discovery_feedback_summary_counts_recent_likes_and_skips() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn| {
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id) VALUES (1, 'Seed', 1), (2, 'Pick', 1)",
+            [],
+        )?;
+        conn.execute_batch(
+            "INSERT INTO discovery_feedback (seed_track_id, candidate_track_id, action, surface, created_at) VALUES
+                (1, 2, 'like', 'discover_space', datetime('now', '-1 days')),
+                (1, 2, 'like', 'discover_space', datetime('now', '-2 days')),
+                (1, 2, 'skip', 'discover_space', datetime('now', '-3 days')),
+                (1, 2, 'dismiss', 'discover_space', datetime('now', '-4 days')),
+                (1, 2, 'like', 'discover_space', datetime('now', '-60 days'));",
+        )?;
+        Ok(())
+    })
+    .expect("seed feedback");
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/discovery/feedback/summary")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["likes"], 2);
+    assert_eq!(json["skips"], 2);
+}
+
+#[tokio::test]
 async fn not_for_me_round_trips_and_rejects_unknown_kinds() {
     let db = fresh_migrated_db();
     let send = |method: &'static str, body: &'static str| {

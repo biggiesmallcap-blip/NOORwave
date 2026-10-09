@@ -945,6 +945,10 @@ pub fn api_routes(state: SharedState) -> Router {
             post(discovery_routes::record_discovery_feedback),
         )
         .route(
+            "/api/discovery/feedback/summary",
+            get(discovery_routes::discovery_feedback_summary),
+        )
+        .route(
             "/api/recommendations/not-for-me",
             post(discovery_routes::set_not_for_me).delete(discovery_routes::clear_not_for_me),
         )

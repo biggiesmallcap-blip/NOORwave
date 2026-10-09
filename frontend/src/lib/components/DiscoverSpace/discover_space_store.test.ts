@@ -12,6 +12,7 @@ vi.mock('$lib/api/client', () => ({
 import {
 	addBlendSeed,
 	clearBlend,
+	suggestedCoherence,
 	discoverSpaceStore,
 	loadBlendSpace,
 	loadSpace,
@@ -339,5 +340,17 @@ describe('loadSpace', () => {
 		expect(state.blendSeeds).toHaveLength(0);
 		expect(state.blendHealth).toBeNull();
 		expect(state.nodes).toHaveLength(0);
+	});
+});
+
+describe('suggested coherence', () => {
+	test('stays at the default without enough votes', () => {
+		expect(suggestedCoherence({ likes: 3, skips: 2 })).toBe(0.5);
+	});
+
+	test('heavy likers start adventurous, heavy skippers familiar', () => {
+		expect(suggestedCoherence({ likes: 20, skips: 0 })).toBe(0.3);
+		expect(suggestedCoherence({ likes: 0, skips: 20 })).toBe(0.7);
+		expect(suggestedCoherence({ likes: 10, skips: 10 })).toBeCloseTo(0.5);
 	});
 });

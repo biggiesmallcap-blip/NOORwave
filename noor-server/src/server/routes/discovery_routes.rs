@@ -872,6 +872,29 @@ pub(super) async fn get_discovery_safety(
     })))
 }
 
+/// Likes and skips (dismiss counts as a skip) of discovery picks over the
+/// last 30 days, across sessions. The Discovery Space uses it to pick a
+/// starting coherence: heavy likers start more adventurous, heavy skippers
+/// more familiar.
+pub(super) async fn discovery_feedback_summary(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let db = state.read().await.db.clone();
+    let (likes, skips): (i64, i64) = db
+        .with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT COALESCE(SUM(action = 'like'), 0),
+                        COALESCE(SUM(action IN ('skip', 'dismiss')), 0)
+                 FROM discovery_feedback
+                 WHERE julianday(created_at) >= julianday('now', '-30 days')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({ "likes": likes, "skips": skips, "days": 30 })))
+}
+
 #[derive(Debug, Deserialize)]
 pub(super) struct NotForMeRequest {
     kind: String,

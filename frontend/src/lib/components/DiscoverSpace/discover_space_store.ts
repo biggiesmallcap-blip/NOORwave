@@ -87,6 +87,44 @@ export const discoverSpaceStore = writable<DiscoverSpaceState>({
 const CONTROLS_STORAGE_KEY = 'discoverspace.controls.v1';
 const SESSION_STORAGE_KEY = 'discoverspace.session.v1';
 const BRANCH_STORAGE_KEY = 'discoverspace.branch.v1';
+// Starting coherence learned from recent likes and skips. localStorage (not
+// session) so the next visit starts there; a session's own slider wins.
+const SUGGESTED_COHERENCE_KEY = 'discoverspace.suggested_coherence.v1';
+
+/**
+ * Starting coherence from the last 30 days of discovery feedback. Heavy
+ * likers start more adventurous, heavy skippers more familiar; under ten
+ * votes there is not enough signal and the default 0.5 stands.
+ */
+export function suggestedCoherence(summary: { likes: number; skips: number }): number {
+	const total = summary.likes + summary.skips;
+	if (total < 10) return 0.5;
+	const likeShare = summary.likes / total;
+	return Math.min(0.7, Math.max(0.3, 0.75 - 0.5 * likeShare));
+}
+
+function readSuggestedCoherence(): number | null {
+	try {
+		const raw = localStorage.getItem(SUGGESTED_COHERENCE_KEY);
+		const value = raw === null ? NaN : Number(raw);
+		return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : null;
+	} catch {
+		return null;
+	}
+}
+
+/** Refresh the suggestion in the background for the next visit. */
+export async function refreshSuggestedCoherence(): Promise<void> {
+	try {
+		const response = await authFetch(`${getApiBase()}/api/discovery/feedback/summary`);
+		if (!response.ok) return;
+		const summary = (await response.json()) as { likes?: number; skips?: number };
+		const value = suggestedCoherence({ likes: summary.likes ?? 0, skips: summary.skips ?? 0 });
+		localStorage.setItem(SUGGESTED_COHERENCE_KEY, String(value));
+	} catch {
+		// Offline or storage full: the default stands.
+	}
+}
 
 function persistBranch(branchPath: BranchStep[], lockedSeedId: number | null): void {
 	try {
@@ -105,7 +143,7 @@ function persistControls(coherence: number, filters: DiscoverFilters): void {
 }
 
 export function hydrateDiscoverControls(): void {
-	let coherence = 0.5;
+	let coherence = readSuggestedCoherence() ?? 0.5;
 	let filters: DiscoverFilters = {};
 	let sessionId = '';
 	let branchPath: BranchStep[] = [];
