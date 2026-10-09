@@ -253,7 +253,19 @@ fn taste_multiplier(taste: &TasteVector, cand: &CandidateFeatures) -> f64 {
     }
     let g_term = 0.06 * g_pos - 0.09 * g_neg;
 
-    let mut m = (1.0 + a_term + g_term).clamp(0.6, 1.3);
+    // Nudge toward the energy and tempo of what was liked: +-5% each,
+    // neutral when either side is unknown.
+    let mut dsp = 1.0;
+    if let (Some(pref), Some(energy)) = (taste.energy_pref, cand.energy) {
+        let closeness = 1.0 - ((energy - f64::from(pref)).abs() / 0.3).min(1.0);
+        dsp *= 0.95 + 0.10 * closeness;
+    }
+    if let Some(delta) = tempo_delta(taste.bpm_pref.map(f64::from), cand.bpm) {
+        let closeness = 1.0 - (delta / 0.15).min(1.0);
+        dsp *= 0.95 + 0.10 * closeness;
+    }
+
+    let mut m = ((1.0 + a_term + g_term) * dsp).clamp(0.6, 1.3);
     if taste.skipped_track_ids.contains(&cand.track_id) {
         m *= 0.2;
     }
@@ -423,6 +435,9 @@ pub struct FeedbackRow {
     pub action: FeedbackAction,
     pub artist_id: Option<i64>,
     pub genres: Vec<String>,
+    /// DSP of the track the feedback is about; None when unanalyzed.
+    pub energy: Option<f64>,
+    pub bpm: Option<f64>,
 }
 
 /// The three feedback actions the discovery surface records.
@@ -453,6 +468,16 @@ impl FeedbackAction {
 /// type - no fork.
 pub fn build_session_taste(rows: &[FeedbackRow]) -> TasteVector {
     let mut tv = TasteVector::default();
+    // Energy and tempo the listener liked: the mean over liked, analyzed rows.
+    let mean = |values: Vec<f64>| {
+        (!values.is_empty()).then(|| (values.iter().sum::<f64>() / values.len() as f64) as f32)
+    };
+    let liked = rows
+        .iter()
+        .filter(|row| row.action == FeedbackAction::Like)
+        .collect::<Vec<_>>();
+    tv.energy_pref = mean(liked.iter().filter_map(|row| row.energy).collect());
+    tv.bpm_pref = mean(liked.iter().filter_map(|row| row.bpm).collect());
     for row in rows {
         match row.action {
             FeedbackAction::Like => {
@@ -674,12 +699,43 @@ mod tests {
     }
 
     #[test]
+    fn taste_leans_toward_liked_energy_and_tempo() {
+        let liked = build_session_taste(&[FeedbackRow {
+            candidate_track_id: 100,
+            action: FeedbackAction::Like,
+            artist_id: None,
+            genres: Vec::new(),
+            energy: Some(0.8),
+            bpm: Some(124.0),
+        }]);
+        assert_eq!(liked.energy_pref, Some(0.8));
+        let near = CandidateFeatures {
+            track_id: 201,
+            energy: Some(0.8),
+            bpm: Some(62.0), // half time of 124
+            ..bare_candidate(1.0)
+        };
+        let far = CandidateFeatures {
+            track_id: 202,
+            energy: Some(0.2),
+            bpm: Some(90.0),
+            ..bare_candidate(1.0)
+        };
+        let unknown = bare_candidate(1.0);
+        assert!(taste_multiplier(&liked, &near) > 1.0);
+        assert!(taste_multiplier(&liked, &far) < 1.0);
+        assert!((taste_multiplier(&liked, &unknown) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn taste_multiplier_asymmetry_and_hard_skip() {
         let liked = build_session_taste(&[FeedbackRow {
             candidate_track_id: 100,
             action: FeedbackAction::Like,
             artist_id: Some(42),
             genres: vec!["house".to_string()],
+            energy: None,
+            bpm: None,
         }]);
         let cand = CandidateFeatures {
             track_id: 200,
@@ -696,6 +752,8 @@ mod tests {
             action: FeedbackAction::Skip,
             artist_id: Some(42),
             genres: vec!["house".to_string()],
+            energy: None,
+            bpm: None,
         }]);
         let m2 = taste_multiplier(&skipped, &cand);
         assert!(m2 < 0.3, "skipped track should be suppressed, got {m2}");
@@ -858,18 +916,24 @@ mod tests {
                 action: FeedbackAction::Like,
                 artist_id: Some(10),
                 genres: vec!["House".to_string()],
+                energy: None,
+                bpm: None,
             },
             FeedbackRow {
                 candidate_track_id: 2,
                 action: FeedbackAction::Skip,
                 artist_id: Some(20),
                 genres: vec!["Metal".to_string()],
+                energy: None,
+                bpm: None,
             },
             FeedbackRow {
                 candidate_track_id: 3,
                 action: FeedbackAction::Dismiss,
                 artist_id: Some(30),
                 genres: vec!["Jazz".to_string()],
+                energy: None,
+                bpm: None,
             },
         ]);
         assert!(tv.artist_affinity.get(&10).unwrap().pos > 0.0);

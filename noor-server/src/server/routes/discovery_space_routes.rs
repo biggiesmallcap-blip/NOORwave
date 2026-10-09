@@ -1053,6 +1053,9 @@ pub(super) async fn rerank_discovery_space(
                     let Some(action) = ranking::FeedbackAction::parse(&action) else {
                         continue;
                     };
+                    let dsp = queries::get_audio_dsp_features(conn, candidate_track_id)
+                        .ok()
+                        .flatten();
                     taste_rows.push(ranking::FeedbackRow {
                         candidate_track_id,
                         action,
@@ -1061,6 +1064,8 @@ pub(super) async fn rerank_discovery_space(
                             .get(&candidate_track_id)
                             .cloned()
                             .unwrap_or_default(),
+                        energy: dsp.as_ref().and_then(|features| features.energy),
+                        bpm: dsp.as_ref().and_then(|features| features.bpm),
                     });
                 }
             }
