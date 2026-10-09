@@ -872,6 +872,60 @@ pub(super) async fn get_discovery_safety(
     })))
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct NotForMeRequest {
+    kind: String,
+    id: i64,
+}
+
+/// Mark a track or artist "Not for me": every recommendation source (automix,
+/// radio, external picks) skips it from then on.
+pub(super) async fn set_not_for_me(
+    State(state): State<SharedState>,
+    Json(payload): Json<NotForMeRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    write_not_for_me(&state, &payload, true).await
+}
+
+/// Undo a "Not for me".
+pub(super) async fn clear_not_for_me(
+    State(state): State<SharedState>,
+    Json(payload): Json<NotForMeRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    write_not_for_me(&state, &payload, false).await
+}
+
+async fn write_not_for_me(
+    state: &SharedState,
+    payload: &NotForMeRequest,
+    not_for_me: bool,
+) -> Result<Json<Value>, StatusCode> {
+    if !matches!(payload.kind.as_str(), "track" | "artist") || payload.id <= 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let db = state.read().await.db.clone();
+    db.with_conn(|conn| {
+        if not_for_me {
+            conn.execute(
+                "INSERT OR IGNORE INTO recommendation_feedback (kind, entity_id) VALUES (?1, ?2)",
+                rusqlite::params![payload.kind, payload.id],
+            )?;
+        } else {
+            conn.execute(
+                "DELETE FROM recommendation_feedback WHERE kind = ?1 AND entity_id = ?2",
+                rusqlite::params![payload.kind, payload.id],
+            )?;
+        }
+        Ok(())
+    })
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({
+        "kind": payload.kind,
+        "id": payload.id,
+        "not_for_me": not_for_me,
+    })))
+}
+
 pub(super) async fn record_discovery_feedback(
     State(state): State<SharedState>,
     Json(payload): Json<DiscoveryFeedbackRequest>,

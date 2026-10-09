@@ -5,6 +5,7 @@ import {
 	shuffleArtist,
 	startArtistRadio,
 } from '$lib/stores/player';
+import { notForMeMenuItem } from '$lib/player/not_for_me';
 
 export interface ArtistLike {
 	id?: number | null;
@@ -86,6 +87,11 @@ export function buildArtistMenu(artist: ArtistLike, options: BuildArtistMenuOpti
 			icon: '＋',
 			submenu: options.addToPlaylistSubmenu,
 		});
+	}
+
+	if (localId != null) {
+		if (items.length > 0) items.push(SEPARATOR);
+		items.push(notForMeMenuItem('artist', localId, 'Not for me'));
 	}
 
 	if (options.includeRemove && options.onRemove) {

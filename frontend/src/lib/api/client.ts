@@ -3394,6 +3394,18 @@ export const api = {
 		});
 	},
 
+	/** Mark (or unmark) a track or artist "Not for me" for every recommendation. */
+	setNotForMe(kind: 'track' | 'artist', id: number, notForMe: boolean) {
+		return fetchApi<{ kind: string; id: number; not_for_me: boolean }>(
+			'/api/recommendations/not-for-me',
+			undefined,
+			{
+				method: notForMe ? 'POST' : 'DELETE',
+				body: JSON.stringify({ kind, id }),
+			}
+		);
+	},
+
 	recordDiscoveryFeedback(
 		seed_track_id: number,
 		candidate_track_id: number,

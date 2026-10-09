@@ -3837,6 +3837,54 @@ async fn discovery_feedback_rejects_actions_outside_allowlist() {
 }
 
 #[tokio::test]
+async fn not_for_me_round_trips_and_rejects_unknown_kinds() {
+    let db = fresh_migrated_db();
+    let send = |method: &'static str, body: &'static str| {
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+            db.clone(),
+        ))));
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri("/api/recommendations/not-for-me")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+    };
+    let count = || {
+        db.with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM recommendation_feedback WHERE kind = 'artist' AND entity_id = 7",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?)
+        })
+        .unwrap()
+    };
+
+    assert_eq!(
+        send("POST", r#"{"kind":"artist","id":7}"#).await,
+        StatusCode::OK
+    );
+    assert_eq!(count(), 1);
+    assert_eq!(
+        send("DELETE", r#"{"kind":"artist","id":7}"#).await,
+        StatusCode::OK
+    );
+    assert_eq!(count(), 0);
+    assert_eq!(
+        send("POST", r#"{"kind":"album","id":7}"#).await,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
 async fn discovery_rerank_suppresses_skipped_tracks_via_session_taste() {
     let db = fresh_migrated_db();
     db.with_conn(|conn| {
