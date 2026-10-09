@@ -430,7 +430,12 @@ export class QueryCache {
 			if (
 				options.persist.maxAgeMs !== undefined &&
 				this.now() - parsed.lastUpdated > options.persist.maxAgeMs
-			) return;
+			) {
+				// Expired: drop it rather than leave it holding storage quota until
+				// the next successful fetch overwrites it (which may never come).
+				storage.removeItem(persistKey(entry.key, options.persist));
+				return;
+			}
 			entry.store.set({
 				data: parsed.data,
 				loading: false,

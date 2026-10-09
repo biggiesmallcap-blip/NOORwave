@@ -35,6 +35,10 @@
 		accent?: ChartMuralAccent;
 		loading?: boolean;
 		loadingLabel?: string;
+		/** Background revalidation: a thin bar, content stays as is. */
+		refreshing?: boolean;
+		/** Showing the previous list while another one loads: dimmed, not blanked. */
+		stale?: boolean;
 		onSelect?: (index: number) => void;
 		onJump?: (delta: number) => void;
 		onPlay?: () => void | Promise<void>;
@@ -56,6 +60,8 @@
 		accent = 'accent',
 		loading = false,
 		loadingLabel = 'Loading chart mural',
+		refreshing = false,
+		stale = false,
 		onSelect = () => {},
 		onJump = () => {},
 		onPlay = () => {},
@@ -83,11 +89,26 @@
 </script>
 
 {#if loading}
-	<div class="chart-mural-loading">{loadingLabel}</div>
+	<!-- Skeleton in the mural's own geometry (STYLING.md "States"), so the
+	     page does not jump when the art lands. -->
+	<div class="chart-mural-skeleton" role="status" aria-label={loadingLabel}>
+		<div class="chart-mural-skeleton-tiles" aria-hidden="true">
+			{#each Array.from({ length: 10 }) as _, i (i)}
+				<span style:--idx={i}></span>
+			{/each}
+		</div>
+		<div class="chart-mural-skeleton-copy" aria-hidden="true">
+			<span class="line title"></span>
+			<span class="line sub"></span>
+			<span class="line action"></span>
+		</div>
+	</div>
 {:else if currentItem}
 	<div
 		class="chart-mural"
 		class:accent-lastfm={accent === 'lastfm'}
+		class:stale
+		aria-busy={refreshing || stale || undefined}
 		onmouseenter={() => onPauseChange?.(true)}
 		onmouseleave={() => onPauseChange?.(false)}
 		role="region"
@@ -130,6 +151,9 @@
 			{/each}
 		</div>
 		<div class="chart-mural-shade"></div>
+		{#if refreshing || stale}
+			<div class="chart-mural-progress" aria-hidden="true"></div>
+		{/if}
 		<div class="chart-mural-content">
 			<div class="chart-mural-meta">
 				<h3 class="chart-mural-title">{title}</h3>
@@ -515,16 +539,107 @@
 		stroke-linejoin: round;
 	}
 
-	.chart-mural-loading {
-		display: grid;
-		place-items: center;
-		min-height: clamp(180px, 20vw, 280px);
-		border: 1px solid var(--panel-border);
+	/* Previous list held on screen while the next one loads. */
+	.chart-mural.stale .chart-mural-bg,
+	.chart-mural.stale .chart-mural-content {
+		opacity: 0.55;
+		transition: opacity var(--motion-base);
+	}
+
+	.chart-mural-progress {
+		position: absolute;
+		top: 0;
+		left: 0;
+		right: 0;
+		z-index: calc(var(--z-raised) + 1);
+		height: 2px;
+		overflow: hidden;
+		pointer-events: none;
+	}
+
+	.chart-mural-progress::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		width: 40%;
+		background: var(--accent);
+		animation: chart-mural-indeterminate 1.1s var(--ease-standard) infinite;
+	}
+
+	@keyframes chart-mural-indeterminate {
+		from { transform: translateX(-100%); }
+		to { transform: translateX(250%); }
+	}
+
+	.chart-mural-skeleton {
+		position: relative;
+		min-height: clamp(220px, 24vw, 360px);
 		border-radius: var(--radius-md);
-		background: var(--panel-bg);
-		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-semibold);
+		overflow: hidden;
+		background: var(--bg-surface);
+		/* Held back 150ms so a fast cache or network answer never flashes it. */
+		animation: chart-mural-skeleton-in var(--motion-fast) 150ms both;
+	}
+
+	.chart-mural-skeleton-tiles {
+		position: absolute;
+		inset: 0;
+		display: grid;
+		grid-template-columns: repeat(5, minmax(0, 1fr));
+		grid-template-rows: repeat(2, minmax(0, 1fr));
+		gap: 2px;
+		opacity: 0.6;
+	}
+
+	.chart-mural-skeleton-tiles span,
+	.chart-mural-skeleton-copy .line {
+		background: linear-gradient(90deg, var(--bg-surface) 0%, var(--bg-hover) 50%, var(--bg-surface) 100%);
+		background-size: 200% 100%;
+		animation: chart-mural-shimmer 1.4s ease-in-out infinite;
+		animation-delay: calc(var(--idx, 0) * 60ms);
+	}
+
+	.chart-mural-skeleton-copy {
+		position: absolute;
+		inset: 0 auto 0 var(--space-6);
+		display: flex;
+		flex-direction: column;
+		justify-content: center;
+		gap: var(--space-2);
+		width: min(22rem, 45%);
+	}
+
+	.chart-mural-skeleton-copy .line {
+		display: block;
+		border-radius: 6px;
+		background-color: var(--bg-raised);
+	}
+
+	.chart-mural-skeleton-copy .title { height: 28px; width: 85%; }
+	.chart-mural-skeleton-copy .sub { height: 14px; width: 55%; }
+	.chart-mural-skeleton-copy .action {
+		height: 36px;
+		width: 92px;
+		margin-top: var(--space-3);
+		border-radius: 999px;
+	}
+
+	@keyframes chart-mural-skeleton-in {
+		from { opacity: 0; }
+		to { opacity: 1; }
+	}
+
+	@keyframes chart-mural-shimmer {
+		0% { background-position: 200% 0; }
+		100% { background-position: -200% 0; }
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.chart-mural-skeleton-tiles span,
+		.chart-mural-skeleton-copy .line,
+		.chart-mural-progress::after {
+			animation: none;
+		}
 	}
 
 	@media (max-width: 760px) {
