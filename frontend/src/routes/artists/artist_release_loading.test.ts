@@ -23,7 +23,6 @@ function statuses(single: { failed: boolean; has_more: boolean | null }): Artist
 		ALBUMS: { failed: false, has_more: false },
 		EPSANDSINGLES: single,
 		COMPILATIONS: { failed: false, has_more: false },
-		LIVE: { failed: false, has_more: false },
 	};
 }
 
