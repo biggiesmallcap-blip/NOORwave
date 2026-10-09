@@ -262,6 +262,9 @@ pub struct LiveListenSession {
 const SESSION_GAP_MINUTES: i64 = 30;
 
 const SESSION_FEEDBACK_LIMIT: i64 = 60;
+/// Listens older than this do not describe the current session (after a week
+/// away the last 60 listens were last week's).
+const SESSION_FEEDBACK_MAX_AGE_DAYS: i64 = 3;
 
 #[derive(Debug, Default)]
 pub(crate) struct SessionTasteProfile {
@@ -2294,6 +2297,33 @@ pub fn is_completed_listen(track: &Track, listened_ms: i64) -> bool {
         .unwrap_or(listened_ms >= 240_000)
 }
 
+/// What a listen says about taste. Only an early skip is negative; a partial
+/// play (often a DJ mix-out or a track you moved on from late) says little.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ListenOutcome {
+    Completed,
+    Partial,
+    EarlySkip,
+}
+
+/// Under 30 seconds, or under a quarter of the track, without completing.
+pub(crate) fn classify_listen(
+    completed: bool,
+    listened_ms: i64,
+    duration_ms: Option<i64>,
+) -> ListenOutcome {
+    if completed {
+        return ListenOutcome::Completed;
+    }
+    let under_quarter =
+        duration_ms.is_some_and(|duration| duration > 0 && listened_ms * 4 < duration);
+    if listened_ms < 30_000 || under_quarter {
+        ListenOutcome::EarlySkip
+    } else {
+        ListenOutcome::Partial
+    }
+}
+
 /// Cap a flushed listen-session duration at the track's length when known.
 ///
 /// The session timer accrues wall-clock time while the player is nominally
@@ -2360,15 +2390,27 @@ pub(crate) fn build_session_taste_profile(
     }
 
     let mut stmt = conn.prepare(
-        "SELECT track_id, completed
-         FROM listen_history
-         ORDER BY started_at DESC, id DESC
+        "SELECT lh.track_id, lh.completed, COALESCE(lh.duration_listened_ms, 0), t.duration_ms
+         FROM listen_history lh
+         LEFT JOIN tracks t ON t.id = lh.track_id
+         WHERE julianday(lh.started_at) >= julianday('now', printf('-%d days', ?2))
+         ORDER BY julianday(lh.started_at) DESC, lh.id DESC
          LIMIT ?1",
     )?;
     let feedback_rows = stmt
-        .query_map(params![SESSION_FEEDBACK_LIMIT], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?))
-        })?
+        .query_map(
+            params![SESSION_FEEDBACK_LIMIT, SESSION_FEEDBACK_MAX_AGE_DAYS],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    classify_listen(
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ),
+                ))
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut feedback_tracks = Vec::new();
@@ -2379,11 +2421,17 @@ pub(crate) fn build_session_taste_profile(
     let found_tracks = queue::get_tracks_by_ids(conn, &feedback_track_ids)?;
     let track_map: HashMap<i64, &Track> = found_tracks.iter().map(|t| (t.id, t)).collect();
 
-    for (track_id, completed) in feedback_rows {
+    for (track_id, outcome) in feedback_rows {
         profile.recent_track_ids.insert(track_id);
-        if !completed {
-            profile.skipped_track_ids.insert(track_id);
-        }
+        // Partial plays only mark the track as recent; they carry no taste.
+        let completed = match outcome {
+            ListenOutcome::Completed => true,
+            ListenOutcome::EarlySkip => {
+                profile.skipped_track_ids.insert(track_id);
+                false
+            }
+            ListenOutcome::Partial => continue,
+        };
 
         if let Some(track) = track_map.get(&track_id) {
             feedback_tracks.push((**track).clone());
@@ -2541,6 +2589,53 @@ mod tests {
         // track (observed: 2795 s recorded on a 334 s track).
         assert_eq!(clamp_listened_ms(2_795_000, Some(334_000)), 334_000);
         assert_eq!(clamp_listened_ms(200_000, Some(334_000)), 200_000);
+    }
+
+    #[test]
+    fn classify_listen_separates_early_skips_from_partial_plays() {
+        use ListenOutcome::*;
+        for (completed, listened, duration, expected) in [
+            (true, 200_000, Some(200_000), Completed),
+            (false, 10_000, Some(200_000), EarlySkip),
+            (false, 45_000, Some(200_000), EarlySkip),
+            (false, 60_000, Some(200_000), Partial),
+            (false, 150_000, Some(200_000), Partial),
+            (false, 29_000, None, EarlySkip),
+            (false, 31_000, None, Partial),
+        ] {
+            assert_eq!(
+                classify_listen(completed, listened, duration),
+                expected,
+                "{completed} {listened} {duration:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_taste_treats_partial_plays_as_neutral_and_ignores_old_listens() {
+        let conn = conn();
+        conn.execute_batch(
+            "INSERT INTO listen_history (track_id, started_at, duration_listened_ms, completed) VALUES
+                (2, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '-1 hours'), 10000, 0),
+                (3, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '-2 hours'), 120000, 0),
+                (4, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '-5 days'), 5000, 0);",
+        )
+        .unwrap();
+        let current = queue::get_track_by_id(&conn, 1).unwrap().unwrap();
+
+        let profile = build_session_taste_profile(&conn, &current).unwrap();
+
+        assert!(profile.skipped_track_ids.contains(&2), "early skip");
+        assert!(
+            !profile.skipped_track_ids.contains(&3),
+            "partial play is neutral"
+        );
+        assert!(profile.recent_track_ids.contains(&3));
+        assert!(
+            !profile.recent_track_ids.contains(&4),
+            "older than the window"
+        );
+        assert!(!profile.skipped_track_ids.contains(&4));
     }
 
     #[test]

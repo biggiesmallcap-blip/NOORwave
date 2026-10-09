@@ -6839,6 +6839,11 @@ pub fn get_completion_weighted_listen_edges(
                 END AS completion_weight
             FROM listen_history lh
             JOIN tracks t ON t.id = lh.track_id
+            -- Early skips are not co-listens.
+            WHERE (COALESCE(lh.completed, 0) = 1
+                OR (COALESCE(lh.duration_listened_ms, 0) >= 30000
+                    AND (t.duration_ms IS NULL OR t.duration_ms <= 0
+                         OR COALESCE(lh.duration_listened_ms, 0) * 4 >= t.duration_ms)))
         )
         SELECT
             'listen_history_pair:' || a.id || ':' || b.id,
@@ -6894,6 +6899,11 @@ pub fn get_listen_history_transition_edges(conn: &Connection) -> Result<Vec<Weig
          JOIN tracks t ON t.id = lh.track_id
          WHERE lh.transition_from_track_id IS NOT NULL
            AND lh.transition_from_track_id != lh.track_id
+           -- An early skip (under 30 s or a quarter) is not evidence the two go together.
+           AND (COALESCE(lh.completed, 0) = 1
+                OR (COALESCE(lh.duration_listened_ms, 0) >= 30000
+                    AND (t.duration_ms IS NULL OR t.duration_ms <= 0
+                         OR COALESCE(lh.duration_listened_ms, 0) * 4 >= t.duration_ms)))
          ORDER BY lh.started_at ASC, lh.id ASC",
     )?;
     let rows = stmt
@@ -10282,6 +10292,45 @@ mod tests {
         assert_eq!(rows[0].to_track_id, 2);
         assert!((rows[0].weight - 0.5).abs() < 1e-9);
         assert_eq!(rows[0].source.as_deref(), Some("manual"));
+    }
+
+    #[test]
+    fn listen_history_edges_leave_out_early_skips() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("artist");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, duration_ms)
+             VALUES (1, 'Before', 1, 200000), (2, 'Kept', 1, 200000), (3, 'Skipped', 1, 200000)",
+            [],
+        )
+        .expect("tracks");
+        conn.execute(
+            "INSERT INTO listen_history
+                (id, track_id, started_at, duration_listened_ms, completed, session_id, transition_from_track_id)
+             VALUES
+                (1, 1, '2026-01-01T00:00:00+00:00', 200000, 1, 's1', NULL),
+                (2, 2, '2026-01-01T00:04:00+00:00', 120000, 0, 's1', 1),
+                (3, 3, '2026-01-01T00:06:00+00:00', 8000, 0, 's1', 2)",
+            [],
+        )
+        .expect("listens");
+
+        let transitions = get_listen_history_transition_edges(&conn).expect("transitions");
+        assert_eq!(
+            transitions
+                .iter()
+                .map(|row| (row.from_track_id, row.to_track_id))
+                .collect::<Vec<_>>(),
+            vec![(1, 2)]
+        );
+        let pairs = get_completion_weighted_listen_edges(&conn, 45).expect("pairs");
+        assert!(
+            pairs
+                .iter()
+                .all(|row| row.to_track_id != 3 && row.from_track_id != 3)
+        );
     }
 
     #[test]
