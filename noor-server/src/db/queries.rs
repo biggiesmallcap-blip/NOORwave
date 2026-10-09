@@ -3772,21 +3772,31 @@ pub fn get_genre_diverse_candidates(
     if limit == 0 {
         return Ok(Vec::new());
     }
+    // One track per artist sharing a seed genre. Track and artist order come
+    // from a stable per-seed hash, not the lowest ids, so different seeds widen
+    // with different tracks instead of the same old rows every time.
     let sql = format!(
-        "SELECT {proj}
-         FROM tracks t
-         LEFT JOIN artists a ON t.artist_id = a.id
-         LEFT JOIN albums al ON t.album_id = al.id
-         WHERE t.id IN (
-             SELECT MIN(t2.id)
+        "WITH pool AS (
+             SELECT DISTINCT t2.id, t2.artist_id,
+                    (((t2.id * 2654435761) % 1000003) * ((?1 * 40503) % 1000003 + 1)) % 1000003 AS k
              FROM tracks t2
              JOIN track_genres tg ON tg.track_id = t2.id
              WHERE tg.genre_id IN (
                  SELECT genre_id FROM track_genres WHERE track_id = ?1
              )
-             GROUP BY t2.artist_id
+               AND t2.id != ?1
+         ),
+         pick AS (
+             SELECT id, k, ROW_NUMBER() OVER (PARTITION BY artist_id ORDER BY k, id) AS rn
+             FROM pool
          )
-         ORDER BY t.id
+         SELECT {proj}
+         FROM pick
+         JOIN tracks t ON t.id = pick.id
+         LEFT JOIN artists a ON t.artist_id = a.id
+         LEFT JOIN albums al ON t.album_id = al.id
+         WHERE pick.rn = 1
+         ORDER BY pick.k, t.id
          LIMIT {limit}",
         proj = track_projection("a"),
     );
@@ -8967,17 +8977,29 @@ mod tests {
         .expect("genres");
         conn.execute(
             "INSERT INTO tracks (id, title, artist_id, duration_ms) VALUES
-                (10,'seed',9,1000),
-                (101,'a-low',1,1000),(102,'a-high',1,1000),
+                (10,'seed',9,1000),(11,'other-seed',9,1000),
                 (201,'b-low',2,1000),(202,'b-high',2,1000),
                 (301,'c-only',3,1000),
                 (401,'off-genre',9,1000)",
             [],
         )
         .expect("tracks");
+        // Artist 1 has twenty tracks in the shared genre.
+        for id in 101..=120 {
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, duration_ms) VALUES (?1, 'a', 1, 1000)",
+                params![id],
+            )
+            .expect("artist 1 track");
+            conn.execute(
+                "INSERT INTO track_genres (track_id, genre_id) VALUES (?1, 1)",
+                params![id],
+            )
+            .expect("artist 1 genre");
+        }
         conn.execute(
             "INSERT INTO track_genres (track_id, genre_id) VALUES
-                (10,1),(101,1),(102,1),(201,1),(202,1),(301,1),(401,2)",
+                (10,1),(11,1),(201,1),(202,1),(301,1),(401,2)",
             [],
         )
         .expect("track_genres");
@@ -8987,11 +9009,22 @@ mod tests {
         // One representative per artist that shares genre 1 - never two from one.
         assert_eq!(out.len(), artist_ids.len(), "no artist appears twice");
         assert!(artist_ids.contains(&1) && artist_ids.contains(&2) && artist_ids.contains(&3));
-        // The representative is the lowest-id track per artist.
-        assert!(out.iter().any(|t| t.id == 101) && !out.iter().any(|t| t.id == 102));
-        assert!(out.iter().any(|t| t.id == 201) && !out.iter().any(|t| t.id == 202));
-        // A track tagged only with a different genre must not leak in.
+        // The seed never widens to itself, and off-genre tracks never leak in.
+        assert!(!out.iter().any(|t| t.id == 10));
         assert!(!out.iter().any(|t| t.id == 401));
+        // Stable for a seed, but a different seed samples differently.
+        let again = get_genre_diverse_candidates(&conn, 10, 100).expect("query");
+        assert_eq!(
+            out.iter().map(|t| t.id).collect::<Vec<_>>(),
+            again.iter().map(|t| t.id).collect::<Vec<_>>()
+        );
+        let artist_one = |tracks: &[Track]| tracks.iter().find(|t| t.artist_id == 1).map(|t| t.id);
+        let other = get_genre_diverse_candidates(&conn, 11, 100).expect("query");
+        assert_ne!(
+            artist_one(&out),
+            artist_one(&other),
+            "seeds should sample differently"
+        );
     }
 
     mod dj_transition_event {
