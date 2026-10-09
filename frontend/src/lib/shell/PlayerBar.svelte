@@ -165,7 +165,7 @@
 	}
 </script>
 
-<div class="np-top" class:queue-expanded={queueExpanded && layout !== 'bottom'} class:horizontal={layout === 'bottom'} class:banner-artwork={$playerArtworkStyle === 'banner' && layout !== 'bottom'}>
+<div class="np-top" class:queue-expanded={queueExpanded && layout !== 'bottom'} class:horizontal={layout === 'bottom'} class:banner-artwork={$playerArtworkStyle !== 'square' && layout !== 'bottom'} class:slim-artwork={$playerArtworkStyle === 'slim' && layout !== 'bottom'}>
 	<div class="player-head">
 		<span class="player-head-label">Now playing</span>
 		<PlayerLayoutSelect effective={layout} />
@@ -413,6 +413,12 @@
 		width: 100%;
 		aspect-ratio: 16 / 9;
 		max-height: min(24dvh, 220px);
+	}
+
+	.np-top.slim-artwork .np-artwork-wrap {
+		aspect-ratio: 3 / 1;
+		max-height: min(14dvh, 120px);
+		border-radius: 16px;
 	}
 
 	.np-artwork-visual {
