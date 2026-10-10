@@ -2054,7 +2054,7 @@ export interface RadioResponse {
 }
 
 export type RadioBlend = 'familiar' | 'mixed' | 'adventurous';
-export type RadioSource = 'library' | 'lastfm' | 'engine';
+export type RadioSource = 'library' | 'lastfm' | 'engine' | 'tidal';
 
 export interface RadioCandidate {
 	track_id: number;

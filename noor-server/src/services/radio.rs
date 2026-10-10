@@ -79,6 +79,9 @@ pub enum RadioSource {
     Library,
     Lastfm,
     Engine,
+    /// TIDAL's own track or artist mix, used when the seed has too little
+    /// evidence for a radio of its own.
+    Tidal,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -111,6 +114,86 @@ pub struct RadioCandidate {
     pub support_count: Option<i64>,
     #[serde(default)]
     pub primary_reason: Option<String>,
+}
+
+/// Fewer picks than this means the seed has too little evidence of its own (a
+/// cold track: no plays, genres or audio analysis, and no Last.fm match), so
+/// TIDAL's mix for the seed fills the radio instead of noise.
+pub const TIDAL_MIX_FALLBACK_MIN_PICKS: usize = 10;
+
+/// The mix id TIDAL attaches to a track or artist payload: `mixes.TRACK_MIX`
+/// or `mixes.ARTIST_MIX`.
+pub fn tidal_mix_id(extra: &HashMap<String, serde_json::Value>, kind: &str) -> Option<String> {
+    extra
+        .get("mixes")?
+        .get(kind)?
+        .as_str()
+        // It goes into a URL path: the same shape rule as the mix routes.
+        .filter(|id| {
+            !id.is_empty()
+                && id.len() <= 96
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
+        .map(str::to_string)
+}
+
+/// TIDAL mix tracks as radio candidates, in mix order. A track already in the
+/// library comes in as that library row; the seed and anything already picked
+/// are skipped.
+pub fn tidal_mix_candidates(
+    conn: &rusqlite::Connection,
+    mix: Vec<crate::services::tidal::client::TidalTrack>,
+    seed_tidal_id: Option<i64>,
+    existing: &[RadioCandidate],
+    limit: usize,
+) -> Vec<RadioCandidate> {
+    let mut seen: HashSet<String> = existing
+        .iter()
+        .map(|c| normalize_for_dedup(&c.artist_name, &c.title))
+        .collect();
+    let total = mix.len().max(1) as f64;
+    let mut out = Vec::new();
+    for (index, track) in mix.into_iter().enumerate() {
+        if out.len() >= limit {
+            break;
+        }
+        if Some(track.id) == seed_tidal_id
+            || !seen.insert(normalize_for_dedup(&track.artist.name, &track.title))
+        {
+            continue;
+        }
+        let local_id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM tracks WHERE tidal_id = ?1",
+                [track.id],
+                |row| row.get(0),
+            )
+            .ok();
+        out.push(RadioCandidate {
+            track_id: local_id.unwrap_or(0),
+            tidal_track_id: Some(track.id),
+            title: track.title,
+            artist_name: track.artist.name,
+            album_title: track.album.as_ref().map(|album| album.title.clone()),
+            artwork_url: track.album.as_ref().and_then(|album| {
+                crate::services::tidal::client::TidalClient::get_artwork_url(&album.cover, 640)
+            }),
+            duration_ms: Some(track.duration * 1000),
+            isrc: track.isrc,
+            is_in_library: local_id.is_some(),
+            source: RadioSource::Tidal,
+            reason: "TIDAL radio for this seed".to_string(),
+            // Mix order is TIDAL's ranking.
+            similarity_score: 1.0 - index as f64 / total * 0.5,
+            confidence: None,
+            candidate_in_degree_percentile: None,
+            support_count: None,
+            primary_reason: None,
+        });
+    }
+    out
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1133,7 +1216,7 @@ fn source_priority(source: RadioSource) -> u8 {
     match source {
         RadioSource::Library => 3,
         RadioSource::Engine => 2,
-        RadioSource::Lastfm => 1,
+        RadioSource::Lastfm | RadioSource::Tidal => 1,
     }
 }
 
@@ -1754,7 +1837,7 @@ fn diversity_rerank(
                 if apply_source_quota {
                     let target_for_source = match cand.source {
                         RadioSource::Library => lib_w,
-                        RadioSource::Lastfm => lfm_w,
+                        RadioSource::Lastfm | RadioSource::Tidal => lfm_w,
                         RadioSource::Engine => eng_w,
                     } * (queue.len() as f64);
                     let actual = *source_counts.get(&cand.source).unwrap_or(&0) as f64;
@@ -1980,6 +2063,62 @@ fn recent_played_artist_names(db: &Database, limit: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tidal_mix_fills_a_cold_seed_with_library_rows_first() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::schema::run_migrations(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO artists (id, name) VALUES (1, 'Surgeon');
+             INSERT INTO tracks (id, title, artist_id, tidal_id) VALUES (7, 'Klonk', 1, 502);",
+        )
+        .unwrap();
+        let track =
+            |id: i64, title: &str, artist: &str| -> crate::services::tidal::client::TidalTrack {
+                serde_json::from_value(serde_json::json!({
+                    "id": id, "title": title, "duration": 360,
+                    "artist": {"id": 1, "name": artist},
+                    "album": {"id": 9, "title": "Album", "cover": "ab-cd"}
+                }))
+                .unwrap()
+            };
+        let payload = track(500, "Track 12", "Steve Bicknell");
+        let mut extra = payload.extra.clone();
+        extra.insert(
+            "mixes".to_string(),
+            serde_json::json!({"TRACK_MIX": "0012abc"}),
+        );
+        assert_eq!(
+            tidal_mix_id(&extra, "TRACK_MIX").as_deref(),
+            Some("0012abc")
+        );
+        assert_eq!(tidal_mix_id(&extra, "ARTIST_MIX"), None);
+        extra.insert(
+            "mixes".to_string(),
+            serde_json::json!({"TRACK_MIX": "../x?y"}),
+        );
+        assert_eq!(tidal_mix_id(&extra, "TRACK_MIX"), None);
+
+        let mix = vec![
+            track(500, "Track 12", "Steve Bicknell"),
+            track(501, "Bad Boy", "Jeff Mills"),
+            track(502, "Klonk", "Surgeon"),
+            track(503, "bad boy", "Jeff Mills"),
+        ];
+        let picks = tidal_mix_candidates(&conn, mix, Some(500), &[], 10);
+        let ids: Vec<_> = picks
+            .iter()
+            .map(|c| (c.track_id, c.tidal_track_id))
+            .collect();
+        // Seed skipped, duplicate title skipped, library track comes in as itself.
+        assert_eq!(ids, vec![(0, Some(501)), (7, Some(502))]);
+        assert!(!picks[0].is_in_library && picks[1].is_in_library);
+        assert!(picks.iter().all(|c| c.source == RadioSource::Tidal));
+        assert_eq!(
+            tidal_mix_candidates(&conn, vec![track(504, "X", "Y")], None, &picks, 0).len(),
+            0
+        );
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -3896,6 +4035,7 @@ mod radio_diagnostic_harness {
                 RadioSource::Library => "library",
                 RadioSource::Lastfm => "lastfm",
                 RadioSource::Engine => "engine",
+                RadioSource::Tidal => "tidal",
             };
             eprintln!(
                 "{:>3} {:>7} {:>7} {:>8.4} {:>8.4} {:>8.4} {:>6.3} {:>6.3} {:>5} {:>5} {:<26} {:<26}",

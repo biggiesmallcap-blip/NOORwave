@@ -35,7 +35,9 @@ const MODEL_FAMILY: &str = queries::DISCOVERY_ENGINE_V2_FAMILY;
 /// (services::discovery_retrain), and the activation gate lets the new model
 /// replace the old one at near-parity.
 /// v3: context-only behavior hash, genre-path genre branch, word-free proxy.
-pub const TRAINER_CONFIG_VERSION: i64 = 3;
+/// v4: no proxy vector for tracks with only an artist token (cold tracks got
+/// hash-collision neighbors); coverage counts tracks with evidence.
+pub const TRAINER_CONFIG_VERSION: i64 = 4;
 /// Relative recall dip allowed when replacing a model from an older trainer
 /// version, whose numbers were measured on broken inputs.
 const UPGRADE_RECALL_TOLERANCE: f64 = 0.10;
