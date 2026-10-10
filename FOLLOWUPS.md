@@ -10,18 +10,6 @@ back to the PR or commit that flagged it.
 
 ## Open
 
-### frontend: move remaining page logic out of .svelte where tests grep source
-
-Search's ranking, previews, paging, prefetch and local-first race now live in
-`frontend/src/lib/search/` with behaviour tests (architecture review #4). Still
-source-grepped: Search's `onInput` debounce / side-load invalidation and the
-secondary playlist phase (`search_layout_contract.test.ts`), and logic inside
-`HomeRecommendationsShelf.svelte` and `DailyChartShelf.svelte`. Same recipe:
-extract the decision into a plain module, test it by behaviour, shrink the
-contract to "the page uses the module". Markup/CSS/a11y presence checks (most
-of `dj_page_contract.test.ts`) are fine as they are.
-Spawned by: refactor program (architecture review #4)
-
 ### tidal: move stream.rs behind the session-bound transport
 
 Playback stream resolution (playbackinfo, manifests, video streams, downloads)
