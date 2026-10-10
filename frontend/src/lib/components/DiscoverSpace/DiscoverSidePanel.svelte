@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { tidalSearchTrackToPlayable } from '$lib/utils/track';
 	import { lockSeed, branchHere, setRadioRoute, discoverSpaceStore } from './discover_space_store';
 	import { REASON_LABELS, REASON_EXPLANATIONS, SOURCE_LABELS, SIDE_PANEL_ACTIONS, ERROR_TOASTS, LENS_LABELS, LENS_DESCRIPTIONS } from './discover_space_story';
 	import type { DiscoverTrackNode, DiscoverReason } from './discover_space_types';
@@ -56,14 +57,8 @@
 			kind: 'tidal',
 			tidal_id: hit.tidal_id,
 			track: {
-				tidal_id: hit.tidal_id,
-				title: hit.title,
-				artist_name: hit.artist_name,
-				album_title: hit.album_title,
+				...tidalSearchTrackToPlayable(hit),
 				artwork_url: hit.artwork_url ?? targetNode.artworkUrl ?? null,
-				duration_ms: hit.duration_ms,
-				artist_tidal_id: hit.artist_id ?? null,
-				album_tidal_id: hit.album_tidal_id ?? null,
 			},
 		};
 		updateNodePlayable(targetNode.trackId, resolved);

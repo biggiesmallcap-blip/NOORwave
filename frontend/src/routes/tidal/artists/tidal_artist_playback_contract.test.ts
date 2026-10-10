@@ -27,7 +27,9 @@ describe('TIDAL artist playback contract', () => {
 	});
 
 	test('track rows preserve discography metadata with the active artist fallback', () => {
-		expect(source).toContain("import { tidalDiscographyTrackToPlayable } from '$lib/utils/track'");
+		expect(source).toMatch(
+			/import \{[^}]*\btidalDiscographyTrackToPlayable\b[^}]*\} from '\$lib\/utils\/track'/,
+		);
 		expect(source).toContain('function artistTrackPlayable(track: TidalDiscographyTrack)');
 		expect(source).toContain('tidalDiscographyTrackToPlayable(track, { artistTidalId: activeTidalArtistId })');
 		expect(source).toContain('{@const playable = artistTrackPlayable(track)}');

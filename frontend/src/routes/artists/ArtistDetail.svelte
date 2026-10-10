@@ -50,7 +50,7 @@
 		upscaleTidalArtwork,
 		type TidalArtworkSize,
 	} from '$lib/utils/artwork';
-	import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';
+	import { libraryTrackToTidalPlayable, tidalDiscographyTrackToPlayable } from '$lib/utils/track';
 	import { cleanArtistBio } from './artist_bio';
 	import { artistCurrentTrackMatchesArtist } from './artist_playback';
 	import {
@@ -374,21 +374,7 @@
 	// queue. Returns null for a pure-local track with no tidal_id.
 	function popularItemPlayable(item: PopularTrackItem): TidalPlayable | null {
 		if (item.kind === 'tidal') return artistTrackPlayable(item.track);
-		const t = item.track;
-		if (t.tidal_id == null || t.tidal_id <= 0) return null;
-		return {
-			tidal_id: t.tidal_id,
-			title: t.title,
-			artist_name: t.artist_name ?? null,
-			album_title: t.album_title ?? null,
-			artwork_url: t.artwork_url ?? null,
-			duration_ms: t.duration_ms ?? null,
-			artist_tidal_id: t.artist_tidal_id ?? activeTidalArtistId,
-			album_tidal_id: t.album_tidal_id ?? null,
-			local_id: t.id,
-			is_in_library: true,
-			is_favorite: t.is_favorite,
-		};
+		return libraryTrackToTidalPlayable(item.track, { artistTidalId: activeTidalArtistId });
 	}
 
 	// Play the Top tracks list in context, starting at the clicked row (the rest

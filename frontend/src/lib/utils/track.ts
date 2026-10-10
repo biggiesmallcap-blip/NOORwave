@@ -18,9 +18,17 @@ import type {
 export function trackToTidalPlayable(track: Track): TidalPlayable | null {
 	if (track.tidal_id == null) return null;
 	if (track.id > 0 && track.source !== 'tidal_stream') return null;
-	return trackWithTidalIdToPlayable(track);
+	return libraryTrackToTidalPlayable(track);
 }
-function trackWithTidalIdToPlayable(track: Track): TidalPlayable | null {
+/**
+ * Any library row that has a TIDAL id, as a `TidalPlayable` that keeps its
+ * library identity. `artistTidalId` fills a missing artist id from context
+ * (for example the artist page the row is shown on).
+ */
+export function libraryTrackToTidalPlayable(
+	track: Track,
+	options: { artistTidalId?: number | null } = {},
+): TidalPlayable | null {
 	if (track.tidal_id == null || track.tidal_id <= 0) return null;
 	const localId = track.id > 0 ? track.id : null;
 	return {
@@ -30,7 +38,7 @@ function trackWithTidalIdToPlayable(track: Track): TidalPlayable | null {
 		album_title: track.album_title,
 		artwork_url: track.artwork_url,
 		duration_ms: track.duration_ms,
-		artist_tidal_id: track.artist_tidal_id ?? null,
+		artist_tidal_id: track.artist_tidal_id ?? options.artistTidalId ?? null,
 		album_tidal_id: track.album_tidal_id ?? null,
 		local_id: localId,
 		is_in_library: localId != null,

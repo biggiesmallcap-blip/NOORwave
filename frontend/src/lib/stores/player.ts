@@ -25,6 +25,7 @@ import {
 	mergeAlbumTracks,
 	queueItemToTidalPlayable,
 	tidalPlayableToMixedQueueItem,
+	tidalSearchTrackToPlayable,
 } from '$lib/utils/track';
 import { currentQueueAnchorItem } from '$lib/player/queue_active';
 import { wsConnected } from '$lib/api/ws';
@@ -2106,13 +2107,8 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 				return;
 			}
 			track = {
-				tidal_id: hit.tidal_id,
-				title: hit.title,
-				artist_name: hit.artist_name,
-				album_title: hit.album_title,
+				...tidalSearchTrackToPlayable(hit),
 				artwork_url: hit.artwork_url ?? track.artwork_url,
-				duration_ms: hit.duration_ms,
-				artist_tidal_id: null,
 			};
 		} catch (error) {
 			dismissToast(loadingToastId);
