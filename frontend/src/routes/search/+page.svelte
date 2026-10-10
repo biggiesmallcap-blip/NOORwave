@@ -1,5 +1,16 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import {
+    appendUnique,
+    focusedViewNeedsPrefetch,
+    mergeTidalPage,
+    pickTopResult,
+    previewForView,
+    rankPlaylists,
+    spotifyPlaylistHref as buildSpotifyPlaylistHref,
+    type RankedPlaylist,
+    type TopResult as SearchTopResult,
+  } from '$lib/search/search_results'
   import { goto, beforeNavigate } from '$app/navigation'
   import type { Snapshot } from './$types'
   import { captureScroll, restoreScroll } from '$lib/navigation/scroll'
@@ -49,10 +60,6 @@
   const SPOTIFY_PLAYLIST_SEARCH_TIMEOUT_MS = 8000
   // Enough to fill the rail on wide windows and at reduced interface size;
   // the rails scroll, so extra items cost nothing on narrow ones.
-  const ALL_VIEW_ARTIST_LIMIT = 24
-  const ALL_VIEW_ALBUM_LIMIT = 24
-  const ALL_VIEW_TRACK_LIMIT = 10
-  const ALL_VIEW_PLAYLIST_LIMIT = 12
   const EMPTY_TIDAL_RESULTS: TidalSearchResults = { tracks: [], albums: [], artists: [], videos: [] }
 
   function loadRecent(): string[] {
@@ -731,24 +738,9 @@
         if (!isCurrentLoadMore()) return
         tidalOffset += LOAD_MORE_PAGE_SIZE
         // De-dupe by id - Tidal occasionally returns overlapping pages.
-        const seenTracks = new Set(results.tracks.map((t) => t.tidal_id))
-        const seenAlbums = new Set(results.albums.map((a) => a.tidal_id))
-        const seenArtists = new Set(results.artists.map((a) => a.tidal_id))
-        const newTracks = next.tracks.filter((t) => !seenTracks.has(t.tidal_id))
-        const newAlbums = next.albums.filter((a) => !seenAlbums.has(a.tidal_id))
-        const newArtists = next.artists.filter((a) => !seenArtists.has(a.tidal_id))
-        results = {
-          tracks: [...results.tracks, ...newTracks],
-          albums: [...results.albums, ...newAlbums],
-          artists: [...results.artists, ...newArtists],
-        }
-        if (
-          next.tracks.length < LOAD_MORE_PAGE_SIZE &&
-          next.albums.length < LOAD_MORE_PAGE_SIZE &&
-          next.artists.length < LOAD_MORE_PAGE_SIZE
-        ) {
-          hasMoreTidal = false
-        }
+        const merged = mergeTidalPage(results, next, LOAD_MORE_PAGE_SIZE)
+        results = merged.results
+        if (merged.exhausted) hasMoreTidal = false
       }
       if (needsPlaylists) {
         const tasks: Promise<unknown>[] = []
@@ -758,9 +750,7 @@
               .searchTidalPlaylists(pageQuery, undefined, { limit: LOAD_MORE_PAGE_SIZE, offset: tidalPlaylistOffset })
               .then((r) => {
                 if (!isCurrentLoadMore()) return
-                const seen = new Set(tidalPlaylistResults.map((p) => p.uuid))
-                const fresh = r.playlists.filter((p) => !seen.has(p.uuid))
-                tidalPlaylistResults = [...tidalPlaylistResults, ...fresh]
+                tidalPlaylistResults = appendUnique(tidalPlaylistResults, r.playlists, (p) => p.uuid)
                 tidalPlaylistOffset += LOAD_MORE_PAGE_SIZE
                 if (r.playlists.length < LOAD_MORE_PAGE_SIZE) hasMoreTidalPlaylists = false
               })
@@ -773,9 +763,7 @@
               .searchSpotifyPlaylists(pageQuery, LOAD_MORE_PAGE_SIZE, undefined, spotifyPlaylistOffset)
               .then((items) => {
                 if (!isCurrentLoadMore()) return
-                const seen = new Set(spotifyPlaylistResults.map((p) => p.spotifyId))
-                const fresh = items.filter((p) => !seen.has(p.spotifyId))
-                spotifyPlaylistResults = [...spotifyPlaylistResults, ...fresh]
+                spotifyPlaylistResults = appendUnique(spotifyPlaylistResults, items, (p) => p.spotifyId)
                 spotifyPlaylistOffset += LOAD_MORE_PAGE_SIZE
                 if (items.length < LOAD_MORE_PAGE_SIZE) hasMoreSpotifyPlaylists = false
               })
@@ -852,15 +840,9 @@
       filterMode === 'all' || filterMode === 'tracks' || filterMode === 'library'
     )
   )
-  const visibleArtists = $derived(
-    filterMode === 'all' ? sortedArtists.slice(0, ALL_VIEW_ARTIST_LIMIT) : sortedArtists
-  )
-  const visibleAlbums = $derived(
-    filterMode === 'all' ? sortedAlbums.slice(0, ALL_VIEW_ALBUM_LIMIT) : sortedAlbums
-  )
-  const visibleTracks = $derived(
-    filterMode === 'all' ? sortedTracks.slice(0, ALL_VIEW_TRACK_LIMIT) : sortedTracks
-  )
+  const visibleArtists = $derived(previewForView(filterMode, sortedArtists, 'artists'))
+  const visibleAlbums = $derived(previewForView(filterMode, sortedAlbums, 'albums'))
+  const visibleTracks = $derived(previewForView(filterMode, sortedTracks, 'tracks'))
   const showPlaylists = $derived(filterMode === 'all' || filterMode === 'playlists')
 
   const filteredPlaylists = $derived.by(() => {
@@ -879,48 +861,9 @@
     const spotifyOnly = spotifyPlaylistResults.filter(sp => sp.spotifyId)
     return { local: matched, tidal: tidalOnly, spotify: spotifyOnly }
   })
-  type PlaylistResultEntry =
-    | { kind: 'local'; key: string; score: number; playlist: Playlist }
-    | { kind: 'tidal'; key: string; score: number; playlist: TidalSearchPlaylist }
-    | { kind: 'spotify'; key: string; score: number; playlist: SpotifyPlaylistSearchItem }
-
-  // Same scoring ladder as the Top Result hero: exact title beats prefix
-  // beats substring, with a partial-credit tail for multi-word queries where
-  // only some tokens hit.
-  function playlistRelevance(title: string | null | undefined, q: string): number {
-    if (!title || !q) return 0
-    const t = title.toLowerCase()
-    if (t === q) return 1.0
-    if (t.startsWith(q)) return 0.6
-    if (t.includes(q)) return 0.3
-    const tokens = q.split(/\s+/).filter((tok) => tok.length > 0)
-    if (tokens.length === 0) return 0
-    const matched = tokens.filter((tok) => t.includes(tok)).length
-    return (matched / tokens.length) * 0.25
-  }
-
-  // One relevance-ranked rail across all three sources. The old layout
-  // grouped by source (local, then TIDAL, then Spotify), which buried an
-  // exact-title Spotify match behind weaker fuzzy matches from the other
-  // providers. Stable sort keeps local > tidal > spotify on equal scores.
-  const rankedPlaylists = $derived.by<PlaylistResultEntry[]>(() => {
-    const q = activeQueryText.toLowerCase()
-    const entries: PlaylistResultEntry[] = [
-      ...filteredPlaylists.local.map((p) => ({
-        kind: 'local' as const, key: `local:${p.id}`, score: playlistRelevance(p.name, q), playlist: p,
-      })),
-      ...filteredPlaylists.tidal.map((p) => ({
-        kind: 'tidal' as const, key: `tidal:${p.uuid}`, score: playlistRelevance(p.title, q), playlist: p,
-      })),
-      ...filteredPlaylists.spotify.map((p) => ({
-        kind: 'spotify' as const, key: `spotify:${p.spotifyId}`, score: playlistRelevance(p.title, q), playlist: p,
-      })),
-    ]
-    return entries.sort((a, b) => b.score - a.score)
-  })
-  const visiblePlaylists = $derived(
-    filterMode === 'all' ? rankedPlaylists.slice(0, ALL_VIEW_PLAYLIST_LIMIT) : rankedPlaylists
-  )
+  type PlaylistResultEntry = RankedPlaylist<Playlist, TidalSearchPlaylist, SpotifyPlaylistSearchItem>
+  const rankedPlaylists = $derived<PlaylistResultEntry[]>(rankPlaylists(filteredPlaylists, activeQueryText))
+  const visiblePlaylists = $derived(previewForView(filterMode, rankedPlaylists, 'playlists'))
 
   // True only when EVERY provider returned zero hits for THIS query -- used for
   // the global "No results" branch. Declared after `filteredPlaylists` so we
@@ -941,42 +884,26 @@
     !(filterMode === 'playlists' && playlistRailPending) &&
     !(showPlaylists && (filteredPlaylists.local.length > 0 || filteredPlaylists.tidal.length > 0 || filteredPlaylists.spotify.length > 0))
   )
-  const focusedFilterNeedsPrefetch = $derived.by(() => {
-    if (loading || loadingMore || !lastQuery.trim() || audioResults !== null) return false
-    if (filterMode === 'tracks') return results !== null && hasMoreTidal
-    if (filterMode === 'albums') return results !== null && hasMoreTidal
-    if (filterMode === 'artists') return results !== null && hasMoreTidal
-    if (filterMode === 'playlists') return hasMoreTidalPlaylists || hasMoreSpotifyPlaylists
-    return false
-  })
+  const focusedFilterNeedsPrefetch = $derived(
+    focusedViewNeedsPrefetch({
+      mode: filterMode,
+      busy: loading || loadingMore,
+      committedQuery: lastQuery,
+      audioSearch: audioResults !== null,
+      hasTidalResults: results !== null,
+      hasMoreTidal,
+      hasMoreTidalPlaylists,
+      hasMoreSpotifyPlaylists,
+    })
+  )
 
-  type TopResult =
-    | { kind: 'artist'; entry: TidalSearchArtist }
-    | { kind: 'album'; entry: TidalSearchAlbum }
-    | { kind: 'track'; entry: TidalSearchTrack }
-
-  // Score each candidate, prefer artist > album > track on ties, exact-name match
-  // wins, library entries get a +0.3 boost. The first place across all three
-  // sections is the hero.
+  type TopResult = SearchTopResult<TidalSearchArtist, TidalSearchAlbum, TidalSearchTrack>
   const topResult = $derived.by<TopResult | null>(() => {
     if (!results || !activeQueryText) return null
-    const q = activeQueryText.toLowerCase()
-    const score = (name: string, inLibrary: boolean, kindBias: number) => {
-      const n = name.toLowerCase()
-      let s = 0
-      if (n === q) s += 1.0
-      else if (n.startsWith(q)) s += 0.6
-      else if (n.includes(q)) s += 0.3
-      if (inLibrary) s += 0.3
-      return s + kindBias
-    }
-    const candidates: { tr: TopResult; s: number }[] = []
-    if (sortedArtists[0]) candidates.push({ tr: { kind: 'artist', entry: sortedArtists[0] }, s: score(sortedArtists[0].name, sortedArtists[0].in_library, 0.05) })
-    if (sortedAlbums[0]) candidates.push({ tr: { kind: 'album', entry: sortedAlbums[0] }, s: score(sortedAlbums[0].title, sortedAlbums[0].in_library, 0.025) })
-    if (sortedTracks[0]) candidates.push({ tr: { kind: 'track', entry: sortedTracks[0] }, s: score(sortedTracks[0].title, sortedTracks[0].in_library, 0) })
-    if (candidates.length === 0) return null
-    candidates.sort((a, b) => b.s - a.s)
-    return candidates[0].tr
+    return pickTopResult(
+      { artist: sortedArtists[0], album: sortedAlbums[0], track: sortedTracks[0] },
+      activeQueryText,
+    )
   })
 
   // All view with a top result: five songs sit beside it, the rest follow.
@@ -1106,9 +1033,7 @@
   }
 
   function spotifyPlaylistHref(spotifyId: string): string {
-    const params = new URLSearchParams({ from: 'search' })
-    if (activeQueryText) params.set('q', activeQueryText)
-    return `/spotify-playlist/${encodeURIComponent(spotifyId)}?${params.toString()}`
+    return buildSpotifyPlaylistHref(spotifyId, activeQueryText)
   }
 
   function trackContextMenu(track: TidalSearchTrack): MenuItem[] {
