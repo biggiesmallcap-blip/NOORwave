@@ -32,7 +32,8 @@ describe('TIDAL artwork surface contracts', () => {
 		expect(appShell).toContain('tidalArtworkFallbackSizes');
 		expect(appShell).toContain('let currentVideoArtwork = $derived(artworkCandidate($videoSession.current?.artwork_url, 320));');
 		expect(appShell).toContain('let mobileNowPlayingArtwork = $derived(artworkCandidate($currentTrack?.artwork_url, 640));');
-		expect(appShell).toContain('const queueArt = artworkCandidate(item.track.artwork_url, 320)');
+		expect(appShell).toContain('artworkUrl={artworkCandidate(item.track.artwork_url, 320)}');
+		expect(appShell).toContain('onArtworkError={markArtworkFailed}');
 		expect(appShell).not.toContain('src={$currentTrack.artwork_url}');
 		expect(appShell).not.toContain('src={item.track.artwork_url}');
 		expect(appShell).not.toContain('src={video.artwork_url}');

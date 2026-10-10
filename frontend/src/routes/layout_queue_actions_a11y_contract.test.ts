@@ -4,18 +4,24 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const source = readFileSync(join(here, '+layout.svelte'), 'utf8');
+const layout = readFileSync(join(here, '+layout.svelte'), 'utf8');
+// Desktop and mobile queue rows both render the shared shell row.
+const source = readFileSync(join(here, '..', 'lib', 'shell', 'QueueRow.svelte'), 'utf8');
 const normalizedSource = source.replace(/\r\n/g, '\n');
 
 describe('queue row accessibility contracts', () => {
 	test('the whole row is one labelled play target, with a single labelled overflow action', () => {
-		// Play is a full-bleed hit button (sidebar + now-playing blocks).
-		expect(source.match(/class="queue-row-hit"/g)?.length).toBe(2);
+		// Play is a full-bleed hit target, rendered for the sidebar and the
+		// now-playing sheet from one component.
+		expect(layout.match(/\{@render queueRow\(/g)?.length).toBe(2);
+		expect(source.match(/class="queue-row-hit"/g)?.length).toBe(1);
 		expect(source).toContain(
 			'aria-label={isPending ? `Play ${item.track.title} (resolving)` : `Play ${item.track.title}`}'
 		);
 		// Actions collapse to one always-present, labelled overflow button.
-		expect(source.match(/class="queue-overflow"/g)?.length).toBe(2);
+		expect(source.match(/class="queue-overflow"/g)?.length).toBe(1);
+		// Pending rows keep the overflow too: it is the only menu on touch.
+		expect(source).not.toContain('{#if !isPending}');
 		expect(source).toContain("aria-label=\"More actions\"");
 		// The old hover-gated visibility machinery is gone, so nothing is hidden
 		// from the accessibility tree.

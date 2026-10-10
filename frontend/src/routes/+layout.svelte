@@ -91,10 +91,10 @@
 	import {
 		SILENT_SOURCE_LABELS,
 		formatQueueSource,
-		queueSourceSlug,
 	} from '$lib/player/queue_source';
 	import { formatPlayerStreamDetail, formatResolutionShort } from '$lib/player/stream_display';
 	import { queueItemToTidalPlayable, trackToTidalPlayable } from '$lib/utils/track';
+	import QueueRow from '$lib/shell/QueueRow.svelte';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
 	import { wallpaperById } from '$lib/components/wallpaper/shaders';
 	import { wallpaper, wallpaperFps, wallpaperQuality } from '$lib/stores/wallpaper';
@@ -1160,10 +1160,6 @@
 		await restoreQueueItems(restorable);
 	}
 
-	function stopPropagation(event: Event) {
-		event.stopPropagation();
-	}
-
 	let failedArtworkUrls = $state<Record<string, boolean>>({});
 
 	function artworkCandidate(
@@ -1399,6 +1395,29 @@
 		}
 	});
 </script>
+
+{#snippet queueRow(item: QueueItemType, reorderable: boolean)}
+	<QueueRow
+		{item}
+		active={isQueueItemActive(item, $currentTrack, $currentQueueItemId, $playbackQueue)}
+		played={queueItemIsPlayed(item)}
+		artworkUrl={artworkCandidate(item.track.artwork_url, 320)}
+		onArtworkError={markArtworkFailed}
+		onplay={() => void handleQueueTrackPlay(item)}
+		onkeydown={(event) => handleQueueTrackKeydown(item, event)}
+		onmenu={(event) => openQueueRowMenu(item, event)}
+		onmenubutton={(event) => openQueueRowMenuFromButton(item, event)}
+		onartistmenu={(event) => openQueueArtistContextMenu(item, event)}
+		reorder={reorderable
+			? {
+				row: queueDrag.row,
+				draggable: queueItemCanReorder(item),
+				dragging: $queueDragState.draggingId === item.id,
+				dragOver: $queueDragState.dragOverId === item.id && $queueDragState.draggingId !== item.id,
+			}
+			: undefined}
+	/>
+{/snippet}
 
 {#if showConnect}
 	<div class="connect-backdrop">
@@ -1975,91 +1994,7 @@
 					onpointerdown={(event) => { if (event.target === queueListEl) handleQueueUserScroll(); }}
 				>
 					{#each sessionQueue.slice(0, queueVisibleCount) as item (item.id)}
-						{@const aid = item.track.artist_id}
-						{@const isPending = item.is_pending === true}
-						{@const isPlayed = queueItemIsPlayed(item)}
-						<div
-							role="listitem"
-							class:active={isQueueItemActive(item, $currentTrack, $currentQueueItemId, $playbackQueue)}
-							class:played={isPlayed}
-							class:dragging={$queueDragState.draggingId === item.id}
-							class:drag-over={$queueDragState.dragOverId === item.id &&
-								$queueDragState.draggingId !== item.id}
-							class:pending={isPending}
-							class="queue-row"
-							title={isPending ? 'Resolving on TIDAL...' : undefined}
-							data-queue-item-id={item.id}
-							draggable={queueItemCanReorder(item)}
-							oncontextmenu={(event) => openQueueRowMenu(item, event)}
-							use:queueDrag.row={item.id}
-						>
-							<!-- Full-bleed hit target: clicking anywhere on the row that
-							     isn't an interactive child plays/jumps to this track. This is a
-							     div, NOT a button, on purpose: a <button> is an interactive
-							     element and swallows the row's native HTML5 dragstart, so the row
-							     could only be dragged by the 12px grip. role/tabindex keep it
-							     keyboard- and screen-reader-operable. -->
-							<div
-								class="queue-row-hit"
-								role="button"
-								tabindex={0}
-								aria-label={isPending ? `Play ${item.track.title} (resolving)` : `Play ${item.track.title}`}
-								onclick={() => void handleQueueTrackPlay(item)}
-								onkeydown={(event) => handleQueueTrackKeydown(item, event)}
-							></div>
-							<span class="queue-grip" aria-hidden="true" title="Drag to reorder">⋮⋮</span>
-							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
-								{#if isPending}
-									<div class="queue-art placeholder pending-art" title="Resolving track...">
-										<span class="queue-spinner" aria-hidden="true"></span>
-									</div>
-								{:else}
-									{@const queueArt = artworkCandidate(item.track.artwork_url, 320)}
-									{#if queueArt}
-										<img
-											class="queue-art"
-											src={queueArt}
-											alt=""
-											onerror={() => markArtworkFailed(queueArt)}
-										/>
-								{:else}
-									<div class="queue-art placeholder">♫</div>
-									{/if}
-								{/if}
-								<span class="queue-source-dot source-{queueSourceSlug(item.source)}" aria-hidden="true"></span>
-							</div>
-
-							<div class="queue-meta">
-								<span class="queue-title">{item.track.title}</span>
-								{#if isPending}
-									<span class="queue-artist pending-label">
-										<span class="queue-inline-spinner" aria-hidden="true"></span>
-										Resolving on TIDAL...
-									</span>
-								{:else if aid && aid > 0}
-									<a
-										class="queue-artist"
-										href="/artists/{aid}"
-										onclick={stopPropagation}
-										oncontextmenu={(event) => openQueueArtistContextMenu(item, event)}
-									>{item.track.artist_name ?? 'Unknown artist'}</a>
-								{:else}
-									<span class="queue-artist">{item.track.artist_name ?? 'Unknown artist'}</span>
-								{/if}
-							</div>
-
-							<div class="queue-side">
-								<span class="queue-time">{formatTrackDuration(item.track.duration_ms)}</span>
-								{#if !isPending}
-									<button
-										class="queue-overflow"
-										aria-label="More actions"
-										title="More actions"
-										onclick={(event) => openQueueRowMenuFromButton(item, event)}
-									>⋯</button>
-								{/if}
-							</div>
-						</div>
+						{@render queueRow(item, true)}
 					{/each}
 				</div>
 			{:else}
@@ -2310,73 +2245,7 @@
 			{#if sessionQueue.length > 0}
 				<div class="mobile-np-queue-list" role="list">
 					{#each sessionQueue.slice(0, queueVisibleCount) as item (item.id)}
-						{@const aid = item.track.artist_id}
-						{@const isPending = item.is_pending === true}
-						{@const isPlayed = queueItemIsPlayed(item)}
-						<div
-							role="listitem"
-							class="queue-row"
-							class:active={isQueueItemActive(item, $currentTrack, $currentQueueItemId, $playbackQueue)}
-							class:played={isPlayed}
-							class:pending={isPending}
-							title={isPending ? 'Resolving on TIDAL...' : undefined}
-							oncontextmenu={(event) => openQueueRowMenu(item, event)}
-						>
-							<button
-								class="queue-row-hit"
-								type="button"
-								aria-label={isPending ? `Play ${item.track.title} (resolving)` : `Play ${item.track.title}`}
-								onclick={() => void handleQueueTrackPlay(item)}
-								onkeydown={(event) => handleQueueTrackKeydown(item, event)}
-							></button>
-							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
-								{#if isPending}
-									<div class="queue-art placeholder pending-art" title="Resolving track...">
-										<span class="queue-spinner" aria-hidden="true"></span>
-									</div>
-								{:else}
-									{@const queueArt = artworkCandidate(item.track.artwork_url, 320)}
-									{#if queueArt}
-										<img
-											class="queue-art"
-											src={queueArt}
-											alt=""
-											onerror={() => markArtworkFailed(queueArt)}
-										/>
-								{:else}
-									<div class="queue-art placeholder">♫</div>
-									{/if}
-								{/if}
-								<span class="queue-source-dot source-{queueSourceSlug(item.source)}" aria-hidden="true"></span>
-							</div>
-							<div class="queue-meta">
-								<span class="queue-title">{item.track.title}</span>
-								{#if isPending}
-									<span class="queue-artist pending-label">
-										<span class="queue-inline-spinner" aria-hidden="true"></span>
-										Resolving on TIDAL...
-									</span>
-								{:else if aid && aid > 0}
-									<a
-										class="queue-artist"
-										href="/artists/{aid}"
-										onclick={stopPropagation}
-										oncontextmenu={(event) => openQueueArtistContextMenu(item, event)}
-									>{item.track.artist_name ?? 'Unknown artist'}</a>
-								{:else}
-									<span class="queue-artist">{item.track.artist_name ?? 'Unknown artist'}</span>
-								{/if}
-							</div>
-							<div class="queue-side">
-								<span class="queue-time">{formatTrackDuration(item.track.duration_ms)}</span>
-								<button
-									class="queue-overflow"
-									aria-label="More actions"
-									title="More actions"
-									onclick={(e) => openQueueRowMenuFromButton(item, e)}
-								>⋯</button>
-							</div>
-						</div>
+						{@render queueRow(item, false)}
 					{/each}
 				</div>
 			{:else}
@@ -3257,9 +3126,6 @@
 	   but flatten translates, rotations, and the spinner so vestibular
 	   users don't get unwanted motion in the queue surface. */
 	@media (prefers-reduced-motion: reduce) {
-		.queue-row,
-		.queue-row:hover,
-		.queue-row:focus-within,
 		.queue-icon-btn:hover:not(:disabled),
 		.queue-undo-btn:hover,
 		.queue-jump-chip:hover,
@@ -3268,10 +3134,6 @@
 		}
 		.now-playing-panel.queue-expanded .queue-expand-btn {
 			transform: none;
-		}
-		.queue-spinner,
-		.queue-inline-spinner {
-			animation: none;
 		}
 		.queue-undo-bar {
 			animation: none;
@@ -3472,303 +3334,9 @@
 		pointer-events: none;
 	}
 
-	.queue-row {
-		position: relative;
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		padding: 6px 8px;
-		border: 1px solid color-mix(in srgb, var(--instrument-border) 46%, transparent);
-		border-radius: var(--radius-sm);
-		background: color-mix(in srgb, var(--instrument-surface) 78%, transparent);
-		transition:
-			border-color var(--motion-fast),
-			background var(--motion-fast),
-			transform var(--motion-fast);
-	}
-
-	/* Full-bleed click target sits behind the row content. Non-interactive
-	   content (art, title, time) has pointer-events:none so clicks fall through
-	   to it; interactive children (grip, artist link, overflow) re-enable. */
-	.queue-row-hit {
-		position: absolute;
-		inset: 0;
-		z-index: 0;
-		margin: 0;
-		padding: 0;
-		border: none;
-		background: transparent;
-		border-radius: inherit;
-		cursor: pointer;
-	}
-
-	.queue-row-hit:focus-visible {
-		outline: 2px solid var(--accent-strong);
-		outline-offset: -2px;
-	}
-
-	.queue-row > .queue-grip,
-	.queue-row > .queue-art-wrap,
-	.queue-row > .queue-meta,
-	.queue-row > .queue-side {
-		position: relative;
-		z-index: 1;
-	}
-
-	.queue-art-wrap,
-	.queue-meta,
-	.queue-time {
-		pointer-events: none;
-	}
-
-	.queue-grip,
-	.queue-meta .queue-artist[href],
-	.queue-overflow {
-		pointer-events: auto;
-	}
-
-	.queue-row:hover,
-	.queue-row:focus-within {
-		border-color: color-mix(in srgb, var(--instrument-border) 72%, transparent);
-		background: color-mix(in srgb, var(--instrument-surface-strong) 86%, transparent);
-		transform: translateY(-1px);
-	}
-
-	.queue-row.active .queue-title {
-		color: var(--playing);
-	}
-
-	.queue-row.active {
-		border-color: color-mix(in srgb, var(--playing) 28%, transparent);
-		background: var(--playing-soft);
-	}
-
-	.queue-row.active::before {
-		content: '';
-		position: absolute;
-		left: 0;
-		top: 10px;
-		bottom: 10px;
-		width: 2px;
-		border-radius: 2px;
-		background: var(--playing);
-	}
-
-	.queue-row.played {
-		opacity: 0.56;
-		background: color-mix(in srgb, var(--instrument-surface) 48%, transparent);
-	}
-
-	.queue-row.played:hover,
-	.queue-row.played:focus-within {
-		opacity: 0.78;
-	}
-
-	.queue-row.played .queue-grip {
-		visibility: hidden;
-	}
-
-	.queue-row.dragging {
-		opacity: 0.4;
-		cursor: grabbing;
-	}
-
-	/* The dropped row lands at the target's index, i.e. above it, so the
-	   accent line sits on the target's top edge to read as "drops here". */
-	.queue-row.drag-over {
-		border-color: var(--accent-line);
-		background: color-mix(in srgb, var(--accent-soft) 55%, transparent);
-		box-shadow: inset 0 2px 0 var(--accent-strong);
-	}
-
-	.queue-row.pending {
-		cursor: default;
-		opacity: 0.78;
-	}
-
-	.queue-row.pending:hover,
-	.queue-row.pending:focus-within {
-		transform: none;
-	}
-
-	.queue-row.pending .queue-title {
-		color: var(--text-secondary);
-	}
-
-	.queue-art.placeholder.pending-art {
-		opacity: 0.7;
-	}
-
-	.queue-spinner {
-		width: 16px;
-		height: 16px;
-		border-radius: 50%;
-		border: 2px solid var(--border-subtle, rgba(255, 255, 255, 0.15));
-		border-top-color: var(--text-secondary, rgba(255, 255, 255, 0.7));
-		animation: queue-spinner-spin 0.9s linear infinite;
-	}
-
-	@keyframes queue-spinner-spin {
-		to { transform: rotate(360deg); }
-	}
-
-	.queue-grip {
-		flex-shrink: 0;
-		width: 12px;
-		text-align: center;
-		font-size: var(--font-size-xs);
-		line-height: 1;
-		color: var(--text-tertiary);
-		cursor: grab;
-		opacity: 0.35;
-		transition: opacity var(--motion-fast);
-		user-select: none;
-	}
-
-	.queue-row:hover .queue-grip,
-	.queue-row:focus-within .queue-grip {
-		opacity: 0.8;
-	}
-
-	.queue-row.dragging .queue-grip {
-		cursor: grabbing;
-	}
-
-	.queue-art-wrap {
-		position: relative;
-		flex-shrink: 0;
-		line-height: 0;
-	}
-
-	.queue-art {
-		width: 42px;
-		height: 42px;
-		border-radius: 12px;
-		object-fit: cover;
-		background: var(--bg-surface);
-		border: 1px solid var(--border-subtle);
-		display: block;
-	}
-
-	.queue-art.placeholder {
-		display: grid;
-		place-items: center;
-		color: var(--text-tertiary);
-	}
-
-	/* The dot in the bottom-right of queue artwork encodes where the track came
-	   from; its colours live in app.css so the legend on the automix page can
-	   reuse them. Tooltip on .queue-art-wrap names the source. */
-
-	.queue-meta {
-		min-width: 0;
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-	}
-
-	.queue-title {
-		font-weight: var(--font-weight-semibold);
-		font-size: var(--font-size-sm);
-		line-height: var(--line-height-snug);
-		margin: 0;
-		/* Two-line clamp lets long titles breathe instead of chopping words. */
-		display: -webkit-box;
-		-webkit-box-orient: vertical;
-		-webkit-line-clamp: 2;
-		line-clamp: 2;
-		overflow: hidden;
-		overflow-wrap: anywhere;
-		word-break: break-word;
-	}
-
-	.queue-artist {
-		color: var(--text-secondary);
-		font-size: var(--font-size-xs);
-		line-height: var(--line-height-snug);
-		text-decoration: none;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		max-width: 100%;
-	}
-
-	a.queue-artist {
-		cursor: pointer;
-	}
-
-	a.queue-artist:hover {
-		color: var(--text-primary);
-		text-decoration: underline;
-	}
-
-	.queue-artist.pending-label {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		color: var(--text-tertiary);
-	}
-
-	.queue-inline-spinner {
-		width: 10px;
-		height: 10px;
-		border-radius: 999px;
-		border: 1.5px solid var(--border-subtle, rgba(255, 255, 255, 0.15));
-		border-top-color: var(--text-secondary, rgba(255, 255, 255, 0.7));
-		animation: queue-spinner-spin 0.9s linear infinite;
-		flex-shrink: 0;
-	}
-
-	.queue-time,
 	.queue-empty span {
 		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
-	}
-
-	.queue-side {
-		display: flex;
-		align-items: center;
-		justify-content: flex-end;
-		gap: 6px;
-		flex-shrink: 0;
-		margin-left: auto;
-	}
-
-	/* Single overflow button replaces the old cluster of hover pills: low-key by
-	   default, brightens on row hover/focus. The context menu holds every action
-	   (play next, favourite, radio, remove), so the row stays calm. */
-	.queue-overflow {
-		width: 28px;
-		height: 28px;
-		padding: 0;
-		display: inline-grid;
-		place-items: center;
-		border-radius: 999px;
-		border: 1px solid transparent;
-		background: transparent;
-		color: var(--text-tertiary);
-		font-size: var(--font-size-md);
-		line-height: 1;
-		cursor: pointer;
-		opacity: 0.55;
-		transition: background var(--motion-fast), color var(--motion-fast),
-			border-color var(--motion-fast), opacity var(--motion-fast);
-	}
-
-	.queue-row:hover .queue-overflow,
-	.queue-row:focus-within .queue-overflow {
-		opacity: 1;
-	}
-
-	@media (hover: none) {
-		.queue-overflow { opacity: 1; }
-	}
-
-	.queue-overflow:hover {
-		background: color-mix(in srgb, var(--instrument-surface-strong) 92%, transparent);
-		border-color: color-mix(in srgb, var(--instrument-border) 70%, transparent);
-		color: var(--text-primary);
 	}
 
 	.queue-empty {
@@ -3958,6 +3526,10 @@
 			grid-template-columns: 1fr;
 			grid-template-rows: auto;
 			background: transparent;
+			/* The desktop compositor-layer transform would make this page-tall
+			   shell the containing block for the fixed mini player, tab bar and
+			   sheets, pinning them to the end of the page instead of the screen. */
+			transform: none;
 		}
 		.workspace { grid-area: auto; }
 
@@ -4551,15 +4123,6 @@
 			flex-direction: column;
 			gap: 6px;
 		}
-	}
-
-	/* ── Small phones (≤ 760px): queue touch tweaks ─────── */
-	@media (max-width: 760px) {
-		.queue-row { align-items: flex-start; }
-		.queue-side { align-items: flex-end; }
-		.queue-time { display: none; }
-		/* Overflow stays tappable without a hover state on touch. */
-		.queue-overflow { opacity: 1; }
 	}
 
 	/* ─── Connect screen ───────────────────── */

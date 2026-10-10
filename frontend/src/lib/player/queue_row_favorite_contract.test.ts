@@ -3,13 +3,14 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const layoutSource = readFileSync(resolve(__dirname, '../../routes/+layout.svelte'), 'utf8');
+const rowSource = readFileSync(resolve(__dirname, '../shell/QueueRow.svelte'), 'utf8');
 const menuSource = readFileSync(resolve(__dirname, './track_menu.ts'), 'utf8');
 
 describe('queue row actions contract', () => {
 	test('per-row actions collapse into a single overflow menu, not inline pills', () => {
 		// The noisy hover pills (favourite / play-next / remove) were replaced by
 		// one overflow button that opens the shared context menu.
-		expect(layoutSource).toContain('class="queue-overflow"');
+		expect(rowSource).toContain('class="queue-overflow"');
 		expect(layoutSource).toContain('openQueueRowMenuFromButton(item, event)');
 		// The old inline-pill machinery is gone.
 		expect(layoutSource).not.toContain('canFavoriteQueueRow');

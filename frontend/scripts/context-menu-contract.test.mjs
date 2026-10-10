@@ -82,7 +82,8 @@ describe('context menu coverage contract', () => {
 
 		expect(source).toContain('buildArtistMenu');
 		expect(source).toContain('openQueueArtistContextMenu');
-		expect(source).toContain('oncontextmenu={(event) => openQueueArtistContextMenu');
+		expect(source).toContain('onartistmenu={(event) => openQueueArtistContextMenu(item, event)}');
+		expect(readFileSync('src/lib/shell/QueueRow.svelte', 'utf8')).toContain('oncontextmenu={onartistmenu}');
 		expect(source).toContain('oncontextmenu={openNowPlayingContextMenu}');
 	});
 
