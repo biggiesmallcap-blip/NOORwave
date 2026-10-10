@@ -4,17 +4,20 @@
 //! Files live in `artwork-cache/` next to `noor.db`, never in the database.
 //! The size cap is a setting (Settings > Library, `server_config`
 //! `artwork_cache.max_mb`); 0 turns the cache off and empties the folder.
-//! Pictures are saved the first time they are shown and the least recently
+//! Pictures are saved in the background the first time they are shown (that
+//! showing loads straight from TIDAL) and the least recently
 //! shown are dropped first. A slow background pass also fills the grid size
 //! of the newest albums and their artists, up to two thirds of the cap.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension};
+use tokio::sync::Semaphore;
 
 use crate::SharedState;
 
@@ -33,6 +36,9 @@ static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static CAP_BYTES: AtomicU64 = AtomicU64::new(DEFAULT_MAX_MB * MB);
 static USED_BYTES: AtomicU64 = AtomicU64::new(0);
 static TRIMMING: AtomicBool = AtomicBool::new(false);
+/// Paths being saved in the background, and how many may download at once.
+static FILLING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
+static FILL_SLOTS: Semaphore = Semaphore::const_new(4);
 
 fn cache_dir() -> &'static Path {
     DIR.get_or_init(|| {
@@ -104,16 +110,41 @@ fn file_for(path: &str) -> PathBuf {
     cache_dir().join(&path[..2]).join(path.replace('/', "_"))
 }
 
-/// The image bytes, from disk when cached, else fetched from TIDAL and saved.
-pub async fn get_or_fetch(path: &str) -> Result<Vec<u8>> {
+/// The image bytes when they are on disk.
+pub async fn read_cached(path: &str) -> Option<Vec<u8>> {
     let file = file_for(path);
-    if let Ok(bytes) = tokio::fs::read(&file).await {
-        touch(file);
-        return Ok(bytes);
+    let bytes = tokio::fs::read(&file).await.ok()?;
+    touch(file);
+    Some(bytes)
+}
+
+/// Saves a picture that was not on disk, without anyone waiting for it: the
+/// caller sends the browser straight to TIDAL, so a page of cold pictures loads
+/// from the CDN in parallel instead of queueing behind the server's fetches.
+/// A picture already being fetched is not fetched twice.
+pub fn fill_in_background(path: &str) {
+    // Tests must not reach TIDAL or write into the real cache folder.
+    if cfg!(test) || !enabled() {
+        return;
     }
-    let bytes = fetch(path).await?;
-    store(&file, &bytes).await;
-    Ok(bytes)
+    let path = path.to_string();
+    {
+        let mut filling = FILLING.lock().unwrap_or_else(|e| e.into_inner());
+        if !filling.insert(path.clone()) {
+            return;
+        }
+    }
+    tokio::spawn(async move {
+        if let Ok(_permit) = FILL_SLOTS.acquire().await
+            && let Ok(bytes) = fetch(&path).await
+        {
+            store(&file_for(&path), &bytes).await;
+        }
+        FILLING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&path);
+    });
 }
 
 async fn fetch(path: &str) -> Result<Vec<u8>> {

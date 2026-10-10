@@ -207,25 +207,23 @@ async fn shutdown_handler(
 /// `GET /artwork/tidal/{path}`: a TIDAL picture through the on-disk artwork
 /// cache. Unauthenticated because `<img>` cannot send the token, so it is
 /// loopback-only and serves nothing but TIDAL image paths (public CDN files).
-/// With the cache off it redirects to TIDAL.
+/// A picture not on disk (or the cache off) redirects to TIDAL at once and is
+/// saved in the background for next time.
 async fn artwork_handler(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     axum::extract::Path(path): axum::extract::Path<String>,
 ) -> Response {
+    use crate::services::artwork_cache;
     if require_loopback(addr).is_err() {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if !crate::services::artwork_cache::valid_tidal_path(&path) {
+    if !artwork_cache::valid_tidal_path(&path) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    if !crate::services::artwork_cache::enabled() {
-        return axum::response::Redirect::temporary(&crate::services::artwork_cache::tidal_url(
-            &path,
-        ))
-        .into_response();
-    }
-    match crate::services::artwork_cache::get_or_fetch(&path).await {
-        Ok(bytes) => (
+    if artwork_cache::enabled()
+        && let Some(bytes) = artwork_cache::read_cached(&path).await
+    {
+        return (
             [
                 (header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg")),
                 (
@@ -235,9 +233,10 @@ async fn artwork_handler(
             ],
             bytes,
         )
-            .into_response(),
-        Err(_) => StatusCode::BAD_GATEWAY.into_response(),
+            .into_response();
     }
+    artwork_cache::fill_in_background(&path);
+    axum::response::Redirect::temporary(&artwork_cache::tidal_url(&path)).into_response()
 }
 
 async fn ping_handler() -> Json<serde_json::Value> {
@@ -1172,6 +1171,30 @@ mod tests {
         assert_eq!(
             require_public_loopback_request(remote_addr(), &headers),
             Err(StatusCode::FORBIDDEN)
+        );
+    }
+
+    // A picture that is not on disk yet must not wait for the server to
+    // download it: the browser only opens six connections to this server, so
+    // a page of cold search results queued behind each other's TIDAL fetches.
+    #[tokio::test]
+    async fn artwork_cache_miss_redirects_to_tidal_without_waiting() {
+        let (mut app, _) = assembled_app("123456", None, None).await;
+        let path = "ffffffff/ffff/ffff/ffff/fffffffffff0/320x320.jpg";
+        let mut request = Request::builder()
+            .uri(format!("/artwork/tidal/{path}"))
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(loopback_addr()));
+
+        let response = app.call(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            &format!("https://resources.tidal.com/images/{path}")
         );
     }
 }
